@@ -29,7 +29,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "%div", Arity::exact(2), prim_div);
     def(heap, "%lt", Arity::exact(2), prim_lt);
     def(heap, "%eq", Arity::exact(2), prim_eq);
-    def(heap, "mod", Arity::exact(2), modulo);
+    // `mod` is Brood over `rem` (std/prelude.blsp); only `rem` is primitive.
     def(heap, "rem", Arity::exact(2), remainder);
 
     // pair / sequence
@@ -47,24 +47,15 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "string-length", Arity::exact(1), string_length);
     def(heap, "substring", Arity::exact(3), substring);
 
-    // type-tag predicates
-    def(heap, "nil?", Arity::exact(1), is_nil);
-    def(heap, "pair?", Arity::exact(1), is_pair);
-    def(heap, "int?", Arity::exact(1), is_int);
-    def(heap, "float?", Arity::exact(1), is_float);
-    def(heap, "bool?", Arity::exact(1), is_bool);
-    def(heap, "string?", Arity::exact(1), is_string);
-    def(heap, "symbol?", Arity::exact(1), is_symbol);
-    def(heap, "keyword?", Arity::exact(1), is_keyword);
-    def(heap, "vector?", Arity::exact(1), is_vector);
-    def(heap, "fn?", Arity::exact(1), is_fn);
+    // type reflection — the tag predicates (nil?/int?/string?/…) are Brood
+    // (std/prelude.blsp) over this one reflective primitive.
     def(heap, "type-of", Arity::exact(1), type_of);
 
     // value <-> text and I/O
     def(heap, "str", Arity::any(), str_concat);
     def(heap, "pr-str", Arity::exact(1), pr_str);
     def(heap, "print", Arity::any(), print);
-    def(heap, "println", Arity::any(), println);
+    // `println` is Brood over `print` (std/prelude.blsp).
     def(heap, "stdout-tty?", Arity::exact(0), stdout_tty);
 
     // time
@@ -101,6 +92,9 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "macroexpand-1", Arity::exact(1), macroexpand_1);
     def(heap, "macroexpand", Arity::exact(1), macroexpand);
     def(heap, "gensym", Arity::range(0, 1), gensym);
+
+    // advisory type checker (the Ty lattice's first consumer; see docs/types.md)
+    def(heap, "check", Arity::exact(1), check_builtin);
 
     // source positions (editor tooling; see docs/tooling.md)
     def(heap, "form-pos", Arity::exact(1), form_pos);
@@ -149,6 +143,16 @@ fn expect_number(heap: &Heap, who: &str, v: Value) -> Result<f64, LispError> {
         Value::Int(n) => Ok(n as f64),
         Value::Float(f) => Ok(f),
         _ => Err(LispError::wrong_type(heap, who, "number", v)),
+    }
+}
+
+/// Require a string, returned **owned** so the `heap` borrow is released before
+/// the builtin reads or allocates further (most callers go on to touch
+/// `&mut heap`). The string analogue of [`expect_int`]/[`expect_number`].
+fn expect_string(heap: &Heap, who: &str, v: Value) -> Result<String, LispError> {
+    match v {
+        Value::Str(id) => Ok(heap.string(id).to_string()),
+        _ => Err(LispError::wrong_type(heap, who, "string", v)),
     }
 }
 
@@ -226,17 +230,6 @@ fn prim_eq(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn int_pair(heap: &Heap, args: &[Value], who: &str) -> Result<(i64, i64), LispError> {
     let (a, b) = two(args, who)?;
     Ok((expect_int(heap, who, a)?, expect_int(heap, who, b)?))
-}
-
-fn modulo(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let (a, b) = int_pair(heap, args, "mod")?;
-    // `checked_rem_euclid` returns `None` for divide-by-zero *and* the
-    // overflowing `i64::MIN % -1`; distinguish them so neither panics.
-    match a.checked_rem_euclid(b) {
-        Some(r) => Ok(Value::Int(r)),
-        None if b == 0 => Err(LispError::runtime("mod: division by zero")),
-        None => Err(LispError::runtime("mod: integer overflow")),
-    }
 }
 
 fn remainder(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -324,46 +317,13 @@ fn string_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     }
 }
 
-// ---------- type-tag predicates ----------
-
-fn is_nil(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Bool(matches!(arg(args, 0), Value::Nil)))
-}
-fn is_pair(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Bool(matches!(arg(args, 0), Value::Pair(_))))
-}
-fn is_int(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Bool(matches!(arg(args, 0), Value::Int(_))))
-}
-fn is_float(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Bool(matches!(arg(args, 0), Value::Float(_))))
-}
-fn is_bool(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Bool(matches!(arg(args, 0), Value::Bool(_))))
-}
-fn is_string(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Bool(matches!(arg(args, 0), Value::Str(_))))
-}
-fn is_symbol(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Bool(matches!(arg(args, 0), Value::Sym(_))))
-}
-fn is_keyword(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Bool(matches!(arg(args, 0), Value::Keyword(_))))
-}
-fn is_vector(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Bool(matches!(arg(args, 0), Value::Vector(_))))
-}
-fn is_fn(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Bool(matches!(
-        arg(args, 0),
-        Value::Fn(_) | Value::Native(_)
-    )))
-}
+// ---------- type reflection ----------
 
 /// `(type-of x)` — the runtime type tag of `x` as a keyword: `:int` `:float`
 /// `:string` `:symbol` `:keyword` `:bool` `:nil` `:pair` `:vector` `:fn`
-/// `:macro` `:native`. The reflective primitive the in-language type checks
-/// build on; spellings mirror the `int?`/`string?`/… predicates.
+/// `:macro` `:native`. The single irreducible reflective primitive: the tag
+/// predicates (`int?`/`string?`/…) are Brood wrappers over it (`std/prelude.blsp`),
+/// and the in-language type checks build on it too.
 fn type_of(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(value::kw(value::tag(arg(args, 0)).name()))
 }
@@ -388,12 +348,6 @@ fn print(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     print!("{}", parts.join(" "));
     use std::io::Write;
     std::io::stdout().flush().ok();
-    Ok(Value::Nil)
-}
-
-fn println(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let parts: Vec<String> = args.iter().map(|&a| printer::display(heap, a)).collect();
-    println!("{}", parts.join(" "));
     Ok(Value::Nil)
 }
 
@@ -439,22 +393,12 @@ fn eval_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
 }
 
 fn read_string(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let v = arg(args, 0);
-    match v {
-        Value::Str(id) => {
-            let s = heap.string(id).to_string();
-            reader::read_one(heap, &s)
-        }
-        _ => Err(LispError::wrong_type(heap, "read-string", "string", v)),
-    }
+    let s = expect_string(heap, "read-string", arg(args, 0))?;
+    reader::read_one(heap, &s)
 }
 
 fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
-    let v = arg(args, 0);
-    let path = match v {
-        Value::Str(id) => heap.string(id).to_string(),
-        _ => return Err(LispError::wrong_type(heap, "load", "string", v)),
-    };
+    let path = expect_string(heap, "load", arg(args, 0))?;
     let src = std::fs::read_to_string(&path)
         .map_err(|e| LispError::runtime(format!("load: cannot read {}: {}", path, e)))?;
     // Read positioned so errors point at a line; tag every error with the file
@@ -482,11 +426,7 @@ fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
 /// global environment (the string analogue of `load`). The module system uses it
 /// to evaluate embedded std modules; it's a general self-hosting hook besides.
 fn eval_string(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
-    let v = arg(args, 0);
-    let src = match v {
-        Value::Str(id) => heap.string(id).to_string(),
-        _ => return Err(LispError::wrong_type(heap, "eval-string", "string", v)),
-    };
+    let src = expect_string(heap, "eval-string", arg(args, 0))?;
     let root = heap.env_root(env);
     let mut result = Value::Nil;
     for form in reader::read_all(heap, &src)? {
@@ -548,11 +488,7 @@ fn name_of(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// `(substring s start end)` — the characters of `s` in `[start, end)`,
 /// char-indexed (consistent with `string-length`). Errors if out of range.
 fn substring(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let v = arg(args, 0);
-    let s = match v {
-        Value::Str(id) => heap.string(id).to_string(),
-        _ => return Err(LispError::wrong_type(heap, "substring", "string", v)),
-    };
+    let s = expect_string(heap, "substring", arg(args, 0))?;
     let start = expect_int(heap, "substring", arg(args, 1))?;
     let end = expect_int(heap, "substring", arg(args, 2))?;
     let len = s.chars().count() as i64;
@@ -582,30 +518,20 @@ fn cwd(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 
 /// `(file-exists? path)` — true if a file or directory exists at `path`.
 fn file_exists(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let v = arg(args, 0);
-    match v {
-        Value::Str(id) => Ok(Value::Bool(std::path::Path::new(heap.string(id)).exists())),
-        _ => Err(LispError::wrong_type(heap, "file-exists?", "string", v)),
-    }
+    let path = expect_string(heap, "file-exists?", arg(args, 0))?;
+    Ok(Value::Bool(std::path::Path::new(&path).exists()))
 }
 
 /// `(dir? path)` — true if `path` exists and is a directory.
 fn is_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let v = arg(args, 0);
-    match v {
-        Value::Str(id) => Ok(Value::Bool(std::path::Path::new(heap.string(id)).is_dir())),
-        _ => Err(LispError::wrong_type(heap, "dir?", "string", v)),
-    }
+    let path = expect_string(heap, "dir?", arg(args, 0))?;
+    Ok(Value::Bool(std::path::Path::new(&path).is_dir()))
 }
 
 /// `(list-dir path)` — the entry names (not full paths) directly under a
 /// directory, sorted for determinism. Errors if `path` isn't a readable directory.
 fn list_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let v = arg(args, 0);
-    let path = match v {
-        Value::Str(id) => heap.string(id).to_string(),
-        _ => return Err(LispError::wrong_type(heap, "list-dir", "string", v)),
-    };
+    let path = expect_string(heap, "list-dir", arg(args, 0))?;
     let mut names: Vec<String> = match std::fs::read_dir(&path) {
         Ok(entries) => entries
             .filter_map(|e| e.ok())
@@ -624,11 +550,7 @@ fn list_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// `(make-dir path)` — create `path` and any missing parents (like `mkdir -p`).
 /// Returns nil. Used by the project scaffolder (`brood new`).
 fn make_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let v = arg(args, 0);
-    let path = match v {
-        Value::Str(id) => heap.string(id).to_string(),
-        _ => return Err(LispError::wrong_type(heap, "make-dir", "string", v)),
-    };
+    let path = expect_string(heap, "make-dir", arg(args, 0))?;
     std::fs::create_dir_all(&path)
         .map_err(|e| LispError::runtime(format!("make-dir: {}: {}", path, e)))?;
     Ok(Value::Nil)
@@ -655,11 +577,7 @@ fn spit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// `(getenv name)` — the value of environment variable `name` as a string, or nil
 /// if it is unset. Lets Brood locate things like the user config directory.
 fn getenv(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let v = arg(args, 0);
-    let name = match v {
-        Value::Str(id) => heap.string(id).to_string(),
-        _ => return Err(LispError::wrong_type(heap, "getenv", "string", v)),
-    };
+    let name = expect_string(heap, "getenv", arg(args, 0))?;
     match std::env::var(&name) {
         Ok(val) => Ok(heap.alloc_string(&val)),
         Err(_) => Ok(Value::Nil),
@@ -721,6 +639,20 @@ fn macroexpand_1(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
 
 fn macroexpand(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     crate::macros::macroexpand(heap, arg(args, 0), env)
+}
+
+/// `(check 'form)` — run the advisory type checker over `form` (macro-expanded
+/// first, like the real compile pass) and return a list of warning strings, or
+/// `nil` when nothing is provably wrong. Advisory only: it never raises.
+fn check_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
+    let root = heap.env_root(env);
+    let form = crate::macros::macroexpand_all(heap, arg(args, 0), root)?;
+    let warnings = crate::check::check_form(heap, form);
+    let mut out = Vec::with_capacity(warnings.len());
+    for w in &warnings {
+        out.push(heap.alloc_string(w));
+    }
+    Ok(heap.list(out))
 }
 
 // ---------- source positions (editor tooling; see docs/tooling.md) ----------

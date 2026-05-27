@@ -78,19 +78,22 @@ eagerly). They are reserved names.
 |---|---|
 | `(quote x)` / `'x` | `x`, unevaluated. |
 | `(if test then else?)` | Evaluate `then` if `test` is truthy, else `else` (or `nil`). |
-| `(when test body...)` | Evaluate `body` if `test` is truthy. |
-| `(unless test body...)` | Evaluate `body` if `test` is falsy. |
-| `(cond t1 e1 t2 e2 ...)` | Flat test/expr pairs (Clojure-style). `else` or `:else` always matches. |
 | `(do body...)` | Evaluate forms in order; result is the last. |
 | `(def name value)` | Define/redefine `name` in the **global** environment. |
 | `(set! name value)` | Mutate the nearest existing binding of `name`. |
 | `(fn (params) body...)` | A lexical closure. `lambda` is an alias. |
 | `(let (a 1 b 2) body...)` | Sequential local bindings (each sees the previous). `let*` is an alias. |
-| `(and a b ...)` | Left-to-right; returns the first falsy value, or the last. |
-| `(or a b ...)` | Left-to-right; returns the first truthy value, or the last. |
 | `(while test body...)` | Loop while `test` is truthy; returns `nil`. |
 | `` (quasiquote tmpl) `` / `` `tmpl `` | Template: literal except `~x` inserts a value and `~@xs` splices a sequence. |
 | `(defmacro name (params) body...)` | Define a macro (see below). |
+
+`when`, `unless`, `cond`, `and`, and `or` read like special forms but are
+**prelude macros** over `if`/`do`/`let` (`std/prelude.blsp`), expanded once by the
+compile pass (ADR-022) — so the evaluator's core stays minimal and they cost
+nothing extra at runtime. `cond` is still flat test/expr pairs with `else`/`:else`
+as the catch-all (ADR-004); `and`/`or` short-circuit left-to-right and return the
+deciding value, each subexpression evaluated once. `while` is the lone iteration
+special form (no named-`let` to express it as a macro yet).
 
 ### Parameter lists
 

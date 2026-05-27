@@ -63,6 +63,72 @@
 (defn =  (& xs) (chain? (fn (a b) (%eq a b)) xs))
 (defn not= (& xs) (not (apply = xs)))
 
+;; ---- control-flow macros ----
+;; These read like special forms but are ordinary macros over `if`/`do`/`let`.
+;; The compile pass (macroexpand-all) expands them once, so they cost nothing at
+;; runtime while the evaluator's core stays just `if`/`do`/`let`/`fn`/… — policy
+;; in Brood, mechanism in Rust (ADR-006/008). `while` is the lone exception that
+;; stays a special form: it's the one primitive loop, with no named-`let` to
+;; build a macro on yet.
+
+(defmacro when (test & body)
+  `(if ~test (do ~@body) nil))
+
+(defmacro unless (test & body)
+  `(if ~test nil (do ~@body)))
+
+;; `and`/`or` short-circuit left-to-right and return the deciding value, with
+;; each subexpression evaluated at most once (a gensym holds it across the test).
+(defmacro and (& xs)
+  (if (empty? xs)
+    true
+    (if (empty? (rest xs))
+      (first xs)
+      (let (g (gensym "and"))
+        `(let (~g ~(first xs))
+           (if ~g (and ~@(rest xs)) ~g))))))
+
+(defmacro or (& xs)
+  (if (empty? xs)
+    nil
+    (if (empty? (rest xs))
+      (first xs)
+      (let (g (gensym "or"))
+        `(let (~g ~(first xs))
+           (if ~g ~g (or ~@(rest xs))))))))
+
+;; cond: flat test/expr pairs (ADR-004); `else` or `:else` is the catch-all.
+(defmacro cond (& clauses)
+  (if (empty? clauses)
+    nil
+    (let (test (first clauses)
+          expr (first (rest clauses))
+          more (rest (rest clauses)))
+      ;; compare with the `%eq` primitive, not the variadic `=` — `=` builds a
+      ;; lambda, and doing that *at expansion time* during the prelude's own
+      ;; compile pass would strand a local-env closure (breaks the freeze).
+      (if (or (%eq test 'else) (%eq test :else))
+        expr
+        `(if ~test ~expr (cond ~@more))))))
+
+;; ---- type predicates --------------------------------------------------------
+;; Each is a thin wrapper over `type-of`, the one reflective primitive (it
+;; returns the runtime tag as a keyword). These were Rust builtins; since they
+;; are expressible in the language they are policy, so they live here — only
+;; `type-of` itself is irreducible. (`%eq` not `=`: no dependency on the
+;; variadic comparison, and it can't be shadowed by a local `=`.)
+(defn nil?     (x) (%eq (type-of x) :nil))
+(defn pair?    (x) (%eq (type-of x) :pair))
+(defn int?     (x) (%eq (type-of x) :int))
+(defn float?   (x) (%eq (type-of x) :float))
+(defn bool?    (x) (%eq (type-of x) :bool))
+(defn string?  (x) (%eq (type-of x) :string))
+(defn symbol?  (x) (%eq (type-of x) :symbol))
+(defn keyword? (x) (%eq (type-of x) :keyword))
+(defn vector?  (x) (%eq (type-of x) :vector))
+;; `fn?` holds for both Brood closures (:fn) and Rust builtins (:native).
+(defn fn?      (x) (or (%eq (type-of x) :fn) (%eq (type-of x) :native)))
+
 ;; ---- derived predicates ----
 (defn number? (x) (or (int? x) (float? x)))
 (defn list?   (x) (or (nil? x) (pair? x)))
@@ -114,6 +180,17 @@
 (defn min (a b) (if (< a b) a b))
 (defn sum     (xs) (reduce + 0 xs))
 (defn product (xs) (reduce * 1 xs))
+
+;; Euclidean modulo: the result has the sign of the divisor and lies in
+;; [0, (abs b)). Brood over the `rem` primitive (truncated remainder), nudged
+;; back into range when the two disagree in sign. (÷0 raises via `rem`.)
+(defn mod (a b)
+  (let (r (rem a b))
+    (if (< r 0) (+ r (abs b)) r)))
+
+;; ---- I/O --------------------------------------------------------------------
+;; `print` (no newline) is the primitive; `println` just appends one.
+(defn println (& xs) (apply print xs) (print "\n"))
 
 ;; ---- threading macros (demonstrate that macros compute at expansion time) ----
 ;; (-> x (f a) (g b))  =>  (g (f x a) b)   ; thread as FIRST argument

@@ -215,6 +215,18 @@ fn native_arity_is_enforced_centrally() {
 }
 
 #[test]
+fn check_builtin_flags_provable_misuse() {
+    // The advisory checker, end to end through the language. Provable primitive
+    // misuse yields a warning; correct or not-statically-known code yields none.
+    assert!(run("(check '(first 5))").contains("first: argument 1 expects"));
+    assert!(run("(check '(string-length :k))").contains("string-length"));
+    assert_eq!(run("(check '(first (list 1 2)))"), "nil"); // arg type unknown → no warning
+    assert_eq!(run("(check '(+ 1 2))"), "nil"); // closure, not a primitive
+    // It is advisory — it never raises, even on the misuse it reports.
+    assert_eq!(run("(do (check '(first 5)) :ok)"), ":ok");
+}
+
+#[test]
 fn defn_defines_functions() {
     assert_eq!(run("(defn sq [x] (* x x)) (sq 6)"), "36");
     assert_eq!(run("(defn add3 [a b c] (+ a b c)) (add3 1 2 3)"), "6");

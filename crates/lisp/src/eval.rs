@@ -6,7 +6,7 @@ use std::sync::LazyLock;
 
 use crate::error::{LispError, LispResult};
 use crate::heap::Heap;
-use crate::value::{self, Arity, Closure, ClosureId, EnvId, NativeId, Symbol, Value};
+use crate::value::{self, Closure, ClosureId, EnvId, NativeId, Symbol, Value};
 
 /// Truthiness: only `nil` and `false` are falsy.
 pub fn truthy(v: Value) -> bool {
@@ -22,9 +22,6 @@ pub fn truthy(v: Value) -> bool {
 const SPECIAL_NAMES: &[&str] = &[
     "quote",
     "if",
-    "when",
-    "unless",
-    "cond",
     "do",
     "def",
     "set!",
@@ -34,8 +31,6 @@ const SPECIAL_NAMES: &[&str] = &[
     "defmacro",
     "let",
     "let*",
-    "and",
-    "or",
     "while",
 ];
 
@@ -95,63 +90,6 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                         nth(&args, 2)
                     };
                     continue 'tail;
-                }
-                "when" => {
-                    let args = heap.list_to_vec(rest)?;
-                    let test = eval(heap, nth(&args, 0), env)?;
-                    if !truthy(test) {
-                        return Ok(Value::Nil);
-                    }
-                    match tail_of(heap, &args, 1, env)? {
-                        Some(last) => {
-                            expr = last;
-                            continue 'tail;
-                        }
-                        None => return Ok(Value::Nil),
-                    }
-                }
-                "unless" => {
-                    let args = heap.list_to_vec(rest)?;
-                    let test = eval(heap, nth(&args, 0), env)?;
-                    if truthy(test) {
-                        return Ok(Value::Nil);
-                    }
-                    match tail_of(heap, &args, 1, env)? {
-                        Some(last) => {
-                            expr = last;
-                            continue 'tail;
-                        }
-                        None => return Ok(Value::Nil),
-                    }
-                }
-                "cond" => {
-                    let args = heap.list_to_vec(rest)?;
-                    if args.len() % 2 != 0 {
-                        return Err(LispError::runtime(
-                            "cond: expected an even number of test/expression forms",
-                        ));
-                    }
-                    let mut chosen = None;
-                    let mut i = 0;
-                    while i < args.len() {
-                        let test = if is_else_keyword(args[i]) {
-                            Value::Bool(true)
-                        } else {
-                            eval(heap, args[i], env)?
-                        };
-                        if truthy(test) {
-                            chosen = Some(args[i + 1]);
-                            break;
-                        }
-                        i += 2;
-                    }
-                    match chosen {
-                        Some(last) => {
-                            expr = last;
-                            continue 'tail;
-                        }
-                        None => return Ok(Value::Nil),
-                    }
                 }
                 "do" => {
                     let args = heap.list_to_vec(rest)?;
@@ -270,34 +208,6 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                         None => return Ok(Value::Nil),
                     }
                 }
-                "and" => {
-                    let args = heap.list_to_vec(rest)?;
-                    if args.is_empty() {
-                        return Ok(Value::Bool(true));
-                    }
-                    for &f in &args[..args.len() - 1] {
-                        let v = eval(heap, f, env)?;
-                        if !truthy(v) {
-                            return Ok(v);
-                        }
-                    }
-                    expr = args[args.len() - 1];
-                    continue 'tail;
-                }
-                "or" => {
-                    let args = heap.list_to_vec(rest)?;
-                    if args.is_empty() {
-                        return Ok(Value::Nil);
-                    }
-                    for &f in &args[..args.len() - 1] {
-                        let v = eval(heap, f, env)?;
-                        if truthy(v) {
-                            return Ok(v);
-                        }
-                    }
-                    expr = args[args.len() - 1];
-                    continue 'tail;
-                }
                 "while" => {
                     let args = heap.list_to_vec(rest)?;
                     let test = nth(&args, 0);
@@ -403,11 +313,11 @@ fn bind_params(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> Result<EnvId, 
             .name
             .map(value::symbol_name)
             .unwrap_or_else(|| "fn".to_string());
+        let max = if has_rest { None } else { Some(required + n_opt) };
         return Err(LispError::arity(arity_message(
             &who,
             required,
-            n_opt,
-            has_rest,
+            max,
             argv.len(),
         )));
     }
@@ -435,15 +345,16 @@ fn bind_params(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> Result<EnvId, 
     Ok(scope)
 }
 
-/// Invoke a builtin, enforcing its declared [`Arity`] first. The single gate
+/// Invoke a builtin, enforcing its declared [`Arity`](crate::value::Arity) first. The single gate
 /// every native call passes through (the evaluator loop *and* `apply`), so a
 /// primitive's arity is checked in one place instead of hand-rolled per builtin.
 fn call_native(heap: &mut Heap, id: NativeId, argv: &[Value], env: EnvId) -> LispResult {
     let nat = heap.native(id);
     if !nat.arity.accepts(argv.len()) {
-        return Err(LispError::arity(native_arity_message(
+        return Err(LispError::arity(arity_message(
             &nat.name,
-            nat.arity,
+            nat.arity.min,
+            nat.arity.max,
             argv.len(),
         )));
     }
@@ -451,33 +362,19 @@ fn call_native(heap: &mut Heap, id: NativeId, argv: &[Value], env: EnvId) -> Lis
     func(argv, env, heap)
 }
 
-/// Built-in arity errors say "arguments" (user functions say "args" — see
-/// [`arity_message`]); the wording difference is load-bearing in the suite.
-fn native_arity_message(who: &str, arity: Arity, got: usize) -> String {
-    let (expected, n) = match (arity.min, arity.max) {
-        (min, Some(max)) if min == max => (min.to_string(), min),
-        (min, Some(max)) => (format!("{} to {}", min, max), max),
-        (min, None) => (format!("at least {}", min), min),
+/// Render an arity error — `"{who}: expected {N | N to M | at least N}
+/// argument(s), got {got}"`. The one formatter for both builtins (from their
+/// declared [`Arity`](crate::value::Arity)) and user closures (from their parameter list): a closure
+/// with `min..=max` required/optional params passes `Some(max)`; `& rest` (and a
+/// variadic builtin) passes `None`.
+fn arity_message(who: &str, min: usize, max: Option<usize>, got: usize) -> String {
+    let (expected, n) = match max {
+        Some(m) if min == m => (min.to_string(), min),
+        Some(m) => (format!("{} to {}", min, m), m),
+        None => (format!("at least {}", min), min),
     };
     let noun = if n == 1 { "argument" } else { "arguments" };
     format!("{}: expected {} {}, got {}", who, expected, noun, got)
-}
-
-fn arity_message(
-    who: &str,
-    required: usize,
-    optionals: usize,
-    has_rest: bool,
-    got: usize,
-) -> String {
-    let expected = if has_rest {
-        format!("at least {}", required)
-    } else if optionals == 0 {
-        format!("{}", required)
-    } else {
-        format!("{} to {}", required, required + optionals)
-    };
-    format!("{}: expected {} args, got {}", who, expected, got)
 }
 
 fn make_closure(heap: &mut Heap, name: Option<Symbol>, rest: Value, env: EnvId) -> LispResult {
@@ -527,8 +424,7 @@ fn parse_params(heap: &Heap, form: Value) -> Result<ParamSpec, LispError> {
 
     while i < items.len() {
         if let Value::Sym(s) = items[i] {
-            let name = value::symbol_name(s);
-            if name == "&optional" {
+            if value::symbol_is(s, "&optional") {
                 if in_optional {
                     return Err(LispError::runtime("&optional may appear only once"));
                 }
@@ -536,7 +432,7 @@ fn parse_params(heap: &Heap, form: Value) -> Result<ParamSpec, LispError> {
                 i += 1;
                 continue;
             }
-            if name == "&" {
+            if value::symbol_is(s, "&") {
                 let r = items.get(i + 1).copied().ok_or_else(|| {
                     LispError::runtime("expected a symbol after & in parameter list")
                 })?;
@@ -546,10 +442,11 @@ fn parse_params(heap: &Heap, form: Value) -> Result<ParamSpec, LispError> {
                 }
                 break;
             }
-            if name.starts_with('&') {
+            // A stray `&`-marker (e.g. `&rest`): only now pay for the full name.
+            if value::symbol_first_char(s) == Some('&') {
                 return Err(LispError::runtime(format!(
                     "unknown parameter marker '{}'; use &optional or & (rest)",
-                    name
+                    value::symbol_name(s)
                 )));
             }
         }
@@ -639,11 +536,4 @@ fn tail_of(
 
 fn nth(args: &[Value], i: usize) -> Value {
     args.get(i).copied().unwrap_or(Value::Nil)
-}
-
-fn is_else_keyword(v: Value) -> bool {
-    match v {
-        Value::Sym(s) | Value::Keyword(s) => value::symbol_name(s) == "else",
-        _ => false,
-    }
 }

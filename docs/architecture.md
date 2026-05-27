@@ -59,24 +59,34 @@ Brood/
   crates/
     lisp/               the language (this is the substance today)
       src/
-        value.rs        Value enum, symbol interner, list/vector constructors
+        value.rs        Value, Tag, handle types, symbol interner, Closure/Arity
+        heap.rs         per-process heap + shared regions, env chain, promotion, equality
+        alloc.rs        process-wide byte-counting global allocator
         reader.rs       text -> Value (recursive-descent parser)
-        env.rs          lexical environment chain
-        eval.rs         tree-walking evaluator + special forms + tail calls
-        builtins.rs     functions implemented in Rust
         printer.rs      Value -> text (round-trips with the reader)
-        error.rs        LispError / LispResult
+        eval.rs         tree-walking evaluator + special forms + tail calls
+        macros.rs       quasiquote, macroexpand, the compile pass + pattern lowering
+        builtins.rs     the primitive kernel (functions implemented in Rust)
+        types.rs        the Ty / GradualTy set-theoretic type lattice (advisory)
+        check.rs        advisory type checker over expanded forms
+        process.rs      green-process scheduler (spawn/send/receive)
+        error.rs        LispError / LispResult / source Pos
         lib.rs          the `Interp` entry point; bundles the prelude
-      tests/basic.rs    end-to-end language tests
-    cli/                the `brood` binary: REPL + file runner
+      tests/            basic.rs (Rust e2e) + suite.rs (runs the .blsp suite)
+    cli/                the `brood` binary: REPL + file runner + test/new
       src/main.rs
   std/
-    prelude.blsp        standard helpers written in Brood itself
-  docs/                 you are here
+    prelude.blsp        the core library, written in Brood itself
+    test.blsp           the test framework (loaded via `require`)
+    project.blsp        project model, test runner, scaffolding
+  tests/                the in-language suite (`tests/**/*_test.blsp`)
+  docs/                 you are here  (see components.md for the full map)
 ```
 
-Later milestones add `crates/editor`, `crates/server`, and a frontend crate;
-the `lisp` crate stays the foundation.
+For a per-component breakdown — responsibilities, interfaces, and what's safe to
+work on independently — see [components.md](components.md). Later milestones add
+`crates/editor`, `crates/server`, and a frontend crate; the `lisp` crate stays
+the foundation.
 
 ## How evaluation works
 
@@ -104,20 +114,34 @@ are integer operations and the spelling is stored once.
 
 ## Memory model (and the plan to change it)
 
-Today heap values live behind `Rc` and environments use `RefCell` for interior
-mutability. This is the simplest correct thing and keeps the borrow checker out
-of the way while we move fast.
+Heap values are no longer `Rc` pointers: `Value` is `Copy` and its heap variants
+are integer **handles** into a per-process `Heap` of plain `Vec` slabs (so a
+`Heap` is `Send` and a process can move between scheduler threads). Reclamation
+today is **arena reset at top-level boundaries**: between top-level forms the
+LOCAL heap holds nothing live but the result, so `eval_str` / the REPL truncate
+it back (globals live in the shared PRELUDE/RUNTIME regions, never in LOCAL).
 
-Its one real limitation: **reference cycles leak.** A closure captures its
-defining environment; if that environment can reach the closure, the `Rc`
-cycle is never freed. For a REPL and the early milestones this is fine. Before
-editor sessions become long-lived we will migrate to a tracing GC
-(`gc-arena` — the design behind the Piccolo Lua VM). The migration is contained
-because *all heap construction goes through the helpers in `value.rs`*.
+What's still open: a general tracing GC for *mid-evaluation* / never-returning
+loops, which needs the evaluator's roots to be scannable. The migration stays
+contained because *all heap construction goes through the helpers in
+`heap.rs` / `value.rs`*. See [memory-model.md](memory-model.md) and
+[shared-code.md](shared-code.md) for the regions and hot-reload story.
 
 ## Dependencies
 
-v0.1 has **zero external crates** — pure `std`. That keeps the build hermetic
-and the first version easy to reason about. Dependencies will arrive with the
-features that need them: `ropey` (text rope) for the editor, `tokio` + `serde`
-for the server/protocol, a line-editor crate for a nicer REPL.
+The early "zero external crates" rule has been relaxed (ADR-005 superseded): a
+well-scoped crate is allowed when it removes real complexity from the *runtime
+substrate* — but Lisp-callable behaviour still belongs in Brood, not a crate.
+Current set:
+
+- `boxcar` (lisp) — lock-free, append-only vector backing the shared RUNTIME
+  code region (stable refs under concurrent `def`; see shared-code.md).
+- `corosensei` (lisp) — stackful coroutines for the green-process scheduler, so
+  the recursive evaluator parks at `receive` without a rewrite (scheduler.md).
+- `rustyline` (cli) — line editing / history for the interactive REPL. A
+  dev/UX dependency in the binary, not the library.
+- `divan` (dev only) — the microbenchmark harness; the released library pulls
+  nothing extra.
+
+More will arrive with the features that need them: `ropey` (text rope) for the
+editor, `tokio` + `serde` for the server/protocol.

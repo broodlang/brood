@@ -15,14 +15,14 @@ gate (`eval::call_native`), before the primitive runs — so a wrong-count call 
 a clean arity error (`type-of: expected 1 argument, got 0`) rather than a missing
 arg silently becoming `nil`.
 
-## Native primitive functions (66)
+## Native primitive functions (54)
 
 | Category | Primitive | Arity | Purpose |
 |---|---|---|---|
 | **Numeric** (arithmetic substrate) | `%add` `%sub` `%mul` `%div` | 2 | int-preserving arithmetic; `%div` is exact-int-or-float and errors on ÷0 |
 | | `%lt` | 2 | numeric `<` → bool |
 | | `%eq` | 2 | structural equality → bool |
-| | `mod` `rem` | 2 | integer modulo / remainder |
+| | `rem` | 2 | integer remainder (truncated, sign of dividend); `mod` (euclidean) is Brood over it |
 | **Pair / sequence** | `cons` | 2 | make a pair |
 | | `first` `rest` | 1 | head / tail (nil, pair, or vector) |
 | | `empty?` | 1 | empty collection? (nil / string / vector / pair) |
@@ -31,11 +31,10 @@ arg silently becoming `nil`.
 | | `vector-length` | 1 | length |
 | **String** | `string-length` | 1 | char count |
 | | `substring` | 3 | characters `[start, end)`, char-indexed |
-| **Type tags** (not expressible in-language) | `nil?` `pair?` `int?` `float?` `bool?` `string?` `symbol?` `keyword?` `vector?` `fn?` | 1 | tag test → bool |
-| | `type-of` | 1 | the runtime type tag as a keyword (`:int` `:string` …); the reflective primitive the predicates and in-language checks build on |
+| **Type reflection** | `type-of` | 1 | the runtime type tag as a keyword (`:int` `:string` …); the one irreducible reflective primitive. The tag predicates (`nil?` `pair?` `int?` `float?` `bool?` `string?` `symbol?` `keyword?` `vector?` `fn?`) are Brood wrappers over it, as are the in-language type checks |
 | **Value ↔ text & I/O** | `str` | n | concatenate the *display* forms of args → string |
 | | `pr-str` | 1 | *readable* form of a value → string |
-| | `print` `println` | n | write display forms to stdout → nil |
+| | `print` | n | write display forms to stdout → nil (`println`, which adds a newline, is Brood over it) |
 | | `stdout-tty?` | 0 | true when stdout is an interactive terminal (false when piped/captured) — gates colour output |
 | **Time** | `now` | 0 | wall-clock milliseconds since the Unix epoch (integer); subtract two readings for elapsed time |
 | **Memory** | `mem-bytes` | 0 | bytes currently allocated process-wide (from the counting global allocator) |
@@ -70,9 +69,12 @@ arg silently becoming `nil`.
 | | `worker-threads` | 0 | size of the scheduler's worker-thread pool (≈ nproc; `-j` overrides) |
 
 **Why this set is irreducible:** every entry needs Rust — raw number ops, heap
-construct/inspect, type-tag tests, I/O, value→text conversion, the wall clock,
-the allocator counters, or a hook into `eval`/the reader. None of it can be
-written in Brood. Everything that *can* be is already in the prelude.
+construct/inspect, the type-tag *reflection* (`type-of`), I/O, value→text
+conversion, the wall clock, the allocator counters, or a hook into `eval`/the
+reader. None of it can be written in Brood. Everything that *can* be is already
+in the prelude — including the tag predicates (over `type-of`), the full
+arithmetic/comparison families (over `%add`/`%lt`/…), `mod` (over `rem`), and
+`println` (over `print`).
 
 ## Special forms (not primitives)
 

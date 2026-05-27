@@ -47,7 +47,7 @@ fn tagged(heap: &Heap, v: Value, name: &str) -> Option<Value> {
     if let Value::Pair(p) = v {
         let (head, tail) = heap.pair(p);
         if let Value::Sym(s) = head {
-            if value::symbol_name(s) == name {
+            if value::symbol_is(s, name) {
                 if let Value::Pair(p2) = tail {
                     return Some(heap.car(p2));
                 }
@@ -104,23 +104,21 @@ pub fn macroexpand_all(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 Err(_) => return Ok(form), // improper list: leave it be
             };
             if let Some(Value::Sym(s)) = items.first().copied() {
-                match value::symbol_name(s).as_str() {
-                    // quote/quasiquote contents are data, not calls to expand.
-                    "quote" | "quasiquote" => return Ok(form),
-                    // Desugar pattern binders into the Brood `match*` engine so
-                    // they expand once here (fast) rather than per call. eval's
-                    // `let`/`fn` then only ever see plain symbol binds.
-                    "let" | "let*" => {
-                        if let Some(lowered) = lower_let(heap, &items) {
-                            return macroexpand_all(heap, lowered, env);
-                        }
+                // quote/quasiquote contents are data, not calls to expand.
+                if value::symbol_is(s, "quote") || value::symbol_is(s, "quasiquote") {
+                    return Ok(form);
+                }
+                // Desugar pattern binders into the Brood `match*` engine so they
+                // expand once here (fast) rather than per call. eval's `let`/`fn`
+                // then only ever see plain symbol binds.
+                if value::symbol_is(s, "let") || value::symbol_is(s, "let*") {
+                    if let Some(lowered) = lower_let(heap, &items) {
+                        return macroexpand_all(heap, lowered, env);
                     }
-                    "fn" | "lambda" => {
-                        if let Some(lowered) = lower_fn(heap, &items) {
-                            return macroexpand_all(heap, lowered, env);
-                        }
+                } else if value::symbol_is(s, "fn") || value::symbol_is(s, "lambda") {
+                    if let Some(lowered) = lower_fn(heap, &items) {
+                        return macroexpand_all(heap, lowered, env);
                     }
-                    _ => {}
                 }
             }
             let mut out = Vec::with_capacity(items.len());
@@ -239,7 +237,7 @@ pub(crate) fn fn_needs_lowering(heap: &Heap, fn_form: Value) -> bool {
     };
     let required_end = params
         .iter()
-        .position(|&p| matches!(p, Value::Sym(s) if matches!(value::symbol_name(s).as_str(), "&optional" | "&")))
+        .position(|&p| matches!(p, Value::Sym(s) if value::symbol_is(s, "&optional") || value::symbol_is(s, "&")))
         .unwrap_or(params.len());
     params[..required_end].iter().any(|&p| !is_sym(p))
 }
@@ -268,7 +266,7 @@ fn lower_fn(heap: &mut Heap, items: &[Value]) -> Option<Value> {
     // Patterns are allowed only in required slots (before &optional / & rest).
     let required_end = params
         .iter()
-        .position(|&p| matches!(p, Value::Sym(s) if matches!(value::symbol_name(s).as_str(), "&optional" | "&")))
+        .position(|&p| matches!(p, Value::Sym(s) if value::symbol_is(s, "&optional") || value::symbol_is(s, "&")))
         .unwrap_or(params.len());
     if !params[..required_end].iter().any(|&p| !is_sym(p)) {
         return None; // no pattern in the required params — ordinary fn

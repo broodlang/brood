@@ -1,6 +1,7 @@
 # Brood types — set-theoretic, gradual, advisory
 
-**Status:** steps 1–2 of 5 implemented (`crates/lisp/src/types.rs`). This doc is the
+**Status:** steps 1–2 done; 3–4 started — a v0 advisory checker (`(check 'form)`)
+is the lattice's first consumer (`crates/lisp/src/{types,check}.rs`). This doc is the
 plan *and* the compatibility contract: the staircase says what to build next, the
 [Compatibility contract](#compatibility-contract) says what every other change
 must respect so we never drift off this path. Decision recorded in
@@ -86,26 +87,25 @@ operators). The "redefinable/free/global references are `dynamic()`" rule is
 documented (the struct doc + ADR-024); no checker consumes it yet.
 **Done:** the gradual type and its derived relation exist and are unit-tested.
 
-### Step 3 — typed signatures on primitives ⬜
-Give each `NativeFn` a result `Ty` (and argument `Ty`s) beside its `Arity` — same
-single-source-of-truth pattern. e.g. `%add: (number, number) -> number`,
-`cons: (any, any) -> pair`, predicates `: (any) -> bool`, `type-of: (any) -> keyword`.
-**Done when:** every builtin declares a signature (compiler-enforced, like
-`Arity`), and a signature is queryable for a given primitive.
+### Step 3 — typed signatures on primitives 🟡
+Signatures exist as a **table** (`check::primitive_sig`): the discriminating
+primitives (`%add: (number,number)→number`, `first: (list|vector)→any`,
+`string-length: (string)→int`, …). **Still ⬜:** move them onto `NativeFn` so
+*every* builtin declares one, compiler-enforced like `Arity` (contract point #6).
+The table was the pragmatic start — it gave the checker what it needs without
+editing every `def` in the (in-flight) `builtins.rs`.
 
-### Step 4 — local, advisory inference ⬜
-A pass over the **macro-expanded** forms (after `macros::macroexpand_all`,
-ADR-022): literals → singleton `Ty`; primitive calls → result `Ty`;
-**guard/pattern narrowing** mined from the matcher (`(if (int? x) …)`,
-`match` clauses) for occurrence typing. Globals are `dynamic()`. Output is
-**warnings** (provable misuse near its source) and, later, specialisation.
-The pass threads **`GradualTy`** (not bare `Ty`) as its currency — globals/free
-references enter as `dynamic()`, `Ty` is just the static `bound` — so expect
-`consistent_with` and a gradual-vs-gradual relation to grow here.
-*Prepped:* the predicate→type bridge this needs is already in place —
-`Ty::tested_by("int?") → int`, `"number?" → number`, `"list?" → list`, etc.
-**Done when:** a body that provably misuses a value warns at compile time, and no
-correct program is rejected.
+### Step 4 — local, advisory inference 🟡 (v0 shipped)
+`crates/lisp/src/check.rs` + the `(check 'form)` builtin: walk a macro-expanded
+form and **warn when a primitive gets a provably-wrong argument** — the argument
+type is *disjoint* from what the primitive accepts (`(first 5)`,
+`(%add 1 "x")`). Disjointness (not subtyping) is the rule, so a superset / `any`
+/ unknown argument is never a false positive. Advisory: returns warnings, never
+raises. **Still ⬜:** closure-signature inference (so `(+ 1 "x")` warns, not just
+`%add`), variable **flow/guard narrowing** via `Ty::tested_by` (already prepped:
+`tested_by("int?") → int`, …), threading `GradualTy` for `dynamic()` globals, and
+wiring the checker into the compile pass / a `brood check` so it runs
+automatically (today it's the opt-in `check` builtin).
 
 ### Step 5+ — structured types ⬜
 Function arrows, vector/list element types, intersections for overloaded fns —

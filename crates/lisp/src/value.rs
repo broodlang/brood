@@ -49,6 +49,19 @@ pub fn symbol_name(sym: Symbol) -> String {
     interner().names[sym as usize].clone()
 }
 
+/// Does `sym`'s spelling equal `name`? Locks once and compares in place — no
+/// `String` allocation, unlike `symbol_name(s) == name`. For the hot compares
+/// against fixed words (`&optional`, `quasiquote`, the compile-pass walk).
+pub fn symbol_is(sym: Symbol, name: &str) -> bool {
+    interner().names[sym as usize] == name
+}
+
+/// The first character of `sym`'s spelling, if any — to recognise the `&`-marker
+/// family without allocating the whole name first.
+pub fn symbol_first_char(sym: Symbol) -> Option<char> {
+    interner().names[sym as usize].chars().next()
+}
+
 // ----- handles into the Heap -----
 
 /// A handle's two high bits tag which heap **region** it addresses; the low 30

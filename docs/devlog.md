@@ -804,3 +804,124 @@ runtime behaviour until the Step 4 inference pass reads them. The first
 behavioural payoff is Step 4.
 
 **Verified.** 12 `types` tests + 45 Rust + suite + doc-test green.
+
+---
+
+## 2026-05-27 — Rust simplification pass (shrink the core)
+
+**Goal.** A review of the Rust to make it as simple as possible without
+compromising stability or performance, then apply the agreed cleanups.
+
+**Done.**
+- **Five special forms became prelude macros.** `when`, `unless`, `cond`, `and`,
+  and `or` left `eval.rs` (and `SPECIAL_NAMES`) for `std/prelude.blsp`, defined
+  over `if`/`do`/`let` (ADR-006/011; ADR-022 already called `when` a "cheap
+  macro"). The evaluator's generic macro-expansion fallback already covers them,
+  so this *removed* eval code with none added; the compile pass expands them once
+  so runtime speed is unchanged. `while` stays a special form (no named-`let`
+  yet). One gotcha: `cond` must test `else`/`:else` with the `%eq` *primitive*,
+  not the variadic `=` — `=` builds a lambda, and doing that at expansion time
+  during the prelude's own compile pass would strand a local-env closure and
+  break the freeze invariant.
+- **One arity-message formatter.** `arity_message` + `native_arity_message`
+  collapsed into one `arity_message(who, min, max, got)`; builtins and user
+  closures now word arity errors identically ("argument(s)"). Updated the two
+  suite assertions that pinned the old "args" wording.
+- **No-alloc symbol comparison.** Added `value::symbol_is` / `symbol_first_char`
+  and used them where the code compared a symbol's spelling to a literal
+  (`macroexpand_all`'s per-node walk, quasiquote's `tagged`, the `&optional`/`&`
+  scans, `parse_params`) — dropping a `String` clone (and interner lock) per node.
+- **Region-accessor macro.** `heap.rs`'s `vector`/`string`/`closure` accessors
+  (identical LOCAL/PRELUDE/RUNTIME dispatch) now come from one `region_ref!`
+  macro; `pair` (by-value) and `native`/`env_frame` (restricted regions) stay
+  explicit.
+- **`expect_string` helper** (second pass). Nine builtins repeated the same
+  `match v { Str(id) => …to_string(), _ => wrong_type }` block; collapsed to one
+  `expect_string(heap, who, v)` (matching the existing `expect_int`/
+  `expect_number`). `spit`/`run-process`/`%builtin-module`/`name` keep bespoke
+  messages and stay explicit.
+
+**Verified.** 19 `types` + 45 Rust + Brood suite + doc-test green; macro edge
+cases (`(and)`/`(or)`/short-circuit/`cond` `:else`) spot-checked at the REPL.
+
+### Types step 4 (v0): the advisory checker — the lattice's first consumer (2026-05-27)
+
+The `Ty` lattice finally *does* something. `crates/lisp/src/check.rs` + a `check`
+builtin: `(check 'form)` macro-expands the form, walks it, and returns warnings
+for **provably-wrong primitive arguments** — e.g. `(first 5)` →
+`"first: argument 1 expects nil | pair | vector, got int (5)"`.
+
+- **Rule is disjointness, not subtyping.** An argument is flagged only when its
+  type shares *no* tag with what the primitive accepts (`arg ∩ param = ⊥`). A
+  superset (`number` for `int`), an `any` result, or an unknown/variable
+  (`dynamic()`, bound `ANY`) all overlap → never flagged. So **no false
+  positives** by construction. Advisory: returns warnings, never raises.
+- **Signatures** live in a `primitive_sig` table (Step 3, table form) for the
+  discriminating primitives; argument types come from literals and from nested
+  primitives' result types (`(first (string-length "a"))` warns on `first`).
+- **Not yet:** closures (`(+ 1 "x")` — `+` is Brood, needs closure sigs), flow/
+  guard narrowing (the `tested_by` bridge is ready), and auto-running in the
+  compile pass (today it's the opt-in `check` builtin).
+
+Honest payoff read: this is the first *behavioural* benefit from the lattice;
+`type-of`/arity/self-identifying errors were already live from step 0.
+
+**Verified.** 6 `check` tests + 13 `types` + 45 Rust + suite + doc-test green;
+CLI demo flags `(first 5)` and recurses, with no false positive on `any` results.
+
+### Shrinking the kernel: tag predicates, `mod`, `println` → Brood (2026-05-27)
+
+Audited the native kernel for primitives expressible in Brood ("keep the
+language as small as possible"). The arithmetic/comparison families (`+ - * /
+< > = …`) were already prelude functions over the binary `%`-ops; this pass
+moved three more groups down into `std/prelude.blsp`:
+
+- **The 10 type-tag predicates** (`nil? pair? int? float? bool? string? symbol?
+  keyword? vector? fn?`) → one-liners over `type-of`, the one irreducible
+  reflective primitive (`(defn int? (x) (%eq (type-of x) :int))`; `fn?` unions
+  `:fn`/`:native`). `docs/primitives.md` had filed these under "not expressible
+  in-language" — false since `type-of` exists; the predicates merely duplicated
+  it in Rust.
+- **`mod`** → Brood over the `rem` primitive: euclidean result nudged back into
+  `[0, (abs b))`. A ÷0 now surfaces as a `rem` error (the pinned error-message
+  test was updated deliberately).
+- **`println`** → Brood over `print` (`(defn println (& xs) (apply print xs)
+  (print "\n"))`).
+
+Net: **12 fewer Rust primitives** (the documented kernel 66 → 54). The
+occurrence-typing bridge (`Ty::tested_by`, keyed by predicate *name*) is
+unaffected — it already listed the Brood-defined `number?`/`list?`, so moving
+the rest changes nothing there. Considered and rejected: `empty?` (reducible but
+on every `fold` step — keep in Rust), `%sub` (derivable via `%add`+negate, but
+worse float/overflow semantics), `first`/`rest` (splitting out `%car`/`%cdr`
+relocates a primitive rather than removing one).
+
+**Verified.** Full `cargo test` green (Rust + Brood suite + doc-test), with new
+suite coverage for `mod`'s sign rules and every tag predicate (incl. `fn?` over
+both a closure and a builtin).
+
+### Editor-parseable output: structured errors + test failures (2026-05-27)
+
+Made test/error output editor-readable as a *language* concern — contract in
+`docs/tooling.md`, alongside an Emacs mode (`brood.el`, in the user's Emacs
+tree). **One output format, always on**: structured, GNU-anchored, read the same
+by humans, LLMs and Emacs (the user: "why is it not always structured?").
+
+- **Source positions.** The reader records each list form's `line:col` in a heap
+  side-table (`set_form_pos`/`form_pos`, dropped on `reset_local_to`). New
+  primitives `(form-pos form)` and `(current-file)`. `LispError` gained
+  `pos`/`file` + a `located()` renderer.
+- **Errors** print GNU `FILE:LINE:COL: kind error: message` plus the source line
+  and a caret. Parse errors are exact; runtime errors get the enclosing
+  top-level form's line; unclosed `(`/`[` point at where they opened.
+- **Test failures** (`std/test.blsp`): the assertion macros capture their own
+  `(file line col)` at expansion (before the form expands) and push a structured
+  record; the runner prints, per failed assertion, a `FILE:LINE:COL: test failed:
+  group › name` anchor + indented `assert:`/`actual:`/`expect:` fields.
+- **Removed** (greenfield, deleted not deprecated): the colour ✓/✗ progress
+  trace, the `N processes (… nested)` summary line, the `:trace`/`:structured`
+  mode split and `--format` flag, and the now-dead ANSI/`sum-ms`/per-test-loc
+  helpers. `brood test` is structured by default.
+
+**Verified.** `cargo test` green (Rust + 161-test Brood suite + doc-test); a
+throwaway failing project renders the block with per-assertion `line:col`.

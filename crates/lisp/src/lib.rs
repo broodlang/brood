@@ -16,6 +16,7 @@
 
 pub mod alloc;
 pub mod builtins;
+pub mod check;
 pub mod error;
 pub mod eval;
 pub mod heap;

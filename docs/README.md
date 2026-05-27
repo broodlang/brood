@@ -6,6 +6,7 @@ it's going. Start here.
 | Document | What's in it |
 |---|---|
 | [architecture.md](architecture.md) | The big picture: the runtime, the crate layout, the eval loop, the memory model, and the "one runtime that can also be a server" design that the whole project is organised around. |
+| [components.md](components.md) | The **component map**: every module/crate/std file, what it owns, its interface (its *seam*), its dependencies, and what's safe to work on independently — plus a separation-of-concerns assessment. The "who does what" companion to architecture.md's "why". |
 | [spec.md](spec.md) | The **formal language specification** (v0.1): lexical structure and reader grammar (EBNF), the data model, evaluation/tail-call rules, scoping (it's a Lisp-1), special forms, and the primitive/derived split. The precise companion to language.md. |
 | [language.md](language.md) | The language reference *as implemented today* (v0.1): data types, syntax, special forms, and every builtin. Friendlier than the spec. |
 | [primitives.md](primitives.md) | The **native primitive kernel** — the complete list of functions implemented in Rust (everything else is Brood), including how error handling (`throw`/`%try`/`try`/`error`) is built. |

@@ -27,6 +27,24 @@ use crate::value::{
     PRELUDE, RUNTIME,
 };
 
+/// Generate a `&self` accessor that resolves a handle to a shared reference by
+/// region: the LOCAL/PRELUDE slab is indexed directly; the append-only RUNTIME
+/// slab via `boxcar::Vec::get` (stable refs, lock-free). The three uniform
+/// all-three-region reference accessors share this; `pair` (returns by value)
+/// and the region-restricted `native`/`env_frame` stay hand-written.
+macro_rules! region_ref {
+    ($name:ident, $id:ty, $field:ident, $ret:ty, $what:literal) => {
+        pub fn $name(&self, id: $id) -> $ret {
+            match id.region() {
+                LOCAL => &self.local.$field[id.index()],
+                PRELUDE => &self.prelude.slabs.$field[id.index()],
+                RUNTIME => self.runtime.code.$field.get(id.index()).expect($what),
+                _ => unreachable!("invalid handle region"),
+            }
+        }
+    };
+}
+
 struct EnvFrame {
     vars: HashMap<Symbol, Value>,
     parent: Option<EnvId>,
@@ -505,45 +523,10 @@ impl Heap {
     pub fn cdr(&self, id: PairId) -> Value {
         self.pair(id).1
     }
-    pub fn vector(&self, id: VecId) -> &[Value] {
-        match id.region() {
-            LOCAL => &self.local.vectors[id.index()],
-            PRELUDE => &self.prelude.slabs.vectors[id.index()],
-            RUNTIME => self
-                .runtime
-                .code
-                .vectors
-                .get(id.index())
-                .expect("runtime vector handle"),
-            _ => unreachable!("invalid handle region"),
-        }
-    }
-    pub fn string(&self, id: StrId) -> &str {
-        match id.region() {
-            LOCAL => &self.local.strings[id.index()],
-            PRELUDE => &self.prelude.slabs.strings[id.index()],
-            RUNTIME => self
-                .runtime
-                .code
-                .strings
-                .get(id.index())
-                .expect("runtime string handle"),
-            _ => unreachable!("invalid handle region"),
-        }
-    }
-    pub fn closure(&self, id: ClosureId) -> &Closure {
-        match id.region() {
-            LOCAL => &self.local.closures[id.index()],
-            PRELUDE => &self.prelude.slabs.closures[id.index()],
-            RUNTIME => self
-                .runtime
-                .code
-                .closures
-                .get(id.index())
-                .expect("runtime closure handle"),
-            _ => unreachable!("invalid handle region"),
-        }
-    }
+    region_ref!(vector, VecId, vectors, &[Value], "runtime vector handle");
+    region_ref!(string, StrId, strings, &str, "runtime string handle");
+    region_ref!(closure, ClosureId, closures, &Closure, "runtime closure handle");
+
     pub fn native(&self, id: NativeId) -> &NativeFn {
         match id.region() {
             LOCAL => &self.local.natives[id.index()],

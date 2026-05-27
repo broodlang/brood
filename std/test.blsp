@@ -50,10 +50,10 @@
 ;; counters, no races. (Assertions are macros that push onto `*fails*`, so use
 ;; them lexically inside a test body, not from unrelated top-level helpers.)
 ;;
-;; run-tests prints progress (a `.`/`F` per test, or a ✓/✗ line per test with
-;; :trace), then any failures, then a summary with timing and memory. It raises an
-;; error if anything failed (non-zero exit — how `cargo test` notices). Flags:
-;;   (run-tests :trace)   ; a per-test line as each finishes, instead of dots
+;; run-tests prints, once at the end, a structured `FILE:LINE:COL:` block per
+;; failed assertion (the one format for humans, LLMs and editors — see
+;; docs/tooling.md), then a one-line summary with timing and memory. It raises an
+;; error if anything failed (non-zero exit — how `cargo test` notices). Flag:
 ;;   (run-tests :slow)    ; after the summary, list the slowest tests
 
 ;; --- registry ----------------------------------------------------------------
@@ -73,20 +73,21 @@
 (defn add-unit! (mode group tests)
   (set! *units* (cons (list mode group tests) *units*)))
 
-;; Source location of a form as (file line), or nil. Captured at macro-expansion
-;; time (by the `test` macro), while the original read form still carries its
-;; position — `current-file` / `form-pos` are Rust primitives (docs/tooling.md).
-(defn source-loc (form)
+;; Full source location of a form as (file line col), or nil. Captured at
+;; macro-expansion time (by the assertion macros), while the original read form
+;; still carries its position — `current-file` / `form-pos` are Rust primitives
+;; (docs/tooling.md). Each failing assertion is thus self-locating, which is what
+;; lets the reporter emit a clickable `FILE:LINE:COL:` anchor per failure.
+(defn fail-loc (form)
   (let (p (form-pos form))                 ; [line col] vector, or nil
-    (if p (list (current-file) (vector-ref p 0)) nil)))
+    (if p (list (current-file) (vector-ref p 0) (vector-ref p 1)) nil)))
 
 ;; A test registers itself: collected into the enclosing describe if there is
 ;; one, otherwise emitted as its own standalone unit (:isolated if flagged).
-;; `loc` is the (file line) where the test was written, for editor output.
-(defn register-test! (name thunk isolated? loc)
+(defn register-test! (name thunk isolated?)
   (if *collecting*
-    (set! *collected* (cons (list name thunk loc) *collected*))
-    (add-unit! (if isolated? :isolated :parallel) "" (list (list name thunk loc)))))
+    (set! *collected* (cons (list name thunk) *collected*))
+    (add-unit! (if isolated? :isolated :parallel) "" (list (list name thunk)))))
 
 ;; Turn a finished describe's collected tests into units according to its mode:
 ;; default spreads them across one :parallel unit each; :serial/:isolated keep
@@ -116,16 +117,16 @@
 ;; dead worker never sends, and `receive` would block forever).
 (defmacro test (name & forms)
   (let (iso  (= (first forms) :isolated)
-        body (if iso (rest forms) forms)
-        loc  (source-loc (first body)))      ; (file line) of the first body form
+        body (if iso (rest forms) forms))
     `(register-test! ~name
        (fn ()
          (let (*fails* nil)
            (try (do ~@body)
-                (catch e (set! *fails* (cons (str "uncaught error: " e) *fails*))))
+                (catch e
+                  (set! *fails*
+                        (cons (list nil (list (str "uncaught error: " e))) *fails*))))
            (reverse *fails*)))
-       ~iso
-       (quote ~loc))))
+       ~iso)))
 
 ;; (deftest name body...) — a single test named by a symbol, no group.
 (defmacro deftest (name & body)
@@ -140,32 +141,51 @@
 ;; the actual value — so a failure line is self-identifying: you (or an LLM reading
 ;; the captured run) see exactly which expression failed and what it produced,
 ;; without opening the file or guessing among look-alike assertions.
+;; A failure record is (loc detail-lines): `loc` is (file line col) or nil, and
+;; `detail-lines` is a list of "label: value" strings. The reporter turns each
+;; into a clickable anchor line plus its indented fields (docs/tooling.md).
 (defmacro is (expr)
-  (let (v (gensym "v"))
+  (let (v (gensym "v") loc (fail-loc expr))
     `(let (~v ~expr)
        (unless ~v
-         (set! *fails* (cons (str (pr-str (quote ~expr)) " is " (pr-str ~v)) *fails*))))))
+         (set! *fails*
+               (cons (list (quote ~loc)
+                           (list (str "assert: " (pr-str (quote (is ~expr))))
+                                 (str "actual: " (pr-str ~v))))
+                     *fails*))))))
 
-;; (refute expr) — the negation of `is`: fail if expr is truthy. Reports the
-;; truthy value it got where it wanted nil/false.
+;; (refute expr) — the negation of `is`: fail if expr is truthy.
 (defmacro refute (expr)
-  (let (v (gensym "v"))
+  (let (v (gensym "v") loc (fail-loc expr))
     `(let (~v ~expr)
        (when ~v
-         (set! *fails* (cons (str (pr-str (quote ~expr)) " is " (pr-str ~v) " — expected falsy") *fails*))))))
+         (set! *fails*
+               (cons (list (quote ~loc)
+                           (list (str "assert: " (pr-str (quote (refute ~expr))))
+                                 (str "actual: " (pr-str ~v) "  (expected falsy)")))
+                     *fails*))))))
 
 (defmacro assert= (actual expected)
-  (let (a (gensym "a") b (gensym "b"))
+  (let (a (gensym "a") b (gensym "b") loc (fail-loc actual))
     `(let (~a ~actual ~b ~expected)
        (unless (= ~a ~b)
-         (set! *fails* (cons (str (pr-str (quote ~actual)) " => " (pr-str ~a)
-                                  ", expected " (pr-str ~b)) *fails*))))))
+         (set! *fails*
+               (cons (list (quote ~loc)
+                           (list (str "assert: " (pr-str (quote (assert= ~actual ~expected))))
+                                 (str "actual: " (pr-str ~a))
+                                 (str "expect: " (pr-str ~b))))
+                     *fails*))))))
 
 (defmacro assert-error (& body)
   ;; Quote the body for the message: the lone form if there's one, else (do …).
-  (let (form (if (= (count body) 1) (first body) (cons 'do body)))
+  (let (form (if (= (count body) 1) (first body) (cons 'do body))
+        loc  (fail-loc (if (= (count body) 1) (first body) nil)))
     `(unless (try (do ~@body false) (catch e true))
-       (set! *fails* (cons (str "expected " (pr-str (quote ~form)) " to raise, but none did") *fails*)))))
+       (set! *fails*
+             (cons (list (quote ~loc)
+                         (list (str "assert: " (pr-str (quote (assert-error ~form))))
+                               "actual: no error was raised"))
+                   *fails*)))))
 
 ;; (error-of body...) — evaluate body and yield the error it raised, so you can
 ;; assert on the *output*: a built-in error comes back as its message string
@@ -210,27 +230,17 @@
         frac   (rem tenths 10))
     (str whole "." frac " MB")))
 
-;; ANSI helpers (the reader's `\e` is ESC). Markers/colours sit *outside* the
-;; padded name, so column alignment still counts only visible text. Colour is
-;; emitted ONLY when stdout is a real terminal — when the run is captured (a
-;; pipe, `cargo test`, an LLM or CI reading it), `ansi` returns the plain string,
-;; so the output is clean text with no escape-code noise.
-(defn ansi (code s) (if (stdout-tty?) (str "\e[" code "m" s "\e[0m") s))
-(defn green  (s) (ansi "32" s))
-(defn red    (s) (ansi "31" s))
-(defn dim    (s) (ansi "2"  s))
-
 ;; --- results -----------------------------------------------------------------
-;; A result is (group name fails ms loc): `fails` is the list of failure messages
-;; for that test (empty = passed); `loc` is (file line) or nil.
+;; A result is (group name fails ms): `fails` is the list of failure records for
+;; that test (empty = passed). A failure record is (loc detail-lines); `loc` is
+;; (file line col) or nil, captured per-assertion (see `fail-loc`).
 (defn r-group (r) (first r))
 (defn r-name  (r) (second r))
 (defn r-fails (r) (third r))
 (defn r-ms    (r) (nth r 3))
-(defn r-loc   (r) (nth r 4))
 (defn r-failed? (r) (not (empty? (r-fails r))))
-(defn label (group name)                  ; "group: name", or just name if ungrouped
-  (if (= group "") (str name) (str group ": " name)))
+(defn label (group name)                  ; "group › name", or just name if ungrouped
+  (if (= group "") (str name) (str group " › " name)))
 (defn full-name (r) (label (r-group r) (r-name r)))
 
 ;; Run one (name thunk) and produce its result (group name fails ms). The thunk's
@@ -240,7 +250,7 @@
   (let (start (now)
         fails ((second t))
         ms    (- (now) start))
-    (list group (first t) fails ms (third t))))
+    (list group (first t) fails ms)))
 
 ;; Like run-test, but evaluate the body with a private copy of the global
 ;; bindings (`%isolate`): an :isolated test's def/set! is rolled back when it
@@ -249,7 +259,7 @@
   (let (start (now)
         fails (%isolate (second t))
         ms    (- (now) start))
-    (list group (first t) fails ms (third t))))
+    (list group (first t) fails ms)))
 
 ;; Run every test in a unit, in order, returning the list of results. This is
 ;; what a worker does (for a :parallel/:serial unit) and what the runner does
@@ -258,72 +268,62 @@
   (let (group (second unit))
     (map (fn (t) (run-test group t)) (third unit))))
 
-;; One trace line: a pass/fail marker, the group-qualified name, and the time.
-(defn timing-line (r)
-  (str "  " (if (r-failed? r) (red "✗") (green "✓")) "  "
-       (pad-right (full-name r) 28)
-       (pad-left (str (r-ms r)) 6) " ms"))
-
-;; Print a result as it becomes known: a per-test line in :trace, else a dot/F.
-(defn render-result (trace? r)
-  (if trace?
-    (println (timing-line r))
-    (print (if (r-failed? r) "F" "."))))
-
 ;; --- the two phases ----------------------------------------------------------
 ;; Parallel phase: spawn one worker per non-isolated unit (each worker captures
 ;; its unit and reports the unit's results back as one message), then collect.
+;; Output is emitted once at the end (a single structured report), so there is no
+;; per-test progress to print here.
 (defn spawn-units (units me)
   (fold (fn (_ unit)
           (spawn (fn (parent) (send parent (run-unit unit))) me))
         nil units))
 
-(defn collect-units (trace? remaining acc)   ; remaining = messages still to receive
+(defn collect-units (remaining acc)   ; remaining = messages still to receive
   (if (= remaining 0)
     acc
-    (let (results (receive))                  ; one unit's worth of results
-      (fold (fn (_ r) (render-result trace? r)) nil results)
-      (collect-units trace? (- remaining 1) (append results acc)))))
+    (let (results (receive))          ; one unit's worth of results
+      (collect-units (- remaining 1) (append results acc)))))
 
 ;; Isolated phase: run each isolated unit on the runner itself, one at a time, so
 ;; nothing else is executing — and each test under `%isolate`, so its global defs
 ;; are rolled back and can't leak to another test.
-(defn run-isolated (trace? units acc)
+(defn run-isolated (units acc)
   (if (empty? units)
     acc
     (let (unit    (first units)
           group   (second unit)
           results (map (fn (t) (run-test-fresh group t)) (third unit)))
-      (fold (fn (_ r) (render-result trace? r)) nil results)
-      (run-isolated trace? (rest units) (append results acc)))))
+      (run-isolated (rest units) (append results acc)))))
 
 ;; --- reporting ---------------------------------------------------------------
-;; "file:line: " prefix for a result, or "" when its location is unknown.
-(defn loc-prefix (r)
-  (let (loc (r-loc r))
-    (if (and loc (first loc))
-      (str (first loc) ":" (second loc) ": ")
-      "")))
+;; A failure record is (loc detail-lines): loc is (file line col) or nil.
+(defn fail-loc-of   (rec) (first rec))
+(defn fail-lines-of (rec) (second rec))
 
-;; In :structured mode print one GNU `FILE:LINE: message` line per failed
-;; assertion (parsed by compilation-mode / flymake; see docs/tooling.md).
-;; Otherwise the human-readable FAILURES block.
-(defn report-failures (structured? results)
+;; The anchor line for a failed assertion. With a location it's the GNU
+;; `FILE:LINE:COL: message` form that compilation-mode / flymake parse and make
+;; clickable; without one, just the message. The labeled fields print indented
+;; under it. See docs/tooling.md.
+(defn fail-anchor (r rec)
+  (let (loc (fail-loc-of rec))
+    (if loc
+      (str (first loc) ":" (second loc) ":" (third loc) ": test failed: " (full-name r))
+      (str "test failed: " (full-name r)))))
+
+;; Print every failure of a result as: an anchor line, then its fields indented.
+(defn print-failure (indent r)
+  (fold (fn (_ rec)
+          (println (fail-anchor r rec))
+          (fold (fn (_ line) (println (str indent line))) nil (fail-lines-of rec)))
+        nil (r-fails r)))
+
+;; Emit one editor-parseable block per failed assertion. There is a single
+;; output format — structured — for humans, LLMs and Emacs alike (docs/tooling.md).
+(defn report-failures (results)
   (let (failed (filter r-failed? results))
     (unless (empty? failed)
-      (if structured?
-        (fold (fn (_ r)
-                (fold (fn (_ msg)
-                        (println (str (loc-prefix r) (full-name r) " — " msg)))
-                      nil (r-fails r)))
-              nil failed)
-        (do
-          (println "")
-          (println "FAILURES:")
-          (fold (fn (_ r)
-                  (fold (fn (_ msg) (println (str "  " (full-name r) " — " msg)))
-                        nil (r-fails r)))
-                nil failed))))))
+      (println "")
+      (fold (fn (_ r) (print-failure "    " r)) nil failed))))
 
 (defn report-slow (results)
   (println "")
@@ -339,57 +339,32 @@
   (fold (fn (acc r) (if (r-failed? r) (+ acc 1) acc)) 0 results))
 (defn count-failures (results)            ; total failed assertions across tests
   (fold (fn (acc r) (+ acc (count (r-fails r)))) 0 results))
-(defn sum-ms (results)                    ; summed runtime (ms) of the given tests
-  (fold (fn (acc r) (+ acc (r-ms r))) 0 results))
 
 ;; --- entry point -------------------------------------------------------------
 (defn run-tests (& opts)
-  (let (trace?  (opt? :trace opts)
-        structured? (opt? :structured opts)
-        units   (reverse *units*)
-        par     (filter (fn (u) (not= (first u) :isolated)) units)  ; parallel + serial
-        iso     (filter (fn (u) (= (first u) :isolated)) units)
-        spawn0  (spawn-count)
-        start   (now)
-        me      (self))
+  (let (units (reverse *units*)
+        par   (filter (fn (u) (not= (first u) :isolated)) units)  ; parallel + serial
+        iso   (filter (fn (u) (= (first u) :isolated)) units)
+        start (now)
+        me    (self))
     ;; Isolated phase first: each isolated test runs alone, against a private copy
     ;; of the globals, so it sees the clean post-load baseline (none of the
     ;; parallel/serial defs below) and its own defs roll back. Then launch the
     ;; parallel/serial workers and collect them.
-    (let (iso-results (run-isolated trace? iso nil)
+    (let (iso-results (run-isolated iso nil)
           _           (spawn-units par me)
-          par-results (collect-units trace? (count par) nil)
+          par-results (collect-units (count par) nil)
           results     (append iso-results par-results)
           elapsed     (- (now) start)
-          spawned     (- (spawn-count) spawn0)
-          workers     (count par)               ; one worker per parallel/serial unit
-          nested      (- spawned workers)        ; extra processes the tests spawned
           total       (count results)
           failed      (count-failed results)
-          fails       (count-failures results)
-          ;; Total test runtime broken down by execution variation. It's the SUM
-          ;; of each test's own duration, so the parallel/serial figure exceeds
-          ;; its share of the wall clock (those tests overlap on worker threads);
-          ;; the isolated figure is wall-clock-like (they run one at a time).
-          iso-time    (sum-ms iso-results)
-          par-time    (sum-ms par-results)
-          test-time   (+ iso-time par-time))
-      (println "")              ; end the progress line
-      (report-failures structured? results)
+          fails       (count-failures results))
+      (report-failures results)
       (when (opt? :slow opts) (report-slow results))
       (println "")
       (println total "tests," (- total failed) "passed," failed "failed"
                (str "(" fails " failed assertions, " (count iso) " isolated)"))
-      (println (str "  test runtime: " test-time " ms total — "
-                    "parallel/serial " par-time " ms, isolated " iso-time " ms"))
       (println (str "  (" elapsed " ms wall, peak " (mb-str (mem-peak)) ")"))
-      ;; Processes are cheap green coroutines (step 4b), multiplexed onto a fixed
-      ;; pool of worker OS threads (≈ nproc) — NOT one thread each. `peak` is the
-      ;; most that ran simultaneously (bounded by the pool), so it shows the real
-      ;; parallelism reached.
-      (println (str "  " (+ spawned 1) " processes (1 runner + " workers
-                    " unit workers + " nested " nested) on " (worker-threads)
-                    " worker threads, peak " (peak-threads) " running at once"))
       (if (> failed 0)
         (error (str failed " test(s) failed"))
         :ok))))

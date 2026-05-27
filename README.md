@@ -15,6 +15,11 @@ the name comes from.
 > imagery is deliberate — you *tend* a brood and feed it *nectar*. These tools
 > and the crate/binary rename aren't built yet; today you use `cargo` directly,
 > as shown below.
+>
+> Brood source files carry the **`.blsp`** extension — a contraction of *Brood
+> Lisp* (`.lisp` collides with Emacs' `lisp-mode`). Any `.blsp` file, or a
+> reference to "blsp", means **Brood-language source**, as distinct from the Rust
+> kernel.
 
 The editor itself comes later. This repository is currently the **language
 core** (v0.1): a reader, a tree-walking evaluator with proper tail calls and

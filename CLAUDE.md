@@ -12,6 +12,11 @@ written in. Today the repo is the **language core**; the editor, display
 protocol, and server come later. Read `docs/` before making non-trivial changes
 — especially `docs/architecture.md`, `docs/roadmap.md`, and `docs/decisions.md`.
 
+Brood source files carry the **`.blsp`** extension — a contraction of *Brood
+Lisp* (`.lisp` was dropped because it collides with Emacs' `lisp-mode`). Any
+`.blsp` file, or a reference to "blsp", means **Brood-language source** (the
+language itself), as distinct from the Rust kernel under `crates/`.
+
 ## Greenfield: prefer the right structure over compatibility
 
 This is **greenfield** — pre-1.0, no external users, nothing to keep stable.

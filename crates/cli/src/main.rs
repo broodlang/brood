@@ -50,16 +50,11 @@ fn main() {
     // loads every tests/**/*_test.blsp, and runs the whole suite once. It raises
     // on failure, so a non-zero exit falls out of the eval error.
     if files.first().map(String::as_str) == Some("test") {
-        // `--format=structured` switches the reporter to GNU `FILE:LINE: message`
-        // failure lines an editor can jump to (see `docs/tooling.md`); otherwise
-        // the human-readable `:trace` output.
-        let structured = files.iter().any(|a| a == "--format=structured");
-        let opts = if structured { ":structured" } else { ":trace" };
-        let code = format!(
-            "(require 'project) (load-config) (run-project-tests {})",
-            opts
-        );
-        if let Err(e) = interp.eval_str(&code) {
+        // One output format — structured GNU `FILE:LINE:COL: message` blocks that
+        // humans, LLMs and editors (compilation-mode, flymake) all read; see
+        // `docs/tooling.md`.
+        let code = "(require 'project) (load-config) (run-project-tests)";
+        if let Err(e) = interp.eval_str(code) {
             // A parse/eval error in a loaded test file carries its file:line:col.
             report_error(&e);
             std::process::exit(1);

@@ -419,4 +419,73 @@ mod tests {
         assert_eq!(g.bound, Ty::of(Tag::Int).union(Ty::of(Tag::Str)));
         assert!(g.is_dynamic()); // dynamic propagates through the union
     }
+
+    #[test]
+    fn static_union_stays_static() {
+        let g = GradualTy::stat(Ty::of(Tag::Int)).union(GradualTy::stat(Ty::of(Tag::Str)));
+        assert!(!g.is_dynamic());
+    }
+
+    #[test]
+    fn dynamic_vs_never_is_the_degenerate_case() {
+        // Nothing inhabits NEVER, so even dynamic() can't be used there...
+        assert!(!GradualTy::dynamic().consistent_with(Ty::NEVER));
+        // ...while a *static* NEVER (⊥) is a subtype of every type.
+        assert!(GradualTy::stat(Ty::NEVER).consistent_with(Ty::of(Tag::Int)));
+    }
+
+    // ---- the set algebra obeys the lattice laws, over a representative sample ----
+
+    fn sample_tys() -> Vec<Ty> {
+        let mut v = vec![Ty::NEVER, Ty::ANY, Ty::NUMBER, Ty::LIST];
+        for t in ALL_TAGS {
+            v.push(Ty::of(t));
+        }
+        v.push(Ty::of(Tag::Int).union(Ty::of(Tag::Str)));
+        v.push(Ty::NUMBER.union(Ty::of(Tag::Nil)));
+        v
+    }
+
+    #[test]
+    fn lattice_laws_hold() {
+        let s = sample_tys();
+        for &a in &s {
+            assert_eq!(a.union(Ty::NEVER), a, "∪⊥ identity");
+            assert_eq!(a.intersect(Ty::ANY), a, "∩⊤ identity");
+            assert_eq!(a.union(a), a, "∪ idempotent");
+            assert_eq!(a.intersect(a), a, "∩ idempotent");
+            assert_eq!(a.union(a.negate()), Ty::ANY, "complement ∪");
+            assert_eq!(a.intersect(a.negate()), Ty::NEVER, "complement ∩");
+            assert_eq!(a.negate().negate(), a, "double negation");
+            for &b in &s {
+                assert_eq!(a.union(b), b.union(a), "∪ commutes");
+                assert_eq!(a.intersect(b), b.intersect(a), "∩ commutes");
+                // subtyping IS set inclusion: a ⊆ b ⟺ a ∩ b = a
+                assert_eq!(a.is_subtype(b), a.intersect(b) == a, "subtype ⟺ inclusion");
+                // disjoint IS empty intersection
+                assert_eq!(a.is_disjoint(b), a.intersect(b).is_never(), "disjoint ⟺ ∅");
+                // De Morgan
+                assert_eq!(
+                    a.union(b).negate(),
+                    a.negate().intersect(b.negate()),
+                    "De Morgan"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn subtyping_is_reflexive_and_transitive() {
+        let s = sample_tys();
+        for &a in &s {
+            assert!(a.is_subtype(a));
+            for &b in &s {
+                for &c in &s {
+                    if a.is_subtype(b) && b.is_subtype(c) {
+                        assert!(a.is_subtype(c), "subtype transitivity");
+                    }
+                }
+            }
+        }
+    }
 }
