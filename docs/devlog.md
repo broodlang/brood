@@ -341,3 +341,36 @@ human Clojurist) reads what's *different* far more reliably than the full spec.
 accept-and-ignore the type or raise a clear "`catch` takes one binding" parse
 error; likewise give multi-arity `fn` a teaching error pointing at
 `&optional`/`&`, matching the quality of the map-literal message.
+
+### Memory reclamation, step 1: arena reset at top-level boundaries (same day)
+
+**Goal.** Stop long-lived processes (the REPL, eventually a server) from leaking
+every cons/env they allocate. (Spawned processes already free their whole `Heap`
+on thread exit, so the leak is specifically the long-lived ones.)
+
+**The wall, and the way around it.** A real tracing GC needs to find live roots,
+but `eval` is a native recursive tree-walker — live `Value`s sit on the *Rust*
+stack, unscannable. A mark-sweep rooted only from the current env is unsafe
+mid-eval (sibling sub-expressions strand live values in local `argv`s). BUT a
+property of the shared-runtime design saves the common case: **globals live in
+PRELUDE/RUNTIME and never point into a process's LOCAL heap** (a top-level `def`
+promotes outward). So at a top-level boundary the only live LOCAL value is the
+form's result.
+
+**Built (ADR-016, memory-model.md).** `Heap::checkpoint()` snapshots LOCAL slab
+lengths; `Heap::reset_local_to(cp)` truncates them back. `eval_str` resets
+between top-level forms (keeping the final result); the REPL (both interactive
+and plain) resets to a baseline after each command, once the result is printed.
+O(1), no tracing, nothing shared touched. Demo: a file of five heavy `sum-to`
+forms went from ~712 MB growing to **~78 MB flat** (peak 159 MB during one form).
+
+**Scope / deferred.** Doesn't help a single never-returning loop (no top-level
+boundary), and reset is unsafe mid-eval. General GC needs the evaluator's roots
+scannable — the explicit-value-stack VM that step 4b also needs — so GC and 4b
+are coupled and best done together. `gc-arena` is no longer the presumed path
+(poor fit for native recursive eval + the shared multi-thread RUNTIME region).
+
+**Verified.** 26 Rust tests + suite + doc-test green; warning-clean. (A subtle
+gotcha while testing: `cargo test` doesn't refresh `target/debug/brood`, so the
+first manual demo ran a stale binary and looked like it leaked — `cargo build`
+then showed the flat profile.)

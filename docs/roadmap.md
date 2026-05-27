@@ -41,9 +41,13 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
 - ✅ **Error handling** — `throw` + `%try` primitives; `try`/`catch` + `error`
   in the prelude (no new special forms — ADR-011)
 - ⬜ **Maps** (`{ }` literals, `get`/`assoc`)
-- ⬜ **Tracing GC** (`gc-arena`) to replace `Rc` before sessions get long-lived
-  — now well-motivated: the `mem-peak` line on the test suite shows ~300 MB
-  retained with no reclamation (`sum-to 100000` leaks its envs/conses)
+- 🟡 **Memory reclamation.** `Send` arena handles replaced `Rc` (done). Step 1 of
+  reclamation is **arena reset at top-level boundaries** (ADR-016): `eval_str` and
+  the REPL truncate the LOCAL heap back after each form — bounds a long
+  session/REPL (demo: ~712 MB growing → ~78 MB flat). Still ⬜: a general tracing
+  GC for *mid-evaluation* / never-returning loops, which needs the evaluator's
+  roots to be scannable (the explicit-value-stack VM that step 4b also needs —
+  they're coupled). `gc-arena` no longer the presumed path. See `memory-model.md`.
 - 🟡 Nicer REPL — `rustyline` line editing (arrow keys, history, Emacs bindings)
   is in; richer completion/highlighting still to come
 - ⬜ **Self-host the CLI/REPL in Brood** — once the language can express it, the

@@ -1,7 +1,34 @@
 # Memory model — toward `Send` heaps and GC
 
-> Status: **design, for review.** Not implemented. This is the approach to pick
-> before rewriting the interpreter core.
+> Status: **partly implemented.** `Send` heaps are **done** — `Value` is a `Copy`
+> handle into arena slabs (no `Rc`), so a `Heap` is `Send` (this enabled the
+> process model and the shared-code regions). Reclamation has a **first step
+> done** — *arena reset at top-level boundaries* (ADR-016, below) — bounding a
+> long REPL/session's memory. A general tracing GC (for mid-evaluation /
+> never-returning loops) is **still future**, and now looks coupled to the
+> explicit-value-stack VM that step 4b also needs (see end).
+
+## Implemented: arena-reset reclamation (ADR-016)
+
+The cheap, safe reclamation we have today, before any tracing GC:
+
+- The per-process LOCAL heap only grows during evaluation (the arena never moves
+  or frees mid-eval). A spawned process frees its whole `Heap` on thread exit, so
+  the leak is specifically *long-lived* processes (the REPL, a server).
+- **Globals live in PRELUDE/RUNTIME and never point into LOCAL** (a top-level
+  `def` *promotes* its value out — see shared-code.md). So at a top-level
+  boundary — eval fully returned, stack empty — the only live LOCAL value is the
+  form's result. We snapshot the LOCAL slab lengths (`Heap::checkpoint`) and
+  truncate back to them (`Heap::reset_local_to`) after consuming the result.
+  `eval_str` does this between forms; the REPL after each command. O(1), no
+  tracing. (Demo: a file of heavy forms went from ~712 MB growing to ~78 MB flat.)
+- **What it does *not* solve:** a single never-returning loop (no top-level
+  boundary) keeps accumulating, and reset is unsafe mid-evaluation (sibling
+  sub-expressions strand live values on the Rust stack, reachable from no
+  scannable root). That needs a real tracing GC — which needs the evaluator's
+  roots to be findable, i.e. the explicit-value-stack VM that 4b also requires.
+  The two are coupled; `gc-arena` fits our native recursive eval + shared
+  multi-thread RUNTIME region poorly, so it's no longer the presumed path.
 
 ## Why now
 

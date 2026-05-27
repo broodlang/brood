@@ -66,8 +66,12 @@ The native kernel is **39 primitives** — see [`docs/primitives.md`](docs/primi
 
 ### Tier 3 — robustness & quality
 
-- ⬜ **Tracing GC** — replace `Rc` (`gc-arena`); the current model leaks reference
-  cycles, which matters for a long-running REPL/editor. **[kernel]** (sizable).
+- 🟡 **Memory reclamation** — `Send` arena handles replaced `Rc` (done). Step 1:
+  **arena reset at top-level boundaries** (ADR-016) — `eval_str`/REPL truncate the
+  LOCAL heap after each form, bounding long sessions (~712 MB→~78 MB in a demo).
+  Still ⬜: a general tracing GC for mid-eval / never-returning loops, which needs
+  scannable roots (the explicit-value-stack VM step 4b also needs — coupled).
+  **[kernel]** (sizable).
 - ⬜ **Source locations in errors** — the reader currently drops spans; attaching
   them gives line/column in messages (and later, stack traces). **[kernel]**
 - ✅ **Native test library** — `std/test.lisp`: ExUnit / `mix test`-style

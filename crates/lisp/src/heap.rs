@@ -64,6 +64,21 @@ pub struct SharedCode {
     slabs: Slabs,
 }
 
+/// A snapshot of the LOCAL heap's sizes, taken at a top-level boundary. Passing
+/// it back to [`Heap::reset_local_to`] reclaims everything allocated since (see
+/// there for the safety contract). This is the arena-reset reclamation strategy
+/// (`docs/memory-model.md`): at a quiescent point the LOCAL heap holds nothing
+/// live but the form's result, because globals live in PRELUDE/RUNTIME and never
+/// point into LOCAL.
+#[derive(Clone, Copy)]
+pub struct LocalCheckpoint {
+    pairs: usize,
+    vectors: usize,
+    strings: usize,
+    closures: usize,
+    envs: usize,
+}
+
 /// Append-only code slabs for the shared RUNTIME region. `boxcar::Vec` gives
 /// lock-free reads that return stable references (existing elements never move
 /// or free as the vector grows), so process threads read closure bodies without
@@ -202,6 +217,36 @@ impl Heap {
     /// True if `env` is this process's global scope.
     pub fn is_global(&self, env: EnvId) -> bool {
         env == self.global
+    }
+
+    /// Snapshot the LOCAL heap's current sizes (for arena-reset reclamation).
+    pub fn checkpoint(&self) -> LocalCheckpoint {
+        LocalCheckpoint {
+            pairs: self.local.pairs.len(),
+            vectors: self.local.vectors.len(),
+            strings: self.local.strings.len(),
+            closures: self.local.closures.len(),
+            envs: self.local.envs.len(),
+        }
+    }
+
+    /// Reclaim everything allocated into the LOCAL heap since `cp`, by truncating
+    /// the slabs back to it.
+    ///
+    /// **Safety contract (logical, not `unsafe`):** call this only at a top-level
+    /// boundary — when the evaluator has fully returned and no value reachable
+    /// from here on holds a LOCAL handle at or past `cp`. Globals live in the
+    /// PRELUDE/RUNTIME regions and never point into LOCAL (a top-level `def`
+    /// *promotes* its value out), so they're always safe; the only thing that can
+    /// still be live is the *result* of the form just evaluated — consume or
+    /// promote it before resetting. Resetting mid-evaluation would strand the
+    /// in-flight computation's values and corrupt later reads.
+    pub fn reset_local_to(&mut self, cp: LocalCheckpoint) {
+        self.local.pairs.truncate(cp.pairs);
+        self.local.vectors.truncate(cp.vectors);
+        self.local.strings.truncate(cp.strings);
+        self.local.closures.truncate(cp.closures);
+        self.local.envs.truncate(cp.envs);
     }
 
     // ----- allocation (always into the local heap) -----

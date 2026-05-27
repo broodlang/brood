@@ -367,6 +367,46 @@ and the normal way tests are written.
 
 ---
 
+## ADR-016 — Arena-reset reclamation at top-level boundaries (first GC step)
+
+**Status:** accepted. First concrete step of memory reclamation; revises (does not
+yet fulfil) ADR-002's "tracing GC later."
+
+**Context.** The heap arenas only grew — a long REPL session or a long-running
+process leaked every cons/env it ever allocated. Spawned processes already free
+their whole `Heap` on thread exit, so the leak is specifically *long-lived*
+processes. A full tracing GC hits a wall: our `eval` is a native recursive
+tree-walker, so live `Value`s sit on the *Rust* call stack where a collector
+can't find them as roots. Worse, a mark-sweep rooted only from the current env is
+**unsafe mid-evaluation** — sibling sub-expressions strand live values in local
+`argv`s reachable from no scannable root.
+
+**Decision.** Reclaim by **arena reset at top-level boundaries**, not tracing.
+`Heap::checkpoint()` snapshots the LOCAL slab lengths; `Heap::reset_local_to(cp)`
+truncates them back. `eval_str` resets between top-level forms (keeping the
+final result); the REPL resets to a baseline after each command. This is safe
+precisely because **globals live in the PRELUDE/RUNTIME regions and never point
+into a process's LOCAL heap** (a top-level `def` *promotes* its value out, ADR-013)
+— so at a quiescent boundary the only live LOCAL value is the form's result, which
+is consumed/printed before the reset. O(1), no tracing, no mark bits.
+
+**Why.** It's the simplest thing that's *provably* safe and reclaims the real
+leak (the suite/REPL demo: ~712 MB growing → ~78 MB flat across heavy forms). It
+needs no eval rewrite and touches nothing shared or concurrent.
+
+**Limits / what's deferred.**
+- It does **not** help a single never-returning loop (a server `(loop)` with no
+  top-level boundary) — that needs reclamation *during* evaluation.
+- Safe mid-eval GC needs the evaluator's roots to be scannable, i.e. an explicit
+  value-stack VM — which is also what **4b** (green-process coroutine suspension)
+  needs. So general GC and 4b share that prerequisite and should likely be done
+  together; `gc-arena` (ADR-002's original target) fits our native recursive eval
+  and shared multi-thread RUNTIME region poorly and is no longer the presumed path.
+- `truncate` retains Vec capacity (bounded by the largest single form), so steady
+  state is the peak form's footprint, not zero — fine, and avoids realloc churn.
+
+---
+
 ## Deferred / open questions
 
 - **Macro hygiene:** currently unhygienic `defmacro` + `gensym`; hygienic macros

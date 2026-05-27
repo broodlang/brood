@@ -104,6 +104,11 @@ fn repl_interactive(interp: &mut Interp) -> rustyline::Result<()> {
         let _ = rl.load_history(path);
     }
 
+    // Baseline LOCAL size; after each command we truncate back to it, reclaiming
+    // everything that command allocated. Safe because globals live in the shared
+    // PRELUDE/RUNTIME regions, never in this process's LOCAL heap.
+    let base = interp.heap.checkpoint();
+
     'repl: loop {
         // Accumulate input lines until the form is delimiter-balanced, so
         // multi-line forms work while each physical line stays editable.
@@ -144,6 +149,7 @@ fn repl_interactive(interp: &mut Interp) -> rustyline::Result<()> {
             Ok(value) => println!("{}", interp.print(value)),
             Err(e) => eprintln!("{}", e),
         }
+        interp.heap.reset_local_to(base); // reclaim this command's allocations
 
         if let Some(path) = &history {
             let _ = rl.save_history(path);
@@ -156,6 +162,7 @@ fn repl_plain(interp: &mut Interp) {
     let stdin = io::stdin();
     let mut handle = stdin.lock();
     let mut pending = String::new();
+    let base = interp.heap.checkpoint();
 
     loop {
         let mut line = String::new();
@@ -185,6 +192,7 @@ fn repl_plain(interp: &mut Interp) {
             }
             Err(e) => eprintln!("{}", e),
         }
+        interp.heap.reset_local_to(base); // reclaim this command's allocations
     }
 }
 

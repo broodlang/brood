@@ -83,9 +83,19 @@ impl Interp {
     /// and return the value of the last.
     pub fn eval_str(&mut self, src: &str) -> Result<Value, LispError> {
         let forms = reader::read_all(&mut self.heap, src)?;
+        // The parsed forms sit in LOCAL below this checkpoint; each form's eval
+        // allocates above it. Between top-level forms the eval stack is empty and
+        // nothing in LOCAL is live but the (discarded) intermediate result —
+        // globals live in PRELUDE/RUNTIME — so we reclaim that form's garbage
+        // before the next. The final form's result is kept for the caller.
+        let cp = self.heap.checkpoint();
         let mut result = Value::Nil;
-        for form in forms {
+        let n = forms.len();
+        for (i, form) in forms.into_iter().enumerate() {
             result = eval::eval(&mut self.heap, form, self.root)?;
+            if i + 1 < n {
+                self.heap.reset_local_to(cp);
+            }
         }
         Ok(result)
     }
