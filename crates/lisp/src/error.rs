@@ -6,6 +6,8 @@
 
 use std::fmt;
 
+use crate::value::Value;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ErrorKind {
     /// The reader could not parse the source text.
@@ -18,17 +20,22 @@ pub enum ErrorKind {
     Type,
     /// A catch-all for runtime failures (overflow, division by zero, ...).
     Runtime,
+    /// Raised by `(throw v)` from user code.
+    User,
 }
 
 #[derive(Debug, Clone)]
 pub struct LispError {
     pub kind: ErrorKind,
     pub message: String,
+    /// The value carried by `(throw v)`, so `catch` can rebind it. Built-in
+    /// errors leave this `None` (and `catch` then receives the message string).
+    pub payload: Option<Value>,
 }
 
 impl LispError {
     pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
-        LispError { kind, message: message.into() }
+        LispError { kind, message: message.into(), payload: None }
     }
     pub fn parse(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Parse, message)
@@ -45,18 +52,26 @@ impl LispError {
     pub fn runtime(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Runtime, message)
     }
+    /// Construct the error raised by `(throw value)`, carrying the value.
+    pub fn thrown(value: Value) -> Self {
+        LispError {
+            kind: ErrorKind::User,
+            message: crate::printer::display(&value),
+            payload: Some(value),
+        }
+    }
 }
 
 impl fmt::Display for LispError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let kind = match self.kind {
-            ErrorKind::Parse => "parse",
-            ErrorKind::Unbound => "unbound",
-            ErrorKind::Arity => "arity",
-            ErrorKind::Type => "type",
-            ErrorKind::Runtime => "runtime",
-        };
-        write!(f, "{} error: {}", kind, self.message)
+        match self.kind {
+            ErrorKind::User => write!(f, "error: {}", self.message),
+            ErrorKind::Parse => write!(f, "parse error: {}", self.message),
+            ErrorKind::Unbound => write!(f, "unbound error: {}", self.message),
+            ErrorKind::Arity => write!(f, "arity error: {}", self.message),
+            ErrorKind::Type => write!(f, "type error: {}", self.message),
+            ErrorKind::Runtime => write!(f, "runtime error: {}", self.message),
+        }
     }
 }
 

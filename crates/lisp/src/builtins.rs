@@ -81,6 +81,10 @@ pub fn register(env: &Rc<Env>) {
     def("macroexpand-1", macroexpand_1);
     def("macroexpand", macroexpand);
     def("gensym", gensym);
+
+    // errors / control (the `try`/`catch`/`error` surface is mylisp, in the prelude)
+    def("throw", throw);
+    def("%try", try_catch);
 }
 
 fn arg(args: &[Value], i: usize) -> Value {
@@ -351,6 +355,29 @@ fn seq_items(v: &Value) -> Result<Vec<Value>, LispError> {
         Value::Pair(_) => value::list_to_vec(v),
         Value::Vector(items) => Ok((**items).clone()),
         _ => Err(LispError::type_err(format!("expected a list or vector, got {}", printer::print(v)))),
+    }
+}
+
+// ---------- errors / control ----------
+
+/// `(throw v)` — raise `v` as an error (a non-local exit caught by `%try`).
+fn throw(args: &[Value], _: &Rc<Env>) -> LispResult {
+    Err(LispError::thrown(arg(args, 0)))
+}
+
+/// `(%try thunk handler)` — call `thunk` (a 0-arg fn); if it raises, call
+/// `handler` with the caught value and return its result, else return the
+/// thunk's result. The caught value is the thrown value, or — for built-in
+/// errors — the error's message string. `try`/`catch` is sugar over this.
+fn try_catch(args: &[Value], env: &Rc<Env>) -> LispResult {
+    let thunk = arg(args, 0);
+    let handler = arg(args, 1);
+    match apply(&thunk, &[], env) {
+        Ok(value) => Ok(value),
+        Err(e) => {
+            let caught = e.payload.clone().unwrap_or_else(|| value::str_val(&e.to_string()));
+            apply(&handler, &[caught], env)
+        }
     }
 }
 

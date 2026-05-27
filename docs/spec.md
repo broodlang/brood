@@ -262,30 +262,38 @@ the type-tag predicates `nil? pair? int? float? bool? string? symbol? keyword?
 vector? fn?` ·
 `str pr-str print println` ·
 `eval read-string load apply` ·
-`macroexpand macroexpand-1 gensym`.
+`macroexpand macroexpand-1 gensym` ·
+`throw %try`.
 
-`%`-prefixed names are low-level and not intended for direct use.
+`%`-prefixed names are low-level and not intended for direct use. The full
+annotated list is in [primitives.md](primitives.md).
 
 **Derived (mylisp, in the prelude):**
-the `defn` macro and the `->`/`->>` threading macros; `not + - * / inc dec < <=
-> >= = not= number? list? car cdr list second third fold reduce map filter
-reverse append count length nth identity zero? positive? negative? abs max min
-sum product`, plus the helpers `chain?`, `append-two`, `nth-list`,
-`thread-first-step`, `thread-last-step`.
+the `defn`, `->`/`->>`, and `try`/`catch` macros; `error`; `not + - * / inc dec
+< <= > >= = not= number? list? car cdr list second third fold reduce map filter
+reverse append count length nth last but-last identity zero? positive? negative?
+abs max min sum product`, plus internal helpers (`chain?`, `append-two`,
+`nth-list`, `thread-first-step`, `thread-last-step`).
 
 ## 10. Errors
 
 Evaluation either yields a value or raises an error carrying a kind (`parse`,
-`unbound`, `arity`, `type`, `runtime`) and a message. In the REPL an error
-aborts the current form and prints a message; the session continues. There is no
-in-language error handling (`try`/`catch`) yet — see §11.
+`unbound`, `arity`, `type`, `runtime`, or `user` for `throw`) and a message. In
+the REPL an error aborts the current form and prints a message; the session
+continues.
+
+**Raising and handling.** `(throw v)` raises `v`. `(error msg ...)` raises a
+formatted message string. `(try body... (catch e handler...))` evaluates the
+body and, if anything raises, binds `e` and runs the handler. `e` is the thrown
+value for `throw`, or the error's message string for a built-in error (§simple
+by ADR-011). `throw` and the low-level `%try` are primitives; `try`/`catch` and
+`error` are macros/functions in the prelude.
 
 ## 11. Not yet specified (planned)
 
 The following are on the roadmap and intentionally absent from this version:
 
 - **Dynamic variables** (`defdyn` / `binding`).
-- **In-language error handling** (`try`/`catch`, `throw`).
 - **Map literals** `{ }` and map operations.
 - **Modules / namespaces** beyond the single global environment.
 - A **tracing GC** (the current `Rc` model leaks reference cycles).

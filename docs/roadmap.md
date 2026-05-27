@@ -12,6 +12,8 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started
 ## M1 — The language core
 
 A solid, self-editable Lisp. This is the foundation everything else stands on.
+The detailed Stage-1 completeness checklist ("what's left to be a full,
+standalone Lisp") lives in the top-level [`ROADMAP.md`](../ROADMAP.md).
 
 - ✅ Reader (text → values): numbers, strings, symbols, keywords, lists, vectors, `'` quote, comments
 - ✅ Value model with interned symbols; cons-cell lists
@@ -33,7 +35,8 @@ A solid, self-editable Lisp. This is the foundation everything else stands on.
   `&key` (named args) is designed but **deferred for simplicity** (ADR-011) —
   additive when the editor command API needs it.
 - ⬜ **Dynamic variables** (`defdyn` / `binding`) for editor config
-- ⬜ **Error handling** in-language (`try`/`catch`, `throw`)
+- ✅ **Error handling** — `throw` + `%try` primitives; `try`/`catch` + `error`
+  in the prelude (no new special forms — ADR-011)
 - ⬜ **Maps** (`{ }` literals, `get`/`assoc`)
 - ⬜ **Tracing GC** (`gc-arena`) to replace `Rc` before sessions get long-lived
 - 🟡 Nicer REPL — `rustyline` line editing (arrow keys, history, Emacs bindings)

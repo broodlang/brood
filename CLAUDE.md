@@ -83,6 +83,11 @@ cargo test -p mylisp --test basic # just the language tests
   When a feature has a simple form and a powerful-but-complex form, ship the
   simple one and defer the rest until a concrete need justifies it. Additive
   features cost nothing to delay; every knob is a tax on every user, forever.
+- **Keep the language as small as possible.** Minimize the *core* — special
+  forms and evaluator semantics — above all. When a feature can be a macro over
+  a primitive function instead of a new special form, do that (e.g. `try`/`catch`
+  is a macro over a `%try` primitive, not a special form). Primitives are just
+  Rust functions; special forms are language. Prefer adding the former.
 - **Symbols are interned `u32`s.** Compare with `==`; get the spelling via
   `value::symbol_name`.
 - **Truthiness:** only `nil` and `false` are falsy (`eval::truthy`).

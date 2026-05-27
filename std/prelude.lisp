@@ -129,3 +129,22 @@
     (list form acc)))
 (defmacro ->> (x & forms)
   (reduce thread-last-step x forms))
+
+;; ---- error handling ----
+;; The kernel gives us `throw` (raise) and `%try` (low-level catch). Everything
+;; user-facing — `error`, `try`/`catch` — is written here in mylisp.
+(defn last     (xs) (first (reverse xs)))
+(defn but-last (xs) (reverse (rest (reverse xs))))
+
+(defn error (& parts) (throw (apply str parts)))
+
+;; (try body... (catch e handler...)) => (%try (fn () body...) (fn (e) handler...))
+;; With no catch clause, it's just (do body...).
+(defmacro try (& body)
+  (let (clause (last body))
+    (if (and (pair? clause) (= (first clause) 'catch))
+      (let (init    (but-last body)
+            evar    (second clause)
+            handler (rest (rest clause)))
+        `(%try (fn () ~@init) (fn (~evar) ~@handler)))
+      `(do ~@body))))

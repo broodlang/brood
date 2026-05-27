@@ -139,6 +139,27 @@ evaluated in its place. Templates are written with quasiquote: `` `x `` quotes,
 > Note: nested quasiquote is not level-tracked yet, and macros are unhygienic
 > (use `gensym`). See spec §7.
 
+## Errors
+
+Raise with `throw` (any value) or `error` (a formatted message), and handle with
+`try`/`catch`:
+
+```clojure
+(try
+  (risky)
+  (catch e
+    (println "failed:" e)
+    :recovered))
+
+(throw :boom)                       ; raise an arbitrary value
+(error "bad index: " i)             ; raise a message string
+```
+
+`catch` binds `e` to the thrown value; for a built-in error (like division by
+zero) it binds the error's message string. A `try` with no `catch` is just a
+`do`. Under the hood `throw` and `%try` are primitives and `try`/`catch`/`error`
+are written in mylisp (`std/prelude.lisp`) — see [primitives.md](primitives.md).
+
 ## Builtins
 
 > **Where these live:** only a small primitive kernel is implemented in Rust

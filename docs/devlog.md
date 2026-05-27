@@ -145,3 +145,20 @@ parameter lists and the broader role of vectors:
 - Docs synced: `spec.md` §7.4 + §4, `language.md` (Parameter lists section,
   examples to list form), `README.md`, `roadmap.md`, `decisions.md`
   (ADR-010/011), `CLAUDE.md`.
+
+### Error handling (same day)
+
+- First wrote a kernel inventory (`docs/primitives.md`) at the user's request,
+  then added error handling under "the language must be as small as possible":
+  **+2 primitives, 0 new special forms.**
+- Kernel: `throw` (raise a value) and `%try` (call a thunk; on raise call a
+  handler). `LispError` gained a `payload: Option<Value>` and a `User` kind.
+- Prelude (mylisp): `error` (raise a formatted message), and `try`/`catch` as a
+  **macro** desugaring to `(%try (fn () body) (fn (e) handler))`; plus `last`
+  and `but-last` helpers it needs.
+- `catch` binds the thrown value, or — for built-in errors — the error's message
+  string (the simplest choice, ADR-011; structured errors can come with maps).
+- Tests: throw/catch, no-throw passthrough, built-in error caught as string,
+  `error`, no-catch `try`, uncaught propagation. 24/24 green.
+- Docs: `primitives.md` (proposal → implemented), `spec.md` §9/§10/§11,
+  `language.md` (Errors section), `roadmap.md`.

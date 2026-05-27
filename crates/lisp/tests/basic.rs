@@ -194,6 +194,28 @@ fn threading_macros() {
 }
 
 #[test]
+fn throw_and_catch() {
+    // a thrown value is rebound by catch
+    assert_eq!(run("(try (throw 42) (catch e e))"), "42");
+    assert_eq!(run("(try (throw :boom) (catch e (str \"caught \" e)))"), "\"caught :boom\"");
+    // no throw: the body's value is returned
+    assert_eq!(run("(try (+ 1 2) (catch e e))"), "3");
+    // a built-in error is caught as its message string
+    assert_eq!(run("(try (/ 1 0) (catch e (string? e)))"), "true");
+    // error: raise a formatted message
+    assert_eq!(run("(try (error \"nope: \" 5) (catch e e))"), "\"nope: 5\"");
+    // try with no catch clause is just a do
+    assert_eq!(run("(try 1 2 3)"), "3");
+}
+
+#[test]
+fn uncaught_throw_propagates() {
+    let interp = Interp::new();
+    assert!(interp.eval_str("(throw 1)").is_err());
+    assert!(interp.eval_str("(error \"boom\")").is_err());
+}
+
+#[test]
 fn errors_are_reported() {
     let interp = Interp::new();
     assert!(interp.eval_str("(+ 1 nope)").is_err());
