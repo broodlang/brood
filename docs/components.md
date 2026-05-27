@@ -17,7 +17,7 @@ one with e.g. *"do backlog item W2 from docs/components.md."*
 
 ```
                          ┌──────────────────────────── entry points ───────────────────────────┐
-                         │  crates/cli (the `brood` binary)      lib.rs  (the `Interp` API)      │
+                         │  crates/cli (`brood`)  crates/nest (`nest`)   lib.rs (`Interp` API)   │
                          └───────────────────────────────┬──────────────────────────────────────┘
                                                           │ embeds
    POLICY (Brood)  ─────────────────────────────────────▼────────────────────────────────────────
@@ -138,7 +138,7 @@ before working in any Rust component:
 
 ### `eval/mod.rs` — the evaluator · ~539 LOC
 - **Owns:** the `'tail: loop` tree-walker, **special forms** (`quote if do def
-  set! fn/lambda quasiquote defmacro let/let* while`), closure application,
+  fn/lambda quasiquote defmacro let/let*`), closure application,
   parameter binding (`&optional`/`& rest`), and the native-call arity gate.
 - **Depends on:** `heap`, `value`, `macros` (lazy expansion + `fn`/`let` lowering
   fallback), `printer`, `error`.
@@ -201,15 +201,26 @@ before working in any Rust component:
 - **Work here independently:** this is the contract embedders (and the CLI) use;
   keep it small.
 
-### `crates/cli/src/main.rs` — the `brood` binary · ~314 LOC
-- **Owns:** arg parsing (`-j`/`--max-parallel`), the file runner, the
-  `rustyline` interactive REPL + plain piped REPL, error rendering with a caret,
-  and the `test` / `new` subcommands.
+### `crates/cli/src/main.rs` — the `brood` language binary
+- **Owns:** arg parsing (`-j`/`--max-parallel`), the file runner, `--test`
+  (single-file in-language suite), `--version`, the `rustyline` interactive REPL
+  + plain piped REPL, and error rendering with a caret. Language only — no
+  project awareness.
 - **Depends on:** only `brood::Interp` (+ `error`, `process::set_max_parallel`)
   and `rustyline`. Cleanly decoupled from kernel internals.
-- **Work here independently:** the `test`/`new` subcommands drive Brood by
-  embedding source strings (`(require 'project) …`) — a deliberate bootstrap;
-  the roadmap goal is to move the REPL/CLI into Brood.
+- **Work here independently:** the roadmap goal is to move the REPL/CLI into
+  Brood.
+
+### `crates/nest/src/main.rs` — the `nest` project-tooling binary
+- **Owns:** the `new` / `test` subcommands and (later) `build`/`check`/config —
+  the `cargo`/`mix` half of the `rustc`/`cargo` split (ADR-027). `brood` runs the
+  language; `nest` runs the project.
+- **Depends on:** only `brood::Interp` (+ `error`, `process::set_max_parallel`).
+  No subprocess — it embeds the lib like `brood` does.
+- **Work here independently:** the subcommands are a *thin* shell that drives
+  Brood by embedding source strings (`(require 'project) …`); the policy lives in
+  `std/project.blsp`. A deliberate bootstrap — moving the tool into Brood is the
+  roadmap goal.
 
 ## Brood standard library (policy — redefinable at runtime)
 
@@ -233,8 +244,8 @@ before working in any Rust component:
 
 ### `std/project.blsp` — project model, runner, scaffolding · ~209 LOC
 - **Owns:** the `project.blsp` manifest, test discovery + `run-project-tests`,
-  the user config (`~/.config/brood/config.blsp`), and `brood new` scaffolding.
-  The policy behind the CLI's `test`/`new`.
+  the user config (`~/.config/brood/config.blsp`), and `nest new` scaffolding.
+  The policy behind `nest`'s `test`/`new`.
 - **Depends on:** the filesystem primitives + `test`. See ADR-020.
 
 ## Tests & benches
@@ -244,7 +255,7 @@ before working in any Rust component:
 - **`crates/lisp/tests/suite.rs`** (~21) — runs the in-language suite via the
   project runner from the repo root.
 - **`tests/**/*_test.blsp`** — the in-language suite (pattern matching, modules,
-  the main `suite_test.blsp`), discovered by `brood test` / the runner.
+  the main `suite_test.blsp`), discovered by `nest test` / the runner.
 - **`crates/lisp/benches/eval.rs`** — `divan` microbenchmarks; archived by
   `scripts/bench.sh` (see [the benchmarks dir](benchmarks/)).
 
@@ -292,9 +303,10 @@ before working in any Rust component:
    A wrong map is the single biggest blocker to working independently.
    *(Fixed alongside this doc.)*
 
-4. **CLI ↔ Brood string coupling (low priority).** `main.rs` embeds Brood
-   snippets for `test`/`new`. This is an acknowledged bootstrap (roadmap:
-   self-host the CLI in Brood); fine to leave until the language can express it.
+4. **`nest` ↔ Brood string coupling (low priority).** `crates/nest/src/main.rs`
+   embeds Brood snippets for `test`/`new`. This is an acknowledged bootstrap
+   (roadmap: self-host the tooling in Brood); fine to leave until the language
+   can express it.
 
 ## Work backlog (dispatchable)
 

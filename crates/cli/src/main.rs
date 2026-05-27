@@ -1,8 +1,15 @@
-//! The `brood` command-line tool.
+//! The `brood` command-line tool — the language binary.
+//!
+//! `brood` only runs the language; project tooling (scaffolding, test
+//! discovery, config) lives in the separate `nest` binary — the
+//! `rustc`/`cargo`, `elixir`/`mix` split (ADR-027).
 //!
 //! - With no arguments it starts a REPL.
 //! - With file arguments it loads and runs each file in order.
-//! - `test` runs the project's test suite; `new <name>` scaffolds a project.
+//! - `--test <file>...` loads each file (which registers its cases) and runs
+//!   the in-language suite once — a single-file test run, distinct from
+//!   `nest test`'s project-wide discovery.
+//! - `--version` prints the version.
 //! - `-j N` / `--max-parallel N` caps how many spawned processes run on OS
 //!   threads at once (0 = unlimited, the default). Useful for bounding a
 //!   concurrent test run; see `std/test.blsp`.
@@ -37,52 +44,49 @@ fn report_error(e: &LispError) {
     }
 }
 
+const HELP: &str = "\
+brood — the Brood language (the language half of the brood/nest split, ADR-028)
+
+usage:
+  brood                   start the REPL
+  brood <file>...         run each file in order
+  brood --test <file>...  run the file(s) as a single in-language test suite
+
+options:
+  -j, --max-parallel N    cap concurrent spawned processes (0 = unlimited)
+  -h, --help              print this help
+      --version           print the version
+
+For project tasks (scaffolding, project-wide test discovery) use `nest`.";
+
 fn main() {
-    let (files, max_parallel) = parse_args(std::env::args().skip(1).collect());
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+
+    if raw.iter().any(|a| a == "--help" || a == "-h") {
+        println!("{}", HELP);
+        return;
+    }
+
+    if raw.iter().any(|a| a == "--version" || a == "-V") {
+        println!("brood {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
+    // `--test <file>...` runs the files as a single in-language suite (load to
+    // register cases, then `(run-tests)` once). Project-wide discovery lives in
+    // `nest test`, not here. The flag is stripped before file parsing.
+    let test_mode = raw.iter().any(|a| a == "--test");
+    let raw: Vec<String> = raw.into_iter().filter(|a| a != "--test").collect();
+
+    let (files, max_parallel) = parse_args(raw);
     if let Some(n) = max_parallel {
         brood::process::set_max_parallel(n);
     }
 
     let mut interp = Interp::new();
 
-    // `brood test` — discover and run the current project's test suite (ADR-020).
-    // The runner (Brood, std/project.blsp) walks up from the cwd to `project.blsp`,
-    // loads every tests/**/*_test.blsp, and runs the whole suite once. It raises
-    // on failure, so a non-zero exit falls out of the eval error.
-    if files.first().map(String::as_str) == Some("test") {
-        // One output format — structured GNU `FILE:LINE:COL: message` blocks that
-        // humans, LLMs and editors (compilation-mode, flymake) all read; see
-        // `docs/tooling.md`.
-        let code = "(require 'project) (load-config) (run-project-tests)";
-        if let Err(e) = interp.eval_str(code) {
-            // A parse/eval error in a loaded test file carries its file:line:col.
-            report_error(&e);
-            std::process::exit(1);
-        }
-        return;
-    }
-
-    // `brood new <name>` — scaffold a new project (ADR-020): a folder with
-    // project.blsp + src/ + tests/ and starter files. The policy (name checks,
-    // templates) is in Brood (std/project.blsp); we just pass the name in,
-    // escaped so it can't break out of the string literal.
-    if files.first().map(String::as_str) == Some("new") {
-        let name = match files.get(1) {
-            Some(n) => n,
-            None => {
-                eprintln!("brood new: expected a project name, e.g. `brood new foobar`");
-                std::process::exit(2);
-            }
-        };
-        let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
-        let code = format!(
-            "(require 'project) (load-config) (new-project \"{}\")",
-            escaped
-        );
-        if let Err(e) = interp.eval_str(&code) {
-            report_error(&e);
-            std::process::exit(1);
-        }
+    if test_mode {
+        run_test_files(&mut interp, &files);
         return;
     }
 
@@ -143,6 +147,41 @@ fn parse_args(args: Vec<String>) -> (Vec<String>, Option<usize>) {
         i += 1;
     }
     (files, max_parallel)
+}
+
+/// `brood --test <file>...`: load each file (registering its cases via the
+/// `test` framework), then run the whole in-language suite once. Output is the
+/// same structured GNU `FILE:LINE:COL:` block per failure as `nest test`; see
+/// `docs/tooling.md`. This is a single-file run — for project-wide discovery
+/// (walk to `project.blsp`, load `tests/**/*_test.blsp`) use `nest test`.
+fn run_test_files(interp: &mut Interp, files: &[String]) {
+    if files.is_empty() {
+        eprintln!("brood --test: expected a file, e.g. `brood --test foo_test.blsp`");
+        std::process::exit(2);
+    }
+    // Ensure `run-tests` exists even if a file forgot to `(require 'test)`.
+    if let Err(e) = interp.eval_str("(require 'test)") {
+        report_error(&e);
+        std::process::exit(1);
+    }
+    for path in files {
+        match std::fs::read_to_string(path) {
+            Ok(src) => {
+                if let Err(e) = interp.eval_source(&src) {
+                    report_error(&e.or_file(path.clone()));
+                    std::process::exit(1);
+                }
+            }
+            Err(e) => {
+                eprintln!("brood: cannot read {}: {}", path, e);
+                std::process::exit(1);
+            }
+        }
+    }
+    if let Err(e) = interp.eval_str("(run-tests)") {
+        report_error(&e);
+        std::process::exit(1);
+    }
 }
 
 fn run_files(interp: &mut Interp, files: &[String]) {

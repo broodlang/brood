@@ -179,15 +179,8 @@
     (def isolated-only 99)
     (assert= isolated-only 99)))
 
-;; :isolated — this group spawns its own nested processes; run it alone so its
-;; concurrency is measured on its own, not contending with the other tests.
-(describe "processes" :isolated
-  ;; spawn a worker, send it a number, get back double — across OS threads.
-  (test "spawn / send / receive round-trip"
-    (defn echo-double (parent) (send parent (* (receive) 2)))
-    (let (w (spawn echo-double (self)))
-      (send w 21)
-      (assert= (receive) 42))))
+;; Process spawning, message passing, selective receive, timeouts, and scheduler
+;; fairness/preemption live in their own suite: tests/concurrency_test.blsp.
 
 ;; Parallel by default; the :serial / :isolated groups above opt out as needed.
 ;;

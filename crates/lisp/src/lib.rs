@@ -19,19 +19,19 @@
 // reads as the architecture.
 
 pub mod core; // substrate: value, heap, alloc — what everything is addressed through
-pub mod syntax; // surface: reader (text to Value) + printer (Value to text)
 pub mod eval; // the tree-walking evaluator + its macro / compile pass
+pub mod syntax; // surface: reader (text to Value) + printer (Value to text)
 pub mod types; // the advisory type lattice + checker (nothing gates on it)
 
+pub mod builtins;
 pub mod error; // errors + source positions (cross-cutting)
-pub mod process; // the green-process scheduler
-pub mod builtins; // the primitive kernel (Rust mechanism; policy lives in std/*.blsp)
+pub mod process; // the green-process scheduler // the primitive kernel (Rust mechanism; policy lives in std/*.blsp)
 
 use std::sync::{Arc, LazyLock};
 
-use error::LispError;
 use core::heap::{Heap, RuntimeCode, SharedCode};
 use core::value::{EnvId, Symbol, Value};
+use error::LispError;
 
 /// The shared code region (prelude closures, code data, builtins) plus the
 /// global bindings to seed each process's global env. Built once, lazily.

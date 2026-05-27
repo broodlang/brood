@@ -62,19 +62,26 @@ crates/lisp/src/
   printer.rs   Value -> text
   error.rs     LispError / LispResult
   lib.rs       the `Interp` entry point; bundles std/prelude.blsp
-crates/cli/src/main.rs   the `brood` binary (REPL + file runner)
+crates/cli/src/main.rs   the `brood` binary — the language (REPL, file runner, `--test`)
+crates/nest/src/main.rs  the `nest` binary — project tooling (`new`, `test`, config) — ADR-028
 std/prelude.blsp         standard library written in Brood
 docs/                    architecture, language, roadmap, decisions, devlog
 ```
+
+The CLI is split (ADR-028, the `rustc`/`cargo` model): **`brood` runs the
+language**, **`nest` runs the project**. Both embed the `brood` lib (no
+subprocess); `nest` is a thin shell over `std/project.blsp`.
 
 ## Commands
 
 ```bash
 cargo build                       # build the workspace
-cargo test                        # Rust tests + the Brood suite (tests/suite.blsp)
+cargo test                        # Rust tests + the Brood suite
 cargo run -p cli                  # start the REPL  (or: ./bin/cli)
 cargo run -p cli file.blsp        # run a program file
-./bin/cli tests/suite.blsp        # the in-language test suite (does (require 'test))
+cargo run -p cli -- --test f.blsp # run one self-contained test file
+cargo run -p nest -- test         # discover + run the project's test suite
+cargo run -p nest -- new foo      # scaffold a new project
 ```
 
 Cargo is the source of truth; a thin **`Makefile`** wraps the common commands as
@@ -126,6 +133,20 @@ surface it and ask — don't reset to "fix" it.
 - **Symbols are interned `u32`s.** Compare with `==`; get the spelling via
   `value::symbol_name`.
 - **Truthiness:** only `nil` and `false` are falsy (`eval::truthy`).
+- **Brood is an immutable language** (ADR-026; `docs/language.md` §Immutability).
+  Data is immutable — there are **no data-mutation primitives** (no `set-car!`,
+  `vector-set!`, `string-set!`, no atoms/cells) and none may be added; every
+  builtin returns a fresh `Value` rather than mutating one. `let`/`fn` bindings
+  never change after creation. The language's **only** mutation is `def`
+  rebinding a *global* — binding mutation, not data mutation, and load-bearing for
+  Erlang-style hot reload (ADR-013). There is **no `set!` and no `while`**: loops
+  are recursion (proper tail calls give O(1) stack) or, for evolving state,
+  processes (`spawn`/`receive`). Genuine mutable state is expressed only two ways
+  — a **process** holding state in its loop, or a **Rust-backed opaque resource
+  handle** (e.g. the coming rope/buffer) behind primitives — never a mutable
+  `Value`. Don't reintroduce mutation to make something convenient; it underpins
+  the tracing GC (no write barriers), `Send` per-process heaps + copy-on-send
+  messages, and the append-only shared `RUNTIME` region.
 - **Types are set-theoretic, gradual, and advisory** (ADR-023/024;
   `docs/types.md`). A type *is* a set of runtime `Tag`s; subtyping is set
   inclusion; redefinable globals are `dynamic()`, never `Any`; checking never

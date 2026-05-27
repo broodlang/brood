@@ -1,9 +1,10 @@
 //! The reader: turns source text into [`Value`]s. It allocates pairs/vectors/
 //! strings, so it threads `&mut Heap`.
 
-use crate::error::{LispError, Pos};
 use crate::core::heap::Heap;
 use crate::core::value::{self, Value};
+use crate::error::{LispError, Pos};
+use crate::syntax::atom::{self, AtomKind};
 
 /// Read every form in `src`.
 pub fn read_all(heap: &mut Heap, src: &str) -> Result<Vec<Value>, LispError> {
@@ -135,7 +136,7 @@ impl<'a> Parser<'a> {
             '(' => self.read_seq(')'),
             '[' => self.read_vector(),
             ')' | ']' | '}' => Err(self.err(format!("unexpected '{}'", c))),
-            '{' => Err(self.err("map literals '{ }' are not supported yet")),
+            '{' => self.read_map(),
             '\'' => self.read_wrapped("quote"),
             '`' => self.read_wrapped("quasiquote"),
             '~' => {
@@ -214,7 +215,7 @@ impl<'a> Parser<'a> {
     fn is_dot_separator(&self) -> bool {
         self.chars
             .get(self.pos + 1)
-            .is_none_or(|&c| is_delimiter(c))
+            .is_none_or(|&c| atom::is_delimiter(c))
     }
 
     fn read_vector(&mut self) -> Result<Value, LispError> {
@@ -233,6 +234,43 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(self.heap.alloc_vector(items))
+    }
+
+    /// Read a map literal `{ k v k v … }`. Keys and values are read as
+    /// (unevaluated) forms in source order; the evaluator evaluates them and
+    /// canonicalises (last-wins dedup). Commas are whitespace, so
+    /// `{:a 1, :b 2}` reads the same as `{:a 1 :b 2}`.
+    fn read_map(&mut self) -> Result<Value, LispError> {
+        let start = self.pos_at(self.pos); // position of the opening '{'
+        self.pos += 1; // '{'
+        let mut pairs = Vec::new();
+        loop {
+            self.skip_trivia();
+            match self.peek() {
+                None => return Err(self.err_at(start, "unclosed map (opened here)")),
+                Some('}') => {
+                    self.pos += 1;
+                    break;
+                }
+                Some(_) => {
+                    let key = self.read_form()?;
+                    self.skip_trivia();
+                    match self.peek() {
+                        Some('}') | None => {
+                            return Err(self.err_at(
+                                start,
+                                "map literal has an odd number of forms (each key needs a value)",
+                            ))
+                        }
+                        Some(_) => {
+                            let val = self.read_form()?;
+                            pairs.push((key, val));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(self.heap.alloc_map(pairs))
     }
 
     fn read_string(&mut self) -> Result<Value, LispError> {
@@ -262,7 +300,7 @@ impl<'a> Parser<'a> {
     fn read_atom(&mut self) -> Result<Value, LispError> {
         let start = self.pos;
         while let Some(c) = self.peek() {
-            if is_delimiter(c) {
+            if atom::is_delimiter(c) {
                 break;
             }
             self.pos += 1;
@@ -272,50 +310,18 @@ impl<'a> Parser<'a> {
     }
 }
 
-fn is_delimiter(c: char) -> bool {
-    c.is_whitespace()
-        || matches!(
-            c,
-            '(' | ')' | '[' | ']' | '{' | '}' | '"' | ';' | '\'' | '`' | '~' | ','
-        )
-}
-
-/// Classify an atom token (no heap needed — atoms are numbers/symbols/keywords).
+/// Classify an atom token into a `Value`, interning symbols/keywords. The
+/// lexical decision (number? keyword? symbol?) is shared with the CST via
+/// [`atom::classify`], so the two parsers agree on what a token is (ADR-025).
 fn classify(token: &str) -> Value {
-    match token {
-        "nil" => return Value::Nil,
-        "true" => return Value::Bool(true),
-        "false" => return Value::Bool(false),
-        _ => {}
+    match atom::classify(token) {
+        AtomKind::Nil => Value::Nil,
+        AtomKind::Bool(b) => Value::Bool(b),
+        AtomKind::Int(i) => Value::Int(i),
+        AtomKind::Float(f) => Value::Float(f),
+        // `atom::classify` only returns `Keyword` for a non-empty `:`-prefixed
+        // token, so dropping the `:` always leaves a non-empty name.
+        AtomKind::Keyword => value::kw(&token[1..]),
+        AtomKind::Symbol => value::sym(token),
     }
-    if let Ok(i) = token.parse::<i64>() {
-        return Value::Int(i);
-    }
-    if looks_numeric(token) {
-        if let Ok(f) = token.parse::<f64>() {
-            return Value::Float(f);
-        }
-    }
-    if let Some(rest) = token.strip_prefix(':') {
-        if !rest.is_empty() {
-            return value::kw(rest);
-        }
-    }
-    value::sym(token)
-}
-
-fn looks_numeric(token: &str) -> bool {
-    let mut chars = token.chars();
-    let first = match chars.next() {
-        Some(c) => c,
-        None => return false,
-    };
-    if !(first.is_ascii_digit()
-        || ((first == '-' || first == '+' || first == '.') && token.len() > 1))
-    {
-        return false;
-    }
-    token
-        .chars()
-        .all(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E'))
 }

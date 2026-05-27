@@ -4,11 +4,12 @@ This describes the language **as implemented today**. Anything not listed here
 does not exist yet — see [roadmap.md](roadmap.md) for what's coming (macros,
 quasiquote, dynamic variables, error handling, maps, …).
 
-Brood is a dynamically-typed **Lisp-1** (one namespace for functions and
-variables, like Scheme/Clojure) with **lexical scoping** and **proper tail
-calls**. The flavour is "clean and modern": code is made of lists (so parameter
-lists are lists), `[...]` vectors are a data type, with Clojure-style
-truthiness and `def`/`defn`/`fn`.
+Brood is a dynamically-typed, **immutable** **Lisp-1** (one namespace for
+functions and variables, like Scheme/Clojure) with **lexical scoping** and
+**proper tail calls**. The flavour is "clean and modern": code is made of lists
+(so parameter lists are lists), `[...]` vectors are a data type, with
+Clojure-style truthiness and `def`/`defn`/`fn`. Data never changes once made and
+there is no local mutation — see [Immutability](#immutability).
 
 For the precise, normative version of everything here — grammar, evaluation
 rules, scoping — see [spec.md](spec.md).
@@ -60,6 +61,43 @@ be guessed from Clojure; it has to be read.
 Only `nil` and `false` are falsy. **Everything else is truthy**, including `0`,
 `""`, and empty collections.
 
+## Immutability
+
+**Brood is an immutable language.** Once a value exists, nothing changes it; once
+a binding is made, it never changes. Concretely:
+
+- **Data is immutable.** There are **no data-mutation primitives** — no
+  `set-car!`, `vector-set!`, `string-set!`, no atoms, refs, or cells. Operations
+  like `cons`, `assoc`, `conj`, and `append` return a **fresh** value and leave
+  their inputs untouched. Strings, lists, and vectors are read-only after
+  construction.
+- **Local bindings never change.** A `let` or `fn` binding is fixed for the life
+  of its frame — there is no `set!` to rebind it.
+- **The one mutation is `def`.** `def` rebinds a name in the **global**
+  environment (even when written inside a function). This is *binding* mutation,
+  not data mutation, and it exists for one reason: **live redefinition / hot
+  reload** — the project's north star (ADR-013). A running process sees a `def`'d
+  change on its next global lookup.
+- **No imperative loop.** There is no `while` (and nothing to make it progress
+  without mutation). Iteration is **recursion** — proper tail calls give O(1)
+  stack — or, for state that must evolve over time, a **process** (`spawn` /
+  `receive`) that carries the state through its own loop.
+- **Mutable state, when truly needed, is never a mutable `Value`.** It takes one
+  of two shapes: a **process** holding evolving state in its receive-loop (the
+  Erlang model), or a **Rust-backed opaque resource handle** exposed through
+  primitives (e.g. the coming rope/buffer, like a file handle) — mutation hidden
+  behind the kernel, never aliasable Lisp data.
+
+**Why it pays off.** Immutability removes the entire shared-mutable-aliasing bug
+class and reinforces every other pillar of the system: the tracing GC needs no
+write barriers or mutable roots; per-process heaps are trivially `Send` with
+copy-on-send messages and no aliasing hazards; the shared `RUNTIME` code region
+can be append-only; and it keeps the safe-Rust guardrail (ADR-001) honest. It
+also shrinks the core — two fewer special forms (`set!`, `while`). See
+[ADR-026](decisions.md) for the full rationale and trade-offs (e.g. repeated
+immutable `assoc`/`append` is O(n²); `reduce`/`fold` and future persistent
+structures are the mitigations).
+
 ## Syntax
 
 - `;` starts a line comment.
@@ -79,11 +117,9 @@ eagerly). They are reserved names.
 | `(quote x)` / `'x` | `x`, unevaluated. |
 | `(if test then else?)` | Evaluate `then` if `test` is truthy, else `else` (or `nil`). |
 | `(do body...)` | Evaluate forms in order; result is the last. |
-| `(def name value)` | Define/redefine `name` in the **global** environment. |
-| `(set! name value)` | Mutate the nearest existing binding of `name`. |
+| `(def name value)` | Define/redefine `name` in the **global** environment — redefinable, the language's only mutation. |
 | `(fn (params) body...)` | A lexical closure. `lambda` is an alias. |
 | `(let (a 1 b 2) body...)` | Sequential local bindings (each sees the previous). `let*` is an alias. |
-| `(while test body...)` | Loop while `test` is truthy; returns `nil`. |
 | `` (quasiquote tmpl) `` / `` `tmpl `` | Template: literal except `~x` inserts a value and `~@xs` splices a sequence. |
 | `(defmacro name (params) body...)` | Define a macro (see below). |
 
@@ -92,8 +128,10 @@ eagerly). They are reserved names.
 compile pass (ADR-022) — so the evaluator's core stays minimal and they cost
 nothing extra at runtime. `cond` is still flat test/expr pairs with `else`/`:else`
 as the catch-all (ADR-004); `and`/`or` short-circuit left-to-right and return the
-deciding value, each subexpression evaluated once. `while` is the lone iteration
-special form (no named-`let` to express it as a macro yet).
+deciding value, each subexpression evaluated once. There is **no iteration special
+form**: data is immutable and there is no local mutation (ADR-026), so loops are
+expressed as recursion (proper tail calls make this O(1) stack) — or, for evolving
+state, as processes (`spawn`/`receive`).
 
 ### Parameter lists
 
@@ -127,6 +165,34 @@ position, but lists are idiomatic). A list has three optional sections, in order
 Arity is strict: too few required args, or too many when there's no `& rest`, is
 an error. Named (`&key`) arguments are designed but not in this version — see
 spec §7.4.
+
+### Docstrings
+
+A string literal as the **first body form** of a `fn`/`defn`/`defmacro` is a
+**docstring** — *when more body follows it*. A function whose body is a lone
+string returns that string (the CL/Elisp rule), so it isn't documentation:
+
+```clojure
+(defn square (x)
+  "Return x times itself."   ; docstring (more body follows)
+  (* x x))
+
+(doc square)                 ;=> "Return x times itself."
+
+(defn greeting (who) "hello") ; lone string → return value, NOT a docstring
+(doc greeting)                ;=> nil
+(greeting 'x)                 ;=> "hello"
+```
+
+The docstring is stored on the closure and read with `(doc f)` (below); it
+powers editor hover / `describe-function` (see `docs/lsp.md`).
+
+A **module** documents itself the same way: a string literal as a file's
+**first top-level form** is the module's docstring (the file-level analogue of
+the function rule). Loading the file discards it harmlessly; the doc tooling
+reads it from source. `nest doc <module>` renders both — the module docstring
+and every definition's signature + docstring — as Markdown (see
+`docs/tooling.md`).
 
 ### Recursion is the loop
 
@@ -283,12 +349,17 @@ wanted, and the tag + printed form of what actually arrived — e.g.
 
 ## Processes (concurrency)
 
-Erlang-style green-ish processes: each runs independently with its **own heap**
-(share-nothing), and they communicate only by **message passing**.
+Erlang-style **green processes**: cheap, lightweight, share-nothing (each runs
+with its **own data heap**), communicating only by **message passing**. They run
+on a small pool of worker threads (≈ one per core, or the CLI's `-j N`), so they
+use every core; scheduling is **preemptively fair** — a CPU-bound process yields
+its worker after a reduction budget, so one busy loop can't freeze the runtime.
+Code is shared, data is not: a spawned function sees every `def` (and live
+redefinitions — ADR-013), but messages cross as deep copies.
 
 ```clojure
 (defn worker (parent)
-  (let (n (receive))          ; block until a message arrives
+  (let (n (receive))          ; suspend until a message arrives
     (send parent (* n 2))))   ; reply to the sender
 
 (def w (spawn worker (self))) ; start a process; (self) is our own pid
@@ -298,19 +369,46 @@ Erlang-style green-ish processes: each runs independently with its **own heap**
 
 | Form | Meaning |
 |---|---|
-| `(spawn f arg...)` | Start a new process running `f` with the (copied) args; returns its pid. |
+| `(spawn f arg...)` | Start a new green process running `f` with the (copied) args; returns its pid. |
 | `(send pid msg)` | Copy `msg` into `pid`'s mailbox (non-blocking; sending to a dead pid is a no-op). |
-| `(receive)` | Take the next message from your own mailbox, blocking until one arrives. |
+| `(receive clause...)` | Take the first matching message (see below); suspend until one arrives. `(receive)` with no clauses takes the next message. |
 | `(self)` | Your own pid. |
-| `(spawn-count)` | How many processes have been spawned since the program started (= worker OS threads created). |
-| `(peak-threads)` | High-water mark of spawned threads running at once (bounded by the CLI's `-j N` concurrency cap). |
+| `(spawn-count)` | How many green processes have been spawned since the program started. |
+| `(peak-threads)` | High-water mark of processes running *simultaneously* (bounded by the worker pool). |
+| `(worker-threads)` | Size of the worker-thread pool (≈ `nproc`, or `-j N`). |
+
+### Selective receive
+
+`receive` takes **pattern clauses** — the same grammar as `match`/`fn`
+([Pattern matching](#pattern-matching)). It scans the mailbox in order, runs the
+**first message that matches any clause**, and leaves non-matching messages
+queued for a later `receive` (true Erlang selective receive — no head-of-line
+blocking). Clauses may carry a `:when` guard.
+
+```clojure
+(receive
+  ([:say text]      (println text))     ; clause = (pattern [:when guard] body...)
+  ([:add a b]       (+ a b))
+  (n :when (int? n) (handle-int n)))
+```
+
+An optional trailing **`(after ms body...)`** clause bounds the wait: if no
+message matches within `ms` milliseconds, `body` runs instead. `(after 0 …)` is a
+non-blocking poll. Because the timeout body is ordinary code, a timeout is
+**catchable** — throw from it and catch with `try`/`catch` (Erlang's idiom):
+
+```clojure
+(try
+  (receive ([:pong] :ok)
+           (after 5000 (throw [:timeout])))   ; raise a structured, catchable value
+  (catch e e))                                 ;=> [:timeout] on timeout
+```
 
 Messages are **copied** between processes (data only — you can't send a
-function). Today each process is backed by an OS thread, and a spawned function
-sees only the prelude/builtins plus its arguments (shared user code is a planned
-follow-up). Because each process is one OS thread, `(spawn-count)` doubles as the
-worker-thread count — the test runner uses it to report how much concurrency a
-run used. See [concurrency.md](concurrency.md) for the model and limitations.
+function; send a symbol naming one, since code is shared). `receive` is a macro
+over the `%receive` primitive, built on the `match` compiler — no new special
+form. See [concurrency.md](concurrency.md) and [scheduler.md](scheduler.md) for
+the model, and [pattern-matching.md](pattern-matching.md) for the clause grammar.
 
 ## Builtins
 
@@ -400,6 +498,23 @@ for the test framework) — works from any directory.
 
 These three are the seed of "edit the system while it runs": read code, evaluate
 it into the live environment, replace definitions.
+
+### Introspection (editor tooling)
+`doc`  `arglist`  `global-names`  `bound?`
+
+For self-description — the substrate an editor (and the planned language server,
+`docs/lsp.md`) reads for hover, signature help, completion, and "is this name
+known?". All derive from runtime state, so they stay correct as the program is
+redefined.
+
+```clojure
+(defn add (a b & more) "Sum the arguments." (reduce + (+ a b) more))
+(doc add)              ;=> "Sum the arguments."
+(arglist add)          ;=> (a b & more)        ; mirrors the source surface
+(bound? 'add)          ;=> true   (quote the name; bound? takes a symbol)
+(bound? 'no-such)      ;=> false
+(member? 'map (global-names))  ;=> true        ; every global, for completion
+```
 
 ## Prelude
 

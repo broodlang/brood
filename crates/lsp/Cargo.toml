@@ -1,0 +1,20 @@
+[package]
+name = "brood-lsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Language server (LSP) for Brood — syntactic diagnostics off the tooling CST."
+
+[[bin]]
+name = "brood-lsp"
+path = "src/main.rs"
+
+[dependencies]
+brood = { path = "../lisp" }
+# The synchronous LSP stack rust-analyzer uses (no tokio). `Interp`/`Heap` is
+# single-threaded-per-process, so a blocking request loop owning the document
+# store sidesteps all Send/Sync friction. See docs/lsp.md.
+lsp-server = "0.7"
+lsp-types = "0.97"
+serde_json = "1"

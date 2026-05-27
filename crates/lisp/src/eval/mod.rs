@@ -10,9 +10,9 @@ pub mod macros;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use crate::error::{LispError, LispResult};
 use crate::core::heap::Heap;
 use crate::core::value::{self, Closure, ClosureId, EnvId, NativeId, Symbol, Value};
+use crate::error::{LispError, LispResult};
 
 /// Truthiness: only `nil` and `false` are falsy.
 pub fn truthy(v: Value) -> bool {
@@ -30,14 +30,12 @@ const SPECIAL_NAMES: &[&str] = &[
     "if",
     "do",
     "def",
-    "set!",
     "fn",
     "lambda",
     "quasiquote",
     "defmacro",
     "let",
     "let*",
-    "while",
 ];
 
 static SPECIAL_IDS: LazyLock<HashMap<Symbol, &'static str>> = LazyLock::new(|| {
@@ -57,6 +55,11 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
     let mut env = env;
 
     'tail: loop {
+        // Reduction-counted preemption: bound the work a process does before it
+        // yields its worker (fairness — a CPU-bound process can't monopolise a
+        // core). A cheap thread-local decrement; a no-op for the root thread. See
+        // `process::tick`.
+        crate::process::tick();
         match expr {
             Value::Sym(s) => {
                 return heap.env_get(env, s).ok_or_else(|| {
@@ -70,6 +73,18 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     out.push(eval(heap, item, env)?);
                 }
                 return Ok(heap.alloc_vector(out));
+            }
+            Value::Map(id) => {
+                // A map literal evaluates each key and value, then canonicalises
+                // (last-wins on equal keys). Like a vector literal, but in pairs.
+                let entries = heap.map(id).to_vec();
+                let mut pairs = Vec::with_capacity(entries.len());
+                for (k, v) in entries {
+                    let k = eval(heap, k, env)?;
+                    let v = eval(heap, v, env)?;
+                    pairs.push((k, v));
+                }
+                return Ok(heap.map_from_pairs(pairs));
             }
             Value::Pair(_) => {} // combination, handled below
             _ => return Ok(expr),
@@ -123,22 +138,6 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     let root = heap.env_root(env);
                     heap.env_define(root, name, val);
                     return Ok(Value::Sym(name));
-                }
-                "set!" => {
-                    let args = heap.list_to_vec(rest)?;
-                    let name = as_symbol(
-                        args.first()
-                            .copied()
-                            .ok_or_else(|| LispError::runtime("set!: missing name"))?,
-                    )?;
-                    let val = eval(heap, nth(&args, 1), env)?;
-                    if heap.env_set(env, name, val) {
-                        return Ok(val);
-                    }
-                    return Err(LispError::unbound(format!(
-                        "set!: cannot set undefined symbol '{}'",
-                        value::symbol_name(name)
-                    )));
                 }
                 "fn" | "lambda" => {
                     // Fallback: a multi-clause / pattern-parameter `fn` normally
@@ -213,24 +212,6 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                         }
                         None => return Ok(Value::Nil),
                     }
-                }
-                "while" => {
-                    let args = heap.list_to_vec(rest)?;
-                    let test = nth(&args, 0);
-                    let body: Vec<Value> = if args.len() > 1 {
-                        args[1..].to_vec()
-                    } else {
-                        Vec::new()
-                    };
-                    loop {
-                        if !truthy(eval(heap, test, env)?) {
-                            break;
-                        }
-                        for &f in &body {
-                            eval(heap, f, env)?;
-                        }
-                    }
-                    return Ok(Value::Nil);
                 }
                 _ => {}
             }
@@ -319,7 +300,11 @@ fn bind_params(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> Result<EnvId, 
             .name
             .map(value::symbol_name)
             .unwrap_or_else(|| "fn".to_string());
-        let max = if has_rest { None } else { Some(required + n_opt) };
+        let max = if has_rest {
+            None
+        } else {
+            Some(required + n_opt)
+        };
         return Err(LispError::arity(arity_message(
             &who,
             required,
@@ -390,7 +375,18 @@ fn make_closure(heap: &mut Heap, name: Option<Symbol>, rest: Value, env: EnvId) 
         .copied()
         .ok_or_else(|| LispError::runtime("fn: missing parameter list"))?;
     let (params, optionals, rest_param) = parse_params(heap, param_form)?;
-    let body = parts[1..].to_vec();
+    let mut body = parts[1..].to_vec();
+    // A leading string literal is a docstring *only when more body follows* —
+    // a function whose body is a lone string returns that string (CL/Elisp
+    // rule). Strip it out so it isn't evaluated for effect each call.
+    let doc = match body.first() {
+        Some(&Value::Str(id)) if body.len() > 1 => {
+            let d = heap.string(id).to_string();
+            body.remove(0);
+            Some(d)
+        }
+        _ => None,
+    };
     // A closure defined at the global (parent-less) scope captures the env
     // symbolically (`None`), so it works in any process; otherwise it captures
     // its specific enclosing scope.
@@ -401,6 +397,7 @@ fn make_closure(heap: &mut Heap, name: Option<Symbol>, rest: Value, env: EnvId) 
         optionals,
         rest: rest_param,
         body,
+        doc,
         env: captured,
     });
     Ok(Value::Fn(id))
@@ -411,16 +408,9 @@ fn make_closure(heap: &mut Heap, name: Option<Symbol>, rest: Value, env: EnvId) 
 type ParamSpec = (Vec<Symbol>, Vec<(Symbol, Value)>, Option<Symbol>);
 
 fn parse_params(heap: &Heap, form: Value) -> Result<ParamSpec, LispError> {
-    let items = match form {
-        Value::Vector(id) => heap.vector(id).to_vec(),
-        Value::Pair(_) => heap.list_to_vec(form)?,
-        Value::Nil => Vec::new(),
-        _ => {
-            return Err(LispError::type_err(
-                "parameter list must be a list (x y) or vector [x y]",
-            ))
-        }
-    };
+    let items = heap.seq_items(form).map_err(|_| {
+        LispError::type_err("parameter list must be a list (x y) or vector [x y]")
+    })?;
 
     let mut required = Vec::new();
     let mut optionals = Vec::new();
@@ -472,10 +462,7 @@ fn parse_optional(heap: &Heap, form: Value) -> Result<(Symbol, Value), LispError
     match form {
         Value::Sym(s) => Ok((s, Value::Nil)),
         Value::Pair(_) | Value::Vector(_) => {
-            let parts = match form {
-                Value::Vector(id) => heap.vector(id).to_vec(),
-                _ => heap.list_to_vec(form)?,
-            };
+            let parts = heap.seq_items(form)?;
             let name = as_symbol(
                 parts
                     .first()
@@ -509,14 +496,9 @@ fn as_symbol(v: Value) -> Result<Symbol, LispError> {
 }
 
 fn as_binding_vec(heap: &Heap, v: Value) -> Result<Vec<Value>, LispError> {
-    match v {
-        Value::Pair(_) => heap.list_to_vec(v),
-        Value::Vector(id) => Ok(heap.vector(id).to_vec()),
-        Value::Nil => Ok(Vec::new()),
-        _ => Err(LispError::type_err(
-            "let bindings must be a list (a 1 b 2) or vector [a 1 b 2]",
-        )),
-    }
+    heap.seq_items(v).map_err(|_| {
+        LispError::type_err("let bindings must be a list (a 1 b 2) or vector [a 1 b 2]")
+    })
 }
 
 /// Evaluate all-but-last of `items[from..]` for effect; return the tail form.

@@ -5,10 +5,10 @@
 //! `%`-prefixed names are low-level primitives not meant to be called directly.
 //! The annotated list is in `docs/primitives.md`.
 
-use crate::error::{ErrorKind, LispError, LispResult};
-use crate::eval::apply;
 use crate::core::heap::Heap;
 use crate::core::value::{self, Arity, EnvId, NativeFn, NativeFnPtr, Value};
+use crate::error::{ErrorKind, LispError, LispResult};
+use crate::eval::apply;
 use crate::syntax::{printer, reader};
 
 /// Install the primitive kernel into `root`.
@@ -83,6 +83,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "list-dir", Arity::exact(1), list_dir);
     def(heap, "make-dir", Arity::exact(1), make_dir);
     def(heap, "spit", Arity::exact(2), spit);
+    def(heap, "slurp", Arity::exact(1), slurp);
 
     // system / environment
     def(heap, "getenv", Arity::exact(1), getenv);
@@ -100,6 +101,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "form-pos", Arity::exact(1), form_pos);
     def(heap, "current-file", Arity::exact(0), current_file);
 
+    // introspection (editor tooling; see docs/lsp.md) — derive what we can from
+    // the bound value (arglist, doc); enumerate the global table for completion.
+    def(heap, "doc", Arity::exact(1), doc);
+    def(heap, "arglist", Arity::exact(1), arglist);
+    def(heap, "global-names", Arity::exact(0), global_names);
+    def(heap, "bound?", Arity::exact(1), bound_p);
+
     // errors / control
     def(heap, "throw", Arity::exact(1), throw);
     def(heap, "%try", Arity::exact(2), try_catch);
@@ -108,7 +116,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // processes (concurrency)
     def(heap, "spawn", Arity::at_least(1), spawn);
     def(heap, "send", Arity::exact(2), send);
-    def(heap, "receive", Arity::exact(0), receive);
+    def(heap, "%receive", Arity::exact(3), receive_match);
     def(heap, "self", Arity::exact(0), self_pid);
     def(heap, "spawn-count", Arity::exact(0), spawn_count);
     def(heap, "peak-threads", Arity::exact(0), peak_threads);
@@ -443,6 +451,7 @@ fn eval_string(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
 const EMBEDDED_MODULES: &[(&str, &str)] = &[
     ("test", include_str!("../../../std/test.blsp")),
     ("project", include_str!("../../../std/project.blsp")),
+    ("docs", include_str!("../../../std/docs.blsp")),
 ];
 
 /// `(%builtin-module name)` — the source of a baked-in std module as a string, or
@@ -548,7 +557,7 @@ fn list_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 }
 
 /// `(make-dir path)` — create `path` and any missing parents (like `mkdir -p`).
-/// Returns nil. Used by the project scaffolder (`brood new`).
+/// Returns nil. Used by the project scaffolder (`nest new`).
 fn make_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "make-dir", arg(args, 0))?;
     std::fs::create_dir_all(&path)
@@ -572,6 +581,16 @@ fn spit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     std::fs::write(&path, content)
         .map_err(|e| LispError::runtime(format!("spit: {}: {}", path, e)))?;
     Ok(Value::Nil)
+}
+
+/// `(slurp path)` — read the whole file at `path` and return it as a string. The
+/// read-side counterpart to `spit`; unlike `load` it does not evaluate, so the
+/// doc tooling can inspect a module's source (e.g. its leading docstring form).
+fn slurp(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "slurp", arg(args, 0))?;
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| LispError::runtime(format!("slurp: {}: {}", path, e)))?;
+    Ok(heap.alloc_string(&content))
 }
 
 /// `(getenv name)` — the value of environment variable `name` as a string, or nil
@@ -676,6 +695,72 @@ fn current_file(_args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
     }
 }
 
+// ---------- introspection (editor tooling; see docs/lsp.md) ----------
+
+/// `(doc f)` — the docstring of a function or macro value, or `nil`. A docstring
+/// is the leading string literal in a `fn`/`defn` body (stored on the closure
+/// when more body follows it). Powers hover / `describe-function`.
+fn doc(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let text = match arg(args, 0) {
+        Value::Fn(id) | Value::Macro(id) => heap.closure(id).doc.clone(),
+        _ => None,
+    };
+    match text {
+        Some(s) => Ok(heap.alloc_string(&s)),
+        None => Ok(Value::Nil),
+    }
+}
+
+/// `(arglist f)` — the parameter list of a function or macro as a list, mirroring
+/// the source surface: required names, then `&optional` names, then `& rest`.
+/// `nil` for a non-function. Feeds signature help / hover.
+fn arglist(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let id = match arg(args, 0) {
+        Value::Fn(id) | Value::Macro(id) => id,
+        _ => return Ok(Value::Nil),
+    };
+    // Copy the parts out before re-borrowing the heap mutably to build the list.
+    let (params, optionals, rest) = {
+        let cl = heap.closure(id);
+        (
+            cl.params.clone(),
+            cl.optionals.iter().map(|&(s, _)| s).collect::<Vec<_>>(),
+            cl.rest,
+        )
+    };
+    let mut items: Vec<Value> = params.into_iter().map(Value::Sym).collect();
+    if !optionals.is_empty() {
+        items.push(value::sym("&optional"));
+        items.extend(optionals.into_iter().map(Value::Sym));
+    }
+    if let Some(r) = rest {
+        items.push(value::sym("&"));
+        items.push(Value::Sym(r));
+    }
+    Ok(heap.list(items))
+}
+
+/// `(global-names)` — a list of every symbol bound in the global table
+/// (prelude + user `def`s), sorted by spelling so the order is deterministic
+/// (for completion / workspace-symbol tooling and reproducible doc generation).
+fn global_names(_args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let mut syms = heap.global_symbols();
+    // `symbol_name` locks the interner and allocates, so resolve each spelling
+    // once (cached) rather than twice per comparison.
+    syms.sort_by_cached_key(|&s| value::symbol_name(s));
+    let syms: Vec<Value> = syms.into_iter().map(Value::Sym).collect();
+    Ok(heap.list(syms))
+}
+
+/// `(bound? 'name)` — whether `name` is bound in the current scope (which
+/// reaches the global table). Takes a symbol, so quote it: `(bound? 'foo)`.
+fn bound_p(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
+    match arg(args, 0) {
+        Value::Sym(s) => Ok(Value::Bool(heap.env_get(env, s).is_some())),
+        other => Err(LispError::wrong_type(heap, "bound?", "symbol", other)),
+    }
+}
+
 fn gensym(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let prefix = match arg(args, 0) {
         Value::Str(id) => heap.string(id).to_string(),
@@ -709,8 +794,10 @@ fn send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::Nil)
 }
 
-fn receive(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    crate::process::receive(heap)
+/// `(%receive matcher timeout on-timeout)` — the selective-receive primitive the
+/// `receive` macro (`std/prelude.blsp`) expands to. See `crate::process::receive_match`.
+fn receive_match(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    crate::process::receive_match(heap, arg(args, 0), arg(args, 1), arg(args, 2))
 }
 
 fn self_pid(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
@@ -736,7 +823,7 @@ fn worker_threads(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 }
 
 /// `(%isolate thunk)` — call `thunk` (no args) with a *private copy* of the
-/// runtime's global bindings: any `def`/`set!` it makes is rolled back when it
+/// runtime's global bindings: any `def` it makes is rolled back when it
 /// returns, so it cannot affect other code. The test framework wraps each
 /// `:isolated` test in this so a test's definitions never leak to another test.
 /// Restores the bindings even if the thunk raises (the error then propagates).

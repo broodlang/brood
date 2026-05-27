@@ -415,7 +415,7 @@ needs no eval rewrite and touches nothing shared or concurrent.
 **Context.** A runtime's processes share one mutable global table (ADR-013), so
 the test framework offered `:serial`/`:isolated` to avoid *races* on it. But
 `:isolated` only meant "no other test runs concurrently" — every test, isolated
-or not, still `def`/`set!`s into the *same* live table, so a test's definitions
+or not, still `def`s into the *same* live table, so a test's definitions
 persisted and were visible to later tests. That's not true per-test independence.
 
 True isolation wants a fresh runtime per test, but the model rules that out
@@ -571,9 +571,9 @@ manifest for identity.
   you never list paths just to get the standard layout running.
 - **Test discovery** — under each test path (default `tests/`), every file matching
   `*_test.blsp`, recursively. A test file only *registers* (`(require 'test)` +
-  `describe` / `test`); `brood test` loads them all, then calls `(run-tests)`
+  `describe` / `test`); `nest test` loads them all, then calls `(run-tests)`
   **once**. Test files no longer call `run-tests` themselves.
-- Surfaced as a CLI path — `brood test` (and an in-language `(run-project-tests)`)
+- Surfaced as a CLI path — `nest test` (and an in-language `(run-project-tests)`)
   — with the discovery/load/run logic written in Brood on the ADR-019 fs
   primitives. Rust stays the thin substrate (CLAUDE.md core principle).
 
@@ -789,6 +789,272 @@ and stay advisory rather than carrying Elixir's full soundness-proof burden —
 borrow the model, not the proof obligation.
 
 ---
+
+## ADR-025 — A lossless, span-carrying CST for tooling, separate from the eval `Value`
+
+**Status:** accepted; foundations implemented (no LSP crate yet). Full plan in
+[`lsp.md`](lsp.md). Done: the CST (`syntax::cst`, with shared lexical rules in
+`syntax::atom`); leading-string **docstrings** on closures; the introspection
+primitives `doc` / `arglist` / `global-names` / `bound?`. Next: the CST scope
+resolver (shared with the checker), then the `brood-lsp` crate.
+
+**Context.** Brood is meant to be the language of a self-editing editor, so a
+language server (LSP) is on the path, not an afterthought (`tooling.md` already
+anticipates "Stage 3: richer introspection for eldoc / completion / xref"). The
+blocker: every interesting LSP feature — hover, go-to-definition, completion
+context, semantic tokens, rename — answers *"what is at this cursor?"*, and the
+evaluation `Value` can't say. Symbols are `Value::Sym(u32)`: `Copy`, interned,
+deduplicated, **not heap-addressed**, so the same `foo` everywhere is one value.
+The `form-pos` side-table is keyed by a heap pair-index, so it positions only
+**list** forms, start-only — never the token under the cursor. Making `Value`
+carry per-occurrence spans (boxing symbols, wrapping read nodes) would tax every
+evaluation forever to serve tooling, and the `Copy` value model + tail-call loop
+are load-bearing.
+
+**Decision.** Give tooling its **own** tree: a lossless, span-carrying CST in
+`syntax::cst`, separate from the reader's `Value`. It is **heap-free** (owned
+`Node`s; no `Heap`, so a server holds many documents cheaply and `Send`s them),
+**total / error-tolerant** (`parse` always returns a tree; malformed input
+becomes `Error` nodes and parsing resumes), records a `Span { start, end }` of
+**byte offsets** on *every* node (including trivia and each symbol token), and
+keeps quote sugar *as written*. The eval reader and the CST parser stay separate
+functions because they have opposite contracts — the evaluator **rejects** a
+half-typed buffer, the LSP **must** parse one on every keystroke — but they
+**share** the lexical rules (`is_delimiter`, atom classification, the escape
+table) so they can't drift on what a token is. The server is a separate binary,
+`crates/lsp` (`brood-lsp`), on `lsp-server` + `lsp-types` (synchronous — the
+single-threaded `Interp` is not `Sync`, so a sync request loop owning the
+document store avoids `tokio` and `Send`/`Sync` friction). It **never evaluates
+user buffers**: syntactic diagnostics come from CST `Error` nodes; semantic ones
+from the advisory checker (ADR-024), which is designed to analyse without
+running. A small introspection surface (`arglist`, `global-names`, `bound?`)
+feeds completion/hover.
+
+**Why.** Deciding *once* how text maps to spans and to meaning lets every feature
+read off that substrate instead of each one re-deriving position bookkeeping —
+the alternative is a parser's worth of duplication that never agrees with itself.
+A separate CST is also the architecturally standard split (execution tree vs.
+lossless syntax tree, à la rust-analyzer) and keeps the eval hot path lean.
+
+**Trade-offs accepted.** Two parsers sharing lexical helpers (a managed
+divergence risk, bounded by sharing the token rules). The advisory checker today
+returns un-located strings over *expanded* forms, so located semantic
+diagnostics are a later increment that checks the **un-expanded** CST — which
+means not seeing *into* macro-generated code at first (the same macro caveat
+`tooling.md` already accepts for runtime-error positions). LSP `Position` is
+UTF-16 code units, which neither byte spans nor the char-counting `Pos` match, so
+the server owns a UTF-16-aware `LineIndex`. Docstrings (for `doc`/hover) need a
+small additive language decision (ADR-011 shape: an optional leading string in a
+`def`/`defn` body) and are deliberately deferred — the LSP design does not block
+on them. Long-term the CST could subsume the `form-pos` side-table; not required
+now.
+
+---
+
+## ADR-026 — Immutability: data is immutable; `def` is the only mutation (no `set!`, no `while`)
+
+**Status:** accepted; implemented.
+
+**Context.** Brood already had *zero* data-mutation primitives — no `set-car!`,
+`vector-set!`, `string-set!`, no atoms. The only mutation in the language was
+binding mutation: `def` (rebind a global — load-bearing for Erlang-style hot
+reload, the project's north star) and `set!` (rebind the nearest existing
+binding, local or global). An audit found every real `set!` use targeted a
+*global* (`*features*`, the project config vars, the test framework's
+registration state) — i.e. it was doing what `def` does — except one: the test
+framework's process-local `*fails*` accumulator, `let`-bound and `set!`-mutated
+per assertion. So `set!` was, in practice, either a redundant `def` or a local
+mutable cell. `while`, the lone iteration special form, is only useful *with*
+local mutation to make progress, and had no Brood users.
+
+**Decision.** Commit to immutability and make it an invariant:
+
+- **Lisp data is immutable.** No primitive mutates a `Value`; this stays true.
+- **`def` (rebinding a global) is the only mutation in the language** — that is
+  exactly what live redefinition / hot reload needs (ADR-013), and it is
+  *binding* mutation, not data mutation. `def` inside a function still targets the
+  global scope.
+- **`set!` is removed** (special form deleted; the now-dead `Heap::env_set` with
+  it). Global `set!` uses became `def`; local mutable accumulation is replaced
+  (see the test framework, below). A `let`/`fn` binding never changes after it is
+  made.
+- **`while` is removed.** With no local mutation it can't make progress; loops are
+  **recursion** (proper tail calls give O(1) stack) or, for evolving state,
+  **processes** (`spawn`/`receive`). Reintroduce a named-`loop`/`recur` macro later
+  if ergonomics demand it (ADR-011).
+- **Mutable state, when genuinely needed, is expressed two ways — never a mutable
+  `Value`:** a **process** holding evolving state in its loop (the Erlang model),
+  or a **Rust-backed resource handle** (the coming M2 rope/buffer — an opaque
+  mutable resource behind primitives, like a file handle).
+
+**The test-framework consequence.** The per-assertion `*fails*` accumulator can't
+survive without local mutation. Replaced with a throw-and-collect scheme that
+stays immutable yet keeps multi-failure reporting: a failing assertion **throws** a
+tagged record (`(:%test-fail loc details)`), and the `test` macro splits its body
+into one thunk per top-level form, running each in its own `try` (`test--run`) and
+folding the caught failures into a list. So failures across a test's forms are all
+collected (a throw ends only its own form), with no mutable accumulator. The one
+limit: multiple assertions nested inside a *single* form stop at the first (the
+throw unwinds that whole form) — a process-backed cell could close that later if a
+real need appears (ADR-011). A non-assertion error is recorded and stops the test.
+
+**Why.** Immutability reinforces every existing pillar: the planned tracing GC
+(no write barriers, no mutable roots), `Send` per-process heaps + copy-on-send
+messages (no aliasing hazards), the append-only shared `RUNTIME` code region, and
+the safe-Rust guardrail (ADR-001) — it removes the whole shared-mutable-aliasing
+bug class. It also shrinks the core: two fewer special forms and a dead heap
+method.
+
+**Trade-offs accepted.** Test failures collect per top-level form, not per nested
+assertion (above). No imperative loop — fine given TCO recursion and processes,
+revisit with `loop`/`recur` only on real need. Repeated immutable `assoc`/`append`
+is O(n²) accumulation; mitigations (`reduce`/`fold`, transients, persistent
+structures) are deferred per ADR-011.
+
+---
+
+## ADR-027 — Reduction-counted preemption + selective `receive` with timeouts
+
+**Status:** accepted; implemented. Realises `scheduler.md` stage 4 (the fairness
+step ADR-018 deferred) and the `receive`-clause surface reserved in
+`docs/pattern-matching.md`.
+
+**Context.** The green-process scheduler was **cooperative**: a process yielded
+its worker only at `receive`, so a CPU-bound process with no `receive` (a runaway
+keybinding, an infinite loop) held its worker until it finished — on an N-worker
+pool, N such processes starve everything, including the root. Separately,
+`receive` was unconditional FIFO (arity-0, popped the head): no way to wait for a
+*specific* message (head-of-line blocking), and no timeout (a process waiting on a
+message that never comes suspends forever). Both block the editor milestone — and
+both were already designed as *additive* steps.
+
+**Decision.** Two coupled additions, sharing the coroutine yielder and the `match`
+compiler; no new special form.
+
+1. **Reduction-counted preemption** (the BEAM's mechanism). `eval`'s `'tail:` loop
+   calls `process::tick()` once per iteration — a thread-local `Cell<u32>`
+   decrement (budget ≈ 2000, reset by the worker before each `resume`). At zero, a
+   green process yields its worker and is re-queued **Ready**. The coroutine now
+   yields a `Suspend` reason: `Receive` (park on the mailbox, as before) vs
+   `Preempt` (re-queue at the back so peers get a turn). The root thread has no
+   yielder, so `tick` just refreshes its budget — the root is never preempted.
+   Top-of-loop placement is correct *and* complete: every non-terminating
+   computation re-enters the loop infinitely often, and no lock/borrow is held
+   there. Proper tail calls are untouched.
+
+2. **Selective `receive`** with patterns, guards, and `after`. `receive` becomes a
+   Brood **macro** over a `%receive` primitive (arity 3: a matcher fn, a timeout in
+   ms or nil, an on-timeout thunk or nil). The macro reuses `match-build-from` with
+   the no-match continuation set to **`nil`** (not the structured throw) and wraps
+   each clause body in a **thunk**, producing a matcher that returns the body-thunk
+   on a match or `nil` otherwise. `%receive` scans the mailbox in order, **removes
+   and runs the first match, leaves non-matching messages queued** (true Erlang
+   selective receive). A trailing `(after ms body...)` clause bounds the wait;
+   `(after 0 …)` is a non-blocking poll. A green process waiting on a timeout is
+   woken by a lazily-started **timer thread** (a `BinaryHeap` of `(deadline, pid)`)
+   that re-queues it at the deadline; the root uses `cv.wait_timeout`. Stale timers
+   are harmless — `%receive` always re-validates its own deadline. The
+   single-consumer mailbox gains a `scanned` cursor so a parked selective receiver
+   is only re-run when a *new* (unscanned) message arrives, not for ones it skipped.
+
+   **Catchable timeouts, the Erlang way.** The `after` body runs inline like
+   Erlang and, like any clause body, runs through the normal `apply`/`throw` path,
+   so it composes with the existing `try`/`catch` (over `%try`). To *propagate* a
+   timeout you `throw` from the body — `(after ms (throw [:timeout]))` — and catch
+   it; convention is the structured value `[:timeout]`, paralleling `match`'s
+   `[:match-error …]`. No separate throwing-timeout construct.
+
+**Why.** Both deliver core capabilities the editor needs (a runaway command can't
+freeze the runtime; request/reply and stateful server processes become writable)
+by **composing existing machinery** — the yielder and the `match` compiler —
+rather than adding language surface. Keeping `receive` a macro over one primitive
+honours "as much in Brood as possible" (ADR-006/008) and "keep the core small"
+(no new special form). Catchability falls out of the existing error model rather
+than a new mechanism (ADR-011).
+
+**Trade-offs accepted.** The per-iteration `tick` is a cost on the hottest path
+(a thread-local decrement; benchmark, and if it ever bites, move the tick to the
+tail-continue/apply points only — same correctness). Testing a `receive` candidate
+rebuilds it into the LOCAL heap, so skipped messages leave short-lived garbage
+(reclaimed at the next top-level arena reset, ADR-016) — negligible when the first
+message matches. The timer thread is one extra OS thread, started only when a
+timed `receive` is first used. `after` is reserved as a final-clause head.
+
+## ADR-028 — Split the CLI: `brood` is the language, `nest` is the project tool
+
+**Status:** accepted (2026-05-27).
+
+**Context.** A single `brood` binary did two unrelated jobs: it *ran the
+language* (`brood file.blsp`, REPL) and it was the *project tool* (`brood test`,
+`brood new`, user config, scaffolding). These grow in different directions —
+the language binary should stay a thin, stable runtime; the project tool will
+accrete `build`/`check`/`add`/release commands and eventually the editor's dev
+environment. Bolting all of that onto the language entry point conflates two
+audiences (run-a-program vs. manage-a-project) and bloats the surface every
+language user sees.
+
+**Decision.** Two binaries, the `rustc`/`cargo` (and `elixir`/`mix`) split:
+
+- **`brood`** (`crates/cli`) — the *language* only: `brood <file>`, the REPL,
+  `brood --version`, and `brood --test <file>…` (run one or more self-contained
+  files as a single in-language suite). No project awareness.
+- **`nest`** (`crates/nest`) — the *project tool*: `nest new <name>`,
+  `nest test` (walk to `project.blsp`, discover `tests/**/*_test.blsp`, run the
+  suite once), the user config, and future `build`/`check`/etc.
+
+`brood --test <file>` (single-file) and `nest test` (project-wide discovery) are
+deliberately different commands for different jobs, not aliases.
+
+**`nest` embeds the lib, it does not shell out.** Both binaries depend on the
+`brood` lib crate and drive `Interp` directly — no subprocess. (Cargo shells out
+to rustc because rustc is not a library; our runtime *is* one, so embedding is
+simpler and keeps a single process for the eventual hot-reload/editor story.)
+`nest` stays a *thin Rust shell*: it evaluates bootstrap snippets
+(`(require 'project) (load-config) (run-project-tests)`) and the policy —
+templates, name checks, discovery — lives in `std/project.blsp` (ADR-006). The
+small `report_error`/`parse_args` helpers are duplicated across the two bins
+rather than coupled through a shared crate; they're tiny and stable.
+
+**Consequences.** `make suite` and `crates/lisp/tests/suite.rs` use the project
+runner unchanged (they call the Brood runner, not the binary). Install/uninstall
+now cover both binaries. The user config dir stays `~/.config/brood/` — it's the
+ecosystem's config, read by `nest`. Self-hosting the tool in Brood remains the
+roadmap goal; this split just gives it its own front door first.
+
+## ADR-029 — Module docstrings + `nest doc` (extract by load-and-introspect)
+
+**Status:** accepted (2026-05-27).
+
+**Context.** Function/macro docstrings already exist (ADR-025: a leading string
+in a `fn`/`defn` body, stored on the closure, read via `(doc f)`). Two pieces
+were missing: a way for a **module** to document itself, and a tool to **extract**
+docs into readable output. The flat `provide`/`require` module model (ADR-019)
+has no namespace, so nothing records which definitions belong to which module.
+
+**Decision.**
+
+- **Module doc = the file's first top-level form, when it is a bare string** —
+  the file-level analogue of the function-docstring rule, no new special form
+  (keeps the core small, ADR-011). It's a harmless no-op when the file is loaded;
+  the tooling reads it from source.
+- **`nest doc [module]` extracts by loading + introspecting**, not by parsing
+  source. It snapshots `(global-names)`, loads the module, and the new names are
+  what it defined — read back through the existing `(doc f)`/`(arglist f)`. The
+  module docstring is read from source (`slurp` + `read-string`), since a leading
+  string is discarded on load. Output is Markdown to stdout. Policy lives in
+  `std/docs.blsp` (ADR-006); Rust adds only `slurp` (the read counterpart of
+  `spit`) and sorts `(global-names)` for deterministic output.
+- Documenting one module **loads its code**. That's acceptable for a one-shot CLI
+  (as `nest test` already loads files), and is explicitly *not* what the
+  continuously-running LSP does — it must never eval user code (`docs/lsp.md`).
+
+**Consequences.** Attribution is load-order dependent: a module already loaded
+before the snapshot yields an empty delta and can't be re-documented in the same
+process (hence `docs` requires `project` lazily). Definitions that *shadow* a
+prelude name, and names pulled in by a transitive `require`, are mis-attributed.
+The accurate, order-independent fix is the static CST walk planned in
+`docs/lsp.md`; the runtime path ships first because it reuses the canonical doc
+machinery and needs almost no new Rust.
 
 ## Deferred / open questions
 

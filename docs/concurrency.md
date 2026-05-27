@@ -90,19 +90,18 @@ data. Messages are data, so they copy cleanly.
 
 ## Scheduling
 
-Start **cooperative**: a process runs until it blocks on `receive` (or finishes),
-then yields. With N cores, a CPU-bound process only occupies one scheduler, so
-the lack of preemption is far less harmful than in a single event loop.
-Reduction-counted preemption (the BEAM's fairness mechanism) can be added later
-if a workload needs it.
+We started **cooperative** (a process yielded only at `receive`) and have since
+added **reduction-counted preemption** (ADR-027): `eval`'s loop decrements a
+per-worker budget and the process yields at zero, so a CPU-bound process can't
+monopolise a core even on a small pool. This is the BEAM's fairness mechanism,
+done as the additive step the original design anticipated.
 
 ## Out of scope for v1 (the "fancy" we're skipping)
 
-- Supervision trees, `link`/`monitor`, restart strategies
+- Supervision trees, `link`/`monitor`, restart strategies, registered names
 - Distribution across machines/nodes
 - Live migration of *running* processes (we start pinned)
-- Reduction-counted preemption (we start cooperative)
-- Selective-receive performance tuning
+- Work-stealing across workers (one shared run queue for now)
 
 These are all additive later.
 
@@ -128,11 +127,19 @@ This is the largest *core* undertaking in the project. Two consequences:
    pool of ≈`nproc` worker threads (a setting; `-j` overrides), suspending at
    `receive` rather than blocking. Cheap spawn, bounded OS threads, no `Gate`
    deadlock. `Send` per-process heaps let a process migrate between workers. See
-   `docs/scheduler.md` / ADR-018. **Cooperative** for now (yields at `receive`).
-3. ⬜ **Work-stealing** — per-worker run queues + steal-on-idle (today: one shared
+   `docs/scheduler.md` / ADR-018.
+3. ✅ **Reduction-counted preemption** (ADR-027) — `eval`'s loop decrements a
+   per-worker budget (≈2000) and the process yields its worker at zero (`Suspend`
+   carries `Receive` vs `Preempt`), so a CPU-bound process can't monopolise a
+   core. Scheduling is now preemptively fair, not cooperative-only.
+4. ✅ **Selective `receive`** (ADR-027) — `receive` takes pattern clauses (the
+   `match` grammar) + an optional `(after ms …)` timeout; it scans the mailbox,
+   runs the first match, and leaves non-matching messages queued. A green process
+   waiting on a timeout is woken by a dedicated timer thread. Timeouts are
+   catchable (`throw` from the `after` body → `try`/`catch`).
+5. ⬜ **Work-stealing** — per-worker run queues + steal-on-idle (today: one shared
    run queue). An optimisation, not a correctness need.
-4. ⬜ Later: reduction-counted preemption (fairness for CPU-bound processes),
-   supervision/links.
+6. ⬜ Later: supervision / links / monitors; registered names.
 
 ## Distribution across nodes (future — kept in mind)
 
@@ -160,16 +167,21 @@ net-splits, serialization versioning, latency. This also fits the project's
 "backend hosted remotely by a frontend" premise — a remote frontend or second
 backend is just another node that links and message-passes.
 
-### Limitations of step 4a (to lift later)
+### Current limitations (to lift later)
 
-- **OS thread per process** — real but heavyweight; not yet green/cheap, no core
-  cap. (→ phase 2.)
-- **`spawn` ships a self-contained closure.** Its code (which is data) is copied
-  to the child, which has only the prelude + builtins + the closure's params —
-  **not** other user-defined globals. This is the missing **shared code** story
-  (Erlang shares code, isolates data); until it lands, a spawned function may
-  only reference the prelude/builtins and its arguments.
-- **The prelude is reloaded per spawn** (a fresh `Interp`). Fine for tens of
-  processes; shared code fixes both this and the point above.
-- **Messages are data only** (no functions); `receive` is FIFO (no selective
-  receive / timeouts yet).
+Steps 4a→4b and ADR-027 lifted the early limits — processes are now cheap green
+coroutines (not OS threads), they share the runtime's live code (ADR-013, no
+per-spawn prelude reload), scheduling is preemptively fair, and `receive` is
+selective with timeouts. What's still open:
+
+- **Messages are data only** — you can't `send` a function (closures are
+  per-heap). Send a *symbol* naming a top-level function instead; code is shared,
+  so the receiver resolves it.
+- **One shared run queue** — no work-stealing yet (phase 5). Fine until run-queue
+  contention shows up in a profile.
+- **No supervision / links / monitors / registered names** (phase 6). A process
+  death is currently just an `eprintln!`; pids are bare integers.
+- **Selective-receive scan cost** — testing a candidate rebuilds it into the
+  LOCAL heap; non-matching messages leave short-lived garbage (reclaimed at the
+  next top-level arena reset, ADR-016). Negligible when the first message matches;
+  optimisable later if a hot skip-heavy receive loop needs it.

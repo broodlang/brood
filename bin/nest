@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Convenience launcher for the Brood project tool (`nest`).
+#
+#   ./bin/nest new foo        # scaffold a new project
+#   ./bin/nest test           # discover + run the project's test suite
+#
+# Builds via cargo as needed and forwards all arguments to the `nest` binary.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec cargo run --quiet --manifest-path "$repo_root/Cargo.toml" -p nest -- "$@"

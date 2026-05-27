@@ -67,9 +67,9 @@
 ;; These read like special forms but are ordinary macros over `if`/`do`/`let`.
 ;; The compile pass (macroexpand-all) expands them once, so they cost nothing at
 ;; runtime while the evaluator's core stays just `if`/`do`/`let`/`fn`/… — policy
-;; in Brood, mechanism in Rust (ADR-006/008). `while` is the lone exception that
-;; stays a special form: it's the one primitive loop, with no named-`let` to
-;; build a macro on yet.
+;; in Brood, mechanism in Rust (ADR-006/008). There is no `while`: data is
+;; immutable and there's no local mutation (ADR-026), so loops are recursion (TCO
+;; keeps the stack O(1)) or processes.
 
 (defmacro when (test & body)
   `(if ~test (do ~@body) nil))
@@ -416,6 +416,50 @@
 (defmacro match (expr & clauses)
   `(match* :match ~expr ~@clauses))
 
+;; ---- receive: selective, pattern-matched message receipt --------------------
+;; (receive clause...) where each clause is (pattern [:when guard] body...), with an
+;; optional trailing (after ms body...) timeout clause. Reuses the match compiler
+;; (match-build-from) to build a *matcher* fn: given a message it returns the clause
+;; body as a thunk on a match, or nil on no match. The %receive primitive runs that
+;; over the mailbox — scanning in order, removing+running the first match, leaving
+;; non-matching messages queued (true Erlang selective receive).
+;;
+;;   (receive
+;;     ([:say text]      (println text))
+;;     (n :when (int? n) (handle n))
+;;     (after 5000       (throw [:timeout])))   ; catchable via try/catch
+;;
+;; (receive) with no clauses blocks for the next message and returns it.
+;; (after 0 ...) is a non-blocking poll; (after ms>0 ...) waits up to ms.
+
+;; Wrap a clause's body in a (fn () body...) thunk, so a matched body runs only after
+;; %receive commits to (and removes) the message — not during the scan. Preserves the
+;; :when guard so the match compiler still gates on it.
+(defn receive--thunk-clause (clause)
+  (let (pat (first clause) more (rest clause))
+    (if (= (first more) :when)
+      `(~pat :when ~(second more) (fn () ~@(rest (rest more))))
+      `(~pat (fn () ~@more)))))
+
+;; Split clauses into [real-clauses ms-or-nil timeout-thunk-or-nil], peeling an
+;; optional trailing (after ms body...). `after` as a final clause head is reserved.
+(defn receive--split (clauses)
+  (let (lst (last clauses))
+    (if (and (pair? lst) (= (first lst) 'after))
+      [(but-last clauses) (second lst) `(fn () ~@(rest (rest lst)))]
+      [clauses nil nil])))
+
+(defmacro receive (& clauses)
+  (let (parts   (receive--split clauses)
+        real    (nth parts 0)
+        ms      (nth parts 1)
+        on-time (nth parts 2)
+        msg     (gensym "msg")
+        matcher (if (empty? real)
+                  `(fn (~msg) (fn () ~msg))   ; no clauses: take the next message as-is
+                  `(fn (~msg) ~(match-build-from (map receive--thunk-clause real) msg nil))))
+    `(%receive ~matcher ~ms ~on-time)))
+
 ;; ---- a general membership test ----------------------------------------------
 (defn member? (x xs)
   (cond
@@ -467,7 +511,7 @@
 (defn provide (mod)
   (let (key (name mod))
     (unless (member? key *features*)
-      (set! *features* (cons key *features*)))
+      (def *features* (cons key *features*)))
     key))
 
 ;; First existing <filename> across the load-path dirs, or nil.

@@ -16,6 +16,34 @@ pub struct Pos {
     pub col: u32,
 }
 
+/// A half-open byte range into the source text, `start..end`. Used by the
+/// tooling CST (`syntax::cst`) to record where every node was read. Byte
+/// offsets index `&str` directly; a `LineIndex` (in the LSP layer) projects them
+/// to editor positions. `Pos` is the line/col projection used for diagnostics;
+/// `Span` is the raw range. See `docs/lsp.md` / ADR-025.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Span {
+    pub start: u32,
+    pub end: u32,
+}
+
+impl Span {
+    pub fn new(start: usize, end: usize) -> Self {
+        Span {
+            start: start as u32,
+            end: end as u32,
+        }
+    }
+    /// Does this span contain byte offset `at`? Half-open: `start <= at < end`.
+    pub fn contains(&self, at: u32) -> bool {
+        self.start <= at && at < self.end
+    }
+    /// Slice the source this span was taken from.
+    pub fn slice<'s>(&self, src: &'s str) -> &'s str {
+        &src[self.start as usize..self.end as usize]
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ErrorKind {
     /// The reader could not parse the source text.
@@ -109,7 +137,12 @@ impl LispError {
     /// A self-identifying type error: which operation (`who`), what it `expected`,
     /// and the actual tag + printed form of what arrived. Threads the heap to
     /// render the offending value, e.g. `first: expected list or vector, got int (5)`.
-    pub fn wrong_type(heap: &crate::core::heap::Heap, who: &str, expected: &str, got: Value) -> Self {
+    pub fn wrong_type(
+        heap: &crate::core::heap::Heap,
+        who: &str,
+        expected: &str,
+        got: Value,
+    ) -> Self {
         Self::type_err(format!(
             "{}: expected {}, got {} ({})",
             who,

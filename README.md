@@ -4,17 +4,25 @@
 purpose: to be the language a modern, Emacs-like text editor is *written in* —
 so that a running editor can redefine its own behaviour on the fly.
 
+It is an **immutable** language: data never changes once made and there is no
+local mutation (no `set!`, no `while`), so loops are recursion. The single
+exception is `def`, which rebinds a global — that *is* live redefinition, the
+whole point of an editor that can rewrite itself while running.
+
 Under the Lisp sits Erlang/OTP-style concurrency: a *brood* of cheap, supervised
 processes that share nothing and talk by message passing. That swarm is where
-the name comes from.
+the name comes from. Immutability is what makes that share-nothing model safe:
+no aliasing across processes, messages copied cleanly, no shared mutable state to
+race on.
 
-> **Name & tooling.** This project was formerly `mylisp`. It is now **Brood**,
-> with a toolchain that mirrors Elixir's `mix`/`hex`: **`tend`** is the
-> build/project tool (`tend new`, `tend build`, `tend test`, `tend repl`) and
-> **`nectar`** is the package registry/manager (`nectar add <dep>`). The colony
-> imagery is deliberate — you *tend* a brood and feed it *nectar*. These tools
-> and the crate/binary rename aren't built yet; today you use `cargo` directly,
-> as shown below.
+> **Name & tooling.** This project was formerly `mylisp`; it is now **Brood**.
+> The command line splits the way `rustc`/`cargo` (and `elixir`/`mix`) do
+> (ADR-028): **`brood`** runs the *language* — a file, the REPL, or a single
+> test file (`brood --test`) — and **`nest`** is the *project tool* —
+> `nest new`, `nest test`, `nest doc` (and, later, dependency management). Both
+> binaries exist today (`make install` puts them on your `PATH`); the Quick start
+> below also shows the raw `cargo` equivalents. The colony imagery is deliberate
+> — a *brood* of processes lives in a *nest*.
 >
 > Brood source files carry the **`.blsp`** extension — a contraction of *Brood
 > Lisp* (`.lisp` collides with Emacs' `lisp-mode`). Any `.blsp` file, or a
@@ -49,21 +57,29 @@ Requires a Rust toolchain (via `rustup`).
 # build everything
 cargo build
 
-# run the tests
+# run the Rust tests + the in-language suite
 cargo test
 
-# start the REPL
+# start the REPL          (installed: `brood`)
 cargo run -p cli
 
-# run a program file
+# run a program file       (installed: `brood path/to/program.blsp`)
 cargo run -p cli path/to/program.blsp
+
+# run a single self-contained test file   (installed: `brood --test …`)
+cargo run -p cli -- --test path/to/foo_test.blsp
+
+# project tooling          (installed: `nest <cmd>`)
+cargo run -p nest -- new myproj   # scaffold a project
+cargo run -p nest -- test         # discover tests/**/*_test.blsp and run them
+cargo run -p nest -- doc          # emit Markdown docs for the project
 ```
 
-In the REPL (`cargo run -p cli`; the banner and prompt will read `brood` once the
-binary is renamed — today they still say `mylisp`):
+`make install` builds and installs both binaries (`brood`, `nest`) into
+`~/.local/bin`; `make uninstall` removes them. In the REPL:
 
 ```
-brood v0.1 — type an expression, Ctrl-D to exit
+brood v0.1 — arrow keys to edit, up/down for history, Ctrl-D to exit
 brood> (+ 1 2)
 3
 brood> (defn greet (name) (str "hello, " name))
@@ -74,8 +90,8 @@ brood> (greet "world")
 
 ## What works today
 
-Lexically-scoped closures, proper tail calls, `def`/`defn`/`set!`/`let`/`fn`,
-`if`/`when`/`unless`/`cond`, `and`/`or`/`while`, **macros** (`defmacro` +
+Lexically-scoped closures, proper tail calls, `def`/`defn`/`let`/`fn`,
+`if`/`when`/`unless`/`cond`, `and`/`or`, **macros** (`defmacro` +
 Clojure-style `` ` ``/`~`/`~@` quasiquote, `macroexpand`, `gensym`), integers &
 floats with overflow-checked arithmetic, strings, symbols, keywords, cons-cell
 lists, `[ ]` vectors, higher-order functions (`map`/`filter`/`reduce`/`apply`),
@@ -106,8 +122,9 @@ The full plan is in [`docs/roadmap.md`](docs/roadmap.md).
 
 ```
 crates/lisp    the language: reader, evaluator, builtins, value model
-crates/cli     the binary: REPL + file runner (to be renamed `brood`; `tend`/`nectar` will wrap it)
-std/           the prelude, written in Brood
+crates/cli     the `brood` binary: the language — REPL, file runner, `--test`
+crates/nest    the `nest` binary: project tooling — `new`, `test`, `doc`
+std/           the prelude + project/test/docs modules, written in Brood
 docs/          architecture, language reference, roadmap, decisions, dev log
 ```
 

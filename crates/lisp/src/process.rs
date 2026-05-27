@@ -18,17 +18,19 @@
 //! process: it is not a coroutine, so its `receive` **blocks** on its mailbox
 //! rather than yielding. Everything `spawn`ed is a green process that yields.
 
-use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::cell::{Cell, RefCell};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, Once};
+use std::time::{Duration, Instant};
 
 use corosensei::{Coroutine, CoroutineResult, Yielder};
 
-use crate::error::{LispError, LispResult};
-use crate::eval;
 use crate::core::heap::Heap;
 use crate::core::value::{EnvId, Symbol, Value};
+use crate::error::{LispError, LispResult};
+use crate::eval;
 
 /// A `Send`, self-contained copy of a value, for crossing heaps.
 pub enum Message {
@@ -41,6 +43,7 @@ pub enum Message {
     Keyword(Symbol),
     List(Vec<Message>),
     Vector(Vec<Message>),
+    Map(Vec<(Message, Message)>),
 }
 
 /// Deep-copy a value out of `heap` into a `Send` message. Functions can't be
@@ -69,6 +72,14 @@ pub fn to_message(heap: &Heap, v: Value) -> Result<Message, LispError> {
                 out.push(to_message(heap, item)?);
             }
             Message::Vector(out)
+        }
+        Value::Map(id) => {
+            let entries = heap.map(id).to_vec();
+            let mut out = Vec::with_capacity(entries.len());
+            for (k, v) in entries {
+                out.push((to_message(heap, k)?, to_message(heap, v)?));
+            }
+            Message::Map(out)
         }
         Value::Fn(_) | Value::Macro(_) | Value::Native(_) => {
             return Err(LispError::type_err("cannot send a function in a message"))
@@ -100,13 +111,30 @@ pub fn from_message(heap: &mut Heap, m: &Message) -> Value {
             }
             heap.alloc_vector(vals)
         }
+        Message::Map(entries) => {
+            let mut pairs = Vec::with_capacity(entries.len());
+            for (k, v) in entries {
+                let k = from_message(heap, k);
+                let v = from_message(heap, v);
+                pairs.push((k, v));
+            }
+            heap.map_from_pairs(pairs)
+        }
     }
 }
 
 // ----- mailboxes & processes -------------------------------------------------
 
-type Yielder0 = Yielder<(), ()>;
-type Coro = Coroutine<(), (), ()>;
+/// Why a green process's coroutine yielded control back to its worker.
+enum Suspend {
+    /// Blocked in `receive` on an empty mailbox — park until a message (or timer).
+    Receive,
+    /// Preempted by the reduction counter — still runnable, re-queue immediately.
+    Preempt,
+}
+
+type Yielder0 = Yielder<(), Suspend>;
+type Coro = Coroutine<(), Suspend, ()>;
 
 /// A process's mailbox. Guarded by one mutex so the "check empty → park" and
 /// "deliver → wake" handshakes stay race-free (see `receive`/`send`/`run_one`).
@@ -123,6 +151,10 @@ struct MailboxState {
     /// and re-queues it. (A short-lived `Process → Arc<Mailbox> → Process` cycle
     /// while parked; broken the moment it's re-queued or the process ends.)
     waiter: Option<Box<Process>>,
+    /// How many leading messages the parked waiter already scanned and rejected
+    /// (selective receive). The worker re-runs it only when a message arrives
+    /// *beyond* this — not for ones it already skipped. 0 for a plain FIFO receive.
+    scanned: usize,
 }
 
 impl Mailbox {
@@ -131,6 +163,7 @@ impl Mailbox {
             state: Mutex::new(MailboxState {
                 queue: VecDeque::new(),
                 waiter: None,
+                scanned: 0,
             }),
             cv: Condvar::new(),
         })
@@ -168,6 +201,55 @@ struct Ctx {
 
 thread_local! {
     static CURRENT: RefCell<Option<Ctx>> = const { RefCell::new(None) };
+}
+
+// ----- reduction-counted preemption ------------------------------------------
+
+thread_local! {
+    /// Reductions left in the current process's scheduling quantum. The worker
+    /// resets it to `REDUCTION_BUDGET` before each `resume` (see `run_one`); `eval`
+    /// decrements it via `tick`, and the process yields when it hits zero.
+    static REDUCTIONS: Cell<u32> = const { Cell::new(0) };
+}
+
+/// How many `eval` loop iterations a process runs before it must yield its worker
+/// (cooperative fairness — the BEAM's mechanism). ~2000 ≈ the BEAM default; tunable.
+const REDUCTION_BUDGET: u32 = 2000;
+
+/// Called once per `eval` `'tail:` iteration. Cheap: a thread-local decrement; only
+/// when the budget is exhausted does it touch `CURRENT` and (for a green process)
+/// suspend. Bounds the work any one process does before peers get the worker, so a
+/// CPU-bound process can't monopolise a core. The root thread is never preempted
+/// (it has no yielder) — it just refreshes the budget.
+#[inline]
+pub fn tick() {
+    REDUCTIONS.with(|r| {
+        let n = r.get();
+        if n == 0 {
+            preempt();
+        } else {
+            r.set(n - 1);
+        }
+    });
+}
+
+/// Budget exhausted: refresh it, then — if we're a green process — yield the worker
+/// (re-queued Ready by `run_one`). Re-establishes `CURRENT` after resume, since the
+/// worker may have run other processes meanwhile (cf. `receive`).
+fn preempt() {
+    REDUCTIONS.with(|r| r.set(REDUCTION_BUDGET));
+    let ctx = match CURRENT.with(|c| c.borrow().clone()) {
+        Some(c) => c,
+        None => return, // no process context (e.g. prelude build) — nothing to yield to
+    };
+    if let Some(yptr) = ctx.yielder {
+        // SAFETY: same invariant as `receive` — the yielder is valid while this
+        // coroutine is running, which is now (tick runs inside eval, inside the
+        // coroutine body). Suspending returns control to the worker (`run_one`).
+        unsafe { (*yptr).suspend(Suspend::Preempt) };
+        CURRENT.with(|c| *c.borrow_mut() = Some(ctx));
+    }
+    // Root thread (yielder None): budget refreshed, never suspends.
 }
 
 // ----- the run queue + worker pool -------------------------------------------
@@ -263,22 +345,31 @@ fn run_one(mut proc: Box<Process>) {
 
     let live = RUNNING.fetch_add(1, Ordering::SeqCst) + 1;
     PEAK_RUNNING.fetch_max(live, Ordering::SeqCst);
+    // Fresh reduction budget for this scheduling quantum (decremented in eval's loop
+    // via `tick`; at zero the process preempts itself — see `tick`/`preempt`).
+    REDUCTIONS.with(|r| r.set(REDUCTION_BUDGET));
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| proc.coro.resume(())));
     RUNNING.fetch_sub(1, Ordering::SeqCst);
 
     match outcome {
         Ok(CoroutineResult::Return(())) => deregister(proc.pid),
-        Ok(CoroutineResult::Yield(())) => {
-            // The coroutine suspended in `receive` because its mailbox looked
-            // empty. Re-check under the lock: if a message arrived during the
-            // suspend window, run again; otherwise park here for `send` to wake.
+        Ok(CoroutineResult::Yield(Suspend::Receive)) => {
+            // The coroutine suspended in `receive`: it scanned the first `scanned`
+            // messages with no match. Re-check under the lock — if a *new*
+            // (unscanned) message arrived during the suspend window, run again;
+            // otherwise park here for `send` (or the timer) to wake.
             let mut st = mailbox.state.lock().unwrap();
-            if st.queue.is_empty() {
-                st.waiter = Some(proc);
-            } else {
+            if st.queue.len() > st.scanned {
                 drop(st);
                 enqueue(proc);
+            } else {
+                st.waiter = Some(proc);
             }
+        }
+        Ok(CoroutineResult::Yield(Suspend::Preempt)) => {
+            // Preempted mid-computation (reduction budget hit). Still runnable —
+            // re-queue at the back so peers get a turn on this worker (fairness).
+            enqueue(proc);
         }
         Err(_) => {
             eprintln!("process {} panicked", proc.pid);
@@ -367,40 +458,186 @@ pub fn send(heap: &Heap, pid_val: Value, msg_val: Value) -> Result<(), LispError
     Ok(())
 }
 
-/// `(receive)` — take the next message from this process's mailbox. A green
-/// process **suspends** until one arrives; the root thread **blocks**.
-pub fn receive(heap: &mut Heap) -> LispResult {
+/// `(%receive matcher timeout on-timeout)` — selective receive. `matcher` is a unary
+/// function: given a message value it returns a 0-arg thunk (the clause body, closing
+/// over its bindings) on a match, or `nil` on no match. Scan the mailbox in order;
+/// the first message a clause matches is removed and its thunk run. Non-matching
+/// messages stay queued (Erlang selective receive). `timeout` is `nil` (wait forever)
+/// or an integer of milliseconds; on expiry the `on-timeout` thunk runs (a `throw`
+/// inside it propagates through `try`/`catch`, since both apply via this `?`). A
+/// green process suspends while waiting; the root thread blocks.
+pub fn receive_match(
+    heap: &mut Heap,
+    matcher: Value,
+    timeout: Value,
+    on_timeout: Value,
+) -> LispResult {
+    let deadline = match timeout {
+        Value::Nil => None,
+        Value::Int(ms) if ms >= 0 => Some(Instant::now() + Duration::from_millis(ms as u64)),
+        _ => {
+            return Err(LispError::type_err(
+                "receive: timeout must be an integer (milliseconds) or nil",
+            ))
+        }
+    };
     let ctx = ensure_ctx();
-    match ctx.yielder {
-        // Root thread: block on the mailbox condvar.
-        None => {
-            let mut st = ctx.mailbox.state.lock().unwrap();
-            loop {
-                if let Some(msg) = st.queue.pop_front() {
-                    drop(st);
-                    return Ok(from_message(heap, &msg));
+    let mut i = 0usize;
+    loop {
+        // Rebuild candidate `i` into the heap, then run the matcher *without* holding
+        // the mailbox lock (the matcher calls eval). Only this process removes from
+        // its own mailbox, so the scanned prefix is stable; `send` only appends.
+        let candidate = {
+            let st = ctx.mailbox.state.lock().unwrap();
+            if i < st.queue.len() {
+                Some(from_message(heap, &st.queue[i]))
+            } else {
+                None
+            }
+        };
+        match candidate {
+            Some(v) => {
+                let thunk = eval::apply(heap, matcher, &[v], EnvId::GLOBAL)?;
+                if matches!(thunk, Value::Fn(_)) {
+                    // Matched — remove exactly this message, then run its body.
+                    ctx.mailbox.state.lock().unwrap().queue.remove(i);
+                    return eval::apply(heap, thunk, &[], EnvId::GLOBAL);
                 }
-                st = ctx.mailbox.cv.wait(st).unwrap();
+                i += 1; // no clause matched — leave it queued, try the next message
+            }
+            None => {
+                // Scanned every queued message with no match.
+                if let Some(d) = deadline {
+                    if Instant::now() >= d {
+                        return if matches!(on_timeout, Value::Fn(_)) {
+                            eval::apply(heap, on_timeout, &[], EnvId::GLOBAL)
+                        } else {
+                            Ok(Value::Nil)
+                        };
+                    }
+                }
+                wait_for_message(&ctx, i, deadline);
             }
         }
-        // Green process: suspend the coroutine until re-queued by `send`.
-        Some(yptr) => loop {
-            {
-                let mut st = ctx.mailbox.state.lock().unwrap();
-                if let Some(msg) = st.queue.pop_front() {
-                    drop(st);
-                    return Ok(from_message(heap, &msg));
+    }
+}
+
+/// Wait until a message beyond index `i` might be available, honouring `deadline`.
+/// Green: record the scan position and suspend (arming a timer if there's a deadline,
+/// so it wakes to check). Root: block on the mailbox condvar (with timeout). Returns
+/// when the caller should re-scan from `i`.
+fn wait_for_message(ctx: &Ctx, i: usize, deadline: Option<Instant>) {
+    match ctx.yielder {
+        // Root thread: block on the condvar (with timeout) until a send or deadline.
+        None => {
+            let st = ctx.mailbox.state.lock().unwrap();
+            if st.queue.len() > i {
+                return; // a message arrived between the scan and here — re-scan
+            }
+            match deadline {
+                Some(d) => {
+                    let now = Instant::now();
+                    if now < d {
+                        // Re-acquired guard dropped at end of scope (before we return).
+                        let _g = ctx.mailbox.cv.wait_timeout(st, d - now);
+                    }
+                }
+                None => {
+                    let _g = ctx.mailbox.cv.wait(st);
                 }
             }
-            // SAFETY: the yielder lives on this coroutine's stack and is valid for
-            // as long as the coroutine is running — which is exactly now, since
-            // `receive` is called from within it. Suspending returns control to
-            // the worker (see `run_one`), which parks us.
-            unsafe { (*yptr).suspend(()) };
-            // Resumed: the worker may have run other processes (overwriting the
-            // thread-local) or resumed us on a different worker — re-establish.
+        }
+        // Green process: record how far we scanned (so the worker re-runs us only on
+        // a *new* message — see `run_one`), then suspend. A timer wakes us at the
+        // deadline; `send` wakes us on a new message.
+        Some(yptr) => {
+            {
+                let mut st = ctx.mailbox.state.lock().unwrap();
+                if st.queue.len() > i {
+                    return; // raced — a message arrived; re-scan without suspending
+                }
+                st.scanned = i;
+            }
+            if let Some(d) = deadline {
+                arm_timer(ctx.pid, d);
+            }
+            // SAFETY: the yielder is valid while this coroutine runs — which is now
+            // (called from within eval, within the coroutine body). Suspending
+            // returns control to the worker (`run_one`), which parks us.
+            unsafe { (*yptr).suspend(Suspend::Receive) };
+            // Resumed (by send or timer): the worker may have run others or migrated
+            // us to another worker — re-establish the context.
             CURRENT.with(|c| *c.borrow_mut() = Some(ctx.clone()));
-        },
+        }
+    }
+}
+
+// ----- timers (receive deadlines) --------------------------------------------
+
+/// Min-heap of `(deadline, pid)`: `Reverse` turns the max-heap into earliest-first.
+type TimerQueue = BinaryHeap<Reverse<(Instant, u64)>>;
+
+/// Pending `receive` deadlines for green processes. A dedicated thread wakes each at
+/// its deadline so it can fire its `after` clause.
+static TIMERS: LazyLock<(Mutex<TimerQueue>, Condvar)> =
+    LazyLock::new(|| (Mutex::new(BinaryHeap::new()), Condvar::new()));
+static TIMER_STARTED: Once = Once::new();
+
+/// Arrange to wake green process `pid` at `deadline`. Lazily starts the timer thread
+/// on first use (programs that never use a `receive` timeout never spawn it).
+fn arm_timer(pid: u64, deadline: Instant) {
+    TIMER_STARTED.call_once(|| {
+        std::thread::spawn(timer_loop);
+    });
+    let (lock, cv) = &*TIMERS;
+    lock.lock().unwrap().push(Reverse((deadline, pid)));
+    cv.notify_one();
+}
+
+/// Sleep until the nearest deadline, then wake every process whose deadline passed.
+fn timer_loop() {
+    let (lock, cv) = &*TIMERS;
+    let mut q = lock.lock().unwrap();
+    loop {
+        match q.peek().copied() {
+            None => q = cv.wait(q).unwrap(),
+            Some(Reverse((deadline, _))) => {
+                let now = Instant::now();
+                if now < deadline {
+                    q = cv.wait_timeout(q, deadline - now).unwrap().0;
+                } else {
+                    let mut due = Vec::new();
+                    while let Some(&Reverse((d, pid))) = q.peek() {
+                        if d <= now {
+                            q.pop();
+                            due.push(pid);
+                        } else {
+                            break;
+                        }
+                    }
+                    drop(q);
+                    for pid in due {
+                        wake_for_timeout(pid);
+                    }
+                    q = lock.lock().unwrap();
+                }
+            }
+        }
+    }
+}
+
+/// Re-queue green process `pid` if it's still parked, so it wakes, re-scans, and —
+/// finding its deadline passed — runs its `after` clause. A no-op if `send` already
+/// woke it or it re-parked on another receive; the process always re-validates its
+/// own deadline, so a stale timer is harmless (at most one spurious wakeup).
+fn wake_for_timeout(pid: u64) {
+    let mailbox = REGISTRY.lock().unwrap().get(&pid).cloned();
+    if let Some(mb) = mailbox {
+        let mut st = mb.state.lock().unwrap();
+        if let Some(proc) = st.waiter.take() {
+            drop(st);
+            enqueue(proc);
+        }
     }
 }
 

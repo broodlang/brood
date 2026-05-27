@@ -21,11 +21,11 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use crate::error::LispError;
 use crate::core::value::{
-    Closure, ClosureId, EnvId, NativeFn, NativeId, PairId, StrId, Symbol, Value, VecId, LOCAL,
-    PRELUDE, RUNTIME,
+    Closure, ClosureId, EnvId, MapId, NativeFn, NativeId, PairId, StrId, Symbol, Value, VecId,
+    LOCAL, PRELUDE, RUNTIME,
 };
+use crate::error::LispError;
 
 /// Generate a `&self` accessor that resolves a handle to a shared reference by
 /// region: the LOCAL/PRELUDE slab is indexed directly; the append-only RUNTIME
@@ -46,7 +46,13 @@ macro_rules! region_ref {
 }
 
 struct EnvFrame {
-    vars: HashMap<Symbol, Value>,
+    // A small association list, not a `HashMap`: frames hold a handful of
+    // bindings (function params, a `let`'s names), and they're immutable after
+    // their bind phase (ADR-026 — no `set!`), so a build-once / scan-to-read
+    // `Vec` is lighter than hashing and wins at these sizes. Lookups scan from
+    // the end so a later binding shadows an earlier one of the same name
+    // (sequential `let`).
+    vars: Vec<(Symbol, Value)>,
     parent: Option<EnvId>,
 }
 
@@ -56,6 +62,7 @@ fn to_prelude(v: Value) -> Value {
     match v {
         Value::Pair(id) => Value::Pair(PairId::prelude(id.index())),
         Value::Vector(id) => Value::Vector(VecId::prelude(id.index())),
+        Value::Map(id) => Value::Map(MapId::prelude(id.index())),
         Value::Str(id) => Value::Str(StrId::prelude(id.index())),
         Value::Fn(id) => Value::Fn(ClosureId::prelude(id.index())),
         Value::Macro(id) => Value::Macro(ClosureId::prelude(id.index())),
@@ -69,6 +76,11 @@ fn to_prelude(v: Value) -> Value {
 struct Slabs {
     pairs: Vec<(Value, Value)>,
     vectors: Vec<Vec<Value>>,
+    /// Maps as insertion-ordered key/value association vectors (no duplicate
+    /// keys — `assoc` replaces in place). Small and immutable, so a `Vec` scanned
+    /// by structural equality is enough; a HAMT can replace it later with no
+    /// surface change.
+    maps: Vec<Vec<(Value, Value)>>,
     strings: Vec<String>,
     closures: Vec<Closure>,
     natives: Vec<NativeFn>,
@@ -92,6 +104,7 @@ pub struct SharedCode {
 pub struct LocalCheckpoint {
     pairs: usize,
     vectors: usize,
+    maps: usize,
     strings: usize,
     closures: usize,
     envs: usize,
@@ -108,6 +121,7 @@ pub struct LocalCheckpoint {
 struct CodeSlabs {
     pairs: boxcar::Vec<(Value, Value)>,
     vectors: boxcar::Vec<Vec<Value>>,
+    maps: boxcar::Vec<Vec<(Value, Value)>>,
     strings: boxcar::Vec<String>,
     closures: boxcar::Vec<Closure>,
     /// Captured environments of promoted closures. A closure defined *inside a
@@ -124,7 +138,7 @@ struct CodeSlabs {
 pub struct RuntimeCode {
     code: CodeSlabs,
     /// The global bindings (prelude + user `def`s). Read on every global lookup,
-    /// written on `def`/`set!`. The values point into PRELUDE or RUNTIME.
+    /// written on `def` (the only mutation). The values point into PRELUDE or RUNTIME.
     globals: RwLock<HashMap<Symbol, Value>>,
 }
 
@@ -239,7 +253,7 @@ impl Heap {
         let bindings: Vec<(Symbol, Value)> = self.local.envs[root.index()]
             .vars
             .iter()
-            .map(|(&s, &v)| (s, to_prelude(v)))
+            .map(|&(s, v)| (s, to_prelude(v)))
             .collect();
 
         let mut slabs = self.local;
@@ -250,6 +264,12 @@ impl Heap {
         for vec in &mut slabs.vectors {
             for x in vec.iter_mut() {
                 *x = to_prelude(*x);
+            }
+        }
+        for map in &mut slabs.maps {
+            for (k, v) in map.iter_mut() {
+                *k = to_prelude(*k);
+                *v = to_prelude(*v);
             }
         }
         for c in &mut slabs.closures {
@@ -289,6 +309,7 @@ impl Heap {
         LocalCheckpoint {
             pairs: self.local.pairs.len(),
             vectors: self.local.vectors.len(),
+            maps: self.local.maps.len(),
             strings: self.local.strings.len(),
             closures: self.local.closures.len(),
             envs: self.local.envs.len(),
@@ -309,6 +330,7 @@ impl Heap {
     pub fn reset_local_to(&mut self, cp: LocalCheckpoint) {
         self.local.pairs.truncate(cp.pairs);
         self.local.vectors.truncate(cp.vectors);
+        self.local.maps.truncate(cp.maps);
         self.local.strings.truncate(cp.strings);
         self.local.closures.truncate(cp.closures);
         self.local.envs.truncate(cp.envs);
@@ -365,6 +387,65 @@ impl Heap {
         Value::Vector(VecId::local(idx))
     }
 
+    /// Allocate a map from already-canonical entries (insertion order, no
+    /// duplicate keys). The map operations below build the entry vector — keyed
+    /// by structural equality — and hand it here.
+    pub fn alloc_map(&mut self, entries: Vec<(Value, Value)>) -> Value {
+        let idx = self.local.maps.len();
+        self.local.maps.push(entries);
+        Value::Map(MapId::local(idx))
+    }
+
+    // ----- map operations (immutable: each returns a fresh map) -----
+
+    /// The value `key` maps to, by structural equality, or `None` if absent.
+    pub fn map_get(&self, id: MapId, key: Value) -> Option<Value> {
+        self.map(id)
+            .iter()
+            .find(|(k, _)| self.equal(*k, key))
+            .map(|(_, v)| *v)
+    }
+
+    /// Is `key` present (by structural equality)?
+    pub fn map_contains(&self, id: MapId, key: Value) -> bool {
+        self.map(id).iter().any(|(k, _)| self.equal(*k, key))
+    }
+
+    /// A fresh map with `key` bound to `val`: replaces the value if `key` is
+    /// already present (keeping its position), otherwise appends.
+    pub fn map_assoc(&mut self, id: MapId, key: Value, val: Value) -> Value {
+        let mut entries = self.map(id).to_vec();
+        match entries.iter_mut().find(|(k, _)| self.equal(*k, key)) {
+            Some(slot) => slot.1 = val,
+            None => entries.push((key, val)),
+        }
+        self.alloc_map(entries)
+    }
+
+    /// A fresh map with `key` removed (a no-op clone if it was absent).
+    pub fn map_dissoc(&mut self, id: MapId, key: Value) -> Value {
+        let entries: Vec<(Value, Value)> = self
+            .map(id)
+            .iter()
+            .filter(|(k, _)| !self.equal(*k, key))
+            .copied()
+            .collect();
+        self.alloc_map(entries)
+    }
+
+    /// Build a canonical map from raw `(key, value)` pairs, applying last-wins
+    /// deduplication by structural equality (for map literals and `hash-map`).
+    pub fn map_from_pairs(&mut self, pairs: Vec<(Value, Value)>) -> Value {
+        let mut entries: Vec<(Value, Value)> = Vec::with_capacity(pairs.len());
+        for (k, v) in pairs {
+            match entries.iter_mut().find(|(ek, _)| self.equal(*ek, k)) {
+                Some(slot) => slot.1 = v,
+                None => entries.push((k, v)),
+            }
+        }
+        self.alloc_map(entries)
+    }
+
     pub fn alloc_string(&mut self, s: &str) -> Value {
         let idx = self.local.strings.len();
         self.local.strings.push(s.to_string());
@@ -402,7 +483,7 @@ impl Heap {
 
     /// Deep-copy a value's reachable structure from the local heap into the
     /// shared RUNTIME region, returning a handle valid in every inner process.
-    /// `def`/`set!` of a global run this so the bound code/data is shareable;
+    /// `def` of a global runs this so the bound code/data is shareable;
     /// `spawn` runs it on the target function. Atoms and already-shared values
     /// (PRELUDE/RUNTIME) are returned unchanged — no copy.
     ///
@@ -423,6 +504,15 @@ impl Heap {
                     .map(|x| self.promote(x))
                     .collect();
                 Value::Vector(VecId::runtime(self.runtime.code.vectors.push(items)))
+            }
+            Value::Map(id) if id.region() == LOCAL => {
+                let entries: Vec<(Value, Value)> = self
+                    .map(id)
+                    .to_vec()
+                    .into_iter()
+                    .map(|(k, v)| (self.promote(k), self.promote(v)))
+                    .collect();
+                Value::Map(MapId::runtime(self.runtime.code.maps.push(entries)))
             }
             Value::Fn(id) if id.region() == LOCAL => Value::Fn(self.promote_closure(id)),
             Value::Macro(id) if id.region() == LOCAL => Value::Macro(self.promote_closure(id)),
@@ -474,6 +564,7 @@ impl Heap {
             optionals,
             rest: cl.rest,
             body,
+            doc: cl.doc,
             env,
         };
         ClosureId::runtime(self.runtime.code.closures.push(promoted))
@@ -491,14 +582,14 @@ impl Heap {
             let frame = self.env_frame(env);
             (
                 frame.parent,
-                frame.vars.iter().map(|(&s, &v)| (s, v)).collect(),
+                frame.vars.iter().map(|&(s, v)| (s, v)).collect(),
             )
         };
         let parent = parent.map(|p| self.promote_env(p));
-        let mut vars = HashMap::with_capacity(bindings.len());
-        for (s, v) in bindings {
-            vars.insert(s, self.promote(v));
-        }
+        let vars = bindings
+            .into_iter()
+            .map(|(s, v)| (s, self.promote(v)))
+            .collect();
         EnvId::runtime(self.runtime.code.envs.push(EnvFrame { vars, parent }))
     }
 
@@ -524,8 +615,15 @@ impl Heap {
         self.pair(id).1
     }
     region_ref!(vector, VecId, vectors, &[Value], "runtime vector handle");
+    region_ref!(map, MapId, maps, &[(Value, Value)], "runtime map handle");
     region_ref!(string, StrId, strings, &str, "runtime string handle");
-    region_ref!(closure, ClosureId, closures, &Closure, "runtime closure handle");
+    region_ref!(
+        closure,
+        ClosureId,
+        closures,
+        &Closure,
+        "runtime closure handle"
+    );
 
     pub fn native(&self, id: NativeId) -> &NativeFn {
         match id.region() {
@@ -601,6 +699,16 @@ impl Heap {
                 let ys = self.vector(y);
                 xs.len() == ys.len() && xs.iter().zip(ys.iter()).all(|(&p, &q)| self.equal(p, q))
             }
+            // Maps are equal when they hold the same key→value associations,
+            // independent of insertion order: same size, and every key in `x`
+            // maps to an equal value in `y` (keys themselves found by `equal`).
+            (Map(x), Map(y)) => {
+                let xs = self.map(x);
+                xs.len() == self.map(y).len()
+                    && xs
+                        .iter()
+                        .all(|(k, v)| self.map_get(y, *k).is_some_and(|w| self.equal(*v, w)))
+            }
             (Fn(x), Fn(y)) => x == y,
             (Macro(x), Macro(y)) => x == y,
             (Native(x), Native(y)) => x == y,
@@ -631,7 +739,7 @@ impl Heap {
     pub fn new_env(&mut self, parent: Option<EnvId>) -> EnvId {
         let idx = self.local.envs.len();
         self.local.envs.push(EnvFrame {
-            vars: HashMap::new(),
+            vars: Vec::new(),
             parent,
         });
         EnvId::local(idx)
@@ -644,8 +752,9 @@ impl Heap {
                 return self.runtime.globals_read().get(&sym).copied();
             }
             let frame = self.env_frame(e);
-            if let Some(v) = frame.vars.get(&sym) {
-                return Some(*v);
+            // Scan from the end: a later binding shadows an earlier same-named one.
+            if let Some(&(_, v)) = frame.vars.iter().rev().find(|&&(s, _)| s == sym) {
+                return Some(v);
             }
             cur = frame.parent;
         }
@@ -659,36 +768,8 @@ impl Heap {
             let shared = self.promote(val);
             self.runtime.globals_write().insert(sym, shared);
         } else {
-            self.local.envs[env.index()].vars.insert(sym, val);
+            self.local.envs[env.index()].vars.push((sym, val));
         }
-    }
-
-    /// Mutate the nearest existing binding; returns false if none exists.
-    pub fn env_set(&mut self, env: EnvId, sym: Symbol, val: Value) -> bool {
-        let mut cur = Some(env);
-        while let Some(e) = cur {
-            if e == EnvId::GLOBAL {
-                let shared = self.promote(val);
-                if let std::collections::hash_map::Entry::Occupied(mut slot) =
-                    self.runtime.globals_write().entry(sym)
-                {
-                    slot.insert(shared);
-                    return true;
-                }
-                return false;
-            }
-            if self.env_frame(e).vars.contains_key(&sym) {
-                if e.region() == LOCAL {
-                    self.local.envs[e.index()].vars.insert(sym, val);
-                    return true;
-                }
-                // A promoted (shared, captured) frame is read-only — `set!` can't
-                // cross the share boundary. Rare; a documented limitation.
-                return false;
-            }
-            cur = self.env_frame(e).parent;
-        }
-        false
     }
 
     /// Snapshot the runtime's global bindings (`symbol -> value`). Cheap: the
@@ -701,8 +782,16 @@ impl Heap {
         self.runtime.globals_read().clone()
     }
 
+    /// Every symbol currently bound in the global table (prelude + user `def`s).
+    /// For tooling/introspection — `(global-names)` feeds completion and
+    /// workspace-symbol queries (see `docs/lsp.md`). Returns just the keys, so
+    /// no `Value`s are cloned.
+    pub fn global_symbols(&self) -> Vec<Symbol> {
+        self.runtime.globals_read().keys().copied().collect()
+    }
+
     /// Restore the runtime's global bindings from a [`Heap::snapshot_globals`]
-    /// snapshot, discarding every `def`/`set!` made since it was taken. The
+    /// snapshot, discarding every `def` made since it was taken. The
     /// append-only code slabs are *not* reclaimed (there's no GC yet), but the
     /// bindings revert — so a name `def`'d since the snapshot becomes unbound
     /// again, and a rebound name returns to its earlier value.

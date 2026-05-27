@@ -3,7 +3,7 @@
 ;;   (require 'project)       ; loaded on demand; baked into the binary
 ;;   (run-project-tests)      ; find project.blsp, discover tests, run them once
 ;;
-;; This is the policy behind `brood test`. Convention over configuration: `src/`
+;; This is the policy behind `nest test`. Convention over configuration: `src/`
 ;; holds the project's source (added to *load-path*), `tests/` holds tests
 ;; discovered as <name>_test.blsp. A `project.blsp` manifest declares identity
 ;; and may override the conventional paths. Rust supplies only the filesystem
@@ -11,6 +11,12 @@
 ;; is ordinary Brood.
 
 ;; --- the project, as set by the manifest -------------------------------------
+"The project model and test runner behind `nest` (ADR-020), written in Brood.
+Convention over configuration: `src/` holds source (added to *load-path*),
+`tests/` holds <name>_test.blsp cases; a `project.blsp` manifest declares
+identity and may override those paths. Also home to the user-config loader and
+the `nest new` scaffolder."
+
 (def *project-root*         nil)
 (def *project-name*         nil)
 (def *project-version*      nil)
@@ -28,12 +34,12 @@
 ;; conventional source/test paths when given. Missing keys keep their defaults.
 ;; Called when a project.blsp is loaded.
 (defn project (& opts)
-  (set! *project-name*    (plist-get opts :name))
-  (set! *project-version* (plist-get opts :version))
+  (def *project-name*    (plist-get opts :name))
+  (def *project-version* (plist-get opts :version))
   (let (src (plist-get opts :source-paths)
         tst (plist-get opts :test-paths))
-    (when src (set! *project-source-paths* src))
-    (when tst (set! *project-test-paths*   tst)))
+    (when src (def *project-source-paths* src))
+    (when tst (def *project-test-paths*   tst)))
   *project-name*)
 
 ;; --- finding the project + discovering tests ---------------------------------
@@ -85,10 +91,10 @@
 ;; Load the manifest (if present) and put the project's source dirs on *load-path*
 ;; so its modules are require-able by name.
 (defn project-setup (root)
-  (set! *project-root* root)
+  (def *project-root* root)
   (when (file-exists? (path-join root "project.blsp"))
     (load (path-join root "project.blsp")))
-  (set! *load-path*
+  (def *load-path*
         (append (project--abs-paths root *project-source-paths*) *load-path*))
   root)
 
@@ -111,13 +117,13 @@
 ;; --- user config (~/.config/brood/config.blsp) -------------------------------
 ;; A user-level Brood file of tooling preferences — the sibling of project.blsp.
 ;; It's auto-created with documented defaults on first tool use, then loaded by
-;; the `brood` subcommands. Rust mechanism: getenv (locate it) + run-process.
-(def *config-git-init* false)   ; brood new: run `git init` in the new project?
+;; the `nest` subcommands. Rust mechanism: getenv (locate it) + run-process.
+(def *config-git-init* false)   ; nest new: run `git init` in the new project?
 
 ;; The (config ...) form for the user config; sets only the keys it's given.
 (defn config (& opts)
   (let (gi (plist-get opts :git-init))
-    (unless (nil? gi) (set! *config-git-init* gi)))
+    (unless (nil? gi) (def *config-git-init* gi)))
   nil)
 
 (defn config--base-dir ()        ; $XDG_CONFIG_HOME, else ~/.config
@@ -128,9 +134,9 @@
 
 (def *config-default-source*
   (str ";; Brood user config — tooling preferences (the sibling of project.blsp).\n"
-       ";; Edit to taste; any `brood` command re-reads it.\n"
+       ";; Edit to taste; any `nest` command re-reads it.\n"
        "(config\n"
-       "  :git-init false)   ; run `git init` in projects made by `brood new`\n"))
+       "  :git-init false)   ; run `git init` in projects made by `nest new`\n"))
 
 ;; Ensure the config exists (writing a documented default the first time), then
 ;; load it. Called by the `brood` subcommands, so a tool use always leaves an
@@ -144,7 +150,7 @@
     (load p))
   nil)
 
-;; --- scaffolding a new project (`brood new <name>`) --------------------------
+;; --- scaffolding a new project (`nest new <name>`) ---------------------------
 ;; True if the 1-char string `ch` occurs in `s` (a short scan — Brood has no char
 ;; index yet, and project names/paths are short).
 (defn str-contains? (s ch)
@@ -168,21 +174,30 @@
        "  :version \"0.1.0\")\n"))
 
 (defn project--main-template (nm)
-  (str ";; " nm " — main module. Loaded automatically by `brood test`.\n"
-       "(defn greeting () \"hello " nm "\")\n"
+  (str ";; " nm " — main module. Loaded automatically by `nest test`.\n"
+       "\"The " nm " project's main module.\"   ; module docstring (`nest doc`)\n"
        "\n"
-       "(defn main () (println (greeting)))\n"))
+       "(defn greeting ()\n"
+       "  \"Return the project's greeting string.\"\n"
+       "  \"hello " nm "\")\n"
+       "\n"
+       "(defn main ()\n"
+       "  \"Entry point: print the greeting.\"\n"
+       "  (println (greeting)))\n"
+       "\n"
+       "(provide 'main)\n"))
 
 (defn project--test-template (nm)
-  (str ";; Tests for " nm ". `brood test` loads src/ first, so use defs directly.\n"
+  (str ";; Tests for " nm ". `nest test` loads src/ first, so use defs directly.\n"
        "(require 'test)\n"
        "\n"
        "(describe \"" nm "\"\n"
        "  (test \"greeting\" (assert= (greeting) \"hello " nm "\")))\n"))
 
 ;; (new-project "foobar") — scaffold ./foobar with a runnable skeleton:
-;; project.blsp + src/main.blsp + tests/main_test.blsp, so `cd foobar && brood
-;; test` passes immediately. Errors on a bad name or an already-existing folder.
+;; project.blsp + src/main.blsp (a documented `main` module) + tests/main_test.blsp,
+;; so `cd foobar && nest test` passes immediately. Errors on a bad name or an
+;; already-existing folder.
 (defn new-project (nm)
   (unless (project--valid-name? nm)
     (error "new: invalid project name '" nm "' (no '/' or spaces, and not empty)"))
@@ -203,7 +218,7 @@
       (if (= 0 (run-process "git" (list "init" "-q" nm)))
         (println "  initialized a git repository")
         (println "  (git init failed)")))
-    (println (str "Next:  cd " nm " && brood test"))
+    (println (str "Next:  cd " nm " && nest test"))
     nm))
 
 (provide 'project)

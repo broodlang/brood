@@ -2,7 +2,8 @@
 # truth — these targets just give short, memorable commands. Pass extra args
 # with ARGS=..., e.g. `make benchmark ARGS=sum_tail`.
 
-CLI := cargo run -q -p cli
+CLI  := cargo run -q -p cli
+NEST := cargo run -q -p nest
 ARGS ?=
 
 .DEFAULT_GOAL := help
@@ -26,16 +27,20 @@ benchmark: ## Run benchmarks; archive results to docs/benchmarks/<timestamp>.md
 	./scripts/bench.sh $(ARGS)
 
 suite: ## Run the in-language suite via the project runner (discovers tests/**/*_test.blsp)
-	$(CLI) test
+	$(NEST) test
 
 repl: ## Start the REPL
 	$(CLI)
 
-install: ## Install `brood` (REPL, file runner, `brood test`/`new`) into ~/.local/bin
+install: ## Install `brood` (language), `nest` (tooling) and `brood-lsp` (language server) into ~/.local/bin
 	cargo install --path crates/cli --force --root $(HOME)/.local
+	cargo install --path crates/nest --force --root $(HOME)/.local
+	cargo install --path crates/lsp --force --root $(HOME)/.local
 
-uninstall: ## Remove the installed `brood` binary from ~/.local/bin
+uninstall: ## Remove the installed `brood`, `nest` and `brood-lsp` binaries from ~/.local/bin
 	cargo uninstall cli --root $(HOME)/.local
+	cargo uninstall nest --root $(HOME)/.local
+	cargo uninstall brood-lsp --root $(HOME)/.local
 
 fmt: ## Format all Rust code
 	cargo fmt

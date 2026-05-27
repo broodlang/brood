@@ -15,7 +15,7 @@ gate (`eval::call_native`), before the primitive runs — so a wrong-count call 
 a clean arity error (`type-of: expected 1 argument, got 0`) rather than a missing
 arg silently becoming `nil`.
 
-## Native primitive functions (55)
+## Native primitive functions (60)
 
 | Category | Primitive | Arity | Purpose |
 |---|---|---|---|
@@ -52,20 +52,25 @@ arg silently becoming `nil`.
 | | `list-dir` | 1 | entry names directly under a directory (sorted) |
 | | `make-dir` | 1 | create a directory and parents (`mkdir -p`) |
 | | `spit` | 2 | write a string to a file (write-side of `load`) |
+| | `slurp` | 1 | read a whole file into a string (read-side of `spit`; unlike `load`, does not evaluate) |
 | **System** | `getenv` | 1 | environment-variable value, or nil if unset |
 | | `run-process` | 2 | run an external program (`prog`, args list), inherit stdio → exit code |
 | **Macro support** | `macroexpand-1` `macroexpand` | 1 | expand a form (one step / fully) |
 | | `gensym` | 0–1 | a fresh, unique symbol (optional name prefix) |
 | **Source positions** (editor tooling) | `form-pos` | 1 | a form's `[line col]` source position vector, or nil |
 | | `current-file` | 0 | path of the file currently being loaded, or nil |
+| **Introspection** (editor tooling) | `doc` | 1 | a function/macro's docstring, or nil |
+| | `arglist` | 1 | a function/macro's parameter list (required, `&optional`, `& rest`), or nil |
+| | `global-names` | 0 | every globally bound symbol, sorted by spelling (completion / doc generation) |
+| | `bound?` | 1 | whether a symbol is bound in scope → bool |
 | **Errors / control** | `throw` | 1 | raise a value as an error (non-local exit) |
 | | `%try` | 2 | call a thunk; on raise, call the handler with the caught value |
-| | `%isolate` | 1 | call a thunk against a private copy of the globals; roll back its `def`/`set!` afterward (used by `:isolated` tests) |
+| | `%isolate` | 1 | call a thunk against a private copy of the globals; roll back its `def`s afterward (used by `:isolated` tests) |
 | **Processes** | `spawn` | ≥1 | run a function in a new process; returns its pid |
 | | `send` | 2 | copy a message into a pid's mailbox |
-| | `receive` | 0 | take the next message from this process's mailbox (blocking) |
+| | `%receive` | 3 | selective-receive primitive (matcher fn, timeout-ms-or-nil, on-timeout thunk-or-nil); `receive` is a Brood macro over it |
 | | `self` | 0 | this process's pid |
-| | `spawn-count` | 0 | processes spawned since program start (= worker OS threads created) |
+| | `spawn-count` | 0 | green processes spawned since program start |
 | | `peak-threads` | 0 | high-water mark of spawned threads running concurrently (bounded by the CLI's `-j`) |
 | | `worker-threads` | 0 | size of the scheduler's worker-thread pool (≈ nproc; `-j` overrides) |
 
@@ -79,13 +84,17 @@ arithmetic/comparison families (over `%add`/`%lt`/…), `mod` (over `rem`), and
 
 ## Special forms (not primitives)
 
-These are evaluation rules in `crates/lisp/src/eval.rs`, not functions — they
+These are evaluation rules in `crates/lisp/src/eval/mod.rs`, not functions — they
 control how their arguments are evaluated and cannot be passed as values:
 
 ```
-quote  if  when  unless  cond  do  def  set!  fn  lambda
-let  let*  and  or  while  quasiquote  defmacro
+quote  if  do  def  fn  lambda  let  let*  quasiquote  defmacro
 ```
+
+`when`, `unless`, `cond`, `and`, and `or` are **prelude macros**, not special
+forms (ADR-022). There is no `set!` and no `while`: data is immutable and there is
+no local mutation — `def` (redefining a global) is the only mutation, and loops
+are recursion or processes (ADR-026).
 
 ---
 

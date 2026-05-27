@@ -1,7 +1,7 @@
 # Brood types — set-theoretic, gradual, advisory
 
 **Status:** steps 1–2 done; 3–4 started — a v0 advisory checker (`(check 'form)`)
-is the lattice's first consumer (`crates/lisp/src/{types,check}.rs`). This doc is the
+is the lattice's first consumer (`crates/lisp/src/types/{mod,check}.rs`). This doc is the
 plan *and* the compatibility contract: the staircase says what to build next, the
 [Compatibility contract](#compatibility-contract) says what every other change
 must respect so we never drift off this path. Decision recorded in
@@ -27,14 +27,14 @@ lineage behind it.
 
 A `Ty` **is a set of values**, and the type operations *are* set operations:
 
-| Type op | Set op | In `types.rs` |
+| Type op | Set op | In `types/mod.rs` |
 |---|---|---|
 | union (`int \| float`) | `∪` | `Ty::union` (bitwise OR) |
 | intersection | `∩` | `Ty::intersect` (AND) |
 | negation ("not nil") | `¬` | `Ty::negate` (complement) |
 | **subtyping** | `⊆` inclusion | `Ty::is_subtype` — *semantic*, no syntactic rules |
 
-- **Atoms** are the 12 runtime [`Tag`](../crates/lisp/src/value.rs)s
+- **Atoms** are the 12 runtime [`Tag`](../crates/lisp/src/core/value.rs)s
   (`int float string symbol keyword bool nil pair vector fn macro native`). The
   type universe is built from these; `type-of` observes one at runtime.
 - `Ty::NEVER` = `⊥` (empty set, subtype of everything); `Ty::ANY` = `⊤` (all
@@ -55,7 +55,9 @@ A `Ty` **is a set of values**, and the type operations *are* set operations:
   relates by subtyping and *would* error when an `int` is wanted; `dynamic()`
   defers). This is the valve that lets typing coexist with live redefinition.
   (Castagna & Lanvin, ICFP 2017; Castagna et al., POPL 2019 — the reconciliation
-  Elixir uses.)
+  Elixir uses.) **Note:** the advisory *checker* (Step 4) doesn't use `GradualTy`
+  — it carries `Option<Ty>` (known / unknown). `dynamic()` is foundation for a
+  later gradual-*assignment* checker, not the disjointness pass.
 - **Structured types** (function arrows `int -> int`, a vector's element type)
   are a later step; today `Ty` is flat (sets of tags only).
 
@@ -70,13 +72,13 @@ on every builtin enforced at one gate (`eval::call_native`).
 **Done:** tag is observable; errors name op/wanted/got; arity is metadata.
 
 ### Step 1 — the set-theoretic `Ty` lattice ✅
-`crates/lisp/src/types.rs`: `Ty` as a set of tags with union/intersect/negate/
+`crates/lisp/src/types/mod.rs`: `Ty` as a set of tags with union/intersect/negate/
 difference, semantic subtyping, `NEVER`/`ANY`/`NUMBER`/`LIST`, `of_value` bridge,
 `Display`. Pure algebra; nothing in the language consumes it yet.
 **Done:** the algebra exists and is unit-tested in isolation.
 
 ### Step 2 — `dynamic()`, the gradual type ✅
-`types.rs`: `GradualTy { bound: Ty, dynamic: bool }` — `dynamic(bound)` kept
+`types/mod.rs`: `GradualTy { bound: Ty, dynamic: bool }` — `dynamic(bound)` kept
 *inside* the lattice (pure `dynamic()` = `dynamic(ANY)`). `consistent_with` is
 **derived from set inclusion** (static → `bound ⊆ expected`; dynamic → `bound ∩
 expected ≠ ⊥`), not a primitive consistency axiom — so pure `dynamic()` is
@@ -87,25 +89,49 @@ operators). The "redefinable/free/global references are `dynamic()`" rule is
 documented (the struct doc + ADR-024); no checker consumes it yet.
 **Done:** the gradual type and its derived relation exist and are unit-tested.
 
-### Step 3 — typed signatures on primitives 🟡
-Signatures exist as a **table** (`check::primitive_sig`): the discriminating
-primitives (`%add: (number,number)→number`, `first: (list|vector)→any`,
-`string-length: (string)→int`, …). **Still ⬜:** move them onto `NativeFn` so
-*every* builtin declares one, compiler-enforced like `Arity` (contract point #6).
-The table was the pragmatic start — it gave the checker what it needs without
-editing every `def` in the (in-flight) `builtins.rs`.
+### Step 3 — signatures the checker reads 🟡
+A callee's signature (argument `Ty`s + result `Ty`) comes from three sources,
+simplest-first — deliberately **no inference engine** (see the rationale in
+[How it runs](#how-it-runs--and-why-its-outside-the-runtime)):
 
-### Step 4 — local, advisory inference 🟡 (v0 shipped)
-`crates/lisp/src/check.rs` + the `(check 'form)` builtin: walk a macro-expanded
-form and **warn when a primitive gets a provably-wrong argument** — the argument
-type is *disjoint* from what the primitive accepts (`(first 5)`,
-`(%add 1 "x")`). Disjointness (not subtyping) is the rule, so a superset / `any`
-/ unknown argument is never a false positive. Advisory: returns warnings, never
-raises. **Still ⬜:** closure-signature inference (so `(+ 1 "x")` warns, not just
-`%add`), variable **flow/guard narrowing** via `Ty::tested_by` (already prepped:
-`tested_by("int?") → int`, …), threading `GradualTy` for `dynamic()` globals, and
-wiring the checker into the compile pass / a `brood check` so it runs
-automatically (today it's the opt-in `check` builtin).
+- **Primitives** — the `check::primitive_sig` table (have it):
+  `%add: (number,number)→number`, `first: (list|vector)→any`,
+  `string-length: (string)→int`, …
+- **Curated stdlib** — a hand-written table for the variadic / `reduce`-based /
+  higher-order fns the checker can't infer but that matter: `+ - * / < <= > >= =
+  mod`, `map`, `filter`, `reduce`, … Hand-vetted, so sound. This is what makes
+  `(+ 1 "x")` catchable even though `+` is `(reduce %add 0 xs)`.
+- **Basic inference** — *only* for a fn whose body is a **single straight-line
+  expression** (no `if`/`cond`/`when`/`let`/`match`/recursion): constrain each
+  param from its direct argument positions against a known sig; used in call
+  position → `fn`. Anything with a branch / binding / recursion → infer nothing.
+  Sound **because a straight-line use is unconditional** — no control-flow
+  analysis, no fixpoint, no false-positive class. Catches one-liner wrappers
+  (`inc`, `twice`, simple user `defn`s); skips everything subtle.
+
+**Deferred (⬜):** moving the primitive table onto `NativeFn` (enforced, contract
+#6); inference through branches / guards / recursion / higher-order.
+
+### Step 4 — the advisory checker 🟡 (v0 shipped; plan below)
+`crates/lisp/src/types/check.rs`: walk a macro-expanded form and **warn when a
+call passes a provably-wrong argument** — its type is *disjoint* from what the
+callee accepts (`(first 5)`; `(+ 1 "x")` once `+` has a curated sig).
+Disjointness (not subtyping) is the rule, so a superset / unknown argument is
+never a false positive.
+
+- **Vocabulary: `Option<Ty>`, not `GradualTy`.** The checker only asks "do I know
+  this argument's type?": `Some(t)` → check disjointness against the param;
+  `None` (a variable, an unknown call) → stay silent. The gradual machinery
+  isn't needed until we check *assignments*; the disjointness checker doesn't, so
+  it stays out of the hot path.
+- **Skip inside `try` / `error-of` / `assert-error`** — those forms deliberately
+  exercise failures, so don't flag code within them (keeps `nest test` quiet on
+  error-path tests).
+- **Advisory, always** — returns warnings; never raises, never gates (contract #5).
+- ✅ **v0 shipped:** the `(check 'form)` builtin, primitives only.
+- ⬜ **next:** the step-3 curated sigs + basic inference (so closures/stdlib get
+  covered); guard narrowing via `Ty::tested_by` (already prepped:
+  `tested_by("int?") → int`, …).
 
 ### Step 5+ — structured types ⬜
 Function arrows, vector/list element types, intersections for overloaded fns —
@@ -113,6 +139,36 @@ the fuller set-theoretic algebra. Additive; gated on real need (ADR-011). **Note
 this *replaces* the `u16`-bitset representation of `Ty`** (likely an
 `enum { Set(u16), Arrow(..), Vec(elem), … }`), it doesn't extend it — which is a
 reason to keep the flat lattice lean now rather than over-build on the bitset.
+
+## How it runs — and why it's outside the runtime
+
+The checker is a **pre-step at the file/project boundary**, never woven into
+evaluation:
+
+- `brood check <file>` — check a single file (the language binary).
+- `nest check` — check the whole project (the CI / editor entry point).
+- `brood <file>` — check, then run a file.
+- `nest test` — check the project, then run the tests.
+- **Not** in the REPL / `load` / per-form `eval` (maybe later) — so there's no
+  per-eval noise and no suppression machinery beyond the `try`/`error-of` skip.
+
+**Checking is upstream of hot reload, never part of it.** "Don't reload code we
+can already see will fail" is a property of the *workflow that orchestrates the
+reload* — today: run `brood check` first; later: the editor's reload command
+(itself Brood) checks, then reloads — **not** of the `def`/reload primitive. The
+runtime never consults the checker, so: contract #5 holds with **no carve-out**,
+there is nothing to override, and a wrong signature can at worst print a stray
+warning upstream — it can never wedge a reload. (Reloads should be *atomic* —
+broken new code leaves the running version in place — but that's hot-reload
+hygiene, independent of the type checker.) The type system stays **entirely
+external**: it observes and advises; it is never in the execution or reload path.
+
+Why no inference *engine* (ADR-011): full body inference needs control-flow /
+dominance analysis to avoid false positives from *guarded* uses (a param used as
+a number only inside `(if (number? x) …)` doesn't make the param a number). That
+machinery is the bulk of the complexity and the only false-positive source — so
+we cut it, keeping curated sigs + the trivially-sound straight-line case, and add
+more only when a concrete need justifies it.
 
 ## Compatibility contract
 
@@ -155,10 +211,14 @@ marked **(enforced)** are compile errors if violated; the rest are review rules.
 
 ## Where it lives
 
-- `crates/lisp/src/types.rs` — the `Ty` lattice (step 1) and `GradualTy` (step 2).
-- `crates/lisp/src/value.rs` — `Tag` (the atoms), `value::tag`, `NativeFn` (gets
-  a signature in step 3).
-- `crates/lisp/src/eval.rs` — `call_native` (arity gate today; the natural place
-  the checker’s results would feed specialisation later).
-- `crates/lisp/src/macros.rs` — `macroexpand_all`, the compile pass step 4 runs
+(After the `core/` / `syntax/` / `eval/` / `types/` module split.)
+
+- `crates/lisp/src/types/mod.rs` — the `Ty` lattice (step 1), `GradualTy`
+  (step 2), and `tested_by` (the guard-narrowing bridge for step 4).
+- `crates/lisp/src/types/check.rs` — the advisory checker: the signature sources
+  (step 3) and the disjointness walk (step 4).
+- `crates/lisp/src/core/value.rs` — `Tag` (the atoms), `value::tag`, `NativeFn`
+  (gains a signature when step 3's table moves onto it).
+- `crates/lisp/src/eval/mod.rs` — `call_native` (the arity gate).
+- `crates/lisp/src/eval/macros.rs` — `macroexpand_all`, the pass the checker runs
   after.

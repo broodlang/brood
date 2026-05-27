@@ -925,3 +925,252 @@ by humans, LLMs and Emacs (the user: "why is it not always structured?").
 
 **Verified.** `cargo test` green (Rust + 161-test Brood suite + doc-test); a
 throwaway failing project renders the block with per-assertion `line:col`.
+
+### Language server — design only, no code yet (2026-05-27)
+
+**Goal.** Answer "how hard is an LSP, as a separate binary?" and lay a foundation
+that doesn't get brute-forced one feature at a time.
+
+**Finding.** A diagnostics-only server is ~1–2 days — `Interp` is already a clean
+reusable boundary and `LispError` already carries `kind`/`pos`/`file`. The richer
+features (hover, goto, completion, rename) all hinge on one missing thing:
+**per-occurrence source spans**, which the eval `Value` can't carry (symbols are
+`Copy`/interned/deduplicated; `form-pos` positions only list-form starts).
+
+**Decision (design).** [ADR-025](decisions.md#adr-025--a-lossless-span-carrying-cst-for-tooling-separate-from-the-eval-value):
+a lossless, heap-free, error-tolerant **CST** in `syntax::cst`, separate from the
+reader's `Value`, with a `Span` on every node; a `crates/lsp` (`brood-lsp`)
+binary on `lsp-server`/`lsp-types` (sync — the `Interp` isn't `Sync`); the server
+never evaluates user buffers — syntactic diagnostics from CST `Error` nodes,
+semantic ones from the advisory checker (ADR-024). Full plan, the `parse_cst`
+sketch, and the feature tiers in [`lsp.md`](lsp.md). Next: pick where to start
+(Tier-0 scaffold vs. feature planning).
+
+### Immutability: dropped `set!` and `while` (ADR-026) (2026-05-27)
+
+**Goal.** Commit to immutability as a language invariant. Triggered by noticing
+the maps design asked about mutability without the project ever having decided it.
+
+**The audit.** Brood already had **zero data-mutation primitives** (no
+`set-car!`/`vector-set!`/atoms); data was immutable in practice. The only mutation
+was binding mutation: `def` (rebind a global — load-bearing for hot reload) and
+`set!` (rebind nearest binding). Every real `set!` targeted a *global* (so it was
+doing `def`'s job) except the test framework's process-local `*fails*` accumulator.
+`while` (the lone iteration special form) needs local mutation to make progress and
+had **no Brood users**.
+
+**Done.**
+- **Removed `set!`** — the special form (`eval/mod.rs`) and the now-dead
+  `Heap::env_set` (`core/heap.rs`; `set!` was its only caller). Global `set!` uses
+  → `def` (`std/prelude.blsp` `*features*`, all of `std/project.blsp`, the test
+  framework's registration globals).
+- **Removed `while`** — recursion (TCO-safe) and processes cover looping.
+- **Test framework → throw-and-collect (immutable, multi-failure kept).** A failing
+  assertion `throw`s a tagged record `(:%test-fail loc details)`; the `test` macro
+  splits its body into one thunk per top-level form and `test--run` runs each in its
+  own `try`, folding the caught failures into a list. So a test still reports several
+  failures — with no mutable accumulator (`*fails*` is gone). Limit: multiple asserts
+  nested in one form stop at the first; a non-assertion error stops the test.
+- **The invariant (ADR-026):** Lisp data is immutable; `def` (global rebinding) is
+  the only mutation; mutable state is processes (Erlang model) or Rust-backed
+  resource handles (the coming M2 buffer), never a mutable `Value`. This reinforces
+  the tracing GC (no write barriers), `Send` heaps + copy-on-send, and the
+  append-only shared code region. Net: two fewer special forms, one dead method.
+
+**Verified.** 46 Rust tests + Brood suite + doc-test green; a throwaway failing
+suite confirmed first-failure-per-test, uncaught-error-as-failure, and located
+failure rendering all work. Docs synced (spec, language, primitives, testing,
+roadmap×2, README, components, shared-code) and ADR-026 recorded.
+
+### LSP foundations A + C: the tooling CST, docstrings, introspection (2026-05-27)
+
+**Goal.** Build the substrate an eventual language server reads off (ADR-025),
+without writing the server yet — so features later are thin handlers, not
+brute-forced one at a time. User picks: leading-string docstrings, and "build
+foundations in the lib first, no LSP crate yet."
+
+**Built (Foundation A — the CST).**
+- `syntax::atom` — the shared lexical rules (`AtomKind`, `classify`,
+  `is_delimiter`) the reader and the CST both use, so the two parsers can't
+  drift on what a token is. The reader now delegates to it.
+- `syntax::cst` — a lossless, **heap-free**, **error-tolerant** span tree:
+  `parse(&str) -> Node` always returns a tree (stray closes / unterminated
+  strings / missing closes become `Error` nodes), records a byte `Span` on every
+  node, keeps trivia and quote sugar, and exposes `node_at(offset)` ("what's
+  under the cursor?"). `error::Span` added beside `Pos`. 9 unit tests incl.
+  multibyte spans and recovery.
+
+**Built (Foundation C — docstrings + introspection).**
+- **Docstrings**: a leading string literal in a `fn`/`defn`/`defmacro` body is
+  pulled onto `Closure.doc` *when more body follows* (a lone string stays the
+  return value — CL/Elisp rule). Extracted in `make_closure`, carried through
+  promotion.
+- Primitives (Rust mechanism, derive-don't-store where possible): `(doc f)`,
+  `(arglist f)` (reconstructs `required &optional … & rest` from the closure),
+  `(global-names)` (new `Heap::global_symbols`), `(bound? 'x)`.
+
+**Deferred to Foundation B / later (deliberately):** the CST scope resolver
+(shared with the advisory checker) and definition-location tracking — they pair
+with goto-definition. The `brood-lsp` crate comes after B.
+
+**Verified.** `cargo test` green — 36 lib-unit (incl. 9 CST), 46 e2e, the Brood
+suite, doctest; `brood test` 172/172 (new `tests/introspection_test.blsp`, 11
+tests). Build warning-clean (the 3 remaining are pre-existing in `process.rs`).
+Docs: `docs/lsp.md`, ADR-025, `language.md` (docstrings + introspection),
+`tooling.md` pointer.
+
+### Preemption + selective `receive` with timeouts (same day)
+
+Closed the two scheduler gaps that blocked the editor milestone — both designed
+already as *additive* steps, both built by composing existing machinery rather
+than adding language surface. ADR-027; `scheduler.md` stage 4 + `pattern-matching.md`
+§`receive` flipped to implemented.
+
+**Reduction-counted preemption (fairness).** The scheduler was cooperative — a
+process yielded only at `receive`, so a CPU-bound loop held its worker forever and
+could starve a whole pool. Now `eval`'s `'tail:` loop calls `process::tick()` once
+per iteration (a thread-local `Cell<u32>` decrement, budget ≈2000, reset by the
+worker before each `resume`); at zero a green process yields and is re-queued
+Ready. The coroutine yields a `Suspend` reason — `Receive` (park on mailbox) vs
+`Preempt` (re-queue at the back) — so `run_one` can tell them apart. The root
+thread has no yielder, so it's never preempted (just refreshes its budget).
+Top-of-loop placement is complete (every non-terminating computation re-enters the
+loop) and safe (no lock/borrow held there); TCO untouched.
+
+**Selective `receive`.** Was unconditional FIFO (arity-0, popped the head). Now
+`receive` is a **Brood macro** over a `%receive` primitive (matcher fn, timeout,
+on-timeout thunk), reusing the `match` compiler: `match-build-from` with a `nil`
+no-match continuation + each body wrapped in a thunk → a matcher returning the
+body-thunk on a match or `nil`. `%receive` scans the mailbox, **removes+runs the
+first match, leaves the rest queued** (true selective receive). A `scanned` cursor
+on the mailbox means a parked selective receiver is only re-run on a *new* message.
+`(after ms body...)` bounds the wait (`after 0` = non-blocking poll); a lazily
+started **timer thread** (`BinaryHeap<(deadline,pid)>`) wakes a green process at its
+deadline (root uses `cv.wait_timeout`). Stale timers are harmless (every receiver
+re-validates its own deadline).
+
+**Catchable timeouts (Erlang-style), as the user required.** The `after` body runs
+through the normal `apply`/`throw` path, so `(after ms (throw [:timeout]))`
+propagates out of `%receive` and is caught by the existing `try`/`catch` — no new
+mechanism. Convention `[:timeout]`, paralleling `match`'s `[:match-error …]`.
+
+**Removed:** the old arity-0 `receive` builtin and `process::receive` (replaced by
+`%receive`/`receive_match`); the `processes` group in `suite_test.blsp` (moved).
+
+**Verified.** `cargo test` green incl. a new dedicated **`tests/preemption.rs`**
+(its own binary so `set_max_parallel(1)` is isolated: an infinite hog + a responder
+on one worker — the responder only replies if preemption works; bounded by a 3 s
+`receive` timeout so a regression fails fast instead of hanging). New
+**`tests/concurrency_test.blsp`** (two `:isolated` groups, 15 cases): FIFO,
+out-of-order selective match + leave-queued (root and green), guards, multi-clause,
+nested patterns, `after 0` poll (hit/miss), `after N` on root + green, message-beats-
+timeout, catchable timeout (root + green), throwing matched body + consumption, and
+liveness at scale. `brood test` 187/187. Clippy clean (factored the timer-queue type).
+
+---
+
+## 2026-05-27 — Split the CLI: `brood` (language) + `nest` (project tool)
+
+**Goal.** The single `brood` binary was doing two jobs — running the language
+*and* being the project tool (`brood test`/`brood new`, config, scaffolding).
+Split them, the `rustc`/`cargo` (and `elixir`/`mix`) way, so the language entry
+point stays thin and the project tool can grow on its own. Name chosen with the
+user: **`nest`** (the workspace that holds a brood). ADR-028.
+
+**What changed.**
+- **New `crates/nest`** — bin `nest`, depends on the `brood` lib (no subprocess,
+  embeds `Interp` like `brood` does). Subcommands `new <name>` / `test` are a
+  thin shell evaluating `(require 'project) (load-config) …`; policy stays in
+  `std/project.blsp` (ADR-006). Carries its own `-j/--max-parallel`, `--version`,
+  `--help`, and a usage screen on no/unknown command.
+- **`crates/cli` (`brood`) is language-only now** — dropped the `test`/`new` arg
+  branches. Added `--test <file>...` (load files → register cases → `(run-tests)`
+  once; prepends `(require 'test)` so a bare file still works), plus `--version`
+  and `--help`. `brood --test` is a *single-file* run; project-wide discovery is
+  `nest test` — different jobs, not aliases.
+- **Wiring:** workspace `members` gains `crates/nest`; `Makefile` `install`/
+  `uninstall` now cover both binaries, `suite` calls `nest test`; added
+  `bin/nest` launcher.
+- **Docs:** ADR-028 recorded; `brood test`/`brood new` → `nest test`/`nest new`
+  across `components.md` (new `nest` section + diagram), `testing.md`,
+  `tooling.md`, `roadmap.md`, `types.md` (split `check` into `brood check <file>`
+  / `nest check`), `decisions.md` (ADR-020), `lsp.md`, and `std/project.blsp`'s
+  own messages/templates ("Next: cd … && nest test"). CLAUDE.md layout/commands
+  updated.
+
+**Verified.** `cargo build` + `cargo test` green (46 basic + lib + suite + doc).
+`nest new demo` scaffolds and its `nest test` passes; `nest test` at repo root
+187/187. `brood --test` runs a self-contained file; `--help`/`--version` on both
+binaries. A test file that needs project `src/` correctly fails under
+`brood --test` (no project setup) and passes under `nest test` — the intended
+distinction.
+
+## 2026-05-27 — Module docstrings + `nest doc` extraction
+
+**Goal.** Function/macro docstrings already existed (ADR-025); add module-level
+docs and a tool to extract them. ADR-029.
+
+**What changed.**
+- **Module doc = a file's leading string form** — the file-level analogue of the
+  function-docstring rule; no new special form. Added module docstrings to
+  `std/test.blsp` and `std/project.blsp` (dogfooding).
+- **`std/docs.blsp`** — new baked-in module (`provide 'docs`). `generate-docs` /
+  `document-module` / `document-file` render Markdown by snapshotting
+  `(global-names)`, loading the module, and documenting the new names via the
+  existing `(doc f)`/`(arglist f)`; the module docstring is read from source.
+  `project` is required lazily so it stays out of the snapshot when it's the
+  target.
+- **`nest doc [module]`** — new subcommand (thin shell over `generate-docs`); no
+  operand documents the whole project, a name documents one module.
+- **Rust mechanism:** added `slurp` (read-side of `spit`); made `(global-names)`
+  return names sorted by spelling (deterministic docs + better completion);
+  registered `docs` in `EMBEDDED_MODULES`.
+- **Tests:** `tests/docs_test.blsp` (leading-doc rule, name-delta, classification,
+  basename, exact entry rendering); `slurp` round-trip + missing-file error in
+  `crates/lisp/tests/basic.rs`.
+- **Docs:** ADR-029; `language.md` (module docstrings), `tooling.md` (`nest doc`),
+  `primitives.md` (`slurp` + the previously-undocumented introspection group;
+  count → 60), `lsp.md` (resolved the "`(doc f)` pending" note).
+
+**Known limit.** Attribution is load-order dependent (empty delta for an
+already-loaded module; transitive `require`s leak in). The order-independent fix
+is the static CST walk planned in `docs/lsp.md`.
+
+**Verified.** `cargo test` green (48 basic + lib + Brood suite + doc). `nest doc
+test`/`doc project` render module docstring + signatures; unknown module errors
+cleanly; `nest --help` lists `doc`.
+
+---
+
+## 2026-05-27 — Immutability cleanup: lighter env frames + dedup
+
+**Context.** With immutability now an invariant (ADR-026), swept the Rust kernel
+for machinery that mutation used to justify. Confirmed the big cleanup already
+landed cleanly — no `set!`/`while`/`env_set` remnants, no mutable accessors to
+`Value` data (`grep` for `*_mut`/`set_car`/… is empty), and all interior
+mutability is legitimately scoped (the `def`/hot-reload global table, the
+interner, scheduler state). Two genuine wins remained.
+
+**Lexical env frames: `HashMap` → association list.** `EnvFrame.vars` was a
+`HashMap<Symbol, Value>`. But frames hold a handful of bindings (params, a
+`let`'s names) and are immutable after their bind phase, so a build-once /
+scan-to-read `Vec<(Symbol, Value)>` is both simpler *and* faster at these sizes —
+no per-frame hash allocation, no hashing. Lookups scan from the end so a later
+binding shadows an earlier same-named one (sequential `let`). Measured on the
+`divan` benches: **~18% faster** across the function-call hot path (fib(25)
+1.556 s → 1.278 s; sum_tail(100000) 718 ms → 586 ms). The global table stays a
+`HashMap` (large, lookup-heavy, and the one mutable structure).
+
+**Dedup: one definition of "sequence form → `Vec`".** `as_binding_vec`, the head
+of `parse_params`, and `parse_optional` each re-implemented the list/vector/nil →
+`Vec<Value>` coercion that `Heap::seq_items` already provides. Routed all three
+through `seq_items` (via `.map_err` to keep each site's specific message),
+removing ~20 lines.
+
+**Also.** `global_names` now uses `sort_by_cached_key` (the sort key
+`symbol_name` locks the interner and allocates, so resolve each once) — clears
+the lone clippy warning.
+
+**Verified.** `cargo test -p brood` green (46 + 48 + Brood suite + doc). The
+unrelated `crates/lsp` workspace member (in progress, no `main.rs` yet) breaks a
+full `cargo test`; scoped to `-p brood`.

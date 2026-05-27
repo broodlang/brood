@@ -17,7 +17,7 @@ new Rust; **[Brood]** = can be written in the prelude.
 
 - ✅ Reader: lists, vectors, atoms, keywords, strings, `'`/`` ` ``/`~`/`~@`, comments
 - ✅ Tree-walking evaluator with **proper tail calls**; lexical scope; closures; Lisp-1
-- ✅ Special forms: `quote if when unless cond do def set! fn lambda let let* and or while quasiquote defmacro`
+- ✅ Special forms: `quote if when unless cond do def fn lambda let let* and or quasiquote defmacro` (no `set!`/`while` — data is immutable, loops are recursion; ADR-026)
 - ✅ **Macros**: `defmacro`, quasiquote, `macroexpand`/`macroexpand-1`, `gensym`
 - ✅ Functions: `defn`, `&optional` (defaults), `& rest`; strict arity
 - ✅ Numbers: i64 + f64, overflow-checked `+ - * /`, `mod`/`rem`, comparisons
@@ -126,9 +126,7 @@ and don't conflict with the concurrency work. Concurrency lands in phases:
 - ✅ **Green M:N on a worker pool** via stackful coroutines (`corosensei`) — each
   process is a coroutine that **suspends** at `receive` (not blocks); a pool of
   ≈`nproc` worker threads (a setting, `-j` overrides) runs them. Spawn is cheap;
-  OS threads bounded; the old `Gate` deadlock is gone. Scheduling is **cooperative**
-  (yield at `receive`); work-stealing and reduction-counted preemption are the
-  deferred follow-ups below. ADR-018, `docs/scheduler.md`.
+  OS threads bounded; the old `Gate` deadlock is gone. ADR-018, `docs/scheduler.md`.
 - ✅ **Shared code** (Erlang-style: share defs, isolate data) — a runtime's inner
   processes share one mutable code region + global table (`Arc<RuntimeCode>`), so
   a `def` reaches a running spawned process on its next lookup (cross-process hot
@@ -139,7 +137,16 @@ and don't conflict with the concurrency work. Concurrency lands in phases:
   handles (valid in any process), and `spawn` already ships a closure + its
   captured environment via `promote`. A `send`-able function value is the small
   remaining step; do it when a concrete need arises.
-- ⬜ later: reduction-counted preemption, then supervision / links
+- ✅ **Reduction-counted preemption** (fairness) — `eval`'s loop decrements a
+  per-worker budget (≈2000) and the process yields its worker at zero, so a
+  CPU-bound process can't monopolise a core. Scheduling is now preemptively fair.
+  ADR-027, `docs/scheduler.md` stage 4.
+- ✅ **Selective `receive` + timeouts** — `receive` takes pattern clauses (the
+  `match` grammar) + an optional `(after ms …)`; scans the mailbox, runs the first
+  match, leaves the rest queued. Green processes are woken at the deadline by a
+  timer thread; timeouts are catchable (`throw` in the `after` body → `try`/`catch`).
+  A Brood macro over a `%receive` primitive. ADR-027, `docs/pattern-matching.md`.
+- ⬜ later: work-stealing; supervision / links / monitors / registered names
 - ⬜ **Distribution across nodes** (future, kept in mind) — link named runtimes
   over TCP; pids carry node identity; `send`/`spawn` stay location-transparent.
   Falls out of share-nothing + copy-on-send (the network is a longer copy). See

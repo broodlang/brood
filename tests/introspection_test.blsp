@@ -1,0 +1,48 @@
+;; Introspection primitives for editor tooling (ADR-025; docs/lsp.md):
+;; doc, arglist, global-names, bound?. Register-only — discovered and run by
+;; `brood test` (and cargo test, via crates/lisp/tests/suite.rs).
+
+(require 'test)
+
+(describe "docstrings"
+  (test "a leading string is a docstring when more body follows"
+    (defn squared (x) "Return x times itself." (* x x))
+    (assert= (doc squared) "Return x times itself.")
+    ;; …and it is stripped from the body, not evaluated/returned.
+    (assert= (squared 4) 16))
+  (test "a lone string body is the return value, not a docstring"
+    (defn greeting (who) "hello")
+    (assert= (doc greeting) nil)
+    (assert= (greeting 'x) "hello"))
+  (test "macros carry docstrings too"
+    (defmacro inc! (x) "Add one." `(+ ~x 1))
+    (assert= (doc inc!) "Add one."))
+  (test "doc of a non-function is nil"
+    (assert= (doc 42) nil)
+    (assert= (doc "a string") nil)))
+
+(describe "arglist"
+  (test "required params"
+    (defn pair (a b) (list a b))
+    (assert= (arglist pair) '(a b)))
+  (test "&optional params are listed after a marker"
+    (defn opt (a &optional (b 10)) (+ a b))
+    (assert= (arglist opt) '(a &optional b)))
+  (test "& rest is reconstructed"
+    (defn variadic (a b & more) a)
+    (assert= (arglist variadic) '(a b & more)))
+  (test "arglist of a non-function is nil"
+    (assert= (arglist 42) nil)))
+
+(describe "global table introspection"
+  (test "bound? reflects the global table"
+    (defn a-defined-name () nil)
+    (is (bound? 'a-defined-name))
+    (is (bound? 'map))                      ; a prelude binding
+    (refute (bound? 'definitely-not-bound-xyz)))
+  (test "bound? wants a symbol"
+    (assert-error (bound? 42)))
+  (test "global-names includes prelude and user definitions"
+    (defn another-name () nil)
+    (is (member? 'map (global-names)))
+    (is (member? 'another-name (global-names)))))

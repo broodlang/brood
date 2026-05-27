@@ -15,7 +15,8 @@ machine" mode flag.
 > - **Stage 2 (done):** structured test reporter with per-assertion source
 >   locations; `form-pos` / `current-file` introspection (below).
 > - **Stage 3 (planned):** richer introspection (`arglist`, completions) for
->   eldoc / completion-at-point / xref.
+>   eldoc / completion-at-point / xref — generalised across editors by a
+>   language server (`brood-lsp`). Design: [`lsp.md`](lsp.md) / ADR-025.
 
 ## Error output: GNU `FILE:LINE:COL:`
 
@@ -63,7 +64,7 @@ into.
 
 ## Test output: a structured block per failure
 
-`brood test` reports each failed assertion as a GNU-anchored block — the first
+`nest test` reports each failed assertion as a GNU-anchored block — the first
 line is the editor-parseable `FILE:LINE:COL:`, the rest are indented labelled
 fields:
 
@@ -88,10 +89,37 @@ reading. The `is` / `assert=` / `refute` / `assert-error` macros (in
 before it macro-expands — and embed the `(file line col)` into a structured
 failure record `(loc detail-lines)`. The runner prints those records.
 
+## Documentation output: Markdown from `nest doc`
+
+`nest doc [module]` emits Markdown documentation to stdout: with no operand it
+documents the whole project (every source file under it); with a module name it
+documents that one module (a baked-in std module, or one on `*load-path*`). Each
+module renders as a `# module <name>` heading, the module docstring (the file's
+leading string form, if any), a `## Definitions` section with each function /
+macro as a `### (name args…)` heading plus its docstring, and a `## Variables`
+list of non-function bindings.
+
+### How this is produced
+
+Policy is Brood (`std/docs.blsp`); Rust supplies only the mechanism. The tool
+**loads the module and introspects it** rather than parsing source: it snapshots
+`(global-names)`, loads the module, and the new names are what it defined — read
+back via the existing `(doc f)` / `(arglist f)`. The module docstring is read
+from source with `slurp` + `read-string` (a leading string form is discarded on
+load, so it can't be recovered by introspection). This reuses the canonical
+docstring machinery and is one-shot, unlike the continuously-running LSP, which
+must never evaluate user code (see `docs/lsp.md`).
+
+One consequence of the load-and-diff attribution: a module **already loaded**
+before the snapshot yields an empty delta, so it can't be re-documented in the
+same process (this is why `docs` lazily requires `project`). Accurate
+attribution independent of load order is the job of the static CST walk planned
+in `docs/lsp.md`.
+
 ## Editor side (Emacs)
 
 `M-x brood-run` (`C-c C-c`) runs the current file and `M-x brood-test`
-(`C-c C-t`) runs `brood test`, both in a `brood-compilation-mode` buffer (run
+(`C-c C-t`) runs `nest test`, both in a `brood-compilation-mode` buffer (run
 through a pipe, so output is clean and un-coloured). That mode uses the built-in
 `gnu` matcher plus a position-less fallback, so `next-error` / clicking jumps
 straight to the failing line. Everything lives in `lisp/progmodes/brood.el`.

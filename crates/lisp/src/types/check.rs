@@ -1,40 +1,52 @@
-//! Step 4 (v0): a small **advisory** type checker — the first consumer of the
-//! `Ty`/`GradualTy` lattice, so the type system finally *does* something.
+//! Step 4: a small **advisory** type checker — the consumer of the `Ty` lattice,
+//! so the type system actually *does* something.
 //!
-//! It walks a macro-expanded form and warns when a **primitive** is called with
-//! an argument that is *provably* the wrong type — e.g. `(first 5)` or
-//! `(%add 1 "x")`. "Provably wrong" means the argument's type is **disjoint**
-//! from what the primitive accepts (they share no tag). That's the conservative
-//! choice that gives **no false positives**: a superset type (`number` where
-//! `int` is wanted), an `any` result, or an unknown/`dynamic()` argument all
-//! overlap the expected type, so they're never flagged. It never rejects
-//! anything — it returns warnings (contract point #5).
+//! It walks a macro-expanded form and warns when a call passes an argument that
+//! is *provably* the wrong type — its type is **disjoint** from what the callee
+//! accepts (`(first 5)`, `(+ 1 "x")`). Disjointness (not subtyping) is the rule,
+//! so a superset (`number` where `int` is wanted), an `any` result, or an
+//! unknown argument all overlap the expected type and are never flagged — **no
+//! false positives**. It never raises and never gates — it returns warnings
+//! (contract point #5).
 //!
-//! Scope of v0 (each a later increment):
-//! - Only **primitive** calls are checked; `(+ 1 "x")` doesn't warn because `+`
-//!   is a Brood closure — closure-signature inference comes later.
-//! - Argument types come from **literals** and from the **result type of a
-//!   nested primitive call**; variables are `dynamic()`. No flow/guard narrowing
-//!   yet (the `Ty::tested_by` bridge is ready for that step).
-//! - Primitive signatures live in [`primitive_sig`] here; per contract point #6
-//!   they should eventually move onto `NativeFn` (enforced, like `Arity`).
+//! Signatures come from two tables: primitives ([`primitive_sig`]) and curated
+//! stdlib closures ([`curated_sig`] — `+`, `<`, `map`, …). Argument types come
+//! from literals and from a nested call's result type; a variable is unknown
+//! (`None`) and never flagged.
+//!
+//! Vocabulary is `Option<Ty>` (known / unknown), not `GradualTy` — the
+//! disjointness check only needs "do I know this type?". Forms inside `try` /
+//! `error-of` / `assert-error` are skipped (they deliberately exercise failures).
+//!
+//! Not yet (later increments): inferring signatures from a fn body, guard
+//! narrowing (`Ty::tested_by` is prepped), and running automatically in
+//! `brood check`/`run`/`test`. Today the entry point is the `(check 'form)`
+//! builtin.
 
 use crate::core::heap::Heap;
-use crate::types::{GradualTy, Ty};
 use crate::core::value::{self, Tag, Value};
+use crate::types::Ty;
 
-/// A primitive's type signature: the expected type of each fixed positional
-/// argument, and the result type. (Variadic primitives — `str`, `vector`, the
-/// predicates — take `any`, so they have no useful signature and are omitted.)
+/// A callee's type signature: the expected type of each fixed positional
+/// argument, an optional type for variadic trailing args (`rest`), and the
+/// result type.
 struct Sig {
     params: Vec<Ty>,
+    rest: Option<Ty>,
     ret: Ty,
 }
 
-/// The signature of a primitive by name, or `None` if it isn't usefully typed
-/// (variadic / all-`any` params). The single source of truth for the checker;
-/// the values are the discriminating ones — those with non-`any` parameters,
-/// where a wrong-typed literal is catchable.
+impl Sig {
+    /// The type expected at argument position `i` — the fixed params, then
+    /// `rest` for anything beyond. `None` means "accepts anything here".
+    fn param(&self, i: usize) -> Option<Ty> {
+        self.params.get(i).copied().or(self.rest)
+    }
+}
+
+/// The signature of a **primitive** by name, or `None` if it isn't usefully
+/// typed (variadic / all-`any` params). The discriminating ones — those with
+/// non-`any` parameters, where a wrong-typed argument is catchable.
 fn primitive_sig(name: &str) -> Option<Sig> {
     let int = Ty::of(Tag::Int);
     let num = Ty::NUMBER;
@@ -43,48 +55,96 @@ fn primitive_sig(name: &str) -> Option<Sig> {
     let any = Ty::ANY;
     // `first`/`rest` accept a list (nil ∪ pair) or a vector.
     let seq = Ty::LIST.union(vector);
+    let s = |params: Vec<Ty>, ret: Ty| Sig {
+        params,
+        rest: None,
+        ret,
+    };
     Some(match name {
-        "%add" | "%sub" | "%mul" | "%div" => Sig { params: vec![num, num], ret: num },
-        "%lt" => Sig { params: vec![num, num], ret: Ty::of(Tag::Bool) },
-        "mod" | "rem" => Sig { params: vec![int, int], ret: int },
-        "first" | "rest" => Sig { params: vec![seq], ret: any },
-        "vector-ref" => Sig { params: vec![vector, int], ret: any },
-        "vector-length" => Sig { params: vec![vector], ret: int },
-        "string-length" => Sig { params: vec![string], ret: int },
-        "substring" => Sig { params: vec![string, int, int], ret: string },
+        "%add" | "%sub" | "%mul" | "%div" => s(vec![num, num], num),
+        "%lt" => s(vec![num, num], Ty::of(Tag::Bool)),
+        "rem" => s(vec![int, int], int),
+        "first" | "rest" => s(vec![seq], any),
+        "vector-ref" => s(vec![vector, int], any),
+        "vector-length" => s(vec![vector], int),
+        "string-length" => s(vec![string], int),
+        "substring" => s(vec![string, int, int], string),
         _ => return None,
     })
 }
 
-/// The static type of an expression form, as a [`GradualTy`]. Self-evaluating
-/// literals get their exact tag; a variable (bare symbol) or anything we can't
-/// pin is `dynamic()`; a primitive call gets that primitive's result type; a
-/// `quote`d datum gets the datum's tag.
-fn expr_ty(heap: &Heap, form: Value) -> GradualTy {
+/// Signatures for the stable stdlib **closures** the checker can't infer but
+/// that matter: the arithmetic/comparison kernel (variadic over numbers) and the
+/// core higher-order fns. Hand-vetted, so sound — this is what makes `(+ 1 "x")`
+/// catchable even though `+` is `(reduce %add 0 xs)`.
+fn curated_sig(name: &str) -> Option<Sig> {
+    let int = Ty::of(Tag::Int);
+    let num = Ty::NUMBER;
+    let any = Ty::ANY;
+    let seq = Ty::LIST.union(Ty::of(Tag::Vector));
+    let callable = Ty::of(Tag::Fn).union(Ty::of(Tag::Native));
+    Some(match name {
+        // variadic arithmetic: every argument must be a number
+        "+" | "-" | "*" | "/" => Sig {
+            params: vec![],
+            rest: Some(num),
+            ret: num,
+        },
+        // variadic comparison: numeric args, boolean result
+        "<" | "<=" | ">" | ">=" => Sig {
+            params: vec![],
+            rest: Some(num),
+            ret: Ty::of(Tag::Bool),
+        },
+        // `mod` is Brood (over `rem`), but its types are fixed
+        "mod" => Sig {
+            params: vec![int, int],
+            rest: None,
+            ret: int,
+        },
+        // higher-order: first arg callable, second a sequence
+        "map" | "filter" => Sig {
+            params: vec![callable, seq],
+            rest: None,
+            ret: seq,
+        },
+        "reduce" => Sig {
+            params: vec![callable, any, seq],
+            rest: None,
+            ret: any,
+        },
+        _ => return None,
+    })
+}
+
+/// The signature for `name`, from either table (primitive, then curated stdlib).
+fn sig_of(name: &str) -> Option<Sig> {
+    primitive_sig(name).or_else(|| curated_sig(name))
+}
+
+/// The static type of an expression form, or `None` when it can't be pinned (a
+/// variable, or a call whose callee has no known signature). `None` is "unknown"
+/// and is never flagged. Self-evaluating literals get their exact tag; a `quote`d
+/// datum gets the datum's tag; a call with a known signature gets its result type.
+fn expr_ty(heap: &Heap, form: Value) -> Option<Ty> {
     match form {
         // A bare symbol in code is a variable reference — unknown.
-        Value::Sym(_) => GradualTy::dynamic(),
-        Value::Pair(_) => match list_items(heap, form) {
-            Some(items) => match items.first().copied() {
+        Value::Sym(_) => None,
+        Value::Pair(_) => {
+            let items = list_items(heap, form)?;
+            match items.first().copied() {
                 Some(Value::Sym(s)) => {
                     let head = value::symbol_name(s);
                     if head == "quote" {
-                        return items
-                            .get(1)
-                            .map(|&d| GradualTy::stat(Ty::of_value(d)))
-                            .unwrap_or_else(GradualTy::dynamic);
+                        return items.get(1).map(|&d| Ty::of_value(d));
                     }
-                    match primitive_sig(&head) {
-                        Some(sig) => GradualTy::stat(sig.ret),
-                        None => GradualTy::dynamic(),
-                    }
+                    sig_of(&head).map(|sig| sig.ret)
                 }
-                _ => GradualTy::dynamic(),
-            },
-            None => GradualTy::dynamic(),
-        },
+                _ => None,
+            }
+        }
         // Int / Float / Str / Keyword / Bool / Nil / Vector: self-evaluating.
-        other => GradualTy::stat(Ty::of_value(other)),
+        other => Some(Ty::of_value(other)),
     }
 }
 
@@ -96,25 +156,36 @@ pub fn check_form(heap: &Heap, form: Value) -> Vec<String> {
     out
 }
 
+/// Forms whose contents are data (`quote`/`quasiquote`) or deliberately exercise
+/// failures (`try` and the error-asserting test helpers it expands from) — don't
+/// look inside them.
+fn skips_body(name: &str) -> bool {
+    matches!(
+        name,
+        "quote" | "quasiquote" | "try" | "error-of" | "assert-error"
+    )
+}
+
 fn check_into(heap: &Heap, form: Value, out: &mut Vec<String>) {
     let Value::Pair(_) = form else { return };
-    let Some(items) = list_items(heap, form) else { return };
+    let Some(items) = list_items(heap, form) else {
+        return;
+    };
     let Some(&head) = items.first() else { return };
 
     if let Value::Sym(s) = head {
         let name = value::symbol_name(s);
-        // `quote`/`quasiquote` enclose data, not code — don't look inside.
-        if name == "quote" || name == "quasiquote" {
+        if skips_body(&name) {
             return;
         }
-        if let Some(sig) = primitive_sig(&name) {
-            for (i, &param) in sig.params.iter().enumerate() {
-                if let Some(&arg) = items.get(i + 1) {
-                    // Warn only on *provable* mismatch: the argument's type shares
-                    // no tag with what the primitive accepts. A superset, `any`,
-                    // or unknown (`dynamic()`, bound `ANY`) argument overlaps the
-                    // param, so it's never flagged — no false positives.
-                    let arg_ty = expr_ty(heap, arg).bound;
+        if let Some(sig) = sig_of(&name) {
+            for (i, &arg) in items[1..].iter().enumerate() {
+                let Some(param) = sig.param(i) else { continue };
+                // Warn only on a *provable* mismatch: the argument's type shares
+                // no tag with what the callee accepts. A superset, an `any`
+                // result, or an unknown argument (`None`) overlaps the param, so
+                // it's never flagged — no false positives.
+                if let Some(arg_ty) = expr_ty(heap, arg) {
                     if arg_ty.is_disjoint(param) {
                         out.push(format!(
                             "{}: argument {} expects {}, got {} ({})",
@@ -165,11 +236,15 @@ mod tests {
 
     #[test]
     fn flags_literal_misuse_of_primitives() {
-        assert!(warnings("(first 5)").iter().any(|w| w.contains("first") && w.contains("int")));
+        assert!(warnings("(first 5)")
+            .iter()
+            .any(|w| w.contains("first") && w.contains("int")));
         assert!(warnings("(string-length :k)")
             .iter()
             .any(|w| w.contains("string-length") && w.contains("keyword")));
-        assert!(warnings("(%add 1 \"x\")").iter().any(|w| w.contains("%add")));
+        assert!(warnings("(%add 1 \"x\")")
+            .iter()
+            .any(|w| w.contains("%add")));
         assert!(warnings("(vector-ref [1 2] :k)")
             .iter()
             .any(|w| w.contains("vector-ref")));
@@ -205,9 +280,31 @@ mod tests {
     }
 
     #[test]
-    fn closures_are_not_checked_yet() {
-        // `+` is a Brood fn, not a primitive — no signature, so no warning (yet).
-        assert!(warnings("(+ 1 \"x\")").is_empty());
+    fn curated_closures_are_checked() {
+        // `+`, `<`, `map` are Brood closures, but their curated sigs let us flag
+        // provable misuse — the headline cases.
+        assert!(warnings("(+ 1 \"x\")")
+            .iter()
+            .any(|w| w.contains('+') && w.contains("number")));
+        assert!(warnings("(< 1 :k)").iter().any(|w| w.contains('<')));
+        // map's first argument must be callable; an int is not.
+        assert!(warnings("(map 1 xs)")
+            .iter()
+            .any(|w| w.contains("map") && w.contains("argument 1")));
+        // Correct uses, and an unknown (variable) callable, stay silent.
+        assert!(warnings("(+ 1 2)").is_empty());
+        assert!(warnings("(map inc xs)").is_empty()); // inc is a variable → unknown
+    }
+
+    #[test]
+    fn skips_error_testing_forms() {
+        // `try` and the error-asserting helpers deliberately exercise failures,
+        // so misuse inside them is not flagged.
+        assert!(warnings("(try (first 5) (catch e e))").is_empty());
+        assert!(warnings("(error-of (first 5))").is_empty());
+        assert!(warnings("(assert-error (first 5))").is_empty());
+        // ...but a sibling form outside the skipped one is still checked.
+        assert!(!warnings("(do (first 5) (try (first 6) (catch e e)))").is_empty());
     }
 
     #[test]
@@ -215,7 +312,9 @@ mod tests {
         assert!(warnings("(mod 7 3)").is_empty());
         assert!(warnings("(mod 7 \"x\")").iter().any(|w| w.contains("mod")));
         assert!(warnings("(rem :a 3)").iter().any(|w| w.contains("rem")));
-        assert!(warnings("(vector-length 5)").iter().any(|w| w.contains("vector-length")));
+        assert!(warnings("(vector-length 5)")
+            .iter()
+            .any(|w| w.contains("vector-length")));
         assert!(warnings("(substring \"hi\" \"a\" 1)")
             .iter()
             .any(|w| w.contains("substring") && w.contains("argument 2")));

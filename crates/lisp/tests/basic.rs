@@ -145,6 +145,25 @@ fn eval_and_read_string() {
 }
 
 #[test]
+fn slurp_round_trips_a_file() {
+    // `slurp` is the read counterpart of `spit`: write a file, read it back, get
+    // the same bytes. Used by the doc tooling to inspect a module's source.
+    let mut path = std::env::temp_dir();
+    path.push(format!("brood-slurp-{}.tmp", std::process::id()));
+    let path = path.to_string_lossy().replace('\\', "\\\\");
+    let src = format!("(spit \"{p}\" \"hello\\n\") (= (slurp \"{p}\") \"hello\\n\")", p = path);
+    assert_eq!(run(&src), "true");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn slurp_of_a_missing_file_errors() {
+    Interp::new()
+        .eval_str("(slurp \"/no/such/brood/file.blsp\")")
+        .expect_err("slurp of a missing path should error");
+}
+
+#[test]
 fn type_of_reports_the_runtime_tag() {
     assert_eq!(run("(type-of 1)"), ":int");
     assert_eq!(run("(type-of 1.5)"), ":float");
@@ -222,7 +241,7 @@ fn check_builtin_flags_provable_misuse() {
     assert!(run("(check '(string-length :k))").contains("string-length"));
     assert_eq!(run("(check '(first (list 1 2)))"), "nil"); // arg type unknown → no warning
     assert_eq!(run("(check '(+ 1 2))"), "nil"); // closure, not a primitive
-    // It is advisory — it never raises, even on the misuse it reports.
+                                                // It is advisory — it never raises, even on the misuse it reports.
     assert_eq!(run("(do (check '(first 5)) :ok)"), ":ok");
 }
 
@@ -459,7 +478,7 @@ fn spawned_process_picks_up_redefinition() {
 }
 
 /// `%isolate` runs a thunk against a private copy of the global bindings: a
-/// `def`/`set!` it makes takes effect *inside* the thunk but is rolled back when
+/// `def` it makes takes effect *inside* the thunk but is rolled back when
 /// it returns. This is what gives `:isolated` tests true state isolation — a
 /// test's definitions can't leak to any other test (see std/test.blsp).
 #[test]

@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
-use crate::error::LispResult;
 use crate::core::heap::Heap;
+use crate::error::LispResult;
 
 /// An interned symbol name (a `u32` id; the spelling lives in a global table).
 pub type Symbol = u32;
@@ -117,6 +117,7 @@ handle!(VecId);
 handle!(StrId);
 handle!(ClosureId);
 handle!(NativeId);
+handle!(MapId);
 handle!(EnvId);
 
 impl EnvId {
@@ -141,6 +142,10 @@ pub enum Value {
     /// A cons cell. Proper lists are pairs chained to a final `Nil`.
     Pair(PairId),
     Vector(VecId),
+    /// An immutable map (`{ }`): key→value associations. Insertion-ordered; keys
+    /// compared by structural equality, so any value can be a key. Every
+    /// operation (`assoc`/`dissoc`) returns a *fresh* map (ADR-026 immutability).
+    Map(MapId),
     /// A closure (`fn`).
     Fn(ClosureId),
     /// A macro — same `Closure` storage, invoked on unevaluated forms.
@@ -175,6 +180,7 @@ pub enum Tag {
     Fn,
     Macro,
     Native,
+    Map,
 }
 
 impl Tag {
@@ -194,6 +200,7 @@ impl Tag {
             Tag::Fn => "fn",
             Tag::Macro => "macro",
             Tag::Native => "native",
+            Tag::Map => "map",
         }
     }
 }
@@ -214,6 +221,7 @@ pub fn tag(v: Value) -> Tag {
         Value::Fn(_) => Tag::Fn,
         Value::Macro(_) => Tag::Macro,
         Value::Native(_) => Tag::Native,
+        Value::Map(_) => Tag::Map,
     }
 }
 
@@ -226,6 +234,11 @@ pub struct Closure {
     pub optionals: Vec<(Symbol, Value)>,
     pub rest: Option<Symbol>,
     pub body: Vec<Value>,
+    /// The docstring: a leading string literal in the `fn`/`defn` body, when
+    /// more body follows it (a lone string is the return value, not docs — the
+    /// CL/Elisp rule). Read by `(doc f)`; powers hover / signature help. See
+    /// ADR-025 / `docs/lsp.md`.
+    pub doc: Option<String>,
     /// The captured lexical environment. `None` means the **global** env —
     /// resolved per-process at call time, so a (shared) top-level closure works
     /// in any process. `Some(id)` is a specific local enclosing scope.

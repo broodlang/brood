@@ -168,7 +168,7 @@ The reconciliation is a matter of *scope*:
   reads return stable references that survive concurrent pushes, so process
   threads read closure bodies without locking while a `def` appends) + a
   `RwLock<HashMap<Symbol, Value>>` global bindings table (read on every global
-  lookup, written on `def`/`set!`).
+  lookup, written on `def` — the only mutation, ADR-026).
 - **The global scope is a sentinel `EnvId::GLOBAL`**, not a frame; the env
   routines route it to `runtime.globals`. A local frame chain bottoms out there;
   a top-level closure captures it symbolically (`Closure.env == None`).
@@ -185,8 +185,8 @@ A closure defined *inside a function call* (not at top level) closes over a loca
 scope. To run such a closure in another process, `promote` also copies its
 captured environment chain into the `RUNTIME` region (`promote_env`) — without
 this, a shared closure with `env = Some(LOCAL …)` would dereference a frame that
-doesn't exist in the other process. (`set!` on a promoted, shared frame is a
-no-op — promoted frames are read-only; a rare, documented limitation.)
+doesn't exist in the other process. (Promoted frames are frozen — sound now that
+bindings are immutable: a `let`/`fn` binding never changes after creation, ADR-026.)
 
 (`send`ing a function — ship a closure handle, now that top-level code is shared —
 remains possible if a concrete need arises.)

@@ -59,6 +59,18 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool) {
             }
             out.push(']');
         }
+        Value::Map(id) => {
+            out.push('{');
+            for (i, (k, v)) in heap.map(id).iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                write_value(out, heap, *k, readable);
+                out.push(' ');
+                write_value(out, heap, *v, readable);
+            }
+            out.push('}');
+        }
         Value::Fn(id) => {
             out.push_str("#<fn");
             if let Some(name) = heap.closure(id).name {

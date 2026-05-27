@@ -1,0 +1,142 @@
+;; Concurrency: reduction-counted preemption (fairness) and selective `receive`
+;; with patterns, guards, and `after` timeouts. See docs/concurrency.md,
+;; docs/scheduler.md, docs/pattern-matching.md.
+;;
+;; Run :isolated — these spawn nested green processes and pass messages, so we
+;; measure them alone rather than contending with the parallel suite. The runner
+;; is the ROOT process here: tests that receive on the runner exercise the root
+;; blocking path (condvar / wait_timeout); tests that spawn a worker exercise the
+;; GREEN path (coroutine suspend, the run-queue wake, and the receive timer).
+;;
+;; Each test fully drains what it puts in the root mailbox, so tests don't leak
+;; messages to one another. Worker functions get distinct names (the whole
+;; :isolated group shares one rolled-back globals copy, so names would otherwise
+;; collide). Preemption proper needs a one-worker pool to be observable and lives
+;; in a dedicated Rust test (crates/lisp/tests/preemption.rs); here we only assert
+;; that many CPU-bound processes all make progress (no deadlock).
+
+(require 'test)
+
+(describe "concurrency: receive" :isolated
+
+  ;; ---- plain FIFO (the no-clause and round-trip forms) ----------------------
+
+  (test "spawn / send / receive round-trip (bare receive doubles a number)"
+    (defn echo-double (parent) (send parent (* (receive) 2)))
+    (let (w (spawn echo-double (self)))
+      (send w 21)
+      (assert= (receive) 42)))
+
+  (test "bare (receive) returns messages in FIFO order"
+    (send (self) :first)
+    (send (self) :second)
+    (assert= (receive) :first)
+    (assert= (receive) :second))
+
+  ;; ---- selective receive: scan, match, leave the rest queued ----------------
+
+  (test "selective receive matches out of order and leaves non-matching queued"
+    (send (self) [:b 1])
+    (send (self) [:a 2])
+    (assert= (receive ([:a x] x)) 2)      ; skips [:b 1], takes [:a 2]
+    (assert= (receive ([:b y] y)) 1))     ; [:b 1] was left queued
+
+  (test "a guard selects the first message that both matches and satisfies it"
+    (send (self) 3)                        ; odd  — pattern matches, guard fails
+    (send (self) 8)                        ; even — taken
+    (assert= (receive (n :when (= 0 (mod n 2)) n)) 8)
+    (assert= (receive (n n)) 3))           ; the odd one is still there
+
+  (test "multiple clauses dispatch on shape"
+    (send (self) [:add 2 3])
+    (assert= (receive ([:mul a b] (* a b))
+                      ([:add a b] (+ a b))) 5))
+
+  (test "nested structured patterns bind through depth"
+    (send (self) [:point [3 4]])
+    (assert= (receive ([:point [x y]] (+ x y))) 7))
+
+  (test "green process suspends past a queued non-match, then drains it"
+    ;; :b arrives first and does NOT match the [:a …] clause, so the worker parks
+    ;; WITH :b queued (the `scanned` park handshake); :a then wakes and matches it.
+    (defn sel-worker (parent)
+      (let (a (receive ([:a x] x)))        ; waits for :a; :b stays queued
+        (let (b (receive ([:b y] y)))      ; now takes the queued :b
+          (send parent [a b]))))
+    (let (w (spawn sel-worker (self)))
+      (send w [:b 1])
+      (send w [:a 2])
+      (assert= (receive) [2 1])))
+
+  ;; ---- after 0: non-blocking poll -------------------------------------------
+
+  (test "(after 0 …) returns the timeout body when nothing matches"
+    (defn poll-empty (parent)
+      (send parent (receive ([:x] :got) (after 0 :nothing))))
+    (let (w (spawn poll-empty (self)))
+      (assert= (receive) :nothing)))
+
+  (test "(after 0 …) takes an already-queued match before timing out"
+    (send (self) :x)
+    (assert= (receive (:x :got) (after 0 :nothing)) :got))
+
+  ;; ---- after N: real timeouts (root condvar path + green timer path) --------
+
+  (test "(after N …) fires on the root after the delay when no message arrives"
+    (assert= (receive (:never x) (after 50 :timed)) :timed))
+
+  (test "(after N …) fires in a green process via the receive timer"
+    (defn timed-worker (parent)
+      (send parent (receive (:never x) (after 50 :timed))))
+    (let (w (spawn timed-worker (self)))
+      (assert= (receive) :timed)))
+
+  (test "a message arriving before the deadline wins over the timeout"
+    (defn race-worker (parent)
+      (send parent (receive (:go :got) (after 1000 :timed))))
+    (let (w (spawn race-worker (self)))
+      (send w :go)                         ; well inside the 1000ms window
+      (assert= (receive) :got)))
+
+  ;; ---- catchable timeouts (Erlang-style: the `after` body can throw) ---------
+
+  (test "a throwing (after …) body is catchable via try/catch (root)"
+    (assert= (try (receive (:never x) (after 30 (throw [:timeout])))
+                  (catch e e))
+             [:timeout]))
+
+  (test "a throwing (after …) body is catchable via try/catch (green)"
+    (defn catch-worker (parent)
+      (send parent (try (receive (:never x) (after 30 (throw [:timeout])))
+                        (catch e e))))
+    (let (w (spawn catch-worker (self)))
+      (assert= (receive) [:timeout])))
+
+  (test "a throwing matched-clause body is catchable, and its message is consumed"
+    (send (self) :boom)
+    (assert= (try (receive (:boom (throw [:handled])))
+                  (catch e e))
+             [:handled])
+    ;; the :boom was removed before its body ran, so the mailbox is now empty
+    (assert= (receive (:boom :still-there) (after 0 :drained)) :drained)))
+
+;; ---- liveness at scale (full preemption proof is the Rust test) --------------
+
+(describe "concurrency: scheduling" :isolated
+
+  (test "many processes all make progress (no deadlock / lost message)"
+    ;; Spawn a batch of processes that each report back, and collect every reply.
+    ;; This is a liveness check — every spawned process must complete and its
+    ;; message arrive — across the worker pool. (Observable preemption needs a
+    ;; one-worker pool; that is crates/lisp/tests/preemption.rs.)
+    (defn sched--worker (parent n) (send parent [:done n]))
+    (defn sched--spawn-n (parent n)
+      (when (> n 0)
+        (spawn sched--worker parent n)
+        (sched--spawn-n parent (- n 1))))
+    (defn sched--collect (got total)
+      (if (= got total)
+        :all-done
+        (sched--collect (receive ([:done _] (+ got 1))) total)))
+    (sched--spawn-n (self) 50)
+    (assert= (sched--collect 0 50) :all-done)))

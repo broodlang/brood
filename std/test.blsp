@@ -24,7 +24,7 @@
 ;;   (describe "mutates a global" :isolated ...)   ; runs ALONE, against a PRIVATE
 ;;                                          ;   copy of the globals: no other test
 ;;                                          ;   runs at the same time, and its
-;;                                          ;   def/set! roll back when it finishes
+;;                                          ;   defs roll back when it finishes
 ;;   (test "touches global state" :isolated ...)   ; a lone isolated test
 ;;
 ;; Why this matters here: a runtime's processes SHARE one global table (see
@@ -66,12 +66,17 @@
 ;; passed). A default `describe` emits one :parallel unit PER test (max
 ;; parallelism); a :serial/:isolated `describe` emits ONE unit holding all its
 ;; tests (so they run in sequence, in a single process).
+"A tiny ExUnit-style test framework, written in Brood. `describe` groups related
+cases and `test` names one; cases run concurrently by default, with `:serial` /
+`:isolated` opt-outs. `run-tests` runs the registered suite once. See
+docs/testing.md for the full guide."
+
 (def *units* nil)         ; all registered units, newest first
 (def *collecting* false)  ; true while a describe body is being registered
 (def *collected* nil)     ; (name thunk) pairs gathered for the current describe
 
 (defn add-unit! (mode group tests)
-  (set! *units* (cons (list mode group tests) *units*)))
+  (def *units* (cons (list mode group tests) *units*)))
 
 ;; Full source location of a form as (file line col), or nil. Captured at
 ;; macro-expansion time (by the assertion macros), while the original read form
@@ -82,11 +87,39 @@
   (let (p (form-pos form))                 ; [line col] vector, or nil
     (if p (list (current-file) (vector-ref p 0) (vector-ref p 1)) nil)))
 
+;; A failing assertion THROWS a tagged failure record rather than mutating shared
+;; state — Brood data is immutable (no accumulator to push onto). The tag is a
+;; `%`-internal keyword the body is exceedingly unlikely to throw itself. `loc` is
+;; (file line col) or nil; `details` is a list of "label: value" strings.
+;; test--record turns a caught throw back into the (loc detail-lines) record the
+;; runner expects.
+(defn test--fail (loc details) (throw (list :%test-fail loc details)))
+(defn test--failure? (e) (and (pair? e) (= (first e) :%test-fail)))
+(defn test--record (e) (list (second e) (third e)))
+
+;; Run a test body that has been split into one thunk PER top-level form, in
+;; order, each in its own `try` — so failures across the body's forms are all
+;; collected, not just the first (a throw ends only its own form, then we move on).
+;; A non-assertion (uncaught) error is recorded and STOPS the test, since later
+;; forms may depend on the one that broke. Returns the failure list (empty = pass).
+(defn test--run (thunks fails)
+  (if (empty? thunks)
+    (reverse fails)
+    (let (outcome (try (do ((first thunks)) :%ok)
+                       (catch e (list :%caught e))))
+      (cond
+        (= outcome :%ok)                  (test--run (rest thunks) fails)
+        (test--failure? (second outcome)) (test--run (rest thunks)
+                                                     (cons (test--record (second outcome)) fails))
+        else                              (reverse (cons (list nil (list (str "uncaught error: "
+                                                                              (second outcome))))
+                                                         fails))))))
+
 ;; A test registers itself: collected into the enclosing describe if there is
 ;; one, otherwise emitted as its own standalone unit (:isolated if flagged).
 (defn register-test! (name thunk isolated?)
   (if *collecting*
-    (set! *collected* (cons (list name thunk) *collected*))
+    (def *collected* (cons (list name thunk) *collected*))
     (add-unit! (if isolated? :isolated :parallel) "" (list (list name thunk)))))
 
 ;; Turn a finished describe's collected tests into units according to its mode:
@@ -104,28 +137,25 @@
                    else                        :parallel)
         body (if (= mode :parallel) forms (rest forms)))
     `(do
-       (set! *collecting* true)
-       (set! *collected* nil)
+       (def *collecting* true)
+       (def *collected* nil)
        (do ~@body)                          ; the (test ...) forms collect themselves
-       (set! *collecting* false)
+       (def *collecting* false)
        (emit-describe! ~mode ~group (reverse *collected*))
        nil)))
 
-;; (test "name" [:isolated] body...) — register one test. Its body runs later,
-;; inside a process-local *fails* accumulator the assertions push onto. An
-;; uncaught error becomes a failure (so a crashing test can't hang the runner: a
-;; dead worker never sends, and `receive` would block forever).
+;; (test "name" [:isolated] body...) — register one test. Each top-level body form
+;; becomes its own thunk; `test--run` runs them in order, each in its own `try`,
+;; collecting a failure record from every form whose assertion fails (so a test
+;; can report several failures). A non-assertion error is recorded and stops the
+;; test, so a crashing test can't hang the runner (a dead worker never sends, and
+;; `receive` would block forever). The thunk returns the failure list (empty = pass).
 (defmacro test (name & forms)
-  (let (iso  (= (first forms) :isolated)
-        body (if iso (rest forms) forms))
+  (let (iso    (= (first forms) :isolated)
+        body   (if iso (rest forms) forms)
+        thunks (map (fn (f) (list 'fn nil f)) body))   ; each form -> (fn () form)
     `(register-test! ~name
-       (fn ()
-         (let (*fails* nil)
-           (try (do ~@body)
-                (catch e
-                  (set! *fails*
-                        (cons (list nil (list (str "uncaught error: " e))) *fails*))))
-           (reverse *fails*)))
+       (fn () (test--run (list ~@thunks) nil))
        ~iso)))
 
 ;; (deftest name body...) — a single test named by a symbol, no group.
@@ -133,10 +163,12 @@
   `(test (str (quote ~name)) ~@body))
 
 ;; --- assertions --------------------------------------------------------------
-;; Macros, not functions: on failure each pushes a message onto the enclosing
-;; test's *fails*; on success they do nothing. They evaluate their operands once,
-;; and they DON'T stop the test — every assertion in a body runs, so one test can
-;; report several failures.
+;; Macros, not functions: on failure each THROWS a tagged failure record (via
+;; `test--fail`); on success they do nothing. They evaluate their operands once.
+;; A throw ends the *body form* it's in, not the whole test — `test--run` runs each
+;; top-level form separately, so a test collects a failure from every form that
+;; fails (several failures per test). Multiple assertions nested inside ONE form
+;; stop at the first. Each failure carries its own source location.
 ;; Each assertion reports the FAILING SOURCE EXPRESSION (quoted at macro time) and
 ;; the actual value — so a failure line is self-identifying: you (or an LLM reading
 ;; the captured run) see exactly which expression failed and what it produced,
@@ -148,44 +180,36 @@
   (let (v (gensym "v") loc (fail-loc expr))
     `(let (~v ~expr)
        (unless ~v
-         (set! *fails*
-               (cons (list (quote ~loc)
-                           (list (str "assert: " (pr-str (quote (is ~expr))))
-                                 (str "actual: " (pr-str ~v))))
-                     *fails*))))))
+         (test--fail (quote ~loc)
+                     (list (str "assert: " (pr-str (quote (is ~expr))))
+                           (str "actual: " (pr-str ~v))))))))
 
 ;; (refute expr) — the negation of `is`: fail if expr is truthy.
 (defmacro refute (expr)
   (let (v (gensym "v") loc (fail-loc expr))
     `(let (~v ~expr)
        (when ~v
-         (set! *fails*
-               (cons (list (quote ~loc)
-                           (list (str "assert: " (pr-str (quote (refute ~expr))))
-                                 (str "actual: " (pr-str ~v) "  (expected falsy)")))
-                     *fails*))))))
+         (test--fail (quote ~loc)
+                     (list (str "assert: " (pr-str (quote (refute ~expr))))
+                           (str "actual: " (pr-str ~v) "  (expected falsy)")))))))
 
 (defmacro assert= (actual expected)
   (let (a (gensym "a") b (gensym "b") loc (fail-loc actual))
     `(let (~a ~actual ~b ~expected)
        (unless (= ~a ~b)
-         (set! *fails*
-               (cons (list (quote ~loc)
-                           (list (str "assert: " (pr-str (quote (assert= ~actual ~expected))))
-                                 (str "actual: " (pr-str ~a))
-                                 (str "expect: " (pr-str ~b))))
-                     *fails*))))))
+         (test--fail (quote ~loc)
+                     (list (str "assert: " (pr-str (quote (assert= ~actual ~expected))))
+                           (str "actual: " (pr-str ~a))
+                           (str "expect: " (pr-str ~b))))))))
 
 (defmacro assert-error (& body)
   ;; Quote the body for the message: the lone form if there's one, else (do …).
   (let (form (if (= (count body) 1) (first body) (cons 'do body))
         loc  (fail-loc (if (= (count body) 1) (first body) nil)))
     `(unless (try (do ~@body false) (catch e true))
-       (set! *fails*
-             (cons (list (quote ~loc)
-                         (list (str "assert: " (pr-str (quote (assert-error ~form))))
-                               "actual: no error was raised"))
-                   *fails*)))))
+       (test--fail (quote ~loc)
+                   (list (str "assert: " (pr-str (quote (assert-error ~form))))
+                         "actual: no error was raised")))))
 
 ;; (error-of body...) — evaluate body and yield the error it raised, so you can
 ;; assert on the *output*: a built-in error comes back as its message string
@@ -243,9 +267,9 @@
   (if (= group "") (str name) (str group " › " name)))
 (defn full-name (r) (label (r-group r) (r-name r)))
 
-;; Run one (name thunk) and produce its result (group name fails ms). The thunk's
-;; failures land in its own process-local *fails*, so running these concurrently
-;; is safe.
+;; Run one (name thunk) and produce its result (group name fails ms). The thunk
+;; returns its own failure list (it catches its first failing assertion), sharing
+;; no mutable state — so running these concurrently is safe.
 (defn run-test (group t)
   (let (start (now)
         fails ((second t))
@@ -253,8 +277,8 @@
     (list group (first t) fails ms)))
 
 ;; Like run-test, but evaluate the body with a private copy of the global
-;; bindings (`%isolate`): an :isolated test's def/set! is rolled back when it
-;; finishes, so it can't leak to any other test. Used only in the isolated phase.
+;; bindings (`%isolate`): an :isolated test's `def`s are rolled back when it
+;; finishes, so they can't leak to any other test. Used only in the isolated phase.
 (defn run-test-fresh (group t)
   (let (start (now)
         fails (%isolate (second t))

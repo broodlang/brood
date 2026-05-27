@@ -1,10 +1,11 @@
 # Step 4b — green M:N scheduler
 
-> Status: **implemented** (cooperative). Stages 1–2 below are done: processes are
-> `corosensei` coroutines on an ≈`nproc` worker pool, suspending at `receive`.
-> Stage 3 (work-stealing) and Stage 4 (reduction-counted preemption) are deferred
-> optimisations. The *rationale* lives in [`concurrency.md`](concurrency.md);
-> this is the build plan and how it landed (ADR-018).
+> Status: **implemented**, now **preemptive**. Stages 1–2 (processes are
+> `corosensei` coroutines on an ≈`nproc` worker pool, suspending at `receive`) and
+> Stage 4 (reduction-counted preemption — ADR-027) are done. Stage 3
+> (work-stealing) remains a deferred optimisation. The *rationale* lives in
+> [`concurrency.md`](concurrency.md); this is the build plan and how it landed
+> (ADR-018, ADR-027).
 
 ## Goal & what changes
 
@@ -124,15 +125,15 @@ RwLock), so concurrent workers reading code is already fine.
    `-j N` sets the count.
 3. **Work-stealing** (optimization). Per-worker deques + steal-on-idle, to cut run-
    queue contention. Optional; only if profiling shows the global queue hurts.
-4. **Reduction-counted preemption** (fairness, later). Until then scheduling is
-   **cooperative**: a process yields only at `receive`. A CPU-bound process with
-   no `receive` (e.g. `(sum-to 100000 0)`) holds its worker until it finishes —
-   acceptable for the editor's mostly-I/O-bound processes, and bounded by the pool
-   size, but it can starve peers on a small pool. The fix is the BEAM's: decrement
-   a *reduction* counter in `eval`'s `'tail:` loop and `yield` when it hits zero
-   (preemptive fairness via cooperative yield points). It's **additive** to this
-   model — no redesign — so it's deferred until the scheduler is integrated and
-   working (per "get it working, then optimise").
+4. ✅ **Reduction-counted preemption** (fairness — ADR-027). Scheduling is no
+   longer cooperative-only: `eval`'s `'tail:` loop decrements a per-worker
+   *reduction* counter (`process::tick`, budget ≈ 2000) and the process yields its
+   worker when it hits zero — a CPU-bound process with no `receive` (e.g. an
+   infinite loop) can no longer monopolise a core. The yield carries a `Suspend`
+   reason (`Receive` → park on the mailbox; `Preempt` → re-queue Ready), so a
+   preempted process goes to the back of the run queue and peers get a turn. The
+   root thread has no yielder, so it just refreshes its budget — never preempted.
+   This was exactly the **additive** step the model promised (no redesign).
 
 ## How this compares to the BEAM (what we copy, what we defer)
 
@@ -141,7 +142,7 @@ The target shape is Erlang's, lean:
 | BEAM | This plan |
 |---|---|
 | one scheduler thread per core, **per-scheduler run queues** | worker pool ≈ core count; **single shared run queue** to start (per-worker + stealing = stage 3) |
-| **reduction-counted preemption** (yield every ~2000 calls) | cooperative-at-`receive` to start; reduction counting is the deferred fairness step (stage 4) |
+| **reduction-counted preemption** (yield every ~2000 calls) | ✅ implemented (ADR-027): `eval` decrements a per-worker budget (~2000) and yields at zero |
 | `receive` suspends until a message arrives | same |
 | process migration / work-stealing across schedulers | deferred (stage 3); `Heap` is `Send`, so migration is *possible* from day one |
 | per-process generational copying GC | per-process arena + top-level reset (ADR-016); tracing GC deferred (Path B) |
@@ -156,7 +157,9 @@ So we're "BEAM-minus-preemption-minus-migration" at first — both are additive 
 - **Panic in a process.** A process that panics (Rust panic, not a Lisp error —
   Lisp errors are `Result`) must not take down its worker. Resuming a panicked
   coroutine: catch/propagate so the worker survives and the process dies cleanly.
-- **Cooperative starvation** (above) until preemption lands.
+- ~~**Cooperative starvation** until preemption lands.~~ Resolved — stage 4
+  (reduction-counted preemption, ADR-027) landed; a CPU-bound process now yields
+  its worker every ≈2000 reductions.
 - **Introspection semantics.** `spawn-count` = green processes; `peak-threads`
   becomes "peak busy workers" (≤ pool size) — update `std/test.blsp`'s summary
   and the wording we just fixed.
@@ -168,4 +171,5 @@ So we're "BEAM-minus-preemption-minus-migration" at first — both are additive 
 ## Out of scope (explicitly deferred)
 
 Precise mid-eval GC (needs Path B / scannable roots), supervision/links,
-reduction preemption, and cross-node distribution. None block 4b.
+work-stealing (stage 3), and cross-node distribution. None block 4b.
+(Reduction preemption was deferred here originally; it has since landed — ADR-027.)

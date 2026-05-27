@@ -11,12 +11,12 @@ Tests live in a project's `tests/` directory as `*_test.blsp` files. The
 only *registers* its cases), and runs the whole suite once:
 
 ```bash
-brood test        # find project.blsp, discover tests/**/*_test.blsp, run them once
+nest test        # find project.blsp, discover tests/**/*_test.blsp, run them once
 make suite        # the same, via cargo
 cargo test        # Rust tests + the same in-language suite (crates/lisp/tests/suite.rs)
 ```
 
-`brood test` walks up from the current directory for a `project.blsp` manifest,
+`nest test` walks up from the current directory for a `project.blsp` manifest,
 so it works from anywhere inside a project.
 
 ## Writing tests
@@ -34,9 +34,11 @@ so it works from anywhere inside a project.
 ```
 
 A `*_test.blsp` file under `tests/` only **registers** its cases like this — it
-does *not* call `(run-tests)`. The project runner (`brood test`) discovers the
-file, loads it, and runs the whole suite once. (You can still call `(run-tests)`
-yourself in an ad-hoc script you run directly with `brood file.blsp`.)
+does *not* call `(run-tests)`. The project runner (`nest test`) discovers the
+file, loads it, and runs the whole suite once. (To run a single self-contained
+test file outside a project, use `brood --test file.blsp` — it loads the file
+and calls `(run-tests)` for you. The language binary `brood` only ever runs a
+*single* file as tests; project-wide discovery is `nest test`.)
 
 - **`(describe "group" body…)`** — names a group of related cases.
 - **`(test "name" body…)`** — one case. The body is any Brood code plus
@@ -61,8 +63,12 @@ and `(number? "nope") is false` — not three identical lines. Use `assert=` for
 equality (it shows both the actual expression's value and the expected value) and
 `is` / `refute` for boolean predicates.
 
-Assertions **do not stop the test** — every assertion in a body runs, so one
-test can report several failures. Each operand is evaluated once.
+A test can report **several failures** — one per top-level body form. Each operand
+is evaluated once. With no mutable accumulator (data is immutable, ADR-026), an
+assertion signals failure by **throwing** a tagged record; the `test` macro runs
+each top-level body form in its own `try` (`test--run`), so a throw ends only that
+form and the next form still runs. The exception: multiple assertions nested inside
+**one** form stop at the first (the throw unwinds the whole form).
 
 Output is **plain text when captured** (a pipe, `cargo test`, CI, or an LLM
 reading the run) and **coloured only when stdout is an interactive terminal**
@@ -105,10 +111,10 @@ test name:
 **Why this exists.** A runtime's processes **share one global table** (see
 [`shared-code.md`](shared-code.md)). Two parallel tests that both redefine the
 same global would race. A test that only reads the prelude and its own locals is
-safe to run in parallel — the default. A test that `def`s or `set!`s a *shared*
-name (or relies on ordering, or a shared external resource) should mark its group
+safe to run in parallel — the default. A test that `def`s a *shared* name (or
+relies on ordering, or a shared external resource) should mark its group
 `:serial` (serialise within the group) or `:isolated` (run alone **and** against a
-rolled-back private copy of the globals, so its `def`/`set!` can't leak to any
+rolled-back private copy of the globals, so its `def`s can't leak to any
 other test).
 
 **Phases.** The `:isolated` units run **first** — one at a time *on the runner
@@ -128,24 +134,27 @@ framework **must not** keep its pass/fail counts in shared mutable globals — t
 concurrent tests would clobber each other (this was a real bug in an earlier,
 isolation-assuming design).
 
-Instead:
+Immutability makes this fall out for free — there is *no* shared (or even
+process-local) mutable accumulator to race on:
 
-- Each test body runs inside a **process-local accumulator**, `*fails*` — a `let`
-  binding the `test` macro establishes. The assertions are *macros* that push a
-  message onto `*fails*` on failure. So a test's failures live only in its own
-  process.
-- The test **yields its `*fails*` list as a value**. A worker sends its unit's
-  results back as a message; the runner aggregates everything into its own local
-  state and reports. No shared counters, no races.
+- An assertion signals failure by **throwing** a tagged failure record
+  (`(:%test-fail loc details)`, via `test--fail`). The `test` macro splits its body
+  into one thunk per top-level form; `test--run` runs each in its own `try`,
+  collecting the caught failures into a list — so each test **yields its failure
+  list as a value** (empty = passed, one record per failing form). An uncaught
+  (non-assertion) error is recorded and stops the test.
+- A worker sends its unit's results back as a message; the runner aggregates
+  everything into its own local state and reports. No shared counters, no
+  mutation, no races.
 
-A corollary: assertions must be used **lexically inside a test body** (they refer
-to that body's `*fails*`), not from unrelated top-level helper functions.
+A corollary: assertions must be used **lexically inside a test body** (the throw
+must reach that body's `try`), not from unrelated top-level helper functions.
 
 ## Running
 
-In a project, run the whole suite with **`brood test`** (or `make suite`, or
+In a project, run the whole suite with **`nest test`** (or `make suite`, or
 `cargo test`): the runner discovers `tests/**/*_test.blsp`, loads them, and calls
-`run-tests` once (`brood test` passes `:trace`). `run-tests` itself takes the flags
+`run-tests` once (`nest test` passes `:trace`). `run-tests` itself takes the flags
 below — forwarded by the runner, and usable directly if you call it yourself:
 
 ```lisp

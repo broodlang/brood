@@ -4,10 +4,10 @@
 //! splices the elements of a sequence. Nested quasiquote is not level-tracked
 //! (v0.1) — unquotes resolve at the first enclosing quasiquote.
 
-use crate::error::{LispError, LispResult};
-use crate::eval;
 use crate::core::heap::Heap;
 use crate::core::value::{self, EnvId, Value};
+use crate::error::{LispError, LispResult};
+use crate::eval;
 
 /// Expand a quasiquote template against `env`.
 pub fn quasiquote(heap: &mut Heap, template: Value, env: EnvId) -> LispResult {
@@ -24,6 +24,17 @@ pub fn quasiquote(heap: &mut Heap, template: Value, env: EnvId) -> LispResult {
             let items = heap.vector(id).to_vec();
             let out = expand_seq(heap, &items, env)?;
             Ok(heap.alloc_vector(out))
+        }
+        Value::Map(id) => {
+            // Expand each key and value (no `~@` splicing into a map — ill-defined).
+            let entries = heap.map(id).to_vec();
+            let mut pairs = Vec::with_capacity(entries.len());
+            for (k, v) in entries {
+                let k = quasiquote(heap, k, env)?;
+                let v = quasiquote(heap, v, env)?;
+                pairs.push((k, v));
+            }
+            Ok(heap.map_from_pairs(pairs))
         }
         other => Ok(other),
     }
@@ -134,6 +145,18 @@ pub fn macroexpand_all(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 out.push(macroexpand_all(heap, item, env)?);
             }
             Ok(heap.alloc_vector(out))
+        }
+        Value::Map(id) => {
+            // Walk a map literal's keys and values so macros inside them expand
+            // once here. Keep it a literal map (the evaluator canonicalises it).
+            let entries = heap.map(id).to_vec();
+            let mut pairs = Vec::with_capacity(entries.len());
+            for (k, v) in entries {
+                let k = macroexpand_all(heap, k, env)?;
+                let v = macroexpand_all(heap, v, env)?;
+                pairs.push((k, v));
+            }
+            Ok(heap.alloc_map(pairs))
         }
         other => Ok(other),
     }

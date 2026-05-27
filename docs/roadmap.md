@@ -22,7 +22,7 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
 - ✅ Value model with interned symbols; cons-cell lists
 - ✅ Lexical environments + closures
 - ✅ Tree-walking evaluator with **proper tail calls**
-- ✅ Special forms: `quote if when unless cond do def set! fn/lambda let/let* and or while`
+- ✅ Special forms: `quote if when unless cond do def fn/lambda let/let* and or` (immutable: no `set!`/`while`, loops are recursion — ADR-026)
 - ✅ Builtins: arithmetic, comparison, lists/sequences, higher-order, predicates, strings/IO
 - ✅ Self-hosting primitives: `eval`, `read-string`, `load`
 - ✅ Prelude written in Brood
@@ -77,8 +77,14 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
 - ✅ **Project model & test tool** — convention over configuration: `src/` is the
   project source (auto on `*load-path*`), `tests/**/*_test.blsp` are the tests; a
   `project.blsp` manifest declares identity (name/version) and overrides paths only
-  when needed. `brood test` discovers + loads (register-only) + runs once; `brood
-  new <name>` scaffolds a project (`spit`/`make-dir`). ADR-020.
+  when needed. `nest test` discovers + loads (register-only) + runs once; `nest
+  new <name>` scaffolds a project (`spit`/`make-dir`). ADR-020/028.
+- 🟡 **Editor tooling & documentation** — source-position errors (GNU
+  `FILE:LINE:COL:`) + structured test output (`docs/tooling.md`); a lossless,
+  span-carrying CST and the introspection primitives `doc`/`arglist`/
+  `global-names`/`bound?` (ADR-025); docstrings on functions/macros and on
+  modules (a file's leading string), extracted to Markdown by `nest doc`
+  (ADR-029). ⬜ The `brood-lsp` language server itself (`docs/lsp.md`).
 
 > v0.1 is the ✅ slice above: enough to be a real, usable language. The ⬜ items
 > complete M1.

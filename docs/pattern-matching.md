@@ -52,7 +52,7 @@ compile(pattern, target, on-success, on-fail) -> code
 | `match` | fall through to the next clause; last clause raises |
 | refutable `let` | raise (this is Elixir's `=`) |
 | `fn` / `defn` clauses | try the next clause; no clause raises |
-| `receive` clauses | (later) re-queue / wait — see caveat below |
+| `receive` clauses | leave the message queued and try the next; if none match, suspend (or run the `after` timeout) — see below |
 
 Build the compiler once, in Brood, and each surface is a thin macro over it.
 
@@ -360,14 +360,30 @@ would let the printed line be a bare sentence; not needed for v1.
   are shallow in practice; if it bites, bind the fail-continuation as a thunk.
   Decide when measured, not now.
 
-## `receive` (later)
+## `receive` (implemented — selective)
 
-Once `match` exists, `(receive (pattern body) …)` is sugar for
-`(let (m (receive)) (match m …))`. Caveat: that matches the **next** message and
-raises/falls through if no clause fits. True Erlang **selective receive** — scan
-the mailbox, leave non-matching messages queued — is a deeper change to the
-`receive` builtin. Ship the simple form first (ADR-011); add selective receive
-when a concrete need appears.
+`receive` is the fourth surface over the pattern compiler. It is a macro
+(`std/prelude.blsp`) that reuses **`match-build-from`** with the no-match
+continuation set to `nil` (instead of the structured throw), wrapping each clause
+body in a thunk. The result is a *matcher* function — given a message it returns
+the body-as-a-thunk on a match, or `nil` otherwise — which the `%receive`
+primitive runs over the mailbox: scan in order, **remove + run the first match,
+leave non-matching messages queued**. That is true Erlang **selective receive**
+(no head-of-line blocking), not the simpler "match the next message or fall
+through" form first sketched here.
+
+```clojure
+(receive
+  ([:say text]      (println text))
+  (n :when (int? n) (handle-int n))
+  (after 5000       (throw [:timeout])))   ; optional timeout; catchable via try/catch
+```
+
+The `on-fail` for a `receive` clause (the table above) is thus *leave queued and
+try the next message; if none match, suspend (or, with `after`, run the timeout
+body)*. `(receive)` with no clauses takes the next message. See
+[`concurrency.md`](concurrency.md) / [`scheduler.md`](scheduler.md) for the
+runtime side (the green-process suspend + the receive timer) and ADR-027.
 
 ## Decisions (review pass)
 

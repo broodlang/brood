@@ -98,6 +98,13 @@ A value is exactly one of:
 Lists are not a distinct type: a "list" is either `nil` or a pair whose chain of
 `rest`s ends in `nil`.
 
+**All values are immutable.** No operation mutates an existing value; there are
+no data-mutation primitives (no `set-car!`, `vector-set!`, `string-set!`, no
+atoms or cells). Constructors and updates (`cons`, `assoc`, `conj`, `append`, …)
+return a fresh value and leave their arguments unchanged. The only mutation in
+the language is `def` rebinding a global binding (§6) — never the contents of a
+value (ADR-026).
+
 ## 5. Evaluation
 
 Evaluation maps a (form, environment) pair to a value, or raises an error (§10).
@@ -142,8 +149,10 @@ outermost frame is the **global environment**. A closure captures the
 environment in which it was created. (Dynamically-scoped variables are planned
 but not yet implemented — see §11.)
 
-`def` always binds in the global environment. `set!` mutates the nearest
-existing binding and errors if none exists. `let` introduces a child frame.
+`def` always binds in the global environment. **It is the only mutation in the
+language** — rebinding a global, which is what enables live redefinition / hot
+reload (ADR-026). There is no local mutation: a `let`/`fn` binding, once made,
+never changes, and data is immutable. `let` introduces a child frame.
 
 ## 7. Special forms
 
@@ -158,13 +167,11 @@ denotes zero or more forms evaluated as an implicit `do`.
 | `(unless t body...)` | If `t` is falsy, evaluate `body`; else `nil`. |
 | `(cond t₁ e₁ t₂ e₂ …)` | Even number of forms. Evaluate tests left to right; the first truthy test's `eᵢ` is the result (tail position). `else` or `:else` as a test always matches. No match ⇒ `nil`. |
 | `(do body...)` | Evaluate in order; result is the last (tail position), or `nil` if empty. |
-| `(def name v?)` | Evaluate `v` (or `nil`) and bind `name` globally. Result: `name`. |
-| `(set! name v)` | Evaluate `v`, assign to the nearest existing binding of `name`; error if unbound. |
+| `(def name v?)` | Evaluate `v` (or `nil`) and bind `name` globally (redefinable — the language's only mutation). Result: `name`. |
 | `(fn [params] body...)` | A closure capturing the current environment. `lambda` is an alias. |
 | `(let [n₁ v₁ …] body...)` | Sequential bindings in a new child frame (each `vᵢ` sees the previous bindings). `let*` is an alias. |
 | `(and a₁ …)` | Left to right; returns the first falsy value, else the last (tail position). Empty ⇒ `true`. |
 | `(or a₁ …)` | Left to right; returns the first truthy value, else the last (tail position). Empty ⇒ `nil`. |
-| `(while t body...)` | While `t` is truthy, evaluate `body` for effect. Returns `nil`. |
 | `(quasiquote tmpl)` | Build a value from a template (§7.2). Reader shorthand: `` `tmpl ``. |
 | `(defmacro name [params] body...)` | Define a macro bound to `name` globally (§7.3). |
 
