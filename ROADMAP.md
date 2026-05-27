@@ -82,6 +82,25 @@ The native kernel is **39 primitives** — see [`docs/primitives.md`](docs/primi
 
 ---
 
+## Parallel track — concurrency (green processes on all cores)
+
+A major *core* effort that runs **alongside** the language work above — design in
+[`docs/concurrency.md`](docs/concurrency.md). Erlang-*style* green processes
+scheduled across all cores, share-nothing, message-passing; lean (no
+supervision / preemption / live-migration in v1).
+
+Strategy: start simple and let the language keep adopting features in parallel.
+Language gaps above are mostly **[mylisp]**, so they don't deepen the evaluator
+and don't conflict with the concurrency work. Concurrency lands in phases:
+
+- ⬜ `spawn` / `send` / `receive` / `self` — one scheduler, cooperative (stackful coroutines)
+- ⬜ N schedulers + work-stealing — uses all cores (pinned processes, copy-on-send messages)
+- ⬜ `Send` per-process heaps via the **GC migration** (shared with Tier 3) → migrating processes
+- ⬜ later, if needed: reduction-counted preemption, then supervision / links
+
+The Tier-3 **tracing GC** is shared with this track: `Send` per-process heaps are
+what unlock full work-stealing, so concurrency pulls the GC work earlier.
+
 ## Suggested order
 
 1. **Maps** (Tier 1) — unblocks structured data *and* a structured error value.

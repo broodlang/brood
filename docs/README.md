@@ -9,6 +9,7 @@ it's going. Start here.
 | [spec.md](spec.md) | The **formal language specification** (v0.1): lexical structure and reader grammar (EBNF), the data model, evaluation/tail-call rules, scoping (it's a Lisp-1), special forms, and the primitive/derived split. The precise companion to language.md. |
 | [language.md](language.md) | The language reference *as implemented today* (v0.1): data types, syntax, special forms, and every builtin. Friendlier than the spec. |
 | [primitives.md](primitives.md) | The **native primitive kernel** — the complete list of functions implemented in Rust (everything else is mylisp), including how error handling (`throw`/`%try`/`try`/`error`) is built. |
+| [concurrency.md](concurrency.md) | Design (for review) for **green processes on all cores** — Erlang-style `spawn`/`send`/`receive`, share-nothing, work-stealing schedulers. A parallel core track. |
 | [roadmap.md](roadmap.md) | The milestones (M1 → M5), what's done, and what's next — including the editor, the display protocol, and the remote/web frontends. |
 | [decisions.md](decisions.md) | The design-decision log (ADR-style): the *why* behind the choices, so future-us doesn't relitigate them by accident. |
 | [devlog.md](devlog.md) | A chronological log of work sessions — what changed and why, in order. |

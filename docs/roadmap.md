@@ -13,7 +13,10 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started
 
 A solid, self-editable Lisp. This is the foundation everything else stands on.
 The detailed Stage-1 completeness checklist ("what's left to be a full,
-standalone Lisp") lives in the top-level [`ROADMAP.md`](../ROADMAP.md).
+standalone Lisp") lives in the top-level [`ROADMAP.md`](../ROADMAP.md). A major
+**parallel core track** — Erlang-style green-process concurrency across all
+cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
+`ROADMAP.md`.
 
 - ✅ Reader (text → values): numbers, strings, symbols, keywords, lists, vectors, `'` quote, comments
 - ✅ Value model with interned symbols; cons-cell lists
