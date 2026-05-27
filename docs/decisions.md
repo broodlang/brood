@@ -35,7 +35,7 @@ tracing-GC-later pattern (see ADR-002), which is well-represented in training
 data (Piccolo, other Rust Lisps).
 
 **Considered & rejected.** Elixir/BEAM is philosophically great for hot-reload
-and distribution, but unnecessary here: because the editor is written in mylisp,
+and distribution, but unnecessary here: because the editor is written in Brood,
 re-evaluating definitions already gives hot-reload, regardless of host language.
 
 ---
@@ -99,20 +99,20 @@ to read end-to-end. Dependencies arrive with the features that justify them
 
 ---
 
-## ADR-006 — As much of the language as possible lives in mylisp
+## ADR-006 — As much of the language as possible lives in Brood
 
 **Status:** accepted.
 
 **Decision.** Anything that doesn't *need* to be a Rust builtin goes in
 `std/prelude.lisp` instead.
 
-**Why.** Whatever is written in mylisp is redefinable at runtime. Maximising
+**Why.** Whatever is written in Brood is redefinable at runtime. Maximising
 that surface is the entire point of the project. Rust provides mechanism;
 policy lives in the language.
 
 ---
 
-## ADR-007 — mylisp is a Lisp-1
+## ADR-007 — Brood is a Lisp-1
 
 **Status:** accepted.
 
@@ -132,12 +132,12 @@ aesthetic already chosen.
 
 ---
 
-## ADR-008 — Rust is a primitive kernel; the language is written in mylisp
+## ADR-008 — Rust is a primitive kernel; the language is written in Brood
 
 **Status:** accepted. Supersedes the original "builtins live in Rust" approach.
 
 **Context.** The core principle (ADR-006) is to write as much of the system in
-mylisp as possible. Initially the math/list functions (`+`, `-`, `map`, `reduce`,
+Brood as possible. Initially the math/list functions (`+`, `-`, `map`, `reduce`,
 …) were Rust loops.
 
 **Decision.** Reduce the Rust surface to an **irreducible primitive kernel** and
@@ -145,13 +145,13 @@ define every user-facing function in `std/prelude.lisp` on top of it. The kernel
 is the 2-argument numeric ops (`%add`/`%sub`/`%mul`/`%div`/`%lt`/`%eq`, plus
 `mod`/`rem`), pair/vector constructors and accessors, type-tag predicates,
 value↔text and I/O, and the self-hosting hooks (`eval`/`read-string`/`load`/`apply`).
-`+ - * / < > = map filter reduce list …` are now mylisp `def`s. (See spec §9.)
+`+ - * / < > = map filter reduce list …` are now Brood `def`s. (See spec §9.)
 
 **Why.** Uniformity (`+` is defined exactly like a user function), and maximal
 runtime editability — the whole arithmetic/sequence library can be redefined
 live. It also exercises the language hard, surfacing gaps early.
 
-**Trade-off accepted.** mylisp-defined arithmetic is materially slower than a
+**Trade-off accepted.** Brood-defined arithmetic is materially slower than a
 native loop (the tail-recursion test went from ~5s to ~50s at 1,000,000
 iterations; we right-sized it to 100,000). This is acceptable for now and
 reversible: a future compiler/specialiser, or selectively re-promoting hot ops to
@@ -181,7 +181,7 @@ surface" stance).
 
 **Context.** ADR-003 introduced `[ ]` vectors and used them, Clojure-style, for
 parameter lists and `let` bindings. Revisiting this against the project's north
-star — a *self-editing editor* that constantly rewrites mylisp source — the
+star — a *self-editing editor* that constantly rewrites Brood source — the
 homoiconic argument won: if code is uniformly cons-lists, macros and the editor's
 own code-manipulation never have to special-case "vector vs list".
 

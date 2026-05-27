@@ -1,4 +1,4 @@
-//! The `mylisp` command-line tool.
+//! The `brood` command-line tool.
 //!
 //! - With no arguments it starts a REPL.
 //! - With file arguments it loads and runs each file in order.
@@ -12,7 +12,7 @@
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
-use mylisp::Interp;
+use brood::Interp;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 
@@ -45,7 +45,7 @@ fn run_files(interp: &mut Interp, files: &[String]) {
                 }
             }
             Err(e) => {
-                eprintln!("mylisp: cannot read {}: {}", path, e);
+                eprintln!("brood: cannot read {}: {}", path, e);
                 std::process::exit(1);
             }
         }
@@ -54,7 +54,7 @@ fn run_files(interp: &mut Interp, files: &[String]) {
 
 /// Interactive REPL with full line editing and history (terminal only).
 fn repl_interactive(interp: &mut Interp) -> rustyline::Result<()> {
-    println!("mylisp v0.1 — arrow keys to edit, up/down for history, Ctrl-D to exit");
+    println!("brood v0.1 — arrow keys to edit, up/down for history, Ctrl-D to exit");
     let mut rl = DefaultEditor::new()?;
     let history = history_path();
     if let Some(path) = &history {
@@ -65,7 +65,7 @@ fn repl_interactive(interp: &mut Interp) -> rustyline::Result<()> {
         // Accumulate input lines until the form is delimiter-balanced, so
         // multi-line forms work while each physical line stays editable.
         let mut buffer = String::new();
-        let mut prompt = "mylisp> ";
+        let mut prompt = "brood> ";
         loop {
             match rl.readline(prompt) {
                 Ok(line) => {
@@ -145,11 +145,11 @@ fn repl_plain(interp: &mut Interp) {
     }
 }
 
-/// Where to persist REPL history (`$HOME/.mylisp_history`), if `$HOME` is set.
+/// Where to persist REPL history (`$HOME/.brood_history`), if `$HOME` is set.
 fn history_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     let mut path = PathBuf::from(home);
-    path.push(".mylisp_history");
+    path.push(".brood_history");
     Some(path)
 }
 

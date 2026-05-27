@@ -1,7 +1,7 @@
 //! Primitive builtins: the irreducible kernel implemented in Rust. Each takes
 //! already-evaluated args, the call-site environment, and `&mut Heap`.
 //!
-//! Anything that can be written in mylisp lives in `std/prelude.lisp` instead.
+//! Anything that can be written in Brood lives in `std/prelude.lisp` instead.
 //! `%`-prefixed names are low-level primitives not meant to be called directly.
 //! The annotated list is in `docs/primitives.md`.
 
@@ -59,6 +59,9 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "pr-str", pr_str);
     def(heap, "print", print);
     def(heap, "println", println);
+
+    // time
+    def(heap, "now", now);
 
     // self-hosting
     def(heap, "eval", eval_builtin);
@@ -304,6 +307,18 @@ fn println(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let parts: Vec<String> = args.iter().map(|&a| printer::display(heap, a)).collect();
     println!("{}", parts.join(" "));
     Ok(Value::Nil)
+}
+
+// ---------- time ----------
+
+/// `(now)` — wall-clock milliseconds since the Unix epoch, as an integer.
+/// Subtract two readings to measure elapsed time (see `std/test.lisp`).
+fn now(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    Ok(Value::Int(ms))
 }
 
 // ---------- self-hosting ----------

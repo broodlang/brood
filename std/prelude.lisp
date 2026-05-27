@@ -1,8 +1,8 @@
-;; mylisp prelude / core library
+;; Brood prelude / core library
 ;; ------------------------------
-;; Most of the language lives here, in mylisp itself. Rust provides only a small
+;; Most of the language lives here, in Brood itself. Rust provides only a small
 ;; primitive kernel (see crates/lisp/src/builtins.rs — the `%`-prefixed ops and
-;; a few constructors/predicates); everything below is ordinary mylisp.
+;; a few constructors/predicates); everything below is ordinary Brood.
 ;;
 ;; Style note: code is made of lists, so parameter lists are written as lists —
 ;; (defn f (x y) ...). Vectors [ ] are a *data* type (O(1) indexing); they are
@@ -132,7 +132,7 @@
 
 ;; ---- error handling ----
 ;; The kernel gives us `throw` (raise) and `%try` (low-level catch). Everything
-;; user-facing — `error`, `try`/`catch` — is written here in mylisp.
+;; user-facing — `error`, `try`/`catch` — is written here in Brood.
 (defn last     (xs) (first (reverse xs)))
 (defn but-last (xs) (reverse (rest (reverse xs))))
 

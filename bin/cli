@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Convenience launcher for the mylisp CLI.
+# Convenience launcher for the Brood CLI.
 #
 #   ./bin/cli                 # start the REPL
 #   ./bin/cli file.lisp       # run a program file
 #
-# Builds via cargo as needed and forwards all arguments to the `mylisp` binary.
+# Builds via cargo as needed and forwards all arguments to the `brood` binary.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

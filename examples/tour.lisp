@@ -1,9 +1,9 @@
-;; mylisp feature tour
+;; Brood feature tour
 ;; -------------------
 ;; Run it:   ./bin/cli examples/tour.lisp
 ;; Or play:  ./bin/cli        (starts the REPL)
 
-;; Arithmetic — +, -, *, /, etc. are defined in mylisp on a tiny Rust kernel.
+;; Arithmetic — +, -, *, /, etc. are defined in Brood on a tiny Rust kernel.
 (println "1 + 2 * 3   =" (+ 1 (* 2 3)))
 (println "7 / 2       =" (/ 7 2))
 (println "10 mod 3    =" (mod 10 3))

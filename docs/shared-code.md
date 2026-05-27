@@ -137,4 +137,4 @@ frames from the local heap, the global frame from the shared region.
 
 Approach **A** is chosen. Build it in the staged sub-steps above, beginning with
 **step 1** (region-tagged handles, shared region empty — behaviour-preserving).
-Each step lands behind `cargo test` + the mylisp suite.
+Each step lands behind `cargo test` + the Brood suite.

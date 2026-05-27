@@ -18,10 +18,10 @@ in. First concrete target from the user: *"a light first version where
 - Cons-cell lists + separate `[ ]` vectors (ADR-003).
 - Clojure-style truthiness; flat `cond` (ADR-004).
 - Zero external dependencies for v0.1 (ADR-005).
-- Maximise the share of the language written in mylisp itself (ADR-006).
+- Maximise the share of the language written in Brood itself (ADR-006).
 
 **Built.**
-- Cargo workspace: `crates/lisp` (the language) + `crates/cli` (the `mylisp`
+- Cargo workspace: `crates/lisp` (the language) + `crates/cli` (the `brood`
   binary), `std/prelude.lisp`, `docs/`.
 - `value.rs`: `Value` enum, thread-local symbol interner, list/vector
   constructors, structural `PartialEq`.
@@ -62,12 +62,12 @@ maps, and the GC migration.
 - **`bin/cli`** launcher script added (builds + runs the CLI from any directory).
 - **REPL line editing.** Added `rustyline` (first external dependency, sanctioned
   by ADR-005) so the interactive REPL has arrow-key editing, history
-  (`~/.mylisp_history`), and Emacs-style bindings. Multi-line forms are handled
+  (`~/.Brood_history`), and Emacs-style bindings. Multi-line forms are handled
   by accumulating lines until delimiters balance. Non-terminal stdin (pipes,
   scripts) falls back to a plain reader that prints results only.
 - **Principle reinforced by the user:** *as much of the language/system as
-  possible must be written in mylisp itself* (Rust = mechanism, mylisp =
-  policy), and the CLI/REPL should eventually be self-hosted in mylisp. Captured
+  possible must be written in Brood itself* (Rust = mechanism, Brood =
+  policy), and the CLI/REPL should eventually be self-hosted in Brood. Captured
   prominently in `CLAUDE.md` and `docs/roadmap.md` (extends ADR-006). The
   current Rust REPL is an explicit bootstrap, not the end state.
 
@@ -76,16 +76,16 @@ maps, and the GC migration.
 - **Shrank the Rust builtins to a primitive kernel** and moved the user-facing
   functions into `std/prelude.lisp`: `+ - * /` (variadic, over 2-arg `%add`…),
   `< <= > >= = not=` (over `%lt`/`%eq`), `not number? list? car cdr list map
-  filter reduce fold reverse append count nth …` are now ordinary mylisp `def`s.
+  filter reduce fold reverse append count nth …` are now ordinary Brood `def`s.
   Rust keeps only `%`-numeric ops, `cons/first/rest/empty?`, vector/string
   primitives, type-tag predicates, I/O, and `eval/read-string/load/apply`.
   Recorded as ADR-008.
-- **Cost & adjustment:** mylisp arithmetic is ~10× slower than the old native
+- **Cost & adjustment:** Brood arithmetic is ~10× slower than the old native
   loop. The tail-recursion test ran ~50s at 1,000,000 iterations, so it was
   right-sized to **100,000** (still proves O(1) stack; suite back to ~5.5s).
   Tradeoff noted as reversible (future specialiser / re-promotion of hot ops).
 - **Answered two design questions from the user and wrote them down:**
-  - mylisp is a **Lisp-1** (single namespace) — ADR-007. This is what makes the
+  - Brood is a **Lisp-1** (single namespace) — ADR-007. This is what makes the
     refactor above possible (`+` is just a value).
   - Added a **formal spec**, `docs/spec.md` (EBNF lexical/reader grammar, data
     model, evaluation + tail-position rules, scoping, special forms, the
@@ -96,7 +96,7 @@ maps, and the GC migration.
 ### Macros + `defn` (same day)
 
 - User asked for function definitions next, and chose the principled route:
-  build macros, then define `defn` in mylisp (rather than a quick Rust special
+  build macros, then define `defn` in Brood (rather than a quick Rust special
   form).
 - **Added the macro system:** a `Value::Macro`, the `defmacro` and `quasiquote`
   special forms, macro expansion wired into the evaluator's `'tail` loop
@@ -109,7 +109,7 @@ maps, and the GC migration.
 - **`defn` is now a macro in `std/prelude.lisp`**, and the whole prelude was
   rewritten to define its functions with `defn` (dogfooding). Also added `->`
   and `->>` threading macros, whose bodies compute the expansion with `reduce`
-  at expansion time — a nice demonstration that macros are just mylisp.
+  at expansion time — a nice demonstration that macros are just Brood.
 - Tests: added `defn`, user-macro/quasiquote, and threading cases. 19/19 green
   (~6.8s). REPL spot-checks: recursive `fib`, a custom `unless2` macro, and
   `->` all behave.
@@ -153,7 +153,7 @@ parameter lists and the broader role of vectors:
   **+2 primitives, 0 new special forms.**
 - Kernel: `throw` (raise a value) and `%try` (call a thunk; on raise call a
   handler). `LispError` gained a `payload: Option<Value>` and a `User` kind.
-- Prelude (mylisp): `error` (raise a formatted message), and `try`/`catch` as a
+- Prelude (Brood): `error` (raise a formatted message), and `try`/`catch` as a
   **macro** desugaring to `(%try (fn () body) (fn (e) handler))`; plus `last`
   and `but-last` helpers it needs.
 - `catch` binds the thrown value, or — for built-in errors — the error's message
@@ -162,3 +162,20 @@ parameter lists and the broader role of vectors:
   `error`, no-catch `try`, uncaught propagation. 24/24 green.
 - Docs: `primitives.md` (proposal → implemented), `spec.md` §9/§10/§11,
   `language.md` (Errors section), `roadmap.md`.
+
+### Test runner: progress dots + timing (same day)
+
+- User asked the test framework to show progress (`.`s) and report how long a
+  run took. Kept the kernel growth minimal: **+1 primitive, the rest in Brood.**
+- Kernel: `now` — wall-clock milliseconds since the Unix epoch as an integer
+  (`SystemTime`). Reading the clock genuinely needs Rust; elapsed time is then
+  just a subtraction in Brood. 45 primitives now.
+- `std/test.lisp` rewritten: assertions (`is`/`assert=`/`assert-error`) now
+  *record* a pass or a failure instead of printing inline. `run-each` prints one
+  `.` per test (`F` if it recorded a failure) for a live progress line; failure
+  details collect in `*failures*` and print afterwards under `FAILURES:`; the
+  summary reports `N tests, M assertions, K failed (T ms)`.
+- The timer immediately earned its keep: it surfaced that the suite takes ~5.7s
+  in the debug build, dominated by the `sum-to 100000` tail-call test.
+- Docs: `primitives.md` (Time category, count 44→45), `language.md` (Time
+  section).

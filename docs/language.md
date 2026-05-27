@@ -1,10 +1,10 @@
-# mylisp language reference (v0.1)
+# Brood language reference (v0.1)
 
 This describes the language **as implemented today**. Anything not listed here
 does not exist yet — see [roadmap.md](roadmap.md) for what's coming (macros,
 quasiquote, dynamic variables, error handling, maps, …).
 
-mylisp is a dynamically-typed **Lisp-1** (one namespace for functions and
+Brood is a dynamically-typed **Lisp-1** (one namespace for functions and
 variables, like Scheme/Clojure) with **lexical scoping** and **proper tail
 calls**. The flavour is "clean and modern": code is made of lists (so parameter
 lists are lists), `[...]` vectors are a data type, with Clojure-style
@@ -158,7 +158,7 @@ Raise with `throw` (any value) or `error` (a formatted message), and handle with
 `catch` binds `e` to the thrown value; for a built-in error (like division by
 zero) it binds the error's message string. A `try` with no `catch` is just a
 `do`. Under the hood `throw` and `%try` are primitives and `try`/`catch`/`error`
-are written in mylisp (`std/prelude.lisp`) — see [primitives.md](primitives.md).
+are written in Brood (`std/prelude.lisp`) — see [primitives.md](primitives.md).
 
 ## Processes (concurrency)
 
@@ -192,7 +192,7 @@ follow-up). See [concurrency.md](concurrency.md) for the model and limitations.
 > **Where these live:** only a small primitive kernel is implemented in Rust
 > (the `%`-prefixed numeric ops, `cons`/`first`/`rest`, type predicates, I/O,
 > `eval`/`load`, …). The functions below that aren't primitives — `+ - * / <
-> = map filter reduce list …` — are defined *in mylisp* in `std/prelude.lisp`,
+> = map filter reduce list …` — are defined *in Brood* in `std/prelude.lisp`,
 > the same way you'd define your own. See spec.md §9 for the exact split. From a
 > caller's point of view they're all just functions.
 
@@ -237,6 +237,13 @@ follow-up). See [concurrency.md](concurrency.md) for the model and limitations.
 - `str` concatenates the *display* form of its args; `pr-str` returns the
   *readable* form of one value.
 
+### Time
+`now`
+
+- `(now)` returns wall-clock milliseconds since the Unix epoch as an integer.
+  Subtract two readings to measure elapsed time — the test runner uses it to
+  report how long a suite took.
+
 ### Metaprogramming / self-hosting
 `eval`  `read-string`  `load`  `require`  `macroexpand`  `macroexpand-1`  `gensym`
 
@@ -256,8 +263,8 @@ it into the live environment, replace definitions.
 `std/prelude.lisp` is loaded at startup and is where most of the language
 actually lives — the `defn` macro, the arithmetic operators, comparisons,
 equality, the sequence library, and the `->`/`->>` threading macros, all defined
-in mylisp on top of the Rust primitive kernel. It also adds `inc` `dec`
+in Brood on top of the Rust primitive kernel. It also adds `inc` `dec`
 `identity` `second` `third` `zero?` `positive?` `negative?` `abs` `max` `min`
-`sum` `product`. Because it's ordinary mylisp, any of it can be redefined at
+`sum` `product`. Because it's ordinary Brood, any of it can be redefined at
 runtime — and every function in it is defined with `defn`, exactly as you'd
 define your own.

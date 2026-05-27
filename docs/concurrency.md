@@ -32,7 +32,7 @@ parts (see "Out of scope" below).
  process = own heap + mailbox; runs until it blocks on `receive` or finishes
 ```
 
-Surface (in mylisp):
+Surface (in Brood):
 
 | Form | Meaning |
 |---|---|
@@ -112,7 +112,7 @@ This is the largest *core* undertaking in the project. Two consequences:
 
 1. It pulls the **GC migration earlier** — `Send` per-process heaps (`gc-arena`)
    are the path to full work-stealing, so the GC and concurrency are one effort.
-2. Until then, prefer adding language features **in mylisp** (string/math/seq
+2. Until then, prefer adding language features **in Brood** (string/math/seq
    libraries, maps) that don't deepen the recursive evaluator, so the eventual
    suspension work (coroutines or stepping VM) stays small.
 

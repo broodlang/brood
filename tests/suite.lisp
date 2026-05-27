@@ -1,4 +1,4 @@
-;; mylisp test suite — written in mylisp, using the native test library.
+;; Brood test suite — written in Brood, using the native test library.
 ;;   ./bin/cli tests/suite.lisp
 ;; (also run by `cargo test` via crates/lisp/tests/suite.rs)
 

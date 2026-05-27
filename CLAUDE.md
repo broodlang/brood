@@ -1,4 +1,4 @@
-# CLAUDE.md — working in the mylisp repo
+# CLAUDE.md — working in the Brood repo
 
 Guidance for Claude Code (and humans) working in this project. For the broader
 machine setup (Ubuntu, apt, Rust via rustup, etc.) see the global
@@ -6,7 +6,7 @@ machine setup (Ubuntu, apt, Rust via rustup, etc.) see the global
 
 ## What this project is
 
-mylisp is a small dynamic **Lisp implemented in Rust**. Its purpose is to be the
+Brood is a small dynamic **Lisp implemented in Rust**. Its purpose is to be the
 language a modern, Emacs-like, self-editing, remotely-hostable text editor is
 written in. Today the repo is the **language core**; the editor, display
 protocol, and server come later. Read `docs/` before making non-trivial changes
@@ -14,25 +14,25 @@ protocol, and server come later. Read `docs/` before making non-trivial changes
 
 ## Core principle: write the language in the language
 
-**As much of the system as possible must be written in mylisp itself, not in
+**As much of the system as possible must be written in Brood itself, not in
 Rust.** This is the most important rule in this repo — it is the entire reason
 the project exists (a self-editing editor is only possible if its behaviour
 lives in code you can redefine at runtime).
 
 Concretely:
-- Rust provides **mechanism**; mylisp provides **policy**. Use Rust only for
+- Rust provides **mechanism**; Brood provides **policy**. Use Rust only for
   what genuinely needs it: primitives the language can't bootstrap (low-level
   I/O, the rope/text engine, performance-critical kernels) and the core
   evaluator itself.
-- Everything else belongs in `std/` (mylisp source), not in `builtins.rs`. When
-  you reach for a new Rust builtin, first ask: *can this be written in mylisp on
+- Everything else belongs in `std/` (Brood source), not in `builtins.rs`. When
+  you reach for a new Rust builtin, first ask: *can this be written in Brood on
   top of existing primitives?* If yes, do that instead.
 - This applies to upcoming pieces too. The **CLI/REPL, the editor commands,
-  keymaps, and UI should ultimately be mylisp**, with Rust only hosting the
+  keymaps, and UI should ultimately be Brood**, with Rust only hosting the
   thinnest necessary substrate. (The REPL is Rust today as a bootstrap; moving
-  it into mylisp is a goal — see `docs/roadmap.md`.)
+  it into Brood is a goal — see `docs/roadmap.md`.)
 - A Rust builtin is an admission that the language can't yet express something.
-  Treat each one as a candidate to later replace with mylisp once the language
+  Treat each one as a candidate to later replace with Brood once the language
   is capable enough.
 
 ## Layout
@@ -47,8 +47,8 @@ crates/lisp/src/
   printer.rs   Value -> text
   error.rs     LispError / LispResult
   lib.rs       the `Interp` entry point; bundles std/prelude.lisp
-crates/cli/src/main.rs   the `mylisp` binary (REPL + file runner)
-std/prelude.lisp         standard library written in mylisp
+crates/cli/src/main.rs   the `brood` binary (REPL + file runner)
+std/prelude.lisp         standard library written in Brood
 docs/                    architecture, language, roadmap, decisions, devlog
 ```
 
@@ -56,7 +56,7 @@ docs/                    architecture, language, roadmap, decisions, devlog
 
 ```bash
 cargo build                       # build the workspace
-cargo test                        # Rust tests + the mylisp suite (tests/suite.lisp)
+cargo test                        # Rust tests + the Brood suite (tests/suite.lisp)
 cargo run -p cli                  # start the REPL  (or: ./bin/cli)
 cargo run -p cli file.lisp        # run a program file
 ./bin/cli tests/suite.lisp        # the in-language test suite (does (require 'test))
@@ -75,7 +75,7 @@ cargo run -p cli file.lisp        # run a program file
 - **All heap construction goes through `value.rs` helpers** (`cons`, `list`,
   `sym`, `str_val`, …). This keeps the planned `Rc` → `gc-arena` migration
   contained (ADR-002). Don't scatter `Rc::new(...)` of `Value`s elsewhere.
-- **Prefer mylisp over Rust** — see the "write the language in the language"
+- **Prefer Brood over Rust** — see the "write the language in the language"
   principle above (ADR-006). If something can live in `std/` instead of
   `builtins.rs`, put it there. Add a Rust builtin only when it genuinely needs
   Rust.

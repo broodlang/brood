@@ -2,14 +2,14 @@
 
 The **complete set of functions implemented in Rust** (every `Value::Native`
 registered in `crates/lisp/src/builtins.rs`). Everything else in the language —
-`+ - * / < = map filter reduce defn -> …` — is written *in mylisp*
+`+ - * / < = map filter reduce defn -> …` — is written *in Brood*
 (`std/prelude.lisp`) on top of these. Keeping this list small is a deliberate,
 load-bearing choice (ADR-006 "write the language in the language", ADR-008
 "Rust is a primitive kernel").
 
 `%`-prefixed names are low-level primitives not meant to be called directly.
 
-## Native primitive functions (44)
+## Native primitive functions (45)
 
 | Category | Primitive | Arity | Purpose |
 |---|---|---|---|
@@ -28,6 +28,7 @@ load-bearing choice (ADR-006 "write the language in the language", ADR-008
 | **Value ↔ text & I/O** | `str` | n | concatenate the *display* forms of args → string |
 | | `pr-str` | 1 | *readable* form of a value → string |
 | | `print` `println` | n | write display forms to stdout → nil |
+| **Time** | `now` | 0 | wall-clock milliseconds since the Unix epoch (integer); subtract two readings for elapsed time |
 | **Self-hosting hooks** | `eval` | 1 | evaluate a form in the global env |
 | | `read-string` | 1 | parse one form from text |
 | | `load` | 1 | read + evaluate a file |
@@ -44,7 +45,7 @@ load-bearing choice (ADR-006 "write the language in the language", ADR-008
 
 **Why this set is irreducible:** every entry needs Rust — raw number ops, heap
 construct/inspect, type-tag tests, I/O, value→text conversion, or a hook into
-`eval`/the reader. None of it can be written in mylisp. Everything that *can* be
+`eval`/the reader. None of it can be written in Brood. Everything that *can* be
 is already in the prelude.
 
 ## Special forms (not primitives)
@@ -62,14 +63,14 @@ let  let*  and  or  while  quasiquote  defmacro
 ## Error handling (implemented)
 
 Error signalling and handling, with a minimal kernel footprint — **two new
-primitives, zero new special forms** — keeping the ergonomic layer in mylisp.
+primitives, zero new special forms** — keeping the ergonomic layer in Brood.
 
 | New | Where | What |
 |---|---|---|
 | `throw` | **primitive** (kernel) | `(throw v)` raises `v` as an error — a non-local exit. |
 | `%try` | **primitive** (kernel) | `(%try thunk handler)` — call `thunk` (a 0-arg fn); if it raises, call `handler` with the caught value, else return the thunk's result. The low-level catch mechanism. |
-| `try` / `catch` | **prelude macro** (mylisp) | `(try body... (catch e handler...))` — sugar that wraps the body and handler in `fn`s and calls `%try`. |
-| `error` | **prelude** (mylisp) | `(error msg & parts)` ⇒ `(throw (str msg ...))` — the common "raise a message" case. |
+| `try` / `catch` | **prelude macro** (Brood) | `(try body... (catch e handler...))` — sugar that wraps the body and handler in `fn`s and calls `%try`. |
+| `error` | **prelude** (Brood) | `(error msg & parts)` ⇒ `(throw (str msg ...))` — the common "raise a message" case. |
 
 Net kernel growth: **+2 primitives (`throw`, `%try`), and zero new special forms.**
 The `try`/`catch` *syntax* is a macro written in the language — keeping the

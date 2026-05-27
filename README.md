@@ -1,8 +1,20 @@
-# mylisp
+# Brood
 
-A small, dynamic **Lisp implemented in Rust**, built for one purpose: to be the
-language a modern, Emacs-like text editor is *written in* — so that a running
-editor can redefine its own behaviour on the fly.
+**Brood** is a small, dynamic **Lisp implemented in Rust**, built for one
+purpose: to be the language a modern, Emacs-like text editor is *written in* —
+so that a running editor can redefine its own behaviour on the fly.
+
+Under the Lisp sits Erlang/OTP-style concurrency: a *brood* of cheap, supervised
+processes that share nothing and talk by message passing. That swarm is where
+the name comes from.
+
+> **Name & tooling.** This project was formerly `mylisp`. It is now **Brood**,
+> with a toolchain that mirrors Elixir's `mix`/`hex`: **`tend`** is the
+> build/project tool (`tend new`, `tend build`, `tend test`, `tend repl`) and
+> **`nectar`** is the package registry/manager (`nectar add <dep>`). The colony
+> imagery is deliberate — you *tend* a brood and feed it *nectar*. These tools
+> and the crate/binary rename aren't built yet; today you use `cargo` directly,
+> as shown below.
 
 The editor itself comes later. This repository is currently the **language
 core** (v0.1): a reader, a tree-walking evaluator with proper tail calls and
@@ -11,7 +23,7 @@ lexical closures, a set of builtins, and a REPL.
 ```clojure
 (+ 1 2)                          ;=> 3
 
-(defn square (x) (* x x))        ; defn is a macro, written in mylisp itself
+(defn square (x) (* x x))        ; defn is a macro, written in Brood itself
 (map square (list 1 2 3 4))      ;=> (1 4 9 16)
 
 (defn greet (name &optional (greeting "hello"))   ; optional arg with a default
@@ -42,15 +54,16 @@ cargo run -p cli
 cargo run -p cli path/to/program.lisp
 ```
 
-In the REPL:
+In the REPL (`cargo run -p cli`; the banner and prompt will read `brood` once the
+binary is renamed — today they still say `mylisp`):
 
 ```
-mylisp v0.1 — type an expression, Ctrl-D to exit
-mylisp> (+ 1 2)
+brood v0.1 — type an expression, Ctrl-D to exit
+brood> (+ 1 2)
 3
-mylisp> (defn greet (name) (str "hello, " name))
+brood> (defn greet (name) (str "hello, " name))
 greet
-mylisp> (greet "world")
+brood> (greet "world")
 "hello, world"
 ```
 
@@ -65,7 +78,7 @@ and the self-hosting trio `eval`/`read-string`/`load`. Parameter lists are
 written as lists (`(x y)` — code is lists; vectors are data) and support
 `&optional` (with defaults) and `& rest`. `defn`, the operators (`+`, `<`, …),
 the sequence library, and the `->`/`->>` threading macros are all defined in
-mylisp itself (`std/prelude.lisp`) on top of a small Rust kernel.
+Brood itself (`std/prelude.lisp`) on top of a small Rust kernel.
 
 See [`docs/language.md`](docs/language.md) for the full reference.
 
@@ -88,8 +101,8 @@ The full plan is in [`docs/roadmap.md`](docs/roadmap.md).
 
 ```
 crates/lisp    the language: reader, evaluator, builtins, value model
-crates/cli     the `mylisp` binary: REPL + file runner
-std/           the prelude, written in mylisp
+crates/cli     the binary: REPL + file runner (to be renamed `brood`; `tend`/`nectar` will wrap it)
+std/           the prelude, written in Brood
 docs/          architecture, language reference, roadmap, decisions, dev log
 ```
 

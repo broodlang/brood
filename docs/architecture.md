@@ -5,7 +5,7 @@
 The goal is a modern, Emacs-like text editor whose defining property is the one
 that makes Emacs Emacs: **the editor is written in the language it hosts, and a
 running editor can redefine itself on the fly.** To get there we first need the
-language. mylisp is that language, implemented in Rust.
+language. Brood is that language, implemented in Rust.
 
 Two requirements shape everything:
 
@@ -47,14 +47,14 @@ Two commitments we make from the start, even though only the left box exists tod
    That is what lets "fast native locally" and "server for other instances" be
    the same code.
 
-Why this is achievable for free: because the editor is written in mylisp,
+Why this is achievable for free: because the editor is written in Brood,
 hot-reload is just *re-evaluating definitions into the live global
 environment* — no host-language hot-reload machinery required.
 
 ## Crate layout
 
 ```
-mylisp/
+Brood/
   Cargo.toml            workspace
   crates/
     lisp/               the language (this is the substance today)
@@ -68,10 +68,10 @@ mylisp/
         error.rs        LispError / LispResult
         lib.rs          the `Interp` entry point; bundles the prelude
       tests/basic.rs    end-to-end language tests
-    cli/                the `mylisp` binary: REPL + file runner
+    cli/                the `brood` binary: REPL + file runner
       src/main.rs
   std/
-    prelude.lisp        standard helpers written in mylisp itself
+    prelude.lisp        standard helpers written in Brood itself
   docs/                 you are here
 ```
 
@@ -84,10 +84,10 @@ the `lisp` crate stays the foundation.
 **`'tail: loop`, not plain recursion**. For any expression in *tail position* —
 the last form of a body, a chosen `if`/`cond` branch, the call in a tail call —
 the evaluator reassigns its `expr`/`env` locals and loops instead of recursing.
-The upshot: deeply recursive mylisp code (the natural way to write loops in a
+The upshot: deeply recursive Brood code (the natural way to write loops in a
 Lisp) does **not** grow the Rust call stack. The test suite proves this by
 summing to 100,000 via tail recursion (kept at 100k rather than millions because
-arithmetic is now defined in mylisp itself, and so is slower than a native loop).
+arithmetic is now defined in Brood itself, and so is slower than a native loop).
 
 Dispatch order for a list form `(head ...)`:
 

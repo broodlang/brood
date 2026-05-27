@@ -1,6 +1,6 @@
 # ROADMAP — Stage 1: a full, functional Lisp
 
-**Goal of Stage 1:** mylisp stands on its own as a *practical, general-purpose
+**Goal of Stage 1:** Brood stands on its own as a *practical, general-purpose
 dynamic Lisp* — you could write real programs in it without ever mentioning the
 editor. (The editor, display protocol, server, and web frontend are Stage 2+ —
 see [`docs/roadmap.md`](docs/roadmap.md) for the full M1–M5 arc. This file is the
@@ -8,8 +8,8 @@ detailed Stage-1 completeness checklist.)
 
 Guiding constraints (see `CLAUDE.md`): keep the **language core small** — prefer
 adding a primitive function or a prelude macro over a new special form — and
-write as much as possible *in mylisp itself*. Tags below: **[kernel]** = needs
-new Rust; **[mylisp]** = can be written in the prelude.
+write as much as possible *in Brood itself*. Tags below: **[kernel]** = needs
+new Rust; **[Brood]** = can be written in the prelude.
 
 ---
 
@@ -43,12 +43,12 @@ The native kernel is **39 primitives** — see [`docs/primitives.md`](docs/primi
   `index-of`, `upper`/`lower`, `string->number`/`number->string`,
   `char-at`/`string->list`/`list->string`. Today only `str`, `string-length`,
   `pr-str` exist. **[kernel]** for a few accessors (`substring`, char access),
-  **[mylisp]** for the rest.
+  **[Brood]** for the rest.
 - ⬜ **Math library** — `floor ceil round sqrt pow`, `even?`/`odd?`,
-  variadic `min`/`max`, `quot`. **[kernel]** for the float ops; **[mylisp]** for
+  variadic `min`/`max`, `quot`. **[kernel]** for the float ops; **[Brood]** for
   the rest.
 - ⬜ **Sequence library** — `range take drop sort member some? every? map2/zip
-  partition find` and friends. Mostly **[mylisp]** (sort needs care, e.g. a
+  partition find` and friends. Mostly **[Brood]** (sort needs care, e.g. a
   prelude merge sort).
 - ⬜ **Dynamic variables** — `defdyn` / `binding` for config-style vars
   (`*print-depth*` etc.). **[kernel]** (a dynamic-binding store + 2 forms).
@@ -56,8 +56,8 @@ The native kernel is **39 primitives** — see [`docs/primitives.md`](docs/primi
 ### Tier 2 — important ergonomics
 
 - ⬜ **Destructuring** in `let`/`fn` — bind `(a b)` / `[a b]` from a sequence.
-  Modern convenience; **[mylisp]** if `let`/`fn` gain a macro layer, else **[kernel]**.
-- ⬜ **`case`** (dispatch on a value) and a few loop macros (`dotimes`, `dolist`). **[mylisp]**
+  Modern convenience; **[Brood]** if `let`/`fn` gain a macro layer, else **[kernel]**.
+- ⬜ **`case`** (dispatch on a value) and a few loop macros (`dotimes`, `dolist`). **[Brood]**
 - ⬜ **`letrec` / local mutual recursion** (today: use top-level `def`). **[kernel]** small.
 - ⬜ **Symbol/keyword tools** — `symbol`, `keyword`, `name`, `symbol->string`,
   `string->symbol`. **[kernel]** small, helps metaprogramming.
@@ -71,10 +71,10 @@ The native kernel is **39 primitives** — see [`docs/primitives.md`](docs/primi
 - ⬜ **Source locations in errors** — the reader currently drops spans; attaching
   them gives line/column in messages (and later, stack traces). **[kernel]**
 - ✅ **Native test library** — `std/test.lisp` (`deftest` / `is` / `assert=` /
-  `assert-error` / `run-tests`, written in mylisp). Loaded via `(require 'test)`
+  `assert-error` / `run-tests`, written in Brood). Loaded via `(require 'test)`
   (embedded in the binary, so it works from any directory). `tests/suite.lisp`
   uses it (54 assertions, 14 tests, incl. concurrency); run via
-  `./bin/cli tests/suite.lisp` and by `cargo test`. Failures exit non-zero. **[mylisp]**
+  `./bin/cli tests/suite.lisp` and by `cargo test`. Failures exit non-zero. **[Brood]**
 
 ### Out of scope for Stage 1 (deferred, additive later)
 
@@ -94,7 +94,7 @@ scheduled across all cores, share-nothing, message-passing; lean (no
 supervision / preemption / live-migration in v1).
 
 Strategy: start simple and let the language keep adopting features in parallel.
-Language gaps above are mostly **[mylisp]**, so they don't deepen the evaluator
+Language gaps above are mostly **[Brood]**, so they don't deepen the evaluator
 and don't conflict with the concurrency work. Concurrency lands in phases:
 
 - ✅ `spawn` / `send` / `receive` / `self` + message passing (`process.rs`) — each
@@ -121,11 +121,11 @@ what unlock full work-stealing, so concurrency pulls the GC work earlier.
 
 1. **Maps** (Tier 1) — unblocks structured data *and* a structured error value.
 2. **Strings + Math** (Tier 1) — the two libraries every real program reaches for.
-3. **Sequence library** (Tier 1, mostly mylisp) — cheap, high value.
+3. **Sequence library** (Tier 1, mostly Brood) — cheap, high value.
 4. **Dynamic variables** (Tier 1).
 5. **Symbol/keyword tools, `case`, file I/O** (Tier 2) — quick wins.
 6. **Tracing GC** (Tier 3) — do before long-lived editor sessions (Stage 2).
 7. Destructuring, source locations, test helpers as they pull their weight.
 
-When every Tier 1 box is ticked, mylisp is a Lisp you can write real programs in
+When every Tier 1 box is ticked, Brood is a Lisp you can write real programs in
 — Stage 1 complete, and we turn to the editor.

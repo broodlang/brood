@@ -1,6 +1,6 @@
-# mylisp documentation
+# Brood documentation
 
-This folder is the detailed record of what mylisp is, how it's built, and where
+This folder is the detailed record of what Brood is, how it's built, and where
 it's going. Start here.
 
 | Document | What's in it |
@@ -8,7 +8,7 @@ it's going. Start here.
 | [architecture.md](architecture.md) | The big picture: the runtime, the crate layout, the eval loop, the memory model, and the "one runtime that can also be a server" design that the whole project is organised around. |
 | [spec.md](spec.md) | The **formal language specification** (v0.1): lexical structure and reader grammar (EBNF), the data model, evaluation/tail-call rules, scoping (it's a Lisp-1), special forms, and the primitive/derived split. The precise companion to language.md. |
 | [language.md](language.md) | The language reference *as implemented today* (v0.1): data types, syntax, special forms, and every builtin. Friendlier than the spec. |
-| [primitives.md](primitives.md) | The **native primitive kernel** — the complete list of functions implemented in Rust (everything else is mylisp), including how error handling (`throw`/`%try`/`try`/`error`) is built. |
+| [primitives.md](primitives.md) | The **native primitive kernel** — the complete list of functions implemented in Rust (everything else is Brood), including how error handling (`throw`/`%try`/`try`/`error`) is built. |
 | [concurrency.md](concurrency.md) | Design (for review) for **green processes on all cores** — Erlang-style `spawn`/`send`/`receive`, share-nothing, work-stealing schedulers. A parallel core track. |
 | [memory-model.md](memory-model.md) | Design (for review) for **`Send` heaps + GC** — the prerequisite for true multi-core. Compares gc-arena+stepping-VM vs a hand-rolled arena; staged migration plan. |
 | [shared-code.md](shared-code.md) | Design for **shared code, isolated data** (Erlang-style) — region-tagged handles, a shared code heap, and cross-process hot-reload. Unlocks cheap spawn + sending functions. Staged sub-steps. |
@@ -18,7 +18,7 @@ it's going. Start here.
 
 ## The one-paragraph version
 
-mylisp is a small, dynamic Lisp implemented in Rust. Its reason for existing is
+Brood is a small, dynamic Lisp implemented in Rust. Its reason for existing is
 to be the language a modern, Emacs-like text editor is *written in* — so that a
 running editor can redefine its own behaviour by re-evaluating code. v0.1 is the
 language core: a reader, a tree-walking evaluator with proper tail calls and

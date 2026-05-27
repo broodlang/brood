@@ -1,13 +1,13 @@
-# mylisp language specification
+# Brood language specification
 
 **Version:** 0.1 · **Status:** draft, tracking the implementation.
 
-This is the normative description of mylisp as currently implemented. Where it
+This is the normative description of Brood as currently implemented. Where it
 and the code disagree, that is a bug in one of them — please file/fix. The
 companion [language.md](language.md) is the friendlier tutorial-style reference;
 this document aims to be precise.
 
-mylisp is a dynamically-typed, lexically-scoped **Lisp-1** with proper tail
+Brood is a dynamically-typed, lexically-scoped **Lisp-1** with proper tail
 calls. "Lisp-1" means functions and variables share a single namespace
 (§6).
 
@@ -131,7 +131,7 @@ Consequently, recursion is the idiomatic and safe way to loop.
 
 ## 6. Scoping and namespaces
 
-mylisp is a **Lisp-1**: there is a single namespace. The operator position of a
+Brood is a **Lisp-1**: there is a single namespace. The operator position of a
 combination is resolved with the same lookup as any other variable reference, so
 functions are first-class values bound like any other (`(def + …)`, `(map f xs)`).
 A local binding may therefore shadow a global function of the same name.
@@ -181,7 +181,7 @@ unquotes resolve at the first enclosing quasiquote.
 A macro is invoked in operator position on its **unevaluated** argument forms;
 the value it returns is then evaluated in its place (and is itself subject to
 further macro expansion and tail-call treatment). Macros are ordinary closures
-tagged as macros, so a macro body is just mylisp code that computes a form —
+tagged as macros, so a macro body is just Brood code that computes a form —
 typically with quasiquote. `gensym` yields fresh symbols for
 hygiene-by-convention. `macroexpand-1`/`macroexpand` expand without evaluating.
 Macros are resolved after special forms and before function application, so a
@@ -250,7 +250,7 @@ holds iff every adjacent pair is equal.
 
 ## 9. The kernel / library split
 
-Almost the entire language is written in mylisp (`std/prelude.lisp`). Rust
+Almost the entire language is written in Brood (`std/prelude.lisp`). Rust
 supplies only an **irreducible primitive kernel**. This split is a deliberate,
 load-bearing design choice (see `CLAUDE.md` and `docs/decisions.md`).
 
@@ -269,7 +269,7 @@ vector? fn?` ·
 `%`-prefixed names are low-level and not intended for direct use. The full
 annotated list is in [primitives.md](primitives.md).
 
-**Derived (mylisp, in the prelude):**
+**Derived (Brood, in the prelude):**
 the `defn`, `->`/`->>`, and `try`/`catch` macros; `error`; `not + - * / inc dec
 < <= > >= = not= number? list? car cdr list second third fold reduce map filter
 reverse append count length nth last but-last identity zero? positive? negative?

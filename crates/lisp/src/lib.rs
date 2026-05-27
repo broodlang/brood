@@ -1,4 +1,4 @@
-//! mylisp — a small, dynamic Lisp built to (eventually) write a modern,
+//! Brood — a small, dynamic Lisp built to (eventually) write a modern,
 //! self-editing text editor.
 //!
 //! This crate is the language: reader, evaluator, value model, the per-process
@@ -6,7 +6,7 @@
 //! REPL.
 //!
 //! ```
-//! use mylisp::Interp;
+//! use brood::Interp;
 //! let mut interp = Interp::new();
 //! let result = interp.eval_str("(+ 1 2)").unwrap();
 //! assert_eq!(interp.print(result), "3");
@@ -70,5 +70,5 @@ impl Default for Interp {
     }
 }
 
-/// The standard prelude, written in mylisp and baked into the binary.
+/// The standard prelude, written in Brood and baked into the binary.
 const PRELUDE: &str = include_str!("../../../std/prelude.lisp");

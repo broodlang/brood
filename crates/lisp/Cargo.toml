@@ -1,11 +1,11 @@
 [package]
-name = "mylisp"
+name = "brood"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "The mylisp language: reader, evaluator, and core for a self-editing editor."
+description = "The Brood language: reader, evaluator, and core for a self-editing editor."
 
 [lib]
-name = "mylisp"
+name = "brood"
 path = "src/lib.rs"

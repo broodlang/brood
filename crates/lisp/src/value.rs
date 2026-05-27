@@ -81,7 +81,7 @@ handle!(ClosureId);
 handle!(NativeId);
 handle!(EnvId);
 
-/// A mylisp value. `Copy`: primitives inline, heap objects as handles.
+/// A Brood value. `Copy`: primitives inline, heap objects as handles.
 #[derive(Clone, Copy, Debug)]
 pub enum Value {
     Nil,

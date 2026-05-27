@@ -2,7 +2,7 @@
 //! check the printed result. These double as executable documentation of what
 //! the language can currently do.
 
-use mylisp::Interp;
+use brood::Interp;
 
 /// Evaluate `src` in a fresh interpreter and return the printed result.
 fn run(src: &str) -> String {
@@ -15,7 +15,7 @@ fn run(src: &str) -> String {
 #[test]
 fn heap_is_send() {
     fn assert_send<T: Send>() {}
-    assert_send::<mylisp::heap::Heap>();
+    assert_send::<brood::heap::Heap>();
 }
 
 #[test]
@@ -110,7 +110,7 @@ fn strings() {
 /// The headline property: deep tail recursion uses O(1) Rust stack, so it must
 /// not overflow. 100,000 frames would blow the stack without tail calls; we keep
 /// the count here (rather than millions) because arithmetic is now defined in
-/// mylisp itself and is correspondingly slower than a native loop.
+/// Brood itself and is correspondingly slower than a native loop.
 #[test]
 fn tail_calls_do_not_overflow() {
     let src = "
@@ -145,7 +145,7 @@ fn eval_and_read_string() {
 fn defn_defines_functions() {
     assert_eq!(run("(defn sq [x] (* x x)) (sq 6)"), "36");
     assert_eq!(run("(defn add3 [a b c] (+ a b c)) (add3 1 2 3)"), "6");
-    // defn is itself written in mylisp; it expands to (def name (fn ...)).
+    // defn is itself written in Brood; it expands to (def name (fn ...)).
     assert_eq!(run("(macroexpand-1 '(defn f [x] (+ x 1)))"), "(def f (fn [x] (+ x 1)))");
 }
 

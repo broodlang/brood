@@ -4,12 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "The mylisp command-line REPL and file runner."
+description = "The Brood command-line REPL and file runner."
 
 [[bin]]
-name = "mylisp"
+name = "brood"
 path = "src/main.rs"
 
 [dependencies]
-mylisp = { path = "../lisp" }
+brood = { path = "../lisp" }
 rustyline = "18.0.0"
