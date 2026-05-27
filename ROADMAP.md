@@ -105,6 +105,9 @@ and don't conflict with the concurrency work. Concurrency lands in phases:
   processes cheap (millions) and gives the core cap
 - ⬜ **Shared code** (Erlang-style: share defs, isolate data) so spawned processes
   see all user functions and spawn is cheap (no per-process prelude reload)
+- ⬜ **Send functions between processes** — once shared code lands: ship a
+  closure's code (already a solved sub-problem) plus its captured free variables
+  (closure serialization); global/native references resolve via shared code
 - ⬜ later: reduction-counted preemption, then supervision / links
 
 The Tier-3 **tracing GC** is shared with this track: `Send` per-process heaps are
