@@ -93,4 +93,4 @@
     (send w 21)
     (assert= (receive) 42)))
 
-(run-tests)
+(run-tests :trace :slow)

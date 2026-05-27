@@ -134,15 +134,33 @@ shared. Today only the global frame's *contents* point into the shared region.
 3. ✅ **`spawn` shares the code.** Since `Interp::new` no longer reloads the
    prelude (clones the `Arc` + copies the bindings map), spawning a process is
    cheap and the child can call any prelude/builtin via the shared region.
-   (Parent's *user* `defn`s are still local — visible to children only after
-   step 4.)
-4. **Mutable shared region.** `def`/`defmacro` promote code to shared and rebind
-   the shared global table (append-only code + locked bindings). Live redefinition
-   works within a process.
-5. **Cross-process hot-reload.** Redefinition is visible to running processes;
-   add a test. Now spawned/sent functions see all user defns.
-6. **Send functions** (separate doc/roadmap item): shared `ClosureId` + captured
-   free variables.
+   Parent's *user* `defn`s are not visible to children — see the design change
+   below.
+
+### Design change: instances are independent (steps 4–5 dropped)
+
+A later requirement settled the direction: **each instance must be independent —
+updating a function in one runtime must *not* update other (connected) runtimes.**
+That is the *opposite* of a shared mutable global. So the originally-planned
+steps 4–5 (a shared mutable global + cross-process hot-reload propagation) are
+**deliberately not built.**
+
+What we keep is exactly right for that model:
+
+- the **prelude is shared read-only** (`Arc<SharedCode>`) — an efficiency win that
+  can't leak updates, since it's immutable (redefining a prelude fn just shadows
+  it *locally*);
+- each instance has its **own mutable global** function table — `def` updates
+  only that instance; **single-instance hot-reload works via late binding**
+  (re-eval the `def`, callers pick it up).
+
+Optional, not yet built: **snapshot user defns at `spawn`** — copy the parent's
+current user functions into the child so a spawned function can call them. A
+*snapshot* (no later propagation) is consistent with instance independence. This
+reuses the closure-shipping machinery; no shared mutable state.
+
+(`6.` send functions — ship a closure's code + captured free variables — remains
+possible if a concrete need arises.)
 
 ## Risks
 

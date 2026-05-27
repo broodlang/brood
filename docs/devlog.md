@@ -195,3 +195,23 @@ parameter lists and the broader role of vectors:
   user+sys needs `/proc` parsing or `libc`).
 - Docs: `primitives.md` (Time + Memory categories, count 44→47), `language.md`
   (Time & memory section), `decisions.md` (ADR-012).
+
+### Test runner: per-test tracing + slow-test report (same day)
+
+- User asked for two opt-in flags on the runner: trace each test (name + time)
+  and surface slow tests. Done **entirely in Brood** — no new primitives;
+  `(now)` already gives ms and `count` already measures strings.
+- `run-tests` now takes flags: `(run-tests :trace)` prints one line per test
+  (`.`/`F` marker, padded name, right-aligned ms) instead of the dot line;
+  `(run-tests :slow)` prints the slowest tests after the summary; both compose.
+  Times are recorded into `*timings*` every run, so `:slow` works on its own.
+- Supporting Brood added to `std/test.lisp`: `opt?` (flag lookup), `spaces`/
+  `pad-right`/`pad-left` (column formatting), `take`, and a tiny `insert-by-ms`/
+  `sort-by-ms` insertion sort (O(n²) is fine for a handful of tests). Default
+  output — dots + summary — is byte-for-byte unchanged when no flags are passed.
+- Enabled both flags on `tests/suite.lisp` per the user's "add these two flags
+  for now". The Rust harness (`crates/lisp/tests/suite.rs`) only checks for a
+  raised error, so the extra output is harmless; `cargo test` stays green.
+- Immediately useful: trace shows `tail-calls` (`sum-to 100000`) is ~6.1s of the
+  ~6.1s run — the whole suite's cost is that one test, reinforcing the GC
+  motivation already noted above.

@@ -91,8 +91,16 @@ cargo run -p cli file.lisp        # run a program file
 - **Symbols are interned `u32`s.** Compare with `==`; get the spelling via
   `value::symbol_name`.
 - **Truthiness:** only `nil` and `false` are falsy (`eval::truthy`).
-- **Keep v0.1 dependency-free** unless a milestone genuinely needs a crate
-  (ADR-005). When you do add one, note it in `docs/decisions.md`.
+- **No Rust dependencies in the runtime.** The `brood` lib crate stays
+  dependency-free — hand-roll any data structures the runtime needs (our own
+  substrate), don't pull in crates like `boxcar`/`dashmap`/`gc-arena`. Dev/UX
+  deps in the **CLI** crate (e.g. `rustyline`) are fine. (Supersedes ADR-005.)
+- **Instances are independent; code updates do not propagate.** Each
+  process/runtime has its own mutable global function table (seeded from a
+  shared, read-only prelude). Redefining a function updates *that* instance only
+  — never other running processes or connected runtimes. Single-instance
+  hot-reload works via late binding (re-eval the `def`); there is deliberately
+  **no** shared mutable global / cross-process code propagation.
 
 ## When you add a feature
 
