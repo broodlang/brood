@@ -1,100 +1,85 @@
-;; mylisp test suite — written in mylisp itself.
-;;   ./bin/cli tests/suite.lisp     (prints a summary; exits non-zero on failure)
-;; It is also run by `cargo test` (see crates/lisp/tests/suite.rs).
+;; mylisp test suite — written in mylisp, using the native test library.
+;;   ./bin/cli std/test.lisp tests/suite.lisp
+;; (also run by `cargo test` via crates/lisp/tests/suite.rs)
 
-(def *passed* 0)
-(def *failed* 0)
+(deftest arithmetic
+  (assert= (+ 1 2 3)     6)
+  (assert= (- 10 3 2)    5)
+  (assert= (- 5)         -5)
+  (assert= (* 2 3 4)     24)
+  (assert= (/ 12 3)      4)
+  (assert= (/ 7 2)       3.5)
+  (assert= (mod 10 3)    1)
+  (assert= (+ 1 (* 2 3)) 7))
 
-(defn check (name actual expected)
-  (if (= actual expected)
-    (set! *passed* (+ *passed* 1))
-    (do
-      (set! *failed* (+ *failed* 1))
-      (println "FAIL:" name "— expected" (pr-str expected) "got" (pr-str actual)))))
+(deftest comparison-and-equality
+  (is (< 1 2 3))
+  (is (not (< 1 3 2)))
+  (is (= 2 2))
+  (is (not= 1 2))
+  (assert= (list 1 2) (list 1 2)))
 
-;; ---- arithmetic ----
-(check "add"        (+ 1 2 3)         6)
-(check "sub"        (- 10 3 2)        5)
-(check "neg"        (- 5)             -5)
-(check "mul"        (* 2 3 4)         24)
-(check "div-int"    (/ 12 3)          4)
-(check "div-float"  (/ 7 2)           3.5)
-(check "mod"        (mod 10 3)        1)
-(check "nested"     (+ 1 (* 2 3))     7)
+(deftest lists
+  (assert= (cons 0 (list 1 2))             (list 0 1 2))
+  (assert= (first (list 1 2 3))            1)
+  (assert= (rest (list 1 2 3))             (list 2 3))
+  (assert= (count (list 1 2 3 4))          4)
+  (assert= (reverse (list 1 2 3))          (list 3 2 1))
+  (assert= (append (list 1 2) (list 3 4))  (list 1 2 3 4))
+  (assert= (nth (list 10 20 30) 1)         20))
 
-;; ---- comparison / equality ----
-(check "lt"         (< 1 2 3)         true)
-(check "lt-false"   (< 1 3 2)         false)
-(check "eq"         (= 2 2)           true)
-(check "not="       (not= 1 2)        true)
-(check "eq-list"    (= (list 1 2) (list 1 2)) true)
+(deftest higher-order
+  (assert= (map inc (list 1 2 3))               (list 2 3 4))
+  (assert= (filter positive? (list -1 2 -3 4))  (list 2 4))
+  (assert= (reduce + 0 (list 1 2 3 4))          10)
+  (assert= (apply + (list 1 2 3))               6))
 
-;; ---- lists ----
-(check "cons"       (cons 0 (list 1 2))      (list 0 1 2))
-(check "first"      (first (list 1 2 3))     1)
-(check "rest"       (rest (list 1 2 3))      (list 2 3))
-(check "count"      (count (list 1 2 3 4))   4)
-(check "reverse"    (reverse (list 1 2 3))   (list 3 2 1))
-(check "append"     (append (list 1 2) (list 3 4)) (list 1 2 3 4))
-(check "nth-list"   (nth (list 10 20 30) 1)  20)
+(deftest vectors
+  (assert= [1 (+ 1 1) 3]   [1 2 3])
+  (assert= (nth [10 20 30] 2) 30)
+  (assert= (count [1 2 3]) 3))
 
-;; ---- higher order ----
-(check "map"        (map inc (list 1 2 3))               (list 2 3 4))
-(check "filter"     (filter positive? (list -1 2 -3 4))  (list 2 4))
-(check "reduce"     (reduce + 0 (list 1 2 3 4))          10)
-(check "apply"      (apply + (list 1 2 3))               6)
+(deftest strings
+  (assert= (str "a" "b" 3) "ab3")
+  (assert= (count "hello") 5))
 
-;; ---- vectors (data) ----
-(check "vector-eval" [1 (+ 1 1) 3]   [1 2 3])
-(check "nth-vec"     (nth [10 20 30] 2) 30)
-(check "vec-count"   (count [1 2 3])  3)
+(deftest predicates
+  (is (nil? nil))
+  (is (pair? (list 1)))
+  (is (number? 3.5))
+  (is (vector? [1])))
 
-;; ---- strings ----
-(check "str"        (str "a" "b" 3)  "ab3")
-(check "str-len"    (count "hello")  5)
+(deftest control-and-binding
+  (assert= (if (< 1 2) :y :n)              :y)
+  (assert= (cond false :a true :b else :c) :b)
+  (assert= (when true 1 2 3)               3)
+  (assert= (let (a 1 b (+ a 1)) (+ a b))   3)
+  (assert= (let (adder (fn (a) (fn (b) (+ a b)))) ((adder 3) 4)) 7))
 
-;; ---- predicates ----
-(check "nil?"       (nil? nil)       true)
-(check "pair?"      (pair? (list 1)) true)
-(check "number?"    (number? 3.5)    true)
-(check "vector?"    (vector? [1])    true)
+(deftest parameter-forms
+  (assert= ((fn (a &optional (b 10)) (+ a b)) 5)   15)
+  (assert= ((fn (a &optional (b 10)) (+ a b)) 5 1) 6)
+  (assert= ((fn (& xs) xs) 1 2 3)                  (list 1 2 3)))
 
-;; ---- conditionals / let / closures ----
-(check "if"      (if (< 1 2) :y :n)                  :y)
-(check "cond"    (cond false :a true :b else :c)     :b)
-(check "when"    (when true 1 2 3)                   3)
-(check "let"     (let (a 1 b (+ a 1)) (+ a b))       3)
-(check "closure" (let (adder (fn (a) (fn (b) (+ a b)))) ((adder 3) 4)) 7)
+(deftest defn-and-macros
+  (defn sq (x) (* x x))
+  (assert= (sq 6) 36)
+  (defmacro my-when (c & body) `(if ~c (do ~@body) nil))
+  (assert= (my-when true 1 2 3)  3)
+  (assert= (my-when false 1 2 3) nil)
+  (assert= `(1 ~(+ 1 1) ~@(list 3 4) 5) (list 1 2 3 4 5)))
 
-;; ---- parameter forms ----
-(check "optional-default" ((fn (a &optional (b 10)) (+ a b)) 5)   15)
-(check "optional-given"   ((fn (a &optional (b 10)) (+ a b)) 5 1) 6)
-(check "rest-args"        ((fn (& xs) xs) 1 2 3)                   (list 1 2 3))
+(deftest threading
+  (assert= (-> 5 (- 1) (* 2))          8)
+  (assert= (->> (list 1 2 3) (map inc)) (list 2 3 4)))
 
-;; ---- defn / macros / threading ----
-(defn sq (x) (* x x))
-(check "defn" (sq 6) 36)
+(deftest error-handling
+  (assert= (try (throw 42) (catch e e))         42)
+  (is      (try (/ 1 0) (catch e (string? e))))
+  (assert= (try (+ 1 2) (catch e :nope))        3))
 
-(defmacro my-when (c & body) `(if ~c (do ~@body) nil))
-(check "macro-true"  (my-when true 1 2 3)  3)
-(check "macro-false" (my-when false 1 2 3) nil)
-(check "quasiquote"  `(1 ~(+ 1 1) ~@(list 3 4) 5) (list 1 2 3 4 5))
+(deftest tail-calls
+  (defn sum-to (n acc) (if (= n 0) acc (sum-to (- n 1) (+ acc n))))
+  (assert= (sum-to 100000 0) 5000050000))
 
-(check "thread-first" (-> 5 (- 1) (* 2))         8)
-(check "thread-last"  (->> (list 1 2 3) (map inc)) (list 2 3 4))
-
-;; ---- error handling ----
-(check "catch-throw"   (try (throw 42) (catch e e))            42)
-(check "catch-builtin" (try (/ 1 0) (catch e (string? e)))     true)
-(check "no-throw"      (try (+ 1 2) (catch e :nope))           3)
-
-;; ---- tail recursion (must not overflow) ----
-(defn sum-to (n acc) (if (= n 0) acc (sum-to (- n 1) (+ acc n))))
-(check "tail-calls" (sum-to 100000 0) 5000050000)
-
-;; ---- summary ----
-(println "")
-(println *passed* "passed," *failed* "failed")
-(if (> *failed* 0)
-  (error (str *failed* " test(s) failed"))
-  (println "mylisp suite: all passed"))
+(run-tests)

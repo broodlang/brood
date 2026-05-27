@@ -6,9 +6,11 @@ use mylisp::Interp;
 
 #[test]
 fn mylisp_suite_passes() {
-    let src = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/suite.lisp"));
+    let test_lib = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../std/test.lisp"));
+    let suite = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/suite.lisp"));
     let mut interp = Interp::new();
-    if let Err(e) = interp.eval_str(src) {
+    interp.eval_str(test_lib).expect("loading std/test.lisp failed");
+    if let Err(e) = interp.eval_str(suite) {
         panic!("mylisp test suite failed: {}", e);
     }
 }

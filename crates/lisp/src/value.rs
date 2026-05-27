@@ -7,18 +7,18 @@
 //! payoff: a `Heap` is plain `Vec`s of data, so it is `Send` — a process can be
 //! moved between scheduler threads — and it gives us one place to do GC.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 
 use crate::error::LispResult;
 use crate::heap::Heap;
 
-/// An interned symbol name (a `u32` id; the spelling lives in a thread-local table).
+/// An interned symbol name (a `u32` id; the spelling lives in a global table).
 pub type Symbol = u32;
 
-thread_local! {
-    static INTERNER: RefCell<Interner> = RefCell::new(Interner::default());
-}
+// Global (process-wide) interner so symbol ids are consistent across scheduler
+// threads — a prerequisite for sending symbols between process heaps.
+static INTERNER: LazyLock<Mutex<Interner>> = LazyLock::new(|| Mutex::new(Interner::default()));
 
 #[derive(Default)]
 struct Interner {
@@ -27,20 +27,18 @@ struct Interner {
 }
 
 pub fn intern(name: &str) -> Symbol {
-    INTERNER.with(|cell| {
-        let mut i = cell.borrow_mut();
-        if let Some(&id) = i.ids.get(name) {
-            return id;
-        }
-        let id = i.names.len() as Symbol;
-        i.names.push(name.to_string());
-        i.ids.insert(name.to_string(), id);
-        id
-    })
+    let mut i = INTERNER.lock().unwrap();
+    if let Some(&id) = i.ids.get(name) {
+        return id;
+    }
+    let id = i.names.len() as Symbol;
+    i.names.push(name.to_string());
+    i.ids.insert(name.to_string(), id);
+    id
 }
 
 pub fn symbol_name(sym: Symbol) -> String {
-    INTERNER.with(|cell| cell.borrow().names[sym as usize].clone())
+    INTERNER.lock().unwrap().names[sym as usize].clone()
 }
 
 // ----- handles into the Heap -----

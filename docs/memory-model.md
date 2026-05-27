@@ -140,8 +140,12 @@ semantics) is **ours**.
    behavior change (25 tests green); still single-threaded — one heap.
 3. ✅ **Reach `Send`** (non-collecting arena — it only grows for now). The `Heap`
    is plain `Vec`s of data, so it's `Send`; a `heap_is_send` test asserts it.
-4. ⬜ **Multi-core scheduler** (concurrency doc phase ②): N threads,
+4. 🟡 **Multi-core scheduler** (concurrency doc phase ②): N threads,
    work-stealing, copy-on-send messages, default **2 schedulers** for testing.
+   Groundwork started: the symbol interner is now **global** (so symbol ids match
+   across threads). Paused here to build the native test library first; uncovered
+   that this step also needs cross-heap message serialization and (for true green
+   threads) coroutine suspension — see `concurrency.md`.
 5. ⬜ **Per-process mark-sweep GC** (see "GC — simplified by isolation"). Roots =
    each process's stack + mailbox; the shared code table is outside it.
 6. ⬜ **Suspension** via stackful coroutines for blocking `receive`.
