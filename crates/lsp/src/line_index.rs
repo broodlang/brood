@@ -53,6 +53,31 @@ impl LineIndex {
             .sum();
         Position::new(line as u32, character)
     }
+
+    /// The byte offset of `pos` within `text` — the inverse of [`position`], for
+    /// requests that arrive as a `Position` (hover, completion, goto). `character`
+    /// is a UTF-16 code-unit count, so we walk the line's chars summing UTF-16
+    /// widths until we reach it. A `line`/`character` past the end clamps to
+    /// end-of-line / end-of-document, mirroring `position`'s out-of-range clamp.
+    ///
+    /// [`position`]: Self::position
+    pub fn offset(&self, text: &str, pos: Position) -> u32 {
+        let Some(&line_start) = self.line_starts.get(pos.line as usize) else {
+            return self.len; // a line past EOF → end of document
+        };
+        let mut col_u16 = 0u32;
+        let mut byte = line_start as usize;
+        for c in text[byte..].chars() {
+            // Stop at the requested column, or at the line's end so a `character`
+            // past the line doesn't spill into the next one.
+            if col_u16 >= pos.character || c == '\n' {
+                break;
+            }
+            col_u16 += c.len_utf16() as u32;
+            byte += c.len_utf8();
+        }
+        byte as u32
+    }
 }
 
 #[cfg(test)]
@@ -97,5 +122,27 @@ mod tests {
         let text = "ab";
         let idx = LineIndex::new(text);
         assert_eq!(idx.position(text, 999), Position::new(0, 2));
+    }
+
+    #[test]
+    fn offset_inverts_position_across_lines_and_multibyte() {
+        // `offset` must round-trip with `position` at every char boundary,
+        // including past multibyte chars where bytes != UTF-16 columns.
+        let text = "(a)\n  (é😀)\n(c)";
+        let idx = LineIndex::new(text);
+        for (b, _) in text.char_indices() {
+            let p = idx.position(text, b as u32);
+            assert_eq!(idx.offset(text, p), b as u32, "round-trip at byte {b}");
+        }
+    }
+
+    #[test]
+    fn offset_clamps_past_end_of_line_and_document() {
+        let text = "(a)\n(b)";
+        let idx = LineIndex::new(text);
+        // A column past the first line's end clamps to the newline, not line 2.
+        assert_eq!(idx.offset(text, Position::new(0, 99)), 3);
+        // A line past EOF clamps to end-of-document.
+        assert_eq!(idx.offset(text, Position::new(99, 0)), text.len() as u32);
     }
 }

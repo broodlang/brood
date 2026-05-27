@@ -1,8 +1,8 @@
 # Brood language reference (v0.1)
 
 This describes the language **as implemented today**. Anything not listed here
-does not exist yet — see [roadmap.md](roadmap.md) for what's coming (macros,
-quasiquote, dynamic variables, error handling, maps, …).
+does not exist yet — see [roadmap.md](roadmap.md) for what's coming (dynamic
+variables, a tracing GC, …).
 
 Brood is a dynamically-typed, **immutable** **Lisp-1** (one namespace for
 functions and variables, like Scheme/Clojure) with **lexical scoping** and
@@ -56,6 +56,7 @@ be guessed from Clojure; it has to be read.
 | Vector | `[1 2 3]` | A data type with O(1) indexing. Evaluates its elements. |
 | Map | `{:a 1 :b 2}`, `{}` | Immutable key→value associations; insertion-ordered. Evaluates its keys and values. Any value can be a key (compared structurally). |
 | Function | `#<fn name>`, `#<native +>` | Closures and builtins. |
+| Ref | `#<ref 0>` | A unique, opaque reference token from `(ref)` — no literal syntax; the only way to make one. Used to tag a request to its reply (see [Processes](#processes-concurrency)). |
 
 ### Truthiness
 
@@ -418,6 +419,9 @@ redefinitions — ADR-013), but messages cross as deep copies.
 | `(send pid msg)` | Copy `msg` into `pid`'s mailbox (non-blocking; sending to a dead pid is a no-op). |
 | `(receive clause...)` | Take the first matching message (see below); suspend until one arrives. `(receive)` with no clauses takes the next message. |
 | `(self)` | Your own pid. |
+| `(ref)` | A fresh unique reference token — see *Synchronous calls* below. |
+| `(monitor pid)` | Watch `pid`; returns a monitor `ref`. See *Monitors* below. |
+| `(demonitor mref)` | Drop the monitor created by `(monitor …)`. |
 | `(spawn-count)` | How many green processes have been spawned since the program started. |
 | `(peak-threads)` | High-water mark of processes running *simultaneously* (bounded by the worker pool). |
 | `(worker-threads)` | Size of the worker-thread pool (≈ `nproc`, or `-j N`). |
@@ -455,6 +459,58 @@ over the `%receive` primitive, built on the `match` compiler — no new special
 form. See [concurrency.md](concurrency.md) and [scheduler.md](scheduler.md) for
 the model, and [pattern-matching.md](pattern-matching.md) for the clause grammar.
 
+### Synchronous calls (and why there's no `await`)
+
+`send` is fire-and-forget. To wait for a result, you don't need an `await`
+primitive — the **blocking `receive` is the synchronisation**. The idiom is
+Erlang's `gen_server` distinction: a *cast* is a bare `send`; a *call* is a
+request whose reply you `receive`. The catch with concurrent calls is telling
+replies apart, which is what **`(ref)`** is for: a fresh, opaque, unforgeable
+token you put in the request and the server echoes in the reply, so a pinned
+`~ref` in your `receive` matches only *your* answer (other replies stay queued).
+
+```clojure
+(defn reply (to tag v) (send to [:reply tag v]))
+(defn call (pid req)
+  (let (tag (ref))                       ; a unique token for this call
+    (send pid [:call (self) tag req])
+    (receive ([:reply ~tag v] v))))      ; block for exactly this reply
+```
+
+A script exits when its *main* process returns, so ending on a `call` (which
+ends on a `receive`) is how you ensure spawned work finished before exit — no
+separate `await`/join. `(ref)` values are their own type (`ref?`, `:ref`),
+compared by identity, and may be sent in messages. (`call`/`reply` aren't in the
+prelude yet — see `examples/life.blsp`.)
+
+### Monitors
+
+`(monitor pid)` starts watching another process and returns a monitor `ref`.
+When that process dies, the watcher receives one message:
+
+```clojure
+[:down <monitor-ref> <pid> <reason>]
+```
+
+`reason` is `:normal` for a clean return, `[:error <message>]` for a crash, and
+`:noproc` if `pid` was *already* dead when you called `monitor` (the DOWN is then
+delivered immediately). The monitor is **unidirectional** (it never affects the
+watched process) and **one-shot** (it fires once). `(demonitor mref)` drops it,
+best-effort — a DOWN already queued is not recalled. Pin the ref to wait for a
+specific process's death and ignore unrelated messages:
+
+```clojure
+(def w (spawn worker))
+(def m (monitor w))
+(receive
+  ([:down ~m _ :normal] :finished)
+  ([:down ~m _ reason]   (restart reason)))   ; supervision, in-language
+```
+
+Monitors are the one kernel mechanism a **supervisor** is built from: watch your
+children, and on a non-`:normal` DOWN, restart per a strategy — all expressible
+in Brood. (Bidirectional `link`s are not implemented yet.)
+
 ## Builtins
 
 > **Where these live:** only a small primitive kernel is implemented in Rust
@@ -465,7 +521,8 @@ the model, and [pattern-matching.md](pattern-matching.md) for the clause grammar
 > caller's point of view they're all just functions.
 
 ### Arithmetic
-`+`  `-`  `*`  `/`  `mod`  `rem`
+`+`  `-`  `*`  `/`  `mod`  `rem`  `quot`  `inc`  `dec`
+`floor`  `ceil`  `round`  `sqrt`  `pow`  `abs`  `min`  `max`  `even?`  `odd?`
 
 - Integer-only arguments give an integer result (`/` stays integer only when it
   divides evenly; otherwise it returns a float). Any float argument makes the
@@ -474,6 +531,20 @@ the model, and [pattern-matching.md](pattern-matching.md) for the clause grammar
 - Integer arithmetic is overflow-checked: an operation that would overflow
   (including `i64::MIN` cases like `(mod min -1)`) raises an error rather than
   wrapping or panicking. `(/ min -1)` falls through to a float.
+- `rem` is the truncated remainder (sign of the dividend); `quot` is truncated
+  integer division; `mod` is the euclidean remainder (sign of the divisor).
+- `floor`/`ceil`/`round` return an **int** (an int passes through unchanged);
+  `round` rounds half away from zero. `pow` requires an **integer exponent**
+  (use `sqrt` for roots): an int base with a non-negative exponent stays an int
+  (overflow raises, like `*`); a negative exponent gives the reciprocal as a
+  float. `sqrt` is always a **float** and is *approximate* — it's computed in
+  Brood (Newton's method), not a hardware sqrt; redefine it if you need
+  bit-exactness.
+- `min`/`max` are variadic and require at least one argument. `even?`/`odd?`
+  classify integers.
+- Only `%add`/`%sub`/`%mul`/`%div`/`%lt`/`%eq`, `rem`, and `floor` are Rust
+  primitives; **everything in this section is Brood** on top of them
+  (`std/prelude.blsp`) — including `+`, `<`, and `=` themselves.
 
 ### Comparison & logic
 `=`  `not=`  `<`  `<=`  `>`  `>=`  `not`
@@ -484,11 +555,24 @@ the model, and [pattern-matching.md](pattern-matching.md) for the clause grammar
   IEEE value — so `(= 0.0 -0.0)` is `true` and `(= nan nan)` is `false`.
 
 ### Lists & sequences
-`cons`  `first`  `rest`  `car`  `cdr`  `list`  `vector`  `append`  `reverse`
-`nth`  `count`  `length`  `empty?`
+`cons`  `first`  `rest`  `car`  `cdr`  `second`  `third`  `last`  `but-last`
+`list`  `vector`  `append`  `reverse`  `nth`  `count`  `length`  `empty?`
+`range`  `take`  `drop`  `take-while`  `drop-while`  `member?`  `some?`
+`every?`  `find`  `zip`  `partition`  `sort`  `sort-by`
 
 - `first`/`rest` of `nil` are `nil`. `nth` takes an optional default:
   `(nth coll i default)`.
+- `range`: `(range hi)` → `0..hi-1`; `(range lo hi)` → `lo..hi-1`;
+  `(range lo hi step)` steps (ascending or descending).
+- `take`/`drop` clamp to the sequence length. `take-while`/`drop-while` split on
+  the first element that fails the predicate.
+- `some?`/`every?` return booleans (`every?` is vacuously true on the empty
+  list); `find` returns the first matching element, or `nil`.
+- `zip` pairs two sequences into `[x y]` vectors, stopping at the shorter.
+  `partition` chunks into `n`-sized groups, dropping a trailing partial chunk.
+- `sort` orders ascending (or with a strict less-than predicate:
+  `(sort > xs)`); `sort-by` orders by a key function. Both are a **stable**
+  merge sort. All of these are tail-recursive (stack-safe on long inputs).
 
 ### Maps
 `hash-map`  `get`  `assoc`  `dissoc`  `contains?`  `keys`  `vals`  `map?`
@@ -508,11 +592,11 @@ immutable operations that return fresh maps. `count`/`empty?` work on maps too.
 
 ### Predicates
 `nil?`  `pair?`  `list?`  `symbol?`  `keyword?`  `string?`  `number?`  `int?`
-`float?`  `bool?`  `fn?`  `vector?`  `map?`
+`float?`  `bool?`  `fn?`  `vector?`  `map?`  `ref?`
 
 - `(type-of x)` returns the runtime type tag as a keyword — `:int` `:float`
   `:string` `:symbol` `:keyword` `:bool` `:nil` `:pair` `:vector` `:map` `:fn`
-  `:macro` `:native` — the spellings mirror the predicates above. It's the
+  `:macro` `:native` `:ref` — the spellings mirror the predicates above. It's the
   reflective primitive that in-language type checks build on; the predicates are
   the common-case shortcuts.
 
@@ -609,6 +693,6 @@ actually lives — the `defn` macro, the arithmetic operators, comparisons,
 equality, the sequence library, and the `->`/`->>` threading macros, all defined
 in Brood on top of the Rust primitive kernel. It also adds `inc` `dec`
 `identity` `second` `third` `zero?` `positive?` `negative?` `abs` `max` `min`
-`sum` `product`. Because it's ordinary Brood, any of it can be redefined at
+`even?` `odd?` `sum` `product`. Because it's ordinary Brood, any of it can be redefined at
 runtime — and every function in it is defined with `defn`, exactly as you'd
 define your own.

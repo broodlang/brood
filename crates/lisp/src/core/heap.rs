@@ -712,6 +712,7 @@ impl Heap {
             (Fn(x), Fn(y)) => x == y,
             (Macro(x), Macro(y)) => x == y,
             (Native(x), Native(y)) => x == y,
+            (Ref(x), Ref(y)) => x == y,
             _ => false,
         }
     }

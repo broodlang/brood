@@ -15,14 +15,15 @@ gate (`eval::call_native`), before the primitive runs — so a wrong-count call 
 a clean arity error (`type-of: expected 1 argument, got 0`) rather than a missing
 arg silently becoming `nil`.
 
-## Native primitive functions (67)
+## Native primitive functions (74)
 
 | Category | Primitive | Arity | Purpose |
 |---|---|---|---|
 | **Numeric** (arithmetic substrate) | `%add` `%sub` `%mul` `%div` | 2 | int-preserving arithmetic; `%div` is exact-int-or-float and errors on ÷0 |
 | | `%lt` | 2 | numeric `<` → bool |
 | | `%eq` | 2 | structural equality → bool |
-| | `rem` | 2 | integer remainder (truncated, sign of dividend); `mod` (euclidean) is Brood over it |
+| | `rem` | 2 | integer remainder (truncated, sign of dividend) — **irreducible**: deriving it via float division would lose precision past 2^53. `mod` (euclidean) and `quot` (truncated division) are Brood over it |
+| | `floor` | 1 | floor toward −∞ → **int** (an int passes through) — the one Float→Int crossing the language can't bootstrap. `ceil`/`round`/`sqrt`/`pow` are Brood over it |
 | **Pair / sequence** | `cons` | 2 | make a pair |
 | | `first` `rest` | 1 | head / tail (nil, pair, or vector) |
 | | `empty?` | 1 | empty collection? (nil / string / vector / pair / map) |
@@ -79,6 +80,9 @@ arg silently becoming `nil`.
 | | `send` | 2 | copy a message into a pid's mailbox |
 | | `%receive` | 3 | selective-receive primitive (matcher fn, timeout-ms-or-nil, on-timeout thunk-or-nil); `receive` is a Brood macro over it |
 | | `self` | 0 | this process's pid |
+| | `ref` | 0 | a fresh, globally-unique reference token (`Value::Ref`); tags request↔reply |
+| | `monitor` | 1 | watch a pid; returns a monitor ref. Delivers `[:down ref pid reason]` on its death (`:noproc` if already dead) |
+| | `demonitor` | 1 | drop a monitor by its ref (best-effort) |
 | | `spawn-count` | 0 | green processes spawned since program start |
 | | `peak-threads` | 0 | high-water mark of spawned threads running concurrently (bounded by the CLI's `-j`) |
 | | `worker-threads` | 0 | size of the scheduler's worker-thread pool (≈ nproc; `-j` overrides) |
@@ -88,11 +92,17 @@ construct/inspect, the type-tag *reflection* (`type-of`), I/O, value→text
 conversion, the wall clock, the allocator counters, the `Ty`-lattice checker
 pass, or a hook into `eval`/the reader. None of it can be written in Brood. Everything that *can* be is already
 in the prelude — including the tag predicates (over `type-of`), the full
-arithmetic/comparison families (over `%add`/`%lt`/…), `mod` (over `rem`),
-`println` (over `print`), and the map surface `get`/`assoc`/`dissoc`/`keys`/
-`vals`/`contains?` (the variadic, default-bearing layer over the `map-*`
-primitives). The map literal `{ }` is read by the reader and evaluated like a
-vector literal — no constructor call.
+arithmetic/comparison families `+ - * / < <= > >= = not=` (over `%add`/`%lt`/`%eq`),
+the whole math library `mod`/`quot`/`ceil`/`round`/`pow`/`sqrt`/`even?`/`odd?` +
+variadic `min`/`max` (over `rem`/`floor`/`/`/`*`/`<` — `sqrt` is Newton's method),
+the whole sequence library
+(`range`/`take`/`drop`/`take-while`/`drop-while`/`some?`/`every?`/`find`/`zip`/
+`partition`/`sort`/`sort-by` — a Brood merge sort), `println` (over `print`), and
+the map surface `get`/`assoc`/`dissoc`/`keys`/`vals`/`contains?` (the variadic,
+default-bearing layer over the `map-*` primitives). Of the math library only
+**`floor`** (the Float→Int crossing) and **`rem`** (exact integer remainder) need
+Rust — everything else is Brood over them. The map literal `{ }` is read by the
+reader and evaluated like a vector literal — no constructor call.
 
 ## Special forms (not primitives)
 

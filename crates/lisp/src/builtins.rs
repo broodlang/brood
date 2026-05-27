@@ -31,6 +31,9 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "%eq", Arity::exact(2), prim_eq);
     // `mod` is Brood over `rem` (std/prelude.blsp); only `rem` is primitive.
     def(heap, "rem", Arity::exact(2), remainder);
+    // `floor` is the single irreducible Float→Int crossing; quot/ceil/round/pow/
+    // sqrt are all Brood over it + rem/`/`/`*`/`<` (std/prelude.blsp).
+    def(heap, "floor", Arity::exact(1), floor);
 
     // pair / sequence
     def(heap, "cons", Arity::exact(2), cons);
@@ -135,6 +138,9 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "send", Arity::exact(2), send);
     def(heap, "%receive", Arity::exact(3), receive_match);
     def(heap, "self", Arity::exact(0), self_pid);
+    def(heap, "ref", Arity::exact(0), make_ref);
+    def(heap, "monitor", Arity::exact(1), monitor);
+    def(heap, "demonitor", Arity::exact(1), demonitor);
     def(heap, "spawn-count", Arity::exact(0), spawn_count);
     def(heap, "peak-threads", Arity::exact(0), peak_threads);
     def(heap, "worker-threads", Arity::exact(0), worker_threads);
@@ -263,6 +269,18 @@ fn remainder(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         Some(r) => Ok(Value::Int(r)),
         None if b == 0 => Err(LispError::runtime("rem: division by zero")),
         None => Err(LispError::runtime("rem: integer overflow")),
+    }
+}
+
+/// Floor toward negative infinity, returning an `Int` — the one Float→Int
+/// crossing the language can't bootstrap (no other primitive produces an `Int`
+/// from a `Float`). An `Int` passes through; a `Float` is floored and cast to
+/// `i64` (the cast saturates for out-of-range magnitudes). `ceil`/`round`/`quot`/
+/// `pow`/`sqrt` are all Brood over this + `rem`/`/`/`*`/`<` (std/prelude.blsp).
+fn floor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    match arg(args, 0) {
+        Value::Int(n) => Ok(Value::Int(n)),
+        v => Ok(Value::Int(expect_number(heap, "floor", v)?.floor() as i64)),
     }
 }
 
@@ -534,6 +552,7 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
     ("test", include_str!("../../../std/test.blsp")),
     ("project", include_str!("../../../std/project.blsp")),
     ("docs", include_str!("../../../std/docs.blsp")),
+    ("hatch", include_str!("../../../std/hatch.blsp")),
 ];
 
 /// `(%builtin-module name)` — the source of a baked-in std module as a string, or
@@ -906,6 +925,31 @@ fn send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::Nil)
 }
 
+/// `(monitor pid)` — watch `pid`; returns a monitor `ref`. The caller receives
+/// `[:down <ref> <pid> <reason>]` when `pid` dies (immediately, reason `:noproc`,
+/// if it is already dead).
+fn monitor(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    match arg(args, 0) {
+        Value::Int(n) if n >= 0 => Ok(crate::process::monitor(n as u64)),
+        _ => Err(LispError::type_err(
+            "monitor: first argument must be a pid (integer)",
+        )),
+    }
+}
+
+/// `(demonitor mref)` — drop the monitor created by `(monitor …)`.
+fn demonitor(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    match arg(args, 0) {
+        Value::Ref(n) => {
+            crate::process::demonitor(n);
+            Ok(Value::Nil)
+        }
+        _ => Err(LispError::type_err(
+            "demonitor: argument must be a monitor ref",
+        )),
+    }
+}
+
 /// `(%receive matcher timeout on-timeout)` — the selective-receive primitive the
 /// `receive` macro (`std/prelude.blsp`) expands to. See `crate::process::receive_match`.
 fn receive_match(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -914,6 +958,12 @@ fn receive_match(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 
 fn self_pid(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::Int(crate::process::self_pid() as i64))
+}
+
+/// `(ref)` — a fresh, globally-unique reference token. Shares the runtime's ref
+/// counter with `(monitor …)` so every ref is distinct.
+fn make_ref(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    Ok(Value::Ref(crate::process::next_ref()))
 }
 
 /// `(spawn-count)` — how many green processes have been spawned since the program

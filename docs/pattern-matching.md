@@ -176,7 +176,8 @@ may be a pattern** instead of a bare symbol, so vectors (tuples) and lists
 ;  a      arg 0, binds
 ;  [x y]  arg 1, destructured as a 2-tuple
 ;  c      optional, default 10
-;  p      optional, destructured if present, else default [0 0]
+;  p      optional, defaults to [0 0]  (a bare symbol — optional *slots*
+;         can't yet be patterns; see the note above)
 ```
 
 Multi-clause dispatches by pattern (and guard), in order — the canonical Erlang

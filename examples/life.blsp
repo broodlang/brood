@@ -1,25 +1,35 @@
 ;; Conway's Game of Life — a feature tour of Brood
 ;; ------------------------------------------------
 ;; Run it:   ./bin/cli examples/life.blsp
+;; The last section ANIMATES a glider in your terminal; let it run to the end.
 ;;
-;; The board is a *set* of live cells, modelled as a map  [x y] -> true.
-;; That one choice exercises a lot of the language at once:
+;; The board is a *set* of live cells, modelled as a map  [x y] -> true. There is
+;; no fixed grid — the set is unbounded, and a glider just walks off into larger
+;; coordinates forever. That one representation exercises much of the language:
 ;;   - maps with VECTOR keys (compared by structure, so [x y] is a real key)
 ;;   - pattern destructuring of those [x y] tuples in fn/defn params
 ;;   - map / filter / fold over cell sets
-;;   - recursion as the loop (tail calls keep the stack flat)
+;;   - recursion as the loop (tail calls keep the stack flat, even for 1000 gens)
 ;;   - macros + quasiquote, cond/when/and/or, ->> threading
 ;;   - try/catch + match guards for validation
-;;   - and finally a PROCESS that holds the evolving board in its receive-loop
-;;     (the Brood way to have "mutable state" without mutable data)
+;;   - a PROCESS holding the evolving board, via `hatch` (a gen_server written in
+;;     Brood: `defprocess` with `cast`/`call` clauses over spawn/send/receive/ref)
+;;   - `(after ms)` as a sleep, `\e[...` ANSI escapes, and `now`/`mem-peak`
 
-;; ---- a small range helper (there's no `range` primitive — recursion is) ------
-;; Built downward so the recursive call is in tail position (O(1) stack).
+(require 'hatch)   ; the process framework (std/hatch.blsp)
+
+;; ---- small helpers -----------------------------------------------------------
+;; There's no `range` primitive — recursion is. Built downward so the recursive
+;; call is in tail position (O(1) stack).
 (defn range-down (i acc) (if (< i 0) acc (range-down (dec i) (cons i acc))))
 (defn range (n) (range-down (dec n) nil))
 
-;; ---- a macro: report how long a body took -----------------------------------
-;; defmacro + quasiquote (`), unquote (~), splice (~@). Computed away before run.
+;; No `sleep` primitive either: a `receive` that matches nothing and times out
+;; after `ms` *is* a sleep — the idiomatic Brood pause.
+(defn sleep (ms) (receive (after ms nil)))
+
+;; A macro: report how long a body took. defmacro + quasiquote (`), unquote (~),
+;; splice (~@), and `now`. Expanded away before the program runs.
 (defmacro timed (label & body)
   `(let (start  (now)
          result (do ~@body))
@@ -38,34 +48,36 @@
 (defn neighbours ([x y])
   (map (fn ([dx dy]) [(+ x dx) (+ y dy)]) neighbour-offsets))
 
-;; How many of a cell's neighbours are live in `board`?
-(defn live-neighbours (cell board)
-  (count (filter (fn (n) (contains? board n)) (neighbours cell))))
-
-;; The cells worth examining next tick: every live cell, plus all their
-;; neighbours — collected into a fresh map used as a set (dedup by key).
-(defn candidates (board)
-  (fold (fn (acc cell)
-          (fold (fn (a n) (assoc a n true))
-                (assoc acc cell true)
+;; Tally, in a single pass over the live set, how many live neighbours each cell
+;; has: for every live cell, bump a counter on each of its 8 neighbours. The
+;; result is a map cell -> count covering exactly the cells that could be alive
+;; next tick (a cell with no live neighbour can't be). `(get c n 0)` reads the
+;; running count, defaulting to 0. This is the whole simulation — no rescanning.
+(defn neighbour-counts (board)
+  (fold (fn (counts cell)
+          (fold (fn (c n) (assoc c n (inc (get c n 0))))
+                counts
                 (neighbours cell)))
         {}
         (keys board)))
 
-;; Conway's rules, expressed with cond / and / or.
-(defn alive-next? (cell board)
-  (let (n     (live-neighbours cell board)
-        live? (contains? board cell))
-    (cond
-      (and live? (or (= n 2) (= n 3))) true    ; a live cell with 2–3 neighbours survives
-      (and (not live?) (= n 3))        true    ; a dead cell with exactly 3 is born
-      else                             false)))
-
-;; One generation: keep every candidate that should be alive next tick.
+;; One generation, straight off the tally — Conway's rules as a cond:
+;;   3 neighbours        -> alive (a birth, or a live cell surviving)
+;;   2 neighbours + live  -> alive (survival)
+;;   anything else        -> dead.
 (defn step (board)
-  (fold (fn (acc cell) (if (alive-next? cell board) (assoc acc cell true) acc))
-        {}
-        (keys (candidates board))))
+  (let (counts (neighbour-counts board))
+    (fold (fn (next cell)
+            (let (n (get counts cell))
+              (cond
+                (= n 3)                              (assoc next cell true)
+                (and (= n 2) (contains? board cell)) (assoc next cell true)
+                else                                 next)))
+          {}
+          (keys counts))))
+
+;; Advance `n` generations without rendering — a pure tail-recursive loop.
+(defn nth-gen (board n) (if (= n 0) board (nth-gen (step board) (dec n))))
 
 ;; ---- rendering ---------------------------------------------------------------
 ;; A row is the live/dead glyphs across x in [0,w); the board is the rows joined.
@@ -80,15 +92,27 @@
 ;; ---- patterns ----------------------------------------------------------------
 (defn cells->board (cells) (fold (fn (acc c) (assoc acc c true)) {} cells))
 
-(def blinker (cells->board (list [1 1] [1 2] [1 3])))   ; oscillates, period 2
-(def glider  (cells->board (list [1 0] [2 1] [0 2] [1 2] [2 2])))  ; walks SE
+(def blinker (cells->board (list [1 1] [1 2] [1 3])))            ; oscillates, period 2
+(def glider  (cells->board (list [1 0] [2 1] [0 2] [1 2] [2 2])))  ; walks SE forever
 
-;; ---- a synchronous driver: recurse one generation at a time ------------------
+;; ---- a stacked driver: print one generation after another -------------------
 (defn run (board gen upto w h)
   (println "── generation " gen "  (" (count board) " live cells) ──")
   (print (render board w h))
   (when (< gen upto)
     (run (step board) (inc gen) upto w h)))
+
+;; ---- an animated driver: overprint each frame in place -----------------------
+;; After the first frame, jump the cursor back up over the (h+1) lines we printed
+;; and clear downward (`\e[<n>A` = up n lines, `\e[0J` = clear to end of screen),
+;; so the glider appears to move rather than scroll. `\e` is the ESC escape.
+(defn animate (board gen upto w h first?)
+  (unless first? (print (str "\e[" (+ h 1) "A") "\e[0J"))
+  (println "generation " gen "   population " (count board))
+  (print (render board w h))
+  (when (< gen upto)
+    (sleep 70)
+    (animate (step board) (inc gen) upto w h false)))
 
 ;; ---- validation: match guard + try/catch ------------------------------------
 ;; A coordinate must be a 2-tuple of ints. `match` with a `:when` guard checks
@@ -100,40 +124,40 @@
     (_ (error "not a coordinate: " (pr-str c)))))
 
 ;; ---- a process that OWNS the board (mutable state, the Brood way) ------------
-;; Data is immutable, so evolving state lives in a process's receive-loop: each
-;; message produces the *next* board by tail-recursing with it. selective
-;; `receive` matches by the same pattern grammar as `match`.
-(defn life-server (board)
-  (receive
-    ([:step]      (life-server (step board)))                   ; advance one gen
-    ([:print w h] (do (print (render board w h)) (life-server board)))
-    ([:count to]  (do (send to (count board)) (life-server board)))
-    ([:stop]      :stopped)))
+;; Data is immutable, so evolving state lives in a process's loop. `hatch`
+;; (std/hatch.blsp) is Brood's gen_server: `defprocess` names the state and gives
+;; `cast`/`call` message clauses, all over spawn/send/receive/ref. The board is
+;; the state `board`; a CAST returns the next board, a CALL returns [reply board].
+(defprocess life-server (board)
+  (cast :step          (step board))                            ; advance one gen
+  (call [:print w h]   (do (print (render board w h)) [:printed board]))
+  (call :count         [(count board) board]))                 ; reply count, board unchanged
 
 ;; =============================================================================
 ;; Driver
 ;; =============================================================================
 
-(println "=== blinker (oscillator) ===")
+(println "=== blinker: an oscillator (period 2) ===")
 (run blinker 0 2 5 5)
 
-(println "\n=== glider (3 generations) ===")
-(timed "glider sim"
-  (run glider 0 3 6 6))
+(println "\n=== validation: match guard + try/catch ===")
+(println "good cell  ->" (check-cell [3 4]))
+(println "bad cell   ->" (try (check-cell [1 "x"]) (catch e (str "rejected: " e))))
 
-(println "\n=== validation (match guard + try/catch) ===")
-(println (check-cell [3 4]))                                   ; ok -> [3 4]
-(println (try (check-cell [1 "x"]) (catch e (str "rejected: " e))))
+(println "\n=== the board as a live process (hatch: cast / call) ===")
+(def srv (hatch life-server glider))        ; spawn the gen_server with the glider
+(! srv :step)                               ; cast: advance, fire-and-forget, twice
+(! srv :step)
+(println "after 2 casts the process holds" (gen-call srv :count) "live cells")
+(gen-call srv [:print 6 6])                 ; a call blocks until the server replies
 
-(println "\n=== the board as a live process ===")
-(def srv (spawn life-server glider))
-(send srv [:step])                          ; tell it to advance, twice
-(send srv [:step])
-(send srv [:count (self)])                  ; ask how many cells are live now
-(println "after 2 steps the process holds" (receive) "live cells:")
-(send srv [:print 6 6])                     ; messages are handled in order, so the
-(send srv [:count (self)])                  ; reply to this can't arrive before the
-(receive)                                   ; print above — a tidy way to wait for it
-(send srv [:stop])
+(println "\n=== the set is unbounded — no grid, no walls ===")
+(timed "50 generations"
+  (let (far (nth-gen glider 50))
+    (println "a glider after 50 gens is still" (count far) "cells, now at"
+             (keys far))))                       ; note the large coordinates — it walked off
+(println "peak memory so far:" (mem-peak) "bytes")
 
-(println "\n--- life complete ---")
+(println "\n=== watch a glider fly (animated) ===")
+(animate glider 0 44 26 16 true)
+(println "--- life complete ---")

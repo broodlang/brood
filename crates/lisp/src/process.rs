@@ -28,11 +28,12 @@ use std::time::{Duration, Instant};
 use corosensei::{Coroutine, CoroutineResult, Yielder};
 
 use crate::core::heap::Heap;
-use crate::core::value::{EnvId, Symbol, Value};
+use crate::core::value::{self, EnvId, Symbol, Value};
 use crate::error::{LispError, LispResult};
 use crate::eval;
 
 /// A `Send`, self-contained copy of a value, for crossing heaps.
+#[derive(Clone)]
 pub enum Message {
     Nil,
     Bool(bool),
@@ -44,6 +45,7 @@ pub enum Message {
     List(Vec<Message>),
     Vector(Vec<Message>),
     Map(Vec<(Message, Message)>),
+    Ref(u64),
 }
 
 /// Deep-copy a value out of `heap` into a `Send` message. Functions can't be
@@ -81,6 +83,7 @@ pub fn to_message(heap: &Heap, v: Value) -> Result<Message, LispError> {
             }
             Message::Map(out)
         }
+        Value::Ref(n) => Message::Ref(n),
         Value::Fn(_) | Value::Macro(_) | Value::Native(_) => {
             return Err(LispError::type_err("cannot send a function in a message"))
         }
@@ -120,6 +123,7 @@ pub fn from_message(heap: &mut Heap, m: &Message) -> Value {
             }
             heap.map_from_pairs(pairs)
         }
+        Message::Ref(n) => Value::Ref(*n),
     }
 }
 
@@ -266,6 +270,30 @@ static WORKERS_STARTED: Once = Once::new();
 static REGISTRY: LazyLock<Mutex<HashMap<u64, Arc<Mailbox>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Monitors: watched-pid → the watchers to notify when it dies, each as
+/// `(watcher-pid, monitor-ref)`. When the watched process deregisters, every
+/// watcher gets a `[:down <mref> <pid> <reason>]` message (Erlang `monitor`,
+/// unidirectional and one-shot). No links yet — a monitor never affects the
+/// watched process.
+static MONITORS: LazyLock<Mutex<HashMap<u64, Vec<(u64, u64)>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Source of unique reference ids, shared by `(ref)` and `(monitor …)` so every
+/// ref — token or monitor handle — is distinct across the whole runtime.
+static NEXT_REF: AtomicU64 = AtomicU64::new(0);
+
+/// A fresh, globally-unique reference id. Backs `Value::Ref`.
+pub fn next_ref() -> u64 {
+    NEXT_REF.fetch_add(1, Ordering::Relaxed)
+}
+
+thread_local! {
+    /// Set by a process's coroutine just before it returns, so `run_one` can read
+    /// the exit reason (for monitor `[:down …]` delivery) once `resume` returns on
+    /// this same worker thread. Cleared at the start of every scheduling quantum.
+    static EXIT_REASON: std::cell::RefCell<Option<Message>> = const { std::cell::RefCell::new(None) };
+}
+
 /// The shared run queue of ready processes + a condvar workers wait on.
 static RUN: LazyLock<(Mutex<VecDeque<Box<Process>>>, Condvar)> =
     LazyLock::new(|| (Mutex::new(VecDeque::new()), Condvar::new()));
@@ -300,8 +328,74 @@ fn worker_count() -> usize {
     }
 }
 
-fn deregister(pid: u64) {
+/// A process has finished (or crashed): drop its mailbox and fire any monitors,
+/// delivering `[:down <mref> <pid> <reason>]` to each watcher.
+fn deregister(pid: u64, reason: Message) {
     REGISTRY.lock().unwrap().remove(&pid);
+    let watchers = MONITORS.lock().unwrap().remove(&pid).unwrap_or_default();
+    for (watcher, mref) in watchers {
+        deliver(watcher, down_message(mref, pid, reason.clone()));
+    }
+}
+
+/// The `[:down <mref> <pid> <reason>]` message a monitor fires.
+fn down_message(mref: u64, pid: u64, reason: Message) -> Message {
+    Message::Vector(vec![
+        Message::Keyword(value::intern("down")),
+        Message::Ref(mref),
+        Message::Int(pid as i64),
+        reason,
+    ])
+}
+
+/// Push a (already-`Send`) message into `pid`'s mailbox and wake it; a no-op if
+/// `pid` is gone. The shared tail of `send` and monitor `[:down …]` delivery.
+fn deliver(pid: u64, msg: Message) {
+    let mailbox = REGISTRY.lock().unwrap().get(&pid).cloned();
+    if let Some(mb) = mailbox {
+        let mut st = mb.state.lock().unwrap();
+        st.queue.push_back(msg);
+        if let Some(proc) = st.waiter.take() {
+            drop(st);
+            enqueue(proc); // wake a parked green process
+        } else {
+            mb.cv.notify_one(); // wake the root thread, if it's blocked in receive
+        }
+    }
+}
+
+/// `(monitor pid)` — start watching `pid`; returns a fresh monitor `ref`. When
+/// `pid` dies, the caller receives `[:down <this-ref> <pid> <reason>]`. If `pid`
+/// is already dead, the DOWN (`reason` `:noproc`) is delivered immediately. The
+/// monitor is unidirectional and one-shot.
+pub fn monitor(target: u64) -> Value {
+    let mref = next_ref();
+    let me = self_pid();
+    let alive = REGISTRY.lock().unwrap().contains_key(&target);
+    if alive {
+        MONITORS
+            .lock()
+            .unwrap()
+            .entry(target)
+            .or_default()
+            .push((me, mref));
+    } else {
+        deliver(
+            me,
+            down_message(mref, target, Message::Keyword(value::intern("noproc"))),
+        );
+    }
+    Value::Ref(mref)
+}
+
+/// `(demonitor mref)` — drop the calling process's monitor with that ref. Best
+/// effort: a `[:down …]` already queued is not recalled.
+pub fn demonitor(mref: u64) {
+    let me = self_pid();
+    let mut mons = MONITORS.lock().unwrap();
+    for watchers in mons.values_mut() {
+        watchers.retain(|&(w, r)| !(w == me && r == mref));
+    }
 }
 
 /// Push a ready process onto the run queue and wake a worker.
@@ -348,11 +442,18 @@ fn run_one(mut proc: Box<Process>) {
     // Fresh reduction budget for this scheduling quantum (decremented in eval's loop
     // via `tick`; at zero the process preempts itself — see `tick`/`preempt`).
     REDUCTIONS.with(|r| r.set(REDUCTION_BUDGET));
+    EXIT_REASON.with(|r| *r.borrow_mut() = None); // stale from a prior process on this worker
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| proc.coro.resume(())));
     RUNNING.fetch_sub(1, Ordering::SeqCst);
 
     match outcome {
-        Ok(CoroutineResult::Return(())) => deregister(proc.pid),
+        Ok(CoroutineResult::Return(())) => {
+            // The coroutine set its exit reason just before returning (see `spawn`).
+            let reason = EXIT_REASON
+                .with(|r| r.borrow_mut().take())
+                .unwrap_or_else(|| Message::Keyword(value::intern("normal")));
+            deregister(proc.pid, reason);
+        }
         Ok(CoroutineResult::Yield(Suspend::Receive)) => {
             // The coroutine suspended in `receive`: it scanned the first `scanned`
             // messages with no match. Re-check under the lock — if a *new*
@@ -373,7 +474,7 @@ fn run_one(mut proc: Box<Process>) {
         }
         Err(_) => {
             eprintln!("process {} panicked", proc.pid);
-            deregister(proc.pid);
+            deregister(proc.pid, Message::Keyword(value::intern("killed")));
         }
     }
 }
@@ -421,9 +522,19 @@ pub fn spawn(heap: &Heap, f: Value, args: &[Value]) -> Result<u64, LispError> {
         for m in &arg_msgs {
             argv.push(from_message(&mut heap, m));
         }
-        if let Err(e) = eval::apply(&mut heap, f, &argv, EnvId::GLOBAL) {
-            eprintln!("process {} died: {}", pid, e);
-        }
+        let reason = match eval::apply(&mut heap, f, &argv, EnvId::GLOBAL) {
+            Ok(_) => Message::Keyword(value::intern("normal")),
+            Err(e) => {
+                eprintln!("process {} died: {}", pid, e);
+                // A crash reason monitors can inspect; the message string for now
+                // (a richer structured reason can come with links later).
+                Message::Vector(vec![
+                    Message::Keyword(value::intern("error")),
+                    Message::Str(e.to_string()),
+                ])
+            }
+        };
+        EXIT_REASON.with(|r| *r.borrow_mut() = Some(reason));
         CURRENT.with(|c| *c.borrow_mut() = None);
     });
 
@@ -444,17 +555,7 @@ pub fn send(heap: &Heap, pid_val: Value, msg_val: Value) -> Result<(), LispError
         }
     };
     let msg = to_message(heap, msg_val)?;
-    let mailbox = REGISTRY.lock().unwrap().get(&pid).cloned();
-    if let Some(mb) = mailbox {
-        let mut st = mb.state.lock().unwrap();
-        st.queue.push_back(msg);
-        if let Some(proc) = st.waiter.take() {
-            drop(st);
-            enqueue(proc); // wake a parked green process
-        } else {
-            mb.cv.notify_one(); // wake the root thread, if it's blocked in receive
-        }
-    }
+    deliver(pid, msg);
     Ok(())
 }
 

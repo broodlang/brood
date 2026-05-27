@@ -176,17 +176,18 @@ semantics) is **ours**.
    each process's stack + mailbox; the shared code table is outside it.
 6. ⬜ **Suspension** via stackful coroutines for blocking `receive`.
 
-> Today there is exactly **one** heap (the single REPL "process"). Step 2/3 made
-> that heap a `Send`, self-contained unit — the prerequisite for *per-process*
-> heaps, which arrive with the scheduler (step 4).
+> Step 2/3 made the heap a `Send`, self-contained unit — the prerequisite for the
+> *per-process* heaps that arrived with the green-process scheduler (step 4, now
+> done): each process owns its `Heap` and they migrate between worker threads.
 
 ## Risks
 
-- Biggest blast radius of any change so far; touches `value.rs`, `env.rs`,
-  `eval.rs`, `builtins.rs`, `printer.rs`.
+- Biggest blast radius of any change so far; touches `core/value.rs`,
+  `core/heap.rs` (the env chain lives here now), `eval/mod.rs`, `builtins.rs`,
+  `syntax/printer.rs`.
 - Handle-threading will be viral through signatures once the arena lands (step 2+).
 - No user-visible payoff until step 4 — we're rebuilding the foundation.
 
 Mitigation: keep `cargo test` green at every step (the test suite is the safety
-net), and migrate behind the `value.rs` seam so the change is mechanical, not
+net), and migrate behind the `core/value.rs` seam so the change is mechanical, not
 semantic.

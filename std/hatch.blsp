@@ -1,0 +1,80 @@
+;; std/hatch.blsp — a small process framework, written in Brood
+;; ------------------------------------------------------------
+;;   (require 'hatch)
+;;
+;; Erlang/OTP's gen_server, but as Brood *policy* on the kernel's mechanism
+;; (spawn / send / receive / ref / monitor — ADR-006). A "hatch process" carries
+;; one immutable **state** value through its receive loop and handles two kinds of
+;; message:
+;;
+;;   - a CAST  — fire-and-forget. The clause body evaluates to the NEXT state.
+;;   - a CALL  — a synchronous request. The clause body evaluates to
+;;               [reply next-state]; the caller blocks until it gets `reply`.
+;;
+;; Because data is immutable, there is no "mutate state" — each clause returns the
+;; state to carry forward. To leave state UNCHANGED, just return the state
+;; parameter (e.g. `n` below). Example:
+;;
+;;   (defprocess counter (n)
+;;     (cast :inc        (+ n 1))         ; new state
+;;     (cast [:add m]    (+ n m))
+;;     (cast :ping       (do (println "pong") n))   ; no change: return n
+;;     (call :value      [n n]))          ; reply n, state unchanged
+;;
+;;   (def c (hatch counter 0))
+;;   (! c :inc)                           ; cast
+;;   (! c [:add 10])
+;;   (gen-call c :value)                  ; => 11   (synchronous)
+;;
+;; Messages are tagged with internal envelopes ([:$cast …] / [:$call from ref …])
+;; so the loop tells a cast from a call; a call is matched to its reply by a fresh
+;; `(ref)`, exactly the request/reply idiom from docs/language.md.
+
+"A gen_server-style process framework written in Brood on spawn/send/receive/
+ref. `defprocess` defines a state-carrying server with `cast` (async) and `call`
+(synchronous) message clauses; `hatch` spawns one, `!` casts, `gen-call` calls.
+Supervisors (built on `monitor`) come next. See docs/concurrency.md."
+
+;; ---- client side ------------------------------------------------------------
+
+;; (! pid payload) — send a cast (fire-and-forget). Erlang's `Pid ! Msg`.
+(defn ! (pid payload) (send pid [:$cast payload]))
+
+;; (gen-call pid payload) — synchronous request: tag it with a fresh ref, block
+;; until the matching reply arrives (other messages stay queued).
+(defn gen-call (pid payload)
+  (let (r (ref))
+    (send pid [:$call (self) r payload])
+    (receive ([:reply ~r v] v))))
+
+;; (hatch proc-fn initial-state) — spawn a `defprocess` server. Returns its pid.
+(defn hatch (f state) (spawn f state))
+
+;; ---- defprocess -------------------------------------------------------------
+;; Compile one clause into a receive clause. `name` is the server fn (so the loop
+;; tail-recurses with the next state); `from`/`rf`/`res` are gensyms shared by the
+;; generated call clauses (sender pid, reply ref, the clause's [reply state]).
+(defn hatch--clause (c name from rf res)
+  (let (kind (first c) pat (second c) body (rest (rest c)))
+    (cond
+      (= kind 'cast)
+        `([:$cast ~pat] (~name (do ~@body)))                 ; body => next state
+      (= kind 'call)
+        `([:$call ~from ~rf ~pat]                            ; body => [reply next-state]
+          (let (~res (do ~@body))
+            (send ~from [:reply ~rf (nth ~res 0)])
+            (~name (nth ~res 1))))
+      else
+        (error "defprocess: each clause must start with `cast` or `call`, got "
+               (pr-str kind)))))
+
+;; (defprocess name (state) (cast PAT body...) (call PAT body...) ...) — define a
+;; server as a tail-recursive receive loop over the cast/call clauses.
+(defmacro defprocess (name params & clauses)
+  (let (from (gensym "from")
+        rf   (gensym "ref")
+        res  (gensym "res"))
+    `(defn ~name ~params
+       (receive ~@(map (fn (c) (hatch--clause c name from rf res)) clauses)))))
+
+(provide 'hatch)

@@ -6,20 +6,29 @@ of the editor contract in [`tooling.md`](tooling.md): instead of every editor
 re-implementing "run the file and parse the GNU error lines", they speak LSP to
 one server that owns the language knowledge.
 
-> Status: **Tier 0 live.** Recorded as
+> Status: **Tier 1 live.** Recorded as
 > [ADR-025](decisions.md#adr-025--a-lossless-span-carrying-cst-for-tooling-separate-from-the-eval-value);
 > this document is the full plan it points to (the `types.md` ↔ ADR-024 pattern).
 > **Done:** Foundation A — the CST (`syntax::cst`) + shared lexical rules
 > (`syntax::atom`) + `error::Span`; Foundation B — the CST scope resolver
 > (`syntax::scope`); Foundation C — leading-string docstrings and the
-> introspection primitives `doc` / `arglist` / `global-names` / `bound?`. And
+> introspection primitives `doc` / `arglist` / `global-names` / `bound?`.
 > **Tier 0** — the `crates/lsp` → `brood-lsp` binary: stdio lifecycle, full
 > document sync, and syntactic `publishDiagnostics` read off the CST
 > (`lsp-server` + `lsp-types`, no async runtime). `Uri`→text document store, a
-> `LineIndex` for byte↔UTF-16 `Position`, and `diagnostics::collect` over the
-> CST's `Error` nodes.
-> **Next:** Tier 1 — completion (globals), hover + signature help, and
-> `documentSymbol`, built on the Foundation B/C surface.
+> `LineIndex` for byte↔UTF-16 `Position` (both directions), and
+> `diagnostics::collect` over the CST's `Error` nodes.
+> **Tier 1** — `textDocument/{completion,hover,documentSymbol,definition}`,
+> wired to the Foundation B/C surface: completion offers locals-in-scope
+> (`scope::names_in_scope`) + interpreter globals (`global-names`); hover renders
+> a local note, a document def's signature+docstring (read off the CST,
+> `defs`), or a prelude/builtin name's `arglist`+`doc`; `documentSymbol` outlines
+> top-level `def`/`defn`/`defmacro`; goto-definition resolves through
+> `scope::resolve_at`. The server holds one `Interp` for introspection only — it
+> still never evaluates the open buffer.
+> **Next:** Tier 2 — references, rename, semantic tokens, and located *semantic*
+> diagnostics (unbound / arity), needing the checker to carry spans. Signature
+> help (active-parameter tracking) is the small remaining Tier-1 item.
 
 ## Why a server, and why not brute-force it
 
@@ -227,15 +236,19 @@ additive change behind the same feature handlers.
 
 ## Feature roadmap (each tier builds on the last)
 
-| Tier | Features | Needs | Rough size |
+| Tier | Features | Needs | Status |
 |---|---|---|---|
-| **0** | `publishDiagnostics` (syntactic), document sync, lifecycle | `cst::parse` + `LineIndex` | ~1–2 days |
-| **1** | completion (globals), hover + signature help, `documentSymbol` (top-level defs) | `arglist` / `global-names` primitives; CST top-level walk | a few days |
-| **2** | goto-definition, references, rename, semantic tokens, "unbound" diagnostics | the CST **scope walker**; located checker output | ~1–2 weeks |
+| **0** | `publishDiagnostics` (syntactic), document sync, lifecycle | `cst::parse` + `LineIndex` | **done** |
+| **1** | completion (locals + globals), hover, `documentSymbol`, **goto-definition** | `arglist` / `global-names` primitives; CST top-level walk (`defs`) + scope walker | **done** (signature help deferred) |
+| **2** | references, rename, semantic tokens, "unbound" / arity diagnostics | located checker output (spans on `types::check`) | next |
 
-Tier 0 is reachable immediately because syntactic diagnostics need only the CST.
-Tiers unlock together once their one prerequisite lands — which is the point of
-deciding the CST and the introspection surface up front.
+Tier 0 was reachable immediately because syntactic diagnostics need only the
+CST. Goto-definition landed early with Tier 1 (rather than Tier 2 as first
+sketched) because the CST scope walker — its one prerequisite — was already
+built as Foundation B; references and rename ride the same `scope::references`
+engine and move to Tier 2 only because they want a little more polish, not more
+substrate. Tiers unlock together once their one prerequisite lands — which is
+the point of deciding the CST and the introspection surface up front.
 
 ## The self-hosting boundary
 

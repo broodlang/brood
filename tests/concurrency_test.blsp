@@ -140,3 +140,72 @@
         (sched--collect (receive ([:done _] (+ got 1))) total)))
     (sched--spawn-n (self) 50)
     (assert= (sched--collect 0 50) :all-done)))
+
+;; ---- ref: unique reference tokens -------------------------------------------
+;; `(ref)` is the kernel primitive behind synchronous call/reply: a fresh,
+;; opaque, unforgeable token that tags a request to its reply.
+(describe "ref: unique tokens"
+  (test "a ref is its own type, distinct from int"
+    (is (ref? (ref)))
+    (assert= (type-of (ref)) :ref)
+    (refute (int? (ref)))
+    (refute (ref? 0)))
+  (test "every ref is distinct; a ref equals itself"
+    (let [r (ref)]
+      (is (= r r))
+      (refute (= (ref) (ref))))))
+
+(describe "ref: synchronous call/reply" :isolated
+  ;; A server that echoes a tagged reply; `call` pins its own ref so it can't pick
+  ;; up another in-flight reply. This is the pattern the prelude lacks but user
+  ;; code builds freely (see examples/life.blsp).
+  (test "a ref-tagged call round-trips to exactly its own reply"
+    (defn ref--server ()
+      (receive ([:call from tag req] (send from [:reply tag (* req 10)]))))
+    (defn ref--call (pid req)
+      (let [tag (ref)]
+        (send pid [:call (self) tag req])
+        (receive ([:reply ~tag v] v))))
+    (assert= (ref--call (spawn ref--server) 7) 70))
+  (test "a stale reply with a different ref is left queued, not mistaken for ours"
+    (let [tag (ref) other (ref)]
+      (send (self) [:reply other :wrong])      ; an unrelated reply, queued first
+      (send (self) [:reply tag :right])
+      (assert= (receive ([:reply ~tag v] v)) :right)   ; pin skips the wrong one
+      (assert= (receive ([:reply ~other v] v)) :wrong)))) ; still there afterwards
+
+;; ---- monitor: be notified when a process dies -------------------------------
+;; `(monitor pid)` returns a ref; a `[:down <ref> <pid> <reason>]` message arrives
+;; when `pid` dies. The one kernel mechanism a supervisor is built from.
+(describe "monitor: death notification" :isolated
+  (test "monitor returns a ref distinct from a plain (ref)"
+    (let [w   (spawn (fn () (receive (:go nil))))
+          mr  (monitor w)]
+      (send w :go)                                   ; let it finish (drain the down)
+      (is (ref? mr))
+      (receive ([:down ~mr _ _] :ok) (after 500 :timeout))))
+  (test "a normal return reports reason :normal, with the right ref and pid"
+    (let [w  (spawn (fn () (receive (:go nil))))
+          mr (monitor w)]
+      (send w :go)
+      (assert= (receive ([:down ~mr pid reason] [(= pid w) reason]) (after 500 :timeout))
+               [true :normal])))
+  (test "a crash reports a non-normal reason"
+    (let [w  (spawn (fn () (receive (:go (throw :boom)))))
+          mr (monitor w)]
+      (send w :go)
+      (assert= (receive ([:down ~mr _ [:error _]] :crashed) (after 500 :timeout))
+               :crashed)))
+  (test "monitoring an already-dead process fires :noproc immediately"
+    (let [w (spawn (fn () nil))]
+      (receive (after 80 nil))                       ; let it die
+      (let [mr (monitor w)]
+        (assert= (receive ([:down ~mr _ reason] reason) (after 500 :timeout))
+                 :noproc))))
+  (test "demonitor stops a not-yet-fired notification"
+    (let [w  (spawn (fn () (receive (:go nil))))
+          mr (monitor w)]
+      (demonitor mr)
+      (send w :go)
+      (assert= (receive ([:down ~mr _ _] :got-down) (after 150 :no-down))
+               :no-down))))

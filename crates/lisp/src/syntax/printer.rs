@@ -92,6 +92,11 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool) {
             out.push_str(&heap.native(id).name);
             out.push('>');
         }
+        Value::Ref(n) => {
+            out.push_str("#<ref ");
+            out.push_str(&n.to_string());
+            out.push('>');
+        }
     }
 }
 

@@ -77,7 +77,11 @@ Brood/
         process.rs      green-process scheduler (spawn/send/receive)
         builtins.rs     the primitive kernel (functions implemented in Rust)
       tests/            basic.rs (Rust e2e) + suite.rs (runs the .blsp suite)
-    cli/                the `brood` binary: REPL + file runner + test/new
+    cli/                the `brood` binary: REPL + file runner + `--test`
+      src/main.rs
+    nest/               the `nest` binary: project tooling — `new` / `test` / `doc` (ADR-028)
+      src/main.rs
+    lsp/                the `brood-lsp` binary: language server (ADR-025, lsp.md)
       src/main.rs
   std/
     prelude.blsp        the core library, written in Brood itself
@@ -113,7 +117,7 @@ Dispatch order for a list form `(head ...)`:
    its captured environment and its body's last form is evaluated in tail
    position.
 
-Symbols are **interned** to `u32` ids (see `value.rs`), so lookups and equality
+Symbols are **interned** to `u32` ids (see `core/value.rs`), so lookups and equality
 are integer operations and the spelling is stored once.
 
 ## Memory model (and the plan to change it)
@@ -128,7 +132,7 @@ it back (globals live in the shared PRELUDE/RUNTIME regions, never in LOCAL).
 What's still open: a general tracing GC for *mid-evaluation* / never-returning
 loops, which needs the evaluator's roots to be scannable. The migration stays
 contained because *all heap construction goes through the helpers in
-`heap.rs` / `value.rs`*. See [memory-model.md](memory-model.md) and
+`core/heap.rs` / `core/value.rs`*. See [memory-model.md](memory-model.md) and
 [shared-code.md](shared-code.md) for the regions and hot-reload story.
 
 ## Dependencies

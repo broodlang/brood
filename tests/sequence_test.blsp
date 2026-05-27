@@ -1,0 +1,139 @@
+;; Sequence library — range / take / drop / take-while / drop-while / some? /
+;; every? / find / zip / partition / sort / sort-by, all written in Brood over the
+;; list primitives. The whole suite runs in parallel (each test is its own green
+;; process), so these already exercise the ops on multiple cores; the final
+;; :isolated block adds explicit spawn/send/fan-in coverage. Register-only —
+;; discovered and run by `nest test` / cargo test.
+
+(require 'test)
+
+(describe "range"
+  (test "(range hi) counts 0..hi-1"
+    (assert= (range 5) (list 0 1 2 3 4))
+    (assert= (range 0) nil)
+    (assert= (range 1) (list 0)))
+  (test "(range lo hi) is the half-open interval"
+    (assert= (range 2 6) (list 2 3 4 5))
+    (assert= (range 5 5) nil))                ; empty when lo == hi
+  (test "(range lo hi step) steps by step, ascending or descending"
+    (assert= (range 0 10 2) (list 0 2 4 6 8))
+    (assert= (range 10 0 -2) (list 10 8 6 4 2))
+    (assert= (range 1 10 3) (list 1 4 7))))
+
+(describe "take / drop"
+  (test "take returns the first n (or all, if shorter)"
+    (assert= (take 3 (range 10)) (list 0 1 2))
+    (assert= (take 0 (range 10)) nil)
+    (assert= (take 99 (list 1 2 3)) (list 1 2 3))
+    (assert= (take 3 nil) nil))
+  (test "drop discards the first n (or all, if shorter)"
+    (assert= (drop 7 (range 10)) (list 7 8 9))
+    (assert= (drop 0 (list 1 2 3)) (list 1 2 3))
+    (assert= (drop 99 (list 1 2 3)) nil)
+    (assert= (drop 3 nil) nil))
+  (test "take and drop at index n partition the sequence"
+    (let (xs (range 10))
+      (assert= (append (take 4 xs) (drop 4 xs)) xs))))
+
+(describe "take-while / drop-while"
+  (test "take-while keeps the leading run that satisfies pred"
+    (assert= (take-while (fn (x) (< x 4)) (range 10)) (list 0 1 2 3))
+    (assert= (take-while even? (list 2 4 5 6)) (list 2 4))
+    (assert= (take-while even? (list 1 2 3)) nil))
+  (test "drop-while skips the leading run that satisfies pred"
+    (assert= (drop-while (fn (x) (< x 4)) (range 10)) (list 4 5 6 7 8 9))
+    (assert= (drop-while even? (list 2 4 5 6)) (list 5 6))
+    (assert= (drop-while even? (list 1 2 3)) (list 1 2 3))))
+
+(describe "some? / every? / find"
+  (test "some? is true iff any element satisfies pred"
+    (is (some? even? (list 1 3 4 5)))
+    (refute (some? even? (list 1 3 5)))
+    (refute (some? even? nil)))             ; vacuously false on empty
+  (test "every? is true iff all elements satisfy pred"
+    (is (every? even? (list 2 4 6)))
+    (refute (every? even? (list 2 4 5)))
+    (is (every? even? nil)))                ; vacuously true on empty
+  (test "find returns the first matching element, or nil"
+    (assert= (find even? (list 1 3 4 5 6)) 4)
+    (assert= (find even? (list 1 3 5)) nil)
+    (assert= (find (fn (x) (> x 100)) (range 10)) nil)))
+
+(describe "zip"
+  (test "zip pairs elements into 2-vectors, stopping at the shorter input"
+    (assert= (zip (list 1 2 3) (list :a :b :c)) (list [1 :a] [2 :b] [3 :c]))
+    (assert= (zip (list 1 2 3) (list :a :b :c :d)) (list [1 :a] [2 :b] [3 :c]))
+    (assert= (zip nil (list :a)) nil)
+    (assert= (zip (list 1) nil) nil)))
+
+(describe "partition"
+  (test "partition chunks into n-sized groups, dropping a trailing partial"
+    (assert= (partition 2 (range 6)) (list (list 0 1) (list 2 3) (list 4 5)))
+    (assert= (partition 2 (range 7)) (list (list 0 1) (list 2 3) (list 4 5)))
+    (assert= (partition 3 (range 9)) (list (list 0 1 2) (list 3 4 5) (list 6 7 8))))
+  (test "partition of too-short input is empty"
+    (assert= (partition 5 (range 3)) nil)
+    (assert= (partition 1 nil) nil)))
+
+(describe "sort / sort-by"
+  (test "sort orders ascending by default"
+    (assert= (sort (list 3 1 2 5 4)) (list 1 2 3 4 5))
+    (assert= (sort nil) nil)
+    (assert= (sort (list 1)) (list 1)))
+  (test "sort takes a custom strict less-than predicate"
+    (assert= (sort > (list 3 1 2 5 4)) (list 5 4 3 2 1)))
+  (test "sort is stable (equal elements keep input order)"
+    ;; sort by first component; the second tags the original position.
+    (let (pairs (list [1 :a] [0 :b] [1 :c] [0 :d]))
+      (assert= (sort (fn (x y) (< (vector-ref x 0) (vector-ref y 0))) pairs)
+               (list [0 :b] [0 :d] [1 :a] [1 :c]))))
+  (test "sort-by orders by a key function"
+    (assert= (sort-by (fn (s) (string-length s)) (list "ccc" "a" "bb"))
+             (list "a" "bb" "ccc"))
+    (assert= (sort-by abs (list -3 1 -2 4)) (list 1 -2 -3 4)))
+  (test "sort handles a larger, reversed input correctly"
+    (assert= (sort (range 50 0 -1)) (range 1 51))))
+
+;; ---- explicit concurrency (spawn / send / fan-in) ---------------------------
+;; :isolated so these run against a private globals copy and don't contend with
+;; the parallel suite for the runner's mailbox. Each worker builds a sequence and
+;; sends it back (deep-copied across per-process heaps), proving the list values
+;; round-trip; the parent fans them in. Defined once at load (distinct seq- names)
+;; so they survive the :isolated rollback.
+
+(defn seq-emit (parent n) (send parent [:r n (sort (range n 0 -1))]))  ; build then sort
+(defn seq-spawn (parent ns)
+  (when (not (empty? ns))
+    (spawn seq-emit parent (first ns))
+    (seq-spawn parent (rest ns))))
+(defn seq-collect (got total acc)
+  (if (= got total)
+    acc
+    (seq-collect (+ got 1) total (receive ([:r n xs] (assoc acc n xs))))))
+
+(def seq-data (range 1 21))                  ; a shared global list read by many processes
+(defn seq-reader (parent i)
+  (send parent [:s (sum (take i seq-data))])) ; Σ 1..i
+(defn seq-spawn-readers (parent n)
+  (when (> n 0) (spawn seq-reader parent n) (seq-spawn-readers parent (- n 1))))
+(defn seq-sum (got total acc)
+  (if (= got total) acc (seq-sum (+ got 1) total (receive ([:s v] (+ acc v))))))
+
+(describe "sequences across processes" :isolated
+
+  (test "a sorted list round-trips through a worker unchanged (deep copy)"
+    (let (w (spawn seq-emit (self) 5))
+      (assert= (receive ([:r n xs] xs)) (list 1 2 3 4 5))))
+
+  (test "fan-out / fan-in: each worker builds+sorts a list, parent folds a map"
+    (seq-spawn (self) (range 1 16))          ; 15 workers, n = 1..15
+    (let (m (seq-collect 0 15 {}))
+      (assert= (count m) 15)
+      (assert= (get m 1) (list 1))
+      (assert= (get m 5) (list 1 2 3 4 5))
+      (assert= (get m 15) (range 1 16))))
+
+  (test "many processes concurrently read a shared GLOBAL list"
+    ;; worker i sends Σ(1..i); summing i=1..10 of i(i+1)/2 = 220.
+    (seq-spawn-readers (self) 10)
+    (assert= (seq-sum 0 10 0) 220)))

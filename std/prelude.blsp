@@ -127,6 +127,8 @@
 (defn keyword? (x) (%eq (type-of x) :keyword))
 (defn vector?  (x) (%eq (type-of x) :vector))
 (defn map?     (x) (%eq (type-of x) :map))
+;; `ref?` holds for a `(ref)` token (a unique reference).
+(defn ref?     (x) (%eq (type-of x) :ref))
 ;; `fn?` holds for both Brood closures (:fn) and Rust builtins (:native).
 (defn fn?      (x) (or (%eq (type-of x) :fn) (%eq (type-of x) :native)))
 
@@ -200,10 +202,53 @@
 (defn positive? (n) (> n 0))
 (defn negative? (n) (< n 0))
 (defn abs (n) (if (< n 0) (- n) n))
-(defn max (a b) (if (> a b) a b))
-(defn min (a b) (if (< a b) a b))
+;; Variadic, fold over the first arg (so at least one is required); a strict `>`
+;; keeps the *first* of equal maxima, matching a left fold.
+(defn max (x & xs) (fold (fn (a b) (if (> b a) b a)) x xs))
+(defn min (x & xs) (fold (fn (a b) (if (< b a) b a)) x xs))
 (defn sum     (xs) (reduce + 0 xs))
 (defn product (xs) (reduce * 1 xs))
+(defn even? (n) (= (rem n 2) 0))
+(defn odd?  (n) (not (even? n)))
+
+;; Rounding & roots, all Brood over the one Float->Int primitive `floor` (toward
+;; -inf) plus `rem`/`/`/`*`. `floor` of an int is itself, so these pass ints
+;; through unchanged.
+(defn ceil (x) (- (floor (- x))))                 ; ceil = -floor(-x)
+;; round half away from zero: floor(x+0.5) for x>=0, mirrored for x<0.
+(defn round (x)
+  (if (< x 0) (- (floor (+ (- x) 0.5))) (floor (+ x 0.5))))
+
+;; (quot a b) — truncated integer division (toward zero), the quotient partner to
+;; `rem`. (a - (rem a b)) is exactly divisible by b, so `/` returns an exact int
+;; (no float round-trip — correct even for large i64, unlike (floor (/ a b))).
+(defn quot (a b) (/ (- a (rem a b)) b))
+
+;; (pow base exp) — `exp` must be an integer (use `sqrt` for roots). Int base +
+;; non-negative exp stays an int (overflow raises, like `*`); a negative exp gives
+;; the reciprocal (a float). Tail-recursive, so a large exponent is O(1) stack.
+(defn pow (base exp)
+  (cond
+    (not (int? exp)) (error "pow: exponent must be an integer (use sqrt for roots), got " exp)
+    (< exp 0)        (/ 1 (pow base (- exp)))
+    else             (pow--acc base exp 1)))
+(defn pow--acc (base exp acc)
+  (if (= exp 0) acc (pow--acc base (- exp 1) (* acc base))))
+
+;; (sqrt n) — Newton's method (Babylonian): guess' = (guess + n/guess)/2, iterated
+;; to the fixed point. Pure Brood, so it's *approximate* (a few ULPs, not the
+;; hardware sqrt) but needs no Rust; redefine it if you ever need bit-exactness.
+;; Always returns a Float; a negative argument raises.
+(defn sqrt (n)
+  (cond
+    (< n 0) (error "sqrt: negative argument " n)
+    (= n 0) 0.0
+    else    (sqrt--iter n (/ n 2.0) 100)))
+(defn sqrt--iter (n guess steps)
+  (let (next (/ (+ guess (/ n guess)) 2.0))
+    (if (or (= steps 0) (= next guess))
+      next
+      (sqrt--iter n next (- steps 1)))))
 
 ;; Euclidean modulo: the result has the sign of the divisor and lies in
 ;; [0, (abs b)). Brood over the `rem` primitive (truncated remainder), nudged
@@ -490,6 +535,110 @@
     (empty? xs)      false
     (= x (first xs)) true
     else             (member? x (rest xs))))
+
+;; ---- sequence library -------------------------------------------------------
+;; All in Brood over the list primitives (`first`/`rest`/`cons`/`empty?`) and
+;; `take`/`drop`. Every builder is tail-recursive (it accumulates a reversed list
+;; and reverses once at the end), so these stay stack-safe on long inputs — which
+;; matters because a `test` body runs in a green process with a small coroutine
+;; stack. Sequences are cons-lists; `zip` pairs are 2-vectors (the tuple idiom).
+
+;; (range hi) -> 0..hi-1 ; (range lo hi) -> lo..hi-1 ; (range lo hi step).
+(defn range (a & more)
+  (cond
+    (empty? more)        (range--collect 0 a 1 nil)
+    (empty? (rest more)) (range--collect a (first more) 1 nil)
+    else                 (range--collect a (first more) (second more) nil)))
+(defn range--collect (i hi step acc)
+  (if (if (> step 0) (< i hi) (> i hi))
+    (range--collect (+ i step) hi step (cons i acc))
+    (reverse acc)))
+
+;; (take n coll) -> the first n elements (fewer if coll is shorter).
+(defn take (n coll) (take--acc n coll nil))
+(defn take--acc (n coll acc)
+  (if (or (<= n 0) (empty? coll))
+    (reverse acc)
+    (take--acc (- n 1) (rest coll) (cons (first coll) acc))))
+
+;; (drop n coll) -> coll without its first n elements.
+(defn drop (n coll)
+  (if (or (<= n 0) (empty? coll)) coll (drop (- n 1) (rest coll))))
+
+;; (take-while pred coll) / (drop-while pred coll) split on the first failure.
+(defn take-while (pred coll) (take-while--acc pred coll nil))
+(defn take-while--acc (pred coll acc)
+  (if (and (pair? coll) (pred (first coll)))
+    (take-while--acc pred (rest coll) (cons (first coll) acc))
+    (reverse acc)))
+(defn drop-while (pred coll)
+  (if (and (pair? coll) (pred (first coll)))
+    (drop-while pred (rest coll))
+    coll))
+
+;; (some? pred coll) -> true if pred holds for any element; (every? pred coll) ->
+;; true if it holds for all (vacuously true on the empty list). Booleans, by the
+;; `?` convention — use `find` to recover the matching element itself.
+(defn some? (pred coll)
+  (cond
+    (empty? coll)       false
+    (pred (first coll)) true
+    else                (some? pred (rest coll))))
+(defn every? (pred coll)
+  (cond
+    (empty? coll)       true
+    (pred (first coll)) (every? pred (rest coll))
+    else                false))
+
+;; (find pred coll) -> the first element satisfying pred, or nil.
+(defn find (pred coll)
+  (cond
+    (empty? coll)       nil
+    (pred (first coll)) (first coll)
+    else                (find pred (rest coll))))
+
+;; (zip a b) -> a list of [x y] vectors, stopping at the shorter input.
+(defn zip (a b) (zip--acc a b nil))
+(defn zip--acc (a b acc)
+  (if (or (empty? a) (empty? b))
+    (reverse acc)
+    (zip--acc (rest a) (rest b) (cons [(first a) (first b)] acc))))
+
+;; (partition n coll) -> consecutive n-sized chunks; a trailing partial chunk is
+;; dropped (Clojure `partition` semantics). `has-at-least?` avoids re-counting.
+(defn has-at-least? (n coll)
+  (cond (<= n 0) true (empty? coll) false else (has-at-least? (- n 1) (rest coll))))
+(defn partition (n coll) (partition--acc n coll nil))
+(defn partition--acc (n coll acc)
+  (if (has-at-least? n coll)
+    (partition--acc n (drop n coll) (cons (take n coll) acc))
+    (reverse acc)))
+
+;; (sort coll) ascending via `<`; (sort less? coll) with a strict less-than
+;; predicate. (sort-by key-fn coll) sorts by `(< (key-fn x) (key-fn y))`. A
+;; stable, O(n log n) merge sort: the merge prefers the left run on ties (stable)
+;; and is tail-recursive; recursion depth is O(log n), so it's stack-safe.
+(defn sort (a & more)
+  (if (empty? more)
+    (merge-sort (fn (x y) (< x y)) a)
+    (merge-sort a (first more))))
+(defn sort-by (key-fn coll)
+  (merge-sort (fn (x y) (< (key-fn x) (key-fn y))) coll))
+(defn merge-sort (less? coll)
+  (if (or (empty? coll) (empty? (rest coll)))
+    coll
+    (let (n (quot (count coll) 2))
+      (merge--runs less?
+                   (merge-sort less? (take n coll))
+                   (merge-sort less? (drop n coll))))))
+(defn merge--runs (less? a b) (merge--acc less? a b nil))
+(defn merge--acc (less? a b acc)
+  (cond
+    (empty? a) (append (reverse acc) b)
+    (empty? b) (append (reverse acc) a)
+    ;; strict `<` on b-vs-a: equal elements take from `a` first, so it's stable.
+    (less? (first b) (first a)) (merge--acc less? a (rest b) (cons (first b) acc))
+    else                        (merge--acc less? (rest a) b (cons (first a) acc))))
 
 ;; ---- strings ----------------------------------------------------------------
 ;; The string library, written over the kernel primitives `substring` /

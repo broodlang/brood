@@ -792,11 +792,14 @@ borrow the model, not the proof obligation.
 
 ## ADR-025 — A lossless, span-carrying CST for tooling, separate from the eval `Value`
 
-**Status:** accepted; foundations implemented (no LSP crate yet). Full plan in
-[`lsp.md`](lsp.md). Done: the CST (`syntax::cst`, with shared lexical rules in
-`syntax::atom`); leading-string **docstrings** on closures; the introspection
-primitives `doc` / `arglist` / `global-names` / `bound?`. Next: the CST scope
-resolver (shared with the checker), then the `brood-lsp` crate.
+**Status:** accepted; foundations implemented + the `brood-lsp` crate is live
+(Tier 0 landed in commit b724f3f, 2026-05-27). Full plan in [`lsp.md`](lsp.md).
+Done: the CST (`syntax::cst`, with shared lexical rules in `syntax::atom`);
+leading-string **docstrings** on closures; the introspection primitives `doc` /
+`arglist` / `global-names` / `bound?`; and the `crates/lsp` server — stdio
+lifecycle, full document sync, and syntactic `publishDiagnostics` off the CST.
+Next: the CST scope resolver (shared with the checker), then Tier 1 (completion,
+hover + signature help, `documentSymbol`).
 
 **Context.** Brood is meant to be the language of a self-editing editor, so a
 language server (LSP) is on the path, not an afterthought (`tooling.md` already

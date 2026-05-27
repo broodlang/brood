@@ -53,17 +53,21 @@ Concretely:
 ## Layout
 
 ```
-crates/lisp/src/
-  value.rs     Value enum, symbol interner, list/vector constructors  (all heap allocation funnels through here)
-  reader.rs    text -> Value
-  env.rs       lexical environment chain
-  eval.rs      evaluator — a `'tail: loop` for proper tail calls + special forms
-  builtins.rs  functions implemented in Rust
-  printer.rs   Value -> text
-  error.rs     LispError / LispResult
+crates/lisp/src/   (the directory tree mirrors the layers — see lib.rs)
+  core/        substrate: value.rs (Value, Tag, symbol interner, Closure/Arity),
+               heap.rs (per-process heap + shared regions + env chain), alloc.rs
+  syntax/      reader.rs (text -> Value), printer.rs, and the tooling CST
+               (atom.rs / cst.rs / scope.rs)
+  eval/        mod.rs (evaluator — a `'tail: loop` for tail calls + special forms),
+               macros.rs (quasiquote, macroexpand, the compile pass + pattern lowering)
+  types/       mod.rs (Ty/GradualTy set-theoretic lattice), check.rs (advisory checker)
+  builtins.rs  functions implemented in Rust (the primitive kernel)
+  process.rs   green-process scheduler (spawn/send/receive/monitor)
+  error.rs     LispError / LispResult / source Pos
   lib.rs       the `Interp` entry point; bundles std/prelude.blsp
 crates/cli/src/main.rs   the `brood` binary — the language (REPL, file runner, `--test`)
-crates/nest/src/main.rs  the `nest` binary — project tooling (`new`, `test`, config) — ADR-028
+crates/nest/src/main.rs  the `nest` binary — project tooling (`new`, `test`, `doc`) — ADR-028
+crates/lsp/src/main.rs   the `brood-lsp` binary — language server (ADR-025, docs/lsp.md)
 std/prelude.blsp         standard library written in Brood
 docs/                    architecture, language, roadmap, decisions, devlog
 ```
@@ -203,8 +207,8 @@ surface it and ask — don't reset to "fix" it.
 
 ## Known next steps (see roadmap)
 
-Dynamic variables (`defdyn`/`binding`), the math/sequence libraries, and the
-tracing-GC migration complete the language core (M1) — macros/quasiquote,
-in-language `try`/`catch`, maps, and the string library are done. After that: the
-editor data model (M2), display protocol + native frontend (M3), server mode
-(M4), web frontend (M5).
+Dynamic variables (`defdyn`/`binding`) and the tracing-GC migration are what's
+left of the language core (M1) — macros/quasiquote, in-language `try`/`catch`,
+maps, the string/math/sequence libraries, pattern matching, modules, project
+tooling, and a Tier-0 language server are done. After that: the editor data model
+(M2), display protocol + native frontend (M3), server mode (M4), web frontend (M5).

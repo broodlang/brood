@@ -2,12 +2,16 @@
 //! over stdio so any editor gets Brood's language knowledge without
 //! re-implementing it. See `docs/lsp.md` for the design and ADR-025.
 //!
-//! Tier 0 (this file): lifecycle, full-document sync, and **syntactic
-//! diagnostics** read off the tooling CST ([`brood::syntax::cst`]). The server
-//! never evaluates document text — diagnostics come from parsing, not running
-//! (a half-typed buffer must stay safe and can't be run). It uses the
-//! synchronous `lsp-server` stack (no async runtime): a single blocking request
-//! loop owns the document store, sidestepping the `!Sync` `Interp`/`Heap`.
+//! Tier 0: lifecycle, full-document sync, and **syntactic diagnostics** read off
+//! the tooling CST ([`brood::syntax::cst`]). Tier 1 (the [`completion`],
+//! [`hover`], [`symbols`], and [`definition`] modules): name completion, hover
+//! docs, the document outline, and goto-definition. The server never evaluates
+//! document text — diagnostics and navigation come from parsing + the CST scope
+//! walker ([`brood::syntax::scope`]), and the one [`Interp`] it owns answers only
+//! introspection queries about the *language's* globals (never user code). A
+//! half-typed buffer must stay safe and can't be run. It uses the synchronous
+//! `lsp-server` stack (no async runtime): a single blocking request loop owns the
+//! document store + the `Interp`, sidestepping the `!Sync` `Heap`.
 
 // `lsp_types::Uri` trips clippy's `mutable_key_type` lint (it wraps a
 // `fluent_uri` type clippy can't prove is immutable), but it's an interned,
@@ -17,20 +21,32 @@
 use std::collections::HashMap;
 use std::error::Error;
 
-use lsp_server::{Connection, Message, Notification as ServerNotification, Response};
+use lsp_server::{Connection, ErrorCode, Message, Notification as ServerNotification, Request, RequestId, Response};
 use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument,
     Notification as NotificationTrait, PublishDiagnostics,
 };
+use lsp_types::request::{
+    Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest, Request as RequestTrait,
+};
 use lsp_types::{
-    Diagnostic, DiagnosticSeverity, PositionEncodingKind, PublishDiagnosticsParams, Range,
-    ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
+    CompletionOptions, CompletionParams, Diagnostic, DiagnosticSeverity, DocumentSymbolParams,
+    GotoDefinitionParams, HoverParams, HoverProviderCapability, OneOf, PositionEncodingKind,
+    PublishDiagnosticsParams, Range, ServerCapabilities, TextDocumentSyncCapability,
+    TextDocumentSyncKind, Uri,
 };
 
-use brood::syntax::cst;
+use brood::syntax::{cst, scope};
+use brood::Interp;
 
+mod completion;
+mod definition;
+mod defs;
 mod diagnostics;
+mod hover;
+mod introspect;
 mod line_index;
+mod symbols;
 
 use line_index::LineIndex;
 
@@ -46,6 +62,13 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
         // We do UTF-16 column arithmetic in `LineIndex`; advertise it explicitly
         // rather than relying on the protocol default.
         position_encoding: Some(PositionEncodingKind::UTF16),
+        // Tier 1 (docs/lsp.md): completion, hover, document symbols, and
+        // goto-definition. The completion `trigger_characters` stay default —
+        // the client requests on identifier chars, which is what we want.
+        completion_provider: Some(CompletionOptions::default()),
+        hover_provider: Some(HoverProviderCapability::Simple(true)),
+        document_symbol_provider: Some(OneOf::Left(true)),
+        definition_provider: Some(OneOf::Left(true)),
         ..Default::default()
     };
 
@@ -69,23 +92,20 @@ type Documents = HashMap<Uri, String>;
 
 fn main_loop(connection: &Connection) -> Result<(), Box<dyn Error + Sync + Send>> {
     let mut docs: Documents = HashMap::new();
+    // One interpreter, loaded with the prelude + builtins, answers introspection
+    // queries (completion candidates, hover signatures). It never evaluates the
+    // open document — see the module docs / `docs/lsp.md`.
+    let mut interp = Interp::new();
 
     for msg in &connection.receiver {
         match msg {
             Message::Request(req) => {
-                // The only request Tier 0 serves is shutdown; `handle_shutdown`
-                // performs the shutdown/exit handshake and returns true when it
-                // was that request, at which point we stop.
+                // `handle_shutdown` performs the shutdown/exit handshake and
+                // returns true when it was that request, at which point we stop.
                 if connection.handle_shutdown(&req)? {
                     return Ok(());
                 }
-                // Nothing else is advertised, so reply method-not-found rather
-                // than leave the client waiting on a response.
-                let resp = Response::new_err(
-                    req.id,
-                    lsp_server::ErrorCode::MethodNotFound as i32,
-                    format!("unsupported request: {}", req.method),
-                );
+                let resp = handle_request(&docs, &mut interp, req);
                 connection.sender.send(Message::Response(resp))?;
             }
             Message::Response(_) => {} // we issue no server→client requests yet
@@ -95,6 +115,98 @@ fn main_loop(connection: &Connection) -> Result<(), Box<dyn Error + Sync + Send>
         }
     }
     Ok(())
+}
+
+/// Build the per-request analysis of a document: its CST, scope tree, and line
+/// index. All three are cheap to derive, so we rebuild them per request rather
+/// than cache (full-document sync, ADR-011 — the simple shape until a need
+/// justifies more). The `ScopeTree` owns its data (no borrow of `root`).
+fn analyze(text: &str) -> (cst::Node, scope::ScopeTree, LineIndex) {
+    let root = cst::parse(text);
+    let tree = scope::analyze(&root, text);
+    let index = LineIndex::new(text);
+    (root, tree, index)
+}
+
+/// Deserialize a request's params, mapping a bad payload to an `InvalidParams`
+/// error response (with the request's id) rather than a panic. The method has
+/// already been matched, so the only failure is a params-shape mismatch.
+fn extract<P: serde::de::DeserializeOwned>(req: Request) -> Result<(RequestId, P), Response> {
+    let id = req.id.clone();
+    let method = req.method.clone();
+    req.extract::<P>(&method).map_err(|_| {
+        Response::new_err(
+            id,
+            ErrorCode::InvalidParams as i32,
+            format!("invalid params for {method}"),
+        )
+    })
+}
+
+/// Dispatch a client request to its Tier-1 feature handler, producing the
+/// response to send. An unknown method gets `MethodNotFound`; a request for a
+/// document we don't have gets a null result (the spec's "no information").
+fn handle_request(docs: &Documents, interp: &mut Interp, req: Request) -> Response {
+    match req.method.as_str() {
+        HoverRequest::METHOD => {
+            let (id, p) = match extract::<HoverParams>(req) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            let pos = p.text_document_position_params;
+            let result = docs.get(&pos.text_document.uri).and_then(|text| {
+                let (root, tree, index) = analyze(text);
+                let offset = index.offset(text, pos.position);
+                hover::hover(interp, text, &root, &tree, &index, offset)
+            });
+            Response::new_ok(id, result)
+        }
+        Completion::METHOD => {
+            let (id, p) = match extract::<CompletionParams>(req) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            let pos = p.text_document_position;
+            let result = docs.get(&pos.text_document.uri).map(|text| {
+                let (_root, tree, index) = analyze(text);
+                let offset = index.offset(text, pos.position);
+                completion::completions(interp, &tree, offset)
+            });
+            Response::new_ok(id, result)
+        }
+        DocumentSymbolRequest::METHOD => {
+            let (id, p) = match extract::<DocumentSymbolParams>(req) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            let result = docs.get(&p.text_document.uri).map(|text| {
+                let (root, _tree, index) = analyze(text);
+                symbols::document_symbols(&root, text, &index)
+            });
+            Response::new_ok(id, result)
+        }
+        GotoDefinition::METHOD => {
+            let (id, p) = match extract::<GotoDefinitionParams>(req) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            let pos = p.text_document_position_params;
+            let uri = pos.text_document.uri;
+            let result = docs.get(&uri).and_then(|text| {
+                let (root, tree, index) = analyze(text);
+                let offset = index.offset(text, pos.position);
+                definition::definition(&uri, text, &root, &tree, &index, offset)
+            });
+            Response::new_ok(id, result)
+        }
+        // Nothing else is advertised: reply method-not-found rather than leave
+        // the client waiting on a response.
+        _ => Response::new_err(
+            req.id,
+            ErrorCode::MethodNotFound as i32,
+            format!("unsupported request: {}", req.method),
+        ),
+    }
 }
 
 fn handle_notification(
@@ -341,6 +453,81 @@ mod server_tests {
         handle.join().unwrap().unwrap();
     }
 
+    /// Send a request and read client messages until its `Response` arrives
+    /// (skipping any diagnostics the open/change emitted in between).
+    fn request(client: &Connection, id: i32, method: &str, params: serde_json::Value) -> Response {
+        client
+            .sender
+            .send(Message::Request(Request::new(
+                RequestId::from(id),
+                method.to_string(),
+                params,
+            )))
+            .unwrap();
+        loop {
+            match client.receiver.recv().expect("server closed before response") {
+                Message::Response(r) if r.id == RequestId::from(id) => return r,
+                _ => continue,
+            }
+        }
+    }
+
+    fn position_params(line: u32, character: u32) -> serde_json::Value {
+        serde_json::json!({
+            "textDocument": { "uri": uri() },
+            "position": { "line": line, "character": character },
+        })
+    }
+
+    #[test]
+    fn serves_tier1_requests_end_to_end() {
+        let (server, client) = Connection::memory();
+        let handle = thread::spawn(move || main_loop(&server));
+
+        // `f` defined, then called; `map` is a prelude global.
+        client
+            .sender
+            .send(did_open("(defn f (x) \"doubles\" (+ x x))\n(f (map g xs))"))
+            .unwrap();
+
+        // documentSymbol → one symbol, `f`.
+        let r = request(
+            &client,
+            1,
+            DocumentSymbolRequest::METHOD,
+            serde_json::json!({ "textDocument": { "uri": uri() } }),
+        );
+        let syms: Vec<lsp_types::DocumentSymbol> = serde_json::from_value(r.result.unwrap()).unwrap();
+        assert_eq!(syms.len(), 1);
+        assert_eq!(syms[0].name, "f");
+
+        // hover on the `f` call site (line 1, char 1) → its signature + docstring.
+        let r = request(&client, 2, HoverRequest::METHOD, position_params(1, 1));
+        let h: lsp_types::Hover = serde_json::from_value(r.result.unwrap()).unwrap();
+        let lsp_types::HoverContents::Markup(m) = h.contents else {
+            panic!("expected markup");
+        };
+        assert!(m.value.contains("(f x)"), "{:?}", m.value);
+        assert!(m.value.contains("doubles"), "{:?}", m.value);
+
+        // goto-definition on the same `f` → its binder at line 0, char 6.
+        let r = request(&client, 3, GotoDefinition::METHOD, position_params(1, 1));
+        let loc: lsp_types::Location = serde_json::from_value(r.result.unwrap()).unwrap();
+        assert_eq!(loc.range.start, lsp_types::Position::new(0, 6));
+
+        // completion inside the defn body (line 0, at the `x` in `(+ x x)`) →
+        // offers the local `x`, the doc def `f`, and the global `map`.
+        let r = request(&client, 4, Completion::METHOD, position_params(0, 26));
+        let items: Vec<lsp_types::CompletionItem> =
+            serde_json::from_value(r.result.unwrap()).unwrap();
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"x"), "local x missing: {labels:?}");
+        assert!(labels.contains(&"map"), "global map missing: {labels:?}");
+
+        shutdown(&client);
+        handle.join().unwrap().unwrap();
+    }
+
     #[test]
     fn unknown_request_gets_method_not_found() {
         let (server, client) = Connection::memory();
@@ -350,7 +537,7 @@ mod server_tests {
             .sender
             .send(Message::Request(Request::new(
                 RequestId::from(7),
-                "textDocument/hover".to_string(),
+                "textDocument/formatting".to_string(), // not advertised
                 serde_json::json!({}),
             )))
             .unwrap();

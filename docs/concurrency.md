@@ -1,6 +1,7 @@
 # Concurrency — green processes on all cores
 
-> Status: **design, for review.** Not implemented.
+> Status: **implemented** (phases 1–4 below). Green M:N on a worker pool,
+> preemptively fair, with selective `receive` + timeouts and process monitors.
 
 ## Goal
 
@@ -98,7 +99,8 @@ done as the additive step the original design anticipated.
 
 ## Out of scope for v1 (the "fancy" we're skipping)
 
-- Supervision trees, `link`/`monitor`, restart strategies, registered names
+- Supervision trees, `link`, restart strategies, registered names
+  (`monitor`/`demonitor` are now in — see Phasing)
 - Distribution across machines/nodes
 - Live migration of *running* processes (we start pinned)
 - Work-stealing across workers (one shared run queue for now)
@@ -139,7 +141,11 @@ This is the largest *core* undertaking in the project. Two consequences:
    catchable (`throw` from the `after` body → `try`/`catch`).
 5. ⬜ **Work-stealing** — per-worker run queues + steal-on-idle (today: one shared
    run queue). An optimisation, not a correctness need.
-6. ⬜ Later: supervision / links / monitors; registered names.
+6. ✅ **Process monitors** — `monitor`/`demonitor`/`ref`: a unidirectional watch
+   that delivers `[:down mref pid reason]` to the monitoring process when `pid`
+   dies (`:noproc` if already dead), in `process.rs`. The one supervision
+   mechanism that needs a primitive; the rest is Brood (the `hatch` library).
+7. ⬜ Later: links, supervision trees, registered names; work-stealing.
 
 ## Distribution across nodes (future — kept in mind)
 

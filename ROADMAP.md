@@ -49,12 +49,14 @@ The native kernel is **70 primitives** — see [`docs/primitives.md`](docs/primi
   `string->number` (strict parse-or-nil) genuinely need Rust; everything else is
   **[Brood]** over `substring`/`string-length`/`str` (`std/prelude.blsp`). Chars
   are 1-char strings (no distinct char type — deferred); indices are char-based.
-- ⬜ **Math library** — `floor ceil round sqrt pow`, `even?`/`odd?`,
-  variadic `min`/`max`, `quot`. **[kernel]** for the float ops; **[Brood]** for
-  the rest.
-- ⬜ **Sequence library** — `range take drop sort member some? every? map2/zip
-  partition find` and friends. Mostly **[Brood]** (sort needs care, e.g. a
-  prelude merge sort).
+- ✅ **Math library** — `floor ceil round quot pow sqrt`, `even?`/`odd?`,
+  variadic `min`/`max`. **[kernel]** is just `floor` (the one irreducible
+  Float→Int crossing); **everything else is [Brood]** over `floor`/`rem`/`/`/`*`
+  (`ceil`=−floor(−x), `quot` exact over `rem`, `pow` recursive, `sqrt` Newton's).
+  `floor`/`ceil`/`round` return an int; `sqrt` is an approximate float.
+- ✅ **Sequence library** — `range take drop take-while drop-while sort sort-by
+  some? every? find zip partition` (plus the existing `member?`). All **[Brood]**;
+  `sort`/`sort-by` are a stable merge sort, every builder tail-recursive.
 - ⬜ **Dynamic variables** — `defdyn` / `binding` for config-style vars
   (`*print-depth*` etc.). **[kernel]** (a dynamic-binding store + 2 forms).
 

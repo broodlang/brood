@@ -37,6 +37,11 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   in the closure calling convention (`fn`/`lambda`/`defn` all share it).
   `&key` (named args) is designed but **deferred for simplicity** (ADR-011) —
   additive when the editor command API needs it.
+- ✅ **Math library** — `floor`/`ceil`/`round`/`quot`/`pow`/`sqrt`, `even?`/`odd?`,
+  variadic `min`/`max`. All **Brood** except the single new primitive `floor`
+  (the irreducible Float→Int crossing); `sqrt` is Newton's method.
+- ✅ **Sequence library** — `range take drop take-while drop-while some? every?
+  find zip partition sort sort-by` (all Brood; `sort` is a stable merge sort).
 - ⬜ **Dynamic variables** (`defdyn` / `binding`) for editor config
 - ✅ **Error handling** — `throw` + `%try` primitives; `try`/`catch` + `error`
   in the prelude (no new special forms — ADR-011)
@@ -90,9 +95,10 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   modules (a file's leading string), extracted to Markdown by `nest doc`
   (ADR-029). 🟡 The `brood-lsp` language server (`docs/lsp.md`): ✅ Tier 0 —
   the `crates/lsp` binary with stdio lifecycle, full document sync, and
-  syntactic `publishDiagnostics` off the CST; ⬜ Tier 1 (completion, hover +
-  signature help, `documentSymbol`) and Tier 2 (goto/refs/rename, semantic
-  tokens, located checker diagnostics).
+  syntactic `publishDiagnostics` off the CST; ✅ Tier 1 — completion (locals +
+  globals), hover, `documentSymbol`, and goto-definition (the latter pulled
+  forward off Foundation B's scope walker); ⬜ remaining: signature help, and
+  Tier 2 (refs/rename, semantic tokens, located checker diagnostics).
 
 > v0.1 is the ✅ slice above: enough to be a real, usable language. The ⬜ items
 > complete M1.

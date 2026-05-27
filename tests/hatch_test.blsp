@@ -1,0 +1,46 @@
+;; std/hatch.blsp — the gen_server-style process framework. Built in Brood on
+;; spawn/send/receive/ref. :isolated because each test spawns processes and we
+;; (re)define servers as globals.
+
+(require 'test)
+(require 'hatch)
+
+(describe "hatch: cast and call" :isolated
+  (defprocess counter (n)
+    (cast :inc     (+ n 1))
+    (cast [:add m] (+ n m))
+    (cast :ping    (do n))            ; side-effect-free no-op: keep state
+    (call :value   [n n])             ; read: reply n, state unchanged
+    (call [:set x] [n x]))            ; reply old, set new
+
+  (test "a cast threads new state; gen-call reads it synchronously"
+    (let [c (hatch counter 0)]
+      (! c :inc)
+      (! c [:add 10])
+      (assert= (gen-call c :value) 11)))
+
+  (test "a no-op cast leaves state unchanged"
+    (let [c (hatch counter 5)]
+      (! c :ping)
+      (assert= (gen-call c :value) 5)))
+
+  (test "a call can both reply and update state"
+    (let [c (hatch counter 7)]
+      (assert= (gen-call c [:set 100]) 7)     ; replies the OLD value
+      (assert= (gen-call c :value) 100)))     ; and the new state took effect
+
+  (test "casts are ordered, and a later call observes all of them"
+    (let [c (hatch counter 0)]
+      (! c :inc) (! c :inc) (! c :inc)
+      (assert= (gen-call c :value) 3))))
+
+(describe "hatch: concurrent servers don't cross wires" :isolated
+  (defprocess echo (state)
+    (call [:double x] [(* x 2) state]))
+
+  (test "two gen-calls to two servers get their own replies"
+    (let [a (hatch echo nil)
+          b (hatch echo nil)]
+      ;; refs tag each call, so interleaved replies can't be confused
+      (assert= (gen-call a [:double 3]) 6)
+      (assert= (gen-call b [:double 21]) 42))))

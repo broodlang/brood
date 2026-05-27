@@ -1289,3 +1289,277 @@ case in `basic.rs`. `cargo test -p brood` green (50 Rust + Brood suite + doc);
 
 **Result.** Tier-1 string library done. Remaining Tier-1 gaps: Math library,
 sequence library, dynamic variables.
+
+---
+
+## 2026-05-27 — Maps: thorough review + concurrency tests
+
+**Goal.** Review the new maps (ADR-030) for edge cases and add broad coverage,
+including explicit multi-core tests.
+
+**Review — no map bugs found.** Probed the edges: int vs float keys are distinct
+(consistent with `=`, `(= 1 1.0)` is false); maps/vectors/lists work as keys
+(structural equality); a stored `nil`/`false` is distinguished from absence by
+`contains?`; nested-map equality is order-independent and depth-sensitive;
+`assoc`/`dissoc` never touch shared structure; `pr-str` round-trips through
+`read-string`+`eval`; maps `promote` into RUNTIME on `def` and survive the arena
+reset. One semantic note: `get`/`keys`/`vals`/`contains?` *error* on a non-map
+including `nil`, even though the rest of Brood nil-puns collections
+(`count`/`first`/`rest`/`empty?` accept `nil`). Left strict; flagged as a possible
+consistency follow-up (make the Brood surface treat `nil` as `{}`).
+
+**Tests.** Expanded `tests/maps_test.blsp` (~90 assertions: construction, access,
+immutable updates, structural keys/equality, printing/round-trip, scale, type
+errors) plus an `:isolated` **"maps across processes"** block — a deep map
+round-tripped through a worker; a worker's immutable update leaving the sender's
+map intact; 20-way fan-out/fan-in assembling one map; 50 processes concurrently
+reading a shared global map; a multi-stage process pipeline; a map in a
+selective-receive pattern. Four new Rust cases in `basic.rs`. `nest test` 272/272.
+
+**Bug found (pre-existing, NOT maps).** Writing the scale tests surfaced a
+**green-process stack overflow → uncatchable segfault**: a `test` body runs in a
+coroutine whose stack is corosensei's ~128 KiB default, and the recursive
+evaluator uses ~2 KiB/frame, so **non-tail recursion deeper than ~50 frames
+segfaults** the whole runtime (the root thread's 8 MB stack hides it). Repro:
+`(defn deep (n) (if (= n 0) 0 (+ n (deep (- n 1)))))` then
+`(spawn (fn () … (deep 100)))`. Worked around in the tests by keeping helpers
+tail-recursive. **Real fix (follow-up, scheduler not maps):** give worker
+coroutines a larger stack (`corosensei` `Coroutine::with_stack` / a stack pool)
+and/or detect exhaustion and raise instead of faulting.
+
+**CLAUDE.md.** Added the rule that **every language feature must be tested across
+multiple cores** (the parallel suite covers it by default — each test is a green
+process — plus add explicit `spawn`/`send`/shared-global coverage), with the
+tail-recursion caveat above.
+
+---
+
+## 2026-05-27 — `(ref)` unique tokens + synchronous call/reply
+
+**Goal.** Writing `examples/life.blsp` (a Game-of-Life feature tour) exposed a
+concurrency footgun: a script exits when its **main** process returns, so ending
+on a fire-and-forget `send` races the spawned work and drops it. The question
+became "what's the simple Erlang way to wait?" — and the answer is *not* an
+`await` primitive. The blocking `receive` already **is** the synchronisation; you
+just structure the protocol as a synchronous **call** (request + reply) rather
+than a **cast** (bare `send`), and end on the call. The only missing piece was a
+way to tell concurrent replies apart.
+
+**Built.** `(ref)` — a primitive returning a fresh, opaque, unforgeable
+reference token (Erlang's `make_ref`), the only way to make one.
+- New `Value::Ref(u64)` + `Tag::Ref` (`type-of` → `:ref`, predicate `ref?`),
+  threaded through the compatibility contract: `value.rs` (variant, tag, name),
+  `types::ALL_TAGS` (now 14) + `tested_by`, `printer` (`#<ref N>`), `heap.equal`
+  (compared by identity), and `process.rs` `Message::Ref` (refs survive a
+  copy-on-send unchanged — they're runtime-global identities).
+- A monotonic `AtomicU64` behind the `ref` builtin. Distinct from a pid (which is
+  still a plain `Int`) precisely so a reply tagged with a ref can never be
+  confused with a pid or a user integer.
+- Tests in `tests/concurrency_test.blsp`: identity/distinctness/type, and a
+  ref-tagged `call` round-trip where a stale reply with a *different* ref is left
+  queued rather than mistaken for ours (the pin `~tag` selects exactly one).
+
+**`call`/`reply` live in the example, not the prelude — and here's why.**
+Attempting to add them to `std/prelude.blsp` broke the prelude **freeze**
+(`debug_assert!(c.env.is_none())` in `heap.freeze_as_shared_code`). Root cause is
+a **pre-existing latent landmine**: `call` uses `receive`, and the `receive`
+macro's expansion *executes* match-compiler helpers — plus `map` and the variadic
+`=` — at the prelude's **own** compile pass. Those library fns build transient
+lambdas (`=` → `(fn (a b) (%eq a b))`, `map` → `(fn (acc x) …)`) that capture a
+local frame; the prelude build leaks them into the region, and freeze (which
+drops all env frames) rejects any closure with a non-global env. The `cond`
+definition already carries a comment warning about exactly this (it uses `%eq`,
+not `=`, to avoid stranding a lambda). **Conclusion: `match`/`receive` cannot be
+used inside a prelude-level function today** (debug builds). User code is
+unaffected (it expands after freeze), so `call`/`reply` sit in the example. Real
+fix is freeze-time reachability (drop unreachable closures) — naturally falls out
+of the tracing-GC migration (ADR-002); filed as follow-up.
+
+**Docs.** `docs/language.md`: `Ref` in the data-types table, `ref?`/`:ref` in
+predicates, `(ref)` in the process table, and a new *Synchronous calls (and why
+there's no `await`)* subsection. `examples/life.blsp` rewritten with an animated
+glider (overprinting via `\e[…` ANSI + `(after ms)` as the sleep), the call/cast
+process server, and an "unbounded set" demo. `cargo test` green (276 in-language
++ Rust suites).
+
+## 2026-05-27 — Math + sequence libraries
+
+**Goal.** Round out the standard library: the two remaining Tier-1 library items
+from `ROADMAP.md` — the **math library** and the **sequence library**. Mechanism
+in Rust, policy in Brood (ADR-006): only the ops that genuinely need f64 / checked
+integer division became kernel primitives; everything else is Brood over them.
+
+**Kernel (`builtins.rs`), 1 new primitive: `floor`** (Float→Int, toward −∞). An
+int passes through; a float is floored and cast to `i64`. This is the *only*
+math op that genuinely needs Rust — there's no other primitive that crosses
+Float→Int. (`rem` was already a primitive and stays one: deriving integer
+remainder via float division would lose precision past 2^53.)
+
+> **Course-correction (same session).** The first cut added *six* primitives —
+> `quot`/`floor`/`ceil`/`round`/`sqrt`/`pow` — reflexively, because the roadmap
+> said "[kernel] for the float ops". The user pushed back: *as much Brood as
+> possible; even `+`/`<` are Brood (over `%add`/`%lt`) — only add Rust when it's
+> truly irreducible.* On audit, five of the six were expressible in Brood:
+> `ceil`/`round` over `floor`; `quot` over `rem` + exact-int `/`; `pow` as
+> recursive multiply; `sqrt` by Newton's method. Only `floor` (Float→Int) had no
+> Brood path. Reverted to the single primitive.
+
+**Brood (`std/prelude.blsp`).**
+- Math (all over `rem`/`floor`/`/`/`*`/`<`): `ceil` = `-floor(-x)`; `round` =
+  `floor(x±0.5)`; `quot` = `(/ (- a (rem a b)) b)` — exact (the dividend is then
+  divisible, so `/` takes the exact-int path, no float round-trip, correct past
+  2^53); `pow` (integer exponent — tail-recursive multiply; negative exponent →
+  float reciprocal; non-integer exponent errors, "use sqrt for roots"); `sqrt`
+  (Newton's method — **approximate**, a few ULPs off the hardware sqrt, and
+  trivially redefinable). Plus `even?`/`odd?` (over `rem`) and `min`/`max` made
+  **variadic** (fold over a required first arg, strict `>`/`<` so the first of
+  equal extrema wins).
+- Sequences: `range` (1/2/3-arg, ascending or descending step), `take`/`drop`,
+  `take-while`/`drop-while`, `some?`/`every?` (booleans, by the `?` convention —
+  `find` recovers the element), `find`, `zip` (→ `[x y]` vectors, stops at the
+  shorter), `partition` (drops a trailing partial, Clojure semantics), and
+  `sort`/`sort-by` — a **stable merge sort** (the merge prefers the left run on
+  ties; recursion depth O(log n)). **Every builder is tail-recursive** (accumulate
+  reversed, reverse once) so they stay stack-safe on long inputs — which matters
+  because a `test` body runs in a green process with a small coroutine stack.
+
+**Tests.** New `tests/math_test.blsp` and `tests/sequence_test.blsp`,
+auto-discovered by the project runner. Each covers the single-threaded behaviour
+(the whole suite already runs each test in its own green process, so multi-core
+coverage is automatic) **plus** an explicit `:isolated` "across processes" block:
+workers compute/build the values, `send` them back (deep-copied across per-process
+heaps — proving the round-trip), read a shared global, and the parent fans them in.
+sqrt assertions use an epsilon helper (it's approximate now). `cargo test` green:
+53 Rust + **325 in-language**.
+
+**Audit (the user's "check all standard libraries").** Walked the whole kernel:
+the rest is genuinely irreducible — `%add…%eq`/`rem` (number-repr dispatch +
+overflow / exact remainder), `cons`/`first`/vector/`map-*` (heap repr),
+`string-length`/`substring`/`upper`/`lower`/`string->number` (char indexing,
+Unicode case tables, parsing), `type-of` (reflection), `str`/`pr-str`/`print`
+(value→text), and the I/O / self-hosting / process / introspection hooks. Each
+already has a comment pointing at its Brood surface; nothing else was reducible.
+
+**Docs.** `docs/primitives.md` (count 74; `floor` the sole math primitive + the
+irreducibility note), `docs/language.md` (Arithmetic + Lists & sequences, the
+"everything here is Brood" note), `roadmap.md` / `ROADMAP.md` (both items ✅). No
+new ADR — this is exactly ADR-006/008 applied; the lesson (don't add a primitive
+before checking it can't be Brood) is the course-correction note above.
+
+---
+
+## 2026-05-27 — Process monitors (supervision M0)
+
+**Goal.** First step toward an Erlang/OTP-style supervision layer, but built the
+Brood way: a minimal kernel mechanism with all policy (gen_server, supervisors,
+restart strategies) to live in Brood later. The one irreducible piece is a way to
+learn that a process has **died** — so: process monitors (monitors-only; no
+links yet, by decision).
+
+**Built (kernel, `process.rs` + `builtins.rs`).**
+- `(monitor pid)` → returns a monitor `ref`; registers `(watcher, mref)` under
+  the watched pid in a new `MONITORS` table. When the watched process
+  deregisters, every watcher is delivered `[:down <mref> <pid> <reason>]`.
+  Monitoring an already-dead pid delivers `:noproc` immediately. Unidirectional,
+  one-shot. `(demonitor mref)` removes it (best-effort).
+- **Exit reason.** A process's coroutine now records its reason in an
+  `EXIT_REASON` thread-local just before returning — `:normal` on a clean return,
+  `[:error <msg>]` on a Brood error (a true Rust panic → `:killed`). `run_one`
+  reads it (same worker thread, right after `resume`) and passes it to
+  `deregister(pid, reason)`, which fires the monitors.
+- Factored `deliver(pid, msg)` (mailbox push + wake) out of `send`; monitor DOWNs
+  reuse it. The root process is already in `REGISTRY` (via `ensure_ctx`), so DOWNs
+  to the main process are delivered, not dropped.
+- `(ref)` and `(monitor …)` now share one `NEXT_REF` counter (`process::next_ref`)
+  so every ref is distinct. `Message` derives `Clone` (a DOWN reason is cloned per
+  watcher).
+
+**Tests.** `tests/concurrency_test.blsp` — normal `:normal`, crash `[:error …]`,
+`:noproc` for already-dead, `demonitor` suppresses, and ref identity. `nest test`
+322/322.
+
+**Docs.** `docs/language.md` gained a *Monitors* subsection (+ table rows);
+`docs/primitives.md` lists `ref`/`monitor`/`demonitor`.
+
+**Next (see `todo.md`).** M1: the Brood process-framework library (gen_server-
+style `defprocess`, `gen-call`/`gen-cast`, `!`) in a `require`-able module — needs
+a name (not "OTP"). M2: a Brood `supervisor` (one-for-one / rest-for-one /
+all-for-one, checkpoint/resume) built on monitors.
+
+---
+
+## 2026-05-27 — brood-lsp Tier 1: completion, hover, document symbols, goto-definition
+
+**Goal.** Move the language server past Tier-0 diagnostics to the everyday
+editor features (`docs/lsp.md` Tier 1), reusing the foundations already in
+place rather than adding substrate.
+
+**Built (`crates/lsp`).** All four handlers are thin wiring over machinery that
+already existed — the CST (`syntax::cst`), the scope walker (`syntax::scope`),
+and the introspection primitives (`arglist`/`doc`/`global-names`):
+- **`textDocument/completion`** (`completion.rs`) — locals visible at the cursor
+  (`scope::names_in_scope`, marked variables, listed first so a shadowing local
+  outranks the global it hides) + interpreter globals (`global-names`, marked
+  functions). De-duped; the client does prefix filtering.
+- **`textDocument/hover`** (`hover.rs`) — resolves the symbol under the cursor
+  and renders by binding: a **local** → a short note; a **document `def`** → its
+  signature + docstring read straight off the CST (`defs.rs`); a **free** name
+  (prelude/builtin) → its `arglist` + `doc` via the interpreter.
+- **`textDocument/documentSymbol`** (`symbols.rs`) — outlines top-level
+  `def`/`defn`/`defmacro` (full form = `range`, name token = `selection_range`).
+- **`textDocument/definition`** (`definition.rs`) — `scope::resolve_at` → the
+  binder's span; a free name has no in-document binder → null. Landed with Tier 1
+  (not Tier 2 as first sketched) because Foundation B already shipped the walker.
+- `defs.rs` — top-level def model (kind, name/full spans, params, leading-string
+  docstring) shared by hover + documentSymbol. `introspect.rs` — `Interp`-backed
+  `global-names` / `(arglist .) + (doc .)` queries. `LineIndex` gained the
+  `Position → byte offset` inverse for incoming request positions.
+
+**Design notes.** The server now owns one `Interp` (prelude + builtins) for
+introspection only; it still **never evaluates the open buffer** (`docs/lsp.md`).
+A symbol's text is safe to interpolate into `(arglist NAME)`/`(doc NAME)` because
+a CST `Symbol` token can't contain a delimiter, quote, or `;` (`syntax::atom`).
+An empty `arglist` is ambiguous (builtin vs zero-arg fn), so hover shows no
+signature there rather than a misleading one.
+
+**Tests.** 34 in `crates/lsp` (up from ~12): per-feature unit tests plus an
+end-to-end `serves_tier1_requests_end_to_end` driving real request/response
+round-trips over `Connection::memory()`. Full workspace green (`cargo test`),
+clippy clean for the crate.
+
+**Next.** Tier 2 — references, rename, semantic tokens, and located *semantic*
+diagnostics (needs `types::check` to carry spans). Signature help (active-param
+tracking) is the small remaining Tier-1 item.
+
+---
+
+## 2026-05-27 — `hatch`: a gen_server in Brood (supervision M1)
+
+**Goal.** With monitors landed (M0), build the gen_server layer — but as Brood
+policy in a `require`-able module, not Rust and not the baked prelude (which would
+hit the `match`/`receive` prelude-freeze landmine). Named `hatch` (fits the
+spawn/offspring metaphor; deliberately NOT "OTP").
+
+**Built — `std/hatch.blsp`** (embedded module; `(require 'hatch)`):
+- `(defprocess name (state) (cast PAT body…) (call PAT body…) …)` — a macro that
+  compiles cast/call clauses into a tail-recursive `receive` loop. A **cast**
+  body evaluates to the next state; a **call** body to `[reply next-state]`.
+  State is immutable and explicit: to keep it, a clause returns the state var.
+  Messages ride internal envelopes (`[:$cast …]` / `[:$call from ref …]`) so the
+  loop tells them apart; a call is matched to its reply by a fresh `(ref)`.
+- `(hatch f state)` spawns one; `(! pid payload)` casts; `(gen-call pid payload)`
+  is the synchronous, ref-tagged request. All ~30 lines of Brood over the kernel.
+
+**Tests / example.** `tests/hatch_test.blsp` (state threading, no-op cast, call-
+updates-state, ordering, two servers not crossing wires). `examples/life.blsp`'s
+process section rewritten from a hand-rolled receive loop to `defprocess`
+life-server + `hatch`/`!`/`gen-call`. `cargo test` green (Rust + 34 in the
+process bucket; full suite passes).
+
+**Known gaps (todo.md M1.x).** No clean stop/terminate yet (a hatch process loops
+forever) — needed before M2 supervisors can shut children down. No `keep`
+shorthand; state is a single value (pack config into it).
+
+**Next — M2:** a Brood `supervisor` on monitors: spawn + monitor children, restart
+per strategy (`:one-for-one` / `:rest-for-one` / `:all-for-one`), checkpoint/
+resume. Needs the stop path first.
