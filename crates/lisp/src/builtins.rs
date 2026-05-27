@@ -35,27 +35,27 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // sqrt are all Brood over it + rem/`/`/`*`/`<` (std/prelude.blsp).
     def(heap, "floor", Arity::exact(1), floor);
 
-    // pair / sequence
+    // pair / sequence — `empty?` is Brood (type dispatch over string-length /
+    // vector-length / map-keys; std/prelude.blsp). `first`/`rest` ARE the pair
+    // accessors (car/cdr), so they stay.
     def(heap, "cons", Arity::exact(2), cons);
     def(heap, "first", Arity::exact(1), first);
     def(heap, "rest", Arity::exact(1), rest);
-    def(heap, "empty?", Arity::exact(1), is_empty);
 
     // vector
     def(heap, "vector", Arity::any(), vector);
     def(heap, "vector-ref", Arity::exact(2), vector_ref);
     def(heap, "vector-length", Arity::exact(1), vector_length);
 
-    // map — the kernel primitives; the `get`/`assoc`/`dissoc`/`keys`/`vals`/
-    // `contains?` surface (incl. variadic forms + defaults) is Brood over these
-    // (std/prelude.blsp). Maps are immutable: each op returns a fresh map.
+    // map — the *minimal* kernel: construct, read, two producers, and one
+    // enumerator (`map-keys`). `vals`/`contains?` and the `get`/`assoc`/`dissoc`
+    // surface (variadic + defaults) are all Brood over these (std/prelude.blsp).
+    // Maps are immutable: each op returns a fresh map.
     def(heap, "hash-map", Arity::any(), hash_map);
     def(heap, "map-get", Arity::range(2, 3), map_get);
     def(heap, "map-assoc", Arity::exact(3), map_assoc);
     def(heap, "map-dissoc", Arity::exact(2), map_dissoc);
     def(heap, "map-keys", Arity::exact(1), map_keys);
-    def(heap, "map-vals", Arity::exact(1), map_vals);
-    def(heap, "map-contains?", Arity::exact(2), map_contains);
 
     // string
     def(heap, "string-length", Arity::exact(1), string_length);
@@ -314,19 +314,6 @@ fn rest(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     }
 }
 
-fn is_empty(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let v = arg(args, 0);
-    let empty = match v {
-        Value::Nil => true,
-        Value::Str(id) => heap.string(id).is_empty(),
-        Value::Vector(id) => heap.vector(id).is_empty(),
-        Value::Map(id) => heap.map(id).is_empty(),
-        Value::Pair(_) => false,
-        _ => return Err(LispError::wrong_type(heap, "empty?", "collection", v)),
-    };
-    Ok(Value::Bool(empty))
-}
-
 // ---------- vector ----------
 
 fn vector(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -402,19 +389,6 @@ fn map_keys(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_map(heap, "map-keys", arg(args, 0))?;
     let keys: Vec<Value> = heap.map(id).iter().map(|(k, _)| *k).collect();
     Ok(heap.list(keys))
-}
-
-/// `(map-vals m)` — the values as a list, in insertion order.
-fn map_vals(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_map(heap, "map-vals", arg(args, 0))?;
-    let vals: Vec<Value> = heap.map(id).iter().map(|(_, v)| *v).collect();
-    Ok(heap.list(vals))
-}
-
-/// `(map-contains? m k)` — whether `k` is a key of `m`.
-fn map_contains(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_map(heap, "map-contains?", arg(args, 0))?;
-    Ok(Value::Bool(heap.map_contains(id, arg(args, 1))))
 }
 
 fn string_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {

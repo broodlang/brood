@@ -30,42 +30,63 @@ a minimal kernel (ADR-006). Decisions taken with the user (2026-05-27):
 callable collections `(board cell)`, no `#(…)` reader fn, no set type `#{}`. Stay
 with current primitives.
 
-## Language improvements surfaced by `examples/life.blsp`
+## Plan: make `examples/life.blsp` simpler
 
-Writing Conway's Game of Life (board = a set of live cells as a map `[x y] ->
-true`) exposed friction worth fixing. Ordered cheap → substantial.
+The Game of Life (board = live cells as a map `[x y] -> true`) exposed friction.
+Goal here is *simpler code*, not raw speed (HAMT is a separate perf item). The
+target is to shrink the two central functions and drop the local `range` helper:
 
-### Cheap, high-leverage (pure-Brood prelude policy)
+```clojure
+;; AFTER tiers 1+2:
+(defn neighbour-counts (board)
+  (frequencies (mapcat neighbours (keys board))))          ; was an 8-line nested fold
 
-- [ ] **`range`** in the prelude. The example defines it locally; it's standard
-  and broadly useful. `(range n)` and `(range start end)`.
+(defn step (board)
+  (reduce-kv (fn (next cell n)
+               (if (or (= n 3) (and (= n 2) (contains? board cell)))
+                 (assoc next cell true) next))
+             {} (neighbour-counts board)))                 ; was (keys …) + per-cell (get …)
+```
+
+### Tier 1 — prelude only, no kernel change (do first; unblocks the rewrite)
+
+- [ ] **`range`** — `(range n)` (and `(range start end)` via `&optional`). Deletes
+  the example's local `range`/`range-down`.
 - [ ] **`mapcat`** — `(defn mapcat (f xs) (apply append (map f xs)))`.
-- [ ] **`frequencies`** — count occurrences into a map. With `mapcat` it collapses
-  the neighbour tally to `(frequencies (mapcat neighbours (keys board)))`.
-- [ ] (maybe) `concat` as a clearer alias for variadic `append`; `repeat`, `take`/
-  `drop` (currently only in `std/test.blsp`).
+- [ ] **`frequencies`** — `(fold (fn (m x) (assoc m x (inc (get m x 0)))) {} xs)`.
+  Collapses `neighbour-counts` to one line.
+- [ ] (optional) `repeat`, `take`/`drop` (today only in `std/test.blsp`), `concat`
+  alias for variadic `append`. Not needed by Life; add if cheap.
 
-### Small kernel addition (removes a real O(n²))
+### Tier 2 — one kernel change, and it *shrinks* the kernel
 
-- [ ] **`map-pairs` primitive + `reduce-kv`/`entries` in prelude.** Maps expose
-  `keys`/`vals` but no way to fold over key+value together, so `step` does
-  `(keys counts)` then `(get counts cell)` — a second lookup per cell, and `get`
-  on the assoc-vector is O(n), making the fold O(n²). `map-pairs` returns
-  `[k v]` pairs in one O(n) pass (trivial over the insertion-ordered assoc
-  vector); `reduce-kv`/`entries` build on it. Both a clarity win and a speedup.
+- [ ] **Make `map-pairs` the single map enumerator (replacing `map-keys`).** Maps
+  have no way to fold key+value together, so `step` does `(keys counts)` then a
+  per-cell `(get counts cell)` — a second lookup, and `get` on the assoc-vector
+  is O(n) → an O(n²) fold. Fix: one primitive `map-pairs` returning `[[k v] …]`
+  in one O(n) pass (trivial over the insertion-ordered assoc vector), and derive
+  *everything else in Brood*: `keys` = `(map first (map-pairs m))`, `vals`,
+  `contains?`, `reduce-kv`, `entries`, even `count`. Net: the kernel loses a
+  primitive (drop `map-keys`) instead of gaining one — fits the current
+  minimization (you already dropped `map-vals`/`map-contains?`) — and the O(n²)
+  is gone. Then `step` uses `reduce-kv`.
 
-### Bigger, deliberately deferred (ADR-011 — defer power features)
+### Out of scope / deferred
 
-- [ ] **First-class set type `#{…}`.** The board is a set wearing a map costume
-  (`[x y] -> true`, `keys`, "dedup by key"). A real set (`#{…}`, `conj`,
-  `contains?`, `union`) would let the code say what it means. New `Value` kind +
-  `Tag` + literal syntax + ADR; check against the compatibility contract in
-  `docs/types.md`. Life is a *nice* motivation, not yet a forcing one.
-- [ ] **HAMT persistent map** to replace the O(n) assoc-vector with O(log n)
-  `get`/`assoc`. The substantive perf fix (Life is ~O(n²) today); large,
-  self-contained kernel work. Surface unchanged — `docs/language.md` already
-  promises the swap is invisible. Pairs naturally with the tracing-GC migration
-  (ADR-002).
+- ~~First-class set type `#{}`~~ — **rejected** (decision above: keep the current
+  surface, board stays a map `[x y] -> true`).
+- [ ] **HAMT persistent map** — O(log n) `get`/`assoc` instead of the O(n) assoc
+  vector. This is the *perf* fix, not a simplicity one (surface unchanged), so
+  it's separate from this plan; pairs with the tracing-GC migration (ADR-002).
+
+## Bug: docstring dropped on functions with a destructured parameter
+
+- [ ] `(defn f ([x y]) "doc" body)` loses its docstring — `(doc f)` → nil — because
+  the single-clause pattern-param path (which delegates to the match compiler in
+  `std/prelude.blsp`) doesn't thread the leading-string docstring through. Plain
+  params keep it. Hit by `neighbours` in `examples/life.blsp`. Fix in the `fn`
+  pattern-param handling: peel a leading docstring before compiling the param
+  pattern, and reattach it to the closure.
 
 ## Concurrency / runtime follow-ups (from the `ref` work, 2026-05-27)
 

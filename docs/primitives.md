@@ -15,7 +15,7 @@ gate (`eval::call_native`), before the primitive runs — so a wrong-count call 
 a clean arity error (`type-of: expected 1 argument, got 0`) rather than a missing
 arg silently becoming `nil`.
 
-## Native primitive functions (74)
+## Native primitive functions (71)
 
 | Category | Primitive | Arity | Purpose |
 |---|---|---|---|
@@ -25,8 +25,7 @@ arg silently becoming `nil`.
 | | `rem` | 2 | integer remainder (truncated, sign of dividend) — **irreducible**: deriving it via float division would lose precision past 2^53. `mod` (euclidean) and `quot` (truncated division) are Brood over it |
 | | `floor` | 1 | floor toward −∞ → **int** (an int passes through) — the one Float→Int crossing the language can't bootstrap. `ceil`/`round`/`sqrt`/`pow` are Brood over it |
 | **Pair / sequence** | `cons` | 2 | make a pair |
-| | `first` `rest` | 1 | head / tail (nil, pair, or vector) |
-| | `empty?` | 1 | empty collection? (nil / string / vector / pair / map) |
+| | `first` `rest` | 1 | head / tail (nil, pair, or vector) — these *are* car/cdr; `empty?` is Brood over them + the length primitives |
 | **Vector** (data type, O(1)) | `vector` | n | construct a vector |
 | | `vector-ref` | 2 | index |
 | | `vector-length` | 1 | length |
@@ -34,8 +33,7 @@ arg silently becoming `nil`.
 | | `map-get` | 2–3 | value at a key, or the optional default (else nil) |
 | | `map-assoc` | 3 | a fresh map with `key`→`val` added/updated |
 | | `map-dissoc` | 2 | a fresh map with a key removed |
-| | `map-keys` `map-vals` | 1 | keys / values as a list, in insertion order |
-| | `map-contains?` | 2 | whether a key is present → bool |
+| | `map-keys` | 1 | keys as a list, in insertion order — the sole enumerator; `vals` (`map get` over keys) and `contains?` (`member?` over keys) are Brood over it |
 | **String** | `string-length` | 1 | char count |
 | | `substring` | 3 | characters `[start, end)`, char-indexed |
 | | `upper` | 1 | `s` upper-cased (Unicode-aware, e.g. `ß` → `SS`) |
@@ -97,12 +95,13 @@ the whole math library `mod`/`quot`/`ceil`/`round`/`pow`/`sqrt`/`even?`/`odd?` +
 variadic `min`/`max` (over `rem`/`floor`/`/`/`*`/`<` — `sqrt` is Newton's method),
 the whole sequence library
 (`range`/`take`/`drop`/`take-while`/`drop-while`/`some?`/`every?`/`find`/`zip`/
-`partition`/`sort`/`sort-by` — a Brood merge sort), `println` (over `print`), and
-the map surface `get`/`assoc`/`dissoc`/`keys`/`vals`/`contains?` (the variadic,
-default-bearing layer over the `map-*` primitives). Of the math library only
-**`floor`** (the Float→Int crossing) and **`rem`** (exact integer remainder) need
-Rust — everything else is Brood over them. The map literal `{ }` is read by the
-reader and evaluated like a vector literal — no constructor call.
+`partition`/`sort`/`sort-by` — a Brood merge sort), `empty?` (type dispatch over
+the length primitives), `println` (over `print`), and the map surface
+`get`/`assoc`/`dissoc`/`contains?`/`vals` (over `map-get`/`map-assoc`/`map-dissoc`/
+`map-keys`). Of the math library only **`floor`** (the Float→Int crossing) and
+**`rem`** (exact integer remainder) need Rust — everything else is Brood over
+them. The map literal `{ }` is read by the reader and evaluated like a vector
+literal — no constructor call.
 
 ## Special forms (not primitives)
 

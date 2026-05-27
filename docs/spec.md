@@ -161,6 +161,13 @@ never changes, and data is immutable. `let` introduces a child frame.
 Special forms are reserved symbols recognised in operator position. `body...`
 denotes zero or more forms evaluated as an implicit `do`.
 
+Only `quote`, `if`, `do`, `def`, `fn`/`lambda`, `let`/`let*`, `quasiquote`, and
+`defmacro` are **true core special forms** (the evaluator's own rules, in
+`eval/mod.rs`). `when`, `unless`, `cond`, `and`, and `or` are **prelude macros**
+(ADR-022) — they expand to the core forms and so can be shadowed or passed over
+like any binding; they are tabled here only so the whole surface reads in one
+place.
+
 | Form | Semantics |
 |---|---|
 | `(quote x)` | `x`, unevaluated. Reader shorthand: `'x`. |
@@ -263,27 +270,36 @@ Almost the entire language is written in Brood (`std/prelude.blsp`). Rust
 supplies only an **irreducible primitive kernel**. This split is a deliberate,
 load-bearing design choice (see `CLAUDE.md` and `docs/decisions.md`).
 
-**Primitives (Rust):**
-`%add %sub %mul %div %lt %eq mod rem` ·
-`cons first rest empty?` ·
-`vector vector-ref vector-length` · `string-length` ·
-the type-tag predicates `nil? pair? int? float? bool? string? symbol? keyword?
-vector? fn?` ·
-`str pr-str print println` ·
-`eval read-string load require apply` ·
-`macroexpand macroexpand-1 gensym` ·
-`throw %try` ·
-`spawn send receive self`.
+**Primitives (Rust)** — the irreducible kernel; the full annotated set is in
+[primitives.md](primitives.md). By area:
 
-`%`-prefixed names are low-level and not intended for direct use. The full
-annotated list is in [primitives.md](primitives.md).
+- arithmetic substrate `%add %sub %mul %div %lt %eq` and integer `rem`
+- the one float→int crossing `floor` (`ceil`/`round`/`quot`/`pow`/`sqrt` are Brood over it)
+- pairs/vectors `cons first rest empty? vector vector-ref vector-length`
+- maps `hash-map map-get map-assoc map-dissoc map-keys map-vals map-contains?`
+- strings `string-length substring upper lower string->number`
+- reflection/checking `type-of check`; value↔text & IO `str pr-str print stdout-tty?`
+- self-hosting `eval read-string eval-string load %builtin-module apply`; macros `macroexpand macroexpand-1 gensym`
+- filesystem/system `cwd file-exists? dir? list-dir make-dir spit slurp getenv run-process`
+- symbols/tooling `name form-pos current-file doc arglist global-names bound?`
+- time/memory `now mem-bytes mem-peak`; errors/control `throw %try %isolate`
+- processes `spawn send %receive self ref monitor demonitor spawn-count peak-threads worker-threads`
+
+`%`-prefixed names are low-level and not intended for direct use. Note that the
+type-tag predicates (`nil? pair? int? …`), `mod`, `quot`, `println`, `require`,
+and the `receive`/`try`/`match` surfaces are **not** primitives — they are Brood,
+written over the kernel above.
 
 **Derived (Brood, in the prelude):**
-the `defn`, `->`/`->>`, and `try`/`catch` macros; `error`; `not + - * / inc dec
-< <= > >= = not= number? list? car cdr list second third fold reduce map filter
-reverse append count length nth last but-last identity zero? positive? negative?
-abs max min sum product`, plus internal helpers (`chain?`, `append-two`,
-`nth-list`, `thread-first-step`, `thread-last-step`).
+the macros `defn`, `when`/`unless`/`cond`/`and`/`or`, `->`/`->>`, `match`/`match*`,
+`receive`, and `try`/`catch`; `error`; the full arithmetic/comparison family
+(`+ - * / < <= > >= = not= inc dec mod abs max min sum product`, plus the float
+ops `ceil round quot pow sqrt`); the type-tag predicates (`nil? pair? int? float?
+bool? string? symbol? keyword? vector? map? fn?`, over `type-of`); the map surface
+(`get assoc dissoc keys vals contains?`); the sequence library (`range take drop
+take-while drop-while some? every? find zip partition sort sort-by` …) and the
+list/string helpers (`car cdr list second third fold reduce map filter reverse
+append count length nth last but-last` …); plus the pattern-match compiler itself.
 
 ## 10. Errors
 

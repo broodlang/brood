@@ -1563,3 +1563,45 @@ shorthand; state is a single value (pack config into it).
 **Next — M2:** a Brood `supervisor` on monitors: spawn + monitor children, restart
 per strategy (`:one-for-one` / `:rest-for-one` / `:all-for-one`), checkpoint/
 resume. Needs the stop path first.
+
+## 2026-05-27 — Kernel audit: drive Rust to the absolute minimum
+
+**Goal.** User directive after the math reduction: *go over the whole language
+and use absolutely minimum Rust — even `+`/`<` are Brood (over `%add`/`%lt`); only
+keep a primitive if it's genuinely irreducible.* Walked all ~74 primitives and
+read each implementation, asking "is there any Brood path over simpler ops?"
+
+**Reduced (3 primitives removed, 74 → 71):**
+- **`empty?`** → Brood. It was pure type dispatch over things the kernel already
+  exposes: the empty list is `nil`, and string/vector/map emptiness is a length
+  (`string-length`/`vector-length`/`map-keys`). Defined early in the prelude (it
+  bootstraps `fold`) with raw kernel ops (`%eq`/`type-of`/…) since `cond`/the tag
+  predicates come later.
+- **`map-vals`** → Brood: `(map (fn (k) (get m k)) (keys m))`. (`get` returns a
+  present key's value, even a falsy one, so this reproduces the values in order.)
+  O(n²) on the association-vector rep; a HAMT later restores O(n), no surface
+  change (ADR-030).
+- **`map-contains?`** → Brood: `(member? k (keys m))` — O(n), same as before.
+  Also dropped the now-dead `heap.map_contains` helper.
+  The map kernel is now the minimal **{hash-map, map-get, map-assoc, map-dissoc,
+  map-keys}** — construct, read, two producers, one enumerator.
+
+**Audited and *kept* (with the specific reason each is irreducible):**
+`%add…%eq` (number-repr dispatch + overflow); `rem` (exact integer remainder —
+float division loses precision past 2^53); `floor` (the only Float→Int crossing);
+`cons`/`first`/`rest` (the pair accessors — `first`/`rest` *are* car/cdr);
+`vector`/`vector-ref`/`vector-length` and the map kernel (opaque-rep access);
+`string-length`/`substring`/`upper`/`lower` (char indexing, Unicode case tables);
+`string->number` (strict parse-or-nil — a correct float parser, *not* reducible to
+`read-string`, which isn't strict and reads only one form); `type-of`
+(reflection); `str`/`pr-str`/`print` (value→text — the printer); `apply` (the
+splice-call primitive); `eval`/`read-string`/`eval-string`/`load` (self-hosting —
+`load`/`eval-string` drive a multi-form read Brood can't iterate, and `load` adds
+`current-file` + `FILE:LINE:COL:` error context); `name`/`gensym` (interner);
+`macroexpand*`/`check` (eval & checker machinery); `form-pos`/`current-file`/`doc`/
+`arglist`/`global-names`/`bound?` (CST / env / global-table reflection); the
+filesystem, system, time, memory, error, and process primitives (I/O & runtime).
+
+**Verified.** `cargo test` green (53 Rust + **330 in-language**), no warnings.
+Docs: `docs/primitives.md` (count 71; the three removals folded into the
+irreducibility note).

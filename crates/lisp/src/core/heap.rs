@@ -406,11 +406,6 @@ impl Heap {
             .map(|(_, v)| *v)
     }
 
-    /// Is `key` present (by structural equality)?
-    pub fn map_contains(&self, id: MapId, key: Value) -> bool {
-        self.map(id).iter().any(|(k, _)| self.equal(*k, key))
-    }
-
     /// A fresh map with `key` bound to `val`: replaces the value if `key` is
     /// already present (keeping its position), otherwise appends.
     pub fn map_assoc(&mut self, id: MapId, key: Value, val: Value) -> Value {

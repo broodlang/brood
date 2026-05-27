@@ -159,8 +159,8 @@ semantics) is **ours**.
 
 ## Staged migration plan (approach B)
 
-1. ✅ **Isolate `Rc` behind the `value.rs` seam.** Every heap construction goes
-   through `value.rs` constructors. Safe, behavior-preserving.
+1. ✅ **Isolate `Rc` behind the `core/value.rs` seam.** Every heap construction
+   goes through `core/value.rs` constructors. Safe, behavior-preserving.
 2. ✅ **Introduce the per-process arena.** `Value` is now a `Copy` handle into a
    `Heap` (`heap.rs`): per-type slabs for pairs/vectors/strings/closures/natives
    plus env frames. The heap threads through reader/eval/builtins/printer. No

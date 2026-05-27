@@ -95,7 +95,8 @@ Lexically-scoped closures, proper tail calls, `def`/`defn`/`let`/`fn`,
 Clojure-style `` ` ``/`~`/`~@` quasiquote, `macroexpand`, `gensym`), integers &
 floats with overflow-checked arithmetic, strings, symbols, keywords, cons-cell
 lists, `[ ]` vectors, immutable `{ }` maps (`get`/`assoc`/`dissoc`/`keys`/`vals`/
-`contains?`), higher-order functions (`map`/`filter`/`reduce`/`apply`),
+`contains?`), Erlang-style **pattern matching** (`match` + destructuring in
+`let`/`fn`), higher-order functions (`map`/`filter`/`reduce`/`apply`),
 and the self-hosting trio `eval`/`read-string`/`load`. Parameter lists are
 written as lists (`(x y)` — code is lists; vectors are data) and support
 `&optional` (with defaults) and `& rest`. `defn`, the operators (`+`, `<`, …),
@@ -106,13 +107,15 @@ See [`docs/language.md`](docs/language.md) for the full reference.
 
 ## What's next
 
-Concurrency has begun: Erlang-style **processes** (`spawn`/`send`/`receive`/`self`)
-run share-nothing on real threads and talk by message passing (see
-[`examples/processes.blsp`](examples/processes.blsp)); making them lightweight
-green threads on a worker pool is in progress.
+Concurrency is well underway: Erlang-style **processes** (`spawn`/`send`/`receive`/`self`)
+run share-nothing as lightweight **green threads** on an M:N worker pool (≈`nproc`),
+with reduction-counted preemption, selective `receive` + timeouts, and process
+monitors (see [`examples/processes.blsp`](examples/processes.blsp)). Still ahead:
+links/supervision and work-stealing.
 
-Dynamic variables, richer string/math/sequence libraries, and a tracing GC
-complete the language (immutable maps and in-language error handling are done). Then: a rope-backed **editor data model**, a
+**Dynamic variables** and a tracing GC are what's left to complete the language
+(immutable maps, in-language error handling, pattern matching, modules, and the
+string/math/sequence libraries are all done). Then: a rope-backed **editor data model**, a
 serialisable **display protocol** with a fast native local frontend, a
 **server/daemon mode** so other editor instances can attach remotely, and
 eventually a **web frontend**.

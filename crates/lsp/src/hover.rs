@@ -40,9 +40,7 @@ pub fn hover(
         Resolution::Defined {
             def,
             kind: BindingKind::Global,
-        } => defs::top_level(root, text)
-            .into_iter()
-            .find(|d| d.name_span == def)
+        } => defs::find_def(root, text, def)
             .map(|d| render_def(&d))
             .unwrap_or_else(|| code(name)),
         Resolution::Free => {
@@ -128,6 +126,15 @@ mod tests {
     fn hovers_a_local_as_a_local_binding() {
         let md = hover_at("(defn f (x) (+ x 1))", "x 1").expect("hover on x");
         assert!(md.contains("local binding"), "{md:?}");
+    }
+
+    #[test]
+    fn hovers_a_nested_def_by_finding_it_at_any_depth() {
+        // `helper` is global despite being nested in a `do`; hover must still
+        // render its signature, not fall back to the bare name.
+        let src = "(do (defn helper (x) (* x 2))) (helper 3)";
+        let md = hover_at(src, "helper 3").expect("hover on helper call");
+        assert!(md.contains("(helper x)"), "signature missing: {md:?}");
     }
 
     #[test]

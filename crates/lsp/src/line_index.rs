@@ -68,12 +68,21 @@ impl LineIndex {
         let mut col_u16 = 0u32;
         let mut byte = line_start as usize;
         for c in text[byte..].chars() {
-            // Stop at the requested column, or at the line's end so a `character`
-            // past the line doesn't spill into the next one.
-            if col_u16 >= pos.character || c == '\n' {
+            // Stop at the line's end so a `character` past the line doesn't spill
+            // into the next one.
+            if c == '\n' {
                 break;
             }
-            col_u16 += c.len_utf16() as u32;
+            // Test the column *after* adding this char's width: if it would step
+            // past the target, the target lands within this char, so stop before
+            // it. A mid-surrogate `character` (a client can emit one for a non-BMP
+            // char like an emoji) thus snaps back to the char's start, not forward
+            // to the next char.
+            let w = c.len_utf16() as u32;
+            if col_u16 + w > pos.character {
+                break;
+            }
+            col_u16 += w;
             byte += c.len_utf8();
         }
         byte as u32
@@ -134,6 +143,17 @@ mod tests {
             let p = idx.position(text, b as u32);
             assert_eq!(idx.offset(text, p), b as u32, "round-trip at byte {b}");
         }
+    }
+
+    #[test]
+    fn offset_snaps_a_mid_surrogate_column_back_to_the_char_start() {
+        // '😀' is 4 bytes / 2 UTF-16 units. A client may send `character: 1` —
+        // inside the surrogate pair. That must snap back to the emoji's start
+        // (byte 0), not forward to the next char `b` (byte 4).
+        let text = "😀b";
+        let idx = LineIndex::new(text);
+        assert_eq!(idx.offset(text, Position::new(0, 1)), 0);
+        assert_eq!(idx.offset(text, Position::new(0, 2)), 4); // boundary → `b`
     }
 
     #[test]

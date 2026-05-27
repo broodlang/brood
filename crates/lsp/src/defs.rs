@@ -66,9 +66,25 @@ impl Def<'_> {
     }
 }
 
-/// Every top-level `def`/`defn`/`defmacro` in document order.
+/// Every top-level `def`/`defn`/`defmacro` in document order — the file outline.
 pub fn top_level<'s>(root: &Node, src: &'s str) -> Vec<Def<'s>> {
     root.forms().filter_map(|f| parse_def(f, src)).collect()
+}
+
+/// Find the definition whose name token is exactly `name_span`, searching at any
+/// depth. Unlike [`top_level`], this recurses: a `def` nested in a `do`/`when`
+/// still defines a *global* (def is global wherever it appears — see
+/// [`scope`](brood::syntax::scope)), so hover must locate it even when it isn't a
+/// direct child of the root.
+pub fn find_def<'s>(node: &Node, src: &'s str, name_span: Span) -> Option<Def<'s>> {
+    if let Some(d) = parse_def(node, src) {
+        if d.name_span == name_span {
+            return Some(d);
+        }
+    }
+    node.children
+        .iter()
+        .find_map(|c| find_def(c, src, name_span))
 }
 
 /// Read one top-level form as a definition, or `None` if it isn't one.
@@ -171,5 +187,22 @@ mod tests {
     #[test]
     fn ignores_non_definitions() {
         assert!(defs("(println \"hi\") 42").is_empty());
+    }
+
+    #[test]
+    fn find_def_locates_a_nested_def() {
+        // `helper` is defined inside a `do`, so it isn't a top-level form — but it
+        // is still a global, and `find_def` must locate it by its name span.
+        let src = "(do (defn helper (x) x))";
+        let root: &'static Node = Box::leak(Box::new(cst::parse(src)));
+        let src: &'static str = Box::leak(src.to_string().into_boxed_str());
+        assert!(top_level(root, src).is_empty(), "not a top-level form");
+        let name_span = Span::new(
+            src.find("helper").unwrap(),
+            src.find("helper").unwrap() + "helper".len(),
+        );
+        let d = find_def(root, src, name_span).expect("nested def found");
+        assert_eq!(d.name, "helper");
+        assert_eq!(d.signature(), "(helper x)");
     }
 }

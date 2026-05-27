@@ -21,6 +21,20 @@
 ;; ---- logic ----
 (defn not (x) (if x false true))
 
+;; `empty?` — true for the empty value of any collection. Defined here, before
+;; `fold`/`reduce` use it, so it's written with the raw kernel ops (`%eq`,
+;; `type-of`, `string-length`, `vector-length`, `map-keys`) rather than the type
+;; predicates / `cond`, which are defined further down. (Not a Rust primitive: the
+;; empty list is `nil`, and every other collection's emptiness is a length the
+;; kernel already exposes.)
+(defn empty? (x)
+  (if (%eq (type-of x) :nil)    true
+  (if (%eq (type-of x) :pair)   false
+  (if (%eq (type-of x) :string) (%eq (string-length x) 0)
+  (if (%eq (type-of x) :vector) (%eq (vector-length x) 0)
+  (if (%eq (type-of x) :map)    (%eq (map-keys x) nil)
+      (throw (str "empty?: not a collection: " (pr-str x)))))))))
+
 ;; ---- folding (the workhorse; tail-recursive, so it is stack-safe) ----
 (defn fold (f acc coll)
   (if (empty? coll)
@@ -193,9 +207,14 @@
 ;; (dissoc m k1 k2 …) -> a fresh map with each key removed.
 (defn dissoc (m & ks) (fold map-dissoc m ks))
 
+;; `keys` is the one map enumerator (kernel); `vals` and `contains?` are Brood
+;; over it. (get m k) returns a present key's value, even a falsy one, so mapping
+;; it over the keys reproduces the values in order. `vals` is O(n²) on the current
+;; association-vector rep (each `get` scans); a HAMT later (ADR-030) restores O(n)
+;; with no surface change. `contains?` stays O(n) either way.
 (def keys map-keys)
-(def vals map-vals)
-(defn contains? (m k) (map-contains? m k))
+(defn vals (m) (map (fn (k) (get m k)) (keys m)))
+(defn contains? (m k) (member? k (keys m)))
 
 (defn identity  (x) x)
 (defn zero?     (n) (= n 0))

@@ -296,12 +296,10 @@ before working in any Rust component:
    *Recommendation:* delete the dead functions now; optionally split into a
    `builtins/` module-per-domain with a single `register` in `mod.rs`.
 
-3. **`docs/architecture.md` is stale — the component map is wrong.** It lists
-   `env.rs` (gone), claims "zero external crates" (now `boxcar`, `corosensei`,
-   `rustyline`, `divan`), describes `Rc`/`RefCell` memory (migrated to `Send`
-   handle heaps), and omits `heap`/`process`/`types`/`check`/`macros`/`alloc`.
-   A wrong map is the single biggest blocker to working independently.
-   *(Fixed alongside this doc.)*
+3. **`docs/architecture.md` — now current.** *(Resolved.)* Its layout/component
+   map matches the `core`/`syntax`/`eval`/`types` tree (no more `env.rs`), the
+   relaxed-dependency note (`boxcar`/`corosensei`/`rustyline`/`divan`), the `Send`
+   handle-heap memory model, and the `nest` + `lsp` crates.
 
 4. **`nest` ↔ Brood string coupling (low priority).** `crates/nest/src/main.rs`
    embeds Brood snippets for `test`/`new`. This is an acknowledged bootstrap

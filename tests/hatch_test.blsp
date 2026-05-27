@@ -34,6 +34,16 @@
       (! c :inc) (! c :inc) (! c :inc)
       (assert= (gen-call c :value) 3))))
 
+(describe "hatch: sleep" :isolated
+  (test "sleep waits roughly the requested time"
+    (let [t (now)]
+      (sleep 30)
+      (is (>= (- (now) t) 25))))           ; allow scheduler slack
+  (test "sleep does not consume queued messages"
+    (send (self) :keep)
+    (sleep 20)
+    (assert= (receive (:keep :present) (after 0 :eaten)) :present)))
+
 (describe "hatch: concurrent servers don't cross wires" :isolated
   (defprocess echo (state)
     (call [:double x] [(* x 2) state]))
