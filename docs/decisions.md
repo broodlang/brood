@@ -174,6 +174,58 @@ macros remain possible future work.
 
 ---
 
+## ADR-010 — Code is cons-lists; vectors are a data type
+
+**Status:** accepted. Refines ADR-003 (reverses its "vectors as the parameter-list
+surface" stance).
+
+**Context.** ADR-003 introduced `[ ]` vectors and used them, Clojure-style, for
+parameter lists and `let` bindings. Revisiting this against the project's north
+star — a *self-editing editor* that constantly rewrites mylisp source — the
+homoiconic argument won: if code is uniformly cons-lists, macros and the editor's
+own code-manipulation never have to special-case "vector vs list".
+
+**Decision.** *Code* (parameter lists, `let` bindings) is written as **lists**:
+`(defn f (x y) …)`, `(let (a 1 b 2) …)`. **Vectors `[ ]` remain a first-class
+data type** for when O(1) indexing/length matters (`vector-ref`,
+`vector-length`). Vectors are still *accepted* in parameter/binding positions for
+leniency, but lists are idiomatic and the prelude is written entirely in list
+form.
+
+**Why.**
+- Homoiconic code is the whole point of a self-editing Lisp: one structure, one
+  set of operations, uniform metaprogramming.
+- Keeping vectors as *data* preserves fast random access without compromising the
+  "code is lists" property — best of both (the analysis behind this is recorded
+  for posterity: lists win for code/sequences, vectors win only for indexing).
+
+**Trade-off accepted.** A mild inconsistency — code uses `( )`, some data uses
+`[ ]` — and the small readability cost that a parameter list `(x y)` looks like a
+call form. Worth it for homoiconic code.
+
+---
+
+## ADR-011 — Favor the simplest user-facing design; defer power features
+
+**Status:** accepted.
+
+**Decision.** When a language feature has a simple form and a powerful-but-complex
+form, ship the simplest one the user can hold in their head, and defer the rest
+until a concrete need justifies the added complexity.
+
+**First application — the parameter grammar.** We designed the full CL-grade
+space (`&optional`, `&key`, required-keywords-via-lazy-defaults, supplied-p
+flags) and then cut it to **`required` + `&optional` (with defaults) + `& rest`**.
+`&key` (named args) and supplied-p are deferred — they are additive (no migration
+cost to add later) and not yet needed. See spec §7.4.
+
+**Why.** Every knob is a tax on everyone who reads or writes the language, paid
+forever; a deferred feature costs nothing until added. This keeps the surface
+learnable and the implementation small. It complements ADR-006/008 (a small
+kernel) on the *ergonomics* side: small kernel, small surface.
+
+---
+
 ## Deferred / open questions
 
 - **Macro hygiene:** currently unhygienic `defmacro` + `gensym`; hygienic macros

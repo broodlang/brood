@@ -189,16 +189,54 @@ special-form name cannot be shadowed by a macro.
 
 ### 7.4 Parameter lists
 
-A parameter list is a vector of symbols. A trailing `& rest` binds `rest` to a
-list of the remaining arguments:
+A parameter list is written as a **list** `(a b)` (idiomatic — code is lists,
+ADR-010) or a vector `[a b]` (accepted). It has three sections; each is optional,
+and they appear in this order. The grammar is kept deliberately small —
+simplicity for the user is the priority (ADR-011).
 
-```
-[a b]        ; exactly two arguments
-[a b & more] ; two or more; `more` is a list of the extras
-[& all]      ; any number; `all` is a list
+```ebnf
+param-list = "(" spec ")" | "[" spec "]" ;
+
+spec       = { required } [ "&optional" optional { optional } ] [ "&" symbol ] ;
+
+required   = symbol ;
+optional   = symbol | "(" symbol default ")" ;
+default    = form ;   (* evaluated only when the argument is omitted *)
 ```
 
-Arity mismatch raises an error.
+**Binding** happens at call time in a fresh function scope, **left to right**, so
+a later `default` may reference an earlier parameter.
+
+1. **required** — each binds to the next positional argument. Fewer positional
+   arguments than required parameters is an arity error.
+2. **&optional** — bound in order from the remaining positional arguments. An
+   omitted optional gets its `default` (a bare symbol ⇒ `nil`).
+3. **& rest** — binds to a list of all arguments past the required and
+   `&optional` positionals, or `nil` if none.
+
+**Arity:** too few required is always an error. With no `&` rest, too many
+arguments is an error (the strict default — allowing up to required + number of
+optionals). A `&` rest makes a trailing surplus legal.
+
+**Examples**
+
+```clojure
+(a b)                      ; exactly two
+(a b & more)               ; two or more; `more` is the extras as a list
+(a &optional b (c 9))      ; (f 1) => a=1 b=nil c=9 ;  (f 1 2 3) => a=1 b=2 c=3
+```
+
+**Status.** Implemented: `required`, `&optional` (with defaults), and `& rest` —
+all in the closure calling convention, so `fn`, `lambda`, and `defn` share them.
+(Argument binding is core mechanism, hence the kernel rather than macro sugar.)
+
+**Deferred (designed, not in v1) — keyword arguments.** Named, order-independent
+arguments (`&key (width 80) ...`, called `:width 100`) were designed and are a
+natural fit for the eventual editor command API. They are *deferred for
+simplicity*: they make the user learn keyword pairs, order-independence, and
+mixing rules. They are purely additive — adding them later needs no migration of
+existing code. Supplied-p flags and required-keyword markers are likewise
+out of scope. See `docs/devlog.md` for the design discussion.
 
 ## 8. Truthiness and equality
 

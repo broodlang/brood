@@ -67,7 +67,7 @@ pub enum Value {
     Keyword(Symbol),
     /// A cons cell. Proper lists are chains of pairs ending in `Nil`.
     Pair(Rc<(Value, Value)>),
-    /// A vector literal, `[a b c]`. Also used as a function's parameter list.
+    /// A vector literal, `[a b c]` — a data type with O(1) indexing.
     Vector(Rc<Vec<Value>>),
     /// A closure: code plus the lexical environment captured at definition.
     Fn(Rc<Closure>),
@@ -82,7 +82,12 @@ pub enum Value {
 /// for lexical scoping.
 pub struct Closure {
     pub name: Option<Symbol>,
+    /// Required positional parameters.
     pub params: Vec<Symbol>,
+    /// `&optional` parameters as (name, default-form). The default form is
+    /// evaluated, in the call scope, only when the argument is omitted; a bare
+    /// optional stores `Nil` (which evaluates to `nil`).
+    pub optionals: Vec<(Symbol, Value)>,
     /// The name bound to the remaining args when the parameter list uses `& rest`.
     pub rest: Option<Symbol>,
     pub body: Vec<Value>,

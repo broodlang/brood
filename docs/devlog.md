@@ -117,3 +117,31 @@ maps, and the GC migration.
   quasiquote + macros, §9 kernel list, §11), `language.md` (Macros section +
   builtins), `roadmap.md` (macros/quasiquote ticked), `decisions.md` (ADR-009),
   `README.md`.
+
+### Lists for code, vectors for data; the parameter grammar (same day)
+
+Prompted by the user's "all are lists" observation, a design conversation about
+parameter lists and the broader role of vectors:
+
+- **ADR-010 — code is cons-lists; vectors are a data type.** Reverses ADR-003's
+  "vectors as the parameter surface." Parameter lists and `let` bindings are now
+  written as lists — `(defn f (x y) …)`, `(let (a 1 b 2) …)` — for homoiconic
+  code (which matters for a self-editing editor). `[ ]` vectors stay as a
+  first-class *data* type (O(1) indexing) and are still accepted in
+  param/binding positions. The prelude was rewritten entirely in list form.
+- **ADR-011 — favor the simplest user-facing design; defer power features.** We
+  designed the full CL-grade parameter grammar (`&optional`/`&key`/required-keys
+  /supplied-p) and then cut it to **`required` + `&optional` (with defaults) +
+  `& rest`**. `&key`, supplied-p, and required-keyword markers are deferred
+  (designed, additive later). Recorded the principle in `CLAUDE.md` too.
+- **Defined the grammar** formally in spec §7.4 (EBNF + binding/arity rules).
+- **Implemented `&optional`** in the closure calling convention
+  (`parse_params`/`bind_params`), so it works uniformly in `fn`, `lambda`, and
+  `defn` — chosen over `defn`-macro sugar to avoid a footgun (raw `fn` silently
+  treating `&optional` as a parameter name) and bootstrapping complexity.
+  Defaults are evaluated lazily, left-to-right, so a default can reference an
+  earlier parameter. Unknown `&markers` are rejected.
+- Tests: added list-param, list-`let`, and `&optional` cases — 22/22 green.
+- Docs synced: `spec.md` §7.4 + §4, `language.md` (Parameter lists section,
+  examples to list form), `README.md`, `roadmap.md`, `decisions.md`
+  (ADR-010/011), `CLAUDE.md`.

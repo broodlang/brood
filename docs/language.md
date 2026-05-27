@@ -6,8 +6,9 @@ quasiquote, dynamic variables, error handling, maps, …).
 
 mylisp is a dynamically-typed **Lisp-1** (one namespace for functions and
 variables, like Scheme/Clojure) with **lexical scoping** and **proper tail
-calls**. The flavour is "clean and modern, leaning Clojure-ish": `[...]` for
-vectors and parameter lists, Clojure-style truthiness, and `def`/`fn`.
+calls**. The flavour is "clean and modern": code is made of lists (so parameter
+lists are lists), `[...]` vectors are a data type, with Clojure-style
+truthiness and `def`/`defn`/`fn`.
 
 For the precise, normative version of everything here — grammar, evaluation
 rules, scoping — see [spec.md](spec.md).
@@ -24,7 +25,7 @@ rules, scoping — see [spec.md](spec.md).
 | Symbol | `foo`, `+`, `my-fn`, `empty?` | Names; interned. |
 | Keyword | `:ok`, `:else` | Self-evaluating named constants. |
 | List | `(1 2 3)`, `()` | Cons cells; `()` is `nil`. Quote to keep as data: `'(1 2 3)`. |
-| Vector | `[1 2 3]` | Evaluates its elements. Also the shape of a parameter list. |
+| Vector | `[1 2 3]` | A data type with O(1) indexing. Evaluates its elements. |
 | Function | `#<fn name>`, `#<native +>` | Closures and builtins. |
 
 ### Truthiness
@@ -54,28 +55,46 @@ eagerly). They are reserved names.
 | `(do body...)` | Evaluate forms in order; result is the last. |
 | `(def name value)` | Define/redefine `name` in the **global** environment. |
 | `(set! name value)` | Mutate the nearest existing binding of `name`. |
-| `(fn [params] body...)` | A lexical closure. `lambda` is an alias. |
-| `(let [a 1 b 2] body...)` | Sequential local bindings (each sees the previous). `let*` is an alias. |
+| `(fn (params) body...)` | A lexical closure. `lambda` is an alias. |
+| `(let (a 1 b 2) body...)` | Sequential local bindings (each sees the previous). `let*` is an alias. |
 | `(and a b ...)` | Left-to-right; returns the first falsy value, or the last. |
 | `(or a b ...)` | Left-to-right; returns the first truthy value, or the last. |
 | `(while test body...)` | Loop while `test` is truthy; returns `nil`. |
 | `` (quasiquote tmpl) `` / `` `tmpl `` | Template: literal except `~x` inserts a value and `~@xs` splices a sequence. |
-| `(defmacro name [params] body...)` | Define a macro (see below). |
+| `(defmacro name (params) body...)` | Define a macro (see below). |
 
-### Functions and `&` rest args
+### Parameter lists
+
+Parameter lists are written as **lists** — `(defn f (x y) …)` — because code is
+made of lists (vectors `[ ]` are a data type; they're still accepted in parameter
+position, but lists are idiomatic). A list has three optional sections, in order:
 
 ```clojure
-(def add (fn [a b] (+ a b)))
-(add 2 3)                  ;=> 5
+(defn add (a b) (+ a b))                 ; required
+(add 2 3)                                ;=> 5
 
-;; variadic: everything after & is bound as a list
-(def my-list (fn [& xs] xs))
-(my-list 1 2 3)            ;=> (1 2 3)
+;; &optional: may be omitted; bare defaults to nil, or give a default expr.
+(defn greet (name &optional (greeting "hello"))
+  (str greeting ", " name))
+(greet "Ada")                            ;=> "hello, Ada"
+(greet "Ada" "yo")                       ;=> "yo, Ada"
+
+;; a default may reference an earlier parameter (left-to-right)
+(defn rect (w &optional (h w)) (* w h))
+(rect 5)                                 ;=> 25
+
+;; & rest: everything left over, as a list
+(defn my-list (& xs) xs)
+(my-list 1 2 3)                          ;=> (1 2 3)
 
 ;; closures capture lexically
-(def adder (fn [a] (fn [b] (+ a b))))
-((adder 10) 5)            ;=> 15
+(defn adder (a) (fn (b) (+ a b)))
+((adder 10) 5)                           ;=> 15
 ```
+
+Arity is strict: too few required args, or too many when there's no `& rest`, is
+an error. Named (`&key`) arguments are designed but not in this version — see
+spec §7.4.
 
 ### Recursion is the loop
 
@@ -83,10 +102,9 @@ There is proper tail-call elimination, so recursion is the idiomatic way to
 iterate and will not overflow the stack:
 
 ```clojure
-(def count-down
-  (fn [n]
-    (when (> n 0)
-      (count-down (- n 1)))))
+(defn count-down (n)
+  (when (> n 0)
+    (count-down (- n 1))))
 ```
 
 ## Macros
@@ -97,17 +115,17 @@ evaluated in its place. Templates are written with quasiquote: `` `x `` quotes,
 
 ```clojure
 ;; defn is itself a macro, defined in the prelude:
-(defmacro defn [name params & body]
+(defmacro defn (name params & body)
   `(def ~name (fn ~params ~@body)))
 
-(defn square [x] (* x x))     ; => (def square (fn [x] (* x x)))
+(defn square (x) (* x x))     ; => (def square (fn (x) (* x x)))
 
 ;; your own:
-(defmacro unless2 [c & body] `(if ~c nil (do ~@body)))
+(defmacro unless2 (c & body) `(if ~c nil (do ~@body)))
 (unless2 false (println "ran"))
 
 ;; inspect an expansion without running it:
-(macroexpand-1 '(defn f [x] x))   ;=> (def f (fn [x] x))
+(macroexpand-1 '(defn f (x) x))   ;=> (def f (fn (x) x))
 ```
 
 `gensym` returns a fresh unique symbol for hygiene-by-convention. The `->` and

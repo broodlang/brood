@@ -320,69 +320,153 @@ pub fn apply_closure(cl: &Rc<Closure>, argv: &[Value]) -> LispResult {
 fn bind_params(cl: &Closure, argv: &[Value]) -> Result<Rc<Env>, LispError> {
     let scope = Env::child(&cl.env);
     let who = cl.name.map(value::symbol_name).unwrap_or_else(|| "fn".to_string());
-    match cl.rest {
-        Some(rest) => {
-            if argv.len() < cl.params.len() {
-                return Err(LispError::arity(format!(
-                    "{}: expected at least {} args, got {}",
-                    who,
-                    cl.params.len(),
-                    argv.len()
-                )));
-            }
-            for (param, arg) in cl.params.iter().zip(argv.iter()) {
-                scope.define(*param, arg.clone());
-            }
-            scope.define(rest, value::list(argv[cl.params.len()..].to_vec()));
-        }
-        None => {
-            if argv.len() != cl.params.len() {
-                return Err(LispError::arity(format!(
-                    "{}: expected {} args, got {}",
-                    who,
-                    cl.params.len(),
-                    argv.len()
-                )));
-            }
-            for (param, arg) in cl.params.iter().zip(argv.iter()) {
-                scope.define(*param, arg.clone());
-            }
+    let required = cl.params.len();
+    let max = if cl.rest.is_some() { usize::MAX } else { required + cl.optionals.len() };
+
+    if argv.len() < required || argv.len() > max {
+        return Err(LispError::arity(arity_message(
+            &who,
+            required,
+            cl.optionals.len(),
+            cl.rest.is_some(),
+            argv.len(),
+        )));
+    }
+
+    // Required parameters, positionally.
+    for (param, arg) in cl.params.iter().zip(argv.iter()) {
+        scope.define(*param, arg.clone());
+    }
+
+    // &optional parameters: take the next positional arg, or evaluate the
+    // default in the scope built so far (left-to-right, so defaults can refer
+    // to earlier parameters).
+    let mut idx = required;
+    for (name, default_form) in &cl.optionals {
+        if idx < argv.len() {
+            scope.define(*name, argv[idx].clone());
+            idx += 1;
+        } else {
+            let value = eval(default_form.clone(), scope.clone())?;
+            scope.define(*name, value);
         }
     }
+
+    // &rest gets whatever is left.
+    if let Some(rest) = cl.rest {
+        scope.define(rest, value::list(argv[idx..].to_vec()));
+    }
+
     Ok(scope)
+}
+
+fn arity_message(who: &str, required: usize, optionals: usize, has_rest: bool, got: usize) -> String {
+    let expected = if has_rest {
+        format!("at least {}", required)
+    } else if optionals == 0 {
+        format!("{}", required)
+    } else {
+        format!("{} to {}", required, required + optionals)
+    };
+    format!("{}: expected {} args, got {}", who, expected, got)
 }
 
 fn make_closure(name: Option<Symbol>, rest: &Value, env: &Rc<Env>) -> LispResult {
     let parts = value::list_to_vec(rest)?;
     let param_form =
         parts.first().ok_or_else(|| LispError::runtime("fn: missing parameter list"))?;
-    let (params, rest_param) = parse_params(param_form)?;
+    let (params, optionals, rest_param) = parse_params(param_form)?;
     let body = parts[1..].to_vec();
-    Ok(Value::Fn(Rc::new(Closure { name, params, rest: rest_param, body, env: env.clone() })))
+    Ok(Value::Fn(Rc::new(Closure {
+        name,
+        params,
+        optionals,
+        rest: rest_param,
+        body,
+        env: env.clone(),
+    })))
 }
 
-fn parse_params(form: &Value) -> Result<(Vec<Symbol>, Option<Symbol>), LispError> {
+/// Parse a parameter list (a list `(x y)` or vector `[x y]`) into required
+/// params, `&optional` params (with default forms), and an optional `& rest`.
+/// See `docs/spec.md` §7.4 for the grammar.
+fn parse_params(
+    form: &Value,
+) -> Result<(Vec<Symbol>, Vec<(Symbol, Value)>, Option<Symbol>), LispError> {
     let items = match form {
         Value::Vector(items) => (**items).clone(),
+        Value::Pair(_) => value::list_to_vec(form)?,
         Value::Nil => Vec::new(),
-        _ => return Err(LispError::type_err("parameter list must be a vector, e.g. [x y]")),
+        _ => return Err(LispError::type_err("parameter list must be a list (x y) or vector [x y]")),
     };
-    let mut params = Vec::new();
+
+    let mut required = Vec::new();
+    let mut optionals = Vec::new();
     let mut rest = None;
+    let mut in_optional = false;
     let mut i = 0;
+
     while i < items.len() {
-        let s = as_symbol(&items[i])?;
-        if value::symbol_name(s) == "&" {
-            let r = items
-                .get(i + 1)
-                .ok_or_else(|| LispError::runtime("expected a symbol after & in parameter list"))?;
-            rest = Some(as_symbol(r)?);
-            break;
+        // Markers (&optional, &) are recognised structurally.
+        if let Value::Sym(s) = &items[i] {
+            let name = value::symbol_name(*s);
+            if name == "&optional" {
+                if in_optional {
+                    return Err(LispError::runtime("&optional may appear only once"));
+                }
+                in_optional = true;
+                i += 1;
+                continue;
+            }
+            if name == "&" {
+                let r = items
+                    .get(i + 1)
+                    .ok_or_else(|| LispError::runtime("expected a symbol after & in parameter list"))?;
+                rest = Some(as_symbol(r)?);
+                if i + 2 < items.len() {
+                    return Err(LispError::runtime("& rest must be the last parameter"));
+                }
+                break;
+            }
+            if name.starts_with('&') {
+                return Err(LispError::runtime(format!(
+                    "unknown parameter marker '{}'; use &optional or & (rest)",
+                    name
+                )));
+            }
         }
-        params.push(s);
+
+        if in_optional {
+            optionals.push(parse_optional(&items[i])?);
+        } else {
+            required.push(as_symbol(&items[i])?);
+        }
         i += 1;
     }
-    Ok((params, rest))
+
+    Ok((required, optionals, rest))
+}
+
+/// An `&optional` entry is a bare symbol (default `nil`) or `(name default)`.
+fn parse_optional(form: &Value) -> Result<(Symbol, Value), LispError> {
+    match form {
+        Value::Sym(s) => Ok((*s, Value::Nil)),
+        Value::Pair(_) | Value::Vector(_) => {
+            let parts = match form {
+                Value::Vector(v) => (**v).clone(),
+                _ => value::list_to_vec(form)?,
+            };
+            let name = as_symbol(
+                parts.first().ok_or_else(|| LispError::runtime("malformed &optional parameter"))?,
+            )?;
+            let default = parts.get(1).cloned().unwrap_or(Value::Nil);
+            Ok((name, default))
+        }
+        other => Err(LispError::type_err(format!(
+            "malformed &optional parameter: {}",
+            crate::printer::print(other)
+        ))),
+    }
 }
 
 /// Attach a name to an anonymous closure when it's `def`'d, for nicer printing
@@ -392,6 +476,7 @@ fn name_value(val: Value, name: Symbol) -> Value {
         Value::Fn(cl) if cl.name.is_none() => Value::Fn(Rc::new(Closure {
             name: Some(name),
             params: cl.params.clone(),
+            optionals: cl.optionals.clone(),
             rest: cl.rest,
             body: cl.body.clone(),
             env: cl.env.clone(),
@@ -426,9 +511,13 @@ fn as_symbol(v: &Value) -> Result<Symbol, LispError> {
 }
 
 fn as_binding_vec(v: &Value) -> Result<Vec<Value>, LispError> {
+    // Bindings are code, so a list (a 1 b 2) is the idiomatic form; a vector
+    // [a 1 b 2] is also accepted.
     match v {
+        Value::Pair(_) => value::list_to_vec(v),
         Value::Vector(items) => Ok((**items).clone()),
-        _ => Err(LispError::type_err("expected a binding vector, e.g. [x 1 y 2]")),
+        Value::Nil => Ok(Vec::new()),
+        _ => Err(LispError::type_err("let bindings must be a list (a 1 b 2) or vector [a 1 b 2]")),
     }
 }
 

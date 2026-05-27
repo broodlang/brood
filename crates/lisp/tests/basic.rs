@@ -39,7 +39,8 @@ fn closures_capture_lexically() {
 
 #[test]
 fn let_is_sequential() {
-    assert_eq!(run("(let [a 1 b (+ a 1)] (+ a b))"), "3");
+    assert_eq!(run("(let [a 1 b (+ a 1)] (+ a b))"), "3"); // vector bindings
+    assert_eq!(run("(let (a 1 b (+ a 1)) (+ a b))"), "3"); // list bindings (idiomatic)
 }
 
 #[test]
@@ -136,6 +137,42 @@ fn defn_defines_functions() {
     assert_eq!(run("(defn add3 [a b c] (+ a b c)) (add3 1 2 3)"), "6");
     // defn is itself written in mylisp; it expands to (def name (fn ...)).
     assert_eq!(run("(macroexpand-1 '(defn f [x] (+ x 1)))"), "(def f (fn [x] (+ x 1)))");
+}
+
+#[test]
+fn params_may_be_a_list_or_vector() {
+    assert_eq!(run("(defn sq (x) (* x x)) (sq 7)"), "49");      // list params
+    assert_eq!(run("(defn sq2 [x] (* x x)) (sq2 8)"), "64");    // vector params
+    assert_eq!(run("((fn (a b) (+ a b)) 2 3)"), "5");
+    assert_eq!(run("(defn rest-args (& xs) xs) (rest-args 1 2 3)"), "(1 2 3)");
+}
+
+#[test]
+fn optional_params() {
+    let g = "(defn greet (name &optional (greeting \"hi\")) (str greeting \", \" name))";
+    assert_eq!(run(&format!("{} (greet \"Ada\")", g)), "\"hi, Ada\"");
+    assert_eq!(run(&format!("{} (greet \"Ada\" \"yo\")", g)), "\"yo, Ada\"");
+    // a default may reference an earlier parameter (left-to-right binding)
+    assert_eq!(run("(defn rect (w &optional (h w)) (* w h)) (rect 5)"), "25");
+    assert_eq!(run("(defn rect (w &optional (h w)) (* w h)) (rect 5 3)"), "15");
+    // a bare optional defaults to nil
+    assert_eq!(run("(defn f (a &optional b) (list a b)) (f 1)"), "(1 nil)");
+    // optionals work on a raw fn, not just defn
+    assert_eq!(run("((fn (a &optional (b 10)) (+ a b)) 5)"), "15");
+    // optionals compose with & rest
+    assert_eq!(run("(defn f (a &optional (b 2) & more) (list a b more)) (f 1)"), "(1 2 nil)");
+    assert_eq!(run("(defn f (a &optional (b 2) & more) (list a b more)) (f 1 9 8 7)"), "(1 9 (8 7))");
+}
+
+#[test]
+fn optional_params_arity() {
+    let interp = Interp::new();
+    // too many args, no rest to absorb them
+    assert!(interp.eval_str("(defn f (a &optional b) a) (f 1 2 3)").is_err());
+    // too few required
+    assert!(interp.eval_str("(defn f (a b &optional c) a) (f 1)").is_err());
+    // an unknown marker is rejected, not silently treated as a param name
+    assert!(interp.eval_str("(defn f (a &key b) a)").is_err());
 }
 
 #[test]

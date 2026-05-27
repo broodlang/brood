@@ -28,6 +28,10 @@ A solid, self-editable Lisp. This is the foundation everything else stands on.
 - ✅ **Macros** (`defmacro`, `macroexpand`/`macroexpand-1`, `gensym`); `defn` and
   the `->`/`->>` threading macros are now defined *in mylisp* (`std/prelude.lisp`)
 - ✅ **Quasiquote** — Clojure-style `` ` `` / `~` / `~@` (ADR-009)
+- ✅ **Parameter grammar** — `required` + `&optional` (with defaults) + `& rest`,
+  in the closure calling convention (`fn`/`lambda`/`defn` all share it).
+  `&key` (named args) is designed but **deferred for simplicity** (ADR-011) —
+  additive when the editor command API needs it.
 - ⬜ **Dynamic variables** (`defdyn` / `binding`) for editor config
 - ⬜ **Error handling** in-language (`try`/`catch`, `throw`)
 - ⬜ **Maps** (`{ }` literals, `get`/`assoc`)

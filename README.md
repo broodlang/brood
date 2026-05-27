@@ -11,12 +11,16 @@ lexical closures, a set of builtins, and a REPL.
 ```clojure
 (+ 1 2)                          ;=> 3
 
-(defn square [x] (* x x))        ; defn is a macro, written in mylisp itself
+(defn square (x) (* x x))        ; defn is a macro, written in mylisp itself
 (map square (list 1 2 3 4))      ;=> (1 4 9 16)
+
+(defn greet (name &optional (greeting "hello"))   ; optional arg with a default
+  (str greeting ", " name))
+(greet "world")                  ;=> "hello, world"
 
 ;; recursion is the loop — tail calls use O(1) stack, so this doesn't overflow
 (def sum-to
-  (fn [n acc] (if (= n 0) acc (sum-to (- n 1) (+ acc n)))))
+  (fn (n acc) (if (= n 0) acc (sum-to (- n 1) (+ acc n)))))
 (sum-to 100000 0)                ;=> 5000050000
 ```
 
@@ -44,7 +48,7 @@ In the REPL:
 mylisp v0.1 — type an expression, Ctrl-D to exit
 mylisp> (+ 1 2)
 3
-mylisp> (def greet (fn [name] (str "hello, " name)))
+mylisp> (defn greet (name) (str "hello, " name))
 greet
 mylisp> (greet "world")
 "hello, world"
@@ -57,9 +61,11 @@ Lexically-scoped closures, proper tail calls, `def`/`defn`/`set!`/`let`/`fn`,
 Clojure-style `` ` ``/`~`/`~@` quasiquote, `macroexpand`, `gensym`), integers &
 floats with overflow-checked arithmetic, strings, symbols, keywords, cons-cell
 lists, `[ ]` vectors, higher-order functions (`map`/`filter`/`reduce`/`apply`),
-and the self-hosting trio `eval`/`read-string`/`load`. `defn`, the operators
-(`+`, `<`, …), the sequence library, and the `->`/`->>` threading macros are all
-defined in mylisp itself (`std/prelude.lisp`) on top of a small Rust kernel.
+and the self-hosting trio `eval`/`read-string`/`load`. Parameter lists are
+written as lists (`(x y)` — code is lists; vectors are data) and support
+`&optional` (with defaults) and `& rest`. `defn`, the operators (`+`, `<`, …),
+the sequence library, and the `->`/`->>` threading macros are all defined in
+mylisp itself (`std/prelude.lisp`) on top of a small Rust kernel.
 
 See [`docs/language.md`](docs/language.md) for the full reference.
 

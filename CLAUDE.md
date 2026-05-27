@@ -79,6 +79,10 @@ cargo test -p mylisp --test basic # just the language tests
   principle above (ADR-006). If something can live in `std/` instead of
   `builtins.rs`, put it there. Add a Rust builtin only when it genuinely needs
   Rust.
+- **Favor the simplest user-facing design; defer power features** (ADR-011).
+  When a feature has a simple form and a powerful-but-complex form, ship the
+  simple one and defer the rest until a concrete need justifies it. Additive
+  features cost nothing to delay; every knob is a tax on every user, forever.
 - **Symbols are interned `u32`s.** Compare with `==`; get the spelling via
   `value::symbol_name`.
 - **Truthiness:** only `nil` and `false` are falsy (`eval::truthy`).
