@@ -42,7 +42,10 @@ fn def_and_reference() {
 
 #[test]
 fn closures_capture_lexically() {
-    assert_eq!(run("(def adder (fn [a] (fn [b] (+ a b)))) ((adder 3) 4)"), "7");
+    assert_eq!(
+        run("(def adder (fn [a] (fn [b] (+ a b)))) ((adder 3) 4)"),
+        "7"
+    );
 }
 
 #[test]
@@ -146,15 +149,21 @@ fn defn_defines_functions() {
     assert_eq!(run("(defn sq [x] (* x x)) (sq 6)"), "36");
     assert_eq!(run("(defn add3 [a b c] (+ a b c)) (add3 1 2 3)"), "6");
     // defn is itself written in Brood; it expands to (def name (fn ...)).
-    assert_eq!(run("(macroexpand-1 '(defn f [x] (+ x 1)))"), "(def f (fn [x] (+ x 1)))");
+    assert_eq!(
+        run("(macroexpand-1 '(defn f [x] (+ x 1)))"),
+        "(def f (fn [x] (+ x 1)))"
+    );
 }
 
 #[test]
 fn params_may_be_a_list_or_vector() {
-    assert_eq!(run("(defn sq (x) (* x x)) (sq 7)"), "49");      // list params
-    assert_eq!(run("(defn sq2 [x] (* x x)) (sq2 8)"), "64");    // vector params
+    assert_eq!(run("(defn sq (x) (* x x)) (sq 7)"), "49"); // list params
+    assert_eq!(run("(defn sq2 [x] (* x x)) (sq2 8)"), "64"); // vector params
     assert_eq!(run("((fn (a b) (+ a b)) 2 3)"), "5");
-    assert_eq!(run("(defn rest-args (& xs) xs) (rest-args 1 2 3)"), "(1 2 3)");
+    assert_eq!(
+        run("(defn rest-args (& xs) xs) (rest-args 1 2 3)"),
+        "(1 2 3)"
+    );
 }
 
 #[test]
@@ -163,24 +172,40 @@ fn optional_params() {
     assert_eq!(run(&format!("{} (greet \"Ada\")", g)), "\"hi, Ada\"");
     assert_eq!(run(&format!("{} (greet \"Ada\" \"yo\")", g)), "\"yo, Ada\"");
     // a default may reference an earlier parameter (left-to-right binding)
-    assert_eq!(run("(defn rect (w &optional (h w)) (* w h)) (rect 5)"), "25");
-    assert_eq!(run("(defn rect (w &optional (h w)) (* w h)) (rect 5 3)"), "15");
+    assert_eq!(
+        run("(defn rect (w &optional (h w)) (* w h)) (rect 5)"),
+        "25"
+    );
+    assert_eq!(
+        run("(defn rect (w &optional (h w)) (* w h)) (rect 5 3)"),
+        "15"
+    );
     // a bare optional defaults to nil
     assert_eq!(run("(defn f (a &optional b) (list a b)) (f 1)"), "(1 nil)");
     // optionals work on a raw fn, not just defn
     assert_eq!(run("((fn (a &optional (b 10)) (+ a b)) 5)"), "15");
     // optionals compose with & rest
-    assert_eq!(run("(defn f (a &optional (b 2) & more) (list a b more)) (f 1)"), "(1 2 nil)");
-    assert_eq!(run("(defn f (a &optional (b 2) & more) (list a b more)) (f 1 9 8 7)"), "(1 9 (8 7))");
+    assert_eq!(
+        run("(defn f (a &optional (b 2) & more) (list a b more)) (f 1)"),
+        "(1 2 nil)"
+    );
+    assert_eq!(
+        run("(defn f (a &optional (b 2) & more) (list a b more)) (f 1 9 8 7)"),
+        "(1 9 (8 7))"
+    );
 }
 
 #[test]
 fn optional_params_arity() {
     let mut interp = Interp::new();
     // too many args, no rest to absorb them
-    assert!(interp.eval_str("(defn f (a &optional b) a) (f 1 2 3)").is_err());
+    assert!(interp
+        .eval_str("(defn f (a &optional b) a) (f 1 2 3)")
+        .is_err());
     // too few required
-    assert!(interp.eval_str("(defn f (a b &optional c) a) (f 1)").is_err());
+    assert!(interp
+        .eval_str("(defn f (a b &optional c) a) (f 1)")
+        .is_err());
     // an unknown marker is rejected, not silently treated as a param name
     assert!(interp.eval_str("(defn f (a &key b) a)").is_err());
 }
@@ -207,7 +232,10 @@ fn threading_macros() {
 fn throw_and_catch() {
     // a thrown value is rebound by catch
     assert_eq!(run("(try (throw 42) (catch e e))"), "42");
-    assert_eq!(run("(try (throw :boom) (catch e (str \"caught \" e)))"), "\"caught :boom\"");
+    assert_eq!(
+        run("(try (throw :boom) (catch e (str \"caught \" e)))"),
+        "\"caught :boom\""
+    );
     // no throw: the body's value is returned
     assert_eq!(run("(try (+ 1 2) (catch e e))"), "3");
     // a built-in error is caught as its message string
@@ -256,4 +284,21 @@ fn spawned_process_picks_up_redefinition() {
         (list before after)
     "#;
     assert_eq!(run(src), "(50 105)");
+}
+
+/// `%isolate` runs a thunk against a private copy of the global bindings: a
+/// `def`/`set!` it makes takes effect *inside* the thunk but is rolled back when
+/// it returns. This is what gives `:isolated` tests true state isolation — a
+/// test's definitions can't leak to any other test (see std/test.lisp).
+#[test]
+fn isolate_rolls_back_global_defs() {
+    let src = r#"
+        (def before 1)
+        ;; Inside the thunk: rebind an existing global and define a new one.
+        (def saw (%isolate (fn () (def before 2) (def new-one 3) (list before new-one))))
+        ;; saw shows the defs took effect inside; after, `before` is back to 1 and
+        ;; `new-one` is unbound again — the isolated mutations were discarded.
+        (list saw before (try new-one (catch e :unbound)))
+    "#;
+    assert_eq!(run(src), "((2 3) 1 :unbound)");
 }

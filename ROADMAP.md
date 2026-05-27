@@ -107,8 +107,12 @@ and don't conflict with the concurrency work. Concurrency lands in phases:
   process is an OS thread with its own heap; messages are copied between heaps
   (step 4a). Real parallelism + isolation.
 - ✅ `Send` per-process heaps (done in step 2/3); global symbol interner
-- ⬜ Green M:N on a small worker pool (default 2) via coroutine suspension — makes
-  processes cheap (millions) and gives the core cap
+- ✅ **Green M:N on a worker pool** via stackful coroutines (`corosensei`) — each
+  process is a coroutine that **suspends** at `receive` (not blocks); a pool of
+  ≈`nproc` worker threads (a setting, `-j` overrides) runs them. Spawn is cheap;
+  OS threads bounded; the old `Gate` deadlock is gone. Scheduling is **cooperative**
+  (yield at `receive`); work-stealing and reduction-counted preemption are the
+  deferred follow-ups below. ADR-018, `docs/scheduler.md`.
 - ✅ **Shared code** (Erlang-style: share defs, isolate data) — a runtime's inner
   processes share one mutable code region + global table (`Arc<RuntimeCode>`), so
   a `def` reaches a running spawned process on its next lookup (cross-process hot

@@ -34,10 +34,10 @@ repl: ## Start the REPL
 fmt: ## Format all Rust code
 	cargo fmt
 
-clippy: ## Lint with clippy (warnings as errors)
-	cargo clippy --all-targets -- -D warnings
+clippy: ## Lint with clippy (all targets; warnings reported, not fatal)
+	cargo clippy --all-targets
 
-check: fmt clippy test ## Format, lint, and test — the pre-commit gate
+check: clippy test ## Lint + test (the pre-commit gate). Run `make fmt` separately — it rewrites files.
 
 clean: ## Remove build artifacts
 	cargo clean

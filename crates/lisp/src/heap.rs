@@ -23,7 +23,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::error::LispError;
 use crate::value::{
-    Closure, ClosureId, EnvId, NativeFn, NativeId, PairId, StrId, Symbol, VecId, Value, LOCAL,
+    Closure, ClosureId, EnvId, NativeFn, NativeId, PairId, StrId, Symbol, Value, VecId, LOCAL,
     PRELUDE, RUNTIME,
 };
 
@@ -109,7 +109,10 @@ pub struct RuntimeCode {
 
 impl Default for RuntimeCode {
     fn default() -> Self {
-        RuntimeCode { code: CodeSlabs::default(), globals: RwLock::new(HashMap::new()) }
+        RuntimeCode {
+            code: CodeSlabs::default(),
+            globals: RwLock::new(HashMap::new()),
+        }
     }
 }
 
@@ -122,7 +125,10 @@ impl RuntimeCode {
         for &(s, v) in bindings {
             globals.insert(s, v);
         }
-        RuntimeCode { code: CodeSlabs::default(), globals: RwLock::new(globals) }
+        RuntimeCode {
+            code: CodeSlabs::default(),
+            globals: RwLock::new(globals),
+        }
     }
 }
 
@@ -152,7 +158,12 @@ impl Heap {
     /// local slabs). Spawned inner processes pass the *same* `runtime` Arc as
     /// their parent, so they see its global bindings and its later `def`s.
     pub fn with_regions(prelude: Arc<SharedCode>, runtime: Arc<RuntimeCode>) -> Self {
-        Heap { local: Slabs::default(), prelude, runtime, global: EnvId::local(0) }
+        Heap {
+            local: Slabs::default(),
+            prelude,
+            runtime,
+            global: EnvId::local(0),
+        }
     }
 
     /// Clone the Arc to this heap's prelude region (for spawning a child).
@@ -197,7 +208,10 @@ impl Heap {
             for (_, d) in c.optionals.iter_mut() {
                 *d = to_prelude(*d);
             }
-            debug_assert!(c.env.is_none(), "shared closures must capture the global env");
+            debug_assert!(
+                c.env.is_none(),
+                "shared closures must capture the global env"
+            );
         }
         slabs.envs = Vec::new(); // the prelude region has no env frames
 
@@ -313,8 +327,12 @@ impl Heap {
                 Value::Pair(PairId::runtime(self.runtime.code.pairs.push((head, tail))))
             }
             Value::Vector(id) if id.region() == LOCAL => {
-                let items: Vec<Value> =
-                    self.vector(id).to_vec().into_iter().map(|x| self.promote(x)).collect();
+                let items: Vec<Value> = self
+                    .vector(id)
+                    .to_vec()
+                    .into_iter()
+                    .map(|x| self.promote(x))
+                    .collect();
                 Value::Vector(VecId::runtime(self.runtime.code.vectors.push(items)))
             }
             Value::Fn(id) if id.region() == LOCAL => Value::Fn(self.promote_closure(id)),
@@ -327,7 +345,11 @@ impl Heap {
     fn promote_closure(&self, id: ClosureId) -> ClosureId {
         let cl = self.closure(id).clone();
         let body = cl.body.iter().map(|&f| self.promote(f)).collect();
-        let optionals = cl.optionals.iter().map(|&(s, d)| (s, self.promote(d))).collect();
+        let optionals = cl
+            .optionals
+            .iter()
+            .map(|&(s, d)| (s, self.promote(d)))
+            .collect();
         // A top-level closure captures the global env (`None`) and is fully
         // shareable as-is. A closure that captured a *local* scope has its scope
         // promoted too, so it resolves its free variables in any process.
@@ -353,7 +375,10 @@ impl Heap {
         // Snapshot the frame, then promote its parent and values (no borrow held).
         let (parent, bindings): (Option<EnvId>, Vec<(Symbol, Value)>) = {
             let frame = self.env_frame(env);
-            (frame.parent, frame.vars.iter().map(|(&s, &v)| (s, v)).collect())
+            (
+                frame.parent,
+                frame.vars.iter().map(|(&s, &v)| (s, v)).collect(),
+            )
         };
         let parent = parent.map(|p| self.promote_env(p));
         let mut vars = HashMap::with_capacity(bindings.len());
@@ -369,7 +394,12 @@ impl Heap {
         match id.region() {
             LOCAL => self.local.pairs[id.index()],
             PRELUDE => self.prelude.slabs.pairs[id.index()],
-            RUNTIME => *self.runtime.code.pairs.get(id.index()).expect("runtime pair handle"),
+            RUNTIME => *self
+                .runtime
+                .code
+                .pairs
+                .get(id.index())
+                .expect("runtime pair handle"),
             _ => unreachable!("invalid handle region"),
         }
     }
@@ -383,7 +413,12 @@ impl Heap {
         match id.region() {
             LOCAL => &self.local.vectors[id.index()],
             PRELUDE => &self.prelude.slabs.vectors[id.index()],
-            RUNTIME => self.runtime.code.vectors.get(id.index()).expect("runtime vector handle"),
+            RUNTIME => self
+                .runtime
+                .code
+                .vectors
+                .get(id.index())
+                .expect("runtime vector handle"),
             _ => unreachable!("invalid handle region"),
         }
     }
@@ -391,7 +426,12 @@ impl Heap {
         match id.region() {
             LOCAL => &self.local.strings[id.index()],
             PRELUDE => &self.prelude.slabs.strings[id.index()],
-            RUNTIME => self.runtime.code.strings.get(id.index()).expect("runtime string handle"),
+            RUNTIME => self
+                .runtime
+                .code
+                .strings
+                .get(id.index())
+                .expect("runtime string handle"),
             _ => unreachable!("invalid handle region"),
         }
     }
@@ -399,7 +439,12 @@ impl Heap {
         match id.region() {
             LOCAL => &self.local.closures[id.index()],
             PRELUDE => &self.prelude.slabs.closures[id.index()],
-            RUNTIME => self.runtime.code.closures.get(id.index()).expect("runtime closure handle"),
+            RUNTIME => self
+                .runtime
+                .code
+                .closures
+                .get(id.index())
+                .expect("runtime closure handle"),
             _ => unreachable!("invalid handle region"),
         }
     }
@@ -477,14 +522,22 @@ impl Heap {
     fn env_frame(&self, env: EnvId) -> &EnvFrame {
         match env.region() {
             LOCAL => &self.local.envs[env.index()],
-            RUNTIME => self.runtime.code.envs.get(env.index()).expect("runtime env frame"),
+            RUNTIME => self
+                .runtime
+                .code
+                .envs
+                .get(env.index())
+                .expect("runtime env frame"),
             _ => unreachable!("env frames live only in the local or runtime region"),
         }
     }
 
     pub fn new_env(&mut self, parent: Option<EnvId>) -> EnvId {
         let idx = self.local.envs.len();
-        self.local.envs.push(EnvFrame { vars: HashMap::new(), parent });
+        self.local.envs.push(EnvFrame {
+            vars: HashMap::new(),
+            parent,
+        });
         EnvId::local(idx)
     }
 
@@ -539,6 +592,25 @@ impl Heap {
             cur = self.env_frame(e).parent;
         }
         false
+    }
+
+    /// Snapshot the runtime's global bindings (`symbol -> value`). Cheap: the
+    /// values are `Copy` handles. Pair with [`Heap::restore_globals`] to run code
+    /// against a *private copy* of the globals — mutations to the live table can
+    /// then be rolled back (this is what the `%isolate` primitive does for
+    /// `:isolated` tests). Only meaningful when no other process is writing the
+    /// table concurrently.
+    pub fn snapshot_globals(&self) -> HashMap<Symbol, Value> {
+        self.runtime.globals.read().unwrap().clone()
+    }
+
+    /// Restore the runtime's global bindings from a [`Heap::snapshot_globals`]
+    /// snapshot, discarding every `def`/`set!` made since it was taken. The
+    /// append-only code slabs are *not* reclaimed (there's no GC yet), but the
+    /// bindings revert — so a name `def`'d since the snapshot becomes unbound
+    /// again, and a rebound name returns to its earlier value.
+    pub fn restore_globals(&self, snapshot: HashMap<Symbol, Value>) {
+        *self.runtime.globals.write().unwrap() = snapshot;
     }
 
     /// Walk to the global scope at the bottom of the frame chain.

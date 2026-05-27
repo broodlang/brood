@@ -40,6 +40,7 @@ load-bearing choice (ADR-006 "write the language in the language", ADR-008
 | | `gensym` | 0–1 | a fresh, unique symbol (optional name prefix) |
 | **Errors / control** | `throw` | 1 | raise a value as an error (non-local exit) |
 | | `%try` | 2 | call a thunk; on raise, call the handler with the caught value |
+| | `%isolate` | 1 | call a thunk against a private copy of the globals; roll back its `def`/`set!` afterward (used by `:isolated` tests) |
 | **Processes** | `spawn` | ≥1 | run a function in a new process; returns its pid |
 | | `send` | 2 | copy a message into a pid's mailbox |
 | | `receive` | 0 | take the next message from this process's mailbox (blocking) |

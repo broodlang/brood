@@ -16,6 +16,11 @@ path = "src/lib.rs"
 # bodies lock-free while `def` appends new code (old versions never move/free —
 # in-flight calls keep running them; Erlang-style hot reload). See docs/shared-code.md.
 boxcar = "0.2"
+# Stackful coroutines for the green-process scheduler (step 4b): each process runs
+# in a coroutine that parks at `receive` and resumes on a worker thread, so the
+# native recursive evaluator suspends without a rewrite. It does the stack-switch
+# `unsafe` we'd otherwise hand-roll; swappable later. See docs/scheduler.md (ADR-018).
+corosensei = "0.3"
 
 [dev-dependencies]
 # Lightweight microbenchmark harness for the interpreter core. Dev-only (the

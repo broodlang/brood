@@ -407,6 +407,83 @@ needs no eval rewrite and touches nothing shared or concurrent.
 
 ---
 
+## ADR-017 — Isolated tests roll back the globals via a private copy (`%isolate`)
+
+**Status:** accepted. Strengthens the `:isolated` mode of the test framework
+(ADR-015) from *scheduled-alone* to *state-isolated*.
+
+**Context.** A runtime's processes share one mutable global table (ADR-013), so
+the test framework offered `:serial`/`:isolated` to avoid *races* on it. But
+`:isolated` only meant "no other test runs concurrently" — every test, isolated
+or not, still `def`/`set!`s into the *same* live table, so a test's definitions
+persisted and were visible to later tests. That's not true per-test independence.
+
+True isolation wants a fresh runtime per test, but the model rules that out
+cheaply: a test thunk is a closure whose handle is region-tagged to *its* runtime
+(it indexes that runtime's append-only code slabs), so it cannot be executed in a
+different runtime — cross-runtime code sharing is deliberately unsupported (ADR-013).
+Re-evaluating each test's *source* in a fresh `Interp` would work but moves test
+execution out of the in-language framework and reloads the framework per test.
+
+**Decision.** Isolate **bindings**, not the whole runtime, with one small Rust
+mechanism. `Heap::snapshot_globals()` clones the global table (values are `Copy`
+handles — cheap); `Heap::restore_globals()` puts a snapshot back. The `%isolate`
+primitive wraps a thunk: snapshot → run → restore (even on error). The framework
+runs the `:isolated` phase **first** and calls each isolated test through
+`%isolate`, so every isolated test sees the clean post-load baseline and nothing
+it defines survives. Policy stays in Brood (`std/test.lisp`); Rust supplies only
+the snapshot/restore mechanism (ADR-006/008).
+
+**Why.** Proportionate (ADR-011): it delivers the property that matters — a test's
+defs can't leak to another test — with one primitive and no eval changes, instead
+of a fresh-runtime machinery the architecture doesn't cheaply allow.
+
+**Limits / what's deferred.**
+- Rolls back **bindings** only. The append-only code slabs and the global symbol
+  interner still grow (memory, not behaviour; there's no GC yet — ADR-016).
+- The LOCAL data heap isn't reset by `%isolate` (it carries no cross-test state).
+- Sound only because the isolated phase runs alone: `restore_globals` is a
+  wholesale swap, unsafe if another process were writing globals concurrently.
+- If a genuine fresh-runtime-per-test need appears, source re-eval in a new
+  `Interp` remains the fuller (heavier) option.
+
+---
+
+## ADR-018 — Green M:N scheduler via stackful coroutines (step 4b)
+
+**Status:** accepted. Implementation plan in `docs/scheduler.md`.
+
+**Context.** Step 4a runs one OS thread per process and blocks the thread at
+`receive` — it oversubscribes cores, needs the `Gate` cap, and can deadlock when
+more processes block than the cap allows. Step 4b makes processes cheap green
+threads on a small worker pool, with `receive` suspending rather than blocking.
+
+**Decision.** **Path A — stackful coroutines (`corosensei`).** Each process runs
+in a coroutine with its own parkable stack, so the native recursive `eval` runs
+unchanged; `receive` on an empty mailbox yields the coroutine. A worker pool
+(≈ `nproc`, a *setting* — never a magic number; `-j` overrides) runs ready
+processes off a shared run queue; `send` wakes a waiting process. `Heap` is
+already `Send`, so processes migrate between workers freely.
+
+- **Not** the explicit-value-stack VM (Path B) — that's a far bigger rewrite,
+  only needed for precise mid-eval GC, and deferred.
+- **Cooperative to start** (yield only at `receive`); reduction-counted
+  preemption (the BEAM's fairness mechanism — decrement a counter in `eval`'s
+  loop, yield at zero) and work-stealing are **additive later**, not a redesign.
+- `corosensei` does the stack-switching `unsafe` we'd otherwise hand-roll
+  (ADR-014). Swappable if we later want to slim dependencies.
+
+**Why.** It delivers cheap green processes + bounded OS threads + suspending
+`receive` with no evaluator rewrite — the lowest-risk path to finishing 4b. It's
+"BEAM-minus-preemption-minus-migration," both of which are additive.
+
+**Trade-offs accepted.** Per-coroutine stacks cost memory (tunable). Cooperative
+scheduling lets a CPU-bound process with no `receive` hold its worker until done
+(bounded by pool size; preemption is the deferred fix). A dependency in the
+runtime crate (justified per ADR-014).
+
+---
+
 ## Deferred / open questions
 
 - **Macro hygiene:** currently unhygienic `defmacro` + `gensym`; hygienic macros

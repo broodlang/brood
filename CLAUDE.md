@@ -62,7 +62,12 @@ cargo run -p cli file.lisp        # run a program file
 ./bin/cli tests/suite.lisp        # the in-language test suite (does (require 'test))
 ```
 
-`make -j$(nproc)` isn't used here — it's a Cargo workspace.
+Cargo is the source of truth; a thin **`Makefile`** wraps the common commands as
+shortcuts (`make help` lists them): `make build`, `make test`, `make suite`,
+`make repl`, and `make benchmark`. The last runs the `divan` benches
+(`crates/lisp/benches/`) via `scripts/bench.sh`, which archives each run with full
+environment metadata to `docs/benchmarks/<UTC-timestamp>.md`. `make -j$(nproc)`
+parallelism isn't relevant — it's a Cargo workspace, not a recursive make.
 
 ## Conventions & invariants (don't break these)
 

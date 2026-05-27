@@ -114,6 +114,15 @@
     (defn sum-to (n acc) (if (= n 0) acc (sum-to (- n 1) (+ acc n))))
     (assert= (sum-to 10000 0) 50005000)))
 
+;; :isolated — runs alone, against a private copy of the globals, so its `def`
+;; rolls back when it finishes and can't leak to another test. (The rollback
+;; itself is guarded by the Rust test `isolate_rolls_back_global_defs`; here we
+;; just confirm an isolated test can def/use a global through the framework.)
+(describe "isolation" :isolated
+  (test "an isolated test may def globals freely"
+    (def isolated-only 99)
+    (assert= isolated-only 99)))
+
 ;; :isolated — this group spawns its own nested processes; run it alone so its
 ;; concurrency is measured on its own, not contending with the other tests.
 (describe "processes" :isolated

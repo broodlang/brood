@@ -374,3 +374,75 @@ are coupled and best done together. `gc-arena` is no longer the presumed path
 gotcha while testing: `cargo test` doesn't refresh `target/debug/brood`, so the
 first manual demo ran a stale binary and looked like it leaked — `cargo build`
 then showed the flat profile.)
+
+### Benchmark harness (divan) + a Makefile (same day)
+
+First reproducible performance baseline. Added a `divan` (0.1) dev-dependency and
+`crates/lisp/benches/eval.rs`: `interp_new` (per-instance startup), `parse_prelude`
+(reader only), `sum_tail` (the tail-call loop), and `fib` (non-tail recursion),
+the eval ones building a fresh `Interp` per iteration via `with_inputs` so the
+once-per-process prelude build stays out of the measured region. `scripts/bench.sh`
+runs them and archives each run to `docs/benchmarks/<UTC>.md` with full environment
+metadata (arch, CPU, toolchain, divan version, git commit + dirty flag) — numbers
+are only meaningful next to the machine and commit they came from. A `Makefile`
+wraps the common Cargo commands (`make benchmark`, `test`, `suite`, `repl`, …).
+
+**Baseline (i7-14700HX, commit 1bf54c9):** `interp_new` ~1.5 µs, `parse_prelude`
+~50 µs, `sum_tail` 1k/10k/100k ~8/82/845 ms, `fib` 15/20/25 ~14/155/1772 ms. The
+loops are slow on purpose — arithmetic is Brood, not native (ADR-008). (A stale
+bench binary from an earlier WIP state spammed a `[reset]` debug print through the
+first archived run; a clean rebuild of the current HEAD source confirmed it gone.)
+
+### Isolated tests roll back the globals (ADR-017) (same day)
+
+`:isolated` went from *scheduled-alone* to *state-isolated*. New `%isolate`
+primitive: snapshot the runtime's global table (`Heap::snapshot_globals`), run a
+thunk, restore (`Heap::restore_globals`) — so a `def`/`set!` inside is rolled back.
+The test framework now runs the isolated phase **first**, each test through
+`%isolate`, so an isolated test sees the clean post-load baseline and its defs
+can't leak to another test. Couldn't do a true fresh runtime per test: a thunk's
+closure handle is region-tagged to its runtime (ADR-013), so it can't run in
+another — isolating *bindings* is the proportionate fix (rationale in ADR-017).
+
+**Verified.** 27 Rust tests (new: `isolate_rolls_back_global_defs`) + suite
+(41 tests, 2 isolated, the isolated phase running first) + doc-test green.
+
+### Step 4b — green M:N scheduler via stackful coroutines (same day)
+
+**Goal.** Replace OS-thread-per-process (4a) with cheap green processes on a fixed
+worker pool, where `receive` *suspends* instead of blocking — so spawn scales,
+OS threads stay ≈`nproc`, and the `Gate` deadlock disappears.
+
+**Approach (ADR-018, `docs/scheduler.md`).** Path A — **`corosensei` stackful
+coroutines**: each process runs in a coroutine with its own parkable stack, so the
+native recursive `eval` is untouched. A pool of ≈`nproc` worker threads pulls
+ready processes off a shared run queue; `receive` on an empty mailbox suspends the
+coroutine and the worker parks it; `send` re-queues it. (Path B — an explicit-VM
+rewrite — was declined; only precise GC needs it.)
+
+**Mechanics.**
+- `receive`/`self`, deep in `eval`, find their process via a thread-local `Ctx`
+  the coroutine sets at start and **re-establishes after every suspend** (so it
+  survives the worker multiplexing other processes, and migration to another
+  worker — corosensei supports cross-thread resume).
+- The "check empty → park" vs "deliver → wake" race is closed under one mailbox
+  mutex: a worker, seeing a `Yield`, re-checks the queue before parking; `send`
+  takes the parked process and re-queues it, else notifies the root's condvar.
+- The **root** thread (REPL / file runner) isn't a coroutine — its `receive`
+  *blocks* on its mailbox; only spawned processes yield.
+- corosensei marks `Coroutine` `!Send`; we `unsafe impl Send for Process` (the run
+  queue owns a process exclusively; corosensei allows cross-thread resume; captured
+  state is `Send`). A panic in a process is caught so the worker survives.
+- Pool size is a **setting** (default `nproc`, `-j` overrides) — never hardcoded.
+  New `(worker-threads)`; `(spawn-count)`/`(peak-threads)` reworded (green
+  processes on a pool, not one OS thread each). The test summary now reads e.g.
+  *"39 processes (1 runner + 37 unit workers + 1 nested) on 28 worker threads,
+  peak 28 running at once."*
+
+**Deferred (optimisation, per "get it working first").** Work-stealing (one shared
+run queue today) and reduction-counted preemption (cooperative today: a CPU-bound
+process with no `receive` holds its worker until done — bounded by the pool). Both
+are additive, per the BEAM comparison in `scheduler.md`.
+
+**Verified.** 27 Rust tests + the suite (now on green processes, 28 worker threads,
+0.76 s) + doc-test green; no hang/deadlock; build warning-clean.

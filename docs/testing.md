@@ -64,28 +64,36 @@ test name:
 (describe "writes a shared file" :serial   ...)  ; its tests run one-at-a-time,
                                             ;   in one worker, but alongside
                                             ;   other groups
-(describe "redefines a global" :isolated   ...)  ; runs ALONE — nothing else runs
-                                            ;   at the same time
+(describe "redefines a global" :isolated   ...)  ; runs ALONE, against a private
+                                            ;   copy of the globals (its defs
+                                            ;   roll back) — nothing else runs
 (test "touches global state" :isolated     ...)  ; a lone isolated test
 ```
 
-| mode | within the group | versus other groups |
-|---|---|---|
-| *(default)* | each test in its own process, in parallel | parallel |
-| `:serial` | one process, tests in sequence | parallel |
-| `:isolated` | one process, tests in sequence | **exclusive** (runs alone) |
+| mode | within the group | versus other groups | globals |
+|---|---|---|---|
+| *(default)* | each test in its own process, in parallel | parallel | shared (live table) |
+| `:serial` | one process, tests in sequence | parallel | shared (live table) |
+| `:isolated` | one process, tests in sequence | **exclusive** (runs alone) | **private copy, rolled back** |
 
 **Why this exists.** A runtime's processes **share one global table** (see
 [`shared-code.md`](shared-code.md)). Two parallel tests that both redefine the
 same global would race. A test that only reads the prelude and its own locals is
 safe to run in parallel — the default. A test that `def`s or `set!`s a *shared*
 name (or relies on ordering, or a shared external resource) should mark its group
-`:serial` (serialise within the group) or `:isolated` (serialise against
-everything).
+`:serial` (serialise within the group) or `:isolated` (run alone **and** against a
+rolled-back private copy of the globals, so its `def`/`set!` can't leak to any
+other test).
 
-**Phases.** The runner spawns all `:parallel` and `:serial` units and runs them
-together; once they finish, it runs the `:isolated` units one at a time *on the
-runner itself*, so nothing else is executing.
+**Phases.** The `:isolated` units run **first** — one at a time *on the runner
+itself*, each under the `%isolate` primitive (which snapshots the global bindings,
+runs the test, then restores them). So every isolated test sees the clean
+post-load baseline (none of the parallel/serial defs) and nothing it defines
+survives. Only `%isolate` rolls back *bindings*; the append-only code slabs and
+the symbol interner still grow (memory, not behaviour — there's no GC yet).
+**Then** the runner spawns all `:parallel` and `:serial` units and runs them
+together. (`%isolate` is sound only because the isolated phase runs alone, with no
+other process mutating globals.)
 
 ## Share-safe tallying (how it works)
 

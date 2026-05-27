@@ -21,19 +21,23 @@
 ;;   (describe "uses a shared file" :serial ...)   ; its tests run one-at-a-time,
 ;;                                          ;   in a single worker, but still
 ;;                                          ;   alongside *other* groups
-;;   (describe "mutates a global" :isolated ...)   ; runs ALONE — no other test
-;;                                          ;   runs at the same time
+;;   (describe "mutates a global" :isolated ...)   ; runs ALONE, against a PRIVATE
+;;                                          ;   copy of the globals: no other test
+;;                                          ;   runs at the same time, and its
+;;                                          ;   def/set! roll back when it finishes
 ;;   (test "touches global state" :isolated ...)   ; a lone isolated test
 ;;
 ;; Why this matters here: a runtime's processes SHARE one global table (see
 ;; docs/shared-code.md), so two parallel tests that both redefine the same global
 ;; would race. Mark such a group `:serial` (serialise within the group) or
-;; `:isolated` (serialise against everything). Tests that only read the prelude
-;; and their own locals are safe to run in parallel — the default.
+;; `:isolated` (run alone AND with a rolled-back private copy of the globals, so a
+;; test's definitions can't leak to any other test). Tests that only read the
+;; prelude and their own locals are safe to run in parallel — the default.
 ;;
-;; Phases: all :parallel and :serial units are spawned and run together; once
-;; they finish, the :isolated units run one at a time on the runner itself, so
-;; nothing else is executing.
+;; Phases: the :isolated units run FIRST — one at a time on the runner itself,
+;; each under `%isolate` (a private copy of the globals) — so each sees the clean
+;; post-load baseline and nothing it defs survives. THEN all :parallel and :serial
+;; units are spawned and run together.
 ;;
 ;; ─────────────────────────────────────────────────────────────────────────────
 ;; SHARE-SAFE TALLYING
@@ -209,6 +213,15 @@
         ms    (- (now) start))
     (list group (first t) fails ms)))
 
+;; Like run-test, but evaluate the body with a private copy of the global
+;; bindings (`%isolate`): an :isolated test's def/set! is rolled back when it
+;; finishes, so it can't leak to any other test. Used only in the isolated phase.
+(defn run-test-fresh (group t)
+  (let (start (now)
+        fails (%isolate (second t))
+        ms    (- (now) start))
+    (list group (first t) fails ms)))
+
 ;; Run every test in a unit, in order, returning the list of results. This is
 ;; what a worker does (for a :parallel/:serial unit) and what the runner does
 ;; directly for an :isolated unit.
@@ -244,11 +257,14 @@
       (collect-units trace? (- remaining 1) (append results acc)))))
 
 ;; Isolated phase: run each isolated unit on the runner itself, one at a time, so
-;; nothing else is executing.
+;; nothing else is executing — and each test under `%isolate`, so its global defs
+;; are rolled back and can't leak to another test.
 (defn run-isolated (trace? units acc)
   (if (empty? units)
     acc
-    (let (results (run-unit (first units)))
+    (let (unit    (first units)
+          group   (second unit)
+          results (map (fn (t) (run-test-fresh group t)) (third unit)))
       (fold (fn (_ r) (render-result trace? r)) nil results)
       (run-isolated trace? (rest units) (append results acc)))))
 
@@ -277,6 +293,8 @@
   (fold (fn (acc r) (if (r-failed? r) (+ acc 1) acc)) 0 results))
 (defn count-failures (results)            ; total failed assertions across tests
   (fold (fn (acc r) (+ acc (count (r-fails r)))) 0 results))
+(defn sum-ms (results)                    ; summed runtime (ms) of the given tests
+  (fold (fn (acc r) (+ acc (r-ms r))) 0 results))
 
 ;; --- entry point -------------------------------------------------------------
 (defn run-tests (& opts)
@@ -287,32 +305,44 @@
         spawn0  (spawn-count)
         start   (now)
         me      (self))
-    (spawn-units par me)
-    (let (par-results (collect-units trace? (count par) nil)
-          iso-results (run-isolated trace? iso nil)
-          results     (append par-results iso-results)
+    ;; Isolated phase first: each isolated test runs alone, against a private copy
+    ;; of the globals, so it sees the clean post-load baseline (none of the
+    ;; parallel/serial defs below) and its own defs roll back. Then launch the
+    ;; parallel/serial workers and collect them.
+    (let (iso-results (run-isolated trace? iso nil)
+          _           (spawn-units par me)
+          par-results (collect-units trace? (count par) nil)
+          results     (append iso-results par-results)
           elapsed     (- (now) start)
           spawned     (- (spawn-count) spawn0)
           workers     (count par)               ; one worker per parallel/serial unit
           nested      (- spawned workers)        ; extra processes the tests spawned
           total       (count results)
           failed      (count-failed results)
-          fails       (count-failures results))
+          fails       (count-failures results)
+          ;; Total test runtime broken down by execution variation. It's the SUM
+          ;; of each test's own duration, so the parallel/serial figure exceeds
+          ;; its share of the wall clock (those tests overlap on worker threads);
+          ;; the isolated figure is wall-clock-like (they run one at a time).
+          iso-time    (sum-ms iso-results)
+          par-time    (sum-ms par-results)
+          test-time   (+ iso-time par-time))
       (println "")              ; end the progress line
       (report-failures results)
       (when (opt? :slow opts) (report-slow results))
       (println "")
       (println total "tests," (- total failed) "passed," failed "failed"
                (str "(" fails " failed assertions, " (count iso) " isolated)"))
-      (println (str "  (" elapsed " ms, peak " (mb-str (mem-peak)) ")"))
-      ;; Each spawned process is its own OS thread (step 4a); +1 for the runner on
-      ;; the main thread. These count threads *created over the run* (born and
-      ;; gone over time) — not threads alive at once, and certainly not CPU cores:
-      ;; the OS time-slices threads onto whatever cores exist. `peak` is the most
-      ;; that were alive simultaneously.
-      (println (str "  " (+ spawned 1) " processes / " (+ spawned 1) " OS threads created"
-                    " (1 runner + " workers " unit workers + " nested " nested)"
-                    ", peak " (peak-threads) " alive at once"))
+      (println (str "  test runtime: " test-time " ms total — "
+                    "parallel/serial " par-time " ms, isolated " iso-time " ms"))
+      (println (str "  (" elapsed " ms wall, peak " (mb-str (mem-peak)) ")"))
+      ;; Processes are cheap green coroutines (step 4b), multiplexed onto a fixed
+      ;; pool of worker OS threads (≈ nproc) — NOT one thread each. `peak` is the
+      ;; most that ran simultaneously (bounded by the pool), so it shows the real
+      ;; parallelism reached.
+      (println (str "  " (+ spawned 1) " processes (1 runner + " workers
+                    " unit workers + " nested " nested) on " (worker-threads)
+                    " worker threads, peak " (peak-threads) " running at once"))
       (if (> failed 0)
         (error (str failed " test(s) failed"))
         :ok))))

@@ -14,7 +14,10 @@ use crate::{printer, reader};
 /// Install the primitive kernel into `root`.
 pub fn register(heap: &mut Heap, root: EnvId) {
     let def = |heap: &mut Heap, name: &str, func: NativeFnPtr| {
-        let v = heap.alloc_native(NativeFn { name: name.to_string(), func });
+        let v = heap.alloc_native(NativeFn {
+            name: name.to_string(),
+            func,
+        });
         heap.env_define(root, value::intern(name), v);
     };
 
@@ -82,6 +85,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // errors / control
     def(heap, "throw", throw);
     def(heap, "%try", try_catch);
+    def(heap, "%isolate", isolate);
 
     // processes (concurrency)
     def(heap, "spawn", spawn);
@@ -90,6 +94,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "self", self_pid);
     def(heap, "spawn-count", spawn_count);
     def(heap, "peak-threads", peak_threads);
+    def(heap, "worker-threads", worker_threads);
 }
 
 fn arg(args: &[Value], i: usize) -> Value {
@@ -98,7 +103,11 @@ fn arg(args: &[Value], i: usize) -> Value {
 
 fn two(args: &[Value], who: &str) -> Result<(Value, Value), LispError> {
     if args.len() != 2 {
-        return Err(LispError::arity(format!("{}: expected 2 arguments, got {}", who, args.len())));
+        return Err(LispError::arity(format!(
+            "{}: expected 2 arguments, got {}",
+            who,
+            args.len()
+        )));
     }
     Ok((args[0], args[1]))
 }
@@ -234,8 +243,12 @@ fn vector_ref(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         (Value::Vector(id), Value::Int(n)) if n >= 0 && (n as usize) < heap.vector(id).len() => {
             Ok(heap.vector(id)[n as usize])
         }
-        (Value::Vector(_), Value::Int(_)) => Err(LispError::runtime("vector-ref: index out of range")),
-        _ => Err(LispError::type_err("vector-ref: expected a vector and an integer index")),
+        (Value::Vector(_), Value::Int(_)) => {
+            Err(LispError::runtime("vector-ref: index out of range"))
+        }
+        _ => Err(LispError::type_err(
+            "vector-ref: expected a vector and an integer index",
+        )),
     }
 }
 
@@ -283,7 +296,10 @@ fn is_vector(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::Bool(matches!(arg(args, 0), Value::Vector(_))))
 }
 fn is_fn(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Bool(matches!(arg(args, 0), Value::Fn(_) | Value::Native(_))))
+    Ok(Value::Bool(matches!(
+        arg(args, 0),
+        Value::Fn(_) | Value::Native(_)
+    )))
 }
 
 // ---------- value <-> text and I/O ----------
@@ -384,12 +400,20 @@ fn require(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
         Value::Str(id) => heap.string(id).to_string(),
         other => {
             let shown = printer::print(heap, other);
-            return Err(LispError::type_err(format!("require: expected a module name, got {}", shown)));
+            return Err(LispError::type_err(format!(
+                "require: expected a module name, got {}",
+                shown
+            )));
         }
     };
     let src = match name.as_str() {
         "test" => TEST_LIB,
-        _ => return Err(LispError::runtime(format!("require: unknown module '{}'", name))),
+        _ => {
+            return Err(LispError::runtime(format!(
+                "require: unknown module '{}'",
+                name
+            )))
+        }
     };
     let root = heap.env_root(env);
     for form in reader::read_all(heap, src)? {
@@ -400,7 +424,9 @@ fn require(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
 
 fn apply_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     if args.len() < 2 {
-        return Err(LispError::arity("apply: expected a function and an argument list"));
+        return Err(LispError::arity(
+            "apply: expected a function and an argument list",
+        ));
     }
     let f = args[0];
     let mut argv = args[1..args.len() - 1].to_vec();
@@ -448,7 +474,9 @@ fn throw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 
 fn spawn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     if args.is_empty() {
-        return Err(LispError::arity("spawn: expected a function and optional arguments"));
+        return Err(LispError::arity(
+            "spawn: expected a function and optional arguments",
+        ));
     }
     let pid = crate::process::spawn(heap, args[0], &args[1..])?;
     Ok(Value::Int(pid as i64))
@@ -467,16 +495,40 @@ fn self_pid(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::Int(crate::process::self_pid() as i64))
 }
 
-/// `(spawn-count)` — how many processes have been spawned since the program
-/// started. Each is backed by one OS thread, so this also counts worker threads.
+/// `(spawn-count)` — how many green processes have been spawned since the program
+/// started. (Green processes are cheap coroutines, not OS threads — step 4b.)
 fn spawn_count(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::Int(crate::process::spawn_count() as i64))
 }
 
-/// `(peak-threads)` — high-water mark of spawned threads running concurrently;
-/// shows how much parallelism was actually reached under the `-j` cap.
+/// `(peak-threads)` — high-water mark of processes running *simultaneously*
+/// (bounded by the worker-pool size); how much parallelism was actually reached.
 fn peak_threads(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::Int(crate::process::peak_threads() as i64))
+}
+
+/// `(worker-threads)` — size of the scheduler's worker-thread pool that runs the
+/// green processes (≈ `nproc`, or the `-j` setting); 0 until the first spawn.
+fn worker_threads(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    Ok(Value::Int(crate::process::worker_threads() as i64))
+}
+
+/// `(%isolate thunk)` — call `thunk` (no args) with a *private copy* of the
+/// runtime's global bindings: any `def`/`set!` it makes is rolled back when it
+/// returns, so it cannot affect other code. The test framework wraps each
+/// `:isolated` test in this so a test's definitions never leak to another test.
+/// Restores the bindings even if the thunk raises (the error then propagates).
+///
+/// This only isolates *bindings* — the shared code slabs and the symbol interner
+/// still grow (memory, not behaviour; there's no GC yet) — and it is sound only
+/// with no other process mutating globals concurrently, which the runner ensures
+/// by running isolated tests alone.
+fn isolate(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
+    let thunk = arg(args, 0);
+    let saved = heap.snapshot_globals();
+    let result = apply(heap, thunk, &[], env);
+    heap.restore_globals(saved);
+    result
 }
 
 fn try_catch(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {

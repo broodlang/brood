@@ -124,13 +124,15 @@ This is the largest *core* undertaking in the project. Two consequences:
    `Message` (deep copy) rebuilt in the receiver's heap; a global registry maps
    pid → mailbox. The mailbox is registered in the parent before the thread
    starts (so a `send` right after `spawn` can't race).
-2. ⬜ **Green M:N + work-stealing** — replace OS-thread-per-process with
-   lightweight green processes on a small worker pool (default **2**), via
-   coroutine suspension at `receive`. This is what makes them cheap (millions)
-   and gives the core cap.
-3. ⬜ **`Send` per-process heaps** already hold (step 2/3); migration of running
-   processes comes with the pool.
-4. ⬜ Later: preemption, supervision/links.
+2. ✅ **Green M:N** — processes are now stackful coroutines (`corosensei`) on a
+   pool of ≈`nproc` worker threads (a setting; `-j` overrides), suspending at
+   `receive` rather than blocking. Cheap spawn, bounded OS threads, no `Gate`
+   deadlock. `Send` per-process heaps let a process migrate between workers. See
+   `docs/scheduler.md` / ADR-018. **Cooperative** for now (yields at `receive`).
+3. ⬜ **Work-stealing** — per-worker run queues + steal-on-idle (today: one shared
+   run queue). An optimisation, not a correctness need.
+4. ⬜ Later: reduction-counted preemption (fairness for CPU-bound processes),
+   supervision/links.
 
 ## Distribution across nodes (future — kept in mind)
 
