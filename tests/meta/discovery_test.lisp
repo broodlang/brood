@@ -1,0 +1,7 @@
+;; In a subdirectory — proves `brood test` discovers tests/**/*_test.lisp
+;; recursively, not just at the top level. Register-only (no run-tests call).
+
+(require 'test)
+
+(describe "discovery"
+  (test "a nested test file is found and run" (assert= (* 6 7) 42)))

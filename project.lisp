@@ -1,0 +1,10 @@
+;; Brood project manifest (ADR-020). Read by the test runner (`brood test`) and,
+;; later, the rest of the project tooling.
+;;
+;; Convention over configuration: tests live in `tests/` as <name>_test.lisp and
+;; are found automatically, so this only declares identity. (The language's own
+;; sources live in `std/` + `crates/`, not a project `src/`, so there's no source
+;; path to add here.)
+(project
+  :name    "brood"
+  :version "0.1.0")

@@ -29,9 +29,9 @@ these are the ones to unlearn:
 | Clojure habit | Brood reality | What you get if you guess wrong |
 |---|---|---|
 | `(try … (catch Type e body))` | `catch` takes a **bare binding**: `(catch e body)`. There is no exception class. | The class name gets bound *as* the variable and `e` is treated as body → cryptic `unbound symbol: e`. |
-| Multi-arity `(fn ([x] …) ([x y] …))` | Not supported. Use `&optional` / `&` rest in **one** parameter list. | `type error: expected a symbol`. |
+| Multi-arity `(fn ([x] …) ([x y] …))` | No arity overloading. `fn` *is* multi-clause, but Erlang-style — **same-arity** dispatch by **pattern + guard** (see [Pattern matching](#pattern-matching)), not by arity. Use `&optional` / `&` rest for variable arity. | — |
 | `{:a 1}` map literal | Maps aren't implemented yet. | `parse error: map literals '{ }' are not supported yet`. |
-| Destructuring `[{:keys [a b]} …]`, `:or` defaults | Not supported. Bind positionally; default with `&optional (b 10)`. | Parse / type error. |
+| `{:keys [a b]}` / `:or` map destructuring | No map patterns yet (maps aren't implemented). Sequence/tuple destructuring **is** supported — `(let ([a b] v) …)`, `(let ((h & t) v) …)`. | Parse / type error. |
 | `(defn f [x y] …)`, `(let [a 1 b 2] …)` | Param lists and `let` bindings are **lists** — `(x y)` / `(a 1 b 2)`. | Works (vectors are accepted in binding position), but it's non-idiomatic — prefer lists. |
 | `(/ 7 2)` → ratio `7/2` | No ratios. Integer args give an integer **only when they divide evenly**; otherwise a float. `(/ 12 3)` → `4`, `(/ 7 2)` → `3.5`. | A float where you expected an exact ratio. |
 
@@ -166,6 +166,90 @@ evaluated in its place. Templates are written with quasiquote: `` `x `` quotes,
 > Note: nested quasiquote is not level-tracked yet, and macros are unhygienic
 > (use `gensym`). See spec §7.
 
+## Pattern matching
+
+Erlang/Elixir-style pattern matching, with **one pattern grammar reused at every
+binding site**: `match`, refutable `let`, and `fn`/`defn` clauses. The compiler
+is written in Brood (`std/prelude.lisp`) — no new special form. For the full
+design and rationale see [pattern-matching.md](pattern-matching.md).
+
+### The grammar
+
+| Pattern | Matches / binds |
+|---|---|
+| `_` | anything; binds nothing |
+| `x` | anything; **binds** `x` (a repeated `x` is an equality constraint) |
+| `42` `"s"` `:k` `true` `nil` | a literal, compared with `=` |
+| `'sym` | the literal symbol `sym` |
+| `~expr` | the current value of `expr` (a *pin*) |
+| `(p1 p2 …)` | a list of that exact length, element-wise |
+| `(p1 & rest)` | head(s) + the tail bound to `rest` |
+| `[p1 p2 …]` | a vector of that exact length — the **tagged-data / tuple idiom** |
+
+Patterns nest to any depth. **The one trap:** a bare symbol *binds* (and
+shadows) — it does **not** test against a same-named value. Match a known value
+with a keyword (`:ok`), a quoted symbol (`'none`), or a pin (`~x`).
+
+### `match`
+
+Clauses are **wrapped** `(pattern [:when guard] body…)`; the first whose pattern
+(and guard) matches runs its body. `case` is just `match` with literal patterns.
+
+```clojure
+(match msg
+  ([:say text]      (println text))
+  ([:add a b]       (+ a b))
+  ((x & xs)         (str "head " x ", rest " xs))
+  (n :when (int? n) (handle-int n))
+  (_                :unknown))          ; explicit catch-all
+```
+
+A `match` in tail position is TCO-safe (loops and receive loops won't overflow).
+No clause matching **crashes** with a structured, catchable value
+`[:match-error <context> <value> <patterns-tried>]` — add a `_` clause to make a
+match total:
+
+```clojure
+(try (match resp ([:ok v] v))
+  (catch e
+    (match e
+      ([:match-error ctx val pats] (recover val))
+      (_                           (throw e)))))
+```
+
+### Refutable / destructuring `let`
+
+A `let` binding target may be a pattern; it's a refutable bind (Brood's `=`) that
+raises on mismatch. Bindings stay sequential, freely mixed with plain symbols:
+
+```clojure
+(let (a 1                    ; plain symbol (unchanged)
+      [:ok v] (fetch key)    ; refutable: raises if fetch isn't [:ok _]
+      (x & xs) (range 10))   ; destructure a list
+  (use a v x xs))
+```
+
+### `fn` / `defn` clauses
+
+`fn` is **multi-clause** when every form after it is a clause `(param-list body…)`
+— Erlang-style same-arity dispatch by pattern (and guard). Otherwise it's
+single-clause, and each **required** parameter may itself be a pattern. `defn`
+inherits both (it forwards to `fn`).
+
+```clojure
+(defn fac
+  ((0)  1)                              ; multi-clause dispatch
+  ((n)  (* n (fac (- n 1)))))
+
+(defn area ([x y]) (* x y))             ; single-clause, tuple-destructured param
+(defn move (p [dx dy] &optional (n 1))  ; patterns coexist with &optional / & rest
+  …)
+```
+
+Parameter lists stay **lists** (ADR-010), so a single tuple parameter must be
+wrapped: `(defn g ([x y]) …)` is one 2-tuple param, while `(defn g (x y) …)` is
+two params. Pattern destructuring of `&optional` slots is not supported yet.
+
 ## Errors
 
 Raise with `throw` (any value) or `error` (a formatted message), and handle with
@@ -186,6 +270,11 @@ Raise with `throw` (any value) or `error` (a formatted message), and handle with
 zero) it binds the error's message string. A `try` with no `catch` is just a
 `do`. Under the hood `throw` and `%try` are primitives and `try`/`catch`/`error`
 are written in Brood (`std/prelude.lisp`) — see [primitives.md](primitives.md).
+
+Type errors are **self-identifying**: they name the operation, the type it
+wanted, and the tag + printed form of what actually arrived — e.g.
+`type error: first: expected list or vector, got int (5)`. The tag word is the
+[`type-of`](#predicates) name, so an error and `type-of` always agree.
 
 ## Processes (concurrency)
 
@@ -261,6 +350,12 @@ run used. See [concurrency.md](concurrency.md) for the model and limitations.
 ### Predicates
 `nil?`  `pair?`  `list?`  `symbol?`  `keyword?`  `string?`  `number?`  `int?`
 `float?`  `bool?`  `fn?`  `vector?`
+
+- `(type-of x)` returns the runtime type tag as a keyword — `:int` `:float`
+  `:string` `:symbol` `:keyword` `:bool` `:nil` `:pair` `:vector` `:fn`
+  `:macro` `:native` — the spellings mirror the predicates above. It's the
+  reflective primitive that in-language type checks build on; the predicates are
+  the common-case shortcuts.
 
 ### Strings & I/O
 `str`  `print`  `println`  `pr-str`

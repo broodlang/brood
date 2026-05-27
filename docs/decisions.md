@@ -484,6 +484,256 @@ runtime crate (justified per ADR-014).
 
 ---
 
+## ADR-019 — Emacs-flat modules: `provide` / `require` / `load-path`, not namespaces
+
+**Status:** accepted; not yet implemented.
+
+**Context.** Today `require` (builtins.rs) is hardcoded to embedded modules — it
+knows only `'test`, baked in with `include_str!`; `load` takes a *literal* path,
+with no search and no load-once. There is no `provide`, no `*load-path*`, no
+feature tracking. As Brood grows a real `std/` and user projects appear, code
+must be loadable *by capability name*, once, from configurable locations. The
+fork: a flat, Emacs-style namespace, or first-class namespaced modules
+(Clojure/Racket-style per-file resolution with explicit imports/exports).
+
+**Decision.** **Flat, Emacs-style modules over the one shared global table.**
+- `*features*` (a global list) records what's loaded; `(provide 'name)` adds it,
+  `(require 'name)` returns early if present.
+- `*load-path*` (a global list of dirs) is searched for `name.lisp`; the first hit
+  is `load`ed (evaluated into the shared globals), then `require` checks the
+  feature was actually provided.
+- Embedded std modules (prelude, `test`, …) stay baked into the binary so it runs
+  from any directory; `require` consults the embedded table before the load-path.
+- **Mechanism vs policy (ADR-006/008):** the only new Rust is filesystem
+  reflection — `file-exists?`, `list-dir`, `cwd` — plus one primitive that hands a
+  baked-in module's source to Brood. `provide` / `require` / `load-path` themselves
+  are Brood, in `std/prelude.lisp`.
+- **Convention, not mechanism:** `foo--internal` (double dash) marks "private",
+  Emacs's lightweight interface signal. Unenforced.
+
+**Why.**
+- *Matches the architecture as built.* One shared mutable global table per runtime
+  (ADR-013); `load` already evals into root. Flat modules add ~no core machinery —
+  Brood functions + 3 fs primitives. Namespaces would touch the symbol model
+  (`value.rs`: interned `u32`, no namespace axis), the reader (`foo/bar`),
+  env/eval (per-namespace resolution), the `RuntimeCode` global table (re-keying),
+  and the hot-reload path — the single largest expansion of the core, against
+  "keep the language as small as possible" and ADR-011.
+- *Right semantics for the goal.* Brood exists to be the language of a
+  self-editing, Emacs-like editor, and such an editor is *defined* by a flat,
+  openly-redefinable global namespace (advice, monkey-patching, redefining
+  anyone's function live). ADR-013's cross-process hot reload is the Brood-native
+  form of exactly that. Namespaces would fight the "any code can redefine any
+  behaviour at runtime" property the project exists for.
+- *Forecloses nothing.* Namespaces can arrive later, additively, along a spectrum
+  without revisiting this decision: (1) flat [now]; (2) flat + a pure-Brood
+  `defmodule` / `import` macro layer that prefixes names (`text/insert`) in the flat
+  table — **zero core change**, since symbols already carry `/` / `-` and lookup
+  stays "find the symbol"; (3) first-class per-file resolution [costly core change]
+  only if a package ecosystem ever demands it. ADR-011: ship the simple form,
+  defer the powerful one.
+
+**Trade-offs accepted.** No isolation — two modules can clobber each other's
+names; the only guard is naming convention (prefixes, `--` privates), exactly as
+in Emacs Lisp. No machine-checked exports. Fine now (you run only your own code;
+no package ecosystem), recoverable later via the macro layer above. A concurrent
+re-`require` of the same absent feature can double-load; idempotent like Emacs,
+and not worth guarding now (ADR-011).
+
+---
+
+## ADR-020 — Project model: `project.lisp` + a discovery-based test runner
+
+**Status:** accepted; not yet implemented.
+
+**Context.** We want (a) a notion of "a Brood project" — a root, source/test
+directories, a name/version — and (b) a tool that *finds and runs* all of a
+project's tests, instead of hand-listing cases and calling `(run-tests)` at the
+foot of one file. The test framework (ADR-015) already separates **registration**
+(`describe` / `test` → `*units*`) from **execution** (`run-tests`) — exactly what
+discovery needs. Fork: a project file as Brood *source* (`project.lisp`) or as
+inert *data* (`Brood.proj`).
+
+**Decision.** **Convention over configuration** (Mix / Cargo style), with a
+manifest for identity.
+- **Conventional layout — no config to get the normal case working.** `src/` holds
+  the project's Brood source (prepended to `*load-path*`, so its files are
+  `require`-able by name); `tests/` holds tests, discovered as `*_test.lisp`
+  recursively. A fresh project that puts code in `src/` and tests in `tests/` needs
+  no path declarations at all.
+- **`project.lisp`** — a Brood-source manifest in the Leiningen `project.clj`
+  mould, mainly declaring *identity*: `(project :name … :version …)`. It reads as
+  data but is eval'd, so computed config is available when wanted. **Project
+  root** = the nearest ancestor directory containing `project.lisp` (like
+  Cargo/git).
+- **Override, don't enumerate.** The conventional dirs are defaults; the manifest
+  *overrides* them (`:source-paths`, `:test-paths`) only when a project deviates —
+  you never list paths just to get the standard layout running.
+- **Test discovery** — under each test path (default `tests/`), every file matching
+  `*_test.lisp`, recursively. A test file only *registers* (`(require 'test)` +
+  `describe` / `test`); `brood test` loads them all, then calls `(run-tests)`
+  **once**. Test files no longer call `run-tests` themselves.
+- Surfaced as a CLI path — `brood test` (and an in-language `(run-project-tests)`)
+  — with the discovery/load/run logic written in Brood on the ADR-019 fs
+  primitives. Rust stays the thin substrate (CLAUDE.md core principle).
+
+**Why.**
+- **Convention over configuration.** Cargo and Python (`src/` + `tests/`), Mix
+  (`lib/` + `test/`), Leiningen (`src/` + `test/`): a new project works with zero
+  path plumbing, the manifest declares identity not layout, and every project looks
+  alike so it's navigable. `src/` + `tests/` are the defaults (matching the Cargo
+  workspace Brood lives in), overridable for the rare project that needs to deviate.
+- `project.lisp`-as-code is the most Brood-native choice (dogfooding), needs zero
+  new core (`load` already evals a file), reads as data yet keeps the
+  computed-config escape hatch — the Leiningen model, consistent with Emacs's own
+  config-is-code (and with flat modules, ADR-019). Pure-data (`Brood.proj`) buys
+  safety (don't eval an untrusted manifest) and external-tool friendliness, but
+  both matter only with a package ecosystem (premature — ADR-011), and "data"
+  today is a clunky alist because map literals (`{}`) aren't in the language yet.
+- Discovery by `*_test.lisp` (Go / ExUnit's `*_test.exs`) lets test files coexist
+  with helper files in `tests/`; aggregating into one `run-tests` preserves the
+  framework's parallel-by-default scheduling across the *whole* suite (ADR-015)
+  rather than per file.
+
+**Trade-offs accepted.** Eval'ing `project.lisp` runs arbitrary code on project
+open — fine while you run only your own projects; revisit (a data subset, or a
+sandboxed read) if third-party projects arrive. Discovery is convention-bound
+(`tests/`, `*_test.lisp`). Migration: the current single `tests/suite.lisp` (which
+calls `run-tests` itself) gets reorganised into register-only `*_test.lisp` files,
+with `cargo test`'s `suite.rs` invoking the discovery runner.
+
+---
+
+## ADR-021 — Pattern matching: one Brood compiler, reused at every binding site
+
+**Status:** accepted; implemented. Design in `docs/pattern-matching.md`.
+
+**Context.** Erlang/Elixir-style pattern matching subsumes two Tier-2 roadmap
+items (destructuring in `let`/`fn`, and `case`) and sets up `receive` clauses. A
+Lisp can't copy Elixir's `=`-is-match operator: code is data, so `(:ok x)` is
+indistinguishable from a call and `=` is a plain function (ADR-008) that
+evaluates both operands. The Lisp-faithful translation is to put **one pattern
+grammar at every binding form** and let those binds be refutable.
+
+**Decision.** A single pattern→code compiler, **written in Brood** (`std/prelude.lisp`),
+emitting nested `if`/`let` over existing primitives — no Rust matcher, no new
+special form (the `try`/`catch` precedent: a macro over primitives, ADR-006/008).
+
+- **Surfaces.** `match` (value dispatch; `case` is just `match` with literal
+  patterns); refutable/destructuring `let`; `fn`/`defn` clauses (multi-clause
+  Erlang dispatch + pattern parameters). `match*` is the shared engine; each
+  surface is a thin layer that picks the failure context.
+- **Grammar.** `_` wildcard; a bare symbol **binds** (a repeated one is a
+  non-linear equality constraint); literals match by `=`; `'sym` matches a
+  symbol; `~expr` is a pin (match the value of `expr`); `(p …)` / `(p & rest)`
+  list patterns; `[p …]` fixed-length vector — the **tagged-data idiom**, chosen
+  for constructor/pattern symmetry (the same literal builds *and* matches).
+- **Clauses are wrapped** `(pattern [:when guard] body…)` — one clause shape for
+  `match`/`fn`/`receive`; guards and multi-form bodies fit; misuse is a loud
+  compile-time error. (`let` stays flat `pattern value …`.)
+- **Failure crashes with a structured, catchable value**
+  `[:match-error <context> <value> <patterns>]` (Erlang "let it crash"); add a
+  `_` clause to total a match. The macro also raises **compile-time** errors for
+  malformed `&`, unreachable clauses after a catch-all, and bad `:when`.
+- **`let`/`fn` are lowered in the compile pass** (ADR-022), not the evaluator:
+  a non-symbol target / a multi-clause or pattern-param `fn` is desugared to
+  `match*` once at definition. eval's `let`/`fn` stay symbol-only. This realises
+  the "one matcher, kept in Brood, stays redefinable" intent of the design's
+  Option A, while inheriting the compile pass's expand-once speed.
+
+**Why.** Maximum power for one mechanism, all in Brood (redefinable later — map
+patterns, custom extractors), the core unchanged. Tail position is preserved
+(each chosen body lands in the generated `if`/`let` tail), so match/receive loops
+are TCO-safe.
+
+**Trade-offs accepted.** A bare symbol always binds (the one trap — match a known
+value with a keyword, `'sym`, or `~pin`). The fn-clause failure context is `:fn`,
+not the function's name (the name is attached after closure creation) — a legible
+nicety deferred. Pattern destructuring of `&optional` slots is deferred (ambiguous
+defaults; rare; additive). The textbook fail-continuation duplication is left as-is
+(patterns are shallow; thunk it if measured — see the design doc's code-size note).
+
+---
+
+## ADR-022 — A macroexpand-all compile pass (expand once at definition)
+
+**Status:** accepted; implemented.
+
+**Context.** The evaluator expands macros lazily: a function body keeps its macro
+calls unexpanded, so each *call* re-expands them. Cheap macros (`when`, `->`)
+hardly notice; the pattern matcher's expander is heavy, so a `match` in a loop
+cost ~25× a plain `if` (re-running the whole Brood compiler every iteration).
+Correct and TCO-safe, but too slow for the receive loops `match` is meant for.
+
+**Decision.** A **compile pass** — `macros::macroexpand_all`, a code walk that
+fully expands every macro call (and lowers the pattern binders of ADR-021) —
+run **once at each top-level / definition boundary**: `eval_str`, `load`,
+`require`, `eval`, and the prelude loader, form-by-form (so a macro a form
+defines is visible to the next). The evaluator **still** expands lazily as a
+fallback, which covers a macro defined and used within the same top-level form
+(not yet defined when the walk ran). `quote`/`quasiquote` are left opaque (their
+contents are data; code inside `~unquote` still expands when it runs).
+
+**Why.** A `match` (or any macro) in a function body now expands once, so the
+body runs at plain-`if` speed; it benefits *every* macro, not just `match`. It is
+also the natural home for desugaring the `let`/`fn` pattern binders (ADR-021),
+keeping the evaluator's core forms small.
+
+**Trade-offs accepted.** Macros are now effectively *early-bound*: a closure
+created before a macro is redefined keeps the old expansion (standard Lisp
+compile-time-macro semantics; functions still late-bind, so live function
+redefinition and cross-process hot reload are unaffected — ADR-013). Further
+optimisation (caching, a fuller compile/closure-creation pass) is additive and
+deferred.
+
+---
+
+## ADR-023 — First-class type tags; types stay runtime, checking stays advisory
+
+**Status:** accepted; step 1 (reflection + diagnostics) implemented.
+
+**Context.** Brood is dynamically typed: the only "types" are the `Value`
+variants, checked ad hoc at the point of use inside primitives (`_ => type_err`).
+The discriminant wasn't nameable from the language (no `type-of`), and error
+messages dropped the offending value (`first: not a list` — but *what* was it?).
+We want better diagnostics now and a path to *limited* compile-time checking
+later — without inhibiting the language. The hard constraint is hot reload
+(ADR-013): a `def` can rebind any global, including `+`, visible to running
+processes. Only **special forms** are immutable (name-dispatched in `eval`
+before any binding lookup).
+
+**Decision.**
+1. Make the runtime tag first-class: a `Tag` enum + `value::tag` (one mapping),
+   and a `(type-of x)` primitive returning the tag as a keyword. Mechanism in
+   Rust; the predicates and any richer checking are policy in Brood.
+2. Type errors are self-identifying — `LispError::wrong_type(heap, who, expected,
+   got)` renders op + wanted type + the actual tag and printed value. The tag
+   word is the `type-of` name, so errors and reflection agree. In the same vein,
+   every builtin declares an `Arity` enforced at one gate (`eval::call_native`),
+   so wrong-count calls are clean arity errors instead of silently-tolerated
+   missing/extra args. Both are runtime metadata a later compile pass can read.
+3. Types stay **runtime-only**. No annotations, no static gating. Any future
+   compile-time analysis (a pass over the ADR-022 expanded forms) is **advisory**
+   and **local**: special-form *structure* may be a hard error (special forms
+   can't be redefined, so it's always sound); literal misuse is a warning; free
+   and global references are treated as `Any` (top of the lattice), which is what
+   keeps the analysis from ever fighting hot reload.
+
+**Why.** Reflection + good errors are pure wins with zero language risk and
+unlock in-language checks (`assert-type`, optional contracts) written in `std/`.
+Pinning "runtime-only, advisory, globals are `Any`" up front means a later
+inference pass can't quietly drift into a static type system that would break
+the dynamism the project depends on.
+
+**Trade-offs accepted.** `type-of` distinguishes `:fn` (Brood closure) from
+`:native` (Rust builtin) — it reports the *concrete* tag rather than collapsing
+both to "callable" (`fn?` remains the callability predicate). Reflection is
+honest about the implementation seam; `fn?` is the abstraction for code that
+shouldn't care. The compile-time tiers beyond special-form structure are
+deferred — additive, and gated on a real need.
+
+---
+
 ## Deferred / open questions
 
 - **Macro hygiene:** currently unhygienic `defmacro` + `gensym`; hygienic macros

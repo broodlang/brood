@@ -446,3 +446,148 @@ are additive, per the BEAM comparison in `scheduler.md`.
 
 **Verified.** 27 Rust tests + the suite (now on green processes, 28 worker threads,
 0.76 s) + doc-test green; no hang/deadlock; build warning-clean.
+
+### Test output built for legibility — source forms + plain-when-captured (same day)
+
+Goal from the user: *an LLM (or anyone reading a captured run) must see test issues
+instantly.* Two changes to the in-language framework (`std/test.lisp`):
+
+- **Failures name the source expression.** `is`/`assert=`/`assert-error` quote
+  their operands at macro-expansion time, so a failure reads `(= 1 2) is false`,
+  `(+ 2 2) => 4, expected 5`, or `expected (+ 1 2) to raise, but none did` —
+  self-identifying, instead of three identical `is: expected truthy, got false`
+  lines you couldn't tell apart. Added `refute` (assert-falsy) as the negation of
+  `is`. Normalised the suite to `assert=` for equality, `is`/`refute` for
+  predicates.
+- **Colour only on a TTY.** New `stdout-tty?` primitive (Rust `IsTerminal`); the
+  `ansi` helper returns plain text when stdout is captured (pipe, `cargo test`,
+  CI, an LLM), so the report is never littered with `\e[..m` escape codes. Colour
+  still shows for an interactive human.
+
+Updated `tests/suite-failures.lisp` (the runnable failure-rendering demo, now also
+exercising `refute`), `docs/testing.md`, and `docs/primitives.md`.
+
+**Verified.** Piped run has zero ANSI escapes; the demo renders every failure
+kind with its expression; 27 Rust tests + suite + doc-test green.
+
+### Modules, project file, and a project test runner — design (same day)
+
+**Goal.** Start on project tooling: a way to `require` Brood code by capability
+(not just the one embedded `test` module), a project manifest, and a tool that
+finds and runs a project's whole test suite. Settled the two design forks with the
+user before writing any code.
+
+**Decided** (rationale in ADR-019 / ADR-020):
+- **Modules: Emacs-flat, not namespaced** (ADR-019). `provide` / `require` track
+  loaded `*features*`; `*load-path*` is searched for `name.lisp`; everything loads
+  into the one shared global table (ADR-013). `foo--private` is the only
+  "interface" signal, by convention. The only new Rust is fs reflection
+  (`file-exists?`, `list-dir`, `cwd`); the require/provide logic is Brood
+  (ADR-006/008). Chosen over first-class namespaces because the latter would expand
+  the core across value / reader / eval / global-table / hot-reload — and because a
+  flat, openly-redefinable namespace is the *desired* semantics for a self-editing
+  Emacs-like editor. Namespaces stay available later as a pure-Brood macro layer
+  (prefix names in the flat table), so this forecloses nothing.
+- **Project file: `project.lisp`, not inert data** (ADR-020) — convention over
+  configuration. `src/` is the project source (auto on `*load-path*`), `tests/`
+  holds the tests; `project.lisp` mainly declares identity
+  (`(project :name … :version …)`) and overrides paths only when a project
+  deviates. Source not data, so it reads as data yet can compute config. Project
+  root = nearest ancestor with `project.lisp`.
+- **Test tool.** `brood test` discovers `tests/**/*_test.lisp`, loads each
+  (register-only — they no longer call `run-tests`), and runs the suite once via
+  the existing framework, which already splits registration from execution
+  (ADR-015), so discovery drops in cleanly.
+
+**Status.** Design captured (ADR-019/020, both roadmaps, this entry); implementation
+is the next step — the fs primitives, the Brood `require`/`provide` + load-path +
+project loader, the `brood test` CLI subcommand, and migrating `tests/suite.lisp`
+into `*_test.lisp` files.
+
+---
+
+## 2026-05-27 — Pattern matching + a macroexpand-all compile pass
+
+**Goal.** Implement the pattern matching designed in
+[pattern-matching.md](pattern-matching.md): Erlang/Elixir-style matching with one
+pattern grammar reused at every binding site. Subsumes the Tier-2 "destructuring
+in `let`/`fn`" and "`case`" items.
+
+**Built (all the matcher logic is Brood, in `std/prelude.lisp`):**
+- A pattern→code compiler + `match*`/`match` macros — full grammar (`_`, binds,
+  literals, `'sym`, pins `~x`, list `(p & rest)`, vector tuples `[p …]`, nesting),
+  guards (`:when`), **non-linear** patterns (a repeated var is an equality check),
+  structured catchable failure `[:match-error ctx value patterns]`, and
+  compile-time checks (malformed `&`, unreachable clause, bad `:when`).
+- Refutable/destructuring `let`, multi-clause `fn` (Erlang dispatch), and `fn`
+  pattern parameters. `defn` is now a pure forwarder to `fn`.
+
+**The performance detour (ADR-022).** The evaluator expands macros lazily, so a
+`match` in a function body re-ran the whole Brood compiler *every call* — ~1 ms/iter,
+~25× a plain `if` (TCO-safe, just slow). Fixed with a **compile pass**:
+`macros::macroexpand_all` fully expands every macro call once at each top-level /
+definition boundary (`eval_str`, `load`, `require`, `eval`, prelude loader),
+form-by-form; the evaluator keeps lazy expansion as a fallback (covers a macro
+defined and used within one form). The pass is also where `let`/`fn` pattern
+binders are **lowered** to `match*`, so eval's `let`/`fn` stay symbol-only and the
+matcher logic stays in Brood. After: `match` loops run at plain-`if` speed.
+
+**Decisions.** ADR-021 (pattern matching: one Brood compiler, every site) and
+ADR-022 (the compile pass). Two refinements vs. the design prose: the `fn`-clause
+failure context is `:fn` not the function name (deferred — the name is attached
+after closure creation), and pattern destructuring of `&optional` slots is
+deferred (required slots only).
+
+**Tested.** `tests/pattern_matching.lisp` (a dedicated, exhaustive in-language
+suite) plus cases in `tests/suite.lisp` and `crates/lisp/tests/basic.rs`,
+including a TCO check that a match-driven loop doesn't overflow.
+
+### First-class type tags (`type-of`) + self-identifying type errors (2026-05-27)
+
+Step 1 of the types direction (ADR-023): make the runtime type tag a real thing
+and put it into every type error.
+
+- **`Tag` enum + `value::tag`** (`value.rs`) — the `Value` discriminant made
+  first-class, one place that maps a value to its tag, with canonical names that
+  mirror the predicates (`Sym` → `symbol`, `Str` → `string`).
+- **`(type-of x)`** primitive → the tag as a keyword (`:int`, `:pair`, `:fn`,
+  `:native`, …). The reflective primitive the in-language checks will build on;
+  the `int?`/`string?` predicates are the common-case shortcuts.
+- **`LispError::wrong_type(heap, who, expected, got)`** (`error.rs`) — one
+  constructor for type errors that renders the op, the wanted type, and the
+  offending value's tag + printed form: `first: expected list or vector, got
+  int (5)` instead of the old `first: not a list`. Converted every scattered
+  `type_err` arm in `builtins.rs` (numeric, sequence, vector, string, I/O) to it
+  via `expect_int`/`expect_number` helpers. Error and `type-of` always agree on
+  the tag word.
+
+Deliberately *not* done yet: any compile-time checking. This is reflection +
+diagnostics only — types stay runtime, the language stays fully dynamic.
+
+**Verified.** Updated the suite's type-error assertions to the new messages and
+added `type-of` cases (`tests/suite.lisp`) plus Rust tests (`basic.rs`); 34 Rust
+tests + suite + doc-test green.
+
+### Arity metadata on builtins, enforced at one gate (2026-05-27)
+
+Follow-on to ADR-023's "more robust runtime checks." Arity was the one piece of
+type metadata a primitive genuinely has (it's fixed) yet had nowhere to live: it
+was hand-rolled per builtin (`two()`, ad-hoc `args.len()` checks) and the
+`arg()`-returns-`nil` accessor meant several natives didn't arity-check at all —
+a missing required arg silently became `nil` and surfaced later as a misleading
+*type* error.
+
+- **`Arity` on `NativeFn`** (`value.rs`) — `exact` / `at_least` / `range` /
+  `any`, declared once per builtin in `register` (the single source of truth).
+- **One gate** — `eval::call_native` checks `arity.accepts(argc)` before running
+  the primitive, used by *both* the evaluator loop and `apply`, so a builtin
+  reached through `(apply …)` is checked the same way. Built-in arity errors say
+  "argument(s)"; user-function errors still say "args" (the suite pins both).
+
+Now `(type-of)` / `(int? 1 2)` / `(now 1 2)` are clean arity errors instead of
+silently wrong results. This is also the metadata a future compile-time
+arity check would read.
+
+**Verified.** Added arity assertions to `tests/suite.lisp` and a Rust test
+(`basic.rs`); the prelude needed no changes (nothing relied on lenient arity);
+35 Rust tests + suite + doc-test green.

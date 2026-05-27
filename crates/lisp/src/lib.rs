@@ -47,6 +47,10 @@ static SHARED: LazyLock<SharedBundle> = LazyLock::new(|| {
     builtins::register(&mut heap, root);
     let forms = reader::read_all(&mut heap, PRELUDE).expect("read prelude");
     for form in forms {
+        // Expand macros once (the compile pass), then evaluate. Form-by-form so
+        // a macro defined by one form is visible to the next.
+        let form = macros::macroexpand_all(&mut heap, form, root)
+            .unwrap_or_else(|e| panic!("prelude expand: {}", e));
         eval::eval(&mut heap, form, root).unwrap_or_else(|e| panic!("prelude: {}", e));
     }
     let (code, bindings) = heap.freeze_as_shared_code(root);
@@ -92,6 +96,9 @@ impl Interp {
         let mut result = Value::Nil;
         let n = forms.len();
         for (i, form) in forms.into_iter().enumerate() {
+            // Compile pass: expand macros once before evaluating (form-by-form,
+            // so a macro a form defines is in scope for the forms after it).
+            let form = macros::macroexpand_all(&mut self.heap, form, self.root)?;
             result = eval::eval(&mut self.heap, form, self.root)?;
             if i + 1 < n {
                 self.heap.reset_local_to(cp);

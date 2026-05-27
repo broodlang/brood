@@ -55,14 +55,27 @@ The native kernel is **39 primitives** — see [`docs/primitives.md`](docs/primi
 
 ### Tier 2 — important ergonomics
 
-- ⬜ **Destructuring** in `let`/`fn` — bind `(a b)` / `[a b]` from a sequence.
-  Modern convenience; **[Brood]** if `let`/`fn` gain a macro layer, else **[kernel]**.
-- ⬜ **`case`** (dispatch on a value) and a few loop macros (`dotimes`, `dolist`). **[Brood]**
+- ✅ **Pattern matching** (ADR-021) — Erlang/Elixir-style, one Brood compiler
+  reused at every binding site (`match`, `let`, `fn`). Subsumes the two below:
+  - ✅ **Destructuring** in `let`/`fn` — sequences/tuples, refutable binds,
+    multi-clause `fn`, pattern params. **[Brood]**, lowered in the compile pass
+    (ADR-022).
+  - ✅ **`case`** — just `match` with literal patterns. Loop macros (`dotimes`,
+    `dolist`) still ⬜. **[Brood]**
 - ⬜ **`letrec` / local mutual recursion** (today: use top-level `def`). **[kernel]** small.
 - ⬜ **Symbol/keyword tools** — `symbol`, `keyword`, `name`, `symbol->string`,
   `string->symbol`. **[kernel]** small, helps metaprogramming.
 - ⬜ **File I/O** — `slurp`/`spit` (read/write a whole file as a string), beyond
-  `load`. **[kernel]** small.
+  `load`. **[kernel]** small. (The module work below also adds the fs-reflection
+  primitives `file-exists?` / `list-dir` / `cwd`.)
+- ⬜ **Modules** — Emacs-flat `provide`/`require` + `*load-path*`, `foo--private`
+  convention; load-once by feature, embedded std modules baked in. **[kernel]**
+  small (`file-exists?`/`list-dir`/`cwd`) + **[Brood]** (the require logic). ADR-019.
+- ⬜ **Project model + test runner** — convention over configuration (`src/` =
+  source on `*load-path*`, `tests/**/*_test.lisp` = tests); a `project.lisp`
+  manifest declares identity and overrides paths only when needed. `brood test`
+  discovers, loads register-only, and calls `run-tests` once. Mostly **[Brood]** +
+  a CLI subcommand. ADR-020.
 
 ### Tier 3 — robustness & quality
 
@@ -87,7 +100,9 @@ The native kernel is **39 primitives** — see [`docs/primitives.md`](docs/primi
 - `&key` named arguments (designed — ADR-011), supplied-p flags
 - Hygienic macros / `macroexpand-all`
 - Bignums / rationals (i64 + f64 is enough for now)
-- Modules / namespaces beyond the single global env
+- **Namespaces** / per-module isolation — flat Emacs-style `provide`/`require` is
+  *in scope* (Tier 2, ADR-019); true per-file namespaces stay deferred (a later,
+  additive Brood macro layer if ever needed)
 - Characters as a distinct type
 
 ---

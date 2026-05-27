@@ -128,6 +128,67 @@ pub enum Value {
     Native(NativeId),
 }
 
+/// The runtime type tags — the discriminant of [`Value`] made first-class, so it
+/// can be named (`type-of`), reported in self-identifying type errors, and used
+/// as the base of the (future, advisory) inference lattice. This *is* Brood's
+/// entire type universe; the language has no other types. Names mirror the
+/// `int?`/`string?`/… predicates (`Sym` → `symbol`, `Str` → `string`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tag {
+    Nil,
+    Bool,
+    Int,
+    Float,
+    Sym,
+    Keyword,
+    Str,
+    Pair,
+    Vector,
+    Fn,
+    Macro,
+    Native,
+}
+
+impl Tag {
+    /// The canonical name — the `type-of` keyword spelling and the word used in
+    /// type-error messages.
+    pub fn name(self) -> &'static str {
+        match self {
+            Tag::Nil => "nil",
+            Tag::Bool => "bool",
+            Tag::Int => "int",
+            Tag::Float => "float",
+            Tag::Sym => "symbol",
+            Tag::Keyword => "keyword",
+            Tag::Str => "string",
+            Tag::Pair => "pair",
+            Tag::Vector => "vector",
+            Tag::Fn => "fn",
+            Tag::Macro => "macro",
+            Tag::Native => "native",
+        }
+    }
+}
+
+/// The runtime [`Tag`] of `v` — the canonical discriminant of [`Value`]. The one
+/// place the value-to-tag mapping lives.
+pub fn tag(v: Value) -> Tag {
+    match v {
+        Value::Nil => Tag::Nil,
+        Value::Bool(_) => Tag::Bool,
+        Value::Int(_) => Tag::Int,
+        Value::Float(_) => Tag::Float,
+        Value::Sym(_) => Tag::Sym,
+        Value::Keyword(_) => Tag::Keyword,
+        Value::Str(_) => Tag::Str,
+        Value::Pair(_) => Tag::Pair,
+        Value::Vector(_) => Tag::Vector,
+        Value::Fn(_) => Tag::Fn,
+        Value::Macro(_) => Tag::Macro,
+        Value::Native(_) => Tag::Native,
+    }
+}
+
 /// A user-defined function. Captures its defining environment (an [`EnvId`]) for
 /// lexical scoping.
 #[derive(Clone)]
@@ -147,8 +208,42 @@ pub struct Closure {
 /// and the heap (to read/allocate values and call back into `eval`).
 pub type NativeFnPtr = fn(&[Value], EnvId, &mut Heap) -> LispResult;
 
+/// How many arguments a primitive accepts — declared once per builtin, the single
+/// source of truth for the arity check the evaluator runs before every native
+/// call. (Closures derive theirs from their parameter list instead.) `max: None`
+/// is variadic.
+#[derive(Clone, Copy, Debug)]
+pub struct Arity {
+    pub min: usize,
+    pub max: Option<usize>,
+}
+
+impl Arity {
+    /// Exactly `n` arguments.
+    pub const fn exact(n: usize) -> Self {
+        Arity { min: n, max: Some(n) }
+    }
+    /// `n` or more (variadic tail).
+    pub const fn at_least(n: usize) -> Self {
+        Arity { min: n, max: None }
+    }
+    /// Between `min` and `max` inclusive (e.g. an optional trailing arg).
+    pub const fn range(min: usize, max: usize) -> Self {
+        Arity { min, max: Some(max) }
+    }
+    /// Any number of arguments.
+    pub const fn any() -> Self {
+        Arity { min: 0, max: None }
+    }
+    /// Does this arity admit a call with `n` arguments?
+    pub fn accepts(self, n: usize) -> bool {
+        n >= self.min && self.max.is_none_or(|m| n <= m)
+    }
+}
+
 pub struct NativeFn {
     pub name: String,
+    pub arity: Arity,
     pub func: NativeFnPtr,
 }
 
@@ -160,4 +255,20 @@ pub fn sym(name: &str) -> Value {
 
 pub fn kw(name: &str) -> Value {
     Value::Keyword(intern(name))
+}
+
+thread_local! {
+    static GENSYM_COUNTER: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// A fresh, interned symbol `<prefix>__<n>` for hygiene-by-convention. Shared by
+/// the `gensym` builtin and the compile pass (so a macro-time temporary and a
+/// pattern-lowering temporary can never collide).
+pub fn gensym(prefix: &str) -> Value {
+    let n = GENSYM_COUNTER.with(|c| {
+        let v = c.get();
+        c.set(v + 1);
+        v
+    });
+    sym(&format!("{}__{}", prefix, n))
 }

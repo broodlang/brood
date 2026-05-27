@@ -145,6 +145,76 @@ fn eval_and_read_string() {
 }
 
 #[test]
+fn type_of_reports_the_runtime_tag() {
+    assert_eq!(run("(type-of 1)"), ":int");
+    assert_eq!(run("(type-of 1.5)"), ":float");
+    assert_eq!(run("(type-of \"s\")"), ":string");
+    assert_eq!(run("(type-of 'x)"), ":symbol");
+    assert_eq!(run("(type-of :k)"), ":keyword");
+    assert_eq!(run("(type-of nil)"), ":nil");
+    assert_eq!(run("(type-of true)"), ":bool");
+    assert_eq!(run("(type-of (list 1))"), ":pair");
+    assert_eq!(run("(type-of [1])"), ":vector");
+    assert_eq!(run("(type-of inc)"), ":fn"); // a Brood closure
+    assert_eq!(run("(type-of %add)"), ":native"); // a Rust builtin
+}
+
+#[test]
+fn type_errors_are_self_identifying() {
+    // The op, the wanted type, and the offending value's tag + form all appear.
+    let err = |src: &str| {
+        Interp::new()
+            .eval_str(src)
+            .expect_err("expected a type error")
+            .to_string()
+    };
+    assert_eq!(
+        err("(+ 1 \"x\")"),
+        "type error: %add: expected number, got string (\"x\")"
+    );
+    assert_eq!(
+        err("(first 5)"),
+        "type error: first: expected list or vector, got int (5)"
+    );
+    assert_eq!(
+        err("(string-length :k)"),
+        "type error: string-length: expected string, got keyword (:k)"
+    );
+}
+
+#[test]
+fn native_arity_is_enforced_centrally() {
+    let err = |src: &str| {
+        Interp::new()
+            .eval_str(src)
+            .expect_err("expected an arity error")
+            .to_string()
+    };
+    // Too few, too many, and a variadic minimum — all caught before the builtin runs.
+    assert_eq!(
+        err("(type-of)"),
+        "arity error: type-of: expected 1 argument, got 0"
+    );
+    assert_eq!(
+        err("(cons 1)"),
+        "arity error: cons: expected 2 arguments, got 1"
+    );
+    assert_eq!(
+        err("(now 1 2)"),
+        "arity error: now: expected 0 arguments, got 2"
+    );
+    assert_eq!(
+        err("(apply +)"),
+        "arity error: apply: expected at least 2 arguments, got 1"
+    );
+    // The same gate applies when a builtin is reached through `apply`.
+    assert_eq!(
+        err("(apply cons (list 1))"),
+        "arity error: cons: expected 2 arguments, got 1"
+    );
+}
+
+#[test]
 fn defn_defines_functions() {
     assert_eq!(run("(defn sq [x] (* x x)) (sq 6)"), "36");
     assert_eq!(run("(defn add3 [a b c] (+ a b c)) (add3 1 2 3)"), "6");
@@ -226,6 +296,93 @@ fn threading_macros() {
     assert_eq!(run("(-> 5 (- 1) (* 2))"), "8");
     // (->> (list 1 2 3) (map inc)) => (map inc (list 1 2 3)) => (2 3 4)
     assert_eq!(run("(->> (list 1 2 3) (map inc))"), "(2 3 4)");
+}
+
+#[test]
+fn match_dispatches_on_patterns() {
+    // literal / case dispatch
+    assert_eq!(run("(match 2 (1 :one) (2 :two) (_ :other))"), ":two");
+    // tagged vectors are the tuple idiom; the same literal builds and matches
+    assert_eq!(run("(match [:ok 42] ([:ok v] v) ([:err e] e))"), "42");
+    // list destructure with a & rest tail
+    assert_eq!(run("(match (list 1 2 3) ((h & t) (list h t)))"), "(1 (2 3))");
+    // nested patterns compose
+    assert_eq!(run("(match [:add [1 2]] ([:add [a b]] (+ a b)))"), "3");
+    // guards
+    assert_eq!(run("(match 7 (n :when (> n 0) :pos) (_ :nonpos))"), ":pos");
+    // non-linear: a repeated variable is an equality constraint
+    assert_eq!(run("(match [3 3] ([x x] :eq) (_ :ne))"), ":eq");
+    assert_eq!(run("(match [3 4] ([x x] :eq) (_ :ne))"), ":ne");
+    // match a known value: keyword tag, quoted symbol, and a pin
+    assert_eq!(run("(match 'foo ('foo :y) (_ :n))"), ":y");
+    assert_eq!(run("(let (k :ok) (match [:ok 9] ([~k v] v) (_ :n)))"), "9");
+}
+
+#[test]
+fn match_no_clause_raises_structured_value() {
+    // A no-match crashes with a structured, catchable value:
+    // [:match-error <context> <value> <patterns-tried>].
+    assert_eq!(
+        run("(try (match 42 ([:ok v] v))
+               (catch e (match e ([:match-error ctx val pats] (list ctx val)) (_ :other))))"),
+        "(:match 42)"
+    );
+    let mut interp = Interp::new();
+    assert!(interp.eval_str("(match 42 ([:ok v] v))").is_err());
+    // compile-time checks fire while the macro expands
+    assert!(interp.eval_str("(match 1 (x :always) (2 :dead))").is_err()); // unreachable
+    assert!(interp.eval_str("(match (list 1) ((a & b c) :x))").is_err()); // malformed &
+}
+
+/// The compile pass expands `match` once at definition, so a `match` in tail
+/// position is both TCO-safe (no overflow) and runs at plain-`if` speed (it is
+/// not re-expanded per call). The rigorous 100,000-frame guard is the if-based
+/// `tail_calls_do_not_overflow`; here we just confirm a match loop doesn't grow
+/// the stack.
+#[test]
+fn match_in_tail_position_does_not_overflow() {
+    let src = "
+        (defn count-down (n) (match n (0 :done) (_ (count-down (- n 1)))))
+        (count-down 50000)
+    ";
+    assert_eq!(run(src), ":done");
+}
+
+#[test]
+fn destructuring_let() {
+    // a binding target may be a pattern — a refutable bind (Brood's `=`)
+    assert_eq!(run("(let ([:ok v] [:ok 42]) v)"), "42");
+    assert_eq!(run("(let ((a b c) (list 1 2 3)) (+ a b c))"), "6");
+    // sequential, freely mixed with plain-symbol binds
+    assert_eq!(
+        run("(let (x 1 [a b] [10 20] y (+ x a)) (list x a b y))"),
+        "(1 10 20 11)"
+    );
+    // a non-match raises (handle it with `match` instead if you don't want a crash)
+    let mut interp = Interp::new();
+    assert!(interp.eval_str("(let ([:ok v] [:err 1]) v)").is_err());
+}
+
+#[test]
+fn fn_clauses_and_pattern_params() {
+    // multi-clause dispatch — the canonical Erlang shape
+    assert_eq!(
+        run("(defn fac ((0) 1) ((n) (* n (fac (- n 1))))) (fac 5)"),
+        "120"
+    );
+    // single-clause fn with a tuple-destructured parameter
+    assert_eq!(run("((fn ([x y]) (* x y)) [3 4])"), "12");
+    assert_eq!(run("((fn (a [x y]) (+ a x y)) 1 [2 3])"), "6");
+    // pattern params coexist with &optional
+    assert_eq!(
+        run("(defn box (a [x y] &optional (c 10)) (+ a x y c)) (box 1 [2 3])"),
+        "16"
+    );
+    // no clause matched is a runtime error
+    let mut interp = Interp::new();
+    assert!(interp
+        .eval_str("(defn only-ok (([:ok v]) v)) (only-ok [:err 1])")
+        .is_err());
 }
 
 #[test]

@@ -26,6 +26,19 @@ fn main() {
     }
 
     let mut interp = Interp::new();
+
+    // `brood test` — discover and run the current project's test suite (ADR-020).
+    // The runner (Brood, std/project.lisp) walks up from the cwd to `project.lisp`,
+    // loads every tests/**/*_test.lisp, and runs the whole suite once. It raises
+    // on failure, so a non-zero exit falls out of the eval error.
+    if files.first().map(String::as_str) == Some("test") {
+        if let Err(e) = interp.eval_str("(require 'project) (run-project-tests :trace)") {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
+
     if !files.is_empty() {
         run_files(&mut interp, &files);
         return;

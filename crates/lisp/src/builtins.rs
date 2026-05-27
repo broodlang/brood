@@ -8,93 +8,107 @@
 use crate::error::{ErrorKind, LispError, LispResult};
 use crate::eval::apply;
 use crate::heap::Heap;
-use crate::value::{self, EnvId, NativeFn, NativeFnPtr, Value};
+use crate::value::{self, Arity, EnvId, NativeFn, NativeFnPtr, Value};
 use crate::{printer, reader};
 
 /// Install the primitive kernel into `root`.
 pub fn register(heap: &mut Heap, root: EnvId) {
-    let def = |heap: &mut Heap, name: &str, func: NativeFnPtr| {
+    let def = |heap: &mut Heap, name: &str, arity: Arity, func: NativeFnPtr| {
         let v = heap.alloc_native(NativeFn {
             name: name.to_string(),
+            arity,
             func,
         });
         heap.env_define(root, value::intern(name), v);
     };
 
     // numeric primitives
-    def(heap, "%add", prim_add);
-    def(heap, "%sub", prim_sub);
-    def(heap, "%mul", prim_mul);
-    def(heap, "%div", prim_div);
-    def(heap, "%lt", prim_lt);
-    def(heap, "%eq", prim_eq);
-    def(heap, "mod", modulo);
-    def(heap, "rem", remainder);
+    def(heap, "%add", Arity::exact(2), prim_add);
+    def(heap, "%sub", Arity::exact(2), prim_sub);
+    def(heap, "%mul", Arity::exact(2), prim_mul);
+    def(heap, "%div", Arity::exact(2), prim_div);
+    def(heap, "%lt", Arity::exact(2), prim_lt);
+    def(heap, "%eq", Arity::exact(2), prim_eq);
+    def(heap, "mod", Arity::exact(2), modulo);
+    def(heap, "rem", Arity::exact(2), remainder);
 
     // pair / sequence
-    def(heap, "cons", cons);
-    def(heap, "first", first);
-    def(heap, "rest", rest);
-    def(heap, "empty?", is_empty);
+    def(heap, "cons", Arity::exact(2), cons);
+    def(heap, "first", Arity::exact(1), first);
+    def(heap, "rest", Arity::exact(1), rest);
+    def(heap, "empty?", Arity::exact(1), is_empty);
 
     // vector
-    def(heap, "vector", vector);
-    def(heap, "vector-ref", vector_ref);
-    def(heap, "vector-length", vector_length);
+    def(heap, "vector", Arity::any(), vector);
+    def(heap, "vector-ref", Arity::exact(2), vector_ref);
+    def(heap, "vector-length", Arity::exact(1), vector_length);
 
     // string
-    def(heap, "string-length", string_length);
+    def(heap, "string-length", Arity::exact(1), string_length);
+    def(heap, "substring", Arity::exact(3), substring);
 
     // type-tag predicates
-    def(heap, "nil?", is_nil);
-    def(heap, "pair?", is_pair);
-    def(heap, "int?", is_int);
-    def(heap, "float?", is_float);
-    def(heap, "bool?", is_bool);
-    def(heap, "string?", is_string);
-    def(heap, "symbol?", is_symbol);
-    def(heap, "keyword?", is_keyword);
-    def(heap, "vector?", is_vector);
-    def(heap, "fn?", is_fn);
+    def(heap, "nil?", Arity::exact(1), is_nil);
+    def(heap, "pair?", Arity::exact(1), is_pair);
+    def(heap, "int?", Arity::exact(1), is_int);
+    def(heap, "float?", Arity::exact(1), is_float);
+    def(heap, "bool?", Arity::exact(1), is_bool);
+    def(heap, "string?", Arity::exact(1), is_string);
+    def(heap, "symbol?", Arity::exact(1), is_symbol);
+    def(heap, "keyword?", Arity::exact(1), is_keyword);
+    def(heap, "vector?", Arity::exact(1), is_vector);
+    def(heap, "fn?", Arity::exact(1), is_fn);
+    def(heap, "type-of", Arity::exact(1), type_of);
 
     // value <-> text and I/O
-    def(heap, "str", str_concat);
-    def(heap, "pr-str", pr_str);
-    def(heap, "print", print);
-    def(heap, "println", println);
+    def(heap, "str", Arity::any(), str_concat);
+    def(heap, "pr-str", Arity::exact(1), pr_str);
+    def(heap, "print", Arity::any(), print);
+    def(heap, "println", Arity::any(), println);
+    def(heap, "stdout-tty?", Arity::exact(0), stdout_tty);
 
     // time
-    def(heap, "now", now);
+    def(heap, "now", Arity::exact(0), now);
 
     // memory
-    def(heap, "mem-bytes", mem_bytes);
-    def(heap, "mem-peak", mem_peak);
+    def(heap, "mem-bytes", Arity::exact(0), mem_bytes);
+    def(heap, "mem-peak", Arity::exact(0), mem_peak);
 
     // self-hosting
-    def(heap, "eval", eval_builtin);
-    def(heap, "read-string", read_string);
-    def(heap, "load", load);
-    def(heap, "require", require);
-    def(heap, "apply", apply_builtin);
+    def(heap, "eval", Arity::exact(1), eval_builtin);
+    def(heap, "read-string", Arity::exact(1), read_string);
+    def(heap, "eval-string", Arity::exact(1), eval_string);
+    def(heap, "load", Arity::exact(1), load);
+    def(heap, "%builtin-module", Arity::exact(1), builtin_module);
+    def(heap, "apply", Arity::at_least(2), apply_builtin);
+
+    // symbols
+    def(heap, "name", Arity::exact(1), name_of);
+
+    // filesystem — mechanism for the Brood module system + project test runner
+    def(heap, "cwd", Arity::exact(0), cwd);
+    def(heap, "file-exists?", Arity::exact(1), file_exists);
+    def(heap, "dir?", Arity::exact(1), is_dir);
+    def(heap, "list-dir", Arity::exact(1), list_dir);
 
     // macros
-    def(heap, "macroexpand-1", macroexpand_1);
-    def(heap, "macroexpand", macroexpand);
-    def(heap, "gensym", gensym);
+    def(heap, "macroexpand-1", Arity::exact(1), macroexpand_1);
+    def(heap, "macroexpand", Arity::exact(1), macroexpand);
+    def(heap, "gensym", Arity::range(0, 1), gensym);
 
     // errors / control
-    def(heap, "throw", throw);
-    def(heap, "%try", try_catch);
-    def(heap, "%isolate", isolate);
+    def(heap, "throw", Arity::exact(1), throw);
+    def(heap, "%try", Arity::exact(2), try_catch);
+    def(heap, "%isolate", Arity::exact(1), isolate);
 
     // processes (concurrency)
-    def(heap, "spawn", spawn);
-    def(heap, "send", send);
-    def(heap, "receive", receive);
-    def(heap, "self", self_pid);
-    def(heap, "spawn-count", spawn_count);
-    def(heap, "peak-threads", peak_threads);
-    def(heap, "worker-threads", worker_threads);
+    def(heap, "spawn", Arity::at_least(1), spawn);
+    def(heap, "send", Arity::exact(2), send);
+    def(heap, "receive", Arity::exact(0), receive);
+    def(heap, "self", Arity::exact(0), self_pid);
+    def(heap, "spawn-count", Arity::exact(0), spawn_count);
+    def(heap, "peak-threads", Arity::exact(0), peak_threads);
+    def(heap, "worker-threads", Arity::exact(0), worker_threads);
 }
 
 fn arg(args: &[Value], i: usize) -> Value {
@@ -114,15 +128,26 @@ fn two(args: &[Value], who: &str) -> Result<(Value, Value), LispError> {
 
 // ---------- numeric ----------
 
-fn as_f64(v: Value) -> Result<f64, LispError> {
+/// Require a number, coerced to `f64`; otherwise a self-identifying type error
+/// attributed to `who` (the primitive that needed it).
+fn expect_number(heap: &Heap, who: &str, v: Value) -> Result<f64, LispError> {
     match v {
         Value::Int(n) => Ok(n as f64),
         Value::Float(f) => Ok(f),
-        _ => Err(LispError::type_err("expected a number")),
+        _ => Err(LispError::wrong_type(heap, who, "number", v)),
+    }
+}
+
+/// Require an integer; otherwise a self-identifying type error.
+fn expect_int(heap: &Heap, who: &str, v: Value) -> Result<i64, LispError> {
+    match v {
+        Value::Int(n) => Ok(n),
+        _ => Err(LispError::wrong_type(heap, who, "int", v)),
     }
 }
 
 fn num_bin(
+    heap: &Heap,
     args: &[Value],
     who: &str,
     int_op: fn(i64, i64) -> Option<i64>,
@@ -133,35 +158,40 @@ fn num_bin(
         (Value::Int(x), Value::Int(y)) => int_op(x, y)
             .map(Value::Int)
             .ok_or_else(|| LispError::runtime(format!("{}: integer overflow", who))),
-        _ => Ok(Value::Float(float_op(as_f64(a)?, as_f64(b)?))),
+        _ => Ok(Value::Float(float_op(
+            expect_number(heap, who, a)?,
+            expect_number(heap, who, b)?,
+        ))),
     }
 }
 
-fn prim_add(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    num_bin(args, "%add", i64::checked_add, |a, b| a + b)
+fn prim_add(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    num_bin(heap, args, "%add", i64::checked_add, |a, b| a + b)
 }
-fn prim_sub(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    num_bin(args, "%sub", i64::checked_sub, |a, b| a - b)
+fn prim_sub(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    num_bin(heap, args, "%sub", i64::checked_sub, |a, b| a - b)
 }
-fn prim_mul(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    num_bin(args, "%mul", i64::checked_mul, |a, b| a * b)
+fn prim_mul(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    num_bin(heap, args, "%mul", i64::checked_mul, |a, b| a * b)
 }
 
-fn prim_div(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+fn prim_div(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let (a, b) = two(args, "%div")?;
-    let bf = as_f64(b)?;
+    let bf = expect_number(heap, "%div", b)?;
     if bf == 0.0 {
         return Err(LispError::runtime("division by zero"));
     }
     match (a, b) {
         (Value::Int(x), Value::Int(y)) if x % y == 0 => Ok(Value::Int(x / y)),
-        _ => Ok(Value::Float(as_f64(a)? / bf)),
+        _ => Ok(Value::Float(expect_number(heap, "%div", a)? / bf)),
     }
 }
 
-fn prim_lt(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+fn prim_lt(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let (a, b) = two(args, "%lt")?;
-    Ok(Value::Bool(as_f64(a)? < as_f64(b)?))
+    Ok(Value::Bool(
+        expect_number(heap, "%lt", a)? < expect_number(heap, "%lt", b)?,
+    ))
 }
 
 fn prim_eq(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -169,24 +199,21 @@ fn prim_eq(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::Bool(heap.equal(a, b)))
 }
 
-fn int_pair(args: &[Value], who: &str) -> Result<(i64, i64), LispError> {
+fn int_pair(heap: &Heap, args: &[Value], who: &str) -> Result<(i64, i64), LispError> {
     let (a, b) = two(args, who)?;
-    match (a, b) {
-        (Value::Int(x), Value::Int(y)) => Ok((x, y)),
-        _ => Err(LispError::type_err(format!("{}: expected integers", who))),
-    }
+    Ok((expect_int(heap, who, a)?, expect_int(heap, who, b)?))
 }
 
-fn modulo(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    let (a, b) = int_pair(args, "mod")?;
+fn modulo(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let (a, b) = int_pair(heap, args, "mod")?;
     if b == 0 {
         return Err(LispError::runtime("mod: division by zero"));
     }
     Ok(Value::Int(a.rem_euclid(b)))
 }
 
-fn remainder(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    let (a, b) = int_pair(args, "rem")?;
+fn remainder(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let (a, b) = int_pair(heap, args, "rem")?;
     if b == 0 {
         return Err(LispError::runtime("rem: division by zero"));
     }
@@ -201,33 +228,36 @@ fn cons(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 }
 
 fn first(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    match arg(args, 0) {
+    let v = arg(args, 0);
+    match v {
         Value::Pair(p) => Ok(heap.car(p)),
         Value::Vector(id) => Ok(heap.vector(id).first().copied().unwrap_or(Value::Nil)),
         Value::Nil => Ok(Value::Nil),
-        _ => Err(LispError::type_err("first: not a list")),
+        _ => Err(LispError::wrong_type(heap, "first", "list or vector", v)),
     }
 }
 
 fn rest(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    match arg(args, 0) {
+    let v = arg(args, 0);
+    match v {
         Value::Pair(p) => Ok(heap.cdr(p)),
         Value::Vector(id) => {
             let items: Vec<Value> = heap.vector(id).iter().skip(1).copied().collect();
             Ok(heap.list(items))
         }
         Value::Nil => Ok(Value::Nil),
-        _ => Err(LispError::type_err("rest: not a list")),
+        _ => Err(LispError::wrong_type(heap, "rest", "list or vector", v)),
     }
 }
 
 fn is_empty(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let empty = match arg(args, 0) {
+    let v = arg(args, 0);
+    let empty = match v {
         Value::Nil => true,
         Value::Str(id) => heap.string(id).is_empty(),
         Value::Vector(id) => heap.vector(id).is_empty(),
         Value::Pair(_) => false,
-        _ => return Err(LispError::type_err("empty?: not a collection")),
+        _ => return Err(LispError::wrong_type(heap, "empty?", "collection", v)),
     };
     Ok(Value::Bool(empty))
 }
@@ -239,30 +269,30 @@ fn vector(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 }
 
 fn vector_ref(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    match (arg(args, 0), arg(args, 1)) {
-        (Value::Vector(id), Value::Int(n)) if n >= 0 && (n as usize) < heap.vector(id).len() => {
+    let v = arg(args, 0);
+    let n = expect_int(heap, "vector-ref", arg(args, 1))?;
+    match v {
+        Value::Vector(id) if n >= 0 && (n as usize) < heap.vector(id).len() => {
             Ok(heap.vector(id)[n as usize])
         }
-        (Value::Vector(_), Value::Int(_)) => {
-            Err(LispError::runtime("vector-ref: index out of range"))
-        }
-        _ => Err(LispError::type_err(
-            "vector-ref: expected a vector and an integer index",
-        )),
+        Value::Vector(_) => Err(LispError::runtime("vector-ref: index out of range")),
+        _ => Err(LispError::wrong_type(heap, "vector-ref", "vector", v)),
     }
 }
 
 fn vector_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    match arg(args, 0) {
+    let v = arg(args, 0);
+    match v {
         Value::Vector(id) => Ok(Value::Int(heap.vector(id).len() as i64)),
-        _ => Err(LispError::type_err("vector-length: not a vector")),
+        _ => Err(LispError::wrong_type(heap, "vector-length", "vector", v)),
     }
 }
 
 fn string_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    match arg(args, 0) {
+    let v = arg(args, 0);
+    match v {
         Value::Str(id) => Ok(Value::Int(heap.string(id).chars().count() as i64)),
-        _ => Err(LispError::type_err("string-length: not a string")),
+        _ => Err(LispError::wrong_type(heap, "string-length", "string", v)),
     }
 }
 
@@ -302,6 +332,14 @@ fn is_fn(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     )))
 }
 
+/// `(type-of x)` — the runtime type tag of `x` as a keyword: `:int` `:float`
+/// `:string` `:symbol` `:keyword` `:bool` `:nil` `:pair` `:vector` `:fn`
+/// `:macro` `:native`. The reflective primitive the in-language type checks
+/// build on; spellings mirror the `int?`/`string?`/… predicates.
+fn type_of(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    Ok(value::kw(value::tag(arg(args, 0)).name()))
+}
+
 // ---------- value <-> text and I/O ----------
 
 fn str_concat(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -329,6 +367,15 @@ fn println(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let parts: Vec<String> = args.iter().map(|&a| printer::display(heap, a)).collect();
     println!("{}", parts.join(" "));
     Ok(Value::Nil)
+}
+
+/// `(stdout-tty?)` — true when stdout is an interactive terminal, false when it's
+/// captured (a pipe, a file, `cargo test`). The test framework uses this to emit
+/// ANSI colour only when a human is watching, so captured output (what an LLM or
+/// CI reads) stays clean plain text.
+fn stdout_tty(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    use std::io::IsTerminal;
+    Ok(Value::Bool(std::io::stdout().is_terminal()))
 }
 
 // ---------- time ----------
@@ -359,23 +406,26 @@ fn mem_peak(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 
 fn eval_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let root = heap.env_root(env);
-    crate::eval::eval(heap, arg(args, 0), root)
+    let form = crate::macros::macroexpand_all(heap, arg(args, 0), root)?;
+    crate::eval::eval(heap, form, root)
 }
 
 fn read_string(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    match arg(args, 0) {
+    let v = arg(args, 0);
+    match v {
         Value::Str(id) => {
             let s = heap.string(id).to_string();
             reader::read_one(heap, &s)
         }
-        _ => Err(LispError::type_err("read-string: expected a string")),
+        _ => Err(LispError::wrong_type(heap, "read-string", "string", v)),
     }
 }
 
 fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
-    let path = match arg(args, 0) {
+    let v = arg(args, 0);
+    let path = match v {
         Value::Str(id) => heap.string(id).to_string(),
-        _ => return Err(LispError::type_err("load: expected a path string")),
+        _ => return Err(LispError::wrong_type(heap, "load", "string", v)),
     };
     let src = std::fs::read_to_string(&path)
         .map_err(|e| LispError::runtime(format!("load: cannot read {}: {}", path, e)))?;
@@ -383,43 +433,152 @@ fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let root = heap.env_root(env);
     let mut result = Value::Nil;
     for form in forms {
+        let form = crate::macros::macroexpand_all(heap, form, root)?;
         result = crate::eval::eval(heap, form, root)?;
     }
     Ok(result)
 }
 
-/// Standard-library modules embedded in the binary (like the prelude), loaded
-/// on demand by `require` — so they work from any directory, no file paths.
-const TEST_LIB: &str = include_str!("../../../std/test.lisp");
-
-/// `(require 'name)` — load an embedded standard-library module into the global
-/// environment. Robust to the current directory (the source is baked in).
-fn require(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
-    let name = match arg(args, 0) {
-        Value::Sym(s) | Value::Keyword(s) => value::symbol_name(s),
+/// `(eval-string "src")` — read and evaluate every form in a string against the
+/// global environment (the string analogue of `load`). The module system uses it
+/// to evaluate embedded std modules; it's a general self-hosting hook besides.
+fn eval_string(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
+    let v = arg(args, 0);
+    let src = match v {
         Value::Str(id) => heap.string(id).to_string(),
-        other => {
-            let shown = printer::print(heap, other);
-            return Err(LispError::type_err(format!(
-                "require: expected a module name, got {}",
-                shown
-            )));
-        }
-    };
-    let src = match name.as_str() {
-        "test" => TEST_LIB,
-        _ => {
-            return Err(LispError::runtime(format!(
-                "require: unknown module '{}'",
-                name
-            )))
-        }
+        _ => return Err(LispError::wrong_type(heap, "eval-string", "string", v)),
     };
     let root = heap.env_root(env);
-    for form in reader::read_all(heap, src)? {
-        crate::eval::eval(heap, form, root)?;
+    let mut result = Value::Nil;
+    for form in reader::read_all(heap, &src)? {
+        let form = crate::macros::macroexpand_all(heap, form, root)?;
+        result = crate::eval::eval(heap, form, root)?;
     }
-    Ok(Value::Nil)
+    Ok(result)
+}
+
+/// Standard-library modules baked into the binary (like the prelude), so they load
+/// from any directory with no file paths. The require / provide / load-path
+/// *policy* is written in Brood (`std/prelude.lisp`, ADR-019); Rust only exposes
+/// an embedded module's source here, via `%builtin-module` (ADR-006/008).
+const EMBEDDED_MODULES: &[(&str, &str)] = &[
+    ("test", include_str!("../../../std/test.lisp")),
+    ("project", include_str!("../../../std/project.lisp")),
+];
+
+/// `(%builtin-module name)` — the source of a baked-in std module as a string, or
+/// nil if there is none. Mechanism only: `require` (Brood) consults this before
+/// searching the load-path.
+fn builtin_module(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let v = arg(args, 0);
+    let name = match v {
+        Value::Sym(s) | Value::Keyword(s) => value::symbol_name(s),
+        Value::Str(id) => heap.string(id).to_string(),
+        _ => return Err(LispError::wrong_type(heap, "%builtin-module", "module name", v)),
+    };
+    match EMBEDDED_MODULES.iter().find(|(n, _)| *n == name) {
+        Some((_, src)) => Ok(heap.alloc_string(src)),
+        None => Ok(Value::Nil),
+    }
+}
+
+/// `(name x)` — the spelling of a symbol or keyword as a string (no leading `:`),
+/// or the string unchanged. The module system uses it to turn a module name into
+/// a filename.
+fn name_of(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let v = arg(args, 0);
+    match v {
+        Value::Sym(s) | Value::Keyword(s) => Ok(heap.alloc_string(&value::symbol_name(s))),
+        Value::Str(_) => Ok(v),
+        _ => Err(LispError::wrong_type(
+            heap,
+            "name",
+            "symbol, keyword, or string",
+            v,
+        )),
+    }
+}
+
+/// `(substring s start end)` — the characters of `s` in `[start, end)`,
+/// char-indexed (consistent with `string-length`). Errors if out of range.
+fn substring(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let v = arg(args, 0);
+    let s = match v {
+        Value::Str(id) => heap.string(id).to_string(),
+        _ => return Err(LispError::wrong_type(heap, "substring", "string", v)),
+    };
+    let (start, end) = match (arg(args, 1), arg(args, 2)) {
+        (Value::Int(a), Value::Int(b)) => (a, b),
+        _ => {
+            return Err(LispError::type_err(
+                "substring: expected integer start and end",
+            ))
+        }
+    };
+    let len = s.chars().count() as i64;
+    if start < 0 || end < start || end > len {
+        return Err(LispError::runtime("substring: index out of range"));
+    }
+    let sub: String = s
+        .chars()
+        .skip(start as usize)
+        .take((end - start) as usize)
+        .collect();
+    Ok(heap.alloc_string(&sub))
+}
+
+// ---------- filesystem ----------
+// Mechanism only: existence / directory reflection so the Brood module system and
+// the project test runner can resolve load paths and discover test files. Path
+// manipulation and all policy live in Brood (`std/prelude.lisp`, `std/project.lisp`).
+
+/// `(cwd)` — the process's current working directory as a string.
+fn cwd(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    match std::env::current_dir() {
+        Ok(p) => Ok(heap.alloc_string(&p.to_string_lossy())),
+        Err(e) => Err(LispError::runtime(format!("cwd: {}", e))),
+    }
+}
+
+/// `(file-exists? path)` — true if a file or directory exists at `path`.
+fn file_exists(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let v = arg(args, 0);
+    match v {
+        Value::Str(id) => Ok(Value::Bool(std::path::Path::new(heap.string(id)).exists())),
+        _ => Err(LispError::wrong_type(heap, "file-exists?", "string", v)),
+    }
+}
+
+/// `(dir? path)` — true if `path` exists and is a directory.
+fn is_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let v = arg(args, 0);
+    match v {
+        Value::Str(id) => Ok(Value::Bool(std::path::Path::new(heap.string(id)).is_dir())),
+        _ => Err(LispError::wrong_type(heap, "dir?", "string", v)),
+    }
+}
+
+/// `(list-dir path)` — the entry names (not full paths) directly under a
+/// directory, sorted for determinism. Errors if `path` isn't a readable directory.
+fn list_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let v = arg(args, 0);
+    let path = match v {
+        Value::Str(id) => heap.string(id).to_string(),
+        _ => return Err(LispError::wrong_type(heap, "list-dir", "string", v)),
+    };
+    let mut names: Vec<String> = match std::fs::read_dir(&path) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect(),
+        Err(e) => return Err(LispError::runtime(format!("list-dir: {}: {}", path, e))),
+    };
+    names.sort();
+    let mut items = Vec::with_capacity(names.len());
+    for n in &names {
+        items.push(heap.alloc_string(n));
+    }
+    Ok(heap.list(items))
 }
 
 fn apply_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
@@ -445,10 +604,6 @@ fn macroexpand(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     crate::macros::macroexpand(heap, arg(args, 0), env)
 }
 
-thread_local! {
-    static GENSYM_COUNTER: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
 fn gensym(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let prefix = match arg(args, 0) {
         Value::Str(id) => heap.string(id).to_string(),
@@ -456,12 +611,7 @@ fn gensym(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         Value::Nil => "g".to_string(),
         other => printer::display(heap, other),
     };
-    let n = GENSYM_COUNTER.with(|c| {
-        let v = c.get();
-        c.set(v + 1);
-        v
-    });
-    Ok(value::sym(&format!("{}__{}", prefix, n)))
+    Ok(value::gensym(&prefix))
 }
 
 // ---------- errors / control ----------

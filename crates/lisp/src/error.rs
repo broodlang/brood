@@ -49,6 +49,23 @@ impl LispError {
     pub fn type_err(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Type, message)
     }
+    /// A self-identifying type error: which operation (`who`), what it `expected`,
+    /// and the actual tag + printed form of what arrived. Threads the heap to
+    /// render the offending value, e.g. `first: expected list or vector, got int (5)`.
+    pub fn wrong_type(
+        heap: &crate::heap::Heap,
+        who: &str,
+        expected: &str,
+        got: Value,
+    ) -> Self {
+        Self::type_err(format!(
+            "{}: expected {}, got {} ({})",
+            who,
+            expected,
+            crate::value::tag(got).name(),
+            crate::printer::print(heap, got),
+        ))
+    }
     pub fn runtime(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Runtime, message)
     }

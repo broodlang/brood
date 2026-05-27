@@ -126,21 +126,36 @@
 ;; test's *fails*; on success they do nothing. They evaluate their operands once,
 ;; and they DON'T stop the test — every assertion in a body runs, so one test can
 ;; report several failures.
+;; Each assertion reports the FAILING SOURCE EXPRESSION (quoted at macro time) and
+;; the actual value — so a failure line is self-identifying: you (or an LLM reading
+;; the captured run) see exactly which expression failed and what it produced,
+;; without opening the file or guessing among look-alike assertions.
 (defmacro is (expr)
   (let (v (gensym "v"))
     `(let (~v ~expr)
        (unless ~v
-         (set! *fails* (cons (str "is: expected truthy, got " (pr-str ~v)) *fails*))))))
+         (set! *fails* (cons (str (pr-str (quote ~expr)) " is " (pr-str ~v)) *fails*))))))
+
+;; (refute expr) — the negation of `is`: fail if expr is truthy. Reports the
+;; truthy value it got where it wanted nil/false.
+(defmacro refute (expr)
+  (let (v (gensym "v"))
+    `(let (~v ~expr)
+       (when ~v
+         (set! *fails* (cons (str (pr-str (quote ~expr)) " is " (pr-str ~v) " — expected falsy") *fails*))))))
 
 (defmacro assert= (actual expected)
   (let (a (gensym "a") b (gensym "b"))
     `(let (~a ~actual ~b ~expected)
        (unless (= ~a ~b)
-         (set! *fails* (cons (str (pr-str ~a) " ≠ " (pr-str ~b)) *fails*))))))
+         (set! *fails* (cons (str (pr-str (quote ~actual)) " => " (pr-str ~a)
+                                  ", expected " (pr-str ~b)) *fails*))))))
 
 (defmacro assert-error (& body)
-  `(unless (try (do ~@body false) (catch e true))
-     (set! *fails* (cons "expected an error, none raised" *fails*))))
+  ;; Quote the body for the message: the lone form if there's one, else (do …).
+  (let (form (if (= (count body) 1) (first body) (cons 'do body)))
+    `(unless (try (do ~@body false) (catch e true))
+       (set! *fails* (cons (str "expected " (pr-str (quote ~form)) " to raise, but none did") *fails*)))))
 
 ;; (error-of body...) — evaluate body and yield the error it raised, so you can
 ;; assert on the *output*: a built-in error comes back as its message string
@@ -186,8 +201,11 @@
     (str whole "." frac " MB")))
 
 ;; ANSI helpers (the reader's `\e` is ESC). Markers/colours sit *outside* the
-;; padded name, so column alignment still counts only visible text.
-(defn ansi (code s) (str "\e[" code "m" s "\e[0m"))
+;; padded name, so column alignment still counts only visible text. Colour is
+;; emitted ONLY when stdout is a real terminal — when the run is captured (a
+;; pipe, `cargo test`, an LLM or CI reading it), `ansi` returns the plain string,
+;; so the output is clean text with no escape-code noise.
+(defn ansi (code s) (if (stdout-tty?) (str "\e[" code "m" s "\e[0m") s))
 (defn green  (s) (ansi "32" s))
 (defn red    (s) (ansi "31" s))
 (defn dim    (s) (ansi "2"  s))

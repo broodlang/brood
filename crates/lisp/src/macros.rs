@@ -83,3 +83,178 @@ pub fn macroexpand(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
         cur = next;
     }
 }
+
+/// The compile pass: recursively expand *every* macro call in `form` (a code
+/// walk), so the result contains no macro invocations and can be evaluated
+/// without expanding again. Run once at each top-level / definition boundary
+/// (`eval_str`, `load`, `require`, `eval`, and the prelude loader), so a macro
+/// in a function body — notably `match` — is expanded ONCE rather than on every
+/// call. The evaluator still expands macros lazily as a fallback, which covers
+/// a macro defined and used within the same top-level form (not yet defined
+/// when the walk ran).
+///
+/// `quote` and `quasiquote` are left opaque: their contents are data, not calls
+/// to expand. Code inside a `~unquote` still expands when the quasiquote runs.
+pub fn macroexpand_all(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
+    let form = macroexpand(heap, form, env)?;
+    match form {
+        Value::Pair(_) => {
+            let items = match heap.list_to_vec(form) {
+                Ok(items) => items,
+                Err(_) => return Ok(form), // improper list: leave it be
+            };
+            if let Some(Value::Sym(s)) = items.first().copied() {
+                match value::symbol_name(s).as_str() {
+                    // quote/quasiquote contents are data, not calls to expand.
+                    "quote" | "quasiquote" => return Ok(form),
+                    // Desugar pattern binders into the Brood `match*` engine so
+                    // they expand once here (fast) rather than per call. eval's
+                    // `let`/`fn` then only ever see plain symbol binds.
+                    "let" | "let*" => {
+                        if let Some(lowered) = lower_let(heap, &items) {
+                            return macroexpand_all(heap, lowered, env);
+                        }
+                    }
+                    "fn" | "lambda" => {
+                        if let Some(lowered) = lower_fn(heap, &items) {
+                            return macroexpand_all(heap, lowered, env);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(macroexpand_all(heap, item, env)?);
+            }
+            Ok(heap.list(out))
+        }
+        Value::Vector(id) => {
+            let items = heap.vector(id).to_vec();
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(macroexpand_all(heap, item, env)?);
+            }
+            Ok(heap.alloc_vector(out))
+        }
+        other => Ok(other),
+    }
+}
+
+// ---- pattern-binder lowering (the compile pass desugars these to `match*`) ----
+
+/// List/vector/`()` -> its element forms; anything else isn't a binding/param list.
+fn form_items(heap: &Heap, v: Value) -> Option<Vec<Value>> {
+    match v {
+        Value::Nil => Some(Vec::new()),
+        Value::Pair(_) => heap.list_to_vec(v).ok(),
+        Value::Vector(id) => Some(heap.vector(id).to_vec()),
+        _ => None,
+    }
+}
+
+fn is_sym(v: Value) -> bool {
+    matches!(v, Value::Sym(_))
+}
+
+fn make_do(heap: &mut Heap, body: &[Value]) -> Value {
+    let mut v = Vec::with_capacity(body.len() + 1);
+    v.push(value::sym("do"));
+    v.extend_from_slice(body);
+    heap.list(v)
+}
+
+/// `(match* :ctx valexpr (pattern inner))` — a single-clause refutable bind.
+fn refutable_bind(heap: &mut Heap, ctx: &str, valexpr: Value, pattern: Value, inner: Value) -> Value {
+    let clause = heap.list(vec![pattern, inner]);
+    heap.list(vec![value::sym("match*"), value::kw(ctx), valexpr, clause])
+}
+
+/// Lower a `let` whose bindings include a non-symbol (pattern) target into
+/// nested symbol-`let` / refutable `match*` binds (sequential, so each sees the
+/// previous). Returns `None` for an all-symbol or malformed `let` (left as-is).
+fn lower_let(heap: &mut Heap, items: &[Value]) -> Option<Value> {
+    let bindings = *items.get(1)?;
+    let binds = form_items(heap, bindings)?;
+    if binds.len() % 2 != 0 {
+        return None; // malformed: let eval report it
+    }
+    if !binds.iter().step_by(2).any(|&t| !is_sym(t)) {
+        return None; // all targets are plain symbols — ordinary let
+    }
+    let body = &items[2..];
+    let mut acc = make_do(heap, body);
+    let mut i = binds.len();
+    while i >= 2 {
+        let (target, valexpr) = (binds[i - 2], binds[i - 1]);
+        acc = if is_sym(target) {
+            let bind = heap.list(vec![target, valexpr]);
+            heap.list(vec![value::sym("let"), bind, acc])
+        } else {
+            refutable_bind(heap, "let", valexpr, target, acc)
+        };
+        i -= 2;
+    }
+    Some(acc)
+}
+
+/// A multi-clause `fn` clause is `(param-list body...)` where the param-list is
+/// itself a list (or `()`). A vector head is *not* a clause (param lists are
+/// lists, ADR-010) — that disambiguates a single tuple param from a clause.
+fn is_clause(heap: &Heap, f: Value) -> bool {
+    match f {
+        Value::Pair(p) => matches!(heap.car(p), Value::Pair(_) | Value::Nil),
+        _ => false,
+    }
+}
+
+/// Lower a `fn` that is multi-clause, or single-clause with pattern(s) in its
+/// required parameters, into a plain `fn` plus the Brood `match*` engine.
+/// Returns `None` for an ordinary single-clause `fn` (left as-is).
+fn lower_fn(heap: &mut Heap, items: &[Value]) -> Option<Value> {
+    let forms = &items[1..];
+
+    // Multi-clause: every form is a clause. Dispatch the whole arg list.
+    if !forms.is_empty() && forms.iter().all(|&f| is_clause(heap, f)) {
+        let g = value::gensym("args");
+        let params = heap.list(vec![value::sym("&"), g]);
+        let mut mexpr = vec![value::sym("match*"), value::kw("fn"), g];
+        mexpr.extend_from_slice(forms); // fn clauses are already match* clauses
+        let body = heap.list(mexpr);
+        return Some(heap.list(vec![value::sym("fn"), params, body]));
+    }
+
+    // Single-clause: forms[0] is the parameter list, forms[1..] the body.
+    let param_form = *forms.first()?;
+    let body = &forms[1..];
+    let params = form_items(heap, param_form)?;
+
+    // Patterns are allowed only in required slots (before &optional / & rest).
+    let required_end = params
+        .iter()
+        .position(|&p| matches!(p, Value::Sym(s) if matches!(value::symbol_name(s).as_str(), "&optional" | "&")))
+        .unwrap_or(params.len());
+    if !params[..required_end].iter().any(|&p| !is_sym(p)) {
+        return None; // no pattern in the required params — ordinary fn
+    }
+
+    // Replace each required pattern slot with a fresh symbol; bind it refutably.
+    let mut new_params = params.clone();
+    let mut binds: Vec<(Value, Value)> = Vec::new();
+    for (idx, &p) in params[..required_end].iter().enumerate() {
+        if !is_sym(p) {
+            let g = value::gensym("arg");
+            new_params[idx] = g;
+            binds.push((g, p));
+        }
+    }
+    let mut acc = make_do(heap, body);
+    for &(g, pat) in binds.iter().rev() {
+        acc = refutable_bind(heap, "fn", g, pat, acc);
+    }
+    let new_param_form = match param_form {
+        Value::Vector(_) => heap.alloc_vector(new_params),
+        _ => heap.list(new_params),
+    };
+    Some(heap.list(vec![value::sym("fn"), new_param_form, acc]))
+}

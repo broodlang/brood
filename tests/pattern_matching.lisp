@@ -1,0 +1,347 @@
+;; Pattern matching — the exhaustive suite. Register-only; run via `brood test`
+;; (and `cargo test`, via crates/lisp/tests/suite.rs), which discovers every
+;; tests/**/*_test.lisp and runs them together.
+;;
+;; Covers every variation of the pattern grammar and all three surfaces (`match`,
+;; refutable `let`, `fn`/`defn` clauses): literals, wildcard, binds, quoted
+;; symbols, pins, list and vector patterns, `& rest`, deep nesting, non-linear
+;; (repeated-variable) constraints, guards, clause ordering, the structured
+;; no-match crash, and the compile-time checks. See docs/pattern-matching.md.
+;;
+;; NOTE on testing compile-time errors: the compile pass expands `match` while a
+;; top-level form is loaded, so a malformed pattern written directly in a test
+;; body would fail at *load* time (before the test runs). To catch those errors
+;; at runtime, we trigger expansion explicitly with `(macroexpand 'form)` (for
+;; `match`) or `(eval (read-string "…"))` (for `let`/`fn`, which lower in the
+;; compile pass, not the `macroexpand` builtin).
+
+(require 'test)
+
+;; ─────────────────────────────────────────────────────────────────────────────
+;; LITERALS — matched by `=` (type-sensitive)
+;; ─────────────────────────────────────────────────────────────────────────────
+(describe "literal patterns"
+  (test "integers"        (assert= (match 2 (1 :a) (2 :b) (3 :c) (_ :z)) :b)
+                          (assert= (match -7 (-7 :neg) (_ :z)) :neg)
+                          (assert= (match 0 (0 :zero) (_ :z)) :zero))
+  (test "floats"          (assert= (match 3.14 (3.14 :pi) (_ :z)) :pi))
+  (test "strings"         (assert= (match "hi" ("yo" :a) ("hi" :b) (_ :z)) :b)
+                          (assert= (match "" ("" :empty) (_ :z)) :empty))
+  (test "keywords"        (assert= (match :b (:a 1) (:b 2) (:c 3)) 2))
+  (test "booleans"        (assert= (match true (true :t) (false :f)) :t)
+                          (assert= (match false (true :t) (false :f)) :f))
+  (test "nil"             (assert= (match nil (nil :n) (_ :z)) :n))
+  (test "type-sensitive = (1 and 1.0 differ)"
+                          (assert= (match 1.0 (1 :int) (_ :other)) :other)
+                          (assert= (match 1 (1 :int) (_ :other)) :int))
+  (test "no literal matches -> falls to catch-all"
+                          (assert= (match 99 (1 :a) (2 :b) (_ :z)) :z)))
+
+;; ─────────────────────────────────────────────────────────────────────────────
+;; WILDCARD and BARE-SYMBOL BIND
+;; ─────────────────────────────────────────────────────────────────────────────
+(describe "wildcard and bind"
+  (test "_ matches anything, binds nothing"
+    (assert= (match 5 (_ :anything)) :anything)
+    (assert= (match [1 2 3] (_ :anything)) :anything)
+    (assert= (match nil (_ :anything)) :anything))
+  (test "bare symbol binds and is usable in the body"
+    (assert= (match 21 (n (* n 2))) 42)
+    (assert= (match :kw (x x)) :kw))
+  (test "bind shadows an outer binding"
+    (assert= (let (x 1) (match 99 (x x))) 99))
+  (test "multiple wildcards in one pattern"
+    (assert= (match [1 2 3] ([_ y _] y)) 2)
+    (assert= (match (list 1 2 3) ((_ _ z) z)) 3)))
+
+;; ─────────────────────────────────────────────────────────────────────────────
+;; QUOTED SYMBOLS — match a symbol by value (the bind trap, avoided)
+;; ─────────────────────────────────────────────────────────────────────────────
+(describe "quoted-symbol patterns"
+  (test "'sym matches that symbol"
+    (assert= (match 'foo ('foo :yes) (_ :no)) :yes)
+    (assert= (match 'bar ('foo :yes) (_ :no)) :no))
+  (test "'sym does not bind (would-be trap)"
+    ;; a bare `none` binds; 'none compares. Prove the difference:
+    (assert= (match :anything ('none :was-none) (other other)) :anything)
+    (assert= (match 'none      ('none :was-none) (other other)) :was-none))
+  (test "quoted symbol inside a structure"
+    (assert= (match [:tag 'go] ([:tag 'go] :matched) (_ :no)) :matched)
+    (assert= (match [:tag 'stop] ([:tag 'go] :matched) (_ :no)) :no)))
+
+;; ─────────────────────────────────────────────────────────────────────────────
+;; PINS — ~expr matches the current value of expr
+;; ─────────────────────────────────────────────────────────────────────────────
+(describe "pin patterns"
+  (test "pin a let-bound variable"
+    (assert= (let (k :ok)  (match :ok  (~k :match) (_ :no))) :match)
+    (assert= (let (k :ok)  (match :err (~k :match) (_ :no))) :no))
+  (test "pin inside a vector (tagged) pattern"
+    (assert= (let (expected :ok) (match [:ok 9]  ([~expected v] v) (_ :no))) 9)
+    (assert= (let (expected :ok) (match [:err 9] ([~expected v] v) (_ :no))) :no))
+  (test "pin inside a list pattern"
+    (assert= (let (h 1) (match (list 1 2 3) ((~h & t) t) (_ :no))) (list 2 3)))
+  (test "pin an arbitrary expression"
+    (assert= (match 4 (~(+ 2 2) :four) (_ :no)) :four)
+    (assert= (match 5 (~(+ 2 2) :four) (_ :no)) :no))
+  (test "pin nested deeply"
+    (assert= (let (target 7) (match [:a [:b 7]] ([:a [:b ~target]] :hit) (_ :no))) :hit)))
+
+;; ─────────────────────────────────────────────────────────────────────────────
+;; LIST PATTERNS
+;; ─────────────────────────────────────────────────────────────────────────────
+(describe "list patterns"
+  (test "empty list / ()"
+    (assert= (match nil (() :empty) (_ :no)) :empty)
+    (assert= (match (list) (() :empty) (_ :no)) :empty)
+    (assert= (match (list 1) (() :empty) (_ :no)) :no))
+  (test "fixed length, element-wise"
+    (assert= (match (list 1 2 3) ((a b c) (list c b a))) (list 3 2 1)))
+  (test "length mismatch falls through"
+    (assert= (match (list 1 2)   ((a b c) :three) (_ :other)) :other)
+    (assert= (match (list 1 2 3 4) ((a b c) :three) (_ :other)) :other))
+  (test "head + & rest"
+    (assert= (match (list 1 2 3 4) ((h & t) (list h t))) (list 1 (list 2 3 4)))
+    (assert= (match (list 9)       ((h & t) (list h t))) (list 9 nil)))   ; rest may be empty
+  (test "several heads + rest"
+    (assert= (match (list 1 2 3 4 5) ((a b & rest) (list a b rest)))
+             (list 1 2 (list 3 4 5))))
+  (test "& binds the whole list"
+    (assert= (match (list 1 2 3) ((& all) all)) (list 1 2 3)))
+  (test "(h & t) requires at least one element"
+    (assert= (match nil ((h & t) :nonempty) (_ :empty)) :empty))
+  (test "literal heads (list-tagged data)"
+    (assert= (match (list :ok 42) ((:ok v) v) (_ :no)) 42)
+    (assert= (match (list :err 1) ((:ok v) v) (_ :no)) :no))
+  (test "mixed literals and binds"
+    (assert= (match (list 1 :go 3) ((1 tag n) (list tag n)) (_ :no)) (list :go 3))))
+
+;; ─────────────────────────────────────────────────────────────────────────────
+;; VECTOR PATTERNS — fixed-length tuples, the tagged-data idiom
+;; ─────────────────────────────────────────────────────────────────────────────
+(describe "vector patterns"
+  (test "empty vector"
+    (assert= (match [] ([] :empty) (_ :no)) :empty)
+    (assert= (match [1] ([] :empty) (_ :no)) :no))
+  (test "fixed length"
+    (assert= (match [1 2 3] ([a b c] (+ a b c))) 6))
+  (test "length mismatch falls through"
+    (assert= (match [1 2] ([a b c] :three) (_ :other)) :other))
+  (test "a list is not a vector (and vice versa)"
+    (assert= (match (list 1 2) ([a b] :vec) (_ :not-vec)) :not-vec)
+    (assert= (match [1 2]      ((a b) :lst) (_ :not-lst)) :not-lst))
+  (test "tagged vector — the idiom"
+    (assert= (match [:ok 42]  ([:ok v] v) ([:err e] (list :e e))) 42)
+    (assert= (match [:err 99] ([:ok v] v) ([:err e] (list :e e))) (list :e 99)))
+  (test "1- and 3-tuples"
+    (assert= (match [:just 5] ([:just x] x) (_ :no)) 5)
+    (assert= (match [1 2 3]   ([a b c] (* a b c))) 6)))
+
+;; ─────────────────────────────────────────────────────────────────────────────
+;; NESTING / COMPOSITION
+;; ─────────────────────────────────────────────────────────────────────────────
+(describe "nested patterns"
+  (test "vector in vector"
+    (assert= (match [:add [1 2]] ([:add [a b]] (+ a b))) 3))
+  (test "vector in list and list in vector"
+    (assert= (match (list :pair [10 20]) ((tag [x y]) (list tag x y))) (list :pair 10 20))
+    (assert= (match [:wrap (list 1 2 3)] ([:wrap (a b c)] (+ a b c))) 6))
+  (test "deeply nested"
+    (assert= (match [:a [:b [:c 42]]] ([:a [:b [:c v]]] v)) 42))
+  (test "rest of structured elements"
+    (assert= (match (list [:p 1] [:p 2] [:p 3]) (([:p a] & more) (list a more)))
+             (list 1 (list [:p 2] [:p 3]))))
+  (test "mixed literal + bind + nested across forms"
+    (assert= (match [:line [0 0] [3 4]]
+               ([:line [x1 y1] [x2 y2]] (list x1 y1 x2 y2)))
+             (list 0 0 3 4))))
+
+;; ─────────────────────────────────────────────────────────────────────────────
+;; NON-LINEAR — a repeated variable is an equality constraint
+;; ─────────────────────────────────────────────────────────────────────────────
+(describe "non-linear patterns"
+  (test "vector [x x]"
+    (assert= (match [3 3] ([x x] :eq) (_ :ne)) :eq)
+    (assert= (match [3 4] ([x x] :eq) (_ :ne)) :ne))
+  (test "list (x x)"
+    (assert= (match (list 5 5) ((x x) :eq) (_ :ne)) :eq)
+    (assert= (match (list 5 6) ((x x) :eq) (_ :ne)) :ne))
+  (test "three repeats [x x x]"
+    (assert= (match [7 7 7] ([x x x] :all-eq) (_ :no)) :all-eq)
+    (assert= (match [7 7 8] ([x x x] :all-eq) (_ :no)) :no))
+  (test "repeat across nested sub-patterns [[x] [x]]"
+    (assert= (match [[1] [1]] ([[x] [x]] :eq) (_ :ne)) :eq)
+    (assert= (match [[1] [2]] ([[x] [x]] :eq) (_ :ne)) :ne))
+  (test "repeat across a list and a vector (x [x])"
+    (assert= (match (list 3 [3]) ((x [x]) :eq) (_ :ne)) :eq)
+    (assert= (match (list 3 [4]) ((x [x]) :eq) (_ :ne)) :ne))
+  (test "non-linear combined with a literal"
+    (assert= (match [:pair 8 8] ([:pair x x] :eq) (_ :ne)) :eq)
+    (assert= (match [:pair 8 9] ([:pair x x] :eq) (_ :ne)) :ne))
+  (test "equality is structural (works on collections)"
+    (assert= (match [(list 1 2) (list 1 2)] ([x x] :eq) (_ :ne)) :eq)
+    (assert= (match [(list 1 2) (list 1 3)] ([x x] :eq) (_ :ne)) :ne)))
+
+;; ─────────────────────────────────────────────────────────────────────────────
+;; GUARDS — :when after a pattern
+;; ─────────────────────────────────────────────────────────────────────────────
+(describe "guards"
+  (test "guard gates the clause"
+    (assert= (match 7  (n :when (> n 0) :pos) (0 :zero) (_ :neg)) :pos)
+    (assert= (match -3 (n :when (> n 0) :pos) (0 :zero) (_ :neg)) :neg))
+  (test "a falsy guard falls through to the next clause"
+    (assert= (match 5 (n :when (> n 100) :big) (n :when (> n 0) :small) (_ :z)) :small))
+  (test "guard sees pattern bindings"
+    (assert= (match [3 4] ([a b] :when (< a b) :ascending) (_ :no)) :ascending)
+    (assert= (match [4 3] ([a b] :when (< a b) :ascending) (_ :no)) :no))
+  (test "guard sees outer bindings"
+    (assert= (let (limit 10) (match 5 (n :when (< n limit) :under) (_ :over))) :under))
+  (test "guard with non-linear pattern"
+    (assert= (match [2 2] ([x x] :when (> x 0) :pos-eq) (_ :no)) :pos-eq)
+    (assert= (match [2 3] ([x x] :when (> x 0) :pos-eq) (_ :no)) :no))
+  (test "guard on a destructured tag"
+    (assert= (match [:n 5] ([:n v] :when (> v 0) :pos) ([:n v] :nonpos)) :pos)
+    (assert= (match [:n 0] ([:n v] :when (> v 0) :pos) ([:n v] :nonpos)) :nonpos)))
+
+;; ─────────────────────────────────────────────────────────────────────────────
+;; CLAUSE ORDERING, BODIES, AND match AS AN EXPRESSION
+;; ─────────────────────────────────────────────────────────────────────────────
+(describe "clauses and bodies"
+  (test "first matching clause wins"
+    (assert= (match 1 (1 :first) (1 :second) (_ :z)) :first))
+  (test "explicit catch-all binding"
+    (assert= (match 99 (1 :one) (other (list :got other))) (list :got 99)))
+  (test "multi-form body is an implicit do (last value)"
+    (assert= (match 3 (n :first-form-discarded (+ n n))) 6))
+  (test "empty body yields nil"
+    (assert= (match 3 (3) (_ :no)) nil))
+  (test "match nests as an expression"
+    (assert= (+ 1 (match 2 (2 10) (_ 0))) 11)
+    (assert= (list (match :a (:a 1)) (match :b (:b 2))) (list 1 2)))
+  (test "match inside let, let inside match"
+    (assert= (let (v (match 1 (1 :one))) v) :one)
+    (assert= (match 5 (n (let (d (* n 2)) d))) 10)))
+
+;; ─────────────────────────────────────────────────────────────────────────────
+;; RUNTIME FAILURE — a structured, catchable [:match-error ctx value patterns]
+;; ─────────────────────────────────────────────────────────────────────────────
+(describe "no-match failure"
+  (test "an unmatched value raises"
+    (assert-error (match 42 ([:ok v] v) ([:err e] e))))
+  (test "the failure is structured and matchable"
+    (assert= (try (match 42 ([:ok v] v) ([:err e] e))
+                  (catch e (match e ([:match-error ctx val pats] (list ctx val))
+                                    (_ :other))))
+             (list :match 42)))
+  (test "the failure carries the patterns tried"
+    (assert= (try (match 7 (1 :a) (2 :b))
+                  (catch e (match e ([:match-error ctx val pats] pats) (_ :no))))
+             (list 1 2)))
+  (test "an empty match always fails"
+    (assert-error (match :anything)))
+  (test "a totalised match never fails"
+    (assert= (match :anything (_ :ok)) :ok)))
+
+;; ─────────────────────────────────────────────────────────────────────────────
+;; COMPILE-TIME CHECKS — fire while the macro expands (triggered via macroexpand)
+;; ─────────────────────────────────────────────────────────────────────────────
+(describe "compile-time errors"
+  (test "unreachable clause after a catch-all (_)"
+    (assert-error (macroexpand '(match 1 (_ :always) (2 :dead)))))
+  (test "unreachable clause after a bare-symbol bind"
+    (assert-error (macroexpand '(match 1 (x :always) (2 :dead)))))
+  (test "a guarded irrefutable clause is NOT unreachable"
+    (assert= (try (do (macroexpand '(match 1 (x :when (> x 0) :pos) (_ :np))) :ok)
+                  (catch e :err))
+             :ok))
+  (test "malformed & — must be followed by exactly one tail pattern"
+    (assert-error (macroexpand '(match (list 1) ((a & b c) :x))))
+    (assert-error (macroexpand '(match (list 1) ((a &) :x)))))
+  (test ":when with no guard"
+    (assert-error (macroexpand '(match 1 (x :when)))))
+  (test "& is not allowed in a vector pattern"
+    (assert-error (macroexpand '(match [1 2] ([a & b] :x)))))
+  (test "a clause that isn't a (pattern body...) list"
+    (assert-error (macroexpand '(match 1 5))))
+  (test "& rest still works (sanity: a valid & does not error)"
+    (assert= (match (list 1 2 3) ((a & b) (list a b))) (list 1 (list 2 3)))))
+
+;; ─────────────────────────────────────────────────────────────────────────────
+;; TAIL POSITION — a match-driven loop must not overflow
+;; ─────────────────────────────────────────────────────────────────────────────
+(describe "tail position"
+  (test "deep match loop does not overflow"
+    (defn pm-count-down (n) (match n (0 :done) (_ (pm-count-down (- n 1)))))
+    (assert= (pm-count-down 20000) :done))
+  (test "match in an accumulator loop"
+    (defn pm-sum (n acc) (match n (0 acc) (_ (pm-sum (- n 1) (+ acc n)))))
+    (assert= (pm-sum 1000 0) 500500)))
+
+;; ─────────────────────────────────────────────────────────────────────────────
+;; REFUTABLE / DESTRUCTURING let
+;; ─────────────────────────────────────────────────────────────────────────────
+(describe "destructuring let"
+  (test "tuple (vector) bind"   (assert= (let ([:ok v] [:ok 42]) v) 42))
+  (test "list bind"             (assert= (let ((a b c) (list 1 2 3)) (+ a b c)) 6))
+  (test "list with & rest"      (assert= (let ((h & t) (list 1 2 3)) (list h t)) (list 1 (list 2 3))))
+  (test "nested"                (assert= (let ([:pt [x y]] [:pt [3 4]]) (+ x y)) 7))
+  (test "plain symbol unchanged" (assert= (let (a 1 b 2) (+ a b)) 3))
+  (test "sequential, freely mixing symbols and patterns"
+    (assert= (let (x 1 [a b] [10 20] y (+ x a)) (list x a b y)) (list 1 10 20 11)))
+  (test "a later binding sees an earlier destructured one"
+    (assert= (let ([a b] [2 3] s (+ a b)) s) 5))
+  (test "non-linear inside a let pattern"
+    (assert= (let ([x x] [4 4]) x) 4)
+    (assert-error (let ([x x] [4 5]) x)))
+  (test "pin inside a let pattern"
+    (assert= (let (tag :ok) (let ([~tag v] [:ok 9]) v)) 9))
+  (test "refutable: a non-match raises, with :let context"
+    (assert-error (let ([:ok v] [:err 1]) v))
+    (assert= (try (let ([:ok v] [:err 404]) v)
+                  (catch e (match e ([:match-error ctx val pats] (list ctx val)) (_ :other))))
+             (list :let [:err 404])))
+  (test "malformed let pattern is a compile-time error"
+    (assert-error (eval (read-string "(let ((a & b c) (list 1)) a)")))))
+
+;; ─────────────────────────────────────────────────────────────────────────────
+;; fn / defn — multi-clause dispatch and pattern parameters  (:serial: defs globals)
+;; ─────────────────────────────────────────────────────────────────────────────
+(describe "fn / defn clauses" :serial
+  (test "multi-clause recursion (fac)"
+    (defn pm-fac ((0) 1) ((n) (* n (pm-fac (- n 1)))))
+    (assert= (pm-fac 0) 1) (assert= (pm-fac 5) 120))
+  (test "multi-clause with a guard"
+    (defn pm-sign ((n) :when (> n 0) :pos) ((0) :zero) ((n) :neg))
+    (assert= (pm-sign 5) :pos) (assert= (pm-sign 0) :zero) (assert= (pm-sign -2) :neg))
+  (test "multi-clause dispatch on tagged data"
+    (defn pm-unwrap (([:ok v]) v) (([:err e]) (list :error e)))
+    (assert= (pm-unwrap [:ok 7]) 7) (assert= (pm-unwrap [:err 9]) (list :error 9)))
+  (test "multi-clause with several params per clause"
+    (defn pm-add ((a b) (+ a b)))
+    (assert= (pm-add 3 4) 7))
+  (test "multi-clause with & rest in a clause"
+    (defn pm-tail ((h & t) t) (() :empty))
+    (assert= (pm-tail 1 2 3) (list 2 3)) (assert= (pm-tail) :empty))
+  (test "different-arity clauses dispatch by arg count"
+    (defn pm-ar ((a) :one) ((a b) :two))
+    (assert= (pm-ar 1) :one) (assert= (pm-ar 1 2) :two))
+  (test "anonymous single-clause fn with a tuple param"
+    (assert= ((fn ([x y]) (* x y)) [3 4]) 12)
+    (assert= ((fn (a [x y]) (+ a x y)) 1 [2 3]) 6))
+  (test "anonymous fn with a nested pattern param"
+    (assert= ((fn ([:pt [x y]]) (+ x y)) [:pt [5 6]]) 11))
+  (test "pattern param coexists with &optional"
+    (defn pm-box (a [x y] &optional (c 10)) (+ a x y c))
+    (assert= (pm-box 1 [2 3]) 16) (assert= (pm-box 1 [2 3] 100) 106))
+  (test "pattern param coexists with & rest"
+    (defn pm-first ([x y] & rest) (list x y rest))
+    (assert= (pm-first [1 2] 3 4 5) (list 1 2 (list 3 4 5))))
+  (test "no clause matched raises"
+    (defn pm-only-ok (([:ok v]) v))
+    (assert-error (pm-only-ok [:err 1])))
+  (test "defn forwards single-clause unchanged"
+    (defn pm-sq (x) (* x x))
+    (assert= (pm-sq 9) 81)))
+
+;; No (run-tests) call: register-only. The project test runner (`brood test`,
+;; ADR-020) discovers this file and runs the whole suite once.

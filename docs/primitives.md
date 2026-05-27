@@ -9,7 +9,13 @@ load-bearing choice (ADR-006 "write the language in the language", ADR-008
 
 `%`-prefixed names are low-level primitives not meant to be called directly.
 
-## Native primitive functions (49)
+The **Arity** column below is now machine-enforced: each builtin declares an
+`Arity` (`value.rs`) and the evaluator checks it once, at the single native call
+gate (`eval::call_native`), before the primitive runs — so a wrong-count call is
+a clean arity error (`type-of: expected 1 argument, got 0`) rather than a missing
+arg silently becoming `nil`.
+
+## Native primitive functions (50)
 
 | Category | Primitive | Arity | Purpose |
 |---|---|---|---|
@@ -25,9 +31,11 @@ load-bearing choice (ADR-006 "write the language in the language", ADR-008
 | | `vector-length` | 1 | length |
 | **String** | `string-length` | 1 | char count |
 | **Type tags** (not expressible in-language) | `nil?` `pair?` `int?` `float?` `bool?` `string?` `symbol?` `keyword?` `vector?` `fn?` | 1 | tag test → bool |
+| | `type-of` | 1 | the runtime type tag as a keyword (`:int` `:string` …); the reflective primitive the predicates and in-language checks build on |
 | **Value ↔ text & I/O** | `str` | n | concatenate the *display* forms of args → string |
 | | `pr-str` | 1 | *readable* form of a value → string |
 | | `print` `println` | n | write display forms to stdout → nil |
+| | `stdout-tty?` | 0 | true when stdout is an interactive terminal (false when piped/captured) — gates colour output |
 | **Time** | `now` | 0 | wall-clock milliseconds since the Unix epoch (integer); subtract two readings for elapsed time |
 | **Memory** | `mem-bytes` | 0 | bytes currently allocated process-wide (from the counting global allocator) |
 | | `mem-peak` | 0 | high-water mark of allocated bytes since process start |

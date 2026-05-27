@@ -40,6 +40,19 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
 - ⬜ **Dynamic variables** (`defdyn` / `binding`) for editor config
 - ✅ **Error handling** — `throw` + `%try` primitives; `try`/`catch` + `error`
   in the prelude (no new special forms — ADR-011)
+- ✅ **Pattern matching** (ADR-021) — Erlang/Elixir-style; one Brood compiler
+  reused by `match`, refutable `let`, and `fn`/`defn` clauses. Subsumes Tier-2
+  destructuring + `case`. Made fast by a **macroexpand-all compile pass**
+  (ADR-022), which also lowers the `let`/`fn` pattern surfaces.
+- 🟡 **Type reflection & checking** (ADR-023). Done: the runtime tag is
+  first-class — a `Tag` enum + `(type-of x)` primitive — type errors are
+  self-identifying (`first: expected list or vector, got int (5)`), and every
+  builtin declares an `Arity` enforced at one central native-call gate (no more
+  silently-tolerated wrong-arity calls). Still ⬜: an
+  **advisory** compile-pass analysis (special-form structure → hard error;
+  literal misuse → warning; local flow inference), kept advisory so hot reload
+  is never inhibited (globals are `Any`). Types stay runtime-only — no static
+  gating, no annotations.
 - ⬜ **Maps** (`{ }` literals, `get`/`assoc`)
 - 🟡 **Memory reclamation.** `Send` arena handles replaced `Rc` (done). Step 1 of
   reclamation is **arena reset at top-level boundaries** (ADR-016): `eval_str` and
@@ -53,6 +66,14 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
 - ⬜ **Self-host the CLI/REPL in Brood** — once the language can express it, the
   read-eval-print loop should be Brood source on a thin Rust substrate, not
   Rust. (See the core principle in `CLAUDE.md`.)
+- ⬜ **Modules** — Emacs-flat `provide` / `require` + `*load-path*` over the shared
+  global table; `foo--private` convention (ADR-019). Logic in Brood; the only new
+  Rust is `file-exists?` / `list-dir` / `cwd`. *Namespaces stay deferred — a later,
+  additive Brood macro layer if ever needed.*
+- ⬜ **Project model & test tool** — convention over configuration: `src/` is the
+  project source (auto on `*load-path*`), `tests/**/*_test.lisp` are the tests; a
+  `project.lisp` manifest declares identity (name/version) and overrides paths only
+  when needed. `brood test` discovers + loads (register-only) + runs once (ADR-020).
 
 > v0.1 is the ✅ slice above: enough to be a real, usable language. The ⬜ items
 > complete M1.

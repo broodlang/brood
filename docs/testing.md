@@ -37,12 +37,27 @@ cargo test                      # runs the same suite via crates/lisp/tests/suit
 
 | form | passes when | failure message |
 |---|---|---|
-| `(is expr)` | `expr` is truthy | `is: expected truthy, got <v>` |
-| `(assert= actual expected)` | `(= actual expected)` | `<actual> ≠ <expected>` |
-| `(assert-error body…)` | evaluating `body` raises | `expected an error, none raised` |
+| `(is expr)` | `expr` is truthy | `<expr> is <v>` |
+| `(refute expr)` | `expr` is falsy | `<expr> is <v> — expected falsy` |
+| `(assert= actual expected)` | `(= actual expected)` | `<actual-expr> => <v>, expected <expected-v>` |
+| `(assert-error body…)` | evaluating `body` raises | `expected <body> to raise, but none did` |
+
+Every failure message **names the source expression that failed**, quoted at
+macro-expansion time — so a failing assertion identifies itself without your
+having to open the file or disambiguate look-alike lines. For example, three
+different `is` checks fail as `(= 1 2) is false`, `(empty? (list 1)) is false`,
+and `(number? "nope") is false` — not three identical lines. Use `assert=` for
+equality (it shows both the actual expression's value and the expected value) and
+`is` / `refute` for boolean predicates.
 
 Assertions **do not stop the test** — every assertion in a body runs, so one
 test can report several failures. Each operand is evaluated once.
+
+Output is **plain text when captured** (a pipe, `cargo test`, CI, or an LLM
+reading the run) and **coloured only when stdout is an interactive terminal**
+(via the `stdout-tty?` primitive) — so a captured run is never littered with ANSI
+escape codes. `tests/suite-failures.lisp` is a runnable demo of the failure
+rendering (`./bin/cli tests/suite-failures.lisp`).
 
 `(error-of body…)` is a helper, not an assertion: it evaluates `body` and yields
 the error it raised — a built-in error as its message string, a `(throw v)` as

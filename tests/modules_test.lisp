@@ -1,0 +1,38 @@
+;; Module system + path/string helpers (ADR-019). Register-only — discovered and
+;; run by `brood test` (and cargo test, via crates/lisp/tests/suite.rs).
+
+(require 'test)
+
+(describe "strings: substring & affixes"
+  (test "substring is char-indexed"
+    (assert= (substring "hello" 1 4) "ell")
+    (assert= (substring "hello" 0 0) "")
+    (assert= (substring "hello" 0 5) "hello"))
+  (test "substring out of range raises"
+    (assert-error (substring "hi" 0 9)) (assert-error (substring "hi" -1 1)))
+  (test "starts-with? / ends-with?"
+    (is (starts-with? "foobar" "foo"))        (refute (starts-with? "foobar" "bar"))
+    (is (ends-with? "foo_test.lisp" "_test.lisp"))
+    (refute (ends-with? "foo.lisp" "_test.lisp"))
+    (is (ends-with? "x" ""))))
+
+(describe "paths"
+  (test "path-join"  (assert= (path-join "a" "b") "a/b")
+                     (assert= (path-join "a/" "b") "a/b"))
+  (test "parent-dir" (assert= (parent-dir "/a/b/c") "/a/b")
+                     (assert= (parent-dir "/foo") "/")
+                     (assert= (parent-dir "rel") ".")))
+
+;; :serial — these mutate the shared *features* global, so run them one-at-a-time.
+(describe "modules: member? / provide / require" :serial
+  (test "member?"
+    (is (member? 2 (list 1 2 3))) (refute (member? 9 (list 1 2 3))))
+  (test "provide records a feature idempotently"
+    (provide 'demo-feature)
+    (is (member? "demo-feature" *features*))
+    (provide 'demo-feature)
+    (assert= (count (filter (fn (x) (= x "demo-feature")) *features*)) 1))
+  (test "require returns the feature name and is idempotent"
+    (assert= (require 'test) "test"))
+  (test "require of a missing module raises"
+    (assert-error (require 'no-such-module-xyz))))

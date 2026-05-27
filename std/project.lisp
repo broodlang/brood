@@ -1,0 +1,90 @@
+;; std/project.lisp — the project model + test runner (ADR-020), in Brood.
+;;
+;;   (require 'project)       ; loaded on demand; baked into the binary
+;;   (run-project-tests)      ; find project.lisp, discover tests, run them once
+;;
+;; This is the policy behind `brood test`. Convention over configuration: `src/`
+;; holds the project's source (added to *load-path*), `tests/` holds tests
+;; discovered as <name>_test.lisp. A `project.lisp` manifest declares identity
+;; and may override the conventional paths. Rust supplies only the filesystem
+;; mechanism (cwd / file-exists? / dir? / list-dir) and `load`; everything here
+;; is ordinary Brood.
+
+;; --- the project, as set by the manifest -------------------------------------
+(def *project-root*         nil)
+(def *project-name*         nil)
+(def *project-version*      nil)
+(def *project-source-paths* (list "src"))     ; conventional default
+(def *project-test-paths*   (list "tests"))   ; conventional default
+
+;; (plist-get '(:a 1 :b 2) :b) => 2 — the value after key k in a flat kv list, or nil.
+(defn plist-get (kvs k)
+  (cond
+    (empty? kvs)      nil
+    (= (first kvs) k) (second kvs)
+    else              (plist-get (rest (rest kvs)) k)))
+
+;; The (project ...) manifest form: records identity, and overrides the
+;; conventional source/test paths when given. Missing keys keep their defaults.
+;; Called when a project.lisp is loaded.
+(defn project (& opts)
+  (set! *project-name*    (plist-get opts :name))
+  (set! *project-version* (plist-get opts :version))
+  (let (src (plist-get opts :source-paths)
+        tst (plist-get opts :test-paths))
+    (when src (set! *project-source-paths* src))
+    (when tst (set! *project-test-paths*   tst)))
+  *project-name*)
+
+;; --- finding the project + discovering tests ---------------------------------
+;; Walk up from `dir` toward the filesystem root, looking for project.lisp.
+;; parent-dir is its own fixed point at "/" and ".", which terminates the walk.
+(defn project--find-root (dir)
+  (cond
+    (file-exists? (path-join dir "project.lisp")) dir
+    (= dir (parent-dir dir))                      nil
+    else                                          (project--find-root (parent-dir dir))))
+
+(defn project--abs-paths (root rels)
+  (map (fn (r) (path-join root r)) rels))
+
+;; Recursively collect every <name>_test.lisp path under `dir` (skipping nothing
+;; else). Returns a list of full paths; nil if `dir` isn't a directory.
+(defn project--collect-tests (dir)
+  (if (dir? dir)
+    (fold (fn (acc entry)
+            (let (p (path-join dir entry))
+              (cond
+                (dir? p)                        (append acc (project--collect-tests p))
+                (ends-with? entry "_test.lisp") (append acc (list p))
+                else                            acc)))
+          nil
+          (list-dir dir))
+    nil))
+
+;; Load the manifest (if present) and put the project's source dirs on *load-path*
+;; so its modules are require-able by name.
+(defn project-setup (root)
+  (set! *project-root* root)
+  (when (file-exists? (path-join root "project.lisp"))
+    (load (path-join root "project.lisp")))
+  (set! *load-path*
+        (append (project--abs-paths root *project-source-paths*) *load-path*))
+  root)
+
+;; (run-project-tests & opts) — find the project from the cwd, set it up, load
+;; every <name>_test.lisp under its test paths (which only REGISTER tests via the
+;; test framework), then run the whole suite once. opts pass through to run-tests
+;; (e.g. :trace / :slow). Raises if there's no project here, or if any test fails.
+(defn run-project-tests (& opts)
+  (let (root (project--find-root (cwd)))
+    (when (nil? root)
+      (error "run-project-tests: not in a Brood project (no project.lisp found from " (cwd) ")"))
+    (project-setup root)
+    (require 'test)
+    (let (dirs  (project--abs-paths root *project-test-paths*)
+          files (fold (fn (acc d) (append acc (project--collect-tests d))) nil dirs))
+      (fold (fn (_ f) (load f)) nil files)   ; load each: registers its tests
+      (apply run-tests opts))))
+
+(provide 'project)

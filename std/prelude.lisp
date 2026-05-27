@@ -12,9 +12,11 @@
 ;; with `defn`, so the library is defined exactly the way you would define your
 ;; own functions — including `+`, which is "just a function".
 
-;; `defn` itself: (defn name (params) body...) => (def name (fn (params) body...))
-(defmacro defn (name params & body)
-  `(def ~name (fn ~params ~@body)))
+;; `defn` itself: forwards everything after the name to `fn`, so it inherits
+;; both single-clause — (defn f (x) ...) => (def f (fn (x) ...)) — and the
+;; multi-clause pattern form — (defn f ((0) 1) ((n) ...)) => (def f (fn ((0) 1) ((n) ...))).
+(defmacro defn (name & clauses)
+  `(def ~name (fn ~@clauses)))
 
 ;; ---- logic ----
 (defn not (x) (if x false true))
@@ -148,3 +150,264 @@
             handler (rest (rest clause)))
         `(%try (fn () ~@init) (fn (~evar) ~@handler)))
       `(do ~@body))))
+
+;; ---- pattern matching -------------------------------------------------------
+;; The matcher is written in Brood, not Rust: a pattern->code compiler (a macro
+;; plus expand-time helper `defn`s, exactly like the threading macros compute at
+;; expansion time) that emits nested `if`/`let` over existing primitives —
+;; `pair?`, `first`, `rest`, `nil?`, `vector?`, `vector-ref`, `vector-length`,
+;; `=`. No new special form (the `try`/`catch` precedent: a macro over
+;; primitives). One compiler serves `match` here, and the `let` / `fn` special
+;; forms delegate to it for destructuring. See docs/pattern-matching.md.
+;;
+;; THE ONE TRAP: a bare symbol in a pattern *binds* (and shadows); it does not
+;; test against a same-named value. Match a known value with a keyword (:ok), a
+;; quoted symbol ('none), or a pin (~x). The grammar:
+;;   _              wildcard (matches anything, binds nothing)
+;;   x              binds x  (a repeated x is an equality constraint — non-linear)
+;;   42 "s" :k nil  a literal, matched by =
+;;   'sym           the literal symbol sym
+;;   ~expr          the current value of expr (a pin)
+;;   (p1 p2 ...)    a list of that exact length, element-wise
+;;   (p1 & rest)    head(s) + tail bound (the & rest marker)
+;;   [p1 p2 ...]    a vector of that exact length (the tagged-data / tuple idiom)
+
+;; -- pattern shape predicates --
+(defn match-wildcard? (p) (= p '_))
+(defn match-bind-sym? (p) (and (symbol? p) (not (= p '_)) (not (= p '&))))
+(defn match-quoted?   (p) (and (pair? p) (= (first p) 'quote)))
+(defn match-pin?      (p) (and (pair? p) (= (first p) 'unquote)))
+
+;; -- expand-time helpers --
+(defn match-member? (x xs)
+  (cond
+    (empty? xs)      false
+    (= x (first xs)) true
+    else             (match-member? x (rest xs))))
+
+(defn match-vec->list (v) (match-vec-collect v (dec (vector-length v)) nil))
+(defn match-vec-collect (v i acc)
+  (if (< i 0) acc (match-vec-collect v (dec i) (cons (vector-ref v i) acc))))
+
+;; The variables a pattern binds. Threaded as `bound` through the compiler so a
+;; variable that recurs becomes an equality check (non-linear patterns).
+(defn pattern-vars (pat)
+  (cond
+    (match-wildcard? pat) nil
+    (match-bind-sym? pat) (list pat)
+    (match-quoted? pat)   nil
+    (match-pin? pat)      nil
+    (pair? pat)           (match-seq-vars pat)
+    (vector? pat)         (match-seq-vars (match-vec->list pat))
+    else                  nil))
+(defn match-seq-vars (pats)
+  (cond
+    (empty? pats)       nil
+    (= (first pats) '&) (match-seq-vars (rest pats))
+    else                (append (pattern-vars (first pats)) (match-seq-vars (rest pats)))))
+
+;; The core: compile `pat` against the value of the symbol `target`, given the
+;; already-`bound` names; on a match run `success`, else `fail`. Returns code.
+(defn match-compile (pat target bound success fail)
+  (cond
+    (match-wildcard? pat) success
+    (match-bind-sym? pat) (if (match-member? pat bound)
+                            `(if (= ~target ~pat) ~success ~fail)  ; non-linear: equal to earlier binding
+                            `(let (~pat ~target) ~success))        ; fresh bind
+    (match-quoted? pat)   `(if (= ~target ~pat) ~success ~fail)    ; 'sym self-evaluates to the symbol
+    (match-pin? pat)      `(if (= ~target ~(second pat)) ~success ~fail) ; ~expr: match the value of expr
+    (pair? pat)           (match-compile-list pat target bound success fail)
+    (vector? pat)         (match-compile-vector pat target bound success fail)
+    else                  `(if (= ~target ~pat) ~success ~fail)))  ; literal (number/string/keyword/bool/nil)
+
+;; list pattern: split off an optional `& rest` tail, then bind element-wise.
+(defn match-split (pats)
+  (cond
+    (empty? pats)       [nil nil false]
+    (= (first pats) '&) (if (= (count (rest pats)) 1)
+                          [nil (second pats) true]
+                          (error "match: '&' must be followed by exactly one tail pattern"))
+    else                (let (sub (match-split (rest pats)))
+                          [(cons (first pats) (nth sub 0)) (nth sub 1) (nth sub 2)])))
+
+(defn match-compile-list (pat target bound success fail)
+  (let (parts (match-split pat))
+    (match-compile-seq (nth parts 0) (nth parts 1) (nth parts 2) target bound success fail)))
+
+(defn match-compile-seq (pats rest-pat has-rest target bound success fail)
+  (if (empty? pats)
+    (if has-rest
+      (match-compile rest-pat target bound success fail)  ; bind the rest to what remains
+      `(if (nil? ~target) ~success ~fail))                ; require the list exhausted
+    (let (p     (first pats)
+          hd    (gensym "hd")
+          tl    (gensym "tl")
+          inner (match-compile-seq (rest pats) rest-pat has-rest tl
+                                   (append bound (pattern-vars p)) success fail)
+          head  (match-compile p hd bound inner fail))
+      `(if (pair? ~target)
+         (let (~hd (first ~target) ~tl (rest ~target)) ~head)
+         ~fail))))
+
+;; vector pattern: a fixed-length tuple, matched element-wise by index.
+(defn match-compile-vector (pat target bound success fail)
+  (let (elems (match-vec->list pat)
+        n     (count elems))
+    (when (match-member? '& elems)
+      (error "match: '&' (rest) is not allowed in a vector pattern — vectors are fixed-length"))
+    `(if (and (vector? ~target) (= (vector-length ~target) ~n))
+       ~(match-compile-velems elems target 0 bound success fail)
+       ~fail)))
+
+(defn match-compile-velems (pats target i bound success fail)
+  (if (empty? pats)
+    success
+    (let (p     (first pats)
+          el    (gensym "el")
+          inner (match-compile-velems (rest pats) target (inc i)
+                                      (append bound (pattern-vars p)) success fail)
+          this  (match-compile p el bound inner fail))
+      `(let (~el (vector-ref ~target ~i)) ~this))))
+
+;; -- clauses: (pattern [:when guard] body...) — one shape for match / fn / receive --
+(defn match-parse-clause (clause)
+  (if (not (pair? clause))
+    (error (str "match: each clause must be a (pattern body...) list, got " (pr-str clause)))
+    (let (pat (first clause) more (rest clause))
+      (if (= (first more) :when)
+        (if (empty? (rest more))
+          (error "match: :when must be followed by a guard expression")
+          [pat (second more) (rest (rest more))])
+        [pat nil more]))))
+
+;; A clause is irrefutable (always matches) iff its pattern is _ or a bare bind
+;; and it has no guard. Such a clause must be last; anything after it is dead.
+(defn match-irrefutable? (pat guard)
+  (and (nil? guard) (or (match-wildcard? pat) (match-bind-sym? pat))))
+
+(defn match-compile-clause (clause target fail)
+  (let (parsed  (match-parse-clause clause)
+        pat     (nth parsed 0)
+        guard   (nth parsed 1)
+        body    (nth parsed 2)
+        success (if (nil? guard) `(do ~@body) `(if ~guard (do ~@body) ~fail)))
+    (match-compile pat target nil success fail)))
+
+;; The no-match failure: a structured, catchable, self-describing value carrying
+;; the context (:match / :let / a fn name), the value, and the patterns tried.
+(defn match-no-match (context target patterns)
+  `(throw [:match-error (quote ~context) ~target (quote ~patterns)]))
+
+(defn match-clause-patterns (clauses)
+  (map (fn (c) (if (pair? c) (first c) c)) clauses))
+
+(defn match-check-reachable (clause following)
+  (let (parsed (match-parse-clause clause))
+    (when (and (match-irrefutable? (nth parsed 0) (nth parsed 1)) (not (empty? following)))
+      (error "match: unreachable clause after a catch-all (an irrefutable pattern must come last)"))))
+
+;; Chain the clauses: each clause's fail-continuation is the code for the rest;
+;; the innermost fail is the structured no-match throw. Each chosen body lands in
+;; tail position of the generated if/let, so a `match` in tail position is TCO-safe.
+(defn match-build-from (clauses target fail)
+  (if (empty? clauses)
+    fail
+    (let (clause    (first clauses)
+          following (rest clauses)
+          rest-code (match-build-from following target fail))
+      (match-check-reachable clause following)
+      (match-compile-clause clause target rest-code))))
+
+(defn match-build (clauses target context)
+  (match-build-from clauses target
+                    (match-no-match context target (match-clause-patterns clauses))))
+
+;; match* — the shared engine. `context` (a keyword like :match/:let, or a fn
+;; name) is embedded in the failure. `match` is the value-dispatch surface; the
+;; `let` and `fn` special forms target match* directly with their own context.
+(defmacro match* (context expr & clauses)
+  (let (v (gensym "m"))
+    `(let (~v ~expr) ~(match-build clauses v context))))
+
+;; (match expr (pattern [:when guard] body...) ...) — match `expr` against each
+;; clause in order; the first whose pattern (and guard) matches runs its body.
+;; No clause matching crashes with a structured value; add a `_` clause to total it.
+(defmacro match (expr & clauses)
+  `(match* :match ~expr ~@clauses))
+
+;; ---- a general membership test ----------------------------------------------
+(defn member? (x xs)
+  (cond
+    (empty? xs)      false
+    (= x (first xs)) true
+    else             (member? x (rest xs))))
+
+;; ---- strings & paths --------------------------------------------------------
+;; Helpers over `substring` (char-indexed, like `string-length`). Generic enough
+;; to live in core; the module system and the project tooling build on them.
+(defn starts-with? (s prefix)
+  (let (n (string-length prefix))
+    (and (>= (string-length s) n) (= (substring s 0 n) prefix))))
+
+(defn ends-with? (s suffix)
+  (let (sl (string-length s) ql (string-length suffix))
+    (and (>= sl ql) (= (substring s (- sl ql) sl) suffix))))
+
+;; Index of the last `/` in `s`, scanning down from `i`, or -1 if none. (Brood has
+;; no char accessor yet; paths are short, so a substring scan is fine.)
+(defn path--last-slash (s i)
+  (cond
+    (< i 0)                         -1
+    (= (substring s i (inc i)) "/") i
+    else                            (path--last-slash s (dec i))))
+
+;; The directory containing `path`: "/a/b/c" -> "/a/b", "/foo" -> "/", "rel" -> ".".
+;; A path that is its own parent ("/" or ".") is the fixed point a walk-up stops at.
+(defn parent-dir (path)
+  (let (i (path--last-slash path (dec (string-length path))))
+    (cond
+      (< i 0) "."
+      (= i 0) "/"
+      else    (substring path 0 i))))
+
+(defn path-join (a b)
+  (if (ends-with? a "/") (str a b) (str a "/" b)))
+
+;; ---- modules: Emacs-flat provide / require (ADR-019) ------------------------
+;; A flat module system over the one shared global table: `provide` records a
+;; loaded feature, `require` loads one once. Embedded std modules (test, project)
+;; are baked into the binary and found via `%builtin-module`; everything else is
+;; searched for on `*load-path*` as `<name>.lisp`. This is policy — Rust supplies
+;; only the filesystem + embedded-source mechanism (ADR-006/008).
+(def *features*  nil)          ; names (strings) of features already loaded
+(def *load-path* (list "."))   ; directories searched for <name>.lisp
+
+;; (provide 'foo) — mark a feature loaded (idempotent). Returns its name.
+(defn provide (mod)
+  (let (key (name mod))
+    (unless (member? key *features*)
+      (set! *features* (cons key *features*)))
+    key))
+
+;; First existing <filename> across the load-path dirs, or nil.
+(defn require--find (filename dirs)
+  (cond
+    (empty? dirs)                                    nil
+    (file-exists? (path-join (first dirs) filename)) (path-join (first dirs) filename)
+    else                                             (require--find filename (rest dirs))))
+
+;; (require 'foo) — load feature foo once: return immediately if already loaded,
+;; else evaluate its embedded source (a baked-in std module) or the first
+;; <foo>.lisp found on *load-path*, then record it. Returns the feature name;
+;; errors if it can't be found.
+(defn require (mod)
+  (let (key (name mod))
+    (if (member? key *features*)
+      key
+      (let (src (%builtin-module key))
+        (if src
+          (do (eval-string src) (provide key))
+          (let (path (require--find (str key ".lisp") *load-path*))
+            (if path
+              (do (load path) (provide key))
+              (error "require: cannot find module '" key "'"))))))))

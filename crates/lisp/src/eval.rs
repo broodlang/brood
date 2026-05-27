@@ -3,7 +3,7 @@
 
 use crate::error::{LispError, LispResult};
 use crate::heap::Heap;
-use crate::value::{self, Closure, ClosureId, EnvId, Symbol, Value};
+use crate::value::{self, Arity, Closure, ClosureId, EnvId, NativeId, Symbol, Value};
 
 /// Truthiness: only `nil` and `false` are falsy.
 pub fn truthy(v: Value) -> bool {
@@ -254,10 +254,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
             argv.push(eval(heap, form, env)?);
         }
         match callee {
-            Value::Native(id) => {
-                let func = heap.native(id).func;
-                return func(&argv, env, heap);
-            }
+            Value::Native(id) => return call_native(heap, id, &argv, env),
             Value::Fn(id) => {
                 let scope = bind_params(heap, id, &argv)?;
                 let body_len = heap.closure(id).body.len();
@@ -282,10 +279,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
 
 pub fn apply(heap: &mut Heap, callee: Value, argv: &[Value], env: EnvId) -> LispResult {
     match callee {
-        Value::Native(id) => {
-            let func = heap.native(id).func;
-            func(argv, env, heap)
-        }
+        Value::Native(id) => call_native(heap, id, argv, env),
         Value::Fn(id) => apply_closure(heap, id, argv),
         other => {
             let shown = crate::printer::print(heap, other);
@@ -339,6 +333,34 @@ fn bind_params(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> Result<EnvId, 
         heap.env_define(scope, rest_sym, rest_list);
     }
     Ok(scope)
+}
+
+/// Invoke a builtin, enforcing its declared [`Arity`] first. The single gate
+/// every native call passes through (the evaluator loop *and* `apply`), so a
+/// primitive's arity is checked in one place instead of hand-rolled per builtin.
+fn call_native(heap: &mut Heap, id: NativeId, argv: &[Value], env: EnvId) -> LispResult {
+    let nat = heap.native(id);
+    if !nat.arity.accepts(argv.len()) {
+        return Err(LispError::arity(native_arity_message(
+            &nat.name,
+            nat.arity,
+            argv.len(),
+        )));
+    }
+    let func = nat.func;
+    func(argv, env, heap)
+}
+
+/// Built-in arity errors say "arguments" (user functions say "args" — see
+/// [`arity_message`]); the wording difference is load-bearing in the suite.
+fn native_arity_message(who: &str, arity: Arity, got: usize) -> String {
+    let (expected, n) = match (arity.min, arity.max) {
+        (min, Some(max)) if min == max => (min.to_string(), min),
+        (min, Some(max)) => (format!("{} to {}", min, max), max),
+        (min, None) => (format!("at least {}", min), min),
+    };
+    let noun = if n == 1 { "argument" } else { "arguments" };
+    format!("{}: expected {} {}, got {}", who, expected, noun, got)
 }
 
 fn arity_message(who: &str, required: usize, optionals: usize, has_rest: bool, got: usize) -> String {

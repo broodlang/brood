@@ -21,19 +21,21 @@
 ;; --- tests that pass, so the report shows successes alongside failures ------
 (describe "passing examples"
   (test "arithmetic" (assert= (+ 1 2) 3) (assert= (* 2 3) 6) (is (< 1 2 3)))
-  (test "lists"      (assert= (reverse (list 1 2 3)) (list 3 2 1)) (is (empty? nil))))
+  (test "lists"      (assert= (reverse (list 1 2 3)) (list 3 2 1)) (refute (empty? (list 1)))))
 
 ;; --- tests that fail, one per kind of failure the framework reports ---------
+;; Every failure line names the SOURCE EXPRESSION that failed plus its value, so
+;; the report identifies each failure on its own — no need to open this file.
 (describe "failing examples"
-  ;; assert= prints both sides with the ≠ marker.
+  ;; assert= shows the actual expression => its value, and the expected value.
   (test "assert= shows both sides"
     (assert= (+ 2 2) 5)
     (assert= (str "a" "b") "abc"))
-  ;; is reports the falsy value it got where it wanted something truthy.
-  (test "is reports the falsy value"
-    (is (= 1 2))
-    (is (empty? (list 1))))
-  ;; assert-error fails when the body does NOT raise.
+  ;; is / refute echo the expression and the value it produced.
+  (test "is and refute report the offending value"
+    (is (= 1 2))             ; wanted truthy, got false
+    (refute (< 1 2)))        ; wanted falsy, got true
+  ;; assert-error fails when the body does NOT raise, naming what it expected.
   (test "assert-error needs a raise"
     (assert-error (+ 1 2)))
   ;; A test collects every failed assertion (it doesn't stop at the first), and

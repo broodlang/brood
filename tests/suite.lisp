@@ -5,6 +5,10 @@
 ;; ExUnit / `mix test`-style: `describe` groups a feature, `test` names a case.
 ;; The suite runs every test concurrently (:parallel), each in its own process;
 ;; tallying is share-safe (see std/test.lisp).
+;;
+;; Assertions: `assert=` for equality (shows actual + expected on failure),
+;; `is` / `refute` for boolean predicates. Each failure names the source
+;; expression that failed, so the report is self-explanatory.
 
 (require 'test)
 
@@ -15,8 +19,8 @@
                           (assert= (/ 7 2) 3.5)  (assert= (mod 10 3) 1)))
 
 (describe "comparison & equality"
-  (test "ordering"        (is (< 1 2 3)) (is (not (< 1 3 2))))
-  (test "equality"        (is (= 2 2)) (is (not= 1 2))
+  (test "ordering"        (is (< 1 2 3)) (refute (< 1 3 2)))
+  (test "equality"        (assert= 2 2) (refute (= 1 2))
                           (assert= (list 1 2) (list 1 2))))
 
 (describe "lists"
@@ -47,6 +51,23 @@
   (test "type checks" (is (nil? nil)) (is (pair? (list 1)))
                       (is (number? 3.5)) (is (vector? [1]))))
 
+(describe "type-of"
+  (test "reports the runtime tag as a keyword"
+    (assert= (type-of 1)        :int)
+    (assert= (type-of 1.5)      :float)
+    (assert= (type-of "s")      :string)
+    (assert= (type-of :k)       :keyword)
+    (assert= (type-of 'x)       :symbol)
+    (assert= (type-of true)     :bool)
+    (assert= (type-of nil)      :nil)
+    (assert= (type-of (list 1)) :pair)
+    (assert= (type-of [1])      :vector)
+    (assert= (type-of inc)      :fn)
+    (assert= (type-of %add)     :native))
+  (test "agrees with the type predicates"
+    (is (int?    (let (v 1)   (if (= (type-of v) :int) v nil))))
+    (is (string? (let (v "a") (if (= (type-of v) :string) v nil))))))
+
 (describe "control & binding"
   (test "conditionals" (assert= (if (< 1 2) :y :n) :y)
                        (assert= (cond false :a true :b else :c) :b)
@@ -72,6 +93,14 @@
   (test "->"  (assert= (-> 5 (- 1) (* 2)) 8))
   (test "->>" (assert= (->> (list 1 2 3) (map inc)) (list 2 3 4))))
 
+;; Pattern matching has its own dedicated, exhaustive suite —
+;; tests/pattern_matching.lisp (run by `cargo test` via suite.rs, and directly
+;; with `./bin/cli tests/pattern_matching.lisp`). Here we keep just a smoke check
+;; so the main suite still exercises the feature.
+(describe "pattern matching (smoke)"
+  (test "match dispatches" (assert= (match [:ok 42] ([:ok v] v) (_ :no)) 42))
+  (test "destructuring let" (assert= (let ((a b) (list 1 2)) (+ a b)) 3)))
+
 (describe "error handling"
   (test "catch yields the thrown value" (assert= (try (throw 42) (catch e e)) 42))
   (test "built-in errors are catchable" (is (try (/ 1 0) (catch e (string? e)))))
@@ -89,15 +118,21 @@
              "runtime error: vector-ref: index out of range"))
   (test "unbound symbol echoes the name"
     (assert= (error-of undefined-name) "unbound error: unbound symbol: undefined-name"))
-  (test "type errors"
-    (assert= (error-of (+ 1 "x")) "type error: expected a number")
-    (assert= (error-of (first 5)) "type error: first: not a list")
+  (test "type errors name the op, the wanted type, and what arrived"
+    (assert= (error-of (+ 1 "x")) "type error: %add: expected number, got string (\"x\")")
+    (assert= (error-of (first 5)) "type error: first: expected list or vector, got int (5)")
+    (assert= (error-of (string-length :k)) "type error: string-length: expected string, got keyword (:k)")
     (assert= (error-of (1 2 3))   "type error: cannot call non-function: 1"))
   (test "arity (user fns say 'args', built-ins say 'arguments')"
     (defn one-arg (x) x)
     (assert= (error-of (one-arg 1 2))    "arity error: one-arg: expected 1 args, got 2")
     (assert= (error-of ((fn (a b) a) 1)) "arity error: fn: expected 2 args, got 1")
     (assert= (error-of (cons 1))         "arity error: cons: expected 2 arguments, got 1"))
+  (test "built-ins enforce their declared arity (no silent extra/missing args)"
+    (assert= (error-of (type-of))   "arity error: type-of: expected 1 argument, got 0")
+    (assert= (error-of (int? 1 2))  "arity error: int?: expected 1 argument, got 2")
+    (assert= (error-of (now 1 2))   "arity error: now: expected 0 arguments, got 2")
+    (assert= (error-of (apply +))   "arity error: apply: expected at least 2 arguments, got 1"))
   (test "parse errors surface through read-string"
     (assert= (error-of (read-string "(1 2")) "parse error: unclosed list"))
   (test "throw hands the value back unchanged"
@@ -134,4 +169,7 @@
       (assert= (receive) 42))))
 
 ;; Parallel by default; the :serial / :isolated groups above opt out as needed.
-(run-tests :trace :slow)
+;;
+;; No (run-tests) call: this file only REGISTERS its tests. The project test
+;; runner (`brood test`, ADR-020) discovers it as tests/*_test.lisp, loads it
+;; alongside the other suites, and runs everything once.
