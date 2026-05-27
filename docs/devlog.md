@@ -215,3 +215,129 @@ parameter lists and the broader role of vectors:
 - Immediately useful: trace shows `tail-calls` (`sum-to 100000`) is ~6.1s of the
   ~6.1s run — the whole suite's cost is that one test, reinforcing the GC
   motivation already noted above.
+
+### Concurrent test runner + concurrency cap (same day)
+
+- User: "get very fancy" — run tests concurrently with a live ASCII view; the
+  view should be governed by the existing `:trace` flag (bar when off, a live
+  per-test dashboard when on). Built on the share-nothing process model.
+- `deftest` now registers `(name thunk worker)`: `thunk` is the old in-process
+  body; `worker` is a `(fn (parent) …)` that, when spawned, `(require 'test)`s
+  the framework in its fresh child interpreter, runs the body (wrapped in
+  `try`/`catch` so an uncaught error becomes a failure instead of a hung runner),
+  and ships `(name passed failed ms failures)` back. `(run-tests :parallel)`
+  spawns one worker per test and aggregates results as they arrive.
+- Display keys off `:trace`: `:parallel` alone redraws a single `\r` progress
+  bar; `:parallel :trace` paints a multi-line dashboard (one line per test,
+  `●` running → `✓`/`✗` with time) that redraws in place as each worker reports.
+- New Rust (mechanism only): reader gained a `\e` ESC string escape (one line)
+  for ANSI; `process.rs` gained a `SPAWNED` counter behind `(spawn-count)` and a
+  `Gate` (Mutex+Condvar) capping concurrent spawned threads, set by the CLI's
+  `-j N` / `--max-parallel N`, observable via `(peak-threads)`. 47→49 primitives.
+- The cap is a stopgap, not step 4b: threads are still one-per-spawn (born when a
+  permit frees), so it bounds *peak concurrency*, not total threads. Because
+  `receive` blocks its OS thread, the cap must exceed the depth of processes
+  blocked waiting on a not-yet-running one — `-j 1` deadlocks the suite (the
+  `processes` test spawns a child and waits), `-j 2` is the safe floor. This is
+  exactly the motivation for step 4b's coroutine suspension at `receive`.
+- The runner reports it: `16 processes / 16 OS threads (1 runner + 14 test
+  workers + 1 nested), peak N running at once`. `tests/suite.lisp` now runs
+  `:parallel :trace :slow`; `cargo test` stays green (the harness only checks for
+  a raised error). Parallel doesn't speed *this* suite up — `tail-calls`
+  dominates (~6s) and the rest are ~0, so wall time is that one long pole plus
+  thread overhead.
+
+### Shared mutable runtime: cross-process hot reload (same day)
+
+**Goal.** A long-running *spawned* process (think: a web server) must pick up a
+redefinition **without being restarted** — while separate runtimes/nodes stay
+independent. This reverses the earlier "instances are independent / no shared
+mutable global" decision, which was mis-scoped: it conflated *inner processes*
+(which should share live code) with *separate runtimes* (which shouldn't). The
+model is Erlang's code server; Brood, being a late-binding Lisp-1, re-dispatches
+on *every* call, so a shared live global gives hot reload for free (ADR-013).
+
+**Built (Rust — mechanism).**
+- **Three heap regions via a 2-bit handle tag** (`value.rs`): `LOCAL` (per-process
+  data), `PRELUDE` (immutable, shared by all runtimes), `RUNTIME` (mutable,
+  per-runtime, shared by a runtime's inner processes). Replaces the old 1-bit
+  local/shared split.
+- **`RuntimeCode`** (`heap.rs`): append-only code slabs backed by **`boxcar`** (a
+  crate — lock-free reads return stable refs that survive concurrent pushes, so
+  process threads read closure bodies lock-free while a `def` appends) + a
+  `RwLock<HashMap>` global bindings table. The global scope became a sentinel
+  (`EnvId::GLOBAL`) routing there; `def`/`set!` **promote** a value's reachable
+  code from LOCAL into RUNTIME before rebinding. Append-only ⇒ in-flight calls
+  finish on the old closure; new lookups get the new one.
+- **`promote_env`**: a closure defined *inside a function call* closes over a
+  local scope; promoting it for sharing copies that scope into RUNTIME too, so a
+  shared closure resolves its free variables in any process. (Without this, the
+  test suite panicked — `env = Some(LOCAL …)` dereferenced a frame that didn't
+  exist in the child.)
+- **`spawn`** now clones the parent's `Arc<RuntimeCode>` (shared live code) and
+  `promote`s the target; args still ship as `Message`s (data is per-process). The
+  old `ship_closure`/`install_closure` are gone. `Gate`/`spawn-count`/`peak-threads`
+  preserved.
+- **Crate policy relaxed** (ADR-014; CLAUDE.md): runtime crates allowed when they
+  cut real complexity — `boxcar` removes a hand-rolled `unsafe`. Lisp-callable
+  behaviour still lives in Brood.
+
+**Verified.** New Rust test `spawned_process_picks_up_redefinition`: a spawned
+request/reply server returns `50` (handler = `* 10`), the handler is redefined to
+`+ 100`, and the *same running server* returns `105` on the next request — no
+restart. 26 Rust tests + suite + doc-test green.
+
+### Test framework: share-safe + ExUnit `describe`/`test` (same day)
+
+**Why.** Sharing the global table broke the concurrent test runner, which had
+each worker tally into shared mutable globals — they raced, miscounted, and hit
+the captured-env panic above. (The earlier `suite-failures.lisp` note had already
+diagnosed the result-mixing.)
+
+**Reworked `std/test.lisp`** (ADR-015, `docs/testing.md`):
+- **Share-safe tallying.** Assertions are now *macros* that push onto a
+  process-local `*fails*` (a `let` the `test` macro establishes); each test yields
+  its failures as a value; the runner aggregates from returns/messages into its
+  own local state. No shared counters.
+- **ExUnit / `mix test` surface.** `describe` groups, `test "name"` cases
+  (`deftest` kept as an alias), `is`/`assert=`/`assert-error`/`error-of`.
+- **Parallel by default**, with opt-in serialisation: `:serial` (a group's tests
+  run one worker, in sequence, alongside other groups) and `:isolated` (runs
+  alone, in an exclusive phase after the parallel batch) — for tests that touch
+  shared global state. Registration builds *units*; the runner runs a parallel
+  phase then an isolated phase.
+- `tests/suite.lisp` converted to `describe`/`test` (40 tests; "macros" is
+  `:serial`, "processes" is `:isolated`); `suite-failures.lisp` likewise. The
+  parallel failure path now attributes failures to the right test with correct
+  counts.
+
+### Documented the Clojure-divergence gotchas (same day)
+
+**Why.** A review of the syntax through the lens of "will an LLM like Claude
+find this easy to write?" found the language is ~80% Clojure on the surface,
+which is good — most Clojure reflexes transfer. But a few core forms borrow from
+Scheme / Common Lisp in exactly the spots where a Clojure habit yields
+valid-*looking* code that fails silently or with a misleading error. Verified
+against `./bin/cli`:
+
+- `(try … (catch Type e body))` — Clojure's class-typed catch binds the *class
+  name* as the variable and treats `e` as body → cryptic `unbound symbol: e`.
+  Brood's clause is a bare `(catch e body)`.
+- Multi-arity `(fn ([x] …) ([x y] …))` → `type error: expected a symbol`. Brood
+  uses `&optional` / `&` in one parameter list instead.
+- `{:a 1}` → `parse error: map literals '{ }' are not supported yet` (a *good*,
+  teaching error — the model that hits it learns the feature is absent).
+- Clojure-style `[x y]` params and `[a 1 b 2]` let-bindings *do* parse (vectors
+  are accepted in binding position) but lists are idiomatic.
+- `/` has no ratios: integer args divide to an integer only when even, else a
+  float (`(/ 7 2)` → `3.5`).
+
+**Documented** a "Coming from Clojure (the differences that bite)" table near
+the top of `docs/language.md` — leading with the deltas, since an LLM (and a
+human Clojurist) reads what's *different* far more reliably than the full spec.
+
+**Candidate fixes, not yet done** (recorded here so they're not lost): the
+`catch` case is the highest-value — detect a multi-symbol catch head and either
+accept-and-ignore the type or raise a clear "`catch` takes one binding" parse
+error; likewise give multi-arity `fn` a teaching error pointing at
+`&optional`/`&`, matching the quality of the map-literal message.

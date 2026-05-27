@@ -70,11 +70,13 @@ The native kernel is **39 primitives** — see [`docs/primitives.md`](docs/primi
   cycles, which matters for a long-running REPL/editor. **[kernel]** (sizable).
 - ⬜ **Source locations in errors** — the reader currently drops spans; attaching
   them gives line/column in messages (and later, stack traces). **[kernel]**
-- ✅ **Native test library** — `std/test.lisp` (`deftest` / `is` / `assert=` /
-  `assert-error` / `run-tests`, written in Brood). Loaded via `(require 'test)`
-  (embedded in the binary, so it works from any directory). `tests/suite.lisp`
-  uses it (54 assertions, 14 tests, incl. concurrency); run via
-  `./bin/cli tests/suite.lisp` and by `cargo test`. Failures exit non-zero. **[Brood]**
+- ✅ **Native test library** — `std/test.lisp`: ExUnit / `mix test`-style
+  `describe` / `test` (plus `deftest`), `is` / `assert=` / `assert-error` /
+  `error-of` / `run-tests`, written in Brood. **Parallel by default** (each test a
+  process), with `:serial` / `:isolated` opt-outs; **share-safe tallying** (no
+  shared mutable counters — required now that processes share globals). Loaded via
+  `(require 'test)` (embedded). `tests/suite.lisp` uses it; run via
+  `./bin/cli tests/suite.lisp` and `cargo test`. ADR-015, `docs/testing.md`. **[Brood]**
 
 ### Out of scope for Stage 1 (deferred, additive later)
 
@@ -103,11 +105,16 @@ and don't conflict with the concurrency work. Concurrency lands in phases:
 - ✅ `Send` per-process heaps (done in step 2/3); global symbol interner
 - ⬜ Green M:N on a small worker pool (default 2) via coroutine suspension — makes
   processes cheap (millions) and gives the core cap
-- ⬜ **Shared code** (Erlang-style: share defs, isolate data) so spawned processes
-  see all user functions and spawn is cheap (no per-process prelude reload)
-- ⬜ **Send functions between processes** — once shared code lands: ship a
-  closure's code (already a solved sub-problem) plus its captured free variables
-  (closure serialization); global/native references resolve via shared code
+- ✅ **Shared code** (Erlang-style: share defs, isolate data) — a runtime's inner
+  processes share one mutable code region + global table (`Arc<RuntimeCode>`), so
+  a `def` reaches a running spawned process on its next lookup (cross-process hot
+  reload, no restart); separate runtimes stay independent. Spawn is cheap (no
+  prelude reload). Region-tagged handles (LOCAL/PRELUDE/RUNTIME), append-only code
+  via `boxcar`. ADR-013/014, `docs/shared-code.md`.
+- 🟡 **Send functions between processes** — top-level functions are now shared
+  handles (valid in any process), and `spawn` already ships a closure + its
+  captured environment via `promote`. A `send`-able function value is the small
+  remaining step; do it when a concrete need arises.
 - ⬜ later: reduction-counted preemption, then supervision / links
 - ⬜ **Distribution across nodes** (future, kept in mind) — link named runtimes
   over TCP; pids carry node identity; `send`/`spawn` stay location-transparent.

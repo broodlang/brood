@@ -7,22 +7,25 @@
 //! a small worker pool (M:N, work-stealing, a 2-core cap) is step 4b and needs
 //! coroutine suspension; the `spawn`/`send`/`receive` *surface* won't change.
 //!
-//! Because a [`Value`] is a handle into one process's heap, it cannot be read by
-//! another. So messages cross as a self-contained, `Send` [`Message`] (a deep
-//! copy), rebuilt into the receiver's heap. Symbols travel as their global
-//! interned id (the interner is process-wide), so they stay consistent.
+//! **Code is shared, data is not.** Inner processes spawned from a runtime share
+//! that runtime's code + global bindings (a shared `Arc<RuntimeCode>`), so a
+//! `def` reaches them and `spawn` just hands over the (shared) function handle.
+//! But a process's *data* lives in its own local heap, so a [`Value`] that
+//! points there can't be read by another process: message **data** crosses as a
+//! self-contained, `Send` [`Message`] (a deep copy), rebuilt into the receiver's
+//! local heap. Symbols travel as their global interned id (the interner is
+//! process-wide), so they stay consistent.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Condvar, LazyLock, Mutex};
 
 use crate::error::LispError;
 use crate::eval;
 use crate::heap::Heap;
-use crate::value::{Closure, ClosureId, Symbol, Value};
-use crate::Interp;
+use crate::value::{EnvId, Symbol, Value};
 
 /// A `Send`, self-contained copy of a value, for crossing heaps.
 pub enum Message {
@@ -97,59 +100,71 @@ pub fn from_message(heap: &mut Heap, m: &Message) -> Value {
     }
 }
 
-/// A closure shipped to a new process: its code (which is data — symbols and
-/// lists) travels as messages and is rebuilt against the child's global env.
-/// Works for self-contained functions (those referencing only the prelude,
-/// builtins, and their own parameters).
-struct ShippedClosure {
-    params: Vec<Symbol>,
-    optionals: Vec<(Symbol, Message)>,
-    rest: Option<Symbol>,
-    body: Vec<Message>,
-}
-
-fn ship_closure(heap: &Heap, id: ClosureId) -> Result<ShippedClosure, LispError> {
-    let cl = heap.closure(id);
-    let params = cl.params.clone();
-    let rest = cl.rest;
-    let mut optionals = Vec::with_capacity(cl.optionals.len());
-    for &(s, default) in &cl.optionals {
-        optionals.push((s, to_message(heap, default)?));
-    }
-    let mut body = Vec::with_capacity(cl.body.len());
-    for &form in &cl.body {
-        body.push(to_message(heap, form)?);
-    }
-    Ok(ShippedClosure { params, optionals, rest, body })
-}
-
-fn install_closure(heap: &mut Heap, shipped: &ShippedClosure) -> Value {
-    let mut optionals = Vec::with_capacity(shipped.optionals.len());
-    for (s, default) in &shipped.optionals {
-        let d = from_message(heap, default);
-        optionals.push((*s, d));
-    }
-    let mut body = Vec::with_capacity(shipped.body.len());
-    for m in &shipped.body {
-        body.push(from_message(heap, m));
-    }
-    let id = heap.alloc_closure(Closure {
-        name: None,
-        params: shipped.params.clone(),
-        optionals,
-        rest: shipped.rest,
-        body,
-        // Shipped functions are top-level: capture the (child's) global env.
-        env: None,
-    });
-    Value::Fn(id)
-}
-
 // ----- the process table -----
 
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);
+/// How many processes `spawn` has started since the program began. Each spawned
+/// process is backed by one OS thread (step 4a), so this is also the count of
+/// worker threads created. The runner reads it via `(spawn-count)` to report how
+/// much concurrency a test run used.
+static SPAWNED: AtomicU64 = AtomicU64::new(0);
 static REGISTRY: LazyLock<Mutex<HashMap<u64, Sender<Message>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Total processes spawned (= worker OS threads created) since program start.
+pub fn spawn_count() -> u64 {
+    SPAWNED.load(Ordering::SeqCst)
+}
+
+/// A throttle on how many spawned threads may run *at once*. This is a stopgap
+/// until step 4b (green M:N processes on a worker pool): it caps concurrency but
+/// does not make processes cheap — each `spawn` is still its own OS thread, born
+/// when a permit is free and gone when it finishes. Because `receive` blocks its
+/// thread, the cap must exceed the depth of processes simultaneously blocked
+/// waiting on a not-yet-running process, or the run deadlocks (so a suite whose
+/// tests each spawn-and-wait on one child needs at least `cap = 2`).
+struct Gate {
+    cap: usize,  // max concurrent spawned threads; 0 = unlimited
+    live: usize, // spawned threads currently running
+    peak: usize, // high-water mark of `live`
+}
+static GATE: LazyLock<(Mutex<Gate>, Condvar)> =
+    LazyLock::new(|| (Mutex::new(Gate { cap: 0, live: 0, peak: 0 }), Condvar::new()));
+
+/// Cap the number of spawned threads allowed to run concurrently (0 = unlimited).
+/// Set once at startup (e.g. from the CLI's `-j` flag) before any spawning.
+pub fn set_max_parallel(n: usize) {
+    let (lock, _) = &*GATE;
+    lock.lock().unwrap().cap = n;
+}
+
+/// High-water mark of concurrently-running spawned threads — how much parallelism
+/// was actually reached. (The runner/main thread is not counted.)
+pub fn peak_threads() -> u64 {
+    let (lock, _) = &*GATE;
+    lock.lock().unwrap().peak as u64
+}
+
+/// Block until a permit is free, then take it (call before starting a thread).
+fn gate_acquire() {
+    let (lock, cv) = &*GATE;
+    let mut g = lock.lock().unwrap();
+    while g.cap != 0 && g.live >= g.cap {
+        g = cv.wait(g).unwrap();
+    }
+    g.live += 1;
+    if g.live > g.peak {
+        g.peak = g.live;
+    }
+}
+
+/// Return a permit (call when a spawned thread finishes) and wake a waiter.
+fn gate_release() {
+    let (lock, cv) = &*GATE;
+    let mut g = lock.lock().unwrap();
+    g.live -= 1;
+    cv.notify_one();
+}
 
 struct ProcCtx {
     pid: u64,
@@ -183,15 +198,25 @@ fn deregister(pid: u64) {
 /// `(spawn f arg...)` — run `f` (a function) in a new process with copied args.
 /// Returns the new pid.
 pub fn spawn(heap: &Heap, f: Value, args: &[Value]) -> Result<u64, LispError> {
-    let cl_id = match f {
-        Value::Fn(id) => id,
-        _ => return Err(LispError::type_err("spawn: first argument must be a function")),
-    };
-    let shipped = ship_closure(heap, cl_id)?;
+    // Promote the target into the shared RUNTIME region so its handle is valid
+    // in the child, which shares this runtime's code via the Arc below. A
+    // top-level function is already shared, so this is usually a no-op.
+    let f = heap.promote(f);
+    if !matches!(f, Value::Fn(_)) {
+        return Err(LispError::type_err("spawn: first argument must be a function"));
+    }
+    // Args are *data*, not code: ship them as messages, rebuilt into the child's
+    // own local heap, so the two processes share no mutable data.
     let mut arg_msgs = Vec::with_capacity(args.len());
     for &a in args {
         arg_msgs.push(to_message(heap, a)?);
     }
+    // The child shares this runtime's code + global table (the same Arc), so a
+    // `def` here is visible to it on its next lookup; the prelude is shared
+    // read-only. This is what makes a long-running spawned process pick up a
+    // redefinition without being restarted (see docs/shared-code.md).
+    let prelude = heap.prelude_arc();
+    let runtime = heap.runtime_arc();
 
     let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
     // Register the mailbox in the *parent*, before the thread starts, so a
@@ -199,20 +224,26 @@ pub fn spawn(heap: &Heap, f: Value, args: &[Value]) -> Result<u64, LispError> {
     let (tx, rx) = mpsc::channel();
     REGISTRY.lock().unwrap().insert(pid, tx);
 
+    // Block here if we're at the concurrency cap, so an over-eager `spawn` can't
+    // create more OS threads than `-j` allows. The permit is returned when the
+    // thread finishes.
+    gate_acquire();
+    SPAWNED.fetch_add(1, Ordering::SeqCst);
     std::thread::spawn(move || {
-        // This thread *is* the process: adopt the pid + mailbox.
+        // This thread *is* the process: adopt the pid + mailbox, share the
+        // runtime's code, and start with a fresh local data heap.
         CURRENT.with(|cell| *cell.borrow_mut() = Some(ProcCtx { pid, inbox: rx }));
-        let mut interp = Interp::new();
-        let f = install_closure(&mut interp.heap, &shipped);
+        let mut heap = Heap::with_regions(prelude, runtime);
+        heap.set_global(EnvId::GLOBAL);
         let mut argv = Vec::with_capacity(arg_msgs.len());
         for m in &arg_msgs {
-            argv.push(from_message(&mut interp.heap, m));
+            argv.push(from_message(&mut heap, m));
         }
-        let root = interp.root;
-        if let Err(e) = eval::apply(&mut interp.heap, f, &argv, root) {
+        if let Err(e) = eval::apply(&mut heap, f, &argv, EnvId::GLOBAL) {
             eprintln!("process {} died: {}", pid, e);
         }
         deregister(pid);
+        gate_release();
     });
 
     Ok(pid)

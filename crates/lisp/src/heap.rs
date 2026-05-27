@@ -1,24 +1,30 @@
-//! The per-process heap, plus the shared **code** region.
+//! The per-process data heap, plus the two shared regions: the immutable
+//! **prelude** and a runtime's mutable, shared **code** region.
 //!
-//! A `Value`'s heap variants are integer handles whose high bit (`SHARED_BIT`,
-//! see `value.rs`) says which region they live in:
+//! A `Value`'s heap variants are integer handles whose two high bits (the
+//! *region*, see `value.rs`) say where they live:
 //!
-//! - **local** — the per-process `Heap`: everything the process allocates at
+//! - **LOCAL** — the per-process [`Heap`]: everything a process allocates at
 //!   runtime (cons cells, vectors, strings, call-frame env scopes). Plain
 //!   `Vec`s, mutated through `&mut Heap`, so the whole `Heap` is `Send`.
-//! - **shared** — a [`SharedCode`] region (behind `Arc`) holding code shared
-//!   across processes. *Currently empty* (step 1 of `docs/shared-code.md`): all
-//!   allocation is local and every read routes to the local slabs, so behaviour
-//!   is identical to before — this just lays the routing in place.
+//! - **PRELUDE** — a [`SharedCode`] region (behind `Arc`) holding the prelude +
+//!   builtins. Built once, frozen, shared read-only by every runtime.
+//! - **RUNTIME** — a [`RuntimeCode`] region (behind `Arc`) holding a runtime's
+//!   `def`'d code and its global bindings. **Mutable and shared** by all of a
+//!   runtime's inner (spawned) processes, so a redefinition is visible to a
+//!   running process on its next global lookup (Erlang-style hot reload). The
+//!   code slabs are append-only (old code is never moved or freed, so in-flight
+//!   calls keep running it); the global bindings are a `RwLock<HashMap>`.
 //!
-//! No GC yet (the arena only grows).
+//! No GC yet (the arenas only grow).
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use crate::error::LispError;
 use crate::value::{
-    Closure, ClosureId, EnvId, NativeFn, NativeId, PairId, StrId, Symbol, VecId, Value,
+    Closure, ClosureId, EnvId, NativeFn, NativeId, PairId, StrId, Symbol, VecId, Value, LOCAL,
+    PRELUDE, RUNTIME,
 };
 
 struct EnvFrame {
@@ -26,22 +32,21 @@ struct EnvFrame {
     parent: Option<EnvId>,
 }
 
-/// Re-tag a value's handle from the local region to the shared region (same
-/// slab index, region bit set). Atoms are unchanged.
-fn to_shared(v: Value) -> Value {
+/// Re-tag a value's handle from the local region to the immutable **prelude**
+/// region (same slab index, region bits set). Atoms are unchanged.
+fn to_prelude(v: Value) -> Value {
     match v {
-        Value::Pair(id) => Value::Pair(PairId::shared(id.index())),
-        Value::Vector(id) => Value::Vector(VecId::shared(id.index())),
-        Value::Str(id) => Value::Str(StrId::shared(id.index())),
-        Value::Fn(id) => Value::Fn(ClosureId::shared(id.index())),
-        Value::Macro(id) => Value::Macro(ClosureId::shared(id.index())),
-        Value::Native(id) => Value::Native(NativeId::shared(id.index())),
+        Value::Pair(id) => Value::Pair(PairId::prelude(id.index())),
+        Value::Vector(id) => Value::Vector(VecId::prelude(id.index())),
+        Value::Str(id) => Value::Str(StrId::prelude(id.index())),
+        Value::Fn(id) => Value::Fn(ClosureId::prelude(id.index())),
+        Value::Macro(id) => Value::Macro(ClosureId::prelude(id.index())),
+        Value::Native(id) => Value::Native(NativeId::prelude(id.index())),
         other => other,
     }
 }
 
-/// The slabs holding heap objects. Used for both the local heap and the shared
-/// code region.
+/// The slabs holding heap objects in the LOCAL data heap and the PRELUDE region.
 #[derive(Default)]
 struct Slabs {
     pairs: Vec<(Value, Value)>,
@@ -52,91 +57,151 @@ struct Slabs {
     envs: Vec<EnvFrame>,
 }
 
-/// The shared, read-only code region (closures, code values, the global env,
-/// natives). Cloned by `Arc` into every process. Empty until step 2.
+/// The immutable, read-only prelude region (closures, code values, the
+/// builtins). Built once, then shared by `Arc` into every runtime.
 #[derive(Default)]
 pub struct SharedCode {
     slabs: Slabs,
 }
 
+/// Append-only code slabs for the shared RUNTIME region. `boxcar::Vec` gives
+/// lock-free reads that return stable references (existing elements never move
+/// or free as the vector grows), so process threads read closure bodies without
+/// locking while another process `def`s new code.
+#[derive(Default)]
+struct CodeSlabs {
+    pairs: boxcar::Vec<(Value, Value)>,
+    vectors: boxcar::Vec<Vec<Value>>,
+    strings: boxcar::Vec<String>,
+    closures: boxcar::Vec<Closure>,
+    /// Captured environments of promoted closures. A closure defined *inside a
+    /// function call* (not at top level) closes over a local scope; promoting it
+    /// for sharing copies that scope here so it resolves in any process. Frozen
+    /// once promoted (read-only), so append-only is sound.
+    envs: boxcar::Vec<EnvFrame>,
+}
+
+/// A runtime's mutable, shared code region: the code `def`'d at runtime plus the
+/// global bindings table. All of a runtime's inner processes share one of these
+/// (via `Arc::clone`), which is what makes a `def` propagate to them — and what
+/// keeps separate runtimes (nodes) independent (each has its own).
+pub struct RuntimeCode {
+    code: CodeSlabs,
+    /// The global bindings (prelude + user `def`s). Read on every global lookup,
+    /// written on `def`/`set!`. The values point into PRELUDE or RUNTIME.
+    globals: RwLock<HashMap<Symbol, Value>>,
+}
+
+impl Default for RuntimeCode {
+    fn default() -> Self {
+        RuntimeCode { code: CodeSlabs::default(), globals: RwLock::new(HashMap::new()) }
+    }
+}
+
+impl RuntimeCode {
+    /// A fresh runtime whose global table is seeded with the prelude bindings
+    /// (`symbol -> prelude value`). The code slabs start empty — user `def`s
+    /// append to them. Inner processes share this whole thing via `Arc`.
+    pub fn seeded(bindings: &[(Symbol, Value)]) -> Self {
+        let mut globals = HashMap::with_capacity(bindings.len());
+        for &(s, v) in bindings {
+            globals.insert(s, v);
+        }
+        RuntimeCode { code: CodeSlabs::default(), globals: RwLock::new(globals) }
+    }
+}
+
 pub struct Heap {
     local: Slabs,
-    code: Arc<SharedCode>,
-    /// This process's global (parent-less) environment. A closure that captured
-    /// the global env (`Closure.env == None`) resolves to this at call time.
+    prelude: Arc<SharedCode>,
+    runtime: Arc<RuntimeCode>,
+    /// This process's global scope. For a real runtime this is [`EnvId::GLOBAL`]
+    /// (routing to `runtime.globals`); for the prelude *builder* it's a real
+    /// local root frame (so the prelude can be evaluated, then frozen).
     global: EnvId,
 }
 
 impl Heap {
+    /// A bare heap with empty shared regions — used to *build* the prelude
+    /// before freezing it. Real runtimes use [`Heap::with_regions`].
     pub fn new() -> Self {
-        Heap { local: Slabs::default(), code: Arc::default(), global: EnvId::local(0) }
+        Heap {
+            local: Slabs::default(),
+            prelude: Arc::default(),
+            runtime: Arc::default(),
+            global: EnvId::local(0),
+        }
     }
 
-    /// A fresh process heap sharing the given code region (empty local slabs).
-    pub fn with_code(code: Arc<SharedCode>) -> Self {
-        Heap { local: Slabs::default(), code, global: EnvId::local(0) }
+    /// A fresh process heap sharing the given prelude + runtime regions (empty
+    /// local slabs). Spawned inner processes pass the *same* `runtime` Arc as
+    /// their parent, so they see its global bindings and its later `def`s.
+    pub fn with_regions(prelude: Arc<SharedCode>, runtime: Arc<RuntimeCode>) -> Self {
+        Heap { local: Slabs::default(), prelude, runtime, global: EnvId::local(0) }
     }
 
-    /// Consume this (builder) heap: move everything it allocated into a shared
-    /// code region — re-tagging every handle from the local region to the shared
-    /// region — and return that region plus the global env's bindings
-    /// (`symbol -> shared value`) used to seed each process's global env.
+    /// Clone the Arc to this heap's prelude region (for spawning a child).
+    pub fn prelude_arc(&self) -> Arc<SharedCode> {
+        Arc::clone(&self.prelude)
+    }
+
+    /// Clone the Arc to this runtime's shared code region (for spawning a child
+    /// that shares this runtime's live globals).
+    pub fn runtime_arc(&self) -> Arc<RuntimeCode> {
+        Arc::clone(&self.runtime)
+    }
+
+    /// Consume this (builder) heap: move everything it allocated into a frozen
+    /// [`SharedCode`] (PRELUDE) region — re-tagging every handle local→prelude —
+    /// and return that region plus the global env's bindings
+    /// (`symbol -> prelude value`) used to seed each runtime's global table.
     ///
     /// Env frames are dropped: shared (top-level) closures capture the global
-    /// env symbolically (`env == None`), so nothing references a shared frame.
+    /// env symbolically (`env == None`), so nothing references a frame.
     pub fn freeze_as_shared_code(self, root: EnvId) -> (SharedCode, Vec<(Symbol, Value)>) {
         let bindings: Vec<(Symbol, Value)> = self.local.envs[root.index()]
             .vars
             .iter()
-            .map(|(&s, &v)| (s, to_shared(v)))
+            .map(|(&s, &v)| (s, to_prelude(v)))
             .collect();
 
         let mut slabs = self.local;
         for p in &mut slabs.pairs {
-            p.0 = to_shared(p.0);
-            p.1 = to_shared(p.1);
+            p.0 = to_prelude(p.0);
+            p.1 = to_prelude(p.1);
         }
         for vec in &mut slabs.vectors {
             for x in vec.iter_mut() {
-                *x = to_shared(*x);
+                *x = to_prelude(*x);
             }
         }
         for c in &mut slabs.closures {
             for f in c.body.iter_mut() {
-                *f = to_shared(*f);
+                *f = to_prelude(*f);
             }
             for (_, d) in c.optionals.iter_mut() {
-                *d = to_shared(*d);
+                *d = to_prelude(*d);
             }
             debug_assert!(c.env.is_none(), "shared closures must capture the global env");
         }
-        slabs.envs = Vec::new(); // the shared region has no env frames
+        slabs.envs = Vec::new(); // the prelude region has no env frames
 
         (SharedCode { slabs }, bindings)
     }
 
-    /// Record this process's global environment (call once, after creating it).
+    /// Record this process's global scope (call once, after creating it).
     pub fn set_global(&mut self, env: EnvId) {
         self.global = env;
     }
 
-    /// This process's global environment.
+    /// This process's global scope.
     pub fn global(&self) -> EnvId {
         self.global
     }
 
-    /// True if `env` is a global (parent-less) environment frame.
+    /// True if `env` is this process's global scope.
     pub fn is_global(&self, env: EnvId) -> bool {
-        self.env_frame(env).parent.is_none()
-    }
-
-    /// The slabs a handle points into.
-    fn slabs(&self, shared: bool) -> &Slabs {
-        if shared {
-            &self.code.slabs
-        } else {
-            &self.local
-        }
+        env == self.global
     }
 
     // ----- allocation (always into the local heap) -----
@@ -180,10 +245,88 @@ impl Heap {
         acc
     }
 
+    // ----- promotion: copy code from LOCAL into the shared RUNTIME region -----
+
+    /// Deep-copy a value's reachable structure from the local heap into the
+    /// shared RUNTIME region, returning a handle valid in every inner process.
+    /// `def`/`set!` of a global run this so the bound code/data is shareable;
+    /// `spawn` runs it on the target function. Atoms and already-shared values
+    /// (PRELUDE/RUNTIME) are returned unchanged — no copy.
+    ///
+    /// Appends only (never mutates existing shared code), so a redefinition adds
+    /// a new version while in-flight calls keep running the old one.
+    pub fn promote(&self, v: Value) -> Value {
+        match v {
+            Value::Str(id) if id.region() == LOCAL => {
+                let s = self.string(id).to_string();
+                Value::Str(StrId::runtime(self.runtime.code.strings.push(s)))
+            }
+            Value::Pair(id) if id.region() == LOCAL => {
+                let (head, tail) = self.pair(id);
+                let head = self.promote(head);
+                let tail = self.promote(tail);
+                Value::Pair(PairId::runtime(self.runtime.code.pairs.push((head, tail))))
+            }
+            Value::Vector(id) if id.region() == LOCAL => {
+                let items: Vec<Value> =
+                    self.vector(id).to_vec().into_iter().map(|x| self.promote(x)).collect();
+                Value::Vector(VecId::runtime(self.runtime.code.vectors.push(items)))
+            }
+            Value::Fn(id) if id.region() == LOCAL => Value::Fn(self.promote_closure(id)),
+            Value::Macro(id) if id.region() == LOCAL => Value::Macro(self.promote_closure(id)),
+            // Atoms, and values already in PRELUDE/RUNTIME, need no copy.
+            _ => v,
+        }
+    }
+
+    fn promote_closure(&self, id: ClosureId) -> ClosureId {
+        let cl = self.closure(id).clone();
+        let body = cl.body.iter().map(|&f| self.promote(f)).collect();
+        let optionals = cl.optionals.iter().map(|&(s, d)| (s, self.promote(d))).collect();
+        // A top-level closure captures the global env (`None`) and is fully
+        // shareable as-is. A closure that captured a *local* scope has its scope
+        // promoted too, so it resolves its free variables in any process.
+        let env = cl.env.map(|e| self.promote_env(e));
+        let promoted = Closure {
+            name: cl.name,
+            params: cl.params,
+            optionals,
+            rest: cl.rest,
+            body,
+            env,
+        };
+        ClosureId::runtime(self.runtime.code.closures.push(promoted))
+    }
+
+    /// Deep-copy an environment frame chain from LOCAL into the shared RUNTIME
+    /// region, promoting each bound value. Stops at the global scope (the shared
+    /// sentinel). Already-shared (RUNTIME) frames are returned unchanged.
+    fn promote_env(&self, env: EnvId) -> EnvId {
+        if env == EnvId::GLOBAL || env.region() == RUNTIME {
+            return env;
+        }
+        // Snapshot the frame, then promote its parent and values (no borrow held).
+        let (parent, bindings): (Option<EnvId>, Vec<(Symbol, Value)>) = {
+            let frame = self.env_frame(env);
+            (frame.parent, frame.vars.iter().map(|(&s, &v)| (s, v)).collect())
+        };
+        let parent = parent.map(|p| self.promote_env(p));
+        let mut vars = HashMap::with_capacity(bindings.len());
+        for (s, v) in bindings {
+            vars.insert(s, self.promote(v));
+        }
+        EnvId::runtime(self.runtime.code.envs.push(EnvFrame { vars, parent }))
+    }
+
     // ----- access (dispatch on the handle's region) -----
 
     pub fn pair(&self, id: PairId) -> (Value, Value) {
-        self.slabs(id.is_shared()).pairs[id.index()]
+        match id.region() {
+            LOCAL => self.local.pairs[id.index()],
+            PRELUDE => self.prelude.slabs.pairs[id.index()],
+            RUNTIME => *self.runtime.code.pairs.get(id.index()).expect("runtime pair handle"),
+            _ => unreachable!("invalid handle region"),
+        }
     }
     pub fn car(&self, id: PairId) -> Value {
         self.pair(id).0
@@ -192,16 +335,35 @@ impl Heap {
         self.pair(id).1
     }
     pub fn vector(&self, id: VecId) -> &[Value] {
-        &self.slabs(id.is_shared()).vectors[id.index()]
+        match id.region() {
+            LOCAL => &self.local.vectors[id.index()],
+            PRELUDE => &self.prelude.slabs.vectors[id.index()],
+            RUNTIME => self.runtime.code.vectors.get(id.index()).expect("runtime vector handle"),
+            _ => unreachable!("invalid handle region"),
+        }
     }
     pub fn string(&self, id: StrId) -> &str {
-        &self.slabs(id.is_shared()).strings[id.index()]
+        match id.region() {
+            LOCAL => &self.local.strings[id.index()],
+            PRELUDE => &self.prelude.slabs.strings[id.index()],
+            RUNTIME => self.runtime.code.strings.get(id.index()).expect("runtime string handle"),
+            _ => unreachable!("invalid handle region"),
+        }
     }
     pub fn closure(&self, id: ClosureId) -> &Closure {
-        &self.slabs(id.is_shared()).closures[id.index()]
+        match id.region() {
+            LOCAL => &self.local.closures[id.index()],
+            PRELUDE => &self.prelude.slabs.closures[id.index()],
+            RUNTIME => self.runtime.code.closures.get(id.index()).expect("runtime closure handle"),
+            _ => unreachable!("invalid handle region"),
+        }
     }
     pub fn native(&self, id: NativeId) -> &NativeFn {
-        &self.slabs(id.is_shared()).natives[id.index()]
+        match id.region() {
+            LOCAL => &self.local.natives[id.index()],
+            PRELUDE => &self.prelude.slabs.natives[id.index()],
+            _ => unreachable!("natives live only in the local or prelude region"),
+        }
     }
 
     /// Collect a proper list into a `Vec`. Errors on an improper (dotted) list.
@@ -261,9 +423,18 @@ impl Heap {
     }
 
     // ----- environments -----
+    //
+    // Real env frames are always LOCAL. The global scope is the sentinel
+    // [`EnvId::GLOBAL`], which routes to the shared `runtime.globals` table; a
+    // top-level frame's parent chain bottoms out there. (During prelude *build*
+    // the global is instead a real local root frame with no parent.)
 
     fn env_frame(&self, env: EnvId) -> &EnvFrame {
-        &self.slabs(env.is_shared()).envs[env.index()]
+        match env.region() {
+            LOCAL => &self.local.envs[env.index()],
+            RUNTIME => self.runtime.code.envs.get(env.index()).expect("runtime env frame"),
+            _ => unreachable!("env frames live only in the local or runtime region"),
+        }
     }
 
     pub fn new_env(&mut self, parent: Option<EnvId>) -> EnvId {
@@ -275,6 +446,9 @@ impl Heap {
     pub fn env_get(&self, env: EnvId, sym: Symbol) -> Option<Value> {
         let mut cur = Some(env);
         while let Some(e) = cur {
+            if e == EnvId::GLOBAL {
+                return self.runtime.globals.read().unwrap().get(&sym).copied();
+            }
             let frame = self.env_frame(e);
             if let Some(v) = frame.vars.get(&sym) {
                 return Some(*v);
@@ -285,35 +459,53 @@ impl Heap {
     }
 
     pub fn env_define(&mut self, env: EnvId, sym: Symbol, val: Value) {
-        // Allocation/definition targets the local heap. (Defining into the shared
-        // global env arrives with the mutable shared region — step 4.)
-        self.local.envs[env.index()].vars.insert(sym, val);
+        if env == EnvId::GLOBAL {
+            // Global code/data is shared across inner processes, so promote it
+            // into the shared RUNTIME region before binding.
+            let shared = self.promote(val);
+            self.runtime.globals.write().unwrap().insert(sym, shared);
+        } else {
+            self.local.envs[env.index()].vars.insert(sym, val);
+        }
     }
 
     /// Mutate the nearest existing binding; returns false if none exists.
     pub fn env_set(&mut self, env: EnvId, sym: Symbol, val: Value) -> bool {
         let mut cur = Some(env);
         while let Some(e) = cur {
-            if self.env_frame(e).vars.contains_key(&sym) {
-                if e.is_shared() {
-                    // Mutating a shared global binding comes with step 4.
-                    return false;
+            if e == EnvId::GLOBAL {
+                let shared = self.promote(val);
+                let mut g = self.runtime.globals.write().unwrap();
+                if g.contains_key(&sym) {
+                    g.insert(sym, shared);
+                    return true;
                 }
-                self.local.envs[e.index()].vars.insert(sym, val);
-                return true;
+                return false;
+            }
+            if self.env_frame(e).vars.contains_key(&sym) {
+                if e.region() == LOCAL {
+                    self.local.envs[e.index()].vars.insert(sym, val);
+                    return true;
+                }
+                // A promoted (shared, captured) frame is read-only — `set!` can't
+                // cross the share boundary. Rare; a documented limitation.
+                return false;
             }
             cur = self.env_frame(e).parent;
         }
         false
     }
 
-    /// Walk to the global (parent-less) environment.
+    /// Walk to the global scope at the bottom of the frame chain.
     pub fn env_root(&self, env: EnvId) -> EnvId {
         let mut cur = env;
         loop {
+            if cur == EnvId::GLOBAL {
+                return EnvId::GLOBAL;
+            }
             match self.env_frame(cur).parent {
                 Some(p) => cur = p,
-                None => return cur,
+                None => return cur, // the prelude builder's local root
             }
         }
     }

@@ -158,6 +158,7 @@ impl<'a> Parser<'a> {
                     Some('n') => s.push('\n'),
                     Some('t') => s.push('\t'),
                     Some('r') => s.push('\r'),
+                    Some('e') => s.push('\u{1b}'), // ESC — for ANSI terminal control
                     Some('0') => s.push('\0'),
                     Some('\\') => s.push('\\'),
                     Some('"') => s.push('"'),

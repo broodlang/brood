@@ -1,7 +1,10 @@
-# Shared code (design)
+# Shared code
 
-> Status: **design, for review.** Not implemented. This documents **Option A**
-> from the concurrency discussion — *true* shared code (not copy-on-spawn).
+> Status: **implemented.** This documents **Option A** from the concurrency
+> discussion — *true* shared code (not copy-on-spawn). A runtime's inner
+> processes share its live code + global table; redefining a function reaches a
+> running process on its next lookup (Erlang-style hot reload across processes).
+> Separate runtimes (future nodes) stay independent; data is never shared.
 
 ## Why
 
@@ -131,36 +134,62 @@ shared. Today only the global frame's *contents* point into the shared region.
    `freeze_as_shared_code` (re-tags handles local→shared). Each `Interp::new`
    shares that `Arc` and seeds a fresh local+mutable global env from the prelude
    bindings — *no prelude reload*. Behaviour-preserving (25 tests + suite green).
-3. ✅ **`spawn` shares the code.** Since `Interp::new` no longer reloads the
-   prelude (clones the `Arc` + copies the bindings map), spawning a process is
-   cheap and the child can call any prelude/builtin via the shared region.
-   Parent's *user* `defn`s are not visible to children — see the design change
-   below.
+3. ✅ **`spawn` shares the prelude.** `Interp::new` no longer reloads the prelude
+   (clones the `Arc` + seeds the global table), so spawning is cheap and the
+   child can call any prelude/builtin via the shared region.
+4. ✅ **The mutable shared RUNTIME region (this doc's payoff).** A third region,
+   `RUNTIME` (a per-runtime `Arc<RuntimeCode>`), holds the code `def`'d at
+   runtime plus the global bindings table. **All of a runtime's inner processes
+   share that same `Arc`**, so a `def` reaches a running process on its next
+   lookup. Details below.
 
-### Design change: instances are independent (steps 4–5 dropped)
+### Scope: inner processes share; separate runtimes don't
 
-A later requirement settled the direction: **each instance must be independent —
-updating a function in one runtime must *not* update other (connected) runtimes.**
-That is the *opposite* of a shared mutable global. So the originally-planned
-steps 4–5 (a shared mutable global + cross-process hot-reload propagation) are
-**deliberately not built.**
+The requirement that settled the direction: **a long-running spawned process
+(e.g. a web server) must pick up a redefinition without being restarted** — but
+**updating one runtime must not propagate to other (connected) runtimes/nodes.**
+The reconciliation is a matter of *scope*:
 
-What we keep is exactly right for that model:
+- **Inner processes** — everything a runtime `spawn`s — **share that runtime's
+  live code + global table.** They resolve globals against the shared table
+  (late binding), so a `def` is visible to them on their next call. This is the
+  cross-process hot reload (`docs` / the Erlang code-server model: shared current
+  code, every call re-dispatches through it — and since Brood is a Lisp-1 with
+  late binding, *every* call already re-dispatches, no `Module:fun` needed).
+- **Separate runtimes (future nodes)** each get their **own** `RuntimeCode`, so
+  updating one never touches another.
 
-- the **prelude is shared read-only** (`Arc<SharedCode>`) — an efficiency win that
-  can't leak updates, since it's immutable (redefining a prelude fn just shadows
-  it *locally*);
-- each instance has its **own mutable global** function table — `def` updates
-  only that instance; **single-instance hot-reload works via late binding**
-  (re-eval the `def`, callers pick it up).
+### How it's built
 
-Optional, not yet built: **snapshot user defns at `spawn`** — copy the parent's
-current user functions into the child so a spawned function can call them. A
-*snapshot* (no later propagation) is consistent with instance independence. This
-reuses the closure-shipping machinery; no shared mutable state.
+- **Three regions, 2-bit handle tag** (`value.rs`): `LOCAL` (per-process data,
+  `Vec` slabs), `PRELUDE` (immutable, `Arc<SharedCode>`, shared by all runtimes),
+  `RUNTIME` (mutable, per-runtime, shared by inner processes).
+- **`RuntimeCode`** (`heap.rs`): append-only code slabs (`boxcar::Vec` — lock-free
+  reads return stable references that survive concurrent pushes, so process
+  threads read closure bodies without locking while a `def` appends) + a
+  `RwLock<HashMap<Symbol, Value>>` global bindings table (read on every global
+  lookup, written on `def`/`set!`).
+- **The global scope is a sentinel `EnvId::GLOBAL`**, not a frame; the env
+  routines route it to `runtime.globals`. A local frame chain bottoms out there;
+  a top-level closure captures it symbolically (`Closure.env == None`).
+- **`def` promotes** the bound value's reachable code from `LOCAL` into the
+  `RUNTIME` region (deep copy, append-only) before rebinding in the shared table.
+  Append-only means a redefinition adds a *new* version while a call already
+  running the old closure finishes on it — correct hot-reload semantics.
+- **`spawn`** clones the parent's `Arc<RuntimeCode>` (shared code) and `promote`s
+  the target function; args are still shipped as `Message`s (data is per-process).
 
-(`6.` send functions — ship a closure's code + captured free variables — remains
-possible if a concrete need arises.)
+### Captured environments cross the boundary too
+
+A closure defined *inside a function call* (not at top level) closes over a local
+scope. To run such a closure in another process, `promote` also copies its
+captured environment chain into the `RUNTIME` region (`promote_env`) — without
+this, a shared closure with `env = Some(LOCAL …)` would dereference a frame that
+doesn't exist in the other process. (`set!` on a promoted, shared frame is a
+no-op — promoted frames are read-only; a rare, documented limitation.)
+
+(`send`ing a function — ship a closure handle, now that top-level code is shared —
+remains possible if a concrete need arises.)
 
 ## Risks
 

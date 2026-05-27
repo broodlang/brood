@@ -88,6 +88,8 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "send", send);
     def(heap, "receive", receive);
     def(heap, "self", self_pid);
+    def(heap, "spawn-count", spawn_count);
+    def(heap, "peak-threads", peak_threads);
 }
 
 fn arg(args: &[Value], i: usize) -> Value {
@@ -463,6 +465,18 @@ fn receive(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 
 fn self_pid(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::Int(crate::process::self_pid() as i64))
+}
+
+/// `(spawn-count)` — how many processes have been spawned since the program
+/// started. Each is backed by one OS thread, so this also counts worker threads.
+fn spawn_count(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    Ok(Value::Int(crate::process::spawn_count() as i64))
+}
+
+/// `(peak-threads)` — high-water mark of spawned threads running concurrently;
+/// shows how much parallelism was actually reached under the `-j` cap.
+fn peak_threads(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    Ok(Value::Int(crate::process::peak_threads() as i64))
 }
 
 fn try_catch(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {

@@ -91,16 +91,26 @@ cargo run -p cli file.lisp        # run a program file
 - **Symbols are interned `u32`s.** Compare with `==`; get the spelling via
   `value::symbol_name`.
 - **Truthiness:** only `nil` and `false` are falsy (`eval::truthy`).
-- **No Rust dependencies in the runtime.** The `brood` lib crate stays
-  dependency-free — hand-roll any data structures the runtime needs (our own
-  substrate), don't pull in crates like `boxcar`/`dashmap`/`gc-arena`. Dev/UX
-  deps in the **CLI** crate (e.g. `rustyline`) are fine. (Supersedes ADR-005.)
-- **Instances are independent; code updates do not propagate.** Each
-  process/runtime has its own mutable global function table (seeded from a
-  shared, read-only prelude). Redefining a function updates *that* instance only
-  — never other running processes or connected runtimes. Single-instance
-  hot-reload works via late binding (re-eval the `def`); there is deliberately
-  **no** shared mutable global / cross-process code propagation.
+- **Runtime crates are allowed when they remove real complexity.** Prefer our
+  own substrate, but a well-scoped crate that genuinely cuts complexity (or
+  hand-rolled `unsafe`) is fine in the `brood` lib crate — e.g. `boxcar` backs
+  the shared RUNTIME code region (lock-free append-only, stable refs). The bar
+  is *infrastructure that helps build the runtime*, not Lisp-callable behaviour:
+  functions the language exposes should still be written in Brood (`std/`), not
+  pulled from a crate. Dev/UX deps in the **CLI** crate (e.g. `rustyline`) are
+  fine. (Relaxes the earlier dependency-free rule / ADR-005.)
+- **A runtime's inner processes share live code; separate runtimes don't.** A
+  runtime has one shared, mutable code region + global table (`RuntimeCode`,
+  behind `Arc`); all processes it `spawn`s share that same `Arc`. So a `def`
+  (which `promote`s code into the shared RUNTIME region, then rebinds in the
+  shared table) is visible to a *running* spawned process on its next lookup —
+  late binding gives Erlang-style hot reload across processes, no restart. The
+  prelude stays a separate, immutable, shared-read-only region. **Separate
+  runtimes (future nodes) stay independent** — each has its own `RuntimeCode`,
+  so updating one never propagates to another. Data is *not* shared: each
+  process has its own LOCAL data heap; messages cross as deep copies.
+  (See `docs/shared-code.md`; supersedes the earlier "instances are independent
+  / no shared mutable global" decision.)
 
 ## When you add a feature
 

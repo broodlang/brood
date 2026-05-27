@@ -260,6 +260,113 @@ cost across the thread-backed processes).
 
 ---
 
+## ADR-013 — A runtime's inner processes share live code; separate runtimes don't
+
+**Status:** accepted. Supersedes the earlier "instances are independent / no
+shared mutable global" decision (commit 081fda9, which dropped shared-code steps
+4–5).
+
+**Context.** Two requirements that first looked contradictory: (a) updating a
+function in one runtime must *not* propagate to other connected runtimes/nodes;
+(b) a long-running **spawned** process — e.g. a web server — must pick up a
+redefinition *without being restarted*. The earlier reading collapsed both into
+"every process is independent," which satisfies (a) but fails (b): a snapshot
+process never sees updates. The resolution is a matter of **scope**, and it's
+exactly Erlang's: a code server holds the *current* code, and every call
+re-dispatches through it (Brood, being a late-binding Lisp-1, re-dispatches on
+*every* call — no `Module:fun` needed). Code is shared and live; data is not.
+
+**Decision.** A **runtime** owns one mutable, shared code region + global table
+(`RuntimeCode`, behind `Arc`). **All processes it `spawn`s share that same
+`Arc`**, so a `def` is visible to a running inner process on its next lookup
+(cross-process hot reload). **Separate runtimes (future nodes) each get their own
+`RuntimeCode`**, so updates never cross between them. Data stays per-process: each
+process has its own LOCAL heap; messages cross as deep copies.
+
+**How.** A 2-bit handle region tag — `LOCAL` (per-process data) / `PRELUDE`
+(immutable, shared by all runtimes) / `RUNTIME` (mutable, per-runtime, shared by
+inner processes). `RUNTIME` code is **append-only** (a redefinition adds a new
+version; in-flight calls finish on the old one). The global scope is a sentinel
+(`EnvId::GLOBAL`) routing to a `RwLock<HashMap>`; `def` **promotes** the bound
+value's reachable code (and any captured environment) from LOCAL into RUNTIME
+before rebinding. See `docs/shared-code.md`.
+
+**Why.** It's the only model that gives editor-style hot reload *across* a
+runtime's processes (the project's north star) while keeping nodes independent
+for safe deployment. Late binding + append-only code gives the Erlang semantics
+(in-flight calls keep old code, new calls get new) for free.
+
+**Trade-offs accepted.** Global reads take a brief `RwLock` read; `def` deep-copies
+code into the shared region (append-only, never reclaimed yet — same GC debt as
+ADR-002). A closure that captured a *local* scope and is then shared has that
+scope promoted too; `set!` on such a promoted (now shared) frame is a no-op — a
+rare, documented limitation. Cross-runtime/node code distribution is deliberately
+out of scope (a future, explicit deploy step, not silent propagation).
+
+---
+
+## ADR-014 — Runtime crates are allowed when they remove real complexity
+
+**Status:** accepted. Relaxes ADR-005 (which had already been superseded on the
+CLI side by `rustyline`).
+
+**Decision.** The `brood` library may depend on a well-scoped crate when it
+genuinely cuts complexity or unsafe code, rather than hand-rolling substrate. The
+bar is **infrastructure that helps build the runtime**, not Lisp-callable
+behaviour: functions the *language* exposes are still written in Brood (`std/`),
+per ADR-006/008 — we don't pull a crate to provide a builtin users could write in
+Brood.
+
+**First application.** `boxcar` backs the shared `RUNTIME` code region (ADR-013):
+a lock-free, append-only vector whose references stay valid across concurrent
+pushes. It removes a hand-rolled `unsafe` lifetime-extension *and* gives lock-free
+reads on the hottest path (every process thread reading closure bodies while a
+`def` appends). The global bindings table stays a std `RwLock<HashMap>`.
+
+**Why.** Getting the concurrency substrate correct by hand is exactly where bugs
+hide; a purpose-built, audited crate is lower-risk than our own `unsafe`. "Get it
+working, then decide" — and the decision is: take the crate where it earns its
+keep.
+
+**Trade-off accepted.** A dependency in the runtime crate (build time, supply
+chain). Mitigated by the high bar above and by keeping Lisp-level behaviour in
+Brood.
+
+---
+
+## ADR-015 — Share-safe, parallel-by-default test framework
+
+**Status:** accepted.
+
+**Context.** The test framework (`std/test.lisp`) is written in Brood and runs
+tests as processes. Under ADR-013 those processes **share** the global table, so
+the original design — workers tallying into shared mutable globals (`*passed*`,
+`*failed*`) — raced and miscounted (failures attributed to the wrong test, double
+counts).
+
+**Decision.** Make tallying **share-safe** and adopt an ExUnit / `mix test`
+surface:
+- `describe` groups, `test` cases (string-named); `deftest` kept as an alias.
+- Assertions are **macros that push onto a process-local `*fails*`** (a `let` the
+  `test` macro establishes); each test **yields its failures as a value**. The
+  runner aggregates from returns/messages into its own local state — no shared
+  counters.
+- **Parallel by default** (each test its own process), with opt-in serialisation:
+  `:serial` (a group's tests run one-at-a-time in a single worker, alongside other
+  groups) and `:isolated` (a group/test runs alone, in an exclusive phase after
+  the parallel batch).
+
+**Why.** Sharing code but not tally state is the only way concurrent tests don't
+clobber each other. `:serial`/`:isolated` give tests that *do* touch shared global
+state (a `def`, a hot-reload) a way to opt out of the race, mirroring ExUnit's
+`async` model. See `docs/testing.md`.
+
+**Trade-off accepted.** Assertions, being macros over `*fails*`, must be used
+lexically inside a test body, not from unrelated top-level helpers — acceptable,
+and the normal way tests are written.
+
+---
+
 ## Deferred / open questions
 
 - **Macro hygiene:** currently unhygienic `defmacro` + `gensym`; hygienic macros

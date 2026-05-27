@@ -9,3 +9,10 @@ description = "The Brood language: reader, evaluator, and core for a self-editin
 [lib]
 name = "brood"
 path = "src/lib.rs"
+
+[dependencies]
+# Lock-free, append-only vector for the shared RUNTIME code region: stable
+# references survive concurrent pushes, so many process threads read closure
+# bodies lock-free while `def` appends new code (old versions never move/free —
+# in-flight calls keep running them; Erlang-style hot reload). See docs/shared-code.md.
+boxcar = "0.2"

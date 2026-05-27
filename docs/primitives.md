@@ -9,7 +9,7 @@ load-bearing choice (ADR-006 "write the language in the language", ADR-008
 
 `%`-prefixed names are low-level primitives not meant to be called directly.
 
-## Native primitive functions (47)
+## Native primitive functions (49)
 
 | Category | Primitive | Arity | Purpose |
 |---|---|---|---|
@@ -44,6 +44,8 @@ load-bearing choice (ADR-006 "write the language in the language", ADR-008
 | | `send` | 2 | copy a message into a pid's mailbox |
 | | `receive` | 0 | take the next message from this process's mailbox (blocking) |
 | | `self` | 0 | this process's pid |
+| | `spawn-count` | 0 | processes spawned since program start (= worker OS threads created) |
+| | `peak-threads` | 0 | high-water mark of spawned threads running concurrently (bounded by the CLI's `-j`) |
 
 **Why this set is irreducible:** every entry needs Rust — raw number ops, heap
 construct/inspect, type-tag tests, I/O, value→text conversion, the wall clock,

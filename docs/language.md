@@ -13,6 +13,33 @@ truthiness and `def`/`defn`/`fn`.
 For the precise, normative version of everything here — grammar, evaluation
 rules, scoping — see [spec.md](spec.md).
 
+## Coming from Clojure (the differences that bite)
+
+Brood's surface is deliberately Clojure-flavoured, so most Clojure reflexes
+transfer unchanged: nil/false-only truthiness, type-sensitive `=`
+(`(= 1 1.0)` is `false`), `:keyword`s, `cond` with flat test/expr pairs, the
+`->`/`->>` threading macros, and quasiquote with `` ` `` / `~` / `~@` (Clojure's
+choice, not Common Lisp's `,` / `,@`).
+
+The catch is that a few core forms borrow from Scheme / Common Lisp instead, in
+exactly the spots where a Clojure habit produces valid-looking code that fails
+**silently or with a misleading error**. If you (or an LLM) write Clojure here,
+these are the ones to unlearn:
+
+| Clojure habit | Brood reality | What you get if you guess wrong |
+|---|---|---|
+| `(try … (catch Type e body))` | `catch` takes a **bare binding**: `(catch e body)`. There is no exception class. | The class name gets bound *as* the variable and `e` is treated as body → cryptic `unbound symbol: e`. |
+| Multi-arity `(fn ([x] …) ([x y] …))` | Not supported. Use `&optional` / `&` rest in **one** parameter list. | `type error: expected a symbol`. |
+| `{:a 1}` map literal | Maps aren't implemented yet. | `parse error: map literals '{ }' are not supported yet`. |
+| Destructuring `[{:keys [a b]} …]`, `:or` defaults | Not supported. Bind positionally; default with `&optional (b 10)`. | Parse / type error. |
+| `(defn f [x y] …)`, `(let [a 1 b 2] …)` | Param lists and `let` bindings are **lists** — `(x y)` / `(a 1 b 2)`. | Works (vectors are accepted in binding position), but it's non-idiomatic — prefer lists. |
+| `(/ 7 2)` → ratio `7/2` | No ratios. Integer args give an integer **only when they divide evenly**; otherwise a float. `(/ 12 3)` → `4`, `(/ 7 2)` → `3.5`. | A float where you expected an exact ratio. |
+
+Optional and rest arguments use the Common-Lisp / Emacs-Lisp spelling
+(`&optional`, `&`), described under [Parameter lists](#parameter-lists) — *not*
+Clojure multi-arity. This is the one piece of the calling convention that can't
+be guessed from Clojure; it has to be read.
+
 ## Data types
 
 | Type | Examples | Notes |
@@ -21,7 +48,7 @@ rules, scoping — see [spec.md](spec.md).
 | Boolean | `true`, `false` | |
 | Integer | `0`, `42`, `-7` | 64-bit; arithmetic is overflow-checked. |
 | Float | `3.14`, `-0.5`, `1e3` | 64-bit. |
-| String | `"hello\n"` | Escapes: `\n \t \r \0 \\ \"`. |
+| String | `"hello\n"` | Escapes: `\n \t \r \e \0 \\ \"` (`\e` is ESC, for ANSI terminal control). |
 | Symbol | `foo`, `+`, `my-fn`, `empty?` | Names; interned. |
 | Keyword | `:ok`, `:else` | Self-evaluating named constants. |
 | List | `(1 2 3)`, `()` | Cons cells; `()` is `nil`. Quote to keep as data: `'(1 2 3)`. |
@@ -181,11 +208,15 @@ Erlang-style green-ish processes: each runs independently with its **own heap**
 | `(send pid msg)` | Copy `msg` into `pid`'s mailbox (non-blocking; sending to a dead pid is a no-op). |
 | `(receive)` | Take the next message from your own mailbox, blocking until one arrives. |
 | `(self)` | Your own pid. |
+| `(spawn-count)` | How many processes have been spawned since the program started (= worker OS threads created). |
+| `(peak-threads)` | High-water mark of spawned threads running at once (bounded by the CLI's `-j N` concurrency cap). |
 
 Messages are **copied** between processes (data only — you can't send a
 function). Today each process is backed by an OS thread, and a spawned function
 sees only the prelude/builtins plus its arguments (shared user code is a planned
-follow-up). See [concurrency.md](concurrency.md) for the model and limitations.
+follow-up). Because each process is one OS thread, `(spawn-count)` doubles as the
+worker-thread count — the test runner uses it to report how much concurrency a
+run used. See [concurrency.md](concurrency.md) for the model and limitations.
 
 ## Builtins
 

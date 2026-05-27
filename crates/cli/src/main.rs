@@ -2,6 +2,9 @@
 //!
 //! - With no arguments it starts a REPL.
 //! - With file arguments it loads and runs each file in order.
+//! - `-j N` / `--max-parallel N` caps how many spawned processes run on OS
+//!   threads at once (0 = unlimited, the default). Useful for bounding a
+//!   concurrent test run; see `std/test.lisp`.
 //!
 //! Interactively (a real terminal) the REPL uses `rustyline` for line editing:
 //! arrow keys to move within a line, up/down to walk history, the usual
@@ -17,9 +20,12 @@ use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 
 fn main() {
-    let mut interp = Interp::new();
-    let files: Vec<String> = std::env::args().skip(1).collect();
+    let (files, max_parallel) = parse_args(std::env::args().skip(1).collect());
+    if let Some(n) = max_parallel {
+        brood::process::set_max_parallel(n);
+    }
 
+    let mut interp = Interp::new();
     if !files.is_empty() {
         run_files(&mut interp, &files);
         return;
@@ -33,6 +39,43 @@ fn main() {
     } else {
         repl_plain(&mut interp);
     }
+}
+
+/// Split CLI args into file paths and an optional concurrency cap. Accepts
+/// `-j N`, `--jobs N`, `--max-parallel N`, and the `=`/joined forms (`-jN`,
+/// `--max-parallel=N`). A bad value is a hard error so a typo never silently
+/// runs unbounded.
+fn parse_args(args: Vec<String>) -> (Vec<String>, Option<usize>) {
+    let mut files = Vec::new();
+    let mut max_parallel = None;
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        let value = if a == "-j" || a == "--jobs" || a == "--max-parallel" {
+            i += 1;
+            args.get(i).cloned()
+        } else if let Some(v) = a
+            .strip_prefix("--max-parallel=")
+            .or_else(|| a.strip_prefix("--jobs="))
+            .or_else(|| a.strip_prefix("-j"))
+        {
+            Some(v.to_string())
+        } else {
+            files.push(a.clone());
+            None
+        };
+        if let Some(v) = value {
+            match v.parse::<usize>() {
+                Ok(n) => max_parallel = Some(n),
+                Err(_) => {
+                    eprintln!("brood: {} expects a number, got {:?}", a, v);
+                    std::process::exit(2);
+                }
+            }
+        }
+        i += 1;
+    }
+    (files, max_parallel)
 }
 
 fn run_files(interp: &mut Interp, files: &[String]) {

@@ -1,96 +1,128 @@
 ;; Brood test suite — written in Brood, using the native test library.
 ;;   ./bin/cli tests/suite.lisp
 ;; (also run by `cargo test` via crates/lisp/tests/suite.rs)
+;;
+;; ExUnit / `mix test`-style: `describe` groups a feature, `test` names a case.
+;; The suite runs every test concurrently (:parallel), each in its own process;
+;; tallying is share-safe (see std/test.lisp).
 
 (require 'test)
 
-(deftest arithmetic
-  (assert= (+ 1 2 3)     6)
-  (assert= (- 10 3 2)    5)
-  (assert= (- 5)         -5)
-  (assert= (* 2 3 4)     24)
-  (assert= (/ 12 3)      4)
-  (assert= (/ 7 2)       3.5)
-  (assert= (mod 10 3)    1)
-  (assert= (+ 1 (* 2 3)) 7))
+(describe "arithmetic"
+  (test "addition"        (assert= (+ 1 2 3) 6) (assert= (+ 1 (* 2 3)) 7))
+  (test "subtraction"     (assert= (- 10 3 2) 5) (assert= (- 5) -5))
+  (test "mul/div/mod"     (assert= (* 2 3 4) 24) (assert= (/ 12 3) 4)
+                          (assert= (/ 7 2) 3.5)  (assert= (mod 10 3) 1)))
 
-(deftest comparison-and-equality
-  (is (< 1 2 3))
-  (is (not (< 1 3 2)))
-  (is (= 2 2))
-  (is (not= 1 2))
-  (assert= (list 1 2) (list 1 2)))
+(describe "comparison & equality"
+  (test "ordering"        (is (< 1 2 3)) (is (not (< 1 3 2))))
+  (test "equality"        (is (= 2 2)) (is (not= 1 2))
+                          (assert= (list 1 2) (list 1 2))))
 
-(deftest lists
-  (assert= (cons 0 (list 1 2))             (list 0 1 2))
-  (assert= (first (list 1 2 3))            1)
-  (assert= (rest (list 1 2 3))             (list 2 3))
-  (assert= (count (list 1 2 3 4))          4)
-  (assert= (reverse (list 1 2 3))          (list 3 2 1))
-  (assert= (append (list 1 2) (list 3 4))  (list 1 2 3 4))
-  (assert= (nth (list 10 20 30) 1)         20))
+(describe "lists"
+  (test "construction"    (assert= (cons 0 (list 1 2)) (list 0 1 2))
+                          (assert= (append (list 1 2) (list 3 4)) (list 1 2 3 4)))
+  (test "access"          (assert= (first (list 1 2 3)) 1)
+                          (assert= (rest (list 1 2 3)) (list 2 3))
+                          (assert= (nth (list 10 20 30) 1) 20))
+  (test "count & reverse" (assert= (count (list 1 2 3 4)) 4)
+                          (assert= (reverse (list 1 2 3)) (list 3 2 1))))
 
-(deftest higher-order
-  (assert= (map inc (list 1 2 3))               (list 2 3 4))
-  (assert= (filter positive? (list -1 2 -3 4))  (list 2 4))
-  (assert= (reduce + 0 (list 1 2 3 4))          10)
-  (assert= (apply + (list 1 2 3))               6))
+(describe "higher-order functions"
+  (test "map"    (assert= (map inc (list 1 2 3)) (list 2 3 4)))
+  (test "filter" (assert= (filter positive? (list -1 2 -3 4)) (list 2 4)))
+  (test "reduce" (assert= (reduce + 0 (list 1 2 3 4)) 10))
+  (test "apply"  (assert= (apply + (list 1 2 3)) 6)))
 
-(deftest vectors
-  (assert= [1 (+ 1 1) 3]   [1 2 3])
-  (assert= (nth [10 20 30] 2) 30)
-  (assert= (count [1 2 3]) 3))
+(describe "vectors"
+  (test "literals evaluate elements" (assert= [1 (+ 1 1) 3] [1 2 3]))
+  (test "access"                     (assert= (nth [10 20 30] 2) 30)
+                                     (assert= (count [1 2 3]) 3)))
 
-(deftest strings
-  (assert= (str "a" "b" 3) "ab3")
-  (assert= (count "hello") 5))
+(describe "strings"
+  (test "concatenation" (assert= (str "a" "b" 3) "ab3"))
+  (test "count"         (assert= (count "hello") 5)))
 
-(deftest predicates
-  (is (nil? nil))
-  (is (pair? (list 1)))
-  (is (number? 3.5))
-  (is (vector? [1])))
+(describe "predicates"
+  (test "type checks" (is (nil? nil)) (is (pair? (list 1)))
+                      (is (number? 3.5)) (is (vector? [1]))))
 
-(deftest control-and-binding
-  (assert= (if (< 1 2) :y :n)              :y)
-  (assert= (cond false :a true :b else :c) :b)
-  (assert= (when true 1 2 3)               3)
-  (assert= (let (a 1 b (+ a 1)) (+ a b))   3)
-  (assert= (let (adder (fn (a) (fn (b) (+ a b)))) ((adder 3) 4)) 7))
+(describe "control & binding"
+  (test "conditionals" (assert= (if (< 1 2) :y :n) :y)
+                       (assert= (cond false :a true :b else :c) :b)
+                       (assert= (when true 1 2 3) 3))
+  (test "let is sequential" (assert= (let (a 1 b (+ a 1)) (+ a b)) 3))
+  (test "lexical closures"  (assert= (let (adder (fn (a) (fn (b) (+ a b)))) ((adder 3) 4)) 7)))
 
-(deftest parameter-forms
-  (assert= ((fn (a &optional (b 10)) (+ a b)) 5)   15)
-  (assert= ((fn (a &optional (b 10)) (+ a b)) 5 1) 6)
-  (assert= ((fn (& xs) xs) 1 2 3)                  (list 1 2 3)))
+(describe "parameter forms"
+  (test "optional with default" (assert= ((fn (a &optional (b 10)) (+ a b)) 5) 15)
+                                (assert= ((fn (a &optional (b 10)) (+ a b)) 5 1) 6))
+  (test "rest"                  (assert= ((fn (& xs) xs) 1 2 3) (list 1 2 3))))
 
-(deftest defn-and-macros
-  (defn sq (x) (* x x))
-  (assert= (sq 6) 36)
-  (defmacro my-when (c & body) `(if ~c (do ~@body) nil))
-  (assert= (my-when true 1 2 3)  3)
-  (assert= (my-when false 1 2 3) nil)
-  (assert= `(1 ~(+ 1 1) ~@(list 3 4) 5) (list 1 2 3 4 5)))
+;; :serial — these tests `defn`/`defmacro` into the shared global table, so run
+;; them one-at-a-time (in a single worker) rather than racing each other.
+(describe "macros" :serial
+  (test "defn"        (defn sq (x) (* x x)) (assert= (sq 6) 36))
+  (test "defmacro"    (defmacro my-when (c & body) `(if ~c (do ~@body) nil))
+                      (assert= (my-when true 1 2 3) 3)
+                      (assert= (my-when false 1 2 3) nil))
+  (test "quasiquote"  (assert= `(1 ~(+ 1 1) ~@(list 3 4) 5) (list 1 2 3 4 5))))
 
-(deftest threading
-  (assert= (-> 5 (- 1) (* 2))          8)
-  (assert= (->> (list 1 2 3) (map inc)) (list 2 3 4)))
+(describe "threading macros"
+  (test "->"  (assert= (-> 5 (- 1) (* 2)) 8))
+  (test "->>" (assert= (->> (list 1 2 3) (map inc)) (list 2 3 4))))
 
-(deftest error-handling
-  (assert= (try (throw 42) (catch e e))         42)
-  (is      (try (/ 1 0) (catch e (string? e))))
-  (assert= (try (+ 1 2) (catch e :nope))        3)
-  (assert-error (/ 1 0))
-  (assert-error (throw :boom)))
+(describe "error handling"
+  (test "catch yields the thrown value" (assert= (try (throw 42) (catch e e)) 42))
+  (test "built-in errors are catchable" (is (try (/ 1 0) (catch e (string? e)))))
+  (test "no error -> body value"        (assert= (try (+ 1 2) (catch e :nope)) 3))
+  (test "assert-error"                  (assert-error (/ 1 0)) (assert-error (throw :boom))))
 
-(deftest tail-calls
-  (defn sum-to (n acc) (if (= n 0) acc (sum-to (- n 1) (+ acc n))))
-  (assert= (sum-to 100000 0) 5000050000))
+;; Pin the exact message each kind of error produces, so a change to user-facing
+;; error text is a deliberate, visible edit here.
+(describe "error messages"
+  (test "runtime errors"
+    (assert= (error-of (/ 1 0))   "runtime error: division by zero")
+    (assert= (error-of (mod 1 0)) "runtime error: mod: division by zero")
+    (assert= (error-of (rem 1 0)) "runtime error: rem: division by zero")
+    (assert= (error-of (vector-ref [1 2] 9))
+             "runtime error: vector-ref: index out of range"))
+  (test "unbound symbol echoes the name"
+    (assert= (error-of undefined-name) "unbound error: unbound symbol: undefined-name"))
+  (test "type errors"
+    (assert= (error-of (+ 1 "x")) "type error: expected a number")
+    (assert= (error-of (first 5)) "type error: first: not a list")
+    (assert= (error-of (1 2 3))   "type error: cannot call non-function: 1"))
+  (test "arity (user fns say 'args', built-ins say 'arguments')"
+    (defn one-arg (x) x)
+    (assert= (error-of (one-arg 1 2))    "arity error: one-arg: expected 1 args, got 2")
+    (assert= (error-of ((fn (a b) a) 1)) "arity error: fn: expected 2 args, got 1")
+    (assert= (error-of (cons 1))         "arity error: cons: expected 2 arguments, got 1"))
+  (test "parse errors surface through read-string"
+    (assert= (error-of (read-string "(1 2")) "parse error: unclosed list"))
+  (test "throw hands the value back unchanged"
+    (assert= (error-of (throw :boom)) :boom)
+    (assert= (error-of (throw 42))    42)
+    (assert= (error-of (error "custom" " " "message")) "custom message"))
+  (test "error-of is nil when nothing is raised"
+    (assert= (error-of (+ 1 2)) nil)))
 
-(deftest processes
+(describe "tail calls"
+  ;; A deep-but-quick smoke check that tail positions don't grow the stack. The
+  ;; rigorous 100,000-frame guard lives in the Rust test `tail_calls_do_not_overflow`.
+  (test "deep self-recursion does not overflow"
+    (defn sum-to (n acc) (if (= n 0) acc (sum-to (- n 1) (+ acc n))))
+    (assert= (sum-to 10000 0) 50005000)))
+
+;; :isolated — this group spawns its own nested processes; run it alone so its
+;; concurrency is measured on its own, not contending with the other tests.
+(describe "processes" :isolated
   ;; spawn a worker, send it a number, get back double — across OS threads.
-  (defn echo-double (parent) (send parent (* (receive) 2)))
-  (let (w (spawn echo-double (self)))
-    (send w 21)
-    (assert= (receive) 42)))
+  (test "spawn / send / receive round-trip"
+    (defn echo-double (parent) (send parent (* (receive) 2)))
+    (let (w (spawn echo-double (self)))
+      (send w 21)
+      (assert= (receive) 42))))
 
+;; Parallel by default; the :serial / :isolated groups above opt out as needed.
 (run-tests :trace :slow)

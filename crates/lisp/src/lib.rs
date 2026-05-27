@@ -28,7 +28,7 @@ pub mod value;
 use std::sync::{Arc, LazyLock};
 
 use error::LispError;
-use heap::{Heap, SharedCode};
+use heap::{Heap, RuntimeCode, SharedCode};
 use value::{EnvId, Symbol, Value};
 
 /// The shared code region (prelude closures, code data, builtins) plus the
@@ -68,15 +68,15 @@ pub struct Interp {
 
 impl Interp {
     pub fn new() -> Self {
-        // Share the (lazily built) code region; seed a fresh, local, mutable
-        // global env from the prelude bindings — no prelude reload.
-        let mut heap = Heap::with_code(Arc::clone(&SHARED.code));
-        let root = heap.new_env(None);
-        heap.set_global(root);
-        for &(sym, val) in &SHARED.bindings {
-            heap.env_define(root, sym, val);
-        }
-        Interp { heap, root }
+        // Share the immutable prelude; build this runtime a fresh, mutable code
+        // region whose global table is seeded from the prelude bindings (no
+        // prelude reload). Inner processes spawned from this runtime share that
+        // region (see `process::spawn`), so a `def` reaches them — while
+        // separate runtimes (nodes) stay independent, each with its own.
+        let runtime = Arc::new(RuntimeCode::seeded(&SHARED.bindings));
+        let mut heap = Heap::with_regions(Arc::clone(&SHARED.code), runtime);
+        heap.set_global(EnvId::GLOBAL);
+        Interp { heap, root: EnvId::GLOBAL }
     }
 
     /// Read every form in `src`, evaluate each against the global environment,

@@ -232,3 +232,28 @@ fn errors_are_reported() {
     assert!(interp.eval_str("(this-is-not-defined)").is_err());
     assert!(interp.eval_str("(/ 1 0)").is_err());
 }
+
+/// The cross-process extension of `live_redefinition`, and the whole point of
+/// the shared-runtime model: a long-running *spawned* process shares the
+/// runtime's live code, so redefining a function it calls changes its behaviour
+/// on the next request — without restarting it (the web-server / Erlang
+/// hot-code-swap scenario; see docs/shared-code.md).
+#[test]
+fn spawned_process_picks_up_redefinition() {
+    let src = r#"
+        (def handler (fn (x) (* x 10)))
+        ;; a tiny request/reply loop, like a long-running server
+        (def server
+          (fn ()
+            (let (msg (receive))
+              (send (first msg) (handler (first (rest msg))))
+              (server))))
+        (def srv  (spawn server))
+        (def call (fn (x) (send srv (list (self) x)) (receive)))
+        (def before (call 5))             ; 5 * 10 = 50
+        (def handler (fn (x) (+ x 100)))  ; hot-reload the handler in place
+        (def after (call 5))              ; 5 + 100 = 105 — on the SAME running server
+        (list before after)
+    "#;
+    assert_eq!(run(src), "(50 105)");
+}

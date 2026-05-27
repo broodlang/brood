@@ -43,33 +43,50 @@ pub fn symbol_name(sym: Symbol) -> String {
 
 // ----- handles into the Heap -----
 
-/// High bit of a handle's index: set ⇒ the value lives in the shared **code**
-/// region; clear ⇒ the process's **local** data heap. (See `docs/shared-code.md`.)
-pub const SHARED_BIT: u32 = 1 << 31;
+/// A handle's two high bits tag which heap **region** it addresses; the low 30
+/// bits are the slab index (≈1 billion objects per region — ample). See
+/// `docs/shared-code.md`.
+///
+/// - [`LOCAL`] — the process's own data heap (mutable, per-process).
+/// - [`PRELUDE`] — the immutable prelude/builtins, shared by *all* runtimes.
+/// - [`RUNTIME`] — a runtime's mutable, append-only code region, shared by all
+///   of that runtime's inner (spawned) processes. This is where `def`'d code
+///   and the global bindings live, so an update is visible to running processes.
+pub const REGION_SHIFT: u32 = 30;
+pub const INDEX_MASK: u32 = (1 << REGION_SHIFT) - 1;
+pub const LOCAL: u8 = 0b00;
+pub const PRELUDE: u8 = 0b01;
+pub const RUNTIME: u8 = 0b10;
 
 macro_rules! handle {
     ($name:ident) => {
         #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
         pub struct $name(pub u32);
         impl $name {
-            /// A handle into the local (per-process) heap.
+            /// A handle into the local (per-process) data heap.
             #[inline]
             pub fn local(index: usize) -> Self {
                 $name(index as u32)
             }
-            /// A handle into the shared code region.
+            /// A handle into the immutable shared prelude region.
             #[inline]
-            pub fn shared(index: usize) -> Self {
-                $name(index as u32 | SHARED_BIT)
+            pub fn prelude(index: usize) -> Self {
+                $name(index as u32 | ((PRELUDE as u32) << REGION_SHIFT))
             }
+            /// A handle into the runtime's mutable shared code region.
             #[inline]
-            pub fn is_shared(self) -> bool {
-                self.0 & SHARED_BIT != 0
+            pub fn runtime(index: usize) -> Self {
+                $name(index as u32 | ((RUNTIME as u32) << REGION_SHIFT))
             }
-            /// The slab index, with the region bit masked off.
+            /// Which region this handle addresses ([`LOCAL`]/[`PRELUDE`]/[`RUNTIME`]).
+            #[inline]
+            pub fn region(self) -> u8 {
+                (self.0 >> REGION_SHIFT) as u8
+            }
+            /// The slab index, with the region tag masked off.
             #[inline]
             pub fn index(self) -> usize {
-                (self.0 & !SHARED_BIT) as usize
+                (self.0 & INDEX_MASK) as usize
             }
         }
     };
@@ -80,6 +97,15 @@ handle!(StrId);
 handle!(ClosureId);
 handle!(NativeId);
 handle!(EnvId);
+
+impl EnvId {
+    /// The runtime's global scope. Not a real frame — a sentinel that the
+    /// environment routines special-case to the shared global bindings table
+    /// (`RuntimeCode::globals`). A local frame chain bottoms out here, and a
+    /// top-level closure captures it symbolically (`Closure.env == None`), so a
+    /// shared closure resolves globals against whichever process runs it.
+    pub const GLOBAL: EnvId = EnvId(u32::MAX);
+}
 
 /// A Brood value. `Copy`: primitives inline, heap objects as handles.
 #[derive(Clone, Copy, Debug)]
