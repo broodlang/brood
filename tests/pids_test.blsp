@@ -1,0 +1,38 @@
+;; Pids are first-class values carrying node identity (ADR-034). `self`/`spawn`
+;; return a `:pid`, not a bare integer — the universal, location-transparent
+;; process handle: the same value addresses a process locally and, once it
+;; reaches another runtime, across a node link (see docs/distribution.md). Here
+;; we cover the local invariants; the cross-node round-trip is the two-process
+;; Rust test (crates/cli/tests/distribution.rs).
+;;
+;; :isolated — these spawn green processes and pass messages, so the framework
+;; runs each in its own process (exercising the value across the per-process
+;; heap boundary, which is the same deep-copy a node link performs).
+
+(require 'test)
+
+(describe "pids: first-class process handles" :isolated
+
+  (test "self and spawn return pids, distinct from refs and ints"
+    (is (pid? (self)))
+    (is (pid? (spawn (receive (:go nil)))))
+    (refute (pid? 7))
+    (refute (pid? (ref)))
+    (assert= (type-of (self)) :pid))
+
+  (test "a pid is equal to itself; distinct processes differ"
+    (assert= (self) (self))
+    (let [w1 (spawn (receive (:go nil)))
+          w2 (spawn (receive (:go nil)))]
+      (is (not= w1 w2))
+      (is (not= w1 (self)))))
+
+  (test "a pid survives a message round-trip unchanged (sent to self)"
+    (let [me (self)]
+      (send me me)                            ; ship our own pid to ourselves
+      (assert= (receive) me)))                ; rebuilt in-heap, still equal
+
+  (test "a worker can carry a pid back across the heap boundary"
+    (defn pid-carrier (parent) (send parent (self)))
+    (let [me (self) w (spawn (pid-carrier me))]
+      (assert= (receive) w))))                ; the pid we got back IS w

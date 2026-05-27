@@ -23,7 +23,7 @@
 
   (test "spawn / send / receive round-trip (bare receive doubles a number)"
     (defn echo-double (parent) (send parent (* (receive) 2)))
-    (let (w (spawn echo-double (self)))
+    (let (me (self) w (spawn (echo-double me)))
       (send w 21)
       (assert= (receive) 42)))
 
@@ -63,7 +63,7 @@
       (let (a (receive ([:a x] x)))        ; waits for :a; :b stays queued
         (let (b (receive ([:b y] y)))      ; now takes the queued :b
           (send parent [a b]))))
-    (let (w (spawn sel-worker (self)))
+    (let (me (self) w (spawn (sel-worker me)))
       (send w [:b 1])
       (send w [:a 2])
       (assert= (receive) [2 1])))
@@ -73,7 +73,7 @@
   (test "(after 0 …) returns the timeout body when nothing matches"
     (defn poll-empty (parent)
       (send parent (receive ([:x] :got) (after 0 :nothing))))
-    (let (w (spawn poll-empty (self)))
+    (let (me (self) w (spawn (poll-empty me)))
       (assert= (receive) :nothing)))
 
   (test "(after 0 …) takes an already-queued match before timing out"
@@ -88,13 +88,13 @@
   (test "(after N …) fires in a green process via the receive timer"
     (defn timed-worker (parent)
       (send parent (receive (:never x) (after 50 :timed))))
-    (let (w (spawn timed-worker (self)))
+    (let (me (self) w (spawn (timed-worker me)))
       (assert= (receive) :timed)))
 
   (test "a message arriving before the deadline wins over the timeout"
     (defn race-worker (parent)
       (send parent (receive (:go :got) (after 1000 :timed))))
-    (let (w (spawn race-worker (self)))
+    (let (me (self) w (spawn (race-worker me)))
       (send w :go)                         ; well inside the 1000ms window
       (assert= (receive) :got)))
 
@@ -109,7 +109,7 @@
     (defn catch-worker (parent)
       (send parent (try (receive (:never x) (after 30 (throw [:timeout])))
                         (catch e e))))
-    (let (w (spawn catch-worker (self)))
+    (let (me (self) w (spawn (catch-worker me)))
       (assert= (receive) [:timeout])))
 
   (test "a throwing matched-clause body is catchable, and its message is consumed"
@@ -132,14 +132,35 @@
     (defn sched--worker (parent n) (send parent [:done n]))
     (defn sched--spawn-n (parent n)
       (when (> n 0)
-        (spawn sched--worker parent n)
+        (spawn (sched--worker parent n))
         (sched--spawn-n parent (- n 1))))
     (defn sched--collect (got total)
       (if (= got total)
         :all-done
         (sched--collect (receive ([:done _] (+ got 1))) total)))
     (sched--spawn-n (self) 50)
-    (assert= (sched--collect 0 50) :all-done)))
+    (assert= (sched--collect 0 50) :all-done))
+
+  ;; A receive *loop* must stay O(1) native stack however many messages it handles
+  ;; — Erlang's core guarantee. The trampoline (`%receive` returns the body thunk,
+  ;; the macro applies it in tail position) is what makes this hold; before it, a
+  ;; server driven through interleaved casts + calls overflowed the green-process
+  ;; coroutine stack and SIGSEGV'd around ~60 cycles. 500 cycles proves the fix.
+  (test "a receive loop handles many messages without overflowing the stack"
+    (defn tco--srv (n)
+      (receive
+        (:inc         (tco--srv (+ n 1)))
+        ([:get from]  (do (send from n) (tco--srv n)))))
+    (defn tco--hammer (p k)
+      (when (> k 0)
+        (send p :inc)                       ; cast: leaves a message queued…
+        (send p [:get (self)])              ; …so the server handles both without suspending
+        (receive (v nil))
+        (tco--hammer p (- k 1))))
+    (let (p (spawn (tco--srv 0)))
+      (tco--hammer p 500)
+      (send p [:get (self)])
+      (assert= (receive (v v)) 500))))
 
 ;; ---- ref: unique reference tokens -------------------------------------------
 ;; `(ref)` is the kernel primitive behind synchronous call/reply: a fresh,
@@ -166,7 +187,7 @@
       (let [tag (ref)]
         (send pid [:call (self) tag req])
         (receive ([:reply ~tag v] v))))
-    (assert= (ref--call (spawn ref--server) 7) 70))
+    (assert= (ref--call (spawn (ref--server)) 7) 70))
   (test "a stale reply with a different ref is left queued, not mistaken for ours"
     (let [tag (ref) other (ref)]
       (send (self) [:reply other :wrong])      ; an unrelated reply, queued first
@@ -179,33 +200,77 @@
 ;; when `pid` dies. The one kernel mechanism a supervisor is built from.
 (describe "monitor: death notification" :isolated
   (test "monitor returns a ref distinct from a plain (ref)"
-    (let [w   (spawn (fn () (receive (:go nil))))
+    (let [w   (spawn (receive (:go nil)))
           mr  (monitor w)]
       (send w :go)                                   ; let it finish (drain the down)
       (is (ref? mr))
       (receive ([:down ~mr _ _] :ok) (after 500 :timeout))))
   (test "a normal return reports reason :normal, with the right ref and pid"
-    (let [w  (spawn (fn () (receive (:go nil))))
+    (let [w  (spawn (receive (:go nil)))
           mr (monitor w)]
       (send w :go)
       (assert= (receive ([:down ~mr pid reason] [(= pid w) reason]) (after 500 :timeout))
                [true :normal])))
   (test "a crash reports a non-normal reason"
-    (let [w  (spawn (fn () (receive (:go (throw :boom)))))
+    (let [w  (spawn (receive (:go (throw :boom))))
           mr (monitor w)]
       (send w :go)
       (assert= (receive ([:down ~mr _ [:error _]] :crashed) (after 500 :timeout))
                :crashed)))
   (test "monitoring an already-dead process fires :noproc immediately"
-    (let [w (spawn (fn () nil))]
+    (let [w (spawn nil)]
       (receive (after 80 nil))                       ; let it die
       (let [mr (monitor w)]
         (assert= (receive ([:down ~mr _ reason] reason) (after 500 :timeout))
                  :noproc))))
   (test "demonitor stops a not-yet-fired notification"
-    (let [w  (spawn (fn () (receive (:go nil))))
+    (let [w  (spawn (receive (:go nil)))
           mr (monitor w)]
       (demonitor mr)
       (send w :go)
       (assert= (receive ([:down ~mr _ _] :got-down) (after 150 :no-down))
                :no-down))))
+
+;; ---- sending closures: mobile code (the spawn-to-node foundation, ADR-033) --
+;; A closure can be sent like any other value: it travels as data (its body is
+;; S-expression forms, its captured locals are copied, its free globals re-resolve
+;; on the receiver). This is exercised here *locally* — across per-process heaps,
+;; which is the same round-trip a node link performs — proving the path without a
+;; transport.
+(describe "sending closures (mobile code)" :isolated
+
+  ;; A worker that receives a function and applies it, replying with the result.
+  (defn cl-apply (parent)
+    (receive (f (send parent (f 6 7)))))
+
+  (test "a closure survives a send and runs in the receiving process"
+    (let (me (self) w (spawn (cl-apply me)))
+      (send w (fn (a b) (* a b)))            ; ship a closure across heaps
+      (assert= (receive) 42)))               ; it runs in the child: 6 * 7
+
+  (test "a sent closure carries its captured local across the heap boundary"
+    (defn cl-call (parent) (receive (f (send parent (f)))))
+    (let (me (self) w (spawn (cl-call me)))
+      (let (n 99)
+        (send w (fn () (+ n 1))))            ; closes over the local n = 99
+      (assert= (receive) 100)))
+
+  (test "a closure round-trips to self and back, then runs"
+    (let (k 5)
+      (send (self) (fn (x) (+ x k))))        ; capture k, send to ourselves
+    (let (f (receive))                        ; rebuilt in our heap
+      (assert= (f 10) 15)))
+
+  (test "a nested closure (a closure capturing a closure) round-trips"
+    (let (me (self) w (spawn (cl-apply me)))
+      (let (g (fn (x) (* x x)))               ; inner closure, captured by the outer
+        (send w (fn (a b) (+ (g a) (g b)))))  ; sends both: g rides along in the capture
+      (assert= (receive) (+ 36 49))))         ; 6² + 7² = 85
+
+  (test "a worker building a closure sends it back to be run by the parent"
+    ;; fan-in direction: the child constructs the mobile code, the parent runs it.
+    (defn cl-maker (parent) (let (base 1000) (send parent (fn (x) (+ base x)))))
+    (let (me (self) w (spawn (cl-maker me)))
+      (let (f (receive))
+        (assert= (f 24) 1024)))))
+

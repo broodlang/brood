@@ -1,0 +1,28 @@
+;; A two-node demo — the SERVER half. Run the client (examples/node_client.blsp)
+;; in another terminal. See examples/node_client.blsp for the full command.
+;;
+;;   cargo run -p cli examples/node_server.blsp
+;;
+;; This names the runtime :server, listens on port 9001, registers an `:echo`
+;; process by name, and replies `[:pong (self)]` to anyone who pings it. It runs
+;; forever — stop it with Ctrl-C when you're done.
+
+(node-start :server "127.0.0.1:9001" "demo-cookie")
+(register :echo (self))
+(println "[server] node " (node-name) " listening on 127.0.0.1:9001, :echo registered")
+(println "[server] waiting for messages — start the client now, Ctrl-C to quit")
+
+(defn serve ()
+  (receive
+    ([:hi from]
+      (do (println "[server] :hi from " from " — replying")
+          (send from [:pong (self)])
+          (serve)))
+    ([:ping from]
+      (do (println "[server] :ping from " from " — replying")
+          (send from [:pong (self)])
+          (serve)))
+    (other
+      (do (println "[server] ignoring " other) (serve)))))
+
+(serve)

@@ -39,6 +39,7 @@ dependencies = [
  "boxcar",
  "corosensei",
  "divan",
+ "smallvec",
 ]
 
 [[package]]

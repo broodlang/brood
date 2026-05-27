@@ -43,9 +43,15 @@
     acc
     (fold f (f acc (first coll)) (rest coll))))
 
+;; `cons` with its arguments flipped — the workhorse passed to `fold` to build a
+;; list in reverse (then reversed once at the end). Hoisted to the top level so
+;; the list builders that reverse-accumulate don't each allocate a fresh closure
+;; on every call.
+(defn flip-cons (acc x) (cons x acc))
+
 (defn reverse (coll)
   "The items of `coll` in reverse order, as a list."
-  (fold (fn (acc x) (cons x acc)) nil coll))
+  (fold flip-cons nil coll))
 
 ;; reduce supports both (reduce f init coll) and (reduce f coll).
 (defn reduce (f x & more)
@@ -55,10 +61,13 @@
     (fold f x (first more))))
 
 ;; ---- arithmetic (variadic, built on the 2-arg primitives) ----
-(defn + (& xs) "Sum of all arguments (0 with none)." (reduce %add 0 xs))
-(defn * (& xs) "Product of all arguments (1 with none)." (reduce %mul 1 xs))
-(defn - (x & xs) "Subtract the rest from `x`; negate `x` if it's the only argument." (if (empty? xs) (%sub 0 x) (reduce %sub x xs)))
-(defn / (x & xs) "Divide `x` by the rest; reciprocal of `x` if it's the only argument. Errors on division by zero." (if (empty? xs) (%div 1 x) (reduce %div x xs)))
+;; These fold directly over the primitive, not via `reduce` — `reduce`'s 3-arg
+;; form *is* `fold`, so routing through it only adds a call frame and a second
+;; `& more` rest-list per call. `(fold %add 0 xs)` ≡ `(reduce %add 0 xs)`.
+(defn + (& xs) "Sum of all arguments (0 with none)." (fold %add 0 xs))
+(defn * (& xs) "Product of all arguments (1 with none)." (fold %mul 1 xs))
+(defn - (x & xs) "Subtract the rest from `x`; negate `x` if it's the only argument." (if (empty? xs) (%sub 0 x) (fold %sub x xs)))
+(defn / (x & xs) "Divide `x` by the rest; reciprocal of `x` if it's the only argument. Errors on division by zero." (if (empty? xs) (%div 1 x) (fold %div x xs)))
 
 (defn inc (n) "Return `n` + 1." (%add n 1))
 (defn dec (n) "Return `n` - 1." (%sub n 1))
@@ -74,11 +83,19 @@
         (chain? pred (rest xs))
         false))))
 
-(defn <  (& xs) "True if the arguments are in strictly increasing order." (chain? (fn (a b) (%lt a b)) xs))
-(defn >  (& xs) "True if the arguments are in strictly decreasing order." (chain? (fn (a b) (%lt b a)) xs))
-(defn <= (& xs) "True if the arguments are in non-decreasing order." (chain? (fn (a b) (not (%lt b a))) xs))
-(defn >= (& xs) "True if the arguments are in non-increasing order." (chain? (fn (a b) (not (%lt a b))) xs))
-(defn =  (& xs) "True if all arguments are structurally equal." (chain? (fn (a b) (%eq a b)) xs))
+;; Binary comparison kernels, hoisted to the top level so the variadic chains
+;; below pass an *existing* function to `chain?` rather than allocating a fresh
+;; closure on every call. `<` and `=` reuse the `%lt`/`%eq` primitives directly;
+;; the swapped/negated ones get a named Brood helper (still policy in Brood).
+(defn cmp--gt (a b) (%lt b a))
+(defn cmp--le (a b) (not (%lt b a)))
+(defn cmp--ge (a b) (not (%lt a b)))
+
+(defn <  (& xs) "True if the arguments are in strictly increasing order." (chain? %lt xs))
+(defn >  (& xs) "True if the arguments are in strictly decreasing order." (chain? cmp--gt xs))
+(defn <= (& xs) "True if the arguments are in non-decreasing order." (chain? cmp--le xs))
+(defn >= (& xs) "True if the arguments are in non-increasing order." (chain? cmp--ge xs))
+(defn =  (& xs) "True if all arguments are structurally equal." (chain? %eq xs))
 (defn not= (& xs) "True if the arguments are not all equal." (not (apply = xs)))
 
 ;; ---- control-flow macros ----
@@ -151,6 +168,7 @@
 (defn vector?  (x) "True if `x` is a vector." (%eq (type-of x) :vector))
 (defn map?     (x) "True if `x` is a map." (%eq (type-of x) :map))
 (defn ref?     (x) "True if `x` is a `(ref)` token (a unique reference)." (%eq (type-of x) :ref))
+(defn pid?     (x) "True if `x` is a process id (from `self`/`spawn`)." (%eq (type-of x) :pid))
 ;; `fn?` holds for both Brood closures (:fn) and Rust builtins (:native).
 (defn fn?      (x) "True if `x` is callable (a closure or a primitive)." (or (%eq (type-of x) :fn) (%eq (type-of x) :native)))
 
@@ -175,8 +193,18 @@
   (reverse (fold (fn (acc x) (if (pred x) (cons x acc) acc)) nil coll)))
 
 (defn append-two (a b)
-  (fold (fn (acc x) (cons x acc)) b (reverse a)))
-(defn append (& lists) "Concatenate the lists into one list." (fold append-two nil lists))
+  "Concatenate two lists (`a` before `b`)."
+  (fold flip-cons b (reverse a)))
+
+;; Prepend every element of `lst` onto `acc` (so `acc` collects all elements in
+;; reverse); `append` folds this over the lists, then reverses once.
+(defn append--onto (acc lst) (fold flip-cons acc lst))
+(defn append (& lists)
+  "Concatenate any number of lists into one, left to right."
+  ;; O(total length) and fully tail-recursive — so `mapcat` (via `apply append`)
+  ;; stays stack-safe on many/long lists. The previous left fold of `append-two`
+  ;; re-reversed the growing accumulator each step, making it O(lists²).
+  (reverse (fold append--onto nil lists)))
 
 (defn count (coll)
   "The number of items in `coll` (a list, vector, string, or map)."
@@ -239,8 +267,8 @@
 ;; keeps the *first* of equal maxima, matching a left fold.
 (defn max (x & xs) "The largest of the arguments (at least one required)." (fold (fn (a b) (if (> b a) b a)) x xs))
 (defn min (x & xs) "The smallest of the arguments (at least one required)." (fold (fn (a b) (if (< b a) b a)) x xs))
-(defn sum     (xs) "The sum of the numbers in `xs`." (reduce + 0 xs))
-(defn product (xs) "The product of the numbers in `xs`." (reduce * 1 xs))
+(defn sum     (xs) "The sum of the numbers in `xs`." (fold %add 0 xs))
+(defn product (xs) "The product of the numbers in `xs`." (fold %mul 1 xs))
 (defn even? (n) "True if integer `n` is even." (= (rem n 2) 0))
 (defn odd?  (n) "True if integer `n` is odd." (not (even? n)))
 
@@ -558,6 +586,17 @@
   "Match `expr` against each `(pattern [:when guard] body...)` clause, running the first that fits (binding the pattern's variables). Errors if none match."
   `(match* :match ~expr ~@clauses))
 
+;; ---- spawn: run an expression as a new green process ------------------------
+;; (spawn expr) runs `expr` in a fresh process and returns its pid. The expression
+;; is wrapped in a 0-arg thunk, so its free *locals* are captured lexically (the
+;; closure carries them) and its free *globals* resolve in the child — which is why
+;; the thunk is shippable to another node (a closure serialises as data; see
+;; docs/decisions.md). Note `(self)` inside `expr` is the *child's* pid: to hand the
+;; parent's pid in, capture it first — `(let (me (self)) (spawn (work me)))`.
+(defmacro spawn (expr)
+  "Run `expr` in a new green process; returns its pid. `expr` is unevaluated and runs in the child (so `(self)` there is the child's pid — capture the parent's pid in a `let` first if you need it)."
+  `(%spawn (fn () ~expr)))
+
 ;; ---- receive: selective, pattern-matched message receipt --------------------
 ;; (receive clause...) where each clause is (pattern [:when guard] body...), with an
 ;; optional trailing (after ms body...) timeout clause. Reuses the match compiler
@@ -589,7 +628,9 @@
   (let (lst (last clauses))
     (if (and (pair? lst) (= (first lst) 'after))
       [(but-last clauses) (second lst) `(fn () ~@(rest (rest lst)))]
-      [clauses nil nil])))
+      ;; no `after`: ms nil (wait forever) and a do-nothing timeout thunk, so the
+      ;; on-timeout slot is always a fn (the `((%receive …))` wrap applies it).
+      [clauses nil `(fn () nil)])))
 
 (defmacro receive (& clauses)
   "Selectively receive a message from the mailbox: run the first `(pattern [:when guard] body...)` clause that matches, leaving others queued. An optional final `(after ms body...)` clause fires on timeout; `(receive)` blocks for the next message."
@@ -601,7 +642,9 @@
         matcher (if (empty? real)
                   `(fn (~msg) (fn () ~msg))   ; no clauses: take the next message as-is
                   `(fn (~msg) ~(match-build-from (map receive--thunk-clause real) msg nil))))
-    `(%receive ~matcher ~ms ~on-time)))
+    ;; `%receive` returns the matched (or timeout) body *thunk*; applying it here —
+    ;; in tail position — is what keeps a receive loop O(1) stack (eval TCO).
+    `((%receive ~matcher ~ms ~on-time))))
 
 ;; ---- a general membership test ----------------------------------------------
 (defn member? (x xs)
@@ -833,11 +876,20 @@ otherwise the items are appended (`to` is a list)."
   "Does `s` contain `needle` as a substring?"
   (>= (index-of s needle) 0))
 
+;; Collect `coll`'s elements interleaved with `sep` into a parts list (tail-
+;; recursively, reversed), then build the string in one `apply str` pass.
+(defn join--parts (sep coll acc)
+  (if (empty? coll)
+    acc
+    (join--parts sep (rest coll) (cons (first coll) (cons sep acc)))))
 (defn join (sep coll)
   "Concatenate the strings in `coll` with `sep` between adjacent elements."
+  ;; One `apply str` over the assembled parts is O(total length); the previous
+  ;; fold did `(str acc sep x)` each step, rebuilding the whole accumulator —
+  ;; O(total length²).
   (if (empty? coll)
     ""
-    (fold (fn (acc x) (str acc sep x)) (str (first coll)) (rest coll))))
+    (apply str (cons (first coll) (reverse (join--parts sep (rest coll) nil))))))
 
 (defn string-split--acc (s sep acc)
   (let (i (index-of s sep))
@@ -943,6 +995,23 @@ leaves `s` unchanged."
       (def *features* (cons key *features*)))
     key))
 
+;; A module declares itself at the top with `defmodule`: its name, an optional
+;; docstring, and (implicitly) `provide`. The canonical module header — it replaces
+;; the old bare-leading-string docstring *and* a trailing `(provide 'name)`.
+(def *module-docs* {})         ; module name (string) -> its docstring (or nil)
+
+(defmacro defmodule (mod & more)
+  "Declare module `mod` (a symbol) — record its (optional) docstring and `provide`
+the feature. Put it first in the file. e.g. (defmodule hatch \"A gen_server …\")."
+  (let (key (name mod)                                   ; "hatch", at expand time
+        doc (if (string? (first more)) (first more) nil))
+    `(do (def *module-docs* (assoc *module-docs* ~key ~doc))
+         (provide ~key))))
+
+(defn module-doc (mod)
+  "The docstring declared by `(defmodule mod …)` (a symbol or string), or nil."
+  (get *module-docs* (name mod)))
+
 ;; First existing <filename> across the load-path dirs, or nil.
 (defn require--find (filename dirs)
   (cond
@@ -950,12 +1019,11 @@ leaves `s` unchanged."
     (file-exists? (path-join (first dirs) filename)) (path-join (first dirs) filename)
     else                                             (require--find filename (rest dirs))))
 
-;; (require 'foo) — load feature foo once: return immediately if already loaded,
-;; else evaluate its embedded source (a baked-in std module) or the first
-;; <foo>.blsp found on *load-path*, then record it. Returns the feature name;
-;; errors if it can't be found.
-(defn require (mod)
-  "Load feature `mod` once: a no-op if already loaded, else evaluate its baked-in source or the first `<mod>.blsp` found on `*load-path*`. Returns the feature name; errors if not found."
+;; Load one feature once: return immediately if already loaded, else evaluate its
+;; embedded source (a baked-in std module) or the first <foo>.blsp found on
+;; *load-path*, then record it. Errors if it can't be found.
+(defn require-one (mod)
+  "Load a single feature `mod` once (a no-op if already loaded); returns its name."
   (let (key (name mod))
     (if (member? key *features*)
       key
@@ -966,3 +1034,9 @@ leaves `s` unchanged."
             (if path
               (do (load path) (provide key))
               (error "require: cannot find module '" key "'"))))))))
+
+;; (require 'a 'b …) — load each feature once, left to right. Returns the names.
+(defn require (& mods)
+  "Load each feature once (a no-op for any already loaded); errors on one not
+found. Returns the list of feature names. e.g. (require 'hatch 'test)."
+  (map require-one mods))

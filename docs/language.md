@@ -57,6 +57,7 @@ be guessed from Clojure; it has to be read.
 | Map | `{:a 1 :b 2}`, `{}` | Immutable key→value associations; insertion-ordered. Evaluates its keys and values. Any value can be a key (compared structurally). |
 | Function | `#<fn name>`, `#<native +>` | Closures and builtins. |
 | Ref | `#<ref 0>` | A unique, opaque reference token from `(ref)` — no literal syntax; the only way to make one. Used to tag a request to its reply (see [Processes](#processes-concurrency)). |
+| Pid | `#<pid a/7>` | A process id from `self`/`spawn`; carries node identity (`node/id`). No literal syntax. The location-transparent handle for `send` — local or across a node link (see [Distributed nodes](#distributed-nodes)). |
 
 ### Truthiness
 
@@ -459,20 +460,28 @@ redefinitions — ADR-013), but messages cross as deep copies.
 
 ```clojure
 (defn worker (parent)
-  (let (n (receive))          ; suspend until a message arrives
-    (send parent (* n 2))))   ; reply to the sender
+  (let (n (receive))            ; suspend until a message arrives
+    (send parent (* n 2))))     ; reply to the sender
 
-(def w (spawn worker (self))) ; start a process; (self) is our own pid
-(send w 21)
-(receive)                     ;=> 42
+(let (me (self))                ; capture the parent's pid *first* —
+  (let (w (spawn (worker me)))  ; (self) *inside* spawn would be the child's pid
+    (send w 21)
+    (receive)))                 ;=> 42
 ```
+
+`spawn` takes **one expression** and runs it in the new process — `(spawn (* (+ 1 1)))`,
+`(spawn (worker me))`. The expression is *unevaluated*: it runs in the child, and its
+free local variables are captured lexically (so `me` above crosses to the child like
+any message). Because the body runs in the child, **`(self)` inside `spawn` is the
+child's own pid** — to hand the parent's pid in, bind it in an enclosing `let` first
+(the Erlang `Self = self(), spawn(fun() -> … end)` idiom).
 
 | Form | Meaning |
 |---|---|
-| `(spawn f arg...)` | Start a new green process running `f` with the (copied) args; returns its pid. |
-| `(send pid msg)` | Copy `msg` into `pid`'s mailbox (non-blocking; sending to a dead pid is a no-op). |
+| `(spawn expr)` | Run `expr` (unevaluated) in a new green process; returns its pid. Free locals are captured; `(self)` inside is the *child's* pid. |
+| `(send target msg)` | Copy `msg` into `target`'s mailbox (non-blocking; a dead/unknown target is a no-op). `target` is a pid (local **or remote** — see [Distributed nodes](#distributed-nodes)) or a `{:name :node}` address. |
 | `(receive clause...)` | Take the first matching message (see below); suspend until one arrives. `(receive)` with no clauses takes the next message. |
-| `(self)` | Your own pid. |
+| `(self)` | Your own pid — a `:pid` value carrying this node's identity. |
 | `(ref)` | A fresh unique reference token — see *Synchronous calls* below. |
 | `(monitor pid)` | Watch `pid`; returns a monitor `ref`. See *Monitors* below. |
 | `(demonitor mref)` | Drop the monitor created by `(monitor …)`. |
@@ -507,8 +516,12 @@ non-blocking poll. Because the timeout body is ordinary code, a timeout is
   (catch e e))                                 ;=> [:timeout] on timeout
 ```
 
-Messages are **copied** between processes (data only — you can't send a
-function; send a symbol naming one, since code is shared). `receive` is a macro
+Messages are **copied** between processes. You can send a **closure** too: it
+travels as data — its body is S-expression forms, its captured locals are copied,
+and its free globals re-resolve on the receiver (so it runs on any node that has
+the same definitions). This is what makes `(spawn expr)` shippable to another node.
+A *builtin* can't be sent (it's a Rust function with no portable form) — reference
+it by the symbol naming it instead, since code is shared. `receive` is a macro
 over the `%receive` primitive, built on the `match` compiler — no new special
 form. See [concurrency.md](concurrency.md) and [scheduler.md](scheduler.md) for
 the model, and [pattern-matching.md](pattern-matching.md) for the clause grammar.
@@ -564,6 +577,39 @@ specific process's death and ignore unrelated messages:
 Monitors are the one kernel mechanism a **supervisor** is built from: watch your
 children, and on a non-`:normal` DOWN, restart per a strategy — all expressible
 in Brood. (Bidirectional `link`s are not implemented yet.)
+
+### Distributed nodes
+
+Two runtimes (separate OS processes) can **connect over TCP and message each
+other** — *the network is just a longer copy*. A **pid carries node identity**, so
+the same value addresses a process whether it's local or on a peer; `send` routes
+transparently.
+
+```clojure
+;; node A: name the runtime, listen, expose a process by name
+(node-start :a "127.0.0.1:9001" "secret")
+(register :echo (self))
+
+;; node B: connect, reach A's :echo by name, then talk to the pid it replies with
+(node-start :b "127.0.0.1:9002" "secret")
+(connect "a@127.0.0.1:9001")
+(send {:name :echo :node :a} [:hi (self)])
+(def peer (receive ([:pong p] p)))   ; p is a remote pid
+(send peer [:ping (self)])           ; addressed directly — location-transparent
+```
+
+| Form | Meaning |
+|---|---|
+| `(node-start name "host:port" cookie)` | Name this runtime and listen for peers. Returns the node name. |
+| `(connect "name@host:port")` | Dial + authenticate a peer (shared cookie). Returns the peer's node name. |
+| `(register name pid)` | Bind a local name so peers can reach this process via `{:name name :node this-node}`. |
+| `(node-name)` | This runtime's node name (`:nonode` until `node-start`). |
+| `(nodes)` | A list of currently connected peer node names. |
+| `(pid? x)` | True if `x` is a process id. |
+
+The cookie is a shared secret (Erlang-style) — **not real security yet**. One node
+per OS process. Remote `spawn`/code-shipping, distributed monitors, and node-down
+detection are deferred. Full reference: [distribution.md](distribution.md).
 
 ## Builtins
 

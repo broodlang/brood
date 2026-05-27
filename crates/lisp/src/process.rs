@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use corosensei::{Coroutine, CoroutineResult, Yielder};
 
 use crate::core::heap::Heap;
-use crate::core::value::{self, EnvId, Symbol, Value};
+use crate::core::value::{self, Closure, ClosureId, EnvId, MapId, Symbol, Value};
 use crate::error::{LispError, LispResult};
 use crate::eval;
 
@@ -46,11 +46,48 @@ pub enum Message {
     Vector(Vec<Message>),
     Map(Vec<(Message, Message)>),
     Ref(u64),
+    /// A process id carrying node identity. In-process this keeps the interned
+    /// node `Symbol`; the node-link wire codec (`crate::dist`) re-encodes the
+    /// node by *name*, since separate runtimes have independent interners.
+    Pid { node: Symbol, id: u64 },
+    /// A serialised closure (Erlang's "send a fun"). Because a closure's body and
+    /// its optionals' defaults are S-expression *forms* (plain data), and its free
+    /// globals resolve on the receiver, a function can travel as data. Only its free
+    /// *local* variables are copied (see [`ClosureMsg::captured`]). This is what
+    /// makes `(spawn …)` shippable to another node — see `docs/decisions.md`.
+    Closure(Box<ClosureMsg>),
 }
 
-/// Deep-copy a value out of `heap` into a `Send` message. Functions can't be
-/// sent (they're per-heap closures).
+/// The wire form of a [`Closure`]: everything but the global env, which is
+/// re-resolved on the receiver rather than copied.
+#[derive(Clone)]
+pub struct ClosureMsg {
+    name: Option<Symbol>,
+    params: Vec<Symbol>,
+    /// `&optional` params with their default *forms* (data).
+    optionals: Vec<(Symbol, Message)>,
+    rest: Option<Symbol>,
+    /// The body forms (data — this is the code, homoiconically).
+    body: Vec<Message>,
+    doc: Option<String>,
+    /// The closure's *free variables* that resolve to a **local** binding, flattened
+    /// to one frame (name → value). Empty = a global-capturing closure (the common
+    /// case, e.g. a `(spawn (* (+ 1 1)))` thunk). We copy only what the body actually
+    /// references from its lexical scope — not the whole frame chain — so unrelated
+    /// (and possibly unsendable) siblings don't ride along, and a closure capturing a
+    /// sibling closure can't form a serialisation cycle through its defining frame.
+    captured: Vec<(Symbol, Message)>,
+}
+
+/// Deep-copy a value out of `heap` into a `Send` message. A closure is sent as
+/// data (see [`ClosureMsg`]); builtins and macros can't be.
 pub fn to_message(heap: &Heap, v: Value) -> Result<Message, LispError> {
+    to_message_rec(heap, v, &mut Vec::new())
+}
+
+/// `visited` carries the closures currently being serialised, so a self- or
+/// mutually-recursive *local* closure is rejected cleanly instead of looping.
+fn to_message_rec(heap: &Heap, v: Value, visited: &mut Vec<ClosureId>) -> Result<Message, LispError> {
     Ok(match v {
         Value::Nil => Message::Nil,
         Value::Bool(b) => Message::Bool(b),
@@ -63,7 +100,7 @@ pub fn to_message(heap: &Heap, v: Value) -> Result<Message, LispError> {
             let items = heap.list_to_vec(v)?;
             let mut out = Vec::with_capacity(items.len());
             for item in items {
-                out.push(to_message(heap, item)?);
+                out.push(to_message_rec(heap, item, visited)?);
             }
             Message::List(out)
         }
@@ -71,7 +108,7 @@ pub fn to_message(heap: &Heap, v: Value) -> Result<Message, LispError> {
             let items = heap.vector(id).to_vec();
             let mut out = Vec::with_capacity(items.len());
             for item in items {
-                out.push(to_message(heap, item)?);
+                out.push(to_message_rec(heap, item, visited)?);
             }
             Message::Vector(out)
         }
@@ -79,15 +116,148 @@ pub fn to_message(heap: &Heap, v: Value) -> Result<Message, LispError> {
             let entries = heap.map(id).to_vec();
             let mut out = Vec::with_capacity(entries.len());
             for (k, v) in entries {
-                out.push((to_message(heap, k)?, to_message(heap, v)?));
+                out.push((to_message_rec(heap, k, visited)?, to_message_rec(heap, v, visited)?));
             }
             Message::Map(out)
         }
         Value::Ref(n) => Message::Ref(n),
-        Value::Fn(_) | Value::Macro(_) | Value::Native(_) => {
-            return Err(LispError::type_err("cannot send a function in a message"))
+        Value::Pid { node, id } => Message::Pid { node, id },
+        Value::Fn(id) => Message::Closure(Box::new(closure_to_message(heap, id, visited)?)),
+        Value::Macro(_) => {
+            return Err(LispError::type_err("cannot send a macro in a message"))
+        }
+        Value::Native(_) => {
+            // A builtin is a Rust function pointer with no portable form — and on
+            // another node the receiver has its own copy anyway. Reference it by
+            // the symbol it's bound to instead of capturing its value.
+            return Err(LispError::type_err(
+                "cannot send a builtin in a message; reference it by name (code is shared)",
+            ))
         }
     })
+}
+
+/// Serialise a closure into its wire form. The body and optional-default *forms*
+/// are data (S-expressions), so they go straight through. For the environment we
+/// copy only the **free variables that resolve to a local binding** — every symbol
+/// the body/defaults mention, looked up in the captured frame chain *below* the
+/// global scope. Free globals are skipped (they re-resolve on the receiver), which
+/// is also why a builtin reached only via a global symbol never gets dragged in.
+fn closure_to_message(
+    heap: &Heap,
+    id: ClosureId,
+    visited: &mut Vec<ClosureId>,
+) -> Result<ClosureMsg, LispError> {
+    if visited.contains(&id) {
+        // The free-variable walk re-entered this same closure: a local closure that
+        // refers to itself (or a cycle of them). Top-level recursion is fine — those
+        // capture the global env (no local capture) and resolve by name.
+        return Err(LispError::type_err(
+            "cannot send a self-referential local closure (define it at top level instead)",
+        ));
+    }
+    visited.push(id);
+    // Borrow the closure — `to_message_rec` only needs `&Heap`, so there's no need
+    // to clone the whole `Closure` (notably its body `Vec`) on every send.
+    let cl = heap.closure(id);
+
+    // Copy only the free variables that resolve to a *local* binding. Skipped
+    // entirely for a global-capturing closure (no local env) — the common case
+    // (e.g. a `(spawn …)` thunk), so collecting symbols costs nothing there.
+    let mut captured = Vec::new();
+    if let Some(env) = cl.env {
+        let mut mentioned = std::collections::HashSet::new();
+        for &form in &cl.body {
+            collect_symbols(heap, form, &mut mentioned);
+        }
+        for &(_, d) in &cl.optionals {
+            collect_symbols(heap, d, &mut mentioned);
+        }
+        for sym in mentioned {
+            if let Some(val) = local_lookup(heap, env, sym) {
+                captured.push((sym, to_message_rec(heap, val, visited)?));
+            }
+        }
+    }
+
+    let optionals = cl
+        .optionals
+        .iter()
+        .map(|&(s, d)| Ok((s, to_message_rec(heap, d, visited)?)))
+        .collect::<Result<Vec<_>, LispError>>()?;
+    let body = cl
+        .body
+        .iter()
+        .map(|&f| to_message_rec(heap, f, visited))
+        .collect::<Result<Vec<_>, LispError>>()?;
+
+    visited.pop();
+    Ok(ClosureMsg {
+        name: cl.name,
+        params: cl.params.clone(),
+        optionals,
+        rest: cl.rest,
+        body,
+        doc: cl.doc.clone(),
+        captured,
+    })
+}
+
+/// Collect every symbol that appears anywhere in `form` (operator or operand
+/// position, at any depth) into `out`. Deliberately over-approximate: it doesn't
+/// track nested binders, because the [`local_lookup`] filter in `closure_to_message`
+/// keeps only names that actually resolve to a captured local — a param or a
+/// not-yet-bound inner name simply isn't there, so it's harmless to list it.
+fn collect_symbols(heap: &Heap, form: Value, out: &mut std::collections::HashSet<Symbol>) {
+    match form {
+        Value::Sym(s) => {
+            out.insert(s);
+        }
+        Value::Pair(_) => {
+            // Walk the spine *iteratively* so a long list can't overflow the stack
+            // (recursion depth stays bounded by nesting, not length), with no
+            // `list_to_vec` allocation per node. The trailing `collect_symbols` on the
+            // final non-pair tail also covers an improper `(a . b)` (and `Nil` no-ops).
+            let mut cur = form;
+            while let Value::Pair(id) = cur {
+                let (car, cdr) = heap.pair(id);
+                collect_symbols(heap, car, out);
+                cur = cdr;
+            }
+            collect_symbols(heap, cur, out);
+        }
+        Value::Vector(id) => {
+            for item in heap.vector(id).to_vec() {
+                collect_symbols(heap, item, out);
+            }
+        }
+        Value::Map(id) => {
+            for (k, v) in heap.map(id).to_vec() {
+                collect_symbols(heap, k, out);
+                collect_symbols(heap, v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Look `sym` up in the local frame chain rooted at `env`, stopping *before* the
+/// global scope — so only a genuinely captured lexical binding is returned, never
+/// a global. `None` means it's a global (resolved on the receiver) or unbound.
+fn local_lookup(heap: &Heap, env: EnvId, sym: Symbol) -> Option<Value> {
+    let mut cur = Some(env);
+    while let Some(e) = cur {
+        if e == EnvId::GLOBAL {
+            break;
+        }
+        let (parent, vars) = heap.env_frame_ref(e);
+        // Scan from the end so a later binding shadows an earlier one (as `env_get`).
+        if let Some(&(_, v)) = vars.iter().rev().find(|&&(s, _)| s == sym) {
+            return Some(v);
+        }
+        cur = parent;
+    }
+    None
 }
 
 /// Rebuild a message into `heap`.
@@ -124,7 +294,49 @@ pub fn from_message(heap: &mut Heap, m: &Message) -> Value {
             heap.map_from_pairs(pairs)
         }
         Message::Ref(n) => Value::Ref(*n),
+        Message::Pid { node, id } => Value::Pid {
+            node: *node,
+            id: *id,
+        },
+        Message::Closure(c) => closure_from_message(heap, c),
     }
+}
+
+/// Rebuild a serialised closure into `heap`. Body/optional-default forms are
+/// reconstructed as local data; captured frames are recreated (outermost first)
+/// and chained onto this process's global scope, so the closure's free globals
+/// resolve here. The result is a fresh, independent copy — a later redefinition
+/// of *this* function won't reach it, but globals it *references* still do.
+fn closure_from_message(heap: &mut Heap, c: &ClosureMsg) -> Value {
+    let optionals = c
+        .optionals
+        .iter()
+        .map(|(s, d)| (*s, from_message(heap, d)))
+        .collect();
+    let body = c.body.iter().map(|f| from_message(heap, f)).collect();
+    // Rebuild the captured free vars as one frame chained onto this process's
+    // global scope, so the closure's free globals resolve here. No captures =>
+    // a global-capturing closure (`env: None`).
+    let env = if c.captured.is_empty() {
+        None
+    } else {
+        let e = heap.new_env(Some(EnvId::GLOBAL));
+        for (s, m) in &c.captured {
+            let v = from_message(heap, m);
+            heap.env_define(e, *s, v);
+        }
+        Some(e)
+    };
+    let id = heap.alloc_closure(Closure {
+        name: c.name,
+        params: c.params.clone(),
+        optionals,
+        rest: c.rest,
+        body,
+        doc: c.doc.clone(),
+        env,
+    });
+    Value::Fn(id)
 }
 
 // ----- mailboxes & processes -------------------------------------------------
@@ -343,14 +555,19 @@ fn down_message(mref: u64, pid: u64, reason: Message) -> Message {
     Message::Vector(vec![
         Message::Keyword(value::intern("down")),
         Message::Ref(mref),
-        Message::Int(pid as i64),
+        // The dying process is local to this runtime, so its pid carries this node.
+        Message::Pid {
+            node: crate::dist::local_node(),
+            id: pid,
+        },
         reason,
     ])
 }
 
-/// Push a (already-`Send`) message into `pid`'s mailbox and wake it; a no-op if
-/// `pid` is gone. The shared tail of `send` and monitor `[:down …]` delivery.
-fn deliver(pid: u64, msg: Message) {
+/// Push a (already-`Send`) message into local process `pid`'s mailbox and wake it;
+/// a no-op if `pid` is gone. The shared tail of `send`, monitor `[:down …]`
+/// delivery, and inbound node-link messages (`crate::dist`).
+pub(crate) fn deliver(pid: u64, msg: Message) {
     let mailbox = REGISTRY.lock().unwrap().get(&pid).cloned();
     if let Some(mb) = mailbox {
         let mut st = mb.state.lock().unwrap();
@@ -481,22 +698,17 @@ fn run_one(mut proc: Box<Process>) {
 
 // ----- spawn / send / receive / self ----------------------------------------
 
-/// `(spawn f arg...)` — run `f` (a function) as a new green process with copied
-/// args. Returns the new pid.
-pub fn spawn(heap: &Heap, f: Value, args: &[Value]) -> Result<u64, LispError> {
-    // Promote the target into the shared RUNTIME region so its handle is valid in
-    // the child (which shares this runtime's code via the Arcs below). A top-level
-    // function is already shared, so this is usually a no-op.
+/// `(%spawn thunk)` — run `thunk` (a 0-arg function) as a new green process.
+/// Returns the new pid. The user-facing `spawn` macro wraps an arbitrary
+/// expression into such a thunk (`(spawn e)` → `(%spawn (fn () e))`), so the
+/// expression's free locals are captured lexically rather than passed as args.
+pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
+    // Promote the thunk into the shared RUNTIME region so its handle (and any
+    // captured local scope) is valid in the child, which shares this runtime's
+    // code via the Arcs below. A top-level function is already shared (no-op).
     let f = heap.promote(f);
     if !matches!(f, Value::Fn(_)) {
-        return Err(LispError::type_err(
-            "spawn: first argument must be a function",
-        ));
-    }
-    // Args are *data*: ship them as messages, rebuilt into the child's own heap.
-    let mut arg_msgs = Vec::with_capacity(args.len());
-    for &a in args {
-        arg_msgs.push(to_message(heap, a)?);
+        return Err(LispError::type_err("spawn: argument must be a function"));
     }
     let prelude = heap.prelude_arc();
     let runtime = heap.runtime_arc();
@@ -518,11 +730,7 @@ pub fn spawn(heap: &Heap, f: Value, args: &[Value]) -> Result<u64, LispError> {
         });
         let mut heap = Heap::with_regions(prelude, runtime);
         heap.set_global(EnvId::GLOBAL);
-        let mut argv = Vec::with_capacity(arg_msgs.len());
-        for m in &arg_msgs {
-            argv.push(from_message(&mut heap, m));
-        }
-        let reason = match eval::apply(&mut heap, f, &argv, EnvId::GLOBAL) {
+        let reason = match eval::apply(&mut heap, f, &[], EnvId::GLOBAL) {
             Ok(_) => Message::Keyword(value::intern("normal")),
             Err(e) => {
                 eprintln!("process {} died: {}", pid, e);
@@ -543,30 +751,60 @@ pub fn spawn(heap: &Heap, f: Value, args: &[Value]) -> Result<u64, LispError> {
     Ok(pid)
 }
 
-/// `(send pid msg)` — copy `msg` into `pid`'s mailbox and wake it. Sending to a
-/// dead pid is a silent no-op (Erlang semantics).
-pub fn send(heap: &Heap, pid_val: Value, msg_val: Value) -> Result<(), LispError> {
-    let pid = match pid_val {
-        Value::Int(n) if n >= 0 => n as u64,
+/// `(send target msg)` — copy `msg` into `target`'s mailbox and wake it. `target`
+/// is a **pid** (local or remote — it carries node identity) or a `{:name :node}`
+/// **registered-name address** for bootstrapping a peer before you hold its pid.
+/// Routing is location-transparent: a local target delivers in-process; a remote
+/// one is forwarded over the node link (`crate::dist`). Sending to a dead/unknown
+/// target is a silent no-op (Erlang semantics).
+pub fn send(heap: &Heap, target_val: Value, msg_val: Value) -> Result<(), LispError> {
+    let msg = to_message(heap, msg_val)?;
+    match target_val {
+        Value::Pid { node, id } => crate::dist::route(node, crate::dist::Target::Pid(id), msg),
+        Value::Map(mid) => {
+            let (name, node) = read_name_address(heap, mid)?;
+            crate::dist::route(node, crate::dist::Target::Name(name), msg);
+        }
         _ => {
             return Err(LispError::type_err(
-                "send: first argument must be a pid (integer)",
+                "send: target must be a pid or a {:name :node} address",
             ))
         }
-    };
-    let msg = to_message(heap, msg_val)?;
-    deliver(pid, msg);
+    }
     Ok(())
+}
+
+/// Read a `{:name <kw> :node <kw>}` registered-name address out of a map, returning
+/// the `(name, node)` symbols. Accepts keyword or symbol values for each field.
+fn read_name_address(heap: &Heap, mid: MapId) -> Result<(Symbol, Symbol), LispError> {
+    let field = |key: &str| -> Result<Symbol, LispError> {
+        let v = heap
+            .map_get(mid, Value::Keyword(value::intern(key)))
+            .ok_or_else(|| {
+                LispError::type_err("send: name address needs :name and :node keys")
+            })?;
+        match v {
+            Value::Keyword(s) | Value::Sym(s) => Ok(s),
+            _ => Err(LispError::type_err(
+                "send: :name and :node must be keywords or symbols",
+            )),
+        }
+    };
+    Ok((field("name")?, field("node")?))
 }
 
 /// `(%receive matcher timeout on-timeout)` — selective receive. `matcher` is a unary
 /// function: given a message value it returns a 0-arg thunk (the clause body, closing
 /// over its bindings) on a match, or `nil` on no match. Scan the mailbox in order;
-/// the first message a clause matches is removed and its thunk run. Non-matching
-/// messages stay queued (Erlang selective receive). `timeout` is `nil` (wait forever)
-/// or an integer of milliseconds; on expiry the `on-timeout` thunk runs (a `throw`
-/// inside it propagates through `try`/`catch`, since both apply via this `?`). A
-/// green process suspends while waiting; the root thread blocks.
+/// the first message a clause matches is removed and its body thunk **returned** —
+/// not run here. The `receive` macro applies it in tail position (`((%receive …))`),
+/// so a loop that tail-calls back into `receive` trampolines through eval's TCO and
+/// stays O(1) native stack (running it here would nest a `receive_match` per message
+/// and overflow the green-process coroutine stack). Non-matching messages stay queued
+/// (Erlang selective receive). `timeout` is `nil` (wait forever) or an integer of
+/// milliseconds; on expiry the `on-timeout` thunk is returned the same way (a `throw`
+/// inside it still propagates through `try`/`catch`). A green process suspends while
+/// waiting; the root thread blocks.
 pub fn receive_match(
     heap: &mut Heap,
     matcher: Value,
@@ -600,9 +838,14 @@ pub fn receive_match(
             Some(v) => {
                 let thunk = eval::apply(heap, matcher, &[v], EnvId::GLOBAL)?;
                 if matches!(thunk, Value::Fn(_)) {
-                    // Matched — remove exactly this message, then run its body.
+                    // Matched — remove exactly this message, then hand the body thunk
+                    // *back* (don't run it here). The `receive` macro applies it in
+                    // TAIL position — `((%receive …))` — so a loop that tail-calls
+                    // back into `receive` trampolines through eval's TCO and stays
+                    // O(1) native stack (running it here instead nests a `receive_match`
+                    // per message → green-process coroutine-stack overflow).
                     ctx.mailbox.state.lock().unwrap().queue.remove(i);
-                    return eval::apply(heap, thunk, &[], EnvId::GLOBAL);
+                    return Ok(thunk);
                 }
                 i += 1; // no clause matched — leave it queued, try the next message
             }
@@ -610,11 +853,9 @@ pub fn receive_match(
                 // Scanned every queued message with no match.
                 if let Some(d) = deadline {
                     if Instant::now() >= d {
-                        return if matches!(on_timeout, Value::Fn(_)) {
-                            eval::apply(heap, on_timeout, &[], EnvId::GLOBAL)
-                        } else {
-                            Ok(Value::Nil)
-                        };
+                        // Same trampoline: return the timeout thunk to be applied in
+                        // tail position (the `receive` macro always supplies a fn).
+                        return Ok(on_timeout);
                     }
                 }
                 wait_for_message(&ctx, i, deadline);
@@ -745,6 +986,16 @@ fn wake_for_timeout(pid: u64) {
 /// `(self)` — this process's pid.
 pub fn self_pid() -> u64 {
     ensure_ctx().pid
+}
+
+/// Wrap a local process id in a [`Value::Pid`] tagged with this runtime's node
+/// identity — what `self`/`spawn` hand back. The node part makes the pid routable
+/// off-node once the holder is on another runtime.
+pub fn pid_value(id: u64) -> Value {
+    Value::Pid {
+        node: crate::dist::local_node(),
+        id,
+    }
 }
 
 /// The current process's context. A coroutine sets this itself; the first time a

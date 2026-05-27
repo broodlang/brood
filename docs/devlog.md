@@ -1804,3 +1804,112 @@ seeing the same site (shared region). Cross-file goto-definition (resolve a
 All green (`cargo test --workspace`), clippy clean for the touched crates. The
 prelude was under concurrent edit (dynamic variables landing in parallel);
 docstring edits were additive and behaviour is unchanged (verified by the suite).
+
+---
+
+## 2026-05-28 — `(spawn expr)` and sendable closures (ADR-033)
+
+**Goal (from the user).** *"We must be able to do `(spawn (* (+ 1 1)))` and send
+this to another node."* Two coupled language changes (full rationale in
+[decisions.md](decisions.md) ADR-033).
+
+**`spawn` now takes one expression.** Renamed the Rust builtin `spawn` →
+`%spawn` (arity 1, runs a 0-arg thunk) and added a prelude macro
+`(defmacro spawn (expr) `(%spawn (fn () ~expr)))` — the `try`/`%try` pattern, no
+new special form. The old `(spawn f arg...)` form is gone; locals are now captured
+lexically by the thunk rather than passed as positional args. **`(self)` moved
+with it:** the body runs in the child, so `(self)` *inside* `spawn` is the child's
+pid — capture the parent's first, `(let (me (self)) (spawn (worker me)))`.
+
+**Closures serialise into a `Message`.** Reversed the old "you can't send a
+function." `to_message`/`from_message` round-trip a `Value::Fn`: the body and
+optional-default *forms* go as data (they already are S-expressions), the **free
+locals the body actually references** are copied (collect the symbols it mentions,
+keep those that resolve to a *local* binding via `Heap::env_frame_snapshot`), and
+**free globals are not copied** — they re-resolve on the receiver. So a closure
+runs on any node with the same definitions. Copying free vars rather than the whole
+frame matters: it keeps unrelated (possibly unsendable) siblings out, and — found
+the hard way, via a stack overflow on a closure capturing a sibling closure — it
+breaks the cycle a closure→defining-frame→closure walk would otherwise loop on. A
+self-referential *local* closure is rejected cleanly (define it at top level
+instead); builtins (`Value::Native`) and macros still can't be sent. Local `spawn`
+is unchanged in cost — it still `promote`s into the shared RUNTIME region;
+serialisation is the *node* path, exercised locally by `send`ing a closure between
+processes (the new `:isolated` "sending closures (mobile code)" block).
+
+**Concurrent with the node-link work.** This landed alongside the user's
+node-distribution layer (node-tagged `Value::Pid { node, id }` + `crate::dist`).
+The two interlock at `Message`: a pid travels as `Message::Pid`, a computation as
+`Message::Closure`. Node identity, the wire codec, and cross-link `send` dispatch
+are `crate::dist` (decided separately). Build was intermittently red on the
+in-flight `dist` module during this work.
+
+---
+
+## 2026-05-28 — Distributed nodes, slice 1: connect two runtimes (ADR-034)
+
+**Goal.** "We need a feature to connect two nodes (two runtimes)." The smallest
+useful slice (ADR-011): two `brood` processes connect over TCP and message each
+other. The design intent was already in `concurrency.md §Distribution` and ADR-033
+deferred exactly this ("node identity + wire transport … decided separately").
+
+**Pids became a value.** `Value::Pid { node, id }` (+ `Tag::Pid`, `pid?`,
+`#<pid node/id>`, the `types` lattice entry) replaced bare-`Int` pids everywhere —
+`self`/`spawn` return one. Mechanical, following the `Value::Ref` template: pids
+are used opaquely in Brood (send targets, message payloads, `[:down …]`), so no
+Brood code needed changing beyond the representation. A *local* pid carries this
+node's name (`:nonode` before `node-start`), a *remote* one the peer's — so the
+**same value addresses a process anywhere** and `send` dispatches on the node part.
+
+**The node layer (`crate::dist`).** `node-start`/`connect` over `std::net` (no new
+dep): a cookie-authenticated `Hello` handshake, then per-connection reader +
+writer OS threads *off* the green-process scheduler — an inbound message lands via
+the same `process::deliver` an in-process `send` uses. Routing: local node →
+deliver in-process; remote → encode a `Send` frame to the peer's writer. Bootstrap
+a peer by `(register name pid)` + a `{:name :node}` address; once it replies with
+`(self)`, talk to that **remote pid** directly. Wire codec is hand-rolled and
+length-prefixed, reusing the `Message` deep-copy — with the key cross-process
+detail that **symbols (a pid's node, keywords) travel by name and re-intern** on
+arrival (separate interners). The codec rejects a `Closure` for now (remote spawn
+is the next slice — the ADR-033 machinery is the missing half).
+
+**Tested.** Codec round-trip + cookie accept/reject as Rust unit tests in
+`dist.rs`; a new `tests/pids_test.blsp` covers the local pid invariants
+(`:isolated`, so across the per-process heap boundary); and a genuine **two-process
+end-to-end test** (`crates/cli/tests/distribution.rs`) launches two `brood`
+subprocesses over loopback, reaches `:echo` by name, then round-trips via the
+remote pid — plus a bad-cookie rejection. (Built/verified green before the tree's
+concurrent closure-sending edits; the suite shares `Message` with that work.)
+
+**Scope / deferred.** One node per OS process (node state + interner are
+process-global). Deferred: remote `spawn`/code shipping, distributed
+monitors/links, node-down detection, reconnect/net-split, real auth/TLS (the
+cookie is a placeholder). Full reference: [distribution.md](distribution.md).
+
+---
+
+## 2026-05-28 — receive loops are now TCO'd (coroutine-stack overflow fix)
+
+**Bug.** A long-lived server segfaulted after handling enough messages. `%receive`
+(`process.rs`) *ran* the matched body thunk via `eval::apply` and returned its
+value; a server loop whose handler tail-calls back into `receive` therefore nested
+a fresh `receive_match` per message handled (the tail call wasn't TCO'd across the
+native boundary), growing the green-process ~128 KB coroutine stack until it
+overflowed (SIGSEGV). Surfaced by `examples/life.blsp` (animator drives the
+life-server 45× cast+call → crash ~gen 26) and reduced to a raw repro: interleaved
+`send :inc` + `send [:get me]`/receive to one process crashes ~60 cycles (pure-cast
+×200 and pure-call ×200 were fine — the interleave makes the server handle a queued
+message *without suspending*, so frames accumulate).
+
+**Fix — a trampoline.** `%receive` now **returns** the matched (or timeout) body
+thunk instead of running it, and the `receive` macro applies it in tail position:
+`((%receive matcher ms on-time))`. Eval's existing `'tail` loop then applies the
+thunk in tail position, so the handler's tail-call back into `receive` loops in
+**O(1) native stack**. `receive--split` always supplies a do-nothing timeout thunk
+so the wrapping application always has a fn. Behaviour is unchanged (the receive
+form still evaluates to the body's value; `after`-timeout throws still propagate
+through `try`/`catch`).
+
+**Tests.** `tests/concurrency_test.blsp` — a server handling 500 interleaved
+cast+call cycles without overflowing. Full suite green; `examples/life.blsp` runs
+all 45 generations.

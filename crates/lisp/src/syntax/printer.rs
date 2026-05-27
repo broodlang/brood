@@ -97,6 +97,13 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool) {
             out.push_str(&n.to_string());
             out.push('>');
         }
+        Value::Pid { node, id } => {
+            out.push_str("#<pid ");
+            out.push_str(&symbol_name(node));
+            out.push('/');
+            out.push_str(&id.to_string());
+            out.push('>');
+        }
     }
 }
 

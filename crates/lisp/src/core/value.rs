@@ -203,6 +203,12 @@ pub enum Value {
     /// never be confused with a pid or a user integer (Erlang's `make_ref`). Sent
     /// by value across processes; compared by identity.
     Ref(u64),
+    /// A process identifier, carrying **node identity** (`node`, an interned node
+    /// name) alongside the process-local id. A *local* pid carries this node's
+    /// name; a *remote* pid (received from a peer) carries the peer's. The same
+    /// value addresses a process whether it's here or across a node link —
+    /// `send` dispatches on `node` (see `crate::dist`). Compared by value.
+    Pid { node: Symbol, id: u64 },
 }
 
 /// The runtime type tags — the discriminant of [`Value`] made first-class, so it
@@ -233,6 +239,7 @@ pub enum Tag {
     Native,
     Map,
     Ref,
+    Pid,
 }
 
 impl Tag {
@@ -254,6 +261,7 @@ impl Tag {
             Tag::Native => "native",
             Tag::Map => "map",
             Tag::Ref => "ref",
+            Tag::Pid => "pid",
         }
     }
 }
@@ -276,6 +284,7 @@ pub fn tag(v: Value) -> Tag {
         Value::Native(_) => Tag::Native,
         Value::Map(_) => Tag::Map,
         Value::Ref(_) => Tag::Ref,
+        Value::Pid { .. } => Tag::Pid,
     }
 }
 

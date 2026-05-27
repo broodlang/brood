@@ -32,7 +32,8 @@
     (is (member? "demo-feature" *features*))
     (provide 'demo-feature)
     (assert= (count (filter (fn (x) (= x "demo-feature")) *features*)) 1))
-  (test "require returns the feature name and is idempotent"
-    (assert= (require 'test) "test"))
+  (test "require returns the list of feature names and is idempotent"
+    (assert= (require 'test) (list "test"))          ; variadic now: a list of names
+    (assert= (require 'test 'docs) (list "test" "docs")))
   (test "require of a missing module raises"
     (assert-error (require 'no-such-module-xyz))))

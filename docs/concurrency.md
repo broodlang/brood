@@ -147,31 +147,34 @@ This is the largest *core* undertaking in the project. Two consequences:
    mechanism that needs a primitive; the rest is Brood (the `hatch` library).
 7. ⬜ Later: links, supervision trees, registered names; work-stealing.
 
-## Distribution across nodes (future — kept in mind)
+## Distribution across nodes (slice 1 implemented)
 
-Not now, but the model is deliberately distribution-ready, so we don't paint
-ourselves into a corner. Erlang-style distribution falls out of share-nothing +
-copy-on-send: **the network is just a longer copy.** What it would take:
+Erlang-style distribution falls out of share-nothing + copy-on-send: **the
+network is just a longer copy.** Slice 1 is **done** — two runtimes connect over
+TCP and message each other (ADR-034; full reference in
+[`distribution.md`](distribution.md)). What landed:
 
-- **Nodes** — named runtimes (`name@host`) that **link** over TCP (handshake +
-  a shared secret/cookie for auth).
-- **Pids carry node identity** — `{node, local-id}` instead of today's local
-  `u64`. `send`/`spawn` stay **location-transparent**: local pid → the local
-  registry (what we have); remote pid → serialize and forward over the node
-  connection; the remote deserializes into a local mailbox.
-- **A wire codec for `Message`** — reuses the deep-copy we already do for crossing
-  heaps. *Important detail:* over the wire, **symbols travel by name**, not by
-  local interned id (each node has its own interner), and are re-interned on
-  arrival. (In-thread messages can keep using the id.)
-- **Code distribution** — remote `spawn` needs the function on the far node:
-  shared code (below) + shipping the closure's code over the wire (code is data).
-- **Later** — distributed links/monitors and node-down detection.
+- ✅ **Nodes** — named runtimes (`node-start`/`connect`, `name@host`) that link
+  over TCP, authenticated by a shared cookie (Erlang-style; a placeholder for
+  real auth/TLS).
+- ✅ **Pids carry node identity** — `Value::Pid { node, id }` instead of a bare
+  `u64`. `send` is **location-transparent**: local pid → the local registry;
+  remote pid → serialize and forward over the link; the peer deserializes into a
+  local mailbox. A `{:name :node}` address bootstraps a peer before you hold its
+  pid.
+- ✅ **A wire codec for `Message`** — reuses the heap-crossing deep-copy.
+  **Symbols travel by name** (not by local interned id — each node has its own
+  interner) and re-intern on arrival.
+- ⬜ **Code distribution** — remote `spawn` needs the function on the far node.
+  The closure-as-data path (ADR-033) is the missing piece; the wire codec rejects
+  a `Closure` for now.
+- ⬜ **Later** — distributed links/monitors and node-down detection.
 
-Caveats Erlang learned the hard way, so start simple/trusted: security (auth from
-day one — distribution is insecure by default in Erlang), partial failure /
-net-splits, serialization versioning, latency. This also fits the project's
-"backend hosted remotely by a frontend" premise — a remote frontend or second
-backend is just another node that links and message-passes.
+Caveats Erlang learned the hard way, still to address: security (the cookie is a
+placeholder — auth/TLS later), partial failure / net-splits, serialization
+versioning, latency. This fits the project's "backend hosted remotely by a
+frontend" premise — a remote frontend or second backend is just another node that
+links and message-passes.
 
 ### Current limitations (to lift later)
 

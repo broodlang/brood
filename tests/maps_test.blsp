@@ -198,7 +198,7 @@
 (defn mt-emit (parent k) (send parent {:key k :sq (* k k)}))
 (defn mt-spawn-emitters (parent ks)
   (when (not (empty? ks))
-    (spawn mt-emit parent (first ks))
+    (spawn (mt-emit parent (first ks)))
     (mt-spawn-emitters parent (rest ks))))
 (defn mt-merge (got total acc)
   (if (= got total)
@@ -209,7 +209,7 @@
 (defn mt-reader (parent i)
   (send parent [:r (+ (get mt-config :base) (* i (get mt-config :mult)))]))
 (defn mt-spawn-readers (parent n)
-  (when (> n 0) (spawn mt-reader parent n) (mt-spawn-readers parent (- n 1))))
+  (when (> n 0) (spawn (mt-reader parent n)) (mt-spawn-readers parent (- n 1))))
 (defn mt-sum (got total acc)
   (if (= got total) acc (mt-sum (+ got 1) total (receive ([:r v] (+ acc v))))))
 
@@ -219,12 +219,12 @@
 (describe "maps across processes" :isolated
 
   (test "a map round-trips through a worker unchanged (deep copy across heaps)"
-    (let (w (spawn mt-echo (self)))
+    (let (me (self) w (spawn (mt-echo me)))
       (send w {:a {:b [1 2 {:c 3}]} :d "deep"})
       (assert= (receive) {:a {:b [1 2 {:c 3}]} :d "deep"})))
 
   (test "a worker's immutable update does not affect the sender's map"
-    (let (w (spawn mt-touch (self)))
+    (let (me (self) w (spawn (mt-touch me)))
       (let (original {:n 41})
         (send w original)
         (assert= (receive) {:n 42 :touched true})  ; the worker's fresh copy
@@ -244,8 +244,8 @@
     (assert= (mt-sum 0 50 0) 8825))
 
   (test "a map flows through a multi-stage process pipeline"
-    (let (w2 (spawn mt-stage2 (self)))
-      (let (w1 (spawn mt-stage1 w2))
+    (let (me (self) w2 (spawn (mt-stage2 me)))
+      (let (w1 (spawn (mt-stage1 w2)))
         (send w1 {:start true})
         (assert= (receive) {:start true :s1 true :s2 true}))))
 

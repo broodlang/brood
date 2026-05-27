@@ -1246,6 +1246,113 @@ documented convention: don't — see `docs/language.md`).
 - *A Rust thread-local stack.* Breaks the moment a coroutine migrates workers or
   suspends at `receive`; the binding must travel with the process, i.e. its heap.
 
+## ADR-033 — `spawn` takes an expression; closures are sendable as data
+
+**Decision.** Two coupled changes that together let a *computation* be spawned and
+shipped to another node:
+
+1. **`spawn` takes one unevaluated expression**, not a function + args. `(spawn e)`
+   is a prelude macro expanding to `(%spawn (fn () e))` — the `try`/`%try` pattern
+   (ADR-011: a macro over a primitive, no new special form). The Rust kernel keeps
+   only `%spawn`, which runs a 0-arg thunk. `(spawn (* (+ 1 1)))` and
+   `(spawn (worker me))` both read naturally, and the thunk **captures free locals
+   lexically** instead of taking them as positional args.
+
+2. **A closure serialises into a `Message`** (reversing the old "you can't send a
+   function"). A closure's body and its optionals' defaults are *S-expression forms*
+   — plain data — so they travel as ordinary messages; the **free locals it actually
+   references** are copied (only those — not the whole lexical frame, so unrelated
+   siblings don't ride along and a closure capturing a sibling closure can't form a
+   serialisation cycle); and its **free globals are not copied at all** — they
+   re-resolve on the receiver against that runtime's own global table. So a closure
+   runs on any node that has the same definitions (Erlang's "the module must be loaded
+   on both nodes"). A self-referential *local* closure can't be sent (define it at top
+   level — global recursion resolves by name, captures nothing).
+
+**Why.** The project's reason to exist is a self-editing, remotely-hostable editor;
+"run this computation over there" is the primitive that makes the remote half real.
+Homoiconicity makes it nearly free: code *is* data, so a `(spawn e)` thunk is already
+serialisable once we copy its captured environment. Spawning an expression (not a
+pre-built fn) is also the more general, more Lisp-like surface — the fn-and-args form
+was a strictly weaker special case.
+
+**Consequences.**
+- **`(self)` moved.** It used to be evaluated in the parent (`(spawn worker (self))`);
+  now the body runs in the child, so `(self)` *inside* `spawn` is the child's pid.
+  Capture the parent's first: `(let (me (self)) (spawn (worker me)))`. Every callsite
+  updated to match.
+- **A sent closure is a frozen copy.** Redefining *that* function later doesn't reach
+  an already-sent copy; globals it *references* still hot-reload (ADR-013). Correct
+  for cross-node, where there's no shared code region to track.
+- **Builtins still can't be sent** (a Rust fn pointer has no portable form); reference
+  one by the symbol naming it. **Macros aren't sendable** either (deferred; no need yet).
+- **Local spawn is unchanged in cost:** it still `promote`s the thunk into the shared
+  RUNTIME region (O(1), hot-reloadable) rather than serialising — serialisation is the
+  *node* path, exercised locally by `send`ing a closure between processes.
+
+**Scope.** This ADR covers the language surface (sendable closures + spawn-the-expr).
+**Node identity and the wire transport** — node-tagged pids (`Value::Pid { node, id }`),
+the codec that re-encodes a node `Symbol` by name across interners, and `send` dispatch
+across a link — live in `crate::dist` and are decided separately.
+
+**Considered & rejected.**
+- *Ship the unevaluated form and `eval` it remotely (code-as-data only).* Simpler —
+  the form is already messageable — but it gives no lexical capture: `(spawn (f x))`
+  couldn't see a local `x` without quasiquote-splicing. Real closures subsume it.
+- *Keep `(spawn f arg...)`.* Can't express `(spawn (* (+ 1 1)))` without a wrapper, and
+  args-as-data is just the no-capture special case of a captured thunk.
+
+---
+
+## ADR-034 — Distributed nodes (slice 1): node-tagged pids + a TCP link
+
+**Status:** accepted. Realises the node identity + wire transport that ADR-033
+deferred; implements the §Distribution sketch in `concurrency.md`. See
+`docs/distribution.md` for the full design.
+
+**Context.** Two runtimes must be able to connect and message each other — the
+foundation of the project's "backend hosted remotely by a frontend" premise (M4).
+Erlang showed the shape: share-nothing + copy-on-send means *the network is just a
+longer copy*. The question was how much to build now and how pids should carry
+location.
+
+**Decision.** The smallest useful slice (ADR-011):
+
+1. **Pids are a first-class value carrying node identity** — `Value::Pid { node,
+   id }` (a `Tag::Pid`), replacing bare-`Int` pids everywhere. `self`/`spawn`
+   return one; it prints `#<pid node/id>`. A *local* pid carries this node's name,
+   a *remote* one the peer's, so **the same value addresses a process anywhere** —
+   `send` dispatches on the node part (local → in-process `deliver`; remote → over
+   the link). Before `node-start`, the node is `:nonode` (always local).
+
+2. **An authenticated TCP link.** `(node-start name "host:port" cookie)` names the
+   runtime and listens; `(connect "name@host:port")` dials. Both sides exchange a
+   `Hello` and check a **shared cookie** (Erlang-style — *not* real security;
+   placeholder for auth/TLS). Each connection runs two plain OS threads (reader +
+   writer), entirely off the green-process scheduler; an inbound message lands in
+   a local mailbox via the same `deliver` an in-process `send` uses.
+
+3. **Bootstrap by registered name.** `(register name pid)` binds a local name;
+   a peer reaches it with a `{:name name :node node}` address before it holds any
+   pid. The first reply carries `(self)` as a pid, and every later `send` targets
+   that **remote pid** directly — location-transparency.
+
+4. **Hand-rolled, length-prefixed wire codec** reusing `Message`'s deep-copy, with
+   one cross-process detail: **symbols (incl. a pid's node, keywords) travel by
+   name and re-intern on arrival**, because separate runtimes have independent
+   interners. No new dependency (std `net` + threads; ADR-014).
+
+**Why a value, not an int.** Routing off-node needs location *on the handle*, and
+making local and remote pids the same kind of value keeps `send` uniform — you
+never special-case "is this remote?" at the call site. Pids are used opaquely in
+Brood (send targets, message payloads, `[:down …]`), so the change is mechanical.
+
+**Scope / deferred.** One node per OS process (node identity + tables + interner
+are process-global). Deferred to later slices: **remote `spawn`/code shipping**
+(the closure-as-data path from ADR-033 is the missing piece — the wire codec
+rejects a `Closure` for now), distributed monitors/links, node-down detection,
+reconnect/net-split handling, and real authentication.
+
 ## Deferred / open questions
 
 - **Macro hygiene:** currently unhygienic `defmacro` + `gensym`; hygienic macros

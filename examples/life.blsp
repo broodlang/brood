@@ -1,116 +1,50 @@
-;; Conway's Game of Life — a concise feature tour of Brood
-;; -------------------------------------------------------
-;; Run it:  ./bin/cli examples/life.blsp   (the last two sections animate)
-;;
-;; The board is a set of live cells, modelled as a map [x y] -> true — there is no
-;; fixed grid, so the world is unbounded and a glider walks off forever. That one
-;; idea exercises map literals with vector keys, tuple destructuring, `for`
-;; comprehensions, `times`/`iterate-times`, `doseq`, multi-clause dispatch, a
-;; `hatch` gen_server, `sleep`, and `\e[` ANSI escapes.
+(defmodule life
+  "Conway's Game of Life. The board is a set of live cells (a map [x y] -> true, so
+the world is unbounded); a `hatch` process owns it, advanced by cast (`!`) and
+read by call (`gen-call`). Run:  ./bin/cli examples/life.blsp")
 
-(require 'hatch)   ; the process framework (std/hatch.blsp)
+(require 'hatch)
 
-(defmacro timed (label & body)
-  "Run `body`, print how long it took, and return its value."
-  `(let (start (now) result (do ~@body))
-     (println ~label "took" (- (now) start) "ms")
-     result))
-
-(defn section (title)
-  "Print a blank line and a titled separator between demo sections."
-  (println)
-  (println "──" title "──"))
-
-;; ---- the simulation ----------------------------------------------------------
-
-(def neighbour-offsets
-  (list [-1 -1] [0 -1] [1 -1] [-1 0] [1 0] [-1 1] [0 1] [1 1]))
+(def offsets (list [-1 -1] [0 -1] [1 -1] [-1 0] [1 0] [-1 1] [0 1] [1 1]))
 
 (defn neighbours ([x y])
-  "The 8 cell coordinates surrounding [x y]."
-  (map (fn ([dx dy]) [(+ x dx) (+ y dy)]) neighbour-offsets))
-
-(defn neighbour-counts (board)
-  "Map of cell -> live-neighbour count, over just the cells that could live next."
-  (frequencies (mapcat neighbours (keys board))))
+  "The 8 cells surrounding [x y]."
+  (map (fn ([dx dy]) [(+ x dx) (+ y dy)]) offsets))
 
 (defn alive-next? (cell n board)
-  "Conway's rule: alive next tick when n is 3, or n is 2 and `cell` is already live."
+  "Conway's rule: alive next tick with 3 live neighbours, or 2 if already alive."
   (or (= n 3) (and (= n 2) (contains? board cell))))
 
 (defn step (board)
-  "The next generation of `board`: every cell that is alive next tick."
-  (into {} (for [[cell n] (map-pairs (neighbour-counts board))
-                 :when (alive-next? cell n board)]
-             [cell true])))
-
-(defn nth-gen (board n)
-  "`board` advanced by `n` generations."
-  (times n step board))
-
-;; ---- rendering ---------------------------------------------------------------
+  "The next generation of `board`."
+  (let (counts (frequencies (mapcat neighbours (keys board))))
+    (into {} (for [[cell n] (map-pairs counts) :when (alive-next? cell n board)]
+               [cell true]))))
 
 (defn render-row (board y w)
-  "Row `y` of `board` across columns 0..w-1, as live/dead glyphs."
   (apply str (for [x (range w)] (if (contains? board [x y]) "█" "·"))))
 
 (defn render (board w h)
   "The w×h window of `board` as text."
-  (str (join "\n" (for [y (range h)] (render-row board y w))) "\n"))
-
-(defn clear-frame (lines)
-  "Move the cursor up `lines` and clear downward (ANSI), to overprint a frame."
-  (print (str "\e[" lines "A") "\e[0J"))
-
-(defn animate (board frames w h)
-  "Animate `frames` generations of `board` in a w×h window, overprinting in place."
-  (doseq [[gen b] (enumerate (iterate-times step board (dec frames)))]
-    (unless (= gen 0) (clear-frame (+ h 1)))
-    (println "generation" gen "— population" (count b))
-    (print (render b w h))
-    (sleep 70)))
-
-;; ---- a board is just a map of live cells, so a pattern is a map literal -------
-
-(def blinker {[1 1] true [1 2] true [1 3] true})
-(def glider  {[1 0] true [2 1] true [0 2] true [1 2] true [2 2] true})
-
-;; ---- validation: the dispatch *is* the check (multi-clause defn + guard) ------
-;; A guard sits after the param-list: (param-list :when guard body). A non-matching
-;; call throws (catchable) — no explicit `match` needed.
-(defn check-cell
-  "Return `c` if it is an [x y] of ints; otherwise throw."
-  (([x y]) :when (and (int? x) (int? y)) [x y])
-  ((c)     (error "not a coordinate: " (pr-str c))))
-
-;; ---- the board as a hatch process --------------------------------------------
+  (apply str (for [y (range h)] (str (render-row board y w) "\n"))))
 
 (defprocess life-server (board)
-  "A server owning the board: cast :step to advance, call :count / [:print w h]."
-  (cast :step        (step board))
-  (call :count       [(count board) board])
-  (call [:print w h] (do (print (render board w h)) [:printed board])))
+  "Owns the board: a :step cast advances it, a :board call reads it back. Driving
+the animation through these is the demo of process calls."
+  (cast :step  (step board))
+  (call :board [board board]))
 
-;; =============================================================================
-;; Driver
-;; =============================================================================
+(defn animate (srv frames w h)
+  "Animate `frames` generations, advancing and reading the board by process call.
+Redraws in place — each cell overwrites the last, so no clear and no flicker."
+  (doseq [gen (range frames)]
+    (let (board (gen-call srv :board))               ; call: fetch the current board
+      (unless (= gen 0) (print (str "\e[" (+ h 1) "A")))   ; move the cursor back up
+      (println "generation" gen "— population" (count board) "\e[K")
+      (print (render board w h)))
+    (! srv :step)                                    ; cast: advance to the next gen
+    (sleep 70)))
 
-(section "validation — dispatch + guard + try/catch")
-(println "good:" (check-cell [3 4]))
-(println "bad: " (try (check-cell [1 "x"]) (catch e e)))
+(def glider {[1 0] true [2 1] true [0 2] true [1 2] true [2 2] true})
 
-(section "live process — a hatch gen_server")
-(def srv (hatch life-server glider))
-(! srv :step) (! srv :step)
-(println "after 2 steps:" (gen-call srv :count) "live cells")
-(gen-call srv [:print 6 6])
-
-(section "unbounded — the set has no walls")
-(timed "50 generations"
-  (println "a glider after 50 gens sits at" (keys (nth-gen glider 50))))
-
-(section "blinker — an oscillator (period 2)")
-(animate blinker 4 5 5)
-
-(section "watch a glider fly")
-(animate glider 45 26 16)
+(animate (hatch life-server glider) 45 26 16)

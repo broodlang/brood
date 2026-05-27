@@ -33,7 +33,7 @@
     (send parent [:v (dt-read)])))
 (defn dt-spawn-workers (parent vs)
   (when (pair? vs)
-    (spawn dt-worker parent (first vs))
+    (spawn (dt-worker parent (first vs)))
     (dt-spawn-workers parent (rest vs))))
 (defn dt-collect (got total acc)
   (if (= got total) acc
@@ -131,12 +131,13 @@
   (test "a binding in the parent does not leak into a spawned child"
     ;; Spawn the reader *inside* a binding; the child still sees the default.
     (binding (*dt* 77)
-      (spawn dt-reader (self)))
+      (let (me (self))
+        (spawn (dt-reader me))))
     (assert= (receive ([:v v] v)) 0))
 
   (test "one process crashing inside a binding leaves the rest working"
     ;; Spawn a worker that dies mid-binding; monitor confirms the crash…
-    (let (c (spawn dt-crasher))
+    (let (c (spawn (dt-crasher)))
       (let (mr (monitor c))
         (assert= (receive ([:down ~mr _ [:error _]] :crashed) (after 500 :timeout))
                  :crashed)))

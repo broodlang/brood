@@ -796,6 +796,8 @@ impl Heap {
             (Macro(x), Macro(y)) => x == y,
             (Native(x), Native(y)) => x == y,
             (Ref(x), Ref(y)) => x == y,
+            // Pids are equal by node identity + local id (same process, anywhere).
+            (Pid { node: n1, id: i1 }, Pid { node: n2, id: i2 }) => n1 == n2 && i1 == i2,
             _ => false,
         }
     }
@@ -818,6 +820,18 @@ impl Heap {
                 .expect("runtime env frame"),
             _ => unreachable!("env frames live only in the local or runtime region"),
         }
+    }
+
+    /// A captured frame's parent link and a borrow of its bindings — no copy.
+    /// Used to *serialize* a closure's captured environment into a `Message`
+    /// (cross-process / cross-node), mirroring what [`Self::promote_env`] reads
+    /// to share it within a runtime. `EnvId::GLOBAL` has no frame (it routes to
+    /// the shared global table), so the walk stops there — globals resolve on
+    /// the receiver, never travel. The borrow is tied to `&self` (the LOCAL slab
+    /// or the stable-ref RUNTIME boxcar), so callers walk a chain without cloning.
+    pub fn env_frame_ref(&self, env: EnvId) -> (Option<EnvId>, &[(Symbol, Value)]) {
+        let frame = self.env_frame(env);
+        (frame.parent, &frame.vars)
     }
 
     pub fn new_env(&mut self, parent: Option<EnvId>) -> EnvId {

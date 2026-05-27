@@ -3,6 +3,27 @@
 Running scratch list of work to pick up. Promote items to `docs/roadmap.md` /
 an ADR once they're committed to. Newest section at the top.
 
+## BUG: receive loops weren't TCO'd → coroutine-stack SIGSEGV ✅ FIXED (2026-05-28)
+
+A server driven through ~60 interleaved cast + call cycles segfaulted: `%receive`
+*ran* the matched body thunk itself (`eval::apply`) and returned its value, so a
+loop that tail-called back into `receive` nested a `receive_match` per message and
+blew the green-process ~128 KB coroutine stack. Fix (a trampoline): `%receive` now
+**returns** the matched/timeout thunk, and the `receive` macro applies it in tail
+position — `((%receive …))` — so eval's existing TCO loops it in O(1) native stack.
+`receive--split` always supplies a do-nothing timeout thunk so the wrap always has
+a fn to apply. Regression test: a server handling 500 interleaved cast+call cycles
+(`tests/concurrency_test.blsp`). Unblocked `examples/life.blsp`.
+
+## Idea: a better way to do module docs
+
+Function/macro/`defprocess` docstrings are solid now (`(doc f)`), but module-level
+docs are still just "a bare string as the first top-level form." For anything
+bigger we want a real mechanism — e.g. a `defmodule`/`module` form (name + doc +
+maybe exports), or a doc form the `nest doc` walker recognises — so a module's
+purpose is queryable the way a function's is, not a loose string. Not committed;
+revisit when the module story grows.
+
 ## Possibility: compile a `nest` project into a standalone binary
 
 Status: **idea, not committed** (discussed 2026-05-27). Captured here so the shape

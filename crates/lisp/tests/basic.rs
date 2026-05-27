@@ -577,7 +577,7 @@ fn spawned_process_picks_up_redefinition() {
             (let (msg (receive))
               (send (first msg) (handler (first (rest msg))))
               (server))))
-        (def srv  (spawn server))
+        (def srv  (spawn (server)))
         (def call (fn (x) (send srv (list (self) x)) (receive)))
         (def before (call 5))             ; 5 * 10 = 50
         (def handler (fn (x) (+ x 100)))  ; hot-reload the handler in place

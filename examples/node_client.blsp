@@ -1,0 +1,37 @@
+;; A two-node demo — the CLIENT half. Start the server first (in another
+;; terminal), then run this one:
+;;
+;;   Terminal 1:  cargo run -p cli examples/node_server.blsp
+;;   Terminal 2:  cargo run -p cli examples/node_client.blsp
+;;
+;; It names this runtime :client, connects to the server, reaches the server's
+;; `:echo` process *by name*, then talks to the *remote pid* the server hands
+;; back — proving location transparency (the same pid value works across the
+;; link). It prints the round-trip and exits.
+
+(node-start :client "127.0.0.1:9002" "demo-cookie")
+
+;; The server might not be up yet — retry connect a few times (100ms apart).
+;; `(receive (after 100 nil))` is just a 100ms sleep here.
+(defn connect-retry (tries)
+  (try
+    (connect "server@127.0.0.1:9001")
+    (catch e
+      (if (> tries 0)
+        (do (receive (after 100 nil)) (connect-retry (- tries 1)))
+        (throw (str "could not reach the server — is it running? " e))))))
+
+(connect-retry 30)
+(println "[client] connected to " (nodes))
+
+;; 1) Reach :echo by registered name (you don't have its pid yet).
+(send {:name :echo :node :server} [:hi (self)])
+(def remote (receive ([:pong p] p) (after 5000 (throw "no reply from :echo"))))
+(println "[client] got the server's pid: " remote " (pid? " (pid? remote) ")")
+
+;; 2) Now address that REMOTE pid directly — location transparency.
+(send remote [:ping (self)])
+(receive ([:pong p] (println "[client] round-trip OK — replied by " p))
+         (after 5000 (throw "no reply from the remote pid")))
+
+(println "[client] done")

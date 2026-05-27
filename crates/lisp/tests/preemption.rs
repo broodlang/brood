@@ -24,8 +24,8 @@ fn cpu_bound_process_does_not_starve_peers_on_one_worker() {
         (def me (self))
         (defn hog () (hog))
         (defn responder (parent) (receive (:ping (send parent :pong))))
-        (spawn hog)
-        (def r (spawn responder me))
+        (spawn (hog))
+        (def r (spawn (responder me)))
         (send r :ping)
         (receive (:pong :alive) (after 3000 :starved))
     "#;

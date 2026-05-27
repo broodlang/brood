@@ -299,7 +299,9 @@ docs/testing.md for the full guide."
 ;; per-test progress to print here.
 (defn spawn-units (units me)
   (fold (fn (_ unit)
-          (spawn (fn (parent) (send parent (run-unit unit))) me))
+          ;; capture `me` (the collector) and `unit` lexically; the thunk runs in
+          ;; the child and reports this unit's results back.
+          (spawn (send me (run-unit unit))))
         nil units))
 
 (defn collect-units (remaining acc)   ; remaining = messages still to receive

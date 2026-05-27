@@ -13,9 +13,9 @@
 (println "main pid:" me)
 
 ;; Fan out: spawn three workers, all reporting back to us.
-(def w1 (spawn square-worker me))
-(def w2 (spawn square-worker me))
-(def w3 (spawn square-worker me))
+(def w1 (spawn (square-worker me)))
+(def w2 (spawn (square-worker me)))
+(def w3 (spawn (square-worker me)))
 
 ;; Hand each one a number.
 (send w1 3)
@@ -29,8 +29,8 @@
 (defn inc-worker (next) (send next (+ (receive) 1)))
 (defn double-worker (parent) (send parent (* (receive) 2)))
 
-(def stage2 (spawn double-worker me))
-(def stage1 (spawn inc-worker stage2))
+(def stage2 (spawn (double-worker me)))
+(def stage1 (spawn (inc-worker stage2)))
 (send stage1 20)                       ;; 20 -> +1 -> 21 -> *2 -> 42
 (println "pipeline 20 -> inc -> double =" (receive))
 

@@ -10,6 +10,8 @@ pub mod macros;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
+use smallvec::SmallVec;
+
 use crate::core::heap::Heap;
 use crate::core::value::{self, Closure, ClosureId, EnvId, NativeId, Symbol, Value};
 use crate::error::{LispError, LispResult};
@@ -236,8 +238,9 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
         };
 
         // Evaluate the argument forms straight off the `rest` cons spine into
-        // `argv`, without first collecting them into an intermediate Vec.
-        let mut argv = Vec::new();
+        // `argv`, without first collecting them into an intermediate Vec. Inline
+        // storage (no heap alloc) for the common small-arity call.
+        let mut argv: SmallVec<[Value; 8]> = SmallVec::new();
         let mut cur = rest;
         loop {
             match cur {

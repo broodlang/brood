@@ -144,7 +144,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "dynamic?", Arity::exact(1), dynamic_p);
 
     // processes (concurrency)
-    def(heap, "spawn", Arity::at_least(1), spawn);
+    def(heap, "%spawn", Arity::exact(1), spawn);
     def(heap, "send", Arity::exact(2), send);
     def(heap, "%receive", Arity::exact(3), receive_match);
     def(heap, "self", Arity::exact(0), self_pid);
@@ -154,6 +154,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "spawn-count", Arity::exact(0), spawn_count);
     def(heap, "peak-threads", Arity::exact(0), peak_threads);
     def(heap, "worker-threads", Arity::exact(0), worker_threads);
+
+    // distributed nodes (connect two runtimes over TCP — crate::dist)
+    def(heap, "node-start", Arity::exact(3), node_start);
+    def(heap, "connect", Arity::exact(1), connect);
+    def(heap, "register", Arity::exact(2), register_name);
+    def(heap, "node-name", Arity::exact(0), node_name);
+    def(heap, "nodes", Arity::exact(0), nodes);
 }
 
 /// Docstrings + parameter names for the public primitives, so `(doc 'name)`,
@@ -218,15 +225,20 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("bound?", &["sym"], "Whether sym is bound in scope. Quote it: (bound? 'foo)."),
     ("dynamic?", &["x"], "Whether x is a symbol declared dynamic with defdyn. Quote it: (dynamic? '*foo*)."),
     ("throw", &["x"], "Raise x as an error - a non-local exit caught by try/catch."),
-    ("spawn", &["f", "&", "args"], "Run f applied to args in a new green process; returns its pid."),
-    ("send", &["pid", "msg"], "Copy msg into pid's mailbox; returns nil."),
-    ("self", &[], "This process's own pid."),
+    ("%spawn", &["thunk"], "Run thunk (a 0-arg fn) in a new green process; returns its pid. Use the `spawn` macro."),
+    ("send", &["target", "msg"], "Copy msg into target's mailbox; target is a pid or {:name :node} address. Routes locally or over a node link. Returns nil."),
+    ("self", &[], "This process's own pid (carries this node's identity)."),
     ("ref", &[], "A fresh, globally-unique reference token (tags a request to its reply)."),
     ("monitor", &["pid"], "Watch pid; returns a monitor ref. Delivers [:down ref pid reason] when pid dies."),
     ("demonitor", &["mref"], "Drop the monitor identified by mref (best-effort)."),
     ("spawn-count", &[], "How many green processes have been spawned since program start."),
     ("peak-threads", &[], "High-water mark of OS threads running processes concurrently."),
     ("worker-threads", &[], "The size of the scheduler's worker-thread pool (about nproc)."),
+    ("node-start", &["name", "addr", "cookie"], "Name this runtime and listen for peers on addr (\"host:port\"); cookie authenticates links. Returns the node name."),
+    ("connect", &["spec"], "Link to a peer node named in spec (\"name@host:port\"); cookie-authenticated. Returns the peer's node name."),
+    ("register", &["name", "pid"], "Bind a local name so peers can address this process via {:name name :node this-node}. Returns the pid."),
+    ("node-name", &[], "This runtime's node name (:nonode until node-start)."),
+    ("nodes", &[], "A list of currently connected peer node names."),
 ];
 
 /// The `(params, doc)` for a primitive `name`, or `(&[], "")` if undocumented.
@@ -1035,13 +1047,8 @@ fn throw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 // ---------- processes ----------
 
 fn spawn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    if args.is_empty() {
-        return Err(LispError::arity(
-            "spawn: expected a function and optional arguments",
-        ));
-    }
-    let pid = crate::process::spawn(heap, args[0], &args[1..])?;
-    Ok(Value::Int(pid as i64))
+    let pid = crate::process::spawn(heap, arg(args, 0))?;
+    Ok(crate::process::pid_value(pid))
 }
 
 fn send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -1054,10 +1061,14 @@ fn send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// if it is already dead).
 fn monitor(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     match arg(args, 0) {
-        Value::Int(n) if n >= 0 => Ok(crate::process::monitor(n as u64)),
-        _ => Err(LispError::type_err(
-            "monitor: first argument must be a pid (integer)",
+        // Local pids only for now — distributed monitors are a later slice.
+        Value::Pid { node, id } if crate::dist::is_local(node) => {
+            Ok(crate::process::monitor(id))
+        }
+        Value::Pid { .. } => Err(LispError::type_err(
+            "monitor: monitoring a remote pid is not supported yet",
         )),
+        _ => Err(LispError::type_err("monitor: first argument must be a pid")),
     }
 }
 
@@ -1081,13 +1092,74 @@ fn receive_match(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 }
 
 fn self_pid(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Int(crate::process::self_pid() as i64))
+    Ok(crate::process::pid_value(crate::process::self_pid()))
 }
 
 /// `(ref)` — a fresh, globally-unique reference token. Shares the runtime's ref
 /// counter with `(monitor …)` so every ref is distinct.
 fn make_ref(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::Ref(crate::process::next_ref()))
+}
+
+// ----- distributed nodes -----------------------------------------------------
+
+/// Coerce a node/name argument (a keyword or symbol) to its interned `Symbol`.
+fn expect_node_name(who: &str, v: Value) -> Result<value::Symbol, LispError> {
+    match v {
+        Value::Keyword(s) | Value::Sym(s) => Ok(s),
+        _ => Err(LispError::type_err(format!(
+            "{who}: expected a keyword or symbol name"
+        ))),
+    }
+}
+
+/// `(node-start name "host:port" cookie)` — name this runtime and listen for peer
+/// nodes. Returns the node name.
+fn node_start(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let name = expect_node_name("node-start", arg(args, 0))?;
+    let addr = expect_string(heap, "node-start", arg(args, 1))?;
+    let cookie = expect_string(heap, "node-start", arg(args, 2))?;
+    crate::dist::node_start(name, &addr, cookie)
+        .map_err(|e| LispError::runtime(format!("node-start: {e}")))?;
+    Ok(Value::Keyword(name))
+}
+
+/// `(connect "name@host:port")` — link to a peer node (cookie-authenticated).
+/// Returns the peer's node name on success.
+fn connect(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let spec = expect_string(heap, "connect", arg(args, 0))?;
+    let peer = crate::dist::connect(&spec).map_err(|e| LispError::runtime(format!("connect: {e}")))?;
+    Ok(Value::Keyword(peer))
+}
+
+/// `(register name pid)` — bind a local name so peers can address this process by
+/// `{:name name :node this-node}` before they hold its pid. Returns the pid.
+fn register_name(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    let name = expect_node_name("register", arg(args, 0))?;
+    match arg(args, 1) {
+        Value::Pid { node, id } if crate::dist::is_local(node) => {
+            crate::dist::register(name, id);
+            Ok(Value::Pid { node, id })
+        }
+        Value::Pid { .. } => Err(LispError::type_err(
+            "register: can only register a local pid",
+        )),
+        _ => Err(LispError::type_err("register: second argument must be a pid")),
+    }
+}
+
+/// `(node-name)` — this runtime's node name (`:nonode` until `node-start`).
+fn node_name(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    Ok(Value::Keyword(crate::dist::local_node()))
+}
+
+/// `(nodes)` — a list of currently connected peer node names.
+fn nodes(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let names: Vec<Value> = crate::dist::connected_nodes()
+        .into_iter()
+        .map(Value::Keyword)
+        .collect();
+    Ok(heap.list(names))
 }
 
 /// `(spawn-count)` — how many green processes have been spawned since the program

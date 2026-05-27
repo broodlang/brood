@@ -149,7 +149,7 @@
 (defn seq-emit (parent n) (send parent [:r n (sort (range n 0 -1))]))  ; build then sort
 (defn seq-spawn (parent ns)
   (when (not (empty? ns))
-    (spawn seq-emit parent (first ns))
+    (spawn (seq-emit parent (first ns)))
     (seq-spawn parent (rest ns))))
 (defn seq-collect (got total acc)
   (if (= got total)
@@ -160,14 +160,14 @@
 (defn seq-reader (parent i)
   (send parent [:s (sum (take i seq-data))])) ; Σ 1..i
 (defn seq-spawn-readers (parent n)
-  (when (> n 0) (spawn seq-reader parent n) (seq-spawn-readers parent (- n 1))))
+  (when (> n 0) (spawn (seq-reader parent n)) (seq-spawn-readers parent (- n 1))))
 (defn seq-sum (got total acc)
   (if (= got total) acc (seq-sum (+ got 1) total (receive ([:s v] (+ acc v))))))
 
 (describe "sequences across processes" :isolated
 
   (test "a sorted list round-trips through a worker unchanged (deep copy)"
-    (let (w (spawn seq-emit (self) 5))
+    (let (me (self) w (spawn (seq-emit me 5)))
       (assert= (receive ([:r n xs] xs)) (list 1 2 3 4 5))))
 
   (test "fan-out / fan-in: each worker builds+sorts a list, parent folds a map"

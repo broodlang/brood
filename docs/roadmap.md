@@ -137,6 +137,12 @@ The seam that makes remoteability free later (see architecture.md).
 
 ## M4 — Server / daemon mode
 
+- 🟡 **Distributed nodes (slice 1 done)** — two runtimes connect over TCP and
+  message each other: node-tagged pids (`Value::Pid`), a cookie-authenticated
+  handshake (`node-start`/`connect`), location-transparent `send`, and a
+  symbols-by-name wire codec (ADR-034, [`distribution.md`](distribution.md)).
+  Deferred: remote `spawn`/code shipping, distributed monitors, node-down
+  detection, real auth.
 - ⬜ The same runtime listens on a socket and serves the M3 protocol
 - ⬜ Remote editor instances attach (the Emacs `--daemon` / `emacsclient` model)
 - ⬜ One core, multiple attached frontends

@@ -30,7 +30,12 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
 ;; from source.
 (defn docs--leading-doc (src)
   (let (form (read-string src))
-    (when (string? form) form)))
+    (cond
+      (string? form)                                 form   ; bare-string (legacy)
+      (and (pair? form) (= (first form) 'defmodule))        ; (defmodule name "doc" …)
+        (let (more (rest (rest form)))
+          (when (string? (first more)) (first more)))
+      else                                           nil)))
 
 ;; The bare module title from a file path: "a/b/foo.blsp" -> "foo".
 (defn docs--basename (path)

@@ -99,7 +99,7 @@
 (defn mth-emit (parent n) (send parent [:r n (* n n) (pow n 3)]))
 (defn mth-spawn (parent ns)
   (when (not (empty? ns))
-    (spawn mth-emit parent (first ns))
+    (spawn (mth-emit parent (first ns)))
     (mth-spawn parent (rest ns))))
 (defn mth-collect (got total acc)
   (if (= got total)
@@ -110,7 +110,7 @@
 (defn mth-reader (parent i)
   (send parent [:p (pow (get mth-consts :two) i)]))
 (defn mth-spawn-readers (parent n)
-  (when (> n 0) (spawn mth-reader parent n) (mth-spawn-readers parent (- n 1))))
+  (when (> n 0) (spawn (mth-reader parent n)) (mth-spawn-readers parent (- n 1))))
 (defn mth-sum (got total acc)
   (if (= got total) acc (mth-sum (+ got 1) total (receive ([:p v] (+ acc v))))))
 
@@ -130,5 +130,5 @@
     (assert= (mth-sum 0 10 0) 2046))
 
   (test "an int result survives the round-trip across heaps (deep copy on send)"
-    (let (w (spawn mth-emit (self) 7))
+    (let (me (self) w (spawn (mth-emit me 7)))
       (assert= (receive ([:r n sq cu] [n sq cu])) [7 49 343]))))

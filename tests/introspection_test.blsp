@@ -80,6 +80,6 @@
     (assert= (source-location 'map) nil)          ; prelude binding, not load-recorded
     (assert= (source-location 'no-such-name-xyz) nil))
   (test "the site is visible from a spawned process (shared runtime code)"
-    (let (w (spawn sl-worker (self)))
+    (let (me (self) w (spawn (sl-worker me)))
       ;; the worker's copied-across value equals the parent's own lookup
       (assert= (receive) (source-location 'sl-subject)))))
