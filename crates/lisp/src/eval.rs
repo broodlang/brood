@@ -306,7 +306,8 @@ pub fn apply_closure(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> LispResu
 }
 
 fn bind_params(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> Result<EnvId, LispError> {
-    let cl_env = heap.closure(cl).env;
+    // A global-capturing closure (env == None) resolves to this process's global.
+    let cl_env = heap.closure(cl).env.unwrap_or_else(|| heap.global());
     let required = heap.closure(cl).params.len();
     let n_opt = heap.closure(cl).optionals.len();
     let has_rest = heap.closure(cl).rest.is_some();
@@ -357,7 +358,11 @@ fn make_closure(heap: &mut Heap, name: Option<Symbol>, rest: Value, env: EnvId) 
         parts.first().copied().ok_or_else(|| LispError::runtime("fn: missing parameter list"))?;
     let (params, optionals, rest_param) = parse_params(heap, param_form)?;
     let body = parts[1..].to_vec();
-    let id = heap.alloc_closure(Closure { name, params, optionals, rest: rest_param, body, env });
+    // A closure defined at the global (parent-less) scope captures the env
+    // symbolically (`None`), so it works in any process; otherwise it captures
+    // its specific enclosing scope.
+    let captured = if heap.is_global(env) { None } else { Some(env) };
+    let id = heap.alloc_closure(Closure { name, params, optionals, rest: rest_param, body, env: captured });
     Ok(Value::Fn(id))
 }
 

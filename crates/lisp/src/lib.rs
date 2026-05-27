@@ -39,6 +39,7 @@ impl Interp {
     pub fn new() -> Self {
         let mut heap = Heap::new();
         let root = heap.new_env(None);
+        heap.set_global(root);
         builtins::register(&mut heap, root);
         let mut interp = Interp { heap, root };
         interp

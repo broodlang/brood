@@ -85,11 +85,27 @@ mechanics, gives cheap spawn + shared prelude), and add the mutable-shared regio
   it, while every new lookup — in any process — gets the new version. This is the
   Erlang/Emacs semantics we want.
 
+## Closures capture the global env *symbolically*
+
+A subtlety found while building: a closure stores the env it was defined in, but
+a **shared** top-level closure can't store a per-process `EnvId` — each process
+has its own global env. So a closure defined at the global (parent-less) scope
+captures the global **symbolically** (`Closure.env == None`); at call time
+`bind_params` resolves it to *this process's* global env (the `Heap` knows its
+own global). Closures that capture a *local* enclosing scope keep `Some(EnvId)`.
+This is what lets one shared closure run correctly in any process. (Done as
+step 2a — behaviour-preserving on its own.)
+
+Note this also means the **global env stays per-process and mutable** (so `def`
+works); it is *not* part of the immutable shared region. The global env's
+*bindings* map symbols to (possibly shared) closure handles; the shared region
+holds the closure *code*, not the global bindings table.
+
 ## `env_get` across regions
 
-A process's innermost scope is a *local* `EnvId`; walking parents eventually
-reaches the *shared* global `EnvId`. `env_get` dispatches per-frame: read local
-frames from the local heap, the global frame from the shared region.
+A process's innermost scopes are *local* `EnvId`s; the global env is per-process
+(local). `env_get` dispatches per-frame by region — relevant once any frame is
+shared. Today only the global frame's *contents* point into the shared region.
 
 ## Interaction with processes
 
@@ -108,9 +124,13 @@ frames from the local heap, the global frame from the shared region.
    `Heap`; accessors dispatch on the bit. Shared region starts **empty** → all
    reads route local → behaviour identical (25 tests + suite green; `Heap` stays
    `Send`). The safe foundation.
-2. **Move startup code to the immutable shared region.** Load prelude + natives +
-   the global env into `SharedCode`; the root env is shared. Runtime allocation
-   stays local. Single-process behaviour unchanged.
+2. **Closures capture the global env symbolically** (`Closure.env: Option<EnvId>`,
+   `None` = global; `Heap` records its process global). Prerequisite for sharing
+   closures across processes. *(2a — done; behaviour-preserving: 25 tests + suite
+   green.)* **2b:** relocate the prelude's closures + code + natives into the
+   shared region (`Arc<SharedCode>`), and rebuild each process's global env from a
+   prelude bindings map (symbol → shared handle). The global env stays local +
+   mutable; only the *code* is shared.
 3. **`spawn` shares the code.** Children clone the `Arc` instead of reloading the
    prelude → cheap spawn, and spawned functions can call prelude/builtins via the
    shared globals. (User defns still not visible until step 5.)

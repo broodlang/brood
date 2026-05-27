@@ -111,7 +111,10 @@ pub struct Closure {
     pub optionals: Vec<(Symbol, Value)>,
     pub rest: Option<Symbol>,
     pub body: Vec<Value>,
-    pub env: EnvId,
+    /// The captured lexical environment. `None` means the **global** env —
+    /// resolved per-process at call time, so a (shared) top-level closure works
+    /// in any process. `Some(id)` is a specific local enclosing scope.
+    pub env: Option<EnvId>,
 }
 
 /// Signature of a builtin: already-evaluated args, the call-site environment,

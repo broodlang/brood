@@ -45,15 +45,32 @@ pub struct SharedCode {
     slabs: Slabs,
 }
 
-#[derive(Default)]
 pub struct Heap {
     local: Slabs,
     code: Arc<SharedCode>,
+    /// This process's global (parent-less) environment. A closure that captured
+    /// the global env (`Closure.env == None`) resolves to this at call time.
+    global: EnvId,
 }
 
 impl Heap {
     pub fn new() -> Self {
-        Heap::default()
+        Heap { local: Slabs::default(), code: Arc::default(), global: EnvId::local(0) }
+    }
+
+    /// Record this process's global environment (call once, after creating it).
+    pub fn set_global(&mut self, env: EnvId) {
+        self.global = env;
+    }
+
+    /// This process's global environment.
+    pub fn global(&self) -> EnvId {
+        self.global
+    }
+
+    /// True if `env` is a global (parent-less) environment frame.
+    pub fn is_global(&self, env: EnvId) -> bool {
+        self.env_frame(env).parent.is_none()
     }
 
     /// The slabs a handle points into.

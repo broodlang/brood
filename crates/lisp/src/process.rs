@@ -21,7 +21,7 @@ use std::sync::{LazyLock, Mutex};
 use crate::error::LispError;
 use crate::eval;
 use crate::heap::Heap;
-use crate::value::{Closure, ClosureId, EnvId, Symbol, Value};
+use crate::value::{Closure, ClosureId, Symbol, Value};
 use crate::Interp;
 
 /// A `Send`, self-contained copy of a value, for crossing heaps.
@@ -123,7 +123,7 @@ fn ship_closure(heap: &Heap, id: ClosureId) -> Result<ShippedClosure, LispError>
     Ok(ShippedClosure { params, optionals, rest, body })
 }
 
-fn install_closure(heap: &mut Heap, shipped: &ShippedClosure, env: EnvId) -> Value {
+fn install_closure(heap: &mut Heap, shipped: &ShippedClosure) -> Value {
     let mut optionals = Vec::with_capacity(shipped.optionals.len());
     for (s, default) in &shipped.optionals {
         let d = from_message(heap, default);
@@ -139,7 +139,8 @@ fn install_closure(heap: &mut Heap, shipped: &ShippedClosure, env: EnvId) -> Val
         optionals,
         rest: shipped.rest,
         body,
-        env,
+        // Shipped functions are top-level: capture the (child's) global env.
+        env: None,
     });
     Value::Fn(id)
 }
@@ -202,7 +203,7 @@ pub fn spawn(heap: &Heap, f: Value, args: &[Value]) -> Result<u64, LispError> {
         // This thread *is* the process: adopt the pid + mailbox.
         CURRENT.with(|cell| *cell.borrow_mut() = Some(ProcCtx { pid, inbox: rx }));
         let mut interp = Interp::new();
-        let f = install_closure(&mut interp.heap, &shipped, interp.root);
+        let f = install_closure(&mut interp.heap, &shipped);
         let mut argv = Vec::with_capacity(arg_msgs.len());
         for m in &arg_msgs {
             argv.push(from_message(&mut interp.heap, m));
