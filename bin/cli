@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Convenience launcher for the mylisp CLI.
+#
+#   ./bin/cli                 # start the REPL
+#   ./bin/cli file.lisp       # run a program file
+#
+# Builds via cargo as needed and forwards all arguments to the `mylisp` binary.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec cargo run --quiet --manifest-path "$repo_root/Cargo.toml" -p cli -- "$@"
