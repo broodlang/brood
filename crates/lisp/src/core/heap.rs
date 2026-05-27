@@ -140,6 +140,21 @@ pub struct RuntimeCode {
     /// The global bindings (prelude + user `def`s). Read on every global lookup,
     /// written on `def` (the only mutation). The values point into PRELUDE or RUNTIME.
     globals: RwLock<HashMap<Symbol, Value>>,
+    /// Where each global was *defined* — file + form position, recorded at load
+    /// time before macroexpansion (ADR-031). Lives here, beside `globals`, so it
+    /// is shared across a runtime's processes and updated by a redefinition, the
+    /// same as the bindings it describes. Read by `(source-location 'name)`; the
+    /// image-query foundation for cross-file goto-definition.
+    def_sites: RwLock<HashMap<Symbol, SourceLoc>>,
+}
+
+/// Where a global was defined: the file, and the start position of its
+/// `def`/`defn`/`defmacro` form. Captured pre-macroexpansion so `defn`/`defmacro`
+/// definitions are located accurately (ADR-031).
+#[derive(Clone)]
+pub struct SourceLoc {
+    pub file: String,
+    pub pos: crate::error::Pos,
 }
 
 impl Default for RuntimeCode {
@@ -147,6 +162,7 @@ impl Default for RuntimeCode {
         RuntimeCode {
             code: CodeSlabs::default(),
             globals: RwLock::new(HashMap::new()),
+            def_sites: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -163,6 +179,7 @@ impl RuntimeCode {
         RuntimeCode {
             code: CodeSlabs::default(),
             globals: RwLock::new(globals),
+            def_sites: RwLock::new(HashMap::new()),
         }
     }
 
@@ -176,6 +193,16 @@ impl RuntimeCode {
     }
     fn globals_write(&self) -> RwLockWriteGuard<'_, HashMap<Symbol, Value>> {
         self.globals.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// As `globals_read`/`globals_write`, for the def-site table (same
+    /// poison-recovery rationale — entries are owned data, never structurally
+    /// corrupting on a panicked writer).
+    fn def_sites_read(&self) -> RwLockReadGuard<'_, HashMap<Symbol, SourceLoc>> {
+        self.def_sites.read().unwrap_or_else(|e| e.into_inner())
+    }
+    fn def_sites_write(&self) -> RwLockWriteGuard<'_, HashMap<Symbol, SourceLoc>> {
+        self.def_sites.write().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -195,6 +222,15 @@ pub struct Heap {
     /// The file currently being `load`ed, exposed via `(current-file)`. Saved and
     /// restored around each load so nested loads don't clobber the outer file.
     current_file: Option<String>,
+    /// This process's dynamic-variable binding stack (the `binding` form). Each
+    /// `binding` pushes its `(symbol, value)` pairs and pops them when its body
+    /// returns (even on error); a read of a dynamic var consults this — latest
+    /// binding wins — before the shared global table (see [`Heap::env_get`]).
+    /// Per-process and not shared: a `spawn`ed child starts with an empty stack,
+    /// so dynamic bindings never cross to another process (data isn't shared).
+    /// Empty whenever no `binding` is active — so it's free on the common path
+    /// and holds no LOCAL handles across a top-level arena reset.
+    dynamics: Vec<(Symbol, Value)>,
 }
 
 impl Default for Heap {
@@ -214,6 +250,7 @@ impl Heap {
             global: EnvId::local(0),
             form_pos: HashMap::new(),
             current_file: None,
+            dynamics: Vec::new(),
         }
     }
 
@@ -228,6 +265,7 @@ impl Heap {
             global: EnvId::local(0),
             form_pos: HashMap::new(),
             current_file: None,
+            dynamics: Vec::new(),
         }
     }
 
@@ -371,6 +409,56 @@ impl Heap {
     /// The file currently being loaded, exposed to Brood via `(current-file)`.
     pub fn current_file(&self) -> Option<&str> {
         self.current_file.as_deref()
+    }
+
+    // ----- definition sites (cross-file xref; ADR-031, docs/lsp.md) -----
+
+    /// If `form` is a top-level `def`/`defn`/`defmacro`, record its name's source
+    /// location (the [`current_file`] + `pos`). Called by the file loaders on each
+    /// *un-expanded* top-level form — before macroexpansion, so `defn`/`defmacro`
+    /// (which lower to `def`) are still recognisable by their head and their span
+    /// is intact. A no-op when no file is set (e.g. the REPL) or the form isn't a
+    /// definition.
+    ///
+    /// [`current_file`]: Self::current_file
+    pub fn note_definition(&mut self, form: Value, pos: crate::error::Pos) {
+        let Some(file) = self.current_file.clone() else {
+            return;
+        };
+        if let Some(name) = self.def_form_name(form) {
+            self.runtime
+                .def_sites_write()
+                .insert(name, SourceLoc { file, pos });
+        }
+    }
+
+    /// The name a top-level `def`/`defn`/`defmacro` form binds, reading the head
+    /// and first argument from the *un-expanded* form. `None` for anything else
+    /// (including `(def (pattern) …)`, which has no plain name — deferred).
+    fn def_form_name(&self, form: Value) -> Option<Symbol> {
+        let Value::Pair(p) = form else { return None };
+        let Value::Sym(head) = self.car(p) else {
+            return None;
+        };
+        if !matches!(
+            crate::core::value::symbol_name(head).as_str(),
+            "def" | "defn" | "defmacro"
+        ) {
+            return None;
+        }
+        let Value::Pair(rest) = self.cdr(p) else {
+            return None;
+        };
+        match self.car(rest) {
+            Value::Sym(name) => Some(name),
+            _ => None,
+        }
+    }
+
+    /// Where `name`'s global definition was loaded from, if recorded. Backs
+    /// `(source-location 'name)`.
+    pub fn def_site(&self, name: Symbol) -> Option<SourceLoc> {
+        self.runtime.def_sites_read().get(&name).cloned()
     }
 
     // ----- allocation (always into the local heap) -----
@@ -745,6 +833,16 @@ impl Heap {
         let mut cur = Some(env);
         while let Some(e) = cur {
             if e == EnvId::GLOBAL {
+                // A dynamic var resolves to its innermost active `binding`, if
+                // any, before the shared global default. The stack is empty
+                // unless a `binding` is in scope, so this costs nothing on the
+                // ordinary path; when active it shadows only at the global level
+                // (dynamic vars are never lexically bound).
+                if !self.dynamics.is_empty() {
+                    if let Some(&(_, v)) = self.dynamics.iter().rev().find(|&&(s, _)| s == sym) {
+                        return Some(v);
+                    }
+                }
                 return self.runtime.globals_read().get(&sym).copied();
             }
             let frame = self.env_frame(e);
@@ -766,6 +864,20 @@ impl Heap {
         } else {
             self.local.envs[env.index()].vars.push((sym, val));
         }
+    }
+
+    // ----- dynamic-variable bindings (the `binding` form) -----
+
+    /// Push a dynamic binding of `sym` to `val` (the innermost wins on lookup).
+    /// Paired with [`Heap::pop_dynamic`] by the `%binding` primitive, which pops
+    /// exactly what it pushed when its body returns — even on error.
+    pub fn push_dynamic(&mut self, sym: Symbol, val: Value) {
+        self.dynamics.push((sym, val));
+    }
+
+    /// Pop the most recent dynamic binding (the matching unwind of `push_dynamic`).
+    pub fn pop_dynamic(&mut self) {
+        self.dynamics.pop();
     }
 
     /// Snapshot the runtime's global bindings (`symbol -> value`). Cheap: the

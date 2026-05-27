@@ -1185,6 +1185,67 @@ computed/conditional `require`s, and is discarded once the self-hosted editor
 makes the image authoritative. Kept only as the *fallback* shape if an image is
 unavailable (e.g. a project that won't load) — not the primary path.
 
+## ADR-032 — Dynamic variables: a per-process binding stack, declared with `defdyn`
+
+**Status:** accepted.
+
+**Context.** Brood needs Lisp "special variables" — globals temporarily
+overridable for a dynamic extent (a print depth, a current sink) that deep
+callees read without threading the value through every call. The constraints are
+sharp: the language is immutable (ADR-026, so no mutable cell holds the current
+value) and concurrent (green processes that migrate between worker threads, so a
+Rust thread-local can't hold the binding), and the core should stay small
+(ADR-011 — prefer a macro over a primitive over a new special form).
+
+**Decision.**
+- **A per-process binding stack lives in the `Heap`.** Each `binding` pushes its
+  `(symbol, value)` pairs and pops them when the body returns. Reads consult it
+  in `env_get` *at the `EnvId::GLOBAL` step only, and only when the stack is
+  non-empty* — so the ordinary lookup path is unchanged, and a dynamic var
+  shadows exactly where it resolves (it's never lexically bound).
+- **Per-process, not inherited.** Because the stack is in the process's own heap,
+  a `binding` is invisible to other processes and a `spawn`ed child starts from
+  the declared defaults. This is the right default under share-nothing (data
+  isn't shared, so neither is dynamic scope) and means a crash mid-`binding`
+  drops the stack with the heap, disturbing no one. (Clojure-style binding
+  *conveyance* across threads can be added later as opt-in if a need appears.)
+- **Declared, not implicit.** `defdyn` marks the symbol dynamic in a process-wide
+  `static` registry (a monotonic declaration fact, like the symbol interner — not
+  per-runtime state) and `def`s its default. `binding` rejects a var that wasn't
+  declared (almost always a typo; silently shadowing a plain global would
+  mislead). `dynamic?` reports the mark.
+- **Macros over a tiny kernel, no new special form.** Kernel: `%declare-dynamic`,
+  `%binding` (push → `apply` thunk → pop, restoring on `Err` too — the `%isolate`
+  shape), `dynamic?`. Surface: the `defdyn`/`binding` macros in the prelude. This
+  follows the `try`/`catch` precedent (ADR-011) and keeps the evaluator's special
+  forms untouched.
+
+**Why.** Restoration-on-unwind and per-process isolation fall out of the design
+rather than needing extra machinery; the read path stays free when no `binding`
+is active; and `binding` mutating its stack is *binding* mutation (like `def`),
+never data mutation, so the immutability and GC invariants (no write barriers)
+hold. The whole feature adds three primitives and two macros — the last open
+Tier-1 language gap, closed without growing the core.
+
+**`let` stays lexical.** Resolution consults the dynamic stack only at the
+global-lookup step, *after* the lexical frame chain — so a `let`/`fn` binding of a
+dynamic var's name is an ordinary lexical shadow, and `binding` is the only form
+that binds dynamically. This follows Clojure (lexical `let`, explicit `binding`),
+not Common Lisp (where `let` on a `special` var binds dynamically). The CL route
+would couple the `let` special form to the dynamic registry for no real gain; the
+cost is that `let`-binding an earmuffed name hides a later `binding` of it (a
+documented convention: don't — see `docs/language.md`).
+
+**Considered & rejected.**
+- *Undeclared `binding` (rebind any global).* Smallest kernel, but `defdyn`
+  becomes a pointless alias for `def` and a typo'd `binding` silently "works".
+  Declaration is cheap and catches the bug.
+- *Temporarily rebinding the shared global table.* Globals are shared across a
+  runtime's processes (ADR-013/014), so this would make one process's `binding`
+  clobber another's — wrong for concurrency, and it fights hot-reload.
+- *A Rust thread-local stack.* Breaks the moment a coroutine migrates workers or
+  suspends at `receive`; the binding must travel with the process, i.e. its heap.
+
 ## Deferred / open questions
 
 - **Macro hygiene:** currently unhygienic `defmacro` + `gensym`; hygienic macros

@@ -7,9 +7,9 @@
 //! payoff: a `Heap` is plain `Vec`s of data, so it is `Send` — a process can be
 //! moved between scheduler threads — and it gives us one place to do GC.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{LazyLock, Mutex, MutexGuard};
+use std::sync::{LazyLock, Mutex, MutexGuard, RwLock};
 
 use crate::core::heap::Heap;
 use crate::error::LispResult;
@@ -17,49 +17,95 @@ use crate::error::LispResult;
 /// An interned symbol name (a `u32` id; the spelling lives in a global table).
 pub type Symbol = u32;
 
-// Global (process-wide) interner so symbol ids are consistent across scheduler
-// threads — a prerequisite for sending symbols between process heaps.
-static INTERNER: LazyLock<Mutex<Interner>> = LazyLock::new(|| Mutex::new(Interner::default()));
+// The process-wide symbol table, split so reads never take a lock:
+//
+// - `NAMES` (id -> spelling) is **append-only and never mutated**, so it's a
+//   lock-free `boxcar::Vec`: any thread reads `NAMES[id]` without locking, and
+//   pushed entries never move (stable refs) — the same structure the shared
+//   RUNTIME code region uses. The hot readers go through here (`symbol_name` in
+//   the printer, `symbol_is` in the compile-pass walk), so symbol spelling and
+//   comparison no longer serialise every scheduler thread through one mutex.
+// - `IDS` (spelling -> id) is read and extended only by `intern`, so it stays
+//   behind a `Mutex`; the lock is held across the `NAMES` push so the two tables
+//   agree on each new id (two threads can't mint different ids for one name).
+//
+// Symbol ids are consistent across scheduler threads — a prerequisite for
+// sending symbols between process heaps.
+static NAMES: LazyLock<boxcar::Vec<String>> = LazyLock::new(boxcar::Vec::new);
+static IDS: LazyLock<Mutex<HashMap<String, Symbol>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
-#[derive(Default)]
-struct Interner {
-    ids: HashMap<String, Symbol>,
-    names: Vec<String>,
-}
-
-// The interner is read-mostly and lives for the whole process; recover from a
-// poisoned lock rather than letting one panicking thread wedge symbol lookup
-// everywhere (the table is append-only, so a recovered guard is consistent).
-fn interner() -> MutexGuard<'static, Interner> {
-    INTERNER.lock().unwrap_or_else(|e| e.into_inner())
+// Recover from a poisoned `IDS` lock rather than letting one panicking thread
+// wedge symbol interning everywhere (the tables are append-only, so a recovered
+// guard is consistent).
+fn ids() -> MutexGuard<'static, HashMap<String, Symbol>> {
+    IDS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 pub fn intern(name: &str) -> Symbol {
-    let mut i = interner();
-    if let Some(&id) = i.ids.get(name) {
+    let mut ids = ids();
+    if let Some(&id) = ids.get(name) {
         return id;
     }
-    let id = i.names.len() as Symbol;
-    i.names.push(name.to_string());
-    i.ids.insert(name.to_string(), id);
+    // A new name: its index in the append-only `NAMES` vec *is* its id. Pushing
+    // while holding the `IDS` lock keeps a single writer, so ids stay dense and
+    // the two tables never disagree.
+    let id = NAMES.push(name.to_string()) as Symbol;
+    ids.insert(name.to_string(), id);
     id
 }
 
 pub fn symbol_name(sym: Symbol) -> String {
-    interner().names[sym as usize].clone()
+    NAMES.get(sym as usize).expect("interned symbol id").clone()
 }
 
-/// Does `sym`'s spelling equal `name`? Locks once and compares in place — no
+/// Does `sym`'s spelling equal `name`? A lock-free read + in-place compare — no
 /// `String` allocation, unlike `symbol_name(s) == name`. For the hot compares
 /// against fixed words (`&optional`, `quasiquote`, the compile-pass walk).
 pub fn symbol_is(sym: Symbol, name: &str) -> bool {
-    interner().names[sym as usize] == name
+    NAMES
+        .get(sym as usize)
+        .expect("interned symbol id")
+        .as_str()
+        == name
 }
 
 /// The first character of `sym`'s spelling, if any — to recognise the `&`-marker
 /// family without allocating the whole name first.
 pub fn symbol_first_char(sym: Symbol) -> Option<char> {
-    interner().names[sym as usize].chars().next()
+    NAMES
+        .get(sym as usize)
+        .expect("interned symbol id")
+        .chars()
+        .next()
+}
+
+// ----- dynamic-variable registry ---------------------------------------------
+//
+// Which symbols are *dynamic variables* (declared by `defdyn`). A monotonic,
+// process-wide declaration fact — like interning, not per-runtime state — so it
+// lives in a `static` rather than the runtime's global table. Reads never touch
+// this set (a dynamic value resolves through the per-process binding stack in
+// `Heap`); it exists only so `binding` can reject an undeclared var and so
+// `dynamic?` can report. See `docs/language.md` (Dynamic variables).
+
+static DYNAMICS: LazyLock<RwLock<HashSet<Symbol>>> =
+    LazyLock::new(|| RwLock::new(HashSet::new()));
+
+/// Mark `sym` as a dynamic variable (idempotent). Called by `defdyn`.
+pub fn mark_dynamic(sym: Symbol) {
+    DYNAMICS
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(sym);
+}
+
+/// Has `sym` been declared dynamic with `defdyn`?
+pub fn is_dynamic(sym: Symbol) -> bool {
+    DYNAMICS
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&sym)
 }
 
 // ----- handles into the Heap -----
@@ -300,6 +346,16 @@ pub struct NativeFn {
     pub name: String,
     pub arity: Arity,
     pub func: NativeFnPtr,
+    /// Parameter names for hover / signature help (e.g. `["a", "b"]`, or
+    /// `["&", "xs"]` for a variadic tail) — the builtin analogue of a closure's
+    /// params, so `arglist` and the LSP treat primitives and Brood functions
+    /// uniformly. Empty when undocumented.
+    pub params: &'static [&'static str],
+    /// One-line docstring shown on hover / by `(doc 'name)`. Empty when
+    /// undocumented. Primitives can't carry a `defn` leading-string docstring
+    /// (they're Rust), so this is their equivalent; sourced from the
+    /// `PRIMITIVE_DOCS` table in `builtins.rs` (mirrors `docs/primitives.md`).
+    pub doc: &'static str,
 }
 
 // ----- handle-free constructors (interned; no heap needed) -----

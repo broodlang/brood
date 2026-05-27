@@ -19,7 +19,7 @@
   `(def ~name (fn ~@clauses)))
 
 ;; ---- logic ----
-(defn not (x) (if x false true))
+(defn not (x) "Logical negation: `nil`/`false` become `true`, everything else `false`." (if x false true))
 
 ;; `empty?` — true for the empty value of any collection. Defined here, before
 ;; `fold`/`reduce` use it, so it's written with the raw kernel ops (`%eq`,
@@ -28,6 +28,7 @@
 ;; empty list is `nil`, and every other collection's emptiness is a length the
 ;; kernel already exposes.)
 (defn empty? (x)
+  "True if `x` is an empty collection (`nil`, `()`, `[]`, `\"\"`, or `{}`)."
   (if (%eq (type-of x) :nil)    true
   (if (%eq (type-of x) :pair)   false
   (if (%eq (type-of x) :string) (%eq (string-length x) 0)
@@ -37,27 +38,30 @@
 
 ;; ---- folding (the workhorse; tail-recursive, so it is stack-safe) ----
 (defn fold (f acc coll)
+  "Left-fold: combine the items of `coll` left-to-right with `(f acc item)`, starting from `acc`. Tail-recursive, so it is stack-safe."
   (if (empty? coll)
     acc
     (fold f (f acc (first coll)) (rest coll))))
 
 (defn reverse (coll)
+  "The items of `coll` in reverse order, as a list."
   (fold (fn (acc x) (cons x acc)) nil coll))
 
 ;; reduce supports both (reduce f init coll) and (reduce f coll).
 (defn reduce (f x & more)
+  "Reduce a collection with `f`. Either `(reduce f init coll)` or `(reduce f coll)` (using the first item as the initial value)."
   (if (empty? more)
     (fold f (first x) (rest x))
     (fold f x (first more))))
 
 ;; ---- arithmetic (variadic, built on the 2-arg primitives) ----
-(defn + (& xs) (reduce %add 0 xs))
-(defn * (& xs) (reduce %mul 1 xs))
-(defn - (x & xs) (if (empty? xs) (%sub 0 x) (reduce %sub x xs)))
-(defn / (x & xs) (if (empty? xs) (%div 1 x) (reduce %div x xs)))
+(defn + (& xs) "Sum of all arguments (0 with none)." (reduce %add 0 xs))
+(defn * (& xs) "Product of all arguments (1 with none)." (reduce %mul 1 xs))
+(defn - (x & xs) "Subtract the rest from `x`; negate `x` if it's the only argument." (if (empty? xs) (%sub 0 x) (reduce %sub x xs)))
+(defn / (x & xs) "Divide `x` by the rest; reciprocal of `x` if it's the only argument. Errors on division by zero." (if (empty? xs) (%div 1 x) (reduce %div x xs)))
 
-(defn inc (n) (%add n 1))
-(defn dec (n) (%sub n 1))
+(defn inc (n) "Return `n` + 1." (%add n 1))
+(defn dec (n) "Return `n` - 1." (%sub n 1))
 
 ;; ---- comparison & equality (variadic chains over %lt / %eq) ----
 ;; chain? checks a predicate holds for every adjacent pair: (chain? < (1 2 3)).
@@ -70,12 +74,12 @@
         (chain? pred (rest xs))
         false))))
 
-(defn <  (& xs) (chain? (fn (a b) (%lt a b)) xs))
-(defn >  (& xs) (chain? (fn (a b) (%lt b a)) xs))
-(defn <= (& xs) (chain? (fn (a b) (not (%lt b a))) xs))
-(defn >= (& xs) (chain? (fn (a b) (not (%lt a b))) xs))
-(defn =  (& xs) (chain? (fn (a b) (%eq a b)) xs))
-(defn not= (& xs) (not (apply = xs)))
+(defn <  (& xs) "True if the arguments are in strictly increasing order." (chain? (fn (a b) (%lt a b)) xs))
+(defn >  (& xs) "True if the arguments are in strictly decreasing order." (chain? (fn (a b) (%lt b a)) xs))
+(defn <= (& xs) "True if the arguments are in non-decreasing order." (chain? (fn (a b) (not (%lt b a))) xs))
+(defn >= (& xs) "True if the arguments are in non-increasing order." (chain? (fn (a b) (not (%lt a b))) xs))
+(defn =  (& xs) "True if all arguments are structurally equal." (chain? (fn (a b) (%eq a b)) xs))
+(defn not= (& xs) "True if the arguments are not all equal." (not (apply = xs)))
 
 ;; ---- control-flow macros ----
 ;; These read like special forms but are ordinary macros over `if`/`do`/`let`.
@@ -86,14 +90,17 @@
 ;; keeps the stack O(1)) or processes.
 
 (defmacro when (test & body)
+  "Evaluate `body` (returning the last) when `test` is truthy, else `nil`."
   `(if ~test (do ~@body) nil))
 
 (defmacro unless (test & body)
+  "Evaluate `body` (returning the last) when `test` is falsy, else `nil`."
   `(if ~test nil (do ~@body)))
 
 ;; `and`/`or` short-circuit left-to-right and return the deciding value, with
 ;; each subexpression evaluated at most once (a gensym holds it across the test).
 (defmacro and (& xs)
+  "Logical AND: evaluate left-to-right, short-circuiting on the first falsy value (which it returns); `true` if none. Each argument is evaluated at most once."
   (if (empty? xs)
     true
     (if (empty? (rest xs))
@@ -103,6 +110,7 @@
            (if ~g (and ~@(rest xs)) ~g))))))
 
 (defmacro or (& xs)
+  "Logical OR: evaluate left-to-right, short-circuiting on the first truthy value (which it returns); `nil` if none. Each argument is evaluated at most once."
   (if (empty? xs)
     nil
     (if (empty? (rest xs))
@@ -113,6 +121,7 @@
 
 ;; cond: flat test/expr pairs (ADR-004); `else` or `:else` is the catch-all.
 (defmacro cond (& clauses)
+  "Multi-way branch over `test expr` pairs: return the `expr` of the first truthy `test`. A final `else` (or `:else`) test always matches; `nil` if none do."
   (if (empty? clauses)
     nil
     (let (test (first clauses)
@@ -131,44 +140,46 @@
 ;; are expressible in the language they are policy, so they live here — only
 ;; `type-of` itself is irreducible. (`%eq` not `=`: no dependency on the
 ;; variadic comparison, and it can't be shadowed by a local `=`.)
-(defn nil?     (x) (%eq (type-of x) :nil))
-(defn pair?    (x) (%eq (type-of x) :pair))
-(defn int?     (x) (%eq (type-of x) :int))
-(defn float?   (x) (%eq (type-of x) :float))
-(defn bool?    (x) (%eq (type-of x) :bool))
-(defn string?  (x) (%eq (type-of x) :string))
-(defn symbol?  (x) (%eq (type-of x) :symbol))
-(defn keyword? (x) (%eq (type-of x) :keyword))
-(defn vector?  (x) (%eq (type-of x) :vector))
-(defn map?     (x) (%eq (type-of x) :map))
-;; `ref?` holds for a `(ref)` token (a unique reference).
-(defn ref?     (x) (%eq (type-of x) :ref))
+(defn nil?     (x) "True if `x` is `nil`." (%eq (type-of x) :nil))
+(defn pair?    (x) "True if `x` is a cons pair." (%eq (type-of x) :pair))
+(defn int?     (x) "True if `x` is an integer." (%eq (type-of x) :int))
+(defn float?   (x) "True if `x` is a float." (%eq (type-of x) :float))
+(defn bool?    (x) "True if `x` is a boolean." (%eq (type-of x) :bool))
+(defn string?  (x) "True if `x` is a string." (%eq (type-of x) :string))
+(defn symbol?  (x) "True if `x` is a symbol." (%eq (type-of x) :symbol))
+(defn keyword? (x) "True if `x` is a keyword." (%eq (type-of x) :keyword))
+(defn vector?  (x) "True if `x` is a vector." (%eq (type-of x) :vector))
+(defn map?     (x) "True if `x` is a map." (%eq (type-of x) :map))
+(defn ref?     (x) "True if `x` is a `(ref)` token (a unique reference)." (%eq (type-of x) :ref))
 ;; `fn?` holds for both Brood closures (:fn) and Rust builtins (:native).
-(defn fn?      (x) (or (%eq (type-of x) :fn) (%eq (type-of x) :native)))
+(defn fn?      (x) "True if `x` is callable (a closure or a primitive)." (or (%eq (type-of x) :fn) (%eq (type-of x) :native)))
 
 ;; ---- derived predicates ----
-(defn number? (x) (or (int? x) (float? x)))
-(defn list?   (x) (or (nil? x) (pair? x)))
+(defn number? (x) "True if `x` is an int or a float." (or (int? x) (float? x)))
+(defn list?   (x) "True if `x` is a proper list (`nil` or a pair)." (or (nil? x) (pair? x)))
 
 ;; ---- list aliases & accessors ----
 (def car first)
 (def cdr rest)
-(defn list (& xs) xs)
-(defn second (coll) (first (rest coll)))
-(defn third  (coll) (first (rest (rest coll))))
+(defn list (& xs) "A list of the given arguments." xs)
+(defn second (coll) "The second item of `coll`." (first (rest coll)))
+(defn third  (coll) "The third item of `coll`." (first (rest (rest coll))))
 
 ;; ---- sequence operations ----
 (defn map (f coll)
+  "A list of `(f x)` for each `x` in `coll`."
   (reverse (fold (fn (acc x) (cons (f x) acc)) nil coll)))
 
 (defn filter (pred coll)
+  "A list of the items of `coll` for which `(pred x)` is truthy."
   (reverse (fold (fn (acc x) (if (pred x) (cons x acc) acc)) nil coll)))
 
 (defn append-two (a b)
   (fold (fn (acc x) (cons x acc)) b (reverse a)))
-(defn append (& lists) (fold append-two nil lists))
+(defn append (& lists) "Concatenate the lists into one list." (fold append-two nil lists))
 
 (defn count (coll)
+  "The number of items in `coll` (a list, vector, string, or map)."
   (cond
     (string? coll) (string-length coll)
     (map? coll)    (count (map-pairs coll))
@@ -182,6 +193,7 @@
     else          (nth-list (rest coll) (- i 1) d)))
 
 (defn nth (coll i & default)
+  "The item at index `i` of `coll` (0-based), or `default` (else `nil`) if out of range."
   (if (vector? coll)
     (if (and (>= i 0) (< i (vector-length coll)))
       (vector-ref coll i)
@@ -195,60 +207,62 @@
 ;; primitives with the variadic / default-bearing surface.
 
 ;; (get m k) -> value or nil if absent; (get m k default) -> value or default.
-(defn get (m k & default) (map-get m k (first default)))
+(defn get (m k & default) "The value at key `k` in map `m`, or `default` (else `nil`) if absent." (map-get m k (first default)))
 
 ;; (assoc m k1 v1 k2 v2 …) -> a fresh map with each pair added/updated.
 (defn assoc--pairs (m kvs)
   (if (empty? kvs)
     m
     (assoc--pairs (map-assoc m (first kvs) (second kvs)) (rest (rest kvs)))))
-(defn assoc (m & kvs) (assoc--pairs m kvs))
+(defn assoc (m & kvs) "A fresh map like `m` with each `key value` pair added or updated." (assoc--pairs m kvs))
 
 ;; (dissoc m k1 k2 …) -> a fresh map with each key removed.
-(defn dissoc (m & ks) (fold map-dissoc m ks))
+(defn dissoc (m & ks) "A fresh map like `m` with each of the given keys removed." (fold map-dissoc m ks))
 
 ;; `map-pairs` (kernel) is the single map enumerator: the entries as a list of
 ;; [k v] vectors, in one O(n) pass. `keys`/`vals`/`contains?`/`reduce-kv` are all
 ;; Brood over it — no per-key `get`, so no O(n²) (this replaced the old `map-keys`
 ;; primitive + get-per-key `vals`).
-(defn keys      (m)   (map first (map-pairs m)))
-(defn vals      (m)   (map second (map-pairs m)))
-(defn contains? (m k) (some? (fn (p) (= k (first p))) (map-pairs m)))
-;; (reduce-kv f init m) -> fold f over the entries, calling (f acc k v).
+(defn keys      (m)   "The keys of map `m`, in insertion order." (map first (map-pairs m)))
+(defn vals      (m)   "The values of map `m`, in insertion order." (map second (map-pairs m)))
+(defn contains? (m k) "True if map `m` has key `k` (distinguishes a stored `nil` from absence)." (some? (fn (p) (= k (first p))) (map-pairs m)))
 (defn reduce-kv (f init m)
+  "Fold over the entries of map `m`, calling `(f acc k v)`, starting from `init`."
   (fold (fn (acc p) (f acc (first p) (second p))) init (map-pairs m)))
 
-(defn identity  (x) x)
-(defn zero?     (n) (= n 0))
-(defn positive? (n) (> n 0))
-(defn negative? (n) (< n 0))
-(defn abs (n) (if (< n 0) (- n) n))
+(defn identity  (x) "Return `x` unchanged." x)
+(defn zero?     (n) "True if `n` is zero." (= n 0))
+(defn positive? (n) "True if `n` is greater than zero." (> n 0))
+(defn negative? (n) "True if `n` is less than zero." (< n 0))
+(defn abs (n) "The absolute value of `n`." (if (< n 0) (- n) n))
 ;; Variadic, fold over the first arg (so at least one is required); a strict `>`
 ;; keeps the *first* of equal maxima, matching a left fold.
-(defn max (x & xs) (fold (fn (a b) (if (> b a) b a)) x xs))
-(defn min (x & xs) (fold (fn (a b) (if (< b a) b a)) x xs))
-(defn sum     (xs) (reduce + 0 xs))
-(defn product (xs) (reduce * 1 xs))
-(defn even? (n) (= (rem n 2) 0))
-(defn odd?  (n) (not (even? n)))
+(defn max (x & xs) "The largest of the arguments (at least one required)." (fold (fn (a b) (if (> b a) b a)) x xs))
+(defn min (x & xs) "The smallest of the arguments (at least one required)." (fold (fn (a b) (if (< b a) b a)) x xs))
+(defn sum     (xs) "The sum of the numbers in `xs`." (reduce + 0 xs))
+(defn product (xs) "The product of the numbers in `xs`." (reduce * 1 xs))
+(defn even? (n) "True if integer `n` is even." (= (rem n 2) 0))
+(defn odd?  (n) "True if integer `n` is odd." (not (even? n)))
 
 ;; Rounding & roots, all Brood over the one Float->Int primitive `floor` (toward
 ;; -inf) plus `rem`/`/`/`*`. `floor` of an int is itself, so these pass ints
 ;; through unchanged.
-(defn ceil (x) (- (floor (- x))))                 ; ceil = -floor(-x)
+(defn ceil (x) "Round `x` toward positive infinity to an integer." (- (floor (- x))))
 ;; round half away from zero: floor(x+0.5) for x>=0, mirrored for x<0.
 (defn round (x)
+  "Round `x` to the nearest integer (halves away from zero)."
   (if (< x 0) (- (floor (+ (- x) 0.5))) (floor (+ x 0.5))))
 
 ;; (quot a b) — truncated integer division (toward zero), the quotient partner to
 ;; `rem`. (a - (rem a b)) is exactly divisible by b, so `/` returns an exact int
 ;; (no float round-trip — correct even for large i64, unlike (floor (/ a b))).
-(defn quot (a b) (/ (- a (rem a b)) b))
+(defn quot (a b) "Truncated integer division of `a` by `b` (toward zero); the quotient partner to `rem`." (/ (- a (rem a b)) b))
 
 ;; (pow base exp) — `exp` must be an integer (use `sqrt` for roots). Int base +
 ;; non-negative exp stays an int (overflow raises, like `*`); a negative exp gives
 ;; the reciprocal (a float). Tail-recursive, so a large exponent is O(1) stack.
 (defn pow (base exp)
+  "`base` raised to integer `exp`. A negative exponent gives the (float) reciprocal."
   (cond
     (not (int? exp)) (error "pow: exponent must be an integer (use sqrt for roots), got " exp)
     (< exp 0)        (/ 1 (pow base (- exp)))
@@ -261,6 +275,7 @@
 ;; hardware sqrt) but needs no Rust; redefine it if you ever need bit-exactness.
 ;; Always returns a Float; a negative argument raises.
 (defn sqrt (n)
+  "The square root of `n` (Newton's method; always a float). Negative `n` raises."
   (cond
     (< n 0) (error "sqrt: negative argument " n)
     (= n 0) 0.0
@@ -275,12 +290,13 @@
 ;; [0, (abs b)). Brood over the `rem` primitive (truncated remainder), nudged
 ;; back into range when the two disagree in sign. (÷0 raises via `rem`.)
 (defn mod (a b)
+  "Euclidean modulo: the result takes the sign of the divisor `b` and lies in [0, |b|)."
   (let (r (rem a b))
     (if (< r 0) (+ r (abs b)) r)))
 
 ;; ---- I/O --------------------------------------------------------------------
 ;; `print` (no newline) is the primitive; `println` just appends one.
-(defn println (& xs) (apply print xs) (print "\n"))
+(defn println (& xs) "Write the display forms of the arguments to stdout, followed by a newline." (apply print xs) (print "\n"))
 
 ;; ---- threading macros (demonstrate that macros compute at expansion time) ----
 ;; (-> x (f a) (g b))  =>  (g (f x a) b)   ; thread as FIRST argument
@@ -290,6 +306,7 @@
     (cons (first form) (cons acc (rest form)))
     (list form acc)))
 (defmacro -> (x & forms)
+  "Thread `x` through the forms as each one's *first* argument: `(-> x (f a) (g b))` is `(g (f x a) b)`."
   (reduce thread-first-step x forms))
 
 (defn thread-last-step (acc form)
@@ -297,19 +314,21 @@
     (append form (list acc))
     (list form acc)))
 (defmacro ->> (x & forms)
+  "Thread `x` through the forms as each one's *last* argument: `(->> x (f a) (g b))` is `(g b (f a x))`."
   (reduce thread-last-step x forms))
 
 ;; ---- error handling ----
 ;; The kernel gives us `throw` (raise) and `%try` (low-level catch). Everything
 ;; user-facing — `error`, `try`/`catch` — is written here in Brood.
-(defn last     (xs) (first (reverse xs)))
-(defn but-last (xs) (reverse (rest (reverse xs))))
+(defn last     (xs) "The last item of `xs`." (first (reverse xs)))
+(defn but-last (xs) "All but the last item of `xs`, as a list." (reverse (rest (reverse xs))))
 
-(defn error (& parts) (throw (apply str parts)))
+(defn error (& parts) "Raise an error whose message is the concatenated display forms of `parts`." (throw (apply str parts)))
 
 ;; (try body... (catch e handler...)) => (%try (fn () body...) (fn (e) handler...))
 ;; With no catch clause, it's just (do body...).
 (defmacro try (& body)
+  "Evaluate `body`; if a final `(catch e handler...)` clause is present, run it with the raised value bound to `e` when `body` throws."
   (let (clause (last body))
     (if (and (pair? clause) (= (first clause) 'catch))
       (let (init    (but-last body)
@@ -317,6 +336,38 @@
             handler (rest (rest clause)))
         `(%try (fn () ~@init) (fn (~evar) ~@handler)))
       `(do ~@body))))
+
+;; ---- dynamic variables ------------------------------------------------------
+;; Process-scoped, dynamically-bound variables (Lisp "special" vars), for
+;; config-style knobs like *print-depth*. `defdyn` declares one with a default;
+;; `binding` rebinds it for the dynamic extent of a body, restoring on exit (even
+;; on error). A reference to the var resolves to the innermost active `binding`,
+;; else the default. Bindings are per-process — they do NOT reach a `spawn`ed
+;; child (it starts from the defaults). The kernel supplies only `%declare-dynamic`,
+;; `%binding`, and `dynamic?`; the surface is these two macros (the `try` precedent).
+
+;; (defdyn *x* 10) => declare *x* dynamic, then def its default.
+(defmacro defdyn (name default)
+  "Declare `name` a dynamic (process-scoped special) variable with the given default, rebindable via `binding`."
+  `(do (%declare-dynamic '~name)
+       (def ~name ~default)))
+
+;; Split a flat binding list (*a* va *b* vb) into its names and value forms, at
+;; expansion time (like the threading-macro helpers above).
+(defn binding--names (b) (if (nil? b) nil (cons (first b)  (binding--names (rest (rest b))))))
+(defn binding--vals  (b) (if (nil? b) nil (cons (second b) (binding--vals  (rest (rest b))))))
+
+;; (binding (*a* 1 *b* 2) body...) => (%binding '(*a* *b*) [1 2] (fn () body...))
+;; The names go out as a quoted list and the values as a vector literal — both
+;; reader/evaluator syntax, never function calls — so a locally-shadowed `list`
+;; or `map` can't break the expansion (`fn`/`quote` are special forms).
+(defmacro binding (bindings & body)
+  "Rebind the dynamic variables in `bindings` (a flat `name value ...` list) for the dynamic extent of `body`, restoring them on exit (even on error)."
+  (if (odd? (count bindings))
+    (error "binding: bindings must be name/value pairs, got " bindings)
+    `(%binding (quote ~(binding--names bindings))
+               [~@(binding--vals bindings)]
+               (fn () ~@body))))
 
 ;; ---- pattern matching -------------------------------------------------------
 ;; The matcher is written in Brood, not Rust: a pattern->code compiler (a macro
@@ -504,6 +555,7 @@
 ;; clause in order; the first whose pattern (and guard) matches runs its body.
 ;; No clause matching crashes with a structured value; add a `_` clause to total it.
 (defmacro match (expr & clauses)
+  "Match `expr` against each `(pattern [:when guard] body...)` clause, running the first that fits (binding the pattern's variables). Errors if none match."
   `(match* :match ~expr ~@clauses))
 
 ;; ---- receive: selective, pattern-matched message receipt --------------------
@@ -540,6 +592,7 @@
       [clauses nil nil])))
 
 (defmacro receive (& clauses)
+  "Selectively receive a message from the mailbox: run the first `(pattern [:when guard] body...)` clause that matches, leaving others queued. An optional final `(after ms body...)` clause fires on timeout; `(receive)` blocks for the next message."
   (let (parts   (receive--split clauses)
         real    (nth parts 0)
         ms      (nth parts 1)
@@ -552,6 +605,7 @@
 
 ;; ---- a general membership test ----------------------------------------------
 (defn member? (x xs)
+  "True if `x` is equal to some item of list `xs`."
   (cond
     (empty? xs)      false
     (= x (first xs)) true
@@ -566,6 +620,7 @@
 
 ;; (range hi) -> 0..hi-1 ; (range lo hi) -> lo..hi-1 ; (range lo hi step).
 (defn range (a & more)
+  "A list of integers: `(range hi)` is 0..hi-1, `(range lo hi)` is lo..hi-1, `(range lo hi step)` strides by `step`."
   (cond
     (empty? more)        (range--collect 0 a 1 nil)
     (empty? (rest more)) (range--collect a (first more) 1 nil)
@@ -576,7 +631,7 @@
     (reverse acc)))
 
 ;; (take n coll) -> the first n elements (fewer if coll is shorter).
-(defn take (n coll) (take--acc n coll nil))
+(defn take (n coll) "The first `n` items of `coll` (fewer if it is shorter), as a list." (take--acc n coll nil))
 (defn take--acc (n coll acc)
   (if (or (<= n 0) (empty? coll))
     (reverse acc)
@@ -584,15 +639,17 @@
 
 ;; (drop n coll) -> coll without its first n elements.
 (defn drop (n coll)
+  "`coll` without its first `n` items."
   (if (or (<= n 0) (empty? coll)) coll (drop (- n 1) (rest coll))))
 
 ;; (take-while pred coll) / (drop-while pred coll) split on the first failure.
-(defn take-while (pred coll) (take-while--acc pred coll nil))
+(defn take-while (pred coll) "The leading items of `coll` for which `(pred x)` holds." (take-while--acc pred coll nil))
 (defn take-while--acc (pred coll acc)
   (if (and (pair? coll) (pred (first coll)))
     (take-while--acc pred (rest coll) (cons (first coll) acc))
     (reverse acc)))
 (defn drop-while (pred coll)
+  "`coll` with its leading items for which `(pred x)` holds removed."
   (if (and (pair? coll) (pred (first coll)))
     (drop-while pred (rest coll))
     coll))
@@ -601,11 +658,13 @@
 ;; true if it holds for all (vacuously true on the empty list). Booleans, by the
 ;; `?` convention — use `find` to recover the matching element itself.
 (defn some? (pred coll)
+  "True if `(pred x)` holds for at least one item of `coll`."
   (cond
     (empty? coll)       false
     (pred (first coll)) true
     else                (some? pred (rest coll))))
 (defn every? (pred coll)
+  "True if `(pred x)` holds for every item of `coll` (vacuously true if empty)."
   (cond
     (empty? coll)       true
     (pred (first coll)) (every? pred (rest coll))
@@ -613,13 +672,14 @@
 
 ;; (find pred coll) -> the first element satisfying pred, or nil.
 (defn find (pred coll)
+  "The first item of `coll` for which `(pred x)` holds, or `nil`."
   (cond
     (empty? coll)       nil
     (pred (first coll)) (first coll)
     else                (find pred (rest coll))))
 
 ;; (zip a b) -> a list of [x y] vectors, stopping at the shorter input.
-(defn zip (a b) (zip--acc a b nil))
+(defn zip (a b) "A list of `[x y]` pairs from `a` and `b`, stopping at the shorter input." (zip--acc a b nil))
 (defn zip--acc (a b acc)
   (if (or (empty? a) (empty? b))
     (reverse acc)
@@ -629,7 +689,7 @@
 ;; dropped (Clojure `partition` semantics). `has-at-least?` avoids re-counting.
 (defn has-at-least? (n coll)
   (cond (<= n 0) true (empty? coll) false else (has-at-least? (- n 1) (rest coll))))
-(defn partition (n coll) (partition--acc n coll nil))
+(defn partition (n coll) "Split `coll` into consecutive `n`-sized chunks; a trailing partial chunk is dropped." (partition--acc n coll nil))
 (defn partition--acc (n coll acc)
   (if (has-at-least? n coll)
     (partition--acc n (drop n coll) (cons (take n coll) acc))
@@ -640,10 +700,12 @@
 ;; stable, O(n log n) merge sort: the merge prefers the left run on ties (stable)
 ;; and is tail-recursive; recursion depth is O(log n), so it's stack-safe.
 (defn sort (a & more)
+  "Sort a collection (stable). `(sort coll)` is ascending by `<`; `(sort less? coll)` uses a strict less-than predicate."
   (if (empty? more)
     (merge-sort (fn (x y) (< x y)) a)
     (merge-sort a (first more))))
 (defn sort-by (key-fn coll)
+  "Sort `coll` (stable, ascending) by comparing `(key-fn x)` of each item."
   (merge-sort (fn (x y) (< (key-fn x) (key-fn y))) coll))
 (defn merge-sort (less? coll)
   (if (or (empty? coll) (empty? (rest coll)))
@@ -668,6 +730,64 @@
 (defn frequencies (coll)
   "A map from each distinct element of `coll` to how many times it occurs."
   (fold (fn (m x) (assoc m x (inc (get m x 0)))) {} coll))
+
+(defn into (to from)
+  "Pour each item of `from` into `to`. For a map, items are [k v] pairs (assoc'd);
+otherwise the items are appended (`to` is a list)."
+  (if (map? to)
+    (reduce (fn (m p) (assoc m (first p) (second p))) to from)
+    (append to from)))
+
+;; ---- iteration combinators --------------------------------------------------
+;; Hide the hand-rolled counter/accumulator recursion behind names that read as
+;; intent (the way `defprocess` hides a receive loop). All ordinary Brood.
+
+(defn times (n f x)
+  "Apply `f` to `x` `n` times — fⁿ(x). `(times 0 f x)` is `x`."
+  (if (<= n 0) x (times (dec n) f (f x))))
+
+(defn iterate-times--acc (f x n acc)
+  (if (< n 0) acc (iterate-times--acc f (f x) (dec n) (cons x acc))))
+(defn iterate-times (f x n)
+  "The list (x f(x) f²(x) … fⁿ(x)) — `n`+1 successive states of applying `f`."
+  (reverse (iterate-times--acc f x n nil)))
+
+(defn enumerate (coll)
+  "Pair each item with its 0-based index: ([0 x₀] [1 x₁] …)."
+  (zip (range (count coll)) coll))
+
+;; ---- comprehensions ---------------------------------------------------------
+;; `for` builds a list by walking one or more bindings, with `:when` guards —
+;; a macro over `mapcat`, so the map/filter/fold plumbing disappears from view.
+;;   (for [x xs] expr)               -> a list of expr for each x
+;;   (for [x xs :when p] expr)       -> … only where p holds
+;;   (for [x xs y ys] [x y])         -> nested (y varies fastest)
+;; Bindings may destructure: (for [[k v] (map-pairs m)] …). Build a map from the
+;; result with `(into {} (for …))`.
+
+;; Compile the binding forms (a list: alternating pattern/coll, plus :when pred)
+;; from the inside out: each binding becomes a `mapcat`, each :when an `if`, and
+;; the body a one-element list that the mapcats concatenate.
+(defn for--build (binds body)
+  (cond
+    (empty? binds)          `(list ~body)
+    (= (first binds) :when) `(if ~(second binds)
+                              ~(for--build (rest (rest binds)) body)
+                              nil)
+    else                    `(mapcat (fn (~(first binds))
+                                       ~(for--build (rest (rest binds)) body))
+                                     ~(second binds))))
+
+(defmacro for (binds body)
+  "List comprehension: `(for [x xs] expr)` yields `expr` for each `x`; supports `:when guard` filters and multiple bindings (last varies fastest). Bindings may destructure."
+  (for--build (map identity binds) body))
+
+;; (doseq [pat coll] body...) — run `body` for its side effects over each item,
+;; returning nil. Just `for` run for effect (the result list is discarded). The
+;; param is `bind`, not `binding` — the latter is the dynamic-variable form.
+(defmacro doseq (bind & body)
+  "Run `body` for its side effects over each item of the binding (like `for`, but discards the result and returns `nil`)."
+  `(do (for ~bind (do ~@body)) nil))
 
 ;; ---- strings ----------------------------------------------------------------
 ;; The string library, written over the kernel primitives `substring` /
@@ -775,10 +895,12 @@ leaves `s` unchanged."
 ;; Helpers over `substring` (char-indexed, like `string-length`). Generic enough
 ;; to live in core; the module system and the project tooling build on them.
 (defn starts-with? (s prefix)
+  "Does string `s` begin with `prefix`?"
   (let (n (string-length prefix))
     (and (>= (string-length s) n) (= (substring s 0 n) prefix))))
 
 (defn ends-with? (s suffix)
+  "Does string `s` end with `suffix`?"
   (let (sl (string-length s) ql (string-length suffix))
     (and (>= sl ql) (= (substring s (- sl ql) sl) suffix))))
 
@@ -793,6 +915,7 @@ leaves `s` unchanged."
 ;; The directory containing `path`: "/a/b/c" -> "/a/b", "/foo" -> "/", "rel" -> ".".
 ;; A path that is its own parent ("/" or ".") is the fixed point a walk-up stops at.
 (defn parent-dir (path)
+  "The directory containing `path` (\"/a/b/c\" -> \"/a/b\", \"/foo\" -> \"/\", \"rel\" -> \".\")."
   (let (i (path--last-slash path (dec (string-length path))))
     (cond
       (< i 0) "."
@@ -800,6 +923,7 @@ leaves `s` unchanged."
       else    (substring path 0 i))))
 
 (defn path-join (a b)
+  "Join path segments `a` and `b` with a single `/` separator."
   (if (ends-with? a "/") (str a b) (str a "/" b)))
 
 ;; ---- modules: Emacs-flat provide / require (ADR-019) ------------------------
@@ -813,6 +937,7 @@ leaves `s` unchanged."
 
 ;; (provide 'foo) — mark a feature loaded (idempotent). Returns its name.
 (defn provide (mod)
+  "Mark feature `mod` (a symbol or string) as loaded (idempotent); returns its name."
   (let (key (name mod))
     (unless (member? key *features*)
       (def *features* (cons key *features*)))
@@ -830,6 +955,7 @@ leaves `s` unchanged."
 ;; <foo>.blsp found on *load-path*, then record it. Returns the feature name;
 ;; errors if it can't be found.
 (defn require (mod)
+  "Load feature `mod` once: a no-op if already loaded, else evaluate its baked-in source or the first `<mod>.blsp` found on `*load-path*`. Returns the feature name; errors if not found."
   (let (key (name mod))
     (if (member? key *features*)
       key

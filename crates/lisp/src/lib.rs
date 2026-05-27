@@ -126,6 +126,10 @@ impl Interp {
         let mut result = Value::Nil;
         let n = forms.len();
         for (i, (form, pos)) in forms.into_iter().enumerate() {
+            // Record def sites pre-expansion (ADR-031); a no-op unless a file is
+            // set via `current-file`. Survives the per-form arena reset below,
+            // since def sites live in the (shared) RUNTIME region, not LOCAL.
+            self.heap.note_definition(form, pos);
             let form = eval::macros::macroexpand_all(&mut self.heap, form, self.root)
                 .map_err(|e| e.or_pos(pos))?;
             result = eval::eval(&mut self.heap, form, self.root).map_err(|e| e.or_pos(pos))?;

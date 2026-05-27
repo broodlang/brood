@@ -57,8 +57,12 @@ The native kernel is **70 primitives** — see [`docs/primitives.md`](docs/primi
 - ✅ **Sequence library** — `range take drop take-while drop-while sort sort-by
   some? every? find zip partition` (plus the existing `member?`). All **[Brood]**;
   `sort`/`sort-by` are a stable merge sort, every builder tail-recursive.
-- ⬜ **Dynamic variables** — `defdyn` / `binding` for config-style vars
-  (`*print-depth*` etc.). **[kernel]** (a dynamic-binding store + 2 forms).
+- ✅ **Dynamic variables** — `defdyn` / `binding` for config-style vars
+  (`*print-depth*` etc.). Lisp special vars: rebind for a dynamic extent,
+  restore on exit (even on throw); **per-process** (not inherited across `spawn`).
+  **[kernel]** is tiny — a per-process binding stack in the `Heap` + the
+  `%declare-dynamic`/`%binding`/`dynamic?` primitives; **[Brood]** the `defdyn`/
+  `binding` macros (no new special form — the `try`/`catch` precedent).
 
 ### Tier 2 — important ergonomics
 
@@ -168,7 +172,7 @@ what unlock full work-stealing, so concurrency pulls the GC work earlier.
    structured error value.
 2. **Strings + Math** (Tier 1) — the two libraries every real program reaches for.
 3. **Sequence library** (Tier 1, mostly Brood) — cheap, high value.
-4. **Dynamic variables** (Tier 1).
+4. ✅ **Dynamic variables** (Tier 1) — done (`defdyn`/`binding`, per-process).
 5. **Symbol/keyword tools, `case`, file I/O** (Tier 2) — quick wins.
 6. **Tracing GC** (Tier 3) — do before long-lived editor sessions (Stage 2).
 7. Destructuring, source locations, test helpers as they pull their weight.

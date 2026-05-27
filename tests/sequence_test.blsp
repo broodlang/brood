@@ -104,6 +104,41 @@
     (assert= (frequencies nil) {})
     (assert= (get (frequencies (list 1 1 1)) 1) 3)))
 
+(describe "for comprehension"
+  (test "basic map"
+    (assert= (for [x (range 4)] (* x x)) (list 0 1 4 9)))
+  (test ":when filters"
+    (assert= (for [x (range 8) :when (even? x)] x) (list 0 2 4 6)))
+  (test "nested bindings (rightmost varies fastest)"
+    (assert= (for [x (range 2) y (range 2)] [x y])
+             (list [0 0] [0 1] [1 0] [1 1])))
+  (test "destructuring a binding"
+    (assert= (for [[k v] (map-pairs {:a 1 :b 2})] [v k])
+             (list [1 :a] [2 :b])))
+  (test "build a map with into {}"
+    (assert= (into {} (for [x (range 3)] [x (* x x)])) {0 0 1 1 2 4})))
+
+(describe "into / times / iterate-times / enumerate / doseq"
+  (test "into a map assocs [k v] pairs; into a list appends"
+    (assert= (into {:a 1} (list [:b 2] [:c 3])) {:a 1 :b 2 :c 3})
+    (assert= (into (list 1 2) (list 3 4)) (list 1 2 3 4)))
+  (test "times applies f n times"
+    (assert= (times 5 inc 0) 5)
+    (assert= (times 0 inc 9) 9))
+  (test "iterate-times yields n+1 successive states"
+    (assert= (iterate-times (fn (n) (* n 2)) 1 4) (list 1 2 4 8 16)))
+  (test "enumerate pairs items with indices"
+    (assert= (enumerate (list :a :b :c)) (list [0 :a] [1 :b] [2 :c]))))
+
+(describe "doseq" :isolated
+  (test "runs its body for each item (in order) and returns nil"
+    (assert= (doseq [x (range 3)] (send (self) [:saw x])) nil)
+    ;; the three sends arrived, in order
+    (assert= (list (receive ([:saw v] v))
+                   (receive ([:saw v] v))
+                   (receive ([:saw v] v)))
+             (list 0 1 2))))
+
 ;; ---- explicit concurrency (spawn / send / fan-in) ---------------------------
 ;; :isolated so these run against a private globals copy and don't contend with
 ;; the parallel suite for the runner's mailbox. Each worker builds a sequence and

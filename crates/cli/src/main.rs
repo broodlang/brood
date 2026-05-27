@@ -154,6 +154,17 @@ fn parse_args(args: Vec<String>) -> (Vec<String>, Option<usize>) {
 /// same structured GNU `FILE:LINE:COL:` block per failure as `nest test`; see
 /// `docs/tooling.md`. This is a single-file run — for project-wide discovery
 /// (walk to `project.blsp`, load `tests/**/*_test.blsp`) use `nest test`.
+/// Evaluate a file's source with `(current-file)` set to its path (restored
+/// after), so runtime-error / test locations carry the file and load-time def
+/// sites are recorded for `(source-location …)` (ADR-031) — the same as the
+/// `load` builtin does for `require`d modules.
+fn eval_file(interp: &mut Interp, path: &str, src: &str) -> Result<(), LispError> {
+    let prev = interp.heap.set_current_file(Some(path.to_string()));
+    let result = interp.eval_source(src);
+    interp.heap.set_current_file(prev);
+    result.map(|_| ())
+}
+
 fn run_test_files(interp: &mut Interp, files: &[String]) {
     if files.is_empty() {
         eprintln!("brood --test: expected a file, e.g. `brood --test foo_test.blsp`");
@@ -167,7 +178,7 @@ fn run_test_files(interp: &mut Interp, files: &[String]) {
     for path in files {
         match std::fs::read_to_string(path) {
             Ok(src) => {
-                if let Err(e) = interp.eval_source(&src) {
+                if let Err(e) = eval_file(interp, path, &src) {
                     report_error(&e.or_file(path.clone()));
                     std::process::exit(1);
                 }
@@ -188,7 +199,7 @@ fn run_files(interp: &mut Interp, files: &[String]) {
     for path in files {
         match std::fs::read_to_string(path) {
             Ok(src) => {
-                if let Err(e) = interp.eval_source(&src) {
+                if let Err(e) = eval_file(interp, path, &src) {
                     report_error(&e.or_file(path.clone()));
                     std::process::exit(1);
                 }

@@ -126,10 +126,19 @@ pub fn macroexpand_all(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                     if let Some(lowered) = lower_let(heap, &items) {
                         return macroexpand_all(heap, lowered, env);
                     }
+                    // Ordinary let: expand binding *values* and the body, but not the
+                    // binding *targets* — a bound name must not be expanded as a call.
+                    return expand_let(heap, &items, env);
                 } else if value::symbol_is(s, "fn") || value::symbol_is(s, "lambda") {
                     if let Some(lowered) = lower_fn(heap, &items) {
                         return macroexpand_all(heap, lowered, env);
                     }
+                    // Ordinary fn: the param list (items[1]) is a binding position,
+                    // not a call — expand only the body.
+                    return expand_tail(heap, &items, 2, env);
+                } else if value::symbol_is(s, "defmacro") {
+                    // (defmacro name params body...) — name/params aren't calls.
+                    return expand_tail(heap, &items, 3, env);
                 }
             }
             let mut out = Vec::with_capacity(items.len());
@@ -160,6 +169,49 @@ pub fn macroexpand_all(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
         }
         other => Ok(other),
     }
+}
+
+/// Rebuild a form expanding only `items[start..]` (the call's body/argument tail),
+/// leaving `items[..start]` opaque. Used to skip binding positions — a fn/defmacro
+/// parameter list — so a name there is never mistaken for a macro call.
+fn expand_tail(heap: &mut Heap, items: &[Value], start: usize, env: EnvId) -> LispResult {
+    let start = start.min(items.len());
+    let mut out = items[..start].to_vec();
+    for &item in &items[start..] {
+        out.push(macroexpand_all(heap, item, env)?);
+    }
+    Ok(heap.list(out))
+}
+
+/// Expand an ordinary `let`: its binding *values* (odd positions of the binding
+/// list) and its body, leaving the binding *targets* (even positions) opaque.
+fn expand_let(heap: &mut Heap, items: &[Value], env: EnvId) -> LispResult {
+    let Some(bindings) = items.get(1).copied() else {
+        return Ok(heap.list(items.to_vec()));
+    };
+    let new_bindings = match form_items(heap, bindings) {
+        Some(binds) => {
+            let mut nb = Vec::with_capacity(binds.len());
+            for (i, &x) in binds.iter().enumerate() {
+                // odd index = a value expression (expand); even = a target (opaque)
+                nb.push(if i % 2 == 1 {
+                    macroexpand_all(heap, x, env)?
+                } else {
+                    x
+                });
+            }
+            match bindings {
+                Value::Vector(_) => heap.alloc_vector(nb),
+                _ => heap.list(nb),
+            }
+        }
+        None => bindings,
+    };
+    let mut out = vec![items[0], new_bindings];
+    for &item in &items[2..] {
+        out.push(macroexpand_all(heap, item, env)?);
+    }
+    Ok(heap.list(out))
 }
 
 // ---- pattern-binder lowering (the compile pass desugars these to `match*`) ----
@@ -247,6 +299,12 @@ pub(crate) fn fn_needs_lowering(heap: &Heap, fn_form: Value) -> bool {
         Err(_) => return false,
     };
     let forms = &items[1..];
+    // Peel a leading docstring (matches `lower_fn`), so a multi-clause fn with a
+    // docstring is still recognised as needing lowering.
+    let forms = match forms.first() {
+        Some(&Value::Str(_)) if forms.len() > 1 => &forms[1..],
+        _ => forms,
+    };
     if forms.is_empty() {
         return false;
     }
@@ -271,14 +329,28 @@ pub(crate) fn fn_needs_lowering(heap: &Heap, fn_form: Value) -> bool {
 fn lower_fn(heap: &mut Heap, items: &[Value]) -> Option<Value> {
     let forms = &items[1..];
 
-    // Multi-clause: every form is a clause. Dispatch the whole arg list.
-    if !forms.is_empty() && forms.iter().all(|&f| is_clause(heap, f)) {
-        let g = value::gensym("args");
-        let params = heap.list(vec![value::sym("&"), g]);
-        let mut mexpr = vec![value::sym("match*"), value::kw("fn"), g];
-        mexpr.extend_from_slice(forms); // fn clauses are already match* clauses
-        let body = heap.list(mexpr);
-        return Some(heap.list(vec![value::sym("fn"), params, body]));
+    // Multi-clause: an optional leading docstring, then every form a clause. The
+    // docstring sits *before* the clauses here (a single-clause fn's docstring
+    // sits after the param list and is peeled below); keep it as the lowered
+    // fn's leading body form so `make_closure` still finds it.
+    {
+        let (doc, clauses): (Option<Value>, &[Value]) = match forms.first() {
+            Some(&Value::Str(_)) if forms.len() > 1 => (Some(forms[0]), &forms[1..]),
+            _ => (None, forms),
+        };
+        if !clauses.is_empty() && clauses.iter().all(|&f| is_clause(heap, f)) {
+            let g = value::gensym("args");
+            let params = heap.list(vec![value::sym("&"), g]);
+            let mut mexpr = vec![value::sym("match*"), value::kw("fn"), g];
+            mexpr.extend_from_slice(clauses); // fn clauses are already match* clauses
+            let body = heap.list(mexpr);
+            let mut lowered = vec![value::sym("fn"), params];
+            if let Some(d) = doc {
+                lowered.push(d);
+            }
+            lowered.push(body);
+            return Some(heap.list(lowered));
+        }
     }
 
     // Single-clause: forms[0] is the parameter list, forms[1..] the body.

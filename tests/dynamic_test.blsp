@@ -1,0 +1,148 @@
+;; Dynamic variables (defdyn / binding): process-scoped special vars. A reference
+;; resolves to the innermost active `binding`, else the declared default; bindings
+;; restore on exit (even on error) and are PER-PROCESS — they never cross a
+;; `spawn`. Register-only — discovered and run by `nest test` (and cargo test, via
+;; crates/lisp/tests/suite.rs).
+;;
+;; The whole suite runs in parallel (each test is its own green process), so even
+;; the single-threaded cases below already exercise dynamic vars on many cores.
+;; The final :isolated block adds explicit cross-process coverage: no cross-talk
+;; under contention, no leak into a child, and survival when one process crashes
+;; mid-`binding`.
+
+(require 'test)
+
+;; ---- file-local fixtures (defined once at load; survive :isolated rollback) ----
+
+(defdyn *dt*  0)     ; the dynamic var under test
+(defdyn *dt2* 100)   ; a second one, for multi-var bindings
+
+;; Read *dt* through a function call — proves the value is resolved *dynamically*
+;; at call time (against the caller's binding), not captured at definition.
+(defn dt-read () *dt*)
+
+;; Tail-recursive [lo, hi) (the coroutine stack a `test` runs on is small).
+(defn dt-range (lo hi) (dt-range--down (- hi 1) lo nil))
+(defn dt-range--down (i lo acc)
+  (if (< i lo) acc (dt-range--down (- i 1) lo (cons i acc))))
+
+;; Each worker binds *dt* to its own value and reports what it sees — so a sum of
+;; the reports proves no two processes clobbered each other's binding.
+(defn dt-worker (parent v)
+  (binding (*dt* v)
+    (send parent [:v (dt-read)])))
+(defn dt-spawn-workers (parent vs)
+  (when (pair? vs)
+    (spawn dt-worker parent (first vs))
+    (dt-spawn-workers parent (rest vs))))
+(defn dt-collect (got total acc)
+  (if (= got total) acc
+    (dt-collect (+ got 1) total (receive ([:v v] (+ acc v))))))
+
+;; A worker that does NOT bind: it must see the default, never the parent's binding.
+(defn dt-reader (parent) (send parent [:v (dt-read)]))
+
+;; A worker that crashes *inside* a binding — its (per-process) binding stack dies
+;; with it and must not perturb anyone else.
+(defn dt-crasher () (binding (*dt* 999) (throw :boom)))
+
+;; ---- single-process semantics -----------------------------------------------
+
+(describe "dynamic variables"
+  (test "a dynamic var defaults to its declared value"
+    (assert= *dt* 0)
+    (assert= (dt-read) 0))
+
+  ;; `binding` is a special form, but it must not be reserved as an ordinary name:
+  ;; a fn/macro/let that binds `binding` should work (the compile pass no longer
+  ;; expands binding-position names as calls).
+  (test "`binding` is usable as an ordinary parameter / let name"
+    (assert= ((fn (binding) (+ binding 1)) 41) 42)
+    (assert= (let (binding 10) (* binding 2)) 20)
+    (defmacro dt-with (binding & body) `(do ~@body))
+    (assert= (dt-with x 1 2 3) 3))
+
+  (test "binding shadows for the dynamic extent, then restores"
+    (assert= (binding (*dt* 7) *dt*) 7)
+    (assert= *dt* 0))
+
+  (test "a binding is visible through a function call (late, dynamic resolution)"
+    (assert= (binding (*dt* 42) (dt-read)) 42)
+    (assert= (dt-read) 0))
+
+  (test "nested bindings stack — inner wins, each level restores"
+    (assert= (binding (*dt* 1) (binding (*dt* 2) *dt*)) 2)
+    (assert= (binding (*dt* 1) (binding (*dt* 2) *dt*) *dt*) 1)
+    (assert= *dt* 0))
+
+  (test "one binding can rebind several vars at once"
+    (assert= (binding (*dt* 5 *dt2* 6) (+ *dt* *dt2*)) 11)
+    (assert= *dt* 0)
+    (assert= *dt2* 100))
+
+  (test "a binding restores even when its body throws"
+    (try (binding (*dt* 5) (throw "boom")) (catch e nil))
+    (assert= *dt* 0)
+    ;; …and the thrown value still propagates to the catch
+    (assert= (try (binding (*dt* 5) (throw :raised)) (catch e e)) :raised))
+
+  (test "dynamic? reports declared dynamics only"
+    (is (dynamic? '*dt*))
+    (is (dynamic? '*dt2*))
+    (refute (dynamic? 'dt-read))            ; an ordinary global fn
+    (refute (dynamic? 'never-declared))
+    (refute (dynamic? 42)))                  ; a non-symbol is simply not dynamic
+
+  (test "binding a non-dynamic variable is an error"
+    (assert-error (binding (dt-read 1) (dt-read)))
+    (assert-error (binding (never-declared 1) nil)))
+
+  (test "binding accepts a vector binding form, like let"
+    (assert= (binding [*dt* 8] *dt*) 8))
+
+  (test "an odd-length binding list is rejected"
+    ;; (read at runtime so the bad form doesn't fail the file's own compile pass)
+    (assert-error (eval (read-string "(binding (*dt*) *dt*)"))))
+
+  (test "binding survives a locally-shadowed `list`/`map` (macro hygiene)"
+    ;; The expansion uses only `quote`/`fn` (special forms) and literals, never a
+    ;; runtime `list`/`map` call — so shadowing them can't break it.
+    (assert= (let (list 99 map 7) (binding (*dt* 5) (dt-read))) 5))
+
+  (test "binding (not let) is what a callee reads — let stays lexical"
+    ;; `binding` reaches the callee's dynamic read…
+    (assert= (binding (*dt* 9) (dt-read)) 9)
+    ;; …a lexical `let` of the same name does not (Clojure-style, not CL).
+    (assert= (let (*dt* 5) (dt-read)) 0)
+    (assert= (let (*dt* 5) *dt*) 5)))      ; the lexical binding is what's seen here
+
+;; ---- across processes (parallelism, isolation, crash resilience) ------------
+;; :isolated so these run against a private globals copy and don't contend with
+;; the rest of the suite.
+
+(describe "dynamic variables across processes" :isolated
+
+  (test "each process has its own binding stack (no cross-talk under contention)"
+    ;; 20 workers, each binding *dt* to a distinct i in 1..20 and reporting it.
+    ;; Σ 1..20 = 210 — only correct if no binding leaked between processes.
+    (dt-spawn-workers (self) (dt-range 1 21))
+    (assert= (dt-collect 0 20 0) 210))
+
+  (test "a binding in the parent does not leak into a spawned child"
+    ;; Spawn the reader *inside* a binding; the child still sees the default.
+    (binding (*dt* 77)
+      (spawn dt-reader (self)))
+    (assert= (receive ([:v v] v)) 0))
+
+  (test "one process crashing inside a binding leaves the rest working"
+    ;; Spawn a worker that dies mid-binding; monitor confirms the crash…
+    (let (c (spawn dt-crasher))
+      (let (mr (monitor c))
+        (assert= (receive ([:down ~mr _ [:error _]] :crashed) (after 500 :timeout))
+                 :crashed)))
+    ;; …then fresh workers still compute correctly (Σ 1..10 = 55)…
+    (dt-spawn-workers (self) (dt-range 1 11))
+    (assert= (dt-collect 0 10 0) 55)
+    ;; …and our own dynamic binding is unaffected by the crash.
+    (assert= (binding (*dt* 3) (dt-read)) 3)
+    (assert= *dt* 0)))

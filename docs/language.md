@@ -394,6 +394,59 @@ wanted, and the tag + printed form of what actually arrived — e.g.
 `type error: first: expected list or vector, got int (5)`. The tag word is the
 [`type-of`](#predicates) name, so an error and `type-of` always agree.
 
+## Dynamic variables
+
+A **dynamic variable** is a global whose value can be temporarily overridden for
+the *dynamic extent* of a body — the call tree it encloses — and then restored.
+It's the Lisp "special variable", for config-style knobs (a print depth, a
+current output sink) that a deep callee should read without threading the value
+through every intermediate call.
+
+```lisp
+(defdyn *indent* 0)              ; declare a dynamic var with a default
+
+(defn level () *indent*)         ; reads *indent* — whatever is bound right now
+
+(level)                          ; => 0   (*indent* is its default)
+(binding (*indent* 4) (level))   ; => 4   (rebound for this dynamic extent)
+(level)                          ; => 0   (restored afterwards)
+```
+
+- **`(defdyn *name* default)`** declares `*name*` dynamic and gives it a default.
+  The earmuffs (`*…*`) are convention, not syntax. Reading the var anywhere
+  yields the default until a `binding` overrides it.
+- **`(binding (*a* va *b* vb …) body…)`** evaluates the value expressions, binds
+  each dynamic var for the duration of `body`, and **restores the previous values
+  on exit — even if the body throws**. Bindings nest; the innermost wins. A
+  reference resolves *dynamically*, at the moment it's evaluated, against the
+  caller's bindings — not lexically where the function was defined.
+- **`(dynamic? x)`** is true when `x` is a symbol declared with `defdyn`.
+
+`binding` only accepts a variable previously declared with `defdyn`; rebinding an
+undeclared global is an error (it's almost always a typo, and silently shadowing a
+plain global would mislead). This is the one place a *binding* changes after it's
+made — and like `def`, it's binding mutation, not data mutation; no value is ever
+mutated (see [Immutability](#immutability)).
+
+**`let` is always lexical, even for an earmuffed name.** `binding` is the *only*
+form that creates a dynamic binding; a `let`/`fn` binding of a dynamic var's name
+is an ordinary lexical binding that shadows it within that scope (this differs
+from Common Lisp, where `let` on a special var binds dynamically — Brood follows
+Clojure: lexical `let`, explicit `binding`). So `(let (*x* 5) (callee))` does
+**not** change what `*x*` the callee reads, and a `let` that lexically binds `*x*`
+will hide a `binding` of `*x*` inside its body. The rule: don't `let`-bind a
+dynamic var's name — use `binding`.
+
+**Dynamic bindings are per-process.** The binding stack lives in the process's
+own heap, so a `binding` in one process is invisible to every other — and a
+`spawn`ed child starts from the **defaults**, never inheriting the parent's
+bindings (consistent with share-nothing: data isn't shared, and neither is
+dynamic scope). If a child needs a value, send it explicitly. A process that
+crashes mid-`binding` takes its binding stack down with it and disturbs no one.
+
+`defdyn`/`binding` are Brood macros over a tiny kernel (`%declare-dynamic`,
+`%binding`, `dynamic?`) — no new special form, the `try`/`catch` precedent.
+
 ## Processes (concurrency)
 
 Erlang-style **green processes**: cheap, lightweight, share-nothing (each runs

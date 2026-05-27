@@ -14,10 +14,13 @@ use crate::syntax::{printer, reader};
 /// Install the primitive kernel into `root`.
 pub fn register(heap: &mut Heap, root: EnvId) {
     let def = |heap: &mut Heap, name: &str, arity: Arity, func: NativeFnPtr| {
+        let (params, doc) = primitive_doc(name);
         let v = heap.alloc_native(NativeFn {
             name: name.to_string(),
             arity,
             func,
+            params,
+            doc,
         });
         heap.env_define(root, value::intern(name), v);
     };
@@ -121,6 +124,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // source positions (editor tooling; see docs/tooling.md)
     def(heap, "form-pos", Arity::exact(1), form_pos);
     def(heap, "current-file", Arity::exact(0), current_file);
+    def(heap, "source-location", Arity::exact(1), source_location);
 
     // introspection (editor tooling; see docs/lsp.md) — derive what we can from
     // the bound value (arglist, doc); enumerate the global table for completion.
@@ -134,6 +138,11 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "%try", Arity::exact(2), try_catch);
     def(heap, "%isolate", Arity::exact(1), isolate);
 
+    // dynamic variables (the `defdyn`/`binding` surface is Brood — see prelude)
+    def(heap, "%declare-dynamic", Arity::exact(1), declare_dynamic);
+    def(heap, "%binding", Arity::exact(3), binding);
+    def(heap, "dynamic?", Arity::exact(1), dynamic_p);
+
     // processes (concurrency)
     def(heap, "spawn", Arity::at_least(1), spawn);
     def(heap, "send", Arity::exact(2), send);
@@ -145,6 +154,88 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "spawn-count", Arity::exact(0), spawn_count);
     def(heap, "peak-threads", Arity::exact(0), peak_threads);
     def(heap, "worker-threads", Arity::exact(0), worker_threads);
+}
+
+/// Docstrings + parameter names for the public primitives, so `(doc 'name)`,
+/// `(arglist 'name)`, and LSP hover treat a Rust builtin like a Brood `defn`
+/// (which can't apply here — primitives have no source body). One row per
+/// user-facing primitive; mirrors the "Purpose" column of `docs/primitives.md`.
+/// `&` in the params marks a rest (variadic) tail. Internal `%`-prefixed
+/// primitives are intentionally absent (they aren't meant to be called directly).
+#[rustfmt::skip]
+static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
+    ("rem", &["a", "b"], "Integer remainder of a / b (truncated, taking the sign of the dividend)."),
+    ("floor", &["x"], "Round x toward negative infinity to an integer."),
+    ("cons", &["x", "xs"], "A new pair with head x and tail xs."),
+    ("first", &["coll"], "The head of a list or vector, or nil if empty."),
+    ("rest", &["coll"], "All but the head of a list or vector."),
+    ("vector", &["&", "items"], "A vector of the given items."),
+    ("vector-ref", &["v", "i"], "The element at index i of vector v."),
+    ("vector-length", &["v"], "The number of elements in vector v."),
+    ("hash-map", &["&", "kvs"], "A map from alternating key/value arguments (last wins on duplicate keys)."),
+    ("map-get", &["m", "k", "default"], "The value at key k in map m, or default (else nil)."),
+    ("map-assoc", &["m", "k", "v"], "A fresh map like m with key k set to v."),
+    ("map-dissoc", &["m", "k"], "A fresh map like m with key k removed."),
+    ("map-pairs", &["m"], "The entries of m as a list of [k v] vectors, in insertion order."),
+    ("string-length", &["s"], "The number of characters in string s."),
+    ("substring", &["s", "start", "end"], "The characters of s in the range [start, end), char-indexed."),
+    ("upper", &["s"], "s upper-cased (Unicode-aware)."),
+    ("lower", &["s"], "s lower-cased (Unicode-aware)."),
+    ("string->number", &["s"], "Parse s strictly as an int, else a float, else nil (unlike read-string)."),
+    ("type-of", &["x"], "The runtime type of x as a keyword (:int, :string, :pair, ...)."),
+    ("check", &["form"], "Advisory type-check a quoted form: a list of warning strings, or nil. Never raises."),
+    ("str", &["&", "xs"], "Concatenate the display forms of the arguments into one string."),
+    ("pr-str", &["x"], "The readable (re-readable) text form of x."),
+    ("print", &["&", "xs"], "Write the display forms of the arguments to stdout; returns nil."),
+    ("stdout-tty?", &[], "True when stdout is an interactive terminal (false when piped or captured)."),
+    ("now", &[], "Wall-clock milliseconds since the Unix epoch."),
+    ("mem-bytes", &[], "Bytes currently allocated process-wide."),
+    ("mem-peak", &[], "High-water mark of allocated bytes since process start."),
+    ("eval", &["form"], "Evaluate a form in the global environment."),
+    ("read-string", &["s"], "Parse and return the first form in string s."),
+    ("eval-string", &["s"], "Read and evaluate every form in string s (the string analogue of load)."),
+    ("load", &["path"], "Read and evaluate every form in the file at path."),
+    ("apply", &["f", "&", "args"], "Call f with the leading args plus the final list argument spliced in as trailing args."),
+    ("name", &["x"], "The spelling of a symbol or keyword as a string (no leading colon)."),
+    ("cwd", &[], "The current working directory."),
+    ("file-exists?", &["path"], "Whether path exists."),
+    ("dir?", &["path"], "Whether path is a directory."),
+    ("list-dir", &["path"], "The entry names directly under directory path, sorted."),
+    ("make-dir", &["path"], "Create a directory and any missing parents (like mkdir -p)."),
+    ("spit", &["path", "s"], "Write string s to the file at path."),
+    ("slurp", &["path"], "Read the whole file at path into a string (does not evaluate it)."),
+    ("getenv", &["name"], "The value of environment variable name, or nil if unset."),
+    ("run-process", &["prog", "args"], "Run external program prog with an args list, inheriting stdio; returns its exit code."),
+    ("macroexpand-1", &["form"], "Expand form by a single macro step."),
+    ("macroexpand", &["form"], "Fully expand the macros in form."),
+    ("gensym", &["prefix"], "A fresh, unique symbol, with an optional name prefix."),
+    ("form-pos", &["form"], "A form's [line col] source position, or nil."),
+    ("current-file", &[], "The path of the file currently being loaded, or nil."),
+    ("source-location", &["name"], "Where global name was defined, as [file line col], or nil. Quote it: (source-location 'foo)."),
+    ("doc", &["f"], "The docstring of a function, macro, or primitive, or nil."),
+    ("arglist", &["f"], "The parameter list of a function, macro, or primitive, or nil."),
+    ("global-names", &[], "Every globally bound symbol, sorted by spelling."),
+    ("bound?", &["sym"], "Whether sym is bound in scope. Quote it: (bound? 'foo)."),
+    ("dynamic?", &["x"], "Whether x is a symbol declared dynamic with defdyn. Quote it: (dynamic? '*foo*)."),
+    ("throw", &["x"], "Raise x as an error - a non-local exit caught by try/catch."),
+    ("spawn", &["f", "&", "args"], "Run f applied to args in a new green process; returns its pid."),
+    ("send", &["pid", "msg"], "Copy msg into pid's mailbox; returns nil."),
+    ("self", &[], "This process's own pid."),
+    ("ref", &[], "A fresh, globally-unique reference token (tags a request to its reply)."),
+    ("monitor", &["pid"], "Watch pid; returns a monitor ref. Delivers [:down ref pid reason] when pid dies."),
+    ("demonitor", &["mref"], "Drop the monitor identified by mref (best-effort)."),
+    ("spawn-count", &[], "How many green processes have been spawned since program start."),
+    ("peak-threads", &[], "High-water mark of OS threads running processes concurrently."),
+    ("worker-threads", &[], "The size of the scheduler's worker-thread pool (about nproc)."),
+];
+
+/// The `(params, doc)` for a primitive `name`, or `(&[], "")` if undocumented.
+fn primitive_doc(name: &str) -> (&'static [&'static str], &'static str) {
+    PRIMITIVE_DOCS
+        .iter()
+        .find(|(n, _, _)| *n == name)
+        .map(|&(_, p, d)| (p, d))
+        .unwrap_or((&[], ""))
 }
 
 fn arg(args: &[Value], i: usize) -> Value {
@@ -193,6 +284,14 @@ fn expect_int(heap: &Heap, who: &str, v: Value) -> Result<i64, LispError> {
     match v {
         Value::Int(n) => Ok(n),
         _ => Err(LispError::wrong_type(heap, who, "int", v)),
+    }
+}
+
+/// Require a symbol; otherwise a self-identifying type error.
+fn expect_symbol(heap: &Heap, who: &str, v: Value) -> Result<value::Symbol, LispError> {
+    match v {
+        Value::Sym(s) => Ok(s),
+        _ => Err(LispError::wrong_type(heap, who, "symbol", v)),
     }
 }
 
@@ -500,6 +599,9 @@ fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let prev = heap.set_current_file(Some(path.clone()));
     let mut result = Ok(Value::Nil);
     for (form, pos) in forms {
+        // Record def sites before expansion (ADR-031): `defn`/`defmacro` are still
+        // recognisable here, and their spans aren't yet lost to macroexpansion.
+        heap.note_definition(form, pos);
         result = crate::eval::macros::macroexpand_all(heap, form, root)
             .and_then(|f| crate::eval::eval(heap, f, root))
             .map_err(|e| e.or_pos(pos).or_file(path.clone()));
@@ -800,6 +902,30 @@ fn form_pos(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
 
 /// `(current-file)` — the path of the file currently being `load`ed, or `nil`
 /// (e.g. at the REPL). Maintained by `load`.
+/// `(source-location 'name)` — where `name`'s global definition was loaded from,
+/// as `[file line col]`, or `nil` if it has no recorded site (a builtin, a
+/// prelude global, or an unknown/local name). The site is captured at load time
+/// before macroexpansion, so `defn`/`defmacro` definitions are located
+/// accurately. The image-query foundation for cross-file goto-definition (ADR-031
+/// / docs/lsp.md). Takes a symbol, so quote it: `(source-location 'foo)`.
+fn source_location(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let name = match arg(args, 0) {
+        Value::Sym(s) => s,
+        other => return Err(LispError::wrong_type(heap, "source-location", "symbol", other)),
+    };
+    match heap.def_site(name) {
+        Some(loc) => {
+            let file = heap.alloc_string(&loc.file);
+            Ok(heap.alloc_vector(vec![
+                file,
+                Value::Int(loc.pos.line as i64),
+                Value::Int(loc.pos.col as i64),
+            ]))
+        }
+        None => Ok(Value::Nil),
+    }
+}
+
 fn current_file(_args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
     match heap.current_file().map(str::to_string) {
         Some(f) => Ok(heap.alloc_string(&f)),
@@ -815,6 +941,12 @@ fn current_file(_args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
 fn doc(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
     let text = match arg(args, 0) {
         Value::Fn(id) | Value::Macro(id) => heap.closure(id).doc.clone(),
+        // A primitive's docstring lives on the `NativeFn` (the `PRIMITIVE_DOCS`
+        // table), since it has no Brood body to carry a leading string.
+        Value::Native(id) => {
+            let d = heap.native(id).doc;
+            (!d.is_empty()).then(|| d.to_string())
+        }
         _ => None,
     };
     match text {
@@ -823,12 +955,23 @@ fn doc(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
     }
 }
 
-/// `(arglist f)` — the parameter list of a function or macro as a list, mirroring
-/// the source surface: required names, then `&optional` names, then `& rest`.
-/// `nil` for a non-function. Feeds signature help / hover.
+/// `(arglist f)` — the parameter list of a function, macro, or primitive as a
+/// list, mirroring the source surface: required names, then `&optional` names,
+/// then `& rest`. `nil` for a non-function (or a primitive without recorded
+/// params). Feeds signature help / hover.
 fn arglist(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
     let id = match arg(args, 0) {
         Value::Fn(id) | Value::Macro(id) => id,
+        // A primitive carries its param names as a flat `&'static` list (incl. any
+        // `&`/`&optional` markers, already in order) — hand them back as symbols.
+        Value::Native(id) => {
+            let params = heap.native(id).params;
+            if params.is_empty() {
+                return Ok(Value::Nil);
+            }
+            let items: Vec<Value> = params.iter().map(|p| value::sym(p)).collect();
+            return Ok(heap.list(items));
+        }
         _ => return Ok(Value::Nil),
     };
     // Copy the parts out before re-borrowing the heap mutably to build the list.
@@ -1002,4 +1145,61 @@ fn try_catch(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
             apply(heap, handler, &[caught], env)
         }
     }
+}
+
+// ----- dynamic variables -----------------------------------------------------
+//
+// The kernel for `defdyn`/`binding`; the surface macros are in the prelude. A
+// dynamic variable's *value* resolves through the per-process binding stack in
+// the `Heap` (see `Heap::env_get`), so reads need no primitive here — only the
+// declaration, the scoped rebind, and the predicate.
+
+/// `(%declare-dynamic 'name)` — mark a symbol as a dynamic variable, so
+/// `binding` will accept it (and `dynamic?` reports it). `defdyn` expands to
+/// this plus a plain `def` of the default value.
+fn declare_dynamic(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let sym = expect_symbol(heap, "%declare-dynamic", arg(args, 0))?;
+    value::mark_dynamic(sym);
+    Ok(Value::Sym(sym))
+}
+
+/// `(dynamic? x)` — true when `x` is a symbol declared dynamic with `defdyn`.
+/// A non-symbol is simply not dynamic (no error), so it composes in predicates.
+fn dynamic_p(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    Ok(Value::Bool(matches!(arg(args, 0), Value::Sym(s) if value::is_dynamic(s))))
+}
+
+/// `(%binding syms vals thunk)` — run `thunk` (no args) with each dynamic var in
+/// `syms` bound to the matching value in `vals` for the dynamic extent of the
+/// call, restoring the previous bindings on return *or* error. `syms` (a quoted
+/// list) and `vals` (a vector) are equal-length sequences built by the `binding`
+/// macro — both emitted as unshadowable literals, so a local rebinding of `list`
+/// can't break the form. Every name must be declared dynamic (else it's almost
+/// certainly a typo — a plain global won't track the rebind). The bindings live
+/// in this process's heap, so they don't reach a `spawn`ed child.
+fn binding(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
+    let syms = heap.seq_items(arg(args, 0))?;
+    let vals = heap.seq_items(arg(args, 1))?;
+    let thunk = arg(args, 2);
+    // Validate every name up front, before pushing anything — so a bad `binding`
+    // leaves the dynamic stack untouched rather than half-pushed.
+    let mut names = Vec::with_capacity(syms.len());
+    for s in &syms {
+        let sym = expect_symbol(heap, "binding", *s)?;
+        if !value::is_dynamic(sym) {
+            return Err(LispError::runtime(format!(
+                "binding: {} is not a dynamic variable (declare it with defdyn)",
+                value::symbol_name(sym)
+            )));
+        }
+        names.push(sym);
+    }
+    for (i, &sym) in names.iter().enumerate() {
+        heap.push_dynamic(sym, arg(&vals, i));
+    }
+    let result = apply(heap, thunk, &[], env);
+    for _ in 0..names.len() {
+        heap.pop_dynamic();
+    }
+    result
 }

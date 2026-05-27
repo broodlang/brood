@@ -136,6 +136,35 @@ target is to shrink the two central functions and drop the local `range` helper:
   `tests/introspection_test.blsp`. (Multi-clause docstrings remain unsupported —
   separate, pre-existing.)
 
+## Bugs found building the comprehension features (2026-05-27) — ✅ FIXED
+
+- [x] **Multi-clause `defn` couldn't carry a docstring.** Fixed in `lower_fn`
+  (`crates/lisp/src/eval/macros.rs`): the multi-clause path now peels an optional
+  leading docstring and re-emits it as the lowered fn's first body form;
+  `fn_needs_lowering` peels it too so the eval fallback still detects multi-clause.
+  `examples/life.blsp` `check-cell` got its docstring back. Test in
+  `tests/introspection_test.blsp`.
+- [x] **Binding-position names were expanded as macro calls.** Root cause of the
+  whole `doseq`/`binding` saga: `macroexpand_all` walked a `fn`/`defmacro` param
+  list (and `let` targets) generically, so a name there whose spelling is a macro
+  — e.g. `binding` (the dynamic-var form) — got expanded as a call (`first` on
+  `&`). Fixed: `fn`/`lambda` and `defmacro` now expand only their body
+  (`expand_tail`), and an ordinary `let` expands only binding *values*, not
+  *targets* (`expand_let`). So `binding`/`let`/`when`/… are usable as ordinary
+  names again. Test in `tests/dynamic_test.blsp`.
+- The "`defmacro` template with a multi-param `(fn (~a ~b) …)` mis-lowers" item
+  was a **misdiagnosis** — it was the param-name collision above in every case; a
+  multi-param fn template expands fine with non-colliding names. Removed.
+
+## Done: `for` / `doseq` / `times` / `iterate-times` / `enumerate` / `into` ✅ (2026-05-27)
+
+- [x] Comprehension `for` (multi-binding + `:when` + destructuring, macro over
+  `mapcat`), `doseq`, `times`/`iterate-times`, `enumerate`, `into` — all pure-Brood
+  in `std/prelude.blsp`. `examples/life.blsp` rewritten to use them: `step` is a
+  `for`+`into`, `render`/`render-row` use `for`, `nth-gen` is `times`, `animate` is
+  `doseq`+`enumerate`+`iterate-times`+`clear-frame`, and `check-cell` is multi-clause
+  dispatch (no explicit `match`). Tests in `tests/sequence_test.blsp`.
+
 ## Concurrency / runtime follow-ups (from the `ref` work, 2026-05-27)
 
 - [ ] **`match`/`receive` can't be used inside a prelude-level function** (debug

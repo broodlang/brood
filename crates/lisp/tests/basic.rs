@@ -234,6 +234,39 @@ fn slurp_round_trips_a_file() {
 }
 
 #[test]
+fn source_location_records_def_sites_from_a_loaded_file() {
+    // ADR-031: loading a file records where each top-level def/defn/defmacro was
+    // defined, so `(source-location 'name)` can answer cross-file goto-definition.
+    let mut path = std::env::temp_dir();
+    path.push(format!("brood-srcloc-{}.blsp", std::process::id()));
+    std::fs::write(&path, "(defn foo (x) (* x 2))\n(def bar 10)\n").unwrap();
+    let p = path.to_string_lossy().replace('\\', "\\\\");
+
+    let mut interp = Interp::new();
+    interp.eval_str(&format!("(load \"{p}\")")).expect("load");
+    let loc = |interp: &mut Interp, s: &str| {
+        let v = interp_eval(interp, s);
+        interp.print(v)
+    };
+
+    // `defn` (a macro lowering to `def`) is still located: the site is captured
+    // pre-expansion. Both names point at their form's line, column 1.
+    assert_eq!(loc(&mut interp, "(source-location 'foo)"), format!("[\"{p}\" 1 1]"));
+    assert_eq!(loc(&mut interp, "(source-location 'bar)"), format!("[\"{p}\" 2 1]"));
+    // A prelude global has no recorded site; nor does an unknown name.
+    assert_eq!(loc(&mut interp, "(source-location 'map)"), "nil");
+    assert_eq!(loc(&mut interp, "(source-location 'no-such-xyz)"), "nil");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Eval `src` against an existing interpreter (so state from a prior `load`
+/// persists), returning the value.
+fn interp_eval(interp: &mut Interp, src: &str) -> brood::core::value::Value {
+    interp.eval_str(src).expect("evaluation failed")
+}
+
+#[test]
 fn slurp_of_a_missing_file_errors() {
     Interp::new()
         .eval_str("(slurp \"/no/such/brood/file.blsp\")")
@@ -684,6 +717,40 @@ fn dotted_pairs_round_trip() {
     assert!(interp.eval_str(r#"(read-string "( . 3)")"#).is_err());
     assert!(interp.eval_str(r#"(read-string "(1 . )")"#).is_err());
     assert!(interp.eval_str(r#"(read-string "(1 . 2 3)")"#).is_err());
+}
+
+/// Dynamic variables (`defdyn`/`binding`): default, dynamic shadowing through a
+/// function call, restoration, and the unwind on error.
+#[test]
+fn dynamic_variables() {
+    assert_eq!(run("(defdyn *d* 0) *d*"), "0");
+    // `binding` shadows for the dynamic extent, then restores.
+    assert_eq!(run("(defdyn *d* 0) (list (binding (*d* 7) *d*) *d*)"), "(7 0)");
+    // Resolved at call time against the caller's binding, not at definition.
+    assert_eq!(
+        run("(defdyn *d* 0) (defn rd () *d*) (binding (*d* 42) (rd))"),
+        "42"
+    );
+    // Nested bindings stack; inner wins.
+    assert_eq!(run("(defdyn *d* 0) (binding (*d* 1) (binding (*d* 2) *d*))"), "2");
+    // The binding is unwound even when the body throws.
+    assert_eq!(
+        run("(defdyn *d* 0) (try (binding (*d* 5) (throw \"x\")) (catch e nil)) *d*"),
+        "0"
+    );
+    // `dynamic?` reports declared dynamics only.
+    assert_eq!(
+        run("(defdyn *d* 0) (list (dynamic? '*d*) (dynamic? 'rd) (dynamic? 42))"),
+        "(true false false)"
+    );
+}
+
+/// `binding` on a variable that was never declared dynamic is an error — the
+/// usual cause is a typo, and silently rebinding a plain global would mislead.
+#[test]
+fn binding_undeclared_is_an_error() {
+    let mut interp = Interp::new();
+    assert!(interp.eval_str("(binding (not-dynamic 1) not-dynamic)").is_err());
 }
 
 /// `gensym` must mint process-wide-unique symbols, including across threads — a

@@ -103,25 +103,23 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     return Ok(args.into_iter().next().unwrap_or(Value::Nil));
                 }
                 "if" => {
-                    let args = heap.list_to_vec(rest)?;
-                    let test = eval(heap, nth(&args, 0), env)?;
-                    expr = if truthy(test) {
-                        nth(&args, 1)
-                    } else {
-                        nth(&args, 2)
-                    };
+                    // (if test then else?) — read the operands straight off the
+                    // cons spine; a missing branch defaults to nil (as nth did),
+                    // so no intermediate Vec is allocated per conditional.
+                    let (test_form, r) = uncons(heap, rest);
+                    let (then_form, r) = uncons(heap, r);
+                    let (else_form, _) = uncons(heap, r);
+                    let test = eval(heap, test_form, env)?;
+                    expr = if truthy(test) { then_form } else { else_form };
                     continue 'tail;
                 }
-                "do" => {
-                    let args = heap.list_to_vec(rest)?;
-                    match tail_of(heap, &args, 0, env)? {
-                        Some(last) => {
-                            expr = last;
-                            continue 'tail;
-                        }
-                        None => return Ok(Value::Nil),
+                "do" => match tail_of_cons(heap, rest, env)? {
+                    Some(last) => {
+                        expr = last;
+                        continue 'tail;
                     }
-                }
+                    None => return Ok(Value::Nil),
+                },
                 "def" => {
                     let args = heap.list_to_vec(rest)?;
                     let name = as_symbol(
@@ -175,13 +173,11 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     return Ok(Value::Sym(name));
                 }
                 "let" | "let*" => {
-                    let args = heap.list_to_vec(rest)?;
-                    let binds = as_binding_vec(
-                        heap,
-                        args.first()
-                            .copied()
-                            .ok_or_else(|| LispError::runtime("let: missing bindings"))?,
-                    )?;
+                    let (binds_form, body) = uncons(heap, rest);
+                    if !matches!(rest, Value::Pair(_)) {
+                        return Err(LispError::runtime("let: missing bindings"));
+                    }
+                    let binds = as_binding_vec(heap, binds_form)?;
                     if binds.len() % 2 != 0 {
                         return Err(LispError::runtime("let: bindings must be name/value pairs"));
                     }
@@ -204,7 +200,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                         heap.env_define(scope, bind_name, val);
                         i += 2;
                     }
-                    match tail_of(heap, &args, 1, scope)? {
+                    match tail_of_cons(heap, body, scope)? {
                         Some(last) => {
                             expr = last;
                             env = scope;
@@ -217,22 +213,44 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
             }
         }
 
-        // --- macro expansion ---
-        if let Value::Sym(s) = head {
-            if let Some(Value::Macro(mid)) = heap.env_get(env, s) {
-                let arg_forms = heap.list_to_vec(rest)?;
-                expr = apply_closure(heap, mid, &arg_forms)?;
-                continue 'tail;
+        // --- macro expansion + function application ---
+        // Resolve the head once: a symbol head is looked up in the environment
+        // (a single walk, shared by the macro check and the callee), any other
+        // head form is evaluated. A macro expands and re-enters the loop; anything
+        // else becomes the callee. (Previously the head was resolved twice — once
+        // for the macro test, once via `eval(head)` — doubling global-table hits
+        // on the hottest path.)
+        let callee = match head {
+            Value::Sym(s) => {
+                let v = heap.env_get(env, s).ok_or_else(|| {
+                    LispError::unbound(format!("unbound symbol: {}", value::symbol_name(s)))
+                })?;
+                if let Value::Macro(mid) = v {
+                    let arg_forms = heap.list_to_vec(rest)?;
+                    expr = apply_closure(heap, mid, &arg_forms)?;
+                    continue 'tail;
+                }
+                v
+            }
+            _ => eval(heap, head, env)?,
+        };
+
+        // Evaluate the argument forms straight off the `rest` cons spine into
+        // `argv`, without first collecting them into an intermediate Vec.
+        let mut argv = Vec::new();
+        let mut cur = rest;
+        loop {
+            match cur {
+                Value::Nil => break,
+                Value::Pair(p) => {
+                    let (form, next) = heap.pair(p);
+                    argv.push(eval(heap, form, env)?);
+                    cur = next;
+                }
+                _ => return Err(LispError::type_err("improper argument list in call")),
             }
         }
 
-        // --- function application ---
-        let callee = eval(heap, head, env)?;
-        let arg_forms = heap.list_to_vec(rest)?;
-        let mut argv = Vec::with_capacity(arg_forms.len());
-        for form in arg_forms {
-            argv.push(eval(heap, form, env)?);
-        }
         match callee {
             Value::Native(id) => return call_native(heap, id, &argv, env),
             Value::Fn(id) => {
@@ -501,27 +519,33 @@ fn as_binding_vec(heap: &Heap, v: Value) -> Result<Vec<Value>, LispError> {
     })
 }
 
-/// Evaluate all-but-last of `items[from..]` for effect; return the tail form.
-fn tail_of(
-    heap: &mut Heap,
-    items: &[Value],
-    from: usize,
-    env: EnvId,
-) -> Result<Option<Value>, LispError> {
-    let slice = if from < items.len() {
-        &items[from..]
-    } else {
-        &[][..]
-    };
-    if slice.is_empty() {
-        return Ok(None);
+/// Split a list cell into `(head, tail)`; `(nil, nil)` if it isn't a pair. For
+/// reading a fixed number of operands off a form's argument spine (`if`, `let`'s
+/// bindings/body split) without materializing a `Vec`.
+fn uncons(heap: &Heap, v: Value) -> (Value, Value) {
+    match v {
+        Value::Pair(p) => heap.pair(p),
+        _ => (Value::Nil, Value::Nil),
     }
-    for &form in &slice[..slice.len() - 1] {
-        eval(heap, form, env)?;
-    }
-    Ok(Some(slice[slice.len() - 1]))
 }
 
-fn nth(args: &[Value], i: usize) -> Value {
-    args.get(i).copied().unwrap_or(Value::Nil)
+/// Evaluate all-but-last of the forms in the cons-list `body` for effect; return
+/// the last form (or `None` if empty). Walks the spine directly, so a `do`/`let`
+/// body costs no intermediate `Vec`. Errors on an improper list.
+fn tail_of_cons(heap: &mut Heap, body: Value, env: EnvId) -> Result<Option<Value>, LispError> {
+    let mut cur = body;
+    loop {
+        match cur {
+            Value::Nil => return Ok(None),
+            Value::Pair(p) => {
+                let (form, next) = heap.pair(p);
+                if matches!(next, Value::Nil) {
+                    return Ok(Some(form));
+                }
+                eval(heap, form, env)?;
+                cur = next;
+            }
+            _ => return Err(LispError::type_err("improper body list")),
+        }
+    }
 }

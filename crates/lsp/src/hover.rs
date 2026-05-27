@@ -138,6 +138,15 @@ mod tests {
     }
 
     #[test]
+    fn hovers_a_primitive_with_signature_and_doc() {
+        // Builtins now carry params + a docstring (PRIMITIVE_DOCS), so hover on a
+        // primitive renders both, like a Brood function.
+        let md = hover_at("(cons 1 xs)", "cons").expect("hover on cons");
+        assert!(md.contains("(cons x xs)"), "signature missing: {md:?}");
+        assert!(md.contains("pair"), "doc missing: {md:?}");
+    }
+
+    #[test]
     fn no_hover_on_a_literal() {
         assert!(hover_at("(+ 1 2)", "1").is_none());
     }

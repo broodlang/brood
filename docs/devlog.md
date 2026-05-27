@@ -1720,3 +1720,87 @@ roadmap to match.
 **Next concrete step.** The `source-location` primitive (foundation; useful for
 error provenance / `nest` / a self-hosted REPL `M-.` on its own), then wire the
 server's `Free`-name fallback to it.
+
+---
+
+## 2026-05-27 — Dynamic variables (`defdyn` / `binding`)
+
+**Goal.** Close the last open Tier-1 language gap (ROADMAP.md): Lisp special
+variables for config-style knobs — declare a default, override it for a dynamic
+extent, restore on exit.
+
+**Design.** Kept the core small and Brood-first (ADR-006/011), reusing the
+`try`/`catch` shape — surface macros over a tiny primitive kernel, **no new
+special form**:
+- **Reads** resolve through a **per-process dynamic binding stack** living in the
+  `Heap` (not a Rust thread-local — green processes migrate between workers). The
+  stack is consulted in `env_get` *only at the `EnvId::GLOBAL` step* and *only
+  when non-empty*, so it costs nothing when no `binding` is active and shadows a
+  var precisely where it resolves (dynamic vars are never lexically bound).
+- **Per-process by construction.** The stack is in the process's own heap, so a
+  `binding` never crosses a `spawn` — a child starts from the declared defaults
+  (consistent with share-nothing). A process that crashes mid-`binding` drops its
+  stack with its heap and perturbs nothing.
+- **Declared, not implicit.** `defdyn` marks the symbol dynamic in a process-wide
+  registry (a `static` set, like the interner — a monotonic declaration fact, not
+  per-runtime state); `binding` rejects an undeclared var (catches typos, gives
+  `defdyn` real meaning). `dynamic?` reports it.
+- **Restore on unwind.** `%binding` mirrors `%isolate`: push → `apply` thunk →
+  pop, popping on both `Ok` and `Err`, so a throw out of the body still restores.
+
+**Built.**
+- `value.rs`: `DYNAMICS` registry + `mark_dynamic`/`is_dynamic`.
+- `heap.rs`: per-process `dynamics` stack (`push_dynamic`/`pop_dynamic`); the
+  dynamic-aware branch in `env_get`.
+- `builtins.rs`: `%declare-dynamic`, `%binding`, `dynamic?` primitives (+ an
+  `expect_symbol` helper).
+- `std/prelude.blsp`: `defdyn` / `binding` macros + expand-time `binding--names`/
+  `binding--vals` splitters.
+- Tests: `tests/dynamic_test.blsp` — single-process semantics (default, late
+  resolution, nesting, multi-var, restore-on-throw, validation) **plus** an
+  `:isolated` across-processes block proving no cross-talk under contention (20
+  workers each `binding` a distinct value, fan-in), that a parent's binding never
+  leaks into a `spawn`ed child, and that **one process crashing inside a
+  `binding` leaves the rest computing correctly**. Rust smoke tests in
+  `crates/lisp/tests/basic.rs`.
+- Docs: new "Dynamic variables" section in `docs/language.md`; both roadmaps
+  ticked; [ADR-032](decisions.md).
+
+**Concurrent-edit note.** The tree moved under this work (the symbol interner was
+rewritten to a lock-free `boxcar` `NAMES` + `Mutex` `IDS`, and a `def_sites` table
+landed for ADR-031 xref); the dynamic-var additions merged cleanly with both.
+
+---
+
+## 2026-05-27 — source-location primitive + hover documentation (stdlib & primitives)
+
+**source-location (ADR-031 foundation).** Loading a file now records where each
+top-level `def`/`defn`/`defmacro` was defined — `name -> (file, span)` — into the
+shared `RuntimeCode` region (beside the global table, so it's process-shared and
+updates on redefinition). Captured *pre-macroexpansion* in the file loaders
+(`load` builtin + `eval_source`), so `defn`/`defmacro` (which lower to `def`) are
+located by their own form. New primitive `(source-location 'name) -> [file line
+col]` (or nil). The CLI now sets `current-file` around `eval_source`, so direct
+`brood file.blsp` / `brood --test` runs record sites too (and test/error
+locations stop showing the `nil:` prefix). Tests: a Rust load-and-query case +
+in-language coverage in `introspection_test.blsp`, including a spawned process
+seeing the same site (shared region). Cross-file goto-definition (resolve a
+`Free` name against this) is the next step on top.
+
+**Hover documentation.** Made `(doc …)`/hover work for the whole public surface:
+- *Primitives* now carry docs. `NativeFn` gained `params: &'static [&str]` +
+  `doc: &'static str`, filled at registration from a new `PRIMITIVE_DOCS` table
+  (one row per public builtin, mirroring `docs/primitives.md`). `doc`/`arglist`
+  read them, so `(doc cons)` and `(arglist cons)` work like a Brood function's,
+  and LSP hover shows `(cons x xs)` + the docstring. `&` in the params marks a
+  variadic tail (`(vector & items)`), which conveys arity. Internal `%`-prefixed
+  primitives are intentionally left undocumented.
+- *Stdlib* — added leading-string **docstrings** (the `defn` doc feature) to the
+  public prelude functions/macros that lacked them: arithmetic/comparison,
+  predicates, list/sequence/map ops, math, the control + threading macros, `try`/
+  `defdyn`/`binding`/`match`/`receive`/`for`/`doseq`, string + path helpers, and
+  `provide`/`require`. (`foo--` helpers left undocumented, per "public API only".)
+
+All green (`cargo test --workspace`), clippy clean for the touched crates. The
+prelude was under concurrent edit (dynamic variables landing in parallel);
+docstring edits were additive and behaviour is unchanged (verified by the suite).

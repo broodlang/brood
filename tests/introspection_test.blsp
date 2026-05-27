@@ -21,6 +21,14 @@
     (defn add-pair ([x y]) "Sum a 2-vector." (+ x y))
     (assert= (doc add-pair) "Sum a 2-vector.")  ; was dropped by the fn-lowering path
     (assert= (add-pair [3 4]) 7))               ; …and the doc isn't returned/evaluated
+  (test "a multi-clause defn keeps its (leading) docstring"
+    (defn sign
+      "Describe a number's sign."
+      ((0) :zero)
+      ((n) :when (> n 0) :positive)
+      ((n) :negative))
+    (assert= (doc sign) "Describe a number's sign.")
+    (assert= (list (sign -3) (sign 0) (sign 9)) (list :negative :zero :positive)))
   (test "doc of a non-function is nil"
     (assert= (doc 42) nil)
     (assert= (doc "a string") nil)))
@@ -50,3 +58,28 @@
     (defn another-name () nil)
     (is (member? 'map (global-names)))
     (is (member? 'another-name (global-names)))))
+
+;; source-location (ADR-031; docs/lsp.md §Cross-file): loading a file records
+;; where each *top-level* def/defn/defmacro was defined, so tooling can answer
+;; cross-file goto-definition by querying the running image. `sl-subject` must be
+;; top-level (a nested def inside a `test` block isn't recorded — by design).
+(defn sl-subject (x) (* x x))
+;; Sends the parent its own view of the site, to prove a spawned process sees the
+;; same shared def-site table (it lives in the runtime code region, like globals).
+(defn sl-worker (parent) (send parent (source-location 'sl-subject)))
+
+(describe "source-location (cross-file def sites)"
+  (test "records a top-level defn's site in this file"
+    (let (loc (source-location 'sl-subject))
+      (refute (nil? loc))
+      (is (vector? loc))
+      (assert= (count loc) 3)               ; [file line col]
+      (is (string? (first loc)))            ; the file it was loaded from
+      (is (int? (first (rest loc))))))      ; the line
+  (test "a prelude global / unknown name has no recorded site"
+    (assert= (source-location 'map) nil)          ; prelude binding, not load-recorded
+    (assert= (source-location 'no-such-name-xyz) nil))
+  (test "the site is visible from a spawned process (shared runtime code)"
+    (let (w (spawn sl-worker (self)))
+      ;; the worker's copied-across value equals the parent's own lookup
+      (assert= (receive) (source-location 'sl-subject)))))

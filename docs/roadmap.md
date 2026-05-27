@@ -42,7 +42,12 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   (the irreducible Float→Int crossing); `sqrt` is Newton's method.
 - ✅ **Sequence library** — `range take drop take-while drop-while some? every?
   find zip partition sort sort-by` (all Brood; `sort` is a stable merge sort).
-- ⬜ **Dynamic variables** (`defdyn` / `binding`) for editor config
+- ✅ **Dynamic variables** (`defdyn` / `binding`) for config-style knobs — Lisp
+  special vars with restore-on-exit (even on throw); **per-process** (a `spawn`ed
+  child starts from defaults, never inherits a binding). Brood macros over a tiny
+  kernel (`%declare-dynamic`/`%binding`/`dynamic?`); the value resolves through a
+  per-process binding stack consulted only at the global-lookup step (free when
+  no `binding` is active). No new special form.
 - ✅ **Error handling** — `throw` + `%try` primitives; `try`/`catch` + `error`
   in the prelude (no new special forms — ADR-011)
 - ✅ **Pattern matching** (ADR-021) — Erlang/Elixir-style; one Brood compiler
