@@ -9,7 +9,7 @@ load-bearing choice (ADR-006 "write the language in the language", ADR-008
 
 `%`-prefixed names are low-level primitives not meant to be called directly.
 
-## Native primitive functions (39)
+## Native primitive functions (44)
 
 | Category | Primitive | Arity | Purpose |
 |---|---|---|---|
@@ -31,11 +31,16 @@ load-bearing choice (ADR-006 "write the language in the language", ADR-008
 | **Self-hosting hooks** | `eval` | 1 | evaluate a form in the global env |
 | | `read-string` | 1 | parse one form from text |
 | | `load` | 1 | read + evaluate a file |
+| | `require` | 1 | load an embedded std-library module by name (e.g. `'test`) |
 | | `apply` | ≥2 | call a function with a spliced argument list |
 | **Macro support** | `macroexpand-1` `macroexpand` | 1 | expand a form (one step / fully) |
 | | `gensym` | 0–1 | a fresh, unique symbol (optional name prefix) |
 | **Errors / control** | `throw` | 1 | raise a value as an error (non-local exit) |
 | | `%try` | 2 | call a thunk; on raise, call the handler with the caught value |
+| **Processes** | `spawn` | ≥1 | run a function in a new process; returns its pid |
+| | `send` | 2 | copy a message into a pid's mailbox |
+| | `receive` | 0 | take the next message from this process's mailbox (blocking) |
+| | `self` | 0 | this process's pid |
 
 **Why this set is irreducible:** every entry needs Rust — raw number ops, heap
 construct/inspect, type-tag tests, I/O, value→text conversion, or a hook into

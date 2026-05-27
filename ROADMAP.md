@@ -71,10 +71,10 @@ The native kernel is **39 primitives** — see [`docs/primitives.md`](docs/primi
 - ⬜ **Source locations in errors** — the reader currently drops spans; attaching
   them gives line/column in messages (and later, stack traces). **[kernel]**
 - ✅ **Native test library** — `std/test.lisp` (`deftest` / `is` / `assert=` /
-  `run-tests`, written in mylisp). `tests/suite.lisp` uses it (52 assertions, 14
-  tests, incl. concurrency); run via `./bin/cli std/test.lisp tests/suite.lisp`
-  and by `cargo test`.
-  Failures are reported and exit non-zero. **[mylisp]**
+  `assert-error` / `run-tests`, written in mylisp). Loaded via `(require 'test)`
+  (embedded in the binary, so it works from any directory). `tests/suite.lisp`
+  uses it (54 assertions, 14 tests, incl. concurrency); run via
+  `./bin/cli tests/suite.lisp` and by `cargo test`. Failures exit non-zero. **[mylisp]**
 
 ### Out of scope for Stage 1 (deferred, additive later)
 

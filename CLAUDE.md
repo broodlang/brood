@@ -59,7 +59,7 @@ cargo build                       # build the workspace
 cargo test                        # Rust tests + the mylisp suite (tests/suite.lisp)
 cargo run -p cli                  # start the REPL  (or: ./bin/cli)
 cargo run -p cli file.lisp        # run a program file
-./bin/cli std/test.lisp tests/suite.lisp   # the in-language test suite (native test lib)
+./bin/cli tests/suite.lisp        # the in-language test suite (does (require 'test))
 ```
 
 `make -j$(nproc)` isn't used here — it's a Cargo workspace.

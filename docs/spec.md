@@ -261,9 +261,10 @@ load-bearing design choice (see `CLAUDE.md` and `docs/decisions.md`).
 the type-tag predicates `nil? pair? int? float? bool? string? symbol? keyword?
 vector? fn?` ·
 `str pr-str print println` ·
-`eval read-string load apply` ·
+`eval read-string load require apply` ·
 `macroexpand macroexpand-1 gensym` ·
-`throw %try`.
+`throw %try` ·
+`spawn send receive self`.
 
 `%`-prefixed names are low-level and not intended for direct use. The full
 annotated list is in [primitives.md](primitives.md).

@@ -6,10 +6,10 @@ use mylisp::Interp;
 
 #[test]
 fn mylisp_suite_passes() {
-    let test_lib = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../std/test.lisp"));
+    // The suite does `(require 'test)` itself, and the framework is embedded in
+    // the binary — so no file paths or working-directory assumptions here.
     let suite = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/suite.lisp"));
     let mut interp = Interp::new();
-    interp.eval_str(test_lib).expect("loading std/test.lisp failed");
     if let Err(e) = interp.eval_str(suite) {
         panic!("mylisp test suite failed: {}", e);
     }

@@ -64,6 +64,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "eval", eval_builtin);
     def(heap, "read-string", read_string);
     def(heap, "load", load);
+    def(heap, "require", require);
     def(heap, "apply", apply_builtin);
 
     // macros
@@ -336,6 +337,32 @@ fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
         result = crate::eval::eval(heap, form, root)?;
     }
     Ok(result)
+}
+
+/// Standard-library modules embedded in the binary (like the prelude), loaded
+/// on demand by `require` — so they work from any directory, no file paths.
+const TEST_LIB: &str = include_str!("../../../std/test.lisp");
+
+/// `(require 'name)` — load an embedded standard-library module into the global
+/// environment. Robust to the current directory (the source is baked in).
+fn require(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
+    let name = match arg(args, 0) {
+        Value::Sym(s) | Value::Keyword(s) => value::symbol_name(s),
+        Value::Str(id) => heap.string(id).to_string(),
+        other => {
+            let shown = printer::print(heap, other);
+            return Err(LispError::type_err(format!("require: expected a module name, got {}", shown)));
+        }
+    };
+    let src = match name.as_str() {
+        "test" => TEST_LIB,
+        _ => return Err(LispError::runtime(format!("require: unknown module '{}'", name))),
+    };
+    let root = heap.env_root(env);
+    for form in reader::read_all(heap, src)? {
+        crate::eval::eval(heap, form, root)?;
+    }
+    Ok(Value::Nil)
 }
 
 fn apply_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {

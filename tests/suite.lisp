@@ -1,6 +1,8 @@
 ;; mylisp test suite — written in mylisp, using the native test library.
-;;   ./bin/cli std/test.lisp tests/suite.lisp
+;;   ./bin/cli tests/suite.lisp
 ;; (also run by `cargo test` via crates/lisp/tests/suite.rs)
+
+(require 'test)
 
 (deftest arithmetic
   (assert= (+ 1 2 3)     6)
@@ -76,7 +78,9 @@
 (deftest error-handling
   (assert= (try (throw 42) (catch e e))         42)
   (is      (try (/ 1 0) (catch e (string? e))))
-  (assert= (try (+ 1 2) (catch e :nope))        3))
+  (assert= (try (+ 1 2) (catch e :nope))        3)
+  (assert-error (/ 1 0))
+  (assert-error (throw :boom)))
 
 (deftest tail-calls
   (defn sum-to (n acc) (if (= n 0) acc (sum-to (- n 1) (+ acc n))))

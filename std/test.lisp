@@ -1,12 +1,11 @@
 ;; std/test.lisp — a tiny test framework, written in mylisp itself.
 ;;
+;;   (require 'test)            ; load the framework (embedded in the binary)
 ;;   (deftest math
 ;;     (is (= (+ 1 2) 3))
-;;     (assert= (* 2 3) 6))
+;;     (assert= (* 2 3) 6)
+;;     (assert-error (/ 1 0)))
 ;;   (run-tests)
-;;
-;; Load it before your tests (the CLI runs files in order):
-;;   ./bin/cli std/test.lisp my-tests.lisp
 ;;
 ;; `run-tests` prints a summary and raises an error if anything failed (so it
 ;; exits non-zero), which is how `cargo test` picks up failures.
@@ -36,6 +35,14 @@
     (do
       (set! *failed* (+ *failed* 1))
       (println "  FAIL" (str *current*) "—" (pr-str actual) "≠" (pr-str expected)))))
+
+;; (assert-error body...) — assert that evaluating body raises an error.
+(defmacro assert-error (& body)
+  `(if (try (do ~@body false) (catch e true))
+     (set! *passed* (+ *passed* 1))
+     (do
+       (set! *failed* (+ *failed* 1))
+       (println "  FAIL" (str *current*) "— expected an error, none raised"))))
 
 ;; Run the registered tests in definition order. Tail-recursive, so any number
 ;; of tests is fine.

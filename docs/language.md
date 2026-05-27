@@ -238,7 +238,10 @@ follow-up). See [concurrency.md](concurrency.md) for the model and limitations.
   *readable* form of one value.
 
 ### Metaprogramming / self-hosting
-`eval`  `read-string`  `load`  `macroexpand`  `macroexpand-1`  `gensym`
+`eval`  `read-string`  `load`  `require`  `macroexpand`  `macroexpand-1`  `gensym`
+
+`(require 'name)` loads an embedded standard-library module (e.g. `(require 'test)`
+for the test framework) — works from any directory.
 
 ```clojure
 (eval (read-string "(+ 40 2)"))  ;=> 42
