@@ -1698,7 +1698,7 @@ order, falsy values through keys/vals, `reduce-kv` folds incl. empty-map seed);
 
 ## 2026-05-27 — Design: cross-file xref via the image, not a static index (ADR-031)
 
-**Decision (no code yet).** Recorded [ADR-031](decisions.md#adr-031). The question
+**Decision (no code yet).** Recorded [ADR-031](decisions.md#adr-031--cross-file-xref-is-an-image-query-not-a-static-index-record-def-sites-at-load-time). The question
 was how `brood-lsp` should resolve names across `require`d modules. Rejected the
 rust-analyzer-style static workspace-indexer as the *primary* path: Brood is an
 image-based, hot-reloadable Lisp (ADR-013) whose endgame is an editor that *is* a
