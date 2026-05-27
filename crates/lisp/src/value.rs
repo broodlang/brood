@@ -43,10 +43,35 @@ pub fn symbol_name(sym: Symbol) -> String {
 
 // ----- handles into the Heap -----
 
+/// High bit of a handle's index: set ⇒ the value lives in the shared **code**
+/// region; clear ⇒ the process's **local** data heap. (See `docs/shared-code.md`.)
+pub const SHARED_BIT: u32 = 1 << 31;
+
 macro_rules! handle {
     ($name:ident) => {
         #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
         pub struct $name(pub u32);
+        impl $name {
+            /// A handle into the local (per-process) heap.
+            #[inline]
+            pub fn local(index: usize) -> Self {
+                $name(index as u32)
+            }
+            /// A handle into the shared code region.
+            #[inline]
+            pub fn shared(index: usize) -> Self {
+                $name(index as u32 | SHARED_BIT)
+            }
+            #[inline]
+            pub fn is_shared(self) -> bool {
+                self.0 & SHARED_BIT != 0
+            }
+            /// The slab index, with the region bit masked off.
+            #[inline]
+            pub fn index(self) -> usize {
+                (self.0 & !SHARED_BIT) as usize
+            }
+        }
     };
 }
 handle!(PairId);

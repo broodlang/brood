@@ -1,15 +1,20 @@
-//! The per-process heap: an arena that owns every heap-allocated value, plus the
-//! environment frames. Values address it by integer handle (see `value.rs`).
+//! The per-process heap, plus the shared **code** region.
 //!
-//! It is deliberately plain `Vec`s of data, so the whole `Heap` is `Send` — the
-//! property that lets a process move between scheduler threads later. There is
-//! no garbage collection yet (the arena only grows); a per-process mark-sweep is
-//! a later step (see `docs/memory-model.md`).
+//! A `Value`'s heap variants are integer handles whose high bit (`SHARED_BIT`,
+//! see `value.rs`) says which region they live in:
 //!
-//! Mutation goes through `&mut Heap`, so no interior mutability (`RefCell`) is
-//! needed — the heap is the single owner of its objects.
+//! - **local** — the per-process `Heap`: everything the process allocates at
+//!   runtime (cons cells, vectors, strings, call-frame env scopes). Plain
+//!   `Vec`s, mutated through `&mut Heap`, so the whole `Heap` is `Send`.
+//! - **shared** — a [`SharedCode`] region (behind `Arc`) holding code shared
+//!   across processes. *Currently empty* (step 1 of `docs/shared-code.md`): all
+//!   allocation is local and every read routes to the local slabs, so behaviour
+//!   is identical to before — this just lays the routing in place.
+//!
+//! No GC yet (the arena only grows).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::error::LispError;
 use crate::value::{
@@ -21,8 +26,10 @@ struct EnvFrame {
     parent: Option<EnvId>,
 }
 
+/// The slabs holding heap objects. Used for both the local heap and the shared
+/// code region.
 #[derive(Default)]
-pub struct Heap {
+struct Slabs {
     pairs: Vec<(Value, Value)>,
     vectors: Vec<Vec<Value>>,
     strings: Vec<String>,
@@ -31,41 +38,63 @@ pub struct Heap {
     envs: Vec<EnvFrame>,
 }
 
+/// The shared, read-only code region (closures, code values, the global env,
+/// natives). Cloned by `Arc` into every process. Empty until step 2.
+#[derive(Default)]
+pub struct SharedCode {
+    slabs: Slabs,
+}
+
+#[derive(Default)]
+pub struct Heap {
+    local: Slabs,
+    code: Arc<SharedCode>,
+}
+
 impl Heap {
     pub fn new() -> Self {
         Heap::default()
     }
 
-    // ----- allocation -----
+    /// The slabs a handle points into.
+    fn slabs(&self, shared: bool) -> &Slabs {
+        if shared {
+            &self.code.slabs
+        } else {
+            &self.local
+        }
+    }
+
+    // ----- allocation (always into the local heap) -----
 
     pub fn alloc_pair(&mut self, head: Value, tail: Value) -> Value {
-        let id = self.pairs.len() as u32;
-        self.pairs.push((head, tail));
-        Value::Pair(PairId(id))
+        let idx = self.local.pairs.len();
+        self.local.pairs.push((head, tail));
+        Value::Pair(PairId::local(idx))
     }
 
     pub fn alloc_vector(&mut self, items: Vec<Value>) -> Value {
-        let id = self.vectors.len() as u32;
-        self.vectors.push(items);
-        Value::Vector(VecId(id))
+        let idx = self.local.vectors.len();
+        self.local.vectors.push(items);
+        Value::Vector(VecId::local(idx))
     }
 
     pub fn alloc_string(&mut self, s: &str) -> Value {
-        let id = self.strings.len() as u32;
-        self.strings.push(s.to_string());
-        Value::Str(StrId(id))
+        let idx = self.local.strings.len();
+        self.local.strings.push(s.to_string());
+        Value::Str(StrId::local(idx))
     }
 
     pub fn alloc_closure(&mut self, c: Closure) -> ClosureId {
-        let id = self.closures.len() as u32;
-        self.closures.push(c);
-        ClosureId(id)
+        let idx = self.local.closures.len();
+        self.local.closures.push(c);
+        ClosureId::local(idx)
     }
 
     pub fn alloc_native(&mut self, f: NativeFn) -> Value {
-        let id = self.natives.len() as u32;
-        self.natives.push(f);
-        Value::Native(NativeId(id))
+        let idx = self.local.natives.len();
+        self.local.natives.push(f);
+        Value::Native(NativeId::local(idx))
     }
 
     /// Build a proper list from a vector of items.
@@ -77,28 +106,28 @@ impl Heap {
         acc
     }
 
-    // ----- access (handles are Copy; small reads return by value) -----
+    // ----- access (dispatch on the handle's region) -----
 
     pub fn pair(&self, id: PairId) -> (Value, Value) {
-        self.pairs[id.0 as usize]
+        self.slabs(id.is_shared()).pairs[id.index()]
     }
     pub fn car(&self, id: PairId) -> Value {
-        self.pairs[id.0 as usize].0
+        self.pair(id).0
     }
     pub fn cdr(&self, id: PairId) -> Value {
-        self.pairs[id.0 as usize].1
+        self.pair(id).1
     }
     pub fn vector(&self, id: VecId) -> &[Value] {
-        &self.vectors[id.0 as usize]
+        &self.slabs(id.is_shared()).vectors[id.index()]
     }
     pub fn string(&self, id: StrId) -> &str {
-        &self.strings[id.0 as usize]
+        &self.slabs(id.is_shared()).strings[id.index()]
     }
     pub fn closure(&self, id: ClosureId) -> &Closure {
-        &self.closures[id.0 as usize]
+        &self.slabs(id.is_shared()).closures[id.index()]
     }
     pub fn native(&self, id: NativeId) -> &NativeFn {
-        &self.natives[id.0 as usize]
+        &self.slabs(id.is_shared()).natives[id.index()]
     }
 
     /// Collect a proper list into a `Vec`. Errors on an improper (dotted) list.
@@ -159,16 +188,20 @@ impl Heap {
 
     // ----- environments -----
 
+    fn env_frame(&self, env: EnvId) -> &EnvFrame {
+        &self.slabs(env.is_shared()).envs[env.index()]
+    }
+
     pub fn new_env(&mut self, parent: Option<EnvId>) -> EnvId {
-        let id = self.envs.len() as u32;
-        self.envs.push(EnvFrame { vars: HashMap::new(), parent });
-        EnvId(id)
+        let idx = self.local.envs.len();
+        self.local.envs.push(EnvFrame { vars: HashMap::new(), parent });
+        EnvId::local(idx)
     }
 
     pub fn env_get(&self, env: EnvId, sym: Symbol) -> Option<Value> {
         let mut cur = Some(env);
         while let Some(e) = cur {
-            let frame = &self.envs[e.0 as usize];
+            let frame = self.env_frame(e);
             if let Some(v) = frame.vars.get(&sym) {
                 return Some(*v);
             }
@@ -178,18 +211,24 @@ impl Heap {
     }
 
     pub fn env_define(&mut self, env: EnvId, sym: Symbol, val: Value) {
-        self.envs[env.0 as usize].vars.insert(sym, val);
+        // Allocation/definition targets the local heap. (Defining into the shared
+        // global env arrives with the mutable shared region — step 4.)
+        self.local.envs[env.index()].vars.insert(sym, val);
     }
 
     /// Mutate the nearest existing binding; returns false if none exists.
     pub fn env_set(&mut self, env: EnvId, sym: Symbol, val: Value) -> bool {
         let mut cur = Some(env);
         while let Some(e) = cur {
-            if self.envs[e.0 as usize].vars.contains_key(&sym) {
-                self.envs[e.0 as usize].vars.insert(sym, val);
+            if self.env_frame(e).vars.contains_key(&sym) {
+                if e.is_shared() {
+                    // Mutating a shared global binding comes with step 4.
+                    return false;
+                }
+                self.local.envs[e.index()].vars.insert(sym, val);
                 return true;
             }
-            cur = self.envs[e.0 as usize].parent;
+            cur = self.env_frame(e).parent;
         }
         false
     }
@@ -198,7 +237,7 @@ impl Heap {
     pub fn env_root(&self, env: EnvId) -> EnvId {
         let mut cur = env;
         loop {
-            match self.envs[cur.0 as usize].parent {
+            match self.env_frame(cur).parent {
                 Some(p) => cur = p,
                 None => return cur,
             }

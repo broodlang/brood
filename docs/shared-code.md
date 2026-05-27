@@ -103,10 +103,11 @@ frames from the local heap, the global frame from the shared region.
 
 ## Staged sub-steps (each keeps `cargo test` green)
 
-1. **Region-tagged handles.** Add the region bit and a `SharedCode` struct
-   mirroring the heap slabs; `Heap` holds an `Arc` to it; accessors dispatch.
-   Shared region starts **empty** → all reads route local → behaviour identical.
-   (Big, mechanical, semantically a no-op — the safe foundation.)
+1. ✅ **Region-tagged handles.** Handles carry a region bit (`SHARED_BIT`); a
+   `SharedCode` region (mirroring the heap slabs) sits behind `Arc` on the
+   `Heap`; accessors dispatch on the bit. Shared region starts **empty** → all
+   reads route local → behaviour identical (25 tests + suite green; `Heap` stays
+   `Send`). The safe foundation.
 2. **Move startup code to the immutable shared region.** Load prelude + natives +
    the global env into `SharedCode`; the root env is shared. Runtime allocation
    stays local. Single-process behaviour unchanged.
