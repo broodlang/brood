@@ -11,6 +11,7 @@ it's going. Start here.
 | [primitives.md](primitives.md) | The **native primitive kernel** — the complete list of functions implemented in Rust (everything else is mylisp), including how error handling (`throw`/`%try`/`try`/`error`) is built. |
 | [concurrency.md](concurrency.md) | Design (for review) for **green processes on all cores** — Erlang-style `spawn`/`send`/`receive`, share-nothing, work-stealing schedulers. A parallel core track. |
 | [memory-model.md](memory-model.md) | Design (for review) for **`Send` heaps + GC** — the prerequisite for true multi-core. Compares gc-arena+stepping-VM vs a hand-rolled arena; staged migration plan. |
+| [shared-code.md](shared-code.md) | Design for **shared code, isolated data** (Erlang-style) — region-tagged handles, a shared code heap, and cross-process hot-reload. Unlocks cheap spawn + sending functions. Staged sub-steps. |
 | [roadmap.md](roadmap.md) | The milestones (M1 → M5), what's done, and what's next — including the editor, the display protocol, and the remote/web frontends. |
 | [decisions.md](decisions.md) | The design-decision log (ADR-style): the *why* behind the choices, so future-us doesn't relitigate them by accident. |
 | [devlog.md](devlog.md) | A chronological log of work sessions — what changed and why, in order. |
