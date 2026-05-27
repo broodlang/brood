@@ -1,0 +1,11 @@
+[package]
+name = "mylisp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The mylisp language: reader, evaluator, and core for a self-editing editor."
+
+[lib]
+name = "mylisp"
+path = "src/lib.rs"

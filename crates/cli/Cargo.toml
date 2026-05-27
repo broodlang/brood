@@ -1,0 +1,14 @@
+[package]
+name = "cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The mylisp command-line REPL and file runner."
+
+[[bin]]
+name = "mylisp"
+path = "src/main.rs"
+
+[dependencies]
+mylisp = { path = "../lisp" }
