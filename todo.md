@@ -79,6 +79,16 @@ target is to shrink the two central functions and drop the local `range` helper:
   vector. This is the *perf* fix, not a simplicity one (surface unchanged), so
   it's separate from this plan; pairs with the tracing-GC migration (ADR-002).
 
+## Done: `sleep` (pure Brood, in `hatch`)
+
+- ✅ `(sleep ms)` in `std/hatch.blsp` — NOT a Rust primitive. A Rust `thread::sleep`
+  would block a scheduler worker and starve other green processes; instead `sleep`
+  pins a fresh `(ref)` in a `receive` (a clause no message can match) with an
+  `(after ms)` timeout, so it parks the process on the scheduler timer and leaves
+  the mailbox untouched. The naive `(receive (after ms nil))` was wrong — it eats
+  the next queued message. Can move to the prelude once the freeze landmine (below)
+  is fixed, since it uses `receive`.
+
 ## Bug: docstring dropped on functions with a destructured parameter
 
 - [ ] `(defn f ([x y]) "doc" body)` loses its docstring — `(doc f)` → nil — because
