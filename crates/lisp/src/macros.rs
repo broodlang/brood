@@ -30,7 +30,7 @@ pub fn quasiquote(template: &Value, env: &Rc<Env>) -> LispResult {
             let items = value::list_to_vec(template)?;
             Ok(value::list(expand_seq(&items, env)?))
         }
-        Value::Vector(items) => Ok(Value::Vector(Rc::new(expand_seq(items, env)?))),
+        Value::Vector(items) => Ok(value::vector(expand_seq(items, env)?)),
         other => Ok(other.clone()),
     }
 }

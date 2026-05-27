@@ -26,7 +26,7 @@ use crate::{printer, reader};
 /// Install the primitive kernel into `env` (the root environment).
 pub fn register(env: &Rc<Env>) {
     let def = |name: &str, func: NativeFnPtr| {
-        env.define(value::intern(name), Value::Native(Rc::new(NativeFn { name: name.to_string(), func })));
+        env.define(value::intern(name), value::native(NativeFn { name: name.to_string(), func }));
     };
 
     // numeric primitives (always exactly two arguments)
@@ -222,7 +222,7 @@ fn is_empty(args: &[Value], _: &Rc<Env>) -> LispResult {
 // ---------- vector primitives ----------
 
 fn vector(args: &[Value], _: &Rc<Env>) -> LispResult {
-    Ok(Value::Vector(Rc::new(args.to_vec())))
+    Ok(value::vector(args.to_vec()))
 }
 
 fn vector_ref(args: &[Value], _: &Rc<Env>) -> LispResult {

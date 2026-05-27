@@ -3,8 +3,6 @@
 //! A hand-written recursive-descent parser over a `Vec<char>`. It is small on
 //! purpose; the grammar it accepts is documented in `docs/language.md`.
 
-use std::rc::Rc;
-
 use crate::error::LispError;
 use crate::value::{self, Value};
 
@@ -144,7 +142,7 @@ impl Parser {
                 Some(_) => items.push(self.read_form()?),
             }
         }
-        Ok(Value::Vector(Rc::new(items)))
+        Ok(value::vector(items))
     }
 
     fn read_string(&mut self) -> Result<Value, LispError> {

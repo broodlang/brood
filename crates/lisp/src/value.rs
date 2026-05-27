@@ -118,6 +118,21 @@ pub fn cons(head: Value, tail: Value) -> Value {
     Value::Pair(Rc::new((head, tail)))
 }
 
+/// Build a vector value.
+pub fn vector(items: Vec<Value>) -> Value {
+    Value::Vector(Rc::new(items))
+}
+
+/// Wrap a [`Closure`] as a function value.
+pub fn closure(c: Closure) -> Value {
+    Value::Fn(Rc::new(c))
+}
+
+/// Wrap a [`NativeFn`] as a builtin value.
+pub fn native(f: NativeFn) -> Value {
+    Value::Native(Rc::new(f))
+}
+
 /// Build a proper list from a vector of items.
 pub fn list(items: Vec<Value>) -> Value {
     let mut acc = Value::Nil;

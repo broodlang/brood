@@ -40,7 +40,7 @@ pub fn eval(expr: Value, env: Rc<Env>) -> LispResult {
                 for item in items.iter() {
                     out.push(eval(item.clone(), env.clone())?);
                 }
-                return Ok(Value::Vector(Rc::new(out)));
+                return Ok(value::vector(out));
             }
             Value::Pair(_) => {} // a combination — handled below
             _ => return Ok(expr.clone()),
@@ -377,14 +377,14 @@ fn make_closure(name: Option<Symbol>, rest: &Value, env: &Rc<Env>) -> LispResult
         parts.first().ok_or_else(|| LispError::runtime("fn: missing parameter list"))?;
     let (params, optionals, rest_param) = parse_params(param_form)?;
     let body = parts[1..].to_vec();
-    Ok(Value::Fn(Rc::new(Closure {
+    Ok(value::closure(Closure {
         name,
         params,
         optionals,
         rest: rest_param,
         body,
         env: env.clone(),
-    })))
+    }))
 }
 
 /// Parse a parameter list (a list `(x y)` or vector `[x y]`) into required
@@ -473,14 +473,14 @@ fn parse_optional(form: &Value) -> Result<(Symbol, Value), LispError> {
 /// and error messages.
 fn name_value(val: Value, name: Symbol) -> Value {
     match val {
-        Value::Fn(cl) if cl.name.is_none() => Value::Fn(Rc::new(Closure {
+        Value::Fn(cl) if cl.name.is_none() => value::closure(Closure {
             name: Some(name),
             params: cl.params.clone(),
             optionals: cl.optionals.clone(),
             rest: cl.rest,
             body: cl.body.clone(),
             env: cl.env.clone(),
-        })),
+        }),
         other => other,
     }
 }
