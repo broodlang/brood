@@ -132,6 +132,32 @@ This is the largest *core* undertaking in the project. Two consequences:
    processes comes with the pool.
 4. ⬜ Later: preemption, supervision/links.
 
+## Distribution across nodes (future — kept in mind)
+
+Not now, but the model is deliberately distribution-ready, so we don't paint
+ourselves into a corner. Erlang-style distribution falls out of share-nothing +
+copy-on-send: **the network is just a longer copy.** What it would take:
+
+- **Nodes** — named runtimes (`name@host`) that **link** over TCP (handshake +
+  a shared secret/cookie for auth).
+- **Pids carry node identity** — `{node, local-id}` instead of today's local
+  `u64`. `send`/`spawn` stay **location-transparent**: local pid → the local
+  registry (what we have); remote pid → serialize and forward over the node
+  connection; the remote deserializes into a local mailbox.
+- **A wire codec for `Message`** — reuses the deep-copy we already do for crossing
+  heaps. *Important detail:* over the wire, **symbols travel by name**, not by
+  local interned id (each node has its own interner), and are re-interned on
+  arrival. (In-thread messages can keep using the id.)
+- **Code distribution** — remote `spawn` needs the function on the far node:
+  shared code (below) + shipping the closure's code over the wire (code is data).
+- **Later** — distributed links/monitors and node-down detection.
+
+Caveats Erlang learned the hard way, so start simple/trusted: security (auth from
+day one — distribution is insecure by default in Erlang), partial failure /
+net-splits, serialization versioning, latency. This also fits the project's
+"backend hosted remotely by a frontend" premise — a remote frontend or second
+backend is just another node that links and message-passes.
+
 ### Limitations of step 4a (to lift later)
 
 - **OS thread per process** — real but heavyweight; not yet green/cheap, no core

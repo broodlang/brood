@@ -109,6 +109,10 @@ and don't conflict with the concurrency work. Concurrency lands in phases:
   closure's code (already a solved sub-problem) plus its captured free variables
   (closure serialization); global/native references resolve via shared code
 - ⬜ later: reduction-counted preemption, then supervision / links
+- ⬜ **Distribution across nodes** (future, kept in mind) — link named runtimes
+  over TCP; pids carry node identity; `send`/`spawn` stay location-transparent.
+  Falls out of share-nothing + copy-on-send (the network is a longer copy). See
+  `concurrency.md` → "Distribution across nodes".
 
 The Tier-3 **tracing GC** is shared with this track: `Send` per-process heaps are
 what unlock full work-stealing, so concurrency pulls the GC work earlier.
