@@ -33,7 +33,7 @@ arg silently becoming `nil`.
 | | `map-get` | 2–3 | value at a key, or the optional default (else nil) |
 | | `map-assoc` | 3 | a fresh map with `key`→`val` added/updated |
 | | `map-dissoc` | 2 | a fresh map with a key removed |
-| | `map-keys` | 1 | keys as a list, in insertion order — the sole enumerator; `vals` (`map get` over keys) and `contains?` (`member?` over keys) are Brood over it |
+| | `map-pairs` | 1 | entries as a list of `[k v]` vectors, insertion order, one O(n) pass — the sole enumerator; `keys`/`vals`/`contains?`/`reduce-kv` are all Brood over it |
 | **String** | `string-length` | 1 | char count |
 | | `substring` | 3 | characters `[start, end)`, char-indexed |
 | | `upper` | 1 | `s` upper-cased (Unicode-aware, e.g. `ß` → `SS`) |
@@ -97,8 +97,8 @@ the whole sequence library
 (`range`/`take`/`drop`/`take-while`/`drop-while`/`some?`/`every?`/`find`/`zip`/
 `partition`/`sort`/`sort-by` — a Brood merge sort), `empty?` (type dispatch over
 the length primitives), `println` (over `print`), and the map surface
-`get`/`assoc`/`dissoc`/`contains?`/`vals` (over `map-get`/`map-assoc`/`map-dissoc`/
-`map-keys`). Of the math library only **`floor`** (the Float→Int crossing) and
+`get`/`assoc`/`dissoc`/`keys`/`vals`/`contains?`/`reduce-kv` (over `map-get`/
+`map-assoc`/`map-dissoc`/`map-pairs`). Of the math library only **`floor`** (the Float→Int crossing) and
 **`rem`** (exact integer remainder) need Rust — everything else is Brood over
 them. The map literal `{ }` is read by the reader and evaluated like a vector
 literal — no constructor call.

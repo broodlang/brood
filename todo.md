@@ -100,18 +100,14 @@ target is to shrink the two central functions and drop the local `range` helper:
   `(frequencies (mapcat neighbours (keys board)))`, and the local `range` helper
   is gone. Tests in `tests/sequence_test.blsp`.
 
-### Tier 2 — one kernel change, and it *shrinks* the kernel
+### Tier 2 — one kernel change ✅ DONE (2026-05-27)
 
-- [ ] **Make `map-pairs` the single map enumerator (replacing `map-keys`).** Maps
-  have no way to fold key+value together, so `step` does `(keys counts)` then a
-  per-cell `(get counts cell)` — a second lookup, and `get` on the assoc-vector
-  is O(n) → an O(n²) fold. Fix: one primitive `map-pairs` returning `[[k v] …]`
-  in one O(n) pass (trivial over the insertion-ordered assoc vector), and derive
-  *everything else in Brood*: `keys` = `(map first (map-pairs m))`, `vals`,
-  `contains?`, `reduce-kv`, `entries`, even `count`. Net: the kernel loses a
-  primitive (drop `map-keys`) instead of gaining one — fits the current
-  minimization (you already dropped `map-vals`/`map-contains?`) — and the O(n²)
-  is gone. Then `step` uses `reduce-kv`.
+- [x] **`map-pairs` is now the single map enumerator (replaced `map-keys`).**
+  Returns `[[k v] …]` in one O(n) pass; `keys`/`vals`/`contains?`/`reduce-kv` and
+  `empty?`/`count`-on-maps are all Brood over it. The map kernel stays five
+  primitives (hash-map/map-get/map-assoc/map-dissoc/map-pairs) and the O(n²) `vals`
+  is gone. `examples/life.blsp` `step` now uses `reduce-kv`. (Did not add `entries`
+  — defer until something needs it.) See `docs/devlog.md` 2026-05-27.
 
 ### Out of scope / deferred
 
@@ -131,14 +127,14 @@ target is to shrink the two central functions and drop the local `range` helper:
   the next queued message. Can move to the prelude once the freeze landmine (below)
   is fixed, since it uses `receive`.
 
-## Bug: docstring dropped on functions with a destructured parameter
+## Bug: docstring dropped on functions with a destructured parameter ✅ FIXED (2026-05-27)
 
-- [ ] `(defn f ([x y]) "doc" body)` loses its docstring — `(doc f)` → nil — because
-  the single-clause pattern-param path (which delegates to the match compiler in
-  `std/prelude.blsp`) doesn't thread the leading-string docstring through. Plain
-  params keep it. Hit by `neighbours` in `examples/life.blsp`. Fix in the `fn`
-  pattern-param handling: peel a leading docstring before compiling the param
-  pattern, and reattach it to the closure.
+- [x] `(defn f ([x y]) "doc" body)` kept its docstring. Fixed in `lower_fn`
+  (`crates/lisp/src/eval/macros.rs`): peel a leading docstring (string + more
+  body) before the refutable-bind/`do` wrap and re-insert it as the lowered `fn`'s
+  first body form, where `make_closure` looks. Regression test in
+  `tests/introspection_test.blsp`. (Multi-clause docstrings remain unsupported —
+  separate, pre-existing.)
 
 ## Concurrency / runtime follow-ups (from the `ref` work, 2026-05-27)
 

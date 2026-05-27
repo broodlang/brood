@@ -216,7 +216,7 @@ symbol binds to**. Two layers:
   heap. It should be **shared with the checker's own scope tracking** so scope
   resolution isn't written twice.
 
-## Cross-file resolution (not yet built)
+## Cross-file resolution: an image query, not a static index (ADR-031)
 
 Everything above is **single-file**. The server's knowledge of names has exactly
 two sources, and neither crosses a `require`:
@@ -228,26 +228,43 @@ two sources, and neither crosses a `require`:
   to it. Today such a name resolves as `Free` (no goto target, no hover, but no
   false "unbound" error either — diagnostics are syntactic-only at Tier 1).
 
-Making `map`-from-*your-module* navigable is a **workspace-indexing** feature, not
-a per-request one. The shape, when we build it (a Tier-2½ / M-later concern):
+The tempting fix is a **static workspace-indexer** (rust-analyzer's model: walk
+the `require` graph off `*load-path*`, parse every file's CST, never run
+anything). We **reject that as the primary path** (ADR-031). Brood is an
+image-based, hot-reloadable Lisp (ADR-013), and the endgame is an editor that
+*is* a running Brood image editing Brood — so the running runtime already holds
+every loaded module's globals (it's what `global-names` enumerates). A static
+index just re-derives, approximately, what the image already knows for certain —
+and can't follow computed/conditional `require`s or see through macros.
 
-1. **Resolve the load graph statically.** Walk `(require 'sym)` / `provide`
-   forms off the CST + `*load-path*` (the same convention `nest`/modules use,
-   ADR-019/020) — *without evaluating* — to find each module's file.
-2. **Index every file's top-level `def`s** with their spans (the `defs` walk
-   already does this per file; run it over the whole project, cache per file,
-   invalidate on `didChange`/`didSave`).
-3. Feed that index into completion (candidates from required modules),
-   goto-definition / hover (resolve a `Free` name against the index, returning a
-   `Location` in another file — LSP `Location` already carries a `Uri`), and
-   workspace-symbol search.
+So cross-file is the **SLIME/CIDER/Emacs-xref model**: the image recorded *where
+each thing was defined as it loaded*, and `M-.` is a lookup against it. The one
+missing piece is that the global table doesn't yet record a definition's
+birthplace. The plan:
 
-This needs a project root (LSP `initialize` carries `workspaceFolders` / `rootUri`,
-which we currently ignore) and a file→CST cache the per-request handlers don't
-have yet. It's additive behind the same handlers — none of the Tier-1 wiring
-changes — so it's deferred until the single-file features are exercised in anger.
-The macro caveat applies here too: indexing reads `provide`/`require` as written,
-not as a running program would compute them.
+1. **Record def sites at load/`def` time** — `name → (file, span)` into the
+   shared, mutable `RuntimeCode` region (so a redefinition updates it and spawned
+   processes see it, per ADR-013). `file` is the existing `current-file`; `span`
+   the form's position. **Span-accurate through macros for *definitions***,
+   because the site is captured before macroexpansion (ADR-022) discards spans.
+2. **Expose `(source-location 'foo) → (file . span)`** — one Rust primitive;
+   policy on top is Brood. Useful standalone (error provenance, `nest`, a
+   self-hosted REPL `M-.`) before any LSP wiring consumes it.
+3. **Stay a hybrid:** the live (half-typed) buffer keeps using the CST + scope
+   walker; a name that resolves `Free` there falls back to `source-location`,
+   yielding a cross-file `Location` (LSP `Location` already carries a `Uri`).
+4. **Definitions go image-based; references stay static** — references through
+   macro-generated code have no faithful spans, so "find references" remains
+   CST-level source occurrences aggregated across files; "go to definition"
+   becomes the name→site lookup.
+
+The cost is a **loaded image**: cross-file answers require the project to have
+been *run* (top-level side effects on load) — the line this doc draws at Tier
+0–1. That's a deliberate, opt-in step (the server owns a project image it loads
+explicitly, or talks to a running one), gated so the safe single-file features
+never depend on it; and the image can be **stale** between an edit and a reload
+(SLIME's `C-c C-c` workflow), which the CST covers for the current buffer. The
+static indexer survives only as the *fallback* when no image is available.
 
 ## The crate
 

@@ -44,16 +44,14 @@ tallies how many live cells named each coordinate."
 
 (defn step (board)
   "The next generation of `board`. A cell is alive next tick with exactly 3 live
-neighbours (a birth, or a live cell surviving), or with 2 when already live."
-  (let (counts (neighbour-counts board))
-    (fold (fn (next cell)
-            (let (n (get counts cell))
-              (cond
-                (= n 3)                              (assoc next cell true)
-                (and (= n 2) (contains? board cell)) (assoc next cell true)
-                else                                 next)))
-          {}
-          (keys counts))))
+neighbours (a birth, or a live cell surviving), or with 2 when already live.
+`reduce-kv` folds straight over the cell→count map — no second lookup per cell."
+  (reduce-kv (fn (next cell n)
+               (if (or (= n 3) (and (= n 2) (contains? board cell)))
+                 (assoc next cell true)
+                 next))
+             {}
+             (neighbour-counts board)))
 
 (defn nth-gen (board n)
   "`board` advanced by `n` generations."

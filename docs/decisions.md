@@ -1102,6 +1102,89 @@ already accepts for `cons`/`append`, with the same mitigation (a persistent
 HAMT) available later behind the unchanged surface. Maps also unblock a
 structured error value (a later refactor of `error.rs`).
 
+---
+
+## ADR-031 — Cross-file xref is an image query, not a static index: record def sites at load time
+
+**Status:** accepted (direction); not yet implemented. Foundation primitive
+(`source-location`) is the first step. Extends [`lsp.md`](lsp.md) §Cross-file;
+builds on the CST decision (ADR-025) and the shared-code / hot-reload model
+(ADR-013, [`shared-code.md`](shared-code.md)).
+
+**Context.** Tier-1 `brood-lsp` (ADR-025) is **single-file**: it knows names from
+the open buffer's CST and from the interpreter's globals — which are the *prelude
++ Rust builtins only*, because the server **never evaluates the buffer** (a
+half-typed file can't be run: side effects, non-termination). So a name another
+module `provide`s resolves as `Free` — no goto, no hover. The obvious next step
+looked like the **rust-analyzer model**: statically walk the `require` graph off
+`*load-path*` (ADR-019/020) and index every file's `def`s. But that makes the
+tool an outside observer forever *re-deriving* what the program means, and it
+can't see through macros.
+
+Brood is the wrong shape for that model. It is an **image-based, self-editing,
+hot-reloadable** Lisp (ADR-013): the running runtime already holds every loaded
+module's globals in one shared, mutable code region (`global-names` enumerates
+them today). The endgame (M2–M5) is *an editor that is a running Brood image
+editing Brood source* — at which point the editor literally is the image and
+"xref" is self-reflection. The idiomatic answer is the **SLIME/CIDER/Emacs-xref
+model**: the image recorded *where each thing was defined as it loaded*, and
+`M-.` is a hash lookup against it, not a re-analysis. The only missing piece is
+that the global table doesn't record a definition's birthplace — `Closure` has
+`name` and `doc` but no source location, and `form_pos` (top-level form starts)
+is LOCAL-only, line/col, and reset on arena reclamation.
+
+**Decision.** Cross-file navigation is answered by **querying the live image**,
+not by a parallel static indexer.
+
+1. **Record def sites at load/`def` time.** When a global is defined, store
+   `name → (file, span)` into the **runtime's** code region (`RuntimeCode`, the
+   shared, mutable, hot-reloadable one — so a redefinition updates it and spawned
+   processes see it, consistent with ADR-013). `file` comes from the existing
+   `current-file`; `span` from the form's recorded position. This is span-accurate
+   for definitions *through macros*, because the site is captured at read/`def`
+   time, before macroexpansion (ADR-022) discards spans.
+2. **Expose one primitive:** `(source-location 'foo) → (file . span)` (or `nil`).
+   Mechanism in Rust; any policy on top is Brood (ADR-006). Useful standalone —
+   better runtime-error provenance, `nest`, a self-hosted REPL `M-.` — independent
+   of the LSP.
+3. **The server stays a hybrid, not a replacement:**
+   - the **live buffer** (half-typed, what you're editing) → CST + scope walker
+     (ADR-025), span-accurate for the file in front of you;
+   - **everything loaded** (other modules, prelude) → image lookup. A name that
+     resolves `Free` locally falls back to `source-location`, yielding a
+     cross-file goto/hover (LSP `Location` already carries a target `Uri`).
+4. **Definitions go image-based; references stay static.** "Find references"
+   through macro-generated code has no faithful spans, so it remains CST-level
+   source occurrences aggregated across files (`scope::references` per file).
+   "Go to definition" becomes a name→site lookup. This is also where SLIME lands.
+
+**Why.** The image is the only source of truth that is *already correct* about
+cross-file names and macro-expanded defs; a static indexer can only approximate
+it. Investing in def-site recording pays off the eventual self-hosted editor
+directly (it needs exactly this), whereas a static workspace-index is throwaway
+scaffolding. It is additive: nothing in Tier-1 changes, and `source-location`
+earns its keep before any LSP wiring consumes it.
+
+**Trade-offs accepted.**
+- **Needs a loaded image.** Cross-file answers require the project to have been
+  *run* (top-level side effects on load) — the very line ADR-025 drew at Tier
+  0–1. SLIME accepts this (you start a Lisp and load your system); Brood's nature
+  leans the same way. The LSP will either own a project image it loads explicitly,
+  or talk to a running one — a deliberate, opt-in step, gated so the safe
+  single-file features never depend on it.
+- **Staleness.** After editing a file you haven't reloaded, the image is stale
+  until that `def` is re-evaluated (SLIME's `C-c C-c` workflow). The CST always
+  covers the *current* buffer, so staleness mostly bites cross-file lookups.
+- **References don't see into macros** — the same caveat ADR-025/`tooling.md`
+  already accept.
+
+**Considered & rejected.** A purely static workspace-indexer (walk `require`,
+parse every file's CST, never run anything). Safe and image-free, but it
+permanently re-derives what the running image already knows, can't follow
+computed/conditional `require`s, and is discarded once the self-hosted editor
+makes the image authoritative. Kept only as the *fallback* shape if an image is
+unavailable (e.g. a project that won't load) — not the primary path.
+
 ## Deferred / open questions
 
 - **Macro hygiene:** currently unhygienic `defmacro` + `gensym`; hygienic macros

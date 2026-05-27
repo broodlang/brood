@@ -127,6 +127,7 @@ Maps are immutable — every operation returns a **fresh** map:
 | `(dissoc m k1 k2 …)` | a new map with those keys removed |
 | `(contains? m k)` | whether `k` is present (distinguishes a stored `nil` from absence) |
 | `(keys m)` / `(vals m)` | the keys / values, as a list, in insertion order |
+| `(reduce-kv f init m)` | fold over the entries: `(f acc k v)` left to right → the final acc |
 | `(count m)` / `(empty? m)` | number of entries / whether there are none |
 | `(map? x)` | whether `x` is a map |
 
@@ -575,7 +576,7 @@ in Brood. (Bidirectional `link`s are not implemented yet.)
   merge sort. All of these are tail-recursive (stack-safe on long inputs).
 
 ### Maps
-`hash-map`  `get`  `assoc`  `dissoc`  `contains?`  `keys`  `vals`  `map?`
+`hash-map`  `get`  `assoc`  `dissoc`  `contains?`  `keys`  `vals`  `reduce-kv`  `map?`
 
 See the [Maps](#maps) section above. `{ }` is the literal form; the rest are
 immutable operations that return fresh maps. `count`/`empty?` work on maps too.

@@ -98,8 +98,10 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   syntactic `publishDiagnostics` off the CST; ✅ Tier 1 (complete) — completion
   (locals + globals), hover, `documentSymbol`, goto-definition (pulled forward
   off Foundation B's scope walker), and signature help; ⬜ Tier 2 (refs/rename,
-  semantic tokens, located checker diagnostics) + a workspace index for
-  cross-file navigation (all Tier-1 features are single-file today).
+  semantic tokens, located checker diagnostics) + **cross-file navigation as an
+  image query** — record def sites at load time + `(source-location 'foo)`, then
+  resolve `Free` names against the running image (ADR-031), not a static
+  workspace index (all Tier-1 features are single-file today).
 
 > v0.1 is the ✅ slice above: enough to be a real, usable language. The ⬜ items
 > complete M1.

@@ -1649,3 +1649,74 @@ Full workspace green; clippy clean for the crate.
 **Next.** Tier 2 — references, rename, semantic tokens, located semantic
 diagnostics (needs `types::check` to carry spans); and, separately, the
 workspace index for cross-file navigation.
+
+## 2026-05-27 — `map-pairs`: one map enumerator; reduce-kv; docstring-on-pattern fix
+
+**Goal.** Continue the kernel minimization on the map type, fixing the O(n²) the
+previous pass left in `vals`, and unblock the `examples/life.blsp` simplification.
+
+**Kernel: `map-keys` → `map-pairs`.** Replaced the keys-only enumerator with one
+that returns the entries as a list of `[k v]` vectors in a single O(n) pass.
+Primitive count unchanged (a rename), but it's strictly more expressive, so the
+whole map surface is now Brood over it:
+- `keys` = `(map first (map-pairs m))`, `vals` = `(map second (map-pairs m))`
+- `contains?` = `(some? (fn (p) (= k (first p))) (map-pairs m))`
+- `reduce-kv` (new) = `(fold (fn (acc p) (f acc (first p) (second p))) init (map-pairs m))`
+- `empty?`/`count` on maps now go through `map-pairs` too.
+
+This kills the regression from the prior pass: `vals` was `(map (fn (k) (get m k)) (keys m))`
+— a `get` per key, O(n²) on the association-vector rep. Folding over `map-pairs`
+is one pass, O(n). The map kernel stays five primitives
+(**hash-map, map-get, map-assoc, map-dissoc, map-pairs**) — construct, read, two
+producers, one enumerator — and the rep is still swappable (ADR-030): nothing
+Brood-side peeks past these.
+
+**Bug fix: docstrings on functions with a destructured parameter.** `(defn f
+([x y]) "doc" body)` dropped its docstring — the single-clause pattern-param path
+in `lower_fn` (`eval/macros.rs`) wraps the body in a refutable-bind `do`, so the
+leading string was no longer the closure body's first form where `make_closure`
+looks for it. Fix: peel a leading docstring (string + more body) before lowering
+and re-insert it as the lowered `fn`'s first body form. (Hit by `neighbours` in
+life.blsp.) Multi-clause docstrings remain unsupported — separate, pre-existing.
+
+**`examples/life.blsp`.** `step` now folds straight over the cell→count map with
+`reduce-kv` (was `(keys counts)` + a per-cell `(get counts cell)` — the very
+double-lookup `map-pairs` removes). `neighbour-counts`/`neighbours` were already
+simplified (the latter is the destructured-param docstring case now fixed).
+Verified: blinker oscillates (period 2), glider walks SE over 50 gens, the hatch
+call/cast server replies.
+
+**Tests.** `tests/maps_test.blsp` gains a "map-pairs & reduce-kv" block (entries
+order, falsy values through keys/vals, `reduce-kv` folds incl. empty-map seed);
+`tests/introspection_test.blsp` gains a destructured-param-keeps-docstring case.
+`cargo test` green: 53 Rust + **339 in-language**, no warnings.
+
+**Docs.** `docs/primitives.md` (the `map-pairs` row + note), `docs/language.md`
+(the maps table gains `reduce-kv`).
+
+---
+
+## 2026-05-27 — Design: cross-file xref via the image, not a static index (ADR-031)
+
+**Decision (no code yet).** Recorded [ADR-031](decisions.md#adr-031). The question
+was how `brood-lsp` should resolve names across `require`d modules. Rejected the
+rust-analyzer-style static workspace-indexer as the *primary* path: Brood is an
+image-based, hot-reloadable Lisp (ADR-013) whose endgame is an editor that *is* a
+running Brood image, so the runtime already knows every loaded module's globals
+for certain — a static index only re-derives that approximately and can't see
+through macros or computed `require`s.
+
+**Plan.** Cross-file = SLIME/CIDER/xref model. Record `name → (file, span)` at
+load/`def` time into the shared `RuntimeCode` region (span-accurate for *defs*
+because it's captured before macroexpansion), expose `(source-location 'foo)`,
+and have the server fall back to that image lookup for names that resolve `Free`
+in the buffer. Definitions go image-based; "find references" stays CST/source-
+level (macro-generated code has no faithful spans). The server stays a hybrid —
+CST for the live half-typed buffer, image for everything loaded. Cost accepted: a
+loaded image (opt-in, gated; safe single-file features never depend on it) and
+staleness between edit and reload. Updated `docs/lsp.md` §Cross-file and the
+roadmap to match.
+
+**Next concrete step.** The `source-location` primitive (foundation; useful for
+error provenance / `nest` / a self-hosted REPL `M-.` on its own), then wire the
+server's `Free`-name fallback to it.
