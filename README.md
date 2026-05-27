@@ -94,7 +94,8 @@ Lexically-scoped closures, proper tail calls, `def`/`defn`/`let`/`fn`,
 `if`/`when`/`unless`/`cond`, `and`/`or`, **macros** (`defmacro` +
 Clojure-style `` ` ``/`~`/`~@` quasiquote, `macroexpand`, `gensym`), integers &
 floats with overflow-checked arithmetic, strings, symbols, keywords, cons-cell
-lists, `[ ]` vectors, higher-order functions (`map`/`filter`/`reduce`/`apply`),
+lists, `[ ]` vectors, immutable `{ }` maps (`get`/`assoc`/`dissoc`/`keys`/`vals`/
+`contains?`), higher-order functions (`map`/`filter`/`reduce`/`apply`),
 and the self-hosting trio `eval`/`read-string`/`load`. Parameter lists are
 written as lists (`(x y)` — code is lists; vectors are data) and support
 `&optional` (with defaults) and `& rest`. `defn`, the operators (`+`, `<`, …),
@@ -110,8 +111,8 @@ run share-nothing on real threads and talk by message passing (see
 [`examples/processes.blsp`](examples/processes.blsp)); making them lightweight
 green threads on a worker pool is in progress.
 
-Dynamic variables, in-language error handling, maps, and a tracing GC complete
-the language. Then: a rope-backed **editor data model**, a
+Dynamic variables, richer string/math/sequence libraries, and a tracing GC
+complete the language (immutable maps and in-language error handling are done). Then: a rope-backed **editor data model**, a
 serialisable **display protocol** with a fast native local frontend, a
 **server/daemon mode** so other editor instances can attach remotely, and
 eventually a **web frontend**.

@@ -126,6 +126,7 @@
 (defn symbol?  (x) (%eq (type-of x) :symbol))
 (defn keyword? (x) (%eq (type-of x) :keyword))
 (defn vector?  (x) (%eq (type-of x) :vector))
+(defn map?     (x) (%eq (type-of x) :map))
 ;; `fn?` holds for both Brood closures (:fn) and Rust builtins (:native).
 (defn fn?      (x) (or (%eq (type-of x) :fn) (%eq (type-of x) :native)))
 
@@ -152,9 +153,10 @@
 (defn append (& lists) (fold append-two nil lists))
 
 (defn count (coll)
-  (if (string? coll)
-    (string-length coll)
-    (fold (fn (acc x) (inc acc)) 0 coll)))
+  (cond
+    (string? coll) (string-length coll)
+    (map? coll)    (count (map-keys coll))
+    else           (fold (fn (acc x) (inc acc)) 0 coll)))
 (def length count)
 
 (defn nth-list (coll i d)
@@ -171,6 +173,28 @@
     (nth-list coll i (first default))))
 
 ;; ---- numeric helpers ----
+;; ---- map operations ----
+;; Maps are immutable: `assoc`/`dissoc` return a fresh map, never mutate.
+;; `{ }` literals and `hash-map` construct them; these wrap the `map-*` kernel
+;; primitives with the variadic / default-bearing surface.
+
+;; (get m k) -> value or nil if absent; (get m k default) -> value or default.
+(defn get (m k & default) (map-get m k (first default)))
+
+;; (assoc m k1 v1 k2 v2 …) -> a fresh map with each pair added/updated.
+(defn assoc--pairs (m kvs)
+  (if (empty? kvs)
+    m
+    (assoc--pairs (map-assoc m (first kvs) (second kvs)) (rest (rest kvs)))))
+(defn assoc (m & kvs) (assoc--pairs m kvs))
+
+;; (dissoc m k1 k2 …) -> a fresh map with each key removed.
+(defn dissoc (m & ks) (fold map-dissoc m ks))
+
+(def keys map-keys)
+(def vals map-vals)
+(defn contains? (m k) (map-contains? m k))
+
 (defn identity  (x) x)
 (defn zero?     (n) (= n 0))
 (defn positive? (n) (> n 0))
@@ -466,6 +490,108 @@
     (empty? xs)      false
     (= x (first xs)) true
     else             (member? x (rest xs))))
+
+;; ---- strings ----------------------------------------------------------------
+;; The string library, written over the kernel primitives `substring` /
+;; `string-length` / `str` and `upper` / `lower` / `string->number`. Brood has no
+;; distinct char type, so a "character" is a 1-char string; all indices are
+;; char-based, matching `string-length`. The helpers below are tail-recursive
+;; (stack-safe over long strings); `substring` is O(index), so a full scan is
+;; O(n²) — fine for the short strings this targets (the rope/buffer engine in M2
+;; is the home for large-text performance).
+
+(defn char-at (s i)
+  "The character (a 1-char string) at char index `i` of `s`."
+  (substring s i (inc i)))
+
+(defn number->string (n)
+  "The textual form of number `n` — the inverse of `string->number`."
+  (str n))
+
+(defn string->list--acc (s i acc)
+  (if (< i 0)
+    acc
+    (string->list--acc s (dec i) (cons (substring s i (inc i)) acc))))
+(defn string->list (s)
+  "The characters of `s` as a list of 1-char strings."
+  (string->list--acc s (dec (string-length s)) nil))
+
+(defn list->string (cs)
+  "Concatenate a list of strings (e.g. from `string->list`) into one string."
+  (apply str cs))
+
+(defn index-of--from (s needle i)
+  (let (nl (string-length needle))
+    (cond
+      (> (+ i nl) (string-length s))      -1
+      (= (substring s i (+ i nl)) needle) i
+      else                                (index-of--from s needle (inc i)))))
+(defn index-of (s needle)
+  "The char index of the first occurrence of `needle` in `s`, or -1 if absent.
+`needle` may be more than one character; the empty string is found at 0."
+  (index-of--from s needle 0))
+
+(defn string-contains? (s needle)
+  "Does `s` contain `needle` as a substring?"
+  (>= (index-of s needle) 0))
+
+(defn join (sep coll)
+  "Concatenate the strings in `coll` with `sep` between adjacent elements."
+  (if (empty? coll)
+    ""
+    (fold (fn (acc x) (str acc sep x)) (str (first coll)) (rest coll))))
+
+(defn string-split--acc (s sep acc)
+  (let (i (index-of s sep))
+    (if (< i 0)
+      (reverse (cons s acc))
+      (string-split--acc (substring s (+ i (string-length sep)) (string-length s))
+                         sep
+                         (cons (substring s 0 i) acc)))))
+(defn string-split (s sep)
+  "Split `s` into a list of substrings on each occurrence of `sep`. An empty
+separator splits `s` into its individual characters."
+  (if (= sep "")
+    (string->list s)
+    (string-split--acc s sep nil)))
+
+(defn replace (s old new)
+  "Return `s` with every occurrence of `old` replaced by `new`. An empty `old`
+leaves `s` unchanged."
+  (if (= old "")
+    s
+    (join new (string-split s old))))
+
+(defn string--whitespace? (c)
+  (or (= c " ") (= c "\t") (= c "\n") (= c "\r")))
+
+(defn blank? (s)
+  "Is `s` empty or made up only of whitespace?"
+  (let (n (string-length s))
+    (cond
+      (= n 0)                            true
+      (string--whitespace? (char-at s 0)) (blank? (substring s 1 n))
+      else                               false)))
+
+(defn triml--from (s i n)
+  (if (and (< i n) (string--whitespace? (char-at s i)))
+    (triml--from s (inc i) n)
+    (substring s i n)))
+(defn triml (s)
+  "Remove leading whitespace from `s`."
+  (triml--from s 0 (string-length s)))
+
+(defn trimr--to (s n)
+  (if (and (> n 0) (string--whitespace? (char-at s (dec n))))
+    (trimr--to s (dec n))
+    (substring s 0 n)))
+(defn trimr (s)
+  "Remove trailing whitespace from `s`."
+  (trimr--to s (string-length s)))
+
+(defn trim (s)
+  "Remove leading and trailing whitespace from `s`."
+  (triml (trimr s)))
 
 ;; ---- strings & paths --------------------------------------------------------
 ;; Helpers over `substring` (char-indexed, like `string-length`). Generic enough

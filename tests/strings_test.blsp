@@ -1,0 +1,105 @@
+;; The string library: kernel primitives `upper`/`lower`/`string->number` (Rust)
+;; plus the Brood layer over `substring`/`str` (char-at, string->list, index-of,
+;; join, string-split, replace, trim, …). Register-only — discovered and run by
+;; `nest test` (and cargo test, via crates/lisp/tests/suite.rs).
+
+(require 'test)
+
+(describe "case folding"
+  (test "upper / lower"
+    (assert= (upper "Hello, World!") "HELLO, WORLD!")
+    (assert= (lower "Hello, World!") "hello, world!"))
+  (test "idempotent on already-cased / non-alpha"
+    (assert= (upper "ABC 123") "ABC 123")
+    (assert= (lower "abc 123") "abc 123"))
+  (test "Unicode-aware"
+    (assert= (upper "ß") "SS")
+    (assert= (upper "naïve") "NAÏVE")))
+
+(describe "string <-> number"
+  (test "integers parse to ints"
+    (assert= (string->number "42") 42)
+    (assert= (string->number "-7") -7))
+  (test "floats parse to floats"
+    (assert= (string->number "3.5") 3.5)
+    (assert= (string->number "-0.25") -0.25))
+  (test "non-numbers and partial matches are nil"
+    (assert= (string->number "x") nil)
+    (assert= (string->number "3abc") nil)
+    (assert= (string->number "") nil)
+    (assert= (string->number " 5") nil))
+  (test "number->string is the inverse"
+    (assert= (number->string 42) "42")
+    (assert= (number->string 3.5) "3.5")
+    (assert= (string->number (number->string 99)) 99)))
+
+(describe "characters & lists"
+  (test "char-at is char-indexed"
+    (assert= (char-at "hello" 0) "h")
+    (assert= (char-at "hello" 4) "o"))
+  (test "string->list yields 1-char strings"
+    (assert= (string->list "abc") (list "a" "b" "c"))
+    (assert= (string->list "") nil))
+  (test "list->string reassembles"
+    (assert= (list->string (list "a" "b" "c")) "abc")
+    (assert= (list->string (string->list "round-trip")) "round-trip")))
+
+(describe "search"
+  (test "index-of finds the first occurrence"
+    (assert= (index-of "hello world" "o") 4)
+    (assert= (index-of "hello world" "world") 6))
+  (test "index-of is -1 when absent"
+    (assert= (index-of "hello" "z") -1))
+  (test "the empty needle is found at 0"
+    (assert= (index-of "hello" "") 0))
+  (test "string-contains?"
+    (is (string-contains? "hello" "ell"))
+    (refute (string-contains? "hello" "xyz"))))
+
+(describe "join"
+  (test "places the separator between elements"
+    (assert= (join ", " (list "a" "b" "c")) "a, b, c"))
+  (test "single element has no separator"
+    (assert= (join ", " (list "solo")) "solo"))
+  (test "empty collection is the empty string"
+    (assert= (join ", " nil) "")))
+
+(describe "split"
+  (test "splits on each occurrence"
+    (assert= (string-split "a,b,c" ",") (list "a" "b" "c")))
+  (test "keeps empty fields"
+    (assert= (string-split "a,,b" ",") (list "a" "" "b")))
+  (test "no separator present yields the whole string"
+    (assert= (string-split "abc" ",") (list "abc")))
+  (test "multi-char separator"
+    (assert= (string-split "a::b::c" "::") (list "a" "b" "c")))
+  (test "empty separator splits into characters"
+    (assert= (string-split "abc" "") (list "a" "b" "c")))
+  (test "split then join round-trips"
+    (assert= (join "," (string-split "x,y,z" ",")) "x,y,z")))
+
+(describe "replace"
+  (test "replaces every occurrence"
+    (assert= (replace "a-b-c" "-" "+") "a+b+c"))
+  (test "multi-char old / new"
+    (assert= (replace "one fish two fish" "fish" "cat") "one cat two cat"))
+  (test "absent pattern is unchanged"
+    (assert= (replace "hello" "z" "!") "hello"))
+  (test "empty old leaves the string unchanged"
+    (assert= (replace "hello" "" "!") "hello")))
+
+(describe "whitespace"
+  (test "blank?"
+    (is (blank? ""))
+    (is (blank? "   "))
+    (is (blank? "\t\n "))
+    (refute (blank? " x ")))
+  (test "trim removes both ends"
+    (assert= (trim "  hi there  ") "hi there")
+    (assert= (trim "\n\thi\n") "hi")
+    (assert= (trim "no-padding") "no-padding"))
+  (test "triml / trimr remove one end"
+    (assert= (triml "  hi  ") "hi  ")
+    (assert= (trimr "  hi  ") "  hi"))
+  (test "all-whitespace trims to empty"
+    (assert= (trim "    ") "")))

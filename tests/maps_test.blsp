@@ -1,0 +1,242 @@
+;; Immutable maps (ADR-030): `{ }` literals + get/assoc/dissoc/keys/vals/
+;; contains?, structural-equality keys, order-independent `=`, and behaviour
+;; across green processes (copy-on-send + shared-global reads). Register-only —
+;; discovered and run by `nest test` (and cargo test, via crates/lisp/tests/suite.rs).
+;;
+;; The whole suite runs in parallel (each test is its own process), so even the
+;; non-concurrency tests below already exercise maps on multiple cores. The final
+;; :isolated block adds explicit spawn/send/receive coverage.
+
+(require 'test)
+
+;; ---- file-local helpers (defined once at load; survive :isolated rollback) ----
+
+;; Tail-recursive [lo, hi) — built top-down so the result is ascending. Tail
+;; recursion matters: a `test` body runs in a green process, whose coroutine
+;; stack is small, so deep *non*-tail recursion would overflow it.
+(defn mt-range (lo hi) (mt-range--down (- hi 1) lo nil))
+(defn mt-range--down (i lo acc)
+  (if (< i lo) acc (mt-range--down (- i 1) lo (cons i acc))))
+
+(defn mt-build (n)                        ; {0->0, 1->1, 2->4, …, (n-1)->(n-1)²}
+  (fold (fn (m i) (assoc m i (* i i))) {} (mt-range 0 n)))
+
+(describe "map literals & construction"
+  (test "a literal builds a map"
+    (is (map? {:a 1 :b 2}))
+    (assert= (type-of {}) :map)
+    (refute (map? 3))
+    (refute (map? (list 1 2)))
+    (refute (map? [1 2])))
+  (test "the empty map"
+    (is (empty? {}))
+    (assert= (count {}) 0)
+    (assert= (keys {}) nil)
+    (assert= (vals {}) nil))
+  (test "hash-map matches the literal"
+    (assert= (hash-map :a 1 :b 2) {:a 1 :b 2})
+    (assert= (hash-map) {}))
+  (test "hash-map rejects an odd argument count"
+    (assert-error (hash-map :a 1 :b)))
+  (test "keys and values are evaluated"
+    (assert= {:sum (+ 1 2)} {:sum 3})
+    (let (k :computed) (assert= {k (* 2 5)} {:computed 10})))
+  (test "duplicate keys: last wins (in a literal and in hash-map)"
+    (assert= {:a 1 :a 2} {:a 2})
+    (assert= (hash-map :a 1 :a 2 :a 3) {:a 3}))
+  (test "commas are whitespace"
+    (assert= {:a 1, :b 2} {:a 1 :b 2}))
+  (test "mixed key types coexist in one map"
+    (let (m {:kw 1 "str" 2 'sym 3 4 :four})
+      (assert= (get m :kw) 1)
+      (assert= (get m "str") 2)
+      (assert= (get m 'sym) 3)
+      (assert= (get m 4) :four)
+      (assert= (count m) 4))))
+
+(describe "map access"
+  (test "get returns the bound value"
+    (assert= (get {:a 1 :b 2} :b) 2))
+  (test "get on a missing key is nil"
+    (assert= (get {:a 1} :z) nil))
+  (test "get with an explicit default"
+    (assert= (get {:a 1} :z 99) 99)
+    (assert= (get {:a 1} :a 99) 1))
+  (test "a stored falsy value is returned, not treated as absent"
+    (assert= (get {:a nil} :a 99) nil)      ; present nil beats the default
+    (assert= (get {:a false} :a 99) false)
+    (assert= (get {:a 0} :a 99) 0))
+  (test "contains? distinguishes a present (even falsy) value from absence"
+    (is (contains? {:a nil} :a))
+    (is (contains? {:a false} :a))
+    (refute (contains? {:a 1} :z))
+    (refute (contains? {} :a)))
+  (test "keys and vals share insertion order (and line up positionally)"
+    (assert= (keys {:a 1 :b 2 :c 3}) (list :a :b :c))
+    (assert= (vals {:a 1 :b 2 :c 3}) (list 1 2 3)))
+  (test "count and empty? on a populated map"
+    (assert= (count {:a 1 :b 2 :c 3}) 3)
+    (refute (empty? {:a 1}))))
+
+(describe "immutable updates"
+  (test "assoc returns a fresh map, leaving the original untouched"
+    (let (m {:a 1})
+      (assert= (assoc m :b 2) {:a 1 :b 2})
+      (assert= m {:a 1})))                  ; the binding is unchanged
+  (test "assoc updates an existing key in place (preserving its position)"
+    (assert= (assoc {:a 1 :b 2} :a 10) {:a 10 :b 2})
+    (assert= (keys (assoc {:a 1 :b 2} :a 10)) (list :a :b)))
+  (test "assoc appends a new key at the end"
+    (assert= (keys (assoc {:a 1 :b 2} :c 3)) (list :a :b :c)))
+  (test "variadic assoc applies pairs left to right"
+    (assert= (assoc {} :a 1 :b 2 :c 3) {:a 1 :b 2 :c 3})
+    (assert= (assoc {:a 1} :a 2 :a 3) {:a 3}))  ; later pair wins
+  (test "dissoc removes one or many keys"
+    (assert= (dissoc {:a 1 :b 2 :c 3} :b) {:a 1 :c 3})
+    (assert= (dissoc {:a 1 :b 2 :c 3} :a :c) {:b 2}))
+  (test "dissoc of an absent key is a no-op"
+    (assert= (dissoc {:a 1} :z) {:a 1}))
+  (test "dissoc down to empty"
+    (assert= (dissoc {:a 1 :b 2} :a :b) {})
+    (is (empty? (dissoc {:a 1} :a))))
+  (test "assoc/dissoc never mutate shared structure"
+    (let (base {:a 1})
+      (let (x (assoc base :b 2) y (assoc base :c 3))
+        (assert= base {:a 1})               ; base still pristine
+        (assert= x {:a 1 :b 2})
+        (assert= y {:a 1 :c 3})))))
+
+(describe "keys & equality"
+  (test "any value can be a key, compared structurally"
+    (assert= (get {"x" 1 "y" 2} "y") 2)
+    (assert= (get {[1 2] :v} [1 2]) :v)
+    (assert= (get {(list 1 2) :lst} (list 1 2)) :lst)
+    (assert= (get {1 :one 2 :two} 2) :two)
+    (assert= (get {true :t false :f} false) :f))
+  (test "a map can itself be a key"
+    (assert= (get {{:a 1} :found} {:a 1}) :found)
+    (refute (contains? {{:a 1} :found} {:a 2})))
+  (test "int and float keys are distinct (consistent with =)"
+    (refute (= 1 1.0))
+    (assert= (get {1 :int} 1.0) nil)
+    (assert= (get {1.0 :flt} 1) nil))
+  (test "equality is order-independent"
+    (is (= {:a 1 :b 2} {:b 2 :a 1}))
+    (is (= {} {}))
+    (is (= (assoc {} :a 1 :b 2) (assoc {} :b 2 :a 1))))
+  (test "inequality: different value, missing key, extra key"
+    (refute (= {:a 1} {:a 2}))
+    (refute (= {:a 1 :b 2} {:a 1}))
+    (refute (= {:a 1} {:a 1 :b 2})))
+  (test "deeply nested maps compare structurally"
+    (is (= {:a {:b {:c [1 2 3]}}} {:a {:b {:c [1 2 3]}}}))
+    (refute (= {:a {:b {:c [1 2 3]}}} {:a {:b {:c [1 2 4]}}}))))
+
+(describe "printing & round-trip"
+  (test "pr-str renders the readable form"
+    (assert= (pr-str {:a 1 :b "hi"}) "{:a 1, :b \"hi\"}")
+    (assert= (pr-str {}) "{}"))
+  (test "a map round-trips through read-string + eval"
+    (let (m {:a 1 :b [2 3] :c "x"})
+      (assert= (eval (read-string (pr-str m))) m)))
+  (test "str uses the display form of values"
+    (assert= (str {:a "hi"}) "{:a hi}")))
+
+(describe "maps at scale"
+  (test "build, count, and look up a large map"
+    (let (m (mt-build 100))
+      (assert= (count m) 100)
+      (assert= (get m 0) 0)
+      (assert= (get m 9) 81)
+      (assert= (get m 99) 9801)
+      (assert= (get m 100) nil)))
+  (test "keys of a built map are in insertion order"
+    (assert= (keys (mt-build 5)) (list 0 1 2 3 4)))
+  (test "fold/reduce over keys reconstructs information"
+    (let (m (mt-build 10))
+      (assert= (reduce + 0 (vals m)) 285)))   ; Σ i² for i in 0..9
+  (test "threading macros compose map ops"
+    (assert= (-> {:x 1} (assoc :y 2) (assoc :z 3) (dissoc :x) keys)
+             (list :y :z))
+    (assert= (->> {:a 1 :b 2} keys count) 2)))
+
+(describe "type errors"
+  ;; A non-map (that isn't nil) is a hard type error on the map primitives.
+  (test "map primitives reject a non-map"
+    (assert-error (get 5 :a))
+    (assert-error (get "str" :a))
+    (assert-error (assoc 5 :a 1))
+    (assert-error (dissoc [1 2] :a))
+    (assert-error (keys 42))
+    (assert-error (contains? :kw :a))))
+
+;; ---- explicit concurrency / parallelism (spawn, send, copy-on-send) ----------
+;; :isolated so these run against a private globals copy and don't contend with
+;; the parallel suite for the runner's mailbox. The runner is the ROOT process;
+;; each worker is a GREEN process on the scheduler's worker pool (≈ nproc cores).
+;; Each test fully drains what it enqueues, so no messages leak between tests.
+
+;; worker fns + a shared global map, defined once at load (distinct names so the
+;; isolated group's shared globals copy never sees a collision).
+(defn mt-echo (parent) (send parent (receive)))
+(defn mt-touch (parent)
+  (receive (m (send parent (assoc m :touched true :n (+ 1 (get m :n)))))))
+(defn mt-emit (parent k) (send parent {:key k :sq (* k k)}))
+(defn mt-spawn-emitters (parent ks)
+  (when (not (empty? ks))
+    (spawn mt-emit parent (first ks))
+    (mt-spawn-emitters parent (rest ks))))
+(defn mt-merge (got total acc)
+  (if (= got total)
+    acc
+    (mt-merge (+ got 1) total (receive (m (assoc acc (get m :key) (get m :sq)))))))
+
+(def mt-config {:base 100 :mult 3})       ; a global map read by many processes
+(defn mt-reader (parent i)
+  (send parent [:r (+ (get mt-config :base) (* i (get mt-config :mult)))]))
+(defn mt-spawn-readers (parent n)
+  (when (> n 0) (spawn mt-reader parent n) (mt-spawn-readers parent (- n 1))))
+(defn mt-sum (got total acc)
+  (if (= got total) acc (mt-sum (+ got 1) total (receive ([:r v] (+ acc v))))))
+
+(defn mt-stage2 (parent) (receive (m (send parent (assoc m :s2 true)))))
+(defn mt-stage1 (next) (receive (m (send next (assoc m :s1 true)))))
+
+(describe "maps across processes" :isolated
+
+  (test "a map round-trips through a worker unchanged (deep copy across heaps)"
+    (let (w (spawn mt-echo (self)))
+      (send w {:a {:b [1 2 {:c 3}]} :d "deep"})
+      (assert= (receive) {:a {:b [1 2 {:c 3}]} :d "deep"})))
+
+  (test "a worker's immutable update does not affect the sender's map"
+    (let (w (spawn mt-touch (self)))
+      (let (original {:n 41})
+        (send w original)
+        (assert= (receive) {:n 42 :touched true})  ; the worker's fresh copy
+        (assert= original {:n 41}))))               ; sender's map untouched
+
+  (test "fan-out / fan-in: workers each emit an entry, parent folds one map"
+    (mt-spawn-emitters (self) (mt-range 1 21))       ; 20 workers, keys 1..20
+    (let (merged (mt-merge 0 20 {}))
+      (assert= (count merged) 20)
+      (assert= (get merged 1) 1)
+      (assert= (get merged 12) 144)
+      (assert= (get merged 20) 400)))
+
+  (test "many processes concurrently read a shared GLOBAL map"
+    ;; Σ (100 + 3i) for i in 1..50 = 50*100 + 3*(50*51/2) = 5000 + 3825 = 8825.
+    (mt-spawn-readers (self) 50)
+    (assert= (mt-sum 0 50 0) 8825))
+
+  (test "a map flows through a multi-stage process pipeline"
+    (let (w2 (spawn mt-stage2 (self)))
+      (let (w1 (spawn mt-stage1 w2))
+        (send w1 {:start true})
+        (assert= (receive) {:start true :s1 true :s2 true}))))
+
+  (test "a map carried in a selective-receive pattern"
+    (send (self) [:other 1])
+    (send (self) [:result {:status :ok :code 200}])
+    (assert= (receive ([:result m] (get m :code))) 200)  ; skips [:other 1]
+    (assert= (receive ([:other n] n)) 1)))                ; left queued, drained

@@ -408,9 +408,9 @@ fn make_closure(heap: &mut Heap, name: Option<Symbol>, rest: Value, env: EnvId) 
 type ParamSpec = (Vec<Symbol>, Vec<(Symbol, Value)>, Option<Symbol>);
 
 fn parse_params(heap: &Heap, form: Value) -> Result<ParamSpec, LispError> {
-    let items = heap.seq_items(form).map_err(|_| {
-        LispError::type_err("parameter list must be a list (x y) or vector [x y]")
-    })?;
+    let items = heap
+        .seq_items(form)
+        .map_err(|_| LispError::type_err("parameter list must be a list (x y) or vector [x y]"))?;
 
     let mut required = Vec::new();
     let mut optionals = Vec::new();

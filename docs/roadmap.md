@@ -57,7 +57,11 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   Steps 0–2 are foundation (no checker consumes the lattice yet); the first
   *behavioural* payoff is Step 4. Advisory throughout — never gates, never
   inhibits the dynamic language; not the TypeScript route.
-- ⬜ **Maps** (`{ }` literals, `get`/`assoc`)
+- ✅ **Maps** (ADR-030) — immutable `{ }` literals + `get`/`assoc`/`dissoc`/
+  `keys`/`vals`/`contains?`/`map?`. Insertion-ordered, structural-equality keys,
+  order-independent `=`; every op returns a fresh map. Small `map-*` Rust kernel,
+  the surface is Brood (`std/prelude.blsp`). Internal rep is an association
+  vector (swappable for a HAMT later, no surface change).
 - 🟡 **Memory reclamation.** `Send` arena handles replaced `Rc` (done). Step 1 of
   reclamation is **arena reset at top-level boundaries** (ADR-016): `eval_str` and
   the REPL truncate the LOCAL heap back after each form — bounds a long
@@ -84,7 +88,11 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   span-carrying CST and the introspection primitives `doc`/`arglist`/
   `global-names`/`bound?` (ADR-025); docstrings on functions/macros and on
   modules (a file's leading string), extracted to Markdown by `nest doc`
-  (ADR-029). ⬜ The `brood-lsp` language server itself (`docs/lsp.md`).
+  (ADR-029). 🟡 The `brood-lsp` language server (`docs/lsp.md`): ✅ Tier 0 —
+  the `crates/lsp` binary with stdio lifecycle, full document sync, and
+  syntactic `publishDiagnostics` off the CST; ⬜ Tier 1 (completion, hover +
+  signature help, `documentSymbol`) and Tier 2 (goto/refs/rename, semantic
+  tokens, located checker diagnostics).
 
 > v0.1 is the ✅ slice above: enough to be a real, usable language. The ⬜ items
 > complete M1.

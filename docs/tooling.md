@@ -14,9 +14,10 @@ machine" mode flag.
 > - **Stage 1 (done):** parseable error output (below).
 > - **Stage 2 (done):** structured test reporter with per-assertion source
 >   locations; `form-pos` / `current-file` introspection (below).
-> - **Stage 3 (planned):** richer introspection (`arglist`, completions) for
+> - **Stage 3 (in progress):** richer introspection (`arglist`, completions) for
 >   eldoc / completion-at-point / xref — generalised across editors by a
->   language server (`brood-lsp`). Design: [`lsp.md`](lsp.md) / ADR-025.
+>   language server (`brood-lsp`), wired into Emacs via Eglot. Design:
+>   [`lsp.md`](lsp.md) / ADR-025.
 
 ## Error output: GNU `FILE:LINE:COL:`
 
@@ -118,8 +119,36 @@ in `docs/lsp.md`.
 
 ## Editor side (Emacs)
 
-`M-x brood-run` (`C-c C-c`) runs the current file and `M-x brood-test`
-(`C-c C-t`) runs `nest test`, both in a `brood-compilation-mode` buffer (run
-through a pipe, so output is clean and un-coloured). That mode uses the built-in
-`gnu` matcher plus a position-less fallback, so `next-error` / clicking jumps
-straight to the failing line. Everything lives in `lisp/progmodes/brood.el`.
+Everything lives in one file, `lisp/progmodes/brood.el` (`brood-mode`, derived
+from `lisp-data-mode`). It splits its external commands along the same
+brood/nest line as the CLI (ADR-028): **language** commands shell out to
+`brood-program-name`, **project** commands to `nest-program-name`.
+
+Run-in-a-compilation-buffer commands (clean, un-coloured output through a pipe;
+`brood-compilation-mode` uses the built-in `gnu` matcher plus a position-less
+fallback, so `next-error` / clicking jumps straight to the failing line):
+
+| Command | Key | Runs |
+|---|---|---|
+| `brood-run`  | `C-c C-c` | `brood FILE` — the current file |
+| `brood-test` | `C-c C-t` | `nest test` — discover + run the suite |
+| `brood-doc`  | `C-c C-d` | `nest doc [module]` (prefix arg prompts) |
+| `brood-new`  | `C-c C-n` | `nest new NAME` — scaffold a project |
+
+`brood-toggle-test` (`C-c C-,`) jumps between a source file and its test —
+`src/REL.blsp` ⟷ `tests/REL_test.blsp`, resolved against the project root
+(nearest `project.blsp`) — offering to create the counterpart if it's missing.
+There's also an inferior REPL (`run-brood`) with the usual `brood-send-*`
+eval-in-REPL commands.
+
+### Language server (Eglot)
+
+Stage 3 — richer introspection (hover, completion, signature help, go-to-def,
+references, live diagnostics) — is delivered by the `brood-lsp` server (see
+[`lsp.md`](lsp.md)), not by bolting features onto the mode. `brood.el` registers
+it with Eglot (`eglot-server-programs`, via a `brood--eglot-contact` function so
+a custom `brood-eglot-server-program` is honoured at connect time). `M-x
+brood-eglot` (or plain `M-x eglot`) connects; add `eglot-ensure` to
+`brood-mode-hook` for auto-connect. Once connected, Eglot supplies the xref,
+eldoc, capf and flymake backends — the cross-editor generalisation of the GNU
+error contract above.

@@ -28,7 +28,7 @@ pub enum NodeKind {
     Root,
     List,   // ( … )
     Vector, // [ … ]
-    Map,    // { … } — accepted for tooling even though eval rejects maps today
+    Map,    // { … } — a map literal (alternating key/value forms)
     // Reader macros, kept *as written* (not lowered to `(quote x)` …) so the
     // tree mirrors the source. Each wraps its target form as a child.
     Quote,   // 'x

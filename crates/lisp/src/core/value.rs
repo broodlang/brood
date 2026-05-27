@@ -152,6 +152,11 @@ pub enum Value {
     Macro(ClosureId),
     /// A builtin implemented in Rust.
     Native(NativeId),
+    /// A unique, opaque reference token from `(ref)` — a fresh monotonic id, the
+    /// only way to make one. Distinct from `Int` so a reply tagged with a ref can
+    /// never be confused with a pid or a user integer (Erlang's `make_ref`). Sent
+    /// by value across processes; compared by identity.
+    Ref(u64),
 }
 
 /// The runtime type tags — the discriminant of [`Value`] made first-class, so it
@@ -181,6 +186,7 @@ pub enum Tag {
     Macro,
     Native,
     Map,
+    Ref,
 }
 
 impl Tag {
@@ -201,6 +207,7 @@ impl Tag {
             Tag::Macro => "macro",
             Tag::Native => "native",
             Tag::Map => "map",
+            Tag::Ref => "ref",
         }
     }
 }
@@ -222,6 +229,7 @@ pub fn tag(v: Value) -> Tag {
         Value::Macro(_) => Tag::Macro,
         Value::Native(_) => Tag::Native,
         Value::Map(_) => Tag::Map,
+        Value::Ref(_) => Tag::Ref,
     }
 }
 

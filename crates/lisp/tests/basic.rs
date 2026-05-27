@@ -88,6 +88,67 @@ fn vectors_evaluate_elements() {
 }
 
 #[test]
+fn maps_are_immutable_values() {
+    // A literal prints insertion-ordered; assoc/dissoc return fresh maps.
+    assert_eq!(run("{:a 1 :b 2}"), "{:a 1, :b 2}");
+    assert_eq!(run("(get {:a 1 :b 2} :b)"), "2");
+    assert_eq!(run("(get {:a 1} :z 99)"), "99");
+    assert_eq!(run("(assoc {:a 1} :b 2)"), "{:a 1, :b 2}");
+    // assoc does not mutate the original binding.
+    assert_eq!(run("(def m {:a 1}) (assoc m :b 2) m"), "{:a 1}");
+    assert_eq!(run("(dissoc {:a 1 :b 2 :c 3} :b)"), "{:a 1, :c 3}");
+    assert_eq!(run("(count {:a 1 :b 2 :c 3})"), "3");
+    // equality is order-independent; any value is a structurally-compared key.
+    assert_eq!(run("(= {:a 1 :b 2} {:b 2 :a 1})"), "true");
+    assert_eq!(run("(get {[1 2] :v} [1 2])"), ":v");
+    assert_eq!(run("(type-of {})"), ":map");
+}
+
+#[test]
+fn maps_structural_keys_and_equality() {
+    // Any value is a key, compared structurally (strings, vectors, maps, ints).
+    assert_eq!(run("(get {\"x\" 1 \"y\" 2} \"y\")"), "2");
+    assert_eq!(run("(get {{:a 1} :found} {:a 1})"), ":found");
+    assert_eq!(run("(contains? {{:a 1} :found} {:a 2})"), "false");
+    // int and float keys are distinct (consistent with `=`).
+    assert_eq!(run("(get {1 :int} 1.0)"), "nil");
+    // A stored falsy value is not absence: get returns it, contains? is true.
+    assert_eq!(run("(get {:a false} :a 99)"), "false");
+    assert_eq!(run("(contains? {:a nil} :a)"), "true");
+    // Equality: order-independent, value-sensitive, depth-sensitive.
+    assert_eq!(run("(= {} {})"), "true");
+    assert_eq!(run("(= {:a 1} {:a 1 :b 2})"), "false");
+    assert_eq!(run("(= {:a {:b [1 2]}} {:a {:b [1 2]}})"), "true");
+    assert_eq!(run("(= {:a {:b [1 2]}} {:a {:b [1 3]}})"), "false");
+    // assoc updates in place (keeps position); a new key appends.
+    assert_eq!(run("(keys (assoc {:a 1 :b 2} :a 9))"), "(:a :b)");
+    assert_eq!(run("(keys (assoc {:a 1} :b 2))"), "(:a :b)");
+}
+
+#[test]
+fn maps_round_trip_through_reader() {
+    // pr-str's readable form reads + evals back to an equal map.
+    let src = "(def m {:a 1 :b [2 3] :c \"x\" :d {:nested true}}) \
+               (= m (eval (read-string (pr-str m))))";
+    assert_eq!(run(src), "true");
+}
+
+/// Maps `def`'d at top level are promoted into the shared RUNTIME region and
+/// survive the per-form LOCAL arena reset (ADR-016) — many sequential top-level
+/// forms must not corrupt earlier maps.
+#[test]
+fn maps_survive_arena_reset() {
+    let src = "
+        (def a {:x 1})
+        (def b (assoc a :y 2))
+        (def c (assoc b :z 3))
+        (def d (dissoc c :x))
+        (list (get a :x) (get b :y) (get c :z) (contains? d :x) (count c))
+    ";
+    assert_eq!(run(src), "(1 2 3 false 3)");
+}
+
+#[test]
 fn higher_order() {
     assert_eq!(run("(map inc (list 1 2 3))"), "(2 3 4)");
     assert_eq!(run("(filter positive? (list -1 2 -3 4))"), "(2 4)");
@@ -108,6 +169,19 @@ fn strings() {
     assert_eq!(run("(str \"a\" \"b\" \"c\")"), "\"abc\"");
     assert_eq!(run("(str \"n=\" 42)"), "\"n=42\"");
     assert_eq!(run("(count \"hello\")"), "5");
+}
+
+/// The string-library kernel primitives (the Brood layer over them is covered by
+/// the in-language suite, `tests/strings_test.blsp`).
+#[test]
+fn string_kernel() {
+    assert_eq!(run("(upper \"abc\")"), "\"ABC\"");
+    assert_eq!(run("(lower \"ABC\")"), "\"abc\"");
+    assert_eq!(run("(upper \"ß\")"), "\"SS\""); // Unicode case folding
+    assert_eq!(run("(string->number \"42\")"), "42");
+    assert_eq!(run("(string->number \"3.5\")"), "3.5");
+    assert_eq!(run("(string->number \"3abc\")"), "nil"); // strict parse, not read-string
+    assert_eq!(run("(string->number \"\")"), "nil");
 }
 
 /// The headline property: deep tail recursion uses O(1) Rust stack, so it must
@@ -151,7 +225,10 @@ fn slurp_round_trips_a_file() {
     let mut path = std::env::temp_dir();
     path.push(format!("brood-slurp-{}.tmp", std::process::id()));
     let path = path.to_string_lossy().replace('\\', "\\\\");
-    let src = format!("(spit \"{p}\" \"hello\\n\") (= (slurp \"{p}\") \"hello\\n\")", p = path);
+    let src = format!(
+        "(spit \"{p}\" \"hello\\n\") (= (slurp \"{p}\") \"hello\\n\")",
+        p = path
+    );
     assert_eq!(run(&src), "true");
     let _ = std::fs::remove_file(&path);
 }

@@ -15,7 +15,7 @@ gate (`eval::call_native`), before the primitive runs — so a wrong-count call 
 a clean arity error (`type-of: expected 1 argument, got 0`) rather than a missing
 arg silently becoming `nil`.
 
-## Native primitive functions (60)
+## Native primitive functions (67)
 
 | Category | Primitive | Arity | Purpose |
 |---|---|---|---|
@@ -25,13 +25,22 @@ arg silently becoming `nil`.
 | | `rem` | 2 | integer remainder (truncated, sign of dividend); `mod` (euclidean) is Brood over it |
 | **Pair / sequence** | `cons` | 2 | make a pair |
 | | `first` `rest` | 1 | head / tail (nil, pair, or vector) |
-| | `empty?` | 1 | empty collection? (nil / string / vector / pair) |
+| | `empty?` | 1 | empty collection? (nil / string / vector / pair / map) |
 | **Vector** (data type, O(1)) | `vector` | n | construct a vector |
 | | `vector-ref` | 2 | index |
 | | `vector-length` | 1 | length |
+| **Map** (immutable; data type) | `hash-map` | n | construct a map from `k v k v …` args (the `{ }` literal's programmatic form); last-wins on dup keys |
+| | `map-get` | 2–3 | value at a key, or the optional default (else nil) |
+| | `map-assoc` | 3 | a fresh map with `key`→`val` added/updated |
+| | `map-dissoc` | 2 | a fresh map with a key removed |
+| | `map-keys` `map-vals` | 1 | keys / values as a list, in insertion order |
+| | `map-contains?` | 2 | whether a key is present → bool |
 | **String** | `string-length` | 1 | char count |
 | | `substring` | 3 | characters `[start, end)`, char-indexed |
-| **Type reflection** | `type-of` | 1 | the runtime type tag as a keyword (`:int` `:string` …); the one irreducible reflective primitive. The tag predicates (`nil?` `pair?` `int?` `float?` `bool?` `string?` `symbol?` `keyword?` `vector?` `fn?`) are Brood wrappers over it, as are the in-language type checks |
+| | `upper` | 1 | `s` upper-cased (Unicode-aware, e.g. `ß` → `SS`) |
+| | `lower` | 1 | `s` lower-cased (Unicode-aware) |
+| | `string->number` | 1 | strict parse → int, else float, else `nil` (`"3abc"` → `nil`, unlike `read-string`) |
+| **Type reflection** | `type-of` | 1 | the runtime type tag as a keyword (`:int` `:string` …); the one irreducible reflective primitive. The tag predicates (`nil?` `pair?` `int?` `float?` `bool?` `string?` `symbol?` `keyword?` `vector?` `map?` `fn?`) are Brood wrappers over it, as are the in-language type checks |
 | **Type checking** (advisory; see [types.md](types.md)) | `check` | 1 | run the advisory type checker over a *quoted* form: macro-expand it (like the real compile pass), then return a **list of warning strings** for provably-wrong primitive arguments (e.g. `(first 5)` → `"first: argument 1 expects nil \| pair \| vector, got int (5)"`), or `nil` when nothing is wrong. Advisory: never raises |
 | **Value ↔ text & I/O** | `str` | n | concatenate the *display* forms of args → string |
 | | `pr-str` | 1 | *readable* form of a value → string |
@@ -79,8 +88,11 @@ construct/inspect, the type-tag *reflection* (`type-of`), I/O, value→text
 conversion, the wall clock, the allocator counters, the `Ty`-lattice checker
 pass, or a hook into `eval`/the reader. None of it can be written in Brood. Everything that *can* be is already
 in the prelude — including the tag predicates (over `type-of`), the full
-arithmetic/comparison families (over `%add`/`%lt`/…), `mod` (over `rem`), and
-`println` (over `print`).
+arithmetic/comparison families (over `%add`/`%lt`/…), `mod` (over `rem`),
+`println` (over `print`), and the map surface `get`/`assoc`/`dissoc`/`keys`/
+`vals`/`contains?` (the variadic, default-bearing layer over the `map-*`
+primitives). The map literal `{ }` is read by the reader and evaluated like a
+vector literal — no constructor call.
 
 ## Special forms (not primitives)
 

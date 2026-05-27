@@ -28,7 +28,7 @@ new Rust; **[Brood]** = can be written in the prelude.
 - ✅ **Error handling**: `throw` / `try` / `catch` / `error`
 - ✅ REPL (line editing, history) + file runner
 
-The native kernel is **39 primitives** — see [`docs/primitives.md`](docs/primitives.md).
+The native kernel is **70 primitives** — see [`docs/primitives.md`](docs/primitives.md).
 
 ---
 
@@ -36,14 +36,19 @@ The native kernel is **39 primitives** — see [`docs/primitives.md`](docs/primi
 
 ### Tier 1 — core gaps (needed before we'd call the language *complete*)
 
-- ⬜ **Maps / associative data** — `{ }` literals + `get`/`assoc`/`dissoc`/`keys`/`vals`/`contains?`.
-  Reserved in the reader but unimplemented; a general Lisp needs key→value data.
-  **[kernel]** (a hash-map value + a few primitives; reader `{ }`).
-- ⬜ **String library** — `substring`, `string-split`, `join`, `replace`,
-  `index-of`, `upper`/`lower`, `string->number`/`number->string`,
-  `char-at`/`string->list`/`list->string`. Today only `str`, `string-length`,
-  `pr-str` exist. **[kernel]** for a few accessors (`substring`, char access),
-  **[Brood]** for the rest.
+- ✅ **Maps / associative data** (ADR-030) — immutable `{ }` literals +
+  `get`/`assoc`/`dissoc`/`keys`/`vals`/`contains?`/`map?`. Insertion-ordered,
+  any value as a structurally-compared key, order-independent `=`; every op
+  returns a fresh map. **[kernel]** a `Value::Map` + small `map-*` primitives +
+  reader `{ }`; the surface is **[Brood]** (`std/prelude.blsp`). Internal rep is
+  an association vector — swappable for a HAMT later with no surface change.
+- ✅ **String library** — `substring`, `string-split`, `join`, `replace`,
+  `index-of`, `string-contains?`, `upper`/`lower`, `string->number`/
+  `number->string`, `char-at`/`string->list`/`list->string`, `trim`/`triml`/
+  `trimr`, `blank?`. **[kernel]** only `upper`/`lower` (Unicode case folding) and
+  `string->number` (strict parse-or-nil) genuinely need Rust; everything else is
+  **[Brood]** over `substring`/`string-length`/`str` (`std/prelude.blsp`). Chars
+  are 1-char strings (no distinct char type — deferred); indices are char-based.
 - ⬜ **Math library** — `floor ceil round sqrt pow`, `even?`/`odd?`,
   variadic `min`/`max`, `quot`. **[kernel]** for the float ops; **[Brood]** for
   the rest.
@@ -157,7 +162,8 @@ what unlock full work-stealing, so concurrency pulls the GC work earlier.
 
 ## Suggested order
 
-1. **Maps** (Tier 1) — unblocks structured data *and* a structured error value.
+1. ✅ **Maps** (Tier 1) — done (ADR-030); unblocks structured data *and* a
+   structured error value.
 2. **Strings + Math** (Tier 1) — the two libraries every real program reaches for.
 3. **Sequence library** (Tier 1, mostly Brood) — cheap, high value.
 4. **Dynamic variables** (Tier 1).

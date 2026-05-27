@@ -48,6 +48,7 @@ dependencies = [
  "brood",
  "lsp-server",
  "lsp-types",
+ "serde",
  "serde_json",
 ]
 

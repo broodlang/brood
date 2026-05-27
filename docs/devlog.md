@@ -1174,3 +1174,118 @@ the lone clippy warning.
 **Verified.** `cargo test -p brood` green (46 + 48 + Brood suite + doc). The
 unrelated `crates/lsp` workspace member (in progress, no `main.rs` yet) breaks a
 full `cargo test`; scoped to `-p brood`.
+
+---
+
+## 2026-05-27 — `brood-lsp`: the language server, Tier 0
+
+**Goal.** Land the LSP server the foundations (CST, scope resolver, docstrings)
+were built for — see [lsp.md](lsp.md). Scope this session to **Tier 0**: a real
+server an editor can connect to, publishing *syntactic* diagnostics.
+
+**Shipped.** New `crates/lsp` → **`brood-lsp`** binary (workspace member #4),
+depending on the `brood` lib + `lsp-server`/`lsp-types` 0.97 (the synchronous,
+no-tokio stack rust-analyzer uses — chosen in lsp.md because `Interp`/`Heap` is
+`!Sync`, so a blocking request loop owning the document store avoids all
+`Send`/`Sync` friction).
+
+- `line_index.rs` — `LineIndex`: byte offset → LSP `Position`, with **UTF-16**
+  column arithmetic (LSP's default `positionEncoding`; we advertise it
+  explicitly). Tested incl. multibyte (`é`, `😀`).
+- `diagnostics.rs` — `collect`: a walk over `cst::parse`'s `Error` nodes into
+  `(Span, message)` pairs (LSP-agnostic, so unit-testable against the CST
+  alone). Names the three CST recovery shapes: unmatched close, unterminated
+  string, unclosed delimiter.
+- `main.rs` — stdio `Connection`, FULL document sync, `initialize` handshake,
+  `didOpen`/`didChange`/`didClose` over a `Uri`→text store, `publishDiagnostics`
+  (severity ERROR, `source: "brood"`). The server **never evaluates** buffer
+  text — diagnostics come from parsing, not running.
+
+**Gotcha hit.** First end-to-end run hung: `main_loop(&connection)` keeps the
+`Connection`'s `Sender` alive, so the stdout writer thread never sees its channel
+close and `io_threads.join()` deadlocks. Fix: `drop(connection)` before the join
+(documented inline). Verified with a scripted `initialize`+`didOpen`(unclosed)
++`didChange`(fixed)+`shutdown` over real LSP framing: one ERROR at EOF, then
+cleared, clean exit.
+
+**Also.** Full `cargo test` is green again now that `crates/lsp` has a `main.rs`
+(the previous entry's caveat is resolved): 46 + 48 + lsp's 9 + Brood suite + doc.
+`make install`/`uninstall` now build `brood-lsp` into `~/.local/bin` alongside
+`brood` and `nest`, so `eglot` finds it on `PATH`.
+
+---
+
+## 2026-05-27 — Maps (immutable `{ }`)
+
+**Goal.** Implement the last Tier-1 data type — maps — which a previous attempt
+stalled on. The blocker then was immutability + hashing; the resolution makes
+both a non-issue.
+
+**Decision (ADR-030).** A map is an **immutable value**, modelled exactly like a
+vector: a new `Value::Map(MapId)` / `Tag::Map` over a slab, with the internal
+representation an **insertion-ordered association vector** `Vec<(Value, Value)>`.
+Keys are compared by the existing structural `heap.equal` — so any value can be
+a key and we never need a `Hash` over heap-resident data (the snag that stalled
+the earlier try). Every op returns a fresh map; nothing mutates.
+
+**What landed.**
+- **Kernel:** `Value::Map` + `Tag::Map` (`value.rs`); a `maps` slab in all three
+  regions + `alloc_map`/`map`/`map_get`/`map_assoc`/`map_dissoc`/`map_contains`/
+  `map_from_pairs` and a `Map` arm in `promote`, `freeze`, `equal`, and the
+  `LocalCheckpoint` reset (`heap.rs`). The reader turns `{ }` into a literal map
+  (odd count is an error, commas are whitespace); `eval` evaluates a map
+  literal's keys+values and canonicalises (last-wins); the printer renders
+  `{k v, k v}`. `macroexpand_all` and `quasiquote` walk into maps. Messages gain
+  a `Map` variant so maps cross process heaps (`process.rs`). The `Ty` lattice
+  gains `Tag::Map` + `tested_by("map?")`.
+- **Primitives (7):** `hash-map`, `map-get` (2–3, optional default),
+  `map-assoc`, `map-dissoc`, `map-keys`, `map-vals`, `map-contains?`. `empty?`
+  gained a map case.
+- **Brood surface (`std/prelude.blsp`):** `map?`, `get` (with default), variadic
+  `assoc`/`dissoc`, `keys`/`vals`/`contains?`; `count` now handles maps.
+
+**Verified.** Insertion order, last-wins dedup, immutable update (original
+binding unchanged after `assoc`), order-independent `=`, structural keys
+(strings/vectors/numbers), computed/quasiquoted values, nesting, `pr-str`
+round-trip, and a map sent to another process and echoed back. New
+`tests/maps_test.blsp` (auto-discovered) + a `maps_are_immutable_values` Rust
+case. Full `cargo test` + `nest test` (218 in-language tests) green.
+
+**Result.** Tier-1 maps done; the language now has all four core data types
+(nil/bool/num/sym/keyword/string + list/vector/map).
+
+---
+
+## 2026-05-27 — String library
+
+**Goal.** The next Tier-1 gap: a usable string library. Today only `str`,
+`pr-str`, `string-length`, `substring` existed.
+
+**Kernel split (the principle: add Rust only where it's unavoidable).** Just
+**3 new primitives**, each genuinely needing Rust:
+- `upper` / `lower` — Unicode-aware case folding (`(upper "ß")` → `"SS"`), which
+  leans on the standard library's case tables.
+- `string->number` — a *strict* parse → int, else float, else `nil`. Can't be
+  expressed over `read-string`, which would read `"3abc"` as `3` and stop; the
+  strict parse-or-nil is the whole point.
+
+**Everything else is Brood** (`std/prelude.blsp`, new "strings" section), over
+`substring` / `string-length` / `str`: `char-at`, `string->list` / `list->string`,
+`number->string`, `index-of`, `string-contains?`, `join`, `string-split`,
+`replace`, `trim` / `triml` / `trimr`, `blank?`. All the recursive helpers are
+**tail-recursive** (stack-safe on long strings). Notes: chars are **1-char
+strings** (no distinct char type — deferred), indices are **char-based** (correct
+for multi-byte UTF-8); `substring` is O(index) so a full scan is O(n²) — fine for
+the short strings this targets, with large-text performance deferred to the M2
+rope engine. `string-split`/`join` are inverses; an empty separator splits into
+characters; `replace` is `join` over `string-split`.
+
+**Verified.** New `tests/strings_test.blsp` (31 cases, auto-discovered: case
+folding incl. Unicode, strict parse-or-nil, char access + round-trip, search,
+join/split round-trip, replace, trim/blank edge cases) + a `string_kernel` Rust
+case in `basic.rs`. `cargo test -p brood` green (50 Rust + Brood suite + doc);
+`nest test` 249/249. Docs: `primitives.md` (+3, kernel now 70), `language.md`
+(rewrote the Strings section), `ROADMAP.md` (String library ✅, count 39→70).
+
+**Result.** Tier-1 string library done. Remaining Tier-1 gaps: Math library,
+sequence library, dynamic variables.

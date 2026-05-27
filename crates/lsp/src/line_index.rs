@@ -88,7 +88,7 @@ mod tests {
         let text = "é😀x";
         let idx = LineIndex::new(text);
         let x = text.find('x').unwrap() as u32; // byte 6
-        // 'é' (1) + '😀' (2) = 3 UTF-16 units before 'x'
+                                                // 'é' (1) + '😀' (2) = 3 UTF-16 units before 'x'
         assert_eq!(idx.position(text, x), Position::new(0, 3));
     }
 

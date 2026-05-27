@@ -183,13 +183,28 @@ surface it and ask — don't reset to "fix" it.
 2. Add tests — an `(assert= …)`/`(is …)` inside a `deftest` in `tests/suite.blsp`
    (in-language, via the `std/test.blsp` framework), and/or a Rust case in
    `crates/lisp/tests/basic.rs`.
+   **Every language feature must also be tested across multiple cores**, not just
+   single-threaded. The in-language suite already helps here — `std/test.blsp`
+   runs each test in its own green process on the ≈`nproc` worker pool, so a plain
+   `describe`/`test` exercises the feature concurrently with every other test. On
+   top of that, add **explicit concurrency coverage** for any feature that
+   produces or carries values: `spawn` workers that build the value, `send` it
+   between processes (which deep-copies across per-process heaps — so it proves
+   `to_message`/`from_message` *and* `promote`/freeze round-trip the value), read
+   it from a shared global in many processes at once, and fan-in the results.
+   See the `:isolated` "across processes" block in `tests/maps_test.blsp` for the
+   pattern. **Caveat:** a `test` body runs in a green process whose coroutine
+   stack is small, so keep recursion in tests **tail-recursive** (O(1) stack) —
+   deep *non*-tail recursion overflows it (today that's an uncatchable segfault,
+   not a clean error; see `docs/devlog.md`).
 3. Update `docs/language.md` (it documents the language *as implemented*).
 4. Tick it off in `docs/roadmap.md`; add a dated entry to `docs/devlog.md`.
 5. If it reflects a real design choice, record an ADR in `docs/decisions.md`.
 
 ## Known next steps (see roadmap)
 
-Macros + quasiquote, dynamic variables (`defdyn`/`binding`), in-language
-`try`/`catch`, map literals, and the tracing-GC migration complete the language
-core (M1). After that: the editor data model (M2), display protocol + native
-frontend (M3), server mode (M4), web frontend (M5).
+Dynamic variables (`defdyn`/`binding`), the math/sequence libraries, and the
+tracing-GC migration complete the language core (M1) — macros/quasiquote,
+in-language `try`/`catch`, maps, and the string library are done. After that: the
+editor data model (M2), display protocol + native frontend (M3), server mode
+(M4), web frontend (M5).

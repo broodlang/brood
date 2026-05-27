@@ -31,8 +31,8 @@ these are the ones to unlearn:
 |---|---|---|
 | `(try … (catch Type e body))` | `catch` takes a **bare binding**: `(catch e body)`. There is no exception class. | The class name gets bound *as* the variable and `e` is treated as body → cryptic `unbound symbol: e`. |
 | Multi-arity `(fn ([x] …) ([x y] …))` | No arity overloading. `fn` *is* multi-clause, but Erlang-style — **same-arity** dispatch by **pattern + guard** (see [Pattern matching](#pattern-matching)), not by arity. Use `&optional` / `&` rest for variable arity. | — |
-| `{:a 1}` map literal | Maps aren't implemented yet. | `parse error: map literals '{ }' are not supported yet`. |
-| `{:keys [a b]}` / `:or` map destructuring | No map patterns yet (maps aren't implemented). Sequence/tuple destructuring **is** supported — `(let ([a b] v) …)`, `(let ((h & t) v) …)`. | Parse / type error. |
+| `{:a 1}` map literal | **Supported.** Immutable, insertion-ordered; `get`/`assoc`/`dissoc`/`keys`/`vals`/`contains?` (see [Maps](#maps)). | Works as you'd expect. |
+| `{:keys [a b]}` / `:or` map destructuring | No map *patterns* yet (maps themselves exist; the pattern syntax for them doesn't). Sequence/tuple destructuring **is** supported — `(let ([a b] v) …)`, `(let ((h & t) v) …)`. | Parse / type error. |
 | `(defn f [x y] …)`, `(let [a 1 b 2] …)` | Param lists and `let` bindings are **lists** — `(x y)` / `(a 1 b 2)`. | Works (vectors are accepted in binding position), but it's non-idiomatic — prefer lists. |
 | `(/ 7 2)` → ratio `7/2` | No ratios. Integer args give an integer **only when they divide evenly**; otherwise a float. `(/ 12 3)` → `4`, `(/ 7 2)` → `3.5`. | A float where you expected an exact ratio. |
 
@@ -54,6 +54,7 @@ be guessed from Clojure; it has to be read.
 | Keyword | `:ok`, `:else` | Self-evaluating named constants. |
 | List | `(1 2 3)`, `()`, `(1 . 2)` | Cons cells; `()` is `nil`. Quote to keep as data: `'(1 2 3)`. A dotted tail `(a . b)` makes an improper list (round-trips with the printer). |
 | Vector | `[1 2 3]` | A data type with O(1) indexing. Evaluates its elements. |
+| Map | `{:a 1 :b 2}`, `{}` | Immutable key→value associations; insertion-ordered. Evaluates its keys and values. Any value can be a key (compared structurally). |
 | Function | `#<fn name>`, `#<native +>` | Closures and builtins. |
 
 ### Truthiness
@@ -98,6 +99,49 @@ also shrinks the core — two fewer special forms (`set!`, `while`). See
 immutable `assoc`/`append` is O(n²); `reduce`/`fold` and future persistent
 structures are the mitigations).
 
+## Maps
+
+Maps are immutable key→value collections, written `{key value …}`:
+
+```lisp
+{:name "Ada" :born 1815}          ; a literal — evaluates keys and values
+{}                                ; the empty map
+(hash-map :a 1 :b 2)              ; built programmatically (same result as {:a 1 :b 2})
+```
+
+Like vectors, a map literal **evaluates** its keys and values, so
+`{:sum (+ 1 2)}` is `{:sum 3}` and `{k 1}` uses the *value* of `k` as the key.
+Any value can be a key — keywords, strings, numbers, even vectors or maps — and
+keys are compared by **structural equality** (so `{[1 2] :v}` can be looked up
+with `[1 2]`). Duplicate keys keep the **last** value. Maps preserve **insertion
+order** when printed and when you ask for `keys`/`vals`. Map equality (`=`) is
+**order-independent**: `{:a 1 :b 2}` equals `{:b 2 :a 1}`.
+
+Maps are immutable — every operation returns a **fresh** map:
+
+| Form | Meaning |
+|---|---|
+| `(get m k)` / `(get m k default)` | the value at `k`; `nil` (or `default`) if absent |
+| `(assoc m k1 v1 k2 v2 …)` | a new map with the pairs added/updated |
+| `(dissoc m k1 k2 …)` | a new map with those keys removed |
+| `(contains? m k)` | whether `k` is present (distinguishes a stored `nil` from absence) |
+| `(keys m)` / `(vals m)` | the keys / values, as a list, in insertion order |
+| `(count m)` / `(empty? m)` | number of entries / whether there are none |
+| `(map? x)` | whether `x` is a map |
+
+```lisp
+(def person {:name "Ada" :born 1815})
+(get person :name)                  ; => "Ada"
+(get person :died "unknown")        ; => "unknown"
+(assoc person :field "computing")   ; => a new map; `person` is unchanged
+(-> person (assoc :born 1816) (get :born))   ; => 1816
+```
+
+These are thin Brood wrappers (`std/prelude.blsp`) over a small kernel of `map-*`
+primitives; the internal representation is an insertion-ordered association
+vector, which can be swapped for a hash-array-mapped trie later without any
+surface change.
+
 ## Syntax
 
 - `;` starts a line comment.
@@ -105,7 +149,8 @@ structures are the mitigations).
 - Whitespace separates tokens; `[` `]` and `(` `)` delimit.
 - A lone `.` inside a list builds a dotted (improper) tail: `(1 2 . 3)`. A `.`
   that begins an atom (`.5`, `.foo`) is not a separator.
-- `{ }` (maps) are reserved but not implemented yet — using them is a parse error.
+- `{ }` is a map literal (`{key value …}`) — see [Maps](#maps). Commas count as
+  whitespace, so `{:a 1, :b 2}` reads the same as `{:a 1 :b 2}`.
 
 ## Special forms
 
@@ -445,6 +490,12 @@ the model, and [pattern-matching.md](pattern-matching.md) for the clause grammar
 - `first`/`rest` of `nil` are `nil`. `nth` takes an optional default:
   `(nth coll i default)`.
 
+### Maps
+`hash-map`  `get`  `assoc`  `dissoc`  `contains?`  `keys`  `vals`  `map?`
+
+See the [Maps](#maps) section above. `{ }` is the literal form; the rest are
+immutable operations that return fresh maps. `count`/`empty?` work on maps too.
+
 ### Higher-order
 `map`  `filter`  `reduce`  `apply`
 
@@ -457,19 +508,54 @@ the model, and [pattern-matching.md](pattern-matching.md) for the clause grammar
 
 ### Predicates
 `nil?`  `pair?`  `list?`  `symbol?`  `keyword?`  `string?`  `number?`  `int?`
-`float?`  `bool?`  `fn?`  `vector?`
+`float?`  `bool?`  `fn?`  `vector?`  `map?`
 
 - `(type-of x)` returns the runtime type tag as a keyword — `:int` `:float`
-  `:string` `:symbol` `:keyword` `:bool` `:nil` `:pair` `:vector` `:fn`
+  `:string` `:symbol` `:keyword` `:bool` `:nil` `:pair` `:vector` `:map` `:fn`
   `:macro` `:native` — the spellings mirror the predicates above. It's the
   reflective primitive that in-language type checks build on; the predicates are
   the common-case shortcuts.
 
-### Strings & I/O
-`str`  `print`  `println`  `pr-str`
+### Strings
+`str`  `pr-str`  `string-length`  `substring`  `char-at`  `string->list`
+`list->string`  `upper`  `lower`  `string->number`  `number->string`
+`index-of`  `string-contains?`  `join`  `string-split`  `replace`
+`trim`  `triml`  `trimr`  `blank?`  `starts-with?`  `ends-with?`
 
 - `str` concatenates the *display* form of its args; `pr-str` returns the
   *readable* form of one value.
+- There is **no distinct character type** (deferred): a "character" is just a
+  1-char string, so `(char-at s i)` and the elements of `(string->list s)` are
+  strings. All indices are **char-based**, matching `string-length` (so they are
+  correct for multi-byte UTF-8, not byte offsets).
+- `substring`, `char-at`, `string-length` are the char-indexed accessors;
+  `string->list` / `list->string` bridge to and from a list of chars.
+- `upper` / `lower` case-fold (Unicode-aware: `(upper "ß")` → `"SS"`).
+- `string->number` is a **strict** parse — int if it is one, else float, else
+  `nil`; it rejects partial input (`(string->number "3abc")` → `nil`) and
+  surrounding whitespace (`trim` first if needed). `number->string` is its inverse
+  (just `str` on a number).
+- `index-of` returns the first char index of a substring or `-1`;
+  `string-contains?` is the boolean form. `join` puts a separator between strings;
+  `string-split` is its inverse (an empty separator splits into characters).
+  `replace` swaps every occurrence of one substring for another.
+- `trim` / `triml` / `trimr` strip whitespace (both ends / left / right);
+  `blank?` is true for an empty or all-whitespace string.
+
+```clojure
+(string-split "a,b,c" ",")      ;=> ("a" "b" "c")
+(join "-" (list "x" "y" "z"))   ;=> "x-y-z"
+(replace "one fish two fish" "fish" "cat")  ;=> "one cat two cat"
+(upper (trim "  hi  "))         ;=> "HI"
+(string->number "3.5")          ;=> 3.5
+```
+
+Only `upper`/`lower` (Unicode tables) and `string->number` (strict parse-or-nil)
+are Rust primitives; the rest of the library is Brood over `substring`/`str`
+(`std/prelude.blsp`) — the "write the language in the language" principle.
+
+### I/O
+`print`  `println`
 
 ### Time & memory
 `now`  `mem-bytes`  `mem-peak`

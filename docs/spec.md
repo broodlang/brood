@@ -65,9 +65,10 @@ The reader turns text into values (§4).
 ```ebnf
 program = { form } ;
 form    = number | string | keyword | boolean | nil | symbol
-        | list | vector | reader-macro ;
+        | list | vector | map | reader-macro ;
 list    = "(" { form } ")" ;
 vector  = "[" { form } "]" ;
+map     = "{" { form form } "}" ;   (* alternating key/value forms *)
 
 reader-macro = "'"  form        (* (quote form)            *)
              | "`"  form        (* (quasiquote form)       *)
@@ -75,8 +76,8 @@ reader-macro = "'"  form        (* (quote form)            *)
              | "~@" form ;      (* (unquote-splicing form) *)
 ```
 
-`{ }` is reserved for map literals and is currently a read error. The empty list
-`()` reads as `nil` (§4).
+A map literal `{ }` holds an even number of forms (key, value, key, value, …);
+an odd count is a read error. The empty list `()` reads as `nil` (§4).
 
 ## 4. Data model
 
@@ -93,6 +94,7 @@ A value is exactly one of:
 | **keyword** | an interned, self-evaluating name (`:k`). |
 | **pair** | a cons cell `(a . b)`. Proper lists are pairs chained to a final `nil`. |
 | **vector** | a fixed sequence of values. |
+| **map** | immutable key→value associations (`{ }`); insertion-ordered, any value as a structurally-compared key. |
 | **function** | a closure (`fn`) or a primitive. |
 
 Lists are not a distinct type: a "list" is either `nil` or a pair whose chain of

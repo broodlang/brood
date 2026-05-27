@@ -1056,6 +1056,49 @@ The accurate, order-independent fix is the static CST walk planned in
 `docs/lsp.md`; the runtime path ships first because it reuses the canonical doc
 machinery and needs almost no new Rust.
 
+## ADR-030 — Maps are immutable values (insertion-ordered assoc vector)
+
+**Context.** A general Lisp needs key→value data; `{ }` was reserved in the
+reader but unimplemented. An earlier attempt stalled on the obvious tension:
+a *mutable* hash map fights everything the runtime depends on — `Send`
+per-process heaps, copy-on-send messages, the append-only shared `RUNTIME` code
+region, the (coming) tracing GC that wants no write barriers — and it would
+violate the language's core immutability rule (ADR-026). Hashing was the other
+snag: keys live in the heap (string contents, list/vector structure), so a
+`Hash` over a `Value` needs `&Heap`, which the standard-library `HashMap` API
+won't give it.
+
+**Decision.** A map is an **immutable value**, exactly like a vector: a new
+`Value::Map` / `Tag::Map`, stored in a slab, deep-copied by `promote` (LOCAL →
+shared RUNTIME), retagged by the prelude freeze, and copied across heaps by the
+message path — no special-casing, no write barriers. Every operation
+(`assoc`/`dissoc`) returns a **fresh** map; nothing mutates in place.
+
+- **Representation:** an **insertion-ordered association vector**
+  `Vec<(Value, Value)>`, with no duplicate keys (assoc replaces in place). Keys
+  are compared by the existing structural `heap.equal`, which *sidesteps the
+  hashing problem entirely* — any value is a valid key, and we never need a
+  `Hash` over heap-resident data. O(n) lookup, but maps here are small
+  (structured data, error values) and ADR-011 says ship the simple form first.
+  It is swappable for a hash-array-mapped trie later **with no surface change**.
+- **Semantics:** literals `{k v …}` evaluate their keys and values (like vector
+  literals), last-wins on duplicate keys; insertion order is preserved for
+  printing and `keys`/`vals`; map `=` is **order-independent** (same
+  associations). `contains?` distinguishes a stored `nil` from absence.
+- **Kernel vs. Brood:** Rust provides only the irreducible `map-*` primitives
+  (`hash-map`, `map-get`, `map-assoc`, `map-dissoc`, `map-keys`, `map-vals`,
+  `map-contains?`); the ergonomic surface — `get` (with default), variadic
+  `assoc`/`dissoc`, `keys`/`vals`/`contains?`/`map?` — is Brood in
+  `std/prelude.blsp` (ADR-006). `count`/`empty?` gained a map case.
+
+**Consequences.** Immutability makes maps "free" to thread through the
+concurrency/GC machinery (they're just another `Send` slab of `Copy` handles),
+which is the opposite of the mutable-map dead end. The cost is O(n) per
+operation and O(n²) for repeated `assoc` in a loop — the same trade-off ADR-026
+already accepts for `cons`/`append`, with the same mitigation (a persistent
+HAMT) available later behind the unchanged surface. Maps also unblock a
+structured error value (a later refactor of `error.rs`).
+
 ## Deferred / open questions
 
 - **Macro hygiene:** currently unhygienic `defmacro` + `gensym`; hygienic macros

@@ -43,9 +43,26 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "vector-ref", Arity::exact(2), vector_ref);
     def(heap, "vector-length", Arity::exact(1), vector_length);
 
+    // map — the kernel primitives; the `get`/`assoc`/`dissoc`/`keys`/`vals`/
+    // `contains?` surface (incl. variadic forms + defaults) is Brood over these
+    // (std/prelude.blsp). Maps are immutable: each op returns a fresh map.
+    def(heap, "hash-map", Arity::any(), hash_map);
+    def(heap, "map-get", Arity::range(2, 3), map_get);
+    def(heap, "map-assoc", Arity::exact(3), map_assoc);
+    def(heap, "map-dissoc", Arity::exact(2), map_dissoc);
+    def(heap, "map-keys", Arity::exact(1), map_keys);
+    def(heap, "map-vals", Arity::exact(1), map_vals);
+    def(heap, "map-contains?", Arity::exact(2), map_contains);
+
     // string
     def(heap, "string-length", Arity::exact(1), string_length);
     def(heap, "substring", Arity::exact(3), substring);
+    // Case folding (Unicode tables) and parse-or-nil genuinely need Rust; the rest
+    // of the string library (split/join/replace/index-of/trim/…) is Brood over
+    // these + `substring`/`str` (std/prelude.blsp).
+    def(heap, "upper", Arity::exact(1), upper);
+    def(heap, "lower", Arity::exact(1), lower);
+    def(heap, "string->number", Arity::exact(1), string_to_number);
 
     // type reflection — the tag predicates (nil?/int?/string?/…) are Brood
     // (std/prelude.blsp) over this one reflective primitive.
@@ -285,6 +302,7 @@ fn is_empty(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         Value::Nil => true,
         Value::Str(id) => heap.string(id).is_empty(),
         Value::Vector(id) => heap.vector(id).is_empty(),
+        Value::Map(id) => heap.map(id).is_empty(),
         Value::Pair(_) => false,
         _ => return Err(LispError::wrong_type(heap, "empty?", "collection", v)),
     };
@@ -315,6 +333,70 @@ fn vector_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         Value::Vector(id) => Ok(Value::Int(heap.vector(id).len() as i64)),
         _ => Err(LispError::wrong_type(heap, "vector-length", "vector", v)),
     }
+}
+
+// ---------- map ----------
+
+/// Require a map; otherwise a self-identifying type error attributed to `who`.
+fn expect_map(heap: &Heap, who: &str, v: Value) -> Result<value::MapId, LispError> {
+    match v {
+        Value::Map(id) => Ok(id),
+        _ => Err(LispError::wrong_type(heap, who, "map", v)),
+    }
+}
+
+/// `(hash-map k v k v …)` — build a map from alternating key/value args (the
+/// programmatic form of the `{ }` literal). Errors on an odd count; last-wins on
+/// duplicate keys.
+fn hash_map(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    if !args.len().is_multiple_of(2) {
+        return Err(LispError::arity(
+            "hash-map: expected an even number of arguments (key/value pairs)",
+        ));
+    }
+    let pairs: Vec<(Value, Value)> = args.chunks_exact(2).map(|kv| (kv[0], kv[1])).collect();
+    Ok(heap.map_from_pairs(pairs))
+}
+
+/// `(map-get m k [default])` — the value `k` maps to, or `default` (nil if
+/// omitted) when absent.
+fn map_get(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_map(heap, "map-get", arg(args, 0))?;
+    Ok(heap
+        .map_get(id, arg(args, 1))
+        .unwrap_or_else(|| arg(args, 2)))
+}
+
+/// `(map-assoc m k v)` — a fresh map with `k` bound to `v`.
+fn map_assoc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_map(heap, "map-assoc", arg(args, 0))?;
+    Ok(heap.map_assoc(id, arg(args, 1), arg(args, 2)))
+}
+
+/// `(map-dissoc m k)` — a fresh map with `k` removed.
+fn map_dissoc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_map(heap, "map-dissoc", arg(args, 0))?;
+    Ok(heap.map_dissoc(id, arg(args, 1)))
+}
+
+/// `(map-keys m)` — the keys as a list, in insertion order.
+fn map_keys(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_map(heap, "map-keys", arg(args, 0))?;
+    let keys: Vec<Value> = heap.map(id).iter().map(|(k, _)| *k).collect();
+    Ok(heap.list(keys))
+}
+
+/// `(map-vals m)` — the values as a list, in insertion order.
+fn map_vals(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_map(heap, "map-vals", arg(args, 0))?;
+    let vals: Vec<Value> = heap.map(id).iter().map(|(_, v)| *v).collect();
+    Ok(heap.list(vals))
+}
+
+/// `(map-contains? m k)` — whether `k` is a key of `m`.
+fn map_contains(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_map(heap, "map-contains?", arg(args, 0))?;
+    Ok(Value::Bool(heap.map_contains(id, arg(args, 1))))
 }
 
 fn string_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -510,6 +592,36 @@ fn substring(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         .take((end - start) as usize)
         .collect();
     Ok(heap.alloc_string(&sub))
+}
+
+/// `(upper s)` — `s` with every character upper-cased. Case folding is
+/// Unicode-aware (e.g. `ß` → `SS`), so it leans on the standard library's tables
+/// rather than being expressible in Brood.
+fn upper(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let s = expect_string(heap, "upper", arg(args, 0))?;
+    Ok(heap.alloc_string(&s.to_uppercase()))
+}
+
+/// `(lower s)` — `s` with every character lower-cased (Unicode-aware, like `upper`).
+fn lower(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let s = expect_string(heap, "lower", arg(args, 0))?;
+    Ok(heap.alloc_string(&s.to_lowercase()))
+}
+
+/// `(string->number s)` — parse `s` as an integer if it is one, else as a float,
+/// else `nil`. The inverse of `number->string`. A robust parse-or-nil can't be
+/// expressed over `read-string` (which would read `"3abc"` as `3` and stop), so
+/// the strict parse is a primitive. Surrounding whitespace is not accepted —
+/// `trim` first if the input may carry any.
+fn string_to_number(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let s = expect_string(heap, "string->number", arg(args, 0))?;
+    if let Ok(i) = s.parse::<i64>() {
+        Ok(Value::Int(i))
+    } else if let Ok(f) = s.parse::<f64>() {
+        Ok(Value::Float(f))
+    } else {
+        Ok(Value::Nil)
+    }
 }
 
 // ---------- filesystem ----------
