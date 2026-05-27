@@ -1,0 +1,43 @@
+# Convenience wrapper around the Cargo workspace. Cargo remains the source of
+# truth — these targets just give short, memorable commands. Pass extra args
+# with ARGS=..., e.g. `make benchmark ARGS=sum_tail`.
+
+CLI := cargo run -q -p cli
+ARGS ?=
+
+.DEFAULT_GOAL := help
+.PHONY: help build test bench benchmark suite repl fmt clippy check clean
+
+help: ## Show this help
+	@echo "Brood — available make targets:"
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
+		| sort \
+		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
+
+build: ## Build the whole workspace
+	cargo build
+
+test: ## Run Rust tests + the in-language suite (via cargo test)
+	cargo test
+
+bench: benchmark ## Alias for `benchmark`
+
+benchmark: ## Run benchmarks; archive results to docs/benchmarks/<timestamp>.md
+	./scripts/bench.sh $(ARGS)
+
+suite: ## Run the in-language test suite (tests/suite.lisp)
+	$(CLI) tests/suite.lisp
+
+repl: ## Start the REPL
+	$(CLI)
+
+fmt: ## Format all Rust code
+	cargo fmt
+
+clippy: ## Lint with clippy (warnings as errors)
+	cargo clippy --all-targets -- -D warnings
+
+check: fmt clippy test ## Format, lint, and test — the pre-commit gate
+
+clean: ## Remove build artifacts
+	cargo clean

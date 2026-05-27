@@ -16,3 +16,12 @@ path = "src/lib.rs"
 # bodies lock-free while `def` appends new code (old versions never move/free —
 # in-flight calls keep running them; Erlang-style hot reload). See docs/shared-code.md.
 boxcar = "0.2"
+
+[dev-dependencies]
+# Lightweight microbenchmark harness for the interpreter core. Dev-only (the
+# released library pulls nothing extra). Run with `cargo bench`.
+divan = "0.1"
+
+[[bench]]
+name = "eval"
+harness = false
