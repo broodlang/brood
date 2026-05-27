@@ -1,10 +1,14 @@
-;; Brood project manifest (ADR-020). Read by the test runner (`brood test`) and,
-;; later, the rest of the project tooling.
+;; Brood project manifest (ADR-020) — read only by Brood tooling (`brood test`),
+;; never by Cargo. It sits ALONGSIDE the Rust workspace and changes nothing about
+;; it: this stays a normal Cargo project (crates/, Cargo.toml, std/) that also
+;; happens to expose its in-language suite to `brood test`.
 ;;
-;; Convention over configuration: tests live in `tests/` as <name>_test.blsp and
-;; are found automatically, so this only declares identity. (The language's own
-;; sources live in `std/` + `crates/`, not a project `src/`, so there's no source
-;; path to add here.)
+;; Convention over configuration: by default source is `src/` and tests are
+;; `tests/` (each <name>_test.blsp), but both are overridable here via
+;; :source-paths / :test-paths. This repo has no Brood app `src/` — the standard
+;; library is embedded (std/*.blsp) and the language itself is Rust (crates/) — so
+;; we only point the runner at the in-language tests in `tests/`.
 (project
-  :name    "brood"
-  :version "0.1.0")
+  :name       "brood"
+  :version    "0.1.0"
+  :test-paths ["tests"])    ; override; e.g. :source-paths ["lib"] for a real app

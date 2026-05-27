@@ -646,3 +646,19 @@ same-form-macro pattern `let` and multi-clause `fn`, and `=`-shadowing.
 ADR-021/022 and `docs/pattern-matching.md` updated.
 
 **Verified.** `brood test` 158/158 green; full `cargo test` green.
+
+### Type prep: predicate→Ty bridge + finished the diagnostics sweep (2026-05-27)
+
+Two easy, forward-looking wins toward the type staircase:
+
+- **`Ty::tested_by(predicate)`** (`types.rs`) — maps a type-predicate name to the
+  `Ty` it asserts (`int?`→int, `number?`→number, `list?`→list, `fn?`→fn∪native,
+  …; `None` for non-tag predicates). This is exactly the data Step 4's occurrence
+  typing / guard-narrowing will consume, built and tested now in isolation.
+- **Finished the value-carrying error sweep** — converted the last raw `type_err`
+  (`substring`'s start/end) to `expect_int`, so every builtin's type error names
+  the op, wanted type, and offending value. Added a `types.rs` test locking
+  contract point #9 (a singleton `Ty` prints as its `type-of`/`Tag::name` name,
+  so errors / `type-of` / `Ty` can't drift apart).
+
+**Verified.** 8 `types` tests + 35 Rust + suite + doc-test green.

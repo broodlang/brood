@@ -108,6 +108,27 @@ impl Interp {
         Ok(result)
     }
 
+    /// Like [`eval_str`](Self::eval_str), but for source loaded from a named
+    /// file: each top-level form is paired with its start position, so a parse
+    /// or runtime error that lacks one is tagged with that form's `line:col`.
+    /// The caller (the CLI) renders `PATH:LINE:COL: message` (see
+    /// `docs/tooling.md`); parse errors keep the reader's precise position.
+    pub fn eval_source(&mut self, src: &str) -> Result<Value, LispError> {
+        let forms = reader::read_all_positioned(&mut self.heap, src)?;
+        let cp = self.heap.checkpoint();
+        let mut result = Value::Nil;
+        let n = forms.len();
+        for (i, (form, pos)) in forms.into_iter().enumerate() {
+            let form = macros::macroexpand_all(&mut self.heap, form, self.root)
+                .map_err(|e| e.or_pos(pos))?;
+            result = eval::eval(&mut self.heap, form, self.root).map_err(|e| e.or_pos(pos))?;
+            if i + 1 < n {
+                self.heap.reset_local_to(cp);
+            }
+        }
+        Ok(result)
+    }
+
     /// Render a value to its readable text form.
     pub fn print(&self, v: Value) -> String {
         printer::print(&self.heap, v)

@@ -87,6 +87,31 @@ impl Ty {
         Ty::of(value::tag(v))
     }
 
+    /// The type asserted when the named type-predicate holds — the bridge from a
+    /// guard `(pred x)` to a refinement of `x`'s type (occurrence typing, step 4):
+    /// in the *then* branch `x` narrows to `T ∩ tested_by(pred)`, in the *else*
+    /// branch to `T ∩ ¬tested_by(pred)`. `None` for predicates that don't pin a
+    /// tag (`empty?`, `zero?`, …) and for unknown names. Spellings match the
+    /// `int?`/`string?`/… builtins and the prelude's `number?`/`list?`.
+    pub fn tested_by(predicate: &str) -> Option<Ty> {
+        Some(match predicate {
+            "nil?" => Ty::of(Tag::Nil),
+            "bool?" => Ty::of(Tag::Bool),
+            "int?" => Ty::of(Tag::Int),
+            "float?" => Ty::of(Tag::Float),
+            "symbol?" => Ty::of(Tag::Sym),
+            "keyword?" => Ty::of(Tag::Keyword),
+            "string?" => Ty::of(Tag::Str),
+            "pair?" => Ty::of(Tag::Pair),
+            "vector?" => Ty::of(Tag::Vector),
+            // `fn?` holds for both Brood closures and Rust builtins.
+            "fn?" => Ty::of(Tag::Fn).union(Ty::of(Tag::Native)),
+            "number?" => Ty::NUMBER,
+            "list?" => Ty::LIST,
+            _ => return None,
+        })
+    }
+
     /// `self ∪ other` — values in either.
     pub const fn union(self, other: Ty) -> Ty {
         Ty(self.0 | other.0)
@@ -223,5 +248,32 @@ mod tests {
             Ty::of(Tag::Int).union(Ty::of(Tag::Str)).to_string(),
             "int | string"
         );
+    }
+
+    #[test]
+    fn tested_by_maps_predicates_to_the_type_they_assert() {
+        assert_eq!(Ty::tested_by("int?"), Some(Ty::of(Tag::Int)));
+        assert_eq!(Ty::tested_by("number?"), Some(Ty::NUMBER));
+        assert_eq!(Ty::tested_by("list?"), Some(Ty::LIST));
+        assert_eq!(Ty::tested_by("nil?"), Some(Ty::of(Tag::Nil)));
+        // fn? covers Brood closures and Rust builtins both.
+        assert_eq!(
+            Ty::tested_by("fn?"),
+            Some(Ty::of(Tag::Fn).union(Ty::of(Tag::Native)))
+        );
+        // Non-tag predicates and unknown names don't narrow.
+        assert_eq!(Ty::tested_by("empty?"), None);
+        assert_eq!(Ty::tested_by("zero?"), None);
+        assert_eq!(Ty::tested_by("frobnicate?"), None);
+    }
+
+    #[test]
+    fn single_tag_display_matches_tag_name() {
+        // Contract point #9: a singleton Ty prints as its `type-of` / `Tag::name`
+        // spelling, so a type named in a message reads the same as `type-of`
+        // returns. (Locks errors / type-of / Ty against name drift.)
+        for tag in ALL_TAGS {
+            assert_eq!(Ty::of(tag).to_string(), tag.name());
+        }
     }
 }

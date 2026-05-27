@@ -31,9 +31,12 @@ so it works from anywhere inside a project.
 (describe "errors"
   (test "catches a throw" (assert= (try (throw 42) (catch e e)) 42))
   (test "div-by-zero"     (assert-error (/ 1 0))))
-
-(run-tests)
 ```
+
+A `*_test.blsp` file under `tests/` only **registers** its cases like this — it
+does *not* call `(run-tests)`. The project runner (`brood test`) discovers the
+file, loads it, and runs the whole suite once. (You can still call `(run-tests)`
+yourself in an ad-hoc script you run directly with `brood file.blsp`.)
 
 - **`(describe "group" body…)`** — names a group of related cases.
 - **`(test "name" body…)`** — one case. The body is any Brood code plus
@@ -140,6 +143,11 @@ to that body's `*fails*`), not from unrelated top-level helper functions.
 
 ## Running
 
+In a project, run the whole suite with **`brood test`** (or `make suite`, or
+`cargo test`): the runner discovers `tests/**/*_test.blsp`, loads them, and calls
+`run-tests` once (`brood test` passes `:trace`). `run-tests` itself takes the flags
+below — forwarded by the runner, and usable directly if you call it yourself:
+
 ```lisp
 (run-tests)            ; parallel, dots (. pass / F fail), summary
 (run-tests :trace)     ; a ✓/✗ line per test as it finishes, instead of dots
@@ -151,31 +159,32 @@ to that body's `*fails*`), not from unrelated top-level helper functions.
 attributed to its test), then a summary:
 
 ```
-40 tests, 40 passed, 0 failed (0 failed assertions, 1 isolated)
-  (706 ms, peak 30.0 MB)
-  39 processes / 39 OS threads created (1 runner + 37 unit workers + 1 nested), peak 34 alive at once
+158 tests, 158 passed, 0 failed (0 failed assertions, 2 isolated)
+  test runtime: 1832 ms total — parallel/serial 1831 ms, isolated 1 ms
+  (797 ms wall, peak 70.8 MB)
+  141 processes (1 runner + 139 unit workers + 1 nested) on 28 worker threads, peak 28 running at once
 ```
 
-The last line reflects the process model: one OS thread per process today
-(step 4a in [`concurrency.md`](concurrency.md)). Read it carefully — the counts
-are **threads, not cores**: "created" is the total spawned over the whole run
-(born and gone over time), and "alive at once" is the high-water mark of threads
-existing simultaneously. Both can exceed your core count; the OS time-slices
-threads onto whatever cores exist. (Decoupling process count from OS-thread count
-— green M:N processes on a ~core-sized pool — is step 4b.) `run-tests` raises an
-error if anything failed, so the process exits non-zero — which is how
-`cargo test` notices.
+The last line reflects the **green M:N** process model (step 4b in
+[`concurrency.md`](concurrency.md)): processes are cheap coroutines multiplexed
+onto a fixed pool of ≈`nproc` worker threads — *not* one OS thread each.
+"processes" is the total spawned over the run; "running at once" is the
+high-water mark, bounded by the pool. `run-tests` raises if anything failed, so
+the process exits non-zero — which is how `cargo test` notices.
 
-See `tests/suite.blsp` for the real suite and `tests/suite-failures.blsp` for a
-deliberately-failing file you can run by hand to see the failure report.
+See `tests/suite_test.blsp` (and the other `tests/*_test.blsp` files) for the real
+suite, and `tests/suite-failures.blsp` for a deliberately-failing file you can run
+by hand (`brood tests/suite-failures.blsp`) to see the failure report.
 
 ## Relationship to Rust tests
 
 - `crates/lisp/tests/basic.rs` — Rust end-to-end checks of the language
   (including `live_redefinition` and `spawned_process_picks_up_redefinition`).
-- `crates/lisp/tests/suite.rs` — runs `tests/suite.blsp` through an `Interp`; the
-  suite signals failure by raising, so `Ok` means every in-language assertion
-  passed.
+- `crates/lisp/tests/suite.rs` — drives the project test runner: it `cd`s to the
+  repo root and evaluates `(require 'project) (run-project-tests)`, which discovers
+  and runs every `tests/**/*_test.blsp`. The suite signals failure by raising, so
+  `Ok` means every in-language assertion passed.
 
-When you add a language feature, add an in-language case to `tests/suite.blsp`
-and/or a Rust case in `basic.rs` (see the checklist in `CLAUDE.md`).
+When you add a language feature, add an in-language case to the relevant
+`tests/*_test.blsp` file (or a new one) and/or a Rust case in `basic.rs` (see the
+checklist in `CLAUDE.md`).

@@ -8,6 +8,14 @@ use std::fmt;
 
 use crate::value::Value;
 
+/// A 1-based source position (line and column), used for editor-parseable
+/// error reporting (see `docs/tooling.md`). Columns count characters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pos {
+    pub line: u32,
+    pub col: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ErrorKind {
     /// The reader could not parse the source text.
@@ -31,11 +39,30 @@ pub struct LispError {
     /// The value carried by `(throw v)`, so `catch` can rebind it. Built-in
     /// errors leave this `None` (and `catch` then receives the message string).
     pub payload: Option<Value>,
+    /// Source position, when known. Set by the reader (precise, for parse
+    /// errors) or filled in by the file runner with the enclosing top-level
+    /// form's start (for runtime errors). Drives `FILE:LINE:COL:` output.
+    pub pos: Option<Pos>,
 }
 
 impl LispError {
     pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
-        LispError { kind, message: message.into(), payload: None }
+        LispError { kind, message: message.into(), payload: None, pos: None }
+    }
+
+    /// Attach a source position (builder style).
+    pub fn with_pos(mut self, pos: Pos) -> Self {
+        self.pos = Some(pos);
+        self
+    }
+
+    /// Attach `pos` only if none is set yet — so a precise inner position
+    /// (e.g. a parse error) is never overwritten by a coarser fallback.
+    pub fn or_pos(mut self, pos: Pos) -> Self {
+        if self.pos.is_none() {
+            self.pos = Some(pos);
+        }
+        self
     }
     pub fn parse(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Parse, message)
@@ -75,6 +102,7 @@ impl LispError {
             kind: ErrorKind::User,
             message: crate::printer::display(heap, value),
             payload: Some(value),
+            pos: None,
         }
     }
 }

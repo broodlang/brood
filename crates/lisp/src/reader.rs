@@ -1,7 +1,7 @@
 //! The reader: turns source text into [`Value`]s. It allocates pairs/vectors/
 //! strings, so it threads `&mut Heap`.
 
-use crate::error::LispError;
+use crate::error::{LispError, Pos};
 use crate::heap::Heap;
 use crate::value::{self, Value};
 
@@ -19,12 +19,33 @@ pub fn read_all(heap: &mut Heap, src: &str) -> Result<Vec<Value>, LispError> {
     Ok(forms)
 }
 
+/// Read every form in `src`, pairing each top-level form with its 1-based
+/// start position. The file runner uses these so a runtime error can be
+/// reported against the enclosing top-level form (see `docs/tooling.md`).
+pub fn read_all_positioned(
+    heap: &mut Heap,
+    src: &str,
+) -> Result<Vec<(Value, Pos)>, LispError> {
+    let mut parser = Parser::new(heap, src);
+    let mut forms = Vec::new();
+    loop {
+        parser.skip_trivia();
+        if parser.at_end() {
+            break;
+        }
+        let start = parser.pos_at(parser.pos);
+        let form = parser.read_form()?;
+        forms.push((form, start));
+    }
+    Ok(forms)
+}
+
 /// Read exactly one form, ignoring any trailing input.
 pub fn read_one(heap: &mut Heap, src: &str) -> Result<Value, LispError> {
     let mut parser = Parser::new(heap, src);
     parser.skip_trivia();
     if parser.at_end() {
-        return Err(LispError::parse("unexpected end of input"));
+        return Err(parser.err("unexpected end of input"));
     }
     parser.read_form()
 }
@@ -42,6 +63,28 @@ impl<'a> Parser<'a> {
 
     fn at_end(&self) -> bool {
         self.pos >= self.chars.len()
+    }
+
+    /// The 1-based line/column of character index `idx`. Computed by scanning
+    /// from the start; only called on top-level form starts and parse errors,
+    /// so the cost is irrelevant.
+    fn pos_at(&self, idx: usize) -> Pos {
+        let mut line = 1u32;
+        let mut col = 1u32;
+        for &c in &self.chars[..idx.min(self.chars.len())] {
+            if c == '\n' {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+        }
+        Pos { line, col }
+    }
+
+    /// A parse error tagged with the current position.
+    fn err(&self, msg: impl Into<String>) -> LispError {
+        LispError::parse(msg).with_pos(self.pos_at(self.pos))
     }
 
     fn peek(&self) -> Option<char> {
@@ -78,12 +121,12 @@ impl<'a> Parser<'a> {
 
     fn read_form(&mut self) -> Result<Value, LispError> {
         self.skip_trivia();
-        let c = self.peek().ok_or_else(|| LispError::parse("unexpected end of input"))?;
+        let c = self.peek().ok_or_else(|| self.err("unexpected end of input"))?;
         match c {
             '(' => self.read_seq(')'),
             '[' => self.read_vector(),
-            ')' | ']' | '}' => Err(LispError::parse(format!("unexpected '{}'", c))),
-            '{' => Err(LispError::parse("map literals '{ }' are not supported yet")),
+            ')' | ']' | '}' => Err(self.err(format!("unexpected '{}'", c))),
+            '{' => Err(self.err("map literals '{ }' are not supported yet")),
             '\'' => self.read_wrapped("quote"),
             '`' => self.read_wrapped("quasiquote"),
             '~' => {
@@ -119,7 +162,7 @@ impl<'a> Parser<'a> {
         loop {
             self.skip_trivia();
             match self.peek() {
-                None => return Err(LispError::parse("unclosed list")),
+                None => return Err(self.err("unclosed list")),
                 Some(c) if c == close => {
                     self.pos += 1;
                     break;
@@ -136,7 +179,7 @@ impl<'a> Parser<'a> {
         loop {
             self.skip_trivia();
             match self.peek() {
-                None => return Err(LispError::parse("unclosed vector")),
+                None => return Err(self.err("unclosed vector")),
                 Some(']') => {
                     self.pos += 1;
                     break;
@@ -152,7 +195,7 @@ impl<'a> Parser<'a> {
         let mut s = String::new();
         loop {
             match self.bump() {
-                None => return Err(LispError::parse("unterminated string")),
+                None => return Err(self.err("unterminated string")),
                 Some('"') => break,
                 Some('\\') => match self.bump() {
                     Some('n') => s.push('\n'),
@@ -163,7 +206,7 @@ impl<'a> Parser<'a> {
                     Some('\\') => s.push('\\'),
                     Some('"') => s.push('"'),
                     Some(other) => s.push(other),
-                    None => return Err(LispError::parse("unterminated string escape")),
+                    None => return Err(self.err("unterminated string escape")),
                 },
                 Some(c) => s.push(c),
             }

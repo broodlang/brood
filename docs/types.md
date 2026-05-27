@@ -83,6 +83,8 @@ ADR-022): literals → singleton `Ty`; primitive calls → result `Ty`;
 **guard/pattern narrowing** mined from the matcher (`(if (int? x) …)`,
 `match` clauses) for occurrence typing. Globals are `dynamic()`. Output is
 **warnings** (provable misuse near its source) and, later, specialisation.
+*Prepped:* the predicate→type bridge this needs is already in place —
+`Ty::tested_by("int?") → int`, `"number?" → number`, `"list?" → list`, etc.
 **Done when:** a body that provably misuses a value warns at compile time, and no
 correct program is rejected.
 

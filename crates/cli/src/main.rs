@@ -95,8 +95,13 @@ fn run_files(interp: &mut Interp, files: &[String]) {
     for path in files {
         match std::fs::read_to_string(path) {
             Ok(src) => {
-                if let Err(e) = interp.eval_str(&src) {
-                    eprintln!("{}: {}", path, e);
+                if let Err(e) = interp.eval_source(&src) {
+                    // GNU `FILE:LINE:COL: message` so editors (compilation-mode,
+                    // flymake) can jump to the error; see `docs/tooling.md`.
+                    match e.pos {
+                        Some(p) => eprintln!("{}:{}:{}: {}", path, p.line, p.col, e),
+                        None => eprintln!("{}: {}", path, e),
+                    }
                     std::process::exit(1);
                 }
             }

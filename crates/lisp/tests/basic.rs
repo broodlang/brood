@@ -459,3 +459,34 @@ fn isolate_rolls_back_global_defs() {
     "#;
     assert_eq!(run(src), "((2 3) 1 :unbound)");
 }
+
+// --- editor-parseable error positions (docs/tooling.md) ----------------------
+
+/// A parse error carries the reader's precise line:col.
+#[test]
+fn parse_errors_carry_precise_position() {
+    let mut interp = Interp::new();
+    // Stray ')' on line 2, column 3.
+    let err = interp.eval_source("(+ 1 2)\n  )\n").unwrap_err();
+    let pos = err.pos.expect("parse error should have a position");
+    assert_eq!((pos.line, pos.col), (2, 3));
+}
+
+/// A runtime error is tagged with the enclosing top-level form's start line.
+#[test]
+fn runtime_errors_carry_top_level_form_position() {
+    let mut interp = Interp::new();
+    // First form is fine; the unbound reference is in the form starting line 3.
+    let err = interp.eval_source("(+ 1 2)\n\n(+ 1 nope)\n").unwrap_err();
+    let pos = err.pos.expect("runtime error should have a position");
+    assert_eq!(pos.line, 3);
+}
+
+/// `eval_str` (no file context) leaves the position unset for callers that
+/// don't want location tagging, e.g. the REPL.
+#[test]
+fn eval_str_leaves_position_unset() {
+    let mut interp = Interp::new();
+    let err = interp.eval_str("(+ 1 nope)").unwrap_err();
+    assert!(err.pos.is_none());
+}

@@ -31,8 +31,8 @@ suite: ## Run the in-language suite via the project runner (discovers tests/**/*
 repl: ## Start the REPL
 	$(CLI)
 
-install: ## Install the `brood` binary (REPL, file runner, `brood test`) onto PATH
-	cargo install --path crates/cli --force
+install: ## Install `brood` (REPL, file runner, `brood test`) into ~/.local/bin
+	cargo install --path crates/cli --force --root $(HOME)/.local
 
 fmt: ## Format all Rust code
 	cargo fmt

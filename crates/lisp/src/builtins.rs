@@ -507,14 +507,8 @@ fn substring(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         Value::Str(id) => heap.string(id).to_string(),
         _ => return Err(LispError::wrong_type(heap, "substring", "string", v)),
     };
-    let (start, end) = match (arg(args, 1), arg(args, 2)) {
-        (Value::Int(a), Value::Int(b)) => (a, b),
-        _ => {
-            return Err(LispError::type_err(
-                "substring: expected integer start and end",
-            ))
-        }
-    };
+    let start = expect_int(heap, "substring", arg(args, 1))?;
+    let end = expect_int(heap, "substring", arg(args, 2))?;
     let len = s.chars().count() as i64;
     if start < 0 || end < start || end > len {
         return Err(LispError::runtime("substring: index out of range"));
