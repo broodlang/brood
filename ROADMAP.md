@@ -72,7 +72,7 @@ The native kernel is **39 primitives** — see [`docs/primitives.md`](docs/primi
   convention; load-once by feature, embedded std modules baked in. **[kernel]**
   small (`file-exists?`/`list-dir`/`cwd`) + **[Brood]** (the require logic). ADR-019.
 - ⬜ **Project model + test runner** — convention over configuration (`src/` =
-  source on `*load-path*`, `tests/**/*_test.lisp` = tests); a `project.lisp`
+  source on `*load-path*`, `tests/**/*_test.blsp` = tests); a `project.blsp`
   manifest declares identity and overrides paths only when needed. `brood test`
   discovers, loads register-only, and calls `run-tests` once. Mostly **[Brood]** +
   a CLI subcommand. ADR-020.
@@ -87,13 +87,13 @@ The native kernel is **39 primitives** — see [`docs/primitives.md`](docs/primi
   **[kernel]** (sizable).
 - ⬜ **Source locations in errors** — the reader currently drops spans; attaching
   them gives line/column in messages (and later, stack traces). **[kernel]**
-- ✅ **Native test library** — `std/test.lisp`: ExUnit / `mix test`-style
+- ✅ **Native test library** — `std/test.blsp`: ExUnit / `mix test`-style
   `describe` / `test` (plus `deftest`), `is` / `assert=` / `assert-error` /
   `error-of` / `run-tests`, written in Brood. **Parallel by default** (each test a
   process), with `:serial` / `:isolated` opt-outs; **share-safe tallying** (no
   shared mutable counters — required now that processes share globals). Loaded via
-  `(require 'test)` (embedded). `tests/suite.lisp` uses it; run via
-  `./bin/cli tests/suite.lisp` and `cargo test`. ADR-015, `docs/testing.md`. **[Brood]**
+  `(require 'test)` (embedded). `tests/suite.blsp` uses it; run via
+  `./bin/cli tests/suite.blsp` and `cargo test`. ADR-015, `docs/testing.md`. **[Brood]**
 
 ### Out of scope for Stage 1 (deferred, additive later)
 

@@ -1,4 +1,4 @@
-;; In a subdirectory — proves `brood test` discovers tests/**/*_test.lisp
+;; In a subdirectory — proves `brood test` discovers tests/**/*_test.blsp
 ;; recursively, not just at the top level. Register-only (no run-tests call).
 
 (require 'test)

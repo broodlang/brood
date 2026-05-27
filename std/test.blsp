@@ -1,4 +1,4 @@
-;; std/test.lisp — a tiny test framework, written in Brood itself.
+;; std/test.blsp — a tiny test framework, written in Brood itself.
 ;;
 ;;   (require 'test)
 ;;   (describe "math"

@@ -446,7 +446,7 @@ fn spawned_process_picks_up_redefinition() {
 /// `%isolate` runs a thunk against a private copy of the global bindings: a
 /// `def`/`set!` it makes takes effect *inside* the thunk but is rolled back when
 /// it returns. This is what gives `:isolated` tests true state isolation — a
-/// test's definitions can't leak to any other test (see std/test.lisp).
+/// test's definitions can't leak to any other test (see std/test.blsp).
 #[test]
 fn isolate_rolls_back_global_defs() {
     let src = r#"

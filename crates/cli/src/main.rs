@@ -4,7 +4,7 @@
 //! - With file arguments it loads and runs each file in order.
 //! - `-j N` / `--max-parallel N` caps how many spawned processes run on OS
 //!   threads at once (0 = unlimited, the default). Useful for bounding a
-//!   concurrent test run; see `std/test.lisp`.
+//!   concurrent test run; see `std/test.blsp`.
 //!
 //! Interactively (a real terminal) the REPL uses `rustyline` for line editing:
 //! arrow keys to move within a line, up/down to walk history, the usual
@@ -28,8 +28,8 @@ fn main() {
     let mut interp = Interp::new();
 
     // `brood test` — discover and run the current project's test suite (ADR-020).
-    // The runner (Brood, std/project.lisp) walks up from the cwd to `project.lisp`,
-    // loads every tests/**/*_test.lisp, and runs the whole suite once. It raises
+    // The runner (Brood, std/project.blsp) walks up from the cwd to `project.blsp`,
+    // loads every tests/**/*_test.blsp, and runs the whole suite once. It raises
     // on failure, so a non-zero exit falls out of the eval error.
     if files.first().map(String::as_str) == Some("test") {
         if let Err(e) = interp.eval_str("(require 'project) (run-project-tests :trace)") {

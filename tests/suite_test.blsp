@@ -1,10 +1,10 @@
 ;; Brood test suite — written in Brood, using the native test library.
-;;   ./bin/cli tests/suite.lisp
+;;   ./bin/cli tests/suite.blsp
 ;; (also run by `cargo test` via crates/lisp/tests/suite.rs)
 ;;
 ;; ExUnit / `mix test`-style: `describe` groups a feature, `test` names a case.
 ;; The suite runs every test concurrently (:parallel), each in its own process;
-;; tallying is share-safe (see std/test.lisp).
+;; tallying is share-safe (see std/test.blsp).
 ;;
 ;; Assertions: `assert=` for equality (shows actual + expected on failure),
 ;; `is` / `refute` for boolean predicates. Each failure names the source
@@ -94,8 +94,8 @@
   (test "->>" (assert= (->> (list 1 2 3) (map inc)) (list 2 3 4))))
 
 ;; Pattern matching has its own dedicated, exhaustive suite —
-;; tests/pattern_matching.lisp (run by `cargo test` via suite.rs, and directly
-;; with `./bin/cli tests/pattern_matching.lisp`). Here we keep just a smoke check
+;; tests/pattern_matching.blsp (run by `cargo test` via suite.rs, and directly
+;; with `./bin/cli tests/pattern_matching.blsp`). Here we keep just a smoke check
 ;; so the main suite still exercises the feature.
 (describe "pattern matching (smoke)"
   (test "match dispatches" (assert= (match [:ok 42] ([:ok v] v) (_ :no)) 42))
@@ -171,5 +171,5 @@
 ;; Parallel by default; the :serial / :isolated groups above opt out as needed.
 ;;
 ;; No (run-tests) call: this file only REGISTERS its tests. The project test
-;; runner (`brood test`, ADR-020) discovers it as tests/*_test.lisp, loads it
+;; runner (`brood test`, ADR-020) discovers it as tests/*_test.blsp, loads it
 ;; alongside the other suites, and runs everything once.

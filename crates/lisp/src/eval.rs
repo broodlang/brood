@@ -145,7 +145,19 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                         value::symbol_name(name)
                     )));
                 }
-                "fn" | "lambda" => return make_closure(heap, None, rest, env),
+                "fn" | "lambda" => {
+                    // Fallback: a multi-clause / pattern-parameter `fn` normally
+                    // lowers to `match*` in the compile pass, but can reach eval
+                    // unlowered (built by a quasiquote, or a macro expanded lazily
+                    // within its defining form). Lower it here and re-enter. The
+                    // common case is detected away cheaply, so this never touches
+                    // an ordinary `fn`.
+                    if crate::macros::fn_needs_lowering(heap, expr) {
+                        expr = crate::macros::macroexpand_all(heap, expr, env)?;
+                        continue 'tail;
+                    }
+                    return make_closure(heap, None, rest, env);
+                }
                 "quasiquote" => {
                     let args = heap.list_to_vec(rest)?;
                     let template = args.into_iter().next().unwrap_or(Value::Nil);
@@ -173,6 +185,13 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     )?;
                     if binds.len() % 2 != 0 {
                         return Err(LispError::runtime("let: bindings must be name/value pairs"));
+                    }
+                    // Fallback: a pattern (non-symbol) binding target reached eval
+                    // unlowered — same paths as `fn` above. Lower via the compile
+                    // pass and re-enter; the common all-symbol `let` skips this.
+                    if binds.iter().step_by(2).any(|&b| !matches!(b, Value::Sym(_))) {
+                        expr = crate::macros::macroexpand_all(heap, expr, env)?;
+                        continue 'tail;
                     }
                     let scope = heap.new_env(Some(env));
                     let mut i = 0;

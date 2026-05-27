@@ -71,7 +71,7 @@ Brood/
     cli/                the `brood` binary: REPL + file runner
       src/main.rs
   std/
-    prelude.lisp        standard helpers written in Brood itself
+    prelude.blsp        standard helpers written in Brood itself
   docs/                 you are here
 ```
 

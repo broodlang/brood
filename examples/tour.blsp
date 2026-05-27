@@ -1,6 +1,6 @@
 ;; Brood feature tour
 ;; -------------------
-;; Run it:   ./bin/cli examples/tour.lisp
+;; Run it:   ./bin/cli examples/tour.blsp
 ;; Or play:  ./bin/cli        (starts the REPL)
 
 ;; Arithmetic — +, -, *, /, etc. are defined in Brood on a tiny Rust kernel.

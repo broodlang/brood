@@ -1,7 +1,7 @@
 # Pattern matching
 
 > Status: **implemented** (ADR-021). Erlang/Elixir-style pattern matching, built
-> to fit the project's rules: the compiler is written in Brood (`std/prelude.lisp`),
+> to fit the project's rules: the compiler is written in Brood (`std/prelude.blsp`),
 > there is no new special form, and one mechanism is reused at every binding site.
 > Subsumes two roadmap items — "Destructuring in `let`/`fn`" and "`case`" (see
 > [`../ROADMAP.md`](../ROADMAP.md) Tier 2). The `let`/`fn` pattern surfaces are
@@ -311,9 +311,15 @@ would let the printed line be a bare sentence; not needed for v1.
 - **The matcher is Brood.** A pattern→code compiler in `std/` (a macro plus
   expand-time helper `defn`s, exactly like the threading macros compute at
   expansion time) emits nested `if`/`let` over existing primitives: `pair?`,
-  `first`, `rest`, `nil?`, `vector?`, `vector-ref`, `vector-length`, `=`. Fresh
-  temporaries via `gensym`. No Rust, no new builtin. This is the `try`/`catch`
-  precedent (a macro over a primitive) applied again.
+  `first`, `rest`, `nil?`, `vector?`, `vector-ref`, `vector-length`, and `%eq`.
+  Fresh temporaries via `gensym`. No Rust, no new builtin. This is the
+  `try`/`catch` precedent (a macro over a primitive) applied again.
+  - *Hygiene:* the generated code references those primitives by bare name, which
+    a local binding could shadow (Lisp-1, unhygienic macros — ADR-009). Equality
+    uses the kernel `%eq` rather than `=` by convention, since `%`-names aren't
+    rebound; the rest (`first`/`rest`/…) remain shadowable until macro hygiene
+    lands. In practice, don't bind `first`/`rest`/`pair?`/… as locals around a
+    `match`.
 
 - **`match` needs no core change** — it's a plain macro.
 
@@ -328,16 +334,26 @@ would let the printed line be a bare sentence; not needed for v1.
   `continue 'tail`); the **implementation does the same rewrite one phase
   earlier**, in the `macroexpand_all` compile pass (ADR-022): a `let` with a
   non-symbol target, or a multi-clause / pattern-parameter `fn`, is desugared to
-  `match*` once at definition. So eval's `let`/`fn` stay strictly symbol-only,
-  the matching *logic* stays in the Brood `match*` engine, and a pattern binder
-  in a hot loop expands once rather than per call. Tail position is preserved
-  (the body lands in `match*`'s tail), so `tail_calls_do_not_overflow` holds —
-  including for multi-clause recursion like `fac`.
+  `match*` once at definition. So in the common case eval's `let`/`fn` see only
+  plain symbol binds, the matching *logic* stays in the Brood `match*` engine, and
+  a pattern binder in a hot loop expands once rather than per call. Tail position
+  is preserved (the body lands in `match*`'s tail), so `tail_calls_do_not_overflow`
+  holds — including for multi-clause recursion like `fac`.
 
   *Concretely:* `(let (pat v) body…)` → `(match* :let v (pat body…))`;
   `(fn (clause…)…)` → `(fn (& g) (match* :fn g clause…))`;
   `(fn (a [x y]) body)` → `(fn (a g) (match* :fn g ([x y] body)))`. `defn` is now
   a pure forwarder to `fn`, so it inherits both forms.
+
+  **Eval keeps the Option-A fallback too.** A pattern binder can still reach the
+  evaluator *unlowered* — built inside a quasiquote unquote (the compile pass
+  leaves quasiquote opaque) or produced by a macro expanded lazily within its own
+  defining form. So `eval`'s `let`/`fn` also detect a non-symbol target / a
+  clause-shaped `fn` and lower it on the fly (rewrite through `macroexpand_all`,
+  then `continue 'tail`). The compile pass is the fast common path; this fallback
+  is the correctness backstop (otherwise such a binder failed with a misleading
+  "expected a symbol"). The common all-symbol case is detected away cheaply, so an
+  ordinary `let`/`fn` never pays for it.
 
 - **Code-size note.** The textbook risk is duplicating the fail-continuation into
   every sub-pattern failure point (exponential blowup on deep nesting). Patterns

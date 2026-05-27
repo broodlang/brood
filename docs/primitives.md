@@ -3,7 +3,7 @@
 The **complete set of functions implemented in Rust** (every `Value::Native`
 registered in `crates/lisp/src/builtins.rs`). Everything else in the language —
 `+ - * / < = map filter reduce defn -> …` — is written *in Brood*
-(`std/prelude.lisp`) on top of these. Keeping this list small is a deliberate,
+(`std/prelude.blsp`) on top of these. Keeping this list small is a deliberate,
 load-bearing choice (ADR-006 "write the language in the language", ADR-008
 "Rust is a primitive kernel").
 

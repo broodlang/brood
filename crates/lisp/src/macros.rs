@@ -208,6 +208,36 @@ fn is_clause(heap: &Heap, f: Value) -> bool {
     }
 }
 
+/// Cheap predicate: does this `fn`/`lambda` form need pattern lowering — i.e. is
+/// it multi-clause, or single-clause with a pattern in a required parameter?
+/// Mirrors [`lower_fn`]'s dispatch. Used by the evaluator as a fallback for `fn`
+/// forms that reached it without the compile pass (built by a quasiquote, or a
+/// macro expanded lazily within its defining form); an ordinary `fn` returns
+/// `false` here and takes the normal `make_closure` path.
+pub(crate) fn fn_needs_lowering(heap: &Heap, fn_form: Value) -> bool {
+    let items = match heap.list_to_vec(fn_form) {
+        Ok(items) => items,
+        Err(_) => return false,
+    };
+    let forms = &items[1..];
+    if forms.is_empty() {
+        return false;
+    }
+    if forms.iter().all(|&f| is_clause(heap, f)) {
+        return true; // multi-clause
+    }
+    // single-clause: a pattern in a required slot (before &optional / & rest)?
+    let params = match form_items(heap, forms[0]) {
+        Some(p) => p,
+        None => return false,
+    };
+    let required_end = params
+        .iter()
+        .position(|&p| matches!(p, Value::Sym(s) if matches!(value::symbol_name(s).as_str(), "&optional" | "&")))
+        .unwrap_or(params.len());
+    params[..required_end].iter().any(|&p| !is_sym(p))
+}
+
 /// Lower a `fn` that is multi-clause, or single-clause with pattern(s) in its
 /// required parameters, into a plain `fn` plus the Brood `match*` engine.
 /// Returns `None` for an ordinary single-clause `fn` (left as-is).

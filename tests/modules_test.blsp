@@ -12,8 +12,8 @@
     (assert-error (substring "hi" 0 9)) (assert-error (substring "hi" -1 1)))
   (test "starts-with? / ends-with?"
     (is (starts-with? "foobar" "foo"))        (refute (starts-with? "foobar" "bar"))
-    (is (ends-with? "foo_test.lisp" "_test.lisp"))
-    (refute (ends-with? "foo.lisp" "_test.lisp"))
+    (is (ends-with? "foo_test.blsp" "_test.blsp"))
+    (refute (ends-with? "foo.blsp" "_test.blsp"))
     (is (ends-with? "x" ""))))
 
 (describe "paths"

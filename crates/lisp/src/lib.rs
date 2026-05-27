@@ -23,6 +23,7 @@ pub mod macros;
 pub mod printer;
 pub mod process;
 pub mod reader;
+pub mod types;
 pub mod value;
 
 use std::sync::{Arc, LazyLock};
@@ -120,4 +121,4 @@ impl Default for Interp {
 }
 
 /// The standard prelude, written in Brood and baked into the binary.
-const PRELUDE: &str = include_str!("../../../std/prelude.lisp");
+const PRELUDE: &str = include_str!("../../../std/prelude.blsp");

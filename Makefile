@@ -6,7 +6,7 @@ CLI := cargo run -q -p cli
 ARGS ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help build test bench benchmark suite repl fmt clippy check clean
+.PHONY: help build test bench benchmark suite repl install fmt clippy check clean
 
 help: ## Show this help
 	@echo "Brood — available make targets:"
@@ -25,11 +25,14 @@ bench: benchmark ## Alias for `benchmark`
 benchmark: ## Run benchmarks; archive results to docs/benchmarks/<timestamp>.md
 	./scripts/bench.sh $(ARGS)
 
-suite: ## Run the in-language test suite (tests/suite.lisp)
-	$(CLI) tests/suite.lisp
+suite: ## Run the in-language suite via the project runner (discovers tests/**/*_test.blsp)
+	$(CLI) test
 
 repl: ## Start the REPL
 	$(CLI)
+
+install: ## Install the `brood` binary (REPL, file runner, `brood test`) onto PATH
+	cargo install --path crates/cli --force
 
 fmt: ## Format all Rust code
 	cargo fmt

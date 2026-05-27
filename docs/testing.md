@@ -1,15 +1,23 @@
 # Testing in Brood
 
-Brood ships a small test framework written **in Brood itself** (`std/test.lisp`),
+Brood ships a small test framework written **in Brood itself** (`std/test.blsp`),
 loaded with `(require 'test)`. It is ExUnit / `mix test`-flavoured: `describe`
 groups, `test` cases, and a runner that runs everything **in parallel by
 default** across the process model, with opt-in serialisation for tests that
 share state.
 
+Tests live in a project's `tests/` directory as `*_test.blsp` files. The
+**project test runner** (ADR-020) discovers them recursively, loads each (which
+only *registers* its cases), and runs the whole suite once:
+
 ```bash
-./bin/cli tests/suite.lisp      # the project suite
-cargo test                      # runs the same suite via crates/lisp/tests/suite.rs
+brood test        # find project.blsp, discover tests/**/*_test.blsp, run them once
+make suite        # the same, via cargo
+cargo test        # Rust tests + the same in-language suite (crates/lisp/tests/suite.rs)
 ```
+
+`brood test` walks up from the current directory for a `project.blsp` manifest,
+so it works from anywhere inside a project.
 
 ## Writing tests
 
@@ -56,8 +64,8 @@ test can report several failures. Each operand is evaluated once.
 Output is **plain text when captured** (a pipe, `cargo test`, CI, or an LLM
 reading the run) and **coloured only when stdout is an interactive terminal**
 (via the `stdout-tty?` primitive) — so a captured run is never littered with ANSI
-escape codes. `tests/suite-failures.lisp` is a runnable demo of the failure
-rendering (`./bin/cli tests/suite-failures.lisp`).
+escape codes. `tests/suite-failures.blsp` is a runnable demo of the failure
+rendering (`./bin/cli tests/suite-failures.blsp`).
 
 `(error-of body…)` is a helper, not an assertion: it evaluates `body` and yields
 the error it raised — a built-in error as its message string, a `(throw v)` as
@@ -158,16 +166,16 @@ threads onto whatever cores exist. (Decoupling process count from OS-thread coun
 error if anything failed, so the process exits non-zero — which is how
 `cargo test` notices.
 
-See `tests/suite.lisp` for the real suite and `tests/suite-failures.lisp` for a
+See `tests/suite.blsp` for the real suite and `tests/suite-failures.blsp` for a
 deliberately-failing file you can run by hand to see the failure report.
 
 ## Relationship to Rust tests
 
 - `crates/lisp/tests/basic.rs` — Rust end-to-end checks of the language
   (including `live_redefinition` and `spawned_process_picks_up_redefinition`).
-- `crates/lisp/tests/suite.rs` — runs `tests/suite.lisp` through an `Interp`; the
+- `crates/lisp/tests/suite.rs` — runs `tests/suite.blsp` through an `Interp`; the
   suite signals failure by raising, so `Ok` means every in-language assertion
   passed.
 
-When you add a language feature, add an in-language case to `tests/suite.lisp`
+When you add a language feature, add an in-language case to `tests/suite.blsp`
 and/or a Rust case in `basic.rs` (see the checklist in `CLAUDE.md`).

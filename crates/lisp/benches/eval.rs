@@ -24,7 +24,7 @@ fn interp_new() -> Interp {
 /// representative chunk of real Brood source for the reader.
 #[divan::bench]
 fn parse_prelude(bencher: divan::Bencher) {
-    let src = include_str!("../../../std/prelude.lisp");
+    let src = include_str!("../../../std/prelude.blsp");
     bencher
         .with_inputs(Interp::new)
         .bench_refs(|interp| reader::read_all(&mut interp.heap, src).unwrap());

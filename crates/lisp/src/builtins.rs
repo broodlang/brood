@@ -1,7 +1,7 @@
 //! Primitive builtins: the irreducible kernel implemented in Rust. Each takes
 //! already-evaluated args, the call-site environment, and `&mut Heap`.
 //!
-//! Anything that can be written in Brood lives in `std/prelude.lisp` instead.
+//! Anything that can be written in Brood lives in `std/prelude.blsp` instead.
 //! `%`-prefixed names are low-level primitives not meant to be called directly.
 //! The annotated list is in `docs/primitives.md`.
 
@@ -381,7 +381,7 @@ fn stdout_tty(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 // ---------- time ----------
 
 /// `(now)` — wall-clock milliseconds since the Unix epoch, as an integer.
-/// Subtract two readings to measure elapsed time (see `std/test.lisp`).
+/// Subtract two readings to measure elapsed time (see `std/test.blsp`).
 fn now(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -459,11 +459,11 @@ fn eval_string(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
 
 /// Standard-library modules baked into the binary (like the prelude), so they load
 /// from any directory with no file paths. The require / provide / load-path
-/// *policy* is written in Brood (`std/prelude.lisp`, ADR-019); Rust only exposes
+/// *policy* is written in Brood (`std/prelude.blsp`, ADR-019); Rust only exposes
 /// an embedded module's source here, via `%builtin-module` (ADR-006/008).
 const EMBEDDED_MODULES: &[(&str, &str)] = &[
-    ("test", include_str!("../../../std/test.lisp")),
-    ("project", include_str!("../../../std/project.lisp")),
+    ("test", include_str!("../../../std/test.blsp")),
+    ("project", include_str!("../../../std/project.blsp")),
 ];
 
 /// `(%builtin-module name)` — the source of a baked-in std module as a string, or
@@ -530,7 +530,7 @@ fn substring(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 // ---------- filesystem ----------
 // Mechanism only: existence / directory reflection so the Brood module system and
 // the project test runner can resolve load paths and discover test files. Path
-// manipulation and all policy live in Brood (`std/prelude.lisp`, `std/project.lisp`).
+// manipulation and all policy live in Brood (`std/prelude.blsp`, `std/project.blsp`).
 
 /// `(cwd)` — the process's current working directory as a string.
 fn cwd(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {

@@ -104,7 +104,7 @@ to read end-to-end. Dependencies arrive with the features that justify them
 **Status:** accepted.
 
 **Decision.** Anything that doesn't *need* to be a Rust builtin goes in
-`std/prelude.lisp` instead.
+`std/prelude.blsp` instead.
 
 **Why.** Whatever is written in Brood is redefinable at runtime. Maximising
 that surface is the entire point of the project. Rust provides mechanism;
@@ -141,7 +141,7 @@ Brood as possible. Initially the math/list functions (`+`, `-`, `map`, `reduce`,
 …) were Rust loops.
 
 **Decision.** Reduce the Rust surface to an **irreducible primitive kernel** and
-define every user-facing function in `std/prelude.lisp` on top of it. The kernel
+define every user-facing function in `std/prelude.blsp` on top of it. The kernel
 is the 2-argument numeric ops (`%add`/`%sub`/`%mul`/`%div`/`%lt`/`%eq`, plus
 `mod`/`rem`), pair/vector constructors and accessors, type-tag predicates,
 value↔text and I/O, and the self-hosting hooks (`eval`/`read-string`/`load`/`apply`).
@@ -338,7 +338,7 @@ Brood.
 
 **Status:** accepted.
 
-**Context.** The test framework (`std/test.lisp`) is written in Brood and runs
+**Context.** The test framework (`std/test.blsp`) is written in Brood and runs
 tests as processes. Under ADR-013 those processes **share** the global table, so
 the original design — workers tallying into shared mutable globals (`*passed*`,
 `*failed*`) — raced and miscounted (failures attributed to the wrong test, double
@@ -431,7 +431,7 @@ handles — cheap); `Heap::restore_globals()` puts a snapshot back. The `%isolat
 primitive wraps a thunk: snapshot → run → restore (even on error). The framework
 runs the `:isolated` phase **first** and calls each isolated test through
 `%isolate`, so every isolated test sees the clean post-load baseline and nothing
-it defines survives. Policy stays in Brood (`std/test.lisp`); Rust supplies only
+it defines survives. Policy stays in Brood (`std/test.blsp`); Rust supplies only
 the snapshot/restore mechanism (ADR-006/008).
 
 **Why.** Proportionate (ADR-011): it delivers the property that matters — a test's
@@ -499,7 +499,7 @@ fork: a flat, Emacs-style namespace, or first-class namespaced modules
 **Decision.** **Flat, Emacs-style modules over the one shared global table.**
 - `*features*` (a global list) records what's loaded; `(provide 'name)` adds it,
   `(require 'name)` returns early if present.
-- `*load-path*` (a global list of dirs) is searched for `name.lisp`; the first hit
+- `*load-path*` (a global list of dirs) is searched for `name.blsp`; the first hit
   is `load`ed (evaluated into the shared globals), then `require` checks the
   feature was actually provided.
 - Embedded std modules (prelude, `test`, …) stay baked into the binary so it runs
@@ -507,7 +507,7 @@ fork: a flat, Emacs-style namespace, or first-class namespaced modules
 - **Mechanism vs policy (ADR-006/008):** the only new Rust is filesystem
   reflection — `file-exists?`, `list-dir`, `cwd` — plus one primitive that hands a
   baked-in module's source to Brood. `provide` / `require` / `load-path` themselves
-  are Brood, in `std/prelude.lisp`.
+  are Brood, in `std/prelude.blsp`.
 - **Convention, not mechanism:** `foo--internal` (double dash) marks "private",
   Emacs's lightweight interface signal. Unenforced.
 
@@ -542,7 +542,7 @@ and not worth guarding now (ADR-011).
 
 ---
 
-## ADR-020 — Project model: `project.lisp` + a discovery-based test runner
+## ADR-020 — Project model: `project.blsp` + a discovery-based test runner
 
 **Status:** accepted; not yet implemented.
 
@@ -551,26 +551,26 @@ directories, a name/version — and (b) a tool that *finds and runs* all of a
 project's tests, instead of hand-listing cases and calling `(run-tests)` at the
 foot of one file. The test framework (ADR-015) already separates **registration**
 (`describe` / `test` → `*units*`) from **execution** (`run-tests`) — exactly what
-discovery needs. Fork: a project file as Brood *source* (`project.lisp`) or as
+discovery needs. Fork: a project file as Brood *source* (`project.blsp`) or as
 inert *data* (`Brood.proj`).
 
 **Decision.** **Convention over configuration** (Mix / Cargo style), with a
 manifest for identity.
 - **Conventional layout — no config to get the normal case working.** `src/` holds
   the project's Brood source (prepended to `*load-path*`, so its files are
-  `require`-able by name); `tests/` holds tests, discovered as `*_test.lisp`
+  `require`-able by name); `tests/` holds tests, discovered as `*_test.blsp`
   recursively. A fresh project that puts code in `src/` and tests in `tests/` needs
   no path declarations at all.
-- **`project.lisp`** — a Brood-source manifest in the Leiningen `project.clj`
+- **`project.blsp`** — a Brood-source manifest in the Leiningen `project.clj`
   mould, mainly declaring *identity*: `(project :name … :version …)`. It reads as
   data but is eval'd, so computed config is available when wanted. **Project
-  root** = the nearest ancestor directory containing `project.lisp` (like
+  root** = the nearest ancestor directory containing `project.blsp` (like
   Cargo/git).
 - **Override, don't enumerate.** The conventional dirs are defaults; the manifest
   *overrides* them (`:source-paths`, `:test-paths`) only when a project deviates —
   you never list paths just to get the standard layout running.
 - **Test discovery** — under each test path (default `tests/`), every file matching
-  `*_test.lisp`, recursively. A test file only *registers* (`(require 'test)` +
+  `*_test.blsp`, recursively. A test file only *registers* (`(require 'test)` +
   `describe` / `test`); `brood test` loads them all, then calls `(run-tests)`
   **once**. Test files no longer call `run-tests` themselves.
 - Surfaced as a CLI path — `brood test` (and an in-language `(run-project-tests)`)
@@ -583,23 +583,23 @@ manifest for identity.
   path plumbing, the manifest declares identity not layout, and every project looks
   alike so it's navigable. `src/` + `tests/` are the defaults (matching the Cargo
   workspace Brood lives in), overridable for the rare project that needs to deviate.
-- `project.lisp`-as-code is the most Brood-native choice (dogfooding), needs zero
+- `project.blsp`-as-code is the most Brood-native choice (dogfooding), needs zero
   new core (`load` already evals a file), reads as data yet keeps the
   computed-config escape hatch — the Leiningen model, consistent with Emacs's own
   config-is-code (and with flat modules, ADR-019). Pure-data (`Brood.proj`) buys
   safety (don't eval an untrusted manifest) and external-tool friendliness, but
   both matter only with a package ecosystem (premature — ADR-011), and "data"
   today is a clunky alist because map literals (`{}`) aren't in the language yet.
-- Discovery by `*_test.lisp` (Go / ExUnit's `*_test.exs`) lets test files coexist
+- Discovery by `*_test.blsp` (Go / ExUnit's `*_test.exs`) lets test files coexist
   with helper files in `tests/`; aggregating into one `run-tests` preserves the
   framework's parallel-by-default scheduling across the *whole* suite (ADR-015)
   rather than per file.
 
-**Trade-offs accepted.** Eval'ing `project.lisp` runs arbitrary code on project
+**Trade-offs accepted.** Eval'ing `project.blsp` runs arbitrary code on project
 open — fine while you run only your own projects; revisit (a data subset, or a
 sandboxed read) if third-party projects arrive. Discovery is convention-bound
-(`tests/`, `*_test.lisp`). Migration: the current single `tests/suite.lisp` (which
-calls `run-tests` itself) gets reorganised into register-only `*_test.lisp` files,
+(`tests/`, `*_test.blsp`). Migration: the current single `tests/suite.blsp` (which
+calls `run-tests` itself) gets reorganised into register-only `*_test.blsp` files,
 with `cargo test`'s `suite.rs` invoking the discovery runner.
 
 ---
@@ -615,7 +615,7 @@ indistinguishable from a call and `=` is a plain function (ADR-008) that
 evaluates both operands. The Lisp-faithful translation is to put **one pattern
 grammar at every binding form** and let those binds be refutable.
 
-**Decision.** A single pattern→code compiler, **written in Brood** (`std/prelude.lisp`),
+**Decision.** A single pattern→code compiler, **written in Brood** (`std/prelude.blsp`),
 emitting nested `if`/`let` over existing primitives — no Rust matcher, no new
 special form (the `try`/`catch` precedent: a macro over primitives, ADR-006/008).
 
@@ -637,9 +637,12 @@ special form (the `try`/`catch` precedent: a macro over primitives, ADR-006/008)
   malformed `&`, unreachable clauses after a catch-all, and bad `:when`.
 - **`let`/`fn` are lowered in the compile pass** (ADR-022), not the evaluator:
   a non-symbol target / a multi-clause or pattern-param `fn` is desugared to
-  `match*` once at definition. eval's `let`/`fn` stay symbol-only. This realises
-  the "one matcher, kept in Brood, stays redefinable" intent of the design's
-  Option A, while inheriting the compile pass's expand-once speed.
+  `match*` once at definition, so the common case is fast. The evaluator *also*
+  keeps the design's Option-A delegation as a **fallback** — if such a binder
+  reaches it unlowered (built in a quasiquote unquote, or from a macro expanded
+  lazily within its defining form), eval lowers it on the fly via `macroexpand_all`
+  and `continue 'tail`. Compile pass = speed; eval fallback = correctness. This
+  realises "one matcher, kept in Brood, stays redefinable."
 
 **Why.** Maximum power for one mechanism, all in Brood (redefinable later — map
 patterns, custom extractors), the core unchanged. Tail position is preserved
@@ -652,6 +655,10 @@ not the function's name (the name is attached after closure creation) — a legi
 nicety deferred. Pattern destructuring of `&optional` slots is deferred (ambiguous
 defaults; rare; additive). The textbook fail-continuation duplication is left as-is
 (patterns are shallow; thunk it if measured — see the design doc's code-size note).
+The generated code is **unhygienic** (ADR-009): it references the primitives it
+emits by bare name, so a local binding could shadow them. Equality uses the kernel
+`%eq` (not `=`) by convention to remove the most likely collision; `first`/`rest`/…
+remain shadowable until macro hygiene lands.
 
 ---
 
@@ -672,7 +679,10 @@ run **once at each top-level / definition boundary**: `eval_str`, `load`,
 defines is visible to the next). The evaluator **still** expands lazily as a
 fallback, which covers a macro defined and used within the same top-level form
 (not yet defined when the walk ran). `quote`/`quasiquote` are left opaque (their
-contents are data; code inside `~unquote` still expands when it runs).
+contents are data; code inside `~unquote` still expands when it runs). For the
+same reason, eval's `let`/`fn` keep an on-the-fly lowering fallback (ADR-021) for
+a pattern binder that reaches them unlowered (built in a quasiquote unquote, or
+from such a lazily-expanded macro).
 
 **Why.** A `match` (or any macro) in a function body now expands once, so the
 body runs at plain-`if` speed; it benefits *every* macro, not just `match`. It is
@@ -731,6 +741,48 @@ both to "callable" (`fn?` remains the callability predicate). Reflection is
 honest about the implementation seam; `fn?` is the abstraction for code that
 shouldn't care. The compile-time tiers beyond special-form structure are
 deferred — additive, and gated on a real need.
+
+---
+
+## ADR-024 — Set-theoretic, gradual types: the model and the compatibility contract
+
+**Status:** accepted; step 1 (the `Ty` lattice) implemented. Full plan in
+[`types.md`](types.md). Refines ADR-023.
+
+**Context.** ADR-023 made tags first-class and committed to *advisory,
+runtime-only* checking, with free/global references treated as `Any`. The open
+question was *which* type system. Surveying the field, **Elixir's set-theoretic +
+gradual** system is the closest fit: it retrofits types onto a dynamic,
+hot-reloadable BEAM language without breaking dynamic code — our exact problem,
+solved by people who took the same constraint seriously.
+
+**Decision.** Adopt the **set-theoretic, gradual** model; explicitly reject the
+TypeScript-style "pragmatic but unsound" route.
+- A **type is a set of values**; the atoms are the runtime `Tag`s. Type
+  operations are set operations; **subtyping is set inclusion** (semantic
+  subtyping), never syntactic rules.
+- **Gradual via `dynamic()`** — the principled replacement for ADR-023's
+  "globals are `Any`." A redefinable global (hot reload) is `dynamic()`, which
+  relates to other types by *consistency*, not subtyping, so typed/untyped code
+  mixes without spurious errors. **This supersedes ADR-023's "globals are `Any`"
+  wording.**
+- Checking stays **advisory** (ADR-023): warns and optimises, never rejects a
+  runnable program (bar provably-sound special-form structure errors).
+- Built in **small, independent steps** (the staircase in `types.md`), each
+  shippable on its own; and governed by a **compatibility contract** (also in
+  `types.md`) that every future change must honour — several points are
+  compiler-enforced (a new `Value` needs a `Tag` + bit; a new primitive will need
+  a signature, the way `Arity` is mandatory today).
+
+**Why.** It is sound where it speaks and never inhibits where it can't — the only
+combination compatible with a self-editing, hot-reloadable language. Pinning the
+model and the contract now stops later work from drifting into a static system
+that would break the dynamism the project exists for.
+
+**Trade-offs accepted.** A full set-theoretic checker is a large system; we build
+a deliberately small subset (flat tags first; structure and `dynamic()` later)
+and stay advisory rather than carrying Elixir's full soundness-proof burden —
+borrow the model, not the proof obligation.
 
 ---
 

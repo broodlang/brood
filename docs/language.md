@@ -170,7 +170,7 @@ evaluated in its place. Templates are written with quasiquote: `` `x `` quotes,
 
 Erlang/Elixir-style pattern matching, with **one pattern grammar reused at every
 binding site**: `match`, refutable `let`, and `fn`/`defn` clauses. The compiler
-is written in Brood (`std/prelude.lisp`) — no new special form. For the full
+is written in Brood (`std/prelude.blsp`) — no new special form. For the full
 design and rationale see [pattern-matching.md](pattern-matching.md).
 
 ### The grammar
@@ -269,7 +269,7 @@ Raise with `throw` (any value) or `error` (a formatted message), and handle with
 `catch` binds `e` to the thrown value; for a built-in error (like division by
 zero) it binds the error's message string. A `try` with no `catch` is just a
 `do`. Under the hood `throw` and `%try` are primitives and `try`/`catch`/`error`
-are written in Brood (`std/prelude.lisp`) — see [primitives.md](primitives.md).
+are written in Brood (`std/prelude.blsp`) — see [primitives.md](primitives.md).
 
 Type errors are **self-identifying**: they name the operation, the type it
 wanted, and the tag + printed form of what actually arrived — e.g.
@@ -312,7 +312,7 @@ run used. See [concurrency.md](concurrency.md) for the model and limitations.
 > **Where these live:** only a small primitive kernel is implemented in Rust
 > (the `%`-prefixed numeric ops, `cons`/`first`/`rest`, type predicates, I/O,
 > `eval`/`load`, …). The functions below that aren't primitives — `+ - * / <
-> = map filter reduce list …` — are defined *in Brood* in `std/prelude.lisp`,
+> = map filter reduce list …` — are defined *in Brood* in `std/prelude.blsp`,
 > the same way you'd define your own. See spec.md §9 for the exact split. From a
 > caller's point of view they're all just functions.
 
@@ -385,7 +385,7 @@ for the test framework) — works from any directory.
 
 ```clojure
 (eval (read-string "(+ 40 2)"))  ;=> 42
-(load "some-file.lisp")          ; evaluate a file into the global environment
+(load "some-file.blsp")          ; evaluate a file into the global environment
 ```
 
 These three are the seed of "edit the system while it runs": read code, evaluate
@@ -393,7 +393,7 @@ it into the live environment, replace definitions.
 
 ## Prelude
 
-`std/prelude.lisp` is loaded at startup and is where most of the language
+`std/prelude.blsp` is loaded at startup and is where most of the language
 actually lives — the `defn` macro, the arithmetic operators, comparisons,
 equality, the sequence library, and the `->`/`->>` threading macros, all defined
 in Brood on top of the Rust primitive kernel. It also adds `inc` `dec`

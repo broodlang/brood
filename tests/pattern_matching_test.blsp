@@ -1,6 +1,6 @@
 ;; Pattern matching — the exhaustive suite. Register-only; run via `brood test`
 ;; (and `cargo test`, via crates/lisp/tests/suite.rs), which discovers every
-;; tests/**/*_test.lisp and runs them together.
+;; tests/**/*_test.blsp and runs them together.
 ;;
 ;; Covers every variation of the pattern grammar and all three surfaces (`match`,
 ;; refutable `let`, `fn`/`defn` clauses): literals, wildcard, binds, quoted
@@ -342,6 +342,31 @@
   (test "defn forwards single-clause unchanged"
     (defn pm-sq (x) (* x x))
     (assert= (pm-sq 9) 81)))
+
+;; ── Regression: pattern binders reaching eval *unlowered* (ADR-022 fallback) ──
+;; A pattern `let`/`fn` normally lowers to `match*` in the compile pass, but can
+;; reach the evaluator unlowered — built inside a quasiquote unquote (which the
+;; compile pass leaves opaque), or produced by a macro expanded lazily within its
+;; own defining form. eval's let/fn lower it on the fly, so these still work
+;; (they used to fail with a misleading "expected a symbol").
+(describe "lowering fallback"
+  (test "pattern let inside a quasiquote unquote (evaluated at runtime)"
+    (assert= `(answer ~(let ((a b) (list 1 2)) (+ a b))) (list 'answer 3)))
+  (test "multi-clause fn inside a quasiquote unquote"
+    (assert= `(r ~((fn ((0) :z) ((n) :nz)) 5)) (list 'r :nz)))
+  (test "shadowing = does not break a match (the matcher emits %eq)"
+    (assert= (let (= (fn (a b) false)) (match 1 (1 :one) (_ :other))) :one)
+    (assert= (let (= (fn (a b) true))  (match 1 (2 :two) (_ :other))) :other)))
+
+;; :serial — these define a macro/global, like the fn/defn group above.
+(describe "lowering fallback via same-form macros" :serial
+  (test "a macro expanded within its defining form yields a pattern let"
+    (defmacro pm-with-pair (v & body) `(let ((a b) ~v) ~@body))
+    (assert= (pm-with-pair (list 3 4) (+ a b)) 7))
+  (test "a macro expanded within its defining form yields a multi-clause fn"
+    (defmacro pm-def-fac (name) `(def ~name (fn ((0) 1) ((n) (* n (~name (- n 1)))))))
+    (pm-def-fac pm-qfac)
+    (assert= (pm-qfac 5) 120)))
 
 ;; No (run-tests) call: register-only. The project test runner (`brood test`,
 ;; ADR-020) discovers this file and runs the whole suite once.

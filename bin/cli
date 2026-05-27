@@ -2,7 +2,7 @@
 # Convenience launcher for the Brood CLI.
 #
 #   ./bin/cli                 # start the REPL
-#   ./bin/cli file.lisp       # run a program file
+#   ./bin/cli file.blsp       # run a program file
 #
 # Builds via cargo as needed and forwards all arguments to the `brood` binary.
 set -euo pipefail

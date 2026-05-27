@@ -46,9 +46,9 @@ crates/lisp/src/
   builtins.rs  functions implemented in Rust
   printer.rs   Value -> text
   error.rs     LispError / LispResult
-  lib.rs       the `Interp` entry point; bundles std/prelude.lisp
+  lib.rs       the `Interp` entry point; bundles std/prelude.blsp
 crates/cli/src/main.rs   the `brood` binary (REPL + file runner)
-std/prelude.lisp         standard library written in Brood
+std/prelude.blsp         standard library written in Brood
 docs/                    architecture, language, roadmap, decisions, devlog
 ```
 
@@ -56,10 +56,10 @@ docs/                    architecture, language, roadmap, decisions, devlog
 
 ```bash
 cargo build                       # build the workspace
-cargo test                        # Rust tests + the Brood suite (tests/suite.lisp)
+cargo test                        # Rust tests + the Brood suite (tests/suite.blsp)
 cargo run -p cli                  # start the REPL  (or: ./bin/cli)
-cargo run -p cli file.lisp        # run a program file
-./bin/cli tests/suite.lisp        # the in-language test suite (does (require 'test))
+cargo run -p cli file.blsp        # run a program file
+./bin/cli tests/suite.blsp        # the in-language test suite (does (require 'test))
 ```
 
 Cargo is the source of truth; a thin **`Makefile`** wraps the common commands as
@@ -96,6 +96,14 @@ parallelism isn't relevant — it's a Cargo workspace, not a recursive make.
 - **Symbols are interned `u32`s.** Compare with `==`; get the spelling via
   `value::symbol_name`.
 - **Truthiness:** only `nil` and `false` are falsy (`eval::truthy`).
+- **Types are set-theoretic, gradual, and advisory** (ADR-023/024;
+  `docs/types.md`). A type *is* a set of runtime `Tag`s; subtyping is set
+  inclusion; redefinable globals are `dynamic()`, never `Any`; checking never
+  rejects a runnable program. Before adding a `Value` kind, primitive, special
+  form, or pattern, check it against the **compatibility contract** in
+  `docs/types.md` — several points are compiler-enforced (a new `Value` needs a
+  `Tag` + bit in `types.rs`; primitives will need a signature like `Arity`). Not
+  the TypeScript route.
 - **Runtime crates are allowed when they remove real complexity.** Prefer our
   own substrate, but a well-scoped crate that genuinely cuts complexity (or
   hand-rolled `unsafe`) is fine in the `brood` lib crate — e.g. `boxcar` backs
@@ -120,9 +128,9 @@ parallelism isn't relevant — it's a Cargo workspace, not a recursive make.
 ## When you add a feature
 
 1. Implement it (special form in `eval.rs`, or builtin in `builtins.rs`, or
-   prelude fn in `std/prelude.lisp`).
-2. Add tests — an `(assert= …)`/`(is …)` inside a `deftest` in `tests/suite.lisp`
-   (in-language, via the `std/test.lisp` framework), and/or a Rust case in
+   prelude fn in `std/prelude.blsp`).
+2. Add tests — an `(assert= …)`/`(is …)` inside a `deftest` in `tests/suite.blsp`
+   (in-language, via the `std/test.blsp` framework), and/or a Rust case in
    `crates/lisp/tests/basic.rs`.
 3. Update `docs/language.md` (it documents the language *as implemented*).
 4. Tick it off in `docs/roadmap.md`; add a dated entry to `docs/devlog.md`.

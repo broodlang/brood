@@ -591,3 +591,58 @@ arity check would read.
 **Verified.** Added arity assertions to `tests/suite.lisp` and a Rust test
 (`basic.rs`); the prelude needed no changes (nothing relied on lenient arity);
 35 Rust tests + suite + doc-test green.
+
+### Set-theoretic type direction: `Ty` lattice (step 1) + the plan/contract (2026-05-27)
+
+Chose the type-system direction: **set-theoretic and gradual, like Elixir's** —
+sound where it speaks, `dynamic()` where it can't, advisory throughout — and
+explicitly *not* the TypeScript "pragmatic but unsound" route. Recorded in
+ADR-024 (refining ADR-023; "globals are `Any`" → "globals are `dynamic()`").
+
+- **Step 1 shipped:** `crates/lisp/src/types.rs` — `Ty` is a set of runtime tags
+  (a `u16` bitset over the 12 `Tag` atoms). Set operations *are* the type
+  operations: union/intersect/negate/difference, **subtyping = set inclusion**
+  (semantic subtyping), `NEVER`/`ANY`/`NUMBER`/`LIST`, an `of_value` bridge, and
+  a `Display` for diagnostics. Pure algebra, 6 unit tests; nothing in the
+  language consumes it yet — deliberately just the foundation.
+- **Documented to be tackled one step at a time:** `docs/types.md` holds the
+  model, the 5-step staircase (each shippable on its own, with done-criteria),
+  and — the point the user emphasised — a **compatibility contract** every future
+  change must honour so the language never drifts off the set-theoretic path.
+  Several contract points are compiler-enforced (a new `Value` needs a `Tag` +
+  bit; primitives will need a signature the way `Arity` is mandatory). Pinned a
+  short invariant in `CLAUDE.md` so it's read every session.
+
+Next small step (2): `dynamic()` — the gradual type, with its consistency
+relation, and the "redefinable globals are `dynamic()`" rule.
+
+**Verified.** 6 `types` tests + 35 Rust + suite + doc-test green.
+
+---
+
+## 2026-05-27 — Pattern matching: review fixes (eval fallback + `%eq` hygiene)
+
+A critical review of the pattern matcher surfaced two real issues; both fixed.
+
+- **Correctness — unlowered pattern binders.** `let`/`fn` patterns lower to
+  `match*` in the compile pass, but a binder can reach the evaluator *unlowered*:
+  built inside a quasiquote unquote (the pass leaves quasiquote opaque), or
+  produced by a macro expanded lazily within its own defining form. eval's
+  symbol-only `let`/`fn` then failed with a misleading "expected a symbol". Fix:
+  eval now keeps the design's Option-A delegation as a **fallback** — a non-symbol
+  target / clause-shaped `fn` is lowered on the fly via `macroexpand_all` +
+  `continue 'tail`. The common all-symbol case is detected away cheaply
+  (`macros::fn_needs_lowering`; a `binds` scan for `let`), so ordinary code is
+  unaffected. Compile pass = speed; eval fallback = correctness.
+- **Hygiene — `=` shadowing.** The matcher emits bare primitive names, which a
+  local binding can shadow (unhygienic macros, ADR-009). Switched the emitted
+  equality from `=` to the kernel `%eq` (a `%`-name isn't rebound), so a local
+  `=` no longer hijacks a `match`. `first`/`rest`/… stay shadowable until macro
+  hygiene lands — documented.
+
+Regression tests added (`tests/pattern_matching_test.blsp`, "lowering fallback"
+groups): quasiquote-unquote pattern `let`, quasiquote-unquote multi-clause `fn`,
+same-form-macro pattern `let` and multi-clause `fn`, and `=`-shadowing.
+ADR-021/022 and `docs/pattern-matching.md` updated.
+
+**Verified.** `brood test` 158/158 green; full `cargo test` green.

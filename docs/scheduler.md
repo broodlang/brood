@@ -35,7 +35,7 @@ The worker-pool size must not be hardcoded. Resolution order:
 4. CLI flag (`-j N`) — wins.
 
 The settings file is **Brood**, mirroring Elixir (`config/config.exs` is Elixir,
-not TOML) and our "write the language in the language" rule: a `config.lisp`
+not TOML) and our "write the language in the language" rule: a `config.blsp`
 (project-local, with a user/global fallback) evaluated at startup into a settings
 table. Scheduler thread-count is needed *before* the scheduler exists, so a tiny
 single-threaded bootstrap eval reads the config first, then the pool starts.
@@ -158,7 +158,7 @@ So we're "BEAM-minus-preemption-minus-migration" at first — both are additive 
   coroutine: catch/propagate so the worker survives and the process dies cleanly.
 - **Cooperative starvation** (above) until preemption lands.
 - **Introspection semantics.** `spawn-count` = green processes; `peak-threads`
-  becomes "peak busy workers" (≤ pool size) — update `std/test.lisp`'s summary
+  becomes "peak busy workers" (≤ pool size) — update `std/test.blsp`'s summary
   and the wording we just fixed.
 - **Stack size.** corosensei stacks are configurable; pick a small default
   (processes should be cheap) with growth/guard pages, and revisit under load.

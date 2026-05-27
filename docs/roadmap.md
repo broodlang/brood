@@ -29,9 +29,9 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
 - ✅ REPL + file runner
 - ✅ End-to-end test suite (incl. 100,000-deep tail recursion, live redefinition)
 - ✅ **Primitive-kernel refactor**: `+ - * / < > = map reduce …` are defined in
-  Brood (`std/prelude.lisp`) over a small Rust kernel (ADR-008)
+  Brood (`std/prelude.blsp`) over a small Rust kernel (ADR-008)
 - ✅ **Macros** (`defmacro`, `macroexpand`/`macroexpand-1`, `gensym`); `defn` and
-  the `->`/`->>` threading macros are now defined *in Brood* (`std/prelude.lisp`)
+  the `->`/`->>` threading macros are now defined *in Brood* (`std/prelude.blsp`)
 - ✅ **Quasiquote** — Clojure-style `` ` `` / `~` / `~@` (ADR-009)
 - ✅ **Parameter grammar** — `required` + `&optional` (with defaults) + `& rest`,
   in the closure calling convention (`fn`/`lambda`/`defn` all share it).
@@ -44,15 +44,16 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   reused by `match`, refutable `let`, and `fn`/`defn` clauses. Subsumes Tier-2
   destructuring + `case`. Made fast by a **macroexpand-all compile pass**
   (ADR-022), which also lowers the `let`/`fn` pattern surfaces.
-- 🟡 **Type reflection & checking** (ADR-023). Done: the runtime tag is
-  first-class — a `Tag` enum + `(type-of x)` primitive — type errors are
-  self-identifying (`first: expected list or vector, got int (5)`), and every
-  builtin declares an `Arity` enforced at one central native-call gate (no more
-  silently-tolerated wrong-arity calls). Still ⬜: an
-  **advisory** compile-pass analysis (special-form structure → hard error;
-  literal misuse → warning; local flow inference), kept advisory so hot reload
-  is never inhibited (globals are `Any`). Types stay runtime-only — no static
-  gating, no annotations.
+- 🟡 **Set-theoretic, gradual types** (ADR-023/024) — full plan and the
+  *compatibility contract* future changes must honour live in
+  [`types.md`](types.md). ✅ Step 0: first-class `Tag` + `(type-of x)`,
+  self-identifying type errors, `Arity` on every builtin (one central gate).
+  ✅ Step 1: the `Ty` set-theoretic lattice (`types.rs` — sets of tags;
+  union/intersect/negate; subtyping = set inclusion). ⬜ Step 2: `dynamic()`
+  (gradual; globals are `dynamic()`, not `Any`). ⬜ Step 3: typed primitive
+  signatures. ⬜ Step 4: advisory local inference over expanded forms (guard/
+  pattern narrowing). ⬜ Step 5+: structured types. Advisory throughout —
+  never gates, never inhibits the dynamic language; not the TypeScript route.
 - ⬜ **Maps** (`{ }` literals, `get`/`assoc`)
 - 🟡 **Memory reclamation.** `Send` arena handles replaced `Rc` (done). Step 1 of
   reclamation is **arena reset at top-level boundaries** (ADR-016): `eval_str` and
@@ -71,8 +72,8 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   Rust is `file-exists?` / `list-dir` / `cwd`. *Namespaces stay deferred — a later,
   additive Brood macro layer if ever needed.*
 - ⬜ **Project model & test tool** — convention over configuration: `src/` is the
-  project source (auto on `*load-path*`), `tests/**/*_test.lisp` are the tests; a
-  `project.lisp` manifest declares identity (name/version) and overrides paths only
+  project source (auto on `*load-path*`), `tests/**/*_test.blsp` are the tests; a
+  `project.blsp` manifest declares identity (name/version) and overrides paths only
   when needed. `brood test` discovers + loads (register-only) + runs once (ADR-020).
 
 > v0.1 is the ✅ slice above: enough to be a real, usable language. The ⬜ items

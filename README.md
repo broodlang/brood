@@ -51,7 +51,7 @@ cargo test
 cargo run -p cli
 
 # run a program file
-cargo run -p cli path/to/program.lisp
+cargo run -p cli path/to/program.blsp
 ```
 
 In the REPL (`cargo run -p cli`; the banner and prompt will read `brood` once the
@@ -78,7 +78,7 @@ and the self-hosting trio `eval`/`read-string`/`load`. Parameter lists are
 written as lists (`(x y)` — code is lists; vectors are data) and support
 `&optional` (with defaults) and `& rest`. `defn`, the operators (`+`, `<`, …),
 the sequence library, and the `->`/`->>` threading macros are all defined in
-Brood itself (`std/prelude.lisp`) on top of a small Rust kernel.
+Brood itself (`std/prelude.blsp`) on top of a small Rust kernel.
 
 See [`docs/language.md`](docs/language.md) for the full reference.
 
@@ -86,7 +86,7 @@ See [`docs/language.md`](docs/language.md) for the full reference.
 
 Concurrency has begun: Erlang-style **processes** (`spawn`/`send`/`receive`/`self`)
 run share-nothing on real threads and talk by message passing (see
-[`examples/processes.lisp`](examples/processes.lisp)); making them lightweight
+[`examples/processes.blsp`](examples/processes.blsp)); making them lightweight
 green threads on a worker pool is in progress.
 
 Dynamic variables, in-language error handling, maps, and a tracing GC complete

@@ -156,9 +156,13 @@
 ;; plus expand-time helper `defn`s, exactly like the threading macros compute at
 ;; expansion time) that emits nested `if`/`let` over existing primitives —
 ;; `pair?`, `first`, `rest`, `nil?`, `vector?`, `vector-ref`, `vector-length`,
-;; `=`. No new special form (the `try`/`catch` precedent: a macro over
-;; primitives). One compiler serves `match` here, and the `let` / `fn` special
-;; forms delegate to it for destructuring. See docs/pattern-matching.md.
+;; and `%eq` (the kernel equality op, used by convention over `=` so a local
+;; binding named `=` can't hijack a generated match). No new special form (the
+;; `try`/`catch` precedent: a macro over primitives). One compiler serves `match`
+;; here, and the `let` / `fn` special forms delegate to it for destructuring.
+;; See docs/pattern-matching.md.
+;; (Note: the other emitted primitives — `first`/`rest`/`pair?`/… — are still
+;; ordinary names a local binding could shadow; full macro hygiene is deferred.)
 ;;
 ;; THE ONE TRAP: a bare symbol in a pattern *binds* (and shadows); it does not
 ;; test against a same-named value. Match a known value with a keyword (:ok), a
@@ -212,13 +216,13 @@
   (cond
     (match-wildcard? pat) success
     (match-bind-sym? pat) (if (match-member? pat bound)
-                            `(if (= ~target ~pat) ~success ~fail)  ; non-linear: equal to earlier binding
+                            `(if (%eq ~target ~pat) ~success ~fail)  ; non-linear: equal to earlier binding
                             `(let (~pat ~target) ~success))        ; fresh bind
-    (match-quoted? pat)   `(if (= ~target ~pat) ~success ~fail)    ; 'sym self-evaluates to the symbol
-    (match-pin? pat)      `(if (= ~target ~(second pat)) ~success ~fail) ; ~expr: match the value of expr
+    (match-quoted? pat)   `(if (%eq ~target ~pat) ~success ~fail)    ; 'sym self-evaluates to the symbol
+    (match-pin? pat)      `(if (%eq ~target ~(second pat)) ~success ~fail) ; ~expr: match the value of expr
     (pair? pat)           (match-compile-list pat target bound success fail)
     (vector? pat)         (match-compile-vector pat target bound success fail)
-    else                  `(if (= ~target ~pat) ~success ~fail)))  ; literal (number/string/keyword/bool/nil)
+    else                  `(if (%eq ~target ~pat) ~success ~fail)))  ; literal (number/string/keyword/bool/nil)
 
 ;; list pattern: split off an optional `& rest` tail, then bind element-wise.
 (defn match-split (pats)
@@ -255,7 +259,7 @@
         n     (count elems))
     (when (match-member? '& elems)
       (error "match: '&' (rest) is not allowed in a vector pattern — vectors are fixed-length"))
-    `(if (and (vector? ~target) (= (vector-length ~target) ~n))
+    `(if (and (vector? ~target) (%eq (vector-length ~target) ~n))
        ~(match-compile-velems elems target 0 bound success fail)
        ~fail)))
 
@@ -377,10 +381,10 @@
 ;; A flat module system over the one shared global table: `provide` records a
 ;; loaded feature, `require` loads one once. Embedded std modules (test, project)
 ;; are baked into the binary and found via `%builtin-module`; everything else is
-;; searched for on `*load-path*` as `<name>.lisp`. This is policy — Rust supplies
+;; searched for on `*load-path*` as `<name>.blsp`. This is policy — Rust supplies
 ;; only the filesystem + embedded-source mechanism (ADR-006/008).
 (def *features*  nil)          ; names (strings) of features already loaded
-(def *load-path* (list "."))   ; directories searched for <name>.lisp
+(def *load-path* (list "."))   ; directories searched for <name>.blsp
 
 ;; (provide 'foo) — mark a feature loaded (idempotent). Returns its name.
 (defn provide (mod)
@@ -398,7 +402,7 @@
 
 ;; (require 'foo) — load feature foo once: return immediately if already loaded,
 ;; else evaluate its embedded source (a baked-in std module) or the first
-;; <foo>.lisp found on *load-path*, then record it. Returns the feature name;
+;; <foo>.blsp found on *load-path*, then record it. Returns the feature name;
 ;; errors if it can't be found.
 (defn require (mod)
   (let (key (name mod))
@@ -407,7 +411,7 @@
       (let (src (%builtin-module key))
         (if src
           (do (eval-string src) (provide key))
-          (let (path (require--find (str key ".lisp") *load-path*))
+          (let (path (require--find (str key ".blsp") *load-path*))
             (if path
               (do (load path) (provide key))
               (error "require: cannot find module '" key "'"))))))))

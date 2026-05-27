@@ -1,6 +1,6 @@
-;; tests/suite-failures.lisp — a deliberately-failing suite, for *looking at*.
+;; tests/suite-failures.blsp — a deliberately-failing suite, for *looking at*.
 ;;
-;;   ./bin/cli tests/suite-failures.lisp
+;;   ./bin/cli tests/suite-failures.blsp
 ;;
 ;; Run it by hand to see how the framework renders a mix of passing and failing
 ;; tests: the per-test ✓/✗ markers, then the FAILURES section with one line per
@@ -8,7 +8,7 @@
 ;; into `cargo test` — it would fail the build by design.
 ;;
 ;; Tallying is share-safe (each test collects its own failures locally and the
-;; runner aggregates from results — see std/test.lisp), so this renders correctly
+;; runner aggregates from results — see std/test.blsp), so this renders correctly
 ;; in either mode: try `(run-tests :parallel :trace)` too — failures stay
 ;; attributed to the right test and counts don't double.
 ;;
