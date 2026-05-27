@@ -22,17 +22,29 @@ A solid, self-editable Lisp. This is the foundation everything else stands on.
 - ✅ Self-hosting primitives: `eval`, `read-string`, `load`
 - ✅ Prelude written in mylisp
 - ✅ REPL + file runner
-- ✅ End-to-end test suite (incl. 1,000,000-deep tail recursion, live redefinition)
-- ⬜ **Macros** (`defmacro`, `macroexpand`) — the big remaining piece
-- ⬜ **Quasiquote** (`` ` `` `,` `,@`) for writing macros
+- ✅ End-to-end test suite (incl. 100,000-deep tail recursion, live redefinition)
+- ✅ **Primitive-kernel refactor**: `+ - * / < > = map reduce …` are defined in
+  mylisp (`std/prelude.lisp`) over a small Rust kernel (ADR-008)
+- ✅ **Macros** (`defmacro`, `macroexpand`/`macroexpand-1`, `gensym`); `defn` and
+  the `->`/`->>` threading macros are now defined *in mylisp* (`std/prelude.lisp`)
+- ✅ **Quasiquote** — Clojure-style `` ` `` / `~` / `~@` (ADR-009)
 - ⬜ **Dynamic variables** (`defdyn` / `binding`) for editor config
 - ⬜ **Error handling** in-language (`try`/`catch`, `throw`)
 - ⬜ **Maps** (`{ }` literals, `get`/`assoc`)
 - ⬜ **Tracing GC** (`gc-arena`) to replace `Rc` before sessions get long-lived
-- ⬜ Nicer REPL (history, multiline editing, completion)
+- 🟡 Nicer REPL — `rustyline` line editing (arrow keys, history, Emacs bindings)
+  is in; richer completion/highlighting still to come
+- ⬜ **Self-host the CLI/REPL in mylisp** — once the language can express it, the
+  read-eval-print loop should be mylisp source on a thin Rust substrate, not
+  Rust. (See the core principle in `CLAUDE.md`.)
 
 > v0.1 is the ✅ slice above: enough to be a real, usable language. The ⬜ items
 > complete M1.
+>
+> **Overarching principle:** as much of the system as possible is written in
+> mylisp itself — Rust is mechanism, mylisp is policy. Every Rust builtin is a
+> candidate to later replace with mylisp. This holds for the CLI, the editor
+> commands, keymaps, and UI as the language grows capable enough.
 
 ## M2 — Editor data model
 

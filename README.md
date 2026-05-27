@@ -11,13 +11,13 @@ lexical closures, a set of builtins, and a REPL.
 ```clojure
 (+ 1 2)                          ;=> 3
 
-(def square (fn [x] (* x x)))
+(defn square [x] (* x x))        ; defn is a macro, written in mylisp itself
 (map square (list 1 2 3 4))      ;=> (1 4 9 16)
 
-;; recursion is the loop — tail calls don't grow the stack
+;; recursion is the loop — tail calls use O(1) stack, so this doesn't overflow
 (def sum-to
   (fn [n acc] (if (= n 0) acc (sum-to (- n 1) (+ acc n)))))
-(sum-to 1000000 0)               ;=> 500000500000
+(sum-to 100000 0)                ;=> 5000050000
 ```
 
 ## Quick start
@@ -52,19 +52,21 @@ mylisp> (greet "world")
 
 ## What works today
 
-Lexically-scoped closures, proper tail calls, `def`/`set!`/`let`/`fn`,
-`if`/`when`/`unless`/`cond`, `and`/`or`/`while`, integers & floats with
-overflow-checked arithmetic, strings, symbols, keywords, cons-cell lists,
-`[ ]` vectors, higher-order functions (`map`/`filter`/`reduce`/`apply`), and the
-self-hosting trio `eval`/`read-string`/`load`. A prelude written in mylisp adds
-helpers like `inc`, `sum`, `abs`, `max`.
+Lexically-scoped closures, proper tail calls, `def`/`defn`/`set!`/`let`/`fn`,
+`if`/`when`/`unless`/`cond`, `and`/`or`/`while`, **macros** (`defmacro` +
+Clojure-style `` ` ``/`~`/`~@` quasiquote, `macroexpand`, `gensym`), integers &
+floats with overflow-checked arithmetic, strings, symbols, keywords, cons-cell
+lists, `[ ]` vectors, higher-order functions (`map`/`filter`/`reduce`/`apply`),
+and the self-hosting trio `eval`/`read-string`/`load`. `defn`, the operators
+(`+`, `<`, …), the sequence library, and the `->`/`->>` threading macros are all
+defined in mylisp itself (`std/prelude.lisp`) on top of a small Rust kernel.
 
 See [`docs/language.md`](docs/language.md) for the full reference.
 
 ## What's next
 
-Macros + quasiquote, dynamic variables, in-language error handling, maps, and a
-tracing GC complete the language. Then: a rope-backed **editor data model**, a
+Dynamic variables, in-language error handling, maps, and a tracing GC complete
+the language. Then: a rope-backed **editor data model**, a
 serialisable **display protocol** with a fast native local frontend, a
 **server/daemon mode** so other editor instances can attach remotely, and
 eventually a **web frontend**.

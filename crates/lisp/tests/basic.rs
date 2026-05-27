@@ -98,16 +98,19 @@ fn strings() {
     assert_eq!(run("(count \"hello\")"), "5");
 }
 
-/// The headline property: deep tail recursion must not overflow the Rust stack.
+/// The headline property: deep tail recursion uses O(1) Rust stack, so it must
+/// not overflow. 100,000 frames would blow the stack without tail calls; we keep
+/// the count here (rather than millions) because arithmetic is now defined in
+/// mylisp itself and is correspondingly slower than a native loop.
 #[test]
 fn tail_calls_do_not_overflow() {
     let src = "
         (def sum-to
           (fn [n acc]
             (if (= n 0) acc (sum-to (- n 1) (+ acc n)))))
-        (sum-to 1000000 0)
+        (sum-to 100000 0)
     ";
-    assert_eq!(run(src), "500000500000");
+    assert_eq!(run(src), "5000050000");
 }
 
 /// The foundation for editing the editor on the fly: redefining a function in
@@ -125,6 +128,32 @@ fn live_redefinition() {
 #[test]
 fn eval_and_read_string() {
     assert_eq!(run("(eval (read-string \"(+ 40 2)\"))"), "42");
+}
+
+#[test]
+fn defn_defines_functions() {
+    assert_eq!(run("(defn sq [x] (* x x)) (sq 6)"), "36");
+    assert_eq!(run("(defn add3 [a b c] (+ a b c)) (add3 1 2 3)"), "6");
+    // defn is itself written in mylisp; it expands to (def name (fn ...)).
+    assert_eq!(run("(macroexpand-1 '(defn f [x] (+ x 1)))"), "(def f (fn [x] (+ x 1)))");
+}
+
+#[test]
+fn user_macros_and_quasiquote() {
+    let when_macro = "(defmacro my-when [c & body] `(if ~c (do ~@body) nil))";
+    assert_eq!(run(&format!("{} (my-when true 1 2 3)", when_macro)), "3");
+    assert_eq!(run(&format!("{} (my-when false 1 2 3)", when_macro)), "nil");
+    // quasiquote with unquote and unquote-splicing
+    assert_eq!(run("`(1 ~(+ 1 1) ~@(list 3 4) 5)"), "(1 2 3 4 5)");
+    assert_eq!(run("(def x 10) `(a ~x b)"), "(a 10 b)");
+}
+
+#[test]
+fn threading_macros() {
+    // (-> 5 (- 1) (* 2)) => (* (- 5 1) 2) => 8
+    assert_eq!(run("(-> 5 (- 1) (* 2))"), "8");
+    // (->> (list 1 2 3) (map inc)) => (map inc (list 1 2 3)) => (2 3 4)
+    assert_eq!(run("(->> (list 1 2 3) (map inc))"), "(2 3 4)");
 }
 
 #[test]

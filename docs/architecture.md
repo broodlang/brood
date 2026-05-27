@@ -86,7 +86,8 @@ the last form of a body, a chosen `if`/`cond` branch, the call in a tail call â€
 the evaluator reassigns its `expr`/`env` locals and loops instead of recursing.
 The upshot: deeply recursive mylisp code (the natural way to write loops in a
 Lisp) does **not** grow the Rust call stack. The test suite proves this by
-summing to 1,000,000 via tail recursion.
+summing to 100,000 via tail recursion (kept at 100k rather than millions because
+arithmetic is now defined in mylisp itself, and so is slower than a native loop).
 
 Dispatch order for a list form `(head ...)`:
 

@@ -71,6 +71,9 @@ pub enum Value {
     Vector(Rc<Vec<Value>>),
     /// A closure: code plus the lexical environment captured at definition.
     Fn(Rc<Closure>),
+    /// A macro: like a closure, but invoked on *unevaluated* argument forms at
+    /// expansion time; its result is then evaluated in place. Shares [`Closure`].
+    Macro(Rc<Closure>),
     /// A builtin implemented in Rust.
     Native(Rc<NativeFn>),
 }
@@ -149,8 +152,9 @@ impl PartialEq for Value {
             (Keyword(a), Keyword(b)) => a == b,
             (Pair(a), Pair(b)) => a.0 == b.0 && a.1 == b.1,
             (Vector(a), Vector(b)) => a == b,
-            // Functions compare by identity.
+            // Functions and macros compare by identity.
             (Fn(a), Fn(b)) => Rc::ptr_eq(a, b),
+            (Macro(a), Macro(b)) => Rc::ptr_eq(a, b),
             (Native(a), Native(b)) => Rc::ptr_eq(a, b),
             _ => false,
         }

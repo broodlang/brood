@@ -58,11 +58,12 @@ impl Parser {
         c
     }
 
-    /// Skip whitespace and `;` line comments.
+    /// Skip whitespace and `;` line comments. Commas count as whitespace
+    /// (Clojure-style), which is why `~` is used for unquote rather than `,`.
     fn skip_trivia(&mut self) {
         loop {
             match self.peek() {
-                Some(c) if c.is_whitespace() => {
+                Some(c) if c.is_whitespace() || c == ',' => {
                     self.pos += 1;
                 }
                 Some(';') => {
@@ -90,6 +91,22 @@ impl Parser {
                 self.pos += 1;
                 let form = self.read_form()?;
                 Ok(value::list(vec![value::sym("quote"), form]))
+            }
+            '`' => {
+                self.pos += 1;
+                let form = self.read_form()?;
+                Ok(value::list(vec![value::sym("quasiquote"), form]))
+            }
+            '~' => {
+                self.pos += 1;
+                if self.peek() == Some('@') {
+                    self.pos += 1;
+                    let form = self.read_form()?;
+                    Ok(value::list(vec![value::sym("unquote-splicing"), form]))
+                } else {
+                    let form = self.read_form()?;
+                    Ok(value::list(vec![value::sym("unquote"), form]))
+                }
             }
             '"' => self.read_string(),
             _ => self.read_atom(),
@@ -167,7 +184,8 @@ impl Parser {
 }
 
 fn is_delimiter(c: char) -> bool {
-    c.is_whitespace() || matches!(c, '(' | ')' | '[' | ']' | '{' | '}' | '"' | ';' | '\'')
+    c.is_whitespace()
+        || matches!(c, '(' | ')' | '[' | ']' | '{' | '}' | '"' | ';' | '\'' | '`' | '~' | ',')
 }
 
 /// Decide what an atom token means: keyword, number, special literal, or symbol.

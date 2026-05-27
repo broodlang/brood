@@ -112,11 +112,73 @@ policy lives in the language.
 
 ---
 
+## ADR-007 — mylisp is a Lisp-1
+
+**Status:** accepted.
+
+**Decision.** A single namespace shared by functions and variables (like
+Scheme/Clojure), not the separate function/value namespaces of Common Lisp or
+Emacs Lisp.
+
+**Why.** The operator position of a combination is resolved with the same lookup
+as any variable, so functions are ordinary first-class values. This is what lets
+higher-order code read naturally (`(map f xs)`, `(reduce %add 0 xs)`) and is a
+prerequisite for ADR-008 — defining `+` and friends as plain `def`s only works
+because a function is just a value in the one namespace.
+
+**Trade-off accepted.** A local binding can shadow a global function of the same
+name. That's the well-understood Lisp-1 cost and matches the Clojure-leaning
+aesthetic already chosen.
+
+---
+
+## ADR-008 — Rust is a primitive kernel; the language is written in mylisp
+
+**Status:** accepted. Supersedes the original "builtins live in Rust" approach.
+
+**Context.** The core principle (ADR-006) is to write as much of the system in
+mylisp as possible. Initially the math/list functions (`+`, `-`, `map`, `reduce`,
+…) were Rust loops.
+
+**Decision.** Reduce the Rust surface to an **irreducible primitive kernel** and
+define every user-facing function in `std/prelude.lisp` on top of it. The kernel
+is the 2-argument numeric ops (`%add`/`%sub`/`%mul`/`%div`/`%lt`/`%eq`, plus
+`mod`/`rem`), pair/vector constructors and accessors, type-tag predicates,
+value↔text and I/O, and the self-hosting hooks (`eval`/`read-string`/`load`/`apply`).
+`+ - * / < > = map filter reduce list …` are now mylisp `def`s. (See spec §9.)
+
+**Why.** Uniformity (`+` is defined exactly like a user function), and maximal
+runtime editability — the whole arithmetic/sequence library can be redefined
+live. It also exercises the language hard, surfacing gaps early.
+
+**Trade-off accepted.** mylisp-defined arithmetic is materially slower than a
+native loop (the tail-recursion test went from ~5s to ~50s at 1,000,000
+iterations; we right-sized it to 100,000). This is acceptable for now and
+reversible: a future compiler/specialiser, or selectively re-promoting hot ops to
+Rust, can recover the speed without changing the surface language.
+
+---
+
+## ADR-009 — Clojure-style quasiquote; commas are whitespace
+
+**Status:** accepted. Resolves the previously-deferred quasiquote question.
+
+**Decision.** Quasiquote uses `` ` `` (quasiquote), `~` (unquote), and `~@`
+(unquote-splicing). The comma `,` is treated as whitespace.
+
+**Why.** Consistency with the rest of the Clojure-leaning surface (vectors,
+truthiness, `def`/`defn`, flat `cond`). Choosing `~` for unquote frees `,` to be
+insignificant whitespace, which is a small but real ergonomic win. Macros are
+unhygienic with `gensym` for hygiene-by-convention (CL/elisp style); hygienic
+macros remain possible future work.
+
+---
+
 ## Deferred / open questions
 
-- **Quasiquote syntax:** traditional `` ` `` `,` `,@` (elisp/CL) vs Clojure
-  `` ` `` `~` `~@`. Leaning traditional. Decide when macros land.
-- **Macro hygiene:** v0.1 will likely start with unhygienic `defmacro` +
-  `gensym` (CL/elisp style); hygienic macros are possible future work.
+- **Macro hygiene:** currently unhygienic `defmacro` + `gensym`; hygienic macros
+  (e.g. `syntax-rules`) are possible future work.
+- **Nested quasiquote:** not level-tracked in v0.1 (see spec §spec note); fine
+  for ordinary macros, revisit if needed.
 - **`car`/`cdr` vs `first`/`rest`:** both provided; `first`/`rest` are the
   documented default.

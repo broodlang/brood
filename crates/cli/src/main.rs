@@ -3,23 +3,40 @@
 //! - With no arguments it starts a REPL.
 //! - With file arguments it loads and runs each file in order.
 //!
-//! The REPL is intentionally dependency-free for v0.1 (just line-buffered
-//! stdin). A richer line editor (history, completion) is on the roadmap.
+//! Interactively (a real terminal) the REPL uses `rustyline` for line editing:
+//! arrow keys to move within a line, up/down to walk history, the usual
+//! Emacs-style bindings (Ctrl-A/E/K/R, ...), and persistent history. When stdin
+//! is not a terminal (piped input, scripts) it falls back to a plain
+//! line-by-line reader so non-interactive use stays clean.
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
+use std::path::PathBuf;
 
 use mylisp::{printer, Interp};
+use rustyline::error::ReadlineError;
+use rustyline::DefaultEditor;
 
 fn main() {
     let interp = Interp::new();
     let files: Vec<String> = std::env::args().skip(1).collect();
 
-    if files.is_empty() {
-        repl(&interp);
+    if !files.is_empty() {
+        run_files(&interp, &files);
         return;
     }
 
-    for path in &files {
+    if io::stdin().is_terminal() {
+        if let Err(e) = repl_interactive(&interp) {
+            eprintln!("repl error: {}", e);
+            std::process::exit(1);
+        }
+    } else {
+        repl_plain(&interp);
+    }
+}
+
+fn run_files(interp: &Interp, files: &[String]) {
+    for path in files {
         match std::fs::read_to_string(path) {
             Ok(src) => {
                 if let Err(e) = interp.eval_str(&src) {
@@ -35,23 +52,72 @@ fn main() {
     }
 }
 
-fn repl(interp: &Interp) {
-    println!("mylisp v0.1 — type an expression, Ctrl-D to exit");
+/// Interactive REPL with full line editing and history (terminal only).
+fn repl_interactive(interp: &Interp) -> rustyline::Result<()> {
+    println!("mylisp v0.1 — arrow keys to edit, up/down for history, Ctrl-D to exit");
+    let mut rl = DefaultEditor::new()?;
+    let history = history_path();
+    if let Some(path) = &history {
+        let _ = rl.load_history(path);
+    }
+
+    'repl: loop {
+        // Accumulate input lines until the form is delimiter-balanced, so
+        // multi-line forms work while each physical line stays editable.
+        let mut buffer = String::new();
+        let mut prompt = "mylisp> ";
+        loop {
+            match rl.readline(prompt) {
+                Ok(line) => {
+                    buffer.push_str(&line);
+                    buffer.push('\n');
+                    if is_balanced(&buffer) {
+                        break;
+                    }
+                    prompt = "  ...   ";
+                }
+                Err(ReadlineError::Interrupted) => {
+                    // Ctrl-C: abandon the current (possibly partial) input.
+                    continue 'repl;
+                }
+                Err(ReadlineError::Eof) => {
+                    // Ctrl-D: save history and exit.
+                    if let Some(path) = &history {
+                        let _ = rl.save_history(path);
+                    }
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        let src = buffer.trim();
+        if src.is_empty() {
+            continue;
+        }
+        let _ = rl.add_history_entry(src);
+
+        match interp.eval_str(&buffer) {
+            Ok(value) => println!("{}", printer::print(&value)),
+            Err(e) => eprintln!("{}", e),
+        }
+
+        if let Some(path) = &history {
+            let _ = rl.save_history(path);
+        }
+    }
+}
+
+/// Plain reader for non-terminal stdin (pipes, scripts). No prompts, no editing.
+fn repl_plain(interp: &Interp) {
     let stdin = io::stdin();
     let mut handle = stdin.lock();
     let mut pending = String::new();
 
     loop {
-        let prompt = if pending.is_empty() { "mylisp> " } else { "  ...   " };
-        print!("{}", prompt);
-        io::stdout().flush().ok();
-
         let mut line = String::new();
         match handle.read_line(&mut line) {
-            Ok(0) => {
-                println!();
-                break; // EOF (Ctrl-D)
-            }
+            Ok(0) => break, // EOF
             Ok(_) => {}
             Err(e) => {
                 eprintln!("input error: {}", e);
@@ -60,7 +126,6 @@ fn repl(interp: &Interp) {
         }
 
         pending.push_str(&line);
-        // Keep reading lines until the form is delimiter-balanced.
         if !is_balanced(&pending) {
             continue;
         }
@@ -71,10 +136,21 @@ fn repl(interp: &Interp) {
         }
 
         match interp.eval_str(&src) {
-            Ok(value) => println!("{}", printer::print(&value)),
+            Ok(value) => {
+                println!("{}", printer::print(&value));
+                io::stdout().flush().ok();
+            }
             Err(e) => eprintln!("{}", e),
         }
     }
+}
+
+/// Where to persist REPL history (`$HOME/.mylisp_history`), if `$HOME` is set.
+fn history_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let mut path = PathBuf::from(home);
+    path.push(".mylisp_history");
+    Some(path)
 }
 
 /// Returns false while there are unclosed `()[]{}` or an open string literal, so

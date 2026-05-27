@@ -12,6 +12,29 @@ written in. Today the repo is the **language core**; the editor, display
 protocol, and server come later. Read `docs/` before making non-trivial changes
 — especially `docs/architecture.md`, `docs/roadmap.md`, and `docs/decisions.md`.
 
+## Core principle: write the language in the language
+
+**As much of the system as possible must be written in mylisp itself, not in
+Rust.** This is the most important rule in this repo — it is the entire reason
+the project exists (a self-editing editor is only possible if its behaviour
+lives in code you can redefine at runtime).
+
+Concretely:
+- Rust provides **mechanism**; mylisp provides **policy**. Use Rust only for
+  what genuinely needs it: primitives the language can't bootstrap (low-level
+  I/O, the rope/text engine, performance-critical kernels) and the core
+  evaluator itself.
+- Everything else belongs in `std/` (mylisp source), not in `builtins.rs`. When
+  you reach for a new Rust builtin, first ask: *can this be written in mylisp on
+  top of existing primitives?* If yes, do that instead.
+- This applies to upcoming pieces too. The **CLI/REPL, the editor commands,
+  keymaps, and UI should ultimately be mylisp**, with Rust only hosting the
+  thinnest necessary substrate. (The REPL is Rust today as a bootstrap; moving
+  it into mylisp is a goal — see `docs/roadmap.md`.)
+- A Rust builtin is an admission that the language can't yet express something.
+  Treat each one as a candidate to later replace with mylisp once the language
+  is capable enough.
+
 ## Layout
 
 ```
@@ -47,15 +70,15 @@ cargo test -p mylisp --test basic # just the language tests
   a special form that has a body or branches, evaluate all-but-last for effect
   and hand the *last* form back to the loop (`expr = …; continue 'tail;`) — see
   the `tail_of`/`tail_of_vec` helpers. Don't turn tail positions into plain
-  recursion; the test `tail_calls_do_not_overflow` (sum to 1,000,000) guards
+  recursion; the test `tail_calls_do_not_overflow` (sum to 100,000) guards
   this.
 - **All heap construction goes through `value.rs` helpers** (`cons`, `list`,
   `sym`, `str_val`, …). This keeps the planned `Rc` → `gc-arena` migration
   contained (ADR-002). Don't scatter `Rc::new(...)` of `Value`s elsewhere.
-- **Prefer mylisp over Rust.** If something can live in `std/prelude.lisp`
-  instead of `builtins.rs`, put it there — that's what stays editable at runtime
-  (ADR-006). Add a Rust builtin only when it needs Rust (I/O, primitives,
-  performance).
+- **Prefer mylisp over Rust** — see the "write the language in the language"
+  principle above (ADR-006). If something can live in `std/` instead of
+  `builtins.rs`, put it there. Add a Rust builtin only when it genuinely needs
+  Rust.
 - **Symbols are interned `u32`s.** Compare with `==`; get the spelling via
   `value::symbol_name`.
 - **Truthiness:** only `nil` and `false` are falsy (`eval::truthy`).

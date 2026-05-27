@@ -160,6 +160,26 @@ pub fn eval(expr: Value, env: Rc<Env>) -> LispResult {
                     )));
                 }
                 "fn" | "lambda" => return make_closure(None, &rest, &env),
+                "quasiquote" => {
+                    let args = value::list_to_vec(&rest)?;
+                    let template = args.into_iter().next().unwrap_or(Value::Nil);
+                    return crate::macros::quasiquote(&template, &env);
+                }
+                "defmacro" => {
+                    // (defmacro name [params] body...) — same shape as fn, but
+                    // the resulting closure is tagged as a macro.
+                    let parts = value::list_to_vec(&rest)?;
+                    let name = as_symbol(
+                        parts.first().ok_or_else(|| LispError::runtime("defmacro: missing name"))?,
+                    )?;
+                    let fn_form = value::list(parts[1..].to_vec());
+                    let macro_val = match make_closure(Some(name), &fn_form, &env)? {
+                        Value::Fn(cl) => Value::Macro(cl),
+                        other => other,
+                    };
+                    Env::root(&env).define(name, macro_val);
+                    return Ok(Value::Sym(name));
+                }
                 "let" | "let*" => {
                     let args = value::list_to_vec(&rest)?;
                     let binds = as_binding_vec(
@@ -229,6 +249,18 @@ pub fn eval(expr: Value, env: Rc<Env>) -> LispResult {
                     return Ok(Value::Nil);
                 }
                 _ => {} // not a special form: fall through to application
+            }
+        }
+
+        // --- macro expansion ---
+        // If the head symbol names a macro, expand it (on the *unevaluated* arg
+        // forms) and loop on the result — so the expansion is itself eligible
+        // for tail-call treatment and further macro expansion.
+        if let Value::Sym(s) = &head {
+            if let Some(Value::Macro(m)) = env.get(*s) {
+                let arg_forms = value::list_to_vec(&rest)?;
+                expr = apply_closure(&m, &arg_forms)?;
+                continue 'tail;
             }
         }
 

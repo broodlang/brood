@@ -67,6 +67,14 @@ fn write_value(out: &mut String, v: &Value, readable: bool) {
             }
             out.push('>');
         }
+        Value::Macro(c) => {
+            out.push_str("#<macro");
+            if let Some(name) = c.name {
+                out.push(' ');
+                out.push_str(&value::symbol_name(name));
+            }
+            out.push('>');
+        }
         Value::Native(nf) => {
             out.push_str("#<native ");
             out.push_str(&nf.name);

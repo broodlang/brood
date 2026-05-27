@@ -56,3 +56,64 @@ the intended flat Clojure-style pairs. Switched the implementation to flat
 **Status.** v0.1 = the ✅ slice of M1 in [roadmap.md](roadmap.md). Next up to
 finish M1: macros + quasiquote, dynamic variables, in-language error handling,
 maps, and the GC migration.
+
+### Follow-ups (same day)
+
+- **`bin/cli`** launcher script added (builds + runs the CLI from any directory).
+- **REPL line editing.** Added `rustyline` (first external dependency, sanctioned
+  by ADR-005) so the interactive REPL has arrow-key editing, history
+  (`~/.mylisp_history`), and Emacs-style bindings. Multi-line forms are handled
+  by accumulating lines until delimiters balance. Non-terminal stdin (pipes,
+  scripts) falls back to a plain reader that prints results only.
+- **Principle reinforced by the user:** *as much of the language/system as
+  possible must be written in mylisp itself* (Rust = mechanism, mylisp =
+  policy), and the CLI/REPL should eventually be self-hosted in mylisp. Captured
+  prominently in `CLAUDE.md` and `docs/roadmap.md` (extends ADR-006). The
+  current Rust REPL is an explicit bootstrap, not the end state.
+
+### Primitive-kernel refactor + spec (same day)
+
+- **Shrank the Rust builtins to a primitive kernel** and moved the user-facing
+  functions into `std/prelude.lisp`: `+ - * /` (variadic, over 2-arg `%add`…),
+  `< <= > >= = not=` (over `%lt`/`%eq`), `not number? list? car cdr list map
+  filter reduce fold reverse append count nth …` are now ordinary mylisp `def`s.
+  Rust keeps only `%`-numeric ops, `cons/first/rest/empty?`, vector/string
+  primitives, type-tag predicates, I/O, and `eval/read-string/load/apply`.
+  Recorded as ADR-008.
+- **Cost & adjustment:** mylisp arithmetic is ~10× slower than the old native
+  loop. The tail-recursion test ran ~50s at 1,000,000 iterations, so it was
+  right-sized to **100,000** (still proves O(1) stack; suite back to ~5.5s).
+  Tradeoff noted as reversible (future specialiser / re-promotion of hot ops).
+- **Answered two design questions from the user and wrote them down:**
+  - mylisp is a **Lisp-1** (single namespace) — ADR-007. This is what makes the
+    refactor above possible (`+` is just a value).
+  - Added a **formal spec**, `docs/spec.md` (EBNF lexical/reader grammar, data
+    model, evaluation + tail-position rules, scoping, special forms, the
+    kernel/derived split, errors, and what's deliberately unspecified).
+- Removed a now-unused `truthy` import; build is warning-clean. Tests: 16/16
+  green.
+
+### Macros + `defn` (same day)
+
+- User asked for function definitions next, and chose the principled route:
+  build macros, then define `defn` in mylisp (rather than a quick Rust special
+  form).
+- **Added the macro system:** a `Value::Macro`, the `defmacro` and `quasiquote`
+  special forms, macro expansion wired into the evaluator's `'tail` loop
+  (macros resolve after special forms, before application, and expansions are
+  re-looped so they get TCO + further expansion), the `macros.rs` module
+  (quasiquote expansion, `macroexpand`/`macroexpand-1`), and `gensym`.
+- **Quasiquote syntax decided (ADR-009):** Clojure-style `` ` `` / `~` / `~@`,
+  and `,` is now whitespace. This matched the preview the user approved and the
+  rest of the Clojure-leaning surface. Reader updated accordingly.
+- **`defn` is now a macro in `std/prelude.lisp`**, and the whole prelude was
+  rewritten to define its functions with `defn` (dogfooding). Also added `->`
+  and `->>` threading macros, whose bodies compute the expansion with `reduce`
+  at expansion time — a nice demonstration that macros are just mylisp.
+- Tests: added `defn`, user-macro/quasiquote, and threading cases. 19/19 green
+  (~6.8s). REPL spot-checks: recursive `fib`, a custom `unless2` macro, and
+  `->` all behave.
+- Docs updated across the board: `spec.md` (§3 reader grammar, §7.2/7.3
+  quasiquote + macros, §9 kernel list, §11), `language.md` (Macros section +
+  builtins), `roadmap.md` (macros/quasiquote ticked), `decisions.md` (ADR-009),
+  `README.md`.
