@@ -118,10 +118,30 @@ This is the largest *core* undertaking in the project. Two consequences:
 
 ## Phasing
 
-1. `spawn`/`send`/`receive`/`self` with **one** scheduler, cooperative, stackful
-   coroutines — proves the API and the suspend/resume mechanism.
-2. **N schedulers + work-stealing** of ready processes — uses all cores
-   (pinned processes, copy-on-send messages).
-3. **`Send` per-process heaps** (with the GC migration) — enables migrating
-   running processes; removes the pinning limitation.
-4. Later, if needed: preemption, then supervision/links.
+1. ✅ **`spawn`/`send`/`receive`/`self` + message passing** — implemented in
+   `process.rs` (step 4a). Each process is its own **OS thread** with its own
+   `Heap` (real parallelism, real isolation); messages cross as a `Send`
+   `Message` (deep copy) rebuilt in the receiver's heap; a global registry maps
+   pid → mailbox. The mailbox is registered in the parent before the thread
+   starts (so a `send` right after `spawn` can't race).
+2. ⬜ **Green M:N + work-stealing** — replace OS-thread-per-process with
+   lightweight green processes on a small worker pool (default **2**), via
+   coroutine suspension at `receive`. This is what makes them cheap (millions)
+   and gives the core cap.
+3. ⬜ **`Send` per-process heaps** already hold (step 2/3); migration of running
+   processes comes with the pool.
+4. ⬜ Later: preemption, supervision/links.
+
+### Limitations of step 4a (to lift later)
+
+- **OS thread per process** — real but heavyweight; not yet green/cheap, no core
+  cap. (→ phase 2.)
+- **`spawn` ships a self-contained closure.** Its code (which is data) is copied
+  to the child, which has only the prelude + builtins + the closure's params —
+  **not** other user-defined globals. This is the missing **shared code** story
+  (Erlang shares code, isolates data); until it lands, a spawned function may
+  only reference the prelude/builtins and its arguments.
+- **The prelude is reloaded per spawn** (a fresh `Interp`). Fine for tens of
+  processes; shared code fixes both this and the point above.
+- **Messages are data only** (no functions); `receive` is FIFO (no selective
+  receive / timeouts yet).

@@ -82,4 +82,11 @@
   (defn sum-to (n acc) (if (= n 0) acc (sum-to (- n 1) (+ acc n))))
   (assert= (sum-to 100000 0) 5000050000))
 
+(deftest processes
+  ;; spawn a worker, send it a number, get back double — across OS threads.
+  (defn echo-double (parent) (send parent (* (receive) 2)))
+  (let (w (spawn echo-double (self)))
+    (send w 21)
+    (assert= (receive) 42)))
+
 (run-tests)

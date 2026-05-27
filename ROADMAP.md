@@ -71,8 +71,9 @@ The native kernel is **39 primitives** — see [`docs/primitives.md`](docs/primi
 - ⬜ **Source locations in errors** — the reader currently drops spans; attaching
   them gives line/column in messages (and later, stack traces). **[kernel]**
 - ✅ **Native test library** — `std/test.lisp` (`deftest` / `is` / `assert=` /
-  `run-tests`, written in mylisp). `tests/suite.lisp` uses it (51 assertions, 13
-  tests); run via `./bin/cli std/test.lisp tests/suite.lisp` and by `cargo test`.
+  `run-tests`, written in mylisp). `tests/suite.lisp` uses it (52 assertions, 14
+  tests, incl. concurrency); run via `./bin/cli std/test.lisp tests/suite.lisp`
+  and by `cargo test`.
   Failures are reported and exit non-zero. **[mylisp]**
 
 ### Out of scope for Stage 1 (deferred, additive later)
@@ -96,10 +97,15 @@ Strategy: start simple and let the language keep adopting features in parallel.
 Language gaps above are mostly **[mylisp]**, so they don't deepen the evaluator
 and don't conflict with the concurrency work. Concurrency lands in phases:
 
-- ⬜ `spawn` / `send` / `receive` / `self` — one scheduler, cooperative (stackful coroutines)
-- ⬜ N schedulers + work-stealing — uses all cores (pinned processes, copy-on-send messages)
-- ⬜ `Send` per-process heaps via the **GC migration** (shared with Tier 3) → migrating processes
-- ⬜ later, if needed: reduction-counted preemption, then supervision / links
+- ✅ `spawn` / `send` / `receive` / `self` + message passing (`process.rs`) — each
+  process is an OS thread with its own heap; messages are copied between heaps
+  (step 4a). Real parallelism + isolation.
+- ✅ `Send` per-process heaps (done in step 2/3); global symbol interner
+- ⬜ Green M:N on a small worker pool (default 2) via coroutine suspension — makes
+  processes cheap (millions) and gives the core cap
+- ⬜ **Shared code** (Erlang-style: share defs, isolate data) so spawned processes
+  see all user functions and spawn is cheap (no per-process prelude reload)
+- ⬜ later: reduction-counted preemption, then supervision / links
 
 The Tier-3 **tracing GC** is shared with this track: `Send` per-process heaps are
 what unlock full work-stealing, so concurrency pulls the GC work earlier.

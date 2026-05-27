@@ -20,6 +20,7 @@ pub mod eval;
 pub mod heap;
 pub mod macros;
 pub mod printer;
+pub mod process;
 pub mod reader;
 pub mod value;
 

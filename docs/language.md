@@ -160,6 +160,33 @@ zero) it binds the error's message string. A `try` with no `catch` is just a
 `do`. Under the hood `throw` and `%try` are primitives and `try`/`catch`/`error`
 are written in mylisp (`std/prelude.lisp`) — see [primitives.md](primitives.md).
 
+## Processes (concurrency)
+
+Erlang-style green-ish processes: each runs independently with its **own heap**
+(share-nothing), and they communicate only by **message passing**.
+
+```clojure
+(defn worker (parent)
+  (let (n (receive))          ; block until a message arrives
+    (send parent (* n 2))))   ; reply to the sender
+
+(def w (spawn worker (self))) ; start a process; (self) is our own pid
+(send w 21)
+(receive)                     ;=> 42
+```
+
+| Form | Meaning |
+|---|---|
+| `(spawn f arg...)` | Start a new process running `f` with the (copied) args; returns its pid. |
+| `(send pid msg)` | Copy `msg` into `pid`'s mailbox (non-blocking; sending to a dead pid is a no-op). |
+| `(receive)` | Take the next message from your own mailbox, blocking until one arrives. |
+| `(self)` | Your own pid. |
+
+Messages are **copied** between processes (data only — you can't send a
+function). Today each process is backed by an OS thread, and a spawned function
+sees only the prelude/builtins plus its arguments (shared user code is a planned
+follow-up). See [concurrency.md](concurrency.md) for the model and limitations.
+
 ## Builtins
 
 > **Where these live:** only a small primitive kernel is implemented in Rust

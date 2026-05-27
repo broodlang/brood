@@ -71,6 +71,11 @@ See [`docs/language.md`](docs/language.md) for the full reference.
 
 ## What's next
 
+Concurrency has begun: Erlang-style **processes** (`spawn`/`send`/`receive`/`self`)
+run share-nothing on real threads and talk by message passing (see
+[`examples/processes.lisp`](examples/processes.lisp)); making them lightweight
+green threads on a worker pool is in progress.
+
 Dynamic variables, in-language error handling, maps, and a tracing GC complete
 the language. Then: a rope-backed **editor data model**, a
 serialisable **display protocol** with a fast native local frontend, a

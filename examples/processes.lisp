@@ -1,0 +1,37 @@
+;; Concurrency demo — green-ish processes on real OS threads.
+;;   ./bin/cli examples/processes.lisp
+;;
+;; Each process is share-nothing (its own heap); they talk only by message
+;; passing. spawn/send/receive/self are the whole API.
+
+;; A worker: receive a number, reply with its square to `parent`.
+(defn square-worker (parent)
+  (let (n (receive))
+    (send parent (* n n))))
+
+(def me (self))
+(println "main pid:" me)
+
+;; Fan out: spawn three workers, all reporting back to us.
+(def w1 (spawn square-worker me))
+(def w2 (spawn square-worker me))
+(def w3 (spawn square-worker me))
+
+;; Hand each one a number.
+(send w1 3)
+(send w2 4)
+(send w3 5)
+
+;; Collect the three replies (9, 16, 25 — order depends on who finishes first).
+(println "results:" (list (receive) (receive) (receive)))
+
+;; A two-step pipeline: inc then double, across two processes.
+(defn inc-worker (next) (send next (+ (receive) 1)))
+(defn double-worker (parent) (send parent (* (receive) 2)))
+
+(def stage2 (spawn double-worker me))
+(def stage1 (spawn inc-worker stage2))
+(send stage1 20)                       ;; 20 -> +1 -> 21 -> *2 -> 42
+(println "pipeline 20 -> inc -> double =" (receive))
+
+(println "--- done ---")

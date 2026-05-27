@@ -74,6 +74,12 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // errors / control
     def(heap, "throw", throw);
     def(heap, "%try", try_catch);
+
+    // processes (concurrency)
+    def(heap, "spawn", spawn);
+    def(heap, "send", send);
+    def(heap, "receive", receive);
+    def(heap, "self", self_pid);
 }
 
 fn arg(args: &[Value], i: usize) -> Value {
@@ -376,6 +382,29 @@ fn gensym(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 
 fn throw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Err(LispError::thrown(arg(args, 0), heap))
+}
+
+// ---------- processes ----------
+
+fn spawn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    if args.is_empty() {
+        return Err(LispError::arity("spawn: expected a function and optional arguments"));
+    }
+    let pid = crate::process::spawn(heap, args[0], &args[1..])?;
+    Ok(Value::Int(pid as i64))
+}
+
+fn send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    crate::process::send(heap, arg(args, 0), arg(args, 1))?;
+    Ok(Value::Nil)
+}
+
+fn receive(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    crate::process::receive(heap)
+}
+
+fn self_pid(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    Ok(Value::Int(crate::process::self_pid() as i64))
 }
 
 fn try_catch(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
