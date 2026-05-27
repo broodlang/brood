@@ -39,11 +39,22 @@ A `Ty` **is a set of values**, and the type operations *are* set operations:
 - `Ty::NEVER` = `⊥` (empty set, subtype of everything); `Ty::ANY` = `⊤` (all
   tags); the named unions `Ty::NUMBER` (`int∪float`), `Ty::LIST` (`nil∪pair`)
   match the `number?`/`list?` predicates.
-- **`dynamic()`** *(step 2, not built yet)* is the **gradual** type: it relates
-  to other types by a *consistency* relation, not subtyping, so typed and
-  untyped code mix without spurious errors. Anything whose type can't be pinned —
-  above all a **redefinable global under hot reload** — is `dynamic()`, **not**
-  `ANY`. This is the valve that lets typing coexist with live redefinition.
+- **`dynamic()`** *(step 2, not built yet)* is the **gradual** type — and it
+  lives *inside* the set-theoretic algebra, not bolted beside it. It's a bounded
+  type `dynamic(bound)` (pure `dynamic()` = `dynamic(ANY)`) whose `bound` is an
+  ordinary set-of-tags `Ty`, read as the interval between its optimistic (`⊥`)
+  and pessimistic (`⊤`) materialisations. Crucially, **consistent subtyping is
+  *derived from* ordinary set inclusion** — not a separate, non-set "consistency"
+  axiom (the classic Siek–Taha framing). For our flat lattice the derived rule is
+  simply: `dynamic(b)` is consistent-compatible with `t` iff `b ∩ t ≠ ⊥` (some
+  materialisation fits); static-vs-static stays plain `<:`. So `dynamic()`
+  composes with `∪`/`∩`/`¬` like any type and honours [contract point
+  #2](#compatibility-contract). Anything whose type can't be pinned — above all a
+  **redefinable global under hot reload** — is `dynamic()`, **not** `ANY` (`ANY`
+  relates by subtyping and *would* error when an `int` is wanted; `dynamic()`
+  defers). This is the valve that lets typing coexist with live redefinition.
+  (Castagna & Lanvin, ICFP 2017; Castagna et al., POPL 2019 — the reconciliation
+  Elixir uses.)
 - **Structured types** (function arrows `int -> int`, a vector's element type)
   are a later step; today `Ty` is flat (sets of tags only).
 
@@ -64,11 +75,16 @@ difference, semantic subtyping, `NEVER`/`ANY`/`NUMBER`/`LIST`, `of_value` bridge
 **Done:** the algebra exists and is unit-tested in isolation.
 
 ### Step 2 — `dynamic()`, the gradual type ⬜
-Add `dynamic()` to `Ty` (or a wrapping `GradualTy`) with the **consistency**
-relation distinct from subtyping. Define the rule "redefinable / free / global
-references are `dynamic()`." No checker yet — just the type and its relation.
-**Done when:** `dynamic()` is consistent with every type, and the
-"globals are `dynamic()`" rule is written down and tested.
+Represent the bounded gradual type `dynamic(bound: Ty)` (pure `dynamic()` =
+`dynamic(ANY)`), keeping it *inside* the lattice — extend `Ty`, or a thin
+`GradualTy` wrapping a `Ty` bound. **Derive** consistent subtyping from set
+operations on the bounds (`dynamic(b)` consistent-compatible with `t` iff
+`b ∩ t ≠ ⊥`), rather than adding a primitive consistency axiom. Define the rule
+"redefinable / free / global references are `dynamic()`." No checker yet — just
+the type and its derived relation.
+**Done when:** `dynamic()` is consistent with every type *via the derived rule*,
+it still composes with `∪`/`∩`/`¬`, and the "globals are `dynamic()`" rule is
+written down and tested.
 
 ### Step 3 — typed signatures on primitives ⬜
 Give each `NativeFn` a result `Ty` (and argument `Ty`s) beside its `Arity` — same

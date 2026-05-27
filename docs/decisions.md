@@ -762,10 +762,14 @@ TypeScript-style "pragmatic but unsound" route.
   operations are set operations; **subtyping is set inclusion** (semantic
   subtyping), never syntactic rules.
 - **Gradual via `dynamic()`** — the principled replacement for ADR-023's
-  "globals are `Any`." A redefinable global (hot reload) is `dynamic()`, which
-  relates to other types by *consistency*, not subtyping, so typed/untyped code
-  mixes without spurious errors. **This supersedes ADR-023's "globals are `Any`"
-  wording.**
+  "globals are `Any`." `dynamic()` is **integrated into the set-theoretic
+  algebra**, not a bolt-on: a bounded type `dynamic(bound)` (pure `dynamic()` =
+  `dynamic(ANY)`) whose **consistent subtyping is *derived from* ordinary set
+  inclusion** (Castagna & Lanvin, ICFP 2017; Castagna et al., POPL 2019 — the
+  reconciliation Elixir uses), *not* the classic Siek–Taha consistency relation
+  grafted alongside subtyping. A redefinable global (hot reload) is `dynamic()`,
+  so typed/untyped code mixes without spurious errors, and it still composes with
+  `∪`/`∩`/`¬`. **This supersedes ADR-023's "globals are `Any`" wording.**
 - Checking stays **advisory** (ADR-023): warns and optimises, never rejects a
   runnable program (bar provably-sound special-form structure errors).
 - Built in **small, independent steps** (the staircase in `types.md`), each

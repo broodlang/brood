@@ -69,6 +69,21 @@ shortcuts (`make help` lists them): `make build`, `make test`, `make suite`,
 environment metadata to `docs/benchmarks/<UTC-timestamp>.md`. `make -j$(nproc)`
 parallelism isn't relevant — it's a Cargo workspace, not a recursive make.
 
+## Working in this repo (the tree changes under you)
+
+**Multiple changes happening at once is normal here.** The user edits files in
+parallel — and sometimes renames or commits things mid-task — so the working tree
+can change between your reads, and files you didn't touch may differ from what you
+expect. Re-read before editing, and treat a moved/changed file as the new reality,
+not an error to undo.
+
+**Never run history- or state-altering git commands unless explicitly asked.**
+No `git reset`, `git stash`, `git checkout`/`switch` to another branch,
+`git restore`, `git rebase`, `git clean`, or force-push — any of these can silently
+discard the user's concurrent work. Commit and push only when asked, and commit
+the state as it is; don't "tidy" by reverting. If the tree looks inconsistent,
+surface it and ask — don't reset to "fix" it.
+
 ## Conventions & invariants (don't break these)
 
 - **Proper tail calls are load-bearing.** `eval` is a `'tail: loop`. When adding
