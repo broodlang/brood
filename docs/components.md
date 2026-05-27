@@ -7,6 +7,12 @@ independently" view; [architecture.md](architecture.md) is the "why it's shaped
 this way" view, and [language.md](language.md) / [primitives.md](primitives.md)
 are the language surface.
 
+**To scope a work session,** name a component by its file (e.g. "work on
+`reader.rs`") — each card's *work here independently* note is its brief.
+Restructuring work that spans a component is collected as numbered, self-contained
+items in the [Work backlog](#work-backlog-dispatchable) at the end; point Claude at
+one with e.g. *"do backlog item W2 from docs/components.md."*
+
 ## The layers
 
 ```
@@ -284,9 +290,61 @@ before working in any Rust component:
    snippets for `test`/`new`. This is an acknowledged bootstrap (roadmap:
    self-host the CLI in Brood); fine to leave until the language can express it.
 
-### Suggested order if we act on the above
+## Work backlog (dispatchable)
 
-1. Delete the dead builtins (trivial, removes warnings, no behaviour change).
-2. Extract `env.rs` from `heap.rs` (biggest clarity win; mechanical).
-3. Move `form_pos`/`current_file` out of `Heap` into a source/tooling module.
-4. (Optional) Split `builtins.rs` into a `builtins/` directory by domain.
+Each item is self-contained: hand Claude the item ID plus this file and it has
+everything it needs. Two pairs share a file — **coordinate or sequence them**:
+W2 and W3 both edit `heap.rs`; W1 is subsumed by W4 (both edit `builtins.rs`).
+
+### W1 — Delete dead primitive functions · `builtins.rs` · trivial, no behaviour change
+- **Goal:** remove dead code.
+- **Do:** delete `is_nil` `is_pair` `is_int` `is_float` `is_bool` `is_string`
+  `is_symbol` `is_keyword` `is_vector` `is_fn` and `println` from
+  `crates/lisp/src/builtins.rs`.
+- **Why:** defined but never registered or called — the tag predicates are Brood
+  over `type-of` and `println` is Brood over `print`; the Rust versions linger as
+  dead-code warnings.
+- **Verify:** `grep` shows no references; `cargo build` warns less; `cargo test` green.
+- **Risk:** none. Independent of W2/W3. **Folded into W4** — skip if doing W4.
+
+### W2 — Extract `env.rs` from `heap.rs` · medium, mechanical
+- **Goal:** give the environment chain its own module.
+- **Do:** move `EnvFrame` and the chain ops (`new_env`, `env_get`, `env_define`,
+  `env_set`, `env_root`, plus the `EnvId::GLOBAL` → `runtime.globals` routing) into
+  `crates/lisp/src/env.rs`. Frame *storage* stays in the heap slabs (`local.envs`,
+  `runtime.code.envs`); `env.rs` operates over the heap via accessors (add
+  `pub(crate)` ones as needed). Add `pub mod env;` in `lib.rs`; update call sites in
+  `eval.rs` and the builtins.
+- **Why:** `heap.rs` bundles ~6 concerns; the env chain was historically its own
+  module.
+- **Verify:** `cargo test` green, incl. `tail_calls_do_not_overflow`; behaviour
+  identical.
+- **Risk:** medium. **Shares `heap.rs` with W3** — do them together or in sequence.
+
+### W3 — Move source metadata out of `Heap` · low–medium
+- **Goal:** decouple editor-tooling state from the allocator.
+- **Do:** relocate `form_pos` / `current_file` and their methods (`set_form_pos`,
+  `form_pos`, `set_current_file`, `current_file`) out of the `Heap` struct — into a
+  small `source.rs` (a `SourceMeta` the reader/`load` carry) or onto the load path.
+  Update the `form-pos` / `current-file` builtins and `load` / the reader.
+- **Why:** read-time tooling state has no business living in the data heap.
+- **Verify:** `form-pos` / `current-file` work; the test framework's per-test
+  source-line capture works; `cargo test` green.
+- **Risk:** low–medium. **Shares `heap.rs` with W2.**
+
+### W4 — Split `builtins.rs` into `builtins/` by domain · medium, large but mechanical
+- **Goal:** one cohesive file per primitive domain.
+- **Do:** convert `crates/lisp/src/builtins.rs` into a `builtins/` directory:
+  `mod.rs` (the single `register` table + shared helpers `arg`/`two`/`expect_*`)
+  plus `numeric`, `collection` (pair/seq/vector/string), `text`
+  (`str`/`pr-str`/`print`/`stdout-tty?`/`type-of`/`name`), `host` (fs +
+  `getenv`/`run-process` + `now` + `mem-*`), `selfhost`
+  (`eval`/`read-string`/`eval-string`/`load`/`%builtin-module`/`apply`/`macroexpand*`/`gensym`),
+  `tooling` (`check`/`form-pos`/`current-file`), `control` (`throw`/`%try`/`%isolate`),
+  `concurrency` (`spawn`/`send`/`receive`/`self`/counters). Keep the full `register`
+  table in `mod.rs` so every primitive + arity stays visible in one place.
+  **Includes W1** — don't carry the dead fns over.
+- **Why:** a 10-domain monolith means unrelated edits collide.
+- **Verify:** the set of registered names + arities is unchanged (diff the
+  `register` calls before/after); `cargo test` green; `primitives.md` still accurate.
+- **Risk:** medium (large diff, no logic change). Independent of W2/W3 (different file).
