@@ -70,7 +70,8 @@ The native kernel is **39 primitives** — see [`docs/primitives.md`](docs/primi
   cycles, which matters for a long-running REPL/editor. **[kernel]** (sizable).
 - ⬜ **Source locations in errors** — the reader currently drops spans; attaching
   them gives line/column in messages (and later, stack traces). **[kernel]**
-- ⬜ **`assert` + a tiny test helper** in mylisp, so the stdlib can test itself. **[mylisp]**
+- ✅ **mylisp test suite** — `tests/suite.lisp` with a `check` harness (51
+  assertions), run by `./bin/cli tests/suite.lisp` and by `cargo test`. **[mylisp]**
 
 ### Out of scope for Stage 1 (deferred, additive later)
 

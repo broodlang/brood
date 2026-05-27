@@ -56,10 +56,10 @@ docs/                    architecture, language, roadmap, decisions, devlog
 
 ```bash
 cargo build                       # build the workspace
-cargo test                        # run all tests (crates/lisp/tests/basic.rs)
-cargo run -p cli                  # start the REPL
+cargo test                        # Rust tests + the mylisp suite (tests/suite.lisp)
+cargo run -p cli                  # start the REPL  (or: ./bin/cli)
 cargo run -p cli file.lisp        # run a program file
-cargo test -p mylisp --test basic # just the language tests
+./bin/cli tests/suite.lisp        # the in-language test suite (a `check` harness)
 ```
 
 `make -j$(nproc)` isn't used here — it's a Cargo workspace.
@@ -98,7 +98,8 @@ cargo test -p mylisp --test basic # just the language tests
 
 1. Implement it (special form in `eval.rs`, or builtin in `builtins.rs`, or
    prelude fn in `std/prelude.lisp`).
-2. Add end-to-end tests in `crates/lisp/tests/basic.rs`.
+2. Add tests — a `(check …)` line in `tests/suite.lisp` (in-language, fastest),
+   and/or a Rust case in `crates/lisp/tests/basic.rs`.
 3. Update `docs/language.md` (it documents the language *as implemented*).
 4. Tick it off in `docs/roadmap.md`; add a dated entry to `docs/devlog.md`.
 5. If it reflects a real design choice, record an ADR in `docs/decisions.md`.
