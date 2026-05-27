@@ -49,11 +49,14 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   [`types.md`](types.md). ✅ Step 0: first-class `Tag` + `(type-of x)`,
   self-identifying type errors, `Arity` on every builtin (one central gate).
   ✅ Step 1: the `Ty` set-theoretic lattice (`types.rs` — sets of tags;
-  union/intersect/negate; subtyping = set inclusion). ⬜ Step 2: `dynamic()`
-  (gradual; globals are `dynamic()`, not `Any`). ⬜ Step 3: typed primitive
-  signatures. ⬜ Step 4: advisory local inference over expanded forms (guard/
-  pattern narrowing). ⬜ Step 5+: structured types. Advisory throughout —
-  never gates, never inhibits the dynamic language; not the TypeScript route.
+  union/intersect/negate; subtyping = set inclusion). ✅ Step 2: `dynamic()` —
+  the gradual type as a bounded `GradualTy` *inside* the lattice, consistent
+  subtyping derived from set inclusion (globals are `dynamic()`, not `Any`).
+  ⬜ Step 3: typed primitive signatures. ⬜ Step 4: advisory local inference over
+  expanded forms (guard/pattern narrowing). ⬜ Step 5+: structured types.
+  Steps 0–2 are foundation (no checker consumes the lattice yet); the first
+  *behavioural* payoff is Step 4. Advisory throughout — never gates, never
+  inhibits the dynamic language; not the TypeScript route.
 - ⬜ **Maps** (`{ }` literals, `get`/`assoc`)
 - 🟡 **Memory reclamation.** `Send` arena handles replaced `Rc` (done). Step 1 of
   reclamation is **arena reset at top-level boundaries** (ADR-016): `eval_str` and
@@ -67,14 +70,15 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
 - ⬜ **Self-host the CLI/REPL in Brood** — once the language can express it, the
   read-eval-print loop should be Brood source on a thin Rust substrate, not
   Rust. (See the core principle in `CLAUDE.md`.)
-- ⬜ **Modules** — Emacs-flat `provide` / `require` + `*load-path*` over the shared
+- ✅ **Modules** — Emacs-flat `provide` / `require` + `*load-path*` over the shared
   global table; `foo--private` convention (ADR-019). Logic in Brood; the only new
-  Rust is `file-exists?` / `list-dir` / `cwd`. *Namespaces stay deferred — a later,
-  additive Brood macro layer if ever needed.*
-- ⬜ **Project model & test tool** — convention over configuration: `src/` is the
+  Rust is `file-exists?` / `dir?` / `list-dir` / `cwd` / `name` / `eval-string` /
+  `%builtin-module`. *Namespaces stay deferred — a later, additive Brood macro layer.*
+- ✅ **Project model & test tool** — convention over configuration: `src/` is the
   project source (auto on `*load-path*`), `tests/**/*_test.blsp` are the tests; a
   `project.blsp` manifest declares identity (name/version) and overrides paths only
-  when needed. `brood test` discovers + loads (register-only) + runs once (ADR-020).
+  when needed. `brood test` discovers + loads (register-only) + runs once; `brood
+  new <name>` scaffolds a project (`spit`/`make-dir`). ADR-020.
 
 > v0.1 is the ✅ slice above: enough to be a real, usable language. The ⬜ items
 > complete M1.

@@ -51,7 +51,7 @@ be guessed from Clojure; it has to be read.
 | String | `"hello\n"` | Escapes: `\n \t \r \e \0 \\ \"` (`\e` is ESC, for ANSI terminal control). |
 | Symbol | `foo`, `+`, `my-fn`, `empty?` | Names; interned. |
 | Keyword | `:ok`, `:else` | Self-evaluating named constants. |
-| List | `(1 2 3)`, `()` | Cons cells; `()` is `nil`. Quote to keep as data: `'(1 2 3)`. |
+| List | `(1 2 3)`, `()`, `(1 . 2)` | Cons cells; `()` is `nil`. Quote to keep as data: `'(1 2 3)`. A dotted tail `(a . b)` makes an improper list (round-trips with the printer). |
 | Vector | `[1 2 3]` | A data type with O(1) indexing. Evaluates its elements. |
 | Function | `#<fn name>`, `#<native +>` | Closures and builtins. |
 
@@ -65,6 +65,8 @@ Only `nil` and `false` are falsy. **Everything else is truthy**, including `0`,
 - `;` starts a line comment.
 - `'expr` is shorthand for `(quote expr)`.
 - Whitespace separates tokens; `[` `]` and `(` `)` delimit.
+- A lone `.` inside a list builds a dotted (improper) tail: `(1 2 . 3)`. A `.`
+  that begins an atom (`.5`, `.foo`) is not a separator.
 - `{ }` (maps) are reserved but not implemented yet — using them is a parse error.
 
 ## Special forms
@@ -323,12 +325,17 @@ run used. See [concurrency.md](concurrency.md) for the model and limitations.
   divides evenly; otherwise it returns a float). Any float argument makes the
   result a float.
 - `(- x)` negates; `(/ x)` is the reciprocal.
+- Integer arithmetic is overflow-checked: an operation that would overflow
+  (including `i64::MIN` cases like `(mod min -1)`) raises an error rather than
+  wrapping or panicking. `(/ min -1)` falls through to a float.
 
 ### Comparison & logic
 `=`  `not=`  `<`  `<=`  `>`  `>=`  `not`
 
 - `=` is structural and variadic (`(= 1 1 1)` → `true`). Numbers compare within
   their type (`(= 1 1.0)` is `false`); use `<`/`>` for cross-type numeric order.
+  Integers compare exactly (no precision loss past 2^53), and floats compare by
+  IEEE value — so `(= 0.0 -0.0)` is `true` and `(= nan nan)` is `false`.
 
 ### Lists & sequences
 `cons`  `first`  `rest`  `car`  `cdr`  `list`  `vector`  `append`  `reverse`

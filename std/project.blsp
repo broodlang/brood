@@ -62,6 +62,26 @@
           (list-dir dir))
     nil))
 
+;; Recursively collect every .blsp under `dir` (the project's source files).
+(defn project--collect-sources (dir)
+  (if (dir? dir)
+    (fold (fn (acc entry)
+            (let (p (path-join dir entry))
+              (cond
+                (dir? p)                   (append acc (project--collect-sources p))
+                (ends-with? entry ".blsp") (append acc (list p))
+                else                       acc)))
+          nil
+          (list-dir dir))
+    nil))
+
+;; Load every source file under the project's source paths, so tests and other
+;; code can use the project's definitions directly — no per-file `require`.
+(defn project-load-sources (root)
+  (fold (fn (_ dir) (fold (fn (_ f) (load f)) nil (project--collect-sources dir)))
+        nil
+        (project--abs-paths root *project-source-paths*)))
+
 ;; Load the manifest (if present) and put the project's source dirs on *load-path*
 ;; so its modules are require-able by name.
 (defn project-setup (root)
@@ -82,9 +102,108 @@
       (error "run-project-tests: not in a Brood project (no project.blsp found from " (cwd) ")"))
     (project-setup root)
     (require 'test)
+    (project-load-sources root)   ; the project's own src/, so tests use it directly
     (let (dirs  (project--abs-paths root *project-test-paths*)
           files (fold (fn (acc d) (append acc (project--collect-tests d))) nil dirs))
       (fold (fn (_ f) (load f)) nil files)   ; load each: registers its tests
       (apply run-tests opts))))
+
+;; --- user config (~/.config/brood/config.blsp) -------------------------------
+;; A user-level Brood file of tooling preferences — the sibling of project.blsp.
+;; It's auto-created with documented defaults on first tool use, then loaded by
+;; the `brood` subcommands. Rust mechanism: getenv (locate it) + run-process.
+(def *config-git-init* false)   ; brood new: run `git init` in the new project?
+
+;; The (config ...) form for the user config; sets only the keys it's given.
+(defn config (& opts)
+  (let (gi (plist-get opts :git-init))
+    (unless (nil? gi) (set! *config-git-init* gi)))
+  nil)
+
+(defn config--base-dir ()        ; $XDG_CONFIG_HOME, else ~/.config
+  (let (xdg (getenv "XDG_CONFIG_HOME"))
+    (if (nil? xdg) (path-join (getenv "HOME") ".config") xdg)))
+(defn config--dir  () (path-join (config--base-dir) "brood"))
+(defn config--path () (path-join (config--dir) "config.blsp"))
+
+(def *config-default-source*
+  (str ";; Brood user config — tooling preferences (the sibling of project.blsp).\n"
+       ";; Edit to taste; any `brood` command re-reads it.\n"
+       "(config\n"
+       "  :git-init false)   ; run `git init` in projects made by `brood new`\n"))
+
+;; Ensure the config exists (writing a documented default the first time), then
+;; load it. Called by the `brood` subcommands, so a tool use always leaves an
+;; editable config behind.
+(defn load-config ()
+  (let (p (config--path))
+    (unless (file-exists? p)
+      (make-dir (config--dir))
+      (spit p *config-default-source*)
+      (println (str "Created " p)))
+    (load p))
+  nil)
+
+;; --- scaffolding a new project (`brood new <name>`) --------------------------
+;; True if the 1-char string `ch` occurs in `s` (a short scan — Brood has no char
+;; index yet, and project names/paths are short).
+(defn str-contains? (s ch)
+  (cond
+    (= (string-length s) 0)  false
+    (= (substring s 0 1) ch) true
+    else                     (str-contains? (substring s 1 (string-length s)) ch)))
+
+;; A project name must be non-empty and free of path separators / spaces, so it
+;; names a single new folder in the current directory.
+(defn project--valid-name? (nm)
+  (and (> (string-length nm) 0)
+       (not (str-contains? nm "/"))
+       (not (str-contains? nm " "))))
+
+;; --- file templates (the starter skeleton) ---
+(defn project--manifest-template (nm)
+  (str ";; " nm " — a Brood project.\n"
+       "(project\n"
+       "  :name    \"" nm "\"\n"
+       "  :version \"0.1.0\")\n"))
+
+(defn project--main-template (nm)
+  (str ";; " nm " — main module. Loaded automatically by `brood test`.\n"
+       "(defn greeting () \"hello " nm "\")\n"
+       "\n"
+       "(defn main () (println (greeting)))\n"))
+
+(defn project--test-template (nm)
+  (str ";; Tests for " nm ". `brood test` loads src/ first, so use defs directly.\n"
+       "(require 'test)\n"
+       "\n"
+       "(describe \"" nm "\"\n"
+       "  (test \"greeting\" (assert= (greeting) \"hello " nm "\")))\n"))
+
+;; (new-project "foobar") — scaffold ./foobar with a runnable skeleton:
+;; project.blsp + src/main.blsp + tests/main_test.blsp, so `cd foobar && brood
+;; test` passes immediately. Errors on a bad name or an already-existing folder.
+(defn new-project (nm)
+  (unless (project--valid-name? nm)
+    (error "new: invalid project name '" nm "' (no '/' or spaces, and not empty)"))
+  (when (file-exists? nm)
+    (error "new: '" nm "' already exists"))
+  (let (src-dir   (path-join nm "src")
+        tests-dir (path-join nm "tests"))
+    (make-dir src-dir)
+    (make-dir tests-dir)
+    (spit (path-join nm "project.blsp")          (project--manifest-template nm))
+    (spit (path-join src-dir "main.blsp")        (project--main-template nm))
+    (spit (path-join tests-dir "main_test.blsp") (project--test-template nm))
+    (println (str "Created Brood project '" nm "'"))
+    (println (str "  " nm "/project.blsp"))
+    (println (str "  " nm "/src/main.blsp"))
+    (println (str "  " nm "/tests/main_test.blsp"))
+    (when *config-git-init*
+      (if (= 0 (run-process "git" (list "init" "-q" nm)))
+        (println "  initialized a git repository")
+        (println "  (git init failed)")))
+    (println (str "Next:  cd " nm " && brood test"))
+    nm))
 
 (provide 'project)

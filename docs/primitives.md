@@ -15,7 +15,7 @@ gate (`eval::call_native`), before the primitive runs — so a wrong-count call 
 a clean arity error (`type-of: expected 1 argument, got 0`) rather than a missing
 arg silently becoming `nil`.
 
-## Native primitive functions (50)
+## Native primitive functions (66)
 
 | Category | Primitive | Arity | Purpose |
 |---|---|---|---|
@@ -30,6 +30,7 @@ arg silently becoming `nil`.
 | | `vector-ref` | 2 | index |
 | | `vector-length` | 1 | length |
 | **String** | `string-length` | 1 | char count |
+| | `substring` | 3 | characters `[start, end)`, char-indexed |
 | **Type tags** (not expressible in-language) | `nil?` `pair?` `int?` `float?` `bool?` `string?` `symbol?` `keyword?` `vector?` `fn?` | 1 | tag test → bool |
 | | `type-of` | 1 | the runtime type tag as a keyword (`:int` `:string` …); the reflective primitive the predicates and in-language checks build on |
 | **Value ↔ text & I/O** | `str` | n | concatenate the *display* forms of args → string |
@@ -41,11 +42,22 @@ arg silently becoming `nil`.
 | | `mem-peak` | 0 | high-water mark of allocated bytes since process start |
 | **Self-hosting hooks** | `eval` | 1 | evaluate a form in the global env |
 | | `read-string` | 1 | parse one form from text |
+| | `eval-string` | 1 | read + evaluate every form in a string (string analogue of `load`) |
 | | `load` | 1 | read + evaluate a file |
-| | `require` | 1 | load an embedded std-library module by name (e.g. `'test`) |
+| | `%builtin-module` | 1 | source of a baked-in std module by name, or nil (used by Brood `require`) |
 | | `apply` | ≥2 | call a function with a spliced argument list |
+| **Symbols** | `name` | 1 | a symbol/keyword's spelling as a string (no leading `:`) |
+| **Filesystem** | `cwd` | 0 | current working directory |
+| | `file-exists?` `dir?` | 1 | path exists / is a directory → bool |
+| | `list-dir` | 1 | entry names directly under a directory (sorted) |
+| | `make-dir` | 1 | create a directory and parents (`mkdir -p`) |
+| | `spit` | 2 | write a string to a file (write-side of `load`) |
+| **System** | `getenv` | 1 | environment-variable value, or nil if unset |
+| | `run-process` | 2 | run an external program (`prog`, args list), inherit stdio → exit code |
 | **Macro support** | `macroexpand-1` `macroexpand` | 1 | expand a form (one step / fully) |
 | | `gensym` | 0–1 | a fresh, unique symbol (optional name prefix) |
+| **Source positions** (editor tooling) | `form-pos` | 1 | a form's `[line col]` source position vector, or nil |
+| | `current-file` | 0 | path of the file currently being loaded, or nil |
 | **Errors / control** | `throw` | 1 | raise a value as an error (non-local exit) |
 | | `%try` | 2 | call a thunk; on raise, call the handler with the caught value |
 | | `%isolate` | 1 | call a thunk against a private copy of the globals; roll back its `def`/`set!` afterward (used by `:isolated` tests) |
@@ -55,6 +67,7 @@ arg silently becoming `nil`.
 | | `self` | 0 | this process's pid |
 | | `spawn-count` | 0 | processes spawned since program start (= worker OS threads created) |
 | | `peak-threads` | 0 | high-water mark of spawned threads running concurrently (bounded by the CLI's `-j`) |
+| | `worker-threads` | 0 | size of the scheduler's worker-thread pool (≈ nproc; `-j` overrides) |
 
 **Why this set is irreducible:** every entry needs Rust — raw number ops, heap
 construct/inspect, type-tag tests, I/O, value→text conversion, the wall clock,

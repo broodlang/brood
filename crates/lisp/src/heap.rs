@@ -19,7 +19,7 @@
 //! No GC yet (the arenas only grow).
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::error::LispError;
 use crate::value::{
@@ -77,6 +77,9 @@ pub struct LocalCheckpoint {
     strings: usize,
     closures: usize,
     envs: usize,
+    // No `natives` field: a live runtime never allocates a native into its LOCAL
+    // heap (they're registered once during the prelude build, then frozen into
+    // PRELUDE). If that ever changes, add a field here and truncate it below.
 }
 
 /// Append-only code slabs for the shared RUNTIME region. `boxcar::Vec` gives
@@ -130,6 +133,18 @@ impl RuntimeCode {
             globals: RwLock::new(globals),
         }
     }
+
+    /// Read/write the global table, recovering from a poisoned lock instead of
+    /// propagating the panic. The values are `Copy` handles and writers only
+    /// `insert`/replace, so a writer that panicked left the map structurally
+    /// sound — recovering keeps one bad process from wedging every other one
+    /// that later looks up or defines a global.
+    fn globals_read(&self) -> RwLockReadGuard<'_, HashMap<Symbol, Value>> {
+        self.globals.read().unwrap_or_else(|e| e.into_inner())
+    }
+    fn globals_write(&self) -> RwLockWriteGuard<'_, HashMap<Symbol, Value>> {
+        self.globals.write().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 pub struct Heap {
@@ -140,6 +155,20 @@ pub struct Heap {
     /// (routing to `runtime.globals`); for the prelude *builder* it's a real
     /// local root frame (so the prelude can be evaluated, then frozen).
     global: EnvId,
+    /// Source position of LOCAL list forms, keyed by pair slab index, recorded
+    /// by the reader. Queried via `(form-pos …)` (e.g. by the test macros, which
+    /// look up a form's line *before* it expands). LOCAL-only and dropped on
+    /// reset, since it is read-time metadata for the source being loaded.
+    form_pos: HashMap<usize, crate::error::Pos>,
+    /// The file currently being `load`ed, exposed via `(current-file)`. Saved and
+    /// restored around each load so nested loads don't clobber the outer file.
+    current_file: Option<String>,
+}
+
+impl Default for Heap {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Heap {
@@ -151,6 +180,8 @@ impl Heap {
             prelude: Arc::default(),
             runtime: Arc::default(),
             global: EnvId::local(0),
+            form_pos: HashMap::new(),
+            current_file: None,
         }
     }
 
@@ -163,6 +194,8 @@ impl Heap {
             prelude,
             runtime,
             global: EnvId::local(0),
+            form_pos: HashMap::new(),
+            current_file: None,
         }
     }
 
@@ -261,6 +294,43 @@ impl Heap {
         self.local.strings.truncate(cp.strings);
         self.local.closures.truncate(cp.closures);
         self.local.envs.truncate(cp.envs);
+        // Drop position metadata for the pairs just reclaimed (indices reused).
+        if !self.form_pos.is_empty() {
+            self.form_pos.retain(|&i, _| i < cp.pairs);
+        }
+    }
+
+    // ----- source-position metadata (editor tooling; see docs/tooling.md) -----
+
+    /// Record the source position of a LOCAL list form (no-op for atoms and
+    /// forms in the shared regions). Called by the reader as it builds lists.
+    pub fn set_form_pos(&mut self, v: Value, pos: crate::error::Pos) {
+        if let Value::Pair(id) = v {
+            if id.region() == crate::value::LOCAL {
+                self.form_pos.insert(id.index(), pos);
+            }
+        }
+    }
+
+    /// The recorded source position of a form, if it is a LOCAL list with one.
+    pub fn form_pos(&self, v: Value) -> Option<crate::error::Pos> {
+        if let Value::Pair(id) = v {
+            if id.region() == crate::value::LOCAL {
+                return self.form_pos.get(&id.index()).copied();
+            }
+        }
+        None
+    }
+
+    /// Set the file currently being loaded, returning the previous value so the
+    /// caller can restore it (loads nest).
+    pub fn set_current_file(&mut self, file: Option<String>) -> Option<String> {
+        std::mem::replace(&mut self.current_file, file)
+    }
+
+    /// The file currently being loaded, exposed to Brood via `(current-file)`.
+    pub fn current_file(&self) -> Option<&str> {
+        self.current_file.as_deref()
     }
 
     // ----- allocation (always into the local heap) -----
@@ -297,7 +367,13 @@ impl Heap {
 
     /// Build a proper list from a vector of items.
     pub fn list(&mut self, items: Vec<Value>) -> Value {
-        let mut acc = Value::Nil;
+        self.list_with_tail(items, Value::Nil)
+    }
+
+    /// Build a list of `items` ending in `tail`. A `Nil` tail gives a proper
+    /// list; any other tail gives an improper (dotted) list, e.g. `(1 2 . 3)`.
+    pub fn list_with_tail(&mut self, items: Vec<Value>, tail: Value) -> Value {
+        let mut acc = tail;
         for item in items.into_iter().rev() {
             acc = self.alloc_pair(item, acc);
         }
@@ -320,12 +396,7 @@ impl Heap {
                 let s = self.string(id).to_string();
                 Value::Str(StrId::runtime(self.runtime.code.strings.push(s)))
             }
-            Value::Pair(id) if id.region() == LOCAL => {
-                let (head, tail) = self.pair(id);
-                let head = self.promote(head);
-                let tail = self.promote(tail);
-                Value::Pair(PairId::runtime(self.runtime.code.pairs.push((head, tail))))
-            }
+            Value::Pair(id) if id.region() == LOCAL => self.promote_list(id),
             Value::Vector(id) if id.region() == LOCAL => {
                 let items: Vec<Value> = self
                     .vector(id)
@@ -340,6 +411,31 @@ impl Heap {
             // Atoms, and values already in PRELUDE/RUNTIME, need no copy.
             _ => v,
         }
+    }
+
+    /// Promote a local cons-chain. Walks the `cdr` spine *iteratively* so a long
+    /// list doesn't recurse its length deep (which overflowed the native stack);
+    /// recursion is bounded by element nesting via `promote` on each `car`.
+    /// Stops at the first already-shared cell or non-pair tail, preserving both
+    /// improper (dotted) lists and existing structure sharing.
+    fn promote_list(&self, first: PairId) -> Value {
+        let mut heads = Vec::new();
+        let mut cur = Value::Pair(first);
+        let tail = loop {
+            match cur {
+                Value::Pair(id) if id.region() == LOCAL => {
+                    let (head, next) = self.pair(id);
+                    heads.push(self.promote(head));
+                    cur = next;
+                }
+                other => break self.promote(other),
+            }
+        };
+        let mut acc = tail;
+        for head in heads.into_iter().rev() {
+            acc = Value::Pair(PairId::runtime(self.runtime.code.pairs.push((head, acc))));
+        }
+        acc
     }
 
     fn promote_closure(&self, id: ClosureId) -> ClosureId {
@@ -485,20 +581,37 @@ impl Heap {
 
     /// Structural equality (the basis of `=`). Functions/macros/natives compare
     /// by identity (same handle).
+    ///
+    /// Floats compare by IEEE value, so `-0.0 = 0.0` is true and `nan = nan` is
+    /// false — the least-surprising arithmetic semantics (not bitwise equality).
     pub fn equal(&self, a: Value, b: Value) -> bool {
         use Value::*;
         match (a, b) {
             (Nil, Nil) => true,
             (Bool(x), Bool(y)) => x == y,
             (Int(x), Int(y)) => x == y,
-            (Float(x), Float(y)) => x.to_bits() == y.to_bits(),
+            (Float(x), Float(y)) => x == y,
             (Sym(x), Sym(y)) => x == y,
             (Keyword(x), Keyword(y)) => x == y,
             (Str(x), Str(y)) => self.string(x) == self.string(y),
+            // Walk the `cdr` spine iteratively so comparing long lists doesn't
+            // recurse their length deep; recursion stays bounded by `car` nesting.
             (Pair(x), Pair(y)) => {
-                let (a0, a1) = self.pair(x);
-                let (b0, b1) = self.pair(y);
-                self.equal(a0, b0) && self.equal(a1, b1)
+                let (mut x, mut y) = (x, y);
+                loop {
+                    let (a0, a1) = self.pair(x);
+                    let (b0, b1) = self.pair(y);
+                    if !self.equal(a0, b0) {
+                        break false;
+                    }
+                    match (a1, b1) {
+                        (Pair(nx), Pair(ny)) => {
+                            x = nx;
+                            y = ny;
+                        }
+                        _ => break self.equal(a1, b1),
+                    }
+                }
             }
             (Vector(x), Vector(y)) => {
                 let xs = self.vector(x);
@@ -545,7 +658,7 @@ impl Heap {
         let mut cur = Some(env);
         while let Some(e) = cur {
             if e == EnvId::GLOBAL {
-                return self.runtime.globals.read().unwrap().get(&sym).copied();
+                return self.runtime.globals_read().get(&sym).copied();
             }
             let frame = self.env_frame(e);
             if let Some(v) = frame.vars.get(&sym) {
@@ -561,7 +674,7 @@ impl Heap {
             // Global code/data is shared across inner processes, so promote it
             // into the shared RUNTIME region before binding.
             let shared = self.promote(val);
-            self.runtime.globals.write().unwrap().insert(sym, shared);
+            self.runtime.globals_write().insert(sym, shared);
         } else {
             self.local.envs[env.index()].vars.insert(sym, val);
         }
@@ -573,9 +686,10 @@ impl Heap {
         while let Some(e) = cur {
             if e == EnvId::GLOBAL {
                 let shared = self.promote(val);
-                let mut g = self.runtime.globals.write().unwrap();
-                if g.contains_key(&sym) {
-                    g.insert(sym, shared);
+                if let std::collections::hash_map::Entry::Occupied(mut slot) =
+                    self.runtime.globals_write().entry(sym)
+                {
+                    slot.insert(shared);
                     return true;
                 }
                 return false;
@@ -601,7 +715,7 @@ impl Heap {
     /// `:isolated` tests). Only meaningful when no other process is writing the
     /// table concurrently.
     pub fn snapshot_globals(&self) -> HashMap<Symbol, Value> {
-        self.runtime.globals.read().unwrap().clone()
+        self.runtime.globals_read().clone()
     }
 
     /// Restore the runtime's global bindings from a [`Heap::snapshot_globals`]
@@ -610,7 +724,7 @@ impl Heap {
     /// bindings revert — so a name `def`'d since the snapshot becomes unbound
     /// again, and a rebound name returns to its earlier value.
     pub fn restore_globals(&self, snapshot: HashMap<Symbol, Value>) {
-        *self.runtime.globals.write().unwrap() = snapshot;
+        *self.runtime.globals_write() = snapshot;
     }
 
     /// Walk to the global scope at the bottom of the frame chain.

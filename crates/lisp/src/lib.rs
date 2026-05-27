@@ -55,7 +55,10 @@ static SHARED: LazyLock<SharedBundle> = LazyLock::new(|| {
         eval::eval(&mut heap, form, root).unwrap_or_else(|e| panic!("prelude: {}", e));
     }
     let (code, bindings) = heap.freeze_as_shared_code(root);
-    SharedBundle { code: Arc::new(code), bindings }
+    SharedBundle {
+        code: Arc::new(code),
+        bindings,
+    }
 });
 
 /// The byte-counting allocator (see [`alloc`]) backs the whole process, so
@@ -81,7 +84,10 @@ impl Interp {
         let runtime = Arc::new(RuntimeCode::seeded(&SHARED.bindings));
         let mut heap = Heap::with_regions(Arc::clone(&SHARED.code), runtime);
         heap.set_global(EnvId::GLOBAL);
-        Interp { heap, root: EnvId::GLOBAL }
+        Interp {
+            heap,
+            root: EnvId::GLOBAL,
+        }
     }
 
     /// Read every form in `src`, evaluate each against the global environment,

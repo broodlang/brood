@@ -165,7 +165,13 @@ fn make_do(heap: &mut Heap, body: &[Value]) -> Value {
 }
 
 /// `(match* :ctx valexpr (pattern inner))` — a single-clause refutable bind.
-fn refutable_bind(heap: &mut Heap, ctx: &str, valexpr: Value, pattern: Value, inner: Value) -> Value {
+fn refutable_bind(
+    heap: &mut Heap,
+    ctx: &str,
+    valexpr: Value,
+    pattern: Value,
+    inner: Value,
+) -> Value {
     let clause = heap.list(vec![pattern, inner]);
     heap.list(vec![value::sym("match*"), value::kw(ctx), valexpr, clause])
 }

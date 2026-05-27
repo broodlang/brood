@@ -90,11 +90,21 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "file-exists?", Arity::exact(1), file_exists);
     def(heap, "dir?", Arity::exact(1), is_dir);
     def(heap, "list-dir", Arity::exact(1), list_dir);
+    def(heap, "make-dir", Arity::exact(1), make_dir);
+    def(heap, "spit", Arity::exact(2), spit);
+
+    // system / environment
+    def(heap, "getenv", Arity::exact(1), getenv);
+    def(heap, "run-process", Arity::exact(2), run_process);
 
     // macros
     def(heap, "macroexpand-1", Arity::exact(1), macroexpand_1);
     def(heap, "macroexpand", Arity::exact(1), macroexpand);
     def(heap, "gensym", Arity::range(0, 1), gensym);
+
+    // source positions (editor tooling; see docs/tooling.md)
+    def(heap, "form-pos", Arity::exact(1), form_pos);
+    def(heap, "current-file", Arity::exact(0), current_file);
 
     // errors / control
     def(heap, "throw", Arity::exact(1), throw);
@@ -115,6 +125,10 @@ fn arg(args: &[Value], i: usize) -> Value {
     args.get(i).copied().unwrap_or(Value::Nil)
 }
 
+/// Destructure exactly two args. The declared `Arity` is the *primary* arity
+/// check (enforced once in `eval::call_native` before any builtin runs); this
+/// re-check is defense-in-depth for a direct Rust call that bypasses the gate
+/// (e.g. a unit test) — it keeps such a call a clean error instead of a panic.
 fn two(args: &[Value], who: &str) -> Result<(Value, Value), LispError> {
     if args.len() != 2 {
         return Err(LispError::arity(format!(
@@ -182,16 +196,26 @@ fn prim_div(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         return Err(LispError::runtime("division by zero"));
     }
     match (a, b) {
-        (Value::Int(x), Value::Int(y)) if x % y == 0 => Ok(Value::Int(x / y)),
+        // Exact integer quotient when it divides evenly; otherwise a float.
+        // `checked_*` guards the one overflowing case (`i64::MIN / -1`), which
+        // then falls through to the float path instead of panicking.
+        (Value::Int(x), Value::Int(y)) => match (x.checked_rem(y), x.checked_div(y)) {
+            (Some(0), Some(q)) => Ok(Value::Int(q)),
+            _ => Ok(Value::Float(x as f64 / y as f64)),
+        },
         _ => Ok(Value::Float(expect_number(heap, "%div", a)? / bf)),
     }
 }
 
 fn prim_lt(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let (a, b) = two(args, "%lt")?;
-    Ok(Value::Bool(
-        expect_number(heap, "%lt", a)? < expect_number(heap, "%lt", b)?,
-    ))
+    // Compare two ints directly; coercing to f64 first loses precision past 2^53
+    // (e.g. `(< 9007199254740992 9007199254740993)` would wrongly be false).
+    let lt = match (a, b) {
+        (Value::Int(x), Value::Int(y)) => x < y,
+        _ => expect_number(heap, "%lt", a)? < expect_number(heap, "%lt", b)?,
+    };
+    Ok(Value::Bool(lt))
 }
 
 fn prim_eq(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -206,18 +230,22 @@ fn int_pair(heap: &Heap, args: &[Value], who: &str) -> Result<(i64, i64), LispEr
 
 fn modulo(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let (a, b) = int_pair(heap, args, "mod")?;
-    if b == 0 {
-        return Err(LispError::runtime("mod: division by zero"));
+    // `checked_rem_euclid` returns `None` for divide-by-zero *and* the
+    // overflowing `i64::MIN % -1`; distinguish them so neither panics.
+    match a.checked_rem_euclid(b) {
+        Some(r) => Ok(Value::Int(r)),
+        None if b == 0 => Err(LispError::runtime("mod: division by zero")),
+        None => Err(LispError::runtime("mod: integer overflow")),
     }
-    Ok(Value::Int(a.rem_euclid(b)))
 }
 
 fn remainder(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let (a, b) = int_pair(heap, args, "rem")?;
-    if b == 0 {
-        return Err(LispError::runtime("rem: division by zero"));
+    match a.checked_rem(b) {
+        Some(r) => Ok(Value::Int(r)),
+        None if b == 0 => Err(LispError::runtime("rem: division by zero")),
+        None => Err(LispError::runtime("rem: integer overflow")),
     }
-    Ok(Value::Int(a % b))
 }
 
 // ---------- pair / sequence ----------
@@ -429,14 +457,25 @@ fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     };
     let src = std::fs::read_to_string(&path)
         .map_err(|e| LispError::runtime(format!("load: cannot read {}: {}", path, e)))?;
-    let forms = reader::read_all(heap, &src)?;
+    // Read positioned so errors point at a line; tag every error with the file
+    // (`FILE:LINE:COL:`, see docs/tooling.md).
+    let forms = reader::read_all_positioned(heap, &src).map_err(|e| e.or_file(path.clone()))?;
     let root = heap.env_root(env);
-    let mut result = Value::Nil;
-    for form in forms {
-        let form = crate::macros::macroexpand_all(heap, form, root)?;
-        result = crate::eval::eval(heap, form, root)?;
+    // Expose the file to Brood (`(current-file)`) for the duration of the load,
+    // so the test macros can record each test's source location; restore the
+    // previous file afterward since loads nest.
+    let prev = heap.set_current_file(Some(path.clone()));
+    let mut result = Ok(Value::Nil);
+    for (form, pos) in forms {
+        result = crate::macros::macroexpand_all(heap, form, root)
+            .and_then(|f| crate::eval::eval(heap, f, root))
+            .map_err(|e| e.or_pos(pos).or_file(path.clone()));
+        if result.is_err() {
+            break;
+        }
     }
-    Ok(result)
+    heap.set_current_file(prev);
+    result
 }
 
 /// `(eval-string "src")` — read and evaluate every form in a string against the
@@ -474,7 +513,14 @@ fn builtin_module(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let name = match v {
         Value::Sym(s) | Value::Keyword(s) => value::symbol_name(s),
         Value::Str(id) => heap.string(id).to_string(),
-        _ => return Err(LispError::wrong_type(heap, "%builtin-module", "module name", v)),
+        _ => {
+            return Err(LispError::wrong_type(
+                heap,
+                "%builtin-module",
+                "module name",
+                v,
+            ))
+        }
     };
     match EMBEDDED_MODULES.iter().find(|(n, _)| *n == name) {
         Some((_, src)) => Ok(heap.alloc_string(src)),
@@ -575,6 +621,85 @@ fn list_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.list(items))
 }
 
+/// `(make-dir path)` — create `path` and any missing parents (like `mkdir -p`).
+/// Returns nil. Used by the project scaffolder (`brood new`).
+fn make_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let v = arg(args, 0);
+    let path = match v {
+        Value::Str(id) => heap.string(id).to_string(),
+        _ => return Err(LispError::wrong_type(heap, "make-dir", "string", v)),
+    };
+    std::fs::create_dir_all(&path)
+        .map_err(|e| LispError::runtime(format!("make-dir: {}: {}", path, e)))?;
+    Ok(Value::Nil)
+}
+
+/// `(spit path content)` — write `content` (a string) to `path`, replacing any
+/// existing file. Returns nil. The write-side counterpart to `load`.
+fn spit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let pv = arg(args, 0);
+    let path = match pv {
+        Value::Str(id) => heap.string(id).to_string(),
+        _ => return Err(LispError::wrong_type(heap, "spit", "string path", pv)),
+    };
+    let cv = arg(args, 1);
+    let content = match cv {
+        Value::Str(id) => heap.string(id).to_string(),
+        _ => return Err(LispError::wrong_type(heap, "spit", "string content", cv)),
+    };
+    std::fs::write(&path, content)
+        .map_err(|e| LispError::runtime(format!("spit: {}: {}", path, e)))?;
+    Ok(Value::Nil)
+}
+
+/// `(getenv name)` — the value of environment variable `name` as a string, or nil
+/// if it is unset. Lets Brood locate things like the user config directory.
+fn getenv(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let v = arg(args, 0);
+    let name = match v {
+        Value::Str(id) => heap.string(id).to_string(),
+        _ => return Err(LispError::wrong_type(heap, "getenv", "string", v)),
+    };
+    match std::env::var(&name) {
+        Ok(val) => Ok(heap.alloc_string(&val)),
+        Err(_) => Ok(Value::Nil),
+    }
+}
+
+/// `(run-process prog args)` — run external program `prog` with `args` (a list or
+/// vector of strings), inheriting stdio, and return its exit code as an integer
+/// (-1 if killed by a signal). The Emacs `call-process` analogue: the general
+/// subprocess mechanism (used by the project scaffolder's `git init`).
+fn run_process(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let pv = arg(args, 0);
+    let prog = match pv {
+        Value::Str(id) => heap.string(id).to_string(),
+        _ => {
+            return Err(LispError::wrong_type(
+                heap,
+                "run-process",
+                "string program",
+                pv,
+            ))
+        }
+    };
+    let mut argv = Vec::new();
+    for a in heap.seq_items(arg(args, 1))? {
+        match a {
+            Value::Str(id) => argv.push(heap.string(id).to_string()),
+            _ => {
+                return Err(LispError::type_err(
+                    "run-process: arguments must be strings",
+                ))
+            }
+        }
+    }
+    match std::process::Command::new(&prog).args(&argv).status() {
+        Ok(status) => Ok(Value::Int(status.code().unwrap_or(-1) as i64)),
+        Err(e) => Err(LispError::runtime(format!("run-process: {}: {}", prog, e))),
+    }
+}
+
 fn apply_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     if args.len() < 2 {
         return Err(LispError::arity(
@@ -596,6 +721,27 @@ fn macroexpand_1(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
 
 fn macroexpand(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     crate::macros::macroexpand(heap, arg(args, 0), env)
+}
+
+// ---------- source positions (editor tooling; see docs/tooling.md) ----------
+
+/// `(form-pos form)` — the `[line col]` (1-based) where `form` was read, or
+/// `nil`. Recorded by the reader for list forms; used by the test macros to
+/// capture a test's source line *before* the form expands.
+fn form_pos(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    match heap.form_pos(arg(args, 0)) {
+        Some(p) => Ok(heap.alloc_vector(vec![Value::Int(p.line as i64), Value::Int(p.col as i64)])),
+        None => Ok(Value::Nil),
+    }
+}
+
+/// `(current-file)` — the path of the file currently being `load`ed, or `nil`
+/// (e.g. at the REPL). Maintained by `load`.
+fn current_file(_args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    match heap.current_file().map(str::to_string) {
+        Some(f) => Ok(heap.alloc_string(&f)),
+        None => Ok(Value::Nil),
+    }
 }
 
 fn gensym(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {

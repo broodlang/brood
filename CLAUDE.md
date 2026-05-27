@@ -12,6 +12,16 @@ written in. Today the repo is the **language core**; the editor, display
 protocol, and server come later. Read `docs/` before making non-trivial changes
 — especially `docs/architecture.md`, `docs/roadmap.md`, and `docs/decisions.md`.
 
+## Greenfield: prefer the right structure over compatibility
+
+This is **greenfield** — pre-1.0, no external users, nothing to keep stable.
+**Make breaking changes freely when they improve the overall structure.** Don't
+add compatibility shims, deprecation aliases, or "keep the old way working too"
+hedges; rename, re-shape, or delete the old thing and update every caller. A
+clean, coherent design beats a backwards-compatible one every time here. (Keep
+the build/tests green, and record notable breaks in `docs/devlog.md` — but don't
+preserve a worse design just to avoid a break.)
+
 ## Core principle: write the language in the language
 
 **As much of the system as possible must be written in Brood itself, not in

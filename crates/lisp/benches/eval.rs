@@ -35,8 +35,9 @@ fn parse_prelude(bencher: divan::Bencher) {
 /// so this also stresses prelude function-call dispatch.
 #[divan::bench(args = [1_000, 10_000, 100_000])]
 fn sum_tail(bencher: divan::Bencher, n: u64) {
-    let src =
-        format!("(def sum-to (fn [n acc] (if (= n 0) acc (sum-to (- n 1) (+ acc n))))) (sum-to {n} 0)");
+    let src = format!(
+        "(def sum-to (fn [n acc] (if (= n 0) acc (sum-to (- n 1) (+ acc n))))) (sum-to {n} 0)"
+    );
     bencher
         .with_inputs(Interp::new)
         .bench_refs(|interp| interp.eval_str(&src).unwrap());
@@ -46,7 +47,8 @@ fn sum_tail(bencher: divan::Bencher, n: u64) {
 /// the growing-then-unwinding Rust call stack. fib(25) is ~242k calls.
 #[divan::bench(args = [15, 20, 25])]
 fn fib(bencher: divan::Bencher, n: u64) {
-    let src = format!("(def fib (fn [n] (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))) (fib {n})");
+    let src =
+        format!("(def fib (fn [n] (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))) (fib {n})");
     bencher
         .with_inputs(Interp::new)
         .bench_refs(|interp| interp.eval_str(&src).unwrap());

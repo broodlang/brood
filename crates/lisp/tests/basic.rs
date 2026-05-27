@@ -305,7 +305,10 @@ fn match_dispatches_on_patterns() {
     // tagged vectors are the tuple idiom; the same literal builds and matches
     assert_eq!(run("(match [:ok 42] ([:ok v] v) ([:err e] e))"), "42");
     // list destructure with a & rest tail
-    assert_eq!(run("(match (list 1 2 3) ((h & t) (list h t)))"), "(1 (2 3))");
+    assert_eq!(
+        run("(match (list 1 2 3) ((h & t) (list h t)))"),
+        "(1 (2 3))"
+    );
     // nested patterns compose
     assert_eq!(run("(match [:add [1 2]] ([:add [a b]] (+ a b)))"), "3");
     // guards
@@ -489,4 +492,116 @@ fn eval_str_leaves_position_unset() {
     let mut interp = Interp::new();
     let err = interp.eval_str("(+ 1 nope)").unwrap_err();
     assert!(err.pos.is_none());
+}
+
+// ---- regression tests for the correctness/robustness fixes ----
+
+/// `<` must compare integers exactly. Coercing to f64 first would collapse
+/// values past 2^53 onto the same float (these two differ by 1).
+#[test]
+fn int_comparison_is_exact_past_2_pow_53() {
+    assert_eq!(run("(< 9007199254740992 9007199254740993)"), "true");
+    assert_eq!(run("(< 9007199254740993 9007199254740992)"), "false");
+    assert_eq!(run("(< 1 2)"), "true");
+    assert_eq!(run("(< 2.5 3)"), "true");
+}
+
+/// `mod`/`rem`/`/` on the one overflowing integer case (`i64::MIN` by `-1`) must
+/// return a clean error or a float — never panic-abort the interpreter.
+#[test]
+fn integer_overflow_does_not_panic() {
+    let mut interp = Interp::new();
+    assert!(interp.eval_str("(mod -9223372036854775808 -1)").is_err());
+    assert!(interp.eval_str("(rem -9223372036854775808 -1)").is_err());
+    // `/` falls through to the float path rather than erroring.
+    assert!(matches!(
+        interp.eval_str("(/ -9223372036854775808 -1)"),
+        Ok(brood::value::Value::Float(_))
+    ));
+    // Ordinary integer division/modulo unaffected.
+    assert_eq!(run("(/ 12 3)"), "4");
+    assert_eq!(run("(/ 7 2)"), "3.5");
+    assert_eq!(run("(mod -7 3)"), "2");
+    assert_eq!(run("(rem -7 3)"), "-1");
+}
+
+/// `=` on floats uses IEEE value equality, not bitwise: `-0.0 = 0.0` is true.
+#[test]
+fn float_equality_is_ieee() {
+    assert_eq!(run("(= 0.0 -0.0)"), "true");
+    assert_eq!(run("(= 1.5 1.5)"), "true");
+    assert_eq!(run("(= 1.5 2.5)"), "false");
+}
+
+/// `def` of a long list must not overflow: promotion into the shared region
+/// walks the cons spine iteratively, not `length`-deep recursion.
+#[test]
+fn def_of_long_list_does_not_overflow() {
+    let src = "(def build (fn (n acc) (if (= n 0) acc (build (- n 1) (cons n acc)))))\
+               (def big (build 200000 nil)) (first big)";
+    assert_eq!(run(src), "1");
+}
+
+/// Structural `=` on long lists must not overflow: it walks the spine
+/// iteratively. Also confirm it still discriminates.
+#[test]
+fn equal_on_long_lists_does_not_overflow() {
+    let build = "(def build (fn (n acc) (if (= n 0) acc (build (- n 1) (cons n acc)))))";
+    assert_eq!(
+        run(&format!(
+            "{build} (let (a (build 200000 nil) b (build 200000 nil)) (= a b))"
+        )),
+        "true"
+    );
+    assert_eq!(
+        run(&format!(
+            "{build} (let (a (build 5 nil) b (build 6 nil)) (= a b))"
+        )),
+        "false"
+    );
+}
+
+/// The printer emits dotted notation for improper lists; the reader must read it
+/// back (round-trip), while a lone `.` stays distinct from atoms like `.5`.
+#[test]
+fn dotted_pairs_round_trip() {
+    assert_eq!(run(r#"(pr-str (cons 1 2))"#), r#""(1 . 2)""#);
+    assert_eq!(run(r#"(pr-str (cons 1 (cons 2 3)))"#), r#""(1 2 . 3)""#);
+    assert_eq!(run(r#"(first (read-string "(1 2 . 3)"))"#), "1");
+    assert_eq!(run(r#"(rest (read-string "(1 . 2)"))"#), "2");
+    assert_eq!(run(r#"(read-string "(1 2 3)")"#), "(1 2 3)"); // proper list unaffected
+    assert_eq!(run("(first (list .5 6))"), "0.5"); // `.5` is a float, not a separator
+
+    let mut interp = Interp::new();
+    assert!(interp.eval_str(r#"(read-string "( . 3)")"#).is_err());
+    assert!(interp.eval_str(r#"(read-string "(1 . )")"#).is_err());
+    assert!(interp.eval_str(r#"(read-string "(1 . 2 3)")"#).is_err());
+}
+
+/// `gensym` must mint process-wide-unique symbols, including across threads — a
+/// thread-local counter would reset per worker and collide.
+#[test]
+fn gensym_is_unique_across_threads() {
+    use std::collections::HashSet;
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            std::thread::spawn(|| {
+                (0..2000)
+                    .map(|_| match brood::value::gensym("g") {
+                        brood::value::Value::Sym(s) => s,
+                        _ => unreachable!(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    let mut seen = HashSet::new();
+    for h in handles {
+        for sym in h.join().unwrap() {
+            assert!(
+                seen.insert(sym),
+                "gensym produced a duplicate across threads"
+            );
+        }
+    }
 }

@@ -43,11 +43,20 @@ pub struct LispError {
     /// errors) or filled in by the file runner with the enclosing top-level
     /// form's start (for runtime errors). Drives `FILE:LINE:COL:` output.
     pub pos: Option<Pos>,
+    /// The file the error occurred in, when known (set by `load` / the file
+    /// runner). Combined with `pos` for `FILE:LINE:COL:` diagnostics.
+    pub file: Option<String>,
 }
 
 impl LispError {
     pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
-        LispError { kind, message: message.into(), payload: None, pos: None }
+        LispError {
+            kind,
+            message: message.into(),
+            payload: None,
+            pos: None,
+            file: None,
+        }
     }
 
     /// Attach a source position (builder style).
@@ -64,6 +73,27 @@ impl LispError {
         }
         self
     }
+
+    /// Attach a file only if none is set yet (the innermost `load` wins).
+    pub fn or_file(mut self, file: impl Into<String>) -> Self {
+        if self.file.is_none() {
+            self.file = Some(file.into());
+        }
+        self
+    }
+
+    /// A one-line GNU diagnostic: `[FILE:][LINE:COL: ]kind error: message`, the
+    /// form editors parse (see `docs/tooling.md`). Falls back gracefully when
+    /// the file or position is unknown (e.g. at the REPL).
+    pub fn located(&self) -> String {
+        let prefix = match (&self.file, self.pos) {
+            (Some(f), Some(p)) => format!("{}:{}:{}: ", f, p.line, p.col),
+            (Some(f), None) => format!("{}: ", f),
+            (None, Some(p)) => format!("{}:{}: ", p.line, p.col),
+            (None, None) => String::new(),
+        };
+        format!("{}{}", prefix, self)
+    }
     pub fn parse(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Parse, message)
     }
@@ -79,12 +109,7 @@ impl LispError {
     /// A self-identifying type error: which operation (`who`), what it `expected`,
     /// and the actual tag + printed form of what arrived. Threads the heap to
     /// render the offending value, e.g. `first: expected list or vector, got int (5)`.
-    pub fn wrong_type(
-        heap: &crate::heap::Heap,
-        who: &str,
-        expected: &str,
-        got: Value,
-    ) -> Self {
+    pub fn wrong_type(heap: &crate::heap::Heap, who: &str, expected: &str, got: Value) -> Self {
         Self::type_err(format!(
             "{}: expected {}, got {} ({})",
             who,
@@ -103,6 +128,7 @@ impl LispError {
             message: crate::printer::display(heap, value),
             payload: Some(value),
             pos: None,
+            file: None,
         }
     }
 }

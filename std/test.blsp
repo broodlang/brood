@@ -73,12 +73,20 @@
 (defn add-unit! (mode group tests)
   (set! *units* (cons (list mode group tests) *units*)))
 
+;; Source location of a form as (file line), or nil. Captured at macro-expansion
+;; time (by the `test` macro), while the original read form still carries its
+;; position — `current-file` / `form-pos` are Rust primitives (docs/tooling.md).
+(defn source-loc (form)
+  (let (p (form-pos form))                 ; [line col] vector, or nil
+    (if p (list (current-file) (vector-ref p 0)) nil)))
+
 ;; A test registers itself: collected into the enclosing describe if there is
 ;; one, otherwise emitted as its own standalone unit (:isolated if flagged).
-(defn register-test! (name thunk isolated?)
+;; `loc` is the (file line) where the test was written, for editor output.
+(defn register-test! (name thunk isolated? loc)
   (if *collecting*
-    (set! *collected* (cons (list name thunk) *collected*))
-    (add-unit! (if isolated? :isolated :parallel) "" (list (list name thunk)))))
+    (set! *collected* (cons (list name thunk loc) *collected*))
+    (add-unit! (if isolated? :isolated :parallel) "" (list (list name thunk loc)))))
 
 ;; Turn a finished describe's collected tests into units according to its mode:
 ;; default spreads them across one :parallel unit each; :serial/:isolated keep
@@ -108,14 +116,16 @@
 ;; dead worker never sends, and `receive` would block forever).
 (defmacro test (name & forms)
   (let (iso  (= (first forms) :isolated)
-        body (if iso (rest forms) forms))
+        body (if iso (rest forms) forms)
+        loc  (source-loc (first body)))      ; (file line) of the first body form
     `(register-test! ~name
        (fn ()
          (let (*fails* nil)
            (try (do ~@body)
                 (catch e (set! *fails* (cons (str "uncaught error: " e) *fails*))))
            (reverse *fails*)))
-       ~iso)))
+       ~iso
+       (quote ~loc))))
 
 ;; (deftest name body...) — a single test named by a symbol, no group.
 (defmacro deftest (name & body)
@@ -211,12 +221,13 @@
 (defn dim    (s) (ansi "2"  s))
 
 ;; --- results -----------------------------------------------------------------
-;; A result is (group name fails ms): `fails` is the list of failure messages for
-;; that test (empty = passed).
+;; A result is (group name fails ms loc): `fails` is the list of failure messages
+;; for that test (empty = passed); `loc` is (file line) or nil.
 (defn r-group (r) (first r))
 (defn r-name  (r) (second r))
 (defn r-fails (r) (third r))
 (defn r-ms    (r) (nth r 3))
+(defn r-loc   (r) (nth r 4))
 (defn r-failed? (r) (not (empty? (r-fails r))))
 (defn label (group name)                  ; "group: name", or just name if ungrouped
   (if (= group "") (str name) (str group ": " name)))
@@ -229,7 +240,7 @@
   (let (start (now)
         fails ((second t))
         ms    (- (now) start))
-    (list group (first t) fails ms)))
+    (list group (first t) fails ms (third t))))
 
 ;; Like run-test, but evaluate the body with a private copy of the global
 ;; bindings (`%isolate`): an :isolated test's def/set! is rolled back when it
@@ -238,7 +249,7 @@
   (let (start (now)
         fails (%isolate (second t))
         ms    (- (now) start))
-    (list group (first t) fails ms)))
+    (list group (first t) fails ms (third t))))
 
 ;; Run every test in a unit, in order, returning the list of results. This is
 ;; what a worker does (for a :parallel/:serial unit) and what the runner does
@@ -287,15 +298,32 @@
       (run-isolated trace? (rest units) (append results acc)))))
 
 ;; --- reporting ---------------------------------------------------------------
-(defn report-failures (results)
+;; "file:line: " prefix for a result, or "" when its location is unknown.
+(defn loc-prefix (r)
+  (let (loc (r-loc r))
+    (if (and loc (first loc))
+      (str (first loc) ":" (second loc) ": ")
+      "")))
+
+;; In :structured mode print one GNU `FILE:LINE: message` line per failed
+;; assertion (parsed by compilation-mode / flymake; see docs/tooling.md).
+;; Otherwise the human-readable FAILURES block.
+(defn report-failures (structured? results)
   (let (failed (filter r-failed? results))
     (unless (empty? failed)
-      (println "")
-      (println "FAILURES:")
-      (fold (fn (_ r)
-              (fold (fn (_ msg) (println (str "  " (full-name r) " — " msg)))
-                    nil (r-fails r)))
-            nil failed))))
+      (if structured?
+        (fold (fn (_ r)
+                (fold (fn (_ msg)
+                        (println (str (loc-prefix r) (full-name r) " — " msg)))
+                      nil (r-fails r)))
+              nil failed)
+        (do
+          (println "")
+          (println "FAILURES:")
+          (fold (fn (_ r)
+                  (fold (fn (_ msg) (println (str "  " (full-name r) " — " msg)))
+                        nil (r-fails r)))
+                nil failed))))))
 
 (defn report-slow (results)
   (println "")
@@ -317,6 +345,7 @@
 ;; --- entry point -------------------------------------------------------------
 (defn run-tests (& opts)
   (let (trace?  (opt? :trace opts)
+        structured? (opt? :structured opts)
         units   (reverse *units*)
         par     (filter (fn (u) (not= (first u) :isolated)) units)  ; parallel + serial
         iso     (filter (fn (u) (= (first u) :isolated)) units)
@@ -346,7 +375,7 @@
           par-time    (sum-ms par-results)
           test-time   (+ iso-time par-time))
       (println "")              ; end the progress line
-      (report-failures results)
+      (report-failures structured? results)
       (when (opt? :slow opts) (report-slow results))
       (println "")
       (println total "tests," (- total failed) "passed," failed "failed"

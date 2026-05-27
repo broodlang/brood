@@ -6,7 +6,7 @@ CLI := cargo run -q -p cli
 ARGS ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help build test bench benchmark suite repl install fmt clippy check clean
+.PHONY: help build test bench benchmark suite repl install uninstall fmt clippy check clean
 
 help: ## Show this help
 	@echo "Brood — available make targets:"
@@ -31,8 +31,11 @@ suite: ## Run the in-language suite via the project runner (discovers tests/**/*
 repl: ## Start the REPL
 	$(CLI)
 
-install: ## Install `brood` (REPL, file runner, `brood test`) into ~/.local/bin
+install: ## Install `brood` (REPL, file runner, `brood test`/`new`) into ~/.local/bin
 	cargo install --path crates/cli --force --root $(HOME)/.local
+
+uninstall: ## Remove the installed `brood` binary from ~/.local/bin
+	cargo uninstall cli --root $(HOME)/.local
 
 fmt: ## Format all Rust code
 	cargo fmt

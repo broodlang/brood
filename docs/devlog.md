@@ -616,6 +616,40 @@ ADR-024 (refining ADR-023; "globals are `Any`" → "globals are `dynamic()`").
 Next small step (2): `dynamic()` — the gradual type, with its consistency
 relation, and the "redefinable globals are `dynamic()`" rule.
 
+### Emacs mode + editor-parseable errors (stage 1) (2026-05-27)
+
+Started making Brood **editor-ready as a language concern**, alongside an Emacs
+major mode (kept in the user's from-source Emacs tree, not this repo:
+`lisp/progmodes/brood.el` + `inf-brood.el`). The mode is *traditional* (derives
+from `lisp-data-mode`, modeled on `scheme.el`) — tree-sitter was rejected: a
+Lisp's regular s-expr syntax means Emacs' native sexp machinery already covers
+navigation/indent, so a grammar is marginal payoff. It adds font-lock, a
+dedicated `brood-indent-function`, imenu, an inferior REPL over `comint`
+(`run-brood` + `brood-send-*`, run through a *pipe* so the CLI takes its clean
+non-`rustyline` path), and a `brood-compilation-mode`.
+
+The canonical Brood source extension is now **`.blsp`** (was `.lisp`, which
+collides with Emacs' `lisp-mode`); the whole repo was migrated.
+
+**Stage 1 of parseable output** (`docs/tooling.md` is the contract):
+- `error::Pos { line, col }` (1-based) + an optional `LispError.pos`.
+- `reader.rs` tracks line:col; **parse errors** carry the exact position, and
+  `read_all_positioned` pairs each top-level form with its start.
+- `Interp::eval_source` tags any otherwise-unpositioned error with the enclosing
+  top-level form's position (runtime errors → top-level-form line; precise inner
+  positions are unreliable post-macroexpansion). `eval_str` (the REPL) stays
+  position-free.
+- The CLI prints GNU `FILE:LINE:COL: message`, which `compilation-mode` /
+  `flymake` parse natively; `brood-run` / `brood-test` make errors clickable.
+
+Deferred to stage 2: a machine-readable test reporter with per-test source
+locations, plus `form-pos` / `current-file` introspection (the test macros can
+query a form's position *before* it expands).
+
+**Verified.** 38 Rust tests (+3 for positions) + suite + doc-test green; CLI
+output confirmed end-to-end (`t.blsp:3:1: unbound error: …`, `:2:3: parse
+error: …`); both `.el` files pass `check-parens`.
+
 **Verified.** 6 `types` tests + 35 Rust + suite + doc-test green.
 
 ---
@@ -662,3 +696,111 @@ Two easy, forward-looking wins toward the type staircase:
   so errors / `type-of` / `Ty` can't drift apart).
 
 **Verified.** 8 `types` tests + 35 Rust + suite + doc-test green.
+
+### Project tooling: `brood test` discovery + `brood new` scaffolding (2026-05-27)
+
+Finished the project tooling designed in ADR-019/020 and brought it green
+end-to-end (an earlier commit had bundled the in-flight pieces; this completes
+and wires them up).
+
+- **Modules (ADR-019).** Emacs-flat `provide` / `require` / `*load-path*` over the
+  one shared global table, written in Brood (`std/prelude.blsp`). Embedded std
+  modules (`test`, `project`) are baked in and found via `%builtin-module` before
+  the load-path. New Rust mechanism only: `cwd`, `file-exists?`, `dir?`,
+  `list-dir`, `name`, `eval-string`, `%builtin-module`, plus `substring` for the
+  path/affix helpers (`starts-with?`/`ends-with?`/`path-join`/`parent-dir`, prelude).
+- **Project model + test runner (ADR-020).** A `project.blsp` manifest, convention
+  over configuration: `src/` on the load-path, tests discovered as
+  `tests/**/*_test.blsp`. `run-project-tests` (`std/project.blsp`) finds the
+  project by walking up from the cwd, loads each test file (register-only), and
+  runs the whole suite once. `brood test` is the CLI entry; `crates/lisp/tests/suite.rs`
+  drives the same runner from the repo root, so `cargo test` exercises discovery.
+  Migrated the existing suites to the `_test.blsp` convention (register-only, no
+  self-`run-tests`).
+- **`brood new <name>`.** Scaffolds a runnable skeleton — `project.blsp` +
+  `src/main.blsp` (a `greeting`/`main` printing "hello <name>") +
+  `tests/main_test.blsp` (a passing starter test) — so `cd <name> && brood test`
+  works immediately. `run-project-tests` now **loads the project's `src/` first**
+  (all `.blsp` under the source paths), so test files use the project's defs
+  directly — no `require`/`provide` ceremony in the scaffold. Policy is Brood
+  (`new-project`: name checks, refuse-if-exists, templates) over two new
+  primitives, `make-dir` and `spit`.
+- **User config (`~/.config/brood/config.blsp`).** A Brood `(config …)` file — the
+  sibling of `project.blsp` — auto-created with documented defaults on first tool
+  use (honoring `$XDG_CONFIG_HOME`) and loaded by the `brood` subcommands. First
+  setting: `:git-init` (off by default), which makes `brood new` run `git init` in
+  the new project. New Rust mechanism: `getenv` + `run-process` (the Emacs
+  `call-process` analogue — a general subprocess primitive).
+- The source extension is now **`.blsp`** repo-wide. `make install` / `make
+  uninstall` put `brood` in `~/.local/bin`.
+
+**Verified.** `brood test` 158/158 green (incl. `tests/modules_test.blsp` and a
+nested `tests/meta/discovery_test.blsp` proving recursive discovery); `cargo test`
+green (12 lib + 45 basic + the discovery suite + doc-test); `brood new foobar`
+scaffolds, auto-creates the config, and its own `brood test` passes; with
+`:git-init true` it initializes a git repo.
+
+### Rust correctness/robustness/perf pass (same day)
+
+A thorough review of the Rust core (review scoped to Rust only), then fixed
+every finding:
+
+- **`<` was lossy for large integers.** `%lt` coerced both operands to `f64`,
+  so values past 2^53 compared wrong (`(< 9007199254740992 9007199254740993)`
+  → `false`). Now ints compare in `i64`; only mixed/float args coerce.
+- **`mod`/`rem`/`/` panicked on `i64::MIN` by `-1`.** Switched to
+  `checked_rem`/`checked_div`/`checked_rem_euclid`: `mod`/`rem` raise
+  "integer overflow", `/` falls through to the float path. (Matches the
+  already-checked `+`/`-`/`*`.)
+- **Deep structural recursion aborted the runtime.** `Heap::promote` (run by
+  every top-level `def`/`set!` and `spawn`) and `Heap::equal` recursed down the
+  cons *spine*, so a long list overflowed the native stack (uncatchable — it
+  `abort()`s the whole process, all green processes with it). Both now walk the
+  spine iteratively; recursion is bounded by element nesting. `def` of a
+  200k-element list and `=` on two of them no longer overflow.
+- **`gensym` was thread-local.** The counter reset per worker thread, so two
+  threads could mint the same "unique" name — breaking the documented
+  process-wide guarantee. Now a global `AtomicU64`.
+- **`=` float semantics.** Switched from bitwise (`to_bits`) to IEEE value
+  equality: `(= 0.0 -0.0)` is `true`, `(= nan nan)` is `false`.
+- **Evaluator hot path.** Special-form dispatch called `symbol_name` on the head
+  of *every* combination — a global-interner `Mutex` lock + `String` allocation
+  (and cross-thread contention under the scheduler). Now it maps the interned
+  symbol id (`u32`) to a `&'static str` via a `LazyLock` table, so ordinary
+  function calls skip the lock/alloc entirely. Behaviour-identical (whole suite
+  green).
+- **Lock-poison hardening.** The global bindings `RwLock` and the symbol
+  interner `Mutex` now recover from poison (`into_inner`) instead of `unwrap`,
+  so a panic in one process can't wedge global lookup/`def` for every other.
+- **Reader: dotted pairs.** The printer emitted `(a . b)` for improper lists but
+  the reader couldn't read it back. A lone `.` inside a list now builds a dotted
+  tail (round-trips); `.5`/`.foo` stay atoms.
+- **Smaller items.** CLI `-jN` no longer eats a filename like `-justfile`;
+  `LocalCheckpoint` documents why it omits the natives slab; clippy is clean
+  (Heap `Default`, `parse_params` type alias, `env_set` entry API, range-loop).
+
+**Deferred (by scope):** moving `when`/`unless`/`cond`/`and`/`or` from Rust
+special forms to prelude macros (aligns with the "smallest core" principle but
+is a Brood-side refactor, not a Rust bug — left as a roadmap item).
+
+**Verified.** `cargo test` green (45 integration incl. 7 new regression tests +
+the in-language suite + doctest); `cargo clippy` clean.
+
+### Types step 2: `dynamic()`, the gradual type (set-theoretic) (2026-05-27)
+
+`GradualTy { bound: Ty, dynamic }` in `types.rs` — `dynamic()` brought *inside*
+the lattice (pure `dynamic()` = `dynamic(ANY)`), per the corrected framing
+(ADR-024): consistent subtyping is **derived from set inclusion**, not a Siek–Taha
+bolt-on. `consistent_with`: static → `bound ⊆ expected`; dynamic → `bound ∩
+expected ≠ ⊥`. So pure `dynamic()` is consistent with every inhabited type (defer
+the check) while `dynamic(number)` is still caught against `string`. Composes via
+`union`/`intersect`/`negate`. The "redefinable globals are `dynamic()`, not `Any`"
+rule is documented; no checker consumes it yet — foundation only, like step 1.
+
+**Status check.** Steps 0–2 are done. What's *live now*: `(type-of x)`,
+self-identifying type errors, enforced builtin arity. What's *foundation, not yet
+consumed*: the `Ty`/`GradualTy` lattice + `tested_by` table — they change no
+runtime behaviour until the Step 4 inference pass reads them. The first
+behavioural payoff is Step 4.
+
+**Verified.** 12 `types` tests + 45 Rust + suite + doc-test green.

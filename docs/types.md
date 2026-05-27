@@ -39,7 +39,7 @@ A `Ty` **is a set of values**, and the type operations *are* set operations:
 - `Ty::NEVER` = `⊥` (empty set, subtype of everything); `Ty::ANY` = `⊤` (all
   tags); the named unions `Ty::NUMBER` (`int∪float`), `Ty::LIST` (`nil∪pair`)
   match the `number?`/`list?` predicates.
-- **`dynamic()`** *(step 2, not built yet)* is the **gradual** type — and it
+- **`dynamic()`** *(step 2, `GradualTy`)* is the **gradual** type — and it
   lives *inside* the set-theoretic algebra, not bolted beside it. It's a bounded
   type `dynamic(bound)` (pure `dynamic()` = `dynamic(ANY)`) whose `bound` is an
   ordinary set-of-tags `Ty`, read as the interval between its optimistic (`⊥`)
@@ -80,9 +80,10 @@ difference, semantic subtyping, `NEVER`/`ANY`/`NUMBER`/`LIST`, `of_value` bridge
 **derived from set inclusion** (static → `bound ⊆ expected`; dynamic → `bound ∩
 expected ≠ ⊥`), not a primitive consistency axiom — so pure `dynamic()` is
 consistent with every inhabited type while `dynamic(number)` is still caught
-against `string`. Composes via `union`/`intersect`/`negate`. The
-"redefinable/free/global references are `dynamic()`" rule is documented (the
-struct doc + ADR-024); no checker consumes it yet.
+against `string`. Joins branch types via `union`; gradual `intersect`/`negate`
+are deferred until a consumer needs them (ADR-011 — don't ship unproven
+operators). The "redefinable/free/global references are `dynamic()`" rule is
+documented (the struct doc + ADR-024); no checker consumes it yet.
 **Done:** the gradual type and its derived relation exist and are unit-tested.
 
 ### Step 3 — typed signatures on primitives ⬜
@@ -98,6 +99,9 @@ ADR-022): literals → singleton `Ty`; primitive calls → result `Ty`;
 **guard/pattern narrowing** mined from the matcher (`(if (int? x) …)`,
 `match` clauses) for occurrence typing. Globals are `dynamic()`. Output is
 **warnings** (provable misuse near its source) and, later, specialisation.
+The pass threads **`GradualTy`** (not bare `Ty`) as its currency — globals/free
+references enter as `dynamic()`, `Ty` is just the static `bound` — so expect
+`consistent_with` and a gradual-vs-gradual relation to grow here.
 *Prepped:* the predicate→type bridge this needs is already in place —
 `Ty::tested_by("int?") → int`, `"number?" → number`, `"list?" → list`, etc.
 **Done when:** a body that provably misuses a value warns at compile time, and no
@@ -105,7 +109,10 @@ correct program is rejected.
 
 ### Step 5+ — structured types ⬜
 Function arrows, vector/list element types, intersections for overloaded fns —
-the fuller set-theoretic algebra. Additive; gated on real need (ADR-011).
+the fuller set-theoretic algebra. Additive; gated on real need (ADR-011). **Note:
+this *replaces* the `u16`-bitset representation of `Ty`** (likely an
+`enum { Set(u16), Arrow(..), Vec(elem), … }`), it doesn't extend it — which is a
+reason to keep the flat lattice lean now rather than over-build on the bitset.
 
 ## Compatibility contract
 
@@ -113,10 +120,14 @@ Every change — new primitive, new special form, new `Value` kind, new feature 
 must keep these true, so future work stays on the set-theoretic path. Items
 marked **(enforced)** are compile errors if violated; the rest are review rules.
 
-1. **Every value has exactly one tag.** The 12 `Tag`s are the type atoms. A new
-   `Value` variant must get a `Tag` (in `value::tag`) and a bit (in
-   `types::bit`). **(enforced)** — both are exhaustive `match`es, so omission
-   won't compile. Don't introduce a value kind that can't be a tag.
+1. **Every value has exactly one tag.** The `Tag`s are the type atoms, and a
+   tag's `#[repr(u8)]` discriminant *is* its lattice bit. A new `Value` variant
+   must get a `Tag` (in `value::tag`, **enforced** — exhaustive match) and be
+   added to `types::ALL_TAGS`; `TAG_COUNT`/`UNIVERSE` then follow automatically.
+   The `tag_universe_is_consistent` test checks bits are dense and in order, so a
+   tag *missing from* or *misordered in* `ALL_TAGS` fails CI (the gap a plain
+   match can't catch, since Rust can't enumerate variants). Don't introduce a
+   value kind that can't be a tag.
 2. **A type is a set of values.** Don't add a typing concept that isn't a set
    (no nominal-only identity, no escape hatch that breaks set semantics).
    Structured types arrive as proper set-theoretic extensions, never bolt-ons.

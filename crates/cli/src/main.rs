@@ -2,6 +2,7 @@
 //!
 //! - With no arguments it starts a REPL.
 //! - With file arguments it loads and runs each file in order.
+//! - `test` runs the project's test suite; `new <name>` scaffolds a project.
 //! - `-j N` / `--max-parallel N` caps how many spawned processes run on OS
 //!   threads at once (0 = unlimited, the default). Useful for bounding a
 //!   concurrent test run; see `std/test.blsp`.
@@ -15,9 +16,26 @@
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
+use brood::error::LispError;
 use brood::Interp;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
+
+/// Print an error as a GNU `FILE:LINE:COL: message` line (editor-parseable),
+/// followed — when the file and position are known — by the offending source
+/// line and a caret under the column. See `docs/tooling.md`.
+fn report_error(e: &LispError) {
+    eprintln!("{}", e.located());
+    if let (Some(file), Some(pos)) = (&e.file, e.pos) {
+        if let Ok(src) = std::fs::read_to_string(file) {
+            if let Some(line) = src.lines().nth(pos.line.saturating_sub(1) as usize) {
+                eprintln!("    {}", line);
+                let pad = " ".repeat(pos.col.saturating_sub(1) as usize);
+                eprintln!("    {}^", pad);
+            }
+        }
+    }
+}
 
 fn main() {
     let (files, max_parallel) = parse_args(std::env::args().skip(1).collect());
@@ -32,8 +50,42 @@ fn main() {
     // loads every tests/**/*_test.blsp, and runs the whole suite once. It raises
     // on failure, so a non-zero exit falls out of the eval error.
     if files.first().map(String::as_str) == Some("test") {
-        if let Err(e) = interp.eval_str("(require 'project) (run-project-tests :trace)") {
-            eprintln!("{}", e);
+        // `--format=structured` switches the reporter to GNU `FILE:LINE: message`
+        // failure lines an editor can jump to (see `docs/tooling.md`); otherwise
+        // the human-readable `:trace` output.
+        let structured = files.iter().any(|a| a == "--format=structured");
+        let opts = if structured { ":structured" } else { ":trace" };
+        let code = format!(
+            "(require 'project) (load-config) (run-project-tests {})",
+            opts
+        );
+        if let Err(e) = interp.eval_str(&code) {
+            // A parse/eval error in a loaded test file carries its file:line:col.
+            report_error(&e);
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    // `brood new <name>` — scaffold a new project (ADR-020): a folder with
+    // project.blsp + src/ + tests/ and starter files. The policy (name checks,
+    // templates) is in Brood (std/project.blsp); we just pass the name in,
+    // escaped so it can't break out of the string literal.
+    if files.first().map(String::as_str) == Some("new") {
+        let name = match files.get(1) {
+            Some(n) => n,
+            None => {
+                eprintln!("brood new: expected a project name, e.g. `brood new foobar`");
+                std::process::exit(2);
+            }
+        };
+        let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+        let code = format!(
+            "(require 'project) (load-config) (new-project \"{}\")",
+            escaped
+        );
+        if let Err(e) = interp.eval_str(&code) {
+            report_error(&e);
             std::process::exit(1);
         }
         return;
@@ -70,7 +122,14 @@ fn parse_args(args: Vec<String>) -> (Vec<String>, Option<usize>) {
         } else if let Some(v) = a
             .strip_prefix("--max-parallel=")
             .or_else(|| a.strip_prefix("--jobs="))
-            .or_else(|| a.strip_prefix("-j"))
+        {
+            Some(v.to_string())
+        } else if let Some(v) = a
+            .strip_prefix("-j")
+            // Only the joined `-jN` form; otherwise a file like `-justfile` would
+            // be misread as a flag. The explicit `=`/spaced forms still error on
+            // a bad value above.
+            .filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_digit()))
         {
             Some(v.to_string())
         } else {
@@ -96,12 +155,7 @@ fn run_files(interp: &mut Interp, files: &[String]) {
         match std::fs::read_to_string(path) {
             Ok(src) => {
                 if let Err(e) = interp.eval_source(&src) {
-                    // GNU `FILE:LINE:COL: message` so editors (compilation-mode,
-                    // flymake) can jump to the error; see `docs/tooling.md`.
-                    match e.pos {
-                        Some(p) => eprintln!("{}:{}:{}: {}", path, p.line, p.col, e),
-                        None => eprintln!("{}: {}", path, e),
-                    }
+                    report_error(&e.or_file(path.clone()));
                     std::process::exit(1);
                 }
             }

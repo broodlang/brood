@@ -68,14 +68,15 @@ The native kernel is **39 primitives** — see [`docs/primitives.md`](docs/primi
 - ⬜ **File I/O** — `slurp`/`spit` (read/write a whole file as a string), beyond
   `load`. **[kernel]** small. (The module work below also adds the fs-reflection
   primitives `file-exists?` / `list-dir` / `cwd`.)
-- ⬜ **Modules** — Emacs-flat `provide`/`require` + `*load-path*`, `foo--private`
+- ✅ **Modules** — Emacs-flat `provide`/`require` + `*load-path*`, `foo--private`
   convention; load-once by feature, embedded std modules baked in. **[kernel]**
-  small (`file-exists?`/`list-dir`/`cwd`) + **[Brood]** (the require logic). ADR-019.
-- ⬜ **Project model + test runner** — convention over configuration (`src/` =
+  small (`file-exists?`/`dir?`/`list-dir`/`cwd`/`name`/`eval-string`/`%builtin-module`)
+  + **[Brood]** (the require logic). ADR-019.
+- ✅ **Project model + test runner** — convention over configuration (`src/` =
   source on `*load-path*`, `tests/**/*_test.blsp` = tests); a `project.blsp`
   manifest declares identity and overrides paths only when needed. `brood test`
-  discovers, loads register-only, and calls `run-tests` once. Mostly **[Brood]** +
-  a CLI subcommand. ADR-020.
+  discovers, loads register-only, and calls `run-tests` once; `brood new <name>`
+  scaffolds a project (`spit`/`make-dir`). Mostly **[Brood]** + CLI dispatch. ADR-020.
 
 ### Tier 3 — robustness & quality
 

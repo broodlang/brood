@@ -23,32 +23,11 @@ use std::fmt;
 
 use crate::value::{self, Tag, Value};
 
-/// The number of tag atoms (must match the [`Tag`] variants).
-const TAG_COUNT: u32 = 12;
-/// All bits set for the 12 atoms — the universe `⊤`.
-const UNIVERSE: u16 = (1u16 << TAG_COUNT) - 1;
-
-/// The bit position of each tag in a [`Ty`]'s bitset. Exhaustive over [`Tag`], so
-/// adding a tag is a compile error here until it's given a bit.
-const fn bit(tag: Tag) -> u32 {
-    match tag {
-        Tag::Nil => 0,
-        Tag::Bool => 1,
-        Tag::Int => 2,
-        Tag::Float => 3,
-        Tag::Sym => 4,
-        Tag::Keyword => 5,
-        Tag::Str => 6,
-        Tag::Pair => 7,
-        Tag::Vector => 8,
-        Tag::Fn => 9,
-        Tag::Macro => 10,
-        Tag::Native => 11,
-    }
-}
-
-/// Every tag, low bit first — for iterating a `Ty`'s members (printing, etc.).
-const ALL_TAGS: [Tag; TAG_COUNT as usize] = [
+/// Every tag, in bit order — for iterating a `Ty`'s members (printing, etc.) and
+/// the source of [`TAG_COUNT`]. **Must list every [`Tag`] variant in discriminant
+/// order**; the compiler can't enumerate variants, so `tag_universe_is_consistent`
+/// (below) is what guards completeness, ordering, and the universe size.
+const ALL_TAGS: [Tag; 12] = [
     Tag::Nil,
     Tag::Bool,
     Tag::Int,
@@ -62,6 +41,18 @@ const ALL_TAGS: [Tag; TAG_COUNT as usize] = [
     Tag::Macro,
     Tag::Native,
 ];
+
+/// The number of tag atoms — derived from [`ALL_TAGS`], not hand-counted.
+const TAG_COUNT: u32 = ALL_TAGS.len() as u32;
+/// All bits set for the atoms — the universe `⊤`. Follows [`TAG_COUNT`].
+const UNIVERSE: u16 = (1u16 << TAG_COUNT) - 1;
+
+/// The bit position of `tag` in a [`Ty`]'s bitset — its `#[repr(u8)]`
+/// discriminant. No hand-maintained mapping (so no collisions possible); the
+/// declaration order of [`Tag`] is the bit order.
+const fn bit(tag: Tag) -> u32 {
+    tag as u8 as u32
+}
 
 /// A set-theoretic type: a set of runtime [`Tag`]s. `Copy` and cheap (one `u16`).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -93,6 +84,9 @@ impl Ty {
     /// branch to `T ∩ ¬tested_by(pred)`. `None` for predicates that don't pin a
     /// tag (`empty?`, `zero?`, …) and for unknown names. Spellings match the
     /// `int?`/`string?`/… builtins and the prelude's `number?`/`list?`.
+    ///
+    /// Keyed by `&str` for now; the Step 4 pass holds interned `Symbol`s, so this
+    /// may move to a `Symbol`-keyed lookup if it proves hot.
     pub fn tested_by(predicate: &str) -> Option<Ty> {
         Some(match predicate {
             "nil?" => Ty::of(Tag::Nil),
@@ -215,12 +209,18 @@ pub struct GradualTy {
 impl GradualTy {
     /// A purely static gradual type — exactly the set `t`, no `?`.
     pub const fn stat(t: Ty) -> GradualTy {
-        GradualTy { bound: t, dynamic: false }
+        GradualTy {
+            bound: t,
+            dynamic: false,
+        }
     }
 
     /// `dynamic(bound)` — gradual, materialisable to anything within `bound`.
     pub const fn dynamic_within(bound: Ty) -> GradualTy {
-        GradualTy { bound, dynamic: true }
+        GradualTy {
+            bound,
+            dynamic: true,
+        }
     }
 
     /// Pure `dynamic()` = `dynamic(ANY)` — the unknown type a redefinable global
@@ -246,26 +246,17 @@ impl GradualTy {
         }
     }
 
-    /// Gradual union — union of bounds, dynamic if either side is. (`dynamic()`
-    /// composes with the set operations rather than standing outside them.)
+    /// Gradual union — union of bounds, dynamic if either side is. Used to join
+    /// the types of branches (e.g. the arms of an `if`). The static set algebra
+    /// lives on [`Ty`] (`self.bound`); the only gradual combinator we expose is
+    /// the one a consumer needs — gradual intersection/negation are deferred
+    /// until Step 4 shows their exact semantics (ADR-011: don't ship unproven
+    /// operators).
     pub fn union(self, other: GradualTy) -> GradualTy {
         GradualTy {
             bound: self.bound.union(other.bound),
             dynamic: self.dynamic || other.dynamic,
         }
-    }
-
-    /// Gradual intersection — intersection of bounds, dynamic if either side is.
-    pub fn intersect(self, other: GradualTy) -> GradualTy {
-        GradualTy {
-            bound: self.bound.intersect(other.bound),
-            dynamic: self.dynamic || other.dynamic,
-        }
-    }
-
-    /// Gradual negation — complement of the bound, preserving the `?`.
-    pub fn negate(self) -> GradualTy {
-        GradualTy { bound: self.bound.negate(), dynamic: self.dynamic }
     }
 }
 
@@ -287,7 +278,7 @@ mod tests {
         assert!(Ty::of(Tag::Int).is_subtype(Ty::NUMBER)); // int ⊆ number
         assert!(Ty::NUMBER.is_subtype(Ty::ANY)); // number ⊆ any
         assert!(!Ty::NUMBER.is_subtype(Ty::of(Tag::Int))); // number ⊄ int
-        // ⊥ is a subtype of everything; everything is a subtype of ⊤.
+                                                           // ⊥ is a subtype of everything; everything is a subtype of ⊤.
         assert!(Ty::NEVER.is_subtype(Ty::of(Tag::Str)));
         assert!(Ty::of(Tag::Str).is_subtype(Ty::ANY));
         assert!(Ty::of(Tag::Int).is_subtype(Ty::of(Tag::Int))); // reflexive
@@ -362,11 +353,46 @@ mod tests {
     }
 
     #[test]
+    fn tag_universe_is_consistent() {
+        // Guards contract point #1: the bits, ALL_TAGS, and the universe size all
+        // agree. `bit` is the `#[repr(u8)]` discriminant, so this also catches a
+        // tag missing from (or misordered in) ALL_TAGS — the gap a plain
+        // exhaustive match can't, since Rust can't enumerate enum variants.
+        for (i, tag) in ALL_TAGS.iter().enumerate() {
+            // ALL_TAGS is in discriminant/bit order, densely from 0.
+            assert_eq!(
+                bit(*tag),
+                i as u32,
+                "{} is out of order in ALL_TAGS",
+                tag.name()
+            );
+            // Every atom's bit is inside the universe...
+            assert!(bit(*tag) < TAG_COUNT);
+            // ...so every singleton is a subtype of ANY (none falls outside ⊤).
+            assert!(Ty::of(*tag).is_subtype(Ty::ANY));
+        }
+        assert_eq!(
+            UNIVERSE.count_ones(),
+            TAG_COUNT,
+            "universe must cover every atom"
+        );
+    }
+
+    #[test]
     fn pure_dynamic_is_consistent_with_every_inhabited_type() {
         let d = GradualTy::dynamic();
         assert!(d.is_dynamic());
-        for t in [Ty::of(Tag::Int), Ty::NUMBER, Ty::of(Tag::Str), Ty::LIST, Ty::ANY] {
-            assert!(d.consistent_with(t), "dynamic() should be consistent with {t}");
+        for t in [
+            Ty::of(Tag::Int),
+            Ty::NUMBER,
+            Ty::of(Tag::Str),
+            Ty::LIST,
+            Ty::ANY,
+        ] {
+            assert!(
+                d.consistent_with(t),
+                "dynamic() should be consistent with {t}"
+            );
         }
     }
 

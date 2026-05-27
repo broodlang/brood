@@ -22,10 +22,7 @@ pub fn read_all(heap: &mut Heap, src: &str) -> Result<Vec<Value>, LispError> {
 /// Read every form in `src`, pairing each top-level form with its 1-based
 /// start position. The file runner uses these so a runtime error can be
 /// reported against the enclosing top-level form (see `docs/tooling.md`).
-pub fn read_all_positioned(
-    heap: &mut Heap,
-    src: &str,
-) -> Result<Vec<(Value, Pos)>, LispError> {
+pub fn read_all_positioned(heap: &mut Heap, src: &str) -> Result<Vec<(Value, Pos)>, LispError> {
     let mut parser = Parser::new(heap, src);
     let mut forms = Vec::new();
     loop {
@@ -58,7 +55,11 @@ struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     fn new(heap: &'a mut Heap, src: &str) -> Self {
-        Parser { heap, chars: src.chars().collect(), pos: 0 }
+        Parser {
+            heap,
+            chars: src.chars().collect(),
+            pos: 0,
+        }
     }
 
     fn at_end(&self) -> bool {
@@ -85,6 +86,12 @@ impl<'a> Parser<'a> {
     /// A parse error tagged with the current position.
     fn err(&self, msg: impl Into<String>) -> LispError {
         LispError::parse(msg).with_pos(self.pos_at(self.pos))
+    }
+
+    /// A parse error tagged with a specific position (e.g. where a delimiter
+    /// opened, which is more useful for "unclosed" than the EOF position).
+    fn err_at(&self, pos: Pos, msg: impl Into<String>) -> LispError {
+        LispError::parse(msg).with_pos(pos)
     }
 
     fn peek(&self) -> Option<char> {
@@ -121,7 +128,9 @@ impl<'a> Parser<'a> {
 
     fn read_form(&mut self) -> Result<Value, LispError> {
         self.skip_trivia();
-        let c = self.peek().ok_or_else(|| self.err("unexpected end of input"))?;
+        let c = self
+            .peek()
+            .ok_or_else(|| self.err("unexpected end of input"))?;
         match c {
             '(' => self.read_seq(')'),
             '[' => self.read_vector(),
@@ -157,29 +166,65 @@ impl<'a> Parser<'a> {
     }
 
     fn read_seq(&mut self, close: char) -> Result<Value, LispError> {
+        let start = self.pos_at(self.pos); // position of the opening delimiter
         self.pos += 1; // opening delimiter
         let mut items = Vec::new();
+        let mut tail = Value::Nil;
         loop {
             self.skip_trivia();
             match self.peek() {
-                None => return Err(self.err("unclosed list")),
+                None => return Err(self.err_at(start, "unclosed list (opened here)")),
                 Some(c) if c == close => {
                     self.pos += 1;
                     break;
                 }
+                // A lone `.` introduces an improper (dotted) tail: `(a . b)`.
+                Some('.') if self.is_dot_separator() => {
+                    if items.is_empty() {
+                        return Err(self.err("dotted list needs an element before '.'"));
+                    }
+                    self.pos += 1; // the '.'
+                    self.skip_trivia();
+                    match self.peek() {
+                        None => return Err(self.err("unclosed list")),
+                        Some(c) if c == close => {
+                            return Err(self.err("expected a form after '.' in dotted list"))
+                        }
+                        Some(_) => tail = self.read_form()?,
+                    }
+                    self.skip_trivia();
+                    match self.peek() {
+                        Some(c) if c == close => {
+                            self.pos += 1;
+                            break;
+                        }
+                        _ => return Err(self.err("expected one form after '.' before close")),
+                    }
+                }
                 Some(_) => items.push(self.read_form()?),
             }
         }
-        Ok(self.heap.list(items))
+        let form = self.heap.list_with_tail(items, tail);
+        self.heap.set_form_pos(form, start); // for (form-pos …); see docs/tooling.md
+        Ok(form)
+    }
+
+    /// Is the `.` at the cursor a lone dotted-pair separator (followed by a
+    /// delimiter or end), rather than the start of an atom like `.5` or `.foo`?
+    fn is_dot_separator(&self) -> bool {
+        self.chars
+            .get(self.pos + 1)
+            .is_none_or(|&c| is_delimiter(c))
     }
 
     fn read_vector(&mut self) -> Result<Value, LispError> {
+        let start = self.pos_at(self.pos); // position of the opening '['
         self.pos += 1; // '['
         let mut items = Vec::new();
         loop {
             self.skip_trivia();
             match self.peek() {
-                None => return Err(self.err("unclosed vector")),
+                None => return Err(self.err_at(start, "unclosed vector (opened here)")),
                 Some(']') => {
                     self.pos += 1;
                     break;
@@ -229,7 +274,10 @@ impl<'a> Parser<'a> {
 
 fn is_delimiter(c: char) -> bool {
     c.is_whitespace()
-        || matches!(c, '(' | ')' | '[' | ']' | '{' | '}' | '"' | ';' | '\'' | '`' | '~' | ',')
+        || matches!(
+            c,
+            '(' | ')' | '[' | ']' | '{' | '}' | '"' | ';' | '\'' | '`' | '~' | ','
+        )
 }
 
 /// Classify an atom token (no heap needed — atoms are numbers/symbols/keywords).
@@ -262,8 +310,12 @@ fn looks_numeric(token: &str) -> bool {
         Some(c) => c,
         None => return false,
     };
-    if !(first.is_ascii_digit() || ((first == '-' || first == '+' || first == '.') && token.len() > 1)) {
+    if !(first.is_ascii_digit()
+        || ((first == '-' || first == '+' || first == '.') && token.len() > 1))
+    {
         return false;
     }
-    token.chars().all(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E'))
+    token
+        .chars()
+        .all(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E'))
 }

@@ -8,7 +8,8 @@
 //! moved between scheduler threads — and it gives us one place to do GC.
 
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex, MutexGuard};
 
 use crate::error::LispResult;
 use crate::heap::Heap;
@@ -26,8 +27,15 @@ struct Interner {
     names: Vec<String>,
 }
 
+// The interner is read-mostly and lives for the whole process; recover from a
+// poisoned lock rather than letting one panicking thread wedge symbol lookup
+// everywhere (the table is append-only, so a recovered guard is consistent).
+fn interner() -> MutexGuard<'static, Interner> {
+    INTERNER.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 pub fn intern(name: &str) -> Symbol {
-    let mut i = INTERNER.lock().unwrap();
+    let mut i = interner();
     if let Some(&id) = i.ids.get(name) {
         return id;
     }
@@ -38,7 +46,7 @@ pub fn intern(name: &str) -> Symbol {
 }
 
 pub fn symbol_name(sym: Symbol) -> String {
-    INTERNER.lock().unwrap().names[sym as usize].clone()
+    interner().names[sym as usize].clone()
 }
 
 // ----- handles into the Heap -----
@@ -133,7 +141,14 @@ pub enum Value {
 /// as the base of the (future, advisory) inference lattice. This *is* Brood's
 /// entire type universe; the language has no other types. Names mirror the
 /// `int?`/`string?`/… predicates (`Sym` → `symbol`, `Str` → `string`).
+///
+/// `#[repr(u8)]` is load-bearing: `Tag as u8` is the bit position of this tag in
+/// a [`crate::types::Ty`] set, so the *declaration order is the lattice bit
+/// order*. Adding a variant just extends the universe; reordering renumbers the
+/// bits (harmless — `Ty` values aren't persisted — but keep `types::ALL_TAGS` in
+/// the same order, which a test checks).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
 pub enum Tag {
     Nil,
     Bool,
@@ -221,7 +236,10 @@ pub struct Arity {
 impl Arity {
     /// Exactly `n` arguments.
     pub const fn exact(n: usize) -> Self {
-        Arity { min: n, max: Some(n) }
+        Arity {
+            min: n,
+            max: Some(n),
+        }
     }
     /// `n` or more (variadic tail).
     pub const fn at_least(n: usize) -> Self {
@@ -229,7 +247,10 @@ impl Arity {
     }
     /// Between `min` and `max` inclusive (e.g. an optional trailing arg).
     pub const fn range(min: usize, max: usize) -> Self {
-        Arity { min, max: Some(max) }
+        Arity {
+            min,
+            max: Some(max),
+        }
     }
     /// Any number of arguments.
     pub const fn any() -> Self {
@@ -257,18 +278,15 @@ pub fn kw(name: &str) -> Value {
     Value::Keyword(intern(name))
 }
 
-thread_local! {
-    static GENSYM_COUNTER: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
+// Process-wide so the uniqueness guarantee below holds across scheduler threads:
+// a green process expanding macros on a worker thread must not mint the same name
+// as the root thread. (A `thread_local` counter would reset per worker and clash.)
+static GENSYM_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// A fresh, interned symbol `<prefix>__<n>` for hygiene-by-convention. Shared by
 /// the `gensym` builtin and the compile pass (so a macro-time temporary and a
-/// pattern-lowering temporary can never collide).
+/// pattern-lowering temporary can never collide), across all threads.
 pub fn gensym(prefix: &str) -> Value {
-    let n = GENSYM_COUNTER.with(|c| {
-        let v = c.get();
-        c.set(v + 1);
-        v
-    });
+    let n = GENSYM_COUNTER.fetch_add(1, Ordering::Relaxed);
     sym(&format!("{}__{}", prefix, n))
 }

@@ -128,7 +128,10 @@ struct MailboxState {
 impl Mailbox {
     fn new() -> Arc<Mailbox> {
         Arc::new(Mailbox {
-            state: Mutex::new(MailboxState { queue: VecDeque::new(), waiter: None }),
+            state: Mutex::new(MailboxState {
+                queue: VecDeque::new(),
+                waiter: None,
+            }),
             cv: Condvar::new(),
         })
     }
@@ -208,7 +211,9 @@ pub fn worker_threads() -> u64 {
 
 fn worker_count() -> usize {
     match WORKER_COUNT.load(Ordering::SeqCst) {
-        0 => std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
+        0 => std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1),
         n => n,
     }
 }
@@ -292,7 +297,9 @@ pub fn spawn(heap: &Heap, f: Value, args: &[Value]) -> Result<u64, LispError> {
     // function is already shared, so this is usually a no-op.
     let f = heap.promote(f);
     if !matches!(f, Value::Fn(_)) {
-        return Err(LispError::type_err("spawn: first argument must be a function"));
+        return Err(LispError::type_err(
+            "spawn: first argument must be a function",
+        ));
     }
     // Args are *data*: ship them as messages, rebuilt into the child's own heap.
     let mut arg_msgs = Vec::with_capacity(args.len());
@@ -339,7 +346,11 @@ pub fn spawn(heap: &Heap, f: Value, args: &[Value]) -> Result<u64, LispError> {
 pub fn send(heap: &Heap, pid_val: Value, msg_val: Value) -> Result<(), LispError> {
     let pid = match pid_val {
         Value::Int(n) if n >= 0 => n as u64,
-        _ => return Err(LispError::type_err("send: first argument must be a pid (integer)")),
+        _ => {
+            return Err(LispError::type_err(
+                "send: first argument must be a pid (integer)",
+            ))
+        }
     };
     let msg = to_message(heap, msg_val)?;
     let mailbox = REGISTRY.lock().unwrap().get(&pid).cloned();
@@ -409,7 +420,11 @@ fn ensure_ctx() -> Ctx {
         let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
         let mailbox = Mailbox::new();
         REGISTRY.lock().unwrap().insert(pid, Arc::clone(&mailbox));
-        let ctx = Ctx { pid, mailbox, yielder: None };
+        let ctx = Ctx {
+            pid,
+            mailbox,
+            yielder: None,
+        };
         *c.borrow_mut() = Some(ctx.clone());
         ctx
     })
