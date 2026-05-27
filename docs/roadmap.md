@@ -42,6 +42,8 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   in the prelude (no new special forms — ADR-011)
 - ⬜ **Maps** (`{ }` literals, `get`/`assoc`)
 - ⬜ **Tracing GC** (`gc-arena`) to replace `Rc` before sessions get long-lived
+  — now well-motivated: the `mem-peak` line on the test suite shows ~300 MB
+  retained with no reclamation (`sum-to 100000` leaks its envs/conses)
 - 🟡 Nicer REPL — `rustyline` line editing (arrow keys, history, Emacs bindings)
   is in; richer completion/highlighting still to come
 - ⬜ **Self-host the CLI/REPL in Brood** — once the language can express it, the

@@ -9,7 +9,7 @@ load-bearing choice (ADR-006 "write the language in the language", ADR-008
 
 `%`-prefixed names are low-level primitives not meant to be called directly.
 
-## Native primitive functions (45)
+## Native primitive functions (47)
 
 | Category | Primitive | Arity | Purpose |
 |---|---|---|---|
@@ -29,6 +29,8 @@ load-bearing choice (ADR-006 "write the language in the language", ADR-008
 | | `pr-str` | 1 | *readable* form of a value → string |
 | | `print` `println` | n | write display forms to stdout → nil |
 | **Time** | `now` | 0 | wall-clock milliseconds since the Unix epoch (integer); subtract two readings for elapsed time |
+| **Memory** | `mem-bytes` | 0 | bytes currently allocated process-wide (from the counting global allocator) |
+| | `mem-peak` | 0 | high-water mark of allocated bytes since process start |
 | **Self-hosting hooks** | `eval` | 1 | evaluate a form in the global env |
 | | `read-string` | 1 | parse one form from text |
 | | `load` | 1 | read + evaluate a file |
@@ -44,9 +46,9 @@ load-bearing choice (ADR-006 "write the language in the language", ADR-008
 | | `self` | 0 | this process's pid |
 
 **Why this set is irreducible:** every entry needs Rust — raw number ops, heap
-construct/inspect, type-tag tests, I/O, value→text conversion, or a hook into
-`eval`/the reader. None of it can be written in Brood. Everything that *can* be
-is already in the prelude.
+construct/inspect, type-tag tests, I/O, value→text conversion, the wall clock,
+the allocator counters, or a hook into `eval`/the reader. None of it can be
+written in Brood. Everything that *can* be is already in the prelude.
 
 ## Special forms (not primitives)
 

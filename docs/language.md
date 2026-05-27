@@ -237,12 +237,19 @@ follow-up). See [concurrency.md](concurrency.md) for the model and limitations.
 - `str` concatenates the *display* form of its args; `pr-str` returns the
   *readable* form of one value.
 
-### Time
-`now`
+### Time & memory
+`now`  `mem-bytes`  `mem-peak`
 
 - `(now)` returns wall-clock milliseconds since the Unix epoch as an integer.
   Subtract two readings to measure elapsed time — the test runner uses it to
   report how long a suite took.
+- `(mem-bytes)` returns the bytes currently allocated process-wide, and
+  `(mem-peak)` the high-water mark since the process started. They are fed by a
+  byte-counting global allocator, so they cover *all* Rust allocations (the
+  interpreter included), not just Brood values — which is what you want for
+  "how much memory did this use." The test runner prints the peak alongside the
+  time. (Until the tracing GC lands, nothing is reclaimed mid-run, so the two
+  read nearly the same.)
 
 ### Metaprogramming / self-hosting
 `eval`  `read-string`  `load`  `require`  `macroexpand`  `macroexpand-1`  `gensym`

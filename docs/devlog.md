@@ -177,5 +177,21 @@ parameter lists and the broader role of vectors:
   summary reports `N tests, M assertions, K failed (T ms)`.
 - The timer immediately earned its keep: it surfaced that the suite takes ~5.7s
   in the debug build, dominated by the `sum-to 100000` tail-call test.
-- Docs: `primitives.md` (Time category, count 44→45), `language.md` (Time
-  section).
+
+- Follow-up, same ask: also report **memory**. Added a byte-counting
+  `#[global_allocator]` (`crates/lisp/src/alloc.rs`) wrapping the system
+  allocator with two relaxed atomics (live bytes + peak), declared in `lib.rs`
+  so the CLI and the test binaries share it. Two primitives read it: `mem-bytes`
+  (live) and `mem-peak` (high-water). 47 primitives now. Dependency-free (std
+  `alloc` only), per ADR-005 (ADR-012).
+- The runner now prints `… failed` then an indented `(T ms, peak X.X MB)` line;
+  MB formatting (round to 0.1) is done in Brood with a small `quot` helper since
+  `/` already lands on an int when the division is exact.
+- This *also* earned its keep instantly: peak is ~300 MB for the suite, because
+  there is **no GC yet** (ADR-002) — `sum-to 100000` retains ~317 MB of envs/
+  conses that are never reclaimed mid-run (so `mem-bytes` ≈ `mem-peak`). Live
+  motivation for the tracing-GC migration; the two readings will diverge once it
+  lands. CPU time was assessed and deferred (wall-clock already covers it; true
+  user+sys needs `/proc` parsing or `libc`).
+- Docs: `primitives.md` (Time + Memory categories, count 44→47), `language.md`
+  (Time & memory section), `decisions.md` (ADR-012).

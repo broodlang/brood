@@ -124,16 +124,18 @@ shared. Today only the global frame's *contents* point into the shared region.
    `Heap`; accessors dispatch on the bit. Shared region starts **empty** → all
    reads route local → behaviour identical (25 tests + suite green; `Heap` stays
    `Send`). The safe foundation.
-2. **Closures capture the global env symbolically** (`Closure.env: Option<EnvId>`,
-   `None` = global; `Heap` records its process global). Prerequisite for sharing
-   closures across processes. *(2a — done; behaviour-preserving: 25 tests + suite
-   green.)* **2b:** relocate the prelude's closures + code + natives into the
-   shared region (`Arc<SharedCode>`), and rebuild each process's global env from a
-   prelude bindings map (symbol → shared handle). The global env stays local +
-   mutable; only the *code* is shared.
-3. **`spawn` shares the code.** Children clone the `Arc` instead of reloading the
-   prelude → cheap spawn, and spawned functions can call prelude/builtins via the
-   shared globals. (User defns still not visible until step 5.)
+2. ✅ **2a** — closures capture the global env symbolically (`Closure.env:
+   Option<EnvId>`, `None` = global; `Heap` records its process global).
+   ✅ **2b** — the prelude (closures + code data + natives) is relocated into a
+   shared `Arc<SharedCode>`, built once (lazily) via a builder heap +
+   `freeze_as_shared_code` (re-tags handles local→shared). Each `Interp::new`
+   shares that `Arc` and seeds a fresh local+mutable global env from the prelude
+   bindings — *no prelude reload*. Behaviour-preserving (25 tests + suite green).
+3. ✅ **`spawn` shares the code.** Since `Interp::new` no longer reloads the
+   prelude (clones the `Arc` + copies the bindings map), spawning a process is
+   cheap and the child can call any prelude/builtin via the shared region.
+   (Parent's *user* `defn`s are still local — visible to children only after
+   step 4.)
 4. **Mutable shared region.** `def`/`defmacro` promote code to shared and rebind
    the shared global table (append-only code + locked bindings). Live redefinition
    works within a process.

@@ -14,6 +14,7 @@
 //!
 //! See `docs/` for the architecture, language reference, and roadmaps.
 
+pub mod alloc;
 pub mod builtins;
 pub mod error;
 pub mod eval;
@@ -24,9 +25,39 @@ pub mod process;
 pub mod reader;
 pub mod value;
 
+use std::sync::{Arc, LazyLock};
+
 use error::LispError;
-use heap::Heap;
-use value::{EnvId, Value};
+use heap::{Heap, SharedCode};
+use value::{EnvId, Symbol, Value};
+
+/// The shared code region (prelude closures, code data, builtins) plus the
+/// global bindings to seed each process's global env. Built once, lazily.
+struct SharedBundle {
+    code: Arc<SharedCode>,
+    bindings: Vec<(Symbol, Value)>,
+}
+
+static SHARED: LazyLock<SharedBundle> = LazyLock::new(|| {
+    // Build the prelude + builtins in a throwaway builder heap, then relocate it
+    // all into the shared region. Done once for the whole process.
+    let mut heap = Heap::new();
+    let root = heap.new_env(None);
+    heap.set_global(root);
+    builtins::register(&mut heap, root);
+    let forms = reader::read_all(&mut heap, PRELUDE).expect("read prelude");
+    for form in forms {
+        eval::eval(&mut heap, form, root).unwrap_or_else(|e| panic!("prelude: {}", e));
+    }
+    let (code, bindings) = heap.freeze_as_shared_code(root);
+    SharedBundle { code: Arc::new(code), bindings }
+});
+
+/// The byte-counting allocator (see [`alloc`]) backs the whole process, so
+/// `(mem-bytes)` / `(mem-peak)` see every Rust allocation. Declared here in the
+/// library so the CLI and the integration-test binaries all share one.
+#[global_allocator]
+static GLOBAL: alloc::Counting = alloc::Counting;
 
 /// An interpreter instance: a heap and a global environment with builtins and
 /// the prelude loaded.
@@ -37,15 +68,15 @@ pub struct Interp {
 
 impl Interp {
     pub fn new() -> Self {
-        let mut heap = Heap::new();
+        // Share the (lazily built) code region; seed a fresh, local, mutable
+        // global env from the prelude bindings — no prelude reload.
+        let mut heap = Heap::with_code(Arc::clone(&SHARED.code));
         let root = heap.new_env(None);
         heap.set_global(root);
-        builtins::register(&mut heap, root);
-        let mut interp = Interp { heap, root };
-        interp
-            .eval_str(PRELUDE)
-            .unwrap_or_else(|e| panic!("failed to load prelude: {}", e));
-        interp
+        for &(sym, val) in &SHARED.bindings {
+            heap.env_define(root, sym, val);
+        }
+        Interp { heap, root }
     }
 
     /// Read every form in `src`, evaluate each against the global environment,

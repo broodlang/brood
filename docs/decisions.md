@@ -226,6 +226,40 @@ kernel) on the *ergonomics* side: small kernel, small surface.
 
 ---
 
+## ADR-012 — A process-wide byte-counting allocator for memory introspection
+
+**Status:** accepted.
+
+**Decision.** Install a `#[global_allocator]` (`crates/lisp/src/alloc.rs`) that
+wraps the system allocator and maintains two relaxed atomics — live bytes and a
+peak high-water mark — exposed to Brood as the `mem-bytes` / `mem-peak`
+primitives. It is declared in the `brood` library (not the CLI binary) so the
+CLI and every integration-test binary share one allocator.
+
+**Why.** Reading the process's memory use genuinely needs Rust (you can't
+bootstrap it on top of cons/`+`), so it belongs in the kernel — like `now`
+(ADR-008). A wrapping allocator is the simplest accurate option: it counts
+*every* Rust allocation, which is exactly the "how much memory did this use"
+number, and needs no `/proc` parsing or extra crate (stays dependency-free,
+ADR-005). The alternative — instrumenting `Heap`'s `alloc_*` — would miss
+allocations behind std collections and only counts objects, not bytes; revisit
+it when the tracing GC lands (ADR-002), where an arena reports live bytes for
+free.
+
+**Trade-offs.** The allocator is *always on*: two atomic ops per (de)allocation
+process-wide (negligible, but real), and declaring it in the library forces it
+on all downstream binaries (fine for this workspace; could be feature-gated if
+that ever bites). The counters surfaced their value immediately — the test
+suite peaks at ~300 MB because there is no reclamation yet (ADR-002), making
+`mem-bytes` ≈ `mem-peak`; the two will diverge once the GC exists.
+
+**Deferred — CPU time.** Wall-clock (`now`) covers the common case. True
+user+sys CPU time would need `getrusage`/`libc` (against ADR-005) or
+Linux-specific `/proc` parsing; deferred until a concrete need (e.g. attributing
+cost across the thread-backed processes).
+
+---
+
 ## Deferred / open questions
 
 - **Macro hygiene:** currently unhygienic `defmacro` + `gensym`; hygienic macros

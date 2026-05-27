@@ -66,6 +66,16 @@
     (println "FAILURES:")
     (fold (fn (_ msg) (println (str "  " msg))) nil (reverse *failures*))))
 
+;; Integer division, and a "N.N MB" formatter for the memory line. `rem` is the
+;; integer-remainder primitive; `(- a (rem a b))` is divisible by b, so here `/`
+;; lands on an integer rather than a float.
+(defn quot (a b) (/ (- a (rem a b)) b))
+(defn mb-str (bytes)
+  (let (tenths (quot (+ (* bytes 10) 524288) 1048576)   ; round to nearest 0.1 MB
+        whole  (quot tenths 10)
+        frac   (rem tenths 10))
+    (str whole "." frac " MB")))
+
 (defn run-tests ()
   (set! *passed* 0)
   (set! *failed* 0)
@@ -78,8 +88,8 @@
       (println "")
       (println (count *tests*) "tests,"
                (+ *passed* *failed*) "assertions,"
-               *failed* "failed"
-               (str "(" elapsed " ms)"))
+               *failed* "failed")
+      (println (str "  (" elapsed " ms, peak " (mb-str (mem-peak)) ")"))
       (if (> *failed* 0)
         (error (str *failed* " assertion(s) failed"))
         :ok))))

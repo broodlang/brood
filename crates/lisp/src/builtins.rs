@@ -63,6 +63,10 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // time
     def(heap, "now", now);
 
+    // memory
+    def(heap, "mem-bytes", mem_bytes);
+    def(heap, "mem-peak", mem_peak);
+
     // self-hosting
     def(heap, "eval", eval_builtin);
     def(heap, "read-string", read_string);
@@ -319,6 +323,18 @@ fn now(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
     Ok(Value::Int(ms))
+}
+
+// ---------- memory ----------
+
+/// `(mem-bytes)` — bytes currently allocated across the whole process.
+fn mem_bytes(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    Ok(Value::Int(crate::alloc::live_bytes() as i64))
+}
+
+/// `(mem-peak)` — high-water mark of allocated bytes since the process started.
+fn mem_peak(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    Ok(Value::Int(crate::alloc::peak_bytes() as i64))
 }
 
 // ---------- self-hosting ----------

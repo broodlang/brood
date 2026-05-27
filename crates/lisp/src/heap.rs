@@ -26,6 +26,20 @@ struct EnvFrame {
     parent: Option<EnvId>,
 }
 
+/// Re-tag a value's handle from the local region to the shared region (same
+/// slab index, region bit set). Atoms are unchanged.
+fn to_shared(v: Value) -> Value {
+    match v {
+        Value::Pair(id) => Value::Pair(PairId::shared(id.index())),
+        Value::Vector(id) => Value::Vector(VecId::shared(id.index())),
+        Value::Str(id) => Value::Str(StrId::shared(id.index())),
+        Value::Fn(id) => Value::Fn(ClosureId::shared(id.index())),
+        Value::Macro(id) => Value::Macro(ClosureId::shared(id.index())),
+        Value::Native(id) => Value::Native(NativeId::shared(id.index())),
+        other => other,
+    }
+}
+
 /// The slabs holding heap objects. Used for both the local heap and the shared
 /// code region.
 #[derive(Default)]
@@ -56,6 +70,49 @@ pub struct Heap {
 impl Heap {
     pub fn new() -> Self {
         Heap { local: Slabs::default(), code: Arc::default(), global: EnvId::local(0) }
+    }
+
+    /// A fresh process heap sharing the given code region (empty local slabs).
+    pub fn with_code(code: Arc<SharedCode>) -> Self {
+        Heap { local: Slabs::default(), code, global: EnvId::local(0) }
+    }
+
+    /// Consume this (builder) heap: move everything it allocated into a shared
+    /// code region — re-tagging every handle from the local region to the shared
+    /// region — and return that region plus the global env's bindings
+    /// (`symbol -> shared value`) used to seed each process's global env.
+    ///
+    /// Env frames are dropped: shared (top-level) closures capture the global
+    /// env symbolically (`env == None`), so nothing references a shared frame.
+    pub fn freeze_as_shared_code(self, root: EnvId) -> (SharedCode, Vec<(Symbol, Value)>) {
+        let bindings: Vec<(Symbol, Value)> = self.local.envs[root.index()]
+            .vars
+            .iter()
+            .map(|(&s, &v)| (s, to_shared(v)))
+            .collect();
+
+        let mut slabs = self.local;
+        for p in &mut slabs.pairs {
+            p.0 = to_shared(p.0);
+            p.1 = to_shared(p.1);
+        }
+        for vec in &mut slabs.vectors {
+            for x in vec.iter_mut() {
+                *x = to_shared(*x);
+            }
+        }
+        for c in &mut slabs.closures {
+            for f in c.body.iter_mut() {
+                *f = to_shared(*f);
+            }
+            for (_, d) in c.optionals.iter_mut() {
+                *d = to_shared(*d);
+            }
+            debug_assert!(c.env.is_none(), "shared closures must capture the global env");
+        }
+        slabs.envs = Vec::new(); // the shared region has no env frames
+
+        (SharedCode { slabs }, bindings)
     }
 
     /// Record this process's global environment (call once, after creating it).
