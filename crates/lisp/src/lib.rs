@@ -1,63 +1,65 @@
 //! mylisp — a small, dynamic Lisp built to (eventually) write a modern,
 //! self-editing text editor.
 //!
-//! This crate is the language itself: the reader, evaluator, value model, and
-//! builtins. The binary in `crates/cli` wraps it in a REPL.
-//!
-//! ## The 30-second tour
+//! This crate is the language: reader, evaluator, value model, the per-process
+//! [`Heap`](heap::Heap), and builtins. The binary in `crates/cli` wraps it in a
+//! REPL.
 //!
 //! ```
 //! use mylisp::Interp;
-//! let interp = Interp::new();
+//! let mut interp = Interp::new();
 //! let result = interp.eval_str("(+ 1 2)").unwrap();
-//! assert_eq!(result.to_string(), "3");
+//! assert_eq!(interp.print(result), "3");
 //! ```
 //!
-//! See `docs/` for the architecture, language reference, and roadmap.
+//! See `docs/` for the architecture, language reference, and roadmaps.
 
 pub mod builtins;
-pub mod env;
 pub mod error;
 pub mod eval;
+pub mod heap;
 pub mod macros;
 pub mod printer;
 pub mod reader;
 pub mod value;
 
-use std::rc::Rc;
-
-use env::Env;
 use error::LispError;
-use value::Value;
+use heap::Heap;
+use value::{EnvId, Value};
 
-/// An interpreter instance: a global environment with builtins and the prelude
-/// already loaded. Hold one and feed it source with [`Interp::eval_str`].
+/// An interpreter instance: a heap and a global environment with builtins and
+/// the prelude loaded.
 pub struct Interp {
-    pub root: Rc<Env>,
+    pub heap: Heap,
+    pub root: EnvId,
 }
 
 impl Interp {
     pub fn new() -> Self {
-        let root = Env::new_root();
-        builtins::register(&root);
-        let interp = Interp { root };
-        // The prelude is bundled and exercised by the test suite, so a failure
-        // here is a build-time bug, not a user error.
+        let mut heap = Heap::new();
+        let root = heap.new_env(None);
+        builtins::register(&mut heap, root);
+        let mut interp = Interp { heap, root };
         interp
             .eval_str(PRELUDE)
             .unwrap_or_else(|e| panic!("failed to load prelude: {}", e));
         interp
     }
 
-    /// Read every form in `src`, evaluate each in turn against the global
-    /// environment, and return the value of the last one.
-    pub fn eval_str(&self, src: &str) -> Result<Value, LispError> {
-        let forms = reader::read_all(src)?;
+    /// Read every form in `src`, evaluate each against the global environment,
+    /// and return the value of the last.
+    pub fn eval_str(&mut self, src: &str) -> Result<Value, LispError> {
+        let forms = reader::read_all(&mut self.heap, src)?;
         let mut result = Value::Nil;
         for form in forms {
-            result = eval::eval(form, self.root.clone())?;
+            result = eval::eval(&mut self.heap, form, self.root)?;
         }
         Ok(result)
+    }
+
+    /// Render a value to its readable text form.
+    pub fn print(&self, v: Value) -> String {
+        printer::print(&self.heap, v)
     }
 }
 
@@ -67,6 +69,5 @@ impl Default for Interp {
     }
 }
 
-/// The standard prelude, written in mylisp and baked into the binary. Defines
-/// the handful of helpers that are more natural in the language than in Rust.
+/// The standard prelude, written in mylisp and baked into the binary.
 const PRELUDE: &str = include_str!("../../../std/prelude.lisp");

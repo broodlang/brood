@@ -111,20 +111,44 @@ are **no cross-heap pointers**. That collapses the GC problem:
 We can ship `Send` with a **non-collecting** arena first (unblocks multi-core),
 then add the per-process mark-sweep — neither step needs the other to land.
 
+## Keep Rust a thin substrate
+
+We deliberately hand-roll the GC and the scheduler rather than adopt
+Rust-specific machinery (gc-arena, an async runtime, `Arc`/locks as the model).
+Rust stays at the **lowest layer** — the allocator behind the arena, and
+`std::thread` workers for the schedulers — while the *model* (heap layout, GC
+algorithm, processes, mailboxes, copy-on-send isolation, `spawn`/`send`/`receive`
+semantics) is **ours**.
+
+- **Why:** control and comprehensibility; the language's semantics aren't dictated
+  by a crate's constraints (gc-arena's `mutate`/`'gc` would have reshaped the
+  evaluator); portability and a path toward self-hosting; and isolation keeps the
+  hand-rolled GC small, so the cost is low.
+- **Isolation is guaranteed by the model** (no cross-heap pointers because
+  messages are copied), not by leaning on Rust's type system. We still *use*
+  `Send` as a guardrail that a process heap is movable — a check, not the design.
+- This is not "avoid Rust" — it's "don't let Rust-specific mechanisms define the
+  model." The thin substrate stays swappable.
+
 ## Staged migration plan (approach B)
 
-1. **Isolate `Rc` behind the `value.rs` seam.** Route *every* heap construction
-   through `value.rs` constructors (`cons`/`list`/`vector`/`closure`/`native`/…),
-   so the heap swap later touches one module. Safe, behavior-preserving.
-2. **Introduce the per-process arena** behind those constructors; `Value`
-   allocation goes through it. No behavior change yet; still single-threaded.
-3. **Reach `Send`** (non-collecting arena). The process heap is now movable
-   across threads. Add a test asserting the heap type is `Send`.
-4. **Multi-core scheduler** on top (concurrency doc phase ②): N threads,
+1. ✅ **Isolate `Rc` behind the `value.rs` seam.** Every heap construction goes
+   through `value.rs` constructors. Safe, behavior-preserving.
+2. ✅ **Introduce the per-process arena.** `Value` is now a `Copy` handle into a
+   `Heap` (`heap.rs`): per-type slabs for pairs/vectors/strings/closures/natives
+   plus env frames. The heap threads through reader/eval/builtins/printer. No
+   behavior change (25 tests green); still single-threaded — one heap.
+3. ✅ **Reach `Send`** (non-collecting arena — it only grows for now). The `Heap`
+   is plain `Vec`s of data, so it's `Send`; a `heap_is_send` test asserts it.
+4. ⬜ **Multi-core scheduler** (concurrency doc phase ②): N threads,
    work-stealing, copy-on-send messages, default **2 schedulers** for testing.
-5. **Per-process mark-sweep GC** (see "GC — simplified by isolation"). Roots =
+5. ⬜ **Per-process mark-sweep GC** (see "GC — simplified by isolation"). Roots =
    each process's stack + mailbox; the shared code table is outside it.
-6. **Suspension** via stackful coroutines for blocking `receive`.
+6. ⬜ **Suspension** via stackful coroutines for blocking `receive`.
+
+> Today there is exactly **one** heap (the single REPL "process"). Step 2/3 made
+> that heap a `Send`, self-contained unit — the prerequisite for *per-process*
+> heaps, which arrive with the scheduler (step 4).
 
 ## Risks
 

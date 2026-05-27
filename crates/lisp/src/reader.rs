@@ -1,14 +1,13 @@
-//! The reader: turns source text into [`Value`]s (the "read" of read-eval-print).
-//!
-//! A hand-written recursive-descent parser over a `Vec<char>`. It is small on
-//! purpose; the grammar it accepts is documented in `docs/language.md`.
+//! The reader: turns source text into [`Value`]s. It allocates pairs/vectors/
+//! strings, so it threads `&mut Heap`.
 
 use crate::error::LispError;
+use crate::heap::Heap;
 use crate::value::{self, Value};
 
 /// Read every form in `src`.
-pub fn read_all(src: &str) -> Result<Vec<Value>, LispError> {
-    let mut parser = Parser::new(src);
+pub fn read_all(heap: &mut Heap, src: &str) -> Result<Vec<Value>, LispError> {
+    let mut parser = Parser::new(heap, src);
     let mut forms = Vec::new();
     loop {
         parser.skip_trivia();
@@ -21,8 +20,8 @@ pub fn read_all(src: &str) -> Result<Vec<Value>, LispError> {
 }
 
 /// Read exactly one form, ignoring any trailing input.
-pub fn read_one(src: &str) -> Result<Value, LispError> {
-    let mut parser = Parser::new(src);
+pub fn read_one(heap: &mut Heap, src: &str) -> Result<Value, LispError> {
+    let mut parser = Parser::new(heap, src);
     parser.skip_trivia();
     if parser.at_end() {
         return Err(LispError::parse("unexpected end of input"));
@@ -30,14 +29,15 @@ pub fn read_one(src: &str) -> Result<Value, LispError> {
     parser.read_form()
 }
 
-struct Parser {
+struct Parser<'a> {
+    heap: &'a mut Heap,
     chars: Vec<char>,
     pos: usize,
 }
 
-impl Parser {
-    fn new(src: &str) -> Self {
-        Parser { chars: src.chars().collect(), pos: 0 }
+impl<'a> Parser<'a> {
+    fn new(heap: &'a mut Heap, src: &str) -> Self {
+        Parser { heap, chars: src.chars().collect(), pos: 0 }
     }
 
     fn at_end(&self) -> bool {
@@ -56,8 +56,7 @@ impl Parser {
         c
     }
 
-    /// Skip whitespace and `;` line comments. Commas count as whitespace
-    /// (Clojure-style), which is why `~` is used for unquote rather than `,`.
+    /// Skip whitespace (commas count as whitespace) and `;` line comments.
     fn skip_trivia(&mut self) {
         loop {
             match self.peek() {
@@ -85,25 +84,17 @@ impl Parser {
             '[' => self.read_vector(),
             ')' | ']' | '}' => Err(LispError::parse(format!("unexpected '{}'", c))),
             '{' => Err(LispError::parse("map literals '{ }' are not supported yet")),
-            '\'' => {
-                self.pos += 1;
-                let form = self.read_form()?;
-                Ok(value::list(vec![value::sym("quote"), form]))
-            }
-            '`' => {
-                self.pos += 1;
-                let form = self.read_form()?;
-                Ok(value::list(vec![value::sym("quasiquote"), form]))
-            }
+            '\'' => self.read_wrapped("quote"),
+            '`' => self.read_wrapped("quasiquote"),
             '~' => {
                 self.pos += 1;
                 if self.peek() == Some('@') {
                     self.pos += 1;
                     let form = self.read_form()?;
-                    Ok(value::list(vec![value::sym("unquote-splicing"), form]))
+                    Ok(self.wrap("unquote-splicing", form))
                 } else {
                     let form = self.read_form()?;
-                    Ok(value::list(vec![value::sym("unquote"), form]))
+                    Ok(self.wrap("unquote", form))
                 }
             }
             '"' => self.read_string(),
@@ -111,8 +102,19 @@ impl Parser {
         }
     }
 
+    /// Read `<form>` and wrap it as `(tag form)`.
+    fn read_wrapped(&mut self, tag: &str) -> Result<Value, LispError> {
+        self.pos += 1;
+        let form = self.read_form()?;
+        Ok(self.wrap(tag, form))
+    }
+
+    fn wrap(&mut self, tag: &str, form: Value) -> Value {
+        self.heap.list(vec![value::sym(tag), form])
+    }
+
     fn read_seq(&mut self, close: char) -> Result<Value, LispError> {
-        self.pos += 1; // consume the opening delimiter
+        self.pos += 1; // opening delimiter
         let mut items = Vec::new();
         loop {
             self.skip_trivia();
@@ -125,11 +127,11 @@ impl Parser {
                 Some(_) => items.push(self.read_form()?),
             }
         }
-        Ok(value::list(items))
+        Ok(self.heap.list(items))
     }
 
     fn read_vector(&mut self) -> Result<Value, LispError> {
-        self.pos += 1; // consume '['
+        self.pos += 1; // '['
         let mut items = Vec::new();
         loop {
             self.skip_trivia();
@@ -142,11 +144,11 @@ impl Parser {
                 Some(_) => items.push(self.read_form()?),
             }
         }
-        Ok(value::vector(items))
+        Ok(self.heap.alloc_vector(items))
     }
 
     fn read_string(&mut self) -> Result<Value, LispError> {
-        self.pos += 1; // consume opening quote
+        self.pos += 1; // opening quote
         let mut s = String::new();
         loop {
             match self.bump() {
@@ -165,7 +167,7 @@ impl Parser {
                 Some(c) => s.push(c),
             }
         }
-        Ok(value::str_val(&s))
+        Ok(self.heap.alloc_string(&s))
     }
 
     fn read_atom(&mut self) -> Result<Value, LispError> {
@@ -186,7 +188,7 @@ fn is_delimiter(c: char) -> bool {
         || matches!(c, '(' | ')' | '[' | ']' | '{' | '}' | '"' | ';' | '\'' | '`' | '~' | ',')
 }
 
-/// Decide what an atom token means: keyword, number, special literal, or symbol.
+/// Classify an atom token (no heap needed — atoms are numbers/symbols/keywords).
 fn classify(token: &str) -> Value {
     match token {
         "nil" => return Value::Nil,
@@ -197,8 +199,6 @@ fn classify(token: &str) -> Value {
     if let Ok(i) = token.parse::<i64>() {
         return Value::Int(i);
     }
-    // Only treat as a float if it actually looks numeric, so that symbols like
-    // `inf` or `nan` (which f64::from_str would accept) stay symbols.
     if looks_numeric(token) {
         if let Ok(f) = token.parse::<f64>() {
             return Value::Float(f);

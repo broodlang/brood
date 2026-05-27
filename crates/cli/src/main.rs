@@ -12,30 +12,30 @@
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
-use mylisp::{printer, Interp};
+use mylisp::Interp;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 
 fn main() {
-    let interp = Interp::new();
+    let mut interp = Interp::new();
     let files: Vec<String> = std::env::args().skip(1).collect();
 
     if !files.is_empty() {
-        run_files(&interp, &files);
+        run_files(&mut interp, &files);
         return;
     }
 
     if io::stdin().is_terminal() {
-        if let Err(e) = repl_interactive(&interp) {
+        if let Err(e) = repl_interactive(&mut interp) {
             eprintln!("repl error: {}", e);
             std::process::exit(1);
         }
     } else {
-        repl_plain(&interp);
+        repl_plain(&mut interp);
     }
 }
 
-fn run_files(interp: &Interp, files: &[String]) {
+fn run_files(interp: &mut Interp, files: &[String]) {
     for path in files {
         match std::fs::read_to_string(path) {
             Ok(src) => {
@@ -53,7 +53,7 @@ fn run_files(interp: &Interp, files: &[String]) {
 }
 
 /// Interactive REPL with full line editing and history (terminal only).
-fn repl_interactive(interp: &Interp) -> rustyline::Result<()> {
+fn repl_interactive(interp: &mut Interp) -> rustyline::Result<()> {
     println!("mylisp v0.1 — arrow keys to edit, up/down for history, Ctrl-D to exit");
     let mut rl = DefaultEditor::new()?;
     let history = history_path();
@@ -98,7 +98,7 @@ fn repl_interactive(interp: &Interp) -> rustyline::Result<()> {
         let _ = rl.add_history_entry(src);
 
         match interp.eval_str(&buffer) {
-            Ok(value) => println!("{}", printer::print(&value)),
+            Ok(value) => println!("{}", interp.print(value)),
             Err(e) => eprintln!("{}", e),
         }
 
@@ -109,7 +109,7 @@ fn repl_interactive(interp: &Interp) -> rustyline::Result<()> {
 }
 
 /// Plain reader for non-terminal stdin (pipes, scripts). No prompts, no editing.
-fn repl_plain(interp: &Interp) {
+fn repl_plain(interp: &mut Interp) {
     let stdin = io::stdin();
     let mut handle = stdin.lock();
     let mut pending = String::new();
@@ -137,7 +137,7 @@ fn repl_plain(interp: &Interp) {
 
         match interp.eval_str(&src) {
             Ok(value) => {
-                println!("{}", printer::print(&value));
+                println!("{}", interp.print(value));
                 io::stdout().flush().ok();
             }
             Err(e) => eprintln!("{}", e),

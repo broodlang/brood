@@ -1,30 +1,19 @@
-//! The core data type of the language: [`Value`].
+//! The core value type, [`Value`], plus the handle types that address the
+//! per-process [`Heap`](crate::heap::Heap).
 //!
-//! Everything the reader produces, the evaluator manipulates, and the printer
-//! renders is a `Value`. Lists are built from cons [`Value::Pair`]s terminated
-//! by [`Value::Nil`] — this keeps the language homoiconic (code is data), which
-//! is what will later let the editor rewrite itself at runtime.
-//!
-//! ## Memory model (v0.1)
-//!
-//! Heap values are held behind [`Rc`] and environments use `RefCell` for
-//! interior mutability. This is the simplest thing that works. Its known
-//! limitation is that reference cycles (e.g. a closure capturing an environment
-//! that points back at it) will leak. That is acceptable for a REPL and the
-//! early milestones; a tracing GC (`gc-arena`) is planned before editor
-//! sessions become long-lived. All heap construction goes through the helpers
-//! in this module so that migration touches one place.
+//! After the step-2 migration (see `docs/memory-model.md`), `Value` is `Copy`:
+//! its heap variants are small integer **handles** into a `Heap`, not `Rc`
+//! pointers. Reading or allocating a heap object goes through the `Heap`. The
+//! payoff: a `Heap` is plain `Vec`s of data, so it is `Send` — a process can be
+//! moved between scheduler threads — and it gives us one place to do GC.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::fmt;
-use std::rc::Rc;
 
-use crate::env::Env;
-use crate::error::{LispError, LispResult};
+use crate::error::LispResult;
+use crate::heap::Heap;
 
-/// An interned symbol name. Comparing symbols is a `u32` compare; the spelling
-/// lives in a thread-local table (see [`intern`] / [`symbol_name`]).
+/// An interned symbol name (a `u32` id; the spelling lives in a thread-local table).
 pub type Symbol = u32;
 
 thread_local! {
@@ -37,7 +26,6 @@ struct Interner {
     names: Vec<String>,
 }
 
-/// Intern a name, returning a stable [`Symbol`] id for it.
 pub fn intern(name: &str) -> Symbol {
     INTERNER.with(|cell| {
         let mut i = cell.borrow_mut();
@@ -51,144 +39,73 @@ pub fn intern(name: &str) -> Symbol {
     })
 }
 
-/// Recover the spelling of an interned [`Symbol`].
 pub fn symbol_name(sym: Symbol) -> String {
     INTERNER.with(|cell| cell.borrow().names[sym as usize].clone())
 }
 
-#[derive(Clone)]
+// ----- handles into the Heap -----
+
+macro_rules! handle {
+    ($name:ident) => {
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+        pub struct $name(pub u32);
+    };
+}
+handle!(PairId);
+handle!(VecId);
+handle!(StrId);
+handle!(ClosureId);
+handle!(NativeId);
+handle!(EnvId);
+
+/// A mylisp value. `Copy`: primitives inline, heap objects as handles.
+#[derive(Clone, Copy, Debug)]
 pub enum Value {
     Nil,
     Bool(bool),
     Int(i64),
     Float(f64),
-    Str(Rc<str>),
     Sym(Symbol),
     Keyword(Symbol),
-    /// A cons cell. Proper lists are chains of pairs ending in `Nil`.
-    Pair(Rc<(Value, Value)>),
-    /// A vector literal, `[a b c]` — a data type with O(1) indexing.
-    Vector(Rc<Vec<Value>>),
-    /// A closure: code plus the lexical environment captured at definition.
-    Fn(Rc<Closure>),
-    /// A macro: like a closure, but invoked on *unevaluated* argument forms at
-    /// expansion time; its result is then evaluated in place. Shares [`Closure`].
-    Macro(Rc<Closure>),
+    Str(StrId),
+    /// A cons cell. Proper lists are pairs chained to a final `Nil`.
+    Pair(PairId),
+    Vector(VecId),
+    /// A closure (`fn`).
+    Fn(ClosureId),
+    /// A macro — same `Closure` storage, invoked on unevaluated forms.
+    Macro(ClosureId),
     /// A builtin implemented in Rust.
-    Native(Rc<NativeFn>),
+    Native(NativeId),
 }
 
-/// A user-defined function (a `fn`/`lambda`). Captures its defining environment
-/// for lexical scoping.
+/// A user-defined function. Captures its defining environment (an [`EnvId`]) for
+/// lexical scoping.
+#[derive(Clone)]
 pub struct Closure {
     pub name: Option<Symbol>,
-    /// Required positional parameters.
     pub params: Vec<Symbol>,
-    /// `&optional` parameters as (name, default-form). The default form is
-    /// evaluated, in the call scope, only when the argument is omitted; a bare
-    /// optional stores `Nil` (which evaluates to `nil`).
     pub optionals: Vec<(Symbol, Value)>,
-    /// The name bound to the remaining args when the parameter list uses `& rest`.
     pub rest: Option<Symbol>,
     pub body: Vec<Value>,
-    pub env: Rc<Env>,
+    pub env: EnvId,
 }
 
-/// Signature of a builtin function. Receives already-evaluated arguments and
-/// the call-site environment (needed by builtins like `eval`/`load`/`apply`).
-pub type NativeFnPtr = fn(&[Value], &Rc<Env>) -> LispResult;
+/// Signature of a builtin: already-evaluated args, the call-site environment,
+/// and the heap (to read/allocate values and call back into `eval`).
+pub type NativeFnPtr = fn(&[Value], EnvId, &mut Heap) -> LispResult;
 
 pub struct NativeFn {
     pub name: String,
     pub func: NativeFnPtr,
 }
 
-// ----- constructors (the single chokepoint for heap allocation) -----
+// ----- handle-free constructors (interned; no heap needed) -----
 
 pub fn sym(name: &str) -> Value {
     Value::Sym(intern(name))
 }
+
 pub fn kw(name: &str) -> Value {
     Value::Keyword(intern(name))
-}
-pub fn str_val(s: &str) -> Value {
-    Value::Str(Rc::from(s))
-}
-pub fn cons(head: Value, tail: Value) -> Value {
-    Value::Pair(Rc::new((head, tail)))
-}
-
-/// Build a vector value.
-pub fn vector(items: Vec<Value>) -> Value {
-    Value::Vector(Rc::new(items))
-}
-
-/// Wrap a [`Closure`] as a function value.
-pub fn closure(c: Closure) -> Value {
-    Value::Fn(Rc::new(c))
-}
-
-/// Wrap a [`NativeFn`] as a builtin value.
-pub fn native(f: NativeFn) -> Value {
-    Value::Native(Rc::new(f))
-}
-
-/// Build a proper list from a vector of items.
-pub fn list(items: Vec<Value>) -> Value {
-    let mut acc = Value::Nil;
-    for item in items.into_iter().rev() {
-        acc = cons(item, acc);
-    }
-    acc
-}
-
-/// Collect a proper list into a `Vec`. Errors on an improper (dotted) list.
-pub fn list_to_vec(v: &Value) -> Result<Vec<Value>, LispError> {
-    let mut out = Vec::new();
-    let mut cur = v.clone();
-    loop {
-        match cur {
-            Value::Nil => return Ok(out),
-            Value::Pair(p) => {
-                out.push(p.0.clone());
-                cur = p.1.clone();
-            }
-            _ => return Err(LispError::type_err("improper list")),
-        }
-    }
-}
-
-impl PartialEq for Value {
-    fn eq(&self, other: &Self) -> bool {
-        use Value::*;
-        match (self, other) {
-            (Nil, Nil) => true,
-            (Bool(a), Bool(b)) => a == b,
-            (Int(a), Int(b)) => a == b,
-            // Compare floats by bit pattern so equality is reflexive (NaN == NaN).
-            (Float(a), Float(b)) => a.to_bits() == b.to_bits(),
-            (Str(a), Str(b)) => a == b,
-            (Sym(a), Sym(b)) => a == b,
-            (Keyword(a), Keyword(b)) => a == b,
-            (Pair(a), Pair(b)) => a.0 == b.0 && a.1 == b.1,
-            (Vector(a), Vector(b)) => a == b,
-            // Functions and macros compare by identity.
-            (Fn(a), Fn(b)) => Rc::ptr_eq(a, b),
-            (Macro(a), Macro(b)) => Rc::ptr_eq(a, b),
-            (Native(a), Native(b)) => Rc::ptr_eq(a, b),
-            _ => false,
-        }
-    }
-}
-
-impl fmt::Display for Value {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", crate::printer::print(self))
-    }
-}
-
-impl fmt::Debug for Value {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", crate::printer::print(self))
-    }
 }

@@ -1,31 +1,36 @@
-//! The printer: renders a [`Value`] back to text (the "print" of the REPL).
+//! Renders a [`Value`] to text. Needs the [`Heap`] to read heap objects.
 //!
-//! Two modes:
-//! - [`print`] is *readable*: strings are quoted/escaped so the output could be
-//!   read back in. This is what the REPL shows.
-//! - [`display`] is *human*: strings are raw. This is what `print`/`str` use.
+//! - [`print`] is *readable* (strings quoted/escaped) — what the REPL shows.
+//! - [`display`] is *human* (strings raw) — what `print`/`str` use.
 
-use crate::value::{self, Value};
+use crate::heap::Heap;
+use crate::value::{symbol_name, Value};
 
-pub fn print(v: &Value) -> String {
+pub fn print(heap: &Heap, v: Value) -> String {
     let mut out = String::new();
-    write_value(&mut out, v, true);
+    write_value(&mut out, heap, v, true);
     out
 }
 
-pub fn display(v: &Value) -> String {
+pub fn display(heap: &Heap, v: Value) -> String {
     let mut out = String::new();
-    write_value(&mut out, v, false);
+    write_value(&mut out, heap, v, false);
     out
 }
 
-fn write_value(out: &mut String, v: &Value, readable: bool) {
+fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool) {
     match v {
         Value::Nil => out.push_str("nil"),
-        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        Value::Bool(b) => out.push_str(if b { "true" } else { "false" }),
         Value::Int(n) => out.push_str(&n.to_string()),
-        Value::Float(f) => out.push_str(&format_float(*f)),
-        Value::Str(s) => {
+        Value::Float(f) => out.push_str(&format_float(f)),
+        Value::Sym(s) => out.push_str(&symbol_name(s)),
+        Value::Keyword(s) => {
+            out.push(':');
+            out.push_str(&symbol_name(s));
+        }
+        Value::Str(id) => {
+            let s = heap.string(id);
             if readable {
                 out.push('"');
                 for c in s.chars() {
@@ -43,49 +48,44 @@ fn write_value(out: &mut String, v: &Value, readable: bool) {
                 out.push_str(s);
             }
         }
-        Value::Sym(s) => out.push_str(&value::symbol_name(*s)),
-        Value::Keyword(s) => {
-            out.push(':');
-            out.push_str(&value::symbol_name(*s));
-        }
-        Value::Pair(_) => write_list(out, v, readable),
-        Value::Vector(items) => {
+        Value::Pair(_) => write_list(out, heap, v, readable),
+        Value::Vector(id) => {
             out.push('[');
-            for (i, item) in items.iter().enumerate() {
+            for (i, &item) in heap.vector(id).iter().enumerate() {
                 if i > 0 {
                     out.push(' ');
                 }
-                write_value(out, item, readable);
+                write_value(out, heap, item, readable);
             }
             out.push(']');
         }
-        Value::Fn(c) => {
+        Value::Fn(id) => {
             out.push_str("#<fn");
-            if let Some(name) = c.name {
+            if let Some(name) = heap.closure(id).name {
                 out.push(' ');
-                out.push_str(&value::symbol_name(name));
+                out.push_str(&symbol_name(name));
             }
             out.push('>');
         }
-        Value::Macro(c) => {
+        Value::Macro(id) => {
             out.push_str("#<macro");
-            if let Some(name) = c.name {
+            if let Some(name) = heap.closure(id).name {
                 out.push(' ');
-                out.push_str(&value::symbol_name(name));
+                out.push_str(&symbol_name(name));
             }
             out.push('>');
         }
-        Value::Native(nf) => {
+        Value::Native(id) => {
             out.push_str("#<native ");
-            out.push_str(&nf.name);
+            out.push_str(&heap.native(id).name);
             out.push('>');
         }
     }
 }
 
-fn write_list(out: &mut String, v: &Value, readable: bool) {
+fn write_list(out: &mut String, heap: &Heap, v: Value, readable: bool) {
     out.push('(');
-    let mut cur = v.clone();
+    let mut cur = v;
     let mut first = true;
     loop {
         match cur {
@@ -94,14 +94,14 @@ fn write_list(out: &mut String, v: &Value, readable: bool) {
                     out.push(' ');
                 }
                 first = false;
-                write_value(out, &p.0, readable);
-                cur = p.1.clone();
+                let (head, tail) = heap.pair(p);
+                write_value(out, heap, head, readable);
+                cur = tail;
             }
             Value::Nil => break,
             other => {
-                // An improper (dotted) list: (a b . c)
                 out.push_str(" . ");
-                write_value(out, &other, readable);
+                write_value(out, heap, other, readable);
                 break;
             }
         }
@@ -109,7 +109,6 @@ fn write_list(out: &mut String, v: &Value, readable: bool) {
     out.push(')');
 }
 
-/// Format a float so it always reads back as a float (e.g. `3` -> `3.0`).
 fn format_float(f: f64) -> String {
     if f.is_nan() {
         return "nan".to_string();

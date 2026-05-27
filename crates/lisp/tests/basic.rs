@@ -2,12 +2,20 @@
 //! check the printed result. These double as executable documentation of what
 //! the language can currently do.
 
-use mylisp::{printer, Interp};
+use mylisp::Interp;
 
 /// Evaluate `src` in a fresh interpreter and return the printed result.
 fn run(src: &str) -> String {
-    let interp = Interp::new();
-    printer::print(&interp.eval_str(src).expect("evaluation failed"))
+    let mut interp = Interp::new();
+    let value = interp.eval_str(src).expect("evaluation failed");
+    interp.print(value)
+}
+
+/// The step-2 goal: a process heap is `Send` (movable across scheduler threads).
+#[test]
+fn heap_is_send() {
+    fn assert_send<T: Send>() {}
+    assert_send::<mylisp::heap::Heap>();
 }
 
 #[test]
@@ -118,11 +126,13 @@ fn tail_calls_do_not_overflow() {
 /// the live global environment changes behaviour immediately.
 #[test]
 fn live_redefinition() {
-    let interp = Interp::new();
-    interp.eval_str("(def greet (fn [] :v1))").unwrap();
-    assert_eq!(printer::print(&interp.eval_str("(greet)").unwrap()), ":v1");
-    interp.eval_str("(def greet (fn [] :v2))").unwrap();
-    assert_eq!(printer::print(&interp.eval_str("(greet)").unwrap()), ":v2");
+    let mut interp = Interp::new();
+    interp.eval_str("(def greet (fn () :v1))").unwrap();
+    let v = interp.eval_str("(greet)").unwrap();
+    assert_eq!(interp.print(v), ":v1");
+    interp.eval_str("(def greet (fn () :v2))").unwrap();
+    let v = interp.eval_str("(greet)").unwrap();
+    assert_eq!(interp.print(v), ":v2");
 }
 
 /// `eval` + `read-string` let the language run code it builds at runtime.
@@ -166,7 +176,7 @@ fn optional_params() {
 
 #[test]
 fn optional_params_arity() {
-    let interp = Interp::new();
+    let mut interp = Interp::new();
     // too many args, no rest to absorb them
     assert!(interp.eval_str("(defn f (a &optional b) a) (f 1 2 3)").is_err());
     // too few required
@@ -210,14 +220,14 @@ fn throw_and_catch() {
 
 #[test]
 fn uncaught_throw_propagates() {
-    let interp = Interp::new();
+    let mut interp = Interp::new();
     assert!(interp.eval_str("(throw 1)").is_err());
     assert!(interp.eval_str("(error \"boom\")").is_err());
 }
 
 #[test]
 fn errors_are_reported() {
-    let interp = Interp::new();
+    let mut interp = Interp::new();
     assert!(interp.eval_str("(+ 1 nope)").is_err());
     assert!(interp.eval_str("(this-is-not-defined)").is_err());
     assert!(interp.eval_str("(/ 1 0)").is_err());

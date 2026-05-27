@@ -53,10 +53,10 @@ impl LispError {
         Self::new(ErrorKind::Runtime, message)
     }
     /// Construct the error raised by `(throw value)`, carrying the value.
-    pub fn thrown(value: Value) -> Self {
+    pub fn thrown(value: Value, heap: &crate::heap::Heap) -> Self {
         LispError {
             kind: ErrorKind::User,
-            message: crate::printer::display(&value),
+            message: crate::printer::display(heap, value),
             payload: Some(value),
         }
     }
