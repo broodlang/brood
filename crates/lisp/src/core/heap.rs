@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::error::LispError;
-use crate::value::{
+use crate::core::value::{
     Closure, ClosureId, EnvId, NativeFn, NativeId, PairId, StrId, Symbol, Value, VecId, LOCAL,
     PRELUDE, RUNTIME,
 };
@@ -324,7 +324,7 @@ impl Heap {
     /// forms in the shared regions). Called by the reader as it builds lists.
     pub fn set_form_pos(&mut self, v: Value, pos: crate::error::Pos) {
         if let Value::Pair(id) = v {
-            if id.region() == crate::value::LOCAL {
+            if id.region() == crate::core::value::LOCAL {
                 self.form_pos.insert(id.index(), pos);
             }
         }
@@ -333,7 +333,7 @@ impl Heap {
     /// The recorded source position of a form, if it is a LOCAL list with one.
     pub fn form_pos(&self, v: Value) -> Option<crate::error::Pos> {
         if let Value::Pair(id) = v {
-            if id.region() == crate::value::LOCAL {
+            if id.region() == crate::core::value::LOCAL {
                 return self.form_pos.get(&id.index()).copied();
             }
         }

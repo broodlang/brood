@@ -6,7 +6,7 @@
 //! per-instance seeding stay out of the measured region — we time parse + eval
 //! of the program itself.
 
-use brood::{reader, Interp};
+use brood::{syntax::reader, Interp};
 
 fn main() {
     divan::main();

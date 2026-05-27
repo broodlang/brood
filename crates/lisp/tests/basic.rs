@@ -15,7 +15,7 @@ fn run(src: &str) -> String {
 #[test]
 fn heap_is_send() {
     fn assert_send<T: Send>() {}
-    assert_send::<brood::heap::Heap>();
+    assert_send::<brood::core::heap::Heap>();
 }
 
 #[test]
@@ -528,7 +528,7 @@ fn integer_overflow_does_not_panic() {
     // `/` falls through to the float path rather than erroring.
     assert!(matches!(
         interp.eval_str("(/ -9223372036854775808 -1)"),
-        Ok(brood::value::Value::Float(_))
+        Ok(brood::core::value::Value::Float(_))
     ));
     // Ordinary integer division/modulo unaffected.
     assert_eq!(run("(/ 12 3)"), "4");
@@ -599,8 +599,8 @@ fn gensym_is_unique_across_threads() {
         .map(|_| {
             std::thread::spawn(|| {
                 (0..2000)
-                    .map(|_| match brood::value::gensym("g") {
-                        brood::value::Value::Sym(s) => s,
+                    .map(|_| match brood::core::value::gensym("g") {
+                        brood::core::value::Value::Sym(s) => s,
                         _ => unreachable!(),
                     })
                     .collect::<Vec<_>>()

@@ -15,7 +15,7 @@ gate (`eval::call_native`), before the primitive runs — so a wrong-count call 
 a clean arity error (`type-of: expected 1 argument, got 0`) rather than a missing
 arg silently becoming `nil`.
 
-## Native primitive functions (54)
+## Native primitive functions (55)
 
 | Category | Primitive | Arity | Purpose |
 |---|---|---|---|
@@ -32,6 +32,7 @@ arg silently becoming `nil`.
 | **String** | `string-length` | 1 | char count |
 | | `substring` | 3 | characters `[start, end)`, char-indexed |
 | **Type reflection** | `type-of` | 1 | the runtime type tag as a keyword (`:int` `:string` …); the one irreducible reflective primitive. The tag predicates (`nil?` `pair?` `int?` `float?` `bool?` `string?` `symbol?` `keyword?` `vector?` `fn?`) are Brood wrappers over it, as are the in-language type checks |
+| **Type checking** (advisory; see [types.md](types.md)) | `check` | 1 | run the advisory type checker over a *quoted* form: macro-expand it (like the real compile pass), then return a **list of warning strings** for provably-wrong primitive arguments (e.g. `(first 5)` → `"first: argument 1 expects nil \| pair \| vector, got int (5)"`), or `nil` when nothing is wrong. Advisory: never raises |
 | **Value ↔ text & I/O** | `str` | n | concatenate the *display* forms of args → string |
 | | `pr-str` | 1 | *readable* form of a value → string |
 | | `print` | n | write display forms to stdout → nil (`println`, which adds a newline, is Brood over it) |
@@ -70,8 +71,8 @@ arg silently becoming `nil`.
 
 **Why this set is irreducible:** every entry needs Rust — raw number ops, heap
 construct/inspect, the type-tag *reflection* (`type-of`), I/O, value→text
-conversion, the wall clock, the allocator counters, or a hook into `eval`/the
-reader. None of it can be written in Brood. Everything that *can* be is already
+conversion, the wall clock, the allocator counters, the `Ty`-lattice checker
+pass, or a hook into `eval`/the reader. None of it can be written in Brood. Everything that *can* be is already
 in the prelude — including the tag predicates (over `type-of`), the full
 arithmetic/comparison families (over `%add`/`%lt`/…), `mod` (over `rem`), and
 `println` (over `print`).

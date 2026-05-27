@@ -1,5 +1,5 @@
 //! The core value type, [`Value`], plus the handle types that address the
-//! per-process [`Heap`](crate::heap::Heap).
+//! per-process [`Heap`](crate::core::heap::Heap).
 //!
 //! After the step-2 migration (see `docs/memory-model.md`), `Value` is `Copy`:
 //! its heap variants are small integer **handles** into a `Heap`, not `Rc`
@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
 use crate::error::LispResult;
-use crate::heap::Heap;
+use crate::core::heap::Heap;
 
 /// An interned symbol name (a `u32` id; the spelling lives in a global table).
 pub type Symbol = u32;

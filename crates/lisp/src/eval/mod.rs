@@ -1,12 +1,18 @@
 //! The evaluator: a tree-walker with proper tail calls. Now heap-threaded — it
 //! takes `&mut Heap` and addresses values by handle / `EnvId`.
+//!
+//! `macros` (quasiquote + the macroexpand compile pass) lives alongside it here:
+//! the two are mutually recursive — the compile pass lowers the `fn`/`let`
+//! pattern surfaces the evaluator runs, and the evaluator falls back to it.
+
+pub mod macros;
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use crate::error::{LispError, LispResult};
-use crate::heap::Heap;
-use crate::value::{self, Closure, ClosureId, EnvId, NativeId, Symbol, Value};
+use crate::core::heap::Heap;
+use crate::core::value::{self, Closure, ClosureId, EnvId, NativeId, Symbol, Value};
 
 /// Truthiness: only `nil` and `false` are falsy.
 pub fn truthy(v: Value) -> bool {
@@ -141,8 +147,8 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     // within its defining form). Lower it here and re-enter. The
                     // common case is detected away cheaply, so this never touches
                     // an ordinary `fn`.
-                    if crate::macros::fn_needs_lowering(heap, expr) {
-                        expr = crate::macros::macroexpand_all(heap, expr, env)?;
+                    if crate::eval::macros::fn_needs_lowering(heap, expr) {
+                        expr = crate::eval::macros::macroexpand_all(heap, expr, env)?;
                         continue 'tail;
                     }
                     return make_closure(heap, None, rest, env);
@@ -150,7 +156,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                 "quasiquote" => {
                     let args = heap.list_to_vec(rest)?;
                     let template = args.into_iter().next().unwrap_or(Value::Nil);
-                    return crate::macros::quasiquote(heap, template, env);
+                    return crate::eval::macros::quasiquote(heap, template, env);
                 }
                 "defmacro" => {
                     let parts = heap.list_to_vec(rest)?;
@@ -188,7 +194,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                         .step_by(2)
                         .any(|&b| !matches!(b, Value::Sym(_)))
                     {
-                        expr = crate::macros::macroexpand_all(heap, expr, env)?;
+                        expr = crate::eval::macros::macroexpand_all(heap, expr, env)?;
                         continue 'tail;
                     }
                     let scope = heap.new_env(Some(env));
@@ -263,7 +269,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                 continue 'tail;
             }
             other => {
-                let shown = crate::printer::print(heap, other);
+                let shown = crate::syntax::printer::print(heap, other);
                 return Err(LispError::type_err(format!(
                     "cannot call non-function: {}",
                     shown
@@ -278,7 +284,7 @@ pub fn apply(heap: &mut Heap, callee: Value, argv: &[Value], env: EnvId) -> Lisp
         Value::Native(id) => call_native(heap, id, argv, env),
         Value::Fn(id) => apply_closure(heap, id, argv),
         other => {
-            let shown = crate::printer::print(heap, other);
+            let shown = crate::syntax::printer::print(heap, other);
             Err(LispError::type_err(format!("not a function: {}", shown)))
         }
     }
@@ -345,7 +351,7 @@ fn bind_params(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> Result<EnvId, 
     Ok(scope)
 }
 
-/// Invoke a builtin, enforcing its declared [`Arity`](crate::value::Arity) first. The single gate
+/// Invoke a builtin, enforcing its declared [`Arity`](crate::core::value::Arity) first. The single gate
 /// every native call passes through (the evaluator loop *and* `apply`), so a
 /// primitive's arity is checked in one place instead of hand-rolled per builtin.
 fn call_native(heap: &mut Heap, id: NativeId, argv: &[Value], env: EnvId) -> LispResult {
@@ -364,7 +370,7 @@ fn call_native(heap: &mut Heap, id: NativeId, argv: &[Value], env: EnvId) -> Lis
 
 /// Render an arity error — `"{who}: expected {N | N to M | at least N}
 /// argument(s), got {got}"`. The one formatter for both builtins (from their
-/// declared [`Arity`](crate::value::Arity)) and user closures (from their parameter list): a closure
+/// declared [`Arity`](crate::core::value::Arity)) and user closures (from their parameter list): a closure
 /// with `min..=max` required/optional params passes `Some(max)`; `& rest` (and a
 /// variadic builtin) passes `None`.
 fn arity_message(who: &str, min: usize, max: Option<usize>, got: usize) -> String {

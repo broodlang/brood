@@ -2,7 +2,7 @@
 //! self-editing text editor.
 //!
 //! This crate is the language: reader, evaluator, value model, the per-process
-//! [`Heap`](heap::Heap), and builtins. The binary in `crates/cli` wraps it in a
+//! [`Heap`](core::heap::Heap), and builtins. The binary in `crates/cli` wraps it in a
 //! REPL.
 //!
 //! ```
@@ -14,24 +14,24 @@
 //!
 //! See `docs/` for the architecture, language reference, and roadmaps.
 
-pub mod alloc;
-pub mod builtins;
-pub mod check;
-pub mod error;
-pub mod eval;
-pub mod heap;
-pub mod macros;
-pub mod printer;
-pub mod process;
-pub mod reader;
-pub mod types;
-pub mod value;
+// The crate's module map, grouped by layer (see docs/components.md). The
+// directory tree mirrors this — core/, syntax/, eval/, types/ — so the layout
+// reads as the architecture.
+
+pub mod core; // substrate: value, heap, alloc — what everything is addressed through
+pub mod syntax; // surface: reader (text to Value) + printer (Value to text)
+pub mod eval; // the tree-walking evaluator + its macro / compile pass
+pub mod types; // the advisory type lattice + checker (nothing gates on it)
+
+pub mod error; // errors + source positions (cross-cutting)
+pub mod process; // the green-process scheduler
+pub mod builtins; // the primitive kernel (Rust mechanism; policy lives in std/*.blsp)
 
 use std::sync::{Arc, LazyLock};
 
 use error::LispError;
-use heap::{Heap, RuntimeCode, SharedCode};
-use value::{EnvId, Symbol, Value};
+use core::heap::{Heap, RuntimeCode, SharedCode};
+use core::value::{EnvId, Symbol, Value};
 
 /// The shared code region (prelude closures, code data, builtins) plus the
 /// global bindings to seed each process's global env. Built once, lazily.
@@ -47,11 +47,11 @@ static SHARED: LazyLock<SharedBundle> = LazyLock::new(|| {
     let root = heap.new_env(None);
     heap.set_global(root);
     builtins::register(&mut heap, root);
-    let forms = reader::read_all(&mut heap, PRELUDE).expect("read prelude");
+    let forms = syntax::reader::read_all(&mut heap, PRELUDE).expect("read prelude");
     for form in forms {
         // Expand macros once (the compile pass), then evaluate. Form-by-form so
         // a macro defined by one form is visible to the next.
-        let form = macros::macroexpand_all(&mut heap, form, root)
+        let form = eval::macros::macroexpand_all(&mut heap, form, root)
             .unwrap_or_else(|e| panic!("prelude expand: {}", e));
         eval::eval(&mut heap, form, root).unwrap_or_else(|e| panic!("prelude: {}", e));
     }
@@ -62,11 +62,11 @@ static SHARED: LazyLock<SharedBundle> = LazyLock::new(|| {
     }
 });
 
-/// The byte-counting allocator (see [`alloc`]) backs the whole process, so
+/// The byte-counting allocator (see [`core::alloc`]) backs the whole process, so
 /// `(mem-bytes)` / `(mem-peak)` see every Rust allocation. Declared here in the
 /// library so the CLI and the integration-test binaries all share one.
 #[global_allocator]
-static GLOBAL: alloc::Counting = alloc::Counting;
+static GLOBAL: core::alloc::Counting = core::alloc::Counting;
 
 /// An interpreter instance: a heap and a global environment with builtins and
 /// the prelude loaded.
@@ -94,7 +94,7 @@ impl Interp {
     /// Read every form in `src`, evaluate each against the global environment,
     /// and return the value of the last.
     pub fn eval_str(&mut self, src: &str) -> Result<Value, LispError> {
-        let forms = reader::read_all(&mut self.heap, src)?;
+        let forms = syntax::reader::read_all(&mut self.heap, src)?;
         // The parsed forms sit in LOCAL below this checkpoint; each form's eval
         // allocates above it. Between top-level forms the eval stack is empty and
         // nothing in LOCAL is live but the (discarded) intermediate result —
@@ -106,7 +106,7 @@ impl Interp {
         for (i, form) in forms.into_iter().enumerate() {
             // Compile pass: expand macros once before evaluating (form-by-form,
             // so a macro a form defines is in scope for the forms after it).
-            let form = macros::macroexpand_all(&mut self.heap, form, self.root)?;
+            let form = eval::macros::macroexpand_all(&mut self.heap, form, self.root)?;
             result = eval::eval(&mut self.heap, form, self.root)?;
             if i + 1 < n {
                 self.heap.reset_local_to(cp);
@@ -121,12 +121,12 @@ impl Interp {
     /// The caller (the CLI) renders `PATH:LINE:COL: message` (see
     /// `docs/tooling.md`); parse errors keep the reader's precise position.
     pub fn eval_source(&mut self, src: &str) -> Result<Value, LispError> {
-        let forms = reader::read_all_positioned(&mut self.heap, src)?;
+        let forms = syntax::reader::read_all_positioned(&mut self.heap, src)?;
         let cp = self.heap.checkpoint();
         let mut result = Value::Nil;
         let n = forms.len();
         for (i, (form, pos)) in forms.into_iter().enumerate() {
-            let form = macros::macroexpand_all(&mut self.heap, form, self.root)
+            let form = eval::macros::macroexpand_all(&mut self.heap, form, self.root)
                 .map_err(|e| e.or_pos(pos))?;
             result = eval::eval(&mut self.heap, form, self.root).map_err(|e| e.or_pos(pos))?;
             if i + 1 < n {
@@ -138,7 +138,7 @@ impl Interp {
 
     /// Render a value to its readable text form.
     pub fn print(&self, v: Value) -> String {
-        printer::print(&self.heap, v)
+        syntax::printer::print(&self.heap, v)
     }
 }
 

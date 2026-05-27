@@ -8,7 +8,7 @@ this way" view, and [language.md](language.md) / [primitives.md](primitives.md)
 are the language surface.
 
 **To scope a work session,** name a component by its file (e.g. "work on
-`reader.rs`") — each card's *work here independently* note is its brief.
+`syntax/reader.rs`") — each card's *work here independently* note is its brief.
 Restructuring work that spans a component is collected as numbered, self-contained
 items in the [Work backlog](#work-backlog-dispatchable) at the end; point Claude at
 one with e.g. *"do backlog item W2 from docs/components.md."*
@@ -31,6 +31,12 @@ one with e.g. *"do backlog item W2 from docs/components.md."*
         error      alloc (byte counter)            process (green-process scheduler)
 ```
 
+On disk the `crates/lisp/src` tree mirrors these layers, so the listing reads as
+the architecture: `core/` (value, heap, alloc), `syntax/` (reader, printer),
+`eval/` (evaluator + macros), `types/` (lattice + checker), with `error.rs`,
+`process.rs`, `builtins.rs`, and `lib.rs` at the top level. `lib.rs`'s module
+block is the annotated table of contents.
+
 Two boundaries do most of the structural work:
 
 1. **Mechanism (Rust) vs policy (Brood).** Rust supplies primitives and the
@@ -46,7 +52,7 @@ Two boundaries do most of the structural work:
 
 ## The central seam: `Value` + `Heap`
 
-`Value` (in `value.rs`) is `Copy`: atoms inline, heap objects are small integer
+`Value` (in `core/value.rs`) is `Copy`: atoms inline, heap objects are small integer
 **handles** (`PairId`, `VecId`, …) whose two high bits tag a *region*
 (LOCAL / PRELUDE / RUNTIME — see [shared-code.md](shared-code.md)). You never
 dereference a handle directly; you ask the `Heap` (`heap.pair(id)`,
@@ -56,7 +62,7 @@ before working in any Rust component:
 - A function that reads or builds values needs `&Heap` / `&mut Heap`. This is
   why `reader`, `printer`, `eval`, `macros`, `builtins`, `check`, `process` all
   thread it.
-- **All heap construction funnels through `Heap`/`value.rs` helpers** (invariant,
+- **All heap construction funnels through `Heap`/`core/value.rs` helpers** (invariant,
   ADR-002/016). Don't allocate `Value` structure any other way — it keeps region
   tagging and the future GC contained.
 - A `Heap` is `Send` (plain `Vec`s + `Arc`s, no `Rc`), so a process can move
@@ -64,7 +70,7 @@ before working in any Rust component:
 
 ## Rust kernel — substrate
 
-### `value.rs` — the value model · ~305 LOC
+### `core/value.rs` — the value model · ~305 LOC
 - **Owns:** `Value`, the first-class type tag `Tag` + `tag(v)`, the handle types
   and their region encoding, the process-wide symbol interner
   (`intern`/`symbol_name`/`symbol_is`), `Closure`, `Arity`, `NativeFn`, and the
@@ -72,11 +78,11 @@ before working in any Rust component:
 - **Depends on:** `error`, and `heap` only in type signatures (`NativeFnPtr`).
 - **Exposes:** the vocabulary every other component is written in.
 - **Work here independently:** adding a `Value` kind is the highest-blast-radius
-  change in the repo — it needs a matching `Tag` (and a bit in `types.rs`, guarded
+  change in the repo — it needs a matching `Tag` (and a bit in `types/mod.rs`, guarded
   by a test) and touches `printer`, `eval`, `heap`, `process::Message`. Check the
   compatibility contract in [types.md](types.md) first.
 
-### `heap.rs` — heap, regions, environments · ~726 LOC (the heaviest)
+### `core/heap.rs` — heap, regions, environments · ~726 LOC (the heaviest)
 - **Owns:** the per-process LOCAL data heap (slab `Vec`s); the shared `SharedCode`
   (PRELUDE) and `RuntimeCode` (RUNTIME) regions + their `Arc`s; allocation
   (`alloc_*`, `list`); access (`pair`/`car`/`cdr`/`vector`/`string`/`closure`);
@@ -98,7 +104,7 @@ before working in any Rust component:
 - **Depends on:** `value`, `printer` (to render the offending value).
 - **Work here independently:** fully self-contained; the cleanest module to touch.
 
-### `alloc.rs` — process byte counter · ~63 LOC
+### `core/alloc.rs` — process byte counter · ~63 LOC
 - **Owns:** the `#[global_allocator]` that tallies live/peak bytes for
   `(mem-bytes)`/`(mem-peak)`.
 - **Depends on:** nothing (std only).
@@ -117,7 +123,7 @@ before working in any Rust component:
 
 ## Rust kernel — language pipeline
 
-### `reader.rs` — text → `Value` · ~321 LOC
+### `syntax/reader.rs` — text → `Value` · ~321 LOC
 - **Owns:** the recursive-descent parser; records form source positions into the
   heap for tooling.
 - **Depends on:** `heap`, `value`, `error`.
@@ -125,12 +131,12 @@ before working in any Rust component:
 - **Work here independently:** input side only; round-trips with `printer`, so
   changing surface syntax usually means a matching `printer` change.
 
-### `printer.rs` — `Value` → text · ~129 LOC
+### `syntax/printer.rs` — `Value` → text · ~129 LOC
 - **Owns:** `print` (readable, REPL) and `display` (human, `str`/`print`).
 - **Depends on:** `heap`, `value`.
 - **Work here independently:** output side only; the inverse contract of `reader`.
 
-### `eval.rs` — the evaluator · ~539 LOC
+### `eval/mod.rs` — the evaluator · ~539 LOC
 - **Owns:** the `'tail: loop` tree-walker, **special forms** (`quote if do def
   set! fn/lambda quasiquote defmacro let/let* while`), closure application,
   parameter binding (`&optional`/`& rest`), and the native-call arity gate.
@@ -142,7 +148,7 @@ before working in any Rust component:
   (`tail_of`), not recurse (guarded by `tail_calls_do_not_overflow`). Keep the
   *core* small (ADR: prefer a prelude macro over a new special form).
 
-### `macros.rs` — expansion & the compile pass · ~294 LOC
+### `eval/macros.rs` — expansion & the compile pass · ~294 LOC
 - **Owns:** `quasiquote`, `macroexpand[-1]`, and `macroexpand_all` (the compile
   pass run at each top-level boundary), including the **pattern lowering** that
   desugars multi-clause / destructuring `fn` and `let` into the Brood `match*`
@@ -172,14 +178,14 @@ before working in any Rust component:
 
 ## Rust kernel — types (advisory; nothing gates on it)
 
-### `types.rs` — the type lattice · ~491 LOC
+### `types/mod.rs` — the type lattice · ~491 LOC
 - **Owns:** `Ty` (a set of `Tag`s; union/intersect/negate; subtyping = inclusion)
   and `GradualTy` (`dynamic()` inside the lattice). Pure algebra + its own tests.
 - **Depends on:** `value` (for `Tag`).
 - **Work here independently:** no runtime path consumes it except `check`. See
   ADR-023/024 and [types.md](types.md).
 
-### `check.rs` — the advisory checker · ~212 LOC
+### `types/check.rs` — the advisory checker · ~212 LOC
 - **Owns:** a walk over macro-expanded forms that warns on *provably* wrong
   primitive arguments (disjoint types). Never rejects; returns warning strings.
 - **Depends on:** `types`, `heap`, `value`, `printer`.
@@ -259,7 +265,7 @@ before working in any Rust component:
 
 ### Coupling hotspots (ranked)
 
-1. **`heap.rs` is a god-object (~726 LOC, ~6 concerns).** It bundles slab
+1. **`core/heap.rs` is a god-object (~726 LOC, ~6 concerns).** It bundles slab
    allocation, the three regions + freeze/promotion, the **environment chain**,
    structural **equality**, memory-reclamation **checkpoints**, and editor
    **source metadata** (`form_pos`/`current_file`). The environment logic used to
@@ -294,7 +300,7 @@ before working in any Rust component:
 
 Each item is self-contained: hand Claude the item ID plus this file and it has
 everything it needs. Two pairs share a file — **coordinate or sequence them**:
-W2 and W3 both edit `heap.rs`; W1 is subsumed by W4 (both edit `builtins.rs`).
+W2 and W3 both edit `core/heap.rs`; W1 is subsumed by W4 (both edit `builtins.rs`).
 
 ### W1 — Delete dead primitive functions · `builtins.rs` · trivial, no behaviour change
 - **Goal:** remove dead code.
@@ -307,19 +313,19 @@ W2 and W3 both edit `heap.rs`; W1 is subsumed by W4 (both edit `builtins.rs`).
 - **Verify:** `grep` shows no references; `cargo build` warns less; `cargo test` green.
 - **Risk:** none. Independent of W2/W3. **Folded into W4** — skip if doing W4.
 
-### W2 — Extract `env.rs` from `heap.rs` · medium, mechanical
+### W2 — Extract `env.rs` from `core/heap.rs` · medium, mechanical
 - **Goal:** give the environment chain its own module.
 - **Do:** move `EnvFrame` and the chain ops (`new_env`, `env_get`, `env_define`,
   `env_set`, `env_root`, plus the `EnvId::GLOBAL` → `runtime.globals` routing) into
-  `crates/lisp/src/env.rs`. Frame *storage* stays in the heap slabs (`local.envs`,
-  `runtime.code.envs`); `env.rs` operates over the heap via accessors (add
-  `pub(crate)` ones as needed). Add `pub mod env;` in `lib.rs`; update call sites in
-  `eval.rs` and the builtins.
-- **Why:** `heap.rs` bundles ~6 concerns; the env chain was historically its own
+  `crates/lisp/src/core/env.rs`. Frame *storage* stays in the heap slabs
+  (`local.envs`, `runtime.code.envs`); `core/env.rs` operates over the heap via
+  accessors (add `pub(crate)` ones as needed). Declare `pub mod env;` in
+  `core/mod.rs`; update call sites in `eval/mod.rs` and the builtins.
+- **Why:** `core/heap.rs` bundles ~6 concerns; the env chain was historically its own
   module.
 - **Verify:** `cargo test` green, incl. `tail_calls_do_not_overflow`; behaviour
   identical.
-- **Risk:** medium. **Shares `heap.rs` with W3** — do them together or in sequence.
+- **Risk:** medium. **Shares `core/heap.rs` with W3** — do them together or in sequence.
 
 ### W3 — Move source metadata out of `Heap` · low–medium
 - **Goal:** decouple editor-tooling state from the allocator.
@@ -330,7 +336,7 @@ W2 and W3 both edit `heap.rs`; W1 is subsumed by W4 (both edit `builtins.rs`).
 - **Why:** read-time tooling state has no business living in the data heap.
 - **Verify:** `form-pos` / `current-file` work; the test framework's per-test
   source-line capture works; `cargo test` green.
-- **Risk:** low–medium. **Shares `heap.rs` with W2.**
+- **Risk:** low–medium. **Shares `core/heap.rs` with W2.**
 
 ### W4 — Split `builtins.rs` into `builtins/` by domain · medium, large but mechanical
 - **Goal:** one cohesive file per primitive domain.

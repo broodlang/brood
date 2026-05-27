@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-use crate::value::Value;
+use crate::core::value::Value;
 
 /// A 1-based source position (line and column), used for editor-parseable
 /// error reporting (see `docs/tooling.md`). Columns count characters.
@@ -109,23 +109,23 @@ impl LispError {
     /// A self-identifying type error: which operation (`who`), what it `expected`,
     /// and the actual tag + printed form of what arrived. Threads the heap to
     /// render the offending value, e.g. `first: expected list or vector, got int (5)`.
-    pub fn wrong_type(heap: &crate::heap::Heap, who: &str, expected: &str, got: Value) -> Self {
+    pub fn wrong_type(heap: &crate::core::heap::Heap, who: &str, expected: &str, got: Value) -> Self {
         Self::type_err(format!(
             "{}: expected {}, got {} ({})",
             who,
             expected,
-            crate::value::tag(got).name(),
-            crate::printer::print(heap, got),
+            crate::core::value::tag(got).name(),
+            crate::syntax::printer::print(heap, got),
         ))
     }
     pub fn runtime(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Runtime, message)
     }
     /// Construct the error raised by `(throw value)`, carrying the value.
-    pub fn thrown(value: Value, heap: &crate::heap::Heap) -> Self {
+    pub fn thrown(value: Value, heap: &crate::core::heap::Heap) -> Self {
         LispError {
             kind: ErrorKind::User,
-            message: crate::printer::display(heap, value),
+            message: crate::syntax::printer::display(heap, value),
             payload: Some(value),
             pos: None,
             file: None,
@@ -148,5 +148,5 @@ impl fmt::Display for LispError {
 
 impl std::error::Error for LispError {}
 
-/// The result of evaluating something: a [`Value`](crate::value::Value) or a [`LispError`].
-pub type LispResult = Result<crate::value::Value, LispError>;
+/// The result of evaluating something: a [`Value`](crate::core::value::Value) or a [`LispError`].
+pub type LispResult = Result<crate::core::value::Value, LispError>;

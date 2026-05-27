@@ -2,8 +2,8 @@
 //! strings, so it threads `&mut Heap`.
 
 use crate::error::{LispError, Pos};
-use crate::heap::Heap;
-use crate::value::{self, Value};
+use crate::core::heap::Heap;
+use crate::core::value::{self, Value};
 
 /// Read every form in `src`.
 pub fn read_all(heap: &mut Heap, src: &str) -> Result<Vec<Value>, LispError> {

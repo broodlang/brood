@@ -6,8 +6,8 @@
 
 use crate::error::{LispError, LispResult};
 use crate::eval;
-use crate::heap::Heap;
-use crate::value::{self, EnvId, Value};
+use crate::core::heap::Heap;
+use crate::core::value::{self, EnvId, Value};
 
 /// Expand a quasiquote template against `env`.
 pub fn quasiquote(heap: &mut Heap, template: Value, env: EnvId) -> LispResult {

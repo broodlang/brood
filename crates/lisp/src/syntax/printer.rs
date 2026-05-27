@@ -3,8 +3,8 @@
 //! - [`print`] is *readable* (strings quoted/escaped) — what the REPL shows.
 //! - [`display`] is *human* (strings raw) — what `print`/`str` use.
 
-use crate::heap::Heap;
-use crate::value::{symbol_name, Value};
+use crate::core::heap::Heap;
+use crate::core::value::{symbol_name, Value};
 
 pub fn print(heap: &Heap, v: Value) -> String {
     let mut out = String::new();

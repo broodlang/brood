@@ -58,20 +58,24 @@ Brood/
   Cargo.toml            workspace
   crates/
     lisp/               the language (this is the substance today)
-      src/
-        value.rs        Value, Tag, handle types, symbol interner, Closure/Arity
-        heap.rs         per-process heap + shared regions, env chain, promotion, equality
-        alloc.rs        process-wide byte-counting global allocator
-        reader.rs       text -> Value (recursive-descent parser)
-        printer.rs      Value -> text (round-trips with the reader)
-        eval.rs         tree-walking evaluator + special forms + tail calls
-        macros.rs       quasiquote, macroexpand, the compile pass + pattern lowering
-        builtins.rs     the primitive kernel (functions implemented in Rust)
-        types.rs        the Ty / GradualTy set-theoretic type lattice (advisory)
-        check.rs        advisory type checker over expanded forms
-        process.rs      green-process scheduler (spawn/send/receive)
-        error.rs        LispError / LispResult / source Pos
+      src/              the directory tree mirrors the layers (see lib.rs)
         lib.rs          the `Interp` entry point; bundles the prelude
+        core/           substrate — what everything is addressed through
+          value.rs        Value, Tag, handle types, symbol interner, Closure/Arity
+          heap.rs         per-process heap + shared regions, env chain, promotion, equality
+          alloc.rs        process-wide byte-counting global allocator
+        syntax/         surface syntax (reader and printer round-trip)
+          reader.rs       text -> Value (recursive-descent parser)
+          printer.rs      Value -> text
+        eval/           the evaluation engine
+          mod.rs          tree-walking evaluator + special forms + tail calls
+          macros.rs       quasiquote, macroexpand, the compile pass + pattern lowering
+        types/          advisory types (nothing gates on it)
+          mod.rs          the Ty / GradualTy set-theoretic lattice
+          check.rs        advisory type checker over expanded forms
+        error.rs        LispError / LispResult / source Pos
+        process.rs      green-process scheduler (spawn/send/receive)
+        builtins.rs     the primitive kernel (functions implemented in Rust)
       tests/            basic.rs (Rust e2e) + suite.rs (runs the .blsp suite)
     cli/                the `brood` binary: REPL + file runner + test/new
       src/main.rs

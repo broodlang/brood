@@ -27,8 +27,8 @@ use corosensei::{Coroutine, CoroutineResult, Yielder};
 
 use crate::error::{LispError, LispResult};
 use crate::eval;
-use crate::heap::Heap;
-use crate::value::{EnvId, Symbol, Value};
+use crate::core::heap::Heap;
+use crate::core::value::{EnvId, Symbol, Value};
 
 /// A `Send`, self-contained copy of a value, for crossing heaps.
 pub enum Message {

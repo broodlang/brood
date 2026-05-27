@@ -2,7 +2,7 @@
 //! inspired by Elixir's set-theoretic + gradual type system).
 //!
 //! A [`Ty`] **is a set of values**, represented as a bitset over the runtime
-//! [`Tag`]s (the value-set atoms — see [`crate::value::Tag`]). On this model the
+//! [`Tag`]s (the value-set atoms — see [`crate::core::value::Tag`]). On this model the
 //! set operations *are* the type operations:
 //!
 //! - union (`∪`)        — "could be either"        → bitwise OR
@@ -18,10 +18,15 @@
 //! (function arrows, a vector's element type) or the gradual `dynamic()` type.
 //! Both are later steps; nothing in the language consumes `Ty` yet. This module
 //! is just the algebra, with its own tests.
+//!
+//! `check` (the advisory type checker — the lattice's first consumer) lives
+//! alongside it here.
+
+pub mod check;
 
 use std::fmt;
 
-use crate::value::{self, Tag, Value};
+use crate::core::value::{self, Tag, Value};
 
 /// Every tag, in bit order — for iterating a `Ty`'s members (printing, etc.) and
 /// the source of [`TAG_COUNT`]. **Must list every [`Tag`] variant in discriminant
@@ -263,7 +268,7 @@ impl GradualTy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::value::Value;
+    use crate::core::value::Value;
 
     #[test]
     fn singletons_and_named_unions() {

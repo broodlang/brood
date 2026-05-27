@@ -19,9 +19,9 @@
 //! - Primitive signatures live in [`primitive_sig`] here; per contract point #6
 //!   they should eventually move onto `NativeFn` (enforced, like `Arity`).
 
-use crate::heap::Heap;
+use crate::core::heap::Heap;
 use crate::types::{GradualTy, Ty};
-use crate::value::{self, Tag, Value};
+use crate::core::value::{self, Tag, Value};
 
 /// A primitive's type signature: the expected type of each fixed positional
 /// argument, and the result type. (Variadic primitives — `str`, `vector`, the
@@ -122,7 +122,7 @@ fn check_into(heap: &Heap, form: Value, out: &mut Vec<String>) {
                             i + 1,
                             param,
                             arg_ty,
-                            crate::printer::print(heap, arg),
+                            crate::syntax::printer::print(heap, arg),
                         ));
                     }
                 }
@@ -155,7 +155,7 @@ fn list_items(heap: &Heap, mut v: Value) -> Option<Vec<Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reader;
+    use crate::syntax::reader;
 
     fn warnings(src: &str) -> Vec<String> {
         let mut heap = Heap::new();

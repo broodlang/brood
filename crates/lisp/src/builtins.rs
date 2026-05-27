@@ -7,9 +7,9 @@
 
 use crate::error::{ErrorKind, LispError, LispResult};
 use crate::eval::apply;
-use crate::heap::Heap;
-use crate::value::{self, Arity, EnvId, NativeFn, NativeFnPtr, Value};
-use crate::{printer, reader};
+use crate::core::heap::Heap;
+use crate::core::value::{self, Arity, EnvId, NativeFn, NativeFnPtr, Value};
+use crate::syntax::{printer, reader};
 
 /// Install the primitive kernel into `root`.
 pub fn register(heap: &mut Heap, root: EnvId) {
@@ -376,19 +376,19 @@ fn now(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 
 /// `(mem-bytes)` — bytes currently allocated across the whole process.
 fn mem_bytes(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Int(crate::alloc::live_bytes() as i64))
+    Ok(Value::Int(crate::core::alloc::live_bytes() as i64))
 }
 
 /// `(mem-peak)` — high-water mark of allocated bytes since the process started.
 fn mem_peak(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Int(crate::alloc::peak_bytes() as i64))
+    Ok(Value::Int(crate::core::alloc::peak_bytes() as i64))
 }
 
 // ---------- self-hosting ----------
 
 fn eval_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let root = heap.env_root(env);
-    let form = crate::macros::macroexpand_all(heap, arg(args, 0), root)?;
+    let form = crate::eval::macros::macroexpand_all(heap, arg(args, 0), root)?;
     crate::eval::eval(heap, form, root)
 }
 
@@ -411,7 +411,7 @@ fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let prev = heap.set_current_file(Some(path.clone()));
     let mut result = Ok(Value::Nil);
     for (form, pos) in forms {
-        result = crate::macros::macroexpand_all(heap, form, root)
+        result = crate::eval::macros::macroexpand_all(heap, form, root)
             .and_then(|f| crate::eval::eval(heap, f, root))
             .map_err(|e| e.or_pos(pos).or_file(path.clone()));
         if result.is_err() {
@@ -430,7 +430,7 @@ fn eval_string(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let root = heap.env_root(env);
     let mut result = Value::Nil;
     for form in reader::read_all(heap, &src)? {
-        let form = crate::macros::macroexpand_all(heap, form, root)?;
+        let form = crate::eval::macros::macroexpand_all(heap, form, root)?;
         result = crate::eval::eval(heap, form, root)?;
     }
     Ok(result)
@@ -633,12 +633,12 @@ fn apply_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
 // ---------- macros ----------
 
 fn macroexpand_1(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
-    let (expanded, _) = crate::macros::macroexpand_1(heap, arg(args, 0), env)?;
+    let (expanded, _) = crate::eval::macros::macroexpand_1(heap, arg(args, 0), env)?;
     Ok(expanded)
 }
 
 fn macroexpand(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
-    crate::macros::macroexpand(heap, arg(args, 0), env)
+    crate::eval::macros::macroexpand(heap, arg(args, 0), env)
 }
 
 /// `(check 'form)` — run the advisory type checker over `form` (macro-expanded
@@ -646,8 +646,8 @@ fn macroexpand(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
 /// `nil` when nothing is provably wrong. Advisory only: it never raises.
 fn check_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let root = heap.env_root(env);
-    let form = crate::macros::macroexpand_all(heap, arg(args, 0), root)?;
-    let warnings = crate::check::check_form(heap, form);
+    let form = crate::eval::macros::macroexpand_all(heap, arg(args, 0), root)?;
+    let warnings = crate::types::check::check_form(heap, form);
     let mut out = Vec::with_capacity(warnings.len());
     for w in &warnings {
         out.push(heap.alloc_string(w));
