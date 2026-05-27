@@ -185,6 +185,90 @@ impl fmt::Display for Ty {
     }
 }
 
+/// A **gradual** type — `dynamic()` brought *inside* the lattice (ADR-024,
+/// `docs/types.md`), not a bolt-on. It is a static [`Ty`] `bound` plus a
+/// `dynamic` flag: flag clear → exactly the static set; flag set →
+/// `dynamic(bound)`, "materialisable to anything within `bound`". Pure
+/// `dynamic()` is `dynamic(ANY)`.
+///
+/// The defining property: **consistent subtyping is *derived from* set
+/// inclusion**, never a separate consistency axiom (the classic Siek–Taha
+/// bolt-on — see ADR-024). A value flows where a static `t` is expected iff a
+/// static type does (`bound ⊆ t`) or — when dynamic — *some* inhabited
+/// materialisation fits (`bound ∩ t ≠ ⊥`). So pure `dynamic()` is consistent with
+/// every inhabited type (defer the check), while `dynamic(number)` is still
+/// caught against `string`.
+///
+/// **The rule (no checker consumes it yet):** anything whose static type can't be
+/// pinned — above all a *redefinable global under hot reload* — is `dynamic()`,
+/// never `ANY`. (`ANY` relates by subtyping and would error where an `int` is
+/// wanted; `dynamic()` defers, which is what lets typing coexist with live
+/// redefinition.)
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct GradualTy {
+    /// What we statically know: every materialisation is `⊆ bound`.
+    pub bound: Ty,
+    /// Whether the gradual `?` is in play (materialisable within `bound`).
+    pub dynamic: bool,
+}
+
+impl GradualTy {
+    /// A purely static gradual type — exactly the set `t`, no `?`.
+    pub const fn stat(t: Ty) -> GradualTy {
+        GradualTy { bound: t, dynamic: false }
+    }
+
+    /// `dynamic(bound)` — gradual, materialisable to anything within `bound`.
+    pub const fn dynamic_within(bound: Ty) -> GradualTy {
+        GradualTy { bound, dynamic: true }
+    }
+
+    /// Pure `dynamic()` = `dynamic(ANY)` — the unknown type a redefinable global
+    /// or free reference gets, so checking never fights hot reload.
+    pub const fn dynamic() -> GradualTy {
+        GradualTy::dynamic_within(Ty::ANY)
+    }
+
+    /// Is the gradual `?` in play?
+    pub const fn is_dynamic(self) -> bool {
+        self.dynamic
+    }
+
+    /// **Consistent subtyping** into a static expectation — derived from set
+    /// inclusion, the relation a checker uses for "can a value of this gradual
+    /// type be used where `expected` is wanted?". Static: `bound ⊆ expected`.
+    /// Dynamic: some inhabited materialisation fits, `bound ∩ expected ≠ ⊥`.
+    pub fn consistent_with(self, expected: Ty) -> bool {
+        if self.dynamic {
+            !self.bound.intersect(expected).is_never()
+        } else {
+            self.bound.is_subtype(expected)
+        }
+    }
+
+    /// Gradual union — union of bounds, dynamic if either side is. (`dynamic()`
+    /// composes with the set operations rather than standing outside them.)
+    pub fn union(self, other: GradualTy) -> GradualTy {
+        GradualTy {
+            bound: self.bound.union(other.bound),
+            dynamic: self.dynamic || other.dynamic,
+        }
+    }
+
+    /// Gradual intersection — intersection of bounds, dynamic if either side is.
+    pub fn intersect(self, other: GradualTy) -> GradualTy {
+        GradualTy {
+            bound: self.bound.intersect(other.bound),
+            dynamic: self.dynamic || other.dynamic,
+        }
+    }
+
+    /// Gradual negation — complement of the bound, preserving the `?`.
+    pub fn negate(self) -> GradualTy {
+        GradualTy { bound: self.bound.negate(), dynamic: self.dynamic }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,5 +359,38 @@ mod tests {
         for tag in ALL_TAGS {
             assert_eq!(Ty::of(tag).to_string(), tag.name());
         }
+    }
+
+    #[test]
+    fn pure_dynamic_is_consistent_with_every_inhabited_type() {
+        let d = GradualTy::dynamic();
+        assert!(d.is_dynamic());
+        for t in [Ty::of(Tag::Int), Ty::NUMBER, Ty::of(Tag::Str), Ty::LIST, Ty::ANY] {
+            assert!(d.consistent_with(t), "dynamic() should be consistent with {t}");
+        }
+    }
+
+    #[test]
+    fn bounded_dynamic_still_discriminates() {
+        // dynamic(number) defers within numbers but is still caught against string.
+        let dnum = GradualTy::dynamic_within(Ty::NUMBER);
+        assert!(dnum.consistent_with(Ty::of(Tag::Int)));
+        assert!(dnum.consistent_with(Ty::of(Tag::Float)));
+        assert!(!dnum.consistent_with(Ty::of(Tag::Str)));
+    }
+
+    #[test]
+    fn static_gradual_is_plain_subtyping() {
+        // Flag clear → consistent_with is exactly set inclusion.
+        assert!(GradualTy::stat(Ty::of(Tag::Int)).consistent_with(Ty::NUMBER));
+        assert!(!GradualTy::stat(Ty::NUMBER).consistent_with(Ty::of(Tag::Int)));
+    }
+
+    #[test]
+    fn composes_with_set_operations() {
+        let g =
+            GradualTy::dynamic_within(Ty::of(Tag::Int)).union(GradualTy::stat(Ty::of(Tag::Str)));
+        assert_eq!(g.bound, Ty::of(Tag::Int).union(Ty::of(Tag::Str)));
+        assert!(g.is_dynamic()); // dynamic propagates through the union
     }
 }

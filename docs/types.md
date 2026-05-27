@@ -1,6 +1,6 @@
 # Brood types — set-theoretic, gradual, advisory
 
-**Status:** step 1 of 5 implemented (`crates/lisp/src/types.rs`). This doc is the
+**Status:** steps 1–2 of 5 implemented (`crates/lisp/src/types.rs`). This doc is the
 plan *and* the compatibility contract: the staircase says what to build next, the
 [Compatibility contract](#compatibility-contract) says what every other change
 must respect so we never drift off this path. Decision recorded in
@@ -74,17 +74,16 @@ difference, semantic subtyping, `NEVER`/`ANY`/`NUMBER`/`LIST`, `of_value` bridge
 `Display`. Pure algebra; nothing in the language consumes it yet.
 **Done:** the algebra exists and is unit-tested in isolation.
 
-### Step 2 — `dynamic()`, the gradual type ⬜
-Represent the bounded gradual type `dynamic(bound: Ty)` (pure `dynamic()` =
-`dynamic(ANY)`), keeping it *inside* the lattice — extend `Ty`, or a thin
-`GradualTy` wrapping a `Ty` bound. **Derive** consistent subtyping from set
-operations on the bounds (`dynamic(b)` consistent-compatible with `t` iff
-`b ∩ t ≠ ⊥`), rather than adding a primitive consistency axiom. Define the rule
-"redefinable / free / global references are `dynamic()`." No checker yet — just
-the type and its derived relation.
-**Done when:** `dynamic()` is consistent with every type *via the derived rule*,
-it still composes with `∪`/`∩`/`¬`, and the "globals are `dynamic()`" rule is
-written down and tested.
+### Step 2 — `dynamic()`, the gradual type ✅
+`types.rs`: `GradualTy { bound: Ty, dynamic: bool }` — `dynamic(bound)` kept
+*inside* the lattice (pure `dynamic()` = `dynamic(ANY)`). `consistent_with` is
+**derived from set inclusion** (static → `bound ⊆ expected`; dynamic → `bound ∩
+expected ≠ ⊥`), not a primitive consistency axiom — so pure `dynamic()` is
+consistent with every inhabited type while `dynamic(number)` is still caught
+against `string`. Composes via `union`/`intersect`/`negate`. The
+"redefinable/free/global references are `dynamic()`" rule is documented (the
+struct doc + ADR-024); no checker consumes it yet.
+**Done:** the gradual type and its derived relation exist and are unit-tested.
 
 ### Step 3 — typed signatures on primitives ⬜
 Give each `NativeFn` a result `Ty` (and argument `Ty`s) beside its `Arity` — same
@@ -145,7 +144,7 @@ marked **(enforced)** are compile errors if violated; the rest are review rules.
 
 ## Where it lives
 
-- `crates/lisp/src/types.rs` — the `Ty` lattice (this is the whole of step 1).
+- `crates/lisp/src/types.rs` — the `Ty` lattice (step 1) and `GradualTy` (step 2).
 - `crates/lisp/src/value.rs` — `Tag` (the atoms), `value::tag`, `NativeFn` (gets
   a signature in step 3).
 - `crates/lisp/src/eval.rs` — `call_native` (arity gate today; the natural place
