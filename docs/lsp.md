@@ -18,17 +18,21 @@ one server that owns the language knowledge.
 > (`lsp-server` + `lsp-types`, no async runtime). `Uri`→text document store, a
 > `LineIndex` for byte↔UTF-16 `Position` (both directions), and
 > `diagnostics::collect` over the CST's `Error` nodes.
-> **Tier 1** — `textDocument/{completion,hover,documentSymbol,definition}`,
-> wired to the Foundation B/C surface: completion offers locals-in-scope
-> (`scope::names_in_scope`) + interpreter globals (`global-names`); hover renders
-> a local note, a document def's signature+docstring (read off the CST,
-> `defs`), or a prelude/builtin name's `arglist`+`doc`; `documentSymbol` outlines
-> top-level `def`/`defn`/`defmacro`; goto-definition resolves through
-> `scope::resolve_at`. The server holds one `Interp` for introspection only — it
-> still never evaluates the open buffer.
+> **Tier 1** (complete) — `textDocument/{completion,hover,documentSymbol,
+> definition,signatureHelp}`, wired to the Foundation B/C surface: completion
+> offers locals-in-scope (`scope::names_in_scope`) + interpreter globals
+> (`global-names`); hover renders a local note, a document def's
+> signature+docstring (read off the CST, `defs`), or a prelude/builtin name's
+> `arglist`+`doc`; `documentSymbol` outlines top-level `def`/`defn`/`defmacro`;
+> goto-definition resolves through `scope::resolve_at`; signature help shows the
+> enclosing call's parameters with the active argument highlighted (params from
+> the CST def, or `arglist` for a prelude/builtin). The server holds one `Interp`
+> for introspection only — it still never evaluates the open buffer.
 > **Next:** Tier 2 — references, rename, semantic tokens, and located *semantic*
-> diagnostics (unbound / arity), needing the checker to carry spans. Signature
-> help (active-parameter tracking) is the small remaining Tier-1 item.
+> diagnostics (unbound / arity), needing the checker to carry spans. **Note:**
+> all of the above is **single-file** — globals come from the prelude/builtins or
+> the open buffer, not from `require`d modules; cross-file resolution is a
+> separate, not-yet-built workspace-indexing concern (see §Cross-file below).
 
 ## Why a server, and why not brute-force it
 
@@ -212,6 +216,39 @@ symbol binds to**. Two layers:
   heap. It should be **shared with the checker's own scope tracking** so scope
   resolution isn't written twice.
 
+## Cross-file resolution (not yet built)
+
+Everything above is **single-file**. The server's knowledge of names has exactly
+two sources, and neither crosses a `require`:
+
+- the **open buffer's** CST + scope tree (locals and this file's `def`s), and
+- the **interpreter's globals** — the *prelude + Rust builtins* only. The server
+  deliberately never evaluates the buffer (no side effects, no loops), so it also
+  never runs a `(require 'foo)`; a symbol another module `provide`s is invisible
+  to it. Today such a name resolves as `Free` (no goto target, no hover, but no
+  false "unbound" error either — diagnostics are syntactic-only at Tier 1).
+
+Making `map`-from-*your-module* navigable is a **workspace-indexing** feature, not
+a per-request one. The shape, when we build it (a Tier-2½ / M-later concern):
+
+1. **Resolve the load graph statically.** Walk `(require 'sym)` / `provide`
+   forms off the CST + `*load-path*` (the same convention `nest`/modules use,
+   ADR-019/020) — *without evaluating* — to find each module's file.
+2. **Index every file's top-level `def`s** with their spans (the `defs` walk
+   already does this per file; run it over the whole project, cache per file,
+   invalidate on `didChange`/`didSave`).
+3. Feed that index into completion (candidates from required modules),
+   goto-definition / hover (resolve a `Free` name against the index, returning a
+   `Location` in another file — LSP `Location` already carries a `Uri`), and
+   workspace-symbol search.
+
+This needs a project root (LSP `initialize` carries `workspaceFolders` / `rootUri`,
+which we currently ignore) and a file→CST cache the per-request handlers don't
+have yet. It's additive behind the same handlers — none of the Tier-1 wiring
+changes — so it's deferred until the single-file features are exercised in anger.
+The macro caveat applies here too: indexing reads `provide`/`require` as written,
+not as a running program would compute them.
+
 ## The crate
 
 `crates/lsp` → a `brood-lsp` binary depending on the `brood` lib. This mirrors
@@ -239,7 +276,7 @@ additive change behind the same feature handlers.
 | Tier | Features | Needs | Status |
 |---|---|---|---|
 | **0** | `publishDiagnostics` (syntactic), document sync, lifecycle | `cst::parse` + `LineIndex` | **done** |
-| **1** | completion (locals + globals), hover, `documentSymbol`, **goto-definition** | `arglist` / `global-names` primitives; CST top-level walk (`defs`) + scope walker | **done** (signature help deferred) |
+| **1** | completion (locals + globals), hover, `documentSymbol`, **goto-definition**, **signature help** | `arglist` / `global-names` primitives; CST top-level walk (`defs`) + scope walker | **done** |
 | **2** | references, rename, semantic tokens, "unbound" / arity diagnostics | located checker output (spans on `types::check`) | next |
 
 Tier 0 was reachable immediately because syntactic diagnostics need only the

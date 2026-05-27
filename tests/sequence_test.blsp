@@ -94,6 +94,16 @@
   (test "sort handles a larger, reversed input correctly"
     (assert= (sort (range 50 0 -1)) (range 1 51))))
 
+(describe "mapcat / frequencies"
+  (test "mapcat maps then concatenates the resulting lists"
+    (assert= (mapcat (fn (x) (list x x)) (list 1 2 3)) (list 1 1 2 2 3 3))
+    (assert= (mapcat (fn (x) (range x)) (list 1 2 3)) (list 0 0 1 0 1 2))
+    (assert= (mapcat (fn (x) (list x)) nil) nil))
+  (test "frequencies tallies occurrences into a map"
+    (assert= (frequencies (list :a :b :a :a :b)) {:a 3 :b 2})
+    (assert= (frequencies nil) {})
+    (assert= (get (frequencies (list 1 1 1)) 1) 3)))
+
 ;; ---- explicit concurrency (spawn / send / fan-in) ---------------------------
 ;; :isolated so these run against a private globals copy and don't contend with
 ;; the parallel suite for the runner's mailbox. Each worker builds a sequence and

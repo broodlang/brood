@@ -48,14 +48,15 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "vector-length", Arity::exact(1), vector_length);
 
     // map — the *minimal* kernel: construct, read, two producers, and one
-    // enumerator (`map-keys`). `vals`/`contains?` and the `get`/`assoc`/`dissoc`
-    // surface (variadic + defaults) are all Brood over these (std/prelude.blsp).
-    // Maps are immutable: each op returns a fresh map.
+    // enumerator (`map-pairs` → [k v] vectors). `keys`/`vals`/`contains?`/
+    // `reduce-kv` and the `get`/`assoc`/`dissoc` surface (variadic + defaults) are
+    // all Brood over these (std/prelude.blsp). Maps are immutable: each op returns
+    // a fresh map.
     def(heap, "hash-map", Arity::any(), hash_map);
     def(heap, "map-get", Arity::range(2, 3), map_get);
     def(heap, "map-assoc", Arity::exact(3), map_assoc);
     def(heap, "map-dissoc", Arity::exact(2), map_dissoc);
-    def(heap, "map-keys", Arity::exact(1), map_keys);
+    def(heap, "map-pairs", Arity::exact(1), map_pairs);
 
     // string
     def(heap, "string-length", Arity::exact(1), string_length);
@@ -384,11 +385,17 @@ fn map_dissoc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.map_dissoc(id, arg(args, 1)))
 }
 
-/// `(map-keys m)` — the keys as a list, in insertion order.
-fn map_keys(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_map(heap, "map-keys", arg(args, 0))?;
-    let keys: Vec<Value> = heap.map(id).iter().map(|(k, _)| *k).collect();
-    Ok(heap.list(keys))
+/// `(map-pairs m)` — the entries as a list of `[k v]` vectors, in insertion
+/// order, in one O(n) pass. The *single* map enumerator: `keys`/`vals`/
+/// `contains?`/`reduce-kv` are all Brood over it (std/prelude.blsp).
+fn map_pairs(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_map(heap, "map-pairs", arg(args, 0))?;
+    let entries = heap.map(id).to_vec(); // copy out, releasing the borrow before we alloc
+    let pairs: Vec<Value> = entries
+        .into_iter()
+        .map(|(k, v)| heap.alloc_vector(vec![k, v]))
+        .collect();
+    Ok(heap.list(pairs))
 }
 
 fn string_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {

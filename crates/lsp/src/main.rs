@@ -28,12 +28,13 @@ use lsp_types::notification::{
 };
 use lsp_types::request::{
     Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest, Request as RequestTrait,
+    SignatureHelpRequest,
 };
 use lsp_types::{
     CompletionOptions, CompletionParams, Diagnostic, DiagnosticSeverity, DocumentSymbolParams,
     GotoDefinitionParams, HoverParams, HoverProviderCapability, OneOf, PositionEncodingKind,
-    PublishDiagnosticsParams, Range, ServerCapabilities, TextDocumentSyncCapability,
-    TextDocumentSyncKind, Uri,
+    PublishDiagnosticsParams, Range, ServerCapabilities, SignatureHelpOptions, SignatureHelpParams,
+    TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
 };
 
 use brood::syntax::{cst, scope};
@@ -46,6 +47,7 @@ mod diagnostics;
 mod hover;
 mod introspect;
 mod line_index;
+mod signature;
 mod symbols;
 
 use line_index::LineIndex;
@@ -69,6 +71,13 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
         definition_provider: Some(OneOf::Left(true)),
+        // Args are whitespace-separated in Lisp, so `(` opens signature help and
+        // a space re-triggers it onto the next parameter.
+        signature_help_provider: Some(SignatureHelpOptions {
+            trigger_characters: Some(vec!["(".to_string(), " ".to_string()]),
+            retrigger_characters: Some(vec![" ".to_string()]),
+            work_done_progress_options: Default::default(),
+        }),
         ..Default::default()
     };
 
@@ -196,6 +205,19 @@ fn handle_request(docs: &Documents, interp: &mut Interp, req: Request) -> Respon
                 let (root, tree, index) = analyze(text);
                 let offset = index.offset(text, pos.position);
                 definition::definition(&uri, text, &root, &tree, &index, offset)
+            });
+            Response::new_ok(id, result)
+        }
+        SignatureHelpRequest::METHOD => {
+            let (id, p) = match extract::<SignatureHelpParams>(req) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            let pos = p.text_document_position_params;
+            let result = docs.get(&pos.text_document.uri).and_then(|text| {
+                let (root, tree, index) = analyze(text);
+                let offset = index.offset(text, pos.position);
+                signature::signature_help(interp, text, &root, &tree, offset)
             });
             Response::new_ok(id, result)
         }

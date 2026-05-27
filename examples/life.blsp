@@ -13,18 +13,8 @@
 (require 'hatch)   ; the process framework (std/hatch.blsp)
 
 ;; ---- small helpers -----------------------------------------------------------
-
-;; Built downward (i decreasing) so the recursive call is in tail position — O(1)
-;; stack, since there's no `range` primitive.
-(defn range-down (i acc)
-  "(0 1 … i) prepended onto `acc`."
-  (if (< i 0) acc (range-down (dec i) (cons i acc))))
-(defn range (n)
-  "The integers 0 to n-1, as a list."
-  (range-down (dec n) nil))
-
-;; `sleep` comes from hatch (required above) — it parks the process on the
-;; scheduler timer without disturbing the mailbox.
+;; `range` (0..n-1) and `sleep` come from the prelude and hatch respectively;
+;; `sleep` parks the process on the scheduler timer without disturbing its mailbox.
 
 (defmacro timed (label & body)
   "Evaluate `body`, print `label` and how long it took in ms, and return its value."
@@ -46,15 +36,11 @@
   (map (fn ([dx dy]) [(+ x dx) (+ y dy)]) neighbour-offsets))
 
 (defn neighbour-counts (board)
-  "A map cell -> live-neighbour-count for every cell adjacent to a live cell,
-built in one pass over the live set. These are exactly the cells that can be
-alive next tick — a cell with no live neighbour cannot be."
-  (fold (fn (counts cell)
-          (fold (fn (c n) (assoc c n (inc (get c n 0))))
-                counts
-                (neighbours cell)))
-        {}
-        (keys board)))
+  "A map cell -> live-neighbour-count for every cell adjacent to a live cell.
+These are exactly the cells that can be alive next tick — a cell with no live
+neighbour cannot be. Each live cell contributes its 8 neighbours; `frequencies`
+tallies how many live cells named each coordinate."
+  (frequencies (mapcat neighbours (keys board))))
 
 (defn step (board)
   "The next generation of `board`. A cell is alive next tick with exactly 3 live

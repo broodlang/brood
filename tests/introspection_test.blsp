@@ -17,6 +17,10 @@
   (test "macros carry docstrings too"
     (defmacro inc! (x) "Add one." `(+ ~x 1))
     (assert= (doc inc!) "Add one."))
+  (test "a function with a destructured parameter keeps its docstring"
+    (defn add-pair ([x y]) "Sum a 2-vector." (+ x y))
+    (assert= (doc add-pair) "Sum a 2-vector.")  ; was dropped by the fn-lowering path
+    (assert= (add-pair [3 4]) 7))               ; …and the doc isn't returned/evaluated
   (test "doc of a non-function is nil"
     (assert= (doc 42) nil)
     (assert= (doc "a string") nil)))

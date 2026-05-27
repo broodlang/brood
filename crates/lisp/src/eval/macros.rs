@@ -286,6 +286,15 @@ fn lower_fn(heap: &mut Heap, items: &[Value]) -> Option<Value> {
     let body = &forms[1..];
     let params = form_items(heap, param_form)?;
 
+    // Peel a leading docstring (a string literal with more body after it) so it
+    // stays the *first* form of the lowered `fn` — otherwise `make_closure`'s
+    // docstring detection misses it once the body is wrapped in the refutable
+    // bind + `do`. (`(fn ([x y]) "doc" body)` would lose its doc otherwise.)
+    let (doc, body) = match body.first() {
+        Some(&Value::Str(_)) if body.len() > 1 => (Some(body[0]), &body[1..]),
+        _ => (None, body),
+    };
+
     // Patterns are allowed only in required slots (before &optional / & rest).
     let required_end = params
         .iter()
@@ -313,5 +322,10 @@ fn lower_fn(heap: &mut Heap, items: &[Value]) -> Option<Value> {
         Value::Vector(_) => heap.alloc_vector(new_params),
         _ => heap.list(new_params),
     };
-    Some(heap.list(vec![value::sym("fn"), new_param_form, acc]))
+    let mut lowered = vec![value::sym("fn"), new_param_form];
+    if let Some(doc) = doc {
+        lowered.push(doc); // keep the docstring as the leading body form
+    }
+    lowered.push(acc);
+    Some(heap.list(lowered))
 }

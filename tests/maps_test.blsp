@@ -78,6 +78,20 @@
     (assert= (count {:a 1 :b 2 :c 3}) 3)
     (refute (empty? {:a 1}))))
 
+(describe "map-pairs & reduce-kv"
+  (test "map-pairs returns [k v] vectors in insertion order"
+    (assert= (map-pairs {:a 1 :b 2 :c 3}) (list [:a 1] [:b 2] [:c 3]))
+    (assert= (map-pairs {}) nil))
+  (test "keys and vals are derived from map-pairs (incl. falsy values)"
+    (assert= (keys {:a nil :b false :c 0}) (list :a :b :c))
+    (assert= (vals {:a nil :b false :c 0}) (list nil false 0)))
+  (test "reduce-kv folds (f acc k v) over the entries"
+    (assert= (reduce-kv (fn (acc k v) (+ acc v)) 0 {:a 1 :b 2 :c 3}) 6)
+    (assert= (reduce-kv (fn (acc k v) (cons k acc)) nil {:a 1 :b 2}) (list :b :a))
+    (assert= (reduce-kv (fn (acc k v) (assoc acc v k)) {} {:a 1 :b 2}) {1 :a 2 :b}))
+  (test "reduce-kv on the empty map returns the seed untouched"
+    (assert= (reduce-kv (fn (acc k v) (+ acc 1)) 99 {}) 99)))
+
 (describe "immutable updates"
   (test "assoc returns a fresh map, leaving the original untouched"
     (let (m {:a 1})

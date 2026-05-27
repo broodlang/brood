@@ -95,10 +95,11 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   modules (a file's leading string), extracted to Markdown by `nest doc`
   (ADR-029). 🟡 The `brood-lsp` language server (`docs/lsp.md`): ✅ Tier 0 —
   the `crates/lsp` binary with stdio lifecycle, full document sync, and
-  syntactic `publishDiagnostics` off the CST; ✅ Tier 1 — completion (locals +
-  globals), hover, `documentSymbol`, and goto-definition (the latter pulled
-  forward off Foundation B's scope walker); ⬜ remaining: signature help, and
-  Tier 2 (refs/rename, semantic tokens, located checker diagnostics).
+  syntactic `publishDiagnostics` off the CST; ✅ Tier 1 (complete) — completion
+  (locals + globals), hover, `documentSymbol`, goto-definition (pulled forward
+  off Foundation B's scope walker), and signature help; ⬜ Tier 2 (refs/rename,
+  semantic tokens, located checker diagnostics) + a workspace index for
+  cross-file navigation (all Tier-1 features are single-file today).
 
 > v0.1 is the ✅ slice above: enough to be a real, usable language. The ⬜ items
 > complete M1.

@@ -1605,3 +1605,47 @@ filesystem, system, time, memory, error, and process primitives (I/O & runtime).
 **Verified.** `cargo test` green (53 Rust + **330 in-language**), no warnings.
 Docs: `docs/primitives.md` (count 71; the three removals folded into the
 irreducibility note).
+
+---
+
+## 2026-05-27 — brood-lsp: signature help completes Tier 1
+
+**Goal.** Close out the last Tier-1 feature (`docs/lsp.md`): `textDocument/
+signatureHelp`.
+
+**Built (`signature.rs`).** While typing a call's args, show the callee's
+parameter list with the active argument highlighted:
+- `enclosing_list` — innermost `List` whose span contains the cursor, with
+  **inclusive-end** containment (unlike `node_at`): signature help fires at EOF
+  inside an unclosed `(map ` where offset == the recovered span's end, which a
+  half-open check misses.
+- Param source: the CST def (`defs::find_def`) when the head symbol resolves to a
+  document `def`, else `introspect::arglist_tokens` (new) for a prelude/builtin.
+- `slots` drops the `&optional` / `&` markers and reduces an `(b 1)` optional
+  group to `b`, so the highlighted parameters are the bindable ones; the full
+  arglist (markers and all) stays in the signature label.
+- `active_param` = the arg form containing the cursor (end-inclusive, so editing
+  at an arg's end counts as that arg), else the count of args completed before it;
+  clamped into range so a `& rest` tail / extra args land on the last slot.
+- Capability advertises `(` and ` ` as trigger/retrigger chars (Lisp args are
+  whitespace-separated).
+
+**Review fixes folded in (from the prior session's review).** UTF-16 `offset`
+now snaps a mid-surrogate column *back* to the char start (was forward);
+`defs::find_def` recurses so hover finds a `def` nested in a `do`/`when` (still a
+global); and the introspection queries bracket each `eval_str` with
+`checkpoint`/`reset_local_to` so a long server session doesn't leak a result list
+per keystroke (the REPL's reclamation pattern).
+
+**Scope reminder.** All Tier-1 features are **single-file**: names come from the
+open buffer or the prelude/builtins, never from `require`d modules (the server
+never evaluates the buffer, so it never runs a `require`). Cross-file resolution
+is a separate workspace-indexing feature — documented under §Cross-file in
+`docs/lsp.md`, deferred.
+
+**Tests.** 43 in `crates/lsp` (per-feature units + the end-to-end loop test).
+Full workspace green; clippy clean for the crate.
+
+**Next.** Tier 2 — references, rename, semantic tokens, located semantic
+diagnostics (needs `types::check` to carry spans); and, separately, the
+workspace index for cross-file navigation.

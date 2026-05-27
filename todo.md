@@ -3,6 +3,48 @@
 Running scratch list of work to pick up. Promote items to `docs/roadmap.md` /
 an ADR once they're committed to. Newest section at the top.
 
+## Possibility: compile a `nest` project into a standalone binary
+
+Status: **idea, not committed** (discussed 2026-05-27). Captured here so the shape
+doesn't have to be re-derived.
+
+**Key call — bundle, not AOT.** Brood is a tree-walker and `def`-rebind hot reload
+(the shared *mutable* RUNTIME table) is load-bearing, so "compile to a binary"
+means *embed the runtime + the project's code image into a self-contained
+executable* (the `deno compile` / Erlang escript model) — **not** AOT-to-machine
+code, which would fight the late binding that's the whole point.
+
+Most machinery already exists:
+- `include_str!` already bakes `.blsp` into the binary — prelude (`lib.rs:152`),
+  std modules (`builtins.rs` `BUILTIN_MODULES` + `%builtin-module`). A project's
+  modules would just become baked-in modules like the std ones.
+- Boot path is `Interp::new()` + `eval_str`; a bundled `main()` is ~10 lines.
+- `nest new` already scaffolds `src/main.blsp` with `(defn main ())` + `(provide 'main)`.
+- `run-process` can drive `cargo` from Brood, so build *policy* stays in
+  `std/project.blsp` (ADR-006), Rust only hosts the launcher template.
+
+Missing pieces:
+1. An `argv` / command-line-args primitive (~10 lines; there's `getenv`, no argv).
+2. A run contract — the binary loads the project main module and calls `(main args)`;
+   let `project.blsp` optionally declare `:main module/fn`. This also yields a
+   **`nest run`** (doesn't exist yet) — really step 0.
+3. A launcher-crate template (generated `Cargo.toml` + `main.rs` depending on the
+   `brood` lib, embedding the project image as a name→source table).
+4. A `nest build` driver — mostly Brood (reuse the `nest doc` source-walk): emit
+   bundle + launcher, `(run-process "cargo" ["build" "--release"])`, move binary out.
+
+Phasing: **P0** `nest run` (½ day) → **P1** `nest build` source-bundle (a few days;
+reuses all the above — needs a Rust toolchain at build time, output ≈ `brood` size,
+re-parses project source each launch). Later/optional: **P2** a frozen
+post-macroexpand `SharedCode` image (skips parse/expand at startup — real
+serialization infra, pairs with the tracing-GC / send-functions-between-processes
+work); and a no-toolchain appended-payload stub (the `deno compile` trick).
+
+Caveats: no dependency manager yet (flat `require`/`*load-path*` + baked std), so
+only **std-only projects** are bundleable until the deps story lands; and the
+generated launcher must reference the `brood` lib crate (path dep locally;
+publishing hits the crates.io `brood` name collision noted in project notes).
+
 ## Supervision / process-framework track (the "OTP-in-Brood" idea)
 
 Build an Erlang/OTP-style process + supervision layer, but as **Brood policy** on
@@ -48,15 +90,15 @@ target is to shrink the two central functions and drop the local `range` helper:
              {} (neighbour-counts board)))                 ; was (keys …) + per-cell (get …)
 ```
 
-### Tier 1 — prelude only, no kernel change (do first; unblocks the rewrite)
+### Tier 1 — prelude only, no kernel change ✅ DONE (2026-05-27)
 
-- [ ] **`range`** — `(range n)` (and `(range start end)` via `&optional`). Deletes
-  the example's local `range`/`range-down`.
-- [ ] **`mapcat`** — `(defn mapcat (f xs) (apply append (map f xs)))`.
-- [ ] **`frequencies`** — `(fold (fn (m x) (assoc m x (inc (get m x 0)))) {} xs)`.
-  Collapses `neighbour-counts` to one line.
-- [ ] (optional) `repeat`, `take`/`drop` (today only in `std/test.blsp`), `concat`
-  alias for variadic `append`. Not needed by Life; add if cheap.
+- [x] **`range`** — `(range hi)` / `(range lo hi)` / `(range lo hi step)`, plus a
+  full sequence library (`take`/`drop`/`take-while`/`zip`/`partition`/`sort`/…).
+- [x] **`mapcat`** — `(apply append (map f coll))`.
+- [x] **`frequencies`** — `(fold (fn (m x) (assoc m x (inc (get m x 0)))) {} coll)`.
+- Result: `examples/life.blsp` `neighbour-counts` is now
+  `(frequencies (mapcat neighbours (keys board)))`, and the local `range` helper
+  is gone. Tests in `tests/sequence_test.blsp`.
 
 ### Tier 2 — one kernel change, and it *shrinks* the kernel
 

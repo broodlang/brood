@@ -66,6 +66,28 @@ pub fn signature(interp: &mut Interp, name: &str) -> (Option<String>, Option<Str
     out
 }
 
+/// The raw parameter tokens of a global function/macro `name` — the names *and*
+/// the `&optional` / `&` markers, in source order (e.g. `["a", "&optional", "b",
+/// "&", "rest"]`). `None` when `name` is unbound or has no params (a builtin or a
+/// zero-arg fn — indistinguishable here, as in [`signature`]). For signature help.
+pub fn arglist_tokens(interp: &mut Interp, name: &str) -> Option<Vec<String>> {
+    let cp = interp.heap.checkpoint();
+    let out = match interp.eval_str(&format!("(arglist {name})")) {
+        Ok(v) => interp.heap.list_to_vec(v).ok().map(|items| {
+            items
+                .into_iter()
+                .filter_map(|x| match x {
+                    Value::Sym(s) => Some(value::symbol_name(s)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        }),
+        Err(_) => None,
+    };
+    interp.heap.reset_local_to(cp);
+    out.filter(|v| !v.is_empty())
+}
+
 /// Render an `(arglist f)` result (a list of parameter symbols, or `nil`) as a
 /// signature line `(name p1 p2 …)`. An empty result (a builtin, a non-fn, *or* a
 /// zero-arg fn) yields `None`: we can't tell a zero-arg fn from a non-fn here, so
