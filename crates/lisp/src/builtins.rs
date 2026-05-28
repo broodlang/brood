@@ -1574,8 +1574,84 @@ fn throw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 // ---------- processes ----------
 
 fn spawn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let pid = crate::process::spawn(heap, arg(args, 0))?;
+    let pid = crate::process::spawn(heap, arg(args, 0), None)?;
     Ok(crate::process::pid_value(pid))
+}
+
+/// `(%spawn-supervised thunk max-restarts max-window-ms)` — spawn a
+/// supervised green process (ADR-039). Throws are caught, the last tail
+/// call is retried with hot-reloaded code, the process exits only when
+/// more than `max-restarts` retries fall inside any `max-window-ms`
+/// window (Erlang's intensity/period). The user-facing wrapper is the
+/// `supervise` macro; both args are positional here because the Brood
+/// macro layer fills defaults (3 / 5000).
+fn spawn_supervised(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let policy = supervision_policy_from_args(args, 1, 2)?;
+    let pid = crate::process::spawn(heap, arg(args, 0), Some(policy))?;
+    Ok(crate::process::pid_value(pid))
+}
+
+/// `(%spawn-supervised-named name thunk max-restarts max-window-ms)` —
+/// idempotent supervised named spawn. Same lookup semantics as
+/// `%spawn-named` (a live name returns its pid, `thunk` is not evaluated),
+/// plus the supervision policy from the trailing two args.
+fn spawn_supervised_named(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let name = match arg(args, 0) {
+        Value::Keyword(s) | Value::Sym(s) => s,
+        v => {
+            return Err(LispError::wrong_type(
+                heap,
+                "%spawn-supervised-named",
+                "keyword or symbol",
+                v,
+            ))
+        }
+    };
+    let thunk = arg(args, 1);
+    if !matches!(thunk, Value::Fn(_)) {
+        return Err(LispError::wrong_type(
+            heap,
+            "%spawn-supervised-named",
+            "function",
+            thunk,
+        ));
+    }
+    let policy = supervision_policy_from_args(args, 2, 3)?;
+    let pid = crate::dist::spawn_or_get(name, || crate::process::spawn(heap, thunk, Some(policy)))?;
+    Ok(crate::process::pid_value(pid))
+}
+
+/// Parse `(max-restarts, max-window-ms)` out of `args` at the given
+/// indices, validating both are non-negative ints fitting their unsigned
+/// types. Shared between `%spawn-supervised` and
+/// `%spawn-supervised-named`.
+fn supervision_policy_from_args(
+    args: &[Value],
+    max_restarts_idx: usize,
+    max_window_idx: usize,
+) -> Result<crate::process::SupervisionPolicy, LispError> {
+    let max_restarts = match arg(args, max_restarts_idx) {
+        Value::Int(n) if n >= 0 => n as u32,
+        v => {
+            return Err(LispError::runtime(format!(
+                "supervise: max-restarts must be a non-negative integer, got {:?}",
+                v
+            )))
+        }
+    };
+    let max_window_ms = match arg(args, max_window_idx) {
+        Value::Int(n) if n >= 0 => n as u64,
+        v => {
+            return Err(LispError::runtime(format!(
+                "supervise: max-window-ms must be a non-negative integer, got {:?}",
+                v
+            )))
+        }
+    };
+    Ok(crate::process::SupervisionPolicy {
+        max_restarts,
+        max_window_ms,
+    })
 }
 
 /// `(%spawn-named name thunk)` — idempotent named spawn. If `name` (a
@@ -1618,7 +1694,7 @@ fn spawn_named(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     // `LispError` if `process::spawn` rejects the thunk (defensive: with the
     // `Value::Fn(_)` type-check above, that shouldn't fire today, but a
     // future change to `promote`/`spawn` won't silently panic).
-    let pid = crate::dist::spawn_or_get(name, || crate::process::spawn(heap, thunk))?;
+    let pid = crate::dist::spawn_or_get(name, || crate::process::spawn(heap, thunk, None))?;
     Ok(crate::process::pid_value(pid))
 }
 
@@ -1822,19 +1898,6 @@ fn peak_threads(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 /// green processes (≈ `nproc`, or the `-j` setting); 0 until the first spawn.
 fn worker_threads(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::Int(crate::process::worker_threads() as i64))
-}
-
-/// `(set-supervision! on?)` — turn the per-process supervisor on or off. See
-/// ADR-039 / docs/supervision.md. Type-checked to a boolean by `Sig`.
-fn set_supervision(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    let on = matches!(args[0], Value::Bool(true));
-    crate::process::set_supervision(on);
-    Ok(Value::Nil)
-}
-
-/// `(supervision?)` — `true` iff the per-process supervisor is currently on.
-fn supervision_q(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Bool(crate::process::is_supervision_enabled()))
 }
 
 /// `(list-processes)` — every currently-live local pid as a `Pid` value

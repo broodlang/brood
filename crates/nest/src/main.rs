@@ -314,22 +314,24 @@ fn cmd_run(interp: &mut Interp, file: Option<&str>, watch: &[String], args: &[St
             })
             .collect::<Vec<_>>()
             .join(" ");
-        // `--watch` implies dev/hot-reload mode (ADR-039): turn the per-process
-        // supervisor on so a save that introduces a runtime error (an unbound
-        // symbol, an arity mismatch, an actual throw) catches at the process
-        // boundary instead of killing the long-running loop. The next reload
-        // — once the user types the fix — gets picked up by name on the
-        // supervisor's retry (`std/scheduler.rs::supervise`). Without --watch,
-        // `nest run` runs as a normal script: let-it-crash, exit on throw.
-        format!("(set-supervision! true) (require 'reload) {}", calls)
+        format!("(require 'reload) {}", calls)
     };
 
-    let code = match file {
+    // With `--watch`, wrap the user's program in a supervised process and
+    // park the root thread on its monitor. The supervisor catches throws so
+    // a save with a typo doesn't kill the session; the root parks on
+    // `(receive [:down …])` so it's there to print the final exit reason
+    // when the supervised process really gives up (Erlang intensity
+    // exceeded). Without `--watch`, run inline — plain script, let-it-crash.
+    //
+    // `__nest-supervised` is the supervised pid we expose so a `--watch`
+    // session can be introspected (`(list-processes)` shows it). The
+    // wrapping is invisible to the user's code: their file still sees the
+    // global env, their `(spawn …)` calls are unsupervised by default.
+    let wrap = !watch.is_empty();
+    let run_form: String = match file {
         // No FILE: run the project's :main via std/project.blsp.
-        None => format!(
-            "(require 'project) (load-config) {} (run-project (list {}))",
-            watch_setup, escaped_args
-        ),
+        None => format!("(run-project (list {}))", escaped_args),
         // FILE: run that file. Inside a project, set up the project so its
         // `src/` is on `*load-path*` (the file can `(require 'foo)` other
         // project modules), but *don't* eager-load every source — otherwise a
@@ -337,19 +339,33 @@ fn cmd_run(interp: &mut Interp, file: Option<&str>, watch: &[String], args: &[St
         // explicit `load`). Outside a project, plain `brood <file>`.
         Some(path) => {
             let escaped_path = brood::introspect::escape_brood_string(path);
-            if in_project() {
-                format!(
-                    "(require 'project) (load-config) \
-                     (let (root (project--find-root (cwd))) \
-                       (when root (project-setup root))) \
-                     {} (load \"{}\")",
-                    watch_setup, escaped_path
-                )
-            } else {
-                format!("{} (load \"{}\")", watch_setup, escaped_path)
-            }
+            format!("(load \"{}\")", escaped_path)
         }
     };
+    let project_setup = if file.is_none() {
+        "(require 'project) (load-config) ".to_string()
+    } else if in_project() {
+        "(require 'project) (load-config) \
+         (let (root (project--find-root (cwd))) \
+           (when root (project-setup root))) "
+            .to_string()
+    } else {
+        String::new()
+    };
+    let body = if wrap {
+        // Park the root on a monitor of the supervised process so the
+        // script doesn't return before the user's program does — and the
+        // root sees `[:down …]` if intensity is exceeded.
+        format!(
+            "(let (p (supervise {})) \
+                  (monitor p) \
+                  (receive ([:down _ ~p reason] (println \"[exit]\" reason))))",
+            run_form
+        )
+    } else {
+        run_form
+    };
+    let code = format!("{}{} {}", project_setup, watch_setup, body);
     run(interp, &code);
 }
 

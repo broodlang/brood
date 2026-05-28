@@ -685,7 +685,11 @@
   - `(spawn expr)` — anonymous.
   - `(spawn name expr)` — named & idempotent: returns the existing pid if
     a live process is already registered under `name`. The hot-reload-friendly
-    form (reloading the file doesn't fire a second worker)."
+    form (reloading the file doesn't fire a second worker).
+
+  Plain `spawn` is **let-it-crash** (Erlang `spawn/1`): an uncaught throw kills
+  the process and any monitors see `[:down pid [:error msg]]` immediately. For
+  recover-on-throw / hot-reload semantics, use `supervise` instead."
   ;; Param name is `more` (not `rest`) so the body can still call the
   ;; prelude's `rest` function without param-shadowing itself.
   (if (empty? more)
@@ -693,6 +697,37 @@
     (if (empty? (rest more))
       `(%spawn-named ~head (fn () ~(first more)))
       (throw "spawn: expected (spawn expr) or (spawn name expr)"))))
+
+;; ---- supervised spawn (ADR-039) -------------------------------------------
+;; Parallel to `spawn` but the process is wrapped in a runtime supervisor:
+;; an uncaught throw is caught at the process boundary, the last tail call
+;; is retried (with hot-reload name re-resolution), and the process exits
+;; only if more than `*supervise-max-restarts*` retries fall inside any
+;; `*supervise-max-window-ms*` window — Erlang's `intensity` / `period`
+;; defaults of 3 in 5 s.
+
+(def *supervise-max-restarts* 3)
+(def *supervise-max-window-ms* 5000)
+
+(defmacro supervise (head & more)
+  "Run an expression in a *supervised* green process; returns its pid. Two
+  shapes, matching `spawn`:
+  - `(supervise expr)` — anonymous, supervised.
+  - `(supervise name expr)` — named, idempotent, supervised.
+
+  An uncaught throw in the supervised process is caught at the process
+  boundary; the supervisor sleeps an exponential backoff (1 ms → 1 s) and
+  retries the last tail call, re-resolving the called fn by name so a
+  freshly-`def`'d version (hot reload, ADR-013) wins. The process gives up
+  only if more than `*supervise-max-restarts*` (default 3) retries fall in
+  any `*supervise-max-window-ms*` (default 5000 ms) window — Erlang's
+  `supervisor` intensity/period (ADR-039)."
+  (if (empty? more)
+    `(%spawn-supervised (fn () ~head) *supervise-max-restarts* *supervise-max-window-ms*)
+    (if (empty? (rest more))
+      `(%spawn-supervised-named ~head (fn () ~(first more))
+                                *supervise-max-restarts* *supervise-max-window-ms*)
+      (throw "supervise: expected (supervise expr) or (supervise name expr)"))))
 
 ;; A long-lived `:remote-spawn` server: the receiver-side machinery behind the
 ;; `remote-spawn` macro. Receives `[:run thunk]` messages and applies the thunk

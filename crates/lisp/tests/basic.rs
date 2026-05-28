@@ -1100,36 +1100,26 @@ fn spawn_with_three_args_is_a_macro_error() {
     );
 }
 
-/// Supervisor recovery (ADR-039 step 2): when a process's main eval raises an
-/// uncaught error, the per-process supervisor catches it and re-invokes the
-/// *most recent tail call* with the **same args** — so a long-running stateful
-/// loop survives a bad iteration. We exercise that by having a tail-recursive
-/// worker that throws on iteration N=0, then count how many times it reports
-/// reaching that iteration: once for the first arrival + once per restart up
-/// to the supervisor's restart budget.
+/// Supervisor recovery (ADR-039): a worker spawned with `(supervise …)`
+/// catches an uncaught throw at the process boundary and re-invokes the
+/// *most recent tail call* with the **same args** — so a long-running
+/// stateful loop survives a bad iteration. We exercise that by having a
+/// tail-recursive worker that throws on iteration N=0, then count how
+/// many times it reports reaching that iteration: once for the first
+/// arrival + once per retry, up to the **restart intensity** (Erlang's
+/// default of 3 retries within any 5 s window — `*supervise-max-restarts*`
+/// / `*supervise-max-window-ms*` in the prelude). Plain `(spawn …)`
+/// without `supervise` is still let-it-crash; this test wraps in
+/// `supervise` explicitly.
 ///
 /// Verifies, end-to-end:
 /// 1. `record_resume` captures `(callee, argv)` on every tail-call dispatch
 ///    (we see argv=[0] re-used by the supervisor, not [3] or [2]).
 /// 2. The supervisor catches a throw escaping the eval and loops.
-/// 3. The restart counter actually fires (we see exactly 1 + MAX_RESTARTS
-///    arrivals at iteration 0, not unbounded).
+/// 3. Restart intensity actually fires (we see exactly 3 retries within
+///    the window, not unbounded; the 4th throw exceeds intensity).
 #[test]
 fn supervisor_retries_last_iteration_with_same_args() {
-    // Supervision is off by default (let-it-crash baseline); opt in here.
-    // Note: `set_supervision` is global, so this test must not run with
-    // peers that assume the default — Cargo serialises tests in one binary
-    // only if --test-threads=1, but the gate's effect is local to spawns
-    // started **after** this call. We turn it back off in a defer to limit
-    // blast radius.
-    brood::process::set_supervision(true);
-    struct Guard;
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            brood::process::set_supervision(false);
-        }
-    }
-    let _g = Guard;
     let mut interp = Interp::new();
     interp
         .eval_str(
@@ -1138,16 +1128,16 @@ fn supervisor_retries_last_iteration_with_same_args() {
                (send *sup-recovery-parent* (vector :iter n))
                (if (= n 0) (throw \"boom\"))
                (sup-recovery-worker (- n 1)))
-             (spawn (sup-recovery-worker 3))",
+             (supervise (sup-recovery-worker 3))",
         )
         .expect("setup");
 
-    // Collect messages with a generous overall timeout: the supervisor's
-    // exponential backoff (1ms → … → 1s) caps each gap so all 11 arrivals at
-    // n=0 land inside a few seconds even on a loaded machine.
+    // Collect messages with a generous overall timeout: backoff
+    // (1+2+4 ms) keeps all 3 retries inside the 5 s window so the test
+    // observes the cap firing rather than timing out.
     let mut iters: Vec<i64> = Vec::new();
     let started = std::time::Instant::now();
-    while started.elapsed() < std::time::Duration::from_secs(15) {
+    while started.elapsed() < std::time::Duration::from_secs(10) {
         let got = interp
             .eval_str("(receive (v v) (after 2000 nil))")
             .expect("receive");
@@ -1165,8 +1155,11 @@ fn supervisor_retries_last_iteration_with_same_args() {
             .unwrap_or_else(|_| panic!("unparseable iter msg: {s}"));
         iters.push(n);
     }
-    // Expected: 3, 2, 1, 0, then 0 repeated up to MAX_RESTARTS times before
-    // the supervisor gives up. (MAX_RESTARTS=10 in scheduler.rs.)
+    // Expected with default intensity (3 in 5 s):
+    //   first descent: 3, 2, 1, 0  — 1 zero
+    //   retries 1, 2, 3 each see argv=[0]: + 3 zeros
+    //   4th throw exceeds intensity → give up.
+    // Total: [3, 2, 1, 0, 0, 0, 0] — 4 zeros.
     assert_eq!(
         iters.iter().take(4).copied().collect::<Vec<_>>(),
         vec![3, 2, 1, 0],
@@ -1174,8 +1167,8 @@ fn supervisor_retries_last_iteration_with_same_args() {
     );
     let zeros = iters.iter().filter(|&&n| n == 0).count();
     assert_eq!(
-        zeros, 11,
-        "supervisor should retry exactly MAX_RESTARTS+1 (=11) times at n=0; got {zeros} (full trace: {iters:?})"
+        zeros, 4,
+        "supervisor should fire 3 retries (Erlang default intensity) + the original arrival at n=0; got {zeros} zeros (full trace: {iters:?})"
     );
 }
 
@@ -1187,22 +1180,18 @@ fn supervisor_retries_last_iteration_with_same_args() {
 /// whole point of integrating supervision with hot reload.
 #[test]
 fn supervisor_picks_up_hot_reloaded_definition_on_retry() {
-    brood::process::set_supervision(true);
-    struct Guard;
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            brood::process::set_supervision(false);
-        }
-    }
-    let _g = Guard;
-
     let mut interp = Interp::new();
+    // Use the primitive `%spawn-supervised` directly so we can hand it a
+    // generous intensity (100 in 60 s). The default 3/5 s would fire ~10
+    // ms after the spawn (each retry takes ~30 ms of sleep + a few ms of
+    // backoff), well before the test thread sleeps 200 ms and `def`s the
+    // fix.
     interp
         .eval_str(
             "(def *hr-parent* (self))
              (defn hr-worker (n)
                (do (sleep 30) (throw \"buggy\")))
-             (spawn (hr-worker 0))",
+             (%spawn-supervised (fn () (hr-worker 0)) 100 60000)",
         )
         .expect("setup");
 
