@@ -44,7 +44,7 @@ impl Span {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     /// The reader could not parse the source text.
     Parse,
@@ -60,12 +60,30 @@ pub enum ErrorKind {
     User,
 }
 
+impl ErrorKind {
+    /// The stable lowercase tag name — the keyword that appears as `:kind` in a
+    /// caught built-in error map (e.g. `:unbound`, `:type`). Stable across
+    /// versions so agents and Brood code can branch on it (ADR-036,
+    /// `docs/llm-native.md` §4).
+    pub fn tag_name(self) -> &'static str {
+        match self {
+            ErrorKind::Parse => "parse",
+            ErrorKind::Unbound => "unbound",
+            ErrorKind::Arity => "arity",
+            ErrorKind::Type => "type",
+            ErrorKind::Runtime => "runtime",
+            ErrorKind::User => "user",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LispError {
     pub kind: ErrorKind,
     pub message: String,
     /// The value carried by `(throw v)`, so `catch` can rebind it. Built-in
-    /// errors leave this `None` (and `catch` then receives the message string).
+    /// errors leave this `None`; `try_catch` then projects the structured
+    /// fields (kind, code, message, location, hint) into a Brood map.
     pub payload: Option<Value>,
     /// Source position, when known. Set by the reader (precise, for parse
     /// errors) or filled in by the file runner with the enclosing top-level
@@ -74,6 +92,35 @@ pub struct LispError {
     /// The file the error occurred in, when known (set by `load` / the file
     /// runner). Combined with `pos` for `FILE:LINE:COL:` diagnostics.
     pub file: Option<String>,
+    /// Stable error code (`"E0010"`, `"E0030"`, …) — see `error_codes` below
+    /// and `docs/error-codes.md`. `None` for errors that haven't been tagged
+    /// yet (callers fall back to branching on [`ErrorKind`]). Static `&str`
+    /// so the registry is a plain table.
+    pub code: Option<&'static str>,
+    /// Optional human-readable hint pointing at a likely fix, e.g.
+    /// `"scheduler race under -j 0 — try -j 1"`. Set by raise sites that
+    /// know the common gotcha; omitted otherwise.
+    pub hint: Option<String>,
+}
+
+// ---------- error codes (see `docs/error-codes.md`) ---------------------------
+//
+// **Stable** identifiers attached to built-in errors at construction time. The
+// numbering scheme groups by [`ErrorKind`]:
+//   E00xx — Parse / reader
+//   E01xx — Unbound / scope
+//   E02xx — Arity
+//   E03xx — Type
+//   E04xx — Runtime (division, overflow, IO, …)
+//
+// Codes never get repurposed — once shipped they're permanent. New errors get
+// the next free slot in their range.
+pub mod error_codes {
+    pub const PARSE_GENERIC: &str = "E0001";
+    pub const UNBOUND_SYMBOL: &str = "E0010";
+    pub const ARITY_MISMATCH: &str = "E0020";
+    pub const TYPE_MISMATCH: &str = "E0030";
+    pub const RUNTIME_GENERIC: &str = "E0099";
 }
 
 impl LispError {
@@ -84,7 +131,21 @@ impl LispError {
             payload: None,
             pos: None,
             file: None,
+            code: None,
+            hint: None,
         }
+    }
+
+    /// Attach a stable error code (builder).
+    pub fn with_code(mut self, code: &'static str) -> Self {
+        self.code = Some(code);
+        self
+    }
+
+    /// Attach a human-readable hint (builder).
+    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
+        self
     }
 
     /// Attach a source position (builder style).
@@ -139,16 +200,16 @@ impl LispError {
         format!("{}{}", prefix, self)
     }
     pub fn parse(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::Parse, message)
+        Self::new(ErrorKind::Parse, message).with_code(error_codes::PARSE_GENERIC)
     }
     pub fn unbound(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::Unbound, message)
+        Self::new(ErrorKind::Unbound, message).with_code(error_codes::UNBOUND_SYMBOL)
     }
     pub fn arity(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::Arity, message)
+        Self::new(ErrorKind::Arity, message).with_code(error_codes::ARITY_MISMATCH)
     }
     pub fn type_err(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::Type, message)
+        Self::new(ErrorKind::Type, message).with_code(error_codes::TYPE_MISMATCH)
     }
     /// A self-identifying type error: which operation (`who`), what it `expected`,
     /// and the actual tag + printed form of what arrived. Threads the heap to
@@ -168,9 +229,11 @@ impl LispError {
         ))
     }
     pub fn runtime(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::Runtime, message)
+        Self::new(ErrorKind::Runtime, message).with_code(error_codes::RUNTIME_GENERIC)
     }
-    /// Construct the error raised by `(throw value)`, carrying the value.
+    /// Construct the error raised by `(throw value)`, carrying the value. User
+    /// throws **don't** carry a code — the user controls the payload shape; if
+    /// they want one, they throw a map with `:code` themselves.
     pub fn thrown(value: Value, heap: &crate::core::heap::Heap) -> Self {
         LispError {
             kind: ErrorKind::User,
@@ -178,7 +241,41 @@ impl LispError {
             payload: Some(value),
             pos: None,
             file: None,
+            code: None,
+            hint: None,
         }
+    }
+
+    /// Project the structured fields into a Brood map for `catch` consumption.
+    /// Shape: `{:kind <keyword> :message <string> [:code <string>]
+    /// [:file <string> :line <int> :col <int>] [:hint <string>]}` — every
+    /// optional field is omitted when absent, so the agent's pattern match
+    /// stays simple. Used by `try_catch` when the error carries no user
+    /// payload (i.e. it's a built-in error). See `docs/llm-native.md` §4.
+    pub fn to_value_map(&self, heap: &mut crate::core::heap::Heap) -> Value {
+        use crate::core::value::{intern, Value};
+        let kind_kw = Value::Keyword(intern(self.kind.tag_name()));
+        let msg_str = heap.alloc_string(&self.message);
+        let mut entries: Vec<(Value, Value)> = Vec::with_capacity(7);
+        entries.push((Value::Keyword(intern("kind")), kind_kw));
+        entries.push((Value::Keyword(intern("message")), msg_str));
+        if let Some(code) = self.code {
+            let code_str = heap.alloc_string(code);
+            entries.push((Value::Keyword(intern("code")), code_str));
+        }
+        if let Some(file) = &self.file {
+            let file_str = heap.alloc_string(file);
+            entries.push((Value::Keyword(intern("file")), file_str));
+        }
+        if let Some(pos) = self.pos {
+            entries.push((Value::Keyword(intern("line")), Value::Int(pos.line as i64)));
+            entries.push((Value::Keyword(intern("col")), Value::Int(pos.col as i64)));
+        }
+        if let Some(hint) = &self.hint {
+            let hint_str = heap.alloc_string(hint);
+            entries.push((Value::Keyword(intern("hint")), hint_str));
+        }
+        heap.alloc_map(entries)
     }
 }
 

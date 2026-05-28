@@ -409,7 +409,7 @@ LLMs. Brood gets the rare chance to bake them in from the start.
 | **1** | MCP server: `find-pattern`, `explain-error` | ❌ — need §7 / §4 first |
 | **2** | Claude skill / plugin | partial — the `brood-task` MCP prompt (`docs/prompts/brood-task.md`) is the system-prompt fragment; the full skill bundle is TBD |
 | **3** | Incarnations file | ✅ `docs/incarnations.md` (with `claude-demo-findings.md` as the first entry); exposed via `brood://docs/incarnations` |
-| **4** | Structured error values with stable codes | ❌ — **highest-leverage next move** |
+| **4** | Structured error values with stable codes | ✅ shipped (`docs/error-codes.md`) — `LispError` carries `code` + `kind`; `catch` rebinds kernel errors to `{:kind :code :message :file :line :col :hint}` maps; MCP `error.data` projects the same shape; current codes `E0001`/`E0010`/`E0020`/`E0030`/`E0099` |
 | **5** | Macroexpand visible: MCP tool, LSP hover, CLI-error expansion context, docstring `:expands-to` | partial — MCP `macroexpand` tool shipped; the rest TBD |
 | **6** | `brood --watch` as LLM's REPL | partial — `--watch <file>` flag exists on `brood` and `nest run` (`std/reload.blsp`); structured JSON-lines output TBD |
 | **7** | Worked-example index by intent (`examples/by-task/`) | ❌ |
@@ -418,14 +418,16 @@ LLMs. Brood gets the rare chance to bake them in from the start.
 | **10** | `nest eval-llm` gauntlet | ❌ |
 | **11** | `brood --think-aloud` | ❌ |
 | **12** | Demo prelude | partial — some helpers exist (`format`, ANSI escapes); a packaged `demo-prelude` TBD |
-| **13** | Failure-mode tagging in errors | ❌ — gated on §4 |
+| **13** | Failure-mode tagging in errors | ❌ — substrate (§4) now exists; specific `:hint` / `:see` attachments per error site are still to be added |
 | **14** | "Brood-aware" prompt fragment | ✅ `docs/prompts/brood-task.md` — served via MCP `prompts/get` and reusable as a file by other agent harnesses (Cursor / Aider / Continue) |
 | **15** | Persistent in-process eval | ✅ — that's the `nest mcp` session model (one long-lived `Interp`, ADR-013 hot reload) |
 
 **Quick map of what's done vs. open per the prioritisation in this doc.**
 The prioritisation block at the top picks §1 → §4 → §7 → §3 → §5 as the
-order. We've done §1 and §3; the gap to §4 (structured errors) and §7
-(examples-by-intent) is what the next session(s) should close.
+order. **§1, §3, §4, §14, §15 are done**; the next-highest-leverage open
+items are §7 (examples-by-intent — unblocks `brood.find-pattern`), §6
+(`--watch --json`), and §5 finish-out (LSP hover macroexpand + CLI errors
+that show the expansion context).
 
 A small follow-up: **`nest new .`** currently fails (`.` isn't a valid
 project name and the existence check trips). Allowing it to scaffold into

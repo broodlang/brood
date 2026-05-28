@@ -4165,3 +4165,261 @@ returns 8 resources including the three new ones;
 `resources/read brood://docs/incarnations` returns the 3 KB index;
 `prompts/get brood-task` returns the 2 KB externalized prompt with the
 incarnations pointer baked in.
+
+---
+
+## 2026-05-28 — Review pass + structured errors with codes (§4)
+
+**Review fixes** to the MCP work just landed:
+
+1. **`mcp-check-tool`** — `:diagnostics` wrapped with `(or … [])` so a
+   clean project renders as `{:diagnostics []}` rather than
+   `{:diagnostics null}`. Same disambiguation hazard `processes` solved.
+2. **`run-tests-structured`** — `:results` and per-test `:failures`
+   wrapped likewise; an empty suite or a passing test no longer renders
+   as `null`.
+3. **`mcp-tools` docstring** — was stale ("`check` / `run-tests` /
+   `processes` ship as documented stubs"); rewritten to reflect that all
+   eight tools are wired.
+4. **`macroexpand_to_string`** — now **rejects** multi-form input
+   rather than silently expanding only the first. Hides agent misuse;
+   the error message points at the `(do …)` wrap.
+5. **`cli_support` REPL stubs** — added `repl_interactive` /
+   `repl_plain` stubs in the lib to unblock the build (the parallel
+   refactor of `nest repl` references them; the real move from
+   `crates/cli/src/main.rs` is left to that session). `nest repl` now
+   prints "use `brood`" until the move completes.
+
+**Structured errors with codes (§4 of `docs/llm-native.md`).** The
+substrate the doc identifies as the top-3 next move, now shipped:
+
+- **`LispError` gained `code: Option<&'static str>` + `hint: Option<String>`**
+  (`crates/lisp/src/error.rs`). `ErrorKind` is `Copy` now (no data; safe).
+  New `tag_name()` returns the stable lowercase keyword name (`"parse"`
+  / `"unbound"` / `"arity"` / `"type"` / `"runtime"` / `"user"`).
+- **`pub mod error_codes`** holds the stable strings (`E0001`,
+  `E0010`, `E0020`, `E0030`, `E0099`). The numbering scheme groups by
+  kind (`E00xx` parse, `E01xx` unbound, `E02xx` arity, `E03xx` type,
+  `E04xx` runtime); once shipped, codes never get repurposed.
+  Constructors (`parse`/`unbound`/`arity`/`type_err`/`wrong_type`/
+  `runtime`) all set the code by default.
+- **`LispError::to_value_map(heap)`** projects the structured fields
+  into a Brood map: `{:kind <keyword> :message <string> [:code]
+  [:file :line :col] [:hint]}` — every optional field omitted when
+  absent. `try_catch` uses it when the LispError carries no user
+  payload, so `(try (/ 1 0) (catch e e))` now binds `e` to a map
+  rather than a rendered string. User throws (`(throw v)`) still
+  rebind verbatim — only kernel errors get the wrapper.
+- **MCP integration** (`crates/nest/src/mcp.rs`):
+  - `RpcError` grew a `data: Option<Json>` field that rides on the
+    JSON-RPC `error` object.
+  - `RpcError::from_lisp(e)` projects a `LispError` into a JSON-RPC
+    Internal error with `data` carrying the same structured shape as
+    the Brood catch map.
+  - `lisp_error_to_json` is the shared projector — the Brood map shape
+    and the JSON shape stay parallel by construction.
+  - `call_tool` uses `from_lisp` for any uncaught handler throw, so a
+    project-defined tool whose handler doesn't `try`/`catch` still
+    surfaces structured info.
+- **`std/mcp.blsp`** gained `mcp--error-shape` (a coercer:
+  built-in errors pass through, user throws become `{:kind :user
+  :payload e}` so the agent always sees an object). Every handler's
+  `(catch e …)` switched from `(str e)` to `(mcp--error-shape e)`.
+- **`docs/error-codes.md`** (new) — the stable reference: catch shape,
+  numbering scheme, current code table, "adding a new code" recipe,
+  `:code` vs `:kind` branching guidance. Exposed via MCP as
+  `brood://docs/error-codes`.
+- **`docs/prompts/brood-task.md`** updated with the structured-errors
+  bullet so the agent knows about `:kind` / `:code` branching from
+  session start.
+- **`docs/llm-native.md`** status block flipped §4 from ❌ to ✅;
+  §13 (failure-mode tagging) noted as "substrate exists, per-site
+  attachments still to be added."
+
+**Tests landed.**
+
+- `crates/lisp/tests/basic.rs::throw_and_catch` — adopted the new
+  shape: `(try (/ 1 0) (catch e (map? e))) → true`,
+  `(get e :kind) → :runtime`, `(get e :code) → "E0099"`, plus the
+  matching unbound / type / arity assertions.
+- `crates/lisp/tests/basic.rs::parse_errors_carry_position_in_catch_map`
+  (new) — verifies `:kind :parse` and a positive `:line` in the catch
+  map after `(eval-string "(unclosed")`.
+- `crates/nest/src/mcp.rs::std_eval_tool_captures_a_runtime_error_as_a_structured_map`
+  (renamed + strengthened) — pins `error.kind == "unbound"` and
+  `error.code == "E0010"`.
+- `crates/nest/src/mcp.rs::std_lookup_tool_handles_unbound_names_softly`
+  (strengthened) — pins the same fields.
+- `crates/nest/src/mcp.rs::argument_validation_throws_a_protocol_error`
+  (strengthened) — also asserts `error.data.kind == "user"` (the new
+  JSON-RPC `data` field).
+- `crates/nest/src/mcp.rs::uncaught_handler_throw_projects_structured_data`
+  (new) — installs an inline tool whose handler `(/ 1 0)`s without
+  `try`/`catch`, asserts the JSON-RPC error has
+  `data.kind == "runtime"`, `data.code == "E0099"`, and
+  `data.message` contains "division by zero".
+- `crates/nest/src/mcp.rs::resources_list_includes_the_baked_doc_resources`
+  — extended to assert `brood://docs/error-codes` is in the resource
+  list.
+
+**Verified.** `cargo build` clean. `cargo test --workspace` green —
+116 (lib) + 66 (basic) + 3 + 1 + 29 (nest, was 28) + 40 (LSP) + 13
+(cli) = 268 tests, all passing. Real-binary smoke:
+- `tools/call eval (no-such-fn 42)` → `{"error": {"code": "E0010",
+  "col": 1, "kind": "unbound", "line": 1, "message": "unbound symbol:
+  no-such-fn"}}` — full structured shape with position.
+- `tools/call eval (/ 1 0)` → `{"error": {"code": "E0099",
+  "kind": "runtime", "message": "division by zero"}}`.
+- `tools/call lookup no-such-name` → soft `:error` map with the same
+  shape.
+
+**Deliberate trade-offs.**
+
+- **User-throws stay verbatim.** `(throw 42) → (catch e e) → 42`
+  preserved. Only kernel errors get the wrapper. The alternative
+  (always-wrap) breaks dozens of catches across `tests/` and `std/`
+  and forces every user to use `(:payload e)` for trivially-thrown
+  values; the asymmetry is small and documented.
+- **`E0099` is the runtime catch-all.** Every `LispError::runtime(...)`
+  picks it up. Future work: split into more specific codes (a `E0040`
+  for division-by-zero, `E0050` for IO failures, etc.). Done
+  incrementally per `docs/error-codes.md`'s "adding a new code"
+  recipe.
+- **Position info is best-effort.** The reader's parse errors and the
+  eval loop's `or_form_pos` cover most cases, but some kernel raises
+  (the `(/ 1 0)` above) reach the catch without a position. Adding
+  positions per raise site is a follow-up — the substrate already
+  carries the optional fields end-to-end.
+
+**What's left for §4 (incremental, not blocking).** Per-site `:hint`
+attachments — a builder pattern is in place (`with_hint("…")`); the
+scheduler-race hint from `claude-demo-findings.md` is the obvious
+first candidate. Same for `:see` (link a code to its
+`docs/<topic>.md#anchor`) — the field isn't on `LispError` yet but
+would slot in alongside `:hint` when wanted.
+
+---
+
+## 2026-05-29 — `brood` / `nest` CLI cleanup + clap + arity-change reload diagnostic
+
+**Goal.** The two binaries had grown messy: `brood --watch` had a single-arg
+form with a 16-line caveat in the help text, `--watch` semantics differed
+between `brood` and `nest run`, and there was no project-aware way to run /
+test / check a *single* file — you were either fully project (`nest test`)
+or fully project-blind (`brood --test foo`). User asked for a review; this
+is the cleanup.
+
+**Shape after the dust settles.**
+
+```
+brood                       REPL (language-only)
+brood <file>...             run files
+brood --test <file>...      run as tests (single-file utility)
+brood --check <file>...     advisory type-check (single-file utility)
+brood -j N                  concurrency cap
+                            # no --watch here — see nest run --watch.
+
+nest new <name>             scaffold
+nest run                    run :main
+nest run <file>             run a specific file (project sources on *load-path*
+                            but not eager-loaded, so `src/foo.blsp` doesn't run
+                            twice)
+nest run --watch <path>...  hot-reload (file or dir, repeatable; dirs pick up
+                            new files automatically). Single-file --watch with
+                            no FILE: that file is promoted to the entry, so
+                            `nest run --watch src/foo.blsp` reads naturally as
+                            "run AND watch foo.blsp".
+nest test [<file>...]       project-wide or scoped to listed files
+nest check [<file>...]      same
+nest repl                   project-aware REPL (currently stubbed; see below)
+nest format [--check]
+nest doc [module]
+nest mcp
+```
+
+**Built.**
+
+- **Switched both binaries to `clap` (derive feature).** Replaces ~150 lines
+  of hand-rolled arg parsing across `crates/cli/src/main.rs` and
+  `crates/nest/src/main.rs`. Free wins: typo suggestions (`brood --tst foo`
+  → "a similar argument exists: `--test`"), uniform `--foo=bar`/`--foo bar`/
+  `-fbar` handling, generated help from doc-comments, subcommand validation.
+  `clap` is CLI-only (ADR-005 / CLAUDE.md allows `rustyline`-class deps in
+  CLI crates), never in the brood lib.
+
+- **Removed `brood --watch` entirely.** It had two shapes (single-arg
+  run-and-watch with a footgun; two-arg watch-helper-while-running-entry)
+  and a 16-line help-text caveat. Both flows live cleanly under `nest run
+  --watch` now — the `nest` side never had the footgun because `:main` is
+  called explicitly (not as a top-level form), so no re-execution on reload.
+
+- **`nest run [<FILE>] [--watch PATH]... [args...]`** with one piece of
+  ergonomic dispatch: when no FILE is given but exactly one `--watch <PATH>`
+  is a regular file, promote that path to the entry. So `nest run --watch
+  src/repeat.blsp` reads as "run and watch repeat.blsp" — the natural
+  reading. Directories or multiple watch paths fall through to `:main` (no
+  unambiguous promotion target). Inside a project, the FILE path gets
+  `(project-setup root)` (puts `src/` on `*load-path*`) but *not*
+  `project-load-sources` (which would double-execute a file under `src/`).
+
+- **`nest test [<file>...]` and `nest check [<file>...]`.** With files, scope
+  to those; without, whole-project as before. `nest test foo_test.blsp`
+  inside a project loads project sources first so cross-module names
+  resolve — the path was impossible before (had to choose between project
+  scope or project-blind brood `--test`).
+
+- **`nest repl`** added but currently stubbed — calling
+  `brood::cli_support::repl_interactive` from nest needs the REPL helpers
+  pulled out of `cli/main.rs` into the brood lib, which means adding
+  `rustyline` as a lib dep. That's a real architectural choice
+  (CLAUDE.md / ADR-005 currently bars it); left as a follow-up. For now,
+  `nest repl` prints a "run `brood` directly" pointer.
+
+- **Arity-change reload diagnostic** in `crates/lisp/src/eval/mod.rs`. When
+  `def` rebinds a callable to one of a different arity — typical hot reload
+  that breaks the caller-side contract — the evaluator prints `[reload]
+  arity changed for X: A -> B` to stderr. Implementation: `value_arity`
+  helper computes `Arity` from a `Value::Fn`/`Macro`/`Native` (closure:
+  `params.len()` min, `+ optionals.len()` max when no `rest`; native: stored
+  `arity`). Fires only on rebinding, so the prelude / std first-time builds
+  are silent. Manual test: defining `greet` at arity 0 then 1 then 2, and
+  shadowing the prelude's `inc` (1-arg) with a 2-arg fn produced three
+  correct diagnostics.
+
+  This intentionally does *not* change the underlying semantic — Brood
+  follows the Lisp tradition (CL/Scheme/Clojure/Elisp) of in-place
+  redefinition, with callers expected to be updated too. The diagnostic
+  just makes the silently-broken-arity case visible at reload time instead
+  of at the next call site. (User picked "add a diagnostic" over "leave
+  as-is" or "treat arity-changed defns as new functions" — the last would
+  deviate from every other Lisp.)
+
+**Smaller fixes along the way:**
+- Unknown-flag rejection in `parse_jobs_args` (the `--wathc` typo no longer
+  silently becomes a file path; clap's parser catches the rest now).
+- `getrandom 0.3 → 0.4`, `hmac 0.12 → 0.13`, `sha2 0.10 → 0.11` (+ the
+  `KeyInit` trait import the new `hmac` requires).
+- `examples/hot-reload/` is the canonical demo for the file-watcher
+  pattern, written against `std/reload.blsp` (the require-able policy
+  layer over `file-mtime`).
+
+**Verified.** Per-crate `cargo test`: brood lib 187, brood-lsp 40, cli 13,
+nest 29 — **269/269**. The new flows:
+- `brood --tst foo` → "a similar argument exists: '--test'" (clap typos).
+- `nest run --watch src/repeat.blsp` → runs repeat.blsp, hot-reloads on save
+  (live demo: ticker swapped from `"first version"` to `"HOT-RELOADED via
+  nest run --watch <file>"` mid-flight, no restart).
+- `nest run --watch src` → runs `:main`, hot-reloads everything in `src/`,
+  auto-picks up new files added during the run.
+- `nest test tests/hello_test.blsp` → scoped test run with project context.
+
+**Still open.**
+
+- **`nest repl`.** Move REPL helpers (`repl_interactive`, `repl_plain`,
+  `history_path`, `is_balanced`) from `crates/cli/src/main.rs` into
+  `brood::cli_support`; add `rustyline` to the brood lib's deps. Real
+  trade-off — `rustyline` was deliberately CLI-only — so wants explicit
+  sign-off and probably an ADR. Stubs in place keep the build green.
+- **Diagnostic configurability.** No env var to silence the arity-change
+  diagnostic yet. Likely fine; can add `BROOD_NO_RELOAD_WARN` or similar if
+  someone needs it during a noisy refactor.

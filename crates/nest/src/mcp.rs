@@ -185,15 +185,22 @@ fn dispatch(interp: &mut Interp, msg: &Json) -> Outcome {
     Outcome::Reply(envelope(id.unwrap(), result))
 }
 
-/// Wrap a per-handler result in the JSON-RPC response envelope.
+/// Wrap a per-handler result in the JSON-RPC response envelope. `data` (the
+/// structured shape from `lisp_error_to_json`) rides on the error object when
+/// present so the agent can branch on `error.data.kind` rather than parsing
+/// `error.message`.
 fn envelope(id: Json, result: Result<Json, RpcError>) -> Json {
     match result {
         Ok(value) => json!({ "jsonrpc": "2.0", "id": id, "result": value }),
-        Err(e) => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": { "code": e.code, "message": e.message },
-        }),
+        Err(e) => {
+            let mut err_obj = JsonMap::new();
+            err_obj.insert("code".into(), json!(e.code));
+            err_obj.insert("message".into(), Json::String(e.message));
+            if let Some(data) = e.data {
+                err_obj.insert("data".into(), data);
+            }
+            json!({ "jsonrpc": "2.0", "id": id, "error": Json::Object(err_obj) })
+        }
     }
 }
 
@@ -330,7 +337,7 @@ fn call_tool(interp: &mut Interp, params: &Json) -> Result<Json, RpcError> {
 
         let result_value =
             brood::eval::apply(&mut interp.heap, handler, &[args_value], interp.root)
-                .map_err(|e| RpcError::internal(e.to_string()))?;
+                .map_err(|e| RpcError::from_lisp(&e))?;
 
         let content = value_to_json(&interp.heap, result_value)
             .map_err(RpcError::internal)?;
@@ -422,6 +429,11 @@ const RESOURCES: &[(&str, &str, &str)] = &[
         "brood://docs/types",
         "Type system contract",
         include_str!("../../../docs/types.md"),
+    ),
+    (
+        "brood://docs/error-codes",
+        "Stable error codes (`E0010`, `E0030`, …) and the catch shape",
+        include_str!("../../../docs/error-codes.md"),
     ),
     (
         "brood://prelude",
@@ -609,10 +621,15 @@ pub fn json_to_value(heap: &mut Heap, j: &Json) -> Result<Value, String> {
 // ============================================================================
 
 /// Minimal JSON-RPC error. Codes follow the spec —
-/// <https://www.jsonrpc.org/specification#error_object>.
+/// <https://www.jsonrpc.org/specification#error_object>. `data` carries the
+/// structured fields from a [`LispError`] (kind / Brood code / file / line /
+/// col / hint) so an agent that hits a tool-dispatch failure can branch on
+/// `error.data.kind` instead of parsing `error.message` (see
+/// `docs/llm-native.md` §4).
 struct RpcError {
     code: i32,
     message: String,
+    data: Option<Json>,
 }
 
 impl RpcError {
@@ -620,20 +637,59 @@ impl RpcError {
         Self {
             code: -32601,
             message: format!("method not found: {method}"),
+            data: None,
         }
     }
     fn invalid_params(msg: impl Into<String>) -> Self {
         Self {
             code: -32602,
             message: msg.into(),
+            data: None,
         }
     }
     fn internal(msg: impl Into<String>) -> Self {
         Self {
             code: -32603,
             message: msg.into(),
+            data: None,
         }
     }
+    /// Project a `LispError` into a JSON-RPC `Internal` error carrying the
+    /// structured fields in `data`. Used when a Brood-side operation
+    /// (`eval_str`, `apply`) errors and we want the agent to see the kind /
+    /// code / location rather than only the rendered message.
+    fn from_lisp(e: &brood::error::LispError) -> Self {
+        Self {
+            code: -32603,
+            message: e.to_string(),
+            data: Some(lisp_error_to_json(e)),
+        }
+    }
+}
+
+/// Convert a [`LispError`]'s structured fields to a JSON object — the same
+/// shape `try_catch` builds via `LispError::to_value_map`, projected to JSON.
+/// Used for `RpcError`'s `data` field; the Brood map shape and the JSON one
+/// stay parallel by construction so an agent's `error.data.kind` and a
+/// `(get e :kind)` match.
+fn lisp_error_to_json(e: &brood::error::LispError) -> Json {
+    let mut obj = JsonMap::new();
+    obj.insert("kind".into(), Json::String(e.kind.tag_name().into()));
+    obj.insert("message".into(), Json::String(e.message.clone()));
+    if let Some(code) = e.code {
+        obj.insert("code".into(), Json::String(code.into()));
+    }
+    if let Some(file) = &e.file {
+        obj.insert("file".into(), Json::String(file.clone()));
+    }
+    if let Some(pos) = e.pos {
+        obj.insert("line".into(), json!(pos.line));
+        obj.insert("col".into(), json!(pos.col));
+    }
+    if let Some(hint) = &e.hint {
+        obj.insert("hint".into(), Json::String(hint.clone()));
+    }
+    Json::Object(obj)
 }
 
 // ============================================================================
@@ -824,6 +880,8 @@ mod tests {
         assert!(uris.contains(&"brood://docs/incarnations"));
         assert!(uris.contains(&"brood://docs/llm-native"));
         assert!(uris.contains(&"brood://docs/claude-demo-findings"));
+        // Stable error-code reference (structured errors, §4).
+        assert!(uris.contains(&"brood://docs/error-codes"));
     }
 
     #[test]
@@ -963,12 +1021,20 @@ mod tests {
     }
 
     #[test]
-    fn std_eval_tool_captures_a_runtime_error() {
+    fn std_eval_tool_captures_a_runtime_error_as_a_structured_map() {
+        // After structured errors (`docs/llm-native.md` §4), a caught built-in
+        // error is a map with `:kind` / `:code` / `:message` — the agent can
+        // branch on `:kind` without parsing strings. `(no-such-fn 1)` raises
+        // unbound; we pin both the kind and the stable code.
         let mut interp = Interp::new();
         let (_, body) = invoke_tool(&mut interp, "eval", json!({ "source": "(no-such-fn 1)" }));
         let body = body.unwrap();
         assert!(body.get("value").is_none(), "{body:?}");
-        assert!(body["error"].as_str().unwrap().len() > 0);
+        let err = &body["error"];
+        assert!(err.is_object(), "expected :error to be a structured map, got {err}");
+        assert_eq!(err["kind"], "unbound");
+        assert_eq!(err["code"], "E0010");
+        assert!(err["message"].as_str().unwrap().len() > 0);
     }
 
     #[test]
@@ -1010,10 +1076,14 @@ mod tests {
         let (_, body) = invoke_tool(&mut interp, "lookup", json!({ "name": "no-such-name-xyzzy" }));
         let body = body.unwrap();
         // Unbound is a soft failure surfaced as :error, not a thrown exception
-        // (the dispatcher would render that as a JSON-RPC error). Lets the
-        // agent branch on the field cleanly.
+        // (the dispatcher would render that as a JSON-RPC error). After
+        // structured errors (§4), the :error field is the kernel-shaped map —
+        // the agent branches on `:kind` / `:code` rather than parsing a string.
         assert_eq!(body["name"], "no-such-name-xyzzy");
-        assert!(body["error"].as_str().is_some());
+        let err = &body["error"];
+        assert!(err.is_object(), "expected :error to be a map: {err}");
+        assert_eq!(err["kind"], "unbound");
+        assert_eq!(err["code"], "E0010");
     }
 
     #[test]
@@ -1174,7 +1244,10 @@ mod tests {
         // The handlers `throw` when `:source` / `:file` / `:name` is missing or
         // wrong-typed; the dispatcher converts the throw into a JSON-RPC error
         // (so a misshapen `arguments` from the agent never looks like a
-        // *value*, it looks like a *protocol failure*).
+        // *value*, it looks like a *protocol failure*). Since structured errors
+        // landed (§4), the JSON-RPC `error.data` carries the kind/code/file/etc.
+        // so the agent can branch on it programmatically — the human-readable
+        // `error.message` stays alongside.
         let mut interp = Interp::new();
         let resp = round_trip(
             &mut interp,
@@ -1188,5 +1261,49 @@ mod tests {
             .as_str()
             .unwrap()
             .contains(":source"));
+        // A `(throw "...")` from Brood lands as a `:user` kind in the
+        // structured data — `(throw v)` keeps `v` opaque to the kernel, so no
+        // `:code` (those are for kernel-raised errors).
+        let data = &resp[0]["error"]["data"];
+        assert!(data.is_object(), "expected error.data: {:?}", resp[0]);
+        assert_eq!(data["kind"], "user");
+    }
+
+    #[test]
+    fn uncaught_handler_throw_projects_structured_data() {
+        // A project's own tool whose handler doesn't try/catch surfaces the
+        // kernel error through the JSON-RPC `error.data` field. Build a
+        // catalogue inline (the override path — `(provide 'mcp)` so the
+        // std catalogue doesn't clobber ours) where the handler triggers
+        // a built-in error (`(/ 1 0)` → runtime).
+        let mut interp = Interp::new();
+        interp
+            .eval_str(
+                r#"
+                (provide 'mcp)
+                (defn mcp-tools ()
+                  (list
+                    {:name "blow-up"
+                     :schema {:type "object" :properties {}}
+                     :handler (fn (_) (/ 1 0))}))
+                "#,
+            )
+            .unwrap();
+        let resp = round_trip(
+            &mut interp,
+            &[
+                req(1, "tools/call", json!({ "name": "blow-up", "arguments": {} })),
+                notif("exit", json!(null)),
+            ],
+        );
+        let err = &resp[0]["error"];
+        assert_eq!(err["code"], -32603, "{err}"); // JSON-RPC internal
+        let data = &err["data"];
+        assert_eq!(data["kind"], "runtime");
+        assert_eq!(data["code"], "E0099");
+        assert!(data["message"]
+            .as_str()
+            .unwrap()
+            .contains("division by zero"));
     }
 }

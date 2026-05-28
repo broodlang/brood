@@ -179,6 +179,27 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     };
                     let val = name_value(heap, val, name);
                     let root = heap.env_root(env);
+                    // Arity-change diagnostic: if `def` is *rebinding* a callable
+                    // to one of a different arity, callers expecting the old shape
+                    // will hit a runtime arity error on the next call. Surface it
+                    // at reload time so the mismatch isn't a silent surprise (the
+                    // hot-reload + late-binding contract — docs/shared-code.md).
+                    // Fires only when an old binding exists, so the prelude/std
+                    // first-time build is silent.
+                    if let Some(old) = heap.env_get(root, name) {
+                        if let (Some(old_a), Some(new_a)) =
+                            (value_arity(heap, old), value_arity(heap, val))
+                        {
+                            if old_a.min != new_a.min || old_a.max != new_a.max {
+                                eprintln!(
+                                    "[reload] arity changed for {}: {} -> {}",
+                                    value::symbol_name(name),
+                                    arity_to_string(old_a),
+                                    arity_to_string(new_a),
+                                );
+                            }
+                        }
+                    }
                     heap.env_define(root, name, val);
                     return Ok(Value::Sym(name));
                 }
@@ -727,5 +748,35 @@ fn tail_of_cons(heap: &mut Heap, body: Value, env: EnvId) -> Result<Option<Value
             }
             _ => return Err(LispError::type_err("improper body list")),
         }
+    }
+}
+
+/// Arity of a callable value (closure, macro, or native primitive), or `None`
+/// for non-callables. Used by the `def` arity-change diagnostic to compare an
+/// old binding's shape against a new one's.
+fn value_arity(heap: &Heap, v: Value) -> Option<value::Arity> {
+    match v {
+        Value::Fn(id) | Value::Macro(id) => {
+            let c = heap.closure(id);
+            let min = c.params.len();
+            let max = if c.rest.is_some() {
+                None
+            } else {
+                Some(min + c.optionals.len())
+            };
+            Some(value::Arity { min, max })
+        }
+        Value::Native(id) => Some(heap.native(id).arity),
+        _ => None,
+    }
+}
+
+/// Render an `Arity` as a compact "N", "N-M", or "N+" string for the
+/// arity-change diagnostic.
+fn arity_to_string(a: value::Arity) -> String {
+    match a.max {
+        Some(max) if max == a.min => format!("{}", a.min),
+        Some(max) => format!("{}-{}", a.min, max),
+        None => format!("{}+", a.min),
     }
 }

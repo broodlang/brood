@@ -493,6 +493,17 @@ mod tests {
     }
 
     #[test]
+    fn macroexpand_to_string_rejects_multi_form_input() {
+        // Silently expanding only the first form hides agent misuse where they
+        // meant to chain expansions. Make the contract visible: error and
+        // point at the `(do …)` wrap.
+        let mut interp = Interp::new();
+        let err = macroexpand_to_string(&mut interp, "(when x 1) (when y 2)", false).unwrap_err();
+        assert!(err.contains("exactly one form"), "{err:?}");
+        assert!(err.contains("do"), "{err:?}");
+    }
+
+    #[test]
     fn format_source_reformats_a_messy_form() {
         // The formatter normalises inter-token spacing and trims trailing
         // whitespace. We don't pin the exact output (that's `std/format.blsp`'s

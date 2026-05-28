@@ -539,12 +539,67 @@ fn throw_and_catch() {
     );
     // no throw: the body's value is returned
     assert_eq!(run("(try (+ 1 2) (catch e e))"), "3");
-    // a built-in error is caught as its message string
-    assert_eq!(run("(try (/ 1 0) (catch e (string? e)))"), "true");
-    // error: raise a formatted message
+    // A built-in error is caught as a **structured map** (the llm-native
+    // §4 contract — agents and Brood code branch on `:kind` / `:code`
+    // instead of grepping a string). User throws (`(throw v)`) still
+    // come back verbatim — only kernel-raised errors get the wrapper.
+    assert_eq!(run("(try (/ 1 0) (catch e (map? e)))"), "true");
+    assert_eq!(run("(try (/ 1 0) (catch e (get e :kind)))"), ":runtime");
+    assert_eq!(
+        run("(try (/ 1 0) (catch e (get e :code)))"),
+        "\"E0099\""
+    );
+    assert_eq!(run("(try (no-such-fn) (catch e (get e :kind)))"), ":unbound");
+    assert_eq!(
+        run("(try (no-such-fn) (catch e (get e :code)))"),
+        "\"E0010\""
+    );
+    // Type errors carry E0030; the message preserves the structured detail
+    // (`wrong_type` includes "expected <kind>, got <kind> (<value>)").
+    assert_eq!(
+        run("(try (first 5) (catch e (get e :code)))"),
+        "\"E0030\""
+    );
+    assert_eq!(
+        run("(try (first 5) (catch e (get e :kind)))"),
+        ":type"
+    );
+    // Arity errors carry E0020. `((fn (x) x))` calls the unary fn with zero
+    // args — the kernel's arity check fires.
+    assert_eq!(
+        run("(try ((fn (x) x)) (catch e (get e :code)))"),
+        "\"E0020\""
+    );
+    // The :message field is always a string, even for kernel errors.
+    assert_eq!(
+        run("(try (/ 1 0) (catch e (string? (get e :message))))"),
+        "true"
+    );
+    // error: raise a formatted message — user-throw, no :code
     assert_eq!(run("(try (error \"nope: \" 5) (catch e e))"), "\"nope: 5\"");
     // try with no catch clause is just a do
     assert_eq!(run("(try 1 2 3)"), "3");
+}
+
+/// Parse errors caught by `try`/`catch` carry the `:line` and `:col` the
+/// reader recorded — agents can highlight the bad span without parsing the
+/// message string. (The kernel raises before the source is bound, so `:file`
+/// is absent — that field comes from `load` / the file runner.)
+#[test]
+fn parse_errors_carry_position_in_catch_map() {
+    let mut interp = Interp::new();
+    let r = interp
+        .eval_str("(try (eval-string \"(unclosed\") (catch e [(get e :kind) (get e :line)]))")
+        .unwrap();
+    let printed = interp.print(r);
+    assert!(printed.contains(":parse"), "{printed}");
+    // Some positive line number — the reader caught the unclosed delimiter
+    // at a known position. Exact value depends on the reader's recovery, so
+    // pin only "non-nil non-zero integer present".
+    assert!(
+        printed.contains("1") || printed.contains("2"),
+        "expected a line number in {printed}"
+    );
 }
 
 #[test]

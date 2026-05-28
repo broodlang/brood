@@ -26,6 +26,15 @@ as errors.")
 ;; become a typed field in the returned map so the agent can branch on it
 ;; without re-parsing an error string.
 
+;; Coerce a caught value into the structured error shape MCP tools return.
+;; Built-in errors are already maps (`{:kind :code :message :file :line :col
+;; :hint}` — see `LispError::to_value_map` in the kernel); user `(throw v)`s
+;; come through as the value itself, so we wrap them as `{:kind :user :payload
+;; v}` to keep `:error` always a map for the agent's JSON consumers. The
+;; asymmetry — built-in vs user — is deliberate per `docs/llm-native.md` §4.
+(defn mcp--error-shape (e)
+  (if (map? e) e {:kind :user :payload e}))
+
 (defn mcp-eval-tool (args)
   "`eval` — evaluate `:source` in the session's global env. State persists
 across calls (hot reload, ADR-013): a `def` here is visible to the next call
@@ -40,7 +49,7 @@ error inside the user expression surfaces here as the `:error` branch."
             value (eval form))
         {:value (pr-str value)})
       (catch e
-        {:error (str e)}))))
+        {:error (mcp--error-shape e)}))))
 
 (defn mcp-load-tool (args)
   "`load` — load a `.blsp` file into the session. Side-effects (`def`,
@@ -53,7 +62,7 @@ error inside the user expression surfaces here as the `:error` branch."
       (do (load file)
           {:ok true})
       (catch e
-        {:ok false :error (str e)}))))
+        {:ok false :error (mcp--error-shape e)}))))
 
 (defn mcp-lookup-tool (args)
   "`lookup` — describe a global name. Returns `{:name :arglist :doc
@@ -74,7 +83,7 @@ the agent can branch on `(get r :error)` cleanly."
            :doc (doc val)
            :source-location (source-location sym)})
         (catch e
-          {:name name :error (str e)})))))
+          {:name name :error (mcp--error-shape e)})))))
 
 (defn mcp-macroexpand-tool (args)
   "`macroexpand` — expand `:form` (a source string) once (`:mode \"1\"`, the
@@ -92,7 +101,7 @@ text — unbalanced parens in `:form` can't break the host expression."
                    (macroexpand-1 form)))
         {:expanded (pr-str out)})
       (catch e
-        {:error (str e)}))))
+        {:error (mcp--error-shape e)}))))
 
 (defn mcp-format-tool (args)
   "`format` — reformat `:source` via `std/format.blsp`'s `(format-source ...)`.
@@ -105,7 +114,7 @@ check after the first invocation."
     (try
       {:formatted (format-source src)}
       (catch e
-        {:error (str e)}))))
+        {:error (mcp--error-shape e)}))))
 
 (defn mcp-check-tool (args)
   "`check` — advisory type-check the project. Returns

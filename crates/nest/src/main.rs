@@ -277,7 +277,24 @@ fn cmd_format(interp: &mut Interp, check: bool) {
 }
 
 /// `nest run [FILE] [--watch PATH]... [args...]` — the entry point.
+///
+/// If no FILE is given but exactly one `--watch` path is a regular file,
+/// promote it to the entry — so `nest run --watch src/foo.blsp` reads as
+/// "run foo.blsp and hot-reload it on save", matching the most natural
+/// reading. With a directory or multiple watch paths there's no unambiguous
+/// promotion, so we fall through to running `:main` and watching alongside.
 fn cmd_run(interp: &mut Interp, file: Option<&str>, watch: &[String], args: &[String]) {
+    let promoted: Option<String> = if file.is_none() && watch.len() == 1 {
+        let p = &watch[0];
+        match std::fs::metadata(p) {
+            Ok(meta) if !meta.is_dir() => Some(p.clone()),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let file: Option<&str> = file.or(promoted.as_deref());
+
     let escaped_args = args
         .iter()
         .map(|a| format!("\"{}\"", brood::introspect::escape_brood_string(a)))
@@ -306,15 +323,18 @@ fn cmd_run(interp: &mut Interp, file: Option<&str>, watch: &[String], args: &[St
             "(require 'project) (load-config) {} (run-project (list {}))",
             watch_setup, escaped_args
         ),
-        // FILE: run that file. Inside a project, pre-load project sources so
-        // the file can reach project modules; outside, plain `brood <file>`.
+        // FILE: run that file. Inside a project, set up the project so its
+        // `src/` is on `*load-path*` (the file can `(require 'foo)` other
+        // project modules), but *don't* eager-load every source — otherwise a
+        // file under `src/` would run twice (once via the walker, once via the
+        // explicit `load`). Outside a project, plain `brood <file>`.
         Some(path) => {
             let escaped_path = brood::introspect::escape_brood_string(path);
             if in_project() {
                 format!(
                     "(require 'project) (load-config) \
                      (let (root (project--find-root (cwd))) \
-                       (when root (project-setup root) (project-load-sources root))) \
+                       (when root (project-setup root))) \
                      {} (load \"{}\")",
                     watch_setup, escaped_path
                 )

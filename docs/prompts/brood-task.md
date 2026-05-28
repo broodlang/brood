@@ -17,6 +17,12 @@ Brood code, fetch these three resources in order:
 - Truthiness: only `nil` and `false` are falsy.
 - Modules: `(provide 'foo)` + `(require 'foo)`; symbols are interned,
   compare with `=`.
+- **Errors are structured.** A `(try … (catch e …))` on a kernel error
+  rebinds `e` to a map: `{:kind :unbound :code "E0010" :message "…"
+  :file … :line … :col …}`. Branch on `:kind` (`:parse` / `:unbound` /
+  `:arity` / `:type` / `:runtime`) or the stable `:code` (the full list
+  is at `brood://docs/error-codes`). User throws (`(throw v)`) keep
+  `(catch e e) → v` — only kernel errors get the wrapper.
 
 **MCP tools (use these to interact with the live image)**
 - `eval` — try expressions. State (a `def`, a `spawn`) persists between

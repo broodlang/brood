@@ -24,8 +24,9 @@ use std::sync::{LazyLock, Mutex};
 
 use crate::core::value::{self, Symbol, Value};
 
+use super::mailbox::{deliver, REGISTRY};
 use super::message::Message;
-use super::{deliver, self_pid, REGISTRY};
+use super::scheduler::self_pid;
 
 /// A monitor's *watcher* side — who gets the `[:down …]` when the watched pid
 /// dies. The same enum carries a process on this runtime (`Local`) and a

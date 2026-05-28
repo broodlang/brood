@@ -7,7 +7,7 @@
 
 use crate::core::heap::Heap;
 use crate::core::value::{self, Arity, EnvId, NativeFn, NativeFnPtr, Tag, Value};
-use crate::error::{ErrorKind, LispError, LispResult};
+use crate::error::{LispError, LispResult};
 use crate::eval::apply;
 use crate::syntax::{cst, printer, reader};
 use crate::types::{Sig, Ty};
@@ -1621,15 +1621,17 @@ fn try_catch(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     match apply(heap, thunk, &[], env) {
         Ok(value) => Ok(value),
         Err(e) => {
+            // The catch sees:
+            //   * the user-thrown value verbatim, if there is one (preserves the
+            //     "throw shape == catch shape" contract — `(throw 42)` → 42);
+            //   * **a structured map** for any built-in error, so Brood code (and
+            //     agents via MCP) can `(case (get e :kind) :unbound …)` without
+            //     parsing strings (`docs/llm-native.md` §4). Shape on
+            //     `LispError::to_value_map`: `{:kind :message [:code] [:file
+            //     :line :col] [:hint]}`.
             let caught = match e.payload {
                 Some(v) => v,
-                None => {
-                    let msg = match e.kind {
-                        ErrorKind::User => e.message.clone(),
-                        _ => e.to_string(),
-                    };
-                    heap.alloc_string(&msg)
-                }
+                None => e.to_value_map(heap),
             };
             apply(heap, handler, &[caught], env)
         }

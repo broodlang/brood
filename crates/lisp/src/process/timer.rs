@@ -55,7 +55,7 @@ fn timer_loop() {
                     }
                     drop(q);
                     for pid in due {
-                        super::wake_for_timeout(pid);
+                        super::mailbox::wake_for_timeout(pid);
                     }
                     q = crate::core::sync::lock(lock);
                 }

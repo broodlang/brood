@@ -25,15 +25,10 @@
 //! shape for hot reload (docs/shared-code.md), and `nest` is where the
 //! daily-driver workflow lives.
 
-use std::io::{self, BufRead, IsTerminal, Write};
-use std::path::PathBuf;
-
 use brood::cli_support::report_error;
 use brood::error::LispError;
 use brood::Interp;
 use clap::Parser;
-use rustyline::error::ReadlineError;
-use rustyline::DefaultEditor;
 
 /// `brood` — the Brood language binary. Parsed by clap; the help text users
 /// see is generated from these doc-comments + the `#[command]`/`#[arg]` attrs.
@@ -95,14 +90,7 @@ fn main() {
         return;
     }
 
-    if io::stdin().is_terminal() {
-        if let Err(e) = repl_interactive(&mut interp) {
-            eprintln!("repl error: {}", e);
-            std::process::exit(1);
-        }
-    } else {
-        repl_plain(&mut interp);
-    }
+    brood_repl::repl(&mut interp);
 }
 
 /// Evaluate a file's source with `(current-file)` set to its path (restored

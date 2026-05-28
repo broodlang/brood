@@ -184,6 +184,11 @@ URI-addressed read-only blobs, served directly by the dispatcher (no eval):
   Mandelbrot). 511 lines of real notes on what bit a real agent.
 - `brood://docs/llm-native` — the forward-looking plan for making Brood
   LLM-native; the status block at the bottom maps what's done vs open.
+- `brood://docs/error-codes` — stable error codes (`E0010`/`E0030`/etc.)
+  and the structured `catch` shape (`{:kind :code :message :file :line
+  :col :hint}`). Agents branch on `:code` / `:kind` for programmatic
+  handling; the dispatcher mirrors the same fields into
+  JSON-RPC `error.data`. See [`llm-native.md`](llm-native.md) §4.
 - `brood://docs/language` — language reference.
 - `brood://docs/decisions` — ADRs.
 - `brood://docs/types` — the type system contract.

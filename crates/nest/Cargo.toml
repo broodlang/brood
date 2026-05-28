@@ -12,6 +12,9 @@ path = "src/main.rs"
 
 [dependencies]
 brood = { path = "../lisp" }
+# Shared REPL — drives `nest repl` after the project bootstrap, same UX as
+# `brood`'s REPL. See crates/repl/Cargo.toml for the why.
+brood-repl = { path = "../repl" }
 # JSON-RPC framing for `nest mcp`: read/write `Content-Length:`-framed JSON
 # messages over stdio (the same shape LSP uses). MCP's surface is small
 # enough that we roll the framing ourselves rather than pull in an
