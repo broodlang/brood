@@ -100,6 +100,24 @@ shortcuts (`make help` lists them): `make build`, `make test`, `make suite`,
 environment metadata to `docs/benchmarks/<UTC-timestamp>.md`. `make -j$(nproc)`
 parallelism isn't relevant — it's a Cargo workspace, not a recursive make.
 
+### Hunting GC / use-after-GC bugs
+
+```bash
+RUSTFLAGS="-C debug-assertions=on" cargo build --release
+BROOD_GC_STRESS=1 ./target/release/brood <file>   # collect at every safepoint
+```
+
+Every LOCAL handle accessor (`pair`, `env_frame`, `closure`, `vector`, `map`,
+`string`) in `crates/lisp/src/core/heap.rs` `debug_assert!`s its slot isn't in
+the GC poison bitmap. Sweep sets the bit; `alloc_*` / `new_env` clear it. A
+use-after-GC panics at the *instant of the bad deref* with a backtrace pointing
+at the offender — instead of surfacing as an "unbound symbol" or wrong-arity
+error many frames later. Plain `cargo build --release` strips it (zero hot-path
+cost shipped); `cargo build` (debug) is too slow to expose contention races but
+will still catch single-threaded ones. The combo above keeps release timing
+while leaving the tripwire armed — what reliably reproduces the scheduler race
+from `docs/claude-demo-findings.md`.
+
 ## Working in this repo (the tree changes under you)
 
 **Multiple changes happening at once is normal here.** The user edits files in

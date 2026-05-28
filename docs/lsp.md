@@ -378,8 +378,11 @@ cursor-keyed `references`/`rename` path), and with no project bootstrapped the
 set degrades to just the open buffer. This is the static, CST-level reference
 model ADR-031 keeps — *definitions* are image-based, *references* stay static
 because macro-generated references have no faithful spans; so references are
-source occurrences (a quoted `'foo` counts), and a name another module
-synthesises via a macro won't appear.
+source occurrences, and a name another module synthesises via a macro won't
+appear. **Quoted symbols are excluded** (`collect_symbols` doesn't descend into a
+`'…` quote): the module name in `(require 'foo)` and quoted data `'(a b)` are
+*data*, not references, so rename never rewrites them. (Quasiquote is left as-is
+— its unquoted `~x` parts are live; untangling those is deferred.)
 
 **Other caveats (deliberate).** Semantic tokens are whole-document only (no
 range/delta requests — the parse is cheap). Semantic diagnostics anchor to the

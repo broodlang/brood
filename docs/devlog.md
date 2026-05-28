@@ -5240,3 +5240,56 @@ independent of this session's changes (all additive: an embedded-doc const,
 markdown, and the `new-project` scaffolder — none in `run-project-tests`' path)
 and coincides with the uncommitted `scheduler.rs` (+77) / `scanner.rs` WIP that
 was already in the tree. Flagged for the scheduler work, not fixed here.
+
+---
+
+## 2026-05-28 (cont.) — Review pass on the LSP + MCP code (shared core, bug fixes)
+
+Detailed review of the editor (LSP) and agent (MCP) surfaces, plus an
+independent adversarial pass. Three real bugs and one sharing win; several
+reviewer findings were rejected as false positives (recorded so they're not
+re-investigated).
+
+**Fixed.**
+- **Quoted symbols counted as references (real, in the *shared* core).**
+  `scope::collect_symbols` descended into `'…` quotes, so `references_to_global`
+  — used by LSP references/highlight/rename *and* the MCP `callers` tool via the
+  `references-in-source` primitive — treated the module name in `(require 'foo)`
+  and quoted data `'(a b)` as references. A cross-file rename of `foo` would have
+  rewritten `(require 'foo)` to point at a different module and mutated quoted
+  literals. Fix: `collect_symbols` no longer descends into `Quote` nodes (one
+  change, all consumers fixed). Quasiquote left as-is (its `~x` parts are live).
+- **`uri_to_path` mishandled a host authority.** `file://localhost/p` (some WSL
+  / remote clients) decoded to the *relative* path `localhost/p`, so
+  `find_project_root` silently never fired — no diagnostics, no cross-file. Now
+  strips the authority; `file:///p` and `file://host/p` both yield `/p`.
+- **`project_sources` overlay keyed by URI string.** The open-buffer overlay and
+  current-file dedup matched on the raw URI, but our `path_to_uri` and an
+  editor's URI can differ in percent-encoding for the same file — which would
+  miss unsaved edits and list the file twice (double edits on rename). Now keyed
+  by the **decoded path**.
+- **MCP `callers` aborted on one unreadable file.** `(slurp f)` throwing (a file
+  deleted/permission-denied between listing and read) failed the whole tool. Now
+  `try/catch` per file — skip and continue.
+
+**Sharing win.** The special-forms list was duplicated in `completion.rs` and
+`semantic_tokens.rs` and had **already drifted** (`match*` in one, not the
+other). Unified to one `pub(crate) const SPECIAL_FORMS`. (The broader LSP↔MCP
+sharing is already in good shape: `brood::introspect` and
+`scope::references_to_global` are the shared substrate; the per-encoding bits —
+LSP `LineIndex` UTF-16 vs the `line_col` char columns the MCP/agent API uses —
+are necessarily separate.)
+
+**Rejected (false positives).** Adding `defmodule` to `collect_globals` — would
+mint a phantom global for a name `defmodule` never binds (it expands to
+`(do (def *module-docs* …) (provide mod))`, no `(def mod …)`). The
+`path_to_uri` two-slash worry — `file://` + an absolute `/path` is the correct
+three-slash form. Char-vs-UTF-16 column on *cross-file goto* — a known,
+documented limitation (the cross-file *references* path uses `LineIndex` and is
+UTF-16-correct).
+
+**Tests.** New: `scope::references_exclude_quoted_symbols`,
+`uri_tests::{uri_to_path_handles_empty_and_host_authorities,
+path_to_uri_round_trips_through_uri_to_path}`. `brood` 125, `brood-lsp` 53,
+`nest` 30 — all green; new code clippy-clean. Re-verified cross-file
+references/rename (LSP) and `callers` (MCP) end-to-end against a fresh project.

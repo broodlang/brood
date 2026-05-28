@@ -254,6 +254,7 @@ fn wait_for_message(ctx: &Ctx, i: usize, deadline: Option<Instant>) {
             // between our suspend and resume (ADR-039).
             let saved_block = gc_block_save();
             let saved_resume = super::scheduler::resume_slot_save();
+            let saved_sup = super::scheduler::supervision_save();
             // SAFETY: the yielder is valid while this coroutine runs — which is now
             // (called from within eval, within the coroutine body). Suspending
             // returns control to the worker (`run_one`), which parks us.
@@ -263,6 +264,7 @@ fn wait_for_message(ctx: &Ctx, i: usize, deadline: Option<Instant>) {
             super::scheduler::CURRENT.with(|c| *c.borrow_mut() = Some(ctx.clone()));
             gc_block_set(saved_block);
             super::scheduler::resume_slot_set(saved_resume);
+            super::scheduler::supervision_set(saved_sup);
         }
     }
 }

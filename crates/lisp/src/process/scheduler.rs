@@ -173,6 +173,59 @@ thread_local! {
     /// restored around suspends so a worker running A, then B, then A again
     /// doesn't leak B's slot into A's recovery.
     static RESUME_SLOT: RefCell<Option<ResumeSlot>> = const { RefCell::new(None) };
+
+    /// The currently-running process's supervision policy, or `None` for
+    /// plain (let-it-crash) spawns. Set at coroutine entry by `spawn` from
+    /// the policy passed in, consulted by `eval`'s `record_resume` guard
+    /// and by `supervise()` itself. Save/restore around suspends so a
+    /// worker multiplexing supervised + unsupervised processes doesn't
+    /// leak one's policy into the other's eval-loop hot path.
+    static SUPERVISION: Cell<Option<SupervisionPolicy>> = const { Cell::new(None) };
+}
+
+/// Restart intensity for a supervised process — Erlang's `intensity` /
+/// `period` shape: at most `max_restarts` retries within any
+/// `max_window_ms` window before the supervisor gives up and the process
+/// exits with the last error. Defaults (3 restarts in 5 s) match Erlang's
+/// `supervisor` defaults. `Copy` so it lives in a `Cell` without
+/// borrow ceremony.
+#[derive(Clone, Copy, Debug)]
+pub struct SupervisionPolicy {
+    pub max_restarts: u32,
+    pub max_window_ms: u64,
+}
+
+impl SupervisionPolicy {
+    /// Erlang `supervisor`'s default intensity (3 restarts per 5 s); the
+    /// default for `(supervise expr)` with no explicit policy.
+    pub const fn default_erlang() -> Self {
+        Self {
+            max_restarts: 3,
+            max_window_ms: 5_000,
+        }
+    }
+}
+
+/// Is the current green process supervised? Hot-path query for the eval
+/// loop's `record_resume` guard. Cheap: one TLS read + branch.
+#[inline]
+pub fn is_supervised() -> bool {
+    SUPERVISION.with(|s| s.get().is_some())
+}
+
+/// Snapshot the current supervision policy for save/restore around a
+/// coroutine suspend, paired with [`supervision_set`].
+#[inline]
+pub(super) fn supervision_save() -> Option<SupervisionPolicy> {
+    SUPERVISION.with(|s| s.get())
+}
+
+/// Set the current supervision policy — paired with `supervision_save`
+/// around suspends, and called by a coroutine entry to install its own
+/// policy (wiping any residual from a previous process on the worker).
+#[inline]
+pub(super) fn supervision_set(v: Option<SupervisionPolicy>) {
+    SUPERVISION.with(|s| s.set(v));
 }
 
 /// Eval-loop hook: record `(callee, name, argv)` as the current iteration's
@@ -322,11 +375,14 @@ fn preempt() {
         // pick up another process whose eval/macroexpand changes these
         // thread-locals, and we need ours back when we resume. GC-block
         // depth is critical for safepoint correctness; the resume slot is
-        // critical so the supervisor sees this process's last tail-call,
-        // not whichever process happened to run on the worker between our
+        // critical so the supervisor sees this process's last tail-call;
+        // the supervision policy is critical so the eval-loop's
+        // `record_resume` guard reads the *current* process's flag, not
+        // whichever process happened to run on the worker between our
         // suspend and resume (ADR-039).
         let saved_block = gc_block_save();
         let saved_resume = resume_slot_save();
+        let saved_sup = supervision_save();
         // SAFETY: same invariant as `receive` — the yielder is valid while this
         // coroutine is running, which is now (tick runs inside eval, inside the
         // coroutine body). Suspending returns control to the worker (`run_one`).
@@ -334,6 +390,7 @@ fn preempt() {
         CURRENT.with(|c| *c.borrow_mut() = Some(ctx));
         gc_block_set(saved_block);
         resume_slot_set(saved_resume);
+        supervision_set(saved_sup);
     }
     // Root thread (yielder None): budget refreshed, never suspends.
 }
@@ -502,7 +559,18 @@ fn run_one(mut proc: Box<Process>) {
 /// Returns the new pid. The user-facing `spawn` macro wraps an arbitrary
 /// expression into such a thunk (`(spawn e)` → `(%spawn (fn () e))`), so the
 /// expression's free locals are captured lexically rather than passed as args.
-pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
+///
+/// `policy` controls supervision:
+/// - `None` → plain spawn: an uncaught throw kills the process, monitors
+///   fire `[:down :error …]` immediately (Erlang `spawn/1`).
+/// - `Some(policy)` → supervised: catches throws, retries the last
+///   tail-call (with hot-reload name re-resolution), gives up only when
+///   the restart intensity is exceeded.
+pub fn spawn(
+    heap: &Heap,
+    f: Value,
+    policy: Option<SupervisionPolicy>,
+) -> Result<u64, LispError> {
     // Promote the thunk into the shared RUNTIME region so its handle (and any
     // captured local scope) is valid in the child, which shares this runtime's
     // code via the Arcs below. A top-level function is already shared (no-op).
@@ -536,12 +604,14 @@ pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
         // coroutine on this worker may have left these nonzero. Our depth
         // starts fresh at 0 (incremented by the eval guard below); our
         // resume slot starts empty (the supervisor will populate it on the
-        // first tail call).
+        // first tail call); supervision policy is this process's, not the
+        // previous tenant's.
         gc_block_set(0);
         resume_slot_set(None);
+        supervision_set(policy);
         let mut heap = Heap::with_regions(prelude, runtime);
         heap.set_global(EnvId::GLOBAL);
-        let reason = supervise(&mut heap, pid, f);
+        let reason = supervise(&mut heap, pid, f, policy);
         EXIT_REASON.with(|r| *r.borrow_mut() = Some(reason));
         CURRENT.with(|c| *c.borrow_mut() = None);
     });
@@ -551,106 +621,62 @@ pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
     Ok(pid)
 }
 
-// ----- supervisor (ADR-039 step 2) -----------------------------------------
+// ----- supervisor (ADR-039) ------------------------------------------------
 //
-// Wraps a process's main eval in a catch-and-retry loop. The eval loop
-// updates `RESUME_SLOT` at every tail-call dispatch (eval::Value::Fn
-// branch); on an uncaught `LispError`, we log it, sleep an exponential
-// backoff, take the slot, and re-invoke from there — *same callee, same
-// argv*, so the iteration's accumulator state is preserved. The whole
-// point: a freshly-saved redefinition that throws doesn't kill the
-// running worker; the next retry runs the corrected code with the same
-// state. See `docs/supervision.md` for the model.
+// Wraps a process's main eval in a catch-and-retry loop, parameterised by a
+// per-process `SupervisionPolicy`. The eval loop updates `RESUME_SLOT` at
+// every tail-call dispatch (eval::Value::Fn branch); on an uncaught
+// `LispError`, we log it, sleep an exponential backoff, take the slot, and
+// re-invoke from there — *same callee, same argv* (with name re-resolution
+// for hot reload, ADR-013). A freshly-saved redefinition that throws doesn't
+// kill the worker; the next retry runs the corrected code with the same
+// state.
 //
-// The circuit-breaker prevents an always-throwing entry from spinning the
-// process. After `MAX_RESTARTS` failed invocations in a row, we give up
-// and let the process exit; its monitor watchers see `[:down …]` with the
-// last error.
+// Restart intensity (Erlang's `intensity`/`period`): a sliding window of
+// crash timestamps. If more than `policy.max_restarts` crashes fall inside
+// any `policy.max_window_ms` window, the supervisor gives up. Default 3/5 s
+// matches Erlang's `supervisor` default. See `docs/supervision.md`.
 
-const MAX_RESTARTS: u32 = 10;
 const BACKOFF_BASE_MS: u64 = 1;
 const BACKOFF_MAX_MS: u64 = 1000;
 
-// ----- mode gate (ADR-039 step 3, brought forward into step 2) --------------
-//
-// Supervision is **off by default**: a process whose eval throws an uncaught
-// `LispError` exits, monitors fire `[:down …]` immediately, no retries — the
-// Erlang let-it-crash baseline. That matches what most code expects and what
-// the existing test suite expects (e.g. `dynamic_test.blsp`'s `dt-crasher`
-// waits 500 ms for `[:down …]`).
-//
-// **Dev mode turns it on** — `(set-supervision! true)` from the language, or
-// `BROOD_SUPERVISE=1` from the environment (consulted on the first
-// `is_supervision_enabled` call and cached). The intended UX: the REPL /
-// `nest dev` flips this; `--release` builds and `nest test` leave it off so
-// throws surface immediately rather than being silently retried.
-//
-// The mode is a `bool` *cached* on first read so the hot eval path can decide
-// in one atomic load. Toggling it via `(set-supervision! …)` updates both
-// the env-derived cache and the active value.
-
-static SUPERVISION: AtomicUsize = AtomicUsize::new(SUPERVISION_UNSET);
-const SUPERVISION_UNSET: usize = 0;
-const SUPERVISION_OFF: usize = 1;
-const SUPERVISION_ON: usize = 2;
-
-/// Is per-process supervision on? Hot-path read for `eval`'s `record_resume`
-/// call and for the supervise loop. First call resolves from
-/// `BROOD_SUPERVISE` and caches; afterwards a single atomic load.
-#[inline]
-pub fn is_supervision_enabled() -> bool {
-    match SUPERVISION.load(Ordering::Relaxed) {
-        SUPERVISION_ON => true,
-        SUPERVISION_OFF => false,
-        _ => {
-            let on = std::env::var_os("BROOD_SUPERVISE")
-                .map(|v| v != "0" && v != "")
-                .unwrap_or(false);
-            SUPERVISION.store(
-                if on { SUPERVISION_ON } else { SUPERVISION_OFF },
-                Ordering::Relaxed,
-            );
-            on
-        }
-    }
-}
-
-/// Turn supervision on/off at runtime. Exposed to Brood as `set-supervision!`
-/// so the REPL or a dev-mode bootstrap can opt in. Affects processes spawned
-/// **after** the call; in-flight supervise loops keep running.
-pub fn set_supervision(on: bool) {
-    SUPERVISION.store(
-        if on { SUPERVISION_ON } else { SUPERVISION_OFF },
-        Ordering::Relaxed,
-    );
-}
-
 /// The per-process supervisor body — replaces the bare `match eval::apply`
-/// the original spawn body had. Loops until either the eval returns Ok
-/// (process finished normally) or we exhaust the restart budget. The exit
-/// reason returned here becomes the `[:down …]` reason monitors see.
-///
-/// When supervision is off (the default — see [`is_supervision_enabled`]),
-/// this short-circuits to a single `eval::apply` and surfaces the error
-/// directly: the let-it-crash baseline, indistinguishable from the
-/// pre-supervisor behaviour the rest of the test suite expects.
-fn supervise(heap: &mut Heap, pid: u64, entry: Value) -> Message {
-    use std::time::Duration;
-    if !is_supervision_enabled() {
-        return match eval::apply(heap, entry, &[], EnvId::GLOBAL) {
-            Ok(_) => Message::Keyword(value::intern("normal")),
-            Err(e) => {
-                eprintln!("process {} died: {}", pid, e);
-                Message::Vector(vec![
-                    Message::Keyword(value::intern("error")),
-                    Message::Str(e.to_string()),
-                ])
-            }
-        };
-    }
+/// the original spawn body had. When `policy` is `None` (plain spawn —
+/// the let-it-crash baseline, Erlang's `spawn/1`), this short-circuits to
+/// a single `eval::apply`. When `Some(policy)`, it loops with retries
+/// until either the eval returns Ok (process finished normally) or the
+/// restart intensity is exceeded. The exit reason returned here becomes
+/// the `[:down …]` reason monitors see.
+fn supervise(
+    heap: &mut Heap,
+    pid: u64,
+    entry: Value,
+    policy: Option<SupervisionPolicy>,
+) -> Message {
+    use std::time::{Duration, Instant};
+    let policy = match policy {
+        Some(p) => p,
+        None => {
+            // Unsupervised: a single attempt, throw escapes as the exit reason.
+            return match eval::apply(heap, entry, &[], EnvId::GLOBAL) {
+                Ok(_) => Message::Keyword(value::intern("normal")),
+                Err(e) => {
+                    eprintln!("process {} died: {}", pid, e);
+                    Message::Vector(vec![
+                        Message::Keyword(value::intern("error")),
+                        Message::Str(e.to_string()),
+                    ])
+                }
+            };
+        }
+    };
     let mut callee = entry;
     let mut argv: smallvec::SmallVec<[Value; 8]> = smallvec::SmallVec::new();
-    let mut restarts: u32 = 0;
+    // Sliding window of crash timestamps; entries older than
+    // `policy.max_window_ms` are pruned on each crash. If after pruning the
+    // window contains more than `policy.max_restarts` entries, we've
+    // exceeded intensity — give up.
+    let mut crashes: Vec<Instant> = Vec::with_capacity(policy.max_restarts as usize + 1);
     let mut backoff_ms = BACKOFF_BASE_MS;
     loop {
         // Each invocation is its own eval; if it tail-calls deeper, `record_resume`
@@ -661,21 +687,22 @@ fn supervise(heap: &mut Heap, pid: u64, entry: Value) -> Message {
             Ok(_) => return Message::Keyword(value::intern("normal")),
             Err(e) => {
                 eprintln!("process {} caught: {}", pid, e);
-                restarts += 1;
-                if restarts > MAX_RESTARTS {
+                let now = Instant::now();
+                crashes.push(now);
+                let window = Duration::from_millis(policy.max_window_ms);
+                crashes.retain(|&t| now.duration_since(t) <= window);
+                if crashes.len() > policy.max_restarts as usize {
                     eprintln!(
-                        "process {} gave up after {} restarts in a row; last error: {}",
-                        pid, restarts, e
+                        "process {} exceeded restart intensity ({} in {} ms); last error: {}",
+                        pid, crashes.len(), policy.max_window_ms, e
                     );
                     return Message::Vector(vec![
                         Message::Keyword(value::intern("error")),
                         Message::Str(e.to_string()),
                     ]);
                 }
-                // Exponential backoff. Capped at 1s so a process retrying a
-                // transient external failure doesn't sleep too long between
-                // attempts. Reset to BASE_MS on successful return (handled
-                // implicitly: that path doesn't loop).
+                // Exponential backoff between retries, capped at 1 s so a
+                // transient external failure doesn't sleep too long.
                 std::thread::sleep(Duration::from_millis(backoff_ms));
                 backoff_ms = (backoff_ms.saturating_mul(2)).min(BACKOFF_MAX_MS);
                 // Take the slot and re-invoke from there. If no tail-call

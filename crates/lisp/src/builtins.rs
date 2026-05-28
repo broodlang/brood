@@ -202,6 +202,12 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // processes (concurrency)
     def(heap, "%spawn", Arity::exact(1), Sig::new(vec![callable], pid_ty), spawn);
     def(heap, "%spawn-named", Arity::exact(2), Sig::new(vec![sym.union(kw), callable], pid_ty), spawn_named);
+    // Supervised spawns: extra `max-restarts` (int) and `max-window-ms` (int)
+    // tail args carry the per-process restart-intensity policy. The
+    // user-facing `(supervise …)` macro fills them with the Erlang defaults
+    // (3 in 5000 ms).
+    def(heap, "%spawn-supervised", Arity::exact(3), Sig::new(vec![callable, int, int], pid_ty), spawn_supervised);
+    def(heap, "%spawn-supervised-named", Arity::exact(4), Sig::new(vec![sym.union(kw), callable, int, int], pid_ty), spawn_supervised_named);
     // `send`'s target is a pid OR a `{:name :node}` address map.
     def(heap, "send", Arity::exact(2), Sig::new(vec![pid_ty.union(map_ty), any], nil_ty), send);
     // Arg shape: (matcher: callable, timeout: int|nil, on-timeout: callable|nil).
@@ -216,8 +222,6 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "demonitor", Arity::exact(1), Sig::new(vec![ref_ty], nil_ty), demonitor);
     def(heap, "spawn-count", Arity::exact(0), Sig::nullary(int), spawn_count);
     def(heap, "peak-threads", Arity::exact(0), Sig::nullary(int), peak_threads);
-    def(heap, "set-supervision!", Arity::exact(1), Sig::new(vec![bool_ty], nil_ty), set_supervision);
-    def(heap, "supervision?", Arity::exact(0), Sig::nullary(bool_ty), supervision_q);
     def(heap, "worker-threads", Arity::exact(0), Sig::nullary(int), worker_threads);
     def(heap, "list-processes", Arity::exact(0), Sig::nullary(list_ty), list_processes);
 
@@ -304,6 +308,8 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("dynamic?", &["x"], "Whether x is a symbol declared dynamic with defdyn. Quote it: (dynamic? '*foo*)."),
     ("throw", &["x"], "Raise x as an error - a non-local exit caught by try/catch."),
     ("%spawn", &["thunk"], "Run thunk (a 0-arg fn) in a new green process; returns its pid. Use the `spawn` macro."),
+    ("%spawn-supervised", &["thunk", "max-restarts", "max-window-ms"], "Like %spawn, but the new process is supervised (ADR-039): an uncaught throw is caught and retried with hot-reloaded code, up to `max-restarts` within any `max-window-ms` window before the process exits. Use the `supervise` macro."),
+    ("%spawn-supervised-named", &["name", "thunk", "max-restarts", "max-window-ms"], "Like %spawn-named, but the new process is supervised (ADR-039). Idempotent on `name`: a second call while the first is alive returns the existing pid (no respawn, no re-eval of thunk). Use the `supervise` macro."),
     ("send", &["target", "msg"], "Copy msg into target's mailbox; target is a pid or {:name :node} address. Routes locally or over a node link. Returns nil."),
     ("self", &[], "This process's own pid (carries this node's identity)."),
     ("ref", &[], "A fresh, globally-unique reference token (tags a request to its reply)."),
@@ -313,8 +319,6 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("spawn-count", &[], "How many green processes have been spawned since program start."),
     ("peak-threads", &[], "High-water mark of OS threads running processes concurrently."),
     ("worker-threads", &[], "The size of the scheduler's worker-thread pool (about nproc)."),
-    ("set-supervision!", &["on?"], "Turn the per-process supervisor on (`true`) or off (`false`). Off by default — a process whose body throws exits immediately (Erlang let-it-crash). On, the supervisor catches uncaught errors, retries the last tail-call iteration up to 10 times with exponential backoff, then gives up; intended for dev/hot-reload mode (ADR-039). Also reads `BROOD_SUPERVISE=1` from the env on first query. Affects processes spawned after the call."),
-    ("supervision?", &[], "Is the per-process supervisor currently on? (ADR-039.)"),
     ("node-start", &["name", "addr", "cookie"], "Name this runtime and listen for peers on addr (\"host:port\"); cookie authenticates links. Returns the node name."),
     ("connect", &["spec"], "Link to a peer node named in spec (\"name@host:port\"); cookie-authenticated. Returns the peer's node name."),
     ("register", &["name", "pid"], "Bind a local name so peers can address this process via {:name name :node this-node}. Returns the pid."),
@@ -952,9 +956,13 @@ const EMBEDDED_DOCS: &[(&str, &str)] = &[
     // `.claude/skills/`, so an AI assistant editing the project auto-loads the
     // Brood-writing rules. The full reference is `brood-for-claude`; this is the
     // short triggerable checklist (`SKILL.md` frontmatter + the LLM traps).
+    // Canonical source lives here in `docs/` (a tracked path); the repo's own
+    // `.claude/skills/writing-brood/SKILL.md` is a local symlink to it — `.claude/`
+    // is gitignored, and a compile-time `include_str!` must not depend on an
+    // untracked path (it would break a fresh clone's build).
     (
         "writing-brood-skill",
-        include_str!("../../../.claude/skills/writing-brood/SKILL.md"),
+        include_str!("../../../docs/writing-brood-skill.md"),
     ),
 ];
 

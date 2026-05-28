@@ -447,12 +447,15 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                 // state preserved.
                 //
                 // Three guards, in cheapness order:
-                //   1. `is_supervision_enabled()` — global mode gate.
-                //      Default off; a release build / `nest test` pays
-                //      zero per-call cost here (one atomic load + branch).
-                //   2. `in_green_process()` — root thread has no
-                //      supervisor (the REPL / file runner), so no need
-                //      to record.
+                //   1. `is_supervised()` — per-process flag (TLS read).
+                //      Default `None`; plain `(spawn …)` pays only one
+                //      load + branch per tail call. A process spawned
+                //      via `(supervise …)` has `Some(policy)` here.
+                //   2. `in_green_process()` — the root thread (REPL /
+                //      file runner) is never supervised, but the flag
+                //      doubles up the check so a future code path that
+                //      forgets the TLS reset on the root thread stays
+                //      correct.
                 //   3. `gc_block_depth() == 1` — only at the outermost
                 //      eval frame: the top-level loop running in the
                 //      spawn coroutine. Nested eval frames are inner
@@ -465,7 +468,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                 //      is per-process (saved/restored around suspends),
                 //      so `== 1` is "this is the spawn entry's own tail
                 //      loop, not a helper running inside it".
-                if crate::process::is_supervision_enabled()
+                if crate::process::is_supervised()
                     && crate::process::in_green_process()
                     && crate::process::gc_block_depth() == 1
                 {

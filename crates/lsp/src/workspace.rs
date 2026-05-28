@@ -12,6 +12,7 @@
 //! document, so the feature still works, single-file.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 use brood::syntax::cst::{Node, NodeKind};
 use brood::syntax::{cst, scope};
@@ -80,26 +81,45 @@ pub fn rename(
 /// in-memory text over the on-disk copy (so unsaved edits are searched). The
 /// open `current` document is always included, even if it's outside the project
 /// (a scratch buffer), so its own occurrences aren't missed.
+///
+/// The open-document overlay and the project/current dedup are keyed by the
+/// **decoded filesystem path**, not the URI string: an editor's URI and our
+/// `path_to_uri` can differ in percent-encoding for the same file (hex case,
+/// which bytes get escaped), and matching on the raw URI would then miss the
+/// unsaved buffer *and* list the file twice — which for rename would emit
+/// double edits.
 fn project_sources(interp: &mut Interp, docs: &Documents, current: &Uri) -> Vec<(Uri, String)> {
+    // Open buffers indexed by their decoded path → in-memory text.
+    let open: HashMap<PathBuf, &str> = docs
+        .iter()
+        .filter_map(|(u, d)| Some((crate::uri_to_path(u)?, d.text.as_str())))
+        .collect();
+
     let mut out = Vec::new();
-    let mut uris = HashSet::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
     for path in introspect::project_files(interp) {
+        let pb = PathBuf::from(&path);
+        if !seen.insert(pb.clone()) {
+            continue;
+        }
         let Some(uri) = crate::path_to_uri(&path) else {
             continue;
         };
-        let text = docs
-            .get(&uri)
-            .map(|d| d.text.clone())
+        let text = open
+            .get(&pb)
+            .map(|s| s.to_string())
             .or_else(|| std::fs::read_to_string(&path).ok());
         if let Some(text) = text {
-            if uris.insert(uri.clone()) {
-                out.push((uri, text));
-            }
+            out.push((uri, text));
         }
     }
-    if !uris.contains(current) {
-        if let Some(doc) = docs.get(current) {
-            out.push((current.clone(), doc.text.clone()));
+    // Ensure the open `current` document is covered (a scratch buffer outside
+    // the project, or a path the project list spelled differently).
+    if let Some(cur_path) = crate::uri_to_path(current) {
+        if seen.insert(cur_path) {
+            if let Some(doc) = docs.get(current) {
+                out.push((current.clone(), doc.text.clone()));
+            }
         }
     }
     out
