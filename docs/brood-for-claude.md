@@ -84,6 +84,62 @@ Local bindings — `let` takes a **flat** name/value list (not Scheme's double-p
   (+ a b x y))
 ```
 
+## Style — lists for code, vectors for data
+
+Two rules that keep Brood code uniform and unambiguous. Both are about *idiom*;
+both forms parse either way, but write the idiomatic one.
+
+**1. Code uses `( )`; vectors `[ ]` are for data.** Param lists and the binding
+forms of `let` / `for` / `doseq` / `when-let` / `if-let` are *lists*, not
+Clojure-style vectors. Vectors are reserved for tuple values (`[x y]`),
+sequence literals (`[1 2 3]`), and tuple **patterns** that match against tuple
+values inside `match` / `let` / `receive` heads. Code is cons-lists so the
+editor and macros manipulate one structure uniformly (ADR-010).
+
+```lisp
+;; good                          ;; not idiomatic
+(let (a 1 b 2) …)                (let [a 1 b 2] …)
+(for (x xs :when p) …)           (for [x xs :when p] …)
+(doseq (x xs) …)                 (doseq [x xs] …)
+(when-let (v (try-it)) …)        (when-let [v (try-it)] …)
+```
+
+**2. Don't tuple-destructure in a single-clause top-level `defn` param list.**
+Name the param and unpack inside the body. Multi-clause `defn` (pattern
+dispatch on clauses) is fine and encouraged — its clause heads use lists, not
+vectors, so there's no ambiguity. Anonymous `fn` in higher-order context
+(`map` / `reduce` / `mapcat`) **may** keep a tuple-destructured param — the
+surrounding `(map …)` makes "this is a one-call function value" obvious, and
+the alternative is a noisy extra `let`.
+
+```lisp
+;; good
+(defn area (p) (let ([x y] p) (* x y)))
+
+(defn neighbours (cell)
+  (let ([x y] cell)
+    (map (fn ([dx dy]) [(+ x dx) (+ y dy)]) offsets)))
+
+;; multi-clause defn is fine — clause heads are lists, no [ ] collision
+(defn fac
+  ((0) 1)
+  ((n) (* n (fac (- n 1)))))
+
+;; not idiomatic — single-clause defn with a tuple-destructured param
+(defn area ([x y]) (* x y))
+(defn neighbours ([x y])
+  (map (fn ([dx dy]) [(+ x dx) (+ y dy)]) offsets))
+```
+
+**Why rule 2:** `(defn f ([x y]) body)` is *single-clause* with one
+tuple-destructured param, but visually collides with *multi-clause* `(defn f
+((p) body))` where the outer `(…)` wraps a clause. The disambiguation is
+correct (the parser checks whether the inner head is a list); the *reader*
+pays a re-parse every time. The cost is highest at a top-level `defn` — that
+name is the thing readers look up later. Confining the rule there preserves
+the ergonomic `(map (fn ([k v]) …) …)` idiom, which reads locally and never
+gets looked up by name.
+
 ## Patterns (`let`, `fn`, `match`, `receive`)
 
 The trap: a bare symbol *binds*, it doesn't match. To match a known value,

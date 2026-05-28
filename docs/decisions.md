@@ -1348,14 +1348,38 @@ never special-case "is this remote?" at the call site. Pids are used opaquely in
 Brood (send targets, message payloads, `[:down …]`), so the change is mechanical.
 
 **Scope / deferred.** One node per OS process (node identity + tables + interner
-are process-global). Deferred to later slices: distributed monitors/links,
-reconnect/net-split handling, and real authentication. Node-down detection
-landed with slice 2; the **closure-as-data path from ADR-033** landed too — the
-`M_CLOSURE` wire codec now ships every `ClosureMsg` field, so `(send target
-fn)` and the `[:run f x reply]` pattern run end-to-end across nodes (see
-`docs/distribution.md` and `lambda_ships_across_nodes_and_runs` in
-`crates/cli/tests/distribution.rs`). A dedicated `remote-spawn` is the small
-remaining sugar over that.
+are process-global). The original "deferred to later slices" set has now
+landed, in increments tracked in `docs/distribution.md`:
+
+- **Node-down detection** (slice 2) — heartbeat ping/pong + generation-checked
+  teardown; `[:nodedown name]` to `monitor-node` watchers.
+- **Closure-as-data path from ADR-033** — `M_CLOSURE` wire codec ships every
+  `ClosureMsg` field; source positions ride along via `Message::List`'s
+  optional `Pos` trailer; `(remote-spawn node expr)` (Brood macro) is the
+  surface convenience over the `[:run f x reply]` pattern.
+- **Distributed pid monitors** — `(monitor remote-pid)` routes through a
+  `Frame::Monitor` to the peer, which reuses the **same** `process::add_monitor`
+  core and `MONITORS` table the local monitor uses (one `Watcher` enum with
+  `Local` / `Remote` variants — no parallel implementation). Net-split fires
+  `[:down mref pid :noconnection]` via a sender-side `PENDING_REMOTE` table
+  and `handle_node_down`.
+- **Auto-reconnect** — `(ensure-link "name@host:port")` (Brood policy in
+  `std/prelude.blsp`) maintains a peer link across restarts: synchronous
+  initial connect, supervisor watches via `monitor-node`, retries on each
+  `[:nodedown …]` with a 200ms backoff until success.
+- **Handshake v2 (real auth)** — 4-byte magic+version prefix (`b"BRD\x02"`),
+  nonce-based `Hello`s, HMAC-SHA256 `Auth` frames. The cookie is **never on
+  the wire** — it's an HMAC key, so an eavesdropper can't replay either it
+  or a captured handshake. A non-brood peer / wrong cookie aborts before the
+  link enters `NODES`. Uses the RustCrypto `hmac` + `sha2` crates (the
+  "don't roll your own crypto" exception to ADR-005); nonces come from
+  `getrandom` (OS RNG). Wire format break from v1, deliberate (greenfield).
+
+**Still deferred.** Erlang OTP-style **supervision trees** with `link` +
+restart strategies (today's `monitor` is unidirectional and one-shot — useful,
+but not the full OTP guarantee). Optional **TLS** as a transport substrate
+*under* the HMAC layer, for over-the-internet links (HMAC alone proves
+shared-cookie possession but doesn't encrypt traffic).
 
 ## ADR-035 — Tracing GC: per-process mark-sweep, fired only at the outermost-eval safepoint
 
@@ -1463,3 +1487,101 @@ a 200k-iteration tail loop and a 20k-message server loop both stay bounded.
   for ordinary macros, revisit if needed.
 - **`car`/`cdr` vs `first`/`rest`:** both provided; `first`/`rest` are the
   documented default.
+
+## ADR-036 — `nest mcp`: a per-project Model Context Protocol server, tools surface in Brood
+
+**Status:** proposed (2026-05-28). Design recorded in [`mcp.md`](mcp.md).
+
+**Context.** Brood has a Tier-1 language server (`brood-lsp`, ADR-025) that
+gives editors hover/completion/diagnostics/goto-def/signature-help on the
+buffer under a cursor. But an *AI agent* doing development against the project
+asks different questions than an editor: not "what is at this offset?", but
+"eval this", "run that test", "expand this macro", "what is `map`'s arglist".
+Routing those through the LSP requires a buffer and a cursor; through the
+shell, parsing GNU-line output per request. Both miss the thing this Lisp
+already does well — hot reload (ADR-013, `docs/shared-code.md`): the running
+runtime is the project, `def` mutates it in place, and running processes see
+the new binding on the next lookup. That makes a *long-lived per-session image*
+the natural shape for agent-driven work, the same way SLIME/CIDER are for
+humans. The Model Context Protocol (MCP, JSON-RPC over stdio, the same shape
+as LSP) is the standard agent surface — Claude Code attaches MCP servers per
+workspace via `.mcp.json` — so the question is just what to expose and where it
+lives in the tree.
+
+**Decision.** Add **`nest mcp`** — a subcommand on the project tool (ADR-028)
+that speaks MCP over stdio, scoped strictly to the project rooted at cwd.
+Outside a project root it errors loudly; there is no "language-only" MCP
+flavour, matching the `nest test` / `nest doc` shape rather than `brood
+file.blsp`. Concretely:
+
+- **One `Interp` per MCP session, long-lived across tool calls.** State *is*
+  the feature: a `def` in one `eval` call is visible to the next and to any
+  green process spawned in between. Two `claude` sessions over the same project
+  get two `nest mcp` processes, each with its own image — no cross-session
+  sharing.
+- **A shared introspection layer.** Pull the existing
+  `crates/lsp/src/introspect.rs` (`global_names` / `signature` /
+  `arglist_tokens`) up to `crates/lisp/src/introspect.rs` and widen it with the
+  operations both surfaces need (`source_location`, `macroexpand_to_string`,
+  `check_project`, `run_tests`, `format_source`, `eval_in_session`). LSP and
+  MCP each become genuinely thin shells over it, so hover and `lookup` cannot
+  drift on what `map`'s signature is.
+- **The tool *surface* is declared in Brood**, not Rust (ADR-006). The Rust
+  side is a JSON-RPC dispatcher; `std/mcp.blsp` lists the tools (name, JSON
+  schema, handler fn) and each handler is Brood. A project's own `mcp.blsp`
+  can extend the catalogue — registering a project-specific verb is a `defn`,
+  not a new Rust release. The initial set (ADR-011, ship the simple shape) is
+  eight tools — `eval`, `load`, `lookup`, `macroexpand`, `run-tests`, `check`,
+  `format`, `processes` — plus resources for the docs (`brood-for-claude`,
+  `language`, `decisions`, `types`), the prelude, and the project manifest.
+- **Transport: a sync JSON-RPC loop we own**, the same shape `lsp-server` gives
+  the LSP. MCP's surface is small (initialize, tools/{list,call},
+  resources/{list,read}, prompts/{list,get}); a direct implementation stays
+  under a few hundred lines, avoids an async runtime, and matches the `!Sync`
+  `Heap` constraint (one `Interp`, one request at a time, no `tokio`). Same
+  calculus as ADR-025 picking `lsp-server` over `tower-lsp`.
+- **Scaffold the attach config.** `nest new foo` drops `foo/.mcp.json` pointing
+  at `nest mcp`, so `cd foo && claude` auto-attaches. Combined with the
+  `%builtin-doc`-baked `brood-for-claude.md` (commit `d650bcb`, also exposed as
+  an MCP resource), a freshly scaffolded project is ready for agent-assisted
+  development from its first commit.
+
+**Why.** Three forces line up:
+
+1. **ADR-006 — write the language in the language.** Rust supplies transport
+   and dispatch; *what tools exist and what they do* is Brood. This is the only
+   architecture that lets a project extend its own agent surface without
+   forking the binary.
+2. **ADR-028 — nest is the project tool.** MCP is project-shaped: per-project
+   image, per-project tests, per-project extensions. It belongs in `nest`. A
+   "raw language" MCP would just be a REPL behind JSON-RPC — that's what
+   `brood` is.
+3. **Hot reload is the agent fit.** The same property that makes Brood a good
+   editor language — `def` is the only mutation, and it propagates to running
+   processes — makes it a good *agent* language: the agent iterates the way a
+   Lisper iterates, not the way a Rust dev iterates.
+
+**Trade-offs accepted.**
+
+- **`eval` is arbitrary code execution.** Local, single-session, behind the
+  user's own `.mcp.json` it's the same authority as Bash from Claude Code —
+  acceptable. Network/multi-tenant exposure would need a `:safe` allowlist; out
+  of scope here.
+- **One `Interp` per connection, no sharing.** `Heap` is `!Sync`; sharing
+  would force a redesign we don't want. Two parallel sessions on a single
+  image (an agent and a human REPL at once) is explicitly not a goal yet.
+- **Per-project only.** Outside `project.blsp`, `nest mcp` errors. Considered a
+  language-only mode and rejected: every nontrivial tool wants project context
+  (tests, sources, `mcp.blsp` extensions), and the LSP's project-aware
+  bootstrap already proved the shape.
+- **Drift risk with the LSP** if the shared `brood::introspect` extraction is
+  half-done — the LSP must move onto it as part of the same change, not after.
+
+**Consequences.** `crates/lsp/src/introspect.rs` moves to the lib crate as
+`brood::introspect` and the LSP consumes it from there. `crates/nest/` grows
+an `mcp.rs` module (promote to a `crates/mcp/` lib only when something else
+needs to embed it — the move is mechanical). `std/mcp.blsp` is a new module
+the dispatcher loads at startup. `nest new` templates gain a `.mcp.json`.
+The editor work later (M2/M3) inherits the same dispatcher — when the editor
+is itself a Brood image, `nest mcp` becomes a long-running thread inside it,
+no protocol change.

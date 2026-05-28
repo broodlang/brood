@@ -2,10 +2,11 @@
 //! callee's parameter list with the argument you're on highlighted. Find the
 //! enclosing call form at the cursor, take its head symbol's parameters — from
 //! the CST def if it's defined in this document ([`defs`](crate::defs)),
-//! otherwise from the interpreter ([`introspect`](crate::introspect)) for a
+//! otherwise from the interpreter ([`introspect`](brood::introspect)) for a
 //! prelude/builtin — and compute the active argument from the cursor's position
 //! among the argument forms. No user code runs.
 
+use brood::introspect;
 use brood::syntax::cst::{Node, NodeKind};
 use brood::syntax::scope::{BindingKind, Resolution, ScopeTree};
 use brood::Interp;
@@ -14,7 +15,6 @@ use lsp_types::{
 };
 
 use crate::defs;
-use crate::introspect;
 
 pub fn signature_help(
     interp: &mut Interp,

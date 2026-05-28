@@ -29,7 +29,7 @@ use corosensei::{Coroutine, CoroutineResult, Yielder};
 
 use crate::core::heap::Heap;
 use crate::core::value::{self, Closure, ClosureId, EnvId, MapId, Symbol, Value};
-use crate::error::{LispError, LispResult};
+use crate::error::{LispError, LispResult, Pos};
 use crate::eval;
 
 /// A `Send`, self-contained copy of a value, for crossing heaps.
@@ -42,7 +42,14 @@ pub enum Message {
     Str(String),
     Sym(Symbol),
     Keyword(Symbol),
-    List(Vec<Message>),
+    /// A cons-list value, plus the **source position** of the original pair
+    /// (if known). Carrying the `Pos` here lets a remote-shipped closure's
+    /// body forms keep their source coordinates through `(send …)` and across
+    /// nodes — the receiver's `from_message` re-stamps it on the rebuilt pair
+    /// via `heap.set_form_pos`, so a diagnostic from inside a remote-run
+    /// lambda still points at the *sender's* source line. `None` for lists
+    /// built at runtime (no recorded position to begin with).
+    List(Vec<Message>, Option<Pos>),
     Vector(Vec<Message>),
     Map(Vec<(Message, Message)>),
     Ref(u64),
@@ -102,12 +109,13 @@ fn to_message_rec(heap: &Heap, v: Value, visited: &mut Vec<ClosureId>) -> Result
         Value::Keyword(s) => Message::Keyword(s),
         Value::Str(id) => Message::Str(heap.string(id).to_string()),
         Value::Pair(_) => {
+            let pos = heap.form_pos(v);
             let items = heap.list_to_vec(v)?;
             let mut out = Vec::with_capacity(items.len());
             for item in items {
                 out.push(to_message_rec(heap, item, visited)?);
             }
-            Message::List(out)
+            Message::List(out, pos)
         }
         Value::Vector(id) => {
             let items = heap.vector(id).to_vec();
@@ -275,12 +283,20 @@ pub fn from_message(heap: &mut Heap, m: &Message) -> Value {
         Message::Sym(s) => Value::Sym(*s),
         Message::Keyword(s) => Value::Keyword(*s),
         Message::Str(s) => heap.alloc_string(s),
-        Message::List(items) => {
+        Message::List(items, pos) => {
             let mut vals = Vec::with_capacity(items.len());
             for item in items {
                 vals.push(from_message(heap, item));
             }
-            heap.list(vals)
+            let v = heap.list(vals);
+            // Re-stamp the original source position on the rebuilt pair, so
+            // a diagnostic from inside a sent / remote-spawned closure still
+            // points at the sender's source line. `set_form_pos` no-ops on
+            // non-LOCAL handles, but `heap.list` always produces LOCAL.
+            if let Some(p) = pos {
+                heap.set_form_pos(v, *p);
+            }
+            v
         }
         Message::Vector(items) => {
             let mut vals = Vec::with_capacity(items.len());
@@ -546,13 +562,51 @@ static WORKERS_STARTED: Once = Once::new();
 static REGISTRY: LazyLock<Mutex<HashMap<u64, Arc<Mailbox>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Monitors: watched-pid → the watchers to notify when it dies, each as
-/// `(watcher-pid, monitor-ref)`. When the watched process deregisters, every
-/// watcher gets a `[:down <mref> <pid> <reason>]` message (Erlang `monitor`,
+/// A monitor's *watcher* side — who gets the `[:down …]` when the watched pid
+/// dies. The same enum carries a process on this runtime (`Local`) and a
+/// process on a peer runtime (`Remote`), so one `MONITORS` table holds both
+/// shapes and the same `deregister` / `demonitor` code drives them. The peer
+/// learns we want a watch via the `dist::Frame::Monitor` frame, the down
+/// notification rides back as an ordinary `Message::Vector([:down …])` send.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) enum Watcher {
+    /// A process on *this* runtime.
+    Local { pid: u64, mref: u64 },
+    /// A process on a peer runtime — `node` names that runtime, `pid` is the
+    /// watcher's pid *over there* (so a peer's `[:down …]` lands in its own
+    /// mailbox), `mref` is the watcher's monitor reference (opaque to us).
+    Remote { node: Symbol, pid: u64, mref: u64 },
+}
+
+/// Monitors: watched-pid → the watchers to notify when it dies. Each watcher
+/// gets a `[:down <mref> <pid> <reason>]` message (Erlang `monitor`,
 /// unidirectional and one-shot). No links yet — a monitor never affects the
-/// watched process.
-static MONITORS: LazyLock<Mutex<HashMap<u64, Vec<(u64, u64)>>>> =
+/// watched process. A single table holds both `Local` and `Remote` watchers,
+/// so the local-monitor path and the cross-node-monitor path share the same
+/// "is the target alive? add or fire :noproc" logic and the same fan-out from
+/// `deregister`.
+static MONITORS: LazyLock<Mutex<HashMap<u64, Vec<Watcher>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// **Pending remote monitors** — the *sender* side of `(monitor remote-pid)`.
+/// Keyed by the peer's node-name, valued by the local triples we'd need to
+/// fire `[:down mref pid :noconnection]` should the link to that peer die
+/// (Erlang semantics: a monitor fires on net-split). Compact mirror of
+/// `MONITORS` — no down-delivery state, just enough to wake the watcher
+/// when the wire goes away.
+static PENDING_REMOTE: LazyLock<Mutex<HashMap<Symbol, Vec<PendingRemote>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[derive(Clone)]
+struct PendingRemote {
+    /// The local watcher to deliver `[:down …]` to.
+    watcher_pid: u64,
+    /// The monitor reference the watcher will pattern-match on.
+    mref: u64,
+    /// The remote pid being watched — the message's `pid` field.
+    target_node: Symbol,
+    target_pid: u64,
+}
 
 /// Source of unique reference ids, shared by `(ref)` and `(monitor …)` so every
 /// ref — token or monitor handle — is distinct across the whole runtime.
@@ -604,26 +658,63 @@ fn worker_count() -> usize {
     }
 }
 
-/// A process has finished (or crashed): drop its mailbox and fire any monitors,
-/// delivering `[:down <mref> <pid> <reason>]` to each watcher.
+/// A process has finished (or crashed): drop its mailbox and fire any
+/// monitors, delivering `[:down <mref> <pid> <reason>]` to each watcher —
+/// `Local` watchers via `deliver` (in-process mailbox push), `Remote`
+/// watchers via the dist layer (an ordinary `send` to a remote pid, which
+/// routes over the link). Same `[:down …]` shape in both cases — the
+/// receiver code on the wire side is unchanged from local.
 fn deregister(pid: u64, reason: Message) {
     REGISTRY.lock().unwrap().remove(&pid);
     let watchers = MONITORS.lock().unwrap().remove(&pid).unwrap_or_default();
-    for (watcher, mref) in watchers {
-        deliver(watcher, down_message(mref, pid, reason.clone()));
+    for w in watchers {
+        fire_down(w, pid, reason.clone());
     }
 }
 
-/// The `[:down <mref> <pid> <reason>]` message a monitor fires.
-fn down_message(mref: u64, pid: u64, reason: Message) -> Message {
+/// Deliver a `[:down …]` to one watcher — the single fan-out point both
+/// `deregister` (target died) and `add_monitor` (target was already dead)
+/// use. Local watchers get an in-process mailbox push; remote watchers get
+/// a routed `send`, so the wire-format `[:down …]` is exactly the message a
+/// peer's process would receive locally.
+fn fire_down(w: Watcher, dying_pid: u64, reason: Message) {
+    let msg = down_message(local_node_pid_msg(dying_pid), w.mref(), reason);
+    match w {
+        Watcher::Local { pid, .. } => deliver(pid, msg),
+        Watcher::Remote { node, pid, .. } => {
+            crate::dist::route(node, crate::dist::Target::Pid(pid), msg);
+        }
+    }
+}
+
+impl Watcher {
+    /// Both variants carry a monitor ref; surface it for shared code paths.
+    fn mref(&self) -> u64 {
+        match *self {
+            Watcher::Local { mref, .. } | Watcher::Remote { mref, .. } => mref,
+        }
+    }
+}
+
+/// The `Message::Pid` for a process that lives on **this** runtime — the
+/// `pid` field of a `[:down …]` we're firing. Wraps the (always-local-here)
+/// node-name lookup so the call site reads as "make the pid value".
+fn local_node_pid_msg(pid: u64) -> Message {
+    Message::Pid {
+        node: crate::dist::local_node(),
+        id: pid,
+    }
+}
+
+/// The `[:down <pid> <mref> <reason>]` message a monitor fires. `pid_msg`
+/// is the dying process's pid as a `Message::Pid` — `Local` watchers see
+/// this runtime's name there, `Remote` watchers see the same thing (still
+/// correct: the dying pid lives on us).
+fn down_message(pid_msg: Message, mref: u64, reason: Message) -> Message {
     Message::Vector(vec![
         Message::Keyword(value::intern("down")),
         Message::Ref(mref),
-        // The dying process is local to this runtime, so its pid carries this node.
-        Message::Pid {
-            node: crate::dist::local_node(),
-            id: pid,
-        },
+        pid_msg,
         reason,
     ])
 }
@@ -645,13 +736,33 @@ pub(crate) fn deliver(pid: u64, msg: Message) {
     }
 }
 
-/// `(monitor pid)` — start watching `pid`; returns a fresh monitor `ref`. When
-/// `pid` dies, the caller receives `[:down <this-ref> <pid> <reason>]`. If `pid`
-/// is already dead, the DOWN (`reason` `:noproc`) is delivered immediately. The
-/// monitor is unidirectional and one-shot.
+/// `(monitor pid)` — start watching the **local** `pid`; returns a fresh
+/// monitor `ref`. When `pid` dies, the caller receives `[:down <this-ref>
+/// <pid> <reason>]`. If `pid` is already dead, the DOWN (`reason` `:noproc`)
+/// is delivered immediately. The monitor is unidirectional and one-shot.
+///
+/// Routes through [`add_monitor`] with a `Watcher::Local`; the cross-node
+/// path (`dist::Frame::Monitor`) calls the same function with a
+/// `Watcher::Remote`, so the alive/dead branch and the `:noproc` fast path
+/// are shared.
 pub fn monitor(target: u64) -> Value {
     let mref = next_ref();
-    let me = self_pid();
+    add_monitor(
+        target,
+        Watcher::Local {
+            pid: self_pid(),
+            mref,
+        },
+    );
+    Value::Ref(mref)
+}
+
+/// The shared "register a watcher" core — used by the local `monitor` builtin
+/// and by `dist`'s `Frame::Monitor` handler. If `target` is alive, append
+/// `watcher` to its monitor list; otherwise fire a synthetic `:noproc` down
+/// to that same watcher immediately. The "delivery channel" of the down
+/// (in-process mailbox vs. routed `send`) is decided inside [`fire_down`].
+pub(crate) fn add_monitor(target: u64, watcher: Watcher) {
     let alive = REGISTRY.lock().unwrap().contains_key(&target);
     if alive {
         MONITORS
@@ -659,24 +770,132 @@ pub fn monitor(target: u64) -> Value {
             .unwrap()
             .entry(target)
             .or_default()
-            .push((me, mref));
+            .push(watcher);
     } else {
-        deliver(
-            me,
-            down_message(mref, target, Message::Keyword(value::intern("noproc"))),
-        );
+        fire_down(watcher, target, Message::Keyword(value::intern("noproc")));
     }
-    Value::Ref(mref)
 }
 
 /// `(demonitor mref)` — drop the calling process's monitor with that ref. Best
 /// effort: a `[:down …]` already queued is not recalled.
 pub fn demonitor(mref: u64) {
     let me = self_pid();
+    drop_monitor(|w| matches!(*w, Watcher::Local { pid, mref: r } if pid == me && r == mref));
+}
+
+/// Remove every `Watcher` matching `pred` from `MONITORS`. The shared dropper
+/// behind local `(demonitor mref)`, remote `Frame::Demonitor`, and the
+/// node-down cleanup that flushes a peer's remote watchers from every target's
+/// list.
+pub(crate) fn drop_monitor(pred: impl Fn(&Watcher) -> bool) {
     let mut mons = MONITORS.lock().unwrap();
     for watchers in mons.values_mut() {
-        watchers.retain(|&(w, r)| !(w == me && r == mref));
+        watchers.retain(|w| !pred(w));
     }
+}
+
+// ---- pending remote monitors: the *sender* side ----------------------------
+// When `(monitor remote-pid)` runs, the target lives on a peer; the entry that
+// fires when the link dies (net-split = `:noconnection`) needs to be findable
+// here. PENDING_REMOTE is the dual of MONITORS — same shape, watched-from
+// instead of watched-by.
+
+/// Remember "this local watcher is monitoring `target_node:target_pid`",
+/// keyed by the peer node so net-split can find and fire it. Mirrors what
+/// `add_monitor` does for local watchers, in a separate table because the
+/// failure mode (link drop) is independent of any local target's death.
+pub(crate) fn record_pending_remote(
+    target_node: Symbol,
+    target_pid: u64,
+    watcher_pid: u64,
+    mref: u64,
+) {
+    PENDING_REMOTE
+        .lock()
+        .unwrap()
+        .entry(target_node)
+        .or_default()
+        .push(PendingRemote {
+            watcher_pid,
+            mref,
+            target_node,
+            target_pid,
+        });
+}
+
+/// Forget a pending remote monitor — the sender-side counterpart to
+/// `drop_monitor`, called from `dist::demonitor_remote`. Identified by
+/// (target_node, watcher_pid, mref) — the same triple `record_pending_remote`
+/// stored.
+pub(crate) fn drop_pending_remote(target_node: Symbol, watcher_pid: u64, mref: u64) {
+    let mut t = PENDING_REMOTE.lock().unwrap();
+    if let Some(v) = t.get_mut(&target_node) {
+        v.retain(|p| !(p.watcher_pid == watcher_pid && p.mref == mref));
+    }
+}
+
+/// `(demonitor mref)` on a ref the local table didn't claim: scan
+/// `PENDING_REMOTE` for entries matching `(self_pid, mref)`, dispatch one
+/// `Demonitor` frame per unique peer holding such an entry, and prune the
+/// local pending side. The fan-out happens here (not in the builtin) so the
+/// peer-set discovery and `drop_pending_remote` cleanup stay co-located.
+pub(crate) fn demonitor_remote_fanout(mref: u64) {
+    let me = self_pid();
+    let peers: Vec<Symbol> = {
+        let table = PENDING_REMOTE.lock().unwrap();
+        table
+            .iter()
+            .filter(|(_, ps)| ps.iter().any(|p| p.watcher_pid == me && p.mref == mref))
+            .map(|(node, _)| *node)
+            .collect()
+    };
+    for node in peers {
+        crate::dist::demonitor_remote(node, me, mref);
+    }
+}
+
+/// The link to `node` just died. Drop **two** sets of monitors:
+///   1. **Pending remote**: monitors *we* asked the peer to keep for us. Each
+///      fires `[:down mref pid :noconnection]` to the local watcher (Erlang
+///      semantics on net-split).
+///   2. **Inbound remote**: watchers the peer registered on our local pids.
+///      No notification — the peer is gone — but the entries would otherwise
+///      leak and a future reconnect would still try to deliver to a fresh
+///      generation of that peer.
+pub(crate) fn handle_node_down(node: Symbol) {
+    let pendings = PENDING_REMOTE.lock().unwrap().remove(&node).unwrap_or_default();
+    for p in pendings {
+        deliver(
+            p.watcher_pid,
+            down_message(
+                Message::Pid {
+                    node: p.target_node,
+                    id: p.target_pid,
+                },
+                p.mref,
+                Message::Keyword(value::intern("noconnection")),
+            ),
+        );
+    }
+    drop_monitor(|w| matches!(*w, Watcher::Remote { node: n, .. } if n == node));
+}
+
+/// Fire `:noconnection` to one watcher (the link isn't up, so we can't ask
+/// the peer to monitor for us). Shared with `dist::monitor_remote`. Uses the
+/// same `down_message` shape as a real DOWN so the watcher's `receive` clause
+/// doesn't have to special-case anything.
+pub(crate) fn fire_noconnection(target_node: Symbol, target_pid: u64, watcher_pid: u64, mref: u64) {
+    deliver(
+        watcher_pid,
+        down_message(
+            Message::Pid {
+                node: target_node,
+                id: target_pid,
+            },
+            mref,
+            Message::Keyword(value::intern("noconnection")),
+        ),
+    );
 }
 
 /// Push a ready process onto the run queue and wake a worker.

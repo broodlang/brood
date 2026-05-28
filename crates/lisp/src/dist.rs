@@ -153,6 +153,73 @@ pub(crate) fn register(name: Symbol, id: u64) {
     NAMES.write().unwrap().insert(name, id);
 }
 
+/// `(whereis name)` — the local pid registered under `name`, or `None`. Lets
+/// callers test for an existing registration before re-`spawn`ing a server
+/// they're about to register (idempotent bootstrap; used by `remote-spawn`).
+pub(crate) fn whereis(name: Symbol) -> Option<u64> {
+    NAMES.read().unwrap().get(&name).copied()
+}
+
+/// `(monitor (Pid remote_node remote_pid))` from the cross-node path: ship a
+/// `Frame::Monitor` to the peer and record the pending remote watcher locally
+/// (so net-split can fire `:noconnection` to the watcher even though the
+/// monitor target lives elsewhere). If the peer link isn't up, deliver
+/// `:noconnection` immediately — same shape an immediately-dead local target
+/// gets (`:noproc` from `add_monitor`), just a different reason.
+pub(crate) fn monitor_remote(
+    target_node: Symbol,
+    target_pid: u64,
+    watcher_pid: u64,
+    mref: u64,
+) {
+    let connected = NODES.read().unwrap().contains_key(&target_node);
+    if !connected {
+        process::fire_noconnection(target_node, target_pid, watcher_pid, mref);
+        return;
+    }
+    process::record_pending_remote(target_node, target_pid, watcher_pid, mref);
+    let me = local_node();
+    let bytes: Arc<[u8]> = match frame_bytes(&Frame::Monitor {
+        from_node: me,
+        watcher_pid,
+        target: target_pid,
+        mref,
+    }) {
+        Ok(b) => Arc::from(b),
+        Err(e) => {
+            eprintln!(
+                "dist: cannot encode Monitor for {}: {}",
+                value::symbol_name(target_node),
+                e
+            );
+            return;
+        }
+    };
+    if let Some(conn) = NODES.read().unwrap().get(&target_node) {
+        let _ = conn.tx.send(bytes);
+    }
+}
+
+/// `(demonitor mref)` for a monitor that was set up against a remote pid:
+/// ship a `Frame::Demonitor` and forget the pending entry locally. Best
+/// effort, like the local demonitor — the peer drops the matching watcher
+/// from its `MONITORS` table.
+pub(crate) fn demonitor_remote(target_node: Symbol, watcher_pid: u64, mref: u64) {
+    process::drop_pending_remote(target_node, watcher_pid, mref);
+    let me = local_node();
+    let bytes: Arc<[u8]> = match frame_bytes(&Frame::Demonitor {
+        from_node: me,
+        watcher_pid,
+        mref,
+    }) {
+        Ok(b) => Arc::from(b),
+        Err(_) => return, // best-effort
+    };
+    if let Some(conn) = NODES.read().unwrap().get(&target_node) {
+        let _ = conn.tx.send(bytes);
+    }
+}
+
 /// `(monitor-node name pid)` — deliver `[:nodedown name]` to `pid` when a link to
 /// `name` goes down. Persistent (fires on each down) until the process exits.
 /// If `name` isn't us and there's no current link, the node is effectively
@@ -288,56 +355,154 @@ pub(crate) fn connect(spec: &str) -> io::Result<Symbol> {
     }
     let mut stream = TcpStream::connect(addr)?;
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
-    // Client speaks first: send our Hello, then read the peer's.
-    let (name, cookie) = {
-        let n = NODE.read().unwrap();
-        (n.name, n.cookie.clone())
-    };
-    write_frame(&mut stream, &Frame::Hello { node: name, cookie })?;
-    let peer = match read_frame(&mut stream)? {
-        Frame::Hello { node, cookie } => {
-            check_cookie(&cookie)?;
-            node
-        }
-        _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "expected Hello")),
-    };
+    let peer = handshake(&mut stream, Role::Initiator)?;
     stream.set_read_timeout(None)?; // steady-state reader blocks until the next message
     establish(peer, stream, Role::Initiator);
     Ok(peer)
 }
 
-/// Server side of the handshake: read the peer's Hello, authenticate, reply with
-/// ours, then start the link threads.
+/// Server side of the handshake: drive the v2 exchange, then start the link
+/// threads. See [`handshake`] for the protocol.
 fn accept(mut stream: TcpStream) -> io::Result<()> {
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
-    let peer = match read_frame(&mut stream)? {
-        Frame::Hello { node, cookie } => {
-            check_cookie(&cookie)?;
-            node
-        }
-        _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "expected Hello")),
-    };
-    let (name, cookie) = {
-        let n = NODE.read().unwrap();
-        (n.name, n.cookie.clone())
-    };
-    write_frame(&mut stream, &Frame::Hello { node: name, cookie })?;
+    let peer = handshake(&mut stream, Role::Responder)?;
     stream.set_read_timeout(None)?; // steady-state reader blocks until the next message
     establish(peer, stream, Role::Responder);
     Ok(())
 }
 
-/// Compare a peer's presented cookie to ours (shared-secret equality). A
-/// placeholder for real auth (documented in `concurrency.md`).
-fn check_cookie(presented: &str) -> io::Result<()> {
-    if presented == NODE.read().unwrap().cookie {
-        Ok(())
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "node cookie mismatch",
-        ))
+/// The v2 authenticated handshake (ADR-034 v2). Both sides:
+///   1. Exchange a 4-byte magic+version prefix. A mismatch aborts before any
+///      frame parsing — old / non-brood peers fail loudly.
+///   2. Send a `Hello { node, nonce }` (each side a fresh 32-byte nonce).
+///      The initiator writes first; the responder reads, then writes its own.
+///   3. Compute `mac_local = HMAC-SHA256(cookie, peer_nonce || peer_name ||
+///      my_name)` and send it as `Auth { mac }`. Initiator first again.
+///   4. Read the peer's `Auth`; constant-time-verify against the expected MAC.
+///      Mismatch ⇒ `PermissionDenied`; the link never enters `NODES`.
+///
+/// The cookie is **never** on the wire — it's an HMAC key. A passive observer
+/// can replay neither the cookie nor a captured `Auth` (the nonce is fresh
+/// each handshake).
+fn handshake(stream: &mut TcpStream, role: Role) -> io::Result<Symbol> {
+    // Step 1: magic + version. Reject before any allocation if we don't speak
+    // the same dialect.
+    stream.write_all(&PROTOCOL_MAGIC)?;
+    let mut their_magic = [0u8; 4];
+    stream.read_exact(&mut their_magic)?;
+    if their_magic != PROTOCOL_MAGIC {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "protocol magic/version mismatch (theirs: {:02x?}, ours: {:02x?})",
+                their_magic, PROTOCOL_MAGIC
+            ),
+        ));
     }
+
+    // Step 2: Hellos with nonces.
+    let (my_name, cookie) = {
+        let n = NODE.read().unwrap();
+        (n.name, n.cookie.clone())
+    };
+    let my_nonce = fresh_nonce()?;
+    let their_hello = match role {
+        Role::Initiator => {
+            write_frame(stream, &Frame::Hello { node: my_name, nonce: my_nonce })?;
+            read_hello(stream)?
+        }
+        Role::Responder => {
+            let h = read_hello(stream)?;
+            write_frame(stream, &Frame::Hello { node: my_name, nonce: my_nonce })?;
+            h
+        }
+    };
+    let (peer_name, peer_nonce) = their_hello;
+
+    // Step 3 + 4: MAC the *peer's* nonce + the names; exchange and verify.
+    // Order (peer_name then my_name in the input) is symmetric — both sides
+    // include their own name last, so the two MACs cover identical-shaped
+    // bytes from opposite vantage points.
+    let my_mac = compute_mac(&cookie, &peer_nonce, peer_name, my_name);
+    let expected_peer_mac = compute_mac(&cookie, &my_nonce, my_name, peer_name);
+    let their_mac = match role {
+        Role::Initiator => {
+            write_frame(stream, &Frame::Auth { mac: my_mac })?;
+            read_auth(stream)?
+        }
+        Role::Responder => {
+            let m = read_auth(stream)?;
+            write_frame(stream, &Frame::Auth { mac: my_mac })?;
+            m
+        }
+    };
+    if !ct_eq(&their_mac, &expected_peer_mac) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "node handshake MAC mismatch (wrong cookie?)",
+        ));
+    }
+    Ok(peer_name)
+}
+
+fn read_hello(stream: &mut TcpStream) -> io::Result<(Symbol, [u8; NONCE_LEN])> {
+    match read_frame(stream)? {
+        Frame::Hello { node, nonce } => Ok((node, nonce)),
+        _ => Err(io::Error::new(io::ErrorKind::InvalidData, "expected Hello")),
+    }
+}
+
+fn read_auth(stream: &mut TcpStream) -> io::Result<[u8; MAC_LEN]> {
+    match read_frame(stream)? {
+        Frame::Auth { mac } => Ok(mac),
+        _ => Err(io::Error::new(io::ErrorKind::InvalidData, "expected Auth")),
+    }
+}
+
+/// `HMAC-SHA256(cookie, peer_nonce || peer_name || my_name)`. Inputs are
+/// length-tagged by their *byte position* in the input — the names are
+/// canonical (interned) UTF-8 strings, so the encoding is the same on both
+/// sides regardless of interner state.
+fn compute_mac(
+    cookie: &str,
+    peer_nonce: &[u8; NONCE_LEN],
+    peer_name: Symbol,
+    my_name: Symbol,
+) -> [u8; MAC_LEN] {
+    use hmac::Mac;
+    type HmacSha256 = hmac::Hmac<sha2::Sha256>;
+    let mut mac = HmacSha256::new_from_slice(cookie.as_bytes()).expect("HMAC key length is fine");
+    mac.update(peer_nonce);
+    mac.update(value::symbol_name(peer_name).as_bytes());
+    // A delimiter byte between the two names — without it, "ab" + "c" and
+    // "a" + "bc" would HMAC to the same value. NUL is not a legal symbol-name
+    // character (the reader rejects it), so it's safe as a separator.
+    mac.update(&[0]);
+    mac.update(value::symbol_name(my_name).as_bytes());
+    mac.finalize().into_bytes().into()
+}
+
+/// Constant-time comparison for the MAC check. `subtle`/`hmac::Mac::verify`
+/// would also do this, but `verify` consumes the HMAC state by computing the
+/// expected MAC at the same time — we already have the expected MAC, so do
+/// the byte compare ourselves.
+fn ct_eq(a: &[u8; MAC_LEN], b: &[u8; MAC_LEN]) -> bool {
+    let mut diff: u8 = 0;
+    for i in 0..MAC_LEN {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
+}
+
+/// 32 fresh bytes from the OS random pool. Each handshake gets its own pair
+/// of nonces, so a captured `Auth` MAC can't be replayed against a fresh
+/// handshake.
+fn fresh_nonce() -> io::Result<[u8; NONCE_LEN]> {
+    let mut n = [0u8; NONCE_LEN];
+    getrandom::fill(&mut n).map_err(|e| {
+        io::Error::other(format!("could not read OS RNG for handshake nonce: {e}"))
+    })?;
+    Ok(n)
 }
 
 /// Register the authenticated link and spawn its reader + writer threads —
@@ -422,7 +587,38 @@ fn establish(peer: Symbol, stream: TcpStream, role: Role) {
                 Frame::Ping => {
                     let _ = reader_tx.send(Arc::clone(&pong));
                 }
-                Frame::Pong | Frame::Hello { .. } => {}
+                // A peer asked to watch one of our local pids — re-use the
+                // shared `add_monitor` core with a `Watcher::Remote` so the
+                // alive-target / dead-target paths are exactly the local
+                // monitor's, just with a different delivery channel.
+                Frame::Monitor {
+                    from_node,
+                    watcher_pid,
+                    target,
+                    mref,
+                } => process::add_monitor(
+                    target,
+                    process::Watcher::Remote {
+                        node: from_node,
+                        pid: watcher_pid,
+                        mref,
+                    },
+                ),
+                // Peer dropped a remote monitor — same `drop_monitor` the
+                // local `demonitor` uses, with a predicate matching the
+                // Remote variant identity (node + pid + mref).
+                Frame::Demonitor {
+                    from_node,
+                    watcher_pid,
+                    mref,
+                } => process::drop_monitor(|w| {
+                    matches!(*w, process::Watcher::Remote { node, pid, mref: r }
+                                 if node == from_node && pid == watcher_pid && r == mref)
+                }),
+                // Handshake-only frames in steady state: a peer that
+                // re-sends one after the link is up is malformed but harmless
+                // — keep reading.
+                Frame::Pong | Frame::Hello { .. } | Frame::Auth { .. } => {}
             }
         }
         drop_link(peer, id);
@@ -447,7 +643,12 @@ fn drop_link(peer: Symbol, id: u64) {
     }
 }
 
-/// Deliver `[:nodedown name]` to every process that called `(monitor-node name)`.
+/// Deliver `[:nodedown name]` to every process that called `(monitor-node name)`,
+/// and fire any pid-monitors that crossed this link — pending remote monitors
+/// fire `:noconnection` to their local watchers, and inbound remote watchers
+/// the peer had registered are dropped (no point keeping entries that route
+/// to a vanished peer). All three sit behind one node-down trigger so a
+/// reconnect later starts from a clean slate.
 fn fire_nodedown(peer: Symbol) {
     let watchers = NODE_MONITORS.read().unwrap().get(&peer).cloned();
     if let Some(watchers) = watchers {
@@ -456,6 +657,7 @@ fn fire_nodedown(peer: Symbol) {
             process::deliver(w, msg.clone());
         }
     }
+    process::handle_node_down(peer);
 }
 
 /// An inbound `Send` from a peer: resolve the target locally and deliver.
@@ -514,8 +716,15 @@ fn heartbeat_loop() {
 // ----- wire frames -----------------------------------------------------------
 
 enum Frame {
-    /// Handshake: who I am + my cookie.
-    Hello { node: Symbol, cookie: String },
+    /// Handshake step 1 & 2: who I am + a fresh nonce I want you to MAC. The
+    /// cookie never travels — it's an HMAC key, not a credential. Both sides
+    /// send a `Hello` (initiator first, responder second); each computes its
+    /// `Auth` over the peer's nonce.
+    Hello { node: Symbol, nonce: [u8; NONCE_LEN] },
+    /// Handshake step 3 & 4: `HMAC-SHA256(cookie, peer_nonce || peer_name ||
+    /// my_name)` — proves possession of the cookie without disclosing it.
+    /// Mismatch on either side aborts before the link enters `NODES`.
+    Auth { mac: [u8; MAC_LEN] },
     /// Route `msg` to `target` on the receiving node.
     Send { target: Target, msg: Message },
     /// Liveness probe; the peer answers with `Pong`.
@@ -523,14 +732,36 @@ enum Frame {
     /// Reply to a `Ping`. (Receiving any frame refreshes liveness; these two carry
     /// no payload, just keep an idle link demonstrably alive.)
     Pong,
+    /// "Watch local pid `target` for me; deliver `[:down ref pid reason]` to
+    /// my `watcher_pid` (on this sender's `from_node`) when it dies." The
+    /// receiver routes through `process::add_monitor` with a
+    /// `Watcher::Remote`, reusing the local "alive? register; dead? fire
+    /// :noproc" logic — same code path, just a different watcher variant.
+    Monitor { from_node: Symbol, watcher_pid: u64, target: u64, mref: u64 },
+    /// Drop the matching remote watcher (best effort; identified by sender's
+    /// node + pid + mref). Goes through `process::drop_monitor`, the same
+    /// dropper local `demonitor` uses.
+    Demonitor { from_node: Symbol, watcher_pid: u64, mref: u64 },
 }
 
 const FRAME_HELLO: u8 = 0;
 const FRAME_SEND: u8 = 1;
 const FRAME_PING: u8 = 2;
 const FRAME_PONG: u8 = 3;
+const FRAME_MONITOR: u8 = 4;
+const FRAME_DEMONITOR: u8 = 5;
+const FRAME_AUTH: u8 = 6;
 const TARGET_PID: u8 = 0;
 const TARGET_NAME: u8 = 1;
+
+/// Protocol magic + version byte sent before any frame. `b"BRD"` lets a
+/// `tcpdump` reader recognise the protocol; the trailing version byte gates
+/// future wire-format changes — a v2 peer that sees anything else aborts
+/// before allocating buffers. The v1 protocol (plaintext cookie in Hello)
+/// has been retired: this is greenfield, so we don't preserve compatibility.
+const PROTOCOL_MAGIC: [u8; 4] = *b"BRD\x02";
+const NONCE_LEN: usize = 32;
+const MAC_LEN: usize = 32;
 
 /// Encode a frame with its `[u32 len][payload]` length prefix, ready to write.
 fn frame_bytes(frame: &Frame) -> io::Result<Vec<u8>> {
@@ -565,10 +796,14 @@ fn read_frame(r: &mut impl Read) -> io::Result<Frame> {
 
 fn encode_frame(w: &mut Vec<u8>, frame: &Frame) -> io::Result<()> {
     match frame {
-        Frame::Hello { node, cookie } => {
+        Frame::Hello { node, nonce } => {
             w.push(FRAME_HELLO);
             put_sym(w, *node);
-            put_str(w, cookie);
+            w.extend_from_slice(nonce);
+        }
+        Frame::Auth { mac } => {
+            w.push(FRAME_AUTH);
+            w.extend_from_slice(mac);
         }
         Frame::Send { target, msg } => {
             w.push(FRAME_SEND);
@@ -577,6 +812,28 @@ fn encode_frame(w: &mut Vec<u8>, frame: &Frame) -> io::Result<()> {
         }
         Frame::Ping => w.push(FRAME_PING),
         Frame::Pong => w.push(FRAME_PONG),
+        Frame::Monitor {
+            from_node,
+            watcher_pid,
+            target,
+            mref,
+        } => {
+            w.push(FRAME_MONITOR);
+            put_sym(w, *from_node);
+            w.extend_from_slice(&watcher_pid.to_be_bytes());
+            w.extend_from_slice(&target.to_be_bytes());
+            w.extend_from_slice(&mref.to_be_bytes());
+        }
+        Frame::Demonitor {
+            from_node,
+            watcher_pid,
+            mref,
+        } => {
+            w.push(FRAME_DEMONITOR);
+            put_sym(w, *from_node);
+            w.extend_from_slice(&watcher_pid.to_be_bytes());
+            w.extend_from_slice(&mref.to_be_bytes());
+        }
     }
     Ok(())
 }
@@ -585,7 +842,10 @@ fn decode_frame(r: &mut Cursor<Vec<u8>>) -> io::Result<Frame> {
     match get_u8(r)? {
         FRAME_HELLO => Ok(Frame::Hello {
             node: get_sym(r)?,
-            cookie: get_str(r)?,
+            nonce: get_fixed::<NONCE_LEN>(r)?,
+        }),
+        FRAME_AUTH => Ok(Frame::Auth {
+            mac: get_fixed::<MAC_LEN>(r)?,
         }),
         FRAME_SEND => Ok(Frame::Send {
             target: decode_target(r)?,
@@ -593,6 +853,17 @@ fn decode_frame(r: &mut Cursor<Vec<u8>>) -> io::Result<Frame> {
         }),
         FRAME_PING => Ok(Frame::Ping),
         FRAME_PONG => Ok(Frame::Pong),
+        FRAME_MONITOR => Ok(Frame::Monitor {
+            from_node: get_sym(r)?,
+            watcher_pid: get_u64(r)?,
+            target: get_u64(r)?,
+            mref: get_u64(r)?,
+        }),
+        FRAME_DEMONITOR => Ok(Frame::Demonitor {
+            from_node: get_sym(r)?,
+            watcher_pid: get_u64(r)?,
+            mref: get_u64(r)?,
+        }),
         t => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("unknown frame tag {t}"),
@@ -672,12 +943,17 @@ fn encode_msg(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
             w.push(M_KEYWORD);
             put_sym(w, *s);
         }
-        Message::List(items) => {
+        Message::List(items, pos) => {
             w.push(M_LIST);
             put_u32(w, items.len() as u32);
             for it in items {
                 encode_msg(w, it)?;
             }
+            // Optional source position trailer — one byte for presence, then
+            // line/col as u32 each when set. Trailing so a reader that didn't
+            // expect it can stop early on the count, but every encoder/decoder
+            // pair after this revision writes it. See `Message::List`'s docs.
+            put_opt_pos(w, *pos);
         }
         Message::Vector(items) => {
             w.push(M_VECTOR);
@@ -760,7 +1036,8 @@ fn decode_msg(r: &mut Cursor<Vec<u8>>) -> io::Result<Message> {
             for _ in 0..n {
                 items.push(decode_msg(r)?);
             }
-            Message::List(items)
+            let pos = get_opt_pos(r)?;
+            Message::List(items, pos)
         }
         M_VECTOR => {
             let n = get_u32(r)? as usize;
@@ -901,6 +1178,34 @@ fn get_opt_str(r: &mut Cursor<Vec<u8>>) -> io::Result<Option<String>> {
     }
 }
 
+/// `Option<Pos>` for the trailing source-position on `Message::List`. Same
+/// `0`/`1` presence tag as the other `put_opt_*` helpers; on `1` the body is
+/// two `u32`s (1-based line and column, as the reader records them).
+fn put_opt_pos(w: &mut Vec<u8>, p: Option<crate::error::Pos>) {
+    match p {
+        Some(p) => {
+            w.push(1);
+            put_u32(w, p.line);
+            put_u32(w, p.col);
+        }
+        None => w.push(0),
+    }
+}
+
+fn get_opt_pos(r: &mut Cursor<Vec<u8>>) -> io::Result<Option<crate::error::Pos>> {
+    match get_u8(r)? {
+        0 => Ok(None),
+        1 => Ok(Some(crate::error::Pos {
+            line: get_u32(r)?,
+            col: get_u32(r)?,
+        })),
+        t => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("bad Option<Pos> tag {t}"),
+        )),
+    }
+}
+
 /// Bytes left in the frame buffer. Used to bound allocations by what the frame
 /// could actually contain — a count/length field is attacker-controlled, but the
 /// buffer is already capped at [`MAX_FRAME`], so an element can't be smaller than
@@ -954,6 +1259,15 @@ fn get_str(r: &mut Cursor<Vec<u8>>) -> io::Result<String> {
     String::from_utf8(buf).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad utf8"))
 }
 
+/// Read a fixed-size byte array from the frame. Used by the handshake for the
+/// nonce + MAC fields (both 32 bytes). Errors cleanly on EOF — no allocation
+/// past `N` even on a malformed frame.
+fn get_fixed<const N: usize>(r: &mut Cursor<Vec<u8>>) -> io::Result<[u8; N]> {
+    let mut buf = [0u8; N];
+    r.read_exact(&mut buf)?;
+    Ok(buf)
+}
+
 /// Read a symbol name and re-intern it into *this* runtime's interner.
 fn get_sym(r: &mut Cursor<Vec<u8>>) -> io::Result<Symbol> {
     Ok(value::intern(&get_str(r)?))
@@ -971,17 +1285,51 @@ mod tests {
 
     #[test]
     fn hello_roundtrips() {
+        let nonce = [7u8; NONCE_LEN];
         let f = Frame::Hello {
             node: value::intern("alpha"),
-            cookie: "s3cret".to_string(),
+            nonce,
         };
         match read_full(&f) {
-            Frame::Hello { node, cookie } => {
+            Frame::Hello { node, nonce: n2 } => {
                 assert_eq!(value::symbol_name(node), "alpha");
-                assert_eq!(cookie, "s3cret");
+                assert_eq!(n2, nonce);
             }
             _ => panic!("wrong frame"),
         }
+    }
+
+    #[test]
+    fn auth_roundtrips() {
+        let mac = [0xabu8; MAC_LEN];
+        let f = Frame::Auth { mac };
+        match read_full(&f) {
+            Frame::Auth { mac: m2 } => assert_eq!(m2, mac),
+            _ => panic!("wrong frame"),
+        }
+    }
+
+    /// Each side's MAC is computed over the *peer's* nonce + (peer_name,
+    /// my_name); the verification on the other side flips the roles, so the
+    /// two MACs are equal precisely when both sides share the cookie. This
+    /// guards the symmetric design: a typo in `compute_mac`'s input ordering
+    /// would let one side authenticate while the other rejects.
+    #[test]
+    fn compute_mac_is_symmetric_under_role_flip() {
+        let cookie = "shared";
+        let nonce_a = [1u8; NONCE_LEN];
+        let nonce_b = [2u8; NONCE_LEN];
+        let a = value::intern("aa");
+        let b = value::intern("bb");
+        // A's MAC, sent to B (covers B's nonce + names with A's name last).
+        let mac_a = compute_mac(cookie, &nonce_b, b, a);
+        // B's expectation of A's MAC.
+        let mac_b_expects = compute_mac(cookie, &nonce_b, b, a);
+        assert_eq!(mac_a, mac_b_expects);
+        // A different cookie produces a different MAC (the integrity claim).
+        assert_ne!(mac_a, compute_mac("other", &nonce_b, b, a));
+        // A different peer nonce produces a different MAC (replay defence).
+        assert_ne!(mac_a, compute_mac(cookie, &[3u8; NONCE_LEN], b, a));
     }
 
     #[test]
@@ -1070,13 +1418,18 @@ mod tests {
             params: vec![value::intern("a"), value::intern("b")],
             optionals: vec![(value::intern("c"), Message::Int(10))],
             rest: Some(value::intern("xs")),
-            // (a body of `(+ a b c)` — just the *message* form of it)
-            body: vec![Message::List(vec![
-                Message::Sym(value::intern("+")),
-                Message::Sym(value::intern("a")),
-                Message::Sym(value::intern("b")),
-                Message::Sym(value::intern("c")),
-            ])],
+            // (a body of `(+ a b c)` — just the *message* form of it, with a
+            // source position so the round-trip exercises the optional `pos`
+            // trailer on `Message::List` too)
+            body: vec![Message::List(
+                vec![
+                    Message::Sym(value::intern("+")),
+                    Message::Sym(value::intern("a")),
+                    Message::Sym(value::intern("b")),
+                    Message::Sym(value::intern("c")),
+                ],
+                Some(crate::error::Pos { line: 7, col: 3 }),
+            )],
             doc: Some("add three".to_string()),
             captured: vec![(value::intern("seed"), Message::Int(42))],
         };
@@ -1096,6 +1449,15 @@ mod tests {
                 assert!(matches!(&c.optionals[0].1, Message::Int(10)));
                 assert_eq!(value::symbol_name(c.rest.unwrap()), "xs");
                 assert_eq!(c.body.len(), 1);
+                // The body form's source position survived the round-trip,
+                // so a remote diagnostic can point at the sender's line.
+                match &c.body[0] {
+                    Message::List(items, pos) => {
+                        assert_eq!(items.len(), 4);
+                        assert_eq!(*pos, Some(crate::error::Pos { line: 7, col: 3 }));
+                    }
+                    _ => panic!("body[0] should be Message::List"),
+                }
                 assert_eq!(c.doc.as_deref(), Some("add three"));
                 assert_eq!(c.captured.len(), 1);
                 assert!(matches!(&c.captured[0].1, Message::Int(42)));

@@ -68,9 +68,14 @@ two ways:
 
 ### Transport (off the scheduler)
 `node-start` binds a `TcpListener` and runs an acceptor thread. `connect` dials.
-Both perform a handshake — exchange a `Hello { node, cookie }` and compare the
-cookie (shared-secret equality; **not** real security yet, a placeholder for
-auth/TLS). On success each connection gets two plain OS threads:
+Both perform the v2 authenticated handshake (ADR-034 v2): a 4-byte
+magic+version prefix (`b"BRD\x02"`), then a `Hello { node, nonce }` exchange
+(each side a fresh 32-byte nonce), then an `Auth { mac }` exchange where each
+side sends `HMAC-SHA256(cookie, peer_nonce || peer_name || my_name)`. The
+cookie is **never on the wire** — it's an HMAC key, so an eavesdropper can't
+replay either it or a captured `Auth`. A mismatch on the magic, the MAC, or
+either Hello aborts before the link enters `NODES`. On success each connection
+gets two plain OS threads:
 
 - a **writer** draining an `mpsc` channel onto the socket;
 - a **reader** decoding inbound frames and handing messages to `process::deliver`.
@@ -91,27 +96,48 @@ independent symbol interners. (In-process messages keep the interned id.)
   interner are process-global, so a "node" *is* the OS process. Two nodes = two
   `brood` processes (typically over loopback). Testing reflects this: see the
   two-process end-to-end test in `crates/cli/tests/distribution.rs`.
-- **Deferred** (later slices): remote `spawn` (the round-trip `[:run f x reply]`
-  pattern already gets you "send a function, run it there, send the result back"
-  — see `lambda_ships_across_nodes_and_runs`; a dedicated `remote-spawn` is a
-  surface convenience over that), distributed process monitors/links, net-split
-  handling, and the versioned/authenticated handshake (§3 below). Connection
-  de-dup, node-down detection, and a generation-checked teardown path landed in
-  **[slice 2](#slice-2--connection-lifecycle--liveness-built)**.
-- **Built since slice 1:** the closure-as-data path of ADR-033 — `(send target
-  fn)` and the `[:run f x …]` pattern now work cross-node. The wire codec's
-  `M_CLOSURE` encodes every `ClosureMsg` field (name, params, optionals + their
-  default *forms*, rest, body forms, doc, captured free locals); the receiver's
-  `closure_from_message` rebuilds the closure against its own prelude, so free
-  globals (`*`, `map`, the user's `(defn …)`s) re-resolve there ("the module
-  must be loaded on both nodes").
+- **Built since slice 1:**
+  - **Closure-as-data path** (ADR-033) — `(send target fn)` and the `[:run f x
+    …]` pattern work cross-node. The wire codec's `M_CLOSURE` encodes every
+    `ClosureMsg` field (name, params, optionals + default *forms*, rest, body
+    forms, doc, captured free locals); the receiver's `closure_from_message`
+    rebuilds against its own prelude, so free globals re-resolve there.
+  - **`(remote-spawn node expr)`** macro (`std/prelude.blsp`) — the surface
+    convenience over the `[:run …]` pattern; ships the closure to a
+    `:remote-spawn` server on `node` (lazily started via `(start-remote-spawn)`).
+    See `remote_spawn_runs_a_thunk_on_a_peer`.
+  - **Source positions across the wire** — `Message::List` carries an optional
+    trailing `Pos`; on rebuild the receiver's `set_form_pos` re-stamps it, so
+    `(form-pos …)` and the eval loop's `or_form_pos` work on remote-shipped
+    code. See `source_positions_survive_a_cross_node_send`.
+  - **Distributed pid monitors** — `(monitor remote-pid)` ships a
+    `Frame::Monitor` to the peer, which routes through the same shared
+    `process::add_monitor` core the local monitor uses (one `Watcher` enum,
+    one `MONITORS` table). On the watched process's death the peer fires
+    `[:down …]` as an ordinary `send` to the remote watcher. Net-split fires
+    `[:down mref pid :noconnection]` via the sender-side `PENDING_REMOTE`
+    table and `handle_node_down`. See `cross_node_pid_monitor_fires_down` and
+    `remote_monitor_fires_noconnection_on_node_down`.
+  - **Auto-reconnect** — `(ensure-link "name@host:port")` (Brood policy in
+    `std/prelude.blsp`) maintains a peer link across restarts: synchronous
+    initial `connect`, then a small supervisor that `monitor-node`s the peer
+    and retries `connect` with a 200ms backoff on every `[:nodedown …]` until
+    success. See `ensure_link_reconnects_across_a_node_restart`.
+  - **Handshake v2** (ADR-034 v2) — magic+version prefix, nonce-based
+    `Hello`s, HMAC-SHA256 `Auth`. Cookie never on the wire. See
+    `non_brood_peer_is_rejected_at_magic_prefix`, `mismatched_cookie_is_rejected`,
+    and the `dist::tests::compute_mac_is_symmetric_under_role_flip` unit test.
+- **Still deferred** (later): supervision trees / `link` / restart strategies
+  (true Erlang OTP-style; today we have `monitor` only — `link` would couple
+  failure both ways), and TLS as an optional substrate under the HMAC layer
+  for over-the-internet links.
 
 ## Slice 2 — connection lifecycle + liveness (built)
 
 Slice 1 was a working trusted-peer link; slice 2 makes it sturdy enough to leave
 running. **De-dup + tie-break**, **node-down detection**, and the
-**generation-checked teardown** they rest on are now implemented. The handshake-
-v2 work (versioning + challenge–response) is **still deferred** (§3 below).
+**generation-checked teardown** they rest on are now implemented. Handshake v2
+(versioning + HMAC challenge–response) landed too — see §3 below.
 
 ### 1. Duplicate / crossing connections (de-dup + tie-break) ✅
 

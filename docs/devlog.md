@@ -2926,3 +2926,248 @@ sender. The natural follow-up is to thread `(line, col)` through `ClosureMsg`
 (eight bytes per pair) so positions cross the wire; the receiver-side
 `heap.set_form_pos` API already accepts them. Additive; deferred until a
 real diagnostic-quality complaint surfaces.
+
+
+---
+
+## 2026-05-28 — Distribution slice 3: finish the deferred list
+
+**Goal.** Land the remaining distribution items from ADR-034's deferred list
+in a single push: a `remote-spawn` surface, source positions across the
+wire, distributed pid monitors with net-split semantics, auto-reconnect on
+node-down, and a real authenticated handshake (v2). Constraint from the
+user: don't duplicate the local vs. remote code paths.
+
+**Built.**
+
+### 1. `remote-spawn` (Brood)
+
+`std/prelude.blsp` gains `(remote-spawn node expr)`, a thin macro that
+`(send {:name :remote-spawn :node node} [:run (fn () expr)])`. The
+receiver-side `:remote-spawn` server (also in the prelude) accepts `[:run
+thunk]` and `(spawn (thunk))`s it locally. Users opt the receiver in once
+via `(start-remote-spawn)` after `node-start`. The closure crosses as
+ADR-033 data — free locals ride along, free globals re-resolve. Surface
+convenience over the working `[:run f x reply]` pattern.
+
+A new `whereis` Rust primitive backs the idempotent registration check —
+one-line lookup in the existing `NAMES` table.
+
+### 2. Source positions across the wire
+
+`Message::List(Vec<Message>)` → `Message::List(Vec<Message>, Option<Pos>)`.
+`to_message` reads `heap.form_pos`; `from_message` re-stamps via
+`heap.set_form_pos`. The wire codec adds a 1-byte presence tag + (line,
+col) as two `u32`s when set. A `put_opt_pos` / `get_opt_pos` pair mirrors
+the existing `put_opt_sym` / `put_opt_str` helpers. Verified end-to-end
+by `source_positions_survive_a_cross_node_send`: a closure containing a
+quoted list literal `'(positioned-marker)` ships to a peer, the peer's
+`(form-pos …)` returns the sender's `[line col]`. Closes the
+"closure-body-position" gap the previous devlog flagged.
+
+### 3. Distributed pid monitors — *one* MONITORS table
+
+`process::MONITORS` is now `HashMap<u64, Vec<Watcher>>` where `Watcher` is
+`Local{pid, mref}` or `Remote{node, pid, mref}`. The local `monitor`
+builtin calls `add_monitor(target, Watcher::Local{…})`; the dist-side
+`Frame::Monitor` handler calls the **same** `add_monitor(target,
+Watcher::Remote{…})`. Same alive/dead branch, same fast-path
+`:noproc`, same fan-out from `deregister`. `fire_down` dispatches on the
+variant: `deliver` for `Local`, `dist::route` for `Remote` — and the
+remote case sends an **ordinary `[:down mref pid reason]` message** to the
+peer's pid, so the wire-format `[:down …]` is identical to what an
+in-process watcher sees.
+
+Net-split: a sender-side `PENDING_REMOTE: HashMap<Symbol, Vec<…>>` table
+remembers "what remote pids am I watching, keyed by peer node". On
+`fire_nodedown`, `handle_node_down` flushes the bin and delivers `[:down
+mref pid :noconnection]` to each local watcher — matching Erlang
+semantics. The peer's stale `Remote` entries in its `MONITORS` table are
+dropped by the same call via `drop_monitor` with a `Watcher::Remote
+{ node: dying }` predicate.
+
+`Frame::Monitor` + `Frame::Demonitor` are the only new frame types — both
+trivial (sender's node + pid + mref). The receiver's frame dispatch
+threads each directly into `process::add_monitor` / `process::drop_monitor`,
+no duplicated logic.
+
+### 4. Auto-reconnect — Brood policy
+
+`(ensure-link "name@host:port")` in the prelude. Pure policy over the
+existing `connect` + `monitor-node` mechanism — no Rust changes. Pattern:
+
+```
+(ensure-link addr) → spawn a supervisor that:
+  - (connect addr) synchronously once (any error swallowed),
+  - (monitor-node peer) — persistent, fires on each transition to down,
+  - loop: receive [:nodedown peer] → sleep 200ms → (try connect) →
+          retry connect until it succeeds (monitor-node only fires on
+          transitions, so we drive the retry off connect's own
+          success/failure), then back to receive.
+```
+
+Caller gets the supervisor pid; sending it `:stop` shuts the loop down.
+Verified by `ensure_link_reconnects_across_a_node_restart`: A1 is killed,
+A2 is brought up on the same port + cookie, the client's
+`(send {:name :probe :node :a} …)` round-trip works the second time too.
+
+### 5. Handshake v2 — HMAC challenge-response
+
+ADR-034 §3 is now built. Wire format:
+
+- **4-byte magic + version prefix** `b"BRD\x02"` written/read by both sides
+  before any frame. A non-brood peer (or wrong version) aborts here with
+  `InvalidData` before any frame parsing — guards against accidental wire
+  compatibility and gives a clean diagnostic.
+- **`Hello { node, nonce: [u8; 32] }`** replaces the old `Hello { node,
+  cookie }`. Each side sends a fresh 32-byte OS-RNG nonce; the **cookie
+  never travels**.
+- **`Auth { mac: [u8; 32] }`** carries `HMAC-SHA256(cookie, peer_nonce ||
+  peer_name || 0x00 || my_name)`. Each side verifies the peer's MAC
+  constant-time (`ct_eq`); a mismatch is `PermissionDenied` and the link
+  never enters `NODES`. Replay defence is the per-handshake nonces.
+
+The Rust crates `hmac` + `sha2` (RustCrypto) plus `getrandom` (OS RNG)
+are added — exactly the "vetted substrate" exception to ADR-005 that
+crypto is the textbook case for. Wire format breaks v1; this is
+greenfield, so we don't preserve compatibility.
+
+`docs/decisions.md` (ADR-034 §Scope) and `docs/distribution.md` updated
+end-to-end to reflect the new shape; the §3 "still deferred" hedge is
+gone. What remains: Erlang OTP-style **supervision** (`link` + restart
+strategies, today's monitor is unidirectional) and optional **TLS** under
+the HMAC layer for over-the-internet traffic — both additive.
+
+**Tests.**
+
+- 2 new unit codec tests in `crates/lisp/src/dist.rs`:
+  `auth_roundtrips`, `compute_mac_is_symmetric_under_role_flip`. The
+  closure round-trip test now also asserts the body form's `Pos` survives.
+- 5 new end-to-end tests in `crates/cli/tests/distribution.rs`:
+  `remote_spawn_runs_a_thunk_on_a_peer`,
+  `source_positions_survive_a_cross_node_send`,
+  `cross_node_pid_monitor_fires_down`,
+  `remote_monitor_fires_noconnection_on_node_down`,
+  `ensure_link_reconnects_across_a_node_restart`,
+  `non_brood_peer_is_rejected_at_magic_prefix`.
+
+**Verified.**
+- `cargo test`: every workspace suite green. Distribution integration
+  suite: **13 tests** (was 6).
+- `nest test`: **441 / 441 in-language tests** pass.
+- `cargo clippy --all-targets`: 2 warnings, both pre-existing
+  (`dist.rs:497`, `process.rs:549`).
+
+**Status of distribution.** Slices 1 + 2 + this third increment cover
+everything ADR-034 originally deferred. Distribution in
+`docs/roadmap.md` ticked ✅ at the M4 line. Remaining work is supervision
+trees and TLS — both additive over a now-complete authenticated, monitored,
+auto-reconnecting, closure-shipping link.
+
+---
+
+## 2026-05-28 — Style: lists for code, vectors for data
+
+**Trigger.** External code-style review of `examples/life.blsp` flagged two
+inconsistencies. (1) `for` / `doseq` used Clojure-style vector binding forms
+while `let` used lists — same language, two conventions. (2) The reader
+misparsed `(defn neighbours ([x y]) …)` as a multi-clause wrapper. The form
+is correct per ADR-010 — the outer `(…)` *is* the param list — but the visual
+collision with multi-clause `(defn f ((p) body))` is real cognitive load
+every time. A "consistent but misreadable" form is still a wart; not waved
+away.
+
+**Decision.** Two style rules, documented in
+[brood-for-claude.md](brood-for-claude.md) §"Style — lists for code, vectors
+for data" (ships with the language via `%builtin-doc` and `nest new`):
+
+1. Code uses `( )`; vectors `[ ]` are for tuple values, sequence literals,
+   and *patterns* against tuple values inside `match` / `let` / `receive`
+   heads. Binding forms (`let`, `for`, `doseq`, `when-let`, `if-let`) are
+   lists. Vectors remain accepted at binding sites for leniency (still
+   tested in `dynamic_test.blsp:96`).
+2. Don't tuple-destructure in a single-clause **top-level `defn`** param
+   list — name the param and unpack with `let` in the body. Multi-clause
+   `defn` pattern dispatch (lists in clause heads) and tuple-destructured
+   params on anonymous `fn` in higher-order context (`(map (fn ([k v]) …) …)`)
+   remain idiomatic — the surrounding `(map …)` makes the shape unambiguous
+   and the alternative is a noisy extra `let`.
+
+Both rules are about *idiom*, not the language — every form still parses
+both ways. The macro side is one-line-safe: `for--build` already normalises
+its bindings via `(map identity binds)`, so list and vector forms produce
+identical expansions.
+
+**Applied.**
+- `std/prelude.blsp`: `for` and `doseq` docstrings and leading comments now
+  show list bindings, with an ADR-010 note that vector-acceptance remains a
+  leniency.
+- `tests/{sequence,hatch,pids,concurrency}_test.blsp`: all `let [ … ]`,
+  `for [ … ]`, `doseq [ … ]` converted to `( … )` (~30 sites). Tests that
+  *specifically exercise* the vector-form leniency
+  (`dynamic_test.blsp:96`, `pattern_matching_test.blsp:324`+,
+  `introspection_test.blsp:21`) are left alone.
+- `examples/life.blsp`: `neighbours` rewritten to name its param and unpack
+  via `let`. Inner `(fn ([dx dy]) …)` kept (rule-2 exception for HOF
+  context).
+- `docs/language.md`: idiom note added to the `(defn area ([x y]) …)`
+  example pointing at the style section.
+
+**Not language change.** No ADR — this is idiom downstream of ADR-010,
+not a new design decision. No grammar / parser / type-checker change. No
+new macros. Tests not re-run in this session (`crates/lisp/src/dist.rs` was
+mid-edit and not compiling); the changes are mechanical and safe pending a
+green suite next time the workspace builds.
+
+**Memory.** Saved as feedback for future sessions —
+`memory/lists-for-code.md`.
+
+---
+
+## 2026-05-28 — MCP server design + introspect layer extracted
+
+**Goal.** Stake out a per-project Model Context Protocol surface (the
+agent-side counterpart to the LSP) and do the safe prep work so the
+implementation pass that follows is mechanical.
+
+**Decisions taken.** [ADR-036](decisions.md#adr-036--nest-mcp-a-per-project-model-context-protocol-server-tools-surface-in-brood)
+records the shape: a `nest mcp` subcommand (ADR-028 — `nest` is the project
+tool), strictly per-project (errors outside a `project.blsp`), one long-lived
+`Interp` per session (hot reload, ADR-013, is the headline behaviour), the
+tool *surface* declared in Brood (ADR-006 — `std/mcp.blsp` lists eight initial
+tools: `eval`, `load`, `lookup`, `macroexpand`, `run-tests`, `check`, `format`,
+`processes`; a project's own `mcp.blsp` can extend the registry), JSON-RPC over
+stdio with no async runtime (same calculus as ADR-025 choosing `lsp-server`
+over `tower-lsp` — `Heap` is `!Sync`), and `nest new` scaffolds `.mcp.json` so
+a fresh project is ready for agent-assisted dev from the first commit.
+[`docs/mcp.md`](mcp.md) holds the full plan, mirroring `docs/lsp.md`.
+
+**Prep landed.** The load-bearing structural change — extracting the shared
+introspection surface so LSP and the future MCP dispatcher can't drift on
+"what `map`'s signature is" — is in place:
+
+- `crates/lsp/src/introspect.rs` → `crates/lisp/src/introspect.rs` (now
+  `brood::introspect`, exported from the lib alongside `core` / `eval` /
+  `syntax` / `types`).
+- LSP `use crate::introspect;` flipped to `use brood::introspect;` across
+  `completion.rs`, `hover.rs`, `signature.rs`. The local `mod introspect;`
+  in `crates/lsp/src/main.rs` is gone.
+- Behaviour-identical: the 4 introspect tests now live in the lib, and all
+  40 LSP tests still pass.
+
+**What remains** (in implementation order):
+1. **Widen `brood::introspect`** with the operations the MCP tools need —
+   `source_location`, `macroexpand_to_string`, `check_project`, `run_tests`,
+   `format_source`, `eval_in_session` — each total (errors become typed
+   fields) and LOCAL-clean (checkpoint/reset around every `eval_str`).
+2. **`crates/nest/src/mcp.rs`** — the sync JSON-RPC loop, the tool registry
+   loaded from `(mcp-tools)`, and dispatch into Brood handlers.
+3. **`std/mcp.blsp`** — the eight initial tools as `defn`s + the registry
+   shape projects can extend.
+4. **`nest new`** scaffolds `foo/.mcp.json` pointing at `nest mcp`.
+5. Tier-1 niceties: `prompts/get` for `brood-task`, project-defined tool
+   discovery, then the Tier-2 progress / sandbox work.
+
+**Verified.** `cargo build` clean; `cargo test -p brood --lib introspect`
+4/4; `cargo test -p brood-lsp` 40/40. The pre-existing dead-code warning
+on `types/check.rs:101` (`aliases` field) is untouched.

@@ -1,12 +1,22 @@
-//! Introspection queries answered by the server's `Interp`. The server holds one
-//! interpreter loaded with the prelude + builtins; it does **not** evaluate the
-//! open document (see `docs/lsp.md`), so these surface the *language's* globals —
-//! completion candidates, and the arglist/docstring of a prelude or builtin name
-//! under the cursor. They run by `eval`ing the introspection primitives
-//! (`global-names` / `arglist` / `doc`, ADR-025), never user code.
+//! Introspection queries answered by a project `Interp`. Asks the *language's*
+//! globals (prelude + builtins + anything the project has loaded) — completion
+//! candidates, the arglist + docstring of a name under the cursor, etc. They
+//! run by `eval`ing the introspection primitives (`global-names` / `arglist` /
+//! `doc`, ADR-025), never user buffer text.
+//!
+//! Two clients consume this: `brood-lsp` (hover/completion/signature, never
+//! evaluates a buffer — only these queries) and the planned `nest mcp`
+//! (the agent-side counterpart, ADR-036 / `docs/mcp.md`). Keeping the surface
+//! here ensures the two cannot drift on what `map`'s signature is.
+//!
+//! **Contract for every operation in this module:**
+//!  1. **Total** — failures become typed-`None`/empty results, never panics.
+//!  2. **LOCAL-clean** — reclaim allocations with `Heap::checkpoint` /
+//!     `reset_local_to` before returning. A long-running tooling session must
+//!     not leak a fresh list per query.
 
-use brood::core::value::{self, Value};
-use brood::Interp;
+use crate::core::value::{self, Value};
+use crate::Interp;
 
 /// Every global the interpreter knows (prelude + builtins), sorted by spelling
 /// (`global-names` sorts) — the completion candidate pool.
@@ -43,7 +53,7 @@ pub fn global_names(interp: &mut Interp) -> Vec<String> {
 /// the expression. Returns `(None, None)` when `name` is unbound (eval errors)
 /// or names something without an arglist/doc.
 ///
-/// [`is_delimiter`]: brood::syntax::atom::is_delimiter
+/// [`is_delimiter`]: crate::syntax::atom::is_delimiter
 pub fn signature(interp: &mut Interp, name: &str) -> (Option<String>, Option<String>) {
     // As in `global_names`: reclaim the LOCAL allocations this eval leaves behind
     // once the signature/doc have been copied into owned `String`s.

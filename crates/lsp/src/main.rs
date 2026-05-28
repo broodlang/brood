@@ -48,7 +48,6 @@ mod definition;
 mod defs;
 mod diagnostics;
 mod hover;
-mod introspect;
 mod line_index;
 mod signature;
 mod symbols;

@@ -19,25 +19,25 @@
   ; reply old, set new
 
   (test "a cast threads new state; gen-call reads it synchronously"
-    (let [c (hatch counter 0)] (! c :inc) (! c [:add 10]) (assert= (gen-call c :value) 11)))
+    (let (c (hatch counter 0)) (! c :inc) (! c [:add 10]) (assert= (gen-call c :value) 11)))
 
   (test "a no-op cast leaves state unchanged"
-    (let [c (hatch counter 5)] (! c :ping) (assert= (gen-call c :value) 5)))
+    (let (c (hatch counter 5)) (! c :ping) (assert= (gen-call c :value) 5)))
 
   (test "a call can both reply and update state"
-    (let [c (hatch counter 7)]
+    (let (c (hatch counter 7))
       (assert= (gen-call c [:set 100]) 7)
       ; replies the OLD value
       (assert= (gen-call c :value) 100)))
   ; and the new state took effect
 
   (test "casts are ordered, and a later call observes all of them"
-    (let [c (hatch counter 0)] (! c :inc) (! c :inc) (! c :inc) (assert= (gen-call c :value) 3))))
+    (let (c (hatch counter 0)) (! c :inc) (! c :inc) (! c :inc) (assert= (gen-call c :value) 3))))
 
 (describe "hatch: sleep"
   :isolated
   (test "sleep waits roughly the requested time"
-    (let [t (now)] (sleep 30) (is (>= (- (now) t) 25))))
+    (let (t (now)) (sleep 30) (is (>= (- (now) t) 25))))
   ; allow scheduler slack
   (test "sleep does not consume queued messages"
     (send (self) :keep)
@@ -49,7 +49,7 @@
   (defprocess echo (state) (call [:double x] [(* x 2) state]))
 
   (test "two gen-calls to two servers get their own replies"
-    (let [a (hatch echo nil) b (hatch echo nil)]
+    (let (a (hatch echo nil) b (hatch echo nil))
       ;; refs tag each call, so interleaved replies can't be confused
       (assert= (gen-call a [:double 3]) 6)
       (assert= (gen-call b [:double 21]) 42))))

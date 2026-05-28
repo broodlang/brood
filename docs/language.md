@@ -395,6 +395,15 @@ Parameter lists stay **lists** (ADR-010), so a single tuple parameter must be
 wrapped: `(defn g ([x y]) …)` is one 2-tuple param, while `(defn g (x y) …)` is
 two params. Pattern destructuring of `&optional` slots is not supported yet.
 
+**Idiom note.** The form `(defn area ([x y]) …)` is supported but **not
+idiomatic** — it visually collides with multi-clause `(defn f ((p) body))`,
+where the outer `(…)` wraps a clause. Prefer naming the param and unpacking
+with `let`: `(defn area (p) (let ([x y] p) (* x y)))`. Multi-clause `defn`
+pattern dispatch and tuple-destructured params on anonymous `fn` in
+higher-order context (`(map (fn ([k v]) …) …)`) remain idiomatic. See
+[brood-for-claude.md](brood-for-claude.md) §"Style — lists for code, vectors
+for data" for the full rule.
+
 ## Errors
 
 Raise with `throw` (any value) or `error` (a formatted message), and handle with

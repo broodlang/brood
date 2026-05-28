@@ -262,12 +262,12 @@ not a known body form (defaults to call-style — every arg breaks)."
   ;; default list break so they survive.
   (let (one (single-line n))
     (cond
-      (and one (<= (+ indent (string-length one)) *format-width*))
-        one
-      (and (= (node-kind n) :map) (not (any-comment? (node-children n))))
-        (render--pair-break (node-children n) indent "{" "}")
-      else
-        (render--break (node-children n) indent open close))))
+      (and one (<= (+ indent (string-length one)) *format-width*)) one
+      (and (= (node-kind n) :map) (not (any-comment? (node-children n)))) (render--pair-break (node-children n)
+                                                                            indent
+                                                                            "{"
+                                                                            "}")
+      else (render--break (node-children n) indent open close))))
 
 (defn render--break (kids indent open close)
   ;; Multi-line list emit. The output is:
@@ -370,8 +370,7 @@ not a known body form (defaults to call-style — every arg breaks)."
 
 (defn render--pair-break (kids indent open close)
   (let (forms (filter (fn (c) (not (trivia? c))) (vec->list kids)) pair-ind (inc indent))
-    (if (nil? forms) (str open close)
-      (str open (render--pair-build forms pair-ind "") close))))
+    (if (nil? forms) (str open close) (str open (render--pair-build forms pair-ind "") close))))
 
 (defn render--pair-build (forms pair-ind acc)
   ;; Emit one pair per line. The first pair has no leading newline (it sits
@@ -438,6 +437,22 @@ not a known body form (defaults to call-style — every arg breaks)."
 (defn kids--next-form (kids i n)
   (cond (= i n) n (trivia? (vector-ref kids i)) (kids--next-form kids (inc i) n) else i))
 
+;; "Trailing same-line comment" detection. After emitting a structural form at
+;; index `form-i`, peek through any following whitespace. If that whitespace
+;; contains no newline AND the next non-whitespace node is a comment, the
+;; comment was on the same line as the form in the source — we re-emit it
+;; alongside (two spaces + the comment text), instead of breaking it to its
+;; own line. Returns the index of that comment, or nil if there is none.
+(defn trailing-comment-at (kids start n) (trailing-comment-at--scan kids start n))
+(defn trailing-comment-at--scan (kids i n)
+  (cond
+    (= i n) nil
+    (whitespace? (vector-ref kids i)) (if (> (count-newlines (node-text (vector-ref kids i))) 0)
+                                        nil
+                                        (trailing-comment-at--scan kids (inc i) n))
+    (comment? (vector-ref kids i)) i
+    else nil))
+
 (defn render--body (kids start-idx body-ind)
   ;; Walk kids from start-idx, emitting each structural form and each comment
   ;; on its own line at body-ind. `nl` mirrors the root walker: it tracks the
@@ -467,12 +482,21 @@ not a known body form (defaults to call-style — every arg breaks)."
                          (if (>= nl 2) "\n\n" "\n")
                          (indent-of body-ind)
                          (comment--strip-trailing-nl (node-text c))))
-        else (render--body--at kids
-               (inc i)
-               n
-               body-ind
-               0
-               (str acc (if (>= nl 2) "\n\n" "\n") (indent-of body-ind) (render c body-ind)))))))
+        else (let (form-line (str acc
+                               (if (>= nl 2) "\n\n" "\n")
+                               (indent-of body-ind)
+                               (render c body-ind))
+                   tc-idx (trailing-comment-at kids (inc i) n))
+               (if (nil? tc-idx)
+                 (render--body--at kids (inc i) n body-ind 0 form-line)
+                 (render--body--at kids
+                   (inc tc-idx)
+                   n
+                   body-ind
+                   1
+                   (str form-line
+                     "  "
+                     (comment--strip-trailing-nl (node-text (vector-ref kids tc-idx)))))))))))
 
 ;; ---- top-level walk ---------------------------------------------------------
 ;; `format-source src` parses src, renders the root, and ensures exactly one
@@ -505,7 +529,22 @@ not a known body form (defaults to call-style — every arg breaks)."
                        n
                        1
                        (format-source--glue acc nl (comment--strip-trailing-nl (node-text c))))
-        else (format-source--root--walk kids (inc i) n 0 (format-source--glue acc nl (render c 0)))))))
+        else (let (form-block (render c 0) tc-idx (trailing-comment-at kids (inc i) n))
+               (if (nil? tc-idx)
+                 (format-source--root--walk kids
+                   (inc i)
+                   n
+                   0
+                   (format-source--glue acc nl form-block))
+                 (format-source--root--walk kids
+                   (inc tc-idx)
+                   n
+                   1
+                   (format-source--glue acc
+                     nl
+                     (str form-block
+                       "  "
+                       (comment--strip-trailing-nl (node-text (vector-ref kids tc-idx))))))))))))
 
 (defn format-source--glue (acc nl block)
   (cond (= acc "") block (>= nl 2) (str acc "\n\n" block) else (str acc "\n" block)))

@@ -173,12 +173,20 @@ The seam that makes remoteability free later (see architecture.md).
 
 ## M4 — Server / daemon mode
 
-- 🟡 **Distributed nodes (slice 1 done)** — two runtimes connect over TCP and
-  message each other: node-tagged pids (`Value::Pid`), a cookie-authenticated
-  handshake (`node-start`/`connect`), location-transparent `send`, and a
-  symbols-by-name wire codec (ADR-034, [`distribution.md`](distribution.md)).
-  Deferred: remote `spawn`/code shipping, distributed monitors, node-down
-  detection, real auth.
+- ✅ **Distributed nodes (slices 1 + 2 + closure-shipping + monitors + auth
+  done)** — two runtimes connect over TCP and message each other:
+  node-tagged pids (`Value::Pid`), location-transparent `send`,
+  symbols-by-name wire codec, connection de-dup + tie-break, node-down
+  detection, **distributed pid monitors** (`(monitor remote-pid)` shares the
+  local `MONITORS` table via a `Watcher::Remote` variant; `:noconnection`
+  fires on net-split), **closure-as-data shipping** (ADR-033 — closures,
+  `(remote-spawn …)`, source positions all cross the wire),
+  **auto-reconnect** (`(ensure-link …)` — Brood policy over
+  `connect`/`monitor-node`), and **handshake v2** (magic+version prefix,
+  HMAC-SHA256 challenge–response; cookie never on the wire). ADR-033/034,
+  [`distribution.md`](distribution.md). Remaining: supervision trees (true
+  `link` / restart strategies) and optional TLS — both additive over what's
+  here.
 - ⬜ The same runtime listens on a socket and serves the M3 protocol
 - ⬜ Remote editor instances attach (the Emacs `--daemon` / `emacsclient` model)
 - ⬜ One core, multiple attached frontends

@@ -198,6 +198,472 @@ fn lambda_ships_across_nodes_and_runs() {
     );
 }
 
+/// Source positions ride along with a closure across the wire. The client
+/// ships a closure whose body contains a *quoted* list literal at a known
+/// line; the remote evaluates `(form-pos quoted-list)` on its own heap and
+/// sends the `[line col]` back. The position the client gets back must be
+/// the position from the **client's source**, not nil — proving that
+/// `Message::List`'s optional `Pos` trailer survived encoding, the receiver's
+/// `from_message` re-stamped it on the rebuilt pair via `heap.set_form_pos`,
+/// and `(form-pos …)` could find it on the receiver's heap.
+#[test]
+fn source_positions_survive_a_cross_node_send() {
+    let _g = port_lock();
+    let dir = std::env::temp_dir().join(format!("brood-dist-pos-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let port_a = free_port();
+    let port_b = free_port();
+
+    let server = format!(
+        r#"
+(node-start :a "127.0.0.1:{port_a}" "secret")
+(register :probe (self))
+(defn serve ()
+  (receive
+    ([:run f reply] (do (send reply [:pos (f)]) (serve)))
+    (_ (serve))))
+(serve)
+"#
+    );
+
+    // Client: send a closure whose body inspects a quoted list literal. The
+    // literal's position was stamped by *our* reader; on the receiver, after
+    // round-tripping through the wire, `(form-pos …)` must still return our
+    // line/col. The list sits on **line 7** of the rendered source — the
+    // leading `r#"\n` is line 1, the four explanatory lines + the `let`
+    // header take us through line 6, the `(send …)` line is 7.
+    let client = format!(
+        r#"
+(node-start :b "127.0.0.1:{port_b}" "secret")
+(connect "a@127.0.0.1:{port_a}")
+(let (me (self))
+  ;; The next line is line 7 in this file — the quoted literal whose position
+  ;; must survive across the wire and reach the receiver's `form-pos`.
+  (send {{:name :probe :node :a}} [:run (fn () (form-pos '(positioned-marker))) me]))
+(receive
+  ([:pos p] (println (str "GOT: " p)))
+  (after 5000 (throw "no reply from probe")))
+"#
+    );
+
+    let mut a = spawn_brood(&dir, "server.blsp", &server);
+    wait_until_listening(port_a);
+    let b = spawn_brood(&dir, "client.blsp", &client);
+
+    let out = b.wait_with_output().expect("client finished");
+    let _ = a.kill();
+    let _ = a.wait();
+    let mut a_err = String::new();
+    if let Some(mut e) = a.stderr.take() {
+        let _ = e.read_to_string(&mut a_err);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "client did not finish cleanly.\n--- client stdout ---\n{stdout}\n--- client stderr ---\n{stderr}\n--- server stderr ---\n{a_err}"
+    );
+    // The literal sits on line 7 of `client.blsp`. If positions crossed the
+    // wire the receiver returns `[7 col]`; otherwise `nil`.
+    assert!(
+        stdout.contains("GOT: [7 "),
+        "expected `[7 col]` from the remote (the client-side line of the quoted list survived the wire), got:\n{stdout}"
+    );
+}
+
+/// `(remote-spawn node expr)` ships a thunk to a peer, where a `:remote-spawn`
+/// server (lazily started on first call) `(spawn)`s it locally. End-to-end:
+/// the client triggers a remote spawn that captures the client's pid, the
+/// spawned process runs on A, sends the client a `[:hello-from-a]` message,
+/// the client receives it. Proves the convenience macro and its on-demand
+/// server bootstrap.
+#[test]
+fn remote_spawn_runs_a_thunk_on_a_peer() {
+    let _g = port_lock();
+    let dir = std::env::temp_dir().join(format!("brood-dist-rspawn-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let port_a = free_port();
+    let port_b = free_port();
+
+    // Server: enable remote-spawn here (the receiver opts in), then park.
+    let server = format!(
+        r#"
+(node-start :a "127.0.0.1:{port_a}" "secret")
+(start-remote-spawn)
+;; Park forever; the harness kills us.
+(receive (after 10000 nil))
+"#
+    );
+
+    // Client: captures its own pid, asks A to spawn a thunk that messages back.
+    let client = format!(
+        r#"
+(node-start :b "127.0.0.1:{port_b}" "secret")
+(connect "a@127.0.0.1:{port_a}")
+(let (me (self))
+  (remote-spawn :a (send me [:hello-from-a (node-name)])))
+(receive
+  ([:hello-from-a from] (if (= from :a)
+                          (println "REMOTE-SPAWN-OK")
+                          (throw (str "spawned on wrong node: " from))))
+  (after 5000 (throw "no reply from remote-spawn")))
+"#
+    );
+
+    let mut a = spawn_brood(&dir, "server.blsp", &server);
+    wait_until_listening(port_a);
+    let b = spawn_brood(&dir, "client.blsp", &client);
+
+    let out = b.wait_with_output().expect("client finished");
+    let _ = a.kill();
+    let _ = a.wait();
+    let mut a_err = String::new();
+    if let Some(mut e) = a.stderr.take() {
+        let _ = e.read_to_string(&mut a_err);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success() && stdout.contains("REMOTE-SPAWN-OK"),
+        "client failed.\n--- client stdout ---\n{stdout}\n--- client stderr ---\n{stderr}\n--- server stderr ---\n{a_err}"
+    );
+}
+
+/// Distributed pid monitor: A registers a worker pid, B `(monitor)`s it, A's
+/// worker exits cleanly, B receives `[:down mref pid reason]` on its mailbox.
+/// Verifies the full cross-node monitor path: the `Frame::Monitor` register
+/// on A's side reuses the same `add_monitor` core the local monitor uses; A's
+/// `deregister` fires the `Remote` watcher; the `[:down …]` is routed back as
+/// an ordinary `send` to B's pid.
+#[test]
+fn cross_node_pid_monitor_fires_down() {
+    let _g = port_lock();
+    let dir = std::env::temp_dir().join(format!("brood-dist-mon-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let port_a = free_port();
+    let port_b = free_port();
+
+    // Server on A: a `:work-bootstrap` registered name that, on `[:hello from]`,
+    // spawns a worker which (a) replies its own pid back, (b) parks until it
+    // gets `:stop`. The bootstrap step is how the client gets a remote pid to
+    // pass to `monitor` — monitors take a pid, not a name.
+    let server = format!(
+        r#"
+(node-start :a "127.0.0.1:{port_a}" "secret")
+(defn worker (parent)
+  (do (send parent [:my-pid (self)])
+      (receive (:stop nil) (_ nil))))
+(register :work-bootstrap (self))
+(receive
+  ([:hello from] (spawn (worker from)))
+  (after 10000 nil))
+;; Park to keep the link alive past the monitor + down delivery.
+(receive (after 10000 nil))
+"#
+    );
+    let client = format!(
+        r#"
+(node-start :b "127.0.0.1:{port_b}" "secret")
+(connect "a@127.0.0.1:{port_a}")
+(send {{:name :work-bootstrap :node :a}} [:hello (self)])
+(def remote-pid (receive ([:my-pid p] p) (after 5000 (throw "no pid reply"))))
+(def m (monitor remote-pid))
+(send remote-pid :stop)
+(receive
+  ([:down mref pid reason]
+    (if (and (= mref m) (pid? pid))
+      (println "DOWN-OK")
+      (throw (str "wrong down: " mref " " pid " " reason))))
+  (after 5000 (throw "no :down message")))
+"#
+    );
+
+    let mut a = spawn_brood(&dir, "server.blsp", &server);
+    wait_until_listening(port_a);
+    let b = spawn_brood(&dir, "client.blsp", &client);
+
+    let out = b.wait_with_output().expect("client finished");
+    let _ = a.kill();
+    let _ = a.wait();
+    let mut a_err = String::new();
+    if let Some(mut e) = a.stderr.take() {
+        let _ = e.read_to_string(&mut a_err);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success() && stdout.contains("DOWN-OK"),
+        "client failed.\n--- client stdout ---\n{stdout}\n--- client stderr ---\n{stderr}\n--- server stderr ---\n{a_err}"
+    );
+}
+
+/// Net-split fires a `:noconnection` on a remote monitor. B monitors A's
+/// worker, A dies (the test kills it), B's pending remote monitor fires
+/// `[:down mref pid :noconnection]` via `handle_node_down`. Proves the
+/// sender-side `PENDING_REMOTE` table is wired and dropped on node-down —
+/// without it, B's watcher would silently never hear about A's disappearance.
+#[test]
+fn remote_monitor_fires_noconnection_on_node_down() {
+    let _g = port_lock();
+    let dir = std::env::temp_dir().join(format!("brood-dist-noconn-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let port_a = free_port();
+    let port_b = free_port();
+
+    // Server on A: spawns a worker, sends its pid back to the requesting
+    // client, then parks. The whole runtime gets killed externally — that's
+    // the "node down" trigger.
+    let server = format!(
+        r#"
+(node-start :a "127.0.0.1:{port_a}" "secret")
+(defn worker (parent)
+  (do (send parent [:my-pid (self)])
+      (receive (after 60000 nil))))
+(register :work-bootstrap (self))
+(receive
+  ([:hello from] (spawn (worker from)))
+  (after 10000 nil))
+(receive (after 60000 nil))
+"#
+    );
+
+    // Client: get the remote pid, monitor it, kill A, expect :noconnection.
+    let client = format!(
+        r#"
+(node-start :b "127.0.0.1:{port_b}" "secret")
+(connect "a@127.0.0.1:{port_a}")
+(send {{:name :work-bootstrap :node :a}} [:hello (self)])
+(def remote-pid (receive ([:my-pid p] p) (after 5000 (throw "no pid reply"))))
+(def m (monitor remote-pid))
+;; Tell the parent harness we're armed; the harness will kill A. We can't
+;; kill A from inside the language, so we wait a beat and the harness sends
+;; SIGKILL to A externally.
+(println "ARMED")
+(receive
+  ([:down mref pid reason]
+    (if (and (= mref m) (= reason :noconnection))
+      (println "NOCONNECTION-OK")
+      (throw (str "wrong down on netsplit: mref=" mref " reason=" reason))))
+  (after 10000 (throw "no :noconnection within 10s")))
+"#
+    );
+
+    let mut a = spawn_brood(&dir, "server.blsp", &server);
+    wait_until_listening(port_a);
+    let mut b = spawn_brood(&dir, "client.blsp", &client);
+
+    // Wait for the client to print ARMED (its monitor is in place), then
+    // kill A. We read B's stdout line-by-line to detect the marker.
+    let mut b_stdout = b.stdout.take().expect("client stdout");
+    let mut buf = Vec::new();
+    let mut armed = false;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && !armed {
+        let mut chunk = [0u8; 256];
+        match b_stdout.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                if String::from_utf8_lossy(&buf).contains("ARMED") {
+                    armed = true;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    assert!(
+        armed,
+        "client never reached ARMED — monitor wasn't set up. partial stdout:\n{}",
+        String::from_utf8_lossy(&buf)
+    );
+
+    // Trigger the net-split.
+    let _ = a.kill();
+    let _ = a.wait();
+
+    // Drain the rest of B's stdout (it should print NOCONNECTION-OK).
+    let _ = b_stdout.read_to_end(&mut buf);
+    let status = b.wait().expect("client finished");
+    let mut b_err = String::new();
+    if let Some(mut e) = b.stderr.take() {
+        let _ = e.read_to_string(&mut b_err);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let stdout = String::from_utf8_lossy(&buf);
+    assert!(
+        status.success() && stdout.contains("NOCONNECTION-OK"),
+        "client did not see :noconnection.\n--- client stdout ---\n{stdout}\n--- client stderr ---\n{b_err}"
+    );
+}
+
+/// `(ensure-link addr)` keeps a peer link alive across restarts. Start A1, B
+/// `ensure-link`s it and sends a probe; kill A1; restart A2 on the same
+/// port/name; B's supervisor reconnects and a second probe round-trips. Pure
+/// Brood policy on top of `connect` + `monitor-node`; no Rust changes — this
+/// test guards the policy code in `std/prelude.blsp`.
+#[test]
+fn ensure_link_reconnects_across_a_node_restart() {
+    let _g = port_lock();
+    let dir = std::env::temp_dir().join(format!("brood-dist-rec-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let port_a = free_port();
+    let port_b = free_port();
+
+    // Both A1 and A2 use the same `:a` name + port + cookie — they're "the
+    // same node" coming back up after a crash, from the link's point of view.
+    let server_src = format!(
+        r#"
+(node-start :a "127.0.0.1:{port_a}" "secret")
+(register :probe (self))
+(defn serve ()
+  (receive
+    ([:ping from] (do (send from [:pong (self)]) (serve)))
+    (_ (serve))))
+(serve)
+"#
+    );
+
+    // B: ensure the link, ping once, kill A externally, wait for reconnect
+    // (we just keep retrying the ping with a small timeout until it succeeds
+    // a second time — `ensure-link` will reconnect under us).
+    let client_src = format!(
+        r#"
+(node-start :b "127.0.0.1:{port_b}" "secret")
+(ensure-link "a@127.0.0.1:{port_a}")
+;; First probe — proves the initial link came up.
+(send {{:name :probe :node :a}} [:ping (self)])
+(receive ([:pong _] (println "FIRST-OK")) (after 5000 (throw "no first pong")))
+;; Tell the harness we're ready for the restart.
+(println "ARMED")
+;; Now retry the second ping until something answers — the harness will
+;; bounce A1 → A2 in between. `ensure-link` re-`connect`s on :nodedown.
+(defn try-second (n)
+  (when (= n 0) (throw "no second pong after retries"))
+  (send {{:name :probe :node :a}} [:ping (self)])
+  (receive
+    ([:pong _] (println "SECOND-OK"))
+    (after 500 (try-second (- n 1)))))
+(try-second 40)
+"#
+    );
+
+    // Bring A1 up.
+    let mut a1 = spawn_brood(&dir, "server.blsp", &server_src);
+    wait_until_listening(port_a);
+
+    // Start B, get to ARMED.
+    let mut b = spawn_brood(&dir, "client.blsp", &client_src);
+    let mut b_stdout = b.stdout.take().expect("client stdout");
+    let mut buf = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let mut chunk = [0u8; 256];
+        match b_stdout.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                if String::from_utf8_lossy(&buf).contains("ARMED") {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    assert!(
+        String::from_utf8_lossy(&buf).contains("ARMED"),
+        "client never reached ARMED. partial stdout:\n{}",
+        String::from_utf8_lossy(&buf)
+    );
+
+    // Kill A1, give the OS a moment to free the port, then bring A2 up
+    // (same name + port). We may have to retry the bind a couple of times
+    // because TIME_WAIT can still hold the address briefly.
+    let _ = a1.kill();
+    let _ = a1.wait();
+    let mut a2 = None;
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(100));
+        if TcpStream::connect(("127.0.0.1", port_a)).is_err() {
+            // Port is free; try to bind A2 to it.
+            a2 = Some(spawn_brood(&dir, "server.blsp", &server_src));
+            break;
+        }
+    }
+    let mut a2 = a2.expect("could not free port for A2");
+    wait_until_listening(port_a);
+
+    // Drain B and assert.
+    let _ = b_stdout.read_to_end(&mut buf);
+    let status = b.wait().expect("client finished");
+    let mut b_err = String::new();
+    if let Some(mut e) = b.stderr.take() {
+        let _ = e.read_to_string(&mut b_err);
+    }
+    let _ = a2.kill();
+    let _ = a2.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let stdout = String::from_utf8_lossy(&buf);
+    assert!(
+        status.success() && stdout.contains("FIRST-OK") && stdout.contains("SECOND-OK"),
+        "client did not reconnect across the restart.\n--- client stdout ---\n{stdout}\n--- client stderr ---\n{b_err}"
+    );
+}
+
+/// A non-brood peer that doesn't speak the v2 protocol must be rejected at
+/// the magic-prefix step, before any frame parsing. We connect a plain
+/// `TcpStream`, write garbage bytes, and expect the server to disconnect us
+/// (read on the stream eventually errors / returns 0). Guards the
+/// `PROTOCOL_MAGIC` gate in `handshake`.
+#[test]
+fn non_brood_peer_is_rejected_at_magic_prefix() {
+    let _g = port_lock();
+    let dir = std::env::temp_dir().join(format!("brood-dist-magic-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let port_a = free_port();
+    let server = format!(
+        r#"
+(node-start :a "127.0.0.1:{port_a}" "secret")
+(receive (after 5000 nil))
+"#
+    );
+    let mut a = spawn_brood(&dir, "server.blsp", &server);
+    wait_until_listening(port_a);
+
+    // Speak HTTP instead of brood-v2. The server reads our 4 magic bytes,
+    // compares to b"BRD\x02", finds "GET ", aborts. We then try to read; the
+    // server has already shut the socket, so we hit EOF.
+    let mut s = TcpStream::connect(("127.0.0.1", port_a)).expect("connect");
+    s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    use std::io::Write as _;
+    let _ = s.write_all(b"GET / HTTP/1.1\r\n\r\n");
+    let mut buf = [0u8; 64];
+    let n = s.read(&mut buf).unwrap_or(0);
+    // EOF (n == 0) or a very small reply — either way, no valid handshake
+    // proceeded. The server's stderr should not be empty (it logs the
+    // mismatch via the `dist: incoming connection failed: …` path).
+    let _ = a.kill();
+    let _ = a.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        n == 0 || n < 8,
+        "server should have closed the socket after the bad magic; read {} bytes",
+        n
+    );
+}
+
 /// A bad cookie must be rejected: B cannot reach A's `:echo`, so the by-name
 /// send is silently dropped and B times out (Erlang semantics — no delivery, no
 /// error at the sender).

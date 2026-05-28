@@ -10,7 +10,7 @@ use brood::syntax::scope::{BindingKind, ScopeTree};
 use brood::Interp;
 use lsp_types::{CompletionItem, CompletionItemKind};
 
-use crate::introspect;
+use brood::introspect;
 
 /// Candidates visible at byte `offset`. `tree` is the document's scope analysis
 /// (already built by the caller, which also parses the CST).

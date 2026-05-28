@@ -13,7 +13,7 @@ use brood::Interp;
 use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind, Range};
 
 use crate::defs;
-use crate::introspect;
+use brood::introspect;
 use crate::line_index::LineIndex;
 
 /// Hover for the symbol at byte `offset`. `root`/`tree`/`index` are the document's

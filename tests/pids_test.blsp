@@ -23,12 +23,12 @@
 
   (test "a pid is equal to itself; distinct processes differ"
     (assert= (self) (self))
-    (let [w1 (spawn (receive (:go nil))) w2 (spawn (receive (:go nil)))]
+    (let (w1 (spawn (receive (:go nil))) w2 (spawn (receive (:go nil))))
       (is (not= w1 w2))
       (is (not= w1 (self)))))
 
   (test "a pid survives a message round-trip unchanged (sent to self)"
-    (let [me (self)]
+    (let (me (self))
       (send me me)
       ; ship our own pid to ourselves
       (assert= (receive) me)))
@@ -36,5 +36,5 @@
 
   (test "a worker can carry a pid back across the heap boundary"
     (defn pid-carrier (parent) (send parent (self)))
-    (let [me (self) w (spawn (pid-carrier me))] (assert= (receive) w))))
+    (let (me (self) w (spawn (pid-carrier me))) (assert= (receive) w))))
 ; the pid we got back IS w

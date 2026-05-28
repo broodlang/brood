@@ -26,6 +26,15 @@ corosensei = "0.3"
 # so keeping them inline avoids a heap allocation per call — which also matters extra
 # here because the byte-counting global allocator taxes every alloc with atomics.
 smallvec = "1"
+# HMAC-SHA256 for the node-link handshake (ADR-034 v2): the cookie isn't sent on
+# the wire — each side proves possession of it by HMAC'ing a peer-supplied
+# nonce, so an eavesdropper can't replay the value. Vetted RustCrypto crates;
+# this is exactly the "don't roll your own" case the dependency rule allows.
+hmac = "0.12"
+sha2 = "0.10"
+# Cryptographically-strong random nonces for the handshake. `getrandom` reads
+# the OS RNG directly — no allocator, no global state, just bytes.
+getrandom = "0.3"
 
 [dev-dependencies]
 # Lightweight microbenchmark harness for the interpreter core. Dev-only (the

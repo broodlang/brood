@@ -209,6 +209,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "node-start", Arity::exact(3), Sig::new(vec![sym, string, string], sym), node_start);
     def(heap, "connect", Arity::exact(1), Sig::new(vec![string], sym), connect);
     def(heap, "register", Arity::exact(2), Sig::new(vec![sym, pid_ty], pid_ty), register_name);
+    def(heap, "whereis", Arity::exact(1), Sig::new(vec![sym], pid_ty.union(nil_ty)), whereis_name);
     // `node-name` is the keyword `:nonode` until `node-start` sets it to a symbol.
     def(heap, "node-name", Arity::exact(0), Sig::nullary(sym.union(kw)), node_name);
     def(heap, "nodes", Arity::exact(0), Sig::nullary(list_ty), nodes);
@@ -294,6 +295,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("node-start", &["name", "addr", "cookie"], "Name this runtime and listen for peers on addr (\"host:port\"); cookie authenticates links. Returns the node name."),
     ("connect", &["spec"], "Link to a peer node named in spec (\"name@host:port\"); cookie-authenticated. Returns the peer's node name."),
     ("register", &["name", "pid"], "Bind a local name so peers can address this process via {:name name :node this-node}. Returns the pid."),
+    ("whereis", &["name"], "The local pid registered under `name`, or nil. Strictly local — does not query other nodes."),
     ("node-name", &[], "This runtime's node name (:nonode until node-start)."),
     ("nodes", &[], "A list of currently connected peer node names."),
     ("monitor-node", &["name"], "Get [:nodedown name] when the link to node `name` goes down (heartbeat timeout or close)."),
@@ -1311,22 +1313,40 @@ fn send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// if it is already dead).
 fn monitor(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     match arg(args, 0) {
-        // Local pids only for now — distributed monitors are a later slice.
         Value::Pid { node, id } if crate::dist::is_local(node) => {
+            // Local pid: in-process registration, returns a fresh mref.
             Ok(crate::process::monitor(id))
         }
-        Value::Pid { .. } => Err(LispError::type_err(
-            "monitor: monitoring a remote pid is not supported yet",
-        )),
+        Value::Pid { node, id } => {
+            // Remote pid: same shape — mint a mref, register *here* (so
+            // demonitor can find it later, and net-split can fire
+            // `:noconnection`), and ship a `Frame::Monitor` to the peer
+            // which routes through the same `process::add_monitor` on the
+            // far side.
+            let mref = crate::process::next_ref();
+            let watcher = crate::process::self_pid();
+            crate::dist::monitor_remote(node, id, watcher, mref);
+            Ok(Value::Ref(mref))
+        }
         _ => Err(LispError::type_err("monitor: first argument must be a pid")),
     }
 }
 
-/// `(demonitor mref)` — drop the monitor created by `(monitor …)`.
+/// `(demonitor mref)` — drop the monitor created by `(monitor …)`. Tries the
+/// local table first; if the mref isn't there it must have been on a remote
+/// peer, so a `Frame::Demonitor` is fanned out to every connected peer that
+/// holds a pending remote monitor with this watcher + mref.
 fn demonitor(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     match arg(args, 0) {
         Value::Ref(n) => {
+            // Local first (in-process MONITORS table).
             crate::process::demonitor(n);
+            // Then ask any peer holding this mref to drop their watcher.
+            // We scan PENDING_REMOTE for matching entries and `Demonitor` each
+            // unique peer once. The same `process::drop_monitor` predicate the
+            // local demonitor used is reused on the far side via the frame
+            // handler.
+            crate::process::demonitor_remote_fanout(n);
             Ok(Value::Nil)
         }
         _ => Err(LispError::type_err(
@@ -1401,6 +1421,22 @@ fn register_name(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 /// `(node-name)` — this runtime's node name (`:nonode` until `node-start`).
 fn node_name(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::Keyword(crate::dist::local_node()))
+}
+
+/// `(whereis name)` — the **local** pid registered under `name`, or `nil`.
+/// Lets idempotent bootstrap shapes test for "is this server already running
+/// here?" before re-`spawn`ing — see `remote-spawn` in `std/prelude.blsp`.
+/// A remote-side registration isn't visible here; this is a strictly local
+/// lookup over the `NAMES` table.
+fn whereis_name(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    let name = expect_node_name("whereis", arg(args, 0))?;
+    match crate::dist::whereis(name) {
+        Some(id) => Ok(Value::Pid {
+            node: crate::dist::local_node(),
+            id,
+        }),
+        None => Ok(Value::Nil),
+    }
 }
 
 /// `(monitor-node name)` — the calling process is sent `[:nodedown name]` when a

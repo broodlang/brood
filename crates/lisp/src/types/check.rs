@@ -91,6 +91,14 @@ struct Ctx {
     types: HashMap<Symbol, Ty>,
     /// `bound-name → (variable, type-it-asserts)`: a `let`-stored guard result.
     guards: HashMap<Symbol, (Symbol, Ty)>,
+    /// **Let-binding aliases.** `(let (a b) …)` where `b` is a known local
+    /// variable records `a → b` here, so narrowing `a` inside the body also
+    /// narrows `b` (and vice versa via `narrow`'s chain follow). This is what
+    /// makes the `match` pattern compiler's `(let (m x) (if (%eq m lit) …))`
+    /// expansion flow type info from the inner test back onto the outer
+    /// scrutinee. Brood is immutable, so the alias relation is sound for the
+    /// extent of the binding.
+    aliases: HashMap<Symbol, Symbol>,
     /// Every locally-bound name in scope — fn/lambda params and let bindings.
     /// Distinct from `types`: a fn-param has *no known type* (`ANY` by default)
     /// but is *in scope*, so it must not be flagged unbound. `types` records
@@ -113,14 +121,15 @@ impl Ctx {
         self.guards.get(&sym).copied()
     }
     /// Is `sym` in scope here? — a local binder (fn-param or let), a recorded
-    /// narrowing or guard alias, or an accumulated file-global. Bindings in the
-    /// surrounding heap (prelude, builtins, earlier-defined globals in a real
-    /// runtime) are checked separately by the caller — this is the *local*
-    /// view only.
+    /// narrowing, guard alias, or let-binding alias, or an accumulated
+    /// file-global. Bindings in the surrounding heap (prelude, builtins,
+    /// earlier-defined globals in a real runtime) are checked separately by
+    /// the caller — this is the *local* view only.
     fn is_local(&self, sym: Symbol) -> bool {
         self.locals.contains(&sym)
             || self.types.contains_key(&sym)
             || self.guards.contains_key(&sym)
+            || self.aliases.contains_key(&sym)
             || self.file_globals.contains(&sym)
     }
     /// **Narrow** `sym` to the intersection with `ty` (a guard refinement —
@@ -128,18 +137,40 @@ impl Ctx {
     /// caller already knows `sym` lives in this scope (e.g. it's a free
     /// variable inside an `if`'s branch); for an unknown one we treat the
     /// prior as `ANY`, so the intersection is just `ty`.
+    ///
+    /// **Alias propagation.** If `sym` is an alias for another local (via
+    /// `(let (sym other) …)`), narrowing `sym` also narrows `other`, and
+    /// recursively any further alias chain. That's how a narrowing on
+    /// `match`'s internal scrutinee `m__28` reaches the user-visible variable
+    /// `x` the `let` bound it to.
     fn narrow(&self, sym: Symbol, ty: Ty) -> Ctx {
         let mut c = self.clone();
-        let prior = c.types.get(&sym).copied().unwrap_or(Ty::ANY);
-        c.types.insert(sym, prior.intersect(ty));
+        c.narrow_chain(sym, ty);
         c
+    }
+    /// In-place narrow following the alias chain. Walks `aliases` from `sym`,
+    /// intersecting `ty` into each visited name's type. A cycle guard caps the
+    /// walk so a pathological alias loop can't iterate forever.
+    fn narrow_chain(&mut self, mut sym: Symbol, ty: Ty) {
+        let mut depth = 0;
+        loop {
+            let prior = self.types.get(&sym).copied().unwrap_or(Ty::ANY);
+            self.types.insert(sym, prior.intersect(ty));
+            match self.aliases.get(&sym).copied() {
+                Some(next) if next != sym && depth < 16 => {
+                    sym = next;
+                    depth += 1;
+                }
+                _ => break,
+            }
+        }
     }
     /// **Bind** `sym` to `ty`, overwriting any prior entry — a fresh let-bound
     /// or fn-param variable shadows the outer. `None` clears the type entry so
     /// a shadowing binding of unknown type doesn't keep an outer narrowing
     /// (but the name is still in scope via `locals`, so an unbound check
-    /// doesn't fire on it). Always clears any guard-alias entry for `sym`
-    /// (a fresh binding doesn't inherit one).
+    /// doesn't fire on it). Always clears any guard-alias *and* let-alias
+    /// entry for `sym` (a fresh binding doesn't inherit either).
     fn bind(&self, sym: Symbol, ty: Option<Ty>) -> Ctx {
         let mut c = self.clone();
         match ty {
@@ -152,6 +183,7 @@ impl Ctx {
         }
         c.locals.insert(sym);
         c.guards.remove(&sym);
+        c.aliases.remove(&sym);
         c
     }
     /// Record that `sym` was let-bound to the result of testing `target` for
@@ -164,6 +196,18 @@ impl Ctx {
         }
         let mut c = self.clone();
         c.guards.insert(sym, (target, ty));
+        c
+    }
+    /// Record `(let (sym target) …)` — a let-binding alias. Lets narrowing on
+    /// either name propagate to the other via `narrow_chain`. Self-aliases
+    /// are rejected (no-op): `(let (x x) …)` shadows the outer `x` and
+    /// `aliasing` itself would create a one-step cycle that adds nothing.
+    fn add_alias(&self, sym: Symbol, target: Symbol) -> Ctx {
+        if sym == target {
+            return self.clone();
+        }
+        let mut c = self.clone();
+        c.aliases.insert(sym, target);
         c
     }
     /// Record a top-level `(def/defn/defmacro name …)` so subsequent forms in
@@ -541,22 +585,54 @@ fn guard_assertion(heap: &Heap, test: Value, ctx: &Ctx) -> Option<(Symbol, Ty)> 
         return ctx.guard(s);
     }
     let items = list_items(heap, test)?;
-    if items.len() != 2 {
-        return None;
-    }
-    let Value::Sym(head) = items[0] else {
+    let Value::Sym(head) = *items.first()? else {
         return None;
     };
     let head_name = value::symbol_name(head);
     // (not <inner>) — invert the inner assertion; everything else proceeds.
-    if head_name == "not" {
+    if items.len() == 2 && head_name == "not" {
         let (sym, ty) = guard_assertion(heap, items[1], ctx)?;
         return Some((sym, ty.negate()));
+    }
+    // `(%eq sym literal)` / `(%eq literal sym)` — equality against a literal
+    // asserts the variable has the literal's runtime tag. The `match` pattern
+    // compiler emits this for literal patterns (e.g. `(match x (5 …))`
+    // lowers through `(let (m x) (if (%eq m 5) …))` — and the let-alias
+    // machinery threads the narrowing back to `x`). Variadic `=` reaches us
+    // pre-expanded as `%eq` calls when arities are 2, so we only need to
+    // recognise the primitive shape.
+    if items.len() == 3 && head_name == "%eq" {
+        if let Some(g) = literal_eq_guard(items[1], items[2]) {
+            return Some(g);
+        }
+        if let Some(g) = literal_eq_guard(items[2], items[1]) {
+            return Some(g);
+        }
+        return None;
+    }
+    if items.len() != 2 {
+        return None;
     }
     let ty = Ty::tested_by(&head_name)?;
     match items[1] {
         Value::Sym(s) => Some((s, ty)),
         _ => None,
+    }
+}
+
+/// If `a` is a symbol and `b` is a self-evaluating literal, return the guard
+/// `(a, type-of(b))`. Used by `guard_assertion`'s `%eq` arm to recognise both
+/// `(%eq sym lit)` and `(%eq lit sym)`. Returns `None` when `b` is itself a
+/// variable — equality between two unknowns asserts nothing.
+fn literal_eq_guard(a: Value, b: Value) -> Option<(Symbol, Ty)> {
+    let Value::Sym(s) = a else { return None };
+    // A literal is anything that's not a symbol / pair / vector / map.
+    // Strings, ints, floats, keywords, booleans, nil all self-evaluate and
+    // have a definite tag; pairs/vectors/maps are constructions whose pieces
+    // could be unknown.
+    match b {
+        Value::Sym(_) | Value::Pair(_) | Value::Vector(_) | Value::Map(_) => None,
+        other => Some((s, Ty::of_value(other))),
     }
 }
 
@@ -864,6 +940,18 @@ fn check_let(
         scope = scope.bind(name, rhs_ty);
         if let Some((target, gty)) = rhs_guard {
             scope = scope.add_guard(name, target, gty);
+        }
+        // A plain `(let (name other) …)` aliases `name` to `other` — narrowing
+        // either propagates to the other via `narrow_chain`. This is what
+        // makes the `match` pattern compiler's `(let (m__28 x) (if (%eq m__28
+        // lit) …))` expansion narrow the user's `x`, not just the internal
+        // `m__28`. We don't gate on `other` being a known local: it might be
+        // a free reference (e.g. when checking a bare form via
+        // `(check 'form)`) or a top-level global — either way, narrowing
+        // inside the branch is sound (it describes "if this branch is
+        // reached, then…", vacuously true on unreachable paths).
+        if let Value::Sym(target) = rhs {
+            scope = scope.add_alias(name, target);
         }
         i += 2;
     }
@@ -1559,6 +1647,111 @@ mod tests {
             w.iter()
                 .any(|s| s.contains("inc") && s.contains("expected 1")),
             "user defn arity should be enforced: {:?}",
+            w
+        );
+    }
+
+    // ---- Step 4 final pieces: %eq-as-guard + let-alias propagation --------
+    //
+    // `match` lowers `(match x (5 body) …)` to
+    // `(let (m__N x) (if (%eq m__N 5) (do body) …))`. To flag a misuse on
+    // `x` in `body` (where the literal pattern asserts x's type), the checker
+    // needs two pieces: (1) recognise `(%eq sym lit)` as a guard asserting
+    // `sym : type-of(lit)`; (2) when a `let` binds a name to another symbol,
+    // propagate narrowings between the two via the alias chain.
+
+    #[test]
+    fn match_literal_pattern_narrows_the_scrutinee() {
+        // `(match x (5 (first x)))` — the literal-int pattern asserts x : int;
+        // `(first x)` in the body must then flag.
+        let w = warnings("(match x (5 (first x)) (_ nil))");
+        assert!(
+            w.iter().any(|s| s.contains("first") && s.contains("int")),
+            "match int-literal pattern should narrow x: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn match_keyword_pattern_narrows_the_scrutinee() {
+        // Mirror of the int case for a keyword literal.
+        let w = warnings("(match x (:foo (first x)) (_ nil))");
+        assert!(
+            w.iter().any(|s| s.contains("first") && s.contains("keyword")),
+            "match keyword-literal pattern should narrow x: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn eq_against_a_literal_is_a_guard() {
+        // The mechanism that powers match: `(%eq m 5)` in a test position
+        // narrows `m` to `:int` in the then-branch. (Symmetric — both
+        // `(%eq m 5)` and `(%eq 5 m)` should narrow.)
+        let w = warnings("(if (%eq m 5) (first m) nil)");
+        assert!(
+            w.iter().any(|s| s.contains("first") && s.contains("int")),
+            "%eq with sym + literal should narrow: {:?}",
+            w
+        );
+        let w = warnings("(if (%eq 5 m) (first m) nil)");
+        assert!(
+            w.iter().any(|s| s.contains("first") && s.contains("int")),
+            "%eq with literal + sym (reversed) should narrow: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn eq_between_two_variables_is_not_a_guard() {
+        // Equality between two unknowns asserts nothing about either's type.
+        // No false positive must fire on the body.
+        let w = warnings("(if (%eq a b) (first a) nil)");
+        assert!(
+            w.iter().all(|s| !s.contains("first")),
+            "%eq between two vars should not narrow: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn let_alias_propagates_narrowing_in_both_directions() {
+        // The match pattern compiler's exact shape: alias `m` to `x`, then
+        // narrow `m` via a guard. The narrowing must flow back onto `x` so a
+        // body that uses `x` (not `m`) still sees the asserted type.
+        let w = warnings("(let (m x) (if (int? m) (first x) nil))");
+        assert!(
+            w.iter().any(|s| s.contains("first") && s.contains("int")),
+            "let-alias should propagate narrowing from m to x: {:?}",
+            w
+        );
+        // And the symmetric direction: narrow x, alias-narrows m.
+        let w = warnings("(let (m x) (if (int? x) (first m) nil))");
+        assert!(
+            w.iter().any(|s| s.contains("first") && s.contains("int")),
+            "let-alias should propagate narrowing from x to m: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn shadowing_clears_an_alias() {
+        // An inner let that rebinds an aliased name to something else breaks
+        // the chain — the new binding is the new name's type, no alias.
+        // `(let (m x) (let (m 5) (first m)))` flags the inner `(first m)`
+        // because `m` is now int, but that's via the literal-type binding,
+        // not the broken alias.
+        let w = warnings("(let (m x) (let (m 5) (first m)))");
+        assert!(
+            w.iter().any(|s| s.contains("first") && s.contains("int")),
+            "shadowed let should still warn on the inner int: {:?}",
+            w
+        );
+        // The outer `x` must not be narrowed by the inner shadowing.
+        let w = warnings("(let (m x) (let (m 5) (println x)))");
+        assert!(
+            w.iter().all(|s| !s.contains("first")),
+            "shadowing must not leak narrowing back to the original: {:?}",
             w
         );
     }
