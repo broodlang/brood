@@ -3741,3 +3741,87 @@ flows that depend on the heartbeat path). The preemption test passes
 after `tick()` was correctly preserved (one trampoline iteration
 caught the regression mid-pass and was reverted in favour of the
 inline-in-eval approach).
+
+---
+
+## 2026-05-28 — MCP step 3: `std/mcp.blsp` lights up the dispatcher
+
+**Goal.** Step 3 of the MCP plan (ADR-036 / `docs/mcp.md`): the eight
+initial tool `defn`s and the `(mcp-tools)` registry the `nest mcp`
+dispatcher reads. With this landing, **the protocol surface is live** —
+an agent attached via `.mcp.json` sees a populated `tools/list` and can
+drive `eval` / `load` / `lookup` / `macroexpand` / `format` against the
+project's image.
+
+**Landed.**
+
+- **`std/mcp.blsp`** (~150 LoC of Brood, per ADR-006 — the tool *surface*
+  is policy in Brood, not Rust):
+  - **Six live tools.** `eval` (read-string + eval, returns `{:value
+    pr-str}` or `{:error msg}`), `load` (returns `{:ok true|false}`),
+    `lookup` (returns `{:name :arglist :doc :source-location}`; unbound
+    names come back as `{:name :error}`, a soft failure the agent can
+    branch on), `macroexpand` (1-step / all, returns `{:expanded pr-str}`),
+    `format` (wraps `(format-source ...)`, returns `{:formatted ...}`).
+  - **Three documented stubs** — `check`, `run-tests`, `processes` —
+    return `{:error "not yet wired — needs <prereq> (step 1c)"}`. The
+    error message names exactly what's missing so the agent gets a
+    truthful pointer rather than a "tool unavailable" 404.
+  - **Argument validation** uses `throw` for shape errors (the dispatcher
+    converts a throw into a JSON-RPC error, so a misshapen `arguments`
+    looks like a *protocol* failure, not a *value*). Body errors (parse,
+    runtime) become `{:error msg}` fields so the agent can act on them.
+- **`crates/lisp/src/builtins.rs`** — added `("mcp", include_str!(...))`
+  to `EMBEDDED_MODULES`. `(require 'mcp)` resolves via `%builtin-module`,
+  so the dispatcher finds the catalogue without a configured load-path.
+- **`crates/nest/src/mcp.rs`** — repurposed the now-obsolete
+  `tools_list_is_empty_when_no_catalogue_is_defined` test as
+  `tools_list_returns_the_baked_std_catalogue` (asserts the eight tools
+  and the `inputSchema.type == "object"` invariant). The two existing
+  override-path tests (`tools_list_projects_a_brood_defined_catalogue`,
+  `tools_call_dispatches_to_a_brood_handler`) now `(provide 'mcp)` before
+  binding inline so the dispatcher's `(require 'mcp)` is a no-op and the
+  test's catalogue wins — which is exactly the shape a project's own
+  `mcp.blsp` will use to extend the surface (step 5).
+- **Eight step-3 integration tests** through the real dispatcher:
+  - `eval` returns the printed value (`(+ 1 2)` → `"3"`); captures a
+    runtime error (`(no-such-fn …)`); state persists across calls (a
+    `def` in call #1 is visible in call #2 — the hot-reload contract,
+    ADR-013).
+  - `lookup map` returns arglist + doc; `source-location` is `null` for
+    prelude defs (the prelude isn't loaded via the positioned reader, so
+    no recorded site — pin the current behaviour rather than hide it).
+  - `lookup` of an unbound name is a soft `:error` field, not a thrown
+    exception.
+  - `macroexpand` steps `(when x 1)` into an `if`-shaped form.
+  - `format` reformats messy source; idempotent.
+  - `check` / `run-tests` / `processes` each carry the documented
+    "not yet wired" marker — a future un-stub flips this assertion.
+  - Argument validation (`{source: 42}` for `eval`) raises a JSON-RPC
+    error mentioning `:source`.
+
+**Verified.** `cargo build` clean. `cargo test --workspace`: 115 (lib)
++ 65 (integration) + 40 (LSP) + 22 (nest, 14 dispatcher + 8 step 3)
++ … all green, no regressions. Real-binary smoke: `tools/list` returns
+the eight names in order; `tools/call eval (+ 1 2 3)` returns `{
+"value": "6" }`; `tools/call lookup map` returns
+`{ "arglist": ["f","coll"], "doc": "A list of `(f x)` …", "name": "map",
+"source-location": null }`.
+
+**What's left for MCP.**
+
+1. **Step 4** — `nest new foo` scaffolds `foo/.mcp.json` pointing at
+   `nest mcp`, so `cd foo && claude` auto-attaches the project's MCP
+   server (closing the loop with the `brood-for-claude.md` doc that's
+   already `%builtin-doc`-baked).
+2. **Step 1c** (the un-stubs, in any order):
+   - Structured `(check-project)` in `std/project.blsp` — return
+     `[file line col message]` tuples instead of printing.
+   - Structured runner result in `std/test.blsp`.
+   - `*out*` dynvar + `(with-out-str)` for stdout capture (also lets
+     `eval_in_session` ship a `:stdout` field).
+   - A `(list-processes)` primitive — small Rust addition, gated on a
+     concrete use-case.
+3. **Step 5** — Tier-1 niceties (`prompts/get` for a `brood-task`
+   template; project-defined tool discovery from a project's own
+   `mcp.blsp` that conses entries onto the std `(mcp-tools)` list).

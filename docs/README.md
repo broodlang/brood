@@ -17,6 +17,7 @@ it's going. Start here.
 | [roadmap.md](roadmap.md) | The milestones (M1 → M5), what's done, and what's next — including the editor, the display protocol, and the remote/web frontends. |
 | [decisions.md](decisions.md) | The design-decision log (ADR-style): the *why* behind the choices, so future-us doesn't relitigate them by accident. |
 | [devlog.md](devlog.md) | A chronological log of work sessions — what changed and why, in order. |
+| [claude-demo-findings.md](claude-demo-findings.md) | An LLM's notes after writing a concurrent Mandelbrot demo in Brood from scratch: language familiarity gaps, the multi-thread scheduler race, interpreter perf numbers, tooling friction (formatter, type-checker noise), and a prioritised fix list. |
 
 ## The one-paragraph version
 

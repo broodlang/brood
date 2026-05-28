@@ -11,21 +11,29 @@
 ;; should choose when files are reloadable; nothing should be auto-watched.
 
 (defmodule reload
-  "Hot-reload helpers. A reloader is a green process that polls one file's
+  "Hot-reload helpers. A reloader is a green process that polls a file's
 mtime and re-`load`s it when it changes — the running program's globals
 rebind on the *next* call site (docs/shared-code.md). Opt-in: nothing is
 watched until you call `reload-on-change`.
 
     (require 'reload)
-    (reload-on-change \"greeter.blsp\")   ; returns the watcher pid
-    ;; …now edit greeter.blsp; the running program picks up the new defs.")
+    (reload-on-change \"greeter.blsp\")   ; one file
+    (reload-on-change \"src\")            ; every .blsp under src/, recursively
+                                          ; — new files added later are picked
+                                          ; up automatically on the next dir
+                                          ; scan.")
 
-;; How often the watcher polls, in ms. 250 ms is fast enough to feel
-;; instantaneous (one human reaction time) and slow enough that the cost
-;; is one stat per quarter-second per watched file — negligible.
+;; How often a per-file watcher polls, in ms. 250 ms feels instantaneous and
+;; the cost is one stat per quarter-second per watched file — negligible.
 (def *reload-poll-ms* 250)
 
-;; The watcher loop. Tail-recursive on (path, last-seen-mtime). Each tick:
+;; How often a directory watcher re-scans for newly-added files, in ms. Longer
+;; than the per-file poll because new files are much rarer than edits; one
+;; list-dir per second per watched directory is invisible.
+(def *reload-scan-ms* 1000)
+
+;; The per-file watcher loop. Tail-recursive on (path, last-seen-mtime).
+;; Each tick:
 ;;   - stat the file (`file-mtime` is the cheap path — no read);
 ;;   - if it vanished, complain once and keep polling (the editor may be
 ;;     mid-rename);
@@ -54,11 +62,73 @@ watched until you call `reload-on-change`.
           (sleep *reload-poll-ms*)
           (reload--loop path now)))))
 
+;; Recursive .blsp collector. Returns a flat list of paths (relative to the
+;; original `dir` argument). Mirrors the walk in std/project.blsp; lives here
+;; too so std/reload stays prelude-only and require-able without project.
+(defn reload--collect-blsp (dir)
+  (if (dir? dir)
+    (fold (fn (acc entry)
+            (let (p (path-join dir entry))
+              (cond
+                (dir? p) (append acc (reload--collect-blsp p))
+                (ends-with? entry ".blsp") (append acc (list p))
+                else acc)))
+      nil
+      (list-dir dir))
+    nil))
+
+;; The directory watcher loop. Holds the set of files we've already noticed.
+;; Each scan tick:
+;;   - re-walk the tree for the current .blsp set;
+;;   - for every path we didn't know about, `load` it (so its defs become
+;;     live without waiting for a second save) and spawn a per-file watcher
+;;     for future edits.
+;; `known` is pre-seeded by `reload-on-change` with the initial scan, so the
+;; first tick is silent — only *genuinely new* files after startup trigger a
+;; "+ <path>" line.
+;; File *deletions* aren't reaped here — the orphaned per-file watcher just
+;; logs "[reload] missing:" on its own poll, which is a useful signal during
+;; rename storms. A periodic prune could come later if it becomes annoying.
+(defn reload--dir-loop (dir known)
+  (let (current (reload--collect-blsp dir))
+    (dolist (p current)
+      (unless (member? p known)
+        (println "[reload] +" p)
+        (try
+          (load p)
+          (catch e (println "[reload] +load failed:" p "—" e)))
+        (spawn (reload--loop p (file-mtime p)))))
+    (sleep *reload-scan-ms*)
+    (reload--dir-loop dir current)))
+
 (defn reload-on-change (path)
-  "Spawn a green process that watches `path` and re-`load`s it whenever its
-mtime changes; returns the watcher's pid. The watcher polls every
-`*reload-poll-ms*` (default 250). Errors during a reload (a half-written
-save, a syntax error, etc.) print and are swallowed — the watcher keeps
-running. To stop watching, you currently need to kill the process (a
-proper `stop-reloader` is deferred until there's a concrete need)."
-  (spawn (reload--loop path (file-mtime path))))
+  "Watch `path` for changes and `load` it on every modification. Dispatches:
+
+  - **File** — spawn one watcher polling `file-mtime` every
+    `*reload-poll-ms*` (250 ms).
+  - **Directory** — spawn one watcher per `.blsp` under it (recursive), plus
+    a directory watcher that re-scans every `*reload-scan-ms*` (1 s) and
+    spawns a fresh per-file watcher for any new `.blsp` that appears.
+
+Errors during a reload (half-written save, syntax error, …) print and are
+swallowed — the watcher keeps running. Returns nil. To stop watching, kill
+the parent process (per-watcher stop is deferred; there's no compelling
+use yet)."
+  (cond
+    (not (file-exists? path))
+      (error "reload-on-change: no such path: " path)
+    (dir? path)
+      ;; Two-step setup for a directory:
+      ;;   1. spawn a per-file watcher for every .blsp currently in the tree
+      ;;      (silently — no "+" line; these files were already loaded by the
+      ;;      caller, typically `nest run`'s `run-project` walk);
+      ;;   2. spawn the dir watcher with `known` pre-seeded to that set, so
+      ;;      it only fires on files that appear *after* startup, and does
+      ;;      `load` + per-file watcher for each.
+      (let (initial (reload--collect-blsp path))
+        (dolist (p initial)
+          (spawn (reload--loop p (file-mtime p))))
+        (spawn (reload--dir-loop path initial))
+        nil)
+    else
+      (do (spawn (reload--loop path (file-mtime path))) nil)))

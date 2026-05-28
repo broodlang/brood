@@ -631,25 +631,41 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_is_empty_when_no_catalogue_is_defined() {
-        // No `std/mcp.blsp` exists yet (step 3 work); the dispatcher must
-        // still serve an empty list rather than error.
+    fn tools_list_returns_the_baked_std_catalogue() {
+        // Step 3 ships `std/mcp.blsp` as a baked-in `EMBEDDED_MODULES` entry, so
+        // `(require 'mcp) (mcp-tools)` succeeds in a fresh `Interp` and the
+        // dispatcher exposes the eight initial tools without any project setup.
         let mut interp = Interp::new();
         let resp = round_trip(
             &mut interp,
             &[req(1, "tools/list", json!({})), notif("exit", json!(null))],
         );
-        assert_eq!(resp[0]["result"]["tools"], json!([]));
+        let tools = resp[0]["result"]["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        // The full v0 surface — six live, three documented stubs.
+        for expected in &[
+            "eval", "load", "lookup", "macroexpand", "format", "check", "run-tests", "processes",
+        ] {
+            assert!(names.contains(expected), "missing {expected:?} in {names:?}");
+        }
+        // Every entry must carry a JSON-Schema-shaped `inputSchema`.
+        for t in tools {
+            assert_eq!(t["inputSchema"]["type"], "object");
+        }
     }
 
     #[test]
     fn tools_list_projects_a_brood_defined_catalogue() {
         let mut interp = Interp::new();
-        // Pre-define an `mcp-tools` catalogue inline — the same shape
-        // `std/mcp.blsp` will use in step 3, so this test pins the contract.
+        // Pre-define an `mcp-tools` catalogue inline; mark `'mcp` as already
+        // provided so the dispatcher's `(require 'mcp)` doesn't load the baked
+        // `std/mcp.blsp` and clobber our test catalogue. This is exactly the
+        // override path a project's own `mcp.blsp` will use (step 5): provide
+        // the feature themselves, then bind their own `mcp-tools`.
         interp
             .eval_str(
                 r#"
+                (provide 'mcp)
                 (defn mcp-tools ()
                   (list
                     {:name "echo"
@@ -674,9 +690,13 @@ mod tests {
     #[test]
     fn tools_call_dispatches_to_a_brood_handler() {
         let mut interp = Interp::new();
+        // Same pattern as `tools_list_projects_a_brood_defined_catalogue`:
+        // claim the feature so the dispatcher's `(require 'mcp)` is a no-op
+        // and our inline catalogue is what `(mcp-tools)` returns.
         interp
             .eval_str(
                 r#"
+                (provide 'mcp)
                 (defn mcp-tools ()
                   (list
                     {:name "double"
@@ -826,5 +846,162 @@ mod tests {
         let mut interp = Interp::new();
         let cl = interp.eval_str("(fn (x) x)").unwrap();
         assert!(value_to_json(&interp.heap, cl).is_err());
+    }
+
+    // ---- step 3 — end-to-end against the baked std/mcp.blsp catalogue --------
+    //
+    // Each test fires a real `tools/call` for one of the six live tools and
+    // asserts on the parsed JSON in the `content[0].text` payload (the Brood
+    // result's `pretty_print`ed JSON). The remaining two — `check` and
+    // `run-tests` — ship as documented stubs; we pin their `:error` message
+    // here so a future un-stub doesn't silently regress the contract.
+
+    /// Send one `tools/call`, parse the dispatcher's `content[0].text` back
+    /// into JSON, and hand it to the assertion closure. Returns the *raw*
+    /// response too so tests can read `error`-shaped replies as well.
+    fn invoke_tool(
+        interp: &mut Interp,
+        name: &str,
+        arguments: Json,
+    ) -> (Json, Option<Json>) {
+        let resp = round_trip(
+            interp,
+            &[
+                req(1, "tools/call", json!({ "name": name, "arguments": arguments })),
+                notif("exit", json!(null)),
+            ],
+        );
+        let parsed = resp[0]["result"]["content"][0]["text"]
+            .as_str()
+            .map(|s| serde_json::from_str::<Json>(s).expect("payload was not JSON"));
+        (resp[0].clone(), parsed)
+    }
+
+    #[test]
+    fn std_eval_tool_returns_the_printed_value() {
+        let mut interp = Interp::new();
+        let (_, body) = invoke_tool(&mut interp, "eval", json!({ "source": "(+ 1 2)" }));
+        assert_eq!(body.unwrap()["value"], "3");
+    }
+
+    #[test]
+    fn std_eval_tool_captures_a_runtime_error() {
+        let mut interp = Interp::new();
+        let (_, body) = invoke_tool(&mut interp, "eval", json!({ "source": "(no-such-fn 1)" }));
+        let body = body.unwrap();
+        assert!(body.get("value").is_none(), "{body:?}");
+        assert!(body["error"].as_str().unwrap().len() > 0);
+    }
+
+    #[test]
+    fn std_eval_tool_state_persists_across_calls() {
+        // The hot-reload promise: a `def` in one tool call is visible to the next.
+        let mut interp = Interp::new();
+        let resp = round_trip(
+            &mut interp,
+            &[
+                req(1, "tools/call", json!({ "name": "eval", "arguments": { "source": "(def mcp-test-x 7)" } })),
+                req(2, "tools/call", json!({ "name": "eval", "arguments": { "source": "(* mcp-test-x 6)" } })),
+                notif("exit", json!(null)),
+            ],
+        );
+        let second = resp[1]["result"]["content"][0]["text"].as_str().unwrap();
+        let parsed: Json = serde_json::from_str(second).unwrap();
+        assert_eq!(parsed["value"], "42");
+    }
+
+    #[test]
+    fn std_lookup_tool_describes_a_prelude_fn() {
+        let mut interp = Interp::new();
+        let (_, body) = invoke_tool(&mut interp, "lookup", json!({ "name": "map" }));
+        let body = body.unwrap();
+        assert_eq!(body["name"], "map");
+        // `arglist` for the prelude `map` is a non-empty list. JSON-shape: array.
+        assert!(body["arglist"].is_array());
+        assert!(body["arglist"].as_array().unwrap().len() >= 1);
+        // Prelude defs don't get recorded source locations (the prelude is read
+        // via `read_all`, not the positioned loader). The lookup still works —
+        // it returns nil for that field. Pin it so a fix to ADR-031 cross-file
+        // is visible from here.
+        assert_eq!(body["source-location"], Json::Null);
+    }
+
+    #[test]
+    fn std_lookup_tool_handles_unbound_names_softly() {
+        let mut interp = Interp::new();
+        let (_, body) = invoke_tool(&mut interp, "lookup", json!({ "name": "no-such-name-xyzzy" }));
+        let body = body.unwrap();
+        // Unbound is a soft failure surfaced as :error, not a thrown exception
+        // (the dispatcher would render that as a JSON-RPC error). Lets the
+        // agent branch on the field cleanly.
+        assert_eq!(body["name"], "no-such-name-xyzzy");
+        assert!(body["error"].as_str().is_some());
+    }
+
+    #[test]
+    fn std_macroexpand_tool_steps_a_when() {
+        let mut interp = Interp::new();
+        let (_, body) = invoke_tool(
+            &mut interp,
+            "macroexpand",
+            json!({ "form": "(when x 1)", "mode": "1" }),
+        );
+        let expanded = body.unwrap()["expanded"].as_str().unwrap().to_string();
+        // `(when c e)` lowers to an `if`-shaped form; we don't pin the exact
+        // expansion (let `docs/macros` evolve it) — only that the conditional
+        // shape is there.
+        assert!(expanded.contains("if"), "got {expanded:?}");
+    }
+
+    #[test]
+    fn std_format_tool_reformats_messy_source() {
+        let mut interp = Interp::new();
+        let (_, body) = invoke_tool(
+            &mut interp,
+            "format",
+            json!({ "source": "(  +  1   2  )\n\n\n" }),
+        );
+        let formatted = body.unwrap()["formatted"].as_str().unwrap().to_string();
+        assert!(!formatted.is_empty());
+        // Idempotent: feeding the formatted source back is a fixed point.
+        let (_, body2) = invoke_tool(&mut interp, "format", json!({ "source": formatted.clone() }));
+        assert_eq!(body2.unwrap()["formatted"].as_str().unwrap(), formatted);
+    }
+
+    #[test]
+    fn std_check_and_run_tests_and_processes_are_documented_stubs() {
+        // Each ships with an `:error` that names what needs to land (step 1c).
+        // A future un-stub flips this — that's the signal to update the test.
+        let mut interp = Interp::new();
+        for name in ["check", "run-tests", "processes"] {
+            let (_, body) = invoke_tool(&mut interp, name, json!({}));
+            let body = body.unwrap();
+            let err = body["error"].as_str().expect("expected an :error field");
+            assert!(
+                err.contains("not yet wired"),
+                "{name}: {err:?} (lost the stub marker)"
+            );
+        }
+    }
+
+    #[test]
+    fn argument_validation_throws_a_protocol_error() {
+        // The handlers `throw` when `:source` / `:file` / `:name` is missing or
+        // wrong-typed; the dispatcher converts the throw into a JSON-RPC error
+        // (so a misshapen `arguments` from the agent never looks like a
+        // *value*, it looks like a *protocol failure*).
+        let mut interp = Interp::new();
+        let resp = round_trip(
+            &mut interp,
+            &[
+                req(1, "tools/call", json!({ "name": "eval", "arguments": { "source": 42 } })),
+                notif("exit", json!(null)),
+            ],
+        );
+        assert!(resp[0]["error"].is_object(), "{:?}", resp[0]);
+        assert!(resp[0]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(":source"));
     }
 }

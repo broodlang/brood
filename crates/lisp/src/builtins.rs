@@ -832,6 +832,9 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
     ("hatch", include_str!("../../../std/hatch.blsp")),
     ("format", include_str!("../../../std/format.blsp")),
     ("reload", include_str!("../../../std/reload.blsp")),
+    // The Model Context Protocol tool surface — `(mcp-tools)` returns the
+    // catalogue the `nest mcp` dispatcher reads (ADR-036, docs/mcp.md, step 3).
+    ("mcp", include_str!("../../../std/mcp.blsp")),
 ];
 
 /// Baked-in reference *documents* (markdown), the counterpart to

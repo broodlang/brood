@@ -23,9 +23,13 @@ image.
 > / prompts/list / ping / shutdown / exit; Brood ↔ JSON converters; 13
 > dispatcher tests; `nest mcp` subcommand wired with the strict-per-project
 > bootstrap; happy-path verified against the real binary)**;
-> (3) `std/mcp.blsp` with the initial tool set — the next move: until it
-> lands, `tools/list` is empty and the protocol surface is doc resources
-> only;
+> **(3) `std/mcp.blsp` — done (2026-05-28; eight tool `defn`s + `(mcp-tools)`
+> registry; six live (`eval`, `load`, `lookup`, `macroexpand`, `format`, and
+> dispatch for any project-defined tools), three documented stubs (`check`,
+> `run-tests`, `processes`); added to `EMBEDDED_MODULES` so `(require 'mcp)`
+> finds it without a load-path; 8 step-3 integration tests through the real
+> dispatcher; verified against the real binary — `tools/list` returns the
+> eight tools, `eval (+ 1 2 3)` → "6", `lookup map` → arglist + doc)**;
 > (4) `nest new` scaffolds `.mcp.json`;
 > (5) docs/devlog tick.
 

@@ -1,0 +1,184 @@
+(defmodule mcp
+  "Model Context Protocol tool surface for `nest mcp` (ADR-036, docs/mcp.md).
+
+The dispatcher in `crates/nest/src/mcp.rs` reads `(mcp-tools)` on every
+`tools/list` *and* `tools/call`, so a `def` in a previous `eval` (hot reload,
+ADR-013) reshapes the surface immediately — and a project's own `mcp.blsp`
+can shadow this entire catalogue (step 5 territory; the dispatcher already
+does the right thing if the project rebinds `mcp-tools`).
+
+Each catalogue entry is a map: `:name` (string, the MCP tool name),
+`:description` (optional, agent-visible), `:schema` (JSON Schema for the
+arguments — a Brood map projected to JSON by the dispatcher), and `:handler`
+(a function `(handler args-map)` returning the tool's result; the dispatcher
+JSON-ifies the return value and wraps it in MCP's content envelope).
+
+Args arrive as a *keyword-keyed* Brood map (JSON object keys become Brood
+keywords) — so `(get args :source)` is the idiomatic accessor. Handlers
+return Brood data (nil, bool, int, float, string, keyword/symbol,
+list/vector, map). Closures, refs, pids etc. can't be JSON-ified and surface
+as errors.")
+
+;; ---- handlers --------------------------------------------------------------
+;; Each handler is `(handler args-map) -> result-map`. Handlers `throw` on
+;; argument-shape problems (the dispatcher renders the throw as a JSON-RPC
+;; error); soft failures (an unbound name in `lookup`, a parse error in `eval`)
+;; become a typed field in the returned map so the agent can branch on it
+;; without re-parsing an error string.
+
+(defn mcp-eval-tool (args)
+  "`eval` — evaluate `:source` in the session's global env. State persists
+across calls (hot reload, ADR-013): a `def` here is visible to the next call
+and to spawned processes. Returns `{:value pr-str-of-result}` on success and
+`{:error msg}` on failure; the dispatcher catches `throw`s, but a parse/eval
+error inside the user expression surfaces here as the `:error` branch."
+  (let (src (get args :source))
+    (when (not (string? src))
+      (throw "eval: :source must be a string"))
+    (try
+      (let (form  (read-string src)
+            value (eval form))
+        {:value (pr-str value)})
+      (catch e
+        {:error (str e)}))))
+
+(defn mcp-load-tool (args)
+  "`load` — load a `.blsp` file into the session. Side-effects (`def`,
+`defn`, `defmacro`) persist. Returns `{:ok true}` or
+`{:ok false :error msg}`."
+  (let (file (get args :file))
+    (when (not (string? file))
+      (throw "load: :file must be a string"))
+    (try
+      (do (load file)
+          {:ok true})
+      (catch e
+        {:ok false :error (str e)}))))
+
+(defn mcp-lookup-tool (args)
+  "`lookup` — describe a global name. Returns `{:name :arglist :doc
+:source-location}` (arglist a list of param symbols incl. `&optional`/`&`
+markers; doc a string or nil; source-location `[file line col]` or nil).
+Unbound names come back as `{:name :error}` rather than a thrown error, so
+the agent can branch on `(get r :error)` cleanly."
+  (let (name (get args :name))
+    (when (not (string? name))
+      (throw "lookup: :name must be a string"))
+    (let (sym (read-string name))
+      (try
+        ;; `arglist` and `doc` want the *function value*; `(eval sym)`
+        ;; resolves the name. `source-location` wants the symbol itself.
+        (let (val (eval sym))
+          {:name name
+           :arglist (arglist val)
+           :doc (doc val)
+           :source-location (source-location sym)})
+        (catch e
+          {:name name :error (str e)})))))
+
+(defn mcp-macroexpand-tool (args)
+  "`macroexpand` — expand `:form` (a source string) once (`:mode \"1\"`, the
+default) or recursively (`:mode \"all\"`). Returns `{:expanded pr-str}`.
+Reads the form ourselves rather than letting it interpolate into surrounding
+text — unbalanced parens in `:form` can't break the host expression."
+  (let (src  (get args :form)
+        mode (get args :mode))
+    (when (not (string? src))
+      (throw "macroexpand: :form must be a string"))
+    (try
+      (let (form (read-string src)
+            out  (if (= mode "all")
+                   (macroexpand form)
+                   (macroexpand-1 form)))
+        {:expanded (pr-str out)})
+      (catch e
+        {:error (str e)}))))
+
+(defn mcp-format-tool (args)
+  "`format` — reformat `:source` via `std/format.blsp`'s `(format-source ...)`.
+Idempotent. The require is lazy and cached, so the per-call cost is a hash
+check after the first invocation."
+  (require 'format)
+  (let (src (get args :source))
+    (when (not (string? src))
+      (throw "format: :source must be a string"))
+    (try
+      {:formatted (format-source src)}
+      (catch e
+        {:error (str e)}))))
+
+(defn mcp-check-tool (args)
+  "`check` — advisory type-check the project. *Stub for v0*: the Brood-side
+`(check-project)` is print-oriented (GNU lines to stderr + an `Int` count),
+so a structured wrapper has to land first. See ADR-036 step 1c (docs/mcp.md)."
+  {:error "check is not yet wired — needs a structured (check-project) variant in std/project.blsp (step 1c)"})
+
+(defn mcp-run-tests-tool (args)
+  "`run-tests` — run the project test suite. *Stub for v0*: same blocker as
+`check` — `(run-project-tests)` prints GNU per-test output and raises on
+failure. Needs a structured runner in std/test.blsp (step 1c)."
+  {:error "run-tests is not yet wired — needs a structured runner in std/test.blsp (step 1c)"})
+
+(defn mcp-processes-tool (args)
+  "`processes` — list the session's live green processes. *Stub*: there is
+no `(list-processes)` primitive today — `(self)` is the only handle on a
+running process. The fix is a `process` enumeration primitive (small Rust
+addition), gated on a concrete agent use-case."
+  {:error "processes is not yet wired — needs a (list-processes) primitive"})
+
+;; ---- catalogue -------------------------------------------------------------
+
+(defn mcp-tools ()
+  "The tool catalogue `nest mcp` reads on every `tools/list`/`tools/call`.
+A project's own `mcp.blsp` (loaded after this) can replace `mcp-tools` with
+its own list that conses additional entries onto this one — `def` rebinds
+globals (ADR-013), so the dispatcher sees the project's version on its next
+fetch.
+
+Six tools work today; `check`, `run-tests`, and `processes` ship as
+documented stubs (their `:error` field tells the agent exactly what's
+missing and which step of `docs/mcp.md` it lives in)."
+  (list
+    {:name "eval"
+     :description "Evaluate a Brood expression in the session's global environment. State persists across calls (hot reload — `def` mutates the runtime image, ADR-013)."
+     :schema {:type "object"
+              :properties {:source {:type "string" :description "Brood source to evaluate"}}
+              :required ["source"]}
+     :handler mcp-eval-tool}
+    {:name "load"
+     :description "Load a `.blsp` file into the session's image. Side-effects (def/defn/defmacro) persist."
+     :schema {:type "object"
+              :properties {:file {:type "string" :description "Path to a .blsp file"}}
+              :required ["file"]}
+     :handler mcp-load-tool}
+    {:name "lookup"
+     :description "Look up a global name: returns its arglist, docstring, and source location (file/line/col)."
+     :schema {:type "object"
+              :properties {:name {:type "string" :description "The name to look up (no leading quote)"}}
+              :required ["name"]}
+     :handler mcp-lookup-tool}
+    {:name "macroexpand"
+     :description "Macro-expand a form. Default is one step (`:mode \"1\"`); pass `:mode \"all\"` for full expansion."
+     :schema {:type "object"
+              :properties {:form {:type "string" :description "Source for the form to expand"}
+                           :mode {:type "string" :enum ["1" "all"] :description "\"1\" (default) or \"all\""}}
+              :required ["form"]}
+     :handler mcp-macroexpand-tool}
+    {:name "format"
+     :description "Reformat Brood source. Idempotent — formatting the result is a fixed point."
+     :schema {:type "object"
+              :properties {:source {:type "string" :description "Brood source to reformat"}}
+              :required ["source"]}
+     :handler mcp-format-tool}
+    {:name "check"
+     :description "Advisory type-check the project (stub — see docs/mcp.md step 1c)."
+     :schema {:type "object" :properties {}}
+     :handler mcp-check-tool}
+    {:name "run-tests"
+     :description "Run the project test suite (stub — see docs/mcp.md step 1c)."
+     :schema {:type "object" :properties {}}
+     :handler mcp-run-tests-tool}
+    {:name "processes"
+     :description "List live green processes (stub — needs a (list-processes) primitive)."
+     :schema {:type "object" :properties {}}
+     :handler mcp-processes-tool}))
