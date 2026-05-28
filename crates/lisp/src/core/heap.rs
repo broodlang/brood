@@ -46,7 +46,18 @@ macro_rules! region_ref {
     ($name:ident, $id:ty, $field:ident, $ret:ty, $what:literal) => {
         pub fn $name(&self, id: $id) -> $ret {
             match id.region() {
-                LOCAL => &self.local.$field[id.index()],
+                LOCAL => {
+                    #[cfg(debug_assertions)]
+                    debug_assert!(
+                        !PoisonBits::is(&self.poison.$field, id.index()),
+                        "use-after-GC: {}() on freed LOCAL {} slot {} (handle {:#x}).",
+                        stringify!($name),
+                        stringify!($field),
+                        id.index(),
+                        id.0
+                    );
+                    &self.local.$field[id.index()]
+                }
                 PRELUDE => &self.prelude.slabs.$field[id.index()],
                 RUNTIME => self.runtime.code.$field.get(id.index()).expect($what),
                 _ => unreachable!("invalid handle region"),

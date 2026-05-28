@@ -526,9 +526,22 @@ fn params<P: serde::de::DeserializeOwned>(not: ServerNotification) -> Option<P> 
 /// back to the real on-disk path — without this, `find_project_root` silently
 /// failed for any path containing whitespace or non-ASCII bytes. A non-`file:`
 /// URI returns `None` so callers skip project work.
+///
+/// Handles both `file:///abs/path` (empty authority — the common form) and
+/// `file://host/abs/path` (some WSL / remote clients): the authority component
+/// is dropped and the path taken from its leading `/`. Without this, a
+/// host-bearing URI decoded to a *relative* path (`host/abs/path`) and project
+/// bootstrap silently never fired.
 fn uri_to_path(uri: &Uri) -> Option<PathBuf> {
-    let raw = uri.as_str().strip_prefix("file://")?;
-    Some(PathBuf::from(percent_decode(raw)))
+    let rest = uri.as_str().strip_prefix("file://")?;
+    // Empty authority → `rest` already starts at the path's `/`. A non-empty
+    // authority (a host) precedes the first `/`; the path begins there.
+    let path = if rest.starts_with('/') {
+        rest
+    } else {
+        &rest[rest.find('/')?..]
+    };
+    Some(PathBuf::from(percent_decode(path)))
 }
 
 /// Build a `file://` URI from an absolute filesystem path — the inverse of

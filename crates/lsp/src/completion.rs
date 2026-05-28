@@ -18,14 +18,7 @@ use lsp_types::{CompletionItem, CompletionItemKind, Documentation, MarkupContent
 
 use brood::introspect;
 
-/// Special forms and core control/binding macros — offered as completions and
-/// marked as keywords. (Mirrors the same list the semantic-token classifier and
-/// `brood.el` use; these names aren't enumerable from the global table.)
-const KEYWORDS: &[&str] = &[
-    "if", "do", "def", "fn", "lambda", "let", "let*", "letrec", "quote", "quasiquote", "defmacro",
-    "defn", "defdyn", "defmodule", "when", "unless", "cond", "and", "or", "match", "try", "catch",
-    "throw", "receive", "binding", "dolist", "doseq", "dotimes", "for", "->", "->>",
-];
+use crate::semantic_tokens::SPECIAL_FORMS;
 
 /// Candidates visible at byte `offset`. `tree` is the document's scope analysis
 /// (already built by the caller, which also parses the CST).
@@ -46,7 +39,8 @@ pub fn completions(interp: &mut Interp, tree: &ScopeTree, offset: u32) -> Vec<Co
         }
     }
     // Special forms / core macros (evaluator syntax — not in the global table).
-    for &kw in KEYWORDS {
+    // One shared list with the semantic-token classifier, so they can't drift.
+    for &kw in SPECIAL_FORMS {
         if seen.insert(kw.to_string()) {
             items.push(item(kw.to_string(), CompletionItemKind::KEYWORD));
         }

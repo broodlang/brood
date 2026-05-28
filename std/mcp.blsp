@@ -163,9 +163,13 @@ synthesised by macros aren't included. Complements `lookup` (which gives the
     (when (not (string? name))
       (throw "callers: :name must be a string"))
     {:references
+     ;; One unreadable file (deleted/permissions between listing and read)
+     ;; must not abort the whole sweep — skip it (`catch` → nil) and continue.
      (mapcat (fn (f)
-               (map (fn (lc) {:file f :line (first lc) :col (second lc)})
-                 (references-in-source name (slurp f))))
+               (try
+                 (map (fn (lc) {:file f :line (first lc) :col (second lc)})
+                   (references-in-source name (slurp f)))
+                 (catch _ nil)))
        (project--all-files *project-root*))}))
 
 ;; ---- catalogue -------------------------------------------------------------

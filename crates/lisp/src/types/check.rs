@@ -160,16 +160,29 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
     // the same form is a no-op. Failures are swallowed: the checker is
     // advisory and shouldn't gate on a missing module.
     let root = heap.global();
-    let expanded: Vec<Value> = forms
-        .iter()
-        .map(|&f| {
-            let exp = crate::eval::macros::macroexpand_all(heap, f, root).unwrap_or(f);
-            if is_require_form(heap, exp) {
-                let _ = crate::eval::eval(heap, exp, root);
-            }
-            exp
-        })
-        .collect();
+    // Root the input forms and the expanding-into vec across the loop:
+    // each iteration may call `eval` on a `(require …)`, which runs a
+    // GC safepoint at outermost depth — any LOCAL `Value` held only in
+    // a Rust local would be swept. The `roots_len`/`truncate_roots`
+    // pairing is balanced even if a panic unwinds through here (a future
+    // `panic = abort` wouldn't need this, but today's `unwind` would
+    // leak roots otherwise).
+    let roots_base = heap.roots_len();
+    for &f in forms {
+        heap.push_root(f);
+    }
+    let mut expanded: Vec<Value> = Vec::with_capacity(forms.len());
+    for &f in forms {
+        let exp = crate::eval::macros::macroexpand_all(heap, f, root).unwrap_or(f);
+        // Root the just-built expansion *before* possibly triggering a
+        // collect via `eval`; otherwise this LOCAL handle dies between
+        // here and the next iteration's macroexpand.
+        heap.push_root(exp);
+        expanded.push(exp);
+        if is_require_form(heap, exp) {
+            let _ = crate::eval::eval(heap, exp, root);
+        }
+    }
     // Pass 2: collect every `(def name …)` in the expanded tree (top level
     // *or* nested — `defn` inside `test`/`describe`/`when`/… still defines a
     // global once it runs, so the checker honours that). `defmacro` stays a
@@ -182,6 +195,10 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
     for &form in &expanded {
         check_into(heap, form, &ctx, &mut out);
     }
+    // Balance the GC roots we pushed for pass 1 (input forms + their
+    // expansions). Safe to drop now: nothing after this consults `expanded`
+    // or `forms` against the heap.
+    heap.truncate_roots(roots_base);
     out
 }
 
