@@ -1300,7 +1300,10 @@ mod tests {
         assert_eq!(err["code"], -32603, "{err}"); // JSON-RPC internal
         let data = &err["data"];
         assert_eq!(data["kind"], "runtime");
-        assert_eq!(data["code"], "E0099");
+        // `(/ 1 0)` carries the specific `E0040` code (div-by-zero); the
+        // generic `E0099` is the runtime catch-all for raises that haven't
+        // been tagged with a specific code yet (see `docs/error-codes.md`).
+        assert_eq!(data["code"], "E0040");
         assert!(data["message"]
             .as_str()
             .unwrap()

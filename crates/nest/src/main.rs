@@ -358,9 +358,11 @@ fn cmd_doc(interp: &mut Interp, module: Option<&str>) {
     run(interp, &code);
 }
 
-/// `nest repl` — project-aware REPL. Inside a project, pre-load sources so
-/// every module is immediately callable. Outside, fall through to the plain
-/// language REPL (same UX as `brood`).
+/// `nest repl` — project-aware REPL. Inside a project, pre-load every source
+/// file so the project's modules are immediately callable from the prompt.
+/// Outside a project, fall through to the plain language REPL (same UX as
+/// `brood`). The REPL itself is `brood_repl` — one implementation shared
+/// across both binaries.
 fn cmd_repl(interp: &mut Interp) {
     if in_project() {
         run(
@@ -373,16 +375,7 @@ fn cmd_repl(interp: &mut Interp) {
     } else {
         eprintln!("nest repl — no project.blsp here; plain REPL (`brood` would do the same)");
     }
-    // Delegate to the `brood` binary's REPL helpers via the shared lib. We
-    // keep one REPL implementation; nest only handles the project bootstrap.
-    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        if let Err(e) = brood::cli_support::repl_interactive(interp) {
-            eprintln!("repl error: {}", e);
-            std::process::exit(1);
-        }
-    } else {
-        brood::cli_support::repl_plain(interp);
-    }
+    brood_repl::repl(interp);
 }
 
 /// `nest mcp` — see docs/mcp.md (ADR-036). Strictly per-project.

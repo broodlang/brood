@@ -51,12 +51,16 @@ Codes are grouped by [`ErrorKind`]:
 | `E0010` | `:unbound` | eval lookup, `LispError::unbound(...)` | `(no-such-fn)` |
 | `E0020` | `:arity` | `bind_params`, `LispError::arity(...)` | `((fn (x) x))` |
 | `E0030` | `:type` | `LispError::wrong_type(...)` / `type_err(...)` | `(first 5)` |
-| `E0099` | `:runtime` | `LispError::runtime(...)` (catch-all) | `(/ 1 0)` |
+| `E0040` | `:runtime` | `%div` / `rem` (with a `:hint`) | `(/ 1 0)`, `(rem 1 0)` |
+| `E0099` | `:runtime` | `LispError::runtime(...)` (catch-all) | uncoded runtime raises |
 
 `E0099` is the catch-all assigned by `LispError::runtime(...)` — every
-runtime raise picks it up by default. As specific raises get their own codes
-(e.g. a dedicated `E0040` for "division by zero", `E0050` for IO failures),
-they slot into the `E04xx` range and the message becomes more diagnostic.
+runtime raise picks it up unless the site overrides via
+`.with_code(error_codes::SOMETHING)`. As specific raises get their own codes
+(integer overflow → `E0041`, IO failures → `E0050`, …), they slot into the
+`E04xx` range and the message becomes more diagnostic. Reserve any
+`E04xx` only when you also intend to attach a `:hint` — the diagnostic
+value of a code without one is small.
 
 ## Adding a new code
 
@@ -67,6 +71,23 @@ they slot into the `E04xx` range and the message becomes more diagnostic.
 4. Add a row to the table above. Don't reuse a retired code.
 5. If the error has a common fix, attach a `:hint` at construction via
    `.with_hint("…")`.
+
+## Hints
+
+`:hint` is set by the raise site when there's a common fix worth surfacing.
+A hint always names an actionable next step, not just a description:
+
+| Hint context | Message |
+|---|---|
+| `(/ x 0)` / `(rem x 0)` | `guard the denominator: (when (not= y 0) (/ x y))` |
+| Unbound symbol in a green process | `this fired inside a spawned process — if it happens only under fan-out load, the scheduler may be racing prelude lookups; try -j 1 …` |
+
+The scheduler-race hint is conditional: it attaches only when the unbound
+error is raised inside a green (spawned) process — checked via
+`process::in_green_process()` in `eval::unbound_error`. The root thread
+(REPL / file runner / `nest mcp` dispatcher) doesn't get it, because the
+race is a multi-thread scheduling phenomenon. Documented from
+[`claude-demo-findings.md`](claude-demo-findings.md)'s blocker §1.
 
 ## Branching on `:code` vs `:kind`
 

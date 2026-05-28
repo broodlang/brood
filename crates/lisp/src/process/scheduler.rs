@@ -247,14 +247,19 @@ fn worker_count() -> usize {
 /// routes over the link). Same `[:down …]` shape in both cases — the
 /// receiver code on the wire side is unchanged from local.
 fn deregister(pid: u64, reason: Message) {
-    // The two locks are taken **sequentially**, not nested: REGISTRY first,
-    // released, then MONITORS. `add_monitor` takes them in the opposite
-    // *nested* order (MONITORS held while briefly grabbing REGISTRY for the
-    // alive check), which is deadlock-free precisely because `deregister`
-    // never holds REGISTRY while reaching for MONITORS. Don't introduce a
-    // function that holds REGISTRY while taking MONITORS, or this becomes a
+    // The three tables are taken **sequentially**, not nested: REGISTRY first,
+    // released, then NAMES, released, then MONITORS. `add_monitor` and
+    // `spawn_or_get` take REGISTRY *nested* inside MONITORS / NAMES
+    // respectively for their own atomic check-and-modify steps — both are
+    // deadlock-free precisely because `deregister` never holds an outer
+    // lock while reaching for REGISTRY. Don't introduce a function that
+    // holds REGISTRY while taking NAMES or MONITORS, or this becomes a
     // genuine ordering hazard.
     crate::core::sync::lock(&REGISTRY).remove(&pid);
+    // Drop any registered names that pointed at this pid — Erlang semantics
+    // (a name lives only as long as its process). Without this, named-spawn
+    // would see the stale entry as "already running" and never respawn.
+    crate::dist::unregister_dead_pid(pid);
     let watchers = crate::core::sync::lock(&monitor::MONITORS)
         .remove(&pid)
         .unwrap_or_default();
@@ -404,6 +409,22 @@ pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
 /// `(self)` — this process's pid.
 pub fn self_pid() -> u64 {
     ensure_ctx().pid
+}
+
+/// Are we currently running inside a **green** (spawned) process — as opposed
+/// to the *root* thread (the REPL / file runner / MCP dispatcher)? `true`
+/// when `CURRENT` has a yielder, i.e. we entered through a coroutine. Used
+/// by the eval-time `unbound` raise to attach a scheduler-race hint
+/// (the under-load failure mode `docs/claude-demo-findings.md` flagged —
+/// concurrent prelude lookups racing). Never panics; returns `false` if
+/// `CURRENT` is unset.
+pub fn in_green_process() -> bool {
+    CURRENT.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|ctx| ctx.yielder.is_some())
+            .unwrap_or(false)
+    })
 }
 
 /// Wrap a local process id in a [`Value::Pid`] tagged with this runtime's node

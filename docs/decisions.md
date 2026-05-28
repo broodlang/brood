@@ -1763,3 +1763,185 @@ already bundled via `include_str!`; `EMBEDDED_MODULES` is the established
 pattern. `project.blsp` already declares the entry point (`:main`).
 `(load …)` is the right hook for "load from inside the binary" — extend
 to look in the embedded archive before falling through to disk.
+
+
+## ADR-039 — Supervised processes with mode-gated resume checkpoints
+
+**Status:** proposed (2026-05-28). Design recorded in
+[`supervision.md`](supervision.md).
+
+**Context.** Brood is the language a self-editing editor will be written in.
+The editor is one long-running stateful process whose `(receive)` loop *must
+not die* when a freshly-saved redefinition contains a bug. The current
+process model is **Erlang let-it-crash**: an uncaught error inside a process
+unwinds the coroutine and the process is gone. Erlang reaches that
+elegantly through *gen_server + supervisor* — split the state-holder from
+the worker so workers can be restarted with no state to lose. That
+separation exists because mutable state is hard to roll back cleanly.
+
+Brood is immutable. There is no mid-iteration partial mutation to undo;
+every value the eval loop holds at a safepoint is byte-for-byte equivalent
+to that same value before any iteration started. That property makes a
+fundamentally different process model possible — one where **the runtime
+itself is the supervisor**, every process is recovered automatically, and
+the worker/state-holder split that defines Erlang/OTP can collapse.
+
+The shape Brood's process model can take, that no mutable language can:
+
+> **A process is its current call.** At every function call, the runtime
+> updates a per-process `(callee, argv)` *resume slot*. On an uncaught
+> error, the supervisor catches, logs, applies a small backoff, and
+> re-invokes from the resume slot — **same function, same arguments**.
+> Immutability means no partial state survived the throw; the resume is
+> transactional. Late binding means a fresh redefinition (after the user
+> fixes the bug and saves) is picked up on the next invocation.
+
+This is the architectural decision. The trade-offs — performance, side
+effects, mode-gating — are below.
+
+**Decision.** Three coupled changes, all gated by a single runtime mode
+flag, with sensible defaults per command:
+
+1. **`spawn` is supervised, always.** `(spawn expr)` creates a process
+   whose outermost eval frame is wrapped in the runtime's supervisor.
+   Uncaught errors are caught at the process boundary, not propagated to
+   the OS thread. The main process running a script is supervised the
+   same way.
+2. **Resume checkpointing.** While `dev-mode` is on, the eval loop updates
+   a `Process::resume_slot: Option<(Value, SmallVec<[Value; 8]>)>` at
+   every function call. On caught error, the supervisor re-invokes
+   `apply(callee, argv)` from the slot. **State is preserved** — `argv`
+   *is* the current iteration's accumulator. With dev-mode off, the slot
+   isn't updated; an error restarts from the *spawn* entry expression (or
+   exits, for one-shot processes). Recovery still works; state doesn't
+   carry through.
+3. **`spawn` accepts an optional name** — `(spawn :editor expr)` makes
+   the spawn *idempotent on the name*. A live process registered under
+   `:editor` makes the spawn a no-op. This is what makes hot-reload of a
+   file containing `(spawn :editor (editor-loop init))` not spin up a
+   second editor: the second load sees the name is alive, skips. The
+   name table is the existing `NAMES` table that `register`/`whereis`
+   already use — no new mechanism.
+
+The mode gate (`BROOD_MODE=dev` / `BROOD_MODE=release`, with per-CLI
+defaults):
+
+| Command                       | Default mode | Why                                                                          |
+|-------------------------------|--------------|------------------------------------------------------------------------------|
+| `brood file.blsp` / REPL      | dev          | Interactive use is hot-reload-style; the user is editing while it runs.      |
+| `brood --test`                | dev          | Tests catch transient errors; supervision keeps the suite running.           |
+| `nest run`                    | dev          | Same as `brood`. Hot-reload is core to the workflow.                         |
+| `nest test`                   | dev          | Same.                                                                        |
+| `nest bundle` (when it lands) | release      | Bundled binaries ship to end users; no editing at runtime; pay no overhead.  |
+| `nest run --release`          | release      | Opt-in for "I want production semantics on dev machine".                     |
+
+Release mode means: no checkpoint slot updates, no resume — uncaught error
+exits the process the Erlang way. Same eval loop, just a no-op for the
+checkpoint branch. **The cost of hot-reload is paid only when the user is
+hot-reloading.**
+
+**Why.** Three forces, all pointing the same way:
+
+1. **The editor is the destination, and the editor *must not die*.** Every
+   keystroke handler is, effectively, an iteration of the editor's main
+   loop. A bug in newly-saved code can't be allowed to terminate the
+   editor. The supervised-resume model gives this for free, with no user
+   ceremony.
+2. **Immutability collapses the gen_server split.** Erlang separates
+   state-holder from worker because the worker has to be safely restartable
+   *despite* mutable state. Brood doesn't need that. State lives in the
+   loop's call frame, and the resume slot puts it back exactly where it was.
+   The whole supervisor-tree+gen_server pattern that occupies a chapter of
+   every Erlang book becomes "spawn it".
+3. **Hot-reload demands it.** The whole point of late binding + redefinable
+   globals (ADR-013) is that *running code picks up new definitions*. If
+   the running code dies the moment a newly-loaded redefinition throws,
+   late binding is half a feature. Supervised resume completes it.
+
+**Mode-gating is the price-vs-feature lever.** Resume checkpointing is two
+writes per function call (a `Value` and an `SmallVec` of args). On the
+hottest path that's a few ns; on a tight recursive numeric loop it might
+be a measurable few percent. Hot-reload survivability isn't free, but it's
+also not needed at runtime for a shipped editor binary. Dev mode pays;
+release mode doesn't. Default chosen by command surface, overridable
+explicitly.
+
+**What this removes.**
+
+- **`defonce`** (transitional shim in `std/prelude.blsp` today): subsumed
+  by named-spawn for the process case (the dominant use) and by "state
+  lives in a process" for the state case. **Kept in the prelude until
+  ADR-039 lands** — removing it before named-spawn exists would leave
+  users without a working "spawn-once on reload" pattern. The
+  implementation commit removes `defonce` in the same change that adds
+  named-spawn.
+- **Hand-written supervisors.** No user code calls `monitor`-and-respawn
+  loops. `monitor` remains for genuine "I want to know when this dies"
+  patterns; it doesn't have to also be the restart mechanism.
+- **The `live-loop` macro** I was about to propose: vanishes. Plain
+  `(defn worker (state) … (worker new-state))` *is* a supervised loop.
+- **Most `try`/`catch` at the top of a process.** Errors are caught by the
+  runtime; user code only catches when it wants to *recover with context*
+  (e.g., an HTTP server logging which request failed), not just "don't die".
+
+**What this enables.** Some downstream simplifications worth flagging:
+
+- **`nest test` doesn't need `:isolated` for crash-isolation** — a test
+  that throws no longer dies its worker; it logs and continues. (`:isolated`
+  still useful for the global-table sandbox use case.)
+- **`std/reload.blsp`'s explicit `(try (load p) (catch e …))` becomes
+  optional** — the watcher process is itself supervised. Keep the explicit
+  catch for the *diagnostic context* (which file failed, which error), drop
+  it as a *survival mechanism*.
+- **The hot-reload demo simplifies.** No `defonce`, no manual park, no
+  named pid: `(spawn :ticker (ticker 0))` at the top of the file. Reloading
+  the file rebinds `ticker`, the spawn is a no-op, the existing process
+  picks up the new code.
+
+**Scope / deferred.**
+
+- **The mode gate's wire** — exact env-var / CLI-flag spelling — is a
+  small implementation detail recorded with the implementation. Likely
+  `BROOD_MODE=release` + `--release` flag for both `brood` and `nest`.
+- **Per-process supervision policy** (max restarts, backoff curve) lives
+  on the spawn site: `(spawn :worker expr :max-restarts 10 :backoff
+  :exponential)`. Default: 10 restarts over 5s, then give up; exponential
+  backoff from 1 ms. Tuneable when real workloads ask for it.
+- **The script case.** A top-level `.blsp` file that's a sequence of
+  side-effecting forms (not a loop) gets supervised the same way, but the
+  resume slot is empty after the last form; an error during step N
+  re-invokes step N (only). For idempotent scripts (most are), retry is
+  fine. For non-idempotent, the script can opt out with `--release` or by
+  bare-spawning. Documented behaviour.
+- **Side-effect duplication.** A `(println …)` followed by a crash means
+  the line printed; resume re-prints. Same as a retried database
+  transaction at the SQL layer — at-least-once. The mode gate lets users
+  opt out when they need exactly-once.
+- **`bound?`** — still useful for genuine "is this name in the global
+  table" introspection; the defonce use case goes away, but it stays
+  as a primitive.
+
+**Open questions / answer-on-implementation.**
+
+- Does the resume slot need to be GC-rooted? Yes — `argv` holds
+  potentially-LOCAL values; the slot is a per-process root the GC must
+  scan. Two extra roots per process. Negligible.
+- Should the supervisor's *log channel* be process-local or runtime-global?
+  Process-local seems right (each process gets its own diagnostic stream);
+  the runtime aggregates into one stream by default. `nest test`'s
+  per-test output already uses a similar pattern.
+- Restart storm prevention. Document the algorithm:
+  `backoff_ms = min(max_backoff, base * 2^restart_count)`; `restart_count`
+  resets after `quiet_seconds` of no crashes. Tune base/max via spawn
+  opts.
+
+**Consequences.** This is the deepest behavioural change since ADR-018
+(green processes); landing it touches `process.rs` (the worker's
+coroutine entry — wrap the eval call in a catch + retry loop), `eval/mod.rs`
+(update `Process::resume_slot` at every `Value::Fn(id)` / `Value::Native(id)`
+dispatch when in dev mode), `value.rs` (the slot needs `Send` storage; a
+SmallVec of Values does), and `Cargo.toml` / CLI flags for mode selection.
+`std/prelude.blsp` loses `defonce`; `std/reload.blsp`'s `try`/`catch` gets
+simpler. The proposed M2 editor work (`docs/roadmap.md`) is designed
+against this model, not retrofit. ADR-038 (the bundler) gains a definite
+release-mode story.

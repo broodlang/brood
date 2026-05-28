@@ -168,6 +168,44 @@ pub(crate) fn whereis(name: Symbol) -> Option<u64> {
     crate::core::sync::read(&NAMES).get(&name).copied()
 }
 
+/// Remove every `NAMES` entry pointing at `pid` — called from
+/// `process::deregister` when a process dies, so a name registered under it
+/// doesn't go stale. Without this, `(whereis :foo)` could return a dead pid
+/// and `(spawn :foo …)` (named-spawn) would mistake the stale entry for
+/// "already running" and never re-spawn the worker. Erlang's `register`
+/// semantics: a name lives only as long as its process does.
+pub(crate) fn unregister_dead_pid(pid: u64) {
+    let mut names = crate::core::sync::write(&NAMES);
+    names.retain(|_, &mut p| p != pid);
+}
+
+/// Named-spawn's atomic check-or-spawn primitive. If `name` is registered
+/// to a still-alive pid, return that pid and skip the spawn. Otherwise,
+/// drop any stale entry, call `spawner` to create a fresh process, register
+/// it under `name`, and return the new pid.
+///
+/// The whole sequence runs under the `NAMES` write lock so two concurrent
+/// `(spawn :name …)` calls can't both spawn — the loser sees the winner's
+/// pid and returns it. Briefly takes the REGISTRY mutex inside (via
+/// `process::is_alive`) for the staleness check; matches the lock ordering
+/// established by `monitor::add_monitor` (the only other place that nests
+/// REGISTRY inside another lock), so no deadlock with `deregister`'s
+/// sequential REGISTRY → NAMES → MONITORS pattern.
+pub(crate) fn spawn_or_get(name: Symbol, spawner: impl FnOnce() -> u64) -> u64 {
+    let mut names = crate::core::sync::write(&NAMES);
+    if let Some(&existing) = names.get(&name) {
+        if process::is_alive(existing) {
+            return existing;
+        }
+        // Stale (the process registered under this name has died); drop and
+        // fall through to a fresh spawn.
+        names.remove(&name);
+    }
+    let pid = spawner();
+    names.insert(name, pid);
+    pid
+}
+
 /// `(monitor (Pid remote_node remote_pid))` from the cross-node path: ship a
 /// `Frame::Monitor` to the peer and record the pending remote watcher locally
 /// (so net-split can fire `:noconnection` to the watcher even though the

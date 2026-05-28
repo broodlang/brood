@@ -4423,3 +4423,233 @@ nest 29 — **269/269**. The new flows:
 - **Diagnostic configurability.** No env var to silence the arity-change
   diagnostic yet. Likely fine; can add `BROOD_NO_RELOAD_WARN` or similar if
   someone needs it during a noisy refactor.
+
+---
+
+## 2026-05-29 — `nest repl` proper: new `crates/repl/` crate
+
+**Goal.** Promote `nest repl` from a "run `brood` directly" stub to a real
+project-aware REPL with the same line editing + history as `brood`'s REPL,
+without making the LSP pay for `rustyline`.
+
+**Trade-off resolved.** `rustyline` is a CLI-side UX dep (ADR-005 / CLAUDE.md).
+The straightforward path — putting REPL helpers in `brood::cli_support` —
+would have pulled `rustyline` into every brood-lib dependent, including the
+LSP, which has no REPL. Instead: a new thin workspace member, `crates/repl/`
+(crate name `brood-repl`), holds the REPL + rustyline. `cli` and `nest` both
+depend on it; `brood-lsp` doesn't.
+
+**Built.**
+
+- **`crates/repl/`** with `repl(interp)` as the one public entry point: the
+  function dispatches `is_terminal` to either `repl_interactive` (rustyline,
+  `~/.brood_history`, multi-line via `is_balanced`) or `repl_plain` (line-
+  buffered, no prompts — for pipes / scripts). Both reclaim each command's
+  LOCAL allocations via `heap.checkpoint()` + `reset_local_to(base)`; globals
+  live in shared regions, so `def`s persist across commands. Five unit tests
+  cover `is_balanced` (the multi-line gate): unclosed delimiters, comments
+  swallowing delimiters, strings ignoring delimiters, escaped quotes.
+- **`cli/main.rs`** lost ~140 lines: imports + main now end with
+  `brood_repl::repl(&mut interp)`. The crate's `Cargo.toml` swaps
+  `rustyline` for `brood-repl`.
+- **`nest/main.rs`'s `cmd_repl`** drops the stub branches and calls
+  `brood_repl::repl(interp)` after the project bootstrap. Inside a project
+  it does `(project-setup root) (project-load-sources root)` first, so the
+  prompt can call any project module directly (verified: `(greeting)` at
+  the prompt resolves to the scaffolded `hello` module's defn).
+- **`brood::cli_support`** lost its interim REPL stubs and the now-unused
+  `use crate::Interp`.
+
+**Workspace.** Added `crates/repl` to `members`. The crate has only two
+dependencies (`brood` + `rustyline`), no dev-deps. `cargo build --workspace`
+clean; full test sweep 274/274 (brood lib 187 + lsp 40 + cli 13 + nest 29 +
+brood-repl 5).
+
+**On the supervisor / process-REPL question** (user asked). The REPL stays a
+plain loop on the main thread for now. Erlang-style "shell as a supervised
+process" doesn't buy us much yet: Brood doesn't panic on user errors
+(`LispResult` propagates), supervisors don't kill stuck processes (which is
+the actual hot path for "user wrote `(loop)`" — needs explicit Ctrl-C /
+eval timeouts), and we don't have an OTP-style supervisor abstraction.
+When (a) `std/` grows a real supervisor framework and (b) the editor model
+arrives where the REPL is one buffer of many, the move is worth revisiting.
+
+
+---
+
+## 2026-05-28 — Supervised-by-default processes (ADR-039); `defonce` removed
+
+**Goal.** Push past the "wrap your loop in try/catch" / "add a supervisor
+process" workarounds and find the right *language-level* answer for the
+hot-reload pain — a redefinition that throws killing the running worker.
+Land the design before M2 (the editor), because the editor's event loop
+is *exactly* the shape this fixes, and we want M2 designed against the
+new process model rather than retrofit.
+
+**What changes for `defonce`.**
+
+- The hot-reload-idempotence it provides is subsumed in the new design
+  by **named-spawn** (`(spawn :worker expr)` — idempotent on the name)
+  for the process case (its main use) and by "state lives in a process"
+  for top-level state. **It is kept in the prelude as a transitional
+  shim until ADR-039 lands** — first attempt: removing it now broke
+  hot-reload immediately (two loops spawned on the second load). The
+  macro now carries a docstring + comment flagging it as transitional
+  with a pointer to `docs/supervision.md`; the actual removal lands in
+  the same commit as named-spawn, so users have a working migration
+  path.
+
+**What I designed.**
+
+- **ADR-039** — *Supervised processes with mode-gated resume checkpoints*.
+  The model in one sentence: **a process is its current call**. The
+  runtime captures `(callee, argv)` at every iteration boundary as a
+  *resume slot*; an uncaught error triggers the supervisor to re-invoke
+  the slot. Same function, same args, fresh code. State preserved.
+  Immutability + late binding + the eval loop's existing `'tail:`
+  checkpoint are the three properties that make this sound in Brood and
+  unsafe in a mutable language.
+- **`docs/supervision.md`** — the long-form design walkthrough. Covers:
+  - **Why this works in Brood and not in mutable languages.** Erlang's
+    gen_server/supervisor split exists *because* a worker that crashes
+    mid-mutation can't be safely resumed; Brood has no mid-mutation to
+    worry about. The split that occupies a chapter of every Erlang book
+    collapses to "spawn it".
+  - **Concrete behaviour for worker, editor, REPL, and one-shot
+    scripts.** Worked example: a worker at `(my-loop 247)`, user saves
+    bad code, throw, runtime catches, re-invokes `(my-loop 247)`, throws
+    again, exponential backoff, user fixes + saves, next retry succeeds
+    *with `num=247` preserved*.
+  - **Mode-gating.** `dev` (default for REPL/`brood file`/`nest run`/`nest
+    test`) pays per-call for full resume; `release` (default for `nest
+    bundle` output / `--release`) does no per-call work — just catches
+    at process boundary and restarts from spawn entry. `bare` for
+    benchmarks. **The cost of hot-reload is paid only when the user is
+    hot-reloading.**
+  - **Simplifications that fall out.** `defonce` ✗, `live-loop` ✗
+    (wouldn't need to exist), most user-level survival `try`/`catch` ✗,
+    `std/reload.blsp`'s explicit `(try (load p) …)` becomes optional,
+    `nest test`'s per-process crash-containment becomes universal,
+    `std/hatch.blsp` simplifies as a layer-over-runtime rather than a
+    full supervision framework, distributed-monitors (slice-3 work)
+    keeps just the *notification* role, not the *restart* role.
+  - **Performance.** Per-call cost: two stores (a `Value` + a `SmallVec`
+    of args). Order-of-magnitude estimate: <1% on typical workloads,
+    ~3–5% on tight recursive numeric loops. Optimisations:
+    coarse-grained "checkpoint only at tail-call boundaries" (4×
+    reduction in updates, same effective recovery semantics), cache-line
+    co-location with the existing `tick` counter, monomorphised dev/
+    release eval loops (no per-call mode branch). Wins from less
+    defensive user code (every removed `try` is cycles back).
+  - **Mode-gating answer to the user's question.** Yes — checkpointing
+    is the cost of hot-reload survivability, and a release build doesn't
+    pay it. Three modes (dev/release/bare), defaults per command surface,
+    overridable via `--release` / `BROOD_MODE`.
+  - **Open questions.** Side-effect duplication on resume (at-least-once
+    semantics for I/O and messages); restart-storm protection (exponential
+    backoff + max-restarts in N seconds, defaults documented); the
+    script-mode resume (top-level form failure exits, doesn't retry —
+    explicit decision, recorded).
+  - **Migration & roll-out.** Behind the mode gate; first land with
+    `(spawn … :supervised true)` as opt-in, then flip default once the
+    test suite migrates. Two-phase commit to limit blast radius.
+
+**Updated.**
+
+- `docs/decisions.md` — ADR-039 appended (~3 KB of rationale + scope).
+- `docs/supervision.md` — new long-form doc (~25 KB; mechanism, examples,
+  performance analysis, what disappears, open questions, implementation
+  sketch).
+- `docs/roadmap.md` — M4 distributed-nodes block gains a ⬜ entry for
+  supervised-by-default processes (designed; pre-requisite for editor
+  design in M2).
+- `docs/README.md` — `supervision.md` row added to the docs index.
+- `std/prelude.blsp` — `defonce` removed.
+
+**Why early.** Three pressures:
+
+1. **The editor needs it.** M2 starts the editor; an editor-event-loop
+   that dies on a bad redefinition is unusable. Better to design the
+   process model first.
+2. **It removes (not adds) abstractions.** `defonce`, `live-loop`, and
+   most survival-pattern boilerplate go away. Net less surface to
+   teach.
+3. **It changes runtime semantics.** Designing in flight is fine for
+   additive things; this is invasive on `process.rs` + `eval/mod.rs`.
+   Capture the design fully first; implement once we agree it's right.
+
+**Not changed yet.** No runtime code lands in this commit — purely
+docs + the `defonce` removal. The design is captured well enough that
+the implementation, when it happens, is a reading-comprehension
+exercise on `supervision.md`.
+
+**What's next** (per the roadmap):
+
+- Decide whether supervised-by-default lands *before* the package
+  manager (ADR-037) or M2 starts. My read: package manager first (1–2
+  weeks, additive, doesn't touch runtime), supervised-by-default second
+  (touches runtime, but mostly mechanical given the design), M2 third
+  (designed against the new model from day one).
+
+---
+
+## 2026-05-28 — Polish round: `nest new .`, E0040 div-by-zero code, scheduler-race hint
+
+**Goal.** Close the small follow-ups noted at the bottom of the structured-
+errors entry: the `nest new .` ask, the first specific-code split of
+`E0099`, and the first per-site `:hint` attachment (the scheduler-race
+pointer from `claude-demo-findings.md`).
+
+**Landed.**
+
+- **`nest new .`** scaffolds into the current directory (`cargo init`'s
+  shape). The project name is derived from `(path-basename (cwd))`, the
+  existing-directory check is skipped, and existing scaffold files get
+  overwritten — the user explicitly asked for this. The `Next:` line
+  drops `cd .` when in-place. A new `path-basename` helper in
+  `std/prelude.blsp` reuses the existing `path--last-slash` walker.
+  Smoke: `cd /tmp/foo && nest new .` creates the scaffold + a manifest
+  with `:name "foo"`; re-running overwrites a user-edited
+  `src/main.blsp`.
+- **`E0040` — division-by-zero specific code.** Both raise sites in
+  `crates/lisp/src/builtins.rs` (`%div` line 412, `rem` line 452) now
+  carry the code *and* a `:hint` (`"guard the denominator: (when
+  (not= y 0) (/ x y))"`). The first concrete demonstration that the
+  `with_code` / `with_hint` builder pattern from §4 carries through to
+  the catch map and the MCP `error.data`.
+- **Scheduler-race hint** on unbound errors raised inside a *green*
+  process. New `process::in_green_process()` checks if `CURRENT` has a
+  yielder (green coroutine vs. root thread). A new
+  `eval::unbound_error(sym)` helper consolidates the two unbound raise
+  sites (`eval/mod.rs:81` for symbol lookup, `:376` for call-head
+  lookup) and conditionally attaches the hint:
+  > this fired inside a spawned process — if it happens only under
+  > fan-out load, the scheduler may be racing prelude lookups; try
+  > `-j 1` (or `nest test -j 1`) to bound concurrency
+  Conditioned on the process kind, not on the symbol name, so it's a
+  best-effort pointer: false positives are tolerable (the hint
+  *suggests* the cause, doesn't claim it). Documented from blocker §1
+  of `claude-demo-findings.md`.
+
+**Tests landed.**
+
+- `crates/lisp/tests/basic.rs::scheduler_race_hint_attaches_to_unbound_in_green_processes`
+  (new) — spawns a process that catches an unbound and `send`s the
+  error map to the root; root asserts `(string? (get msg :hint))`.
+- `crates/lisp/tests/basic.rs::unbound_in_root_thread_has_no_scheduler_hint`
+  (new) — the negative case: the root thread's catch sees `:hint nil`.
+- `crates/lisp/tests/basic.rs::throw_and_catch` — `(/ 1 0)` now asserts
+  `:code "E0040"` (was `E0099`) and `(string? (get e :hint)) → true`.
+- `crates/nest/src/mcp.rs::uncaught_handler_throw_projects_structured_data`
+  — `(/ 1 0)` flipped to `:code "E0040"` to match the new specific code.
+
+**Docs.**
+
+- `docs/error-codes.md` — added the `E0040` row to the table; new
+  "Hints" section documenting the two concrete attachments
+  (div-by-zero, scheduler race) and the per-process conditioning.
+
+**Verified.** `cargo build` clean. `cargo test --workspace`: 116 (lib)
++ 68 (basic, was 66) + 3 + 1 + 29 (nest) + 40 (LSP) + 13 (cli) = 270
+tests, all passing. Smoke: `nest new .` in a fresh `/tmp/foo` produces
+the expected scaffold and `:name "foo"` in the manifest.

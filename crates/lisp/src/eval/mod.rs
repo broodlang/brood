@@ -77,9 +77,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                 let expr_sym = expr;
                 return heap
                     .env_get(env, s)
-                    .ok_or_else(|| {
-                        LispError::unbound(format!("unbound symbol: {}", value::symbol_name(s)))
-                    })
+                    .ok_or_else(|| unbound_error(s))
                     .map_err(|e| e.or_form_pos(heap, expr_sym));
             }
             Value::Vector(id) => {
@@ -372,9 +370,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                 // not the enclosing top-level form's start.
                 let v = heap
                     .env_get(env, s)
-                    .ok_or_else(|| {
-                        LispError::unbound(format!("unbound symbol: {}", value::symbol_name(s)))
-                    })
+                    .ok_or_else(|| unbound_error(s))
                     .map_err(|e| e.or_form_pos(heap, call_form))?;
                 if let Value::Macro(mid) = v {
                     let arg_forms = heap.list_to_vec(rest)?;
@@ -574,6 +570,26 @@ fn call_native(heap: &mut Heap, id: NativeId, argv: &[Value], env: EnvId) -> Lis
 /// declared [`Arity`](crate::core::value::Arity)) and user closures (from their parameter list): a closure
 /// with `min..=max` required/optional params passes `Some(max)`; `& rest` (and a
 /// variadic builtin) passes `None`.
+/// Construct an "unbound symbol: …" error, attaching the scheduler-race hint
+/// when we're currently executing in a *green* (spawned) process. The hint
+/// covers the under-load failure mode `docs/claude-demo-findings.md` flagged
+/// — fan-out of ~20+ workers racing prelude lookups so internal names like
+/// `acc`/`fold`/`%eq` spuriously look unbound. False positives are
+/// tolerable: the hint conditions on "if this fired under fan-out, try
+/// `-j 1`," not on every unbound being a race. (`docs/error-codes.md`.)
+fn unbound_error(sym: Symbol) -> LispError {
+    let e = LispError::unbound(format!("unbound symbol: {}", value::symbol_name(sym)));
+    if crate::process::in_green_process() {
+        e.with_hint(
+            "this fired inside a spawned process — if it happens only under \
+             fan-out load, the scheduler may be racing prelude lookups; \
+             try -j 1 (or `nest test -j 1`) to bound concurrency",
+        )
+    } else {
+        e
+    }
+}
+
 fn arity_message(who: &str, min: usize, max: Option<usize>, got: usize) -> String {
     let (expected, n) = match max {
         Some(m) if min == m => (min.to_string(), min),

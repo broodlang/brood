@@ -195,6 +195,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
 
     // processes (concurrency)
     def(heap, "%spawn", Arity::exact(1), Sig::new(vec![callable], pid_ty), spawn);
+    def(heap, "%spawn-named", Arity::exact(2), Sig::new(vec![sym.union(kw), callable], pid_ty), spawn_named);
     // `send`'s target is a pid OR a `{:name :node}` address map.
     def(heap, "send", Arity::exact(2), Sig::new(vec![pid_ty.union(map_ty), any], nil_ty), send);
     // Arg shape: (matcher: callable, timeout: int|nil, on-timeout: callable|nil).
@@ -410,7 +411,9 @@ fn prim_div(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let (a, b) = two(args, "%div")?;
     let bf = expect_number(heap, "%div", b)?;
     if bf == 0.0 {
-        return Err(LispError::runtime("division by zero"));
+        return Err(LispError::runtime("division by zero")
+            .with_code(crate::error::error_codes::DIV_BY_ZERO)
+            .with_hint("guard the denominator: (when (not= y 0) (/ x y))"));
     }
     match (a, b) {
         // Exact integer quotient when it divides evenly; otherwise a float.
@@ -449,7 +452,9 @@ fn remainder(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let (a, b) = int_pair(heap, args, "rem")?;
     match a.checked_rem(b) {
         Some(r) => Ok(Value::Int(r)),
-        None if b == 0 => Err(LispError::runtime("rem: division by zero")),
+        None if b == 0 => Err(LispError::runtime("rem: division by zero")
+            .with_code(crate::error::error_codes::DIV_BY_ZERO)
+            .with_hint("guard the denominator: (when (not= y 0) (rem x y))")),
         None => Err(LispError::runtime("rem: integer overflow")),
     }
 }
@@ -1386,6 +1391,53 @@ fn throw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 
 fn spawn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let pid = crate::process::spawn(heap, arg(args, 0))?;
+    Ok(crate::process::pid_value(pid))
+}
+
+/// `(%spawn-named name thunk)` — idempotent named spawn. If `name` (a
+/// keyword or symbol) is currently registered to a still-alive pid, return
+/// that pid and **do not** spawn — `thunk` is never evaluated. Otherwise,
+/// drop any stale registration, spawn the thunk as a new green process,
+/// register it under `name`, and return the new pid.
+///
+/// The check-or-spawn step is atomic under `NAMES`'s write lock — two
+/// concurrent `(spawn :name …)` calls can't both spawn; the loser sees
+/// the winner's pid. The user-facing `(spawn name expr)` macro wraps an
+/// expression into a thunk the same way `(spawn expr)` does, so the
+/// expression's free locals are captured lexically (ADR-033).
+///
+/// Replaces the `defonce *worker* (spawn (worker))` pattern: a file
+/// reloaded by the hot-reload supervisor sees the name is alive, the
+/// `%spawn-named` is a no-op, and the running worker keeps going.
+fn spawn_named(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let name = match arg(args, 0) {
+        Value::Keyword(s) | Value::Sym(s) => s,
+        v => {
+            return Err(LispError::wrong_type(
+                heap,
+                "%spawn-named",
+                "keyword or symbol",
+                v,
+            ))
+        }
+    };
+    let thunk = arg(args, 1);
+    if !matches!(thunk, Value::Fn(_)) {
+        return Err(LispError::wrong_type(
+            heap,
+            "%spawn-named",
+            "function",
+            thunk,
+        ));
+    }
+    // Capture the thunk by value so the closure passed to `spawn_or_get` is
+    // `FnOnce`, not just `Fn`. Errors during the spawn (e.g. a non-`Fn`
+    // somehow slipping through; defensive) propagate out as a thrown value
+    // via the `Result::unwrap_or_else` below; in practice this never fires
+    // because we type-checked just above.
+    let pid = crate::dist::spawn_or_get(name, || {
+        crate::process::spawn(heap, thunk).expect("type-checked above")
+    });
     Ok(crate::process::pid_value(pid))
 }
 

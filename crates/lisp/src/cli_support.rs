@@ -7,7 +7,6 @@
 //! `crates/cli/` or `crates/nest/`.
 
 use crate::error::LispError;
-use crate::Interp;
 
 /// Print an error as a GNU `FILE:LINE:COL: message` line (editor-parseable),
 /// followed — when the file and position are known — by the offending source
@@ -87,33 +86,3 @@ pub fn parse_jobs_args(
     (files, max_parallel)
 }
 
-// ---- REPL stubs (interim) --------------------------------------------------
-//
-// `nest repl` (per the in-flight refactor) calls these from the lib, but the
-// real REPL code still lives privately in `crates/cli/src/main.rs`. Completing
-// the move means pulling `repl_interactive` (rustyline) + `repl_plain` (plain
-// stdio) up here, plus their helpers (`history_path`, `is_balanced`), and
-// adding `rustyline` to the lib's `Cargo.toml`. That's a real architectural
-// choice — `rustyline` is currently a "CLI-only UX dep" per `CLAUDE.md` — so
-// we stub here for now to keep the build green; the cli's REPL keeps working
-// from its private copies.
-
-/// Stub: interactive REPL not yet moved into `cli_support`. Tells the caller
-/// to use `brood` directly. Returns `Ok(())` so the caller's error path
-/// doesn't fire.
-pub fn repl_interactive(_interp: &mut Interp) -> Result<(), std::io::Error> {
-    eprintln!(
-        "nest repl: the shared REPL has not been moved into `brood::cli_support` yet — \
-         run `brood` directly for an interactive REPL (the cli crate still holds its \
-         own copy)."
-    );
-    Ok(())
-}
-
-/// Stub: plain (non-terminal) REPL not yet moved. Prints the same pointer.
-pub fn repl_plain(_interp: &mut Interp) {
-    eprintln!(
-        "nest repl: the shared REPL has not been moved into `brood::cli_support` yet — \
-         pipe Brood source through `brood` instead."
-    );
-}

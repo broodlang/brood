@@ -69,6 +69,14 @@ impl Mailbox {
 pub(super) static REGISTRY: LazyLock<Mutex<HashMap<u64, Arc<Mailbox>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Is `pid` currently registered (i.e. still alive)? Used by the
+/// named-spawn idempotence check in `dist::spawn_or_get` to decide
+/// whether to reuse an existing pid registered under a name or treat
+/// the name as stale and spawn fresh. Cheap — one mutex acquisition.
+pub(crate) fn is_alive(pid: u64) -> bool {
+    crate::core::sync::lock(&REGISTRY).contains_key(&pid)
+}
+
 /// Push a (already-`Send`) message into local process `pid`'s mailbox and wake it;
 /// a no-op if `pid` is gone. The shared tail of `send`, monitor `[:down …]`
 /// delivery, and inbound node-link messages (`crate::dist`).

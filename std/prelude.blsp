@@ -17,23 +17,6 @@
 ;; multi-clause pattern form — (defn f ((0) 1) ((n) ...)) => (def f (fn ((0) 1) ((n) ...))).
 (defmacro defn (name & clauses) `(def ~name (fn ~@clauses)))
 
-;; `defonce` — bind `name` to `init` *only* on the first load. If `name` is
-;; already bound (e.g. the file is being re-loaded by a hot-reload
-;; supervisor), the form is a no-op and `init` is never evaluated. The
-;; hot-reload-friendly initialiser for two cases:
-;;   1. **Long-lived top-level state.** `(defonce *cache* {})` keeps the
-;;      cache across reloads instead of resetting on every edit.
-;;   2. **One-shot launchers.** `(defonce *loop-pid* (spawn (worker)))`
-;;      spawns the loop once; reloads update the function body via the
-;;      global table without firing a second worker.
-;; Subsequent reloads pick up code changes (via `(defn …)` rebinding); only
-;; the value held under `name` is preserved. Use plain `(def name …)` if you
-;; want the reset-on-load semantics. Raw `if` rather than `unless` so this
-;; macro can sit next to `defn` without depending on later prelude forms.
-(defmacro defonce (name init)
-  "Bind `name` to `init` only on the first load — leave it alone if already bound. The hot-reload-friendly initialiser for top-level state and one-shot launchers."
-  `(if (bound? (quote ~name)) nil (def ~name ~init)))
-
 ;; ---- logic ----
 (defn not (x)
   "Logical negation: `nil`/`false` become `true`, everything else `false`."
@@ -610,9 +593,41 @@
 ;; the thunk is shippable to another node (a closure serialises as data; see
 ;; docs/decisions.md). Note `(self)` inside `expr` is the *child's* pid: to hand the
 ;; parent's pid in, capture it first — `(let (me (self)) (spawn (work me)))`.
-(defmacro spawn (expr)
-  "Run `expr` in a new green process; returns its pid. `expr` is unevaluated and runs in the child (so `(self)` there is the child's pid — capture the parent's pid in a `let` first if you need it)."
-  `(%spawn (fn () ~expr)))
+;; `spawn` has two shapes:
+;;   (spawn expr)          → anonymous; always creates a fresh process.
+;;   (spawn name expr)     → **named & idempotent**. If a process is already
+;;                            registered under `name` (a keyword/symbol) and
+;;                            is still alive, the call is a no-op and returns
+;;                            the existing pid; `expr` is never evaluated.
+;;                            Otherwise spawns fresh and registers the new
+;;                            pid under `name`.
+;;
+;; The named form is the replacement for the old `(defonce *worker* (spawn
+;; (worker)))` hot-reload pattern (ADR-039). A file containing
+;; `(spawn :worker (worker))` reloaded by a hot-reload supervisor sees the
+;; name is alive and does nothing — the running worker keeps going with its
+;; current state, picking up the new code via the next global lookup of
+;; `worker`. When the process dies, its registered name is reaped automatically
+;; (`process::deregister` calls `dist::unregister_dead_pid`), so a fresh
+;; reload spawns again — no stale entries.
+(defmacro spawn (& args)
+  "Run an expression in a new green process; returns its pid. Two shapes:
+
+  - `(spawn expr)` — anonymous; spawns unconditionally.
+  - `(spawn name expr)` — named & idempotent on `name`. If a live process is
+    already registered under `name` (a keyword/symbol), returns its pid
+    without spawning. The hot-reload-friendly form: reloading a file
+    containing this expression doesn't fire a second worker.
+
+  `expr` is unevaluated and runs in the child (so `(self)` there is the child's
+  pid — capture the parent's pid in a `let` first if you need it). Free
+  locals in `expr` are captured lexically (the closure carries them); free
+  globals resolve in the child — which is why the thunk is shippable to
+  another node (ADR-033)."
+  (cond
+    (%eq (count args) 1) `(%spawn (fn () ~(first args)))
+    (%eq (count args) 2) `(%spawn-named ~(first args) (fn () ~(second args)))
+    else (throw "spawn: expected (spawn expr) or (spawn name expr)")))
 
 ;; A long-lived `:remote-spawn` server: the receiver-side machinery behind the
 ;; `remote-spawn` macro. Receives `[:run thunk]` messages and applies the thunk
@@ -1149,6 +1164,16 @@ leaves `s` unchanged."
 (defn path-join (a b)
   "Join path segments `a` and `b` with a single `/` separator."
   (if (ends-with? a "/") (str a b) (str a "/" b)))
+
+(defn path-basename (path)
+  "The final component of `path` (\"/a/b/c\" -> \"c\", \"/foo\" -> \"foo\",
+\"foo\" -> \"foo\"). The empty string returns itself; a trailing slash isn't
+stripped (`(cwd)` doesn't produce one, which is the primary caller)."
+  (let (n (string-length path))
+    (if (= n 0)
+      ""
+      (let (i (path--last-slash path (dec n)))
+        (if (< i 0) path (substring path (inc i) n))))))
 
 ;; ---- modules: Emacs-flat provide / require (ADR-019) ------------------------
 ;; A flat module system over the one shared global table: `provide` records a

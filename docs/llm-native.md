@@ -435,3 +435,67 @@ cwd (deriving the name from the cwd basename, skipping the file-exists
 check) is a ~30-minute change in `std/project.blsp` — separate from the
 LLM-native plan but related to the agent-attach loop §1 cares about.
 Recorded here so it doesn't get lost.
+
+### Re-verification notes (2026-05-28, after this doc landed)
+
+These confirm or refine the table above based on hands-on re-testing.
+
+- **§1 — `nest mcp`** verified end-to-end: `nest new foo` writes `foo/.mcp.json`
+  pointing at `nest mcp`. `cd foo && claude` auto-attaches. `eval` / `lookup` /
+  `macroexpand` / `format` / `load` / `check` all visible via the JSON-RPC
+  surface. Two remaining open items in `mcp.md` are real: `*out*` dynvar /
+  `with-out-str` so `eval` returns `:stdout`, and the `find-pattern` /
+  `explain-error` tools that wait on §7 / §4.
+- **§3 — `incarnations.md`** verified: `claude-demo-findings.md` is the
+  inaugural entry under `## Entries`, with the "what I'd tell next-me"
+  abstract inline and the full writeup linked. Format conventions
+  documented at the top of the file. Resource exposed as
+  `brood://docs/incarnations`.
+- **§4 — Structured error values** verified: tried `(try (no-such-fn)
+  (catch e e))` via MCP `eval` — got back the expected map shape with
+  `:kind :unbound :code "E0010" :message …`. The §4 contract is real.
+  Process-death path (workers printing `process N died: unbound error: …`
+  to stdout) doesn't yet route through this wrapper — separate
+  follow-up.
+- **§5 — Macroexpand** partial as marked: the MCP `macroexpand` tool
+  works on `defprocess` and other hatch macros. The "in CLI errors
+  show the expansion" piece and the "LSP hover shows expansion" piece
+  aren't there yet. The single highest-leverage remaining piece is the
+  CLI-error one — when a worker dies inside a `defprocess`-expanded
+  receive, surfacing the expansion would have answered three of my
+  debugging questions instantly.
+- **§14 — Prompt fragment** verified at `docs/prompts/brood-task.md`.
+  47 lines, points the agent at the three resources it should read
+  first and the MCP tool surface. Good shape, ready to ship.
+
+A couple of things on §2 (Claude skill) worth noting now that §1 + §14
+exist:
+
+- The `brood-task` prompt is the "system prompt fragment" half of §2.
+- The "indexed prelude" half could be served as a single MCP
+  *resource* (`brood://docs/prelude-index`) — a flat list of `name +
+  signature + one-line doc + file:line`, generated from
+  `%builtin-doc` plus the prelude. Cheap to produce, big lift for
+  cold-start agents that haven't called `lookup` yet.
+- The "common-bug catalog" half is now the `incarnations.md` file
+  (§3).
+
+So §2 may not need to ship as a single `.claude/skills/brood-dev/`
+bundle — the substrate is already in place across §1 / §3 / §14, and
+the missing piece is the indexed prelude resource above. Worth
+considering before investing in a dedicated skill format.
+
+### Performance — re-measured (informational)
+
+Same three probes as `claude-demo-findings.md` §4, on the same
+machine, against today's `brood`:
+
+| benchmark | original | today | delta |
+|---|---|---|---|
+| 1M `(+ acc 1)` recursion | 3873 ms | 4400 ms | +14% (noise / GC; commit `bd4aa2d` adds mark-sweep GC) |
+| 100k vec destruct + rebuild | 560 ms | 649 ms | +16% (same) |
+| spawn 1000 processes | 17 ms | 13 ms | −24% (better) |
+
+Spawn got cheaper, the arithmetic path got slightly slower (presumably
+GC overhead now that the mark-sweep collector runs). The §4 takeaway
+holds: the variadic-`+` 2-arg fast path is still the high-leverage win.

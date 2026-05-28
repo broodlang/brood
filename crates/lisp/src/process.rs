@@ -43,11 +43,11 @@ pub use mailbox::{list_local_pids, receive_match, send};
 pub use message::{from_message, to_message, ClosureMsg, Message};
 pub use monitor::{demonitor, monitor, next_ref};
 pub use scheduler::{
-    gc_block_depth, peak_threads, pid_value, self_pid, set_max_parallel, spawn, spawn_count, tick,
-    worker_threads, GcBlockGuard,
+    gc_block_depth, in_green_process, peak_threads, pid_value, self_pid, set_max_parallel, spawn,
+    spawn_count, tick, worker_threads, GcBlockGuard,
 };
 
-pub(crate) use mailbox::{deliver, read_name_address};
+pub(crate) use mailbox::{deliver, is_alive, read_name_address};
 pub(crate) use monitor::{
     add_monitor, demonitor_remote_fanout, drop_monitor, drop_pending_remote, fire_noconnection,
     handle_node_down, record_pending_remote, Watcher,

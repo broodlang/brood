@@ -508,4 +508,137 @@ is the right starting point before diving into `eval/mod.rs`.
 
 ---
 
+## 10. Status (2026-05-28 follow-up)
+
+Re-verified against the language repo a few hours after writing the
+original document. Substantial review-pass progress lands at commit
+`e856728` ("Review pass + structured errors with codes…"). Verification
+method noted next to each item.
+
+### Executive-summary items
+
+| # | Item | Original status | Today | Notes |
+|---|------|------|-------|------|
+| 1 | Multi-thread scheduler race | 🐛 blocker | 🐛 still present | Re-ran the mandel demo at default `-j`; race trips at `crates/lisp/src/eval/mod.rs:446` now (was `:380`). Same symptoms — workers die with "unbound symbol: acc / iter" and one Rust panic. Race appears to have moved, not been fixed. |
+| 2 | Type-checker noise around `(require 'hatch)` | 🐛 blocker | 🟢 partial fix | `nest check` (project-aware, runs through `(check-project-structured)`) is now silent on hatch macros. `brood file.blsp` directly **still emits all five warnings** (`defprocess` / `cast` / `!` / `hatch` / `state`). The project-aware path is the agent path, so this is meaningful progress; the file-direct path needs the same know-what's-required behaviour. |
+| 3 | `nest format` collapses readable code | 🐛 blocker | 🐛 still present | Re-tested with a synthetic multi-line `let` + `cond` probe (8 lines hand-aligned). Formatter rewrote it onto a single 92-char line. Reasoning from §6.1 still applies. |
+| 4 | Quick-ref doc gaps | 🟡 polish | 🟢 partial fix | `docs/brood-for-claude.md` gained a strong "Idiomatic syntax" section on `(` vs `[`, tuple-destructure caveats, and a Filesystem section. Still missing from the builtin lists: `apply`, `now`, `gensym`, `quot`, `mod`, `rem`, `char-at`, `dotimes`/`doseq`/`dolist`, `for`, `defprocess` / `hatch` / `!` / `gen-call` / `sleep`. |
+| 5 | Float formatting / no `format` builtin | 🟡 polish | 🟡 unchanged | `std/format.blsp` exists, but it's the **source-code formatter** behind `nest format`, not a `(format "%.2f" x)` helper. No general number/string formatter shipped. |
+| 6 | Pattern-destructure failure surfaces as Rust panic | 🟡 polish | 🐛 still present | Same panic shape (`index out of bounds: the len is N but the index is M`), now at `eval/mod.rs:446`. Structured errors landed (`E00xx`, see §10.3) but this specific failure site hasn't been routed through the new error wrapper yet. |
+
+### LLM-facing infrastructure (new since this doc)
+
+These didn't exist when I wrote the original; they materially change the
+next agent's experience. All from the same review pass (commit `e856728`)
+plus the prior MCP-server commits (`bd4aa2d`, `808b7f1`, `d662df7`).
+
+- **MCP server (`nest mcp`).** Six tools live: `eval`, `load`, `lookup`,
+  `macroexpand`, `format`, `check` (with `run-tests` / `processes` /
+  project-defined tools also wired). `.mcp.json` auto-scaffolded by
+  `nest new`. ADR-036; design in [`mcp.md`](mcp.md). This is the single
+  biggest improvement — the 30-minute "spelunk through `std/prelude.blsp`"
+  detour I described in §2.1 becomes a tool call.
+- **Structured error values with stable codes.** `LispError` carries
+  `:code` + `:kind`; `(try expr (catch e …))` rebinds `e` to a map
+  `{:kind :code :message :hint :file :line :col}`. Codes `E0001`/`E0010`/
+  `E0020`/`E0030`/`E0099` ship today, more to come. Design in
+  [`error-codes.md`](error-codes.md). Directly resolves §6.5 (error UX)
+  for catchable errors, and is the substrate for §6.5 (process death
+  with context) once the wrapping reaches the process-death path.
+- **Incarnations file ([`incarnations.md`](incarnations.md)).** A
+  self-improving record of what tripped real agents; my findings here
+  are the first entry. The MCP server publishes it as
+  `brood://docs/incarnations`. This is the path by which the *next*
+  agent gets the warnings I had to discover the hard way.
+- **MCP system-prompt fragment ([`prompts/brood-task.md`](prompts/brood-task.md)).**
+  Served via MCP `prompts/get`; also reusable verbatim by Cursor / Aider /
+  Continue. Points the agent at the three resources it should fetch
+  first (brood-for-claude, incarnations, project CLAUDE.md) and
+  summarises the MCP tool surface. Closes the "agent walking into a
+  Brood project has no orientation" gap I hit.
+- **Persistent in-process eval.** The MCP session model holds one
+  long-lived `Interp` per project, with `def` rebinds and `spawn`
+  state persisting between tool calls — Brood already has cross-process
+  hot reload at the language level (ADR-013 / `shared-code.md`), so
+  the MCP server inherits it. This is the REPL-without-a-REPL surface
+  I asked for in `llm-native.md` §15.
+- **`--watch` (file-level reload).** `brood --watch <PATH>` and
+  `nest run --watch <PATH>` re-`load` on save (`std/reload.blsp`). The
+  structured JSON-lines feedback channel `llm-native.md` §6 asks for
+  isn't there yet, but the trigger and the hot-reload machinery are.
+- **GNU-anchored error output.** `FILE:LINE:COL: KIND error: MESSAGE`
+  to stderr, parseable by Emacs `compilation-mode`, Flymake, and most
+  IDEs out of the box. Details in [`tooling.md`](tooling.md). Tightens
+  the "what file?" question that §6.5 raised.
+- **Preemptive M:N scheduler (ADR-027).** Green processes on an `nproc`
+  worker pool; `receive` suspends rather than blocking. Doesn't fix the
+  race in §1, but is the right substrate for fixing it — the work-stealing
+  stage (3) and the per-process env discipline are now well-defined.
+
+### Recommendations — revised priorities
+
+The original §8 prioritised: race → type-checker noise → formatter.
+After this review pass, the priorities re-order:
+
+If you can only do **three things**:
+
+1. **Fix the multi-thread scheduler race.** Still the blocker for any
+   fan-out demo. Bug has *moved* (`eval/mod.rs:446`) but not gone away.
+2. **Soften `nest format` so it doesn't collapse multi-line code.**
+   This is now the single most LLM-hostile tool in the chain: every
+   call inverts the writer's deliberate layout choices.
+3. **Wrap pattern-destructure mismatches in a Brood error.** The Rust
+   panic still surfaces; structured errors exist; just route this site
+   through `LispError::wrong_type` with a new `E03xx` code.
+
+If you have **a week**, also:
+
+4. **Expand the builtin lists in `brood-for-claude.md`** to cover
+   `apply` / `now` / `gensym` / `quot` / `mod` / `char-at` / `dotimes` /
+   `doseq` / `dolist` / `for` and a "Concurrency framework" subsection
+   for `defprocess` / `hatch` / `!` / `gen-call` / `sleep`. (The
+   "Idiomatic syntax" section was great; finish the surface coverage.)
+5. **Ship a number/string `format`** (`(format "%.2f" x)`). Demo
+   numeric output is currently ugly.
+6. **Suppress the unbound-macro warnings in `brood file.blsp`** the
+   same way `nest check` already does (resolve `require`s before the
+   type-check pass).
+7. **Add `repeat` / `string-repeat` / `pad-left` / `pad-right` / `round-to`
+   / `bench` / `now-ns`** to either the prelude or a `(require 'demo)`
+   helper module. Demos shouldn't re-derive these every time.
+
+If you have **a month**, also:
+
+8. **Wire structured error data into the process-death path.** Today
+   "process N died: unbound error: …" still lacks file/line/spawn-site.
+   The `LispError` data is there; the death printer just needs it.
+9. **2-arg fast-paths for the variadic numerics** — `(+ a b)` is 4.4 μs
+   per call today (1M iterations in 4.4 s). The `fold` + rest-list
+   dispatch dominates. Half that and the interpreter feels twice as
+   fast.
+10. **Watch-mode JSON-lines output** (`llm-native.md` §6) so the LLM
+    edit-test loop drops from "spawn nest run, parse stdout" to "tail
+    a stream of structured events." File trigger exists; emit shape
+    is what's missing.
+
+### What I'd test next (revised)
+
+The original §9 listed three ambitious demos all blocked on the race.
+With MCP and structured errors landed, two **non-race-blocked** demos
+are now compelling:
+
+- **A Brood-aware coding agent driven by `nest mcp`.** Use the live
+  `eval` tool to iterate on a real function, the `macroexpand` tool to
+  understand `defprocess`, the `lookup` tool to find prelude helpers,
+  and the `check` tool to validate. This *is* the demo of the MCP
+  story.
+- **A self-documenting incarnations CI.** Have an agent attempt the
+  mandel demo from scratch, append its findings to `incarnations.md`,
+  and commit. Run weekly. Watch the entries shrink as gaps close.
+
+Both are race-independent. The race-dependent items in the original §9
+remain blocked.
+
+---
+
 *End of document.*

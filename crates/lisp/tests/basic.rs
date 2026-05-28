@@ -547,7 +547,12 @@ fn throw_and_catch() {
     assert_eq!(run("(try (/ 1 0) (catch e (get e :kind)))"), ":runtime");
     assert_eq!(
         run("(try (/ 1 0) (catch e (get e :code)))"),
-        "\"E0099\""
+        "\"E0040\""
+    );
+    // Hint rides along when the raise site set one — `with_hint("…")`.
+    assert_eq!(
+        run("(try (/ 1 0) (catch e (string? (get e :hint))))"),
+        "true"
     );
     assert_eq!(run("(try (no-such-fn) (catch e (get e :kind)))"), ":unbound");
     assert_eq!(
@@ -579,6 +584,30 @@ fn throw_and_catch() {
     assert_eq!(run("(try (error \"nope: \" 5) (catch e e))"), "\"nope: 5\"");
     // try with no catch clause is just a do
     assert_eq!(run("(try 1 2 3)"), "3");
+}
+
+/// The scheduler-race hint fires for unbound errors raised inside a *green*
+/// process (the under-load failure mode `docs/claude-demo-findings.md`
+/// flagged). The root thread doesn't get the hint — that's the contract
+/// `eval::unbound_error` enforces via `process::in_green_process()`.
+#[test]
+fn scheduler_race_hint_attaches_to_unbound_in_green_processes() {
+    // `spawn` takes an *expression* (ADR-033), so the body is the form to
+    // evaluate in the new process — not a `(fn () …)`-wrapped thunk.
+    let src = r#"
+        (let (me (self))
+          (spawn (send me (try (no-such-fn) (catch e e))))
+          (let (msg (receive))
+            (string? (get msg :hint))))
+    "#;
+    assert_eq!(run(src), "true");
+}
+
+#[test]
+fn unbound_in_root_thread_has_no_scheduler_hint() {
+    // Negative case: the root thread (REPL / file runner / nest mcp
+    // dispatcher) is *not* a green process, so the hint stays nil.
+    assert_eq!(run("(try (no-such-fn) (catch e (get e :hint)))"), "nil");
 }
 
 /// Parse errors caught by `try`/`catch` carry the `:line` and `:col` the
