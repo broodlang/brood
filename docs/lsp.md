@@ -6,7 +6,7 @@ of the editor contract in [`tooling.md`](tooling.md): instead of every editor
 re-implementing "run the file and parse the GNU error lines", they speak LSP to
 one server that owns the language knowledge.
 
-> Status: **Tier 1 live.** Recorded as
+> Status: **Tier 1 live, plus semantic diagnostics and cross-file goto.** Recorded as
 > [ADR-025](decisions.md#adr-025--a-lossless-span-carrying-cst-for-tooling-separate-from-the-eval-value);
 > this document is the full plan it points to (the `types.md` ↔ ADR-024 pattern).
 > **Done:** Foundation A — the CST (`syntax::cst`) + shared lexical rules
@@ -32,12 +32,22 @@ one server that owns the language knowledge.
 > docstring + param names from the `PRIMITIVE_DOCS` table), and the public stdlib
 > carries leading-string docstrings — so a hover shows real documentation across
 > the surface.
-> **Next:** Tier 2 — references, rename, semantic tokens, and located *semantic*
-> diagnostics (unbound / arity), needing the checker to carry spans. **Note:**
-> all of the above is **single-file** — globals come from the prelude/builtins or
-> the open buffer, not from `require`d modules. The image-query foundation for
-> cross-file (record def sites + `(source-location 'foo)`) **is built** (ADR-031,
-> §Cross-file); what remains is the server-side `Free`-name fallback to it.
+> **Beyond Tier 1 (also done):**
+> • **Semantic diagnostics** — `publish` runs the advisory checker
+> (`types::check::check_file`) over the positioned forms and emits its
+> unbound-name / arity / type-misuse findings as `WARNING`s (located; a 1-char
+> marker at the form). It bootstraps the enclosing project first
+> (`bootstrap_project`: `project-setup` + `project-load-sources` + `require
+> 'test`), so cross-module names and the test-framework macros resolve and don't
+> false-positive as unbound.
+> • **Cross-file goto-definition** — the §Cross-file hybrid is wired: a name that
+> resolves `Free` in the buffer falls back to `(source-location 'name)` against
+> the bootstrapped image, including **into the standard library** (the prelude is
+> materialized to a cache file so its def sites are openable — see §Cross-file).
+> **Still next:** references, rename, semantic tokens (these want the
+> `scope::references` engine + token classification, not more substrate);
+> incremental sync; and finer diagnostic spans (the checker attributes a finding
+> to its top-level form's start, not the offending token).
 
 ## Why a server, and why not brute-force it
 
@@ -244,7 +254,7 @@ and can't follow computed/conditional `require`s or see through macros.
 
 So cross-file is the **SLIME/CIDER/Emacs-xref model**: the image recorded *where
 each thing was defined as it loaded*, and `M-.` is a lookup against it. The plan
-(steps 1–2 **done**; 3–4 are the remaining LSP wiring):
+(**all four steps done**):
 
 1. ✅ **Record def sites at load/`def` time** — `name → (file, pos)` into the
    shared, mutable `RuntimeCode` region (so a redefinition updates it and spawned
@@ -257,13 +267,28 @@ each thing was defined as it loaded*, and `M-.` is a lookup against it. The plan
 2. ✅ **`(source-location 'foo) → [file line col]`** (or nil) — one Rust
    primitive; policy on top is Brood. Already useful standalone (error provenance,
    `nest`, a self-hosted REPL `M-.`) before any LSP wiring consumes it.
-3. **Stay a hybrid:** the live (half-typed) buffer keeps using the CST + scope
+3. ✅ **Stay a hybrid:** the live (half-typed) buffer keeps using the CST + scope
    walker; a name that resolves `Free` there falls back to `source-location`,
    yielding a cross-file `Location` (LSP `Location` already carries a `Uri`).
+   (`definition::definition` — `Resolution::Free` → `introspect::source_location`
+   → `path_to_uri`. Works once the project is bootstrapped, which the first
+   `didOpen` under a `project.blsp` arranges.)
 4. **Definitions go image-based; references stay static** — references through
    macro-generated code have no faithful spans, so "find references" remains
    CST-level source occurrences aggregated across files; "go to definition"
    becomes the name→site lookup.
+
+**Navigating into the standard library.** The prelude is `include_str!`'d, so it
+has no source file at runtime — `M-.` on `map` would have nowhere to land. The
+prelude build therefore *materializes* a copy to `$XDG_CACHE_HOME/brood/prelude.blsp`
+(falling back to `~/.cache`), sets `current-file` to it, reads positioned, and
+records each prelude def's site there. These sites are immutable, so they live in
+the shared `SharedCode` region (not per-runtime `RuntimeCode`); `Heap::def_site`
+consults the runtime table first (a user redefinition wins) then the prelude. The
+cache copy is rewritten only when a new build's embedded prelude differs. Builtins
+implemented in Rust (`cons`, `rem`, …) have no Brood source and remain `nil` —
+hover still documents them via `PRIMITIVE_DOCS`. Best-effort: if the cache can't
+be written, stdlib goto is simply unavailable and nothing else is affected.
 
 The cost is a **loaded image**: cross-file answers require the project to have
 been *run* (top-level side effects on load) — the line this doc draws at Tier
@@ -301,7 +326,8 @@ additive change behind the same feature handlers.
 |---|---|---|---|
 | **0** | `publishDiagnostics` (syntactic), document sync, lifecycle | `cst::parse` + `LineIndex` | **done** |
 | **1** | completion (locals + globals), hover, `documentSymbol`, **goto-definition**, **signature help** | `arglist` / `global-names` primitives; CST top-level walk (`defs`) + scope walker | **done** |
-| **2** | references, rename, semantic tokens, "unbound" / arity diagnostics | located checker output (spans on `types::check`) | next |
+| **1+** | semantic diagnostics ("unbound" / arity / type misuse), **cross-file & stdlib goto** | located `check_file`; project bootstrap; `source-location` + prelude-cache | **done** |
+| **2** | references, rename, semantic tokens | `scope::references` engine; token classification | next |
 
 Tier 0 was reachable immediately because syntactic diagnostics need only the
 CST. Goto-definition landed early with Tier 1 (rather than Tier 2 as first

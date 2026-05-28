@@ -1,8 +1,9 @@
 //! Predicates over forms that the walker dispatches on:
 //!
-//! - [`is_syntactic_keyword`] / [`skips_body`] — which heads are *not*
-//!   callables (so an "unbound symbol" warning doesn't fire on them) and
-//!   which bodies are data the walker should not descend into.
+//! - [`is_syntactic_keyword`] — which heads are *not* callables, so an
+//!   "unbound symbol" warning doesn't fire on them. (The "don't descend
+//!   into this body" predicate that used to live here is now folded into
+//!   `walk::SPECIAL_HEAD` so the dispatch is one `SymbolMap` probe.)
 //! - [`guard_assertion`] / [`literal_eq_guard`] — pull a `(sym, type)` pair
 //!   out of an `if`-test when it's a recognised guard, so the walk can
 //!   narrow the variable in each branch.
@@ -64,24 +65,15 @@ pub(super) fn is_syntactic_keyword(name: &str) -> bool {
     )
 }
 
-/// Forms whose contents are data (`quote`/`quasiquote`) or deliberately
-/// exercise failures (`try` / `error-of` / `assert-error` pre-expansion;
-/// `%try` post-expansion — they all bottom out at the same primitive). Don't
-/// look inside.
-///
-/// **Post-expansion matters.** `check_file` macroexpands first so threading
-/// macros and `match` patterns get their real shape — but that also rewrites
-/// `(try …)` to `(%try (fn () body) (fn (e) handler))`. Without `%try` here,
-/// the walk would descend into the user's "I expect this to fail" body and
-/// flag the very errors they're asserting on (every `(error-of (cons 1))` in
-/// the test suite would warn). `assert-error` / `error-of` expand *through*
-/// `try`, so `%try` covers them too.
-pub(super) fn skips_body(name: &str) -> bool {
-    matches!(
-        name,
-        "quote" | "quasiquote" | "try" | "error-of" | "assert-error" | "%try"
-    )
-}
+// `skips_body` used to live here; it's now folded into the
+// `SpecialHead::SkipBody` arm of `walk::SPECIAL_HEAD` (one `SymbolMap` probe
+// shared with the special-form dispatch, no per-call string allocation).
+// Names that route through that arm: `quote`, `quasiquote`, `try`,
+// `error-of`, `assert-error`, `%try`. `%try` matters post-expansion: the
+// macroexpand pass rewrites `(try …)` to `(%try (fn () body) (fn (e) handler))`
+// before `check_file` walks the tree, and without `%try` in that arm the walk
+// would descend into the "I expect this to fail" body and flag every
+// `(error-of (cons 1))` in the test suite.
 
 /// If `test` is a recognisable type guard over a single variable, return the
 /// `(sym, asserted_type)` pair — the type `sym` provably has when `test` is

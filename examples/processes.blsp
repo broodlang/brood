@@ -1,4 +1,4 @@
-;; Concurrency demo — green-ish processes on real OS threads.
+;; Concurrency demo — green processes multiplexed over a worker-thread pool.
 ;;   ./bin/cli examples/processes.blsp
 ;;
 ;; Each process is share-nothing (its own heap); they talk only by message

@@ -1,15 +1,21 @@
 # Supervised processes + resume checkpoints
 
-> Status: **designed, not yet implemented.** ADR-039. Core architectural
-> change to the process model — every spawned process (including the main
-> one running a script) is implicitly supervised by the runtime; uncaught
-> errors are caught at the process boundary, the process is restarted
-> automatically. The depth of state preservation is mode-gated: full
-> in development, none in release.
+> Status: **implemented as opt-in.** ADR-039. The supervisor, resume slot,
+> exponential backoff, and circuit breaker all landed (2026-05-28); the
+> mode gate landed alongside them. The supervisor is **off by default**:
+> a thrown `LispError` in a spawned process exits immediately and monitors
+> fire `[:down …]`, the Erlang let-it-crash baseline. Turn it on with
+> `(set-supervision! true)` or `BROOD_SUPERVISE=1` — that's the dev /
+> hot-reload mode.
+>
+> Still pending: a CLI / `nest` policy for when the gate flips on (so
+> `nest dev` or `brood` REPL gives supervision automatically, while
+> `nest test` and `--release` leave it off); spawn-link (lifecycle
+> bonding) as a follow-up to named-spawn.
 >
 > This doc is the design walkthrough — what changes, why it's safe in Brood
 > specifically, what simplifies downstream, and where the performance
-> levers are.
+> levers are. See `docs/devlog.md` 2026-05-28 for the "as built" notes.
 
 ## The model in one sentence
 

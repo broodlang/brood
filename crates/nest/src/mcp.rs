@@ -1063,11 +1063,19 @@ mod tests {
         // `arglist` for the prelude `map` is a non-empty list. JSON-shape: array.
         assert!(body["arglist"].is_array());
         assert!(body["arglist"].as_array().unwrap().len() >= 1);
-        // Prelude defs don't get recorded source locations (the prelude is read
-        // via `read_all`, not the positioned loader). The lookup still works —
-        // it returns nil for that field. Pin it so a fix to ADR-031 cross-file
-        // is visible from here.
-        assert_eq!(body["source-location"], Json::Null);
+        // Prelude defs now *do* carry a source location — the prelude build
+        // materialises a copy to `$XDG_CACHE_HOME/brood/prelude.blsp` and
+        // reads it positioned, so `M-.` can land inside the standard library
+        // (ADR-031 step 4). The lookup returns the cache path + line + col.
+        let loc = &body["source-location"];
+        assert!(loc.is_array(), "expected source-location array: {loc}");
+        let arr = loc.as_array().unwrap();
+        assert_eq!(arr.len(), 3, "expected [path line col]");
+        let path = arr[0].as_str().unwrap_or("");
+        assert!(
+            path.ends_with("prelude.blsp"),
+            "expected prelude cache path, got {path:?}"
+        );
     }
 
     #[test]

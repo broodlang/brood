@@ -253,6 +253,65 @@
   "Fold over the entries of map `m`, calling `(f acc k v)`, starting from `init`."
   (fold (fn (acc p) (f acc (first p) (second p))) init (map-pairs m)))
 
+;; ---- map: merge / update / nested access -----------------------------------
+;; All Brood over the kernel ops (`map-assoc`/`map-pairs`) and the surface above
+;; (`reduce-kv`/`contains?`/`get`). Every one returns a fresh map — maps are
+;; immutable (ADR-026). The builders fold with the 3-arg kernel `map-assoc` (no
+;; per-step rest-list, unlike variadic `assoc`).
+
+(defn merge--into (acc m) (if (nil? m) acc (reduce-kv map-assoc acc m)))
+(defn merge (& maps)
+  "A single map combining the given maps left to right; on a duplicate key the rightmost map wins. `nil` maps are skipped, so `(merge)` is `{}`."
+  (fold merge--into {} maps))
+
+;; merge-with: on a shared key, combine with `(f existing new)` instead of replacing.
+(defn merge-with--step (f a k v) (if (contains? a k) (map-assoc a k (f (get a k) v)) (map-assoc a k v)))
+(defn merge-with (f & maps)
+  "Like `merge`, but when two maps share a key the combined value is `(f value-so-far next-value)` rather than just the latter. `nil` maps are skipped."
+  (fold (fn (acc m) (if (nil? m) acc (reduce-kv (fn (a k v) (merge-with--step f a k v)) acc m))) {} maps))
+
+(defn update (m k f & args)
+  "A map like `m` with the value at `k` replaced by `(apply f current args)`, where `current` is the existing value (`nil` if `k` is absent)."
+  (assoc m k (apply f (get m k) args)))
+
+(defn update-vals (m f)
+  "A map like `m` with `f` applied to every value."
+  (reduce-kv (fn (acc k v) (map-assoc acc k (f v))) {} m))
+(defn update-keys (m f)
+  "A map like `m` with `f` applied to every key (later keys win on a collision)."
+  (reduce-kv (fn (acc k v) (map-assoc acc (f k) v)) {} m))
+
+(defn select-keys (m ks)
+  "A map of just the entries of `m` whose key is in `ks` (keys absent from `m` are skipped)."
+  (fold (fn (acc k) (if (contains? m k) (map-assoc acc k (get m k)) acc)) {} ks))
+
+(defn zipmap (ks vs)
+  "A map pairing each key in `ks` with the value at the same position in `vs`, stopping at the shorter."
+  (into {} (zip ks vs)))
+
+;; Nested-map access along a `path` (a sequence of keys). `get-in` walks; missing
+;; key → default. `assoc-in` rebuilds, coercing a non-map node to `{}` so it can
+;; create intermediate maps; `update-in` is `get-in` then `assoc-in`.
+(defn get-in--walk (m path default)
+  (cond
+    (empty? path) m
+    (and (map? m) (contains? m (first path))) (get-in--walk (get m (first path)) (rest path) default)
+    else default))
+(defn get-in (m path & default)
+  "The value in nested maps `m` at the key sequence `path`, or `default` (else `nil`) if any key along the way is absent. `(get-in m ())` is `m`."
+  (get-in--walk m path (first default)))
+
+(defn assoc-in (m path v)
+  "A nested copy of `m` with `v` stored at the key sequence `path`, creating intermediate maps as needed (a non-map node along the path becomes a fresh map)."
+  (let (m (if (map? m) m {}) k (first path) ks (rest path))
+    (if (empty? ks)
+      (assoc m k v)
+      (assoc m k (assoc-in (get m k) ks v)))))
+
+(defn update-in (m path f & args)
+  "A nested copy of `m` with the value at the key sequence `path` replaced by `(apply f current args)` (creating intermediate maps as needed)."
+  (assoc-in m path (apply f (get-in m path) args)))
+
 (defn identity (x) "Return `x` unchanged." x)
 (defn zero? (n) "True if `n` is zero." (= n 0))
 (defn positive? (n) "True if `n` is greater than zero." (> n 0))
@@ -619,15 +678,19 @@
 ;; picking up the new code via the next global lookup. When the process
 ;; dies, its registered name is reaped (`process::deregister` →
 ;; `dist::unregister_dead_pid`), so a later reload re-spawns cleanly.
-(defmacro spawn (head & rest)
+(defmacro spawn (head & more)
   "Run an expression in a new green process; returns its pid. Two shapes:
   - `(spawn expr)` — anonymous.
   - `(spawn name expr)` — named & idempotent: returns the existing pid if
     a live process is already registered under `name`. The hot-reload-friendly
     form (reloading the file doesn't fire a second worker)."
-  (if (empty? rest)
+  ;; Param name is `more` (not `rest`) so the body can still call the
+  ;; prelude's `rest` function without param-shadowing itself.
+  (if (empty? more)
     `(%spawn (fn () ~head))
-    `(%spawn-named ~head (fn () ~(first rest)))))
+    (if (empty? (rest more))
+      `(%spawn-named ~head (fn () ~(first more)))
+      (throw "spawn: expected (spawn expr) or (spawn name expr)"))))
 
 ;; A long-lived `:remote-spawn` server: the receiver-side machinery behind the
 ;; `remote-spawn` macro. Receives `[:run thunk]` messages and applies the thunk
@@ -879,6 +942,91 @@
   "Pour each item of `from` into `to`. For a map, items are [k v] pairs (assoc'd);
 otherwise the items are appended (`to` is a list)."
   (if (map? to) (reduce (fn (m p) (assoc m (first p) (second p))) to from) (append to from)))
+
+;; ---- more sequence operations -----------------------------------------------
+;; The eager counterparts of the `x*` transducers, plus the common Clojure-ish
+;; builders. All tail-recursive (reverse-accumulate, reverse once) so they stay
+;; stack-safe on long inputs — see the sequence-library note above.
+
+(defn remove (pred coll)
+  "A list of the items of `coll` for which `(pred x)` is *falsy* — the complement of `filter`."
+  (reverse (fold (fn (acc x) (if (pred x) acc (cons x acc))) nil coll)))
+
+(defn keep (f coll)
+  "A list of the non-nil results of `(f x)` over `coll` — map and filter fused (the eager counterpart of `xkeep`)."
+  (reverse (fold (fn (acc x) (let (y (f x)) (if (nil? y) acc (cons y acc)))) nil coll)))
+
+;; distinct: keep the first occurrence of each item. A map carried alongside the
+;; result acts as the "seen" set, so membership is O(1)-ish, not the O(n²) a
+;; `member?`-per-item scan would cost. State is the 2-vector [seen result-rev].
+(defn distinct--step (state x)
+  (if (contains? (nth state 0) x)
+    state
+    [(map-assoc (nth state 0) x true) (cons x (nth state 1))]))
+(defn distinct (coll)
+  "The items of `coll` with duplicates removed, keeping the first occurrence of each (order-preserving)."
+  (reverse (nth (fold distinct--step [{} nil] coll) 1)))
+
+;; dedupe: collapse only *consecutive* runs of equal items (no "seen" set needed).
+(defn dedupe--acc (coll prev acc)
+  (cond
+    (empty? coll) acc
+    (= (first coll) prev) (dedupe--acc (rest coll) prev acc)
+    else (dedupe--acc (rest coll) (first coll) (cons (first coll) acc))))
+(defn dedupe (coll)
+  "The items of `coll` with *consecutive* runs of equal items collapsed to a single item."
+  (if (empty? coll)
+    nil
+    (reverse (dedupe--acc (rest coll) (first coll) (list (first coll))))))
+
+(defn group-by (f coll)
+  "A map from each `(f x)` to the list of items of `coll` that produced it, each list in original order."
+  ;; Prepend per group (O(1)) then reverse every group's list once at the end.
+  (update-vals (fold (fn (m x) (let (k (f x)) (assoc m k (cons x (get m k))))) {} coll) reverse))
+
+;; flatten: splice nested lists into one flat list. Descends through `pair?`/`nil`
+;; (so empty sub-lists and nils vanish); vectors and maps are leaf items. The
+;; outer walk is tail-recursive; the nested call recurses only as deep as the
+;; nesting (bounded), not the length.
+(defn flatten--acc (coll acc)
+  (cond
+    (empty? coll) acc
+    (list? (first coll)) (flatten--acc (rest coll) (flatten--acc (first coll) acc))
+    else (flatten--acc (rest coll) (cons (first coll) acc))))
+(defn flatten (coll)
+  "A single flat list of the leaf items of `coll`, descending into nested lists. Vectors and maps are treated as leaves."
+  (reverse (flatten--acc coll nil)))
+
+(defn interpose--acc (sep coll acc)
+  (if (empty? coll) acc (interpose--acc sep (rest coll) (cons (first coll) (cons sep acc)))))
+(defn interpose (sep coll)
+  "A list with `sep` inserted between adjacent items of `coll`."
+  (if (empty? coll) nil (reverse (interpose--acc sep (rest coll) (list (first coll))))))
+
+(defn interleave--acc (a b acc)
+  (if (or (empty? a) (empty? b))
+    (reverse acc)
+    (interleave--acc (rest a) (rest b) (cons (first b) (cons (first a) acc)))))
+(defn interleave (a b)
+  "A list alternating items from `a` and `b` — `(a0 b0 a1 b1 …)` — stopping at the shorter input."
+  (interleave--acc a b nil))
+
+(defn take-last (n coll)
+  "The last `n` items of `coll`, as a list (the whole of `coll` if it is shorter, `()` if `n` <= 0)."
+  (drop (- (count coll) n) coll))
+(defn drop-last (n coll)
+  "`coll` without its last `n` items (`()` if `n` >= its length)."
+  (take (- (count coll) n) coll))
+
+(defn repeat--acc (n x acc) (if (<= n 0) acc (repeat--acc (dec n) x (cons x acc))))
+(defn repeat (n x)
+  "A list of `x` repeated `n` times (empty if `n` <= 0)."
+  (repeat--acc n x nil))
+
+(defn repeatedly--acc (n f acc) (if (<= n 0) (reverse acc) (repeatedly--acc (dec n) f (cons (f) acc))))
+(defn repeatedly (n f)
+  "A list of `n` successive calls to the zero-argument function `f` (in call order)."
+  (repeatedly--acc n f nil))
 
 ;; ---- transducers ------------------------------------------------------------
 ;; A *reducing function* has shape `(rf acc x) -> new-acc` — what `fold`

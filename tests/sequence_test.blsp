@@ -133,6 +133,63 @@
     (assert= (list (receive ([:saw v] v)) (receive ([:saw v] v)) (receive ([:saw v] v)))
       (list 0 1 2))))
 
+(describe "remove / keep"
+  (test "remove is the complement of filter"
+    (assert= (remove even? (range 8)) (list 1 3 5 7))
+    (assert= (remove (fn (x) true) (range 3)) nil))
+  (test "keep takes the non-nil results of f (map+filter fused)"
+    (assert= (keep (fn (x) (if (even? x) (* x x) nil)) (range 6)) (list 0 4 16))
+    (assert= (keep (fn (x) nil) (range 3)) nil)))
+
+(describe "distinct / dedupe"
+  (test "distinct drops duplicates, keeping first occurrence (order-preserving)"
+    (assert= (distinct (list 1 1 2 3 3 3 1 4)) (list 1 2 3 4))
+    (assert= (distinct nil) nil))
+  (test "distinct works on any equal-able items"
+    (assert= (distinct (list :a :b :a :c :b)) (list :a :b :c)))
+  (test "dedupe collapses only consecutive runs"
+    (assert= (dedupe (list 1 1 2 3 3 3 1 4)) (list 1 2 3 1 4))
+    (assert= (dedupe nil) nil)))
+
+(describe "group-by"
+  (test "group-by buckets items by f, preserving order within a bucket"
+    (assert= (group-by even? (range 6)) {true (list 0 2 4) false (list 1 3 5)}))
+  (test "group-by on an empty collection is the empty map"
+    (assert= (group-by even? nil) {})))
+
+(describe "flatten"
+  (test "flatten splices nested lists into one flat list"
+    (assert= (flatten (list 1 (list 2 (list 3 4)) 5 (list (list 6)))) (list 1 2 3 4 5 6)))
+  (test "flatten leaves a flat list unchanged and treats vectors as leaves"
+    (assert= (flatten (list 1 2 3)) (list 1 2 3))
+    (assert= (flatten (list [1 2] [3 4])) (list [1 2] [3 4]))))
+
+(describe "interpose / interleave"
+  (test "interpose inserts a separator between adjacent items"
+    (assert= (interpose :x (list 1 2 3)) (list 1 :x 2 :x 3))
+    (assert= (interpose :x (list 1)) (list 1))
+    (assert= (interpose :x nil) nil))
+  (test "interleave alternates, stopping at the shorter input"
+    (assert= (interleave (list 1 2 3) (list :a :b :c :d)) (list 1 :a 2 :b 3 :c))
+    (assert= (interleave nil (list 1)) nil)))
+
+(describe "take-last / drop-last"
+  (test "take-last returns the final n items (whole list if shorter)"
+    (assert= (take-last 2 (range 5)) (list 3 4))
+    (assert= (take-last 99 (range 3)) (list 0 1 2))
+    (assert= (take-last 0 (range 3)) nil))
+  (test "drop-last removes the final n items"
+    (assert= (drop-last 2 (range 5)) (list 0 1 2))
+    (assert= (drop-last 99 (range 3)) nil)))
+
+(describe "repeat / repeatedly"
+  (test "repeat builds a list of n copies"
+    (assert= (repeat 3 :x) (list :x :x :x))
+    (assert= (repeat 0 :x) nil))
+  (test "repeatedly calls a thunk n times, in order"
+    (assert= (repeatedly 3 (fn () 7)) (list 7 7 7))
+    (assert= (repeatedly 0 (fn () 7)) nil)))
+
 ;; ---- explicit concurrency (spawn / send / fan-in) ---------------------------
 ;; :isolated so these run against a private globals copy and don't contend with
 ;; the parallel suite for the runner's mailbox. Each worker builds a sequence and

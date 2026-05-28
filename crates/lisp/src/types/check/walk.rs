@@ -9,13 +9,65 @@
 //! are the tiny syntax-shape readers the rest of the walk shares; they're
 //! `pub(super)` so the sibling submodules (`sigs`, `guards`) can use them.
 
-use crate::core::heap::Heap;
+use std::sync::LazyLock;
+
+use crate::core::heap::{Heap, SymbolMap};
 use crate::core::value::{self, Symbol, Value};
 use crate::error::Pos;
 
 use super::ctx::Ctx;
-use super::guards::{expr_ty, guard_assertion, is_syntactic_keyword, skips_body};
+use super::guards::{expr_ty, guard_assertion, is_syntactic_keyword};
 use super::sigs::{arity_of, arity_str, curated_sig, is_globally_bound, sig_of};
+
+/// What the walk does at a head symbol. `Generic` is the fall-through for any
+/// head that isn't one of the recognised special forms / skip-body markers —
+/// the walk treats it as a normal call (resolves sig + arity, checks for
+/// unbound). One [`SymbolMap`] lookup decides: pre-consolidation each call
+/// allocated a `String` via `value::symbol_name` just to feed a chain of
+/// `matches!(name.as_str(), "if" | …)` plus `skips_body(&name)` — that was
+/// the hot allocation the review flagged. (`eval/mod.rs` uses the same
+/// `SymbolMap` pattern on its own loop.)
+#[derive(Clone, Copy)]
+enum SpecialHead {
+    /// `quote` / `quasiquote` / `try` / `error-of` / `assert-error` / `%try`
+    /// — return without descending. Mirrors `guards::skips_body`.
+    SkipBody,
+    If,
+    /// `let` / `let*` — sequential bind, no pre-binding.
+    Let,
+    /// `letrec` — pre-bind every name before walking RHSs (mutual recursion).
+    Letrec,
+    /// `fn` / `lambda` — open a fresh scope with the params bound.
+    Fn,
+    /// `def` — `name` is a binder, value is an expression.
+    Def,
+    /// `defn` / `defmacro` — same shape as `fn`/`lambda` plus a binder name.
+    Defn,
+}
+
+static SPECIAL_HEAD: LazyLock<SymbolMap<SpecialHead>> = LazyLock::new(|| {
+    use SpecialHead::*;
+    [
+        ("quote", SkipBody),
+        ("quasiquote", SkipBody),
+        ("try", SkipBody),
+        ("error-of", SkipBody),
+        ("assert-error", SkipBody),
+        ("%try", SkipBody),
+        ("if", If),
+        ("let", Let),
+        ("let*", Let),
+        ("letrec", Letrec),
+        ("fn", Fn),
+        ("lambda", Fn),
+        ("def", Def),
+        ("defn", Defn),
+        ("defmacro", Defn),
+    ]
+    .into_iter()
+    .map(|(n, k)| (value::intern(n), k))
+    .collect()
+});
 
 /// Walk `form` recursively, adding to `ctx.file_globals` every name introduced
 /// by a `(def name …)` or `(defmacro name …)` — at any depth, since Brood's
@@ -36,11 +88,12 @@ pub(super) fn collect_def_names(heap: &Heap, form: Value, ctx: &mut Ctx) {
     let Some(&Value::Sym(head)) = items.first() else {
         return;
     };
-    let head_name = value::symbol_name(head);
-    if matches!(head_name.as_str(), "quote" | "quasiquote") {
+    // Lock-free `symbol_is` instead of allocating the head's spelling — the
+    // walk visits every nested form, and only four comparisons are needed.
+    if value::symbol_is(head, "quote") || value::symbol_is(head, "quasiquote") {
         return;
     }
-    if matches!(head_name.as_str(), "def" | "defmacro") {
+    if value::symbol_is(head, "def") || value::symbol_is(head, "defmacro") {
         if let Some(&Value::Sym(name)) = items.get(1) {
             ctx.add_file_global(name);
         }
@@ -65,43 +118,46 @@ pub(super) fn check_into(
     // Special-cased forms that introduce scope or refine types. Each handles
     // its own argument-walking and returns; the generic path below doesn't run.
     if let Value::Sym(s) = head {
+        // One `SymbolMap` probe dispatches the recognised special-form heads —
+        // no `value::symbol_name` allocation for the common short-circuit
+        // paths (`if`/`let`/`fn`/…). The fallthrough computes the spelling
+        // once for the call-resolution work below (sig/arity/error messages).
+        if let Some(&kind) = SPECIAL_HEAD.get(&s) {
+            match kind {
+                SpecialHead::SkipBody => return,
+                SpecialHead::If => {
+                    check_if(heap, &items, ctx, out);
+                    return;
+                }
+                SpecialHead::Let => {
+                    check_let(heap, &items, ctx, out, false);
+                    return;
+                }
+                SpecialHead::Letrec => {
+                    // `letrec` pre-binds every name to `nil` so all bindings are
+                    // visible in every RHS — that's the mutual-recursion reason
+                    // letrec exists. The checker mirrors this: it pre-binds the
+                    // names into the inner scope *before* walking the RHSs, so a
+                    // self-recursive or mutually-recursive call doesn't get
+                    // flagged unbound.
+                    check_let(heap, &items, ctx, out, true);
+                    return;
+                }
+                SpecialHead::Fn => {
+                    check_fn(heap, &items, ctx, out);
+                    return;
+                }
+                SpecialHead::Def => {
+                    check_def(heap, &items, ctx, out);
+                    return;
+                }
+                SpecialHead::Defn => {
+                    check_defn(heap, &items, ctx, out);
+                    return;
+                }
+            }
+        }
         let name = value::symbol_name(s);
-        if skips_body(&name) {
-            return;
-        }
-        match name.as_str() {
-            "if" => {
-                check_if(heap, &items, ctx, out);
-                return;
-            }
-            "let" | "let*" => {
-                check_let(heap, &items, ctx, out, false);
-                return;
-            }
-            "letrec" => {
-                // `letrec` pre-binds every name to `nil` so all bindings are
-                // visible in every RHS — that's the mutual-recursion reason
-                // letrec exists. The checker mirrors this: it pre-binds the
-                // names into the inner scope *before* walking the RHSs, so a
-                // self-recursive or mutually-recursive call doesn't get
-                // flagged unbound.
-                check_let(heap, &items, ctx, out, true);
-                return;
-            }
-            "fn" | "lambda" => {
-                check_fn(heap, &items, ctx, out);
-                return;
-            }
-            "def" => {
-                check_def(heap, &items, ctx, out);
-                return;
-            }
-            "defn" | "defmacro" => {
-                check_defn(heap, &items, ctx, out);
-                return;
-            }
-            _ => {}
-        }
 
         // Resolve the callee's signature + arity (separate concerns; either
         // may be available without the other).
@@ -254,8 +310,12 @@ fn fn_params(heap: &Heap, form: Value) -> Vec<Symbol> {
     for item in items {
         match item {
             Value::Sym(s) => {
-                let name = value::symbol_name(s);
-                if name == "&" || name == "&optional" || name == "&rest" {
+                // Lock-free `symbol_is` to filter the parameter-list markers
+                // — three name compares without ever allocating the spelling.
+                if value::symbol_is(s, "&")
+                    || value::symbol_is(s, "&optional")
+                    || value::symbol_is(s, "&rest")
+                {
                     continue;
                 }
                 out.push(s);

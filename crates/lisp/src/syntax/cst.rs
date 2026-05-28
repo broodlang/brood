@@ -20,6 +20,7 @@
 
 use crate::error::Span;
 use crate::syntax::atom::{self, AtomKind};
+use crate::syntax::scanner::Scanner;
 
 /// The kind of a CST node. Tokens (leaves) carry no children; the rest nest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,12 +98,20 @@ impl Node {
 /// Parse `src` into a lossless CST. Never fails: malformed input is recorded as
 /// [`NodeKind::Error`] nodes and parsing continues.
 pub fn parse(src: &str) -> Node {
-    Cst {
-        src,
-        pos: 0,
+    let src_len = src.len();
+    let mut cst = Cst {
+        s: Scanner::new(src),
         depth: 0,
+    };
+    let mut children = Vec::new();
+    while cst.s.peek().is_some() {
+        children.push(cst.trivia_or_form());
     }
-    .parse_root()
+    Node {
+        kind: NodeKind::Root,
+        span: Span::new(0, src_len),
+        children,
+    }
 }
 
 /// Bound on nesting depth. Past this, an opening delimiter becomes an `Error`
@@ -112,24 +121,13 @@ pub fn parse(src: &str) -> Node {
 const MAX_DEPTH: u32 = 256;
 
 struct Cst<'a> {
-    src: &'a str,
-    pos: usize, // byte offset into `src`
+    s: Scanner<'a>,
     depth: u32,
 }
 
 impl<'a> Cst<'a> {
-    fn peek(&self) -> Option<char> {
-        self.src[self.pos..].chars().next()
-    }
-
-    fn bump(&mut self) -> Option<char> {
-        let c = self.peek()?;
-        self.pos += c.len_utf8();
-        Some(c)
-    }
-
     fn span_from(&self, start: usize) -> Span {
-        Span::new(start, self.pos)
+        Span::new(start, self.s.pos())
     }
 
     fn leaf(&self, kind: NodeKind, start: usize) -> Node {
@@ -140,21 +138,9 @@ impl<'a> Cst<'a> {
         }
     }
 
-    fn parse_root(&mut self) -> Node {
-        let mut children = Vec::new();
-        while self.peek().is_some() {
-            children.push(self.trivia_or_form());
-        }
-        Node {
-            kind: NodeKind::Root,
-            span: Span::new(0, self.src.len()),
-            children,
-        }
-    }
-
     /// One run of trivia, or one form. (Trivia stays in the tree — lossless.)
     fn trivia_or_form(&mut self) -> Node {
-        match self.peek() {
+        match self.s.peek() {
             Some(c) if c.is_whitespace() || c == ',' => self.trivia(false),
             Some(';') => self.trivia(true),
             _ => self.form(),
@@ -162,42 +148,44 @@ impl<'a> Cst<'a> {
     }
 
     /// Consume a maximal run of whitespace (`,` counts) or a single `;` comment
-    /// to end-of-line.
+    /// to end-of-line. We don't reuse [`Scanner::skip_trivia`] (which consumes
+    /// whitespace *and* comments uninterrupted) because the CST keeps them as
+    /// separate nodes for losslessness.
     fn trivia(&mut self, comment: bool) -> Node {
-        let start = self.pos;
+        let start = self.s.pos();
         if comment {
-            while let Some(c) = self.bump() {
+            while let Some(c) = self.s.bump() {
                 if c == '\n' {
                     break;
                 }
             }
             self.leaf(NodeKind::Comment, start)
         } else {
-            while matches!(self.peek(), Some(c) if (c.is_whitespace() || c == ',') && c != ';') {
-                self.bump();
+            while matches!(self.s.peek(), Some(c) if (c.is_whitespace() || c == ',') && c != ';') {
+                self.s.bump();
             }
             self.leaf(NodeKind::Whitespace, start)
         }
     }
 
     fn form(&mut self) -> Node {
-        let start = self.pos;
-        match self.peek() {
+        let start = self.s.pos();
+        match self.s.peek() {
             Some('(') => self.seq(NodeKind::List, ')', start),
             Some('[') => self.seq(NodeKind::Vector, ']', start),
             Some('{') => self.seq(NodeKind::Map, '}', start),
             Some('\'') => {
-                self.bump();
+                self.s.bump();
                 self.wrap(NodeKind::Quote, start)
             }
             Some('`') => {
-                self.bump();
+                self.s.bump();
                 self.wrap(NodeKind::Quasi, start)
             }
             Some('~') => {
-                self.bump();
-                let kind = if self.peek() == Some('@') {
-                    self.bump();
+                self.s.bump();
+                let kind = if self.s.peek() == Some('@') {
+                    self.s.bump();
                     NodeKind::Splice
                 } else {
                     NodeKind::Unquote
@@ -207,7 +195,7 @@ impl<'a> Cst<'a> {
             Some('"') => self.string(start),
             // A stray close delimiter is an error token; resume after it.
             Some(')') | Some(']') | Some('}') => {
-                self.bump();
+                self.s.bump();
                 self.leaf(NodeKind::Error, start)
             }
             Some(_) => self.atom(start),
@@ -225,15 +213,15 @@ impl<'a> Cst<'a> {
     /// `Error` child so the tree stays total but the parser doesn't grow the
     /// native stack with the source.
     fn seq(&mut self, kind: NodeKind, close: char, start: usize) -> Node {
-        self.bump(); // opening delimiter
+        self.s.bump(); // opening delimiter
         if self.depth >= MAX_DEPTH {
-            let err_start = self.pos;
+            let err_start = self.s.pos();
             self.skip_to_balanced_close(close);
             // The Error covers what wasn't parsed; the outer node spans through
             // the close (if we found one) just like a normal `seq`.
             let err = Node {
                 kind: NodeKind::Error,
-                span: Span::new(err_start, self.pos.saturating_sub(1).max(err_start)),
+                span: Span::new(err_start, self.s.pos().saturating_sub(1).max(err_start)),
                 children: Vec::new(),
             };
             return Node {
@@ -245,13 +233,13 @@ impl<'a> Cst<'a> {
         self.depth += 1;
         let mut children = Vec::new();
         loop {
-            match self.peek() {
+            match self.s.peek() {
                 None => {
-                    children.push(self.leaf(NodeKind::Error, self.pos)); // missing close
+                    children.push(self.leaf(NodeKind::Error, self.s.pos())); // missing close
                     break;
                 }
                 Some(c) if c == close => {
-                    self.bump();
+                    self.s.bump();
                     break;
                 }
                 _ => children.push(self.trivia_or_form()),
@@ -272,14 +260,14 @@ impl<'a> Cst<'a> {
     /// least one byte per iteration or stops at EOF).
     fn skip_to_balanced_close(&mut self, close: char) {
         let mut depth = 1i32; // we've already consumed our opener
-        while let Some(c) = self.peek() {
+        while let Some(c) = self.s.peek() {
             match c {
                 '(' | '[' | '{' => {
-                    self.bump();
+                    self.s.bump();
                     depth += 1;
                 }
                 ')' | ']' | '}' => {
-                    self.bump();
+                    self.s.bump();
                     depth -= 1;
                     if depth == 0 && c == close {
                         return;
@@ -289,25 +277,18 @@ impl<'a> Cst<'a> {
                     }
                 }
                 '"' => {
-                    self.bump();
-                    while let Some(c) = self.bump() {
-                        if c == '"' {
-                            break;
-                        }
-                        if c == '\\' {
-                            self.bump();
-                        }
-                    }
+                    self.s.bump(); // opening quote
+                    let _ = self.s.scan_string_body(None);
                 }
                 ';' => {
-                    while let Some(c) = self.bump() {
+                    while let Some(c) = self.s.bump() {
                         if c == '\n' {
                             break;
                         }
                     }
                 }
                 _ => {
-                    self.bump();
+                    self.s.bump();
                 }
             }
         }
@@ -323,7 +304,7 @@ impl<'a> Cst<'a> {
     fn wrap(&mut self, kind: NodeKind, start: usize) -> Node {
         let mut children = Vec::new();
         // interior trivia, kept (lossless): `' x`, `` ` ;c\n x``
-        while matches!(self.peek(), Some(c) if c.is_whitespace() || c == ',' || c == ';') {
+        while matches!(self.s.peek(), Some(c) if c.is_whitespace() || c == ',' || c == ';') {
             children.push(self.trivia_or_form());
         }
         if self.depth >= MAX_DEPTH {
@@ -334,7 +315,7 @@ impl<'a> Cst<'a> {
             };
         }
         self.depth += 1;
-        match self.peek() {
+        match self.s.peek() {
             Some(c) if c != ')' && c != ']' && c != '}' => children.push(self.form()),
             _ => {} // dangling sigil — recover, leaving the wrapper childless
         }
@@ -349,27 +330,23 @@ impl<'a> Cst<'a> {
     /// A `"…"` string. An unterminated string (EOF before the close quote)
     /// becomes an `Error` node spanning to EOF, since `Node` carries no
     /// "recovered" sub-state — `Error` is how syntactic diagnostics find it.
+    ///
+    /// Uses [`Scanner::scan_string_body`] with `out: None` — same body-walk
+    /// the reader uses, just without decoding (the CST keeps content as the
+    /// source span; readers slice it on demand).
     fn string(&mut self, start: usize) -> Node {
-        self.bump(); // opening quote
-        loop {
-            match self.bump() {
-                None => return self.leaf(NodeKind::Error, start), // unterminated
-                Some('"') => return self.leaf(NodeKind::Str, start),
-                Some('\\') => {
-                    self.bump(); // skip the escaped char (incl. a trailing one)
-                }
-                Some(_) => {}
-            }
+        self.s.bump(); // opening quote
+        match self.s.scan_string_body(None) {
+            crate::syntax::scanner::StringScan::Closed => self.leaf(NodeKind::Str, start),
+            crate::syntax::scanner::StringScan::Unterminated => self.leaf(NodeKind::Error, start),
         }
     }
 
     /// An atom: consume to the next delimiter, then classify the token with the
     /// shared [`atom`] rules so the kind matches what the reader would produce.
     fn atom(&mut self, start: usize) -> Node {
-        while matches!(self.peek(), Some(c) if !atom::is_delimiter(c)) {
-            self.bump();
-        }
-        let kind = match atom::classify(&self.src[start..self.pos]) {
+        let token = self.s.read_atom();
+        let kind = match atom::classify(token) {
             AtomKind::Nil => NodeKind::Nil,
             AtomKind::Bool(_) => NodeKind::Bool,
             AtomKind::Int(_) => NodeKind::Int,

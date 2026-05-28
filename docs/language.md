@@ -129,6 +129,15 @@ Maps are immutable — every operation returns a **fresh** map:
 | `(contains? m k)` | whether `k` is present (distinguishes a stored `nil` from absence) |
 | `(keys m)` / `(vals m)` | the keys / values, as a list, in insertion order |
 | `(reduce-kv f init m)` | fold over the entries: `(f acc k v)` left to right → the final acc |
+| `(merge m1 m2 …)` | combine maps left to right; rightmost key wins (`nil` maps skipped) |
+| `(merge-with f m1 m2 …)` | like `merge`, but a shared key's value is `(f old new)` |
+| `(update m k f args…)` | a new map with `k`'s value replaced by `(f current args…)` (`current` is `nil` if absent) |
+| `(update-vals m f)` / `(update-keys m f)` | a new map with `f` applied to every value / key |
+| `(select-keys m ks)` | a new map of just the entries whose key is in `ks` |
+| `(zipmap ks vs)` | a map pairing `ks` with `vs` positionally (stops at the shorter) |
+| `(get-in m path)` / `(get-in m path default)` | the value at a nested key `path`, or `default`/`nil` |
+| `(assoc-in m path v)` | a nested copy with `v` stored at `path` (intermediate maps created) |
+| `(update-in m path f args…)` | a nested copy with `path`'s value replaced by `(f current args…)` |
 | `(count m)` / `(empty? m)` | number of entries / whether there are none |
 | `(map? x)` | whether `x` is a map |
 
@@ -693,25 +702,41 @@ detection are deferred. Full reference: [distribution.md](distribution.md).
 ### Lists & sequences
 `cons`  `first`  `rest`  `car`  `cdr`  `second`  `third`  `last`  `but-last`
 `list`  `vector`  `append`  `reverse`  `nth`  `count`  `length`  `empty?`
-`range`  `take`  `drop`  `take-while`  `drop-while`  `member?`  `some?`
-`every?`  `find`  `zip`  `partition`  `sort`  `sort-by`
+`range`  `take`  `drop`  `take-last`  `drop-last`  `take-while`  `drop-while`
+`member?`  `some?`  `every?`  `find`  `zip`  `partition`  `sort`  `sort-by`
+`remove`  `keep`  `distinct`  `dedupe`  `group-by`  `flatten`  `interpose`
+`interleave`  `repeat`  `repeatedly`
 
 - `first`/`rest` of `nil` are `nil`. `nth` takes an optional default:
   `(nth coll i default)`.
 - `range`: `(range hi)` → `0..hi-1`; `(range lo hi)` → `lo..hi-1`;
   `(range lo hi step)` steps (ascending or descending).
-- `take`/`drop` clamp to the sequence length. `take-while`/`drop-while` split on
-  the first element that fails the predicate.
+- `take`/`drop` clamp to the sequence length; `take-last`/`drop-last` take/drop
+  from the end. `take-while`/`drop-while` split on the first element that fails
+  the predicate.
 - `some?`/`every?` return booleans (`every?` is vacuously true on the empty
   list); `find` returns the first matching element, or `nil`.
-- `zip` pairs two sequences into `[x y]` vectors, stopping at the shorter.
-  `partition` chunks into `n`-sized groups, dropping a trailing partial chunk.
+- `remove` is the complement of `filter`; `keep` maps a function and drops the
+  `nil` results (map + filter fused).
+- `distinct` removes duplicates, keeping the first occurrence (order-preserving);
+  `dedupe` collapses only *consecutive* runs of equal items.
+- `group-by` buckets items into a map from `(f x)` to the list of items that
+  produced it. `flatten` splices nested lists into one flat list (vectors/maps
+  are leaves).
+- `interpose` inserts a separator between adjacent items; `interleave` alternates
+  two sequences, stopping at the shorter. `zip` pairs two sequences into `[x y]`
+  vectors, stopping at the shorter. `partition` chunks into `n`-sized groups,
+  dropping a trailing partial chunk.
+- `repeat` builds a list of `n` copies of a value; `repeatedly` calls a
+  zero-argument function `n` times and collects the results.
 - `sort` orders ascending (or with a strict less-than predicate:
   `(sort > xs)`); `sort-by` orders by a key function. Both are a **stable**
   merge sort. All of these are tail-recursive (stack-safe on long inputs).
 
 ### Maps
-`hash-map`  `get`  `assoc`  `dissoc`  `contains?`  `keys`  `vals`  `reduce-kv`  `map?`
+`hash-map`  `get`  `assoc`  `dissoc`  `contains?`  `keys`  `vals`  `reduce-kv`
+`merge`  `merge-with`  `update`  `update-vals`  `update-keys`  `select-keys`
+`zipmap`  `get-in`  `assoc-in`  `update-in`  `map?`
 
 See the [Maps](#maps) section above. `{ }` is the literal form; the rest are
 immutable operations that return fresh maps. `count`/`empty?` work on maps too.

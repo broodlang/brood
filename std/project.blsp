@@ -10,12 +10,14 @@
 ;; mechanism (cwd / file-exists? / dir? / list-dir) and `load`; everything here
 ;; is ordinary Brood.
 
-;; --- the project, as set by the manifest -------------------------------------
-"The project model and test runner behind `nest` (ADR-020), written in Brood.
+(defmodule project
+  "The project model and test runner behind `nest` (ADR-020), written in Brood.
 Convention over configuration: `src/` holds source (added to *load-path*),
 `tests/` holds <name>_test.blsp cases; a `project.blsp` manifest declares
 identity and may override those paths. Also home to the user-config loader and
-the `nest new` scaffolder."
+the `nest new` scaffolder.")
+
+;; --- the project, as set by the manifest -------------------------------------
 
 (def *project-root* nil)
 (def *project-name* nil)
@@ -474,5 +476,3 @@ the `nest new` scaffolder."
                "Next:  nest test && nest run"
                (str "Next:  cd " nm " && nest test && nest run")))
     nm)))
-
-(provide 'project)

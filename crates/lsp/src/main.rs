@@ -28,14 +28,18 @@ use lsp_types::notification::{
     Notification as NotificationTrait, PublishDiagnostics,
 };
 use lsp_types::request::{
-    Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest, Request as RequestTrait,
-    SignatureHelpRequest,
+    Completion, DocumentHighlightRequest, DocumentSymbolRequest, GotoDefinition, HoverRequest,
+    PrepareRenameRequest, References, Rename, Request as RequestTrait, ResolveCompletionItem,
+    SemanticTokensFullRequest, SignatureHelpRequest,
 };
 use lsp_types::{
-    CompletionOptions, CompletionParams, Diagnostic, DiagnosticSeverity, DocumentSymbolParams,
-    GotoDefinitionParams, HoverParams, HoverProviderCapability, OneOf, Position,
-    PositionEncodingKind, PublishDiagnosticsParams, Range, ServerCapabilities, SignatureHelpOptions,
-    SignatureHelpParams, TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
+    CompletionItem, CompletionOptions, CompletionParams, Diagnostic, DiagnosticSeverity,
+    DocumentHighlightParams, DocumentSymbolParams, GotoDefinitionParams, HoverParams,
+    HoverProviderCapability, OneOf, Position, PositionEncodingKind, PrepareRenameResponse,
+    PublishDiagnosticsParams, Range, ReferenceParams, RenameOptions, RenameParams,
+    SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelpOptions, SignatureHelpParams,
+    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
 };
 
 use brood::core::value::Value;
@@ -49,6 +53,9 @@ mod defs;
 mod diagnostics;
 mod hover;
 mod line_index;
+mod references;
+mod rename;
+mod semantic_tokens;
 mod signature;
 mod symbols;
 
@@ -66,13 +73,34 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
         // We do UTF-16 column arithmetic in `LineIndex`; advertise it explicitly
         // rather than relying on the protocol default.
         position_encoding: Some(PositionEncodingKind::UTF16),
-        // Tier 1 (docs/lsp.md): completion, hover, document symbols, and
-        // goto-definition. The completion `trigger_characters` stay default —
-        // the client requests on identifier chars, which is what we want.
-        completion_provider: Some(CompletionOptions::default()),
+        // Completion offers locals + special forms + globals; `resolve_provider`
+        // lets us fill each item's signature/docstring lazily on
+        // `completionItem/resolve`. Trigger chars stay default (identifier chars).
+        completion_provider: Some(CompletionOptions {
+            resolve_provider: Some(true),
+            ..Default::default()
+        }),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
         definition_provider: Some(OneOf::Left(true)),
+        references_provider: Some(OneOf::Left(true)),
+        document_highlight_provider: Some(OneOf::Left(true)),
+        // Rename, with `prepareRename` so the editor validates/highlights the
+        // span before prompting.
+        rename_provider: Some(OneOf::Right(RenameOptions {
+            prepare_provider: Some(true),
+            work_done_progress_options: Default::default(),
+        })),
+        // Semantic tokens (whole-document) — meaning-based highlighting off the
+        // CST + scope tree. Range requests aren't offered (full is cheap enough).
+        semantic_tokens_provider: Some(
+            SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
+                legend: semantic_tokens::legend(),
+                full: Some(SemanticTokensFullOptions::Bool(true)),
+                range: Some(false),
+                work_done_progress_options: Default::default(),
+            }),
+        ),
         // Args are whitespace-separated in Lisp, so `(` opens signature help and
         // a space re-triggers it onto the next parameter.
         signature_help_provider: Some(SignatureHelpOptions {
@@ -97,9 +125,33 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
     Ok(())
 }
 
-/// Per-open-document state: just the source text. The CST and `LineIndex` are
-/// cheap to rebuild, so we derive them on each change rather than cache them.
-type Documents = HashMap<Uri, String>;
+/// Per-open-document state: the source text plus its cached [`Analysis`]. The
+/// CST + scope tree + line index are derived once per document version (on
+/// `did_open` / `did_change`) and reused for every request and the diagnostic
+/// publish — pre-cache, hover / completion / signature / publish each parsed
+/// the document afresh, so a single keystroke cost ~4 parses + 4 line-indexes.
+type Documents = HashMap<Uri, Document>;
+
+/// One open document — the text the editor sent plus its derived analysis.
+/// Replace the whole `Document` on every `did_change` so cache and text stay
+/// in sync without invalidation logic.
+struct Document {
+    text: String,
+    analysis: Analysis,
+    /// The editor's version for this text, echoed back on `publishDiagnostics`
+    /// so the client can discard diagnostics for a stale version.
+    version: i32,
+}
+
+/// All read-only views of a document version that every LSP request reuses:
+/// the CST, the scope tree built from it, and the byte→line/col index.
+/// Cheap to build once; ruinously expensive to build per keystroke on a big
+/// buffer.
+pub(crate) struct Analysis {
+    pub(crate) cst: cst::Node,
+    pub(crate) scope: scope::ScopeTree,
+    pub(crate) line_index: LineIndex,
+}
 
 fn main_loop(connection: &Connection) -> Result<(), Box<dyn Error + Sync + Send>> {
     let mut docs: Documents = HashMap::new();
@@ -133,15 +185,18 @@ fn main_loop(connection: &Connection) -> Result<(), Box<dyn Error + Sync + Send>
     Ok(())
 }
 
-/// Build the per-request analysis of a document: its CST, scope tree, and line
-/// index. All three are cheap to derive, so we rebuild them per request rather
-/// than cache (full-document sync, ADR-011 — the simple shape until a need
-/// justifies more). The `ScopeTree` owns its data (no borrow of `root`).
-fn analyze(text: &str) -> (cst::Node, scope::ScopeTree, LineIndex) {
-    let root = cst::parse(text);
-    let tree = scope::analyze(&root, text);
-    let index = LineIndex::new(text);
-    (root, tree, index)
+/// Build the analysis of a document — its CST, scope tree, and line index.
+/// All three are derived from the source text; cached on the [`Document`] so
+/// every request against the same document version reuses one parse.
+fn analyze(text: &str) -> Analysis {
+    let cst = cst::parse(text);
+    let scope = scope::analyze(&cst, text);
+    let line_index = LineIndex::new(text);
+    Analysis {
+        cst,
+        scope,
+        line_index,
+    }
 }
 
 /// Deserialize a request's params, mapping a bad payload to an `InvalidParams`
@@ -170,10 +225,10 @@ fn handle_request(docs: &Documents, interp: &mut Interp, req: Request) -> Respon
                 Err(resp) => return resp,
             };
             let pos = p.text_document_position_params;
-            let result = docs.get(&pos.text_document.uri).and_then(|text| {
-                let (root, tree, index) = analyze(text);
-                let offset = index.offset(text, pos.position);
-                hover::hover(interp, text, &root, &tree, &index, offset)
+            let result = docs.get(&pos.text_document.uri).and_then(|doc| {
+                let a = &doc.analysis;
+                let offset = a.line_index.offset(&doc.text, pos.position);
+                hover::hover(interp, &doc.text, &a.cst, &a.scope, &a.line_index, offset)
             });
             Response::new_ok(id, result)
         }
@@ -183,10 +238,10 @@ fn handle_request(docs: &Documents, interp: &mut Interp, req: Request) -> Respon
                 Err(resp) => return resp,
             };
             let pos = p.text_document_position;
-            let result = docs.get(&pos.text_document.uri).map(|text| {
-                let (_root, tree, index) = analyze(text);
-                let offset = index.offset(text, pos.position);
-                completion::completions(interp, &tree, offset)
+            let result = docs.get(&pos.text_document.uri).map(|doc| {
+                let a = &doc.analysis;
+                let offset = a.line_index.offset(&doc.text, pos.position);
+                completion::completions(interp, &a.scope, offset)
             });
             Response::new_ok(id, result)
         }
@@ -195,9 +250,9 @@ fn handle_request(docs: &Documents, interp: &mut Interp, req: Request) -> Respon
                 Ok(v) => v,
                 Err(resp) => return resp,
             };
-            let result = docs.get(&p.text_document.uri).map(|text| {
-                let (root, _tree, index) = analyze(text);
-                symbols::document_symbols(&root, text, &index)
+            let result = docs.get(&p.text_document.uri).map(|doc| {
+                let a = &doc.analysis;
+                symbols::document_symbols(&a.cst, &doc.text, &a.line_index)
             });
             Response::new_ok(id, result)
         }
@@ -208,11 +263,19 @@ fn handle_request(docs: &Documents, interp: &mut Interp, req: Request) -> Respon
             };
             let pos = p.text_document_position_params;
             let uri = pos.text_document.uri;
-            let result = docs.get(&uri).and_then(|text| {
-                let (root, tree, index) = analyze(text);
-                let offset = index.offset(text, pos.position);
-                definition::definition(&uri, text, &root, &tree, &index, offset)
-            });
+            // Not a closure: goto-definition needs `&mut interp` (for the
+            // cross-file `source-location` fallback) alongside the immutable
+            // `docs` borrow, so inline the lookup to keep both borrows separate.
+            let result = match docs.get(&uri) {
+                Some(doc) => {
+                    let a = &doc.analysis;
+                    let offset = a.line_index.offset(&doc.text, pos.position);
+                    definition::definition(
+                        interp, &uri, &doc.text, &a.cst, &a.scope, &a.line_index, offset,
+                    )
+                }
+                None => None,
+            };
             Response::new_ok(id, result)
         }
         SignatureHelpRequest::METHOD => {
@@ -221,12 +284,91 @@ fn handle_request(docs: &Documents, interp: &mut Interp, req: Request) -> Respon
                 Err(resp) => return resp,
             };
             let pos = p.text_document_position_params;
-            let result = docs.get(&pos.text_document.uri).and_then(|text| {
-                let (root, tree, index) = analyze(text);
-                let offset = index.offset(text, pos.position);
-                signature::signature_help(interp, text, &root, &tree, offset)
+            let result = docs.get(&pos.text_document.uri).and_then(|doc| {
+                let a = &doc.analysis;
+                let offset = a.line_index.offset(&doc.text, pos.position);
+                signature::signature_help(interp, &doc.text, &a.cst, &a.scope, offset)
             });
             Response::new_ok(id, result)
+        }
+        References::METHOD => {
+            let (id, p) = match extract::<ReferenceParams>(req) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            let pos = p.text_document_position;
+            let uri = pos.text_document.uri;
+            let result = docs.get(&uri).map(|doc| {
+                let a = &doc.analysis;
+                let offset = a.line_index.offset(&doc.text, pos.position);
+                references::references(&uri, &doc.text, &a.cst, &a.scope, &a.line_index, offset)
+            });
+            Response::new_ok(id, result)
+        }
+        DocumentHighlightRequest::METHOD => {
+            let (id, p) = match extract::<DocumentHighlightParams>(req) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            let pos = p.text_document_position_params;
+            let result = docs.get(&pos.text_document.uri).map(|doc| {
+                let a = &doc.analysis;
+                let offset = a.line_index.offset(&doc.text, pos.position);
+                references::document_highlights(&doc.text, &a.cst, &a.scope, &a.line_index, offset)
+            });
+            Response::new_ok(id, result)
+        }
+        PrepareRenameRequest::METHOD => {
+            let (id, p) = match extract::<TextDocumentPositionParams>(req) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            let result = docs.get(&p.text_document.uri).and_then(|doc| {
+                let a = &doc.analysis;
+                let offset = a.line_index.offset(&doc.text, p.position);
+                rename::prepare_rename(&doc.text, &a.cst, &a.scope, &a.line_index, offset)
+                    .map(PrepareRenameResponse::Range)
+            });
+            Response::new_ok(id, result)
+        }
+        Rename::METHOD => {
+            let (id, p) = match extract::<RenameParams>(req) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            let pos = p.text_document_position;
+            let uri = pos.text_document.uri;
+            let result = docs.get(&uri).and_then(|doc| {
+                let a = &doc.analysis;
+                let offset = a.line_index.offset(&doc.text, pos.position);
+                rename::rename(
+                    &uri, &doc.text, &a.cst, &a.scope, &a.line_index, offset, &p.new_name,
+                )
+            });
+            Response::new_ok(id, result)
+        }
+        SemanticTokensFullRequest::METHOD => {
+            let (id, p) = match extract::<SemanticTokensParams>(req) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            let result = docs.get(&p.text_document.uri).map(|doc| {
+                let a = &doc.analysis;
+                SemanticTokensResult::Tokens(semantic_tokens::semantic_tokens(
+                    &doc.text,
+                    &a.cst,
+                    &a.scope,
+                    &a.line_index,
+                ))
+            });
+            Response::new_ok(id, result)
+        }
+        ResolveCompletionItem::METHOD => {
+            let (id, item) = match extract::<CompletionItem>(req) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            Response::new_ok(id, completion::resolve(interp, item))
         }
         // Nothing else is advertised: reply method-not-found rather than leave
         // the client waiting on a response.
@@ -254,7 +396,20 @@ fn handle_notification(
                 return Ok(());
             };
             let uri = p.text_document.uri;
-            docs.insert(uri.clone(), p.text_document.text);
+            let text = p.text_document.text;
+            let version = p.text_document.version;
+            // Cache the analysis once per document version — every later
+            // request against this URI reads from `doc.analysis` rather than
+            // re-parsing the source.
+            let analysis = analyze(&text);
+            docs.insert(
+                uri.clone(),
+                Document {
+                    text,
+                    analysis,
+                    version,
+                },
+            );
             publish(connection, docs, interp, bootstrapped, &uri)?;
         }
         DidChangeTextDocument::METHOD => {
@@ -264,7 +419,17 @@ fn handle_notification(
             // Full sync: the last change event carries the entire new document.
             if let Some(change) = p.content_changes.into_iter().last() {
                 let uri = p.text_document.uri;
-                docs.insert(uri.clone(), change.text);
+                let text = change.text;
+                let version = p.text_document.version;
+                let analysis = analyze(&text);
+                docs.insert(
+                    uri.clone(),
+                    Document {
+                        text,
+                        analysis,
+                        version,
+                    },
+                );
                 publish(connection, docs, interp, bootstrapped, &uri)?;
             }
         }
@@ -275,7 +440,7 @@ fn handle_notification(
             let uri = p.text_document.uri;
             docs.remove(&uri);
             // Clear diagnostics for the closed document.
-            send_diagnostics(connection, &uri, Vec::new())?;
+            send_diagnostics(connection, &uri, Vec::new(), None)?;
         }
         _ => {} // initialized, didSave, didChangeConfiguration, … — nothing to do yet
     }
@@ -304,6 +469,29 @@ fn params<P: serde::de::DeserializeOwned>(not: ServerNotification) -> Option<P> 
 fn uri_to_path(uri: &Uri) -> Option<PathBuf> {
     let raw = uri.as_str().strip_prefix("file://")?;
     Some(PathBuf::from(percent_decode(raw)))
+}
+
+/// Build a `file://` URI from an absolute filesystem path — the inverse of
+/// [`uri_to_path`], for the cross-file `Location`s goto-definition returns.
+/// Percent-encodes every byte outside the URI "unreserved" set (plus `/`), so
+/// spaces and non-ASCII path components round-trip. `None` if the result somehow
+/// doesn't parse as a URI (it always should for an absolute path).
+pub(crate) fn path_to_uri(path: &str) -> Option<Uri> {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut s = String::from("file://");
+    for &b in path.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                s.push(b as char)
+            }
+            _ => {
+                s.push('%');
+                s.push(HEX[(b >> 4) as usize] as char);
+                s.push(HEX[(b & 0xf) as usize] as char);
+            }
+        }
+    }
+    s.parse().ok()
 }
 
 /// Tiny `%`-decoder for the path portion of a `file://` URI — no allocation
@@ -398,19 +586,19 @@ fn publish(
     bootstrapped: &mut HashSet<PathBuf>,
     uri: &Uri,
 ) -> Result<(), Box<dyn Error + Sync + Send>> {
-    let Some(text) = docs.get(uri) else {
+    let Some(doc) = docs.get(uri) else {
         return Ok(());
     };
+    let text = &doc.text;
+    let cst_root = &doc.analysis.cst;
+    let index = &doc.analysis.line_index;
 
     // Make project-local + test-framework names visible to the checker
     // (idempotent, cached per project root). No-op outside a project.
     bootstrap_project(interp, bootstrapped, uri);
 
-    let cst_root = cst::parse(text);
-    let index = LineIndex::new(text);
-
     // (1) Syntactic diagnostics — Tier 0.
-    let mut lsp_diags: Vec<Diagnostic> = diagnostics::collect(&cst_root, text)
+    let mut lsp_diags: Vec<Diagnostic> = diagnostics::collect(cst_root, text)
         .into_iter()
         .map(|d| {
             let range = Range::new(
@@ -434,15 +622,19 @@ fn publish(
         let forms: Vec<Value> = positioned.into_iter().map(|(f, _)| f).collect();
         for (pos_opt, msg) in check_file(&mut interp.heap, &forms) {
             if let Some(pos) = pos_opt {
-                // `Pos` is 1-based; LSP `Position` is 0-based. A 1-character
-                // marker is enough to anchor the squiggle — editors widen it
-                // to the token under it. `saturating_*` handles the edge cases
-                // (`pos.line == 0`, end-of-line columns) without panicking.
+                // `Pos` is 1-based; LSP `Position` is 0-based. Refine the range
+                // from the form start to the *offending token* where we can read
+                // it off the CST (the named symbol in an "unbound symbol: X", or
+                // a call's operator) — else fall back to a 1-char marker the
+                // editor widens. `saturating_*` keeps the edges panic-free.
                 let line = pos.line.saturating_sub(1);
                 let col = pos.col.saturating_sub(1);
-                let start = Position::new(line, col);
-                let end = Position::new(line, col.saturating_add(1));
-                let mut diag = Diagnostic::new_simple(Range::new(start, end), msg);
+                let range = refine_diagnostic_range(cst_root, text, index, line, col, &msg)
+                    .unwrap_or_else(|| {
+                        let start = Position::new(line, col);
+                        Range::new(start, Position::new(line, col.saturating_add(1)))
+                    });
+                let mut diag = Diagnostic::new_simple(range, msg);
                 diag.severity = Some(DiagnosticSeverity::WARNING);
                 diag.source = Some("brood".to_string());
                 lsp_diags.push(diag);
@@ -451,15 +643,50 @@ fn publish(
     }
     interp.heap.reset_local_to(cp);
 
-    send_diagnostics(connection, uri, lsp_diags)
+    send_diagnostics(connection, uri, lsp_diags, Some(doc.version))
+}
+
+/// Tighten a checker finding's squiggle from the whole form to the token it's
+/// really about. For `unbound symbol: NAME`, the first matching symbol token in
+/// the form; otherwise the form's operator (arity / type-misuse are about the
+/// call head). `None` if neither is found — the caller uses a 1-char marker.
+fn refine_diagnostic_range(
+    root: &cst::Node,
+    text: &str,
+    index: &LineIndex,
+    line: u32,
+    col: u32,
+    msg: &str,
+) -> Option<Range> {
+    let off = index.offset(text, Position::new(line, col));
+    let form = root.node_at(off)?;
+    let span = if let Some(name) = msg.strip_prefix("unbound symbol: ") {
+        find_symbol(form, text, name.trim())?
+    } else {
+        let head = form.forms().next()?;
+        (head.kind == cst::NodeKind::Symbol).then_some(head.span)?
+    };
+    Some(Range::new(
+        index.position(text, span.start),
+        index.position(text, span.end),
+    ))
+}
+
+/// The span of the first `Symbol` token under `node` whose text is `name`.
+fn find_symbol(node: &cst::Node, text: &str, name: &str) -> Option<brood::error::Span> {
+    if node.kind == cst::NodeKind::Symbol && node.text(text) == name {
+        return Some(node.span);
+    }
+    node.children.iter().find_map(|c| find_symbol(c, text, name))
 }
 
 fn send_diagnostics(
     connection: &Connection,
     uri: &Uri,
     diagnostics: Vec<Diagnostic>,
+    version: Option<i32>,
 ) -> Result<(), Box<dyn Error + Sync + Send>> {
-    let params = PublishDiagnosticsParams::new(uri.clone(), diagnostics, None);
+    let params = PublishDiagnosticsParams::new(uri.clone(), diagnostics, version);
     let not = ServerNotification::new(PublishDiagnostics::METHOD.to_string(), params);
     connection.sender.send(Message::Notification(not))?;
     Ok(())

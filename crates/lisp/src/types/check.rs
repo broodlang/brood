@@ -90,6 +90,19 @@ use crate::error::Pos;
 use ctx::Ctx;
 use walk::{check_into, collect_def_names};
 
+/// True when `form` is a top-level `(require …)` call — the one form the
+/// checker pre-evaluates so a module's macros (e.g. `defprocess` from
+/// `std/hatch.blsp`) are resolvable for the rest of the file.
+fn is_require_form(heap: &Heap, form: Value) -> bool {
+    if let Value::Pair(p) = form {
+        let (head, _) = heap.pair(p);
+        if let Value::Sym(s) = head {
+            return crate::core::value::symbol_is(s, "require");
+        }
+    }
+    false
+}
+
 /// Check one form, returning a warning per provable misuse. Empty when nothing is
 /// provably wrong (which includes "not enough static info").
 pub fn check_form(heap: &Heap, form: Value) -> Vec<String> {
@@ -137,10 +150,25 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
     // Pass 1: macroexpand each form (recording the expanded shape we'll also
     // walk in pass 2). A macroexpand failure isn't this pass's job to report,
     // so we fall back to the un-expanded form silently.
+    //
+    // When a top-level form is `(require 'mod …)`, also *evaluate* it so the
+    // module's macros and globals become resolvable for the rest of the file.
+    // Otherwise the next form using a macro the module brought in
+    // (`defprocess`, `cast`, `!`, etc. from `std/hatch.blsp`) would expand as
+    // an un-known head and trip the unbound-symbol diagnostic. `require` is
+    // idempotent (it checks `*features*`), so a later real run re-evaluating
+    // the same form is a no-op. Failures are swallowed: the checker is
+    // advisory and shouldn't gate on a missing module.
     let root = heap.global();
     let expanded: Vec<Value> = forms
         .iter()
-        .map(|&f| crate::eval::macros::macroexpand_all(heap, f, root).unwrap_or(f))
+        .map(|&f| {
+            let exp = crate::eval::macros::macroexpand_all(heap, f, root).unwrap_or(f);
+            if is_require_form(heap, exp) {
+                let _ = crate::eval::eval(heap, exp, root);
+            }
+            exp
+        })
         .collect();
     // Pass 2: collect every `(def name …)` in the expanded tree (top level
     // *or* nested — `defn` inside `test`/`describe`/`when`/… still defines a

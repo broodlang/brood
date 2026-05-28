@@ -186,24 +186,34 @@ pub(crate) fn unregister_dead_pid(pid: u64) {
 ///
 /// The whole sequence runs under the `NAMES` write lock so two concurrent
 /// `(spawn :name …)` calls can't both spawn — the loser sees the winner's
-/// pid and returns it. Briefly takes the REGISTRY mutex inside (via
-/// `process::is_alive`) for the staleness check; matches the lock ordering
-/// established by `monitor::add_monitor` (the only other place that nests
-/// REGISTRY inside another lock), so no deadlock with `deregister`'s
-/// sequential REGISTRY → NAMES → MONITORS pattern.
-pub(crate) fn spawn_or_get(name: Symbol, spawner: impl FnOnce() -> u64) -> u64 {
+/// pid and returns it. Inside, REGISTRY is briefly acquired **twice**:
+/// once via `process::is_alive` for the staleness check, and once inside
+/// `spawner()` (`process::spawn` inserts a new mailbox). Both are short
+/// — sequential acquisitions, not held across awaits, never overlap with
+/// each other. Lock-ordering vs `deregister` (which holds REGISTRY, then
+/// NAMES, then MONITORS *sequentially*) is safe: deregister never holds
+/// REGISTRY while reaching for NAMES, so the NAMES → REGISTRY nesting
+/// here can't form a cycle.
+///
+/// `spawner` is **fallible** — if creating the process errors (e.g. a
+/// type-check or heap-promotion failure), we propagate without inserting
+/// into NAMES, so a failed spawn leaves no stale entry behind.
+pub(crate) fn spawn_or_get<E>(
+    name: Symbol,
+    spawner: impl FnOnce() -> Result<u64, E>,
+) -> Result<u64, E> {
     let mut names = crate::core::sync::write(&NAMES);
     if let Some(&existing) = names.get(&name) {
         if process::is_alive(existing) {
-            return existing;
+            return Ok(existing);
         }
         // Stale (the process registered under this name has died); drop and
         // fall through to a fresh spawn.
         names.remove(&name);
     }
-    let pid = spawner();
+    let pid = spawner()?;
     names.insert(name, pid);
-    pid
+    Ok(pid)
 }
 
 /// `(monitor (Pid remote_node remote_pid))` from the cross-node path: ship a

@@ -429,6 +429,38 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     .map_err(|e| e.or_form_pos(heap, call_form));
             }
             Value::Fn(id) => {
+                // Supervisor checkpoint (ADR-039 step 2): record the call
+                // we're about to enter so, if a `LispError` later escapes
+                // the process, the per-process supervisor in
+                // `process::spawn`'s coroutine can re-invoke this same
+                // `(callee, argv)` — same iteration of the enclosing loop,
+                // state preserved.
+                //
+                // Three guards, in cheapness order:
+                //   1. `is_supervision_enabled()` — global mode gate.
+                //      Default off; a release build / `nest test` pays
+                //      zero per-call cost here (one atomic load + branch).
+                //   2. `in_green_process()` — root thread has no
+                //      supervisor (the REPL / file runner), so no need
+                //      to record.
+                //   3. `gc_block_depth() == 1` — only at the outermost
+                //      eval frame: the top-level loop running in the
+                //      spawn coroutine. Nested eval frames are inner
+                //      helpers (`(- n 1)` calls the prelude `-`, which
+                //      tail-recurses through `fold`, which calls more
+                //      `Fn`s) — and any of those overwriting the slot
+                //      many times per loop iteration would bury the
+                //      iteration value we actually want to retry. The
+                //      `gc_block_depth` counter tracks eval nesting and
+                //      is per-process (saved/restored around suspends),
+                //      so `== 1` is "this is the spawn entry's own tail
+                //      loop, not a helper running inside it".
+                if crate::process::is_supervision_enabled()
+                    && crate::process::in_green_process()
+                    && crate::process::gc_block_depth() == 1
+                {
+                    crate::process::record_resume(cur_callee, &cur_argv);
+                }
                 let scope = bind_params(heap, id, &cur_argv)
                     .map_err(|e| e.or_form_pos(heap, call_form))?;
                 let body_len = heap.closure(id).body.len();

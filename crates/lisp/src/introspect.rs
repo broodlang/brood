@@ -174,9 +174,10 @@ pub struct EvalResult {
 }
 
 /// Where the global `name` was defined, by lifting `(source-location 'NAME)`
-/// (ADR-031). `None` when the name is unbound, has no recorded site (a
-/// builtin or a prelude global — neither goes through the file loader's
-/// `note_definition` step), or `(source-location)` itself errored.
+/// (ADR-031). `None` when the name is unbound, has no recorded site (a Rust
+/// builtin — it has no Brood source), or `(source-location)` itself errored.
+/// Prelude globals *do* resolve, to a materialized copy of the prelude (so the
+/// standard library is navigable); user/project defs resolve to their files.
 ///
 /// `name` must be a single CST symbol token (see [`is_delimiter`] —
 /// completions, hovers, and goto-def already enforce this on their inputs).
@@ -187,6 +188,26 @@ pub fn source_location(interp: &mut Interp, name: &str) -> Option<SourceLoc> {
     let out = match interp.eval_str(&format!("(source-location '{name})")) {
         Ok(v) => parse_source_location(&interp.heap, v),
         Err(_) => None,
+    };
+    interp.heap.reset_local_to(cp);
+    out
+}
+
+/// The on-disk file a `require`able feature resolves to, found the same way
+/// `require` itself does: `require--find` over the live `*load-path*` (which
+/// `bootstrap_project` extends with the project's source dirs). Powers
+/// goto-definition on the module name in `(require 'foo)`. `None` for a baked-in
+/// std module (it has no file — it's `%builtin-module` source) or a feature not
+/// on the path. `feature` is a CST symbol token; it's escaped before embedding.
+pub fn module_file(interp: &mut Interp, feature: &str) -> Option<String> {
+    let cp = interp.heap.checkpoint();
+    let expr = format!(
+        "(require--find \"{}.blsp\" *load-path*)",
+        escape_brood_string(feature)
+    );
+    let out = match interp.eval_str(&expr) {
+        Ok(Value::Str(id)) => Some(interp.heap.string(id).to_string()),
+        _ => None,
     };
     interp.heap.reset_local_to(cp);
     out
@@ -412,16 +433,21 @@ mod tests {
     // ---- step 1b — wider tooling surface ------------------------------------
 
     #[test]
-    fn source_location_is_none_for_prelude_globals_and_unbound_names() {
-        // The prelude is loaded through `read_all` (not `read_all_positioned`),
-        // so even its `defn`s have no recorded site (see ADR-031, the comment on
-        // `source_location` in `builtins.rs`). Same for builtins (Rust, no site)
-        // and unknown names (no global at all). All three yield `None`, which is
-        // the visible behaviour today and what the MCP `lookup` tool needs to
-        // know to fall back gracefully.
+    fn source_location_resolves_prelude_fns_but_not_builtins_or_unbound() {
+        // The prelude is now loaded positioned, with `current-file` set to a
+        // materialized cache copy, so a prelude `defn` like `map` reports a site
+        // there — this powers `M-.` into the standard library. (Even `+` is a
+        // prelude `defn` over the `%add` primitive, so it resolves too.) A Rust
+        // *primitive* like `cons` has no Brood source, and an unknown name has no
+        // global at all, so both still yield `None` (MCP `lookup` relies on that).
         let mut interp = Interp::new();
-        assert_eq!(source_location(&mut interp, "map"), None);
-        assert_eq!(source_location(&mut interp, "+"), None);
+        let map = source_location(&mut interp, "map").expect("prelude fn has a site");
+        assert!(
+            map.file.ends_with("prelude.blsp"),
+            "should point at the prelude copy, got {map:?}"
+        );
+        assert!(map.line >= 1 && map.col >= 1, "{map:?}");
+        assert_eq!(source_location(&mut interp, "cons"), None);
         assert_eq!(source_location(&mut interp, "no-such-name-xyzzy"), None);
     }
 

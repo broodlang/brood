@@ -167,6 +167,13 @@ impl FreeLists {
 #[derive(Default)]
 pub struct SharedCode {
     slabs: Slabs,
+    /// Where each prelude global was defined — `name → (cache-file, pos)`,
+    /// recorded once during the prelude build (the file is the materialized
+    /// `prelude.blsp` copy; see `lib.rs`). Immutable like the rest of this
+    /// region, and consulted by [`Heap::def_site`] *after* the runtime table so
+    /// a user redefinition of a prelude name still wins. Powers cross-file
+    /// goto-definition into the standard library (ADR-031, docs/lsp.md).
+    def_sites: HashMap<Symbol, SourceLoc>,
 }
 
 /// A snapshot of the LOCAL heap's sizes, taken at a top-level boundary. Passing
@@ -366,6 +373,26 @@ impl Default for Heap {
     }
 }
 
+/// Pop a free-list slot if one is waiting, otherwise extend the slab. The
+/// shared shape behind every `replace-wholesale` allocator: `alloc_pair`,
+/// `alloc_vector`, `alloc_map`, `alloc_closure`. Returns the chosen slot
+/// index (usize). Pre-consolidation each of those was four lines of the
+/// same `if let Some(idx) = … pop() { … } else { … push() }` shape; the
+/// macro is that shape in one place. (`alloc_string` and `new_env` reuse
+/// the slot's inner buffer instead and stay hand-written.)
+macro_rules! alloc_slot {
+    ($self:expr, $field:ident, $value:expr) => {{
+        if let Some(idx) = $self.local_free.$field.pop() {
+            $self.local.$field[idx as usize] = $value;
+            idx as usize
+        } else {
+            let idx = $self.local.$field.len();
+            $self.local.$field.push($value);
+            idx
+        }
+    }};
+}
+
 impl Heap {
     /// A bare heap with empty shared regions — used to *build* the prelude
     /// before freezing it. Real runtimes use [`Heap::with_regions`]. GC is
@@ -465,7 +492,12 @@ impl Heap {
         }
         slabs.envs = Vec::new(); // the prelude region has no env frames
 
-        (SharedCode { slabs }, bindings)
+        // Move the def-sites the builder recorded (via `note_definition` while
+        // loading the prelude) into the immutable region. They describe prelude
+        // globals, never change, and shouldn't be re-recorded per runtime.
+        let def_sites = std::mem::take(&mut *self.runtime.def_sites_write());
+
+        (SharedCode { slabs, def_sites }, bindings)
     }
 
     /// Record this process's global scope (call once, after creating it).
@@ -603,9 +635,15 @@ impl Heap {
     }
 
     /// Where `name`'s global definition was loaded from, if recorded. Backs
-    /// `(source-location 'name)`.
+    /// `(source-location 'name)`. The runtime table (user/project `def`s) takes
+    /// precedence over the immutable prelude table, so redefining a prelude name
+    /// reports the user's site, not the standard library's.
     pub fn def_site(&self, name: Symbol) -> Option<SourceLoc> {
-        self.runtime.def_sites_read().get(&name).cloned()
+        self.runtime
+            .def_sites_read()
+            .get(&name)
+            .cloned()
+            .or_else(|| self.prelude.def_sites.get(&name).cloned())
     }
 
     // ----- allocation (always into the local heap) -----
@@ -615,24 +653,20 @@ impl Heap {
     // stays bounded by the high-water live count, not the lifetime allocation
     // total. Atomic w.r.t. the slab's `Vec`: a free index is always < current
     // `len`, so writing in place is well-defined.
+    //
+    // The four `replace-wholesale` allocators (pair/vector/map/closure) share
+    // the same pop-or-push shape; the [`alloc_slot!`] macro is that shape in
+    // one place. `alloc_string` / `new_env` differ — they *reuse* the slot's
+    // inner buffer (String capacity, EnvVars inline storage) rather than
+    // replacing wholesale — so they stay hand-written.
 
     pub fn alloc_pair(&mut self, head: Value, tail: Value) -> Value {
-        if let Some(idx) = self.local_free.pairs.pop() {
-            self.local.pairs[idx as usize] = (head, tail);
-            return Value::Pair(PairId::local(idx as usize));
-        }
-        let idx = self.local.pairs.len();
-        self.local.pairs.push((head, tail));
+        let idx = alloc_slot!(self, pairs, (head, tail));
         Value::Pair(PairId::local(idx))
     }
 
     pub fn alloc_vector(&mut self, items: Vec<Value>) -> Value {
-        if let Some(idx) = self.local_free.vectors.pop() {
-            self.local.vectors[idx as usize] = items;
-            return Value::Vector(VecId::local(idx as usize));
-        }
-        let idx = self.local.vectors.len();
-        self.local.vectors.push(items);
+        let idx = alloc_slot!(self, vectors, items);
         Value::Vector(VecId::local(idx))
     }
 
@@ -640,12 +674,7 @@ impl Heap {
     /// duplicate keys). The map operations below build the entry vector — keyed
     /// by structural equality — and hand it here.
     pub fn alloc_map(&mut self, entries: Vec<(Value, Value)>) -> Value {
-        if let Some(idx) = self.local_free.maps.pop() {
-            self.local.maps[idx as usize] = entries;
-            return Value::Map(MapId::local(idx as usize));
-        }
-        let idx = self.local.maps.len();
-        self.local.maps.push(entries);
+        let idx = alloc_slot!(self, maps, entries);
         Value::Map(MapId::local(idx))
     }
 
@@ -709,12 +738,7 @@ impl Heap {
     }
 
     pub fn alloc_closure(&mut self, c: Closure) -> ClosureId {
-        if let Some(idx) = self.local_free.closures.pop() {
-            self.local.closures[idx as usize] = c;
-            return ClosureId::local(idx as usize);
-        }
-        let idx = self.local.closures.len();
-        self.local.closures.push(c);
+        let idx = alloc_slot!(self, closures, c);
         ClosureId::local(idx)
     }
 
@@ -1046,23 +1070,7 @@ impl Heap {
 
     pub fn env_get(&self, env: EnvId, sym: Symbol) -> Option<Value> {
         let mut cur = Some(env);
-        let start = env;
-        let mut steps = 0u32;
-        if std::env::var_os("BROOD_DEBUG_FREED").is_some()
-            && env != EnvId::GLOBAL
-            && env.region() == LOCAL
-            && self.local_free.envs.contains(&(env.index() as u32))
-        {
-            eprintln!(
-                "[envget] FREED-SLOT-AS-ENV idx={} sym={} ({}) in_green={}",
-                env.index(),
-                sym,
-                crate::core::value::symbol_name(sym),
-                crate::process::in_green_process(),
-            );
-        }
         while let Some(e) = cur {
-            steps += 1;
             if e == EnvId::GLOBAL {
                 // A dynamic var resolves to its innermost active `binding`, if
                 // any, before the shared global default. The stack is empty
@@ -1074,24 +1082,7 @@ impl Heap {
                         return Some(v);
                     }
                 }
-                let r = self.runtime.globals_read().get(&sym).copied();
-                if r.is_none()
-                    && std::env::var_os("BROOD_DEBUG_ENV").is_some()
-                    && crate::process::in_green_process()
-                {
-                    let g_len = self.runtime.globals_read().len();
-                    let runtime_addr = std::sync::Arc::as_ptr(&self.runtime) as usize;
-                    eprintln!(
-                        "[envget] GREEN miss-at-GLOBAL sym={} ({}) start={:#x} steps={} globals_len={} runtime_addr={:#x}",
-                        sym,
-                        crate::core::value::symbol_name(sym),
-                        start.0,
-                        steps,
-                        g_len,
-                        runtime_addr
-                    );
-                }
-                return r;
+                return self.runtime.globals_read().get(&sym).copied();
             }
             let frame = self.env_frame(e);
             // Scan from the end: a later binding shadows an earlier same-named one.
@@ -1099,15 +1090,6 @@ impl Heap {
                 return Some(v);
             }
             cur = frame.parent;
-        }
-        if std::env::var_os("BROOD_DEBUG_ENV").is_some() && crate::process::in_green_process() {
-            eprintln!(
-                "[envget] GREEN miss-no-GLOBAL sym={} ({}) start={:#x} steps={}",
-                sym,
-                crate::core::value::symbol_name(sym),
-                start.0,
-                steps
-            );
         }
         None
     }
@@ -1507,44 +1489,35 @@ impl Marks {
             envs: vec![false; local.envs.len()],
         }
     }
+}
 
-    fn mark_pair(&mut self, i: usize) -> bool {
-        mark_one(&mut self.pairs, i)
-    }
-    fn mark_vector(&mut self, i: usize) -> bool {
-        mark_one(&mut self.vectors, i)
-    }
-    fn mark_map(&mut self, i: usize) -> bool {
-        mark_one(&mut self.maps, i)
-    }
-    fn mark_string(&mut self, i: usize) -> bool {
-        mark_one(&mut self.strings, i)
-    }
-    fn mark_closure(&mut self, i: usize) -> bool {
-        mark_one(&mut self.closures, i)
-    }
-    fn mark_env(&mut self, i: usize) -> bool {
-        mark_one(&mut self.envs, i)
-    }
+// Generate `mark_X` / `is_X_marked` for each slab. Pre-consolidation these
+// were twelve hand-written one-line methods that drifted on style (some used
+// `.unwrap_or(false)`, some asserted in-range). The macro pins one shape: a
+// `mark_X` that flips the bit and reports first-touch (so the worklist
+// enqueues children only once), and an `is_X_marked` that's safe past the
+// end of the bit-vector (the sweep loop indexes `local.X.len()`, but a slab
+// that grew mid-mark would otherwise panic). One shape, one place.
+macro_rules! mark_methods {
+    ($($field:ident => $mark:ident, $is_marked:ident),+ $(,)?) => {
+        impl Marks {
+            $(
+                fn $mark(&mut self, i: usize) -> bool { mark_one(&mut self.$field, i) }
+                fn $is_marked(&self, i: usize) -> bool {
+                    self.$field.get(i).copied().unwrap_or(false)
+                }
+            )+
+        }
+    };
+}
 
-    fn is_pair_marked(&self, i: usize) -> bool {
-        self.pairs.get(i).copied().unwrap_or(false)
-    }
-    fn is_vector_marked(&self, i: usize) -> bool {
-        self.vectors.get(i).copied().unwrap_or(false)
-    }
-    fn is_map_marked(&self, i: usize) -> bool {
-        self.maps.get(i).copied().unwrap_or(false)
-    }
-    fn is_string_marked(&self, i: usize) -> bool {
-        self.strings.get(i).copied().unwrap_or(false)
-    }
-    fn is_closure_marked(&self, i: usize) -> bool {
-        self.closures.get(i).copied().unwrap_or(false)
-    }
-    fn is_env_marked(&self, i: usize) -> bool {
-        self.envs.get(i).copied().unwrap_or(false)
-    }
+mark_methods! {
+    pairs => mark_pair, is_pair_marked,
+    vectors => mark_vector, is_vector_marked,
+    maps => mark_map, is_map_marked,
+    strings => mark_string, is_string_marked,
+    closures => mark_closure, is_closure_marked,
+    envs => mark_env, is_env_marked,
 }
 
 #[inline]

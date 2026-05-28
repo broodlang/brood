@@ -1,16 +1,31 @@
-//! `textDocument/completion`: name candidates at the cursor. Two sources, the
-//! split `docs/lsp.md` describes — **locals** visible at the cursor (from the CST
-//! scope walker) and the interpreter's **globals** (prelude + builtins). Locals
-//! come first, so a name they shadow ranks above the global it hides; the client
-//! does the prefix filtering, so we offer the whole visible set.
+//! `textDocument/completion` (+ `completionItem/resolve`): name candidates at
+//! the cursor. Three sources, inner-shadows-outer: **locals** visible at the
+//! cursor (from the CST scope walker), the **special forms / core macros** (which
+//! aren't in the global table — they're evaluator syntax, so completion would
+//! otherwise never offer `if`/`let`/`fn`/`def`…), and the interpreter's
+//! **globals** (prelude + builtins). The client does prefix filtering, so we
+//! offer the whole visible set.
+//!
+//! Items ship label + kind only; the signature and docstring are filled in by
+//! [`resolve`] when the client asks (`completionItem/resolve`), so building the
+//! list stays cheap (no introspection eval per candidate).
 
 use std::collections::HashSet;
 
 use brood::syntax::scope::{BindingKind, ScopeTree};
 use brood::Interp;
-use lsp_types::{CompletionItem, CompletionItemKind};
+use lsp_types::{CompletionItem, CompletionItemKind, Documentation, MarkupContent, MarkupKind};
 
 use brood::introspect;
+
+/// Special forms and core control/binding macros — offered as completions and
+/// marked as keywords. (Mirrors the same list the semantic-token classifier and
+/// `brood.el` use; these names aren't enumerable from the global table.)
+const KEYWORDS: &[&str] = &[
+    "if", "do", "def", "fn", "lambda", "let", "let*", "letrec", "quote", "quasiquote", "defmacro",
+    "defn", "defdyn", "defmodule", "when", "unless", "cond", "and", "or", "match", "try", "catch",
+    "throw", "receive", "binding", "dolist", "doseq", "dotimes", "for", "->", "->>",
+];
 
 /// Candidates visible at byte `offset`. `tree` is the document's scope analysis
 /// (already built by the caller, which also parses the CST).
@@ -30,6 +45,12 @@ pub fn completions(interp: &mut Interp, tree: &ScopeTree, offset: u32) -> Vec<Co
             ));
         }
     }
+    // Special forms / core macros (evaluator syntax — not in the global table).
+    for &kw in KEYWORDS {
+        if seen.insert(kw.to_string()) {
+            items.push(item(kw.to_string(), CompletionItemKind::KEYWORD));
+        }
+    }
     // Then the interpreter's globals (prelude + builtins).
     for name in introspect::global_names(interp) {
         if seen.insert(name.clone()) {
@@ -37,6 +58,23 @@ pub fn completions(interp: &mut Interp, tree: &ScopeTree, offset: u32) -> Vec<Co
         }
     }
     items
+}
+
+/// Fill in an item's signature (`detail`) and docstring (`documentation`) — what
+/// `completionItem/resolve` is for. Looked up by label against the interpreter's
+/// introspection; a local (or anything with neither) is returned unchanged.
+pub fn resolve(interp: &mut Interp, mut item: CompletionItem) -> CompletionItem {
+    let (sig, doc) = introspect::signature(interp, &item.label);
+    if let Some(sig) = sig {
+        item.detail = Some(sig);
+    }
+    if let Some(doc) = doc {
+        item.documentation = Some(Documentation::MarkupContent(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: doc,
+        }));
+    }
+    item
 }
 
 fn item(label: String, kind: CompletionItemKind) -> CompletionItem {
@@ -64,22 +102,29 @@ mod tests {
     }
 
     #[test]
-    fn offers_locals_and_globals() {
-        // Inside the body, the param `x` and the global `+` are both candidates.
+    fn offers_locals_keywords_and_globals() {
         let labels = labels_at("(defn f (x) (+ x 1))", "x 1");
         assert!(labels.contains(&"x".to_string()), "local missing");
         assert!(labels.contains(&"f".to_string()), "doc def missing");
         assert!(labels.contains(&"+".to_string()), "global missing");
+        assert!(labels.contains(&"let".to_string()), "special form missing");
     }
 
     #[test]
     fn a_local_appears_once_even_if_it_shadows() {
-        // A local named like a global must not be offered twice.
         let labels = labels_at("(defn map2 (map) map)", "map)");
         assert_eq!(
             labels.iter().filter(|l| *l == "map").count(),
             1,
             "shadowing local should be de-duped: {labels:?}"
         );
+    }
+
+    #[test]
+    fn resolve_attaches_a_signature_and_doc_for_a_global() {
+        let mut interp = Interp::new();
+        let resolved = resolve(&mut interp, item("map".into(), CompletionItemKind::FUNCTION));
+        assert!(resolved.detail.unwrap().contains("(map "), "signature");
+        assert!(resolved.documentation.is_some(), "doc");
     }
 }

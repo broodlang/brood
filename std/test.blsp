@@ -66,10 +66,11 @@
 ;; passed). A default `describe` emits one :parallel unit PER test (max
 ;; parallelism); a :serial/:isolated `describe` emits ONE unit holding all its
 ;; tests (so they run in sequence, in a single process).
-"A tiny ExUnit-style test framework, written in Brood. `describe` groups related
+(defmodule test
+  "A tiny ExUnit-style test framework, written in Brood. `describe` groups related
 cases and `test` names one; cases run concurrently by default, with `:serial` /
 `:isolated` opt-outs. `run-tests` runs the registered suite once. See
-docs/testing.md for the full guide."
+docs/testing.md for the full guide.")
 
 (def *units* nil)
 ; all registered units, newest first
@@ -225,9 +226,9 @@ docs/testing.md for the full guide."
 (defn pad-right (s w) (str s (spaces (- w (count s)))))
 (defn pad-left (s w) (str (spaces (- w (count s))) s))
 
-(defn take (n xs)
-  ; first n elements (fewer if xs is shorter)
-  (if (<= n 0) nil (if (empty? xs) nil (cons (first xs) (take (- n 1) (rest xs))))))
+;; (`take` / `quot` are the prelude's — formerly redefined here, which clobbered
+;; the shared global `take` with a non-tail version, since the runtime shares one
+;; global table across all loaded modules. Use the prelude's stack-safe versions.)
 
 ;; Insertion sort of (name . ms) pairs, slowest first. O(n²), but there are only
 ;; ever a handful of tests, so simplicity wins.
@@ -238,8 +239,7 @@ docs/testing.md for the full guide."
     else (cons (first sorted) (insert-by-ms x (rest sorted)))))
 (defn sort-by-ms (xs) (fold (fn (acc x) (insert-by-ms x acc)) nil xs))
 
-;; Integer division, and a "N.N MB" formatter for the memory line.
-(defn quot (a b) (/ (- a (rem a b)) b))
+;; A "N.N MB" formatter for the memory line (`quot` is the prelude's).
 (defn mb-str (bytes)
   (let (tenths (quot (+ (* bytes 10) 524288) 1048576)
          ; round to nearest 0.1 MB

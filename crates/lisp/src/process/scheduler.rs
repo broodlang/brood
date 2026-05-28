@@ -123,6 +123,94 @@ pub(super) fn gc_block_set(n: u32) {
     GC_BLOCK.with(|d| d.set(n));
 }
 
+// ----- resume slot (ADR-039 step 2 — supervised processes) ------------------
+//
+// The runtime's per-process supervisor catches a `LispError` that escaped the
+// process's eval (a redefinition that throws, a bug in a worker iteration)
+// and re-invokes the *last function call* — same callee, same args — so a
+// long-running stateful loop survives a bad iteration. The "last function
+// call" is captured here, in a thread-local, by the eval loop at every
+// tail-call dispatch (see `eval::Value::Fn` branch).
+//
+// **Coarse-grained checkpointing.** We update only at the tail-call site,
+// not at every nested call. Recovery semantics: retry the most recent
+// iteration of the enclosing loop, not the innermost frame. This is what
+// users actually want — and the per-call cost stays at one update per
+// iteration, not one per frame.
+//
+// **Why a thread-local, not Process-owned**: the slot is hot-path; thread-
+// local access is one TLS read. The slot is per-process-currently-running:
+// when a worker multiplexes another process, the old process's slot would
+// otherwise leak into the new one. Save/restore around suspends (the same
+// pattern `GC_BLOCK` uses) keeps each process's slot isolated.
+
+/// What the supervisor needs to re-invoke the most recent iteration. The
+/// eval loop pushes `(callee, argv.clone())` here on every tail-call entry
+/// (`Value::Fn(id)` branch, just before `continue 'tail`). The supervisor
+/// in the coroutine body reads it via [`take_resume`] when an error escapes.
+#[derive(Clone)]
+pub(crate) struct ResumeSlot {
+    pub(crate) callee: crate::core::value::Value,
+    pub(crate) argv: smallvec::SmallVec<[crate::core::value::Value; 8]>,
+}
+
+thread_local! {
+    /// The currently-running green process's resume slot. Updated by
+    /// `record_resume` from the eval loop on every tail-call dispatch; read
+    /// + cleared by the supervisor via `take_resume` on error. Saved /
+    /// restored around suspends so a worker running A, then B, then A again
+    /// doesn't leak B's slot into A's recovery.
+    static RESUME_SLOT: RefCell<Option<ResumeSlot>> = const { RefCell::new(None) };
+}
+
+/// Eval-loop hook: record `(callee, argv)` as the current iteration's
+/// resume point. Called by `eval::eval`'s `Value::Fn(id)` branch right
+/// before `continue 'tail`. Reuses the slot's `SmallVec` capacity when
+/// possible (clear + extend_from_slice) so a tight tail-loop pays one
+/// `Value` overwrite + one memcpy per iteration, not a fresh allocation.
+#[inline]
+pub fn record_resume(callee: crate::core::value::Value, argv: &[crate::core::value::Value]) {
+    RESUME_SLOT.with(|s| {
+        let mut s = s.borrow_mut();
+        match s.as_mut() {
+            Some(slot) => {
+                slot.callee = callee;
+                slot.argv.clear();
+                slot.argv.extend_from_slice(argv);
+            }
+            None => {
+                let mut new_argv = smallvec::SmallVec::new();
+                new_argv.extend_from_slice(argv);
+                *s = Some(ResumeSlot { callee, argv: new_argv });
+            }
+        }
+    });
+}
+
+/// Take (and clear) the current resume slot. Called by the supervisor on
+/// error. Returns `None` if no tail-call recorded yet — the supervisor then
+/// re-invokes the spawn entry instead (state-loss restart, the worst-case
+/// recovery).
+pub(super) fn take_resume() -> Option<ResumeSlot> {
+    RESUME_SLOT.with(|s| s.borrow_mut().take())
+}
+
+/// Read-only snapshot of the slot for save/restore around a coroutine
+/// suspend. Paired with [`resume_slot_set`] in the same pattern as
+/// `gc_block_save` / `gc_block_set`.
+#[inline]
+pub(super) fn resume_slot_save() -> Option<ResumeSlot> {
+    RESUME_SLOT.with(|s| s.borrow().clone())
+}
+
+/// Write the resume slot — paired with `resume_slot_save` around a suspend,
+/// and called by a fresh coroutine to wipe the residual value left on the
+/// worker by a previously-running process.
+#[inline]
+pub(super) fn resume_slot_set(v: Option<ResumeSlot>) {
+    RESUME_SLOT.with(|s| *s.borrow_mut() = v);
+}
+
 /// RAII guard: increments `GC_BLOCK` on construction, decrements on `Drop`.
 /// Acquired at the top of every `eval` call and every `macroexpand_all` call —
 /// the two contexts that hold unrooted LOCAL transients between safepoints.
@@ -186,16 +274,22 @@ fn preempt() {
         None => return, // no process context (e.g. prelude build) — nothing to yield to
     };
     if let Some(yptr) = ctx.yielder {
-        // Save this process's GC-block depth before yielding: a worker may pick
-        // up another process whose eval/macroexpand changes the thread-local,
-        // and we need ours back when we resume.
+        // Save this process's per-thread state before yielding: a worker may
+        // pick up another process whose eval/macroexpand changes these
+        // thread-locals, and we need ours back when we resume. GC-block
+        // depth is critical for safepoint correctness; the resume slot is
+        // critical so the supervisor sees this process's last tail-call,
+        // not whichever process happened to run on the worker between our
+        // suspend and resume (ADR-039).
         let saved_block = gc_block_save();
+        let saved_resume = resume_slot_save();
         // SAFETY: same invariant as `receive` — the yielder is valid while this
         // coroutine is running, which is now (tick runs inside eval, inside the
         // coroutine body). Suspending returns control to the worker (`run_one`).
         unsafe { (*yptr).suspend(Suspend::Preempt) };
         CURRENT.with(|c| *c.borrow_mut() = Some(ctx));
         gc_block_set(saved_block);
+        resume_slot_set(saved_resume);
     }
     // Root thread (yielder None): budget refreshed, never suspends.
 }
@@ -394,24 +488,16 @@ pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
                 yielder: Some(yielder as *const Yielder0),
             });
         });
-        // Wipe the worker's residual GC-block depth — a previous coroutine on
-        // this worker may have left it nonzero. Our depth starts fresh at 0
-        // (incremented by the eval guard below).
+        // Wipe the worker's residual thread-local state — a previous
+        // coroutine on this worker may have left these nonzero. Our depth
+        // starts fresh at 0 (incremented by the eval guard below); our
+        // resume slot starts empty (the supervisor will populate it on the
+        // first tail call).
         gc_block_set(0);
+        resume_slot_set(None);
         let mut heap = Heap::with_regions(prelude, runtime);
         heap.set_global(EnvId::GLOBAL);
-        let reason = match eval::apply(&mut heap, f, &[], EnvId::GLOBAL) {
-            Ok(_) => Message::Keyword(value::intern("normal")),
-            Err(e) => {
-                eprintln!("process {} died: {}", pid, e);
-                // A crash reason monitors can inspect; the message string for now
-                // (a richer structured reason can come with links later).
-                Message::Vector(vec![
-                    Message::Keyword(value::intern("error")),
-                    Message::Str(e.to_string()),
-                ])
-            }
-        };
+        let reason = supervise(&mut heap, pid, f);
         EXIT_REASON.with(|r| *r.borrow_mut() = Some(reason));
         CURRENT.with(|c| *c.borrow_mut() = None);
     });
@@ -419,6 +505,156 @@ pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
     ensure_workers();
     enqueue(Box::new(Process { pid, mailbox, coro }));
     Ok(pid)
+}
+
+// ----- supervisor (ADR-039 step 2) -----------------------------------------
+//
+// Wraps a process's main eval in a catch-and-retry loop. The eval loop
+// updates `RESUME_SLOT` at every tail-call dispatch (eval::Value::Fn
+// branch); on an uncaught `LispError`, we log it, sleep an exponential
+// backoff, take the slot, and re-invoke from there — *same callee, same
+// argv*, so the iteration's accumulator state is preserved. The whole
+// point: a freshly-saved redefinition that throws doesn't kill the
+// running worker; the next retry runs the corrected code with the same
+// state. See `docs/supervision.md` for the model.
+//
+// The circuit-breaker prevents an always-throwing entry from spinning the
+// process. After `MAX_RESTARTS` failed invocations in a row, we give up
+// and let the process exit; its monitor watchers see `[:down …]` with the
+// last error.
+
+const MAX_RESTARTS: u32 = 10;
+const BACKOFF_BASE_MS: u64 = 1;
+const BACKOFF_MAX_MS: u64 = 1000;
+
+// ----- mode gate (ADR-039 step 3, brought forward into step 2) --------------
+//
+// Supervision is **off by default**: a process whose eval throws an uncaught
+// `LispError` exits, monitors fire `[:down …]` immediately, no retries — the
+// Erlang let-it-crash baseline. That matches what most code expects and what
+// the existing test suite expects (e.g. `dynamic_test.blsp`'s `dt-crasher`
+// waits 500 ms for `[:down …]`).
+//
+// **Dev mode turns it on** — `(set-supervision! true)` from the language, or
+// `BROOD_SUPERVISE=1` from the environment (consulted on the first
+// `is_supervision_enabled` call and cached). The intended UX: the REPL /
+// `nest dev` flips this; `--release` builds and `nest test` leave it off so
+// throws surface immediately rather than being silently retried.
+//
+// The mode is a `bool` *cached* on first read so the hot eval path can decide
+// in one atomic load. Toggling it via `(set-supervision! …)` updates both
+// the env-derived cache and the active value.
+
+static SUPERVISION: AtomicUsize = AtomicUsize::new(SUPERVISION_UNSET);
+const SUPERVISION_UNSET: usize = 0;
+const SUPERVISION_OFF: usize = 1;
+const SUPERVISION_ON: usize = 2;
+
+/// Is per-process supervision on? Hot-path read for `eval`'s `record_resume`
+/// call and for the supervise loop. First call resolves from
+/// `BROOD_SUPERVISE` and caches; afterwards a single atomic load.
+#[inline]
+pub fn is_supervision_enabled() -> bool {
+    match SUPERVISION.load(Ordering::Relaxed) {
+        SUPERVISION_ON => true,
+        SUPERVISION_OFF => false,
+        _ => {
+            let on = std::env::var_os("BROOD_SUPERVISE")
+                .map(|v| v != "0" && v != "")
+                .unwrap_or(false);
+            SUPERVISION.store(
+                if on { SUPERVISION_ON } else { SUPERVISION_OFF },
+                Ordering::Relaxed,
+            );
+            on
+        }
+    }
+}
+
+/// Turn supervision on/off at runtime. Exposed to Brood as `set-supervision!`
+/// so the REPL or a dev-mode bootstrap can opt in. Affects processes spawned
+/// **after** the call; in-flight supervise loops keep running.
+pub fn set_supervision(on: bool) {
+    SUPERVISION.store(
+        if on { SUPERVISION_ON } else { SUPERVISION_OFF },
+        Ordering::Relaxed,
+    );
+}
+
+/// The per-process supervisor body — replaces the bare `match eval::apply`
+/// the original spawn body had. Loops until either the eval returns Ok
+/// (process finished normally) or we exhaust the restart budget. The exit
+/// reason returned here becomes the `[:down …]` reason monitors see.
+///
+/// When supervision is off (the default — see [`is_supervision_enabled`]),
+/// this short-circuits to a single `eval::apply` and surfaces the error
+/// directly: the let-it-crash baseline, indistinguishable from the
+/// pre-supervisor behaviour the rest of the test suite expects.
+fn supervise(heap: &mut Heap, pid: u64, entry: Value) -> Message {
+    use std::time::Duration;
+    if !is_supervision_enabled() {
+        return match eval::apply(heap, entry, &[], EnvId::GLOBAL) {
+            Ok(_) => Message::Keyword(value::intern("normal")),
+            Err(e) => {
+                eprintln!("process {} died: {}", pid, e);
+                Message::Vector(vec![
+                    Message::Keyword(value::intern("error")),
+                    Message::Str(e.to_string()),
+                ])
+            }
+        };
+    }
+    let mut callee = entry;
+    let mut argv: smallvec::SmallVec<[Value; 8]> = smallvec::SmallVec::new();
+    let mut restarts: u32 = 0;
+    let mut backoff_ms = BACKOFF_BASE_MS;
+    loop {
+        // Each invocation is its own eval; if it tail-calls deeper, `record_resume`
+        // updates RESUME_SLOT at every iteration boundary. The recovery cost on
+        // the happy path is one TLS read + two writes per tail call.
+        let result = eval::apply(heap, callee, &argv, EnvId::GLOBAL);
+        match result {
+            Ok(_) => return Message::Keyword(value::intern("normal")),
+            Err(e) => {
+                eprintln!("process {} caught: {}", pid, e);
+                restarts += 1;
+                if restarts > MAX_RESTARTS {
+                    eprintln!(
+                        "process {} gave up after {} restarts in a row; last error: {}",
+                        pid, restarts, e
+                    );
+                    return Message::Vector(vec![
+                        Message::Keyword(value::intern("error")),
+                        Message::Str(e.to_string()),
+                    ]);
+                }
+                // Exponential backoff. Capped at 1s so a process retrying a
+                // transient external failure doesn't sleep too long between
+                // attempts. Reset to BASE_MS on successful return (handled
+                // implicitly: that path doesn't loop).
+                std::thread::sleep(Duration::from_millis(backoff_ms));
+                backoff_ms = (backoff_ms.saturating_mul(2)).min(BACKOFF_MAX_MS);
+                // Take the slot and re-invoke from there. If no tail-call
+                // recorded yet (the entry itself threw before recursing),
+                // retry the original entry with no args — state-loss restart,
+                // the worst-case recovery.
+                match take_resume() {
+                    Some(slot) => {
+                        callee = slot.callee;
+                        argv.clear();
+                        argv.extend_from_slice(&slot.argv);
+                    }
+                    None => {
+                        // Re-invoke `entry` with no args. (callee already set
+                        // to `entry` on first iteration; restore on
+                        // subsequent fall-through.)
+                        callee = entry;
+                        argv.clear();
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// `(self)` — this process's pid.

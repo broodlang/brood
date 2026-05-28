@@ -1,4 +1,6 @@
 ;; The unit of hot-reload: a single function. The ticker in main.blsp calls
 ;; (greet) on every iteration; redefining greet here (or via a re-load) rebinds
 ;; the global, and the *next* (greet) call from the running ticker picks it up.
+(defmodule greeter "The hot-reloadable greeting — re-loading this file rebinds the global `greet`.")
+
 (defn greet () (println "hello"))

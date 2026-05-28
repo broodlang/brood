@@ -210,6 +210,8 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "demonitor", Arity::exact(1), Sig::new(vec![ref_ty], nil_ty), demonitor);
     def(heap, "spawn-count", Arity::exact(0), Sig::nullary(int), spawn_count);
     def(heap, "peak-threads", Arity::exact(0), Sig::nullary(int), peak_threads);
+    def(heap, "set-supervision!", Arity::exact(1), Sig::new(vec![bool_ty], nil_ty), set_supervision);
+    def(heap, "supervision?", Arity::exact(0), Sig::nullary(bool_ty), supervision_q);
     def(heap, "worker-threads", Arity::exact(0), Sig::nullary(int), worker_threads);
     def(heap, "list-processes", Arity::exact(0), Sig::nullary(list_ty), list_processes);
 
@@ -303,6 +305,8 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("spawn-count", &[], "How many green processes have been spawned since program start."),
     ("peak-threads", &[], "High-water mark of OS threads running processes concurrently."),
     ("worker-threads", &[], "The size of the scheduler's worker-thread pool (about nproc)."),
+    ("set-supervision!", &["on?"], "Turn the per-process supervisor on (`true`) or off (`false`). Off by default — a process whose body throws exits immediately (Erlang let-it-crash). On, the supervisor catches uncaught errors, retries the last tail-call iteration up to 10 times with exponential backoff, then gives up; intended for dev/hot-reload mode (ADR-039). Also reads `BROOD_SUPERVISE=1` from the env on first query. Affects processes spawned after the call."),
+    ("supervision?", &[], "Is the per-process supervisor currently on? (ADR-039.)"),
     ("node-start", &["name", "addr", "cookie"], "Name this runtime and listen for peers on addr (\"host:port\"); cookie authenticates links. Returns the node name."),
     ("connect", &["spec"], "Link to a peer node named in spec (\"name@host:port\"); cookie-authenticated. Returns the peer's node name."),
     ("register", &["name", "pid"], "Bind a local name so peers can address this process via {:name name :node this-node}. Returns the pid."),
@@ -1307,8 +1311,9 @@ fn form_pos(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
 /// `(current-file)` — the path of the file currently being `load`ed, or `nil`
 /// (e.g. at the REPL). Maintained by `load`.
 /// `(source-location 'name)` — where `name`'s global definition was loaded from,
-/// as `[file line col]`, or `nil` if it has no recorded site (a builtin, a
-/// prelude global, or an unknown/local name). The site is captured at load time
+/// as `[file line col]`, or `nil` if it has no recorded site (a Rust builtin, or
+/// an unknown/local name). Prelude globals resolve to a materialized copy of the
+/// standard library. The site is captured at load time
 /// before macroexpansion, so `defn`/`defmacro` definitions are located
 /// accurately. The image-query foundation for cross-file goto-definition (ADR-031
 /// / docs/lsp.md). Takes a symbol, so quote it: `(source-location 'foo)`.
@@ -1479,14 +1484,11 @@ fn spawn_named(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             thunk,
         ));
     }
-    // Capture the thunk by value so the closure passed to `spawn_or_get` is
-    // `FnOnce`, not just `Fn`. Errors during the spawn (e.g. a non-`Fn`
-    // somehow slipping through; defensive) propagate out as a thrown value
-    // via the `Result::unwrap_or_else` below; in practice this never fires
-    // because we type-checked just above.
-    let pid = crate::dist::spawn_or_get(name, || {
-        crate::process::spawn(heap, thunk).expect("type-checked above")
-    });
+    // `spawn_or_get`'s spawner is fallible — `?` propagates a real
+    // `LispError` if `process::spawn` rejects the thunk (defensive: with the
+    // `Value::Fn(_)` type-check above, that shouldn't fire today, but a
+    // future change to `promote`/`spawn` won't silently panic).
+    let pid = crate::dist::spawn_or_get(name, || crate::process::spawn(heap, thunk))?;
     Ok(crate::process::pid_value(pid))
 }
 
@@ -1690,6 +1692,19 @@ fn peak_threads(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 /// green processes (≈ `nproc`, or the `-j` setting); 0 until the first spawn.
 fn worker_threads(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::Int(crate::process::worker_threads() as i64))
+}
+
+/// `(set-supervision! on?)` — turn the per-process supervisor on or off. See
+/// ADR-039 / docs/supervision.md. Type-checked to a boolean by `Sig`.
+fn set_supervision(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    let on = matches!(args[0], Value::Bool(true));
+    crate::process::set_supervision(on);
+    Ok(Value::Nil)
+}
+
+/// `(supervision?)` — `true` iff the per-process supervisor is currently on.
+fn supervision_q(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    Ok(Value::Bool(crate::process::is_supervision_enabled()))
 }
 
 /// `(list-processes)` — every currently-live local pid as a `Pid` value

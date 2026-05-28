@@ -1,3 +1,6 @@
-(defn fib (x) 1)
+;; A tiny taste of Brood: recursive Fibonacci.
+(defn fib (n)
+  "The nth Fibonacci number, 0-indexed: 0 1 1 2 3 5 8 13 …"
+  (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))
 
-(println (fib 2))
+(println (fib 10))   ; => 55

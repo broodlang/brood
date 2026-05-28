@@ -1,5 +1,6 @@
 ;; std/docs.blsp — documentation extraction (`nest doc`), in Brood.
-"Generate Markdown documentation for a module by loading it and introspecting
+(defmodule docs
+  "Generate Markdown documentation for a module by loading it and introspecting
 the definitions it adds to the global table.
 
 `(generate-docs)` documents the whole project (every source file under it);
@@ -11,7 +12,7 @@ in `std/project.blsp`; Rust supplies only that mechanism (ADR-006).
 Attribution uses a `(global-names)` delta around loading the module, so it can't
 document a module already loaded before the snapshot (the delta is empty). For
 that reason `project` is required lazily, inside `document-project`, rather than
-at the top — keeping it out of the snapshot when it is itself the doc target."
+at the top — keeping it out of the snapshot when it is itself the doc target.")
 
 ;; --- module source + leading docstring ---------------------------------------
 
@@ -121,4 +122,3 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
 (defn generate-docs (& args)
   (if (empty? args) (println (document-project)) (println (document-module (first args)))))
 
-(provide 'docs)

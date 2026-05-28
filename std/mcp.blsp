@@ -196,11 +196,11 @@ prereqs landed and the stubs were replaced with the real implementations.)"
               :required ["source"]}
      :handler mcp-format-tool}
     {:name "check"
-     :description "Advisory type-check the project (stub — see docs/mcp.md step 1c)."
+     :description "Advisory type-check the project. Returns one diagnostic per warning ({:diagnostics [...]})."
      :schema {:type "object" :properties {}}
      :handler mcp-check-tool}
     {:name "run-tests"
-     :description "Run the project test suite (stub — see docs/mcp.md step 1c)."
+     :description "Run the project test suite. Returns the structured runner result ({:total :passed :failed ...})."
      :schema {:type "object" :properties {}}
      :handler mcp-run-tests-tool}
     {:name "processes"

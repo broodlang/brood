@@ -253,8 +253,17 @@ fn source_location_records_def_sites_from_a_loaded_file() {
     // pre-expansion. Both names point at their form's line, column 1.
     assert_eq!(loc(&mut interp, "(source-location 'foo)"), format!("[\"{p}\" 1 1]"));
     assert_eq!(loc(&mut interp, "(source-location 'bar)"), format!("[\"{p}\" 2 1]"));
-    // A prelude global has no recorded site; nor does an unknown name.
-    assert_eq!(loc(&mut interp, "(source-location 'map)"), "nil");
+    // A prelude `defn` (`map`) does have a recorded site — it points at the
+    // materialised prelude cache copy on disk (ADR-031 step 4; see
+    // `introspect::source_location_resolves_prelude_fns_but_not_builtins_or_unbound`).
+    // A Rust primitive (`cons`) has no Brood source, and an unknown name has
+    // no global at all, so both still yield `nil`.
+    let map_loc = loc(&mut interp, "(source-location 'map)");
+    assert!(
+        map_loc.contains("prelude.blsp"),
+        "expected prelude `map` to resolve to its cache copy, got {map_loc}"
+    );
+    assert_eq!(loc(&mut interp, "(source-location 'cons)"), "nil");
     assert_eq!(loc(&mut interp, "(source-location 'no-such-xyz)"), "nil");
 
     let _ = std::fs::remove_file(&path);
@@ -1018,6 +1027,156 @@ fn apply_tail_recursion_does_not_overflow() {
         (loop-apply 100000 0)
     ";
     assert_eq!(run(src), "5000050000");
+}
+
+/// Named-spawn (ADR-039 step 1): `(spawn :name expr)` is idempotent on
+/// `name`. A second call while the first process is alive returns the
+/// existing pid and **does not evaluate** the new thunk.
+///
+/// **Name is unique per test** (`:named-spawn-idempotent-test`) because the
+/// `NAMES` table is a process-wide static shared across all tests in this
+/// binary — collisions with sibling tests would race.
+#[test]
+fn named_spawn_is_idempotent_while_alive() {
+    let mut interp = Interp::new();
+    interp
+        .eval_str(
+            "(defn nsi-loop () (receive (after 60000 nil)) (nsi-loop))
+             (def p1 (spawn :named-spawn-idempotent-test (nsi-loop)))
+             (def p2 (spawn :named-spawn-idempotent-test
+                            (throw \"second thunk should NOT run\")))",
+        )
+        .expect("spawn calls should succeed");
+    // The two pids are the same value — the second spawn was a no-op.
+    let same = interp.eval_str("(= p1 p2)").expect("eq check");
+    assert_eq!(interp.print(same), "true");
+}
+
+/// When a named process dies, its name is reaped — a subsequent
+/// `(spawn :name …)` spawns fresh (does not reuse the dead pid).
+/// Exercises `dist::unregister_dead_pid` wired into `process::deregister`.
+#[test]
+fn named_spawn_respawns_after_death() {
+    let mut interp = Interp::new();
+    // First named spawn — process exits immediately (body is `nil`).
+    let p1 = interp
+        .eval_str("(spawn :named-spawn-respawn-test nil)")
+        .expect("first spawn ok");
+    let p1_str = interp.print(p1);
+    // Wait for the scheduler to run + deregister to fire.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    // The name has been reaped — `whereis` returns nil.
+    let where_ = interp
+        .eval_str("(whereis :named-spawn-respawn-test)")
+        .expect("whereis");
+    assert_eq!(
+        interp.print(where_),
+        "nil",
+        "name should be reaped after process death"
+    );
+    // A second spawn under the same name creates a fresh process — different pid.
+    let p2 = interp
+        .eval_str("(spawn :named-spawn-respawn-test nil)")
+        .expect("second spawn ok");
+    let p2_str = interp.print(p2);
+    assert_ne!(
+        p1_str, p2_str,
+        "fresh spawn after reap must produce a distinct pid (got both as {p1_str})"
+    );
+}
+
+/// `(spawn a b c)` with three args is a macroexpand-time error — the macro
+/// should refuse extra args rather than silently dropping them.
+#[test]
+fn spawn_with_three_args_is_a_macro_error() {
+    let err = Interp::new()
+        .eval_str("(spawn :a :b :c)")
+        .expect_err("three-arg spawn must error");
+    assert!(
+        err.to_string().contains("spawn:")
+            && err.to_string().contains("expected"),
+        "should be a spawn shape error, got: {}",
+        err
+    );
+}
+
+/// Supervisor recovery (ADR-039 step 2): when a process's main eval raises an
+/// uncaught error, the per-process supervisor catches it and re-invokes the
+/// *most recent tail call* with the **same args** — so a long-running stateful
+/// loop survives a bad iteration. We exercise that by having a tail-recursive
+/// worker that throws on iteration N=0, then count how many times it reports
+/// reaching that iteration: once for the first arrival + once per restart up
+/// to the supervisor's restart budget.
+///
+/// Verifies, end-to-end:
+/// 1. `record_resume` captures `(callee, argv)` on every tail-call dispatch
+///    (we see argv=[0] re-used by the supervisor, not [3] or [2]).
+/// 2. The supervisor catches a throw escaping the eval and loops.
+/// 3. The restart counter actually fires (we see exactly 1 + MAX_RESTARTS
+///    arrivals at iteration 0, not unbounded).
+#[test]
+fn supervisor_retries_last_iteration_with_same_args() {
+    // Supervision is off by default (let-it-crash baseline); opt in here.
+    // Note: `set_supervision` is global, so this test must not run with
+    // peers that assume the default — Cargo serialises tests in one binary
+    // only if --test-threads=1, but the gate's effect is local to spawns
+    // started **after** this call. We turn it back off in a defer to limit
+    // blast radius.
+    brood::process::set_supervision(true);
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            brood::process::set_supervision(false);
+        }
+    }
+    let _g = Guard;
+    let mut interp = Interp::new();
+    interp
+        .eval_str(
+            "(def *sup-recovery-parent* (self))
+             (defn sup-recovery-worker (n)
+               (send *sup-recovery-parent* (vector :iter n))
+               (if (= n 0) (throw \"boom\"))
+               (sup-recovery-worker (- n 1)))
+             (spawn (sup-recovery-worker 3))",
+        )
+        .expect("setup");
+
+    // Collect messages with a generous overall timeout: the supervisor's
+    // exponential backoff (1ms → … → 1s) caps each gap so all 11 arrivals at
+    // n=0 land inside a few seconds even on a loaded machine.
+    let mut iters: Vec<i64> = Vec::new();
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_secs(15) {
+        let got = interp
+            .eval_str("(receive (v v) (after 2000 nil))")
+            .expect("receive");
+        let s = interp.print(got);
+        if s == "nil" {
+            break;
+        }
+        // s looks like "[:iter 3]" — parse the trailing integer.
+        let n: i64 = s
+            .trim_end_matches(']')
+            .rsplit(' ')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap_or_else(|_| panic!("unparseable iter msg: {s}"));
+        iters.push(n);
+    }
+    // Expected: 3, 2, 1, 0, then 0 repeated up to MAX_RESTARTS times before
+    // the supervisor gives up. (MAX_RESTARTS=10 in scheduler.rs.)
+    assert_eq!(
+        iters.iter().take(4).copied().collect::<Vec<_>>(),
+        vec![3, 2, 1, 0],
+        "expected the worker's first descent 3→0, got {iters:?}"
+    );
+    let zeros = iters.iter().filter(|&&n| n == 0).count();
+    assert_eq!(
+        zeros, 11,
+        "supervisor should retry exactly MAX_RESTARTS+1 (=11) times at n=0; got {zeros} (full trace: {iters:?})"
+    );
 }
 
 /// `gensym` must mint process-wide-unique symbols, including across threads — a

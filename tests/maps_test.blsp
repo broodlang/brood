@@ -117,6 +117,59 @@
         (assert= x {:a 1 :b 2})
         (assert= y {:a 1 :c 3})))))
 
+(describe "merge / merge-with"
+  (test "merge combines maps left to right; rightmost key wins"
+    (assert= (merge {:a 1 :b 2} {:b 9 :c 3}) {:a 1 :b 9 :c 3}))
+  (test "merge skips nil maps; no args is the empty map"
+    (assert= (merge {:a 1} nil {:b 2}) {:a 1 :b 2})
+    (assert= (merge) {})
+    (assert= (merge nil) {}))
+  (test "merge returns a fresh map (originals untouched)"
+    (let (a {:a 1})
+      (assert= (merge a {:b 2}) {:a 1 :b 2})
+      (assert= a {:a 1})))
+  (test "merge-with combines shared keys with f"
+    (assert= (merge-with + {:a 1 :b 2} {:a 10 :c 3}) {:a 11 :b 2 :c 3}))
+  (test "merge-with f only fires on collisions"
+    (assert= (merge-with - {:a 5} {:b 1}) {:a 5 :b 1})))
+
+(describe "update / update-vals / update-keys"
+  (test "update applies f to the value at a key"
+    (assert= (update {:a 1} :a inc) {:a 2}))
+  (test "update passes nil for an absent key, and threads extra args"
+    (assert= (update {:a 1} :a + 5 6) {:a 12})
+    (assert= (update {} :a (fn (v) (if (nil? v) 0 v))) {:a 0}))
+  (test "update-vals maps f over every value"
+    (assert= (update-vals {:a 1 :b 2} inc) {:a 2 :b 3}))
+  (test "update-keys maps f over every key"
+    (assert= (update-keys {:a 1 :b 2} name) {"a" 1 "b" 2})))
+
+(describe "select-keys / zipmap"
+  (test "select-keys keeps only the named keys (absent ones skipped)"
+    (assert= (select-keys {:a 1 :b 2 :c 3} (list :a :c :z)) {:a 1 :c 3}))
+  (test "zipmap pairs keys with values, stopping at the shorter"
+    (assert= (zipmap (list :a :b :c) (list 1 2 3)) {:a 1 :b 2 :c 3})
+    (assert= (zipmap (list :a :b) (list 1 2 3)) {:a 1 :b 2})))
+
+(describe "nested access: get-in / assoc-in / update-in"
+  (test "get-in walks a key path"
+    (assert= (get-in {:a {:b {:c 42}}} (list :a :b :c)) 42))
+  (test "get-in returns the default when the path is missing"
+    (assert= (get-in {:a {:b 1}} (list :a :x :y) :none) :none)
+    (is (nil? (get-in {:a 1} (list :z)))))
+  (test "get-in with the empty path returns the whole map"
+    (assert= (get-in {:a 1} nil) {:a 1}))
+  (test "assoc-in stores deep, creating intermediate maps"
+    (assert= (assoc-in {:a {:b 1}} (list :a :c) 9) {:a {:b 1 :c 9}})
+    (assert= (assoc-in {} (list :a :b :c) 7) {:a {:b {:c 7}}}))
+  (test "assoc-in leaves the original untouched"
+    (let (m {:a {:b 1}})
+      (assert= (assoc-in m (list :a :b) 99) {:a {:b 99}})
+      (assert= m {:a {:b 1}})))
+  (test "update-in applies f at a path, creating as needed"
+    (assert= (update-in {:a {:b 1}} (list :a :b) inc) {:a {:b 2}})
+    (assert= (update-in {} (list :x) (fn (v) (if (nil? v) 1 (inc v)))) {:x 1})))
+
 (describe "keys & equality"
   (test "any value can be a key, compared structurally"
     (assert= (get {"x" 1 "y" 2} "y") 2)

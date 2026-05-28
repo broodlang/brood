@@ -50,14 +50,28 @@ static SHARED: LazyLock<SharedBundle> = LazyLock::new(|| {
     let root = heap.new_env(None);
     heap.set_global(root);
     builtins::register(&mut heap, root);
-    let forms = syntax::reader::read_all(&mut heap, PRELUDE).expect("read prelude");
-    for form in forms {
+    // Record each prelude def's source location against a materialized, on-disk
+    // copy of the prelude, so the LSP can jump `M-.` into the standard library
+    // (the prelude is `include_str!`'d — there's no source file at runtime
+    // otherwise). Best-effort and nav-only: if the cache can't be written we
+    // simply set no file, `note_definition` no-ops, and stdlib goto stays
+    // unavailable (everything else is unaffected). See `prelude_source_path`.
+    let prelude_file = prelude_source_path();
+    heap.set_current_file(prelude_file);
+    // Positioned read so each def carries the line/col goto-definition lands on.
+    let forms = syntax::reader::read_all_positioned(&mut heap, PRELUDE).expect("read prelude");
+    for (form, pos) in forms {
+        // Capture the def site from the *un-expanded* form (before macros lower
+        // `defn`/`defmacro` to `def` and discard spans), exactly as the file
+        // loader does. No-op when no file was set, or the form isn't a def.
+        heap.note_definition(form, pos);
         // Expand macros once (the compile pass), then evaluate. Form-by-form so
         // a macro defined by one form is visible to the next.
         let form = eval::macros::macroexpand_all(&mut heap, form, root)
             .unwrap_or_else(|e| panic!("prelude expand: {}", e));
         eval::eval(&mut heap, form, root).unwrap_or_else(|e| panic!("prelude: {}", e));
     }
+    heap.set_current_file(None);
     let (code, bindings) = heap.freeze_as_shared_code(root);
     SharedBundle {
         code: Arc::new(code),
@@ -187,3 +201,34 @@ impl Default for Interp {
 
 /// The standard prelude, written in Brood and baked into the binary.
 const PRELUDE: &str = include_str!("../../../std/prelude.blsp");
+
+/// Materialize the embedded prelude to a stable, read-only-ish cache file and
+/// return its path — the file the prelude's def-sites point at, so tools (the
+/// LSP's `M-.`) can open the standard library's source. The prelude is
+/// `include_str!`'d, so it has no source file at runtime; this writes one copy
+/// to `$XDG_CACHE_HOME/brood/prelude.blsp` (falling back to `~/.cache`), only
+/// when missing or stale (a new build ships a different prelude). Editing it
+/// has no effect — it's a navigation artefact, not a load path.
+///
+/// Returns `None` if no cache dir can be determined or the write fails; the
+/// caller treats that as "stdlib navigation unavailable" and carries on.
+fn prelude_source_path() -> Option<String> {
+    use std::path::PathBuf;
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
+    let dir = base.join("brood");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join("prelude.blsp");
+    // Rewrite only when the on-disk copy is absent or differs from this build's
+    // embedded prelude — keeps the file stable across runs and across versions.
+    let stale = match std::fs::read(&path) {
+        Ok(existing) => existing != PRELUDE.as_bytes(),
+        Err(_) => true,
+    };
+    if stale {
+        std::fs::write(&path, PRELUDE).ok()?;
+    }
+    Some(path.to_string_lossy().into_owned())
+}

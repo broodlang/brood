@@ -260,14 +260,38 @@ not a known body form (defaults to call-style — every arg breaks)."
   ;; pairs up like a `let` bindings list — `{:a 1\n :b 2}` instead of every
   ;; element on its own line. Comments inside a map fall through to the
   ;; default list break so they survive.
-  (let (one (single-line n))
+  (let (one (single-line n)
+        ;; Respect the author's line structure: if the source had newlines
+        ;; *inside this form's own children*, keep it broken even if the
+        ;; collapsed form would fit. Standard Lisp formatter behaviour
+        ;; (matches Clojure/Racket/Emacs-lisp), and idempotent — a form
+        ;; already on one line stays on one line, a form already broken
+        ;; stays broken. Maps follow the same rule but get the pair-break
+        ;; layout below.
+        keep-broken (had-author-newlines? n))
     (cond
-      (and one (<= (+ indent (string-length one)) *format-width*)) one
+      (and one (not keep-broken) (<= (+ indent (string-length one)) *format-width*)) one
       (and (= (node-kind n) :map) (not (any-comment? (node-children n)))) (render--pair-break (node-children n)
                                                                             indent
                                                                             "{"
                                                                             "}")
       else (render--break (node-children n) indent open close))))
+
+;; True if any direct-child whitespace of `n` contains a newline — the source
+;; broke this form across lines, so single-line emit would erase that intent.
+;; Idempotent: a single-line form has no inner newlines and answers false.
+(defn had-author-newlines? (n)
+  (let (k (node-kind n))
+    (if (or (= k :list) (= k :vector) (= k :map))
+      (had-author-newlines--scan (node-children n) 0 (vector-length (node-children n)))
+      false)))
+
+(defn had-author-newlines--scan (kids i n)
+  (cond
+    (= i n) false
+    (let (c (vector-ref kids i))
+      (and (whitespace? c) (string-contains? (node-text c) "\n"))) true
+    else (had-author-newlines--scan kids (inc i) n)))
 
 (defn render--break (kids indent open close)
   ;; Multi-line list emit. The output is:
@@ -362,9 +386,10 @@ not a known body form (defaults to call-style — every arg breaks)."
 ;; the opening `(`). Comments inside the bindings disable pair grouping —
 ;; we fall back to plain `render--break` so they survive.
 (defn render-pair-list (n indent)
-  (let (one (single-line n))
+  (let (one (single-line n)
+        keep-broken (had-author-newlines? n))
     (cond
-      (and one (<= (+ indent (string-length one)) *format-width*)) one
+      (and one (not keep-broken) (<= (+ indent (string-length one)) *format-width*)) one
       (any-comment? (node-children n)) (render--break (node-children n) indent "(" ")")
       else (render--pair-break (node-children n) indent "(" ")"))))
 

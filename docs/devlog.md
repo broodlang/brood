@@ -4768,3 +4768,216 @@ The bigger LLM-native picture (`docs/llm-native.md`) is unchanged:
 catch-shape + codes are now structured enough for the agent to branch
 programmatically; the remaining moves are §7 (examples-by-intent),
 §8 (idiom lints), and §10 (the gauntlet).
+
+---
+
+## 2026-05-28 — Stdlib gap-fill: map + sequence ops; std/examples style sweep
+
+**Goal.** Round out the standard library against what a general-purpose
+Lisp/Clojure-style stdlib carries, then sweep all `std/*.blsp` and the
+examples for the current preferred style. All-Brood, no new kernel.
+
+**Added to `std/prelude.blsp` (all Brood, all tail-recursive/bounded):**
+
+- *Maps* — `merge` / `merge-with` (variadic, rightmost-wins; `nil` maps
+  skipped), `update` (apply-f-at-key with threaded args), `update-vals` /
+  `update-keys`, `select-keys`, `zipmap`, and the nested-path trio `get-in` /
+  `assoc-in` / `update-in` (`assoc-in` coerces a non-map node to `{}` so it
+  creates intermediate maps; `update-in` is `get-in` then `assoc-in`). Built on
+  `reduce-kv` + the 3-arg kernel `map-assoc` (no per-step rest-list).
+- *Sequences* — `remove` (eager complement of `filter`) and `keep` (the eager
+  `xkeep`), `distinct` (first-occurrence, O(n) via a map-as-seen-set) /
+  `dedupe` (consecutive-run collapse), `group-by`, `flatten` (splices nested
+  lists; vectors/maps are leaves), `interpose` / `interleave`, `take-last` /
+  `drop-last`, `repeat` / `repeatedly`.
+
+Multi-collection `map` (`(map f xs ys)`) was **deliberately not** added: the
+prelude keeps `map`/`filter` fixed-arity for the no-rest-list fast path (see the
+`x*` transducer note), and `(map (fn ([a b]) …) (zip xs ys))` covers it.
+
+**Style sweep (3 parallel review agents over std + examples):**
+
+- **Real bug fixed:** `std/test.blsp` redefined the global `take` with a
+  *non-tail* version (and re-defined `quot`). Because the runtime shares one
+  global table across all loaded modules (ADR-013), `(require 'test)` was
+  silently clobbering the prelude's stack-safe `take` for the whole image.
+  Both local redefinitions deleted — the prelude's are used. (`quot` was
+  identical; `take` was strictly worse.)
+- **Modernized module headers to `defmodule`:** `std/project.blsp` and
+  `std/docs.blsp` still used the legacy *bare-leading-string + trailing
+  `(provide 'x)`* pattern; `std/test.blsp` had a bare leading string and no
+  `provide` at all. All three now lead with `(defmodule name "…")` (which both
+  documents and provides), so `(module-doc 'project)` etc. now return their
+  docstrings. (`docs--leading-doc` still reads legacy bare-string docs, by
+  design — third-party/older modules.)
+- **`std/mcp.blsp`:** the `check` / `run-tests` tool `:description`s still said
+  "(stub — see docs/mcp.md step 1c)", contradicting the file's own docstring
+  (the stubs were replaced long ago). Updated to describe the real return
+  shapes.
+- **Examples:** `examples/wilhelm.blsp` was a placeholder (`(defn fib (x) 1)`)
+  → a real recursive `fib` with a docstring; `examples/hot-reload/greeter.blsp`
+  gained a `defmodule` header; `examples/processes.blsp`'s "green-ish processes
+  on real OS threads" comment corrected to "green processes multiplexed over a
+  worker-thread pool". `life`/`tour`/`processes`/`node_*`/`main` reviewed clean
+  (all builtins they call still exist; no `defonce`/`set!`/removed forms).
+
+**Tests.** New `describe` blocks in `tests/maps_test.blsp` (merge/merge-with,
+update family, select-keys/zipmap, nested get-in/assoc-in/update-in) and
+`tests/sequence_test.blsp` (remove/keep, distinct/dedupe, group-by, flatten,
+interpose/interleave, take-last/drop-last, repeat/repeatedly) — each `test`
+already runs in its own green process (multi-core coverage); the files' existing
+`:isolated` blocks carry the explicit spawn/send/fan-in coverage. `docs/language.md`
+Maps table + the Lists/Maps builtin lists updated.
+
+**Verified.** `maps_test` + `sequence_test` run green in isolation —
+**113/113** pass. Targeted load-and-run because the **full** `cargo test`
+suite currently SIGSEGVs in `tests/suite.rs` (a green-process stack overflow in
+`format_test`) — that is **concurrent runtime WIP** in the working tree
+(uncommitted `core/heap.rs` +129, `process/scheduler.rs` +201, plus
+`eval/mod.rs` / `mailbox.rs` / `process.rs`; today's earlier entry flags the
+in-progress freeze there), **not** these stdlib changes: every `std/*.blsp`
+edit here is `.blsp`-only, and the new prelude functions all verify standalone.
+Re-run the full suite once the scheduler/heap work settles.
+
+---
+
+## 2026-05-28 — LSP: cross-file & standard-library goto-definition
+
+**Goal.** From editor work (`brood.el`): `M-.` couldn't jump to a definition in
+another project module, nor into the standard library. The cross-file substrate
+(ADR-031 steps 1–2: def-site recording + `(source-location 'name)`) was built,
+but the LSP wiring (steps 3–4) wasn't.
+
+**Built.**
+- **Cross-module goto** (`crates/lsp/definition.rs`, `main.rs`): a name that
+  resolves `Free` in the buffer now falls back to `introspect::source_location`
+  against the bootstrapped `Interp`, projected to a cross-file `Location` (new
+  `path_to_uri` helper, the inverse of `uri_to_path`). The first `didOpen` under
+  a `project.blsp` already bootstraps the project, so a module's `def`s are in
+  the def-site table by the time a goto request arrives. Verified end-to-end
+  against a `nest new` project (`greeting` in `main.blsp` → `hello.blsp`).
+- **Standard-library goto** (`core/heap.rs`, `lib.rs`): the prelude is
+  `include_str!`'d, so it had no on-disk source to land on. The prelude build now
+  *materializes* a copy to `$XDG_CACHE_HOME/brood/prelude.blsp` (fallback
+  `~/.cache`), sets `current-file` to it, reads positioned, and records each
+  prelude def's site. Those sites are immutable, so they live in `SharedCode`
+  (drained from the builder's `RuntimeCode` in `freeze_as_shared_code`);
+  `Heap::def_site` checks the runtime table first (a user redefinition wins) then
+  the prelude. `(source-location 'map)` → the cache copy; Rust primitives
+  (`cons`, `rem`, …) stay `nil` (no Brood source; hover still documents them via
+  `PRIMITIVE_DOCS`). The cache is rewritten only when a build's embedded prelude
+  differs. Best-effort: an unwritable cache just means stdlib goto is
+  unavailable, nothing else.
+
+**Also corrected stale docs.** `docs/lsp.md` Status/roadmap (semantic
+diagnostics — unbound/arity/type-misuse — and cross-file goto are live, not
+"next"); the `source-location` doc comments in `builtins.rs`/`introspect.rs`
+(prelude globals *do* resolve now); and `brood.el`'s commentary. The diagnosis of
+the reported "`println` hover shows two `(println & xs)` lines, no docs" landed
+client-side: the server returns signature **and** docstring (verified over
+stdio); eglot composes `signatureHelp` + `hover` in the echo area and truncates
+the doc — an eldoc-config matter, not a server bug.
+
+**Tests.** New `definition::falls_back_to_a_loaded_modules_def_site` (writes a
+temp module, `load`s it, asserts the cross-file `Location`); updated
+`introspect::source_location_resolves_prelude_fns_but_not_builtins_or_unbound`
+(was asserting prelude globals had no site). `brood-lsp` 41/41 and `brood --lib`
+123/123 green. (The full `cargo test` still shows one failure —
+`supervisor_retries_last_iteration_with_same_args` in `tests/basic.rs` — which is
+**concurrent supervision/scheduler WIP** in the working tree, unrelated to these
+LSP/heap changes.)
+
+---
+
+## 2026-05-28 — Supervised processes step 2: runtime supervisor + mode gate
+
+**Goal.** ADR-039 step 2 — wrap each green process's eval in a catch-and-retry
+loop so a `def` rebinding that throws doesn't kill a long-running stateful loop
+(the editor / REPL / any process holding accumulator state). Step 1 (named
+`(spawn :name expr)` + reaping on death) landed earlier; this is the recovery
+substrate that makes step 1 useful — without it, a buggy reload still loses
+the process, and named-spawn just becomes "respawn from scratch". Per the
+design, step 3's **mode gate** got pulled forward into the same change: the
+supervisor is intrusive enough that an always-on default would change the
+semantics every existing test (and every user) expects (e.g. a `(throw)` in
+a spawned process now retries 10× over ~2 s before monitors fire). Off by
+default; opt in for dev/hot-reload mode.
+
+**Built.**
+
+- **Resume slot** (`crates/lisp/src/process/scheduler.rs`). A
+  `ResumeSlot { callee, argv }` thread-local — the per-process pointer to
+  the *most recent tail-call boundary*, what the supervisor re-invokes on
+  recovery. Save/restore around every coroutine suspend (`preempt` and
+  `wait_for_message`), the same shape `GC_BLOCK` already had, so a worker
+  multiplexing several processes doesn't leak one process's slot into
+  another's recovery. Wiped at coroutine start.
+- **Eval-loop hook** (`crates/lisp/src/eval/mod.rs`). At the `Value::Fn(id)`
+  tail-call dispatch, three guards (in cheapness order) decide whether to
+  update the slot: supervision-enabled (atomic load), in a green process,
+  and `gc_block_depth() == 1` (outermost eval frame). The third guard is
+  load-bearing — without it every `(- n 1)` and `(empty? xs)` overwrites
+  the slot many times per outer loop iteration, burying the value we
+  actually need to retry. `gc_block_depth == 1` is exactly "this is the
+  spawn entry's own tail loop, not a helper running inside it"; verified
+  by running the supervisor test against the recursive worker and
+  observing the slot retains its `argv=[0]` even though `=`, `chain?`,
+  `empty?`, `-`, `fold` (all `defn` in the prelude — they go through
+  `Value::Fn`) execute many calls inside the same iteration.
+- **Supervisor body** (`scheduler::supervise`). Replaces the bare
+  `eval::apply` the spawn coroutine had: catch a `LispError`, log, sleep
+  the exponential backoff (1 ms → 1 s, doubling), `take_resume()`, retry.
+  Circuit-breaker at `MAX_RESTARTS = 10` consecutive failures — after that
+  the process exits with `[:error <last-msg>]` and monitors fire. When
+  no tail call recorded yet (the entry itself threw, no inner loop ran),
+  fall back to re-invoking the spawn entry with no args — state-loss
+  restart, the worst-case recovery — instead of giving up immediately.
+- **Mode gate** (`scheduler::SUPERVISION` atomic + `is_supervision_enabled`).
+  Default off. First-call resolution from `BROOD_SUPERVISE=1` then cached;
+  `(set-supervision! true)` flips it at runtime. Both the eval-loop hook
+  *and* the supervise loop consult the same atomic, so a release build
+  pays exactly one relaxed load + branch per tail call (no slot writes,
+  no clone) and the supervise loop short-circuits to a single
+  `eval::apply` (the let-it-crash behaviour the rest of the suite
+  expects). Exposed to Brood as `(set-supervision! on?)` /
+  `(supervision?)` builtins.
+- **Test** (`tests/basic.rs::supervisor_retries_last_iteration_with_same_args`).
+  A worker that sends `[:iter n]` to its parent then throws at `n=0`,
+  verified end-to-end: messages `3, 2, 1, 0` from the first descent, then
+  `0` repeated *exactly* 10 more times (the restart budget) before the
+  supervisor gives up. Verifies (a) `record_resume` captures `(callee,
+  argv)` per outermost tail call, (b) the supervisor catches the throw
+  and re-invokes with the *same* argv (we see `0` 11×, not `3, 2, 1, 0`
+  again — proves `take_resume` returned a slot, not None), (c) the
+  restart counter actually fires.
+
+**Why mode-gating won.** I landed step 2 with supervision always on and ran
+the full suite — `dynamic_test.blsp`'s `dt-crasher` monitor test was
+waiting 500 ms for `[:down …]`, but the supervisor now retried with
+exponential backoff that exceeded the timeout. A handful of similar tests
+fail the same way. Two options: rewrite every test that relies on
+immediate-crash semantics (broad; we'd hide bugs under "let it crash" too),
+or land step 3's mode gate now and have supervision opt-in. Picked the
+latter — see ADR-039: the gate was always part of the design and pushing
+it later just delays the truth that *most code wants the let-it-crash
+default*; supervision is the hot-reload affordance.
+
+**What's still open.** The CLI / `nest` haven't been wired to set the gate
+yet (a `--supervised` flag, or `nest dev` flipping it on, or detecting an
+interactive TTY). That's a single-line change once we decide the policy
+— I left it for the user's call. Spawn-link (lifecycle bonding,
+distinct from named-spawn's idempotence) is still pending. The
+recovery semantics around inner-helper tail-recursion are coarse-grained
+by design (we retry the outermost loop's iteration, not the innermost
+frame); revisit if a real workload turns up where that's wrong.
+
+**Tests.** `cargo test -p brood --test basic` 72/72 green (was 71 with one
+flagged failure; the resume-slot fix moved it to pass, and the parallel
+prelude-cache change broke the now-fixed `source_location_records_def_sites_from_a_loaded_file`
+assertion about `'map` resolving to `nil` — updated to match the new
+behaviour the user landed in the LSP/heap commit above). `gc.rs` 3/3 and
+`preemption.rs` 1/1 still green. The in-language `suite_test.blsp`
+segfault is **pre-existing parallel WIP**, not from this change — confirmed
+by running with supervision off (the default), where the now-uncaught
+`:boom` throws print `process N died: …` immediately rather than being
+caught + retried.
