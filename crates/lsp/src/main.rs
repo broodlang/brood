@@ -296,11 +296,46 @@ fn params<P: serde::de::DeserializeOwned>(not: ServerNotification) -> Option<P> 
     }
 }
 
-/// Extract the filesystem path from a `file://` URI. Best-effort: typical Unix
-/// paths have no percent-encoded characters, and a non-`file://` URI (or any
-/// path we can't reason about) returns `None` so callers skip project work.
+/// Extract the filesystem path from a `file://` URI. Percent-decodes the path
+/// so an editor URI for `/home/Wilhelm Kirschbaum/proj/` (`%20`-escaped) maps
+/// back to the real on-disk path — without this, `find_project_root` silently
+/// failed for any path containing whitespace or non-ASCII bytes. A non-`file:`
+/// URI returns `None` so callers skip project work.
 fn uri_to_path(uri: &Uri) -> Option<PathBuf> {
-    uri.as_str().strip_prefix("file://").map(PathBuf::from)
+    let raw = uri.as_str().strip_prefix("file://")?;
+    Some(PathBuf::from(percent_decode(raw)))
+}
+
+/// Tiny `%`-decoder for the path portion of a `file://` URI — no allocation
+/// unless the path actually contains a `%`. Invalid escapes (`%XY` with
+/// non-hex digits, or a trailing `%`) pass through literally rather than
+/// returning an error: the caller's failure mode (`exists()` returns false)
+/// is already the right one for a path we can't make sense of.
+fn percent_decode(s: &str) -> String {
+    if !s.contains('%') {
+        return s.to_string();
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b);
+        i += 1;
+    }
+    // `from_utf8_lossy` for the path-with-replacement-char fallback; the OS
+    // won't accept a malformed-utf8 path anyway, and `String` is the public
+    // shape `PathBuf::from` takes.
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Walk up from `file_path` looking for a directory containing `project.blsp`,
@@ -332,8 +367,9 @@ fn bootstrap_project(interp: &mut Interp, bootstrapped: &mut HashSet<PathBuf>, u
         return;
     }
     // Escape backslashes and quotes for embedding into a Brood string literal.
-    // Common Unix paths have neither, but be safe.
-    let esc = root.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
+    // Common Unix paths have neither, but be safe — shared rule with
+    // `nest`/`introspect` so any future escape gets one fix.
+    let esc = brood::introspect::escape_brood_string(&root.display().to_string());
     let cmd = format!(
         "(require 'project) (project-setup \"{e}\") (project-load-sources \"{e}\") (require 'test)",
         e = esc,

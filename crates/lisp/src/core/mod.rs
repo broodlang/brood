@@ -4,4 +4,5 @@
 
 pub mod alloc;
 pub mod heap;
+pub mod sync;
 pub mod value;

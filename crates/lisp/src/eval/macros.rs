@@ -9,20 +9,36 @@ use crate::core::value::{self, EnvId, Value};
 use crate::error::{LispError, LispResult};
 use crate::eval;
 
+/// Bound on recursion depth for the quasiquote walker and the compile pass.
+/// Past this, return `LispError::runtime` rather than overflowing the native
+/// Rust stack — a deeply nested template, vector, or map (from a user file or
+/// a misbehaving macro) should produce a clean error, not abort the process.
+const MAX_DEPTH: u32 = 256;
+
 /// Expand a quasiquote template against `env`.
 pub fn quasiquote(heap: &mut Heap, template: Value, env: EnvId) -> LispResult {
+    quasiquote_depth(heap, template, env, 0)
+}
+
+fn quasiquote_depth(heap: &mut Heap, template: Value, env: EnvId, depth: u32) -> LispResult {
+    if depth >= MAX_DEPTH {
+        return Err(LispError::runtime(format!(
+            "quasiquote template nested too deeply (max {} levels)",
+            MAX_DEPTH
+        )));
+    }
     if let Some(inner) = tagged(heap, template, "unquote") {
         return eval::eval(heap, inner, env);
     }
     match template {
         Value::Pair(_) => {
             let items = heap.list_to_vec(template)?;
-            let out = expand_seq(heap, &items, env)?;
+            let out = expand_seq(heap, &items, env, depth + 1)?;
             Ok(heap.list(out))
         }
         Value::Vector(id) => {
             let items = heap.vector(id).to_vec();
-            let out = expand_seq(heap, &items, env)?;
+            let out = expand_seq(heap, &items, env, depth + 1)?;
             Ok(heap.alloc_vector(out))
         }
         Value::Map(id) => {
@@ -30,8 +46,8 @@ pub fn quasiquote(heap: &mut Heap, template: Value, env: EnvId) -> LispResult {
             let entries = heap.map(id).to_vec();
             let mut pairs = Vec::with_capacity(entries.len());
             for (k, v) in entries {
-                let k = quasiquote(heap, k, env)?;
-                let v = quasiquote(heap, v, env)?;
+                let k = quasiquote_depth(heap, k, env, depth + 1)?;
+                let v = quasiquote_depth(heap, v, env, depth + 1)?;
                 pairs.push((k, v));
             }
             Ok(heap.map_from_pairs(pairs))
@@ -40,14 +56,19 @@ pub fn quasiquote(heap: &mut Heap, template: Value, env: EnvId) -> LispResult {
     }
 }
 
-fn expand_seq(heap: &mut Heap, items: &[Value], env: EnvId) -> Result<Vec<Value>, LispError> {
+fn expand_seq(
+    heap: &mut Heap,
+    items: &[Value],
+    env: EnvId,
+    depth: u32,
+) -> Result<Vec<Value>, LispError> {
     let mut out = Vec::new();
     for &el in items {
         if let Some(inner) = tagged(heap, el, "unquote-splicing") {
             let spliced = eval::eval(heap, inner, env)?;
             out.extend(heap.seq_items(spliced)?);
         } else {
-            out.push(quasiquote(heap, el, env)?);
+            out.push(quasiquote_depth(heap, el, env, depth)?);
         }
     }
     Ok(out)
@@ -107,6 +128,10 @@ pub fn macroexpand(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
 /// `quote` and `quasiquote` are left opaque: their contents are data, not calls
 /// to expand. Code inside a `~unquote` still expands when the quasiquote runs.
 pub fn macroexpand_all(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
+    macroexpand_all_depth(heap, form, env, 0)
+}
+
+fn macroexpand_all_depth(heap: &mut Heap, form: Value, env: EnvId, depth: u32) -> LispResult {
     // Block GC during the expansion: this walk holds partially-built LOCAL
     // forms in Rust locals and recurses into macro applications via `eval`,
     // whose outermost-eval safepoint would otherwise sweep them. Bumping
@@ -114,6 +139,12 @@ pub fn macroexpand_all(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
     // skip GC; the expansion is bounded per form, so memory grows briefly
     // (reclaimed at the *next* runtime safepoint). See `docs/memory-model.md`.
     let _gc_block = crate::process::GcBlockGuard::enter();
+    if depth >= MAX_DEPTH {
+        return Err(LispError::runtime(format!(
+            "macro expansion nested too deeply (max {} levels)",
+            MAX_DEPTH
+        )));
+    }
     let original = form;
     let form = macroexpand(heap, form, env)?;
     match form {
@@ -132,31 +163,31 @@ pub fn macroexpand_all(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 // then only ever see plain symbol binds.
                 if value::symbol_is(s, "let") || value::symbol_is(s, "let*") {
                     if let Some(lowered) = lower_let(heap, &items) {
-                        return macroexpand_all(heap, lowered, env);
+                        return macroexpand_all_depth(heap, lowered, env, depth + 1);
                     }
                     // Ordinary let: expand binding *values* and the body, but not the
                     // binding *targets* — a bound name must not be expanded as a call.
-                    return expand_let(heap, original, &items, env);
+                    return expand_let(heap, original, &items, env, depth + 1);
                 } else if value::symbol_is(s, "letrec") {
                     // Same shape as let: even-indexed binding entries are targets
                     // (opaque), odd-indexed are values (expand). letrec disallows
                     // pattern targets in eval, so there's no `lower_let` branch.
-                    return expand_let(heap, original, &items, env);
+                    return expand_let(heap, original, &items, env, depth + 1);
                 } else if value::symbol_is(s, "fn") || value::symbol_is(s, "lambda") {
                     if let Some(lowered) = lower_fn(heap, &items) {
-                        return macroexpand_all(heap, lowered, env);
+                        return macroexpand_all_depth(heap, lowered, env, depth + 1);
                     }
                     // Ordinary fn: the param list (items[1]) is a binding position,
                     // not a call — expand only the body.
-                    return expand_tail(heap, original, &items, 2, env);
+                    return expand_tail(heap, original, &items, 2, env, depth + 1);
                 } else if value::symbol_is(s, "defmacro") {
                     // (defmacro name params body...) — name/params aren't calls.
-                    return expand_tail(heap, original, &items, 3, env);
+                    return expand_tail(heap, original, &items, 3, env, depth + 1);
                 }
             }
             let mut out = Vec::with_capacity(items.len());
             for item in items {
-                out.push(macroexpand_all(heap, item, env)?);
+                out.push(macroexpand_all_depth(heap, item, env, depth + 1)?);
             }
             Ok(rebuild_list(heap, original, out))
         }
@@ -164,7 +195,7 @@ pub fn macroexpand_all(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
             let items = heap.vector(id).to_vec();
             let mut out = Vec::with_capacity(items.len());
             for item in items {
-                out.push(macroexpand_all(heap, item, env)?);
+                out.push(macroexpand_all_depth(heap, item, env, depth + 1)?);
             }
             Ok(heap.alloc_vector(out))
         }
@@ -174,8 +205,8 @@ pub fn macroexpand_all(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
             let entries = heap.map(id).to_vec();
             let mut pairs = Vec::with_capacity(entries.len());
             for (k, v) in entries {
-                let k = macroexpand_all(heap, k, env)?;
-                let v = macroexpand_all(heap, v, env)?;
+                let k = macroexpand_all_depth(heap, k, env, depth + 1)?;
+                let v = macroexpand_all_depth(heap, v, env, depth + 1)?;
                 pairs.push((k, v));
             }
             Ok(heap.alloc_map(pairs))
@@ -208,18 +239,25 @@ fn expand_tail(
     items: &[Value],
     start: usize,
     env: EnvId,
+    depth: u32,
 ) -> LispResult {
     let start = start.min(items.len());
     let mut out = items[..start].to_vec();
     for &item in &items[start..] {
-        out.push(macroexpand_all(heap, item, env)?);
+        out.push(macroexpand_all_depth(heap, item, env, depth)?);
     }
     Ok(rebuild_list(heap, original, out))
 }
 
 /// Expand an ordinary `let`: its binding *values* (odd positions of the binding
 /// list) and its body, leaving the binding *targets* (even positions) opaque.
-fn expand_let(heap: &mut Heap, original: Value, items: &[Value], env: EnvId) -> LispResult {
+fn expand_let(
+    heap: &mut Heap,
+    original: Value,
+    items: &[Value],
+    env: EnvId,
+    depth: u32,
+) -> LispResult {
     let Some(bindings) = items.get(1).copied() else {
         return Ok(rebuild_list(heap, original, items.to_vec()));
     };
@@ -229,7 +267,7 @@ fn expand_let(heap: &mut Heap, original: Value, items: &[Value], env: EnvId) -> 
             for (i, &x) in binds.iter().enumerate() {
                 // odd index = a value expression (expand); even = a target (opaque)
                 nb.push(if i % 2 == 1 {
-                    macroexpand_all(heap, x, env)?
+                    macroexpand_all_depth(heap, x, env, depth)?
                 } else {
                     x
                 });
@@ -243,7 +281,7 @@ fn expand_let(heap: &mut Heap, original: Value, items: &[Value], env: EnvId) -> 
     };
     let mut out = vec![items[0], new_bindings];
     for &item in &items[2..] {
-        out.push(macroexpand_all(heap, item, env)?);
+        out.push(macroexpand_all_depth(heap, item, env, depth)?);
     }
     Ok(rebuild_list(heap, original, out))
 }

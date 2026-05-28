@@ -24,6 +24,15 @@ pub struct LineIndex {
 
 impl LineIndex {
     pub fn new(text: &str) -> Self {
+        // The whole span machinery is `u32`-indexed (`error::Span` etc.) — flag
+        // a > 4 GiB document in debug. In release, callers downstream that
+        // index past the truncated length will return saturated positions
+        // rather than panic.
+        debug_assert!(
+            text.len() <= u32::MAX as usize,
+            "LineIndex: document larger than 4 GiB ({} bytes)",
+            text.len()
+        );
         let mut line_starts = vec![0u32];
         for (i, b) in text.bytes().enumerate() {
             if b == b'\n' {
@@ -32,7 +41,7 @@ impl LineIndex {
         }
         LineIndex {
             line_starts,
-            len: text.len() as u32,
+            len: text.len().min(u32::MAX as usize) as u32,
         }
     }
 

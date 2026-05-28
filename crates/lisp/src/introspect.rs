@@ -346,7 +346,12 @@ fn collect_diagnostics(interp: &mut Interp, src: &str) -> Vec<Diag> {
 /// literal. Newlines and other control characters pass through verbatim —
 /// the reader's `read_string` only specials those two chars (it accepts raw
 /// newlines inside a literal, see `crates/lisp/src/syntax/reader.rs:280`).
-fn escape_brood_string(s: &str) -> String {
+///
+/// Shared with `nest` / `brood-lsp` (`brood::introspect::escape_brood_string`):
+/// the one place this rule lives, since drift between sites is what would
+/// produce a "looks correct in source, breaks in some other escape sequence"
+/// bug.
+pub fn escape_brood_string(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 

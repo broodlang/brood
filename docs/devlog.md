@@ -3395,3 +3395,349 @@ greet` for `main.blsp` because `greet` is only defined via a runtime
 `load`, not statically present in the file the checker walks. Harmless —
 the run proceeds — but worth tracking: a clean cross-file model (or a
 `(declare 'greet)` form) is the eventual fix.
+
+
+---
+
+## 2026-05-28 — Code review pass: monitor race fixes + doc tidy
+
+**Goal.** Quick review-and-fix pass over the recent distribution + Step-4
+work to surface any latent bugs and bring the docs back into sync with what's
+actually in the kernel.
+
+**Two real races, both pre-existing, both fixed.**
+
+1. **`add_monitor` (TOCTOU on REGISTRY vs MONITORS).** The original
+   `monitor` builtin (and now `add_monitor`, after the `Watcher`
+   refactor) checked `REGISTRY.contains_key(target)`, released the lock,
+   then took `MONITORS` and inserted. If the target's `deregister` ran in
+   between, the watcher landed in `MONITORS` after the target was gone —
+   `:down` would never fire. Fix: hold `MONITORS` *during* the
+   REGISTRY-liveness check, so the check + insert are atomic from
+   `deregister`'s point of view (and `deregister`'s release-then-acquire
+   pattern keeps the lock order deadlock-free). Documented the lock
+   ordering invariant on `deregister` so a future contributor can't
+   regress it: don't ever hold `REGISTRY` while reaching for `MONITORS`.
+2. **`monitor_remote` (drop_link drains PENDING_REMOTE before
+   record).** If a link's `drop_link` + `fire_nodedown` ran between
+   `monitor_remote`'s connectivity check and its `record_pending_remote`
+   call, the new entry would land *after* `handle_node_down` had already
+   drained the bin — orphaning the watcher (no `:noconnection` ever
+   fired). Fix: record first, *then* take a single `NODES` read covering
+   both the link-presence check and the channel send. If the link is
+   gone by the time we look, explicitly drop the pending entry and fire
+   `:noconnection` ourselves. Either ordering with `drop_link` now lands
+   correctly: drop-first → drain finds our entry; record-first →
+   the explicit cleanup path catches it.
+
+Both fixes are tiny (a handful of lines each) but soundness-relevant —
+without them, a hot path involving monitors against a process or peer
+that's racing to exit could silently swallow `:down`.
+
+**Other small things.**
+- `eval/mod.rs`: `quasiquote` now wraps its return with
+  `or_form_pos(expr)`. The inner unquote eval already attaches finer
+  positions; this is the fallback so a malformed quasi-quote (rare)
+  isn't bare.
+- `dist::compute_mac`: the doc comment was misleading ("length-tagged by
+  byte position"). Rewrote it to spell out the two collision-free
+  assumptions — `peer_nonce` is fixed-length, the `0x00` delimiter
+  separates the two variable-length names — and to note that NUL can't
+  appear in a Brood symbol name (reader rejects it). The encoding is
+  unchanged.
+- `docs/primitives.md`: bumped the count and added the rows that were
+  silently missing — `check-file`, `eprint`, `source-location`,
+  `parse-source`, `dynamic?`, `register`, `whereis`, and the whole
+  **Distributed nodes** block (`node-start`, `connect`, `node-name`,
+  `nodes`, `monitor-node`). `monitor`/`demonitor` row updated to
+  mention the cross-node case (`:noconnection` on net-split).
+
+**Verified.**
+- `cargo test`: every workspace suite green (lib 115, integration 61,
+  distribution 13, …). 451/451 in-language tests.
+- `cargo clippy --all-targets`: 1 warning, pre-existing
+  (`type_complexity` in `process.rs:549`).
+- The monitor race fixes don't change behaviour on the happy paths the
+  existing distribution suite exercises — they only close the window
+  where a concurrent peer-down or target-death would have leaked.
+
+---
+
+## 2026-05-28 — Hot-reload: ergonomic surface (`std/reload`, `nest run --watch`)
+
+**Goal.** Make the file-mtime watcher pattern from the earlier example
+"super easy to set up" (user ask), without making it the default. Two
+levels of opt-in: one for source-modifiers, one for ad-hoc users.
+
+**Added.**
+
+- **`std/reload.blsp`** — a require-able std module exposing
+  `(reload-on-change path) → pid`. Body is the same tail-recursive
+  `(path, last-seen-mtime)` loop the example shipped: poll `file-mtime`
+  every `*reload-poll-ms*` (250 ms), call `load` only on a bump, swallow
+  reader/eval errors from partial-write races but still advance `last` so
+  a broken save doesn't busy-retry every tick. Registered in
+  `EMBEDDED_MODULES` (`crates/lisp/src/builtins.rs`), so it's `require`-able
+  with no load-path config — same shape as `test`/`project`/`docs`/`hatch`.
+
+- **`nest run --watch <file>`** (repeatable) — pre-spawns a reloader
+  per `<file>` before invoking `run-project`. Parsed in the `"run"` arm
+  of `crates/nest/src/main.rs`; both `--watch path` and `--watch=path`
+  forms work. Bootstrap snippet becomes `(require 'project) (load-config)
+  (require 'reload) (reload-on-change "p1") … (run-project (list …))`.
+  No flag → no overhead; the reload module isn't loaded at all.
+
+- **Updated `examples/hot-reload/main.blsp`** to use the module. Two
+  lines now do the whole job:
+
+      (require 'reload)
+      (reload-on-change greeter-path)
+
+**Verified.** Two end-to-end swap tests, both watched, both hot-reloaded
+without restart:
+
+1. `./target/debug/brood examples/hot-reload/main.blsp` + edit
+   `greeter.blsp` → `[reload] …/greeter.blsp` line, next ticks print the
+   new output.
+2. `nest new hot_reload_demo`, rewrite `main.blsp` to a tail-recursive
+   ticker, `nest run --watch src/hello.blsp` + edit `hello.blsp` → same
+   reload line, next ticks pick up the new `(greeting)`.
+
+`cargo test --workspace` 234/0/0 across all crates after the changes.
+
+**Why not `brood --watch`.** Considered and rejected. The language binary
+already has too many flags, and "re-run the entry file when it changes"
+has different semantics (re-runs top-level effects) from hot-reload (rebinds
+globals, in-flight calls keep going). If anything, file-watching belongs
+under `nest`, not `brood`.
+
+**Deferred (ADR-011 — favour the simple form):**
+- `(stop-reloader pid)` — needs a defined "kill a green process" story
+  first; pids are immortal today.
+- `(reload-many [paths…])` — one-line wrapper over a `dolist`, write it
+  in user code when needed.
+- Configurable poll interval per-watcher — currently a single
+  `*reload-poll-ms*` global; fine until someone has a real reason to
+  vary it.
+- OS-native watching (`notify` crate) — polling at 250 ms is invisible
+  in human terms; defer the kqueue/inotify hop until the editor side
+  (many buffers) actually needs it.
+
+---
+
+## 2026-05-28 — MCP step 2: `nest mcp` dispatcher
+
+**Goal.** Step 2 of the MCP plan (ADR-036 / `docs/mcp.md`): a sync JSON-RPC
+loop in `crates/nest/src/mcp.rs` that speaks Model Context Protocol over
+stdio against a long-lived `Interp`, strictly per-project (ADR-028 — `nest`
+is the project tool).
+
+**Landed.**
+
+- **`crates/nest/src/mcp.rs`** (~600 LoC) — the dispatcher itself:
+  - **Transport.** Content-Length framing (the same shape LSP uses; MCP is
+    JSON-RPC over stdio). Read/write taken as `impl BufRead` / `impl Write`,
+    so tests drive it with `Cursor<Vec<u8>>` / `Vec<u8>` rather than real
+    stdio — same shape as the LSP's `Connection::memory()` pattern, no
+    threading. No `tokio`, no `lsp-server` (MCP isn't LSP, and the surface
+    is small enough to roll directly — the calculus ADR-025 made for the
+    LSP applies in reverse here).
+  - **Methods.** `initialize`, `tools/list`, `tools/call`, `resources/list`,
+    `resources/read`, `prompts/list`, `ping`, `shutdown`, `exit` (the
+    notification), plus silent-drop for unknown notifications and
+    `MethodNotFound` for unknown requests.
+  - **Tool dispatch.** Reads the catalogue from `(require 'mcp) (mcp-tools)`
+    on every `tools/list` *and* `tools/call`, so a `def` in a previous
+    `eval` (hot reload) reshapes the surface immediately. A missing
+    `std/mcp.blsp` (the step-3 work) collapses to an empty tool list — the
+    server stays useful, just with no tools yet. `tools/call` converts
+    JSON arguments to a Brood map (objects become keyword-keyed maps, the
+    idiomatic shape for `(get args :source)`), `apply`s the handler with
+    full GC rooting (`push_root` around `args_value` + `handler` across
+    `brood::eval::apply`), and wraps the Brood result in MCP's
+    `{ content: [{ type: "text", text: "..." }] }` envelope.
+  - **Brood ↔ JSON converters** (`value_to_json`, `json_to_value`, `pub`)
+    cover all data kinds: nil/bool/int/float/string/keyword/symbol/list/
+    vector/map. Closures, macros, natives, refs, pids fail loudly rather
+    than silently drop (a tool that *returns* a closure surfaces an error
+    instead of "null"). JSON object keys → keywords; arrays → lists;
+    integers preserved where possible.
+  - **Resources.** Five static doc URIs baked in via `include_str!`
+    (`brood://docs/{brood-for-claude,language,decisions,types}` and
+    `brood://prelude`) — the agent gets the canonical docs over MCP
+    without filesystem access. A dynamic `brood://project` URI lands with
+    step 3.
+- **`crates/nest/src/main.rs`** — `nest mcp` subcommand. Bootstrap mirrors
+  the LSP's `bootstrap_project` (`crates/lsp/src/main.rs:329`): walk up
+  for `project.blsp`, `project-setup`, `project-load-sources`, `(require
+  'test)`, `(require 'format)`. Outside a project root, a clean GNU error
+  + exit-1. Diagnostics go to stderr (stdout is the protocol stream).
+- **`crates/nest/Cargo.toml`** — `serde_json = "1"`. No tokio, no MCP/LSP
+  crate.
+
+**Tests.** 13 dispatcher tests in-process via in-memory framing:
+- `initialize` returns server info + capabilities.
+- `tools/list` is empty when no catalogue is defined.
+- `tools/list` projects a Brood-defined catalogue to the MCP shape
+  (pre-defines `mcp-tools` inline, asserts on the `inputSchema` round-trip).
+- `tools/call` dispatches to a Brood handler (`{n: 21}` → `42`).
+- `tools/call` returns `InvalidParams` for unknown tools.
+- `resources/list` + `resources/read` against the baked URIs.
+- `ping` / `shutdown` / `exit` lifecycle.
+- Unknown method → `MethodNotFound`; unknown notification → silent drop.
+- Brood ↔ JSON round-trip across a representative payload
+  (`{n,f,s,items,nested,flag,absent}`).
+- `value_to_json` rejects unrepresentable kinds (closures).
+
+**Verified.** `cargo test --workspace` clean — 115 + 61 + 40 + 13 + …
+across every suite, no regressions. Real-binary smoke test: `nest mcp`
+in `/tmp` errors out (`not in a Brood project`); inside the project,
+`initialize` returns properly-framed JSON with the expected payload.
+
+**What's left for MCP.**
+
+1. **Step 3 — `std/mcp.blsp`**: the eight initial tool `defn`s (`eval`,
+   `load`, `lookup`, `macroexpand`, `run-tests`, `check`, `format`,
+   `processes`) + the `(mcp-tools)` registry the dispatcher reads.
+   `eval` / `lookup` / `macroexpand` / `format` / `load` / `processes`
+   are tractable today via `brood::introspect` + one-line
+   `eval_in_session` calls; `check` / `run-tests` ship as stubs until
+   step 1c lands their Brood-side prereqs.
+2. **Step 1c** (any subset, in any order): structured `check-project` /
+   `run-project-tests` variants in `std/project.blsp` / `std/test.blsp`;
+   `*out*` dynvar + `with-out-str` for stdout capture in
+   `eval_in_session`.
+3. **Step 4** — `nest new` scaffolds `foo/.mcp.json`.
+4. **Step 5** — Tier-1 niceties (`prompts/get` for a `brood-task`
+   template, project-defined tool discovery from a project's own
+   `mcp.blsp`).
+
+
+---
+
+## 2026-05-28 — Security/hardening review pass (Rust review + audit fixes)
+
+**Goal.** Act on the consolidated findings of the multi-agent Rust review +
+security audit (style, file separation, crash hazards, network surface).
+All "Critical" + "Important" items addressed; the larger cleanup items
+(file splits, `expect_*` macro consolidation) are deferred.
+
+**Critical fixes.**
+
+- **Depth caps on every recursive parser/codec/walker** — reader, CST,
+  printer, quasiquote, `macroexpand_all`, wire-frame `decode_msg` /
+  `decode_closure`, message `to_message_rec` all take a `depth: u32`
+  bounded at 256 and return a clean error past it. Pre-fix, a deeply
+  nested file (~1000 open parens) or a tiny but pathological wire frame
+  aborted the process with a Rust stack overflow. New
+  `parser_rejects_deeply_nested_input_instead_of_overflowing` test
+  in `crates/lisp/tests/basic.rs` guards the surface.
+  Sites: `crates/lisp/src/syntax/{reader,cst,printer}.rs`,
+  `crates/lisp/src/eval/macros.rs`, `crates/lisp/src/dist.rs` (decode
+  side), `crates/lisp/src/process.rs` (to_message side).
+- **Reader rejects out-of-range integer literals** instead of silently
+  falling through to `Float` — `9223372036854775808` now errors
+  ("integer literal out of range for i64") rather than reading as
+  `9.22e18`. New `AtomKind::IntOverflow` variant; the reader maps it to
+  `LispError::parse`, the CST to `NodeKind::Error`. Float-shaped tokens
+  (`1e1000` → `inf`) still parse. New
+  `reader_rejects_out_of_range_integer_literal` test.
+- **`floor` errors on non-finite / out-of-range floats** rather than
+  the silent saturating `f as i64`. `(floor (* 1e308 1e308))` and
+  `(floor (/ 0.0 0.0))` now return a runtime error; finite in-range
+  values still work. New `floor_rejects_non_finite_and_out_of_range`
+  test. `crates/lisp/src/builtins.rs:454`.
+- **`apply` is TCO through the eval loop.** Eval's main dispatch
+  detects `Value::Native(apply)` and unfolds the call inline (splicing
+  the trailing sequence into argv, looping on nested `(apply apply …)`)
+  before falling through to the `Native` / `Fn` cases — so chained
+  `(apply f …)` recursion no longer grows the Rust stack ~4 frames per
+  level via `call_native → apply_builtin → eval::apply`. New
+  `apply_tail_recursion_does_not_overflow` test (100,000 levels through
+  `(apply loop-apply …)`). `crates/lisp/src/eval/mod.rs:369`.
+- **`monitor` accepts the `{:name :node}` address form** the Sig +
+  docstring already promised. Local-node addresses resolve via
+  `dist::whereis`; a remote-name address errors clearly (the protocol
+  has no name-resolve-then-monitor round-trip yet). Required exposing
+  `process::read_name_address` as `pub(crate)`.
+- **`nest new` name validation** rejects `..`, `\`, NUL, leading
+  `.`/`-`/`~`, whitespace, embedded tabs/newlines — path-traversal
+  hardening in `std/project.blsp:269`.
+- **`dist.rs` hardening pass.**
+  - `connect` now uses `TcpStream::connect_timeout` (5s) per address.
+  - Writer socket gets a 30s `set_write_timeout` so a slowloris peer
+    can't pin the writer thread + grow the per-link `mpsc::channel`.
+  - Authenticated peer name (from `handshake`) is used for inbound
+    `Frame::Monitor` / `Demonitor` watcher node, *not* the wire
+    `from_node` field — a peer can no longer spoof a watcher's node
+    identity.
+  - `node_start` accept loop catches per-connection panics and
+    sleeps 50ms on accept errors instead of burn-looping on EMFILE.
+  - Heartbeat thread re-spawns on panic.
+  - `frame_bytes` checks payload against `MAX_FRAME` on the *encode*
+    side too (was decode-only) — silent `as u32` truncation can no
+    longer produce a frame the peer can't parse.
+  - `LOCAL_NODE` uses `Release`/`Acquire` ordering paired with the
+    `NODE` write lock.
+
+**Important-tier fixes.**
+
+- **Mutex / RwLock poison recovery** sweep: new `core::sync::{lock,read,
+  write}` helpers (mirror the `ids()` pattern from `value.rs`), used at
+  all ~42 lock sites across `process.rs` and `dist.rs`. A panic inside
+  any code holding a global lock no longer cascades — every `MONITORS`
+  / `NODES` / `REGISTRY` access now recovers from poisoning.
+- `(quote a b)` is now an arity error (used to silently drop the tail).
+- `or_form_pos` is threaded on leaf-symbol unbound errors and on
+  `&optional` default-form evaluation — diagnostics from those paths
+  now point at the symbol/default form's line.
+- `gensym` Sig fixed (`any -> sym` rather than the wrong `string -> sym`
+  that triggered checker warnings on `(gensym 'foo)`).
+- Handle constructors carry `debug_assert!`s against the silent
+  region-bit aliasing case (`index >= 2^30`).
+- `intern` no longer double-allocates the symbol name string.
+- `local_live_count` uses `saturating_sub` + a `debug_assert!` — a
+  free-list-vs-slab accounting bug surfaces in tests rather than
+  panicking on the GC safepoint hot path.
+- `apply_builtin` binds `let last = args.len() - 1` after the guard so
+  the slice indexing is robust to refactors.
+- `Ty(u16)` is one tag away from a cryptic const-eval shift overflow on
+  the 17th atom — explicit `const _: () = assert!(TAG_COUNT <= 16, …)`
+  surfaces the cap with a clear message.
+- `is_syntactic_keyword` no longer lists phantom `loop` / `recur` (they
+  aren't special forms or prelude macros).
+- LSP `uri_to_path` percent-decodes the URI path (previously a
+  whitespace or non-ASCII path silently failed `find_project_root` and
+  the LSP never bootstrapped the project).
+- `LineIndex::new` has a `debug_assert!` against documents > 4 GiB and
+  saturates its `u32` length field instead of truncating.
+
+**Cleanup landed.**
+
+- `report_error` + `parse_jobs_args` lifted into a new
+  `brood::cli_support` module, shared by both `brood` (`crates/cli`) and
+  `nest` (`crates/nest`). Two byte-for-byte-identical copies collapsed
+  to one.
+- `escape_brood_string` promoted to `pub` in `brood::introspect`; the
+  five `replace('\\','\\\\').replace('"','\\\"')` copies in `nest`
+  and the LSP now share that one function.
+- `Closure` derives `Default`; sweep replaces dead slots with
+  `Closure::default()` (was an inline 7-field literal — would silently
+  drop a new field).
+
+**Cleanup deferred** (substantial restructurings; documented for the
+next pass): file splits for `dist.rs` (→ `dist/{mod,wire,handshake,
+heartbeat}.rs`), `process.rs` (→ `process/{mod,message,mailbox,…}.rs`),
+`types/check.rs` (→ `check/{ctx,sigs,guards,walk}.rs`); an `expect!`
+macro to collapse the five `expect_string`/`expect_int`/etc helpers;
+the six `alloc_*`/`sweep` slab loops in `heap.rs`; `NodeKind::name`
+inherent method; reader-vs-CST structural-parse consolidation.
+
+**Verified.** `cargo test --workspace` → 251 passed, 0 failed
+(unchanged-but-+3 tests over the pre-pass baseline of 248). All
+distribution tests still pass with the dist.rs hardening (including
+the `cross_node_pid_monitor_fires_down` and `node_down_is_detected`
+flows that depend on the heartbeat path). The preemption test passes
+after `tick()` was correctly preserved (one trampoline iteration
+caught the regression mid-pass and was reverted in favour of the
+inline-in-eval approach).

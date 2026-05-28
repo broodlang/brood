@@ -49,9 +49,11 @@ pub fn intern(name: &str) -> Symbol {
     }
     // A new name: its index in the append-only `NAMES` vec *is* its id. Pushing
     // while holding the `IDS` lock keeps a single writer, so ids stay dense and
-    // the two tables never disagree.
-    let id = NAMES.push(name.to_string()) as Symbol;
-    ids.insert(name.to_string(), id);
+    // the two tables never disagree. One allocation, not two — `NAMES` and
+    // `IDS` share the same `String` (cloned once from `name: &str` here).
+    let owned = name.to_string();
+    let id = NAMES.push(owned.clone()) as Symbol;
+    ids.insert(owned, id);
     id
 }
 
@@ -138,19 +140,37 @@ macro_rules! handle {
         #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
         pub struct $name(pub u32);
         impl $name {
-            /// A handle into the local (per-process) data heap.
+            /// A handle into the local (per-process) data heap. The
+            /// debug-assert catches the silent-aliasing case where a slab
+            /// grows past `2^30` and the high bits start colliding with the
+            /// region tag.
             #[inline]
             pub fn local(index: usize) -> Self {
+                debug_assert!(
+                    index < (1 << REGION_SHIFT),
+                    "handle index {} would alias the region tag bits",
+                    index,
+                );
                 $name(index as u32)
             }
             /// A handle into the immutable shared prelude region.
             #[inline]
             pub fn prelude(index: usize) -> Self {
+                debug_assert!(
+                    index < (1 << REGION_SHIFT),
+                    "prelude handle index {} would alias the region tag bits",
+                    index,
+                );
                 $name(index as u32 | ((PRELUDE as u32) << REGION_SHIFT))
             }
             /// A handle into the runtime's mutable shared code region.
             #[inline]
             pub fn runtime(index: usize) -> Self {
+                debug_assert!(
+                    index < (1 << REGION_SHIFT),
+                    "runtime handle index {} would alias the region tag bits",
+                    index,
+                );
                 $name(index as u32 | ((RUNTIME as u32) << REGION_SHIFT))
             }
             /// Which region this handle addresses ([`LOCAL`]/[`PRELUDE`]/[`RUNTIME`]).
@@ -298,7 +318,7 @@ pub fn tag(v: Value) -> Tag {
 
 /// A user-defined function. Captures its defining environment (an [`EnvId`]) for
 /// lexical scoping.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Closure {
     pub name: Option<Symbol>,
     pub params: Vec<Symbol>,

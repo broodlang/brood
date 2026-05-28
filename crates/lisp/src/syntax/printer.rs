@@ -6,19 +6,30 @@
 use crate::core::heap::Heap;
 use crate::core::value::{symbol_name, Value};
 
+/// Maximum nesting the printer will descend into. Past this we emit `…`
+/// rather than recursing — a printed REPL value should never be the thing
+/// that overflows the native Rust stack. (The reader caps inputs at the
+/// same depth, but a closure built by `cons`-ing in a loop can produce a
+/// value deeper than any reader could parse.)
+const MAX_DEPTH: u32 = 256;
+
 pub fn print(heap: &Heap, v: Value) -> String {
     let mut out = String::new();
-    write_value(&mut out, heap, v, true);
+    write_value(&mut out, heap, v, true, 0);
     out
 }
 
 pub fn display(heap: &Heap, v: Value) -> String {
     let mut out = String::new();
-    write_value(&mut out, heap, v, false);
+    write_value(&mut out, heap, v, false, 0);
     out
 }
 
-fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool) {
+fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u32) {
+    if depth >= MAX_DEPTH {
+        out.push_str("…");
+        return;
+    }
     match v {
         Value::Nil => out.push_str("nil"),
         Value::Bool(b) => out.push_str(if b { "true" } else { "false" }),
@@ -48,14 +59,14 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool) {
                 out.push_str(s);
             }
         }
-        Value::Pair(_) => write_list(out, heap, v, readable),
+        Value::Pair(_) => write_list(out, heap, v, readable, depth),
         Value::Vector(id) => {
             out.push('[');
             for (i, &item) in heap.vector(id).iter().enumerate() {
                 if i > 0 {
                     out.push(' ');
                 }
-                write_value(out, heap, item, readable);
+                write_value(out, heap, item, readable, depth + 1);
             }
             out.push(']');
         }
@@ -65,9 +76,9 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool) {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                write_value(out, heap, *k, readable);
+                write_value(out, heap, *k, readable, depth + 1);
                 out.push(' ');
-                write_value(out, heap, *v, readable);
+                write_value(out, heap, *v, readable, depth + 1);
             }
             out.push('}');
         }
@@ -107,10 +118,12 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool) {
     }
 }
 
-fn write_list(out: &mut String, heap: &Heap, v: Value, readable: bool) {
+fn write_list(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u32) {
     out.push('(');
     let mut cur = v;
     let mut first = true;
+    // The list *spine* is iterated, not recursed (so a million-long proper
+    // list doesn't overflow); only each `head` advances the depth counter.
     loop {
         match cur {
             Value::Pair(p) => {
@@ -119,13 +132,13 @@ fn write_list(out: &mut String, heap: &Heap, v: Value, readable: bool) {
                 }
                 first = false;
                 let (head, tail) = heap.pair(p);
-                write_value(out, heap, head, readable);
+                write_value(out, heap, head, readable, depth + 1);
                 cur = tail;
             }
             Value::Nil => break,
             other => {
                 out.push_str(" . ");
-                write_value(out, heap, other, readable);
+                write_value(out, heap, other, readable, depth + 1);
                 break;
             }
         }

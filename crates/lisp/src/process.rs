@@ -91,15 +91,32 @@ pub struct ClosureMsg {
     pub(crate) captured: Vec<(Symbol, Message)>,
 }
 
+/// Maximum nesting depth `to_message` will descend into. Past this, the
+/// serialiser errors out — a deeply nested local data structure (built by a
+/// `cons`-in-a-loop or a runaway recursion) should produce a clean error
+/// rather than aborting the sender thread with a stack overflow. Matches
+/// `dist::MAX_DECODE_DEPTH` so wire round-trip is symmetric.
+const MAX_MESSAGE_DEPTH: u32 = 256;
+
 /// Deep-copy a value out of `heap` into a `Send` message. A closure is sent as
 /// data (see [`ClosureMsg`]); builtins and macros can't be.
 pub fn to_message(heap: &Heap, v: Value) -> Result<Message, LispError> {
-    to_message_rec(heap, v, &mut Vec::new())
+    to_message_rec(heap, v, &mut Vec::new(), 0)
 }
 
 /// `visited` carries the closures currently being serialised, so a self- or
 /// mutually-recursive *local* closure is rejected cleanly instead of looping.
-fn to_message_rec(heap: &Heap, v: Value, visited: &mut Vec<ClosureId>) -> Result<Message, LispError> {
+fn to_message_rec(
+    heap: &Heap,
+    v: Value,
+    visited: &mut Vec<ClosureId>,
+    depth: u32,
+) -> Result<Message, LispError> {
+    if depth >= MAX_MESSAGE_DEPTH {
+        return Err(LispError::runtime(format!(
+            "value nested deeper than {MAX_MESSAGE_DEPTH} levels (cannot serialise)",
+        )));
+    }
     Ok(match v {
         Value::Nil => Message::Nil,
         Value::Bool(b) => Message::Bool(b),
@@ -113,7 +130,7 @@ fn to_message_rec(heap: &Heap, v: Value, visited: &mut Vec<ClosureId>) -> Result
             let items = heap.list_to_vec(v)?;
             let mut out = Vec::with_capacity(items.len());
             for item in items {
-                out.push(to_message_rec(heap, item, visited)?);
+                out.push(to_message_rec(heap, item, visited, depth + 1)?);
             }
             Message::List(out, pos)
         }
@@ -121,7 +138,7 @@ fn to_message_rec(heap: &Heap, v: Value, visited: &mut Vec<ClosureId>) -> Result
             let items = heap.vector(id).to_vec();
             let mut out = Vec::with_capacity(items.len());
             for item in items {
-                out.push(to_message_rec(heap, item, visited)?);
+                out.push(to_message_rec(heap, item, visited, depth + 1)?);
             }
             Message::Vector(out)
         }
@@ -129,13 +146,16 @@ fn to_message_rec(heap: &Heap, v: Value, visited: &mut Vec<ClosureId>) -> Result
             let entries = heap.map(id).to_vec();
             let mut out = Vec::with_capacity(entries.len());
             for (k, v) in entries {
-                out.push((to_message_rec(heap, k, visited)?, to_message_rec(heap, v, visited)?));
+                out.push((
+                    to_message_rec(heap, k, visited, depth + 1)?,
+                    to_message_rec(heap, v, visited, depth + 1)?,
+                ));
             }
             Message::Map(out)
         }
         Value::Ref(n) => Message::Ref(n),
         Value::Pid { node, id } => Message::Pid { node, id },
-        Value::Fn(id) => Message::Closure(Box::new(closure_to_message(heap, id, visited)?)),
+        Value::Fn(id) => Message::Closure(Box::new(closure_to_message(heap, id, visited, depth + 1)?)),
         Value::Macro(_) => {
             return Err(LispError::type_err("cannot send a macro in a message"))
         }
@@ -160,6 +180,7 @@ fn closure_to_message(
     heap: &Heap,
     id: ClosureId,
     visited: &mut Vec<ClosureId>,
+    depth: u32,
 ) -> Result<ClosureMsg, LispError> {
     if visited.contains(&id) {
         // The free-variable walk re-entered this same closure: a local closure that
@@ -188,7 +209,7 @@ fn closure_to_message(
         }
         for sym in mentioned {
             if let Some(val) = local_lookup(heap, env, sym) {
-                captured.push((sym, to_message_rec(heap, val, visited)?));
+                captured.push((sym, to_message_rec(heap, val, visited, depth)?));
             }
         }
     }
@@ -196,12 +217,12 @@ fn closure_to_message(
     let optionals = cl
         .optionals
         .iter()
-        .map(|&(s, d)| Ok((s, to_message_rec(heap, d, visited)?)))
+        .map(|&(s, d)| Ok((s, to_message_rec(heap, d, visited, depth)?)))
         .collect::<Result<Vec<_>, LispError>>()?;
     let body = cl
         .body
         .iter()
-        .map(|&f| to_message_rec(heap, f, visited))
+        .map(|&f| to_message_rec(heap, f, visited, depth))
         .collect::<Result<Vec<_>, LispError>>()?;
 
     visited.pop();
@@ -665,8 +686,15 @@ fn worker_count() -> usize {
 /// routes over the link). Same `[:down …]` shape in both cases — the
 /// receiver code on the wire side is unchanged from local.
 fn deregister(pid: u64, reason: Message) {
-    REGISTRY.lock().unwrap().remove(&pid);
-    let watchers = MONITORS.lock().unwrap().remove(&pid).unwrap_or_default();
+    // The two locks are taken **sequentially**, not nested: REGISTRY first,
+    // released, then MONITORS. `add_monitor` takes them in the opposite
+    // *nested* order (MONITORS held while briefly grabbing REGISTRY for the
+    // alive check), which is deadlock-free precisely because `deregister`
+    // never holds REGISTRY while reaching for MONITORS. Don't introduce a
+    // function that holds REGISTRY while taking MONITORS, or this becomes a
+    // genuine ordering hazard.
+    crate::core::sync::lock(&REGISTRY).remove(&pid);
+    let watchers = crate::core::sync::lock(&MONITORS).remove(&pid).unwrap_or_default();
     for w in watchers {
         fire_down(w, pid, reason.clone());
     }
@@ -723,9 +751,9 @@ fn down_message(pid_msg: Message, mref: u64, reason: Message) -> Message {
 /// a no-op if `pid` is gone. The shared tail of `send`, monitor `[:down …]`
 /// delivery, and inbound node-link messages (`crate::dist`).
 pub(crate) fn deliver(pid: u64, msg: Message) {
-    let mailbox = REGISTRY.lock().unwrap().get(&pid).cloned();
+    let mailbox = crate::core::sync::lock(&REGISTRY).get(&pid).cloned();
     if let Some(mb) = mailbox {
-        let mut st = mb.state.lock().unwrap();
+        let mut st = crate::core::sync::lock(&mb.state);
         st.queue.push_back(msg);
         if let Some(proc) = st.waiter.take() {
             drop(st);
@@ -762,18 +790,23 @@ pub fn monitor(target: u64) -> Value {
 /// `watcher` to its monitor list; otherwise fire a synthetic `:noproc` down
 /// to that same watcher immediately. The "delivery channel" of the down
 /// (in-process mailbox vs. routed `send`) is decided inside [`fire_down`].
+///
+/// **Race-free against [`deregister`]**: the REGISTRY liveness check happens
+/// inside the MONITORS critical section. `deregister` takes the same locks
+/// in the same order (REGISTRY first, then MONITORS), so the two pairings
+/// resolve cleanly: either we see the target alive and insert before
+/// deregister can drain the bin (in which case deregister fires the down to
+/// us), or we see the target gone (because deregister already drained
+/// REGISTRY) and fire `:noproc` ourselves. Without the critical section we'd
+/// have a TOCTOU window where the watcher gets stuck.
 pub(crate) fn add_monitor(target: u64, watcher: Watcher) {
-    let alive = REGISTRY.lock().unwrap().contains_key(&target);
-    if alive {
-        MONITORS
-            .lock()
-            .unwrap()
-            .entry(target)
-            .or_default()
-            .push(watcher);
-    } else {
-        fire_down(watcher, target, Message::Keyword(value::intern("noproc")));
+    let mut mons = crate::core::sync::lock(&MONITORS);
+    if crate::core::sync::lock(&REGISTRY).contains_key(&target) {
+        mons.entry(target).or_default().push(watcher);
+        return;
     }
+    drop(mons); // release before delivering — `fire_down` may need other locks
+    fire_down(watcher, target, Message::Keyword(value::intern("noproc")));
 }
 
 /// `(demonitor mref)` — drop the calling process's monitor with that ref. Best
@@ -788,7 +821,7 @@ pub fn demonitor(mref: u64) {
 /// node-down cleanup that flushes a peer's remote watchers from every target's
 /// list.
 pub(crate) fn drop_monitor(pred: impl Fn(&Watcher) -> bool) {
-    let mut mons = MONITORS.lock().unwrap();
+    let mut mons = crate::core::sync::lock(&MONITORS);
     for watchers in mons.values_mut() {
         watchers.retain(|w| !pred(w));
     }
@@ -828,7 +861,7 @@ pub(crate) fn record_pending_remote(
 /// (target_node, watcher_pid, mref) — the same triple `record_pending_remote`
 /// stored.
 pub(crate) fn drop_pending_remote(target_node: Symbol, watcher_pid: u64, mref: u64) {
-    let mut t = PENDING_REMOTE.lock().unwrap();
+    let mut t = crate::core::sync::lock(&PENDING_REMOTE);
     if let Some(v) = t.get_mut(&target_node) {
         v.retain(|p| !(p.watcher_pid == watcher_pid && p.mref == mref));
     }
@@ -842,7 +875,7 @@ pub(crate) fn drop_pending_remote(target_node: Symbol, watcher_pid: u64, mref: u
 pub(crate) fn demonitor_remote_fanout(mref: u64) {
     let me = self_pid();
     let peers: Vec<Symbol> = {
-        let table = PENDING_REMOTE.lock().unwrap();
+        let table = crate::core::sync::lock(&PENDING_REMOTE);
         table
             .iter()
             .filter(|(_, ps)| ps.iter().any(|p| p.watcher_pid == me && p.mref == mref))
@@ -863,7 +896,7 @@ pub(crate) fn demonitor_remote_fanout(mref: u64) {
 ///      leak and a future reconnect would still try to deliver to a fresh
 ///      generation of that peer.
 pub(crate) fn handle_node_down(node: Symbol) {
-    let pendings = PENDING_REMOTE.lock().unwrap().remove(&node).unwrap_or_default();
+    let pendings = crate::core::sync::lock(&PENDING_REMOTE).remove(&node).unwrap_or_default();
     for p in pendings {
         deliver(
             p.watcher_pid,
@@ -901,7 +934,7 @@ pub(crate) fn fire_noconnection(target_node: Symbol, target_pid: u64, watcher_pi
 /// Push a ready process onto the run queue and wake a worker.
 fn enqueue(proc: Box<Process>) {
     let (lock, cv) = &*RUN;
-    lock.lock().unwrap().push_back(proc);
+    crate::core::sync::lock(&lock).push_back(proc);
     cv.notify_one();
 }
 
@@ -920,7 +953,7 @@ fn worker_loop() {
     loop {
         let proc = {
             let (lock, cv) = &*RUN;
-            let mut q = lock.lock().unwrap();
+            let mut q = crate::core::sync::lock(&lock);
             loop {
                 if let Some(p) = q.pop_front() {
                     break p;
@@ -959,7 +992,7 @@ fn run_one(mut proc: Box<Process>) {
             // messages with no match. Re-check under the lock — if a *new*
             // (unscanned) message arrived during the suspend window, run again;
             // otherwise park here for `send` (or the timer) to wake.
-            let mut st = mailbox.state.lock().unwrap();
+            let mut st = crate::core::sync::lock(&mailbox.state);
             if st.queue.len() > st.scanned {
                 drop(st);
                 enqueue(proc);
@@ -999,7 +1032,7 @@ pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
     let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
     SPAWNED.fetch_add(1, Ordering::SeqCst);
     let mailbox = Mailbox::new();
-    REGISTRY.lock().unwrap().insert(pid, Arc::clone(&mailbox));
+    crate::core::sync::lock(&REGISTRY).insert(pid, Arc::clone(&mailbox));
 
     let coro_mailbox = Arc::clone(&mailbox);
     let coro = Coroutine::new(move |yielder: &Yielder0, _input: ()| {
@@ -1063,7 +1096,7 @@ pub fn send(heap: &Heap, target_val: Value, msg_val: Value) -> Result<(), LispEr
 
 /// Read a `{:name <kw> :node <kw>}` registered-name address out of a map, returning
 /// the `(name, node)` symbols. Accepts keyword or symbol values for each field.
-fn read_name_address(heap: &Heap, mid: MapId) -> Result<(Symbol, Symbol), LispError> {
+pub(crate) fn read_name_address(heap: &Heap, mid: MapId) -> Result<(Symbol, Symbol), LispError> {
     let field = |key: &str| -> Result<Symbol, LispError> {
         let v = heap
             .map_get(mid, Value::Keyword(value::intern(key)))
@@ -1114,7 +1147,7 @@ pub fn receive_match(
         // the mailbox lock (the matcher calls eval). Only this process removes from
         // its own mailbox, so the scanned prefix is stable; `send` only appends.
         let candidate = {
-            let st = ctx.mailbox.state.lock().unwrap();
+            let st = crate::core::sync::lock(&ctx.mailbox.state);
             if i < st.queue.len() {
                 Some(from_message(heap, &st.queue[i]))
             } else {
@@ -1131,7 +1164,7 @@ pub fn receive_match(
                     // back into `receive` trampolines through eval's TCO and stays
                     // O(1) native stack (running it here instead nests a `receive_match`
                     // per message → green-process coroutine-stack overflow).
-                    ctx.mailbox.state.lock().unwrap().queue.remove(i);
+                    crate::core::sync::lock(&ctx.mailbox.state).queue.remove(i);
                     return Ok(thunk);
                 }
                 i += 1; // no clause matched — leave it queued, try the next message
@@ -1159,7 +1192,7 @@ fn wait_for_message(ctx: &Ctx, i: usize, deadline: Option<Instant>) {
     match ctx.yielder {
         // Root thread: block on the condvar (with timeout) until a send or deadline.
         None => {
-            let st = ctx.mailbox.state.lock().unwrap();
+            let st = crate::core::sync::lock(&ctx.mailbox.state);
             if st.queue.len() > i {
                 return; // a message arrived between the scan and here — re-scan
             }
@@ -1181,7 +1214,7 @@ fn wait_for_message(ctx: &Ctx, i: usize, deadline: Option<Instant>) {
         // deadline; `send` wakes us on a new message.
         Some(yptr) => {
             {
-                let mut st = ctx.mailbox.state.lock().unwrap();
+                let mut st = crate::core::sync::lock(&ctx.mailbox.state);
                 if st.queue.len() > i {
                     return; // raced — a message arrived; re-scan without suspending
                 }
@@ -1224,14 +1257,14 @@ fn arm_timer(pid: u64, deadline: Instant) {
         std::thread::spawn(timer_loop);
     });
     let (lock, cv) = &*TIMERS;
-    lock.lock().unwrap().push(Reverse((deadline, pid)));
+    crate::core::sync::lock(&lock).push(Reverse((deadline, pid)));
     cv.notify_one();
 }
 
 /// Sleep until the nearest deadline, then wake every process whose deadline passed.
 fn timer_loop() {
     let (lock, cv) = &*TIMERS;
-    let mut q = lock.lock().unwrap();
+    let mut q = crate::core::sync::lock(&lock);
     loop {
         match q.peek().copied() {
             None => q = cv.wait(q).unwrap(),
@@ -1253,7 +1286,7 @@ fn timer_loop() {
                     for pid in due {
                         wake_for_timeout(pid);
                     }
-                    q = lock.lock().unwrap();
+                    q = crate::core::sync::lock(&lock);
                 }
             }
         }
@@ -1265,9 +1298,9 @@ fn timer_loop() {
 /// woke it or it re-parked on another receive; the process always re-validates its
 /// own deadline, so a stale timer is harmless (at most one spurious wakeup).
 fn wake_for_timeout(pid: u64) {
-    let mailbox = REGISTRY.lock().unwrap().get(&pid).cloned();
+    let mailbox = crate::core::sync::lock(&REGISTRY).get(&pid).cloned();
     if let Some(mb) = mailbox {
-        let mut st = mb.state.lock().unwrap();
+        let mut st = crate::core::sync::lock(&mb.state);
         if let Some(proc) = st.waiter.take() {
             drop(st);
             enqueue(proc);
@@ -1300,7 +1333,7 @@ fn ensure_ctx() -> Ctx {
         }
         let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
         let mailbox = Mailbox::new();
-        REGISTRY.lock().unwrap().insert(pid, Arc::clone(&mailbox));
+        crate::core::sync::lock(&REGISTRY).insert(pid, Arc::clone(&mailbox));
         let ctx = Ctx {
             pid,
             mailbox,

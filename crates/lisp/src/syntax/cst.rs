@@ -97,12 +97,24 @@ impl Node {
 /// Parse `src` into a lossless CST. Never fails: malformed input is recorded as
 /// [`NodeKind::Error`] nodes and parsing continues.
 pub fn parse(src: &str) -> Node {
-    Cst { src, pos: 0 }.parse_root()
+    Cst {
+        src,
+        pos: 0,
+        depth: 0,
+    }
+    .parse_root()
 }
+
+/// Bound on nesting depth. Past this, an opening delimiter becomes an `Error`
+/// node spanning the unparsed body — the CST is still total, just refuses to
+/// build a million-deep tree (which would overflow the native Rust stack on
+/// this parser and on every downstream walk in `scope.rs` / `check.rs`).
+const MAX_DEPTH: u32 = 256;
 
 struct Cst<'a> {
     src: &'a str,
     pos: usize, // byte offset into `src`
+    depth: u32,
 }
 
 impl<'a> Cst<'a> {
@@ -208,8 +220,29 @@ impl<'a> Cst<'a> {
     /// A delimited sequence. Recovers: a stray inner close is handled by `form`;
     /// at EOF without our close, emit a zero-width `Error` child marking where
     /// the close was expected, then stop (the node's children stay navigable).
+    ///
+    /// Past [`MAX_DEPTH`], skip the body without recursing — emit a single
+    /// `Error` child so the tree stays total but the parser doesn't grow the
+    /// native stack with the source.
     fn seq(&mut self, kind: NodeKind, close: char, start: usize) -> Node {
         self.bump(); // opening delimiter
+        if self.depth >= MAX_DEPTH {
+            let err_start = self.pos;
+            self.skip_to_balanced_close(close);
+            // The Error covers what wasn't parsed; the outer node spans through
+            // the close (if we found one) just like a normal `seq`.
+            let err = Node {
+                kind: NodeKind::Error,
+                span: Span::new(err_start, self.pos.saturating_sub(1).max(err_start)),
+                children: Vec::new(),
+            };
+            return Node {
+                kind,
+                span: self.span_from(start),
+                children: vec![err],
+            };
+        }
+        self.depth += 1;
         let mut children = Vec::new();
         loop {
             match self.peek() {
@@ -224,6 +257,7 @@ impl<'a> Cst<'a> {
                 _ => children.push(self.trivia_or_form()),
             }
         }
+        self.depth -= 1;
         Node {
             kind,
             span: self.span_from(start),
@@ -231,20 +265,80 @@ impl<'a> Cst<'a> {
         }
     }
 
+    /// Flat scan to the matching close delimiter, used when nesting is past
+    /// [`MAX_DEPTH`] — tracks delimiter balance at the byte level (not by
+    /// recursive descent) and skips `"…"` strings so a `"` inside a string
+    /// doesn't fool the counter. Always terminates (advances `pos` by at
+    /// least one byte per iteration or stops at EOF).
+    fn skip_to_balanced_close(&mut self, close: char) {
+        let mut depth = 1i32; // we've already consumed our opener
+        while let Some(c) = self.peek() {
+            match c {
+                '(' | '[' | '{' => {
+                    self.bump();
+                    depth += 1;
+                }
+                ')' | ']' | '}' => {
+                    self.bump();
+                    depth -= 1;
+                    if depth == 0 && c == close {
+                        return;
+                    }
+                    if depth <= 0 {
+                        return; // a mismatched close — let the outer parser see it
+                    }
+                }
+                '"' => {
+                    self.bump();
+                    while let Some(c) = self.bump() {
+                        if c == '"' {
+                            break;
+                        }
+                        if c == '\\' {
+                            self.bump();
+                        }
+                    }
+                }
+                ';' => {
+                    while let Some(c) = self.bump() {
+                        if c == '\n' {
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    self.bump();
+                }
+            }
+        }
+    }
+
     /// A reader-macro wrapper (`'` `` ` `` `~` `~@`): the sigil is already
     /// consumed; attach any interior trivia and the one target form as children.
     /// A dangling sigil (EOF or a close delimiter follows) yields a childless
     /// node — an incomplete form the LSP can flag, without derailing the parse.
+    ///
+    /// Past [`MAX_DEPTH`], the wrapper is left childless rather than recursing
+    /// into another `form`, matching the [`seq`] depth-cap behaviour.
     fn wrap(&mut self, kind: NodeKind, start: usize) -> Node {
         let mut children = Vec::new();
         // interior trivia, kept (lossless): `' x`, `` ` ;c\n x``
         while matches!(self.peek(), Some(c) if c.is_whitespace() || c == ',' || c == ';') {
             children.push(self.trivia_or_form());
         }
+        if self.depth >= MAX_DEPTH {
+            return Node {
+                kind,
+                span: self.span_from(start),
+                children,
+            };
+        }
+        self.depth += 1;
         match self.peek() {
             Some(c) if c != ')' && c != ']' && c != '}' => children.push(self.form()),
             _ => {} // dangling sigil — recover, leaving the wrapper childless
         }
+        self.depth -= 1;
         Node {
             kind,
             span: self.span_from(start),
@@ -282,6 +376,10 @@ impl<'a> Cst<'a> {
             AtomKind::Float(_) => NodeKind::Float,
             AtomKind::Keyword => NodeKind::Keyword,
             AtomKind::Symbol => NodeKind::Symbol,
+            // An integer-shaped token that overflows `i64` — the reader
+            // rejects this as a parse error; in the tooling tree it's an
+            // `Error` token so the LSP flags it the same way.
+            AtomKind::IntOverflow => NodeKind::Error,
         };
         self.leaf(kind, start)
     }

@@ -1204,7 +1204,18 @@ impl Heap {
             + self.local_free.strings.len()
             + self.local_free.closures.len()
             + self.local_free.envs.len();
-        total - free
+        // `saturating_sub` rather than `total - free`: if a future bug ever
+        // makes the free list outgrow the slab (sweep accounting drift, a
+        // double-free, etc.) this returns 0 instead of panicking on the GC
+        // safepoint hot path. A `debug_assert!` flags the invariant break in
+        // tests without taking the prod runtime down.
+        debug_assert!(
+            total >= free,
+            "free count {} exceeds slab count {}",
+            free,
+            total
+        );
+        total.saturating_sub(free)
     }
 
     // ----- the tracing GC ------------------------------------------------------
@@ -1377,16 +1388,10 @@ impl Heap {
         for i in 0..self.local.closures.len() {
             if !marks.is_closure_marked(i) {
                 self.local_free.closures.push(i as u32);
-                // Replace with a default so the `Vec`s inside drop.
-                self.local.closures[i] = Closure {
-                    name: None,
-                    params: Vec::new(),
-                    optionals: Vec::new(),
-                    rest: None,
-                    body: Vec::new(),
-                    doc: None,
-                    env: None,
-                };
+                // Replace with a default so the `Vec`s inside drop. `Closure`
+                // derives `Default`, so adding a field to it doesn't risk a
+                // sweep-bug from a missed initialiser here.
+                self.local.closures[i] = Closure::default();
             }
         }
         for i in 0..self.local.envs.len() {

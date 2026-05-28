@@ -52,6 +52,15 @@ const ALL_TAGS: [Tag; 15] = [
 
 /// The number of tag atoms — derived from [`ALL_TAGS`], not hand-counted.
 const TAG_COUNT: u32 = ALL_TAGS.len() as u32;
+/// `Ty` is a `u16`, so at most 16 atoms fit. The `UNIVERSE` mask
+/// `(1u16 << TAG_COUNT) - 1` would otherwise fail const-eval with a cryptic
+/// shift-overflow message when someone added the 17th atom — this surfaces
+/// the cap with a clear message right where the lattice width is set. Widen
+/// `Ty(u16)` to `Ty(u32)` (and this assert) to lift the cap.
+const _: () = assert!(
+    TAG_COUNT <= 16,
+    "Ty is u16-wide; widen the type to add more than 16 atoms",
+);
 /// All bits set for the atoms — the universe `⊤`. Follows [`TAG_COUNT`].
 const UNIVERSE: u16 = (1u16 << TAG_COUNT) - 1;
 

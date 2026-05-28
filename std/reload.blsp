@@ -1,0 +1,64 @@
+;; std/reload.blsp — file-watcher hot reload. Loaded with (require 'reload).
+;;
+;; Mechanism vs. policy: the *language* already does hot reload (a top-level
+;; `def` promotes new code into the shared RUNTIME region and rebinds the
+;; global; in-flight calls keep the old closure, the next lookup sees the new
+;; one — docs/shared-code.md). What's missing for casual use is the *trigger*:
+;; somebody needs to notice the file changed and call `load`. That's policy,
+;; and it lives here.
+;;
+;; This module is opt-in (`require 'reload`) on purpose. Production programs
+;; should choose when files are reloadable; nothing should be auto-watched.
+
+(defmodule reload
+  "Hot-reload helpers. A reloader is a green process that polls one file's
+mtime and re-`load`s it when it changes — the running program's globals
+rebind on the *next* call site (docs/shared-code.md). Opt-in: nothing is
+watched until you call `reload-on-change`.
+
+    (require 'reload)
+    (reload-on-change \"greeter.blsp\")   ; returns the watcher pid
+    ;; …now edit greeter.blsp; the running program picks up the new defs.")
+
+;; How often the watcher polls, in ms. 250 ms is fast enough to feel
+;; instantaneous (one human reaction time) and slow enough that the cost
+;; is one stat per quarter-second per watched file — negligible.
+(def *reload-poll-ms* 250)
+
+;; The watcher loop. Tail-recursive on (path, last-seen-mtime). Each tick:
+;;   - stat the file (`file-mtime` is the cheap path — no read);
+;;   - if it vanished, complain once and keep polling (the editor may be
+;;     mid-rename);
+;;   - if mtime unchanged, sleep and recur;
+;;   - else `load` it (catch reader/eval errors from partial-write races so
+;;     a broken save doesn't kill the watcher), then recur with the new
+;;     mtime — even after a *failed* load, so we don't busy-retry the same
+;;     broken state on every tick.
+(defn reload--loop (path last)
+  (let (now (file-mtime path))
+    (cond
+      (nil? now)
+        (do (println "[reload] missing:" path)
+            (sleep *reload-poll-ms*)
+            (reload--loop path last))
+      (= now last)
+        (do (sleep *reload-poll-ms*)
+            (reload--loop path last))
+      else
+        (do
+          (try
+            (do (load path)
+                (println "[reload]" path))
+            (catch e
+              (println "[reload] failed:" path "—" e)))
+          (sleep *reload-poll-ms*)
+          (reload--loop path now)))))
+
+(defn reload-on-change (path)
+  "Spawn a green process that watches `path` and re-`load`s it whenever its
+mtime changes; returns the watcher's pid. The watcher polls every
+`*reload-poll-ms*` (default 250). Errors during a reload (a half-written
+save, a syntax error, etc.) print and are swallowed — the watcher keeps
+running. To stop watching, you currently need to kill the process (a
+proper `stop-reloader` is deferred until there's a concrete need)."
+  (spawn (reload--loop path (file-mtime path))))

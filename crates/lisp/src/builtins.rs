@@ -157,7 +157,11 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // macros
     def(heap, "macroexpand-1", Arity::exact(1), Sig::new(vec![any], any), macroexpand_1);
     def(heap, "macroexpand", Arity::exact(1), Sig::new(vec![any], any), macroexpand);
-    def(heap, "gensym", Arity::range(0, 1), Sig::new(vec![string], sym), gensym);
+    // gensym accepts anything as a prefix (string/sym/keyword/nil/anything is
+    // turned into its `display` form), so its prefix slot is `any` — not the
+    // narrower `string` the original Sig claimed, which made the checker warn
+    // on legitimate `(gensym 'foo)` calls.
+    def(heap, "gensym", Arity::range(0, 1), Sig::new(vec![any], sym), gensym);
 
     // advisory type checker (the Ty lattice's first consumer; see docs/types.md)
     def(heap, "check", Arity::exact(1), Sig::new(vec![any], list_ty), check_builtin);
@@ -448,13 +452,33 @@ fn remainder(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 
 /// Floor toward negative infinity, returning an `Int` — the one Float→Int
 /// crossing the language can't bootstrap (no other primitive produces an `Int`
-/// from a `Float`). An `Int` passes through; a `Float` is floored and cast to
-/// `i64` (the cast saturates for out-of-range magnitudes). `ceil`/`round`/`quot`/
+/// from a `Float`). An `Int` passes through; a `Float` is floored. `NaN` and
+/// values whose floor doesn't fit in `i64` are runtime errors — pre-fix the
+/// `as i64` cast silently saturated, so `(floor (* 1e308 1e308))` returned
+/// `i64::MAX` and `(floor (/ 0.0 0.0))` returned `0`. `ceil`/`round`/`quot`/
 /// `pow`/`sqrt` are all Brood over this + `rem`/`/`/`*`/`<` (std/prelude.blsp).
 fn floor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match arg(args, 0) {
         Value::Int(n) => Ok(Value::Int(n)),
-        v => Ok(Value::Int(expect_number(heap, "floor", v)?.floor() as i64)),
+        v => {
+            let f = expect_number(heap, "floor", v)?.floor();
+            if !f.is_finite() {
+                return Err(LispError::runtime(format!(
+                    "floor: argument {} has no integer floor",
+                    f
+                )));
+            }
+            // `i64::MIN as f64` rounds *down* to a value still in range; the
+            // upper bound `i64::MAX as f64` rounds *up* past `i64::MAX`, so
+            // the open upper comparison is the right one.
+            if f < i64::MIN as f64 || f >= i64::MAX as f64 + 1.0 {
+                return Err(LispError::runtime(format!(
+                    "floor: {} is out of range for i64",
+                    f
+                )));
+            }
+            Ok(Value::Int(f as i64))
+        }
     }
 }
 
@@ -807,6 +831,7 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
     ("docs", include_str!("../../../std/docs.blsp")),
     ("hatch", include_str!("../../../std/hatch.blsp")),
     ("format", include_str!("../../../std/format.blsp")),
+    ("reload", include_str!("../../../std/reload.blsp")),
 ];
 
 /// Baked-in reference *documents* (markdown), the counterpart to
@@ -1108,9 +1133,13 @@ fn apply_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
             "apply: expected a function and an argument list",
         ));
     }
+    // Bind `last` after the guard so the slice indexing below is robust to
+    // refactors of the guard: anyone moving / tightening it can't accidentally
+    // leave a bare `args[args.len() - 1]` indexing into an empty slice.
+    let last = args.len() - 1;
     let f = args[0];
-    let mut argv = args[1..args.len() - 1].to_vec();
-    argv.extend(heap.seq_items(args[args.len() - 1])?);
+    let mut argv = args[1..last].to_vec();
+    argv.extend(heap.seq_items(args[last])?);
     apply(heap, f, &argv, env)
 }
 
@@ -1326,7 +1355,7 @@ fn send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// `(monitor pid)` — watch `pid`; returns a monitor `ref`. The caller receives
 /// `[:down <ref> <pid> <reason>]` when `pid` dies (immediately, reason `:noproc`,
 /// if it is already dead).
-fn monitor(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+fn monitor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match arg(args, 0) {
         Value::Pid { node, id } if crate::dist::is_local(node) => {
             // Local pid: in-process registration, returns a fresh mref.
@@ -1343,7 +1372,31 @@ fn monitor(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
             crate::dist::monitor_remote(node, id, watcher, mref);
             Ok(Value::Ref(mref))
         }
-        _ => Err(LispError::type_err("monitor: first argument must be a pid")),
+        // `{:name n :node node}` address: resolve to a pid via `whereis` and
+        // monitor that pid. Only the local-node case is supported — a remote
+        // `{:name :node}` address has no protocol to resolve the name on the
+        // far side at monitor time, so we redirect the user to ship the pid
+        // directly. Documented in `docs/primitives.md`.
+        Value::Map(mid) => {
+            let (name, node) = crate::process::read_name_address(heap, mid)?;
+            if crate::dist::is_local(node) {
+                match crate::dist::whereis(name) {
+                    Some(pid) => Ok(crate::process::monitor(pid)),
+                    // Unregistered name: behave as if the pid were already
+                    // dead — fire :noproc immediately. `process::monitor`
+                    // already does this for an unknown local pid, so route
+                    // through it with a fresh-but-dead id placeholder.
+                    None => Ok(crate::process::monitor(u64::MAX)),
+                }
+            } else {
+                Err(LispError::type_err(
+                    "monitor: remote {:name :node} addresses aren't resolvable for monitor — pass the pid",
+                ))
+            }
+        }
+        _ => Err(LispError::type_err(
+            "monitor: first argument must be a pid or a {:name :node} address",
+        )),
     }
 }
 

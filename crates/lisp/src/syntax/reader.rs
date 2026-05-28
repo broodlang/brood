@@ -52,7 +52,16 @@ struct Parser<'a> {
     heap: &'a mut Heap,
     chars: Vec<char>,
     pos: usize,
+    depth: u32,
 }
+
+/// Bound on parser-recursion depth. A new frame is taken for each delimited
+/// form (`(`/`[`/`{`/`'`/`` ` ``/`~`); past this we return a parse error
+/// instead of growing the native Rust stack (which would abort the process
+/// — see `docs/devlog.md` 2026-05-28 hardening). 256 is comfortably above any
+/// hand-written program; pathological deeply-nested input from disk, the LSP,
+/// or `eval-string` is rejected with `LispError::parse`.
+const MAX_DEPTH: u32 = 256;
 
 impl<'a> Parser<'a> {
     fn new(heap: &'a mut Heap, src: &str) -> Self {
@@ -60,7 +69,25 @@ impl<'a> Parser<'a> {
             heap,
             chars: src.chars().collect(),
             pos: 0,
+            depth: 0,
         }
+    }
+
+    /// Enter a nesting level. Errors out at [`MAX_DEPTH`] rather than recursing
+    /// into a stack-overflow abort. Pair every successful call with [`exit`].
+    fn enter(&mut self) -> Result<(), LispError> {
+        if self.depth >= MAX_DEPTH {
+            return Err(self.err(format!(
+                "form nested too deeply (max {} levels)",
+                MAX_DEPTH
+            )));
+        }
+        self.depth += 1;
+        Ok(())
+    }
+
+    fn exit(&mut self) {
+        self.depth -= 1;
     }
 
     fn at_end(&self) -> bool {
@@ -132,23 +159,55 @@ impl<'a> Parser<'a> {
         let c = self
             .peek()
             .ok_or_else(|| self.err("unexpected end of input"))?;
+        // Every branch below that recurses through `read_form` is guarded by
+        // `enter`/`exit` so a deeply nested input (e.g. 100 000 open parens
+        // from a malicious file or LSP buffer) returns a clean parse error
+        // instead of overflowing the native Rust stack.
         match c {
-            '(' => self.read_seq(')'),
-            '[' => self.read_vector(),
+            '(' => {
+                self.enter()?;
+                let v = self.read_seq(')');
+                self.exit();
+                v
+            }
+            '[' => {
+                self.enter()?;
+                let v = self.read_vector();
+                self.exit();
+                v
+            }
             ')' | ']' | '}' => Err(self.err(format!("unexpected '{}'", c))),
-            '{' => self.read_map(),
-            '\'' => self.read_wrapped("quote"),
-            '`' => self.read_wrapped("quasiquote"),
+            '{' => {
+                self.enter()?;
+                let v = self.read_map();
+                self.exit();
+                v
+            }
+            '\'' => {
+                self.enter()?;
+                let v = self.read_wrapped("quote");
+                self.exit();
+                v
+            }
+            '`' => {
+                self.enter()?;
+                let v = self.read_wrapped("quasiquote");
+                self.exit();
+                v
+            }
             '~' => {
+                self.enter()?;
                 self.pos += 1;
-                if self.peek() == Some('@') {
+                let v = if self.peek() == Some('@') {
                     self.pos += 1;
                     let form = self.read_form()?;
                     Ok(self.wrap("unquote-splicing", form))
                 } else {
                     let form = self.read_form()?;
                     Ok(self.wrap("unquote", form))
-                }
+                };
+                self.exit();
+                v
             }
             '"' => self.read_string(),
             _ => self.read_atom(),
@@ -298,30 +357,27 @@ impl<'a> Parser<'a> {
     }
 
     fn read_atom(&mut self) -> Result<Value, LispError> {
-        let start = self.pos;
+        let token_start = self.pos;
         while let Some(c) = self.peek() {
             if atom::is_delimiter(c) {
                 break;
             }
             self.pos += 1;
         }
-        let token: String = self.chars[start..self.pos].iter().collect();
-        Ok(classify(&token))
-    }
-}
-
-/// Classify an atom token into a `Value`, interning symbols/keywords. The
-/// lexical decision (number? keyword? symbol?) is shared with the CST via
-/// [`atom::classify`], so the two parsers agree on what a token is (ADR-025).
-fn classify(token: &str) -> Value {
-    match atom::classify(token) {
-        AtomKind::Nil => Value::Nil,
-        AtomKind::Bool(b) => Value::Bool(b),
-        AtomKind::Int(i) => Value::Int(i),
-        AtomKind::Float(f) => Value::Float(f),
-        // `atom::classify` only returns `Keyword` for a non-empty `:`-prefixed
-        // token, so dropping the `:` always leaves a non-empty name.
-        AtomKind::Keyword => value::kw(&token[1..]),
-        AtomKind::Symbol => value::sym(token),
+        let token: String = self.chars[token_start..self.pos].iter().collect();
+        match atom::classify(&token) {
+            AtomKind::Nil => Ok(Value::Nil),
+            AtomKind::Bool(b) => Ok(Value::Bool(b)),
+            AtomKind::Int(i) => Ok(Value::Int(i)),
+            AtomKind::Float(f) => Ok(Value::Float(f)),
+            // `atom::classify` only returns `Keyword` for a non-empty `:`-prefixed
+            // token, so dropping the `:` always leaves a non-empty name.
+            AtomKind::Keyword => Ok(value::kw(&token[1..])),
+            AtomKind::Symbol => Ok(value::sym(&token)),
+            AtomKind::IntOverflow => Err(self.err_at(
+                self.pos_at(token_start),
+                format!("integer literal out of range for i64: {}", token),
+            )),
+        }
     }
 }

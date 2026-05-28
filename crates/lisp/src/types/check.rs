@@ -272,8 +272,6 @@ fn is_syntactic_keyword(name: &str) -> bool {
             | "throw"
             | "binding"
             | "for"
-            | "loop"
-            | "recur"
             | "spawn"
             | "&"
             | "&optional"

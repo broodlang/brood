@@ -15,7 +15,7 @@ gate (`eval::call_native`), before the primitive runs — so a wrong-count call 
 a clean arity error (`type-of: expected 1 argument, got 0`) rather than a missing
 arg silently becoming `nil`.
 
-## Native primitive functions (80)
+## Native primitive functions (81)
 
 | Category | Primitive | Arity | Purpose |
 |---|---|---|---|
@@ -72,10 +72,13 @@ arg silently becoming `nil`.
 | | `gensym` | 0–1 | a fresh, unique symbol (optional name prefix) |
 | **Source positions** (editor tooling) | `form-pos` | 1 | a form's `[line col]` source position vector, or nil |
 | | `current-file` | 0 | path of the file currently being loaded, or nil |
+| | `source-location` | 1 | `[file line col]` of where `'name` was defined (`def`/`defn`/`defmacro`/`defdyn` site), or nil. Captured pre-expansion so macros' surface forms are located accurately (ADR-031) |
+| | `parse-source` | 1 | parse a `.blsp` source string into a span-carrying CST node (`Atom`/`Cst`); the formatter and LSP read structure + positions from this rather than re-reading source. ADR-025 |
 | **Introspection** (editor tooling) | `doc` | 1 | a function/macro's docstring, or nil |
 | | `arglist` | 1 | a function/macro's parameter list (required, `&optional`, `& rest`), or nil |
 | | `global-names` | 0 | every globally bound symbol, sorted by spelling (completion / doc generation) |
 | | `bound?` | 1 | whether a symbol is bound in scope → bool |
+| | `dynamic?` | 1 | whether a symbol names a dynamic variable (declared via `defdyn`) → bool |
 | **Errors / control** | `throw` | 1 | raise a value as an error (non-local exit) |
 | | `%try` | 2 | call a thunk; on raise, call the handler with the caught value |
 | | `%isolate` | 1 | call a thunk against a private copy of the globals; roll back its `def`s afterward (used by `:isolated` tests) |
@@ -84,11 +87,18 @@ arg silently becoming `nil`.
 | | `%receive` | 3 | selective-receive primitive (matcher fn, timeout-ms-or-nil, on-timeout thunk-or-nil); `receive` is a Brood macro over it |
 | | `self` | 0 | this process's pid |
 | | `ref` | 0 | a fresh, globally-unique reference token (`Value::Ref`); tags request↔reply |
-| | `monitor` | 1 | watch a pid; returns a monitor ref. Delivers `[:down ref pid reason]` on its death (`:noproc` if already dead) |
-| | `demonitor` | 1 | drop a monitor by its ref (best-effort) |
+| | `monitor` | 1 | watch a pid (local or remote); returns a monitor ref. Delivers `[:down ref pid reason]` on death (`:noproc` if already dead; `:noconnection` if a remote peer's link drops) |
+| | `demonitor` | 1 | drop a monitor by its ref (best-effort; remote demonitor is fanned out to the holding peer) |
+| | `register` | 2 | bind a local name → pid so peers can address it via `{:name n :node this-node}`. Returns the pid |
+| | `whereis` | 1 | the local pid registered under `name`, or nil. Strictly local — does not query other nodes |
 | | `spawn-count` | 0 | green processes spawned since program start |
 | | `peak-threads` | 0 | high-water mark of spawned threads running concurrently (bounded by the CLI's `-j`) |
 | | `worker-threads` | 0 | size of the scheduler's worker-thread pool (≈ nproc; `-j` overrides) |
+| **Distributed nodes** ([docs](distribution.md), ADR-034) | `node-start` | 3 | name this runtime (`node`, `"host:port"`, `cookie`), start the acceptor; cookie is the HMAC key for handshake v2 (never on the wire). Returns the node name |
+| | `connect` | 1 | dial `"name@host:port"`, complete the v2 handshake (magic+version, nonce-exchange, HMAC challenge-response). Returns the peer's node name |
+| | `node-name` | 0 | this runtime's node name (`:nonode` until `node-start`) |
+| | `nodes` | 0 | list of currently connected peer node names |
+| | `monitor-node` | 1 | get `[:nodedown name]` when the link to node `name` drops (heartbeat timeout or clean close). Persistent — fires on each down |
 
 **Why this set is irreducible:** every entry needs Rust — raw number ops, heap
 construct/inspect, the type-tag *reflection* (`type-of`), I/O, value→text

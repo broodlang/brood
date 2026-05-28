@@ -14,6 +14,12 @@ pub enum AtomKind {
     Bool(bool),
     Int(i64),
     Float(f64),
+    /// An integer-shaped token (digits only, optional leading sign) that won't
+    /// fit in `i64`. The reader turns this into a `LispError::parse`; the CST
+    /// records it as an `Error` node. Distinguishing it from `Float` is the
+    /// point: `9223372036854775808` is not a `Float(9.22e18)` — that would
+    /// silently lose precision against the user's intent.
+    IntOverflow,
     /// A `:keyword` (the leading `:` is part of the token; strip it to intern).
     Keyword,
     Symbol,
@@ -30,6 +36,13 @@ pub fn classify(token: &str) -> AtomKind {
     if let Ok(i) = token.parse::<i64>() {
         return AtomKind::Int(i);
     }
+    // An integer-shaped token that didn't fit in `i64` is its own outcome —
+    // *not* a Float fall-through (which would silently round e.g.
+    // `9223372036854775808` to `9.22e18`). A user who wrote digits got a
+    // diagnostic; a user who wrote `1e1000` still gets the `Float(inf)` path.
+    if looks_integer(token) {
+        return AtomKind::IntOverflow;
+    }
     if looks_numeric(token) {
         if let Ok(f) = token.parse::<f64>() {
             return AtomKind::Float(f);
@@ -40,6 +53,15 @@ pub fn classify(token: &str) -> AtomKind {
         return AtomKind::Keyword;
     }
     AtomKind::Symbol
+}
+
+/// An integer-shaped token: `looks_numeric`, but with no fractional/exponent
+/// part — pure digits with an optional leading sign.
+fn looks_integer(token: &str) -> bool {
+    looks_numeric(token)
+        && !token.contains('.')
+        && !token.contains('e')
+        && !token.contains('E')
 }
 
 /// Characters that terminate an atom (and so can't appear unescaped inside one).

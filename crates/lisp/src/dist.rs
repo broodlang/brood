@@ -30,7 +30,7 @@
 
 use std::collections::HashMap;
 use std::io::{self, Cursor, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, LazyLock, Once, RwLock};
@@ -50,6 +50,19 @@ const MAX_FRAME: usize = 64 * 1024 * 1024;
 /// can't pin a thread forever (the steady-state reader has the timeout cleared —
 /// it *should* block until the next message arrives).
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Timeout on dialer socket connect. Without this, `TcpStream::connect(addr)` blocks
+/// at the kernel's TCP SYN timeout (minutes on Linux) when the peer's port is
+/// silently dropping packets — fine for a healthy LAN, but on a flaky network the
+/// dialer wedges. Several seconds is enough for a real LAN/WAN round-trip.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Per-write timeout on the steady-state writer socket. A peer that stops reading
+/// (slowloris-style) drives its TCP receive window to zero; without this, our
+/// `write_all` blocks forever, the writer thread is pinned, and the unbounded
+/// `mpsc::channel` accumulates messages — a remote-controlled OOM. Generous so a
+/// genuinely slow peer doesn't get torn down for an occasional slow drain.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How often the (single, shared) heartbeat thread probes each link with a `Ping`
 /// and checks liveness. Idle-gated: a `Ping` is a 5-byte frame, only sent on the
@@ -95,7 +108,10 @@ static LOCAL_NODE: AtomicU32 = AtomicU32::new(u32::MAX);
 
 /// This runtime's node name (interned). `:nonode` until `node-start`. Lock-free.
 pub(crate) fn local_node() -> Symbol {
-    match LOCAL_NODE.load(Ordering::Relaxed) {
+    // `Acquire` pairs with the `Release` `store` in `node_start` — any reader
+    // that sees the published name is also guaranteed to see the `NODE`
+    // lock's writes (cookie + name) made before that store.
+    match LOCAL_NODE.load(Ordering::Acquire) {
         u32::MAX => *NONODE,
         id => id,
     }
@@ -150,14 +166,14 @@ static NODE_MONITORS: LazyLock<RwLock<HashMap<Symbol, Vec<u64>>>> =
 
 /// `(register name pid)` — bind a local name to a local process id.
 pub(crate) fn register(name: Symbol, id: u64) {
-    NAMES.write().unwrap().insert(name, id);
+    crate::core::sync::write(&NAMES).insert(name, id);
 }
 
 /// `(whereis name)` — the local pid registered under `name`, or `None`. Lets
 /// callers test for an existing registration before re-`spawn`ing a server
 /// they're about to register (idempotent bootstrap; used by `remote-spawn`).
 pub(crate) fn whereis(name: Symbol) -> Option<u64> {
-    NAMES.read().unwrap().get(&name).copied()
+    crate::core::sync::read(&NAMES).get(&name).copied()
 }
 
 /// `(monitor (Pid remote_node remote_pid))` from the cross-node path: ship a
@@ -172,12 +188,6 @@ pub(crate) fn monitor_remote(
     watcher_pid: u64,
     mref: u64,
 ) {
-    let connected = NODES.read().unwrap().contains_key(&target_node);
-    if !connected {
-        process::fire_noconnection(target_node, target_pid, watcher_pid, mref);
-        return;
-    }
-    process::record_pending_remote(target_node, target_pid, watcher_pid, mref);
     let me = local_node();
     let bytes: Arc<[u8]> = match frame_bytes(&Frame::Monitor {
         from_node: me,
@@ -195,8 +205,30 @@ pub(crate) fn monitor_remote(
             return;
         }
     };
-    if let Some(conn) = NODES.read().unwrap().get(&target_node) {
-        let _ = conn.tx.send(bytes);
+    // Record the pending entry **before** consulting `NODES`, then take a
+    // single `NODES` read lock that covers both the link presence check and
+    // the channel send. This closes a race against `drop_link`/`handle_node_down`:
+    //   • If we record before they run, they'll find our entry in
+    //     `PENDING_REMOTE` and fire `:noconnection` to us — even if our send
+    //     never made it onto the wire.
+    //   • If they run first (`NODES` already empty here), we fall through to
+    //     the explicit cleanup below, dropping our pending entry and firing
+    //     `:noconnection` ourselves.
+    // The pending entry can't be orphaned in either branch.
+    process::record_pending_remote(target_node, target_pid, watcher_pid, mref);
+    let sent = {
+        let nodes = crate::core::sync::read(&NODES);
+        match nodes.get(&target_node) {
+            Some(conn) => {
+                let _ = conn.tx.send(bytes);
+                true
+            }
+            None => false,
+        }
+    };
+    if !sent {
+        process::drop_pending_remote(target_node, watcher_pid, mref);
+        process::fire_noconnection(target_node, target_pid, watcher_pid, mref);
     }
 }
 
@@ -215,7 +247,7 @@ pub(crate) fn demonitor_remote(target_node: Symbol, watcher_pid: u64, mref: u64)
         Ok(b) => Arc::from(b),
         Err(_) => return, // best-effort
     };
-    if let Some(conn) = NODES.read().unwrap().get(&target_node) {
+    if let Some(conn) = crate::core::sync::read(&NODES).get(&target_node) {
         let _ = conn.tx.send(bytes);
     }
 }
@@ -226,8 +258,8 @@ pub(crate) fn demonitor_remote(target_node: Symbol, watcher_pid: u64, mref: u64)
 /// already down and `[:nodedown]` is delivered immediately (Erlang's
 /// `monitor_node` semantics).
 pub(crate) fn monitor_node(name: Symbol, pid: u64) {
-    NODE_MONITORS.write().unwrap().entry(name).or_default().push(pid);
-    if !is_local(name) && !NODES.read().unwrap().contains_key(&name) {
+    crate::core::sync::write(&NODE_MONITORS).entry(name).or_default().push(pid);
+    if !is_local(name) && !crate::core::sync::read(&NODES).contains_key(&name) {
         process::deliver(pid, nodedown_msg(name));
     }
 }
@@ -242,7 +274,7 @@ fn nodedown_msg(name: Symbol) -> Message {
 
 /// Connected peer node names (for `(nodes)`).
 pub(crate) fn connected_nodes() -> Vec<Symbol> {
-    NODES.read().unwrap().keys().copied().collect()
+    crate::core::sync::read(&NODES).keys().copied().collect()
 }
 
 // ----- routing ---------------------------------------------------------------
@@ -262,7 +294,7 @@ pub(crate) fn route(node: Symbol, target: Target, msg: Message) {
     if is_local(node) {
         let id = match target {
             Target::Pid(id) => id,
-            Target::Name(name) => match NAMES.read().unwrap().get(&name).copied() {
+            Target::Name(name) => match crate::core::sync::read(&NAMES).get(&name).copied() {
                 Some(id) => id,
                 None => return,
             },
@@ -278,7 +310,7 @@ pub(crate) fn route(node: Symbol, target: Target, msg: Message) {
             return;
         }
     };
-    if let Some(conn) = NODES.read().unwrap().get(&node) {
+    if let Some(conn) = crate::core::sync::read(&NODES).get(&node) {
         let _ = conn.tx.send(bytes); // dropped if the writer has gone away
     }
 }
@@ -292,7 +324,7 @@ pub(crate) fn node_start(name: Symbol, addr: &str, cookie: String) -> io::Result
     // Bind first (it can fail on a bad/taken address) — but guard against a second
     // node-start, which would otherwise leak the previous listener + acceptor thread.
     {
-        let n = NODE.read().unwrap();
+        let n = crate::core::sync::read(&NODE);
         if n.started {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -302,19 +334,39 @@ pub(crate) fn node_start(name: Symbol, addr: &str, cookie: String) -> io::Result
     }
     let listener = TcpListener::bind(addr)?;
     {
-        let mut n = NODE.write().unwrap();
+        let mut n = crate::core::sync::write(&NODE);
         n.name = name;
         n.cookie = cookie;
         n.started = true;
     }
-    LOCAL_NODE.store(name, Ordering::Relaxed); // publish for the lock-free hot path
+    // `Release` so a reader on another core that loads with `Acquire` is
+    // guaranteed to see the `NODE` lock's write (cookie + name) too. The hot
+    // path (`local_node`) is the matched `Acquire`.
+    LOCAL_NODE.store(name, Ordering::Release); // publish for the lock-free hot path
     std::thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
-            std::thread::spawn(move || {
-                if let Err(e) = accept(stream) {
-                    eprintln!("dist: incoming connection failed: {}", e);
+        // `flatten()` silently drops accept errors — wrap each iteration so a
+        // transient EMFILE just logs and re-loops with a tiny backoff instead
+        // of burn-looping the acceptor.
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    std::thread::spawn(move || {
+                        // Catch a panic in the per-connection thread so one bad
+                        // peer doesn't take down the runtime via thread-panic
+                        // unwind (the rest of the dist surface assumes its
+                        // background threads stay alive).
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            if let Err(e) = accept(stream) {
+                                eprintln!("dist: incoming connection failed: {}", e);
+                            }
+                        }));
+                    });
                 }
-            });
+                Err(e) => {
+                    eprintln!("dist: accept error: {}", e);
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
         }
     });
     Ok(())
@@ -349,11 +401,28 @@ pub(crate) fn connect(spec: &str) -> io::Result<Symbol> {
     // still resolved by the tie-break in `establish`.) `intern_existing` keeps
     // the interner from growing for names we ultimately don't use.
     if let Some(claimed) = value::intern_existing(claimed_name) {
-        if NODES.read().unwrap().contains_key(&claimed) {
+        if crate::core::sync::read(&NODES).contains_key(&claimed) {
             return Ok(claimed);
         }
     }
-    let mut stream = TcpStream::connect(addr)?;
+    // `connect_timeout` requires a `SocketAddr`, so resolve here and try each
+    // address in turn — gives us the same multi-A-record behaviour as
+    // `TcpStream::connect(spec)` while bounding the wait per attempt.
+    let mut last_err: Option<io::Error> = None;
+    let stream = addr.to_socket_addrs()?.find_map(|sa| {
+        match TcpStream::connect_timeout(&sa, CONNECT_TIMEOUT) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                last_err = Some(e);
+                None
+            }
+        }
+    });
+    let mut stream = stream.ok_or_else(|| {
+        last_err.unwrap_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "no addresses resolved")
+        })
+    })?;
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
     let peer = handshake(&mut stream, Role::Initiator)?;
     stream.set_read_timeout(None)?; // steady-state reader blocks until the next message
@@ -402,7 +471,7 @@ fn handshake(stream: &mut TcpStream, role: Role) -> io::Result<Symbol> {
 
     // Step 2: Hellos with nonces.
     let (my_name, cookie) = {
-        let n = NODE.read().unwrap();
+        let n = crate::core::sync::read(&NODE);
         (n.name, n.cookie.clone())
     };
     let my_nonce = fresh_nonce()?;
@@ -528,7 +597,7 @@ fn establish(peer: Symbol, stream: TcpStream, role: Role) {
     // Compare connectors by *name* (spelling) — interned ids differ per process,
     // but both ends share the names, so they pick the same physical link.
     let evicted: Option<Conn> = {
-        let mut nodes = NODES.write().unwrap();
+        let mut nodes = crate::core::sync::write(&NODES);
         match nodes.get(&peer) {
             Some(existing)
                 if value::symbol_name(connector) >= value::symbol_name(existing.connector) =>
@@ -563,16 +632,21 @@ fn establish(peer: Symbol, stream: TcpStream, role: Role) {
 
     ensure_heartbeat();
 
-    // Writer: drain the channel onto the socket. On a write error, `shutdown` so
-    // the reader unblocks and runs the single teardown path.
+    // Writer: drain the channel onto the socket. A per-write timeout
+    // (`WRITE_TIMEOUT`) prevents a slowloris peer from pinning the writer and
+    // ballooning `rx` — a timeout is treated the same as an I/O error, fall
+    // through to shutdown.
     let writer_sock = Arc::clone(&sock);
+    let _ = writer_sock.set_write_timeout(Some(WRITE_TIMEOUT));
     std::thread::spawn(move || {
-        for bytes in rx {
-            if (&*writer_sock).write_all(&bytes).is_err() {
-                let _ = writer_sock.shutdown(Shutdown::Both);
-                break;
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            for bytes in rx {
+                if (&*writer_sock).write_all(&bytes).is_err() {
+                    let _ = writer_sock.shutdown(Shutdown::Both);
+                    break;
+                }
             }
-        }
+        }));
     });
 
     // Reader: every inbound frame refreshes liveness; a `Ping` is answered with a
@@ -586,47 +660,55 @@ fn establish(peer: Symbol, stream: TcpStream, role: Role) {
     std::thread::spawn(move || {
         let mut r: &TcpStream = &reader_sock;
         // Loop until peer closes, protocol error, or a deliberate `shutdown`.
-        while let Ok(frame) = read_frame(&mut r) {
-            last_seen.store(now_millis(), Ordering::Relaxed);
-            match frame {
-                Frame::Send { target, msg } => deliver_inbound(target, msg),
-                Frame::Ping => {
-                    let _ = reader_tx.send(Arc::clone(&pong));
-                }
-                // A peer asked to watch one of our local pids — re-use the
-                // shared `add_monitor` core with a `Watcher::Remote` so the
-                // alive-target / dead-target paths are exactly the local
-                // monitor's, just with a different delivery channel.
-                Frame::Monitor {
-                    from_node,
-                    watcher_pid,
-                    target,
-                    mref,
-                } => process::add_monitor(
-                    target,
-                    process::Watcher::Remote {
-                        node: from_node,
-                        pid: watcher_pid,
+        // `peer` is the *authenticated* node name from the handshake — we use
+        // it instead of the wire's `from_node` field on Monitor/Demonitor so a
+        // malicious peer can't claim to be node X and inject `[:down …]`
+        // deliveries to processes watching X. The `from_node` field stays in
+        // the wire format for clean error paths (encode side still emits it)
+        // but is *not consulted* on this side.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            while let Ok(frame) = read_frame(&mut r) {
+                last_seen.store(now_millis(), Ordering::Release);
+                match frame {
+                    Frame::Send { target, msg } => deliver_inbound(target, msg),
+                    Frame::Ping => {
+                        let _ = reader_tx.send(Arc::clone(&pong));
+                    }
+                    // A peer asked to watch one of our local pids — re-use the
+                    // shared `add_monitor` core with a `Watcher::Remote` so the
+                    // alive-target / dead-target paths are exactly the local
+                    // monitor's, just with a different delivery channel.
+                    Frame::Monitor {
+                        from_node: _wire_node,
+                        watcher_pid,
+                        target,
                         mref,
-                    },
-                ),
-                // Peer dropped a remote monitor — same `drop_monitor` the
-                // local `demonitor` uses, with a predicate matching the
-                // Remote variant identity (node + pid + mref).
-                Frame::Demonitor {
-                    from_node,
-                    watcher_pid,
-                    mref,
-                } => process::drop_monitor(|w| {
-                    matches!(*w, process::Watcher::Remote { node, pid, mref: r }
-                                 if node == from_node && pid == watcher_pid && r == mref)
-                }),
-                // Handshake-only frames in steady state: a peer that
-                // re-sends one after the link is up is malformed but harmless
-                // — keep reading.
-                Frame::Pong | Frame::Hello { .. } | Frame::Auth { .. } => {}
+                    } => process::add_monitor(
+                        target,
+                        process::Watcher::Remote {
+                            node: peer,
+                            pid: watcher_pid,
+                            mref,
+                        },
+                    ),
+                    // Peer dropped a remote monitor — same `drop_monitor` the
+                    // local `demonitor` uses, with a predicate matching the
+                    // Remote variant identity (node + pid + mref).
+                    Frame::Demonitor {
+                        from_node: _wire_node,
+                        watcher_pid,
+                        mref,
+                    } => process::drop_monitor(|w| {
+                        matches!(*w, process::Watcher::Remote { node, pid, mref: r }
+                                     if node == peer && pid == watcher_pid && r == mref)
+                    }),
+                    // Handshake-only frames in steady state: a peer that
+                    // re-sends one after the link is up is malformed but harmless
+                    // — keep reading.
+                    Frame::Pong | Frame::Hello { .. } | Frame::Auth { .. } => {}
+                }
             }
-        }
+        }));
         drop_link(peer, id);
     });
 }
@@ -635,7 +717,7 @@ fn establish(peer: Symbol, stream: TcpStream, role: Role) {
 /// replaced link can't tear down its successor), and fire node-down watchers.
 fn drop_link(peer: Symbol, id: u64) {
     let removed = {
-        let mut nodes = NODES.write().unwrap();
+        let mut nodes = crate::core::sync::write(&NODES);
         match nodes.get(&peer) {
             Some(c) if c.id == id => {
                 nodes.remove(&peer);
@@ -656,7 +738,7 @@ fn drop_link(peer: Symbol, id: u64) {
 /// to a vanished peer). All three sit behind one node-down trigger so a
 /// reconnect later starts from a clean slate.
 fn fire_nodedown(peer: Symbol) {
-    let watchers = NODE_MONITORS.read().unwrap().get(&peer).cloned();
+    let watchers = crate::core::sync::read(&NODE_MONITORS).get(&peer).cloned();
     if let Some(watchers) = watchers {
         let msg = nodedown_msg(peer);
         for w in watchers {
@@ -670,7 +752,7 @@ fn fire_nodedown(peer: Symbol) {
 fn deliver_inbound(target: Target, msg: Message) {
     let id = match target {
         Target::Pid(id) => id,
-        Target::Name(name) => match NAMES.read().unwrap().get(&name).copied() {
+        Target::Name(name) => match crate::core::sync::read(&NAMES).get(&name).copied() {
             Some(id) => id,
             None => return,
         },
@@ -685,7 +767,13 @@ static HEARTBEAT_STARTED: Once = Once::new();
 /// Start the single shared heartbeat thread once, on the first established link.
 fn ensure_heartbeat() {
     HEARTBEAT_STARTED.call_once(|| {
-        std::thread::spawn(heartbeat_loop);
+        // Re-spawn on panic so a single bad iteration doesn't silently stop
+        // liveness detection for the rest of the process lifetime.
+        std::thread::spawn(|| loop {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(heartbeat_loop));
+            eprintln!("dist: heartbeat thread panicked; restarting");
+            std::thread::sleep(HEARTBEAT_INTERVAL);
+        });
     });
 }
 
@@ -703,10 +791,10 @@ fn heartbeat_loop() {
         let now = now_millis();
         // Snapshot under the lock, then act without holding it (shutdown/send can block).
         let links: Vec<(Arc<TcpStream>, Sender<Arc<[u8]>>, u64)> = {
-            let nodes = NODES.read().unwrap();
+            let nodes = crate::core::sync::read(&NODES);
             nodes
                 .values()
-                .map(|c| (Arc::clone(&c.sock), c.tx.clone(), c.last_seen.load(Ordering::Relaxed)))
+                .map(|c| (Arc::clone(&c.sock), c.tx.clone(), c.last_seen.load(Ordering::Acquire)))
                 .collect()
         };
         for (sock, tx, last) in links {
@@ -770,9 +858,22 @@ const NONCE_LEN: usize = 32;
 const MAC_LEN: usize = 32;
 
 /// Encode a frame with its `[u32 len][payload]` length prefix, ready to write.
+/// A payload over [`MAX_FRAME`] is rejected here too — symmetric with
+/// `read_frame` — so an oversized local `(send pid huge-thing)` returns a clean
+/// error rather than silently truncating the `u32` length and producing a frame
+/// the peer can't parse.
 fn frame_bytes(frame: &Frame) -> io::Result<Vec<u8>> {
     let mut payload = Vec::new();
     encode_frame(&mut payload, frame)?;
+    if payload.len() > MAX_FRAME {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "frame of {} bytes exceeds the {MAX_FRAME}-byte limit",
+                payload.len()
+            ),
+        ));
+    }
     let mut out = Vec::with_capacity(payload.len() + 4);
     out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     out.extend_from_slice(&payload);
@@ -1026,7 +1127,23 @@ fn encode_closure(w: &mut Vec<u8>, c: &crate::process::ClosureMsg) -> io::Result
     Ok(())
 }
 
+/// Maximum nesting depth the wire decoder will descend into. Past this we
+/// reject the frame as `InvalidData` — a peer (already authenticated, but
+/// possibly malicious) can otherwise send a deeply nested `M_LIST` chain in a
+/// small frame and overflow the receiver thread's native Rust stack.
+const MAX_DECODE_DEPTH: u32 = 256;
+
 fn decode_msg(r: &mut Cursor<Vec<u8>>) -> io::Result<Message> {
+    decode_msg_at(r, 0)
+}
+
+fn decode_msg_at(r: &mut Cursor<Vec<u8>>, depth: u32) -> io::Result<Message> {
+    if depth >= MAX_DECODE_DEPTH {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("message nested deeper than {MAX_DECODE_DEPTH} levels"),
+        ));
+    }
     Ok(match get_u8(r)? {
         M_NIL => Message::Nil,
         M_FALSE => Message::Bool(false),
@@ -1040,7 +1157,7 @@ fn decode_msg(r: &mut Cursor<Vec<u8>>) -> io::Result<Message> {
             let n = get_u32(r)? as usize;
             let mut items = Vec::with_capacity(prealloc(r, n));
             for _ in 0..n {
-                items.push(decode_msg(r)?);
+                items.push(decode_msg_at(r, depth + 1)?);
             }
             let pos = get_opt_pos(r)?;
             Message::List(items, pos)
@@ -1049,7 +1166,7 @@ fn decode_msg(r: &mut Cursor<Vec<u8>>) -> io::Result<Message> {
             let n = get_u32(r)? as usize;
             let mut items = Vec::with_capacity(prealloc(r, n));
             for _ in 0..n {
-                items.push(decode_msg(r)?);
+                items.push(decode_msg_at(r, depth + 1)?);
             }
             Message::Vector(items)
         }
@@ -1057,8 +1174,8 @@ fn decode_msg(r: &mut Cursor<Vec<u8>>) -> io::Result<Message> {
             let n = get_u32(r)? as usize;
             let mut entries = Vec::with_capacity(prealloc(r, n));
             for _ in 0..n {
-                let k = decode_msg(r)?;
-                let v = decode_msg(r)?;
+                let k = decode_msg_at(r, depth + 1)?;
+                let v = decode_msg_at(r, depth + 1)?;
                 entries.push((k, v));
             }
             Message::Map(entries)
@@ -1068,7 +1185,7 @@ fn decode_msg(r: &mut Cursor<Vec<u8>>) -> io::Result<Message> {
             node: get_sym(r)?,
             id: get_u64(r)?,
         },
-        M_CLOSURE => Message::Closure(Box::new(decode_closure(r)?)),
+        M_CLOSURE => Message::Closure(Box::new(decode_closure_at(r, depth + 1)?)),
         t => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1082,7 +1199,10 @@ fn decode_msg(r: &mut Cursor<Vec<u8>>) -> io::Result<Message> {
 /// frame's remaining bytes (via [`prealloc`]) so a tiny frame claiming a huge
 /// count can't trigger a large allocation up front — the decode loop fails
 /// cleanly on EOF instead.
-fn decode_closure(r: &mut Cursor<Vec<u8>>) -> io::Result<crate::process::ClosureMsg> {
+fn decode_closure_at(
+    r: &mut Cursor<Vec<u8>>,
+    depth: u32,
+) -> io::Result<crate::process::ClosureMsg> {
     let name = get_opt_sym(r)?;
     let n = get_u32(r)? as usize;
     let mut params = Vec::with_capacity(prealloc(r, n));
@@ -1093,21 +1213,21 @@ fn decode_closure(r: &mut Cursor<Vec<u8>>) -> io::Result<crate::process::Closure
     let mut optionals = Vec::with_capacity(prealloc(r, n));
     for _ in 0..n {
         let s = get_sym(r)?;
-        let m = decode_msg(r)?;
+        let m = decode_msg_at(r, depth)?;
         optionals.push((s, m));
     }
     let rest = get_opt_sym(r)?;
     let n = get_u32(r)? as usize;
     let mut body = Vec::with_capacity(prealloc(r, n));
     for _ in 0..n {
-        body.push(decode_msg(r)?);
+        body.push(decode_msg_at(r, depth)?);
     }
     let doc = get_opt_str(r)?;
     let n = get_u32(r)? as usize;
     let mut captured = Vec::with_capacity(prealloc(r, n));
     for _ in 0..n {
         let s = get_sym(r)?;
-        let m = decode_msg(r)?;
+        let m = decode_msg_at(r, depth)?;
         captured.push((s, m));
     }
     Ok(crate::process::ClosureMsg {

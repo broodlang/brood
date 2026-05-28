@@ -846,6 +846,75 @@ fn binding_undeclared_is_an_error() {
     assert!(interp.eval_str("(binding (not-dynamic 1) not-dynamic)").is_err());
 }
 
+/// A pathological deeply-nested input is rejected as a parse error rather
+/// than overflowing the native Rust stack. Guards the depth caps added to
+/// `reader.rs`, `cst.rs`, `printer.rs`, `eval/macros.rs`, and the wire codec
+/// — any one of those reverting would either error here or abort the test
+/// runner.
+#[test]
+fn parser_rejects_deeply_nested_input_instead_of_overflowing() {
+    let mut interp = brood::Interp::new();
+    let src: String = "(".repeat(5000);
+    let err = interp.eval_str(&src).expect_err("must reject deep input");
+    let msg = format!("{}", err);
+    assert!(
+        msg.contains("nested too deeply"),
+        "expected a depth-cap parse error, got: {}",
+        msg
+    );
+}
+
+/// `floor` on `NaN`/`±inf`/out-of-`i64`-range values is a runtime error,
+/// not a silent saturating cast. Pre-fix, `(floor (* 1e308 1e308))` returned
+/// `i64::MAX` and `(floor (/ 0.0 0.0))` returned `0`.
+#[test]
+fn floor_rejects_non_finite_and_out_of_range() {
+    let mut interp = brood::Interp::new();
+    assert!(interp.eval_str("(floor (* 1e308 1e308))").is_err());
+    assert!(interp.eval_str("(floor (/ 0.0 0.0))").is_err());
+    // In-range floats still work.
+    let v = interp.eval_str("(floor 3.7)").unwrap();
+    assert_eq!(interp.print(v), "3");
+    let v = interp.eval_str("(floor -3.2)").unwrap();
+    assert_eq!(interp.print(v), "-4");
+}
+
+/// An integer-shaped literal that doesn't fit in `i64` is a parse error,
+/// not a silent fall-through to `Float`. Pre-fix, `9223372036854775808`
+/// quietly read as `9.22e18` and any downstream type-check or arithmetic
+/// silently used the rounded float.
+#[test]
+fn reader_rejects_out_of_range_integer_literal() {
+    let mut interp = brood::Interp::new();
+    let err = interp
+        .eval_str("9223372036854775808")
+        .expect_err("must reject");
+    let msg = format!("{}", err);
+    assert!(
+        msg.contains("integer literal out of range"),
+        "expected an integer-range parse error, got: {}",
+        msg
+    );
+    // The float-shaped sibling still reads as float (here, +inf).
+    assert!(interp.eval_str("1e1000").is_ok());
+}
+
+/// Tail-recursion via `apply` doesn't blow the Rust stack. Pre-fix, an
+/// `(apply f …)` recursing on itself grew the Rust stack ~4 frames per
+/// level because `apply` → `apply_closure` → `eval(last)` recursed through
+/// native code rather than trampolining; with the `apply_with_tco` loop in
+/// `eval/mod.rs`, the recursion stays O(1) on the Rust stack.
+#[test]
+fn apply_tail_recursion_does_not_overflow() {
+    let src = "
+        (def loop-apply
+          (fn [n acc]
+            (if (= n 0) acc (apply loop-apply (list (- n 1) (+ acc n))))))
+        (loop-apply 100000 0)
+    ";
+    assert_eq!(run(src), "5000050000");
+}
+
 /// `gensym` must mint process-wide-unique symbols, including across threads — a
 /// thread-local counter would reset per worker and collide.
 #[test]

@@ -18,10 +18,14 @@ image.
 > (`check_project` / `run_tests` want a *structured-result* variant in
 > `std/project.blsp` and `std/test.blsp`; `eval_in_session.stdout` wants a
 > `with-out-str` facility — `*out*` dynvar + a Rust capture primitive);
-> (2) `crates/nest/src/mcp.rs` with the JSON-RPC loop + dispatcher (can
-> start with the four shipped helpers — `load` and `processes` need no
-> Rust wrapper, they're a one-line `eval_in_session` from the dispatcher);
-> (3) `std/mcp.blsp` with the initial tool set;
+> **(2) `crates/nest/src/mcp.rs` — done (2026-05-28; sync JSON-RPC loop,
+> `serde_json` framing, initialize / tools{list,call} / resources{list,read}
+> / prompts/list / ping / shutdown / exit; Brood ↔ JSON converters; 13
+> dispatcher tests; `nest mcp` subcommand wired with the strict-per-project
+> bootstrap; happy-path verified against the real binary)**;
+> (3) `std/mcp.blsp` with the initial tool set — the next move: until it
+> lands, `tools/list` is empty and the protocol surface is doc resources
+> only;
 > (4) `nest new` scaffolds `.mcp.json`;
 > (5) docs/devlog tick.
 

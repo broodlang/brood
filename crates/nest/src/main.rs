@@ -18,39 +18,36 @@
 //! threads at once (0 = unlimited, the default) — useful for bounding a
 //! concurrent test run; see `std/test.blsp`.
 
-use brood::error::LispError;
+// `LispError` is referenced indirectly via `cli_support::report_error`.
 use brood::Interp;
 
-/// Print an error as a GNU `FILE:LINE:COL: message` line (editor-parseable),
-/// followed — when the file and position are known — by the offending source
-/// line and a caret under the column. See `docs/tooling.md`.
-fn report_error(e: &LispError) {
-    eprintln!("{}", e.located());
-    if let (Some(file), Some(pos)) = (&e.file, e.pos) {
-        if let Ok(src) = std::fs::read_to_string(file) {
-            if let Some(line) = src.lines().nth(pos.line.saturating_sub(1) as usize) {
-                eprintln!("    {}", line);
-                let pad = " ".repeat(pos.col.saturating_sub(1) as usize);
-                eprintln!("    {}^", pad);
-            }
-        }
-    }
-}
+mod mcp;
+
+// `report_error` lives in `brood::cli_support` — shared with `brood`.
+use brood::cli_support::report_error;
 
 const HELP: &str = "\
 nest — Brood project tooling (the project half of the brood/nest split, ADR-028)
 
 usage:
   nest new <name>   scaffold a new project (project.blsp + src/ + tests/)
-  nest run [args…]  run the project's entry point (set via :main in project.blsp;
+  nest run [--watch <file>]… [args…]
+                    run the project's entry point (set via :main in project.blsp;
                     defaults to module `main`, fn `main`). Extra args are passed
-                    to the entry fn as strings.
+                    to the entry fn as strings. `--watch <file>` (repeatable)
+                    spawns a reloader that re-`load`s <file> when it changes —
+                    hot-reload without source edits (std/reload.blsp).
   nest test         discover tests/**/*_test.blsp and run the suite once
   nest check        advisory type-check every .blsp under src/ + tests/
                     (exits non-zero on warnings — for CI)
   nest format       format every .blsp under src/ and tests/ in place
                     (use --check to exit non-zero on diffs instead of writing)
   nest doc [module] emit Markdown docs (whole project, or one named module)
+  nest mcp          serve the project over Model Context Protocol on stdio,
+                    so an agent (Claude Code etc.) can `eval`, lookup, format,
+                    expand, run tests, and read the canonical docs against
+                    *this* project's live image (ADR-036, docs/mcp.md). Errors
+                    out if cwd is not inside a Brood project.
 
 options:
   -j, --max-parallel N   cap concurrent spawned processes (test runs)
@@ -150,7 +147,7 @@ fn main() {
                 eprintln!("nest new: expected a project name, e.g. `nest new foobar`");
                 std::process::exit(2);
             });
-            let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+            let escaped = brood::introspect::escape_brood_string(name);
             let code = format!(
                 "(require 'project) (load-config) (new-project \"{}\")",
                 escaped
@@ -192,22 +189,61 @@ fn main() {
             run(&mut interp, &code);
         }
 
-        // `nest run [args…]` — run the project's entry point (ADR-020). The
-        // entry is configured via `:main` in project.blsp (a module symbol, or a
-        // `(module fn)` list) and defaults to module `main`, fn `main`. Extra
-        // positional args after `run` are passed to the entry as strings. The
-        // policy (find the project root, load it, resolve and apply the entry)
-        // lives in Brood (std/project.blsp); we just build the args list.
+        // `nest run [--watch <file>]… [args…]` — run the project's entry point
+        // (ADR-020). The entry is configured via `:main` in project.blsp (a
+        // module symbol, or a `(module fn)` list) and defaults to module `main`,
+        // fn `main`. Extra positional args after `run` are passed to the entry
+        // as strings. `--watch <file>` (repeatable, opt-in) pre-spawns a
+        // reloader from std/reload.blsp that re-`load`s <file> on every mtime
+        // bump — hot-reload without touching source. The policy (find the
+        // project root, load it, resolve and apply the entry) lives in Brood
+        // (std/project.blsp); we just build the args list and the reloader
+        // calls.
         "run" => {
-            let escaped_args = positional
+            let mut watch: Vec<String> = Vec::new();
+            let mut entry_args: Vec<String> = Vec::new();
+            let mut it = positional.iter().skip(1);
+            while let Some(a) = it.next() {
+                if a == "--watch" {
+                    match it.next() {
+                        Some(path) => watch.push(path.clone()),
+                        None => {
+                            eprintln!("nest run: --watch expects a file path");
+                            std::process::exit(2);
+                        }
+                    }
+                } else if let Some(path) = a.strip_prefix("--watch=") {
+                    watch.push(path.to_string());
+                } else {
+                    entry_args.push(a.clone());
+                }
+            }
+            let escaped_args = entry_args
                 .iter()
-                .skip(1)
-                .map(|a| format!("\"{}\"", a.replace('\\', "\\\\").replace('"', "\\\"")))
+                .map(|a| format!("\"{}\"", brood::introspect::escape_brood_string(a)))
                 .collect::<Vec<_>>()
                 .join(" ");
+            // Watchers go up *before* `run-project`: a slow / blocking entry
+            // is exactly when you want them already alive so you can fix the
+            // file. Same escaping rules as the args.
+            let watch_setup = if watch.is_empty() {
+                String::new()
+            } else {
+                let calls = watch
+                    .iter()
+                    .map(|p| {
+                        format!(
+                            "(reload-on-change \"{}\")",
+                            brood::introspect::escape_brood_string(p)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!("(require 'reload) {}", calls)
+            };
             let code = format!(
-                "(require 'project) (load-config) (run-project (list {}))",
-                escaped_args
+                "(require 'project) (load-config) {} (run-project (list {}))",
+                watch_setup, escaped_args
             );
             run(&mut interp, &code);
         }
@@ -221,12 +257,46 @@ fn main() {
         "doc" => {
             let code = match positional.get(1) {
                 Some(name) => {
-                    let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+                    let escaped = brood::introspect::escape_brood_string(name);
                     format!("(require 'docs) (generate-docs \"{}\")", escaped)
                 }
                 None => "(require 'docs) (generate-docs)".to_string(),
             };
             run(&mut interp, &code);
+        }
+
+        // `nest mcp` — speak the Model Context Protocol over stdio, scoped to
+        // this project (ADR-036). Strictly per-project: bootstrap walks up to
+        // `project.blsp` and errors loudly if there isn't one, matching the
+        // shape of `nest test` / `nest doc`. After the bootstrap, all protocol
+        // policy lives in `crates/nest/src/mcp.rs` — `main_loop` reads framed
+        // JSON-RPC, dispatches to the tool catalogue Brood produces from
+        // `(mcp-tools)`, and never returns until the peer closes the channel
+        // or sends `exit`. The dispatcher's transport is `stdout`, so any
+        // diagnostic we emit must go to **stderr** to avoid corrupting the
+        // protocol stream.
+        "mcp" => {
+            // Pre-load the project image — same shape the LSP uses
+            // (`bootstrap_project`, `lsp/main.rs:329`) so cross-module names
+            // and the test framework are resolvable from inside an `eval`
+            // tool call. `project--find-root` raises if there's no project
+            // here, which surfaces as a clean GNU error + exit-1 via `run`.
+            let bootstrap = r#"
+                (require 'project)
+                (load-config)
+                (let (root (project--find-root (cwd)))
+                  (when (nil? root)
+                    (error "nest mcp: not in a Brood project (no project.blsp found from " (cwd) ")"))
+                  (project-setup root)
+                  (project-load-sources root)
+                  (require 'test)
+                  (require 'format))
+            "#;
+            run(&mut interp, bootstrap);
+            if let Err(e) = mcp::run(&mut interp) {
+                eprintln!("nest mcp: {e}");
+                std::process::exit(1);
+            }
         }
 
         other => {
@@ -260,42 +330,8 @@ fn run_for_value(interp: &mut Interp, code: &str) -> brood::core::value::Value {
 }
 
 /// Split CLI args into positional words (the subcommand + its operands) and an
-/// optional concurrency cap. Accepts `-j N`, `--jobs N`, `--max-parallel N`,
-/// and the `=`/joined forms (`-jN`, `--max-parallel=N`). A bad value is a hard
-/// error so a typo never silently runs unbounded.
+/// optional concurrency cap. See `brood::cli_support::parse_jobs_args` for the
+/// accepted forms.
 fn parse_args(args: Vec<String>) -> (Vec<String>, Option<usize>) {
-    let mut positional = Vec::new();
-    let mut max_parallel = None;
-    let mut i = 0;
-    while i < args.len() {
-        let a = &args[i];
-        let value = if a == "-j" || a == "--jobs" || a == "--max-parallel" {
-            i += 1;
-            args.get(i).cloned()
-        } else if let Some(v) = a
-            .strip_prefix("--max-parallel=")
-            .or_else(|| a.strip_prefix("--jobs="))
-        {
-            Some(v.to_string())
-        } else if let Some(v) = a
-            .strip_prefix("-j")
-            .filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_digit()))
-        {
-            Some(v.to_string())
-        } else {
-            positional.push(a.clone());
-            None
-        };
-        if let Some(v) = value {
-            match v.parse::<usize>() {
-                Ok(n) => max_parallel = Some(n),
-                Err(_) => {
-                    eprintln!("nest: {} expects a number, got {:?}", a, v);
-                    std::process::exit(2);
-                }
-            }
-        }
-        i += 1;
-    }
-    (positional, max_parallel)
+    brood::cli_support::parse_jobs_args("nest", args)
 }

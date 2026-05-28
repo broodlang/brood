@@ -264,10 +264,24 @@ the `nest new` scaffolder."
     (= (substring s 0 1) ch) true
     else (str-contains? (substring s 1 (string-length s)) ch)))
 
-;; A project name must be non-empty and free of path separators / spaces, so it
-;; names a single new folder in the current directory.
+;; A project name must be a single, fresh path component in the current
+;; directory: non-empty, no path separators or whitespace, no NUL, and not
+;; one of the path-traversal / hidden / flag-shaped names (`.`, `..`, leading
+;; `.`/`-`/`~`/`\`). This blocks `nest new ..` and friends from scaffolding
+;; into a parent or hidden directory — see CLAUDE.md / docs/devlog.md.
 (defn project--valid-name? (nm)
-  (and (> (string-length nm) 0) (not (str-contains? nm "/")) (not (str-contains? nm " "))))
+  (and (> (string-length nm) 0)
+       (not (= nm "."))
+       (not (= nm ".."))
+       (not (str-contains? nm "/"))
+       (not (str-contains? nm "\\"))
+       (not (str-contains? nm " "))
+       (not (str-contains? nm "\t"))
+       (not (str-contains? nm "\n"))
+       (not (str-contains? nm "\0"))
+       (not (= (substring nm 0 1) "."))
+       (not (= (substring nm 0 1) "-"))
+       (not (= (substring nm 0 1) "~"))))
 
 ;; --- file templates (the starter skeleton) ---
 (defn project--manifest-template (nm)

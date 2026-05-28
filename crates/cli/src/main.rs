@@ -28,21 +28,8 @@ use brood::Interp;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 
-/// Print an error as a GNU `FILE:LINE:COL: message` line (editor-parseable),
-/// followed — when the file and position are known — by the offending source
-/// line and a caret under the column. See `docs/tooling.md`.
-fn report_error(e: &LispError) {
-    eprintln!("{}", e.located());
-    if let (Some(file), Some(pos)) = (&e.file, e.pos) {
-        if let Ok(src) = std::fs::read_to_string(file) {
-            if let Some(line) = src.lines().nth(pos.line.saturating_sub(1) as usize) {
-                eprintln!("    {}", line);
-                let pad = " ".repeat(pos.col.saturating_sub(1) as usize);
-                eprintln!("    {}^", pad);
-            }
-        }
-    }
-}
+// `report_error` lives in `brood::cli_support` — shared with `nest`.
+use brood::cli_support::report_error;
 
 const HELP: &str = "\
 brood — the Brood language (the language half of the brood/nest split, ADR-028)
@@ -117,48 +104,10 @@ fn main() {
     }
 }
 
-/// Split CLI args into file paths and an optional concurrency cap. Accepts
-/// `-j N`, `--jobs N`, `--max-parallel N`, and the `=`/joined forms (`-jN`,
-/// `--max-parallel=N`). A bad value is a hard error so a typo never silently
-/// runs unbounded.
+/// Split CLI args into file paths and an optional concurrency cap.
+/// See `brood::cli_support::parse_jobs_args` for the accepted forms.
 fn parse_args(args: Vec<String>) -> (Vec<String>, Option<usize>) {
-    let mut files = Vec::new();
-    let mut max_parallel = None;
-    let mut i = 0;
-    while i < args.len() {
-        let a = &args[i];
-        let value = if a == "-j" || a == "--jobs" || a == "--max-parallel" {
-            i += 1;
-            args.get(i).cloned()
-        } else if let Some(v) = a
-            .strip_prefix("--max-parallel=")
-            .or_else(|| a.strip_prefix("--jobs="))
-        {
-            Some(v.to_string())
-        } else if let Some(v) = a
-            .strip_prefix("-j")
-            // Only the joined `-jN` form; otherwise a file like `-justfile` would
-            // be misread as a flag. The explicit `=`/spaced forms still error on
-            // a bad value above.
-            .filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_digit()))
-        {
-            Some(v.to_string())
-        } else {
-            files.push(a.clone());
-            None
-        };
-        if let Some(v) = value {
-            match v.parse::<usize>() {
-                Ok(n) => max_parallel = Some(n),
-                Err(_) => {
-                    eprintln!("brood: {} expects a number, got {:?}", a, v);
-                    std::process::exit(2);
-                }
-            }
-        }
-        i += 1;
-    }
-    (files, max_parallel)
+    brood::cli_support::parse_jobs_args("brood", args)
 }
 
 /// `brood --test <file>...`: load each file (registering its cases via the

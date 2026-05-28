@@ -69,9 +69,18 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
     'tail: loop {
         match expr {
             Value::Sym(s) => {
-                return heap.env_get(env, s).ok_or_else(|| {
-                    LispError::unbound(format!("unbound symbol: {}", value::symbol_name(s)))
-                });
+                // Tag the symbol's recorded source position on an unbound
+                // error — so e.g. a `(let (a 1) zzz)` whose `zzz` is unbound
+                // points at the *symbol's* line rather than the enclosing
+                // top-level form's start. The `or_form_pos` lookup runs only
+                // on the error path.
+                let expr_sym = expr;
+                return heap
+                    .env_get(env, s)
+                    .ok_or_else(|| {
+                        LispError::unbound(format!("unbound symbol: {}", value::symbol_name(s)))
+                    })
+                    .map_err(|e| e.or_form_pos(heap, expr_sym));
             }
             Value::Vector(id) => {
                 let items = heap.vector(id).to_vec();
@@ -126,8 +135,16 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
         if let Value::Sym(s) = head {
             match special_name(s) {
                 "quote" => {
-                    let args = heap.list_to_vec(rest)?;
-                    return Ok(args.into_iter().next().unwrap_or(Value::Nil));
+                    // `(quote x)` returns x literally — but only x; reject
+                    // `(quote a b)` rather than silently dropping the tail.
+                    let (form, r) = uncons(heap, rest);
+                    if !matches!(r, Value::Nil) {
+                        return Err(LispError::arity(
+                            "quote: expected exactly one argument",
+                        )
+                        .or_form_pos(heap, expr));
+                    }
+                    return Ok(form);
                 }
                 "if" => {
                     // (if test then else?) — read the operands straight off the
@@ -366,13 +383,36 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
             }
         }
 
-        match callee {
+        // Inline `apply` unfolding: when the callee is the `apply` builtin,
+        // splice the trailing sequence into `argv` and dispatch the real
+        // callee here — instead of going through `call_native(apply)` →
+        // `apply_builtin` → `eval::apply` (which would add ~4 Rust frames per
+        // chained `(apply f …)` and defeat TCO for `apply`-driven recursion).
+        // Looped so nested `(apply apply (list f xs))` is also flattened.
+        // A mis-arity (`(apply f)`) is left for `call_native` to flag with the
+        // canonical "expected at least 2 arguments" message.
+        let mut cur_callee = callee;
+        let mut cur_argv = argv;
+        while let Value::Native(id) = cur_callee {
+            if heap.native(id).name != "apply" || cur_argv.len() < 2 {
+                break;
+            }
+            let last = cur_argv.pop().expect("argv non-empty (checked above)");
+            let real = cur_argv.remove(0);
+            cur_argv.extend(
+                heap.seq_items(last)
+                    .map_err(|e| e.or_form_pos(heap, call_form))?,
+            );
+            cur_callee = real;
+        }
+
+        match cur_callee {
             Value::Native(id) => {
-                return call_native(heap, id, &argv, env)
+                return call_native(heap, id, &cur_argv, env)
                     .map_err(|e| e.or_form_pos(heap, call_form));
             }
             Value::Fn(id) => {
-                let scope = bind_params(heap, id, &argv)
+                let scope = bind_params(heap, id, &cur_argv)
                     .map_err(|e| e.or_form_pos(heap, call_form))?;
                 let body_len = heap.closure(id).body.len();
                 if body_len == 0 {
@@ -475,7 +515,12 @@ fn bind_params(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> Result<EnvId, 
             heap.env_define(scope, name, argv[idx]);
             idx += 1;
         } else {
-            let value = eval(heap, default_form, scope)?;
+            // Tag the default-form's source position on any error from its
+            // evaluation, so a diagnostic from inside an `&optional` default
+            // points at the default's line (not at the enclosing top-level
+            // form's start).
+            let value = eval(heap, default_form, scope)
+                .map_err(|e| e.or_form_pos(heap, default_form))?;
             heap.env_define(scope, name, value);
         }
     }
