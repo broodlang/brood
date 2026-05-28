@@ -195,6 +195,25 @@ pub(super) fn take_resume() -> Option<ResumeSlot> {
     RESUME_SLOT.with(|s| s.borrow_mut().take())
 }
 
+/// Visit the current resume slot's live `Value`s — callee + each arg — by
+/// calling `visit` once per value. The GC safepoint uses this to keep the
+/// supervisor's recovery target alive: without it, a tracing collection
+/// between the eval-loop's `record_resume` write and the supervisor's
+/// `take_resume` read could free the closure / vector / pair the slot
+/// points at, and the supervisor would call back into a reused slot.
+/// Zero-allocation visit so the safepoint stays in the hot path.
+#[inline]
+pub fn for_each_resume_root(mut visit: impl FnMut(crate::core::value::Value)) {
+    RESUME_SLOT.with(|s| {
+        if let Some(slot) = s.borrow().as_ref() {
+            visit(slot.callee);
+            for &v in slot.argv.iter() {
+                visit(v);
+            }
+        }
+    });
+}
+
 /// Read-only snapshot of the slot for save/restore around a coroutine
 /// suspend. Paired with [`resume_slot_set`] in the same pattern as
 /// `gc_block_save` / `gc_block_set`.

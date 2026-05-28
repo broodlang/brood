@@ -90,6 +90,7 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
 ;; Markdown for the module loaded from `path`: snapshot the globals, load the
 ;; file, and attribute every newly-bound name to it.
 (defn document-file (path)
+  "The Markdown documentation for the module in the file at `path`: load it and document every global it newly binds (each with its arglist and docstring)."
   (let (src (slurp path) before (global-names))
     (load path)
     (docs--render (docs--basename path) (docs--leading-doc src) (docs--added before (global-names)))))
@@ -98,6 +99,7 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
 ;; (baked-in or on *load-path*), snapshot the globals, `require` it, and document
 ;; the names it added.
 (defn document-module (modname)
+  "The Markdown documentation for the module named `modname` (a symbol or string), resolved baked-in or on `*load-path*`. Errors if it can't be found."
   (let (key (name modname) src (docs--source key))
     (when (nil? src) (error "doc: cannot find module '" key "'"))
     (let (before (global-names))
@@ -107,6 +109,7 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
 ;; Markdown for the whole project: find it from the cwd, put its sources on the
 ;; load-path, and document each source file in turn.
 (defn document-project ()
+  "The Markdown documentation for the whole project (every source file under it), found from the cwd. Errors if not in a project."
   (require 'project)
   ; project--find-root / --collect-sources / project-setup
   (let (root (project--find-root (cwd)))
@@ -116,9 +119,7 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
           files (fold (fn (acc d) (append acc (project--collect-sources d))) nil dirs))
       (fold (fn (acc f) (str acc (document-file f) "\n")) "" files))))
 
-;; (generate-docs)        — document the whole project, to stdout.
-;; (generate-docs name)   — document one module by name, to stdout.
-;; The policy behind `nest doc` (the CLI passes the optional module name through).
 (defn generate-docs (& args)
+  "Print Markdown documentation to stdout: the whole project with no args, or a single module given its name. The policy behind `nest doc`."
   (if (empty? args) (println (document-project)) (println (document-module (first args)))))
 

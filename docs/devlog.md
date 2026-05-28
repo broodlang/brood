@@ -4829,6 +4829,19 @@ already runs in its own green process (multi-core coverage); the files' existing
 `:isolated` blocks carry the explicit spawn/send/fan-in coverage. `docs/language.md`
 Maps table + the Lists/Maps builtin lists updated.
 
+**Docstrings — public API pass.** Audited every Brood `defn`/`defmacro` in
+`std/` for a docstring (via runtime `(doc fn-value)`, the same lookup `nest doc`
+and LSP hover use). The prelude's public functions were already complete; the
+gaps were the std *modules'* public entry points. Documented the user/tool-facing
+surface (scoped to public API — `--` helpers stay private by convention):
+`test`'s framework macros (`describe` / `test` / `deftest` / `is` / `refute` /
+`assert=` / `assert-error` / `error-of`) and `run-tests` / `run-tests-structured`;
+`project`'s `check-project{,-structured,-sources}` / `run-project{,-tests,
+-tests-structured}` / `config` / `load-config` / `new-project`; `docs`'s
+`document-{file,module,project}` / `generate-docs`; and the prelude's `defn`
+macro itself. `format`/`mcp`/`hatch`/`reload` public surfaces already had
+docstrings. Verified all 24 now return a docstring from `doc`.
+
 **Verified.** `maps_test` + `sequence_test` run green in isolation —
 **113/113** pass. Targeted load-and-run because the **full** `cargo test`
 suite currently SIGSEGVs in `tests/suite.rs` (a green-process stack overflow in
@@ -4981,3 +4994,48 @@ segfault is **pre-existing parallel WIP**, not from this change — confirmed
 by running with supervision off (the default), where the now-uncaught
 `:boom` throws print `process N died: …` immediately rather than being
 caught + retried.
+
+---
+
+## 2026-05-28 (cont.) — LSP Tier 2: references, rename, semantic tokens, polish
+
+**Goal.** From editor work, a batch of LSP improvements: the remaining Tier-2
+features plus two reported gaps — goto on a `require`'d module name, and hover
+docs not showing.
+
+**Built (all over the existing CST + scope substrate, no new analysis layer).**
+- **`require`-target goto** — `definition.rs` detects a `(require 'foo)` call
+  context and resolves the module via `introspect::module_file` (new): runs the
+  prelude's `require--find "foo.blsp" *load-path*` against the bootstrapped
+  project's load-path, lands at the file top. (`'hello` → `src/hello.blsp`.)
+- **Find-references + document-highlight** (`references.rs`) — both off
+  `ScopeTree::references`; a local stays scoped, a document global spans the file.
+- **Rename + prepareRename** (`rename.rs`) — same engine → a single-file
+  `WorkspaceEdit`; new name validated through `syntax::atom::classify`
+  (rejects numbers/keywords/delimited junk). Single-file by design (no
+  cross-file reference index — ADR-031).
+- **Semantic tokens** (`semantic_tokens.rs`, `semanticTokens/full`) — CST + scope
+  walk: `def`-family head → keyword, defined name → function+`definition`, locals
+  → variable, call heads → function, `:kw` → enumMember, strings/numbers/comments
+  classified; multi-line tokens split per line; delta-encoded.
+- **Completion polish** — offers the special forms / core macros (not in the
+  global table, so previously never suggested), kinds split keyword/function/
+  variable, and `completionItem/resolve` fills signature (`detail`) + docstring
+  lazily so the list stays cheap.
+- **Finer diagnostic spans** — `refine_diagnostic_range` narrows an
+  `unbound symbol: X` squiggle to X's token (else the call operator), instead of
+  a 1-char marker at the form start.
+- **publishDiagnostics version** — `Document` now carries the editor version and
+  echoes it, so clients can drop stale diagnostics.
+- **Hover docs (client side)** — `brood.el` sets `eldoc-documentation-strategy`
+  to compose + `eldoc-echo-area-use-multiline-p t` in `brood-mode`, so the
+  docstring the server already returns isn't hidden behind signature help / cut
+  off by the echo area (the reported "two `(println & xs)` lines, no docs").
+
+**Verified.** Drove the real `brood-lsp` over stdio end-to-end: all nine
+providers advertised; references=3 and rename→3 edits on a def; 11 semantic
+tokens for a sample; completion offers `let` + `map`, resolve(map)→`(map f
+coll)`; unbound `frobnicate` squiggle spans the exact token; diagnostics carry
+`version`. `brood-lsp` 51/51, `brood --lib` 123/123; `brood.el` byte-compiles
+clean. (The unrelated `supervisor_retries…` failure in `tests/basic.rs` — the
+concurrent scheduler WIP — is still there and still not ours.)

@@ -157,6 +157,7 @@ the `nest new` scaffolder.")
 ;; Honors `BROOD_NO_CHECK=1` the same way `check-project` does: returns
 ;; an empty list under the flag.
 (defn check-project-structured ()
+  "Advisory type-check the whole project, returning a list of `{:file :line :col :message}` diagnostic maps (one per warning) instead of printing. Returns nil under `BROOD_NO_CHECK=1`. Errors if not in a project. Backs the `nest mcp` `check` tool."
   (let (root (project--find-root (cwd)))
     (when (nil? root)
       (error "check-project-structured: not in a Brood project (no project.blsp found from " (cwd) ")"))
@@ -168,6 +169,7 @@ the `nest new` scaffolder.")
             (project--all-files root)))))
 
 (defn check-project ()
+  "Advisory type-check the whole project (every source + test file), printing GNU-style `FILE:LINE:COL:` warnings to stderr. Errors if not in a Brood project. Backs `nest check`."
   (let (root (project--find-root (cwd)))
     (when (nil? root)
       (error "check-project: not in a Brood project (no project.blsp found from " (cwd) ")"))
@@ -180,6 +182,7 @@ the `nest new` scaffolder.")
 ;; do — so checking them there would emit spurious "unbound symbol" warnings.
 ;; `nest test` keeps using `check-project` (full coverage; `test` is loaded).
 (defn check-project-sources ()
+  "Like `check-project`, but checks only the project's source paths (skips `tests/`, whose files reference test-framework macros). Used by `nest run`'s pre-flight."
   (let (root (project--find-root (cwd)))
     (when (nil? root)
       (error "check-project-sources: not in a Brood project (no project.blsp found from " (cwd) ")"))
@@ -197,6 +200,7 @@ the `nest new` scaffolder.")
 ;; `(run-tests)`, so the checker sees every source + test file once
 ;; cross-module names are resolvable through the loaded heap.
 (defn run-project-tests (& opts)
+  "Discover, load (register-only), and run the project's whole test suite once, from the cwd. `opts` pass through to `run-tests` (e.g. `:slow`). Runs an advisory `check-project` pre-flight. Errors if not in a project or if any test fails. Backs `nest test`."
   (let (root (project--find-root (cwd)))
     (when (nil? root)
       (error "run-project-tests: not in a Brood project (no project.blsp found from " (cwd) ")"))
@@ -218,6 +222,7 @@ the `nest new` scaffolder.")
 ;; printed output + a throw on failure. Backs the `nest mcp` `run-tests`
 ;; tool (step 1c-b).
 (defn run-project-tests-structured (& opts)
+  "Like `run-project-tests`, but returns the structured result `{:total :passed :failed :ms :results [...]}` instead of printing and raising on failure. Backs the `nest mcp` `run-tests` tool."
   (let (root (project--find-root (cwd)))
     (when (nil? root)
       (error "run-project-tests-structured: not in a Brood project (no project.blsp found from " (cwd) ")"))
@@ -237,6 +242,7 @@ the `nest new` scaffolder.")
 ;; bare manifest and a `(defn main () ...)` in src/main.blsp. Errors if there's
 ;; no project here, or if the entry fn isn't defined or callable.
 (defn run-project (args)
+  "Run the project's entry point (default module `main`, fn `main`; overridable via the manifest's `:main`), passing `args` (a list of CLI string arguments). Runs an advisory sources-only pre-flight. Errors if not in a project or the entry fn is missing/uncallable. Backs `nest run`."
   (let (root (project--find-root (cwd)))
     (when (nil? root)
       (error "run-project: not in a Brood project (no project.blsp found from " (cwd) ")"))
@@ -262,8 +268,8 @@ the `nest new` scaffolder.")
 (def *config-git-init* false)
 ; nest new: run `git init` in the new project?
 
-;; The (config ...) form for the user config; sets only the keys it's given.
 (defn config (& opts)
+  "Set user-level tooling preferences — the form the user config file (`~/.config/brood/config.blsp`) contains. Recognized keys: `:git-init` (whether `nest new` runs `git init`). Sets only the keys given; returns nil."
   (let (gi (plist-get opts :git-init)) (unless (nil? gi) (def *config-git-init* gi)))
   nil)
 
@@ -283,6 +289,7 @@ the `nest new` scaffolder.")
 ;; load it. Called by the `brood` subcommands, so a tool use always leaves an
 ;; editable config behind.
 (defn load-config ()
+  "Ensure the user config (`~/.config/brood/config.blsp`) exists — writing a documented default on first use — then load it. Called by the `nest` subcommands."
   (let (p (config--path))
     (unless (file-exists? p)
       (make-dir (config--dir))
@@ -428,6 +435,7 @@ the `nest new` scaffolder.")
 ;; self-contained for AI-assisted editing. Errors on a bad name; an existing
 ;; folder is reused (its scaffold files overwritten), not rejected.
 (defn new-project (nm)
+  "Scaffold a new project named `nm` (or `\".\"` for the current directory, taking the project name from the cwd's basename): a `main` + `hello` module pair with paired tests, a `project.blsp` manifest, and the baked-in language guide. Existing scaffold files are overwritten, not rejected. Backs `nest new`."
   ;; `nest new .` scaffolds into the current directory (cargo init's shape);
   ;; the project name is then the cwd's basename. Both forms — `nest new .` and
   ;; `nest new foobar` — *overwrite* existing scaffold files rather than

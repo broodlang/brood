@@ -15,7 +15,9 @@
 ;; `defn` itself: forwards everything after the name to `fn`, so it inherits
 ;; both single-clause — (defn f (x) ...) => (def f (fn (x) ...)) — and the
 ;; multi-clause pattern form — (defn f ((0) 1) ((n) ...)) => (def f (fn ((0) 1) ((n) ...))).
-(defmacro defn (name & clauses) `(def ~name (fn ~@clauses)))
+(defmacro defn (name & clauses)
+  "Define a global function `name`, forwarding the clauses to `fn` — so it supports both the single-clause form `(defn f (x) body...)` and multi-clause pattern dispatch."
+  `(def ~name (fn ~@clauses)))
 
 ;; ---- logic ----
 (defn not (x)

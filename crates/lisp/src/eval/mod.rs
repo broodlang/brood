@@ -110,11 +110,21 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
         //   • `expr` / `env` are passed as roots,
         //   • the dynamic stack and the explicit root stack are scanned by
         //     `collect` itself,
+        //   • the **resume slot** (ADR-039) is rooted via
+        //     `for_each_resume_root` — it holds the callee + argv the
+        //     supervisor will retry with, and without rooting them, a
+        //     collection here could free the closure the slot points at,
+        //     leaving the supervisor to call back into a reused slot
+        //     (silently "succeeding" instead of retrying — the bug that
+        //     made `(churn 50001)` give up after 4 retries instead of 11),
         //   • no other Rust frame holds an unrooted LOCAL transient (the
         //     `GC_BLOCK == 1` invariant — see `docs/memory-model.md`).
         // Cost on inner-eval iterations: one TLS read + compare (fail-fast).
         if crate::process::gc_block_depth() == 1 && heap.gc_due() {
-            heap.collect(&[expr], &[env]);
+            let mut roots: SmallVec<[Value; 10]> = SmallVec::new();
+            roots.push(expr);
+            crate::process::for_each_resume_root(|v| roots.push(v));
+            heap.collect(&roots, &[env]);
         }
         // Reduction-counted preemption: bound the work a process does before it
         // yields its worker (fairness — a CPU-bound process can't monopolise a

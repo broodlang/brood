@@ -1,7 +1,8 @@
 //! `nest mcp` — the Model Context Protocol dispatcher for a Brood project.
 //!
-//! A synchronous JSON-RPC loop over stdio (Content-Length framing, the same
-//! shape LSP uses) scoped strictly to a single project (ADR-036, ADR-028).
+//! A synchronous JSON-RPC loop over stdio (newline-delimited JSON — the MCP
+//! stdio transport, *not* LSP's `Content-Length` framing) scoped strictly to a
+//! single project (ADR-036, ADR-028).
 //! The caller in `main.rs` walks up to `project.blsp`, builds + bootstraps an
 //! [`Interp`], and hands it here; `run` owns the protocol from that point on.
 //!
@@ -70,56 +71,41 @@ pub fn run(interp: &mut Interp) -> Result<(), Box<dyn Error>> {
 }
 
 // ============================================================================
-// Transport — Content-Length framing + JSON-RPC envelope
+// Transport — newline-delimited JSON (MCP stdio) + JSON-RPC envelope
 // ============================================================================
 
-/// Read one framed JSON message. Returns `Ok(None)` at clean EOF (peer closed
-/// the channel — exit cleanly). A header without a `Content-Length` or a body
-/// that doesn't parse is `InvalidData` (the protocol is broken, not a soft
-/// EOF, so propagate and let the caller fail loudly).
+/// Read one **newline-delimited** JSON message — the MCP stdio transport: one
+/// JSON-RPC object per line, no framing headers. (This is *not* LSP, which uses
+/// `Content-Length` headers; using that here is why a real MCP client — Claude
+/// Code — could never complete the `initialize` handshake.) Returns `Ok(None)`
+/// at clean EOF (peer closed the channel — exit cleanly). Blank lines are
+/// tolerated as separators; a non-empty line that doesn't parse as JSON is
+/// `InvalidData` (the protocol is broken — propagate and fail loudly).
 fn read_message<R: BufRead>(r: &mut R) -> std::io::Result<Option<Json>> {
-    let mut content_length: Option<usize> = None;
     let mut line = String::new();
     loop {
         line.clear();
         let n = r.read_line(&mut line)?;
         if n == 0 {
-            // EOF *between* messages is clean — that's the "peer hung up"
-            // exit. EOF *mid-header* (header started but no blank line) is
-            // not distinguishable here without more bookkeeping; treat any
-            // top-of-loop EOF as clean and let downstream handle a truncated
-            // header by failing the body read instead.
-            return Ok(None);
+            return Ok(None); // EOF between messages — peer hung up
         }
-        let trimmed = line.trim_end_matches(['\r', '\n']);
+        let trimmed = line.trim();
         if trimmed.is_empty() {
-            break; // end of headers
+            continue; // tolerate stray blank lines between messages
         }
-        if let Some(v) = trimmed.strip_prefix("Content-Length:") {
-            content_length = v.trim().parse().ok();
-        }
-        // Any other header (Content-Type, etc.) is ignored — MCP doesn't
-        // require us to validate them.
+        let msg: Json = serde_json::from_str(trimmed)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        return Ok(Some(msg));
     }
-    let len = content_length.ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "missing or malformed Content-Length",
-        )
-    })?;
-    let mut buf = vec![0u8; len];
-    r.read_exact(&mut buf)?;
-    let msg: Json = serde_json::from_slice(&buf)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    Ok(Some(msg))
 }
 
-/// Write one framed JSON message. The framing is `Content-Length: N\r\n\r\n`
-/// followed by `N` bytes of body — same as LSP.
+/// Write one **newline-delimited** JSON message: the compact body followed by a
+/// single `\n` (the MCP stdio transport). The body must contain no embedded
+/// newlines, which `serde_json`'s compact serialization guarantees.
 fn write_message<W: Write>(w: &mut W, msg: &Json) -> std::io::Result<()> {
     let body = serde_json::to_vec(msg)?;
-    write!(w, "Content-Length: {}\r\n\r\n", body.len())?;
     w.write_all(&body)?;
+    w.write_all(b"\n")?;
     w.flush()
 }
 
@@ -702,18 +688,19 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
-    /// Build a Content-Length-framed buffer from a list of JSON messages.
+    /// Build a newline-delimited JSON buffer from a list of messages (the MCP
+    /// stdio framing — one compact object per line).
     fn frame(messages: &[Json]) -> Vec<u8> {
         let mut buf = Vec::new();
         for m in messages {
             let body = serde_json::to_vec(m).unwrap();
-            write!(buf, "Content-Length: {}\r\n\r\n", body.len()).unwrap();
             buf.extend_from_slice(&body);
+            buf.push(b'\n');
         }
         buf
     }
 
-    /// Parse a server's stream of framed JSON responses out of a `Vec<u8>`.
+    /// Parse a server's stream of newline-delimited JSON responses out of a `Vec<u8>`.
     fn unframe(output: &[u8]) -> Vec<Json> {
         let mut r = Cursor::new(output);
         let mut out = Vec::new();
@@ -738,6 +725,29 @@ mod tests {
 
     fn notif(method: &str, params: Json) -> Json {
         json!({ "jsonrpc": "2.0", "method": method, "params": params })
+    }
+
+    #[test]
+    fn transport_is_newline_delimited_json_not_content_length() {
+        // Regression: the MCP stdio transport is one JSON object per line. A real
+        // client (Claude Code) frames this way — if we revert to LSP-style
+        // `Content-Length` headers, `initialize` never completes. So assert the
+        // raw bytes: a bare newline-delimited request parses, and a
+        // `Content-Length:` header line is *not* valid JSON (it errors, proving
+        // we no longer treat it as framing).
+        let line = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n";
+        let mut r = Cursor::new(&line[..]);
+        let msg = read_message(&mut r).unwrap().expect("a message");
+        assert_eq!(msg["method"], "ping");
+
+        // The output side emits compact body + a single trailing newline.
+        let mut out = Vec::new();
+        write_message(&mut out, &json!({"ok": true})).unwrap();
+        assert_eq!(out, b"{\"ok\":true}\n");
+
+        // A leftover `Content-Length:` header is just a non-JSON line → error.
+        let mut r = Cursor::new(&b"Content-Length: 17\r\n"[..]);
+        assert!(read_message(&mut r).is_err(), "header must not be accepted as a message");
     }
 
     #[test]

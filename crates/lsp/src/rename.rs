@@ -102,7 +102,7 @@ mod tests {
     #[test]
     fn renames_all_occurrences_of_a_global() {
         // def + two calls = three edits.
-        assert_eq!(rename_at("(defn f (x) x)\n(f 1)\n(f 2)", "defn f", "g"), Some(3));
+        assert_eq!(rename_at("(defn f (x) x)\n(f 1)\n(f 2)", "f (x)", "g"), Some(3));
     }
 
     #[test]

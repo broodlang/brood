@@ -74,7 +74,7 @@ mod tests {
     #[test]
     fn finds_every_use_of_a_document_global() {
         // `f` is defined once and called twice → three occurrences.
-        let n = ref_count("(defn f (x) (* x x))\n(f 1)\n(f 2)", "defn f");
+        let n = ref_count("(defn f (x) (* x x))\n(f 1)\n(f 2)", "f (x)");
         assert_eq!(n, 3);
     }
 

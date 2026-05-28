@@ -131,8 +131,8 @@ docs/testing.md for the full guide.")
     (fold (fn (_ t) (add-unit! :parallel group (list t))) nil tests)
     (add-unit! mode group tests)))
 
-;; (describe "group" [:serial | :isolated] body...) — register a group of tests.
 (defmacro describe (group & forms)
+  "Register a group of tests: `(describe \"name\" [:serial | :isolated] body...)`. Tests run in parallel by default; `:serial` runs them sequentially in one process, `:isolated` each against a private copy of the globals."
   (let (mode (cond
                (= (first forms) :isolated) :isolated
                (= (first forms) :serial) :serial
@@ -154,14 +154,16 @@ docs/testing.md for the full guide.")
 ;; test, so a crashing test can't hang the runner (a dead worker never sends, and
 ;; `receive` would block forever). The thunk returns the failure list (empty = pass).
 (defmacro test (name & forms)
+  "Register one test: `(test \"name\" [:isolated] body...)`. Each body form is checked independently, so one test can report several assertion failures."
   (let (iso (= (first forms) :isolated)
         body (if iso (rest forms) forms)
         thunks (map (fn (f) (list 'fn nil f)) body))
     ; each form -> (fn () form)
     `(register-test! ~name (fn () (test--run (list ~@thunks) nil)) ~iso)))
 
-;; (deftest name body...) — a single test named by a symbol, no group.
-(defmacro deftest (name & body) `(test (str (quote ~name)) ~@body))
+(defmacro deftest (name & body)
+  "Register a single test named by the (symbol) `name`, outside any `describe` group."
+  `(test (str (quote ~name)) ~@body))
 
 ;; --- assertions --------------------------------------------------------------
 ;; Macros, not functions: on failure each THROWS a tagged failure record (via
@@ -178,14 +180,15 @@ docs/testing.md for the full guide.")
 ;; `detail-lines` is a list of "label: value" strings. The reporter turns each
 ;; into a clickable anchor line plus its indented fields (docs/tooling.md).
 (defmacro is (expr)
+  "Assert that `expr` is truthy; on failure record the source expression and its actual value."
   (let (v (gensym "v") loc (fail-loc expr))
     `(let (~v ~expr)
        (unless ~v
          (test--fail (quote ~loc)
            (list (str "assert: " (pr-str (quote (is ~expr)))) (str "actual: " (pr-str ~v))))))))
 
-;; (refute expr) — the negation of `is`: fail if expr is truthy.
 (defmacro refute (expr)
+  "Assert that `expr` is falsy — the negation of `is`."
   (let (v (gensym "v") loc (fail-loc expr))
     `(let (~v ~expr)
        (when ~v
@@ -194,6 +197,7 @@ docs/testing.md for the full guide.")
              (str "actual: " (pr-str ~v) "  (expected falsy)")))))))
 
 (defmacro assert= (actual expected)
+  "Assert that `actual` is structurally equal to `expected`; on failure record both values."
   (let (a (gensym "a") b (gensym "b") loc (fail-loc actual))
     `(let (~a ~actual ~b ~expected)
        (unless (= ~a ~b)
@@ -203,6 +207,7 @@ docs/testing.md for the full guide.")
              (str "expect: " (pr-str ~b))))))))
 
 (defmacro assert-error (& body)
+  "Assert that evaluating `body` raises an error; fails if it completes normally."
   ;; Quote the body for the message: the lone form if there's one, else (do …).
   (let (form (if (= (count body) 1) (first body) (cons 'do body))
         loc (fail-loc (if (= (count body) 1) (first body) nil)))
@@ -210,12 +215,11 @@ docs/testing.md for the full guide.")
        (test--fail (quote ~loc)
          (list (str "assert: " (pr-str (quote (assert-error ~form)))) "actual: no error was raised")))))
 
-;; (error-of body...) — evaluate body and yield the error it raised, so you can
-;; assert on the *output*: a built-in error comes back as its message string
-;; (e.g. "type error: expected a number"), a `(throw v)` as the value v itself.
-;; Returns nil when body completes without raising. Pair it with assert= to pin
-;; exact failure output:  (assert= (error-of (/ 1 0)) "runtime error: division by zero")
-(defmacro error-of (& body) `(try (do ~@body nil) (catch e e)))
+;; Pair it with assert= to pin exact failure output:
+;;   (assert= (error-of (/ 1 0)) "runtime error: division by zero")
+(defmacro error-of (& body)
+  "Evaluate `body` and return the error it raised — a built-in error as its message string, a `(throw v)` as the value `v` — or nil if `body` completes without raising."
+  `(try (do ~@body nil) (catch e e)))
 
 ;; --- small text/list helpers for the trace and slow-test output --------------
 (defn opt? (flag opts)
@@ -363,6 +367,7 @@ docs/testing.md for the full guide.")
 
 ;; --- entry point -------------------------------------------------------------
 (defn run-tests (& opts)
+  "Run every registered test once (the isolated tests first, then the parallel/serial pool), print a summary, and raise if any failed. Pass `:slow` to also report the slowest tests."
   (let (units (reverse *units*)
          par
          (filter (fn (u) (not= (first u) :isolated)) units)
@@ -407,6 +412,7 @@ docs/testing.md for the full guide.")
 ;; A test that uncaught-errored shows up as `:passed false` with a single
 ;; failure carrying the error text (consistent with the textual runner).
 (defn run-tests-structured (& opts)
+  "Like `run-tests`, but returns the result as data — `{:total :passed :failed :failed-assertions :ms :results [...]}` — instead of printing and raising. Backs the `nest mcp` `run-tests` tool."
   (let (units (reverse *units*)
         par   (filter (fn (u) (not= (first u) :isolated)) units)
         iso   (filter (fn (u) (= (first u) :isolated)) units)

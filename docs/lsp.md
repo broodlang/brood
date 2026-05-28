@@ -6,7 +6,10 @@ of the editor contract in [`tooling.md`](tooling.md): instead of every editor
 re-implementing "run the file and parse the GNU error lines", they speak LSP to
 one server that owns the language knowledge.
 
-> Status: **Tier 1 live, plus semantic diagnostics and cross-file goto.** Recorded as
+> Status: **Tiers 0–2 live** — diagnostics (syntactic + semantic), completion,
+> hover, signature help, document symbols, goto-definition (in-file, cross-module,
+> stdlib, and `require`-target), references, document-highlight, rename, and
+> semantic tokens. Recorded as
 > [ADR-025](decisions.md#adr-025--a-lossless-span-carrying-cst-for-tooling-separate-from-the-eval-value);
 > this document is the full plan it points to (the `types.md` ↔ ADR-024 pattern).
 > **Done:** Foundation A — the CST (`syntax::cst`) + shared lexical rules
@@ -44,10 +47,17 @@ one server that owns the language knowledge.
 > resolves `Free` in the buffer falls back to `(source-location 'name)` against
 > the bootstrapped image, including **into the standard library** (the prelude is
 > materialized to a cache file so its def sites are openable — see §Cross-file).
-> **Still next:** references, rename, semantic tokens (these want the
-> `scope::references` engine + token classification, not more substrate);
-> incremental sync; and finer diagnostic spans (the checker attributes a finding
-> to its top-level form's start, not the offending token).
+> **Tier 2 (also done):** find-references and document-highlight (both off
+> `scope::references`), rename with `prepareRename` (single-file
+> `WorkspaceEdit`, new name validated through the atom classifier), and
+> whole-document semantic tokens. Completion gained the special forms + lazy
+> `completionItem/resolve` (signature + docstring), diagnostics now carry the
+> document version, and an unbound-symbol squiggle narrows to the offending token
+> (`refine_diagnostic_range`).
+> **Still next:** cross-file references/rename (needs a workspace reference
+> index — references stay static per ADR-031); incremental document sync; range
+> / delta semantic-token requests; and finer spans for arity/type findings
+> (wants spans threaded through the checker, not just the call operator).
 
 ## Why a server, and why not brute-force it
 
@@ -278,6 +288,15 @@ each thing was defined as it loaded*, and `M-.` is a lookup against it. The plan
    CST-level source occurrences aggregated across files; "go to definition"
    becomes the name→site lookup.
 
+**Navigating to a `require`'d module.** Goto-definition on the module name in
+`(require 'foo)` doesn't go through the def-site table (the feature name binds
+nothing); instead `definition.rs` detects the `require` call context (an
+enclosing `List` whose head is `require`) and resolves the name with
+`introspect::module_file` — `require--find "foo.blsp" *load-path*`, the same
+lookup `require` itself uses, against the bootstrapped project's load-path. It
+lands at the top of the module's file. (A baked-in std module — `%builtin-module`
+source, no file — has no target.)
+
 **Navigating into the standard library.** The prelude is `include_str!`'d, so it
 has no source file at runtime — `M-.` on `map` would have nowhere to land. The
 prelude build therefore *materializes* a copy to `$XDG_CACHE_HOME/brood/prelude.blsp`
@@ -326,16 +345,32 @@ additive change behind the same feature handlers.
 |---|---|---|---|
 | **0** | `publishDiagnostics` (syntactic), document sync, lifecycle | `cst::parse` + `LineIndex` | **done** |
 | **1** | completion (locals + globals), hover, `documentSymbol`, **goto-definition**, **signature help** | `arglist` / `global-names` primitives; CST top-level walk (`defs`) + scope walker | **done** |
-| **1+** | semantic diagnostics ("unbound" / arity / type misuse), **cross-file & stdlib goto** | located `check_file`; project bootstrap; `source-location` + prelude-cache | **done** |
-| **2** | references, rename, semantic tokens | `scope::references` engine; token classification | next |
+| **1+** | semantic diagnostics ("unbound" / arity / type misuse), **cross-file & stdlib goto**, `require`-target goto | located `check_file`; project bootstrap; `source-location` + prelude-cache; `require--find` | **done** |
+| **2** | references, document-highlight, rename (+prepareRename), semantic tokens, completion resolve | `scope::references` engine; CST token classification | **done** |
 
 Tier 0 was reachable immediately because syntactic diagnostics need only the
 CST. Goto-definition landed early with Tier 1 (rather than Tier 2 as first
 sketched) because the CST scope walker — its one prerequisite — was already
-built as Foundation B; references and rename ride the same `scope::references`
-engine and move to Tier 2 only because they want a little more polish, not more
-substrate. Tiers unlock together once their one prerequisite lands — which is
-the point of deciding the CST and the introspection surface up front.
+built as Foundation B; references, document-highlight and rename then all rode
+the same `scope::references` engine (a local stays scoped to its block, a
+document global spans the file; rename validates the new name through the shared
+atom classifier and emits a single-file `WorkspaceEdit`). Semantic tokens are a
+straight CST + scope walk (`semantic_tokens.rs`): `def`-family heads → keyword,
+the defined name → function + `definition`, locals → variable, call heads →
+function, with multi-line tokens split per the protocol. Completion now also
+offers the special forms (not in the global table) and fills each item's
+signature/docstring lazily via `completionItem/resolve`. Tiers unlock together
+once their one prerequisite lands — which is the point of deciding the CST and
+the introspection surface up front.
+
+**Caveats (deliberate, single-file).** References and rename are **CST-level and
+single-file**: occurrences in other modules aren't found or edited, so renaming
+an exported name is incomplete (ADR-031 — there's no faithful cross-file
+reference index; definitions are image-based, references stay static). Semantic
+tokens are whole-document only (no range/delta requests — the parse is cheap).
+Semantic diagnostics anchor to the offending token where the message names it
+(unbound symbol) or to the call operator otherwise; deeper attribution wants
+spans threaded through the checker.
 
 ## The self-hosting boundary
 

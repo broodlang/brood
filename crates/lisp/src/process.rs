@@ -43,9 +43,9 @@ pub use mailbox::{list_local_pids, receive_match, send};
 pub use message::{from_message, to_message, ClosureMsg, Message};
 pub use monitor::{demonitor, monitor, next_ref};
 pub use scheduler::{
-    gc_block_depth, in_green_process, is_supervision_enabled, peak_threads, pid_value,
-    record_resume, self_pid, set_max_parallel, set_supervision, spawn, spawn_count, tick,
-    worker_threads, GcBlockGuard,
+    for_each_resume_root, gc_block_depth, in_green_process, is_supervision_enabled, peak_threads,
+    pid_value, record_resume, self_pid, set_max_parallel, set_supervision, spawn, spawn_count,
+    tick, worker_threads, GcBlockGuard,
 };
 
 pub(crate) use mailbox::{deliver, is_alive, read_name_address};
