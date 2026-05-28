@@ -125,6 +125,15 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   `nest format` (and `--check`) reformats every project `.blsp` in place, driven
   by an in-Brood CST walker (`std/format.blsp`) over a `parse-source` primitive.
   ADR-020/028.
+- ⬜ **Package manager** (ADR-037, [`packages.md`](packages.md)) — third-party
+  Brood deps. Git-deps + project-local `_deps/` cache + `project.lock.blsp` for
+  reproducibility; no registry, no semver solver, no install scripts. Policy in
+  Brood (`std/package.blsp`); the only new Rust is `%git-clone` / `%git-resolve-ref`
+  / `%sha256-file` / `%http-get` (the last lands now for future tarball deps,
+  used later). `nest fetch`/`update`/`add`/`remove`/`tree`; existing `nest`
+  subcommands auto-fetch missing deps. Designed early — before M2 — because the
+  cache layout + manifest extension + auto-fetch behaviour cross-cut project
+  management and the upcoming editor plugin story (ADR-006/011/019/020/028).
 - 🟡 **Editor tooling & documentation** — source-position errors (GNU
   `FILE:LINE:COL:`) + structured test output (`docs/tooling.md`); a lossless,
   span-carrying CST and the introspection primitives `doc`/`arglist`/

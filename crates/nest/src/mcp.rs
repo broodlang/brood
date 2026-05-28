@@ -388,6 +388,26 @@ const RESOURCES: &[(&str, &str, &str)] = &[
         "Brood for Claude (pocket reference)",
         include_str!("../../../docs/brood-for-claude.md"),
     ),
+    // The self-improving findings index — entries grow with each non-trivial
+    // session (see `docs/llm-native.md` §3). The next agent reads this *after*
+    // `brood-for-claude.md` to see what already bit prior agents.
+    (
+        "brood://docs/incarnations",
+        "Incarnations — what tripped up prior agents",
+        include_str!("../../../docs/incarnations.md"),
+    ),
+    (
+        "brood://docs/llm-native",
+        "Making Brood LLM-native (forward-looking plan)",
+        include_str!("../../../docs/llm-native.md"),
+    ),
+    // First incarnation entry — full writeup. Subsequent entries land alongside
+    // and join `RESOURCES` here.
+    (
+        "brood://docs/claude-demo-findings",
+        "Claude Opus 4.7 — concurrent Mandelbrot findings (2026-05-28)",
+        include_str!("../../../docs/claude-demo-findings.md"),
+    ),
     (
         "brood://docs/language",
         "Brood language reference",
@@ -447,29 +467,12 @@ fn read_resource(params: &Json) -> Result<Json, RpcError> {
 
 /// The orientation prompt every Brood-aware agent should fetch first. Short
 /// on purpose — depth lives in the `brood://docs/brood-for-claude` resource;
-/// this is the "what should I do *right now*?" pointer. Step 5a (ADR-036).
-const BROOD_TASK_PROMPT: &str = "\
-You're working in a Brood project (a `.blsp` Lisp). \
-Before generating Brood code, fetch `brood://docs/brood-for-claude` — the \
-pocket reference for the idioms that differ from other Lisps.
-
-**Brood essentials**
-- Data is immutable; `def` is the only mutation (rebinds globals, Erlang-style hot reload).
-- Loops are tail recursion or processes (`spawn`/`receive`/`send`). No `while`, no `set!`.
-- Truthiness: only `nil` and `false` are falsy.
-- Modules: `(provide 'foo)` + `(require 'foo)`; symbols are interned, compare with `=`.
-
-**MCP tools (use these to interact with the live image)**
-- `eval` — try expressions. State (a `def`, a `spawn`) persists between calls.
-- `lookup` — `:arglist` + `:doc` + `:source-location` for a name. No quote: `{:name \"map\"}`.
-- `macroexpand` — see what a macro lowers to. Useful for `when-let`, `cond`, `match`.
-- `format` — reformat source idempotently.
-- `load` — load a `.blsp` file into the live image.
-- `check` — advisory type-check; `run-tests` — structured runner result;
-  `processes` — live pids.
-
-Project conventions live in `CLAUDE.md` at the project root — open it for
-project-specific guidance before editing.";
+/// this is the "what should I do *right now*?" pointer. Sourced from
+/// `docs/prompts/brood-task.md` so the maintainer can edit it without
+/// recompiling, *and* other agent harnesses (Cursor, Aider, Continue per
+/// `docs/llm-native.md` §14) can drop the same file into their system
+/// prompts. Step 5a (ADR-036).
+const BROOD_TASK_PROMPT: &str = include_str!("../../../docs/prompts/brood-task.md");
 
 fn list_prompts() -> Vec<Json> {
     vec![json!({
@@ -815,6 +818,12 @@ mod tests {
         let uris: Vec<&str> = resources.iter().map(|r| r["uri"].as_str().unwrap()).collect();
         assert!(uris.contains(&"brood://docs/brood-for-claude"));
         assert!(uris.contains(&"brood://prelude"));
+        // The incarnations index + its companion docs (added in the
+        // llm-native bundle); the agent's orientation funnel relies on
+        // these being discoverable.
+        assert!(uris.contains(&"brood://docs/incarnations"));
+        assert!(uris.contains(&"brood://docs/llm-native"));
+        assert!(uris.contains(&"brood://docs/claude-demo-findings"));
     }
 
     #[test]

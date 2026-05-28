@@ -1,313 +1,394 @@
 //! The `nest` command — Brood project tooling.
 //!
 //! `nest` is the project/workspace tool sitting above the `brood` language
-//! binary — the `cargo`/`rustc`, `mix`/`elixir` split (ADR-028). `brood` only
-//! runs the language; everything project-shaped (scaffolding, test discovery,
-//! user config) lives here. `nest` is a *thin Rust shell*: the actual policy —
-//! name checks, templates, discovery — is written in Brood (`std/project.blsp`)
-//! and driven through `Interp`, keeping behaviour in the language (ADR-006).
+//! binary — the `cargo`/`rustc`, `mix`/`elixir` split (ADR-028). For everyday
+//! work this is the daily driver: `nest` covers scaffolding, running, testing,
+//! type-checking, formatting, REPL, docs, and the MCP server. `brood` is the
+//! low-level "just run the language" tool.
 //!
-//!   nest new <name>   scaffold a new project (project.blsp + src/ + tests/)
-//!   nest run [args…]  run the project's entry point (configured via :main)
-//!   nest test         discover tests/**/*_test.blsp and run the suite once
-//!   nest check        advisory type-check every .blsp under src/ + tests/
-//!   nest format       format every .blsp under src/ and tests/ in place
-//!   nest format --check  exit non-zero if any file would change (CI mode)
+//! `nest` is a thin Rust shell. The actual policy — name checks, templates,
+//! discovery — is written in Brood (`std/project.blsp`) and driven through
+//! `Interp`, keeping behaviour in the language (ADR-006).
 //!
-//! `-j N` / `--max-parallel N` caps how many spawned processes run on OS
-//! threads at once (0 = unlimited, the default) — useful for bounding a
-//! concurrent test run; see `std/test.blsp`.
+//! Subcommands:
+//!
+//!   nest new <name>        scaffold a new project
+//!   nest run [<file>]      run :main, or `<file>` if given (project context
+//!                          preloaded when inside a project)
+//!   nest test [<file>...]  run the project's tests, or the listed files
+//!   nest check [<file>...] type-check the project, or the listed files
+//!   nest repl              project-aware REPL (sources preloaded)
+//!   nest format            in-place reformat (`--check` for CI dry-run)
+//!   nest doc [module]      Markdown docs (whole project or one module)
+//!   nest mcp               Model Context Protocol server over stdio
+//!
+//! `-j N` / `--max-parallel N` caps concurrent spawned processes. Hot reload
+//! lives in `nest run --watch <path>` (file or directory, repeatable).
 
-// `LispError` is referenced indirectly via `cli_support::report_error`.
+use brood::cli_support::report_error;
 use brood::Interp;
+use clap::{Parser, Subcommand};
 
 mod mcp;
 
-// `report_error` lives in `brood::cli_support` — shared with `brood`.
-use brood::cli_support::report_error;
+#[derive(Parser, Debug)]
+#[command(
+    name = "nest",
+    version,
+    about = "Brood project tooling — the daily driver above the `brood` language binary (ADR-028).",
+    propagate_version = true,
+    subcommand_required = true,
+    arg_required_else_help = true
+)]
+struct Cli {
+    /// Cap concurrent spawned processes (0 = unlimited). Bounds a concurrent
+    /// test run; see `std/test.blsp`.
+    #[arg(
+        short = 'j',
+        long = "max-parallel",
+        visible_alias = "jobs",
+        value_name = "N",
+        global = true
+    )]
+    max_parallel: Option<usize>,
 
-const HELP: &str = "\
-nest — Brood project tooling (the project half of the brood/nest split, ADR-028)
-
-usage:
-  nest new <name>   scaffold a new project (project.blsp + src/ + tests/)
-  nest run [--watch <file>]… [args…]
-                    run the project's entry point (set via :main in project.blsp;
-                    defaults to module `main`, fn `main`). Extra args are passed
-                    to the entry fn as strings. `--watch <file>` (repeatable)
-                    spawns a reloader that re-`load`s <file> when it changes —
-                    hot-reload without source edits (std/reload.blsp).
-  nest test         discover tests/**/*_test.blsp and run the suite once
-  nest check        advisory type-check every .blsp under src/ + tests/
-                    (exits non-zero on warnings — for CI)
-  nest format       format every .blsp under src/ and tests/ in place
-                    (use --check to exit non-zero on diffs instead of writing)
-  nest doc [module] emit Markdown docs (whole project, or one named module)
-  nest mcp          serve the project over Model Context Protocol on stdio,
-                    so an agent (Claude Code etc.) can `eval`, lookup, format,
-                    expand, run tests, and read the canonical docs against
-                    *this* project's live image (ADR-036, docs/mcp.md). Errors
-                    out if cwd is not inside a Brood project.
-
-options:
-  -j, --max-parallel N   cap concurrent spawned processes (test runs)
-  -h, --help             print this help
-      --version          print the version
-
-To run the language itself (REPL, a file, a single test file) use `brood`.";
-
-/// Print help to stdout and exit 0 (`--help` is a request, not an error).
-fn help() -> ! {
-    println!("{}", HELP);
-    std::process::exit(0);
+    #[command(subcommand)]
+    cmd: Cmd,
 }
 
-/// Print help to stderr and exit non-zero (no/unknown command — an error).
-fn usage() -> ! {
-    eprintln!("{}", HELP);
-    std::process::exit(2);
+#[derive(Subcommand, Debug)]
+enum Cmd {
+    /// Scaffold a new project (project.blsp + src/ + tests/ + starter files).
+    New {
+        /// The project's name. Becomes the directory + `:name` in project.blsp.
+        name: String,
+    },
+
+    /// Run the project's entry point, or a specific .blsp file.
+    ///
+    /// Inside a project: with no FILE, runs `:main` (defaults to `main/main`);
+    /// with a FILE, runs that file with the project's sources pre-loaded so
+    /// it can reach project modules.
+    /// Outside a project: FILE is required and runs like `brood <file>`.
+    Run {
+        /// .blsp file to run instead of the project's `:main`.
+        #[arg(value_name = "FILE")]
+        file: Option<String>,
+
+        /// Watch a file or directory; on every save re-`load`s the affected
+        /// file. Repeatable. Directories are walked recursively for `.blsp`
+        /// files; new files added later are picked up automatically.
+        #[arg(long = "watch", value_name = "PATH")]
+        watch: Vec<String>,
+
+        /// Trailing arguments passed to the entry function as strings.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Run the project's tests, or specific test files.
+    ///
+    /// With no FILES: discover and run every `tests/**/*_test.blsp`.
+    /// With FILES: load each (registering its cases) and run the suite once —
+    /// inside a project, project sources are pre-loaded so cross-module names
+    /// resolve.
+    Test {
+        /// Specific test files to run. Omit for project-wide discovery.
+        #[arg(value_name = "FILE")]
+        files: Vec<String>,
+    },
+
+    /// Advisory type-check the project, or specific files.
+    ///
+    /// With no FILES: walk every `.blsp` under `src/` + `tests/` and exit
+    /// non-zero on any warning (CI-friendly).
+    /// With FILES: check only those files.
+    Check {
+        /// Specific files to check. Omit for project-wide checking.
+        #[arg(value_name = "FILE")]
+        files: Vec<String>,
+    },
+
+    /// Start a REPL. Inside a project, every source file is pre-loaded so the
+    /// project's modules are immediately callable.
+    Repl,
+
+    /// Reformat every `.blsp` under `src/` and `tests/` in place.
+    Format {
+        /// Don't write; exit non-zero if any file would change (CI mode).
+        #[arg(long, short = 'c')]
+        check: bool,
+    },
+
+    /// Emit Markdown documentation — the whole project, or one named module.
+    Doc {
+        /// Module name to document (a baked-in std module or one on the
+        /// load-path). Omit to document the whole project.
+        module: Option<String>,
+    },
+
+    /// Serve the project over Model Context Protocol on stdio so an agent
+    /// (Claude Code etc.) can eval / lookup / format / expand / run tests /
+    /// read docs against this project's live image (ADR-036, docs/mcp.md).
+    /// Errors if cwd is not inside a Brood project.
+    Mcp,
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|a| a == "--help" || a == "-h") {
-        help();
-    }
-    if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("nest {}", env!("CARGO_PKG_VERSION"));
-        return;
-    }
-
-    let (positional, max_parallel) = parse_args(args);
-    if let Some(n) = max_parallel {
+    let cli = Cli::parse();
+    if let Some(n) = cli.max_parallel {
         brood::process::set_max_parallel(n);
     }
 
-    let cmd = match positional.first() {
-        Some(c) => c.as_str(),
-        None => usage(),
-    };
-
     let mut interp = Interp::new();
 
-    match cmd {
-        // `nest test` — discover and run the current project's test suite
-        // (ADR-020). The runner (Brood, std/project.blsp) walks up from the cwd
-        // to `project.blsp`, loads every tests/**/*_test.blsp, and runs the
-        // whole suite once. It raises on failure, so a non-zero exit falls out
-        // of the eval error. One output format — structured GNU
-        // `FILE:LINE:COL:` blocks; see `docs/tooling.md`.
-        "test" => run(
-            &mut interp,
-            "(require 'project) (load-config) (run-project-tests)",
-        ),
-
-        // `nest check` — advisory type-check the whole project (every .blsp under
-        // src/ + tests/) without running anything. Mirrors `brood --check <file>`
-        // at project scope. Warnings go to stdout (so callers can pipe them); the
-        // process exits non-zero when any warning was emitted, so CI can gate on
-        // it. The check itself is policy in Brood (`check-project` in
-        // `std/project.blsp`); the Rust side just turns the returned count into
-        // an exit code. See `docs/types.md`.
-        "check" => {
-            // Same bootstrap order as the other subcommands. `check-project`
-            // prints each warning and returns the total count; we exit with
-            // that count clamped to 1 if non-zero.
-            //
-            // We `(require 'test)` first so the unbound-symbol pass doesn't
-            // flag `test` / `describe` / `assert=` / … in `tests/**/*_test.blsp`.
-            // Test files normally start with `(require 'test)` themselves, but
-            // the checker reads files without executing them, so the require
-            // never runs through the checker's eyes — pre-loading the module
-            // here makes its exports globally visible, matching what
-            // `run-project-tests` does before its embedded check.
-            let v = run_for_value(
-                &mut interp,
-                "(require 'project) (load-config) (require 'test) (check-project)",
-            );
-            match v {
-                brood::core::value::Value::Int(0) => {}
-                brood::core::value::Value::Int(_) => std::process::exit(1),
-                other => {
-                    eprintln!(
-                        "nest check: check-project returned a non-integer ({})",
-                        interp.print(other)
-                    );
-                    std::process::exit(1);
-                }
-            }
-        }
-
-        // `nest new <name>` — scaffold a new project (ADR-020): a folder with
-        // project.blsp + src/ + tests/ and starter files. The policy (name
-        // checks, templates) is in Brood (std/project.blsp); we just pass the
-        // name in, escaped so it can't break out of the string literal.
-        "new" => {
-            let name = positional.get(1).unwrap_or_else(|| {
-                eprintln!("nest new: expected a project name, e.g. `nest new foobar`");
-                std::process::exit(2);
-            });
-            let escaped = brood::introspect::escape_brood_string(name);
-            let code = format!(
-                "(require 'project) (load-config) (new-project \"{}\")",
-                escaped
-            );
-            run(&mut interp, &code);
-        }
-
-        // `nest format` — reformat every .blsp under src/ + tests/ in place
-        // (ADR-020 extension). `--check` flips to a read-only mode: same walk
-        // but exits non-zero if any file would change, used for CI. Mechanism
-        // is one Rust primitive (`parse-source`) + std/format.blsp; this arm
-        // just chooses which Brood entry to call. Operands beyond the flag are
-        // rejected — there are no other args, and silently ignoring them would
-        // mask typos.
-        "format" => {
-            let mut check = false;
-            for a in positional.iter().skip(1) {
-                match a.as_str() {
-                    "--check" | "-c" => check = true,
-                    other => {
-                        eprintln!("nest format: unexpected argument {:?}", other);
-                        std::process::exit(2);
-                    }
-                }
-            }
-            let entry = if check {
-                "(format-project-check)"
-            } else {
-                "(format-project)"
-            };
-            // Same bootstrap order as the other subcommands: project first
-            // (defines `load-config`), then load-config (which writes the
-            // default user config if absent), then the feature module. Format
-            // depends on project's discovery helpers via its own require.
-            let code = format!(
-                "(require 'project) (load-config) (require 'format) {}",
-                entry
-            );
-            run(&mut interp, &code);
-        }
-
-        // `nest run [--watch <file>]… [args…]` — run the project's entry point
-        // (ADR-020). The entry is configured via `:main` in project.blsp (a
-        // module symbol, or a `(module fn)` list) and defaults to module `main`,
-        // fn `main`. Extra positional args after `run` are passed to the entry
-        // as strings. `--watch <file>` (repeatable, opt-in) pre-spawns a
-        // reloader from std/reload.blsp that re-`load`s <file> on every mtime
-        // bump — hot-reload without touching source. The policy (find the
-        // project root, load it, resolve and apply the entry) lives in Brood
-        // (std/project.blsp); we just build the args list and the reloader
-        // calls.
-        "run" => {
-            let mut watch: Vec<String> = Vec::new();
-            let mut entry_args: Vec<String> = Vec::new();
-            let mut it = positional.iter().skip(1);
-            while let Some(a) = it.next() {
-                if a == "--watch" {
-                    match it.next() {
-                        Some(path) => watch.push(path.clone()),
-                        None => {
-                            eprintln!("nest run: --watch expects a file path");
-                            std::process::exit(2);
-                        }
-                    }
-                } else if let Some(path) = a.strip_prefix("--watch=") {
-                    watch.push(path.to_string());
-                } else {
-                    entry_args.push(a.clone());
-                }
-            }
-            let escaped_args = entry_args
-                .iter()
-                .map(|a| format!("\"{}\"", brood::introspect::escape_brood_string(a)))
-                .collect::<Vec<_>>()
-                .join(" ");
-            // Watchers go up *before* `run-project`: a slow / blocking entry
-            // is exactly when you want them already alive so you can fix the
-            // file. Same escaping rules as the args.
-            let watch_setup = if watch.is_empty() {
-                String::new()
-            } else {
-                let calls = watch
-                    .iter()
-                    .map(|p| {
-                        format!(
-                            "(reload-on-change \"{}\")",
-                            brood::introspect::escape_brood_string(p)
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                format!("(require 'reload) {}", calls)
-            };
-            let code = format!(
-                "(require 'project) (load-config) {} (run-project (list {}))",
-                watch_setup, escaped_args
-            );
-            run(&mut interp, &code);
-        }
-
-        // `nest doc [module]` — generate Markdown documentation to stdout. With
-        // no operand it documents the whole project (every source file under
-        // it); with a module name it documents that one module (a baked-in std
-        // module, or one on the load-path). The policy (load + introspect via
-        // `doc`/`arglist`/`global-names`) is Brood (std/docs.blsp); we pass the
-        // optional name through, escaped so it can't break out of the literal.
-        "doc" => {
-            let code = match positional.get(1) {
-                Some(name) => {
-                    let escaped = brood::introspect::escape_brood_string(name);
-                    format!("(require 'docs) (generate-docs \"{}\")", escaped)
-                }
-                None => "(require 'docs) (generate-docs)".to_string(),
-            };
-            run(&mut interp, &code);
-        }
-
-        // `nest mcp` — speak the Model Context Protocol over stdio, scoped to
-        // this project (ADR-036). Strictly per-project: bootstrap walks up to
-        // `project.blsp` and errors loudly if there isn't one, matching the
-        // shape of `nest test` / `nest doc`. After the bootstrap, all protocol
-        // policy lives in `crates/nest/src/mcp.rs` — `main_loop` reads framed
-        // JSON-RPC, dispatches to the tool catalogue Brood produces from
-        // `(mcp-tools)`, and never returns until the peer closes the channel
-        // or sends `exit`. The dispatcher's transport is `stdout`, so any
-        // diagnostic we emit must go to **stderr** to avoid corrupting the
-        // protocol stream.
-        "mcp" => {
-            // Pre-load the project image — same shape the LSP uses
-            // (`bootstrap_project`, `lsp/main.rs:329`) so cross-module names
-            // and the test framework are resolvable from inside an `eval`
-            // tool call. `project--find-root` raises if there's no project
-            // here, which surfaces as a clean GNU error + exit-1 via `run`.
-            let bootstrap = r#"
-                (require 'project)
-                (load-config)
-                (let (root (project--find-root (cwd)))
-                  (when (nil? root)
-                    (error "nest mcp: not in a Brood project (no project.blsp found from " (cwd) ")"))
-                  (project-setup root)
-                  (project-load-sources root)
-                  (require 'test)
-                  (require 'format))
-            "#;
-            run(&mut interp, bootstrap);
-            if let Err(e) = mcp::run(&mut interp) {
-                eprintln!("nest mcp: {e}");
-                std::process::exit(1);
-            }
-        }
-
-        other => {
-            eprintln!("nest: unknown command {:?}", other);
-            usage();
-        }
+    match cli.cmd {
+        Cmd::Test { files } => cmd_test(&mut interp, &files),
+        Cmd::Check { files } => cmd_check(&mut interp, &files),
+        Cmd::New { name } => cmd_new(&mut interp, &name),
+        Cmd::Format { check } => cmd_format(&mut interp, check),
+        Cmd::Run { file, watch, args } => cmd_run(&mut interp, file.as_deref(), &watch, &args),
+        Cmd::Doc { module } => cmd_doc(&mut interp, module.as_deref()),
+        Cmd::Repl => cmd_repl(&mut interp),
+        Cmd::Mcp => cmd_mcp(&mut interp),
     }
 }
 
-/// Evaluate a bootstrap snippet, reporting any error in editor-parseable form
-/// and exiting non-zero on failure.
+// ---------- subcommand handlers ----------
+
+/// `nest test [FILES...]` — project-wide if no files, otherwise just those.
+/// Single-file mode mirrors the old `brood --test` shape but with project
+/// sources pre-loaded if we're inside a project, so cross-module names work.
+fn cmd_test(interp: &mut Interp, files: &[String]) {
+    if files.is_empty() {
+        // Whole-project discovery via std/project.blsp. Raises on failure,
+        // so a non-zero exit falls out of the eval error.
+        run(
+            interp,
+            "(require 'project) (load-config) (run-project-tests)",
+        );
+        return;
+    }
+    // Single-file path: mirror brood --test, but pre-load project image when
+    // we're inside a project so cross-module names resolve.
+    let bootstrap = if in_project() {
+        "(require 'project) (load-config) (let (root (project--find-root (cwd))) \
+            (when root (project-setup root) (project-load-sources root))) \
+            (require 'test)"
+    } else {
+        "(require 'test)"
+    };
+    run(interp, bootstrap);
+    for path in files {
+        let src = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("nest test: cannot read {}: {}", path, e);
+                std::process::exit(1);
+            }
+        };
+        if let Err(e) = eval_file(interp, path, &src) {
+            report_error(&e.or_file(path.clone()));
+            std::process::exit(1);
+        }
+    }
+    run(interp, "(run-tests)");
+}
+
+/// `nest check [FILES...]` — project-wide if no files, otherwise file-by-file.
+fn cmd_check(interp: &mut Interp, files: &[String]) {
+    if files.is_empty() {
+        let v = run_for_value(
+            interp,
+            "(require 'project) (load-config) (require 'test) (check-project)",
+        );
+        match v {
+            brood::core::value::Value::Int(0) => {}
+            brood::core::value::Value::Int(_) => std::process::exit(1),
+            other => {
+                eprintln!(
+                    "nest check: check-project returned a non-integer ({})",
+                    interp.print(other)
+                );
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    // Single-file path: print warnings to stdout (CI-friendly), exit non-zero
+    // if any file warned.
+    let mut warned = false;
+    for path in files {
+        let src = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("nest check: cannot read {}: {}", path, e);
+                std::process::exit(1);
+            }
+        };
+        let forms =
+            match brood::syntax::reader::read_all_positioned(&mut interp.heap, &src) {
+                Ok(forms) => forms,
+                Err(e) => {
+                    report_error(&e.clone().or_file(path.to_string()));
+                    warned = true;
+                    continue;
+                }
+            };
+        let just_forms: Vec<_> = forms.into_iter().map(|(f, _)| f).collect();
+        let warnings = brood::types::check::check_file(&mut interp.heap, &just_forms);
+        if !warnings.is_empty() {
+            warned = true;
+        }
+        for (pos, msg) in warnings {
+            match pos {
+                Some(p) => println!("{}:{}:{}: warning: {}", path, p.line, p.col, msg),
+                None => println!("{}: warning: {}", path, msg),
+            }
+        }
+    }
+    if warned {
+        std::process::exit(1);
+    }
+}
+
+/// `nest new <name>` — delegates to `(new-project name)` in std/project.blsp.
+fn cmd_new(interp: &mut Interp, name: &str) {
+    let escaped = brood::introspect::escape_brood_string(name);
+    let code = format!(
+        "(require 'project) (load-config) (new-project \"{}\")",
+        escaped
+    );
+    run(interp, &code);
+}
+
+/// `nest format [--check]` — reformat in place, or dry-run on `--check`.
+fn cmd_format(interp: &mut Interp, check: bool) {
+    let entry = if check {
+        "(format-project-check)"
+    } else {
+        "(format-project)"
+    };
+    let code = format!(
+        "(require 'project) (load-config) (require 'format) {}",
+        entry
+    );
+    run(interp, &code);
+}
+
+/// `nest run [FILE] [--watch PATH]... [args...]` — the entry point.
+fn cmd_run(interp: &mut Interp, file: Option<&str>, watch: &[String], args: &[String]) {
+    let escaped_args = args
+        .iter()
+        .map(|a| format!("\"{}\"", brood::introspect::escape_brood_string(a)))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let watch_setup = if watch.is_empty() {
+        String::new()
+    } else {
+        let calls = watch
+            .iter()
+            .map(|p| {
+                format!(
+                    "(reload-on-change \"{}\")",
+                    brood::introspect::escape_brood_string(p)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("(require 'reload) {}", calls)
+    };
+
+    let code = match file {
+        // No FILE: run the project's :main via std/project.blsp.
+        None => format!(
+            "(require 'project) (load-config) {} (run-project (list {}))",
+            watch_setup, escaped_args
+        ),
+        // FILE: run that file. Inside a project, pre-load project sources so
+        // the file can reach project modules; outside, plain `brood <file>`.
+        Some(path) => {
+            let escaped_path = brood::introspect::escape_brood_string(path);
+            if in_project() {
+                format!(
+                    "(require 'project) (load-config) \
+                     (let (root (project--find-root (cwd))) \
+                       (when root (project-setup root) (project-load-sources root))) \
+                     {} (load \"{}\")",
+                    watch_setup, escaped_path
+                )
+            } else {
+                format!("{} (load \"{}\")", watch_setup, escaped_path)
+            }
+        }
+    };
+    run(interp, &code);
+}
+
+/// `nest doc [module]` — Markdown docs to stdout.
+fn cmd_doc(interp: &mut Interp, module: Option<&str>) {
+    let code = match module {
+        Some(name) => {
+            let escaped = brood::introspect::escape_brood_string(name);
+            format!("(require 'docs) (generate-docs \"{}\")", escaped)
+        }
+        None => "(require 'docs) (generate-docs)".to_string(),
+    };
+    run(interp, &code);
+}
+
+/// `nest repl` — project-aware REPL. Inside a project, pre-load sources so
+/// every module is immediately callable. Outside, fall through to the plain
+/// language REPL (same UX as `brood`).
+fn cmd_repl(interp: &mut Interp) {
+    if in_project() {
+        run(
+            interp,
+            "(require 'project) (load-config) \
+             (let (root (project--find-root (cwd))) \
+               (when root (project-setup root) (project-load-sources root)))",
+        );
+        eprintln!("nest repl — project sources loaded; Ctrl-D to exit");
+    } else {
+        eprintln!("nest repl — no project.blsp here; plain REPL (`brood` would do the same)");
+    }
+    // Delegate to the `brood` binary's REPL helpers via the shared lib. We
+    // keep one REPL implementation; nest only handles the project bootstrap.
+    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        if let Err(e) = brood::cli_support::repl_interactive(interp) {
+            eprintln!("repl error: {}", e);
+            std::process::exit(1);
+        }
+    } else {
+        brood::cli_support::repl_plain(interp);
+    }
+}
+
+/// `nest mcp` — see docs/mcp.md (ADR-036). Strictly per-project.
+fn cmd_mcp(interp: &mut Interp) {
+    let bootstrap = r#"
+        (require 'project)
+        (load-config)
+        (let (root (project--find-root (cwd)))
+          (when (nil? root)
+            (error "nest mcp: not in a Brood project (no project.blsp found from " (cwd) ")"))
+          (project-setup root)
+          (project-load-sources root)
+          (require 'test)
+          (require 'format))
+    "#;
+    run(interp, bootstrap);
+    if let Err(e) = mcp::run(interp) {
+        eprintln!("nest mcp: {e}");
+        std::process::exit(1);
+    }
+}
+
+// ---------- helpers ----------
+
+/// Evaluate a bootstrap snippet, reporting any error in GNU form and exiting
+/// non-zero on failure.
 fn run(interp: &mut Interp, code: &str) {
     if let Err(e) = interp.eval_str(code) {
         report_error(&e);
@@ -315,10 +396,9 @@ fn run(interp: &mut Interp, code: &str) {
     }
 }
 
-/// Like [`run`], but returns the bootstrap's last value so the caller can
-/// decide whether to exit non-zero based on it. Used by `nest check` to turn
-/// "warnings were emitted" into a non-zero exit without throwing a synthetic
-/// error (and the noise that would follow).
+/// Like [`run`], but returns the last value so the caller can decide whether
+/// to exit non-zero based on it. Used by `nest check` to convert a non-zero
+/// warning count into a non-zero exit without throwing a synthetic error.
 fn run_for_value(interp: &mut Interp, code: &str) -> brood::core::value::Value {
     match interp.eval_str(code) {
         Ok(v) => v,
@@ -329,9 +409,29 @@ fn run_for_value(interp: &mut Interp, code: &str) -> brood::core::value::Value {
     }
 }
 
-/// Split CLI args into positional words (the subcommand + its operands) and an
-/// optional concurrency cap. See `brood::cli_support::parse_jobs_args` for the
-/// accepted forms.
-fn parse_args(args: Vec<String>) -> (Vec<String>, Option<usize>) {
-    brood::cli_support::parse_jobs_args("nest", args)
+/// Evaluate a file's source with `(current-file)` set so runtime-error /
+/// test locations carry the file. Mirrors the helper in `cli/main.rs`.
+fn eval_file(
+    interp: &mut Interp,
+    path: &str,
+    src: &str,
+) -> Result<(), brood::error::LispError> {
+    let prev = interp.heap.set_current_file(Some(path.to_string()));
+    let result = interp.eval_source(src);
+    interp.heap.set_current_file(prev);
+    result.map(|_| ())
+}
+
+/// Walk up from cwd looking for a `project.blsp` marker. Used by the
+/// single-file `nest run/test/check` paths to decide whether to bootstrap
+/// the project image.
+fn in_project() -> bool {
+    let mut here = std::env::current_dir().ok();
+    while let Some(dir) = here {
+        if dir.join("project.blsp").exists() {
+            return true;
+        }
+        here = dir.parent().map(|p| p.to_path_buf());
+    }
+    false
 }

@@ -1,136 +1,97 @@
 //! The `brood` command-line tool — the language binary.
 //!
 //! `brood` only runs the language; project tooling (scaffolding, test
-//! discovery, config) lives in the separate `nest` binary — the
-//! `rustc`/`cargo`, `elixir`/`mix` split (ADR-027).
+//! discovery, hot-reload, MCP, etc.) lives in the separate `nest` binary —
+//! the `rustc`/`cargo`, `elixir`/`mix` split (ADR-028). For everyday work
+//! reach for `nest`; `brood` is for the language-only path (REPL, run a
+//! single file, one-shot test/check) outside of any project.
 //!
-//! - With no arguments it starts a REPL.
+//! Shape (all parsed by `clap`):
+//!
+//! - With no arguments it starts a REPL (line-edited in a terminal, plain
+//!   on a pipe).
 //! - With file arguments it loads and runs each file in order.
-//! - `--test <file>...` loads each file (which registers its cases) and runs
-//!   the in-language suite once — a single-file test run, distinct from
-//!   `nest test`'s project-wide discovery.
-//! - `--version` prints the version.
+//! - `--test <file>...` loads each file (registers its cases via the test
+//!   framework) and runs the in-language suite once. Project-wide test
+//!   discovery is `nest test`.
+//! - `--check <file>...` advisory type-check (no eval). Project-wide
+//!   checking is `nest check`.
 //! - `-j N` / `--max-parallel N` caps how many spawned processes run on OS
-//!   threads at once (0 = unlimited, the default). Useful for bounding a
-//!   concurrent test run; see `std/test.blsp`.
+//!   threads at once (0 = unlimited, the default). Bounds a concurrent
+//!   test run; see `std/test.blsp`.
 //!
-//! Interactively (a real terminal) the REPL uses `rustyline` for line editing:
-//! arrow keys to move within a line, up/down to walk history, the usual
-//! Emacs-style bindings (Ctrl-A/E/K/R, ...), and persistent history. When stdin
-//! is not a terminal (piped input, scripts) it falls back to a plain
-//! line-by-line reader so non-interactive use stays clean.
+//! Hot-reload lives in `nest run --watch` — the language binary has no
+//! `--watch` flag. The two-file pattern (entry + helpers) is the cleanest
+//! shape for hot reload (docs/shared-code.md), and `nest` is where the
+//! daily-driver workflow lives.
 
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
+use brood::cli_support::report_error;
 use brood::error::LispError;
 use brood::Interp;
+use clap::Parser;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 
-// `report_error` lives in `brood::cli_support` — shared with `nest`.
-use brood::cli_support::report_error;
+/// `brood` — the Brood language binary. Parsed by clap; the help text users
+/// see is generated from these doc-comments + the `#[command]`/`#[arg]` attrs.
+#[derive(Parser, Debug)]
+#[command(
+    name = "brood",
+    version,
+    about = "The Brood language — language half of the brood/nest split (ADR-028).",
+    long_about = "Run Brood code as a single file or a REPL, plus one-shot \
+type-check and test runs. For projects (scaffolding, project-wide tests, \
+hot-reload, MCP) use `nest` instead — `brood` is the rustc-style low-level \
+runner; `nest` is the cargo-style daily driver."
+)]
+struct Cli {
+    /// .blsp file(s) to run. With no files, starts a REPL.
+    #[arg(value_name = "FILE")]
+    files: Vec<String>,
 
-const HELP: &str = "\
-brood — the Brood language (the language half of the brood/nest split, ADR-028)
+    /// Run the file(s) as a single in-language test suite (registers each
+    /// `deftest`, then calls `(run-tests)` once). For project-wide discovery
+    /// use `nest test`.
+    #[arg(long, conflicts_with = "check")]
+    test: bool,
 
-usage:
-  brood                   start the REPL
-  brood <file>...         run each file in order
-  brood --test <file>...  run the file(s) as a single in-language test suite
-  brood --check <file>... type-check the file(s) (advisory; see docs/types.md)
+    /// Type-check the file(s) without running (advisory; never gates a run).
+    /// For project-wide checking use `nest check`.
+    #[arg(long)]
+    check: bool,
 
-options:
-  -j, --max-parallel N    cap concurrent spawned processes (0 = unlimited)
-      --watch <file>      hot-reload <file> while running. Two shapes:
-                            brood --watch foo.blsp         (run + watch foo.blsp)
-                            brood --watch a.blsp script.blsp  (watch a.blsp,
-                                                               run script.blsp)
-                          Repeatable. On every save, re-`load`s the watched
-                          file — globals rebind on the next call site
-                          (std/reload.blsp, docs/shared-code.md). Watching the
-                          entry file is fine for pure-defn scripts, but re-runs
-                          all its top-level forms on each save (a `(ticker 0)`
-                          at the bottom would stack tickers — split the loop
-                          out into a helper and watch the helper). For
-                          directory / project-tree watching, use `nest run
-                          --watch`.
-  -h, --help              print this help
-      --version           print the version
-
-For project tasks (scaffolding, project-wide test discovery) use `nest`.";
+    /// Cap concurrent spawned processes (0 = unlimited). Useful for bounding
+    /// a concurrent test run; see `std/test.blsp`.
+    #[arg(
+        short = 'j',
+        long = "max-parallel",
+        visible_alias = "jobs",
+        value_name = "N"
+    )]
+    max_parallel: Option<usize>,
+}
 
 fn main() {
-    let raw: Vec<String> = std::env::args().skip(1).collect();
-
-    if raw.iter().any(|a| a == "--help" || a == "-h") {
-        println!("{}", HELP);
-        return;
-    }
-
-    if raw.iter().any(|a| a == "--version" || a == "-V") {
-        println!("brood {}", env!("CARGO_PKG_VERSION"));
-        return;
-    }
-
-    // `--test <file>...` runs the files as a single in-language suite (load to
-    // register cases, then `(run-tests)` once). Project-wide discovery lives in
-    // `nest test`, not here. The flag is stripped before file parsing.
-    let test_mode = raw.iter().any(|a| a == "--test");
-    // `--check <file>...` type-checks without running (advisory). `nest check`
-    // does the project-wide walk.
-    let check_mode = raw.iter().any(|a| a == "--check");
-    // `--watch <path>` (repeatable) installs a hot-reloader for each <path>
-    // before evaluation starts. Files only — meaningless with `--test` (the
-    // suite runs once and exits) and `--check` (no eval). Stripped from raw
-    // so parse_args doesn't mistake the paths for source files.
-    let (raw, watch_paths) = extract_watch_paths(raw);
-    let raw: Vec<String> = raw
-        .into_iter()
-        .filter(|a| a != "--test" && a != "--check")
-        .collect();
-
-    let (files, max_parallel) = parse_args(raw);
-    if let Some(n) = max_parallel {
+    let cli = Cli::parse();
+    if let Some(n) = cli.max_parallel {
         brood::process::set_max_parallel(n);
     }
 
-    if !watch_paths.is_empty() && (test_mode || check_mode) {
-        eprintln!("brood: --watch has no effect with --test or --check (one-shot modes)");
-        std::process::exit(2);
-    }
-    // `brood --watch foo.blsp` (no separate entry) — treat the watched file
-    // as the entry too. Common single-file shape: run AND hot-reload the same
-    // file. Note: reloading the entry re-runs its top-level forms, so a
-    // `(ticker 0)` at the bottom would stack a fresh ticker on every save —
-    // for that pattern, split into a tiny entry + a helper, and watch the
-    // helper.
-    let files = if !watch_paths.is_empty() && files.is_empty() {
-        watch_paths.clone()
-    } else {
-        files
-    };
-
     let mut interp = Interp::new();
 
-    if check_mode {
-        run_check_files(&mut interp, &files);
+    if cli.check {
+        run_check_files(&mut interp, &cli.files);
         return;
     }
-
-    if test_mode {
-        run_test_files(&mut interp, &files);
+    if cli.test {
+        run_test_files(&mut interp, &cli.files);
         return;
     }
-
-    if !files.is_empty() {
-        // Bootstrap reloaders *before* the user's program runs so the watcher
-        // is already alive when the entry's first call site fires — same shape
-        // as `nest run --watch`, just on the single-file CLI.
-        if !watch_paths.is_empty() {
-            install_watchers(&mut interp, &watch_paths);
-        }
-        run_files(&mut interp, &files);
+    if !cli.files.is_empty() {
+        run_files(&mut interp, &cli.files);
         return;
     }
 
@@ -144,17 +105,6 @@ fn main() {
     }
 }
 
-/// Split CLI args into file paths and an optional concurrency cap.
-/// See `brood::cli_support::parse_jobs_args` for the accepted forms.
-fn parse_args(args: Vec<String>) -> (Vec<String>, Option<usize>) {
-    brood::cli_support::parse_jobs_args("brood", args)
-}
-
-/// `brood --test <file>...`: load each file (registering its cases via the
-/// `test` framework), then run the whole in-language suite once. Output is the
-/// same structured GNU `FILE:LINE:COL:` block per failure as `nest test`; see
-/// `docs/tooling.md`. This is a single-file run — for project-wide discovery
-/// (walk to `project.blsp`, load `tests/**/*_test.blsp`) use `nest test`.
 /// Evaluate a file's source with `(current-file)` set to its path (restored
 /// after), so runtime-error / test locations carry the file and load-time def
 /// sites are recorded for `(source-location …)` (ADR-031) — the same as the
@@ -166,6 +116,11 @@ fn eval_file(interp: &mut Interp, path: &str, src: &str) -> Result<(), LispError
     result.map(|_| ())
 }
 
+/// `brood --test <file>...`: load each file (registering its cases via the
+/// `test` framework), then run the whole in-language suite once. Output is the
+/// same structured GNU `FILE:LINE:COL:` block per failure as `nest test`; see
+/// `docs/tooling.md`. Single-file run — project-wide discovery (walk to
+/// `project.blsp`, load `tests/**/*_test.blsp`) is `nest test`.
 fn run_test_files(interp: &mut Interp, files: &[String]) {
     if files.is_empty() {
         eprintln!("brood --test: expected a file, e.g. `brood --test foo_test.blsp`");
@@ -179,9 +134,6 @@ fn run_test_files(interp: &mut Interp, files: &[String]) {
     for path in files {
         match std::fs::read_to_string(path) {
             Ok(src) => {
-                // Same advisory pre-check as `run_files`: warnings before tests,
-                // tests run regardless (`BROOD_NO_CHECK=1` opts out). Stderr so
-                // the structured test output on stdout stays unmixed.
                 if !no_check_env() {
                     check_one_file(interp, path, &src, CheckSink::Stderr);
                 }
@@ -202,10 +154,9 @@ fn run_test_files(interp: &mut Interp, files: &[String]) {
     }
 }
 
-/// Where the auto-checker's warnings should land — stdout for the explicit
-/// `brood --check` command (the user's intent is to *see* warnings), stderr
-/// for the implicit pre-run auto-check (warnings are sidebar info that
-/// shouldn't muddle program output).
+/// Where the advisory checker's warnings land — stdout for the explicit
+/// `brood --check` command (the user wants the warnings), stderr for the
+/// implicit pre-run check (sidebar info that shouldn't muddle stdout).
 enum CheckSink {
     Stdout,
     Stderr,
@@ -217,17 +168,9 @@ enum CheckSink {
 /// error here is reported but signalled by the bool, so the caller can choose
 /// whether to continue (regular run) or fail fast (`--check`).
 fn check_one_file(interp: &mut Interp, path: &str, src: &str, sink: CheckSink) -> bool {
-    // Read (recording positions) without evaluating, then check the file as a
-    // whole — `check_file` accumulates top-level `def`/`defn` names across
-    // forms so a name defined at the top isn't flagged when a later form
-    // calls it.
     let forms = match brood::syntax::reader::read_all_positioned(&mut interp.heap, src) {
         Ok(forms) => forms,
         Err(e) => {
-            // A parse error becomes one warning line so the regular-run path
-            // can still proceed to attempt eval (which will surface the same
-            // parse error as a hard error). For `--check` we want a hard exit;
-            // the caller controls that.
             report_error(&e.clone().or_file(path.to_string()));
             return true;
         }
@@ -248,11 +191,9 @@ fn check_one_file(interp: &mut Interp, path: &str, src: &str, sink: CheckSink) -
     warned
 }
 
-/// `brood --check <file>...`: read each file and run the advisory type checker
-/// over its top-level forms, printing a GNU `FILE:LINE:COL: warning:` line per
-/// provable misuse. Advisory (never runs the code, never gates a run), but the
-/// command exits non-zero when it finds warnings so CI / `nest check` can use it.
-/// See docs/types.md.
+/// `brood --check <file>...`: advisory type-check each file. Never runs the
+/// code, never gates a run; exits non-zero when warnings are emitted so CI /
+/// `nest check` can use it. See `docs/types.md`.
 fn run_check_files(interp: &mut Interp, files: &[String]) {
     if files.is_empty() {
         eprintln!("brood --check: expected a file, e.g. `brood --check foo.blsp`");
@@ -267,7 +208,6 @@ fn run_check_files(interp: &mut Interp, files: &[String]) {
                 std::process::exit(1);
             }
         };
-        // `brood --check` — the user wants the warnings, so they go to stdout.
         if check_one_file(interp, path, &src, CheckSink::Stdout) {
             warned = true;
         }
@@ -281,12 +221,8 @@ fn run_files(interp: &mut Interp, files: &[String]) {
     for path in files {
         match std::fs::read_to_string(path) {
             Ok(src) => {
-                // Auto-run the advisory checker before eval. Warnings print to
-                // **stderr** in the same GNU format as `--check`, so they don't
-                // muddle the program's own stdout; the run proceeds regardless
-                // (advisory, never gates — see `docs/types.md`).
-                // `BROOD_NO_CHECK=1` disables it for the rare case a caller
-                // wants the raw eval (e.g. timing a hot path).
+                // Auto-run the advisory checker before eval (stderr so it
+                // doesn't muddle program stdout). `BROOD_NO_CHECK=1` opts out.
                 if !no_check_env() {
                     check_one_file(interp, path, &src, CheckSink::Stderr);
                 }
@@ -303,9 +239,8 @@ fn run_files(interp: &mut Interp, files: &[String]) {
     }
 }
 
-/// Honoured by `run_files` and `run_test_files` so the advisory checker can be
-/// silenced when timing a run or when the warnings are noise (e.g. during
-/// development of the checker itself). Default: on.
+/// `BROOD_NO_CHECK=1` disables the implicit pre-run advisory check for the
+/// rare case a caller wants raw eval (e.g. timing a hot path). Default: on.
 fn no_check_env() -> bool {
     std::env::var_os("BROOD_NO_CHECK").is_some()
 }
@@ -319,14 +254,12 @@ fn repl_interactive(interp: &mut Interp) -> rustyline::Result<()> {
         let _ = rl.load_history(path);
     }
 
-    // Baseline LOCAL size; after each command we truncate back to it, reclaiming
-    // everything that command allocated. Safe because globals live in the shared
-    // PRELUDE/RUNTIME regions, never in this process's LOCAL heap.
+    // Baseline LOCAL size; after each command we truncate back to it,
+    // reclaiming everything that command allocated. Safe because globals live
+    // in the shared PRELUDE/RUNTIME regions, never in this process's LOCAL.
     let base = interp.heap.checkpoint();
 
     'repl: loop {
-        // Accumulate input lines until the form is delimiter-balanced, so
-        // multi-line forms work while each physical line stays editable.
         let mut buffer = String::new();
         let mut prompt = "brood> ";
         loop {
@@ -339,12 +272,8 @@ fn repl_interactive(interp: &mut Interp) -> rustyline::Result<()> {
                     }
                     prompt = "  ...   ";
                 }
-                Err(ReadlineError::Interrupted) => {
-                    // Ctrl-C: abandon the current (possibly partial) input.
-                    continue 'repl;
-                }
+                Err(ReadlineError::Interrupted) => continue 'repl, // Ctrl-C
                 Err(ReadlineError::Eof) => {
-                    // Ctrl-D: save history and exit.
                     if let Some(path) = &history {
                         let _ = rl.save_history(path);
                     }
@@ -364,7 +293,7 @@ fn repl_interactive(interp: &mut Interp) -> rustyline::Result<()> {
             Ok(value) => println!("{}", interp.print(value)),
             Err(e) => eprintln!("{}", e),
         }
-        interp.heap.reset_local_to(base); // reclaim this command's allocations
+        interp.heap.reset_local_to(base);
 
         if let Some(path) = &history {
             let _ = rl.save_history(path);
@@ -382,7 +311,7 @@ fn repl_plain(interp: &mut Interp) {
     loop {
         let mut line = String::new();
         match handle.read_line(&mut line) {
-            Ok(0) => break, // EOF
+            Ok(0) => break,
             Ok(_) => {}
             Err(e) => {
                 eprintln!("input error: {}", e);
@@ -407,7 +336,7 @@ fn repl_plain(interp: &mut Interp) {
             }
             Err(e) => eprintln!("{}", e),
         }
-        interp.heap.reset_local_to(base); // reclaim this command's allocations
+        interp.heap.reset_local_to(base);
     }
 }
 
@@ -419,8 +348,8 @@ fn history_path() -> Option<PathBuf> {
     Some(path)
 }
 
-/// Returns false while there are unclosed `()[]{}` or an open string literal, so
-/// the REPL knows to keep reading more input lines for a multi-line form.
+/// Returns false while there are unclosed `()[]{}` or an open string literal,
+/// so the REPL knows to keep reading for a multi-line form.
 fn is_balanced(src: &str) -> bool {
     let mut depth: i32 = 0;
     let mut in_string = false;
@@ -454,64 +383,4 @@ fn is_balanced(src: &str) -> bool {
     }
 
     !in_string && depth <= 0
-}
-
-/// Extract every `--watch <path>` (and `--watch=<path>`) occurrence from `raw`,
-/// returning `(remaining_args, watch_paths)`. A bare `--watch` with no value is
-/// a hard error so a typo doesn't silently swallow the next file argument.
-fn extract_watch_paths(raw: Vec<String>) -> (Vec<String>, Vec<String>) {
-    let mut rest = Vec::new();
-    let mut watches = Vec::new();
-    let mut it = raw.into_iter();
-    while let Some(a) = it.next() {
-        if a == "--watch" {
-            match it.next() {
-                Some(p) => watches.push(p),
-                None => {
-                    eprintln!("brood: --watch expects a file path");
-                    std::process::exit(2);
-                }
-            }
-        } else if let Some(p) = a.strip_prefix("--watch=") {
-            watches.push(p.to_string());
-        } else {
-            rest.push(a);
-        }
-    }
-    (rest, watches)
-}
-
-/// Pre-spawn one reloader per `--watch` file before the user's program runs.
-/// Single-file only — passing a directory is a hard error (use `nest run
-/// --watch` for project-tree watching). Errors on the bootstrap call print
-/// in the same GNU format as a normal eval error.
-fn install_watchers(interp: &mut Interp, paths: &[String]) {
-    for p in paths {
-        let meta = match std::fs::metadata(p) {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("brood: --watch {}: {}", p, e);
-                std::process::exit(2);
-            }
-        };
-        if meta.is_dir() {
-            eprintln!(
-                "brood: --watch {} is a directory; use `nest run --watch` for trees",
-                p
-            );
-            std::process::exit(2);
-        }
-    }
-    if let Err(e) = interp.eval_str("(require 'reload)") {
-        report_error(&e);
-        std::process::exit(1);
-    }
-    for p in paths {
-        let escaped = p.replace('\\', "\\\\").replace('"', "\\\"");
-        let snippet = format!("(reload-on-change \"{}\")", escaped);
-        if let Err(e) = interp.eval_str(&snippet) {
-            report_error(&e);
-            std::process::exit(1);
-        }
-    }
 }

@@ -175,6 +175,15 @@ URI-addressed read-only blobs, served directly by the dispatcher (no eval):
 - `brood://docs/brood-for-claude` — the AI pocket reference (already
   `%builtin-doc`-baked, commit `d650bcb`); the *primary* resource the agent
   fetches at session start.
+- `brood://docs/incarnations` — the self-improving findings index
+  (`docs/incarnations.md`, [`llm-native.md`](llm-native.md) §3). Agents
+  append a one-paragraph entry + a full writeup at the end of a non-trivial
+  session; the next agent reads it first.
+- `brood://docs/claude-demo-findings` — the first incarnation
+  (`docs/claude-demo-findings.md`, Claude Opus 4.7 building a concurrent
+  Mandelbrot). 511 lines of real notes on what bit a real agent.
+- `brood://docs/llm-native` — the forward-looking plan for making Brood
+  LLM-native; the status block at the bottom maps what's done vs open.
 - `brood://docs/language` — language reference.
 - `brood://docs/decisions` — ADRs.
 - `brood://docs/types` — the type system contract.
@@ -183,9 +192,15 @@ URI-addressed read-only blobs, served directly by the dispatcher (no eval):
 
 ## Prompts
 
-A single `brood-task` prompt template that pre-seeds the conventions an agent
-needs (CLAUDE.md essentials + a pointer at `brood://docs/brood-for-claude`).
-Optional and additive — the agent can do everything via tools alone.
+A single `brood-task` prompt template that orients a fresh agent. Sourced
+from [`docs/prompts/brood-task.md`](prompts/brood-task.md) — the markdown
+file is `include_str!`'d into the dispatcher, so the maintainer can edit
+the prompt without recompiling, *and* other agent harnesses (Cursor,
+Aider, Continue per [`llm-native.md`](llm-native.md) §14) can copy the
+file into their system prompts and get the same content. Points the agent
+at the three reads-first resources: `brood-for-claude`, `incarnations`,
+and the project's `CLAUDE.md`. Optional and additive — the agent can do
+everything via tools alone.
 
 ## Session model & hot reload
 

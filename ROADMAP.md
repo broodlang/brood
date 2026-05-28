@@ -123,6 +123,23 @@ The native kernel is **70 primitives** — see [`docs/primitives.md`](docs/primi
   `(require 'test)` (embedded). `tests/suite.blsp` uses it; run via
   `./bin/cli tests/suite.blsp` and `cargo test`. ADR-015, `docs/testing.md`. **[Brood]**
 
+### Adjacent to Stage 1 (designed; lands as the project work catches up)
+
+- ⬜ **Package manager** (ADR-037, [`docs/packages.md`](docs/packages.md)) —
+  third-party Brood deps via git URLs, project-local `_deps/` cache, lock
+  file for reproducibility. Designed early *because it changes project
+  management* (`*load-path*` extension, auto-fetch in `nest test`/`run`/
+  `check`, lock-file commit policy); landing the design before M2 keeps the
+  editor's plugin story from inventing its own one-off loader. **[Brood]**
+  policy in `std/package.blsp`; **[kernel]** primitives are tiny
+  (`%git-clone` / `%git-resolve-ref` / `%sha256-file` / `%http-get`).
+- ⬜ **Single-binary bundling** (ADR-038) — `nest bundle` produces a
+  self-contained `app` executable (append-to-binary: zip of project +
+  `_deps/` appended to a pre-built `brood`, magic-footer record, runtime
+  detects on startup). Explicitly **deferred**: no value to the project's
+  current loop, lands when the editor (M3/M4) actually needs end-user
+  distribution.
+
 ### Out of scope for Stage 1 (deferred, additive later)
 
 - `&key` named arguments (designed — ADR-011), supplied-p flags

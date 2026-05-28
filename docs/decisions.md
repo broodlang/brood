@@ -1585,3 +1585,181 @@ the dispatcher loads at startup. `nest new` templates gain a `.mcp.json`.
 The editor work later (M2/M3) inherits the same dispatcher — when the editor
 is itself a Brood image, `nest mcp` becomes a long-running thread inside it,
 no protocol change.
+
+
+## ADR-037 — Packages: git deps + project-local cache + lock file
+
+**Status:** proposed (2026-05-28). Design recorded in [`packages.md`](packages.md).
+
+**Context.** The module system (ADR-019) resolves `(require 'foo)` by walking
+`*load-path*`, with embedded std modules baked into the binary. That's enough
+for a single project (`src/` is on `*load-path*` automatically — ADR-020) and
+for the stdlib (embedded via `%builtin-module`). It is **not** enough for
+third-party Brood code: there's no way to declare "this project depends on
+`parser` version *X*", no place for that code to live, no way to reproduce a
+build. As soon as the editor (M2+) starts inviting plugins / modes /
+syntax-highlighters, the absence of a package story stops a real ecosystem
+from forming.
+
+The choices that defined the ecosystem-shape of every language with a
+package manager — central registry vs. URL imports, SAT-solver constraints
+vs. pinned refs, project-local vs. global cache — are baked in once and hard
+to walk back. Better to pick early, ship the simplest thing that fits the
+project's grain, and grow from real pressure rather than speculation.
+
+**Decision.** A **git-deps + project-local cache + lock file** package manager,
+designed around the project's existing constraints — language-as-policy
+(ADR-006), `nest` as the project tool (ADR-028), `project.blsp` as the
+manifest (ADR-020), Brood's module system (ADR-019). The decisions, in
+order from most to least committed:
+
+- **Manifest extension.** `project.blsp` gains an optional `:dependencies`
+  vector. Each entry is `[name :git URL :ref REF]` or `[name :path PATH]`
+  — the local name (the symbol `require` will see), a source kind, and
+  source-specific opts. No registry name resolution: **the source URL *is*
+  the package identity**. Go's `name = URL` model — pre-1.0-friendly,
+  no central infrastructure, no registry to host or pay for.
+- **Project-local cache.** Fetched deps live in `_deps/<name>/` under the
+  project root (gitignored). One copy per project, no global cache — keeps
+  each project hermetic and avoids the "did `cargo clean` clobber something
+  I needed" class of issue. Disk is cheap; correctness is not.
+- **Lock file.** `nest fetch` writes `project.lock.blsp` with the resolved
+  commit, the SHA-256 of the working-tree tarball, and the dep's own
+  transitive `:dependencies`. Re-running `fetch` is a no-op unless the
+  manifest or a `--update` flag asks otherwise. Reproducible builds without
+  inventing a binary lock format — the lock file is just Brood data, read
+  by the same reader/printer everything else uses.
+- **`*load-path*` integration.** `nest fetch` (and any `nest test`/`run`/
+  `check` that triggers an implicit fetch) extends `*load-path*` to include
+  each `_deps/<name>/src/`. The existing `(require 'foo)` machinery resolves
+  through that — *no change to the require semantics or surface*. Packages
+  are just code on the load path.
+- **No constraint solver — direct refs only.** Each dep pins an exact Git
+  ref (tag or commit). Two deps requiring different versions of the same
+  package is a **loud error** at `nest fetch` time; the user resolves it by
+  pinning explicitly in their root manifest. No SAT solver, no MVS, no
+  semver matching. The pain point this avoids is real and a recurring time
+  sink in other ecosystems; the cost is the user has to think about
+  conflicts manually until v2 (when, if it comes, an explicit resolver
+  gets designed against real data).
+- **No install scripts.** Packages are pure Brood source. Loading one runs
+  its `(provide …)` / top-level forms via the normal evaluator — no
+  privileged install-time hook, no `package.json`-style `postinstall`. A
+  package that wants to ship native code does it the standard Rust way (a
+  separate `cargo` crate, distributed via crates.io); the Brood side just
+  `require`s a wrapper. The npm-style supply-chain attack surface stays
+  closed by construction.
+- **Policy in Brood (`std/package.blsp`), mechanism in Rust.** The fetch
+  primitives are small: `%git-clone url dest ref` (shell out to `git`),
+  `%sha256-file path`, `%http-get url` (for future tarball deps —
+  primitive added now, used later). Manifest parsing, lock-file format,
+  cache layout, conflict detection, transitive resolution — all Brood.
+  Standard pattern (ADR-006/008).
+- **Subcommand surface on `nest`.** `nest fetch` / `nest update [<name>]` /
+  `nest add <name> <source> [opts]` / `nest remove <name>` / `nest tree`.
+  All Brood entry points dispatched from the existing `nest` Rust shell
+  (ADR-028). Existing subcommands (`test`, `run`, `check`, `format`, `doc`,
+  `mcp`) auto-fetch missing deps on first run.
+
+**Why.** Five forces line up:
+
+1. **The simplest thing that could possibly work.** Go's "URL = name" model
+   ships a working package manager in a weekend. Cargo's design is excellent
+   but borderline-impossible to fit in scope; Hex/Mix needs a registry; npm
+   needs a registry *and* unsolvable security work. Git deps + lock file
+   gets 90% of the value for 5% of the engineering.
+2. **ADR-006 — write the language in the language.** The package manager is
+   exactly the kind of policy that should be Brood. The only Rust the design
+   adds is "shell out to git" + "compute a SHA-256" — primitives the editor
+   will want for unrelated reasons anyway.
+3. **ADR-011 — ship the simple form, defer the powerful one.** No constraint
+   solver, no registry, no signing — each adds knobs forever. Add when a
+   concrete pain shows up.
+4. **The editor wants this.** M2+ introduces user-extensible pieces (modes,
+   syntax highlighters, keymaps). "How does a plugin arrive in my editor?"
+   has to have an answer before the editor lands; a package system that
+   already works for ordinary Brood code drops in naturally as the plugin
+   loader.
+5. **It changes project management — once.** The `_deps/` directory,
+   `project.lock.blsp`, the auto-fetch behaviour, the load-path extension —
+   they all affect how `nest test` / `nest run` / `nest check` work. Better
+   to design them in early than retrofit. (Specifically, this is why we're
+   landing the design *before* M2: the editor work shouldn't define its own
+   one-off plugin loader.)
+
+**Scope / deferred.**
+
+- **Registry, semver, constraint solving** — deferred. Direct git refs are
+  enough until a concrete need emerges.
+- **Tarball / HTTP deps** — deferred. `%http-get` lands now for future use;
+  no `:tarball` source kind in v1.
+- **Signed packages** — deferred. SHA-256 in the lock file gives bit-for-bit
+  reproducibility; trust still flows from "do you trust this URL". Signed
+  packages need a key infrastructure that's its own problem.
+- **Per-dep overrides** (`[:patch]`-style Cargo syntax) — deferred. A `:path`
+  source on a dep already gives you "I want to hack on this dep locally".
+- **A global / shared cache** — explicitly rejected for v1. Per-project
+  `_deps/` is simpler and avoids the "is my install reproducible across
+  machines" class of subtle bug. Cost: more disk usage. Acceptable.
+
+**Open questions / answer-on-implementation.**
+
+- *Where does the lockfile sit relative to the manifest?* Alongside in the
+  project root, like Cargo. Committed to the user's repo.
+- *How are vendored / mirrored deps modelled?* `:path` sources cover the
+  internal-mirror case; a separate `:tarball-cache` flag could later cache
+  HTTPS fetches in a local directory for offline builds.
+- *Does the auto-checker walk dep source?* No, by default. Dep source is
+  treated as stable (the package's author already passed `nest check`).
+  Override: `nest check --include-deps`.
+
+**Consequences.** `std/package.blsp` is a new module. `std/project.blsp`
+grows a `:dependencies` clause in its `(project …)` form and an
+`(ensure-deps)` step in `project-setup`. `nest`'s Rust shell gains
+`fetch`/`update`/`add`/`remove`/`tree` subcommands (each a one-liner that
+calls into `std/package.blsp`). The Rust kernel grows `%git-clone`,
+`%sha256-file`, `%http-get` primitives. `.gitignore` templates from `nest
+new` get `_deps/` added. `nest mcp` gets a `packages.list` tool surface
+later (separate ADR if needed). No change to the require/load semantics —
+the existing module system is the runtime; packages are just a source
+provisioner above it.
+
+## ADR-038 — Single-binary bundling: deferred until distribution matters
+
+**Status:** proposed, **deferred** (2026-05-28). Design recorded for later;
+no implementation yet.
+
+**Context.** "Run my Brood app as one executable, no `brood` interpreter on
+the host" matters for end-user distribution (the editor, eventually) but
+adds no value to the project's current loop (CLI + tests + REPL on dev
+machines that have `cargo`). The cheapest, most portable bundling approach
+is **append-to-binary**: take the built `brood` executable, append a zip of
+the project's source + `_deps/`, write a small magic-footer record, chmod
++x. The interpreter's `main` checks for the footer on its own path
+(`/proc/self/exe` / `_NSGetExecutablePath` / `GetModuleFileNameW`) and, if
+present, mounts the embedded archive and runs the project's `:main` instead
+of the default REPL.
+
+**Decision.** Land this when the editor's distribution story actually needs
+it — likely late M3 or M4 (server / daemon mode). Two design points worth
+recording so the eventual implementation isn't rediscovered:
+
+- **Append-to-binary, not re-link.** Rebuilding via `cargo` on the user's
+  machine works but takes a minute and needs the Rust toolchain installed.
+  Appending a zip + footer to a pre-built binary takes milliseconds and
+  needs nothing on the user's machine.
+- **`nest bundle [--target <triple>]`** is the surface. Static linking for
+  Linux uses `--target x86_64-unknown-linux-musl`; cross-compilation to
+  macOS/Windows uses `cross` or a build host. Out of scope on the bundler
+  side; the user provides a pre-built `brood` for the target.
+
+**Why deferred.** Stage 1 has no end-user distribution; the editor
+(M2/M3) is the first thing that does. Implementing it now would mean
+maintaining a wire format that no real user exercises. Better to wait for
+the editor's deployment shape to settle, then design once.
+
+**What's already in our favour for when we land it.** The prelude is
+already bundled via `include_str!`; `EMBEDDED_MODULES` is the established
+pattern. `project.blsp` already declares the entry point (`:main`).
+`(load …)` is the right hook for "load from inside the binary" — extend
+to look in the embedded archive before falling through to disk.

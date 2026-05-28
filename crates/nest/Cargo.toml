@@ -17,3 +17,7 @@ brood = { path = "../lisp" }
 # enough that we roll the framing ourselves rather than pull in an
 # MCP/LSP-shaped crate + async runtime — see ADR-036 / docs/mcp.md.
 serde_json = "1"
+# Argument parsing + help text + subcommand routing. See the matching note
+# in crates/cli/Cargo.toml — `nest` has more surface (run/test/check/format/
+# new/doc/mcp/repl), so the win from derive-based subcommands is bigger.
+clap = { version = "4", features = ["derive"] }

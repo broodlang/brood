@@ -398,3 +398,38 @@ The big bet is that Brood is small and young enough to design *for*
 LLM use rather than retrofit. None of these ideas are possible to do
 well in a 30-year-old language with a doc-stack that long predates
 LLMs. Brood gets the rare chance to bake them in from the start.
+
+---
+
+## Status (2026-05-28)
+
+| § | Item | Status |
+|---|---|---|
+| **1** | MCP server: `lookup`, `expand`, `eval`, `where-is` (via `lookup`), `check` | ✅ shipped (ADR-036, `docs/mcp.md`) |
+| **1** | MCP server: `find-pattern`, `explain-error` | ❌ — need §7 / §4 first |
+| **2** | Claude skill / plugin | partial — the `brood-task` MCP prompt (`docs/prompts/brood-task.md`) is the system-prompt fragment; the full skill bundle is TBD |
+| **3** | Incarnations file | ✅ `docs/incarnations.md` (with `claude-demo-findings.md` as the first entry); exposed via `brood://docs/incarnations` |
+| **4** | Structured error values with stable codes | ❌ — **highest-leverage next move** |
+| **5** | Macroexpand visible: MCP tool, LSP hover, CLI-error expansion context, docstring `:expands-to` | partial — MCP `macroexpand` tool shipped; the rest TBD |
+| **6** | `brood --watch` as LLM's REPL | partial — `--watch <file>` flag exists on `brood` and `nest run` (`std/reload.blsp`); structured JSON-lines output TBD |
+| **7** | Worked-example index by intent (`examples/by-task/`) | ❌ |
+| **8** | Idiom-aware lints (`prefer-match`, `prefer-transduce`, `no-fn-send`, `pin-or-bind`, …) | ❌ |
+| **9** | Property-test syntax `(prop "..." (a int?) ...)` | ❌ |
+| **10** | `nest eval-llm` gauntlet | ❌ |
+| **11** | `brood --think-aloud` | ❌ |
+| **12** | Demo prelude | partial — some helpers exist (`format`, ANSI escapes); a packaged `demo-prelude` TBD |
+| **13** | Failure-mode tagging in errors | ❌ — gated on §4 |
+| **14** | "Brood-aware" prompt fragment | ✅ `docs/prompts/brood-task.md` — served via MCP `prompts/get` and reusable as a file by other agent harnesses (Cursor / Aider / Continue) |
+| **15** | Persistent in-process eval | ✅ — that's the `nest mcp` session model (one long-lived `Interp`, ADR-013 hot reload) |
+
+**Quick map of what's done vs. open per the prioritisation in this doc.**
+The prioritisation block at the top picks §1 → §4 → §7 → §3 → §5 as the
+order. We've done §1 and §3; the gap to §4 (structured errors) and §7
+(examples-by-intent) is what the next session(s) should close.
+
+A small follow-up: **`nest new .`** currently fails (`.` isn't a valid
+project name and the existence check trips). Allowing it to scaffold into
+cwd (deriving the name from the cwd basename, skipping the file-exists
+check) is a ~30-minute change in `std/project.blsp` — separate from the
+LLM-native plan but related to the agent-attach loop §1 cares about.
+Recorded here so it doesn't get lost.

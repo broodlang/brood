@@ -144,7 +144,7 @@ fn compute_mac(
     peer_name: Symbol,
     my_name: Symbol,
 ) -> [u8; MAC_LEN] {
-    use hmac::Mac;
+    use hmac::{KeyInit, Mac};
     type HmacSha256 = hmac::Hmac<sha2::Sha256>;
     let mut mac = HmacSha256::new_from_slice(cookie.as_bytes()).expect("HMAC key length is fine");
     mac.update(peer_nonce);

@@ -425,11 +425,17 @@ docs/testing.md for the full guide."
        :failed failed
        :failed-assertions fails
        :ms elapsed
-       :results (map (fn (r)
+       ;; `(or … [])` on every list field so empty results render as JSON
+       ;; `[]` rather than `null`. Matters when the suite has zero tests, or
+       ;; a passing test has zero failures — agents branch on `length`, not
+       ;; `(= null)`.
+       :results (or (map (fn (r)
                        {:group (r-group r)
                         :name (r-name r)
                         :passed (not (r-failed? r))
                         :ms (r-ms r)
-                        :failures (map (fn (f) {:loc (first f) :details (second f)})
-                                       (r-fails r))})
-                  results)})))
+                        :failures (or (map (fn (f) {:loc (first f) :details (second f)})
+                                       (r-fails r))
+                                      [])})
+                  results)
+                 [])})))

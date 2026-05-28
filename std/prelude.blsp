@@ -17,6 +17,23 @@
 ;; multi-clause pattern form — (defn f ((0) 1) ((n) ...)) => (def f (fn ((0) 1) ((n) ...))).
 (defmacro defn (name & clauses) `(def ~name (fn ~@clauses)))
 
+;; `defonce` — bind `name` to `init` *only* on the first load. If `name` is
+;; already bound (e.g. the file is being re-loaded by a hot-reload
+;; supervisor), the form is a no-op and `init` is never evaluated. The
+;; hot-reload-friendly initialiser for two cases:
+;;   1. **Long-lived top-level state.** `(defonce *cache* {})` keeps the
+;;      cache across reloads instead of resetting on every edit.
+;;   2. **One-shot launchers.** `(defonce *loop-pid* (spawn (worker)))`
+;;      spawns the loop once; reloads update the function body via the
+;;      global table without firing a second worker.
+;; Subsequent reloads pick up code changes (via `(defn …)` rebinding); only
+;; the value held under `name` is preserved. Use plain `(def name …)` if you
+;; want the reset-on-load semantics. Raw `if` rather than `unless` so this
+;; macro can sit next to `defn` without depending on later prelude forms.
+(defmacro defonce (name init)
+  "Bind `name` to `init` only on the first load — leave it alone if already bound. The hot-reload-friendly initialiser for top-level state and one-shot launchers."
+  `(if (bound? (quote ~name)) nil (def ~name ~init)))
+
 ;; ---- logic ----
 (defn not (x)
   "Logical negation: `nil`/`false` become `true`, everything else `false`."

@@ -111,10 +111,13 @@ check after the first invocation."
   "`check` — advisory type-check the project. Returns
 `{:diagnostics [{:file :line :col :message} ...]}` (one entry per warning,
 position omitted when the checker can't supply one — ADR-024). Backed by
-`(check-project-structured)` in `std/project.blsp` (step 1c-a)."
+`(check-project-structured)` in `std/project.blsp` (step 1c-a). `(or … [])`
+so a clean project renders as `{:diagnostics []}` rather than `{:diagnostics
+null}` — agents shouldn't have to disambiguate \"no warnings\" from
+\"missing field\"."
   (require 'project)
   (try
-    {:diagnostics (check-project-structured)}
+    {:diagnostics (or (check-project-structured) [])}
     (catch e
       {:error (str e)})))
 
@@ -148,9 +151,9 @@ its own list that conses additional entries onto this one — `def` rebinds
 globals (ADR-013), so the dispatcher sees the project's version on its next
 fetch.
 
-Six tools work today; `check`, `run-tests`, and `processes` ship as
-documented stubs (their `:error` field tells the agent exactly what's
-missing and which step of `docs/mcp.md` it lives in)."
+All eight tools work today. (Earlier drafts shipped `check` / `run-tests` /
+`processes` as documented stubs; their step-1c-a / 1c-b / 1c-d Brood-side
+prereqs landed and the stubs were replaced with the real implementations.)"
   (list
     {:name "eval"
      :description "Evaluate a Brood expression in the session's global environment. State persists across calls (hot reload — `def` mutates the runtime image, ADR-013)."

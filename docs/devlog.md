@@ -3919,3 +3919,249 @@ Real binary: `tools/list` returns all 8 tool names, `processes`
 returns `{"processes":[]}` (empty array, correctly), `prompts/list`
 shows `["brood-task"]`, `prompts/get brood-task` returns 1157 chars
 of orientation text.
+
+
+---
+
+## 2026-05-28 — Package-manager design (ADR-037); bundler deferred (ADR-038)
+
+**Goal.** Land the design for third-party Brood deps *before* M2 — the
+`_deps/` layout, auto-fetch, and lock-file policy cross-cut every
+existing `nest` subcommand, and the upcoming editor plugin story
+shouldn't invent its own one-off loader. Decide now what the manifest
+shape is, what the cache looks like, where the trust boundary sits;
+implement when the language work pays itself down.
+
+**Recorded.**
+
+- **ADR-037** — *Packages: git deps + project-local cache + lock file*.
+  Go-style "URL = name" identity, no central registry; `project.blsp`
+  gains an optional `:dependencies` vector of `[name :git URL :ref REF]`
+  / `[name :path PATH]` entries; `nest fetch` writes
+  `project.lock.blsp` (committed) with the resolved commit + SHA-256
+  per dep; project-local `_deps/<name>/` cache (gitignored,
+  reconstructable from the lock); auto-fetch on first run of every
+  `nest` subcommand. The Rust kernel grows four small primitives
+  (`%git-clone`, `%git-resolve-ref`, `%sha256-file`, `%http-get`);
+  policy is `std/package.blsp` (new). No constraint solver, no install
+  scripts, no native code at install time — supply-chain attack class
+  closed by construction.
+- **ADR-038** — *Single-binary bundling: deferred until distribution
+  matters*. Append-to-binary approach (zip + magic footer, runtime
+  detects from `/proc/self/exe`); ships when the editor (M3/M4) needs
+  end-user distribution, not before.
+
+- **`docs/packages.md`** — the long-form design walkthrough: manifest
+  model, lock-file format with examples, resolution algorithm
+  (depth-first, MVS-without-the-solver: direct beats transitive),
+  conflict policy (loud error, no auto-resolve), `*load-path*`
+  integration, the full `nest` subcommand surface, cache layout +
+  `.gitignore` interaction, the hot-reload story for path-deps, the
+  trust/security model, a side-by-side with Go modules / Cargo / npm,
+  the explicitly-deferred list (registry, semver, signing, tarball
+  sources), and an implementation sketch the eventual coder can read
+  to write the same thing twice.
+
+**Updated.**
+
+- `docs/roadmap.md` — M1 list gets the ⬜ "Package manager" entry next
+  to "Project model & test tool", with a one-paragraph summary and a
+  pointer to ADR-037 / `packages.md`.
+- `ROADMAP.md` — new **Adjacent to Stage 1** section: package manager
+  (designed, lands as project work catches up) + single-binary
+  bundling (designed, deferred until M3/M4).
+- `docs/decisions.md` — ADR-037 + ADR-038 appended.
+
+**Why early.** Three reasons:
+
+1. **It changes project management.** Auto-fetch on every `nest`
+   subcommand, `_deps/` in `.gitignore`, the lock-file commit
+   convention — those are workflow choices, not implementation
+   details. Better to land them once.
+2. **The editor needs it.** M2 starts introducing modes / syntax
+   highlighters / keymaps as plugins; a package system that already
+   exists for ordinary Brood code drops in as the plugin loader
+   instead of a one-off solution.
+3. **It's cheap once designed.** Most of the system is Brood policy
+   (`std/package.blsp`); the Rust additions are four small primitives
+   that don't touch the evaluator, the GC, or the scheduler. Designing
+   was the hard part; coding it is a few days when the time comes.
+
+**Not changed yet.** No code lands in this commit — just docs. The
+design is captured fully so the implementation, when it happens, is a
+reading-comprehension exercise rather than a re-design.
+
+**What's next** (per `docs/roadmap.md`'s "what comes next" angle):
+
+- *Either* start M2 (rope-backed buffers — the editor's data model)
+  *or* implement the package manager now. The package design doesn't
+  block M2; it's a parallel track that pays interest once the editor
+  starts inviting plugins. My read: M2 first if the editor goal is
+  pulling; packages first if the user-extensibility story is.
+
+---
+
+## 2026-05-28 (continued) — Module splits: dist, types::check, process
+
+**Goal.** Land the three file splits flagged at the end of the security
+review as "substantial restructurings deferred for the next pass" — the
+three biggest single files in the crate were carrying multiple concerns.
+
+**`crates/lisp/src/dist.rs`** (1657 → 615 lines at the root, plus three
+submodules). Rust 2018-style parent file `dist.rs` + sibling directory
+`dist/` holding:
+
+- **`dist/wire.rs`** (854 lines) — the entire wire codec: `Frame` enum,
+  `FRAME_*`/`TARGET_*`/`M_*` tag constants, `frame_bytes`/`write_frame`/
+  `read_frame`/`encode_frame`/`decode_frame`/`encode_target`/
+  `decode_target`/`encode_msg`/`decode_msg_at`/`encode_closure`/
+  `decode_closure_at`, all `put_*`/`get_*` byte helpers, `MAX_DECODE_DEPTH`,
+  `PROTOCOL_MAGIC`/`NONCE_LEN`/`MAC_LEN`, and the round-trip tests. Pure
+  data → bytes, no sockets, no scheduler. Items the parent needs are
+  `pub(super)`; `Target` stays at the dist root (used by `route` and the
+  reader thread too).
+- **`dist/handshake.rs`** (216 lines) — the v2 authenticated exchange
+  (`Role` enum, `handshake`, `read_hello`/`read_auth`, `compute_mac`,
+  `ct_eq`, `fresh_nonce`) plus the `compute_mac_is_symmetric_under_role_flip`
+  test that exercises the cross-MAC equality. Touches `super::NODE` for
+  the cookie + name.
+- **`dist/heartbeat.rs`** (93 lines) — the single shared liveness thread:
+  `HEARTBEAT_INTERVAL`/`DOWN_AFTER`/`HEARTBEAT_STARTED`/`ensure_heartbeat`/
+  `heartbeat_loop`. Reads `super::now_millis` and the connection table.
+  Re-spawn-on-panic stays here.
+
+**`crates/lisp/src/types/check.rs`** (1784 → 949 lines, most of that
+tests). Sub-modules in `types/check/`:
+
+- **`check/ctx.rs`** (187 lines) — the `Ctx` value the walk threads:
+  `types` (variable narrowings), `guards` (let-stored guard results),
+  `aliases` (let-binding aliases), `locals`, `file_globals`, plus all
+  `narrow`/`bind`/`add_guard`/`add_alias` impls and the BFS chain.
+- **`check/sigs.rs`** (183 lines) — where signatures + arities come
+  from: `primitive_sig` (reads `NativeFn.sig`), `curated_sig` (the
+  hand-vetted stdlib table), `infer_sig` (one-step inference),
+  `sig_of`, `arity_of`, `arity_str`, `is_globally_bound`.
+- **`check/guards.rs`** (175 lines) — predicates over forms:
+  `is_syntactic_keyword`, `skips_body`, `guard_assertion`,
+  `literal_eq_guard`, `expr_ty`.
+- **`check/walk.rs`** (403 lines) — the recursive `check_into` and
+  every special-form helper (`check_if`/`check_let`/`check_fn`/`check_def`/
+  `check_defn`), plus `fn_params`, `bindings`, `list_items`,
+  `collect_def_names`. `list_items` is `pub(super)` so `sigs` and
+  `guards` can peel a call form's head.
+- **`check.rs`** (parent) — module doc rewritten with a module map; the
+  public entries `check_form` / `check_located` / `check_file`; and the
+  tests block (unchanged behaviour, plus two new imports for items
+  the tests reach into directly: `super::sigs::primitive_sig`,
+  `crate::types::Ty`, `crate::core::value::Tag`).
+
+**`crates/lisp/src/process.rs`** (1358 → 705 lines). Three submodules
+under `process/`; the remaining `mailbox` + `scheduler` concerns stayed
+in the parent because they share too much private state for a clean
+split to be worth the visibility annotations:
+
+- **`process/message.rs`** (369 lines) — `Message`/`ClosureMsg` types
+  plus the deep-copy machinery (`to_message`/`to_message_rec`/
+  `closure_to_message`/`collect_symbols`/`local_lookup`/`from_message`/
+  `closure_from_message`). `MAX_MESSAGE_DEPTH` lives here too. The
+  cleanest extraction — no scheduler dependencies; just heap + value.
+- **`process/monitor.rs`** (306 lines) — the `Watcher` enum, `MONITORS`
+  and `PENDING_REMOTE` tables, `NEXT_REF`/`next_ref`, and the full
+  monitor lifecycle: `fire_down`/`add_monitor`/`monitor`/`demonitor`/
+  `drop_monitor`/`record_pending_remote`/`drop_pending_remote`/
+  `demonitor_remote_fanout`/`handle_node_down`/`fire_noconnection`/
+  `local_node_pid_msg`/`down_message`. Takes `REGISTRY` and `deliver`
+  from `super` (the lock-ordering invariant — REGISTRY first, then
+  MONITORS — is documented in both files).
+- **`process/timer.rs`** (65 lines) — `TimerQueue`/`TIMERS`/
+  `TIMER_STARTED`/`arm_timer`/`timer_loop`. The wake-up path
+  (`wake_for_timeout`) stays in `process.rs` so timer.rs doesn't need
+  the full mailbox internals (`MailboxState`/`Process`/`enqueue`); it
+  just calls `super::wake_for_timeout(pid)`.
+
+**Cumulative.** The three biggest files in the crate dropped from
+1657 + 1784 + 1358 = 4799 lines to 615 + 949 (mostly tests) + 705 =
+2269 lines at the roots; the remainder is spread across ten focused
+submodules with clear responsibilities, each `pub(super)` annotation
+documenting a real cross-concern boundary.
+
+**Verified.** `cargo test --workspace --exclude nest` → 240 passed,
+0 failed. (The `nest` binary's `mcp.rs` has unrelated WIP from a
+concurrent session — `list_prompts` / `get_prompt` referenced but
+not yet defined — so it's excluded from the run, not regressed.)
+
+---
+
+## 2026-05-28 — LLM-native bundle: incarnations + new MCP resources + externalized prompt
+
+**Goal.** Activate the `docs/llm-native.md` plan's low-cost / high-impact
+items that *ride on* the MCP work just landed — the "add now" bundle from
+the analysis at the bottom of the MCP step-5 entry — and document the
+remaining roadmap so the next session has a clear picture of what's open.
+
+**Landed.**
+
+- **`docs/incarnations.md`** (new) — the self-improving findings index
+  ([`llm-native.md`](llm-native.md) §3). One paragraph per session: goal,
+  blockers, surprises, "what I'd tell next-me", + a link to the full
+  writeup. Format guide at the top so the next agent (or human) appends in
+  the right shape without re-inventing it. First entry is the May 28
+  Claude Opus 4.7 concurrent-Mandelbrot session.
+- **Three new MCP resources** in `crates/nest/src/mcp.rs`:
+  `brood://docs/incarnations`, `brood://docs/llm-native`,
+  `brood://docs/claude-demo-findings`. Total resources: 8 (was 5). The
+  agent's reads-first funnel is now: pocket reference → incarnations →
+  CLAUDE.md. The forward-looking plan is one fetch away when wanted.
+- **`docs/prompts/brood-task.md`** (new) — the `BROOD_TASK_PROMPT`
+  constant pulled out of `mcp.rs` into a real markdown file,
+  `include_str!`'d by the dispatcher. Two payoffs at once: the maintainer
+  can edit the prompt without recompiling, *and* other agent harnesses
+  (Cursor, Aider, Continue per `llm-native.md` §14) can drop the same
+  file into their system prompts and get the same content. The new
+  prompt body is 2009 chars (was 1157) — gained the incarnations
+  pointer, the CLAUDE.md pointer, and the "don't `print` from `eval`"
+  caveat (until step 1c-c lands).
+- **Status block** at the bottom of `docs/llm-native.md` mapping each of
+  the doc's 15 items to its current state — ✅ shipped (§1 / §3 / §14
+  / §15 fully, partial on §2 / §5 / §6 / §12), ❌ open (§4 / §7 / §8 /
+  §9 / §10 / §11), gated (§13 on §4). Picks out the next-highest-leverage
+  item: **structured errors with stable codes** (§4) — the doc's own
+  top-3 priority and the thing that turns every MCP `:error` field from
+  prose into branchable data.
+
+**Documented but deferred.** The status block in `docs/llm-native.md`
+is the canonical "what's open" view. Highlights:
+
+- **§4 structured errors with codes** is the next big move; touches
+  `error.rs`, every raise site, and JSON encoding. Real project (≈ a
+  session). Would let `try`/`catch` match on `:kind`, let `brood
+  --explain E0042` print the doc page, and let the harness branch on
+  `:user-fault false` (§13).
+- **§7 examples-by-intent** (medium effort) unblocks `brood.find-pattern`
+  as an MCP tool — "I need an actor pool" → a runnable example.
+- **§6 `--watch --json` structured output** would close the LLM-as-REPL
+  loop. The `--watch` flag exists; structured framing is small but
+  separate from MCP.
+- **§8 idiom-aware lints** (`prefer-match`, `prefer-transduce`,
+  `no-fn-send`, `pin-or-bind`) — high-yield because LLMs make these
+  mistakes *consistently* (60% of the time, vs. 1% for humans, per the
+  doc). Lives in the type-checker pass.
+- **§10 the gauntlet** — the measurement loop. Long-term.
+- **`nest new .`** — small follow-up noticed during this session: the
+  scaffolder errors on `.` (invalid name + dir-exists check). Allowing
+  it to scaffold into cwd (deriving the name from the basename,
+  skipping the existence check, overwriting existing scaffold files)
+  is ~30 min in `std/project.blsp`. Recorded in the `llm-native.md`
+  status block.
+
+**Tests.** Updated `resources_list_includes_the_baked_doc_resources` to
+assert the three new URIs are present. `prompts_get_returns_the_orientation_message`
+still passes against the externalized prompt (the asserted markers —
+`brood://docs/brood-for-claude`, "immutable", "MCP tools" — all
+survived the rewrite). 28/28 nest tests green; LSP unchanged.
+
+**Verified.** `cargo build` clean. Real-binary smoke: `resources/list`
+returns 8 resources including the three new ones;
+`resources/read brood://docs/incarnations` returns the 3 KB index;
+`prompts/get brood-task` returns the 2 KB externalized prompt with the
+incarnations pointer baked in.

@@ -224,10 +224,11 @@ fn parse_source_location(heap: &Heap, v: Value) -> Option<SourceLoc> {
 /// the compile pass actually evaluates — useful when debugging quasiquote or
 /// nested-macro emission).
 ///
-/// `src` must read as **exactly one** top-level form. Multi-form input takes
-/// only the first form (and the rest are dropped on `reset_local_to` below);
-/// document this to callers rather than wrap them in `(do …)`, which would
-/// hide the misuse.
+/// `src` must read as **exactly one** top-level form. Multi-form input is
+/// **rejected** (rather than silently expanding only the first) — silently
+/// dropping forms hides agent misuse where they meant to chain expansions;
+/// returning an error makes the contract obvious. Wrap explicitly in
+/// `(do …)` to expand a sequence as one form.
 ///
 /// Parses the source ourselves rather than going through
 /// `eval_str("(macroexpand-1 'SRC)")` — the latter would let `src` break out
@@ -241,6 +242,12 @@ pub fn macroexpand_to_string(
     let result = (|| -> Result<String, String> {
         let forms = crate::syntax::reader::read_all(&mut interp.heap, src)
             .map_err(|e| e.to_string())?;
+        if forms.len() > 1 {
+            return Err(format!(
+                "expected exactly one form, got {} (wrap multiple forms in `(do …)`)",
+                forms.len()
+            ));
+        }
         let form = forms.into_iter().next().ok_or("no form to expand")?;
         let expanded = if recursive {
             crate::eval::macros::macroexpand(&mut interp.heap, form, interp.root)

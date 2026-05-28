@@ -12,4 +12,11 @@ path = "src/main.rs"
 
 [dependencies]
 brood = { path = "../lisp" }
+# Line editing + history for the REPL (arrow keys, Ctrl-A/E, persistent
+# history). Pure dev/UX dep; not pulled into the brood library.
 rustyline = "18.0.0"
+# Argument parsing + help text. The CLI is small enough to hand-roll, but
+# we've already paid for one typo-detection bug from doing so — clap's
+# typo suggestions and uniform `--foo=bar`/`--foo bar` handling pay for
+# themselves. derive feature is the ergonomic path.
+clap = { version = "4", features = ["derive"] }
