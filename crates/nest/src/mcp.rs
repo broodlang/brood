@@ -175,7 +175,8 @@ fn dispatch(interp: &mut Interp, msg: &Json) -> Outcome {
         "tools/call" => call_tool(interp, &params),
         "resources/list" => Ok(json!({ "resources": list_resources() })),
         "resources/read" => read_resource(&params),
-        "prompts/list" => Ok(json!({ "prompts": [] })),
+        "prompts/list" => Ok(json!({ "prompts": list_prompts() })),
+        "prompts/get" => get_prompt(&params),
         "ping" => Ok(json!({})),
         "shutdown" => Ok(Json::Null),
         other => Err(RpcError::method_not_found(other)),
@@ -441,6 +442,60 @@ fn read_resource(params: &Json) -> Result<Json, RpcError> {
 }
 
 // ============================================================================
+// `prompts/list` + `prompts/get`
+// ============================================================================
+
+/// The orientation prompt every Brood-aware agent should fetch first. Short
+/// on purpose — depth lives in the `brood://docs/brood-for-claude` resource;
+/// this is the "what should I do *right now*?" pointer. Step 5a (ADR-036).
+const BROOD_TASK_PROMPT: &str = "\
+You're working in a Brood project (a `.blsp` Lisp). \
+Before generating Brood code, fetch `brood://docs/brood-for-claude` — the \
+pocket reference for the idioms that differ from other Lisps.
+
+**Brood essentials**
+- Data is immutable; `def` is the only mutation (rebinds globals, Erlang-style hot reload).
+- Loops are tail recursion or processes (`spawn`/`receive`/`send`). No `while`, no `set!`.
+- Truthiness: only `nil` and `false` are falsy.
+- Modules: `(provide 'foo)` + `(require 'foo)`; symbols are interned, compare with `=`.
+
+**MCP tools (use these to interact with the live image)**
+- `eval` — try expressions. State (a `def`, a `spawn`) persists between calls.
+- `lookup` — `:arglist` + `:doc` + `:source-location` for a name. No quote: `{:name \"map\"}`.
+- `macroexpand` — see what a macro lowers to. Useful for `when-let`, `cond`, `match`.
+- `format` — reformat source idempotently.
+- `load` — load a `.blsp` file into the live image.
+- `check` — advisory type-check; `run-tests` — structured runner result;
+  `processes` — live pids.
+
+Project conventions live in `CLAUDE.md` at the project root — open it for
+project-specific guidance before editing.";
+
+fn list_prompts() -> Vec<Json> {
+    vec![json!({
+        "name": "brood-task",
+        "description": "Orient an agent for editing this Brood project: language quirks, MCP tool list, and project conventions pointer.",
+    })]
+}
+
+fn get_prompt(params: &Json) -> Result<Json, RpcError> {
+    let name = params
+        .get("name")
+        .and_then(Json::as_str)
+        .ok_or_else(|| RpcError::invalid_params("missing 'name'"))?;
+    if name != "brood-task" {
+        return Err(RpcError::invalid_params(format!("no such prompt: {name}")));
+    }
+    Ok(json!({
+        "description": "Orient an agent for editing this Brood project",
+        "messages": [{
+            "role": "user",
+            "content": { "type": "text", "text": BROOD_TASK_PROMPT },
+        }],
+    }))
+}
+
+// ============================================================================
 // Brood ↔ JSON conversion
 // ============================================================================
 
@@ -487,7 +542,21 @@ pub fn value_to_json(heap: &Heap, v: Value) -> Result<Json, String> {
             }
             Ok(Json::Object(obj))
         }
-        Value::Fn(_) | Value::Macro(_) | Value::Native(_) | Value::Ref(_) | Value::Pid { .. } => {
+        // Pids and refs round-trip as tagged objects so a tool returning
+        // `(list-processes)` (or any pid-bearing value) doesn't lose data.
+        // `{"$type": "pid", "node": "name", "id": 42}` and `{"$type": "ref",
+        // "id": 7}` — the `$type` tag distinguishes them from plain maps so
+        // an agent can spot them programmatically. `json_to_value` does
+        // *not* reverse this (a JSON object stays a Brood map keyed by
+        // keywords); constructing a fresh pid/ref from JSON would be
+        // unsound (pids name a live mailbox; refs are unique).
+        Value::Pid { node, id } => Ok(json!({
+            "$type": "pid",
+            "node": value::symbol_name(node),
+            "id": id,
+        })),
+        Value::Ref(id) => Ok(json!({ "$type": "ref", "id": id })),
+        Value::Fn(_) | Value::Macro(_) | Value::Native(_) => {
             Err(format!(
                 "value of kind {:?} has no JSON representation",
                 value::tag(v)
@@ -969,19 +1038,126 @@ mod tests {
     }
 
     #[test]
-    fn std_check_and_run_tests_and_processes_are_documented_stubs() {
-        // Each ships with an `:error` that names what needs to land (step 1c).
-        // A future un-stub flips this — that's the signal to update the test.
+    fn run_tests_structured_returns_a_structured_summary() {
+        // Drive the underlying `(run-tests-structured)` directly — invoking
+        // the `run-tests` MCP tool would discover and run the workspace's
+        // entire in-language suite (cwd-dependent), which is slow and
+        // potentially recursive in CI. Register two inline tests and verify
+        // the result map carries the documented keys.
         let mut interp = Interp::new();
-        for name in ["check", "run-tests", "processes"] {
-            let (_, body) = invoke_tool(&mut interp, name, json!({}));
-            let body = body.unwrap();
-            let err = body["error"].as_str().expect("expected an :error field");
-            assert!(
-                err.contains("not yet wired"),
-                "{name}: {err:?} (lost the stub marker)"
-            );
+        interp
+            .eval_str(
+                r#"
+                (require 'test)
+                (test "always-ok" (assert= 1 1))
+                "#,
+            )
+            .unwrap();
+        let result = interp.eval_str("(run-tests-structured)").unwrap();
+        let printed = interp.print(result);
+        // Pin the contract keys without counting (the test framework can
+        // auto-register tests of its own across versions).
+        for key in &[":total", ":passed", ":failed", ":ms", ":results"] {
+            assert!(printed.contains(key), "missing {key}: {printed}");
         }
+    }
+
+    #[test]
+    fn std_check_tool_returns_structured_diagnostics_or_an_error() {
+        // After step 1c-a, `check` calls `(check-project-structured)` and
+        // returns either `{:diagnostics [...]}` (when invoked from inside a
+        // Brood project — the workspace root in `cargo test`'s cwd usually
+        // is one) or `{:error msg}` (when it isn't). Either shape passes;
+        // what *must not* be present is the old "not yet wired" stub marker.
+        let mut interp = Interp::new();
+        let (_, body) = invoke_tool(&mut interp, "check", json!({}));
+        let body = body.unwrap();
+        let has_diag = body["diagnostics"].is_array();
+        let has_err = body["error"].is_string();
+        assert!(has_diag || has_err, "neither :diagnostics nor :error: {body:?}");
+        if let Some(err) = body["error"].as_str() {
+            assert!(!err.contains("not yet wired"), "still a stub: {err:?}");
+        }
+    }
+
+    #[test]
+    fn std_processes_tool_returns_a_pid_list() {
+        // After step 1c-d, `processes` is wired to `(list-processes)`. There's
+        // always at least *some* registered mailbox by the time a tool call
+        // executes (the dispatcher's eval runs in a registered process), so
+        // the list is non-empty. Each entry is a tagged `{$type: "pid"}`
+        // object (see `value_to_json` in this file).
+        let mut interp = Interp::new();
+        let (_, body) = invoke_tool(&mut interp, "processes", json!({}));
+        let body = body.unwrap();
+        let procs = body["processes"]
+            .as_array()
+            .expect("expected :processes to be an array");
+        assert!(!procs.is_empty(), "no live pids?");
+        for p in procs {
+            assert_eq!(p["$type"], "pid", "{p:?}");
+            assert!(p["id"].is_number());
+            assert!(p["node"].is_string());
+        }
+    }
+
+    #[test]
+    fn prompts_list_includes_brood_task() {
+        let mut interp = Interp::new();
+        let resp = round_trip(
+            &mut interp,
+            &[req(1, "prompts/list", json!({})), notif("exit", json!(null))],
+        );
+        let prompts = resp[0]["result"]["prompts"].as_array().unwrap();
+        let names: Vec<&str> = prompts.iter().map(|p| p["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"brood-task"), "{names:?}");
+    }
+
+    #[test]
+    fn prompts_get_returns_the_orientation_message() {
+        let mut interp = Interp::new();
+        let resp = round_trip(
+            &mut interp,
+            &[
+                req(1, "prompts/get", json!({ "name": "brood-task" })),
+                notif("exit", json!(null)),
+            ],
+        );
+        let messages = resp[0]["result"]["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        let text = messages[0]["content"]["text"].as_str().unwrap();
+        // Pin the orientation pointers — the prompt is a *contract*, the
+        // agent reads it once at session start, so we don't want it to
+        // silently drift to something un-useful.
+        assert!(text.contains("brood://docs/brood-for-claude"), "{text}");
+        assert!(text.contains("immutable"), "{text}");
+        assert!(text.contains("MCP tools"), "{text}");
+    }
+
+    #[test]
+    fn prompts_get_returns_an_error_for_unknown_names() {
+        let mut interp = Interp::new();
+        let resp = round_trip(
+            &mut interp,
+            &[
+                req(1, "prompts/get", json!({ "name": "no-such-prompt" })),
+                notif("exit", json!(null)),
+            ],
+        );
+        assert_eq!(resp[0]["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn value_to_json_renders_pids_as_tagged_objects() {
+        // The tagged-object shape pids round-trip through is part of the MCP
+        // contract — `(list-processes)` and any handler returning a pid relies
+        // on it. Pin both fields.
+        let mut interp = Interp::new();
+        let pid = interp.eval_str("(self)").unwrap();
+        let json = value_to_json(&interp.heap, pid).unwrap();
+        assert_eq!(json["$type"], "pid");
+        assert!(json["id"].is_number());
+        assert!(json["node"].is_string());
     }
 
     #[test]

@@ -6,8 +6,16 @@ the project tool: `nest mcp`. This is the agent-side counterpart to
 *agents* operating on the project at the level of named verbs and a long-lived
 image.
 
-> Status: **proposed** (2026-05-28). Recorded as
+> Status: **implemented, v0** (2026-05-28). Recorded as
 > [ADR-036](decisions.md#adr-036--nest-mcp-a-per-project-model-context-protocol-server-tools-surface-in-brood).
+> Six of the eight tools live, three Tier-1 niceties in place (project-defined
+> tool discovery, `prompts/get`, `.mcp.json` scaffolded by `nest new`). The
+> single remaining piece is the **`*out*` dynvar / `with-out-str` work**
+> (step 1c-c) — needed to fold a `:stdout` field into `EvalResult` and to
+> safely redirect `print` output away from the dispatcher's stdout. Deferred
+> until a concrete need; agents using `eval` should return data via the
+> result value rather than calling `(print …)` (which corrupts the JSON-RPC
+> stream on the current main path).
 > Implementation order:
 > **(1a) extract `brood::introspect` from the LSP crate into the lib — done
 > (2026-05-28; lives at `crates/lisp/src/introspect.rs`, LSP migrated)**;
@@ -27,11 +35,32 @@ image.
 > registry; six live (`eval`, `load`, `lookup`, `macroexpand`, `format`, and
 > dispatch for any project-defined tools), three documented stubs (`check`,
 > `run-tests`, `processes`); added to `EMBEDDED_MODULES` so `(require 'mcp)`
-> finds it without a load-path; 8 step-3 integration tests through the real
-> dispatcher; verified against the real binary — `tools/list` returns the
-> eight tools, `eval (+ 1 2 3)` → "6", `lookup map` → arglist + doc)**;
-> (4) `nest new` scaffolds `.mcp.json`;
-> (5) docs/devlog tick.
+> finds it without a load-path)**;
+> **(4) `nest new` scaffolds `.mcp.json` — done (2026-05-28; the scaffolder
+> writes `foo/.mcp.json` pointing at `nest mcp`, so `cd foo && claude`
+> auto-attaches the agent)**;
+> **(1c-a) structured `(check-project-structured)` in `std/project.blsp` —
+> done (returns `[{:file :line :col :message}]`); `check` MCP tool now
+> dispatches through it**;
+> **(1c-b) structured `(run-tests-structured)` in `std/test.blsp` and
+> `(run-project-tests-structured)` in `std/project.blsp` — done; `run-tests`
+> MCP tool now returns `{:total :passed :failed :failed-assertions :ms
+> :results [...]}` instead of the stub**;
+> **(1c-d) `(list-processes)` Rust primitive — done; `processes` MCP tool
+> now returns `{:processes [{:$type :pid :node :id} ...]}` (an empty array,
+> not nil/null, when nothing is registered)**;
+> **(5a) `prompts/get` with `brood-task` — done (a single orientation
+> prompt that points at `brood://docs/brood-for-claude` and lists the
+> tool surface)**;
+> **(5b) project-defined tool discovery — done (`std/mcp.blsp` auto-loads
+> `<project-root>/mcp.blsp` if present, after `provide`ing 'mcp; the
+> project file can `def mcp-tools` to extend or replace the catalogue)**;
+> (1c-c) `*out*` dynvar + `(with-out-str)` + dispatcher stdout redirect
+> — **deferred**; the `EvalResult` shape sketched in step 1b includes a
+> `:stdout` field that will be lit up by this. Needs design for
+> per-process buffering across the scheduler's worker threads (a
+> thread-local would leak captures across green processes scheduled on
+> the same OS thread).
 
 ## Why a server, and why not just the LSP
 

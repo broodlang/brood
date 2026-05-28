@@ -108,23 +108,36 @@ check after the first invocation."
         {:error (str e)}))))
 
 (defn mcp-check-tool (args)
-  "`check` — advisory type-check the project. *Stub for v0*: the Brood-side
-`(check-project)` is print-oriented (GNU lines to stderr + an `Int` count),
-so a structured wrapper has to land first. See ADR-036 step 1c (docs/mcp.md)."
-  {:error "check is not yet wired — needs a structured (check-project) variant in std/project.blsp (step 1c)"})
+  "`check` — advisory type-check the project. Returns
+`{:diagnostics [{:file :line :col :message} ...]}` (one entry per warning,
+position omitted when the checker can't supply one — ADR-024). Backed by
+`(check-project-structured)` in `std/project.blsp` (step 1c-a)."
+  (require 'project)
+  (try
+    {:diagnostics (check-project-structured)}
+    (catch e
+      {:error (str e)})))
 
 (defn mcp-run-tests-tool (args)
-  "`run-tests` — run the project test suite. *Stub for v0*: same blocker as
-`check` — `(run-project-tests)` prints GNU per-test output and raises on
-failure. Needs a structured runner in std/test.blsp (step 1c)."
-  {:error "run-tests is not yet wired — needs a structured runner in std/test.blsp (step 1c)"})
+  "`run-tests` — run the project test suite. Returns the structured runner
+result from `(run-project-tests-structured)` — `{:total :passed :failed
+:failed-assertions :ms :results [{:group :name :passed :ms :failures ...}]}`.
+Outside a Brood project, returns `{:error msg}`."
+  (require 'project)
+  (try
+    (run-project-tests-structured)
+    (catch e
+      {:error (str e)})))
 
 (defn mcp-processes-tool (args)
-  "`processes` — list the session's live green processes. *Stub*: there is
-no `(list-processes)` primitive today — `(self)` is the only handle on a
-running process. The fix is a `process` enumeration primitive (small Rust
-addition), gated on a concrete agent use-case."
-  {:error "processes is not yet wired — needs a (list-processes) primitive"})
+  "`processes` — list the session's live green processes. Returns
+`{:processes [{:node :id} ...]}` (the JSON shape pids use; see
+`value_to_json` in the dispatcher). Order is unspecified — sort by
+`:id` if you need stability. Backed by the `(list-processes)`
+primitive (`crates/lisp/src/process.rs`). `(or … [])` so an empty
+list renders as JSON `[]` rather than `null` — agents shouldn't have
+to disambiguate \"no processes\" from \"missing field\"."
+  {:processes (or (list-processes) [])})
 
 ;; ---- catalogue -------------------------------------------------------------
 
@@ -179,6 +192,23 @@ missing and which step of `docs/mcp.md` it lives in)."
      :schema {:type "object" :properties {}}
      :handler mcp-run-tests-tool}
     {:name "processes"
-     :description "List live green processes (stub — needs a (list-processes) primitive)."
+     :description "List live green processes."
      :schema {:type "object" :properties {}}
      :handler mcp-processes-tool}))
+
+;; ---- project-defined extensions (step 5b) ---------------------------------
+;; If the project root has its own `mcp.blsp`, load it now so it can:
+;;   - bind additional `defn`s the catalogue references,
+;;   - `def mcp-tools` to a richer list (e.g. wrap the std catalogue:
+;;     `(let (base mcp-tools) (defn mcp-tools () (append (base) (list ...))))`).
+;; Runs **once**: this whole file body executes once per session (the dispatcher
+;; calls `(require 'mcp)` which `provide`s 'mcp early, so subsequent requires
+;; are no-ops). Failures in the project mcp.blsp surface as load errors during
+;; `nest mcp` startup, which is exactly when the agent's `.mcp.json` would
+;; have wired it up — the right time for a hard error.
+(require 'project)
+(let (root (project--find-root (cwd)))
+  (when root
+    (let (project-mcp (path-join root "mcp.blsp"))
+      (when (file-exists? project-mcp)
+        (load project-mcp)))))

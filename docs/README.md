@@ -18,6 +18,7 @@ it's going. Start here.
 | [decisions.md](decisions.md) | The design-decision log (ADR-style): the *why* behind the choices, so future-us doesn't relitigate them by accident. |
 | [devlog.md](devlog.md) | A chronological log of work sessions — what changed and why, in order. |
 | [claude-demo-findings.md](claude-demo-findings.md) | An LLM's notes after writing a concurrent Mandelbrot demo in Brood from scratch: language familiarity gaps, the multi-thread scheduler race, interpreter perf numbers, tooling friction (formatter, type-checker noise), and a prioritised fix list. |
+| [llm-native.md](llm-native.md) | Forward-looking companion to claude-demo-findings.md: what would make Brood a language LLMs genuinely write well in — an MCP server, a shipped Claude skill, structured errors with codes, macroexpand-on-everything, a watch-mode REPL, an example-by-intent index, idiom-aware lints, property tests, the "Brood gauntlet" eval harness, and a self-improving "incarnations" file. |
 
 ## The one-paragraph version
 

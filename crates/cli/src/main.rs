@@ -42,6 +42,19 @@ usage:
 
 options:
   -j, --max-parallel N    cap concurrent spawned processes (0 = unlimited)
+      --watch <file>      hot-reload <file> while running. Two shapes:
+                            brood --watch foo.blsp         (run + watch foo.blsp)
+                            brood --watch a.blsp script.blsp  (watch a.blsp,
+                                                               run script.blsp)
+                          Repeatable. On every save, re-`load`s the watched
+                          file — globals rebind on the next call site
+                          (std/reload.blsp, docs/shared-code.md). Watching the
+                          entry file is fine for pure-defn scripts, but re-runs
+                          all its top-level forms on each save (a `(ticker 0)`
+                          at the bottom would stack tickers — split the loop
+                          out into a helper and watch the helper). For
+                          directory / project-tree watching, use `nest run
+                          --watch`.
   -h, --help              print this help
       --version           print the version
 
@@ -67,6 +80,11 @@ fn main() {
     // `--check <file>...` type-checks without running (advisory). `nest check`
     // does the project-wide walk.
     let check_mode = raw.iter().any(|a| a == "--check");
+    // `--watch <path>` (repeatable) installs a hot-reloader for each <path>
+    // before evaluation starts. Files only — meaningless with `--test` (the
+    // suite runs once and exits) and `--check` (no eval). Stripped from raw
+    // so parse_args doesn't mistake the paths for source files.
+    let (raw, watch_paths) = extract_watch_paths(raw);
     let raw: Vec<String> = raw
         .into_iter()
         .filter(|a| a != "--test" && a != "--check")
@@ -76,6 +94,22 @@ fn main() {
     if let Some(n) = max_parallel {
         brood::process::set_max_parallel(n);
     }
+
+    if !watch_paths.is_empty() && (test_mode || check_mode) {
+        eprintln!("brood: --watch has no effect with --test or --check (one-shot modes)");
+        std::process::exit(2);
+    }
+    // `brood --watch foo.blsp` (no separate entry) — treat the watched file
+    // as the entry too. Common single-file shape: run AND hot-reload the same
+    // file. Note: reloading the entry re-runs its top-level forms, so a
+    // `(ticker 0)` at the bottom would stack a fresh ticker on every save —
+    // for that pattern, split into a tiny entry + a helper, and watch the
+    // helper.
+    let files = if !watch_paths.is_empty() && files.is_empty() {
+        watch_paths.clone()
+    } else {
+        files
+    };
 
     let mut interp = Interp::new();
 
@@ -90,6 +124,12 @@ fn main() {
     }
 
     if !files.is_empty() {
+        // Bootstrap reloaders *before* the user's program runs so the watcher
+        // is already alive when the entry's first call site fires — same shape
+        // as `nest run --watch`, just on the single-file CLI.
+        if !watch_paths.is_empty() {
+            install_watchers(&mut interp, &watch_paths);
+        }
         run_files(&mut interp, &files);
         return;
     }
@@ -414,4 +454,64 @@ fn is_balanced(src: &str) -> bool {
     }
 
     !in_string && depth <= 0
+}
+
+/// Extract every `--watch <path>` (and `--watch=<path>`) occurrence from `raw`,
+/// returning `(remaining_args, watch_paths)`. A bare `--watch` with no value is
+/// a hard error so a typo doesn't silently swallow the next file argument.
+fn extract_watch_paths(raw: Vec<String>) -> (Vec<String>, Vec<String>) {
+    let mut rest = Vec::new();
+    let mut watches = Vec::new();
+    let mut it = raw.into_iter();
+    while let Some(a) = it.next() {
+        if a == "--watch" {
+            match it.next() {
+                Some(p) => watches.push(p),
+                None => {
+                    eprintln!("brood: --watch expects a file path");
+                    std::process::exit(2);
+                }
+            }
+        } else if let Some(p) = a.strip_prefix("--watch=") {
+            watches.push(p.to_string());
+        } else {
+            rest.push(a);
+        }
+    }
+    (rest, watches)
+}
+
+/// Pre-spawn one reloader per `--watch` file before the user's program runs.
+/// Single-file only — passing a directory is a hard error (use `nest run
+/// --watch` for project-tree watching). Errors on the bootstrap call print
+/// in the same GNU format as a normal eval error.
+fn install_watchers(interp: &mut Interp, paths: &[String]) {
+    for p in paths {
+        let meta = match std::fs::metadata(p) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("brood: --watch {}: {}", p, e);
+                std::process::exit(2);
+            }
+        };
+        if meta.is_dir() {
+            eprintln!(
+                "brood: --watch {} is a directory; use `nest run --watch` for trees",
+                p
+            );
+            std::process::exit(2);
+        }
+    }
+    if let Err(e) = interp.eval_str("(require 'reload)") {
+        report_error(&e);
+        std::process::exit(1);
+    }
+    for p in paths {
+        let escaped = p.replace('\\', "\\\\").replace('"', "\\\"");
+        let snippet = format!("(reload-on-change \"{}\")", escaped);
+        if let Err(e) = interp.eval_str(&snippet) {
+            report_error(&e);
+            std::process::exit(1);
+        }
+    }
 }

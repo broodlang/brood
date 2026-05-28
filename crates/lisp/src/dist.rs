@@ -29,11 +29,11 @@
 //! interners.
 
 use std::collections::HashMap;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, LazyLock, Once, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::core::value::{self, Symbol};
@@ -64,18 +64,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// genuinely slow peer doesn't get torn down for an occasional slow drain.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How often the (single, shared) heartbeat thread probes each link with a `Ping`
-/// and checks liveness. Idle-gated: a `Ping` is a 5-byte frame, only sent on the
-/// tick, never per message.
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
-
-/// A link with no inbound frame (data, `Ping`, or `Pong`) for this long is
-/// declared **down**: we `shutdown` its socket, which tears it down and fires
-/// `[:nodedown name]` to its watchers. Several heartbeat intervals, so a single
-/// dropped probe doesn't flap a healthy link.
-const DOWN_AFTER: Duration = Duration::from_secs(6);
-
 /// Monotonic clock base, so `last_seen` can live in an `AtomicU64` of millis.
+/// `dist::heartbeat` reads this same clock; keep the source here at the root
+/// so the readers (link establishment, reader thread) and the writer
+/// (`heartbeat_loop`) share one zero point.
 static START: LazyLock<Instant> = LazyLock::new(Instant::now);
 fn now_millis() -> u64 {
     START.elapsed().as_millis() as u64
@@ -435,146 +427,6 @@ fn accept(mut stream: TcpStream) -> io::Result<()> {
     Ok(())
 }
 
-/// The v2 authenticated handshake (ADR-034 v2). Both sides:
-///   1. Exchange a 4-byte magic+version prefix. A mismatch aborts before any
-///      frame parsing — old / non-brood peers fail loudly.
-///   2. Send a `Hello { node, nonce }` (each side a fresh 32-byte nonce).
-///      The initiator writes first; the responder reads, then writes its own.
-///   3. Compute `mac_local = HMAC-SHA256(cookie, peer_nonce || peer_name ||
-///      my_name)` and send it as `Auth { mac }`. Initiator first again.
-///   4. Read the peer's `Auth`; constant-time-verify against the expected MAC.
-///      Mismatch ⇒ `PermissionDenied`; the link never enters `NODES`.
-///
-/// The cookie is **never** on the wire — it's an HMAC key. A passive observer
-/// can replay neither the cookie nor a captured `Auth` (the nonce is fresh
-/// each handshake).
-fn handshake(stream: &mut TcpStream, role: Role) -> io::Result<Symbol> {
-    // Step 1: magic + version. Reject before any allocation if we don't speak
-    // the same dialect.
-    stream.write_all(&PROTOCOL_MAGIC)?;
-    let mut their_magic = [0u8; 4];
-    stream.read_exact(&mut their_magic)?;
-    if their_magic != PROTOCOL_MAGIC {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "protocol magic/version mismatch (theirs: {:02x?}, ours: {:02x?})",
-                their_magic, PROTOCOL_MAGIC
-            ),
-        ));
-    }
-
-    // Step 2: Hellos with nonces.
-    let (my_name, cookie) = {
-        let n = crate::core::sync::read(&NODE);
-        (n.name, n.cookie.clone())
-    };
-    let my_nonce = fresh_nonce()?;
-    let their_hello = match role {
-        Role::Initiator => {
-            write_frame(stream, &Frame::Hello { node: my_name, nonce: my_nonce })?;
-            read_hello(stream)?
-        }
-        Role::Responder => {
-            let h = read_hello(stream)?;
-            write_frame(stream, &Frame::Hello { node: my_name, nonce: my_nonce })?;
-            h
-        }
-    };
-    let (peer_name, peer_nonce) = their_hello;
-
-    // Step 3 + 4: MAC the *peer's* nonce + the names; exchange and verify.
-    // Order (peer_name then my_name in the input) is symmetric — both sides
-    // include their own name last, so the two MACs cover identical-shaped
-    // bytes from opposite vantage points.
-    let my_mac = compute_mac(&cookie, &peer_nonce, peer_name, my_name);
-    let expected_peer_mac = compute_mac(&cookie, &my_nonce, my_name, peer_name);
-    let their_mac = match role {
-        Role::Initiator => {
-            write_frame(stream, &Frame::Auth { mac: my_mac })?;
-            read_auth(stream)?
-        }
-        Role::Responder => {
-            let m = read_auth(stream)?;
-            write_frame(stream, &Frame::Auth { mac: my_mac })?;
-            m
-        }
-    };
-    if !ct_eq(&their_mac, &expected_peer_mac) {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "node handshake MAC mismatch (wrong cookie?)",
-        ));
-    }
-    Ok(peer_name)
-}
-
-fn read_hello(stream: &mut TcpStream) -> io::Result<(Symbol, [u8; NONCE_LEN])> {
-    match read_frame(stream)? {
-        Frame::Hello { node, nonce } => Ok((node, nonce)),
-        _ => Err(io::Error::new(io::ErrorKind::InvalidData, "expected Hello")),
-    }
-}
-
-fn read_auth(stream: &mut TcpStream) -> io::Result<[u8; MAC_LEN]> {
-    match read_frame(stream)? {
-        Frame::Auth { mac } => Ok(mac),
-        _ => Err(io::Error::new(io::ErrorKind::InvalidData, "expected Auth")),
-    }
-}
-
-/// `HMAC-SHA256(cookie, peer_nonce || peer_name || 0x00 || my_name)`.
-///
-/// **Encoding is collision-free** under two assumptions, both of which hold:
-///   1. `peer_nonce` is exactly `NONCE_LEN` bytes (fixed length), so the
-///      following bytes are unambiguously the start of `peer_name`.
-///   2. The `0x00` delimiter separates the two variable-length names —
-///      without it, `("ab", "c")` and `("a", "bc")` would HMAC to the same
-///      value. NUL is not a legal character in a Brood symbol name (the
-///      reader rejects it), so it can't appear inside either name and
-///      genuinely separates them.
-///
-/// Names travel as canonical (interned) UTF-8 spellings, identical on both
-/// sides regardless of interner state.
-fn compute_mac(
-    cookie: &str,
-    peer_nonce: &[u8; NONCE_LEN],
-    peer_name: Symbol,
-    my_name: Symbol,
-) -> [u8; MAC_LEN] {
-    use hmac::Mac;
-    type HmacSha256 = hmac::Hmac<sha2::Sha256>;
-    let mut mac = HmacSha256::new_from_slice(cookie.as_bytes()).expect("HMAC key length is fine");
-    mac.update(peer_nonce);
-    mac.update(value::symbol_name(peer_name).as_bytes());
-    mac.update(&[0]);
-    mac.update(value::symbol_name(my_name).as_bytes());
-    mac.finalize().into_bytes().into()
-}
-
-/// Constant-time comparison for the MAC check. `subtle`/`hmac::Mac::verify`
-/// would also do this, but `verify` consumes the HMAC state by computing the
-/// expected MAC at the same time — we already have the expected MAC, so do
-/// the byte compare ourselves.
-fn ct_eq(a: &[u8; MAC_LEN], b: &[u8; MAC_LEN]) -> bool {
-    let mut diff: u8 = 0;
-    for i in 0..MAC_LEN {
-        diff |= a[i] ^ b[i];
-    }
-    diff == 0
-}
-
-/// 32 fresh bytes from the OS random pool. Each handshake gets its own pair
-/// of nonces, so a captured `Auth` MAC can't be replayed against a fresh
-/// handshake.
-fn fresh_nonce() -> io::Result<[u8; NONCE_LEN]> {
-    let mut n = [0u8; NONCE_LEN];
-    getrandom::fill(&mut n).map_err(|e| {
-        io::Error::other(format!("could not read OS RNG for handshake nonce: {e}"))
-    })?;
-    Ok(n)
-}
-
 /// Register the authenticated link and spawn its reader + writer threads —
 /// resolving a duplicate against any existing link to the same peer first.
 fn establish(peer: Symbol, stream: TcpStream, role: Role) {
@@ -755,54 +607,9 @@ fn deliver_inbound(target: Target, msg: Message) {
     process::deliver(id, msg);
 }
 
-// ----- liveness (heartbeat) --------------------------------------------------
-
-static HEARTBEAT_STARTED: Once = Once::new();
-
-/// Start the single shared heartbeat thread once, on the first established link.
-fn ensure_heartbeat() {
-    HEARTBEAT_STARTED.call_once(|| {
-        // Re-spawn on panic so a single bad iteration doesn't silently stop
-        // liveness detection for the rest of the process lifetime.
-        std::thread::spawn(|| loop {
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(heartbeat_loop));
-            eprintln!("dist: heartbeat thread panicked; restarting");
-            std::thread::sleep(HEARTBEAT_INTERVAL);
-        });
-    });
-}
-
-/// Probe every link each interval: if it's been silent past `DOWN_AFTER`, declare
-/// it down (shutdown → the reader runs `drop_link` → `[:nodedown]`); otherwise
-/// send a `Ping` (the peer answers `Pong`, refreshing its `last_seen`). One thread
-/// for all links; a `Ping` is sent only on the tick, never per message.
-fn heartbeat_loop() {
-    // One shared Ping buffer for every link, every tick: each send is an
-    // `Arc::clone` (atomic incr), not a `Vec` copy.
-    let ping: Arc<[u8]> = Arc::from(frame_bytes(&Frame::Ping).expect("encode Ping"));
-    let down_after = DOWN_AFTER.as_millis() as u64;
-    loop {
-        std::thread::sleep(HEARTBEAT_INTERVAL);
-        let now = now_millis();
-        // Snapshot under the lock, then act without holding it (shutdown/send can block).
-        let links: Vec<(Arc<TcpStream>, Sender<Arc<[u8]>>, u64)> = {
-            let nodes = crate::core::sync::read(&NODES);
-            nodes
-                .values()
-                .map(|c| (Arc::clone(&c.sock), c.tx.clone(), c.last_seen.load(Ordering::Acquire)))
-                .collect()
-        };
-        for (sock, tx, last) in links {
-            if now.saturating_sub(last) > down_after {
-                let _ = sock.shutdown(Shutdown::Both); // dead peer → tear down via the reader
-            } else {
-                let _ = tx.send(Arc::clone(&ping));
-            }
-        }
-    }
-}
-
-
+mod handshake;
+mod heartbeat;
 mod wire;
 
-use wire::{frame_bytes, read_frame, write_frame, Frame, MAC_LEN, NONCE_LEN, PROTOCOL_MAGIC};
+use heartbeat::ensure_heartbeat;
+use wire::{frame_bytes, read_frame, Frame};

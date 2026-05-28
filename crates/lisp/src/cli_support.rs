@@ -28,6 +28,13 @@ pub fn report_error(e: &LispError) {
 /// `-j N`, `--jobs N`, `--max-parallel N`, and the `=`/joined forms (`-jN`,
 /// `--max-parallel=N`). A bad value calls `exit_with(prog)` so a typo never
 /// silently runs unbounded — letting each caller decide its exit message.
+///
+/// Callers pass `mode_flags` (e.g. `["--test", "--check", "--watch"]`) for the
+/// boolean / consumed-elsewhere flags they've already stripped: appearing here
+/// would mean a duplicate, which we accept as a no-op (the caller saw it
+/// first). Any *other* `-*` argument at this point is a typo — we hard-error
+/// with the offending token so the user sees "unknown option" instead of
+/// "cannot read --foo: No such file or directory".
 pub fn parse_jobs_args(
     prog: &str,
     args: Vec<String>,
@@ -53,6 +60,14 @@ pub fn parse_jobs_args(
             .filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_digit()))
         {
             Some(v.to_string())
+        } else if a.starts_with('-') && a != "-" {
+            // Unknown `-*` arg at this point — caller's recognised flags
+            // (--test/--check/--watch/etc.) have already been stripped, so
+            // anything dash-prefixed left over is a typo. Reject rather than
+            // treat as a file path (which surfaces as a confusing "cannot
+            // read --foo" later).
+            eprintln!("{prog}: unknown option {a:?}");
+            std::process::exit(2);
         } else {
             files.push(a.clone());
             None

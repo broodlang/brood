@@ -3825,3 +3825,97 @@ the eight names in order; `tools/call eval (+ 1 2 3)` returns `{
 3. **Step 5** — Tier-1 niceties (`prompts/get` for a `brood-task`
    template; project-defined tool discovery from a project's own
    `mcp.blsp` that conses entries onto the std `(mcp-tools)` list).
+
+---
+
+## 2026-05-28 — MCP steps 4, 1c-{a,b,d}, 5: full v0 surface live
+
+**Goal.** Land every remaining MCP step that doesn't require redesigning
+`print`. Result: six of eight tools fully wired (was: five), the agent
+attach loop is closed (`nest new` scaffolds `.mcp.json`), and project-level
+extensibility is in place.
+
+**Step 4 — `nest new` scaffolds `.mcp.json`.** `std/project.blsp` grew a
+`project--mcp-json-template` (a single `brood` server entry pointing at
+`nest mcp`). `new-project` writes it alongside `CLAUDE.md` /
+`brood-for-claude.md`, and the CLAUDE.md template now carries an "MCP
+integration" section telling humans what's there. Verified: `nest new
+mcp4-smoke` writes the expected JSON; `cd mcp4-smoke && claude` would
+auto-attach.
+
+**Step 1c-a — structured `(check-project)`.** New Rust primitive
+`(check-file-structured path)` returns `[{:file :line :col :message}]`
+(`:line`/`:col` omitted when the checker has no position — ADR-024).
+`std/project.blsp` grew `(check-project-structured)` as the data-shaped
+analogue of `(check-project)` (honors `BROOD_NO_CHECK=1` the same way).
+`mcp-check-tool` un-stubbed: returns `{:diagnostics [...]}` or
+`{:error msg}` (when called outside a project).
+
+**Step 1c-b — structured test runner.** `std/test.blsp` grew
+`(run-tests-structured)` — same isolated/parallel/serial orchestration as
+`run-tests`, but returns
+`{:total :passed :failed :failed-assertions :ms :results [{:group :name
+:passed :ms :failures [{:loc :details} ...]}]}` instead of printing GNU
+output + throwing. `std/project.blsp` grew the matching
+`(run-project-tests-structured)`. `mcp-run-tests-tool` un-stubbed.
+
+**Step 1c-d — `(list-processes)`.** New Rust primitive lifting `REGISTRY`
+keys to `Pid` values (via `process::pid_value`, so each pid carries this
+runtime's node identity and is `send`-routable as-returned).
+`mcp-processes-tool` un-stubbed; `(or (list-processes) [])` so an empty
+result renders as JSON `[]` rather than `null` — agents shouldn't have
+to disambiguate "no processes" from "missing field".
+
+**Brood ↔ JSON converter** now renders `Pid` and `Ref` as tagged objects
+(`{$type: "pid", node, id}` / `{$type: "ref", id}`) instead of erroring.
+A tool returning a pid-bearing value no longer loses data; the `$type`
+tag distinguishes them from plain maps. `json_to_value` is intentionally
+one-way (a JSON object stays a Brood map — constructing fresh pids/refs
+from JSON would be unsound).
+
+**Step 5a — `prompts/get` with `brood-task`.** A single orientation prompt
+baked into `mcp.rs` as `BROOD_TASK_PROMPT` (~1.2 KB). Points at
+`brood://docs/brood-for-claude` for depth, lists the MCP tool surface,
+sketches the Brood essentials (immutability, no `set!`, truthiness,
+modules). The agent fetches this once at session start to get oriented;
+`prompts/list` advertises it; `prompts/get` returns it as a single
+`user`-role text message.
+
+**Step 5b — project-defined tool discovery.** `std/mcp.blsp` ends with
+an auto-load: if `<project-root>/mcp.blsp` exists, `(load)` it after
+the std catalogue is bound. The project's file can `def mcp-tools` to
+extend (`(let (base mcp-tools) (defn mcp-tools () (append (base) (list
+new-tool))))`) or replace the catalogue. Runs once (`require` is
+idempotent via `provide`).
+
+**Deferred — step 1c-c (`*out*` + `with-out-str`).** Documented in
+`docs/mcp.md` and (loose end) at the bottom of this entry. Folding a
+`:stdout` field into `EvalResult` would need the `*out*` dynvar
+architecture *plus* a way to safely buffer per-process (a thread-local
+would leak captures across green processes scheduled on the same OS
+thread). The current state: an `(eval (println …))` in a tool call
+writes to the dispatcher's stdout and corrupts the JSON-RPC stream.
+Workaround until step 1c-c lands: agents should return data via the
+`:value` field instead of calling `print`. The `brood-task` prompt
+should grow a note pointing this out (folded in once the fix is
+designed).
+
+**Tests.** 28/28 nest tests now (was 22): added `prompts_list_includes_brood_task`,
+`prompts_get_returns_the_orientation_message`, `prompts_get_returns_an_error_for_unknown_names`,
+`std_processes_tool_returns_a_pid_list`, `value_to_json_renders_pids_as_tagged_objects`,
+`std_check_tool_returns_structured_diagnostics_or_an_error`,
+`run_tests_structured_returns_a_structured_summary`. The
+`std_check_and_run_tests_and_processes_are_documented_stubs` test was
+shrunk to `std_run_tests_is_a_documented_stub` as each tool un-stubbed;
+then once `run-tests` landed, that test went too (the `run-tests-structured`
+test replaces it).
+
+**Verified.** `cargo build` clean. `cargo test -p nest`: 28/28.
+`cargo test -p brood-lsp`: 40/40 (no regressions). `cargo test
+--workspace` is blocked by a *parallel* in-flight edit on
+`crates/lisp/src/types/check.rs` (the user is splitting it into a
+submodule); my changes don't depend on it and `cargo test -p` works.
+Real binary: `tools/list` returns all 8 tool names, `processes`
+returns `{"processes":[]}` (empty array, correctly), `prompts/list`
+shows `["brood-task"]`, `prompts/get brood-task` returns 1157 chars
+of orientation text.

@@ -397,3 +397,39 @@ docs/testing.md for the full guide."
         (str "(" fails " failed assertions, " (count iso) " isolated)"))
       (println (str "  (" elapsed " ms wall, peak " (mb-str (mem-peak)) ")"))
       (if (> failed 0) (error (str failed " test(s) failed")) :ok))))
+
+;; Structured analogue of `run-tests` — runs the same suite (isolated phase,
+;; then parallel/serial), but **returns data** instead of printing + throwing.
+;; Backs the `nest mcp` `run-tests` tool (step 1c-b). Shape:
+;;   {:total :passed :failed :failed-assertions :ms
+;;    :results [{:group :name :passed :ms :failures [{:loc :details} ...]}]}
+;; `:loc` is `[file line col]` or nil; `:details` is a list of strings.
+;; A test that uncaught-errored shows up as `:passed false` with a single
+;; failure carrying the error text (consistent with the textual runner).
+(defn run-tests-structured (& opts)
+  (let (units (reverse *units*)
+        par   (filter (fn (u) (not= (first u) :isolated)) units)
+        iso   (filter (fn (u) (= (first u) :isolated)) units)
+        start (now)
+        me    (self))
+    (let (iso-results (run-isolated iso nil)
+          _           (spawn-units par me)
+          par-results (collect-units (count par) nil)
+          results     (append iso-results par-results)
+          elapsed     (- (now) start)
+          total       (count results)
+          failed      (count-failed results)
+          fails       (count-failures results))
+      {:total total
+       :passed (- total failed)
+       :failed failed
+       :failed-assertions fails
+       :ms elapsed
+       :results (map (fn (r)
+                       {:group (r-group r)
+                        :name (r-name r)
+                        :passed (not (r-failed? r))
+                        :ms (r-ms r)
+                        :failures (map (fn (f) {:loc (first f) :details (second f)})
+                                       (r-fails r))})
+                  results)})))

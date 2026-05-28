@@ -149,6 +149,22 @@ the `nest new` scaffolder."
 ;; this; the embedded callers re-invoke it for free.
 (defn project--ensure-loaded (root) (project-setup root) (project-load-sources root))
 
+;; Structured analogue of `check-project` — returns a flat list of
+;; `{:file :line :col :message}` maps instead of printing GNU lines + a
+;; count. Backs the `nest mcp` `check` tool (`std/mcp.blsp`, step 1c-a).
+;; Honors `BROOD_NO_CHECK=1` the same way `check-project` does: returns
+;; an empty list under the flag.
+(defn check-project-structured ()
+  (let (root (project--find-root (cwd)))
+    (when (nil? root)
+      (error "check-project-structured: not in a Brood project (no project.blsp found from " (cwd) ")"))
+    (project--ensure-loaded root)
+    (if (= (getenv "BROOD_NO_CHECK") "1")
+      nil
+      (fold (fn (acc f) (append acc (check-file-structured f)))
+            nil
+            (project--all-files root)))))
+
 (defn check-project ()
   (let (root (project--find-root (cwd)))
     (when (nil? root)
@@ -193,6 +209,24 @@ the `nest new` scaffolder."
       (check-project)
       ; advisory; warnings to stderr
       (apply run-tests opts))))
+
+;; Structured analogue of `run-project-tests` — same bootstrap (discovery,
+;; load, type-check pre-flight) but `(run-tests-structured)` at the end, so
+;; the caller gets `{:total :passed :failed :ms :results [...]}` instead of
+;; printed output + a throw on failure. Backs the `nest mcp` `run-tests`
+;; tool (step 1c-b).
+(defn run-project-tests-structured (& opts)
+  (let (root (project--find-root (cwd)))
+    (when (nil? root)
+      (error "run-project-tests-structured: not in a Brood project (no project.blsp found from " (cwd) ")"))
+    (project-setup root)
+    (require 'test)
+    (project-load-sources root)
+    (let (dirs (project--abs-paths root *project-test-paths*)
+          files (fold (fn (acc d) (append acc (project--collect-tests d))) nil dirs))
+      (fold (fn (_ f) (load f)) nil files)
+      ; loader-only: tests register themselves
+      (apply run-tests-structured opts))))
 
 ;; (run-project args) — find the project from the cwd, set it up (which may
 ;; override *project-main* via the manifest), `require` the entry module, and
@@ -358,7 +392,31 @@ the `nest new` scaffolder."
     "\n"
     "`docs/brood-for-claude.md` is the language reference geared for AI assistants\n"
     "— syntax, idioms, and the patterns that aren't shared with other Lisps. Read\n"
-    "it before generating Brood code.\n"))
+    "it before generating Brood code.\n"
+    "\n"
+    "## MCP integration\n"
+    "\n"
+    "`.mcp.json` points Claude Code at this project's `nest mcp` server, so `cd "
+    nm
+    " && claude`\n"
+    "auto-attaches an agent that can `eval`, `load`, `lookup`, `macroexpand`, and `format`\n"
+    "against the live image (ADR-036, `docs/mcp.md` upstream).\n"))
+
+;; `.mcp.json` for a fresh project — points Claude Code (and other MCP-aware
+;; agents) at this project's `nest mcp` server. The dispatcher runs from the
+;; project root (which is wherever the agent invoked `claude`), so a relative
+;; `command: nest` works as long as `nest` is on PATH. Keeping the file
+;; minimal: a single `brood` server entry. Users can add more (their own
+;; MCP servers) without losing the scaffold.
+(defn project--mcp-json-template (nm)
+  (str "{\n"
+    "  \"mcpServers\": {\n"
+    "    \"brood\": {\n"
+    "      \"command\": \"nest\",\n"
+    "      \"args\": [\"mcp\"]\n"
+    "    }\n"
+    "  }\n"
+    "}\n"))
 
 ;; (new-project "foobar") — scaffold ./foobar with a runnable two-module
 ;; skeleton: project.blsp + src/main.blsp + src/hello.blsp (where main `require`s
@@ -379,6 +437,7 @@ the `nest new` scaffolder."
     (make-dir docs-dir)
     (spit (path-join nm "project.blsp") (project--manifest-template nm))
     (spit (path-join nm "CLAUDE.md") (project--claude-md-template nm))
+    (spit (path-join nm ".mcp.json") (project--mcp-json-template nm))
     (spit (path-join docs-dir "brood-for-claude.md") (%builtin-doc 'brood-for-claude))
     (spit (path-join src-dir "main.blsp") (project--main-template nm))
     (spit (path-join src-dir "hello.blsp") (project--hello-template nm))
@@ -387,6 +446,7 @@ the `nest new` scaffolder."
     (println (str "Created Brood project '" nm "'"))
     (println (str "  " nm "/project.blsp"))
     (println (str "  " nm "/CLAUDE.md"))
+    (println (str "  " nm "/.mcp.json"))
     (println (str "  " nm "/docs/brood-for-claude.md"))
     (println (str "  " nm "/src/main.blsp"))
     (println (str "  " nm "/src/hello.blsp"))

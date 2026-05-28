@@ -166,6 +166,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // advisory type checker (the Ty lattice's first consumer; see docs/types.md)
     def(heap, "check", Arity::exact(1), Sig::new(vec![any], list_ty), check_builtin);
     def(heap, "check-file", Arity::exact(1), Sig::new(vec![string], list_ty), check_file_builtin);
+    def(heap, "check-file-structured", Arity::exact(1), Sig::new(vec![string], list_ty), check_file_structured);
 
     // source positions (editor tooling; see docs/tooling.md)
     def(heap, "form-pos", Arity::exact(1), Sig::new(vec![any], vec_ty.union(nil_ty)), form_pos);
@@ -209,6 +210,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "spawn-count", Arity::exact(0), Sig::nullary(int), spawn_count);
     def(heap, "peak-threads", Arity::exact(0), Sig::nullary(int), peak_threads);
     def(heap, "worker-threads", Arity::exact(0), Sig::nullary(int), worker_threads);
+    def(heap, "list-processes", Arity::exact(0), Sig::nullary(list_ty), list_processes);
 
     // distributed nodes (connect two runtimes over TCP — crate::dist)
     def(heap, "node-start", Arity::exact(3), Sig::new(vec![sym, string, string], sym), node_start);
@@ -250,6 +252,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("type-of", &["x"], "The runtime type of x as a keyword (:int, :string, :pair, ...)."),
     ("check", &["form"], "Advisory type-check a quoted form: a list of warning strings, or nil. Never raises."),
     ("check-file", &["path"], "Advisory type-check every top-level form in the file at path: a list of `path:line:col: warning: …` strings, or nil. Does not evaluate the file."),
+    ("check-file-structured", &["path"], "Like check-file but returns a list of `{:file :line :col :message}` maps instead of GNU-format strings — for tools (the `nest mcp` `check` tool, editor diagnostics)."),
     ("str", &["&", "xs"], "Concatenate the display forms of the arguments into one string."),
     ("pr-str", &["x"], "The readable (re-readable) text form of x."),
     ("print", &["&", "xs"], "Write the display forms of the arguments to stdout; returns nil."),
@@ -294,6 +297,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("self", &[], "This process's own pid (carries this node's identity)."),
     ("ref", &[], "A fresh, globally-unique reference token (tags a request to its reply)."),
     ("monitor", &["pid"], "Watch pid; returns a monitor ref. Delivers [:down ref pid reason] when pid dies."),
+    ("list-processes", &[], "Every currently-live pid on this runtime (one per registered mailbox). Order is unspecified — sort if you need stability. For agents/tools enumerating spawned processes."),
     ("demonitor", &["mref"], "Drop the monitor identified by mref (best-effort)."),
     ("spawn-count", &[], "How many green processes have been spawned since program start."),
     ("peak-threads", &[], "High-water mark of OS threads running processes concurrently."),
@@ -1199,6 +1203,41 @@ fn check_file_builtin(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResul
     Ok(heap.list(out))
 }
 
+/// `(check-file-structured path)` — the data-shaped counterpart of
+/// `check-file`. Returns a list of `{:file :line :col :message}` maps (or
+/// `{:file :message}` for warnings without a position — the advisory
+/// checker doesn't carry spans through macroexpansion yet, ADR-024). Used
+/// by the `nest mcp` `check` tool (step 1c-a) and any other consumer that
+/// wants structured diagnostics rather than a GNU-line string to re-parse.
+fn check_file_structured(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "check-file-structured", arg(args, 0))?;
+    let src = std::fs::read_to_string(&path).map_err(|e| {
+        LispError::runtime(format!("check-file-structured: cannot read {}: {}", path, e))
+    })?;
+    let forms =
+        reader::read_all_positioned(heap, &src).map_err(|e| e.or_file(path.clone()))?;
+    let just_forms: Vec<Value> = forms.into_iter().map(|(f, _)| f).collect();
+    let warnings = crate::types::check::check_file(heap, &just_forms);
+    let file_kw = Value::Keyword(value::intern("file"));
+    let line_kw = Value::Keyword(value::intern("line"));
+    let col_kw = Value::Keyword(value::intern("col"));
+    let msg_kw = Value::Keyword(value::intern("message"));
+    let file_val = heap.alloc_string(&path);
+    let mut out = Vec::with_capacity(warnings.len());
+    for (pos_opt, msg) in &warnings {
+        let msg_val = heap.alloc_string(msg);
+        let mut entries: Vec<(Value, Value)> = Vec::with_capacity(4);
+        entries.push((file_kw, file_val));
+        if let Some(p) = pos_opt {
+            entries.push((line_kw, Value::Int(p.line as i64)));
+            entries.push((col_kw, Value::Int(p.col as i64)));
+        }
+        entries.push((msg_kw, msg_val));
+        out.push(heap.alloc_map(entries));
+    }
+    Ok(heap.list(out))
+}
+
 // ---------- source positions (editor tooling; see docs/tooling.md) ----------
 
 /// `(form-pos form)` — the `[line col]` (1-based) where `form` was read, or
@@ -1543,6 +1582,19 @@ fn peak_threads(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 /// green processes (≈ `nproc`, or the `-j` setting); 0 until the first spawn.
 fn worker_threads(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::Int(crate::process::worker_threads() as i64))
+}
+
+/// `(list-processes)` — every currently-live local pid as a `Pid` value
+/// (carrying this runtime's node identity, so the list is `send`-routable as
+/// returned). Order is unspecified; sort by `.id` if you need stability.
+/// Used by agents / the `nest mcp` `processes` tool to enumerate what's been
+/// spawned in the session.
+fn list_processes(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let items: Vec<Value> = crate::process::list_local_pids()
+        .into_iter()
+        .map(crate::process::pid_value)
+        .collect();
+    Ok(heap.list(items))
 }
 
 /// `(%isolate thunk)` — call `thunk` (no args) with a *private copy* of the
