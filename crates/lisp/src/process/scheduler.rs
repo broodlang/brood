@@ -50,19 +50,30 @@ pub(super) type Yielder0 = Yielder<(), Suspend>;
 type Coro = Coroutine<(), Suspend, ()>;
 
 /// A green process: its mailbox plus the coroutine carrying its computation
-/// (which owns its `Heap`). `Send`, so any worker can run it.
+/// (which owns its `Heap`). Pinned to a single worker thread at spawn time
+/// (`worker_id`); the scheduler routes every re-enqueue back to that worker,
+/// so a coroutine is only ever resumed on the OS thread that first ran it.
+/// `Send` for the moment from spawn → worker (the queue owns it exclusively
+/// in transit), and never again across threads.
 pub(super) struct Process {
     pub(super) pid: u64,
     pub(super) mailbox: Arc<Mailbox>,
+    /// Which worker owns this process for its lifetime. Assigned at spawn
+    /// (round-robin); preempt/receive re-enqueue routes back to the same
+    /// worker's queue. Prevents corosensei cross-thread resume hazards
+    /// (KI-1b in docs/known-issues.md — clobbered return addresses under
+    /// preempt-induced migration).
+    pub(super) worker_id: usize,
     coro: Coro,
 }
 
-// SAFETY: corosensei marks `Coroutine` `!Send` conservatively. We move a process
-// between worker threads only via the run queue, which owns it exclusively — it is
-// never resumed on two threads at once, and corosensei supports resuming a
-// coroutine on a different thread than the one it suspended on. Its captured state
-// (heap, Arcs, message values) is all `Send`. So migrating a *parked* process is
-// sound. (See docs/scheduler.md; swappable if we drop corosensei.)
+// SAFETY: corosensei marks `Coroutine` `!Send` conservatively. A process is
+// only ever moved across threads *once* — from `spawn` (caller's thread) into
+// its assigned worker's queue (via `enqueue`). After that, the assigned worker
+// is the only thread that ever pops it; preempt and receive both re-enqueue to
+// the *same* worker's queue. So at every `resume` site the proc is owned
+// exclusively by one thread, and no cross-thread `resume` ever happens. The
+// captured state (heap, Arcs, message values) is all `Send`.
 unsafe impl Send for Process {}
 
 /// What a running coroutine needs to find from deep inside `eval` (for
@@ -244,9 +255,29 @@ thread_local! {
     static EXIT_REASON: RefCell<Option<Message>> = const { RefCell::new(None) };
 }
 
-/// The shared run queue of ready processes + a condvar workers wait on.
-static RUN: LazyLock<(Mutex<VecDeque<Box<Process>>>, Condvar)> =
-    LazyLock::new(|| (Mutex::new(VecDeque::new()), Condvar::new()));
+/// Per-worker run queues. Index = `worker_id`. Each worker pops only from its
+/// own queue (no shared queue, no work stealing). A process is assigned to one
+/// worker at spawn time and stays there for its lifetime — preempt and receive
+/// re-enqueue to the same worker's queue. The Vec is sized once at the first
+/// `ensure_workers` from `worker_count()`, then never resized.
+static WORKERS: LazyLock<Vec<(Mutex<VecDeque<Box<Process>>>, Condvar)>> =
+    LazyLock::new(|| {
+        (0..worker_count())
+            .map(|_| (Mutex::new(VecDeque::new()), Condvar::new()))
+            .collect()
+    });
+
+/// Next worker to assign a newly-spawned process to (round-robin). Read +
+/// incremented under relaxed ordering — the only requirement is approximate
+/// distribution; an occasional duplicate or skipped index is fine.
+static NEXT_WORKER: AtomicUsize = AtomicUsize::new(0);
+
+/// Pick the worker that a fresh `Process` should be pinned to. Wraps modulo
+/// `worker_count()` so the assignment fits the actual pool.
+fn assign_worker() -> usize {
+    let n = worker_count();
+    NEXT_WORKER.fetch_add(1, Ordering::Relaxed) % n.max(1)
+}
 
 /// Total processes spawned since program start (read by `(spawn-count)`).
 pub fn spawn_count() -> u64 {
@@ -270,6 +301,13 @@ pub fn worker_threads() -> u64 {
 }
 
 fn worker_count() -> usize {
+    if let Some(s) = std::env::var_os("BROOD_J") {
+        if let Some(n) = s.to_str().and_then(|t| t.parse::<usize>().ok()) {
+            if n > 0 {
+                return n;
+            }
+        }
+    }
     match WORKER_COUNT.load(Ordering::SeqCst) {
         0 => std::thread::available_parallelism()
             .map(|n| n.get())
@@ -318,9 +356,12 @@ fn deregister(pid: u64, reason: Message) {
     }
 }
 
-/// Push a ready process onto the run queue and wake a worker.
+/// Push a ready process onto its owning worker's queue and wake that worker.
+/// Routing by `proc.worker_id` keeps the coroutine on the same OS thread for
+/// its lifetime — no cross-thread `resume`, no KI-1b migration hazard.
 pub(super) fn enqueue(proc: Box<Process>) {
-    let (lock, cv) = &*RUN;
+    let wid = proc.worker_id;
+    let (lock, cv) = &WORKERS[wid];
     crate::core::sync::lock(lock).push_back(proc);
     cv.notify_one();
 }
@@ -328,18 +369,21 @@ pub(super) fn enqueue(proc: Box<Process>) {
 /// Start the worker pool exactly once (on the first `spawn`).
 fn ensure_workers() {
     WORKERS_STARTED.call_once(|| {
-        let n = worker_count();
+        // Force the WORKERS LazyLock to initialise *now*, with the pool size
+        // committed by the current `set_max_parallel` (or the default ≈ nproc).
+        // A later `set_max_parallel` won't resize the pool — sized once.
+        let n = WORKERS.len();
         ACTIVE_WORKERS.store(n, Ordering::SeqCst);
-        for _ in 0..n {
-            std::thread::spawn(worker_loop);
+        for wid in 0..n {
+            std::thread::spawn(move || worker_loop(wid));
         }
     });
 }
 
-fn worker_loop() {
+fn worker_loop(wid: usize) {
     loop {
         let proc = {
-            let (lock, cv) = &*RUN;
+            let (lock, cv) = &WORKERS[wid];
             let mut q = crate::core::sync::lock(lock);
             loop {
                 if let Some(p) = q.pop_front() {
@@ -456,7 +500,13 @@ pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
     });
 
     ensure_workers();
-    enqueue(Box::new(Process { pid, mailbox, coro }));
+    let worker_id = assign_worker();
+    enqueue(Box::new(Process {
+        pid,
+        mailbox,
+        worker_id,
+        coro,
+    }));
     Ok(pid)
 }
 
