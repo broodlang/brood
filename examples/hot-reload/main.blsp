@@ -1,0 +1,63 @@
+;; Hot-reload demo.
+;;
+;;   cargo run -p cli examples/hot-reload/main.blsp
+;;
+;; In another shell, edit examples/hot-reload/greeter.blsp (change "hello" to
+;; "bye") and save. The running ticker picks up the new (greet) on its next
+;; iteration — without restarting.
+;;
+;; How it works:
+;; - A single `code-reloader` green process stats the file each tick (cheap —
+;;   no file read until something actually changed) and calls `load` only when
+;;   the mtime moves forward.
+;; - `load` re-runs the file's top-level forms; `(defn greet …)` rebinds the
+;;   `greet` global in the shared code region (docs/shared-code.md).
+;; - The ticker calls `(greet)` by *name* every iteration — that's a global
+;;   lookup, so it sees the new binding on the next call. In-flight calls keep
+;;   the old code; only the *next* call swaps.
+
+(def here (parent-dir (current-file)))
+(def greeter-path (path-join here "greeter.blsp"))
+
+;; Initial load.
+(load greeter-path)
+
+;; The reloader: tail-recursive loop over (path, last-seen-mtime). On every
+;; tick, stat the file; if it changed, try to re-load it. A partial-write race
+;; (editor saving mid-stat) shows up as a reader/eval error — swallow it and
+;; we'll just try again on the next tick. Note: even after a *failed* reload
+;; we update `last`, so we don't busy-retry the same broken state.
+(defn code-reloader (path last)
+  (let (now (file-mtime path))
+    (cond
+      (nil? now)
+        (do (println "[reloader] file vanished:" path)
+            (sleep 250)
+            (code-reloader path last))
+      (= now last)
+        (do (sleep 250)
+            (code-reloader path last))
+      else
+        (do
+          (try
+            (do (load path)
+                (println "[reloader] reloaded" path))
+            (catch e
+              (println "[reloader] reload failed:" e)))
+          (sleep 250)
+          (code-reloader path now)))))
+
+;; Spawn the reloader as a separate green process. It runs forever in the
+;; background; the parent doesn't wait on it.
+(spawn (code-reloader greeter-path (file-mtime greeter-path)))
+
+;; The ticker: call `(greet)` once a second forever. (greet) is a global, so
+;; every iteration is a fresh symbol lookup — that's how the reload becomes
+;; visible without us doing anything special here.
+(defn ticker (n)
+  (greet)
+  (sleep 1000)
+  (ticker (inc n)))
+
+(println "[main] ticker starting (Ctrl-C to stop; edit greeter.blsp to swap output)")
+(ticker 0)

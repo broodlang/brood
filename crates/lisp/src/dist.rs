@@ -459,9 +459,18 @@ fn read_auth(stream: &mut TcpStream) -> io::Result<[u8; MAC_LEN]> {
     }
 }
 
-/// `HMAC-SHA256(cookie, peer_nonce || peer_name || my_name)`. Inputs are
-/// length-tagged by their *byte position* in the input — the names are
-/// canonical (interned) UTF-8 strings, so the encoding is the same on both
+/// `HMAC-SHA256(cookie, peer_nonce || peer_name || 0x00 || my_name)`.
+///
+/// **Encoding is collision-free** under two assumptions, both of which hold:
+///   1. `peer_nonce` is exactly `NONCE_LEN` bytes (fixed length), so the
+///      following bytes are unambiguously the start of `peer_name`.
+///   2. The `0x00` delimiter separates the two variable-length names —
+///      without it, `("ab", "c")` and `("a", "bc")` would HMAC to the same
+///      value. NUL is not a legal character in a Brood symbol name (the
+///      reader rejects it), so it can't appear inside either name and
+///      genuinely separates them.
+///
+/// Names travel as canonical (interned) UTF-8 spellings, identical on both
 /// sides regardless of interner state.
 fn compute_mac(
     cookie: &str,
@@ -474,9 +483,6 @@ fn compute_mac(
     let mut mac = HmacSha256::new_from_slice(cookie.as_bytes()).expect("HMAC key length is fine");
     mac.update(peer_nonce);
     mac.update(value::symbol_name(peer_name).as_bytes());
-    // A delimiter byte between the two names — without it, "ab" + "c" and
-    // "a" + "bc" would HMAC to the same value. NUL is not a legal symbol-name
-    // character (the reader rejects it), so it's safe as a separator.
     mac.update(&[0]);
     mac.update(value::symbol_name(my_name).as_bytes());
     mac.finalize().into_bytes().into()
@@ -1309,11 +1315,12 @@ mod tests {
         }
     }
 
-    /// Each side's MAC is computed over the *peer's* nonce + (peer_name,
-    /// my_name); the verification on the other side flips the roles, so the
-    /// two MACs are equal precisely when both sides share the cookie. This
-    /// guards the symmetric design: a typo in `compute_mac`'s input ordering
-    /// would let one side authenticate while the other rejects.
+    /// Simulate both sides of a handshake and verify each side's `my_mac`
+    /// matches the *other* side's `expected_peer_mac` — i.e. what `handshake`
+    /// actually compares. A typo in `compute_mac`'s arg order (e.g. forgetting
+    /// to put `my_name` last) would let one side authenticate while the
+    /// other rejects; this test catches that asymmetry. Also asserts the
+    /// integrity properties (wrong cookie / wrong nonce → different MAC).
     #[test]
     fn compute_mac_is_symmetric_under_role_flip() {
         let cookie = "shared";
@@ -1321,15 +1328,24 @@ mod tests {
         let nonce_b = [2u8; NONCE_LEN];
         let a = value::intern("aa");
         let b = value::intern("bb");
-        // A's MAC, sent to B (covers B's nonce + names with A's name last).
-        let mac_a = compute_mac(cookie, &nonce_b, b, a);
-        // B's expectation of A's MAC.
-        let mac_b_expects = compute_mac(cookie, &nonce_b, b, a);
-        assert_eq!(mac_a, mac_b_expects);
-        // A different cookie produces a different MAC (the integrity claim).
-        assert_ne!(mac_a, compute_mac("other", &nonce_b, b, a));
+
+        // Side A computes its outgoing MAC and the MAC it expects from B —
+        // exactly the two `compute_mac` calls `handshake` performs.
+        let a_my_mac = compute_mac(cookie, &nonce_b, b, a);
+        let a_expects_b_mac = compute_mac(cookie, &nonce_a, a, b);
+        // Side B computes the symmetric pair (peer ↔ self labels flipped).
+        let b_my_mac = compute_mac(cookie, &nonce_a, a, b);
+        let b_expects_a_mac = compute_mac(cookie, &nonce_b, b, a);
+
+        // The cross-checks that the actual handshake does — each side's
+        // outgoing MAC equals the other side's expectation.
+        assert_eq!(a_my_mac, b_expects_a_mac, "A's mac must verify on B");
+        assert_eq!(b_my_mac, a_expects_b_mac, "B's mac must verify on A");
+
+        // A different cookie produces a different MAC (integrity).
+        assert_ne!(a_my_mac, compute_mac("other", &nonce_b, b, a));
         // A different peer nonce produces a different MAC (replay defence).
-        assert_ne!(mac_a, compute_mac(cookie, &[3u8; NONCE_LEN], b, a));
+        assert_ne!(a_my_mac, compute_mac(cookie, &[3u8; NONCE_LEN], b, a));
     }
 
     #[test]

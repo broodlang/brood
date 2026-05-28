@@ -15,7 +15,7 @@ gate (`eval::call_native`), before the primitive runs — so a wrong-count call 
 a clean arity error (`type-of: expected 1 argument, got 0`) rather than a missing
 arg silently becoming `nil`.
 
-## Native primitive functions (73)
+## Native primitive functions (80)
 
 | Category | Primitive | Arity | Purpose |
 |---|---|---|---|
@@ -41,9 +41,11 @@ arg silently becoming `nil`.
 | | `string->number` | 1 | strict parse → int, else float, else `nil` (`"3abc"` → `nil`, unlike `read-string`) |
 | **Type reflection** | `type-of` | 1 | the runtime type tag as a keyword (`:int` `:string` …); the one irreducible reflective primitive. The tag predicates (`nil?` `pair?` `int?` `float?` `bool?` `string?` `symbol?` `keyword?` `vector?` `map?` `fn?`) are Brood wrappers over it, as are the in-language type checks |
 | **Type checking** (advisory; see [types.md](types.md)) | `check` | 1 | run the advisory type checker over a *quoted* form: macro-expand it (like the real compile pass), then return a **list of warning strings** for provably-wrong primitive arguments (e.g. `(first 5)` → `"first: argument 1 expects nil \| pair \| vector, got int (5)"`), or `nil` when nothing is wrong. Advisory: never raises |
+| | `check-file` | 1 | check every top-level form in the file at `path`, returning pre-formatted `"path:line:col: warning: …"` strings (or `nil` if clean). Reads but does **not** evaluate. Used by `(check-project)` for the `nest test` / `nest run` / `nest check` pre-flight |
 | **Value ↔ text & I/O** | `str` | n | concatenate the *display* forms of args → string |
 | | `pr-str` | 1 | *readable* form of a value → string |
 | | `print` | n | write display forms to stdout → nil (`println`, which adds a newline, is Brood over it) |
+| | `eprint` | n | write display forms to **stderr** → nil (mirrors `print`; `eprintln` is the Brood newline-adding wrapper) |
 | | `stdout-tty?` | 0 | true when stdout is an interactive terminal (false when piped/captured) — gates colour output |
 | **Time** | `now` | 0 | wall-clock milliseconds since the Unix epoch (integer); subtract two readings for elapsed time |
 | **Memory** | `mem-bytes` | 0 | bytes currently allocated process-wide (from the counting global allocator) |
@@ -63,6 +65,7 @@ arg silently becoming `nil`.
 | | `make-dir` | 1 | create a directory and parents (`mkdir -p`) |
 | | `spit` | 2 | write a string to a file (write-side of `load`) |
 | | `slurp` | 1 | read a whole file into a string (read-side of `spit`; unlike `load`, does not evaluate) |
+| | `file-mtime` | 1 | last-modified time as epoch-milliseconds, or nil if missing (cheap stat; pair with `load` for hot-reload) |
 | **System** | `getenv` | 1 | environment-variable value, or nil if unset |
 | | `run-process` | 2 | run an external program (`prog`, args list), inherit stdio → exit code |
 | **Macro support** | `macroexpand-1` `macroexpand` | 1 | expand a form (one step / fully) |

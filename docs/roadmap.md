@@ -54,39 +54,35 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   reused by `match`, refutable `let`, and `fn`/`defn` clauses. Subsumes Tier-2
   destructuring + `case`. Made fast by a **macroexpand-all compile pass**
   (ADR-022), which also lowers the `let`/`fn` pattern surfaces.
-- 🟡 **Set-theoretic, gradual types** (ADR-023/024) — full plan and the
-  *compatibility contract* future changes must honour live in
-  [`types.md`](types.md). ✅ Step 0: first-class `Tag` + `(type-of x)`,
+- ✅ **Set-theoretic, gradual types — Steps 0–4 done** (ADR-023/024). Full
+  plan and the *compatibility contract* future changes must honour in
+  [`types.md`](types.md). Step 0: first-class `Tag` + `(type-of x)`,
   self-identifying type errors, `Arity` on every builtin (one central gate).
-  ✅ Step 1: the `Ty` set-theoretic lattice (`types.rs` — sets of tags;
-  union/intersect/negate; subtyping = set inclusion). ✅ Step 2: `dynamic()` —
-  the gradual type as a bounded `GradualTy` *inside* the lattice, consistent
-  subtyping derived from set inclusion (globals are `dynamic()`, not `Any`).
-  ✅ Step 3: typed primitive signatures — every `NativeFn` carries a `Sig`
-  field next to its `Arity` (compatibility-contract #6, enforced); the checker
-  reads sigs from there, from a small curated stdlib table (`+`/`<`/…/`map`/
-  `reduce`), and from one-step inference of straight-line single-expression
-  closures (`(defn inc (x) (+ x 1))` works without a hand-written sig).
-  🟡 Step 4: advisory local inference over expanded forms — the disjointness
-  walk is shipped (`brood --check <file>`, the `(check 'form)` builtin); guard
-  narrowing via `Ty::tested_by` now lands too (a `Ctx` of locally-known types
-  threaded through the walk; `let`/`let*` seeds `var : expr_ty(rhs)`, `if`
-  narrows in both branches incl. a leading `(not …)`; inner shadowing
-  overrides); plus **arity diagnostics** (every call's argument count vs the
-  callee's `Arity` — primitives, curated stdlib, inferred closures) and
-  **unbound-symbol diagnostics** (call heads; scope-aware over `fn`/`lambda`/
-  `let`/`def`/`defn`/`defmacro`, with a `check_file` API accumulating
-  file-local def names across forms); plus **auto-running** the checker in
-  `brood <file>` / `brood --test` / `nest test` / `nest run` (advisory, to
-  stderr) and the dedicated `nest check` (to stdout, exit non-zero on
-  warnings — for CI). `BROOD_NO_CHECK=1` is the uniform opt-out across
-  every entry point. The Rust primitive `(check-file path)` exposes the
-  file-level walk to Brood; `(check-project)` in `std/project.blsp` walks
-  the project's source + test paths. Remaining: cond-/match-/and-/or-chained
-  guard narrowing (the macro-expanded `(let (g …) (if g …))` shape).
-  ⬜ Step 5+: structured types. Steps 0–2 are foundation; Step 3 puts sigs on
-  the kernel; the first *behavioural* payoff is Step 4. Advisory throughout —
-  never gates, never inhibits the dynamic language; not the TypeScript route.
+  Step 1: the `Ty` set-theoretic lattice (sets of tags; union/intersect/
+  negate; subtyping = set inclusion). Step 2: `dynamic()` — the gradual type
+  as a bounded `GradualTy` *inside* the lattice (globals are `dynamic()`,
+  not `Any`). Step 3: typed primitive signatures — every `NativeFn` carries
+  a `Sig` next to its `Arity` (compatibility-contract #6, enforced); the
+  checker reads sigs from there, from a small curated stdlib table, and from
+  one-step inference of straight-line single-expression closures. Step 4
+  — the behavioural payoff — is **complete**: the disjointness walk; guard
+  narrowing via `Ty::tested_by` (`if` narrows in both branches incl. a
+  leading `(not …)`); arity and unbound-symbol diagnostics with file-local
+  `defn` accumulation; auto-running at file boundaries (`brood <file>` /
+  `brood --test` / `nest test` / `nest run` to stderr; `nest check` to
+  stdout, exit-non-zero for CI; `BROOD_NO_CHECK=1` is the uniform opt-out);
+  let-stored guard aliases (`(let (g (int? x)) (if g …))` narrows `x`);
+  **let-binding aliases + `%eq`-as-guard** that close `match` pattern
+  narrowing (`(match x (5 (first x)))` now flags `first` on int — the
+  pattern compiler's `(let (m x) (if (%eq m lit) …))` expansion flows the
+  narrowing back to `x` via an undirected alias graph). `cond` / `and` /
+  `or` chained guards all narrow through the existing guard pipeline. The
+  Rust primitive `(check-file path)` exposes the file-level walk; the
+  Brood `(check-project)` walks the project's `src/` + `tests/`.
+  ⬜ Step 5+: structured types — function arrows, vector/list element types,
+  intersections for overloaded fns. Replaces the `u16`-bitset rep;
+  additive; gated on real need (ADR-011). Advisory throughout — never
+  gates, never inhibits the dynamic language; not the TypeScript route.
 - ✅ **Maps** (ADR-030) — immutable `{ }` literals + `get`/`assoc`/`dissoc`/
   `keys`/`vals`/`contains?`/`map?`. Insertion-ordered, structural-equality keys,
   order-independent `=`; every op returns a fresh map. Small `map-*` Rust kernel,

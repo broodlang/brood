@@ -3171,3 +3171,227 @@ introspection surface so LSP and the future MCP dispatcher can't drift on
 **Verified.** `cargo build` clean; `cargo test -p brood --lib introspect`
 4/4; `cargo test -p brood-lsp` 40/40. The pre-existing dead-code warning
 on `types/check.rs:101` (`aliases` field) is untouched.
+
+
+---
+
+## 2026-05-28 — Types Step 4 finish: match pattern narrowing
+
+**Goal.** Close the last item in Step 4: chained guard narrowing across the
+macro-expanded shapes. A quick survey showed `cond` / `and` / `or` were
+already covered by the existing direct-guard and let-stored-guard-alias
+paths — the actual gap was `match`, whose pattern compiler lowers to
+`(let (m__N x) (if (%eq m__N lit) (do body) …))` and whose body references
+the user's `x`, not the internal `m__N`.
+
+**Built.**
+
+Two coupled additions to `crates/lisp/src/types/check.rs`:
+
+1. **`%eq`-as-guard.** `guard_assertion` learns the shape `(%eq sym lit)`
+   (and the symmetric `(%eq lit sym)`) — equality against a self-evaluating
+   literal asserts the variable has the literal's runtime tag. Strings,
+   ints, floats, keywords, booleans, and `nil` qualify; pairs / vectors /
+   maps don't (their pieces could be unknown). A new helper
+   `literal_eq_guard` keeps the asymmetry tidy. This is what makes the
+   *inner* `(if (%eq m__N 5) …)` narrow `m__N` to `:int` in the then-branch.
+
+2. **Let-binding aliases.** `Ctx` gains an `aliases: HashMap<Symbol,
+   HashSet<Symbol>>` — an undirected adjacency map. `check_let` records
+   `add_alias(name, target)` whenever the RHS is a plain symbol, so a
+   `(let (m x) …)` creates the edge `m ↔ x`. `narrow` switches from a
+   linear chain walk to a BFS over the equivalence class via a new
+   `narrow_chain`, intersecting the guard's type into every visited name's
+   `types` entry. With the edge bidirectional, narrowing either side
+   propagates to the other — that's what carries the `m__N : int` narrowing
+   back onto the user's `x`. `bind` (shadowing) disconnects a name from
+   the alias graph entirely (removes its bin *and* prunes the name from
+   every neighbour's bin) so a rebinding can't leak through stale
+   back-edges. Self-aliases are no-ops.
+
+Combined: `(match x (5 (first x)) (_ nil))` macroexpands to `(let (m__N x)
+(if (%eq m__N 5) (do (first x)) (do nil)))`, the let aliases `m__N ↔ x`,
+the `(%eq m__N 5)` guard narrows `m__N : int` in the then-branch, the BFS
+narrows `x : int` too, and the checker flags `first: argument 1 expects
+nil | pair | vector, got int (x)`. Same for keyword / string / bool /
+nil-literal patterns.
+
+**Tests.** 6 new in `types::check::tests`:
+
+- `match_literal_pattern_narrows_the_scrutinee` — the headline case.
+- `match_keyword_pattern_narrows_the_scrutinee` — same for a keyword
+  literal.
+- `eq_against_a_literal_is_a_guard` — the recogniser in isolation; both
+  `(%eq m 5)` and `(%eq 5 m)` orderings narrow.
+- `eq_between_two_variables_is_not_a_guard` — no false positive when both
+  sides are variables (asserts nothing).
+- `let_alias_propagates_narrowing_in_both_directions` — narrowing `m`
+  reaches `x`, narrowing `x` reaches `m`. The bidirectional check that
+  drove me to the undirected-set representation.
+- `shadowing_clears_an_alias` — `(let (m x) (let (m 5) …))` rebinds `m`
+  to int *without* leaking the narrowing back to outer `x` via stale
+  edges. Also verifies the inner `(first m)` is still flagged via the
+  literal-binding narrowing.
+
+A second test helper, `warnings_expanded(src)`, calls
+`macroexpand_all` before `check_form` — needed for tests on `defmacro`s
+like `match` (the original `warnings(src)` ran the un-expanded form, which
+exposed the pattern syntax `_` as a "free symbol"). Matches what
+`(check 'form)` and `check_file` actually do at runtime.
+
+**Verified.**
+- `cargo test --lib -p brood types::check`: **55 tests** pass (was 49).
+- `cargo test`: every workspace suite green — Rust totals up to ~226 from
+  ~220.
+- `nest test`: **451 / 451** in-language tests pass.
+- `cargo clippy --all-targets`: 2 pre-existing warnings; no new ones.
+
+**Docs.**
+- `docs/types.md` — Step 4 status: `🟡` → effectively done. The
+  let-binding aliases + `%eq` paragraph added; the "deferred"
+  cond/match/and/or hedge replaced with the concrete "all in" bullet.
+- `docs/roadmap.md` — Step 4 tick (`🟡` → ✅) with the cluster summary;
+  Step 5+ still ⬜ as the next-and-only-remaining types work.
+
+**What's left in types.** Step 5+ (structured types — function arrows,
+element types, intersections) remains explicitly deferred per ADR-011.
+It replaces the `u16`-bitset `Ty` representation, so it's a chunk of
+work; gated on a concrete need, not a checklist item.
+
+---
+
+## 2026-05-28 — MCP step 1b: widened `brood::introspect`
+
+**Goal.** Step 1b of the MCP plan (ADR-036 / `docs/mcp.md`): give
+`brood::introspect` the operations the planned `nest mcp` dispatcher will
+need — total (errors as typed result fields, never panics) and LOCAL-clean
+(every `eval_str` bracketed by `checkpoint` / `reset_local_to`).
+
+**Landed (four operations + a type vocabulary).**
+
+- **`SourceLoc { file, line: u32, col: u32 }`** — the runtime's `Pos`
+  lifted into a stable Rust struct, the shape `[file line col]`
+  `(source-location 'NAME)` already returns (ADR-031).
+- **`Diag { pos: Option<Pos>, message }`** — one advisory finding. `pos`
+  stays optional because the checker doesn't thread spans through
+  macroexpansion yet (ADR-024).
+- **`EvalResult { value, error, diagnostics }`** — structured eval result.
+  Exactly one of `value` / `error` is `Some`; `diagnostics` is
+  independent so the agent sees warnings about code that happens to work.
+- **`source_location(name)`** — lifts `(source-location 'NAME)` into
+  `Option<SourceLoc>`. Returns `None` for prelude/builtin globals (no
+  recorded site — they don't go through the file loader's
+  `note_definition`), unbound names, and any malformed result vector.
+- **`macroexpand_to_string(src, recursive)`** — reads `src` ourselves and
+  calls `eval::macros::macroexpand_1` / `macroexpand` directly, rather
+  than `eval_str("(macroexpand-1 'SRC)")` — the latter would let an
+  unbalanced paren in `src` break the surrounding expression.
+- **`format_source(src)`** — wraps `(format-source SRC)` from
+  `std/format.blsp`. Escapes `\` and `"` for the string literal; raw
+  newlines pass through.
+- **`eval_in_session(src)`** — the high-throughput operation. Runs the
+  checker on a separate `read_all_positioned` + `check_file` pass
+  (mirroring the LSP's path at `crates/lsp/src/main.rs:398-415`), then
+  `eval_str`s the source. State accumulates across calls because `def`s
+  promote to RUNTIME, which survives the per-call LOCAL housekeeping —
+  the hot-reload contract (ADR-013) doing its job.
+
+**Deferred to step 1c**, behind real Brood-side prereqs:
+
+- **`check_project`** — `(check-project)` is print-oriented (GNU lines to
+  stdout + an `Int` count). The right wrapper needs a structured variant in
+  `std/project.blsp` returning `[file line col message]` tuples; the alt
+  ("capture stdout, parse GNU") goes against ADR-006.
+- **`run_tests`** — same: `(run-project-tests)` prints GNU per-test output
+  and raises on failure. Needs a structured runner result from
+  `std/test.blsp`.
+- **`EvalResult.stdout`** — needs `*out*` (a dynvar) + a `with-out-str`
+  capture primitive. Out of scope for step 1; `eval_in_session` ships
+  without it. `value` + `error` + `diagnostics` are already useful, and
+  `print`-as-debug isn't an agent's primary affordance.
+
+**Tests.** 12 new unit tests in `crates/lisp/src/introspect.rs`, covering
+each operation's happy path and at least one failure mode (parse error,
+unbound name, type mismatch). The `source_location` happy-path test
+directly drives `Heap::set_current_file` + `eval_source` to populate the
+def-site table (the only path that does today), plus a focused unit test
+on the result-vector lifter. State persistence across calls is asserted
+end-to-end (`(def x 42)` → `(* x 2)` → "84").
+
+**Verified.** `cargo build` clean. `cargo test -p brood --lib introspect`
+16/16 (4 original + 12 new). `cargo test -p brood-lsp` 40/40 — LSP
+behaviour unchanged. `cargo test --workspace --lib` 115/115.
+
+**What's left for MCP.**
+
+1. **Step 1c** (any subset, in any order): structured `(check-project)`
+   variant in `std/project.blsp`; structured runner result in
+   `std/test.blsp`; `*out*` dynvar + `with-out-str`. None block step 2 —
+   the dispatcher can start with the four shipped helpers (plus `load`
+   and `processes` as one-line `eval_in_session` calls; they don't need
+   dedicated Rust wrappers).
+2. **Step 2** — `crates/nest/src/mcp.rs`: the sync JSON-RPC loop + the
+   tool registry loaded from `(mcp-tools)`.
+3. **Step 3** — `std/mcp.blsp`: the eight tool `defn`s + the catalogue
+   shape projects can extend.
+4. **Step 4** — `nest new` scaffolds `foo/.mcp.json`.
+5. **Step 5** — Tier-1 niceties (`prompts/get`, project-defined tools).
+
+---
+
+## 2026-05-28 — `file-mtime` + hot-reload example
+
+**Goal.** Exercise the shared-code hot-reload story end-to-end from Brood with
+a self-contained demo: a ticker that calls `(greet)` while a separate green
+process watches the defining file and re-`load`s it when it changes.
+
+The mechanism was already in place — `def` promotes into the shared
+`RuntimeCode` region and rebinds the global; in-flight calls keep the old
+closure, the *next* lookup sees the new one (`docs/shared-code.md`). The
+missing piece for a clean watcher was a cheap "did anything change?" stat
+that doesn't slurp the whole file every tick.
+
+**Added.**
+
+- **`(file-mtime path)`** in `crates/lisp/src/builtins.rs` — `i64`
+  epoch-milliseconds or `nil`. Reads `std::fs::metadata().modified()`; any
+  failure (missing file, mtime unsupported, pre-epoch) collapses to `nil`
+  rather than throwing, so a poller doesn't need a `try` around stat. Type
+  signature `(string) -> int | nil`. Documented in `docs/primitives.md`
+  and `docs/brood-for-claude.md`. Justification (ADR-006): a one-syscall
+  stat is mechanism — Brood can't build it from existing primitives.
+
+- **`examples/hot-reload/`** — `greeter.blsp` (one `defn greet`) and
+  `main.blsp`, which spawns a `code-reloader` green process. The reloader
+  is a tail-recursive `(path, last-seen-mtime)` loop that polls `file-mtime`
+  every 250 ms, calls `load` only when the mtime moves, and catches reader
+  / eval errors from partial-write races so a bad tick doesn't kill the
+  process. Updates `last` even on a *failed* reload so we don't busy-retry
+  the same broken state.
+
+**Verified end-to-end.** Ran `./target/debug/brood
+examples/hot-reload/main.blsp` and edited `greeter.blsp` mid-run:
+
+```
+[main] ticker starting (Ctrl-C to stop; edit greeter.blsp to swap output)
+hello
+hello
+...
+[reloader] reloaded examples/hot-reload/greeter.blsp
+bye
+bye
+...
+[reloader] reloaded examples/hot-reload/greeter.blsp
+hello
+hello
+```
+
+The ticker, untouched, picks up the redefinition because each iteration of
+`(ticker n)` does a fresh global lookup of `greet` — late binding doing
+exactly what `docs/shared-code.md` claims.
+
+**Note** (advisory-check noise). The auto-checker emits `unbound symbol:
+greet` for `main.blsp` because `greet` is only defined via a runtime
+`load`, not statically present in the file the checker walks. Harmless —
+the run proceeds — but worth tracking: a clean cross-file model (or a
+`(declare 'greet)` form) is the eventual fix.

@@ -11,8 +11,16 @@ image.
 > Implementation order:
 > **(1a) extract `brood::introspect` from the LSP crate into the lib — done
 > (2026-05-28; lives at `crates/lisp/src/introspect.rs`, LSP migrated)**;
-> (1b) widen it with the operations below;
-> (2) `crates/nest/src/mcp.rs` with the JSON-RPC loop + dispatcher;
+> **(1b) widen `brood::introspect` with the operations the MCP tools need —
+> done (2026-05-28; four new helpers + a `Diag` / `SourceLoc` / `EvalResult`
+> type vocabulary, 12 new tests, all green)**;
+> (1c) Brood-side prereqs for the two deferred operations
+> (`check_project` / `run_tests` want a *structured-result* variant in
+> `std/project.blsp` and `std/test.blsp`; `eval_in_session.stdout` wants a
+> `with-out-str` facility — `*out*` dynvar + a Rust capture primitive);
+> (2) `crates/nest/src/mcp.rs` with the JSON-RPC loop + dispatcher (can
+> start with the four shipped helpers — `load` and `processes` need no
+> Rust wrapper, they're a one-line `eval_in_session` from the dispatcher);
 > (3) `std/mcp.blsp` with the initial tool set;
 > (4) `nest new` scaffolds `.mcp.json`;
 > (5) docs/devlog tick.
@@ -68,21 +76,31 @@ drifting on "what `map`'s signature is":
 - **Moved** `global_names` / `signature` / `arglist_tokens` from the LSP crate
   to the lib (2026-05-28); both LSP and the future MCP dispatcher consume
   them from `brood::introspect`.
-- **Widen** with the operations both will want:
-  - `source_location(name) -> Option<Loc>` — wraps `(source-location 'foo)`
-    (ADR-031).
-  - `macroexpand_to_string(form, all: bool) -> Result<String>` — wraps
-    `(macroexpand-1 …)` / `(macroexpand …)` and pretty-prints.
-  - `check_project(root: &Path) -> Vec<Diag>` — wraps `(check-project)` with
-    structured diagnostics. (The LSP can later adopt this once the checker
-    carries spans — see [`lsp.md`](lsp.md) Tier 2.)
-  - `run_tests(filter: Option<&str>) -> TestReport` — wraps the project test
-    runner with structured pass/fail per test.
-  - `format_source(src: &str) -> Result<String>` — calls into
-    `std/format.blsp`.
-  - `eval_in_session(src: &str) -> EvalResult { value, stdout, error,
-    diagnostics }` — captures `*out*` and any raised error into a structured
-    payload.
+- **Widened** with four of the operations both surfaces want (step 1b,
+  2026-05-28):
+  - `source_location(name) -> Option<SourceLoc>` — wraps `(source-location 'foo)`
+    (ADR-031). **Done.**
+  - `macroexpand_to_string(src, recursive: bool) -> Result<String>` — parses
+    `src` directly and calls `eval::macros::macroexpand_1` / `macroexpand`
+    (the eval-via-string path would be vulnerable to unbalanced delimiters in
+    `src`). **Done.**
+  - `format_source(src) -> Result<String>` — calls into `std/format.blsp`'s
+    `(format-source SRC)`. **Done.**
+  - `eval_in_session(src) -> EvalResult { value, error, diagnostics }` —
+    structured eval; state accumulates across calls (hot reload). **Done.**
+- **Deferred to step 1c**, behind Brood-side prereqs:
+  - `check_project(root) -> Vec<Diag>` — today `(check-project)` is
+    print-oriented (GNU lines + an `Int` count). Needs a structured variant
+    in `std/project.blsp` that returns `[file line col message]` tuples
+    before a faithful Rust wrapper can land.
+  - `run_tests(filter) -> TestReport` — same shape: `(run-project-tests)`
+    prints GNU per-test output and raises on failure. Wants a structured
+    runner result from `std/test.blsp`.
+  - `EvalResult.stdout` — needs `*out*` (a dynvar) + a `with-out-str` capture
+    primitive. Out of scope here; `eval_in_session` ships without it for now,
+    since `value` + `error` + `diagnostics` are already useful and the agent
+    can read side-effect outputs another way (`(println …)` to a known
+    buffer-as-data structure, for instance).
 
 The contract for every operation:
 1. **Total** — errors become typed fields in the result, never Rust panics.

@@ -181,7 +181,12 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                 "quasiquote" => {
                     let args = heap.list_to_vec(rest)?;
                     let template = args.into_iter().next().unwrap_or(Value::Nil);
-                    return crate::eval::macros::quasiquote(heap, template, env);
+                    // Inner unquote evals tag their own positions; this
+                    // fallback uses the quasiquote combination only when an
+                    // error somehow escaped without one (e.g. a missing-arg
+                    // from `quasiquote` itself).
+                    return crate::eval::macros::quasiquote(heap, template, env)
+                        .map_err(|e| e.or_form_pos(heap, expr));
                 }
                 "defmacro" => {
                     let parts = heap.list_to_vec(rest)?;

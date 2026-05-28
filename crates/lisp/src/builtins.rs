@@ -148,6 +148,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "make-dir", Arity::exact(1), Sig::new(vec![string], nil_ty), make_dir);
     def(heap, "spit", Arity::exact(2), Sig::new(vec![string, string], nil_ty), spit);
     def(heap, "slurp", Arity::exact(1), Sig::new(vec![string], string), slurp);
+    def(heap, "file-mtime", Arity::exact(1), Sig::new(vec![string], int.union(nil_ty)), file_mtime);
 
     // system / environment
     def(heap, "getenv", Arity::exact(1), Sig::new(vec![string], string.union(nil_ty)), getenv);
@@ -269,6 +270,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("make-dir", &["path"], "Create a directory and any missing parents (like mkdir -p)."),
     ("spit", &["path", "s"], "Write string s to the file at path."),
     ("slurp", &["path"], "Read the whole file at path into a string (does not evaluate it)."),
+    ("file-mtime", &["path"], "Last-modified time of path as epoch-milliseconds, or nil if the file is missing. Cheap (stat) — pair with `load` to drive a hot-reloader."),
     ("getenv", &["name"], "The value of environment variable name, or nil if unset."),
     ("run-process", &["prog", "args"], "Run external program prog with an args list, inheriting stdio; returns its exit code."),
     ("macroexpand-1", &["form"], "Expand form by a single macro step."),
@@ -1041,6 +1043,19 @@ fn slurp(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let content = std::fs::read_to_string(&path)
         .map_err(|e| LispError::runtime(format!("slurp: {}: {}", path, e)))?;
     Ok(heap.alloc_string(&content))
+}
+
+/// `(file-mtime path)` — last-modified time of `path` as epoch-milliseconds, or
+/// `nil` if the file is missing or its mtime can't be read. A cheap `stat`, not a
+/// read — pairs with `load` to drive a hot-reloader: poll `file-mtime`, reload
+/// only when it changes. Resolution is platform-dependent (typically nanoseconds
+/// on Linux, truncated to ms here).
+fn file_mtime(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "file-mtime", arg(args, 0))?;
+    let Ok(meta) = std::fs::metadata(&path) else { return Ok(Value::Nil) };
+    let Ok(modified) = meta.modified() else { return Ok(Value::Nil) };
+    let Ok(since) = modified.duration_since(std::time::UNIX_EPOCH) else { return Ok(Value::Nil) };
+    Ok(Value::Int(since.as_millis() as i64))
 }
 
 /// `(getenv name)` — the value of environment variable `name` as a string, or nil

@@ -229,6 +229,7 @@ clause for timeouts.
 - **arithmetic**: variadic `+ - * /`; comparison variadic chains
   `< > <= >= =`
 - **I/O**: `print` `println` `slurp` `spit` `load` `eval-string` `read-string`
+- **Filesystem (stat-class)**: `file-exists?` `dir?` `list-dir` `file-mtime`
 - **processes**: `spawn` `send` `receive` `self` `ref` `monitor` `demonitor`
 - **transducers**: `comp` `xmap` `xfilter` `xremove` `xkeep` `xmapcat`
   `xtake-while` `transduce` `reduced` `reduced?`
