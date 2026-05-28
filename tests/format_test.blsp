@@ -1,0 +1,99 @@
+;; In-language tests for the formatter (std/format.blsp). Register-only —
+;; discovered and run by `nest test` (and cargo test, via crates/lisp/tests/
+;; suite.rs).
+;;
+;; The contract is: format-source is idempotent on every well-formed input,
+;; preserves comments, preserves blank-line intent between top-level forms,
+;; collapses short forms onto a single line, and breaks long ones over multiple.
+
+(require 'test)
+(require 'format)
+
+(describe "format: trivial inputs"
+  (test "empty input yields empty output"
+    (assert= (format-source "") ""))
+  (test "a single form gets a trailing newline"
+    (assert= (format-source "(+ 1 2)") "(+ 1 2)\n"))
+  (test "whitespace is normalised inside a form"
+    (assert= (format-source "(+   1    2)") "(+ 1 2)\n"))
+  (test "extra blank lines between top-level forms collapse to one"
+    (assert= (format-source "(def a 1)\n\n\n\n(def b 2)")
+             "(def a 1)\n\n(def b 2)\n"))
+  (test "no blank line between forms stays no-blank"
+    (assert= (format-source "(def a 1)\n(def b 2)")
+             "(def a 1)\n(def b 2)\n")))
+
+(describe "format: short forms collapse"
+  (test "a multi-line let that fits one line collapses"
+    (assert= (format-source "(let (a 1\n      b 2)\n  (+ a b))")
+             "(let (a 1 b 2) (+ a b))\n"))
+  (test "a multi-line defn that fits one line collapses"
+    (assert= (format-source "(defn add\n  (x y)\n  (+ x y))")
+             "(defn add (x y) (+ x y))\n")))
+
+(describe "format: long forms break"
+  (test "a long generic call breaks: head alone on the first line, args at +2"
+    (let (in  "(very-long-function-name aaaaaaaaaaaaa bbbbbbbbbbbbb cccccccccccccc ddddddddddddd eeeeeeeeeeeee ffffffffffff)"
+          out (format-source in))
+      ;; Call-style: head on first line, every arg on its own line at +2.
+      (is (string-contains? out "(very-long-function-name\n  aaaaaaaaaaaaa\n  bbbbbbbbbbbbb"))))
+  (test "a too-long defn keeps name + params on the head line + indents the body"
+    (let (in  "(defn long-function-name (x y z) (some-long-body-form x y z w v u u1 u2) (another-long-body x y z w v))"
+          out (format-source in))
+      ;; defn is in the header table (count = 2): name + params ride along.
+      (is (string-contains? out "(defn long-function-name (x y z)\n  (some-long-body-form")))))
+
+(describe "format: comments are preserved"
+  (test "a top-level comment is kept"
+    (assert= (format-source ";; hello\n(def x 1)")
+             ";; hello\n(def x 1)\n"))
+  (test "an inline comment forces multi-line on its enclosing list"
+    (let (in  "(defn f (x) ;; doc\n  x)"
+          out (format-source in))
+      (is (string-contains? out ";; doc"))
+      ;; The body item moves to a new line at +2 indent.
+      (is (string-contains? out "\n  x)"))))
+  (test "blank lines between two top-level comments are preserved"
+    (assert= (format-source ";; a\n\n;; b\n(def x 1)")
+             ";; a\n\n;; b\n(def x 1)\n")))
+
+(describe "format: reader macros + collections"
+  (test "quote stays attached to its form"
+    (assert= (format-source "'(a b c)") "'(a b c)\n"))
+  (test "quasi / unquote / splice are emitted with their prefixes"
+    (assert= (format-source "`(a ~b ~@c)") "`(a ~b ~@c)\n"))
+  (test "vectors fit on one line when they fit"
+    (assert= (format-source "[ 1  2  3 ]") "[1 2 3]\n"))
+  (test "maps keep alternating key/value pairs"
+    (assert= (format-source "{ :a 1   :b 2 }") "{:a 1 :b 2}\n"))
+  (test "empty containers stay empty"
+    (assert= (format-source "()") "()\n")
+    (assert= (format-source "[]") "[]\n")
+    (assert= (format-source "{}") "{}\n")))
+
+(describe "format: idempotency"
+  (test "idempotent on a representative grab-bag"
+    (let (samples (list
+                    ""
+                    "(+ 1 2)"
+                    "(defn add (x y) (+ x y))"
+                    ";; comment only"
+                    "(defn long-fn (x y z) (foo) (bar) (baz))"
+                    "'(a b c)"
+                    "(let (a 1 b 2) (+ a b))"
+                    "(cond (= x 1) :one (= x 2) :two else :many)"
+                    "(if (and a b) c d)"
+                    "{:a 1 :b 2}"
+                    "[1 [2 [3 [4]]]]"))
+      (fold (fn (_ s)
+              (let (once  (format-source s)
+                    twice (format-source once))
+                (assert= once twice)))
+            nil samples)))
+  (test "the prelude is idempotent (format(format(prelude)) == format(prelude))"
+    ;; The prelude is the largest single-file Brood program we have; idempotency
+    ;; on it is a high-confidence smoke test of the whole walker.
+    (let (src (slurp "std/prelude.blsp")
+          once (format-source src)
+          twice (format-source once))
+      (assert= once twice))))

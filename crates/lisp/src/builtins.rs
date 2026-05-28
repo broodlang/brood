@@ -107,6 +107,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "str", Arity::any(), Sig::variadic(any, string), str_concat);
     def(heap, "pr-str", Arity::exact(1), Sig::new(vec![any], string), pr_str);
     def(heap, "print", Arity::any(), Sig::variadic(any, nil_ty), print);
+    def(heap, "eprint", Arity::any(), Sig::variadic(any, nil_ty), eprint);
     // `println` is Brood over `print` (std/prelude.blsp).
     def(heap, "stdout-tty?", Arity::exact(0), Sig::nullary(bool_ty), stdout_tty);
 
@@ -126,7 +127,8 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // vectors; see `parse_source` for the shape.
     def(heap, "parse-source", Arity::exact(1), Sig::new(vec![string], vec_ty), parse_source);
     def(heap, "load", Arity::exact(1), Sig::new(vec![string], any), load);
-    def(heap, "%builtin-module", Arity::exact(1), Sig::new(vec![sym], any), builtin_module);
+    def(heap, "%builtin-module", Arity::exact(1), Sig::new(vec![sym.union(kw).union(string)], string.union(nil_ty)), builtin_module);
+    def(heap, "%builtin-doc", Arity::exact(1), Sig::new(vec![sym.union(kw).union(string)], string.union(nil_ty)), builtin_doc);
     // `apply`'s last positional arg should be a sequence (it's spliced); the
     // others can be anything. We model it as `(callable, ...any) -> any` — the
     // sequence-at-tail constraint is dynamic-only (a poor fit for fixed-arity
@@ -134,7 +136,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "apply", Arity::at_least(2), Sig::with_rest(vec![callable], any, any), apply_builtin);
 
     // symbols
-    def(heap, "name", Arity::exact(1), Sig::new(vec![sym.union(kw)], string), name_of);
+    def(heap, "name", Arity::exact(1), Sig::new(vec![sym.union(kw).union(string)], string), name_of);
     def(heap, "symbol", Arity::exact(1), Sig::new(vec![string.union(sym).union(kw)], sym), to_symbol);
     def(heap, "keyword", Arity::exact(1), Sig::new(vec![string.union(sym).union(kw)], kw), to_keyword);
 
@@ -158,6 +160,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
 
     // advisory type checker (the Ty lattice's first consumer; see docs/types.md)
     def(heap, "check", Arity::exact(1), Sig::new(vec![any], list_ty), check_builtin);
+    def(heap, "check-file", Arity::exact(1), Sig::new(vec![string], list_ty), check_file_builtin);
 
     // source positions (editor tooling; see docs/tooling.md)
     def(heap, "form-pos", Arity::exact(1), Sig::new(vec![any], vec_ty.union(nil_ty)), form_pos);
@@ -233,9 +236,11 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("string->number", &["s"], "Parse s strictly as an int, else a float, else nil (unlike read-string)."),
     ("type-of", &["x"], "The runtime type of x as a keyword (:int, :string, :pair, ...)."),
     ("check", &["form"], "Advisory type-check a quoted form: a list of warning strings, or nil. Never raises."),
+    ("check-file", &["path"], "Advisory type-check every top-level form in the file at path: a list of `path:line:col: warning: …` strings, or nil. Does not evaluate the file."),
     ("str", &["&", "xs"], "Concatenate the display forms of the arguments into one string."),
     ("pr-str", &["x"], "The readable (re-readable) text form of x."),
     ("print", &["&", "xs"], "Write the display forms of the arguments to stdout; returns nil."),
+    ("eprint", &["&", "xs"], "Write the display forms of the arguments to stderr; returns nil."),
     ("stdout-tty?", &[], "True when stdout is an interactive terminal (false when piped or captured)."),
     ("now", &[], "Wall-clock milliseconds since the Unix epoch."),
     ("mem-bytes", &[], "Bytes currently allocated process-wide."),
@@ -597,6 +602,14 @@ fn print(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::Nil)
 }
 
+fn eprint(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let parts: Vec<String> = args.iter().map(|&a| printer::display(heap, a)).collect();
+    eprint!("{}", parts.join(" "));
+    use std::io::Write;
+    std::io::stderr().flush().ok();
+    Ok(Value::Nil)
+}
+
 /// `(stdout-tty?)` — true when stdout is an interactive terminal, false when it's
 /// captured (a pipe, a file, `cargo test`). The test framework uses this to emit
 /// ANSI colour only when a human is watching, so captured output (what an LLM or
@@ -785,27 +798,51 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
     ("format", include_str!("../../../std/format.blsp")),
 ];
 
-/// `(%builtin-module name)` — the source of a baked-in std module as a string, or
-/// nil if there is none. Mechanism only: `require` (Brood) consults this before
-/// searching the load-path.
-fn builtin_module(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+/// Baked-in reference *documents* (markdown), the counterpart to
+/// [`EMBEDDED_MODULES`] for non-module text. `(%builtin-doc 'brood-for-claude)`
+/// returns the language guide that `nest new` scaffolds into each new project,
+/// so a freshly-scaffolded project is self-contained without depending on a
+/// Brood install path.
+const EMBEDDED_DOCS: &[(&str, &str)] = &[(
+    "brood-for-claude",
+    include_str!("../../../docs/brood-for-claude.md"),
+)];
+
+/// The lookup body shared by `%builtin-module` and `%builtin-doc`: coerce the
+/// (symbol | keyword | string) name argument, find it in `table`, return the
+/// baked-in source as a fresh string (or `nil` if absent). `who`/`label` are
+/// used only in the type-error message.
+fn lookup_embedded(
+    args: &[Value],
+    heap: &mut Heap,
+    table: &[(&str, &str)],
+    who: &'static str,
+    label: &'static str,
+) -> LispResult {
     let v = arg(args, 0);
     let name = match v {
         Value::Sym(s) | Value::Keyword(s) => value::symbol_name(s),
         Value::Str(id) => heap.string(id).to_string(),
-        _ => {
-            return Err(LispError::wrong_type(
-                heap,
-                "%builtin-module",
-                "module name",
-                v,
-            ))
-        }
+        _ => return Err(LispError::wrong_type(heap, who, label, v)),
     };
-    match EMBEDDED_MODULES.iter().find(|(n, _)| *n == name) {
+    match table.iter().find(|(n, _)| *n == name) {
         Some((_, src)) => Ok(heap.alloc_string(src)),
         None => Ok(Value::Nil),
     }
+}
+
+/// `(%builtin-module name)` — the source of a baked-in std module as a string,
+/// or nil if there is none. Mechanism only: `require` (Brood) consults this
+/// before searching the load-path.
+fn builtin_module(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    lookup_embedded(args, heap, EMBEDDED_MODULES, "%builtin-module", "module name")
+}
+
+/// `(%builtin-doc name)` — the source of a baked-in reference document as a
+/// string, or nil if there is none. Used by `nest new` to scaffold the language
+/// guide into each new project.
+fn builtin_doc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    lookup_embedded(args, heap, EMBEDDED_DOCS, "%builtin-doc", "doc name")
 }
 
 /// `(name x)` — the spelling of a symbol or keyword as a string (no leading `:`),
@@ -1074,6 +1111,34 @@ fn check_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let mut out = Vec::with_capacity(warnings.len());
     for w in &warnings {
         out.push(heap.alloc_string(w));
+    }
+    Ok(heap.list(out))
+}
+
+/// `(check-file path)` — run the advisory type checker over every top-level
+/// form in the file at `path` and return a list of pre-formatted warning
+/// strings (each `"path:line:col: warning: message"`), or `nil` if clean.
+///
+/// Reads but does **not** evaluate the file — same `check_file` walk the
+/// `brood --check` CLI uses, with the file-globals accumulator threaded
+/// across top-level forms. The whole-file-at-once shape is what lets `(defn
+/// foo …)` at line 1 silence the unbound check on `(foo …)` at line 100. Used
+/// by `(check-project)` in `std/project.blsp` for the `nest test` / `nest run`
+/// pre-flight.
+fn check_file_builtin(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "check-file", arg(args, 0))?;
+    let src = std::fs::read_to_string(&path)
+        .map_err(|e| LispError::runtime(format!("check-file: cannot read {}: {}", path, e)))?;
+    let forms = reader::read_all_positioned(heap, &src).map_err(|e| e.or_file(path.clone()))?;
+    let just_forms: Vec<Value> = forms.into_iter().map(|(f, _)| f).collect();
+    let warnings = crate::types::check::check_file(heap, &just_forms);
+    let mut out = Vec::with_capacity(warnings.len());
+    for (pos, msg) in &warnings {
+        let s = match pos {
+            Some(p) => format!("{}:{}:{}: warning: {}", path, p.line, p.col, msg),
+            None => format!("{}: warning: {}", path, msg),
+        };
+        out.push(heap.alloc_string(&s));
     }
     Ok(heap.list(out))
 }

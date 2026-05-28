@@ -271,8 +271,10 @@ not a known body form (defaults to call-style — every arg breaks)."
   ;; Walk kids from start-idx, emitting each structural form and each comment
   ;; on its own line at body-ind. `nl` mirrors the root walker: it tracks the
   ;; newline count between the last emitted block and the cursor, so a blank
-  ;; line in the source survives between two body items.
-  (render--body--at kids start-idx (vector-length kids) body-ind 1 ""))
+  ;; line in the source survives between two body items. Init 0: we want a
+  ;; single `\n` between the head-line and the first body item (a blank line
+  ;; there would be ugly and isn't user intent).
+  (render--body--at kids start-idx (vector-length kids) body-ind 0 ""))
 
 (defn render--body--at (kids i n body-ind nl acc)
   (if (= i n) acc
@@ -305,7 +307,7 @@ not a known body form (defaults to call-style — every arg breaks)."
     (format-source--root (node-children root))))
 
 (defn format-source--root (kids)
-  (let (out (format-source--root--walk kids 0 (vector-length kids) false ""))
+  (let (out (format-source--root--walk kids 0 (vector-length kids) 0 ""))
     (cond
       (= out "")           ""
       (ends-with? out "\n") out
@@ -407,9 +409,9 @@ per rewritten file and a summary; returns the number of files rewritten."
               0)
         else
           (do (fold (fn (_ p) (println (str "  needs formatting: " p))) nil changed)
-              (error "format: " (length changed) " file"
-                     (if (= (length changed) 1) "" "s")
-                     " need formatting."))))))
+              (error "format: " (length changed)
+                     (if (= (length changed) 1) " file needs" " files need")
+                     " formatting."))))))
 
 (defn format--check (files acc)
   (if (nil? files) (reverse acc)

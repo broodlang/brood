@@ -2554,3 +2554,96 @@ new surface. The devlog plus the tooling.md section is enough; if `:main`
 grows shapes later (string `"mod:fn"`, namespaced symbols, an `:args` default),
 that's the point to revisit.
 
+---
+
+## 2026-05-28 — `nest format`: a Brood-driven code formatter
+
+**Goal.** Add an opinionated formatter that walks every `.blsp` file in a
+project and rewrites it in place. Per the repo's "write the language in the
+language" rule (ADR-006), the formatter itself lives in Brood; Rust supplies
+only the mechanism it can't bootstrap.
+
+**Substrate.** The lossless, comment-and-whitespace-preserving CST already
+existed (`crates/lisp/src/syntax/cst.rs`, built for the LSP). What was missing
+was a way to reach it from Brood. Added one builtin:
+
+```
+(parse-source "src") -> [:root [child …]]
+```
+
+Each node is a vector `[kind …]`. Leaves carry their raw source text so they
+round-trip byte-for-byte (`[:symbol "foo"]`, `[:int "42"]`, `[:str "\"hi\""]`,
+`[:whitespace "  \n"]`, `[:comment ";; …\n"]`). Reader macros wrap a single
+child (`[:quote child]`, `[:quasi child]`, …). Containers carry a child vector
+(`[:list [child …]]`, `[:vector …]`, `[:map …]`, `[:root …]`). Errors become
+`[:error "raw"]` nodes — never raises; the formatter just ignores them and
+re-emits their original text. ~80 lines of Rust in `builtins.rs`.
+
+**The formatter** (`std/format.blsp`, ~280 lines of Brood). One rule:
+
+> Render any form on a single line if it fits within the width budget; otherwise
+> break it across lines with each body argument on its own line at +2 indent.
+
+A small `*format-headers*` table (`defn` → 2, `let` → 1, `if` → 1, …) keeps a
+fixed prefix of args on the first line of recognised forms, so the body
+indents under a sensible header. Comments inside a list force the multi-line
+shape and re-emit on their own line at the surrounding indent. Blank lines
+between top-level forms (or top-level comments) survive when the author left
+one; runs of 3+ blanks collapse to a single blank. Strings with literal
+newlines force multi-line on their enclosing form (you can't inline a
+multi-line string).
+
+**Idempotency is the contract.** `format-source(format-source(x))` must equal
+`format-source(x)` for every input. The "fit one line / else break at +2" rule
+makes this easy: once a form fits a line, it always will; once it doesn't, the
+break shape is canonical. Verified on a grab-bag plus the prelude (the largest
+single Brood file we have, ~1200 lines).
+
+**`nest format`** (~25 lines in `crates/nest/src/main.rs`). Default rewrites in
+place; `--check` (or `-c`) just diff-summarises and exits non-zero. The
+bootstrap snippet follows the same shape as the other subcommands —
+`(require 'project) (load-config) (require 'format) (format-project)` (or
+`(format-project-check)`).
+
+**Two design choices worth recording.**
+1. **No "align after head" for generic calls.** Some Lisps emit
+   `(foo a\n     b\n     c)`; we emit `(foo\n  a\n  b\n  c)` regardless of
+   head. The simpler rule is robust under rename — a 3-char head and a 13-char
+   head produce the same shape.
+2. **No `if`-cascade flattening.** The prelude has hand-aligned cascading
+   `if`s (`(if a 1 (if b 2 (if c 3 …)))`); the formatter re-emits them as the
+   nested staircase that the source literally is. Rewriting forms is out of
+   scope — a formatter shouldn't be a refactor tool. The prelude's pattern
+   should be `cond`, which stays flat.
+
+**Caveat: not running it on the brood repo (yet).** A dry-run of
+`format-source` on `std/prelude.blsp` would touch ~1170 lines — mostly real
+stylistic changes (hand-tuned widths, the `if`-cascade above, occasional
+multi-line forms that fit on one line). The change is intentionally a separate
+commit when the user wants to opt in; tonight's commit only adds the tool.
+
+**Tests.** `tests/format_test.blsp` — 18 in-language assertions across
+trivial inputs, short-form collapsing, long-form breaking, comment
+preservation, reader macros + collections, and an idempotency battery that
+includes the whole prelude.
+
+**Verified.**
+- `cargo build` clean.
+- `cargo test` green across the workspace; `brood_suite_passes` now runs
+  the new format tests as part of the in-language suite.
+- Hand smoke: `nest new demo && cd demo && nest format` rewrites the
+  scaffolded files; `nest format --check` returns 0 on the clean tree and 1
+  after dirtying any file; `nest test` still passes on the formatted result.
+
+**Docs.**
+- `docs/tooling.md`: new "Formatting source: `nest format`" section between
+  the `nest run` and `nest doc` sections.
+- `docs/roadmap.md`: the project-tool bullet now lists `nest format`.
+
+**Why no ADR.** Extends ADR-020/028 the same way `nest run` did. The shape of
+the data the formatter consumes (the CST-as-Brood-data tree) is the only
+durable interface decision here; if a second consumer appears (a refactor
+tool, a static checker, the LSP), that's the point at which the data shape
+deserves its own ADR.
+
+

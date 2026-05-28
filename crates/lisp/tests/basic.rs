@@ -616,23 +616,98 @@ fn parse_errors_carry_precise_position() {
     assert_eq!((pos.line, pos.col), (2, 3));
 }
 
-/// A runtime error is tagged with the enclosing top-level form's start line.
+/// A runtime error from a primitive is tagged with the *innermost* combination
+/// that triggered it — not just the enclosing top-level form's line. The eval
+/// loop's `or_form_pos` shape preserves the most precise known position
+/// (innermost wins).
 #[test]
-fn runtime_errors_carry_top_level_form_position() {
+fn runtime_errors_carry_innermost_form_position() {
     let mut interp = Interp::new();
-    // First form is fine; the unbound reference is in the form starting line 3.
-    let err = interp.eval_source("(+ 1 2)\n\n(+ 1 nope)\n").unwrap_err();
+    // First form is fine; `(first 5)` on line 5 col 3 is where the error fires.
+    let err = interp
+        .eval_source("(+ 1 2)\n(def x 1)\n(def y 2)\n(do\n  (first 5))\n")
+        .unwrap_err();
     let pos = err.pos.expect("runtime error should have a position");
-    assert_eq!(pos.line, 3);
+    assert_eq!((pos.line, pos.col), (5, 3));
 }
 
-/// `eval_str` (no file context) leaves the position unset for callers that
-/// don't want location tagging, e.g. the REPL.
+/// A primitive misuse inside a `let` RHS lands on the RHS's line, not the let's.
 #[test]
-fn eval_str_leaves_position_unset() {
+fn runtime_error_inside_let_rhs_points_at_rhs() {
     let mut interp = Interp::new();
-    let err = interp.eval_str("(+ 1 nope)").unwrap_err();
-    assert!(err.pos.is_none());
+    // The let opens on line 1; `(first 99)` is on line 3 col 9.
+    let err = interp
+        .eval_source("(let (a 1\n      b 2\n      c (first 99))\n  c)\n")
+        .unwrap_err();
+    let pos = err.pos.expect("runtime error should have a position");
+    assert_eq!((pos.line, pos.col), (3, 9));
+}
+
+/// A primitive misuse inside an `if` test lands on the test's line, not the if's.
+#[test]
+fn runtime_error_inside_if_test_points_at_test() {
+    let mut interp = Interp::new();
+    // The if opens on line 1; the test `(+ 1 "x")` is on line 2 col 3.
+    let err = interp
+        .eval_source("(if\n  (+ 1 \"x\")\n  :then\n  :else)\n")
+        .unwrap_err();
+    let pos = err.pos.expect("runtime error should have a position");
+    assert_eq!((pos.line, pos.col), (2, 3));
+}
+
+/// Macroexpand rebuilds list forms (the compile pass walks the whole tree);
+/// the rebuilt forms must carry the original's position so a diagnostic from
+/// inside an expanded form still points at the source line. Regression:
+/// before this carry-through, every inner position was lost to expansion and
+/// the diagnostic fell back to the top-level form's start.
+#[test]
+fn position_survives_macroexpansion() {
+    let mut interp = Interp::new();
+    // `when` is a prelude macro that expands to `if`+`do`. The misuse is on
+    // line 3 col 5 — inside the body of the `when`, which gets rebuilt by the
+    // compile pass.
+    let err = interp
+        .eval_source("(def x 1)\n(when true\n    (first 5))\n")
+        .unwrap_err();
+    let pos = err.pos.expect("runtime error should have a position");
+    assert_eq!((pos.line, pos.col), (3, 5));
+}
+
+/// The GNU `[FILE:]LINE:COL: kind error: msg` formatter — what editors parse.
+/// File + pos come from `load`; pos refinement comes from the eval loop. End
+/// to end: we should be able to point a tool at a `.blsp` file and get a
+/// jumpable diagnostic.
+#[test]
+fn located_diagnostic_carries_file_line_col() {
+    let mut path = std::env::temp_dir();
+    path.push(format!("brood-loc-{}.blsp", std::process::id()));
+    std::fs::write(&path, "(def x 1)\n(def y 2)\n(first 99)\n").unwrap();
+    let p_str = path.to_string_lossy().to_string();
+
+    let err = Interp::new()
+        .eval_str(&format!("(load {:?})", p_str))
+        .unwrap_err();
+    let line = err.located();
+    // PATH:3:1: type error: first: ...
+    assert!(line.starts_with(&format!("{}:3:1: type error:", p_str)),
+            "unexpected diagnostic: {}", line);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// `eval_str` (no file context) still attaches the innermost form's position
+/// to the error — it just leaves `file` unset. Useful for the REPL: a
+/// multi-line input still gets a `LINE:COL:` prefix on the diagnostic.
+#[test]
+fn eval_str_attaches_position_no_file() {
+    let mut interp = Interp::new();
+    // Multi-line input; misuse is on line 3 col 3.
+    let err = interp
+        .eval_str("(do\n  (println :a)\n  (first 5))")
+        .unwrap_err();
+    let pos = err.pos.expect("eval_str should still tag the innermost pos");
+    assert_eq!((pos.line, pos.col), (3, 3));
+    assert!(err.file.is_none(), "eval_str must not invent a file");
 }
 
 // ---- regression tests for the correctness/robustness fixes ----

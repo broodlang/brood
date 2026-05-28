@@ -120,7 +120,9 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   when needed. `nest test` discovers + loads (register-only) + runs once; `nest
   run [args…]` runs the entry point (configured by `:main`, defaults to module
   `main`, fn `main`; extra CLI args are passed in as strings); `nest new <name>`
-  scaffolds a two-module project (`main` requires `hello`) via `spit`/`make-dir`.
+  scaffolds a two-module project (`main` requires `hello`) via `spit`/`make-dir`;
+  `nest format` (and `--check`) reformats every project `.blsp` in place, driven
+  by an in-Brood CST walker (`std/format.blsp`) over a `parse-source` primitive.
   ADR-020/028.
 - 🟡 **Editor tooling & documentation** — source-position errors (GNU
   `FILE:LINE:COL:`) + structured test output (`docs/tooling.md`); a lossless,

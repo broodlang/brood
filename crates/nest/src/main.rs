@@ -10,6 +10,9 @@
 //!   nest new <name>   scaffold a new project (project.blsp + src/ + tests/)
 //!   nest run [args…]  run the project's entry point (configured via :main)
 //!   nest test         discover tests/**/*_test.blsp and run the suite once
+//!   nest check        advisory type-check every .blsp under src/ + tests/
+//!   nest format       format every .blsp under src/ and tests/ in place
+//!   nest format --check  exit non-zero if any file would change (CI mode)
 //!
 //! `-j N` / `--max-parallel N` caps how many spawned processes run on OS
 //! threads at once (0 = unlimited, the default) — useful for bounding a
@@ -43,6 +46,10 @@ usage:
                     defaults to module `main`, fn `main`). Extra args are passed
                     to the entry fn as strings.
   nest test         discover tests/**/*_test.blsp and run the suite once
+  nest check        advisory type-check every .blsp under src/ + tests/
+                    (exits non-zero on warnings — for CI)
+  nest format       format every .blsp under src/ and tests/ in place
+                    (use --check to exit non-zero on diffs instead of writing)
   nest doc [module] emit Markdown docs (whole project, or one named module)
 
 options:
@@ -98,6 +105,42 @@ fn main() {
             "(require 'project) (load-config) (run-project-tests)",
         ),
 
+        // `nest check` — advisory type-check the whole project (every .blsp under
+        // src/ + tests/) without running anything. Mirrors `brood --check <file>`
+        // at project scope. Warnings go to stdout (so callers can pipe them); the
+        // process exits non-zero when any warning was emitted, so CI can gate on
+        // it. The check itself is policy in Brood (`check-project` in
+        // `std/project.blsp`); the Rust side just turns the returned count into
+        // an exit code. See `docs/types.md`.
+        "check" => {
+            // Same bootstrap order as the other subcommands. `check-project`
+            // prints each warning and returns the total count; we exit with
+            // that count clamped to 1 if non-zero.
+            //
+            // We `(require 'test)` first so the unbound-symbol pass doesn't
+            // flag `test` / `describe` / `assert=` / … in `tests/**/*_test.blsp`.
+            // Test files normally start with `(require 'test)` themselves, but
+            // the checker reads files without executing them, so the require
+            // never runs through the checker's eyes — pre-loading the module
+            // here makes its exports globally visible, matching what
+            // `run-project-tests` does before its embedded check.
+            let v = run_for_value(
+                &mut interp,
+                "(require 'project) (load-config) (require 'test) (check-project)",
+            );
+            match v {
+                brood::core::value::Value::Int(0) => {}
+                brood::core::value::Value::Int(_) => std::process::exit(1),
+                other => {
+                    eprintln!(
+                        "nest check: check-project returned a non-integer ({})",
+                        interp.print(other)
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+
         // `nest new <name>` — scaffold a new project (ADR-020): a folder with
         // project.blsp + src/ + tests/ and starter files. The policy (name
         // checks, templates) is in Brood (std/project.blsp); we just pass the
@@ -111,6 +154,40 @@ fn main() {
             let code = format!(
                 "(require 'project) (load-config) (new-project \"{}\")",
                 escaped
+            );
+            run(&mut interp, &code);
+        }
+
+        // `nest format` — reformat every .blsp under src/ + tests/ in place
+        // (ADR-020 extension). `--check` flips to a read-only mode: same walk
+        // but exits non-zero if any file would change, used for CI. Mechanism
+        // is one Rust primitive (`parse-source`) + std/format.blsp; this arm
+        // just chooses which Brood entry to call. Operands beyond the flag are
+        // rejected — there are no other args, and silently ignoring them would
+        // mask typos.
+        "format" => {
+            let mut check = false;
+            for a in positional.iter().skip(1) {
+                match a.as_str() {
+                    "--check" | "-c" => check = true,
+                    other => {
+                        eprintln!("nest format: unexpected argument {:?}", other);
+                        std::process::exit(2);
+                    }
+                }
+            }
+            let entry = if check {
+                "(format-project-check)"
+            } else {
+                "(format-project)"
+            };
+            // Same bootstrap order as the other subcommands: project first
+            // (defines `load-config`), then load-config (which writes the
+            // default user config if absent), then the feature module. Format
+            // depends on project's discovery helpers via its own require.
+            let code = format!(
+                "(require 'project) (load-config) (require 'format) {}",
+                entry
             );
             run(&mut interp, &code);
         }
@@ -165,6 +242,20 @@ fn run(interp: &mut Interp, code: &str) {
     if let Err(e) = interp.eval_str(code) {
         report_error(&e);
         std::process::exit(1);
+    }
+}
+
+/// Like [`run`], but returns the bootstrap's last value so the caller can
+/// decide whether to exit non-zero based on it. Used by `nest check` to turn
+/// "warnings were emitted" into a non-zero exit without throwing a synthetic
+/// error (and the noise that would follow).
+fn run_for_value(interp: &mut Interp, code: &str) -> brood::core::value::Value {
+    match interp.eval_str(code) {
+        Ok(v) => v,
+        Err(e) => {
+            report_error(&e);
+            std::process::exit(1);
+        }
     }
 }
 

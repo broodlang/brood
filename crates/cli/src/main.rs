@@ -190,6 +190,12 @@ fn run_test_files(interp: &mut Interp, files: &[String]) {
     for path in files {
         match std::fs::read_to_string(path) {
             Ok(src) => {
+                // Same advisory pre-check as `run_files`: warnings before tests,
+                // tests run regardless (`BROOD_NO_CHECK=1` opts out). Stderr so
+                // the structured test output on stdout stays unmixed.
+                if !no_check_env() {
+                    check_one_file(interp, path, &src, CheckSink::Stderr);
+                }
                 if let Err(e) = eval_file(interp, path, &src) {
                     report_error(&e.or_file(path.clone()));
                     std::process::exit(1);
@@ -205,6 +211,52 @@ fn run_test_files(interp: &mut Interp, files: &[String]) {
         report_error(&e);
         std::process::exit(1);
     }
+}
+
+/// Where the auto-checker's warnings should land — stdout for the explicit
+/// `brood --check` command (the user's intent is to *see* warnings), stderr
+/// for the implicit pre-run auto-check (warnings are sidebar info that
+/// shouldn't muddle program output).
+enum CheckSink {
+    Stdout,
+    Stderr,
+}
+
+/// Run the advisory checker over a single file's source, writing each warning
+/// as a GNU `FILE:LINE:COL: warning: msg` line to the chosen sink. Returns
+/// `true` when at least one warning was emitted. **Never** raises — a parse
+/// error here is reported but signalled by the bool, so the caller can choose
+/// whether to continue (regular run) or fail fast (`--check`).
+fn check_one_file(interp: &mut Interp, path: &str, src: &str, sink: CheckSink) -> bool {
+    // Read (recording positions) without evaluating, then check the file as a
+    // whole — `check_file` accumulates top-level `def`/`defn` names across
+    // forms so a name defined at the top isn't flagged when a later form
+    // calls it.
+    let forms = match brood::syntax::reader::read_all_positioned(&mut interp.heap, src) {
+        Ok(forms) => forms,
+        Err(e) => {
+            // A parse error becomes one warning line so the regular-run path
+            // can still proceed to attempt eval (which will surface the same
+            // parse error as a hard error). For `--check` we want a hard exit;
+            // the caller controls that.
+            report_error(&e.clone().or_file(path.to_string()));
+            return true;
+        }
+    };
+    let just_forms: Vec<_> = forms.into_iter().map(|(f, _)| f).collect();
+    let warnings = brood::types::check::check_file(&mut interp.heap, &just_forms);
+    let warned = !warnings.is_empty();
+    for (pos, msg) in warnings {
+        let line = match pos {
+            Some(p) => format!("{}:{}:{}: warning: {}", path, p.line, p.col, msg),
+            None => format!("{}: warning: {}", path, msg),
+        };
+        match sink {
+            CheckSink::Stdout => println!("{}", line),
+            CheckSink::Stderr => eprintln!("{}", line),
+        }
+    }
+    warned
 }
 
 /// `brood --check <file>...`: read each file and run the advisory type checker
@@ -226,24 +278,9 @@ fn run_check_files(interp: &mut Interp, files: &[String]) {
                 std::process::exit(1);
             }
         };
-        // Read (recording positions) without evaluating, then check the file
-        // as a whole — `check_file` accumulates top-level `def`/`defn` names
-        // across forms so a name defined at the top isn't flagged when a later
-        // form calls it.
-        let forms = match brood::syntax::reader::read_all_positioned(&mut interp.heap, &src) {
-            Ok(forms) => forms,
-            Err(e) => {
-                report_error(&e.or_file(path.clone()));
-                std::process::exit(1);
-            }
-        };
-        let just_forms: Vec<_> = forms.into_iter().map(|(f, _)| f).collect();
-        for (pos, msg) in brood::types::check::check_file(&interp.heap, &just_forms) {
+        // `brood --check` — the user wants the warnings, so they go to stdout.
+        if check_one_file(interp, path, &src, CheckSink::Stdout) {
             warned = true;
-            match pos {
-                Some(p) => println!("{}:{}:{}: warning: {}", path, p.line, p.col, msg),
-                None => println!("{}: warning: {}", path, msg),
-            }
         }
     }
     if warned {
@@ -255,6 +292,15 @@ fn run_files(interp: &mut Interp, files: &[String]) {
     for path in files {
         match std::fs::read_to_string(path) {
             Ok(src) => {
+                // Auto-run the advisory checker before eval. Warnings print to
+                // **stderr** in the same GNU format as `--check`, so they don't
+                // muddle the program's own stdout; the run proceeds regardless
+                // (advisory, never gates — see `docs/types.md`).
+                // `BROOD_NO_CHECK=1` disables it for the rare case a caller
+                // wants the raw eval (e.g. timing a hot path).
+                if !no_check_env() {
+                    check_one_file(interp, path, &src, CheckSink::Stderr);
+                }
                 if let Err(e) = eval_file(interp, path, &src) {
                     report_error(&e.or_file(path.clone()));
                     std::process::exit(1);
@@ -266,6 +312,13 @@ fn run_files(interp: &mut Interp, files: &[String]) {
             }
         }
     }
+}
+
+/// Honoured by `run_files` and `run_test_files` so the advisory checker can be
+/// silenced when timing a run or when the warnings are noise (e.g. during
+/// development of the checker itself). Default: on.
+fn no_check_env() -> bool {
+    std::env::var_os("BROOD_NO_CHECK").is_some()
 }
 
 /// Interactive REPL with full line editing and history (terminal only).

@@ -17,6 +17,11 @@ Lisp* (`.lisp` was dropped because it collides with Emacs' `lisp-mode`). Any
 `.blsp` file, or a reference to "blsp", means **Brood-language source** (the
 language itself), as distinct from the Rust kernel under `crates/`.
 
+**When writing Brood code, read `docs/brood-for-claude.md` first.** It's the
+pocket reference geared for AI assistants — syntax, idioms, and the patterns
+that aren't shared with other Lisps. `nest new` also drops a copy into every
+scaffolded project (it's baked into the binary via `%builtin-doc`).
+
 ## Greenfield: prefer the right structure over compatibility
 
 This is **greenfield** — pre-1.0, no external users, nothing to keep stable.

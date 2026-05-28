@@ -115,10 +115,51 @@ the `nest new` scaffolder."
         (append (project--abs-paths root *project-source-paths*) *load-path*))
   root)
 
+;; Every .blsp file the project owns — its source files plus its test files.
+;; The set the advisory type-checker walks for `(check-project)`.
+(defn project--all-files (root)
+  (let (src-dirs  (project--abs-paths root *project-source-paths*)
+        test-dirs (project--abs-paths root *project-test-paths*))
+    (append
+      (fold (fn (a d) (append a (project--collect-sources d))) nil src-dirs)
+      (fold (fn (a d) (append a (project--collect-tests d)))   nil test-dirs))))
+
+;; (check-project) — advisory pre-flight: run `check-file` over every source +
+;; test file in the project, printing each warning to stderr as a GNU
+;; `FILE:LINE:COL: warning: …` line (editor-parseable, matches `brood --check`).
+;; Returns the total warning count. Advisory only — never raises, never stops a
+;; run. Called by `run-project-tests` and `run-project` before they hand off to
+;; the test runner / entry-point, so users see type-misuse / arity / unbound
+;; diagnostics without an extra command (`docs/types.md` — Step 4 auto-run).
+;;
+;; Runs *after* the project's sources are loaded (in the caller), so
+;; cross-module names resolve through the heap's globals — `(check-file p)`
+;; sees every prelude / std / project-source definition. File-local defns are
+;; handled by `check-file`'s own per-file accumulator. The trade-off: a
+;; file whose load fails never reaches the check; that error surfaces through
+;; the normal eval path instead.
+(defn check-project ()
+  (let (root (project--find-root (cwd)))
+    (when (nil? root)
+      (error "check-project: not in a Brood project (no project.blsp found from " (cwd) ")"))
+    ;; Respect `BROOD_NO_CHECK=1` — the same opt-out the `brood` CLI honors for
+    ;; `brood <file>` / `brood --test`. Returning 0 (no warnings, no print) is
+    ;; what callers' "exit non-zero on warning" gating in `nest check` expects.
+    (if (= (getenv "BROOD_NO_CHECK") "1")
+      0
+      (fold (fn (n f)
+              (fold (fn (k w) (eprintln w) (+ k 1)) n (check-file f)))
+            0
+            (project--all-files root)))))
+
 ;; (run-project-tests & opts) — find the project from the cwd, set it up, load
 ;; every <name>_test.blsp under its test paths (which only REGISTER tests via the
 ;; test framework), then run the whole suite once. opts pass through to run-tests
 ;; (e.g. :trace / :slow). Raises if there's no project here, or if any test fails.
+;;
+;; A `(check-project)` advisory pre-flight runs after all loads but before
+;; `(run-tests)`, so the checker sees every source + test file once
+;; cross-module names are resolvable through the loaded heap.
 (defn run-project-tests (& opts)
   (let (root (project--find-root (cwd)))
     (when (nil? root)
@@ -129,6 +170,7 @@ the `nest new` scaffolder."
     (let (dirs  (project--abs-paths root *project-test-paths*)
           files (fold (fn (acc d) (append acc (project--collect-tests d))) nil dirs))
       (fold (fn (_ f) (load f)) nil files)   ; load each: registers its tests
+      (check-project)                          ; advisory; warnings to stderr
       (apply run-tests opts))))
 
 ;; (run-project args) — find the project from the cwd, set it up (which may
@@ -147,6 +189,10 @@ the `nest new` scaffolder."
       (require modname)
       (unless (bound? fname)
         (error "run-project: entry fn '" fname "' is not defined (module '" modname "')"))
+      ;; Advisory pre-flight: warnings go to stderr so they don't pollute the
+      ;; entry point's own stdout. After `require` so cross-module names see
+      ;; the heap's globals (see `check-project`).
+      (check-project)
       (let (f (eval fname))
         (unless (fn? f)
           (error "run-project: entry '" fname "' is not callable (" (type-of f) ")"))
@@ -246,10 +292,33 @@ the `nest new` scaffolder."
        "(describe \"hello\"\n"
        "  (test \"greeting\" (assert= (greeting) \"hello " nm "\")))\n"))
 
+;; `CLAUDE.md` for a fresh project — short project-specific intro that points
+;; at the language reference (which `nest new` also drops into `docs/`, so the
+;; project is self-contained and an AI assistant has everything it needs in-tree).
+(defn project--claude-md-template (nm)
+  (str "# " nm " — guidance for Claude\n"
+       "\n"
+       "This is a Brood (`.blsp`) project scaffolded by `nest new`. Replace this stub\n"
+       "with project-specific guidance — commands, conventions, gotchas.\n"
+       "\n"
+       "## Running\n"
+       "\n"
+       "- `nest test`   — run the test suite (each test runs in its own green process).\n"
+       "- `nest run`    — invoke the entry point (default `main/main`; override in `project.blsp` via `:main`).\n"
+       "- `nest format` — format Brood source.\n"
+       "\n"
+       "## Writing Brood\n"
+       "\n"
+       "`docs/brood-for-claude.md` is the language reference geared for AI assistants\n"
+       "— syntax, idioms, and the patterns that aren't shared with other Lisps. Read\n"
+       "it before generating Brood code.\n"))
+
 ;; (new-project "foobar") — scaffold ./foobar with a runnable two-module
 ;; skeleton: project.blsp + src/main.blsp + src/hello.blsp (where main `require`s
 ;; hello and calls into it) + a paired test file for each, so `cd foobar && nest
-;; test` *and* `nest run` both pass immediately. Errors on a bad name or an
+;; test` *and* `nest run` both pass immediately. Also drops CLAUDE.md +
+;; docs/brood-for-claude.md (the baked-in language guide) so the project is
+;; self-contained for AI-assisted editing. Errors on a bad name or an
 ;; already-existing folder.
 (defn new-project (nm)
   (unless (project--valid-name? nm)
@@ -257,16 +326,22 @@ the `nest new` scaffolder."
   (when (file-exists? nm)
     (error "new: '" nm "' already exists"))
   (let (src-dir   (path-join nm "src")
-        tests-dir (path-join nm "tests"))
+        tests-dir (path-join nm "tests")
+        docs-dir  (path-join nm "docs"))
     (make-dir src-dir)
     (make-dir tests-dir)
-    (spit (path-join nm "project.blsp")           (project--manifest-template nm))
-    (spit (path-join src-dir "main.blsp")         (project--main-template nm))
-    (spit (path-join src-dir "hello.blsp")        (project--hello-template nm))
-    (spit (path-join tests-dir "main_test.blsp")  (project--main-test-template nm))
-    (spit (path-join tests-dir "hello_test.blsp") (project--hello-test-template nm))
+    (make-dir docs-dir)
+    (spit (path-join nm "project.blsp")               (project--manifest-template nm))
+    (spit (path-join nm "CLAUDE.md")                  (project--claude-md-template nm))
+    (spit (path-join docs-dir "brood-for-claude.md")  (%builtin-doc 'brood-for-claude))
+    (spit (path-join src-dir "main.blsp")             (project--main-template nm))
+    (spit (path-join src-dir "hello.blsp")            (project--hello-template nm))
+    (spit (path-join tests-dir "main_test.blsp")      (project--main-test-template nm))
+    (spit (path-join tests-dir "hello_test.blsp")     (project--hello-test-template nm))
     (println (str "Created Brood project '" nm "'"))
     (println (str "  " nm "/project.blsp"))
+    (println (str "  " nm "/CLAUDE.md"))
+    (println (str "  " nm "/docs/brood-for-claude.md"))
     (println (str "  " nm "/src/main.blsp"))
     (println (str "  " nm "/src/hello.blsp"))
     (println (str "  " nm "/tests/main_test.blsp"))

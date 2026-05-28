@@ -325,6 +325,7 @@
 ;; ---- I/O --------------------------------------------------------------------
 ;; `print` (no newline) is the primitive; `println` just appends one.
 (defn println (& xs) "Write the display forms of the arguments to stdout, followed by a newline." (apply print xs) (print "\n"))
+(defn eprintln (& xs) "Write the display forms of the arguments to stderr, followed by a newline." (apply eprint xs) (eprint "\n"))
 
 ;; ---- threading macros (demonstrate that macros compute at expansion time) ----
 ;; (-> x (f a) (g b))  =>  (g (f x a) b)   ; thread as FIRST argument

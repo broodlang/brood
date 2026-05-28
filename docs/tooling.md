@@ -121,6 +121,53 @@ everything it transitively requires — then `apply`s the entry fn to the CLI
 args. A missing project, an unbound entry fn, or a non-callable entry are
 reported as editor-parseable errors and exit non-zero.
 
+## Formatting source: `nest format`
+
+`nest format` rewrites every `.blsp` under the project's source + test paths in
+place using a single, opinionated style. `nest format --check` does the same
+walk read-only and exits non-zero if anything would change — the CI mode. Both
+are policy in Brood (`std/format.blsp`); the only new Rust is the `parse-source`
+primitive, which returns the lossless CST as nested vectors so the walker can
+see whitespace and comments.
+
+The layout, in one paragraph: every form is emitted on a single line if it fits
+within the width budget (`*format-width*`, 100 cols); otherwise it breaks across
+lines with each body argument on its own line at +2 indent. A small table of
+*header counts* (`*format-headers*`) keeps a fixed prefix of args on the first
+line of certain forms — `defn` keeps `name params`, `let` keeps the bindings
+list, `if`/`when`/`unless` keep the predicate, etc. — so the body indents under
+a recognisable header. Comments inside a list force the multi-line shape; they
+re-emit on their own line at the surrounding indent, with their original text
+preserved verbatim. Blank lines between top-level forms (or top-level comments)
+are preserved when the author left one; runs of 3+ blanks collapse to a single
+blank.
+
+### Idempotency is a contract
+
+`(= (format-source (format-source s)) (format-source s))` for every input.
+That's the property `tests/format_test.blsp` asserts on a grab-bag of shapes
+*and* on the full prelude — the largest single Brood source in the tree. A
+break of idempotency is a bug, not a stylistic preference.
+
+### Comment preservation, in detail
+
+The CST records each `;` comment as a `[:comment "...;...\n"]` node. The
+formatter strips the trailing newline (so adjacent blocks join cleanly), then
+re-emits the comment on its own line at the current indent. A comment between
+the head and the first body item of a list lives inside the list — it goes on a
+line of its own at the body indent. A comment between top-level forms behaves
+like a top-level block: it gets its own line, and blank lines around it survive.
+
+### What is *not* in scope (yet)
+
+- **Width is not configurable** at the CLI. Set `*format-width*` from a
+  `project.blsp` hook if you need a different budget.
+- **No "align after head"** for generic calls — every overflow arg goes to
+  `+2`, never to `(head)`-column. Simpler, idempotent under rename of the head.
+- **No `if`-cascade recognition.** A hand-aligned `(if a 1 (if b 2 (if c 3)))`
+  re-emits as a nested staircase. If you wrote it as `cond` it would stay flat;
+  the formatter is not in the business of rewriting forms.
+
 ## Documentation output: Markdown from `nest doc`
 
 `nest doc [module]` emits Markdown documentation to stdout: with no operand it

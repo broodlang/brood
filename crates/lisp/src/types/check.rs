@@ -371,6 +371,17 @@ fn arity_str(a: Arity) -> String {
     }
 }
 
+/// Does `name` resolve to *any* value in the global env? Broader than
+/// `sig_of` / `arity_of` (which only return for callables they know how to
+/// describe). A `Value::Macro`, a constant, or anything else that's actually
+/// bound counts as "in scope" for the unbound-symbol check — we don't warn
+/// just because the checker can't say much about the binding's *shape*.
+fn is_globally_bound(heap: &Heap, name: &str) -> bool {
+    value::intern_existing(name)
+        .and_then(|sym| heap.env_get(heap.global(), sym))
+        .is_some()
+}
+
 /// The static type of an expression form *in `ctx`*, or `None` when it can't
 /// be pinned. `None` is "unknown" and is never flagged. Self-evaluating
 /// literals get their exact tag; a `quote`d datum gets the datum's tag; a call
@@ -423,49 +434,80 @@ pub fn check_located(heap: &Heap, form: Value) -> Vec<(Option<Pos>, String)> {
 /// a later form calls `foo`. This is the entry point for `brood --check
 /// <file>` / `nest check`.
 ///
-/// What gets accumulated: the *name* introduced by each top-level
-/// `def` / `defn` / `defmacro` / `defdyn` (see [`top_level_def_name`]). We
-/// don't evaluate, so the *binding* (a closure, a value) isn't visible — only
-/// the name. Result: cross-form unbound-symbol diagnostics are silent on
-/// locally defined names, but cross-form *type/arity* checks still need the
-/// actual definition (which is only available in a running runtime, not in
-/// the `--check` read-only path).
-pub fn check_file(heap: &Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)> {
+/// Each form is **macro-expanded first** (like the `(check 'form)` builtin),
+/// so threading macros (`->`/`->>`), pattern syntax (`match`), test framework
+/// wrappers (`test`/`describe`/…), and any user macro that rearranges code
+/// are checked against their *expanded* shape — not the surface syntax that
+/// would otherwise mistake `(map inc)` inside `(->> xs (map inc))` for a
+/// 1-arg call. Source positions survive expansion where the macro rebuilds
+/// through `rebuild_list` (the common case); positions on macro-introduced
+/// new code are absent.
+///
+/// File-local def names are accumulated by a **recursive** scan over the
+/// expanded forms, so a `(defn foo …)` nested inside a macro body
+/// (e.g. inside `(test … (defn foo …) …)`) still shields a later `(foo …)`
+/// — `def`s define globally in Brood regardless of nesting position
+/// (`docs/language.md`).
+///
+/// A form whose macroexpansion fails (a malformed macro call) falls back to
+/// its un-expanded shape — the eval path will surface the same parse-time
+/// error later anyway, so the checker just stays quiet there.
+pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)> {
     let mut out = Vec::new();
+    // Pass 1: macroexpand each form (recording the expanded shape we'll also
+    // walk in pass 2). A macroexpand failure isn't this pass's job to report,
+    // so we fall back to the un-expanded form silently.
+    let root = heap.global();
+    let expanded: Vec<Value> = forms
+        .iter()
+        .map(|&f| crate::eval::macros::macroexpand_all(heap, f, root).unwrap_or(f))
+        .collect();
+    // Pass 2: collect every `(def name …)` in the expanded tree (top level
+    // *or* nested — `defn` inside `test`/`describe`/`when`/… still defines a
+    // global once it runs, so the checker honours that). `defmacro` stays a
+    // special form (it doesn't expand to `def`), so we match it too.
     let mut ctx = Ctx::default();
-    // Pass 1: collect top-level defined names so a `defn foo` at line 1 is
-    // visible to `(foo …)` at line 100. Re-collected per call (cheap).
-    for &form in forms {
-        if let Some(name) = top_level_def_name(heap, form) {
-            ctx.add_file_global(name);
-        }
+    for &form in &expanded {
+        collect_def_names(heap, form, &mut ctx);
     }
-    // Pass 2: check each form with the accumulated file-globals visible.
-    for &form in forms {
+    // Pass 3: check each expanded form with the accumulated file-globals.
+    for &form in &expanded {
         check_into(heap, form, &ctx, &mut out);
     }
     out
 }
 
-/// If `form` is a top-level `(def name …)` / `(defn name …)` / `(defmacro
-/// name …)` / `(defdyn name …)`, return `name` as the introduced symbol.
-/// Used by [`check_file`] to accumulate file-local globals.
-fn top_level_def_name(heap: &Heap, form: Value) -> Option<Symbol> {
-    let items = list_items(heap, form)?;
-    let Value::Sym(head) = items.first().copied()? else {
-        return None;
+/// Walk `form` recursively, adding to `ctx.file_globals` every name introduced
+/// by a `(def name …)` or `(defmacro name …)` — at any depth, since Brood's
+/// `def` always binds globally regardless of where it textually sits (a
+/// `(when … (def x 1))` makes `x` a global when the `when` runs).
+///
+/// Recursion stops at forms whose body is data, not code (`quote` /
+/// `quasiquote`) — a `(quote (def x …))` is a literal list, not a binder.
+/// Doesn't recurse into a `fn`/`lambda` body either: a `def` *inside* a
+/// closure body only fires when the closure is called, but since the body
+/// runs later and Brood's `def` is global, the result is the same — we still
+/// want the name in scope. So we *do* recurse there. The only thing we skip
+/// is `quote`/`quasiquote`.
+fn collect_def_names(heap: &Heap, form: Value, ctx: &mut Ctx) {
+    let Some(items) = list_items(heap, form) else {
+        return;
+    };
+    let Some(&Value::Sym(head)) = items.first() else {
+        return;
     };
     let head_name = value::symbol_name(head);
-    if !matches!(
-        head_name.as_str(),
-        "def" | "defn" | "defmacro" | "defdyn"
-    ) {
-        return None;
+    if matches!(head_name.as_str(), "quote" | "quasiquote") {
+        return;
     }
-    let Value::Sym(name) = items.get(1).copied()? else {
-        return None;
-    };
-    Some(name)
+    if matches!(head_name.as_str(), "def" | "defmacro") {
+        if let Some(&Value::Sym(name)) = items.get(1) {
+            ctx.add_file_global(name);
+        }
+    }
+    for &item in &items[1..] {
+        collect_def_names(heap, item, ctx);
+    }
 }
 
 /// Forms whose contents are data (`quote`/`quasiquote`) or deliberately exercise
@@ -557,15 +599,22 @@ fn check_into(
             _ => {}
         }
 
-        // Resolve the callee's signature + arity. If neither resolves AND the
-        // name is otherwise unknown, this is an "unbound symbol" diagnostic.
+        // Resolve the callee's signature + arity (separate concerns; either
+        // may be available without the other).
         let sig = sig_of(heap, &name);
         let arity = arity_of(heap, &name);
-        if sig.is_none() && arity.is_none() && !is_syntactic_keyword(&name) && !ctx.is_local(s) {
-            out.push((
-                heap.form_pos(form),
-                format!("unbound symbol: {}", name),
-            ));
+        // Unbound-symbol diagnostic: warn only when the head is **truly not
+        // resolvable** — not local, not a syntactic keyword, not in the global
+        // env (which includes `Value::Macro`s like `test` / `assert=` that
+        // `arity_of` doesn't describe), and not in the curated stdlib table.
+        // The unbound check is independent of "is the sig informative" —
+        // a macro is bound even though it has no value-type sig.
+        if !ctx.is_local(s)
+            && !is_syntactic_keyword(&name)
+            && !is_globally_bound(heap, &name)
+            && curated_sig(&name).is_none()
+        {
+            out.push((heap.form_pos(form), format!("unbound symbol: {}", name)));
             // Still recurse into args below — they may carry their own issues.
         }
 
@@ -1425,7 +1474,7 @@ mod tests {
         );
         heap.set_global(crate::core::value::EnvId::GLOBAL);
         let forms = crate::syntax::reader::read_all(&mut heap, src).expect("parse");
-        let out = check_file(&heap, &forms);
+        let out = check_file(&mut heap, &forms);
         let msgs: Vec<_> = out.into_iter().map(|(_, m)| m).collect();
         assert!(
             msgs.iter().all(|m| !m.contains("unbound symbol: my-fn")),
