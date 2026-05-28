@@ -253,6 +253,105 @@ send data and call `def`'d names on the receiving side. `receive` takes
 pattern clauses just like `match`, plus an optional `(after ms body...)`
 clause for timeouts.
 
+**`spawn` is let-it-crash, `supervise` recovers.** Plain `(spawn expr)` is
+Erlang's `spawn/1`: if `expr` throws, the process exits and its monitors
+fire `[:down pid [:error msg]]`. `(supervise expr)` wraps the new process
+in a runtime supervisor — an uncaught throw is caught, the *last tail
+call* is re-invoked (resolving the called fn by name so a hot reload picks
+up the new version, ADR-013), and the process exits only if more than the
+restart intensity allows (Erlang default: 3 restarts in any 5 s window;
+prelude `*supervise-max-restarts*` / `*supervise-max-window-ms*`).
+
+```lisp
+(spawn (worker))                                   ; fire-and-forget; crashes propagate
+(supervise (long-running-loop))                    ; supervised + retried on throw
+(spawn :ticker (ticker 0))                         ; named + idempotent (no auto-restart)
+(supervise :ticker (ticker 0))                     ; named + idempotent + supervised
+```
+
+## Stateful servers — the `hatch` framework (`(require 'hatch)`)
+
+Raw `spawn`/`receive` is the substrate; for a process that **holds state and
+answers messages** (a gen_server / actor), use `hatch`. State is immutable —
+each clause *returns the next state* to carry through the loop. Two message
+kinds:
+
+- **cast** — fire-and-forget; the clause body is the **next state**. Send with
+  `(! pid payload)`.
+- **call** — synchronous; the clause body is `[reply next-state]` and the caller
+  blocks for `reply`. Send with `(gen-call pid payload)`.
+
+```lisp
+(require 'hatch)
+
+(defprocess counter (n)                 ; n is the state
+  (cast :inc       (+ n 1))             ; new state = n+1
+  (cast [:add k]   (+ n k))             ; payloads can carry data (pattern binds k)
+  (cast :ping      (do (println "pong") n))  ; side effect, state unchanged
+  (call :value     [n n]))             ; reply n, keep state n
+
+(def c (hatch counter 0))               ; spawn with initial state 0 → pid
+(! c :inc)                              ; cast (returns immediately)
+(! c [:add 10])
+(gen-call c :value)                     ; => 11  (synchronous; blocks for reply)
+```
+
+Other primitives: `(sleep ms)` parks the current process without touching its
+mailbox (it does *not* block a worker thread).
+
+**Worker pool — fan out work, fan in results** (plain `spawn`/`receive`, the
+pattern most demos want):
+
+```lisp
+(defn worker (parent i)                 ; compute, send result tagged with i
+  (send parent [:done i (* i i)]))
+
+(defn collect (got total acc)           ; tail-recursive fan-in over the mailbox
+  (if (= got total)
+    acc
+    (collect (+ got 1) total (receive ([:done i sq] (assoc acc i sq))))))
+
+(defn run (n)
+  (let (me (self))
+    (dotimes (i n) (spawn (worker me i)))   ; fan out n workers
+    (collect 0 n {})))                       ; fan in n results into a map
+```
+
+Each worker is a green process on the scheduler's pool; `send` deep-copies the
+result across heaps. The `collect` loop is tail-recursive, so it's O(1) stack
+even for thousands of workers.
+
+## Hot reload (`nest run --watch FILE`)
+
+Writing a live script: just write a normal Brood file. The
+`nest run --watch` wrapper handles supervision and reload triggering.
+
+```lisp
+;; live.blsp — run with: nest run --watch live.blsp
+(defn my-loop (n)
+  (do (println "iter:" n) (sleep 1000) (my-loop (+ n 1))))
+
+(my-loop 0)
+```
+
+What happens when you save:
+
+- `(defn my-loop …)` re-evaluates — the global rebinds.
+- `(my-loop 0)` is **not** re-run — `reload-defs` skips non-`def*` top-level
+  forms, so each save doesn't fork a duplicate loop.
+- The running process's next call to `my-loop` late-binds to the new
+  closure, picks up your edit on the next iteration.
+
+If your save introduces a runtime error (typo, unbound symbol, wrong
+arity), the supervisor catches the throw at the process boundary and
+retries — `--watch` uses a generous 100 restarts in 60 s, so you have
+roughly a minute to type the fix. The supervisor's next retry
+re-resolves the function by name and picks up the corrected code,
+state preserved (it continues from the iteration that threw).
+
+Outside `--watch` (`nest run FILE`, `brood FILE`), the same file runs
+inline as a plain script — no supervision, no reload, throws exit.
+
 ## Errors
 
 ```lisp
@@ -269,19 +368,36 @@ clause for timeouts.
 
 - **list / seq**: `first` `rest` `cons` `list` `count` `empty?` `nth`
   `reverse` `map` `filter` `reduce` `fold` `append` `mapcat` `sort` `take`
-  `drop` `range` `zip` `partition` `frequencies`
-- **string**: `str` `pr-str` `string-length` `substring` `index-of`
-  `string-split` `join` `replace` `trim` `upper` `lower` `number->string`
-  `string->number` `starts-with?` `ends-with?`
+  `drop` `range` `zip` `partition` `frequencies` `enumerate` `repeat`
+  `repeatedly`
+- **iteration** (macros, for effect — there is no `while`/`for`-loop): `for`
+  (list comprehension, with `:when`), `doseq` (destructuring/`:when`),
+  `dotimes` `(i n)`, `dolist` `(x coll)`. All return `nil` except `for`.
+- **string**: `str` `pr-str` `string-length` `substring` `char-at`
+  (returns a 1-char *string* — Brood has no char type) `index-of`
+  `string-contains?` `string-split` `join` `replace` `trim` `triml` `trimr`
+  `blank?` `upper` `lower` `number->string` `string->number`
+  `string->list` `list->string` `starts-with?` `ends-with?`
+- **string formatting**: `string-repeat` `pad-left` `pad-right`
+  `to-fixed` (number → string with fixed decimals, e.g. `(to-fixed 3.14159 2)`
+  → `"3.14"` — `str` prints full f64 precision, so reach for this for output)
 - **map**: `assoc` `dissoc` `get` `keys` `vals` `contains?` `into`
 - **types**: `type-of` plus the `?` predicates — `int?` `float?` `string?`
   `symbol?` `keyword?` `bool?` `nil?` `pair?` `vector?` `map?` `fn?` `ref?`
   `pid?`
 - **arithmetic**: variadic `+ - * /`; comparison variadic chains
-  `< > <= >= =`
+  `< > <= >= =`; `inc` `dec` `abs` `min` `max`; integer division `quot`
+  (truncating) / `rem` (truncated remainder) / `mod` (Euclidean);
+  `floor` `ceil` `round` `round-to` (round to N decimals, stays a number)
+  `pow` `sqrt`
+- **meta / eval**: `apply` (call a fn with a list of args — the only way to
+  splat) `eval` `read-string` `eval-string` `gensym` (fresh symbol, for macros)
+- **timing**: `now` (ms since epoch) `now-ns` (ns since epoch) `bench`
+  (macro: `(bench "label" expr)` prints `label: N ms`, returns `expr`)
 - **I/O**: `print` `println` `slurp` `spit` `load` `eval-string` `read-string`
 - **Filesystem (stat-class)**: `file-exists?` `dir?` `list-dir` `file-mtime`
-- **processes**: `spawn` `send` `receive` `self` `ref` `monitor` `demonitor`
+- **processes**: `spawn` `supervise` `send` `receive` `self` `ref` `monitor`
+  `demonitor` — plus the **`hatch`** framework below
 - **transducers**: `comp` `xmap` `xfilter` `xremove` `xkeep` `xmapcat`
   `xtake-while` `transduce` `reduced` `reduced?`
 

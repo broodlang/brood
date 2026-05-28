@@ -7,7 +7,7 @@ NEST := cargo run -q -p nest
 ARGS ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help build test bench benchmark suite repl install uninstall fmt clippy check clean
+.PHONY: help build test bench benchmark quickbench suite repl install uninstall fmt clippy check clean
 
 help: ## Show this help
 	@echo "Brood — available make targets:"
@@ -25,6 +25,9 @@ bench: benchmark ## Alias for `benchmark`
 
 benchmark: ## Run benchmarks; archive results to docs/benchmarks/<timestamp>.md
 	./scripts/bench.sh $(ARGS)
+
+quickbench: ## Fast (~10s) benchmark for iteration — no archive, few samples
+	./scripts/quickbench.sh $(ARGS)
 
 suite: ## Run the in-language suite via the project runner (discovers tests/**/*_test.blsp)
 	$(NEST) test

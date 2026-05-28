@@ -353,11 +353,14 @@ fn cmd_run(interp: &mut Interp, file: Option<&str>, watch: &[String], args: &[St
         String::new()
     };
     let body = if wrap {
-        // Park the root on a monitor of the supervised process so the
-        // script doesn't return before the user's program does — and the
-        // root sees `[:down …]` if intensity is exceeded.
+        // Park the root on a monitor of the spawned process so the script
+        // doesn't return before the user's program does — and the root sees
+        // `[:down …]` if it dies. Erlang let-it-crash: a throw kills the
+        // process and the `--watch` session exits with the reason. (Auto-
+        // retry-with-state was removed alongside the supervisor scaffolding;
+        // edit the file again to spawn a fresh attempt.)
         format!(
-            "(let (p (supervise {})) \
+            "(let (p (%spawn (fn () {}))) \
                   (monitor p) \
                   (receive ([:down _ ~p reason] (println \"[exit]\" reason))))",
             run_form

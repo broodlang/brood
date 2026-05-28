@@ -225,6 +225,11 @@ fn list_tools(interp: &mut Interp) -> Vec<Json> {
     let cp = interp.heap.checkpoint();
     let roots_base = interp.heap.roots_len();
 
+    // Building the catalogue shouldn't print, but a project `mcp.blsp` loaded by
+    // the `(require 'mcp)` below could — divert it off the JSON-RPC channel and
+    // discard it (a `tools/list` reply has no place to surface stray output).
+    brood::builtins::begin_stdout_capture();
+
     // Best-effort require — silently ignore "no such module" so the server
     // works the moment it boots, before `std/mcp.blsp` exists (step 3) and
     // even if a project hasn't defined its own MCP extensions yet.
@@ -238,6 +243,7 @@ fn list_tools(interp: &mut Interp) -> Vec<Json> {
         Err(_) => Vec::new(),
     };
 
+    let _ = brood::builtins::take_captured_stdout();
     interp.heap.truncate_roots(roots_base);
     interp.heap.reset_local_to(cp);
     tools
@@ -301,6 +307,13 @@ fn call_tool(interp: &mut Interp, params: &Json) -> Result<Json, RpcError> {
     let cp = interp.heap.checkpoint();
     let roots_base = interp.heap.roots_len();
 
+    // Divert any `(print …)` a handler runs into an in-memory buffer for the
+    // duration of the call: writing to the real stdout here would corrupt the
+    // JSON-RPC stream this server speaks over stdio. The captured text rides
+    // back in the result envelope (see `wrap_as_mcp_content`), so `print`-based
+    // debugging is safe rather than a channel-breaking footgun.
+    brood::builtins::begin_stdout_capture();
+
     let outcome = (|| -> Result<Json, RpcError> {
         // Re-fetch the catalogue per call so a `def` in a previous `eval`
         // call (hot reload) reshapes the tool surface immediately.
@@ -327,8 +340,13 @@ fn call_tool(interp: &mut Interp, params: &Json) -> Result<Json, RpcError> {
 
         let content = value_to_json(&interp.heap, result_value)
             .map_err(RpcError::internal)?;
-        Ok(wrap_as_mcp_content(content))
+        Ok(content)
     })();
+
+    // Always drain the capture buffer (even on error) so it never leaks into the
+    // next call; attach it to a successful reply's content envelope.
+    let captured = brood::builtins::take_captured_stdout().unwrap_or_default();
+    let outcome = outcome.map(|content| wrap_as_mcp_content(content, &captured));
 
     interp.heap.truncate_roots(roots_base);
     interp.heap.reset_local_to(cp);
@@ -359,12 +377,24 @@ fn find_handler(heap: &Heap, tools: Value, name: &str) -> Option<Value> {
 /// Plain strings pass through; structured values are pretty-printed JSON.
 /// (`structuredContent` is a recent MCP addition; sticking to `text` for v0
 /// maximises client compatibility, ADR-011.)
-fn wrap_as_mcp_content(content: Json) -> Json {
+///
+/// `content[0]` is always the handler's return value (the stable contract an
+/// agent parses). If the handler `(print …)`d anything, that captured stdout
+/// rides along as a second, clearly-labelled text block — so `print`-based
+/// debugging surfaces in the reply instead of corrupting the JSON-RPC channel.
+fn wrap_as_mcp_content(content: Json, captured_stdout: &str) -> Json {
     let text = match &content {
         Json::String(s) => s.clone(),
         other => serde_json::to_string_pretty(other).unwrap_or_default(),
     };
-    json!({ "content": [{ "type": "text", "text": text }] })
+    let mut blocks = vec![json!({ "type": "text", "text": text })];
+    if !captured_stdout.is_empty() {
+        blocks.push(json!({
+            "type": "text",
+            "text": format!("[captured stdout]\n{captured_stdout}"),
+        }));
+    }
+    json!({ "content": blocks })
 }
 
 // ============================================================================
@@ -855,6 +885,61 @@ mod tests {
         let content = &resp[0]["result"]["content"][0];
         assert_eq!(content["type"], "text");
         assert_eq!(content["text"], "42");
+    }
+
+    #[test]
+    fn handler_print_is_captured_not_leaked_onto_the_channel() {
+        // A handler that `(print …)`s must not corrupt the JSON-RPC stdio stream:
+        // the printed text is diverted into a buffer and rides back as a second
+        // content block, while `content[0]` stays the handler's return value.
+        // `round_trip` reads the reply as newline-delimited JSON — if the print
+        // had leaked to stdout it would not parse here, so a clean round-trip is
+        // itself proof the channel stayed pure.
+        let mut interp = Interp::new();
+        interp
+            .eval_str(
+                r#"
+                (provide 'mcp)
+                (defn mcp-tools ()
+                  (list
+                    {:name "chatty"
+                     :schema {:type "object" :properties {}}
+                     :handler (fn (_) (print "debug line") 42)}))
+                "#,
+            )
+            .unwrap();
+        let resp = round_trip(
+            &mut interp,
+            &[
+                req(1, "tools/call", json!({ "name": "chatty", "arguments": {} })),
+                notif("exit", json!(null)),
+            ],
+        );
+        let content = resp[0]["result"]["content"].as_array().unwrap();
+        // content[0] is the unchanged return value.
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "42");
+        // content[1] carries the captured stdout, clearly labelled.
+        assert_eq!(content.len(), 2, "expected a captured-stdout block: {content:?}");
+        let captured = content[1]["text"].as_str().unwrap();
+        assert!(captured.contains("debug line"), "{captured:?}");
+        assert!(captured.contains("captured stdout"), "{captured:?}");
+    }
+
+    #[test]
+    fn capture_does_not_leak_between_calls() {
+        // The buffer is drained after every call (even when the handler prints
+        // nothing), so a silent handler reports no captured-stdout block.
+        let mut interp = Interp::new();
+        let resp = round_trip(
+            &mut interp,
+            &[
+                req(1, "tools/call", json!({ "name": "eval", "arguments": { "source": "(+ 1 1)" } })),
+                notif("exit", json!(null)),
+            ],
+        );
+        let content = resp[0]["result"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1, "a non-printing handler should add no block: {content:?}");
     }
 
     #[test]

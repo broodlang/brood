@@ -1945,3 +1945,109 @@ SmallVec of Values does), and `Cargo.toml` / CLI flags for mode selection.
 simpler. The proposed M2 editor work (`docs/roadmap.md`) is designed
 against this model, not retrofit. ADR-038 (the bundler) gains a definite
 release-mode story.
+
+
+## ADR-040 — Maps: CHAMP (16-way) instead of an entries-vec + index
+
+**Status:** proposed (2026-05-28).
+
+**Context.** ADR-030 shipped maps as insertion-ordered association vectors,
+explicitly flagged "swappable for a hash-array-mapped trie later **with no
+surface change**." That has now started to hurt: `assoc`/`dissoc` are O(n)
+each because every op copies the whole entries vector (immutability — ADR-026
+— forbids the in-place update Clojure's `transient!` uses), so `(fold assoc
+{} (range N))` is O(n²). `get` is also O(n) on a linear `equal` scan. An
+intermediate attempt — keep the vector, add a hash-keyed bucket index
+alongside — moves lookup to O(1) but does nothing about build cost (the
+index itself has to be cloned per assoc), and on Brood's current
+small-to-medium map workloads the constant-factor regression (`HashMap::clone`
+per op) outweighs the lookup win. The right move is to fix both at once with
+structural sharing.
+
+**Decision.** Replace the entries-vector representation with a **CHAMP** trie
+(*Compressed Hash-Array Mapped Prefix-tree* — Steindorfer & Vinju, 2015).
+Surface (`assoc`, `dissoc`, `get`, `contains?`, `keys`, `vals`, `map-pairs`,
+order-independent `=`) is unchanged — the kernel API in `builtins.rs` and
+every `std/prelude.blsp` wrapper stay byte-for-byte the same. **No new
+ADR-030 contract is broken.**
+
+**Why CHAMP, not vanilla Clojure HAMT.** Same big-O (O(log₁₆ N) ≈ effectively
+O(1) up to billions of entries), but:
+- **Two bitmaps per node** (`dataMap` for inline (k,v) entries, `nodeMap` for
+  child subtries) instead of Clojure's combined slot array with type
+  discrimination. Half the slots in the common case → smaller nodes, better
+  cache use, less GC traffic.
+- **Canonical form** under structural equality (no equivalent map has two
+  representations), so `equal?` is a recursive walk that bails on the first
+  shape mismatch — no need to fall back to "iterate one map, look every key
+  up in the other" like ADR-030 does today.
+- **Faster iteration** (entries first, then children, then collision nodes —
+  CHAMP authors measured ~2× over Clojure's HAMT). Matters for `keys`/`vals`
+  in long-running editor processes that fold over thousands of entries.
+
+**16-way branching** (4 bits per level, 8 levels deep at max). 32-way nodes
+allocate too much for small maps; 4-way pushes the tree too deep. Steindorfer
+& Vinju measure 16 as the sweet spot on modern caches, and it matches our
+existing `SmallVec<[Value; 16]>` instinct for inline storage.
+
+**Storage shape.** A new heap slab type, `MapNode`, joins `Slabs` /
+`CodeSlabs` next to the existing `maps` slab (which keeps its place as the
+root handle — the existing `Value::Map(MapId)` *handle* is unchanged; only
+the slot's contents become a CHAMP root node). The trie is built out of
+those `MapNode` slots, addressed by `MapId` index-into-slab, so the GC
+already knows how to mark/sweep/promote them (one new variant in the
+`TraceItem` enum + one `mark_methods!` line). Collision nodes are a separate
+small variant (≤ 8 entries before the canonical CHAMP fallback path); above
+that the next hash level continues. Bitmaps are `u16` (one bit per child
+slot — 4-bit slice → 16 children → fits exactly).
+
+**Hashing.** Adopts the structural `hash_value` introduced by the abandoned
+ADR-030-index attempt — consistent with `heap.equal` (0.0/-0.0 identical,
+NaN canonical, recursive Pair/Vector/Map walks, region bits ignored). The
+function stays in `heap.rs` (it needs `&Heap`); no `Hash`-trait impl on
+`Value` (CHAMP nodes call `heap.hash_value(k)` directly).
+
+**Immutability discipline (no regression).** Every `assoc`/`dissoc`
+returns a fresh root via **path copying**: only the O(log N) nodes on the
+path from root to the touched leaf are cloned; the rest is structurally
+shared. Path-copy is the entire point of the ADR-030 trade-off finally
+paying out. Frozen PRELUDE / shared RUNTIME maps stay safe because every
+op allocates new LOCAL nodes — the shared regions are never mutated, just
+referenced.
+
+**Threading-safety & concurrency.** Trie nodes are `Send` once allocated
+(every field is `Copy`). Promotion (LOCAL → RUNTIME) walks the trie depth-
+first, allocating new RUNTIME slots and replacing handles — same shape as
+`promote` for existing data structures. Cross-process message copy goes
+through the same recursion. The append-only RUNTIME slab handles
+concurrent reads of shared maps without locking, just as it does for
+strings and vectors today.
+
+**Consequences.**
+- `assoc`/`dissoc` become O(log N) instead of O(n). For small maps this is a
+  *constant-factor improvement* (one bitmap test + one slot copy) — no
+  small-map regression like the bucket-index attempt had. For large maps
+  this is the win we wanted (1000-entry build drops from ~31 ms to single
+  digits).
+- `get` becomes O(log N), and for the common case (key found in inline
+  data, ~1 bitmap test + 1 `equal`) often faster than the old linear scan
+  even at N=5.
+- `equal?` between two maps drops from O(n²) to O(n) thanks to CHAMP's
+  canonical form (compare bitmaps then walk in lock-step).
+- One new ADR-030 contract clause: **iteration order is no longer
+  insertion order.** `keys`/`vals`/`map-pairs` give a deterministic order
+  per map shape, but it's hash-driven. ADR-030 promised insertion order;
+  this ADR walks that back. (The current users — `pr-str`, `=`, tests —
+  don't depend on it; the only test that asserts insertion-order
+  iteration is `tests/maps_test.blsp:215` and would be rewritten as a set
+  comparison. Equality is still order-independent.)
+- Code volume: ~500 lines of new node logic in a new `core/map_champ.rs`
+  module, plus ~30 lines in `heap.rs` for the slab + GC integration. The
+  existing `map_*` functions in `heap.rs` shrink to thin handle-router
+  wrappers over the trie ops.
+
+**Pre-requisites.** Needs `hash_value(&Heap, Value) -> u64` in `heap.rs`
+(the function the ADR-030-index attempt built, salvageable). Needs one
+new `Tag` reservation (`MapNode`) and one bit in `types.rs`. Needs the
+maps test suite to be updated to use set comparisons for iteration
+(`tests/maps_test.blsp` lines that fix order).

@@ -1100,137 +1100,6 @@ fn spawn_with_three_args_is_a_macro_error() {
     );
 }
 
-/// Supervisor recovery (ADR-039): a worker spawned with `(supervise …)`
-/// catches an uncaught throw at the process boundary and re-invokes the
-/// *most recent tail call* with the **same args** — so a long-running
-/// stateful loop survives a bad iteration. We exercise that by having a
-/// tail-recursive worker that throws on iteration N=0, then count how
-/// many times it reports reaching that iteration: once for the first
-/// arrival + once per retry, up to the **restart intensity** (Erlang's
-/// default of 3 retries within any 5 s window — `*supervise-max-restarts*`
-/// / `*supervise-max-window-ms*` in the prelude). Plain `(spawn …)`
-/// without `supervise` is still let-it-crash; this test wraps in
-/// `supervise` explicitly.
-///
-/// Verifies, end-to-end:
-/// 1. `record_resume` captures `(callee, argv)` on every tail-call dispatch
-///    (we see argv=[0] re-used by the supervisor, not [3] or [2]).
-/// 2. The supervisor catches a throw escaping the eval and loops.
-/// 3. Restart intensity actually fires (we see exactly 3 retries within
-///    the window, not unbounded; the 4th throw exceeds intensity).
-#[test]
-fn supervisor_retries_last_iteration_with_same_args() {
-    let mut interp = Interp::new();
-    interp
-        .eval_str(
-            "(def *sup-recovery-parent* (self))
-             (defn sup-recovery-worker (n)
-               (send *sup-recovery-parent* (vector :iter n))
-               (if (= n 0) (throw \"boom\"))
-               (sup-recovery-worker (- n 1)))
-             (supervise (sup-recovery-worker 3))",
-        )
-        .expect("setup");
-
-    // Collect messages with a generous overall timeout: backoff
-    // (1+2+4 ms) keeps all 3 retries inside the 5 s window so the test
-    // observes the cap firing rather than timing out.
-    let mut iters: Vec<i64> = Vec::new();
-    let started = std::time::Instant::now();
-    while started.elapsed() < std::time::Duration::from_secs(10) {
-        let got = interp
-            .eval_str("(receive (v v) (after 2000 nil))")
-            .expect("receive");
-        let s = interp.print(got);
-        if s == "nil" {
-            break;
-        }
-        // s looks like "[:iter 3]" — parse the trailing integer.
-        let n: i64 = s
-            .trim_end_matches(']')
-            .rsplit(' ')
-            .next()
-            .unwrap()
-            .parse()
-            .unwrap_or_else(|_| panic!("unparseable iter msg: {s}"));
-        iters.push(n);
-    }
-    // Expected with default intensity (3 in 5 s):
-    //   first descent: 3, 2, 1, 0  — 1 zero
-    //   retries 1, 2, 3 each see argv=[0]: + 3 zeros
-    //   4th throw exceeds intensity → give up.
-    // Total: [3, 2, 1, 0, 0, 0, 0] — 4 zeros.
-    assert_eq!(
-        iters.iter().take(4).copied().collect::<Vec<_>>(),
-        vec![3, 2, 1, 0],
-        "expected the worker's first descent 3→0, got {iters:?}"
-    );
-    let zeros = iters.iter().filter(|&&n| n == 0).count();
-    assert_eq!(
-        zeros, 4,
-        "supervisor should fire 3 retries (Erlang default intensity) + the original arrival at n=0; got {zeros} zeros (full trace: {iters:?})"
-    );
-}
-
-/// Supervisor + hot reload (ADR-039 × ADR-013). A worker throws on every
-/// iteration; the parent `def`s a fixed version between throws; the
-/// supervisor re-resolves the function name on its next retry and picks up
-/// the fix. Without name-based re-resolution, the supervisor would call the
-/// old throwing closure handle forever (up to the restart budget) — the
-/// whole point of integrating supervision with hot reload.
-#[test]
-fn supervisor_picks_up_hot_reloaded_definition_on_retry() {
-    let mut interp = Interp::new();
-    // Use the primitive `%spawn-supervised` directly so we can hand it a
-    // generous intensity (100 in 60 s). The default 3/5 s would fire ~10
-    // ms after the spawn (each retry takes ~30 ms of sleep + a few ms of
-    // backoff), well before the test thread sleeps 200 ms and `def`s the
-    // fix.
-    interp
-        .eval_str(
-            "(def *hr-parent* (self))
-             (defn hr-worker (n)
-               (do (sleep 30) (throw \"buggy\")))
-             (%spawn-supervised (fn () (hr-worker 0)) 100 60000)",
-        )
-        .expect("setup");
-
-    // Let the supervisor catch the buggy version a few times. The first
-    // ~10 ms total of backoff (1+2+4+8 = 15 ms) ensures at least a couple
-    // of catches before our `def` lands.
-    std::thread::sleep(std::time::Duration::from_millis(200));
-
-    // Hot-reload the worker: now it sends a heartbeat instead of throwing.
-    interp
-        .eval_str(
-            "(defn hr-worker (n)
-               (do (send *hr-parent* [:hr-beat n])
-                   (sleep 30)
-                   (hr-worker (+ n 1))))",
-        )
-        .expect("redef");
-
-    // The supervisor's next retry calls the new closure (resolved by name).
-    // Read two beats — the first proves the fix took, the second proves the
-    // re-resolved closure tail-recurses normally (it's the *new* fn, not the
-    // captured handle).
-    let first = interp
-        .eval_str("(receive ([:hr-beat n] (vector :beat n)) (after 3000 :timeout))")
-        .expect("receive 1");
-    let second = interp
-        .eval_str("(receive ([:hr-beat n] (vector :beat n)) (after 3000 :timeout))")
-        .expect("receive 2");
-    assert_eq!(
-        interp.print(first),
-        "[:beat 0]",
-        "first beat should arrive once the fix is live"
-    );
-    assert_eq!(
-        interp.print(second),
-        "[:beat 1]",
-        "second beat proves the new closure tail-recurses normally"
-    );
-}
 
 /// `gensym` must mint process-wide-unique symbols, including across threads — a
 /// thread-local counter would reset per worker and collide.
@@ -1258,4 +1127,32 @@ fn gensym_is_unique_across_threads() {
             );
         }
     }
+}
+
+/// The test registry (`*units*` in `std/test.blsp`) must be resettable so a
+/// long-lived image — the `nest mcp` hot-reload session (ADR-013) — that loads
+/// the same test file twice doesn't double-count. `reset-units!` clears it; the
+/// project test runner calls it before (re)loading test files. Here we simulate
+/// the reload directly: registering a test twice inflates the count, and
+/// `reset-units!` before re-registering restores a count of one.
+#[test]
+fn reset_units_prevents_reload_double_count() {
+    let mut interp = Interp::new();
+    interp.eval_str("(require 'test)").expect("require test");
+    // Simulate a test file loaded twice into one image: two registrations.
+    interp
+        .eval_str(r#"(reset-units!) (test "t" (is true)) (test "t" (is true))"#)
+        .expect("register twice");
+    let doubled = interp
+        .eval_str("(get (run-tests-structured) :total)")
+        .expect("run twice-registered");
+    assert_eq!(interp.print(doubled), "2", "two registrations should report two tests");
+    // The fix: reset before the (re)load clears the stale registrations.
+    interp
+        .eval_str(r#"(reset-units!) (test "t" (is true))"#)
+        .expect("reset then register once");
+    let single = interp
+        .eval_str("(get (run-tests-structured) :total)")
+        .expect("run once-registered");
+    assert_eq!(interp.print(single), "1", "reset should leave exactly one test");
 }

@@ -667,7 +667,7 @@ detection are deferred. Full reference: [distribution.md](distribution.md).
 
 ### Arithmetic
 `+`  `-`  `*`  `/`  `mod`  `rem`  `quot`  `inc`  `dec`
-`floor`  `ceil`  `round`  `sqrt`  `pow`  `abs`  `min`  `max`  `even?`  `odd?`
+`floor`  `ceil`  `round`  `round-to`  `sqrt`  `pow`  `abs`  `min`  `max`  `even?`  `odd?`
 
 - Integer-only arguments give an integer result (`/` stays integer only when it
   divides evenly; otherwise it returns a float). Any float argument makes the
@@ -679,7 +679,9 @@ detection are deferred. Full reference: [distribution.md](distribution.md).
 - `rem` is the truncated remainder (sign of the dividend); `quot` is truncated
   integer division; `mod` is the euclidean remainder (sign of the divisor).
 - `floor`/`ceil`/`round` return an **int** (an int passes through unchanged);
-  `round` rounds half away from zero. `pow` requires an **integer exponent**
+  `round` rounds half away from zero. `round-to` keeps a fixed number of
+  decimal *places* but stays a **number** (`(round-to 3.14159 2)` → `3.14`); for
+  a fixed-width *string* like `"3.10"`, use `to-fixed` (under Strings). `pow` requires an **integer exponent**
   (use `sqrt` for roots): an int base with a non-negative exponent stays an int
   (overflow raises, like `*`); a negative exponent gives the reciprocal as a
   float. `sqrt` is always a **float** and is *approximate* — it's computed in
@@ -766,6 +768,7 @@ immutable operations that return fresh maps. `count`/`empty?` work on maps too.
 `list->string`  `upper`  `lower`  `string->number`  `number->string`
 `index-of`  `string-contains?`  `join`  `string-split`  `replace`
 `trim`  `triml`  `trimr`  `blank?`  `starts-with?`  `ends-with?`
+`string-repeat`  `pad-left`  `pad-right`  `to-fixed`
 
 - `str` concatenates the *display* form of its args; `pr-str` returns the
   *readable* form of one value.
@@ -786,6 +789,12 @@ immutable operations that return fresh maps. `count`/`empty?` work on maps too.
   `replace` swaps every occurrence of one substring for another.
 - `trim` / `triml` / `trimr` strip whitespace (both ends / left / right);
   `blank?` is true for an empty or all-whitespace string.
+- `string-repeat` concatenates n copies; `pad-left` / `pad-right` justify a
+  string into a fixed-width field with spaces (never truncating). `to-fixed`
+  renders a number with a fixed decimal count (`(to-fixed 3.14159 2)` → `"3.14"`)
+  — the float→text op `str`/`pr-str` can't do, since they print the shortest
+  round-tripping form. Together they handle tabular/console output. `to-fixed` is
+  a Rust primitive (Rust's float formatter); the rest are Brood.
 
 ```clojure
 (string-split "a,b,c" ",")      ;=> ("a" "b" "c")
@@ -795,19 +804,24 @@ immutable operations that return fresh maps. `count`/`empty?` work on maps too.
 (string->number "3.5")          ;=> 3.5
 ```
 
-Only `upper`/`lower` (Unicode tables) and `string->number` (strict parse-or-nil)
-are Rust primitives; the rest of the library is Brood over `substring`/`str`
-(`std/prelude.blsp`) — the "write the language in the language" principle.
+Only `upper`/`lower` (Unicode tables), `string->number` (strict parse-or-nil),
+and `to-fixed` (float formatting) are Rust primitives; the rest of the library is
+Brood over `substring`/`str` (`std/prelude.blsp`) — the "write the language in
+the language" principle.
 
 ### I/O
 `print`  `println`
 
 ### Time & memory
-`now`  `mem-bytes`  `mem-peak`
+`now`  `now-ns`  `bench`  `mem-bytes`  `mem-peak`
 
 - `(now)` returns wall-clock milliseconds since the Unix epoch as an integer.
   Subtract two readings to measure elapsed time — the test runner uses it to
-  report how long a suite took.
+  report how long a suite took. `(now-ns)` is the same in **nanoseconds**, for
+  timing work too fast for millisecond resolution (i64 ns stays in range until
+  2262).
+- `(bench "label" expr)` (a macro) evaluates `expr`, prints `label: N ms`, and
+  returns `expr`'s value — drop it around any expression to time it in place.
 - `(mem-bytes)` returns the bytes currently allocated process-wide, and
   `(mem-peak)` the high-water mark since the process started. They are fed by a
   byte-counting global allocator, so they cover *all* Rust allocations (the

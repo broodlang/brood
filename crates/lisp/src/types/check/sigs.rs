@@ -17,23 +17,60 @@
 //! `arity_of` is independent: it works for any callable (primitive or
 //! closure) without needing a sig.
 
-use crate::core::heap::Heap;
-use crate::core::value::{self, Arity, Tag, Value};
+use std::sync::LazyLock;
+
+use crate::core::heap::{Heap, SymbolMap};
+use crate::core::value::{self, Arity, Symbol, Tag, Value};
 use crate::types::{Sig, Ty};
 
 use super::walk::list_items;
 
-/// The signature of a **primitive** named `name` — read from its `NativeFn`
-/// (contract point #6, enforced). `None` when no global of that name exists,
-/// or when it isn't a primitive (a Brood closure goes through [`curated_sig`]
+/// Curated stdlib sigs, keyed by interned `Symbol`. Built once at first
+/// use — every entry's name is interned via `value::intern`, and a lookup
+/// is a `SymbolMap` (FxHash-on-`u32`) probe rather than a string compare
+/// chain. Pre-consolidation the checker walked every call form, allocated
+/// a `String` via `symbol_name`, then matched `name.as_str()` against this
+/// table — that allocation was the review's hottest finding for the
+/// type-check walk. (`SymbolMap` is the same hasher `eval::SPECIAL_IDS`
+/// uses.)
+static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
+    let int = Ty::of(Tag::Int);
+    let num = Ty::NUMBER;
+    let any = Ty::ANY;
+    let seq = Ty::LIST.union(Ty::of(Tag::Vector));
+    let callable = Ty::of(Tag::Fn).union(Ty::of(Tag::Native));
+    let mut m: SymbolMap<Sig> = SymbolMap::default();
+    let mut put = |name: &str, sig: Sig| {
+        m.insert(value::intern(name), sig);
+    };
+    // variadic arithmetic: every argument must be a number
+    for n in ["+", "-", "*", "/"] {
+        put(n, Sig::variadic(num, num));
+    }
+    // variadic comparison: numeric args, boolean result
+    for n in ["<", "<=", ">", ">="] {
+        put(n, Sig::variadic(num, Ty::of(Tag::Bool)));
+    }
+    // `mod` is Brood (over `rem`), but its types are fixed
+    put("mod", Sig::new(vec![int, int], int));
+    // higher-order: first arg callable, second a sequence
+    for n in ["map", "filter"] {
+        put(n, Sig::new(vec![callable, seq], seq));
+    }
+    put("reduce", Sig::new(vec![callable, any, seq], any));
+    m
+});
+
+/// The signature of a **primitive** bound to `sym` — read from its `NativeFn`
+/// (contract point #6, enforced). `None` when `sym` has no binding, or its
+/// binding isn't a primitive (a Brood closure goes through [`curated_sig`]
 /// or [`infer_sig`] instead).
 ///
 /// Lookup goes through `heap.global()`, not `EnvId::GLOBAL` directly: in a real
 /// runtime that's `EnvId::GLOBAL` (routed to the shared `runtime.globals`
 /// table), but in the prelude-builder / test heap it's a *local* env that
 /// `builtins::register` populated — `env_get` walks both transparently.
-pub(super) fn primitive_sig(heap: &Heap, name: &str) -> Option<Sig> {
-    let sym = value::intern_existing(name)?;
+pub(super) fn primitive_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
     match heap.env_get(heap.global(), sym)? {
         Value::Native(id) => Some(heap.native(id).sig.clone()),
         _ => None,
@@ -44,24 +81,8 @@ pub(super) fn primitive_sig(heap: &Heap, name: &str) -> Option<Sig> {
 /// that matter: the arithmetic/comparison kernel (variadic over numbers) and the
 /// core higher-order fns. Hand-vetted, so sound — this is what makes `(+ 1 "x")`
 /// catchable even though `+` is `(reduce %add 0 xs)`.
-pub(super) fn curated_sig(name: &str) -> Option<Sig> {
-    let int = Ty::of(Tag::Int);
-    let num = Ty::NUMBER;
-    let any = Ty::ANY;
-    let seq = Ty::LIST.union(Ty::of(Tag::Vector));
-    let callable = Ty::of(Tag::Fn).union(Ty::of(Tag::Native));
-    Some(match name {
-        // variadic arithmetic: every argument must be a number
-        "+" | "-" | "*" | "/" => Sig::variadic(num, num),
-        // variadic comparison: numeric args, boolean result
-        "<" | "<=" | ">" | ">=" => Sig::variadic(num, Ty::of(Tag::Bool)),
-        // `mod` is Brood (over `rem`), but its types are fixed
-        "mod" => Sig::new(vec![int, int], int),
-        // higher-order: first arg callable, second a sequence
-        "map" | "filter" => Sig::new(vec![callable, seq], seq),
-        "reduce" => Sig::new(vec![callable, any, seq], any),
-        _ => return None,
-    })
+pub(super) fn curated_sig(sym: Symbol) -> Option<Sig> {
+    CURATED_SIGS.get(&sym).cloned()
 }
 
 /// Inferred signature for a **user closure** named `sym` whose body is one
@@ -79,8 +100,7 @@ pub(super) fn curated_sig(name: &str) -> Option<Sig> {
 ///   particular, the closure's own name → recursion is ignored, per the rule).
 ///
 /// Sound because a straight-line use is unconditional — no false positives.
-fn infer_sig(heap: &Heap, name: &str) -> Option<Sig> {
-    let sym = value::intern_existing(name)?;
+fn infer_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
     let Value::Fn(cid) = heap.env_get(heap.global(), sym)? else {
         return None;
     };
@@ -90,7 +110,7 @@ fn infer_sig(heap: &Heap, name: &str) -> Option<Sig> {
     }
     let body = closure.body[0];
     // Copy out before we ask sig_of (which borrows the heap again).
-    let params: Vec<value::Symbol> = closure.params.clone();
+    let params: Vec<Symbol> = closure.params.clone();
     let self_name = closure.name;
 
     let items = list_items(heap, body)?;
@@ -103,8 +123,7 @@ fn infer_sig(heap: &Heap, name: &str) -> Option<Sig> {
     if self_name == Some(callee) {
         return None;
     }
-    let callee_name = value::symbol_name(callee);
-    let callee_sig = primitive_sig(heap, &callee_name).or_else(|| curated_sig(&callee_name))?;
+    let callee_sig = primitive_sig(heap, callee).or_else(|| curated_sig(callee))?;
 
     // Each closure parameter takes the type the callee expects where the
     // parameter is used. Multiple positions → intersect (the param must satisfy
@@ -123,17 +142,17 @@ fn infer_sig(heap: &Heap, name: &str) -> Option<Sig> {
     Some(Sig::new(param_tys, callee_sig.ret))
 }
 
-/// The signature for `name`, from any of the three sources (primitive → curated
+/// The signature for `sym`, from any of the three sources (primitive → curated
 /// → inferred). The non-inferring half is exposed as [`primitive_sig`] +
 /// [`curated_sig`] so [`infer_sig`] can consult the callee's sig *without*
 /// kicking off another inference (the rule says inference is one step deep).
-pub(super) fn sig_of(heap: &Heap, name: &str) -> Option<Sig> {
-    primitive_sig(heap, name)
-        .or_else(|| curated_sig(name))
-        .or_else(|| infer_sig(heap, name))
+pub(super) fn sig_of(heap: &Heap, sym: Symbol) -> Option<Sig> {
+    primitive_sig(heap, sym)
+        .or_else(|| curated_sig(sym))
+        .or_else(|| infer_sig(heap, sym))
 }
 
-/// The arity of the callable named `name` — `NativeFn.arity` for primitives,
+/// The arity of the callable bound to `sym` — `NativeFn.arity` for primitives,
 /// derived from `Closure.{params, optionals, rest}` for Brood closures. `None`
 /// when the name resolves to a non-callable, doesn't exist, or no callable is
 /// visible (e.g. a file-local `defn` checked in the read-only `--check` path
@@ -142,8 +161,7 @@ pub(super) fn sig_of(heap: &Heap, name: &str) -> Option<Sig> {
 /// Brood's closure params are: `params.len()` required + `optionals.len()`
 /// optional + an optional rest tail (`Symbol`). So min = required, max =
 /// required + optional unless there's a rest (then no max).
-pub(super) fn arity_of(heap: &Heap, name: &str) -> Option<Arity> {
-    let sym = value::intern_existing(name)?;
+pub(super) fn arity_of(heap: &Heap, sym: Symbol) -> Option<Arity> {
     match heap.env_get(heap.global(), sym)? {
         Value::Native(id) => Some(heap.native(id).arity),
         Value::Fn(cid) => {
@@ -171,13 +189,11 @@ pub(super) fn arity_str(a: Arity) -> String {
     }
 }
 
-/// Does `name` resolve to *any* value in the global env? Broader than
+/// Does `sym` resolve to *any* value in the global env? Broader than
 /// `sig_of` / `arity_of` (which only return for callables they know how to
 /// describe). A `Value::Macro`, a constant, or anything else that's actually
 /// bound counts as "in scope" for the unbound-symbol check — we don't warn
 /// just because the checker can't say much about the binding's *shape*.
-pub(super) fn is_globally_bound(heap: &Heap, name: &str) -> bool {
-    value::intern_existing(name)
-        .and_then(|sym| heap.env_get(heap.global(), sym))
-        .is_some()
+pub(super) fn is_globally_bound(heap: &Heap, sym: Symbol) -> bool {
+    heap.env_get(heap.global(), sym).is_some()
 }

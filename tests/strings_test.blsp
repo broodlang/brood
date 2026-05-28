@@ -84,3 +84,61 @@
     (assert= (triml "  hi  ") "hi  ")
     (assert= (trimr "  hi  ") "  hi"))
   (test "all-whitespace trims to empty" (assert= (trim "    ") "")))
+
+(describe "padding & repetition"
+  (test "string-repeat concatenates n copies"
+    (assert= (string-repeat "=" 5) "=====")
+    (assert= (string-repeat "ab" 3) "ababab"))
+  (test "string-repeat with n <= 0 is empty"
+    (assert= (string-repeat "x" 0) "")
+    (assert= (string-repeat "x" -2) ""))
+  (test "pad-left right-justifies with spaces"
+    (assert= (pad-left "42" 6) "    42")
+    (assert= (pad-left "" 3) "   "))
+  (test "pad-right left-justifies with spaces"
+    (assert= (pad-right "hi" 6) "hi    ")
+    (assert= (pad-right "" 3) "   "))
+  (test "pad-* never truncate an over-wide string"
+    (assert= (pad-left "toolong" 3) "toolong")
+    (assert= (pad-right "toolong" 3) "toolong"))
+  (test "pad-* are exact-width at the boundary"
+    (assert= (string-length (pad-left "ab" 2)) 2)
+    (assert= (string-length (pad-right "ab" 5)) 5)))
+
+(describe "to-fixed (fixed-decimal rendering)"
+  (test "renders exactly n decimal places"
+    (assert= (to-fixed 3.14159 2) "3.14")
+    (assert= (to-fixed 0.015873015873 4) "0.0159"))
+  (test "pads short fractions with trailing zeros"
+    (assert= (to-fixed 1.5 3) "1.500")
+    (assert= (to-fixed 2 2) "2.00"))
+  (test "n = 0 gives an integer-looking string (no point)"
+    (assert= (to-fixed 3.7 0) "4")
+    (assert= (to-fixed 3.2 0) "3"))
+  (test "rejects a negative decimal count" (assert-error (to-fixed 1.0 -1)))
+  (test "lines up in a fixed-width column via pad-left"
+    (assert= (pad-left (to-fixed 1.5 2) 7) "   1.50")))
+
+;; ---- across processes -------------------------------------------------------
+;; Each worker builds a padded string from data and sends it back (deep copy
+;; across per-process heaps); the parent fans in and checks the strings survived
+;; the round-trip intact. :isolated so it doesn't contend for the runner's
+;; mailbox with the parallel suite.
+(defn str-pad-worker (parent i) (send parent [:p i (pad-left (number->string i) 4)]))
+(defn str-spawn-padders (parent n)
+  (when (> n 0) (spawn (str-pad-worker parent n)) (str-spawn-padders parent (- n 1))))
+(defn str-collect (got total acc)
+  (if (= got total) acc (str-collect (+ got 1) total (receive ([:p i s] (assoc acc i s))))))
+
+(describe "string formatting across processes"
+  :isolated
+  (test "padded strings round-trip through 20 workers unchanged"
+    (str-spawn-padders (self) 20)
+    (let (merged (str-collect 0 20 {}))
+      (assert= (count merged) 20)
+      (assert= (get merged 1) "   1")
+      (assert= (get merged 20) "  20")))
+  (test "string-repeat result survives a send"
+    (let (me (self))
+      (spawn (send me (string-repeat "-" 8)))
+      (assert= (receive) "--------"))))

@@ -31,6 +31,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use smallvec::SmallVec;
 
+use crate::core::map_champ::{self, MapNode, BITS_PER_LEVEL, MAX_DEPTH};
 use crate::core::value::{
     Closure, ClosureId, EnvId, MapId, NativeFn, NativeId, PairId, StrId, Symbol, Value, VecId,
     LOCAL, PRELUDE, RUNTIME,
@@ -123,11 +124,13 @@ fn to_prelude(v: Value) -> Value {
 struct Slabs {
     pairs: Vec<(Value, Value)>,
     vectors: Vec<Vec<Value>>,
-    /// Maps as insertion-ordered key/value association vectors (no duplicate
-    /// keys — `assoc` replaces in place). Small and immutable, so a `Vec` scanned
-    /// by structural equality is enough; a HAMT can replace it later with no
-    /// surface change.
-    maps: Vec<Vec<(Value, Value)>>,
+    /// Maps as a flat slab of CHAMP nodes (ADR-040). Each [`MapNode`] is
+    /// either a branch (two bitmaps + packed data/children arrays) or a
+    /// max-depth collision leaf. The handle in `Value::Map(MapId)` points
+    /// at the trie's *root* node; child sub-nodes live in the same slab,
+    /// referenced by `MapId`. The root is the only entry-point — internal
+    /// nodes are reachable only through the trie itself.
+    maps: Vec<MapNode>,
     strings: Vec<String>,
     closures: Vec<Closure>,
     natives: Vec<NativeFn>,
@@ -254,7 +257,7 @@ pub struct LocalCheckpoint {
 struct CodeSlabs {
     pairs: boxcar::Vec<(Value, Value)>,
     vectors: boxcar::Vec<Vec<Value>>,
-    maps: boxcar::Vec<Vec<(Value, Value)>>,
+    maps: boxcar::Vec<MapNode>,
     strings: boxcar::Vec<String>,
     closures: boxcar::Vec<Closure>,
     /// Captured environments of promoted closures. A closure defined *inside a
@@ -1054,6 +1057,136 @@ impl Heap {
         }
     }
 
+    /// A `u64` hash of `v` consistent with [`Heap::equal`]: two values that
+    /// `equal` agrees on must hash to the same number. Used by the CHAMP map
+    /// (ADR-040) to drive trie navigation — top 4 bits pick the root slot,
+    /// next 4 the child, …
+    ///
+    /// Subtle bits the consistency proof rides on:
+    /// - `Float(0.0)` and `Float(-0.0)` hash the same (they compare equal).
+    /// - `NaN` ≠ `NaN` per IEEE-754, so two `NaN` keys won't be `equal` and
+    ///   needn't hash the same — but a single canonical bit pattern still
+    ///   keeps the trie well-typed; pick `u64::MAX` so any NaN routes to one
+    ///   leaf where it'll fail the `equal` check anyway.
+    /// - Maps are insertion-order-independent: the hash XORs each entry's
+    ///   `(k, v)` hash so order doesn't matter (XOR is commutative).
+    /// - Pair / Vector hashes feed children into a `DefaultHasher` so
+    ///   structure matters; lists with the same `equal` shape hash the same
+    ///   regardless of which `Cons` cells they're built from.
+    /// - Region bits in handles are ignored — `hash_value` works on
+    ///   *structure*, so a LOCAL pair and its PRELUDE-retagged twin land at
+    ///   the same key.
+    pub fn hash_value(&self, v: Value) -> u64 {
+        use std::hash::Hasher;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.hash_value_into(v, &mut h);
+        h.finish()
+    }
+
+    fn hash_value_into<H: std::hash::Hasher>(&self, v: Value, h: &mut H) {
+        use std::hash::{Hash, Hasher};
+        // A leading byte tags the variant so a `Sym(0)` and an `Int(0)` never
+        // collide on the *exact* same hash by accident.
+        match v {
+            Value::Nil => 0u8.hash(h),
+            Value::Bool(b) => {
+                1u8.hash(h);
+                b.hash(h);
+            }
+            Value::Int(i) => {
+                2u8.hash(h);
+                i.hash(h);
+            }
+            Value::Float(f) => {
+                3u8.hash(h);
+                if f.is_nan() {
+                    u64::MAX.hash(h);
+                } else if f == 0.0 {
+                    // 0.0 and -0.0 compare equal; canonicalise to +0.0 bits.
+                    0u64.hash(h);
+                } else {
+                    f.to_bits().hash(h);
+                }
+            }
+            Value::Sym(s) => {
+                4u8.hash(h);
+                s.hash(h);
+            }
+            Value::Keyword(s) => {
+                5u8.hash(h);
+                s.hash(h);
+            }
+            Value::Str(id) => {
+                6u8.hash(h);
+                self.string(id).hash(h);
+            }
+            Value::Pair(id) => {
+                7u8.hash(h);
+                // Walk the cdr spine iteratively (matches `equal`'s loop).
+                let mut cur = id;
+                loop {
+                    let (car, cdr) = self.pair(cur);
+                    self.hash_value_into(car, h);
+                    match cdr {
+                        Value::Pair(next) => cur = next,
+                        other => {
+                            // Marker so a 1-pair `(a . b)` doesn't hash the
+                            // same as a 2-pair `(a b)` (whose cdr ends Nil).
+                            0xFFu8.hash(h);
+                            self.hash_value_into(other, h);
+                            break;
+                        }
+                    }
+                }
+            }
+            Value::Vector(id) => {
+                8u8.hash(h);
+                let xs = self.vector(id);
+                (xs.len() as u64).hash(h);
+                for &x in xs {
+                    self.hash_value_into(x, h);
+                }
+            }
+            Value::Map(id) => {
+                9u8.hash(h);
+                // Order-insensitive: XOR each entry's hash into an accumulator
+                // (XOR is commutative). Mix in length so `{}` ≠ `{a a}` even
+                // if the per-entry hash ever conspired to 0.
+                let mut acc: u64 = 0;
+                let entries = self.map(id);
+                for &(k, vv) in entries {
+                    let mut sub = std::collections::hash_map::DefaultHasher::new();
+                    self.hash_value_into(k, &mut sub);
+                    self.hash_value_into(vv, &mut sub);
+                    acc ^= sub.finish();
+                }
+                (entries.len() as u64).hash(h);
+                acc.hash(h);
+            }
+            Value::Fn(id) => {
+                10u8.hash(h);
+                id.0.hash(h);
+            }
+            Value::Macro(id) => {
+                11u8.hash(h);
+                id.0.hash(h);
+            }
+            Value::Native(id) => {
+                12u8.hash(h);
+                id.0.hash(h);
+            }
+            Value::Ref(id) => {
+                13u8.hash(h);
+                id.hash(h);
+            }
+            Value::Pid { node, id } => {
+                14u8.hash(h);
+                node.hash(h);
+                id.hash(h);
+            }
+        }
+    }
+
     /// Structural equality (the basis of `=`). Functions/macros/natives compare
     /// by identity (same handle).
     ///
@@ -1119,6 +1252,50 @@ impl Heap {
     // [`EnvId::GLOBAL`], which routes to the shared `runtime.globals` table; a
     // top-level frame's parent chain bottoms out there. (During prelude *build*
     // the global is instead a real local root frame with no parent.)
+
+    /// True if `env` points at a LOCAL env slot that the sweep has poisoned
+    /// (i.e. a freed slot whose handle leaked past GC). Debug-only entry
+    /// point for the use-after-GC chase in [`crate::eval`]; in release the
+    /// `poison` field doesn't exist, so the method is `#[cfg]`-gated too —
+    /// every call site is `#[cfg(debug_assertions)]`-gated to match.
+    #[cfg(debug_assertions)]
+    pub fn env_is_poisoned(&self, env: EnvId) -> bool {
+        env != EnvId::GLOBAL
+            && env.region() == LOCAL
+            && PoisonBits::is(&self.poison.envs, env.index())
+    }
+
+    /// Walk the parent chain from `env` looking up `_sym`, logging at the
+    /// first poisoned link. Helps localise *which* frame in a lookup chain
+    /// is the use-after-GC offender. Debug-only; no-op in release.
+    #[cfg(debug_assertions)]
+    pub fn debug_walk_env_chain(&self, env: EnvId, _sym: Symbol) {
+        if !crate::process::in_green_process() {
+            return;
+        }
+        let mut cur = env;
+        let mut depth = 0u32;
+        while cur != EnvId::GLOBAL {
+            if cur.region() == LOCAL && PoisonBits::is(&self.poison.envs, cur.index()) {
+                eprintln!(
+                    "[panic-context] env chain hit POISONED frame at depth {} env={:#x}",
+                    depth, cur.0
+                );
+                return;
+            }
+            match self.local.envs.get(cur.index()) {
+                Some(frame) => match frame.parent {
+                    Some(p) => cur = p,
+                    None => return,
+                },
+                None => return,
+            }
+            depth += 1;
+            if depth > 10_000 {
+                return; // safety belt — env chains shouldn't be this deep
+            }
+        }
+    }
 
     fn env_frame(&self, env: EnvId) -> &EnvFrame {
         // `EnvId::GLOBAL` is a sentinel (region bits `0b11`) — there is no

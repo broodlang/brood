@@ -341,6 +341,14 @@
   "Round `x` to the nearest integer (halves away from zero)."
   (if (< x 0) (- (floor (+ (- x) 0.5))) (floor (+ x 0.5))))
 
+;; (round-to x places) — round to a fixed number of decimal places, staying a
+;; number (for a fixed-width *string*, e.g. "3.10", use the `to-fixed` primitive).
+;; Subject to the usual binary-float caveat: a "halfway" decimal like 1.255 isn't
+;; exactly representable, so it may round the way its nearest f64 actually lies.
+(defn round-to (x places)
+  "Round `x` to `places` decimal places (halves away from zero); returns a number."
+  (let (scale (pow 10 places)) (/ (round (* x scale)) scale)))
+
 ;; (quot a b) — truncated integer division (toward zero), the quotient partner to
 ;; `rem`. (a - (rem a b)) is exactly divisible by b, so `/` returns an exact int
 ;; (no float round-trip — correct even for large i64, unlike (floor (/ a b))).
@@ -687,9 +695,8 @@
     a live process is already registered under `name`. The hot-reload-friendly
     form (reloading the file doesn't fire a second worker).
 
-  Plain `spawn` is **let-it-crash** (Erlang `spawn/1`): an uncaught throw kills
-  the process and any monitors see `[:down pid [:error msg]]` immediately. For
-  recover-on-throw / hot-reload semantics, use `supervise` instead."
+  Erlang **let-it-crash** (`spawn/1`): an uncaught throw kills the process and
+  any monitors see `[:down pid [:error msg]]` immediately."
   ;; Param name is `more` (not `rest`) so the body can still call the
   ;; prelude's `rest` function without param-shadowing itself.
   (if (empty? more)
@@ -697,37 +704,6 @@
     (if (empty? (rest more))
       `(%spawn-named ~head (fn () ~(first more)))
       (throw "spawn: expected (spawn expr) or (spawn name expr)"))))
-
-;; ---- supervised spawn (ADR-039) -------------------------------------------
-;; Parallel to `spawn` but the process is wrapped in a runtime supervisor:
-;; an uncaught throw is caught at the process boundary, the last tail call
-;; is retried (with hot-reload name re-resolution), and the process exits
-;; only if more than `*supervise-max-restarts*` retries fall inside any
-;; `*supervise-max-window-ms*` window — Erlang's `intensity` / `period`
-;; defaults of 3 in 5 s.
-
-(def *supervise-max-restarts* 3)
-(def *supervise-max-window-ms* 5000)
-
-(defmacro supervise (head & more)
-  "Run an expression in a *supervised* green process; returns its pid. Two
-  shapes, matching `spawn`:
-  - `(supervise expr)` — anonymous, supervised.
-  - `(supervise name expr)` — named, idempotent, supervised.
-
-  An uncaught throw in the supervised process is caught at the process
-  boundary; the supervisor sleeps an exponential backoff (1 ms → 1 s) and
-  retries the last tail call, re-resolving the called fn by name so a
-  freshly-`def`'d version (hot reload, ADR-013) wins. The process gives up
-  only if more than `*supervise-max-restarts*` (default 3) retries fall in
-  any `*supervise-max-window-ms*` (default 5000 ms) window — Erlang's
-  `supervisor` intensity/period (ADR-039)."
-  (if (empty? more)
-    `(%spawn-supervised (fn () ~head) *supervise-max-restarts* *supervise-max-window-ms*)
-    (if (empty? (rest more))
-      `(%spawn-supervised-named ~head (fn () ~(first more))
-                                *supervise-max-restarts* *supervise-max-window-ms*)
-      (throw "supervise: expected (supervise expr) or (supervise name expr)"))))
 
 ;; A long-lived `:remote-spawn` server: the receiver-side machinery behind the
 ;; `remote-spawn` macro. Receives `[:run thunk]` messages and applies the thunk
@@ -947,9 +923,15 @@
 ;; predicate. (sort-by key-fn coll) sorts by `(< (key-fn x) (key-fn y))`. A
 ;; stable, O(n log n) merge sort: the merge prefers the left run on ties (stable)
 ;; and is tail-recursive; recursion depth is O(log n), so it's stack-safe.
+;;
+;; The single-arg `(sort coll)` case delegates to the Rust `%sort-asc`
+;; primitive — ~50× faster than the in-Brood mergesort on 10 000 items
+;; because every comparison is a Rust `match` instead of an `eval::apply`
+;; round-trip. Custom-comparator `(sort less? coll)` stays on the
+;; Brood-side `merge-sort` (the primitive is `<`-only).
 (defn sort (a & more)
   "Sort a collection (stable). `(sort coll)` is ascending by `<`; `(sort less? coll)` uses a strict less-than predicate."
-  (if (empty? more) (merge-sort (fn (x y) (< x y)) a) (merge-sort a (first more))))
+  (if (empty? more) (%sort-asc a) (merge-sort a (first more))))
 (defn sort-by (key-fn coll)
   "Sort `coll` (stable, ascending) by comparing `(key-fn x)` of each item."
   (merge-sort (fn (x y) (< (key-fn x) (key-fn y))) coll))
@@ -1220,6 +1202,16 @@ applies to each input first."
   "Run `body` with the bound name set to each element of the collection for side effect; returns `nil`. `bind` is `(var coll)`."
   `(do (dolist--loop ~(second bind) (fn (~(first bind)) ~@body)) nil))
 
+;; (bench label expr) — wall-clock timing, in milliseconds (the resolution of
+;; `now`). The gensyms keep `label`/`expr` from capturing `t0`/`r` if the caller
+;; happens to use those names.
+(defmacro bench (label expr)
+  "Evaluate `expr`, print `label: N ms`, and return `expr`'s value."
+  (let (t0 (gensym "t0") r (gensym "r"))
+    `(let (~t0 (now) ~r ~expr)
+       (println (str ~label ": " (- (now) ~t0) " ms"))
+       ~r)))
+
 ;; ---- symbol / keyword conversions -------------------------------------------
 ;; `symbol` and `keyword` (Rust) are lenient — they take string/symbol/keyword.
 ;; These are the strict named conversions: each errors on the wrong input shape,
@@ -1321,6 +1313,21 @@ leaves `s` unchanged."
 (defn trimr (s) "Remove trailing whitespace from `s`." (trimr--to s (string-length s)))
 
 (defn trim (s) "Remove leading and trailing whitespace from `s`." (triml (trimr s)))
+
+;; ---- string padding & repetition --------------------------------------------
+;; Column formatting for tabular/console output. `pad-*` left unchanged when the
+;; string already meets the width (they never truncate).
+(defn string-repeat (s n)
+  "The string `s` concatenated `n` times (the empty string if `n` <= 0)."
+  (apply str (repeat n s)))
+
+(defn pad-left (s w)
+  "Right-justify `s` in a field of width `w`, padding with spaces on the left; `s` is returned unchanged if it is already at least `w` wide."
+  (let (n (string-length s)) (if (>= n w) s (str (string-repeat " " (- w n)) s))))
+
+(defn pad-right (s w)
+  "Left-justify `s` in a field of width `w`, padding with spaces on the right; `s` is returned unchanged if it is already at least `w` wide."
+  (let (n (string-length s)) (if (>= n w) s (str s (string-repeat " " (- w n))))))
 
 ;; ---- strings & paths --------------------------------------------------------
 ;; Helpers over `substring` (char-indexed, like `string-length`). Generic enough

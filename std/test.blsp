@@ -81,6 +81,17 @@ docs/testing.md for the full guide.")
 
 (defn add-unit! (mode group tests) (def *units* (cons (list mode group tests) *units*)))
 
+;; Empty the registry. A `describe`/`test` form REGISTERS by consing onto
+;; `*units*`; in a fresh process that starts at nil, so a one-shot `nest test`
+;; never double-counts. But a long-lived image (the `nest mcp` session, ADR-013)
+;; that `load`s the same test file twice would register every unit twice and
+;; report inflated counts. The project test runner calls this right before it
+;; (re)loads the test files, so each run owns a clean registry regardless of how
+;; many times the image has loaded them before.
+(defn reset-units! ()
+  "Clear the test registry (drop every registered unit). The project test runner calls this before (re)loading test files so a long-lived image — e.g. a `nest mcp` hot-reload session — doesn't accumulate duplicate registrations across runs."
+  (def *units* nil))
+
 ;; Full source location of a form as (file line col), or nil. Captured at
 ;; macro-expansion time (by the assertion macros), while the original read form
 ;; still carries its position — `current-file` / `form-pos` are Rust primitives

@@ -208,6 +208,8 @@ the `nest new` scaffolder.")
     (require 'test)
     (project-load-sources root)
     ; the project's own src/, so tests use it directly
+    (reset-units!)
+    ; drop any stale registrations from a prior run (long-lived image / hot reload)
     (let (dirs (project--abs-paths root *project-test-paths*)
           files (fold (fn (acc d) (append acc (project--collect-tests d))) nil dirs))
       (fold (fn (_ f) (load f)) nil files)
@@ -229,6 +231,9 @@ the `nest new` scaffolder.")
     (project-setup root)
     (require 'test)
     (project-load-sources root)
+    (reset-units!)
+    ; drop any stale registrations so a re-run in a long-lived `nest mcp` image
+    ; (each `load` re-registers, ADR-013) counts each test once, not N times
     (let (dirs (project--abs-paths root *project-test-paths*)
           files (fold (fn (acc d) (append acc (project--collect-tests d))) nil dirs))
       (fold (fn (_ f) (load f)) nil files)

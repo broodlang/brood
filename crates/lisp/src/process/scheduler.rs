@@ -121,191 +121,14 @@ pub(super) fn gc_block_save() -> u32 {
 #[inline]
 pub(super) fn gc_block_set(n: u32) {
     GC_BLOCK.with(|d| d.set(n));
-}
-
-// ----- resume slot (ADR-039 step 2 — supervised processes) ------------------
-//
-// The runtime's per-process supervisor catches a `LispError` that escaped the
-// process's eval (a redefinition that throws, a bug in a worker iteration)
-// and re-invokes the *last function call* — same callee, same args — so a
-// long-running stateful loop survives a bad iteration. The "last function
-// call" is captured here, in a thread-local, by the eval loop at every
-// tail-call dispatch (see `eval::Value::Fn` branch).
-//
-// **Coarse-grained checkpointing.** We update only at the tail-call site,
-// not at every nested call. Recovery semantics: retry the most recent
-// iteration of the enclosing loop, not the innermost frame. This is what
-// users actually want — and the per-call cost stays at one update per
-// iteration, not one per frame.
-//
-// **Why a thread-local, not Process-owned**: the slot is hot-path; thread-
-// local access is one TLS read. The slot is per-process-currently-running:
-// when a worker multiplexes another process, the old process's slot would
-// otherwise leak into the new one. Save/restore around suspends (the same
-// pattern `GC_BLOCK` uses) keeps each process's slot isolated.
-
-/// What the supervisor needs to re-invoke the most recent iteration. The
-/// eval loop pushes `(callee, name, argv.clone())` here on every tail-call
-/// entry (`Value::Fn(id)` branch, just before `continue 'tail`). The
-/// supervisor in the coroutine body reads it via [`take_resume`] when an
-/// error escapes.
-///
-/// `name` is the closure's `defn`-given name (when set). On retry, the
-/// supervisor re-resolves it in the global env so a user's hot reload
-/// (`(def my-loop …)` between iterations) takes effect on the retry —
-/// without this, the supervisor would re-invoke the *old, throwing*
-/// closure handle stored in `callee`, defeating the whole point of
-/// integrating supervision with hot reload (ADR-039 × ADR-013). Falls
-/// back to the stored handle if the name doesn't resolve to a `Fn`
-/// anymore (rare — only if the user `def`'d it to something
-/// non-callable mid-flight).
-#[derive(Clone)]
-pub(crate) struct ResumeSlot {
-    pub(crate) callee: crate::core::value::Value,
-    pub(crate) name: Option<crate::core::value::Symbol>,
-    pub(crate) argv: smallvec::SmallVec<[crate::core::value::Value; 8]>,
-}
-
-thread_local! {
-    /// The currently-running green process's resume slot. Updated by
-    /// `record_resume` from the eval loop on every tail-call dispatch; read
-    /// + cleared by the supervisor via `take_resume` on error. Saved /
-    /// restored around suspends so a worker running A, then B, then A again
-    /// doesn't leak B's slot into A's recovery.
-    static RESUME_SLOT: RefCell<Option<ResumeSlot>> = const { RefCell::new(None) };
-
-    /// The currently-running process's supervision policy, or `None` for
-    /// plain (let-it-crash) spawns. Set at coroutine entry by `spawn` from
-    /// the policy passed in, consulted by `eval`'s `record_resume` guard
-    /// and by `supervise()` itself. Save/restore around suspends so a
-    /// worker multiplexing supervised + unsupervised processes doesn't
-    /// leak one's policy into the other's eval-loop hot path.
-    static SUPERVISION: Cell<Option<SupervisionPolicy>> = const { Cell::new(None) };
-}
-
-/// Restart intensity for a supervised process — Erlang's `intensity` /
-/// `period` shape: at most `max_restarts` retries within any
-/// `max_window_ms` window before the supervisor gives up and the process
-/// exits with the last error. Defaults (3 restarts in 5 s) match Erlang's
-/// `supervisor` defaults. `Copy` so it lives in a `Cell` without
-/// borrow ceremony.
-#[derive(Clone, Copy, Debug)]
-pub struct SupervisionPolicy {
-    pub max_restarts: u32,
-    pub max_window_ms: u64,
-}
-
-impl SupervisionPolicy {
-    /// Erlang `supervisor`'s default intensity (3 restarts per 5 s); the
-    /// default for `(supervise expr)` with no explicit policy.
-    pub const fn default_erlang() -> Self {
-        Self {
-            max_restarts: 3,
-            max_window_ms: 5_000,
-        }
+    #[cfg(debug_assertions)]
+    if std::env::var_os("BROOD_TRACE_GCBLOCK").is_some() {
+        eprintln!(
+            "[gcblock] SET({}) thread={:?}",
+            n,
+            std::thread::current().id()
+        );
     }
-}
-
-/// Is the current green process supervised? Hot-path query for the eval
-/// loop's `record_resume` guard. Cheap: one TLS read + branch.
-#[inline]
-pub fn is_supervised() -> bool {
-    SUPERVISION.with(|s| s.get().is_some())
-}
-
-/// Snapshot the current supervision policy for save/restore around a
-/// coroutine suspend, paired with [`supervision_set`].
-#[inline]
-pub(super) fn supervision_save() -> Option<SupervisionPolicy> {
-    SUPERVISION.with(|s| s.get())
-}
-
-/// Set the current supervision policy — paired with `supervision_save`
-/// around suspends, and called by a coroutine entry to install its own
-/// policy (wiping any residual from a previous process on the worker).
-#[inline]
-pub(super) fn supervision_set(v: Option<SupervisionPolicy>) {
-    SUPERVISION.with(|s| s.set(v));
-}
-
-/// Eval-loop hook: record `(callee, name, argv)` as the current iteration's
-/// resume point. Called by `eval::eval`'s `Value::Fn(id)` branch right
-/// before `continue 'tail`. Reuses the slot's `SmallVec` capacity when
-/// possible (clear + extend_from_slice) so a tight tail-loop pays one
-/// `Value` overwrite + one memcpy per iteration, not a fresh allocation.
-///
-/// `name` is the closure's `defn`-given name (`heap.closure(id).name`);
-/// the supervisor re-resolves it on retry so a hot reload picks up the new
-/// definition (see [`ResumeSlot`]).
-#[inline]
-pub fn record_resume(
-    callee: crate::core::value::Value,
-    name: Option<crate::core::value::Symbol>,
-    argv: &[crate::core::value::Value],
-) {
-    RESUME_SLOT.with(|s| {
-        let mut s = s.borrow_mut();
-        match s.as_mut() {
-            Some(slot) => {
-                slot.callee = callee;
-                slot.name = name;
-                slot.argv.clear();
-                slot.argv.extend_from_slice(argv);
-            }
-            None => {
-                let mut new_argv = smallvec::SmallVec::new();
-                new_argv.extend_from_slice(argv);
-                *s = Some(ResumeSlot {
-                    callee,
-                    name,
-                    argv: new_argv,
-                });
-            }
-        }
-    });
-}
-
-/// Take (and clear) the current resume slot. Called by the supervisor on
-/// error. Returns `None` if no tail-call recorded yet — the supervisor then
-/// re-invokes the spawn entry instead (state-loss restart, the worst-case
-/// recovery).
-pub(super) fn take_resume() -> Option<ResumeSlot> {
-    RESUME_SLOT.with(|s| s.borrow_mut().take())
-}
-
-/// Visit the current resume slot's live `Value`s — callee + each arg — by
-/// calling `visit` once per value. The GC safepoint uses this to keep the
-/// supervisor's recovery target alive: without it, a tracing collection
-/// between the eval-loop's `record_resume` write and the supervisor's
-/// `take_resume` read could free the closure / vector / pair the slot
-/// points at, and the supervisor would call back into a reused slot.
-/// Zero-allocation visit so the safepoint stays in the hot path.
-#[inline]
-pub fn for_each_resume_root(mut visit: impl FnMut(crate::core::value::Value)) {
-    RESUME_SLOT.with(|s| {
-        if let Some(slot) = s.borrow().as_ref() {
-            visit(slot.callee);
-            for &v in slot.argv.iter() {
-                visit(v);
-            }
-        }
-    });
-}
-
-/// Read-only snapshot of the slot for save/restore around a coroutine
-/// suspend. Paired with [`resume_slot_set`] in the same pattern as
-/// `gc_block_save` / `gc_block_set`.
-#[inline]
-pub(super) fn resume_slot_save() -> Option<ResumeSlot> {
-    RESUME_SLOT.with(|s| s.borrow().clone())
-}
-
-/// Write the resume slot — paired with `resume_slot_save` around a suspend,
-/// and called by a fresh coroutine to wipe the residual value left on the
-/// worker by a previously-running process.
-#[inline]
-pub(super) fn resume_slot_set(v: Option<ResumeSlot>) {
-    RESUME_SLOT.with(|s| *s.borrow_mut() = v);
 }
 
 /// RAII guard: increments `GC_BLOCK` on construction, decrements on `Drop`.
@@ -318,7 +141,15 @@ pub struct GcBlockGuard;
 impl GcBlockGuard {
     #[inline]
     pub fn enter() -> Self {
-        GC_BLOCK.with(|d| d.set(d.get() + 1));
+        let new = GC_BLOCK.with(|d| {
+            let n = d.get() + 1;
+            d.set(n);
+            n
+        });
+        #[cfg(debug_assertions)]
+        if std::env::var_os("BROOD_TRACE_GCBLOCK").is_some() {
+            eprintln!("[gcblock] enter -> {} thread={:?}", new, std::thread::current().id());
+        }
         GcBlockGuard
     }
 }
@@ -326,7 +157,17 @@ impl GcBlockGuard {
 impl Drop for GcBlockGuard {
     #[inline]
     fn drop(&mut self) {
-        GC_BLOCK.with(|d| d.set(d.get().saturating_sub(1)));
+        let new = GC_BLOCK.with(|d| {
+            let n = d.get().saturating_sub(1);
+            d.set(n);
+            n
+        });
+        #[cfg(debug_assertions)]
+        if std::env::var_os("BROOD_TRACE_GCBLOCK").is_some() {
+            eprintln!("[gcblock] drop -> {} thread={:?}", new, std::thread::current().id());
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = new;
     }
 }
 
@@ -374,23 +215,14 @@ fn preempt() {
         // Save this process's per-thread state before yielding: a worker may
         // pick up another process whose eval/macroexpand changes these
         // thread-locals, and we need ours back when we resume. GC-block
-        // depth is critical for safepoint correctness; the resume slot is
-        // critical so the supervisor sees this process's last tail-call;
-        // the supervision policy is critical so the eval-loop's
-        // `record_resume` guard reads the *current* process's flag, not
-        // whichever process happened to run on the worker between our
-        // suspend and resume (ADR-039).
+        // depth is critical for safepoint correctness.
         let saved_block = gc_block_save();
-        let saved_resume = resume_slot_save();
-        let saved_sup = supervision_save();
         // SAFETY: same invariant as `receive` — the yielder is valid while this
         // coroutine is running, which is now (tick runs inside eval, inside the
         // coroutine body). Suspending returns control to the worker (`run_one`).
         unsafe { (*yptr).suspend(Suspend::Preempt) };
         CURRENT.with(|c| *c.borrow_mut() = Some(ctx));
         gc_block_set(saved_block);
-        resume_slot_set(saved_resume);
-        supervision_set(saved_sup);
     }
     // Root thread (yielder None): budget refreshed, never suspends.
 }
@@ -452,6 +284,18 @@ fn worker_count() -> usize {
 /// watchers via the dist layer (an ordinary `send` to a remote pid, which
 /// routes over the link). Same `[:down …]` shape in both cases — the
 /// receiver code on the wire side is unchanged from local.
+/// A human descriptor for a process in death/crash diagnostics: its registered
+/// name plus pid when it has one (`ticker (pid 6)`), else the bare pid (`6`).
+/// Read the name *before* `deregister` clears it. Used only on the cold death
+/// path, so the `name_for_pid` scan is fine. (Keyword and symbol registrations
+/// share the interner, so the name prints without a leading `:`.)
+fn proc_descr(pid: u64) -> String {
+    match crate::dist::name_for_pid(pid) {
+        Some(name) => format!("{} (pid {})", value::symbol_name(name), pid),
+        None => pid.to_string(),
+    }
+}
+
 fn deregister(pid: u64, reason: Message) {
     // The three tables are taken **sequentially**, not nested: REGISTRY first,
     // released, then NAMES, released, then MONITORS. `add_monitor` and
@@ -549,7 +393,7 @@ fn run_one(mut proc: Box<Process>) {
             enqueue(proc);
         }
         Err(_) => {
-            eprintln!("process {} panicked", proc.pid);
+            eprintln!("process {} panicked", proc_descr(proc.pid));
             deregister(proc.pid, Message::Keyword(value::intern("killed")));
         }
     }
@@ -559,18 +403,9 @@ fn run_one(mut proc: Box<Process>) {
 /// Returns the new pid. The user-facing `spawn` macro wraps an arbitrary
 /// expression into such a thunk (`(spawn e)` → `(%spawn (fn () e))`), so the
 /// expression's free locals are captured lexically rather than passed as args.
-///
-/// `policy` controls supervision:
-/// - `None` → plain spawn: an uncaught throw kills the process, monitors
-///   fire `[:down :error …]` immediately (Erlang `spawn/1`).
-/// - `Some(policy)` → supervised: catches throws, retries the last
-///   tail-call (with hot-reload name re-resolution), gives up only when
-///   the restart intensity is exceeded.
-pub fn spawn(
-    heap: &Heap,
-    f: Value,
-    policy: Option<SupervisionPolicy>,
-) -> Result<u64, LispError> {
+/// Erlang-style let-it-crash: an uncaught throw kills the process, monitors
+/// fire `[:down :error …]` immediately.
+pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
     // Promote the thunk into the shared RUNTIME region so its handle (and any
     // captured local scope) is valid in the child, which shares this runtime's
     // code via the Arcs below. A top-level function is already shared (no-op).
@@ -600,18 +435,22 @@ pub fn spawn(
                 yielder: Some(yielder as *const Yielder0),
             });
         });
-        // Wipe the worker's residual thread-local state — a previous
-        // coroutine on this worker may have left these nonzero. Our depth
-        // starts fresh at 0 (incremented by the eval guard below); our
-        // resume slot starts empty (the supervisor will populate it on the
-        // first tail call); supervision policy is this process's, not the
-        // previous tenant's.
+        // Wipe the worker's residual GC-block depth — a previous coroutine
+        // on this worker may have left it nonzero. Our depth starts fresh
+        // at 0 (incremented by the eval guard below).
         gc_block_set(0);
-        resume_slot_set(None);
-        supervision_set(policy);
         let mut heap = Heap::with_regions(prelude, runtime);
         heap.set_global(EnvId::GLOBAL);
-        let reason = supervise(&mut heap, pid, f, policy);
+        let reason = match eval::apply(&mut heap, f, &[], EnvId::GLOBAL) {
+            Ok(_) => Message::Keyword(value::intern("normal")),
+            Err(e) => {
+                eprintln!("process {} died: {}", proc_descr(pid), e.located());
+                Message::Vector(vec![
+                    Message::Keyword(value::intern("error")),
+                    Message::Str(e.to_string()),
+                ])
+            }
+        };
         EXIT_REASON.with(|r| *r.borrow_mut() = Some(reason));
         CURRENT.with(|c| *c.borrow_mut() = None);
     });
@@ -619,131 +458,6 @@ pub fn spawn(
     ensure_workers();
     enqueue(Box::new(Process { pid, mailbox, coro }));
     Ok(pid)
-}
-
-// ----- supervisor (ADR-039) ------------------------------------------------
-//
-// Wraps a process's main eval in a catch-and-retry loop, parameterised by a
-// per-process `SupervisionPolicy`. The eval loop updates `RESUME_SLOT` at
-// every tail-call dispatch (eval::Value::Fn branch); on an uncaught
-// `LispError`, we log it, sleep an exponential backoff, take the slot, and
-// re-invoke from there — *same callee, same argv* (with name re-resolution
-// for hot reload, ADR-013). A freshly-saved redefinition that throws doesn't
-// kill the worker; the next retry runs the corrected code with the same
-// state.
-//
-// Restart intensity (Erlang's `intensity`/`period`): a sliding window of
-// crash timestamps. If more than `policy.max_restarts` crashes fall inside
-// any `policy.max_window_ms` window, the supervisor gives up. Default 3/5 s
-// matches Erlang's `supervisor` default. See `docs/supervision.md`.
-
-const BACKOFF_BASE_MS: u64 = 1;
-const BACKOFF_MAX_MS: u64 = 1000;
-
-/// The per-process supervisor body — replaces the bare `match eval::apply`
-/// the original spawn body had. When `policy` is `None` (plain spawn —
-/// the let-it-crash baseline, Erlang's `spawn/1`), this short-circuits to
-/// a single `eval::apply`. When `Some(policy)`, it loops with retries
-/// until either the eval returns Ok (process finished normally) or the
-/// restart intensity is exceeded. The exit reason returned here becomes
-/// the `[:down …]` reason monitors see.
-fn supervise(
-    heap: &mut Heap,
-    pid: u64,
-    entry: Value,
-    policy: Option<SupervisionPolicy>,
-) -> Message {
-    use std::time::{Duration, Instant};
-    let policy = match policy {
-        Some(p) => p,
-        None => {
-            // Unsupervised: a single attempt, throw escapes as the exit reason.
-            return match eval::apply(heap, entry, &[], EnvId::GLOBAL) {
-                Ok(_) => Message::Keyword(value::intern("normal")),
-                Err(e) => {
-                    eprintln!("process {} died: {}", pid, e);
-                    Message::Vector(vec![
-                        Message::Keyword(value::intern("error")),
-                        Message::Str(e.to_string()),
-                    ])
-                }
-            };
-        }
-    };
-    let mut callee = entry;
-    let mut argv: smallvec::SmallVec<[Value; 8]> = smallvec::SmallVec::new();
-    // Sliding window of crash timestamps; entries older than
-    // `policy.max_window_ms` are pruned on each crash. If after pruning the
-    // window contains more than `policy.max_restarts` entries, we've
-    // exceeded intensity — give up.
-    let mut crashes: Vec<Instant> = Vec::with_capacity(policy.max_restarts as usize + 1);
-    let mut backoff_ms = BACKOFF_BASE_MS;
-    loop {
-        // Each invocation is its own eval; if it tail-calls deeper, `record_resume`
-        // updates RESUME_SLOT at every iteration boundary. The recovery cost on
-        // the happy path is one TLS read + two writes per tail call.
-        let result = eval::apply(heap, callee, &argv, EnvId::GLOBAL);
-        match result {
-            Ok(_) => return Message::Keyword(value::intern("normal")),
-            Err(e) => {
-                eprintln!("process {} caught: {}", pid, e);
-                let now = Instant::now();
-                crashes.push(now);
-                let window = Duration::from_millis(policy.max_window_ms);
-                crashes.retain(|&t| now.duration_since(t) <= window);
-                if crashes.len() > policy.max_restarts as usize {
-                    eprintln!(
-                        "process {} exceeded restart intensity ({} in {} ms); last error: {}",
-                        pid, crashes.len(), policy.max_window_ms, e
-                    );
-                    return Message::Vector(vec![
-                        Message::Keyword(value::intern("error")),
-                        Message::Str(e.to_string()),
-                    ]);
-                }
-                // Exponential backoff between retries, capped at 1 s so a
-                // transient external failure doesn't sleep too long.
-                std::thread::sleep(Duration::from_millis(backoff_ms));
-                backoff_ms = (backoff_ms.saturating_mul(2)).min(BACKOFF_MAX_MS);
-                // Take the slot and re-invoke from there. If no tail-call
-                // recorded yet (the entry itself threw before recursing),
-                // retry the original entry with no args — state-loss restart,
-                // the worst-case recovery.
-                match take_resume() {
-                    Some(slot) => {
-                        // Hot-reload integration (ADR-039 × ADR-013): if the
-                        // closure had a `defn`-given name, re-resolve it in
-                        // the global env. The user may have `(def name …)`'d
-                        // a fix between throws — that's the *entire point*
-                        // of supervision being on. Without this lookup the
-                        // supervisor would keep calling the old, throwing
-                        // closure handle stored in `slot.callee` forever
-                        // (up to MAX_RESTARTS), defeating the hot reload.
-                        // Fall back to the stored handle if the name no
-                        // longer resolves to a `Fn` (someone `def`'d it to
-                        // something non-callable, or `undef`'d it).
-                        callee = slot.callee;
-                        if let Some(name) = slot.name {
-                            if let Some(latest) = heap.env_get(EnvId::GLOBAL, name) {
-                                if matches!(latest, Value::Fn(_) | Value::Native(_)) {
-                                    callee = latest;
-                                }
-                            }
-                        }
-                        argv.clear();
-                        argv.extend_from_slice(&slot.argv);
-                    }
-                    None => {
-                        // Re-invoke `entry` with no args. (callee already set
-                        // to `entry` on first iteration; restore on
-                        // subsequent fall-through.)
-                        callee = entry;
-                        argv.clear();
-                    }
-                }
-            }
-        }
-    }
 }
 
 /// `(self)` — this process's pid.
@@ -756,25 +470,13 @@ pub fn self_pid() -> u64 {
 /// when `CURRENT` has a yielder, i.e. we entered through a coroutine. Used
 /// by the eval-time `unbound` raise to attach a scheduler-race hint
 /// (the under-load failure mode `docs/claude-demo-findings.md` flagged —
-/// concurrent prelude lookups racing) **and** by the supervisor's
-/// `record_resume` guard in the eval loop (ADR-039) — so this is called
-/// from inside eval on every tail call.
-///
-/// Uses `try_borrow` rather than `borrow`: every site that mutates `CURRENT`
-/// in this crate evaluates its RHS with no calls back into `in_green_process`
-/// today (Arc::clone, struct construction — see the `borrow_mut` audit in
-/// docs/devlog 2026-05-28), so the `try_borrow` should always succeed; but
-/// if a future change adds a path where it doesn't, the supervisor's
-/// hot-path guard would otherwise panic with "RefCell already borrowed"
-/// halfway through a tail call. Returning `false` on a contended borrow
-/// degrades gracefully — the recovery slot just isn't written for that one
-/// call. Never panics; returns `false` if `CURRENT` is unset *or* if a
-/// borrow is held.
+/// concurrent prelude lookups racing). Never panics; returns `false` if
+/// `CURRENT` is unset.
 pub fn in_green_process() -> bool {
     CURRENT.with(|c| {
-        c.try_borrow()
-            .ok()
-            .and_then(|b| b.as_ref().map(|ctx| ctx.yielder.is_some()))
+        c.borrow()
+            .as_ref()
+            .map(|ctx| ctx.yielder.is_some())
             .unwrap_or(false)
     })
 }

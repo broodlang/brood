@@ -23,10 +23,21 @@
 use crate::error::Pos;
 use crate::syntax::atom;
 
-/// A byte-offset cursor into `src`. Cheap: just two fields, no allocation.
+/// A byte-offset cursor into `src` + a one-shot line-start table for fast
+/// `pos_at`. Pre-table, every `pos_at` walked the whole prefix of `src` from
+/// byte 0 — the reader called it once per top-level form, so a file with
+/// `N` top-level forms paid `O(N × file_size)` just locating line numbers.
+/// Building a sorted `Vec<u32>` of newline-following byte offsets once at
+/// construction lets `pos_at` do an `O(log N)` bsearch for the line, then a
+/// short within-line char walk for the column.
 pub struct Scanner<'a> {
     src: &'a str,
     pos: usize,
+    /// Byte offsets of every line *start* in `src`. `line_starts[0] == 0`;
+    /// each subsequent entry is `(byte of '\n') + 1`. So the line containing
+    /// byte `b` is the largest `i` with `line_starts[i] <= b`. ~4 bytes per
+    /// source line — 5–6 KB for the prelude, negligible.
+    line_starts: Vec<u32>,
 }
 
 /// Result of [`Scanner::scan_string_body`] — either the closing quote was
@@ -38,7 +49,24 @@ pub enum StringScan {
 
 impl<'a> Scanner<'a> {
     pub fn new(src: &'a str) -> Self {
-        Scanner { src, pos: 0 }
+        // Build the line-start table in one byte-walk. `\n`-only newlines —
+        // Brood source is text, so anything past `\n` would be a malformed
+        // CR / Unicode line separator that the reader doesn't recognise as
+        // a line break anyway (`pos_at`'s old loop only counted `\n`).
+        // Sized exactly so we don't over-allocate on big files.
+        let nl_count = src.bytes().filter(|&b| b == b'\n').count();
+        let mut line_starts = Vec::with_capacity(nl_count + 1);
+        line_starts.push(0);
+        for (i, &b) in src.as_bytes().iter().enumerate() {
+            if b == b'\n' {
+                line_starts.push((i + 1) as u32);
+            }
+        }
+        Scanner {
+            src,
+            pos: 0,
+            line_starts,
+        }
     }
 
     /// Current byte offset into `src`. Both parsers carry their own notion of
@@ -177,21 +205,20 @@ impl<'a> Scanner<'a> {
         }
     }
 
-    /// The 1-based `Pos` of byte offset `idx`. Computed by scanning from the
-    /// start of `src`; only called on top-level form starts and on parse
-    /// errors, so the linear scan is fine.
+    /// The 1-based `Pos` of byte offset `idx`. `O(log N + col_len)` via the
+    /// precomputed `line_starts` bsearch + a short within-line char walk
+    /// (column is by character, so multibyte source files still get a
+    /// correct column count from `line_start` to `idx`).
     pub fn pos_at(&self, idx: usize) -> Pos {
-        let mut line = 1u32;
-        let mut col = 1u32;
-        let upto = idx.min(self.src.len());
-        for c in self.src[..upto].chars() {
-            if c == '\n' {
-                line += 1;
-                col = 1;
-            } else {
-                col += 1;
-            }
-        }
+        let upto = idx.min(self.src.len()) as u32;
+        // The line containing `idx` is the largest entry `<= idx`. Using
+        // `partition_point` for the 1-based line number directly.
+        let line = self.line_starts.partition_point(|&s| s <= upto) as u32;
+        // Within-line column: walk chars from this line's start byte to `idx`.
+        // For the prelude's mostly-ASCII source this is one byte per char;
+        // multibyte chars are counted once. 1-based.
+        let line_start = self.line_starts[(line - 1) as usize] as usize;
+        let col = self.src[line_start..upto as usize].chars().count() as u32 + 1;
         Pos { line, col }
     }
 }

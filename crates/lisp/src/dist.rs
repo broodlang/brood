@@ -168,6 +168,17 @@ pub(crate) fn whereis(name: Symbol) -> Option<u64> {
     crate::core::sync::read(&NAMES).get(&name).copied()
 }
 
+/// The name `pid` is registered under, if any — the reverse of [`whereis`].
+/// Used by the scheduler's death reporter to name a crashed process
+/// (`process ticker (pid 6) died: …`) instead of only its opaque pid. O(n) over
+/// the (small) `NAMES` table, and only on the cold death path, so the linear
+/// scan is fine. Must be read *before* `unregister_dead_pid` clears the entry.
+pub(crate) fn name_for_pid(pid: u64) -> Option<Symbol> {
+    crate::core::sync::read(&NAMES)
+        .iter()
+        .find_map(|(&name, &p)| if p == pid { Some(name) } else { None })
+}
+
 /// Remove every `NAMES` entry pointing at `pid` — called from
 /// `process::deregister` when a process dies, so a name registered under it
 /// doesn't go stale. Without this, `(whereis :foo)` could return a dead pid

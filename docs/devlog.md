@@ -5293,3 +5293,71 @@ UTF-16-correct).
 path_to_uri_round_trips_through_uri_to_path}`. `brood` 125, `brood-lsp` 53,
 `nest` 30 — all green; new code clippy-clean. Re-verified cross-file
 references/rename (LSP) and `callers` (MCP) end-to-end against a fresh project.
+
+## 2026-05-28 (cont.) — Demo-friendliness: stdlib + docs gaps from `claude-demo-findings.md`
+
+Closing the tractable, non-race tail of [`claude-demo-findings.md`](claude-demo-findings.md).
+First a status reconciliation against HEAD: three of that doc's four "blockers"
+were **already fixed** (commit `5b19787` + the structured-error work) — the
+type-checker no longer warns on `(require 'hatch)` macros, `nest format` keeps
+multi-line code (only strips column-alignment padding), and pattern-destructure
+mismatches now raise a clean `[:match-error …]` Brood error instead of a Rust
+panic. Verified each by re-running, not by trusting the doc. What remained was
+the stdlib/doc polish; the scheduler race and the perf/process-death items are
+deferred (the race is under active investigation, and they perturb or collide
+with that work).
+
+**Added — stdlib (`std/prelude.blsp`, pure Brood).**
+- `string-repeat`, `pad-left`, `pad-right` — column formatting for console
+  output (`pad-*` never truncate). `round-to` — round to N decimal places,
+  staying a number (built on the `floor` primitive; documented binary-float
+  caveat). `bench` — a gensym-hygienic macro that times an expression, prints
+  `label: N ms`, and returns its value. (`repeat` already existed.)
+
+**Added — kernel primitives (`crates/lisp/src/builtins.rs`).** Two genuine
+Rust-boundary cases the language can't bootstrap:
+- `to-fixed` — `(to-fixed x n)` renders a number with exactly `n` decimals as a
+  string (e.g. `"3.14"`, `"3.00"`). `str`/`pr-str` print the shortest
+  round-tripping form (full f64 precision), which is wrong for tabular output.
+  Uses Rust's float formatter; negative `n` raises `E0042`.
+- `now-ns` — wall-clock nanoseconds since the epoch, the fine-grained partner to
+  `now` for sub-millisecond timing.
+
+**Docs.** Expanded [`brood-for-claude.md`](brood-for-claude.md): filled the
+missing builtins (`apply`/`now`/`gensym`/`quot`/`mod`/`rem`/`char-at`/`for`/
+`doseq`/`dotimes`/`dolist`/`enumerate` + the new helpers) and added a **`hatch`
+framework** section (`defprocess`/`cast`/`call`/`!`/`gen-call`/`sleep`) with a
+verified counter-server and worker-pool example — the idiomatic concurrency
+story that was entirely absent. Kept [`language.md`](language.md) in sync
+(Strings / Arithmetic / Time & memory sections).
+
+**Tests.** New `deftest`s in `tests/strings_test.blsp` (padding/repetition,
+`to-fixed`, plus an `:isolated` across-processes round-trip that sends padded
+strings through 20 workers) and `tests/math_test.blsp` (`round-to` both signs,
+`bench` return value, `now-ns` monotonicity). All green; `brood` Rust suite (73
+in `basic.rs`) green.
+
+**Process-death context (§3.4/§6.5).** `process N died: …` was opaque about
+*which* process. Added `dist::name_for_pid` (the reverse of `whereis`, read
+before `deregister` clears it) and a `scheduler::proc_descr(pid)` helper, and
+routed all four diagnostics (`panicked` / `died` / `caught` / `exceeded restart
+intensity`) through it — a named process now reports `process ticker (pid 1)
+died: …`. The error is printed via `LispError::located()` so it carries
+`FILE:LINE:COL:` + kind *when known*. **Caveat:** errors propagating out of a
+spawned process currently carry no source position (the file runner only tags
+the main thread's top-level forms), so the location half is correct-but-latent —
+it'll light up for free once the propagation path attaches position (a natural
+tie-in to the def-site work). Verified the name output end-to-end; the always-on
+location piece would need spawn-site/enclosing-form tagging in `eval/mod.rs`,
+left out to stay clear of the in-flight race work.
+
+**Deferred (perturbs the in-flight race hunt).** The 2-arg numeric fast-paths
+(pure-prelude multi-arity dispatch on `+`/`-`/`*`/`/`/`=`/`<`,
+`std/prelude.blsp:69`) change the hot-path allocation profile the race is
+sensitive to — held until the race fix lands.
+
+**Pre-existing failure noted (not from this work).** `introspection_test`'s
+"a prelude global … has no recorded site" now fails — `(source-location 'map)`
+returns a cached-prelude def-site `["…/.cache/brood/prelude.blsp" 185 1]` instead
+of `nil`. That's the in-progress cross-file def-site / prelude-caching change in
+`heap.rs`/`eval/mod.rs`, unrelated to the additive stdlib work here.

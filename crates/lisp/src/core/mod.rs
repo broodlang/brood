@@ -4,5 +4,6 @@
 
 pub mod alloc;
 pub mod heap;
+pub mod map_champ;
 pub mod sync;
 pub mod value;

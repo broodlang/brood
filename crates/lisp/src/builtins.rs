@@ -71,6 +71,14 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "cons", Arity::exact(2), Sig::new(vec![any, any], pair), cons);
     def(heap, "first", Arity::exact(1), Sig::new(vec![seq], any), first);
     def(heap, "rest", Arity::exact(1), Sig::new(vec![seq], list_ty), rest);
+    // `%sort-asc` is the Rust fast path for the common `(sort coll)` case
+    // (ascending by `<`, no custom comparator). Avoids per-comparison Brood
+    // eval overhead — the old in-Brood mergesort was ~1.5 s on 10 000 items
+    // because every compare went through `eval::apply`. `sort-by` /
+    // `(sort cmp coll)` still routes through the Brood merge sort for
+    // arbitrary comparators. Items must be all-`int` or all-`float`; mixed
+    // numerics work by promotion (matches `<`'s semantics).
+    def(heap, "%sort-asc", Arity::exact(1), Sig::new(vec![seq], list_ty), sort_asc);
 
     // vector
     def(heap, "vector", Arity::any(), Sig::variadic(any, vec_ty), vector);
@@ -98,6 +106,10 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "lower", Arity::exact(1), Sig::new(vec![string], string), lower);
     // string->number returns int *or* float *or* nil (the parse-failed case).
     def(heap, "string->number", Arity::exact(1), Sig::new(vec![string], num.union(nil_ty)), string_to_number);
+    // `to-fixed` renders a number with a fixed count of decimals — the one
+    // float→text op `str`/`pr-str` can't express (they print shortest round-trip
+    // form, i.e. full f64 precision). `round-to` (a *number*) is Brood over floor.
+    def(heap, "to-fixed", Arity::exact(2), Sig::new(vec![num, int], string), to_fixed);
 
     // type reflection — the tag predicates (nil?/int?/string?/…) are Brood
     // (std/prelude.blsp) over this one reflective primitive.
@@ -113,6 +125,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
 
     // time
     def(heap, "now", Arity::exact(0), Sig::nullary(int), now);
+    def(heap, "now-ns", Arity::exact(0), Sig::nullary(int), now_ns);
 
     // memory
     def(heap, "mem-bytes", Arity::exact(0), Sig::nullary(int), mem_bytes);
@@ -202,12 +215,6 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // processes (concurrency)
     def(heap, "%spawn", Arity::exact(1), Sig::new(vec![callable], pid_ty), spawn);
     def(heap, "%spawn-named", Arity::exact(2), Sig::new(vec![sym.union(kw), callable], pid_ty), spawn_named);
-    // Supervised spawns: extra `max-restarts` (int) and `max-window-ms` (int)
-    // tail args carry the per-process restart-intensity policy. The
-    // user-facing `(supervise …)` macro fills them with the Erlang defaults
-    // (3 in 5000 ms).
-    def(heap, "%spawn-supervised", Arity::exact(3), Sig::new(vec![callable, int, int], pid_ty), spawn_supervised);
-    def(heap, "%spawn-supervised-named", Arity::exact(4), Sig::new(vec![sym.union(kw), callable, int, int], pid_ty), spawn_supervised_named);
     // `send`'s target is a pid OR a `{:name :node}` address map.
     def(heap, "send", Arity::exact(2), Sig::new(vec![pid_ty.union(map_ty), any], nil_ty), send);
     // Arg shape: (matcher: callable, timeout: int|nil, on-timeout: callable|nil).
@@ -261,6 +268,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("substring", &["s", "start", "end"], "The characters of s in the range [start, end), char-indexed."),
     ("upper", &["s"], "s upper-cased (Unicode-aware)."),
     ("lower", &["s"], "s lower-cased (Unicode-aware)."),
+    ("to-fixed", &["x", "n"], "Render number x as a string with exactly n digits after the decimal point (rounded). n must be >= 0."),
     ("string->number", &["s"], "Parse s strictly as an int, else a float, else nil (unlike read-string)."),
     ("type-of", &["x"], "The runtime type of x as a keyword (:int, :string, :pair, ...)."),
     ("check", &["form"], "Advisory type-check a quoted form: a list of warning strings, or nil. Never raises."),
@@ -272,6 +280,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("eprint", &["&", "xs"], "Write the display forms of the arguments to stderr; returns nil."),
     ("stdout-tty?", &[], "True when stdout is an interactive terminal (false when piped or captured)."),
     ("now", &[], "Wall-clock milliseconds since the Unix epoch."),
+    ("now-ns", &[], "Wall-clock nanoseconds since the Unix epoch (finer-grained than now)."),
     ("mem-bytes", &[], "Bytes currently allocated process-wide."),
     ("mem-peak", &[], "High-water mark of allocated bytes since process start."),
     ("eval", &["form"], "Evaluate a form in the global environment."),
@@ -308,8 +317,6 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("dynamic?", &["x"], "Whether x is a symbol declared dynamic with defdyn. Quote it: (dynamic? '*foo*)."),
     ("throw", &["x"], "Raise x as an error - a non-local exit caught by try/catch."),
     ("%spawn", &["thunk"], "Run thunk (a 0-arg fn) in a new green process; returns its pid. Use the `spawn` macro."),
-    ("%spawn-supervised", &["thunk", "max-restarts", "max-window-ms"], "Like %spawn, but the new process is supervised (ADR-039): an uncaught throw is caught and retried with hot-reloaded code, up to `max-restarts` within any `max-window-ms` window before the process exits. Use the `supervise` macro."),
-    ("%spawn-supervised-named", &["name", "thunk", "max-restarts", "max-window-ms"], "Like %spawn-named, but the new process is supervised (ADR-039). Idempotent on `name`: a second call while the first is alive returns the existing pid (no respawn, no re-eval of thunk). Use the `supervise` macro."),
     ("send", &["target", "msg"], "Copy msg into target's mailbox; target is a pid or {:name :node} address. Routes locally or over a node link. Returns nil."),
     ("self", &[], "This process's own pid (carries this node's identity)."),
     ("ref", &[], "A fresh, globally-unique reference token (tags a request to its reply)."),
@@ -556,6 +563,59 @@ fn rest(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     }
 }
 
+/// `(%sort-asc coll)` — stable ascending sort of a numeric collection by `<`.
+/// The fast path behind `(sort coll)` when no custom comparator is given;
+/// the all-Brood `merge-sort` in `std/prelude.blsp` still handles
+/// `(sort less? coll)`. ~50× faster than the in-Brood mergesort on 10 000
+/// items because every comparison is a Rust `match` instead of an
+/// `eval::apply` round-trip.
+///
+/// Items must be `Int` / `Float` / mixed (the same shape `<` accepts).
+/// Mixed Int+Float promote to float for the compare (matching `prim_lt`).
+/// Any non-numeric item is a `wrong_type` error against the offending value.
+fn sort_asc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    // Collect into a Vec. `seq_items` walks the cons spine (or copies a
+    // vector) once. Values are `Copy` so the Vec holds plain handles — no
+    // GC root machinery needed because `sort_by` does no eval and can't
+    // trigger a safepoint.
+    let mut items = heap.seq_items(arg(args, 0))?;
+
+    // Validate before sorting so a non-numeric item produces one clear
+    // error rather than an indeterminate-order partial sort.
+    for &v in &items {
+        match v {
+            Value::Int(_) | Value::Float(_) => {}
+            _ => return Err(LispError::wrong_type(heap, "sort", "number", v)),
+        }
+    }
+
+    // Stable sort. The int-int branch keeps full precision; mixed pairs
+    // promote to f64 (same compromise as `prim_lt`'s mixed case — past
+    // 2^53 the float compare can collapse two distinct ints, but that
+    // matches what `<` itself would do).
+    items.sort_by(|a, b| match (*a, *b) {
+        (Value::Int(x), Value::Int(y)) => x.cmp(&y),
+        _ => {
+            let xf = match *a {
+                Value::Int(n) => n as f64,
+                Value::Float(f) => f,
+                _ => unreachable!(),
+            };
+            let yf = match *b {
+                Value::Int(n) => n as f64,
+                Value::Float(f) => f,
+                _ => unreachable!(),
+            };
+            // NaN sorts as Equal (would otherwise break `sort_by`'s total
+            // ordering). Real Brood `<` doesn't admit NaN past `(nan? x)`
+            // anyway, so this is the lesser evil.
+            xf.partial_cmp(&yf).unwrap_or(std::cmp::Ordering::Equal)
+        }
+    });
+
+    Ok(heap.list(items))
+}
+
 // ---------- vector ----------
 
 fn vector(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -677,11 +737,52 @@ fn pr_str(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.alloc_string(&s))
 }
 
+thread_local! {
+    /// When `Some`, `(print …)` appends here instead of writing to the process's
+    /// real stdout. The `nest mcp` dispatcher installs a buffer around each
+    /// `tools/call` (see [`begin_stdout_capture`]) so a handler's `(print …)`
+    /// can't corrupt the JSON-RPC stdout stream — the captured text rides back in
+    /// the result envelope instead. `None` (the default) sends `print` straight
+    /// to stdout, as in the REPL and the file runner. Thread-local, so it only
+    /// affects `print`s on the thread that began the capture — spawned green
+    /// processes on other workers are unaffected (and shouldn't be printing to a
+    /// protocol channel anyway).
+    static STDOUT_CAPTURE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Start capturing `(print …)` output on the current thread into a fresh
+/// in-memory buffer (discarding any buffer already installed). Pair with
+/// [`take_captured_stdout`]. Used by the `nest mcp` dispatcher to keep handler
+/// output off the JSON-RPC channel.
+pub fn begin_stdout_capture() {
+    STDOUT_CAPTURE.with(|c| *c.borrow_mut() = Some(String::new()));
+}
+
+/// Stop capturing and return what `(print …)` wrote since [`begin_stdout_capture`]
+/// — `Some(text)` (possibly empty) if capture was active, `None` if it wasn't.
+/// After this call `print` writes to real stdout again.
+pub fn take_captured_stdout() -> Option<String> {
+    STDOUT_CAPTURE.with(|c| c.borrow_mut().take())
+}
+
 fn print(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let parts: Vec<String> = args.iter().map(|&a| printer::display(heap, a)).collect();
-    print!("{}", parts.join(" "));
-    use std::io::Write;
-    std::io::stdout().flush().ok();
+    let text = parts.join(" ");
+    // If a capture buffer is installed on this thread, divert there instead of
+    // touching real stdout — the MCP channel must stay pure JSON-RPC.
+    let captured = STDOUT_CAPTURE.with(|c| match c.borrow_mut().as_mut() {
+        Some(buf) => {
+            buf.push_str(&text);
+            true
+        }
+        None => false,
+    });
+    if !captured {
+        print!("{text}");
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+    }
     Ok(Value::Nil)
 }
 
@@ -712,6 +813,18 @@ fn now(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
     Ok(Value::Int(ms))
+}
+
+/// `(now-ns)` — wall-clock nanoseconds since the Unix epoch, as an integer.
+/// The fine-grained partner to `now`; subtract two readings to time sub-
+/// millisecond work that `now`'s resolution would round to zero. (i64
+/// nanoseconds since 1970 stays in range until the year 2262.)
+fn now_ns(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    let ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0);
+    Ok(Value::Int(ns))
 }
 
 // ---------- memory ----------
@@ -1083,6 +1196,25 @@ fn substring(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         .take((end - start) as usize)
         .collect();
     Ok(heap.alloc_string(&sub))
+}
+
+/// `(to-fixed x n)` — x rendered with exactly `n` digits after the decimal point
+/// (rounded). The one float→text op the language can't bootstrap: `str`/`pr-str`
+/// print the shortest round-tripping form (full f64 precision, e.g.
+/// `0.015873015873015872`), which is wrong for tabular/console output. An int `x`
+/// is promoted, so `(to-fixed 3 2)` is `"3.00"`. `n` must be non-negative.
+fn to_fixed(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let x = expect_number(heap, "to-fixed", arg(args, 0))?;
+    let n = expect_int(heap, "to-fixed", arg(args, 1))?;
+    if n < 0 {
+        return Err(LispError::runtime(format!(
+            "to-fixed: decimal places must be non-negative, got {}",
+            n
+        ))
+        .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE));
+    }
+    let s = format!("{:.*}", n as usize, x);
+    Ok(heap.alloc_string(&s))
 }
 
 /// `(upper s)` — `s` with every character upper-cased. Case folding is
@@ -1574,84 +1706,8 @@ fn throw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 // ---------- processes ----------
 
 fn spawn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let pid = crate::process::spawn(heap, arg(args, 0), None)?;
+    let pid = crate::process::spawn(heap, arg(args, 0))?;
     Ok(crate::process::pid_value(pid))
-}
-
-/// `(%spawn-supervised thunk max-restarts max-window-ms)` — spawn a
-/// supervised green process (ADR-039). Throws are caught, the last tail
-/// call is retried with hot-reloaded code, the process exits only when
-/// more than `max-restarts` retries fall inside any `max-window-ms`
-/// window (Erlang's intensity/period). The user-facing wrapper is the
-/// `supervise` macro; both args are positional here because the Brood
-/// macro layer fills defaults (3 / 5000).
-fn spawn_supervised(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let policy = supervision_policy_from_args(args, 1, 2)?;
-    let pid = crate::process::spawn(heap, arg(args, 0), Some(policy))?;
-    Ok(crate::process::pid_value(pid))
-}
-
-/// `(%spawn-supervised-named name thunk max-restarts max-window-ms)` —
-/// idempotent supervised named spawn. Same lookup semantics as
-/// `%spawn-named` (a live name returns its pid, `thunk` is not evaluated),
-/// plus the supervision policy from the trailing two args.
-fn spawn_supervised_named(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let name = match arg(args, 0) {
-        Value::Keyword(s) | Value::Sym(s) => s,
-        v => {
-            return Err(LispError::wrong_type(
-                heap,
-                "%spawn-supervised-named",
-                "keyword or symbol",
-                v,
-            ))
-        }
-    };
-    let thunk = arg(args, 1);
-    if !matches!(thunk, Value::Fn(_)) {
-        return Err(LispError::wrong_type(
-            heap,
-            "%spawn-supervised-named",
-            "function",
-            thunk,
-        ));
-    }
-    let policy = supervision_policy_from_args(args, 2, 3)?;
-    let pid = crate::dist::spawn_or_get(name, || crate::process::spawn(heap, thunk, Some(policy)))?;
-    Ok(crate::process::pid_value(pid))
-}
-
-/// Parse `(max-restarts, max-window-ms)` out of `args` at the given
-/// indices, validating both are non-negative ints fitting their unsigned
-/// types. Shared between `%spawn-supervised` and
-/// `%spawn-supervised-named`.
-fn supervision_policy_from_args(
-    args: &[Value],
-    max_restarts_idx: usize,
-    max_window_idx: usize,
-) -> Result<crate::process::SupervisionPolicy, LispError> {
-    let max_restarts = match arg(args, max_restarts_idx) {
-        Value::Int(n) if n >= 0 => n as u32,
-        v => {
-            return Err(LispError::runtime(format!(
-                "supervise: max-restarts must be a non-negative integer, got {:?}",
-                v
-            )))
-        }
-    };
-    let max_window_ms = match arg(args, max_window_idx) {
-        Value::Int(n) if n >= 0 => n as u64,
-        v => {
-            return Err(LispError::runtime(format!(
-                "supervise: max-window-ms must be a non-negative integer, got {:?}",
-                v
-            )))
-        }
-    };
-    Ok(crate::process::SupervisionPolicy {
-        max_restarts,
-        max_window_ms,
-    })
 }
 
 /// `(%spawn-named name thunk)` — idempotent named spawn. If `name` (a
@@ -1665,10 +1721,6 @@ fn supervision_policy_from_args(
 /// the winner's pid. The user-facing `(spawn name expr)` macro wraps an
 /// expression into a thunk the same way `(spawn expr)` does, so the
 /// expression's free locals are captured lexically (ADR-033).
-///
-/// Replaces the `defonce *worker* (spawn (worker))` pattern: a file
-/// reloaded by the hot-reload supervisor sees the name is alive, the
-/// `%spawn-named` is a no-op, and the running worker keeps going.
 fn spawn_named(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let name = match arg(args, 0) {
         Value::Keyword(s) | Value::Sym(s) => s,
@@ -1694,7 +1746,7 @@ fn spawn_named(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     // `LispError` if `process::spawn` rejects the thunk (defensive: with the
     // `Value::Fn(_)` type-check above, that shouldn't fire today, but a
     // future change to `promote`/`spawn` won't silently panic).
-    let pid = crate::dist::spawn_or_get(name, || crate::process::spawn(heap, thunk, None))?;
+    let pid = crate::dist::spawn_or_get(name, || crate::process::spawn(heap, thunk))?;
     Ok(crate::process::pid_value(pid))
 }
 

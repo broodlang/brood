@@ -34,7 +34,28 @@
   (test "rounders reject a non-number"
     (assert-error (floor "x"))
     (assert-error (ceil :k))
-    (assert-error (round nil))))
+    (assert-error (round nil)))
+  (test "round-to keeps a fixed number of decimal places"
+    (assert= (round-to 3.14159 2) 3.14)
+    (assert= (round-to 0.015873015873 3) 0.016)
+    (assert= (round-to 2.5 0) 3))
+  (test "round-to handles both signs (halves away from zero on the scaled value)"
+    (assert= (round-to -3.14159 2) -3.14)
+    (assert= (round-to -2.5 0) -3)
+    (assert= (round-to 12.345 1) 12.3)))
+
+(describe "bench"
+  (test "returns its expression's value while timing it"
+    (assert= (bench "sum" (reduce + 0 (range 100))) 4950))
+  (test "the timed value is whatever the body evaluates to"
+    (assert= (bench "noop" [:a :b]) [:a :b])))
+
+(describe "now-ns (fine-grained timing)"
+  (test "is a positive integer"
+    (is (int? (now-ns)))
+    (is (> (now-ns) 0)))
+  (test "does not run backwards within a process"
+    (let (a (now-ns) b (now-ns)) (is (>= b a)))))
 
 (describe "sqrt and pow"
   (test "sqrt approximates the root and is always a Float"

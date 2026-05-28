@@ -57,6 +57,14 @@ fn special_name(s: Symbol) -> &'static str {
 pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
     let mut expr = expr;
     let mut env = env;
+    #[cfg(debug_assertions)]
+    if crate::process::in_green_process() && heap.env_is_poisoned(env) {
+        eprintln!(
+            "[entry] eval entered with POISONED env={:#x} gc_block={}",
+            env.0,
+            crate::process::gc_block_depth()
+        );
+    }
 
     // GC-block guard: increments `GC_BLOCK` for the lifetime of this `eval`
     // frame. The safepoint below collects only when this is the **outermost**
@@ -69,11 +77,8 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
     'tail: loop {
         match expr {
             Value::Sym(s) => {
-                // Tag the symbol's recorded source position on an unbound
-                // error — so e.g. a `(let (a 1) zzz)` whose `zzz` is unbound
-                // points at the *symbol's* line rather than the enclosing
-                // top-level form's start. The `or_form_pos` lookup runs only
-                // on the error path.
+                #[cfg(debug_assertions)]
+                heap.debug_walk_env_chain(env, s);
                 let expr_sym = expr;
                 return heap
                     .env_get(env, s)
@@ -110,21 +115,11 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
         //   • `expr` / `env` are passed as roots,
         //   • the dynamic stack and the explicit root stack are scanned by
         //     `collect` itself,
-        //   • the **resume slot** (ADR-039) is rooted via
-        //     `for_each_resume_root` — it holds the callee + argv the
-        //     supervisor will retry with, and without rooting them, a
-        //     collection here could free the closure the slot points at,
-        //     leaving the supervisor to call back into a reused slot
-        //     (silently "succeeding" instead of retrying — the bug that
-        //     made `(churn 50001)` give up after 4 retries instead of 11),
         //   • no other Rust frame holds an unrooted LOCAL transient (the
         //     `GC_BLOCK == 1` invariant — see `docs/memory-model.md`).
         // Cost on inner-eval iterations: one TLS read + compare (fail-fast).
         if crate::process::gc_block_depth() == 1 && heap.gc_due() {
-            let mut roots: SmallVec<[Value; 10]> = SmallVec::new();
-            roots.push(expr);
-            crate::process::for_each_resume_root(|v| roots.push(v));
-            heap.collect(&roots, &[env]);
+            heap.collect(&[expr], &[env]);
         }
         // Reduction-counted preemption: bound the work a process does before it
         // yields its worker (fairness — a CPU-bound process can't monopolise a
@@ -372,6 +367,8 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
 
         let callee = match head {
             Value::Sym(s) => {
+                #[cfg(debug_assertions)]
+                heap.debug_walk_env_chain(env, s);
                 // An unbound-symbol error from a *tail-position* call (the
                 // last form of a `do`/`let`/`letrec` body, set as `expr` via
                 // `continue 'tail`) exits this eval frame directly — no outer
@@ -439,49 +436,6 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     .map_err(|e| e.or_form_pos(heap, call_form));
             }
             Value::Fn(id) => {
-                // Supervisor checkpoint (ADR-039 step 2): record the call
-                // we're about to enter so, if a `LispError` later escapes
-                // the process, the per-process supervisor in
-                // `process::spawn`'s coroutine can re-invoke this same
-                // `(callee, argv)` — same iteration of the enclosing loop,
-                // state preserved.
-                //
-                // Three guards, in cheapness order:
-                //   1. `is_supervised()` — per-process flag (TLS read).
-                //      Default `None`; plain `(spawn …)` pays only one
-                //      load + branch per tail call. A process spawned
-                //      via `(supervise …)` has `Some(policy)` here.
-                //   2. `in_green_process()` — the root thread (REPL /
-                //      file runner) is never supervised, but the flag
-                //      doubles up the check so a future code path that
-                //      forgets the TLS reset on the root thread stays
-                //      correct.
-                //   3. `gc_block_depth() == 1` — only at the outermost
-                //      eval frame: the top-level loop running in the
-                //      spawn coroutine. Nested eval frames are inner
-                //      helpers (`(- n 1)` calls the prelude `-`, which
-                //      tail-recurses through `fold`, which calls more
-                //      `Fn`s) — and any of those overwriting the slot
-                //      many times per loop iteration would bury the
-                //      iteration value we actually want to retry. The
-                //      `gc_block_depth` counter tracks eval nesting and
-                //      is per-process (saved/restored around suspends),
-                //      so `== 1` is "this is the spawn entry's own tail
-                //      loop, not a helper running inside it".
-                if crate::process::is_supervised()
-                    && crate::process::in_green_process()
-                    && crate::process::gc_block_depth() == 1
-                {
-                    // The closure's `defn`-given name is the late-binding key:
-                    // on retry the supervisor looks it up in the global env so
-                    // a hot-reload `(def my-loop …)` between iterations takes
-                    // effect on the next attempt instead of re-running the old
-                    // (still throwing) closure handle. None for anonymous
-                    // `(fn …)`s — those can only retry by handle (no late
-                    // binding handle available).
-                    let name = heap.closure(id).name;
-                    crate::process::record_resume(cur_callee, name, &cur_argv);
-                }
                 let scope = bind_params(heap, id, &cur_argv)
                     .map_err(|e| e.or_form_pos(heap, call_form))?;
                 // Snapshot the body forms once. Each `heap.closure(id)` call

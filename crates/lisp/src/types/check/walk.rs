@@ -19,6 +19,15 @@ use super::ctx::Ctx;
 use super::guards::{expr_ty, guard_assertion, is_syntactic_keyword};
 use super::sigs::{arity_of, arity_str, curated_sig, is_globally_bound, sig_of};
 
+/// `symbol_name(s)` is a `String` allocation; we only need the spelling on
+/// the rare *error* paths (unbound / arity / type-disjoint). Wrap as a
+/// no-arg helper so the hot path (the whole `is_local` / `is_syntactic` /
+/// `is_globally_bound` / `curated_sig` short-circuit) skips it entirely.
+#[inline]
+fn name_of(s: Symbol) -> String {
+    value::symbol_name(s)
+}
+
 /// What the walk does at a head symbol. `Generic` is the fall-through for any
 /// head that isn't one of the recognised special forms / skip-body markers —
 /// the walk treats it as a normal call (resolves sig + arity, checks for
@@ -157,24 +166,30 @@ pub(super) fn check_into(
                 }
             }
         }
-        let name = value::symbol_name(s);
-
         // Resolve the callee's signature + arity (separate concerns; either
-        // may be available without the other).
-        let sig = sig_of(heap, &name);
-        let arity = arity_of(heap, &name);
+        // may be available without the other). Both take `Symbol` directly —
+        // no `symbol_name` round-trip — so the success path doesn't allocate.
+        let sig = sig_of(heap, s);
+        let arity = arity_of(heap, s);
         // Unbound-symbol diagnostic: warn only when the head is **truly not
         // resolvable** — not local, not a syntactic keyword, not in the global
         // env (which includes `Value::Macro`s like `test` / `assert=` that
         // `arity_of` doesn't describe), and not in the curated stdlib table.
         // The unbound check is independent of "is the sig informative" —
         // a macro is bound even though it has no value-type sig.
+        //
+        // `is_syntactic_keyword` is the one piece that still wants the
+        // spelling — but only when every other short-circuit has failed.
+        // Compute it lazily.
         if !ctx.is_local(s)
-            && !is_syntactic_keyword(&name)
-            && !is_globally_bound(heap, &name)
-            && curated_sig(&name).is_none()
+            && !is_globally_bound(heap, s)
+            && curated_sig(s).is_none()
+            && !is_syntactic_keyword(&name_of(s))
         {
-            out.push((heap.form_pos(form), format!("unbound symbol: {}", name)));
+            out.push((
+                heap.form_pos(form),
+                format!("unbound symbol: {}", name_of(s)),
+            ));
             // Still recurse into args below — they may carry their own issues.
         }
 
@@ -186,7 +201,7 @@ pub(super) fn check_into(
                     heap.form_pos(form),
                     format!(
                         "{}: wrong number of arguments — expected {}, got {}",
-                        name,
+                        name_of(s),
                         arity_str(a),
                         argc,
                     ),
@@ -215,7 +230,7 @@ pub(super) fn check_into(
                     if arg_ty.is_disjoint(param) {
                         let msg = format!(
                             "{}: argument {} expects {}, got {} ({})",
-                            name,
+                            name_of(s),
                             i + 1,
                             param,
                             arg_ty,

@@ -152,11 +152,10 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
             let items = list_items(heap, form)?;
             match items.first().copied() {
                 Some(Value::Sym(s)) => {
-                    let head = value::symbol_name(s);
-                    if head == "quote" {
+                    if value::symbol_is(s, "quote") {
                         return items.get(1).map(|&d| Ty::of_value(d));
                     }
-                    sig_of(heap, &head).map(|sig| sig.ret)
+                    sig_of(heap, s).map(|sig| sig.ret)
                 }
                 _ => None,
             }

@@ -381,13 +381,14 @@ mod tests {
         // next to its `Arity` in `builtins.rs`. If we ever drop the sig field
         // (or set it wrong), this catches it.
         let interp = crate::Interp::new();
-        let sig = primitive_sig(&interp.heap, "string-length")
+        let sig = primitive_sig(&interp.heap, crate::core::value::intern("string-length"))
             .expect("string-length is a primitive");
         assert_eq!(sig.params, vec![Ty::of(Tag::Str)]);
         assert_eq!(sig.ret, Ty::of(Tag::Int));
         // The "no useful info" lane: a variadic any-arg primitive (str) returns
         // a Sig that param-overlaps every input, so it never warns.
-        let any_sig = primitive_sig(&interp.heap, "str").expect("str is a primitive");
+        let any_sig = primitive_sig(&interp.heap, crate::core::value::intern("str"))
+            .expect("str is a primitive");
         assert_eq!(any_sig.rest, Some(Ty::ANY));
     }
 
