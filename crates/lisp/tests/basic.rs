@@ -1179,6 +1179,70 @@ fn supervisor_retries_last_iteration_with_same_args() {
     );
 }
 
+/// Supervisor + hot reload (ADR-039 × ADR-013). A worker throws on every
+/// iteration; the parent `def`s a fixed version between throws; the
+/// supervisor re-resolves the function name on its next retry and picks up
+/// the fix. Without name-based re-resolution, the supervisor would call the
+/// old throwing closure handle forever (up to the restart budget) — the
+/// whole point of integrating supervision with hot reload.
+#[test]
+fn supervisor_picks_up_hot_reloaded_definition_on_retry() {
+    brood::process::set_supervision(true);
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            brood::process::set_supervision(false);
+        }
+    }
+    let _g = Guard;
+
+    let mut interp = Interp::new();
+    interp
+        .eval_str(
+            "(def *hr-parent* (self))
+             (defn hr-worker (n)
+               (do (sleep 30) (throw \"buggy\")))
+             (spawn (hr-worker 0))",
+        )
+        .expect("setup");
+
+    // Let the supervisor catch the buggy version a few times. The first
+    // ~10 ms total of backoff (1+2+4+8 = 15 ms) ensures at least a couple
+    // of catches before our `def` lands.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // Hot-reload the worker: now it sends a heartbeat instead of throwing.
+    interp
+        .eval_str(
+            "(defn hr-worker (n)
+               (do (send *hr-parent* [:hr-beat n])
+                   (sleep 30)
+                   (hr-worker (+ n 1))))",
+        )
+        .expect("redef");
+
+    // The supervisor's next retry calls the new closure (resolved by name).
+    // Read two beats — the first proves the fix took, the second proves the
+    // re-resolved closure tail-recurses normally (it's the *new* fn, not the
+    // captured handle).
+    let first = interp
+        .eval_str("(receive ([:hr-beat n] (vector :beat n)) (after 3000 :timeout))")
+        .expect("receive 1");
+    let second = interp
+        .eval_str("(receive ([:hr-beat n] (vector :beat n)) (after 3000 :timeout))")
+        .expect("receive 2");
+    assert_eq!(
+        interp.print(first),
+        "[:beat 0]",
+        "first beat should arrive once the fix is live"
+    );
+    assert_eq!(
+        interp.print(second),
+        "[:beat 1]",
+        "second beat proves the new closure tail-recurses normally"
+    );
+}
+
 /// `gensym` must mint process-wide-unique symbols, including across threads — a
 /// thread-local counter would reset per worker and collide.
 #[test]

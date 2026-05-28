@@ -401,7 +401,8 @@ the `nest new` scaffolder.")
     "\n"
     "`docs/brood-for-claude.md` is the language reference geared for AI assistants\n"
     "— syntax, idioms, and the patterns that aren't shared with other Lisps. Read\n"
-    "it before generating Brood code.\n"
+    "it before generating Brood code. The `.claude/skills/writing-brood` skill\n"
+    "carries the short version and auto-loads when Claude Code edits `.blsp` files.\n"
     "\n"
     "## MCP integration\n"
     "\n"
@@ -431,9 +432,10 @@ the `nest new` scaffolder.")
 ;; skeleton: project.blsp + src/main.blsp + src/hello.blsp (where main `require`s
 ;; hello and calls into it) + a paired test file for each, so `cd foobar && nest
 ;; test` *and* `nest run` both pass immediately. Also drops CLAUDE.md +
-;; docs/brood-for-claude.md (the baked-in language guide) so the project is
-;; self-contained for AI-assisted editing. Errors on a bad name; an existing
-;; folder is reused (its scaffold files overwritten), not rejected.
+;; docs/brood-for-claude.md (the baked-in language guide) + a
+;; .claude/skills/writing-brood skill, so the project is self-contained for
+;; AI-assisted editing. Errors on a bad name; an existing folder is reused (its
+;; scaffold files overwritten), not rejected.
 (defn new-project (nm)
   "Scaffold a new project named `nm` (or `\".\"` for the current directory, taking the project name from the cwd's basename): a `main` + `hello` module pair with paired tests, a `project.blsp` manifest, and the baked-in language guide. Existing scaffold files are overwritten, not rejected. Backs `nest new`."
   ;; `nest new .` scaffolds into the current directory (cargo init's shape);
@@ -451,14 +453,17 @@ the `nest new` scaffolder.")
       (error "new: cwd has no basename — cannot derive a project name"))
     (let (src-dir (path-join nm "src")
           tests-dir (path-join nm "tests")
-          docs-dir (path-join nm "docs"))
+          docs-dir (path-join nm "docs")
+          skill-dir (path-join nm ".claude/skills/writing-brood"))
       (make-dir src-dir)
       (make-dir tests-dir)
       (make-dir docs-dir)
+      (make-dir skill-dir)
       (spit (path-join nm "project.blsp") (project--manifest-template actual-name))
       (spit (path-join nm "CLAUDE.md") (project--claude-md-template actual-name))
       (spit (path-join nm ".mcp.json") (project--mcp-json-template actual-name))
       (spit (path-join docs-dir "brood-for-claude.md") (%builtin-doc 'brood-for-claude))
+      (spit (path-join skill-dir "SKILL.md") (%builtin-doc 'writing-brood-skill))
       (spit (path-join src-dir "main.blsp") (project--main-template actual-name))
       (spit (path-join src-dir "hello.blsp") (project--hello-template actual-name))
       (spit (path-join tests-dir "main_test.blsp") (project--main-test-template actual-name))
@@ -472,6 +477,7 @@ the `nest new` scaffolder.")
       (println (str "  " nm "/CLAUDE.md"))
       (println (str "  " nm "/.mcp.json"))
       (println (str "  " nm "/docs/brood-for-claude.md"))
+      (println (str "  " nm "/.claude/skills/writing-brood/SKILL.md"))
       (println (str "  " nm "/src/main.blsp"))
       (println (str "  " nm "/src/hello.blsp"))
       (println (str "  " nm "/tests/main_test.blsp"))

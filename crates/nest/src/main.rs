@@ -314,7 +314,14 @@ fn cmd_run(interp: &mut Interp, file: Option<&str>, watch: &[String], args: &[St
             })
             .collect::<Vec<_>>()
             .join(" ");
-        format!("(require 'reload) {}", calls)
+        // `--watch` implies dev/hot-reload mode (ADR-039): turn the per-process
+        // supervisor on so a save that introduces a runtime error (an unbound
+        // symbol, an arity mismatch, an actual throw) catches at the process
+        // boundary instead of killing the long-running loop. The next reload
+        // — once the user types the fix — gets picked up by name on the
+        // supervisor's retry (`std/scheduler.rs::supervise`). Without --watch,
+        // `nest run` runs as a normal script: let-it-crash, exit on throw.
+        format!("(set-supervision! true) (require 'reload) {}", calls)
     };
 
     let code = match file {

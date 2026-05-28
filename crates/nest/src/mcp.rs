@@ -772,7 +772,7 @@ mod tests {
     fn tools_list_returns_the_baked_std_catalogue() {
         // Step 3 ships `std/mcp.blsp` as a baked-in `EMBEDDED_MODULES` entry, so
         // `(require 'mcp) (mcp-tools)` succeeds in a fresh `Interp` and the
-        // dispatcher exposes the eight initial tools without any project setup.
+        // dispatcher exposes the initial tool catalogue without any project setup.
         let mut interp = Interp::new();
         let resp = round_trip(
             &mut interp,
@@ -783,6 +783,7 @@ mod tests {
         // The full v0 surface — six live, three documented stubs.
         for expected in &[
             "eval", "load", "lookup", "macroexpand", "format", "check", "run-tests", "processes",
+            "callers",
         ] {
             assert!(names.contains(expected), "missing {expected:?} in {names:?}");
         }

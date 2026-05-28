@@ -162,6 +162,46 @@ impl FreeLists {
     }
 }
 
+/// Use-after-GC tripwire bits, one per LOCAL slot in each slab. **Debug-only**:
+/// the field on `Heap` is `#[cfg(debug_assertions)]`, and every accessor that
+/// consults this drops out entirely in release. Set by [`Heap::sweep`] when a
+/// slot is freed, cleared by `new_env` / the `alloc_slot!` reuse paths when a
+/// slot is taken back out of the free list. A `debug_assert!` in each handle
+/// accessor checks the bit so a *use of a dangling handle* panics at the
+/// instant of the bad deref — pointing the backtrace at the actual offender,
+/// not at the eventual symptom (e.g. an "unbound symbol" arising later when
+/// the reclaimed env's parent chain is read).
+#[cfg(debug_assertions)]
+#[derive(Default)]
+struct PoisonBits {
+    pairs: Vec<bool>,
+    vectors: Vec<bool>,
+    maps: Vec<bool>,
+    strings: Vec<bool>,
+    closures: Vec<bool>,
+    envs: Vec<bool>,
+}
+
+#[cfg(debug_assertions)]
+impl PoisonBits {
+    /// Mark/clear one slot — `poisoned == true` after sweep frees it, `false`
+    /// when an allocation reuses it. The Vec auto-grows so callers don't have
+    /// to size it eagerly (sweep resizes once before its loop; alloc paths
+    /// just write the bit they own).
+    fn set(bits: &mut Vec<bool>, idx: usize, poisoned: bool) {
+        if idx >= bits.len() {
+            bits.resize(idx + 1, false);
+        }
+        bits[idx] = poisoned;
+    }
+
+    /// Is `idx` currently poisoned? Out-of-range answers `false` — a slot we
+    /// never sized for can't have been freed by sweep.
+    fn is(bits: &[bool], idx: usize) -> bool {
+        bits.get(idx).copied().unwrap_or(false)
+    }
+}
+
 /// The immutable, read-only prelude region (closures, code values, the
 /// builtins). Built once, then shared by `Arc` into every runtime.
 #[derive(Default)]
@@ -323,6 +363,17 @@ pub struct Heap {
     /// sweep, drained by `alloc_*` before extending the slab. PRELUDE/RUNTIME
     /// (append-only) have no equivalent.
     local_free: FreeLists,
+    /// Debug-build use-after-GC tripwire: a bit per LOCAL slot that's set when
+    /// sweep frees the slot and cleared when an `alloc_*` / `new_env` reuses
+    /// it. Every handle accessor (`pair`, `vector`, `closure`, `env_frame`, …)
+    /// `debug_assert!`s its slot isn't poisoned, so a dangling handle panics
+    /// at the *moment of use* with a backtrace pointing at the offender —
+    /// instead of returning silently-stale data that surfaces as an "unbound
+    /// symbol" or wrong-arity error many call frames later
+    /// (`docs/claude-demo-findings.md` § Scheduler race). Skipped in release
+    /// (`#[cfg(debug_assertions)]`) so there's zero hot-path cost shipped.
+    #[cfg(debug_assertions)]
+    poison: PoisonBits,
     prelude: Arc<SharedCode>,
     runtime: Arc<RuntimeCode>,
     /// This process's global scope. For a real runtime this is [`EnvId::GLOBAL`]
@@ -384,6 +435,10 @@ macro_rules! alloc_slot {
     ($self:expr, $field:ident, $value:expr) => {{
         if let Some(idx) = $self.local_free.$field.pop() {
             $self.local.$field[idx as usize] = $value;
+            // Clear the use-after-GC tripwire — sweep set it when this slot
+            // was freed; reusing it makes the slot live again. Debug only.
+            #[cfg(debug_assertions)]
+            PoisonBits::set(&mut $self.poison.$field, idx as usize, false);
             idx as usize
         } else {
             let idx = $self.local.$field.len();
@@ -403,6 +458,8 @@ impl Heap {
         Heap {
             local: Slabs::default(),
             local_free: FreeLists::default(),
+            #[cfg(debug_assertions)]
+            poison: PoisonBits::default(),
             prelude: Arc::default(),
             runtime: Arc::default(),
             global: EnvId::local(0),
@@ -422,6 +479,8 @@ impl Heap {
         Heap {
             local: Slabs::default(),
             local_free: FreeLists::default(),
+            #[cfg(debug_assertions)]
+            poison: PoisonBits::default(),
             prelude,
             runtime,
             global: EnvId::local(0),
@@ -485,9 +544,21 @@ impl Heap {
             for (_, d) in c.optionals.iter_mut() {
                 *d = to_prelude(*d);
             }
-            debug_assert!(
+            // Hard assert (not debug_assert!) — `slabs.envs` is wiped below,
+            // so a closure capturing a non-None env would survive into the
+            // frozen prelude with a dangling env handle, and the first call
+            // would silently index past the empty slab. We want the same
+            // failure in release: a clear panic at freeze time, not corrupt
+            // state at runtime. The message names the closure so the prelude
+            // line that produced it is easy to find.
+            assert!(
                 c.env.is_none(),
-                "shared closures must capture the global env"
+                "shared closures must capture the global env (closure {:?} \
+                 has env={:?}); the prelude tried to freeze a closure with a \
+                 captured local frame — most likely a `defn`/`def` whose body \
+                 closes over a let-bound name instead of a global",
+                c.name.map(crate::core::value::symbol_name),
+                c.env,
             );
         }
         slabs.envs = Vec::new(); // the prelude region has no env frames
@@ -730,6 +801,9 @@ impl Heap {
             let slot = &mut self.local.strings[idx as usize];
             slot.clear();
             slot.push_str(s);
+            // Clear the use-after-GC tripwire (see `alloc_slot!`).
+            #[cfg(debug_assertions)]
+            PoisonBits::set(&mut self.poison.strings, idx as usize, false);
             return Value::Str(StrId::local(idx as usize));
         }
         let idx = self.local.strings.len();
@@ -896,7 +970,17 @@ impl Heap {
 
     pub fn pair(&self, id: PairId) -> (Value, Value) {
         match id.region() {
-            LOCAL => self.local.pairs[id.index()],
+            LOCAL => {
+                #[cfg(debug_assertions)]
+                debug_assert!(
+                    !PoisonBits::is(&self.poison.pairs, id.index()),
+                    "use-after-GC: pair() on freed LOCAL pair slot {} \
+                     (handle {:#x}).",
+                    id.index(),
+                    id.0
+                );
+                self.local.pairs[id.index()]
+            }
             PRELUDE => self.prelude.slabs.pairs[id.index()],
             RUNTIME => *self
                 .runtime
@@ -1026,8 +1110,32 @@ impl Heap {
     // the global is instead a real local root frame with no parent.)
 
     fn env_frame(&self, env: EnvId) -> &EnvFrame {
+        // `EnvId::GLOBAL` is a sentinel (region bits `0b11`) — there is no
+        // frame to return; the global scope routes through
+        // `runtime.globals_read()` instead. Callers MUST short-circuit
+        // GLOBAL before reaching here (every walker does — see `env_get`
+        // line 1086). A clear assert when that invariant slips, rather
+        // than the `_ => unreachable!()` arm catching it via the
+        // undefined-region byte.
+        assert!(
+            env != EnvId::GLOBAL,
+            "env_frame called with EnvId::GLOBAL — global scope has no frame; \
+             use env_get / globals_read instead",
+        );
         match env.region() {
-            LOCAL => &self.local.envs[env.index()],
+            LOCAL => {
+                #[cfg(debug_assertions)]
+                debug_assert!(
+                    !PoisonBits::is(&self.poison.envs, env.index()),
+                    "use-after-GC: env_frame on freed LOCAL env slot {} \
+                     (handle {:#x}). Sweep poisoned this slot; some caller \
+                     held the EnvId across a GC safepoint without rooting it. \
+                     See docs/claude-demo-findings.md § Scheduler race.",
+                    env.index(),
+                    env.0
+                );
+                &self.local.envs[env.index()]
+            }
             RUNTIME => self
                 .runtime
                 .code
@@ -1058,6 +1166,9 @@ impl Heap {
             let slot = &mut self.local.envs[idx as usize];
             slot.vars.clear();
             slot.parent = parent;
+            // Clear the use-after-GC tripwire (see `alloc_slot!`).
+            #[cfg(debug_assertions)]
+            PoisonBits::set(&mut self.poison.envs, idx as usize, false);
             return EnvId::local(idx as usize);
         }
         let idx = self.local.envs.len();
@@ -1379,6 +1490,25 @@ impl Heap {
     /// from dead, not from previously-free).
     fn sweep(&mut self, marks: &Marks) {
         self.local_free.clear();
+        // Reset the use-after-GC tripwire: poisoned[i] starts equal to "slot
+        // i was just freed" — set inside each loop below. Live slots clear to
+        // false; reused-then-freed slots flip true. Debug builds only — the
+        // `poison` field doesn't exist in release.
+        #[cfg(debug_assertions)]
+        {
+            self.poison.pairs.clear();
+            self.poison.pairs.resize(self.local.pairs.len(), false);
+            self.poison.vectors.clear();
+            self.poison.vectors.resize(self.local.vectors.len(), false);
+            self.poison.maps.clear();
+            self.poison.maps.resize(self.local.maps.len(), false);
+            self.poison.strings.clear();
+            self.poison.strings.resize(self.local.strings.len(), false);
+            self.poison.closures.clear();
+            self.poison.closures.resize(self.local.closures.len(), false);
+            self.poison.envs.clear();
+            self.poison.envs.resize(self.local.envs.len(), false);
+        }
 
         for i in 0..self.local.pairs.len() {
             if !marks.is_pair_marked(i) {
@@ -1386,6 +1516,10 @@ impl Heap {
                 // form_pos is keyed by pair index; drop the entry since the
                 // slot will be reused for an unrelated pair.
                 self.form_pos.remove(&i);
+                #[cfg(debug_assertions)]
+                {
+                    self.poison.pairs[i] = true;
+                }
             }
         }
         for i in 0..self.local.vectors.len() {
@@ -1394,12 +1528,20 @@ impl Heap {
                 // Release the dead `Vec<Value>`'s buffer; alloc_vector replaces
                 // the slot wholesale on reuse, so we don't need an empty marker.
                 self.local.vectors[i] = Vec::new();
+                #[cfg(debug_assertions)]
+                {
+                    self.poison.vectors[i] = true;
+                }
             }
         }
         for i in 0..self.local.maps.len() {
             if !marks.is_map_marked(i) {
                 self.local_free.maps.push(i as u32);
                 self.local.maps[i] = Vec::new();
+                #[cfg(debug_assertions)]
+                {
+                    self.poison.maps[i] = true;
+                }
             }
         }
         for i in 0..self.local.strings.len() {
@@ -1407,6 +1549,10 @@ impl Heap {
                 self.local_free.strings.push(i as u32);
                 // Release the dead `String` buffer; alloc_string replaces.
                 self.local.strings[i] = String::new();
+                #[cfg(debug_assertions)]
+                {
+                    self.poison.strings[i] = true;
+                }
             }
         }
         for i in 0..self.local.closures.len() {
@@ -1416,6 +1562,10 @@ impl Heap {
                 // derives `Default`, so adding a field to it doesn't risk a
                 // sweep-bug from a missed initialiser here.
                 self.local.closures[i] = Closure::default();
+                #[cfg(debug_assertions)]
+                {
+                    self.poison.closures[i] = true;
+                }
             }
         }
         for i in 0..self.local.envs.len() {
@@ -1424,6 +1574,10 @@ impl Heap {
                 let slot = &mut self.local.envs[i];
                 slot.vars.clear();
                 slot.parent = None;
+                #[cfg(debug_assertions)]
+                {
+                    self.poison.envs[i] = true;
+                }
             }
         }
     }

@@ -200,6 +200,13 @@ impl EnvId {
     /// (`RuntimeCode::globals`). A local frame chain bottoms out here, and a
     /// top-level closure captures it symbolically (`Closure.env == None`), so a
     /// shared closure resolves globals against whichever process runs it.
+    ///
+    /// **Encoding.** `u32::MAX` sets both region bits to `0b11`, an otherwise
+    /// undefined region — `LOCAL` / `PRELUDE` / `RUNTIME` are `0b00` / `0b01`
+    /// / `0b10`. This is the marker `Heap::env_frame` and the env walkers
+    /// short-circuit on (`env == EnvId::GLOBAL`) before touching the region
+    /// dispatch; a stray dispatch on a GLOBAL panics with a clear message
+    /// (see `Heap::env_frame`), not the `_ => unreachable!()` fall-through.
     pub const GLOBAL: EnvId = EnvId(u32::MAX);
 }
 

@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 use lsp_server::{Connection, ErrorCode, Message, Notification as ServerNotification, Request, RequestId, Response};
 use lsp_types::notification::{
-    DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument,
+    DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument,
     Notification as NotificationTrait, PublishDiagnostics,
 };
 use lsp_types::request::{
@@ -43,6 +43,7 @@ use lsp_types::{
 };
 
 use brood::core::value::Value;
+use brood::syntax::scope::{BindingKind, Resolution};
 use brood::syntax::{cst, reader, scope};
 use brood::types::check::check_file;
 use brood::Interp;
@@ -58,6 +59,7 @@ mod rename;
 mod semantic_tokens;
 mod signature;
 mod symbols;
+mod workspace;
 
 use line_index::LineIndex;
 
@@ -298,11 +300,30 @@ fn handle_request(docs: &Documents, interp: &mut Interp, req: Request) -> Respon
             };
             let pos = p.text_document_position;
             let uri = pos.text_document.uri;
-            let result = docs.get(&uri).map(|doc| {
-                let a = &doc.analysis;
-                let offset = a.line_index.offset(&doc.text, pos.position);
-                references::references(&uri, &doc.text, &a.cst, &a.scope, &a.line_index, offset)
-            });
+            // A local → single-file (its own scope). A global / free name → the
+            // whole project (flat module model, ADR-019), via `workspace`.
+            let result = match docs.get(&uri) {
+                Some(doc) => {
+                    let a = &doc.analysis;
+                    let offset = a.line_index.offset(&doc.text, pos.position);
+                    Some(match a.scope.resolve_at(&a.cst, &doc.text, offset) {
+                        Resolution::Defined { kind: BindingKind::Local, .. } => references::references(
+                            &uri, &doc.text, &a.cst, &a.scope, &a.line_index, offset,
+                        ),
+                        Resolution::Defined { .. } | Resolution::Free => {
+                            match workspace::symbol_at(&a.cst, &doc.text, offset) {
+                                Some(name) => {
+                                    let name = name.to_string();
+                                    workspace::references(interp, docs, &uri, &name)
+                                }
+                                None => Vec::new(),
+                            }
+                        }
+                        Resolution::NotASymbol => Vec::new(),
+                    })
+                }
+                None => None,
+            };
             Response::new_ok(id, result)
         }
         DocumentHighlightRequest::METHOD => {
@@ -338,13 +359,29 @@ fn handle_request(docs: &Documents, interp: &mut Interp, req: Request) -> Respon
             };
             let pos = p.text_document_position;
             let uri = pos.text_document.uri;
-            let result = docs.get(&uri).and_then(|doc| {
-                let a = &doc.analysis;
-                let offset = a.line_index.offset(&doc.text, pos.position);
-                rename::rename(
-                    &uri, &doc.text, &a.cst, &a.scope, &a.line_index, offset, &p.new_name,
-                )
-            });
+            // Local → single-file edit; global → a project-wide `WorkspaceEdit`.
+            let result = match docs.get(&uri) {
+                Some(doc) => {
+                    let a = &doc.analysis;
+                    let offset = a.line_index.offset(&doc.text, pos.position);
+                    match a.scope.resolve_at(&a.cst, &doc.text, offset) {
+                        Resolution::Defined { kind: BindingKind::Local, .. } => rename::rename(
+                            &uri, &doc.text, &a.cst, &a.scope, &a.line_index, offset, &p.new_name,
+                        ),
+                        Resolution::Defined { .. } | Resolution::Free => {
+                            match workspace::symbol_at(&a.cst, &doc.text, offset) {
+                                Some(name) => {
+                                    let name = name.to_string();
+                                    workspace::rename(interp, docs, &uri, &name, &p.new_name)
+                                }
+                                None => None,
+                            }
+                        }
+                        Resolution::NotASymbol => None,
+                    }
+                }
+                None => None,
+            };
             Response::new_ok(id, result)
         }
         SemanticTokensFullRequest::METHOD => {
@@ -442,7 +479,30 @@ fn handle_notification(
             // Clear diagnostics for the closed document.
             send_diagnostics(connection, &uri, Vec::new(), None)?;
         }
-        _ => {} // initialized, didSave, didChangeConfiguration, … — nothing to do yet
+        DidSaveTextDocument::METHOD => {
+            // A `project.blsp` save invalidates the cached project bootstrap:
+            // the user just edited the project's manifest (modules, deps,
+            // entry, …) and a hover / check from now on must see the new
+            // state. Evicting the root from `bootstrapped` makes the next
+            // `publish` re-run `bootstrap_project`, which re-evaluates the
+            // project's source set into the live `Interp`. Per-source-file
+            // saves don't need this — the buffer text already drives publish.
+            let Some(p) = params::<lsp_types::DidSaveTextDocumentParams>(not) else {
+                return Ok(());
+            };
+            let uri = p.text_document.uri;
+            if let Some(path) = uri_to_path(&uri) {
+                if path.file_name().and_then(|n| n.to_str()) == Some("project.blsp") {
+                    if let Some(root) = path.parent() {
+                        bootstrapped.remove(root);
+                    }
+                }
+            }
+            // Re-publish diagnostics against the (possibly re-bootstrapped)
+            // image so the user sees the effect of their save right away.
+            publish(connection, docs, interp, bootstrapped, &uri)?;
+        }
+        _ => {} // initialized, didChangeConfiguration, … — nothing to do yet
     }
     Ok(())
 }

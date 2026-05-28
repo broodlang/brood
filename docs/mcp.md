@@ -148,7 +148,7 @@ The contract for every operation:
 
 ## The tool surface (Brood, in `std/mcp.blsp`)
 
-Eight tools, each earning its place by needing the runtime to answer —
+Nine tools, each earning its place by needing the runtime to answer —
 anything a plain file read or grep would answer is **not** here, because
 Claude Code already has those:
 
@@ -162,6 +162,7 @@ Claude Code already has those:
 | `check`       | `{file?}`                   | `[{file, line, col, message}]`         | Advisory type-check, structured |
 | `format`      | `{file?, source?}`          | `{formatted}`                          | Idempotent reformatter |
 | `processes`   | `{}`                        | `[{pid, status, ...}]`                 | After `spawn`, list live green processes |
+| `callers`     | `{name}`                    | `{references: [{file, line, col}]}`    | Cross-file find-references — the *use* sites of a global (complements `lookup`'s def site) |
 
 Each tool is a `defn` in `std/mcp.blsp`; `(mcp-tools)` returns the catalogue
 the dispatcher reads at startup. **A project can extend the surface** by
@@ -233,6 +234,15 @@ is mechanical.
 that a direct sync JSON-RPC loop stays under a few hundred lines, matching the
 `!Sync` `Heap` constraint with no `tokio`. (`rmcp` exists; the dep + async
 cost outweighs the saving here, same calculus as ADR-025 over `tower-lsp`.)
+
+**Transport — newline-delimited JSON, not LSP framing.** The MCP stdio transport
+frames each JSON-RPC message as one line of compact JSON terminated by `\n` (no
+embedded newlines), **not** the `Content-Length` headers LSP uses. This matters:
+`brood-lsp` and `nest mcp` look alike (both sync JSON-RPC over stdio) but their
+wire framing differs, and using the LSP framing here silently breaks every real
+MCP client — the `initialize` handshake never completes because the client's
+newline-framed bytes aren't parsed. (`read_message`/`write_message` in
+`crates/nest/src/mcp.rs`; regression-tested.)
 
 ## The `.mcp.json` scaffold
 

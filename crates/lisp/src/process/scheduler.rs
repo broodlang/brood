@@ -145,12 +145,24 @@ pub(super) fn gc_block_set(n: u32) {
 // pattern `GC_BLOCK` uses) keeps each process's slot isolated.
 
 /// What the supervisor needs to re-invoke the most recent iteration. The
-/// eval loop pushes `(callee, argv.clone())` here on every tail-call entry
-/// (`Value::Fn(id)` branch, just before `continue 'tail`). The supervisor
-/// in the coroutine body reads it via [`take_resume`] when an error escapes.
+/// eval loop pushes `(callee, name, argv.clone())` here on every tail-call
+/// entry (`Value::Fn(id)` branch, just before `continue 'tail`). The
+/// supervisor in the coroutine body reads it via [`take_resume`] when an
+/// error escapes.
+///
+/// `name` is the closure's `defn`-given name (when set). On retry, the
+/// supervisor re-resolves it in the global env so a user's hot reload
+/// (`(def my-loop …)` between iterations) takes effect on the retry —
+/// without this, the supervisor would re-invoke the *old, throwing*
+/// closure handle stored in `callee`, defeating the whole point of
+/// integrating supervision with hot reload (ADR-039 × ADR-013). Falls
+/// back to the stored handle if the name doesn't resolve to a `Fn`
+/// anymore (rare — only if the user `def`'d it to something
+/// non-callable mid-flight).
 #[derive(Clone)]
 pub(crate) struct ResumeSlot {
     pub(crate) callee: crate::core::value::Value,
+    pub(crate) name: Option<crate::core::value::Symbol>,
     pub(crate) argv: smallvec::SmallVec<[crate::core::value::Value; 8]>,
 }
 
@@ -163,25 +175,38 @@ thread_local! {
     static RESUME_SLOT: RefCell<Option<ResumeSlot>> = const { RefCell::new(None) };
 }
 
-/// Eval-loop hook: record `(callee, argv)` as the current iteration's
+/// Eval-loop hook: record `(callee, name, argv)` as the current iteration's
 /// resume point. Called by `eval::eval`'s `Value::Fn(id)` branch right
 /// before `continue 'tail`. Reuses the slot's `SmallVec` capacity when
 /// possible (clear + extend_from_slice) so a tight tail-loop pays one
 /// `Value` overwrite + one memcpy per iteration, not a fresh allocation.
+///
+/// `name` is the closure's `defn`-given name (`heap.closure(id).name`);
+/// the supervisor re-resolves it on retry so a hot reload picks up the new
+/// definition (see [`ResumeSlot`]).
 #[inline]
-pub fn record_resume(callee: crate::core::value::Value, argv: &[crate::core::value::Value]) {
+pub fn record_resume(
+    callee: crate::core::value::Value,
+    name: Option<crate::core::value::Symbol>,
+    argv: &[crate::core::value::Value],
+) {
     RESUME_SLOT.with(|s| {
         let mut s = s.borrow_mut();
         match s.as_mut() {
             Some(slot) => {
                 slot.callee = callee;
+                slot.name = name;
                 slot.argv.clear();
                 slot.argv.extend_from_slice(argv);
             }
             None => {
                 let mut new_argv = smallvec::SmallVec::new();
                 new_argv.extend_from_slice(argv);
-                *s = Some(ResumeSlot { callee, argv: new_argv });
+                *s = Some(ResumeSlot {
+                    callee,
+                    name,
+                    argv: new_argv,
+                });
             }
         }
     });
@@ -659,7 +684,25 @@ fn supervise(heap: &mut Heap, pid: u64, entry: Value) -> Message {
                 // the worst-case recovery.
                 match take_resume() {
                     Some(slot) => {
+                        // Hot-reload integration (ADR-039 × ADR-013): if the
+                        // closure had a `defn`-given name, re-resolve it in
+                        // the global env. The user may have `(def name …)`'d
+                        // a fix between throws — that's the *entire point*
+                        // of supervision being on. Without this lookup the
+                        // supervisor would keep calling the old, throwing
+                        // closure handle stored in `slot.callee` forever
+                        // (up to MAX_RESTARTS), defeating the hot reload.
+                        // Fall back to the stored handle if the name no
+                        // longer resolves to a `Fn` (someone `def`'d it to
+                        // something non-callable, or `undef`'d it).
                         callee = slot.callee;
+                        if let Some(name) = slot.name {
+                            if let Some(latest) = heap.env_get(EnvId::GLOBAL, name) {
+                                if matches!(latest, Value::Fn(_) | Value::Native(_)) {
+                                    callee = latest;
+                                }
+                            }
+                        }
                         argv.clear();
                         argv.extend_from_slice(&slot.argv);
                     }
@@ -686,13 +729,25 @@ pub fn self_pid() -> u64 {
 /// when `CURRENT` has a yielder, i.e. we entered through a coroutine. Used
 /// by the eval-time `unbound` raise to attach a scheduler-race hint
 /// (the under-load failure mode `docs/claude-demo-findings.md` flagged —
-/// concurrent prelude lookups racing). Never panics; returns `false` if
-/// `CURRENT` is unset.
+/// concurrent prelude lookups racing) **and** by the supervisor's
+/// `record_resume` guard in the eval loop (ADR-039) — so this is called
+/// from inside eval on every tail call.
+///
+/// Uses `try_borrow` rather than `borrow`: every site that mutates `CURRENT`
+/// in this crate evaluates its RHS with no calls back into `in_green_process`
+/// today (Arc::clone, struct construction — see the `borrow_mut` audit in
+/// docs/devlog 2026-05-28), so the `try_borrow` should always succeed; but
+/// if a future change adds a path where it doesn't, the supervisor's
+/// hot-path guard would otherwise panic with "RefCell already borrowed"
+/// halfway through a tail call. Returning `false` on a contended borrow
+/// degrades gracefully — the recovery slot just isn't written for that one
+/// call. Never panics; returns `false` if `CURRENT` is unset *or* if a
+/// borrow is held.
 pub fn in_green_process() -> bool {
     CURRENT.with(|c| {
-        c.borrow()
-            .as_ref()
-            .map(|ctx| ctx.yielder.is_some())
+        c.try_borrow()
+            .ok()
+            .and_then(|b| b.as_ref().map(|ctx| ctx.yielder.is_some()))
             .unwrap_or(false)
     })
 }

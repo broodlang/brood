@@ -151,6 +151,23 @@ list renders as JSON `[]` rather than `null` — agents shouldn't have
 to disambiguate \"no processes\" from \"missing field\"."
   {:processes (or (list-processes) [])})
 
+(defn mcp-callers-tool (args)
+  "`callers` — every reference to the global `:name` across the project's source
+and test files, as `{:references [{:file :line :col} ...]}` (1-based line/col).
+Cross-file under the flat module model (ADR-019): a global is one binding
+everywhere, so this is the union over every project file; locals that merely
+share the spelling are excluded. Source-occurrence based (ADR-031) — references
+synthesised by macros aren't included. Complements `lookup` (which gives the
+*definition* site): this gives the *use* sites."
+  (let (name (get args :name))
+    (when (not (string? name))
+      (throw "callers: :name must be a string"))
+    {:references
+     (mapcat (fn (f)
+               (map (fn (lc) {:file f :line (first lc) :col (second lc)})
+                 (references-in-source name (slurp f))))
+       (project--all-files *project-root*))}))
+
 ;; ---- catalogue -------------------------------------------------------------
 
 (defn mcp-tools ()
@@ -160,7 +177,8 @@ its own list that conses additional entries onto this one — `def` rebinds
 globals (ADR-013), so the dispatcher sees the project's version on its next
 fetch.
 
-All eight tools work today. (Earlier drafts shipped `check` / `run-tests` /
+All nine tools work today (the eight v0 tools plus `callers`, the cross-file
+find-references tool). (Earlier drafts shipped `check` / `run-tests` /
 `processes` as documented stubs; their step-1c-a / 1c-b / 1c-d Brood-side
 prereqs landed and the stubs were replaced with the real implementations.)"
   (list
@@ -206,7 +224,13 @@ prereqs landed and the stubs were replaced with the real implementations.)"
     {:name "processes"
      :description "List live green processes."
      :schema {:type "object" :properties {}}
-     :handler mcp-processes-tool}))
+     :handler mcp-processes-tool}
+    {:name "callers"
+     :description "Find every reference to a global name across the project's source and test files (cross-file find-references). Returns {:references [{:file :line :col} ...]}. Complements `lookup`, which gives the definition site."
+     :schema {:type "object"
+              :properties {:name {:type "string" :description "The global name to find references to (no leading quote)"}}
+              :required ["name"]}
+     :handler mcp-callers-tool}))
 
 ;; ---- project-defined extensions (step 5b) ---------------------------------
 ;; If the project root has its own `mcp.blsp`, load it now so it can:

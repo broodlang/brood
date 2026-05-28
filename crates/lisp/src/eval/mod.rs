@@ -469,19 +469,33 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     && crate::process::in_green_process()
                     && crate::process::gc_block_depth() == 1
                 {
-                    crate::process::record_resume(cur_callee, &cur_argv);
+                    // The closure's `defn`-given name is the late-binding key:
+                    // on retry the supervisor looks it up in the global env so
+                    // a hot-reload `(def my-loop …)` between iterations takes
+                    // effect on the next attempt instead of re-running the old
+                    // (still throwing) closure handle. None for anonymous
+                    // `(fn …)`s — those can only retry by handle (no late
+                    // binding handle available).
+                    let name = heap.closure(id).name;
+                    crate::process::record_resume(cur_callee, name, &cur_argv);
                 }
                 let scope = bind_params(heap, id, &cur_argv)
                     .map_err(|e| e.or_form_pos(heap, call_form))?;
-                let body_len = heap.closure(id).body.len();
-                if body_len == 0 {
+                // Snapshot the body forms once. Each `heap.closure(id)` call
+                // is a region-dispatch + slab index; iterating the body four
+                // times (len + per-form read + tail-form read) repeated those
+                // dispatches per call. A `SmallVec` of `Value` (each `Copy`)
+                // is one slab read + a stack-resident slice — closures are
+                // immutable, so the snapshot stays correct for this iteration.
+                let body: SmallVec<[Value; 4]> = SmallVec::from_slice(&heap.closure(id).body);
+                if body.is_empty() {
                     return Ok(Value::Nil);
                 }
-                for i in 0..body_len - 1 {
-                    let form = heap.closure(id).body[i];
+                let (last, init) = body.split_last().expect("checked non-empty");
+                for &form in init {
                     eval(heap, form, scope).map_err(|e| e.or_form_pos(heap, form))?;
                 }
-                expr = heap.closure(id).body[body_len - 1];
+                expr = *last;
                 env = scope;
                 continue 'tail;
             }
@@ -509,10 +523,11 @@ pub fn apply(heap: &mut Heap, callee: Value, argv: &[Value], env: EnvId) -> Lisp
 
 pub fn apply_closure(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> LispResult {
     let scope = bind_params(heap, cl, argv)?;
-    let body_len = heap.closure(cl).body.len();
+    // Snapshot the body once — see the eval-loop equivalent above for the
+    // rationale (avoid a region-dispatch + slab index per body form).
+    let body: SmallVec<[Value; 4]> = SmallVec::from_slice(&heap.closure(cl).body);
     let mut result = Value::Nil;
-    for i in 0..body_len {
-        let form = heap.closure(cl).body[i];
+    for &form in &body {
         // Same as the closure body branch in `eval`: tag the body form's
         // position on any error so the diagnostic points at the failing line.
         result = eval(heap, form, scope).map_err(|e| e.or_form_pos(heap, form))?;

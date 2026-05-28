@@ -1,12 +1,18 @@
 # Supervised processes + resume checkpoints
 
-> Status: **implemented as opt-in.** ADR-039. The supervisor, resume slot,
-> exponential backoff, and circuit breaker all landed (2026-05-28); the
-> mode gate landed alongside them. The supervisor is **off by default**:
-> a thrown `LispError` in a spawned process exits immediately and monitors
-> fire `[:down …]`, the Erlang let-it-crash baseline. Turn it on with
-> `(set-supervision! true)` or `BROOD_SUPERVISE=1` — that's the dev /
+> Status: **implemented as opt-in, hot-reload-integrated.** ADR-039. The
+> supervisor, resume slot, exponential backoff, circuit breaker, and the
+> mode gate all landed (2026-05-28). The supervisor is **off by default**
+> — a thrown `LispError` in a spawned process exits immediately and
+> monitors fire `[:down …]`, the Erlang let-it-crash baseline. Turn it on
+> with `(set-supervision! true)` or `BROOD_SUPERVISE=1` — that's the dev /
 > hot-reload mode.
+>
+> **Hot reload integration**: on retry, the supervisor re-resolves the
+> closure by its `defn`-given name (when it has one) — so a
+> `(def my-loop …)` between throws lands on the very next attempt. The
+> resume slot is a GC root, so a collection between `record_resume` and
+> the supervisor's `take_resume` won't free the slot's contents.
 >
 > Still pending: a CLI / `nest` policy for when the gate flips on (so
 > `nest dev` or `brood` REPL gives supervision automatically, while

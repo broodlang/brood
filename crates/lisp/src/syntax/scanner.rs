@@ -65,7 +65,18 @@ impl<'a> Scanner<'a> {
 
     #[inline]
     pub fn peek(&self) -> Option<char> {
-        self.src[self.pos..].chars().next()
+        // ASCII fast-path: most source bytes are ASCII (every delimiter,
+        // every whitespace, every keyword, every prelude line), so save the
+        // UTF-8 decode in the common case. A naive `src[pos..].chars().next()`
+        // walks 1–4 bytes plus a branch even for `< 0x80` — measurable in a
+        // parser-heavy bench (`parse_prelude` lost ~1.7× per byte when we
+        // moved from `Vec<char>` to byte offsets without this branch).
+        let b = *self.src.as_bytes().get(self.pos)?;
+        if b < 0x80 {
+            Some(b as char)
+        } else {
+            self.src[self.pos..].chars().next()
+        }
     }
 
     /// The next-but-one char (i.e. the second char from `pos`). Used by

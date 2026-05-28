@@ -193,6 +193,34 @@ pub fn source_location(interp: &mut Interp, name: &str) -> Option<SourceLoc> {
     out
 }
 
+/// Every `.blsp` file the bootstrapped project owns — its sources plus its
+/// tests — by asking the Brood side `(project--all-files *project-root*)` (the
+/// same set `check-project` walks). Empty when no project has been set up (e.g.
+/// a bare buffer outside a project, where `*project-root*` is unbound). Feeds
+/// the cross-file reference / rename sweep (ADR-031 §Cross-file): under the flat
+/// module model these files are the whole search space for a global.
+pub fn project_files(interp: &mut Interp) -> Vec<String> {
+    let cp = interp.heap.checkpoint();
+    let out = match interp.eval_str("(project--all-files *project-root*)") {
+        Ok(v) => interp
+            .heap
+            .list_to_vec(v)
+            .map(|items| {
+                items
+                    .into_iter()
+                    .filter_map(|x| match x {
+                        Value::Str(id) => Some(interp.heap.string(id).to_string()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    interp.heap.reset_local_to(cp);
+    out
+}
+
 /// The on-disk file a `require`able feature resolves to, found the same way
 /// `require` itself does: `require--find` over the live `*load-path*` (which
 /// `bootstrap_project` extends with the project's source dirs). Powers
@@ -326,20 +354,21 @@ pub fn eval_in_session(interp: &mut Interp, src: &str) -> EvalResult {
     // shouldn't pile on top of (or get tangled with) the eval's result.
     let diagnostics = collect_diagnostics(interp, src);
 
-    // Now eval. We *do not* checkpoint/reset around `eval_str` itself:
-    //   * `def`s the source contains were promoted into RUNTIME by the
-    //     evaluator (they survive a LOCAL reset by design, ADR-013), but
-    //   * the *intermediate value* (`v` below) is in LOCAL, and `interp.print`
-    //     needs the heap intact to walk it. We print *before* any reset.
-    // After printing, LOCAL is allowed to stay populated — the next
-    // `eval_in_session` call's `eval_str` starts with its own checkpoint
-    // (see `Interp::eval_str` at `crates/lisp/src/lib.rs:104`), which reclaims
-    // between forms. The trade is a small per-call peak vs. a hard borrow
-    // tangle if we tried to reset between `print` and the return.
+    // Eval bracketed by a checkpoint + reset, satisfying the module-level
+    // **LOCAL-clean** contract. The trick that lets us reset safely is that
+    // we render the result to an owned `String` *before* the reset — the
+    // String holds no LOCAL handle, so it survives the wipe. `def`s the
+    // source contains were promoted into RUNTIME by the evaluator
+    // (ADR-013), so the *session state* the next call sees is unaffected;
+    // only the discarded intermediate value's allocations go. Pre-fix this
+    // bracket was skipped (see git blame for the prior rationale), and a
+    // long agent session steadily accumulated a per-call LOCAL baseline.
+    let cp = interp.heap.checkpoint();
     let (value, error) = match interp.eval_str(src) {
         Ok(v) => (Some(interp.print(v)), None),
         Err(e) => (None, Some(e.to_string())),
     };
+    interp.heap.reset_local_to(cp);
 
     EvalResult {
         value,

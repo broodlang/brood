@@ -141,6 +141,30 @@ impl ScopeTree {
             .collect()
     }
 
+    /// Every occurrence of `name` in this document that refers to the file's
+    /// **global** binding (a top-level `def`) or is **free** (defined in another
+    /// module) — i.e. every use of the cross-module global `name`, *excluding*
+    /// any local that happens to share the spelling (those resolve to a `Local`
+    /// binding and are skipped). The building block for **cross-file** references
+    /// and rename: under the flat module model (ADR-019) a global is one binding
+    /// everywhere, so the union of this over every project file is the global's
+    /// full reference set. (Contrast [`references`], which keys off a cursor and
+    /// stays within one binding in one document.)
+    pub fn references_to_global(&self, root: &Node, src: &str, name: &str) -> Vec<Span> {
+        let mut syms = Vec::new();
+        collect_symbols(root, &mut syms);
+        syms.iter()
+            .filter(|n| n.text(src) == name)
+            .filter(|n| {
+                matches!(
+                    self.resolve(n.span.start, name),
+                    Resolution::Defined { kind: BindingKind::Global, .. } | Resolution::Free
+                )
+            })
+            .map(|n| n.span)
+            .collect()
+    }
+
     /// The innermost scope whose span contains `offset` (smallest containing).
     fn scope_at(&self, offset: u32) -> usize {
         let mut best = 0;
@@ -406,6 +430,20 @@ mod tests {
         let refs = tree.references(&root, src, param);
         // binder + the two uses inside the body = 3; the trailing free `x` is excluded.
         assert_eq!(refs.len(), 3, "{:?}", refs);
+    }
+
+    #[test]
+    fn references_to_global_collects_globals_and_frees_but_not_locals() {
+        // `f` is a doc global; `g` is free (defined elsewhere); a `let`-bound `f`
+        // in another form shadows the global and must be excluded.
+        let src = "(defn f (x) (g x)) (f 1) (let (f 9) f)";
+        let root = cst::parse(src);
+        let tree = analyze(&root, src);
+        // `f` as a global: the def name + the `(f 1)` call = 2. The `let`-bound
+        // `f` (binder + body use) are Local → excluded.
+        assert_eq!(tree.references_to_global(&root, src, "f").len(), 2);
+        // `g` is free here: its single use.
+        assert_eq!(tree.references_to_global(&root, src, "g").len(), 1);
     }
 
     #[test]

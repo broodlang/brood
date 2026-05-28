@@ -38,10 +38,21 @@ watched until you call `reload-on-change`.
 ;;   - if it vanished, complain once and keep polling (the editor may be
 ;;     mid-rename);
 ;;   - if mtime unchanged, sleep and recur;
-;;   - else `load` it (catch reader/eval errors from partial-write races so
-;;     a broken save doesn't kill the watcher), then recur with the new
-;;     mtime — even after a *failed* load, so we don't busy-retry the same
-;;     broken state on every tick.
+;;   - else `reload-defs` it — re-evaluate only the top-level *definitions*
+;;     (def, defn, defmacro, defmodule, …), not side-effecting calls. This
+;;     is the difference between hot-reload and re-launch: a watched file
+;;     containing both `(defn main-loop …)` and `(main-loop 0)` would, with
+;;     plain `load`, re-execute the loop on every save (spawning a
+;;     duplicate that runs alongside the original, *and* blocking the
+;;     watcher itself inside the call — observable as "stops updating
+;;     after the first reload"). `reload-defs` refreshes the bindings only;
+;;     the still-running loop picks up the new code via late binding on
+;;     its next call site (ADR-013).
+;;
+;;     Errors from a partial-write race (incomplete syntax, half-saved
+;;     file) are caught so a broken save doesn't kill the watcher; we
+;;     still advance `last` to `now` so we don't busy-retry the same
+;;     broken state every poll.
 (defn reload--loop (path last)
   (let (now (file-mtime path))
     (cond
@@ -55,7 +66,7 @@ watched until you call `reload-on-change`.
       else
         (do
           (try
-            (do (load path)
+            (do (reload-defs path)
                 (println "[reload]" path))
             (catch e
               (println "[reload] failed:" path "—" e)))

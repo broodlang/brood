@@ -127,12 +127,17 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // vectors; see `parse_source` for the shape.
     def(heap, "parse-source", Arity::exact(1), Sig::new(vec![string], vec_ty), parse_source);
     def(heap, "load", Arity::exact(1), Sig::new(vec![string], any), load);
+    def(heap, "reload-defs", Arity::exact(1), Sig::new(vec![string], nil_ty), reload_defs);
     def(heap, "%builtin-module", Arity::exact(1), Sig::new(vec![sym.union(kw).union(string)], string.union(nil_ty)), builtin_module);
     def(heap, "%builtin-doc", Arity::exact(1), Sig::new(vec![sym.union(kw).union(string)], string.union(nil_ty)), builtin_doc);
-    // `apply`'s last positional arg should be a sequence (it's spliced); the
-    // others can be anything. We model it as `(callable, ...any) -> any` — the
-    // sequence-at-tail constraint is dynamic-only (a poor fit for fixed-arity
-    // sigs).
+    // `apply`'s last positional arg must be a sequence (it's spliced); the
+    // intermediate args can be anything. The `Sig` algebra can express
+    // "prefix + repeating tail" but not "the *last* item of the tail is
+    // special", so the Sig is `(callable, ...any) -> any` — the closest
+    // honest approximation. The sequence-at-tail constraint is checked at
+    // call time by `apply_builtin` via `heap.seq_items(args[last])`, which
+    // surfaces a `wrong_type` error if the last arg isn't a seq. So the
+    // Sig is loose, but the runtime is tight.
     def(heap, "apply", Arity::at_least(2), Sig::with_rest(vec![callable], any, any), apply_builtin);
 
     // symbols
@@ -172,6 +177,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "form-pos", Arity::exact(1), Sig::new(vec![any], vec_ty.union(nil_ty)), form_pos);
     def(heap, "current-file", Arity::exact(0), Sig::nullary(string.union(nil_ty)), current_file);
     def(heap, "source-location", Arity::exact(1), Sig::new(vec![sym], vec_ty.union(nil_ty)), source_location);
+    def(heap, "references-in-source", Arity::exact(2), Sig::new(vec![sym.union(string), string], any), references_in_source);
 
     // introspection (editor tooling; see docs/lsp.md) — derive what we can from
     // the bound value (arglist, doc); enumerate the global table for completion.
@@ -269,6 +275,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("parse-source", &["s"], "Parse s into a lossless CST tree as nested vectors (mechanism for std/format.blsp)."),
     ("eval-string", &["s"], "Read and evaluate every form in string s (the string analogue of load)."),
     ("load", &["path"], "Read and evaluate every form in the file at path."),
+    ("reload-defs", &["path"], "Re-evaluate only the def-style top-level forms in `path` (def, defn, defmacro, defmodule, defdyn, …) — skipping other top-level calls. Used by file watchers to refresh code without re-running side-effecting top-level calls like a `(main-loop)`. Returns nil."),
     ("apply", &["f", "&", "args"], "Call f with the leading args plus the final list argument spliced in as trailing args."),
     ("name", &["x"], "The spelling of a symbol or keyword as a string (no leading colon)."),
     ("symbol", &["x"], "Coerce a string, symbol, or keyword to the matching symbol (interning if needed)."),
@@ -289,6 +296,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("form-pos", &["form"], "A form's [line col] source position, or nil."),
     ("current-file", &[], "The path of the file currently being loaded, or nil."),
     ("source-location", &["name"], "Where global name was defined, as [file line col], or nil. Quote it: (source-location 'foo)."),
+    ("references-in-source", &["name", "source"], "Occurrences of the global `name` in `source`, as a list of [line col] (1-based); locals that shadow it are excluded."),
     ("doc", &["f"], "The docstring of a function, macro, or primitive, or nil."),
     ("arglist", &["f"], "The parameter list of a function, macro, or primitive, or nil."),
     ("global-names", &[], "Every globally bound symbol, sorted by spelling."),
@@ -815,6 +823,60 @@ fn cst_to_value(heap: &mut Heap, node: &cst::Node, src: &str) -> Value {
     }
 }
 
+/// `(reload-defs path)` — like `load`, but only re-evaluates **definitions**
+/// (top-level forms whose head symbol starts with `def`: `def`, `defn`,
+/// `defmacro`, `defmodule`, `defdyn`, …). All other top-level forms are
+/// silently skipped. Used by the file watcher (`std/reload.blsp`): on the
+/// **second** and subsequent visits to a file we want to refresh the code
+/// (so the running program sees the new behaviour via late binding) but
+/// **not** re-run side-effecting top-level calls like `(main)` or
+/// `(my-loop 99)` — re-executing those would either spawn a duplicate
+/// long-running process (if it's a tail-recursive loop) or block the
+/// watcher itself (the calling process). Returns `nil`. ADR-013 hot
+/// reload's mechanism flowing through to the tool layer.
+fn reload_defs(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "reload-defs", arg(args, 0))?;
+    let src = std::fs::read_to_string(&path).map_err(|e| {
+        LispError::runtime(format!("reload-defs: cannot read {}: {}", path, e))
+            .with_code(crate::error::error_codes::FILE_IO)
+    })?;
+    let forms = reader::read_all_positioned(heap, &src).map_err(|e| e.or_file(path.clone()))?;
+    let root = heap.env_root(env);
+    let prev = heap.set_current_file(Some(path.clone()));
+    let mut result = Ok(Value::Nil);
+    for (form, pos) in forms {
+        // Only re-eval forms whose head is a symbol starting with "def".
+        // That covers `def`/`defn`/`defmacro`/`defmodule`/`defdyn` and any
+        // future `def…`. Other top-level forms — `(require …)`, `(load …)`,
+        // ordinary calls — are skipped. (`require` skipping is intentional:
+        // we don't auto-reload transitive modules from inside another
+        // module's reload; the user explicitly watches each path they
+        // care about with `reload-on-change`.)
+        let head_is_def = match form {
+            Value::Pair(p) => {
+                let (head, _) = heap.pair(p);
+                matches!(head, Value::Sym(s) if value::symbol_name(s).starts_with("def"))
+            }
+            _ => false,
+        };
+        if !head_is_def {
+            continue;
+        }
+        // Same def-site recording / expand / eval shape as `load` for the
+        // forms we *do* evaluate, so cross-file goto still lands at the
+        // re-saved def site.
+        heap.note_definition(form, pos);
+        result = crate::eval::macros::macroexpand_all(heap, form, root)
+            .and_then(|f| crate::eval::eval(heap, f, root))
+            .map_err(|e| e.or_pos(pos).or_file(path.clone()));
+        if result.is_err() {
+            break;
+        }
+    }
+    heap.set_current_file(prev);
+    result.map(|_| Value::Nil)
+}
+
 fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "load", arg(args, 0))?;
     let src = std::fs::read_to_string(&path)
@@ -881,10 +943,20 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
 /// returns the language guide that `nest new` scaffolds into each new project,
 /// so a freshly-scaffolded project is self-contained without depending on a
 /// Brood install path.
-const EMBEDDED_DOCS: &[(&str, &str)] = &[(
-    "brood-for-claude",
-    include_str!("../../../docs/brood-for-claude.md"),
-)];
+const EMBEDDED_DOCS: &[(&str, &str)] = &[
+    (
+        "brood-for-claude",
+        include_str!("../../../docs/brood-for-claude.md"),
+    ),
+    // The Claude Code skill that `nest new` drops into each project's
+    // `.claude/skills/`, so an AI assistant editing the project auto-loads the
+    // Brood-writing rules. The full reference is `brood-for-claude`; this is the
+    // short triggerable checklist (`SKILL.md` frontmatter + the LLM traps).
+    (
+        "writing-brood-skill",
+        include_str!("../../../.claude/skills/writing-brood/SKILL.md"),
+    ),
+];
 
 /// The lookup body shared by `%builtin-module` and `%builtin-doc`: coerce the
 /// (symbol | keyword | string) name argument, find it in `table`, return the
@@ -1333,6 +1405,56 @@ fn source_location(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
         }
         None => Ok(Value::Nil),
     }
+}
+
+/// `(references-in-source name source)` — every occurrence of the global `name`
+/// in `source`, as a list of `[line col]` (both 1-based), in document order. A
+/// local that shadows the name is excluded. Pure: it parses the string and
+/// holds no project state, so the Brood-side `callers` MCP tool maps it over a
+/// project's files for cross-file find-references (ADR-031 §Cross-file,
+/// docs/lsp.md). `name` may be a symbol or a string.
+fn references_in_source(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let name = match arg(args, 0) {
+        Value::Sym(s) => value::symbol_name(s),
+        Value::Str(id) => heap.string(id).to_string(),
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "references-in-source",
+                "symbol or string",
+                other,
+            ))
+        }
+    };
+    let src = expect_string(heap, "references-in-source", arg(args, 1))?;
+    let root = cst::parse(&src);
+    let tree = crate::syntax::scope::analyze(&root, &src);
+    let starts = line_starts(&src);
+    let occ: Vec<Value> = tree
+        .references_to_global(&root, &src, &name)
+        .into_iter()
+        .map(|span| {
+            let (line, col) = line_col(&src, &starts, span.start as usize);
+            heap.alloc_vector(vec![Value::Int(line as i64), Value::Int(col as i64)])
+        })
+        .collect();
+    Ok(heap.list(occ))
+}
+
+/// Byte offsets of each line start in `src` (line 0 begins at 0). Built once so
+/// repeated byte→line/col lookups in one source are cheap.
+fn line_starts(src: &str) -> Vec<usize> {
+    std::iter::once(0)
+        .chain(src.match_indices('\n').map(|(i, _)| i + 1))
+        .collect()
+}
+
+/// 1-based (line, col) of byte offset `b`, col counted in characters. `b` must
+/// be a char boundary (CST spans always are).
+fn line_col(src: &str, starts: &[usize], b: usize) -> (u32, u32) {
+    let line = starts.partition_point(|&s| s <= b) - 1; // 0-based
+    let col = src[starts[line]..b].chars().count();
+    (line as u32 + 1, col as u32 + 1)
 }
 
 fn current_file(_args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {

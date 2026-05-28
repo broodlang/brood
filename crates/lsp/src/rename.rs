@@ -76,8 +76,9 @@ pub fn rename(
 
 /// Whether `name` is a legal plain Brood symbol: non-empty, no delimiter or
 /// whitespace characters, and not something the reader would classify as a
-/// number / keyword / `nil` / `true` / `false`.
-fn is_valid_symbol(name: &str) -> bool {
+/// number / keyword / `nil` / `true` / `false`. Shared with the cross-file
+/// rename path ([`workspace`](crate::workspace)).
+pub(crate) fn is_valid_symbol(name: &str) -> bool {
     !name.is_empty()
         && !name.chars().any(|c| c.is_whitespace() || is_delimiter(c))
         && matches!(classify(name), AtomKind::Symbol)

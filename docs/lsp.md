@@ -54,10 +54,14 @@ one server that owns the language knowledge.
 > `completionItem/resolve` (signature + docstring), diagnostics now carry the
 > document version, and an unbound-symbol squiggle narrows to the offending token
 > (`refine_diagnostic_range`).
-> **Still next:** cross-file references/rename (needs a workspace reference
-> index — references stay static per ADR-031); incremental document sync; range
-> / delta semantic-token requests; and finer spans for arity/type findings
-> (wants spans threaded through the checker, not just the call operator).
+> **Cross-file references & rename (also done):** `references_to_global` over
+> every `project_files` entry (`workspace.rs`); rename emits a multi-file
+> `WorkspaceEdit`. Locals stay single-file; no project → just the open buffer.
+> The same engine is exposed to agents as the MCP **`callers`** tool, via the
+> pure `(references-in-source name src)` primitive (docs/mcp.md).
+> **Still next:** incremental document sync; range / delta semantic-token
+> requests; and finer spans for arity/type findings (wants spans threaded
+> through the checker, not just the call operator).
 
 ## Why a server, and why not brute-force it
 
@@ -346,7 +350,7 @@ additive change behind the same feature handlers.
 | **0** | `publishDiagnostics` (syntactic), document sync, lifecycle | `cst::parse` + `LineIndex` | **done** |
 | **1** | completion (locals + globals), hover, `documentSymbol`, **goto-definition**, **signature help** | `arglist` / `global-names` primitives; CST top-level walk (`defs`) + scope walker | **done** |
 | **1+** | semantic diagnostics ("unbound" / arity / type misuse), **cross-file & stdlib goto**, `require`-target goto | located `check_file`; project bootstrap; `source-location` + prelude-cache; `require--find` | **done** |
-| **2** | references, document-highlight, rename (+prepareRename), semantic tokens, completion resolve | `scope::references` engine; CST token classification | **done** |
+| **2** | **cross-file** references & rename (+prepareRename), document-highlight, semantic tokens, completion resolve | `scope::references` / `references_to_global`; `project_files`; CST token classification | **done** |
 
 Tier 0 was reachable immediately because syntactic diagnostics need only the
 CST. Goto-definition landed early with Tier 1 (rather than Tier 2 as first
@@ -363,14 +367,24 @@ signature/docstring lazily via `completionItem/resolve`. Tiers unlock together
 once their one prerequisite lands — which is the point of deciding the CST and
 the introspection surface up front.
 
-**Caveats (deliberate, single-file).** References and rename are **CST-level and
-single-file**: occurrences in other modules aren't found or edited, so renaming
-an exported name is incomplete (ADR-031 — there's no faithful cross-file
-reference index; definitions are image-based, references stay static). Semantic
-tokens are whole-document only (no range/delta requests — the parse is cheap).
-Semantic diagnostics anchor to the offending token where the message names it
-(unbound symbol) or to the call operator otherwise; deeper attribution wants
-spans threaded through the checker.
+**Cross-file references and rename.** A name that resolves to a **global** is
+one binding across the whole project under the flat module model (ADR-019), so
+references and rename span every project file: `workspace.rs` gets the file set
+from `introspect::project_files` (`(project--all-files *project-root*)`, the same
+set `check-project` walks), preferring an open document's in-memory text over its
+on-disk copy, and unions `ScopeTree::references_to_global` over each. Rename
+emits a multi-file `WorkspaceEdit`. **Locals stay single-file** (routed to the
+cursor-keyed `references`/`rename` path), and with no project bootstrapped the
+set degrades to just the open buffer. This is the static, CST-level reference
+model ADR-031 keeps — *definitions* are image-based, *references* stay static
+because macro-generated references have no faithful spans; so references are
+source occurrences (a quoted `'foo` counts), and a name another module
+synthesises via a macro won't appear.
+
+**Other caveats (deliberate).** Semantic tokens are whole-document only (no
+range/delta requests — the parse is cheap). Semantic diagnostics anchor to the
+offending token where the message names it (unbound symbol) or to the call
+operator otherwise; deeper attribution wants spans threaded through the checker.
 
 ## The self-hosting boundary
 

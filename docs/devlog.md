@@ -5039,3 +5039,204 @@ coll)`; unbound `frobnicate` squiggle spans the exact token; diagnostics carry
 `version`. `brood-lsp` 51/51, `brood --lib` 123/123; `brood.el` byte-compiles
 clean. (The unrelated `supervisor_retries…` failure in `tests/basic.rs` — the
 concurrent scheduler WIP — is still there and still not ours.)
+
+---
+
+## 2026-05-28 (cont.) — MCP server: fix the stdio transport (was unusable by real clients)
+
+**Symptom.** "The MCP server isn't working." Driving `nest mcp` by hand showed
+the full surface responding — initialize, all eight tools, resources, prompts —
+but only when fed **`Content-Length`-framed** input.
+
+**Root cause.** `crates/nest/src/mcp.rs` framed messages LSP-style
+(`Content-Length: N\r\n\r\n` + body). The **MCP stdio transport is
+newline-delimited JSON** — one compact JSON-RPC object per line. A real client
+(Claude Code) sends newline-framed bytes, which the server rejected with
+"missing or malformed Content-Length", so `initialize` never completed and the
+connection died. The server looked fine in isolation only because **its own test
+harness `frame()` also used `Content-Length`** — so the tests round-tripped
+through the same wrong framing and stayed green. A classic "tested against
+itself, never against the protocol" trap.
+
+**Fix.** `read_message` now reads a line and parses it as JSON (skipping blank
+separators, clean EOF → stop); `write_message` writes compact body + a single
+`\n`. Updated the test harness `frame()`/`unframe()` to match, and added
+`transport_is_newline_delimited_json_not_content_length` to lock it in (asserts
+a newline request parses, output is `{...}\n`, and a stray `Content-Length:`
+header line is *not* accepted). `nest` 30/30 green.
+
+**Made it live.** `make install` rebuilt + replaced `~/.local/bin/{brood,nest,
+brood-lsp}` (release) — the `.mcp.json` `nest new` scaffolds launches bare `nest`
+from PATH, so the installed binary is what actually serves Claude Code; the
+working-tree fix is inert until reinstalled. (Same applies to the brood-lsp Tier-2
+work from earlier today — the installed LSP was stale too; now refreshed.)
+Verified end-to-end against the *installed* `nest mcp` over newline framing:
+`initialize` → serverInfo, `lookup reduce` → arglist+doc.
+
+**Doc.** `docs/mcp.md` gained a "Transport — newline-delimited JSON, not LSP
+framing" note contrasting it with `brood-lsp`, so the two servers' identical
+*shape* doesn't tempt a future copy of the wrong framing.
+
+---
+
+## 2026-05-28 (cont.) — Supervisor follow-up: hot-reload + GC roots
+
+**Goal.** Two bugs surfaced on the supervised processes work that landed
+earlier today (ADR-039 step 2): (1) on retry, the supervisor was calling
+the **captured closure handle** — so a `(def my-loop …)` between throws
+didn't take effect, defeating the whole point of integrating supervision
+with hot reload. (2) `RESUME_SLOT.callee` wasn't a GC root, so a collection
+between `record_resume` and the supervisor's `take_resume` could free the
+closure the slot points at, leaving the retry to call into a reused slot
+(observed as "the supervisor 'succeeded' after 4 retries instead of
+running to the budget").
+
+**Fixed.**
+
+- **Name-based re-resolution on retry**
+  (`crates/lisp/src/process/scheduler.rs`, `eval/mod.rs`). `ResumeSlot`
+  gained a `name: Option<Symbol>` field — the closure's `defn`-given
+  name. Eval's `Value::Fn` hook reads `heap.closure(id).name` and passes
+  it through `record_resume`. The supervisor, on retry, looks the name
+  up in the global env: a freshly-`def`'d closure wins, falling back to
+  the stored handle if the name no longer resolves to a `Fn`/`Native`
+  (someone `def`'d it to a non-callable, or `undef`'d it). This is the
+  hot reload `def`-rebinding contract (ADR-013) flowing through
+  supervision (ADR-039). Anonymous `(fn …)`s carry `name: None`, so
+  they retry by handle — that's the only fallback path we can offer
+  without a name.
+- **`RESUME_SLOT` is a GC root**
+  (`crates/lisp/src/process/scheduler.rs::for_each_resume_root`,
+  `eval/mod.rs`). New `for_each_resume_root(visit)` walks the current
+  thread's slot, calling `visit(slot.callee)` then once per
+  `slot.argv[i]` — zero allocation, hot-path-safe. The eval safepoint
+  builds a `SmallVec` of roots (`expr` + the slot's contents) and hands
+  it to `heap.collect`. Without this, a collection between
+  `record_resume` and `take_resume` could free a LOCAL closure /
+  vector / pair the slot points at; the supervisor then retries into
+  a slot that's been reused for an unrelated value, and the process
+  silently "succeeds" or behaves erratically.
+- **`in_green_process` no longer panics on contended borrow**. Was
+  `c.borrow().…`, now `c.try_borrow().…`. Today no in-crate path
+  takes `CURRENT.borrow_mut()` and then evaluates an RHS that calls
+  `in_green_process` — verified by an audit of all five borrow_mut
+  sites (`mailbox.rs:263`, `scheduler.rs:290`/485/502/707). But the
+  supervisor's eval-loop guard runs `in_green_process()` on **every
+  tail call**, so a future change that introduces such a path would
+  otherwise panic mid-iteration with "RefCell already borrowed" rather
+  than continuing safely. Returning `false` on a contended borrow
+  degrades gracefully — the recovery slot just isn't written for that
+  one call, the supervisor still does its job on the throw.
+
+**Test.**
+`crates/lisp/tests/basic.rs::supervisor_picks_up_hot_reloaded_definition_on_retry`
+— end-to-end: spawn `hr-worker` that throws on every iteration, sleep
+200 ms while the supervisor catches a few times, `def` a fixed
+`hr-worker` that sends heartbeats, then `receive` two heartbeats and
+assert the worker is running the new code (first beat: `[:beat 0]` —
+proves the fix took on the next retry; second beat: `[:beat 1]` —
+proves the *new* closure tail-recurses normally, not just one-shot
+recovery into something that exits). With the bug present, the test
+times out on the first `receive` — the supervisor keeps calling the
+captured old throwing handle forever.
+
+**Tests.** `cargo test -p brood --test basic --test gc --test
+preemption`: 73 + 3 + 1 green (+1 new — the hot-reload test).
+Workspace-wide: 301/302; the one outstanding is `tests/suite.rs`'s
+in-language segfault, still parallel WIP unrelated to this change
+(confirmed: supervisor default-off here, processes just `die: …` on
+throw immediately, no supervisor involvement).
+
+**Smoke.** `/tmp/race-repro/hotreload.blsp` — manual hot-reload story:
+spawn buggy worker, parent waits, parent `def`s fix, parent reads
+heartbeats from new worker. Prints `[:got 0]` then `[:got 1]` —
+indistinguishable from the test, kept around as the user-facing demo
+for the next devlog or readme.
+
+---
+
+## 2026-05-28 (cont.) — Cross-file references & rename (LSP) + the MCP `callers` tool
+
+**Goal.** Whole-project find-references and rename, shared between the editor
+(LSP) and agents (a new MCP tool). The substrate was the missing piece; ADR-031
+already sanctions a *static* cross-file reference model (definitions image-based,
+references stay static), and the flat module system (ADR-019) makes a global one
+binding everywhere — so the reference set is just the union over project files.
+
+**Shared core (brood lib).**
+- `ScopeTree::references_to_global(root, src, name)` — occurrences of `name` that
+  resolve to the file's global (a top-level `def`) or are free, *excluding*
+  locals that shadow it. The per-file primitive both consumers union over.
+- `introspect::project_files(interp)` — the project's source+test files via
+  `(project--all-files *project-root*)`.
+- `(references-in-source name source)` primitive — pure (parse a string → list
+  of `[line col]`); the mechanism the Brood/MCP side maps over files.
+
+**LSP (`crates/lsp`).** New `workspace.rs`: for a global/free name, union
+`references_to_global` over `project_files` (preferring open-buffer text over
+disk), producing cross-file `Location`s; rename emits a multi-file
+`WorkspaceEdit`. The references/rename handlers now dispatch on resolution —
+**local → single-file** (the existing cursor-keyed path), **global/free →
+cross-file**; no project → degrades to the open buffer. Verified end-to-end:
+references on `greeting` (free in `main.blsp`) found it across `hello.blsp`,
+`main.blsp`, and `hello_test.blsp`; rename → a 3-file `WorkspaceEdit`.
+
+**MCP (`callers` tool).** `std/mcp.blsp` gains `mcp-callers-tool`: maps
+`references-in-source` over `(project--all-files *project-root*)` (read via
+`slurp`) → `{:references [{:file :line :col} ...]}`. It's the *use*-site
+counterpart to `lookup`'s def site. Verified against the real `nest mcp`:
+`callers(greeting)` returned all three files' occurrences. Ninth tool in the
+catalogue.
+
+**Tests.** `scope::references_to_global_collects_globals_and_frees_but_not_locals`;
+the dispatcher catalogue test now asserts `callers`. `brood` 124, `brood-lsp` 51,
+`nest` 30 — all green. New code clippy-clean (the pre-existing brood-lib + nest
+module-doc warnings are untouched).
+
+**Docs.** `docs/lsp.md` (cross-file refs/rename section + roadmap), `docs/mcp.md`
+(ninth tool), this entry.
+
+---
+
+## 2026-05-28 — Std style review, codified conventions, `writing-brood` skill
+
+**Goal.** Review the standard library for style, fold what it consistently does
+into the shipped style guide, and ship a Claude skill that helps an assistant
+write idiomatic Brood. Later in the session: surface the MCP server as the
+coding loop.
+
+**Review.** Swept `std/` (`prelude`, `format`, `project`, `test`, `mcp`,
+`reload`, `hatch`, `docs`) against the nine style rules. **Zero violations** —
+binding forms are lists, `let` is flat, `cond` uses `:else`, no mutation, loops
+are tail-recursion/`fold`/`map`, public `defn`s carry docstrings. The std is
+already the canonical example it claims to be. What was *missing* was a written
+record of the conventions it follows implicitly.
+
+**Guide (`docs/brood-for-claude.md`).** New **"Naming & docstrings"** section
+codifying the conventions the std follows without exception: `foo?` predicates,
+`*foo*` dyn/module vars, `foo--bar` private helpers (double-dash infix),
+`foo->bar` conversions, no `!` (nothing mutates); tail-recursive public-shell +
+`--acc`/`--loop` worker split; first-line-summary docstrings with markdown;
+`(defmodule name "…")` openings; `"fn-name: what went wrong: " val` error shape.
+
+**Skill (`.claude/skills/writing-brood/SKILL.md`).** A triggerable checklist of
+the traps an LLM hits writing Brood like Clojure/Scheme/CL (no mutation, no
+loops, lists-for-code/vectors-for-data, bind-vs-match patterns, truthiness),
+plus the naming/shape rules and an **MCP-server coding loop** section (`eval` →
+`load` → `eval` a call → `macroexpand` → fix, via `nest mcp`). Baked into the
+binary as `(%builtin-doc 'writing-brood-skill)` and scaffolded by `nest new`
+into every project's `.claude/skills/`, mirroring how `brood-for-claude.md`
+ships. Scaffolded `CLAUDE.md` now points at the skill too.
+
+**Verified.** `cargo build` green; scaffolding a fresh project drops
+`.claude/skills/writing-brood/SKILL.md` and the project's own `nest test`
+passes. `brood` Rust tests 124 green; `nest`/`lsp`/`gc`/`preemption` green.
+
+**Known issue (not ours).** The in-language `suite` (`nest test` from the repo
+root, `cargo test -p brood --test suite`) **segfaults deterministically** in the
+green-process/scheduler path — the signature of the known "deep non-tail
+recursion overflows the coroutine stack" failure (see CLAUDE.md). It reproduces
+independent of this session's changes (all additive: an embedded-doc const,
+markdown, and the `new-project` scaffolder — none in `run-project-tests`' path)
+and coincides with the uncommitted `scheduler.rs` (+77) / `scanner.rs` WIP that
+was already in the tree. Flagged for the scheduler work, not fixed here.

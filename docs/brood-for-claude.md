@@ -140,6 +140,57 @@ name is the thing readers look up later. Confining the rule there preserves
 the ergonomic `(map (fn ([k v]) …) …)` idiom, which reads locally and never
 gets looked up by name.
 
+## Naming & docstrings
+
+These conventions are followed without exception across `std/` — match them and
+your code will read like the standard library.
+
+**Names carry their role in their spelling:**
+
+```
+foo?         ; predicate — returns a boolean (int? empty? starts-with?)
+*foo*         ; dynamic var or module-level config/state (defdyn *log-level*)
+foo--bar      ; PRIVATE helper — the double-dash infix marks "implementation
+              ;   detail, not public API" (append--onto, cmp--gt, reload--loop)
+foo->bar      ; conversion (number->string, vec->list)
+```
+
+There is **no `!` convention** — nothing mutates, so no name needs to warn of it.
+Symbols are kebab-case (`out-of-range?`, not `outOfRange`/`out_of_range`).
+
+**Tail-recursive helpers get a suffix naming what they accumulate or do** —
+`--acc`, `--at`, `--loop`, `--onto`, `--scan`. The public function is a thin
+shell; the `--`-suffixed helper does the real recursion with an accumulator:
+
+```lisp
+(defn reverse (coll) "The items of `coll` in reverse order." (fold flip-cons nil coll))
+
+;; longer recursions split into a public shell + a private --acc helper
+(defn count-newlines--at (s i acc) …)              ; private worker
+(defn count-newlines (s) "Number of \\n in `s`." (count-newlines--at s 0 0))
+```
+
+**Docstrings** go on every public `defn` / `defmacro`. First line is a complete
+one-sentence summary (it's what `(doc 'name)` and the LSP show on hover);
+backtick code, **bold**, and `-` bullet lists are rendered, so use them. Private
+`--` helpers usually skip the docstring and use a `;;` comment instead.
+
+```lisp
+(defn format-source (src)
+  "Format `src` as a Brood source string. Idempotent."
+  …)
+```
+
+**Every module opens with `(defmodule name "…")`** — the docstring is a short
+paragraph on what the module is for and where its Rust substrate lives, if any.
+
+**Error messages** read `"fn-name: what went wrong"`, lowercase, with the
+offending value appended via `str`-style trailing args:
+
+```lisp
+(error "reload-on-change: no such path: " path)
+```
+
 ## Patterns (`let`, `fn`, `match`, `receive`)
 
 The trap: a bare symbol *binds*, it doesn't match. To match a known value,
