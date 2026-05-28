@@ -159,11 +159,25 @@ never a false positive.
   the RHS is itself a recognised guard, and `guard_assertion` on a bare `Sym`
   test looks it up. Sound because Brood is immutable — between the let and
   the if neither `x` nor `cond` can change. Self-aliasing (`(let (x (int? x))
-  …)`) is rejected (the outer `x` is shadowed). 20 new tests in
-  `types::check::tests`. Cond-/match-/and-/or-chained guards (which expand to
-  nested `(let g (if g …))` whose `g` aliases the *combined* test, not a
-  single variable) are still deferred — they'd need either pre-expansion
-  handling or post-expansion shape recognition.
+  …)`) is rejected (the outer `x` is shadowed).
+- ✅ **Let-binding aliases + `%eq` guards** — the pair that closes `match`
+  pattern narrowing. The `match` pattern compiler lowers `(match x (5 body)
+  …)` to `(let (m__N x) (if (%eq m__N 5) (do body) …))`; `body` references
+  `x` (not the internal `m__N`), so narrowing has to flow back. Two pieces
+  do it: `Ctx.aliases: HashMap<Symbol, HashSet<Symbol>>` records the
+  undirected `(let (a b) …)` equivalence between a name and another symbol,
+  and `narrow_chain` BFSes the equivalence class on every narrow so an
+  assertion on either side propagates to the other. The guard recogniser
+  learns `(%eq sym lit)` (and the symmetric `(%eq lit sym)`) as an assertion
+  `sym : type-of(lit)` — covering literal-int, -keyword, -string, -bool, and
+  -nil patterns. With both in place, `(match x (5 (first x)))` now flags
+  `first: argument 1 expects nil | pair | vector, got int (x)`. `shadow`
+  fully disconnects a name from the alias graph (its bin removed and the
+  name pruned from every neighbour's bin) so a rebinding doesn't leak
+  through stale back-edges. Sound for the same immutability reason as guard
+  aliases. (Cond / and / or didn't need any new machinery — `cond`'s direct
+  `(pred? sym)` tests and `and`/`or`'s gensym `let`-then-`if` expansion are
+  already handled by the existing guard pipeline.)
 - ✅ **Arity diagnostics.** Every call's argument count is checked against the
   callee's `Arity` — `NativeFn.arity` for primitives, derived from
   `Closure.{params, optionals, rest}` for Brood closures (in the heap; the
@@ -205,8 +219,16 @@ never a false positive.
   a `(defn foo …)` nested inside `test`/`describe`/etc. still shields a later
   `(foo …)` from the unbound check. Positions survive expansion where the
   macro rebuilds through `rebuild_list` (the common case).
-- ⬜ **next:** cond-/match-/and-/or-chained guard narrowing; running
-  automatically in `nest check` (a project-wide check-only entry point).
+- ✅ **Cond / match / and / or guard narrowing all in.** `cond` flows
+  through `if`'s existing `(pred? sym)` recognition; `and` / `or` through
+  the `let`-stored guard-alias path (the prelude expansion `(let (g a) (if
+  g b g))`); `match` through the new let-binding alias + `%eq` guard. The
+  whole Step-4 surface is behavioural now — every form a user reaches for
+  on a guarded variable narrows it.
+
+With everything above, Step 4 is **done**. The only meaningful next move is
+project-wide check-only entry points already on tap (`nest check`) and the
+upgrade to Step 5+ (structured types) when a real need surfaces.
 
 ### Step 5+ — structured types ⬜
 Function arrows, vector/list element types, intersections for overloaded fns —

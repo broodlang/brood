@@ -59,6 +59,52 @@
   (test "blank lines between two top-level comments are preserved"
     (assert= (format-source ";; a\n\n;; b\n(def x 1)") ";; a\n\n;; b\n(def x 1)\n")))
 
+(describe "format: comment markers preserved verbatim"
+  ;; Lisp convention is `;` for trailing comments, `;;` at the current code
+  ;; column, `;;;` for top-level banners. The formatter must not "normalise"
+  ;; the marker count — that's authorial intent.
+  (test "single ; marker survives"
+    (let (out (format-source "; one\n(def x 1)"))
+      (is (string-contains? out "; one"))))
+  (test ";; marker (current-line column) survives"
+    (let (out (format-source ";; section\n(def x 1)"))
+      (is (string-contains? out ";; section"))))
+  (test ";;; marker (top-level banner) survives"
+    (let (out (format-source ";;; banner\n(def x 1)"))
+      (is (string-contains? out ";;; banner"))))
+  (test "trailing comment after code stays on the same line"
+    (let (out (format-source "(def x 1) ; trailing"))
+      (is (string-contains? out "(def x 1)"))
+      (is (string-contains? out "; trailing"))
+      ;; And specifically: not pushed onto its own line.
+      (is (not (string-contains? out "(def x 1)\n; trailing")))))
+  (test "trailing comment after a closing paren is preserved"
+    (let (out (format-source "(defn f () 0) ;; nullary"))
+      (is (string-contains? out "(defn f () 0)"))
+      (is (string-contains? out ";; nullary"))))
+  (test "comment-only input gets a single trailing newline, nothing else"
+    (assert= (format-source ";; just a comment") ";; just a comment\n")))
+
+(describe "format: strings"
+  (test "a short string literal is preserved byte-for-byte"
+    (assert= (format-source "(def s \"hello world\")") "(def s \"hello world\")\n"))
+  (test "escape sequences inside a string survive unchanged"
+    (assert= (format-source "(def s \"a\\tb\\nc\")") "(def s \"a\\tb\\nc\")\n"))
+  (test "a multi-line string literal preserves its internal newlines"
+    (let (in  "(def doc \"line one\nline two\nline three\")"
+          out (format-source in))
+      ;; The string content stays byte-for-byte — including the literal
+      ;; newlines (we can't reflow inside a string literal).
+      (is (string-contains? out "\"line one\nline two\nline three\""))))
+  (test "a string longer than the width budget pushes itself to its own line, content untouched"
+    (let (long-content "this is a really long string that exceeds the eighty column width budget the formatter uses"
+          in   (str "(def msg \"" long-content "\")")
+          out  (format-source in))
+      ;; Content is preserved verbatim.
+      (is (string-contains? out (str "\"" long-content "\"")))
+      ;; And the form breaks: string lands on its own line at +2 indent.
+      (is (string-contains? out (str "(def msg\n  \"" long-content "\""))))))
+
 (describe "format: reader macros + collections"
   (test "quote stays attached to its form" (assert= (format-source "'(a b c)") "'(a b c)\n"))
   (test "quasi / unquote / splice are emitted with their prefixes"
@@ -83,7 +129,14 @@
                     "(cond (= x 1) :one (= x 2) :two else :many)"
                     "(if (and a b) c d)"
                     "{:a 1 :b 2}"
-                    "[1 [2 [3 [4]]]]"))
+                    "[1 [2 [3 [4]]]]"
+                    ;; comment + string cases that the new describes above cover.
+                    "; trailing\n;; section\n;;; banner\n(def x 1)"
+                    "(def x 1) ; trailing"
+                    "(defn f () 0) ;; nullary"
+                    "(def s \"hello world\")"
+                    "(def s \"a\\tb\\nc\")"
+                    "(def doc \"line one\nline two\nline three\")"))
       (fold (fn (_ s)
               (let (once (format-source s) twice (format-source once)) (assert= once twice)))
         nil

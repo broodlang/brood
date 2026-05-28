@@ -91,14 +91,14 @@ struct Ctx {
     types: HashMap<Symbol, Ty>,
     /// `bound-name → (variable, type-it-asserts)`: a `let`-stored guard result.
     guards: HashMap<Symbol, (Symbol, Ty)>,
-    /// **Let-binding aliases.** `(let (a b) …)` where `b` is a known local
-    /// variable records `a → b` here, so narrowing `a` inside the body also
-    /// narrows `b` (and vice versa via `narrow`'s chain follow). This is what
-    /// makes the `match` pattern compiler's `(let (m x) (if (%eq m lit) …))`
-    /// expansion flow type info from the inner test back onto the outer
-    /// scrutinee. Brood is immutable, so the alias relation is sound for the
-    /// extent of the binding.
-    aliases: HashMap<Symbol, Symbol>,
+    /// **Let-binding aliases.** `(let (a b) …)` aliases `a` and `b` — they
+    /// name the same value through the scope, so narrowing either propagates
+    /// to the other. Stored as an undirected adjacency map (each name maps
+    /// to its co-equivalent set), so `narrow` BFSes the equivalence class
+    /// and tightens every member. Brood is immutable, so the relation is
+    /// sound for the binding's extent; `bind` (shadow) disconnects the name
+    /// from every neighbour to prevent stale aliasing across re-bindings.
+    aliases: HashMap<Symbol, HashSet<Symbol>>,
     /// Every locally-bound name in scope — fn/lambda params and let bindings.
     /// Distinct from `types`: a fn-param has *no known type* (`ANY` by default)
     /// but is *in scope*, so it must not be flagged unbound. `types` records
@@ -148,20 +148,25 @@ impl Ctx {
         c.narrow_chain(sym, ty);
         c
     }
-    /// In-place narrow following the alias chain. Walks `aliases` from `sym`,
-    /// intersecting `ty` into each visited name's type. A cycle guard caps the
-    /// walk so a pathological alias loop can't iterate forever.
-    fn narrow_chain(&mut self, mut sym: Symbol, ty: Ty) {
-        let mut depth = 0;
-        loop {
-            let prior = self.types.get(&sym).copied().unwrap_or(Ty::ANY);
-            self.types.insert(sym, prior.intersect(ty));
-            match self.aliases.get(&sym).copied() {
-                Some(next) if next != sym && depth < 16 => {
-                    sym = next;
-                    depth += 1;
+    /// In-place narrow over the equivalence class of `sym` — BFS through the
+    /// alias graph, intersecting `ty` into each visited name's type. A
+    /// `visited` set caps each name at one narrow so a cycle (the
+    /// always-present bidirectional edge) terminates cleanly.
+    fn narrow_chain(&mut self, sym: Symbol, ty: Ty) {
+        let mut visited = HashSet::new();
+        let mut queue = vec![sym];
+        while let Some(s) = queue.pop() {
+            if !visited.insert(s) {
+                continue;
+            }
+            let prior = self.types.get(&s).copied().unwrap_or(Ty::ANY);
+            self.types.insert(s, prior.intersect(ty));
+            if let Some(neighbours) = self.aliases.get(&s) {
+                for &n in neighbours {
+                    if !visited.contains(&n) {
+                        queue.push(n);
+                    }
                 }
-                _ => break,
             }
         }
     }
@@ -169,8 +174,9 @@ impl Ctx {
     /// or fn-param variable shadows the outer. `None` clears the type entry so
     /// a shadowing binding of unknown type doesn't keep an outer narrowing
     /// (but the name is still in scope via `locals`, so an unbound check
-    /// doesn't fire on it). Always clears any guard-alias *and* let-alias
-    /// entry for `sym` (a fresh binding doesn't inherit either).
+    /// doesn't fire on it). Disconnects `sym` from the alias graph entirely
+    /// — removes its bin and also removes it from every neighbour's bin —
+    /// so a fresh binding doesn't inherit aliases through stale back-edges.
     fn bind(&self, sym: Symbol, ty: Option<Ty>) -> Ctx {
         let mut c = self.clone();
         match ty {
@@ -183,7 +189,13 @@ impl Ctx {
         }
         c.locals.insert(sym);
         c.guards.remove(&sym);
-        c.aliases.remove(&sym);
+        if let Some(neighbours) = c.aliases.remove(&sym) {
+            for n in neighbours {
+                if let Some(set) = c.aliases.get_mut(&n) {
+                    set.remove(&sym);
+                }
+            }
+        }
         c
     }
     /// Record that `sym` was let-bound to the result of testing `target` for
@@ -198,16 +210,18 @@ impl Ctx {
         c.guards.insert(sym, (target, ty));
         c
     }
-    /// Record `(let (sym target) …)` — a let-binding alias. Lets narrowing on
-    /// either name propagate to the other via `narrow_chain`. Self-aliases
-    /// are rejected (no-op): `(let (x x) …)` shadows the outer `x` and
-    /// `aliasing` itself would create a one-step cycle that adds nothing.
+    /// Record `(let (sym target) …)` — an undirected alias. Each side gets
+    /// the other added to its neighbour-set, so a later `narrow` on either
+    /// reaches both via `narrow_chain`'s BFS. Self-aliases are rejected
+    /// (no-op): `(let (x x) …)` shadows the outer `x` and "aliasing itself"
+    /// would just add a vacuous self-loop.
     fn add_alias(&self, sym: Symbol, target: Symbol) -> Ctx {
         if sym == target {
             return self.clone();
         }
         let mut c = self.clone();
-        c.aliases.insert(sym, target);
+        c.aliases.entry(sym).or_default().insert(target);
+        c.aliases.entry(target).or_default().insert(sym);
         c
     }
     /// Record a top-level `(def/defn/defmacro name …)` so subsequent forms in
@@ -1003,6 +1017,18 @@ mod tests {
         check_form(&interp.heap, form)
     }
 
+    /// `warnings` but with macroexpansion — what `(check 'form)` and
+    /// `check-file` actually do. Required to exercise post-expansion shapes
+    /// like `match` (a `defmacro` whose pattern compiler lowers to
+    /// `let`+`if`+`%eq`), threading macros, and the test-framework wrappers.
+    fn warnings_expanded(src: &str) -> Vec<String> {
+        let mut interp = crate::Interp::new();
+        let form = reader::read_one(&mut interp.heap, src).expect("parse");
+        let form =
+            crate::eval::macros::macroexpand_all(&mut interp.heap, form, interp.root).unwrap();
+        check_form(&interp.heap, form)
+    }
+
     #[test]
     fn flags_literal_misuse_of_primitives() {
         assert!(warnings("(first 5)")
@@ -1663,8 +1689,10 @@ mod tests {
     #[test]
     fn match_literal_pattern_narrows_the_scrutinee() {
         // `(match x (5 (first x)))` — the literal-int pattern asserts x : int;
-        // `(first x)` in the body must then flag.
-        let w = warnings("(match x (5 (first x)) (_ nil))");
+        // `(first x)` in the body must then flag. Goes through macroexpansion
+        // because `match` is a `defmacro` whose pattern compiler lowers to
+        // `let`+`if`+`%eq`; the checker's narrowing rides the lowered shape.
+        let w = warnings_expanded("(match x (5 (first x)) (_ nil))");
         assert!(
             w.iter().any(|s| s.contains("first") && s.contains("int")),
             "match int-literal pattern should narrow x: {:?}",
@@ -1675,7 +1703,7 @@ mod tests {
     #[test]
     fn match_keyword_pattern_narrows_the_scrutinee() {
         // Mirror of the int case for a keyword literal.
-        let w = warnings("(match x (:foo (first x)) (_ nil))");
+        let w = warnings_expanded("(match x (:foo (first x)) (_ nil))");
         assert!(
             w.iter().any(|s| s.contains("first") && s.contains("keyword")),
             "match keyword-literal pattern should narrow x: {:?}",
