@@ -161,6 +161,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "register", Arity::exact(2), register_name);
     def(heap, "node-name", Arity::exact(0), node_name);
     def(heap, "nodes", Arity::exact(0), nodes);
+    def(heap, "monitor-node", Arity::exact(1), monitor_node);
 }
 
 /// Docstrings + parameter names for the public primitives, so `(doc 'name)`,
@@ -239,6 +240,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("register", &["name", "pid"], "Bind a local name so peers can address this process via {:name name :node this-node}. Returns the pid."),
     ("node-name", &[], "This runtime's node name (:nonode until node-start)."),
     ("nodes", &[], "A list of currently connected peer node names."),
+    ("monitor-node", &["name"], "Get [:nodedown name] when the link to node `name` goes down (heartbeat timeout or close)."),
 ];
 
 /// The `(params, doc)` for a primitive `name`, or `(&[], "")` if undocumented.
@@ -1151,6 +1153,14 @@ fn register_name(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 /// `(node-name)` — this runtime's node name (`:nonode` until `node-start`).
 fn node_name(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::Keyword(crate::dist::local_node()))
+}
+
+/// `(monitor-node name)` — the calling process is sent `[:nodedown name]` when a
+/// link to `name` goes down (heartbeat timeout or clean close). Returns the name.
+fn monitor_node(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    let name = expect_node_name("monitor-node", arg(args, 0))?;
+    crate::dist::monitor_node(name, crate::process::self_pid());
+    Ok(Value::Keyword(name))
 }
 
 /// `(nodes)` — a list of currently connected peer node names.

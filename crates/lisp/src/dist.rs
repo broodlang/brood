@@ -30,11 +30,11 @@
 
 use std::collections::HashMap;
 use std::io::{self, Cursor, Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::net::{Shutdown, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
-use std::sync::{LazyLock, RwLock};
-use std::time::Duration;
+use std::sync::{Arc, LazyLock, Once, RwLock};
+use std::time::{Duration, Instant};
 
 use crate::core::value::{self, Symbol};
 use crate::process::{self, Message};
@@ -50,6 +50,23 @@ const MAX_FRAME: usize = 64 * 1024 * 1024;
 /// can't pin a thread forever (the steady-state reader has the timeout cleared —
 /// it *should* block until the next message arrives).
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How often the (single, shared) heartbeat thread probes each link with a `Ping`
+/// and checks liveness. Idle-gated: a `Ping` is a 5-byte frame, only sent on the
+/// tick, never per message.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
+
+/// A link with no inbound frame (data, `Ping`, or `Pong`) for this long is
+/// declared **down**: we `shutdown` its socket, which tears it down and fires
+/// `[:nodedown name]` to its watchers. Several heartbeat intervals, so a single
+/// dropped probe doesn't flap a healthy link.
+const DOWN_AFTER: Duration = Duration::from_secs(6);
+
+/// Monotonic clock base, so `last_seen` can live in an `AtomicU64` of millis.
+static START: LazyLock<Instant> = LazyLock::new(Instant::now);
+fn now_millis() -> u64 {
+    START.elapsed().as_millis() as u64
+}
 
 // ----- node identity ---------------------------------------------------------
 
@@ -92,10 +109,27 @@ pub(crate) fn is_local(node: Symbol) -> bool {
 
 // ----- connection + name tables ----------------------------------------------
 
-/// A live link to a peer node: its writer thread's inbox (length-framed bytes).
+/// A live link to a peer node.
 struct Conn {
+    /// A generation id, unique per physical connection. Teardown removes a `NODES`
+    /// entry only if the stored link still has *this* id, so an evicted/old link's
+    /// reader can't clobber a newer replacement (see `drop_link`).
+    id: u64,
+    /// Which node *initiated* this link. The tie-break for a duplicate keeps the
+    /// link initiated by the lexicographically smaller node name, computed
+    /// identically on both ends (see `establish`).
+    connector: Symbol,
+    /// The writer thread's inbox (length-framed bytes).
     tx: Sender<Vec<u8>>,
+    /// A handle to the socket, for `shutdown` — the single teardown lever.
+    sock: Arc<TcpStream>,
+    /// Millis (on the `START` clock) of the last inbound frame. The heartbeat
+    /// thread reads this to decide liveness; the reader writes it.
+    last_seen: Arc<AtomicU64>,
 }
+
+/// Source of per-connection generation ids.
+static NEXT_LINK: AtomicU64 = AtomicU64::new(0);
 
 /// Connected peer node-name → its connection.
 static NODES: LazyLock<RwLock<HashMap<Symbol, Conn>>> =
@@ -106,9 +140,20 @@ static NODES: LazyLock<RwLock<HashMap<Symbol, Conn>>> =
 static NAMES: LazyLock<RwLock<HashMap<Symbol, u64>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
+/// Node-name → pids that asked to watch it (`monitor-node`). Each gets a
+/// `[:nodedown name]` message when a link to that node tears down.
+static NODE_MONITORS: LazyLock<RwLock<HashMap<Symbol, Vec<u64>>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
 /// `(register name pid)` — bind a local name to a local process id.
 pub(crate) fn register(name: Symbol, id: u64) {
     NAMES.write().unwrap().insert(name, id);
+}
+
+/// `(monitor-node name pid)` — deliver `[:nodedown name]` to `pid` when a link to
+/// `name` goes down. Persistent (fires on each down) until the process exits.
+pub(crate) fn monitor_node(name: Symbol, pid: u64) {
+    NODE_MONITORS.write().unwrap().entry(name).or_default().push(pid);
 }
 
 /// Connected peer node names (for `(nodes)`).
@@ -191,12 +236,29 @@ pub(crate) fn node_start(name: Symbol, addr: &str, cookie: String) -> io::Result
     Ok(())
 }
 
+/// Which end opened a connection — the tie-break for a duplicate keeps the link
+/// initiated by the smaller node name, so both ends need to know who that is.
+#[derive(Clone, Copy, PartialEq)]
+enum Role {
+    /// We dialed (`connect`) — the initiator is us.
+    Initiator,
+    /// We accepted — the initiator is the peer.
+    Responder,
+}
+
 /// `(connect "name@host:port")` — dial a peer and complete the client handshake.
 /// Returns the peer's (authoritative) node name on success.
 pub(crate) fn connect(spec: &str) -> io::Result<Symbol> {
-    let (_claimed_name, addr) = spec
+    let (claimed_name, addr) = spec
         .split_once('@')
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "expected name@host:port"))?;
+    // Best-effort de-dup: if we already have a link to the named node, reuse it
+    // instead of dialing a redundant one. (A genuine simultaneous-connect race is
+    // still resolved by the tie-break in `establish`.)
+    let claimed = value::intern(claimed_name);
+    if NODES.read().unwrap().contains_key(&claimed) {
+        return Ok(claimed);
+    }
     let mut stream = TcpStream::connect(addr)?;
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
     // Client speaks first: send our Hello, then read the peer's.
@@ -213,7 +275,7 @@ pub(crate) fn connect(spec: &str) -> io::Result<Symbol> {
         _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "expected Hello")),
     };
     stream.set_read_timeout(None)?; // steady-state reader blocks until the next message
-    establish(peer, stream);
+    establish(peer, stream, Role::Initiator);
     Ok(peer)
 }
 
@@ -234,7 +296,7 @@ fn accept(mut stream: TcpStream) -> io::Result<()> {
     };
     write_frame(&mut stream, &Frame::Hello { node: name, cookie })?;
     stream.set_read_timeout(None)?; // steady-state reader blocks until the next message
-    establish(peer, stream);
+    establish(peer, stream, Role::Responder);
     Ok(())
 }
 
@@ -251,44 +313,127 @@ fn check_cookie(presented: &str) -> io::Result<()> {
     }
 }
 
-/// Register the link and spawn its reader + writer threads.
-fn establish(peer: Symbol, stream: TcpStream) {
-    let write_half = match stream.try_clone() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("dist: cannot split socket for {}: {}", value::symbol_name(peer), e);
-            return;
+/// Register the authenticated link and spawn its reader + writer threads —
+/// resolving a duplicate against any existing link to the same peer first.
+fn establish(peer: Symbol, stream: TcpStream, role: Role) {
+    // Who initiated *this* connection (the tie-break key).
+    let connector = match role {
+        Role::Initiator => local_node(),
+        Role::Responder => peer,
+    };
+    let sock = Arc::new(stream);
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    let last_seen = Arc::new(AtomicU64::new(now_millis()));
+    let id = NEXT_LINK.fetch_add(1, Ordering::Relaxed);
+
+    // Decide winner vs. any existing link, and register atomically under the lock.
+    // Compare connectors by *name* (spelling) — interned ids differ per process,
+    // but both ends share the names, so they pick the same physical link.
+    let evicted: Option<Conn> = {
+        let mut nodes = NODES.write().unwrap();
+        match nodes.get(&peer) {
+            Some(existing)
+                if value::symbol_name(connector) >= value::symbol_name(existing.connector) =>
+            {
+                // The existing link wins (its connector sorts first, or it's the
+                // same initiator = a plain duplicate). We lose: close our socket
+                // and don't register or spawn.
+                let _ = sock.shutdown(Shutdown::Both);
+                return;
+            }
+            _ => {
+                // We win (or there was no existing link). Take over the slot; any
+                // evicted link is torn down below, outside the lock.
+                let old = nodes.remove(&peer);
+                nodes.insert(
+                    peer,
+                    Conn {
+                        id,
+                        connector,
+                        tx: tx.clone(),
+                        sock: Arc::clone(&sock),
+                        last_seen: Arc::clone(&last_seen),
+                    },
+                );
+                old
+            }
         }
     };
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
-    NODES.write().unwrap().insert(peer, Conn { tx });
+    if let Some(old) = evicted {
+        let _ = old.sock.shutdown(Shutdown::Both); // its reader unblocks, no-ops on the new id
+    }
 
-    // The two threads tear each other down so a link never half-leaks:
-    // - reader dies (peer closed / bad frame) → it removes the `NODES` entry,
-    //   which drops the `Conn`'s `tx`, ending the writer's `for … in rx`.
-    // - writer dies (write error / peer half-closed) → it `shutdown`s the shared
-    //   socket, which unblocks the reader's `read`, and the reader then does the
-    //   `NODES` removal. Either way both threads + the socket are freed once.
+    ensure_heartbeat();
+
+    // Writer: drain the channel onto the socket. On a write error, `shutdown` so
+    // the reader unblocks and runs the single teardown path.
+    let writer_sock = Arc::clone(&sock);
     std::thread::spawn(move || {
-        let mut sock = write_half;
         for bytes in rx {
-            if sock.write_all(&bytes).is_err() {
-                let _ = sock.shutdown(std::net::Shutdown::Both); // wake the reader to clean up
+            if (&*writer_sock).write_all(&bytes).is_err() {
+                let _ = writer_sock.shutdown(Shutdown::Both);
                 break;
             }
         }
     });
+
+    // Reader: every inbound frame refreshes liveness; a `Ping` is answered with a
+    // `Pong`. On EOF/error (incl. a `shutdown` from the writer or the heartbeat)
+    // it runs `drop_link`, which removes the entry iff it's still this generation.
+    let reader_sock = Arc::clone(&sock);
+    let reader_tx = tx;
+    let pong = frame_bytes(&Frame::Pong).expect("encode Pong");
     std::thread::spawn(move || {
-        let mut sock = stream;
+        let mut r: &TcpStream = &reader_sock;
         loop {
-            match read_frame(&mut sock) {
-                Ok(Frame::Send { target, msg }) => deliver_inbound(target, msg),
-                Ok(Frame::Hello { .. }) => {} // unexpected mid-stream; ignore
-                Err(_) => break,              // peer closed or protocol error
+            match read_frame(&mut r) {
+                Ok(frame) => {
+                    last_seen.store(now_millis(), Ordering::Relaxed);
+                    match frame {
+                        Frame::Send { target, msg } => deliver_inbound(target, msg),
+                        Frame::Ping => {
+                            let _ = reader_tx.send(pong.clone());
+                        }
+                        Frame::Pong | Frame::Hello { .. } => {}
+                    }
+                }
+                Err(_) => break, // peer closed, protocol error, or a deliberate shutdown
             }
         }
-        NODES.write().unwrap().remove(&peer);
+        drop_link(peer, id);
     });
+}
+
+/// Remove a link from `NODES` **iff** it's still this generation (so an evicted or
+/// replaced link can't tear down its successor), and fire node-down watchers.
+fn drop_link(peer: Symbol, id: u64) {
+    let removed = {
+        let mut nodes = NODES.write().unwrap();
+        match nodes.get(&peer) {
+            Some(c) if c.id == id => {
+                nodes.remove(&peer);
+                true
+            }
+            _ => false,
+        }
+    };
+    if removed {
+        fire_nodedown(peer);
+    }
+}
+
+/// Deliver `[:nodedown name]` to every process that called `(monitor-node name)`.
+fn fire_nodedown(peer: Symbol) {
+    let watchers = NODE_MONITORS.read().unwrap().get(&peer).cloned();
+    if let Some(watchers) = watchers {
+        let msg = Message::Vector(vec![
+            Message::Keyword(value::intern("nodedown")),
+            Message::Keyword(peer),
+        ]);
+        for w in watchers {
+            process::deliver(w, msg.clone());
+        }
+    }
 }
 
 /// An inbound `Send` from a peer: resolve the target locally and deliver.
@@ -303,6 +448,45 @@ fn deliver_inbound(target: Target, msg: Message) {
     process::deliver(id, msg);
 }
 
+// ----- liveness (heartbeat) --------------------------------------------------
+
+static HEARTBEAT_STARTED: Once = Once::new();
+
+/// Start the single shared heartbeat thread once, on the first established link.
+fn ensure_heartbeat() {
+    HEARTBEAT_STARTED.call_once(|| {
+        std::thread::spawn(heartbeat_loop);
+    });
+}
+
+/// Probe every link each interval: if it's been silent past `DOWN_AFTER`, declare
+/// it down (shutdown → the reader runs `drop_link` → `[:nodedown]`); otherwise
+/// send a `Ping` (the peer answers `Pong`, refreshing its `last_seen`). One thread
+/// for all links; a `Ping` is sent only on the tick, never per message.
+fn heartbeat_loop() {
+    let ping = frame_bytes(&Frame::Ping).expect("encode Ping");
+    let down_after = DOWN_AFTER.as_millis() as u64;
+    loop {
+        std::thread::sleep(HEARTBEAT_INTERVAL);
+        let now = now_millis();
+        // Snapshot under the lock, then act without holding it (shutdown/send can block).
+        let links: Vec<(Arc<TcpStream>, Sender<Vec<u8>>, u64)> = {
+            let nodes = NODES.read().unwrap();
+            nodes
+                .values()
+                .map(|c| (Arc::clone(&c.sock), c.tx.clone(), c.last_seen.load(Ordering::Relaxed)))
+                .collect()
+        };
+        for (sock, tx, last) in links {
+            if now.saturating_sub(last) > down_after {
+                let _ = sock.shutdown(Shutdown::Both); // dead peer → tear down via the reader
+            } else {
+                let _ = tx.send(ping.clone());
+            }
+        }
+    }
+}
+
 // ----- wire frames -----------------------------------------------------------
 
 enum Frame {
@@ -310,10 +494,17 @@ enum Frame {
     Hello { node: Symbol, cookie: String },
     /// Route `msg` to `target` on the receiving node.
     Send { target: Target, msg: Message },
+    /// Liveness probe; the peer answers with `Pong`.
+    Ping,
+    /// Reply to a `Ping`. (Receiving any frame refreshes liveness; these two carry
+    /// no payload, just keep an idle link demonstrably alive.)
+    Pong,
 }
 
 const FRAME_HELLO: u8 = 0;
 const FRAME_SEND: u8 = 1;
+const FRAME_PING: u8 = 2;
+const FRAME_PONG: u8 = 3;
 const TARGET_PID: u8 = 0;
 const TARGET_NAME: u8 = 1;
 
@@ -360,6 +551,8 @@ fn encode_frame(w: &mut Vec<u8>, frame: &Frame) -> io::Result<()> {
             encode_target(w, target);
             encode_msg(w, msg)?;
         }
+        Frame::Ping => w.push(FRAME_PING),
+        Frame::Pong => w.push(FRAME_PONG),
     }
     Ok(())
 }
@@ -374,6 +567,8 @@ fn decode_frame(r: &mut Cursor<Vec<u8>>) -> io::Result<Frame> {
             target: decode_target(r)?,
             msg: decode_msg(r)?,
         }),
+        FRAME_PING => Ok(Frame::Ping),
+        FRAME_PONG => Ok(Frame::Pong),
         t => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("unknown frame tag {t}"),

@@ -25,6 +25,7 @@
 
 use crate::core::heap::Heap;
 use crate::core::value::{self, Tag, Value};
+use crate::error::Pos;
 use crate::types::Ty;
 
 /// A callee's type signature: the expected type of each fixed positional
@@ -148,9 +149,20 @@ fn expr_ty(heap: &Heap, form: Value) -> Option<Ty> {
     }
 }
 
-/// Check one macro-expanded form, returning a warning per provable misuse. Empty
-/// when nothing is provably wrong (which includes "not enough static info").
+/// Check one form, returning a warning per provable misuse. Empty when nothing is
+/// provably wrong (which includes "not enough static info").
 pub fn check_form(heap: &Heap, form: Value) -> Vec<String> {
+    check_located(heap, form)
+        .into_iter()
+        .map(|(_, msg)| msg)
+        .collect()
+}
+
+/// Like [`check_form`], but each warning carries the source `Pos` of the call it
+/// was found in (when known) — for `file:line:col:` diagnostics from `brood
+/// --check` / `nest check`. The position is the *call form*'s, recorded by the
+/// reader; an unrecorded form (e.g. one a macro synthesised) yields `None`.
+pub fn check_located(heap: &Heap, form: Value) -> Vec<(Option<Pos>, String)> {
     let mut out = Vec::new();
     check_into(heap, form, &mut out);
     out
@@ -166,7 +178,7 @@ fn skips_body(name: &str) -> bool {
     )
 }
 
-fn check_into(heap: &Heap, form: Value, out: &mut Vec<String>) {
+fn check_into(heap: &Heap, form: Value, out: &mut Vec<(Option<Pos>, String)>) {
     let Value::Pair(_) = form else { return };
     let Some(items) = list_items(heap, form) else {
         return;
@@ -187,14 +199,16 @@ fn check_into(heap: &Heap, form: Value, out: &mut Vec<String>) {
                 // it's never flagged — no false positives.
                 if let Some(arg_ty) = expr_ty(heap, arg) {
                     if arg_ty.is_disjoint(param) {
-                        out.push(format!(
+                        let msg = format!(
                             "{}: argument {} expects {}, got {} ({})",
                             name,
                             i + 1,
                             param,
                             arg_ty,
                             crate::syntax::printer::print(heap, arg),
-                        ));
+                        );
+                        // Locate to the call form (a Pair the reader positioned).
+                        out.push((heap.form_pos(form), msg));
                     }
                 }
             }

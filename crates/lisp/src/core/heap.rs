@@ -6,7 +6,9 @@
 //!
 //! - **LOCAL** — the per-process [`Heap`]: everything a process allocates at
 //!   runtime (cons cells, vectors, strings, call-frame env scopes). Plain
-//!   `Vec`s, mutated through `&mut Heap`, so the whole `Heap` is `Send`.
+//!   `Vec`s, mutated through `&mut Heap`, so the whole `Heap` is `Send`. Has a
+//!   per-slab **free list** so the tracing [`collect`](Self::collect) can reclaim
+//!   dead slots; `alloc_*` pop the free list before extending the slab.
 //! - **PRELUDE** — a [`SharedCode`] region (behind `Arc`) holding the prelude +
 //!   builtins. Built once, frozen, shared read-only by every runtime.
 //! - **RUNTIME** — a [`RuntimeCode`] region (behind `Arc`) holding a runtime's
@@ -16,10 +18,18 @@
 //!   code slabs are append-only (old code is never moved or freed, so in-flight
 //!   calls keep running it); the global bindings are a `RwLock<HashMap>`.
 //!
-//! No GC yet (the arenas only grow).
+//! GC is **per-process, single-threaded, non-moving mark-sweep** (ADR-035, see
+//! `docs/memory-model.md`). Handles are stable across collection — a live
+//! object's slab slot is never moved — so a Rust local holding a rooted handle
+//! stays valid. PRELUDE and RUNTIME are not swept (they hold no LOCAL refs, by
+//! the promotion invariant — see [`promote`](Self::promote)); the collector
+//! only touches LOCAL. Roots are gathered explicitly at the outermost-eval
+//! safepoint (see the `GC_BLOCK` discipline in `process.rs`).
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+use smallvec::SmallVec;
 
 use crate::core::value::{
     Closure, ClosureId, EnvId, MapId, NativeFn, NativeId, PairId, StrId, Symbol, Value, VecId,
@@ -45,15 +55,35 @@ macro_rules! region_ref {
     };
 }
 
+/// Inline storage for an env frame's bindings. A frame holds a handful (function
+/// params, a `let`'s names), so keeping them inline avoids a heap allocation per
+/// call / `let` — which the byte-counting global allocator would otherwise tax
+/// with atomics on the hot path. Spills to the heap past the inline capacity.
+type EnvVars = SmallVec<[(Symbol, Value); 4]>;
+
 struct EnvFrame {
     // A small association list, not a `HashMap`: frames hold a handful of
     // bindings (function params, a `let`'s names), and they're immutable after
     // their bind phase (ADR-026 — no `set!`), so a build-once / scan-to-read
-    // `Vec` is lighter than hashing and wins at these sizes. Lookups scan from
+    // vector is lighter than hashing and wins at these sizes. Lookups scan from
     // the end so a later binding shadows an earlier one of the same name
     // (sequential `let`).
-    vars: Vec<(Symbol, Value)>,
+    vars: EnvVars,
     parent: Option<EnvId>,
+}
+
+/// Lower bound on the GC threshold (live LOCAL objects), so tiny heaps don't
+/// thrash by collecting between every few allocations. Overridden by the
+/// `BROOD_GC_STRESS` env var (set to `1` to collect at every safepoint — a
+/// debug aid that flushes out rooting bugs by maximising free-list churn).
+fn gc_floor() -> usize {
+    if std::env::var_os("BROOD_GC_STRESS").is_some() {
+        0
+    } else {
+        // 64 KB of cons cells worth (~3000 entries) is well above per-call
+        // working sets but trivial vs the GBs a long-running process would leak.
+        64 * 1024
+    }
 }
 
 /// Re-tag a value's handle from the local region to the immutable **prelude**
@@ -85,6 +115,45 @@ struct Slabs {
     closures: Vec<Closure>,
     natives: Vec<NativeFn>,
     envs: Vec<EnvFrame>,
+}
+
+/// Per-slab free lists for the LOCAL heap: indices of dead slots reclaimed by
+/// [`Heap::collect`] that the next [`Heap::alloc_pair`] (etc.) reuses before
+/// extending the slab. Empty for the PRELUDE/RUNTIME regions (those are
+/// append-only / frozen). No `natives` list — natives are only allocated during
+/// the prelude build (then frozen into PRELUDE), so the LOCAL natives slab
+/// stays empty at runtime and isn't swept.
+#[derive(Default)]
+struct FreeLists {
+    pairs: Vec<u32>,
+    vectors: Vec<u32>,
+    maps: Vec<u32>,
+    strings: Vec<u32>,
+    closures: Vec<u32>,
+    envs: Vec<u32>,
+}
+
+impl FreeLists {
+    fn clear(&mut self) {
+        self.pairs.clear();
+        self.vectors.clear();
+        self.maps.clear();
+        self.strings.clear();
+        self.closures.clear();
+        self.envs.clear();
+    }
+
+    /// Drop free-list entries pointing into the *truncated* region (≥ each cap).
+    /// Called after [`Heap::reset_local_to`] truncates the slabs so we don't try
+    /// to reuse indices that no longer exist.
+    fn purge_above(&mut self, cp: &LocalCheckpoint) {
+        self.pairs.retain(|&i| (i as usize) < cp.pairs);
+        self.vectors.retain(|&i| (i as usize) < cp.vectors);
+        self.maps.retain(|&i| (i as usize) < cp.maps);
+        self.strings.retain(|&i| (i as usize) < cp.strings);
+        self.closures.retain(|&i| (i as usize) < cp.closures);
+        self.envs.retain(|&i| (i as usize) < cp.envs);
+    }
 }
 
 /// The immutable, read-only prelude region (closures, code values, the
@@ -135,11 +204,40 @@ struct CodeSlabs {
 /// global bindings table. All of a runtime's inner processes share one of these
 /// (via `Arc::clone`), which is what makes a `def` propagate to them — and what
 /// keeps separate runtimes (nodes) independent (each has its own).
+/// A fast hasher for `Symbol` (`u32`) keys. The globals table is consulted on
+/// every global reference (every operator / prelude call), and the default
+/// SipHash is overkill — and notably slow to finalize — for a single `u32`.
+/// FxHash-style: one wrapping multiply per key. `write_u32` is the only path that
+/// runs for a `Symbol`, and multiplying by an odd constant is a bijection, so
+/// distinct symbols never collide.
+#[derive(Default)]
+pub struct SymbolHasher(u64);
+
+impl std::hash::Hasher for SymbolHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.0 = (self.0 ^ i as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        // Fallback for any non-`u32` key (none on the hot path); kept correct.
+        for &b in bytes {
+            self.0 = (self.0 ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+}
+
+/// A `HashMap` keyed by interned `Symbol`s, using the fast [`SymbolHasher`].
+pub type SymbolMap<V> = HashMap<Symbol, V, std::hash::BuildHasherDefault<SymbolHasher>>;
+
 pub struct RuntimeCode {
     code: CodeSlabs,
     /// The global bindings (prelude + user `def`s). Read on every global lookup,
     /// written on `def` (the only mutation). The values point into PRELUDE or RUNTIME.
-    globals: RwLock<HashMap<Symbol, Value>>,
+    globals: RwLock<SymbolMap<Value>>,
     /// Where each global was *defined* — file + form position, recorded at load
     /// time before macroexpansion (ADR-031). Lives here, beside `globals`, so it
     /// is shared across a runtime's processes and updated by a redefinition, the
@@ -161,7 +259,7 @@ impl Default for RuntimeCode {
     fn default() -> Self {
         RuntimeCode {
             code: CodeSlabs::default(),
-            globals: RwLock::new(HashMap::new()),
+            globals: RwLock::new(SymbolMap::default()),
             def_sites: RwLock::new(HashMap::new()),
         }
     }
@@ -172,7 +270,7 @@ impl RuntimeCode {
     /// (`symbol -> prelude value`). The code slabs start empty — user `def`s
     /// append to them. Inner processes share this whole thing via `Arc`.
     pub fn seeded(bindings: &[(Symbol, Value)]) -> Self {
-        let mut globals = HashMap::with_capacity(bindings.len());
+        let mut globals = SymbolMap::with_capacity_and_hasher(bindings.len(), Default::default());
         for &(s, v) in bindings {
             globals.insert(s, v);
         }
@@ -188,10 +286,10 @@ impl RuntimeCode {
     /// `insert`/replace, so a writer that panicked left the map structurally
     /// sound — recovering keeps one bad process from wedging every other one
     /// that later looks up or defines a global.
-    fn globals_read(&self) -> RwLockReadGuard<'_, HashMap<Symbol, Value>> {
+    fn globals_read(&self) -> RwLockReadGuard<'_, SymbolMap<Value>> {
         self.globals.read().unwrap_or_else(|e| e.into_inner())
     }
-    fn globals_write(&self) -> RwLockWriteGuard<'_, HashMap<Symbol, Value>> {
+    fn globals_write(&self) -> RwLockWriteGuard<'_, SymbolMap<Value>> {
         self.globals.write().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -208,6 +306,10 @@ impl RuntimeCode {
 
 pub struct Heap {
     local: Slabs,
+    /// Reclaimed-but-not-yet-reused LOCAL slots. Grown by [`Heap::collect`]'s
+    /// sweep, drained by `alloc_*` before extending the slab. PRELUDE/RUNTIME
+    /// (append-only) have no equivalent.
+    local_free: FreeLists,
     prelude: Arc<SharedCode>,
     runtime: Arc<RuntimeCode>,
     /// This process's global scope. For a real runtime this is [`EnvId::GLOBAL`]
@@ -231,6 +333,25 @@ pub struct Heap {
     /// Empty whenever no `binding` is active — so it's free on the common path
     /// and holds no LOCAL handles across a top-level arena reset.
     dynamics: Vec<(Symbol, Value)>,
+    /// Explicit GC root stack: any LOCAL [`Value`] alive across a possible GC
+    /// safepoint that isn't already reachable from `env`/`expr`/`dynamics` lives
+    /// here. In practice this is one site — `eval_str`/`eval_source` push the
+    /// unevaluated forms vector here for the duration of the per-form eval (the
+    /// only depth-0-reachable transient surface, by the `GC_BLOCK==1` invariant
+    /// — see `docs/memory-model.md`). Empty on the hot path.
+    roots: Vec<Value>,
+    /// Adaptive GC trigger: collect when the LOCAL live-object count crosses
+    /// this. Recomputed after each [`collect`](Self::collect) as
+    /// `max(GC_FLOOR, 2 * live)`. `usize::MAX` while [`gc_enabled`] is false
+    /// (prelude build) so the safepoint check is a single compare with no GC.
+    ///
+    /// [`gc_enabled`]: Self::gc_enabled
+    gc_threshold: usize,
+    /// GC switch. `false` during the prelude *build* (`Heap::new`), `true` for
+    /// real process heaps (`Heap::with_regions`); also forced `false` when the
+    /// prelude `SharedCode` `Arc` is the default (empty) one, since a missing
+    /// prelude means a freshly-built builder heap that's about to freeze.
+    gc_enabled: bool,
 }
 
 impl Default for Heap {
@@ -241,16 +362,23 @@ impl Default for Heap {
 
 impl Heap {
     /// A bare heap with empty shared regions — used to *build* the prelude
-    /// before freezing it. Real runtimes use [`Heap::with_regions`].
+    /// before freezing it. Real runtimes use [`Heap::with_regions`]. GC is
+    /// disabled here (the prelude is built once, then frozen — collection would
+    /// be wasted work and could complicate `freeze_as_shared_code` if it left
+    /// holes mid-build).
     pub fn new() -> Self {
         Heap {
             local: Slabs::default(),
+            local_free: FreeLists::default(),
             prelude: Arc::default(),
             runtime: Arc::default(),
             global: EnvId::local(0),
             form_pos: HashMap::new(),
             current_file: None,
             dynamics: Vec::new(),
+            roots: Vec::new(),
+            gc_threshold: usize::MAX,
+            gc_enabled: false,
         }
     }
 
@@ -260,12 +388,16 @@ impl Heap {
     pub fn with_regions(prelude: Arc<SharedCode>, runtime: Arc<RuntimeCode>) -> Self {
         Heap {
             local: Slabs::default(),
+            local_free: FreeLists::default(),
             prelude,
             runtime,
             global: EnvId::local(0),
             form_pos: HashMap::new(),
             current_file: None,
             dynamics: Vec::new(),
+            roots: Vec::new(),
+            gc_threshold: gc_floor(),
+            gc_enabled: true,
         }
     }
 
@@ -287,6 +419,9 @@ impl Heap {
     ///
     /// Env frames are dropped: shared (top-level) closures capture the global
     /// env symbolically (`env == None`), so nothing references a frame.
+    /// GC is disabled in a builder heap (`Heap::new` sets `gc_enabled = false`),
+    /// so the slabs have no holes here — indices are dense and stable across
+    /// the local→prelude re-tag.
     pub fn freeze_as_shared_code(self, root: EnvId) -> (SharedCode, Vec<(Symbol, Value)>) {
         let bindings: Vec<(Symbol, Value)> = self.local.envs[root.index()]
             .vars
@@ -376,6 +511,12 @@ impl Heap {
         if !self.form_pos.is_empty() {
             self.form_pos.retain(|&i, _| i < cp.pairs);
         }
+        // Drop free-list entries pointing into the truncated tail — those slots
+        // no longer exist. Entries below the cap remain valid (holes inside the
+        // surviving prefix that a later `alloc_*` can still reuse).
+        self.local_free.purge_above(&cp);
+        // The threshold is relative to live count; reclamation here is so cheap
+        // that we let the next `gc_due` check recompute against the smaller heap.
     }
 
     // ----- source-position metadata (editor tooling; see docs/tooling.md) -----
@@ -462,14 +603,28 @@ impl Heap {
     }
 
     // ----- allocation (always into the local heap) -----
+    //
+    // Each allocator pops a [`FreeLists`] entry (a slot the GC reclaimed and
+    // overwrites in place) before extending the slab — so the slab's `len()`
+    // stays bounded by the high-water live count, not the lifetime allocation
+    // total. Atomic w.r.t. the slab's `Vec`: a free index is always < current
+    // `len`, so writing in place is well-defined.
 
     pub fn alloc_pair(&mut self, head: Value, tail: Value) -> Value {
+        if let Some(idx) = self.local_free.pairs.pop() {
+            self.local.pairs[idx as usize] = (head, tail);
+            return Value::Pair(PairId::local(idx as usize));
+        }
         let idx = self.local.pairs.len();
         self.local.pairs.push((head, tail));
         Value::Pair(PairId::local(idx))
     }
 
     pub fn alloc_vector(&mut self, items: Vec<Value>) -> Value {
+        if let Some(idx) = self.local_free.vectors.pop() {
+            self.local.vectors[idx as usize] = items;
+            return Value::Vector(VecId::local(idx as usize));
+        }
         let idx = self.local.vectors.len();
         self.local.vectors.push(items);
         Value::Vector(VecId::local(idx))
@@ -479,6 +634,10 @@ impl Heap {
     /// duplicate keys). The map operations below build the entry vector — keyed
     /// by structural equality — and hand it here.
     pub fn alloc_map(&mut self, entries: Vec<(Value, Value)>) -> Value {
+        if let Some(idx) = self.local_free.maps.pop() {
+            self.local.maps[idx as usize] = entries;
+            return Value::Map(MapId::local(idx as usize));
+        }
         let idx = self.local.maps.len();
         self.local.maps.push(entries);
         Value::Map(MapId::local(idx))
@@ -530,18 +689,33 @@ impl Heap {
     }
 
     pub fn alloc_string(&mut self, s: &str) -> Value {
+        if let Some(idx) = self.local_free.strings.pop() {
+            // Reuse the slot's `String` buffer by replacing its contents — saves
+            // the existing capacity if `s` fits.
+            let slot = &mut self.local.strings[idx as usize];
+            slot.clear();
+            slot.push_str(s);
+            return Value::Str(StrId::local(idx as usize));
+        }
         let idx = self.local.strings.len();
         self.local.strings.push(s.to_string());
         Value::Str(StrId::local(idx))
     }
 
     pub fn alloc_closure(&mut self, c: Closure) -> ClosureId {
+        if let Some(idx) = self.local_free.closures.pop() {
+            self.local.closures[idx as usize] = c;
+            return ClosureId::local(idx as usize);
+        }
         let idx = self.local.closures.len();
         self.local.closures.push(c);
         ClosureId::local(idx)
     }
 
     pub fn alloc_native(&mut self, f: NativeFn) -> Value {
+        // Natives are only allocated during the prelude build (then frozen into
+        // PRELUDE); the LOCAL natives slab stays empty at runtime and isn't
+        // swept, so there's no free list to consult.
         let idx = self.local.natives.len();
         self.local.natives.push(f);
         Value::Native(NativeId::local(idx))
@@ -557,6 +731,18 @@ impl Heap {
     pub fn list_with_tail(&mut self, items: Vec<Value>, tail: Value) -> Value {
         let mut acc = tail;
         for item in items.into_iter().rev() {
+            acc = self.alloc_pair(item, acc);
+        }
+        acc
+    }
+
+    /// Build a proper list from a slice — no intermediate `Vec`. For the hot path
+    /// where the items already live in a buffer, notably a `& rest` parameter's
+    /// trailing args (every variadic call, which includes all the arithmetic and
+    /// comparison operators).
+    pub fn list_from_slice(&mut self, items: &[Value]) -> Value {
+        let mut acc = Value::Nil;
+        for &item in items.iter().rev() {
             acc = self.alloc_pair(item, acc);
         }
         acc
@@ -835,9 +1021,18 @@ impl Heap {
     }
 
     pub fn new_env(&mut self, parent: Option<EnvId>) -> EnvId {
+        if let Some(idx) = self.local_free.envs.pop() {
+            // Reuse the slot, dropping its old contents. `EnvVars` is a
+            // `SmallVec` so this releases any spilled bindings; the inline
+            // capacity stays with the slot.
+            let slot = &mut self.local.envs[idx as usize];
+            slot.vars.clear();
+            slot.parent = parent;
+            return EnvId::local(idx as usize);
+        }
         let idx = self.local.envs.len();
         self.local.envs.push(EnvFrame {
-            vars: Vec::new(),
+            vars: EnvVars::new(),
             parent,
         });
         EnvId::local(idx)
@@ -900,7 +1095,7 @@ impl Heap {
     /// then be rolled back (this is what the `%isolate` primitive does for
     /// `:isolated` tests). Only meaningful when no other process is writing the
     /// table concurrently.
-    pub fn snapshot_globals(&self) -> HashMap<Symbol, Value> {
+    pub fn snapshot_globals(&self) -> SymbolMap<Value> {
         self.runtime.globals_read().clone()
     }
 
@@ -917,7 +1112,7 @@ impl Heap {
     /// append-only code slabs are *not* reclaimed (there's no GC yet), but the
     /// bindings revert — so a name `def`'d since the snapshot becomes unbound
     /// again, and a rebound name returns to its earlier value.
-    pub fn restore_globals(&self, snapshot: HashMap<Symbol, Value>) {
+    pub fn restore_globals(&self, snapshot: SymbolMap<Value>) {
         *self.runtime.globals_write() = snapshot;
     }
 

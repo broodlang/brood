@@ -152,3 +152,95 @@ fn mismatched_cookie_is_rejected() {
         "expected the bad-cookie handshake to be rejected.\n--- stdout ---\n{stdout}"
     );
 }
+
+/// An `:echo` server that replies `[:welcome]` to `[:hi from]`, and exits cleanly
+/// on `[:bye from]` (its main process returns → the OS process exits → the link's
+/// socket closes). Shared by the de-dup and node-down tests.
+fn echo_server_src(port: u16) -> String {
+    format!(
+        r#"
+(node-start :a "127.0.0.1:{port}" "secret")
+(register :echo (self))
+(defn serve ()
+  (receive
+    ([:hi from]  (do (send from [:welcome]) (serve)))
+    ([:bye _]    :exiting)               ; return → the runtime exits
+    (_ (serve))))
+(serve)
+"#
+    )
+}
+
+/// Connecting to the same peer twice yields **one** link, not two — the second
+/// `connect` reuses the existing one. Messaging still works.
+#[test]
+fn duplicate_connect_is_deduplicated() {
+    let dir = std::env::temp_dir().join(format!("brood-dist-dup-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let port_a = free_port();
+    let port_b = free_port();
+
+    let client = format!(
+        r#"
+(node-start :b "127.0.0.1:{port_b}" "secret")
+(connect "a@127.0.0.1:{port_a}")
+(connect "a@127.0.0.1:{port_a}")          ; second connect — should reuse, not add
+(send {{:name :echo :node :a}} [:hi (self)])
+(receive ([:welcome] :ok) (after 5000 (throw "no welcome")))
+(println (str "NODES=" (nodes)))           ; expect exactly (:a)
+(send {{:name :echo :node :a}} [:bye (self)])
+"#
+    );
+
+    let mut a = spawn_brood(&dir, "server.blsp", &echo_server_src(port_a));
+    wait_until_listening(port_a);
+    let b = spawn_brood(&dir, "client.blsp", &client);
+    let out = b.wait_with_output().expect("client finished");
+    let _ = a.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains("NODES=(:a)"),
+        "expected a single deduplicated link.\n--- stdout ---\n{stdout}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `(monitor-node :a)` delivers `[:nodedown :a]` when the link to `:a` drops. The
+/// client establishes the link (proven by a `:welcome` round-trip, after which the
+/// monitor is registered), asks `:a` to exit, and must then receive the nodedown.
+#[test]
+fn node_down_is_detected() {
+    let dir = std::env::temp_dir().join(format!("brood-dist-down-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let port_a = free_port();
+    let port_b = free_port();
+
+    let client = format!(
+        r#"
+(node-start :b "127.0.0.1:{port_b}" "secret")
+(connect "a@127.0.0.1:{port_a}")
+(monitor-node :a)
+(send {{:name :echo :node :a}} [:hi (self)])
+(receive ([:welcome] :ok) (after 5000 (throw "no welcome")))   ; link + monitor are up
+(send {{:name :echo :node :a}} [:bye (self)])                  ; make :a exit
+(receive ([:nodedown :a] (println "NODEDOWN-OK"))
+         (after 10000 (throw "no nodedown")))
+"#
+    );
+
+    let mut a = spawn_brood(&dir, "server.blsp", &echo_server_src(port_a));
+    wait_until_listening(port_a);
+    let b = spawn_brood(&dir, "client.blsp", &client);
+    let out = b.wait_with_output().expect("client finished");
+    let _ = a.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains("NODEDOWN-OK"),
+        "expected a [:nodedown :a] after the peer exited.\n--- stdout ---\n{stdout}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

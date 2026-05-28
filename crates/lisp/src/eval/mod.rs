@@ -7,12 +7,11 @@
 
 pub mod macros;
 
-use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use smallvec::SmallVec;
 
-use crate::core::heap::Heap;
+use crate::core::heap::{Heap, SymbolMap};
 use crate::core::value::{self, Closure, ClosureId, EnvId, NativeId, Symbol, Value};
 use crate::error::{LispError, LispResult};
 
@@ -40,7 +39,9 @@ const SPECIAL_NAMES: &[&str] = &[
     "let*",
 ];
 
-static SPECIAL_IDS: LazyLock<HashMap<Symbol, &'static str>> = LazyLock::new(|| {
+// Keyed by interned symbol id — use the fast integer hasher, since `special_name`
+// hits this on every combination (the default SipHash-on-a-`u32` is overhead).
+static SPECIAL_IDS: LazyLock<SymbolMap<&'static str>> = LazyLock::new(|| {
     SPECIAL_NAMES
         .iter()
         .map(|&n| (value::intern(n), n))
@@ -57,11 +58,6 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
     let mut env = env;
 
     'tail: loop {
-        // Reduction-counted preemption: bound the work a process does before it
-        // yields its worker (fairness — a CPU-bound process can't monopolise a
-        // core). A cheap thread-local decrement; a no-op for the root thread. See
-        // `process::tick`.
-        crate::process::tick();
         match expr {
             Value::Sym(s) => {
                 return heap.env_get(env, s).ok_or_else(|| {
@@ -91,6 +87,14 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
             Value::Pair(_) => {} // combination, handled below
             _ => return Ok(expr),
         }
+
+        // Reduction-counted preemption: bound the work a process does before it
+        // yields its worker (fairness — a CPU-bound process can't monopolise a
+        // core). Counted per *combination* (a function call / special form), which
+        // is where loops actually occur — leaf evals (symbols, literals) return
+        // above without a tick. A cheap thread-local decrement; a no-op for the
+        // root thread. See `process::tick`.
+        crate::process::tick();
 
         let (head, rest) = match expr {
             Value::Pair(p) => heap.pair(p),
@@ -351,7 +355,7 @@ fn bind_params(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> Result<EnvId, 
         }
     }
     if let Some(rest_sym) = heap.closure(cl).rest {
-        let rest_list = heap.list(argv[idx..].to_vec());
+        let rest_list = heap.list_from_slice(&argv[idx..]);
         heap.env_define(scope, rest_sym, rest_list);
     }
     Ok(scope)

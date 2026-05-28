@@ -51,6 +51,7 @@ usage:
   brood                   start the REPL
   brood <file>...         run each file in order
   brood --test <file>...  run the file(s) as a single in-language test suite
+  brood --check <file>... type-check the file(s) (advisory; see docs/types.md)
 
 options:
   -j, --max-parallel N    cap concurrent spawned processes (0 = unlimited)
@@ -76,7 +77,13 @@ fn main() {
     // register cases, then `(run-tests)` once). Project-wide discovery lives in
     // `nest test`, not here. The flag is stripped before file parsing.
     let test_mode = raw.iter().any(|a| a == "--test");
-    let raw: Vec<String> = raw.into_iter().filter(|a| a != "--test").collect();
+    // `--check <file>...` type-checks without running (advisory). `nest check`
+    // does the project-wide walk.
+    let check_mode = raw.iter().any(|a| a == "--check");
+    let raw: Vec<String> = raw
+        .into_iter()
+        .filter(|a| a != "--test" && a != "--check")
+        .collect();
 
     let (files, max_parallel) = parse_args(raw);
     if let Some(n) = max_parallel {
@@ -84,6 +91,11 @@ fn main() {
     }
 
     let mut interp = Interp::new();
+
+    if check_mode {
+        run_check_files(&mut interp, &files);
+        return;
+    }
 
     if test_mode {
         run_test_files(&mut interp, &files);
@@ -191,6 +203,49 @@ fn run_test_files(interp: &mut Interp, files: &[String]) {
     }
     if let Err(e) = interp.eval_str("(run-tests)") {
         report_error(&e);
+        std::process::exit(1);
+    }
+}
+
+/// `brood --check <file>...`: read each file and run the advisory type checker
+/// over its top-level forms, printing a GNU `FILE:LINE:COL: warning:` line per
+/// provable misuse. Advisory (never runs the code, never gates a run), but the
+/// command exits non-zero when it finds warnings so CI / `nest check` can use it.
+/// See docs/types.md.
+fn run_check_files(interp: &mut Interp, files: &[String]) {
+    if files.is_empty() {
+        eprintln!("brood --check: expected a file, e.g. `brood --check foo.blsp`");
+        std::process::exit(2);
+    }
+    let mut warned = false;
+    for path in files {
+        let src = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("brood: cannot read {}: {}", path, e);
+                std::process::exit(1);
+            }
+        };
+        // Read (recording positions) without evaluating, then check the surface
+        // forms — `check_into` already descends into nested calls.
+        let forms = match brood::syntax::reader::read_all_positioned(&mut interp.heap, &src) {
+            Ok(forms) => forms,
+            Err(e) => {
+                report_error(&e.or_file(path.clone()));
+                std::process::exit(1);
+            }
+        };
+        for (form, _) in forms {
+            for (pos, msg) in brood::types::check::check_located(&interp.heap, form) {
+                warned = true;
+                match pos {
+                    Some(p) => println!("{}:{}:{}: warning: {}", path, p.line, p.col, msg),
+                    None => println!("{}: warning: {}", path, msg),
+                }
+            }
+        }
+    }
+    if warned {
         std::process::exit(1);
     }
 }
