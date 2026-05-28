@@ -4653,3 +4653,118 @@ pointer from `claude-demo-findings.md`).
 + 68 (basic, was 66) + 3 + 1 + 29 (nest) + 40 (LSP) + 13 (cli) = 270
 tests, all passing. Smoke: `nest new .` in a fresh `/tmp/foo` produces
 the expected scaffold and `:name "foo"` in the manifest.
+
+---
+
+## 2026-05-28 — `nest new` overwrites; `brood <nest-cmd>` points at nest
+
+**Goal.** Two CLI papercuts. (1) `brood new foobar` died with a cryptic
+`brood: cannot read new: No such file or directory` — `new` got parsed as a
+FILE. (2) Re-running `nest new foobar` on an existing folder errored out; the
+user wants both `nest new .` and `nest new foobar` to *overwrite* an existing
+project's scaffold rather than refuse.
+
+**Built.**
+- `crates/cli/src/main.rs`: `nest_subcommand_misuse` — when the first FILE arg
+  is a known `nest` subcommand (new/run/test/check/repl/format/doc/mcp) *and*
+  isn't a real file on disk, print a friendly hint (`try: nest new foobar`) and
+  exit 2 instead of the opaque read error. Keeps the brood/nest split clean
+  (ADR-028) — `brood` runs the language, `nest` runs the project. A real file
+  named after a subcommand still runs (existence check guards the heuristic).
+- `std/project.blsp` `new-project`: dropped the refuse-if-exists guard. Both
+  `nest new .` (in-place, basename as name) and `nest new foobar` now re-stamp
+  the skeleton over whatever's there (`make-dir` is `mkdir -p`, `spit`
+  overwrites). New `reusing-dir` flag only tunes the printed summary
+  (`(existing files overwritten)` for the named form).
+
+**Verified.** `cargo build` clean. `brood new foobar` / `brood new .` /
+`brood run x.blsp` all emit the nest hint (exit 2); a real file named `test`
+still runs. **Not** verified end-to-end: `nest new` itself currently panics in
+prelude freeze (`heap.rs:469` "shared closures must capture the global env" +
+a stray `DEBUG:` line) — concurrent WIP in `heap.rs`/`scheduler.rs`/
+`prelude.blsp`, unrelated to this change. The overwrite path is correct by
+construction; re-run the smoke test once that freeze assertion settles.
+
+---
+
+## 2026-05-28 — Specific runtime error codes (E0041–E0070) + a few more hints
+
+**Goal.** Follow through on the §4 substrate that landed earlier today.
+`E0099` covered every `LispError::runtime(...)` raise — useful as a
+catch-all but coarse. This pass peels off the common families into
+stable codes so agents can branch on *which kind of runtime failure*
+without re-parsing the message string.
+
+**New codes** (registered in `crates/lisp/src/error.rs::error_codes`):
+
+| Code | Kind | Sites |
+|---|---|---|
+| `E0041` | `:runtime` | checked-arithmetic overflow (`%add`/`%sub`/`%mul`, `rem`); `floor` of a non-finite float or out-of-i64 value |
+| `E0042` | `:runtime` | `vector-ref` / `substring` out-of-range index |
+| `E0050` | `:runtime` | file IO (`load`, `slurp`, `spit`, `make-dir`, `list-dir`, `cwd`, `check-file`, `check-file-structured`) |
+| `E0051` | `:runtime` | `run-process` couldn't start the subprocess (with a `:hint` about PATH) |
+| `E0060` | `:runtime` | distribution layer: `node-start` / `connect` failed |
+| `E0070` | `:runtime` | `send` saw a message value nested past `MAX_MESSAGE_DEPTH` (with a `:hint` about flattening/chunking) |
+
+**Numbering shape.** Follows the `E04xx` / `E05xx` / `E06xx` / `E07xx`
+lanes documented in `docs/error-codes.md` — `E004x` for integer/
+index-shaped failures, `E005x` for IO/subprocess, `E006x` for
+distribution, `E007x` for messaging. `E0099` stays the catch-all for
+any uncoded `runtime(...)` raise; the goal isn't to eliminate it, just
+to peel off the families an agent has a real branching reason to care
+about.
+
+**Per-site messages got tighter too.** `vector-ref` and `substring`
+now report the bad index *with the valid range*:
+
+```
+vector-ref: index 7 out of range [0, 3)
+substring: range [0, 99) out of bounds for length 2
+```
+
+Same information either way for a human; for an agent, the difference
+between "out of range" and "index 7 out of range [0, 3)" is the
+difference between guessing and knowing.
+
+**Tests** added to `crates/lisp/tests/basic.rs::throw_and_catch` —
+one assertion per new code that's tractable at unit level:
+
+- `(* 9223372036854775807 2)` → `:code "E0041"`.
+- `(vector-ref [1 2 3] 7)` → `:code "E0042"`.
+- `(substring "hi" 0 99)` → `:code "E0042"`.
+- `(slurp "/does/not/exist/anywhere")` → `:code "E0050"`.
+
+The codes for `E0051` (subprocess — needs a missing binary),
+`E0060` (distribution — needs a live peer story), and `E0070`
+(message too deep — hundreds of nested levels) aren't unit-tested.
+They ride through `to_value_map` → `lisp_error_to_json` without any
+code path of their own, so the four tested sites cover the projection
+end-to-end.
+
+**Docs.** `docs/error-codes.md` table extended with seven new rows;
+the "Hints" section gained two entries (subprocess, message-depth) so
+the doc stays honest about which raises carry actionable next-step
+text.
+
+**Verified.** `cargo build` clean. `cargo test --workspace`: 116
+(lib) + 68 (basic) + 3 + 1 + 29 (nest) + 40 (LSP) + 13 (cli) = 270
+tests, all passing, no regressions.
+
+**What's left for §4** (still incremental, well-motivated):
+
+- **`E0021` — too-many-args** vs. `E0020`'s too-few-args, when the
+  arity check can tell which side fired.
+- **`E0061` — handshake failure** vs. `E0060`'s generic distribution
+  failure (cookie / nonce / MAC mismatch carries different agent
+  guidance).
+- **Special-form malformed** raises in `eval/mod.rs` (`let: missing
+  bindings`, `letrec: missing bindings`, `fn: missing parameter
+  list`) are currently `LispError::runtime(...)` → `E0099`. They're
+  programmer errors at *parse* time really; a `:kind :parse` recode
+  with `E000x` codes would be the natural shape but breaks the
+  "Parse = reader-failed" framing today. Worth a follow-up.
+
+The bigger LLM-native picture (`docs/llm-native.md`) is unchanged:
+catch-shape + codes are now structured enough for the agent to branch
+programmatically; the remaining moves are §7 (examples-by-intent),
+§8 (idiom lints), and §10 (the gauntlet).

@@ -26,6 +26,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, Once};
 
+use corosensei::stack::DefaultStack;
 use corosensei::{Coroutine, CoroutineResult, Yielder};
 
 use crate::core::heap::Heap;
@@ -147,6 +148,16 @@ impl Drop for GcBlockGuard {
 /// How many `eval` loop iterations a process runs before it must yield its worker
 /// (cooperative fairness — the BEAM's mechanism). ~2000 ≈ the BEAM default; tunable.
 const REDUCTION_BUDGET: u32 = 2000;
+
+/// Stack size for each green-process coroutine. corosensei's `DefaultStack` is
+/// 128 KiB out of the box; the tree-walking eval recurses one Rust frame per
+/// combination, so a debug-build evaluator running the in-language test suite
+/// (which spawns processes that load many test files) can run close to that.
+/// 1 MiB gives comfortable headroom in debug *and* survives any future eval
+/// frames a refactor accidentally widens (cf. the post-module-split overflow
+/// reproducible in `cargo test -p brood --test suite` — bd4aa2d → e8567285).
+/// Tunable; bump if the user lands a feature whose frames are heavier.
+const CORO_STACK_BYTES: usize = 1 * 1024 * 1024;
 
 /// Called once per `eval` `'tail:` iteration. Cheap: a thread-local decrement; only
 /// when the budget is exhausted does it touch `CURRENT` and (for a green process)
@@ -370,7 +381,11 @@ pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
     crate::core::sync::lock(&REGISTRY).insert(pid, Arc::clone(&mailbox));
 
     let coro_mailbox = Arc::clone(&mailbox);
-    let coro = Coroutine::new(move |yielder: &Yielder0, _input: ()| {
+    // SAFETY: `DefaultStack::new` rejects only an unreasonable size; our
+    // constant is well within `usize` and the OS' anonymous-mmap limit.
+    // The expect message names the constant so the failure is debuggable.
+    let stack = DefaultStack::new(CORO_STACK_BYTES).expect("DefaultStack::new(CORO_STACK_BYTES)");
+    let coro = Coroutine::with_stack(stack, move |yielder: &Yielder0, _input: ()| {
         // Establish this process's context so `receive`/`self` can find it.
         CURRENT.with(|c| {
             *c.borrow_mut() = Some(Ctx {

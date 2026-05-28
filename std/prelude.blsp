@@ -610,24 +610,24 @@
 ;; `worker`. When the process dies, its registered name is reaped automatically
 ;; (`process::deregister` calls `dist::unregister_dead_pid`), so a fresh
 ;; reload spawns again — no stale entries.
-(defmacro spawn (& args)
+;; spawn — two shapes via arity dispatch:
+;;   (spawn expr)         → (%spawn (fn () expr))             — anonymous
+;;   (spawn name expr)    → (%spawn-named name (fn () expr))  — idempotent on name
+;; The named form replaces the `defonce *worker* (spawn …)` hot-reload
+;; pattern (ADR-039). The reloaded file sees the name is alive and the
+;; second `(spawn :worker …)` is a no-op — the running worker keeps going,
+;; picking up the new code via the next global lookup. When the process
+;; dies, its registered name is reaped (`process::deregister` →
+;; `dist::unregister_dead_pid`), so a later reload re-spawns cleanly.
+(defmacro spawn (head & rest)
   "Run an expression in a new green process; returns its pid. Two shapes:
-
-  - `(spawn expr)` — anonymous; spawns unconditionally.
-  - `(spawn name expr)` — named & idempotent on `name`. If a live process is
-    already registered under `name` (a keyword/symbol), returns its pid
-    without spawning. The hot-reload-friendly form: reloading a file
-    containing this expression doesn't fire a second worker.
-
-  `expr` is unevaluated and runs in the child (so `(self)` there is the child's
-  pid — capture the parent's pid in a `let` first if you need it). Free
-  locals in `expr` are captured lexically (the closure carries them); free
-  globals resolve in the child — which is why the thunk is shippable to
-  another node (ADR-033)."
-  (cond
-    (%eq (count args) 1) `(%spawn (fn () ~(first args)))
-    (%eq (count args) 2) `(%spawn-named ~(first args) (fn () ~(second args)))
-    else (throw "spawn: expected (spawn expr) or (spawn name expr)")))
+  - `(spawn expr)` — anonymous.
+  - `(spawn name expr)` — named & idempotent: returns the existing pid if
+    a live process is already registered under `name`. The hot-reload-friendly
+    form (reloading the file doesn't fire a second worker)."
+  (if (empty? rest)
+    `(%spawn (fn () ~head))
+    `(%spawn-named ~head (fn () ~(first rest)))))
 
 ;; A long-lived `:remote-spawn` server: the receiver-side machinery behind the
 ;; `remote-spawn` macro. Receives `[:run thunk]` messages and applies the thunk

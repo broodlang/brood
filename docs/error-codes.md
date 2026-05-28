@@ -52,15 +52,22 @@ Codes are grouped by [`ErrorKind`]:
 | `E0020` | `:arity` | `bind_params`, `LispError::arity(...)` | `((fn (x) x))` |
 | `E0030` | `:type` | `LispError::wrong_type(...)` / `type_err(...)` | `(first 5)` |
 | `E0040` | `:runtime` | `%div` / `rem` (with a `:hint`) | `(/ 1 0)`, `(rem 1 0)` |
+| `E0041` | `:runtime` | checked arithmetic overflow; `floor` of non-finite or out-of-i64 float | `(* 9223372036854775807 2)`, `(floor 1e20)` |
+| `E0042` | `:runtime` | index out of range (`vector-ref`, `substring`) | `(vector-ref [1 2 3] 7)`, `(substring "hi" 0 99)` |
+| `E0050` | `:runtime` | file IO (`load`, `slurp`, `spit`, `make-dir`, `list-dir`, `cwd`, `check-file`, `check-file-structured`) | `(slurp "/no/such/file")` |
+| `E0051` | `:runtime` | `run-process` couldn't start the subprocess (with a `:hint` about PATH) | `(run-process "nope" [])` |
+| `E0060` | `:runtime` | distribution layer: `node-start` / `connect` failed | `(connect "bad@host")` |
+| `E0070` | `:runtime` | `send` saw a message value nested past `MAX_MESSAGE_DEPTH` (with a `:hint` about chunking) | a recursively self-referential structure |
 | `E0099` | `:runtime` | `LispError::runtime(...)` (catch-all) | uncoded runtime raises |
 
 `E0099` is the catch-all assigned by `LispError::runtime(...)` — every
 runtime raise picks it up unless the site overrides via
-`.with_code(error_codes::SOMETHING)`. As specific raises get their own codes
-(integer overflow → `E0041`, IO failures → `E0050`, …), they slot into the
-`E04xx` range and the message becomes more diagnostic. Reserve any
-`E04xx` only when you also intend to attach a `:hint` — the diagnostic
-value of a code without one is small.
+`.with_code(error_codes::SOMETHING)`. As specific raises get their own
+codes, they slot into the `E04xx` / `E05xx` / `E06xx` / `E07xx` ranges
+(integer-shaped failures in `E004x`, IO/process in `E005x`, distribution
+in `E006x`, messaging in `E007x`) and the message becomes more diagnostic.
+Reserve any new code only when you also intend to attach a `:hint` — the
+diagnostic value of a code without one is small.
 
 ## Adding a new code
 
@@ -81,6 +88,8 @@ A hint always names an actionable next step, not just a description:
 |---|---|
 | `(/ x 0)` / `(rem x 0)` | `guard the denominator: (when (not= y 0) (/ x y))` |
 | Unbound symbol in a green process | `this fired inside a spawned process — if it happens only under fan-out load, the scheduler may be racing prelude lookups; try -j 1 …` |
+| `run-process` failure | `check that the program is on PATH and the args are well-formed` |
+| Message too deep (`E0070`) | `messages cross processes by deep copy — flatten or chunk the data (e.g. send a list of items rather than one nested tree)` |
 
 The scheduler-race hint is conditional: it attaches only when the unbound
 error is raised inside a green (spawned) process — checked via

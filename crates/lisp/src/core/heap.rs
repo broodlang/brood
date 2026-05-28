@@ -1046,7 +1046,23 @@ impl Heap {
 
     pub fn env_get(&self, env: EnvId, sym: Symbol) -> Option<Value> {
         let mut cur = Some(env);
+        let start = env;
+        let mut steps = 0u32;
+        if std::env::var_os("BROOD_DEBUG_FREED").is_some()
+            && env != EnvId::GLOBAL
+            && env.region() == LOCAL
+            && self.local_free.envs.contains(&(env.index() as u32))
+        {
+            eprintln!(
+                "[envget] FREED-SLOT-AS-ENV idx={} sym={} ({}) in_green={}",
+                env.index(),
+                sym,
+                crate::core::value::symbol_name(sym),
+                crate::process::in_green_process(),
+            );
+        }
         while let Some(e) = cur {
+            steps += 1;
             if e == EnvId::GLOBAL {
                 // A dynamic var resolves to its innermost active `binding`, if
                 // any, before the shared global default. The stack is empty
@@ -1058,7 +1074,24 @@ impl Heap {
                         return Some(v);
                     }
                 }
-                return self.runtime.globals_read().get(&sym).copied();
+                let r = self.runtime.globals_read().get(&sym).copied();
+                if r.is_none()
+                    && std::env::var_os("BROOD_DEBUG_ENV").is_some()
+                    && crate::process::in_green_process()
+                {
+                    let g_len = self.runtime.globals_read().len();
+                    let runtime_addr = std::sync::Arc::as_ptr(&self.runtime) as usize;
+                    eprintln!(
+                        "[envget] GREEN miss-at-GLOBAL sym={} ({}) start={:#x} steps={} globals_len={} runtime_addr={:#x}",
+                        sym,
+                        crate::core::value::symbol_name(sym),
+                        start.0,
+                        steps,
+                        g_len,
+                        runtime_addr
+                    );
+                }
+                return r;
             }
             let frame = self.env_frame(e);
             // Scan from the end: a later binding shadows an earlier same-named one.
@@ -1066,6 +1099,15 @@ impl Heap {
                 return Some(v);
             }
             cur = frame.parent;
+        }
+        if std::env::var_os("BROOD_DEBUG_ENV").is_some() && crate::process::in_green_process() {
+            eprintln!(
+                "[envget] GREEN miss-no-GLOBAL sym={} ({}) start={:#x} steps={}",
+                sym,
+                crate::core::value::symbol_name(sym),
+                start.0,
+                steps
+            );
         }
         None
     }

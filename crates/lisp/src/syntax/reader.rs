@@ -1,18 +1,26 @@
 //! The reader: turns source text into [`Value`]s. It allocates pairs/vectors/
 //! strings, so it threads `&mut Heap`.
+//!
+//! The character stream + trivia/atom/string-body primitives live in
+//! [`scanner`](super::scanner) and are shared with the CST. This module
+//! handles the *structural* parsing — open/close delimiters, dotted pairs,
+//! map literals, quote sigils — and the building of `Value`s through the
+//! heap. Lexical rules (where an atom ends, how to classify a token)
+//! continue to share [`atom`](super::atom).
 
 use crate::core::heap::Heap;
 use crate::core::value::{self, Value};
 use crate::error::{LispError, Pos};
 use crate::syntax::atom::{self, AtomKind};
+use crate::syntax::scanner::{Scanner, StringScan};
 
 /// Read every form in `src`.
 pub fn read_all(heap: &mut Heap, src: &str) -> Result<Vec<Value>, LispError> {
     let mut parser = Parser::new(heap, src);
     let mut forms = Vec::new();
     loop {
-        parser.skip_trivia();
-        if parser.at_end() {
+        parser.s.skip_trivia();
+        if parser.s.at_end() {
             break;
         }
         forms.push(parser.read_form()?);
@@ -27,11 +35,11 @@ pub fn read_all_positioned(heap: &mut Heap, src: &str) -> Result<Vec<(Value, Pos
     let mut parser = Parser::new(heap, src);
     let mut forms = Vec::new();
     loop {
-        parser.skip_trivia();
-        if parser.at_end() {
+        parser.s.skip_trivia();
+        if parser.s.at_end() {
             break;
         }
-        let start = parser.pos_at(parser.pos);
+        let start = parser.s.pos_at(parser.s.pos());
         let form = parser.read_form()?;
         forms.push((form, start));
     }
@@ -41,8 +49,8 @@ pub fn read_all_positioned(heap: &mut Heap, src: &str) -> Result<Vec<(Value, Pos
 /// Read exactly one form, ignoring any trailing input.
 pub fn read_one(heap: &mut Heap, src: &str) -> Result<Value, LispError> {
     let mut parser = Parser::new(heap, src);
-    parser.skip_trivia();
-    if parser.at_end() {
+    parser.s.skip_trivia();
+    if parser.s.at_end() {
         return Err(parser.err("unexpected end of input"));
     }
     parser.read_form()
@@ -50,8 +58,7 @@ pub fn read_one(heap: &mut Heap, src: &str) -> Result<Value, LispError> {
 
 struct Parser<'a> {
     heap: &'a mut Heap,
-    chars: Vec<char>,
-    pos: usize,
+    s: Scanner<'a>,
     depth: u32,
 }
 
@@ -64,11 +71,10 @@ struct Parser<'a> {
 const MAX_DEPTH: u32 = 256;
 
 impl<'a> Parser<'a> {
-    fn new(heap: &'a mut Heap, src: &str) -> Self {
+    fn new(heap: &'a mut Heap, src: &'a str) -> Self {
         Parser {
             heap,
-            chars: src.chars().collect(),
-            pos: 0,
+            s: Scanner::new(src),
             depth: 0,
         }
     }
@@ -90,30 +96,9 @@ impl<'a> Parser<'a> {
         self.depth -= 1;
     }
 
-    fn at_end(&self) -> bool {
-        self.pos >= self.chars.len()
-    }
-
-    /// The 1-based line/column of character index `idx`. Computed by scanning
-    /// from the start; only called on top-level form starts and parse errors,
-    /// so the cost is irrelevant.
-    fn pos_at(&self, idx: usize) -> Pos {
-        let mut line = 1u32;
-        let mut col = 1u32;
-        for &c in &self.chars[..idx.min(self.chars.len())] {
-            if c == '\n' {
-                line += 1;
-                col = 1;
-            } else {
-                col += 1;
-            }
-        }
-        Pos { line, col }
-    }
-
     /// A parse error tagged with the current position.
     fn err(&self, msg: impl Into<String>) -> LispError {
-        LispError::parse(msg).with_pos(self.pos_at(self.pos))
+        LispError::parse(msg).with_pos(self.s.pos_at(self.s.pos()))
     }
 
     /// A parse error tagged with a specific position (e.g. where a delimiter
@@ -122,41 +107,10 @@ impl<'a> Parser<'a> {
         LispError::parse(msg).with_pos(pos)
     }
 
-    fn peek(&self) -> Option<char> {
-        self.chars.get(self.pos).copied()
-    }
-
-    fn bump(&mut self) -> Option<char> {
-        let c = self.peek();
-        if c.is_some() {
-            self.pos += 1;
-        }
-        c
-    }
-
-    /// Skip whitespace (commas count as whitespace) and `;` line comments.
-    fn skip_trivia(&mut self) {
-        loop {
-            match self.peek() {
-                Some(c) if c.is_whitespace() || c == ',' => {
-                    self.pos += 1;
-                }
-                Some(';') => {
-                    while let Some(c) = self.peek() {
-                        self.pos += 1;
-                        if c == '\n' {
-                            break;
-                        }
-                    }
-                }
-                _ => break,
-            }
-        }
-    }
-
     fn read_form(&mut self) -> Result<Value, LispError> {
-        self.skip_trivia();
+        self.s.skip_trivia();
         let c = self
+            .s
             .peek()
             .ok_or_else(|| self.err("unexpected end of input"))?;
         // Every branch below that recurses through `read_form` is guarded by
@@ -197,9 +151,9 @@ impl<'a> Parser<'a> {
             }
             '~' => {
                 self.enter()?;
-                self.pos += 1;
-                let v = if self.peek() == Some('@') {
-                    self.pos += 1;
+                self.s.bump(); // '~'
+                let v = if self.s.peek() == Some('@') {
+                    self.s.bump();
                     let form = self.read_form()?;
                     Ok(self.wrap("unquote-splicing", form))
                 } else {
@@ -216,7 +170,7 @@ impl<'a> Parser<'a> {
 
     /// Read `<form>` and wrap it as `(tag form)`.
     fn read_wrapped(&mut self, tag: &str) -> Result<Value, LispError> {
-        self.pos += 1;
+        self.s.bump(); // sigil
         let form = self.read_form()?;
         Ok(self.wrap(tag, form))
     }
@@ -226,36 +180,36 @@ impl<'a> Parser<'a> {
     }
 
     fn read_seq(&mut self, close: char) -> Result<Value, LispError> {
-        let start = self.pos_at(self.pos); // position of the opening delimiter
-        self.pos += 1; // opening delimiter
+        let start = self.s.pos_at(self.s.pos()); // position of the opening delimiter
+        self.s.bump(); // opening delimiter
         let mut items = Vec::new();
         let mut tail = Value::Nil;
         loop {
-            self.skip_trivia();
-            match self.peek() {
+            self.s.skip_trivia();
+            match self.s.peek() {
                 None => return Err(self.err_at(start, "unclosed list (opened here)")),
                 Some(c) if c == close => {
-                    self.pos += 1;
+                    self.s.bump();
                     break;
                 }
                 // A lone `.` introduces an improper (dotted) tail: `(a . b)`.
-                Some('.') if self.is_dot_separator() => {
+                Some('.') if self.s.is_dot_separator() => {
                     if items.is_empty() {
                         return Err(self.err("dotted list needs an element before '.'"));
                     }
-                    self.pos += 1; // the '.'
-                    self.skip_trivia();
-                    match self.peek() {
+                    self.s.bump(); // the '.'
+                    self.s.skip_trivia();
+                    match self.s.peek() {
                         None => return Err(self.err("unclosed list")),
                         Some(c) if c == close => {
                             return Err(self.err("expected a form after '.' in dotted list"))
                         }
                         Some(_) => tail = self.read_form()?,
                     }
-                    self.skip_trivia();
-                    match self.peek() {
+                    self.s.skip_trivia();
+                    match self.s.peek() {
                         Some(c) if c == close => {
-                            self.pos += 1;
+                            self.s.bump();
                             break;
                         }
                         _ => return Err(self.err("expected one form after '.' before close")),
@@ -269,24 +223,16 @@ impl<'a> Parser<'a> {
         Ok(form)
     }
 
-    /// Is the `.` at the cursor a lone dotted-pair separator (followed by a
-    /// delimiter or end), rather than the start of an atom like `.5` or `.foo`?
-    fn is_dot_separator(&self) -> bool {
-        self.chars
-            .get(self.pos + 1)
-            .is_none_or(|&c| atom::is_delimiter(c))
-    }
-
     fn read_vector(&mut self) -> Result<Value, LispError> {
-        let start = self.pos_at(self.pos); // position of the opening '['
-        self.pos += 1; // '['
+        let start = self.s.pos_at(self.s.pos()); // position of the opening '['
+        self.s.bump(); // '['
         let mut items = Vec::new();
         loop {
-            self.skip_trivia();
-            match self.peek() {
+            self.s.skip_trivia();
+            match self.s.peek() {
                 None => return Err(self.err_at(start, "unclosed vector (opened here)")),
                 Some(']') => {
-                    self.pos += 1;
+                    self.s.bump();
                     break;
                 }
                 Some(_) => items.push(self.read_form()?),
@@ -300,21 +246,21 @@ impl<'a> Parser<'a> {
     /// canonicalises (last-wins dedup). Commas are whitespace, so
     /// `{:a 1, :b 2}` reads the same as `{:a 1 :b 2}`.
     fn read_map(&mut self) -> Result<Value, LispError> {
-        let start = self.pos_at(self.pos); // position of the opening '{'
-        self.pos += 1; // '{'
+        let start = self.s.pos_at(self.s.pos()); // position of the opening '{'
+        self.s.bump(); // '{'
         let mut pairs = Vec::new();
         loop {
-            self.skip_trivia();
-            match self.peek() {
+            self.s.skip_trivia();
+            match self.s.peek() {
                 None => return Err(self.err_at(start, "unclosed map (opened here)")),
                 Some('}') => {
-                    self.pos += 1;
+                    self.s.bump();
                     break;
                 }
                 Some(_) => {
                     let key = self.read_form()?;
-                    self.skip_trivia();
-                    match self.peek() {
+                    self.s.skip_trivia();
+                    match self.s.peek() {
                         Some('}') | None => {
                             return Err(self.err_at(
                                 start,
@@ -333,39 +279,18 @@ impl<'a> Parser<'a> {
     }
 
     fn read_string(&mut self) -> Result<Value, LispError> {
-        self.pos += 1; // opening quote
+        self.s.bump(); // opening quote
         let mut s = String::new();
-        loop {
-            match self.bump() {
-                None => return Err(self.err("unterminated string")),
-                Some('"') => break,
-                Some('\\') => match self.bump() {
-                    Some('n') => s.push('\n'),
-                    Some('t') => s.push('\t'),
-                    Some('r') => s.push('\r'),
-                    Some('e') => s.push('\u{1b}'), // ESC — for ANSI terminal control
-                    Some('0') => s.push('\0'),
-                    Some('\\') => s.push('\\'),
-                    Some('"') => s.push('"'),
-                    Some(other) => s.push(other),
-                    None => return Err(self.err("unterminated string escape")),
-                },
-                Some(c) => s.push(c),
-            }
+        match self.s.scan_string_body(Some(&mut s)) {
+            StringScan::Closed => Ok(self.heap.alloc_string(&s)),
+            StringScan::Unterminated => Err(self.err("unterminated string")),
         }
-        Ok(self.heap.alloc_string(&s))
     }
 
     fn read_atom(&mut self) -> Result<Value, LispError> {
-        let token_start = self.pos;
-        while let Some(c) = self.peek() {
-            if atom::is_delimiter(c) {
-                break;
-            }
-            self.pos += 1;
-        }
-        let token: String = self.chars[token_start..self.pos].iter().collect();
-        match atom::classify(&token) {
+        let token_start = self.s.pos();
+        let token = self.s.read_atom();
+        match atom::classify(token) {
             AtomKind::Nil => Ok(Value::Nil),
             AtomKind::Bool(b) => Ok(Value::Bool(b)),
             AtomKind::Int(i) => Ok(Value::Int(i)),
@@ -373,9 +298,9 @@ impl<'a> Parser<'a> {
             // `atom::classify` only returns `Keyword` for a non-empty `:`-prefixed
             // token, so dropping the `:` always leaves a non-empty name.
             AtomKind::Keyword => Ok(value::kw(&token[1..])),
-            AtomKind::Symbol => Ok(value::sym(&token)),
+            AtomKind::Symbol => Ok(value::sym(token)),
             AtomKind::IntOverflow => Err(self.err_at(
-                self.pos_at(token_start),
+                self.s.pos_at(token_start),
                 format!("integer literal out of range for i64: {}", token),
             )),
         }

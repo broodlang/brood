@@ -423,20 +423,20 @@ the `nest new` scaffolder."
 ;; hello and calls into it) + a paired test file for each, so `cd foobar && nest
 ;; test` *and* `nest run` both pass immediately. Also drops CLAUDE.md +
 ;; docs/brood-for-claude.md (the baked-in language guide) so the project is
-;; self-contained for AI-assisted editing. Errors on a bad name or an
-;; already-existing folder.
+;; self-contained for AI-assisted editing. Errors on a bad name; an existing
+;; folder is reused (its scaffold files overwritten), not rejected.
 (defn new-project (nm)
-  ;; `nest new .` means "scaffold into the current directory" (cargo init's
-  ;; shape). The project name is then the cwd's basename, the
-  ;; existing-directory check is skipped, and existing scaffold files get
-  ;; overwritten — the user asked for one over the other. Everything else
-  ;; (file list, templates, printed summary) is shared.
+  ;; `nest new .` scaffolds into the current directory (cargo init's shape);
+  ;; the project name is then the cwd's basename. Both forms — `nest new .` and
+  ;; `nest new foobar` — *overwrite* existing scaffold files rather than
+  ;; refusing on an existing folder: re-running `new` re-stamps the skeleton.
+  ;; `reusing-dir` only drives the printed summary. Everything else (file list,
+  ;; templates) is shared.
   (let (in-place (= nm ".")
-        actual-name (if in-place (path-basename (cwd)) nm))
+        actual-name (if in-place (path-basename (cwd)) nm)
+        reusing-dir (file-exists? nm))
     (unless (or in-place (project--valid-name? nm))
       (error "new: invalid project name '" nm "' (no '/' or spaces, and not empty)"))
-    (when (and (not in-place) (file-exists? nm))
-      (error "new: '" nm "' already exists"))
     (when (and in-place (= actual-name ""))
       (error "new: cwd has no basename — cannot derive a project name"))
     (let (src-dir (path-join nm "src")
@@ -454,7 +454,10 @@ the `nest new` scaffolder."
       (spit (path-join tests-dir "main_test.blsp") (project--main-test-template actual-name))
       (spit (path-join tests-dir "hello_test.blsp") (project--hello-test-template actual-name))
       (println (str "Created Brood project '" actual-name "'"
-                 (if in-place " (in-place — files in current directory overwritten)" "")))
+                 (cond
+                   in-place   " (in-place — files in current directory overwritten)"
+                   reusing-dir " (existing files overwritten)"
+                   else       "")))
       (println (str "  " nm "/project.blsp"))
       (println (str "  " nm "/CLAUDE.md"))
       (println (str "  " nm "/.mcp.json"))

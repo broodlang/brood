@@ -75,6 +75,15 @@ fn main() {
         brood::process::set_max_parallel(n);
     }
 
+    // A bare `brood new foo` (or run/test/... ) parses `new` as a FILE and dies
+    // with a cryptic "cannot read new". Project tooling lives in `nest`, not
+    // `brood` (ADR-028) — so when the first arg is plainly a `nest` subcommand
+    // and not a readable file, point the user there instead.
+    if let Some(hint) = nest_subcommand_misuse(&cli.files) {
+        eprintln!("{hint}");
+        std::process::exit(2);
+    }
+
     let mut interp = Interp::new();
 
     if cli.check {
@@ -225,6 +234,27 @@ fn run_files(interp: &mut Interp, files: &[String]) {
             }
         }
     }
+}
+
+/// If the first FILE is actually a `nest` subcommand the user typed at `brood`
+/// by mistake (and isn't a real file on disk), return a friendly hint pointing
+/// them at `nest`. Keeps the brood/nest split clean (ADR-028) — `brood` runs
+/// the language, `nest` runs the project — while turning the opaque "cannot
+/// read new" into an actionable message. Returns `None` for normal file runs.
+fn nest_subcommand_misuse(files: &[String]) -> Option<String> {
+    const NEST_CMDS: &[&str] = &[
+        "new", "run", "test", "check", "repl", "format", "doc", "mcp",
+    ];
+    let first = files.first()?;
+    if !NEST_CMDS.contains(&first.as_str()) || std::path::Path::new(first).exists() {
+        return None;
+    }
+    // Reconstruct the command they probably meant, e.g. `nest new foobar`.
+    let suggestion = format!("nest {}", files.join(" "));
+    Some(format!(
+        "brood: `{first}` is a `nest` command, not a `brood` one.\n       \
+         try:  {suggestion}\n\n(brood runs the language; nest runs the project — ADR-028)"
+    ))
 }
 
 /// `BROOD_NO_CHECK=1` disables the implicit pre-run advisory check for the

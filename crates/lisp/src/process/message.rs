@@ -102,7 +102,12 @@ fn to_message_rec(
     if depth >= MAX_MESSAGE_DEPTH {
         return Err(LispError::runtime(format!(
             "value nested deeper than {MAX_MESSAGE_DEPTH} levels (cannot serialise)",
-        )));
+        ))
+        .with_code(crate::error::error_codes::MESSAGE_TOO_DEEP)
+        .with_hint(
+            "messages cross processes by deep copy — flatten or chunk the data \
+             (e.g. send a list of items rather than one nested tree)",
+        ));
     }
     Ok(match v {
         Value::Nil => Message::Nil,

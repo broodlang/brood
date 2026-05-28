@@ -342,40 +342,53 @@ fn two(args: &[Value], who: &str) -> Result<(Value, Value), LispError> {
 
 // ---------- numeric ----------
 
+/// Require a value of a particular shape, or raise a self-identifying type
+/// error attributed to `who` (the primitive that needed it). One macro behind
+/// every `expect_*` helper below — the alternative was six hand-written
+/// `match v { Value::X(id) => Ok(id), _ => Err(wrong_type(…, "kind", v)) }`
+/// copies that drifted on the error helper used (`expect_node_name` chose
+/// `type_err` over `wrong_type` and lost the offending value from its
+/// message). The macro lifts that one rule into one place; the human-readable
+/// `$expected` string is what the error message will say.
+macro_rules! expect {
+    ($heap:expr, $who:expr, $v:expr, $expected:literal, $($pat:pat => $extract:expr),+ $(,)?) => {
+        match $v {
+            $($pat => Ok($extract),)+
+            __other => Err(LispError::wrong_type($heap, $who, $expected, __other)),
+        }
+    };
+}
+
 /// Require a number, coerced to `f64`; otherwise a self-identifying type error
 /// attributed to `who` (the primitive that needed it).
 fn expect_number(heap: &Heap, who: &str, v: Value) -> Result<f64, LispError> {
-    match v {
-        Value::Int(n) => Ok(n as f64),
-        Value::Float(f) => Ok(f),
-        _ => Err(LispError::wrong_type(heap, who, "number", v)),
-    }
+    expect!(heap, who, v, "number",
+        Value::Int(n) => n as f64,
+        Value::Float(f) => f,
+    )
 }
 
 /// Require a string, returned **owned** so the `heap` borrow is released before
 /// the builtin reads or allocates further (most callers go on to touch
 /// `&mut heap`). The string analogue of [`expect_int`]/[`expect_number`].
 fn expect_string(heap: &Heap, who: &str, v: Value) -> Result<String, LispError> {
-    match v {
-        Value::Str(id) => Ok(heap.string(id).to_string()),
-        _ => Err(LispError::wrong_type(heap, who, "string", v)),
-    }
+    expect!(heap, who, v, "string",
+        Value::Str(id) => heap.string(id).to_string(),
+    )
 }
 
 /// Require an integer; otherwise a self-identifying type error.
 fn expect_int(heap: &Heap, who: &str, v: Value) -> Result<i64, LispError> {
-    match v {
-        Value::Int(n) => Ok(n),
-        _ => Err(LispError::wrong_type(heap, who, "int", v)),
-    }
+    expect!(heap, who, v, "int",
+        Value::Int(n) => n,
+    )
 }
 
 /// Require a symbol; otherwise a self-identifying type error.
 fn expect_symbol(heap: &Heap, who: &str, v: Value) -> Result<value::Symbol, LispError> {
-    match v {
-        Value::Sym(s) => Ok(s),
-        _ => Err(LispError::wrong_type(heap, who, "symbol", v)),
-    }
+    expect!(heap, who, v, "symbol",
+        Value::Sym(s) => s,
+    )
 }
 
 fn num_bin(
@@ -389,7 +402,10 @@ fn num_bin(
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => int_op(x, y)
             .map(Value::Int)
-            .ok_or_else(|| LispError::runtime(format!("{}: integer overflow", who))),
+            .ok_or_else(|| {
+                LispError::runtime(format!("{}: integer overflow", who))
+                    .with_code(crate::error::error_codes::INT_OVERFLOW)
+            }),
         _ => Ok(Value::Float(float_op(
             expect_number(heap, who, a)?,
             expect_number(heap, who, b)?,
@@ -455,7 +471,8 @@ fn remainder(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         None if b == 0 => Err(LispError::runtime("rem: division by zero")
             .with_code(crate::error::error_codes::DIV_BY_ZERO)
             .with_hint("guard the denominator: (when (not= y 0) (rem x y))")),
-        None => Err(LispError::runtime("rem: integer overflow")),
+        None => Err(LispError::runtime("rem: integer overflow")
+            .with_code(crate::error::error_codes::INT_OVERFLOW)),
     }
 }
 
@@ -475,7 +492,8 @@ fn floor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
                 return Err(LispError::runtime(format!(
                     "floor: argument {} has no integer floor",
                     f
-                )));
+                ))
+                .with_code(crate::error::error_codes::INT_OVERFLOW));
             }
             // `i64::MIN as f64` rounds *down* to a value still in range; the
             // upper bound `i64::MAX as f64` rounds *up* past `i64::MAX`, so
@@ -484,7 +502,8 @@ fn floor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
                 return Err(LispError::runtime(format!(
                     "floor: {} is out of range for i64",
                     f
-                )));
+                ))
+                .with_code(crate::error::error_codes::INT_OVERFLOW));
             }
             Ok(Value::Int(f as i64))
         }
@@ -534,7 +553,12 @@ fn vector_ref(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         Value::Vector(id) if n >= 0 && (n as usize) < heap.vector(id).len() => {
             Ok(heap.vector(id)[n as usize])
         }
-        Value::Vector(_) => Err(LispError::runtime("vector-ref: index out of range")),
+        Value::Vector(id) => Err(LispError::runtime(format!(
+            "vector-ref: index {} out of range [0, {})",
+            n,
+            heap.vector(id).len()
+        ))
+        .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE)),
         _ => Err(LispError::wrong_type(heap, "vector-ref", "vector", v)),
     }
 }
@@ -551,10 +575,9 @@ fn vector_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 
 /// Require a map; otherwise a self-identifying type error attributed to `who`.
 fn expect_map(heap: &Heap, who: &str, v: Value) -> Result<value::MapId, LispError> {
-    match v {
-        Value::Map(id) => Ok(id),
-        _ => Err(LispError::wrong_type(heap, who, "map", v)),
-    }
+    expect!(heap, who, v, "map",
+        Value::Map(id) => id,
+    )
 }
 
 /// `(hash-map k v k v …)` — build a map from alternating key/value args (the
@@ -791,7 +814,10 @@ fn cst_to_value(heap: &mut Heap, node: &cst::Node, src: &str) -> Value {
 fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "load", arg(args, 0))?;
     let src = std::fs::read_to_string(&path)
-        .map_err(|e| LispError::runtime(format!("load: cannot read {}: {}", path, e)))?;
+        .map_err(|e| {
+            LispError::runtime(format!("load: cannot read {}: {}", path, e))
+                .with_code(crate::error::error_codes::FILE_IO)
+        })?;
     // Read positioned so errors point at a line; tag every error with the file
     // (`FILE:LINE:COL:`, see docs/tooling.md).
     let forms = reader::read_all_positioned(heap, &src).map_err(|e| e.or_file(path.clone()))?;
@@ -961,7 +987,11 @@ fn substring(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let end = expect_int(heap, "substring", arg(args, 2))?;
     let len = s.chars().count() as i64;
     if start < 0 || end < start || end > len {
-        return Err(LispError::runtime("substring: index out of range"));
+        return Err(LispError::runtime(format!(
+            "substring: range [{}, {}) out of bounds for length {}",
+            start, end, len
+        ))
+        .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE));
     }
     let sub: String = s
         .chars()
@@ -1010,7 +1040,8 @@ fn string_to_number(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn cwd(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match std::env::current_dir() {
         Ok(p) => Ok(heap.alloc_string(&p.to_string_lossy())),
-        Err(e) => Err(LispError::runtime(format!("cwd: {}", e))),
+        Err(e) => Err(LispError::runtime(format!("cwd: {}", e))
+            .with_code(crate::error::error_codes::FILE_IO)),
     }
 }
 
@@ -1035,7 +1066,10 @@ fn list_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect(),
-        Err(e) => return Err(LispError::runtime(format!("list-dir: {}: {}", path, e))),
+        Err(e) => {
+            return Err(LispError::runtime(format!("list-dir: {}: {}", path, e))
+                .with_code(crate::error::error_codes::FILE_IO))
+        }
     };
     names.sort();
     let mut items = Vec::with_capacity(names.len());
@@ -1050,7 +1084,10 @@ fn list_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn make_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "make-dir", arg(args, 0))?;
     std::fs::create_dir_all(&path)
-        .map_err(|e| LispError::runtime(format!("make-dir: {}: {}", path, e)))?;
+        .map_err(|e| {
+            LispError::runtime(format!("make-dir: {}: {}", path, e))
+                .with_code(crate::error::error_codes::FILE_IO)
+        })?;
     Ok(Value::Nil)
 }
 
@@ -1068,7 +1105,10 @@ fn spit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         _ => return Err(LispError::wrong_type(heap, "spit", "string content", cv)),
     };
     std::fs::write(&path, content)
-        .map_err(|e| LispError::runtime(format!("spit: {}: {}", path, e)))?;
+        .map_err(|e| {
+            LispError::runtime(format!("spit: {}: {}", path, e))
+                .with_code(crate::error::error_codes::FILE_IO)
+        })?;
     Ok(Value::Nil)
 }
 
@@ -1078,7 +1118,10 @@ fn spit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn slurp(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "slurp", arg(args, 0))?;
     let content = std::fs::read_to_string(&path)
-        .map_err(|e| LispError::runtime(format!("slurp: {}: {}", path, e)))?;
+        .map_err(|e| {
+            LispError::runtime(format!("slurp: {}: {}", path, e))
+                .with_code(crate::error::error_codes::FILE_IO)
+        })?;
     Ok(heap.alloc_string(&content))
 }
 
@@ -1135,7 +1178,9 @@ fn run_process(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     }
     match std::process::Command::new(&prog).args(&argv).status() {
         Ok(status) => Ok(Value::Int(status.code().unwrap_or(-1) as i64)),
-        Err(e) => Err(LispError::runtime(format!("run-process: {}: {}", prog, e))),
+        Err(e) => Err(LispError::runtime(format!("run-process: {}: {}", prog, e))
+            .with_code(crate::error::error_codes::SUBPROCESS_FAILED)
+            .with_hint("check that the program is on PATH and the args are well-formed")),
     }
 }
 
@@ -1193,7 +1238,10 @@ fn check_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
 fn check_file_builtin(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "check-file", arg(args, 0))?;
     let src = std::fs::read_to_string(&path)
-        .map_err(|e| LispError::runtime(format!("check-file: cannot read {}: {}", path, e)))?;
+        .map_err(|e| {
+            LispError::runtime(format!("check-file: cannot read {}: {}", path, e))
+                .with_code(crate::error::error_codes::FILE_IO)
+        })?;
     let forms = reader::read_all_positioned(heap, &src).map_err(|e| e.or_file(path.clone()))?;
     let just_forms: Vec<Value> = forms.into_iter().map(|(f, _)| f).collect();
     let warnings = crate::types::check::check_file(heap, &just_forms);
@@ -1218,6 +1266,7 @@ fn check_file_structured(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispRe
     let path = expect_string(heap, "check-file-structured", arg(args, 0))?;
     let src = std::fs::read_to_string(&path).map_err(|e| {
         LispError::runtime(format!("check-file-structured: cannot read {}: {}", path, e))
+            .with_code(crate::error::error_codes::FILE_IO)
     })?;
     let forms =
         reader::read_all_positioned(heap, &src).map_err(|e| e.or_file(path.clone()))?;
@@ -1536,23 +1585,27 @@ fn make_ref(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 // ----- distributed nodes -----------------------------------------------------
 
 /// Coerce a node/name argument (a keyword or symbol) to its interned `Symbol`.
-fn expect_node_name(who: &str, v: Value) -> Result<value::Symbol, LispError> {
-    match v {
-        Value::Keyword(s) | Value::Sym(s) => Ok(s),
-        _ => Err(LispError::type_err(format!(
-            "{who}: expected a keyword or symbol name"
-        ))),
-    }
+/// Goes through the same `wrong_type` formatter as the other `expect_*`
+/// helpers — pre-fix this one used `type_err` and lost the offending value
+/// from the message, the one expect-family inconsistency the review flagged.
+fn expect_node_name(heap: &Heap, who: &str, v: Value) -> Result<value::Symbol, LispError> {
+    expect!(heap, who, v, "keyword or symbol",
+        Value::Keyword(s) => s,
+        Value::Sym(s) => s,
+    )
 }
 
 /// `(node-start name "host:port" cookie)` — name this runtime and listen for peer
 /// nodes. Returns the node name.
 fn node_start(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let name = expect_node_name("node-start", arg(args, 0))?;
+    let name = expect_node_name(heap, "node-start", arg(args, 0))?;
     let addr = expect_string(heap, "node-start", arg(args, 1))?;
     let cookie = expect_string(heap, "node-start", arg(args, 2))?;
     crate::dist::node_start(name, &addr, cookie)
-        .map_err(|e| LispError::runtime(format!("node-start: {e}")))?;
+        .map_err(|e| {
+            LispError::runtime(format!("node-start: {e}"))
+                .with_code(crate::error::error_codes::DISTRIBUTION)
+        })?;
     Ok(Value::Keyword(name))
 }
 
@@ -1560,14 +1613,17 @@ fn node_start(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// Returns the peer's node name on success.
 fn connect(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let spec = expect_string(heap, "connect", arg(args, 0))?;
-    let peer = crate::dist::connect(&spec).map_err(|e| LispError::runtime(format!("connect: {e}")))?;
+    let peer = crate::dist::connect(&spec).map_err(|e| {
+        LispError::runtime(format!("connect: {e}"))
+            .with_code(crate::error::error_codes::DISTRIBUTION)
+    })?;
     Ok(Value::Keyword(peer))
 }
 
 /// `(register name pid)` — bind a local name so peers can address this process by
 /// `{:name name :node this-node}` before they hold its pid. Returns the pid.
-fn register_name(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    let name = expect_node_name("register", arg(args, 0))?;
+fn register_name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let name = expect_node_name(heap, "register", arg(args, 0))?;
     match arg(args, 1) {
         Value::Pid { node, id } if crate::dist::is_local(node) => {
             crate::dist::register(name, id);
@@ -1590,8 +1646,8 @@ fn node_name(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 /// here?" before re-`spawn`ing — see `remote-spawn` in `std/prelude.blsp`.
 /// A remote-side registration isn't visible here; this is a strictly local
 /// lookup over the `NAMES` table.
-fn whereis_name(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    let name = expect_node_name("whereis", arg(args, 0))?;
+fn whereis_name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let name = expect_node_name(heap, "whereis", arg(args, 0))?;
     match crate::dist::whereis(name) {
         Some(id) => Ok(Value::Pid {
             node: crate::dist::local_node(),
@@ -1603,8 +1659,8 @@ fn whereis_name(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 
 /// `(monitor-node name)` — the calling process is sent `[:nodedown name]` when a
 /// link to `name` goes down (heartbeat timeout or clean close). Returns the name.
-fn monitor_node(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    let name = expect_node_name("monitor-node", arg(args, 0))?;
+fn monitor_node(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let name = expect_node_name(heap, "monitor-node", arg(args, 0))?;
     crate::dist::monitor_node(name, crate::process::self_pid());
     Ok(Value::Keyword(name))
 }

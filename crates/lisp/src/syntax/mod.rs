@@ -10,4 +10,5 @@ pub mod atom;
 pub mod cst;
 pub mod printer;
 pub mod reader;
+pub mod scanner;
 pub mod scope;

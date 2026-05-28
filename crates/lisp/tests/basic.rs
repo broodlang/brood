@@ -554,6 +554,27 @@ fn throw_and_catch() {
         run("(try (/ 1 0) (catch e (string? (get e :hint))))"),
         "true"
     );
+    // E0041 integer overflow — checked-arithmetic raises on `%add` etc. when
+    // the result wouldn't fit i64. `(* i64::MAX 2)` is the easiest trigger.
+    assert_eq!(
+        run("(try (* 9223372036854775807 2) (catch e (get e :code)))"),
+        "\"E0041\""
+    );
+    // E0042 index out of range — vector-ref off the end.
+    assert_eq!(
+        run("(try (vector-ref [1 2 3] 7) (catch e (get e :code)))"),
+        "\"E0042\""
+    );
+    // Same code for `substring` (different surface, same family).
+    assert_eq!(
+        run("(try (substring \"hi\" 0 99) (catch e (get e :code)))"),
+        "\"E0042\""
+    );
+    // E0050 file IO — slurp of a path that doesn't exist.
+    assert_eq!(
+        run("(try (slurp \"/does/not/exist/anywhere\") (catch e (get e :code)))"),
+        "\"E0050\""
+    );
     assert_eq!(run("(try (no-such-fn) (catch e (get e :kind)))"), ":unbound");
     assert_eq!(
         run("(try (no-such-fn) (catch e (get e :code)))"),

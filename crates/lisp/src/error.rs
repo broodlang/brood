@@ -122,6 +122,22 @@ pub mod error_codes {
     pub const TYPE_MISMATCH: &str = "E0030";
     /// `(/ x 0)` or `(rem x 0)` — guard with `(when (not= y 0) …)`.
     pub const DIV_BY_ZERO: &str = "E0040";
+    /// Integer overflow on the checked numeric ops (`%add`/`%sub`/`%mul`/
+    /// `rem`).
+    pub const INT_OVERFLOW: &str = "E0041";
+    /// `vector-ref` / `substring` / similar with an out-of-range index.
+    pub const INDEX_OUT_OF_RANGE: &str = "E0042";
+    /// File IO failed: `load` / `slurp` / `spit` / `make-dir` / `list-dir` /
+    /// `cwd` / `check-file` couldn't read or write a path.
+    pub const FILE_IO: &str = "E0050";
+    /// `run-process` could not start the requested program (typically: not
+    /// on PATH).
+    pub const SUBPROCESS_FAILED: &str = "E0051";
+    /// `node-start` / `connect` / other distribution-layer failure.
+    pub const DISTRIBUTION: &str = "E0060";
+    /// `send` saw a message value nested past `MAX_MESSAGE_DEPTH` — the
+    /// deep-copy stack would have overflowed.
+    pub const MESSAGE_TOO_DEEP: &str = "E0070";
     pub const RUNTIME_GENERIC: &str = "E0099";
 }
 
