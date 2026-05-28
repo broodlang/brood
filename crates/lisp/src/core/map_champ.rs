@@ -82,19 +82,6 @@ impl Default for MapNode {
 }
 
 impl MapNode {
-    /// Number of *direct* entries (inline + collision); excludes child
-    /// subtrees. Equal to `data.len()` regardless of which form.
-    #[inline]
-    pub fn direct_len(&self) -> usize {
-        self.data.len()
-    }
-
-    /// Number of child slots (always 0 for a collision leaf).
-    #[inline]
-    pub fn child_len(&self) -> usize {
-        self.children.len()
-    }
-
     /// True if this node has exactly one direct entry and no children —
     /// the *promotion* trigger: a parent dissoc'ing one of its children
     /// down to this shape inlines the surviving entry into the parent
@@ -115,8 +102,9 @@ impl MapNode {
     }
 }
 
-/// Bits of hash consumed per trie level. 4 → 16-way branching.
-pub const BITS_PER_LEVEL: u32 = 4;
+/// Bits of hash consumed per trie level. 4 → 16-way branching. Module-
+/// private — callers should pull values via [`slot_at`] / [`MAX_DEPTH`].
+const BITS_PER_LEVEL: u32 = 4;
 
 /// Number of levels before the hash is exhausted (64 bits / 4 bits per level).
 /// At this depth the trie spawns a [collision leaf](MapNode) instead of

@@ -111,7 +111,9 @@
   (test "nested bindings (rightmost varies fastest)"
     (assert= (for (x (range 2) y (range 2)) [x y]) (list [0 0] [0 1] [1 0] [1 1])))
   (test "destructuring a binding"
-    (assert= (for ([k v] (map-pairs {:a 1 :b 2})) [v k]) (list [1 :a] [2 :b])))
+    ;; ADR-040: map iteration order is hash-driven; compare as a frequency map.
+    (assert= (frequencies (for ([k v] (map-pairs {:a 1 :b 2})) [v k]))
+             {[1 :a] 1 [2 :b] 1}))
   (test "build a map with into {}"
     (assert= (into {} (for (x (range 3)) [x (* x x)])) {0 0 1 1 2 4})))
 

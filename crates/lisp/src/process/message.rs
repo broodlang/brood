@@ -135,7 +135,7 @@ fn to_message_rec(
             Message::Vector(out)
         }
         Value::Map(id) => {
-            let entries = heap.map(id).to_vec();
+            let entries = heap.map_entries(id);
             let mut out = Vec::with_capacity(entries.len());
             for (k, v) in entries {
                 out.push((
@@ -258,7 +258,7 @@ fn collect_symbols(heap: &Heap, form: Value, out: &mut std::collections::HashSet
             }
         }
         Value::Map(id) => {
-            for (k, v) in heap.map(id).to_vec() {
+            for (k, v) in heap.map_entries(id) {
                 collect_symbols(heap, k, out);
                 collect_symbols(heap, v, out);
             }

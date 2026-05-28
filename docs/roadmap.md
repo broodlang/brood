@@ -83,11 +83,13 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   intersections for overloaded fns. Replaces the `u16`-bitset rep;
   additive; gated on real need (ADR-011). Advisory throughout — never
   gates, never inhibits the dynamic language; not the TypeScript route.
-- ✅ **Maps** (ADR-030) — immutable `{ }` literals + `get`/`assoc`/`dissoc`/
-  `keys`/`vals`/`contains?`/`map?`. Insertion-ordered, structural-equality keys,
-  order-independent `=`; every op returns a fresh map. Small `map-*` Rust kernel,
-  the surface is Brood (`std/prelude.blsp`). Internal rep is an association
-  vector (swappable for a HAMT later, no surface change).
+- ✅ **Maps** (ADR-030 + ADR-040) — immutable `{ }` literals + `get`/`assoc`/
+  `dissoc`/`keys`/`vals`/`contains?`/`map?`. Structural-equality keys, order-
+  independent `=`; every op returns a fresh map. Small `map-*` Rust kernel, the
+  surface is Brood (`std/prelude.blsp`). Internal rep is a CHAMP hash trie
+  (16-way, path-copying — ADR-040): O(log₁₆ N) lookup/assoc/dissoc, structural
+  sharing keeps fold-build linear-amortised. One ADR-030 contract change:
+  iteration order is hash-driven, not insertion order.
 - ✅ **Tier-2 ergonomics** (per `ROADMAP.md`) — `letrec` for local mutual
   recursion (new special form alongside `let`/`let*`; plain-symbol targets;
   pre-bind to `nil` so all names are visible in every RHS), lenient `symbol`

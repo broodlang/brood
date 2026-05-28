@@ -85,11 +85,18 @@ EXIT=124   (runner does not reap the dead process → whole run hangs)
 
 ### Two distinct bugs here
 
-1. The lookup race itself (= KI-1).
-2. **Runner doesn't fail fast:** a test process that dies with an error is not
-   reaped, so the run hangs instead of reporting the failure. Worth fixing
-   independently of KI-1 — a crashed test should surface as a failure, not a
-   hang.
+1. The lookup race itself (= KI-1). **Still open.**
+2. ~~**Runner doesn't fail fast:**~~ **Fixed (2026-05-29).** A test process that
+   died with an error was not reaped, so the run hung in `(receive)` forever
+   instead of reporting the failure. `spawn-units` now `monitor`s every worker
+   and `collect-units` accounts for each one exactly once — by its result if it
+   reported, otherwise by the `[:down …]` its monitor fires — turning a dead
+   worker into a failing result (`"test process died: <reason>"`) instead of an
+   indefinite hang (`std/test.blsp`; regression test
+   `tests/runner_failfast_test.blsp`). This is independent of KI-1: the lookup
+   race can still *kill* a worker, but the runner now fails fast with the death
+   reason rather than hanging. An unattended `nest test` / `cargo test` therefore
+   reports red instead of blocking.
 
 ### Mitigations
 

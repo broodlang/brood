@@ -293,7 +293,7 @@ impl LispError {
             let hint_str = heap.alloc_string(hint);
             entries.push((Value::Keyword(intern("hint")), hint_str));
         }
-        heap.alloc_map(entries)
+        heap.map_from_pairs(entries)
     }
 }
 

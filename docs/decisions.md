@@ -1949,7 +1949,7 @@ release-mode story.
 
 ## ADR-040 — Maps: CHAMP (16-way) instead of an entries-vec + index
 
-**Status:** proposed (2026-05-28).
+**Status:** accepted, implemented 2026-05-29 (see devlog).
 
 **Context.** ADR-030 shipped maps as insertion-ordered association vectors,
 explicitly flagged "swappable for a hash-array-mapped trie later **with no

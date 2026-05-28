@@ -221,6 +221,37 @@ everything via tools alone.
 - **Hot reload is documented as the headline behaviour** in
   `brood-for-claude.md`. The agent has to know that `def` is the loop, not
   "edit file + restart".
+- **The test registry resets per run.** `(describe …)` / `(test …)` *register*
+  by accumulating into `*units*` (`std/test.blsp`); in a long-lived image,
+  `load`ing the same test file twice would register every unit twice and
+  inflate the `run-tests` count. The project test runners call `reset-units!`
+  before (re)loading test files, so each `run-tests` reflects exactly the
+  current files — no fall back to a fresh `nest test` for a trustworthy count.
+
+## Captured stdout — `print` is safe in a handler
+
+The transport is newline-delimited JSON over **stdout**, so a handler that
+`(print …)`d straight to stdout would corrupt the JSON-RPC stream — the one
+thing the skill used to have to warn against, because printing is the natural
+debugging reflex. It no longer can: the dispatcher installs a thread-local
+capture buffer around every `tools/call`, so `print` / `println` divert into
+it instead of the channel. The captured text rides back as a **second** content
+block in the reply, labelled `[captured stdout]`:
+
+```json
+{ "content": [
+    { "type": "text", "text": "<the handler's return value as JSON>" },
+    { "type": "text", "text": "[captured stdout]\n…whatever the handler printed…" }
+]}
+```
+
+`content[0]` is always the return value (the stable shape an agent parses); the
+stdout block appears only when something was printed. This is the realized form
+of the `stdout` column in the tool table above — delivered uniformly for every
+tool rather than threaded through each handler's return map. Capture is
+thread-local: it covers the synchronous handler, not green processes the handler
+`spawn`s on other workers (which shouldn't be writing to the channel anyway).
+`eprint` (stderr) is untouched — it never shared the protocol channel.
 
 ## The crate
 

@@ -72,7 +72,7 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
         }
         Value::Map(id) => {
             out.push('{');
-            for (i, (k, v)) in heap.map(id).iter().enumerate() {
+            for (i, (k, v)) in heap.map_entries(id).iter().enumerate() {
                 if i > 0 {
                     out.push_str(", ");
                 }

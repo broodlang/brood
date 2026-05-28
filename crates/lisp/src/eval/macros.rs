@@ -43,7 +43,7 @@ fn quasiquote_depth(heap: &mut Heap, template: Value, env: EnvId, depth: u32) ->
         }
         Value::Map(id) => {
             // Expand each key and value (no `~@` splicing into a map — ill-defined).
-            let entries = heap.map(id).to_vec();
+            let entries = heap.map_entries(id);
             let mut pairs = Vec::with_capacity(entries.len());
             for (k, v) in entries {
                 let k = quasiquote_depth(heap, k, env, depth + 1)?;
@@ -202,14 +202,14 @@ fn macroexpand_all_depth(heap: &mut Heap, form: Value, env: EnvId, depth: u32) -
         Value::Map(id) => {
             // Walk a map literal's keys and values so macros inside them expand
             // once here. Keep it a literal map (the evaluator canonicalises it).
-            let entries = heap.map(id).to_vec();
+            let entries = heap.map_entries(id);
             let mut pairs = Vec::with_capacity(entries.len());
             for (k, v) in entries {
                 let k = macroexpand_all_depth(heap, k, env, depth + 1)?;
                 let v = macroexpand_all_depth(heap, v, env, depth + 1)?;
                 pairs.push((k, v));
             }
-            Ok(heap.alloc_map(pairs))
+            Ok(heap.map_from_pairs(pairs))
         }
         other => Ok(other),
     }

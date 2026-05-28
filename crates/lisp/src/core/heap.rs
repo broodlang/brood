@@ -31,7 +31,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use smallvec::SmallVec;
 
-use crate::core::map_champ::{self, MapNode, BITS_PER_LEVEL, MAX_DEPTH};
+use crate::core::map_champ::{self, MapNode, MAX_DEPTH};
 use crate::core::value::{
     Closure, ClosureId, EnvId, MapId, NativeFn, NativeId, PairId, StrId, Symbol, Value, VecId,
     LOCAL, PRELUDE, RUNTIME,
@@ -445,20 +445,16 @@ impl Default for Heap {
 /// same `if let Some(idx) = … pop() { … } else { … push() }` shape; the
 /// macro is that shape in one place. (`alloc_string` and `new_env` reuse
 /// the slot's inner buffer instead and stay hand-written.)
+// Bump-only allocator (post-supervisor-strip): indices grow monotonically
+// per process, no free-list reuse, no mark-sweep. The per-process heap is
+// dropped wholesale at process exit; long-running receive loops will (next
+// phase) flip the arena on receive. Stale-handle bugs become impossible
+// because slots are never reused.
 macro_rules! alloc_slot {
     ($self:expr, $field:ident, $value:expr) => {{
-        if let Some(idx) = $self.local_free.$field.pop() {
-            $self.local.$field[idx as usize] = $value;
-            // Clear the use-after-GC tripwire — sweep set it when this slot
-            // was freed; reusing it makes the slot live again. Debug only.
-            #[cfg(debug_assertions)]
-            PoisonBits::set(&mut $self.poison.$field, idx as usize, false);
-            idx as usize
-        } else {
-            let idx = $self.local.$field.len();
-            $self.local.$field.push($value);
-            idx
-        }
+        let idx = $self.local.$field.len();
+        $self.local.$field.push($value);
+        idx
     }};
 }
 
@@ -545,10 +541,15 @@ impl Heap {
                 *x = to_prelude(*x);
             }
         }
-        for map in &mut slabs.maps {
-            for (k, v) in map.iter_mut() {
+        for map_node in &mut slabs.maps {
+            // Re-tag every (k, v) inside the trie node — child `MapId`s
+            // need their region bits flipped to PRELUDE too.
+            for (k, v) in map_node.data.iter_mut() {
                 *k = to_prelude(*k);
                 *v = to_prelude(*v);
+            }
+            for child in map_node.children.iter_mut() {
+                *child = MapId::prelude(child.index());
             }
         }
         for c in &mut slabs.closures {
@@ -755,71 +756,474 @@ impl Heap {
         Value::Vector(VecId::local(idx))
     }
 
-    /// Allocate a map from already-canonical entries (insertion order, no
-    /// duplicate keys). The map operations below build the entry vector — keyed
-    /// by structural equality — and hand it here.
-    pub fn alloc_map(&mut self, entries: Vec<(Value, Value)>) -> Value {
-        let idx = alloc_slot!(self, maps, entries);
+    // ===== map operations (ADR-040: CHAMP — see `core/map_champ.rs`) =====
+    //
+    // Every op returns a fresh `Value::Map` handle; the trie is path-copied
+    // from root to the touched leaf, with the rest structurally shared.
+    // None of these mutate any existing `MapNode` — the slab is append-only
+    // from the language's point of view, which is what makes RUNTIME/PRELUDE
+    // maps safely shareable across processes.
+
+    /// Allocate a fresh empty map — a single root `MapNode` with no
+    /// entries. Used by `(hash-map)` with no args and as the starting
+    /// point for `map_from_pairs`.
+    pub fn alloc_empty_map(&mut self) -> Value {
+        let idx = alloc_slot!(self, maps, MapNode::default());
         Value::Map(MapId::local(idx))
     }
 
-    // ----- map operations (immutable: each returns a fresh map) -----
-
     /// The value `key` maps to, by structural equality, or `None` if absent.
+    /// O(log₁₆ N) — one 4-bit hash slice + one bitmap test per trie level.
     pub fn map_get(&self, id: MapId, key: Value) -> Option<Value> {
-        self.map(id)
-            .iter()
-            .find(|(k, _)| self.equal(*k, key))
-            .map(|(_, v)| *v)
+        let hash = self.hash_value(key);
+        self.champ_get(id, key, hash, 0)
     }
 
-    /// A fresh map with `key` bound to `val`: replaces the value if `key` is
-    /// already present (keeping its position), otherwise appends.
-    pub fn map_assoc(&mut self, id: MapId, key: Value, val: Value) -> Value {
-        let mut entries = self.map(id).to_vec();
-        match entries.iter_mut().find(|(k, _)| self.equal(*k, key)) {
-            Some(slot) => slot.1 = val,
-            None => entries.push((key, val)),
+    fn champ_get(&self, id: MapId, key: Value, hash: u64, depth: u32) -> Option<Value> {
+        let node = self.map_node(id);
+        if node.is_collision {
+            return node
+                .data
+                .iter()
+                .find(|(k, _)| self.equal(*k, key))
+                .map(|(_, v)| *v);
         }
-        self.alloc_map(entries)
+        let slot = map_champ::slot_at(hash, depth);
+        let bit = map_champ::slot_mask(slot);
+        if node.data_map & bit != 0 {
+            let i = map_champ::rank(node.data_map, slot);
+            let (k, v) = node.data[i];
+            if self.equal(k, key) { Some(v) } else { None }
+        } else if node.node_map & bit != 0 {
+            let j = map_champ::rank(node.node_map, slot);
+            self.champ_get(node.children[j], key, hash, depth + 1)
+        } else {
+            None
+        }
     }
 
-    /// A fresh map with `key` removed (a no-op clone if it was absent).
+    /// A fresh map with `key` bound to `val` — replaces or inserts in
+    /// O(log₁₆ N). Path-copies only the nodes from root to the touched
+    /// leaf; every other node is structurally shared with the input map.
+    pub fn map_assoc(&mut self, id: MapId, key: Value, val: Value) -> Value {
+        let hash = self.hash_value(key);
+        let new_root = self.champ_assoc(id, key, val, hash, 0);
+        Value::Map(new_root)
+    }
+
+    fn champ_assoc(&mut self, id: MapId, key: Value, val: Value, hash: u64, depth: u32) -> MapId {
+        // Snapshot the node fields we need — releases the immutable borrow
+        // on `self` before we go allocating new slots.
+        let node = self.map_node(id);
+        let is_collision = node.is_collision;
+        let data_map = node.data_map;
+        let node_map = node.node_map;
+
+        if is_collision {
+            // At max depth — all entries share the full hash. Linear scan
+            // by `equal`.
+            let data = node.data.clone();
+            let pos = data.iter().position(|(k, _)| self.equal(*k, key));
+            let (new_data, delta) = match pos {
+                Some(i) => {
+                    let mut d = data;
+                    d[i].1 = val;
+                    (d, 0i64)
+                }
+                None => {
+                    let mut d = data;
+                    d.push((key, val));
+                    (d, 1i64)
+                }
+            };
+            let new_size = node.size as i64 + delta;
+            let new_node = MapNode {
+                size: new_size as u32,
+                data_map: 0,
+                node_map: 0,
+                is_collision: true,
+                data: new_data,
+                children: SmallVec::new(),
+            };
+            return self.alloc_map_node(new_node);
+        }
+
+        let slot = map_champ::slot_at(hash, depth);
+        let bit = map_champ::slot_mask(slot);
+
+        // Case 1: slot already holds an inline (k, v) entry.
+        if data_map & bit != 0 {
+            let i = map_champ::rank(data_map, slot);
+            let (existing_k, existing_v) = node.data[i];
+            if self.equal(existing_k, key) {
+                // Overwrite. If the value is identical by `equal`, we could
+                // return id unchanged — but assoc's contract is "returns a
+                // fresh map", and callers can dedup themselves if they care.
+                let mut new_data = node.data.clone();
+                new_data[i].1 = val;
+                let new_node = MapNode {
+                    size: node.size,
+                    data_map,
+                    node_map,
+                    is_collision: false,
+                    data: new_data,
+                    children: node.children.clone(),
+                };
+                return self.alloc_map_node(new_node);
+            }
+            // Different key hashed to same slot. Split: turn this inline
+            // entry into a child sub-node holding both pairs.
+            let other_hash = self.hash_value(existing_k);
+            let child_id = self.champ_split(existing_k, existing_v, other_hash, key, val, hash, depth + 1);
+            let node = self.map_node(id); // re-borrow after the recursive alloc
+            let new_data_map = data_map ^ bit;
+            let new_node_map = node_map | bit;
+            let mut new_data = node.data.clone();
+            new_data.remove(i);
+            let child_pos = map_champ::rank(new_node_map, slot);
+            let mut new_children = node.children.clone();
+            new_children.insert(child_pos, child_id);
+            let new_node = MapNode {
+                size: node.size + 1,
+                data_map: new_data_map,
+                node_map: new_node_map,
+                is_collision: false,
+                data: new_data,
+                children: new_children,
+            };
+            return self.alloc_map_node(new_node);
+        }
+
+        // Case 2: slot holds a child sub-node — recurse, then patch the
+        // child handle.
+        if node_map & bit != 0 {
+            let j = map_champ::rank(node_map, slot);
+            let old_child = node.children[j];
+            let old_child_size = self.map_node(old_child).size;
+            let new_child = self.champ_assoc(old_child, key, val, hash, depth + 1);
+            let new_child_size = self.map_node(new_child).size;
+            let node = self.map_node(id);
+            let mut new_children = node.children.clone();
+            new_children[j] = new_child;
+            let new_node = MapNode {
+                size: node.size + new_child_size - old_child_size,
+                data_map,
+                node_map,
+                is_collision: false,
+                data: node.data.clone(),
+                children: new_children,
+            };
+            return self.alloc_map_node(new_node);
+        }
+
+        // Case 3: empty slot — insert a fresh inline entry.
+        let new_data_map = data_map | bit;
+        let new_data_pos = map_champ::rank(new_data_map, slot);
+        let mut new_data = node.data.clone();
+        new_data.insert(new_data_pos, (key, val));
+        let new_node = MapNode {
+            size: node.size + 1,
+            data_map: new_data_map,
+            node_map,
+            is_collision: false,
+            data: new_data,
+            children: node.children.clone(),
+        };
+        self.alloc_map_node(new_node)
+    }
+
+    /// Build a sub-node holding two entries with different keys but
+    /// possibly the same slot at `depth`. Recursively descends until
+    /// the two keys' hash slices diverge (or until [`MAX_DEPTH`], where
+    /// it spawns a collision leaf). Used by `champ_assoc`'s split case.
+    fn champ_split(
+        &mut self,
+        k1: Value,
+        v1: Value,
+        h1: u64,
+        k2: Value,
+        v2: Value,
+        h2: u64,
+        depth: u32,
+    ) -> MapId {
+        if depth >= MAX_DEPTH {
+            // Hash exhausted — both keys hash identically. Collision leaf.
+            let mut data = SmallVec::<[(Value, Value); 4]>::new();
+            data.push((k1, v1));
+            data.push((k2, v2));
+            return self.alloc_map_node(MapNode {
+                size: 2,
+                data_map: 0,
+                node_map: 0,
+                is_collision: true,
+                data,
+                children: SmallVec::new(),
+            });
+        }
+        let s1 = map_champ::slot_at(h1, depth);
+        let s2 = map_champ::slot_at(h2, depth);
+        if s1 == s2 {
+            // Still colliding at this level — recurse.
+            let child = self.champ_split(k1, v1, h1, k2, v2, h2, depth + 1);
+            let bit = map_champ::slot_mask(s1);
+            let mut children = SmallVec::<[MapId; 4]>::new();
+            children.push(child);
+            return self.alloc_map_node(MapNode {
+                size: 2,
+                data_map: 0,
+                node_map: bit,
+                is_collision: false,
+                data: SmallVec::new(),
+                children,
+            });
+        }
+        // Diverged: two inline entries in the new node, ordered by slot.
+        let (lo_slot, lo_kv, hi_slot, hi_kv) = if s1 < s2 {
+            (s1, (k1, v1), s2, (k2, v2))
+        } else {
+            (s2, (k2, v2), s1, (k1, v1))
+        };
+        let data_map = map_champ::slot_mask(lo_slot) | map_champ::slot_mask(hi_slot);
+        let mut data = SmallVec::<[(Value, Value); 4]>::new();
+        data.push(lo_kv);
+        data.push(hi_kv);
+        self.alloc_map_node(MapNode {
+            size: 2,
+            data_map,
+            node_map: 0,
+            is_collision: false,
+            data,
+            children: SmallVec::new(),
+        })
+    }
+
+    /// A fresh map with `key` removed; a clone of the same shape if
+    /// `key` was absent. Path-copies the affected branch; collapses
+    /// singleton sub-trees into the parent's inline data (the CHAMP
+    /// canonicalisation rule that keeps the tree shallow).
     pub fn map_dissoc(&mut self, id: MapId, key: Value) -> Value {
-        let entries: Vec<(Value, Value)> = self
-            .map(id)
-            .iter()
-            .filter(|(k, _)| !self.equal(*k, key))
-            .copied()
-            .collect();
-        self.alloc_map(entries)
+        let hash = self.hash_value(key);
+        let new_root = self.champ_dissoc(id, key, hash, 0);
+        Value::Map(new_root)
     }
 
-    /// Build a canonical map from raw `(key, value)` pairs, applying last-wins
-    /// deduplication by structural equality (for map literals and `hash-map`).
+    fn champ_dissoc(&mut self, id: MapId, key: Value, hash: u64, depth: u32) -> MapId {
+        let node = self.map_node(id);
+        let is_collision = node.is_collision;
+
+        if is_collision {
+            let pos = node.data.iter().position(|(k, _)| self.equal(*k, key));
+            let Some(i) = pos else {
+                return self.clone_map_node(id);
+            };
+            let mut new_data = node.data.clone();
+            new_data.remove(i);
+            return self.alloc_map_node(MapNode {
+                size: node.size - 1,
+                data_map: 0,
+                node_map: 0,
+                is_collision: true,
+                data: new_data,
+                children: SmallVec::new(),
+            });
+        }
+
+        let slot = map_champ::slot_at(hash, depth);
+        let bit = map_champ::slot_mask(slot);
+        let data_map = node.data_map;
+        let node_map = node.node_map;
+
+        // Case 1: inline entry at this slot.
+        if data_map & bit != 0 {
+            let i = map_champ::rank(data_map, slot);
+            if !self.equal(node.data[i].0, key) {
+                return self.clone_map_node(id); // key absent
+            }
+            let new_data_map = data_map ^ bit;
+            let mut new_data = node.data.clone();
+            new_data.remove(i);
+            return self.alloc_map_node(MapNode {
+                size: node.size - 1,
+                data_map: new_data_map,
+                node_map,
+                is_collision: false,
+                data: new_data,
+                children: node.children.clone(),
+            });
+        }
+
+        // Case 2: child sub-node at this slot — recurse and patch.
+        if node_map & bit != 0 {
+            let j = map_champ::rank(node_map, slot);
+            let old_child = node.children[j];
+            let old_child_size = self.map_node(old_child).size;
+            let new_child = self.champ_dissoc(old_child, key, hash, depth + 1);
+            let new_child_node = self.map_node(new_child);
+            let new_child_size = new_child_node.size;
+            if new_child_size == old_child_size {
+                // No change (key was absent below).
+                return self.clone_map_node(id);
+            }
+            // Promote: if the child shrunk to a singleton (one entry, no
+            // children — branch *or* collision leaf), inline it here.
+            // Collision leaves are legitimate singletons: the surviving
+            // entry's hash still routes through this slot at this depth,
+            // so inlining is safe and keeps the trie shallow.
+            if new_child_node.is_singleton() {
+                let (kk, vv) = new_child_node.data[0];
+                let node = self.map_node(id);
+                let new_node_map = node_map ^ bit;
+                let new_data_map = data_map | bit;
+                let mut new_children = node.children.clone();
+                new_children.remove(j);
+                let new_data_pos = map_champ::rank(new_data_map, slot);
+                let mut new_data = node.data.clone();
+                new_data.insert(new_data_pos, (kk, vv));
+                return self.alloc_map_node(MapNode {
+                    size: node.size - 1,
+                    data_map: new_data_map,
+                    node_map: new_node_map,
+                    is_collision: false,
+                    data: new_data,
+                    children: new_children,
+                });
+            }
+            // If the child is now empty entirely, drop the reference.
+            if new_child_node.is_empty() {
+                let node = self.map_node(id);
+                let new_node_map = node_map ^ bit;
+                let mut new_children = node.children.clone();
+                new_children.remove(j);
+                return self.alloc_map_node(MapNode {
+                    size: node.size - 1,
+                    data_map,
+                    node_map: new_node_map,
+                    is_collision: false,
+                    data: node.data.clone(),
+                    children: new_children,
+                });
+            }
+            // Otherwise just swap the child handle.
+            let node = self.map_node(id);
+            let mut new_children = node.children.clone();
+            new_children[j] = new_child;
+            return self.alloc_map_node(MapNode {
+                size: node.size - old_child_size + new_child_size,
+                data_map,
+                node_map,
+                is_collision: false,
+                data: node.data.clone(),
+                children: new_children,
+            });
+        }
+
+        // Case 3: empty slot — key absent.
+        self.clone_map_node(id)
+    }
+
+    /// Build a canonical map from raw `(key, value)` pairs, applying
+    /// last-wins de-dup by structural equality. Used by the `{ }` literal
+    /// reader path and `(hash-map …)`. Folds `assoc` over a fresh empty
+    /// root — O(N log N) overall, in line with CHAMP's per-op cost.
     pub fn map_from_pairs(&mut self, pairs: Vec<(Value, Value)>) -> Value {
-        let mut entries: Vec<(Value, Value)> = Vec::with_capacity(pairs.len());
+        let mut current = match self.alloc_empty_map() {
+            Value::Map(id) => id,
+            _ => unreachable!("alloc_empty_map returns Value::Map"),
+        };
         for (k, v) in pairs {
-            match entries.iter_mut().find(|(ek, _)| self.equal(*ek, k)) {
-                Some(slot) => slot.1 = v,
-                None => entries.push((k, v)),
+            let next = match self.map_assoc(current, k, v) {
+                Value::Map(id) => id,
+                _ => unreachable!("map_assoc returns Value::Map"),
+            };
+            current = next;
+        }
+        Value::Map(current)
+    }
+
+    /// All entries in the map, walked depth-first through the trie.
+    /// Order is deterministic per shape (slot-index ascending at each
+    /// level, then collision-leaf order) but is **not** insertion order
+    /// — ADR-040's one contract change vs ADR-030. Callers that need an
+    /// ordered set should sort the result.
+    pub fn map_entries(&self, id: MapId) -> Vec<(Value, Value)> {
+        let mut out = Vec::with_capacity(self.map_size(id));
+        self.collect_entries_into(id, &mut out);
+        out
+    }
+
+    fn collect_entries_into(&self, id: MapId, out: &mut Vec<(Value, Value)>) {
+        let node = self.map_node(id);
+        for &kv in &node.data {
+            out.push(kv);
+        }
+        if !node.is_collision {
+            // children are in slot-ascending order — that's our traversal.
+            for &child in &node.children {
+                self.collect_entries_into(child, out);
             }
         }
-        self.alloc_map(entries)
+    }
+
+    /// Walk every entry in the map, calling `f(k, v)` on each. Borrow-friendly
+    /// alternative to `map_entries` when the caller doesn't need a Vec — used by
+    /// `hash_value_into` where allocating per call would be wasteful.
+    pub fn fold_entries(&self, id: MapId, f: &mut dyn FnMut(Value, Value)) {
+        let node = self.map_node(id);
+        for &(k, v) in &node.data {
+            f(k, v);
+        }
+        if !node.is_collision {
+            for &child in &node.children {
+                self.fold_entries(child, f);
+            }
+        }
+    }
+
+    /// Number of entries in the map. O(1) — every node tracks the size
+    /// of its own subtree, so the root's `size` is the answer.
+    pub fn map_size(&self, id: MapId) -> usize {
+        self.map_node(id).size as usize
+    }
+
+    /// True if `id` resolves to a map with `key` as one of its keys (so
+    /// `(contains? m k)` distinguishes a stored `nil`/`false` from absence
+    /// — both are valid stored values, only "not bound" returns false here).
+    /// Same cost as `map_get`; we delegate rather than duplicate the trie
+    /// walk.
+    pub fn map_contains(&self, id: MapId, key: Value) -> bool {
+        self.map_get(id, key).is_some()
+    }
+
+    /// Allocate a new map node — the path-copy primitive every assoc /
+    /// dissoc step ends with. Returns the `MapId` (not a `Value`) so
+    /// internal callers can stitch children together before wrapping the
+    /// root in `Value::Map`.
+    fn alloc_map_node(&mut self, node: MapNode) -> MapId {
+        let idx = alloc_slot!(self, maps, node);
+        MapId::local(idx)
+    }
+
+    /// A fresh root `MapNode` slot holding the same shape as `id`. The
+    /// child handles are reused (structural sharing extends one level
+    /// out from the root), so this is `O(branching)`, not deep. Used by
+    /// `dissoc` when the key was absent — the surface contract is
+    /// "every op returns a fresh map handle", and an unconditional
+    /// root clone keeps that honest without touching the unchanged
+    /// subtree.
+    fn clone_map_node(&mut self, id: MapId) -> MapId {
+        let node = self.map_node(id);
+        let cloned = MapNode {
+            size: node.size,
+            data_map: node.data_map,
+            node_map: node.node_map,
+            is_collision: node.is_collision,
+            data: node.data.clone(),
+            children: node.children.clone(),
+        };
+        self.alloc_map_node(cloned)
     }
 
     pub fn alloc_string(&mut self, s: &str) -> Value {
-        if let Some(idx) = self.local_free.strings.pop() {
-            // Reuse the slot's `String` buffer by replacing its contents — saves
-            // the existing capacity if `s` fits.
-            let slot = &mut self.local.strings[idx as usize];
-            slot.clear();
-            slot.push_str(s);
-            // Clear the use-after-GC tripwire (see `alloc_slot!`).
-            #[cfg(debug_assertions)]
-            PoisonBits::set(&mut self.poison.strings, idx as usize, false);
-            return Value::Str(StrId::local(idx as usize));
-        }
         let idx = self.local.strings.len();
         self.local.strings.push(s.to_string());
         Value::Str(StrId::local(idx))
@@ -893,13 +1297,11 @@ impl Heap {
                 Value::Vector(VecId::runtime(self.runtime.code.vectors.push(items)))
             }
             Value::Map(id) if id.region() == LOCAL => {
-                let entries: Vec<(Value, Value)> = self
-                    .map(id)
-                    .to_vec()
-                    .into_iter()
-                    .map(|(k, v)| (self.promote(k), self.promote(v)))
-                    .collect();
-                Value::Map(MapId::runtime(self.runtime.code.maps.push(entries)))
+                // Recursively promote the trie depth-first. Children are
+                // promoted before their parent so the parent's `children`
+                // array can be wired to the freshly-allocated RUNTIME
+                // sub-node handles.
+                Value::Map(self.promote_map_node(id))
             }
             Value::Fn(id) if id.region() == LOCAL => Value::Fn(self.promote_closure(id)),
             Value::Macro(id) if id.region() == LOCAL => Value::Macro(self.promote_closure(id)),
@@ -931,6 +1333,41 @@ impl Heap {
             acc = Value::Pair(PairId::runtime(self.runtime.code.pairs.push((head, acc))));
         }
         acc
+    }
+
+    /// Promote a LOCAL CHAMP trie into the shared RUNTIME region. Walks
+    /// depth-first: child sub-nodes are promoted before their parent so
+    /// the parent's `children` array references the new RUNTIME handles.
+    /// Every `(k, v)` entry is promoted recursively (matches `promote`
+    /// on vectors / lists). The result is a brand-new trie in RUNTIME;
+    /// the original LOCAL trie is left untouched (it'll be GC'd when its
+    /// last reference goes).
+    fn promote_map_node(&self, id: MapId) -> MapId {
+        let node = self.map_node(id);
+        // Promote children first (bottom-up) so the new RUNTIME node can
+        // be built with the new child handles in one push.
+        let new_children: SmallVec<[MapId; 4]> = node
+            .children
+            .iter()
+            .map(|&c| match c.region() {
+                LOCAL => self.promote_map_node(c),
+                _ => c, // already shared
+            })
+            .collect();
+        let new_data: SmallVec<[(Value, Value); 4]> = node
+            .data
+            .iter()
+            .map(|&(k, v)| (self.promote(k), self.promote(v)))
+            .collect();
+        let promoted = MapNode {
+            size: node.size,
+            data_map: node.data_map,
+            node_map: node.node_map,
+            is_collision: node.is_collision,
+            data: new_data,
+            children: new_children,
+        };
+        MapId::runtime(self.runtime.code.maps.push(promoted))
     }
 
     fn promote_closure(&self, id: ClosureId) -> ClosureId {
@@ -1012,7 +1449,7 @@ impl Heap {
         self.pair(id).1
     }
     region_ref!(vector, VecId, vectors, &[Value], "runtime vector handle");
-    region_ref!(map, MapId, maps, &[(Value, Value)], "runtime map handle");
+    region_ref!(map_node, MapId, maps, &MapNode, "runtime map node");
     region_ref!(string, StrId, strings, &str, "runtime string handle");
     region_ref!(
         closure,
@@ -1149,18 +1586,19 @@ impl Heap {
             }
             Value::Map(id) => {
                 9u8.hash(h);
-                // Order-insensitive: XOR each entry's hash into an accumulator
-                // (XOR is commutative). Mix in length so `{}` ≠ `{a a}` even
+                // Order-insensitive: XOR each entry's hash into an
+                // accumulator (XOR is commutative — works regardless of
+                // CHAMP trie shape). Mix in size so `{}` ≠ `{a a}` even
                 // if the per-entry hash ever conspired to 0.
                 let mut acc: u64 = 0;
-                let entries = self.map(id);
-                for &(k, vv) in entries {
+                let size = self.map_size(id);
+                self.fold_entries(id, &mut |k, vv| {
                     let mut sub = std::collections::hash_map::DefaultHasher::new();
                     self.hash_value_into(k, &mut sub);
                     self.hash_value_into(vv, &mut sub);
                     acc ^= sub.finish();
-                }
-                (entries.len() as u64).hash(h);
+                });
+                (size as u64).hash(h);
                 acc.hash(h);
             }
             Value::Fn(id) => {
@@ -1226,16 +1664,12 @@ impl Heap {
                 let ys = self.vector(y);
                 xs.len() == ys.len() && xs.iter().zip(ys.iter()).all(|(&p, &q)| self.equal(p, q))
             }
-            // Maps are equal when they hold the same key→value associations,
-            // independent of insertion order: same size, and every key in `x`
-            // maps to an equal value in `y` (keys themselves found by `equal`).
-            (Map(x), Map(y)) => {
-                let xs = self.map(x);
-                xs.len() == self.map(y).len()
-                    && xs
-                        .iter()
-                        .all(|(k, v)| self.map_get(y, *k).is_some_and(|w| self.equal(*v, w)))
-            }
+            // Maps: CHAMP is *canonical* under structural equality, so two
+            // equal maps have identical trie shapes — same `data_map` /
+            // `node_map` / `is_collision` bits at every node. Recurse
+            // structurally; collision leaves fall back to set-equality on
+            // their entries (their internal order isn't canonical).
+            (Map(x), Map(y)) => self.map_equal(x, y),
             (Fn(x), Fn(y)) => x == y,
             (Macro(x), Macro(y)) => x == y,
             (Native(x), Native(y)) => x == y,
@@ -1244,6 +1678,51 @@ impl Heap {
             (Pid { node: n1, id: i1 }, Pid { node: n2, id: i2 }) => n1 == n2 && i1 == i2,
             _ => false,
         }
+    }
+
+    /// Equality between two CHAMP maps — canonical-form recursion. Two
+    /// equal maps have the same node shape (same bitmaps, same children
+    /// in slot order), so a structural walk bails on the first mismatch.
+    /// Collision leaves fall back to set-equality on their entries (their
+    /// internal order isn't canonical — two equally-content collision
+    /// leaves can hold their entries in different positions).
+    fn map_equal(&self, x: MapId, y: MapId) -> bool {
+        let nx = self.map_node(x);
+        let ny = self.map_node(y);
+        if nx.size != ny.size {
+            return false;
+        }
+        if nx.is_collision != ny.is_collision {
+            return false;
+        }
+        if nx.is_collision {
+            // Set-equality on entries. Collision leaves are tiny (entries
+            // share the full 64-bit hash — astronomically rare), so O(n²)
+            // is fine.
+            if nx.data.len() != ny.data.len() {
+                return false;
+            }
+            return nx.data.iter().all(|(k, v)| {
+                ny.data
+                    .iter()
+                    .any(|(k2, v2)| self.equal(*k, *k2) && self.equal(*v, *v2))
+            });
+        }
+        // Branch: same bitmaps → same slot occupancy → same shapes.
+        if nx.data_map != ny.data_map || nx.node_map != ny.node_map {
+            return false;
+        }
+        for ((k1, v1), (k2, v2)) in nx.data.iter().zip(ny.data.iter()) {
+            if !self.equal(*k1, *k2) || !self.equal(*v1, *v2) {
+                return false;
+            }
+        }
+        for (&c1, &c2) in nx.children.iter().zip(ny.children.iter()) {
+            if !self.map_equal(c1, c2) {
+                return false;
+            }
+        }
+        true
     }
 
     // ----- environments -----
@@ -1347,18 +1826,6 @@ impl Heap {
     }
 
     pub fn new_env(&mut self, parent: Option<EnvId>) -> EnvId {
-        if let Some(idx) = self.local_free.envs.pop() {
-            // Reuse the slot, dropping its old contents. `EnvVars` is a
-            // `SmallVec` so this releases any spilled bindings; the inline
-            // capacity stays with the slot.
-            let slot = &mut self.local.envs[idx as usize];
-            slot.vars.clear();
-            slot.parent = parent;
-            // Clear the use-after-GC tripwire (see `alloc_slot!`).
-            #[cfg(debug_assertions)]
-            PoisonBits::set(&mut self.poison.envs, idx as usize, false);
-            return EnvId::local(idx as usize);
-        }
         let idx = self.local.envs.len();
         self.local.envs.push(EnvFrame {
             vars: EnvVars::new(),
@@ -1555,21 +2022,17 @@ impl Heap {
     // lists from scratch as `(0..len).filter(|i| !marked[i])` — equivalently,
     // any LOCAL slot present in the slab and not reached from a root.
 
-    /// Collect garbage in the LOCAL heap. `extra_roots` / `extra_envs` are
-    /// transient roots known to the caller (the evaluator passes the current
-    /// `expr` and `env` here). Pre-allocated objects whose handles aren't
-    /// rooted in *any* form become unreachable and are added to the free lists.
-    ///
-    /// **Safety contract:** every live LOCAL handle, anywhere — Rust locals,
-    /// captured borrows, in-flight builtin accumulators — must be reachable
-    /// from the union {`extra_roots`, `extra_envs`, [`Self::roots`],
-    /// [`Self::dynamics`]}. The `GC_BLOCK == 1` discipline in `process.rs`
-    /// makes this true *by construction* at the eval safepoint (no other eval
-    /// or macroexpand frame is active, the eval's own loop-body locals are
-    /// dead at `continue 'tail`, and the only depth-0 caller — `eval_str` —
-    /// uses [`Self::push_root`] for its forms vec). Calling `collect` from
-    /// anywhere else is the caller's responsibility to satisfy.
-    pub fn collect(&mut self, extra_roots: &[Value], extra_envs: &[EnvId]) {
+    /// Bump-allocator era: this is now a no-op. The per-process heap grows
+    /// monotonically until the process exits, at which point the whole heap
+    /// is dropped. Long-running receive loops will be bounded by an arena
+    /// flip on receive (next phase). The legacy mark-sweep is kept below as
+    /// `collect_old` for reference; remove on the phase-2 cleanup.
+    pub fn collect(&mut self, _extra_roots: &[Value], _extra_envs: &[EnvId]) {
+        // no-op
+    }
+
+    #[allow(dead_code)]
+    fn collect_old(&mut self, extra_roots: &[Value], extra_envs: &[EnvId]) {
         if !self.gc_enabled {
             return;
         }
@@ -1634,9 +2097,18 @@ impl Heap {
             }
             TraceItem::Map(idx) => {
                 if marks.mark_map(idx) {
-                    for &(k, v) in &self.local.maps[idx] {
+                    // CHAMP node: trace every inline entry's (k, v) and
+                    // every child sub-node handle. Children are LOCAL
+                    // `MapId`s — push them via the normal Map traceitem.
+                    let node = &self.local.maps[idx];
+                    for &(k, v) in &node.data {
                         push_value(work, k);
                         push_value(work, v);
+                    }
+                    for &c in &node.children {
+                        if c.region() == LOCAL {
+                            work.push(TraceItem::Map(c.index()));
+                        }
                     }
                 }
             }
@@ -1725,7 +2197,7 @@ impl Heap {
         for i in 0..self.local.maps.len() {
             if !marks.is_map_marked(i) {
                 self.local_free.maps.push(i as u32);
-                self.local.maps[i] = Vec::new();
+                self.local.maps[i] = MapNode::default();
                 #[cfg(debug_assertions)]
                 {
                     self.poison.maps[i] = true;

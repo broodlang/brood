@@ -695,7 +695,7 @@ fn map_dissoc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// `contains?`/`reduce-kv` are all Brood over it (std/prelude.blsp).
 fn map_pairs(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_map(heap, "map-pairs", arg(args, 0))?;
-    let entries = heap.map(id).to_vec(); // copy out, releasing the borrow before we alloc
+    let entries = heap.map_entries(id); // copy out, releasing the borrow before we alloc
     let pairs: Vec<Value> = entries
         .into_iter()
         .map(|(k, v)| heap.alloc_vector(vec![k, v]))
@@ -1503,7 +1503,7 @@ fn check_file_structured(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispRe
             entries.push((col_kw, Value::Int(p.col as i64)));
         }
         entries.push((msg_kw, msg_val));
-        out.push(heap.alloc_map(entries));
+        out.push(heap.map_from_pairs(entries));
     }
     Ok(heap.list(out))
 }

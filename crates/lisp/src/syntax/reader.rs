@@ -275,7 +275,7 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        Ok(self.heap.alloc_map(pairs))
+        Ok(self.heap.map_from_pairs(pairs))
     }
 
     fn read_string(&mut self) -> Result<Value, LispError> {

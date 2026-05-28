@@ -75,9 +75,13 @@
       ; the file it was loaded from
       (is (int? (first (rest loc))))))
   ; the line
-  (test "a prelude global / unknown name has no recorded site"
-    (assert= (source-location 'map) nil)
-    ; prelude binding, not load-recorded
+  (test "a prelude global resolves to the materialised prelude file"
+    ;; Prelude defns have a recorded site (the unpacked stdlib copy).
+    ;; What stays `nil`: a Rust builtin (no .blsp source) or an unknown
+    ;; name.
+    (let (loc (source-location 'map))
+      (is (vector? loc))
+      (is (string? (first loc))))
     (assert= (source-location 'no-such-name-xyz) nil))
   (test "the site is visible from a spawned process (shared runtime code)"
     (let (me (self) w (spawn (sl-worker me)))

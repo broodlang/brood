@@ -89,14 +89,19 @@ fn vectors_evaluate_elements() {
 
 #[test]
 fn maps_are_immutable_values() {
-    // A literal prints insertion-ordered; assoc/dissoc return fresh maps.
-    assert_eq!(run("{:a 1 :b 2}"), "{:a 1, :b 2}");
+    // ADR-040 (CHAMP): print order is hash-driven, not insertion order.
+    // The only printed form we assert exactly is a single-entry map; the
+    // round-trip in the `=` line is the real shape-correctness check.
     assert_eq!(run("(get {:a 1 :b 2} :b)"), "2");
     assert_eq!(run("(get {:a 1} :z 99)"), "99");
-    assert_eq!(run("(assoc {:a 1} :b 2)"), "{:a 1, :b 2}");
+    assert_eq!(run("(get (assoc {:a 1} :b 2) :b)"), "2");
     // assoc does not mutate the original binding.
     assert_eq!(run("(def m {:a 1}) (assoc m :b 2) m"), "{:a 1}");
-    assert_eq!(run("(dissoc {:a 1 :b 2 :c 3} :b)"), "{:a 1, :c 3}");
+    // dissoc result equals the expected map regardless of print order.
+    assert_eq!(
+        run("(= (dissoc {:a 1 :b 2 :c 3} :b) {:a 1 :c 3})"),
+        "true"
+    );
     assert_eq!(run("(count {:a 1 :b 2 :c 3})"), "3");
     // equality is order-independent; any value is a structurally-compared key.
     assert_eq!(run("(= {:a 1 :b 2} {:b 2 :a 1})"), "true");
@@ -120,9 +125,16 @@ fn maps_structural_keys_and_equality() {
     assert_eq!(run("(= {:a 1} {:a 1 :b 2})"), "false");
     assert_eq!(run("(= {:a {:b [1 2]}} {:a {:b [1 2]}})"), "true");
     assert_eq!(run("(= {:a {:b [1 2]}} {:a {:b [1 3]}})"), "false");
-    // assoc updates in place (keeps position); a new key appends.
-    assert_eq!(run("(keys (assoc {:a 1 :b 2} :a 9))"), "(:a :b)");
-    assert_eq!(run("(keys (assoc {:a 1} :b 2))"), "(:a :b)");
+    // ADR-040 (CHAMP): iteration order is hash-driven, not insertion.
+    // The key *set* survives assoc; assert via frequencies-as-map equality.
+    assert_eq!(
+        run("(= (frequencies (keys (assoc {:a 1 :b 2} :a 9))) {:a 1 :b 1})"),
+        "true"
+    );
+    assert_eq!(
+        run("(= (frequencies (keys (assoc {:a 1} :b 2))) {:a 1 :b 1})"),
+        "true"
+    );
 }
 
 #[test]

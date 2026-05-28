@@ -5351,13 +5351,190 @@ tie-in to the def-site work). Verified the name output end-to-end; the always-on
 location piece would need spawn-site/enclosing-form tagging in `eval/mod.rs`,
 left out to stay clear of the in-flight race work.
 
-**Deferred (perturbs the in-flight race hunt).** The 2-arg numeric fast-paths
-(pure-prelude multi-arity dispatch on `+`/`-`/`*`/`/`/`=`/`<`,
-`std/prelude.blsp:69`) change the hot-path allocation profile the race is
-sensitive to — held until the race fix lands.
+**Dropped — 2-arg numeric fast-paths (§4).** Investigated, decided against. The
+goal was to skip the rest-list + `fold` overhead on `(+ a b)` (≈4 µs/call). It
+turns out there's **no pure-prelude win**: a multi-clause `defn` lowers (via
+`lower_fn`, `eval/macros.rs:413`) to `(fn (& args) (match* :fn args …))` — it
+still binds *every* arg into a rest-list before dispatching, then adds `match*`
+overhead, so it's strictly *worse*. `&optional a b` breaks semantics (optionals
+default to `nil`, so `(+ 1 nil)` — today a type error — would read as `(+ 1)`).
+The rest-list is allocated by the evaluator's `apply_closure` at the call
+boundary, *before* any Brood runs, so no wrapper-level arity check can avoid it.
+A genuine fix needs one of: (a) arity-based clause dispatch in `eval/mod.rs`
+(skip arg-collection — the principled route, but it's the hot race-hunt file),
+or (b) moving `+`/`-`/`*`/`/`/`<`/`=` to `Arity::any()` Rust builtins (fastest,
+but reverses ADR-006 for arithmetic). Neither is worth it pre-profiling on a real
+workload; revisit if arithmetic ever shows up hot in a benchmark that matters.
+**Lesson for next time:** multi-clause `defn` is not a zero-alloc arity switch.
 
 **Pre-existing failure noted (not from this work).** `introspection_test`'s
 "a prelude global … has no recorded site" now fails — `(source-location 'map)`
 returns a cached-prelude def-site `["…/.cache/brood/prelude.blsp" 185 1]` instead
 of `nil`. That's the in-progress cross-file def-site / prelude-caching change in
 `heap.rs`/`eval/mod.rs`, unrelated to the additive stdlib work here.
+
+
+## 2026-05-29 — Maps: CHAMP trie (ADR-040)
+
+**Goal.** Replace ADR-030's insertion-ordered association vector with a
+CHAMP hash trie so `assoc`/`dissoc` stop being O(n) (and `(fold assoc {} …)`
+stops being O(n²)), and `get` stops being a linear `equal` scan.
+
+**Why CHAMP, not vanilla HAMT.** The ADR-040 rationale in one paragraph:
+same big-O as Clojure's `PersistentHashMap`, but two bitmaps per node
+(`data_map` for inline `(k,v)`, `node_map` for child sub-nodes) → smaller
+nodes, better cache use, and **canonical** structure under structural
+equality, so map `=` becomes a shape-matching recursion that bails on the
+first mismatched bitmap instead of "iterate one map, look every key up
+in the other."
+
+**What landed.**
+- `core/map_champ.rs` — `MapNode` (branch / collision leaf), `slot_at`
+  (4-bit hash slice), `rank` (bitmap-popcount index), constants.
+- `core/heap.rs` — `Slabs::maps` and `CodeSlabs::maps` switched from
+  `Vec<Vec<(Value, Value)>>` to `Vec<MapNode>` / `boxcar::Vec<MapNode>`.
+  Map ops became CHAMP recursions: `champ_get` / `champ_assoc` (split /
+  overwrite / recurse / insert; `champ_split` for hash-collision spawn)
+  / `champ_dissoc` (promotion when a sub-node shrinks to a singleton; drop
+  when it empties). `map_equal` walks the canonical shape, fallback to
+  set-equality on collision leaves. Promotion to RUNTIME: `promote_map_node`
+  walks depth-first, allocating new RUNTIME slots bottom-up. Prelude freeze
+  re-tags both inline entries' values and child `MapId`s.
+- `Heap::hash_value` (salvaged from the abandoned ADR-030-index attempt) —
+  structural, consistent with `Heap::equal`; canonical 0.0/-0.0/NaN; XOR-
+  based for order-insensitive map hashes; region-blind.
+- API rename: the slice-returning `heap.map(id) -> &[(Value, Value)]` is
+  gone (entries are spread through the trie). Callers use
+  `heap.map_entries(id) -> Vec<(Value, Value)>` (full walk),
+  `heap.map_node(id) -> &MapNode` (raw node), `heap.map_get` (one key),
+  or `heap.fold_entries` (borrow-friendly iteration without a Vec). Old
+  `heap.alloc_map(pairs)` → `heap.map_from_pairs(pairs)` (folds `assoc`
+  over a fresh empty root, building the trie in one O(N log N) pass).
+- `map-pairs` and the `{ }` reader path go through the new APIs.
+
+**ADR-030 contract change.** **Iteration order is no longer insertion
+order.** It's deterministic per map shape (slot-index ascending at each
+level), but hash-driven. Tests that asserted insertion order — and there
+were nine — were rewritten to compare via `(frequencies (keys m))` (a map
+→ order-independent `=`) or to reduce + assoc round-trips. The "any value
+is a key" / "equality is order-independent" / falsy-value tests are
+unchanged.
+
+**Numbers (release, divan, 3-sample quickbench).**
+| Bench | HEAD (assoc-vec) | CHAMP | Δ |
+|---|---|---|---|
+| `build_and_get` 200 | 4.4 ms | 5.2 ms | +18% |
+| `build_and_get` 1000 | 31.0 ms | 20.7 ms | **−33%** |
+| `frequencies` 1000 | 9.2 ms | 9.6 ms | +4% |
+| `frequencies` 10000 | 113 ms | 117 ms | +4% |
+
+The asymptotic win shows at N=1000 (≈35% faster) and grows: a 10 000-entry
+map builds + iterates in ~137 ms end-to-end (was prohibitively slow on the
+old O(N²) build). Small `frequencies` workloads (7 unique keys) shift
+marginally — the per-op work per assoc is one slot probe + a one-`data`
+shift, vs. a one-element `equal` scan before; cache effects dominate.
+
+**Tests.** 64/64 in-language `tests/maps_test.blsp`; full Rust test
+suite green (the one pre-existing `server_style_receive_loop` GC bug is
+deferred and unrelated). Pre-existing parallel-session failures noted:
+`suite_test.blsp` `error-of` assertions (parallel session changed it from
+string-returning to map-returning); not part of this work.
+
+---
+
+## 2026-05-29 (cont.) — MCP DX feedback: the two trust-breakers
+
+**Goal.** A Claude session reviewed `nest mcp` + the `writing-brood` skill
+(notes in the chat; overall 8/10, "the live-image loop is the right
+abstraction"). Two items actively made the loop *untrustworthy* — fix those
+first, defer the polish items (`load` arg naming, scoped `format`, `def`
+docstrings, a bind-vs-match lint).
+
+**Fixed.**
+
+- **`run-tests` double-counts after a reload.** A `describe`/`test` form
+  *registers* by consing onto `*units*` in `std/test.blsp`. In a one-shot
+  `nest test` the process starts with `*units* = nil`, so counts are right —
+  but the MCP session is a long-lived image (ADR-013), and `load`ing the same
+  test file twice registered every unit twice. The runner reported 6 tests for
+  a 3-test suite, so an agent had to shell out to a fresh `nest test` for a
+  trustworthy count. Fix: a `reset-units!` (`std/test.blsp`) that clears the
+  registry, called by both `run-project-tests` and
+  `run-project-tests-structured` (`std/project.blsp`) right before they
+  (re)load the test files — so each run owns a clean registry no matter how
+  many times the image loaded them before. Inert on a fresh `Interp`
+  (`*units*` is already `nil`), so the one-shot path is unchanged.
+
+- **`print` corrupts the JSON-RPC channel.** `nest mcp` speaks newline-
+  delimited JSON over stdout; a handler's `(print …)` wrote straight there and
+  broke the protocol stream — and printing is the most natural debugging
+  instinct, so "don't print" was a real footgun (the skill had to warn against
+  it). Fix: a thread-local capture buffer in `crates/lisp/src/builtins.rs`
+  (`begin_stdout_capture` / `take_captured_stdout`, both `pub`); `print`
+  diverts into it when one is installed, else takes the identical
+  `print!`-to-stdout path as before (REPL / file runner unaffected). The
+  dispatcher (`crates/nest/src/mcp.rs`) installs a buffer around every
+  `tools/call` (and `tools/list`, in case a project `mcp.blsp` prints at load)
+  and drains it afterward — always, even on error, so it can't leak into the
+  next call. Captured output rides back as a **second** MCP content block
+  (`content[1]`, labelled `[captured stdout]`); `content[0]` stays the
+  handler's return value, so existing parsers are unaffected. Thread-local, so
+  it captures the synchronous handler thread only — spawned green processes on
+  other workers are unaffected (they shouldn't be writing to a protocol
+  channel anyway). This realizes the `stdout` column the `docs/mcp.md` tool
+  table already anticipated, delivered uniformly for *every* tool rather than
+  threaded through each handler's return map.
+
+**Tests.** `crates/lisp/tests/basic.rs`:
+`reset_units_prevents_reload_double_count` (register twice → 2, `reset-units!`
++ once → 1). `crates/nest/src/mcp.rs`:
+`handler_print_is_captured_not_leaked_onto_the_channel` (a clean newline-
+delimited round-trip past a printing handler is itself proof the channel
+stayed pure JSON) and `capture_does_not_leak_between_calls`. All 32 nest tests
+and 128 brood lib unit tests green.
+
+**Caveat — full in-language suite.** `tests/suite.rs` currently SIGSEGVs in
+the concurrent scheduler path (the in-progress supervision/resume-slot
+rework — `process/scheduler.rs`), surfacing right after the `bench` +
+concurrency groups. Confirmed unrelated to this work: `reset-units!` is a
+no-op on the suite's fresh `Interp`; the `print` change is the identical code
+path when no capture is installed; and the evaluator's `map_entries` change
+(the only one-line eval diff in the tree) returns an owned `Vec`, GC-safe.
+Targeted verification done; whole-suite re-run pending the scheduler fix.
+
+**Docs.** This entry; the `docs/mcp.md` "Session model" section now documents
+stdout capture + the `content[1]` envelope.
+
+---
+
+## 2026-05-29 — Test runner fails fast on a dead worker (KI-2 part 2)
+
+**Goal.** From agent DX feedback (three editing sessions, `docs/` review): the
+single highest-impact fix was that `nest test` *hangs forever* when a parallel
+test worker dies, instead of reporting the failure. A hung runner is the worst
+signal for both a human and an autonomous agent — worse than a red test.
+
+**Built.** `std/test.blsp`: the parallel phase now reaps dead workers.
+- `spawn-units` `monitor`s every worker it spawns and returns a `(pid unit)`
+  assoc list; each worker tags its result message with its own `(self)` pid.
+- `collect-units` → `collect-loop` accounts for each worker exactly once: by its
+  `[:unit-result pid results]` if it reported, otherwise by the
+  `[:down mref pid reason]` its monitor fires. A dead worker becomes a failing
+  result (`"test process died: <reason>"`) instead of an indefinite `(receive)`
+  block. A `[:down …]` for a pid that isn't ours (a stale worker from a prior
+  run in a long-lived session) is ignored without decrementing the count, so it
+  can't corrupt a later run. The kernel fires `[:down …]` immediately if the
+  worker already exited, so there's no lost-death window between `spawn` and
+  `monitor`.
+
+**Why this is independent of KI-1.** The scheduler lookup race can still *kill*
+a worker; this change only ensures the runner *notices* and fails fast with the
+death reason. KI-1 (workers can't resolve globals under `-j 0`) remains open.
+
+**Tests.** `tests/runner_failfast_test.blsp` reproduces a worker death
+deterministically (a unit whose thunk throws inside `run-unit`, before the
+worker sends) and asserts the collector returns a failing result rather than
+hanging. Verified in isolation (`--test`, exit 0). Full-suite re-run pending —
+the tree has concurrent core changes in flight.
+
+**Docs.** `docs/known-issues.md` KI-2 part 2 marked fixed; this entry.

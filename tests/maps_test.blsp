@@ -1,7 +1,15 @@
-;; Immutable maps (ADR-030): `{ }` literals + get/assoc/dissoc/keys/vals/
-;; contains?, structural-equality keys, order-independent `=`, and behaviour
-;; across green processes (copy-on-send + shared-global reads). Register-only —
-;; discovered and run by `nest test` (and cargo test, via crates/lisp/tests/suite.rs).
+;; Immutable maps (ADR-030 + ADR-040): `{ }` literals + get/assoc/dissoc/keys/
+;; vals/contains?, structural-equality keys, order-independent `=`, and
+;; behaviour across green processes (copy-on-send + shared-global reads).
+;; Register-only — discovered and run by `nest test` (and cargo test, via
+;; crates/lisp/tests/suite.rs).
+;;
+;; ADR-040 (CHAMP) replaced ADR-030's insertion-ordered association vector
+;; with a 16-way hash trie, so iteration order is **no longer insertion
+;; order**. It is still deterministic per map shape — same content always
+;; iterates in the same order — but it's hash-driven. Tests below compare
+;; key/value sequences either after `sort` or as set-equality through map
+;; round-trip, never raw against an insertion-ordered expectation.
 ;;
 ;; The whole suite runs in parallel (each test is its own process), so even the
 ;; non-concurrency tests below already exercise maps on multiple cores. The final
@@ -68,23 +76,42 @@
     (is (contains? {:a false} :a))
     (refute (contains? {:a 1} :z))
     (refute (contains? {} :a)))
-  (test "keys and vals share insertion order (and line up positionally)"
-    (assert= (keys {:a 1 :b 2 :c 3}) (list :a :b :c))
-    (assert= (vals {:a 1 :b 2 :c 3}) (list 1 2 3)))
+  (test "keys and vals enumerate the same set in the same order"
+    ;; ADR-040: order is determined by CHAMP trie shape, not insertion.
+    ;; Both `keys` and `vals` walk the trie identically, so the i-th key
+    ;; corresponds to the i-th value — that's the invariant we test.
+    (let (m {:a 1 :b 2 :c 3})
+      (assert= (map-pairs m)
+               (map (fn (k) [k (get m k)]) (keys m)))))
   (test "count and empty? on a populated map"
     (assert= (count {:a 1 :b 2 :c 3}) 3)
     (refute (empty? {:a 1}))))
 
 (describe "map-pairs & reduce-kv"
-  (test "map-pairs returns [k v] vectors in insertion order"
-    (assert= (map-pairs {:a 1 :b 2 :c 3}) (list [:a 1] [:b 2] [:c 3]))
+  (test "map-pairs returns one [k v] vector per entry; empty for {}"
+    (let (ps (map-pairs {:a 1 :b 2 :c 3}))
+      (assert= (count ps) 3)
+      ;; Round-trip through reduce + assoc recovers the original — proves
+      ;; every entry is present without depending on iteration order.
+      (assert= (reduce (fn (m kv) (assoc m (first kv) (last kv))) {} ps)
+               {:a 1 :b 2 :c 3}))
     (assert= (map-pairs {}) nil))
-  (test "keys and vals are derived from map-pairs (incl. falsy values)"
-    (assert= (keys {:a nil :b false :c 0}) (list :a :b :c))
-    (assert= (vals {:a nil :b false :c 0}) (list nil false 0)))
+  (test "keys and vals enumerate every entry (incl. falsy) — set, not order"
+    ;; CHAMP iteration isn't insertion order; assert content via maps.
+    (let (m {:a nil :b false :c 0})
+      ;; `frequencies` builds a map → set comparison is `=` of maps.
+      (assert= (frequencies (keys m)) {:a 1 :b 1 :c 1})
+      ;; The value list has the right multiset (covers nil/false/0).
+      (assert= (frequencies (vals m)) {nil 1 false 1 0 1})
+      ;; And rebuilding from (keys m) + (get m k) recovers the map.
+      (assert= (reduce (fn (acc k) (assoc acc k (get m k))) {} (keys m)) m)))
   (test "reduce-kv folds (f acc k v) over the entries"
     (assert= (reduce-kv (fn (acc k v) (+ acc v)) 0 {:a 1 :b 2 :c 3}) 6)
-    (assert= (reduce-kv (fn (acc k v) (cons k acc)) nil {:a 1 :b 2}) (list :b :a))
+    ;; Order-independent fold: collect keys into a set-like map then
+    ;; compare. The earlier `(cons k acc)` assertion depended on iteration
+    ;; order which CHAMP doesn't preserve.
+    (assert= (reduce-kv (fn (acc k v) (assoc acc k true)) {} {:a 1 :b 2})
+             {:a true :b true})
     (assert= (reduce-kv (fn (acc k v) (assoc acc v k)) {} {:a 1 :b 2}) {1 :a 2 :b}))
   (test "reduce-kv on the empty map returns the seed untouched"
     (assert= (reduce-kv (fn (acc k v) (+ acc 1)) 99 {}) 99)))
@@ -93,11 +120,11 @@
   (test "assoc returns a fresh map, leaving the original untouched"
     (let (m {:a 1}) (assert= (assoc m :b 2) {:a 1 :b 2}) (assert= m {:a 1})))
   ; the binding is unchanged
-  (test "assoc updates an existing key in place (preserving its position)"
+  (test "assoc updates an existing key (value-equal, key set unchanged)"
     (assert= (assoc {:a 1 :b 2} :a 10) {:a 10 :b 2})
-    (assert= (keys (assoc {:a 1 :b 2} :a 10)) (list :a :b)))
-  (test "assoc appends a new key at the end"
-    (assert= (keys (assoc {:a 1 :b 2} :c 3)) (list :a :b :c)))
+    (assert= (frequencies (keys (assoc {:a 1 :b 2} :a 10))) {:a 1 :b 1}))
+  (test "assoc adds a new key (key set grows)"
+    (assert= (frequencies (keys (assoc {:a 1 :b 2} :c 3))) {:a 1 :b 1 :c 1}))
   (test "variadic assoc applies pairs left to right"
     (assert= (assoc {} :a 1 :b 2 :c 3) {:a 1 :b 2 :c 3})
     (assert= (assoc {:a 1} :a 2 :a 3) {:a 3}))
@@ -197,8 +224,12 @@
     (refute (= {:a {:b {:c [1 2 3]}}} {:a {:b {:c [1 2 4]}}}))))
 
 (describe "printing & round-trip"
-  (test "pr-str renders the readable form"
-    (assert= (pr-str {:a 1 :b "hi"}) "{:a 1, :b \"hi\"}")
+  (test "pr-str renders a readable form (round-trip is what matters)"
+    ;; ADR-040: per-entry order is hash-driven, so we can't assert an
+    ;; exact string layout for multi-entry maps. The next test covers
+    ;; the round-trip; here we just smoke-test the empty case + the
+    ;; single-entry case (one possible layout).
+    (assert= (pr-str {:a 1}) "{:a 1}")
     (assert= (pr-str {}) "{}"))
   (test "a map round-trips through read-string + eval"
     (let (m {:a 1 :b [2 3] :c "x"}) (assert= (eval (read-string (pr-str m))) m)))
@@ -212,12 +243,14 @@
       (assert= (get m 9) 81)
       (assert= (get m 99) 9801)
       (assert= (get m 100) nil)))
-  (test "keys of a built map are in insertion order" (assert= (keys (mt-build 5)) (list 0 1 2 3 4)))
+  (test "keys of a built map cover every inserted key (sorted comparison)"
+    (assert= (sort (keys (mt-build 5))) (list 0 1 2 3 4)))
   (test "fold/reduce over keys reconstructs information"
     (let (m (mt-build 10)) (assert= (reduce + 0 (vals m)) 285)))
   ; Σ i² for i in 0..9
   (test "threading macros compose map ops"
-    (assert= (-> {:x 1} (assoc :y 2) (assoc :z 3) (dissoc :x) keys) (list :y :z))
+    (assert= (frequencies (-> {:x 1} (assoc :y 2) (assoc :z 3) (dissoc :x) keys))
+             {:y 1 :z 1})
     (assert= (->> {:a 1 :b 2} keys count) 2)))
 
 (describe "type errors"

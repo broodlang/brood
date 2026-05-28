@@ -1,0 +1,29 @@
+;; Runner fail-fast: a test worker that DIES before reporting must surface as a
+;; failure, not hang the collector forever. This is the KI-2 symptom — under the
+;; scheduler race a worker throws inside `run-unit` itself (outside any per-form
+;; `try`), exits without sending, and the old `collect-units` blocked in
+;; `(receive)` waiting for a message that never came. `spawn-units` now monitors
+;; each worker and `collect-units` reaps a `[:down …]` into failing results.
+;;
+;; We reproduce the death deterministically (no race needed): a unit whose
+;; thunk throws when `run-unit` calls it — `run-test` evaluates `((second t))`
+;; for the failure list with no `try` around it, so the throw propagates out of
+;; the worker and kills it before `(send me …)`. The monitor fires `[:down …]`,
+;; and the collector must come back with a failing result instead of blocking.
+
+(require 'test)
+
+;; A one-test unit `(mode group tests)` whose worker dies in `run-unit`.
+(def %crashing-unit
+  (list :parallel "crash-grp"
+    (list (list "boom" (fn () (error "kaboom"))))))
+
+(describe "runner reaps a dead worker" :isolated
+  (test "a worker that dies before reporting becomes a failure, not a hang"
+    ;; If reaping is broken this `collect-units` never returns and the whole
+    ;; suite hangs (which `cargo test`/`nest test` would surface as a timeout).
+    (let (results (collect-units (spawn-units (list %crashing-unit) (self)) nil)
+          r       (first results))
+      (assert= 1 (count results))      ; the dead unit's one test is accounted for
+      (assert= "boom" (second r))      ; its name is preserved
+      (is (not (empty? (third r))))))) ; and it carries a failure record

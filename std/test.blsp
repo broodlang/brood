@@ -301,21 +301,72 @@ docs/testing.md for the full guide.")
 ;; Output is emitted once at the end (a single structured report), so there is no
 ;; per-test progress to print here.
 (defn spawn-units (units me)
+  ;; Spawn one MONITORED worker per unit and return an assoc list of
+  ;; `(pid unit)`. Each worker tags its message with its own pid (`(self)`),
+  ;; which equals the pid `spawn` returns — so the collector can correlate a
+  ;; result with the worker that produced it. `monitor` lets the collector
+  ;; observe a worker that DIES before reporting (KI-2: a raced/crashed test
+  ;; process throwing in `run-unit` itself, outside any per-form `try`) and turn
+  ;; it into a failure instead of blocking forever in `receive`. The kernel fires
+  ;; `[:down …]` immediately if the worker has already exited, so there is no
+  ;; lost-death window between `spawn` and `monitor`.
   (fold
-    (fn (_ unit)
-      ;; capture `me` (the collector) and `unit` lexically; the thunk runs in
-      ;; the child and reports this unit's results back.
-      (spawn (send me (run-unit unit))))
+    (fn (acc unit)
+      (let (pid (spawn (send me (list :unit-result (self) (run-unit unit)))))
+        (monitor pid)
+        (cons (list pid unit) acc)))
     nil
     units))
 
-(defn collect-units (remaining acc)
-  ; remaining = messages still to receive
-  (if (= remaining 0)
+;; The unit a monitored worker `pid` was spawned for, or nil if `pid` isn't one
+;; of ours (e.g. a stale `[:down …]` from a previous run still in the mailbox).
+(defn unit-of-pid (pid workers)
+  (cond (empty? workers) nil
+        (= (first (first workers)) pid) (second (first workers))
+        else (unit-of-pid pid (rest workers))))
+
+;; A worker died before reporting (KI-2). Synthesize a failing result for every
+;; test in its unit, carrying the exit reason — so a crashed/raced worker fails
+;; fast as a visible failure instead of hanging the collector. A result tuple is
+;; `(group name fails ms)`; a failure record is `(loc detail-lines)` with loc nil.
+(defn dead-unit-results (unit reason)
+  (map (fn (t)
+         (list (second unit) (first t)
+           (list (list nil (list (str "test process died: " (pr-str reason)))))
+           0))
+    (third unit)))
+
+;; Account for each spawned worker exactly once — by its result if it reported,
+;; otherwise by its death. A healthy worker sends `[:unit-result pid results]`
+;; then exits `:normal` (its later `[:down …]` is ignored because its pid is in
+;; `reported`); a crashed worker sends nothing but its monitor fires
+;; `[:down mref pid reason]`, which we turn into failing results. `pending`
+;; counts workers not yet accounted for. A `[:down …]` for an unknown pid (a
+;; stale worker from a prior run in a long-lived session) is ignored WITHOUT
+;; decrementing, so it can't corrupt the count.
+(defn collect-units (workers acc)
+  (collect-loop (count workers) workers nil acc))
+
+(defn collect-loop (pending workers reported acc)
+  (if (= pending 0)
     acc
-    (let (results (receive))
-      ; one unit's worth of results
-      (collect-units (- remaining 1) (append results acc)))))
+    (let (msg (receive))
+      (cond
+        (= (first msg) :unit-result)         ; [:unit-result pid results]
+        (collect-loop (- pending 1) workers (cons (second msg) reported)
+          (append (third msg) acc))
+
+        (= (first msg) :down)                ; [:down mref pid reason]
+        (let (pid (third msg)
+              unit (unit-of-pid pid workers))
+          (cond
+            (member? pid reported) (collect-loop pending workers reported acc)
+            (nil? unit)            (collect-loop pending workers reported acc)
+            else (collect-loop (- pending 1) workers reported
+                   (append (dead-unit-results unit (nth msg 3)) acc))))
+
+        ;; Anything else in the runner's mailbox isn't ours — skip it.
+        else (collect-loop pending workers reported acc)))))
 
 ;; Isolated phase: run each isolated unit on the runner itself, one at a time, so
 ;; nothing else is executing — and each test under `%isolate`, so its global defs
@@ -394,8 +445,8 @@ docs/testing.md for the full guide.")
     ;; parallel/serial defs below) and its own defs roll back. Then launch the
     ;; parallel/serial workers and collect them.
     (let (iso-results (run-isolated iso nil)
-          _ (spawn-units par me)
-          par-results (collect-units (count par) nil)
+          workers (spawn-units par me)
+          par-results (collect-units workers nil)
           results (append iso-results par-results)
           elapsed (- (now) start)
           total (count results)
@@ -430,8 +481,8 @@ docs/testing.md for the full guide.")
         start (now)
         me    (self))
     (let (iso-results (run-isolated iso nil)
-          _           (spawn-units par me)
-          par-results (collect-units (count par) nil)
+          workers     (spawn-units par me)
+          par-results (collect-units workers nil)
           results     (append iso-results par-results)
           elapsed     (- (now) start)
           total       (count results)

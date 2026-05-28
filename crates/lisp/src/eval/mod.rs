@@ -96,7 +96,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
             Value::Map(id) => {
                 // A map literal evaluates each key and value, then canonicalises
                 // (last-wins on equal keys). Like a vector literal, but in pairs.
-                let entries = heap.map(id).to_vec();
+                let entries = heap.map_entries(id);
                 let mut pairs = Vec::with_capacity(entries.len());
                 for (k, v) in entries {
                     let k = eval(heap, k, env)?;

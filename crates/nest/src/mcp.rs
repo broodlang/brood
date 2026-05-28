@@ -46,7 +46,7 @@ use std::error::Error;
 use std::io::{BufRead, BufReader, Write};
 
 use brood::core::heap::Heap;
-use brood::core::value::{self, Value};
+use brood::core::value::{self, MapId, Value};
 use brood::Interp;
 
 use serde_json::{json, Map as JsonMap, Value as Json};
@@ -266,29 +266,28 @@ fn tool_entry_to_json(heap: &Heap, entry: Value) -> Option<Json> {
         Value::Map(id) => id,
         _ => return None,
     };
-    let map = heap.map(map_id);
-    let name = map_get_kw(map, "name").and_then(|v| match v {
+    let name = map_get_kw(heap, map_id, "name").and_then(|v| match v {
         Value::Str(id) => Some(heap.string(id).to_string()),
         _ => None,
     })?;
-    let schema = map_get_kw(map, "schema")?;
+    let schema = map_get_kw(heap, map_id, "schema")?;
     let schema_json = value_to_json(heap, schema).ok()?;
     let mut obj = JsonMap::new();
     obj.insert("name".into(), Json::String(name));
     obj.insert("inputSchema".into(), schema_json);
-    if let Some(Value::Str(id)) = map_get_kw(map, "description") {
+    if let Some(Value::Str(id)) = map_get_kw(heap, map_id, "description") {
         obj.insert("description".into(), Json::String(heap.string(id).to_string()));
     }
     Some(Json::Object(obj))
 }
 
 /// Look up a keyword-keyed entry in a Brood map: `(get m :kw)` in Rust. The
-/// keyword name has to intern, so callers pass a `&str`.
-fn map_get_kw(map: &[(Value, Value)], kw: &str) -> Option<Value> {
+/// keyword name has to intern, so callers pass a `&str`. Goes through the
+/// CHAMP-backed `map_get` (ADR-040) — O(log N) probe instead of the old
+/// linear scan over an entries slice.
+fn map_get_kw(heap: &Heap, map_id: MapId, kw: &str) -> Option<Value> {
     let target = value::intern(kw);
-    map.iter()
-        .find(|(k, _)| matches!(k, Value::Keyword(s) if *s == target))
-        .map(|(_, v)| *v)
+    heap.map_get(map_id, Value::Keyword(target))
 }
 
 /// Find a tool by `name` in the catalogue and apply its handler to the JSON
@@ -361,13 +360,12 @@ fn find_handler(heap: &Heap, tools: Value, name: &str) -> Option<Value> {
             Value::Map(id) => id,
             _ => continue,
         };
-        let map = heap.map(map_id);
-        let item_name = match map_get_kw(map, "name") {
+        let item_name = match map_get_kw(heap, map_id, "name") {
             Some(Value::Str(id)) => heap.string(id),
             _ => continue,
         };
         if item_name == name {
-            return map_get_kw(map, "handler");
+            return map_get_kw(heap, map_id, "handler");
         }
     }
     None
@@ -558,8 +556,8 @@ pub fn value_to_json(heap: &Heap, v: Value) -> Result<Json, String> {
         }
         Value::Map(id) => {
             let mut obj = JsonMap::new();
-            for (k, val) in heap.map(id) {
-                let key = match *k {
+            for (k, val) in heap.map_entries(id) {
+                let key = match k {
                     Value::Str(id) => heap.string(id).to_string(),
                     Value::Sym(s) | Value::Keyword(s) => value::symbol_name(s),
                     other => {
@@ -569,7 +567,7 @@ pub fn value_to_json(heap: &Heap, v: Value) -> Result<Json, String> {
                         ))
                     }
                 };
-                obj.insert(key, value_to_json(heap, *val)?);
+                obj.insert(key, value_to_json(heap, val)?);
             }
             Ok(Json::Object(obj))
         }
@@ -627,7 +625,7 @@ pub fn json_to_value(heap: &mut Heap, j: &Json) -> Result<Value, String> {
                 let val = json_to_value(heap, v)?;
                 entries.push((key, val));
             }
-            Ok(heap.alloc_map(entries))
+            Ok(heap.map_from_pairs(entries))
         }
     }
 }
