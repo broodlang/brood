@@ -414,19 +414,15 @@ fn establish(peer: Symbol, stream: TcpStream, role: Role) {
     let pong: Arc<[u8]> = Arc::from(frame_bytes(&Frame::Pong).expect("encode Pong"));
     std::thread::spawn(move || {
         let mut r: &TcpStream = &reader_sock;
-        loop {
-            match read_frame(&mut r) {
-                Ok(frame) => {
-                    last_seen.store(now_millis(), Ordering::Relaxed);
-                    match frame {
-                        Frame::Send { target, msg } => deliver_inbound(target, msg),
-                        Frame::Ping => {
-                            let _ = reader_tx.send(Arc::clone(&pong));
-                        }
-                        Frame::Pong | Frame::Hello { .. } => {}
-                    }
+        // Loop until peer closes, protocol error, or a deliberate `shutdown`.
+        while let Ok(frame) = read_frame(&mut r) {
+            last_seen.store(now_millis(), Ordering::Relaxed);
+            match frame {
+                Frame::Send { target, msg } => deliver_inbound(target, msg),
+                Frame::Ping => {
+                    let _ = reader_tx.send(Arc::clone(&pong));
                 }
-                Err(_) => break, // peer closed, protocol error, or a deliberate shutdown
+                Frame::Pong | Frame::Hello { .. } => {}
             }
         }
         drop_link(peer, id);

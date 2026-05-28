@@ -2141,3 +2141,111 @@ exists in `types/mod.rs` — predicates like `int?` already map to `Ty::of(Int)`
 auto-running the checker in `brood <file>` / `nest test` / `nest check` (only
 `brood --check` exists). Step 5 (structured types) replaces the `u16` bitset,
 so it stays deferred to a concrete need (ADR-011).
+
+
+---
+
+## 2026-05-28 — Types Step 4: guard narrowing + let-binding tracking
+
+**Goal.** Wire `Ty::tested_by` (already built in `types/mod.rs`) into the
+checker so a type predicate in an `if` test *narrows* what the variable can be
+in each branch, and start tracking `let` bindings so a literal-typed RHS gives
+the checker something to flag. Both are the second behavioural payoff in the
+types roadmap; both fall out of threading a small `Ctx` through the walk.
+
+**Built.** `crates/lisp/src/types/check.rs`:
+- A `Ctx { types: HashMap<Symbol, Ty> }` plumbed through `expr_ty` and
+  `check_into`. Two operators: `narrow(sym, ty)` *intersects* (a guard
+  refinement of the same lexical variable) and `bind(sym, opt_ty)`
+  *overwrites* (a fresh let-bound shadow — `None` clears the slot so an
+  unknown RHS does not let the outer narrowing leak through).
+- `expr_ty(form, &Ctx)` now resolves `Value::Sym(s)` via `ctx.get(s)` — a
+  free / global reference still returns `None` and is never flagged.
+- `check_into` special-cases `if` and `let`/`let*` before falling through to
+  the generic "call-with-sig" path:
+  - `check_if(items, ctx)`: checks the test in the outer ctx, then descends
+    into `then` / `else` with `ctx.narrow(sym, ty)` / `ctx.narrow(sym,
+    ty.negate())` when `guard_assertion(test)` recognises a `(pred? sym)` or
+    `(not (pred? sym))` shape. Missing branches default to `nil` (matches the
+    evaluator).
+  - `check_let(items, ctx)`: walks bindings sequentially (matching the
+    evaluator), checks each RHS in the in-flight ctx, then `bind`s the new
+    name with `expr_ty(rhs, ctx)` for the body. Pattern-target binders are
+    skipped (not warned), since the Step-4 work is plain-symbol locals only.
+    `[name val …]` vector binding shape is recognised alongside `(name val …)`.
+- `guard_assertion(test)`: matches `(<pred?> <sym>)` and `(not <inner>)`,
+  returning `(sym, Ty)` — the type `sym` provably has when the test is
+  truthy. Anything else returns `None`, so unrecognised guards never narrow.
+
+**Tests.** 14 new in `types::check::tests`, covering the basic cases
+(`(let (x 1) (first x))` flags, `(if (int? x) (first x) nil)` flags); the
+no-false-positive boundary (`(if (int? x) nil (first x))` stays silent, since
+the else-branch is `not int` which overlaps `list|vector`); the shadow rules
+(an inner `let` with an unknown RHS clears an outer narrowing — `(let (x 1)
+(let (x foo) (first x)))` must *not* warn); negated guards flipping; nested
+guards composing to e.g. `float` (= `number ∩ ¬int`); the vector binding
+shape; and `let*` going through the same path. All 32 `types::check` tests
+pass — 18 existing + 14 new.
+
+**Verified.** `cargo test` green across the workspace; `make suite` → 379
+in-language tests, 379 passed.
+
+**Docs.** `docs/types.md` Step 4 bullet updated (the ⬜ guard-narrowing item
+is ✅; unbound/arity diagnostics still ⬜). `docs/roadmap.md` types bullet
+edited the same way.
+
+**What is still ⬜ in Step 4.** Unbound-symbol diagnostics and arity
+diagnostics in the checker, plus auto-running the checker in `brood <file>` /
+`nest test`. Cond-/match-/and-/or-chained guards are also deferred — they
+expand to `(let (g …) (if g …))` shape macros where the `g` is the test's
+*result*, not the variable being narrowed, so recognising them needs either
+pre-expansion handling or post-expansion shape pattern-matching through the
+gensym. Both are tractable; neither is on the critical path.
+
+### Followup: serialise the distribution test ports (same day)
+
+Spotted while running `cargo test` repeatedly: a flake on
+`crates/cli/tests/distribution.rs`. Two tests in the file call `free_port()`
+(bind `:0`, take the port, drop the listener) and then `spawn_brood` to bind
+that same port in a child. Run in parallel, both can pick the *same* freed
+port — the loser's child fails to bind, `wait_until_listening` happens to find
+the winner's listener, and the loser's client times out with `ECONNREFUSED`.
+
+Fix: a file-local `static PORTS: Mutex<()>` plus a `port_lock()` guard at the
+top of each test. Tests now serialise *against each other*; they still run
+concurrently with every other test binary. 5x `cargo test` after the change:
+0 failed suites across the workspace each time (previously flaked roughly 1
+in 3 runs). No code change needed in the runtime itself — the dedup logic
+and tie-break path were both fine.
+
+### Followup: reap killed test processes (same day)
+
+`cargo clippy --all-targets` flagged four `spawned process is never wait()ed
+on` warnings in `crates/cli/tests/distribution.rs`. Each test that runs a
+server child does `let _ = a.kill();` (SIGKILL) but doesn't `wait()` — so the
+child stays a zombie in the process table until the test binary exits. With
+`cargo test` running the suite repeatedly (e.g. while debugging the port
+race) zombies pile up. Fix: add `let _ = a.wait();` right after each kill.
+Output reads from `a.stderr` (in one test) still work fine — after SIGKILL
+the pipe buffer drains cleanly. Clippy now reports only the three pre-existing
+style warnings on the brood crate.
+
+### Followup: let-bound guard aliases (same day)
+
+Extends the guard-narrowing from the previous entry. The user-written shape
+`(let (cond (int? x)) (if cond …))` doesn't narrow `x` with just the
+`tested_by`-of-the-test rule, because the inner `if`'s test is the bare
+symbol `cond`, not a predicate call. So I added a second table to `Ctx`,
+`guards: HashMap<Symbol, (Symbol, Ty)>`, that records "name → (variable,
+asserted-type)" when a let-bound RHS is itself a recognised guard. Then
+`guard_assertion(Sym, ctx)` looks the symbol up in `ctx.guards`. Six new
+tests cover: the basic narrowing in both branches, negation flipping it,
+shadowing clears the alias, and self-aliasing (`(let (x (int? x)) …)`) is
+rejected (the outer `x` is gone). 38 tests in `types::check::tests` all pass;
+`make suite` → 379/379. Brood's immutability is what makes the alias sound —
+between the let and the if neither variable can change.
+
+This still doesn't catch the `(and (int? x) …)` form, whose macro expands to
+`(let (g_n (int? x)) (if g_n (and …) g_n))` where the outer if's test is the
+*let form*, not a symbol. The deferred fix there is either pre-expansion
+handling or specifically recognising the macro-output shape.

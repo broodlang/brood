@@ -10,10 +10,29 @@
 use std::io::Read;
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-/// Grab a currently-free localhost port by binding to :0 and releasing it. A
-/// tiny race window before the child re-binds, acceptable for a test.
+/// Serialises the *bind→spawn* window across the (parallel-by-default) tests in
+/// this file. Two tests racing through [`free_port`] can both pick the same
+/// just-freed kernel port; the loser's child then fails to bind, the winner's
+/// listener is what `wait_until_listening` happens to find, and the loser's
+/// client times out with `ECONNREFUSED`. Holding this lock across each test's
+/// port allocation + child spawn closes that window — the tests run end-to-end
+/// concurrently with everything *else* in the workspace; only with each other
+/// do they queue.
+static PORTS: Mutex<()> = Mutex::new(());
+
+/// Acquire the cross-test bind lock. Released when the returned guard drops.
+/// (`PoisonError` is recovered into the inner unit; a panicked sibling test
+/// shouldn't wedge the rest of the suite.)
+fn port_lock() -> MutexGuard<'static, ()> {
+    PORTS.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Grab a currently-free localhost port by binding to :0 and releasing it.
+/// Best paired with the [`port_lock`] guard around the spawn that re-binds it
+/// — otherwise a sibling test can grab the same just-freed port first.
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -52,6 +71,7 @@ fn wait_until_listening(port: u16) {
 
 #[test]
 fn two_nodes_connect_and_message() {
+    let _g = port_lock();
     let dir = std::env::temp_dir().join(format!("brood-dist-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -94,6 +114,7 @@ fn two_nodes_connect_and_message() {
     let out = b.wait_with_output().expect("client finished");
     // Tear the server down regardless of the assertion outcome.
     let _ = a.kill();
+    let _ = a.wait(); // reap, so the test doesn't leave a zombie
     let mut a_err = String::new();
     if let Some(mut e) = a.stderr.take() {
         let _ = e.read_to_string(&mut a_err);
@@ -113,6 +134,7 @@ fn two_nodes_connect_and_message() {
 /// error at the sender).
 #[test]
 fn mismatched_cookie_is_rejected() {
+    let _g = port_lock();
     let dir = std::env::temp_dir().join(format!("brood-dist-bad-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -144,6 +166,7 @@ fn mismatched_cookie_is_rejected() {
 
     let out = b.wait_with_output().expect("client finished");
     let _ = a.kill();
+    let _ = a.wait(); // reap, so the test doesn't leave a zombie
     let _ = std::fs::remove_dir_all(&dir);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -175,6 +198,7 @@ fn echo_server_src(port: u16) -> String {
 /// `connect` reuses the existing one. Messaging still works.
 #[test]
 fn duplicate_connect_is_deduplicated() {
+    let _g = port_lock();
     let dir = std::env::temp_dir().join(format!("brood-dist-dup-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let port_a = free_port();
@@ -197,6 +221,7 @@ fn duplicate_connect_is_deduplicated() {
     let b = spawn_brood(&dir, "client.blsp", &client);
     let out = b.wait_with_output().expect("client finished");
     let _ = a.kill();
+    let _ = a.wait(); // reap, so the test doesn't leave a zombie
     let _ = std::fs::remove_dir_all(&dir);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -210,6 +235,7 @@ fn duplicate_connect_is_deduplicated() {
 /// `connect` to our own node name is refused up-front (no self-dial loop).
 #[test]
 fn connect_to_self_refused() {
+    let _g = port_lock();
     let dir = std::env::temp_dir().join(format!("brood-dist-self-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let port_a = free_port();
@@ -236,6 +262,7 @@ fn connect_to_self_refused() {
 /// immediately (Erlang `monitor_node` semantics).
 #[test]
 fn monitor_unconnected_node_fires_immediately() {
+    let _g = port_lock();
     let dir = std::env::temp_dir().join(format!("brood-dist-ghost-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let port_b = free_port();
@@ -265,6 +292,7 @@ fn monitor_unconnected_node_fires_immediately() {
 /// monitor is registered), asks `:a` to exit, and must then receive the nodedown.
 #[test]
 fn node_down_is_detected() {
+    let _g = port_lock();
     let dir = std::env::temp_dir().join(format!("brood-dist-down-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let port_a = free_port();
@@ -288,6 +316,7 @@ fn node_down_is_detected() {
     let b = spawn_brood(&dir, "client.blsp", &client);
     let out = b.wait_with_output().expect("client finished");
     let _ = a.kill();
+    let _ = a.wait(); // reap, so the test doesn't leave a zombie
     let _ = std::fs::remove_dir_all(&dir);
 
     let stdout = String::from_utf8_lossy(&out.stdout);

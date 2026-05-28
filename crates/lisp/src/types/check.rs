@@ -28,22 +28,105 @@
 //!    return is the callee's. Sound because a straight-line use is
 //!    unconditional — no control-flow analysis (see [`infer_sig`]).
 //!
-//! Argument types in a call come from literals and from a nested call's result
-//! type; a variable is unknown (`None`) and never flagged.
+//! Argument types in a call come from literals, nested calls with a known
+//! return type, and **a context-tracked map of local-variable narrowings**:
+//!
+//! - A `let`/`let*` binding's RHS contributes its `expr_ty` as the variable's
+//!   type (so `(let (x 1) (first x))` flags `first` — `x` is known `int`).
+//! - An `if`'s test is matched against the predicate-narrowing table
+//!   ([`Ty::tested_by`]). On a `(pred? sym)` test the *then*-branch narrows
+//!   `sym` to `tested_by(pred)`, the *else*-branch to its complement; a leading
+//!   `(not …)` flips the assertion. Bindings inside a branch override the
+//!   narrowing as ordinary shadowing.
 //!
 //! Vocabulary is `Option<Ty>` (known / unknown), not `GradualTy` — the
 //! disjointness check only needs "do I know this type?". Forms inside `try` /
 //! `error-of` / `assert-error` are skipped (they deliberately exercise failures).
 //!
-//! Not yet (later increments): inference through branches / guards / recursion
-//! / higher-order; guard narrowing (`Ty::tested_by` is prepped); running
-//! automatically in `brood <file>` / `nest test`. Today the entry point is
-//! `brood --check` (CLI) and the `(check 'form)` builtin.
+//! Not yet (later increments): inference through `cond`/`match`, structured /
+//! `and`/`or`-chained guards, recursion, higher-order; unbound-symbol and
+//! arity diagnostics; running automatically in `brood <file>` / `nest test`.
+//! Today the entry point is `brood --check` (CLI) and the `(check 'form)`
+//! builtin.
+
+use std::collections::HashMap;
 
 use crate::core::heap::Heap;
-use crate::core::value::{self, Tag, Value};
+use crate::core::value::{self, Symbol, Tag, Value};
 use crate::error::Pos;
 use crate::types::{Sig, Ty};
+
+/// Locally-known types for variables in scope — populated by `let`/`let*`
+/// bindings and by an enclosing `if`'s guard. Globals are never tracked here
+/// (they're redefinable under hot reload — `dynamic()`, not `Any`).
+///
+/// `Ty::ANY` and "absent" both mean "no useful info"; we keep absent variables
+/// out of the map so the printer in tests stays uncluttered.
+///
+/// **Guard aliases.** When a `let` binds a name to a recognised guard call —
+/// `(let (cond (int? x)) (if cond …))` — we also remember that the bound name
+/// *is* the result of testing that variable, so the inner `if cond` can
+/// narrow `x` (not the bool `cond` itself). The aliasing is sound because
+/// Brood is immutable: between the let and the if, neither `x` nor `cond` can
+/// change, so the assertion the guard recorded still applies.
+#[derive(Clone, Default)]
+struct Ctx {
+    types: HashMap<Symbol, Ty>,
+    /// `bound-name → (variable, type-it-asserts)`: a `let`-stored guard result.
+    guards: HashMap<Symbol, (Symbol, Ty)>,
+}
+
+impl Ctx {
+    /// The locally-known type for `sym`, or `None` if it isn't tracked.
+    fn get(&self, sym: Symbol) -> Option<Ty> {
+        self.types.get(&sym).copied()
+    }
+    /// The guard (variable + asserted type) `sym` was bound to, if any.
+    fn guard(&self, sym: Symbol) -> Option<(Symbol, Ty)> {
+        self.guards.get(&sym).copied()
+    }
+    /// **Narrow** `sym` to the intersection with `ty` (a guard refinement —
+    /// the same lexical variable in the same scope getting tighter). The
+    /// caller already knows `sym` lives in this scope (e.g. it's a free
+    /// variable inside an `if`'s branch); for an unknown one we treat the
+    /// prior as `ANY`, so the intersection is just `ty`.
+    fn narrow(&self, sym: Symbol, ty: Ty) -> Ctx {
+        let mut c = self.clone();
+        let prior = c.types.get(&sym).copied().unwrap_or(Ty::ANY);
+        c.types.insert(sym, prior.intersect(ty));
+        c
+    }
+    /// **Bind** `sym` to `ty`, overwriting any prior entry — a fresh let-bound
+    /// or fn-param variable shadows the outer. `None` clears the entry so a
+    /// shadowing binding of unknown type doesn't keep an outer narrowing.
+    /// Always clears any guard-alias entry for `sym` (a fresh binding doesn't
+    /// inherit one).
+    fn bind(&self, sym: Symbol, ty: Option<Ty>) -> Ctx {
+        let mut c = self.clone();
+        match ty {
+            Some(t) => {
+                c.types.insert(sym, t);
+            }
+            None => {
+                c.types.remove(&sym);
+            }
+        }
+        c.guards.remove(&sym);
+        c
+    }
+    /// Record that `sym` was let-bound to the result of testing `target` for
+    /// `ty` — so a later `(if sym then else)` narrows `target` accordingly.
+    /// Self-aliasing (`(let (x (int? x)) …)` would shadow the outer `x` the
+    /// guard means to narrow) is rejected.
+    fn add_guard(&self, sym: Symbol, target: Symbol, ty: Ty) -> Ctx {
+        if sym == target {
+            return self.clone();
+        }
+        let mut c = self.clone();
+        c.guards.insert(sym, (target, ty));
+        c
+    }
+}
 
 /// The signature of a **primitive** named `name` — read from its `NativeFn`
 /// (contract point #6, enforced). `None` when no global of that name exists,
@@ -155,14 +238,16 @@ fn sig_of(heap: &Heap, name: &str) -> Option<Sig> {
         .or_else(|| infer_sig(heap, name))
 }
 
-/// The static type of an expression form, or `None` when it can't be pinned (a
-/// variable, or a call whose callee has no known signature). `None` is "unknown"
-/// and is never flagged. Self-evaluating literals get their exact tag; a `quote`d
-/// datum gets the datum's tag; a call with a known signature gets its result type.
-fn expr_ty(heap: &Heap, form: Value) -> Option<Ty> {
+/// The static type of an expression form *in `ctx`*, or `None` when it can't
+/// be pinned. `None` is "unknown" and is never flagged. Self-evaluating
+/// literals get their exact tag; a `quote`d datum gets the datum's tag; a call
+/// with a known signature gets its result type; a variable returns whatever
+/// `ctx` knows about it (typically `None` for a free / global reference).
+fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
     match form {
-        // A bare symbol in code is a variable reference — unknown.
-        Value::Sym(_) => None,
+        // A bare symbol is a variable reference — looked up in the local ctx
+        // (let-bound RHS / if-guard narrowing). A miss = unknown, not flagged.
+        Value::Sym(s) => ctx.get(s),
         Value::Pair(_) => {
             let items = list_items(heap, form)?;
             match items.first().copied() {
@@ -196,7 +281,7 @@ pub fn check_form(heap: &Heap, form: Value) -> Vec<String> {
 /// reader; an unrecorded form (e.g. one a macro synthesised) yields `None`.
 pub fn check_located(heap: &Heap, form: Value) -> Vec<(Option<Pos>, String)> {
     let mut out = Vec::new();
-    check_into(heap, form, &mut out);
+    check_into(heap, form, &Ctx::default(), &mut out);
     out
 }
 
@@ -210,17 +295,66 @@ fn skips_body(name: &str) -> bool {
     )
 }
 
-fn check_into(heap: &Heap, form: Value, out: &mut Vec<(Option<Pos>, String)>) {
+/// If `test` is a recognisable type guard over a single variable, return the
+/// `(sym, asserted_type)` pair — the type `sym` provably has when `test` is
+/// truthy. A leading `(not …)` flips the assertion via [`Ty::negate`]. A bare
+/// `Sym` is looked up in `ctx`'s guard-alias table (a `let`-stored guard
+/// result — `(let (cond (int? x)) (if cond …))`). `None` for any test that
+/// isn't a pure pattern-matchable guard (so we never narrow on something we
+/// can't soundly invert in the else-branch).
+fn guard_assertion(heap: &Heap, test: Value, ctx: &Ctx) -> Option<(Symbol, Ty)> {
+    if let Value::Sym(s) = test {
+        return ctx.guard(s);
+    }
+    let items = list_items(heap, test)?;
+    if items.len() != 2 {
+        return None;
+    }
+    let Value::Sym(head) = items[0] else {
+        return None;
+    };
+    let head_name = value::symbol_name(head);
+    // (not <inner>) — invert the inner assertion; everything else proceeds.
+    if head_name == "not" {
+        let (sym, ty) = guard_assertion(heap, items[1], ctx)?;
+        return Some((sym, ty.negate()));
+    }
+    let ty = Ty::tested_by(&head_name)?;
+    match items[1] {
+        Value::Sym(s) => Some((s, ty)),
+        _ => None,
+    }
+}
+
+fn check_into(
+    heap: &Heap,
+    form: Value,
+    ctx: &Ctx,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
     let Value::Pair(_) = form else { return };
     let Some(items) = list_items(heap, form) else {
         return;
     };
     let Some(&head) = items.first() else { return };
 
+    // Special-cased forms that introduce scope or refine types. Each handles
+    // its own argument-walking and returns; the generic path below doesn't run.
     if let Value::Sym(s) = head {
         let name = value::symbol_name(s);
         if skips_body(&name) {
             return;
+        }
+        match name.as_str() {
+            "if" => {
+                check_if(heap, &items, ctx, out);
+                return;
+            }
+            "let" | "let*" => {
+                check_let(heap, &items, ctx, out);
+                return;
+            }
+            _ => {}
         }
         if let Some(sig) = sig_of(heap, &name) {
             for (i, &arg) in items[1..].iter().enumerate() {
@@ -229,7 +363,7 @@ fn check_into(heap: &Heap, form: Value, out: &mut Vec<(Option<Pos>, String)>) {
                 // no tag with what the callee accepts. A superset, an `any`
                 // result, or an unknown argument (`None`) overlaps the param, so
                 // it's never flagged — no false positives.
-                if let Some(arg_ty) = expr_ty(heap, arg) {
+                if let Some(arg_ty) = expr_ty(heap, arg, ctx) {
                     if arg_ty.is_disjoint(param) {
                         let msg = format!(
                             "{}: argument {} expects {}, got {} ({})",
@@ -249,7 +383,82 @@ fn check_into(heap: &Heap, form: Value, out: &mut Vec<(Option<Pos>, String)>) {
 
     // Recurse: arguments (and any nested forms) may themselves be calls.
     for &item in &items {
-        check_into(heap, item, out);
+        check_into(heap, item, ctx, out);
+    }
+}
+
+/// `(if test then else?)` — check the test in the outer ctx, then descend
+/// into each branch with the ctx narrowed by what the test would assert.
+/// `else` defaults to `nil` (matches the evaluator), so absent or non-pair
+/// branches simply contribute no warnings.
+fn check_if(heap: &Heap, items: &[Value], ctx: &Ctx, out: &mut Vec<(Option<Pos>, String)>) {
+    let test = items.get(1).copied().unwrap_or(Value::Nil);
+    let then_form = items.get(2).copied().unwrap_or(Value::Nil);
+    let else_form = items.get(3).copied().unwrap_or(Value::Nil);
+
+    check_into(heap, test, ctx, out);
+
+    let (then_ctx, else_ctx) = match guard_assertion(heap, test, ctx) {
+        Some((sym, ty)) => (ctx.narrow(sym, ty), ctx.narrow(sym, ty.negate())),
+        None => (ctx.clone(), ctx.clone()),
+    };
+    check_into(heap, then_form, &then_ctx, out);
+    check_into(heap, else_form, &else_ctx, out);
+}
+
+/// `(let bindings body…)` — walk the bindings sequentially (matching how the
+/// evaluator binds), checking each RHS in the in-flight ctx and shadowing the
+/// new name into it. Then check the body in the extended ctx.
+///
+/// Quietly skips a malformed bindings shape (a pattern-target `let`, an
+/// improper list, an odd number of binding items): those are evaluator-level
+/// errors and aren't this checker's job.
+fn check_let(heap: &Heap, items: &[Value], ctx: &Ctx, out: &mut Vec<(Option<Pos>, String)>) {
+    let Some(&binds_form) = items.get(1) else {
+        return;
+    };
+    let Some(binds) = bindings(heap, binds_form) else {
+        // Unknown shape — just recurse generically so we still check nested calls.
+        for &item in items {
+            check_into(heap, item, ctx, out);
+        }
+        return;
+    };
+    if binds.len() % 2 != 0 {
+        return;
+    }
+    let mut scope = ctx.clone();
+    let mut i = 0;
+    while i < binds.len() {
+        let Value::Sym(name) = binds[i] else {
+            // Pattern-target binding (post-Step 4 work) — skip narrowing for it
+            // but still check the RHS as an expression.
+            check_into(heap, binds[i + 1], &scope, out);
+            i += 2;
+            continue;
+        };
+        let rhs = binds[i + 1];
+        check_into(heap, rhs, &scope, out);
+        let rhs_ty = expr_ty(heap, rhs, &scope);
+        let rhs_guard = guard_assertion(heap, rhs, &scope);
+        scope = scope.bind(name, rhs_ty);
+        if let Some((target, gty)) = rhs_guard {
+            scope = scope.add_guard(name, target, gty);
+        }
+        i += 2;
+    }
+    for &body_form in &items[2..] {
+        check_into(heap, body_form, &scope, out);
+    }
+}
+
+/// Parse a `let` bindings form — accepts both `(name val name val …)` lists
+/// and `[name val name val …]` vectors, the two shapes the reader emits.
+fn bindings(heap: &Heap, form: Value) -> Option<Vec<Value>> {
+    match form {
+        Value::Vector(id) => Some(heap.vector(id).to_vec()),
+        Value::Nil | Value::Pair(_) => list_items(heap, form),
+        _ => None,
     }
 }
 
@@ -508,5 +717,263 @@ mod tests {
         // A variadic-tail closure isn't a "fixed-arity straight-line" — skip.
         let w = check_with_defs(&["(defn vlist (& xs) (first xs))"], "(vlist 1 2 3)");
         assert!(w.is_empty(), "variadic defns must not infer: {:?}", w);
+    }
+
+    // ------------- Step 4: scope tracking + guard narrowing --------------
+
+    #[test]
+    fn let_binding_propagates_its_rhs_type() {
+        // The RHS is a literal int — `(first x)` should flag, because x : int
+        // shadows "unknown" in the body. (This is the basic let-tracking.)
+        let w = warnings("(let (x 1) (first x))");
+        assert!(
+            w.iter().any(|s| s.contains("first") && s.contains("int")),
+            "expected a `first x` warning where x : int, got {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn let_binding_from_nested_call_propagates() {
+        // RHS is a known primitive whose return type is int. So `x : int`,
+        // and `(first x)` flags.
+        let w = warnings("(let (x (string-length \"hi\")) (first x))");
+        assert!(
+            w.iter().any(|s| s.contains("first") && s.contains("int")),
+            "expected a `first x` warning where x : int, got {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn let_binding_of_unknown_rhs_stays_silent() {
+        // RHS is a variable (unknown), so x stays unknown — `(first x)` must
+        // not warn. (No false positives from let-tracking.)
+        let w = warnings("(let (x foo) (first x))");
+        assert!(w.is_empty(), "got {:?}", w);
+    }
+
+    #[test]
+    fn inner_let_shadows_outer_binding() {
+        // The outer x : int; the inner x : string. `(first x)` in the body
+        // refers to the inner, which is a string — and `first` accepts list /
+        // vector, disjoint from string. So a warning is still expected, but
+        // the *narrowing message* must be "string", not "int". This is the
+        // shadowing-correctness check (outer narrowing must not leak in).
+        let w = warnings("(let (x 1) (let (x \"hi\") (first x)))");
+        assert!(
+            w.iter().any(|s| s.contains("first") && s.contains("string")),
+            "expected the inner string to be the source, got {:?}",
+            w
+        );
+        assert!(
+            !w.iter().any(|s| s.contains("got int")),
+            "outer int must not leak through shadowing: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn shadowing_with_unknown_rhs_clears_prior_narrowing() {
+        // Outer x : int; inner x : <unknown var>. Inside the inner let, x is
+        // unknown — `(first x)` must NOT warn (the outer narrowing must not
+        // leak through the shadow).
+        let w = warnings("(let (x 1) (let (x foo) (first x)))");
+        assert!(w.is_empty(), "shadow must clear the prior type: {:?}", w);
+    }
+
+    #[test]
+    fn vector_let_bindings_are_recognised() {
+        // `(let [x 1] …)` (vector shape) must work the same as `(let (x 1) …)`.
+        let w = warnings("(let [x 1] (first x))");
+        assert!(
+            w.iter().any(|s| s.contains("first") && s.contains("int")),
+            "vector-form let bindings must populate the ctx: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn let_star_behaves_like_let_for_typing() {
+        // `let*` shares the sequential-binding semantics; the checker handles
+        // both via the same path. Verify it still tracks types.
+        let w = warnings("(let* (x 1) (first x))");
+        assert!(
+            w.iter().any(|s| s.contains("first") && s.contains("int")),
+            "let* must populate the ctx like let: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn guard_narrowing_lets_a_then_branch_flag_a_misuse() {
+        // In the then-branch of `(if (int? x) …)`, x : int — `(first x)` flags.
+        let w = warnings("(if (int? x) (first x) nil)");
+        assert!(
+            w.iter().any(|s| s.contains("first") && s.contains("int")),
+            "expected guard narrowing to flag (first x) when x : int, got {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn guard_narrowing_does_not_leak_into_the_else_branch() {
+        // The else-branch narrows x to `not int`, which overlaps list / vector;
+        // so `(first x)` must NOT warn there.
+        let w = warnings("(if (int? x) nil (first x))");
+        assert!(
+            !w.iter().any(|s| s.contains("first")),
+            "else branch must not have x narrowed to int: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn negated_guard_flips_the_narrowing() {
+        // (if (not (int? x)) …) — the then-branch narrows x to `not int`, the
+        // else-branch to int.
+        let w = warnings("(if (not (int? x)) nil (first x))");
+        assert!(
+            w.iter().any(|s| s.contains("first") && s.contains("int")),
+            "the else of a negated guard must narrow to the inner type: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn guards_for_number_and_list_unions_narrow_to_the_union() {
+        // (if (number? x) (first x) …) — x : number = int|float in the then,
+        // which is disjoint from list/vector, so `(first x)` flags.
+        let w = warnings("(if (number? x) (first x) nil)");
+        assert!(
+            w.iter().any(|s| s.contains("first") && s.contains("number")),
+            "number? must narrow to int|float: {:?}",
+            w
+        );
+        // The list? guard should *not* warn in the then (list overlaps first's
+        // expected type).
+        let w = warnings("(if (list? x) (first x) nil)");
+        assert!(
+            !w.iter().any(|s| s.contains("first")),
+            "list? must not produce a false positive on (first x): {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn non_guard_tests_dont_narrow() {
+        // The test isn't a recognised type predicate, so x stays unknown in
+        // both branches — `(first x)` must not warn.
+        let w = warnings("(if (zero? x) (first x) (first x))");
+        assert!(w.is_empty(), "non-tag-guard test must not narrow: {:?}", w);
+    }
+
+    #[test]
+    fn nested_guards_compose_their_narrowings() {
+        // (if (number? x) (if (int? x) … (first x)) …) — in the inner else,
+        // x is narrowed to `number ∩ ¬int` = float, which is still disjoint
+        // from list/vector, so `(first x)` flags.
+        let w = warnings("(if (number? x) (if (int? x) nil (first x)) nil)");
+        assert!(
+            w.iter().any(|s| s.contains("first") && s.contains("float")),
+            "nested guards must compose to float (= number ∩ ¬int): {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn let_bound_guard_narrows_when_used_as_an_if_test() {
+        // The user-written shape `(let (cond (int? x)) (if cond …))` — Brood is
+        // immutable, so `cond` faithfully reflects `(int? x)` until the let
+        // ends. The guard-alias table maps `cond → (x, int)`, and the inner
+        // `if cond` narrows x to int in the then-branch.
+        let w = warnings("(let (cond (int? x)) (if cond (first x) nil))");
+        assert!(
+            w.iter().any(|s| s.contains("first") && s.contains("int")),
+            "expected let-bound guard to flag (first x) in the then: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn let_bound_guard_narrows_in_the_else_branch_too() {
+        // Else-branch sees x as `not int`, which overlaps list / vector, so
+        // no warning — same as the direct-test case.
+        let w = warnings("(let (cond (int? x)) (if cond nil (first x)))");
+        assert!(
+            !w.iter().any(|s| s.contains("first")),
+            "the else of a let-bound guard must narrow to ¬int, not int: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn let_bound_guard_can_be_negated_in_the_if() {
+        // `(if (not cond) …)` flips the narrowing — same as `(not (int? x))`.
+        let w = warnings("(let (cond (int? x)) (if (not cond) nil (first x)))");
+        assert!(
+            w.iter().any(|s| s.contains("first") && s.contains("int")),
+            "expected negation to flip the let-bound guard: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn rebinding_the_guard_name_clears_the_alias() {
+        // After `(let (cond <unknown>) …)` shadowing, `cond` no longer aliases
+        // the int-guard, so `(if cond …)` must not narrow x.
+        let w = warnings(
+            "(let (cond (int? x)) (let (cond foo) (if cond (first x) nil)))",
+        );
+        assert!(
+            w.is_empty(),
+            "shadowing must drop the guard alias: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn rebinding_to_a_non_guard_value_clears_the_alias() {
+        // Same as above but with an int literal rather than an unknown var.
+        let w = warnings(
+            "(let (cond (int? x)) (let (cond 1) (if cond (first x) nil)))",
+        );
+        assert!(
+            w.is_empty(),
+            "shadowing with a non-guard value must drop the alias: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn self_aliased_guard_is_not_recorded() {
+        // `(let (x (int? x)) …)` shadows the outer x with a bool; the inner
+        // body's `x` is the bool, not the original — narrowing the original
+        // would be unsound (it's no longer reachable), so we must not record
+        // the guard. (No assertion about a warning either way — the point is
+        // we don't crash and don't introduce a stale alias.)
+        let w = warnings("(let (x (int? x)) (if x x nil))");
+        assert!(
+            !w.iter().any(|s| s.contains("first")),
+            "self-aliased guards must not propagate to inner uses: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn let_inside_a_then_branch_can_shadow_a_narrowing() {
+        // Outer narrowing: x : int. Inner shadow: x : string. The body now
+        // sees x as string, so the narrowing message names string.
+        let w = warnings("(if (int? x) (let (x \"hi\") (first x)) nil)");
+        assert!(
+            w.iter().any(|s| s.contains("first") && s.contains("string")),
+            "shadow must override the guard narrowing: {:?}",
+            w
+        );
+        assert!(
+            !w.iter().any(|s| s.contains("got int")),
+            "the int narrowing must not leak through the shadow: {:?}",
+            w
+        );
     }
 }

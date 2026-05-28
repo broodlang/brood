@@ -69,7 +69,10 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   closures (`(defn inc (x) (+ x 1))` works without a hand-written sig).
   🟡 Step 4: advisory local inference over expanded forms — the disjointness
   walk is shipped (`brood --check <file>`, the `(check 'form)` builtin); guard
-  narrowing via `Ty::tested_by` and unbound/arity diagnostics still to come.
+  narrowing via `Ty::tested_by` now lands too (a `Ctx` of locally-known types
+  threaded through the walk; `let`/`let*` seeds `var : expr_ty(rhs)`, `if`
+  narrows in both branches incl. a leading `(not …)`; inner shadowing
+  overrides). Unbound-symbol and arity diagnostics still to come.
   ⬜ Step 5+: structured types. Steps 0–2 are foundation; Step 3 puts sigs on
   the kernel; the first *behavioural* payoff is Step 4. Advisory throughout —
   never gates, never inhibits the dynamic language; not the TypeScript route.

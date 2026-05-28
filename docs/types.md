@@ -145,9 +145,27 @@ never a false positive.
   no parallel table), curated stdlib sigs for `+`/`<`/`map`/…, and inference
   for straight-line single-expression closures (so a user `(defn inc (x) (+ x
   1))` participates without a hand-written sig).
-- ⬜ **next:** guard narrowing via `Ty::tested_by` (already prepped:
-  `tested_by("int?") → int`, …); unbound-symbol and arity diagnostics; running
-  automatically in `brood <file>` / `nest test` / `nest check`.
+- ✅ **Guard narrowing + let-binding tracking** (the second behavioural payoff):
+  the checker now threads a `Ctx { sym → Ty }` of locally-known types through
+  the walk. A `let`/`let*` binding seeds the variable with the RHS's
+  `expr_ty`; an `if`'s test narrows in both branches via [`Ty::tested_by`]
+  (`(if (int? x) … …)` ⇒ in the *then* branch `x` is `int`, in the *else* it's
+  `not int`); `(not <inner>)` flips. Inner shadowing overrides — a fresh
+  binding to an unknown RHS *removes* an outer narrowing rather than
+  intersecting (otherwise the outer leaks through the shadow).
+- ✅ **Let-bound guard aliases.** `(let (cond (int? x)) (if cond …))` now
+  narrows `x` (not the bool `cond`) inside the if. The `Ctx` carries a second
+  table `guards: sym → (var, asserted-ty)`; a `let` records the alias when
+  the RHS is itself a recognised guard, and `guard_assertion` on a bare `Sym`
+  test looks it up. Sound because Brood is immutable — between the let and
+  the if neither `x` nor `cond` can change. Self-aliasing (`(let (x (int? x))
+  …)`) is rejected (the outer `x` is shadowed). 20 new tests in
+  `types::check::tests`. Cond-/match-/and-/or-chained guards (which expand to
+  nested `(let g (if g …))` whose `g` aliases the *combined* test, not a
+  single variable) are still deferred — they'd need either pre-expansion
+  handling or post-expansion shape recognition.
+- ⬜ **next:** unbound-symbol and arity diagnostics; running automatically in
+  `brood <file>` / `nest test` / `nest check`.
 
 ### Step 5+ — structured types ⬜
 Function arrows, vector/list element types, intersections for overloaded fns —
