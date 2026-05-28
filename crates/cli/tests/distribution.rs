@@ -207,6 +207,59 @@ fn duplicate_connect_is_deduplicated() {
     );
 }
 
+/// `connect` to our own node name is refused up-front (no self-dial loop).
+#[test]
+fn connect_to_self_refused() {
+    let dir = std::env::temp_dir().join(format!("brood-dist-self-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let port_a = free_port();
+
+    let src = format!(
+        r#"
+(node-start :a "127.0.0.1:{port_a}" "secret")
+(println (try (do (connect "a@127.0.0.1:{port_a}") "UNEXPECTED-CONNECTED")
+              (catch e "REFUSED-AS-EXPECTED")))
+"#
+    );
+    let p = spawn_brood(&dir, "self.blsp", &src);
+    let out = p.wait_with_output().expect("finished");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("REFUSED-AS-EXPECTED") && !stdout.contains("UNEXPECTED-CONNECTED"),
+        "expected self-connect to be refused.\n--- stdout ---\n{stdout}"
+    );
+}
+
+/// `(monitor-node :ghost)` for a node we've never linked to fires `[:nodedown]`
+/// immediately (Erlang `monitor_node` semantics).
+#[test]
+fn monitor_unconnected_node_fires_immediately() {
+    let dir = std::env::temp_dir().join(format!("brood-dist-ghost-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let port_b = free_port();
+
+    let src = format!(
+        r#"
+(node-start :b "127.0.0.1:{port_b}" "secret")
+(monitor-node :ghost)
+(receive ([:nodedown :ghost] (println "IMMEDIATE-NODEDOWN"))
+         (after 1000 (throw "monitor-node did not fire immediately")))
+"#
+    );
+    let p = spawn_brood(&dir, "ghost.blsp", &src);
+    let out = p.wait_with_output().expect("finished");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains("IMMEDIATE-NODEDOWN"),
+        "expected an immediate [:nodedown] for an unconnected node.\n--- stdout ---\n{stdout}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// `(monitor-node :a)` delivers `[:nodedown :a]` when the link to `:a` drops. The
 /// client establishes the link (proven by a `:welcome` round-trip, after which the
 /// monitor is registered), asks `:a` to exit, and must then receive the nodedown.

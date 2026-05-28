@@ -1,16 +1,16 @@
-# Memory model — toward `Send` heaps and GC
+# Memory model — `Send` heaps and per-process GC
 
-> Status: **partly implemented.** `Send` heaps are **done** — `Value` is a `Copy`
-> handle into arena slabs (no `Rc`), so a `Heap` is `Send` (this enabled the
-> process model and the shared-code regions). Reclamation has a **first step
-> done** — *arena reset at top-level boundaries* (ADR-016, below) — bounding a
-> long REPL/session's memory. A general tracing GC (for mid-evaluation /
-> never-returning loops) is **still future**, and now looks coupled to the
-> explicit-value-stack VM that step 4b also needs (see end).
+> Status: **implemented.** `Send` heaps shipped first (`Value` is a `Copy` handle
+> into arena slabs — see ADR-002 → step 2/3 below). Reclamation arrived in two
+> steps: **arena reset at top-level boundaries** (ADR-016, cheap O(1)
+> truncation), then a **per-process tracing mark-sweep** (ADR-035) that handles
+> the mid-evaluation / never-returning-loop case the reset can't reach. The two
+> coexist — reset still bounds a long file/REPL session at top-level
+> boundaries, and the GC kicks in inside long-running loops.
 
 ## Implemented: arena-reset reclamation (ADR-016)
 
-The cheap, safe reclamation we have today, before any tracing GC:
+The cheap, safe O(1) reclamation at top-level boundaries:
 
 - The per-process LOCAL heap only grows during evaluation (the arena never moves
   or frees mid-eval). A spawned process frees its whole `Heap` on thread exit, so
@@ -23,12 +23,78 @@ The cheap, safe reclamation we have today, before any tracing GC:
   `eval_str` does this between forms; the REPL after each command. O(1), no
   tracing. (Demo: a file of heavy forms went from ~712 MB growing to ~78 MB flat.)
 - **What it does *not* solve:** a single never-returning loop (no top-level
-  boundary) keeps accumulating, and reset is unsafe mid-evaluation (sibling
-  sub-expressions strand live values on the Rust stack, reachable from no
-  scannable root). That needs a real tracing GC — which needs the evaluator's
-  roots to be findable, i.e. the explicit-value-stack VM that 4b also requires.
-  The two are coupled; `gc-arena` fits our native recursive eval + shared
-  multi-thread RUNTIME region poorly, so it's no longer the presumed path.
+  boundary) keeps accumulating. That's the niche the tracing GC below fills.
+
+## Implemented: per-process tracing GC (ADR-035)
+
+A precise, non-moving mark-sweep that fires at the **outermost-`eval`
+`'tail:` safepoint** — exactly when the rooting surface is minimal and
+statically knowable.
+
+### Roots
+
+A complete root set at the safepoint, by construction (see ADR-035 for the
+correctness sketch):
+
+- `expr` and `env` — passed to `Heap::collect` by the eval safepoint.
+- `Heap::dynamics` — the `binding`-form's per-process stack.
+- `Heap::roots` — an explicit `Vec<Value>` used by the two depth-0 callers
+  (`eval_str` / `eval_source`) for their unevaluated forms.
+
+That's the whole surface. No handle-scopes thread through `eval`'s helpers, no
+rooting in builtins.
+
+### The `GC_BLOCK` invariant
+
+A thread-local depth counter, incremented by RAII guards at every `eval()` and
+`macroexpand_all()` entry. The safepoint fires GC iff `GC_BLOCK == 1` — *we are
+the outermost contributor*. This forces:
+
+- Inner evals (arg evaluation, body forms, nested calls) see `GC_BLOCK >= 2`
+  and short-circuit. Cost on the hot path: one TLS read + compare.
+- Macroexpansion's internal evals see `>= 2` (the `macroexpand_all` guard is
+  also a contributor) — its partially-built forms never get swept.
+- A builtin running between an outer eval and an inner eval doesn't fire GC
+  on its own; if it calls `eval`/`apply`, *that* eval is `>= 2` and inner
+  evals don't GC. GC and builtin-mid-execution are mutually exclusive.
+
+Saved/restored around coroutine suspend (`process::preempt`,
+`process::wait_for_message`) and reset to 0 at coroutine entry — so workers
+multiplexing several green processes don't leak each other's depths.
+
+### Mark + sweep mechanics
+
+- **Mark** is iterative (an explicit `Vec<TraceItem>` worklist), so a deep
+  cons chain or env-frame chain can't overflow the native stack. Per-slab
+  `Vec<bool>` mark bits are allocated per collection (no persistent cost).
+  PRELUDE/RUNTIME handles are filtered at the worklist-push site — the trace
+  never leaves LOCAL.
+- **Sweep** rebuilds the free lists from scratch (`(0..len) \ marked`),
+  clears dead vector/map/string/closure/env slots so their inner allocations
+  drop, and purges `form_pos` entries whose pair slot was freed.
+- **Allocators** (`alloc_pair`, …) pop the free list before extending. The
+  slab's `len()` is the high-water live count + the largest peak free list,
+  not the lifetime allocation total.
+- **Adaptive threshold:** after each collect, `gc_threshold = max(GC_FLOOR,
+  2 * live)`. Set `BROOD_GC_STRESS=1` to force GC at every safepoint
+  (debugging — the full test suite is green under it).
+
+### What's deferred (and why it's fine)
+
+- **GC doesn't fire if a program stays at `GC_BLOCK > 1` forever** — e.g. a
+  server loop wrapped in `(try (loop) (catch …))` keeps the outer eval
+  blocked in `%try` and never reaches a safepoint until it unwinds.
+  Idiomatic Erlang-style loops `try` *within* an iteration, returning to the
+  outermost between iterations; that case GCs every iteration. The
+  pathological case is recoverable by adding explicit rooting to the few
+  builtins that hold transients across eval — incremental, no architectural
+  shift.
+- **Slabs don't shrink trailing dead runs.** The free list reuses indices;
+  the high-water `len` stays. Memory peaks at the high-water live count and
+  then stays flat. (Trailing-truncate is a small future win.)
+- **The interner and the shared RUNTIME code slabs** (hot-reloaded code via
+  `def`) are still append-only and grow with redefinitions. Orthogonal to
+  per-process *data* GC.
 
 ## Why now
 
@@ -157,37 +223,38 @@ semantics) is **ours**.
 - This is not "avoid Rust" — it's "don't let Rust-specific mechanisms define the
   model." The thin substrate stays swappable.
 
-## Staged migration plan (approach B)
+## Staged migration plan (approach B) — complete
 
 1. ✅ **Isolate `Rc` behind the `core/value.rs` seam.** Every heap construction
    goes through `core/value.rs` constructors. Safe, behavior-preserving.
-2. ✅ **Introduce the per-process arena.** `Value` is now a `Copy` handle into a
+2. ✅ **Introduce the per-process arena.** `Value` is a `Copy` handle into a
    `Heap` (`heap.rs`): per-type slabs for pairs/vectors/strings/closures/natives
-   plus env frames. The heap threads through reader/eval/builtins/printer. No
-   behavior change (25 tests green); still single-threaded — one heap.
-3. ✅ **Reach `Send`** (non-collecting arena — it only grows for now). The `Heap`
-   is plain `Vec`s of data, so it's `Send`; a `heap_is_send` test asserts it.
-4. 🟡 **Multi-core processes** — step 4a done: `spawn`/`send`/`receive`/`self`
-   with each process an OS thread + its own heap; the symbol interner is global
-   and messages are deep-copied across heaps (`process.rs`). Remaining (4b): green
-   M:N on a worker pool (default **2**) via coroutine suspension, and shared code.
-   See `concurrency.md`.
-5. ⬜ **Per-process mark-sweep GC** (see "GC — simplified by isolation"). Roots =
-   each process's stack + mailbox; the shared code table is outside it.
-6. ⬜ **Suspension** via stackful coroutines for blocking `receive`.
+   plus env frames. The heap threads through reader/eval/builtins/printer.
+3. ✅ **Reach `Send`.** The `Heap` is plain `Vec`s of data, so it's `Send`; a
+   `heap_is_send` test asserts it.
+4. ✅ **Multi-core processes.** Each process owns its `Heap`; messages are
+   deep-copied; symbols share a global interner. Green M:N on a worker pool
+   via [`corosensei`] stackful coroutines, with reduction-counted preemption
+   and selective `receive`. See `concurrency.md` / `scheduler.md`.
+5. ✅ **Per-process mark-sweep GC** (ADR-035; "Implemented: per-process tracing
+   GC" above). Fires at the outermost-eval safepoint, gated by `GC_BLOCK == 1`;
+   roots are `expr`/`env`/`heap.roots`/`heap.dynamics`. Free lists per slab,
+   adaptive threshold, stress mode for testing.
+6. ✅ **Suspension** via stackful coroutines for blocking `receive` (landed
+   with step 4b).
 
-> Step 2/3 made the heap a `Send`, self-contained unit — the prerequisite for the
-> *per-process* heaps that arrived with the green-process scheduler (step 4, now
-> done): each process owns its `Heap` and they migrate between worker threads.
+> Step 2/3 made the heap a `Send`, self-contained unit. Step 4 made each
+> process own one. Step 5 finally bounded a long-lived process's footprint.
 
-## Risks
+## Risks (closed)
 
-- Biggest blast radius of any change so far; touches `core/value.rs`,
-  `core/heap.rs` (the env chain lives here now), `eval/mod.rs`, `builtins.rs`,
-  `syntax/printer.rs`.
-- Handle-threading will be viral through signatures once the arena lands (step 2+).
-- No user-visible payoff until step 4 — we're rebuilding the foundation.
+The "biggest blast radius" risk for the GC turned out to be much smaller than
+the doc originally feared: the trampoline structure of the evaluator + the
+`GC_BLOCK == 1` invariant collapsed the rooting surface to two sites
+(`eval_str`, `eval_source`) and zero rooting in builtins. Validated by:
 
-Mitigation: keep `cargo test` green at every step (the test suite is the safety
-net), and migrate behind the `core/value.rs` seam so the change is mechanical, not
-semantic.
+- the full suite (158 tests) passing under `BROOD_GC_STRESS=1` (GC at every
+  safepoint, maximising free-list churn),
+- a dedicated `crates/lisp/tests/gc.rs` asserting bounded live counts across
+  200k-iteration tail loops and 20k-message server loops, in both the root
+  thread and a spawned green process.

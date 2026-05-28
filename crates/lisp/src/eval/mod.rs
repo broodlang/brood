@@ -57,6 +57,14 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
     let mut expr = expr;
     let mut env = env;
 
+    // GC-block guard: increments `GC_BLOCK` for the lifetime of this `eval`
+    // frame. The safepoint below collects only when this is the **outermost**
+    // contributor (`gc_block_depth() == 1`) — no other eval / macroexpand frame
+    // is on the stack, so the eval's own loop-body locals (`head`/`rest`/
+    // `callee`/`argv`/`scope`) are dead at `continue 'tail` and only `expr`/`env`
+    // persist. `Drop` runs on every return path (including `?` and panic).
+    let _gc_block = crate::process::GcBlockGuard::enter();
+
     'tail: loop {
         match expr {
             Value::Sym(s) => {
@@ -88,6 +96,18 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
             _ => return Ok(expr),
         }
 
+        // GC safepoint. Outermost eval only — inner evals (arg evaluation, body
+        // forms, etc.) sit at `GC_BLOCK >= 2` and short-circuit. At the
+        // outermost loop top:
+        //   • `expr` / `env` are passed as roots,
+        //   • the dynamic stack and the explicit root stack are scanned by
+        //     `collect` itself,
+        //   • no other Rust frame holds an unrooted LOCAL transient (the
+        //     `GC_BLOCK == 1` invariant — see `docs/memory-model.md`).
+        // Cost on inner-eval iterations: one TLS read + compare (fail-fast).
+        if crate::process::gc_block_depth() == 1 && heap.gc_due() {
+            heap.collect(&[expr], &[env]);
+        }
         // Reduction-counted preemption: bound the work a process does before it
         // yields its worker (fairness — a CPU-bound process can't monopolise a
         // core). Counted per *combination* (a function call / special form), which

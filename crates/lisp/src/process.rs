@@ -426,6 +426,60 @@ thread_local! {
     /// resets it to `REDUCTION_BUDGET` before each `resume` (see `run_one`); `eval`
     /// decrements it via `tick`, and the process yields when it hits zero.
     static REDUCTIONS: Cell<u32> = const { Cell::new(0) };
+
+    /// GC-block depth: how many `eval` / `macroexpand_all` frames are active on
+    /// this thread. The eval safepoint runs GC iff this is **1** ("we are the
+    /// outermost contributor — no other eval/macroexpand frame holds an
+    /// unrooted LOCAL transient"). See `docs/memory-model.md` and the
+    /// rooting-completeness argument in `eval::eval`.
+    ///
+    /// Per-process: reset to 0 at coroutine entry and saved/restored around
+    /// suspend (see `spawn` / `preempt` / `wait_for_message`), so workers
+    /// multiplexing several processes don't leak each other's depths. The root
+    /// thread doesn't multiplex, so its depth flows naturally.
+    static GC_BLOCK: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Current GC-block depth — `eval::eval`'s safepoint compares this against 1.
+#[inline]
+pub fn gc_block_depth() -> u32 {
+    GC_BLOCK.with(|d| d.get())
+}
+
+/// Read the GC-block depth for save/restore around a coroutine suspend (we want
+/// to capture this process's value so a resume on any worker restores it).
+#[inline]
+fn gc_block_save() -> u32 {
+    GC_BLOCK.with(|d| d.get())
+}
+
+/// Write the GC-block depth — paired with `gc_block_save` around a suspend,
+/// and used by a fresh coroutine to wipe the residual value left on the worker.
+#[inline]
+fn gc_block_set(n: u32) {
+    GC_BLOCK.with(|d| d.set(n));
+}
+
+/// RAII guard: increments `GC_BLOCK` on construction, decrements on `Drop`.
+/// Acquired at the top of every `eval` call and every `macroexpand_all` call —
+/// the two contexts that hold unrooted LOCAL transients between safepoints.
+/// `Drop` runs on a normal return *and* on a panic unwind, so the depth never
+/// leaks past a frame's lifetime.
+pub struct GcBlockGuard;
+
+impl GcBlockGuard {
+    #[inline]
+    pub fn enter() -> Self {
+        GC_BLOCK.with(|d| d.set(d.get() + 1));
+        GcBlockGuard
+    }
+}
+
+impl Drop for GcBlockGuard {
+    #[inline]
+    fn drop(&mut self) {
+        GC_BLOCK.with(|d| d.set(d.get().saturating_sub(1)));
+    }
 }
 
 /// How many `eval` loop iterations a process runs before it must yield its worker
@@ -459,11 +513,16 @@ fn preempt() {
         None => return, // no process context (e.g. prelude build) — nothing to yield to
     };
     if let Some(yptr) = ctx.yielder {
+        // Save this process's GC-block depth before yielding: a worker may pick
+        // up another process whose eval/macroexpand changes the thread-local,
+        // and we need ours back when we resume.
+        let saved_block = gc_block_save();
         // SAFETY: same invariant as `receive` — the yielder is valid while this
         // coroutine is running, which is now (tick runs inside eval, inside the
         // coroutine body). Suspending returns control to the worker (`run_one`).
         unsafe { (*yptr).suspend(Suspend::Preempt) };
         CURRENT.with(|c| *c.borrow_mut() = Some(ctx));
+        gc_block_set(saved_block);
     }
     // Root thread (yielder None): budget refreshed, never suspends.
 }
@@ -728,6 +787,10 @@ pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
                 yielder: Some(yielder as *const Yielder0),
             });
         });
+        // Wipe the worker's residual GC-block depth — a previous coroutine on
+        // this worker may have left it nonzero. Our depth starts fresh at 0
+        // (incremented by the eval guard below).
+        gc_block_set(0);
         let mut heap = Heap::with_regions(prelude, runtime);
         heap.set_global(EnvId::GLOBAL);
         let reason = match eval::apply(&mut heap, f, &[], EnvId::GLOBAL) {
@@ -903,13 +966,18 @@ fn wait_for_message(ctx: &Ctx, i: usize, deadline: Option<Instant>) {
             if let Some(d) = deadline {
                 arm_timer(ctx.pid, d);
             }
+            // Save this process's GC-block depth before yielding (same rationale
+            // as `preempt`): the worker may run other processes whose eval/
+            // macroexpand changes the thread-local before we resume.
+            let saved_block = gc_block_save();
             // SAFETY: the yielder is valid while this coroutine runs — which is now
             // (called from within eval, within the coroutine body). Suspending
             // returns control to the worker (`run_one`), which parks us.
             unsafe { (*yptr).suspend(Suspend::Receive) };
             // Resumed (by send or timer): the worker may have run others or migrated
-            // us to another worker — re-establish the context.
+            // us to another worker — re-establish the context and depth.
             CURRENT.with(|c| *c.borrow_mut() = Some(ctx.clone()));
+            gc_block_set(saved_block);
         }
     }
 }

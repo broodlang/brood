@@ -781,6 +781,61 @@ otherwise the items are appended (`to` is a list)."
     (reduce (fn (m p) (assoc m (first p) (second p))) to from)
     (append to from)))
 
+;; ---- transducers ------------------------------------------------------------
+;; A *reducing function* has shape `(rf acc x) -> new-acc` — what `fold`
+;; consumes. A *transducer* is a function `(xf rf) -> rf'` that wraps one
+;; reducing function in another. Composing transducers is just function
+;; composition (`comp`); the resulting transducer, applied to a reducer, fuses
+;; the pipeline into a single per-step function — **no intermediate collections**.
+;;
+;; The eager pipeline `(reduce + 0 (filter even? (map sq xs)))` builds two
+;; throwaway lists; the transducer form
+;;
+;;   (transduce (comp (xmap sq) (xfilter even?)) + 0 xs)
+;;
+;; walks `xs` once and never materialises the intermediates.
+;;
+;; v1 is *stateless* — `xtake`/`xdrop`/`xpartition` are deferred until we add an
+;; early-termination protocol (the language has no mutable cells).
+
+;; Composition (the glue for transducer chains, also generally useful).
+(defn comp--compose (f g) (fn (x) (f (g x))))
+(defn comp (& fns)
+  "Right-to-left function composition. `((comp f g) x)` is `(f (g x))`; with no
+arguments, `identity`. For transducers, the *leftmost* `xform`'s transformation
+applies to each input first."
+  (cond
+    (empty? fns)        identity
+    (empty? (rest fns)) (first fns)
+    else                (fold comp--compose (first fns) (rest fns))))
+
+;; Stateless transducer constructors. Named `x*` so the eager `map`/`filter`
+;; keep their fixed-arity (no rest-list) fast path — see the perf devlog.
+(defn xmap (f)
+  "A transducer that applies `f` to each input. The fused counterpart of `(map f coll)`."
+  (fn (rf) (fn (acc x) (rf acc (f x)))))
+
+(defn xfilter (pred)
+  "A transducer that keeps inputs for which `(pred x)` is truthy. The fused counterpart of `(filter pred coll)`."
+  (fn (rf) (fn (acc x) (if (pred x) (rf acc x) acc))))
+
+(defn xremove (pred)
+  "A transducer that drops inputs for which `(pred x)` is truthy — the inverse of `xfilter`."
+  (fn (rf) (fn (acc x) (if (pred x) acc (rf acc x)))))
+
+(defn xkeep (f)
+  "A transducer that keeps the non-nil results of `(f x)` — map and filter fused in one stage."
+  (fn (rf) (fn (acc x) (let (y (f x)) (if (nil? y) acc (rf acc y))))))
+
+(defn xmapcat (f)
+  "A transducer that maps `f` over each input (expected to return a list or vector) and feeds the *items* of each result into the next stage — fused `mapcat`, no intermediate per-element lists."
+  (fn (rf) (fn (acc x) (fold rf acc (f x)))))
+
+;; Driver.
+(defn transduce (xform rf init coll)
+  "Reduce `coll` with `(xform rf)` from `init`. `xform` and `rf` fuse into a single pass; the equivalent eager pipeline (with intermediate collections) is `(reduce rf init (... xform-applied-to ... coll))`."
+  (fold (xform rf) init coll))
+
 ;; ---- iteration combinators --------------------------------------------------
 ;; Hide the hand-rolled counter/accumulator recursion behind names that read as
 ;; intent (the way `defprocess` hides a receive loop). All ordinary Brood.

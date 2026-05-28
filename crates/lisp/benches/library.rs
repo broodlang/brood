@@ -55,6 +55,31 @@ mod sequence {
             format!("(count (sort (map (fn (x) (rem (* x 7919) {n})) (range {n}))))"),
         );
     }
+
+    /// Same workload as `pipeline`, expressed as a transducer chain — `xmap`
+    /// and `xfilter` fuse with the reducer into one pass over `range`, with no
+    /// intermediate lists. Paired with `pipeline` to show the fusion win.
+    #[divan::bench(args = [1_000, 10_000])]
+    fn transduce_pipeline(bencher: divan::Bencher, n: usize) {
+        bench_prog(
+            bencher,
+            format!(
+                "(transduce (comp (xmap (fn (x) (* x x))) (xfilter even?)) + 0 (range {n}))"
+            ),
+        );
+    }
+
+    /// Same workload as `mapcat`, fused via `xmapcat` — feeds each expanded
+    /// list's items straight into the reducer, no per-element intermediate.
+    #[divan::bench(args = [1_000, 10_000])]
+    fn transduce_mapcat(bencher: divan::Bencher, n: usize) {
+        bench_prog(
+            bencher,
+            format!(
+                "(transduce (xmapcat (fn (x) (list x x))) (fn (acc _) (+ acc 1)) 0 (range {n}))"
+            ),
+        );
+    }
 }
 
 /// The string library — char-indexed `substring`/`str` over short strings (the

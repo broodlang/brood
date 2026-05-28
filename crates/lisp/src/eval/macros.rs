@@ -107,6 +107,13 @@ pub fn macroexpand(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
 /// `quote` and `quasiquote` are left opaque: their contents are data, not calls
 /// to expand. Code inside a `~unquote` still expands when the quasiquote runs.
 pub fn macroexpand_all(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
+    // Block GC during the expansion: this walk holds partially-built LOCAL
+    // forms in Rust locals and recurses into macro applications via `eval`,
+    // whose outermost-eval safepoint would otherwise sweep them. Bumping
+    // `GC_BLOCK` makes any internal eval see `>= 2` ("not outermost") and
+    // skip GC; the expansion is bounded per form, so memory grows briefly
+    // (reclaimed at the *next* runtime safepoint). See `docs/memory-model.md`.
+    let _gc_block = crate::process::GcBlockGuard::enter();
     let form = macroexpand(heap, form, env)?;
     match form {
         Value::Pair(_) => {

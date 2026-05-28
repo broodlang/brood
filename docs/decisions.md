@@ -1353,6 +1353,104 @@ are process-global). Deferred to later slices: **remote `spawn`/code shipping**
 rejects a `Closure` for now), distributed monitors/links, node-down detection,
 reconnect/net-split handling, and real authentication.
 
+## ADR-035 — Tracing GC: per-process mark-sweep, fired only at the outermost-eval safepoint
+
+**Status:** accepted. Fulfils ADR-002's "tracing GC later" and the deferred step in
+ADR-016 (arena-reset doesn't help a never-returning loop). Implementation in
+`crates/lisp/src/core/heap.rs`; design walkthrough in
+[`docs/memory-model.md`](memory-model.md).
+
+**Context.** Arena-reset (ADR-016) bounded long REPL/file sessions by truncating
+the LOCAL heap at top-level boundaries, but a single never-returning loop (a
+spawned server, a `(spin)` benchmark) has no such boundary and accumulates
+linearly with iteration count. A general tracing GC was deferred because our
+recursive tree-walker holds live `Value`s on the **Rust** call stack where a
+collector can't find them as roots — and the docs anticipated the fix would
+require an explicit-operand-stack VM rewrite (coupled with step 4b). Step 4b
+shipped instead via stackful coroutines (ADR-018), so the VM-rewrite rationale
+no longer applies; we need a GC that works with the recursive evaluator we
+have.
+
+**Decision.** A **precise, non-moving, per-process mark-sweep** that fires
+**only at the outermost-`eval` `'tail:` safepoint**. The completeness argument
+relies on one invariant — `GC_BLOCK == 1` — and on the trampoline structure of
+the evaluator.
+
+- **Roots at the safepoint** are: the eval's `expr`/`env` (passed in by the
+  call), the heap's dynamic-binding stack, and an explicit `Heap::roots` stack
+  (used only by `eval_str`/`eval_source`, the sole depth-0 callers that hold a
+  `Vec<Value>` of unevaluated forms across an outermost eval).
+- **`GC_BLOCK` is a thread-local depth counter** incremented by RAII guards at
+  every `eval` and `macroexpand_all` entry. GC runs only when this is `1` ("we
+  are the outermost contributor — no other eval/macroexpand frame holds an
+  unrooted LOCAL transient"). Saved/restored around coroutine suspend, reset to
+  0 at coroutine entry, so workers multiplexing processes don't leak depths.
+- **Per-slab free lists** (`pairs`/`vectors`/`maps`/`strings`/`closures`/`envs`);
+  `alloc_*` pop the free list before extending the slab. Handles stay stable
+  across collection (non-moving), so a Rust local holding a rooted handle stays
+  valid even though the slab around it was swept.
+- **PRELUDE and RUNTIME are not swept.** The promotion invariant (every LOCAL→
+  RUNTIME write deep-copies) guarantees those regions hold no LOCAL refs, so
+  the trace never leaves the local heap.
+- **Adaptive threshold:** after each collect, `gc_threshold = max(GC_FLOOR, 2 *
+  live)`. Set `BROOD_GC_STRESS=1` to force GC at every safepoint (debugging /
+  test stress — the suite is green under it).
+- **Disabled during prelude build** (`Heap::new` sets `gc_enabled = false`),
+  so freeze/re-tag sees a hole-free slab.
+
+**Why this works (correctness sketch).** At `GC_BLOCK == 1` at the eval loop
+top:
+
+1. The current eval's loop-body locals (`head`, `rest`, `callee`, `argv`,
+   `scope`) are declared inside the loop body and dead at `continue 'tail`;
+   only `expr`/`env` persist — and both are passed to `collect` as roots.
+2. No other eval or `macroexpand_all` frame is active (`GC_BLOCK == 1` means
+   *this* is the only contributor), so no nested-eval transient is live.
+3. A builtin mid-execution implies the eval that called it is blocked in
+   `call_native`, not at its safepoint — GC and builtin transients are
+   mutually exclusive on the stack.
+4. The caller of the outermost eval is either `eval_str`/`eval_source`
+   (forms vec rooted via `Heap::push_root`) or a coroutine body (holds `f` —
+   already RUNTIME by `promote` — and a `scope` that *is* the current `env`).
+
+Therefore every live LOCAL handle is reachable from the union {`expr`, `env`,
+`heap.roots`, `heap.dynamics`}. ∎
+
+**Why not stepping VM / handle scopes / gc-arena.**
+
+- A stepping-VM rewrite would touch ~all of `eval` and re-shape every builtin's
+  calling convention — the doc-anticipated cost. It's unnecessary here: the
+  trampoline structure already lets us pick a safepoint where the operand
+  stack *is* tiny and statically known.
+- Handle-scope rooting (V8-style) across all of `eval` and every Rust-side
+  builtin is ergonomically invasive and easy to get subtly wrong. The
+  `GC_BLOCK==1` invariant collapses the rooting surface to two sites
+  (`eval_str`, `eval_source`).
+- `gc-arena` was the original ADR-002 path; the `'gc` lifetime brand reshapes
+  every value-touching function and assumes a stepping evaluator. Both bad
+  fits for our recursive eval + shared multi-thread RUNTIME region.
+
+**Limits / what's deferred.**
+
+- A computation that perpetually stays at `GC_BLOCK > 1` (e.g. a non-tail
+  deeply-recursive function, or a server loop wrapped in `(try (loop) …)` where
+  `%try` keeps the outer eval blocked) doesn't reach a safepoint and won't GC
+  until it unwinds. Idiomatic Erlang-style loops return to the outermost
+  between iterations, so this is rare in practice — and the fix is incremental
+  (add explicit rooting for the few builtins that hold transients across eval,
+  letting GC fire at deeper safepoints).
+- Slabs don't shrink trailing dead runs — the free list reuses indices instead.
+  Memory peaks at the high-water live count plus retained `Vec` capacity, then
+  stays flat. (Trailing-truncate is a future optimization.)
+- The interner and the RUNTIME code slabs are still append-only and grow with
+  hot-reload (ADR-013) — orthogonal to per-process data GC.
+
+**Verified.** The full suite passes under `BROOD_GC_STRESS=1` (GC at every
+safepoint). Dedicated regression tests in `crates/lisp/tests/gc.rs` assert that
+a 200k-iteration tail loop and a 20k-message server loop both stay bounded.
+
+---
+
 ## Deferred / open questions
 
 - **Macro hygiene:** currently unhygienic `defmacro` + `gensym`; hygienic macros

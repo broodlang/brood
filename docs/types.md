@@ -89,28 +89,39 @@ operators). The "redefinable/free/global references are `dynamic()`" rule is
 documented (the struct doc + ADR-024); no checker consumes it yet.
 **Done:** the gradual type and its derived relation exist and are unit-tested.
 
-### Step 3 — signatures the checker reads 🟡
+### Step 3 — signatures the checker reads ✅
 A callee's signature (argument `Ty`s + result `Ty`) comes from three sources,
 simplest-first — deliberately **no inference engine** (see the rationale in
 [How it runs](#how-it-runs--and-why-its-outside-the-runtime)):
 
-- **Primitives** — the `check::primitive_sig` table (have it):
-  `%add: (number,number)→number`, `first: (list|vector)→any`,
-  `string-length: (string)→int`, …
-- **Curated stdlib** — a hand-written table for the variadic / `reduce`-based /
-  higher-order fns the checker can't infer but that matter: `+ - * / < <= > >= =
-  mod`, `map`, `filter`, `reduce`, … Hand-vetted, so sound. This is what makes
-  `(+ 1 "x")` catchable even though `+` is `(reduce %add 0 xs)`.
-- **Basic inference** — *only* for a fn whose body is a **single straight-line
-  expression** (no `if`/`cond`/`when`/`let`/`match`/recursion): constrain each
-  param from its direct argument positions against a known sig; used in call
-  position → `fn`. Anything with a branch / binding / recursion → infer nothing.
+- ✅ **Primitives** — every [`NativeFn`](../crates/lisp/src/core/value.rs)
+  carries a [`Sig`](../crates/lisp/src/types/mod.rs) field next to its `Arity`
+  (compatibility-contract point #6, **enforced** — there's no way to construct
+  a `NativeFn` without one). The checker reads it via a global-env lookup
+  (`check::primitive_sig`); there is no parallel hand-maintained table.
+  Primitives whose args/result aren't usefully pinned use the explicit
+  `Sig::any()` lane (`(...any) -> any`) — overlaps every input, so the
+  disjointness checker never warns against it.
+  Example sigs: `%add: (number,number)→number`, `first: (list|vector)→any`,
+  `string-length: (string)→int`, `string->number: (string)→number|nil`.
+- ✅ **Curated stdlib** — a small hand-written table for the variadic /
+  `reduce`-based / higher-order Brood closures the checker can't infer but that
+  matter: `+ - * / < <= > >= mod`, `map`, `filter`, `reduce`. Hand-vetted, so
+  sound. This is what makes `(+ 1 "x")` catchable even though `+` is
+  `(reduce %add 0 xs)`.
+- ✅ **Basic inference** (`check::infer_sig`) — *only* for a fn whose body is a
+  **single straight-line expression** (no `if`/`cond`/`when`/`let`/`match`/
+  recursion, no `&optional`/rest params): each closure parameter inherits the
+  type the callee expects at the position(s) where the parameter is used
+  directly (intersected across positions); the closure's return is the
+  callee's. Anything with a branch / binding / recursion → infer nothing.
   Sound **because a straight-line use is unconditional** — no control-flow
-  analysis, no fixpoint, no false-positive class. Catches one-liner wrappers
-  (`inc`, `twice`, simple user `defn`s); skips everything subtle.
+  analysis, no fixpoint, no false-positive class. The callee is itself only
+  looked up via the *non-inferring* `primitive_sig`/`curated_sig` (so a chain
+  `defn a (x) (b x)` / `defn b (x) (a x)` can't loop). Catches one-liner
+  wrappers (`inc`, `twice`, simple user `defn`s); skips everything subtle.
 
-**Deferred (⬜):** moving the primitive table onto `NativeFn` (enforced, contract
-#6); inference through branches / guards / recursion / higher-order.
+**Deferred (⬜):** inference through branches / guards / recursion / higher-order.
 
 ### Step 4 — the advisory checker 🟡 (v0 shipped; plan below)
 `crates/lisp/src/types/check.rs`: walk a macro-expanded form and **warn when a
@@ -128,10 +139,15 @@ never a false positive.
   exercise failures, so don't flag code within them (keeps `nest test` quiet on
   error-path tests).
 - **Advisory, always** — returns warnings; never raises, never gates (contract #5).
-- ✅ **v0 shipped:** the `(check 'form)` builtin, primitives only.
-- ⬜ **next:** the step-3 curated sigs + basic inference (so closures/stdlib get
-  covered); guard narrowing via `Ty::tested_by` (already prepped:
-  `tested_by("int?") → int`, …).
+- ✅ **v0 shipped:** the `(check 'form)` builtin + `brood --check <file>`
+  (located warnings).
+- ✅ **Step-3 coverage:** primitive sigs sourced from `NativeFn` (enforced;
+  no parallel table), curated stdlib sigs for `+`/`<`/`map`/…, and inference
+  for straight-line single-expression closures (so a user `(defn inc (x) (+ x
+  1))` participates without a hand-written sig).
+- ⬜ **next:** guard narrowing via `Ty::tested_by` (already prepped:
+  `tested_by("int?") → int`, …); unbound-symbol and arity diagnostics; running
+  automatically in `brood <file>` / `nest test` / `nest check`.
 
 ### Step 5+ — structured types ⬜
 Function arrows, vector/list element types, intersections for overloaded fns —
@@ -198,9 +214,11 @@ marked **(enforced)** are compile errors if violated; the rest are review rules.
    program — except provably-sound special-form *structure* errors (special forms
    aren't redefinable, so those can't be wrong). Types warn and optimise; they
    never gate.
-6. **Every primitive declares its type (step 3 onward).** A new builtin supplies
-   a result `Ty` (+ arg `Ty`s) next to its `Arity`. Will be **(enforced)** once
-   `NativeFn` carries the field — the same mechanism that made `Arity` mandatory.
+6. **Every primitive declares its type. (enforced)** A new builtin supplies a
+   result `Ty` (+ arg `Ty`s) next to its `Arity` — `NativeFn` carries a `Sig`
+   field, the same mechanism that makes `Arity` mandatory: omitting it is a
+   compile error. The "no useful info" case uses `Sig::any()` (overlaps every
+   input, never warns), so the contract holds for permissive builtins too.
 7. **Policy in Brood.** If a type test or contract can be written in Brood over
    `type-of`/predicates, it goes in `std/`, not Rust (ADR-006).
 8. **Pattern/guard forms expose their refinement.** New pattern kinds or guards

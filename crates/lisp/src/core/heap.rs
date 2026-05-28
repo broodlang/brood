@@ -76,14 +76,20 @@ struct EnvFrame {
 /// thrash by collecting between every few allocations. Overridden by the
 /// `BROOD_GC_STRESS` env var (set to `1` to collect at every safepoint — a
 /// debug aid that flushes out rooting bugs by maximising free-list churn).
+///
+/// Read once on first use and cached — env vars don't change mid-run, and the
+/// safepoint hits this every collection.
 fn gc_floor() -> usize {
-    if std::env::var_os("BROOD_GC_STRESS").is_some() {
-        0
-    } else {
-        // 64 KB of cons cells worth (~3000 entries) is well above per-call
-        // working sets but trivial vs the GBs a long-running process would leak.
-        64 * 1024
-    }
+    static FLOOR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *FLOOR.get_or_init(|| {
+        if std::env::var_os("BROOD_GC_STRESS").is_some() {
+            0
+        } else {
+            // 64 KB of cons cells worth (~3000 entries) is well above per-call
+            // working sets but trivial vs the GBs a long-running process leaks.
+            64 * 1024
+        }
+    })
 }
 
 /// Re-tag a value's handle from the local region to the immutable **prelude**
@@ -1128,5 +1134,378 @@ impl Heap {
                 None => return cur, // the prelude builder's local root
             }
         }
+    }
+
+    // ----- GC root stack -------------------------------------------------------
+    //
+    // A small explicit root stack for the few sites (today: `eval_str` /
+    // `eval_source`) that hold a `Vec<Value>` of LOCAL forms across a depth-0
+    // eval call. Every other place is either already reachable from
+    // `env`/`expr` at the safepoint, or sits at `GC_BLOCK > 1` where GC won't
+    // fire — see `docs/memory-model.md`. Empty on the hot path.
+
+    /// Push `v` onto the explicit root stack so it survives any GC that may run
+    /// between now and the matching [`Self::truncate_roots`] (or
+    /// [`Self::pop_root`]). Cheap: one `Vec` push.
+    pub fn push_root(&mut self, v: Value) {
+        self.roots.push(v);
+    }
+
+    /// Pop the most recently pushed root (the matching unwind of `push_root`).
+    pub fn pop_root(&mut self) -> Option<Value> {
+        self.roots.pop()
+    }
+
+    /// Current root-stack depth, for a balanced `truncate_roots(roots_len())`
+    /// guard around a region that may push variable numbers of roots.
+    pub fn roots_len(&self) -> usize {
+        self.roots.len()
+    }
+
+    /// Drop every root pushed since the recorded depth (i.e. shrink to `n`).
+    /// The paired teardown for a `let n = heap.roots_len(); … heap.push_root(v);
+    /// … heap.truncate_roots(n);` region.
+    pub fn truncate_roots(&mut self, n: usize) {
+        self.roots.truncate(n);
+    }
+
+    // ----- GC trigger / introspection -----------------------------------------
+
+    /// Is GC armed on this heap? `false` for the prelude *builder* (we don't
+    /// collect during the one-shot build/freeze) and `true` for every real
+    /// process heap. Lets the evaluator skip the safepoint check cheaply when
+    /// it isn't applicable.
+    pub fn gc_enabled(&self) -> bool {
+        self.gc_enabled
+    }
+
+    /// Should the next safepoint run a collection? Compares LOCAL live count
+    /// against the adaptive threshold (recomputed by [`Self::collect`] as
+    /// `max(GC_FLOOR, 2 * live)`). Cheap: an addition over six small `usize`s
+    /// and a compare.
+    #[inline]
+    pub fn gc_due(&self) -> bool {
+        self.gc_enabled && self.local_live_count() >= self.gc_threshold
+    }
+
+    /// LOCAL live-object count = `Σ slab.len() − Σ free.len()` over the swept
+    /// slabs. The metric the threshold tracks; also exposed for tests asserting
+    /// reclamation in long-running loops.
+    pub fn local_live_count(&self) -> usize {
+        let total = self.local.pairs.len()
+            + self.local.vectors.len()
+            + self.local.maps.len()
+            + self.local.strings.len()
+            + self.local.closures.len()
+            + self.local.envs.len();
+        let free = self.local_free.pairs.len()
+            + self.local_free.vectors.len()
+            + self.local_free.maps.len()
+            + self.local_free.strings.len()
+            + self.local_free.closures.len()
+            + self.local_free.envs.len();
+        total - free
+    }
+
+    // ----- the tracing GC ------------------------------------------------------
+    //
+    // Non-moving, single-threaded mark-sweep over the LOCAL heap only. Roots
+    // are: `extra_roots`/`extra_envs` (the caller — usually the eval safepoint
+    // — supplies `expr`/`env` here), the explicit root stack [`Self::roots`],
+    // and the dynamic-binding stack [`Self::dynamics`]. The PRELUDE and RUNTIME
+    // regions are never traced into (they hold no LOCAL refs, by the promotion
+    // invariant), so the walk stays bounded by *this* process's working set.
+    //
+    // Marking is **iterative** (an explicit worklist) so a deep cons chain or
+    // env-frame chain can't overflow the native stack. Sweep rebuilds the free
+    // lists from scratch as `(0..len).filter(|i| !marked[i])` — equivalently,
+    // any LOCAL slot present in the slab and not reached from a root.
+
+    /// Collect garbage in the LOCAL heap. `extra_roots` / `extra_envs` are
+    /// transient roots known to the caller (the evaluator passes the current
+    /// `expr` and `env` here). Pre-allocated objects whose handles aren't
+    /// rooted in *any* form become unreachable and are added to the free lists.
+    ///
+    /// **Safety contract:** every live LOCAL handle, anywhere — Rust locals,
+    /// captured borrows, in-flight builtin accumulators — must be reachable
+    /// from the union {`extra_roots`, `extra_envs`, [`Self::roots`],
+    /// [`Self::dynamics`]}. The `GC_BLOCK == 1` discipline in `process.rs`
+    /// makes this true *by construction* at the eval safepoint (no other eval
+    /// or macroexpand frame is active, the eval's own loop-body locals are
+    /// dead at `continue 'tail`, and the only depth-0 caller — `eval_str` —
+    /// uses [`Self::push_root`] for its forms vec). Calling `collect` from
+    /// anywhere else is the caller's responsibility to satisfy.
+    pub fn collect(&mut self, extra_roots: &[Value], extra_envs: &[EnvId]) {
+        if !self.gc_enabled {
+            return;
+        }
+        // Sized to the LOCAL slabs only — RUNTIME/PRELUDE handles are filtered
+        // out before they reach the worklist, so we never index those marks.
+        let mut marks = Marks::new(&self.local);
+        let mut work: Vec<TraceItem> = Vec::new();
+
+        // Seed: the caller's transient roots.
+        for &v in extra_roots {
+            push_value(&mut work, v);
+        }
+        for &e in extra_envs {
+            push_env(&mut work, e);
+        }
+        // The explicit root stack and the dynamic-binding stack.
+        for &v in &self.roots {
+            push_value(&mut work, v);
+        }
+        for &(_, v) in &self.dynamics {
+            push_value(&mut work, v);
+        }
+
+        // Worklist mark phase. Adding a handle to `work` is a *request* to mark
+        // it; the pop site checks the mark bit and only walks its children if
+        // it was unmarked (so we never cycle, no quadratic re-traversal).
+        while let Some(item) = work.pop() {
+            self.trace_one(item, &mut marks, &mut work);
+        }
+
+        // Sweep: rebuild free lists from `(0..len) \ marked`. Clearing the slot
+        // (strings/vectors/maps/closures/envs) releases the slot's owned inner
+        // allocations; pairs are 16 bytes inline, so they only need the index
+        // re-listed.
+        self.sweep(&marks);
+
+        // Adaptive threshold: collect again when live doubles. Floored so a
+        // tiny heap doesn't thrash.
+        let live = self.local_live_count();
+        self.gc_threshold = std::cmp::max(gc_floor(), live.saturating_mul(2));
+    }
+
+    /// Mark one item and, if it was previously unmarked, enqueue its children.
+    /// Skips PRELUDE/RUNTIME handles entirely — the promotion invariant
+    /// guarantees they reach no LOCAL data, so there's nothing for us to
+    /// reclaim down those edges.
+    fn trace_one(&self, item: TraceItem, marks: &mut Marks, work: &mut Vec<TraceItem>) {
+        match item {
+            TraceItem::Pair(idx) => {
+                if marks.mark_pair(idx) {
+                    let (a, b) = self.local.pairs[idx];
+                    push_value(work, a);
+                    push_value(work, b);
+                }
+            }
+            TraceItem::Vector(idx) => {
+                if marks.mark_vector(idx) {
+                    for &v in &self.local.vectors[idx] {
+                        push_value(work, v);
+                    }
+                }
+            }
+            TraceItem::Map(idx) => {
+                if marks.mark_map(idx) {
+                    for &(k, v) in &self.local.maps[idx] {
+                        push_value(work, k);
+                        push_value(work, v);
+                    }
+                }
+            }
+            TraceItem::Str(idx) => {
+                // No children, but mark it so it survives sweep.
+                marks.mark_string(idx);
+            }
+            TraceItem::Closure(idx) => {
+                if marks.mark_closure(idx) {
+                    let cl = &self.local.closures[idx];
+                    for &f in &cl.body {
+                        push_value(work, f);
+                    }
+                    for &(_, d) in &cl.optionals {
+                        push_value(work, d);
+                    }
+                    if let Some(env) = cl.env {
+                        push_env(work, env);
+                    }
+                }
+            }
+            TraceItem::Env(idx) => {
+                if marks.mark_env(idx) {
+                    let frame = &self.local.envs[idx];
+                    for &(_, v) in &frame.vars {
+                        push_value(work, v);
+                    }
+                    if let Some(parent) = frame.parent {
+                        push_env(work, parent);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Sweep the LOCAL slabs: any unmarked slot becomes a free-list entry.
+    /// Replaces the old free list (every slot present-and-unmarked is "free
+    /// now," whether or not it was free before — the marks distinguish live
+    /// from dead, not from previously-free).
+    fn sweep(&mut self, marks: &Marks) {
+        self.local_free.clear();
+
+        for i in 0..self.local.pairs.len() {
+            if !marks.is_pair_marked(i) {
+                self.local_free.pairs.push(i as u32);
+                // form_pos is keyed by pair index; drop the entry since the
+                // slot will be reused for an unrelated pair.
+                self.form_pos.remove(&i);
+            }
+        }
+        for i in 0..self.local.vectors.len() {
+            if !marks.is_vector_marked(i) {
+                self.local_free.vectors.push(i as u32);
+                // Release the dead `Vec<Value>`'s buffer; alloc_vector replaces
+                // the slot wholesale on reuse, so we don't need an empty marker.
+                self.local.vectors[i] = Vec::new();
+            }
+        }
+        for i in 0..self.local.maps.len() {
+            if !marks.is_map_marked(i) {
+                self.local_free.maps.push(i as u32);
+                self.local.maps[i] = Vec::new();
+            }
+        }
+        for i in 0..self.local.strings.len() {
+            if !marks.is_string_marked(i) {
+                self.local_free.strings.push(i as u32);
+                // Release the dead `String` buffer; alloc_string replaces.
+                self.local.strings[i] = String::new();
+            }
+        }
+        for i in 0..self.local.closures.len() {
+            if !marks.is_closure_marked(i) {
+                self.local_free.closures.push(i as u32);
+                // Replace with a default so the `Vec`s inside drop.
+                self.local.closures[i] = Closure {
+                    name: None,
+                    params: Vec::new(),
+                    optionals: Vec::new(),
+                    rest: None,
+                    body: Vec::new(),
+                    doc: None,
+                    env: None,
+                };
+            }
+        }
+        for i in 0..self.local.envs.len() {
+            if !marks.is_env_marked(i) {
+                self.local_free.envs.push(i as u32);
+                let slot = &mut self.local.envs[i];
+                slot.vars.clear();
+                slot.parent = None;
+            }
+        }
+    }
+}
+
+// ----- GC worklist + mark bits ----------------------------------------------
+
+/// One item on the mark worklist — a LOCAL handle to walk. RUNTIME/PRELUDE
+/// handles are filtered out at the `push_*` sites so they never reach here.
+#[derive(Clone, Copy)]
+enum TraceItem {
+    Pair(usize),
+    Vector(usize),
+    Map(usize),
+    Str(usize),
+    Closure(usize),
+    Env(usize),
+}
+
+/// If `v` carries a LOCAL handle, push it onto the mark worklist. Atoms and
+/// shared-region values are ignored.
+fn push_value(work: &mut Vec<TraceItem>, v: Value) {
+    match v {
+        Value::Pair(id) if id.region() == LOCAL => work.push(TraceItem::Pair(id.index())),
+        Value::Vector(id) if id.region() == LOCAL => work.push(TraceItem::Vector(id.index())),
+        Value::Map(id) if id.region() == LOCAL => work.push(TraceItem::Map(id.index())),
+        Value::Str(id) if id.region() == LOCAL => work.push(TraceItem::Str(id.index())),
+        Value::Fn(id) | Value::Macro(id) if id.region() == LOCAL => {
+            work.push(TraceItem::Closure(id.index()))
+        }
+        _ => {}
+    }
+}
+
+/// If `env` is a LOCAL frame, push it. The [`EnvId::GLOBAL`] sentinel and
+/// RUNTIME-promoted frames are skipped (no LOCAL slot to mark).
+fn push_env(work: &mut Vec<TraceItem>, env: EnvId) {
+    if env != EnvId::GLOBAL && env.region() == LOCAL {
+        work.push(TraceItem::Env(env.index()));
+    }
+}
+
+/// One bit per slot in each LOCAL slab. Allocated per collection (no persistent
+/// memory cost between cycles). `mark_*` returns `true` if the slot transitioned
+/// from unmarked to marked, so the caller can enqueue children only once.
+struct Marks {
+    pairs: Vec<bool>,
+    vectors: Vec<bool>,
+    maps: Vec<bool>,
+    strings: Vec<bool>,
+    closures: Vec<bool>,
+    envs: Vec<bool>,
+}
+
+impl Marks {
+    fn new(local: &Slabs) -> Self {
+        Marks {
+            pairs: vec![false; local.pairs.len()],
+            vectors: vec![false; local.vectors.len()],
+            maps: vec![false; local.maps.len()],
+            strings: vec![false; local.strings.len()],
+            closures: vec![false; local.closures.len()],
+            envs: vec![false; local.envs.len()],
+        }
+    }
+
+    fn mark_pair(&mut self, i: usize) -> bool {
+        mark_one(&mut self.pairs, i)
+    }
+    fn mark_vector(&mut self, i: usize) -> bool {
+        mark_one(&mut self.vectors, i)
+    }
+    fn mark_map(&mut self, i: usize) -> bool {
+        mark_one(&mut self.maps, i)
+    }
+    fn mark_string(&mut self, i: usize) -> bool {
+        mark_one(&mut self.strings, i)
+    }
+    fn mark_closure(&mut self, i: usize) -> bool {
+        mark_one(&mut self.closures, i)
+    }
+    fn mark_env(&mut self, i: usize) -> bool {
+        mark_one(&mut self.envs, i)
+    }
+
+    fn is_pair_marked(&self, i: usize) -> bool {
+        self.pairs.get(i).copied().unwrap_or(false)
+    }
+    fn is_vector_marked(&self, i: usize) -> bool {
+        self.vectors.get(i).copied().unwrap_or(false)
+    }
+    fn is_map_marked(&self, i: usize) -> bool {
+        self.maps.get(i).copied().unwrap_or(false)
+    }
+    fn is_string_marked(&self, i: usize) -> bool {
+        self.strings.get(i).copied().unwrap_or(false)
+    }
+    fn is_closure_marked(&self, i: usize) -> bool {
+        self.closures.get(i).copied().unwrap_or(false)
+    }
+    fn is_env_marked(&self, i: usize) -> bool {
+        self.envs.get(i).copied().unwrap_or(false)
+    }
+}
+
+#[inline]
+fn mark_one(bits: &mut [bool], i: usize) -> bool {
+    if bits[i] {
+        false
+    } else {
+        bits[i] = true;
+        true
     }
 }

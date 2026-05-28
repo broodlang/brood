@@ -62,23 +62,33 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   union/intersect/negate; subtyping = set inclusion). ✅ Step 2: `dynamic()` —
   the gradual type as a bounded `GradualTy` *inside* the lattice, consistent
   subtyping derived from set inclusion (globals are `dynamic()`, not `Any`).
-  ⬜ Step 3: typed primitive signatures. ⬜ Step 4: advisory local inference over
-  expanded forms (guard/pattern narrowing). ⬜ Step 5+: structured types.
-  Steps 0–2 are foundation (no checker consumes the lattice yet); the first
-  *behavioural* payoff is Step 4. Advisory throughout — never gates, never
-  inhibits the dynamic language; not the TypeScript route.
+  ✅ Step 3: typed primitive signatures — every `NativeFn` carries a `Sig`
+  field next to its `Arity` (compatibility-contract #6, enforced); the checker
+  reads sigs from there, from a small curated stdlib table (`+`/`<`/…/`map`/
+  `reduce`), and from one-step inference of straight-line single-expression
+  closures (`(defn inc (x) (+ x 1))` works without a hand-written sig).
+  🟡 Step 4: advisory local inference over expanded forms — the disjointness
+  walk is shipped (`brood --check <file>`, the `(check 'form)` builtin); guard
+  narrowing via `Ty::tested_by` and unbound/arity diagnostics still to come.
+  ⬜ Step 5+: structured types. Steps 0–2 are foundation; Step 3 puts sigs on
+  the kernel; the first *behavioural* payoff is Step 4. Advisory throughout —
+  never gates, never inhibits the dynamic language; not the TypeScript route.
 - ✅ **Maps** (ADR-030) — immutable `{ }` literals + `get`/`assoc`/`dissoc`/
   `keys`/`vals`/`contains?`/`map?`. Insertion-ordered, structural-equality keys,
   order-independent `=`; every op returns a fresh map. Small `map-*` Rust kernel,
   the surface is Brood (`std/prelude.blsp`). Internal rep is an association
   vector (swappable for a HAMT later, no surface change).
-- 🟡 **Memory reclamation.** `Send` arena handles replaced `Rc` (done). Step 1 of
-  reclamation is **arena reset at top-level boundaries** (ADR-016): `eval_str` and
-  the REPL truncate the LOCAL heap back after each form — bounds a long
-  session/REPL (demo: ~712 MB growing → ~78 MB flat). Still ⬜: a general tracing
-  GC for *mid-evaluation* / never-returning loops, which needs the evaluator's
-  roots to be scannable (the explicit-value-stack VM that step 4b also needs —
-  they're coupled). `gc-arena` no longer the presumed path. See `memory-model.md`.
+- ✅ **Memory reclamation.** Done in two coexisting layers: **arena reset at
+  top-level boundaries** (ADR-016) — `eval_str`/the REPL truncate the LOCAL
+  heap after each form (demo: ~712 MB growing → ~78 MB flat) — and a
+  **per-process tracing mark-sweep GC** (ADR-035) for the
+  never-returning-loop case the reset can't reach. The GC fires only at the
+  outermost-`eval` `'tail:` safepoint, gated by a thread-local `GC_BLOCK == 1`
+  invariant that collapses the rooting surface to two sites (`eval_str` /
+  `eval_source`), zero rooting in builtins. Validated by the full suite green
+  under `BROOD_GC_STRESS=1` (GC at every safepoint) plus
+  `crates/lisp/tests/gc.rs` (200k-iteration tail loops, 20k-message server
+  loops, both root and spawned). See `memory-model.md`.
 - 🟡 Nicer REPL — `rustyline` line editing (arrow keys, history, Emacs bindings)
   is in; richer completion/highlighting still to come
 - ⬜ **Self-host the CLI/REPL in Brood** — once the language can express it, the
@@ -124,7 +134,7 @@ The text-editing substance, exposed to Brood.
 - ⬜ Points, marks, regions; multiple buffers
 - ⬜ Editing primitives as builtins: `insert`, `delete`, `goto`, `search`, …
 - ⬜ Buffers as first-class Brood values
-- ⬜ Do the GC migration here if not already done
+- ✅ The tracing GC migration landed in M1 (ADR-035) — no longer carried forward to M2.
 
 ## M3 — Display protocol + native local frontend
 

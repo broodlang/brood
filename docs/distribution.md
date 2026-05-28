@@ -36,6 +36,7 @@
 | `(register name pid)` | Bind a local name so peers can address this process. Returns the pid. |
 | `(node-name)` | This runtime's node name (`:nonode` until `node-start`). |
 | `(nodes)` | A list of currently connected peer node names. |
+| `(monitor-node name)` | Deliver `[:nodedown name]` to the caller when the link to `name` goes down (clean close or heartbeat timeout). Persistent. |
 | `(send target msg)` | `target` is a **pid** (local or remote) or a `{:name :node}` address. |
 | `(pid? x)` | True if `x` is a process id. |
 
@@ -92,69 +93,64 @@ independent symbol interners. (In-process messages keep the interned id.)
   two-process end-to-end test in `crates/cli/tests/distribution.rs`.
 - **Deferred** (later slices): remote `spawn` + code shipping (the closure-as-data
   path of ADR-033 is the missing piece — the wire codec rejects a `Closure`
-  today), distributed monitors/links, and net-split handling. Connection de-dup,
-  node-down detection, a versioned/authenticated handshake, and the
-  resource-cleanup discipline they all depend on are planned in
-  **[Planned hardening — slice 2](#planned-hardening--slice-2-not-yet-built)**.
+  today), distributed process monitors/links, net-split handling, and the
+  versioned/authenticated handshake (§3 below). Connection de-dup, node-down
+  detection, and a generation-checked teardown path landed in
+  **[slice 2](#slice-2--connection-lifecycle--liveness-built)**.
 
-## Planned hardening — slice 2 (not yet built)
+## Slice 2 — connection lifecycle + liveness (built)
 
-Slice 1 is a working, trusted-peer link. Before it can carry real traffic it
-needs connection lifecycle correctness, liveness detection, and a sturdier
-handshake. These are **planned, not implemented** — each notes its performance
-and resource-cleanup considerations so we don't regress the hot path or leak
-threads/sockets when we do build it.
+Slice 1 was a working trusted-peer link; slice 2 makes it sturdy enough to leave
+running. **De-dup + tie-break**, **node-down detection**, and the
+**generation-checked teardown** they rest on are now implemented. The handshake-
+v2 work (versioning + challenge–response) is **still deferred** (§3 below).
 
-### 1. Duplicate / crossing connections (de-dup + tie-break)
+### 1. Duplicate / crossing connections (de-dup + tie-break) ✅
 
-**Problem.** Today connecting to a peer twice — or A and B dialing each other
-simultaneously — inserts a second `Conn` under the same node key, clobbering the
-first. The replaced writer exits when its channel drops, but its **reader thread
-and socket linger** until the peer closes. Two live links can also race messages
-out of order. Erlang hit this exactly and solved it in the handshake.
+`connect` first checks `NODES` for an existing live link to the claimed name and
+**reuses it** instead of dialing a redundant socket. For a genuine
+simultaneous-connect race, `establish` resolves it under the `NODES` write lock
+with a deterministic tie-break: **the link whose connector has the
+lexicographically smaller node name wins** — comparing the *spelling*
+(`value::symbol_name`), not the interned id, since ids differ per process but
+the names match on both ends. The loser's socket is `shutdown` and never
+registered; the winner replaces any prior entry under a new generation id, and
+the displaced link tears down via the shared path (§4).
 
-**Approach.**
-- Before dialing, check `NODES` for an existing live link to that node name and
-  reuse it (don't open a second).
-- For the genuine simultaneous-connect race, resolve it **in the handshake** with
-  a deterministic tie-break: the node with the lexicographically smaller name (or
-  a comparison of a per-connection nonce) wins; the loser closes its socket. Both
-  ends apply the same rule, so exactly one link survives.
-- On accept, if a link to that peer already exists, apply the same tie-break
-  rather than blindly inserting.
+**Perf.** Cold path: the tie-break runs only at connection setup. The hot
+`send` path is unchanged — still one uncontended `RwLock` read on `NODES` plus a
+channel send. The lock-free `local_node()` atomic cache is preserved.
 
-**Perf.** Pure connection-setup cost (cold path) — must not touch the per-`send`
-routing path. The `NODES` read on `send` stays a single uncontended `RwLock` read
-(or move to an `arc-swap`/`RCU` snapshot if it ever shows up in profiles).
+**Resources.** The losing side never spawns threads; the displaced link's reader
+runs the single generation-checked teardown (§4), so no socket or thread leaks
+across reconnects.
 
-**Resources.** The losing side must fully tear down — close the socket *and* stop
-its reader/writer threads (see §4 for the shared shutdown handle), with no
-half-open leftover.
+### 2. Node-down detection ✅
 
-### 2. Node-down detection
+Two new wire frames — **`Ping`** and **`Pong`** (5 bytes each) — plus a single
+shared **heartbeat thread** started lazily on the first link. Every
+`HEARTBEAT_INTERVAL` (2 s) it snapshots `NODES` under the read lock and, for each
+link, either declares it **down** (silent past `DOWN_AFTER` = 6 s) by
+`shutdown`ing the socket, or sends a `Ping`. The peer's reader answers with a
+`Pong`. Every inbound frame — `Send`, `Ping`, or `Pong` — refreshes the link's
+`last_seen` atomic, so an idle-but-alive link stays healthy on its heartbeats and
+a dead one is detected within a couple of intervals.
 
-**Problem.** A peer that vanishes without a TCP FIN (cable pull, power loss, kill
--9) leaves our reader blocked on `read` forever, a stale entry in `(nodes)`, and
-`send`s silently dropping into a dead writer. There's no signal to the language.
+Down detection funnels into the same generation-checked teardown (§4), which
+fires **`[:nodedown name]`** to every process that called
+**`(monitor-node name)`** — the new Brood primitive (persistent, fires on each
+down event; mirrors process `monitor` in spirit).
 
-**Approach.**
-- **TCP keepalive** on each link socket as the cheap backstop (`SO_KEEPALIVE` +
-  tuned idle/interval) so the OS eventually errors a dead reader.
-- A lightweight **application heartbeat**: a `Ping`/`Pong` frame on an idle timer;
-  if N intervals pass with no traffic, declare the node down. This catches
-  half-open and "process alive but wedged" faster than TCP alone.
-- On node-down: remove the `NODES` entry, tear down both threads (§4), and
-  **surface it to Brood** — deliver `[:nodedown <name>]` to processes that asked
-  to watch the node (a `(monitor-node name)` primitive, mirroring process
-  `monitor`). This is also what lets distributed monitors fire a `:noconnection`
-  DOWN for pids on a downed node.
+**Perf.** One thread total for all links, not per-link. Probes are idle-gated:
+a `Ping` is sent only on the tick, never per-message; an active link's regular
+traffic refreshes `last_seen` and the probes are pure no-ops on the receiver.
+Snapshotting `NODES` once per tick avoids holding the lock across the actual
+`shutdown`/`send`.
 
-**Perf.** Heartbeats are per-link and idle-gated (no traffic ⇒ a tiny frame every
-few seconds), never per-message. One shared timer thread for all links, not a
-thread per link. The idle timer must not wake a sleeping link needlessly.
-
-**Resources.** Detection is the *trigger* for cleanup — wire it to the single
-teardown path so a down node frees its socket, both threads, and its table entry.
+**Resources.** Detection is the *trigger* for the §4 teardown — a down node
+frees its socket, both threads, and its table entry exactly once. Clean peer
+exits (the test exercises this via `[:bye …]`) fire `nodedown` immediately via
+reader EOF; heartbeat covers the hard-down (no FIN) case.
 
 ### 3. Handshake v2 (versioned + authenticated)
 
@@ -178,35 +174,30 @@ can't pin a thread during negotiation.
 **Resources.** A failed/timed-out handshake must close the socket and not spawn
 link threads (slice 1 already does this; preserve it).
 
-### 4. Resource cleanup (cross-cutting — do not leak)
+### 4. Resource cleanup (cross-cutting — no leaks) ✅
 
-A connection owns two OS threads + a socket; **every** exit path (peer close,
-read/write error, handshake failure, tie-break loss, node-down) must free all
-three exactly once.
+Every link funnels through one teardown path. Each `Conn` carries a generation
+id and a shared `Arc<TcpStream>` for `shutdown`. Any trigger — peer close, read
+or write error, tie-break eviction (§1), heartbeat down (§2) — `shutdown`s the
+socket; the reader unblocks and calls `drop_link(peer, id)`, which removes the
+`NODES` entry **iff** the stored generation still matches (so an evicted link
+can't clobber its replacement). Removal drops the `Conn`, which drops the
+writer's channel sender and ends its `for … in rx`, and then fires `nodedown` to
+watchers. Each exit frees: one socket, one reader thread, one writer thread —
+exactly once.
 
-**Done so far:** the reader and writer tear *each other* down, so neither runtime
-exit path half-leaks — reader-dies removes the `NODES` entry (dropping the
-writer's channel), and writer-dies `shutdown`s the socket to unblock the reader,
-which then removes the entry. Still to do: a shared shutdown signal so the
-*deliberate* drops (tie-break loss §1, node-down §2) funnel through the same
-idempotent teardown, plus the churn test below.
+**Still to do:** a churn test that opens/closes thousands of links under load
+and asserts thread/fd counts return to baseline (the e2e covers the common
+cases; the long-soak test is its own thing).
 
-**Approach.** Give each link a shared shutdown signal (an `AtomicBool` +
-`shutdown(Shutdown::Both)` on the socket, or drop the writer's channel and
-`shutdown` to unblock the reader). Any path that decides to drop a link sets it,
-which unblocks the reader's `read`, drains/stops the writer, and removes the
-`NODES` entry — once, idempotently. Add a test that opens/closes many links and
-asserts thread and fd counts return to baseline (no leak under churn).
-
-**Perf.** Teardown is cold; the only hot-path constraint is that the liveness
-checks and the `NODES` lookup on `send` stay cheap (atomic / single short lock).
+**Perf.** Teardown is cold. Hot-path lookups are unchanged — one uncontended
+`NODES` read for a remote `send`, plus a lock-free atomic for `local_node()`.
 
 ### Sequencing
-§4 (a single idempotent teardown path) underpins the rest, so build it first;
-then §1 (de-dup, which needs teardown for the losing link), then §2 (node-down,
-which triggers teardown), then §3 (handshake v2, which carries §1's tie-break).
-Each lands behind `cargo test` + the two-process integration test, extended with
-churn/kill scenarios.
+Built in the planned order: §4 (generation-checked teardown) → §1 (de-dup +
+tie-break) → §2 (node-down + `monitor-node`). §3 (handshake v2: protocol-version
++ challenge–response) is still future; the existing cookie compare and version
+omission are documented as not-yet-security.
 
 ## Where it lives
 - `crates/lisp/src/dist.rs` — node state, transport threads, handshake, routing,

@@ -120,7 +120,10 @@ struct Conn {
     /// identically on both ends (see `establish`).
     connector: Symbol,
     /// The writer thread's inbox (length-framed bytes).
-    tx: Sender<Vec<u8>>,
+    /// Outbound frames carry an `Arc<[u8]>` so liveness probes (one `ping` per
+    /// tick, one `pong` per inbound `Ping`) reuse a single buffer per link
+    /// instead of cloning a `Vec<u8>` each time.
+    tx: Sender<Arc<[u8]>>,
     /// A handle to the socket, for `shutdown` — the single teardown lever.
     sock: Arc<TcpStream>,
     /// Millis (on the `START` clock) of the last inbound frame. The heartbeat
@@ -152,8 +155,22 @@ pub(crate) fn register(name: Symbol, id: u64) {
 
 /// `(monitor-node name pid)` — deliver `[:nodedown name]` to `pid` when a link to
 /// `name` goes down. Persistent (fires on each down) until the process exits.
+/// If `name` isn't us and there's no current link, the node is effectively
+/// already down and `[:nodedown]` is delivered immediately (Erlang's
+/// `monitor_node` semantics).
 pub(crate) fn monitor_node(name: Symbol, pid: u64) {
     NODE_MONITORS.write().unwrap().entry(name).or_default().push(pid);
+    if !is_local(name) && !NODES.read().unwrap().contains_key(&name) {
+        process::deliver(pid, nodedown_msg(name));
+    }
+}
+
+/// The `[:nodedown <name>]` message a downed link delivers to its watchers.
+fn nodedown_msg(name: Symbol) -> Message {
+    Message::Vector(vec![
+        Message::Keyword(value::intern("nodedown")),
+        Message::Keyword(name),
+    ])
 }
 
 /// Connected peer node names (for `(nodes)`).
@@ -187,8 +204,8 @@ pub(crate) fn route(node: Symbol, target: Target, msg: Message) {
         return;
     }
     // Remote: encode a Send frame and hand it to the peer's writer thread.
-    let bytes = match frame_bytes(&Frame::Send { target, msg }) {
-        Ok(b) => b,
+    let bytes: Arc<[u8]> = match frame_bytes(&Frame::Send { target, msg }) {
+        Ok(b) => Arc::from(b),
         Err(e) => {
             eprintln!("dist: cannot encode message for {}: {}", value::symbol_name(node), e);
             return;
@@ -252,12 +269,22 @@ pub(crate) fn connect(spec: &str) -> io::Result<Symbol> {
     let (claimed_name, addr) = spec
         .split_once('@')
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "expected name@host:port"))?;
+    // Refuse to dial ourselves — it would race through the handshake and form a
+    // tie-break loser in the same process; cleaner to reject up front.
+    if claimed_name == value::symbol_name(local_node()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("cannot connect to self ({claimed_name})"),
+        ));
+    }
     // Best-effort de-dup: if we already have a link to the named node, reuse it
     // instead of dialing a redundant one. (A genuine simultaneous-connect race is
-    // still resolved by the tie-break in `establish`.)
-    let claimed = value::intern(claimed_name);
-    if NODES.read().unwrap().contains_key(&claimed) {
-        return Ok(claimed);
+    // still resolved by the tie-break in `establish`.) `intern_existing` keeps
+    // the interner from growing for names we ultimately don't use.
+    if let Some(claimed) = value::intern_existing(claimed_name) {
+        if NODES.read().unwrap().contains_key(&claimed) {
+            return Ok(claimed);
+        }
     }
     let mut stream = TcpStream::connect(addr)?;
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
@@ -322,7 +349,7 @@ fn establish(peer: Symbol, stream: TcpStream, role: Role) {
         Role::Responder => peer,
     };
     let sock = Arc::new(stream);
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    let (tx, rx) = mpsc::channel::<Arc<[u8]>>();
     let last_seen = Arc::new(AtomicU64::new(now_millis()));
     let id = NEXT_LINK.fetch_add(1, Ordering::Relaxed);
 
@@ -382,7 +409,9 @@ fn establish(peer: Symbol, stream: TcpStream, role: Role) {
     // it runs `drop_link`, which removes the entry iff it's still this generation.
     let reader_sock = Arc::clone(&sock);
     let reader_tx = tx;
-    let pong = frame_bytes(&Frame::Pong).expect("encode Pong");
+    // One shared Pong buffer per reader; sending is an `Arc::clone` (atomic
+    // incr), not a `Vec` copy.
+    let pong: Arc<[u8]> = Arc::from(frame_bytes(&Frame::Pong).expect("encode Pong"));
     std::thread::spawn(move || {
         let mut r: &TcpStream = &reader_sock;
         loop {
@@ -392,7 +421,7 @@ fn establish(peer: Symbol, stream: TcpStream, role: Role) {
                     match frame {
                         Frame::Send { target, msg } => deliver_inbound(target, msg),
                         Frame::Ping => {
-                            let _ = reader_tx.send(pong.clone());
+                            let _ = reader_tx.send(Arc::clone(&pong));
                         }
                         Frame::Pong | Frame::Hello { .. } => {}
                     }
@@ -426,10 +455,7 @@ fn drop_link(peer: Symbol, id: u64) {
 fn fire_nodedown(peer: Symbol) {
     let watchers = NODE_MONITORS.read().unwrap().get(&peer).cloned();
     if let Some(watchers) = watchers {
-        let msg = Message::Vector(vec![
-            Message::Keyword(value::intern("nodedown")),
-            Message::Keyword(peer),
-        ]);
+        let msg = nodedown_msg(peer);
         for w in watchers {
             process::deliver(w, msg.clone());
         }
@@ -464,13 +490,15 @@ fn ensure_heartbeat() {
 /// send a `Ping` (the peer answers `Pong`, refreshing its `last_seen`). One thread
 /// for all links; a `Ping` is sent only on the tick, never per message.
 fn heartbeat_loop() {
-    let ping = frame_bytes(&Frame::Ping).expect("encode Ping");
+    // One shared Ping buffer for every link, every tick: each send is an
+    // `Arc::clone` (atomic incr), not a `Vec` copy.
+    let ping: Arc<[u8]> = Arc::from(frame_bytes(&Frame::Ping).expect("encode Ping"));
     let down_after = DOWN_AFTER.as_millis() as u64;
     loop {
         std::thread::sleep(HEARTBEAT_INTERVAL);
         let now = now_millis();
         // Snapshot under the lock, then act without holding it (shutdown/send can block).
-        let links: Vec<(Arc<TcpStream>, Sender<Vec<u8>>, u64)> = {
+        let links: Vec<(Arc<TcpStream>, Sender<Arc<[u8]>>, u64)> = {
             let nodes = NODES.read().unwrap();
             nodes
                 .values()
@@ -481,7 +509,7 @@ fn heartbeat_loop() {
             if now.saturating_sub(last) > down_after {
                 let _ = sock.shutdown(Shutdown::Both); // dead peer → tear down via the reader
             } else {
-                let _ = tx.send(ping.clone());
+                let _ = tx.send(Arc::clone(&ping));
             }
         }
     }

@@ -1913,3 +1913,231 @@ through `try`/`catch`).
 **Tests.** `tests/concurrency_test.blsp` — a server handling 500 interleaved
 cast+call cycles without overflowing. Full suite green; `examples/life.blsp` runs
 all 45 generations.
+
+---
+
+## 2026-05-28 — Distributed nodes, slice 2: connection lifecycle + liveness
+
+**Goal.** Make the node link sturdy enough to leave running. A critical review
+of slice 1 surfaced several latent issues (pid-id `u32` truncation, decoder OOM
+vectors, a lock on the hot `send` path, half-open thread leak on writer death) —
+those were fixed first; this entry covers slice 2 proper.
+
+**Generation-checked teardown.** Each `Conn` carries a `u64` generation id + a
+shared `Arc<TcpStream>`. Any trigger — peer close, read/write error, tie-break
+eviction, heartbeat down — `shutdown`s the socket; the reader unblocks and
+`drop_link(peer, id)` removes the `NODES` entry *iff* the stored id still
+matches, so an evicted link can't clobber its replacement. One idempotent
+teardown path; both threads + socket freed exactly once.
+
+**Connection de-dup + tie-break.** `connect` pre-checks `NODES` and reuses an
+existing link to the claimed name (no redundant dial). For a real
+simultaneous-connect race, `establish` resolves it under the `NODES` write lock
+with a deterministic tie-break: the link whose connector has the
+lexicographically smaller node *name* (the spelling — interned ids differ across
+processes) wins; the loser's socket is shut down and never registered.
+
+**Node-down detection.** Two new 5-byte wire frames (`Ping`, `Pong`), one shared
+heartbeat thread (started on the first link). Every 2 s it snapshots `NODES`
+under the read lock and either declares each link down (silent past 6 s) by
+`shutdown`ing its socket, or sends a `Ping`. Every inbound frame refreshes
+`last_seen`, so active traffic *is* its heartbeat — probes are idle-gated, never
+per-message. Detection funnels through the same teardown, which fires
+`[:nodedown name]` to every process that called the new `(monitor-node name)`
+primitive. Clean peer exits fire nodedown immediately via reader EOF; heartbeat
+covers the hard-down case.
+
+**Tests.** Two new e2e tests in `crates/cli/tests/distribution.rs` —
+`duplicate_connect_is_deduplicated` asserts `(nodes) = (:a)` after two
+`connect`s; `node_down_is_detected` does a `:welcome` round-trip (proving link +
+monitor are up), asks the peer to exit, and waits on `[:nodedown :a]` within
+10 s. All four e2e tests pass; brood unit suite, in-language suite, codec
+tests, and doc test stay green.
+
+**Still deferred.** Handshake v2 (protocol version + constant-time
+challenge–response in place of the plaintext cookie compare). Documented in
+[distribution.md](distribution.md) §3.
+
+---
+
+## 2026-05-28 — Per-process tracing GC (ADR-035)
+
+**Goal.** Close the last hole in the memory model: a long-running process — a
+spawned server, a `(spin)` benchmark — has no top-level boundary, so
+arena-reset (ADR-016) can't help it. Memory grows linearly with iteration
+count. Bounding that requires a real tracing collector.
+
+**What the docs anticipated.** ADR-016 and `memory-model.md` flagged this as
+"the biggest blast radius of any change so far," coupled with an
+explicit-operand-stack VM rewrite (the doc's predicted cost). The reasoning:
+our recursive evaluator holds live `Value`s on the *Rust* call stack where a
+GC can't find them, and that seemed to force a stepping-VM refactor of `eval`
+plus pervasive rooting of every builtin's transient accumulators.
+
+**The cheaper path I found.** Stackful coroutines (ADR-018) shipped the
+suspension story instead of a stepping VM, so we're not actually forced to
+rewrite eval to suspend. And the **trampoline** structure of the evaluator —
+the `'tail: loop` — gives us a moment, per iteration, where the active eval
+frame's loop-body locals (`head`/`rest`/`callee`/`argv`/`scope`) are dead and
+only `expr`/`env` persist. That moment is a precise safepoint where the root
+set is trivially small *if* we ensure no other eval/macroexpand frame is on
+the stack. So:
+
+- A thread-local **`GC_BLOCK` depth counter**, incremented by RAII guards at
+  every `eval()` and `macroexpand_all()` entry. GC fires only when this is `1`
+  ("we are the outermost contributor — no other eval or macroexpand frame
+  holds an unrooted LOCAL transient"). Saved/restored around coroutine
+  suspend (`process::preempt`, `process::wait_for_message`) and reset to 0 at
+  coroutine entry, so workers multiplexing processes don't leak depths.
+- At `GC_BLOCK == 1`, the roots are: `expr`/`env` (passed in by the
+  safepoint), `Heap::dynamics` (the `binding`-form stack), and an explicit
+  `Heap::roots` `Vec<Value>` used by exactly two sites (`eval_str`,
+  `eval_source`) — they hold a `Vec` of unevaluated forms across the
+  outermost eval, the *only* depth-0-reachable transient surface.
+- **Completeness argument.** At `GC_BLOCK == 1`: (a) the eval's own loop-body
+  locals are dead at `continue 'tail`, leaving only the rooted `expr`/`env`;
+  (b) no other eval/macroexpand frame is active by the invariant; (c) a
+  builtin mid-execution implies its calling eval is blocked in `call_native`,
+  not at its safepoint — GC and builtin transients are mutually exclusive on
+  the stack; (d) the only depth-0 caller besides the coroutine body is
+  `eval_str`, whose forms are pushed onto `Heap::roots`. So every live LOCAL
+  handle is reachable from the union. ∎
+
+**The collector.**
+- Non-moving mark-sweep (handles stay stable across collection — a Rust local
+  holding a rooted handle stays valid even though the slab around it was
+  swept).
+- Per-LOCAL-slab **free lists** (`pairs`/`vectors`/`maps`/`strings`/
+  `closures`/`envs`); `alloc_*` pop a free index before extending.
+- **Iterative** mark via an explicit `Vec<TraceItem>` worklist, so a deep
+  cons or env chain can't overflow the native stack. PRELUDE/RUNTIME handles
+  are filtered at the push site — the trace never leaves LOCAL.
+- **Sweep** rebuilds the free lists as `(0..len) \ marked`, clears dead
+  vector/map/string/closure/env slots (releases their inner allocations),
+  and purges `form_pos` entries for freed pair slots.
+- **Adaptive threshold:** `gc_threshold = max(GC_FLOOR, 2 * live)` after each
+  collect. `BROOD_GC_STRESS=1` floors it at 0 — GC at every safepoint.
+
+**The blast radius, in lines.** `heap.rs` grew by ~330 lines (free lists +
+collector + root API); `eval/mod.rs` got one RAII guard and one safepoint
+check; `eval/macros.rs` got one guard; `process.rs` got `GC_BLOCK` + the
+save/restore at the two suspend sites + the coroutine-entry reset;
+`lib.rs::eval_str`/`eval_source` push the forms vec onto `Heap::roots`. Zero
+new dependencies. **Zero rooting** in any builtin. That was the
+doc-anticipated cost that turned out to be unnecessary.
+
+**Verified.** All 158 existing tests pass under `BROOD_GC_STRESS=1` — GC
+fires at every outermost-eval safepoint, maximising free-list churn. New
+`crates/lisp/tests/gc.rs`: a 200k-iteration tail-recursive loop allocating
+cons garbage stays bounded under 64k live objects (in practice it's a few
+hundred); the same loop inside a `spawn`ed green process passes (exercising
+the coroutine save/restore path); a server-style `receive` loop processing
+20k messages stays bounded.
+
+**What's deferred.** A program that perpetually stays at `GC_BLOCK > 1`
+(e.g. a server wrapped in `(try (loop) …)` — `%try` holds the outer eval
+blocked) won't GC until it unwinds. Idiomatic Erlang `try`s within an
+iteration, not around the whole loop, so this is rare. Fix is incremental
+when needed: add explicit rooting to the few builtins that hold transients
+across eval. Slabs don't shrink trailing dead runs — the free list reuses
+indices instead; high-water `len` stays. (Trailing-truncate is a small
+future win.)
+
+---
+
+## 2026-05-28 — Types Step 3: sigs on `NativeFn`; one-step closure inference
+
+**Goal.** Finish the type-system Step 3 from `docs/types.md`: stop maintaining
+a parallel `primitive_sig` table in the checker, put the source of truth on
+`NativeFn` (compatibility-contract #6, *enforced*), and add the narrow
+inference rule for straight-line single-expression closures so user `defn`s
+like `(defn inc (x) (+ x 1))` participate without a hand-written sig.
+
+**Built.**
+- **`types::Sig`** in `crates/lisp/src/types/mod.rs`: `params: Vec<Ty>` + `rest:
+  Option<Ty>` + `ret: Ty`, with `Sig::new`/`nullary`/`variadic`/`with_rest`/
+  `any` builders. `Vec<Ty>` (not `&'static`) so the same type works for
+  static primitive declarations *and* inferred closure sigs built at check
+  time. The previous private `Sig` inside `check.rs` is gone.
+- **`NativeFn { …, sig: types::Sig }`** in `core/value.rs`: required field,
+  no default — adding a builtin without a sig is a compile error. The "no
+  useful info" case is the explicit `Sig::any()` lane (`(...any) -> any`),
+  which still satisfies the contract while the checker's disjointness test
+  never warns against it (`ANY` overlaps every inhabited type).
+- **Every primitive declared** in `builtins.rs::register` — ~60 sigs, sourced
+  from each primitive's actual runtime acceptance:
+  - numeric kernel (`%add..%div %lt %eq rem floor`),
+  - pair/vector/map/string kernels (the discriminating ones — `vector-ref:
+    (vector,int)→any`, `string-length: (string)→int`, `substring:
+    (string,int,int)→string`, …),
+  - I/O / reflection / introspection (`type-of: (any)→keyword`, `print:
+    (...any)→nil`, `now: ()→int`, …),
+  - filesystem (`slurp: (string)→string`, `getenv: (string)→string|nil`, …),
+  - control / dynamics / processes / distribution (thunks typed as
+    `fn|native`, `send` taking `pid|map`, `throw: (any)→never`, …).
+  Refined returns where they matter: `string->number: (string)→number|nil`,
+  `getenv` / `current-file` / `doc` / `source-location` / `form-pos` return
+  `T|nil` so a downstream call on the nil case doesn't claim "found", but
+  also doesn't false-positive on the inhabited case.
+- **Checker refactor** (`types::check`):
+  - `primitive_sig` now looks the name up via `heap.env_get(heap.global(),
+    sym)` and reads `heap.native(id).sig` — no parallel table. Works in both
+    the prelude builder (local global env) and the real runtime
+    (`EnvId::GLOBAL` routed to the shared globals table) because
+    `heap.global()` returns the right one in each.
+  - `curated_sig` kept for the variadic / `reduce`-based / higher-order Brood
+    closures (`+ - * / < <= > >= mod map filter reduce`) — hand-vetted, sound.
+  - **`infer_sig`**: a closure with `body.len() == 1`, no `&optional`/rest,
+    whose single expression is a call to a known primitive/curated sig — each
+    closure parameter inherits the callee's expected type at the positions
+    where the parameter is passed directly (intersected across positions);
+    the closure's return is the callee's. Skips recursion (self-name match)
+    and only consults the *non-inferring* `primitive_sig`/`curated_sig` so a
+    mutual chain `defn a (x) (b x)` / `defn b (x) (a x)` can't loop. Sound
+    because a straight-line use is unconditional — no control-flow analysis,
+    no fixpoint, no false-positive class.
+  - `sig_of(heap, name)` is the three-tier lookup the walk uses (primitive →
+    curated → inferred).
+- **Tests.** 6 new in `types::check::tests`:
+  - `primitive_sigs_are_read_from_native_fn` — the contract: `string-length`'s
+    sig in the checker *is* the `Sig::new(vec![string], int)` declared in
+    `builtins.rs`. If the field is ever dropped or the value drifts, this
+    catches it.
+  - `infers_a_straight_line_wrapper` — `(defn inc (x) (+ x 1))` then
+    `(inc :k)` warns.
+  - `inferred_return_type_propagates` — `(string-length (inc 1))` warns
+    (inferred `inc: (number)→number`; `nil`-ish return would be caught too).
+  - `inferred_params_intersect_across_positions` — `(defn add (x y) (+ x y))`,
+    `(add "a" 2)` warns on `x`.
+  - `does_not_infer_through_branches_or_lets` — a body with `if` or `let` is
+    *not* straight-line; inference skips, no warning emitted (zero false
+    positives from the lack of control-flow analysis).
+  - `does_not_infer_through_recursion` and
+    `skips_inference_for_variadic_or_optional_closures` — the explicit
+    skip cases.
+
+  Existing tests adjusted: the bare `Heap::new()` in `warnings()` is now a
+  `heap_with_primitives()` (builder heap with `builtins::register`'d into it),
+  since primitive sigs now live there rather than in a static table.
+
+**Verified.** `cargo test`: 51 + 56 + 3 + 44 + 1 + 6 pass (the lisp unit
+suite, integration tests, distribution, LSP, etc.). `make suite`: 379
+in-language tests, 379 passed. `cargo build` clean.
+
+**Docs.**
+- `docs/types.md`: Step 3 marked ✅ with the three-source breakdown, the new
+  `infer_sig` rule and its skipped cases, and the example sigs updated to
+  reflect what's now declared. Compatibility contract point #6 is now
+  **(enforced)** — the "Will be **(enforced)** once `NativeFn` carries the
+  field" hedge is gone.
+- `docs/roadmap.md`: the types bullet updated — Step 3 ✅; Step 4 still 🟡
+  (the disjointness walk ships, but guard narrowing / unbound / arity
+  diagnostics are the remaining behavioural payoff).
+
+**What's left in Step 4.** Guard narrowing via `Ty::tested_by` (the bridge
+exists in `types/mod.rs` — predicates like `int?` already map to `Ty::of(Int)`
+— but no consumer yet); unbound-symbol and arity diagnostics in the checker
+(today's checker only flags primitive type misuse, per `docs/lsp.md`); and
+auto-running the checker in `brood <file>` / `nest test` / `nest check` (only
+`brood --check` exists). Step 5 (structured types) replaces the `u16` bitset,
+so it stays deferred to a concrete need (ADR-011).

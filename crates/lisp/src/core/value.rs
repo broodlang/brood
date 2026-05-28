@@ -59,6 +59,14 @@ pub fn symbol_name(sym: Symbol) -> String {
     NAMES.get(sym as usize).expect("interned symbol id").clone()
 }
 
+/// Look up an existing interned symbol without inserting one. Returns `None` if
+/// the name has never been interned in this process. For cold-path checks (e.g.
+/// `dist::connect`'s pre-dial de-dup) that don't want to grow the interner with
+/// a name that may never be used as a value.
+pub fn intern_existing(name: &str) -> Option<Symbol> {
+    ids().get(name).copied()
+}
+
 /// Does `sym`'s spelling equal `name`? A lock-free read + in-place compare — no
 /// `String` allocation, unlike `symbol_name(s) == name`. For the hot compares
 /// against fixed words (`&optional`, `quasiquote`, the compile-pass walk).
@@ -365,6 +373,14 @@ pub struct NativeFn {
     /// (they're Rust), so this is their equivalent; sourced from the
     /// `PRIMITIVE_DOCS` table in `builtins.rs` (mirrors `docs/primitives.md`).
     pub doc: &'static str,
+    /// The primitive's type signature — what the advisory checker reads to flag
+    /// provably-wrong calls. **Required:** the compatibility-contract point #6
+    /// (every primitive declares its type) is enforced *here* — there is no
+    /// way to construct a `NativeFn` without one. A primitive whose args/result
+    /// aren't usefully typed uses `Sig::any()`, the explicit "no useful info"
+    /// signature (which still satisfies the contract). See `types/mod.rs` and
+    /// `types/check.rs`.
+    pub sig: crate::types::Sig,
 }
 
 // ----- handle-free constructors (interned; no heap needed) -----

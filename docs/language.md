@@ -605,6 +605,7 @@ transparently.
 | `(register name pid)` | Bind a local name so peers can reach this process via `{:name name :node this-node}`. |
 | `(node-name)` | This runtime's node name (`:nonode` until `node-start`). |
 | `(nodes)` | A list of currently connected peer node names. |
+| `(monitor-node name)` | Deliver `[:nodedown name]` when the link to `name` goes down (clean close or heartbeat timeout). |
 | `(pid? x)` | True if `x` is a process id. |
 
 The cookie is a shared secret (Erlang-style) — **not real security yet**. One node

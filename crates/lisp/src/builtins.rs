@@ -6,18 +6,20 @@
 //! The annotated list is in `docs/primitives.md`.
 
 use crate::core::heap::Heap;
-use crate::core::value::{self, Arity, EnvId, NativeFn, NativeFnPtr, Value};
+use crate::core::value::{self, Arity, EnvId, NativeFn, NativeFnPtr, Tag, Value};
 use crate::error::{ErrorKind, LispError, LispResult};
 use crate::eval::apply;
 use crate::syntax::{printer, reader};
+use crate::types::{Sig, Ty};
 
 /// Install the primitive kernel into `root`.
 pub fn register(heap: &mut Heap, root: EnvId) {
-    let def = |heap: &mut Heap, name: &str, arity: Arity, func: NativeFnPtr| {
+    let def = |heap: &mut Heap, name: &str, arity: Arity, sig: Sig, func: NativeFnPtr| {
         let (params, doc) = primitive_doc(name);
         let v = heap.alloc_native(NativeFn {
             name: name.to_string(),
             arity,
+            sig,
             func,
             params,
             doc,
@@ -25,143 +27,176 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         heap.env_define(root, value::intern(name), v);
     };
 
-    // numeric primitives
-    def(heap, "%add", Arity::exact(2), prim_add);
-    def(heap, "%sub", Arity::exact(2), prim_sub);
-    def(heap, "%mul", Arity::exact(2), prim_mul);
-    def(heap, "%div", Arity::exact(2), prim_div);
-    def(heap, "%lt", Arity::exact(2), prim_lt);
-    def(heap, "%eq", Arity::exact(2), prim_eq);
+    // Lattice shorthands used in the signatures below; see types::Ty for the
+    // algebra. NUMBER = int ∪ float, LIST = nil ∪ pair, seq = list ∪ vector
+    // (the receivers of first/rest). `callable` = fn ∪ native (a thunk or
+    // applicable). `ANY` is the "no useful info" lane — overlaps everything,
+    // so the disjointness checker never warns against it.
+    let any = Ty::ANY;
+    let int = Ty::of(Tag::Int);
+    let num = Ty::NUMBER;
+    let string = Ty::of(Tag::Str);
+    let kw = Ty::of(Tag::Keyword);
+    let sym = Ty::of(Tag::Sym);
+    let bool_ty = Ty::of(Tag::Bool);
+    let nil_ty = Ty::of(Tag::Nil);
+    let pair = Ty::of(Tag::Pair);
+    let vec_ty = Ty::of(Tag::Vector);
+    let map_ty = Ty::of(Tag::Map);
+    let pid_ty = Ty::of(Tag::Pid);
+    let ref_ty = Ty::of(Tag::Ref);
+    let list_ty = Ty::LIST;
+    let seq = list_ty.union(vec_ty);
+    let callable = Ty::of(Tag::Fn).union(Ty::of(Tag::Native));
+
+    // numeric primitives — `%add`..`%div` accept and return the wider NUMBER
+    // (int + int may overflow into Float; the others always do on a Float arg).
+    // `%lt` is comparison → bool; `%eq` accepts anything and returns bool.
+    def(heap, "%add", Arity::exact(2), Sig::new(vec![num, num], num), prim_add);
+    def(heap, "%sub", Arity::exact(2), Sig::new(vec![num, num], num), prim_sub);
+    def(heap, "%mul", Arity::exact(2), Sig::new(vec![num, num], num), prim_mul);
+    def(heap, "%div", Arity::exact(2), Sig::new(vec![num, num], num), prim_div);
+    def(heap, "%lt", Arity::exact(2), Sig::new(vec![num, num], bool_ty), prim_lt);
+    def(heap, "%eq", Arity::exact(2), Sig::new(vec![any, any], bool_ty), prim_eq);
     // `mod` is Brood over `rem` (std/prelude.blsp); only `rem` is primitive.
-    def(heap, "rem", Arity::exact(2), remainder);
+    def(heap, "rem", Arity::exact(2), Sig::new(vec![int, int], int), remainder);
     // `floor` is the single irreducible Float→Int crossing; quot/ceil/round/pow/
     // sqrt are all Brood over it + rem/`/`/`*`/`<` (std/prelude.blsp).
-    def(heap, "floor", Arity::exact(1), floor);
+    def(heap, "floor", Arity::exact(1), Sig::new(vec![num], int), floor);
 
     // pair / sequence — `empty?` is Brood (type dispatch over string-length /
     // vector-length / map-keys; std/prelude.blsp). `first`/`rest` ARE the pair
-    // accessors (car/cdr), so they stay.
-    def(heap, "cons", Arity::exact(2), cons);
-    def(heap, "first", Arity::exact(1), first);
-    def(heap, "rest", Arity::exact(1), rest);
+    // accessors (car/cdr), so they stay. `rest` always yields a list (a vector's
+    // tail is built via `heap.list`), never a vector.
+    def(heap, "cons", Arity::exact(2), Sig::new(vec![any, any], pair), cons);
+    def(heap, "first", Arity::exact(1), Sig::new(vec![seq], any), first);
+    def(heap, "rest", Arity::exact(1), Sig::new(vec![seq], list_ty), rest);
 
     // vector
-    def(heap, "vector", Arity::any(), vector);
-    def(heap, "vector-ref", Arity::exact(2), vector_ref);
-    def(heap, "vector-length", Arity::exact(1), vector_length);
+    def(heap, "vector", Arity::any(), Sig::variadic(any, vec_ty), vector);
+    def(heap, "vector-ref", Arity::exact(2), Sig::new(vec![vec_ty, int], any), vector_ref);
+    def(heap, "vector-length", Arity::exact(1), Sig::new(vec![vec_ty], int), vector_length);
 
     // map — the *minimal* kernel: construct, read, two producers, and one
     // enumerator (`map-pairs` → [k v] vectors). `keys`/`vals`/`contains?`/
     // `reduce-kv` and the `get`/`assoc`/`dissoc` surface (variadic + defaults) are
     // all Brood over these (std/prelude.blsp). Maps are immutable: each op returns
     // a fresh map.
-    def(heap, "hash-map", Arity::any(), hash_map);
-    def(heap, "map-get", Arity::range(2, 3), map_get);
-    def(heap, "map-assoc", Arity::exact(3), map_assoc);
-    def(heap, "map-dissoc", Arity::exact(2), map_dissoc);
-    def(heap, "map-pairs", Arity::exact(1), map_pairs);
+    def(heap, "hash-map", Arity::any(), Sig::variadic(any, map_ty), hash_map);
+    def(heap, "map-get", Arity::range(2, 3), Sig::with_rest(vec![map_ty, any], any, any), map_get);
+    def(heap, "map-assoc", Arity::exact(3), Sig::new(vec![map_ty, any, any], map_ty), map_assoc);
+    def(heap, "map-dissoc", Arity::exact(2), Sig::new(vec![map_ty, any], map_ty), map_dissoc);
+    def(heap, "map-pairs", Arity::exact(1), Sig::new(vec![map_ty], list_ty), map_pairs);
 
     // string
-    def(heap, "string-length", Arity::exact(1), string_length);
-    def(heap, "substring", Arity::exact(3), substring);
+    def(heap, "string-length", Arity::exact(1), Sig::new(vec![string], int), string_length);
+    def(heap, "substring", Arity::exact(3), Sig::new(vec![string, int, int], string), substring);
     // Case folding (Unicode tables) and parse-or-nil genuinely need Rust; the rest
     // of the string library (split/join/replace/index-of/trim/…) is Brood over
     // these + `substring`/`str` (std/prelude.blsp).
-    def(heap, "upper", Arity::exact(1), upper);
-    def(heap, "lower", Arity::exact(1), lower);
-    def(heap, "string->number", Arity::exact(1), string_to_number);
+    def(heap, "upper", Arity::exact(1), Sig::new(vec![string], string), upper);
+    def(heap, "lower", Arity::exact(1), Sig::new(vec![string], string), lower);
+    // string->number returns int *or* float *or* nil (the parse-failed case).
+    def(heap, "string->number", Arity::exact(1), Sig::new(vec![string], num.union(nil_ty)), string_to_number);
 
     // type reflection — the tag predicates (nil?/int?/string?/…) are Brood
     // (std/prelude.blsp) over this one reflective primitive.
-    def(heap, "type-of", Arity::exact(1), type_of);
+    def(heap, "type-of", Arity::exact(1), Sig::new(vec![any], kw), type_of);
 
     // value <-> text and I/O
-    def(heap, "str", Arity::any(), str_concat);
-    def(heap, "pr-str", Arity::exact(1), pr_str);
-    def(heap, "print", Arity::any(), print);
+    def(heap, "str", Arity::any(), Sig::variadic(any, string), str_concat);
+    def(heap, "pr-str", Arity::exact(1), Sig::new(vec![any], string), pr_str);
+    def(heap, "print", Arity::any(), Sig::variadic(any, nil_ty), print);
     // `println` is Brood over `print` (std/prelude.blsp).
-    def(heap, "stdout-tty?", Arity::exact(0), stdout_tty);
+    def(heap, "stdout-tty?", Arity::exact(0), Sig::nullary(bool_ty), stdout_tty);
 
     // time
-    def(heap, "now", Arity::exact(0), now);
+    def(heap, "now", Arity::exact(0), Sig::nullary(int), now);
 
     // memory
-    def(heap, "mem-bytes", Arity::exact(0), mem_bytes);
-    def(heap, "mem-peak", Arity::exact(0), mem_peak);
+    def(heap, "mem-bytes", Arity::exact(0), Sig::nullary(int), mem_bytes);
+    def(heap, "mem-peak", Arity::exact(0), Sig::nullary(int), mem_peak);
 
-    // self-hosting
-    def(heap, "eval", Arity::exact(1), eval_builtin);
-    def(heap, "read-string", Arity::exact(1), read_string);
-    def(heap, "eval-string", Arity::exact(1), eval_string);
-    def(heap, "load", Arity::exact(1), load);
-    def(heap, "%builtin-module", Arity::exact(1), builtin_module);
-    def(heap, "apply", Arity::at_least(2), apply_builtin);
+    // self-hosting — eval/load/etc. take and return arbitrary forms / values.
+    def(heap, "eval", Arity::exact(1), Sig::new(vec![any], any), eval_builtin);
+    def(heap, "read-string", Arity::exact(1), Sig::new(vec![string], any), read_string);
+    def(heap, "eval-string", Arity::exact(1), Sig::new(vec![string], any), eval_string);
+    def(heap, "load", Arity::exact(1), Sig::new(vec![string], any), load);
+    def(heap, "%builtin-module", Arity::exact(1), Sig::new(vec![sym], any), builtin_module);
+    // `apply`'s last positional arg should be a sequence (it's spliced); the
+    // others can be anything. We model it as `(callable, ...any) -> any` — the
+    // sequence-at-tail constraint is dynamic-only (a poor fit for fixed-arity
+    // sigs).
+    def(heap, "apply", Arity::at_least(2), Sig::with_rest(vec![callable], any, any), apply_builtin);
 
     // symbols
-    def(heap, "name", Arity::exact(1), name_of);
+    def(heap, "name", Arity::exact(1), Sig::new(vec![sym.union(kw)], string), name_of);
 
     // filesystem — mechanism for the Brood module system + project test runner
-    def(heap, "cwd", Arity::exact(0), cwd);
-    def(heap, "file-exists?", Arity::exact(1), file_exists);
-    def(heap, "dir?", Arity::exact(1), is_dir);
-    def(heap, "list-dir", Arity::exact(1), list_dir);
-    def(heap, "make-dir", Arity::exact(1), make_dir);
-    def(heap, "spit", Arity::exact(2), spit);
-    def(heap, "slurp", Arity::exact(1), slurp);
+    def(heap, "cwd", Arity::exact(0), Sig::nullary(string), cwd);
+    def(heap, "file-exists?", Arity::exact(1), Sig::new(vec![string], bool_ty), file_exists);
+    def(heap, "dir?", Arity::exact(1), Sig::new(vec![string], bool_ty), is_dir);
+    def(heap, "list-dir", Arity::exact(1), Sig::new(vec![string], list_ty), list_dir);
+    def(heap, "make-dir", Arity::exact(1), Sig::new(vec![string], nil_ty), make_dir);
+    def(heap, "spit", Arity::exact(2), Sig::new(vec![string, string], nil_ty), spit);
+    def(heap, "slurp", Arity::exact(1), Sig::new(vec![string], string), slurp);
 
     // system / environment
-    def(heap, "getenv", Arity::exact(1), getenv);
-    def(heap, "run-process", Arity::exact(2), run_process);
+    def(heap, "getenv", Arity::exact(1), Sig::new(vec![string], string.union(nil_ty)), getenv);
+    def(heap, "run-process", Arity::exact(2), Sig::new(vec![string, seq], int), run_process);
 
     // macros
-    def(heap, "macroexpand-1", Arity::exact(1), macroexpand_1);
-    def(heap, "macroexpand", Arity::exact(1), macroexpand);
-    def(heap, "gensym", Arity::range(0, 1), gensym);
+    def(heap, "macroexpand-1", Arity::exact(1), Sig::new(vec![any], any), macroexpand_1);
+    def(heap, "macroexpand", Arity::exact(1), Sig::new(vec![any], any), macroexpand);
+    def(heap, "gensym", Arity::range(0, 1), Sig::new(vec![string], sym), gensym);
 
     // advisory type checker (the Ty lattice's first consumer; see docs/types.md)
-    def(heap, "check", Arity::exact(1), check_builtin);
+    def(heap, "check", Arity::exact(1), Sig::new(vec![any], list_ty), check_builtin);
 
     // source positions (editor tooling; see docs/tooling.md)
-    def(heap, "form-pos", Arity::exact(1), form_pos);
-    def(heap, "current-file", Arity::exact(0), current_file);
-    def(heap, "source-location", Arity::exact(1), source_location);
+    def(heap, "form-pos", Arity::exact(1), Sig::new(vec![any], vec_ty.union(nil_ty)), form_pos);
+    def(heap, "current-file", Arity::exact(0), Sig::nullary(string.union(nil_ty)), current_file);
+    def(heap, "source-location", Arity::exact(1), Sig::new(vec![sym], vec_ty.union(nil_ty)), source_location);
 
     // introspection (editor tooling; see docs/lsp.md) — derive what we can from
     // the bound value (arglist, doc); enumerate the global table for completion.
-    def(heap, "doc", Arity::exact(1), doc);
-    def(heap, "arglist", Arity::exact(1), arglist);
-    def(heap, "global-names", Arity::exact(0), global_names);
-    def(heap, "bound?", Arity::exact(1), bound_p);
+    def(heap, "doc", Arity::exact(1), Sig::new(vec![any], string.union(nil_ty)), doc);
+    def(heap, "arglist", Arity::exact(1), Sig::new(vec![any], list_ty), arglist);
+    def(heap, "global-names", Arity::exact(0), Sig::nullary(list_ty), global_names);
+    def(heap, "bound?", Arity::exact(1), Sig::new(vec![sym], bool_ty), bound_p);
 
     // errors / control
-    def(heap, "throw", Arity::exact(1), throw);
-    def(heap, "%try", Arity::exact(2), try_catch);
-    def(heap, "%isolate", Arity::exact(1), isolate);
+    def(heap, "throw", Arity::exact(1), Sig::new(vec![any], Ty::NEVER), throw);
+    def(heap, "%try", Arity::exact(2), Sig::new(vec![callable, callable], any), try_catch);
+    def(heap, "%isolate", Arity::exact(1), Sig::new(vec![callable], any), isolate);
 
     // dynamic variables (the `defdyn`/`binding` surface is Brood — see prelude)
-    def(heap, "%declare-dynamic", Arity::exact(1), declare_dynamic);
-    def(heap, "%binding", Arity::exact(3), binding);
-    def(heap, "dynamic?", Arity::exact(1), dynamic_p);
+    def(heap, "%declare-dynamic", Arity::exact(1), Sig::new(vec![sym], nil_ty), declare_dynamic);
+    def(heap, "%binding", Arity::exact(3), Sig::new(vec![sym, any, callable], any), binding);
+    def(heap, "dynamic?", Arity::exact(1), Sig::new(vec![any], bool_ty), dynamic_p);
 
     // processes (concurrency)
-    def(heap, "%spawn", Arity::exact(1), spawn);
-    def(heap, "send", Arity::exact(2), send);
-    def(heap, "%receive", Arity::exact(3), receive_match);
-    def(heap, "self", Arity::exact(0), self_pid);
-    def(heap, "ref", Arity::exact(0), make_ref);
-    def(heap, "monitor", Arity::exact(1), monitor);
-    def(heap, "demonitor", Arity::exact(1), demonitor);
-    def(heap, "spawn-count", Arity::exact(0), spawn_count);
-    def(heap, "peak-threads", Arity::exact(0), peak_threads);
-    def(heap, "worker-threads", Arity::exact(0), worker_threads);
+    def(heap, "%spawn", Arity::exact(1), Sig::new(vec![callable], pid_ty), spawn);
+    // `send`'s target is a pid OR a `{:name :node}` address map.
+    def(heap, "send", Arity::exact(2), Sig::new(vec![pid_ty.union(map_ty), any], nil_ty), send);
+    def(heap, "%receive", Arity::exact(3), Sig::new(vec![callable, callable, int.union(nil_ty)], any), receive_match);
+    def(heap, "self", Arity::exact(0), Sig::nullary(pid_ty), self_pid);
+    def(heap, "ref", Arity::exact(0), Sig::nullary(ref_ty), make_ref);
+    // `monitor` also accepts a name map (forwarded to the remote node).
+    def(heap, "monitor", Arity::exact(1), Sig::new(vec![pid_ty.union(map_ty)], ref_ty), monitor);
+    def(heap, "demonitor", Arity::exact(1), Sig::new(vec![ref_ty], nil_ty), demonitor);
+    def(heap, "spawn-count", Arity::exact(0), Sig::nullary(int), spawn_count);
+    def(heap, "peak-threads", Arity::exact(0), Sig::nullary(int), peak_threads);
+    def(heap, "worker-threads", Arity::exact(0), Sig::nullary(int), worker_threads);
 
     // distributed nodes (connect two runtimes over TCP — crate::dist)
-    def(heap, "node-start", Arity::exact(3), node_start);
-    def(heap, "connect", Arity::exact(1), connect);
-    def(heap, "register", Arity::exact(2), register_name);
-    def(heap, "node-name", Arity::exact(0), node_name);
-    def(heap, "nodes", Arity::exact(0), nodes);
-    def(heap, "monitor-node", Arity::exact(1), monitor_node);
+    def(heap, "node-start", Arity::exact(3), Sig::new(vec![sym, string, string], sym), node_start);
+    def(heap, "connect", Arity::exact(1), Sig::new(vec![string], sym), connect);
+    def(heap, "register", Arity::exact(2), Sig::new(vec![sym, pid_ty], pid_ty), register_name);
+    // `node-name` is the keyword `:nonode` until `node-start` sets it to a symbol.
+    def(heap, "node-name", Arity::exact(0), Sig::nullary(sym.union(kw)), node_name);
+    def(heap, "nodes", Arity::exact(0), Sig::nullary(list_ty), nodes);
+    def(heap, "monitor-node", Arity::exact(1), Sig::new(vec![sym], ref_ty), monitor_node);
 }
 
 /// Docstrings + parameter names for the public primitives, so `(doc 'name)`,

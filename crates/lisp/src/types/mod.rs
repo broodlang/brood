@@ -217,6 +217,79 @@ pub struct GradualTy {
     pub dynamic: bool,
 }
 
+/// A function's type signature: the static type of each fixed positional
+/// argument, an optional type for the variadic tail (`rest`), and the result
+/// type. The advisory checker (see [`check`]) reads this to decide whether a
+/// call's arguments are provably wrong.
+///
+/// **Carried on every primitive [`NativeFn`](crate::core::value::NativeFn) —
+/// the enforcement of compatibility-contract point #6:** adding a new
+/// primitive without a signature is a compile error. Closures don't carry one
+/// (yet); for the narrow set the checker can handle, [`check`] *infers* a
+/// `Sig` from a straight-line one-expression body.
+///
+/// `params` is a [`Vec<Ty>`] (not `&'static [Ty]`) so the same type works for
+/// inferred closure sigs built at check time, not just for static primitive
+/// declarations.
+#[derive(Clone, Debug)]
+pub struct Sig {
+    /// The fixed positional argument types, in order.
+    pub params: Vec<Ty>,
+    /// The variadic-tail type — applies to every argument beyond `params`.
+    /// `None` means no rest (extras are an arity error, caught separately).
+    pub rest: Option<Ty>,
+    /// The result type.
+    pub ret: Ty,
+}
+
+impl Sig {
+    /// `params -> ret` — fixed arity, no rest tail.
+    pub fn new(params: Vec<Ty>, ret: Ty) -> Sig {
+        Sig {
+            params,
+            rest: None,
+            ret,
+        }
+    }
+    /// `() -> ret` — a nullary primitive (a thunk / accessor).
+    pub fn nullary(ret: Ty) -> Sig {
+        Sig {
+            params: Vec::new(),
+            rest: None,
+            ret,
+        }
+    }
+    /// `(...rest) -> ret` — pure variadic, every argument is `rest`.
+    pub fn variadic(rest: Ty, ret: Ty) -> Sig {
+        Sig {
+            params: Vec::new(),
+            rest: Some(rest),
+            ret,
+        }
+    }
+    /// `params... ...rest -> ret` — fixed leading params then a variadic tail.
+    pub fn with_rest(params: Vec<Ty>, rest: Ty, ret: Ty) -> Sig {
+        Sig {
+            params,
+            rest: Some(rest),
+            ret,
+        }
+    }
+    /// `(...any) -> any` — the catch-all when a primitive's args/result aren't
+    /// usefully pinned. The checker's disjointness test never warns against
+    /// `ANY` (it overlaps every inhabited type), so this reads exactly like
+    /// "no useful signature" while still satisfying contract point #6.
+    pub fn any() -> Sig {
+        Sig::variadic(Ty::ANY, Ty::ANY)
+    }
+    /// The type expected at argument position `i` — fixed params first, then
+    /// `rest` for anything beyond. `None` when too many args are passed for
+    /// a non-variadic sig (a separate arity check catches that).
+    pub fn param(&self, i: usize) -> Option<Ty> {
+        self.params.get(i).copied().or(self.rest)
+    }
+}
+
 impl GradualTy {
     /// A purely static gradual type — exactly the set `t`, no `?`.
     pub const fn stat(t: Ty) -> GradualTy {
