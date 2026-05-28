@@ -80,6 +80,34 @@ mod sequence {
             ),
         );
     }
+
+    /// Same workload as `transduce_short_circuit` but expressed eagerly: the
+    /// filter must run against every item of the n-long mapped list (no way to
+    /// stop early). Paired with the transducer version to show the
+    /// `xtake-while` / `reduced` short-circuit win.
+    #[divan::bench(args = [10_000, 100_000])]
+    fn pipeline_no_short_circuit(bencher: divan::Bencher, n: usize) {
+        bench_prog(
+            bencher,
+            format!(
+                "(reduce + 0 (filter (fn (x) (< x 1000)) (map (fn (x) (* x x)) (range {n}))))"
+            ),
+        );
+    }
+
+    /// Short-circuiting transducer: `xtake-while` returns `reduced` once
+    /// squares cross the threshold, so the driver halts and the rest of the
+    /// n-long input is never touched. Should be ~constant time regardless of
+    /// `n` (only ~32 items processed before the first square ≥ 1000).
+    #[divan::bench(args = [10_000, 100_000])]
+    fn transduce_short_circuit(bencher: divan::Bencher, n: usize) {
+        bench_prog(
+            bencher,
+            format!(
+                "(transduce (comp (xmap (fn (x) (* x x))) (xtake-while (fn (x) (< x 1000)))) + 0 (range {n}))"
+            ),
+        );
+    }
 }
 
 /// The string library — char-indexed `substring`/`str` over short strings (the

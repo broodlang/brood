@@ -37,6 +37,7 @@ const SPECIAL_NAMES: &[&str] = &[
     "defmacro",
     "let",
     "let*",
+    "letrec",
 ];
 
 // Keyed by interned symbol id — use the fast integer hasher, since `special_name`
@@ -135,7 +136,8 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     let (test_form, r) = uncons(heap, rest);
                     let (then_form, r) = uncons(heap, r);
                     let (else_form, _) = uncons(heap, r);
-                    let test = eval(heap, test_form, env)?;
+                    let test = eval(heap, test_form, env)
+                        .map_err(|e| e.or_form_pos(heap, test_form))?;
                     expr = if truthy(test) { then_form } else { else_form };
                     continue 'tail;
                 }
@@ -154,7 +156,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                             .ok_or_else(|| LispError::runtime("def: missing name"))?,
                     )?;
                     let val = if args.len() > 1 {
-                        eval(heap, args[1], env)?
+                        eval(heap, args[1], env).map_err(|e| e.or_form_pos(heap, args[1]))?
                     } else {
                         Value::Nil
                     };
@@ -222,7 +224,70 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     let mut i = 0;
                     while i < binds.len() {
                         let bind_name = as_symbol(binds[i])?;
-                        let val = eval(heap, binds[i + 1], scope)?;
+                        let rhs = binds[i + 1];
+                        let val = eval(heap, rhs, scope)
+                            .map_err(|e| e.or_form_pos(heap, rhs))?;
+                        heap.env_define(scope, bind_name, val);
+                        i += 2;
+                    }
+                    match tail_of_cons(heap, body, scope)? {
+                        Some(last) => {
+                            expr = last;
+                            env = scope;
+                            continue 'tail;
+                        }
+                        None => return Ok(Value::Nil),
+                    }
+                }
+                "letrec" => {
+                    // Mutual local recursion: every binding's name is visible in
+                    // every binding's RHS (and to itself). The frame is a
+                    // last-write-wins association vector (`env_define` pushes,
+                    // lookup scans from the end), so we make all names visible by
+                    // pre-defining them to nil, then evaluate each RHS in the
+                    // scope and push the real value — closures built during the
+                    // bind phase capture the scope and resolve names lazily at
+                    // call time, so mutual recursion just works. Brood stays
+                    // immutable: the user can't observe the nil pre-binding
+                    // (touching a name before its RHS has been evaluated reads
+                    // the placeholder, but for the recursion-of-functions case
+                    // letrec is meant for, the bodies don't fire until call
+                    // time, by which point the real value is the latest entry).
+                    let (binds_form, body) = uncons(heap, rest);
+                    if !matches!(rest, Value::Pair(_)) {
+                        return Err(LispError::runtime("letrec: missing bindings"));
+                    }
+                    let binds = as_binding_vec(heap, binds_form)?;
+                    if binds.len() % 2 != 0 {
+                        return Err(LispError::runtime(
+                            "letrec: bindings must be name/value pairs",
+                        ));
+                    }
+                    // Plain-symbol targets only — letrec exists for mutual
+                    // recursion of *named* values; pattern binding would muddy
+                    // what "the names visible in the RHSs" means.
+                    if binds
+                        .iter()
+                        .step_by(2)
+                        .any(|&b| !matches!(b, Value::Sym(_)))
+                    {
+                        return Err(LispError::runtime(
+                            "letrec: binding targets must be plain symbols",
+                        ));
+                    }
+                    let scope = heap.new_env(Some(env));
+                    let mut i = 0;
+                    while i < binds.len() {
+                        let bind_name = as_symbol(binds[i])?;
+                        heap.env_define(scope, bind_name, Value::Nil);
+                        i += 2;
+                    }
+                    let mut i = 0;
+                    while i < binds.len() {
+                        let bind_name = as_symbol(binds[i])?;
+                        let rhs = binds[i + 1];
+                        let val = eval(heap, rhs, scope)
+                            .map_err(|e| e.or_form_pos(heap, rhs))?;
                         heap.env_define(scope, bind_name, val);
                         i += 2;
                     }
@@ -246,6 +311,14 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
         // else becomes the callee. (Previously the head was resolved twice — once
         // for the macro test, once via `eval(head)` — doubling global-table hits
         // on the hottest path.)
+        // Source position of *this* combination — used as the fallback when an
+        // error bubbles up from a sub-eval / primitive / closure-arity check
+        // that didn't tag itself with a more-inner position. `or_form_pos`
+        // checks `pos.is_none()` first, so the innermost annotation wins; this
+        // is only a cost on the error path (`form_pos` lookup is skipped
+        // entirely when the error is already tagged).
+        let call_form = expr;
+
         let callee = match head {
             Value::Sym(s) => {
                 let v = heap.env_get(env, s).ok_or_else(|| {
@@ -253,12 +326,13 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                 })?;
                 if let Value::Macro(mid) = v {
                     let arg_forms = heap.list_to_vec(rest)?;
-                    expr = apply_closure(heap, mid, &arg_forms)?;
+                    expr = apply_closure(heap, mid, &arg_forms)
+                        .map_err(|e| e.or_form_pos(heap, call_form))?;
                     continue 'tail;
                 }
                 v
             }
-            _ => eval(heap, head, env)?,
+            _ => eval(heap, head, env).map_err(|e| e.or_form_pos(heap, head))?,
         };
 
         // Evaluate the argument forms straight off the `rest` cons spine into
@@ -271,7 +345,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                 Value::Nil => break,
                 Value::Pair(p) => {
                     let (form, next) = heap.pair(p);
-                    argv.push(eval(heap, form, env)?);
+                    argv.push(eval(heap, form, env).map_err(|e| e.or_form_pos(heap, form))?);
                     cur = next;
                 }
                 _ => return Err(LispError::type_err("improper argument list in call")),
@@ -279,16 +353,20 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
         }
 
         match callee {
-            Value::Native(id) => return call_native(heap, id, &argv, env),
+            Value::Native(id) => {
+                return call_native(heap, id, &argv, env)
+                    .map_err(|e| e.or_form_pos(heap, call_form));
+            }
             Value::Fn(id) => {
-                let scope = bind_params(heap, id, &argv)?;
+                let scope = bind_params(heap, id, &argv)
+                    .map_err(|e| e.or_form_pos(heap, call_form))?;
                 let body_len = heap.closure(id).body.len();
                 if body_len == 0 {
                     return Ok(Value::Nil);
                 }
                 for i in 0..body_len - 1 {
                     let form = heap.closure(id).body[i];
-                    eval(heap, form, scope)?;
+                    eval(heap, form, scope).map_err(|e| e.or_form_pos(heap, form))?;
                 }
                 expr = heap.closure(id).body[body_len - 1];
                 env = scope;
@@ -322,17 +400,33 @@ pub fn apply_closure(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> LispResu
     let mut result = Value::Nil;
     for i in 0..body_len {
         let form = heap.closure(cl).body[i];
-        result = eval(heap, form, scope)?;
+        // Same as the closure body branch in `eval`: tag the body form's
+        // position on any error so the diagnostic points at the failing line.
+        result = eval(heap, form, scope).map_err(|e| e.or_form_pos(heap, form))?;
     }
     Ok(result)
 }
 
 fn bind_params(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> Result<EnvId, LispError> {
+    // Snapshot the closure's metadata once. Every re-read of `heap.closure(cl)`
+    // is a region-dispatch + slab index, and the body below would otherwise
+    // re-read it ~4-6 times per call plus once per parameter in the binding
+    // loop. Closures are immutable once allocated, so this snapshot stays
+    // consistent. `params` and `optionals` copy into inline `SmallVec`s, so
+    // frames of ≤4 params/optionals (the common case) pay no heap alloc here.
+    let mut params: SmallVec<[Symbol; 4]> = SmallVec::new();
+    let mut optionals: SmallVec<[(Symbol, Value); 4]> = SmallVec::new();
+    let (cl_env_opt, cl_name, rest_sym) = {
+        let cl_data = heap.closure(cl);
+        params.extend_from_slice(&cl_data.params);
+        optionals.extend_from_slice(&cl_data.optionals);
+        (cl_data.env, cl_data.name, cl_data.rest)
+    };
     // A global-capturing closure (env == None) resolves to this process's global.
-    let cl_env = heap.closure(cl).env.unwrap_or_else(|| heap.global());
-    let required = heap.closure(cl).params.len();
-    let n_opt = heap.closure(cl).optionals.len();
-    let has_rest = heap.closure(cl).rest.is_some();
+    let cl_env = cl_env_opt.unwrap_or_else(|| heap.global());
+    let required = params.len();
+    let n_opt = optionals.len();
+    let has_rest = rest_sym.is_some();
     let max = if has_rest {
         usize::MAX
     } else {
@@ -340,9 +434,7 @@ fn bind_params(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> Result<EnvId, 
     };
 
     if argv.len() < required || argv.len() > max {
-        let who = heap
-            .closure(cl)
-            .name
+        let who = cl_name
             .map(value::symbol_name)
             .unwrap_or_else(|| "fn".to_string());
         let max = if has_rest {
@@ -360,12 +452,11 @@ fn bind_params(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> Result<EnvId, 
 
     let scope = heap.new_env(Some(cl_env));
     for (i, &arg) in argv.iter().enumerate().take(required) {
-        let param = heap.closure(cl).params[i];
-        heap.env_define(scope, param, arg);
+        heap.env_define(scope, params[i], arg);
     }
     let mut idx = required;
     for j in 0..n_opt {
-        let (name, default_form) = heap.closure(cl).optionals[j];
+        let (name, default_form) = optionals[j];
         if idx < argv.len() {
             heap.env_define(scope, name, argv[idx]);
             idx += 1;
@@ -374,9 +465,9 @@ fn bind_params(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> Result<EnvId, 
             heap.env_define(scope, name, value);
         }
     }
-    if let Some(rest_sym) = heap.closure(cl).rest {
+    if let Some(rs) = rest_sym {
         let rest_list = heap.list_from_slice(&argv[idx..]);
-        heap.env_define(scope, rest_sym, rest_list);
+        heap.env_define(scope, rs, rest_list);
     }
     Ok(scope)
 }
@@ -558,7 +649,10 @@ fn uncons(heap: &Heap, v: Value) -> (Value, Value) {
 
 /// Evaluate all-but-last of the forms in the cons-list `body` for effect; return
 /// the last form (or `None` if empty). Walks the spine directly, so a `do`/`let`
-/// body costs no intermediate `Vec`. Errors on an improper list.
+/// body costs no intermediate `Vec`. Errors on an improper list. Each non-tail
+/// form's source position is attached to any error it raises (innermost wins),
+/// so a `do`-body failure points at the failing form's line, not the enclosing
+/// `do`'s.
 fn tail_of_cons(heap: &mut Heap, body: Value, env: EnvId) -> Result<Option<Value>, LispError> {
     let mut cur = body;
     loop {
@@ -569,7 +663,7 @@ fn tail_of_cons(heap: &mut Heap, body: Value, env: EnvId) -> Result<Option<Value
                 if matches!(next, Value::Nil) {
                     return Ok(Some(form));
                 }
-                eval(heap, form, env)?;
+                eval(heap, form, env).map_err(|e| e.or_form_pos(heap, form))?;
                 cur = next;
             }
             _ => return Err(LispError::type_err("improper body list")),

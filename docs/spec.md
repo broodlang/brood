@@ -161,9 +161,9 @@ never changes, and data is immutable. `let` introduces a child frame.
 Special forms are reserved symbols recognised in operator position. `body...`
 denotes zero or more forms evaluated as an implicit `do`.
 
-Only `quote`, `if`, `do`, `def`, `fn`/`lambda`, `let`/`let*`, `quasiquote`, and
-`defmacro` are **true core special forms** (the evaluator's own rules, in
-`eval/mod.rs`). `when`, `unless`, `cond`, `and`, and `or` are **prelude macros**
+Only `quote`, `if`, `do`, `def`, `fn`/`lambda`, `let`/`let*`, `letrec`,
+`quasiquote`, and `defmacro` are **true core special forms** (the evaluator's
+own rules, in `eval/mod.rs`). `when`, `unless`, `cond`, `and`, and `or` are **prelude macros**
 (ADR-022) — they expand to the core forms and so can be shadowed or passed over
 like any binding; they are tabled here only so the whole surface reads in one
 place.
@@ -179,6 +179,7 @@ place.
 | `(def name v?)` | Evaluate `v` (or `nil`) and bind `name` globally (redefinable — the language's only mutation). Result: `name`. |
 | `(fn [params] body...)` | A closure capturing the current environment. `lambda` is an alias. |
 | `(let [n₁ v₁ …] body...)` | Sequential bindings in a new child frame (each `vᵢ` sees the previous bindings). `let*` is an alias. |
+| `(letrec [n₁ v₁ …] body...)` | Mutually recursive bindings in a new child frame — every `nᵢ` is visible in every `vⱼ` (and to itself). Each name is pre-bound to `nil` before any `vⱼ` evaluates, so the form is for mutually recursive **functions** (their bodies fire at call time, by which point the real value is bound). Binding targets must be plain symbols. |
 | `(and a₁ …)` | Left to right; returns the first falsy value, else the last (tail position). Empty ⇒ `true`. |
 | `(or a₁ …)` | Left to right; returns the first truthy value, else the last (tail position). Empty ⇒ `nil`. |
 | `(quasiquote tmpl)` | Build a value from a template (§7.2). Reader shorthand: `` `tmpl ``. |

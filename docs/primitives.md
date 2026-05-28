@@ -15,7 +15,7 @@ gate (`eval::call_native`), before the primitive runs — so a wrong-count call 
 a clean arity error (`type-of: expected 1 argument, got 0`) rather than a missing
 arg silently becoming `nil`.
 
-## Native primitive functions (71)
+## Native primitive functions (73)
 
 | Category | Primitive | Arity | Purpose |
 |---|---|---|---|
@@ -55,6 +55,8 @@ arg silently becoming `nil`.
 | | `%builtin-module` | 1 | source of a baked-in std module by name, or nil (used by Brood `require`) |
 | | `apply` | ≥2 | call a function with a spliced argument list |
 | **Symbols** | `name` | 1 | a symbol/keyword's spelling as a string (no leading `:`) |
+| | `symbol` | 1 | coerce a string / symbol / keyword to the matching symbol (intern as needed). Lenient inverse of `name`; strict `string->symbol` is a Brood wrapper |
+| | `keyword` | 1 | coerce a string / symbol / keyword to the matching keyword (intern as needed). Mirrors `symbol`; they share an interner so `(= (name 'x) (name :x))` |
 | **Filesystem** | `cwd` | 0 | current working directory |
 | | `file-exists?` `dir?` | 1 | path exists / is a directory → bool |
 | | `list-dir` | 1 | entry names directly under a directory (sorted) |

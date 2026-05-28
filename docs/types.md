@@ -164,8 +164,28 @@ never a false positive.
   nested `(let g (if g …))` whose `g` aliases the *combined* test, not a
   single variable) are still deferred — they'd need either pre-expansion
   handling or post-expansion shape recognition.
-- ⬜ **next:** unbound-symbol and arity diagnostics; running automatically in
-  `brood <file>` / `nest test` / `nest check`.
+- ✅ **Arity diagnostics.** Every call's argument count is checked against the
+  callee's `Arity` — `NativeFn.arity` for primitives, derived from
+  `Closure.{params, optionals, rest}` for Brood closures (in the heap; the
+  inferred-sig path applies too). `(first)` → "expected 1, got 0"; `(rem 1 2
+  3)` → "expected 2, got 3"; `(map-get {})` → "expected 2 to 3"; `(apply f)`
+  → "expected 2 or more". Independent of the type check (which still runs
+  for the args that *are* present), so a 1-arg `(first 5)` still says `first:
+  argument 1 expects nil | pair | vector, got int (5)`.
+- ✅ **Unbound-symbol diagnostics** (call heads). A call whose head doesn't
+  resolve to *anything* — not a primitive, not a curated stdlib closure, not
+  in local scope (fn-param, let-binding), not a file-local `def`/`defn`/
+  `defmacro`/`defdyn`, not a syntactic keyword (`if`/`do`/`when`/`cond`/`and`/
+  `or`/`match`/`->`/…), and not in the heap's global table — is flagged
+  `unbound symbol: foo`. The walk gained scope-aware handling of `fn` /
+  `lambda` / `def` / `defn` / `defmacro` so binders aren't seen as references
+  and fn-params get bound into `Ctx`. A new `check_file(heap, &[forms])` API
+  threads top-level `def`/`defn` names across forms so a later call to an
+  earlier definition isn't flagged. The CLI's `brood --check` now uses
+  `check_file`.
+- ⬜ **next:** cond-/match-/and-/or-chained guard narrowing; running
+  automatically in `brood <file>` / `nest test` / `nest check` (today only
+  `brood --check` is wired).
 
 ### Step 5+ — structured types ⬜
 Function arrows, vector/list element types, intersections for overloaded fns —

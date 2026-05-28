@@ -95,6 +95,24 @@
   (test "let is sequential" (assert= (let (a 1 b (+ a 1)) (+ a b)) 3))
   (test "lexical closures"  (assert= (let (adder (fn (a) (fn (b) (+ a b)))) ((adder 3) 4)) 7)))
 
+(describe "letrec"
+  ;; Self-recursive local function — the simplest letrec.
+  (test "self-recursion"
+    (assert= (letrec (fact (fn (n) (if (<= n 1) 1 (* n (fact (- n 1))))))
+               (fact 6))
+             720))
+  ;; Mutually recursive locals — the canonical reason letrec exists.
+  (test "mutual recursion"
+    (assert= (letrec (even? (fn (n) (if (= n 0) true  (odd?  (- n 1))))
+                      odd?  (fn (n) (if (= n 0) false (even? (- n 1)))))
+               (list (even? 10) (even? 7) (odd? 7)))
+             (list true false true)))
+  ;; Tail-recursive locals stay O(1) — letrec doesn't break TCO.
+  (test "tail-recursive local is stack-safe"
+    (assert= (letrec (loop (fn (i acc) (if (= i 0) acc (loop (- i 1) (+ acc 1)))))
+               (loop 10000 0))
+             10000)))
+
 (describe "parameter forms"
   (test "optional with default" (assert= ((fn (a &optional (b 10)) (+ a b)) 5) 15)
                                 (assert= ((fn (a &optional (b 10)) (+ a b)) 5 1) 6))
@@ -108,6 +126,30 @@
                       (assert= (my-when true 1 2 3) 3)
                       (assert= (my-when false 1 2 3) nil))
   (test "quasiquote"  (assert= `(1 ~(+ 1 1) ~@(list 3 4) 5) (list 1 2 3 4 5))))
+
+;; :serial — the side-effecting loop macros write into a global accumulator;
+;; isolating the writes keeps them out of the cross-test race window.
+(describe "loop macros" :serial
+  (test "dotimes runs body 0..n-1"
+    (def loop--acc nil)
+    (dotimes (i 5) (def loop--acc (cons i loop--acc)))
+    (assert= (reverse loop--acc) (list 0 1 2 3 4)))
+  (test "dotimes with n=0 is a no-op"
+    (def loop--acc :untouched)
+    (dotimes (i 0) (def loop--acc :touched))
+    (assert= loop--acc :untouched))
+  (test "dotimes returns nil"
+    (assert= (dotimes (i 3) i) nil))
+  (test "dolist walks each item"
+    (def loop--acc nil)
+    (dolist (x (list :a :b :c)) (def loop--acc (cons x loop--acc)))
+    (assert= (reverse loop--acc) (list :a :b :c)))
+  (test "dolist on empty is a no-op"
+    (def loop--acc :untouched)
+    (dolist (x nil) (def loop--acc :touched))
+    (assert= loop--acc :untouched))
+  (test "dolist returns nil"
+    (assert= (dolist (x (list 1 2)) x) nil)))
 
 (describe "threading macros"
   (test "->"  (assert= (-> 5 (- 1) (* 2)) 8))

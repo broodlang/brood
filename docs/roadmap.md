@@ -22,7 +22,7 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
 - ✅ Value model with interned symbols; cons-cell lists
 - ✅ Lexical environments + closures
 - ✅ Tree-walking evaluator with **proper tail calls**
-- ✅ Special forms: `quote if when unless cond do def fn/lambda let/let* and or` (immutable: no `set!`/`while`, loops are recursion — ADR-026)
+- ✅ Special forms: `quote if when unless cond do def fn/lambda let/let* letrec and or` (immutable: no `set!`/`while`, loops are recursion — ADR-026)
 - ✅ Builtins: arithmetic, comparison, lists/sequences, higher-order, predicates, strings/IO
 - ✅ Self-hosting primitives: `eval`, `read-string`, `load`
 - ✅ Prelude written in Brood
@@ -72,7 +72,13 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   narrowing via `Ty::tested_by` now lands too (a `Ctx` of locally-known types
   threaded through the walk; `let`/`let*` seeds `var : expr_ty(rhs)`, `if`
   narrows in both branches incl. a leading `(not …)`; inner shadowing
-  overrides). Unbound-symbol and arity diagnostics still to come.
+  overrides); plus **arity diagnostics** (every call's argument count vs the
+  callee's `Arity` — primitives, curated stdlib, inferred closures) and
+  **unbound-symbol diagnostics** (call heads; scope-aware over `fn`/`lambda`/
+  `let`/`def`/`defn`/`defmacro`, with a `check_file` API accumulating
+  file-local def names across forms). Remaining: cond-/match-/and-/or-chained
+  guard narrowing, plus auto-running in `brood <file>` / `nest test` /
+  `nest check`.
   ⬜ Step 5+: structured types. Steps 0–2 are foundation; Step 3 puts sigs on
   the kernel; the first *behavioural* payoff is Step 4. Advisory throughout —
   never gates, never inhibits the dynamic language; not the TypeScript route.
@@ -81,6 +87,13 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   order-independent `=`; every op returns a fresh map. Small `map-*` Rust kernel,
   the surface is Brood (`std/prelude.blsp`). Internal rep is an association
   vector (swappable for a HAMT later, no surface change).
+- ✅ **Tier-2 ergonomics** (per `ROADMAP.md`) — `letrec` for local mutual
+  recursion (new special form alongside `let`/`let*`; plain-symbol targets;
+  pre-bind to `nil` so all names are visible in every RHS), lenient `symbol`
+  and `keyword` constructors over string/symbol/keyword input, strict
+  `symbol->string` / `string->symbol` wrappers in Brood, and the side-effecting
+  loop macros `dotimes` / `dolist` (lean tail-recursive Brood; `doseq` stays
+  for the destructuring / `:when`-filter case).
 - ✅ **Memory reclamation.** Done in two coexisting layers: **arena reset at
   top-level boundaries** (ADR-016) — `eval_str`/the REPL truncate the LOCAL
   heap after each form (demo: ~712 MB growing → ~78 MB flat) — and a
@@ -105,7 +118,10 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   project source (auto on `*load-path*`), `tests/**/*_test.blsp` are the tests; a
   `project.blsp` manifest declares identity (name/version) and overrides paths only
   when needed. `nest test` discovers + loads (register-only) + runs once; `nest
-  new <name>` scaffolds a project (`spit`/`make-dir`). ADR-020/028.
+  run [args…]` runs the entry point (configured by `:main`, defaults to module
+  `main`, fn `main`; extra CLI args are passed in as strings); `nest new <name>`
+  scaffolds a two-module project (`main` requires `hello`) via `spit`/`make-dir`.
+  ADR-020/028.
 - 🟡 **Editor tooling & documentation** — source-position errors (GNU
   `FILE:LINE:COL:`) + structured test output (`docs/tooling.md`); a lossless,
   span-carrying CST and the introspection primitives `doc`/`arglist`/

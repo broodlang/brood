@@ -102,6 +102,22 @@ impl LispError {
         self
     }
 
+    /// Attach the recorded source position of `form` (if any) only when none is
+    /// set yet — the [`or_pos`](Self::or_pos) shape, but driven by
+    /// [`Heap::form_pos`](crate::core::heap::Heap::form_pos). The eval loop
+    /// uses this on every error-propagation path, so an error bubbles up tagged
+    /// with the *innermost* form whose position was recorded by the reader.
+    /// The lookup happens only on the error path, so the hot path pays nothing.
+    pub fn or_form_pos(self, heap: &crate::core::heap::Heap, form: Value) -> Self {
+        if self.pos.is_some() {
+            return self;
+        }
+        match heap.form_pos(form) {
+            Some(p) => self.with_pos(p),
+            None => self,
+        }
+    }
+
     /// Attach a file only if none is set yet (the innermost `load` wins).
     pub fn or_file(mut self, file: impl Into<String>) -> Self {
         if self.file.is_none() {

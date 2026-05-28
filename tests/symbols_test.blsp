@@ -1,0 +1,50 @@
+;; Symbol & keyword tools: `name` (existing kernel) plus the new constructors
+;; `symbol` / `keyword` (Rust, lenient — string/symbol/keyword in) and the strict
+;; named conversions `symbol->string` / `string->symbol` (Brood, in prelude).
+;; Register-only — discovered and run by `nest test` (and `cargo test`, via
+;; crates/lisp/tests/suite.rs).
+
+(require 'test)
+
+(describe "name"
+  (test "symbol → string"  (assert= (name 'foo) "foo"))
+  (test "keyword → string" (assert= (name :bar) "bar"))
+  (test "string passes through" (assert= (name "baz") "baz")))
+
+(describe "symbol (lenient constructor)"
+  (test "from string"     (assert= (symbol "hello") 'hello))
+  (test "from symbol"     (assert= (symbol 'hello) 'hello))
+  (test "from keyword"    (assert= (symbol :hello) 'hello))
+  (test "result is a symbol" (is (symbol? (symbol "x")))
+                             (refute (keyword? (symbol "x"))))
+  ;; Symbols are interned: two `symbol` calls with the same spelling are `=`.
+  (test "interning"       (assert= (symbol "abc") (symbol "abc"))))
+
+(describe "keyword (lenient constructor)"
+  (test "from string"     (assert= (keyword "hello") :hello))
+  (test "from symbol"     (assert= (keyword 'hello) :hello))
+  (test "from keyword"    (assert= (keyword :hello) :hello))
+  (test "result is a keyword" (is (keyword? (keyword "x")))
+                              (refute (symbol? (keyword "x"))))
+  (test "interning"       (assert= (keyword "abc") (keyword "abc"))))
+
+(describe "round-trips"
+  (test "name ↔ symbol"   (assert= (name (symbol "round")) "round")
+                          (assert= (symbol (name 'round)) 'round))
+  (test "name ↔ keyword"  (assert= (name (keyword "round")) "round")
+                          (assert= (keyword (name :round)) :round))
+  ;; A symbol and the keyword spelled the same share an interner id; only the
+  ;; tag distinguishes them.
+  (test "shared interner" (assert= (name 'shared) (name :shared))))
+
+(describe "symbol->string (strict)"
+  (test "symbol input"    (assert= (symbol->string 'foo) "foo"))
+  (test "rejects keyword" (assert-error (symbol->string :foo)))
+  (test "rejects string"  (assert-error (symbol->string "foo")))
+  (test "rejects int"     (assert-error (symbol->string 42))))
+
+(describe "string->symbol (strict)"
+  (test "string input"    (assert= (string->symbol "foo") 'foo))
+  (test "rejects symbol"  (assert-error (string->symbol 'foo)))
+  (test "rejects keyword" (assert-error (string->symbol :foo)))
+  (test "rejects int"     (assert-error (string->symbol 42))))

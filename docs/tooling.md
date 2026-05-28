@@ -90,6 +90,37 @@ reading. The `is` / `assert=` / `refute` / `assert-error` macros (in
 before it macro-expands — and embed the `(file line col)` into a structured
 failure record `(loc detail-lines)`. The runner prints those records.
 
+## Running a project: `nest run`
+
+`nest run [args…]` runs the project's entry point. The entry is configured by
+the optional `:main` key in `project.blsp` and defaults to module `main`, fn
+`main` — so a project scaffolded by `nest new` runs out of the box without
+declaring anything:
+
+```
+(project
+  :name    "myapp"
+  :version "0.1.0")          ; :main omitted -> (main main)
+
+;; override the fn name:
+(project ... :main '(main start))
+
+;; or just the module (fn name defaults to `main`):
+(project ... :main 'cli)
+```
+
+Extra positional args after `run` are passed to the entry fn as strings, so
+`nest run alpha beta` calls `(main "alpha" "beta")`. The entry can be no-arg
+(`(defn main () …)`) or variadic (`(defn main (& args) …)`); a fixed-arity
+mismatch surfaces as a normal Brood error.
+
+`run-project` (in `std/project.blsp`) walks from `cwd` up to `project.blsp`,
+loads the manifest (which may override `*project-main*`), puts the project's
+source paths on `*load-path*`, `require`s the entry module — pulling in
+everything it transitively requires — then `apply`s the entry fn to the CLI
+args. A missing project, an unbound entry fn, or a non-callable entry are
+reported as editor-parseable errors and exit non-zero.
+
 ## Documentation output: Markdown from `nest doc`
 
 `nest doc [module]` emits Markdown documentation to stdout: with no operand it

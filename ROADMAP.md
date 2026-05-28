@@ -71,12 +71,19 @@ The native kernel is **70 primitives** — see [`docs/primitives.md`](docs/primi
   - ✅ **Destructuring** in `let`/`fn` — sequences/tuples, refutable binds,
     multi-clause `fn`, pattern params. **[Brood]**, lowered in the compile pass
     (ADR-022).
-  - ✅ **`case`** — just `match` with literal patterns. Loop macros (`dotimes`,
-    `dolist`) still ⬜. **[Brood]**
-- ⬜ **`letrec` / local mutual recursion** (today: use top-level `def`). **[kernel]** small.
-- ⬜ **Symbol/keyword tools** — `symbol`, `keyword`, `name`, `symbol->string`,
-  `string->symbol`. **[kernel]** small, helps metaprogramming.
-- ⬜ **File I/O** — `slurp`/`spit` (read/write a whole file as a string), beyond
+  - ✅ **`case`** — just `match` with literal patterns.
+- ✅ **Loop macros** (`dotimes`, `dolist`) — lean tail-recursive Brood macros
+  for the side-effecting iteration case (`doseq` stays for the destructuring /
+  filter case). **[Brood]**
+- ✅ **`letrec` / local mutual recursion** — a new special form alongside
+  `let`/`let*`. Plain-symbol targets only; every name visible in every RHS
+  (the bindings frame pre-defines each name to `nil` so closures built during
+  the bind phase capture the scope and resolve names lazily). **[kernel]** small.
+- ✅ **Symbol/keyword tools** — `symbol` and `keyword` (lenient constructors
+  over string/symbol/keyword input — Rust); `symbol->string` and
+  `string->symbol` (strict named conversions — Brood); `name` was already in.
+  **[kernel]** is the two constructors; **[Brood]** is the strict wrappers.
+- ✅ **File I/O** — `slurp`/`spit` (read/write a whole file as a string), beyond
   `load`. **[kernel]** small. (The module work below also adds the fs-reflection
   primitives `file-exists?` / `list-dir` / `cwd`.)
 - ✅ **Modules** — Emacs-flat `provide`/`require` + `*load-path*`, `foo--private`
@@ -173,7 +180,7 @@ what unlock full work-stealing, so concurrency pulls the GC work earlier.
 2. **Strings + Math** (Tier 1) — the two libraries every real program reaches for.
 3. **Sequence library** (Tier 1, mostly Brood) — cheap, high value.
 4. ✅ **Dynamic variables** (Tier 1) — done (`defdyn`/`binding`, per-process).
-5. **Symbol/keyword tools, `case`, file I/O** (Tier 2) — quick wins.
+5. ✅ **Symbol/keyword tools, `case`, file I/O, `letrec`, `dotimes`/`dolist`** (Tier 2) — done.
 6. **Tracing GC** (Tier 3) — do before long-lived editor sessions (Stage 2).
 7. Destructuring, source locations, test helpers as they pull their weight.
 

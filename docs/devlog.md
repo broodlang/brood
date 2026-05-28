@@ -2249,3 +2249,308 @@ This still doesn't catch the `(and (int? x) …)` form, whose macro expands to
 `(let (g_n (int? x)) (if g_n (and …) g_n))` where the outer if's test is the
 *let form*, not a symbol. The deferred fix there is either pre-expansion
 handling or specifically recognising the macro-output shape.
+
+---
+
+## 2026-05-28 — Types Step 4: arity + unbound-symbol diagnostics
+
+**Goal.** Make the advisory checker say more than "argument 1 expects X" — the
+two highest-leverage additions from `docs/types.md`'s Step 4 deferred list:
+catch wrong argument *counts* and reference *unbound* names. Both share the
+scope infrastructure the guard-narrowing work already laid down; the change is
+about wiring, not new machinery.
+
+**Built.**
+- **`arity_of(heap, name) -> Option<Arity>`.** One lookup — `NativeFn.arity`
+  for primitives, derived from `Closure.{params, optionals, rest}` for Brood
+  closures: `min = params.len()`, `max = if rest.is_some() { None } else {
+  Some(min + optionals.len()) }`. Works in any heap that has the callee
+  bound (the prelude builder, a real `Interp`, a process with later
+  `def`s). Returns `None` for non-callable / not-found / a file-local
+  `defn` in a `--check` heap.
+- **Arity check at the call site.** `check_into` now resolves *both* `sig`
+  and `arity` for a known head; when `!arity.accepts(argc)` it adds an
+  "expected K, got N" warning. Phrasing handles all three shapes:
+  `exact(n)` → "expected 2"; `range(a, b)` → "expected 2 to 3";
+  `at_least(n)` → "expected 2 or more". The type check still runs on the
+  args that *are* present, so `(first)` and `(first 5)` give distinct, useful
+  diagnostics.
+- **Unbound-symbol diagnostics** (call heads). A call whose head doesn't
+  resolve to *anything* gets a `unbound symbol: foo` warning. The disjunction
+  the checker actually computes:
+  - not in `Ctx.locals` (fn/lambda/let-bound),
+  - not in `Ctx.types` or `Ctx.guards` (narrowed name),
+  - not in `Ctx.file_globals` (top-level def name from the same file),
+  - not a syntactic keyword (`if`/`do`/`when`/`cond`/`and`/`or`/`match`/`->`/
+    `try`/`catch`/`throw`/`spawn`/`defn`/`defmacro`/`defdyn`/`defmodule`/…),
+  - and no `Sig`/`Arity` was found from any source (which means the global env
+    has nothing either).
+  Sound because all five clauses must miss; even a curated-but-not-evaluated
+  stdlib name passes the curated-sig clause and so isn't flagged.
+- **Scope-aware walk.** New special-cases in `check_into` for `fn` /
+  `lambda` (parse params via a new `fn_params` helper that handles `&` /
+  `&optional` markers and `(name default)` optional-with-default shapes),
+  `def` (skip the binder, walk the value), and `defn` / `defmacro` (bind
+  params before walking the body). `fn_params` ignores marker symbols so
+  `(fn (x &optional (y 0) & ys) …)` binds `{x, y, ys}` — never `&` or
+  `&optional` themselves.
+- **`Ctx.locals: HashSet<Symbol>`** + **`Ctx.file_globals: HashSet<Symbol>`.**
+  The first records every locally-bound name (separate from `Ctx.types`,
+  because a fn-param has no known type but *is* in scope). The second
+  accumulates top-level `def`/`defn`/`defmacro`/`defdyn` names across the
+  forms in a file — needed because `--check` doesn't evaluate, so a `(defn
+  foo …)` at line 1 isn't in the heap when line 100 calls `foo`. New
+  `Ctx::bind` now records both `locals` and (optionally) `types`; a fresh
+  binding clears the guard-alias entry as before.
+- **`check_file(heap, forms: &[Value]) -> Vec<(Option<Pos>, String)>`.** Two
+  passes — first sweep `forms` collecting top-level def names into
+  `Ctx.file_globals`, then walk each form with the accumulated set. The CLI
+  (`brood --check`) now calls this instead of `check_located` per form.
+- **`is_syntactic_keyword(name)`** — a single source of truth for "name with
+  syntactic meaning but no value to bind", consulted by the unbound check so
+  we don't false-flag `cond`/`match`/`->`/`&`/`&optional`/etc.
+
+**Tests.** 11 new in `types::check::tests`:
+- `flags_too_few_arguments`, `flags_too_many_arguments`,
+  `arity_message_handles_range_and_variadic`,
+  `arity_pass_is_silent_for_correct_calls` — the four shapes (exact/range/
+  variadic/at-least), in both error and ok directions.
+- `flags_unbound_call_heads`, `unbound_is_silent_for_in_scope_names`,
+  `unbound_is_silent_for_prelude_names`, `fn_params_with_rest_and_optional_dont_leak`,
+  `defn_body_sees_its_params_in_scope` — covers the false-positive risks (fn
+  params, let bindings, prelude names, syntactic keywords, `&`/`&optional`
+  markers) and the true-positive case.
+- `file_globals_make_later_forms_see_earlier_defs` — `check_file` wiring:
+  two forms, the second calls the first; no unbound warning even though the
+  defn was never evaluated.
+- `arity_check_works_for_user_defns_in_a_real_interp` — once a defn is in the
+  heap, arity is derivable from its closure (`(inc 1 2)` flagged).
+
+Existing tests adjusted: the previous `warnings()` helper used a
+primitives-only `Heap` (no prelude), so the new unbound check would flag
+every Brood-defined stdlib name (`list`, `int?`, `zero?`, `inc`, …) — a
+false positive specific to that bare setup, not the real one. `warnings()`
+now builds a full `Interp::new()` heap, matching how the checker is
+actually invoked from `(check 'form)` and `brood --check`. One test
+(`does_not_infer_through_branches_or_lets`) had a name mismatch (looped
+over `maybe`/`shadow` defns but always called `(maybe :k)`) that the new
+diagnostic exposed; fixed to pair each defn with its matching call.
+`(first)` is now an arity diagnostic instead of "silently no warning", so
+the malformed-forms test was updated to assert the new behaviour.
+
+**End-to-end demo (`brood --check /tmp/check-demo.blsp`):**
+```
+demo.blsp:5:1: warning: +: argument 2 expects number, got string ("x")
+demo.blsp:6:1: warning: first: argument 1 expects nil | pair | vector, got int (5)
+demo.blsp:7:1: warning: first: wrong number of arguments — expected 1, got 0
+demo.blsp:8:1: warning: string-length: wrong number of arguments — expected 1, got 0
+demo.blsp:9:1: warning: rem: wrong number of arguments — expected 2, got 3
+demo.blsp:10:1: warning: map-get: wrong number of arguments — expected 2 to 3, got 1
+demo.blsp:13:1: warning: unbound symbol: frobnicate
+demo.blsp:14:1: warning: unbound symbol: typo-name
+```
+All three diagnostic kinds firing, with `(fn (x) …)` / `(let (x 5) …)` /
+`(defn ok (a b) …)` / `(add 1 2)` (a file-local defn) all correctly silent.
+
+**Verified.** `cargo test`: 78 + 56 + 3 + 44 + 1 + 6 + 1 all green. `make
+suite`: 387 in-language tests passed. `cargo clippy -p brood`: no new
+warnings (the two pre-existing ones in `dist.rs`/`process.rs` are untouched).
+
+**Docs.** `docs/types.md` Step 4 list gained the two new ✅ entries with the
+exact behaviour (the arity-message shapes; the disjunction the unbound check
+computes). The "next" line trimmed to what's actually left:
+cond-/match-/and-/or-chained guard narrowing, plus auto-running the checker
+in `brood <file>` / `nest test` / `nest check`.
+
+**What's left in Step 4.** The macro-expansion-shape gap on `cond`/`match`/
+chained-`and`/`or` guards (a leftover from the guard-narrowing work);
+auto-running the checker at the file boundaries documented in `docs/types.md`
+(only `brood --check` is wired today); and richer LSP wiring (`check_located`
+already returns spans, but the LSP server doesn't yet publish semantic
+diagnostics — `docs/lsp.md` Tier 2). Step 5 (structured types) stays
+deferred — additive, replaces the bitset rep, no concrete pressure to do
+it (ADR-011).
+
+
+---
+
+## 2026-05-28 — Tier 2 ergonomics: letrec, symbol/keyword tools, dotimes/dolist
+
+**Goal.** Close the remaining ⬜ items in `ROADMAP.md`'s Tier 2 in a single
+pass so the Stage-1 "full functional Lisp" checklist is done: a `letrec` for
+local mutual recursion, the symbol/keyword constructor family, and the
+side-effecting loop macros. The ROADMAP entries for `slurp`/`spit` were
+already done in earlier work — the file just hadn't been updated.
+
+**Built.**
+
+- **`letrec` special form** (`crates/lisp/src/eval/mod.rs`). Added to
+  `SPECIAL_NAMES` and to the dispatch in the eval loop's special-form match,
+  next to `let`/`let*`. The implementation matches Scheme's: allocate the
+  scope, push `(name, nil)` for every binding (so every name is visible
+  during RHS evaluation), then evaluate each RHS in the scope and push the
+  real value. Lookups already scan the env frame's association vector from
+  the end (`heap.rs`, `env_get`), so the second push wins — no actual
+  mutation primitive needed. Closures built in the bind phase capture the
+  scope and resolve names lazily at call time, which is what makes the
+  mutual-recursion case work. Plain-symbol targets only (pattern targets
+  reject with a clear message — letrec exists for named values).
+- **`expand_let` covers `letrec`** in the compile pass (`eval/macros.rs`).
+  Same binding shape `(name val name val …)`, so the existing helper that
+  treats odd positions as values (expand) and even positions as targets
+  (opaque) is reused. No pattern lowering branch (letrec disallows them).
+- **Types-checker awareness** (`types/check.rs`). Added `"letrec"` to
+  `skips_body` and routed it through `check_let` alongside `let`/`let*`.
+  Bindings shape is identical; the mutual-visibility nuance doesn't affect
+  type-flow because the recursive bodies the form is meant for are functions
+  whose typing doesn't get synthesised from within letrec today.
+- **Symbol/keyword constructors** (`crates/lisp/src/builtins.rs`). Two new
+  primitives:
+  - `(symbol x)` — accepts `string | symbol | keyword`, returns a
+    `Value::Sym` with the matching spelling. Lenient inverse of `name`.
+  - `(keyword x)` — same shape, returns a `Value::Keyword`. Mirrors
+    `symbol`; both share the global interner, so `(name 'x)` and `(name :x)`
+    return equal strings and the two values' inner `Symbol` ids are equal.
+
+  Sigs declare the union `string | symbol | keyword` → `symbol`/`keyword`,
+  so the checker will flag e.g. `(symbol 42)` once it lands in this form's
+  position.
+- **Strict named conversions** (`std/prelude.blsp`). `symbol->string` and
+  `string->symbol` as thin Brood wrappers — single-type input, error on
+  anything else. No new Rust: they delegate to `name` / `symbol` after a
+  predicate check.
+- **Side-effecting loop macros** (`std/prelude.blsp`). Two macros over a
+  pair of small tail-recursive helpers (the established `--`-suffix
+  convention, see `string->list--acc`):
+  - `(dotimes (i n) body…)` — runs body for `i` = 0, 1, …, n-1; returns
+    `nil`. Lean: no result list built (`doseq` routes through
+    `for`/`mapcat`, which builds and discards one).
+  - `(dolist (x xs) body…)` — list-only counterpart. Same shape.
+
+  Both expand to a top-level helper call plus `nil`, so they're tail-safe
+  via the evaluator's `'tail:` loop (verified: `(dotimes (i 100000) …)`
+  completes without overflowing). `doseq` stays in place for the
+  destructuring / `:when`-filter case.
+
+**Tests.** 41 new in-language tests.
+
+- `tests/suite_test.blsp`: a new `letrec` describe block (self-recursion,
+  mutual recursion via `even?`/`odd?`, and a 10,000-deep tail-recursive
+  local to prove TCO survives), and a `:serial` `loop macros` block
+  (dotimes builds 0..4 into a global accumulator; n=0 is a no-op; returns
+  nil; dolist walks each item; empty is a no-op; returns nil). `:serial`
+  for the loops because they write a shared global counter — `:serial`
+  matches the existing `macros` describe block's pattern.
+- `tests/symbols_test.blsp` (new): `name` round-trips, `symbol` and
+  `keyword` lenient over each of the three input shapes, interning
+  (`(= (symbol "abc") (symbol "abc"))`), the shared-interner property
+  (`(= (name 'shared) (name :shared))`), and the strict converters
+  rejecting the wrong input shapes via `assert-error`.
+
+**Verified.**
+- `cargo build` clean (warning-free on the touched files).
+- `cargo test`: every suite green across the workspace (Rust lib + the
+  integration suites under `crates/lisp/tests/`, the LSP crate's 44
+  tests, the 6-test distribution suite, and the lone doc-test).
+- `nest test`: **420 in-language tests, 420 passed** (was 379 before
+  this work; +41 new).
+- `cargo clippy --all-targets`: clean — the two pre-existing
+  `type_complexity` warnings on `dist.rs`/`process.rs` are unchanged.
+
+**Docs.**
+- `docs/primitives.md`: count bumped 71 → 73; two new rows under
+  **Symbols** (`symbol`, `keyword`) next to the existing `name`.
+- `docs/language.md`: `letrec` added to the special-form table, plus a
+  short paragraph under "Recursion is the loop" with `dotimes`/`dolist`
+  examples and a `letrec` example explaining the nil-pre-bind nuance.
+- `docs/spec.md`: `letrec` added to the §7 special-form table and to the
+  "true core special forms" sentence.
+- `ROADMAP.md`: Tier-2 `letrec`, symbol/keyword tools, and `dotimes`/
+  `dolist` ticked off; the suggested-order line for Tier 2 marked ✅.
+- `docs/roadmap.md`: `letrec` added to the M1 special-forms bullet; a
+  new "Tier-2 ergonomics" ✅ bullet summarising the cluster.
+
+**What's done in Stage 1 after this.** Every Tier-1 box was already ticked;
+Tier 2's `letrec`, the symbol/keyword tools, file I/O, the loop macros,
+modules, the project model, and pattern matching are all ✅. Tier 3 keeps
+two ⬜ items: **source locations in errors** (reader drops spans today),
+and the wider tracing-GC story (the mark-sweep landed in M1; what remains
+is editor-session-scale stress). Everything else past Tier 2 is the M2+
+editor work.
+
+---
+
+## 2026-05-28 — `nest run` and a two-module `nest new` skeleton
+
+**Goal.** Make `nest run` work on a folder with `project.blsp` — configurable
+which module + which function — and make `nest new` scaffold a multi-file
+project so newcomers see how modules wire together from the start.
+
+**Manifest.** `project.blsp` grows an optional `:main` key that names the entry
+point. Two shapes:
+- `:main 'foo` — module `foo`, fn defaults to `main`
+- `:main '(foo bar)` — module `foo`, fn `bar`
+
+Omitting `:main` keeps the default `(main main)`, so a bare manifest just works.
+Anything else (a string, a 1-list, a 3-list, a non-symbol component) errors at
+manifest load. Parsing lives in `project--parse-main` and is exhaustively
+covered by `tests/project_test.blsp`.
+
+**`nest run [args…]`.** A new `"run"` arm in `crates/nest/src/main.rs` collects
+positional args after the subcommand, escapes them, and evaluates
+`(require 'project) (load-config) (run-project (list "a" "b" …))`. All the
+policy is Brood: `run-project` walks from `cwd` to `project.blsp`, calls
+`project-setup` (which may override `*project-main*` via the manifest),
+`require`s the entry module (pulling in everything it transitively requires),
+checks the entry fn is bound and callable, then `apply`s it to the args. Three
+clean error paths: no project root, unbound entry fn, non-callable entry —
+each surfaces as an editor-parseable error and a non-zero exit.
+
+A nuance worth recording: unlike `nest test`, `nest run` does **not** load all
+of `src/` up front. It just `require`s the entry module, which gives a real
+proof that the project's `(require 'hello)` wiring works. If a project wants
+all sources eagerly loaded, that's `project-load-sources` and they can call it
+from `main`.
+
+**`nest new` ships two modules.** Templates switched to `defmodule` (the
+post-ADR-029 canonical header — leading-string-docstring + trailing
+`(provide …)` is gone) and the scaffold is now five files:
+- `project.blsp` (no `:main`, relies on the default)
+- `src/main.blsp` — `(defmodule main …)`, `(require 'hello)`, `(defn main ()
+  (println (greeting)))`
+- `src/hello.blsp` — `(defmodule hello …)`, `(defn greeting () "hello <name>")`
+- `tests/main_test.blsp` — asserts `main` is callable
+- `tests/hello_test.blsp` — asserts `(greeting)` returns the expected string
+
+The two-file split is deliberately about *showing* the flat module system
+(ADR-019): `hello` registers `greeting` in the shared global table, and `main`
+just calls it after a `require`. A newcomer immediately has a working example
+of "edit one file, the other still works."
+
+**Tests.** 1 new in-language describe (`project: :main parsing`) covering the
+symbol form, the 2-list form, the four reject paths, and the
+`*project-main*` default. Hand-tested end-to-end: `nest new demo`, then `cd
+demo && nest test` (2/2 passes) and `nest run` (prints `hello demo`); plus a
+manual `:main '(main run)` override calling `(run "alpha" "beta")` to verify
+args passthrough; plus the two error paths (no project, missing entry).
+
+**Verified.**
+- `cargo build` clean.
+- `cargo test`: every suite green — Rust lib (89), integration (56 + 3 + 1),
+  the brood-suite-passes runner (which now includes `tests/project_test.blsp`),
+  the LSP crate (44), the distribution suite (6), and the doc-test.
+- `nest new demo && cd demo && nest test && nest run` works out of the box.
+
+**Docs.**
+- `docs/tooling.md`: new "Running a project: `nest run`" section between the
+  test-output and `nest doc` sections.
+- `docs/roadmap.md`: the "Project model & test tool" bullet now mentions
+  `nest run` and the two-module `nest new` skeleton.
+
+**Why no ADR.** This is a small extension of ADR-020 (project model) and
+ADR-028 (the brood/nest split) — the entry-point convention falls out of
+"convention over configuration" naturally, and the manifest key is the only
+new surface. The devlog plus the tooling.md section is enough; if `:main`
+grows shapes later (string `"mod:fn"`, namespaced symbols, an `:args` default),
+that's the point to revisit.
+

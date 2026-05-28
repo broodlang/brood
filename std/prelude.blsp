@@ -831,10 +831,47 @@ applies to each input first."
   "A transducer that maps `f` over each input (expected to return a list or vector) and feeds the *items* of each result into the next stage — fused `mapcat`, no intermediate per-element lists."
   (fn (rf) (fn (acc x) (fold rf acc (f x)))))
 
-;; Driver.
+(defn xtake-while (pred)
+  "A transducer that lets each input through as long as `(pred x)` holds; the first input that fails the predicate ends the reduction (the failing item is *not* fed downstream). Stateless — predicate-driven via the `reduced` sentinel."
+  (fn (rf) (fn (acc x) (if (pred x) (rf acc x) (reduced acc)))))
+
+;; ---- early-termination sentinel ---------------------------------------------
+;; A `reduced`-wrapped accumulator signals "stop the reduction now and unwrap
+;; me." `xtake-while` returns one when its predicate fails; `transduce` (below)
+;; sees it and halts. Count-based `xtake n` / `xdrop n` would need *internal*
+;; mutable state per transducer, which Brood doesn't have (ADR-026), and are
+;; deferred until either an accumulator-wrapping protocol or a mutable-cell
+;; primitive lands.
+
+(defn reduced (x)
+  "Wrap `x` as a final, short-circuit reduced value. `transduce` sees this and stops walking the input, unwrapping `x` as the result."
+  [:%reduced x])
+
+(defn reduced? (x)
+  "Is `x` a value wrapped by `reduced`?"
+  ;; Hand-rolled nested-if — `reduced?` runs per-step on the transduce hot path,
+  ;; so we skip `vector?`'s user-fn frame and `and`'s gensym/let dance.
+  (if (%eq (type-of x) :vector)
+    (if (%eq (vector-length x) 2)
+      (%eq (vector-ref x 0) :%reduced)
+      false)
+    false))
+
+(defn deref-reduced (x)
+  "Unwrap a `reduced` value; otherwise return `x` unchanged."
+  (if (reduced? x) (vector-ref x 1) x))
+
+;; Driver — short-circuits on a `reduced` accumulator. The per-step `reduced?`
+;; check is cheap for typical accumulators (it fails `vector?` immediately).
+(defn transduce--step (rf acc coll)
+  (cond
+    (reduced? acc) (deref-reduced acc)
+    (empty? coll)  acc
+    else           (transduce--step rf (rf acc (first coll)) (rest coll))))
+
 (defn transduce (xform rf init coll)
-  "Reduce `coll` with `(xform rf)` from `init`. `xform` and `rf` fuse into a single pass; the equivalent eager pipeline (with intermediate collections) is `(reduce rf init (... xform-applied-to ... coll))`."
-  (fold (xform rf) init coll))
+  "Reduce `coll` with `(xform rf)` from `init`. `xform` and `rf` fuse into a single pass; the equivalent eager pipeline (with intermediate collections) is `(reduce rf init (... xform-applied-to ... coll))`. If a step returns a `reduced` value (e.g. via `xtake-while`) the walk stops and that value is unwrapped as the result."
+  (transduce--step (xform rf) init coll))
 
 ;; ---- iteration combinators --------------------------------------------------
 ;; Hide the hand-rolled counter/accumulator recursion behind names that read as
@@ -886,6 +923,38 @@ applies to each input first."
 (defmacro doseq (bind & body)
   "Run `body` for its side effects over each item of the binding (like `for`, but discards the result and returns `nil`)."
   `(do (for ~bind (do ~@body)) nil))
+
+;; (dotimes (i n) body...) — run `body` for `i` = 0, 1, …, n-1; returns nil. The
+;; lean iteration primitive: a plain tail-recursive walker, no result list built
+;; (unlike `doseq`, which routes through `for`/`mapcat`). For effects only.
+(defn dotimes--loop (n f i)
+  (when (< i n) (f i) (dotimes--loop n f (+ i 1))))
+(defmacro dotimes (bind & body)
+  "Run `body` with the bound name set to 0, 1, …, n-1 for side effect; returns `nil`. `bind` is `(var n)`."
+  `(do (dotimes--loop ~(second bind) (fn (~(first bind)) ~@body) 0) nil))
+
+;; (dolist (x xs) body...) — run `body` for each element of `xs`; returns nil.
+;; The list-only counterpart to `dotimes`: lean and tail-recursive, no discard
+;; list built. Use `doseq` when you need destructuring or `:when` filters; reach
+;; for `dolist` for the common "do this for each item" loop.
+(defn dolist--loop (xs f)
+  (when (not (nil? xs)) (f (first xs)) (dolist--loop (rest xs) f)))
+(defmacro dolist (bind & body)
+  "Run `body` with the bound name set to each element of the collection for side effect; returns `nil`. `bind` is `(var coll)`."
+  `(do (dolist--loop ~(second bind) (fn (~(first bind)) ~@body)) nil))
+
+;; ---- symbol / keyword conversions -------------------------------------------
+;; `symbol` and `keyword` (Rust) are lenient — they take string/symbol/keyword.
+;; These are the strict named conversions: each errors on the wrong input shape,
+;; matching the Scheme/Clojure tradition. Thin Brood wrappers, no new kernel.
+
+(defn symbol->string (s)
+  "The spelling of symbol `s` as a string. Errors if `s` isn't a symbol."
+  (if (symbol? s) (name s) (error "symbol->string: expected a symbol, got " (type-of s))))
+
+(defn string->symbol (s)
+  "The symbol whose spelling is the string `s`. Errors if `s` isn't a string."
+  (if (string? s) (symbol s) (error "string->symbol: expected a string, got " (type-of s))))
 
 ;; ---- strings ----------------------------------------------------------------
 ;; The string library, written over the kernel primitives `substring` /

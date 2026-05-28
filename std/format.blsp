@@ -1,0 +1,419 @@
+(defmodule format
+  "The in-Brood code formatter behind `nest format` (ADR-020/028 extension).
+Walks the lossless CST exposed by the `parse-source` builtin (see
+`crates/lisp/src/syntax/cst.rs`) and re-emits each file with normalised
+indentation and whitespace, preserving comments and the blank lines the author
+left between top-level forms. Rust supplies one primitive (`parse-source`);
+everything else — the layout policy, file discovery, in-place vs check — lives
+here.
+
+Layout in one paragraph: every form is rendered single-line if it fits within
+the width budget; otherwise it breaks across lines with each body argument on
+its own line at +2 indent. A handful of special forms (`defn`, `let`, `if`,
+`cond`, `defmodule`, …) keep a fixed prefix of *header* arguments on the first
+line — e.g. `defn` keeps the name + params there so the body indents under
+them. Comments inside a list force the multi-line shape; they're re-emitted on
+their own lines at the surrounding indent.
+
+Idempotency is a contract: `(= (format-source (format-source s)) (format-source s))`
+for every well-formed input. Hand-checked across the brood repo's std/ and tests/.")
+
+;; ---- knobs ------------------------------------------------------------------
+(def *format-width* 100)   ; column budget for the single-line attempt
+
+;; ---- CST node accessors -----------------------------------------------------
+;; Every node is a vector [kind payload]. For leaves payload is the raw source
+;; text (so we can re-emit it byte-for-byte). For reader-macro wrappers payload
+;; is the single wrapped child. For containers (:root :list :vector :map)
+;; payload is a vector of children (including trivia, so blank-line + comment
+;; intent is recoverable). See the `parse-source` doc in builtins.rs.
+
+(defn node-kind     (n) (vector-ref n 0))
+(defn node-text     (n) (vector-ref n 1))   ; leaf
+(defn node-form     (n) (vector-ref n 1))   ; wrapper (quote/quasi/unquote/splice)
+(defn node-children (n) (vector-ref n 1))   ; container (a vector)
+
+(defn whitespace? (n) (= (node-kind n) :whitespace))
+(defn comment?    (n) (= (node-kind n) :comment))
+(defn trivia?     (n) (or (whitespace? n) (comment? n)))
+
+(defn container? (n)
+  (let (k (node-kind n))
+    (or (= k :list) (= k :vector) (= k :map) (= k :root))))
+
+(defn wrapper? (n)
+  (let (k (node-kind n))
+    (or (= k :quote) (= k :quasi) (= k :unquote) (= k :splice))))
+
+;; ---- small utilities --------------------------------------------------------
+(defn vec->list (v)
+  "The vector `v` as a list, preserving order."
+  (vec->list--acc v (dec (vector-length v)) nil))
+(defn vec->list--acc (v i acc)
+  (if (< i 0) acc
+    (vec->list--acc v (dec i) (cons (vector-ref v i) acc))))
+
+(defn count-newlines (s)
+  "How many `\\n` characters appear in string `s`."
+  (count-newlines--at s 0 (string-length s) 0))
+(defn count-newlines--at (s i n acc)
+  (if (= i n) acc
+    (count-newlines--at s (inc i) n
+      (if (= (substring s i (inc i)) "\n") (inc acc) acc))))
+
+(defn string-repeat (s n)
+  "The string `s` concatenated with itself `n` times (n ≥ 0)."
+  (string-repeat--acc s n ""))
+(defn string-repeat--acc (s n acc)
+  (if (<= n 0) acc (string-repeat--acc s (dec n) (str acc s))))
+
+(defn indent-of (n) (string-repeat " " n))
+
+;; The whitespace inside a comment node is `";; foo\n"` — the trailing newline
+;; is part of the node. We strip it before emitting so glue logic owns the
+;; spacing between blocks.
+(defn comment--strip-trailing-nl (text)
+  (if (ends-with? text "\n")
+    (substring text 0 (dec (string-length text)))
+    text))
+
+;; ---- header table -----------------------------------------------------------
+;; The number of args that ride on the same line as the head when a list breaks.
+;; Forms not listed get 0 → in multi-line mode every arg goes on its own line.
+;; The values are conservative: anything past the header is a *body* and indents
+;; uniformly at +2, which is the only style that's both simple and obviously
+;; idempotent. (We're not in the business of aligning args under the head; that
+;; reflows on every rename.)
+(def *format-headers*
+  {;; binding forms — header is name (+ params for fn-likes)
+   'defn       2          ; name params
+   'defmacro   2          ; name params
+   'def        1          ; name (value goes on the next line if it breaks)
+   'defdyn     1          ; name (value goes on the next line if it breaks)
+   'defmodule  1          ; name (docstring goes on the next line if it breaks)
+   'fn         1          ; params
+   'let        1          ; bindings list
+   'letrec     1          ; bindings list
+   'binding    1          ; bindings list
+   ;; predicate-and-body
+   'if         1          ; predicate (then/else each go on their own lines)
+   'when       1
+   'unless     1
+   ;; scrutinee-and-arms
+   'case       1          ; expr
+   'match      1          ; expr
+   ;; bare body
+   'cond       0
+   'do         0
+   'try        0
+   ;; loop forms
+   'dotimes    1          ; binding
+   'dolist     1          ; binding
+   'loop       1          ; bindings
+   ;; tests
+   'describe   1          ; name
+   'test       1})        ; name
+
+(defn head-header-count (head-node)
+  "How many args after this head stay on the first line of a broken list. -1 means
+not a known body form (defaults to call-style — every arg breaks)."
+  (if (= (node-kind head-node) :symbol)
+    (get *format-headers* (symbol (node-text head-node)) -1)
+    -1))
+
+;; ---- the inlineability check ------------------------------------------------
+;; Single-line emit: returns the string, or nil if the node cannot legally
+;; appear on one line (it contains a comment, or a string with a literal
+;; newline). Recursive — a list inlines only if every child does.
+(defn single-line (n)
+  (let (k (node-kind n))
+    (cond
+      (= k :whitespace) " "          ; collapses to one space inside a form
+      (= k :comment)    nil          ; comments always break
+      (= k :str)        (single-line--str (node-text n))
+      (or (= k :symbol) (= k :keyword) (= k :int) (= k :float)
+          (= k :bool) (= k :nil) (= k :error))
+        (node-text n)
+      (= k :quote)      (single-line--wrap "'"  (node-form n))
+      (= k :quasi)      (single-line--wrap "`"  (node-form n))
+      (= k :unquote)    (single-line--wrap "~"  (node-form n))
+      (= k :splice)     (single-line--wrap "~@" (node-form n))
+      (= k :list)       (single-line--seq (node-children n) "(" ")")
+      (= k :vector)     (single-line--seq (node-children n) "[" "]")
+      (= k :map)        (single-line--seq (node-children n) "{" "}")
+      else              nil)))
+
+(defn single-line--str (text)
+  ;; A literal multi-line string can't be re-emitted on one line.
+  (if (string-contains? text "\n") nil text))
+
+(defn single-line--wrap (prefix child)
+  (let (s (single-line child))
+    (if (nil? s) nil (str prefix s))))
+
+(defn single-line--seq (kids open close)
+  ;; Render the structural children space-separated. Any comment, or any
+  ;; un-inlineable child, sinks the attempt.
+  (let (forms (filter (fn (c) (not (trivia? c))) (vec->list kids)))
+    (cond
+      (any-comment? kids) nil
+      (nil? forms)        (str open close)
+      else                (single-line--seq-build forms open close))))
+
+(defn any-comment? (kids)
+  ;; Direct-child comment? (Sub-list comments are caught recursively when their
+  ;; parent calls single-line on them.)
+  (any-comment--at kids 0 (vector-length kids)))
+(defn any-comment--at (kids i n)
+  (cond
+    (= i n)                        false
+    (comment? (vector-ref kids i)) true
+    else                           (any-comment--at kids (inc i) n)))
+
+(defn single-line--seq-build (forms open close)
+  (let (parts (map single-line forms))
+    (if (any-nil? parts) nil
+      (str open (join " " parts) close))))
+
+(defn any-nil? (xs)
+  (cond
+    (nil? xs)        false
+    (nil? (first xs)) true
+    else             (any-nil? (rest xs))))
+
+;; ---- multi-line emit --------------------------------------------------------
+;; `render n indent` produces the canonical text for node n, possibly multi-line.
+;; The result never ends with a newline (callers own the gluing).
+(defn render (n indent)
+  (let (k (node-kind n))
+    (cond
+      (or (= k :symbol) (= k :keyword) (= k :int) (= k :float)
+          (= k :bool) (= k :nil) (= k :error) (= k :str))
+        (node-text n)
+      (= k :quote)   (render--wrap "'"  (node-form n) indent)
+      (= k :quasi)   (render--wrap "`"  (node-form n) indent)
+      (= k :unquote) (render--wrap "~"  (node-form n) indent)
+      (= k :splice)  (render--wrap "~@" (node-form n) indent)
+      (= k :list)    (render--seq n indent "(" ")")
+      (= k :vector)  (render--seq n indent "[" "]")
+      (= k :map)     (render--seq n indent "{" "}")
+      else           (node-text n))))
+
+(defn render--wrap (prefix child indent)
+  ;; Reader-macro wrappers don't introduce their own break: render the child at
+  ;; the current column. (A long `'(foo bar)` will break inside the list, which
+  ;; is what we want.)
+  (str prefix (render child (+ indent (string-length prefix)))))
+
+(defn render--seq (n indent open close)
+  ;; Try single-line; if it fits the remaining budget at this indent, take it.
+  ;; Else break across lines.
+  (let (one (single-line n))
+    (if (and one (<= (+ indent (string-length one)) *format-width*))
+      one
+      (render--break (node-children n) indent open close))))
+
+(defn render--break (kids indent open close)
+  ;; Multi-line list emit. The output is:
+  ;;   open + head-line + body-lines + close
+  ;; where head-line is "head [header-args]" on the first line, and body-lines
+  ;; are each remaining structural arg on its own line, indented +2 from the
+  ;; opening bracket. Comments between args are emitted on their own lines at
+  ;; the same body indent. Whitespace nodes only contribute "blank line wanted"
+  ;; intent (capped at 1) between body items.
+  (let (forms     (filter (fn (c) (not (trivia? c))) (vec->list kids))
+        body-ind  (+ indent 2))
+    (cond
+      (nil? forms)
+        (str open close)
+      else
+        (let (head      (first forms)
+              args      (rest forms)
+              hdr-count (head-header-count head)
+              hdr-keep  (if (< hdr-count 0) 0 (min hdr-count (length args))))
+          (let (header-line (render--head-line head (take hdr-keep args) (inc indent))
+                body-args   (drop hdr-keep args)
+                ;; Re-thread the *original* children so comments between args
+                ;; can be slotted in. We need the index into `kids` where the
+                ;; first body-arg starts.
+                first-body-idx (kids--index-of-form kids (inc hdr-keep)))
+            (str open
+                 header-line
+                 (render--body kids first-body-idx body-ind)
+                 close))))))
+
+;; Index in `kids` of the (1-based) Nth structural form (0 = head).
+(defn kids--index-of-form (kids form-i)
+  (kids--index-of-form--at kids form-i 0 0 (vector-length kids)))
+(defn kids--index-of-form--at (kids target seen i n)
+  (cond
+    (= i n)                        n
+    (= seen target)                i
+    (trivia? (vector-ref kids i))  (kids--index-of-form--at kids target seen (inc i) n)
+    else                           (kids--index-of-form--at kids target (inc seen) (inc i) n)))
+
+(defn render--head-line (head header-args indent-after-open)
+  ;; "head a b c" — the head and any header args, space-separated. Uses
+  ;; single-line for the args. For very long header args (e.g. an oversize
+  ;; param list), each falls back to its own multi-line render — keeping it on
+  ;; the same line might exceed width, but the alternative is fiddly and the
+  ;; defn signatures we see in practice fit.
+  (render--head-line--build (cons head header-args) indent-after-open ""))
+(defn render--head-line--build (items indent acc)
+  (cond
+    (nil? items) acc
+    (= acc "")   (render--head-line--build (rest items) indent (render (first items) indent))
+    else
+      (let (part (render (first items) (+ indent (string-length acc) 1)))
+        (render--head-line--build (rest items) indent (str acc " " part)))))
+
+(defn render--body (kids start-idx body-ind)
+  ;; Walk kids from start-idx, emitting each structural form and each comment
+  ;; on its own line at body-ind. `nl` mirrors the root walker: it tracks the
+  ;; newline count between the last emitted block and the cursor, so a blank
+  ;; line in the source survives between two body items.
+  (render--body--at kids start-idx (vector-length kids) body-ind 1 ""))
+
+(defn render--body--at (kids i n body-ind nl acc)
+  (if (= i n) acc
+    (let (c (vector-ref kids i))
+      (cond
+        (whitespace? c)
+          (render--body--at kids (inc i) n body-ind
+            (+ nl (count-newlines (node-text c)))
+            acc)
+        (comment? c)
+          (render--body--at kids (inc i) n body-ind 1
+            (str acc
+                 (if (>= nl 2) "\n\n" "\n")
+                 (indent-of body-ind)
+                 (comment--strip-trailing-nl (node-text c))))
+        else
+          (render--body--at kids (inc i) n body-ind 0
+            (str acc
+                 (if (>= nl 2) "\n\n" "\n")
+                 (indent-of body-ind)
+                 (render c body-ind)))))))
+
+;; ---- top-level walk ---------------------------------------------------------
+;; `format-source src` parses src, renders the root, and ensures exactly one
+;; trailing newline. Top-level forms are joined by a single `\n`, with a blank
+;; line preserved between any pair the author separated with one.
+(defn format-source (src)
+  "Format `src` as a Brood source string. Idempotent."
+  (let (root (parse-source src))
+    (format-source--root (node-children root))))
+
+(defn format-source--root (kids)
+  (let (out (format-source--root--walk kids 0 (vector-length kids) false ""))
+    (cond
+      (= out "")           ""
+      (ends-with? out "\n") out
+      else                 (str out "\n"))))
+
+;; The walker threads `nl-since-last`: the newline count between the last
+;; emitted block and the cursor. Whitespace adds its newline count; a comment
+;; resets to 1 (its own trailing `\n` is the start of the gap to the next
+;; block); a form resets to 0. Two-or-more newlines between blocks → blank line.
+(defn format-source--root--walk (kids i n nl acc)
+  (if (= i n) acc
+    (let (c (vector-ref kids i))
+      (cond
+        (whitespace? c)
+          (format-source--root--walk kids (inc i) n
+            (+ nl (count-newlines (node-text c)))
+            acc)
+        (comment? c)
+          (format-source--root--walk kids (inc i) n 1
+            (format-source--glue acc nl
+              (comment--strip-trailing-nl (node-text c))))
+        else
+          (format-source--root--walk kids (inc i) n 0
+            (format-source--glue acc nl (render c 0)))))))
+
+(defn format-source--glue (acc nl block)
+  (cond
+    (= acc "")    block
+    (>= nl 2)     (str acc "\n\n" block)
+    else          (str acc "\n" block)))
+
+;; ---- driving the project ----------------------------------------------------
+;; `nest format` walks every .blsp in the project's source + test paths and
+;; rewrites it. `nest format --check` does the same walk but emits a diff
+;; summary and raises if anything was off. We reuse project.blsp's discovery
+;; (`project--collect-sources`, `project--collect-tests`) so the set of files
+;; matches what `nest test` sees.
+
+(defn format--every-blsp (root)
+  ;; The union of source and test files, deduplicated by path. (A project that
+  ;; aliased src as tests would otherwise format the same file twice.)
+  (require 'project)
+  (let (srcs  (fold (fn (acc d) (append acc (project--collect-sources d)))
+                    nil
+                    (project--abs-paths root *project-source-paths*))
+        tests (fold (fn (acc d) (append acc (project--collect-tests d)))
+                    nil
+                    (project--abs-paths root *project-test-paths*)))
+    (format--dedup (append srcs tests))))
+
+(defn format--dedup (xs)
+  (reverse (fold (fn (acc x) (if (member? x acc) acc (cons x acc))) nil xs)))
+
+(defn format--require-root ()
+  (require 'project)
+  (let (root (project--find-root (cwd)))
+    (when (nil? root)
+      (error "format: not in a Brood project (no project.blsp found from " (cwd) ")"))
+    (project-setup root)
+    root))
+
+(defn format-file (path)
+  "Format the file at `path` in place. Returns :unchanged or :rewrote."
+  (let (src (slurp path)
+        out (format-source src))
+    (if (= src out)
+      :unchanged
+      (do (spit path out) :rewrote))))
+
+(defn format-project ()
+  "Format every .blsp under the current project (sources + tests). Prints one line
+per rewritten file and a summary; returns the number of files rewritten."
+  (let (root  (format--require-root)
+        files (format--every-blsp root))
+    (let (rewrote (format--apply files 0))
+      (println (str "format: " (length files) " file"
+                    (if (= (length files) 1) "" "s")
+                    " considered, " rewrote " rewritten."))
+      rewrote)))
+
+(defn format--apply (files rewrote)
+  (if (nil? files) rewrote
+    (let (path (first files)
+          r    (format-file path))
+      (when (= r :rewrote) (println (str "  rewrote " path)))
+      (format--apply (rest files) (if (= r :rewrote) (inc rewrote) rewrote)))))
+
+(defn format-project-check ()
+  "Check (don't write): print each file whose contents differ from
+`(format-source …)` and raise if any do. Used by `nest format --check`."
+  (let (root  (format--require-root)
+        files (format--every-blsp root))
+    (let (changed (format--check files nil))
+      (cond
+        (nil? changed)
+          (do (println (str "format: " (length files) " file"
+                            (if (= (length files) 1) "" "s")
+                            " checked, all clean."))
+              0)
+        else
+          (do (fold (fn (_ p) (println (str "  needs formatting: " p))) nil changed)
+              (error "format: " (length changed) " file"
+                     (if (= (length changed) 1) "" "s")
+                     " need formatting."))))))
+
+(defn format--check (files acc)
+  (if (nil? files) (reverse acc)
+    (let (path (first files)
+          src  (slurp path))
+      (format--check (rest files)
+        (if (= src (format-source src)) acc (cons path acc))))))

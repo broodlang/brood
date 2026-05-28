@@ -22,6 +22,7 @@ the `nest new` scaffolder."
 (def *project-version*      nil)
 (def *project-source-paths* (list "src"))     ; conventional default
 (def *project-test-paths*   (list "tests"))   ; conventional default
+(def *project-main*         (list 'main 'main))  ; (module fn) — `nest run` entry
 
 ;; (plist-get '(:a 1 :b 2) :b) => 2 — the value after key k in a flat kv list, or nil.
 (defn plist-get (kvs k)
@@ -30,16 +31,32 @@ the `nest new` scaffolder."
     (= (first kvs) k) (second kvs)
     else              (plist-get (rest (rest kvs)) k)))
 
+;; Normalise the manifest's `:main` value into a `(module fn)` pair of symbols.
+;;   'foo           => '(foo main)        ; module foo, default fn name `main`
+;;   '(foo bar)     => '(foo bar)         ; module foo, fn bar
+;;   anything else  => error
+(defn project--parse-main (v)
+  (cond
+    (symbol? v)
+      (list v 'main)
+    (and (pair? v) (symbol? (first v)) (pair? (rest v)) (symbol? (second v))
+         (nil? (rest (rest v))))
+      (list (first v) (second v))
+    else
+      (error "project: :main must be a module symbol or '(module fn), got " v)))
+
 ;; The (project ...) manifest form: records identity, and overrides the
-;; conventional source/test paths when given. Missing keys keep their defaults.
-;; Called when a project.blsp is loaded.
+;; conventional source/test paths and the `nest run` entry when given. Missing
+;; keys keep their defaults. Called when a project.blsp is loaded.
 (defn project (& opts)
   (def *project-name*    (plist-get opts :name))
   (def *project-version* (plist-get opts :version))
   (let (src (plist-get opts :source-paths)
-        tst (plist-get opts :test-paths))
+        tst (plist-get opts :test-paths)
+        m   (plist-get opts :main))
     (when src (def *project-source-paths* src))
-    (when tst (def *project-test-paths*   tst)))
+    (when tst (def *project-test-paths*   tst))
+    (when m   (def *project-main*         (project--parse-main m))))
   *project-name*)
 
 ;; --- finding the project + discovering tests ---------------------------------
@@ -114,6 +131,27 @@ the `nest new` scaffolder."
       (fold (fn (_ f) (load f)) nil files)   ; load each: registers its tests
       (apply run-tests opts))))
 
+;; (run-project args) — find the project from the cwd, set it up (which may
+;; override *project-main* via the manifest), `require` the entry module, and
+;; call its entry fn with `args` (a list of strings from the CLI). The default
+;; entry is `(main main)` — module `main`, fn `main` — so most projects ship a
+;; bare manifest and a `(defn main () ...)` in src/main.blsp. Errors if there's
+;; no project here, or if the entry fn isn't defined or callable.
+(defn run-project (args)
+  (let (root (project--find-root (cwd)))
+    (when (nil? root)
+      (error "run-project: not in a Brood project (no project.blsp found from " (cwd) ")"))
+    (project-setup root)
+    (let (modname (first  *project-main*)
+          fname   (second *project-main*))
+      (require modname)
+      (unless (bound? fname)
+        (error "run-project: entry fn '" fname "' is not defined (module '" modname "')"))
+      (let (f (eval fname))
+        (unless (fn? f)
+          (error "run-project: entry '" fname "' is not callable (" (type-of f) ")"))
+        (apply f args)))))
+
 ;; --- user config (~/.config/brood/config.blsp) -------------------------------
 ;; A user-level Brood file of tooling preferences — the sibling of project.blsp.
 ;; It's auto-created with documented defaults on first tool use, then loaded by
@@ -174,29 +212,44 @@ the `nest new` scaffolder."
        "  :version \"0.1.0\")\n"))
 
 (defn project--main-template (nm)
-  (str ";; " nm " — main module. Loaded automatically by `nest test`.\n"
-       "\"The " nm " project's main module.\"   ; module docstring (`nest doc`)\n"
+  (str "(defmodule main \"The " nm " project's entry-point module — wired up as\n"
+       "the `nest run` entry by default (module `main`, fn `main`).\")\n"
+       "\n"
+       "(require 'hello)\n"
+       "\n"
+       "(defn main ()\n"
+       "  \"Entry point: print the project's greeting.\"\n"
+       "  (println (greeting)))\n"))
+
+(defn project--hello-template (nm)
+  (str "(defmodule hello \"A second module in the " nm " project — main requires it\n"
+       "and calls `greeting`. Showcases the flat module system (ADR-019): `hello`\n"
+       "registers `greeting` in the shared global table, so `main` just calls it.\")\n"
        "\n"
        "(defn greeting ()\n"
        "  \"Return the project's greeting string.\"\n"
-       "  \"hello " nm "\")\n"
-       "\n"
-       "(defn main ()\n"
-       "  \"Entry point: print the greeting.\"\n"
-       "  (println (greeting)))\n"
-       "\n"
-       "(provide 'main)\n"))
+       "  \"hello " nm "\")\n"))
 
-(defn project--test-template (nm)
-  (str ";; Tests for " nm ". `nest test` loads src/ first, so use defs directly.\n"
+(defn project--main-test-template (nm)
+  (str ";; Tests for the main module. `nest test` loads src/ first, so we can call\n"
+       ";; main directly — and since `hello` is on the load-path, its defs are too.\n"
        "(require 'test)\n"
        "\n"
-       "(describe \"" nm "\"\n"
+       "(describe \"main\"\n"
+       "  (test \"main is callable\" (is (fn? main))))\n"))
+
+(defn project--hello-test-template (nm)
+  (str ";; Tests for the hello module. `nest test` loads src/ first, so `greeting`\n"
+       ";; is available without an explicit (require 'hello) here.\n"
+       "(require 'test)\n"
+       "\n"
+       "(describe \"hello\"\n"
        "  (test \"greeting\" (assert= (greeting) \"hello " nm "\")))\n"))
 
-;; (new-project "foobar") — scaffold ./foobar with a runnable skeleton:
-;; project.blsp + src/main.blsp (a documented `main` module) + tests/main_test.blsp,
-;; so `cd foobar && nest test` passes immediately. Errors on a bad name or an
+;; (new-project "foobar") — scaffold ./foobar with a runnable two-module
+;; skeleton: project.blsp + src/main.blsp + src/hello.blsp (where main `require`s
+;; hello and calls into it) + a paired test file for each, so `cd foobar && nest
+;; test` *and* `nest run` both pass immediately. Errors on a bad name or an
 ;; already-existing folder.
 (defn new-project (nm)
   (unless (project--valid-name? nm)
@@ -207,18 +260,22 @@ the `nest new` scaffolder."
         tests-dir (path-join nm "tests"))
     (make-dir src-dir)
     (make-dir tests-dir)
-    (spit (path-join nm "project.blsp")          (project--manifest-template nm))
-    (spit (path-join src-dir "main.blsp")        (project--main-template nm))
-    (spit (path-join tests-dir "main_test.blsp") (project--test-template nm))
+    (spit (path-join nm "project.blsp")           (project--manifest-template nm))
+    (spit (path-join src-dir "main.blsp")         (project--main-template nm))
+    (spit (path-join src-dir "hello.blsp")        (project--hello-template nm))
+    (spit (path-join tests-dir "main_test.blsp")  (project--main-test-template nm))
+    (spit (path-join tests-dir "hello_test.blsp") (project--hello-test-template nm))
     (println (str "Created Brood project '" nm "'"))
     (println (str "  " nm "/project.blsp"))
     (println (str "  " nm "/src/main.blsp"))
+    (println (str "  " nm "/src/hello.blsp"))
     (println (str "  " nm "/tests/main_test.blsp"))
+    (println (str "  " nm "/tests/hello_test.blsp"))
     (when *config-git-init*
       (if (= 0 (run-process "git" (list "init" "-q" nm)))
         (println "  initialized a git repository")
         (println "  (git init failed)")))
-    (println (str "Next:  cd " nm " && nest test"))
+    (println (str "Next:  cd " nm " && nest test && nest run"))
     nm))
 
 (provide 'project)

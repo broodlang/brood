@@ -1,0 +1,36 @@
+;; Project manifest + entry-point resolution (std/project.blsp). Covers the
+;; `:main` parser and the default entry. Register-only — discovered and run by
+;; `nest test` (and cargo test, via crates/lisp/tests/suite.rs).
+;;
+;; `run-project` itself is not exercised in-language: it walks from `cwd` to a
+;; project.blsp, which the brood-repo suite already sits inside, so we can't
+;; isolate it from here without changing the working directory. The hand-run
+;; equivalent — `nest new foo && cd foo && nest run` — is the integration check.
+
+(require 'test)
+(require 'project)
+
+(describe "project: :main parsing"
+  (test "a bare symbol defaults the fn name to `main`"
+    (assert= (project--parse-main 'foo) '(foo main)))
+  (test "a 2-list of symbols is taken as (module fn)"
+    (assert= (project--parse-main '(foo bar)) '(foo bar)))
+  (test "a 1-list is rejected"
+    (assert= "project: :main must be a module symbol or '(module fn), got (foo)"
+             (try (project--parse-main '(foo)) (catch e e))))
+  (test "a 3-list is rejected"
+    (assert= "project: :main must be a module symbol or '(module fn), got (foo bar baz)"
+             (try (project--parse-main '(foo bar baz)) (catch e e))))
+  (test "a non-symbol head is rejected"
+    (is (string? (try (project--parse-main '("foo" main)) (catch e e)))))
+  (test "a non-symbol fn is rejected"
+    (is (string? (try (project--parse-main '(foo "main")) (catch e e)))))
+  (test "a string is rejected"
+    (is (string? (try (project--parse-main "main") (catch e e))))))
+
+(describe "project: default entry"
+  (test "*project-main* defaults to (main main)"
+    ;; A manifest with no :main key never assigns *project-main*, so the default
+    ;; stays in place. The brood repo's own project.blsp omits :main, so this
+    ;; reflects the live value the runner would use.
+    (assert= *project-main* '(main main))))

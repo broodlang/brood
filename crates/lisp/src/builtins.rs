@@ -9,7 +9,7 @@ use crate::core::heap::Heap;
 use crate::core::value::{self, Arity, EnvId, NativeFn, NativeFnPtr, Tag, Value};
 use crate::error::{ErrorKind, LispError, LispResult};
 use crate::eval::apply;
-use crate::syntax::{printer, reader};
+use crate::syntax::{cst, printer, reader};
 use crate::types::{Sig, Ty};
 
 /// Install the primitive kernel into `root`.
@@ -121,6 +121,10 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "eval", Arity::exact(1), Sig::new(vec![any], any), eval_builtin);
     def(heap, "read-string", Arity::exact(1), Sig::new(vec![string], any), read_string);
     def(heap, "eval-string", Arity::exact(1), Sig::new(vec![string], any), eval_string);
+    // CST parse — mechanism for the in-Brood formatter (std/format.blsp); never
+    // fails (malformed input becomes [:error "..."] nodes). Returns nested
+    // vectors; see `parse_source` for the shape.
+    def(heap, "parse-source", Arity::exact(1), Sig::new(vec![string], vec_ty), parse_source);
     def(heap, "load", Arity::exact(1), Sig::new(vec![string], any), load);
     def(heap, "%builtin-module", Arity::exact(1), Sig::new(vec![sym], any), builtin_module);
     // `apply`'s last positional arg should be a sequence (it's spliced); the
@@ -131,6 +135,8 @@ pub fn register(heap: &mut Heap, root: EnvId) {
 
     // symbols
     def(heap, "name", Arity::exact(1), Sig::new(vec![sym.union(kw)], string), name_of);
+    def(heap, "symbol", Arity::exact(1), Sig::new(vec![string.union(sym).union(kw)], sym), to_symbol);
+    def(heap, "keyword", Arity::exact(1), Sig::new(vec![string.union(sym).union(kw)], kw), to_keyword);
 
     // filesystem — mechanism for the Brood module system + project test runner
     def(heap, "cwd", Arity::exact(0), Sig::nullary(string), cwd);
@@ -236,10 +242,13 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("mem-peak", &[], "High-water mark of allocated bytes since process start."),
     ("eval", &["form"], "Evaluate a form in the global environment."),
     ("read-string", &["s"], "Parse and return the first form in string s."),
+    ("parse-source", &["s"], "Parse s into a lossless CST tree as nested vectors (mechanism for std/format.blsp)."),
     ("eval-string", &["s"], "Read and evaluate every form in string s (the string analogue of load)."),
     ("load", &["path"], "Read and evaluate every form in the file at path."),
     ("apply", &["f", "&", "args"], "Call f with the leading args plus the final list argument spliced in as trailing args."),
     ("name", &["x"], "The spelling of a symbol or keyword as a string (no leading colon)."),
+    ("symbol", &["x"], "Coerce a string, symbol, or keyword to the matching symbol (interning if needed)."),
+    ("keyword", &["x"], "Coerce a string, symbol, or keyword to the matching keyword (interning if needed)."),
     ("cwd", &[], "The current working directory."),
     ("file-exists?", &["path"], "Whether path exists."),
     ("dir?", &["path"], "Whether path is a directory."),
@@ -634,6 +643,94 @@ fn read_string(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     reader::read_one(heap, &s)
 }
 
+/// `(parse-source s)` — parse s into a lossless CST tree as nested vectors, the
+/// mechanism behind `std/format.blsp`. Never raises: malformed input becomes
+/// `[:error "raw"]` nodes (parsing resumes after them). See `syntax::cst`.
+///
+/// Shape (each node is a vector `[kind …]`):
+/// - Leaves carry the original source text:
+///   `[:symbol "foo"]`, `[:keyword ":foo"]`, `[:int "42"]`, `[:float "1.5"]`,
+///   `[:bool "true"]`, `[:nil "nil"]`, `[:str "\"hi\""]` (raw — quotes/escapes
+///   included), `[:whitespace "  \n"]`, `[:comment ";; hi\n"]`, `[:error "raw"]`.
+/// - Reader macros wrap a single child form:
+///   `[:quote child]`, `[:quasi child]`, `[:unquote child]`, `[:splice child]`.
+/// - Containers carry a child vector:
+///   `[:root [child …]]`, `[:list [child …]]`, `[:vector [child …]]`,
+///   `[:map [child …]]`.
+///
+/// Roundtrip property: concatenating every leaf's text in tree order reproduces
+/// the input — this is what makes the CST a faithful basis for formatting.
+fn parse_source(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let s = expect_string(heap, "parse-source", arg(args, 0))?;
+    let root = cst::parse(&s);
+    Ok(cst_to_value(heap, &root, &s))
+}
+
+fn cst_to_value(heap: &mut Heap, node: &cst::Node, src: &str) -> Value {
+    use cst::NodeKind::*;
+    let tag = |k: &'static str| Value::Keyword(value::intern(k));
+    match node.kind {
+        // Leaves: [kind raw-text].
+        Symbol | Keyword | Int | Float | Str | Bool | Nil | Whitespace | Comment | Error => {
+            let k = match node.kind {
+                Symbol => "symbol",
+                Keyword => "keyword",
+                Int => "int",
+                Float => "float",
+                Str => "str",
+                Bool => "bool",
+                Nil => "nil",
+                Whitespace => "whitespace",
+                Comment => "comment",
+                Error => "error",
+                _ => unreachable!(),
+            };
+            let text = heap.alloc_string(node.text(src));
+            heap.alloc_vector(vec![tag(k), text])
+        }
+        // Reader-macro wrappers: [kind child]. The single structural child is
+        // the wrapped form; any leading whitespace child is dropped (the wrapper
+        // owns its position via its parent's children list).
+        Quote | Quasi | Unquote | Splice => {
+            let k = match node.kind {
+                Quote => "quote",
+                Quasi => "quasi",
+                Unquote => "unquote",
+                Splice => "splice",
+                _ => unreachable!(),
+            };
+            // A reader-macro node's children are the wrapped form's parse
+            // result(s) — usually a single form. Walk and pick the first
+            // non-trivia child; nest the rest as following siblings would be a
+            // parse bug, but in case of empty (EOF after ~/`/'/), emit nil.
+            let child = node
+                .forms()
+                .next()
+                .map(|c| cst_to_value(heap, c, src))
+                .unwrap_or(Value::Nil);
+            heap.alloc_vector(vec![tag(k), child])
+        }
+        // Containers: [kind [child …]]. Children include trivia (whitespace +
+        // comments) so the formatter can preserve blank-line + comment intent.
+        Root | List | Vector | Map => {
+            let k = match node.kind {
+                Root => "root",
+                List => "list",
+                Vector => "vector",
+                Map => "map",
+                _ => unreachable!(),
+            };
+            let kids: Vec<Value> = node
+                .children
+                .iter()
+                .map(|c| cst_to_value(heap, c, src))
+                .collect();
+            let kids_vec = heap.alloc_vector(kids);
+            heap.alloc_vector(vec![tag(k), kids_vec])
+        }
+    }
+}
+
 fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "load", arg(args, 0))?;
     let src = std::fs::read_to_string(&path)
@@ -685,6 +782,7 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
     ("project", include_str!("../../../std/project.blsp")),
     ("docs", include_str!("../../../std/docs.blsp")),
     ("hatch", include_str!("../../../std/hatch.blsp")),
+    ("format", include_str!("../../../std/format.blsp")),
 ];
 
 /// `(%builtin-module name)` — the source of a baked-in std module as a string, or
@@ -722,6 +820,49 @@ fn name_of(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             heap,
             "name",
             "symbol, keyword, or string",
+            v,
+        )),
+    }
+}
+
+/// `(symbol x)` — the symbol whose spelling is `x`. Accepts a string (intern as
+/// a fresh-or-existing symbol), a symbol (identity), or a keyword (same spelling,
+/// retagged as a symbol). The lenient inverse of `name`; pairs with `keyword`.
+fn to_symbol(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let v = arg(args, 0);
+    match v {
+        Value::Sym(_) => Ok(v),
+        Value::Keyword(s) => Ok(Value::Sym(s)),
+        Value::Str(id) => {
+            let name = heap.string(id).to_string();
+            Ok(Value::Sym(value::intern(&name)))
+        }
+        _ => Err(LispError::wrong_type(
+            heap,
+            "symbol",
+            "string, symbol, or keyword",
+            v,
+        )),
+    }
+}
+
+/// `(keyword x)` — the keyword whose spelling is `x`. Accepts a string (intern),
+/// a keyword (identity), or a symbol (same spelling, retagged as a keyword).
+/// Mirrors `symbol`; the two share an interner so a keyword and a symbol with the
+/// same spelling carry equal `Symbol` ids (the tag is the only distinction).
+fn to_keyword(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let v = arg(args, 0);
+    match v {
+        Value::Keyword(_) => Ok(v),
+        Value::Sym(s) => Ok(Value::Keyword(s)),
+        Value::Str(id) => {
+            let name = heap.string(id).to_string();
+            Ok(Value::Keyword(value::intern(&name)))
+        }
+        _ => Err(LispError::wrong_type(
+            heap,
+            "keyword",
+            "string, symbol, or keyword",
             v,
         )),
     }

@@ -43,16 +43,33 @@
 //! disjointness check only needs "do I know this type?". Forms inside `try` /
 //! `error-of` / `assert-error` are skipped (they deliberately exercise failures).
 //!
+//! ## Beyond type misuse
+//!
+//! The walk also emits two non-type diagnostics, sharing the same scope
+//! infrastructure:
+//!
+//! - **Arity**: a call whose argument count isn't admitted by the callee's
+//!   declared `Arity` (from [`NativeFn`](crate::core::value::NativeFn) for a
+//!   primitive, or from `Closure.{params, optionals, rest}` for a Brood
+//!   closure). See [`arity_of`].
+//! - **Unbound symbols**: a call head that resolves to nothing — not a
+//!   primitive, not a curated stdlib closure, not in local scope (fn/let), not
+//!   a file-local def, not a syntactic keyword, and not in the heap's globals.
+//!   Driven by [`Ctx::is_local`] (the local + file-global view) plus a
+//!   global-env lookup. Scope is honoured: `fn`/`lambda`/`defn`/`defmacro`
+//!   bind their params into `Ctx` before walking the body, and
+//!   [`check_file`] accumulates top-level `def`/`defn`/`defmacro` / `defdyn`
+//!   names across the forms in a file.
+//!
 //! Not yet (later increments): inference through `cond`/`match`, structured /
-//! `and`/`or`-chained guards, recursion, higher-order; unbound-symbol and
-//! arity diagnostics; running automatically in `brood <file>` / `nest test`.
-//! Today the entry point is `brood --check` (CLI) and the `(check 'form)`
-//! builtin.
+//! `and`/`or`-chained guards, recursion, higher-order; running automatically
+//! in `brood <file>` / `nest test`. Today the entry points are `brood
+//! --check` (CLI; see [`check_file`]) and the `(check 'form)` builtin.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::core::heap::Heap;
-use crate::core::value::{self, Symbol, Tag, Value};
+use crate::core::value::{self, Arity, Symbol, Tag, Value};
 use crate::error::Pos;
 use crate::types::{Sig, Ty};
 
@@ -74,6 +91,16 @@ struct Ctx {
     types: HashMap<Symbol, Ty>,
     /// `bound-name → (variable, type-it-asserts)`: a `let`-stored guard result.
     guards: HashMap<Symbol, (Symbol, Ty)>,
+    /// Every locally-bound name in scope — fn/lambda params and let bindings.
+    /// Distinct from `types`: a fn-param has *no known type* (`ANY` by default)
+    /// but is *in scope*, so it must not be flagged unbound. `types` records
+    /// narrowings on top; `locals` records existence.
+    locals: HashSet<Symbol>,
+    /// Top-level names defined earlier in the same file (`def`/`defn`/
+    /// `defmacro` accumulated by [`check_file`]). The file isn't being
+    /// evaluated, so these aren't in `heap`'s global table — we track them
+    /// here so a later form doesn't flag them as unbound.
+    file_globals: HashSet<Symbol>,
 }
 
 impl Ctx {
@@ -84,6 +111,17 @@ impl Ctx {
     /// The guard (variable + asserted type) `sym` was bound to, if any.
     fn guard(&self, sym: Symbol) -> Option<(Symbol, Ty)> {
         self.guards.get(&sym).copied()
+    }
+    /// Is `sym` in scope here? — a local binder (fn-param or let), a recorded
+    /// narrowing or guard alias, or an accumulated file-global. Bindings in the
+    /// surrounding heap (prelude, builtins, earlier-defined globals in a real
+    /// runtime) are checked separately by the caller — this is the *local*
+    /// view only.
+    fn is_local(&self, sym: Symbol) -> bool {
+        self.locals.contains(&sym)
+            || self.types.contains_key(&sym)
+            || self.guards.contains_key(&sym)
+            || self.file_globals.contains(&sym)
     }
     /// **Narrow** `sym` to the intersection with `ty` (a guard refinement —
     /// the same lexical variable in the same scope getting tighter). The
@@ -97,10 +135,11 @@ impl Ctx {
         c
     }
     /// **Bind** `sym` to `ty`, overwriting any prior entry — a fresh let-bound
-    /// or fn-param variable shadows the outer. `None` clears the entry so a
-    /// shadowing binding of unknown type doesn't keep an outer narrowing.
-    /// Always clears any guard-alias entry for `sym` (a fresh binding doesn't
-    /// inherit one).
+    /// or fn-param variable shadows the outer. `None` clears the type entry so
+    /// a shadowing binding of unknown type doesn't keep an outer narrowing
+    /// (but the name is still in scope via `locals`, so an unbound check
+    /// doesn't fire on it). Always clears any guard-alias entry for `sym`
+    /// (a fresh binding doesn't inherit one).
     fn bind(&self, sym: Symbol, ty: Option<Ty>) -> Ctx {
         let mut c = self.clone();
         match ty {
@@ -111,6 +150,7 @@ impl Ctx {
                 c.types.remove(&sym);
             }
         }
+        c.locals.insert(sym);
         c.guards.remove(&sym);
         c
     }
@@ -126,6 +166,61 @@ impl Ctx {
         c.guards.insert(sym, (target, ty));
         c
     }
+    /// Record a top-level `(def/defn/defmacro name …)` so subsequent forms in
+    /// the same file see `name` as bound (the file isn't being evaluated, so
+    /// `name` won't appear in `heap`'s global table). In-place mutation; the
+    /// accumulator threads through [`check_file`].
+    fn add_file_global(&mut self, sym: Symbol) {
+        self.file_globals.insert(sym);
+    }
+}
+
+/// Names that have *syntactic* meaning but aren't bound values — never flag
+/// these as unbound. Mirrors `eval::SPECIAL_NAMES` plus the macros that the
+/// reader / un-expanded forms may carry (the CLI's `--check` doesn't
+/// macroexpand). `catch` is the carrier-form for `try`'s catcher, not a
+/// callable; `&` / `&optional` are parameter-list markers.
+fn is_syntactic_keyword(name: &str) -> bool {
+    matches!(
+        name,
+        "quote"
+            | "quasiquote"
+            | "unquote"
+            | "unquote-splicing"
+            | "if"
+            | "do"
+            | "def"
+            | "fn"
+            | "lambda"
+            | "let"
+            | "let*"
+            | "letrec"
+            | "defmacro"
+            | "defn"
+            | "defdyn"
+            | "defmodule"
+            | "module-doc"
+            | "when"
+            | "unless"
+            | "cond"
+            | "and"
+            | "or"
+            | "->"
+            | "->>"
+            | "match"
+            | "case"
+            | "try"
+            | "catch"
+            | "throw"
+            | "binding"
+            | "for"
+            | "loop"
+            | "recur"
+            | "spawn"
+            | "&"
+            | "&optional"
+            | "&rest"
+    )
 }
 
 /// The signature of a **primitive** named `name` — read from its `NativeFn`
@@ -238,6 +333,44 @@ fn sig_of(heap: &Heap, name: &str) -> Option<Sig> {
         .or_else(|| infer_sig(heap, name))
 }
 
+/// The arity of the callable named `name` — `NativeFn.arity` for primitives,
+/// derived from `Closure.{params, optionals, rest}` for Brood closures. `None`
+/// when the name resolves to a non-callable, doesn't exist, or no callable is
+/// visible (e.g. a file-local `defn` checked in the read-only `--check` path
+/// — there's nothing to inspect, so no arity check fires).
+///
+/// Brood's closure params are: `params.len()` required + `optionals.len()`
+/// optional + an optional rest tail (`Symbol`). So min = required, max =
+/// required + optional unless there's a rest (then no max).
+fn arity_of(heap: &Heap, name: &str) -> Option<Arity> {
+    let sym = value::intern_existing(name)?;
+    match heap.env_get(heap.global(), sym)? {
+        Value::Native(id) => Some(heap.native(id).arity),
+        Value::Fn(cid) => {
+            let c = heap.closure(cid);
+            let min = c.params.len();
+            let max = if c.rest.is_some() {
+                None
+            } else {
+                Some(min + c.optionals.len())
+            };
+            Some(Arity { min, max })
+        }
+        _ => None,
+    }
+}
+
+/// A human-readable rendering of an `Arity` for a "wrong number of args"
+/// warning — `exact(2)` → "2"; `range(2,3)` → "2 to 3"; `at_least(2)` → "2 or
+/// more".
+fn arity_str(a: Arity) -> String {
+    match a.max {
+        Some(m) if m == a.min => a.min.to_string(),
+        Some(m) => format!("{} to {}", a.min, m),
+        None => format!("{} or more", a.min),
+    }
+}
+
 /// The static type of an expression form *in `ctx`*, or `None` when it can't
 /// be pinned. `None` is "unknown" and is never flagged. Self-evaluating
 /// literals get their exact tag; a `quote`d datum gets the datum's tag; a call
@@ -283,6 +416,56 @@ pub fn check_located(heap: &Heap, form: Value) -> Vec<(Option<Pos>, String)> {
     let mut out = Vec::new();
     check_into(heap, form, &Ctx::default(), &mut out);
     out
+}
+
+/// Check a sequence of top-level forms together, threading file-local
+/// definitions across them so a `(defn foo …)` at the top isn't flagged when
+/// a later form calls `foo`. This is the entry point for `brood --check
+/// <file>` / `nest check`.
+///
+/// What gets accumulated: the *name* introduced by each top-level
+/// `def` / `defn` / `defmacro` / `defdyn` (see [`top_level_def_name`]). We
+/// don't evaluate, so the *binding* (a closure, a value) isn't visible — only
+/// the name. Result: cross-form unbound-symbol diagnostics are silent on
+/// locally defined names, but cross-form *type/arity* checks still need the
+/// actual definition (which is only available in a running runtime, not in
+/// the `--check` read-only path).
+pub fn check_file(heap: &Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)> {
+    let mut out = Vec::new();
+    let mut ctx = Ctx::default();
+    // Pass 1: collect top-level defined names so a `defn foo` at line 1 is
+    // visible to `(foo …)` at line 100. Re-collected per call (cheap).
+    for &form in forms {
+        if let Some(name) = top_level_def_name(heap, form) {
+            ctx.add_file_global(name);
+        }
+    }
+    // Pass 2: check each form with the accumulated file-globals visible.
+    for &form in forms {
+        check_into(heap, form, &ctx, &mut out);
+    }
+    out
+}
+
+/// If `form` is a top-level `(def name …)` / `(defn name …)` / `(defmacro
+/// name …)` / `(defdyn name …)`, return `name` as the introduced symbol.
+/// Used by [`check_file`] to accumulate file-local globals.
+fn top_level_def_name(heap: &Heap, form: Value) -> Option<Symbol> {
+    let items = list_items(heap, form)?;
+    let Value::Sym(head) = items.first().copied()? else {
+        return None;
+    };
+    let head_name = value::symbol_name(head);
+    if !matches!(
+        head_name.as_str(),
+        "def" | "defn" | "defmacro" | "defdyn"
+    ) {
+        return None;
+    }
+    let Value::Sym(name) = items.get(1).copied()? else {
+        return None;
+    };
+    Some(name)
 }
 
 /// Forms whose contents are data (`quote`/`quasiquote`) or deliberately exercise
@@ -350,13 +533,59 @@ fn check_into(
                 check_if(heap, &items, ctx, out);
                 return;
             }
-            "let" | "let*" => {
+            "let" | "let*" | "letrec" => {
+                // `letrec` has the same bindings shape `(name val name val …)` and
+                // body tail — same checker walk. The mutual-visibility nuance
+                // (names visible in their own RHSs) doesn't affect type-flow:
+                // pre-binding is to `nil`, the recursive cases here are fns, and
+                // the checker doesn't synthesise fn types from within letrec.
                 check_let(heap, &items, ctx, out);
+                return;
+            }
+            "fn" | "lambda" => {
+                check_fn(heap, &items, ctx, out);
+                return;
+            }
+            "def" => {
+                check_def(heap, &items, ctx, out);
+                return;
+            }
+            "defn" | "defmacro" => {
+                check_defn(heap, &items, ctx, out);
                 return;
             }
             _ => {}
         }
-        if let Some(sig) = sig_of(heap, &name) {
+
+        // Resolve the callee's signature + arity. If neither resolves AND the
+        // name is otherwise unknown, this is an "unbound symbol" diagnostic.
+        let sig = sig_of(heap, &name);
+        let arity = arity_of(heap, &name);
+        if sig.is_none() && arity.is_none() && !is_syntactic_keyword(&name) && !ctx.is_local(s) {
+            out.push((
+                heap.form_pos(form),
+                format!("unbound symbol: {}", name),
+            ));
+            // Still recurse into args below — they may carry their own issues.
+        }
+
+        // Arity check (independent of sig — they're separate concerns).
+        if let Some(a) = arity {
+            let argc = items.len() - 1;
+            if !a.accepts(argc) {
+                out.push((
+                    heap.form_pos(form),
+                    format!(
+                        "{}: wrong number of arguments — expected {}, got {}",
+                        name,
+                        arity_str(a),
+                        argc,
+                    ),
+                ));
+            }
+        }
+
+        if let Some(sig) = sig {
             for (i, &arg) in items[1..].iter().enumerate() {
                 let Some(param) = sig.param(i) else { continue };
                 // Warn only on a *provable* mismatch: the argument's type shares
@@ -385,6 +614,103 @@ fn check_into(
     for &item in &items {
         check_into(heap, item, ctx, out);
     }
+}
+
+/// `(fn (params...) docstring? body...)` (and `lambda` — the same closure
+/// shape) — parse the parameter list, bind each into `ctx`, then walk the body
+/// in the extended scope. Parameter positions (`& rest`, `&optional`) are
+/// binders, not references, so they're not flagged as unbound.
+fn check_fn(heap: &Heap, items: &[Value], ctx: &Ctx, out: &mut Vec<(Option<Pos>, String)>) {
+    let Some(&params_form) = items.get(1) else {
+        return;
+    };
+    let mut scope = ctx.clone();
+    for p in fn_params(heap, params_form) {
+        scope = scope.bind(p, None);
+    }
+    // Skip a leading docstring (a lone string when more body follows).
+    let body_start = match (items.get(2), items.get(3)) {
+        (Some(Value::Str(_)), Some(_)) => 3,
+        _ => 2,
+    };
+    for &body_form in &items[body_start..] {
+        check_into(heap, body_form, &scope, out);
+    }
+}
+
+/// `(def name value)` — the binder is in position 1, the value in 2. Don't
+/// flag `name` as an unbound *reference* (it's a binder); walk `value` as an
+/// expression. `name` is added to the file-globals accumulator inside
+/// [`check_file`], not here (which checks one form in isolation).
+fn check_def(heap: &Heap, items: &[Value], ctx: &Ctx, out: &mut Vec<(Option<Pos>, String)>) {
+    let Some(&value_form) = items.get(2) else {
+        // `(def name)` — degenerate; skip.
+        return;
+    };
+    check_into(heap, value_form, ctx, out);
+}
+
+/// `(defn name (params...) docstring? body...)` and the structurally identical
+/// `defmacro` — the body lives in a fresh scope with `params` bound. Like
+/// `def`, the `name` is a binder, not a reference; file-global accumulation
+/// happens in [`check_file`].
+fn check_defn(heap: &Heap, items: &[Value], ctx: &Ctx, out: &mut Vec<(Option<Pos>, String)>) {
+    let Some(&params_form) = items.get(2) else {
+        return;
+    };
+    let mut scope = ctx.clone();
+    for p in fn_params(heap, params_form) {
+        scope = scope.bind(p, None);
+    }
+    let body_start = match (items.get(3), items.get(4)) {
+        (Some(Value::Str(_)), Some(_)) => 4,
+        _ => 3,
+    };
+    for &body_form in &items[body_start..] {
+        check_into(heap, body_form, &scope, out);
+    }
+}
+
+/// The set of parameter-binder symbols introduced by a `fn`/`defn`/`defmacro`
+/// parameter list. Handles the three Brood shapes uniformly:
+///
+/// - positional: `(x y z)` → `{x, y, z}`
+/// - optional:   `(x &optional (y 0))` → `{x, y}`
+/// - rest:       `(x & ys)` → `{x, ys}`
+///
+/// `&` / `&optional` themselves are markers, not binders, so they're filtered
+/// out. The result is *just* what would be in scope — used to seed `Ctx`
+/// without false-flagging the inner body's references.
+fn fn_params(heap: &Heap, form: Value) -> Vec<Symbol> {
+    let items = match form {
+        Value::Vector(id) => heap.vector(id).to_vec(),
+        Value::Nil | Value::Pair(_) => list_items(heap, form).unwrap_or_default(),
+        _ => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for item in items {
+        match item {
+            Value::Sym(s) => {
+                let name = value::symbol_name(s);
+                if name == "&" || name == "&optional" || name == "&rest" {
+                    continue;
+                }
+                out.push(s);
+            }
+            // `&optional` defaults: `(name default)` — the binder is at [0].
+            Value::Pair(_) | Value::Vector(_) => {
+                let inner = match item {
+                    Value::Vector(id) => heap.vector(id).to_vec(),
+                    _ => list_items(heap, item).unwrap_or_default(),
+                };
+                if let Some(&Value::Sym(s)) = inner.first() {
+                    out.push(s);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// `(if test then else?)` — check the test in the outer ctx, then descend
@@ -483,23 +809,16 @@ mod tests {
     use super::*;
     use crate::syntax::reader;
 
-    /// A fresh builder heap with the primitive kernel registered (the source
-    /// the checker reads sigs from) and a local root env serving as the heap's
-    /// "global". Mirrors the prelude builder in `lib.rs`, minus the prelude
-    /// itself — curated stdlib closures live in `curated_sig`, so we don't
-    /// need to eval them to check their callers.
-    fn heap_with_primitives() -> Heap {
-        let mut heap = Heap::new();
-        let root = heap.new_env(None);
-        heap.set_global(root);
-        crate::builtins::register(&mut heap, root);
-        heap
-    }
-
+    /// A full `Interp` — primitives + the loaded prelude. We need the prelude
+    /// in the global env so the new unbound-symbol diagnostic doesn't false-
+    /// flag every Brood-side stdlib name (`list`, `int?`, `zero?`, `inc`, …);
+    /// the previous primitives-only setup worked when the checker silently
+    /// skipped unknown callees, but Step 4's unbound check has to know what's
+    /// genuinely bound.
     fn warnings(src: &str) -> Vec<String> {
-        let mut heap = heap_with_primitives();
-        let form = reader::read_one(&mut heap, src).expect("parse");
-        check_form(&heap, form)
+        let mut interp = crate::Interp::new();
+        let form = reader::read_one(&mut interp.heap, src).expect("parse");
+        check_form(&interp.heap, form)
     }
 
     #[test]
@@ -612,8 +931,11 @@ mod tests {
             // missing argument.
             let _ = warnings(src);
         }
-        assert!(warnings("(5 6 7)").is_empty()); // head isn't a symbol
-        assert!(warnings("(first)").is_empty()); // missing arg → nothing to check
+        assert!(warnings("(5 6 7)").is_empty()); // head isn't a symbol — no diagnostics
+        // `(first)` is now an arity diagnostic (0 args; first needs 1).
+        assert!(warnings("(first)")
+            .iter()
+            .any(|w| w.contains("first") && w.contains("expected 1")));
     }
 
     // ------------- Step 3: sigs sourced from NativeFn, closure inference --------------
@@ -642,13 +964,14 @@ mod tests {
         // The sig the checker uses for `string-length` *is* the one declared
         // next to its `Arity` in `builtins.rs`. If we ever drop the sig field
         // (or set it wrong), this catches it.
-        let heap = heap_with_primitives();
-        let sig = primitive_sig(&heap, "string-length").expect("string-length is a primitive");
+        let interp = crate::Interp::new();
+        let sig = primitive_sig(&interp.heap, "string-length")
+            .expect("string-length is a primitive");
         assert_eq!(sig.params, vec![Ty::of(Tag::Str)]);
         assert_eq!(sig.ret, Ty::of(Tag::Int));
         // The "no useful info" lane: a variadic any-arg primitive (str) returns
         // a Sig that param-overlaps every input, so it never warns.
-        let any_sig = primitive_sig(&heap, "str").expect("str is a primitive");
+        let any_sig = primitive_sig(&interp.heap, "str").expect("str is a primitive");
         assert_eq!(any_sig.rest, Some(Ty::ANY));
     }
 
@@ -691,11 +1014,11 @@ mod tests {
         // A body with `if`/`let` is *not* a single straight-line expression —
         // inference must skip it, leaving the closure as untyped (no warning).
         // The point: zero false positives from inference's lack of control flow.
-        for src in &[
-            "(defn maybe (x) (if (int? x) (+ x 1) x))",
-            "(defn shadow (x) (let (y x) (+ y 1)))",
+        for (defs, call) in &[
+            ("(defn maybe (x) (if (int? x) (+ x 1) x))", "(maybe :k)"),
+            ("(defn shadow (x) (let (y x) (+ y 1)))", "(shadow :k)"),
         ] {
-            let w = check_with_defs(&[src], "(maybe :k)");
+            let w = check_with_defs(&[defs], call);
             assert!(
                 w.is_empty(),
                 "branchy / binding bodies must not infer (so no warning): {:?}",
@@ -973,6 +1296,175 @@ mod tests {
         assert!(
             !w.iter().any(|s| s.contains("got int")),
             "the int narrowing must not leak through the shadow: {:?}",
+            w
+        );
+    }
+
+    // ---------------- Step 4: arity + unbound-symbol diagnostics ----------------
+
+    #[test]
+    fn flags_too_few_arguments() {
+        // `first` expects exactly 1; 0 is wrong.
+        assert!(warnings("(first)")
+            .iter()
+            .any(|w| w.contains("first") && w.contains("expected 1") && w.contains("got 0")));
+        // `string-length` expects exactly 1.
+        assert!(warnings("(string-length)")
+            .iter()
+            .any(|w| w.contains("string-length") && w.contains("expected 1")));
+    }
+
+    #[test]
+    fn flags_too_many_arguments() {
+        // `rem` is `exact(2)`; calling with 3 is wrong.
+        assert!(warnings("(rem 1 2 3)")
+            .iter()
+            .any(|w| w.contains("rem") && w.contains("expected 2") && w.contains("got 3")));
+    }
+
+    #[test]
+    fn arity_message_handles_range_and_variadic() {
+        // `map-get` is `range(2, 3)` → "expected 2 to 3".
+        assert!(warnings("(map-get {})")
+            .iter()
+            .any(|w| w.contains("map-get") && w.contains("2 to 3")));
+        // `apply` is `at_least(2)` → "expected 2 or more"; 1 is too few.
+        assert!(warnings("(apply f)")
+            .iter()
+            .any(|w| w.contains("apply") && w.contains("2 or more")));
+    }
+
+    #[test]
+    fn arity_pass_is_silent_for_correct_calls() {
+        assert!(warnings("(first [1 2])")
+            .iter()
+            .all(|w| !w.contains("number of arguments")));
+        assert!(warnings("(rem 7 3)")
+            .iter()
+            .all(|w| !w.contains("number of arguments")));
+        // Variadic: any count is fine.
+        for n in 0..=5 {
+            let args = (0..n)
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let w = warnings(&format!("(+ {})", args));
+            assert!(
+                w.iter().all(|s| !s.contains("number of arguments")),
+                "(+ {}…) should not warn arity: {:?}",
+                n,
+                w
+            );
+        }
+    }
+
+    #[test]
+    fn flags_unbound_call_heads() {
+        assert!(warnings("(frobnicate 1)")
+            .iter()
+            .any(|w| w.contains("unbound symbol: frobnicate")));
+        assert!(warnings("(typo-name :hi)")
+            .iter()
+            .any(|w| w.contains("unbound symbol: typo-name")));
+    }
+
+    #[test]
+    fn unbound_is_silent_for_in_scope_names() {
+        // fn/lambda params don't look unbound when used as call heads or
+        // referenced in the body.
+        assert!(warnings("(fn (f) (f 1 2))")
+            .iter()
+            .all(|w| !w.contains("unbound")));
+        // let bindings: same.
+        assert!(warnings("(let (g (fn (x) x)) (g 1))")
+            .iter()
+            .all(|w| !w.contains("unbound")));
+        // Syntactic keywords aren't bound but are never "unbound".
+        for src in &["(do 1 2 3)", "(when true 1)", "(cond)", "(and)", "(or)"] {
+            assert!(
+                warnings(src).iter().all(|w| !w.contains("unbound")),
+                "syntactic keyword must not be flagged unbound: {} → {:?}",
+                src,
+                warnings(src)
+            );
+        }
+    }
+
+    #[test]
+    fn unbound_is_silent_for_prelude_names() {
+        // The prelude is loaded in our test heap (via Interp::new()), so
+        // stdlib names resolve. `inc`, `list`, `int?`, `even?`, … are all fine.
+        for src in &[
+            "(inc 1)",
+            "(list 1 2 3)",
+            "(int? 5)",
+            "(zero? 0)",
+            "(map (fn (x) x) [1 2 3])",
+        ] {
+            assert!(
+                warnings(src)
+                    .iter()
+                    .all(|w| !w.contains("unbound")),
+                "prelude name must not be flagged unbound: {} → {:?}",
+                src,
+                warnings(src)
+            );
+        }
+    }
+
+    #[test]
+    fn file_globals_make_later_forms_see_earlier_defs() {
+        // `check_file` accumulates top-level def names. Without that,
+        // `(my-fn 1)` in form 2 would be flagged unbound — `my-fn` isn't in
+        // the heap (no eval), only in the file.
+        let interp = crate::Interp::new();
+        let src = "(defn my-fn (x) (+ x 1))\n(my-fn 1)";
+        let mut heap = crate::core::heap::Heap::with_regions(
+            interp.heap.prelude_arc(),
+            interp.heap.runtime_arc(),
+        );
+        heap.set_global(crate::core::value::EnvId::GLOBAL);
+        let forms = crate::syntax::reader::read_all(&mut heap, src).expect("parse");
+        let out = check_file(&heap, &forms);
+        let msgs: Vec<_> = out.into_iter().map(|(_, m)| m).collect();
+        assert!(
+            msgs.iter().all(|m| !m.contains("unbound symbol: my-fn")),
+            "file-local defns must shield later calls: {:?}",
+            msgs
+        );
+    }
+
+    #[test]
+    fn fn_params_with_rest_and_optional_dont_leak() {
+        // The marker symbols `&`/`&optional` themselves are *not* binders;
+        // the names that follow them are.
+        assert!(warnings("(fn (x & ys) (cons x ys))")
+            .iter()
+            .all(|w| !w.contains("unbound")));
+        assert!(warnings("(fn (x &optional (y 0)) (+ x y))")
+            .iter()
+            .all(|w| !w.contains("unbound")));
+    }
+
+    #[test]
+    fn defn_body_sees_its_params_in_scope() {
+        // A user defn whose body references its params must not flag them as
+        // unbound. (The `defn` macro hasn't been expanded — the CLI checks
+        // un-expanded forms — so this tests the un-expanded surface path.)
+        assert!(warnings("(defn my-fn (x y) (+ x y))")
+            .iter()
+            .all(|w| !w.contains("unbound")));
+    }
+
+    #[test]
+    fn arity_check_works_for_user_defns_in_a_real_interp() {
+        // Once a defn is evaluated, its arity is derivable from its Closure.
+        // `inc` (prelude) is `(defn inc (n) …)` → exact(1).
+        let w = check_with_defs(&[], "(inc 1 2)");
+        assert!(
+            w.iter()
+                .any(|s| s.contains("inc") && s.contains("expected 1")),
+            "user defn arity should be enforced: {:?}",
             w
         );
     }

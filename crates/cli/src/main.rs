@@ -226,8 +226,10 @@ fn run_check_files(interp: &mut Interp, files: &[String]) {
                 std::process::exit(1);
             }
         };
-        // Read (recording positions) without evaluating, then check the surface
-        // forms — `check_into` already descends into nested calls.
+        // Read (recording positions) without evaluating, then check the file
+        // as a whole — `check_file` accumulates top-level `def`/`defn` names
+        // across forms so a name defined at the top isn't flagged when a later
+        // form calls it.
         let forms = match brood::syntax::reader::read_all_positioned(&mut interp.heap, &src) {
             Ok(forms) => forms,
             Err(e) => {
@@ -235,13 +237,12 @@ fn run_check_files(interp: &mut Interp, files: &[String]) {
                 std::process::exit(1);
             }
         };
-        for (form, _) in forms {
-            for (pos, msg) in brood::types::check::check_located(&interp.heap, form) {
-                warned = true;
-                match pos {
-                    Some(p) => println!("{}:{}:{}: warning: {}", path, p.line, p.col, msg),
-                    None => println!("{}: warning: {}", path, msg),
-                }
+        let just_forms: Vec<_> = forms.into_iter().map(|(f, _)| f).collect();
+        for (pos, msg) in brood::types::check::check_file(&interp.heap, &just_forms) {
+            warned = true;
+            match pos {
+                Some(p) => println!("{}:{}:{}: warning: {}", path, p.line, p.col, msg),
+                None => println!("{}: warning: {}", path, msg),
             }
         }
     }

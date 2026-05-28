@@ -8,6 +8,7 @@
 //! and driven through `Interp`, keeping behaviour in the language (ADR-006).
 //!
 //!   nest new <name>   scaffold a new project (project.blsp + src/ + tests/)
+//!   nest run [args…]  run the project's entry point (configured via :main)
 //!   nest test         discover tests/**/*_test.blsp and run the suite once
 //!
 //! `-j N` / `--max-parallel N` caps how many spawned processes run on OS
@@ -38,6 +39,9 @@ nest — Brood project tooling (the project half of the brood/nest split, ADR-02
 
 usage:
   nest new <name>   scaffold a new project (project.blsp + src/ + tests/)
+  nest run [args…]  run the project's entry point (set via :main in project.blsp;
+                    defaults to module `main`, fn `main`). Extra args are passed
+                    to the entry fn as strings.
   nest test         discover tests/**/*_test.blsp and run the suite once
   nest doc [module] emit Markdown docs (whole project, or one named module)
 
@@ -107,6 +111,26 @@ fn main() {
             let code = format!(
                 "(require 'project) (load-config) (new-project \"{}\")",
                 escaped
+            );
+            run(&mut interp, &code);
+        }
+
+        // `nest run [args…]` — run the project's entry point (ADR-020). The
+        // entry is configured via `:main` in project.blsp (a module symbol, or a
+        // `(module fn)` list) and defaults to module `main`, fn `main`. Extra
+        // positional args after `run` are passed to the entry as strings. The
+        // policy (find the project root, load it, resolve and apply the entry)
+        // lives in Brood (std/project.blsp); we just build the args list.
+        "run" => {
+            let escaped_args = positional
+                .iter()
+                .skip(1)
+                .map(|a| format!("\"{}\"", a.replace('\\', "\\\\").replace('"', "\\\"")))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let code = format!(
+                "(require 'project) (load-config) (run-project (list {}))",
+                escaped_args
             );
             run(&mut interp, &code);
         }

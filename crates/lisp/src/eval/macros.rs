@@ -114,6 +114,7 @@ pub fn macroexpand_all(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
     // skip GC; the expansion is bounded per form, so memory grows briefly
     // (reclaimed at the *next* runtime safepoint). See `docs/memory-model.md`.
     let _gc_block = crate::process::GcBlockGuard::enter();
+    let original = form;
     let form = macroexpand(heap, form, env)?;
     match form {
         Value::Pair(_) => {
@@ -135,24 +136,29 @@ pub fn macroexpand_all(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                     }
                     // Ordinary let: expand binding *values* and the body, but not the
                     // binding *targets* — a bound name must not be expanded as a call.
-                    return expand_let(heap, &items, env);
+                    return expand_let(heap, original, &items, env);
+                } else if value::symbol_is(s, "letrec") {
+                    // Same shape as let: even-indexed binding entries are targets
+                    // (opaque), odd-indexed are values (expand). letrec disallows
+                    // pattern targets in eval, so there's no `lower_let` branch.
+                    return expand_let(heap, original, &items, env);
                 } else if value::symbol_is(s, "fn") || value::symbol_is(s, "lambda") {
                     if let Some(lowered) = lower_fn(heap, &items) {
                         return macroexpand_all(heap, lowered, env);
                     }
                     // Ordinary fn: the param list (items[1]) is a binding position,
                     // not a call — expand only the body.
-                    return expand_tail(heap, &items, 2, env);
+                    return expand_tail(heap, original, &items, 2, env);
                 } else if value::symbol_is(s, "defmacro") {
                     // (defmacro name params body...) — name/params aren't calls.
-                    return expand_tail(heap, &items, 3, env);
+                    return expand_tail(heap, original, &items, 3, env);
                 }
             }
             let mut out = Vec::with_capacity(items.len());
             for item in items {
                 out.push(macroexpand_all(heap, item, env)?);
             }
-            Ok(heap.list(out))
+            Ok(rebuild_list(heap, original, out))
         }
         Value::Vector(id) => {
             let items = heap.vector(id).to_vec();
@@ -178,23 +184,44 @@ pub fn macroexpand_all(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
     }
 }
 
+/// Rebuild `items` into a fresh list, copying the source position of the
+/// `original` pair (if any). The compile pass goes through this on every list
+/// it expands, so source positions survive macroexpansion — diagnostics from
+/// inside a nested combination still point at the original line, not at the
+/// enclosing top-level form's start. No-op for non-LOCAL originals (see
+/// [`Heap::form_pos`](crate::core::heap::Heap::form_pos)).
+fn rebuild_list(heap: &mut Heap, original: Value, items: Vec<Value>) -> Value {
+    let pos = heap.form_pos(original);
+    let new_list = heap.list(items);
+    if let Some(p) = pos {
+        heap.set_form_pos(new_list, p);
+    }
+    new_list
+}
+
 /// Rebuild a form expanding only `items[start..]` (the call's body/argument tail),
 /// leaving `items[..start]` opaque. Used to skip binding positions — a fn/defmacro
 /// parameter list — so a name there is never mistaken for a macro call.
-fn expand_tail(heap: &mut Heap, items: &[Value], start: usize, env: EnvId) -> LispResult {
+fn expand_tail(
+    heap: &mut Heap,
+    original: Value,
+    items: &[Value],
+    start: usize,
+    env: EnvId,
+) -> LispResult {
     let start = start.min(items.len());
     let mut out = items[..start].to_vec();
     for &item in &items[start..] {
         out.push(macroexpand_all(heap, item, env)?);
     }
-    Ok(heap.list(out))
+    Ok(rebuild_list(heap, original, out))
 }
 
 /// Expand an ordinary `let`: its binding *values* (odd positions of the binding
 /// list) and its body, leaving the binding *targets* (even positions) opaque.
-fn expand_let(heap: &mut Heap, items: &[Value], env: EnvId) -> LispResult {
+fn expand_let(heap: &mut Heap, original: Value, items: &[Value], env: EnvId) -> LispResult {
     let Some(bindings) = items.get(1).copied() else {
-        return Ok(heap.list(items.to_vec()));
+        return Ok(rebuild_list(heap, original, items.to_vec()));
     };
     let new_bindings = match form_items(heap, bindings) {
         Some(binds) => {
@@ -209,7 +236,7 @@ fn expand_let(heap: &mut Heap, items: &[Value], env: EnvId) -> LispResult {
             }
             match bindings {
                 Value::Vector(_) => heap.alloc_vector(nb),
-                _ => heap.list(nb),
+                _ => rebuild_list(heap, bindings, nb),
             }
         }
         None => bindings,
@@ -218,7 +245,7 @@ fn expand_let(heap: &mut Heap, items: &[Value], env: EnvId) -> LispResult {
     for &item in &items[2..] {
         out.push(macroexpand_all(heap, item, env)?);
     }
-    Ok(heap.list(out))
+    Ok(rebuild_list(heap, original, out))
 }
 
 // ---- pattern-binder lowering (the compile pass desugars these to `match*`) ----

@@ -168,6 +168,7 @@ eagerly). They are reserved names.
 | `(def name value)` | Define/redefine `name` in the **global** environment — redefinable, the language's only mutation. |
 | `(fn (params) body...)` | A lexical closure. `lambda` is an alias. |
 | `(let (a 1 b 2) body...)` | Sequential local bindings (each sees the previous). `let*` is an alias. |
+| `(letrec (f (fn ...) g (fn ...)) body...)` | Local **mutually recursive** bindings — every name is visible in every RHS (and to itself). Plain-symbol targets only; meant for fn definitions. |
 | `` (quasiquote tmpl) `` / `` `tmpl `` | Template: literal except `~x` inserts a value and `~@xs` splices a sequence. |
 | `(defmacro name (params) body...)` | Define a macro (see below). |
 
@@ -252,6 +253,31 @@ iterate and will not overflow the stack:
   (when (> n 0)
     (count-down (- n 1))))
 ```
+
+For purely side-effecting iteration, two prelude macros wrap the common patterns:
+
+```clojure
+(dotimes (i 3) (print i " "))    ; prints "0 1 2 "
+(dolist (x (list :a :b))         ; runs the body for each element
+  (println (name x)))            ; prints "a" then "b"
+```
+
+Both are tail-recursive and return `nil` (they're for effects). `doseq` (over
+`for`) is the alternative when destructuring or `:when` filters are wanted.
+
+Recursive **locals** — a helper fn that only exists inside one expression —
+use `letrec`, which makes every binding name visible in every RHS:
+
+```clojure
+(letrec (even? (fn (n) (if (= n 0) true  (odd?  (- n 1))))
+         odd?  (fn (n) (if (= n 0) false (even? (- n 1)))))
+  (even? 10))                    ;=> true
+```
+
+Each RHS sees a placeholder `nil` for every name until its real value is
+installed, so `letrec` is for mutually recursive **functions** (their bodies
+fire at call time, by which point the real values are bound). For a one-shot
+sequential binding, `let` is what you want.
 
 ## Macros
 
