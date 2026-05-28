@@ -8,8 +8,7 @@
 (describe "docs: leading module docstring"
   (test "a file's leading string form is its module doc"
     (assert= (docs--leading-doc "\"Hi.\" (def x 1)") "Hi."))
-  (test "a leading non-string means no module doc"
-    (assert= (docs--leading-doc "(def x 1)") nil))
+  (test "a leading non-string means no module doc" (assert= (docs--leading-doc "(def x 1)") nil))
   (test "comments before the string are skipped"
     (assert= (docs--leading-doc ";; a comment\n\"Hi.\"\n(def x 1)") "Hi."))
   (test "the baked-in test module carries a module docstring"
@@ -18,8 +17,7 @@
 (describe "docs: name attribution (global-names delta)"
   (test "added names are those in after but not before"
     (assert= (docs--added '(a b) '(a b c d)) '(c d)))
-  (test "nothing newly bound is empty"
-    (assert= (docs--added '(a b) '(a b)) nil)))
+  (test "nothing newly bound is empty" (assert= (docs--added '(a b) '(a b)) nil)))
 
 (describe "docs: classification"
   (test "functions and macros are documentable; plain values are not"
@@ -27,7 +25,8 @@
     (defmacro doc-test-macro (x) x)
     (is (docs--documentable? doc-test-fn))
     (is (docs--documentable? doc-test-macro))
-    (is (docs--documentable? map))          ; a native/closure builtin is a fn
+    (is (docs--documentable? map))
+    ; a native/closure builtin is a fn
     (refute (docs--documentable? 42))
     (refute (docs--documentable? "a string"))))
 
@@ -41,12 +40,10 @@
   (test "a documented function renders its signature and docstring"
     (defn doc-squared (x) "Return x times itself." (* x x))
     (assert= (docs--entry 'doc-squared doc-squared)
-             "### `(doc-squared x)`\n\nReturn x times itself.\n"))
+      "### `(doc-squared x)`\n\nReturn x times itself.\n"))
   (test "a macro entry is tagged"
     (defmacro doc-inc! (x) "Add one." `(+ ~x 1))
-    (assert= (docs--entry 'doc-inc! doc-inc!)
-             "### `(doc-inc! x)`  *(macro)*\n\nAdd one.\n"))
+    (assert= (docs--entry 'doc-inc! doc-inc!) "### `(doc-inc! x)`  *(macro)*\n\nAdd one.\n"))
   (test "an undocumented function gets a placeholder"
     (defn doc-bare (x) (* x x))
-    (assert= (docs--entry 'doc-bare doc-bare)
-             "### `(doc-bare x)`\n\n_Undocumented._\n")))
+    (assert= (docs--entry 'doc-bare doc-bare) "### `(doc-bare x)`\n\n_Undocumented._\n")))

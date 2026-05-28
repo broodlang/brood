@@ -41,11 +41,11 @@
     (is (mth-approx? (sqrt 16) 4))
     (is (mth-approx? (sqrt 4.0) 2))
     (is (mth-approx? (sqrt 2) 1.4142135623730951))
-    (is (mth-approx? (* (sqrt 7) (sqrt 7)) 7))      ; round-trips
+    (is (mth-approx? (* (sqrt 7) (sqrt 7)) 7))
+    ; round-trips
     (assert= (sqrt 0) 0.0)
     (assert= (type-of (sqrt 9)) :float))
-  (test "sqrt rejects a negative argument"
-    (assert-error (sqrt -1)))
+  (test "sqrt rejects a negative argument" (assert-error (sqrt -1)))
   (test "pow stays an Int when both args are non-negative ints"
     (assert= (pow 2 10) 1024)
     (assert= (pow 5 0) 1)
@@ -58,34 +58,31 @@
   (test "a float base with an integer exponent stays a float"
     (assert= (pow 2.0 3) 8.0)
     (assert= (pow 1.5 2) 2.25))
-  (test "pow requires an integer exponent (use sqrt for roots)"
-    (assert-error (pow 2 0.5)))
-  (test "pow and sqrt reject a non-number"
-    (assert-error (sqrt "x"))
-    (assert-error (pow :a 2))))
+  (test "pow requires an integer exponent (use sqrt for roots)" (assert-error (pow 2 0.5)))
+  (test "pow and sqrt reject a non-number" (assert-error (sqrt "x")) (assert-error (pow :a 2))))
 
 (describe "quot, even? and odd?"
   (test "quot is truncated integer division"
     (assert= (quot 17 5) 3)
-    (assert= (quot -17 5) -3)               ; truncates toward zero (unlike floor)
+    (assert= (quot -17 5) -3)
+    ; truncates toward zero (unlike floor)
     (assert= (type-of (quot 17 5)) :int))
-  (test "quot by zero raises"
-    (assert-error (quot 1 0)))
-  (test "quot/rem reconstruct the dividend"
-    (assert= (+ (* (quot 17 5) 5) (rem 17 5)) 17))
+  (test "quot by zero raises" (assert-error (quot 1 0)))
+  (test "quot/rem reconstruct the dividend" (assert= (+ (* (quot 17 5) 5) (rem 17 5)) 17))
   (test "even? / odd? classify integers"
-    (is (even? 0)) (is (even? 4)) (is (even? -2))
+    (is (even? 0))
+    (is (even? 4))
+    (is (even? -2))
     (refute (even? 3))
-    (is (odd? 1)) (is (odd? -3))
+    (is (odd? 1))
+    (is (odd? -3))
     (refute (odd? 4))))
 
 (describe "variadic min / max"
   (test "max / min over many args keep the extreme"
     (assert= (max 3 1 4 1 5 9 2 6) 9)
     (assert= (min 3 1 4 1 5 9 2 6) 1))
-  (test "max / min on a single arg return it"
-    (assert= (max 7) 7)
-    (assert= (min 7) 7))
+  (test "max / min on a single arg return it" (assert= (max 7) 7) (assert= (min 7) 7))
   (test "max / min work on floats and mixed numbers"
     (assert= (max 1 2.5 2) 2.5)
     (assert= (min 1 2.5 0.5) 0.5)))
@@ -98,26 +95,26 @@
 
 (defn mth-emit (parent n) (send parent [:r n (* n n) (pow n 3)]))
 (defn mth-spawn (parent ns)
-  (when (not (empty? ns))
-    (spawn (mth-emit parent (first ns)))
-    (mth-spawn parent (rest ns))))
+  (when (not (empty? ns)) (spawn (mth-emit parent (first ns))) (mth-spawn parent (rest ns))))
 (defn mth-collect (got total acc)
   (if (= got total)
     acc
     (mth-collect (+ got 1) total (receive ([:r n sq cu] (assoc acc n [sq cu]))))))
 
-(def mth-consts {:two 2 :ten 10})           ; a shared global read by many processes
-(defn mth-reader (parent i)
-  (send parent [:p (pow (get mth-consts :two) i)]))
+(def mth-consts {:two 2 :ten 10})
+; a shared global read by many processes
+(defn mth-reader (parent i) (send parent [:p (pow (get mth-consts :two) i)]))
 (defn mth-spawn-readers (parent n)
   (when (> n 0) (spawn (mth-reader parent n)) (mth-spawn-readers parent (- n 1))))
 (defn mth-sum (got total acc)
   (if (= got total) acc (mth-sum (+ got 1) total (receive ([:p v] (+ acc v))))))
 
-(describe "math across processes" :isolated
+(describe "math across processes"
+  :isolated
 
   (test "fan-out / fan-in: workers compute squares and cubes, parent folds them"
-    (mth-spawn (self) (mth-range 1 21))      ; 20 workers, n = 1..20
+    (mth-spawn (self) (mth-range 1 21))
+    ; 20 workers, n = 1..20
     (let (m (mth-collect 0 20 {}))
       (assert= (count m) 20)
       (assert= (get m 2) [4 8])

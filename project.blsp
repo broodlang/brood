@@ -8,7 +8,5 @@
 ;; :source-paths / :test-paths. This repo has no Brood app `src/` — the standard
 ;; library is embedded (std/*.blsp) and the language itself is Rust (crates/) — so
 ;; we only point the runner at the in-language tests in `tests/`.
-(project
-  :name       "brood"
-  :version    "0.1.0"
-  :test-paths ["tests"])    ; override; e.g. :source-paths ["lib"] for a real app
+(project :name "brood" :version "0.1.0" :test-paths ["tests"])
+; override; e.g. :source-paths ["lib"] for a real app

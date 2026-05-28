@@ -76,9 +76,14 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   callee's `Arity` — primitives, curated stdlib, inferred closures) and
   **unbound-symbol diagnostics** (call heads; scope-aware over `fn`/`lambda`/
   `let`/`def`/`defn`/`defmacro`, with a `check_file` API accumulating
-  file-local def names across forms). Remaining: cond-/match-/and-/or-chained
-  guard narrowing, plus auto-running in `brood <file>` / `nest test` /
-  `nest check`.
+  file-local def names across forms); plus **auto-running** the checker in
+  `brood <file>` / `brood --test` / `nest test` / `nest run` (advisory, to
+  stderr) and the dedicated `nest check` (to stdout, exit non-zero on
+  warnings — for CI). `BROOD_NO_CHECK=1` is the uniform opt-out across
+  every entry point. The Rust primitive `(check-file path)` exposes the
+  file-level walk to Brood; `(check-project)` in `std/project.blsp` walks
+  the project's source + test paths. Remaining: cond-/match-/and-/or-chained
+  guard narrowing (the macro-expanded `(let (g …) (if g …))` shape).
   ⬜ Step 5+: structured types. Steps 0–2 are foundation; Step 3 puts sigs on
   the kernel; the first *behavioural* payoff is Step 4. Advisory throughout —
   never gates, never inhibits the dynamic language; not the TypeScript route.

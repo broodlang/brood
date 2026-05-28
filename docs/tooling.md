@@ -43,10 +43,16 @@ user `(throw …)` (which prints `error: …`). The process exits non-zero.
 
 - **Parse errors** carry the reader's **exact** `line:col` — the character where
   parsing failed.
-- **Runtime errors** carry the **start `line:col` of the enclosing top-level
-  form**. This is deliberately coarse: macro expansion rewrites inner forms, so
-  a precise inner position is unreliable in general, whereas the top-level form
-  is always known and always clickable.
+- **Runtime errors** carry the **`line:col` of the innermost combination** that
+  produced them — not the enclosing top-level form. The evaluator's
+  error-propagation path is annotated at every call boundary (`or_form_pos`,
+  innermost wins), and the compile pass (macroexpand-all) copies positions
+  through to rebuilt list forms — so a misuse inside a `(when …)` or `(let …)`
+  body still points at the failing line, not the outer form's start. Body
+  forms inside a `def`'d closure live in the shared RUNTIME region after
+  promotion and have no recorded position; an error inside such a closure
+  reports the **call site** (the innermost LOCAL combination), not the line
+  inside the body — a stack trace would close that gap (M2+).
 
 When the file and position are both known the CLI also prints the offending
 **source line and a caret** under the column:
@@ -59,9 +65,26 @@ examples/tour.blsp:12:5: parse error: unclosed list (opened here)
 
 If no position is known the CLI falls back to `FILE: message` (file still
 clickable, no line). `LispError` carries optional `error::Pos { line, col }` and
-`file`; `Interp::eval_source` and `load` tag errors with the enclosing top-level
-form's position. The REPL path (`eval_str`) leaves them unset — nothing to point
-into.
+`file`; `Interp::eval_source` and `load` tag the *enclosing top-level form*'s
+position as a fallback (an error with no inner pos takes that), and the eval
+loop's per-call annotation refines it to the innermost LOCAL form. The REPL
+path (`eval_str`) leaves `file` unset, but `pos` is still attached so
+multi-line input gets a `LINE:COL:` prefix on the diagnostic.
+
+### Auto-running the advisory checker
+
+`brood <file>`, `brood --test <file>`, `nest test`, and `nest run` all
+**auto-run the advisory checker** before evaluating, so unbound-symbol /
+type-misuse / arity warnings appear before the run starts. Warnings go to
+**stderr** (so the file's own stdout output stays unmixed) in the same GNU
+`FILE:LINE:COL: warning: msg` format the `brood --check` mode uses. The run
+proceeds regardless — the checker is advisory and never gates.
+
+- `nest check` is the dedicated mode: same walk as the auto-check but no
+  eval, warnings to **stdout** (pipeable), **exit non-zero** when any
+  warning fires (for CI).
+- Set `BROOD_NO_CHECK=1` to silence the auto-check (e.g. when timing a hot
+  path, or while the checker has known false positives in your code).
 
 ## Test output: a structured block per failure
 

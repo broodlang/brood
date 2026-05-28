@@ -1348,10 +1348,14 @@ never special-case "is this remote?" at the call site. Pids are used opaquely in
 Brood (send targets, message payloads, `[:down …]`), so the change is mechanical.
 
 **Scope / deferred.** One node per OS process (node identity + tables + interner
-are process-global). Deferred to later slices: **remote `spawn`/code shipping**
-(the closure-as-data path from ADR-033 is the missing piece — the wire codec
-rejects a `Closure` for now), distributed monitors/links, node-down detection,
-reconnect/net-split handling, and real authentication.
+are process-global). Deferred to later slices: distributed monitors/links,
+reconnect/net-split handling, and real authentication. Node-down detection
+landed with slice 2; the **closure-as-data path from ADR-033** landed too — the
+`M_CLOSURE` wire codec now ships every `ClosureMsg` field, so `(send target
+fn)` and the `[:run f x reply]` pattern run end-to-end across nodes (see
+`docs/distribution.md` and `lambda_ships_across_nodes_and_runs` in
+`crates/cli/tests/distribution.rs`). A dedicated `remote-spawn` is the small
+remaining sugar over that.
 
 ## ADR-035 — Tracing GC: per-process mark-sweep, fired only at the outermost-eval safepoint
 

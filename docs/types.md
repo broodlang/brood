@@ -183,9 +183,30 @@ never a false positive.
   threads top-level `def`/`defn` names across forms so a later call to an
   earlier definition isn't flagged. The CLI's `brood --check` now uses
   `check_file`.
+- ✅ **Auto-running at file boundaries.** The checker now fires automatically:
+  `brood <file>` and `brood --test <file>` pre-check before evaluating (CLI
+  wiring through `check_one_file`); `nest run` and `nest test` pre-check the
+  whole project after loads but before running (Brood `(check-project)` in
+  `std/project.blsp` walking every `.blsp` under `src/` + `tests/`). Warnings
+  go to **stderr** so they don't muddle program output; the run/test
+  **proceeds regardless** (advisory, never gates — `contract #5`). Set
+  `BROOD_NO_CHECK=1` to opt out (e.g. when timing a hot path).
+  Mechanism: a new `(check-file path)` Rust primitive reads and checks a file,
+  returning pre-formatted `path:line:col: warning: …` strings; policy in Brood
+  iterates over the project's files via `(check-project)` (the standard
+  policy-in-Brood pattern, ADR-006).
+- ✅ **Macro-expansion before walking.** `check_file` now macroexpands each
+  top-level form before walking it, so threading macros (`->`/`->>`), pattern
+  syntax (`match`), test framework wrappers (`test`/`describe`/`error-of`/
+  `assert-error`), and any user macro that rearranges code are checked
+  against their *expanded* shape — eliminating false positives like
+  `(map inc)` inside `(->> xs (map inc))` getting flagged as 1-arg. The
+  file-globals accumulator likewise walks the expanded tree recursively, so
+  a `(defn foo …)` nested inside `test`/`describe`/etc. still shields a later
+  `(foo …)` from the unbound check. Positions survive expansion where the
+  macro rebuilds through `rebuild_list` (the common case).
 - ⬜ **next:** cond-/match-/and-/or-chained guard narrowing; running
-  automatically in `brood <file>` / `nest test` / `nest check` (today only
-  `brood --check` is wired).
+  automatically in `nest check` (a project-wide check-only entry point).
 
 ### Step 5+ — structured types ⬜
 Function arrows, vector/list element types, intersections for overloaded fns —

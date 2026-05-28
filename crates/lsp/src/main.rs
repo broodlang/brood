@@ -18,8 +18,9 @@
 // effectively-immutable URI — the canonical document-store key. False positive.
 #![allow(clippy::mutable_key_type)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
+use std::path::{Path, PathBuf};
 
 use lsp_server::{Connection, ErrorCode, Message, Notification as ServerNotification, Request, RequestId, Response};
 use lsp_types::notification::{
@@ -32,12 +33,14 @@ use lsp_types::request::{
 };
 use lsp_types::{
     CompletionOptions, CompletionParams, Diagnostic, DiagnosticSeverity, DocumentSymbolParams,
-    GotoDefinitionParams, HoverParams, HoverProviderCapability, OneOf, PositionEncodingKind,
-    PublishDiagnosticsParams, Range, ServerCapabilities, SignatureHelpOptions, SignatureHelpParams,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
+    GotoDefinitionParams, HoverParams, HoverProviderCapability, OneOf, Position,
+    PositionEncodingKind, PublishDiagnosticsParams, Range, ServerCapabilities, SignatureHelpOptions,
+    SignatureHelpParams, TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
 };
 
-use brood::syntax::{cst, scope};
+use brood::core::value::Value;
+use brood::syntax::{cst, reader, scope};
+use brood::types::check::check_file;
 use brood::Interp;
 
 mod completion;
@@ -102,9 +105,14 @@ type Documents = HashMap<Uri, String>;
 fn main_loop(connection: &Connection) -> Result<(), Box<dyn Error + Sync + Send>> {
     let mut docs: Documents = HashMap::new();
     // One interpreter, loaded with the prelude + builtins, answers introspection
-    // queries (completion candidates, hover signatures). It never evaluates the
-    // open document — see the module docs / `docs/lsp.md`.
+    // queries (completion candidates, hover signatures) and runs the advisory
+    // type checker over each document. The first time a file under a project is
+    // opened, its `project.blsp` + sources + the test framework are loaded once
+    // into this Interp (see `bootstrap_project`), so cross-module names and
+    // `describe`/`test`/`assert=`/`is` resolve. Project roots already bootstrapped
+    // are tracked here so subsequent edits don't re-load. See `docs/lsp.md`.
     let mut interp = Interp::new();
+    let mut bootstrapped: HashSet<PathBuf> = HashSet::new();
 
     for msg in &connection.receiver {
         match msg {
@@ -119,7 +127,7 @@ fn main_loop(connection: &Connection) -> Result<(), Box<dyn Error + Sync + Send>
             }
             Message::Response(_) => {} // we issue no server→client requests yet
             Message::Notification(not) => {
-                handle_notification(connection, &mut docs, not)?;
+                handle_notification(connection, &mut docs, &mut interp, &mut bootstrapped, not)?;
             }
         }
     }
@@ -234,6 +242,8 @@ fn handle_request(docs: &Documents, interp: &mut Interp, req: Request) -> Respon
 fn handle_notification(
     connection: &Connection,
     docs: &mut Documents,
+    interp: &mut Interp,
+    bootstrapped: &mut HashSet<PathBuf>,
     not: ServerNotification,
 ) -> Result<(), Box<dyn Error + Sync + Send>> {
     // Bad params must not tear down the connection: a malformed (or
@@ -246,7 +256,7 @@ fn handle_notification(
             };
             let uri = p.text_document.uri;
             docs.insert(uri.clone(), p.text_document.text);
-            publish(connection, docs, &uri)?;
+            publish(connection, docs, interp, bootstrapped, &uri)?;
         }
         DidChangeTextDocument::METHOD => {
             let Some(p) = params::<lsp_types::DidChangeTextDocumentParams>(not) else {
@@ -256,7 +266,7 @@ fn handle_notification(
             if let Some(change) = p.content_changes.into_iter().last() {
                 let uri = p.text_document.uri;
                 docs.insert(uri.clone(), change.text);
-                publish(connection, docs, &uri)?;
+                publish(connection, docs, interp, bootstrapped, &uri)?;
             }
         }
         DidCloseTextDocument::METHOD => {
@@ -287,18 +297,85 @@ fn params<P: serde::de::DeserializeOwned>(not: ServerNotification) -> Option<P> 
     }
 }
 
-/// Parse the document, turn its `Error` nodes into LSP diagnostics, and publish.
+/// Extract the filesystem path from a `file://` URI. Best-effort: typical Unix
+/// paths have no percent-encoded characters, and a non-`file://` URI (or any
+/// path we can't reason about) returns `None` so callers skip project work.
+fn uri_to_path(uri: &Uri) -> Option<PathBuf> {
+    uri.as_str().strip_prefix("file://").map(PathBuf::from)
+}
+
+/// Walk up from `file_path` looking for a directory containing `project.blsp`,
+/// the project root marker. `None` if the file isn't inside a Brood project.
+fn find_project_root(file_path: &Path) -> Option<PathBuf> {
+    let mut dir = file_path.parent()?;
+    loop {
+        if dir.join("project.blsp").exists() {
+            return Some(dir.to_path_buf());
+        }
+        match dir.parent() {
+            Some(p) if p != dir => dir = p,
+            _ => return None,
+        }
+    }
+}
+
+/// Bootstrap the project rooted at the file in `uri` — once per project root
+/// per server lifetime. Loads the manifest, puts source dirs on `*load-path*`,
+/// loads every project source so cross-module names resolve, and `require`s
+/// the test framework so `describe`/`test`/`assert=`/`is` are bound in test
+/// files. Cached in `bootstrapped` so we don't re-load on every keystroke.
+/// Best-effort: failures log and continue (the checker still runs with at
+/// least the prelude). Files outside a project are a silent no-op.
+fn bootstrap_project(interp: &mut Interp, bootstrapped: &mut HashSet<PathBuf>, uri: &Uri) {
+    let Some(file_path) = uri_to_path(uri) else { return };
+    let Some(root) = find_project_root(&file_path) else { return };
+    if bootstrapped.contains(&root) {
+        return;
+    }
+    // Escape backslashes and quotes for embedding into a Brood string literal.
+    // Common Unix paths have neither, but be safe.
+    let esc = root.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
+    let cmd = format!(
+        "(require 'project) (project-setup \"{e}\") (project-load-sources \"{e}\") (require 'test)",
+        e = esc,
+    );
+    if let Err(e) = interp.eval_str(&cmd) {
+        eprintln!("brood-lsp: project bootstrap failed for {}: {e}", root.display());
+    }
+    // Mark bootstrapped regardless of success — a partial load is consistent
+    // (each top-level form's `eval_str` is checkpointed), and re-running on
+    // every publish would re-load every source on every keystroke.
+    bootstrapped.insert(root);
+}
+
+/// Parse the document and publish two tiers of diagnostics:
+/// (1) **syntactic errors** — `Error` nodes in the tooling CST (parser failures,
+///     always severity ERROR; the document doesn't parse).
+/// (2) **advisory type-check warnings** — `check_file` over the positioned
+///     forms (severity WARNING; the document parses but the checker spotted
+///     something — unbound names, arity mismatch, type-misuse). Project sources
+///     and the test framework are pre-loaded via `bootstrap_project`, so
+///     cross-module references and test-framework macros resolve.
 fn publish(
     connection: &Connection,
     docs: &Documents,
+    interp: &mut Interp,
+    bootstrapped: &mut HashSet<PathBuf>,
     uri: &Uri,
 ) -> Result<(), Box<dyn Error + Sync + Send>> {
     let Some(text) = docs.get(uri) else {
         return Ok(());
     };
-    let root = cst::parse(text);
+
+    // Make project-local + test-framework names visible to the checker
+    // (idempotent, cached per project root). No-op outside a project.
+    bootstrap_project(interp, bootstrapped, uri);
+
+    let cst_root = cst::parse(text);
     let index = LineIndex::new(text);
-    let lsp_diags = diagnostics::collect(&root, text)
+
+    // (1) Syntactic diagnostics — Tier 0.
+    let mut lsp_diags: Vec<Diagnostic> = diagnostics::collect(&cst_root, text)
         .into_iter()
         .map(|d| {
             let range = Range::new(
@@ -311,6 +388,34 @@ fn publish(
             diag
         })
         .collect();
+
+    // (2) Type-check warnings — Tier 1, only when the parse succeeded enough to
+    // read positioned forms. Wrapped in an arena checkpoint so the document's
+    // parsed forms (allocated in LOCAL) are reclaimed after the check — the
+    // Interp's heap doesn't grow per keystroke. Project sources / `defn`s the
+    // bootstrap loaded promote to RUNTIME, so they survive this reset.
+    let cp = interp.heap.checkpoint();
+    if let Ok(positioned) = reader::read_all_positioned(&mut interp.heap, text) {
+        let forms: Vec<Value> = positioned.into_iter().map(|(f, _)| f).collect();
+        for (pos_opt, msg) in check_file(&mut interp.heap, &forms) {
+            if let Some(pos) = pos_opt {
+                // `Pos` is 1-based; LSP `Position` is 0-based. A 1-character
+                // marker is enough to anchor the squiggle — editors widen it
+                // to the token under it. `saturating_*` handles the edge cases
+                // (`pos.line == 0`, end-of-line columns) without panicking.
+                let line = pos.line.saturating_sub(1);
+                let col = pos.col.saturating_sub(1);
+                let start = Position::new(line, col);
+                let end = Position::new(line, col.saturating_add(1));
+                let mut diag = Diagnostic::new_simple(Range::new(start, end), msg);
+                diag.severity = Some(DiagnosticSeverity::WARNING);
+                diag.source = Some("brood".to_string());
+                lsp_diags.push(diag);
+            }
+        }
+    }
+    interp.heap.reset_local_to(cp);
+
     send_diagnostics(connection, uri, lsp_diags)
 }
 
@@ -420,7 +525,10 @@ mod server_tests {
                     content_changes: vec![TextDocumentContentChangeEvent {
                         range: None,
                         range_length: None,
-                        text: "(foo)".into(),
+                        // A well-formed form with no unbound names — so the
+                        // type-check tier produces no warnings either, and the
+                        // diagnostics list is genuinely empty.
+                        text: "nil".into(),
                     }],
                 },
             ))

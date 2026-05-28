@@ -17,16 +17,15 @@
     (assert= (project--parse-main '(foo bar)) '(foo bar)))
   (test "a 1-list is rejected"
     (assert= "project: :main must be a module symbol or '(module fn), got (foo)"
-             (try (project--parse-main '(foo)) (catch e e))))
+      (try (project--parse-main '(foo)) (catch e e))))
   (test "a 3-list is rejected"
     (assert= "project: :main must be a module symbol or '(module fn), got (foo bar baz)"
-             (try (project--parse-main '(foo bar baz)) (catch e e))))
+      (try (project--parse-main '(foo bar baz)) (catch e e))))
   (test "a non-symbol head is rejected"
     (is (string? (try (project--parse-main '("foo" main)) (catch e e)))))
   (test "a non-symbol fn is rejected"
     (is (string? (try (project--parse-main '(foo "main")) (catch e e)))))
-  (test "a string is rejected"
-    (is (string? (try (project--parse-main "main") (catch e e))))))
+  (test "a string is rejected" (is (string? (try (project--parse-main "main") (catch e e))))))
 
 (describe "project: default entry"
   (test "*project-main* defaults to (main main)"

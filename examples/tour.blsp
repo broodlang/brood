@@ -9,8 +9,7 @@
 (println "10 mod 3    =" (mod 10 3))
 
 ;; defn, with optional args (default values)
-(defn greet (name &optional (greeting "hello"))
-  (str greeting ", " name))
+(defn greet (name &optional (greeting "hello")) (str greeting ", " name))
 (println (greet "world"))
 (println (greet "world" "hi"))
 

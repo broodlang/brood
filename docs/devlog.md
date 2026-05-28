@@ -2647,3 +2647,282 @@ tool, a static checker, the LSP), that's the point at which the data shape
 deserves its own ADR.
 
 
+
+
+---
+
+## 2026-05-28 — Source locations in errors + auto-running the checker
+
+**Goal.** Close two of M1's loudest remaining ⬜s in one pass: (1) make
+runtime errors carry the **innermost** form's `file:line:col`, not just the
+enclosing top-level form's start, and (2) wire the advisory checker into
+the run-paths so a misuse warns before evaluation begins.
+
+**Built — source locations.**
+
+- `LispError::or_form_pos(heap, form)` — the `or_pos` shape, but driven by
+  `heap.form_pos(form)`. Non-overwriting (inner wins); the lookup is only
+  on the error path, so the hot path pays nothing.
+- The eval loop (`crates/lisp/src/eval/mod.rs`) attaches `or_form_pos` at
+  every error-propagation site: `if` test, `def` value, `let`/`let*`/
+  `letrec` RHSs, `tail_of_cons` (non-tail body forms), the macro-call
+  expansion, the head eval for a non-symbol head, the argv loop, the
+  native dispatch, `bind_params`, and the closure non-tail body forms.
+  `apply_closure` (used outside the eval loop) gets the same body-form
+  treatment. The combination's position (`call_form`) is the fallback for
+  primitive errors and arity errors that originate without one.
+- The compile pass (`crates/lisp/src/eval/macros.rs`) now carries
+  positions through to rebuilt list forms. Without this, a `(when …)`
+  body's inner combination loses its `form_pos` to expansion and the
+  error falls back to the enclosing top-level. A new helper
+  `rebuild_list(heap, original, items)` reads the original's pos and
+  re-stamps it on the rebuilt list; `expand_let`/`expand_tail` and the
+  default-case rebuild all flow through it.
+
+**Verified — source locations.**
+
+- Six explicit tests in `crates/lisp/tests/basic.rs` cover the matrix:
+  `runtime_errors_carry_innermost_form_position` (a `do` body's misuse
+  reports the misuse's line, not the `do`'s), `runtime_error_inside_let_rhs_points_at_rhs`,
+  `runtime_error_inside_if_test_points_at_test`,
+  `position_survives_macroexpansion` (a misuse inside a `when` body
+  still points at the source line — guards the new
+  carry-through), `located_diagnostic_carries_file_line_col` (end-to-end
+  `PATH:3:1: type error: …` from `load`), and
+  `eval_str_attaches_position_no_file` (REPL still tags positions, just
+  with `file` unset).
+- The existing `parse_errors_carry_precise_position` keeps passing —
+  parse errors still come from the reader unchanged.
+
+**Built — auto-running the checker.**
+
+- The CLI's `run_check_files` was refactored into `check_one_file(interp,
+  path, src, sink)` returning `bool` warned; `run_files` and
+  `run_test_files` call it with `CheckSink::Stderr` before each
+  `eval_file` so warnings appear before the file's own output. `BROOD_NO_CHECK=1`
+  silences the auto-check (uniform opt-out across every entry point).
+- A new Rust primitive `(check-file path)` exposes the file-level
+  checker to Brood, returning a list of pre-formatted
+  `"path:line:col: warning: msg"` strings. The `check_file` walk it goes
+  through is exactly what `brood --check` uses.
+- `std/project.blsp` adds `(check-project)`: walks every `.blsp` under
+  `*project-source-paths*` + `*project-test-paths*`, calls
+  `(check-file)` per file, prints each warning to stderr, returns the
+  total count. Honors `BROOD_NO_CHECK=1` too. `run-project-tests` and
+  `run-project` now call it as a pre-flight after loads.
+- `crates/nest/src/main.rs` adds the `nest check` subcommand. Same
+  walk, but warnings go to **stdout** and the process **exits non-zero**
+  when the count is positive — for CI. The bootstrap `(require 'test)`
+  first, so test-framework macros are in the global table before the
+  walk (otherwise a test file's `test`/`assert=`/`describe` flag as
+  unbound — the checker reads files without executing their `(require
+  'test)`).
+
+**Side fix.** Spotted while looking at the auto-check noise: `%receive`'s
+declared `Sig` had its last two arg types swapped — `(callable, callable,
+int|nil)` instead of `(callable, int|nil, callable|nil)`. The Rust
+signature is `(matcher, timeout, on_timeout)`; the macro in
+`std/prelude.blsp` matches that order. Wrong sig was producing
+~150 false-positive warnings per project that uses `receive`. Sig
+corrected; warning count on a `nest test` of this repo drops from
+200 → 58.
+
+**Tests.** `cargo test`: every workspace suite green (60 + 89 + 3 + 1 +
+1 + 44 + 6 + 1 = 205 Rust tests; the +4 over the prior baseline is the
+new position tests, accounting for the two old top-level-pos tests
+replaced by their innermost-pos counterparts). `nest test` on the
+Brood repo: **439 / 439 in-language tests pass** (up from 420 — the +19
+include the position/auto-check coverage). `cargo clippy
+--all-targets`: 2 warnings, both pre-existing (`dist.rs:497`,
+`process.rs:549`).
+
+**Docs.**
+- `docs/tooling.md` — the position-precision section rewritten: runtime
+  errors now report the innermost combination, not the top-level form;
+  the closure-body / RUNTIME caveat noted (stack trace is M2+). New
+  subsection "Auto-running the advisory checker" covers the entry
+  points, sinks, exit codes, and `BROOD_NO_CHECK`.
+- `ROADMAP.md` — the "Source locations in errors" ⬜ ticked ✅ with the
+  carry-through rationale and the RUNTIME-bodies caveat.
+- `docs/roadmap.md` — the Step-4 types bullet updated: auto-running is
+  done; the only remaining 🟡 piece is `and`/`or`/`cond`/`match`-chained
+  guard narrowing.
+
+**What's still ⬜ for Stage 1.** None at the *language-completeness* tier
+(`ROADMAP.md`): every Tier-1, Tier-2, and Tier-3 box is now ✅ (modulo
+the cross-process stack-trace nuance for closure-body positions, which
+is M2+ territory). The remaining M1 work is REPL polish, the
+self-host-CLI goal, and Tier-2 LSP wiring — all listed in
+`docs/roadmap.md`.
+
+---
+
+## 2026-05-28 — Auto-checker polish: macroexpand walk, scope fixes, sig fixes
+
+**Goal.** With the auto-checker now firing from every entry point
+(`brood <file>`, `brood --test`, `nest test`, `nest run`, `nest check`),
+shake out the residual false positives a real codebase surfaces. Target:
+0 warnings on a clean scaffold and on the project's own suite,
+modulo macros that define names at runtime.
+
+**Built.**
+- **Macroexpand before walking.** `check_file` (Rust) now `macroexpand_all`s
+  each top-level form before the disjointness walk, so threading macros
+  (`->`/`->>`), `match` pattern syntax, and any user wrapper (`test`/
+  `describe`/`error-of`/`assert-error`) are checked against their *expanded*
+  shape. Without this, `(map inc)` inside `(->> xs (map inc))` looked like
+  a 1-arg call to `map`; `_` in `(match … (_ …))` looked like an unbound
+  symbol; `(cons 1)` inside `(error-of …)` triggered a fake arity
+  warning. The accumulator that collects file-local def names is now a
+  *recursive* walk over the expanded tree — `defn` nested inside `test`/
+  `describe`/etc. still shields a later call, because Brood's `def` is
+  global regardless of where it textually sits. Positions survive
+  expansion via `rebuild_list`'s carry-through (the common case).
+- **`%try` in `skips_body`.** Post-expansion, `(try …)` becomes
+  `(%try (fn () body) (fn (e) handler))`. The walk was descending into
+  the body and flagging every error the user was *deliberately*
+  asserting on (every `(error-of (cons 1))` in the test suite). Adding
+  `%try` to the skip list covers `try` / `error-of` / `assert-error`
+  uniformly post-expansion (they all expand through `try`).
+- **`letrec` pre-binding** in `check_let`. The `(letrec (fact (fn (n) …
+  (fact …))) …)` shape needs every binder visible in every RHS, not just
+  the prior ones (the mutual-recursion reason `letrec` exists). The
+  checker now pre-binds every name to "in scope, type unknown" before
+  walking the RHSs, matching the evaluator's nil-pre-bind. `let`/`let*`
+  keep their sequential walk.
+- **`NEVER`-typed args skipped.** When guard narrowing intersects a
+  variable's type down to `Ty::NEVER` (the empty set — unreachable code),
+  every disjointness check against it would warn. That's all noise: the
+  code can't execute, so there's no real misuse. The walk now skips the
+  type check when `arg_ty.is_never()`. Surfaces in pattern-match
+  lowering where a guard has narrowed a temp to a type with no
+  inhabitants for the current branch.
+- **`is_globally_bound` for macro recognition.** The unbound check was
+  consulting `sig_of` / `arity_of`, both of which only match `Value::Native`
+  / `Value::Fn`. A `Value::Macro` (the test framework's `test` /
+  `assert=` / `describe`, every user `defmacro`) fell through both and
+  got flagged "unbound symbol". Fix: check `heap.env_get` directly — any
+  bound value counts as in scope. The unbound check is independent of
+  "is the sig informative".
+- **Sig fixes** found by running the auto-check on the real suite:
+  - `%builtin-module` accepts symbol *or* keyword *or* string (the
+    require flow passes a name via `(name mod)`, a string). Returns
+    `string | nil`.
+  - `name` accepts string too (it's idempotent on a string).
+  - `%binding` arg 0/1 are *sequences* (the macro emits `(quote (*a*
+    *b* …))` + `[v1 v2 …]`), not a single symbol/value.
+  - `%receive` had positions 1/2 swapped — `(matcher, timeout, on-timeout)`,
+    not `(matcher, on-timeout, timeout)`. ~150 fake warnings on any
+    project using `receive` (already noted in the previous entry, listed
+    here for completeness).
+- **`eprint` primitive + `eprintln` Brood wrapper** so `(check-project)`
+  can write warnings to stderr without muddling program stdout. Mirrors
+  `print`/`println`.
+- **`project--ensure-loaded`** in `std/project.blsp`: `(check-project)`
+  and `check-project-sources` now project-setup + project-load-sources
+  themselves, so `nest check` works standalone (the prior version
+  assumed the caller had loaded sources, which `nest test`/`run` do but
+  `nest check` did not). Re-running after a loaded setup is idempotent
+  (Brood `def` replaces `def`).
+
+**End-to-end.** On a clean `nest new` scaffold: `nest check` is silent
+(exit 0); `nest test` runs the auto-check first then the tests (both
+silent on a clean project). On the Brood repo's own suite: warning
+count dropped from 58 to **1** — the remaining one is `pm-qfac` in
+`pattern_matching_test.blsp`, defined by a user `defmacro` (`pm-def-fac`)
+whose body isn't visible to `macroexpand_all` because `defmacro` only
+registers the macro at *evaluation* time, not at expansion. This is a
+known limitation of static checking without evaluation; documented.
+
+**Verified.** `cargo test`: 89 + 60 + 3 + 44 + 1 + 6 + 1 + 1 = 205
+Rust tests pass. `nest test`: 439 / 439 in-language tests pass.
+`cargo clippy`: 2 warnings, both pre-existing (`dist.rs`, `process.rs`
+type complexity).
+
+**What's left in Step 4.** Cond-/match-/and-/or-chained guard narrowing
+(the macro-expanded `(let (g …) (if g …))` shape); a way for the checker
+to see through `(somemacro defines-this)` patterns (a runtime-defmacro
+limitation — currently uncatchable without partial eval). Step 5
+(structured types) stays deferred — additive, replaces the bitset rep,
+no concrete pressure (ADR-011).
+
+
+---
+
+## 2026-05-28 — Cross-node closure shipping (ADR-033 wire codec)
+
+**Goal.** Finish the last piece of ADR-033: ship a closure across a TCP link
+between two runtimes. Within a runtime the serialiser
+(`closure_to_message`/`closure_from_message`) was already complete; the wire
+codec in `dist.rs` still had a `return Err("not supported yet")` stub for
+`Message::Closure`.
+
+**Built.**
+- `crates/lisp/src/process.rs` — `ClosureMsg` fields elevated to `pub(crate)`
+  so the sibling `dist` module can read them. They're inert plain data once
+  built, so there's no invariant for accessors to defend.
+- `crates/lisp/src/dist.rs` — new `M_CLOSURE = 13` tag, plus
+  `encode_closure` / `decode_closure` that walk every `ClosureMsg` field in
+  the struct's declared order:
+  - `Option<Symbol>` and `Option<String>` via two new helpers
+    (`put_opt_sym` / `get_opt_sym`, `put_opt_str` / `get_opt_str`) with a
+    one-byte `0`/`1` presence tag — cheap and unambiguous in a stream codec.
+  - Symbols travel by name (existing `put_sym` — separate runtimes have
+    independent interners; the id is meaningless across the wire).
+  - Body forms and `&optional` defaults are already `Message`s (S-expression
+    data — homoiconicity in action), so they recurse through the existing
+    `encode_msg`/`decode_msg`. Code travels as ordinary data.
+  - `prealloc(r, n)` clamps every `Vec` allocation to the frame's remaining
+    bytes, so a tiny frame claiming a huge `body.len()` can't trigger a giant
+    up-front alloc — the decode loop fails cleanly on EOF instead.
+
+**Tests.**
+- `crates/lisp/src/dist.rs` — two unit round-trip tests in the existing
+  `tests` module:
+  - `closure_roundtrips_through_the_wire` — a full-featured `ClosureMsg`
+    (name, multi-param, optional with a default, rest, body, doc, captures)
+    survives encode → decode unchanged.
+  - `closure_with_all_options_absent_roundtrips` — the minimal case (no
+    name / no rest / no doc / no optionals / no captures) — guards the four
+    `Option<…>` 0/1 tags from mis-aligning when None.
+- `crates/cli/tests/distribution.rs` — `lambda_ships_across_nodes_and_runs`,
+  end-to-end with two real `brood` subprocesses. A `:worker` on node A waits
+  for `[:run f x reply]`. The client on node B builds `(fn (x) (* x n))`
+  inside a `let (n 3)` (so `n` is a captured free local that has to ride
+  along) and ships it via `send`. The worker applies it, gets `42`, sends
+  the result back to the reply pid. Verifies every leg: the body forms
+  crossing as `Message::List`, `n` arriving via `captured`, the free
+  global `*` re-resolving against the receiver's prelude, and the pid in
+  the request routing the result back the way it came.
+
+**Verified.**
+- `cargo test`: every workspace suite green. The `dist::tests` count is now
+  7 (was 5), the `distribution` integration suite is 7 (was 6).
+- `nest test`: **441 / 441 in-language tests** pass.
+- `cargo clippy --all-targets`: 2 warnings, both pre-existing
+  (`dist.rs:497`, `process.rs:549`).
+
+**Docs.**
+- `ROADMAP.md` — "Send functions between processes" 🟡 → ✅ with the
+  inside-a-runtime / across-nodes split and the test that proves the latter.
+- `docs/distribution.md` — slice-1 "Scope & limitations" updated: the
+  closure-as-data path is no longer deferred. The round-trip `[:run f x …]`
+  pattern is the working surface; a dedicated `remote-spawn` is a small
+  convenience over it.
+- `docs/decisions.md` — ADR-034's deferred-list edited the same way: the
+  closure shipping is no longer in the "missing piece" hedge.
+
+**What's left in distribution.** Distributed monitors/links (today's
+`monitor` is local only), reconnect/net-split handling, a dedicated
+`remote-spawn` macro over the `[:run f x reply]` pattern, and the v2
+handshake (versioning + challenge–response auth). Each is additive over
+slices 1 + 2 + this; nothing in the language core blocks them.
+
+**Connection to today's source-location work.** Closures sent across nodes
+land in the receiver's LOCAL heap via `closure_from_message` — which builds
+fresh `Pair`s with no `form_pos` entries. So an error inside a remote-shipped
+closure today still reports the receiver's call site, not the line on the
+sender. The natural follow-up is to thread `(line, col)` through `ClosureMsg`
+(eight bytes per pair) so positions cross the wire; the receiver-side
+`heap.set_form_pos` API already accepts them. Additive; deferred until a
+real diagnostic-quality complaint surfaces.

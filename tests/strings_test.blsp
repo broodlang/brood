@@ -12,9 +12,7 @@
   (test "idempotent on already-cased / non-alpha"
     (assert= (upper "ABC 123") "ABC 123")
     (assert= (lower "abc 123") "abc 123"))
-  (test "Unicode-aware"
-    (assert= (upper "ß") "SS")
-    (assert= (upper "naïve") "NAÏVE")))
+  (test "Unicode-aware" (assert= (upper "ß") "SS") (assert= (upper "naïve") "NAÏVE")))
 
 (describe "string <-> number"
   (test "integers parse to ints"
@@ -48,52 +46,36 @@
   (test "index-of finds the first occurrence"
     (assert= (index-of "hello world" "o") 4)
     (assert= (index-of "hello world" "world") 6))
-  (test "index-of is -1 when absent"
-    (assert= (index-of "hello" "z") -1))
-  (test "the empty needle is found at 0"
-    (assert= (index-of "hello" "") 0))
+  (test "index-of is -1 when absent" (assert= (index-of "hello" "z") -1))
+  (test "the empty needle is found at 0" (assert= (index-of "hello" "") 0))
   (test "string-contains?"
     (is (string-contains? "hello" "ell"))
     (refute (string-contains? "hello" "xyz"))))
 
 (describe "join"
-  (test "places the separator between elements"
-    (assert= (join ", " (list "a" "b" "c")) "a, b, c"))
-  (test "single element has no separator"
-    (assert= (join ", " (list "solo")) "solo"))
-  (test "empty collection is the empty string"
-    (assert= (join ", " nil) "")))
+  (test "places the separator between elements" (assert= (join ", " (list "a" "b" "c")) "a, b, c"))
+  (test "single element has no separator" (assert= (join ", " (list "solo")) "solo"))
+  (test "empty collection is the empty string" (assert= (join ", " nil) "")))
 
 (describe "split"
-  (test "splits on each occurrence"
-    (assert= (string-split "a,b,c" ",") (list "a" "b" "c")))
-  (test "keeps empty fields"
-    (assert= (string-split "a,,b" ",") (list "a" "" "b")))
+  (test "splits on each occurrence" (assert= (string-split "a,b,c" ",") (list "a" "b" "c")))
+  (test "keeps empty fields" (assert= (string-split "a,,b" ",") (list "a" "" "b")))
   (test "no separator present yields the whole string"
     (assert= (string-split "abc" ",") (list "abc")))
-  (test "multi-char separator"
-    (assert= (string-split "a::b::c" "::") (list "a" "b" "c")))
+  (test "multi-char separator" (assert= (string-split "a::b::c" "::") (list "a" "b" "c")))
   (test "empty separator splits into characters"
     (assert= (string-split "abc" "") (list "a" "b" "c")))
-  (test "split then join round-trips"
-    (assert= (join "," (string-split "x,y,z" ",")) "x,y,z")))
+  (test "split then join round-trips" (assert= (join "," (string-split "x,y,z" ",")) "x,y,z")))
 
 (describe "replace"
-  (test "replaces every occurrence"
-    (assert= (replace "a-b-c" "-" "+") "a+b+c"))
+  (test "replaces every occurrence" (assert= (replace "a-b-c" "-" "+") "a+b+c"))
   (test "multi-char old / new"
     (assert= (replace "one fish two fish" "fish" "cat") "one cat two cat"))
-  (test "absent pattern is unchanged"
-    (assert= (replace "hello" "z" "!") "hello"))
-  (test "empty old leaves the string unchanged"
-    (assert= (replace "hello" "" "!") "hello")))
+  (test "absent pattern is unchanged" (assert= (replace "hello" "z" "!") "hello"))
+  (test "empty old leaves the string unchanged" (assert= (replace "hello" "" "!") "hello")))
 
 (describe "whitespace"
-  (test "blank?"
-    (is (blank? ""))
-    (is (blank? "   "))
-    (is (blank? "\t\n "))
-    (refute (blank? " x ")))
+  (test "blank?" (is (blank? "")) (is (blank? "   ")) (is (blank? "\t\n ")) (refute (blank? " x ")))
   (test "trim removes both ends"
     (assert= (trim "  hi there  ") "hi there")
     (assert= (trim "\n\thi\n") "hi")
@@ -101,5 +83,4 @@
   (test "triml / trimr remove one end"
     (assert= (triml "  hi  ") "hi  ")
     (assert= (trimr "  hi  ") "  hi"))
-  (test "all-whitespace trims to empty"
-    (assert= (trim "    ") "")))
+  (test "all-whitespace trims to empty" (assert= (trim "    ") "")))

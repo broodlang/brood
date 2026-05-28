@@ -71,12 +71,14 @@ cases and `test` names one; cases run concurrently by default, with `:serial` /
 `:isolated` opt-outs. `run-tests` runs the registered suite once. See
 docs/testing.md for the full guide."
 
-(def *units* nil)         ; all registered units, newest first
-(def *collecting* false)  ; true while a describe body is being registered
-(def *collected* nil)     ; (name thunk) pairs gathered for the current describe
+(def *units* nil)
+; all registered units, newest first
+(def *collecting* false)
+; true while a describe body is being registered
+(def *collected* nil)
+; (name thunk) pairs gathered for the current describe
 
-(defn add-unit! (mode group tests)
-  (def *units* (cons (list mode group tests) *units*)))
+(defn add-unit! (mode group tests) (def *units* (cons (list mode group tests) *units*)))
 
 ;; Full source location of a form as (file line col), or nil. Captured at
 ;; macro-expansion time (by the assertion macros), while the original read form
@@ -84,7 +86,8 @@ docs/testing.md for the full guide."
 ;; (docs/tooling.md). Each failing assertion is thus self-locating, which is what
 ;; lets the reporter emit a clickable `FILE:LINE:COL:` anchor per failure.
 (defn fail-loc (form)
-  (let (p (form-pos form))                 ; [line col] vector, or nil
+  (let (p (form-pos form))
+    ; [line col] vector, or nil
     (if p (list (current-file) (vector-ref p 0) (vector-ref p 1)) nil)))
 
 ;; A failing assertion THROWS a tagged failure record rather than mutating shared
@@ -105,15 +108,12 @@ docs/testing.md for the full guide."
 (defn test--run (thunks fails)
   (if (empty? thunks)
     (reverse fails)
-    (let (outcome (try (do ((first thunks)) :%ok)
-                       (catch e (list :%caught e))))
+    (let (outcome (try (do ((first thunks)) :%ok) (catch e (list :%caught e))))
       (cond
-        (= outcome :%ok)                  (test--run (rest thunks) fails)
+        (= outcome :%ok) (test--run (rest thunks) fails)
         (test--failure? (second outcome)) (test--run (rest thunks)
-                                                     (cons (test--record (second outcome)) fails))
-        else                              (reverse (cons (list nil (list (str "uncaught error: "
-                                                                              (second outcome))))
-                                                         fails))))))
+                                            (cons (test--record (second outcome)) fails))
+        else (reverse (cons (list nil (list (str "uncaught error: " (second outcome)))) fails))))))
 
 ;; A test registers itself: collected into the enclosing describe if there is
 ;; one, otherwise emitted as its own standalone unit (:isolated if flagged).
@@ -132,14 +132,16 @@ docs/testing.md for the full guide."
 
 ;; (describe "group" [:serial | :isolated] body...) — register a group of tests.
 (defmacro describe (group & forms)
-  (let (mode (cond (= (first forms) :isolated) :isolated
-                   (= (first forms) :serial)   :serial
-                   else                        :parallel)
+  (let (mode (cond
+               (= (first forms) :isolated) :isolated
+               (= (first forms) :serial) :serial
+               else :parallel)
         body (if (= mode :parallel) forms (rest forms)))
     `(do
        (def *collecting* true)
        (def *collected* nil)
-       (do ~@body)                          ; the (test ...) forms collect themselves
+       (do ~@body)
+       ; the (test ...) forms collect themselves
        (def *collecting* false)
        (emit-describe! ~mode ~group (reverse *collected*))
        nil)))
@@ -151,16 +153,14 @@ docs/testing.md for the full guide."
 ;; test, so a crashing test can't hang the runner (a dead worker never sends, and
 ;; `receive` would block forever). The thunk returns the failure list (empty = pass).
 (defmacro test (name & forms)
-  (let (iso    (= (first forms) :isolated)
-        body   (if iso (rest forms) forms)
-        thunks (map (fn (f) (list 'fn nil f)) body))   ; each form -> (fn () form)
-    `(register-test! ~name
-       (fn () (test--run (list ~@thunks) nil))
-       ~iso)))
+  (let (iso (= (first forms) :isolated)
+        body (if iso (rest forms) forms)
+        thunks (map (fn (f) (list 'fn nil f)) body))
+    ; each form -> (fn () form)
+    `(register-test! ~name (fn () (test--run (list ~@thunks) nil)) ~iso)))
 
 ;; (deftest name body...) — a single test named by a symbol, no group.
-(defmacro deftest (name & body)
-  `(test (str (quote ~name)) ~@body))
+(defmacro deftest (name & body) `(test (str (quote ~name)) ~@body))
 
 ;; --- assertions --------------------------------------------------------------
 ;; Macros, not functions: on failure each THROWS a tagged failure record (via
@@ -181,8 +181,7 @@ docs/testing.md for the full guide."
     `(let (~v ~expr)
        (unless ~v
          (test--fail (quote ~loc)
-                     (list (str "assert: " (pr-str (quote (is ~expr))))
-                           (str "actual: " (pr-str ~v))))))))
+           (list (str "assert: " (pr-str (quote (is ~expr)))) (str "actual: " (pr-str ~v))))))))
 
 ;; (refute expr) — the negation of `is`: fail if expr is truthy.
 (defmacro refute (expr)
@@ -190,68 +189,64 @@ docs/testing.md for the full guide."
     `(let (~v ~expr)
        (when ~v
          (test--fail (quote ~loc)
-                     (list (str "assert: " (pr-str (quote (refute ~expr))))
-                           (str "actual: " (pr-str ~v) "  (expected falsy)")))))))
+           (list (str "assert: " (pr-str (quote (refute ~expr))))
+             (str "actual: " (pr-str ~v) "  (expected falsy)")))))))
 
 (defmacro assert= (actual expected)
   (let (a (gensym "a") b (gensym "b") loc (fail-loc actual))
     `(let (~a ~actual ~b ~expected)
        (unless (= ~a ~b)
          (test--fail (quote ~loc)
-                     (list (str "assert: " (pr-str (quote (assert= ~actual ~expected))))
-                           (str "actual: " (pr-str ~a))
-                           (str "expect: " (pr-str ~b))))))))
+           (list (str "assert: " (pr-str (quote (assert= ~actual ~expected))))
+             (str "actual: " (pr-str ~a))
+             (str "expect: " (pr-str ~b))))))))
 
 (defmacro assert-error (& body)
   ;; Quote the body for the message: the lone form if there's one, else (do …).
   (let (form (if (= (count body) 1) (first body) (cons 'do body))
-        loc  (fail-loc (if (= (count body) 1) (first body) nil)))
+        loc (fail-loc (if (= (count body) 1) (first body) nil)))
     `(unless (try (do ~@body false) (catch e true))
        (test--fail (quote ~loc)
-                   (list (str "assert: " (pr-str (quote (assert-error ~form))))
-                         "actual: no error was raised")))))
+         (list (str "assert: " (pr-str (quote (assert-error ~form)))) "actual: no error was raised")))))
 
 ;; (error-of body...) — evaluate body and yield the error it raised, so you can
 ;; assert on the *output*: a built-in error comes back as its message string
 ;; (e.g. "type error: expected a number"), a `(throw v)` as the value v itself.
 ;; Returns nil when body completes without raising. Pair it with assert= to pin
 ;; exact failure output:  (assert= (error-of (/ 1 0)) "runtime error: division by zero")
-(defmacro error-of (& body)
-  `(try (do ~@body nil) (catch e e)))
+(defmacro error-of (& body) `(try (do ~@body nil) (catch e e)))
 
 ;; --- small text/list helpers for the trace and slow-test output --------------
-(defn opt? (flag opts)                    ; is flag present in the run-tests args?
-  (cond
-    (empty? opts)         false
-    (= flag (first opts)) true
-    else                  (opt? flag (rest opts))))
+(defn opt? (flag opts)
+  ; is flag present in the run-tests args?
+  (cond (empty? opts) false (= flag (first opts)) true else (opt? flag (rest opts))))
 
 (defn spaces (n) (if (<= n 0) "" (str " " (spaces (- n 1)))))
 (defn pad-right (s w) (str s (spaces (- w (count s)))))
-(defn pad-left  (s w) (str (spaces (- w (count s))) s))
+(defn pad-left (s w) (str (spaces (- w (count s))) s))
 
-(defn take (n xs)                         ; first n elements (fewer if xs is shorter)
-  (if (<= n 0)
-    nil
-    (if (empty? xs)
-      nil
-      (cons (first xs) (take (- n 1) (rest xs))))))
+(defn take (n xs)
+  ; first n elements (fewer if xs is shorter)
+  (if (<= n 0) nil (if (empty? xs) nil (cons (first xs) (take (- n 1) (rest xs))))))
 
 ;; Insertion sort of (name . ms) pairs, slowest first. O(n²), but there are only
 ;; ever a handful of tests, so simplicity wins.
 (defn insert-by-ms (x sorted)
   (cond
-    (empty? sorted)                     (list x)
+    (empty? sorted) (list x)
     (>= (rest x) (rest (first sorted))) (cons x sorted)
-    else                                (cons (first sorted) (insert-by-ms x (rest sorted)))))
+    else (cons (first sorted) (insert-by-ms x (rest sorted)))))
 (defn sort-by-ms (xs) (fold (fn (acc x) (insert-by-ms x acc)) nil xs))
 
 ;; Integer division, and a "N.N MB" formatter for the memory line.
 (defn quot (a b) (/ (- a (rem a b)) b))
 (defn mb-str (bytes)
-  (let (tenths (quot (+ (* bytes 10) 524288) 1048576)   ; round to nearest 0.1 MB
-        whole  (quot tenths 10)
-        frac   (rem tenths 10))
+  (let (tenths (quot (+ (* bytes 10) 524288) 1048576)
+         ; round to nearest 0.1 MB
+         whole
+         (quot tenths 10)
+         frac
+         (rem tenths 10))
     (str whole "." frac " MB")))
 
 ;; --- results -----------------------------------------------------------------
@@ -259,11 +254,12 @@ docs/testing.md for the full guide."
 ;; that test (empty = passed). A failure record is (loc detail-lines); `loc` is
 ;; (file line col) or nil, captured per-assertion (see `fail-loc`).
 (defn r-group (r) (first r))
-(defn r-name  (r) (second r))
+(defn r-name (r) (second r))
 (defn r-fails (r) (third r))
-(defn r-ms    (r) (nth r 3))
+(defn r-ms (r) (nth r 3))
 (defn r-failed? (r) (not (empty? (r-fails r))))
-(defn label (group name)                  ; "group › name", or just name if ungrouped
+(defn label (group name)
+  ; "group › name", or just name if ungrouped
   (if (= group "") (str name) (str group " › " name)))
 (defn full-name (r) (label (r-group r) (r-name r)))
 
@@ -271,26 +267,18 @@ docs/testing.md for the full guide."
 ;; returns its own failure list (it catches its first failing assertion), sharing
 ;; no mutable state — so running these concurrently is safe.
 (defn run-test (group t)
-  (let (start (now)
-        fails ((second t))
-        ms    (- (now) start))
-    (list group (first t) fails ms)))
+  (let (start (now) fails ((second t)) ms (- (now) start)) (list group (first t) fails ms)))
 
 ;; Like run-test, but evaluate the body with a private copy of the global
 ;; bindings (`%isolate`): an :isolated test's `def`s are rolled back when it
 ;; finishes, so they can't leak to any other test. Used only in the isolated phase.
 (defn run-test-fresh (group t)
-  (let (start (now)
-        fails (%isolate (second t))
-        ms    (- (now) start))
-    (list group (first t) fails ms)))
+  (let (start (now) fails (%isolate (second t)) ms (- (now) start)) (list group (first t) fails ms)))
 
 ;; Run every test in a unit, in order, returning the list of results. This is
 ;; what a worker does (for a :parallel/:serial unit) and what the runner does
 ;; directly for an :isolated unit.
-(defn run-unit (unit)
-  (let (group (second unit))
-    (map (fn (t) (run-test group t)) (third unit))))
+(defn run-unit (unit) (let (group (second unit)) (map (fn (t) (run-test group t)) (third unit))))
 
 ;; --- the two phases ----------------------------------------------------------
 ;; Parallel phase: spawn one worker per non-isolated unit (each worker captures
@@ -298,16 +286,20 @@ docs/testing.md for the full guide."
 ;; Output is emitted once at the end (a single structured report), so there is no
 ;; per-test progress to print here.
 (defn spawn-units (units me)
-  (fold (fn (_ unit)
-          ;; capture `me` (the collector) and `unit` lexically; the thunk runs in
-          ;; the child and reports this unit's results back.
-          (spawn (send me (run-unit unit))))
-        nil units))
+  (fold
+    (fn (_ unit)
+      ;; capture `me` (the collector) and `unit` lexically; the thunk runs in
+      ;; the child and reports this unit's results back.
+      (spawn (send me (run-unit unit))))
+    nil
+    units))
 
-(defn collect-units (remaining acc)   ; remaining = messages still to receive
+(defn collect-units (remaining acc)
+  ; remaining = messages still to receive
   (if (= remaining 0)
     acc
-    (let (results (receive))          ; one unit's worth of results
+    (let (results (receive))
+      ; one unit's worth of results
       (collect-units (- remaining 1) (append results acc)))))
 
 ;; Isolated phase: run each isolated unit on the runner itself, one at a time, so
@@ -316,14 +308,14 @@ docs/testing.md for the full guide."
 (defn run-isolated (units acc)
   (if (empty? units)
     acc
-    (let (unit    (first units)
-          group   (second unit)
+    (let (unit (first units)
+          group (second unit)
           results (map (fn (t) (run-test-fresh group t)) (third unit)))
       (run-isolated (rest units) (append results acc)))))
 
 ;; --- reporting ---------------------------------------------------------------
 ;; A failure record is (loc detail-lines): loc is (file line col) or nil.
-(defn fail-loc-of   (rec) (first rec))
+(defn fail-loc-of (rec) (first rec))
 (defn fail-lines-of (rec) (second rec))
 
 ;; The anchor line for a failed assertion. With a location it's the GNU
@@ -341,56 +333,67 @@ docs/testing.md for the full guide."
   (fold (fn (_ rec)
           (println (fail-anchor r rec))
           (fold (fn (_ line) (println (str indent line))) nil (fail-lines-of rec)))
-        nil (r-fails r)))
+    nil
+    (r-fails r)))
 
 ;; Emit one editor-parseable block per failed assertion. There is a single
 ;; output format — structured — for humans, LLMs and Emacs alike (docs/tooling.md).
 (defn report-failures (results)
   (let (failed (filter r-failed? results))
-    (unless (empty? failed)
-      (println "")
-      (fold (fn (_ r) (print-failure "    " r)) nil failed))))
+    (unless (empty? failed) (println "") (fold (fn (_ r) (print-failure "    " r)) nil failed))))
 
 (defn report-slow (results)
   (println "")
   (println "Slowest tests:")
   (let (timings (map (fn (r) (cons (full-name r) (r-ms r))) results))
     (fold (fn (_ entry)
-            (println (str "  " (pad-right (str (first entry)) 28)
-                          (pad-left (str (rest entry)) 6) " ms")))
-          nil
-          (take 5 (sort-by-ms timings)))))
+            (println (str "  "
+                       (pad-right (str (first entry)) 28)
+                       (pad-left (str (rest entry)) 6)
+                       " ms")))
+      nil
+      (take 5 (sort-by-ms timings)))))
 
-(defn count-failed (results)              ; tests with at least one failed assertion
+(defn count-failed (results)
+  ; tests with at least one failed assertion
   (fold (fn (acc r) (if (r-failed? r) (+ acc 1) acc)) 0 results))
-(defn count-failures (results)            ; total failed assertions across tests
+(defn count-failures (results)
+  ; total failed assertions across tests
   (fold (fn (acc r) (+ acc (count (r-fails r)))) 0 results))
 
 ;; --- entry point -------------------------------------------------------------
 (defn run-tests (& opts)
   (let (units (reverse *units*)
-        par   (filter (fn (u) (not= (first u) :isolated)) units)  ; parallel + serial
-        iso   (filter (fn (u) (= (first u) :isolated)) units)
-        start (now)
-        me    (self))
+         par
+         (filter (fn (u) (not= (first u) :isolated)) units)
+         ; parallel + serial
+         iso
+         (filter (fn (u) (= (first u) :isolated)) units)
+         start
+         (now)
+         me
+         (self))
     ;; Isolated phase first: each isolated test runs alone, against a private copy
     ;; of the globals, so it sees the clean post-load baseline (none of the
     ;; parallel/serial defs below) and its own defs roll back. Then launch the
     ;; parallel/serial workers and collect them.
     (let (iso-results (run-isolated iso nil)
-          _           (spawn-units par me)
+          _ (spawn-units par me)
           par-results (collect-units (count par) nil)
-          results     (append iso-results par-results)
-          elapsed     (- (now) start)
-          total       (count results)
-          failed      (count-failed results)
-          fails       (count-failures results))
+          results (append iso-results par-results)
+          elapsed (- (now) start)
+          total (count results)
+          failed (count-failed results)
+          fails (count-failures results))
       (report-failures results)
       (when (opt? :slow opts) (report-slow results))
       (println "")
-      (println total "tests," (- total failed) "passed," failed "failed"
-               (str "(" fails " failed assertions, " (count iso) " isolated)"))
+      (println total
+        "tests,"
+        (- total failed)
+        "passed,"
+        failed
+        "failed"
+        (str "(" fails " failed assertions, " (count iso) " isolated)"))
       (println (str "  (" elapsed " ms wall, peak " (mb-str (mem-peak)) ")"))
-      (if (> failed 0)
-        (error (str failed " test(s) failed"))
-        :ok))))
+      (if (> failed 0) (error (str failed " test(s) failed")) :ok))))

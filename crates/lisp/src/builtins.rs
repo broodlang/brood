@@ -181,14 +181,21 @@ pub fn register(heap: &mut Heap, root: EnvId) {
 
     // dynamic variables (the `defdyn`/`binding` surface is Brood — see prelude)
     def(heap, "%declare-dynamic", Arity::exact(1), Sig::new(vec![sym], nil_ty), declare_dynamic);
-    def(heap, "%binding", Arity::exact(3), Sig::new(vec![sym, any, callable], any), binding);
+    // `%binding`'s first arg is the *list/vector of names*, second is the
+    // *list/vector of values*, third is the thunk — the macro `binding` emits
+    // these as `(quote (*a* *b* …))` + `[v1 v2 …]` + `(fn () …)`.
+    def(heap, "%binding", Arity::exact(3), Sig::new(vec![seq, seq, callable], any), binding);
     def(heap, "dynamic?", Arity::exact(1), Sig::new(vec![any], bool_ty), dynamic_p);
 
     // processes (concurrency)
     def(heap, "%spawn", Arity::exact(1), Sig::new(vec![callable], pid_ty), spawn);
     // `send`'s target is a pid OR a `{:name :node}` address map.
     def(heap, "send", Arity::exact(2), Sig::new(vec![pid_ty.union(map_ty), any], nil_ty), send);
-    def(heap, "%receive", Arity::exact(3), Sig::new(vec![callable, callable, int.union(nil_ty)], any), receive_match);
+    // Arg shape: (matcher: callable, timeout: int|nil, on-timeout: callable|nil).
+    // The `receive` macro in `std/prelude.blsp` expands to exactly this; the
+    // `callable|nil` on the third position is for the no-`after`-clause case
+    // (the macro passes `nil`).
+    def(heap, "%receive", Arity::exact(3), Sig::new(vec![callable, int.union(nil_ty), callable.union(nil_ty)], any), receive_match);
     def(heap, "self", Arity::exact(0), Sig::nullary(pid_ty), self_pid);
     def(heap, "ref", Arity::exact(0), Sig::nullary(ref_ty), make_ref);
     // `monitor` also accepts a name map (forwarded to the remote node).

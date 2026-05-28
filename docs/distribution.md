@@ -91,12 +91,20 @@ independent symbol interners. (In-process messages keep the interned id.)
   interner are process-global, so a "node" *is* the OS process. Two nodes = two
   `brood` processes (typically over loopback). Testing reflects this: see the
   two-process end-to-end test in `crates/cli/tests/distribution.rs`.
-- **Deferred** (later slices): remote `spawn` + code shipping (the closure-as-data
-  path of ADR-033 is the missing piece — the wire codec rejects a `Closure`
-  today), distributed process monitors/links, net-split handling, and the
-  versioned/authenticated handshake (§3 below). Connection de-dup, node-down
-  detection, and a generation-checked teardown path landed in
+- **Deferred** (later slices): remote `spawn` (the round-trip `[:run f x reply]`
+  pattern already gets you "send a function, run it there, send the result back"
+  — see `lambda_ships_across_nodes_and_runs`; a dedicated `remote-spawn` is a
+  surface convenience over that), distributed process monitors/links, net-split
+  handling, and the versioned/authenticated handshake (§3 below). Connection
+  de-dup, node-down detection, and a generation-checked teardown path landed in
   **[slice 2](#slice-2--connection-lifecycle--liveness-built)**.
+- **Built since slice 1:** the closure-as-data path of ADR-033 — `(send target
+  fn)` and the `[:run f x …]` pattern now work cross-node. The wire codec's
+  `M_CLOSURE` encodes every `ClosureMsg` field (name, params, optionals + their
+  default *forms*, rest, body forms, doc, captured free locals); the receiver's
+  `closure_from_message` rebuilds the closure against its own prelude, so free
+  globals (`*`, `map`, the user's `(defn …)`s) re-resolve there ("the module
+  must be loaded on both nodes").
 
 ## Slice 2 — connection lifecycle + liveness (built)
 

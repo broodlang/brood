@@ -19,41 +19,37 @@
     (assert= (doc inc!) "Add one."))
   (test "a function with a destructured parameter keeps its docstring"
     (defn add-pair ([x y]) "Sum a 2-vector." (+ x y))
-    (assert= (doc add-pair) "Sum a 2-vector.")  ; was dropped by the fn-lowering path
-    (assert= (add-pair [3 4]) 7))               ; …and the doc isn't returned/evaluated
+    (assert= (doc add-pair) "Sum a 2-vector.")
+    ; was dropped by the fn-lowering path
+    (assert= (add-pair [3 4]) 7))
+  ; …and the doc isn't returned/evaluated
   (test "a multi-clause defn keeps its (leading) docstring"
-    (defn sign
-      "Describe a number's sign."
+    (defn sign "Describe a number's sign."
       ((0) :zero)
       ((n) :when (> n 0) :positive)
       ((n) :negative))
     (assert= (doc sign) "Describe a number's sign.")
     (assert= (list (sign -3) (sign 0) (sign 9)) (list :negative :zero :positive)))
-  (test "doc of a non-function is nil"
-    (assert= (doc 42) nil)
-    (assert= (doc "a string") nil)))
+  (test "doc of a non-function is nil" (assert= (doc 42) nil) (assert= (doc "a string") nil)))
 
 (describe "arglist"
-  (test "required params"
-    (defn pair (a b) (list a b))
-    (assert= (arglist pair) '(a b)))
+  (test "required params" (defn pair (a b) (list a b)) (assert= (arglist pair) '(a b)))
   (test "&optional params are listed after a marker"
     (defn opt (a &optional (b 10)) (+ a b))
     (assert= (arglist opt) '(a &optional b)))
   (test "& rest is reconstructed"
     (defn variadic (a b & more) a)
     (assert= (arglist variadic) '(a b & more)))
-  (test "arglist of a non-function is nil"
-    (assert= (arglist 42) nil)))
+  (test "arglist of a non-function is nil" (assert= (arglist 42) nil)))
 
 (describe "global table introspection"
   (test "bound? reflects the global table"
     (defn a-defined-name () nil)
     (is (bound? 'a-defined-name))
-    (is (bound? 'map))                      ; a prelude binding
+    (is (bound? 'map))
+    ; a prelude binding
     (refute (bound? 'definitely-not-bound-xyz)))
-  (test "bound? wants a symbol"
-    (assert-error (bound? 42)))
+  (test "bound? wants a symbol" (assert-error (bound? 42)))
   (test "global-names includes prelude and user definitions"
     (defn another-name () nil)
     (is (member? 'map (global-names)))
@@ -73,11 +69,15 @@
     (let (loc (source-location 'sl-subject))
       (refute (nil? loc))
       (is (vector? loc))
-      (assert= (count loc) 3)               ; [file line col]
-      (is (string? (first loc)))            ; the file it was loaded from
-      (is (int? (first (rest loc))))))      ; the line
+      (assert= (count loc) 3)
+      ; [file line col]
+      (is (string? (first loc)))
+      ; the file it was loaded from
+      (is (int? (first (rest loc))))))
+  ; the line
   (test "a prelude global / unknown name has no recorded site"
-    (assert= (source-location 'map) nil)          ; prelude binding, not load-recorded
+    (assert= (source-location 'map) nil)
+    ; prelude binding, not load-recorded
     (assert= (source-location 'no-such-name-xyz) nil))
   (test "the site is visible from a spawned process (shared runtime code)"
     (let (me (self) w (spawn (sl-worker me)))

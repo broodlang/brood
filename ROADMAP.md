@@ -104,8 +104,17 @@ The native kernel is **70 primitives** — see [`docs/primitives.md`](docs/primi
   Still ⬜: a general tracing GC for mid-eval / never-returning loops, which needs
   scannable roots (the explicit-value-stack VM step 4b also needs — coupled).
   **[kernel]** (sizable).
-- ⬜ **Source locations in errors** — the reader currently drops spans; attaching
-  them gives line/column in messages (and later, stack traces). **[kernel]**
+- ✅ **Source locations in errors** — the reader already stamped every list
+  pair via `set_form_pos`; the gap was *runtime* errors carrying only the
+  enclosing top-level form's position (a 50-line `defn` showed line 1 on a
+  misuse on line 47). The eval loop's error-propagation path is now annotated
+  with the innermost combination's position via `LispError::or_form_pos`
+  (non-overwriting, so inner wins), and macroexpand-all carries positions
+  through to rebuilt list forms. Diagnostics from inside `when`/`let`/`if`/
+  arg-position calls now point at the failing line, not the enclosing
+  top-level. Promoted closure bodies (RUNTIME pairs) still have no
+  position metadata — an error inside a `(def`'d fn reports the call site, not
+  the line inside the body; a stack trace closes that gap (M2+).
 - ✅ **Native test library** — `std/test.blsp`: ExUnit / `mix test`-style
   `describe` / `test` (plus `deftest`), `is` / `assert=` / `assert-error` /
   `error-of` / `run-tests`, written in Brood. **Parallel by default** (each test a
@@ -151,10 +160,17 @@ and don't conflict with the concurrency work. Concurrency lands in phases:
   reload, no restart); separate runtimes stay independent. Spawn is cheap (no
   prelude reload). Region-tagged handles (LOCAL/PRELUDE/RUNTIME), append-only code
   via `boxcar`. ADR-013/014, `docs/shared-code.md`.
-- 🟡 **Send functions between processes** — top-level functions are now shared
-  handles (valid in any process), and `spawn` already ships a closure + its
-  captured environment via `promote`. A `send`-able function value is the small
-  remaining step; do it when a concrete need arises.
+- ✅ **Send functions between processes / across nodes** (ADR-033 closure-as-data
+  path, complete). Within a runtime: top-level fns are shared handles; `spawn` /
+  `send` of a local closure go through `closure_to_message` / `closure_from_message`,
+  which copy the closure's body forms + the *free locals* it actually references
+  (not the whole frame chain); free globals re-resolve on the receiver. Across
+  nodes: the `M_CLOSURE` wire codec in `dist.rs` (was a `return Err("not
+  supported yet")` stub, now a full encode/decode of every `ClosureMsg` field)
+  ships the same `Message::Closure` over TCP. End-to-end verified by
+  `lambda_ships_across_nodes_and_runs` in `crates/cli/tests/distribution.rs`: a
+  closure with a captured free local crosses to a peer, runs there against the
+  peer's prelude, and the result comes back through `send`.
 - ✅ **Reduction-counted preemption** (fairness) — `eval`'s loop decrements a
   per-worker budget (≈2000) and the process yields its worker at zero, so a
   CPU-bound process can't monopolise a core. Scheduling is now preemptively fair.

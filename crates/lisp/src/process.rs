@@ -60,23 +60,28 @@ pub enum Message {
 
 /// The wire form of a [`Closure`]: everything but the global env, which is
 /// re-resolved on the receiver rather than copied.
+///
+/// `pub(crate)` fields rather than accessors: the wire codec in
+/// `crate::dist` needs every field (closure-as-data shipping; ADR-033) and
+/// they're inert plain data once built — no invariant to defend at the
+/// boundary.
 #[derive(Clone)]
 pub struct ClosureMsg {
-    name: Option<Symbol>,
-    params: Vec<Symbol>,
+    pub(crate) name: Option<Symbol>,
+    pub(crate) params: Vec<Symbol>,
     /// `&optional` params with their default *forms* (data).
-    optionals: Vec<(Symbol, Message)>,
-    rest: Option<Symbol>,
+    pub(crate) optionals: Vec<(Symbol, Message)>,
+    pub(crate) rest: Option<Symbol>,
     /// The body forms (data — this is the code, homoiconically).
-    body: Vec<Message>,
-    doc: Option<String>,
+    pub(crate) body: Vec<Message>,
+    pub(crate) doc: Option<String>,
     /// The closure's *free variables* that resolve to a **local** binding, flattened
     /// to one frame (name → value). Empty = a global-capturing closure (the common
     /// case, e.g. a `(spawn (* (+ 1 1)))` thunk). We copy only what the body actually
     /// references from its lexical scope — not the whole frame chain — so unrelated
     /// (and possibly unsendable) siblings don't ride along, and a closure capturing a
     /// sibling closure can't form a serialisation cycle through its defining frame.
-    captured: Vec<(Symbol, Message)>,
+    pub(crate) captured: Vec<(Symbol, Message)>,
 }
 
 /// Deep-copy a value out of `heap` into a `Send` message. A closure is sent as

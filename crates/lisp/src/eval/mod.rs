@@ -321,9 +321,18 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
 
         let callee = match head {
             Value::Sym(s) => {
-                let v = heap.env_get(env, s).ok_or_else(|| {
-                    LispError::unbound(format!("unbound symbol: {}", value::symbol_name(s)))
-                })?;
+                // An unbound-symbol error from a *tail-position* call (the
+                // last form of a `do`/`let`/`letrec` body, set as `expr` via
+                // `continue 'tail`) exits this eval frame directly — no outer
+                // `or_form_pos` will see it. Attach `call_form`'s position
+                // here so the diagnostic points at the failing call's line,
+                // not the enclosing top-level form's start.
+                let v = heap
+                    .env_get(env, s)
+                    .ok_or_else(|| {
+                        LispError::unbound(format!("unbound symbol: {}", value::symbol_name(s)))
+                    })
+                    .map_err(|e| e.or_form_pos(heap, call_form))?;
                 if let Value::Macro(mid) = v {
                     let arg_forms = heap.list_to_vec(rest)?;
                     expr = apply_closure(heap, mid, &arg_forms)

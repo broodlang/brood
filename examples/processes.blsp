@@ -5,9 +5,7 @@
 ;; passing. spawn/send/receive/self are the whole API.
 
 ;; A worker: receive a number, reply with its square to `parent`.
-(defn square-worker (parent)
-  (let (n (receive))
-    (send parent (* n n))))
+(defn square-worker (parent) (let (n (receive)) (send parent (* n n))))
 
 (def me (self))
 (println "main pid:" me)
@@ -31,7 +29,8 @@
 
 (def stage2 (spawn (double-worker me)))
 (def stage1 (spawn (inc-worker stage2)))
-(send stage1 20)                       ;; 20 -> +1 -> 21 -> *2 -> 42
+(send stage1 20)
+;; 20 -> +1 -> 21 -> *2 -> 42
 (println "pipeline 20 -> inc -> double =" (receive))
 
 (println "--- done ---")

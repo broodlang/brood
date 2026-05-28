@@ -14,7 +14,8 @@
     (assert= (range 1) (list 0)))
   (test "(range lo hi) is the half-open interval"
     (assert= (range 2 6) (list 2 3 4 5))
-    (assert= (range 5 5) nil))                ; empty when lo == hi
+    (assert= (range 5 5) nil))
+  ; empty when lo == hi
   (test "(range lo hi step) steps by step, ascending or descending"
     (assert= (range 0 10 2) (list 0 2 4 6 8))
     (assert= (range 10 0 -2) (list 10 8 6 4 2))
@@ -32,8 +33,7 @@
     (assert= (drop 99 (list 1 2 3)) nil)
     (assert= (drop 3 nil) nil))
   (test "take and drop at index n partition the sequence"
-    (let (xs (range 10))
-      (assert= (append (take 4 xs) (drop 4 xs)) xs))))
+    (let (xs (range 10)) (assert= (append (take 4 xs) (drop 4 xs)) xs))))
 
 (describe "take-while / drop-while"
   (test "take-while keeps the leading run that satisfies pred"
@@ -49,11 +49,13 @@
   (test "some? is true iff any element satisfies pred"
     (is (some? even? (list 1 3 4 5)))
     (refute (some? even? (list 1 3 5)))
-    (refute (some? even? nil)))             ; vacuously false on empty
+    (refute (some? even? nil)))
+  ; vacuously false on empty
   (test "every? is true iff all elements satisfy pred"
     (is (every? even? (list 2 4 6)))
     (refute (every? even? (list 2 4 5)))
-    (is (every? even? nil)))                ; vacuously true on empty
+    (is (every? even? nil)))
+  ; vacuously true on empty
   (test "find returns the first matching element, or nil"
     (assert= (find even? (list 1 3 4 5 6)) 4)
     (assert= (find even? (list 1 3 5)) nil)
@@ -86,10 +88,9 @@
     ;; sort by first component; the second tags the original position.
     (let (pairs (list [1 :a] [0 :b] [1 :c] [0 :d]))
       (assert= (sort (fn (x y) (< (vector-ref x 0) (vector-ref y 0))) pairs)
-               (list [0 :b] [0 :d] [1 :a] [1 :c]))))
+        (list [0 :b] [0 :d] [1 :a] [1 :c]))))
   (test "sort-by orders by a key function"
-    (assert= (sort-by (fn (s) (string-length s)) (list "ccc" "a" "bb"))
-             (list "a" "bb" "ccc"))
+    (assert= (sort-by (fn (s) (string-length s)) (list "ccc" "a" "bb")) (list "a" "bb" "ccc"))
     (assert= (sort-by abs (list -3 1 -2 4)) (list 1 -2 -3 4)))
   (test "sort handles a larger, reversed input correctly"
     (assert= (sort (range 50 0 -1)) (range 1 51))))
@@ -105,16 +106,12 @@
     (assert= (get (frequencies (list 1 1 1)) 1) 3)))
 
 (describe "for comprehension"
-  (test "basic map"
-    (assert= (for [x (range 4)] (* x x)) (list 0 1 4 9)))
-  (test ":when filters"
-    (assert= (for [x (range 8) :when (even? x)] x) (list 0 2 4 6)))
+  (test "basic map" (assert= (for [x (range 4)] (* x x)) (list 0 1 4 9)))
+  (test ":when filters" (assert= (for [x (range 8) :when (even? x)] x) (list 0 2 4 6)))
   (test "nested bindings (rightmost varies fastest)"
-    (assert= (for [x (range 2) y (range 2)] [x y])
-             (list [0 0] [0 1] [1 0] [1 1])))
+    (assert= (for [x (range 2) y (range 2)] [x y]) (list [0 0] [0 1] [1 0] [1 1])))
   (test "destructuring a binding"
-    (assert= (for [[k v] (map-pairs {:a 1 :b 2})] [v k])
-             (list [1 :a] [2 :b])))
+    (assert= (for [[k v] (map-pairs {:a 1 :b 2})] [v k]) (list [1 :a] [2 :b])))
   (test "build a map with into {}"
     (assert= (into {} (for [x (range 3)] [x (* x x)])) {0 0 1 1 2 4})))
 
@@ -122,22 +119,19 @@
   (test "into a map assocs [k v] pairs; into a list appends"
     (assert= (into {:a 1} (list [:b 2] [:c 3])) {:a 1 :b 2 :c 3})
     (assert= (into (list 1 2) (list 3 4)) (list 1 2 3 4)))
-  (test "times applies f n times"
-    (assert= (times 5 inc 0) 5)
-    (assert= (times 0 inc 9) 9))
+  (test "times applies f n times" (assert= (times 5 inc 0) 5) (assert= (times 0 inc 9) 9))
   (test "iterate-times yields n+1 successive states"
     (assert= (iterate-times (fn (n) (* n 2)) 1 4) (list 1 2 4 8 16)))
   (test "enumerate pairs items with indices"
     (assert= (enumerate (list :a :b :c)) (list [0 :a] [1 :b] [2 :c]))))
 
-(describe "doseq" :isolated
+(describe "doseq"
+  :isolated
   (test "runs its body for each item (in order) and returns nil"
     (assert= (doseq [x (range 3)] (send (self) [:saw x])) nil)
     ;; the three sends arrived, in order
-    (assert= (list (receive ([:saw v] v))
-                   (receive ([:saw v] v))
-                   (receive ([:saw v] v)))
-             (list 0 1 2))))
+    (assert= (list (receive ([:saw v] v)) (receive ([:saw v] v)) (receive ([:saw v] v)))
+      (list 0 1 2))))
 
 ;; ---- explicit concurrency (spawn / send / fan-in) ---------------------------
 ;; :isolated so these run against a private globals copy and don't contend with
@@ -146,32 +140,31 @@
 ;; round-trip; the parent fans them in. Defined once at load (distinct seq- names)
 ;; so they survive the :isolated rollback.
 
-(defn seq-emit (parent n) (send parent [:r n (sort (range n 0 -1))]))  ; build then sort
+(defn seq-emit (parent n) (send parent [:r n (sort (range n 0 -1))]))
+; build then sort
 (defn seq-spawn (parent ns)
-  (when (not (empty? ns))
-    (spawn (seq-emit parent (first ns)))
-    (seq-spawn parent (rest ns))))
+  (when (not (empty? ns)) (spawn (seq-emit parent (first ns))) (seq-spawn parent (rest ns))))
 (defn seq-collect (got total acc)
-  (if (= got total)
-    acc
-    (seq-collect (+ got 1) total (receive ([:r n xs] (assoc acc n xs))))))
+  (if (= got total) acc (seq-collect (+ got 1) total (receive ([:r n xs] (assoc acc n xs))))))
 
-(def seq-data (range 1 21))                  ; a shared global list read by many processes
-(defn seq-reader (parent i)
-  (send parent [:s (sum (take i seq-data))])) ; Σ 1..i
+(def seq-data (range 1 21))
+; a shared global list read by many processes
+(defn seq-reader (parent i) (send parent [:s (sum (take i seq-data))]))
+; Σ 1..i
 (defn seq-spawn-readers (parent n)
   (when (> n 0) (spawn (seq-reader parent n)) (seq-spawn-readers parent (- n 1))))
 (defn seq-sum (got total acc)
   (if (= got total) acc (seq-sum (+ got 1) total (receive ([:s v] (+ acc v))))))
 
-(describe "sequences across processes" :isolated
+(describe "sequences across processes"
+  :isolated
 
   (test "a sorted list round-trips through a worker unchanged (deep copy)"
-    (let (me (self) w (spawn (seq-emit me 5)))
-      (assert= (receive ([:r n xs] xs)) (list 1 2 3 4 5))))
+    (let (me (self) w (spawn (seq-emit me 5))) (assert= (receive ([:r n xs] xs)) (list 1 2 3 4 5))))
 
   (test "fan-out / fan-in: each worker builds+sorts a list, parent folds a map"
-    (seq-spawn (self) (range 1 16))          ; 15 workers, n = 1..15
+    (seq-spawn (self) (range 1 16))
+    ; 15 workers, n = 1..15
     (let (m (seq-collect 0 15 {}))
       (assert= (count m) 15)
       (assert= (get m 1) (list 1))

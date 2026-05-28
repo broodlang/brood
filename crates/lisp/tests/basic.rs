@@ -655,6 +655,24 @@ fn runtime_error_inside_if_test_points_at_test() {
     assert_eq!((pos.line, pos.col), (2, 3));
 }
 
+/// An unbound symbol at the head of a *tail-position* call (the last form
+/// of a `do`/`let`/`letrec` body, reached via `expr = last; continue 'tail`)
+/// must still carry the call's position. The unbound error fires inside the
+/// symbol-head branch of the eval loop — a path that exits via raw `?` to the
+/// eval frame's caller, so no enclosing `or_form_pos` ever sees it. Regression
+/// guard for the explicit `or_form_pos(call_form)` on that branch.
+#[test]
+fn unbound_head_in_tail_position_carries_call_pos() {
+    let mut interp = Interp::new();
+    // `(nope-fn)` is the tail of a `do` whose top-level form opens on line 1;
+    // before the fix this reported line 1, now it reports line 3 col 3.
+    let err = interp
+        .eval_source("(do\n  (println :a)\n  (nope-fn))\n")
+        .unwrap_err();
+    let pos = err.pos.expect("unbound error should have a position");
+    assert_eq!((pos.line, pos.col), (3, 3));
+}
+
 /// Macroexpand rebuilds list forms (the compile pass walks the whole tree);
 /// the rebuilt forms must carry the original's position so a diagnostic from
 /// inside an expanded form still points at the source line. Regression:

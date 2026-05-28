@@ -21,8 +21,7 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
   (let (embedded (%builtin-module key))
     (if embedded
       embedded
-      (let (path (require--find (str key ".blsp") *load-path*))
-        (when path (slurp path))))))
+      (let (path (require--find (str key ".blsp") *load-path*)) (when path (slurp path))))))
 
 ;; The module docstring: a module's first top-level form, when it is a string
 ;; literal (mirrors the function-docstring rule). nil if there's no leading
@@ -31,26 +30,23 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
 (defn docs--leading-doc (src)
   (let (form (read-string src))
     (cond
-      (string? form)                                 form   ; bare-string (legacy)
-      (and (pair? form) (= (first form) 'defmodule))        ; (defmodule name "doc" …)
-        (let (more (rest (rest form)))
-          (when (string? (first more)) (first more)))
-      else                                           nil)))
+      (string? form) form
+      ; bare-string (legacy)
+      (and (pair? form) (= (first form) 'defmodule)) (let (more (rest (rest form)))
+                                                       (when (string? (first more)) (first more)))
+      else nil)))
 
 ;; The bare module title from a file path: "a/b/foo.blsp" -> "foo".
 (defn docs--basename (path)
-  (let (i    (path--last-slash path (dec (string-length path)))
+  (let (i (path--last-slash path (dec (string-length path)))
         file (if (< i 0) path (substring path (inc i) (string-length path))))
-    (if (ends-with? file ".blsp")
-      (substring file 0 (- (string-length file) 5))
-      file)))
+    (if (ends-with? file ".blsp") (substring file 0 (- (string-length file) 5)) file)))
 
 ;; --- which names a module defines (global-table delta) -----------------------
 
 ;; Names present in `after` but not `before` — the bindings a module introduced
 ;; between two (global-names) snapshots. global-names is sorted, so this is too.
-(defn docs--added (before after)
-  (filter (fn (s) (not (member? s before))) after))
+(defn docs--added (before after) (filter (fn (s) (not (member? s before))) after))
 
 ;; --- rendering ---------------------------------------------------------------
 
@@ -60,70 +56,62 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
 ;; One definition's Markdown: a `### (name args…)` heading (with a *(macro)* tag
 ;; for macros) followed by its docstring, or a placeholder when undocumented.
 (defn docs--entry (sym v)
-  (let (sig    (pr-str (cons sym (arglist v)))
-        d      (doc v)
+  (let (sig (pr-str (cons sym (arglist v)))
+        d (doc v)
         suffix (if (= (type-of v) :macro) "  *(macro)*" ""))
-    (str "### `" sig "`" suffix "\n\n"
-         (if (nil? d) "_Undocumented._\n" (str d "\n")))))
+    (str "### `" sig "`" suffix "\n\n" (if (nil? d) "_Undocumented._\n" (str d "\n")))))
 
 ;; The "Definitions" section: every function/macro the module added.
 (defn docs--section-defs (syms)
   (let (defs (filter (fn (s) (docs--documentable? (eval s))) syms))
     (if (empty? defs)
       ""
-      (str "## Definitions\n\n"
-           (fold (fn (acc s) (str acc (docs--entry s (eval s)) "\n")) "" defs)))))
+      (str "## Definitions\n\n" (fold (fn (acc s) (str acc (docs--entry s (eval s)) "\n")) "" defs)))))
 
 ;; The "Variables" section: names the module bound to non-function values.
 (defn docs--section-vars (syms)
   (let (vars (filter (fn (s) (not (docs--documentable? (eval s)))) syms))
     (if (empty? vars)
       ""
-      (str "## Variables\n\n"
-           (fold (fn (acc s) (str acc "- `" (name s) "`\n")) "" vars)))))
+      (str "## Variables\n\n" (fold (fn (acc s) (str acc "- `" (name s) "`\n")) "" vars)))))
 
 ;; Assemble one module's Markdown from its title, module doc, and added names.
 (defn docs--render (title mdoc syms)
-  (str "# module " title "\n\n"
-       (if (nil? mdoc) "" (str mdoc "\n\n"))
-       (docs--section-defs syms)
-       (docs--section-vars syms)))
+  (str "# module "
+    title
+    "\n\n"
+    (if (nil? mdoc) "" (str mdoc "\n\n"))
+    (docs--section-defs syms)
+    (docs--section-vars syms)))
 
 ;; --- public entry points -----------------------------------------------------
 
 ;; Markdown for the module loaded from `path`: snapshot the globals, load the
 ;; file, and attribute every newly-bound name to it.
 (defn document-file (path)
-  (let (src    (slurp path)
-        before (global-names))
+  (let (src (slurp path) before (global-names))
     (load path)
-    (docs--render (docs--basename path)
-                  (docs--leading-doc src)
-                  (docs--added before (global-names)))))
+    (docs--render (docs--basename path) (docs--leading-doc src) (docs--added before (global-names)))))
 
 ;; Markdown for a module named `modname` (symbol or string): resolve its source
 ;; (baked-in or on *load-path*), snapshot the globals, `require` it, and document
 ;; the names it added.
 (defn document-module (modname)
-  (let (key (name modname)
-        src (docs--source key))
-    (when (nil? src)
-      (error "doc: cannot find module '" key "'"))
+  (let (key (name modname) src (docs--source key))
+    (when (nil? src) (error "doc: cannot find module '" key "'"))
     (let (before (global-names))
       (require modname)
-      (docs--render key
-                    (docs--leading-doc src)
-                    (docs--added before (global-names))))))
+      (docs--render key (docs--leading-doc src) (docs--added before (global-names))))))
 
 ;; Markdown for the whole project: find it from the cwd, put its sources on the
 ;; load-path, and document each source file in turn.
 (defn document-project ()
-  (require 'project)   ; project--find-root / --collect-sources / project-setup
+  (require 'project)
+  ; project--find-root / --collect-sources / project-setup
   (let (root (project--find-root (cwd)))
-    (when (nil? root)
-      (error "doc: not in a Brood project (no project.blsp found from " (cwd) ")"))
+    (when (nil? root) (error "doc: not in a Brood project (no project.blsp found from " (cwd) ")"))
     (project-setup root)
-    (let (dirs  (project--abs-paths root *project-source-paths*)
+    (let (dirs (project--abs-paths root *project-source-paths*)
           files (fold (fn (acc d) (append acc (project--collect-sources d))) nil dirs))
       (fold (fn (acc f) (str acc (document-file f) "\n")) "" files))))
 
@@ -131,8 +119,6 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
 ;; (generate-docs name)   — document one module by name, to stdout.
 ;; The policy behind `nest doc` (the CLI passes the optional module name through).
 (defn generate-docs (& args)
-  (if (empty? args)
-    (println (document-project))
-    (println (document-module (first args)))))
+  (if (empty? args) (println (document-project)) (println (document-module (first args)))))
 
 (provide 'docs)

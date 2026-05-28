@@ -129,6 +129,75 @@ fn two_nodes_connect_and_message() {
     );
 }
 
+/// Cross-node closure shipping (ADR-033, the wire codec's `M_CLOSURE` path).
+/// The client ships a `(fn (x) (* x n))` to a remote worker, with `n` a free
+/// local captured from the surrounding `let`. The worker applies it and sends
+/// the result back. Proves the full closure-as-data path end-to-end:
+///   - the closure's body forms cross the wire as `Message::List(...)`
+///     (S-expressions = data),
+///   - the captured local `n` rides along in `captured`,
+///   - the closure's free globals (`*`) re-resolve on the receiver against
+///     *its* prelude — Erlang's "module must be loaded on both nodes",
+///   - the receiver `f` is called via apply, the result `(* 14 3) = 42`
+///     comes back to the client via the pid carried in the request.
+#[test]
+fn lambda_ships_across_nodes_and_runs() {
+    let _g = port_lock();
+    let dir = std::env::temp_dir().join(format!("brood-dist-fn-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let port_a = free_port();
+    let port_b = free_port();
+
+    // Worker on A: receive `[:run f x reply]`, apply `(f x)`, send the result back.
+    let server = format!(
+        r#"
+(node-start :a "127.0.0.1:{port_a}" "secret")
+(register :worker (self))
+(defn serve ()
+  (receive
+    ([:run f x reply] (do (send reply [:result (f x)]) (serve)))
+    (_ (serve))))
+(serve)
+"#
+    );
+
+    // Client on B: build a closure capturing `n`, ship it, expect (* 14 3) = 42.
+    let client = format!(
+        r#"
+(node-start :b "127.0.0.1:{port_b}" "secret")
+(connect "a@127.0.0.1:{port_a}")
+(let (n 3)
+  (send {{:name :worker :node :a}} [:run (fn (x) (* x n)) 14 (self)]))
+(receive
+  ([:result r] (if (= r 42)
+                 (println "CROSS-NODE-LAMBDA-OK")
+                 (throw (str "expected 42, got " r))))
+  (after 5000 (throw "no reply")))
+"#
+    );
+
+    let mut a = spawn_brood(&dir, "server.blsp", &server);
+    wait_until_listening(port_a);
+    let b = spawn_brood(&dir, "client.blsp", &client);
+
+    let out = b.wait_with_output().expect("client finished");
+    let _ = a.kill();
+    let _ = a.wait();
+    let mut a_err = String::new();
+    if let Some(mut e) = a.stderr.take() {
+        let _ = e.read_to_string(&mut a_err);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success() && stdout.contains("CROSS-NODE-LAMBDA-OK"),
+        "client failed.\n--- client stdout ---\n{stdout}\n--- client stderr ---\n{stderr}\n--- server stderr ---\n{a_err}"
+    );
+}
+
 /// A bad cookie must be rejected: B cannot reach A's `:echo`, so the by-name
 /// send is silently dropped and B times out (Erlang semantics — no delivery, no
 /// error at the sender).

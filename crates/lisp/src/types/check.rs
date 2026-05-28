@@ -510,13 +510,22 @@ fn collect_def_names(heap: &Heap, form: Value, ctx: &mut Ctx) {
     }
 }
 
-/// Forms whose contents are data (`quote`/`quasiquote`) or deliberately exercise
-/// failures (`try` and the error-asserting test helpers it expands from) — don't
-/// look inside them.
+/// Forms whose contents are data (`quote`/`quasiquote`) or deliberately
+/// exercise failures (`try` / `error-of` / `assert-error` pre-expansion;
+/// `%try` post-expansion — they all bottom out at the same primitive). Don't
+/// look inside.
+///
+/// **Post-expansion matters.** `check_file` macroexpands first so threading
+/// macros and `match` patterns get their real shape — but that also rewrites
+/// `(try …)` to `(%try (fn () body) (fn (e) handler))`. Without `%try` here,
+/// the walk would descend into the user's "I expect this to fail" body and
+/// flag the very errors they're asserting on (every `(error-of (cons 1))` in
+/// the test suite would warn). `assert-error` / `error-of` expand *through*
+/// `try`, so `%try` covers them too.
 fn skips_body(name: &str) -> bool {
     matches!(
         name,
-        "quote" | "quasiquote" | "try" | "error-of" | "assert-error"
+        "quote" | "quasiquote" | "try" | "error-of" | "assert-error" | "%try"
     )
 }
 
@@ -575,13 +584,18 @@ fn check_into(
                 check_if(heap, &items, ctx, out);
                 return;
             }
-            "let" | "let*" | "letrec" => {
-                // `letrec` has the same bindings shape `(name val name val …)` and
-                // body tail — same checker walk. The mutual-visibility nuance
-                // (names visible in their own RHSs) doesn't affect type-flow:
-                // pre-binding is to `nil`, the recursive cases here are fns, and
-                // the checker doesn't synthesise fn types from within letrec.
-                check_let(heap, &items, ctx, out);
+            "let" | "let*" => {
+                check_let(heap, &items, ctx, out, false);
+                return;
+            }
+            "letrec" => {
+                // `letrec` pre-binds every name to `nil` so all bindings are
+                // visible in every RHS — that's the mutual-recursion reason
+                // letrec exists. The checker mirrors this: it pre-binds the
+                // names into the inner scope *before* walking the RHSs, so a
+                // self-recursive or mutually-recursive call doesn't get
+                // flagged unbound.
+                check_let(heap, &items, ctx, out, true);
                 return;
             }
             "fn" | "lambda" => {
@@ -641,7 +655,17 @@ fn check_into(
                 // no tag with what the callee accepts. A superset, an `any`
                 // result, or an unknown argument (`None`) overlaps the param, so
                 // it's never flagged — no false positives.
+                //
+                // A `NEVER` arg type means "this branch is unreachable" — every
+                // intersection with NEVER is NEVER, so it'd warn against
+                // *every* param. That's all noise: the code can't execute, so
+                // there's no real misuse. Skip. This shows up in pattern-match
+                // lowering where a guard has narrowed a variable to a type
+                // that has no inhabitants for the current branch.
                 if let Some(arg_ty) = expr_ty(heap, arg, ctx) {
+                    if arg_ty.is_never() {
+                        continue;
+                    }
                     if arg_ty.is_disjoint(param) {
                         let msg = format!(
                             "{}: argument {} expects {}, got {} ({})",
@@ -781,14 +805,24 @@ fn check_if(heap: &Heap, items: &[Value], ctx: &Ctx, out: &mut Vec<(Option<Pos>,
     check_into(heap, else_form, &else_ctx, out);
 }
 
-/// `(let bindings body…)` — walk the bindings sequentially (matching how the
-/// evaluator binds), checking each RHS in the in-flight ctx and shadowing the
-/// new name into it. Then check the body in the extended ctx.
+/// `(let bindings body…)` / `(let* …)` / `(letrec …)` — walk the bindings,
+/// then check the body in the extended ctx. `letrec` pre-binds every name to
+/// "in scope, type unknown" before walking RHSs, matching the evaluator's
+/// nil-pre-bind so a self/mutual-recursive call inside a RHS isn't flagged
+/// unbound. `let`/`let*` walk sequentially — each RHS sees only the
+/// previously-bound names. (The let-vs-let* scope distinction doesn't affect
+/// the unbound check since we only widen names; type-flow stays sound.)
 ///
 /// Quietly skips a malformed bindings shape (a pattern-target `let`, an
 /// improper list, an odd number of binding items): those are evaluator-level
 /// errors and aren't this checker's job.
-fn check_let(heap: &Heap, items: &[Value], ctx: &Ctx, out: &mut Vec<(Option<Pos>, String)>) {
+fn check_let(
+    heap: &Heap,
+    items: &[Value],
+    ctx: &Ctx,
+    out: &mut Vec<(Option<Pos>, String)>,
+    letrec: bool,
+) {
     let Some(&binds_form) = items.get(1) else {
         return;
     };
@@ -803,6 +837,17 @@ fn check_let(heap: &Heap, items: &[Value], ctx: &Ctx, out: &mut Vec<(Option<Pos>
         return;
     }
     let mut scope = ctx.clone();
+    // letrec: pre-bind every name to `None` (in scope, no known type) so each
+    // RHS can refer to its peers (and to itself).
+    if letrec {
+        let mut j = 0;
+        while j < binds.len() {
+            if let Value::Sym(name) = binds[j] {
+                scope = scope.bind(name, None);
+            }
+            j += 2;
+        }
+    }
     let mut i = 0;
     while i < binds.len() {
         let Value::Sym(name) = binds[i] else {

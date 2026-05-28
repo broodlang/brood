@@ -13,123 +13,143 @@
 (require 'test)
 
 (describe "arithmetic"
-  (test "addition"        (assert= (+ 1 2 3) 6) (assert= (+ 1 (* 2 3)) 7))
-  (test "subtraction"     (assert= (- 10 3 2) 5) (assert= (- 5) -5))
-  (test "mul/div/mod"     (assert= (* 2 3 4) 24) (assert= (/ 12 3) 4)
-                          (assert= (/ 7 2) 3.5)  (assert= (mod 10 3) 1))
+  (test "addition" (assert= (+ 1 2 3) 6) (assert= (+ 1 (* 2 3)) 7))
+  (test "subtraction" (assert= (- 10 3 2) 5) (assert= (- 5) -5))
+  (test "mul/div/mod"
+    (assert= (* 2 3 4) 24)
+    (assert= (/ 12 3) 4)
+    (assert= (/ 7 2) 3.5)
+    (assert= (mod 10 3) 1))
   ;; `mod` is euclidean (Brood over `rem`): the result is always in [0, (abs b)),
   ;; even when the operands are negative.
-  (test "mod sign rules"  (assert= (mod -7 3) 2)  (assert= (mod 7 -3) 1)
-                          (assert= (mod -7 -3) 2) (assert= (mod 0 5) 0)))
+  (test "mod sign rules"
+    (assert= (mod -7 3) 2)
+    (assert= (mod 7 -3) 1)
+    (assert= (mod -7 -3) 2)
+    (assert= (mod 0 5) 0)))
 
 (describe "comparison & equality"
-  (test "ordering"        (is (< 1 2 3)) (refute (< 1 3 2)))
-  (test "equality"        (assert= 2 2) (refute (= 1 2))
-                          (assert= (list 1 2) (list 1 2))))
+  (test "ordering" (is (< 1 2 3)) (refute (< 1 3 2)))
+  (test "equality" (assert= 2 2) (refute (= 1 2)) (assert= (list 1 2) (list 1 2))))
 
 (describe "lists"
-  (test "construction"    (assert= (cons 0 (list 1 2)) (list 0 1 2))
-                          (assert= (append (list 1 2) (list 3 4)) (list 1 2 3 4)))
-  (test "access"          (assert= (first (list 1 2 3)) 1)
-                          (assert= (rest (list 1 2 3)) (list 2 3))
-                          (assert= (nth (list 10 20 30) 1) 20))
-  (test "count & reverse" (assert= (count (list 1 2 3 4)) 4)
-                          (assert= (reverse (list 1 2 3)) (list 3 2 1))))
+  (test "construction"
+    (assert= (cons 0 (list 1 2)) (list 0 1 2))
+    (assert= (append (list 1 2) (list 3 4)) (list 1 2 3 4)))
+  (test "access"
+    (assert= (first (list 1 2 3)) 1)
+    (assert= (rest (list 1 2 3)) (list 2 3))
+    (assert= (nth (list 10 20 30) 1) 20))
+  (test "count & reverse"
+    (assert= (count (list 1 2 3 4)) 4)
+    (assert= (reverse (list 1 2 3)) (list 3 2 1))))
 
 (describe "higher-order functions"
-  (test "map"    (assert= (map inc (list 1 2 3)) (list 2 3 4)))
+  (test "map" (assert= (map inc (list 1 2 3)) (list 2 3 4)))
   (test "filter" (assert= (filter positive? (list -1 2 -3 4)) (list 2 4)))
   (test "reduce" (assert= (reduce + 0 (list 1 2 3 4)) 10))
-  (test "apply"  (assert= (apply + (list 1 2 3)) 6)))
+  (test "apply" (assert= (apply + (list 1 2 3)) 6)))
 
 (describe "vectors"
   (test "literals evaluate elements" (assert= [1 (+ 1 1) 3] [1 2 3]))
-  (test "access"                     (assert= (nth [10 20 30] 2) 30)
-                                     (assert= (count [1 2 3]) 3)))
+  (test "access" (assert= (nth [10 20 30] 2) 30) (assert= (count [1 2 3]) 3)))
 
 (describe "strings"
   (test "concatenation" (assert= (str "a" "b" 3) "ab3"))
-  (test "count"         (assert= (count "hello") 5)))
+  (test "count" (assert= (count "hello") 5)))
 
 ;; The tag predicates are Brood wrappers over `type-of` — exercise each one
 ;; positively and check a couple of negatives so the move stays honest.
 (describe "predicates"
-  (test "type checks" (is (nil? nil)) (is (pair? (list 1)))
-                      (is (number? 3.5)) (is (vector? [1])))
+  (test "type checks" (is (nil? nil)) (is (pair? (list 1))) (is (number? 3.5)) (is (vector? [1])))
   (test "every tag predicate"
-    (is (int? 1))        (refute (int? 1.5))
-    (is (float? 1.5))    (refute (float? 1))
-    (is (bool? true))    (refute (bool? nil))
-    (is (string? "s"))   (refute (string? 's))
-    (is (symbol? 's))    (refute (symbol? :s))
-    (is (keyword? :k))   (refute (keyword? 'k))
-    (is (vector? [1]))   (refute (vector? (list 1)))
-    (is (pair? (list 1)))(refute (pair? nil))
-    (is (nil? nil))      (refute (nil? false)))
+    (is (int? 1))
+    (refute (int? 1.5))
+    (is (float? 1.5))
+    (refute (float? 1))
+    (is (bool? true))
+    (refute (bool? nil))
+    (is (string? "s"))
+    (refute (string? 's))
+    (is (symbol? 's))
+    (refute (symbol? :s))
+    (is (keyword? :k))
+    (refute (keyword? 'k))
+    (is (vector? [1]))
+    (refute (vector? (list 1)))
+    (is (pair? (list 1)))
+    (refute (pair? nil))
+    (is (nil? nil))
+    (refute (nil? false)))
   ;; `fn?` holds for both Brood closures and Rust builtins, and nothing else.
   (test "fn? spans closures and builtins"
-    (is (fn? inc)) (is (fn? cons)) (is (fn? (fn (x) x)))
-    (refute (fn? 1)) (refute (fn? 'inc))))
+    (is (fn? inc))
+    (is (fn? cons))
+    (is (fn? (fn (x) x)))
+    (refute (fn? 1))
+    (refute (fn? 'inc))))
 
 (describe "type-of"
   (test "reports the runtime tag as a keyword"
-    (assert= (type-of 1)        :int)
-    (assert= (type-of 1.5)      :float)
-    (assert= (type-of "s")      :string)
-    (assert= (type-of :k)       :keyword)
-    (assert= (type-of 'x)       :symbol)
-    (assert= (type-of true)     :bool)
-    (assert= (type-of nil)      :nil)
+    (assert= (type-of 1) :int)
+    (assert= (type-of 1.5) :float)
+    (assert= (type-of "s") :string)
+    (assert= (type-of :k) :keyword)
+    (assert= (type-of 'x) :symbol)
+    (assert= (type-of true) :bool)
+    (assert= (type-of nil) :nil)
     (assert= (type-of (list 1)) :pair)
-    (assert= (type-of [1])      :vector)
-    (assert= (type-of inc)      :fn)
-    (assert= (type-of %add)     :native))
+    (assert= (type-of [1]) :vector)
+    (assert= (type-of inc) :fn)
+    (assert= (type-of %add) :native))
   (test "agrees with the type predicates"
-    (is (int?    (let (v 1)   (if (= (type-of v) :int) v nil))))
+    (is (int? (let (v 1) (if (= (type-of v) :int) v nil))))
     (is (string? (let (v "a") (if (= (type-of v) :string) v nil))))))
 
 (describe "control & binding"
-  (test "conditionals" (assert= (if (< 1 2) :y :n) :y)
-                       (assert= (cond false :a true :b else :c) :b)
-                       (assert= (when true 1 2 3) 3))
+  (test "conditionals"
+    (assert= (if (< 1 2) :y :n) :y)
+    (assert= (cond false :a true :b else :c) :b)
+    (assert= (when true 1 2 3) 3))
   (test "let is sequential" (assert= (let (a 1 b (+ a 1)) (+ a b)) 3))
-  (test "lexical closures"  (assert= (let (adder (fn (a) (fn (b) (+ a b)))) ((adder 3) 4)) 7)))
+  (test "lexical closures" (assert= (let (adder (fn (a) (fn (b) (+ a b)))) ((adder 3) 4)) 7)))
 
 (describe "letrec"
   ;; Self-recursive local function — the simplest letrec.
   (test "self-recursion"
-    (assert= (letrec (fact (fn (n) (if (<= n 1) 1 (* n (fact (- n 1))))))
-               (fact 6))
-             720))
+    (assert= (letrec (fact (fn (n) (if (<= n 1) 1 (* n (fact (- n 1)))))) (fact 6)) 720))
   ;; Mutually recursive locals — the canonical reason letrec exists.
   (test "mutual recursion"
-    (assert= (letrec (even? (fn (n) (if (= n 0) true  (odd?  (- n 1))))
-                      odd?  (fn (n) (if (= n 0) false (even? (- n 1)))))
+    (assert= (letrec (even? (fn (n) (if (= n 0) true (odd? (- n 1))))
+                      odd? (fn (n) (if (= n 0) false (even? (- n 1)))))
                (list (even? 10) (even? 7) (odd? 7)))
-             (list true false true)))
+      (list true false true)))
   ;; Tail-recursive locals stay O(1) — letrec doesn't break TCO.
   (test "tail-recursive local is stack-safe"
-    (assert= (letrec (loop (fn (i acc) (if (= i 0) acc (loop (- i 1) (+ acc 1)))))
-               (loop 10000 0))
-             10000)))
+    (assert= (letrec (loop (fn (i acc) (if (= i 0) acc (loop (- i 1) (+ acc 1))))) (loop 10000 0))
+      10000)))
 
 (describe "parameter forms"
-  (test "optional with default" (assert= ((fn (a &optional (b 10)) (+ a b)) 5) 15)
-                                (assert= ((fn (a &optional (b 10)) (+ a b)) 5 1) 6))
-  (test "rest"                  (assert= ((fn (& xs) xs) 1 2 3) (list 1 2 3))))
+  (test "optional with default"
+    (assert= ((fn (a &optional (b 10)) (+ a b)) 5) 15)
+    (assert= ((fn (a &optional (b 10)) (+ a b)) 5 1) 6))
+  (test "rest" (assert= ((fn (& xs) xs) 1 2 3) (list 1 2 3))))
 
 ;; :serial — these tests `defn`/`defmacro` into the shared global table, so run
 ;; them one-at-a-time (in a single worker) rather than racing each other.
-(describe "macros" :serial
-  (test "defn"        (defn sq (x) (* x x)) (assert= (sq 6) 36))
-  (test "defmacro"    (defmacro my-when (c & body) `(if ~c (do ~@body) nil))
-                      (assert= (my-when true 1 2 3) 3)
-                      (assert= (my-when false 1 2 3) nil))
-  (test "quasiquote"  (assert= `(1 ~(+ 1 1) ~@(list 3 4) 5) (list 1 2 3 4 5))))
+(describe "macros"
+  :serial
+  (test "defn" (defn sq (x) (* x x)) (assert= (sq 6) 36))
+  (test "defmacro"
+    (defmacro my-when (c & body) `(if ~c (do ~@body) nil))
+    (assert= (my-when true 1 2 3) 3)
+    (assert= (my-when false 1 2 3) nil))
+  (test "quasiquote" (assert= `(1 ~(+ 1 1) ~@(list 3 4) 5) (list 1 2 3 4 5))))
 
 ;; :serial — the side-effecting loop macros write into a global accumulator;
 ;; isolating the writes keeps them out of the cross-test race window.
-(describe "loop macros" :serial
+(describe "loop macros"
+  :serial
   (test "dotimes runs body 0..n-1"
     (def loop--acc nil)
     (dotimes (i 5) (def loop--acc (cons i loop--acc)))
@@ -138,8 +158,7 @@
     (def loop--acc :untouched)
     (dotimes (i 0) (def loop--acc :touched))
     (assert= loop--acc :untouched))
-  (test "dotimes returns nil"
-    (assert= (dotimes (i 3) i) nil))
+  (test "dotimes returns nil" (assert= (dotimes (i 3) i) nil))
   (test "dolist walks each item"
     (def loop--acc nil)
     (dolist (x (list :a :b :c)) (def loop--acc (cons x loop--acc)))
@@ -148,11 +167,10 @@
     (def loop--acc :untouched)
     (dolist (x nil) (def loop--acc :touched))
     (assert= loop--acc :untouched))
-  (test "dolist returns nil"
-    (assert= (dolist (x (list 1 2)) x) nil)))
+  (test "dolist returns nil" (assert= (dolist (x (list 1 2)) x) nil)))
 
 (describe "threading macros"
-  (test "->"  (assert= (-> 5 (- 1) (* 2)) 8))
+  (test "->" (assert= (-> 5 (- 1) (* 2)) 8))
   (test "->>" (assert= (->> (list 1 2 3) (map inc)) (list 2 3 4))))
 
 ;; Pattern matching has its own dedicated, exhaustive suite —
@@ -166,44 +184,43 @@
 (describe "error handling"
   (test "catch yields the thrown value" (assert= (try (throw 42) (catch e e)) 42))
   (test "built-in errors are catchable" (is (try (/ 1 0) (catch e (string? e)))))
-  (test "no error -> body value"        (assert= (try (+ 1 2) (catch e :nope)) 3))
-  (test "assert-error"                  (assert-error (/ 1 0)) (assert-error (throw :boom))))
+  (test "no error -> body value" (assert= (try (+ 1 2) (catch e :nope)) 3))
+  (test "assert-error" (assert-error (/ 1 0)) (assert-error (throw :boom))))
 
 ;; Pin the exact message each kind of error produces, so a change to user-facing
 ;; error text is a deliberate, visible edit here.
 (describe "error messages"
   (test "runtime errors"
-    (assert= (error-of (/ 1 0))   "runtime error: division by zero")
+    (assert= (error-of (/ 1 0)) "runtime error: division by zero")
     ;; `mod` is Brood over the `rem` primitive, so a ÷0 surfaces as a `rem` error.
     (assert= (error-of (mod 1 0)) "runtime error: rem: division by zero")
     (assert= (error-of (rem 1 0)) "runtime error: rem: division by zero")
-    (assert= (error-of (vector-ref [1 2] 9))
-             "runtime error: vector-ref: index out of range"))
+    (assert= (error-of (vector-ref [1 2] 9)) "runtime error: vector-ref: index out of range"))
   (test "unbound symbol echoes the name"
     (assert= (error-of undefined-name) "unbound error: unbound symbol: undefined-name"))
   (test "type errors name the op, the wanted type, and what arrived"
     (assert= (error-of (+ 1 "x")) "type error: %add: expected number, got string (\"x\")")
     (assert= (error-of (first 5)) "type error: first: expected list or vector, got int (5)")
-    (assert= (error-of (string-length :k)) "type error: string-length: expected string, got keyword (:k)")
-    (assert= (error-of (1 2 3))   "type error: cannot call non-function: 1"))
+    (assert= (error-of (string-length :k))
+      "type error: string-length: expected string, got keyword (:k)")
+    (assert= (error-of (1 2 3)) "type error: cannot call non-function: 1"))
   (test "arity errors name the fn, the expected count, and what arrived"
     (defn one-arg (x) x)
-    (assert= (error-of (one-arg 1 2))    "arity error: one-arg: expected 1 argument, got 2")
+    (assert= (error-of (one-arg 1 2)) "arity error: one-arg: expected 1 argument, got 2")
     (assert= (error-of ((fn (a b) a) 1)) "arity error: fn: expected 2 arguments, got 1")
-    (assert= (error-of (cons 1))         "arity error: cons: expected 2 arguments, got 1"))
+    (assert= (error-of (cons 1)) "arity error: cons: expected 2 arguments, got 1"))
   (test "built-ins enforce their declared arity (no silent extra/missing args)"
-    (assert= (error-of (type-of))   "arity error: type-of: expected 1 argument, got 0")
-    (assert= (error-of (int? 1 2))  "arity error: int?: expected 1 argument, got 2")
-    (assert= (error-of (now 1 2))   "arity error: now: expected 0 arguments, got 2")
-    (assert= (error-of (apply +))   "arity error: apply: expected at least 2 arguments, got 1"))
+    (assert= (error-of (type-of)) "arity error: type-of: expected 1 argument, got 0")
+    (assert= (error-of (int? 1 2)) "arity error: int?: expected 1 argument, got 2")
+    (assert= (error-of (now 1 2)) "arity error: now: expected 0 arguments, got 2")
+    (assert= (error-of (apply +)) "arity error: apply: expected at least 2 arguments, got 1"))
   (test "parse errors surface through read-string"
     (assert= (error-of (read-string "(1 2")) "parse error: unclosed list (opened here)"))
   (test "throw hands the value back unchanged"
     (assert= (error-of (throw :boom)) :boom)
-    (assert= (error-of (throw 42))    42)
+    (assert= (error-of (throw 42)) 42)
     (assert= (error-of (error "custom" " " "message")) "custom message"))
-  (test "error-of is nil when nothing is raised"
-    (assert= (error-of (+ 1 2)) nil)))
+  (test "error-of is nil when nothing is raised" (assert= (error-of (+ 1 2)) nil)))
 
 (describe "tail calls"
   ;; A deep-but-quick smoke check that tail positions don't grow the stack. The
@@ -216,10 +233,9 @@
 ;; rolls back when it finishes and can't leak to another test. (The rollback
 ;; itself is guarded by the Rust test `isolate_rolls_back_global_defs`; here we
 ;; just confirm an isolated test can def/use a global through the framework.)
-(describe "isolation" :isolated
-  (test "an isolated test may def globals freely"
-    (def isolated-only 99)
-    (assert= isolated-only 99)))
+(describe "isolation"
+  :isolated
+  (test "an isolated test may def globals freely" (def isolated-only 99) (assert= isolated-only 99)))
 
 ;; Process spawning, message passing, selective receive, timeouts, and scheduler
 ;; fairness/preemption live in their own suite: tests/concurrency_test.blsp.

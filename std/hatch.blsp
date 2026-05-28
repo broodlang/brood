@@ -35,9 +35,7 @@ to leave it unchanged, return the state parameter.
 (defn gen-call (pid payload)
   "Send `payload` as a synchronous call and block until the reply arrives. Other
 messages stay queued — the reply is matched by a fresh (ref)."
-  (let (r (ref))
-    (send pid [:$call (self) r payload])
-    (receive ([:reply ~r v] v))))
+  (let (r (ref)) (send pid [:$call (self) r payload]) (receive ([:reply ~r v] v))))
 
 (defn hatch (f state)
   "Spawn a `defprocess` server `f` with its initial `state`; return its pid."
@@ -51,8 +49,7 @@ messages stay queued — the reply is matched by a fresh (ref)."
   ;; leaves every real message queued. This parks the green process on the
   ;; scheduler's timer (it does NOT block a worker thread), which is why sleep is
   ;; pure Brood rather than a Rust primitive.
-  (let (never (ref))
-    (receive (~never nil) (after ms nil))))
+  (let (never (ref)) (receive (~never nil) (after ms nil))))
 
 ;; ---- defprocess -------------------------------------------------------------
 
@@ -62,16 +59,12 @@ fn (so a clause tail-recurses with the next state); `from`/`rf`/`res` are the
 gensyms a `call` clause uses for the sender pid, reply ref, and its [reply state]."
   (let (kind (first c) pat (second c) body (rest (rest c)))
     (cond
-      (= kind 'cast)
-        `([:$cast ~pat] (~name (do ~@body)))                 ; body => next state
-      (= kind 'call)
-        `([:$call ~from ~rf ~pat]                            ; body => [reply next-state]
-          (let (~res (do ~@body))
-            (send ~from [:reply ~rf (nth ~res 0)])
-            (~name (nth ~res 1))))
-      else
-        (error "defprocess: each clause must start with `cast` or `call`, got "
-               (pr-str kind)))))
+      (= kind 'cast) `([:$cast ~pat] (~name (do ~@body)))
+      ; body => next state
+      (= kind 'call) `([:$call ~from ~rf ~pat] (let (~res (do ~@body))
+                                                 (send ~from [:reply ~rf (nth ~res 0)])
+                                                 (~name (nth ~res 1))))
+      else (error "defprocess: each clause must start with `cast` or `call`, got " (pr-str kind)))))
 
 (defmacro defprocess (name params & clauses)
   "Define a hatch server `name` over a single `params` state, as a tail-recursive
@@ -80,12 +73,10 @@ receive loop. Each clause is (cast PATTERN body…) — body is the next state �
 the server's docstring."
   ;; Peel an optional leading docstring so it stays the generated defn's docstring
   ;; rather than being parsed as a clause.
-  (let (doc     (if (string? (first clauses)) (first clauses) nil)
+  (let (doc (if (string? (first clauses)) (first clauses) nil)
         clauses (if doc (rest clauses) clauses)
-        from    (gensym "from")
-        rf      (gensym "ref")
-        res     (gensym "res")
-        loop    `(receive ~@(map (fn (c) (hatch--clause c name from rf res)) clauses)))
-    (if doc
-      `(defn ~name ~params ~doc ~loop)
-      `(defn ~name ~params ~loop))))
+        from (gensym "from")
+        rf (gensym "ref")
+        res (gensym "res")
+        loop `(receive ~@(map (fn (c) (hatch--clause c name from rf res)) clauses)))
+    (if doc `(defn ~name ~params ~doc ~loop) `(defn ~name ~params ~loop))))

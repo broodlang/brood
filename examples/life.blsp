@@ -18,31 +18,33 @@ read by call (`gen-call`). Run:  ./bin/cli examples/life.blsp")
 (defn step (board)
   "The next generation of `board`."
   (let (counts (frequencies (mapcat neighbours (keys board))))
-    (into {} (for [[cell n] (map-pairs counts) :when (alive-next? cell n board)]
-               [cell true]))))
+    (into {} (for [[cell n] (map-pairs counts) :when (alive-next? cell n board)] [cell true]))))
 
-(defn render-row (board y w)
-  (apply str (for [x (range w)] (if (contains? board [x y]) "█" "·"))))
+(defn render-row (board y w) (apply str (for [x (range w)] (if (contains? board [x y]) "█" "·"))))
 
 (defn render (board w h)
   "The w×h window of `board` as text."
   (apply str (for [y (range h)] (str (render-row board y w) "\n"))))
 
-(defprocess life-server (board)
+(defprocess life-server
+  (board)
   "Owns the board: a :step cast advances it, a :board call reads it back. Driving
 the animation through these is the demo of process calls."
-  (cast :step  (step board))
+  (cast :step (step board))
   (call :board [board board]))
 
 (defn animate (srv frames w h)
   "Animate `frames` generations, advancing and reading the board by process call.
 Redraws in place — each cell overwrites the last, so no clear and no flicker."
   (doseq [gen (range frames)]
-    (let (board (gen-call srv :board))               ; call: fetch the current board
-      (unless (= gen 0) (print (str "\e[" (+ h 1) "A")))   ; move the cursor back up
+    (let (board (gen-call srv :board))
+      ; call: fetch the current board
+      (unless (= gen 0) (print (str "\e[" (+ h 1) "A")))
+      ; move the cursor back up
       (println "generation" gen "— population" (count board) "\e[K")
       (print (render board w h)))
-    (! srv :step)                                    ; cast: advance to the next gen
+    (! srv :step)
+    ; cast: advance to the next gen
     (sleep 70)))
 
 (def glider {[1 0] true [2 1] true [0 2] true [1 2] true [2 2] true})

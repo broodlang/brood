@@ -3,5 +3,4 @@
 
 (require 'test)
 
-(describe "discovery"
-  (test "a nested test file is found and run" (assert= (* 6 7) 42)))
+(describe "discovery" (test "a nested test file is found and run" (assert= (* 6 7) 42)))

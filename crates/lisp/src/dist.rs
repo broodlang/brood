@@ -639,6 +639,13 @@ const M_VECTOR: u8 = 9;
 const M_MAP: u8 = 10;
 const M_REF: u8 = 11;
 const M_PID: u8 = 12;
+/// A serialised closure (ADR-033 closure-as-data path). Body and optionals'
+/// defaults are S-expression forms — already messages — so the wire encoding
+/// is a flat record: name?, params, optionals, rest?, body, doc?, captured.
+/// The receiver's `closure_from_message` chains captured frees onto its own
+/// global scope; free globals re-resolve there (Erlang's "the module must be
+/// loaded on both nodes").
+const M_CLOSURE: u8 = 13;
 
 fn encode_msg(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
     match m {
@@ -696,13 +703,43 @@ fn encode_msg(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
             put_sym(w, *node);
             w.extend_from_slice(&id.to_be_bytes());
         }
-        // Shipping a closure over the wire is a later slice (remote spawn).
-        Message::Closure(_) => {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "sending a function across nodes is not supported yet",
-            ))
+        Message::Closure(c) => {
+            w.push(M_CLOSURE);
+            encode_closure(w, c)?;
         }
+    }
+    Ok(())
+}
+
+/// Wire form of a `ClosureMsg`. Same field order as the struct; symbols travel
+/// by name (separate runtimes have independent interners — see [`put_sym`]).
+/// Two callouts:
+///   - Symbol/string optionals carry a 1-byte `0`/`1` tag, then the value
+///     when present. Cheap and unambiguous in a stream codec.
+///   - Body/optional-default *forms* are already `Message`s (S-expression
+///     data), so they recurse through [`encode_msg`] — code travels exactly
+///     like any other data.
+fn encode_closure(w: &mut Vec<u8>, c: &crate::process::ClosureMsg) -> io::Result<()> {
+    put_opt_sym(w, c.name);
+    put_u32(w, c.params.len() as u32);
+    for &s in &c.params {
+        put_sym(w, s);
+    }
+    put_u32(w, c.optionals.len() as u32);
+    for (s, m) in &c.optionals {
+        put_sym(w, *s);
+        encode_msg(w, m)?;
+    }
+    put_opt_sym(w, c.rest);
+    put_u32(w, c.body.len() as u32);
+    for m in &c.body {
+        encode_msg(w, m)?;
+    }
+    put_opt_str(w, c.doc.as_deref());
+    put_u32(w, c.captured.len() as u32);
+    for (s, m) in &c.captured {
+        put_sym(w, *s);
+        encode_msg(w, m)?;
     }
     Ok(())
 }
@@ -748,12 +785,56 @@ fn decode_msg(r: &mut Cursor<Vec<u8>>) -> io::Result<Message> {
             node: get_sym(r)?,
             id: get_u64(r)?,
         },
+        M_CLOSURE => Message::Closure(Box::new(decode_closure(r)?)),
         t => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("unknown message tag {t}"),
             ))
         }
+    })
+}
+
+/// Inverse of [`encode_closure`]. Each `Vec`'s length is bounded by the
+/// frame's remaining bytes (via [`prealloc`]) so a tiny frame claiming a huge
+/// count can't trigger a large allocation up front — the decode loop fails
+/// cleanly on EOF instead.
+fn decode_closure(r: &mut Cursor<Vec<u8>>) -> io::Result<crate::process::ClosureMsg> {
+    let name = get_opt_sym(r)?;
+    let n = get_u32(r)? as usize;
+    let mut params = Vec::with_capacity(prealloc(r, n));
+    for _ in 0..n {
+        params.push(get_sym(r)?);
+    }
+    let n = get_u32(r)? as usize;
+    let mut optionals = Vec::with_capacity(prealloc(r, n));
+    for _ in 0..n {
+        let s = get_sym(r)?;
+        let m = decode_msg(r)?;
+        optionals.push((s, m));
+    }
+    let rest = get_opt_sym(r)?;
+    let n = get_u32(r)? as usize;
+    let mut body = Vec::with_capacity(prealloc(r, n));
+    for _ in 0..n {
+        body.push(decode_msg(r)?);
+    }
+    let doc = get_opt_str(r)?;
+    let n = get_u32(r)? as usize;
+    let mut captured = Vec::with_capacity(prealloc(r, n));
+    for _ in 0..n {
+        let s = get_sym(r)?;
+        let m = decode_msg(r)?;
+        captured.push((s, m));
+    }
+    Ok(crate::process::ClosureMsg {
+        name,
+        params,
+        optionals,
+        rest,
+        body,
+        doc,
+        captured,
     })
 }
 
@@ -772,6 +853,52 @@ fn put_str(w: &mut Vec<u8>, s: &str) {
 /// interners, so the id is meaningless across the wire.
 fn put_sym(w: &mut Vec<u8>, s: Symbol) {
     put_str(w, &value::symbol_name(s));
+}
+
+/// `Option<Symbol>` as a `0`/`1` presence tag + the symbol's name when set.
+/// One byte cheaper than encoding `nil` as a sentinel name, and unambiguous
+/// in a stream codec.
+fn put_opt_sym(w: &mut Vec<u8>, s: Option<Symbol>) {
+    match s {
+        Some(s) => {
+            w.push(1);
+            put_sym(w, s);
+        }
+        None => w.push(0),
+    }
+}
+
+/// `Option<&str>` with the same `0`/`1` tag shape as [`put_opt_sym`].
+fn put_opt_str(w: &mut Vec<u8>, s: Option<&str>) {
+    match s {
+        Some(s) => {
+            w.push(1);
+            put_str(w, s);
+        }
+        None => w.push(0),
+    }
+}
+
+fn get_opt_sym(r: &mut Cursor<Vec<u8>>) -> io::Result<Option<Symbol>> {
+    match get_u8(r)? {
+        0 => Ok(None),
+        1 => Ok(Some(get_sym(r)?)),
+        t => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("bad Option<Symbol> tag {t}"),
+        )),
+    }
+}
+
+fn get_opt_str(r: &mut Cursor<Vec<u8>>) -> io::Result<Option<String>> {
+    match get_u8(r)? {
+        0 => Ok(None),
+        1 => Ok(Some(get_str(r)?)),
+        t => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("bad Option<String> tag {t}"),
+        )),
+    }
 }
 
 /// Bytes left in the frame buffer. Used to bound allocations by what the frame
@@ -928,6 +1055,88 @@ mod tests {
         match read_frame(&mut Cursor::new(bytes)) {
             Err(e) => assert_eq!(e.kind(), io::ErrorKind::InvalidData),
             Ok(_) => panic!("oversized frame should be rejected"),
+        }
+    }
+
+    #[test]
+    fn closure_roundtrips_through_the_wire() {
+        // A `ClosureMsg` exercising every optional + every list — the kind a
+        // real `(fn (a &optional (b 10) &) … )` would serialise to. Captures
+        // are stand-ins for free locals copied from the sender's frame; on
+        // the receiver they chain onto its global scope.
+        use crate::process::ClosureMsg;
+        let c = ClosureMsg {
+            name: Some(value::intern("worker")),
+            params: vec![value::intern("a"), value::intern("b")],
+            optionals: vec![(value::intern("c"), Message::Int(10))],
+            rest: Some(value::intern("xs")),
+            // (a body of `(+ a b c)` — just the *message* form of it)
+            body: vec![Message::List(vec![
+                Message::Sym(value::intern("+")),
+                Message::Sym(value::intern("a")),
+                Message::Sym(value::intern("b")),
+                Message::Sym(value::intern("c")),
+            ])],
+            doc: Some("add three".to_string()),
+            captured: vec![(value::intern("seed"), Message::Int(42))],
+        };
+        let f = Frame::Send {
+            target: Target::Pid(1),
+            msg: Message::Closure(Box::new(c)),
+        };
+        match read_full(&f) {
+            Frame::Send {
+                msg: Message::Closure(c),
+                ..
+            } => {
+                assert_eq!(value::symbol_name(c.name.unwrap()), "worker");
+                assert_eq!(c.params.len(), 2);
+                assert_eq!(value::symbol_name(c.params[0]), "a");
+                assert_eq!(c.optionals.len(), 1);
+                assert!(matches!(&c.optionals[0].1, Message::Int(10)));
+                assert_eq!(value::symbol_name(c.rest.unwrap()), "xs");
+                assert_eq!(c.body.len(), 1);
+                assert_eq!(c.doc.as_deref(), Some("add three"));
+                assert_eq!(c.captured.len(), 1);
+                assert!(matches!(&c.captured[0].1, Message::Int(42)));
+            }
+            other => panic!("wrong frame after round-trip: {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn closure_with_all_options_absent_roundtrips() {
+        // The minimal case: no name, no rest, no doc, no optionals, no captures —
+        // a global-capturing `(fn (x) x)`. Each Option's 0/1 tag has to survive
+        // cleanly, otherwise decoding would mis-align.
+        use crate::process::ClosureMsg;
+        let c = ClosureMsg {
+            name: None,
+            params: vec![value::intern("x")],
+            optionals: vec![],
+            rest: None,
+            body: vec![Message::Sym(value::intern("x"))],
+            doc: None,
+            captured: vec![],
+        };
+        let f = Frame::Send {
+            target: Target::Pid(1),
+            msg: Message::Closure(Box::new(c)),
+        };
+        match read_full(&f) {
+            Frame::Send {
+                msg: Message::Closure(c),
+                ..
+            } => {
+                assert!(c.name.is_none());
+                assert!(c.rest.is_none());
+                assert!(c.doc.is_none());
+                assert!(c.optionals.is_empty());
+                assert!(c.captured.is_empty());
+                assert_eq!(c.params.len(), 1);
+                assert_eq!(c.body.len(), 1);
+            }
+            _ => panic!("wrong frame"),
         }
     }
 
