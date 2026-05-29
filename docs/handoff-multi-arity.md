@@ -22,18 +22,49 @@
 | Test memory cap = host-safety backstop (5 GiB hard / 4 GiB soft) | ✅ done |
 | Test framework: `:isolated` units run in droppable processes (was 18 GiB accumulation) | ✅ done |
 | Adversarial test bugs (reader, blob, cross-test contamination) | ✅ done, 22/22 green standalone |
-| **Native multi-arity dispatch (ADR-046)** | ✅ implemented + validated (8.1× win) |
-| → ADR-046 in `docs/decisions.md`, devlog entry, `language.md` note, roadmap tick | ⛔ **TODO** |
-| → final `cargo test` green confirmation | ⏳ running / confirm |
+| **Native multi-arity dispatch (ADR-047)** | ✅ implemented + validated (8.1× win); committed in `2ce11c9` |
+| → ADR-047 in `docs/decisions.md`, devlog entry, `language.md` note, roadmap tick | ✅ **done** (2026-05-29 follow-up session) |
+| `cargo test`: lib + basic + gc + mem_limit + preemption | ✅ green (basic.rs 29s→**5s**, multi-arity speedup) |
+| `cargo test`: the **in-language suite** (`suite.rs`/`nest test`) | ⚠️ trips the memory soft cap — see below (GC-blocked, host-safe) |
 
 ## How to resume in one paragraph
 
-The build is green (as of handoff). Run `cargo test` — if green, the only thing
-left is **docs**: write **ADR-046** (native multi-arity dispatch) in
-`docs/decisions.md`, add a dated `docs/devlog.md` entry covering this whole
-session, add a short multi-arity note to `docs/language.md`, and tick the
-roadmap. Then it's done. If `cargo test` is *not* green, see "If tests fail"
-below.
+The build is green and **multi-arity is done + validated**. The remaining work is
+**(1) docs** — write **ADR-047** in `docs/decisions.md`, a dated `docs/devlog.md`
+entry for this whole session, a short multi-arity note in `docs/language.md`, and
+tick the roadmap — and **(2) a decision about the in-language suite's memory**
+(see "The one open issue" below). Multi-arity itself is finished; don't redo it.
+
+## The one open issue — the suite trips the memory cap (GC-blocked, NOT a regression)
+
+`cargo test`'s `brood_suite_passes` (and `nest test`) **fail**: the full
+in-language suite (633 tests, including the user's new editor/rope tests) grows
+to **whatever the memory soft cap is** and trips E0043 (measured: hits 4 GiB at
+the 4 GiB cap, 6 GiB at an 8 GiB cap — it grows monotonically to the cap). This
+is the **no-GC cumulative accumulation** problem (`Heap::collect` is a no-op; the
+long-lived runner + parallel-phase work never frees), the same M1-GC issue
+documented in `memory/no-gc-suite-memory.md`. Multi-arity cut *per-op* cost ~8×
+(basic.rs went 29s→5s) but did **not** change the *cumulative* total.
+
+**It is host-SAFE**: the 4 failures are clean catchable E0043 ("memory limit
+exceeded"), not crashes — the cap is doing its job. **Do not "fix" this by
+setting the cap to 0/unlimited** (that OOM-froze the user's machine once).
+
+Options for the next session (discuss with the user — they chose dogfooding +
+"build the language up, don't work around it"):
+- **The real fix is the tracing GC** (M1) — then the suite's working set drops by
+  orders of magnitude and a tight cap works. This is the principled path.
+- **Interim**: flush the runner's LOCAL heap between phases, or run the parallel
+  phase in bounded batches that fully drain+free (a `run-parallel` batched
+  scaffold already exists in `std/test.blsp` — `*parallel-batch*`), or reduce the
+  heaviest test counts. Earlier probing showed batching alone did NOT bound it
+  (the runner accumulation dominates), so this needs more diagnosis — instrument
+  `mem-bytes` across the suite to find what the long-lived runner retains.
+- **Measuring the true peak** is safe only with a *bounded* `BROOD_MEM_LIMIT`
+  (the cap aborts one process at the limit — it can't freeze the host). Never
+  measure with unlimited.
+
+If `cargo test` is otherwise unexpectedly red, see "If tests fail" below.
 
 ---
 
@@ -76,7 +107,7 @@ still **SIGSEGV'd a green process** (the exact MCP-server-killer from
 These all compiled and passed before the multi-arity work; re-confirm with
 `cargo test` once green.
 
-## Part B — native multi-arity dispatch (ADR-046) — THE MAIN NEW FEATURE
+## Part B — native multi-arity dispatch (ADR-047) — THE MAIN NEW FEATURE
 
 **Why** (user's explicit direction — see CLAUDE.md "Dogfood first; optimize only
 by building the language up"): variadic `+`/`-`/`=` are Brood `defn`s over `fold`,
@@ -141,8 +172,8 @@ e.g. `((3 _) …)`) still lower to the `match*` engine.
    output). The 8.1× arithmetic win should also drop the *suite* peak well under
    the 4 GiB soft cap — verify it no longer trips E0043. Also eyeball that the
    suite-wide memory is much lower than the pre-multi-arity ~3 GiB.
-2. **ADR-046** in `docs/decisions.md` (next free number — 044=supervision,
-   045=ropes are taken; the prelude comment already references **ADR-046**).
+2. **ADR-047** in `docs/decisions.md` (next free number — 044=supervision,
+   045=ropes are taken; the prelude comment already references **ADR-047**).
    Title: "Native multi-arity closure dispatch". Cover: the dogfooding rationale,
    arms vs `match*` split, `select_arm` semantics, the 8.1× measurement, and that
    it keeps `+` in Brood.

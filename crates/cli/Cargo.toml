@@ -12,10 +12,6 @@ path = "src/main.rs"
 
 [dependencies]
 brood = { path = "../lisp" }
-# Shared REPL (rustyline-backed) used by both `brood` and `nest` — lives in
-# its own crate so the LSP (which depends on brood but has no REPL) doesn't
-# pay for rustyline. See ADR-005 / docs/decisions.md.
-brood-repl = { path = "../repl" }
 # Argument parsing + help text. The CLI is small enough to hand-roll, but
 # we've already paid for one typo-detection bug from doing so — clap's
 # typo suggestions and uniform `--foo=bar`/`--foo bar` handling pay for

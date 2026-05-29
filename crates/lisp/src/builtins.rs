@@ -422,6 +422,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::variadic(any, nil_ty),
         eprint,
     );
+    def(
+        heap,
+        "read-line",
+        Arity::exact(0),
+        Sig::nullary(string.union(nil_ty)),
+        read_line,
+    );
     // `println` is Brood over `print` (std/prelude.blsp).
     def(
         heap,
@@ -1037,6 +1044,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("make-dir", &["path"], "Create a directory and any missing parents (like mkdir -p)."),
     ("spit", &["path", "s"], "Write string s to the file at path."),
     ("slurp", &["path"], "Read the whole file at path into a string (does not evaluate it)."),
+    ("read-line", &[], "Read one line from stdin; returns the line as a string (trailing newline stripped) or nil at end of input."),
     ("file-mtime", &["path"], "Last-modified time of path as epoch-milliseconds, or nil if the file is missing. Cheap (stat) — pair with `load` to drive a hot-reloader."),
     ("getenv", &["name"], "The value of environment variable name, or nil if unset."),
     ("run-process", &["prog", "args"], "Run external program prog with an args list, inheriting stdio; returns its exit code."),
@@ -1858,6 +1866,10 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
     // The Model Context Protocol tool surface — `(mcp-tools)` returns the
     // catalogue the `nest mcp` dispatcher reads (ADR-036, docs/mcp.md, step 3).
     ("mcp", include_str!("../../../std/mcp.blsp")),
+    // The read-eval-print loop itself, written in Brood (`(require 'repl)`):
+    // policy over the `read-line`/`eval-string`/`pr-str` primitives. The Rust
+    // binaries (`brood`, `nest repl`) just bootstrap into `(repl-run)`.
+    ("repl", include_str!("../../../std/repl.blsp")),
 ];
 
 /// Baked-in reference *documents* (markdown), the counterpart to
@@ -2472,6 +2484,27 @@ fn spit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// `(slurp path)` — read the whole file at `path` and return it as a string. The
 /// read-side counterpart to `spit`; unlike `load` it does not evaluate, so the
 /// doc tooling can inspect a module's source (e.g. its leading docstring form).
+/// `(read-line)` — read one line from stdin, returning it as a string with the
+/// trailing newline stripped, or `nil` at end of input (EOF / Ctrl-D). The one
+/// irreducible I/O mechanism the Brood-hosted REPL (`std/repl.blsp`) can't
+/// bootstrap; line *editing* on a TTY comes free from the terminal's cooked
+/// mode, so this stays a plain blocking read.
+fn read_line(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use std::io::BufRead;
+    let mut line = String::new();
+    let n = std::io::stdin().lock().read_line(&mut line).map_err(|e| {
+        LispError::runtime(format!("read-line: {}", e))
+            .with_code(crate::error::error_codes::FILE_IO)
+    })?;
+    if n == 0 {
+        return Ok(Value::Nil); // EOF
+    }
+    while line.ends_with('\n') || line.ends_with('\r') {
+        line.pop();
+    }
+    Ok(heap.alloc_string(&line))
+}
+
 fn slurp(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "slurp", arg(args, 0))?;
     let content = std::fs::read_to_string(&path).map_err(|e| {

@@ -154,8 +154,15 @@ Current set:
   the recursive evaluator parks at `receive` without a rewrite (scheduler.md).
 - `rustyline` (cli) — line editing / history for the interactive REPL. A
   dev/UX dependency in the binary, not the library.
+- `ropey` (lisp) — the text rope backing editor buffers (M2, ADR-045): an
+  `Arc`-shared B-tree giving O(1) clone + copy-on-write edits, so immutability is
+  free. The one irreducible text mechanism; everything above it is Brood.
+- `crossterm` (lisp) — the terminal frontend for the M3 display/input seam
+  (ADR-046): raw mode, the alternate screen, key events, styled output. The
+  `term-*` primitives are the in-process frontend that paints the render-op
+  protocol (which is itself Brood data); a remote frontend speaks the same ops.
 - `divan` (dev only) — the microbenchmark harness; the released library pulls
   nothing extra.
 
-More will arrive with the features that need them: `ropey` (text rope) for the
-editor, `tokio` + `serde` for the server/protocol.
+More will arrive with the features that need them: `tokio` + `serde` for the
+server/protocol.

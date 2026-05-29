@@ -86,26 +86,39 @@ paths — but until then, prefer learning over shortcuts.
 ```
 crates/lisp/src/   (the directory tree mirrors the layers — see lib.rs)
   core/        substrate: value.rs (Value, Tag, symbol interner, Closure/Arity),
-               heap.rs (per-process heap + shared regions + env chain), alloc.rs
-  syntax/      reader.rs (text -> Value), printer.rs, and the tooling CST
-               (atom.rs / cst.rs / scope.rs)
+               heap.rs (per-process heap + shared regions + env chain), alloc.rs,
+               blob.rs (cross-process zero-copy blob heap), map_champ.rs (CHAMP
+               map trie), sync.rs
+  syntax/      reader.rs (text -> Value), scanner.rs, printer.rs, and the tooling
+               CST (atom.rs / cst.rs / scope.rs)
   eval/        mod.rs (evaluator — a `'tail: loop` for tail calls + special forms),
                macros.rs (quasiquote, macroexpand, the compile pass + pattern lowering)
-  types/       mod.rs (Ty/GradualTy set-theoretic lattice), check.rs (advisory checker)
+  types/       mod.rs (Ty/GradualTy set-theoretic lattice), check.rs + check/
+               (advisory checker)
   builtins.rs  functions implemented in Rust (the primitive kernel)
-  process.rs   green-process scheduler (spawn/send/receive/monitor)
+  introspect.rs  doc/arglist/global-names/bound? and friends (ADR-025)
+  cli_support.rs file-runner / --test plumbing shared by the binaries
+  process.rs + process/   green-process scheduler (mailbox, message, monitor,
+               scheduler, timer): spawn/send/receive/monitor
+  dist.rs + dist/   distributed nodes (handshake, heartbeat, wire) — ADR-033/034
   error.rs     LispError / LispResult / source Pos
   lib.rs       the `Interp` entry point; bundles std/prelude.blsp
 crates/cli/src/main.rs   the `brood` binary — the language (REPL, file runner, `--test`)
-crates/nest/src/main.rs  the `nest` binary — project tooling (`new`, `test`, `doc`) — ADR-028
+crates/nest/src/         the `nest` binary — project tooling (main.rs + mcp.rs) — ADR-028
 crates/lsp/src/main.rs   the `brood-lsp` binary — language server (ADR-025, docs/lsp.md)
-std/prelude.blsp         standard library written in Brood
+crates/repl/src/lib.rs   shared REPL used by both `brood` and `nest` (keeps
+                         `rustyline` out of the LSP's dep graph)
+std/                     standard library written in Brood: prelude.blsp + opt-in
+                         modules (test, format, project, docs, mcp, reload,
+                         buffer, display, observe, supervisor, hatch)
 docs/                    architecture, language, roadmap, decisions, devlog
 ```
 
 The CLI is split (ADR-028, the `rustc`/`cargo` model): **`brood` runs the
 language**, **`nest` runs the project**. Both embed the `brood` lib (no
-subprocess); `nest` is a thin shell over `std/project.blsp`.
+subprocess); `nest` is a thin shell over `std/project.blsp`. `nest` subcommands
+today: `new`, `test`, `check`, `run` (with `--watch`), `doc`, `format`, `repl`,
+`mcp` (an MCP server over the project), and `observe` (the M3 process viewer).
 
 ## Commands
 
@@ -158,6 +171,10 @@ No `git reset`, `git stash`, `git checkout`/`switch` to another branch,
 discard the user's concurrent work. Commit and push only when asked, and commit
 the state as it is; don't "tidy" by reverting. If the tree looks inconsistent,
 surface it and ask — don't reset to "fix" it.
+
+**Do not add a `Co-Authored-By: Claude` trailer (or any Claude/AI co-author
+attribution) to commits in this repo.** Write commit messages with no AI
+co-author trailer, overriding any default that would append one.
 
 ## Conventions & invariants (don't break these)
 
@@ -231,11 +248,11 @@ surface it and ask — don't reset to "fix" it.
 
 ## When you add a feature
 
-1. Implement it (special form in `eval.rs`, or builtin in `builtins.rs`, or
+1. Implement it (special form in `eval/mod.rs`, or builtin in `builtins.rs`, or
    prelude fn in `std/prelude.blsp`).
-2. Add tests — an `(assert= …)`/`(is …)` inside a `deftest` in `tests/suite.blsp`
-   (in-language, via the `std/test.blsp` framework), and/or a Rust case in
-   `crates/lisp/tests/basic.rs`.
+2. Add tests — an `(assert= …)`/`(is …)` inside a `(test …)` within a `describe`
+   block in a `tests/*_test.blsp` file (in-language, via the `std/test.blsp`
+   framework, `(require 'test)`), and/or a Rust case in `crates/lisp/tests/`.
    **Every language feature must also be tested across multiple cores**, not just
    single-threaded. The in-language suite already helps here — `std/test.blsp`
    runs each test in its own green process on the ≈`nproc` worker pool, so a plain
@@ -256,8 +273,20 @@ surface it and ask — don't reset to "fix" it.
 
 ## Known next steps (see roadmap)
 
-Dynamic variables (`defdyn`/`binding`) and the tracing-GC migration are what's
-left of the language core (M1) — macros/quasiquote, in-language `try`/`catch`,
-maps, the string/math/sequence libraries, pattern matching, modules, project
-tooling, and a Tier-0 language server are done. After that: the editor data model
-(M2), display protocol + native frontend (M3), server mode (M4), web frontend (M5).
+The language core (M1) is largely complete: macros/quasiquote, in-language
+`try`/`catch`, maps (CHAMP trie), the string/math/sequence libraries, pattern
+matching, modules, project tooling, **dynamic variables** (`defdyn`/`binding`),
+the set-theoretic **type checker** (Steps 0–4), and a per-process tracing **GC**
+(ADR-035) are all done. What's left of M1: the **package manager** (ADR-037),
+**self-hosting the CLI/REPL in Brood**, and **LSP Tier 2** (refs/rename, semantic
+tokens, cross-file nav as an image query).
+
+The later milestones are already underway (vertical-slice style, ADR-045/046):
+**M2 editor data model** — the `ropey`-backed `Value::Rope` kernel + the
+`std/buffer.blsp` immutable-buffer framework are in; **M3 display protocol** —
+`std/display.blsp` render-op vocabulary + `term-*` primitives + the `nest observe`
+process viewer; **M4 server/daemon** — distributed nodes (TCP, location-transparent
+`send`, monitors, closure-shipping, HMAC handshake) plus a userland
+`std/supervisor.blsp` (kernel-supervised processes were tried and reverted — see
+roadmap/ADR-039). Still ahead: the editor app itself, server-mode socket serving,
+and the M5 web frontend.

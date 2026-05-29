@@ -15,7 +15,7 @@ gate (`eval::call_native`), before the primitive runs — so a wrong-count call 
 a clean arity error (`type-of: expected 1 argument, got 0`) rather than a missing
 arg silently becoming `nil`.
 
-## Native primitive functions (91)
+## Native primitive functions (97)
 
 | Category | Primitive | Arity | Purpose |
 |---|---|---|---|
@@ -49,6 +49,12 @@ arg silently becoming `nil`.
 | | `rope-line` | 2 | text of line `n` (0-based), including its trailing newline — the viewport primitive |
 | | `rope-char->line` | 2 | 0-based line index containing a char index |
 | | `rope-line->char` | 2 | char index where a 0-based line begins |
+| **Terminal** (the display/input seam — ADR-046; the in-process crossterm frontend that paints the render-op protocol, `std/display.blsp`) | `term-enter` | 0 | take over the terminal: raw mode + alternate screen, cursor hidden → nil. Pair with `term-leave` |
+| | `term-leave` | 0 | restore the terminal (show cursor, leave alternate screen, disable raw mode) → nil |
+| | `term-size` | 0 | terminal size as `[cols rows]` (character cells) |
+| | `term-poll` | 1 | `(term-poll ms)` → wait up to `ms` ms for a key: a 1-char string (printable), a keyword for specials (`:up` `:down` `:left` `:right` `:enter` `:escape` `:backspace` `:tab` `:delete` `:home` `:end` `:page-up` `:page-down`, ctrl combos like `:ctrl-c`), or `nil` on timeout. Always pass a finite `ms` |
+| | `term-draw` | 1 | paint a **frame** — a vector of render ops `[:clear]` / `[:text row col s]` / `[:text row col s face]` / `[:cursor row col]`, where a face is a map like `{:fg :red :bold true}` → nil. The frontend that interprets the display protocol |
+| **Process introspection** | `mailbox-size` | 1 | `(mailbox-size pid)` → the number of messages queued in a live local process's mailbox (its receive backlog), or `nil` for a remote/dead pid. The one process-state accessor Brood can't reach (the queue lives behind the scheduler registry); `(list-processes)` + `self` are the others. Used by `std/observe.blsp` |
 | **Type reflection** | `type-of` | 1 | the runtime type tag as a keyword (`:int` `:string` …); the one irreducible reflective primitive. The tag predicates (`nil?` `pair?` `int?` `float?` `bool?` `string?` `symbol?` `keyword?` `vector?` `map?` `fn?`) are Brood wrappers over it, as are the in-language type checks |
 | **Type checking** (advisory; see [types.md](types.md)) | `check` | 1 | run the advisory type checker over a *quoted* form: macro-expand it (like the real compile pass), then return a **list of warning strings** for provably-wrong primitive arguments (e.g. `(first 5)` → `"first: argument 1 expects nil \| pair \| vector, got int (5)"`), or `nil` when nothing is wrong. Advisory: never raises |
 | | `check-file` | 1 | check every top-level form in the file at `path`, returning pre-formatted `"path:line:col: warning: …"` strings (or `nil` if clean). Reads but does **not** evaluate. Used by `(check-project)` for the `nest test` / `nest run` / `nest check` pre-flight |

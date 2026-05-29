@@ -6439,3 +6439,154 @@ matters.
 §3.2 (revised directions: balance ✅ landed, fresh-only stealing 🟡 optional,
 live-coroutine stealing ❌ substrate-blocked). Experiment preserved on branch
 `track-a-workstealing`, unmerged.
+
+
+## 2026-05-29 — M3 Phase 0: the display/input seam + `nest observe` (ADR-046)
+
+**Goal.** Start M3 — the seam between the runtime and any frontend — and prove it
+end-to-end with the smallest real app: a terminal process observer. Picked over
+starting the editor project because it needs **no rope/buffer**, so it validates
+the render protocol + key loop in isolation before the editor rides on it. (Prior
+session's recommended first step; resumed from another Claude profile's session.)
+
+**Design (ADR-046).** A frontend is a **protocol, not a library** (architecture.md).
+The render frame is **Brood data** — a vector of tagged ops (`[:clear]`, `[:text
+row col s]`, `[:text row col s face]`, `[:cursor row col]`; a face is a map of
+`:fg`/`:bg`/`:bold`/`:reverse`). Rust supplies only the *frontend that paints it*:
+five `term-*` primitives over `crossterm`. So a remote/web frontend re-implements
+the identical ops over a socket later — the seam that makes local-fast and
+server-mode one code path. Mechanism in Rust, protocol-meaning + observer policy
+in Brood.
+
+**Built.**
+- *Rust (mechanism):* `crossterm` dep + `term-enter`/`term-leave`/`term-size`/
+  `term-poll`/`term-draw` in `builtins.rs` (`term-draw` is a ~40-line interpreter
+  of the frame vector; never panics — clean `LispError`s like the rope prims),
+  plus one introspection accessor `mailbox-size` (the mailbox queue is behind the
+  scheduler registry, unreachable from Brood; added `process::mailbox_len`).
+  `pub fn restore_terminal()` for the host-side panic backstop.
+- *Brood (policy):* `std/display.blsp` (pure render-op constructors `clear`/
+  `text`/`cursor`/`frame`, nil-dropping) and `std/observe.blsp` (a pure
+  `observe-frame` builder + a thin `observe-run` IO loop). Both embedded, opt-in.
+- *`nest observe`:* runs the observer in the **root process** (outside the worker
+  pool, so its blocking `term-poll` never starves the processes it observes) with
+  an RAII `TermGuard` restoring the terminal on panic/error.
+
+**Two design points that mattered.**
+- *Scheduler safety.* Preemption can't interrupt a process parked in a native
+  crossterm call, so an infinite poll on a *green* process would pin a worker.
+  Fix: observer = root process (its thread isn't in the pool) + always a finite
+  poll timeout. Traced via the Plan agent against scheduler.rs.
+- *Terminal restore.* `process::exit` skips `Drop`, so the guard is scoped to drop
+  (restore) *before* an error-exit; the normal path is the Brood `term-leave`, the
+  guard is the abnormal-path backstop (fires on panic unwind). Verified: a non-TTY
+  run surfaces a clean `runtime error: terminal: …` and restores the screen.
+
+**Interactive + node panel (same day).** Per the next ask ("more node info + some
+interactivity") the observer grew a **node-stats header** (node name, workers/peak,
+spawn count, mem used/peak, peers — all existing primitives, no new Rust) and
+**keyboard navigation**: `↑`/`↓` (or `k`/`j`) select a process, the row is
+caret-marked + reverse-highlighted, a detail line names the selection, `space`
+freezes/resumes the live refresh, `r` refreshes, `q`/Esc/Ctrl-C quits.
+Interactivity with **no mutation**: the UI state (`{:sel-pid :frozen}`) is a plain
+map threaded through the tail-recursive loop — each keypress recurses with a fresh
+state. Selection is tracked **by pid string**, not row index, so it stays on the
+same process as the busiest-first list reorders under it (and recovers to row 0 if
+the process dies). `observe-frame` gained the node map + `sel` + `paused` args and
+windows long lists (centred on the selection) with a `[sel/total]` counter.
+
+**Tests.** `tests/observe_test.blsp` — 18 tests: display constructors + nil-drop,
+`observe--fit`/`observe--row`/`observe--bytes->human`/`observe--window-start`/
+`observe--sel-index`/`observe--node-lines` helpers, `observe-frame` structure
+(node panel, per-process rows, selection marker+highlight, detail line, paused
+footer, windowing + position counter, width-clipping), and an `:isolated` live
+block driving the new `mailbox-size` primitive + `observe--snapshot` across real
+spawned processes. 18/18 green incl. `BROOD_GC_STRESS=1`. The `term-*` primitives
+need a real TTY, exercised manually via `nest observe`.
+
+**Gotchas hit.** `concat`→`append` (the variadic seq concat); `get` is map-only
+(use `nth` to index a vector); `sort-by` compares with numeric `<` only (can't
+sort pid strings) → sort by mailbox backlog **descending** instead, which is also
+the better observer ordering (busiest first, like Erlang's observer).
+
+**Next.** The editor app — a new `nest` project that `(require 'buffer)`s the M2
+framework and renders through this seam: keymaps, commands, config. Later additive
+on the same protocol: faces beyond fg/bold, mouse/resize, scroll, and attaching
+the observer to a *remote* live image (the dist/node machinery exists for it).
+
+## 2026-05-29 — Runaway-resource safety (real this time) + native multi-arity dispatch (ADR-047)
+
+**Goal.** Two things. **(A)** Make runaway recursion/allocation *actually* safe —
+the in-flight ADR-043 backstops didn't work, a deep non-tail recursion still
+SIGSEGV'd a green process (the MCP-server-killer from `claude-demo-findings.md`).
+**(B)** Close the variadic-arithmetic performance gap *without* moving `+`/`-`/`=`
+to Rust — the dogfooding-aligned fix the CLAUDE.md "build the language up" rule
+calls for.
+
+**A — runaway-resource safety.**
+- *Byte-based stack guard (E0044).* The old E0044 was a frame *count* (3500),
+  miscalibrated ~40×: a debug green-process coroutine (2 MiB stack) overflows at
+  ~90 frames, so `(defn boom (n) (+ 1 (boom (+ n 1)))) (boom 0)` still segfaulted.
+  Frame-counting can't work — heavy vs light frames differ ~7× in bytes. Fix
+  (`process/scheduler.rs` + `eval/mod.rs`): record the per-coroutine stack-base sp
+  at the outermost eval, save/restore it across suspend (alongside `GC_BLOCK`, in
+  `scheduler::preempt` and mailbox receive), and check `base - sp` against
+  `stack_budget()` each eval → clean catchable **E0044**. `CORO_STACK_BYTES`
+  2 MiB→16 MiB (lazy mmap, ~free); `brood`/`nest`/`suite.rs` re-home root work onto
+  a `CORO_STACK_BYTES` thread so the budget is uniform. Verified: `(boom 0)` → clean
+  E0044 at root *and* in a green process; legit non-tail recursion to 300+ levels.
+- *Soft memory limit made depth-independent* (`eval/mod.rs`): the E0043 check no
+  longer gates on `gc_block_depth()==1`, so a runaway in argument position is
+  caught (raising just unwinds — no rooting constraint, unlike GC).
+- *Test memory cap* (`core/alloc.rs`): **5 GiB hard / 4 GiB soft** — a *host-
+  survival backstop*, not a working-set budget. **Never set it 0/unlimited** (no
+  GC → the suite tried ~18 GiB and OOM-froze the host once).
+- *Test framework* (`std/test.blsp` `run-isolated`): `:isolated` units run in their
+  **own spawned process** (one at a time), so each unit's heap is reclaimed on exit
+  — was ~18 GiB accumulation on the long-lived runner, now ~190 MB for that phase.
+- *Adversarial tests* (`tests/adversarial_test.blsp`): fixed the long-atom test
+  (string vs symbol), the 200-worker blob test (echoers report `%blob-ptr` so
+  `adv-collect` drains all 200 — undrained strings were contaminating later
+  `:isolated` tests via the shared runner mailbox), capped the heaviest stress
+  counts (100k→30k) given real no-GC accumulation.
+
+**B — native multi-arity dispatch (ADR-047).** Variadic `+`/`-`/`<`/`=` were Brood
+`defn`s over `fold` + a `& xs` rest-list — ~15 env frames per `(+ a b)`, ~40× a
+direct call; `(sum-to 100000)` burned 497 MB on that overhead (none reclaimed — GC
+is a no-op). The wrong fix is making them Rust builtins; the right one is giving the
+*evaluator* the missing capability. Now a closure holds `Vec<ClosureArm>` (was flat
+`params/optionals/rest/body`); the call's arg count selects an arm
+(`Closure::select_arm`: exact fixed beats variadic, then most-specific) which binds
+its params **directly** — no rest-list, no `match*`. Arity-only clauses (plain
+symbols + `&optional`/`&`) dispatch natively; clauses with literal/destructuring
+*patterns* still lower to `match*` (Erlang-style same-arity dispatch, untouched).
+`arms` threaded through the whole closure lifecycle: `make_closure`/`bind_params`/
+`apply_closure` + the inline TCO path (`eval/mod.rs`); `expand_fn_clauses` in the
+compile pass (expands each clause *body*, leaves param-lists opaque so a second
+clause's `(a)` head isn't mangled into a call); `promote_closure`/`flush`/GC trace/
+structural-dedup (`heap.rs`); `to_message`/`from_message` (cross-process spawn) +
+the dist wire codec (cross-node); the type checker (`infer_sig` single-arm only —
+sound; `arity_of` spans arms). `std/prelude.blsp` `+ * - / < > <= >= = not=`
+rewritten with fast 0/1/2-arg arms + a variadic 3+ fallback.
+
+**Result.** `(sum-to 100000 0)` = **61 MB, was 497 MB → 8.1×**; `basic.rs`
+29 s → 5 s. Correctness spot-checked: `(+)`/`(+ 5)`/`(+ 1 2)`/`(+ 1 2 3 4)` →
+`0 5 3 10`; `(- 5)`→`-5`, `(- 10 3 2)`→`5`; `(< 1 2 3)`→`true`, `(< 1 3 2)`→`false`;
+pattern multi-clause (`fac`, `alive-next?`) still works.
+
+**Tests.** `cargo test -p brood --test basic --test gc --test mem_limit --test
+preemption` green (basic 75, gc 3, mem_limit 1, preemption 1).
+
+**Known limitation (advisory, non-blocking).** The advisory scope checker emits a
+spurious `unbound symbol` warning for params bound only in arity arms *after* the
+first (`(defn f ((a) …) ((a & more) …))` warns on `a`). Runtime is correct; the
+checker's scope walk just doesn't register per-arm params beyond arm 0. Cosmetic —
+worth a follow-up in `types/check/` but doesn't reject any program.
+
+**Still open (GC-blocked, host-safe).** The *full* in-language suite still grows to
+the memory soft cap — multi-arity cut *per-op* cost 8× but not the *cumulative*
+no-GC accumulation (`Heap::collect` is a no-op; `collect_old` is the disabled
+ADR-035 mark-sweep). Failures are clean E0043, not crashes. The real fix is
+re-enabling the tracing GC (M1) — see `memory/no-gc-suite-memory.md`. **Note:**
+`roadmap.md` currently marks the tracing GC as landed (ADR-035); in the code
+`collect` is a bump-allocator no-op, so that line overstates the present state.
