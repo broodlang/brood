@@ -168,12 +168,82 @@ the `nest new` scaffolder.")
             nil
             (project--all-files root)))))
 
+;; --- duplicate-global detection (flat namespace, ADR-019) --------------------
+;; The project shares one flat global table: exactly one binding per name across
+;; every source file. If two files each `(defn main …)`, the last loaded silently
+;; wins with no error — an expensive, invisible failure (a real one hit in
+;; docs/feedback-retro-game-of-life.md). This advisory pass parses each source
+;; file's top-level def-style forms (via `parse-source`'s CST — no eval) and
+;; warns when one name is defined in more than one file.
+
+;; CST node accessors (see the `parse-source` doc in builtins.rs): a node is
+;; `[kind v]` — for a leaf `v` is the raw source text, for a container
+;; (`[:list …]`, `[:root …]`) `v` is the vector of child nodes.
+(defn project--node-kind (n) (vector-ref n 0))
+(defn project--node-val (n) (vector-ref n 1))
+
+;; Top-level heads that bind a global (each expands to `def`). `defmodule` is
+;; excluded — it registers a module feature, not a clashing value binding.
+(def *project--def-heads* ["def" "defn" "defmacro" "defdyn" "defonce"])
+
+;; The global name a top-level list node introduces (a string), or nil if the
+;; node isn't a recognised def-style form.
+(defn project--def-name (list-node)
+  (let (kids (filter (fn (c) (not (includes? [:whitespace :comment] (project--node-kind c))))
+               (project--node-val list-node)))
+    (when (>= (count kids) 2)
+      (let (head (first kids) nm (second kids))
+        (when (and (= (project--node-kind head) :symbol)
+                (includes? *project--def-heads* (project--node-val head))
+                (= (project--node-kind nm) :symbol))
+          (project--node-val nm))))))
+
+;; Every global name defined at top level in the file at `path` (name strings, in
+;; source order). `parse-source` never raises — malformed input just yields fewer
+;; recognised defs — so a syntax error in one file can't abort the scan.
+(defn project--file-def-names (path)
+  (keep project--def-name
+    (filter (fn (c) (= (project--node-kind c) :list))
+      (project--node-val (parse-source (slurp path))))))
+
+;; The project's source files (no tests) — the set the flat-namespace rule binds.
+(defn project--source-files (root)
+  (fold (fn (acc d) (append acc (project--collect-sources d)))
+    nil
+    (project--abs-paths root *project-source-paths*)))
+
+;; Warning strings for names defined across more than one source file.
+(defn project--duplicate-def-warnings (files)
+  (let (by-name (fold (fn (acc path)
+                        (fold (fn (m nm) (assoc m nm (cons path (get m nm))))
+                          acc
+                          (project--file-def-names path)))
+                  {}
+                  files))
+    (keep (fn (entry)
+            (let ([nm paths] entry
+                  where (sort (distinct paths)))
+              (when (> (count where) 1)
+                (str "warning: global '" nm "' is defined in " (count where)
+                  " source files (" (join ", " where)
+                  ") — names are flat across the project (ADR-019); the last loaded wins"))))
+      by-name)))
+
+;; Print the duplicate-def warnings to stderr and return the count. Advisory
+;; (never raises, never stops a run) and honors `BROOD_NO_CHECK=1` like the
+;; type-check pre-flight. Shared by `check-project` / `check-project-sources`.
+(defn project--check-duplicate-defs (files)
+  (if (= (getenv "BROOD_NO_CHECK") "1")
+    0
+    (fold (fn (n w) (eprintln w) (+ n 1)) 0 (project--duplicate-def-warnings files))))
+
 (defn check-project ()
   "Advisory type-check the whole project (every source + test file), printing GNU-style `FILE:LINE:COL:` warnings to stderr. Errors if not in a Brood project. Backs `nest check`."
   (let (root (project--find-root (cwd)))
     (when (nil? root)
       (error "check-project: not in a Brood project (no project.blsp found from " (cwd) ")"))
     (project--ensure-loaded root)
+    (project--check-duplicate-defs (project--source-files root))
     (project--check-files (project--all-files root))))
 
 ;; Sources-only variant for `run-project`'s auto pre-flight: skip `tests/`,
@@ -187,9 +257,9 @@ the `nest new` scaffolder.")
     (when (nil? root)
       (error "check-project-sources: not in a Brood project (no project.blsp found from " (cwd) ")"))
     (project--ensure-loaded root)
-    (project--check-files (fold (fn (acc d) (append acc (project--collect-sources d)))
-                            nil
-                            (project--abs-paths root *project-source-paths*)))))
+    (let (srcs (project--source-files root))
+      (project--check-duplicate-defs srcs)
+      (project--check-files srcs))))
 
 ;; (run-project-tests & opts) — find the project from the cwd, set it up, load
 ;; every <name>_test.blsp under its test paths (which only REGISTER tests via the
