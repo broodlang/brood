@@ -113,7 +113,7 @@ round-trips. Two faster moves:
   | `set!` / `swap!` / atoms | nothing — state is a process or a Rust handle (trap #1) |
   | `loop`/`recur`, `while`, `for`-loop | tail recursion, or `fold`/`map`/`filter`/`reduce` (trap #2) |
   | a `flush` after `print` | nothing — `print` flushes stdout every call |
-  | raw ANSI (`clear`+`home`, cursor moves) | `(require 'ansi)` → `ansi-clear`/`ansi-home`/`ansi-cursor`/`ansi-hide-cursor` (escape strings you `print`); ESC is `\e`. A render loop wants `std/display` instead. |
+  | raw ANSI (`clear`+`home`, cursor moves) | `(require 'ansi)` → **call** `(ansi-clear)`/`(ansi-home)`/`(ansi-cursor r c)`/`(ansi-hide-cursor)` — these are **zero-arg functions** that *return* an escape string, so you must call them: `(print (ansi-clear))`, **never** `(print ansi-clear)` (a bare symbol prints `#<fn …>` and emits no escape). ESC is `\e`. A render loop wants `std/display` instead. |
   | a built-in RNG (`rand`) | `rng`/`rand-int`/`rand-float`/`shuffle`/`sample` — pure & seedable, return `[value next-seed]`; thread the seed through your state |
 
 ## Before finishing

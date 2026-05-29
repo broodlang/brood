@@ -167,6 +167,164 @@ for follow-up. See the 2026-05-29 devlog entry and ADR-050.
 > fix the `ansi-*` "string vs function" wording; (5) still — fix the underlying
 > leak so `hibernate` isn't mandatory for every render loop.
 
+> **Re-verification, 2026-05-29 (fourth pass — first build *after* the §8 leak
+> fix; the leak is gone, but a doc trap this document already flagged bit me
+> again, verbatim).** Built the game once more in `foobar/src/life.blsp`
+> (~115 lines, one `life` module + `main`).
+>
+> **The prompt** (verbatim): *"can you write a game of life application 80x40
+> with wrapping in a loop on a 60x40 grid."* Note the **internal contradiction**
+> — "80x40" then "60x40 grid". I resolved it by asking a single clarifying
+> question (80×40 chosen) rather than guessing; that was the right call and cost
+> nothing. The session was otherwise two turns: build it, then one bug report.
+>
+> **The good news — §8 is genuinely fixed and needed no workaround.** This is the
+> first pass on a binary with the entry-depth fix (§8 RESOLVED note). I wrote the
+> obvious naive shape — `(defn life-loop (g gen) (do …(sleep …)(life-loop (step g)
+> (+ gen 1))))` called straight from `main`, **no `spawn`, no `hibernate`** — and
+> `nest run --for 1s` ran it and exited cleanly. No `hibernate escaped` crash, no
+> terminal wreckage, no climbing RSS in the brief run. The third-pass footgun
+> (hibernate-only-in-a-spawn) is simply gone: the naive loop is now the correct
+> loop. Big improvement — the single highest-friction item across the first three
+> passes no longer exists for `nest run`.
+>
+> **What I got wrong — the `ansi-*` string-vs-function trap, *again*, exactly as
+> the third pass warned.** This is the headline of this pass. Both the
+> `writing-brood` skill table and `docs/brood-for-claude.md` describe the helpers
+> as "escape **strings** you `print`" (`ansi-clear`/`ansi-home`/`ansi-hide-cursor`).
+> I trusted that wording, wrote `(print ansi-home)` / `(print ansi-clear)`, all six
+> unit tests passed, the checker was clean, and I shipped it. On the user's screen:
+> `#<fn ansi-home>` printed literally **and the animation never refreshed** (the
+> bare symbol never emitted the cursor-home escape, so every frame just scrolled).
+> They are zero-arg *functions* — `(ansi-home)`, `(ansi-clear)`. The third pass
+> (line ~145) recorded this exact bug and asked (ask #4) to "fix the wording to
+> show the call, or make them constants." **That fix was never applied, and it
+> caused the only user-visible defect in the very next session.** Two consecutive
+> passes, same trap, same root cause — this is now the strongest, most repeatable
+> signal in the whole document.
+>
+> **My own process misses (both would have caught it pre-ship):**
+>   1. **I didn't use the MCP `eval` loop the skill explicitly prescribes.** A
+>      one-line `eval ansi-home` returns `#<fn …>` and `eval (ansi-home)` returns
+>      `"\e[H"` — the bug is *visible in a single eval* at write time. I went
+>      straight to `nest test`/`nest run` over Bash instead. The skill calls the
+>      MCP image "your coding loop … how you check the code you're about to write
+>      actually works"; I skipped it and paid for it.
+>   2. **My verification hid the bug.** I ran `nest run --for 1s 2>&1 | tail -3`,
+>      saw a grid and a `gen` line, and called it verified — but `#<fn ansi-home>`
+>      was *in that very output*, masked by piping a full-screen TUI to `tail` and
+>      by the grid overwriting the view. The check that actually proves a render
+>      loop works is inspecting the **raw bytes for escape sequences**, which I
+>      only ran *after* the user complained: `nest run --for 600ms 2>&1 | cat -v |
+>      grep -oE '\^\[\[[0-9;]*[A-Za-z]'` → confirmed `^[[2J` once + `^[[H` per
+>      frame. That assertion belongs *before* shipping, not after. Note the
+>      deeper point: **`nest test` cannot catch this** — the tests exercise pure
+>      functions (`step`/`render`/wrapping, all correct first try), never the
+>      render loop's escape output. A green suite gave false confidence.
+>
+> **A smaller miss:** I modelled the board as a flat boolean vector with a full
+> O(w·h·8) rescan per `step`, and never reached for the `(frequencies (mapcat
+> neighbours (keys live)))` idiom this doc celebrates (§4.4). It's correct and
+> readable, but it's evidence that the elegant combinator idiom still isn't
+> surfacing at the point of writing — §4.4's "make it a worked example" ask is
+> still open in practice.
+>
+> **Effort shape.** No wall clock, but the familiar pattern held even harder this
+> pass: the *logic* was correct on first validation (6 tests green on first run,
+> `nest check` clean) and never changed. The entire gap between "logic done" and
+> "actually done" was **one known, documented, still-unfixed doc trap** plus the
+> one user round-trip it forced. With the leak fixed, this genre is now *one
+> doc-line away* from a clean one-shot.
+>
+> **Asks this pass, in priority order:**
+> 1. **Apply the third pass's ask #4 now.** Fix the `ansi-*` wording in *both* the
+>    `writing-brood` skill table and `docs/brood-for-claude.md` to show the **call**
+>    form — `(ansi-clear)`, `(ansi-home)`, `(ansi-hide-cursor)` — and stop calling
+>    them "strings." Every code reference should carry the parens. This is the one
+>    change that turns this app into a first-try success; it has now demonstrably
+>    cost two sessions.
+> 2. **Make the failure mode self-evident — nothing in the toolchain catches a
+>    function used as a value.** This is the deeper gap, and (per the maintainer)
+>    a *previously-noticed, recurring* one, not specific to ansi. Concretely, in
+>    this pass: my `src/life.blsp` contained `(print ansi-home)` and
+>    `(print ansi-clear)` — `ansi-home`/`ansi-clear` are arity-0 functions, so
+>    these print the *function object* (`#<fn ansi-home>`), never the escape
+>    string. Yet:
+>    - **`nest check` was completely clean** (empty output) on that file.
+>    - **All six tests passed**, and the advisory type checker said nothing.
+>    - There was **no warning, error, or hint at compile/check time** that a bare
+>      function symbol was being passed where a value was wanted, or that a
+>      zero-arg helper was referenced but never called.
+>
+>    The bug only manifested as literal `#<fn ansi-home>` text *on the user's
+>    screen at runtime*. Because Brood is dynamic and a function is a
+>    first-class value, `(print ansi-home)` is perfectly legal — but
+>    passing a *function* to `print`/`str`/`println` (output sinks that want a
+>    string-able value) is almost never intentional, and `(some-fn)` accidentally
+>    written as `some-fn` is a classic LLM/typo slip. This is exactly the kind of
+>    "silent-wrong" the duplicate-`main` warning (§5.1) was added to kill, and it
+>    deserves the same treatment. Options, cheapest first:
+>    - **Lint at check time:** flag a bare reference to a *known zero-arity*
+>      global in argument position (especially to `print`/`println`/`str`/`format`)
+>      as "function used as a value — did you mean `(ansi-home)`?" The checker
+>      already knows arities; this is a pattern match over the CST.
+>    - **Loud at runtime:** have `print`/`str` render a fn as `#<fn ansi-home —
+>      call it: (ansi-home)>` (a hint in the very output the author is staring at),
+>      instead of a bare `#<fn …>`.
+>    - The type checker, if it tracked "this sink expects a stringable", could even
+>      mark `(print <fn>)` advisory-wrong directly.
+>
+>    Either guard would have turned this from a shipped, user-reported defect into
+>    a diagnostic at `nest check` — the difference between a one-shot success and a
+>    round-trip. Generalize it: **using a function as a plain value is rarely
+>    intended and currently has zero diagnostics; that's worth a lint regardless
+>    of the ansi case.**
+> 3. **Teach the render-loop verification reflex** (skill one-liner): "verify a
+>    TUI/animation by grepping raw output for escape sequences (`cat -v | grep`),
+>    not by eyeballing a piped frame — and remember `nest test` only covers the
+>    pure functions, not the loop."
+> 4. Surface the `frequencies`/`mapcat` neighbour-count idiom at point-of-writing
+>    (skill example), per §4.4 — still not reached for by default.
+
+> **Re-verification, 2026-05-29 (fifth pass — concise rewrite + supervisor; a new
+> memory finding).** Follow-ups: *"make the code VERY concise … below 50 lines and
+> use supervisor process"* and *"confirm we have stable memory afterwards."*
+> Rewrote the game set-based (live cells = `{[x y] true}`) with the §4.4
+> `(frequencies (mapcat neighbours (keys live)))` idiom — **49 lines**, 6 tests
+> green, checker clean. The animator now runs as a child of a `std/supervisor`
+> one-for-one supervisor (`start-supervisor [{:id :life :start (fn () (spawn
+> (life-proc)))}]`), with `main` parked on `receive`. The set/`frequencies`
+> formulation was validated through MCP `eval` *before* writing the file (the loop
+> the third/fourth passes said I should use — this time I did, and it caught that
+> `into {}` over a filtered `frequencies` keeps the *counts* as values, so I added
+> a `map … [cell true]` to return a clean set).
+>
+> **New finding — the supervisor (spawned process) trades a flat profile for a
+> bounded-but-spiky one.** I sampled `/proc/<pid>/VmRSS` once/sec over a
+> `nest run --for 22s` run (output to `/dev/null`):
+>
+> ```
+> 570 1140 114 657 1180 257 803 252 533 1078
+> 234 770 215 512 1041 237 772 266 605 948   (MB)
+> ```
+>
+> This is a **sawtooth, not a leak**: RSS climbs, the per-process GC fires, drops
+> back to ~115–265 MB, repeats — and the *peaks do not trend upward* across the
+> run (~1140 @2 s … ~948 @20 s). Bounded; the process exited cleanly at the cap
+> and RAM recovered. **But** the high-water is ~1.1 GB for a game whose live state
+> is ~800 cells — far spikier than the §8-fixed *top-level* loop, which runs nearly
+> flat (~5 MB). The difference is **where the loop runs**: the §8 entry-depth fix
+> makes a top-level `nest run` loop collect at the depth-1 safepoint, but here the
+> loop runs inside a **spawned** green process (supervisor → `spawn` → `life-proc`),
+> whose collector reclaims at a much looser threshold. So: **moving a render loop
+> under a supervisor (or any `spawn`) silently changes its memory profile from flat
+> to a ~1.1 GB sawtooth.** Bounded and correct, but worth a look — the
+> spawned-process GC threshold appears far higher than the depth-1 path's, and the
+> two should probably converge. (Left as-is at the maintainer's request; noted
+> here only.) Allocation churn is also inherent to the elegant `mapcat`/
+> `frequencies` `step` (~8 fresh coord vectors per live cell per generation) — a
+> second reason the idiom we want to teach (§4.4) is allocation-heavy.
+
 **Done:**
 - **Standard PRNG** (§1, §4.1) — `rng`/`rand-seed`/`rand-int`/`rand-float`/
   `shuffle`/`sample`, pure & seedable (`[value next-seed]`), in `std/prelude.blsp`.
@@ -207,19 +365,31 @@ entry of the same date):**
   at `nest doc --all`.
 
 **Still open (mapped, not yet built):**
-- **§8 memory leak** — the highest-priority item; **re-confirmed twice on
-  2026-05-29** (~80 MB/s at 20×20; **~600 MB/s / 3.7 GB-in-6 s at 40×40**, see the
-  re-verification notes above). It is the known "spiky memory": the copying
-  collector (`flush`) exists but only fires on a manual `(hibernate)`, so a
-  long-running `nest run` loop never reclaims. The manual `(hibernate)` *does*
-  bound it (flat ~81 MB) **but only inside a spawned process** and is undocumented
-  + crashes at a script top level (third-pass re-verification above) — so it isn't
-  yet a usable workaround for a naive author. Fix is **Stage B** of
-  `docs/memory-review.md` (auto-fire the copy at a threshold), gated on a
-  `GC_BLOCK`/suspend rooting audit — not rushed. (`--for` now makes it
-  reproducible in CI.) Interim: document `hibernate` and make it usable from a
-  top-level loop.
+- **No diagnostic for a function used as a value** — a *recurring, previously-
+  noticed* gap (maintainer), surfaced again in the fourth pass. `(print ansi-home)`
+  on an arity-0 function passes `nest check` clean, all tests green, no
+  warning/error — and prints `#<fn ansi-home>` at runtime. Same "silent-wrong"
+  class as the duplicate-`main` shadow (§5.1) that already got a warning. Wants a
+  check-time lint (bare reference to a known zero-arity global in
+  `print`/`println`/`str`/`format` arg position → "did you mean `(ansi-home)`?")
+  and/or a hinted runtime render. See fourth-pass ask #2 for detail. Highest-
+  leverage of the open items because it's general, not ansi-specific.
 - **Set type `#{}`** (§1, §4.2).
+
+**Resolved since first recorded:**
+- **`ansi-*` "string vs function" wording — FIXED 2026-05-29 (fourth-pass ask #1,
+  third-pass ask #4).** The `writing-brood` skill table, `docs/brood-for-claude.md`,
+  and the `std/ansi.blsp` module docstring now show the **call** form
+  (`(print (ansi-clear))`) and state explicitly that the helpers are zero-arg
+  functions that *return* an escape string — calling out that `(print ansi-clear)`
+  prints `#<fn …>` and emits nothing. The skill `SKILL.md` symlinks to the docs
+  file, so both share one corrected source. The deeper, general item below — *no
+  diagnostic for a function used as a value* — remains the open follow-up.
+- **§8 memory leak — FIXED and confirmed in the fourth pass.** The entry-depth fix
+  (run `nest run <file>` through `eval_source` at depth 1) landed; §8's RESOLVED
+  note has the root cause. The fourth-pass rebuild used the **naive** top-level
+  tail loop — no `spawn`, no `hibernate` — and `nest run --for 1s` ran and exited
+  cleanly with no RSS climb. `hibernate` is no longer needed in render loops.
 
 ---
 
