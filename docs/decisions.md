@@ -2885,12 +2885,25 @@ hints, Tab completion, and the core emacs/readline keys + ↑/↓ history. The e
   would turn one logical line into many rows and break that math); the signature hint
   renders on the line *below*, and because all motion is relative a bottom-of-screen
   scroll moves the input and hint together (no absolute-row assumptions).
-- **Pure keymap + thin IO loop.** `lineedit--handle (state, key) → state` is pure, so
-  the entire keymap (insert/delete, motion, kill-ring + yank, word motion, history,
-  completion, Ctrl-D/Ctrl-C) is tested without a TTY; only `lineedit--loop` polls
-  keys and paints (exercised manually, like `repl`/`observe`). Ctrl-D on an empty line
-  signals EOF (routed to the existing end-of-input branch), mid-line it deletes
-  forward; Ctrl-C abandons the in-progress form and re-prompts, staying in the loop.
+- **The keymap is data; commands are redefinable functions.** `*lineedit-keymap*` is
+  a plain map of `key → command-symbol`; each command is a public global
+  `(fn (state key) -> state)` (`lineedit-beginning-of-line`, `lineedit-kill-line`, …).
+  `lineedit--handle` looks the key up and resolves the symbol *late* (`(eval sym)`), so
+  **both** override paths work from a running REPL: rebind a key
+  (`(lineedit-bind :ctrl-x 'cmd)` / re-`def` the map) or redefine a command's function
+  — each takes effect on the next keystroke (the project's hot-reload model). Keeping
+  the keymap symbols-not-closures keeps it pure data (promotable/sendable); a buggy
+  binding is caught so it can't crash the read. This is the editor's keymap seam: the
+  same shape the full editor's keymaps will use. Common emacs/readline keys are bound —
+  C-a/C-e, C-f/C-b, M-f/M-b, C-k/C-u/C-w, M-d, C-y, C-t, C-h, C-d, C-l, Tab, ↑/↓ and
+  C-p/C-n. Ctrl-D on an empty line signals EOF; mid-line it deletes forward; Ctrl-C
+  abandons the form and re-prompts.
+- **Pure keymap + thin IO loop.** Commands and `lineedit--handle` are pure
+  `(state, key) → state` (the late symbol resolution aside), so the whole keymap is
+  tested without a TTY; only `lineedit--loop` polls keys and paints (exercised
+  manually, like `repl`/`observe`). C-l is the one command needing IO (a screen
+  clear): its command just sets a `:clear` flag that the loop honours via a new
+  `term-emit` `[:clear-screen]` op, keeping the command itself pure.
 
 **Where the editor runs (and why the worker cost is a non-issue).** The editor polls
 keys with `term-poll` from inside the *spawned* `repl--loop` process — the process that

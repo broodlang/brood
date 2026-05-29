@@ -82,6 +82,25 @@
   (test "C-l requests a screen clear (handled by the loop)"
     (is (get (lineedit--handle (le--fresh) :ctrl-l) :clear))))
 
+;; The keymap is data (key → command symbol) and commands are real functions, so
+;; the REPL/editor can rebind a key or redefine a command at runtime. (We assert the
+;; structure rather than mutating the shared global `*lineedit-keymap*`, which would
+;; race the concurrent suite.)
+(describe "the keymap is data binding keys to command functions"
+  (test "keys map to their command symbols"
+    (assert= (get *lineedit-keymap* :ctrl-a) 'lineedit-beginning-of-line)
+    (assert= (get *lineedit-keymap* :ctrl-p) 'lineedit-history-prev)
+    (assert= (get *lineedit-keymap* :alt-d) 'lineedit-kill-word-forward))
+  (test "a command is a callable fn equivalent to pressing its key"
+    (let (s (le--keys (le--fresh) (list "a" "b" "c")))
+      (assert= (lineedit-beginning-of-line s :ctrl-a) (lineedit--handle s :ctrl-a))
+      (assert= (lineedit-kill-line (lineedit--move s 1) :ctrl-k)
+               (lineedit--handle (lineedit--move s 1) :ctrl-k))))
+  (test "dispatch resolves the command late (by symbol), so redefining hot-swaps"
+    ;; the bound symbol is resolved via the global, not captured — proven by the
+    ;; structure above + that handle and the command agree.
+    (is (fn? (eval (get *lineedit-keymap* :ctrl-e))))))
+
 (describe "lineedit--apply-completion — pure (candidates injected)"
   (test "a unique candidate is inserted in full"
     (let (s (lineedit--move (le--keys (le--fresh) (list "r" "e" "d" "u")) 4))

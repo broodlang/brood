@@ -6896,11 +6896,14 @@ richer editing as the next Brood-over-`term-*` layer — this is that layer.
   vs head-position calls), plus `bracket-match` (depth scan skipping strings/comments),
   `enclosing-call` (callee + arg index for hints), and `symbol-prefix-at`/
   `common-prefix` for completion. Special-forms set mirrors the LSP's `SPECIAL_FORMS`.
-- **`std/lineedit.blsp` (new).** Pure `lineedit--handle (state, key) → state` keymap
-  (insert/delete, C-a/C-e, C-f/C-b, M-f/M-b, C-k/C-u/C-w, C-y, Home/End, ↑/↓ history,
-  Tab completion, Ctrl-D EOF / Ctrl-C cancel) + a thin `term-emit` render loop with
-  live highlighting, matched-bracket emphasis (red when unbalanced), a signature-hint
-  line, and horizontal scroll for long lines.
+- **`std/lineedit.blsp` (new).** A **data-driven keymap**: `*lineedit-keymap*` maps
+  `key → command-symbol`, each command a public `(fn (state key) -> state)`, dispatched
+  by late symbol resolution — so a running REPL can `(lineedit-bind :ctrl-x 'cmd)` or
+  redefine a command and it takes effect next keystroke (hot reload). Bound: C-a/C-e,
+  C-f/C-b, M-f/M-b, C-k/C-u/C-w, M-d, C-y, C-t, C-h, C-d, C-l, Tab, Home/End, ↑/↓ and
+  C-p/C-n history, Ctrl-C cancel. Plus a thin `term-emit` render loop with live
+  highlighting, matched-bracket emphasis (red when unbalanced), a signature-hint line,
+  and horizontal scroll for long lines.
 - **`std/repl.blsp` integration.** When stdin + stdout are both a TTY, `repl--read-line`
   reads via `lineedit-read` (passing the accumulator as read-only `:prefix` for
   whole-form analysis); redirected stdin keeps `read-line` byte-for-byte. The editor is
