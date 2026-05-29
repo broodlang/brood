@@ -102,6 +102,9 @@ for every well-formed input. Hand-checked across the brood repo's std/ and tests
     'let
     1
     ; bindings list
+    'let*
+    1
+    ; bindings list
     'letrec
     1
     ; bindings list
@@ -607,9 +610,7 @@ not a known body form (defaults to call-style — every arg breaks)."
 (defn format--every-blsp (root)
   ;; Every .blsp under the project root, in deterministic order. The manifest
   ;; (`project.blsp` at the root) is included along with everything else.
-  (format--dedup (format--collect-blsp root)))
-
-(defn format--dedup (xs) (reverse (fold (fn (acc x) (if (member? x acc) acc (cons x acc))) nil xs)))
+  (distinct (format--collect-blsp root)))
 
 (defn format--require-root ()
   (require 'project)
