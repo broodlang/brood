@@ -174,8 +174,25 @@
       (sleep 10)
       (assert= (get (process-info kid) :parent) me)))
 
-  (test "observe--snapshot yields frame-ready process-info maps"
+  (test "observe--local-source includes this runtime's live processes"
+    (let (w (spawn (receive (_ :done))))
+      (sleep 10)
+      (let (procs (observe--local-source)
+            ids (map (fn (p) (get p :id)) procs))
+        (is (every? map? procs))
+        ;; the inline source sees the just-spawned process
+        (is (includes? ids (get (process-info w) :id))))))
+
+  (test "observe--snapshot reads from a pluggable source (inline = local)"
     (spawn (receive (_ :done)))
-    (let (snap (observe--snapshot :id))
+    (let (snap (observe--snapshot observe--local-source :id))
       (is (every? (fn (p) (and (number? (get p :id)) (number? (get p :mailbox)))) snap))
-      (is (>= (count (observe-frame (observe--node-info) snap 0 80 24 false :id)) 5)))))
+      (is (>= (count (observe-frame (observe--node-info) snap 0 80 24 false :id)) 5))))
+
+  (test "a custom source feeds the same snapshot path (the remote-attach seam)"
+    ;; A source is just a 0-arg fn → process-info maps; remote attach swaps this
+    ;; for a peer request. The loop / frame don't care which.
+    (let (fake (fn () [{:id 2 :name :b :status :waiting :mailbox 1 :monitored-by 0}
+                       {:id 1 :name :a :status :running :mailbox 0 :monitored-by 0}]))
+      (assert= (map (fn (p) (get p :id)) (observe--snapshot fake :id)) '(1 2))
+      (assert= (map (fn (p) (get p :id)) (observe--snapshot fake :mailbox)) '(2 1)))))
