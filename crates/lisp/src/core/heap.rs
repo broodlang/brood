@@ -2523,6 +2523,26 @@ impl Heap {
         total.saturating_sub(free)
     }
 
+    /// An estimate of this process's LOCAL heap footprint in **bytes** — the
+    /// occupied slab entries weighted by element size (`len * size_of` per slab).
+    /// Cheap (no traversal); counts the slab arrays themselves, not nested/shared
+    /// content (inner vectors, string bytes, `Arc`-shared ropes), so it's a
+    /// comparative figure for an observer, not an exact RSS. Bump-allocated, so it
+    /// reflects allocation since the last arena reset / `hibernate`. Backs
+    /// `process-info`'s `:memory` (published on `receive`).
+    pub fn local_bytes(&self) -> usize {
+        use std::mem::size_of;
+        let s = &self.local;
+        s.pairs.len() * size_of::<(Value, Value)>()
+            + s.vectors.len() * size_of::<Vec<Value>>()
+            + s.maps.len() * size_of::<MapNode>()
+            + s.strings.len() * size_of::<LocalString>()
+            + s.ropes.len() * size_of::<ropey::Rope>()
+            + s.closures.len() * size_of::<Closure>()
+            + s.natives.len() * size_of::<NativeFn>()
+            + s.envs.len() * size_of::<EnvFrame>()
+    }
+
     // ----- the tracing GC ------------------------------------------------------
     //
     // Non-moving, single-threaded mark-sweep over the LOCAL heap only. Roots

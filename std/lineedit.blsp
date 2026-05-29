@@ -28,8 +28,9 @@
   "A raw-mode, emacs/readline-style line editor for the REPL, written in Brood
 (ADR-052). `(lineedit-read prompt prefix history)` reads one line with live
 syntax highlighting, bracket matching, signature hints, Tab completion, and the
-core emacs keys (C-a/C-e, C-f/C-b, M-f/M-b, C-k/C-u/C-w, C-y, arrows, Home/End,
-↑/↓ history); it returns `{:line <str|nil> :eof <bool> :cancel <bool>}`.
+emacs/readline keys — C-a/C-e, C-f/C-b, M-f/M-b, C-k/C-u/C-w, M-d, C-y, C-t, C-h,
+C-d, C-l, arrows, Home/End, and ↑/↓ (or C-p/C-n) history; it returns
+`{:line <str|nil> :eof <bool> :cancel <bool>}`.
 
 Built on `std/highlight.blsp` (pure analysis) and the inline `term-*` seam.
 `std/repl.blsp` calls it on a TTY in place of `read-line`.")
@@ -121,6 +122,26 @@ Built on `std/highlight.blsp` (pure analysis) and the inline `term-*` seam.
     (assoc state :text (str (substring text 0 s) (substring text p n))
            :kill (substring text s p) :point s :hist-idx -1)))
 
+(defn lineedit--kill-word-fwd (state)
+  "State with the word *after* point killed into `:kill` (M-d), point unchanged."
+  (let (text (get state :text) p (get state :point) n (string-length text)
+        e (lineedit--fwd-word text p))
+    (assoc state :text (str (substring text 0 p) (substring text e n))
+           :kill (substring text p e) :hist-idx -1)))
+
+(defn lineedit--transpose (state)
+  "State with the two characters around point swapped, point advanced (C-t) — at
+end of line, swaps the last two. No-op on a line shorter than 2 or at column 0."
+  (let (text (get state :text) p (get state :point) n (string-length text))
+    (if (or (< n 2) (= p 0))
+      state
+      (let (q (if (>= p n) (dec n) p)
+            a (char-at text (dec q))
+            b (char-at text q))
+        (assoc state
+               :text (str (substring text 0 (dec q)) b a (substring text (inc q) n))
+               :point (min n (inc q)) :hist-idx -1)))))
+
 (defn lineedit--yank (state)
   "State with the last-killed text inserted at point (C-y)."
   (lineedit--insert state (get state :kill)))
@@ -176,34 +197,86 @@ against `cands` — the candidate itself when unique, else the longest common pr
       state
       (lineedit--apply-completion state sstart pfx (lineedit--candidates pfx)))))
 
-;; ---- the keymap (pure) ------------------------------------------------------
+;; ---- commands ---------------------------------------------------------------
+;; Each command is a public `(fn (state key) -> state)` — the bindable unit the
+;; keymap names. Redefining one (`def`) hot-swaps that key's behaviour on the next
+;; keystroke (late binding); they all ignore `key` except self-insert. Keep these
+;; thin over the edit ops above so a REPL/editor can compose or replace them.
+
+(defn lineedit-self-insert (state key) "Insert the typed character `key`." (lineedit--insert state key))
+(defn lineedit-beginning-of-line (state _) "Move point to the start of the line (C-a)." (lineedit--move state 0))
+(defn lineedit-end-of-line (state _) "Move point to the end of the line (C-e)." (lineedit--move state (string-length (get state :text))))
+(defn lineedit-forward-char (state _) "Move point one character right (C-f)." (lineedit--move state (inc (get state :point))))
+(defn lineedit-backward-char (state _) "Move point one character left (C-b)." (lineedit--move state (dec (get state :point))))
+(defn lineedit-forward-word (state _) "Move point to the end of the next word (M-f)." (lineedit--move state (lineedit--fwd-word (get state :text) (get state :point))))
+(defn lineedit-backward-word (state _) "Move point to the start of the previous word (M-b)." (lineedit--move state (lineedit--bwd-word (get state :text) (get state :point))))
+(defn lineedit-delete-backward (state _) "Delete the character before point (Backspace / C-h)." (lineedit--del-back state))
+(defn lineedit-delete-forward (state _) "Delete the character at point (Delete)." (lineedit--del-fwd state))
+(defn lineedit-kill-line (state _) "Kill from point to end of line (C-k)." (lineedit--kill-end state))
+(defn lineedit-kill-to-start (state _) "Kill from start of line to point (C-u)." (lineedit--kill-begin state))
+(defn lineedit-kill-word-backward (state _) "Kill the word before point (C-w)." (lineedit--kill-word state))
+(defn lineedit-kill-word-forward (state _) "Kill the word after point (M-d)." (lineedit--kill-word-fwd state))
+(defn lineedit-yank (state _) "Insert the last-killed text at point (C-y)." (lineedit--yank state))
+(defn lineedit-transpose-chars (state _) "Swap the two characters around point (C-t)." (lineedit--transpose state))
+(defn lineedit-history-prev (state _) "Recall the previous history entry (↑ / C-p)." (lineedit--hist-prev state))
+(defn lineedit-history-next (state _) "Recall the next history entry (↓ / C-n)." (lineedit--hist-next state))
+(defn lineedit-complete (state _) "Complete the symbol under point (Tab)." (lineedit--complete state))
+(defn lineedit-clear-screen (state _) "Request a screen clear + redraw (C-l)." (assoc state :clear true))
+(defn lineedit-submit (state _) "Finish the line (Enter)." (assoc state :done :submit))
+(defn lineedit-cancel (state _) "Abandon the line, re-prompt (C-c)." (assoc state :done :cancel))
+(defn lineedit-eof-or-delete (state _)
+  "Signal EOF on an empty line, else delete forward (C-d) — readline semantics."
+  (if (= (get state :text) "") (assoc state :done :eof) (lineedit--del-fwd state)))
+
+;; ---- the keymap -------------------------------------------------------------
+
+(def *lineedit-keymap*
+  "The editor's `key → command-symbol` bindings — the bindable keymap (ADR-052).
+Override a key by re-`def`ing this map
+(`(def *lineedit-keymap* (assoc *lineedit-keymap* :ctrl-x 'my-command))`), or change
+what a key does by redefining its command function; both take effect on the next
+keystroke (late binding). A command is a global `(fn (state key) -> state)`. A key
+not bound here self-inserts (a 1-char string) or is ignored."
+  {:enter 'lineedit-submit
+   :ctrl-c 'lineedit-cancel
+   :ctrl-d 'lineedit-eof-or-delete
+   :backspace 'lineedit-delete-backward
+   :ctrl-h 'lineedit-delete-backward
+   :delete 'lineedit-delete-forward
+   :left 'lineedit-backward-char
+   :ctrl-b 'lineedit-backward-char
+   :right 'lineedit-forward-char
+   :ctrl-f 'lineedit-forward-char
+   :home 'lineedit-beginning-of-line
+   :ctrl-a 'lineedit-beginning-of-line
+   :end 'lineedit-end-of-line
+   :ctrl-e 'lineedit-end-of-line
+   :alt-f 'lineedit-forward-word
+   :alt-b 'lineedit-backward-word
+   :ctrl-k 'lineedit-kill-line
+   :ctrl-u 'lineedit-kill-to-start
+   :ctrl-w 'lineedit-kill-word-backward
+   :alt-d 'lineedit-kill-word-forward
+   :ctrl-y 'lineedit-yank
+   :ctrl-t 'lineedit-transpose-chars
+   :up 'lineedit-history-prev
+   :ctrl-p 'lineedit-history-prev
+   :down 'lineedit-history-next
+   :ctrl-n 'lineedit-history-next
+   :ctrl-l 'lineedit-clear-screen
+   :tab 'lineedit-complete
+   :back-tab 'lineedit-complete})
 
 (defn lineedit--handle (state key)
-  "Apply one key event to the editor `state`, returning the next state. A key is a
-1-char string (printable) or a keyword (`:enter`, `:ctrl-a`, `:alt-f`, …). Sets
-`:done` to `:submit` / `:eof` / `:cancel` when the read should end. Pure — the
-whole keymap is testable without a terminal."
-  (let (text (get state :text) p (get state :point))
+  "Dispatch key event `key` through `*lineedit-keymap*` to its command — a global
+`(fn (state key) -> state)` resolved by symbol (so redefining the command, or
+rebinding the key, hot-swaps behaviour). An unbound key self-inserts (a 1-char
+string) or is a no-op; a command that throws is caught so a bad binding can't crash
+the read. Pure apart from that symbol resolution; testable without a terminal."
+  (let (sym (get *lineedit-keymap* key))
     (cond
-      (and (string? key) (= (string-length key) 1)) (lineedit--insert state key)
-      (= key :enter) (assoc state :done :submit)
-      (= key :backspace) (lineedit--del-back state)
-      (= key :delete) (lineedit--del-fwd state)
-      (or (= key :left) (= key :ctrl-b)) (lineedit--move state (dec p))
-      (or (= key :right) (= key :ctrl-f)) (lineedit--move state (inc p))
-      (or (= key :home) (= key :ctrl-a)) (lineedit--move state 0)
-      (or (= key :end) (= key :ctrl-e)) (lineedit--move state (string-length text))
-      (= key :alt-f) (lineedit--move state (lineedit--fwd-word text p))
-      (= key :alt-b) (lineedit--move state (lineedit--bwd-word text p))
-      (= key :ctrl-k) (lineedit--kill-end state)
-      (= key :ctrl-u) (lineedit--kill-begin state)
-      (= key :ctrl-w) (lineedit--kill-word state)
-      (= key :ctrl-y) (lineedit--yank state)
-      (= key :up) (lineedit--hist-prev state)
-      (= key :down) (lineedit--hist-next state)
-      (= key :ctrl-d) (if (= text "") (assoc state :done :eof) (lineedit--del-fwd state))
-      (= key :ctrl-c) (assoc state :done :cancel)
-      (or (= key :tab) (= key :back-tab)) (lineedit--complete state)
+      (some? sym) (try ((eval sym) state key) (catch e state))
+      (and (string? key) (= (string-length key) 1)) (lineedit-self-insert state key)
       :else state)))
 
 ;; ---- signature hint + bracket overrides (pure analysis -> render data) -------
@@ -242,6 +315,16 @@ in `full`, or nil when there's no call (or its head isn't a known function)."
                   (append (lineedit--arg-pieces args 0 argi)
                           (list [")" lineedit-face-hint]))))))))
 
+(defn lineedit--fit (pieces room acc)
+  "Truncate `[str face]` `pieces` to at most `room` columns so the one-line hint
+never wraps (which would desync the `[:up 1]` cursor restore)."
+  (if (or (empty? pieces) (<= room 0))
+    (reverse acc)
+    (let ([s f] (first pieces) w (string-length s))
+      (if (<= w room)
+        (lineedit--fit (rest pieces) (- room w) (cons [s f] acc))
+        (reverse (cons [(substring s 0 room) f] acc))))))
+
 (defn lineedit--overrides (full pos)
   "Bracket-match colour overrides (`[pos face]` list) for the cursor at `pos`: the
 matched pair reversed, or a lone unmatched bracket in the error face."
@@ -256,8 +339,9 @@ matched pair reversed, or a lone unmatched bracket in the error face."
 ;; ---- layout + rendering (IO) ------------------------------------------------
 
 (defn lineedit--cols ()
-  "The terminal width in columns."
-  (let ([c r] (term-size)) c))
+  "The terminal width in columns, with a sane fallback when the terminal reports no
+size (e.g. a pty with no winsize), so layout never collapses to a 1-column window."
+  (let ([c r] (term-size)) (if (< c 1) 80 c)))
 
 (defn lineedit--reflow (state)
   "Recompute the horizontal-scroll window so point is visible, and cache the width,
@@ -277,13 +361,12 @@ available text columns, and prompt width for rendering."
   "Turn `[substring face]` highlight chunks into `[:print str face]` ops."
   (map (fn ([s f]) [:print s f]) chunks))
 
-(defn lineedit--render (state)
+(defn lineedit--render (st)
   "Repaint the input line in place (relative motion): carriage-return, clear from
 the cursor down, reprint the prompt + the highlighted visible window, draw the
-signature hint on the line below (if any), then park the cursor at point."
-  (let (st (lineedit--reflow state)
-        prompt (get st :prompt)
-        text (get st :text)
+signature hint on the line below (if any), then park the cursor at point. `st` must
+already be reflowed by the caller (`lineedit--loop`)."
+  (let (text (get st :text)
         point (get st :point)
         prefix (get st :prefix)
         hs (get st :hscroll)
@@ -296,9 +379,10 @@ signature hint on the line below (if any), then park the cursor at point."
         cursorpos (+ base point)
         overrides (lineedit--overrides full cursorpos)
         chunks (highlight-chunks full (+ base hs) vis overrides)
-        hint (lineedit--hint-pieces full cursorpos)
+        raw-hint (lineedit--hint-pieces full cursorpos)
+        hint (if (nil? raw-hint) nil (lineedit--fit raw-hint (dec (get st :width)) '()))
         cursor-col (+ promptw (- point hs))
-        head (append [[:cr] [:clear-below] [:print prompt]] (lineedit--chunk-ops chunks))
+        head (append [[:cr] [:clear-below] [:print (get st :prompt)]] (lineedit--chunk-ops chunks))
         tail (if (nil? hint)
                (list [:col cursor-col])
                (append (cons [:nl] (lineedit--chunk-ops hint))
@@ -350,10 +434,14 @@ drain it and either finish or loop with the new state."
           (lineedit--loop next))))))
 
 (defn lineedit--loop (state)
-  "Render the current state, then wait for input. Tail-recursive via `--await`."
-  (do
-    (lineedit--render state)
-    (lineedit--await state)))
+  "Reflow (so the horizontal-scroll window sticks), honour a pending C-l screen
+clear, render, then wait for input. Tail-recursive via `--await`."
+  (let (s1 (lineedit--reflow state)
+        st (if (get s1 :clear)
+             (do (term-emit [[:clear-screen]]) (assoc s1 :clear nil))
+             s1))
+    (lineedit--render st)
+    (lineedit--await st)))
 
 (defn lineedit-read (prompt prefix history)
   "Read one line interactively (raw mode) and return `{:line <str|nil> :eof :cancel}`:

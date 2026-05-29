@@ -54,6 +54,7 @@ and calls `(run-tests)` for you. The language binary `brood` only ever runs a
 | `(refute expr)` | `expr` is falsy | `<expr> is <v> — expected falsy` |
 | `(assert= actual expected)` | `(= actual expected)` | `<actual-expr> => <v>, expected <expected-v>` |
 | `(assert-error body…)` | evaluating `body` raises | `expected <body> to raise, but none did` |
+| `(check-property n gen pred)` | `pred` holds on all `n` generated values | `property failed on trial i/n` + counterexample + seed |
 
 Every failure message **names the source expression that failed**, quoted at
 macro-expansion time — so a failing assertion identifies itself without your
@@ -83,6 +84,23 @@ the error it raised — a built-in error as its message string, a `(throw v)` as
 ```lisp
 (assert= (error-of (/ 1 0)) "runtime error: division by zero")
 (assert= (error-of (+ 1 2)) nil)            ; also a plain "did it raise?" probe
+```
+
+### Property-based testing
+
+`(check-property n gen pred)` runs `n` trials. Each draws a value from `gen` — a
+`seed -> [value next-seed]` function over the seedable PRNG (`rand-int`,
+`rand-float`, `shuffle`, `sample`) — and asserts `(pred value)`. It's
+**deterministic** (a fixed start seed, threaded), so a failure reproduces; on the
+first counterexample it fails with the value, the trial number, and the seed that
+produced it. Sampling many inputs catches edge cases a single hand-written
+example misses.
+
+```lisp
+(test "rand-int stays in range"
+  (check-property 200 (fn (s) (rand-int s 1000)) (fn (x) (and (>= x 0) (< x 1000)))))
+(test "shuffle preserves length"
+  (check-property 50 (fn (s) (shuffle s [1 2 3 4 5])) (fn (sh) (= (count sh) 5))))
 ```
 
 ## Execution model — parallel by default

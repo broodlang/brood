@@ -155,7 +155,7 @@ Claude Code already has those:
 | Tool | Args | Returns | Why it needs the runtime |
 |---|---|---|---|
 | `eval`        | `{source}`                  | `{value, stdout, error?, diagnostics}` | The point — iterate without restart |
-| `load`        | `{file}`                    | `{ok, diagnostics}`                    | Reload a `.blsp` into the live image |
+| `load`        | `{file}`                    | `{ok, diagnostics, shadows}`           | Reload a `.blsp` into the live image, *and* check it: `diagnostics` are `check-file-structured` warnings (type/arity/unbound/non-tail-recursion); `shadows` flags names this file also-defines in another source file (flat-namespace collision) |
 | `lookup`      | `{name}`                    | `{arglist, doc, source_location, kind}`| Resolves prelude, project, macros uniformly |
 | `macroexpand` | `{form, mode: "1"\|"all"}`  | `{expanded}`                           | Teaches the agent quasiquote/`when-let`/etc. |
 | `run-tests`   | `{file?, name?}`            | `[{name, status, output}]`             | Structured, not GNU-line parsing |

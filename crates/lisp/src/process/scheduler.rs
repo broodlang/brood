@@ -34,7 +34,7 @@ use crate::core::value::{self, EnvId, Value};
 use crate::error::LispError;
 use crate::eval;
 
-use super::mailbox::{Mailbox, REGISTRY};
+use super::mailbox::{Mailbox, ST_RUNNABLE, ST_RUNNING, REGISTRY};
 use super::message::Message;
 use super::monitor;
 
@@ -528,6 +528,7 @@ fn deregister(pid: u64, reason: Message) {
 /// its lifetime — no cross-thread `resume`, no KI-1b migration hazard.
 pub(super) fn enqueue(proc: Box<Process>) {
     let wid = proc.worker_id;
+    proc.mailbox.status.store(ST_RUNNABLE, Ordering::Relaxed); // queued, awaiting a worker turn
     let (lock, cv) = &WORKERS[wid];
     crate::core::sync::lock(lock).push_back(proc);
     cv.notify_one();
@@ -567,6 +568,7 @@ fn worker_loop(wid: usize) {
 /// at `receive`, park it on its mailbox (or re-queue it if a message raced in).
 fn run_one(mut proc: Box<Process>) {
     let mailbox = Arc::clone(&proc.mailbox);
+    mailbox.status.store(ST_RUNNING, Ordering::Relaxed); // about to resume on this worker
 
     let live = RUNNING.fetch_add(1, Ordering::SeqCst) + 1;
     PEAK_RUNNING.fetch_max(live, Ordering::SeqCst);

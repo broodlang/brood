@@ -2841,3 +2841,154 @@ pid (a non-pid is a type error — same contract as `mailbox-size`):
 **References.** ADR-006 (mechanism in Rust, the map is policy-shaped data), ADR-046
 (the observer, first consumer), ADR-026 (the snapshot is an immutable value),
 `std/observe.blsp`, `docs/primitives.md` (the `process-info` entry).
+
+## ADR-052 — Interactive REPL line editor in Brood (inline `term-*` seam)
+
+**Status:** accepted (2026-05-29). The syntax-highlighting, bracket-matching,
+signature-hinting, completing, emacs-keyed REPL editor — `std/lineedit.blsp` +
+`std/highlight.blsp` over a thin new inline `term-*` seam.
+
+**Context.** ADR-048 made the REPL a Brood loop over `read-line`, with line editing
+left to the terminal's cooked mode and an explicit note that richer editing was "now
+a Brood function to add, not Rust," over the `term-*` raw-key seam. This ADR adds it:
+tree-sitter-style lexical highlighting, matching-bracket emphasis, function signature
+hints, Tab completion, and the core emacs/readline keys + ↑/↓ history. The existing
+`term-*` primitives (ADR-046) were built for a *full-screen* TUI (`nest observe`):
+`term-enter` takes the **alternate screen** and `term-draw` paints **absolute** cells
+— both wrong for a REPL, which must render **inline** and keep scrollback.
+
+**Decision.**
+- **A thin inline seam in Rust, the editor in Brood** (the ADR-006 split). Three new
+  primitives: `term-raw-enter` / `term-raw-leave` (raw mode *only* — no alternate
+  screen, cursor stays visible, scrollback preserved; `restore_raw` is the
+  panic-path backstop, and unlike `restore_terminal` it emits no escape sequences so
+  a piped stdout stays clean) and `term-emit` (a vector of *relative*-motion ops —
+  `:print`/`:cr`/`:nl`/`:up`/`:down`/`:col`/`:clear-eol`/`:clear-below` — queued then
+  flushed once, sharing `term-draw`'s `apply_face`). `key_to_value` also learns the
+  ALT modifier (`:alt-f` …, for M-f/M-b) and `BackTab` (`:back-tab`). Everything an
+  editor *does* — keymap, kill-ring, history, completion, layout, highlighting —
+  lives in Brood (`std/lineedit.blsp` + the pure `std/highlight.blsp`), redefinable.
+- **Lexical highlighting, written in Brood.** `std/highlight.blsp` is a pure
+  source→data lexer (the `observe-frame` discipline): it classifies tokens by shape +
+  head-position (the first symbol after a `(` is a call / special form), not by
+  resolving bindings — cheap, robust on incomplete input, and unit-testable without a
+  terminal. The special-forms set is mirrored from the LSP's `SPECIAL_FORMS`
+  (`semantic_tokens.rs`, `pub(crate)` and so unreachable from Brood) by hand; a
+  `(special-forms)` primitive to de-drift the two is a follow-up.
+- **Single-line editing, whole-form analysis.** The editor edits one physical line
+  and returns it — a `read-line` drop-in — so multi-line forms keep coming from the
+  REPL's existing reader-driven accumulation (ADR-049), with no second incomplete-
+  detector in Brood. The already-typed accumulator threads in as read-only `:prefix`
+  context, so highlighting, bracket matching, and signature hints analyse the *whole*
+  form (`prefix + line`) even on a continuation line, while cursor math stays
+  one-dimensional. A long line **horizontally scrolls** rather than wrapping (wrapping
+  would turn one logical line into many rows and break that math); the signature hint
+  renders on the line *below*, and because all motion is relative a bottom-of-screen
+  scroll moves the input and hint together (no absolute-row assumptions).
+- **Pure keymap + thin IO loop.** `lineedit--handle (state, key) → state` is pure, so
+  the entire keymap (insert/delete, motion, kill-ring + yank, word motion, history,
+  completion, Ctrl-D/Ctrl-C) is tested without a TTY; only `lineedit--loop` polls
+  keys and paints (exercised manually, like `repl`/`observe`). Ctrl-D on an empty line
+  signals EOF (routed to the existing end-of-input branch), mid-line it deletes
+  forward; Ctrl-C abandons the in-progress form and re-prompts, staying in the loop.
+
+**Where the editor runs (and why the worker cost is a non-issue).** The editor polls
+keys with `term-poll` from inside the *spawned* `repl--loop` process — the process that
+`hibernate`s between forms to bound memory (ADR-048). `term-poll` natively blocks its
+worker thread for the poll timeout, so the REPL's one worker is unavailable while it
+idles at the prompt. Given the scheduler (`scheduler.rs`: ≈`nproc` workers, processes
+pinned to a worker for life, per-worker queues, **no work stealing**), this is benign:
+(1) only the REPL's *one* worker is involved; (2) a blocked worker only affects
+processes pinned to *that* worker, and `assign_worker` is least-loaded, so fresh spawns
+steer to idle workers — usually nothing else is co-located; (3) the finite (250 ms)
+timeout yields the worker periodically, so even a co-located process still gets slices
+(no deadlock); and (4) it's *better* than the old `read-line`, which blocked the same
+worker **indefinitely** until a full line arrived — the editor yields every ≤250 ms.
+Only the degenerate single-worker pool (`-j 1`) is meaningfully affected, and even
+there background work proceeds in slices. **Rejected:** a root↔spawned round-trip that
+moves the read to the (never-blocking) root process — it removes the already-benign
+block but pushes the editor's per-keystroke transients onto the root arena, which
+*cannot* `hibernate` → unbounded growth over a long session; a real cost for an
+imaginary one. A **scheduler-parking key read** (suspend the green process until a key
+is ready, like `receive`) would make the block truly zero-cost — a nicety, not a fix.
+
+**Consequences.**
+- The REPL is now a genuinely modern prompt, entirely in Brood — the editor for the
+  coming text editor (M2+) starts here, on the same seam.
+- `term-emit`'s relative ops are the inline counterpart to `term-draw`'s absolute
+  frame; both share `apply_face`, so a future remote/web frontend interprets one more
+  small op set.
+- Piped (non-TTY) input is untouched: the editor is gated on **stdin** being a TTY
+  (`(and (stdin-tty?) (stdout-tty?))` — a new `stdin-tty?` primitive), so
+  `echo … | brood` *in a terminal* (piped stdin, TTY stdout) correctly takes the
+  plain `read-line` path instead of blocking the editor on key events; cosmetic
+  prompts/banner stay gated on `stdout-tty?`.
+- Known v1 limits (all additive follow-ups): a scheduler-parking key read (makes the
+  benign worker block above truly zero-cost); lexical (not scope-aware) highlighting;
+  completion from globals only (no locals-in-scope); no reverse history search /
+  persistent history; display width approximated as one column per char (wide
+  CJK/emoji may misposition the cursor).
+
+**References.** ADR-048 (the self-hosted REPL this extends), ADR-049 (the reader's
+INCOMPLETE_INPUT multi-line signal the single-line model relies on), ADR-046 (the
+full-screen `term-*` seam this adds an inline counterpart to), ADR-006 (mechanism in
+Rust, policy in Brood), ADR-025 (`arglist`/`global-names` introspection the hints +
+completion read; `semantic_tokens.rs` SPECIAL_FORMS the highlighter mirrors),
+`std/lineedit.blsp`, `std/highlight.blsp`, `std/repl.blsp`, `docs/primitives.md`.
+
+## ADR-053 — Remote attach: observe a running runtime over the node link
+
+**Status:** accepted (2026-05-29). The way to watch *existing executing code* — the
+real use for the process observer, since one terminal can't show app + observer.
+
+**Context.** `observe-attach` watches *this* runtime; to watch a separately-running
+program you must attach from a second terminal, which means IPC between two OS
+processes. Brood's only cross-runtime channel is the **distributed node link**
+(`dist.rs`: TCP + shared-cookie handshake) — and it's the right one: it gives
+location-transparent `send`/`receive`, and `process-info` already returns a
+**send-able immutable map**. A bespoke socket would mean new Rust primitives +
+re-doing the node wire codec for nothing.
+
+**Decision.** Remote attach is the **same observer loop with a remote data source**
+— no kernel changes, no new wire format.
+- **Target side, `(observe-serve)`:** spawn an agent and `register` it as
+  `:observe`; it replies to each `[:snapshot from _]` with `(observe--local-snapshot)`
+  (`{:node :procs}`) — the *same* snapshot the inline observer renders — sent to the
+  requester's pid, which routes back over the link. Opt-in (errors unless the program
+  has `node-start`ed), exactly like Erlang's `-name`: a program isn't observable
+  unless it opens itself up.
+- **Observer side, `(observe-connect spec cookie)` / `nest observe --connect`:**
+  `node-start` a unique transient node, `connect` the peer *before* `term-enter` (so a
+  refused / wrong-cookie / bad-spec error — all clean `LispError`s — surfaces without a
+  wrecked screen), `monitor-node` it, then run `observe--loop` with a source that
+  requests a snapshot per frame. The **node panel shows the peer's** stats because the
+  snapshot now carries `:node` (the source unification — the loop reads node + procs
+  from the snapshot, not from a local call).
+- **Pluggable source + link status.** A source returns a snapshot map, or a status
+  keyword. `observe--apply-result` folds it into `{:last :link}`: a map → `:ok`;
+  `:timeout` (stalled link / no agent) → `:stale` keeping the last snapshot;
+  `:down` (link dropped, via `[:nodedown]` or socket close) → **sticky** `DISCONNECTED`
+  frozen on the last snapshot until the user quits. So the UI never hangs on the
+  network and never crashes on disconnect — it shows the state.
+- **Cookie (decided): explicit.** `--cookie` → `$BROOD_COOKIE` → a clean error; no
+  baked-in default (a default cookie on a listening node is a footgun). A short
+  per-frame request timeout (`*observe-timeout*` ≈ 800 ms) keeps a slow link showing
+  `stale` rather than blocking the key loop; stale replies are drained so a flaky link
+  can't grow the mailbox.
+
+**Consequences.**
+- Watching a running CLI/server is now "open a second terminal and
+  `nest observe --connect`," the Erlang-observer model. Same `observe-frame`, same
+  `process-info` — the observer renders identically whether the data is local or a
+  peer's, which is the protocol-not-library property the display seam (ADR-046) set up.
+- **Trust model is dev-grade** (inherited from `dist.rs`): shared cookie, **no
+  encryption**, no per-message auth — LAN/trusted networks only; an internet-facing
+  attach needs TLS on top. Read-only: the observer reads snapshots, it can't control
+  the peer's processes (kill/inspect is a deliberate non-goal for now).
+- Cross-node coverage in `crates/cli/tests/observe_attach.rs` (two real runtimes:
+  attach → snapshot of the peer's processes → kill target → `:down`).
+
+**References.** ADR-046 (the display seam / observer this extends), ADR-051
+(`process-info`, the send-able snapshot maps), ADR-034 (the node handshake/cookie),
+ADR-006 (mechanism in Rust, the agent + loop are Brood), `std/observe.blsp`,
+`docs/roadmap.md` M3.

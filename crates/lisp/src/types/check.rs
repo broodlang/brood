@@ -81,6 +81,7 @@
 mod ctx;
 mod guards;
 mod hygiene;
+mod recursion;
 mod sigs;
 mod walk;
 
@@ -196,6 +197,11 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
     for &form in &expanded {
         check_into(heap, form, &ctx, &mut out);
     }
+    // Pass 3.5: flag non-tail self-recursion (overflow footgun — Brood loops
+    // must be tail-recursive). Walks the same expanded tree.
+    for &form in &expanded {
+        recursion::check_recursion(heap, form, &mut out);
+    }
     // Pass 4: macro-hygiene lint over the *un-expanded* forms — `defmacro`
     // templates and their `~unquote` structure only survive pre-expansion
     // (`macroexpand_all` leaves quasiquote opaque, and the template is gone once
@@ -242,6 +248,53 @@ mod tests {
         let form =
             crate::eval::macros::macroexpand_all(&mut interp.heap, form, interp.root).unwrap();
         check_form(&interp.heap, form)
+    }
+
+    /// The non-tail-recursion lint (`recursion::check_recursion`) over a
+    /// macroexpanded form — what `check-file`'s Pass 3.5 runs.
+    fn recursion_warnings(src: &str) -> Vec<String> {
+        let mut interp = crate::Interp::new();
+        let form = reader::read_one(&mut interp.heap, src).expect("parse");
+        let form =
+            crate::eval::macros::macroexpand_all(&mut interp.heap, form, interp.root).unwrap();
+        let mut out = Vec::new();
+        recursion::check_recursion(&interp.heap, form, &mut out);
+        out.into_iter().map(|(_, m)| m).collect()
+    }
+
+    #[test]
+    fn flags_non_tail_self_recursion() {
+        // self-call as an argument to another call
+        assert!(recursion_warnings("(defn fact (n) (if (= n 0) 1 (* n (fact (- n 1)))))")
+            .iter()
+            .any(|w| w.contains("fact") && w.contains("non-tail")));
+        assert!(
+            recursion_warnings("(defn sum (xs) (if (empty? xs) 0 (+ (first xs) (sum (rest xs)))))")
+                .iter()
+                .any(|w| w.contains("sum"))
+        );
+        // self-call as a let binding value
+        assert!(!recursion_warnings("(defn k (n) (let (m (k (- n 1))) m))").is_empty());
+        // first (tested) operand of `and`, and a `cond` test
+        assert!(!recursion_warnings("(defn p (n) (and (p n) (> n 0)))").is_empty());
+        assert!(!recursion_warnings("(defn g (n) (cond (g 0) :a :else :b))").is_empty());
+    }
+
+    #[test]
+    fn no_warning_for_tail_recursion_or_higher_order() {
+        // proper tail calls in each tail-propagating special form
+        assert!(
+            recursion_warnings("(defn loop (n acc) (if (= n 0) acc (loop (- n 1) (* acc n))))")
+                .is_empty()
+        );
+        assert!(recursion_warnings("(defn down (n) (when (> n 0) (down (- n 1))))").is_empty());
+        assert!(recursion_warnings("(defn f (n) (cond (= n 0) :z :else (f (- n 1))))").is_empty());
+        assert!(recursion_warnings("(defn p (n) (and (> n 0) (p (- n 1))))").is_empty());
+        assert!(recursion_warnings("(defn k (n) (let (m (- n 1)) (k m)))").is_empty());
+        // a self-call inside a nested closure is a different frame — not flagged
+        assert!(recursion_warnings("(defn h (xs) (map (fn (x) (h x)) xs))").is_empty());
+        // non-recursive function
+        assert!(recursion_warnings("(defn g (x) (+ x 1))").is_empty());
     }
 
     #[test]

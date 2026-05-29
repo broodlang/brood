@@ -58,6 +58,30 @@
       ;; back down past the newest restores the saved in-progress text
       (assert= (get (lineedit--handle u1 :down) :text) "wip"))))
 
+(describe "lineedit--handle — extra emacs/readline keys"
+  (test "C-p / C-n walk history like ↑ / ↓"
+    (let (h (lineedit--init "x> " "" (list "(b)" "(a)")))
+      (assert= (get (lineedit--handle h :ctrl-p) :text) "(b)")
+      (assert= (get (lineedit--handle (lineedit--handle h :ctrl-p) :ctrl-n) :text) "")))
+  (test "C-h is backspace"
+    (let (s (le--keys (le--fresh) (list "a" "b" "c")))
+      (assert= (get (lineedit--handle s :ctrl-h) :text) "ab")))
+  (test "M-d kills the word after point, leaving point put"
+    (let (s (lineedit--move (le--keys (le--fresh) (list "f" "o" "o" " " "b" "a" "r")) 4)
+          d (lineedit--handle s :alt-d))
+      (assert= (get d :text) "foo ")
+      (assert= (get d :kill) "bar")
+      (assert= (get d :point) 4)))
+  (test "C-t transposes the chars around point"
+    (let (s (lineedit--move (le--keys (le--fresh) (list "a" "b" "c")) 1))
+      (assert= (get (lineedit--handle s :ctrl-t) :text) "bac")
+      (assert= (get (lineedit--handle s :ctrl-t) :point) 2))
+    ;; at end of line, transpose the last two
+    (let (s (le--keys (le--fresh) (list "a" "b" "c")))
+      (assert= (get (lineedit--handle s :ctrl-t) :text) "acb")))
+  (test "C-l requests a screen clear (handled by the loop)"
+    (is (get (lineedit--handle (le--fresh) :ctrl-l) :clear))))
+
 (describe "lineedit--apply-completion — pure (candidates injected)"
   (test "a unique candidate is inserted in full"
     (let (s (lineedit--move (le--keys (le--fresh) (list "r" "e" "d" "u")) 4))
@@ -88,7 +112,11 @@
   (test "bracket overrides: matched pair reversed, lone bracket in error face"
     (assert= (lineedit--overrides "(+ 1)" 1)
              (list [0 hl-face-match] [4 hl-face-match]))
-    (assert= (lineedit--overrides "(+ 1" 1) (list [0 hl-face-error]))))
+    (assert= (lineedit--overrides "(+ 1" 1) (list [0 hl-face-error])))
+  (test "a hint wider than the room is truncated (so it never wraps)"
+    (assert= (lineedit--fit (list ["abcd" nil] ["efgh" {:bold true}]) 6 '())
+             (list ["abcd" nil] ["ef" {:bold true}]))
+    (assert= (lineedit--fit (list ["abc" nil]) 0 '()) '())))
 
 ;; Cross-process: an editor-state map crosses a heap boundary via send (deep copy)
 ;; and is edited on the far side, proving the immutable state survives copy-on-send

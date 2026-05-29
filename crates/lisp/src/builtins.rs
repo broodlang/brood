@@ -488,6 +488,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::nullary(bool_ty),
         stdout_tty,
     );
+    def(
+        heap,
+        "stdin-tty?",
+        Arity::exact(0),
+        Sig::nullary(bool_ty),
+        stdin_tty,
+    );
 
     // time
     def(heap, "now", Arity::exact(0), Sig::nullary(int), now);
@@ -1079,6 +1086,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("print", &["&", "xs"], "Write the display forms of the arguments to stdout; returns nil."),
     ("eprint", &["&", "xs"], "Write the display forms of the arguments to stderr; returns nil."),
     ("stdout-tty?", &[], "True when stdout is an interactive terminal (false when piped or captured)."),
+    ("stdin-tty?", &[], "True when stdin is an interactive terminal (false when redirected from a pipe or file). The REPL gates raw-mode line editing on this."),
     ("now", &[], "Wall-clock milliseconds since the Unix epoch."),
     ("now-ns", &[], "Wall-clock nanoseconds since the Unix epoch (finer-grained than now)."),
     ("mem-bytes", &[], "Bytes currently allocated process-wide."),
@@ -1135,7 +1143,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("term-draw", &["frame"], "Paint a frame — a vector of render ops: [:clear], [:text row col str], [:text row col str face], [:cursor row col]. A face is a map like {:fg :red :bold true}. The in-process frontend for the display protocol; returns nil."),
     ("term-raw-enter", &[], "Enter raw mode only — NO alternate screen, cursor stays visible, scrollback preserved. The seam for an inline line editor (the REPL); use term-enter instead for a full-screen TUI. Pair with term-raw-leave."),
     ("term-raw-leave", &[], "Leave raw mode (the teardown for term-raw-enter). Idempotent with the panic-path restore."),
-    ("term-emit", &["ops"], "Paint inline, relative-motion render ops (for an in-place editor that must not take over the screen): [:print str], [:print str face], [:cr], [:nl], [:up n], [:down n], [:col n], [:clear-eol], [:clear-below]. A face is a map like {:fg :cyan :bold true}. Queues all ops then flushes once; unknown ops are skipped; returns nil."),
+    ("term-emit", &["ops"], "Paint inline, relative-motion render ops (for an in-place editor that must not take over the screen): [:print str], [:print str face], [:cr], [:nl], [:up n], [:down n], [:col n], [:clear-eol], [:clear-below], [:clear-screen]. A face is a map like {:fg :cyan :bold true}. Queues all ops then flushes once; unknown ops are skipped; returns nil."),
     ("demonitor", &["mref"], "Drop the monitor identified by mref (best-effort)."),
     ("spawn-count", &[], "How many green processes have been spawned since program start."),
     ("peak-threads", &[], "High-water mark of OS threads running processes concurrently."),
@@ -1698,6 +1706,15 @@ fn eprint(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn stdout_tty(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     use std::io::IsTerminal;
     Ok(Value::Bool(std::io::stdout().is_terminal()))
+}
+
+/// `(stdin-tty?)` — true when stdin is an interactive terminal, false when it's
+/// redirected (a pipe, a file). The REPL gates raw-mode line editing on this:
+/// `echo … | brood` has a piped stdin (even with a TTY stdout), so it must take
+/// the plain `read-line` path, not the interactive editor.
+fn stdin_tty(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    use std::io::IsTerminal;
+    Ok(Value::Bool(std::io::stdin().is_terminal()))
 }
 
 // ---------- time ----------
@@ -2494,6 +2511,7 @@ fn term_raw_leave(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 ///   `[:col n]`                             move to absolute column n (0-based)
 ///   `[:clear-eol]`                         clear from the cursor to end of line
 ///   `[:clear-below]`                       clear from the cursor to end of screen
+///   `[:clear-screen]`                      clear the whole screen, cursor to (0,0)
 /// Unknown ops are skipped (forward-compatible, like `term-draw`).
 fn term_emit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use crossterm::cursor::{MoveDown, MoveToColumn, MoveUp};
@@ -2513,6 +2531,7 @@ fn term_emit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let col_t = value::intern("col");
     let clear_eol_t = value::intern("clear-eol");
     let clear_below_t = value::intern("clear-below");
+    let clear_screen_t = value::intern("clear-screen");
     let mut out = std::io::stdout();
     for op in ops {
         let parts: Vec<Value> = match op {
@@ -2549,6 +2568,9 @@ fn term_emit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             crossterm::queue!(out, Clear(ClearType::UntilNewLine)).map_err(term_err)?;
         } else if tag == clear_below_t {
             crossterm::queue!(out, Clear(ClearType::FromCursorDown)).map_err(term_err)?;
+        } else if tag == clear_screen_t {
+            crossterm::queue!(out, Clear(ClearType::All), crossterm::cursor::MoveTo(0, 0))
+                .map_err(term_err)?;
         }
     }
     out.flush().map_err(term_err)?;
@@ -2653,6 +2675,9 @@ fn process_info(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             let parent = crate::process::parent_of(id)
                 .map(|p| Value::Int(p as i64))
                 .unwrap_or(Value::Nil);
+            // `:memory` — the process's LOCAL heap footprint (bytes), published on
+            // its last `receive`; 0 for a process that has never received.
+            let memory = Value::Int(crate::process::process_mem(id).unwrap_or(0) as i64);
             let pairs = vec![
                 (value::kw("id"), Value::Int(id as i64)),
                 (value::kw("node"), Value::Keyword(node)),
@@ -2661,6 +2686,7 @@ fn process_info(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
                 (value::kw("mailbox"), mailbox),
                 (value::kw("monitored-by"), monitored),
                 (value::kw("parent"), parent),
+                (value::kw("memory"), memory),
             ];
             Ok(heap.map_from_pairs(pairs))
         }

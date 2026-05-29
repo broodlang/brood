@@ -22,6 +22,9 @@
              (list [0 4 hl-face-string] [5 8 hl-face-comment])))
   (test "keywords colour as keywords"
     (assert= (highlight-spans ":foo") (list [0 4 hl-face-keyword])))
+  (test "nil / true / false colour as constants, even in head position"
+    (assert= (highlight-spans "nil") (list [0 3 hl-face-keyword]))
+    (assert= (highlight-spans "(true)") (list [1 5 hl-face-keyword])))
   (test "a plain variable reference carries no span"
     (assert= (highlight-spans "x") '())))
 

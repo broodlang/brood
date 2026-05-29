@@ -87,10 +87,15 @@ the opening quote), honouring `\\` escapes; `n` if the string is unterminated."
 
 ;; ---- the lexer: source -> colour spans --------------------------------------
 
+;; `nil` / `true` / `false` colour as keyword-like literals (the LSP's T_KEYWORD),
+;; regardless of position — so `(nil? x)` shows `nil` as a constant, not a call head.
+(def hl--constants ["nil" "true" "false"])
+
 (defn hl--atom-face (tok after)
   "The face for atom `tok`, given whether it sits in head (`after` a `(`) position."
   (cond
     (starts-with? tok ":") hl-face-keyword
+    (includes? hl--constants tok) hl-face-keyword
     (hl--number? tok) hl-face-number
     (and after (special-form? tok)) hl-face-special
     after hl-face-function
