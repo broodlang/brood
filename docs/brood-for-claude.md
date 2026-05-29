@@ -484,9 +484,12 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 - **I/O**: `print` `println` `slurp` `spit` `load` `eval-string` `read-string`.
   `print`/`println` **flush stdout every call** — there's no separate flush, so
   an animation frame paints immediately. For raw terminal control without the
-  full display protocol, `(require 'ansi)` gives `ansi-clear`/`ansi-home`/
-  `ansi-cursor`/`ansi-hide-cursor` (escape *strings* you `print`); the ESC byte
-  is the `\e` string escape. (For a render-op frame buffer, use `std/display`.)
+  full display protocol, `(require 'ansi)` gives `(ansi-clear)`/`(ansi-home)`/
+  `(ansi-cursor r c)`/`(ansi-hide-cursor)` — **zero-arg functions you call**, each
+  *returning* an escape string. Call them: `(print (ansi-clear))`, **never**
+  `(print ansi-clear)` (a bare symbol prints `#<fn …>` and emits no escape). The
+  ESC byte is the `\e` string escape. (For a render-op frame buffer, use
+  `std/display`.)
 - **Filesystem (stat-class)**: `file-exists?` `dir?` `list-dir` `file-mtime`
 - **processes**: `spawn` (incl. named-spawn `(spawn :name expr)`)
   `send` `receive` `self` `ref` `monitor` `demonitor` `register` `whereis`
