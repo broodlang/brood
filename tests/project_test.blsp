@@ -33,3 +33,29 @@
     ;; stays in place. The brood repo's own project.blsp omits :main, so this
     ;; reflects the live value the runner would use.
     (assert= *project-main* '(main main))))
+
+(describe "project: duplicate global detection (flat namespace)"
+  (test "project--file-def-names extracts top-level def-style names (and skips defmodule)"
+    (let (dir (path-join "/tmp" (name (gensym "brood-dup-"))))
+      (make-dir dir)
+      (let (f (path-join dir "a.blsp"))
+        (spit f "(defmodule a \"x\")\n(defn main () 1)\n(def k 2)\n(defmacro m (x) x)\n(defdyn *d* 0)\n(defn helper (y) y)\n")
+        (assert= (sort (project--file-def-names f))
+          (sort ["*d*" "helper" "k" "m" "main"])))))
+  (test "a name in two files is flagged once; unique names are not"
+    (let (dir (path-join "/tmp" (name (gensym "brood-dup-"))))
+      (make-dir dir)
+      (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
+        (spit fa "(defn main () 1)\n(defn only-a () 1)\n")
+        (spit fb "(defn main () 2)\n(defn only-b () 2)\n")
+        (let (warns (project--duplicate-def-warnings [fa fb]))
+          (assert= (count warns) 1)
+          (is (string-contains? (first warns) "main"))
+          (refute (string-contains? (first warns) "only-a"))))))
+  (test "no duplicates yields no warnings"
+    (let (dir (path-join "/tmp" (name (gensym "brood-dup-"))))
+      (make-dir dir)
+      (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
+        (spit fa "(defn alpha () 1)\n")
+        (spit fb "(defn beta () 2)\n")
+        (assert= (project--duplicate-def-warnings [fa fb]) nil)))))
