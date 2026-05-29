@@ -1,0 +1,104 @@
+;; The standard pseudo-random number generator (std/prelude.blsp): a pure,
+;; seedable xorshift32 whose every step returns [value next-seed]. Because Brood
+;; has no global mutable state, randomness is threaded, so these tests double as
+;; a check that the [value next-seed] discipline composes. Register-only —
+;; discovered and run by `nest test` (and cargo test via suite.rs).
+
+(require 'test)
+
+;; A tail-recursive helper: n successive draws from `seed`, oldest first.
+(defn prng-draws (seed n acc)
+  (if (= n 0)
+    (reverse acc)
+    (let ([v s] (rng seed))
+      (prng-draws s (dec n) (cons v acc)))))
+
+(describe "rng — the seeded step"
+  (test "same seed yields the same value (deterministic, pure)"
+    (let ([va _] (rng 42) [vb _] (rng 42))
+      (assert= va vb)))
+  (test "the same seed yields the same stream"
+    (assert= (prng-draws 7 20 nil) (prng-draws 7 20 nil)))
+  (test "different seeds diverge"
+    (refute (= (prng-draws 1 10 nil) (prng-draws 2 10 nil))))
+  (test "values are non-negative 32-bit ints"
+    (let ([v _] (rng 12345))
+      (is (and (>= v 0) (< v 4294967296)))
+      (assert= (type-of v) :int)))
+  (test "threading next-seed advances the stream"
+    (let ([v1 s1] (rng 99) [v2 _] (rng s1))
+      (refute (= v1 v2)))))
+
+(describe "rand-seed — seed normalization"
+  (test "a zero seed maps to a nonzero state (xorshift32 cannot start at 0)"
+    (refute (= (rand-seed 0) 0)))
+  (test "normalization keeps the low 32 bits"
+    (assert= (rand-seed 5) 5)
+    (assert= (rand-seed 4294967296) 2463534242))) ; 2^32 -> 0 -> default seed
+
+(describe "rand-int / rand-float — ranged draws"
+  (test "rand-int stays in [0, n) across many draws"
+    (defn ri-loop (seed n ok)
+      (if (= n 0)
+        ok
+        (let ([i s] (rand-int seed 6))
+          (ri-loop s (dec n) (and ok (>= i 0) (< i 6))))))
+    (is (ri-loop 1 2000 true)))
+  (test "rand-int bound must be positive"
+    (assert-error (rand-int 1 0))
+    (assert-error (rand-int 1 -3)))
+  (test "rand-float stays in [0.0, 1.0)"
+    (defn rf-loop (seed n ok)
+      (if (= n 0)
+        ok
+        (let ([f s] (rand-float seed))
+          (rf-loop s (dec n) (and ok (>= f 0.0) (< f 1.0))))))
+    (is (rf-loop 3 2000 true))))
+
+(describe "shuffle / sample"
+  (test "shuffle is a permutation (preserves the multiset)"
+    (let ([sh _] (shuffle 9 [1 2 3 4 5 5]))
+      (assert= (sort sh) (sort [1 2 3 4 5 5]))))
+  (test "shuffle of an empty collection is empty"
+    (let ([sh _] (shuffle 1 []))
+      (assert= sh nil)))
+  (test "shuffle threads a usable next-seed"
+    (let ([_ s1] (shuffle 4 [1 2 3])
+          [sh2 _] (shuffle s1 [1 2 3]))
+      (assert= (sort sh2) (sort [1 2 3]))))
+  (test "sample returns a member of the collection"
+    (let ([x _] (sample 3 [:a :b :c]))
+      (is (includes? [:a :b :c] x))))
+  (test "sample of an empty collection errors"
+    (assert-error (sample 1 []))))
+
+;; ---- explicit concurrency (spawn / send / fan-in) ---------------------------
+;; The PRNG is pure, so a value drawn with seed K in a spawned process must equal
+;; the value drawn with seed K here — proving determinism survives the deep copy
+;; across per-process heaps (to_message/from_message round-trip on send). Helpers
+;; are defined once at load (distinct prng- names) so they survive :isolated.
+
+(defn prng-emit (parent seed) (send parent [:r seed (prng-draws seed 5 nil)]))
+(defn prng-spawn (parent seeds)
+  (when (not (empty? seeds))
+    (spawn (prng-emit parent (first seeds)))
+    (prng-spawn parent (rest seeds))))
+(defn prng-collect (got total acc)
+  (if (= got total)
+    acc
+    (prng-collect (+ got 1) total (receive ([:r seed draws] (assoc acc seed draws))))))
+
+(describe "prng across processes"
+  :isolated
+
+  (test "a worker's stream for seed K matches the parent's stream for seed K"
+    (prng-spawn (self) (range 1 11)) ; 10 workers, seeds 1..10
+    (let (m (prng-collect 0 10 {}))
+      (assert= (count m) 10)
+      (assert= (get m 1) (prng-draws 1 5 nil))
+      (assert= (get m 7) (prng-draws 7 5 nil))
+      (assert= (get m 10) (prng-draws 10 5 nil))))
+
+  (test "a single random draw round-trips intact across heaps"
+    (let (me (self) w (spawn (prng-emit me 42)))
+      (assert= (receive ([:r seed draws] draws)) (prng-draws 42 5 nil)))))

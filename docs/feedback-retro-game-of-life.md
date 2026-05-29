@@ -35,6 +35,34 @@ in this document.
 
 ---
 
+## Status — what's been addressed (updated 2026-05-29)
+
+A first pass landed the contained, high-value items; the deeper ones are scoped
+for follow-up. See the 2026-05-29 devlog entry and ADR-050.
+
+**Done:**
+- **Standard PRNG** (§1, §4.1) — `rng`/`rand-seed`/`rand-int`/`rand-float`/
+  `shuffle`/`sample`, pure & seedable (`[value next-seed]`), in `std/prelude.blsp`.
+  ADR-050.
+- **Bitwise operators** (§1, §4.3) — `bit-and`/`-or`/`-xor`/`-not`/`-shift-left`/
+  `-shift-right` (Rust primitives; the PRNG is built on them).
+- **Discovery / introspection** (§2, §5.5) — `apropos`/`all-globals`/`doc-search`
+  in-language, and as three `nest mcp` tools. Answers "is there an RNG?" in one
+  call.
+- **`:main` in the scaffold** (§5.2) — `nest new`'s CLAUDE.md now shows the syntax
+  and states the one-name-project-wide rule.
+
+**Still open (mapped, not yet built):**
+- **§8 memory leak** — the highest-priority item. It is the known "spiky memory":
+  the copying collector (`flush`) exists but only fires on a manual `(hibernate)`,
+  so a long-running `nest run` loop never reclaims. Fix is **Stage B** of
+  `docs/memory-review.md` (auto-fire the copy at a threshold), gated on a
+  `GC_BLOCK`/suspend rooting audit — not rushed.
+- **Set type `#{}`** (§1, §4.2), **duplicate-global warning** (§5.1, §6 "the bad
+  miss"), **`--main`/CLI entry override** (§5.3), **frame-capped run mode** (§5.4).
+
+---
+
 ## 1) Language issues
 
 **No randomness anywhere in the language.** This was the biggest ergonomic gap. I

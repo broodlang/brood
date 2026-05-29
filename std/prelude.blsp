@@ -1533,6 +1533,95 @@ stripped (`(cwd)` doesn't produce one, which is the primary caller)."
       (let (i (path--last-slash path (dec n)))
         (if (< i 0) path (substring path (inc i) n))))))
 
+;; ---- pseudo-random numbers (xorshift32, pure & seedable) --------------------
+;; Brood has no global mutable state, so randomness is *threaded*: every step
+;; takes a seed and returns `[value next-seed]`. Pass `next-seed` to the next
+;; call; thread the seed through your loop state exactly like any other value.
+;; Seed a fresh stream from any integer (e.g. `(now)`) via `rand-seed`.
+;;
+;; The generator is Marsaglia's xorshift32 — fast and good enough for
+;; simulations, sampling, shuffling, jitter, and ids; NOT for cryptography. Each
+;; left shift can exceed 32 bits, so we mask back to 32 bits with `*rand-mask*`,
+;; which also keeps every intermediate well within i64 (no overflow).
+
+(def *rand-mask* 4294967295) ; 2^32 - 1
+
+(defn rand-seed (n)
+  "Normalize integer `n` into a valid nonzero 32-bit PRNG seed (xorshift32 cannot start from 0)."
+  (let (m (bit-and n *rand-mask*))
+    (if (= m 0) 2463534242 m)))
+
+(defn rand--step (state)
+  ;; One xorshift32 transition over a nonzero 32-bit `state`.
+  (let (x (bit-and (bit-xor state (bit-shift-left state 13)) *rand-mask*)
+        x (bit-xor x (bit-shift-right x 17))
+        x (bit-and (bit-xor x (bit-shift-left x 5)) *rand-mask*))
+    x))
+
+(defn rng (seed)
+  "Step the PRNG: returns `[value next-seed]`, where `value` is a pseudo-random non-negative 32-bit integer and `next-seed` feeds the next call. `seed` is any integer (normalized via `rand-seed`)."
+  (let (s (rand--step (rand-seed seed)))
+    [s s]))
+
+(defn rand-int (seed n)
+  "Returns `[i next-seed]` with `i` a pseudo-random integer in `[0, n)`. `n` must be positive."
+  (if (<= n 0)
+    (error "rand-int: bound must be positive: " n)
+    (let (s (rand--step (rand-seed seed)))
+      [(rem s n) s])))
+
+(defn rand-float (seed)
+  "Returns `[f next-seed]` with `f` a pseudo-random float in `[0.0, 1.0)`."
+  (let (s (rand--step (rand-seed seed)))
+    [(/ s 4294967296.0) s]))
+
+(defn sample (seed coll)
+  "Returns `[item next-seed]`: one uniformly random element of non-empty `coll` (list, vector, or a map read as its `[k v]` entries)."
+  (let (items (into [] coll)
+        n (count items))
+    (if (= n 0)
+      (error "sample: cannot sample from an empty collection")
+      (let (s (rand--step (rand-seed seed)))
+        [(nth items (rem s n)) s]))))
+
+(defn shuffle--acc (state remaining acc)
+  (if (= (count remaining) 0)
+    [acc state]
+    (let (s (rand--step state)
+          i (rem s (count remaining)))
+      (shuffle--acc s
+        (append (take i remaining) (drop (inc i) remaining))
+        (cons (nth remaining i) acc)))))
+
+(defn shuffle (seed coll)
+  "Returns `[shuffled next-seed]`: the items of `coll` as a list in uniformly random order (Fisher–Yates)."
+  (shuffle--acc (rand-seed seed) (into [] coll) nil))
+
+;; ---- discovery / introspection ----------------------------------------------
+;; "What's in this image, and where?" — name- and doc-based search over the flat
+;; global table, on top of the `global-names`/`doc` primitives. The first thing
+;; to reach for when exploring rather than guessing names one at a time.
+
+(defn all-globals ()
+  "Every globally bound name, as a sorted list of symbols. Alias of `global-names`."
+  (global-names))
+
+(defn apropos (pattern)
+  "Every global whose name contains `pattern` (a string, symbol, or keyword), as a sorted list of symbols — e.g. `(apropos \"rand\")`."
+  ;; `name` (not `str`) so a keyword pattern drops its leading colon, matching
+  ;; the bare global names; a string passes through unchanged.
+  (let (needle (if (string? pattern) pattern (name pattern)))
+    (filter (fn (s) (string-contains? (name s) needle)) (global-names))))
+
+(defn doc-search (query)
+  "Every global whose docstring contains `query` (a string), as a list of `[name doc]` pairs — searches behaviour, not just names, e.g. `(doc-search \"random\")`."
+  (keep
+    (fn (s)
+      (let (d (try (doc (eval s)) (catch _ nil)))
+        (when (and (string? d) (string-contains? d query))
+          [s d])))
+    (global-names)))
+
 ;; ---- modules: Emacs-flat provide / require (ADR-019) ------------------------
 ;; A flat module system over the one shared global table: `provide` records a
 ;; loaded feature, `require` loads one once. Embedded std modules (test, project)

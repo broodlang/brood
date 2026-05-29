@@ -430,8 +430,8 @@ fn cmd_doc(interp: &mut Interp, module: Option<&str>) {
 /// `nest repl` — project-aware REPL. Inside a project, pre-load every source
 /// file so the project's modules are immediately callable from the prompt.
 /// Outside a project, fall through to the plain language REPL (same UX as
-/// `brood`). The REPL itself is `brood_repl` — one implementation shared
-/// across both binaries.
+/// `brood`). The REPL itself is Brood (`std/repl.blsp`, ADR-048) — one
+/// implementation both binaries bootstrap into via `(repl-run)`.
 fn cmd_repl(interp: &mut Interp) {
     if in_project() {
         run(

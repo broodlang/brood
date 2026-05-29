@@ -296,3 +296,15 @@ pub fn mailbox_len(pid: u64) -> Option<usize> {
     let len = crate::core::sync::lock(&mailbox.state).queue.len();
     Some(len)
 }
+
+/// A coarse run-status for live local process `pid`, inferred from where the
+/// process currently sits (no per-process bookkeeping needed): `"waiting"` if it
+/// is parked in `receive` (its mailbox holds it in the `waiter` slot), else
+/// `"running"` (on a worker or queued). `None` if the pid is dead/unknown. Backs
+/// `process-info`'s `:status`; a future explicit Process state enum can replace
+/// this with a precise reading (and widen the vocabulary, e.g. `"runnable"`).
+pub fn process_status(pid: u64) -> Option<&'static str> {
+    let mailbox = crate::core::sync::lock(&REGISTRY).get(&pid).cloned()?;
+    let parked = crate::core::sync::lock(&mailbox.state).waiter.is_some();
+    Some(if parked { "waiting" } else { "running" })
+}

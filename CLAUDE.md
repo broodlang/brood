@@ -106,11 +106,11 @@ crates/lisp/src/   (the directory tree mirrors the layers — see lib.rs)
 crates/cli/src/main.rs   the `brood` binary — the language (REPL, file runner, `--test`)
 crates/nest/src/         the `nest` binary — project tooling (main.rs + mcp.rs) — ADR-028
 crates/lsp/src/main.rs   the `brood-lsp` binary — language server (ADR-025, docs/lsp.md)
-crates/repl/src/lib.rs   shared REPL used by both `brood` and `nest` (keeps
-                         `rustyline` out of the LSP's dep graph)
 std/                     standard library written in Brood: prelude.blsp + opt-in
-                         modules (test, format, project, docs, mcp, reload,
-                         buffer, display, observe, supervisor, hatch)
+                         modules (repl, test, format, project, docs, mcp, reload,
+                         buffer, display, observe, supervisor, hatch). The REPL is
+                         Brood too now (`std/repl.blsp`, ADR-048); the binaries
+                         just bootstrap into `(repl-run)`.
 docs/                    architecture, language, roadmap, decisions, devlog
 ```
 

@@ -87,3 +87,35 @@
     (let (me (self) w (spawn (sl-worker me)))
       ;; the worker's copied-across value equals the parent's own lookup
       (assert= (receive) (source-location 'sl-subject)))))
+
+;; Discovery over the flat namespace (std/prelude.blsp): apropos matches names,
+;; doc-search matches docstrings, all-globals lists everything. Built on the
+;; global-names/doc primitives above.
+
+(describe "discovery (apropos / all-globals / doc-search)"
+  (test "apropos finds globals by name substring"
+    (let (hits (apropos "rand"))
+      (is (includes? hits 'rand-int))
+      (is (includes? hits 'rand-float))
+      (refute (includes? hits 'map))))  ; 'map' has no "rand" in it
+  (test "apropos accepts a string, symbol, or keyword pattern"
+    (assert= (apropos "shuffle") (apropos 'shuffle))
+    (assert= (apropos "shuffle") (apropos :shuffle)))
+  (test "apropos of a nonsense pattern is empty"
+    (assert= (apropos "zzz-no-such-thing-zzz") nil))
+  (test "all-globals lists every global and includes the prelude"
+    (let (g (all-globals))
+      (is (> (count g) 100))
+      (is (includes? g 'map))
+      (is (includes? g 'rand-int))
+      (assert= g (global-names)))) ; it's an alias
+  (test "doc-search finds globals whose docstring mentions a word"
+    (let (names (map first (doc-search "uniformly random")))
+      (is (includes? names 'shuffle))
+      (is (includes? names 'sample))))
+  (test "doc-search returns [name doc] pairs with real docstrings"
+    (let (hits (doc-search "xorshift"))
+      (refute (empty? hits))
+      (let ([nm d] (first hits))
+        (is (symbol? nm))
+        (is (string? d))))))

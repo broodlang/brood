@@ -3,28 +3,31 @@
 ;; Design notes (the *why*; the *what* is in the docstrings below):
 ;;  - The first real app on the M3 display/input seam (ADR-046): an
 ;;    Erlang-observer-style view of this runtime — node stats up top, a navigable
-;;    process list (pid + mailbox backlog) below. Proves the protocol + key loop
-;;    end-to-end and needs no rope/buffer, so it validates the seam in isolation.
+;;    table of live processes (id · name · status · mailbox · memory · monitors)
+;;    below. Proves the protocol + key loop end-to-end and needs no rope/buffer.
+;;  - Per-process data comes from `(process-info pid)` (ADR-051): a kernel snapshot
+;;    map. Fields the kernel doesn't track yet (`:memory`, `:parent`) simply render
+;;    as absent, so the observer grows richer as the kernel does, with no rework.
 ;;  - PURE core / thin IO loop. `observe-frame` turns plain data (a node-stats map
-;;    + a process list + which row is selected) into a render frame, with no IO —
-;;    so it is unit-testable without a terminal. `observe-run`/`observe--loop` are
-;;    the only parts that touch the `term-*` primitives and the live runtime.
-;;  - Interactivity with no mutation: the UI state (selected process, freeze) is a
-;;    plain map threaded through the tail-recursive loop — each keypress recurses
-;;    with a fresh state. Selection is tracked **by pid string**, not row index, so
-;;    it stays on the same process even as the list reorders (busiest-first) under
-;;    it. The loop runs in the root process, polling with a finite timeout, so it
-;;    blocks only the root thread — never a scheduler worker.
+;;    + a list of process-info maps + which row is selected) into a render frame,
+;;    with no IO — so it is unit-testable without a terminal. `observe--loop` /
+;;    `observe-run` are the only parts that touch `term-*` and the live runtime.
+;;  - Interactivity with no mutation: the UI state (selection, sort key, freeze) is
+;;    a plain map threaded through the tail-recursive loop — each keypress recurses
+;;    with a fresh state. Selection is tracked by the numeric pid **id**, so it
+;;    stays on the same process as the list re-sorts under it (and recovers if it
+;;    dies). The loop runs in the root process, polling with a finite timeout, so
+;;    it blocks only the root thread — never a scheduler worker.
 ;;  - Opt-in (`require`), never in the prelude; pure Brood over `display` + the
-;;    `term-*` / `list-processes` / `mailbox-size` / node-stat primitives.
+;;    `process-info` / `list-processes` / node-stat primitives.
 
 (defmodule observe
   "An interactive process observer — a full-screen TUI showing this runtime's node
-stats and a navigable list of live processes with their mailbox backlogs, built on
-the display seam (M3, ADR-046).
+stats and a navigable table of live processes (id, name, status, mailbox backlog,
+memory, monitors), built on the display seam (M3, ADR-046) over `process-info`.
 
     (require 'observe)
-    (observe-run)   ; ↑/↓ select · space pause · r refresh · q quit
+    (observe-run)   ; ↑/↓ select · s sort · space pause · r refresh · q quit
 
 `observe-frame` is the pure core (node + process data → a render frame);
 `observe-run` is the IO loop. Drive it from the shell with `nest observe`.")
@@ -44,10 +47,43 @@ the display seam (M3, ADR-046).
     (< n 1048576) (str (quot n 1024) " KB")
     :else (str (quot n 1048576) " MB")))
 
-(defn observe--row (marker pid mbox)
-  "Format one table row — a `marker` (selection caret or spaces) then `pid` and
-`mbox` (mailbox backlog) in fixed columns. Used for both the header and rows."
-  (str marker (pad-right (str pid) 24) (pad-left (str mbox) 8)))
+(defn observe--opt (v f)
+  "Render optional field `v` with `f`, or `\"-\"` when it's absent (nil)."
+  (if (nil? v) "-" (f v)))
+
+(defn observe--cells (id nm status mbox mem mon)
+  "One table line's six fixed-width columns (used for both header and rows)."
+  (str (pad-left (str id) 5) " " (pad-right nm 12) " " (pad-right status 8) " "
+       (pad-left (str mbox) 6) " " (pad-left mem 8) " " (pad-left (str mon) 4)))
+
+(defn observe--proc-cells (p)
+  "The table line for one `process-info` map `p`."
+  (observe--cells (get p :id)
+                  (observe--opt (get p :name) name)
+                  (observe--opt (get p :status) name)
+                  (get p :mailbox)
+                  (observe--opt (get p :memory) observe--bytes->human)
+                  (get p :monitored-by)))
+
+(defn observe--row-face (p selected?)
+  "Face for a process row: reverse-video when selected, else dimmed/green by status."
+  (if selected?
+    {:reverse true}
+    (cond (= (get p :status) :running) {:fg :green}
+          (= (get p :status) :waiting) {:fg :dark-grey}
+          :else nil)))
+
+(defn observe--detail (p nprocs cap sel)
+  "The detail line for the selected process-info map `p`. Absent fields
+(`:name`/`:memory`/`:parent`) are omitted rather than shown as a placeholder."
+  (str "  pid " (get p :id)
+       (let (nm (get p :name)) (if (nil? nm) "" (str " (" (name nm) ")")))
+       " · " (let (s (get p :status)) (if (nil? s) "?" (name s)))
+       " · mailbox " (get p :mailbox)
+       (let (m (get p :memory)) (if (nil? m) "" (str " · mem " (observe--bytes->human m))))
+       (let (pa (get p :parent)) (if (nil? pa) "" (str " · parent " pa)))
+       " · monitored-by " (get p :monitored-by)
+       (if (> nprocs cap) (str "   [" (inc sel) "/" nprocs "]") "")))
 
 (defn observe--node-lines (node nprocs)
   "The two node-summary header strings from a node-stats map (see
@@ -67,13 +103,13 @@ on screen (roughly centred), clamped so the window never runs past the end."
 
 ;; ---- the pure render core (no IO — the testable heart) ----------------------
 
-(defn observe-frame (node procs sel cols rows paused)
+(defn observe-frame (node procs sel cols rows paused sort)
   "Pure: build a render frame (a vector of display ops) for a `cols`×`rows`
-terminal — a two-line node panel (from `node`, an `observe--node-info` map), a
-column header, the `procs` list (each `{:pid <string> :mailbox <int>}`) windowed
-to fit with row `sel` selected/highlighted, a detail line for the selection, and a
-key-hint footer (showing `PAUSED` when `paused`). No IO — the observer's testable
-core; `observe--loop` feeds it live data."
+terminal — a two-line node panel (from `node`), a column header, the `procs` list
+(each a `process-info` map) windowed to fit with row `sel` selected/highlighted, a
+detail line for the selection, and a key-hint footer (showing `PAUSED` when
+`paused`, and the current `sort` key). No IO — the observer's testable core;
+`observe--loop` feeds it live data."
   (let (nprocs (count procs)
         lines (observe--node-lines node nprocs)
         cap (max 1 (- rows 5))
@@ -83,26 +119,20 @@ core; `observe--loop` feeds it live data."
                     (let (a (+ start i)
                           selected? (= a sel))
                       (text (+ 3 i) 0
-                            (observe--fit (observe--row (if selected? "▸ " "  ")
-                                                        (get p :pid) (get p :mailbox))
-                                          cols)
-                            (if selected? {:reverse true} nil))))
+                            (observe--fit (str (if selected? "▸ " "  ") (observe--proc-cells p)) cols)
+                            (observe--row-face p selected?))))
                   (enumerate visible))
         detail (if (empty? procs)
                  "  (no live processes)"
-                 (let (p (nth procs (min (max 0 (dec nprocs)) sel)))
-                   (str "  selected " (get p :pid)
-                        "   mailbox backlog " (get p :mailbox)
-                        (if (> nprocs cap) (str "   [" (inc sel) "/" nprocs "]") ""))))
-        keys (if paused
-               "  PAUSED · space resume · ↑/↓ select · r refresh · q quit"
-               "  ↑/↓ select · space pause · r refresh · q quit"))
+                 (observe--detail (nth procs (min (max 0 (dec nprocs)) sel)) nprocs cap sel))
+        keys (str (if paused "  PAUSED · space resume" "  space pause")
+                  " · ↑/↓ select · s sort(" (name sort) ") · r refresh · q quit"))
     (apply frame
            (append
              [(clear)
               (text 0 0 (observe--fit (pad-right (nth lines 0) cols) cols) {:reverse true :bold true})
               (text 1 0 (observe--fit (pad-right (nth lines 1) cols) cols) {:fg :dark-grey})
-              (text 2 0 (observe--fit (observe--row "  " "PID" "MAILBOX") cols) {:bold true})]
+              (text 2 0 (observe--fit (str "  " (observe--cells "ID" "NAME" "STATUS" "MBOX" "MEM" "MON")) cols) {:bold true})]
              body
              [(text (- rows 2) 0 (observe--fit (pad-right detail cols) cols) {:fg :cyan})
               (text (dec rows) 0 (observe--fit (pad-right keys cols) cols) {:reverse true})]))))
@@ -119,42 +149,55 @@ core; `observe--loop` feeds it live data."
    :mem-peak (mem-peak)
    :peers (nodes)})
 
-(defn observe--snapshot ()
-  "The live process list as plain `{:pid <string> :mailbox <int>}` maps, busiest
-first (largest mailbox backlog on top, like Erlang's observer) — the input
-`observe-frame` renders."
-  (sort-by (fn (p) (- (get p :mailbox)))
-           (map (fn (pid) {:pid (str pid) :mailbox (or (mailbox-size pid) 0)})
-                (list-processes))))
+(defn observe--sort (procs key)
+  "Sort the process-info list by `key`: `:id` ascending (stable spawn order),
+`:mailbox` or `:memory` descending (busiest/biggest first)."
+  (cond
+    (= key :mailbox) (sort-by (fn (p) (- (get p :mailbox))) procs)
+    (= key :memory)  (sort-by (fn (p) (- (or (get p :memory) 0))) procs)
+    :else            (sort-by (fn (p) (get p :id)) procs)))
+
+(defn observe--next-sort (key)
+  "Cycle the sort key: id → mailbox → memory → id."
+  (cond (= key :id) :mailbox (= key :mailbox) :memory :else :id))
+
+(defn observe--snapshot (sort)
+  "The live process table: a `process-info` map per live process (dropping any pid
+that died mid-scan), ordered by `sort`. The input `observe-frame` renders."
+  (observe--sort
+    (filter (fn (p) (not (nil? p))) (map process-info (list-processes)))
+    sort))
 
 ;; ---- the IO loop (interactive; runs in the root process) --------------------
 
-(defn observe--sel-index (procs sel-pid)
-  "The row index of the process whose pid string is `sel-pid`, or 0 if it is gone
-(so selection follows the same process across reorderings, and recovers if it
-dies). Clamped to a valid row."
-  (let (idx (index-of (map (fn (p) (get p :pid)) procs) sel-pid))
+(defn observe--sel-index (procs sel-id)
+  "The row index of the process whose `:id` is `sel-id`, or 0 if it is gone (so
+selection follows the same process across re-sorts, and recovers if it dies).
+Clamped to a valid row."
+  (let (idx (index-of (map (fn (p) (get p :id)) procs) sel-id))
     (max 0 (min (max 0 (dec (count procs))) (if (< idx 0) 0 idx)))))
 
 (defn observe--select (state procs idx)
-  "Return `state` with the selection pinned to the pid at row `idx` of `procs`."
-  (assoc state :sel-pid (if (empty? procs) nil (get (nth procs idx) :pid))))
+  "Return `state` with the selection pinned to the `:id` at row `idx` of `procs`."
+  (assoc state :sel-id (if (empty? procs) nil (get (nth procs idx) :id))))
 
 (defn observe--loop (state)
   "The observer event loop (root process): draw the current frame, wait up to 1s
 for a key, then recurse with updated UI state until `q` / Esc / Ctrl-C. `state` is
-`{:sel-pid <string|nil> :frozen <procs|nil>}` — `:frozen` holds a paused snapshot."
+`{:sel-id <int|nil> :sort <kw> :frozen <procs|nil>}` (`:frozen` = paused snapshot)."
   (let ([cols rows] (term-size)
         paused (not (nil? (get state :frozen)))
-        procs (if paused (get state :frozen) (observe--snapshot))
+        sort (get state :sort)
+        procs (if paused (get state :frozen) (observe--snapshot sort))
         n (count procs)
-        sel (observe--sel-index procs (get state :sel-pid)))
-    (term-draw (observe-frame (observe--node-info) procs sel cols rows paused))
+        sel (observe--sel-index procs (get state :sel-id)))
+    (term-draw (observe-frame (observe--node-info) procs sel cols rows paused sort))
     (let (k (term-poll 1000))
       (cond
         (or (= k "q") (= k :escape) (= k :ctrl-c)) (term-leave)
         (or (= k :up) (= k "k"))   (observe--loop (observe--select state procs (max 0 (dec sel))))
         (or (= k :down) (= k "j")) (observe--loop (observe--select state procs (min (max 0 (dec n)) (inc sel))))
+        (= k "s") (observe--loop (assoc state :sort (observe--next-sort sort)))
         (= k " ") (observe--loop (assoc state :frozen (if paused nil procs)))
         (= k "r") (observe--loop (assoc state :frozen nil))
         :else (observe--loop state)))))
@@ -181,11 +224,12 @@ fresh observer has live processes to watch. Returns nil."
 
 (defn observe-run (&optional (demo true))
   "Run the interactive process observer — a full-screen TUI with node stats and a
-navigable process list. `↑`/`↓` (or `k`/`j`) select, `space` pauses/resumes the
-live refresh, `r` refreshes, and `q`/Esc/Ctrl-C quits. With `demo` true (the
-default), seeds a few demo processes first so there is something to watch. Runs in
-the calling process and blocks until quit; pairs with `nest observe`."
+navigable process table. `↑`/`↓` (or `k`/`j`) select, `s` cycles the sort
+(id/mailbox/memory), `space` pauses/resumes the live refresh, `r` refreshes, and
+`q`/Esc/Ctrl-C quits. With `demo` true (the default), seeds a few demo processes
+first so there is something to watch. Runs in the calling process and blocks until
+quit; pairs with `nest observe`."
   (do
     (when demo (observe--spawn-demo 5))
     (term-enter)
-    (observe--loop {:sel-pid nil :frozen nil})))
+    (observe--loop {:sel-id nil :sort :id :frozen nil})))

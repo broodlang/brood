@@ -78,11 +78,12 @@ cargo run -p nest -- test         # discover tests/**/*_test.blsp and run them
 cargo run -p nest -- doc          # emit Markdown docs for the project
 ```
 
-`make install` builds and installs both binaries (`brood`, `nest`) into
-`~/.local/bin`; `make uninstall` removes them. In the REPL:
+`make install` builds and installs the binaries (`brood`, `nest`, `brood-lsp`)
+into `~/.local/bin`; `make uninstall` removes them. The REPL is itself written in
+Brood (`std/repl.blsp`); `brood` with no arguments runs it:
 
 ```
-brood v0.1 — arrow keys to edit, up/down for history, Ctrl-D to exit
+brood — REPL (Ctrl-D to exit)
 brood> (+ 1 2)
 3
 brood> (defn greet (name) (str "hello, " name))

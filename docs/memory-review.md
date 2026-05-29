@@ -206,13 +206,16 @@ runner, the editor event loop is a tail-recursive `receive`/iterate loop).
 The principle: **make collection automatic and frequent, keep it copying (no slot
 reuse), and pay for stability with CPU — exactly the trade requested.**
 
-**Stage A — auto-hibernate long-lived loops (smallest step, do first).**
-Nothing new in the kernel: make the long-lived loops that currently grow
-(test runner; any `receive` server) recur through `(hibernate loop state)` like
-the REPL already does (`std/repl.blsp`). This converts their unbounded climb into
-a bounded sawtooth whose amplitude is one iteration's working set. Proves the
-"slow-and-stable" trade end-to-end and immediately fixes the suite. *Cost: a deep
-copy per iteration — slower, flat. Acceptable per the brief.*
+**Stage A — auto-hibernate long-lived loops (smallest step). ✅ DONE for the test
+runner (2026-05-29).** Nothing new in the kernel: make the long-lived loops that
+grow (test runner; any `receive` server) recur through `(hibernate loop state)`
+like the REPL already does (`std/repl.blsp`). This converts their unbounded climb
+into a bounded sawtooth whose amplitude is one iteration's working set. *Cost: a
+deep copy per step — slower, flat. Acceptable per the brief.* **Measured:** the
+test runner (`std/test.blsp`, the hibernating-driver block) took the full suite
+from ~4 GiB (tripping the cap) to **peak 1135 MB, 655/655 pass** — confirming the
+growth was *garbage*, not live data. This is explicitly a **temporary smell** (a
+userland GC trigger); Stage B removes it.
 
 **Stage B — automatic threshold-triggered collection (the real fix).**
 Promote Model 2 from manual to automatic. At the `GC_BLOCK == 1` safepoint, when

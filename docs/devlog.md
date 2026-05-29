@@ -6653,3 +6653,151 @@ correctness and consistency improvements without breaking anything.
   prelude's stack-safe versions.
 
 **Verified.** `nest test` — 653 tests, 0 failed (release build).
+
+
+## 2026-05-29 — Self-hosted REPL: the read-eval-print loop moves into Brood (ADR-048/049)
+
+**Goal.** Retire the Rust REPL (`crates/repl`, `rustyline`) and write the
+read-eval-print loop in Brood — the long-standing M1 "self-host the CLI/REPL"
+item. The editor backbone made it reachable: `eval-string` is the evaluator,
+`try`/`catch` surfaces structured errors, and the M3 work proved Brood can own an
+IO loop.
+
+**Built.**
+- *Rust (mechanism, the only new surface):* one primitive `(read-line)` — a
+  blocking stdin line read, returns the line (newline stripped) or `nil` at EOF.
+  `std/repl.blsp` added to `EMBEDDED_MODULES`. `brood` (no args) and `nest repl`
+  now bootstrap into `(require 'repl) (repl-run)`; `crates/repl` + the `rustyline`
+  dependency are deleted.
+- *Brood (policy):* `std/repl.blsp` — the loop, prompts (the dynamic vars
+  `*repl-prompt*` / `*repl-cont-prompt*`), readable result echo (`pr-str`), and
+  structured-error rendering off the `{:kind :message [:line :col] :code …}` map.
+  Reads work piped too; prompts/banner gate on `(stdout-tty?)`.
+
+**Two design points that mattered.**
+- *Multi-line input via the reader, not a delimiter scanner (ADR-049).* An
+  unclosed form/string makes `eval-string` raise the reader's `INCOMPLETE_INPUT`
+  error (code `E0002`) — the "read another line" signal; any other error is real.
+  Since `eval-string` reads all forms before evaluating any, an incomplete buffer
+  throws at read time with nothing evaluated, so retrying the growing buffer is
+  side-effect-free. (Dropped an earlier hand-rolled Brood balance scanner — the
+  reader already knows "complete," strings/comments/escapes included.)
+- *Memory: `hibernate` in a spawned process.* The tracing GC (ADR-035) is a
+  current no-op, and a nested `eval-string` doesn't hit the top-level arena reset,
+  so a naive loop leaks — **measured ~15 GB** RSS over 50 000 commands. Fix:
+  `repl--loop` recurs via `(hibernate repl--loop tty)`, flipping the LOCAL arena
+  each command (keeping only the loop fn + `tty`). `hibernate` is caught only by
+  the spawned-process scheduler loop, so `repl-run` runs the loop in a spawned
+  process and `monitor`s it to await EOF. **After: flat ~8 MB** at 2 000 and
+  20 000 commands alike.
+
+**Tests.** `tests/repl_test.blsp` — 12 tests: datum detection (`repl--content?`),
+incomplete-input detection (`repl--incomplete?` off E0002, incl. `repl--eval-print`
+returning `:more`), error rendering, and an `:isolated` cross-process error-map
+round-trip. The IO loop itself is exercised manually (`brood`, piped input).
+
+**Pre-existing, unrelated.** The full `cargo test` aggregate still shows the 3
+adversarial heap-allocation tests dying on the 4 GB process-wide soft cap under
+peak concurrency — confirmed identical at committed `HEAD` (a worktree check) and
+a known no-GC-suite-memory consequence (ADR-047). Not introduced here.
+
+**Next.** Arrow-key history/recall over the `term-*` raw-key seam (ADR-046) + the
+buffer framework — now a Brood function to add, not a Rust dep to carry.
+
+## 2026-05-29 — Memory review + Stage A: hibernate the test runner
+
+**Goal.** Stop the in-language suite (~655 tests) climbing to the memory soft cap
+(clean E0043). Brief: *slow-and-stable over fast-and-spiky* — reclaim often, keep
+the working set flat, accept the CPU.
+
+**Review first** (`docs/memory-review.md`). Mapped the memory model onto standard
+techniques. Findings: (1) `Heap::flush` is already a textbook **semi-space copying
+collector** — we only *trigger* it manually via `(hibernate)`; the spikiness IS
+that manual trigger. (2) "immutability ⇒ acyclic ⇒ refcounting suffices" is
+**false** — `letrec`/mutual recursion build real `env↔closure` cycles (flush handles
+them), so pure RC would leak; we need tracing/copying. (3) Index-slab handles make
+slot reuse *unsafe* (silent aliasing) — why bump-only was chosen and the in-place
+mark-sweep stays disabled; copying sidesteps it (relocate + drop). (4) Two rooting
+models: in-place mark-sweep at the `GC_BLOCK==1` safepoint (disabled: slot reuse +
+the scheduler-suspend race) vs. copying `flush` after an unwind (safe; tail-call
+boundaries only). Recommendation: fire the existing copy **automatically at a memory
+threshold** (Stage B, the threshold = the slow/stable dial); do **Stage A** first.
+
+**Stage A (this entry).** The runner is one long-lived process, so with the GC off
+it accumulated every step's transients (worker-result copies, the `append` spine,
+spawn/monitor machinery) until the cap. Merged the old `run-isolated`/`run-parallel`
+phases into a single **hibernating driver** (`std/test.blsp`): a spawned process
+that runs the work list one step at a time (each isolated unit alone; parallel units
+in `*parallel-batch*` groups) and `(hibernate)`s between steps — each flip keeps
+only `(steps parent acc)` and drops that step's garbage. `run-tests` /
+`run-tests-structured` delegate via `drain-runner` (spawn + monitor + await the
+`:all-results` message). Marked a **TEMPORARY smell** (userland GC trigger) to delete
+when Stage B lands.
+
+**Result.** Full suite **655/655 pass, peak 1135 MB** (was ~4 GiB tripping the cap
+→ ~3.5× lower, well under the soft cap; no more E0043). Confirms the runner's growth
+was dominated by *garbage*, not live data. `cargo test` green (`basic.rs` incl.
+`run-tests-structured`; `suite.rs` full run, 48.9 s).
+
+**Gotchas.** `partition` **drops** a short trailing chunk — batching units with it
+would silently skip tests; wrote a remainder-keeping `run--chunks`. `receive`/match
+patterns: a plain symbol **binds**, `~x` **pins** an existing value (got it backwards
+at first). Mailbox messages are stored serialized (off the LOCAL heap), so they
+survive a hibernate arena flip — fully collecting a batch before hibernating keeps no
+in-flight message across the boundary.
+
+**Next.** Stage B — automatic threshold-triggered copying collection at the eval
+safepoint, after auditing `GC_BLOCK` save/restore across preempt + receive. Removes
+the Stage-A smell and is the real fix.
+
+---
+
+## 2026-05-29 — Game-of-Life feedback: bitwise ops, a standard PRNG, discovery tools
+
+**Goal.** Act on `docs/feedback-retro-game-of-life.md` — an AI assistant built a
+Conway's Life in Brood and reported the friction. Knock out the contained,
+high-value items in one pass; leave the deeper items scoped (see **Deferred**).
+
+**Built.**
+- **Bitwise primitives** (`builtins.rs`): `bit-and` `bit-or` `bit-xor` `bit-not`
+  `bit-shift-left` `bit-shift-right` — i64 two's-complement, arithmetic right
+  shift, shift amount validated to `[0, 64)` (out of range is a clean error, not
+  a Rust panic). The one genuinely irreducible piece here; everything below sits
+  on top of them. Table stakes the feedback called out (hashing, flags, PRNG
+  quality).
+- **A standard PRNG, in Brood** (`std/prelude.blsp`): `rng` `rand-seed`
+  `rand-int` `rand-float` `shuffle` `sample`. Pure and seedable — every step is
+  `seed -> [value next-seed]`, threaded like any other value (no global mutable
+  PRNG; respects ADR-026). Marsaglia **xorshift32** with 32-bit masking, chosen
+  precisely because integer `+`/`*` *error* on overflow (they don't wrap) — the
+  shifts stay well within i64 and mask back to 32 bits, so no overflow. The #1
+  ergonomic gap in the feedback; before this every user hand-rolled an LCG.
+- **Discovery / introspection** (`std/prelude.blsp`): `all-globals` (alias of
+  `global-names`), `apropos` (name substring; accepts string/symbol/keyword),
+  `doc-search` (matches docstrings, returns `[name doc]` pairs). Answers "does an
+  RNG exist?" in one call instead of a dozen unbound-symbol probes. Also exposed
+  as three **`nest mcp` tools** (`apropos`/`all-globals`/`doc-search`) — the
+  catalogue is twelve tools now.
+- **Scaffold doc fix** (`std/project.blsp`): the `nest new` CLAUDE.md template now
+  *shows* `:main` syntax (`:main 'app` → `app/main`; `:main '(app start)`) and
+  states the flat-namespace naming rule (exactly one `main` project-wide) — the
+  feedback's silent-duplicate-`main` trap, headed off at scaffold time.
+
+**Tests.** `tests/math_test.blsp` (+bitwise describe: ops, sign-preserving shift,
+out-of-range error, type errors); new `tests/prng_test.blsp` (determinism, ranges,
+shuffle-is-a-permutation, plus an `:isolated` across-processes block proving a
+seed's stream survives the deep copy on `send`); `tests/introspection_test.blsp`
+(+discovery describe). The keyword-pattern test caught a real bug — `apropos` used
+`str` (which keeps a keyword's leading colon); fixed to `name`. Full suite green
+(`cargo test`: 136 + 75 + 53 unit, `brood_suite_passes`, MCP + distribution).
+
+**Deferred (scoped, not done).**
+- **The §8 memory leak** — the headline finding. It's the known "spiky memory":
+  the copying collector (`flush`) exists but only fires on a manual `(hibernate)`,
+  so a long-running `nest run` loop (a TUI game) never reclaims. The real fix is
+  **Stage B** of `docs/memory-review.md` (auto-fire the copy at a memory threshold
+  at the eval safepoint), which needs the `GC_BLOCK`/suspend rooting audit first —
+  deliberately *not* rushed.
+- **Set type `#{}`**, **duplicate-global warning** in `check-project-sources`, a
+  **`--main`/`module/fn` CLI override**, and a **frame-capped run mode** — all
+  mapped (insertion points known) but left for follow-up.
