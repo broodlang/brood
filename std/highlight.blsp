@@ -1,0 +1,303 @@
+;; std/highlight.blsp — lexical syntax highlighting + bracket/call analysis. (require 'highlight).
+;;
+;; Design notes (the *why*; the *what* is in the docstrings below):
+;;  - Pure data → data, no IO and no kernel surface (the analogue of
+;;    `observe-frame`): every function takes a source string and returns spans /
+;;    chunks / positions. That makes the whole module unit-testable without a
+;;    terminal — `std/lineedit.blsp` is the only piece that touches `term-*`.
+;;  - Lexical, not semantic: this is a tree-sitter-style *highlighter*, not the
+;;    type checker. It classifies tokens by shape + head-position (the first
+;;    symbol after a `(` is a call/special-form), not by resolving what a name
+;;    binds to. Cheap, robust on incomplete input, and written in Brood (ADR-006).
+;;  - The faces are `display.blsp`-style maps (`{:fg :cyan}` …) so they feed
+;;    straight into a `[:print str face]` op for `term-emit`.
+
+(defmodule highlight
+  "Lexical syntax highlighting and bracket / call-site analysis for Brood source,
+as pure functions over a source string (ADR-052):
+
+  - `(highlight-spans src)` — `[start end face]` colour spans for the tokens.
+  - `(highlight-chunks full base line overrides)` — `[substring face]` chunks that
+    tile a visible line (with caller `overrides`, e.g. bracket-match colours).
+  - `(bracket-match full pos)` — the bracket pair adjacent to cursor `pos`.
+  - `(enclosing-call full pos)` — `[callee arg-index]` for the call enclosing the cursor.
+  - `(symbol-prefix-at full pos)` / `(common-prefix strs)` — completion helpers.
+
+Used by `std/lineedit.blsp` (the REPL editor); pure, so independently testable.")
+
+;; ---- faces (display.blsp-style maps) ----------------------------------------
+
+(def hl-face-comment {:fg :dark-grey})
+(def hl-face-string {:fg :green})
+(def hl-face-number {:fg :yellow})
+(def hl-face-keyword {:fg :magenta})
+(def hl-face-special {:fg :blue :bold true})
+(def hl-face-function {:fg :cyan})
+(def hl-face-match {:reverse true})
+(def hl-face-error {:fg :red :bold true})
+
+;; The set of names that highlight as a *keyword* (special forms + core macros).
+;; Mirrors `crates/lsp/src/semantic_tokens.rs` SPECIAL_FORMS by hand — that const
+;; is `pub(crate)`, unreachable from Brood; keep the two in sync (ADR-052 notes a
+;; `(special-forms)` primitive as the de-drift follow-up).
+(def hl--special-forms
+  ["if" "do" "def" "fn" "lambda" "let" "let*" "letrec"
+   "quote" "quasiquote" "defmacro" "defn" "defdyn" "defmodule"
+   "when" "unless" "cond" "and" "or" "match" "match*"
+   "try" "catch" "throw" "receive" "binding"
+   "dolist" "doseq" "dotimes" "for" "->" "->>"])
+
+(defn special-form? (s)
+  "True if string `s` names a Brood special form / core macro that should highlight
+as a keyword. Mirrors the LSP's SPECIAL_FORMS list."
+  (includes? hl--special-forms s))
+
+;; ---- character classes ------------------------------------------------------
+
+(defn hl--ws? (c)
+  (or (= c " ") (= c "\t") (= c "\n") (= c "\r") (= c ",")))
+(defn hl--open? (c) (or (= c "(") (= c "[") (= c "{")))
+(defn hl--close? (c) (or (= c ")") (= c "]") (= c "}")))
+(defn hl--bracket? (c) (or (hl--open? c) (hl--close? c)))
+(defn hl--delim? (c)
+  (or (hl--ws? c) (hl--bracket? c) (= c "\"") (= c ";")))
+
+(defn hl--number? (tok)
+  "True if `tok` reads as a number (so it colours as one rather than a symbol)."
+  (not (nil? (string->number tok))))
+
+;; ---- scanning primitives (shared by lexer + matchers) -----------------------
+
+(defn hl--to-eol (src i n)
+  "Index of the newline ending the line containing `i` (or `n` at end of input)."
+  (if (or (>= i n) (= (char-at src i) "\n")) i (hl--to-eol src (inc i) n)))
+
+(defn hl--string-end (src i n)
+  "Index just past the closing quote of a string whose body starts at `i` (one past
+the opening quote), honouring `\\` escapes; `n` if the string is unterminated."
+  (cond
+    (>= i n) i
+    (= (char-at src i) "\\") (hl--string-end src (+ i 2) n)
+    (= (char-at src i) "\"") (inc i)
+    :else (hl--string-end src (inc i) n)))
+
+(defn hl--atom-end (src i n)
+  "Index of the first delimiter at or after `i` — the end of an atom token."
+  (if (or (>= i n) (hl--delim? (char-at src i))) i (hl--atom-end src (inc i) n)))
+
+;; ---- the lexer: source -> colour spans --------------------------------------
+
+(defn hl--atom-face (tok after)
+  "The face for atom `tok`, given whether it sits in head (`after` a `(`) position."
+  (cond
+    (starts-with? tok ":") hl-face-keyword
+    (hl--number? tok) hl-face-number
+    (and after (special-form? tok)) hl-face-special
+    after hl-face-function
+    :else nil))
+
+(defn hl--lex (src i n after acc)
+  "Tail-recursive lexer worker. `after` is true when the next atom is in head
+position (directly inside a `(`, across whitespace/comments). Accumulates spans in
+reverse."
+  (if (>= i n)
+    (reverse acc)
+    (let (c (char-at src i))
+      (cond
+        (hl--ws? c) (hl--lex src (inc i) n after acc)
+        (= c ";") (let (j (hl--to-eol src (inc i) n))
+                    (hl--lex src j n after (cons [i j hl-face-comment] acc)))
+        (= c "\"") (let (j (hl--string-end src (inc i) n))
+                     (hl--lex src j n false (cons [i j hl-face-string] acc)))
+        (= c "(") (hl--lex src (inc i) n true acc)
+        (hl--open? c) (hl--lex src (inc i) n false acc)
+        (hl--close? c) (hl--lex src (inc i) n false acc)
+        :else (let (j (hl--atom-end src (inc i) n)
+                    face (hl--atom-face (substring src i j) after))
+                (hl--lex src j n false (if (nil? face) acc (cons [i j face] acc))))))))
+
+(defn highlight-spans (src)
+  "Lexically tokenize Brood `src` into a list of `[start end face]` colour spans
+(character offsets, end-exclusive) for the tokens that carry a colour — comments,
+strings, numbers, keywords, and head-position symbols (special forms vs calls).
+Whitespace and plain variable references carry no span (the default colour)."
+  (hl--lex src 0 (string-length src) false '()))
+
+;; ---- projecting spans onto a visible line -----------------------------------
+
+(defn hl--face-at (spans pos)
+  "The face of the span covering offset `pos`, or nil."
+  (cond
+    (empty? spans) nil
+    :else (let ([s e f] (first spans))
+            (if (and (>= pos s) (< pos e)) f (hl--face-at (rest spans) pos)))))
+
+(defn hl--override-at (overrides pos)
+  "The override face for offset `pos` in the `[pos face]` list `overrides`, or nil."
+  (cond
+    (empty? overrides) nil
+    :else (let ([p f] (first overrides))
+            (if (= p pos) f (hl--override-at (rest overrides) pos)))))
+
+(defn hl--face (full base spans overrides k)
+  "The face for line char `k` (offset `base+k` in `full`): an override wins, else
+the lexer's span face, else nil (default)."
+  (let (pos (+ base k))
+    (or (hl--override-at overrides pos) (hl--face-at spans pos))))
+
+(defn hl--chunk (full base line spans overrides len i start cur acc)
+  "Tail-recursive run-length coalescer: emit a `[substring face]` chunk whenever
+the per-char face changes."
+  (if (>= i len)
+    (reverse (cons [(substring line start len) cur] acc))
+    (let (f (hl--face full base spans overrides i))
+      (if (= f cur)
+        (hl--chunk full base line spans overrides len (inc i) start cur acc)
+        (hl--chunk full base line spans overrides len (inc i) i f
+                   (cons [(substring line start i) cur] acc))))))
+
+(defn highlight-chunks (full base line overrides)
+  "Return `[substring face]` chunks that tile `line` — the visible region starting
+at offset `base` in `full` — coloured by lexing `full`, with `overrides` (a list of
+`[pos face]` in full-coordinates, e.g. bracket-match colours) winning over the
+lexer. Adjacent chars of equal face coalesce into one chunk; feed each to a
+`[:print str face]` op."
+  (let (len (string-length line))
+    (if (= len 0)
+      '()
+      (let (spans (highlight-spans full))
+        (hl--chunk full base line spans overrides len 1 0
+                   (hl--face full base spans overrides 0) '())))))
+
+;; ---- bracket matching -------------------------------------------------------
+
+(defn hl--fwd-match (full i n depth)
+  "Scanning forward from `i` (just past an opener), the offset of the closer at
+`depth` 0, or -1. Skips strings/comments so their brackets don't count."
+  (if (>= i n)
+    -1
+    (let (c (char-at full i))
+      (cond
+        (= c "\"") (hl--fwd-match full (hl--string-end full (inc i) n) n depth)
+        (= c ";") (hl--fwd-match full (hl--to-eol full (inc i) n) n depth)
+        (hl--open? c) (hl--fwd-match full (inc i) n (inc depth))
+        (hl--close? c) (if (= depth 0) i (hl--fwd-match full (inc i) n (dec depth)))
+        :else (hl--fwd-match full (inc i) n depth)))))
+
+(defn hl--opener-scan (full i n cp stack)
+  "Forward scan maintaining a `stack` of opener offsets; on reaching closer `cp`,
+return the matching opener (top of stack) or -1. Skips strings/comments."
+  (if (>= i n)
+    -1
+    (let (c (char-at full i))
+      (cond
+        (= c "\"") (hl--opener-scan full (hl--string-end full (inc i) n) n cp stack)
+        (= c ";") (hl--opener-scan full (hl--to-eol full (inc i) n) n cp stack)
+        (hl--open? c) (hl--opener-scan full (inc i) n cp (cons i stack))
+        (hl--close? c) (if (= i cp)
+                         (if (empty? stack) -1 (first stack))
+                         (hl--opener-scan full (inc i) n cp (rest stack)))
+        :else (hl--opener-scan full (inc i) n cp stack)))))
+
+(defn bracket-match (full pos)
+  "Given source `full` and cursor offset `pos`, return `[a b]` (the offsets of the
+matched bracket pair, `a` the opener) when the bracket adjacent to the cursor (the
+one just left of it, else the one under it) has a match, `[p :unmatched]` when it
+has none, or nil when the cursor isn't next to a bracket. Brackets inside strings
+and comments are ignored."
+  (let (n (string-length full)
+        bi (cond
+             (and (> pos 0) (hl--bracket? (char-at full (dec pos)))) (dec pos)
+             (and (< pos n) (hl--bracket? (char-at full pos))) pos
+             :else -1))
+    (if (< bi 0)
+      nil
+      (let (c (char-at full bi))
+        (if (hl--open? c)
+          (let (m (hl--fwd-match full (inc bi) n 0))
+            (if (< m 0) [bi :unmatched] [bi m]))
+          (let (m (hl--opener-scan full 0 n bi '()))
+            (if (< m 0) [bi :unmatched] [m bi])))))))
+
+;; ---- enclosing call (for signature hints) -----------------------------------
+
+(defn hl--enc-scan (full i pos n stack)
+  "Forward scan to `pos` maintaining a stack of open-bracket offsets; returns the
+innermost open bracket enclosing `pos`, or -1. Skips strings/comments (clamped at
+`pos`)."
+  (if (>= i pos)
+    (if (empty? stack) -1 (first stack))
+    (let (c (char-at full i))
+      (cond
+        (= c "\"") (hl--enc-scan full (min pos (hl--string-end full (inc i) n)) pos n stack)
+        (= c ";") (hl--enc-scan full (min pos (hl--to-eol full (inc i) n)) pos n stack)
+        (hl--open? c) (hl--enc-scan full (inc i) pos n (cons i stack))
+        (hl--close? c) (hl--enc-scan full (inc i) pos n (rest stack))
+        :else (hl--enc-scan full (inc i) pos n stack)))))
+
+(defn hl--datum-starts (full i end n acc)
+  "Start offsets (reverse order) of the complete datums in `[i, end)` at one nesting
+level — atoms, strings, and whole bracketed forms each count once."
+  (if (>= i end)
+    acc
+    (let (c (char-at full i))
+      (cond
+        (hl--ws? c) (hl--datum-starts full (inc i) end n acc)
+        (= c ";") (hl--datum-starts full (hl--to-eol full (inc i) n) end n acc)
+        (= c "\"") (hl--datum-starts full (hl--string-end full (inc i) n) end n (cons i acc))
+        (hl--open? c) (let (m (hl--fwd-match full (inc i) n 0))
+                        (hl--datum-starts full (if (< m 0) end (inc m)) end n (cons i acc)))
+        (hl--close? c) (hl--datum-starts full (inc i) end n acc)
+        :else (hl--datum-starts full (hl--atom-end full (inc i) n) end n (cons i acc))))))
+
+(defn enclosing-call (full pos)
+  "Return `[callee arg-index]` for the innermost call `(…` enclosing cursor offset
+`pos` — `callee` the head symbol's text and `arg-index` how many arguments precede
+the cursor (0 = first arg) — or nil when the cursor isn't inside a call whose head
+is a plain symbol."
+  (let (n (string-length full)
+        op (hl--enc-scan full 0 pos n '()))
+    (if (or (< op 0) (not (= (char-at full op) "(")))
+      nil
+      (let (end (min pos n)
+            starts (reverse (hl--datum-starts full (inc op) end n '())))
+        (if (empty? starts)
+          nil
+          (let (cstart (first starts)
+                cchar (char-at full cstart))
+            (if (or (hl--open? cchar) (= cchar "\"") (= cchar ":"))
+              nil
+              (let (callee (substring full cstart (hl--atom-end full (inc cstart) n)))
+                (if (hl--number? callee)
+                  nil
+                  (let (afterc (dec (count starts))
+                        in-datum (and (> pos 0) (not (hl--delim? (char-at full (dec pos)))))
+                        argi (if in-datum (max 0 (dec afterc)) afterc))
+                    [callee argi]))))))))))
+
+;; ---- completion helpers (pure; candidates supplied by the caller) -----------
+
+(defn hl--sym-start (full i)
+  "The offset where the symbol token ending at `i` begins."
+  (if (or (<= i 0) (hl--delim? (char-at full (dec i)))) i (hl--sym-start full (dec i))))
+
+(defn symbol-prefix-at (full pos)
+  "Return `[start prefix]` for the symbol token ending at cursor offset `pos` —
+`start` its offset, `prefix` its text — or `[pos \"\"]` when the cursor isn't on a
+symbol."
+  (let (s (hl--sym-start full pos)) [s (substring full s pos)]))
+
+(defn hl--cp2 (a b)
+  "The longest common prefix of two strings."
+  (hl--cp2--at a b 0 (min (string-length a) (string-length b))))
+(defn hl--cp2--at (a b i n)
+  (if (or (>= i n) (not (= (char-at a i) (char-at b i))))
+    (substring a 0 i)
+    (hl--cp2--at a b (inc i) n)))
+
+(defn common-prefix (strs)
+  "The longest common string prefix shared by every string in `strs` (\"\" when
+`strs` is empty or shares nothing)."
+  (if (empty? strs)
+    ""
+    (fold hl--cp2 (first strs) (rest strs))))

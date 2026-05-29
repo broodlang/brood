@@ -144,6 +144,34 @@ everything it transitively requires — then `apply`s the entry fn to the CLI
 args. A missing project, an unbound entry fn, or a non-callable entry are
 reported as editor-parseable errors and exit non-zero.
 
+Before handing off, the run does an advisory **duplicate-global** pass over the
+project's source files (`project--duplicate-def-warnings`): under the flat
+namespace (ADR-019) a name is one binding project-wide, so two files each
+defining e.g. `main` is a bug where the last loaded silently wins. The warning
+goes to stderr (GNU-ish), is never fatal, and honours `BROOD_NO_CHECK=1`. The
+same pass runs in `nest test` (via `check-project`).
+
+### Bounded runs: `nest run --for DURATION`
+
+An infinite loop or full-screen TUI never returns, so it can't be `eval`'d and
+is awkward to verify. `nest run --for DURATION` runs the program for at most
+that long, then exits **cleanly** — a first-class `timeout Ns nest run`:
+
+```
+nest run --for 2s              # run :main for 2 seconds, then stop
+nest run --for 500ms game.blsp
+nest run --for 1500            # bare integer = milliseconds
+```
+
+`DURATION` is `Ns`, `Nms`, or a bare integer (ms); anything else exits 2 with a
+usage hint. Mechanism: the entry runs in a spawned green process the root
+monitors with a `(receive … (after ms …))` timeout (`std/prelude.blsp` over
+`process/timer.rs`); when the cap fires the root prints `[stopped after …]` and
+exits 0, dropping the program where it stood. It composes with `--watch`. Lets a
+whole loop (not just its pure functions) be exercised, and makes time-based
+behaviour — e.g. a memory-growth check — reproducible in CI without a manual
+`timeout`.
+
 ## Formatting source: `nest format`
 
 `nest format` rewrites every `.blsp` under the project's source + test paths in

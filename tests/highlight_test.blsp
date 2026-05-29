@@ -1,0 +1,85 @@
+;; tests/highlight_test.blsp — the lexical highlighter / analysis (std/highlight.blsp).
+;;
+;; The module is pure (source string -> spans / chunks / positions), so it's fully
+;; testable without a terminal — the live `term-*` rendering lives in
+;; std/lineedit.blsp and is exercised manually. These cover the lexer's token
+;; classification, the bracket matcher (incl. brackets ignored inside strings),
+;; the signature scanner's callee + arg-index, and the completion helpers. The
+;; closing :isolated block tokenizes inside a spawned process to prove the spans
+;; (vectors of face maps) round-trip the copy-on-send heap boundary.
+
+(require 'test)
+(require 'highlight)
+
+(describe "highlight-spans — token classification"
+  (test "special form vs call vs number"
+    (assert= (highlight-spans "(+ 1)")
+             (list [1 2 hl-face-function] [3 4 hl-face-number]))
+    (assert= (highlight-spans "(if x)")
+             (list [1 3 hl-face-special])))
+  (test "strings and comments"
+    (assert= (highlight-spans "\"hi\" ; c")
+             (list [0 4 hl-face-string] [5 8 hl-face-comment])))
+  (test "keywords colour as keywords"
+    (assert= (highlight-spans ":foo") (list [0 4 hl-face-keyword])))
+  (test "a plain variable reference carries no span"
+    (assert= (highlight-spans "x") '())))
+
+(describe "highlight-chunks — tiling a visible line"
+  (test "chunks cover the whole line, coalescing default runs"
+    (assert= (highlight-chunks "(+ 1)" 0 "(+ 1)" '())
+             (list ["(" nil] ["+" hl-face-function] [" " nil]
+                   ["1" hl-face-number] [")" nil])))
+  (test "an empty line yields no chunks"
+    (assert= (highlight-chunks "" 0 "" '()) '())))
+
+(describe "special-form?"
+  (test "core forms / macros are special"
+    (is (special-form? "defn"))
+    (is (special-form? "cond"))
+    (is (special-form? "->")))
+  (test "ordinary functions are not"
+    (refute (special-form? "map"))
+    (refute (special-form? "reduce"))))
+
+(describe "bracket-match — the pair adjacent to the cursor"
+  (test "matches an opener forward and a closer backward"
+    (assert= (bracket-match "(+ 1)" 1) [0 4])
+    (assert= (bracket-match "(+ 1)" 5) [0 4]))
+  (test "an unclosed opener is unmatched"
+    (assert= (bracket-match "(+ 1" 1) [0 :unmatched]))
+  (test "no bracket adjacent to the cursor"
+    (assert= (bracket-match "abc" 1) nil))
+  (test "brackets inside a string are ignored"
+    ;; (str ")" 1) — the ) inside the string must not match the leading (
+    (assert= (bracket-match "(str \")\" 1)" 1) [0 10])))
+
+(describe "enclosing-call — the call around the cursor"
+  (test "callee and arg index"
+    (assert= (enclosing-call "(map f " 7) ["map" 1])
+    (assert= (enclosing-call "(map f xs" 9) ["map" 1]))
+  (test "the innermost call wins"
+    (assert= (enclosing-call "(+ (* 2 3) " 11) ["+" 1]))
+  (test "outside any call there is no hint"
+    (assert= (enclosing-call "abc " 4) nil)))
+
+(describe "completion helpers"
+  (test "symbol-prefix-at returns the token start and text"
+    (assert= (symbol-prefix-at "(map fo" 7) [5 "fo"])
+    (assert= (symbol-prefix-at "(+ " 3) [3 ""]))
+  (test "common-prefix of candidates"
+    (assert= (common-prefix ["map" "mapcat" "max"]) "ma")
+    (assert= (common-prefix ["reduce"]) "reduce")
+    (assert= (common-prefix []) "")))
+
+;; Cross-process: spans (vectors carrying face *maps*) cross a heap boundary via
+;; send (a deep copy) before being compared, proving the analysis output survives
+;; the copy-on-send round-trip under the scheduler — not just same-heap building.
+(describe "highlight-spans across processes"
+  :isolated
+
+  (test "spans built in another process round-trip intact"
+    (let (w (spawn (receive ([:lex src from] (send from (highlight-spans src))))))
+      (send w [:lex "(+ 1)" (self)])
+      (assert= (receive (r r))
+               (list [1 2 hl-face-function] [3 4 hl-face-number])))))

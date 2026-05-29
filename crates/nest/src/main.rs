@@ -62,6 +62,12 @@ enum Cmd {
     New {
         /// The project's name. Becomes the directory + `:name` in project.blsp.
         name: String,
+
+        /// Starter template: `default` (a main+hello pair), `tui-loop` (a
+        /// tail-recursive animation loop, pairs with `nest run --for`), or
+        /// `hatch` (a stateful gen_server-style process).
+        #[arg(long = "template", short = 't', value_name = "NAME")]
+        template: Option<String>,
     },
 
     /// Run the project's entry point, or a specific .blsp file.
@@ -80,6 +86,12 @@ enum Cmd {
         /// files; new files added later are picked up automatically.
         #[arg(long = "watch", value_name = "PATH")]
         watch: Vec<String>,
+
+        /// Run for at most this long, then exit cleanly — e.g. `2s`, `500ms`,
+        /// or a bare `1500` (milliseconds). Lets a long-running loop / TUI app
+        /// be exercised end-to-end and in CI without a manual `timeout`.
+        #[arg(long = "for", value_name = "DURATION")]
+        for_duration: Option<String>,
 
         /// Trailing arguments passed to the entry function as strings.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -170,9 +182,20 @@ fn run_main(cli: Cli) {
     match cli.cmd {
         Cmd::Test { files } => cmd_test(&mut interp, &files),
         Cmd::Check { files } => cmd_check(&mut interp, &files),
-        Cmd::New { name } => cmd_new(&mut interp, &name),
+        Cmd::New { name, template } => cmd_new(&mut interp, &name, template.as_deref()),
         Cmd::Format { check } => cmd_format(&mut interp, check),
-        Cmd::Run { file, watch, args } => cmd_run(&mut interp, file.as_deref(), &watch, &args),
+        Cmd::Run {
+            file,
+            watch,
+            for_duration,
+            args,
+        } => cmd_run(
+            &mut interp,
+            file.as_deref(),
+            &watch,
+            for_duration.as_deref(),
+            &args,
+        ),
         Cmd::Doc { module } => cmd_doc(&mut interp, module.as_deref()),
         Cmd::Repl => cmd_repl(&mut interp),
         Cmd::Mcp => cmd_mcp(&mut interp),
@@ -189,6 +212,16 @@ struct TermGuard;
 impl Drop for TermGuard {
     fn drop(&mut self) {
         brood::builtins::restore_terminal();
+    }
+}
+
+/// Like [`TermGuard`] but for the *inline* REPL editor (`term-raw-enter`): only
+/// leaves raw mode, writing no escape sequences, so a piped (non-TTY) `nest repl`
+/// stdout stays clean on exit. The Brood `term-raw-leave` is the normal teardown.
+struct ReplTermGuard;
+impl Drop for ReplTermGuard {
+    fn drop(&mut self) {
+        brood::builtins::restore_raw();
     }
 }
 
@@ -295,12 +328,17 @@ fn cmd_check(interp: &mut Interp, files: &[String]) {
     }
 }
 
-/// `nest new <name>` — delegates to `(new-project name)` in std/project.blsp.
-fn cmd_new(interp: &mut Interp, name: &str) {
+/// `nest new <name> [--template NAME]` — delegates to `(new-project name
+/// template)` in std/project.blsp.
+fn cmd_new(interp: &mut Interp, name: &str, template: Option<&str>) {
     let escaped = brood::introspect::escape_brood_string(name);
+    let tmpl_arg = match template {
+        Some(t) => format!(" \"{}\"", brood::introspect::escape_brood_string(t)),
+        None => String::new(),
+    };
     let code = format!(
-        "(require 'project) (load-config) (new-project \"{}\")",
-        escaped
+        "(require 'project) (load-config) (new-project \"{}\"{})",
+        escaped, tmpl_arg
     );
     run(interp, &code);
 }
@@ -326,7 +364,28 @@ fn cmd_format(interp: &mut Interp, check: bool) {
 /// "run foo.blsp and hot-reload it on save", matching the most natural
 /// reading. With a directory or multiple watch paths there's no unambiguous
 /// promotion, so we fall through to running `:main` and watching alongside.
-fn cmd_run(interp: &mut Interp, file: Option<&str>, watch: &[String], args: &[String]) {
+/// Parse a duration like `2s`, `500ms`, or a bare `1500` (milliseconds) into
+/// milliseconds. `None` if unparseable or negative (the caller turns that into
+/// an exit-2 with a usage hint).
+fn parse_duration_ms(s: &str) -> Option<u64> {
+    let t = s.trim();
+    let ms = if let Some(n) = t.strip_suffix("ms") {
+        n.trim().parse::<f64>().ok()?
+    } else if let Some(n) = t.strip_suffix('s') {
+        n.trim().parse::<f64>().ok()? * 1000.0
+    } else {
+        t.parse::<f64>().ok()? // bare number = milliseconds
+    };
+    (ms.is_finite() && ms >= 0.0).then_some(ms as u64)
+}
+
+fn cmd_run(
+    interp: &mut Interp,
+    file: Option<&str>,
+    watch: &[String],
+    for_duration: Option<&str>,
+    args: &[String],
+) {
     let promoted: Option<String> = if file.is_none() && watch.len() == 1 {
         let p = &watch[0];
         match std::fs::metadata(p) {
@@ -371,7 +430,14 @@ fn cmd_run(interp: &mut Interp, file: Option<&str>, watch: &[String], args: &[St
     // session can be introspected (`(list-processes)` shows it). The
     // wrapping is invisible to the user's code: their file still sees the
     // global env, their `(spawn …)` calls are unsupervised by default.
-    let wrap = !watch.is_empty();
+    let timed: Option<(u64, String)> = for_duration.map(|s| match parse_duration_ms(s) {
+        Some(ms) => (ms, s.trim().to_string()),
+        None => {
+            eprintln!("nest run: invalid --for duration '{s}' (use e.g. 2s, 500ms, or 1500)");
+            std::process::exit(2);
+        }
+    });
+    let wrap = !watch.is_empty() || timed.is_some();
     let run_form: String = match file {
         // No FILE: run the project's :main via std/project.blsp.
         None => format!("(run-project (list {}))", escaped_args),
@@ -402,11 +468,26 @@ fn cmd_run(interp: &mut Interp, file: Option<&str>, watch: &[String], args: &[St
         // process and the `--watch` session exits with the reason. (Auto-
         // retry-with-state was removed alongside the supervisor scaffolding;
         // edit the file again to spawn a fresh attempt.)
+        //
+        // With `--for DURATION`, add a `(after ms …)` timeout clause: when the
+        // cap elapses the receive returns, the root falls through, and the
+        // binary exits cleanly (the spawned program is dropped on exit). This
+        // is the first-class form of `timeout Ns nest run` — it lets a loop /
+        // TUI app be exercised end-to-end (not just its pure fns) and makes
+        // time-based behaviour reproducible in CI.
+        let after_clause = match &timed {
+            Some((ms, label)) => format!(
+                "(after {} (println \"[stopped after {}]\"))",
+                ms,
+                brood::introspect::escape_brood_string(label)
+            ),
+            None => String::new(),
+        };
         format!(
             "(let (p (%spawn (fn () {}))) \
                   (monitor p) \
-                  (receive ([:down _ ~p reason] (println \"[exit]\" reason))))",
-            run_form
+                  (receive ([:down _ ~p reason] (println \"[exit]\" reason)) {}))",
+            run_form, after_clause
         )
     } else {
         run_form
@@ -444,8 +525,19 @@ fn cmd_repl(interp: &mut Interp) {
     } else {
         eprintln!("nest repl — no project.blsp here; plain REPL (`brood` would do the same)");
     }
-    // The REPL is Brood now (`std/repl.blsp`), same as `brood` with no args.
-    run(interp, "(require 'repl) (repl-run)");
+    // The REPL is Brood now (`std/repl.blsp`), same as `brood` with no args. The
+    // interactive editor enters raw mode (std/lineedit.blsp), so guard the
+    // terminal: the Brood `term-raw-leave` is the normal teardown, but this
+    // restores it on a panic unwind too. Scope it like `cmd_observe` so it drops
+    // (restoring) before any error report + exit (`process::exit` skips Drop).
+    let result = {
+        let _guard = ReplTermGuard;
+        interp.eval_str("(require 'repl) (repl-run)")
+    };
+    if let Err(e) = result {
+        report_error(&e);
+        std::process::exit(1);
+    }
 }
 
 /// `nest mcp` — see docs/mcp.md (ADR-036). Strictly per-project.
@@ -531,4 +623,27 @@ fn in_project() -> bool {
         here = dir.parent().map(|p| p.to_path_buf());
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_duration_ms;
+
+    #[test]
+    fn parse_duration_ms_handles_units_and_bare_millis() {
+        assert_eq!(parse_duration_ms("1500"), Some(1500)); // bare = ms
+        assert_eq!(parse_duration_ms("500ms"), Some(500));
+        assert_eq!(parse_duration_ms("2s"), Some(2000));
+        assert_eq!(parse_duration_ms("1.5s"), Some(1500)); // fractional seconds
+        assert_eq!(parse_duration_ms("  250ms  "), Some(250)); // trimmed
+        assert_eq!(parse_duration_ms("0"), Some(0));
+    }
+
+    #[test]
+    fn parse_duration_ms_rejects_garbage_and_negatives() {
+        assert_eq!(parse_duration_ms("2x"), None);
+        assert_eq!(parse_duration_ms("abc"), None);
+        assert_eq!(parse_duration_ms(""), None);
+        assert_eq!(parse_duration_ms("-5s"), None);
+    }
 }

@@ -404,6 +404,14 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         term_poll,
     );
     def(heap, "term-draw", Arity::exact(1), Sig::new(vec![vec_ty], nil_ty), term_draw);
+    // Inline (relative-motion) variant of the seam, for an in-place line editor
+    // that must NOT take over the screen: `term-raw-enter`/`term-raw-leave` toggle
+    // raw mode only (no alternate screen, cursor stays visible, scrollback kept),
+    // and `term-emit` paints relative ops. The self-hosted REPL editor uses these
+    // (std/lineedit.blsp); `term-enter`/`term-draw` stay the full-screen path.
+    def(heap, "term-raw-enter", Arity::exact(0), Sig::new(vec![], nil_ty), term_raw_enter);
+    def(heap, "term-raw-leave", Arity::exact(0), Sig::new(vec![], nil_ty), term_raw_leave);
+    def(heap, "term-emit", Arity::exact(1), Sig::new(vec![vec_ty], nil_ty), term_emit);
     // The one process-introspection accessor the language can't reach from Brood
     // (the mailbox queue lives behind the scheduler registry). Everything else an
     // observer shows — pid id, liveness — is assembled in Brood (std/observe.blsp).
@@ -1125,6 +1133,9 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("term-size", &[], "The terminal size as [cols rows] in character cells."),
     ("term-poll", &["ms"], "Wait up to ms milliseconds for a key; return it as a 1-char string (printable) or a keyword for specials (:up :down :left :right :enter :escape :backspace :tab :delete, ctrl combos like :ctrl-c), or nil on timeout. Always pass a finite ms."),
     ("term-draw", &["frame"], "Paint a frame — a vector of render ops: [:clear], [:text row col str], [:text row col str face], [:cursor row col]. A face is a map like {:fg :red :bold true}. The in-process frontend for the display protocol; returns nil."),
+    ("term-raw-enter", &[], "Enter raw mode only — NO alternate screen, cursor stays visible, scrollback preserved. The seam for an inline line editor (the REPL); use term-enter instead for a full-screen TUI. Pair with term-raw-leave."),
+    ("term-raw-leave", &[], "Leave raw mode (the teardown for term-raw-enter). Idempotent with the panic-path restore."),
+    ("term-emit", &["ops"], "Paint inline, relative-motion render ops (for an in-place editor that must not take over the screen): [:print str], [:print str face], [:cr], [:nl], [:up n], [:down n], [:col n], [:clear-eol], [:clear-below]. A face is a map like {:fg :cyan :bold true}. Queues all ops then flushes once; unknown ops are skipped; returns nil."),
     ("demonitor", &["mref"], "Drop the monitor identified by mref (best-effort)."),
     ("spawn-count", &[], "How many green processes have been spawned since program start."),
     ("peak-threads", &[], "High-water mark of OS threads running processes concurrently."),
@@ -1977,6 +1988,12 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
     // the `term-*` primitives. Both opt-in, never in the prelude.
     ("display", include_str!("../../../std/display.blsp")),
     ("observe", include_str!("../../../std/observe.blsp")),
+    // The interactive REPL line editor (ADR-052): `highlight` is the pure lexical
+    // syntax-highlighter / bracket-matcher / signature + completion scanners;
+    // `lineedit` is the raw-mode, emacs-style editor built on it + the inline
+    // `term-*` seam. Both opt-in, never in the prelude; `repl` requires them.
+    ("highlight", include_str!("../../../std/highlight.blsp")),
+    ("lineedit", include_str!("../../../std/lineedit.blsp")),
     ("format", include_str!("../../../std/format.blsp")),
     ("reload", include_str!("../../../std/reload.blsp")),
     // The Model Context Protocol tool surface — `(mcp-tools)` returns the
@@ -2334,6 +2351,15 @@ pub fn restore_terminal() {
     let _ = disable_raw_mode();
 }
 
+/// Lighter restore for the *inline* seam (the REPL line editor, `term-raw-enter`):
+/// only leave raw mode. Unlike `restore_terminal` it writes no escape sequences —
+/// `disable_raw_mode` is a termios ioctl — so a host binary can hold this in an
+/// RAII guard around the REPL without polluting a piped (non-TTY) stdout on exit.
+/// Idempotent; errors are swallowed (the normal path is the Brood `term-raw-leave`).
+pub fn restore_raw() {
+    let _ = crossterm::terminal::disable_raw_mode();
+}
+
 /// `(term-size)` — the terminal size as `[cols rows]` (character cells).
 fn term_size(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let (cols, rows) = crossterm::terminal::size().map_err(term_err)?;
@@ -2365,9 +2391,15 @@ fn term_poll(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn key_to_value(heap: &mut Heap, k: crossterm::event::KeyEvent) -> Value {
     use crossterm::event::{KeyCode, KeyModifiers};
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = k.modifiers.contains(KeyModifiers::ALT);
     match k.code {
         KeyCode::Char(c) if ctrl => {
             Value::Keyword(value::intern(&format!("ctrl-{}", c.to_ascii_lowercase())))
+        }
+        // Alt/Meta combos (M-f, M-b, … — emacs word motion). Some terminals send
+        // these as an Esc prefix; crossterm normalises them to the ALT modifier.
+        KeyCode::Char(c) if alt => {
+            Value::Keyword(value::intern(&format!("alt-{}", c.to_ascii_lowercase())))
         }
         KeyCode::Char(c) => heap.alloc_string(&c.to_string()),
         KeyCode::Up => value::kw("up"),
@@ -2378,6 +2410,7 @@ fn key_to_value(heap: &mut Heap, k: crossterm::event::KeyEvent) -> Value {
         KeyCode::Esc => value::kw("escape"),
         KeyCode::Backspace => value::kw("backspace"),
         KeyCode::Tab => value::kw("tab"),
+        KeyCode::BackTab => value::kw("back-tab"),
         KeyCode::Delete => value::kw("delete"),
         KeyCode::Home => value::kw("home"),
         KeyCode::End => value::kw("end"),
@@ -2428,6 +2461,94 @@ fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             apply_face(&mut out, heap, parts.get(4).copied().unwrap_or(Value::Nil))?;
             crossterm::queue!(out, Print(s), SetAttribute(Attribute::Reset), ResetColor)
                 .map_err(term_err)?;
+        }
+    }
+    out.flush().map_err(term_err)?;
+    Ok(Value::Nil)
+}
+
+/// `(term-raw-enter)` — raw mode only: no alternate screen, the cursor stays
+/// visible, scrollback is preserved. The seam for an *inline* line editor (the
+/// self-hosted REPL, std/lineedit.blsp), as opposed to `term-enter` which takes
+/// over the whole screen for a full-screen TUI. Pair with `term-raw-leave`.
+fn term_raw_enter(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    crossterm::terminal::enable_raw_mode().map_err(term_err)?;
+    Ok(Value::Nil)
+}
+
+/// `(term-raw-leave)` — leave raw mode (the teardown for `term-raw-enter`).
+/// Idempotent with the panic-path `restore_terminal`.
+fn term_raw_leave(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    crossterm::terminal::disable_raw_mode().map_err(term_err)?;
+    Ok(Value::Nil)
+}
+
+/// `(term-emit ops)` — inline, relative-motion rendering for an in-place editor
+/// that must not take over the screen (unlike `term-draw`, which paints absolute
+/// cells on the alternate screen). Interprets a vector of op vectors, queued then
+/// flushed once so a repaint doesn't tear:
+///   `[:print str]` / `[:print str face]`  print at the cursor (face via apply_face)
+///   `[:cr]`                                carriage return to column 0
+///   `[:nl]`                                newline (`"\r\n"`)
+///   `[:up n]` / `[:down n]`                move the cursor n rows
+///   `[:col n]`                             move to absolute column n (0-based)
+///   `[:clear-eol]`                         clear from the cursor to end of line
+///   `[:clear-below]`                       clear from the cursor to end of screen
+/// Unknown ops are skipped (forward-compatible, like `term-draw`).
+fn term_emit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use crossterm::cursor::{MoveDown, MoveToColumn, MoveUp};
+    use crossterm::style::{Attribute, Print, ResetColor, SetAttribute};
+    use crossterm::terminal::{Clear, ClearType};
+    use std::io::Write;
+
+    let ops: Vec<Value> = match arg(args, 0) {
+        Value::Vector(id) => heap.vector(id).to_vec(),
+        other => return Err(LispError::wrong_type(heap, "term-emit", "vector (ops)", other)),
+    };
+    let print_t = value::intern("print");
+    let cr_t = value::intern("cr");
+    let nl_t = value::intern("nl");
+    let up_t = value::intern("up");
+    let down_t = value::intern("down");
+    let col_t = value::intern("col");
+    let clear_eol_t = value::intern("clear-eol");
+    let clear_below_t = value::intern("clear-below");
+    let mut out = std::io::stdout();
+    for op in ops {
+        let parts: Vec<Value> = match op {
+            Value::Vector(id) => heap.vector(id).to_vec(),
+            _ => continue,
+        };
+        let tag = match parts.first() {
+            Some(Value::Keyword(s)) => *s,
+            _ => continue,
+        };
+        if tag == print_t {
+            let s = expect_string(heap, "term-emit", arg(&parts, 1))?;
+            apply_face(&mut out, heap, parts.get(2).copied().unwrap_or(Value::Nil))?;
+            crossterm::queue!(out, Print(s), SetAttribute(Attribute::Reset), ResetColor)
+                .map_err(term_err)?;
+        } else if tag == cr_t {
+            crossterm::queue!(out, MoveToColumn(0)).map_err(term_err)?;
+        } else if tag == nl_t {
+            crossterm::queue!(out, Print("\r\n")).map_err(term_err)?;
+        } else if tag == up_t {
+            let n = expect_int(heap, "term-emit", arg(&parts, 1))?;
+            if n > 0 {
+                crossterm::queue!(out, MoveUp(clamp_u16(n))).map_err(term_err)?;
+            }
+        } else if tag == down_t {
+            let n = expect_int(heap, "term-emit", arg(&parts, 1))?;
+            if n > 0 {
+                crossterm::queue!(out, MoveDown(clamp_u16(n))).map_err(term_err)?;
+            }
+        } else if tag == col_t {
+            let n = expect_int(heap, "term-emit", arg(&parts, 1))?;
+            crossterm::queue!(out, MoveToColumn(clamp_u16(n))).map_err(term_err)?;
+        } else if tag == clear_eol_t {
+            crossterm::queue!(out, Clear(ClearType::UntilNewLine)).map_err(term_err)?;
+        } else if tag == clear_below_t {
+            crossterm::queue!(out, Clear(ClearType::FromCursorDown)).map_err(term_err)?;
         }
     }
     out.flush().map_err(term_err)?;

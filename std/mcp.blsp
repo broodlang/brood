@@ -51,16 +51,35 @@ error inside the user expression surfaces here as the `:error` branch."
       (catch e
         {:error (mcp--error-shape e)}))))
 
+;; Cross-file shadow warnings (flat namespace, ADR-019) involving `file`: the
+;; names this file defines that are also defined in another project source file.
+;; Empty (and silent) outside a project. Best-effort — never raises.
+(defn mcp--shadows-for (file)
+  (try
+    (let (root (project--find-root (cwd)))
+      (if (nil? root)
+        nil
+        (let (defined (project--file-def-names file))
+          (filter (fn (w) (some? (fn (nm) (string-contains? w (str "'" nm "'"))) defined))
+            (project--duplicate-def-warnings (project--source-files root))))))
+    (catch _ nil)))
+
 (defn mcp-load-tool (args)
-  "`load` — load a `.blsp` file into the session. Side-effects (`def`,
-`defn`, `defmacro`) persist. Returns `{:ok true}` or
+  "`load` — load a `.blsp` file into the session and check it. Side-effects
+(`def`, `defn`, `defmacro`) persist. Returns `{:ok true :diagnostics [...]
+:shadows [...]}` — `diagnostics` are advisory `{:file :line :col :message}`
+type/arity/unbound/non-tail-recursion warnings from `check-file-structured`;
+`shadows` flags names this file defines that another project source file also
+defines (the silent flat-namespace collision). On a load error:
 `{:ok false :error msg}`."
   (let (file (get args :file))
     (when (not (string? file))
       (throw "load: :file must be a string"))
     (try
       (do (load file)
-          {:ok true})
+          {:ok true
+           :diagnostics (or (check-file-structured file) [])
+           :shadows (or (mcp--shadows-for file) [])})
       (catch e
         {:ok false :error (mcp--error-shape e)}))))
 

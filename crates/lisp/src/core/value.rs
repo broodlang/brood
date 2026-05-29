@@ -118,68 +118,110 @@ pub fn is_dynamic(sym: Symbol) -> bool {
 
 // ----- handles into the Heap -----
 
-/// A handle's two high bits tag which heap **region** it addresses; the low 30
-/// bits are the slab index (≈1 billion objects per region — ample). See
-/// `docs/shared-code.md`.
+/// A handle is a packed `u64`: the two top bits tag the heap **region**, the
+/// next 30 bits are a **generation** stamp, and the low 32 bits are the slab
+/// index (≈4 billion objects per region — ample). See `docs/shared-code.md`.
 ///
 /// - [`LOCAL`] — the process's own data heap (mutable, per-process).
 /// - [`PRELUDE`] — the immutable prelude/builtins, shared by *all* runtimes.
 /// - [`RUNTIME`] — a runtime's mutable, append-only code region, shared by all
 ///   of that runtime's inner (spawned) processes. This is where `def`'d code
 ///   and the global bindings live, so an update is visible to running processes.
-pub const REGION_SHIFT: u32 = 30;
-pub const INDEX_MASK: u32 = (1 << REGION_SHIFT) - 1;
+///
+/// **Generation stamp (ADR-049 / `docs/memory-review.md`).** A LOCAL handle
+/// carries the heap's *epoch* at the moment it was minted. Every per-process
+/// arena flip (`(hibernate)` → [`Heap::flush`], and the coming GC) bumps that
+/// epoch and re-mints the survivors, so a handle held across a flip without
+/// being re-rooted carries a *stale* epoch. The LOCAL accessors in `heap.rs`
+/// `debug_assert!` the stamp matches the current epoch, turning use-after-flip
+/// (a moved object) into a precise panic **at the bad deref** instead of a
+/// far-away out-of-bounds index or a silent wrong-slot read. PRELUDE/RUNTIME
+/// handles never move, so their stamp is always 0 and is not checked. The width
+/// is free: `Value` already carries 8-byte payloads (`Int`/`Float`/`Ref`), so a
+/// `u64` handle doesn't grow it. **Equality/hashing ignore the stamp** — two
+/// handles to the same region+index are the same object regardless of epoch.
+pub const REGION_SHIFT: u32 = 62;
+pub const GEN_SHIFT: u32 = 32;
+/// Low 32 bits: the slab index.
+pub const INDEX_MASK: u64 = (1u64 << GEN_SHIFT) - 1;
+/// 30 bits between the index and the region tag: the generation stamp.
+pub const GEN_MASK: u64 = (1u64 << (REGION_SHIFT - GEN_SHIFT)) - 1;
 pub const LOCAL: u8 = 0b00;
 pub const PRELUDE: u8 = 0b01;
 pub const RUNTIME: u8 = 0b10;
 
 macro_rules! handle {
     ($name:ident) => {
-        #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-        pub struct $name(pub u32);
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name(pub u64);
         impl $name {
-            /// A handle into the local (per-process) data heap. The
-            /// debug-assert catches the silent-aliasing case where a slab
-            /// grows past `2^30` and the high bits start colliding with the
-            /// region tag.
+            /// A LOCAL handle with no generation stamp (epoch 0) — the prelude
+            /// build and any caller that doesn't track epochs. Runtime
+            /// allocations use [`local_gen`](Self::local_gen) to stamp the
+            /// heap's current epoch.
             #[inline]
             pub fn local(index: usize) -> Self {
+                Self::local_gen(index, 0)
+            }
+            /// A LOCAL handle stamped with generation `gen` (the allocating
+            /// heap's current epoch). The debug-assert catches a slab growing
+            /// past `2^32` (where the index would collide with the gen bits).
+            #[inline]
+            pub fn local_gen(index: usize, gen: u32) -> Self {
                 debug_assert!(
-                    index < (1 << REGION_SHIFT),
-                    "handle index {} would alias the region tag bits",
+                    index < (1usize << GEN_SHIFT),
+                    "handle index {} overflows the 32-bit index field",
                     index,
                 );
-                $name(index as u32)
+                $name((index as u64) | (((gen as u64) & GEN_MASK) << GEN_SHIFT))
             }
-            /// A handle into the immutable shared prelude region.
+            /// A handle into the immutable shared prelude region (no generation).
             #[inline]
             pub fn prelude(index: usize) -> Self {
-                debug_assert!(
-                    index < (1 << REGION_SHIFT),
-                    "prelude handle index {} would alias the region tag bits",
-                    index,
-                );
-                $name(index as u32 | ((PRELUDE as u32) << REGION_SHIFT))
+                debug_assert!(index < (1usize << GEN_SHIFT), "prelude index {} overflows", index);
+                $name((index as u64) | ((PRELUDE as u64) << REGION_SHIFT))
             }
-            /// A handle into the runtime's mutable shared code region.
+            /// A handle into the runtime's mutable shared code region (no generation).
             #[inline]
             pub fn runtime(index: usize) -> Self {
-                debug_assert!(
-                    index < (1 << REGION_SHIFT),
-                    "runtime handle index {} would alias the region tag bits",
-                    index,
-                );
-                $name(index as u32 | ((RUNTIME as u32) << REGION_SHIFT))
+                debug_assert!(index < (1usize << GEN_SHIFT), "runtime index {} overflows", index);
+                $name((index as u64) | ((RUNTIME as u64) << REGION_SHIFT))
             }
             /// Which region this handle addresses ([`LOCAL`]/[`PRELUDE`]/[`RUNTIME`]).
             #[inline]
             pub fn region(self) -> u8 {
                 (self.0 >> REGION_SHIFT) as u8
             }
-            /// The slab index, with the region tag masked off.
+            /// The slab index, with the region tag and generation masked off.
             #[inline]
             pub fn index(self) -> usize {
                 (self.0 & INDEX_MASK) as usize
+            }
+            /// The generation stamp (the heap epoch this LOCAL handle was minted
+            /// in; 0 for PRELUDE/RUNTIME). Checked by the LOCAL accessors.
+            #[inline]
+            pub fn generation(self) -> u32 {
+                ((self.0 >> GEN_SHIFT) & GEN_MASK) as u32
+            }
+            /// Region + index with the generation cleared — the identity used for
+            /// equality and hashing, so a handle compares equal to itself across
+            /// epochs (same object) while the stamp still flags stale *derefs*.
+            #[inline]
+            fn canonical(self) -> u64 {
+                self.0 & !(GEN_MASK << GEN_SHIFT)
+            }
+        }
+        impl PartialEq for $name {
+            #[inline]
+            fn eq(&self, other: &Self) -> bool {
+                self.canonical() == other.canonical()
+            }
+        }
+        impl Eq for $name {}
+        impl ::core::hash::Hash for $name {
+            #[inline]
+            fn hash<H: ::core::hash::Hasher>(&self, state: &mut H) {
+                self.canonical().hash(state);
             }
         }
     };
@@ -200,13 +242,15 @@ impl EnvId {
     /// top-level closure captures it symbolically (`Closure.env == None`), so a
     /// shared closure resolves globals against whichever process runs it.
     ///
-    /// **Encoding.** `u32::MAX` sets both region bits to `0b11`, an otherwise
+    /// **Encoding.** `u64::MAX` sets both region bits to `0b11`, an otherwise
     /// undefined region — `LOCAL` / `PRELUDE` / `RUNTIME` are `0b00` / `0b01`
     /// / `0b10`. This is the marker `Heap::env_frame` and the env walkers
     /// short-circuit on (`env == EnvId::GLOBAL`) before touching the region
     /// dispatch; a stray dispatch on a GLOBAL panics with a clear message
     /// (see `Heap::env_frame`), not the `_ => unreachable!()` fall-through.
-    pub const GLOBAL: EnvId = EnvId(u32::MAX);
+    /// (`u64::MAX` survives the gen-masked equality — its region+index bits are
+    /// all-ones, which no real handle produces.)
+    pub const GLOBAL: EnvId = EnvId(u64::MAX);
 }
 
 /// A Brood value. `Copy`: primitives inline, heap objects as handles.

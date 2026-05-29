@@ -389,6 +389,24 @@ the function call from its initial args.
 Outside `--watch` (`nest run FILE`, `brood FILE`), the same file runs
 inline as a plain script — no reload, throws exit.
 
+### Running a loop for a bounded time (`nest run --for DURATION`)
+
+An infinite loop or full-screen TUI never returns, which makes it awkward
+to exercise (you can't `eval` it). `nest run --for DURATION` runs the
+program for at most that long, then exits **cleanly** — the first-class
+form of `timeout Ns nest run`:
+
+```
+nest run --for 2s        # run :main for 2 seconds, then stop
+nest run --for 500ms src/game.blsp
+```
+
+`DURATION` is `2s`, `500ms`, or a bare integer (milliseconds). Use it to
+verify a whole loop end-to-end (not just its pure functions) and to make
+time-based behaviour reproducible in CI. It prints `[stopped after …]` on
+the cap and exits 0; the program is dropped where it stood (a TUI may not
+get to restore the terminal — redirect output in CI).
+
 ## Errors
 
 ```lisp
@@ -434,9 +452,22 @@ inline as a plain script — no reload, throws exit.
   `< > <= >= =`; `inc` `dec` `abs` `min` `max`; integer division `quot`
   (truncating) / `rem` (truncated remainder) / `mod` (Euclidean);
   `floor` `ceil` `round` `round-to` (round to N decimals, stays a number)
-  `pow` `sqrt`
+  `pow` `sqrt`. Integer `+ - *` **error on overflow** (they don't wrap).
+- **bitwise**: `bit-and` `bit-or` `bit-xor` `bit-not` `bit-shift-left`
+  `bit-shift-right` (64-bit, arithmetic right shift; shift amount in `[0,64)`).
+- **randomness** (pure & seedable — there is *no* global RNG; thread the seed):
+  every step takes a seed and returns `[value next-seed]`. `rng` (→ a 32-bit
+  int), `rand-int` `(seed n)` → `[i next]` in `[0,n)`, `rand-float` `(seed)` →
+  `[f next]` in `[0,1)`, `shuffle` `(seed coll)`, `sample` `(seed coll)`; seed a
+  stream from any int (e.g. `(now)`) with `rand-seed`. Carry `next-seed` in your
+  loop/process state like any other value.
 - **meta / eval**: `apply` (call a fn with a list of args — the only way to
   splat) `eval` `read-string` `eval-string` `gensym` (fresh symbol, for macros)
+- **discovery / introspection**: `doc` `arglist` `bound?` `source-location`;
+  and to *find* what exists rather than guess names — `all-globals`,
+  `apropos` (name substring, e.g. `(apropos "rand")`), `doc-search` (matches
+  docstrings). The same three are `nest mcp` tools. Reach for these instead of
+  probing names one at a time.
 - **timing**: `now` (ms since epoch) `now-ns` (ns since epoch) `bench`
   (macro: `(bench "label" expr)` prints `label: N ms`, returns `expr`)
 - **I/O**: `print` `println` `slurp` `spit` `load` `eval-string` `read-string`
@@ -465,6 +496,12 @@ inline as a plain script — no reload, throws exit.
   `(false? nil)` is `false`. Both are falsy, neither is the other.
 - **Tail position matters**: deep *non*-tail recursion overflows the
   green-process stack. Use a tail-recursive helper with an accumulator.
+- **Exactly one of every name, project-wide.** The module system is flat
+  (ADR-019): a global is a single binding across the *whole* project, not
+  per-file. Defining `main` (or any name) in two source files is a bug — the
+  last one loaded silently wins. `nest run` / `nest test` warn on cross-file
+  duplicates, but it's on you to keep names unique. This is a naming *rule*,
+  not just a module fact.
 - **Not Clojure**: no `defprotocol`, no transients, no `loop` / `recur`
   (just plain recursion), no namespaced names (the module system is flat).
 - **Not Scheme / CL**: no `setq`, no `cond`-with-`t`-catch-all (use `else`
@@ -512,7 +549,10 @@ inline as a plain script — no reload, throws exit.
 structural equality with a diff on failure; `(is expr)` asserts truthy.
 
 `nest test` runs each test in its own green process. `nest run` invokes the
-`main/main` entry by default (override in `project.blsp` via `:main`).
+`main/main` entry by default (override in `project.blsp` via `:main`; e.g.
+`:main 'app` runs `app/main`, `:main '(app start)` runs `app/start`). Add
+`--for DURATION` (e.g. `nest run --for 2s`) to run a loop/TUI for a bounded
+time and exit cleanly.
 
 ## When in doubt
 
