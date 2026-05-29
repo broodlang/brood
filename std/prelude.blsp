@@ -84,7 +84,7 @@
     (fold f x (first more))))
 
 ;; ---- arithmetic (variadic, built on the 2-arg primitives) ----
-;; Multi-arity (ADR-046): the 0/1/2-argument clauses bind their parameters
+;; Multi-arity (ADR-047): the 0/1/2-argument clauses bind their parameters
 ;; *directly* and call the primitive — no `& xs` rest-list, no `fold`, just one
 ;; env frame — so the overwhelmingly common 2-argument call (`(+ a b)`) is ~40×
 ;; cheaper than folding over a variadic rest-list. Only the 3+-argument fallback

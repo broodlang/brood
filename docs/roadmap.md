@@ -37,6 +37,12 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   in the closure calling convention (`fn`/`lambda`/`defn` all share it).
   `&key` (named args) is designed but **deferred for simplicity** (ADR-011) —
   additive when the editor command API needs it.
+- ✅ **Native multi-arity dispatch** (ADR-047) — Clojure-style arg-count
+  overloading: a closure holds one arm per arity clause, the call's arg count
+  selects the arm, and arity-only arms bind params *directly* (no rest-list, no
+  `match*`). Keeps the prelude's variadic `+`/`-`/`<`/`=` in Brood while making
+  `(+ a b)` ~one env frame — `(sum-to 100000)` 497 MB → 61 MB (8.1×). Pattern
+  clauses still lower to the `match*` engine; the two dispatch axes don't mix.
 - ✅ **Math library** — `floor`/`ceil`/`round`/`quot`/`pow`/`sqrt`, `even?`/`odd?`,
   variadic `min`/`max`. All **Brood** except the single new primitive `floor`
   (the irreducible Float→Int crossing); `sqrt` is Newton's method.
@@ -97,17 +103,32 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   `symbol->string` / `string->symbol` wrappers in Brood, and the side-effecting
   loop macros `dotimes` / `dolist` (lean tail-recursive Brood; `doseq` stays
   for the destructuring / `:when`-filter case).
-- ✅ **Memory reclamation.** Done in two coexisting layers: **arena reset at
-  top-level boundaries** (ADR-016) — `eval_str`/the REPL truncate the LOCAL
-  heap after each form (demo: ~712 MB growing → ~78 MB flat) — and a
-  **per-process tracing mark-sweep GC** (ADR-035) for the
-  never-returning-loop case the reset can't reach. The GC fires only at the
-  outermost-`eval` `'tail:` safepoint, gated by a thread-local `GC_BLOCK == 1`
-  invariant that collapses the rooting surface to two sites (`eval_str` /
-  `eval_source`), zero rooting in builtins. Validated by the full suite green
-  under `BROOD_GC_STRESS=1` (GC at every safepoint) plus
-  `crates/lisp/tests/gc.rs` (200k-iteration tail loops, 20k-message server
-  loops, both root and spawned). See `memory-model.md`.
+- 🟡 **Memory reclamation.** Two coexisting layers are live today, plus a
+  disabled third:
+  - **Arena reset at top-level boundaries** (ADR-016) — `eval_str`/the REPL
+    `checkpoint` then `reset_local_to`, truncating the LOCAL heap after each form
+    (demo: ~712 MB growing → ~78 MB flat). Bounds the REPL / file-runner.
+  - **Bump-only allocator + arena flip on `(hibernate)`** — the LOCAL heap is now
+    a pure bump allocator (`Slabs`: `Vec`s, **no slot reuse**), and a long-running
+    loop reclaims by calling `(hibernate fn & args)`, which `Heap::flush`
+    deep-copies the *live* graph into fresh slabs and drops the garbage. Bounds
+    never-returning receive/spin loops. Validated by `crates/lisp/tests/gc.rs`
+    (50k/100k-iteration loops, 5k-message server loops, root and spawned) — these
+    are bounded by **flush**, not by mark-sweep.
+  - **⛔ Disabled: per-process tracing mark-sweep GC** (ADR-035). `Heap::collect`
+    is a **no-op**; the mark-sweep is kept as `collect_old` (`#[allow(dead_code)]`).
+    It was switched off when the bump-only allocator landed (commit `6e92e8e`):
+    mark-sweep reclaims only by **reusing freed slots**, and slot reuse
+    reintroduced the stale-handle scheduler race the bump allocator was built to
+    eliminate. The `GC_BLOCK == 1` safepoint + poison tripwire are still wired but
+    inert. `BROOD_GC_STRESS=1` lowers the GC threshold but, since `collect` is a
+    no-op, currently exercises nothing.
+  - **Known gap (not host-unsafe):** a *long-lived* process that never hibernates
+    (the in-language test **runner** across ~633 tests) accumulates unreachable
+    garbage until it trips the test memory soft cap (clean `E0043`, not a crash).
+    Planned fix: **hibernate the runner between batches** (the architecturally
+    consistent path — no slot reuse), *not* re-enabling the race-prone mark-sweep.
+  See `memory-model.md`.
 - 🟡 Nicer REPL — `rustyline` line editing (arrow keys, history, Emacs bindings)
   is in; richer completion/highlighting still to come
 - ⬜ **Self-host the CLI/REPL in Brood** — once the language can express it, the
@@ -207,16 +228,43 @@ The text-editing substance, exposed to Brood. Built as a thin end-to-end
 - ⬜ Editing **commands** + multiple buffers — belong in the **editor app** (a
   new `nest` project that `(require 'buffer)`s this framework), not here.
 - ✅ Buffers as first-class Brood values — a buffer *is* an immutable value.
-- ✅ The tracing GC migration landed in M1 (ADR-035) — no longer carried forward to M2.
+- ✅ Per-process memory reclamation is solved for M2's needs by the **bump
+  allocator + arena reset + `(hibernate)` flush** (see M1 "Memory reclamation") —
+  so it's no longer carried forward to M2. The ADR-035 tracing **mark-sweep** is
+  *not* what shipped: it's disabled (slot reuse reintroduced a scheduler race);
+  `Heap::collect` is a no-op.
 
 ## M3 — Display protocol + native local frontend
 
 The seam that makes remoteability free later (see architecture.md).
 
-- ⬜ A serialisable display protocol (render ops: lines, faces/styles, cursor, minibuffer)
-- ⬜ Input events (keys) flowing back in
-- ⬜ A native, in-process frontend (terminal via `crossterm`, or a GPU window) — the fast local path
-- ⬜ Keymaps and interactive commands defined in Brood
+- 🟡 **Serialisable display protocol (Phase 0 — done, ADR-046).** The render frame
+  is **Brood data** — a vector of tagged ops (`[:clear]`, `[:text row col s]`,
+  `[:text row col s face]`, `[:cursor row col]`; a face is `{:fg :bg :bold
+  :reverse}`). `std/display.blsp` is the pure op vocabulary; the meaning is Lisp,
+  so a remote/web frontend re-implements the identical ops over a socket later.
+- 🟡 **Input events flowing back in (Phase 0 — done).** `term-poll` returns keys
+  (1-char strings / specials as keywords) into the Brood loop. Mouse/resize events
+  deferred until a feature needs them.
+- 🟡 **Native in-process frontend (Phase 0 — done, terminal).** Five `term-*`
+  primitives over `crossterm` paint the protocol + read keys; `term-draw` is a
+  thin interpreter of the frame vector. A GPU-window frontend is a later additive
+  path speaking the same protocol.
+- 🟡 **First app on the seam: `nest observe` (done).** An Erlang-observer-style
+  process viewer (`std/observe.blsp`) — proves the render protocol + key loop
+  end-to-end with **no rope/buffer**. A node-stats panel (node name, workers/peak,
+  spawn count, memory used/peak, peers) over a navigable, busiest-mailbox-first
+  process list: `↑`/`↓` select, `space` pauses the live refresh, `q` quits.
+  Interactivity is a UI-state map threaded through the tail-recursive loop (no
+  mutation); selection is tracked **by pid**, so it stays on the same process as
+  the list reorders. Pure `observe-frame` core (testable without a TTY) + a thin
+  root-process IO loop; the only new primitive is `mailbox-size` (node stats reuse
+  existing primitives). `tests/observe_test.blsp` 18/18 incl. GC-stress + an
+  `:isolated` live-process block.
+- ⬜ Keymaps and interactive commands defined in Brood — belong in the **editor
+  app** (a new `nest` project), not the framework.
+- ⬜ Minibuffer / status line / multiple windows — editor-app concerns, additive
+  on the same protocol.
 
 ## M4 — Server / daemon mode
 

@@ -444,7 +444,8 @@ fn cmd_repl(interp: &mut Interp) {
     } else {
         eprintln!("nest repl — no project.blsp here; plain REPL (`brood` would do the same)");
     }
-    brood_repl::repl(interp);
+    // The REPL is Brood now (`std/repl.blsp`), same as `brood` with no args.
+    run(interp, "(require 'repl) (repl-run)");
 }
 
 /// `nest mcp` — see docs/mcp.md (ADR-036). Strictly per-project.

@@ -1,0 +1,132 @@
+;; std/repl.blsp — the read-eval-print loop, written in Brood. (require 'repl).
+;;
+;; Design notes (the *why*; the *what* is in the docstrings below):
+;;  - The REPL is policy, not mechanism: it's a loop over `read-line` (the one
+;;    irreducible I/O primitive), `eval-string`, and `pr-str`. The Rust binaries
+;;    (`brood` with no args, `nest repl`) only bootstrap into `(repl-run)`; the
+;;    loop itself — prompts, multi-line reads, error formatting — lives here so
+;;    it can be redefined at runtime like everything else (the project's reason
+;;    for existing). Replaces the old Rust `crates/repl`.
+;;  - No mutation, no loop construct: `repl--loop` is tail-recursive, so it runs
+;;    forever in O(1) stack; the per-process tracing GC reclaims each command's
+;;    allocations (the never-returning-loop case it was built for — ADR-035), so
+;;    there's no manual heap reset to do from here.
+;;  - Line editing comes free from the terminal's cooked mode (backspace, ^U,
+;;    ^W), so `read-line` stays a plain blocking read. Arrow-key history is a
+;;    later addition over the `term-*` raw-key seam + the buffer framework — the
+;;    point of self-hosting is that it's now a Brood function to add, not Rust.
+;;  - Reads work piped, too: `echo '(+ 1 2)' | brood` prints `3`. Prompts and the
+;;    banner are gated on `(stdout-tty?)`, so they never pollute a redirected
+;;    stdout; results always print (matching the old plain reader).
+
+(defmodule repl
+  "The Brood read-eval-print loop. `(repl-run)` reads forms from stdin (handling
+multi-line input), evaluates each in the running image, and prints the result —
+until end of input (Ctrl-D).
+
+    (require 'repl)
+    (repl-run)
+
+Driven from the shell by `brood` (no arguments) and `nest repl`. The prompts are
+the dynamic vars `*repl-prompt*` / `*repl-cont-prompt*`; rebind them with
+`binding` to customise.")
+
+;; ---- configuration (dynamic so a session can rebind them) -------------------
+
+(defdyn *repl-prompt* "brood> ")
+(defdyn *repl-cont-prompt* "  ...   ")
+(def *repl-banner* "brood — REPL (Ctrl-D to exit)")
+
+;; ---- pure form scanning -----------------------------------------------------
+
+(defn repl--balanced? (src)
+  "True when `src` has no unclosed `()`/`[]`/`{}` and no open string — i.e. it's
+a complete form (or forms) ready to evaluate."
+  (repl--scan src 0 (string-length src) 0 false false false))
+
+(defn repl--scan (s i n depth in-str esc in-com)
+  "Tail-recursive delimiter scan over `s`, tracking nesting `depth`, whether we're
+inside a string (`in-str`, with `esc` for a pending backslash) or a `;`-comment
+(`in-com`). Balanced when we finish outside a string with `depth <= 0`."
+  (if (>= i n)
+    (and (not in-str) (<= depth 0))
+    (let (c (char-at s i) j (inc i))
+      (cond
+        in-com (repl--scan s j n depth false false (not (= c "\n")))
+        in-str (cond
+                 esc        (repl--scan s j n depth true false false)
+                 (= c "\\") (repl--scan s j n depth true true false)
+                 (= c "\"") (repl--scan s j n depth false false false)
+                 :else      (repl--scan s j n depth true false false))
+        (= c "\"") (repl--scan s j n depth true false false)
+        (= c ";") (repl--scan s j n depth false false true)
+        (includes? "([{" c) (repl--scan s j n (inc depth) false false false)
+        (includes? ")]}" c) (repl--scan s j n (dec depth) false false false)
+        :else (repl--scan s j n depth false false false)))))
+
+(defn repl--content? (s i n in-com)
+  "True if `s` holds an actual datum — i.e. some character that isn't whitespace
+or part of a `;`-comment. Lets the loop ignore blank lines and comment-only
+input without echoing `nil`."
+  (if (>= i n)
+    false
+    (let (c (char-at s i) j (inc i))
+      (cond
+        in-com (repl--content? s j n (not (= c "\n")))
+        (= c ";") (repl--content? s j n true)
+        (blank? c) (repl--content? s j n false)
+        :else true))))
+
+;; ---- I/O loop ---------------------------------------------------------------
+
+(defn repl--prompt (acc)
+  "Print the primary or continuation prompt depending on whether we're starting a
+fresh form (`acc` empty) or continuing a multi-line one."
+  (print (if (= acc "") *repl-prompt* *repl-cont-prompt*)))
+
+(defn repl--read-form (tty acc)
+  "Read lines from stdin into `acc` until they form a complete (balanced) form,
+returning that source. Returns `nil` at end of input with nothing pending; a
+partial form pending at EOF is returned as-is (eval will report it)."
+  (when tty (repl--prompt acc))
+  (let (line (read-line))
+    (if (nil? line)
+      (if (= acc "") nil acc)
+      (let (next (str acc line "\n"))
+        (if (repl--balanced? next) next (repl--read-form tty next))))))
+
+(defn repl--error-message (e)
+  "Render a caught value for display: built-in errors arrive as a structured map
+`{:kind :message [:line :col] …}`, a user `throw` arrives as the raw value."
+  (if (and (map? e) (contains? e :message))
+    (str (if (contains? e :kind) (str (name (get e :kind)) " error") "error")
+         ": " (get e :message)
+         (if (contains? e :line)
+           (str " (line " (get e :line) ", col " (get e :col) ")")
+           ""))
+    (str "error: " (if (string? e) e (pr-str e)))))
+
+(defn repl--eval-print (src)
+  "Evaluate `src` in the running image and print its value in readable form, or
+print the error it raised. Never lets an error escape the loop."
+  (try
+    (println (pr-str (eval-string src)))
+    (catch e (eprint (str (repl--error-message e) "\n")))))
+
+(defn repl--loop (tty)
+  "The loop: read a form, evaluate-and-print it (skipping blank / comment-only
+input), repeat until end of input. Tail-recursive — runs in O(1) stack."
+  (let (form (repl--read-form tty ""))
+    (cond
+      (nil? form) (when tty (print "\n"))
+      (repl--content? form 0 (string-length form) false)
+        (do (repl--eval-print form) (repl--loop tty))
+      :else (repl--loop tty))))
+
+(defn repl-run ()
+  "Run the read-eval-print loop on stdin until end of input (Ctrl-D). Prompts and
+the banner show only on a TTY; results always print. Returns nil."
+  (let (tty (stdout-tty?))
+    (when tty (eprint (str *repl-banner* "\n")))
+    (repl--loop tty)
+    nil))

@@ -120,7 +120,12 @@ fn run(cli: Cli) {
         return;
     }
 
-    brood_repl::repl(&mut interp);
+    // The REPL is now Brood (`std/repl.blsp`): bootstrap into `(repl-run)`.
+    // `read-line` drives it; cooked-mode line editing comes from the terminal.
+    if let Err(e) = interp.eval_str("(require 'repl) (repl-run)") {
+        report_error(&e);
+        std::process::exit(1);
+    }
 }
 
 /// Evaluate a file's source with `(current-file)` set to its path (restored

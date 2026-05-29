@@ -67,21 +67,30 @@ Common macros (expanded once at the compile pass — runtime-free): `defn`,
 (binding (*log-level* :debug) (do-thing))           ; scoped rebind
 ```
 
-`fn` also supports multi-clause pattern dispatch:
+`fn` is multi-clause two ways (don't mix them in one `defn`):
 
 ```lisp
-(defn classify
+(defn arity-fn                       ; multi-ARITY: dispatch by arg count (Clojure-style)
+  ((x)   (arity-fn x 0))             ; param lists are LISTS (x), not vectors [x]
+  ((x y) (+ x y)))
+
+(defn classify                       ; multi-PATTERN: same arity, dispatch by shape + :when guard
   ((0)               :zero)
   ((n) :when (< n 0)  :neg)
   ((n)               :pos))
 ```
 
-**Trap — `&optional` doesn't combine with matching.** An `&optional` slot must
-be a plain symbol (it can't be a pattern), and `&optional` does *not* work inside
-multi-clause heads (clause heads are same-arity patterns, so `&optional` there is
-read as a literal symbol and the call won't match). Required params *can* still be
-patterns next to `&optional` — only the optional/rest slot is restricted. To
-branch on an optional, bind it and `match` in the body (`nil` = omitted):
+Arity arms (plain-symbol heads, optionally with `&`/`&optional`) bind directly and
+are cheap — this is how the prelude's variadic `+`/`-`/`<`/`=` stay fast. Pattern
+heads (literals/destructuring) use the matcher.
+
+**Trap — `&optional` defaults & patterns don't combine with arity overloading.** An
+`&optional` slot must be a plain symbol (it can't be a pattern). A clause head with
+a `(default …)` optional form or a pattern is matched as a *pattern* clause, so its
+`&optional` is read literally — don't expect it to act as an arity marker. Pick one
+mechanism per `defn`. Required params *can* still be patterns next to `&optional`
+(only the optional/rest slot is restricted). To branch on an optional, bind it and
+`match` in the body (`nil` = omitted):
 
 ```lisp
 (defn h (x &optional opt) (match opt (nil [:no x]) (v [:yes x v])))

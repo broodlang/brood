@@ -2457,3 +2457,138 @@ a prelude predicate over `type-of`, and `Ty::tested_by` narrows on it.
 **References.** ADR-006 (mechanism/policy split), ADR-026 (immutability), ADR-005
 relaxation (runtime-substrate crates), ADR-011 (ship the simple form),
 [`roadmap.md`](roadmap.md) M2, [`types.md`](types.md) compatibility contract.
+
+## ADR-046 — The display/input seam: a frontend is a protocol of render-op data
+
+**Status:** accepted (2026-05-29). The first M3 substrate — the seam between the
+runtime and any frontend (local terminal today, a socket peer later).
+
+**Context.** The editor must feel native locally *and* serve remote/web frontends,
+from one codebase (architecture.md). The way to get that for free is to make the
+display layer a **protocol, not a library**: the runtime emits a serialisable
+stream of "render this" operations and consumes input events; the local frontend
+implements that protocol in-process (the fast path), and a remote/web frontend
+implements the *identical* protocol over a socket. The open question was how thin
+the Rust surface should be, and where the protocol's meaning should live.
+
+**Decision.** The render frame is **Brood data** — a vector of tagged render ops
+(`[:clear]`, `[:text row col s]`, `[:text row col s face]`, `[:cursor row col]`)
+— and Rust supplies only the *frontend that paints it* plus the input source:
+five `term-*` primitives over `crossterm` (`term-enter`, `term-leave`,
+`term-size`, `term-poll`, `term-draw`). Plus one process-introspection accessor,
+`mailbox-size`, that the first app needs and Brood can't reach (the mailbox queue
+lives behind the scheduler registry).
+
+- **Protocol meaning is policy (Brood); painting is mechanism (Rust).**
+  `std/display.blsp` defines the op vocabulary as pure constructors; `term-draw`
+  is a ~40-line interpreter of that vector. So the op set is redefinable Lisp data
+  and a remote frontend re-implements the same ops elsewhere — exactly the seam
+  architecture.md promised. This is the "drawing, I/O" Rust-primitive category the
+  architecture already anticipated (ADR-006).
+- **Observer-as-proof, not editor-first.** `std/observe.blsp` + `nest observe` is
+  a tiny Erlang-observer-style process viewer — the *smallest real app* on the
+  seam. It needs no rope/buffer, so it validates the render protocol + key loop
+  end-to-end in isolation, before the editor rides on it. A node-stats panel +
+  navigable process list (`↑`/`↓` select, `space` pause, `q` quit). Split into a
+  pure `observe-frame` (node + process data → frame, unit-testable without a TTY)
+  and a thin `observe-run` IO loop. **Interactivity without mutation:** the UI
+  state (selection, freeze) is a plain map threaded through the tail-recursive
+  loop — each keypress recurses with a fresh state; selection is tracked *by pid*,
+  not row index, so it stays on the same process as the list reorders. Node stats
+  reuse existing primitives (`node-name`/`worker-threads`/`mem-bytes`/…); the only
+  new Rust is `mailbox-size`.
+- **Scheduler safety.** The observer runs in the **root process** (the binary's
+  dedicated thread, which is *not* in the scheduler worker pool), so its blocking
+  `term-poll` blocks only that thread — never a worker running the processes it
+  observes. Poll timeouts are always finite: preemption can't interrupt a process
+  parked in a native crossterm call, so an infinite poll on a *green* process
+  would pin a worker. (Future async input — a reader thread feeding a mailbox —
+  would lift even the root-thread block; deferred per ADR-011.)
+- **Terminal-restore is belt-and-suspenders.** The normal teardown is the Brood
+  `term-leave` (on quit); a Rust RAII guard in `nest observe` (`brood::builtins::
+  restore_terminal`) is the abnormal-path backstop, firing on a panic unwind and
+  scoped to drop *before* an error-exit (since `process::exit` skips `Drop`), so a
+  crash never leaves the terminal in raw mode / the alternate screen.
+
+**Consequences.**
+- One new dependency (`crossterm`) in the `brood` lib — the runtime-substrate
+  case the dependency rule allows; the Lisp-callable surface (`display`/`observe`)
+  is Brood. `display`/`observe` are embedded opt-in modules, never in the prelude.
+- The op vocabulary is intentionally minimal (text + cursor + clear + a small face
+  map of fg/bg/bold/reverse). Faces beyond that, mouse/resize events, scroll, and
+  attaching the observer to a *remote* live image are additive and deferred
+  (ADR-011). The same `term-draw`/`term-poll` shape is what the M3 editor frontend
+  and the M4/M5 socket frontends will speak.
+
+**References.** ADR-006 (mechanism/policy), ADR-045 (the rope, the other editor
+substrate), ADR-005 relaxation (runtime-substrate crates), ADR-011 (ship the
+simple form), ADR-043 (the root-vs-worker thread + stack model),
+[`architecture.md`](architecture.md) (the seam), [`roadmap.md`](roadmap.md) M3.
+
+## ADR-047 — Native multi-arity closure dispatch
+
+**Status:** accepted (2026-05-29). Closes the variadic-arithmetic performance gap
+without moving `+`/`-`/`=` out of Brood.
+
+**Context.** The prelude's variadic arithmetic and comparison operators (`+`, `*`,
+`-`, `/`, `<`, `=`, …) are written *in Brood*, as `defn`s over `fold` and a
+rest-list. That is the project's core principle in action (ADR-006: write the
+language in the language) — but it was costing **~40× a direct primitive call**.
+Each `(+ a b)` allocated a `& xs` rest-list, then a `fold`, then a
+`fold--loop`/`empty?`/`first`/`rest` chain ≈ 15 env frames — none of which the
+(no-op) GC reclaims. `(sum-to 100000)` spent **497 MB** purely on this per-call
+overhead. The naïve fix — make `+`/`-`/`=` Rust builtins — is fast but reverses
+the whole reason the project exists and teaches us nothing. CLAUDE.md's "dogfood
+first; optimize only by building the language up, not around it" sets the bar: an
+optimization must (1) improve language performance *broadly* and (2) build up a
+*primitive/capability* so Brood code gets faster — not move behaviour into a Rust
+escape hatch. Variadic `+` was the worked example of a missing capability:
+**efficient arg-count dispatch**.
+
+**Decision.** Give the evaluator **Clojure-style multi-arity dispatch**. A closure
+holds a `Vec<ClosureArm>` (was a flat `params/optionals/rest/body`); each arm is
+one arity clause. The call's argument count selects the arm, which then binds its
+parameters **directly** — no rest-list, no `match*`, just one env frame for the
+common small call. `+` stays Brood; `(+ a b)` is now ~one env frame instead of
+~15.
+
+- **Arity clauses vs. pattern clauses — a split, not a replacement.** A clause
+  whose head is *arity-only* (plain-symbol params plus optional `&optional`/`&`
+  rest) becomes a `ClosureArm` and dispatches natively by count. A clause whose
+  head contains *patterns* (literals/destructuring, e.g. `((0) 1)`, `((3 _) …)`)
+  still lowers to the existing `match*` engine (`eval::macros::lower_fn`). So the
+  pre-existing Erlang-style **same-arity pattern dispatch** (ADR-010) is untouched;
+  multi-arity is a second, orthogonal dispatch axis layered cleanly in front of it.
+  `fn_is_arity_multi_clause` decides which a given `defn` is.
+- **`select_arm(argc)` semantics.** Among arms that `accept(argc)`, prefer an
+  **exact fixed-arity** arm (no `&` rest) over a variadic one; among those, the
+  **most specific** (most required params). A single-arm closure always returns its
+  sole arm when `argc` fits, else an arity error listing the accepted arities.
+- **One representation, threaded everywhere.** `arms` replaces the flat fields
+  through the whole closure lifecycle: `make_closure`/`bind_params`/`apply_closure`
+  and the inline TCO call path (`eval/mod.rs`), `promote_closure`/`flush`/GC
+  trace/structural-dedup (`heap.rs`), `to_message`/`from_message` (cross-process
+  spawn) and the dist wire codec (cross-node), and the type checker (`infer_sig`
+  only fires for single-arm closures — sound: no false inference for an
+  overloaded fn; `arity_of` spans all arms).
+
+**Consequences.**
+- **`(sum-to 100000 0)` = 61 MB, was 497 MB → 8.1×**; `basic.rs` runtime 29 s → 5 s.
+  This is the floor for a fixed-arity arm (≈1 env frame, ~0.6 KB/call) vs. the old
+  variadic path (~5 KB/call). The win is *per-op*; it does **not** change the no-GC
+  *cumulative* accumulation that still bounds the full in-language suite (that is a
+  GC problem — see [`memory/no-gc-suite-memory.md`](../memory/no-gc-suite-memory.md)
+  and roadmap M1).
+- `+ * - / < > <= >= = not=` are rewritten in the prelude with fast 0/1/2-arg arms
+  and a variadic 3+ fallback — still Brood, now cheap.
+- **Two things you cannot mix in one `defn`:** arity-overloaded clauses and
+  pattern/`&optional` heads. A head is read as *either* an arity arm *or* a pattern
+  clause; an `&optional` inside a multi-clause head is treated as a literal symbol
+  (it doesn't make that arm variadic). This matches the pre-existing rule that
+  `&optional`/patterns/multi-clause don't nest (see `docs/language.md`).
+
+**References.** ADR-006 (write the language in the language), ADR-010 (parameter
+lists are lists; Erlang-style same-arity pattern dispatch), ADR-002 (`Rc`→`gc-arena`,
+why heap construction stays funnelled), CLAUDE.md "Dogfood first; optimize only by
+building the language up", [`language.md`](language.md) (`fn`/`defn` clauses),
+[`roadmap.md`](roadmap.md) M1 (the tracing GC that fixes cumulative memory).

@@ -30,16 +30,19 @@ these are the ones to unlearn:
 | Clojure habit | Brood reality | What you get if you guess wrong |
 |---|---|---|
 | `(try … (catch Type e body))` | `catch` takes a **bare binding**: `(catch e body)`. There is no exception class. | The class name gets bound *as* the variable and `e` is treated as body → cryptic `unbound symbol: e`. |
-| Multi-arity `(fn ([x] …) ([x y] …))` | No arity overloading. `fn` *is* multi-clause, but Erlang-style — **same-arity** dispatch by **pattern + guard** (see [Pattern matching](#pattern-matching)), not by arity. Use `&optional` / `&` rest for variable arity. | — |
+| Multi-arity `(fn ((x) …) ((x y) …))` | **Supported** (ADR-047) — dispatch by argument count, like Clojure. But param lists are **lists** `(x)`, not vectors `[x]`, and a clause head may *also* be a same-arity **pattern** (Erlang-style; see [Pattern matching](#pattern-matching)). The two don't mix in one `defn`. | Vector heads `([x] …)` read as a one-tuple-param pattern clause, not an arity clause. |
 | `{:a 1}` map literal | **Supported.** Immutable, insertion-ordered; `get`/`assoc`/`dissoc`/`keys`/`vals`/`contains?` (see [Maps](#maps)). | Works as you'd expect. |
 | `{:keys [a b]}` / `:or` map destructuring | No map *patterns* yet (maps themselves exist; the pattern syntax for them doesn't). Sequence/tuple destructuring **is** supported — `(let ([a b] v) …)`, `(let ((h & t) v) …)`. | Parse / type error. |
 | `(defn f [x y] …)`, `(let [a 1 b 2] …)` | Param lists and `let` bindings are **lists** — `(x y)` / `(a 1 b 2)`. | Works (vectors are accepted in binding position), but it's non-idiomatic — prefer lists. |
 | `(/ 7 2)` → ratio `7/2` | No ratios. Integer args give an integer **only when they divide evenly**; otherwise a float. `(/ 12 3)` → `4`, `(/ 7 2)` → `3.5`. | A float where you expected an exact ratio. |
 
-Optional and rest arguments use the Common-Lisp / Emacs-Lisp spelling
-(`&optional`, `&`), described under [Parameter lists](#parameter-lists) — *not*
-Clojure multi-arity. This is the one piece of the calling convention that can't
-be guessed from Clojure; it has to be read.
+Within a *single* clause, optional and rest arguments use the Common-Lisp /
+Emacs-Lisp spelling (`&optional`, `&`), described under
+[Parameter lists](#parameter-lists). Brood *also* has Clojure-style multi-arity
+(arg-count dispatch across clauses; ADR-047) — but the param lists are **lists**
+`(x y)`, not vectors `[x y]`, and arity clauses don't mix with pattern/`&optional`
+heads (see [`fn`/`defn` clauses](#fn--defn-clauses)). The list-not-vector spelling
+is the one piece that can't be guessed from Clojure; it has to be read.
 
 ## Data types
 
@@ -385,20 +388,47 @@ raises on mismatch. Bindings stay sequential, freely mixed with plain symbols:
 
 ### `fn` / `defn` clauses
 
-`fn` is **multi-clause** when every form after it is a clause `(param-list body…)`
-— Erlang-style same-arity dispatch by pattern (and guard). Otherwise it's
-single-clause, and each **required** parameter may itself be a pattern. `defn`
-inherits both (it forwards to `fn`).
+`fn` is **multi-clause** when every form after it is a clause `(param-list body…)`.
+Multi-clause dispatch has **two axes** (ADR-047):
+
+- **By argument count** (Clojure-style multi-arity) when the heads are *arity
+  clauses* — plain-symbol params, optionally with `&optional` / `&` rest. The
+  call's arg count picks the clause; an exact fixed arity beats a variadic one,
+  and among matches the most-specific (most required params) wins. Each arm binds
+  its params *directly* (no rest-list), so it's as cheap as a single-clause fn —
+  this is how the prelude's variadic `+`/`-`/`<`/`=` stay fast and stay Brood.
+- **By pattern** (Erlang-style same-arity dispatch) when a head contains
+  literals or destructuring — the clauses share an arity and the first matching
+  shape (and `:when` guard) wins.
+
+Otherwise `fn` is single-clause, and each **required** parameter may itself be a
+pattern. `defn` inherits all of this (it forwards to `fn`).
 
 ```clojure
-(defn fac
-  ((0)  1)                              ; multi-clause dispatch
+(defn greet                             ; multi-ARITY: dispatch by arg count
+  ((name)          (greet name "hello"))
+  ((name greeting) (str greeting ", " name)))
+(greet "Ada")                           ;=> "hello, Ada"
+(greet "Ada" "yo")                      ;=> "yo, Ada"
+
+(defn count-args                        ; an arity arm may take & rest
+  (()        0)
+  ((a)       1)
+  ((a & more) (+ 1 (length more))))
+
+(defn fac                               ; multi-PATTERN: same arity, dispatch by shape
+  ((0)  1)
   ((n)  (* n (fac (- n 1)))))
 
 (defn area ([x y]) (* x y))             ; single-clause, tuple-destructured param
 (defn move (p [dx dy] &optional (n 1))  ; patterns coexist with &optional / & rest
   …)
 ```
+
+The two multi-clause axes **don't mix in one `defn`**: a head is read as *either*
+an arity arm *or* a pattern clause. An `&optional`/`&` inside a clause that's being
+matched as a pattern is treated as a literal symbol — it does *not* make that arm
+variadic. Use arity overloading or pattern dispatch, not both in the same `defn`.
 
 Parameter lists stay **lists** (ADR-010), so a single tuple parameter must be
 wrapped: `(defn g ([x y]) …)` is one 2-tuple param, while `(defn g (x y) …)` is
@@ -411,10 +441,14 @@ into the optional slot:
 - An `&optional` slot **must be a plain symbol** (with an optional default); it
   **cannot be a pattern**. `(defn k (x &optional ([a b] …)) …)` is a *type
   error* ("expected a symbol").
-- **`&optional` does not work in multi-clause heads.** Clause heads are matched
-  as same-arity patterns, so an `&optional` inside one is treated as a literal
-  symbol, not an arity marker — the call fails to match. Use one or the other,
-  not both in the same `defn`.
+- **Don't mix `&optional` defaults / patterns with arity overloading.** A
+  multi-clause `defn` is *either* arity-dispatched (every head is plain symbols,
+  optionally with `&`/bare-`&optional`) *or* pattern-dispatched (some head carries
+  a literal/destructuring/`(default …)` form, matched as a same-arity pattern). A
+  head with a `(default …)` optional form is read as a *pattern* clause, so its
+  `&optional` is matched literally and won't act as an arity marker. Overlapping
+  arity arms that also use `&optional` are ambiguous — keep one mechanism per
+  `defn`.
 - Required parameters *can* still be patterns alongside `&optional` / `& rest`
   (only the optional/rest slots are restricted): `(defn move (p [dx dy]
   &optional (n 1)) …)` is fine.
