@@ -274,14 +274,16 @@ mod tests {
     #[test]
     fn flags_non_tail_self_recursion() {
         // self-call as an argument to another call
-        assert!(recursion_warnings("(defn fact (n) (if (= n 0) 1 (* n (fact (- n 1)))))")
-            .iter()
-            .any(|w| w.contains("fact") && w.contains("non-tail")));
         assert!(
-            recursion_warnings("(defn sum (xs) (if (empty? xs) 0 (+ (first xs) (sum (rest xs)))))")
+            recursion_warnings("(defn fact (n) (if (= n 0) 1 (* n (fact (- n 1)))))")
                 .iter()
-                .any(|w| w.contains("sum"))
+                .any(|w| w.contains("fact") && w.contains("non-tail"))
         );
+        assert!(recursion_warnings(
+            "(defn sum (xs) (if (empty? xs) 0 (+ (first xs) (sum (rest xs)))))"
+        )
+        .iter()
+        .any(|w| w.contains("sum")));
         // self-call as a let binding value
         assert!(!recursion_warnings("(defn k (n) (let (m (k (- n 1))) m))").is_empty());
         // first (tested) operand of `and`, and a `cond` test
@@ -292,10 +294,10 @@ mod tests {
     #[test]
     fn no_warning_for_tail_recursion_or_higher_order() {
         // proper tail calls in each tail-propagating special form
-        assert!(
-            recursion_warnings("(defn loop (n acc) (if (= n 0) acc (loop (- n 1) (* acc n))))")
-                .is_empty()
-        );
+        assert!(recursion_warnings(
+            "(defn loop (n acc) (if (= n 0) acc (loop (- n 1) (* acc n))))"
+        )
+        .is_empty());
         assert!(recursion_warnings("(defn down (n) (when (> n 0) (down (- n 1))))").is_empty());
         assert!(recursion_warnings("(defn f (n) (cond (= n 0) :z :else (f (- n 1))))").is_empty());
         assert!(recursion_warnings("(defn p (n) (and (> n 0) (p (- n 1))))").is_empty());

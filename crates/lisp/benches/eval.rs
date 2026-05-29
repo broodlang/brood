@@ -53,3 +53,40 @@ fn fib(bencher: divan::Bencher, n: u64) {
         .with_inputs(Interp::new)
         .bench_refs(|interp| interp.eval_str(&src).unwrap());
 }
+
+/// Tail-recursive `cons`-builder — every iteration resolves the *global* `cons`
+/// (a full lexical-chain walk to GLOBAL, then a globals-table probe) plus one
+/// allocation. The clearest measure of the global-lookup + dispatch tax the
+/// eval-dispatch campaign targets (see `docs/handoff-eval-dispatch.md`); the
+/// later lexical-addressing step should move this most.
+#[divan::bench(args = [10_000, 100_000])]
+fn cons_build(bencher: divan::Bencher, n: u64) {
+    let src = format!(
+        "(def build (fn [n acc] (if (= n 0) acc (build (- n 1) (cons n acc))))) \
+         (count (build {n} nil))"
+    );
+    bencher
+        .with_inputs(Interp::new)
+        .bench_refs(|interp| interp.eval_str(&src).unwrap());
+}
+
+/// End-to-end Brood `(sort < …)` — the workload that motivated the campaign.
+/// Forces the in-language `merge-sort` path (custom comparator), not the Rust
+/// `%sort-asc` fast-path, so it reflects interpreter dispatch over list-walking.
+/// Data is built in-language (xorshift) so parsing stays out of the hot region.
+#[divan::bench(args = [1_000, 5_000])]
+fn sort_brood(bencher: divan::Bencher, n: u64) {
+    let src = format!(
+        "(def gen (fn [n seed acc] \
+           (if (= n 0) acc \
+             (let (x (bit-xor seed (bit-shift-left seed 13)) \
+                   y (bit-xor x (bit-shift-right x 7)) \
+                   z (bit-xor y (bit-shift-left y 17))) \
+               (gen (- n 1) z (cons (rem (bit-and z 1048575) 1000000) acc)))))) \
+         (def data (gen {n} 123456789 nil)) \
+         (count (sort < data))"
+    );
+    bencher
+        .with_inputs(Interp::new)
+        .bench_refs(|interp| interp.eval_str(&src).unwrap());
+}

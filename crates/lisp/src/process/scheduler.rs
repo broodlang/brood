@@ -34,7 +34,7 @@ use crate::core::value::{self, EnvId, Value};
 use crate::error::LispError;
 use crate::eval;
 
-use super::mailbox::{Mailbox, ST_RUNNABLE, ST_RUNNING, REGISTRY};
+use super::mailbox::{Mailbox, REGISTRY, ST_RUNNABLE, ST_RUNNING};
 use super::message::Message;
 use super::monitor;
 
@@ -197,6 +197,42 @@ impl Drop for GcBlockGuard {
         }
         #[cfg(not(debug_assertions))]
         let _ = new;
+    }
+}
+
+/// RAII guard that drops the GC-block depth back to **0** for its lifetime,
+/// restoring the saved value on `Drop`. The inverse of [`GcBlockGuard`]: it lets
+/// a builtin that evaluates a fresh batch of top-level forms (`load` over a file's
+/// forms) re-enter `eval` at the depth-1 safepoint so Stage B can collect between
+/// them — instead of one frame deeper, where it never fires (the `nest run`/load
+/// memory leak, `docs/memory-review.md`).
+///
+/// **Safety contract:** only sound when no eval frame *below* this point holds an
+/// un-rooted LOCAL transient that a moving collection would invalidate. `load`
+/// uses it solely when it is itself at `gc_block_depth() == 1` AND the form being
+/// loaded is a spawned-process body (promoted to the RUNTIME region, so the outer
+/// `(load …)` frame's `expr`/`call_form` are RUNTIME handles a LOCAL collection
+/// never touches) — see `builtins::load`. Validated under
+/// `BROOD_GC_STRESS=1` + `debug_assertions` (the generational tripwire fires on
+/// any violation).
+pub struct GcBlockReset(u32);
+
+impl GcBlockReset {
+    #[inline]
+    pub fn enter() -> Self {
+        let saved = GC_BLOCK.with(|d| {
+            let n = d.get();
+            d.set(0);
+            n
+        });
+        GcBlockReset(saved)
+    }
+}
+
+impl Drop for GcBlockReset {
+    #[inline]
+    fn drop(&mut self) {
+        GC_BLOCK.with(|d| d.set(self.0));
     }
 }
 
@@ -430,13 +466,21 @@ fn assign_worker() -> usize {
     let n = worker_count().max(1);
     let start = NEXT_WORKER.fetch_add(1, Ordering::Relaxed) % n;
     let mut best = start;
-    let mut best_len = WORKERS[start].0.try_lock().map(|q| q.len()).unwrap_or(usize::MAX);
+    let mut best_len = WORKERS[start]
+        .0
+        .try_lock()
+        .map(|q| q.len())
+        .unwrap_or(usize::MAX);
     for off in 1..n {
         if best_len == 0 {
             break; // can't do better than an empty queue
         }
         let i = (start + off) % n;
-        let len = WORKERS[i].0.try_lock().map(|q| q.len()).unwrap_or(usize::MAX);
+        let len = WORKERS[i]
+            .0
+            .try_lock()
+            .map(|q| q.len())
+            .unwrap_or(usize::MAX);
         if len < best_len {
             best_len = len;
             best = i;
@@ -662,35 +706,20 @@ pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
         stack_base_set(0);
         let mut heap = Heap::with_regions(prelude, runtime);
         heap.set_global(EnvId::GLOBAL);
-        // `hibernate` raises an uncatchable `ErrorKind::Hibernate` sentinel
-        // that unwinds every intervening eval frame back to here. We catch
-        // it, flush the LOCAL arena (deep-copying only the named callee +
-        // args into fresh slabs), and re-apply. Any *other* error exits the
-        // process. Bounds memory in long-running receive loops.
-        let mut callee = f;
-        let mut argv: Vec<Value> = Vec::new();
-        let reason = loop {
-            match eval::apply(&mut heap, callee, &argv, EnvId::GLOBAL) {
-                Ok(_) => break Message::Keyword(value::intern("normal")),
-                Err(e) if e.kind == crate::error::ErrorKind::Hibernate => {
-                    let new_callee = e.payload.expect("hibernate err carries callee");
-                    let new_args = e
-                        .hibernate_args
-                        .expect("hibernate err carries args (possibly empty)");
-                    let mut roots: Vec<Value> = std::iter::once(new_callee)
-                        .chain(new_args.iter().copied())
-                        .collect();
-                    heap.flush(&mut roots);
-                    callee = roots[0];
-                    argv = roots[1..].to_vec();
-                }
-                Err(e) => {
-                    eprintln!("process {} died: {}", proc_descr(pid), e.located());
-                    break Message::Vector(vec![
-                        Message::Keyword(value::intern("error")),
-                        Message::Str(e.to_string()),
-                    ]);
-                }
+        // Run the process body. Its memory stays bounded with no help from the
+        // author: the body runs at the depth-1 eval safepoint where Stage B's
+        // automatic copying GC fires (ADR-055), so a long-running tail / receive
+        // loop reclaims its per-iteration garbage. (Pre-ADR-055 a `(hibernate)`
+        // sentinel was caught here and flushed the arena manually; automatic GC
+        // made it redundant and the primitive was removed — docs/memory-review.md.)
+        let reason = match eval::apply(&mut heap, f, &[], EnvId::GLOBAL) {
+            Ok(_) => Message::Keyword(value::intern("normal")),
+            Err(e) => {
+                eprintln!("process {} died: {}", proc_descr(pid), e.located());
+                Message::Vector(vec![
+                    Message::Keyword(value::intern("error")),
+                    Message::Str(e.to_string()),
+                ])
             }
         };
         EXIT_REASON.with(|r| *r.borrow_mut() = Some(reason));

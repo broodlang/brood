@@ -1733,11 +1733,46 @@ grows a `:dependencies` clause in its `(project …)` form and an
 `(ensure-deps)` step in `project-setup`. `nest`'s Rust shell gains
 `fetch`/`update`/`add`/`remove`/`tree` subcommands (each a one-liner that
 calls into `std/package.blsp`). The Rust kernel grows `%git-clone`,
-`%sha256-file`, `%http-get` primitives. `.gitignore` templates from `nest
-new` get `_deps/` added. `nest mcp` gets a `packages.list` tool surface
-later (separate ADR if needed). No change to the require/load semantics —
-the existing module system is the runtime; packages are just a source
-provisioner above it.
+`%sha256`, `%git-resolve-ref`, `%http-get` primitives. `.gitignore`
+templates from `nest new` get `_deps/` added. `nest mcp` gets a
+`packages.list` tool surface later (separate ADR if needed). No change to
+the require/load semantics — the existing module system is the runtime;
+packages are just a source provisioner above it.
+
+**Implementation refinements (2026-05-29).** Four decisions taken when the
+build started, refining the original sketch (full rationale in
+[`packages.md`](packages.md)):
+
+1. **Hash primitive is `%sha256` over a *string*, not `%sha256-file` over a
+   directory.** One irreducible primitive (hash a byte string → hex); the
+   canonical tree walk + per-file `(%sha256 (slurp p))` + combine is Brood
+   (`std/package.blsp`), over the existing `list-dir`/`dir?`/`slurp`. Smaller
+   kernel, more in-language (ADR-006), and the same primitive hashes the lock
+   manifest. Replaces `%sha256-file` in the original kernel list.
+2. **`:path` deps load *in place*.** A path dep's `src/` goes straight onto
+   `*load-path*`; it is **not** copied into `_deps/`. So `_deps/` only appears
+   once git deps land — and edits to a path-dep's tree are live (the intended
+   local-dev workflow). Path deps are still tree-hashed into the lock for
+   change detection.
+3. **`(project …)` is a quoting macro.** It treats its arguments as literal
+   data (expands to `(project--apply '(…))`), so a manifest writes dep names
+   and the `:main` pair as **bare symbols** — `[parser :git … :ref …]`, not
+   `'[parser …]`. Manifests are pure static data; nothing in them is ever
+   evaluated. *(Shipped 2026-05-29 with the `:dependencies` parser; the rest
+   of these are Slice-1/2 commitments.)*
+4. **Clone-then-checkout the resolved commit.** `git clone --depth 1 --branch
+   <ref>` only accepts a branch/tag name, but the lock file always pins a
+   commit SHA — so the sketch's `ensure_cache` clone would fail on a pinned
+   dep. `%git-clone` instead clones the ref shallowly then checks out the exact
+   commit (fetching it where the server allows).
+
+Implementation lands in vertical slices: **Slice 0** — manifest
+`:dependencies` parsing + the `project` macro (done); **Slice 1** —
+`:path` deps end-to-end (`%sha256`, tree hashing, lock-file I/O, `ensure-deps`
+load-path integration) — no git, no network, fully testable; **Slice 2** —
+`:git` deps (`%git-resolve-ref`/`%git-clone`, `_deps/` cache, `fetch`/`update`/
+`tree`); **Slice 3** — `add`/`remove`, auto-fetch on every subcommand,
+`%http-get` (added unused, for future tarball deps).
 
 ## ADR-038 — Single-binary bundling: deferred until distribution matters
 
@@ -2500,7 +2535,7 @@ lives behind the scheduler registry).
   and a remote frontend re-implements the same ops elsewhere — exactly the seam
   architecture.md promised. This is the "drawing, I/O" Rust-primitive category the
   architecture already anticipated (ADR-006).
-- **Observer-as-proof, not editor-first.** `std/observe.blsp` + `nest observe` is
+- **Observer-as-proof, not editor-first.** `std/observer.blsp` + `nest observe` is
   a tiny Erlang-observer-style process viewer — the *smallest real app* on the
   seam. It needs no rope/buffer, so it validates the render protocol + key loop
   end-to-end in isolation, before the editor rides on it. A node-stats panel +
@@ -2845,7 +2880,7 @@ pid (a non-pid is a type error — same contract as `mailbox-size`):
 
 **References.** ADR-006 (mechanism in Rust, the map is policy-shaped data), ADR-046
 (the observer, first consumer), ADR-026 (the snapshot is an immutable value),
-`std/observe.blsp`, `docs/primitives.md` (the `process-info` entry).
+`std/observer.blsp`, `docs/primitives.md` (the `process-info` entry).
 
 ## ADR-052 — Interactive REPL line editor in Brood (inline `term-*` seam)
 
@@ -3014,7 +3049,7 @@ re-doing the node wire codec for nothing.
 
 **References.** ADR-046 (the display seam / observer this extends), ADR-051
 (`process-info`, the send-able snapshot maps), ADR-034 (the node handshake/cookie),
-ADR-006 (mechanism in Rust, the agent + loop are Brood), `std/observe.blsp`,
+ADR-006 (mechanism in Rust, the agent + loop are Brood), `std/observer.blsp`,
 `docs/roadmap.md` M3.
 
 ## ADR-054 — Generational handles: a debug tripwire for use-after-GC
@@ -3133,3 +3168,269 @@ ADR-035 (the disabled mark-sweep this replaces), ADR-016 (the arena reset it
 supersedes under GC), ADR-026 (immutability — no write barriers; but `letrec`
 cycles), [`docs/memory-review.md`](memory-review.md) (the full plan + the fork),
 [`roadmap.md`](roadmap.md) M1. Stage C (generational nursery) deferred.
+
+## ADR-056 — A windowed (GUI) frontend + mouse input, on the same display seam
+
+**Status:** accepted (2026-05-29). The second frontend for the ADR-046 seam, and
+the realisation of its deferred mouse/scroll input. (The window itself first
+landed in the same commit as ADR-055 without its own ADR; this records both the
+GUI decision and the input completion.)
+
+**Context.** ADR-046 made the display layer a *protocol of render-op data*, not a
+library, and deferred "mouse/resize events" and additional frontends as additive.
+The claim that a frontend is "just another implementer of the protocol" was only
+ever exercised by one frontend (the `crossterm` terminal), so it was unproven. And
+the observer was keyboard-only — fine for a TUI, but a window invites a pointer.
+
+**Decision.** Add a **native window frontend** as a peer of `term-*`, and extend
+the seam's *input* half with a mouse event — both as additive `gui-*` primitives
+and a new render-op-protocol input shape, with zero change to the frame protocol.
+
+- **A frontend is five primitives, again.** `gui-open`/`gui-close`/`gui-size`/
+  `gui-draw`/`gui-poll` mirror `term-*` and paint the *identical* frame vector
+  (`crate::gui`, behind the `gui` cargo feature: `winit` owns the event loop,
+  `softbuffer` a CPU framebuffer, `fontdue` a monospace glyph grid). The same pure
+  `observe-frame` therefore paints to a window or a terminal unchanged; a
+  `display-broadcast` can still drive several frontends from one frame. Without
+  `--features gui` the primitives return a clear "rebuild with --features gui"
+  error, so the symbols exist uniformly either way.
+- **Many windows, one event loop.** winit allows only *one* event loop per process,
+  so a single GUI thread owns it and multiplexes a *registry* of windows. `gui-open`
+  returns an integer window id and the other primitives take it (vs the single
+  terminal's 0-arg `term-*`); `*gui-display*` is therefore a `(gui-display)`
+  *constructor* that opens a window and closes the `gui-*` over its id. This is what
+  lets `(observe)` open several independent windows. The id keeps the Brood side
+  from depending on winit's opaque `WindowId`; the thread maps between them.
+- **Mouse is one new input value, shared by both frontends.** `term-poll`/
+  `gui-poll` may now also yield `[:mouse action button row col]` (`action`:
+  `:press :scroll-up :scroll-down`; `button`: `:left :right :middle` or nil;
+  `row`/`col` 0-based cells) — the same encoding from both, so one keymap/handler
+  drives either. The crossterm frontend enables mouse capture in `term-enter` only
+  (not the inline REPL `term-raw-enter` seam, which must keep the terminal's own
+  text selection). The GUI thread reports it from winit's button/wheel events,
+  translated to the same cell coordinates (it tracks the pointer on cursor-move but
+  does not *emit* bare motion — see below).
+- **A deliberately minimal vocabulary** — exactly what a consumer needs today: a
+  click and the wheel. Release / drag / bare motion are dropped at *both* backends
+  (crossterm maps them to a nil poll; the GUI tracks the cursor on move but emits
+  nothing), so the two frontends surface an identical set, and the observer never
+  wakes for an event it would ignore. This avoids a real footgun: winit's
+  `CursorMoved` fires per pixel, and since the observer refetches+redraws on every
+  poll result, *emitting* motion would turn a mouse wiggle into a redraw storm.
+  Release/drag are additive when a consumer (drag-select) needs them (ADR-011).
+- **The observer acts on two.** `std/observer.blsp` reacts to left-press (select the
+  clicked process row) and the wheel (scroll the selection); a right/middle click,
+  a click off the list, or any future action is a no-op. The mapping is **pure**
+  (`observe--mouse-row->sel`, `observe--apply-mouse`) and unit-tested without a
+  window, consistent with the keyboard commands being pure `(state key) → state`.
+- **`(observe)` is non-blocking; one process per window.** To open several windows
+  by calling `(observe)` repeatedly it can't be modal, so it `spawn`s a process that
+  opens a window and runs the loop, returning that pid. Each window is independent
+  state in its own process. The trade-off vs ADR-046's root-process observer: a
+  spawned observer blocks on `gui-poll` in a *green* process, pinning a scheduler
+  worker for the poll interval (native blocking can't be preempted). Fine for a
+  handful of windows (≈`nproc` workers); opening as many observers as workers would
+  starve other processes for up to a poll interval. Acceptable now (ADR-011);
+  `(observe-attach …)` stays modal for the single-window/terminal case.
+- **Same GUI-thread bridge as ADR-046.** Only `Send` plain data (`Op`/`Input`)
+  crosses the channels; the windows/surfaces/glyph caches never leave the GUI
+  thread. Closing a window surfaces as `:escape` to that window's input, so its
+  Brood loop tears down (and calls `gui-close`) on its own terms.
+
+**Consequences.**
+- Three optional deps (`winit`/`softbuffer`/`fontdue`), all gated behind `gui`; a
+  default build links none. They're runtime-substrate (the "drawing, I/O" Rust
+  category ADR-006/046 anticipated) — the Lisp-callable surface stays Brood.
+- `back-tab` (Shift+Tab) is now translated by the GUI too, matching the terminal,
+  so the key vocabularies are aligned across frontends.
+- The `gui-*` primitives gained a window-id argument (a breaking change from the
+  initial 0-arg shape — fine pre-1.0); `*gui-display*` became the `(gui-display)`
+  constructor. `(observe)` now returns a pid instead of blocking.
+- Still deferred (ADR-011): a `gui-raw-*` inline seam (so the self-hosted REPL can
+  run in a window, not just the observer), runtime font sizing, and attaching a
+  frontend to a *remote* live image. A spawned observer pins a worker while polling
+  (above). No automated GUI test (it needs a live display); the pure input mapping
+  is tested, the backend is smoke-tested by hand (two windows at once).
+
+**References.** ADR-046 (the display/input seam this extends — and whose mouse
+deferral this closes), ADR-011 (ship the simple form), ADR-006 (drawing/I-O as a
+Rust-primitive category), ADR-043 (root-vs-worker thread + finite-poll model),
+[`roadmap.md`](roadmap.md) M3.
+
+## ADR-057 — Lexical addressing: O(1) variable lookup (eval-dispatch Step 2)
+
+**Status:** proposed / draft (2026-05-29). Step 2 of the evaluator-dispatch
+campaign ([`handoff-eval-dispatch.md`](handoff-eval-dispatch.md)). Not yet
+implemented — this records the design for review before the (large, load-bearing)
+change. Builds on Step 1 (ADR-… not minted; the `SpecialForm` enum dispatch).
+
+**Context.** Measuring `(sort < …)` overturned its own premise (devlog
+2026-05-29): the ~700× gap vs Rust is neither comparisons (~9%) nor allocation
+(~140 ns/cons) nor GC (never fires below the 64K floor). The floor is **variable
+lookup**. `env_get` (`core/heap.rs`) walks the lexical parent chain and scans each
+`EnvFrame`'s assoc-list; *every reference to a global* — `cons`, `<`, `-`, `take`,
+… (most refs in a hot loop) — walks the **entire** chain to `EnvId::GLOBAL`, then
+probes a `Symbol→Value` HashMap. A bare tail loop costs ~400 ns/iter, dominated by
+these walks. Step 1 confirmed special-form *classification* is not the cost
+(enum dispatch moved the if-loop 404→406 ns, within noise). This ADR is the
+structural fix: resolve each reference once, at compile time, to a direct address.
+
+**Decision (three parts).**
+
+**(1) Representation — internal resolved-reference `Value`s, carved out of the
+public type universe.** Add two variants produced *only* by the resolver and
+consumed *only* by `eval`'s `match expr`:
+- `Value::LocalRef { up: u16, idx: u16 }` — bound `up` lexical frames out, slot
+  `idx` within that frame.
+- `Value::GlobalRef { slot: u32, sym: Symbol }` — global cell `slot`; `sym`
+  retained for diagnostics, dynamic-var fallback, and cross-runtime re-resolution
+  (see §messages).
+
+Options weighed:
+- *(A) full `Value` variants in the public lattice* — fast, but pollutes
+  `type-of`/predicates/printer/equality/messages for things that are **code,
+  never data**. A category error.
+- *(B) internal special-form lists* `(%local up idx)` / `(%global slot)` —
+  no new `Tag`, dispatched via the Step-1 enum, but allocates + re-walks a list
+  per reference; likely no faster than the symbol lookup it replaces.
+- **(C, chosen) dedicated `Value` variants excluded from the user type
+  universe.** They get `Tag::LocalRef`/`Tag::GlobalRef` appended *after* `Rope`
+  (existing bit order preserved), but are **omitted from `types::ALL_TAGS`** and
+  the `type-of` surface, and the reader never produces them. The compatibility
+  contract (`docs/types.md`) is met by a documented carve-out: the checker treats
+  them as `dynamic()`; printer / structural-equality / `to_message` hit a
+  `debug_assert!(unreachable)` (a resolved ref must never reach userland — quote
+  and quasiquote keep raw symbols, so data is never resolved). `Copy` scalars, so
+  the tracing GC ignores them (no handle to relocate).
+
+`eval` gains two arms: `LocalRef{up,idx}` → climb `up` parents, index `vars[idx]`
+directly (no symbol compare); `GlobalRef{slot,..}` → one indexed cell load.
+
+**(2) Global cells.** Back the globals table with an append-only slot vector
+(`boxcar::Vec<GlobalCell>` — stable refs, lock-free, already used for the shared
+code region) alongside the existing `Symbol→slot` index map. `def` resolves a
+symbol to its slot (reserving one if absent) and writes the cell; a resolved
+`GlobalRef{slot}` read skips the *map* (no hash, no map lock). **Late binding /
+hot reload preserved** (CLAUDE.md "shared code", ADR-013): the slot is stable, a
+re-`def` updates the cell in place, so a *running* process holding
+`GlobalRef{slot}` sees the new value on its next read — no inlined value, no
+recompile. Forward refs reserve an empty (unbound) cell that the later `def`
+fills. The slot vector lives in the shared `RuntimeCode` (per-runtime), so
+separate runtimes stay independent.
+
+*Cell synchronization (memory safety — load-bearing).* The cell is **not** a
+bare `Value`. Globals are shared mutable state across a runtime's processes
+(today: one `RwLock<SymbolMap<Value>>`, so every read is a rwlock read-acquire);
+a `Value` is a **multi-word `Copy` enum** (discriminant + ≤64-bit payload), so an
+unsynchronized read of a plain `cell: Value` concurrent with a `def` write is a
+**torn read / data race — UB.** "Skip the map" must therefore mean *skip the hash
+and the coarse map lock*, **not** *skip synchronization*. Each `GlobalCell` is a
+**seqlock** (a generation counter: the reader loads `seq → value → seq` and
+retries on mismatch) — the right shape for *frequent reads, rare `def` writes, a
+small `Copy` payload*. A seqlock read is **two acquire loads + a compare —
+strictly cheaper than today's rwlock read-acquire (an atomic RMW)** *and* it
+drops the hash, so the perf win survives while the access stays sound.
+(`arc_swap::ArcSwap<Value>` is the wait-free alternative if seqlock reader-retry
+under a write storm ever bites; it costs an indirection + an `Arc` refcount bump
+per read and an `Arc` alloc per `def`. Seqlock is preferred — `def` is rare.)
+Only the `Symbol→slot` index map still needs a lock, and only on the rare
+`def`/reserve path; resolved-slot reads never touch it.
+
+*Publish ordering (why hot reload is visible and safe).* `def` already
+`promote`s the value into the **append-only, immutable** shared RUNTIME region
+*before* binding. The seqlock write is a release publish of the (promoted,
+already-shared) handle; the reader's acquire load observes both the new handle
+and the immutable data it points to. A process that reads the global mid-reload
+sees either the old or the new binding — never a torn half — and whichever it
+sees points at valid, immutable, shared data.
+
+**(3) Resolution pass.** Thread a compile-time **lexical scope** (a stack of
+frames, each the ordered names a `fn`/`let`/`letrec` binds) through the existing
+`macroexpand_all` walk — which already (a) runs once per top-level/definition
+boundary, (b) distinguishes *binders* (let targets, fn param lists) from
+*references*, and (c) leaves quote/quasiquote opaque. **Resolution must run after
+full macroexpansion** (names a macro introduces are resolved in the expanded
+tree), so it hooks at the *tail* of `macroexpand_all` (or a sibling pass invoked
+immediately after). For each `Value::Sym(s)` in operator/operand position:
+bound at depth `d` slot `i` → `LocalRef{d,i}`; else → `GlobalRef{slot_for(s),s}`.
+Idempotent (re-resolving a resolved node is a no-op) and applied wherever
+macroexpand runs — including the `eval`/`load` builtins on dynamically-built code.
+
+*Dynamic vars* (`defdyn`/`binding`) are never lexically bound; a `GlobalRef` read
+consults the dynamic stack first (as `env_get` does at `GLOBAL` today), preserving
+current semantics.
+
+*`letrec` wrinkle.* Today its bind phase double-pushes (pre-define all names to
+nil, then re-`env_define` the real values), so a name has two frame slots —
+unindexable. Fix: pre-define N nil slots, then *update in place* during the value
+phase (still within the bind phase, before the body runs — no observable
+mutation), giving exactly N stable slots.
+
+**Messages / closure-shipping.** A closure in a message carries resolved bodies.
+`LocalRef` is self-contained (a depth/index, interpreted against the *receiving*
+process's own runtime env — process-local, so it travels fine). `GlobalRef`
+depends on *where the message lands*, and the two paths differ:
+- **Same-node `send`** deep-copies the message across per-process heaps
+  (`to_message`/`from_message`) but stays **inside the same runtime** — same
+  shared `RuntimeCode`, same global table — so a `GlobalRef{slot}` is **still
+  valid; no downgrade.** The same-node copy keeps the slot intact.
+- **Cross-*node* (the `dist` wire)** lands in an **independent `RuntimeCode`**
+  where a slot index is meaningless. So the **dist serialization** (not the
+  same-node copy) **downgrades `GlobalRef → sym`**, and the receiver re-resolves
+  against its own table on load (or lazily on first eval).
+
+This is why `GlobalRef` retains `sym`: the dist path needs it, and it also serves
+diagnostics + the dynamic-var fallback. (A `def`'d-but-unbound forward slot that
+crosses the wire downgrades to its `sym` like any other.)
+
+**Consequences / invariants.**
+- **Tail calls** unaffected (resolution rewrites references, not control flow);
+  `tail_calls_do_not_overflow` stays the gate.
+- **GC** unaffected — resolved refs are `Copy` scalars; closure bodies are still
+  `Value` trees traced as before.
+- **Type checker** never rejects (refs are `dynamic()`); advisory contract intact.
+- **Immutability** intact — global *cells* are binding mutation (already the only
+  mutation Brood has, ADR-026/013), not data mutation.
+- **Concurrency / memory safety.** 2a (`LocalRef`) adds no shared-mutable surface
+  — env frames are process-local. 2b's global cells are the only new shared
+  mutable state, and they are **seqlock-synchronized** (see §2): reads are
+  wait-free-ish (retry only against a concurrent `def`), writes release-publish an
+  already-promoted immutable handle. No torn reads, no data race; soundness does
+  not rest on the coarse map lock it replaces.
+
+**Risks.** Largest churn of the campaign — `eval/mod.rs`, `eval/macros.rs`,
+`core/value.rs` + `types.rs` (the carve-out), `core/heap.rs` (global cells +
+seqlock), `dist` (the cross-node `GlobalRef → sym` downgrade). Overlaps in-flight
+GC-stats work in `heap.rs`. The global-cell change touches the hot-reload path →
+the cross-process and hot-reload suites are the correctness gate, not just the
+unit benches. **Get the seqlock right**: a `Value` is multi-word, so a bare slot
+read is UB — this is the one place a subtle bug would be a data race rather than a
+clean error.
+
+**Rollout (each stage measured against the Step-0 baseline).**
+- **2a — locals only.** Resolve `LocalRef`; leave globals as symbols (still map
+  lookup). No `RuntimeCode` change, no message/hot-reload risk. Validates the
+  resolver pass, scope threading, the `Value` carve-out, and idempotency on the
+  *low-risk* path. (Moves deep-local programs; the global-heavy `sort`/`cons_build`
+  benches move little here — that's expected.)
+- **2b — global cells (seqlock) + `GlobalRef`.** The high-impact stage (this is
+  what the `sort`/`cons_build` benches actually wait on). Gated on the hot-reload
+  suite **plus a new concurrent-globals race test** — many spawned processes
+  reading a global while another redefines it, under `BROOD_GC_STRESS` — which is
+  what would catch a botched seqlock.
+- **2c — dynamic-var fallback + the cross-node `GlobalRef → sym` dist-wire
+  downgrade** (same-node `send` keeps the slot) and their explicit multi-node
+  tests.
+
+Locals-first deliberately front-loads the *shared machinery* (representation,
+pass, idempotency) on the safe path before the high-impact, higher-risk global
+change. An ADR number is reserved; promote **Status → accepted** once 2a lands
+green with a recorded benchmark delta.
+
+**References.** [`handoff-eval-dispatch.md`](handoff-eval-dispatch.md) (the
+campaign + Step 0/1 results), ADR-013 (hot reload / late binding — the constraint
+that forces global *cells* not inlined values), ADR-026 (immutability — why this
+is binding-, not data-mutation), ADR-023/024 + [`types.md`](types.md) (the
+compatibility contract the `Value` carve-out must satisfy), ADR-002 (the
+`Rc`→`gc-arena` migration that `value.rs` helpers keep contained), the shared-code
+model in [`shared-code.md`](shared-code.md) (why `GlobalRef` can't cross runtimes).

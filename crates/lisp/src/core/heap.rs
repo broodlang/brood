@@ -35,8 +35,7 @@ use crate::core::blob::{SharedBlob, SHARED_BLOB_THRESHOLD};
 use crate::core::map_champ::{self, MapNode, MAX_DEPTH};
 use crate::core::value::{
     Closure, ClosureArm, ClosureId, EnvId, MapId, NativeFn, NativeId, PairId, RopeId, StrId,
-    Symbol, Value,
-    VecId, LOCAL, PRELUDE, RUNTIME,
+    Symbol, Value, VecId, LOCAL, PRELUDE, RUNTIME,
 };
 use crate::error::LispError;
 
@@ -540,6 +539,20 @@ pub struct Heap {
     /// reuses a slot, so a whole-arena flip is the only LOCAL-invalidating event.
     /// See `docs/memory-review.md`.
     local_epoch: u32,
+    /// GC observability counters (Tier-1; `docs/memory-review.md` §7). Bumped by
+    /// every [`arena_flip`](Self::arena_flip) — so they count *both* the automatic
+    /// Stage-B safepoint collections and the `(hibernate)` flushes, which share
+    /// that path. Read out via `(gc-stats)`. Per-heap (per Brood process), reset
+    /// to zero only at process start; survive arena flips (the flip writes them,
+    /// it doesn't clear them). `u64` so a long-lived server loop can't wrap them.
+    /// `gc_runs` = collections performed; `gc_copied` = cumulative survivors
+    /// relocated; `gc_reclaimed` = cumulative objects dropped (live-before minus
+    /// survivors). These are *counts of LOCAL objects*, not bytes — the cheap,
+    /// traversal-free figure (cf. [`local_bytes`](Self::local_bytes) for a byte
+    /// estimate).
+    gc_runs: u64,
+    gc_copied: u64,
+    gc_reclaimed: u64,
 }
 
 impl Default for Heap {
@@ -590,6 +603,9 @@ impl Heap {
             gc_threshold: usize::MAX,
             gc_enabled: false,
             local_epoch: 0,
+            gc_runs: 0,
+            gc_copied: 0,
+            gc_reclaimed: 0,
         }
     }
 
@@ -612,6 +628,9 @@ impl Heap {
             gc_threshold: gc_floor(),
             gc_enabled: true,
             local_epoch: 0,
+            gc_runs: 0,
+            gc_copied: 0,
+            gc_reclaimed: 0,
         }
     }
 
@@ -1480,7 +1499,12 @@ impl Heap {
             id.index(),
             id.0
         );
-        self.check_epoch(id.generation(), id.index(), "local_shared_blob_strong_count", id.0);
+        self.check_epoch(
+            id.generation(),
+            id.index(),
+            "local_shared_blob_strong_count",
+            id.0,
+        );
         match &self.local.strings[id.index()] {
             LocalString::Shared(arc) => Some(Arc::strong_count(arc)),
             LocalString::Inline(_) => None,
@@ -1712,28 +1736,25 @@ impl Heap {
         EnvId::runtime(self.runtime.code.envs.push(EnvFrame { vars, parent }))
     }
 
-    /// **Arena flip / heap flush** (Phase 2, ADR-026 + the bump-allocator
-    /// follow-up): deep-copy the given LOCAL-reachable roots into a brand-new
-    /// `Slabs`, swap it in, and drop the old. Bounds memory in long-lived
-    /// processes (server-style receive loops, REPLs, the editor event loop)
-    /// where the bump allocator would otherwise grow without bound.
+    /// **Arena flip with value roots only** (no env roots) — the thin
+    /// [`arena_flip`](Self::arena_flip) entry used where the live set is a flat
+    /// list of `Value`s and no `env` needs relocating: the heap unit tests, and
+    /// any future caller that has unwound to a clean point. Deep-copies the given
+    /// LOCAL-reachable `roots` (plus this heap's [`dynamics`]/[`roots`] stacks)
+    /// into a fresh `Slabs`, swaps it in, and drops the old; PRELUDE/RUNTIME
+    /// handles are returned unchanged; cycles terminate via forwarding tables.
     ///
-    /// Inputs (mutated **in place** to the new handles): the explicit `roots`
-    /// slice the caller cares about, plus this heap's own [`dynamics`] stack
-    /// and [`roots`](Self::push_root) stack. Anything in PRELUDE/RUNTIME is
-    /// returned unchanged. Cycles are handled via forwarding tables — a
-    /// placeholder is allocated before recursing, so a `letrec`-style
-    /// env-↔-closure cycle terminates.
+    /// The *automatic* collector ([`collect`](Self::collect)) is the production
+    /// path — it shares this same `arena_flip` machinery but also relocates the
+    /// eval loop's live `env`. (This used to back the removed `(hibernate)`
+    /// primitive, reached via an unwinding sentinel; automatic GC made that
+    /// redundant — docs/memory-review.md.)
     ///
-    /// **Safety contract.** The caller must guarantee that no LOCAL handle
-    /// outside the supplied roots / dynamics / extra-roots is reachable from
-    /// the Rust stack — i.e. there is no in-flight eval-loop frame whose
-    /// `expr`/`env` register points at LOCAL. The way to satisfy this is to
-    /// reach flush via an unwinding error ([`LispError::hibernate`]) that
-    /// discards every intervening Rust frame; the process run loop then
-    /// catches the sentinel at the coroutine boundary and calls flush before
-    /// re-applying. Calling flush from inside `eval` without that unwind
-    /// would leave the caller's stale handles dangling.
+    /// **Safety contract.** No LOCAL handle outside the supplied roots /
+    /// dynamics / explicit-root stack may be reachable from the Rust stack — i.e.
+    /// no in-flight eval frame whose `expr`/`env` points at LOCAL — or those
+    /// stale handles dangle. Satisfied by calling only from a point with no live
+    /// eval frame (the tests run it on a bare heap).
     pub fn flush(&mut self, roots: &mut [Value]) {
         self.arena_flip(roots, &mut []);
     }
@@ -1759,6 +1780,9 @@ impl Heap {
         // epoch and trips the debug deref check. `wrapping_add` is fine — a
         // collision needs 2^30 flips of one heap between a handle's mint and its
         // stale use.
+        // Live LOCAL objects *before* the copy — survivors come out of the flip
+        // below, so `before - survivors` is what this collection reclaims.
+        let before = self.local_live_count();
         self.local_epoch = self.local_epoch.wrapping_add(1);
         let old = std::mem::take(&mut self.local);
         let mut fwd = FlushForward::default();
@@ -1798,6 +1822,15 @@ impl Heap {
             self.poison.closures.clear();
             self.poison.envs.clear();
         }
+        // GC observability (Tier-1). After the flip the free lists are cleared,
+        // so `local_live_count()` is exactly the survivor count. Saturating so a
+        // pathological wrap can't panic on the collector hot path.
+        let survivors = self.local_live_count();
+        self.gc_runs = self.gc_runs.saturating_add(1);
+        self.gc_copied = self.gc_copied.saturating_add(survivors as u64);
+        self.gc_reclaimed = self
+            .gc_reclaimed
+            .saturating_add(before.saturating_sub(survivors) as u64);
         // `old` drops here, releasing every LOCAL slot the previous iteration
         // ever allocated.
     }
@@ -2624,6 +2657,22 @@ impl Heap {
             + s.envs.len() * size_of::<EnvFrame>()
     }
 
+    /// GC observability counters (Tier-1; `docs/memory-review.md` §7), as a
+    /// `(runs, copied, reclaimed)` triple of cumulative figures since process
+    /// start: collections performed, LOCAL objects relocated, LOCAL objects
+    /// dropped. Backs the `(gc-stats)` builtin. Counts *both* Stage-B safepoint
+    /// collections and `(hibernate)` flushes (they share [`arena_flip`]).
+    pub fn gc_counters(&self) -> (u64, u64, u64) {
+        (self.gc_runs, self.gc_copied, self.gc_reclaimed)
+    }
+
+    /// The current adaptive GC threshold (LOCAL live-object count that triggers
+    /// the next safepoint collection). The slow/stable dial — exposed so an
+    /// observer can see how close the heap is to its next collection.
+    pub fn gc_threshold(&self) -> usize {
+        self.gc_threshold
+    }
+
     // ----- the tracing GC ------------------------------------------------------
     //
     // Non-moving, single-threaded mark-sweep over the LOCAL heap only. Roots
@@ -3045,19 +3094,13 @@ struct FlushForward {
 
 fn flush_value(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, v: Value) -> Value {
     match v {
-        Value::Pair(id) if id.region() == LOCAL => {
-            Value::Pair(flush_pair(old, new, fwd, id))
-        }
-        Value::Vector(id) if id.region() == LOCAL => {
-            Value::Vector(flush_vector(old, new, fwd, id))
-        }
+        Value::Pair(id) if id.region() == LOCAL => Value::Pair(flush_pair(old, new, fwd, id)),
+        Value::Vector(id) if id.region() == LOCAL => Value::Vector(flush_vector(old, new, fwd, id)),
         Value::Map(id) if id.region() == LOCAL => Value::Map(flush_map(old, new, fwd, id)),
         Value::Str(id) if id.region() == LOCAL => Value::Str(flush_string(old, new, fwd, id)),
         Value::Rope(id) if id.region() == LOCAL => Value::Rope(flush_rope(old, new, fwd, id)),
         Value::Fn(id) if id.region() == LOCAL => Value::Fn(flush_closure(old, new, fwd, id)),
-        Value::Macro(id) if id.region() == LOCAL => {
-            Value::Macro(flush_closure(old, new, fwd, id))
-        }
+        Value::Macro(id) if id.region() == LOCAL => Value::Macro(flush_closure(old, new, fwd, id)),
         // Atoms + PRELUDE/RUNTIME handles are shared and immutable; no copy.
         _ => v,
     }
@@ -3214,12 +3257,7 @@ fn flush_map(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: MapId) ->
     MapId::local_gen(new_idx, fwd.epoch)
 }
 
-fn flush_closure(
-    old: &Slabs,
-    new: &mut Slabs,
-    fwd: &mut FlushForward,
-    id: ClosureId,
-) -> ClosureId {
+fn flush_closure(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: ClosureId) -> ClosureId {
     let key = id.index() as u32;
     if let Some(&new_idx) = fwd.closures.get(&key) {
         return ClosureId::local_gen(new_idx as usize, fwd.epoch);

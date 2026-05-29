@@ -462,11 +462,12 @@ Maps look up by key; vectors, lists, and strings index by integer position
   (let (next (/ (+ guess (/ n guess)) 2.0))
     (if (or (= steps 0) (= next guess)) next (sqrt--iter n next (- steps 1)))))
 
-;; Euclidean modulo: the result has the sign of the divisor and lies in
+;; Euclidean modulo: the result is always non-negative and lies in
 ;; [0, (abs b)). Brood over the `rem` primitive (truncated remainder), nudged
-;; back into range when the two disagree in sign. (÷0 raises via `rem`.)
+;; back into range when `rem` comes out negative. (÷0 raises via `rem`.)
+;; Note this is *not* floored modulo: `(mod 7 -3)` is 1, not -2.
 (defn mod (a b)
-  "Euclidean modulo: the result takes the sign of the divisor `b` and lies in [0, |b|)."
+  "Euclidean modulo: the result is always non-negative and lies in [0, |b|)."
   (let (r (rem a b)) (if (< r 0) (+ r (abs b)) r)))
 
 ;; ---- I/O --------------------------------------------------------------------

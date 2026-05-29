@@ -229,7 +229,28 @@ flip (error positions survive a mid-load collection). Validated: full suite
 (every-safepoint fuzz); release churn of 100k allocating iterations stays bounded
 (~10 MB) at 0.02 s. The footgun the review feared is real but bounded and was
 caught loudly by the generational tripwire + GC_STRESS — exactly as predicted.
-The original plan follows.
+
+**Stage B's reach is exactly "depth-1 tail loops" — and how you *enter* the
+program decides whether you get it (2026-05-29 follow-up).** The safepoint is
+gated on `gc_block_depth() == 1` (the outermost eval, where the only live LOCAL
+transients are the rooted `expr`/`env`); a loop running *deeper* never reaches it.
+The trap this exposed: `nest run <file>` used to evaluate the program via the
+`(load "path")` builtin, which re-enters `eval` for each form while the `(load …)`
+frame is still on the stack — so the whole program ran at `gc_block_depth >= 2`
+and **never collected**, climbing ~100 MB/s (the Game-of-Life §8 leak,
+`docs/feedback-retro-game-of-life.md`). `brood <file>` never leaked because its
+`eval_source` form loop runs each top-level form at depth 1. **Fix:** `nest run
+<file>` now evaluates the entry through `eval_source` at depth 1, like `brood`;
+the same life loop went from 0 collections / 1.16 GB to 166 collections / ~5 MB.
+So the rule a *user* never has to think about — but the runtime must honour — is
+**run the program at depth 1** (a top-level form, or a spawned-process body; both
+collect). Resetting `GC_BLOCK` inside `load` to fake depth 1 is **unsafe**: the
+`(load …)` eval frame itself holds unrooted `expr`/`call_form` Rust locals that a
+collection would invalidate. Still one frame deep, and so still un-collected:
+`nest run --watch`/`--for` (program runs inside a wrapper spawn whose body
+`(load …)`s) and project `:main` (a Brood dispatcher calls the entry fn). These
+keep `(hibernate)` as the escape hatch until the operand-stack VM (below) lets us
+collect at any depth. The original plan follows.
 
 Promote Model 2 from manual to automatic. At the `GC_BLOCK == 1` safepoint, when
 `mem` crosses a threshold, instead of the disabled in-place `collect`, perform a

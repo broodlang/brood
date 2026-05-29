@@ -187,7 +187,11 @@ pub fn parse_size(s: &str) -> Option<usize> {
     let body = s
         .strip_suffix('B')
         .or_else(|| s.strip_suffix('b'))
-        .map(|t| t.strip_suffix('i').or_else(|| t.strip_suffix('I')).unwrap_or(t))
+        .map(|t| {
+            t.strip_suffix('i')
+                .or_else(|| t.strip_suffix('I'))
+                .unwrap_or(t)
+        })
         .unwrap_or(s);
     let (num, mult) = match body.chars().last() {
         Some(c @ ('K' | 'k')) => (&body[..body.len() - c.len_utf8()], 1024usize),

@@ -1,0 +1,177 @@
+;; std/package.blsp — the package manager (ADR-037, docs/packages.md). (require 'package).
+;;
+;; Third-party Brood deps: source pinned in the manifest's :dependencies, cached
+;; per-project, locked for reproducibility. Policy is here; the kernel adds only
+;; thin mechanism (`%sha256`, later `%git-clone`/`%git-resolve-ref`/`%http-get`).
+;;
+;; Slice 1 (this file): `:path` deps end-to-end — resolve a sibling-directory dep,
+;; hash its tree, write project.lock.blsp, and add its `src/` to *load-path* so
+;; `(require 'dep)` finds it. `:path` deps load IN PLACE (no _deps/ copy), so edits
+;; to a path-dep's tree are live. `:git` deps (the _deps/ cache + clone) land in
+;; Slice 2 and error cleanly here.
+;;
+;; Manifest parsing (`project--parse-deps`) lives in std/project.blsp — the manifest
+;; owner — and we reuse it both for the root manifest and for each dep's own.
+
+(require 'project)
+
+(defmodule package
+  "The package manager behind `nest fetch` (ADR-037). Resolves the project's
+:dependencies into a flat, transitively-closed lock file and puts each dep's
+source on *load-path*. Slice 1 handles `:path` (local/sibling) deps; `:git` deps
+land in a later slice.")
+
+;; --- canonical directory content hash (ADR-037 reproducibility) --------------
+;; A directory's hash is Brood over the single `%sha256` primitive: walk files in
+;; sorted order, and for each emit "<rel-path>\0<file-hash>\n", then hash the lot.
+;; Approximates `git archive | sha256sum` without depending on git. Skips _deps/
+;; and .git/ (a dep's nested cache / VCS data is not part of its content).
+
+(def *package--hash-skip* (list "_deps" ".git"))
+
+;; The file paths under `dir`, relative to it, sorted. Recurses into subdirs.
+(defn package--tree-files (dir) (sort (package--tree-files--walk dir "")))
+(defn package--tree-files--walk (dir prefix)
+  (fold (fn (acc entry)
+          (if (includes? *package--hash-skip* entry)
+            acc
+            (let (full (path-join dir entry)
+                  rel (if (= prefix "") entry (str prefix "/" entry)))
+              (if (dir? full)
+                (append acc (package--tree-files--walk full rel))
+                (append acc (list rel))))))
+    nil (list-dir dir)))
+
+(defn package--sha256-file (path) (%sha256 (slurp path)))
+
+(defn package-tree-hash (dir)
+  "The canonical SHA-256 (hex) of a directory's file contents — order-independent of the filesystem, stable across machines (ADR-037)."
+  (%sha256
+    (join ""
+      (map (fn (rel) (str rel "\0" (package--sha256-file (path-join dir rel)) "\n"))
+        (package--tree-files dir)))))
+
+;; --- reading a dependency's own manifest -------------------------------------
+;; A dep declares its own deps in its project.blsp. We read (not eval) the first
+;; form; if it's a `(project …)` call, pull :dependencies from its plist and
+;; normalise with the manifest parser. Avoids `load`, which would clobber the
+;; root project's *project-* globals.
+(defn package--manifest-deps (manifest-path)
+  (if (not (file-exists? manifest-path))
+    nil
+    (let (form (read-string (slurp manifest-path)))
+      (if (and (pair? form) (= (first form) 'project))
+        (project--parse-deps (plist-get (rest form) :dependencies))
+        nil))))
+
+;; --- resolution --------------------------------------------------------------
+;; Resolve the transitive dep set into a flat list of resolved entry-maps
+;; (depth-first; direct deps first, then their deps). A name required twice at
+;; different sources is a loud error — the user pins it in the root manifest.
+
+(defn resolve-deps (root deps)
+  "Resolve `deps` (normalised dep maps from the manifest) and everything they transitively pull in, into a flat list of resolved entry-maps. Errors on a name required at two different sources."
+  (package--resolve-loop root deps {} nil))
+
+(defn package--resolve-loop (root queue resolved order)
+  (cond
+    (empty? queue) (map (fn (nm) (get resolved nm)) (reverse order))
+    (contains? resolved (get (first queue) :name))
+    (do (package--check-compatible (get resolved (get (first queue) :name)) (first queue))
+        (package--resolve-loop root (rest queue) resolved order))
+    else
+    (let (dep (first queue)
+          nm (get dep :name)
+          entry (package--resolve-one root dep))
+      (package--resolve-loop root
+        (append (rest queue) (get entry :deps))
+        (assoc resolved nm entry)
+        (cons nm order)))))
+
+(defn package--resolve-one (root dep)
+  (cond
+    (= (get dep :kind) :path) (package--resolve-path root dep)
+    (= (get dep :kind) :git) (error "package: :git dependency " (get dep :name)
+                               " — git deps are not supported yet (Slice 2); use a :path dep for now")
+    else (error "package: unknown dependency kind " (get dep :kind))))
+
+(defn package--resolve-path (root dep)
+  (let (abs (path-join root (get dep :path)))
+    (when (not (dir? abs))
+      (error "package: :path dependency " (get dep :name) " not found at " abs))
+    {:name (get dep :name)
+     :kind :path
+     :path (get dep :path)
+     :resolved-path abs
+     :sha256 (package-tree-hash abs)
+     :deps (package--manifest-deps (path-join abs "project.blsp"))}))
+
+;; Two resolutions of the same name must agree on their source.
+(defn package--check-compatible (existing dep)
+  (when (not (= (get existing :path) (get dep :path)))
+    (error "package: conflicting dependency " (get dep :name)
+      " required at both \"" (get existing :path) "\" and \"" (get dep :path)
+      "\" — pin it explicitly in your root manifest")))
+
+;; --- the lock file -----------------------------------------------------------
+;; project.lock.blsp is generated, committed, and plain Brood data so a PR diff is
+;; reviewable. Each entry is a vector `[name :path PATH :sha256 HASH :deps [names…]]`;
+;; :deps records the dep's own direct deps (by name) for traceability / `nest tree`.
+
+(defn package--entry->lock-vec (e)
+  (apply vector
+    (append (list (get e :name) :path (get e :path) :sha256 (get e :sha256))
+      (list :deps (apply vector (map (fn (d) (get d :name)) (get e :deps)))))))
+
+(defn package--lockfile-content (entries)
+  (str ";; project.lock.blsp — generated by `nest fetch`. Do not edit by hand.\n"
+    (pr-str (list 'lock :version 1 :dependencies (apply vector (map package--entry->lock-vec entries))))
+    "\n"))
+
+(defn package--lockfile-path (root) (path-join root "project.lock.blsp"))
+
+(defn write-lockfile (root entries)
+  "Write project.lock.blsp under `root` from resolved `entries`."
+  (spit (package--lockfile-path root) (package--lockfile-content entries)))
+
+(defn read-lockfile (root)
+  "The :dependencies vector from project.lock.blsp under `root`, or nil if absent."
+  (let (path (package--lockfile-path root))
+    (if (not (file-exists? path))
+      nil
+      (let (form (read-string (slurp path)))
+        (if (and (pair? form) (= (first form) 'lock))
+          (plist-get (rest form) :dependencies)
+          nil)))))
+
+;; Rewrite the lock only when its content actually changes — so a plain
+;; `nest test`/`run` doesn't churn the file (or git) on every invocation.
+(defn package--write-lockfile-if-changed (root entries)
+  (let (path (package--lockfile-path root)
+        new (package--lockfile-content entries)
+        old (if (file-exists? path) (slurp path) nil))
+    (when (not (= old new)) (spit path new))))
+
+;; --- load-path integration ---------------------------------------------------
+;; A dep's source dir (its <resolved>/src by default). :path deps load here in
+;; place; no copy into _deps/.
+(defn package--dep-src-dir (e) (path-join (get e :resolved-path) "src"))
+
+(defn ensure-deps (root deps)
+  "Resolve `deps`, refresh the lock file, and return the list of source dirs to add to *load-path* (one per resolved dep). Called from `project-setup`; a no-op when there are no deps."
+  (if (empty? deps)
+    nil
+    (let (entries (resolve-deps root deps))
+      (package--write-lockfile-if-changed root entries)
+      (map package--dep-src-dir entries))))
+
+;; --- the `nest fetch` verb ---------------------------------------------------
+(defn fetch ()
+  "Resolve and lock the current project's dependencies, always (re)writing project.lock.blsp. For :path deps this verifies each is present and records its tree hash. Returns the resolved entries."
+  (let (root (project--find-root (cwd)))
+    (when (nil? root) (error "package: not inside a Brood project (no project.blsp found)"))
+    (when (file-exists? (path-join root "project.blsp")) (load (path-join root "project.blsp")))
+    (let (entries (resolve-deps root *project-dependencies*))
+      (write-lockfile root entries)
+      (println "package: locked " (count entries) " dependencies in project.lock.blsp")
+      entries)))

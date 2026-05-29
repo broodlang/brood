@@ -34,6 +34,55 @@
     ;; reflects the live value the runner would use.
     (assert= *project-main* '(main main))))
 
+(describe "project: :dependencies parsing (ADR-037)"
+  (test "a :git entry normalises to a dep map"
+    (assert= (project--parse-dep '[parser :git "https://example.com/p.git" :ref "v1.2.0"])
+      {:name 'parser :kind :git :url "https://example.com/p.git" :ref "v1.2.0"}))
+  (test "a :path entry normalises to a dep map"
+    (assert= (project--parse-dep '[shared :path "../shared"])
+      {:name 'shared :kind :path :path "../shared"}))
+  (test "parse-deps maps over the whole vector"
+    (assert= (project--parse-deps '[[a :path "../a"] [b :path "../b"]])
+      (list {:name 'a :kind :path :path "../a"} {:name 'b :kind :path :path "../b"})))
+  (test "nil dependencies parse to nil"
+    (assert= (project--parse-deps nil) nil))
+  (test "a non-vector :dependencies value is rejected"
+    (is (string-contains? (try (project--parse-deps '(a b)) (catch e e)) "must be a vector")))
+  (test "a non-symbol dep name is rejected"
+    (is (string-contains? (try (project--parse-dep '["parser" :path "../p"]) (catch e e)) "must be a symbol")))
+  (test "an unknown source kind is rejected"
+    (is (string-contains? (try (project--parse-dep '[parser :svn "../p"]) (catch e e)) "must be :git or :path")))
+  (test "a :git dep without a :ref is rejected"
+    (is (string-contains? (try (project--parse-dep '[parser :git "https://x.git"]) (catch e e)) "needs a :ref")))
+  (test "a reserved opt is rejected so the manifest stays forward-compatible"
+    (is (string-contains?
+          (try (project--parse-dep '[parser :git "https://x.git" :ref "v1" :branch "main"]) (catch e e))
+          "reserved for a future version")))
+  (test "an entry that is too short is rejected"
+    (is (string-contains? (try (project--parse-dep '[parser :path]) (catch e e)) "too short"))))
+
+;; `:isolated` runs against a rolled-back private copy of the globals (ADR-017),
+;; so the *project-* globals this clobbers via `(project ...)` don't leak.
+(describe "project: the (project ...) manifest macro treats its args as data" :isolated
+  (test "bare dep-name symbols survive without quoting; :dependencies populates *project-dependencies*"
+    (project :name "demo" :version "0.0.1"
+      :dependencies [[parser :git "https://example.com/p.git" :ref "v1"]
+                     [shared :path "../shared"]])
+    (assert= *project-dependencies*
+      (list {:name 'parser :kind :git :url "https://example.com/p.git" :ref "v1"}
+            {:name 'shared :kind :path :path "../shared"}))))
+
+(describe "project: scaffold templates (ADR-037)"
+  (test "the .gitignore template ignores the package cache"
+    (is (string-contains? (project--gitignore-template) "_deps/")))
+  (test "the manifest template documents how to add :dependencies"
+    (let (m (project--manifest-template "demo"))
+      (is (string-contains? m ":dependencies"))
+      ;; still a valid manifest: the first form is the (project …) call
+      (let (form (read-string m))
+        (assert= (first form) 'project)
+        (assert= (plist-get (rest form) :name) "demo")))))
+
 (describe "project: duplicate global detection (flat namespace)"
   (test "project--file-def-names extracts top-level def-style names (and skips defmodule)"
     (let (dir (path-join "/tmp" (name (gensym "brood-dup-"))))

@@ -33,7 +33,9 @@ pub struct SharedBlob {
 
 impl SharedBlob {
     pub fn new(bytes: &[u8]) -> Arc<Self> {
-        Arc::new(SharedBlob { bytes: bytes.into() })
+        Arc::new(SharedBlob {
+            bytes: bytes.into(),
+        })
     }
 
     pub fn as_bytes(&self) -> &[u8] {

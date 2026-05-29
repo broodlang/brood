@@ -362,10 +362,10 @@ docs/testing.md for the full guide.")
 ;; freely — this only bounds how many *units* are in flight at once.
 (def *parallel-batch* 4)
 
-;; The parallel/serial units run in bounded groups (see `*parallel-batch*`) — but
-;; the loop that does so is the hibernating `run-driver` below, which also folds in
-;; the isolated phase. (It used to be a plain `run-parallel`/`run-isolated` pair;
-;; they were merged into the driver so the runner can `(hibernate)` between groups.)
+;; The parallel/serial units run in bounded groups (see `*parallel-batch*`) — the
+;; loop that does so is the `run-driver` below, which also folds in the isolated
+;; phase. (It used to be a plain `run-parallel`/`run-isolated` pair; they were
+;; merged into the driver so the runner collects between groups at the safepoint.)
 
 ;; The unit a monitored worker `pid` was spawned for, or nil if `pid` isn't one
 ;; of ours (e.g. a stale `[:down …]` from a previous run still in the mailbox).
@@ -422,23 +422,24 @@ docs/testing.md for the full guide.")
 (defn run-unit-fresh (unit)
   (let (group (second unit)) (map (fn (t) (run-test-fresh group t)) (third unit)))) ; -> results
 
-;; ─── TEMPORARY (Stage A — docs/memory-review.md) ────────────────────────────
-;; Hibernating test runner. The runner is one long-lived process; with automatic
-;; collection disabled (the ADR-035 GC is a no-op) it otherwise accumulates every
-;; step's transients — worker-result copies, the `append` spine, spawn/monitor
-;; machinery — until it trips the memory cap (the ~633-test suite hit ~4 GiB).
-;; So the result-gathering loop runs in a SPAWNED process that `(hibernate)`s
-;; between steps: each flip keeps only `(steps parent acc)` and drops that step's
-;; garbage, turning the unbounded climb into a per-step sawtooth. This is a
-;; userland GC trigger and a SMELL — delete this whole block and gather the two
-;; phases inline (a plain `fold`/recur) once automatic collection (Stage B) lands.
+;; ─── The test runner ────────────────────────────────────────────────────────
+;; The runner is one long-lived process gathering every step's results. Its
+;; per-step transients — worker-result copies, the `append` spine, spawn/monitor
+;; machinery — are garbage that once climbed to the memory cap (the ~633-test
+;; suite hit ~4 GiB) because automatic collection was off. It no longer does: the
+;; driver loop is a SPAWNED process body, so it runs at the depth-1 eval safepoint
+;; where **Stage B's automatic copying GC** (ADR-055) fires — each iteration's
+;; garbage is reclaimed while the live `acc` is kept (it's rooted as a tail-call
+;; argument). A plain tail call bounds the suite; the `(hibernate)` Stage A used
+;; here is gone (and the primitive itself was removed — automatic GC made it
+;; redundant, docs/memory-review.md §6).
 ;;
 ;; Each isolated unit still runs in its OWN awaited worker (so its heap is dropped
 ;; wholesale on exit, and its mailbox can't leak stragglers into another test);
-;; the parallel units still run in `*parallel-batch*`-sized groups (so the no-GC
-;; live set stays bounded to one group). Isolated steps come first and serially,
-;; so `%isolate`'s snapshot/restore of the shared globals table can't race a
-;; concurrent unit and each sees the clean post-load baseline.
+;; the parallel units still run in `*parallel-batch*`-sized groups (so the live
+;; set per collection stays bounded to one group). Isolated steps come first and
+;; serially, so `%isolate`'s snapshot/restore of the shared globals table can't
+;; race a concurrent unit and each sees the clean post-load baseline.
 
 ;; Chunk `coll` into ≤`n`-sized groups, KEEPING a short trailing group (`partition`
 ;; drops it — which here would silently skip tests).
@@ -466,15 +467,15 @@ docs/testing.md for the full guide.")
       (collect-units (list (list pid unit)) nil))
     (collect-units (spawn-units (rest step) (self)) nil)))
 
-;; The hibernating loop: run a step, then `(hibernate)` into the next with its
-;; results accumulated — the flip reclaims the step's transients. When the work
-;; list is empty, hand the full result list to `parent` (the process exits, so its
-;; heap drops too). Runs in the process `drain-runner` spawns, where `hibernate`
-;; is caught at the coroutine boundary.
+;; The driver loop: run a step, then tail-recurse into the next with its results
+;; accumulated. Stage B collects the step's transients at the safepoint between
+;; iterations (this is a depth-1 spawned-process body), keeping `acc` live. When
+;; the work list is empty, hand the full result list to `parent` (the process
+;; exits, so its heap drops too).
 (defn run-driver (steps parent acc)
   (if (empty? steps)
     (send parent [:all-results acc])
-    (hibernate run-driver (rest steps) parent
+    (run-driver (rest steps) parent
       (append (run--step (first steps)) acc))))
 
 ;; Spawn the driver and block until it reports every unit's results. Monitors it

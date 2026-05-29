@@ -5,3 +5,9 @@
 # Editor / OS cruft
 *.swp
 .DS_Store
+
+# Local build options written by ./configure
+/config.mk
+
+# Brood package cache — regenerable from project.lock.blsp (committed) (ADR-037)
+_deps/

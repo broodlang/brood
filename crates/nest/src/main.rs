@@ -632,12 +632,12 @@ fn cmd_observe(interp: &mut Interp, connect: Option<String>, cookie: Option<Stri
             // `spec`/`cookie` are user input embedded in a Brood string literal —
             // escape backslash and quote so they can't break out of the literal.
             format!(
-                "(require 'observe) (observe-connect \"{}\" \"{}\")",
+                "(require 'observer) (observe-connect \"{}\" \"{}\")",
                 brood_str_escape(&spec),
                 brood_str_escape(&cookie),
             )
         }
-        None => "(require 'observe) (observe-run)".to_string(),
+        None => "(require 'observer) (observe-run)".to_string(),
     };
     // The guard restores the terminal on a panic unwind; the inner scope drops it
     // (restoring) before any error is reported and we exit — `process::exit`

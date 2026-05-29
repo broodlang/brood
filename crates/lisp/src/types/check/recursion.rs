@@ -133,7 +133,10 @@ fn walk(heap: &Heap, form: Value, tail: bool, name: Symbol, out: &mut Vec<(Optio
             analyze_body(heap, name, &items[2..], out);
             return;
         }
-        if value::symbol_is(head, "do") || value::symbol_is(head, "and") || value::symbol_is(head, "or") {
+        if value::symbol_is(head, "do")
+            || value::symbol_is(head, "and")
+            || value::symbol_is(head, "or")
+        {
             // do: last form is tail. and/or: the last operand is the result
             // (tail); earlier operands are tested (non-tail). Same shape.
             analyze_body(heap, name, &items[1..], out);

@@ -1,0 +1,149 @@
+;; Package manager — Slice 1: :path deps end-to-end (std/package.blsp, ADR-037).
+;; Covers the canonical tree hash, reading a dep's manifest, transitive
+;; resolution + conflict detection, the lock-file round-trip, and `ensure-deps`'s
+;; load-path output. Fixtures are real directories built under /tmp with a unique
+;; gensym'd root per test, so the cases don't collide and need no network/git.
+;;
+;; Register-only — discovered and run by `nest test` (and cargo test).
+
+(require 'test)
+(require 'package)
+
+;; Build a throwaway project dir `<tmp>/<name>` with a manifest + one src module.
+;; `deps-vec` is a literal :dependencies vector string (or nil for none).
+(defn pkg-fixture-root () (path-join "/tmp" (name (gensym "brood-pkg-"))))
+
+(defn pkg-write-project (root nm src-module body deps-line)
+  (make-dir (path-join root "src"))
+  (spit (path-join root "project.blsp")
+    (str "(project :name \"" nm "\" :version \"0.1.0\"" deps-line ")\n"))
+  (spit (path-join (path-join root "src") (str src-module ".blsp"))
+    (str "(defmodule " src-module " \"fixture\")\n" body "\n")))
+
+(describe "package: canonical tree hash"
+  (test "is deterministic for the same content"
+    (let (root (pkg-fixture-root))
+      (pkg-write-project root "a" "a" "(defn f () 1)" "")
+      (assert= (package-tree-hash root) (package-tree-hash root))))
+  (test "changes when a file's content changes"
+    (let (root (pkg-fixture-root))
+      (pkg-write-project root "a" "a" "(defn f () 1)" "")
+      (let (h1 (package-tree-hash root))
+        (spit (path-join (path-join root "src") "a.blsp") "(defmodule a \"fixture\")\n(defn f () 2)\n")
+        (refute (= h1 (package-tree-hash root))))))
+  (test "skips _deps/ so a nested cache doesn't perturb the hash"
+    (let (root (pkg-fixture-root))
+      (pkg-write-project root "a" "a" "(defn f () 1)" "")
+      (let (h1 (package-tree-hash root))
+        (make-dir (path-join root "_deps"))
+        (spit (path-join (path-join root "_deps") "junk.blsp") "(def x 1)")
+        (assert= h1 (package-tree-hash root))))))
+
+(describe "package: reading a dependency's manifest"
+  (test "extracts a dep's own :dependencies"
+    (let (root (pkg-fixture-root))
+      (pkg-write-project root "a" "a" "(defn f () 1)"
+        " :dependencies [[b :path \"../b\"]]")
+      (assert= (package--manifest-deps (path-join root "project.blsp"))
+        (list {:name 'b :kind :path :path "../b"}))))
+  (test "a manifest without :dependencies yields nil"
+    (let (root (pkg-fixture-root))
+      (pkg-write-project root "a" "a" "(defn f () 1)" "")
+      (assert= (package--manifest-deps (path-join root "project.blsp")) nil)))
+  (test "a missing manifest yields nil"
+    (assert= (package--manifest-deps "/tmp/does-not-exist-xyz/project.blsp") nil)))
+
+(describe "package: resolving :path deps"
+  (test "a single path dep resolves to an entry with name/kind/path/sha/deps"
+    (let (parent (pkg-fixture-root)
+          dep-dir (path-join parent "greeter")
+          app-dir (path-join parent "app"))
+      (pkg-write-project dep-dir "greeter" "greeter" "(defn greet (w) (str \"hi \" w))" "")
+      (pkg-write-project app-dir "app" "main" "(defn main () 1)"
+        " :dependencies [[greeter :path \"../greeter\"]]")
+      (let (entries (resolve-deps app-dir (list {:name 'greeter :kind :path :path "../greeter"})))
+        (assert= (count entries) 1)
+        (let (e (first entries))
+          (assert= (get e :name) 'greeter)
+          (assert= (get e :kind) :path)
+          (assert= (get e :path) "../greeter")
+          (is (string? (get e :sha256)))
+          (assert= (get e :deps) nil)))))
+  (test "transitive path deps are resolved depth-first into a flat list"
+    (let (parent (pkg-fixture-root)
+          a (path-join parent "a")
+          b (path-join parent "b")
+          app (path-join parent "app"))
+      (pkg-write-project b "b" "b" "(defn bf () 1)" "")
+      (pkg-write-project a "a" "a" "(defn af () 1)" " :dependencies [[b :path \"../b\"]]")
+      (pkg-write-project app "app" "main" "(defn main () 1)" " :dependencies [[a :path \"../a\"]]")
+      (let (entries (resolve-deps app (list {:name 'a :kind :path :path "../a"})))
+        (assert= (map (fn (e) (get e :name)) entries) (list 'a 'b)))))
+  (test "a missing path dep is a clear error"
+    (let (app (pkg-fixture-root))
+      (pkg-write-project app "app" "main" "(defn main () 1)" "")
+      (is (string-contains?
+            (try (resolve-deps app (list {:name 'gone :kind :path :path "../gone"})) (catch e e))
+            "not found"))))
+  (test "a :git dep errors with the Slice-2 message"
+    (is (string-contains?
+          (try (resolve-deps "/tmp" (list {:name 'p :kind :git :url "https://x.git" :ref "v1"}))
+            (catch e e))
+          "not supported yet"))))
+
+(describe "package: the lock file round-trips"
+  (test "write-lockfile then read-lockfile recovers the dep vector"
+    (let (parent (pkg-fixture-root)
+          dep-dir (path-join parent "greeter")
+          app-dir (path-join parent "app"))
+      (pkg-write-project dep-dir "greeter" "greeter" "(defn greet (w) w)" "")
+      (pkg-write-project app-dir "app" "main" "(defn main () 1)"
+        " :dependencies [[greeter :path \"../greeter\"]]")
+      (let (entries (resolve-deps app-dir (list {:name 'greeter :kind :path :path "../greeter"})))
+        (write-lockfile app-dir entries)
+        (let (locked (read-lockfile app-dir))
+          (is (vector? locked))
+          (assert= (vector-length locked) 1)
+          ;; entry vector: [greeter :path "../greeter" :sha256 H :deps []]
+          (let (row (vector-ref locked 0))
+            (assert= (vector-ref row 0) 'greeter)
+            (assert= (vector-ref row 1) :path)
+            (assert= (vector-ref row 2) "../greeter"))))))
+  (test "read-lockfile is nil when there is no lock file"
+    (assert= (read-lockfile (pkg-fixture-root)) nil)))
+
+(describe "package: ensure-deps yields load-path entries"
+  (test "returns each dep's src dir and writes the lock file"
+    (let (parent (pkg-fixture-root)
+          dep-dir (path-join parent "greeter")
+          app-dir (path-join parent "app"))
+      (pkg-write-project dep-dir "greeter" "greeter" "(defn greet (w) w)" "")
+      (pkg-write-project app-dir "app" "main" "(defn main () 1)"
+        " :dependencies [[greeter :path \"../greeter\"]]")
+      (let (dirs (ensure-deps app-dir (list {:name 'greeter :kind :path :path "../greeter"})))
+        (assert= (count dirs) 1)
+        ;; the dir is the dep's src/ (relative ".." is left unnormalised — the OS
+        ;; resolves it; normalisation is a deferred nicety)
+        (is (string-contains? (first dirs) "greeter/src"))
+        (is (file-exists? (path-join app-dir "project.lock.blsp"))))))
+  (test "no deps means no load-path entries and no lock file"
+    (let (app (pkg-fixture-root))
+      (make-dir app)
+      (assert= (ensure-deps app nil) nil)
+      (refute (file-exists? (path-join app "project.lock.blsp"))))))
+
+;; End-to-end: a path dep's module becomes require-able once its src dir is on
+;; *load-path* — the whole point of the slice. :isolated because it mutates
+;; *load-path* and loads a module (ADR-017 rolls both back).
+(describe "package: a resolved :path dep is require-able" :isolated
+  (test "require finds the dep's module after ensure-deps extends *load-path*"
+    (let (parent (pkg-fixture-root)
+          dep-dir (path-join parent "greeter")
+          app-dir (path-join parent "app"))
+      (pkg-write-project dep-dir "greeter" "greeter" "(defn greet (w) (str \"hi \" w))" "")
+      (pkg-write-project app-dir "app" "main" "(defn main () 1)"
+        " :dependencies [[greeter :path \"../greeter\"]]")
+      (let (dirs (ensure-deps app-dir (list {:name 'greeter :kind :path :path "../greeter"})))
+        (def *load-path* (append *load-path* dirs))
+        (require 'greeter)
+        (assert= (greet "you") "hi you")))))

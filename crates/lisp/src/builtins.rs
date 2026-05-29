@@ -116,10 +116,34 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // bitwise — integer bit-twiddling on the i64 two's-complement representation.
     // Table stakes for hashing, flags, and PRNGs (the std xorshift PRNG is built
     // on these); they were a noted gap (docs/feedback-retro-game-of-life.md).
-    def(heap, "bit-and", Arity::exact(2), Sig::new(vec![int, int], int), bit_and);
-    def(heap, "bit-or", Arity::exact(2), Sig::new(vec![int, int], int), bit_or);
-    def(heap, "bit-xor", Arity::exact(2), Sig::new(vec![int, int], int), bit_xor);
-    def(heap, "bit-not", Arity::exact(1), Sig::new(vec![int], int), bit_not);
+    def(
+        heap,
+        "bit-and",
+        Arity::exact(2),
+        Sig::new(vec![int, int], int),
+        bit_and,
+    );
+    def(
+        heap,
+        "bit-or",
+        Arity::exact(2),
+        Sig::new(vec![int, int], int),
+        bit_or,
+    );
+    def(
+        heap,
+        "bit-xor",
+        Arity::exact(2),
+        Sig::new(vec![int, int], int),
+        bit_xor,
+    );
+    def(
+        heap,
+        "bit-not",
+        Arity::exact(1),
+        Sig::new(vec![int], int),
+        bit_not,
+    );
     def(
         heap,
         "bit-shift-left",
@@ -392,10 +416,28 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // display protocol and reads keys. The protocol itself is Brood data (a
     // vector of render ops); these primitives are mechanism only. `term-poll`
     // returns a key (a 1-char string, or a keyword for specials) or nil on
-    // timeout; `term-draw` interprets a frame vector. See std/observe.blsp.
-    def(heap, "term-enter", Arity::exact(0), Sig::new(vec![], nil_ty), term_enter);
-    def(heap, "term-leave", Arity::exact(0), Sig::new(vec![], nil_ty), term_leave);
-    def(heap, "term-size", Arity::exact(0), Sig::new(vec![], vec_ty), term_size);
+    // timeout; `term-draw` interprets a frame vector. See std/observer.blsp.
+    def(
+        heap,
+        "term-enter",
+        Arity::exact(0),
+        Sig::new(vec![], nil_ty),
+        term_enter,
+    );
+    def(
+        heap,
+        "term-leave",
+        Arity::exact(0),
+        Sig::new(vec![], nil_ty),
+        term_leave,
+    );
+    def(
+        heap,
+        "term-size",
+        Arity::exact(0),
+        Sig::new(vec![], vec_ty),
+        term_size,
+    );
     def(
         heap,
         "term-poll",
@@ -403,33 +445,77 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![int], string.union(kw).union(nil_ty)),
         term_poll,
     );
-    def(heap, "term-draw", Arity::exact(1), Sig::new(vec![vec_ty], nil_ty), term_draw);
+    def(
+        heap,
+        "term-draw",
+        Arity::exact(1),
+        Sig::new(vec![vec_ty], nil_ty),
+        term_draw,
+    );
     // Inline (relative-motion) variant of the seam, for an in-place line editor
     // that must NOT take over the screen: `term-raw-enter`/`term-raw-leave` toggle
     // raw mode only (no alternate screen, cursor stays visible, scrollback kept),
     // and `term-emit` paints relative ops. The self-hosted REPL editor uses these
     // (std/lineedit.blsp); `term-enter`/`term-draw` stay the full-screen path.
-    def(heap, "term-raw-enter", Arity::exact(0), Sig::new(vec![], nil_ty), term_raw_enter);
-    def(heap, "term-raw-leave", Arity::exact(0), Sig::new(vec![], nil_ty), term_raw_leave);
-    def(heap, "term-emit", Arity::exact(1), Sig::new(vec![vec_ty], nil_ty), term_emit);
+    def(
+        heap,
+        "term-raw-enter",
+        Arity::exact(0),
+        Sig::new(vec![], nil_ty),
+        term_raw_enter,
+    );
+    def(
+        heap,
+        "term-raw-leave",
+        Arity::exact(0),
+        Sig::new(vec![], nil_ty),
+        term_raw_leave,
+    );
+    def(
+        heap,
+        "term-emit",
+        Arity::exact(1),
+        Sig::new(vec![vec_ty], nil_ty),
+        term_emit,
+    );
     // The windowed (GUI) frontend — the same seam as `term-*`, painting the same
     // render-op protocol to a native window (feature "gui"; the symbols always
-    // exist, erroring at call time without the feature). std/observe.blsp's
-    // broadcast display drives this and the terminal from one frame. See gui.rs.
-    def(heap, "gui-enter", Arity::exact(0), Sig::new(vec![], nil_ty), gui_enter);
-    def(heap, "gui-leave", Arity::exact(0), Sig::new(vec![], nil_ty), gui_leave);
-    def(heap, "gui-size", Arity::exact(0), Sig::new(vec![], vec_ty), gui_size);
+    // exist, erroring at call time without the feature). Unlike the single
+    // terminal, there can be many windows: `gui-open` returns an integer window id
+    // and the other primitives take it, so `(observe)` can spawn several at once.
+    // std/observer.blsp's `gui-display` wraps an id as a display map. See gui.rs.
+    def(heap, "gui-open", Arity::exact(0), Sig::new(vec![], int), gui_open);
+    def(
+        heap,
+        "gui-close",
+        Arity::exact(1),
+        Sig::new(vec![int], nil_ty),
+        gui_close,
+    );
+    def(
+        heap,
+        "gui-size",
+        Arity::exact(1),
+        Sig::new(vec![int], vec_ty),
+        gui_size,
+    );
     def(
         heap,
         "gui-poll",
-        Arity::exact(1),
-        Sig::new(vec![int], string.union(kw).union(nil_ty)),
+        Arity::exact(2),
+        Sig::new(vec![int, int], string.union(kw).union(vec_ty).union(nil_ty)),
         gui_poll,
     );
-    def(heap, "gui-draw", Arity::exact(1), Sig::new(vec![vec_ty], nil_ty), gui_draw);
+    def(
+        heap,
+        "gui-draw",
+        Arity::exact(2),
+        Sig::new(vec![int, vec_ty], nil_ty),
+        gui_draw,
+    );
     // The one process-introspection accessor the language can't reach from Brood
     // (the mailbox queue lives behind the scheduler registry). Everything else an
-    // observer shows — pid id, liveness — is assembled in Brood (std/observe.blsp).
+    // observer shows — pid id, liveness — is assembled in Brood (std/observer.blsp).
     def(
         heap,
         "mailbox-size",
@@ -543,6 +629,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(0),
         Sig::nullary(int),
         mem_soft_limit,
+    );
+    def(
+        heap,
+        "gc-stats",
+        Arity::exact(0),
+        Sig::nullary(map_ty),
+        gc_stats,
     );
 
     // self-hosting — eval/load/etc. take and return arbitrary forms / values.
@@ -695,6 +788,16 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![string], int.union(nil_ty)),
         file_mtime,
     );
+    // The one hashing primitive (ADR-037): SHA-256 of a string's bytes → hex.
+    // Per-file and directory-tree hashing for the package manager are Brood over
+    // this + `slurp`/`list-dir` (std/package.blsp), not a directory primitive.
+    def(
+        heap,
+        "%sha256",
+        Arity::exact(1),
+        Sig::new(vec![string], string),
+        sha256_hex,
+    );
 
     // system / environment
     def(
@@ -815,7 +918,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::nullary(list_ty),
         global_names,
     );
-    def(heap, "special-forms", Arity::exact(0), Sig::nullary(list_ty), special_forms);
+    def(
+        heap,
+        "special-forms",
+        Arity::exact(0),
+        Sig::nullary(list_ty),
+        special_forms,
+    );
     def(
         heap,
         "bound?",
@@ -831,13 +940,6 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![any], Ty::NEVER),
         throw,
-    );
-    def(
-        heap,
-        "hibernate",
-        Arity::at_least(1),
-        Sig::new(vec![callable], Ty::NEVER),
-        hibernate,
     );
     // `%force-panic` — deliberately panics the Rust thread when called. Exists
     // *only* in debug builds: it gives the MCP-host panic-isolation regression
@@ -1109,6 +1211,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("mem-peak", &[], "High-water mark of allocated bytes since process start."),
     ("mem-limit", &[], "Hard memory ceiling in bytes (0 = unlimited); crossing it aborts the process. Set via BROOD_MEM_LIMIT."),
     ("mem-soft-limit", &[], "Soft memory ceiling in bytes (0 = unlimited); crossing it raises a catchable E0043 at the next safepoint."),
+    ("gc-stats", &[], "A snapshot map of this process's GC activity: :collections, :copied, :reclaimed (cumulative object counts), :live, :live-bytes, and :threshold (next-collection trigger). Per-process — reports the caller's own heap."),
     ("eval", &["form"], "Evaluate a form in the global environment."),
     ("read-string", &["s"], "Parse and return the first form in string s."),
     ("parse-source", &["s"], "Parse s into a lossless CST tree as nested vectors (mechanism for std/format.blsp)."),
@@ -1126,6 +1229,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("make-dir", &["path"], "Create a directory and any missing parents (like mkdir -p)."),
     ("spit", &["path", "s"], "Write string s to the file at path."),
     ("slurp", &["path"], "Read the whole file at path into a string (does not evaluate it)."),
+    ("%sha256", &["s"], "Lowercase hex SHA-256 of string s's bytes. The package manager's one hashing primitive (ADR-037); file/tree hashing is Brood over it."),
     ("read-line", &[], "Read one line from stdin; returns the line as a string (trailing newline stripped) or nil at end of input."),
     ("file-mtime", &["path"], "Last-modified time of path as epoch-milliseconds, or nil if the file is missing. Cheap (stat) — pair with `load` to drive a hot-reloader."),
     ("getenv", &["name"], "The value of environment variable name, or nil if unset."),
@@ -1144,20 +1248,24 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("bound?", &["sym"], "Whether sym is bound in scope. Quote it: (bound? 'foo)."),
     ("dynamic?", &["x"], "Whether x is a symbol declared dynamic with defdyn. Quote it: (dynamic? '*foo*)."),
     ("throw", &["x"], "Raise x as an error - a non-local exit caught by try/catch."),
-    ("hibernate", &["fn", "&", "args"], "Discard this process's call stack, flush its LOCAL arena (keeping only `fn` + `args`), and tail-call `(apply fn args)` in the fresh heap. Bounds memory in long-running receive loops. Uncatchable. Use in tail position."),
     ("%spawn", &["thunk"], "Run thunk (a 0-arg fn) in a new green process; returns its pid. Use the `spawn` macro."),
     ("send", &["target", "msg"], "Copy msg into target's mailbox; target is a pid or {:name :node} address. Routes locally or over a node link. Returns nil."),
     ("self", &[], "This process's own pid (carries this node's identity)."),
     ("ref", &[], "A fresh, globally-unique reference token (tags a request to its reply)."),
     ("monitor", &["pid"], "Watch pid; returns a monitor ref. Delivers [:down ref pid reason] when pid dies."),
     ("list-processes", &[], "Every currently-live pid on this runtime (one per registered mailbox). Order is unspecified — sort if you need stability. For agents/tools enumerating spawned processes."),
-    ("mailbox-size", &["pid"], "How many messages are queued in pid's mailbox (its receive backlog), or nil if pid is not a live local process. The one process-introspection accessor not reachable from Brood; see std/observe.blsp."),
-    ("process-info", &["pid"], "A snapshot map of a live local process: {:id :node :name :status :mailbox :monitored-by :parent} (:status is :running or :waiting; :name nil if unregistered; :parent the spawner's id, nil for the root). nil for a remote/dead pid. The Erlang-process_info-style introspection the observer reads; see std/observe.blsp."),
-    ("term-enter", &[], "Enter raw mode + the alternate screen and hide the cursor, taking over the terminal for a full-screen UI. Pair with term-leave. (ADR-046 display seam.)"),
-    ("term-leave", &[], "Restore the terminal: show the cursor, leave the alternate screen, disable raw mode. The normal-path teardown for term-enter."),
+    ("mailbox-size", &["pid"], "How many messages are queued in pid's mailbox (its receive backlog), or nil if pid is not a live local process. The one process-introspection accessor not reachable from Brood; see std/observer.blsp."),
+    ("process-info", &["pid"], "A snapshot map of a live local process: {:id :node :name :status :mailbox :monitored-by :parent :memory :collections} (:status is :running or :waiting; :name nil if unregistered; :parent the spawner's id, nil for the root; :memory the LOCAL heap bytes and :collections the cumulative GC count, both as of the process's last receive). nil for a remote/dead pid. The Erlang-process_info-style introspection the observer reads; see std/observer.blsp."),
+    ("term-enter", &[], "Enter raw mode + the alternate screen, hide the cursor, and enable mouse capture, taking over the terminal for a full-screen UI (so click/scroll reach term-poll). Pair with term-leave. (ADR-046 display seam.)"),
+    ("term-leave", &[], "Restore the terminal: show the cursor, disable mouse capture, leave the alternate screen, disable raw mode. The normal-path teardown for term-enter."),
     ("term-size", &[], "The terminal size as [cols rows] in character cells."),
-    ("term-poll", &["ms"], "Wait up to ms milliseconds for a key; return it as a 1-char string (printable) or a keyword for specials (:up :down :left :right :enter :escape :backspace :tab :delete, ctrl combos like :ctrl-c), or nil on timeout. Always pass a finite ms."),
+    ("term-poll", &["ms"], "Wait up to ms milliseconds for an input event; return a key (a 1-char string for printables, or a keyword for specials: :up :down :left :right :enter :escape :backspace :tab :back-tab :delete :home :end :page-up :page-down, ctrl combos like :ctrl-c, alt combos like :alt-f), a mouse event as a vector [:mouse action button row col] (action: :press :scroll-up :scroll-down; button: :left :right :middle or nil; row/col 0-based cells), or nil on timeout. Always pass a finite ms."),
     ("term-draw", &["frame"], "Paint a frame — a vector of render ops: [:clear], [:text row col str], [:text row col str face], [:cursor row col]. A face is a map like {:fg :red :bold true}. The in-process frontend for the display protocol; returns nil."),
+    ("gui-open", &[], "Open a new native window and return its integer id (needs the runtime built with --features gui; errors otherwise). Starts the GUI thread on the first call; each call is an independent window, so several observers can run at once. Pass the id to the other gui-* primitives; pair with gui-close. The windowed frontend of the ADR-046 display seam."),
+    ("gui-close", &["id"], "Close window id (the teardown for gui-open). Idempotent; an unknown id is a no-op."),
+    ("gui-size", &["id"], "Window id's size as [cols rows] in character cells (tracks resize / HiDPI), same shape as term-size."),
+    ("gui-poll", &["id", "ms"], "Like term-poll for window id: wait up to ms for an input event and return a key (1-char string / keyword), a mouse event [:mouse action button row col], or nil on timeout. Same encoding as term-poll, so one keymap drives both frontends. Closing the window yields :escape."),
+    ("gui-draw", &["id", "frame"], "Paint a frame (the same render-op vector term-draw takes) to window id; returns nil. Unknown ops are skipped (forward-compatible)."),
     ("term-raw-enter", &[], "Enter raw mode only — NO alternate screen, cursor stays visible, scrollback preserved. The seam for an inline line editor (the REPL); use term-enter instead for a full-screen TUI. Pair with term-raw-leave."),
     ("term-raw-leave", &[], "Leave raw mode (the teardown for term-raw-enter). Idempotent with the panic-path restore."),
     ("term-emit", &["ops"], "Paint inline, relative-motion render ops (for an in-place editor that must not take over the screen): [:print str], [:print str face], [:cr], [:nl], [:up n], [:down n], [:col n], [:clear-eol], [:clear-below], [:clear-screen]. A face is a map like {:fg :cyan :bold true}. Queues all ops then flushes once; unknown ops are skipped; returns nil."),
@@ -1417,7 +1525,9 @@ fn bit_shift_left(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     // top are discarded) — the conventional `bit-shift-left`. Wrapping, not
     // checked: callers mask back down (e.g. the xorshift PRNG) rather than
     // expecting an overflow error.
-    Ok(Value::Int(a.wrapping_shl(shift_amount(n, "bit-shift-left")?)))
+    Ok(Value::Int(
+        a.wrapping_shl(shift_amount(n, "bit-shift-left")?),
+    ))
 }
 
 fn bit_shift_right(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -1770,6 +1880,38 @@ fn mem_peak(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::Int(crate::core::alloc::peak_bytes() as i64))
 }
 
+/// `(gc-stats)` — a snapshot map of this process's garbage-collection activity
+/// (Tier-1 observability; `docs/memory-review.md` §7). Per-process: it reports
+/// the *calling* process's own LOCAL heap, never another's. Keys:
+/// `:collections` (collections run since start — both the automatic Stage-B
+/// safepoint copies and `(hibernate)` flushes), `:copied` (cumulative LOCAL
+/// objects relocated by those collections), `:reclaimed` (cumulative LOCAL
+/// objects dropped), `:live` (LOCAL objects live right now), `:live-bytes` (a
+/// cheap byte estimate of the LOCAL slabs — see `mem-bytes` for the process-wide
+/// figure), and `:threshold` (the live count that triggers the next collection —
+/// the slow/stable dial).
+fn gc_stats(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let (runs, copied, reclaimed) = heap.gc_counters();
+    let pairs = vec![
+        (value::kw("collections"), Value::Int(runs as i64)),
+        (value::kw("copied"), Value::Int(copied as i64)),
+        (value::kw("reclaimed"), Value::Int(reclaimed as i64)),
+        (
+            value::kw("live"),
+            Value::Int(heap.local_live_count() as i64),
+        ),
+        (
+            value::kw("live-bytes"),
+            Value::Int(heap.local_bytes() as i64),
+        ),
+        (
+            value::kw("threshold"),
+            Value::Int(heap.gc_threshold() as i64),
+        ),
+    ];
+    Ok(heap.map_from_pairs(pairs))
+}
+
 /// `(mem-limit)` — the hard memory ceiling in bytes (0 = unlimited). ADR-043.
 fn mem_limit(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::Int(crate::core::alloc::hard_limit() as i64))
@@ -1974,16 +2116,59 @@ fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     // so the test macros can record each test's source location; restore the
     // previous file afterward since loads nest.
     let prev = heap.set_current_file(Some(path.clone()));
+
+    // **Bounded loading — the core memory guarantee (docs/memory-review.md).**
+    // When `load` is the outermost eval — a spawned-process body (`nest run
+    // --watch`/`--for`) or a top-level form (`nest run <file>`, `(require …)`) —
+    // run the file's forms with the SAME depth-1 form-loop discipline as
+    // `Interp::eval_source`: drop the GC-block depth to 0 so each form's eval
+    // re-enters at the `gc_block_depth() == 1` safepoint where Stage B's
+    // automatic copying GC fires, and root the unevaluated forms across each
+    // collection (re-fetching the relocated handle via `root_at`). Without this a
+    // file loaded here runs one eval frame deeper, where the safepoint never
+    // triggers and a long-running loop climbs unbounded — the `nest run` leak
+    // (~100 MB/s). Living in `load` (the core), not in each tool, means *every*
+    // entry path — `brood`, `nest`, MCP `eval`, the future editor — inherits the
+    // bound for free; that's why this isn't a `nest`-side fix.
+    //
+    // Safe at depth 1: no eval frame below holds an un-rooted LOCAL transient a
+    // collection would strand. The only outer frame is the `(load …)` combination
+    // itself; its `expr`/`call_form` are read solely by `or_form_pos` via
+    // `id.index()` (a bit-extract, no slab deref → no use-after-GC tripwire) and
+    // only when the error lacks a position — which it never does here (`or_pos`).
+    // Deeper than depth 1 (`(cons (load …) xs)`) we fall back to inline eval: a
+    // library load that doesn't loop, so it never crosses the GC threshold.
     let mut result = Ok(Value::Nil);
-    for (form, pos) in forms {
-        // Record def sites before expansion (ADR-031): `defn`/`defmacro` are still
-        // recognisable here, and their spans aren't yet lost to macroexpansion.
-        heap.note_definition(form, pos);
-        result = crate::eval::macros::macroexpand_all(heap, form, root)
-            .and_then(|f| crate::eval::eval(heap, f, root))
-            .map_err(|e| e.or_pos(pos).or_file(path.clone()));
-        if result.is_err() {
-            break;
+    if crate::process::gc_block_depth() == 1 {
+        let _reset = crate::process::GcBlockReset::enter();
+        let base = heap.roots_len();
+        for (form, _) in &forms {
+            heap.push_root(*form);
+        }
+        for (i, &(_, pos)) in forms.iter().enumerate() {
+            // Re-fetch the (possibly relocated) form from the root stack — an
+            // earlier form's eval may have triggered a collection that moved it.
+            let form = heap.root_at(base + i);
+            heap.note_definition(form, pos);
+            result = crate::eval::macros::macroexpand_all(heap, form, root)
+                .and_then(|f| crate::eval::eval(heap, f, root))
+                .map_err(|e| e.or_pos(pos).or_file(path.clone()));
+            if result.is_err() {
+                break;
+            }
+        }
+        heap.truncate_roots(base);
+    } else {
+        for (form, pos) in forms {
+            // Record def sites before expansion (ADR-031): `defn`/`defmacro` are
+            // still recognisable here, before macroexpansion loses their spans.
+            heap.note_definition(form, pos);
+            result = crate::eval::macros::macroexpand_all(heap, form, root)
+                .and_then(|f| crate::eval::eval(heap, f, root))
+                .map_err(|e| e.or_pos(pos).or_file(path.clone()));
+            if result.is_err() {
+                break;
+            }
         }
     }
     heap.set_current_file(prev);
@@ -2011,6 +2196,10 @@ fn eval_string(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
 const EMBEDDED_MODULES: &[(&str, &str)] = &[
     ("test", include_str!("../../../std/test.blsp")),
     ("project", include_str!("../../../std/project.blsp")),
+    // The package manager (ADR-037): resolves the manifest's :dependencies into a
+    // lock file + load-path entries. Required lazily by `project-setup` only when a
+    // project actually declares deps. Opt-in, never in the prelude.
+    ("package", include_str!("../../../std/package.blsp")),
     ("docs", include_str!("../../../std/docs.blsp")),
     ("hatch", include_str!("../../../std/hatch.blsp")),
     ("supervisor", include_str!("../../../std/supervisor.blsp")),
@@ -2019,11 +2208,11 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
     ("buffer", include_str!("../../../std/buffer.blsp")),
     // The display/input seam (M3, ADR-046): `display` is the render-op protocol
     // (pure data constructors); `keymap` is the rebindable key→command dispatcher
-    // shared by the line editor and the observer; `observe` is a process-viewer
-    // TUI built on them + the `term-*` primitives. All opt-in, never in the prelude.
+    // shared by the line editor and the observer; `observer` is a process-viewer
+    // built on them + the `term-*`/`gui-*` primitives. All opt-in, never in the prelude.
     ("display", include_str!("../../../std/display.blsp")),
     ("keymap", include_str!("../../../std/keymap.blsp")),
-    ("observe", include_str!("../../../std/observe.blsp")),
+    ("observer", include_str!("../../../std/observer.blsp")),
     // Bare ANSI escape *strings* for simple terminal scripts (`print` them
     // directly) — the lightweight counterpart to the `display` render-op
     // protocol. Opt-in, never in the prelude.
@@ -2364,9 +2553,19 @@ fn term_err(e: std::io::Error) -> LispError {
 /// restores the terminal if the program panics, so a crash never wrecks it.
 fn term_enter(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     use crossterm::cursor::Hide;
+    use crossterm::event::EnableMouseCapture;
     use crossterm::terminal::{enable_raw_mode, EnterAlternateScreen};
     enable_raw_mode().map_err(term_err)?;
-    crossterm::execute!(std::io::stdout(), EnterAlternateScreen, Hide).map_err(term_err)?;
+    // Mouse capture rides with the full-screen path only (not the inline REPL
+    // seam), so click/scroll reach `term-poll`. It costs terminal text-selection
+    // while active — standard for a TUI, and only for the duration of the UI.
+    crossterm::execute!(
+        std::io::stdout(),
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        Hide
+    )
+    .map_err(term_err)?;
     Ok(Value::Nil)
 }
 
@@ -2374,8 +2573,15 @@ fn term_enter(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 /// disable raw mode). The normal-path teardown for `term-enter`.
 fn term_leave(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     use crossterm::cursor::Show;
+    use crossterm::event::DisableMouseCapture;
     use crossterm::terminal::{disable_raw_mode, LeaveAlternateScreen};
-    crossterm::execute!(std::io::stdout(), Show, LeaveAlternateScreen).map_err(term_err)?;
+    crossterm::execute!(
+        std::io::stdout(),
+        Show,
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )
+    .map_err(term_err)?;
     disable_raw_mode().map_err(term_err)?;
     Ok(Value::Nil)
 }
@@ -2386,8 +2592,14 @@ fn term_leave(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 /// errors are swallowed (the normal path is the Brood `term-leave`).
 pub fn restore_terminal() {
     use crossterm::cursor::Show;
+    use crossterm::event::DisableMouseCapture;
     use crossterm::terminal::{disable_raw_mode, LeaveAlternateScreen};
-    let _ = crossterm::execute!(std::io::stdout(), Show, LeaveAlternateScreen);
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        Show,
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    );
     let _ = disable_raw_mode();
 }
 
@@ -2419,11 +2631,47 @@ fn term_poll(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             // Ignore key *release* events (reported on some platforms with the
             // enhanced-keyboard protocol) so a keypress isn't seen twice.
             Event::Key(k) if k.kind != KeyEventKind::Release => Ok(key_to_value(heap, k)),
+            Event::Mouse(m) => Ok(mouse_to_value(heap, m)),
             _ => Ok(Value::Nil),
         }
     } else {
         Ok(Value::Nil)
     }
+}
+
+/// Encode a Brood mouse event as the vector `[:mouse action button row col]` —
+/// the shared shape both frontends yield, so the observer (and any future UI)
+/// reads one form. `action` is a keyword, `button` a keyword or nil, `row`/`col`
+/// 0-based cell coordinates.
+fn mouse_value(heap: &mut Heap, action: &str, button: Option<&str>, row: u16, col: u16) -> Value {
+    let btn = button.map(value::kw).unwrap_or(Value::Nil);
+    heap.alloc_vector(vec![
+        value::kw("mouse"),
+        value::kw(action),
+        btn,
+        Value::Int(row as i64),
+        Value::Int(col as i64),
+    ])
+}
+
+/// Translate a crossterm mouse event into the shared `[:mouse …]` vector. Only
+/// the minimal vocabulary `gui::MouseAction` also produces — a click and the wheel
+/// — is surfaced; release / drag / motion / horizontal-scroll yield nil (a no-op
+/// poll), so both frontends emit exactly the same set.
+fn mouse_to_value(heap: &mut Heap, m: crossterm::event::MouseEvent) -> Value {
+    use crossterm::event::{MouseButton as CB, MouseEventKind as MK};
+    let button = |b: CB| match b {
+        CB::Left => "left",
+        CB::Right => "right",
+        CB::Middle => "middle",
+    };
+    let (action, btn) = match m.kind {
+        MK::Down(b) => ("press", Some(button(b))),
+        MK::ScrollUp => ("scroll-up", None),
+        MK::ScrollDown => ("scroll-down", None),
+        _ => return Value::Nil,
+    };
+    mouse_value(heap, action, btn, m.row, m.column)
 }
 
 /// Encode a crossterm key event as a Brood value: a printable char becomes a
@@ -2472,7 +2720,14 @@ fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 
     let ops: Vec<Value> = match arg(args, 0) {
         Value::Vector(id) => heap.vector(id).to_vec(),
-        other => return Err(LispError::wrong_type(heap, "term-draw", "vector (a frame)", other)),
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "term-draw",
+                "vector (a frame)",
+                other,
+            ))
+        }
     };
     let clear_t = value::intern("clear");
     let text_t = value::intern("text");
@@ -2544,7 +2799,14 @@ fn term_emit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 
     let ops: Vec<Value> = match arg(args, 0) {
         Value::Vector(id) => heap.vector(id).to_vec(),
-        other => return Err(LispError::wrong_type(heap, "term-emit", "vector (ops)", other)),
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "term-emit",
+                "vector (ops)",
+                other,
+            ))
+        }
     };
     let print_t = value::intern("print");
     let cr_t = value::intern("cr");
@@ -2615,7 +2877,10 @@ fn apply_face<W: std::io::Write>(out: &mut W, heap: &Heap, face: Value) -> Resul
     if heap.map_get(id, value::kw("bold")).is_some_and(face_truthy) {
         crossterm::queue!(out, SetAttribute(Attribute::Bold)).map_err(term_err)?;
     }
-    if heap.map_get(id, value::kw("reverse")).is_some_and(face_truthy) {
+    if heap
+        .map_get(id, value::kw("reverse"))
+        .is_some_and(face_truthy)
+    {
         crossterm::queue!(out, SetAttribute(Attribute::Reverse)).map_err(term_err)?;
     }
     Ok(())
@@ -2657,7 +2922,7 @@ fn clamp_u16(n: i64) -> u16 {
 // back in the same encoding. The window/loop machinery lives in `crate::gui`
 // (behind the `gui` feature); these primitives just translate Brood `Value`s ⇄
 // the plain `gui::Op`/`gui::Key`/`gui::Face` the backend speaks. A composite
-// "broadcast" display in std/observe.blsp drives term + gui (+ remote later)
+// "broadcast" display in std/observer.blsp drives term + gui (+ remote later)
 // from one frame — so the frontends can't drift. Without `--features gui` the
 // backend functions return a clear "rebuild with --features gui" error.
 
@@ -2689,35 +2954,51 @@ fn gui_face(heap: &Heap, face: Value) -> crate::gui::Face {
     f.fg = heap.map_get(id, value::kw("fg")).and_then(color_rgb);
     f.bg = heap.map_get(id, value::kw("bg")).and_then(color_rgb);
     f.bold = heap.map_get(id, value::kw("bold")).is_some_and(face_truthy);
-    f.reverse = heap.map_get(id, value::kw("reverse")).is_some_and(face_truthy);
+    f.reverse = heap
+        .map_get(id, value::kw("reverse"))
+        .is_some_and(face_truthy);
     f
 }
 
-/// `(gui-enter)` — open the window + start its event-loop thread. Idempotent.
-fn gui_enter(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    crate::gui::enter().map_err(LispError::runtime)?;
+/// Read a window-id argument (the integer `gui-open` returned) for the windowed
+/// primitives. Negative ids clamp to 0 (no such window → a clean "not open" error).
+fn gui_window_id(heap: &Heap, who: &str, v: Value) -> Result<u64, LispError> {
+    Ok(expect_int(heap, who, v)?.max(0) as u64)
+}
+
+/// `(gui-open)` — open a new native window and return its integer id. Starts the
+/// GUI thread on the first call; each call is an independent window (so several
+/// observers can run at once). Pass the id to the other `gui-*` primitives.
+fn gui_open(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    let id = crate::gui::open().map_err(LispError::runtime)?;
+    Ok(Value::Int(id as i64))
+}
+
+/// `(gui-close id)` — close window `id` (the teardown for `gui-open`; idempotent).
+fn gui_close(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = gui_window_id(heap, "gui-close", arg(args, 0))?;
+    crate::gui::close(id).map_err(LispError::runtime)?;
     Ok(Value::Nil)
 }
 
-/// `(gui-leave)` — close the window and stop its thread. The teardown for `gui-enter`.
-fn gui_leave(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    crate::gui::leave().map_err(LispError::runtime)?;
-    Ok(Value::Nil)
-}
-
-/// `(gui-size)` — the window size as `[cols rows]` (character cells), same shape
-/// as `term-size`.
-fn gui_size(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let (cols, rows) = crate::gui::size().map_err(LispError::runtime)?;
+/// `(gui-size id)` — window `id`'s size as `[cols rows]` (character cells), same
+/// shape as `term-size`.
+fn gui_size(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = gui_window_id(heap, "gui-size", arg(args, 0))?;
+    let (cols, rows) = crate::gui::size(id).map_err(LispError::runtime)?;
     Ok(heap.alloc_vector(vec![Value::Int(cols as i64), Value::Int(rows as i64)]))
 }
 
-/// `(gui-poll ms)` — wait up to `ms` for a key; same return shape as `term-poll`
-/// (a 1-char string, a keyword for specials, or nil on timeout).
+/// `(gui-poll id ms)` — wait up to `ms` for an input event on window `id`; same
+/// return shapes as `term-poll` (a 1-char string / keyword for keys, a `[:mouse …]`
+/// vector for the mouse, or nil on timeout).
 fn gui_poll(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let ms = expect_int(heap, "gui-poll", arg(args, 0))?.max(0) as u64;
-    match crate::gui::poll(ms).map_err(LispError::runtime)? {
-        Some(k) => Ok(gui_key_to_value(heap, k)),
+    use crate::gui::Input;
+    let id = gui_window_id(heap, "gui-poll", arg(args, 0))?;
+    let ms = expect_int(heap, "gui-poll", arg(args, 1))?.max(0) as u64;
+    match crate::gui::poll(id, ms).map_err(LispError::runtime)? {
+        Some(Input::Key(k)) => Ok(gui_key_to_value(heap, k)),
+        Some(Input::Mouse(m)) => Ok(gui_mouse_to_value(heap, m)),
         None => Ok(Value::Nil),
     }
 }
@@ -2734,13 +3015,39 @@ fn gui_key_to_value(heap: &mut Heap, k: crate::gui::Key) -> Value {
     }
 }
 
-/// `(gui-draw frame)` — paint a frame (the same op vector `term-draw` takes) to
-/// the window. Parses the ops into plain `gui::Op`s (it has heap access) and
-/// ships them to the GUI thread. Unknown ops are skipped (forward-compatible).
+/// Encode a `gui::Mouse` as the shared `[:mouse …]` vector — the GUI counterpart
+/// of `mouse_to_value` (crossterm). Both translate their native event to the same
+/// keywords and hand off to `mouse_value`, so the two frontends can't drift.
+fn gui_mouse_to_value(heap: &mut Heap, m: crate::gui::Mouse) -> Value {
+    use crate::gui::{MouseAction as MA, MouseButton as MB};
+    let action = match m.action {
+        MA::Press => "press",
+        MA::ScrollUp => "scroll-up",
+        MA::ScrollDown => "scroll-down",
+    };
+    let button = m.button.map(|b| match b {
+        MB::Left => "left",
+        MB::Right => "right",
+        MB::Middle => "middle",
+    });
+    mouse_value(heap, action, button, m.row, m.col)
+}
+
+/// `(gui-draw id frame)` — paint a frame (the same op vector `term-draw` takes) to
+/// window `id`. Parses the ops into plain `gui::Op`s (it has heap access) and ships
+/// them to the GUI thread. Unknown ops are skipped (forward-compatible).
 fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let ops_v: Vec<Value> = match arg(args, 0) {
+    let win = gui_window_id(heap, "gui-draw", arg(args, 0))?;
+    let ops_v: Vec<Value> = match arg(args, 1) {
         Value::Vector(id) => heap.vector(id).to_vec(),
-        other => return Err(LispError::wrong_type(heap, "gui-draw", "vector (a frame)", other)),
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "gui-draw",
+                "vector (a frame)",
+                other,
+            ))
+        }
     };
     let clear_t = value::intern("clear");
     let text_t = value::intern("text");
@@ -2769,14 +3076,14 @@ fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             ops.push(crate::gui::Op::Text { row, col, s, face });
         }
     }
-    crate::gui::draw(ops).map_err(LispError::runtime)?;
+    crate::gui::draw(win, ops).map_err(LispError::runtime)?;
     Ok(Value::Nil)
 }
 
 /// `(mailbox-size pid)` — the number of queued messages in a local process's
 /// mailbox, or `nil` for a remote/dead pid. The one process-introspection
 /// accessor Brood can't reach (the queue lives behind the scheduler registry);
-/// `std/observe.blsp` assembles everything else (id, liveness) from Brood.
+/// `std/observer.blsp` assembles everything else (id, liveness) from Brood.
 fn mailbox_size(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match arg(args, 0) {
         Value::Pid { node, id } if crate::dist::is_local(node) => {
@@ -2824,6 +3131,10 @@ fn process_info(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             // `:memory` — the process's LOCAL heap footprint (bytes), published on
             // its last `receive`; 0 for a process that has never received.
             let memory = Value::Int(crate::process::process_mem(id).unwrap_or(0) as i64);
+            // `:collections` — the process's cumulative GC count, republished on
+            // its last `receive` (0 for one that has never received). The signal
+            // for "is this process churning memory?" in the observer.
+            let collections = Value::Int(crate::process::process_gc_runs(id).unwrap_or(0) as i64);
             let pairs = vec![
                 (value::kw("id"), Value::Int(id as i64)),
                 (value::kw("node"), Value::Keyword(node)),
@@ -2833,6 +3144,7 @@ fn process_info(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
                 (value::kw("monitored-by"), monitored),
                 (value::kw("parent"), parent),
                 (value::kw("memory"), memory),
+                (value::kw("collections"), collections),
             ];
             Ok(heap.map_from_pairs(pairs))
         }
@@ -2936,6 +3248,22 @@ fn spit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             .with_code(crate::error::error_codes::FILE_IO)
     })?;
     Ok(Value::Nil)
+}
+
+/// `(%sha256 s)` — the lowercase hex SHA-256 of `s`'s UTF-8 bytes. The single
+/// hashing mechanism for the package manager (ADR-037); per-file hashing
+/// (`(%sha256 (slurp p))`) and the canonical directory-tree hash are Brood over
+/// it (`std/package.blsp`), keeping a directory walk out of the kernel.
+fn sha256_hex(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use sha2::{Digest, Sha256};
+    let s = expect_string(heap, "%sha256", arg(args, 0))?;
+    let digest = Sha256::digest(s.as_bytes());
+    let mut hex = String::with_capacity(64);
+    for b in digest {
+        use std::fmt::Write;
+        let _ = write!(hex, "{:02x}", b);
+    }
+    Ok(heap.alloc_string(&hex))
 }
 
 /// `(slurp path)` — read the whole file at `path` and return it as a string. The
@@ -3323,10 +3651,38 @@ fn arglist(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
 /// keeping a copy), so the runtime and the tooling can't drift. Mirrors
 /// `brood.el`'s `brood-special-forms` plus the `def`-family heads.
 pub const SPECIAL_FORMS: &[&str] = &[
-    "if", "do", "def", "fn", "lambda", "let", "let*", "letrec", "quote", "quasiquote",
-    "defmacro", "defn", "defdyn", "defmodule", "when", "unless", "cond", "and", "or",
-    "match", "match*", "try", "catch", "throw", "receive", "binding", "dolist", "doseq",
-    "dotimes", "for", "->", "->>",
+    "if",
+    "do",
+    "def",
+    "fn",
+    "lambda",
+    "let",
+    "let*",
+    "letrec",
+    "quote",
+    "quasiquote",
+    "defmacro",
+    "defn",
+    "defdyn",
+    "defmodule",
+    "when",
+    "unless",
+    "cond",
+    "and",
+    "or",
+    "match",
+    "match*",
+    "try",
+    "catch",
+    "throw",
+    "receive",
+    "binding",
+    "dolist",
+    "doseq",
+    "dotimes",
+    "for",
+    "->",
+    "->>",
 ];
 
 /// `(special-forms)` — the list of special-form / core-macro names (strings) that
@@ -3419,26 +3775,6 @@ fn blob_strong_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             value::tag(other).name()
         ))),
     }
-}
-
-/// `(hibernate fn & args)` — Erlang-style hibernate. Out-of-band signal to
-/// the process's run loop: "discard my stack, flush my LOCAL arena (keeping
-/// only `fn` + `args`), and re-apply." Bounds memory in long-running
-/// processes (server-style receive loops, the editor event loop) where the
-/// bump allocator would otherwise grow without bound.
-///
-/// Implementation: raises an [`ErrorKind::Hibernate`] sentinel that unwinds
-/// every intervening eval frame (uncatchable by `try`/`catch`) until the
-/// process's `spawn` coroutine (or `eval_str` for the root thread) catches
-/// it and runs [`Heap::flush`] before re-applying. Because the unwind
-/// discards every Rust frame between here and the run loop, the *only*
-/// LOCAL state that survives is what the user named explicitly — call
-/// hibernate in **tail position** to make this match the user's intent
-/// (`(loop next-state)` ⇒ `(hibernate loop next-state)`).
-fn hibernate(args: &[Value], _: EnvId, _heap: &mut Heap) -> LispResult {
-    let callee = arg(args, 0);
-    let rest_args: Vec<Value> = args.iter().skip(1).copied().collect();
-    Err(LispError::hibernate(callee, rest_args))
 }
 
 // ---------- processes ----------
@@ -3727,11 +4063,6 @@ fn try_catch(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let handler = arg(args, 1);
     match apply(heap, thunk, &[], env) {
         Ok(value) => Ok(value),
-        // `hibernate` is an out-of-band stack-unwind signal, not a user error
-        // — re-raise so the process run loop sees it. `try`/`catch` must not
-        // be able to swallow it, otherwise the user could wedge the unwind
-        // mid-stack and the next eval would touch a stale env.
-        Err(e) if e.kind == crate::error::ErrorKind::Hibernate => Err(e),
         Err(e) => {
             // The catch sees:
             //   * the user-thrown value verbatim, if there is one (preserves the

@@ -1,5 +1,10 @@
 # Writing a Game of Life in Brood — a retrospective
 
+**The prompt:** *"can you write a game of life application 80x40 with wrapping in
+a loop."* (Started 40×40; widened to 60×30 then **80×40** over later
+follow-ups. The full turn-by-turn arc is in the third-pass re-verification
+block below.)
+
 > Feedback from an AI assistant (Claude Code) building a small app in Brood.
 >
 > **Recorded:** 2026-05-29 19:02 SAST. Findings — including the §8 memory leak —
@@ -60,6 +65,110 @@ for follow-up. See the 2026-05-29 devlog entry and ADR-050.
 >   recovered. Remains the highest-priority open item.
 > - **Set type still absent** — `set`/`conj`/`union`/`difference` all unbound.
 
+> **Re-verification, 2026-05-29 (third pass — a wrapping-grid rebuild, the leak's
+> intended fix now exists but is a footgun).** Built the game again with wrapping
+> against the live image (started 40×40, then 60×30, then 80×40 over successive
+> "make it wider" / resize follow-ups).
+>
+> **The prompt** (verbatim): *"can you write a game of life application 40x40
+> with wrapping in a loop."* The session then unfolded as a string of short
+> follow-ups, each verbatim:
+>   1. *"i don't think we need hibernate anymore. remove it"* — which my own
+>      before/after measurement contradicted (a plain loop leaks ~600 MB/s), so I
+>      surfaced the data and kept `hibernate`, just relocated it into a spawned
+>      process where it's valid.
+>   2. *"can you update this document with all your findings pleaes:
+>      feedback-retro-game-of-life.md"* (this third-pass block).
+>   3. a screenshot of a wrecked terminal: *"i get this and then the terminal
+>      becomes unusable."* — the `hibernate`-escape crash skipping `term-leave`.
+>   4. *"also mention what the prompt was and how long it took to actually finish
+>      it."* (the note just below).
+>   5. *"can you make it wider? the board?"* — generalised the single `*size*`
+>      into `*cols*`/`*rows*` and went 40×40 → **60×30**; tests were rewritten to
+>      derive expectations from the constants rather than hard-code 40.
+>   6. *"then updat the prompt"* — i.e. keep this very record in sync.
+>   7. *"on top of the doc, tell me the prompt 80x40"* — put the prompt at the top
+>      of this doc and resized again to **80×40** (160 cols wide at 2 chars/cell);
+>      with `*cols*`/`*rows*` already factored out, a two-constant change.
+>
+> **How long it took / effort shape.** No reliable wall-clock was captured, but
+> the telling metric is the gap between "logic done" and "actually finished": the
+> pure engine (`step`/`neighbors`/wrapping/`random-board`) was **correct on first
+> validation** via the MCP image and never changed afterward. Everything *after*
+> that — three run-it-and-fix iterations, each triggered by actually executing
+> the program, not by reasoning — was the real work:
+>   1. first `nest run --for` failed because `term-enter` needs a TTY;
+>   2. switched to `hibernate` for the leak → it crashed at the script top level
+>      (`hibernate escaped`) and, with `term-enter` still in, left the user's
+>      terminal unusable;
+>   3. moved the loop into a spawned process *and* dropped raw-mode for an
+>      `(ansi-clear)` + `print` render → then hit `#<fn ansi-clear>` on screen
+>      because the `ansi-*` helpers are functions, not strings.
+> A later "make it wider" turn was by contrast a clean ~5-minute change
+> (`*size*` → `*cols*`/`*rows*`, tests re-derived from the constants) — exactly
+> the kind of edit that *is* fast, because it's pure logic with no runtime edge.
+> Each of the three above, though, was a one-line-of-understanding fix that only
+> surfaced by *running* it. The
+> lesson echoes the first retro: the algorithm is the easy 20%; the long pole is
+> the runtime/tooling edges (leak workaround, TTY, terminal teardown, doc
+> mismatches) that a pure-function unit test never exercises.
+>
+> New findings, in priority order:
+>
+> - **`hibernate` now exists and *does* bound the leak — but it's undocumented
+>   and only valid inside a spawned process.** `(hibernate fn & args)` discards
+>   the call stack, flushes the local arena, and tail-calls `(apply fn args)` in
+>   a fresh heap. Used as the loop's tail call it holds RSS **flat at ~81 MB over
+>   12 s** (the high-water of one generation's allocation), and a *pure* spawned
+>   hibernate loop ran **4.6 M iterations in 5 s at a flat 6 MB**. This is the
+>   manual `flush` the §8 note predicted. Three sharp edges, though:
+>   1. **It's undocumented.** `nest doc gui-draw`/`hibernate` print
+>      `_Undocumented._`; `lookup`/`arglist` return `null`. The one primitive
+>      that works around the headline bug has no signature or docstring — I found
+>      its arity and arg type only by trial-and-error (and by an error message
+>      that revealed `gui-draw` wants a *frame* vector while `hibernate` wants
+>      `fn & args`).
+>   2. **It crashes at a script top level.** Called directly from a
+>      `nest run FILE` top-level form (which runs inline, *not* as a managed
+>      process) it aborts the whole program with `internal: hibernate escaped:
+>      hibernate`; the same "escape" happens in MCP `eval`. It only works once
+>      the loop is wrapped in `(spawn (life-loop …))` with `main` parked on
+>      `receive`. So the fix for the #1 bug is itself a footgun: the obvious
+>      `(defn start () (life-loop board 0))` *crashes*, with an opaque message and
+>      no hint that `spawn` is required.
+>   3. **Combined with `term-enter` it wrecks the terminal.** The escape crash
+>      skips `term-leave`, leaving raw mode + the alternate screen active — the
+>      terminal is unusable until `reset`. (Screenshot reported by the user.)
+> - **The leak itself is still unfixed and is board-size-sensitive.** A plain
+>   tail-recursive loop on the 40×40 board climbed to **~3.7 GB in 6 s (~600
+>   MB/s)** — far steeper than the 20×20 run's ~80 MB/s, consistent with
+>   ~10–12 MB *per generation* times more generations and more cells. Same
+>   monotonic-no-plateau signature.
+> - **Doc bug: `ansi-clear` / `ansi-home` are zero-arg *functions*, not string
+>   constants.** The `writing-brood` skill table calls them "escape strings you
+>   print", so I `(str ansi-clear …)`-ed them and the screen filled with
+>   `#<fn ansi-clear>`. They must be *called*: `(ansi-clear)` returns
+>   `"\e[2J\e[H"` (clear **and** home, so `ansi-home` is redundant after it).
+>   Fix the wording to show the call, or make them constants.
+> - **`term-enter` / `term-draw` require a real TTY.** Under a non-tty
+>   `nest run` (piped output, CI) they fail with `terminal: No such device or
+>   address (os error 6)`, so a `display`/`term-*` TUI can't be exercised
+>   headless. An `(ansi-clear)` + `print` render loop (no raw mode, no alt
+>   screen) runs fine headless **and** survives Ctrl-C / `--for` without leaving
+>   the terminal broken — the more robust default for this genre. The shipped app
+>   now uses it.
+> - **`step` is the per-frame cost.** The elegant
+>   `(frequencies (mapcat neighbours (keys live)))` transition runs ~23 ms/gen on
+>   40×40 (1000 steps = 23 s). Fine behind an 80 ms tick, but it's allocation-
+>   heavy and is what feeds the leak.
+>
+> **Asks this pass:** (1) document `hibernate`/`gui-draw`; (2) make `hibernate`
+> either work at a script top level or fail with a message that says "use inside
+> a spawned process"; (3) have `nest run --for` run terminal teardown on the time
+> cap (and a panic/Ctrl-C hook restore the alt screen, not just raw mode); (4)
+> fix the `ansi-*` "string vs function" wording; (5) still — fix the underlying
+> leak so `hibernate` isn't mandatory for every render loop.
+
 **Done:**
 - **Standard PRNG** (§1, §4.1) — `rng`/`rand-seed`/`rand-int`/`rand-float`/
   `shuffle`/`sample`, pure & seedable (`[value next-seed]`), in `std/prelude.blsp`.
@@ -100,14 +209,18 @@ entry of the same date):**
   at `nest doc --all`.
 
 **Still open (mapped, not yet built):**
-- **§8 memory leak** — the highest-priority item; **re-confirmed 2026-05-29 on the
-  newer binary (~80 MB/s, see the re-verification note above).** It is the known
-  "spiky memory":
-  the copying collector (`flush`) exists but only fires on a manual `(hibernate)`,
-  so a long-running `nest run` loop never reclaims. Fix is **Stage B** of
+- **§8 memory leak** — the highest-priority item; **re-confirmed twice on
+  2026-05-29** (~80 MB/s at 20×20; **~600 MB/s / 3.7 GB-in-6 s at 40×40**, see the
+  re-verification notes above). It is the known "spiky memory": the copying
+  collector (`flush`) exists but only fires on a manual `(hibernate)`, so a
+  long-running `nest run` loop never reclaims. The manual `(hibernate)` *does*
+  bound it (flat ~81 MB) **but only inside a spawned process** and is undocumented
+  + crashes at a script top level (third-pass re-verification above) — so it isn't
+  yet a usable workaround for a naive author. Fix is **Stage B** of
   `docs/memory-review.md` (auto-fire the copy at a threshold), gated on a
   `GC_BLOCK`/suspend rooting audit — not rushed. (`--for` now makes it
-  reproducible in CI.)
+  reproducible in CI.) Interim: document `hibernate` and make it usable from a
+  top-level loop.
 - **Set type `#{}`** (§1, §4.2).
 
 ---
@@ -293,6 +406,20 @@ handling (only Ctrl-C; the loop has no input channel).
 ---
 
 ## 8) Memory & CPU stability — a serious leak (external profiling)
+
+> **RESOLVED 2026-05-29 (Stage B + the entry-depth fix).** Root cause finally
+> pinned down: it was **not** that the app loop allocates (a tail loop *should*
+> run flat) — it was that `nest run <file>` evaluated the program via
+> `(load "path")`, which runs the file's forms **one eval frame deeper**
+> (`gc_block_depth >= 2`). Stage B's automatic copying GC (ADR-055) only fires at
+> the depth-1 eval safepoint, so a loop run that way never collected → the linear
+> climb measured below. `brood <file>` never had the leak because it uses the
+> depth-1 `eval_source` form loop. **Fix:** `nest run <file>` now evaluates the
+> entry through `eval_source` at depth 1, exactly like `brood`. Same life-style
+> loop, measured after the fix: **166 collections, ~5 MB live, flat** (was 0
+> collections / 1.16 GB). `(hibernate)` is **no longer needed** for `nest run` —
+> remove it from render loops. (Remaining depth-≥2 edges — `--watch`/`--for`
+> wrapping and `:main` — still run one frame deep; see `docs/memory-review.md`.)
 
 After the app ran correctly I profiled it **from outside the process** with
 standard Linux tooling (no app instrumentation, no debugger attached).

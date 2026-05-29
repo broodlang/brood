@@ -178,13 +178,21 @@ macro_rules! handle {
             /// A handle into the immutable shared prelude region (no generation).
             #[inline]
             pub fn prelude(index: usize) -> Self {
-                debug_assert!(index < (1usize << GEN_SHIFT), "prelude index {} overflows", index);
+                debug_assert!(
+                    index < (1usize << GEN_SHIFT),
+                    "prelude index {} overflows",
+                    index
+                );
                 $name((index as u64) | ((PRELUDE as u64) << REGION_SHIFT))
             }
             /// A handle into the runtime's mutable shared code region (no generation).
             #[inline]
             pub fn runtime(index: usize) -> Self {
-                debug_assert!(index < (1usize << GEN_SHIFT), "runtime index {} overflows", index);
+                debug_assert!(
+                    index < (1usize << GEN_SHIFT),
+                    "runtime index {} overflows",
+                    index
+                );
                 $name((index as u64) | ((RUNTIME as u64) << REGION_SHIFT))
             }
             /// Which region this handle addresses ([`LOCAL`]/[`PRELUDE`]/[`RUNTIME`]).
