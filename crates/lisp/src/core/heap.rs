@@ -2613,21 +2613,40 @@ impl Heap {
     // lists from scratch as `(0..len).filter(|i| !marked[i])` — equivalently,
     // any LOCAL slot present in the slab and not reached from a root.
 
-    /// Bump-allocator era: this is now a no-op. The per-process heap grows
-    /// monotonically until the process exits, at which point the whole heap
-    /// is dropped. Long-running loops reclaim via the `(hibernate)` arena flip
-    /// ([`flush`](Self::flush), which shares [`arena_flip`](Self::arena_flip)).
-    /// The legacy mark-sweep is kept below as `collect_old` for reference.
+    /// **Stage B — automatic copying collection at the eval safepoint** (ADR-054;
+    /// `docs/memory-review.md`). Fired by `eval::eval` when `gc_due()` *and* we are
+    /// the outermost eval (`gc_block_depth() == 1`), so the only live LOCAL handles
+    /// are the ones reachable from the roots below — see the safepoint's
+    /// rooting-completeness argument. A semi-space copy via [`arena_flip`]: relocate
+    /// every LOCAL object reachable from `extra_roots` (the eval's `expr`),
+    /// `extra_envs` (its `env`), the dynamic stack, and the explicit root stack into
+    /// fresh slabs; drop the rest; bump the generation epoch so any handle held
+    /// across this without being re-rooted trips the tripwire at its next deref.
     ///
-    /// Stage B (automatic collection at this safepoint) is **pending generational
-    /// handles** — see `docs/memory-review.md`. A prototype copying collector here
-    /// surfaced (under `BROOD_GC_STRESS=1`) the use-after-move footgun this is
-    /// blocked on: every Rust-held `Value`/`EnvId` copy elsewhere goes stale when
-    /// objects move, and that surfaces as a far-away bounds panic, not at the
-    /// offending deref. Generational handles fix the *debuggability* (and re-open
-    /// non-moving mark-sweep, which avoids the footgun entirely).
-    pub fn collect(&mut self, _extra_roots: &[Value], _extra_envs: &[EnvId]) {
-        // no-op (see doc comment — Stage B blocked on generational handles)
+    /// Because it MOVES survivors, the caller **must** use the relocated handles
+    /// written back into `extra_roots`/`extra_envs`. Recomputes the adaptive
+    /// threshold so the next collection fires when the live set doubles (amortized
+    /// O(1) copying per allocation — standard semi-space; the threshold is the
+    /// slow/stable dial, `BROOD_GC_STRESS=1` ⇒ every safepoint). No-op while GC is
+    /// disabled (the builder heap during prelude construction). Shares all of its
+    /// machinery — and the no-slot-reuse safety — with the `(hibernate)` flush.
+    pub fn collect(&mut self, extra_roots: &mut [Value], extra_envs: &mut [EnvId]) {
+        if !self.gc_enabled {
+            return;
+        }
+        self.arena_flip(extra_roots, extra_envs);
+        self.gc_threshold = std::cmp::max(gc_floor(), self.local_live_count().saturating_mul(2));
+    }
+
+    /// The relocated handle of the `i`th explicit root (see [`push_root`]). Read
+    /// back by the form-loops in `Interp::eval_str`/`eval_source` after each form:
+    /// a collection during form `i` relocates the LOCAL forms `i+1..` that those
+    /// loops pushed as roots, so their own `Vec` copies are stale — this returns
+    /// the current handle from the (relocated) root stack instead.
+    ///
+    /// [`push_root`]: Self::push_root
+    pub fn root_at(&self, i: usize) -> Value {
+        self.roots[i]
     }
 
     #[allow(dead_code)]

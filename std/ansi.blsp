@@ -25,7 +25,7 @@ separate flush step. The ESC byte is the `\\e` string escape.")
 
 (defn ansi-clear ()
   "Erase the screen and move the cursor home — the per-frame reset for an animation loop. `(print (ansi-clear) frame)` redraws cleanly without scrolling."
-  (str "\e[2J\e[H"))
+  (str (ansi-clear-screen) (ansi-home)))
 
 (defn ansi-cursor (row col)
   "The escape that moves the cursor to 1-based (`row`, `col`)."

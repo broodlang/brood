@@ -53,6 +53,8 @@ runtime (`observe-attach`) or, later, a peer runtime over a node link (remote
 attach). Drive the standalone app from the shell with `nest observe`.")
 
 (require 'display)
+(require 'keymap)     ; the shared key→command dispatcher (also used by the REPL)
+(require 'lineedit)  ; the minibuffer reuses lineedit's pure editing core
 
 ;; ---- pure formatting helpers ------------------------------------------------
 
@@ -133,13 +135,15 @@ on screen (roughly centred), clamped so the window never runs past the end."
 
 ;; ---- the pure render core (no IO — the testable heart) ----------------------
 
-(defn observe-frame (node procs sel cols rows paused sort link)
+(defn observe-frame (node procs sel cols rows paused sort link ui)
   "Pure: build a render frame (a vector of display ops) for a `cols`×`rows`
 terminal — a two-line node panel (from `node`, with the `link` status), a column
 header, the `procs` list (each a `process-info` map) windowed to fit with row `sel`
-selected/highlighted, a detail line for the selection, and a key-hint footer
-(showing `PAUSED` when `paused`, and the current `sort` key). No IO — the
-observer's testable core; `observe--loop` feeds it live data."
+selected/highlighted, a detail line, and a footer. `ui` (a map, or nil) carries the
+command-line overlay: when `(:mode ui)` is `:command` the footer becomes the
+minibuffer (the `:edit` line-editor state's prompt+text, with the cursor placed),
+and `(:msg ui)` — the last command's result — replaces the detail line. No IO —
+the observer's testable core; `observe--loop` feeds it live data."
   (let (nprocs (count procs)
         lines (observe--node-lines node nprocs link)
         cap (max 1 (- rows 5))
@@ -152,11 +156,16 @@ observer's testable core; `observe--loop` feeds it live data."
                             (observe--fit (str (if selected? "▸ " "  ") (observe--proc-cells p)) cols)
                             (observe--row-face p selected?))))
                   (enumerate visible))
-        detail (if (empty? procs)
-                 "  (no live processes)"
-                 (observe--detail (nth procs (min (max 0 (dec nprocs)) sel)) nprocs cap sel))
-        keys (str (if paused "  PAUSED · space resume" "  space pause")
-                  " · ↑/↓ select · s sort(" (name sort) ") · r refresh · q quit"))
+        cmd? (= (get ui :mode) :command)
+        edit (get ui :edit)
+        detail (cond
+                 (get ui :msg) (str "  " (get ui :msg))
+                 (empty? procs) "  (no live processes)"
+                 :else (observe--detail (nth procs (min (max 0 (dec nprocs)) sel)) nprocs cap sel))
+        footer (if cmd?
+                 (str (get edit :prompt) (get edit :text))
+                 (str (if paused "  PAUSED · space resume" "  space pause")
+                      " · ↑/↓ select · s sort(" (name sort) ") · : eval · r refresh · q quit")))
     (apply frame
            (append
              [(clear)
@@ -165,7 +174,11 @@ observer's testable core; `observe--loop` feeds it live data."
               (text 2 0 (observe--fit (str "  " (observe--cells "ID" "NAME" "STATUS" "MBOX" "MEM" "MON")) cols) {:bold true})]
              body
              [(text (- rows 2) 0 (observe--fit (pad-right detail cols) cols) {:fg :cyan})
-              (text (dec rows) 0 (observe--fit (pad-right keys cols) cols) {:reverse true})]))))
+              (text (dec rows) 0 (observe--fit (pad-right footer cols) cols) (if cmd? nil {:reverse true}))
+              ;; place the cursor in the minibuffer when editing a command
+              (if cmd?
+                (cursor (dec rows) (min (max 0 (dec cols)) (+ (string-length (get edit :prompt)) (get edit :point))))
+                nil)]))))
 
 ;; ---- live data --------------------------------------------------------------
 
@@ -264,30 +277,79 @@ Clamped to a valid row."
   "Return `state` with the selection pinned to the `:id` at row `idx` of `procs`."
   (assoc state :sel-id (if (empty? procs) nil (get (nth procs idx) :id))))
 
-(defn observe--loop (state source)
-  "The observer event loop: fetch a snapshot from `source` (unless paused), draw it,
-wait up to 1s for a key, then recurse until `q` / Esc / Ctrl-C. `state` is `{:sel-id
-<int|nil> :sort <kw> :paused <bool> :last <snapshot|nil> :link <kw>}`. `source` (a
-0-arg fn → snapshot map | `:timeout` | `:down`) is local for inline, a peer request
-for remote attach — the loop doesn't care which."
+;; ---- navigation commands + keymap (shared dispatcher, the REPL's model) ------
+;;
+;; Each command is a pure `(state key) -> state`; the loop threads the current
+;; `:procs`/`:sel`/`:n` into the state so selection commands can read them. Keys
+;; resolve through `*observe-keymap*` via `keymap-dispatch` (rebindable + testable,
+;; like the line editor). Quit sets `:done`; `:`/`e` enter the eval minibuffer.
+
+(defn observe-cmd-up (state _) "Select the previous row." (observe--select state (get state :procs) (max 0 (dec (get state :sel)))))
+(defn observe-cmd-down (state _) "Select the next row." (observe--select state (get state :procs) (min (max 0 (dec (get state :n))) (inc (get state :sel)))))
+(defn observe-cmd-sort (state _) "Cycle the view (id/mailbox/memory/tree)." (assoc state :sort (observe--next-sort (get state :sort))))
+(defn observe-cmd-pause (state _) "Pause / resume the live refresh." (assoc state :paused (not (get state :paused))))
+(defn observe-cmd-refresh (state _) "Resume live (un-pause)." (assoc state :paused false))
+(defn observe-cmd-quit (state _) "Quit the observer." (assoc state :done true))
+(defn observe-cmd-command (state _)
+  "Open the eval minibuffer (a Brood prompt). Enter evaluates in the observed
+runtime (locally inline, or on the peer when remote-attached); Ctrl-C cancels."
+  (assoc state :mode :command :edit (lineedit--init "λ " "" []) :msg nil))
+
+(def *observe-keymap*
+  {:up 'observe-cmd-up :ctrl-p 'observe-cmd-up "k" 'observe-cmd-up
+   :down 'observe-cmd-down :ctrl-n 'observe-cmd-down "j" 'observe-cmd-down
+   "s" 'observe-cmd-sort
+   " " 'observe-cmd-pause
+   "r" 'observe-cmd-refresh
+   ":" 'observe-cmd-command "e" 'observe-cmd-command
+   "q" 'observe-cmd-quit :escape 'observe-cmd-quit :ctrl-c 'observe-cmd-quit})
+
+;; ---- the eval minibuffer (a REPL inside the observer) ------------------------
+
+(defn observe--eval-string (src)
+  "Evaluate `src` in THIS runtime and format the result (or error) as a one-line
+string for the minibuffer. The local backend, and what the remote agent runs."
+  (try
+    (str "=> " (pr-str (eval-string src)))
+    (catch e (str "error: "
+                  (if (and (map? e) (contains? e :message)) (get e :message) (pr-str e))))))
+
+(defn observe--command-key (state backend key)
+  "Feed `key` to the minibuffer's line editor (reusing lineedit's pure core). On
+submit, evaluate the text via `backend`'s `:eval` and show the result; on cancel /
+EOF, return to navigation; otherwise keep editing."
+  (let (edit (lineedit--handle (get state :edit) key)
+        done (get edit :done))
+    (cond
+      (= done :submit) (assoc state :mode :nav :edit nil :msg ((get backend :eval) (get edit :text)))
+      (nil? done)      (assoc state :edit edit)
+      :else            (assoc state :mode :nav :edit nil))))
+
+(defn observe--loop (state backend)
+  "The observer event loop: fetch a snapshot from `backend`'s `:source` (unless
+paused or in command mode), draw it, wait up to 1s for a key, dispatch it, recurse.
+`state` carries `{:sel-id :sort :paused :last :link :mode :edit :msg}`. `backend` is
+`{:source <0-arg fn → snapshot | :timeout | :down> :eval <fn src → result-string>}`
+— local for inline, a peer request/eval for remote attach. In `:command` mode keys
+go to the minibuffer; in `:nav` mode through `*observe-keymap*` (quit sets `:done`)."
   (let ([cols rows] (term-size)
-        paused (get state :paused)
-        state (if paused state (observe--apply-result state (source)))
+        fetching (and (not (get state :paused)) (not (= (get state :mode) :command)))
+        state (if fetching (observe--apply-result state ((get backend :source))) state)
         sort (get state :sort)
         snap (or (get state :last) {:node (observe--node-info) :procs []})
         procs (observe--order (get snap :procs) sort)
         n (count procs)
-        sel (observe--sel-index procs (get state :sel-id)))
-    (term-draw (observe-frame (get snap :node) procs sel cols rows paused sort (get state :link)))
+        sel (observe--sel-index procs (get state :sel-id))
+        ;; thread the rendered list/selection so the nav commands can read them
+        state (assoc state :procs procs :sel sel :n n)
+        ui {:mode (get state :mode) :edit (get state :edit) :msg (get state :msg)})
+    (term-draw (observe-frame (get snap :node) procs sel cols rows (get state :paused) sort (get state :link) ui))
     (let (k (term-poll 1000))
       (cond
-        (or (= k "q") (= k :escape) (= k :ctrl-c)) (term-leave)
-        (or (= k :up) (= k "k"))   (observe--loop (observe--select state procs (max 0 (dec sel))) source)
-        (or (= k :down) (= k "j")) (observe--loop (observe--select state procs (min (max 0 (dec n)) (inc sel))) source)
-        (= k "s") (observe--loop (assoc state :sort (observe--next-sort sort)) source)
-        (= k " ") (observe--loop (assoc state :paused (not paused)) source)
-        (= k "r") (observe--loop (assoc state :paused false) source)
-        :else (observe--loop state source)))))
+        (nil? k) (observe--loop state backend)                                   ; timeout → redraw / refetch
+        (= (get state :mode) :command) (observe--loop (observe--command-key state backend k) backend)
+        :else (let (next (keymap-dispatch *observe-keymap* (assoc state :msg nil) k (fn (s _) s)))
+                (if (get next :done) (term-leave) (observe--loop next backend)))))))
 
 ;; ---- demo processes (so a fresh observer has something to show) -------------
 
@@ -324,8 +386,8 @@ must redraw afterward. Remote attach (a peer runtime) is the same loop with a
 remote source — see `observe-connect`."
   (do
     (term-enter)
-    (observe--loop {:sel-id nil :sort :id :paused false :last nil :link :ok}
-                   observe--local-snapshot)))
+    (observe--loop {:sel-id nil :sort :id :paused false :last nil :link :ok :mode :nav :edit nil :msg nil}
+                   {:source observe--local-snapshot :eval observe--eval-string})))
 
 ;; ---- remote attach (observe a peer runtime over the node link, ADR-053) -----
 ;;
@@ -337,11 +399,14 @@ remote source — see `observe-connect`."
 (defdyn *observe-timeout* 800)   ; ms to wait for a remote snapshot before :stale
 
 (defn observe--agent-loop ()
-  "The target-side agent's receive loop: reply to each `[:snapshot from _]` with
-this runtime's `observe--local-snapshot`, sent back to the requester's pid (which
-routes over the link). Ignores anything else."
+  "The target-side agent's receive loop: reply to `[:snapshot from _]` with this
+runtime's `observe--local-snapshot`, and to `[:eval src from _]` with the result of
+evaluating `src` HERE (the remote eval minibuffer) — both sent back to the
+requester's pid (which routes over the link). Ignores anything else."
   (receive
     ([:snapshot from _] (do (send from [:observe-reply (observe--local-snapshot)])
+                            (observe--agent-loop)))
+    ([:eval src from _] (do (send from [:eval-reply (observe--eval-string src)])
                             (observe--agent-loop)))
     (_ (observe--agent-loop))))
 
@@ -378,6 +443,16 @@ link can't pile them up in the observer's mailbox."
     ([:nodedown ~peer] :down)
     (after *observe-timeout* :timeout)))
 
+(defn observe--remote-eval (peer src)
+  "Evaluate `src` on `peer` via its `:observe` agent (the remote eval minibuffer):
+send `[:eval …]`, await the agent's formatted result string. Returns an error
+string on a dropped/stalled link rather than throwing (the minibuffer shows it)."
+  (send {:name :observe :node peer} [:eval src (self) (ref)])
+  (receive
+    ([:eval-reply r] r)
+    ([:nodedown ~peer] "error: link down")
+    (after *observe-timeout* "error: eval timed out")))
+
 (defn observe-connect (spec cookie)
   "Attach the observer to a peer runtime named in `spec` (\"name@host:port\") over
 the node link, authenticating with `cookie` (both sides share it). The target must
@@ -391,8 +466,9 @@ until you quit."
     (let (peer (connect spec))           ; raises a clean error on failure (caught by the caller)
       (monitor-node peer)
       (term-enter)
-      (observe--loop {:sel-id nil :sort :id :paused false :last nil :link :ok}
-                     (fn () (observe--request peer))))))
+      (observe--loop {:sel-id nil :sort :id :paused false :last nil :link :ok :mode :nav :edit nil :msg nil}
+                     {:source (fn () (observe--request peer))
+                      :eval (fn (src) (observe--remote-eval peer src))}))))
 
 (defn observe-run (&optional (demo true))
   "Run the interactive process observer as a standalone app — a full-screen TUI

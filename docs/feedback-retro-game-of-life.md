@@ -80,6 +80,25 @@ for follow-up. See the 2026-05-29 devlog entry and ADR-050.
   time then exits cleanly. The first-class `timeout Ns nest run`; makes the §8
   leak (and any time-based behaviour) reproducible in CI.
 
+**Done (round 2, 2026-05-29 — a *second* GoL pass still spent ~30 probes on
+builtin signatures; round 1 only solved discovery-of-existence. See the devlog
+entry of the same date):**
+- **Complete signature reference** — `nest doc --all` prints every public global
+  in a fresh image (≈340 builtins + prelude fns/macros) with signature + one-line
+  summary, generated live so it never drifts. The intended fix for probing names
+  one at a time: read it once. `nest doc <module>` still covers opt-in modules.
+- **`concat`** (§1 reflex) — variadic alias of `append` (folds over lists *and*
+  vectors), so the universal Clojure reflex resolves to a real binding.
+- **Simple terminal output** — `std/ansi.blsp` (opt-in): `ansi-clear`/`-cursor`/
+  `-home`/`-hide-cursor`/… escape *strings* to `print`, the lightweight
+  counterpart to the `display` render-op protocol. Plus the clarification that
+  **`print` flushes every call** (the "no flush primitive" worry was a non-issue).
+- **`--main`/CLI entry override** (§5.3) — `nest run --main module/fn` runs a
+  one-off entry without editing the manifest; warns when a FILE is also given.
+- **Skill gotcha table** — `docs/writing-brood-skill.md` now lists the reflexes
+  that don't carry over (concat/conj/set!/loop-recur/flush/ANSI/RNG) and points
+  at `nest doc --all`.
+
 **Still open (mapped, not yet built):**
 - **§8 memory leak** — the highest-priority item; **re-confirmed 2026-05-29 on the
   newer binary (~80 MB/s, see the re-verification note above).** It is the known
@@ -89,8 +108,7 @@ for follow-up. See the 2026-05-29 devlog entry and ADR-050.
   `docs/memory-review.md` (auto-fire the copy at a threshold), gated on a
   `GC_BLOCK`/suspend rooting audit — not rushed. (`--for` now makes it
   reproducible in CI.)
-- **Set type `#{}`** (§1, §4.2), and a one-off **`--main`/CLI entry override**
-  (§5.3) for running a different entry without editing the manifest.
+- **Set type `#{}`** (§1, §4.2).
 
 ---
 

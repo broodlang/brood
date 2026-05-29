@@ -15,7 +15,7 @@ gate (`eval::call_native`), before the primitive runs — so a wrong-count call 
 a clean arity error (`type-of: expected 1 argument, got 0`) rather than a missing
 arg silently becoming `nil`.
 
-## Native primitive functions (99)
+## Native primitive functions (100)
 
 | Category | Primitive | Arity | Purpose |
 |---|---|---|---|
@@ -99,6 +99,7 @@ arg silently becoming `nil`.
 | **Introspection** (editor tooling) | `doc` | 1 | a function/macro's docstring, or nil |
 | | `arglist` | 1 | a function/macro's parameter list (required, `&optional`, `& rest`), or nil |
 | | `global-names` | 0 | every globally bound symbol, sorted by spelling (completion / doc generation) |
+| | `special-forms` | 0 | the special-form / core-macro names (strings) that read as keywords — the canonical list shared by the syntax highlighter (`std/highlight.blsp`) and the LSP |
 | | `bound?` | 1 | whether a symbol is bound in scope → bool |
 | | `dynamic?` | 1 | whether a symbol names a dynamic variable (declared via `defdyn`) → bool |
 | **Errors / control** | `throw` | 1 | raise a value as an error (non-local exit) |

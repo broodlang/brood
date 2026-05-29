@@ -7122,3 +7122,81 @@ cross-test contention on the shared worker pool — passes `--test-threads=1`.
 **Next.** Stage B — automatic collection at the eval safepoint — is now
 debuggable: a rooting miss points at itself. Revisit copying-vs-non-moving with
 the tripwire armed (`docs/memory-review.md`).
+
+---
+
+## 2026-05-29 — Game-of-Life retro round 2: kill the primitive-probing path
+
+**Goal.** A second AI-written Game-of-Life pass (after the first retro's fixes —
+PRNG, bitwise, `apropos`/`all-globals`, `--for`, duplicate-`main` warning) still
+burned ~4 min and ~30 REPL probes. Those fixes *held* (no RNG/duplicate-main/
+`--for` friction this time); the remaining cost was discovering builtin
+*signatures and semantics* (the first retro only solved discovery-of-*existence*)
+plus a few real gaps. Close that gap.
+
+**Done.**
+- **`nest doc --all`** — a complete reference: every public global in a fresh
+  image (≈340 builtins + prelude fns/macros) with its signature and one-line
+  summary, generated from the live image so it's always in sync. `document-all` +
+  `docs--public?` (drops `foo--bar` privates and raw `%`-primitives) in
+  `std/docs.blsp`; `--all` flag in `crates/nest`. The intended fix for "probing
+  names one at a time": read it once. `nest doc <module>` still covers opt-in
+  modules.
+- **`concat`** (`std/prelude.blsp`) — variadic sequence join, alias of `append`
+  (which already folds over lists *and* vectors), mirroring the
+  `all-globals`/`global-names` alias precedent. Resolves the universal Clojure
+  reflex that cost probes; returns a list (`(into [] …)` for a vector).
+- **`std/ansi.blsp`** (opt-in) — bare ANSI escape *strings* to `print`:
+  `ansi-clear`/`ansi-clear-screen`/`ansi-home`/`ansi-cursor`/`ansi-hide-cursor`/
+  `ansi-show-cursor`. The lightweight path for the cellular-automata/roguelike
+  genre, vs the structured `std/display` render-op protocol. `ansi-` prefixed
+  because `clear`/`cursor` belong to `display` (flat namespace). The ESC byte is
+  `\e`.
+- **`nest run --main module/fn`** — a one-off entry override without editing the
+  manifest's `:main` (the open §5.3 retro item). `set-project-main` +
+  `project--parse-main-spec` in `std/project.blsp`; warns (not silently ignores)
+  when a FILE is also given.
+- **Docs** — `docs/writing-brood-skill.md` gained a "Don't guess the standard
+  library" section with a *reflexes-that-don't-carry-over* table (`concat`,
+  `conj`, `set!`, `loop/recur`, flush, raw ANSI, RNG) pointing at `nest doc
+  --all`. `docs/brood-for-claude.md` and `docs/language.md` updated for `concat`,
+  the ansi module, `--main`, and the fact that **`print` flushes stdout every
+  call** (the "no flush primitive" worry was a non-issue — there's nothing to
+  add; documenting it keeps the core small).
+
+**Tests.** `tests/sequence_test.blsp` (concat over lists/vectors/mixed/empty +
+`into []`), new `tests/ansi_test.blsp` (escape strings + an `:isolated`
+cross-process frame round-trip), `cargo test -p nest` (35 green). Suite +
+single-file runs green.
+
+**Note for the next pass.** Caught the classic `spawn` trap while writing the
+ansi test: `spawn` is a macro over an *expression* run in the new process, so
+`(spawn (fn () …))` builds a closure and discards it (the parent's `receive` then
+blocks forever). Pass state to a top-level worker fn — `(spawn (worker me))` —
+as the rest of the suite does. Still **not** fixed: the §8 memory leak (Stage B
+of `docs/memory-review.md`), which keeps `--for` mandatory for long loops.
+
+## 2026-05-29 — REPL editor cleanups: `(special-forms)`, persistent history, C-r (ADR-052)
+
+Three of the ADR-052 follow-ups (deferring the scheduler-parking key read, which
+would collide with the in-flight scheduler/handle work):
+- **`(special-forms)` primitive + de-drift.** Moved the canonical `SPECIAL_FORMS`
+  into the `brood` lib (`builtins.rs`, `pub const`); added `(special-forms)` over it;
+  the LSP (`semantic_tokens`/`completion`) now imports it instead of its own copy, and
+  `std/highlight.blsp` reads it via `(def hl--special-forms (special-forms))`. One
+  list, no drift between runtime, highlighter, and LSP.
+- **Persistent history.** `std/repl.blsp` loads history on an interactive start and
+  saves it (capped to `*repl-history-max*`, 1000) after each submitted form, to
+  `$BROOD_HISTORY` else `$HOME/.brood_history` — one entry per line, oldest first.
+  Piped/scripted runs neither read nor write it. Serialize/parse factored into pure
+  `repl--history->text` / `repl--history<-text` (tested); a history I/O error is
+  swallowed so it can't break the REPL. Verified across two sessions via a pty.
+- **Reverse incremental search (C-r).** A `:search` sub-mode in `std/lineedit.blsp`:
+  C-r enters/steps older, printable extends, backspace shortens, Enter accepts, C-g/Esc
+  cancels (restoring the pre-search line), any other key accepts then replays. The
+  prompt shows `(reverse-i-search)\`q':` and the hint is suppressed while searching.
+
+Tests: lineedit 30, repl 14, highlight 19 (+ observe 29) green. Done alongside the
+user's parallel extraction of the keymap into `std/keymap.blsp` (`keymap-dispatch`,
+the input-side seam) — the editor's dispatch now routes through it, with C-r layered
+on top.
