@@ -6791,6 +6791,22 @@ seed's stream survives the deep copy on `send`); `tests/introspection_test.blsp`
 `str` (which keeps a keyword's leading colon); fixed to `name`. Full suite green
 (`cargo test`: 136 + 75 + 53 unit, `brood_suite_passes`, MCP + distribution).
 
+**Follow-up — duplicate-global warning (§5.1, the "bad miss").** The flat
+namespace (ADR-019) means one binding per name project-wide, but two source files
+each defining `(defn main …)` silently let the last-loaded win with **no
+diagnostic** — the feedback's most expensive failure (a non-erroring wrong
+result). Added an advisory pass to `std/project.blsp`: `project--file-def-names`
+parses a file's top-level def-style forms straight from `parse-source`'s CST (no
+eval — a `def`/`defn`/`defmacro`/`defdyn`/`defonce` head + its name symbol;
+`defmodule` excluded), and `project--duplicate-def-warnings` groups names across
+the project's **source** files and warns on any defined in >1 file.
+`check-project` (`nest test`) and `check-project-sources` (`nest run`) print these
+to stderr before handing off — advisory, never fatal, honors `BROOD_NO_CHECK=1`.
+Verified end-to-end: `nest new` + a second `main` → the warning fires and the run
+still proceeds; a clean project stays silent. Tests in `tests/project_test.blsp`.
+Mechanism (CST parsing) is the Rust `parse-source` primitive; the policy
+(grouping, the message) is Brood — the ADR-006 split.
+
 **Deferred (scoped, not done).**
 - **The §8 memory leak** — the headline finding. It's the known "spiky memory":
   the copying collector (`flush`) exists but only fires on a manual `(hibernate)`,
@@ -6798,7 +6814,7 @@ seed's stream survives the deep copy on `send`); `tests/introspection_test.blsp`
   **Stage B** of `docs/memory-review.md` (auto-fire the copy at a memory threshold
   at the eval safepoint), which needs the `GC_BLOCK`/suspend rooting audit first —
   deliberately *not* rushed.
-- **Set type `#{}`**, **duplicate-global warning** in `check-project-sources`, a
+- **Set type `#{}`**, a
   **`--main`/`module/fn` CLI override**, and a **frame-capped run mode** — all
   mapped (insertion points known) but left for follow-up.
 
