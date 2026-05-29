@@ -7200,3 +7200,29 @@ Tests: lineedit 30, repl 14, highlight 19 (+ observe 29) green. Done alongside t
 user's parallel extraction of the keymap into `std/keymap.blsp` (`keymap-dispatch`,
 the input-side seam) — the editor's dispatch now routes through it, with C-r layered
 on top.
+
+---
+
+## 2026-05-29 — std-library review: `let*` formatting fix + dedup simplification
+
+**Goal.** A sweep over all `std/*.blsp` (≈6500 lines, 17 files) for bugs and
+simplifications, with emphasis on the standard library. Fanned out per-file
+review; the library came back remarkably clean. Two actionable items found and
+fixed:
+
+- **Formatter bug — `let*` not in `*format-headers*`** (`std/format.blsp`). `let*`
+  was listed in `*format-pair-bindings*` but missing from `*format-headers*`
+  (unlike its siblings `let`/`letrec`/`binding`), so it got header-count -1. In the
+  common case the generic-call path still rode the bindings list on the head line,
+  but when the bindings list *couldn't* be single-lined (e.g. it contained a
+  comment) `let*` dropped the bindings to the body at +2 indent and sat alone on
+  the head line — inconsistent with `let`. Fixed by adding `'let* 1` to
+  `*format-headers*`. Verified before/after with a comment-in-bindings `let*`.
+- **Simplification — `format--dedup` reinvented `distinct`** (`std/format.blsp`).
+  The one-use, order-preserving, first-occurrence `format--dedup` (O(n²) via
+  `member?`) was exactly the prelude's `distinct` (O(n) via a map-backed seen set).
+  Replaced the call site with `distinct` and deleted the helper.
+
+The remaining review notes were micro-optimizations not worth the churn (a
+redundant EOF re-parse in `repl.blsp`, `blank?` on single chars, `eval` resolving
+a symbol twice in `docs.blsp`). Full suite green: 765 tests pass.
