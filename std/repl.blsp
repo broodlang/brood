@@ -8,9 +8,11 @@
 ;;    it can be redefined at runtime like everything else (the project's reason
 ;;    for existing). Replaces the old Rust `crates/repl`.
 ;;  - No mutation, no loop construct: `repl--loop` is tail-recursive, so it runs
-;;    forever in O(1) stack; the per-process tracing GC reclaims each command's
-;;    allocations (the never-returning-loop case it was built for — ADR-035), so
-;;    there's no manual heap reset to do from here.
+;;    forever in O(1) stack. NOTE: the per-process tracing GC that was meant to
+;;    reclaim each command's allocations (ADR-035) is currently DISABLED
+;;    (`Heap::collect` is a no-op), and this loop does not `(hibernate)`, so a
+;;    long session accumulates LOCAL allocations with no reclamation. The fix is
+;;    to recur via `(hibernate repl--loop tty)` (arena flip) — see ADR-048.
 ;;  - Line editing comes free from the terminal's cooked mode (backspace, ^U,
 ;;    ^W), so `read-line` stays a plain blocking read. Arrow-key history is a
 ;;    later addition over the `term-*` raw-key seam + the buffer framework — the

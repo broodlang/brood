@@ -1383,9 +1383,24 @@ shared-cookie possession but doesn't encrypt traffic).
 
 ## ADR-035 — Tracing GC: per-process mark-sweep, fired only at the outermost-eval safepoint
 
-**Status:** accepted. Fulfils ADR-002's "tracing GC later" and the deferred step in
-ADR-016 (arena-reset doesn't help a never-returning loop). Implementation in
-`crates/lisp/src/core/heap.rs`; design walkthrough in
+**Status:** ⚠️ **superseded / disabled** (2026-05-29). The mark-sweep described
+below was implemented, then **switched off** in favour of a **bump-only allocator +
+arena flip on `(hibernate)`** (commits `f90f0de` Phase 1, `dee0814` Phase 2; see
+ADR-041 and the status banner in [`docs/memory-model.md`](memory-model.md)).
+`Heap::collect` is now a **no-op**; the mark-sweep survives as `collect_old`
+(`#[allow(dead_code)]`) for reference only. *Why it was disabled:* mark-sweep
+reclaims by **reusing freed slots**, and slot reuse reintroduced the stale-handle
+multi-threaded scheduler race that the never-reuse bump allocator eliminates. The
+`GC_BLOCK == 1` safepoint and the poison tripwire are still wired but inert (and
+`BROOD_GC_STRESS=1` therefore exercises nothing today). The one remaining niche the
+mark-sweep was meant to fill — a *long-lived* process (e.g. the in-language test
+runner) that never hibernates accumulating unreachable garbage — is to be solved by
+**hibernating that process between batches**, not by re-enabling slot reuse. The
+original rationale is kept below for context.
+
+**Original status (historical):** accepted. Fulfils ADR-002's "tracing GC later"
+and the deferred step in ADR-016 (arena-reset doesn't help a never-returning loop).
+Implementation in `crates/lisp/src/core/heap.rs`; design walkthrough in
 [`docs/memory-model.md`](memory-model.md).
 
 **Context.** Arena-reset (ADR-016) bounded long REPL/file sessions by truncating
@@ -2591,4 +2606,67 @@ common small call. `+` stays Brood; `(+ a b)` is now ~one env frame instead of
 lists are lists; Erlang-style same-arity pattern dispatch), ADR-002 (`Rc`→`gc-arena`,
 why heap construction stays funnelled), CLAUDE.md "Dogfood first; optimize only by
 building the language up", [`language.md`](language.md) (`fn`/`defn` clauses),
-[`roadmap.md`](roadmap.md) M1 (the tracing GC that fixes cumulative memory).
+[`roadmap.md`](roadmap.md) M1 ("Memory reclamation" — the cumulative-memory story
+multi-arity helps but doesn't fully solve).
+
+## ADR-048 — Self-hosted REPL (the read-eval-print loop in Brood)
+
+**Status:** accepted (2026-05-29). Moves the REPL out of Rust (`crates/repl`) and
+into Brood (`std/repl.blsp`); the `rustyline` dependency leaves the tree with it.
+
+**Context.** The REPL was Rust from day one — a bootstrap (`crates/repl`, shared
+by `brood` and `nest repl`) doing `rustyline` line editing, multi-line balance
+detection, per-command heap reset, and error printing. The roadmap always carried
+"self-host the CLI/REPL in Brood" as M1 work (the core principle, ADR-006: Rust is
+mechanism, Brood is policy — and a read-eval-print loop is pure policy). Three
+prerequisites had to land first, and now all have:
+- **`eval-string`** is the whole evaluator, callable from Brood (read-all →
+  macroexpand-all → eval).
+- a never-returning Brood loop can be **memory-bounded** — the design target the
+  per-process tracing GC (ADR-035) was meant to hit. ⚠️ That mark-sweep is
+  currently **disabled** (`Heap::collect` is a no-op — see ADR-035), so the
+  reclamation that actually works today is `(hibernate fn & args)` (arena flip).
+  **Known limitation:** the v1 `repl--loop` is plain tail recursion and does *not*
+  hibernate, so a long interactive session accumulates LOCAL allocations until a
+  cap/host limit — to be closed by looping via `(hibernate repl--loop tty)` (or
+  re-enabling reclamation). The Rust `checkpoint`/`reset_local_to` is gone from the
+  Brood loop regardless.
+- **`try`/`catch`** surfaces a built-in error to Brood as a structured map
+  (`{:kind :message [:line :col] …}`, ADR + `docs/llm-native.md` §4), so the loop
+  can format errors without parsing strings.
+
+**Decision.** Write the loop in `std/repl.blsp` (opt-in module, `(require 'repl)`),
+add **one** irreducible Rust primitive, and shrink the binaries to a bootstrap.
+- **New primitive: `(read-line)`** — a blocking read of one line from stdin,
+  returning the line (trailing newline stripped) or `nil` at EOF. Blocking stdin
+  I/O is genuine mechanism the language can't bootstrap; everything else is Brood.
+- **Line editing comes free from the terminal's cooked mode** (backspace, `^U`,
+  `^W`), so `read-line` stays a plain read — no raw-mode key handling needed for
+  v1. Arrow-key history/recall is a later additive layer over the `term-*` raw-key
+  seam (M3) + the buffer framework (M2); the point of self-hosting is that it's now
+  a Brood function to add, not a Rust dependency to carry.
+- **`brood` (no args) and `nest repl` bootstrap into `(require 'repl) (repl-run)`**;
+  the `repl` module is baked into the binary (`EMBEDDED_MODULES`) like the prelude.
+- **`crates/repl` and `rustyline` are deleted.** Greenfield: no compatibility shim
+  (CLAUDE.md). Reads work piped too (`echo '(+ 1 2)' | brood` → `3`); prompts and
+  the banner gate on `(stdout-tty?)` so they never pollute a redirected stdout.
+
+**Consequences.**
+- The REPL is now redefinable at runtime like the rest of the system — prompts are
+  the dynamic vars `*repl-prompt*` / `*repl-cont-prompt*`; the loop, error
+  rendering, and balance detection are ordinary Brood functions.
+- **Lost (for now):** arrow-key history recall and Emacs keybindings that
+  `rustyline` provided. Cooked-mode editing covers in-line correction; history is
+  the first thing to add back over the raw-key seam. Acceptable per the dogfooding
+  trade (CLAUDE.md): surface the gap rather than carry a Rust escape hatch.
+- One less crate and one fewer third-party dependency; the LSP never depended on
+  the REPL, so nothing there changes.
+- `tests/repl_test.blsp` covers the pure pieces (balance/datum detection, error
+  rendering) incl. a cross-process error-map round-trip; the IO loop is exercised
+  manually via `brood` / piped input.
+
+**References.** ADR-006 (write the language in the language), ADR-035 (the
+per-process tracing GC meant to bound a never-returning Brood loop — currently
+disabled; reclamation today is `(hibernate)`), ADR-028 (`brood`/`nest` split —
+both bootstrap the same Brood REPL), ADR-046 (the `term-*` seam a future raw-mode
+line editor rides on), CLAUDE.md "Dogfood first" and "Greenfield".

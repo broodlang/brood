@@ -895,8 +895,10 @@ the language" principle.
   byte-counting global allocator, so they cover *all* Rust allocations (the
   interpreter included), not just Brood values — which is what you want for
   "how much memory did this use." The test runner prints the peak alongside the
-  time. (Until the tracing GC lands, nothing is reclaimed mid-run, so the two
-  read nearly the same.)
+  time. (The LOCAL heap is a bump allocator with no slot reuse; memory is
+  reclaimed only at a top-level-form boundary, on `(hibernate …)`, or when a
+  process exits — so within one long-running expression that never hibernates,
+  the two reads sit nearly the same.)
 
 ### Metaprogramming / self-hosting
 `eval`  `read-string`  `load`  `require`  `macroexpand`  `macroexpand-1`  `gensym`

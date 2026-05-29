@@ -129,11 +129,15 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
     Planned fix: **hibernate the runner between batches** (the architecturally
     consistent path — no slot reuse), *not* re-enabling the race-prone mark-sweep.
   See `memory-model.md`.
-- 🟡 Nicer REPL — `rustyline` line editing (arrow keys, history, Emacs bindings)
-  is in; richer completion/highlighting still to come
-- ⬜ **Self-host the CLI/REPL in Brood** — once the language can express it, the
-  read-eval-print loop should be Brood source on a thin Rust substrate, not
-  Rust. (See the core principle in `CLAUDE.md`.)
+- ✅ **Self-hosted REPL in Brood** (ADR-048) — the read-eval-print loop is now
+  `std/repl.blsp`, not Rust: a tail-recursive loop over `read-line` (the one new
+  primitive) + `eval-string` + `pr-str`, with multi-line balance detection,
+  structured-error rendering, and tty-gated prompts all in Brood. `brood` (no
+  args) and `nest repl` bootstrap into `(repl-run)`; the old `crates/repl` +
+  `rustyline` are gone. The per-process GC (ADR-035) reclaims each command's
+  allocations, so there's no Rust heap-reset left. Cooked-mode editing comes free
+  from the terminal; ⬜ arrow-key **history/recall** is the next additive layer
+  over the `term-*` raw-key seam (ADR-046) + the buffer framework.
 - ✅ **Modules** — Emacs-flat `provide` / `require` + `*load-path*` over the shared
   global table; `foo--private` convention (ADR-019). Logic in Brood; the only new
   Rust is `file-exists?` / `dir?` / `list-dir` / `cwd` / `name` / `eval-string` /
