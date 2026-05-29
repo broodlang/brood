@@ -3259,12 +3259,58 @@ Rust-primitive category), ADR-043 (root-vs-worker thread + finite-poll model),
 
 ## ADR-057 — Lexical addressing: O(1) variable lookup (eval-dispatch Step 2)
 
-**Status:** proposed / draft (2026-05-29). Step 2 of the evaluator-dispatch
-campaign ([`handoff-eval-dispatch.md`](handoff-eval-dispatch.md)). Not yet
-implemented — this records the design for review before the (large, load-bearing)
-change. Builds on Step 1 (ADR-… not minted; the `SpecialForm` enum dispatch).
+**Status:** **rejected as scoped** (2026-05-29). Designed, then *not* implemented
+— direct measurement showed the premise this rests on is false: variable lookup is
+**~6%** of the eval loop, not the bottleneck. The design is kept on record (it's
+correct, and lexical addressing may return as a *by-product* of a future
+precompiled-body step), but on its own it's a poor trade: ~1–1.5 weeks of
+high-churn work — including the campaign's only real data-race surface (the
+global-cell seqlock) — for an under-10% gain. The evaluator-dispatch campaign's
+Step 2 is **re-pointed at the call path + per-combination overhead** instead; see
+[`handoff-eval-dispatch.md`](handoff-eval-dispatch.md).
 
-**Context.** Measuring `(sort < …)` overturned its own premise (devlog
+**Why rejected — the measurements that killed it.** Same machine, current build,
+2 M-iter loops, isolating one cost at a time (`/tmp/{lookup,read,call}_cost.blsp`):
+- A **local** variable read costs **~0 ns** over binding a constant — the env chain
+  is shallow (1–3 frames of a few bindings each), so the "walk + scan" is free.
+- A **global** read costs **~9 ns** over a constant (the `RwLock` read-acquire +
+  `FxHash` probe — cheap and uncontended).
+- One **closure call** costs **~52 ns** (`new_env` alloc + `bind_params` + body).
+- So the bare ~400–480 ns/iter loop splits roughly: **lookup ~6%**, function calls
+  ~a third, and the **majority is per-combination fixed overhead** (the
+  `tick`/`gc_due`/`soft_limit` TLS guards run on *every* combination, spine
+  `uncons`, argv `SmallVec`, native dispatch). Lexical addressing targets the
+  smallest slice.
+
+The original premise — that the ~400 ns is dominated by `env_get` chain-walking —
+was an inference, not a measurement; a "what's the benefit?" review caught it
+before the 1.5 weeks were spent (a vindication of the Step-0 baseline + the
+"measure every step" guardrail). The high-leverage levers are the call machinery
+(`new_env` per call) and folding the per-combination guards into one check —
+recorded in the handoff doc as the re-scoped Step 2/3.
+
+**Does code-safety rescue it? No.** A later review asked whether lexical
+addressing, beyond speed, buys *user code safety* (catching unbound vars / typos /
+shadowing before runtime). The general principle holds — a resolution pass that
+classifies every reference against a compile-time scope *is* a safety tool — but in
+Brood that value is **already delivered, at the right layer, decoupled from the
+runtime**: `syntax/scope.rs::analyze` (the CST scope tree behind go-to-def /
+find-refs / rename / shadowing) and the advisory **type checker** Step 4 (arity +
+**unbound-symbol** diagnostics, scope-aware, surfaced by the LSP as warnings). The
+runtime `LocalRef`/`GlobalRef` rewrite changes *how a lookup executes*, not *what is
+checked* — it adds **no new diagnostic**, and its resolution pass would *duplicate*
+analysis that already exists. And Brood's checking is **advisory, never rejecting**
+(ADR-023/024) — because late binding + hot reload (ADR-013) make a currently-unbound
+global legal — so even maximal static checking here is a warning, already emitted.
+*If* more safety is wanted, the lever is the checker/LSP, not the evaluator: an
+audit (devlog 2026-05-29) found one real gap — unbound symbols in **operand/value
+position** aren't flagged (only call heads are; the checker is conservative there to
+honour its no-false-positives rule around unexpanded macro args). Closing that is a
+small, low-risk change in `types/check` — unrelated to, and not a justification for,
+this ADR.
+
+**Original context (retained for the design record).** Measuring `(sort < …)`
+overturned its own premise (devlog
 2026-05-29): the ~700× gap vs Rust is neither comparisons (~9%) nor allocation
 (~140 ns/cons) nor GC (never fires below the 64K floor). The floor is **variable
 lookup**. `env_get` (`core/heap.rs`) walks the lexical parent chain and scans each
@@ -3434,3 +3480,62 @@ is binding-, not data-mutation), ADR-023/024 + [`types.md`](types.md) (the
 compatibility contract the `Value` carve-out must satisfy), ADR-002 (the
 `Rc`→`gc-arena` migration that `value.rs` helpers keep contained), the shared-code
 model in [`shared-code.md`](shared-code.md) (why `GlobalRef` can't cross runtimes).
+
+## ADR-058 — Automatic GC reaches every entry path; `(hibernate)` removed
+
+**Status.** Accepted (2026-05-29). Completes ADR-055 (Stage B) and supersedes the
+Stage-A `(hibernate)` expedient from `docs/memory-review.md`.
+
+**Context.** Stage B (ADR-055) made copying collection automatic at the
+`gc_block_depth() == 1` eval safepoint. But "done" hid a trap: the safepoint only
+fires at depth 1, and how a program is *entered* decides its depth. `nest run
+<file>` launched the program via the `(load "path")` builtin, which re-enters
+`eval` for each form while the `(load …)` frame is still on the stack — so the
+whole program ran at `gc_block_depth >= 2`, the safepoint never fired, and a
+long-running loop climbed ~100 MB/s (the Game-of-Life §8 leak,
+`feedback-retro-game-of-life.md`). `brood <file>` never leaked because its
+`eval_source` form loop runs each top-level form at depth 1. So identical code
+leaked or didn't depending purely on the launcher — a violation of the project
+rule that **a Brood author must never have to reason about GC**.
+
+**Decision.**
+1. **Make `load` bounded in the core, not per-tool.** When `load` is the outermost
+   eval (`gc_block_depth() == 1` — a top-level form or a spawned-process body) it
+   evaluates the file's forms through the same depth-1 rooted form-loop as
+   `Interp::eval_source`: a `GcBlockReset` guard drops the block depth to 0 so each
+   form re-enters at the safepoint, and the unevaluated forms are rooted across
+   each collection (re-fetched via `root_at`). Called deeper (`(cons (load …) xs)`)
+   it falls back to inline eval — a library load that doesn't loop, so it never
+   crosses the threshold. Because the fix lives in `load`, *every* entry path —
+   `brood`, `nest run`/`--watch`/`--for`, MCP `eval`, the future editor — inherits
+   the bound for free; no launcher special-cases it. (`nest run`'s short-lived
+   `eval_source` workaround was reverted.)
+2. **Remove the `(hibernate)` primitive entirely.** With automatic collection now
+   reaching every normal entry path (every long-lived loop is a top-level form or
+   a spawned-process body, both at depth 1), the manual flush is redundant. Gone:
+   the `hibernate` builtin, the `ErrorKind::Hibernate` unwinding sentinel +
+   `hibernate_args` carrier (shrinking `LispError` on the hot `Result` path), and
+   the scheduler's catch-and-flush loop. `std/test.blsp`'s runner and
+   `std/repl.blsp`'s loop became plain tail calls; the `gc.rs` / `blob_share_test`
+   cases that asserted hibernate semantics now drive Stage B directly.
+   `Heap::flush` survives as a tested arena-flip helper.
+
+**Safety.** Resetting `GC_BLOCK` inside `load` is sound only at depth 1: the sole
+outer frame is the `(load …)` combination, whose `expr`/`call_form` are read only
+by `or_form_pos` via `id.index()` (a bit-extract, no slab deref → no tripwire) and
+only when the error lacks a position, which it never does here. Validated under
+`BROOD_GC_STRESS=1` + `debug_assertions` (every-safepoint fuzz, generational
+tripwire armed): `--for` loop and require/load-heavy suites stay green; a
+life-style loop went from 0 collections / 1.16 GB to 166 / ~5 MB.
+
+**Known limit.** A loop running several eval frames deep (e.g. invoked from a
+non-tail position inside `load`-ed non-entry code) still won't be collected — the
+depth-1 safepoint can't reach it. The general fix is the deferred operand-stack VM
+(collect at any depth, `memory-review.md` §6); it is not reachable by any normal
+program structure, so no escape hatch is retained.
+
+**References.** ADR-055 (Stage B), ADR-054 (generational handles — the tripwire
+this leans on), ADR-035 (the per-process GC model), ADR-048 (the REPL loop that
+dropped its `(hibernate)`), [`memory-review.md`](memory-review.md) §6,
+[`memory-model.md`](memory-model.md), and the §8 resolution in
+[`feedback-retro-game-of-life.md`](feedback-retro-game-of-life.md).

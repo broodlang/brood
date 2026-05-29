@@ -132,6 +132,24 @@
       (assert= (ensure-deps app nil) nil)
       (refute (file-exists? (path-join app "project.lock.blsp"))))))
 
+;; The `fetch`/`tree` verbs themselves are cwd-driven (they walk from `(cwd)` to a
+;; project root), so — like `run-project` — they can't be isolated from the brood
+;; repo the suite runs inside. The hand check is `nest fetch`/`nest tree` in a
+;; scaffolded project. Here we cover their pure, cwd-free helpers.
+(describe "package: tree helpers"
+  (test "dep-label renders a path dep"
+    (assert= (package--dep-label {:name 'shared :kind :path :path "../shared"})
+      "shared  (path \"../shared\")"))
+  (test "dep-label renders a git dep"
+    (assert= (package--dep-label {:name 'p :kind :git :url "https://x.git" :ref "v1"})
+      "p  (git https://x.git @ v1)"))
+  (test "index-by-name keys resolved entries by their name"
+    (let (idx (package--index-by-name
+                (list {:name 'a :kind :path :path "../a" :deps nil}
+                      {:name 'b :kind :path :path "../b" :deps nil})))
+      (assert= (get (get idx 'a) :path) "../a")
+      (assert= (get (get idx 'b) :path) "../b"))))
+
 ;; End-to-end: a path dep's module becomes require-able once its src dir is on
 ;; *load-path* — the whole point of the slice. :isolated because it mutates
 ;; *load-path* and loads a module (ADR-017 rolls both back).

@@ -1,5 +1,26 @@
 # Memory model — `Send` heaps and per-process GC
 
+> **2026-05-29 status (current) — automatic copying GC at the eval safepoint
+> (ADR-054/055).** Reclamation is now automatic and needs nothing from the
+> author. The per-process LOCAL heap is still a bump allocator, but a **semi-space
+> copying collector** (`Heap::collect`, sharing the `arena_flip` machinery) fires
+> at the `gc_block_depth() == 1` eval safepoint whenever the live set crosses an
+> adaptive threshold — so a long-running tail loop or `receive` server runs in
+> bounded memory automatically. Handles carry a generation epoch (ADR-054) so a
+> stale handle held across a flip trips a precise debug tripwire.
+>
+> **The one thing a program author must never do is think about GC** — there is no
+> `while`, no manual collect, and the old `(hibernate)` primitive (which forced a
+> flush) was **removed** once automatic collection landed. The only requirement,
+> met by the runtime not the user, is that a program runs at the depth-1 safepoint:
+> top-level forms (`brood`/`nest run` via `eval_source`), the bodies of spawned
+> processes, and files loaded via `load` (which drops to a depth-1 form loop when
+> it is the outermost eval). See [`memory-review.md`](memory-review.md) for the
+> staged path (Stage A→B) and the entry-depth analysis. The banners below are the
+> earlier (pre-ADR-055) designs, kept for the rationale trail.
+>
+> ---
+>
 > **2026-05-29 status — bump + flush + shared blobs (commits `f90f0de`
 > Phase 1, evening-of-2026-05-29 Phase 2, late-2026-05-29 ADR-041).**
 >

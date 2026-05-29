@@ -130,7 +130,8 @@ pub fn is_dynamic(sym: Symbol) -> bool {
 ///
 /// **Generation stamp (ADR-054 / `docs/memory-review.md`).** A LOCAL handle
 /// carries the heap's *epoch* at the moment it was minted. Every per-process
-/// arena flip (`(hibernate)` → [`Heap::flush`], and the coming GC) bumps that
+/// arena flip (the automatic copying collector [`Heap::collect`], or the
+/// [`Heap::flush`] helper) bumps that
 /// epoch and re-mints the survivors, so a handle held across a flip without
 /// being re-rooted carries a *stale* epoch. The LOCAL accessors in `heap.rs`
 /// `debug_assert!` the stamp matches the current epoch, turning use-after-flip

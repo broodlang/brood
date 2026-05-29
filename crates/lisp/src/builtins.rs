@@ -1883,8 +1883,8 @@ fn mem_peak(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 /// `(gc-stats)` — a snapshot map of this process's garbage-collection activity
 /// (Tier-1 observability; `docs/memory-review.md` §7). Per-process: it reports
 /// the *calling* process's own LOCAL heap, never another's. Keys:
-/// `:collections` (collections run since start — both the automatic Stage-B
-/// safepoint copies and `(hibernate)` flushes), `:copied` (cumulative LOCAL
+/// `:collections` (collections run since start — the automatic Stage-B
+/// safepoint copies), `:copied` (cumulative LOCAL
 /// objects relocated by those collections), `:reclaimed` (cumulative LOCAL
 /// objects dropped), `:live` (LOCAL objects live right now), `:live-bytes` (a
 /// cheap byte estimate of the LOCAL slabs — see `mem-bytes` for the process-wide

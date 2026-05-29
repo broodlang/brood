@@ -97,20 +97,14 @@ pub struct Mouse {
     pub col: u16,
 }
 
-/// One input event the backend hands back from `poll`: a key or a mouse event.
-/// Keeps `gui-poll` a single call that yields either (mirroring `term-poll`).
-pub enum Input {
-    Key(Key),
-    Mouse(Mouse),
-}
-
 #[cfg(not(feature = "gui"))]
 const NOT_COMPILED: &str = "gui backend not compiled in; rebuild with `--features gui`";
 
 #[cfg(not(feature = "gui"))]
 mod disabled {
-    use super::{Input, Op, NOT_COMPILED};
-    pub fn open() -> Result<u64, String> {
+    use super::Op;
+    use super::NOT_COMPILED;
+    pub fn open(_subscriber: u64) -> Result<u64, String> {
         Err(NOT_COMPILED.into())
     }
     pub fn close(_id: u64) -> Result<(), String> {
@@ -122,27 +116,26 @@ mod disabled {
     pub fn draw(_id: u64, _ops: Vec<Op>) -> Result<(), String> {
         Err(NOT_COMPILED.into())
     }
-    pub fn poll(_id: u64, _ms: u64) -> Result<Option<Input>, String> {
-        Err(NOT_COMPILED.into())
-    }
 }
 
 #[cfg(not(feature = "gui"))]
-pub use disabled::{close, draw, open, poll, size};
+pub use disabled::{close, draw, open, size};
 
 #[cfg(feature = "gui")]
-pub use backend::{close, draw, open, poll, size};
+pub use backend::{close, draw, open, size};
 
 #[cfg(feature = "gui")]
 mod backend {
-    use super::{Input, Key, Mouse, MouseAction, MouseButton, Op};
+    use super::{Key, Mouse, MouseAction, MouseButton, Op};
+    use crate::core::value;
+    use crate::process::mailbox;
+    use crate::process::message::Message;
     use std::collections::HashMap;
     use std::num::NonZeroU32;
     use std::rc::Rc;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+    use std::sync::mpsc::{self, Sender};
     use std::sync::{Arc, Mutex, OnceLock};
-    use std::time::Duration;
 
     use winit::dpi::{LogicalSize, PhysicalPosition};
     use winit::event::{
@@ -167,8 +160,10 @@ mod backend {
     /// proxy. Each carries the window id it targets: winit allows only one event
     /// loop per process (ADR-056), so one thread multiplexes every window.
     enum UserEvent {
-        /// Open a new window; reply with its wiring (or a build error).
+        /// Open a new window whose input is delivered to process `subscriber`'s
+        /// mailbox; reply with its id + shared size (or a build error).
         Open {
+            subscriber: u64,
             reply: Sender<Result<OpenReply, String>>,
         },
         /// Replace window `id`'s frame and repaint it.
@@ -177,22 +172,19 @@ mod backend {
         Close { id: u64 },
     }
 
-    /// A freshly opened window's wiring, handed back to the Brood side: its id, the
-    /// shared cell size the GUI thread keeps current, and the input channel to poll.
+    /// A freshly opened window's wiring, handed back to the Brood side: its id and
+    /// the shared cell size the GUI thread keeps current. Input is *not* polled — the
+    /// GUI thread delivers it straight to the subscriber's mailbox (ADR-058).
     struct OpenReply {
         id: u64,
         size: Arc<Mutex<(u16, u16)>>,
-        input: Receiver<Input>,
     }
 
-    /// What the Brood side keeps per open window (keyed by the id `open` returns).
-    /// The input receiver is behind its own `Arc<Mutex>` so `poll` can block on one
-    /// window without holding the registry lock — otherwise one window's blocking
-    /// poll would stall every other window's draw/poll. Only one process ever polls
-    /// a given window, so that per-window mutex is uncontended.
+    /// What the Brood side keeps per open window (keyed by the id `open` returns) —
+    /// just the shared cell size for `gui-size`. Input arrives as mailbox messages,
+    /// so there is no receiver to keep here (ADR-058).
     struct WinHandle {
         size: Arc<Mutex<(u16, u16)>>,
-        input: Arc<Mutex<Receiver<Input>>>,
     }
 
     /// The one GUI thread's event-loop proxy, started lazily on the first `open`.
@@ -229,27 +221,25 @@ mod backend {
             .map_err(|_| "gui thread exited during init".to_string())?
     }
 
-    /// `(gui-open)` — open a new window and return its id. Starts the GUI thread on
-    /// the first call. Each call is an independent window.
-    pub fn open() -> Result<u64, String> {
+    /// `(gui-open subscriber)` — open a new window whose key/mouse input is
+    /// delivered to process `subscriber`'s mailbox; return the window id. Starts the
+    /// GUI thread on the first call. Each call is an independent window.
+    pub fn open(subscriber: u64) -> Result<u64, String> {
         let (reply_tx, reply_rx) = mpsc::channel();
         // Send under the proxy lock, then drop it before awaiting the reply so a
         // slow window build can't block other windows' sends.
         gui()?
             .lock()
             .unwrap()
-            .send_event(UserEvent::Open { reply: reply_tx })
+            .send_event(UserEvent::Open {
+                subscriber,
+                reply: reply_tx,
+            })
             .map_err(|_| "gui thread is gone".to_string())?;
-        let OpenReply { id, size, input } = reply_rx
+        let OpenReply { id, size } = reply_rx
             .recv()
             .map_err(|_| "gui thread did not reply".to_string())??;
-        windows().lock().unwrap().insert(
-            id,
-            WinHandle {
-                size,
-                input: Arc::new(Mutex::new(input)),
-            },
-        );
+        windows().lock().unwrap().insert(id, WinHandle { size });
         Ok(id)
     }
 
@@ -285,21 +275,40 @@ mod backend {
             .map_err(|_| "gui thread is gone".to_string())
     }
 
-    /// `(gui-poll id ms)` — wait up to `ms` for an input event on window `id`.
-    pub fn poll(id: u64, ms: u64) -> Result<Option<Input>, String> {
-        // Clone the per-window receiver Arc under the registry lock, then release
-        // the registry lock so other windows stay drawable/pollable while we block.
-        let rx = {
-            let w = windows().lock().unwrap();
-            w.get(&id).ok_or("gui window not open")?.input.clone()
-        };
-        let rx = rx.lock().unwrap();
-        match rx.recv_timeout(Duration::from_millis(ms)) {
-            Ok(ev) => Ok(Some(ev)),
-            Err(RecvTimeoutError::Timeout) => Ok(None),
-            // The window/thread is gone — surface it as a quit key so the loop ends.
-            Err(RecvTimeoutError::Disconnected) => Ok(Some(Input::Key(Key::Named("escape")))),
+    /// A key as the Brood value `term-poll`/`gui` deliver: a printable → a 1-char
+    /// string, the rest → keywords. Built as a `Message` (no heap) so the GUI thread
+    /// can deliver it straight to a mailbox (ADR-058). Mirrors `key_to_value`.
+    fn key_message(k: &Key) -> Message {
+        match k {
+            Key::Char(c) => Message::Str(c.to_string()),
+            Key::Ctrl(c) => Message::Keyword(value::intern(&format!("ctrl-{c}"))),
+            Key::Alt(c) => Message::Keyword(value::intern(&format!("alt-{c}"))),
+            Key::Named(s) => Message::Keyword(value::intern(s)),
         }
+    }
+
+    /// A mouse event as the shared `[:mouse action button row col]` vector, built as
+    /// a `Message` (no heap). Mirrors `builtins::mouse_to_value`'s shape so the two
+    /// frontends stay identical.
+    fn mouse_message(m: &Mouse) -> Message {
+        let action = match m.action {
+            MouseAction::Press => "press",
+            MouseAction::ScrollUp => "scroll-up",
+            MouseAction::ScrollDown => "scroll-down",
+        };
+        let button = match m.button {
+            Some(MouseButton::Left) => Message::Keyword(value::intern("left")),
+            Some(MouseButton::Right) => Message::Keyword(value::intern("right")),
+            Some(MouseButton::Middle) => Message::Keyword(value::intern("middle")),
+            None => Message::Nil,
+        };
+        Message::Vector(vec![
+            Message::Keyword(value::intern("mouse")),
+            Message::Keyword(value::intern(action)),
+            button,
+            Message::Int(m.row as i64),
+            Message::Int(m.col as i64),
+        ])
     }
 
     /// One open window's GUI-thread-side state.
@@ -310,7 +319,8 @@ mod backend {
         surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
         renderer: Renderer,
         size: Arc<Mutex<(u16, u16)>>,
-        input: Sender<Input>,
+        /// The process this window's input is delivered to (its mailbox).
+        subscriber: u64,
         frame: Vec<Op>,
         mods: ModifiersState,
         cursor: (u16, u16),
@@ -321,7 +331,7 @@ mod backend {
     fn build_window(
         elwt: &EventLoopWindowTarget<UserEvent>,
         id: u64,
-        input: Sender<Input>,
+        subscriber: u64,
     ) -> Result<Win, String> {
         let window = WindowBuilder::new()
             .with_title(format!("brood observer #{id}"))
@@ -340,7 +350,7 @@ mod backend {
             surface,
             renderer,
             size: Arc::new(Mutex::new((80, 24))),
-            input,
+            subscriber,
             frame: Vec::new(),
             mods: ModifiersState::empty(),
             cursor: (0, 0),
@@ -373,17 +383,15 @@ mod backend {
         let _ = event_loop.run(move |event, elwt| {
             elwt.set_control_flow(ControlFlow::Wait);
             match event {
-                Event::UserEvent(UserEvent::Open { reply }) => {
+                Event::UserEvent(UserEvent::Open { subscriber, reply }) => {
                     let id = next_id();
-                    let (tx, rx) = mpsc::channel::<Input>();
-                    match build_window(elwt, id, tx) {
+                    match build_window(elwt, id, subscriber) {
                         Ok(win) => {
                             update_cells(&win.window, &win.renderer, &win.size);
                             let wid = win.window.id();
                             let _ = reply.send(Ok(OpenReply {
                                 id,
                                 size: win.size.clone(),
-                                input: rx,
                             }));
                             ids.insert(id, wid);
                             wins.insert(wid, win);
@@ -412,7 +420,7 @@ mod backend {
                         // The window's close button → a quit key, so the Brood loop
                         // tears down (calling gui-close) on its own terms.
                         WindowEvent::CloseRequested => {
-                            let _ = w.input.send(Input::Key(Key::Named("escape")));
+                            mailbox::deliver(w.subscriber, key_message(&Key::Named("escape")));
                         }
                         WindowEvent::ModifiersChanged(m) => w.mods = m.state(),
                         WindowEvent::Resized(_) => {

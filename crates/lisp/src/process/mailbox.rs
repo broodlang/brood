@@ -52,7 +52,7 @@ pub(super) struct Mailbox {
     /// The owning process's LOCAL heap footprint in bytes, republished each time
     /// it enters `receive` (`Heap::local_bytes`). Registry-reachable for
     /// `process-info`'s `:memory`; bump-allocated, so it reflects allocation since
-    /// the last arena reset / `hibernate`, not a tracing-GC live set.
+    /// the last arena reset / collection, not a tracing-GC live set.
     pub(super) mem: AtomicUsize,
     /// The owning process's cumulative GC-collection count (`Heap::gc_counters().0`),
     /// republished alongside `mem` on each `receive`. Lets the observer flag a
@@ -351,7 +351,7 @@ pub fn process_status(pid: u64) -> Option<&'static str> {
 /// pid is dead/unknown. Republished by the process each time it enters `receive`
 /// (so an idle actor's figure is its resting working set); a process that never
 /// `receive`s reports `0`. Bump-allocated, so it reflects allocation since the
-/// last arena reset / `hibernate`. Backs `process-info`'s `:memory`.
+/// last arena reset / collection. Backs `process-info`'s `:memory`.
 pub fn process_mem(pid: u64) -> Option<usize> {
     let mailbox = crate::core::sync::lock(&REGISTRY).get(&pid).cloned()?;
     Some(mailbox.mem.load(Ordering::Relaxed))

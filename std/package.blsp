@@ -165,13 +165,55 @@ land in a later slice.")
       (package--write-lockfile-if-changed root entries)
       (map package--dep-src-dir entries))))
 
-;; --- the `nest fetch` verb ---------------------------------------------------
-(defn fetch ()
-  "Resolve and lock the current project's dependencies, always (re)writing project.lock.blsp. For :path deps this verifies each is present and records its tree hash. Returns the resolved entries."
+;; --- the `nest` verbs --------------------------------------------------------
+;; Locate the project root, load its manifest (so *project-dependencies* is set),
+;; and hand the root to `body-fn`. Shared preamble for the verbs below.
+(defn package--in-project (body-fn)
   (let (root (project--find-root (cwd)))
     (when (nil? root) (error "package: not inside a Brood project (no project.blsp found)"))
     (when (file-exists? (path-join root "project.blsp")) (load (path-join root "project.blsp")))
-    (let (entries (resolve-deps root *project-dependencies*))
-      (write-lockfile root entries)
-      (println "package: locked " (count entries) " dependencies in project.lock.blsp")
-      entries)))
+    (body-fn root)))
+
+(defn fetch ()
+  "Resolve and lock the current project's dependencies, (re)writing project.lock.blsp. For :path deps this verifies each is present and records its tree hash. Returns the resolved entries (nil when none are declared). Backs `nest fetch`."
+  (package--in-project
+    (fn (root)
+      (if (empty? *project-dependencies*)
+        (do (println "package: no dependencies declared") nil)
+        (let (entries (resolve-deps root *project-dependencies*))
+          (write-lockfile root entries)
+          (println (str "package: locked " (count entries) " dependencies in project.lock.blsp"))
+          entries)))))
+
+;; --- `nest tree` -------------------------------------------------------------
+(defn package--index-by-name (entries)
+  (fold (fn (m e) (assoc m (get e :name) e)) {} entries))
+
+(defn package--dep-label (dep)
+  (cond
+    (= (get dep :kind) :path) (str (get dep :name) "  (path \"" (get dep :path) "\")")
+    (= (get dep :kind) :git) (str (get dep :name) "  (git " (get dep :url) " @ " (get dep :ref) ")")
+    else (str (get dep :name))))
+
+;; Print `deps` (a list of dep maps) as an indented tree, recursing into each
+;; dep's resolved direct deps via `index`. `seen` breaks cycles / shared deps:
+;; a name already printed is shown once more, marked, without re-descending.
+(defn package--print-tree (deps index prefix seen)
+  (dolist (d deps)
+    (let (nm (get d :name)
+          dup (includes? seen nm)
+          entry (get index nm))
+      (println (str prefix "- " (package--dep-label d) (if dup " (already shown)" "")))
+      (when (and entry (not dup) (not (empty? (get entry :deps))))
+        (package--print-tree (get entry :deps) index (str prefix "  ") (cons nm seen))))))
+
+(defn tree ()
+  "Print the resolved dependency tree of the current project (root → direct → transitive). Backs `nest tree`."
+  (package--in-project
+    (fn (root)
+      (println (or *project-name* "(this project)"))
+      (if (empty? *project-dependencies*)
+        (println "  (no dependencies)")
+        (package--print-tree *project-dependencies*
+          (package--index-by-name (resolve-deps root *project-dependencies*)) "  " nil))
+      nil)))

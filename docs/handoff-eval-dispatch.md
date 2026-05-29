@@ -82,52 +82,53 @@ assessed as near-free — `String`/`&str` `!=` is length-discriminated first, so
 non-5-char names reject in one compare; not worth a struct field). The real
 target is Step 2.
 
-### Step 2 — Lexical addressing: O(1) variable lookup  *(big, biggest win)* — DESIGNED
-**Full design: [ADR-057](decisions.md#adr-057--lexical-addressing-o1-variable-lookup-eval-dispatch-step-2)**
-(status: proposed/draft). Summary of what was decided there:
+### Step 2 (original) — Lexical addressing — ❌ REJECTED AS SCOPED (2026-05-29)
+Designed in full ([ADR-057](decisions.md#adr-057--lexical-addressing-o1-variable-lookup-eval-dispatch-step-2),
+status *rejected as scoped*), then **not implemented**. A "what's the benefit?"
+review measured the thing it targets and found it's **~6% of the eval loop**, not
+the bottleneck — so ~1–1.5 weeks of high-churn work (plus the campaign's only real
+data-race surface, the global-cell seqlock) bought under 10%. The design is sound
+and on record; lexical addressing may return for free as a *by-product* of the
+precompiled-body step below. See the ADR for the representation, the seqlock
+global cells, and the resolver pass.
 
- - **Representation:** two internal `Value` variants — `LocalRef{up,idx}` and
-   `GlobalRef{slot,sym}` — produced only by the resolver, consumed only in `eval`,
-   and **carved out of the public type universe** (omitted from `ALL_TAGS`/
-   `type-of`; reader never makes them; printer/equality/`to_message`
-   `debug_assert!`-unreachable). Chosen over (A) full public Value variants
-   [type-universe pollution for things that are code, not data] and (B) internal
-   `(%local …)` lists [alloc + re-walk per ref, likely no faster].
- - **Globals → seqlock cells:** an append-only slot vector (`boxcar::Vec`, like the
-   code region) + the existing `Symbol→slot` map; `def` writes the cell, a resolved
-   `GlobalRef{slot}` read skips the *hash + map lock*. Each cell is a **seqlock**,
-   not a bare `Value` — a `Value` is multi-word, so an unsynchronized read racing a
-   `def` is a torn read / UB. Seqlock read = two acquire loads + compare (cheaper
-   than today's rwlock read-acquire) and still skips the hash. **Late binding/hot
-   reload preserved** — slot is stable, re-`def` release-publishes an
-   already-promoted immutable handle, a running process sees it (ADR-013). Forward
-   refs reserve an empty cell.
- - **Pass:** thread a compile-time lexical scope through `macroexpand_all` (which
-   already separates binders from refs and leaves quote opaque); resolve *after*
-   full expansion; idempotent; runs on dynamically `eval`/`load`ed code too.
- - **Wrinkles handled:** `letrec` double-push → pre-define-then-update-in-place
-   (N stable slots); dynamic vars consult the dynamic stack first; **same-node
-   `send` keeps `GlobalRef{slot}`** (same runtime, same table), only the **cross-node
-   dist wire** downgrades `GlobalRef`→`sym` (independent runtimes — hence `GlobalRef`
-   keeps `sym`).
+### Where the time actually goes (the measurements that re-scoped the campaign)
+Same machine, current build, 2 M-iter loops, isolating one cost at a time
+(`/tmp/{lookup,read,call}_cost.blsp`):
 
-**Rollout (each measured against the Step-0 baseline):**
- - **2a — locals only.** No `RuntimeCode`/message/hot-reload risk; validates the
-   resolver + `Value` carve-out + idempotency on the safe path. (Global-heavy
-   `sort`/`cons_build` move little here — expected.)
- - **2b — global cells + `GlobalRef`.** The high-impact stage; gated on the
-   hot-reload + cross-process suites.
- - **2c — dynamic-var fallback + closure-shipping downgrade** + multi-node tests.
+| component | cost | share of the ~400–480 ns/iter loop |
+|---|---|---|
+| **local** variable read | ~0 ns over a constant | — (env chains are shallow) |
+| **global** variable read | ~9 ns over a constant | **~6%** (lookup — Step 2's target) |
+| one **closure call** (`new_env` + `bind_params` + body) | ~52 ns | ~a third |
+| **per-combination fixed overhead** | the remainder | **the majority** |
 
-Promote ADR-057 to *accepted* once 2a lands green with a recorded delta.
+The per-combination overhead = the `tick` / `gc_due` / `soft_limit_hit` TLS guards
+that run on *every* combination, plus spine `uncons`, argv `SmallVec` build, and
+native dispatch. **That's the real lever, not lookup.**
 
-### Step 3 — Pre-split / pre-tag the loop body  *(medium)*
-Once Step 2 exists, the body of a closure (and `if`/`do`/`let` operands) can be
-stored **pre-parsed** — special-form tag + operand slots resolved — so the
-`'tail` loop dispatches on a tag instead of re-`uncons`ing and re-classifying the
-spine each iteration. This is the on-ramp to a real bytecode/CPS form without
-committing to one yet. Stop here if the numbers are good enough; the jump to full
-bytecode is a separate, later decision (ADR-worthy).
+### Step 2 (re-scoped) — Call path + per-combination overhead  *(the actual win)*
+Lower-risk than the rejected lexical-addressing plan and attacks ~90% of the loop:
+ - **`new_env` per call** — every function call allocates a fresh `EnvFrame` in the
+   local arena (part of the ~52 ns/call). Pool/reuse frames, or use a frame stack,
+   to cut a third of the per-call cost. (Mind the GC: frames are relocated by the
+   copying collector — any pool must survive `arena_flip`.)
+ - **Fold the three per-combination TLS guards into one.** `tick`, `gc_due`, and
+   `soft_limit_hit` are three separate thread-local reads on every combination;
+   combine into a single counter/check. Cheap, broad, no semantic change.
+ - **argv build + native dispatch** — profile whether the `SmallVec` and
+   `call_native` path have low-hanging fruit.
+Each measured against the Step-0 baseline; profile first (`perf`/a flamegraph)
+before cutting, to confirm the split above holds beyond microbenchmarks.
+
+### Step 3 — Pre-tagged / precompiled closure bodies  *(the multiplier, ADR-worthy)*
+If the call-path work isn't enough, the real structural fix is to stop re-walking
+and re-classifying the s-expression spine every iteration: compile each closure
+body once into a pre-tagged form (special-form tag + resolved operands), so the
+`'tail` loop dispatches on a tag instead of `uncons`+classify. **Lexical addressing
+falls out of this for free** (operands resolve to slots as part of the same pass) —
+which is the only context in which ADR-057's work is worth doing. This is the
+on-ramp to a bytecode/CPS evaluator; a separate, later decision.
 
 ### Step 4 (optional, separate) — GC for retain-heavy workloads
 Out of scope for *dispatch*, but the same measurements surfaced it: above the 64K
