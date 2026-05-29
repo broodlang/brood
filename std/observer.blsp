@@ -56,6 +56,7 @@ attach). Drive the standalone app from the shell with `nest observe`.")
 
 (require 'display)
 (require 'keymap)     ; the shared key→command dispatcher (also used by the REPL)
+(require 'ui)         ; the reusable app framework — frontends + the `ui-run` loop
 (require 'lineedit)  ; the minibuffer reuses lineedit's pure editing core
 (require 'highlight) ; …and its syntax colouring (shared with the REPL line editor)
 
@@ -393,83 +394,11 @@ body height (`(max 1 (- rows 5))`, as in `observe-frame`)."
           (if (nil? idx) state (observe--select st procs idx)))
       :else state)))
 
-;; ---- display frontends (ADR-046: one protocol, many frontends) --------------
-;;
-;; The observer talks to a *display*: a map of five fns
-;; `{:enter :leave :size :draw :poll}`. The same pure `observe-frame` therefore
-;; paints to the terminal, a GUI window, or several at once. `term-*`/`gui-*` are
-;; the two Rust-backed frontends (mechanism only); the composition below — fan a
-;; frame out to every frontend, merge their keys, render at the smallest common
-;; grid — is all Brood, so it stays live-editable and grows to remote frontends.
-
-(def *term-display*
-  ;; the terminal (crossterm) frontend — always available, and single (one
-  ;; terminal), so it's a fixed display map of the 0-arg `term-*` primitives.
-  {:enter term-enter :leave term-leave :size term-size :draw term-draw :poll term-poll})
-
-(defn gui-display ()
-  "Open a **new** native window and return a display (the `{:enter :leave :size
-:draw :poll}` map) bound to it — each call is a separate window, so several
-observers can run at once. Unlike `*term-display*` (one terminal, a constant), the
-windowed frontend is a *constructor*: it calls `gui-open` for a fresh window id and
-closes the `gui-*` primitives over it. The window is opened eagerly here, so
-`:enter` is a no-op and `:leave` closes it. Needs the runtime built with
-`--features gui` (`./configure --with-gui && make install`), else `gui-open`
-errors. The map also carries the raw `:window` id.
-
-**Create and poll it in the same process.** `:draw`/`:size`/`:leave` act on the
-captured window id, but `:poll` is a `receive` on the *calling* process's mailbox
-(that's where `gui-open` delivers this window's input, ADR-058) — it ignores the
-window id. So a display made here must be polled by the process that made it; don't
-hand it to another process to run. And because the delivered key/mouse messages
-carry no window id, one process should drive **one** window (which is why
-`(observe)` spawns a process per window) — two windows in one process would mix
-their input. Both are deferred trade-offs (ADR-059), fine for the observer."
-  (let (id (gui-open))
-    {:enter (fn () nil)
-     :leave (fn () (gui-close id))
-     :size  (fn () (gui-size id))
-     :draw  (fn (f) (gui-draw id f))
-     ;; Input arrives as mailbox messages (gui-open delivers to this process), so
-     ;; `:poll` is a `receive` that parks the process — it holds no scheduler worker
-     ;; while waiting (ADR-058), unlike a blocking poll. Returns the next key/mouse
-     ;; message, or nil after `ms` (the live-refresh tick).
-     :poll  (fn (ms) (receive (m m) (after ms nil)))
-     :window id}))
-
-(defn display--min-size (displays)
-  "The smallest cols×rows across all frontends, so one broadcast frame fits every
-screen (a larger frontend just shows it in its top-left)."
-  (fold (fn (acc d)
-          (let ([c r] ((get d :size)))
-            (if (nil? acc)
-                [c r]
-                (let ([ac ar] acc) [(min ac c) (min ar r)]))))
-        nil
-        displays))
-
-(defn display--poll-loop (displays slice)
-  (if (empty? displays)
-      nil
-      (let (k ((get (first displays) :poll) slice))
-        (if (nil? k) (display--poll-loop (rest displays) slice) k))))
-
-(defn display--poll-any (displays ms)
-  "Poll each frontend for a slice of `ms` in turn, returning the first key seen
-(or nil) — so a keystroke from *any* attached frontend reaches the loop."
-  (display--poll-loop displays (max 1 (quot ms (max 1 (count displays))))))
-
-(defn display-broadcast (displays)
-  "Compose several displays into one that fans a single frame out to all of them
-and merges their input: update the view and *every* attached frontend updates
-together (a GUI window and the terminal today; remote frontends later — they slot
-in as just another member). The frame renders at the smallest common grid so it
-fits everywhere. Pure Brood over the `term-*`/`gui-*` mechanism."
-  {:enter (fn () (doseq (d displays) ((get d :enter))))
-   :leave (fn () (doseq (d displays) ((get d :leave))))
-   :size  (fn () (display--min-size displays))
-   :draw  (fn (f) (doseq (d displays) ((get d :draw) f)))
-   :poll  (fn (ms) (display--poll-any displays ms))})
+;; ---- display frontends + app loop now live in `ui` (std/ui.blsp) ------------
+;; `*term-display*`, `(gui-display)`, `display-broadcast`, and the `ui-run` loop
+;; were extracted into the reusable `ui` module so a new project (the editor) can
+;; build on the same seam. `(require 'ui)` above pulls them in; the observer is now
+;; just a `ui-run` client — see `observe--view` / `observe--update` below.
 
 ;; ---- the eval minibuffer (a REPL inside the observer) ------------------------
 
@@ -492,35 +421,56 @@ EOF, return to navigation; otherwise keep editing."
       (nil? done)      (assoc state :edit edit)
       :else            (assoc state :mode :nav :edit nil))))
 
-(defn observe--loop (state backend display)
-  "The observer event loop: fetch a snapshot from `backend`'s `:source` (unless
-paused or in command mode), draw it, wait up to 1s for a key, dispatch it, recurse.
-`state` carries `{:sel-id :sort :paused :last :link :mode :edit :msg}`. `backend` is
-`{:source <0-arg fn → snapshot | :timeout | :down> :eval <fn src → result-string>}`
-— local for inline, a peer request/eval for remote attach. `display` is the
-frontend (`{:enter :leave :size :draw :poll}`) — terminal, GUI, or a broadcast of
-both (so one frame paints everywhere). In `:command` mode keys go to the
-minibuffer; in `:nav` mode through `*observe-keymap*` (quit sets `:done`)."
-  (let ([cols rows] ((get display :size))
-        cap (max 1 (- rows 5))               ; visible body height (see observe-frame)
-        fetching (and (not (get state :paused)) (not (= (get state :mode) :command)))
-        state (if fetching (observe--apply-result state ((get backend :source))) state)
-        sort (get state :sort)
-        snap (or (get state :last) {:node (observe--node-info) :procs []})
-        procs (observe--order (get snap :procs) sort)
+;; The observer is a `ui-run` client (std/ui.blsp): a pure `view` (model + size →
+;; frame) and an `update` (model + input + size → model). `ui-run` owns the loop —
+;; enter, render, poll, fold, recurse, leave — so the observer holds no loop of its
+;; own. The session model is `{:sel-id :sort :paused :last :link :mode :edit :msg
+;; :backend}`; `:backend` is `{:source <0-arg fn → snapshot | :timeout | :down>
+;; :eval <fn src → result-string>}` (local inline, or a peer request/eval for remote
+;; attach). `ui-run` quits when a command sets `:done`.
+
+(defn observe--derived (model cols rows)
+  "Thread the currently-rendered process list / selection / count into `model`, so
+the nav + mouse commands (pure `(state key) → state`) can read them. Recomputed from
+`:last` + `:sort` per input — cheap, since inputs are infrequent. Pure."
+  (let (snap (or (get model :last) {:node (observe--node-info) :procs []})
+        procs (observe--order (get snap :procs) (get model :sort))
         n (count procs)
-        sel (observe--sel-index procs (get state :sel-id))
-        ;; thread the rendered list/selection so the nav commands can read them
-        state (assoc state :procs procs :sel sel :n n)
-        ui {:mode (get state :mode) :edit (get state :edit) :msg (get state :msg)})
-    ((get display :draw) (observe-frame (get snap :node) procs sel cols rows (get state :paused) sort (get state :link) ui))
-    (let (k ((get display :poll) 1000))
-      (cond
-        (nil? k) (observe--loop state backend display)                           ; timeout → redraw / refetch
-        (observe--mouse? k) (observe--loop (observe--apply-mouse state k cap) backend display)
-        (= (get state :mode) :command) (observe--loop (observe--command-key state backend k) backend display)
-        :else (let (next (keymap-dispatch *observe-keymap* (assoc state :msg nil) k (fn (s _) s)))
-                (if (get next :done) ((get display :leave)) (observe--loop next backend display)))))))
+        sel (observe--sel-index procs (get model :sel-id)))
+    (assoc model :procs procs :sel sel :n n)))
+
+(defn observe--view (model cols rows)
+  "The observer's `ui-run` **view**: model + terminal size → a render frame (pure).
+Builds `observe-frame` from the last snapshot, the sort key, the link status, and
+the minibuffer UI state. Paints to whatever frontend `ui-run` holds."
+  (let (snap (or (get model :last) {:node (observe--node-info) :procs []})
+        sort (get model :sort)
+        procs (observe--order (get snap :procs) sort)
+        sel (observe--sel-index procs (get model :sel-id))
+        ui {:mode (get model :mode) :edit (get model :edit) :msg (get model :msg)})
+    (observe-frame (get snap :node) procs sel cols rows (get model :paused) sort (get model :link) ui)))
+
+(defn observe--update (model input cols rows)
+  "The observer's `ui-run` **update**: fold one input into the next model. `:tick`
+(the refresh beat) fetches a fresh snapshot from the backend's `:source` unless
+paused or in the minibuffer; a `[:mouse …]` event selects/scrolls; in `:command`
+mode keys drive the eval minibuffer; otherwise keys dispatch through
+`*observe-keymap*` (quit sets `:done`, which `ui-run` honours). The backend rides in
+the model under `:backend`."
+  (let (backend (get model :backend)
+        cap (max 1 (- rows 5)))             ; visible body height (see observe-frame)
+    (cond
+      (= input :tick)
+        (if (and (not (get model :paused)) (not (= (get model :mode) :command)))
+          (observe--apply-result model ((get backend :source)))
+          model)
+      (observe--mouse? input)
+        (observe--apply-mouse (observe--derived model cols rows) input cap)
+      (= (get model :mode) :command)
+        (observe--command-key model backend input)
+      :else
+        (keymap-dispatch *observe-keymap* (assoc (observe--derived model cols rows) :msg nil)
+                         input (fn (s _) s)))))
 
 ;; ---- demo processes (so a fresh observer has something to show) -------------
 
@@ -559,11 +509,9 @@ loop with a remote source — see `observe-connect`. `display` defaults to the
 terminal; pass `(gui-display)` for a window, or a `display-broadcast` of several
 frontends to render to all at once. It blocks the calling process until quit, so
 `(observe)` runs it in a spawned process."
-  (do
-    ((get display :enter))
-    (observe--loop {:sel-id nil :sort :id :paused false :last nil :link :ok :mode :nav :edit nil :msg nil}
-                   {:source observe--local-snapshot :eval observe--eval-string}
-                   display)))
+  (ui-run {:sel-id nil :sort :id :paused false :last nil :link :ok :mode :nav :edit nil :msg nil
+           :backend {:source observe--local-snapshot :eval observe--eval-string}}
+          observe--view observe--update display))
 
 (defn observe ()
   "Open the observer over this runtime's own processes in a **new native GUI
@@ -659,14 +607,14 @@ source; a dropped link freezes on the last snapshot with a DISCONNECTED banner
 until you quit."
   (do
     (node-start (observe--gen-node-name) "127.0.0.1:0" cookie)
-    (let (peer (connect spec)            ; raises a clean error on failure (caught by the caller)
-          display *term-display*)
+    (let (peer (connect spec))            ; raises a clean error on failure (caught by the caller)
       (monitor-node peer)
-      ((get display :enter))
-      (observe--loop {:sel-id nil :sort :id :paused false :last nil :link :ok :mode :nav :edit nil :msg nil}
-                     {:source (fn () (observe--request peer))
-                      :eval (fn (src) (observe--remote-eval peer src))}
-                     display))))
+      ;; `ui-run` enters the display — and we only reach here after `connect`
+      ;; succeeded, so a bad spec/cookie never wrecks the screen.
+      (ui-run {:sel-id nil :sort :id :paused false :last nil :link :ok :mode :nav :edit nil :msg nil
+               :backend {:source (fn () (observe--request peer))
+                         :eval (fn (src) (observe--remote-eval peer src))}}
+              observe--view observe--update *term-display*))))
 
 (defn observe-run (&optional (demo true))
   "Run the interactive process observer as a standalone app — a full-screen TUI

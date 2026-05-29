@@ -3766,3 +3766,50 @@ interacts with the green scheduler.
 ADR-006 (language-in-the-language), ADR-026 (immutability — sockets are the
 Rust-backed mutable-resource escape hatch, like the rope), ADR-045 (rope, the
 other opaque handle), `docs/handoff-blocking-io.md`.
+
+## ADR-063 — `(exit pid reason)`: Erlang-style process termination
+
+**Status:** accepted (2026-05-30). Implemented: the `exit` primitive + the
+`Suspend::Kill` scheduler path.
+
+**Context.** Green processes could only end on their own (return, throw, or the
+stack-overflow guard). Nothing could terminate *another* process — needed for a
+test-runner per-test timeout, an MCP-tool watchdog, and supervision generally. A
+green coroutine is pinned to one worker and **cannot be aborted mid-computation
+from another thread** (the KI-1b cross-thread-resume hazard), so termination has
+to happen at the target's own yield points.
+
+**Decision.** `(exit pid reason)`, modelled on Erlang `exit/2`:
+
+- `reason = :kill` — the **untrappable hard** kill. Checked in `preempt()` (the
+  reduction-boundary yield, hit ≤2000 reductions), so it stops even a tight CPU
+  loop that never `receive`s. Untrappable **by construction**: it fires at the
+  scheduler level via a new `Suspend::Kill(reason)` the coroutine yields, which
+  `run_one` turns into `deregister(reason)` + drop — *below* Brood's `%try`, so no
+  `catch` can intercept it.
+- any other `reason` — the **soft** signal. Checked at the top of `receive_match`'s
+  loop (a server's natural per-iteration boundary), so the target finishes its
+  current iteration, then dies with `reason`. A tight non-`receive` loop won't
+  honour a soft exit — inherent to cooperative termination (use `:kill`).
+
+**Mechanism (no cross-thread resume).** A per-`Mailbox` `kill_pending: AtomicBool`
++ `MailboxState.kill: Option<Message>`, set by `exit` via the registry from any
+thread. The target observes it at its own `preempt`/`receive` and self-terminates
+on its **own** worker (where dropping the coroutine force-unwinds safely —
+corosensei force-unwinds a suspended coroutine on drop, running destructors). A
+**parked** target (in `receive`, not running) is woken by re-`enqueue`ing it onto
+its own worker — never dropped by the caller, which would resume the coroutine on
+the wrong thread. The state lock serialises `exit`'s waiter-take with `run_one`'s
+park, so a just-parking process can't end up parked-with-a-pending-kill (stuck):
+exactly one of the two wins. Monitors fire `[:down ref pid reason]`. Exit of a
+dead/unknown pid is a no-op (idempotent); remote pids error for now (defer dist).
+
+**Consequences.** Unblocks the test-runner 30s per-test timeout and the MCP-tool
+10s watchdog (both `(exit pid :kill)` a slow worker). Self-exit takes effect at the
+caller's next yield (not instantaneous) — acceptable; revisit if needed. A
+trap-exit (`exit` delivered as a *message* to a process that opted in) is deferred
+(ADR-011) until a supervisor needs it.
+
+**References.** ADR-059 (blocking-work→mailbox; the deliver-and-self-handle shape),
+KI-1b (cross-thread-resume hazard this design avoids), ADR-051 (`process-info`),
+ADR-011 (defer trap-exit), [`todo.md`] (the test/MCP timeouts built on this).

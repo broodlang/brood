@@ -1,19 +1,22 @@
 //! TCP sockets (ADR-062), built on the blocking-IO → mailbox seam (ADR-059).
 //!
-//! A socket never blocks a worker. Inbound data is read on a dedicated non-worker
-//! thread (`spawn_io_source`) and **delivered to the owning process's mailbox** as
-//! messages; the Brood side just `receive`s them. The owner is the process that
-//! `tcp-connect`ed (or that owns the listener, for accepted connections):
+//! A socket never blocks a worker. A connected stream is read on a dedicated
+//! non-worker thread (`spawn_io_source`) that **delivers to the owning process's
+//! mailbox**; the Brood side just `receive`s. Shapes:
 //!
-//! - a connected/accepted stream delivers `[:tcp sock data]` per chunk, then
-//!   `[:tcp-closed sock]` at EOF / error;
-//! - a listener delivers `[:tcp-accept lsock client]` for each connection (the
-//!   client stream is already wired to the same owner).
+//! - a stream delivers `[:tcp sock data]` per chunk, then `[:tcp-closed sock]`;
+//! - a listener delivers `[:tcp-accept lsock client]` per connection.
 //!
-//! Outbound writes (`send`) and `close` are direct calls. A socket is a `u64` id
-//! into a global registry, surfaced as the scalar handle `Value::Socket(id)`
-//! (the GC never traces or moves it). Valid across this runtime's processes; not
-//! node-portable.
+//! Ownership: `tcp-connect` makes an **active** stream — its reader starts at once,
+//! delivering to the connecting process. An **accepted** stream is **passive** —
+//! announced via `[:tcp-accept …]` but not read until `tcp-controlling-process`
+//! assigns it an owner (then its reader starts, delivering there). This is the
+//! Erlang `gen_tcp` handoff: no inbound bytes are lost to the acceptor before a
+//! per-connection handler takes over.
+//!
+//! A socket is a `u64` id into a global registry, surfaced as the scalar handle
+//! `Value::Socket(id)` (the GC never traces or moves it). Valid across this
+//! runtime's processes; not node-portable.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -23,12 +26,15 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use crate::core::value;
-use crate::process::{spawn_io_source, MailboxSink, Message};
+use crate::process::{spawn_io_source, MailboxSink, Message, SubscriberHandle};
 
 enum Sock {
-    /// A connected stream — the write/close handle. The reader thread holds an
-    /// independent clone of the same fd for blocking reads.
-    Stream(TcpStream),
+    /// A connected stream — the write/close handle, plus the reader's retarget
+    /// handle once started (`None` for a freshly accepted, still-passive socket).
+    Stream {
+        stream: TcpStream,
+        reader: Option<SubscriberHandle>,
+    },
     /// A listening socket — the accept thread owns the `TcpListener`; `alive`
     /// stops it on close. `port` is cached so `local-port` works without it.
     Listener { alive: Arc<AtomicBool>, port: u16 },
@@ -68,12 +74,10 @@ fn tcp_accept_msg(lid: u64, cid: u64) -> Message {
 
 // ---- reader / accept threads ----
 
-/// Register `stream` as a connected socket and start its reader thread, which
-/// delivers `[:tcp id data]` / `[:tcp-closed id]` to `subscriber`. Returns the id.
-fn register_stream(stream: TcpStream, subscriber: u64) -> std::io::Result<u64> {
-    let reader = stream.try_clone()?; // independent handle, same fd
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    reg().insert(id, Sock::Stream(stream));
+/// Start a reader thread for the already-cloned `reader` handle of socket `id`,
+/// delivering `[:tcp id data]` / `[:tcp-closed id]` to `subscriber`. Returns the
+/// retarget handle.
+fn start_reader(id: u64, reader: TcpStream, subscriber: u64) -> SubscriberHandle {
     spawn_io_source(subscriber, "brood-tcp-reader", move |sink| {
         let mut rd = reader;
         let mut buf = [0u8; 65536];
@@ -90,18 +94,25 @@ fn register_stream(stream: TcpStream, subscriber: u64) -> std::io::Result<u64> {
                 }
             }
         }
-    });
-    Ok(id)
+    })
 }
 
 fn accept_loop(lid: u64, listener: TcpListener, alive: Arc<AtomicBool>, sink: &MailboxSink) {
     while alive.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((stream, _)) => {
-                // Wire the accepted stream to the same owner, then announce it.
-                if let Ok(cid) = register_stream(stream, sink.subscriber()) {
-                    sink.emit(tcp_accept_msg(lid, cid));
-                }
+                // Register the accepted stream **passive** (no reader yet) and
+                // announce it; the owner calls `tcp-controlling-process` to start
+                // reading. Avoids losing early bytes before a handler takes over.
+                let cid = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+                reg().insert(
+                    cid,
+                    Sock::Stream {
+                        stream,
+                        reader: None,
+                    },
+                );
+                sink.emit(tcp_accept_msg(lid, cid));
             }
             // Non-blocking listener: nothing waiting — nap on this dedicated
             // (non-worker) thread and re-check `alive`, so `close` can stop us.
@@ -115,16 +126,25 @@ fn accept_loop(lid: u64, listener: TcpListener, alive: Arc<AtomicBool>, sink: &M
 
 // ---- the primitive operations ----
 
-/// `(tcp-connect host port)` — blocking connect, then a reader thread delivers
+/// `(tcp-connect host port)` — blocking connect; an **active** reader delivers
 /// inbound data to `subscriber`. Returns the socket id.
 pub fn connect(host: &str, port: u16, subscriber: u64) -> std::io::Result<u64> {
     let stream = TcpStream::connect((host, port))?;
-    register_stream(stream, subscriber)
+    let reader = stream.try_clone()?;
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let handle = start_reader(id, reader, subscriber);
+    reg().insert(
+        id,
+        Sock::Stream {
+            stream,
+            reader: Some(handle),
+        },
+    );
+    Ok(id)
 }
 
 /// `(tcp-listen host port)` — bind and start an accept thread delivering
-/// `[:tcp-accept lid client]` (and wiring each client) to `subscriber`. Port 0
-/// asks the OS for an ephemeral port.
+/// `[:tcp-accept lid client]` to `subscriber`. Port 0 = OS-assigned.
 pub fn listen(host: &str, port: u16, subscriber: u64) -> std::io::Result<u64> {
     let listener = TcpListener::bind((host, port))?;
     let local = listener.local_addr()?.port();
@@ -144,13 +164,37 @@ pub fn listen(host: &str, port: u16, subscriber: u64) -> std::io::Result<u64> {
     Ok(id)
 }
 
+/// `(tcp-controlling-process sock pid)` — make `pid` the owner of `sock`'s inbound
+/// data. For a passive (just-accepted) socket this **starts** its reader; for an
+/// already-active socket it retargets delivery. Errors if `sock` is a listener or
+/// is gone.
+pub fn controlling_process(id: u64, pid: u64) -> std::io::Result<()> {
+    let mut reg = reg();
+    match reg.get_mut(&id) {
+        Some(Sock::Stream { stream, reader }) => {
+            match reader {
+                Some(h) => h.retarget(pid),
+                None => {
+                    let clone = stream.try_clone()?;
+                    *reader = Some(start_reader(id, clone, pid));
+                }
+            }
+            Ok(())
+        }
+        Some(Sock::Listener { .. }) => Err(invalid(
+            "tcp-controlling-process: socket is a listener, not a stream",
+        )),
+        None => Err(bad_socket()),
+    }
+}
+
 /// `(tcp-send sock data)` — write all of `data` (blocking; clones the handle so
 /// the registry lock isn't held during the write).
 pub fn send(id: u64, data: &[u8]) -> std::io::Result<()> {
     let stream = {
         let reg = reg();
         match reg.get(&id) {
-            Some(Sock::Stream(s)) => s.try_clone()?,
+            Some(Sock::Stream { stream, .. }) => stream.try_clone()?,
             Some(Sock::Listener { .. }) => {
                 return Err(invalid("tcp-send: socket is a listener, not a stream"))
             }
@@ -161,13 +205,13 @@ pub fn send(id: u64, data: &[u8]) -> std::io::Result<()> {
     (&stream).flush()
 }
 
-/// `(tcp-close sock)` — shut a stream down (its reader sees EOF and exits) or stop
-/// a listener's accept loop. Idempotent.
+/// `(tcp-close sock)` — shut a stream down (its reader, if any, sees EOF and
+/// exits) or stop a listener's accept loop. Idempotent.
 pub fn close(id: u64) {
     let removed = reg().remove(&id);
     match removed {
-        Some(Sock::Stream(s)) => {
-            let _ = s.shutdown(Shutdown::Both);
+        Some(Sock::Stream { stream, .. }) => {
+            let _ = stream.shutdown(Shutdown::Both);
         }
         Some(Sock::Listener { alive, .. }) => alive.store(false, Ordering::Relaxed),
         None => {}
@@ -178,7 +222,7 @@ pub fn close(id: u64) {
 pub fn local_port(id: u64) -> Option<u16> {
     let reg = reg();
     match reg.get(&id)? {
-        Sock::Stream(s) => s.local_addr().ok().map(|a| a.port()),
+        Sock::Stream { stream, .. } => stream.local_addr().ok().map(|a| a.port()),
         Sock::Listener { port, .. } => Some(*port),
     }
 }

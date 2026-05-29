@@ -229,9 +229,17 @@ can restore it, and selecting the newest match (empty query → newest entry)."
 ;; ---- completion -------------------------------------------------------------
 
 (defn lineedit--candidates (pfx)
-  "Sorted global names beginning with `pfx` — Tab completion candidates. Reads the
-live image (`global-names`), so globals + macros (defn/when/cond/…) are all in."
+  "Sorted global names beginning with `pfx` — the default Tab-completion source.
+Reads the live image (`global-names`), so globals + macros (defn/when/cond/…) are
+all in (and a new project's own globals, since it's the live runtime)."
   (sort (filter (fn (s) (starts-with? s pfx)) (map str (global-names)))))
+
+;; The completion source: a `(fn pfx -> sorted-candidate-strings)`. Defaults to the
+;; live globals; a project that wants to complete its *own* vocabulary (buffer
+;; words, file paths, a DSL's keywords) just rebinds this — `(def *lineedit-candidates*
+;; my-completer)` — and Tab in `lineedit-read` (or the observer minibuffer) uses it.
+;; A plain redefinable global (hot-swappable), not baked into the completer.
+(def *lineedit-candidates* lineedit--candidates)
 
 (defn lineedit--apply-completion (state sstart pfx cands)
   "Pure: replace the symbol prefix `[sstart, point)` with the completion of `pfx`
@@ -247,12 +255,13 @@ against `cands` — the candidate itself when unique, else the longest common pr
            :hist-idx -1)))
 
 (defn lineedit--complete (state)
-  "Tab: complete the symbol under point against the global names."
+  "Tab: complete the symbol under point against `*lineedit-candidates*` (the live
+globals by default; a project can rebind it to complete its own vocabulary)."
   (let (text (get state :text) p (get state :point)
         [sstart pfx] (symbol-prefix-at text p))
     (if (= pfx "")
       state
-      (lineedit--apply-completion state sstart pfx (lineedit--candidates pfx)))))
+      (lineedit--apply-completion state sstart pfx (*lineedit-candidates* pfx)))))
 
 ;; ---- commands ---------------------------------------------------------------
 ;; Each command is a public `(fn (state key) -> state)` — the bindable unit the

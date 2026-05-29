@@ -112,6 +112,7 @@ arg silently becoming `nil`.
 | | `ref` | 0 | a fresh, globally-unique reference token (`Value::Ref`); tags request↔reply |
 | | `monitor` | 1 | watch a pid (local or remote); returns a monitor ref. Delivers `[:down ref pid reason]` on death (`:noproc` if already dead; `:noconnection` if a remote peer's link drops) |
 | | `demonitor` | 1 | drop a monitor by its ref (best-effort; remote demonitor is fanned out to the holding peer) |
+| | `exit` | 2 | `(exit pid reason)` — send an exit signal to a local process (Erlang `exit/2`). `:kill` is the untrappable hard kill (dies at its next reduction tick, or now if parked); any other reason is the soft signal (dies at its next `receive`). Monitors fire `[:down ref pid reason]`. No-op for a dead/unknown pid (ADR-063) |
 | | `register` | 2 | bind a local name → pid so peers can address it via `{:name n :node this-node}`. Returns the pid |
 | | `whereis` | 1 | the local pid registered under `name`, or nil. Strictly local — does not query other nodes |
 | | `spawn-count` | 0 | green processes spawned since program start |

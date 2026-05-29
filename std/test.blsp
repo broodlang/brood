@@ -268,6 +268,12 @@ docs/testing.md for the full guide.")
   ; is flag present in the run-tests args?
   (cond (empty? opts) false (= flag (first opts)) true else (opt? flag (rest opts))))
 
+(defn opt-val (key opts default)
+  ; the value following `key` in the run-tests args (e.g. `:timeout 5000`), or default.
+  (cond (empty? opts) default
+        (= key (first opts)) (second opts)
+        else (opt-val key (rest opts) default)))
+
 ;; (`pad-left` / `pad-right` are the prelude's, like `take` / `quot` — all formerly
 ;; redefined here, which clobbered the shared global with a worse version (the local
 ;; `spaces` helper was non-tail-recursive; `take` was non-tail), since the runtime
@@ -307,16 +313,23 @@ docs/testing.md for the full guide.")
   (if (= group "") (str name) (str group " › " name)))
 (defn full-name (r) (label (r-group r) (r-name r)))
 
+;; Live progress: announce a test as it starts, when `*test-trace*` is on. Runs in
+;; the worker process (so it prints before the thunk runs); a no-op otherwise.
+(defn trace-start (group name)
+  (when *test-trace* (println (str "▶ " (label group name)))))
+
 ;; Run one (name thunk) and produce its result (group name fails ms). The thunk
 ;; returns its own failure list (it catches its first failing assertion), sharing
 ;; no mutable state — so running these concurrently is safe.
 (defn run-test (group t)
+  (trace-start group (first t))
   (let (start (now) fails ((second t)) ms (- (now) start)) (list group (first t) fails ms)))
 
 ;; Like run-test, but evaluate the body with a private copy of the global
 ;; bindings (`%isolate`): an :isolated test's `def`s are rolled back when it
 ;; finishes, so they can't leak to any other test. Used only in the isolated phase.
 (defn run-test-fresh (group t)
+  (trace-start group (first t))
   (let (start (now) fails (%isolate (second t)) ms (- (now) start)) (list group (first t) fails ms)))
 
 ;; Run every test in a unit, in order, returning the list of results. This is
@@ -362,6 +375,32 @@ docs/testing.md for the full guide.")
 ;; freely — this only bounds how many *units* are in flight at once.
 (def *parallel-batch* 4)
 
+;; Two per-test wall-clock thresholds, in milliseconds — distinct on purpose:
+;;
+;; - `*test-slow-ms*` (default 1s) — **informational**. A test that takes longer is
+;;   listed (name + duration) under the summary. It still PASSES; this only surfaces
+;;   where the time goes. Override: `(run-tests :slow-over MS)`.
+;; - `*test-timeout-ms*` (default 30s) — **a hard ceiling**. A test that runs longer
+;;   is hard-killed (`(exit worker :kill)`, ADR-063 — stops even a tight loop that
+;;   never `receive`s) and reported as a "timed out" FAILURE, so a hung/runaway test
+;;   fails the suite instead of dragging or wedging it. Override: `(run-tests :timeout
+;;   MS)`. Workers in a batch start together, so the deadline (`collect-start + this`)
+;;   is effectively per-test (per-unit for `:serial`/`:isolated`).
+;;
+;; So: slow ≤ duration < timeout → listed but passes; duration ≥ timeout → killed +
+;; failed. Keep `*test-slow-ms*` < `*test-timeout-ms*` (a slow test you still want to
+;; see before it's a hard failure).
+(def *test-slow-ms* 1000)
+(def *test-timeout-ms* 30000)
+
+;; When set, print `▶ group › name` as each test STARTS — live progress so you can
+;; see which test is running (and spot the slow/hung one) before it finishes. Off by
+;; default, and never set by `run-tests-structured` / the `--test` path, so machine-
+;; parsed and structured output stays clean. `(run-tests :trace)` turns it on, and
+;; `nest test` passes `:trace`. Lines from parallel workers interleave (each is one
+;; flushed `println`); they come in waves of `*parallel-batch*`.
+(def *test-trace* false)
+
 ;; The parallel/serial units run in bounded groups (see `*parallel-batch*`) — the
 ;; loop that does so is the `run-driver` below, which also folds in the isolated
 ;; phase. (It used to be a plain `run-parallel`/`run-isolated` pair; they were
@@ -393,29 +432,64 @@ docs/testing.md for the full guide.")
 ;; counts workers not yet accounted for. A `[:down …]` for an unknown pid (a
 ;; stale worker from a prior run in a long-lived session) is ignored WITHOUT
 ;; decrementing, so it can't corrupt the count.
-(defn collect-units (workers acc)
-  (collect-loop (count workers) workers nil acc))
+;; Budget exhausted (`*test-timeout-ms*`): every worker that hasn't reported is
+;; presumed hung. Hard-kill each — `(exit pid :kill)` stops even a tight non-receive
+;; loop (ADR-063) — and synthesize a timeout failure for each of its tests, so a hung
+;; test FAILS instead of wedging the collector. Returns the full result list.
+(defn collect-timeout (workers reported acc)
+  (fold (fn (a w)
+          (if (member? (first w) reported)
+            a
+            (do (exit (first w) :kill)
+                (append (timeout-unit-results (second w)) a))))
+    acc
+    workers))
 
-(defn collect-loop (pending workers reported acc)
+;; A timeout failure per test in a hung unit — same shape as `dead-unit-results`:
+;; `(group name fails ms)`, `fails` = `((loc detail-lines))`.
+(defn timeout-unit-results (unit)
+  (map (fn (t)
+         (list (second unit) (first t)
+           (list (list nil (list (str "test timed out after " (quot *test-timeout-ms* 1000)
+                                    "s — hard-killed (raise *test-timeout-ms* if legitimately slow)"))))
+           *test-timeout-ms*))
+    (third unit)))
+
+(defn collect-units (workers acc)
+  ;; Fixed wall deadline for this batch — recomputed per collect, so each isolated
+  ;; unit / parallel chunk gets its own full budget.
+  (collect-loop (count workers) workers nil acc (+ (now) *test-timeout-ms*)))
+
+(defn collect-loop (pending workers reported acc deadline)
   (if (= pending 0)
     acc
-    (let (msg (receive))
+    ;; `(m m)` takes the next message; `(after …)` fires when the budget is spent.
+    (let (msg (receive (m m) (after (max 0 (- deadline (now))) :%test-timeout)))
       (cond
+        (= msg :%test-timeout)               ; budget spent — kill + fail the stragglers
+        (collect-timeout workers reported acc)
+
         (= (first msg) :unit-result)         ; [:unit-result pid results]
-        (collect-loop (- pending 1) workers (cons (second msg) reported)
-          (append (third msg) acc))
+        (let (pid (second msg))
+          ;; Ignore a result from a pid that isn't one of THIS batch's workers, or
+          ;; one already counted — a late message from a timed-out/killed worker of a
+          ;; prior step must not corrupt this step's `pending` count.
+          (if (or (member? pid reported) (nil? (unit-of-pid pid workers)))
+            (collect-loop pending workers reported acc deadline)
+            (collect-loop (- pending 1) workers (cons pid reported)
+              (append (third msg) acc) deadline)))
 
         (= (first msg) :down)                ; [:down mref pid reason]
         (let (pid (third msg)
               unit (unit-of-pid pid workers))
           (cond
-            (member? pid reported) (collect-loop pending workers reported acc)
-            (nil? unit)            (collect-loop pending workers reported acc)
+            (member? pid reported) (collect-loop pending workers reported acc deadline)
+            (nil? unit)            (collect-loop pending workers reported acc deadline)
             else (collect-loop (- pending 1) workers reported
-                   (append (dead-unit-results unit (nth msg 3)) acc))))
+                   (append (dead-unit-results unit (nth msg 3)) acc) deadline)))
 
         ;; Anything else in the runner's mailbox isn't ours — skip it.
-        else (collect-loop pending workers reported acc)))))
+        else (collect-loop pending workers reported acc deadline)))))
 
 ;; Run a whole unit with each test under `%isolate` (global-def rollback). This
 ;; is what an isolated unit's *own* worker process evaluates.
@@ -559,7 +633,12 @@ docs/testing.md for the full guide.")
 
 ;; --- entry point -------------------------------------------------------------
 (defn run-tests (& opts)
-  "Run every registered test once (the isolated tests first, then the parallel/serial pool), print a summary, and raise if any failed. Any test slower than 1s is listed automatically; pass `:slow` to also report the slowest 5 regardless of duration."
+  "Run every registered test once (the isolated tests first, then the parallel/serial pool), print a summary, and raise if any failed. Each test has a 30s hard timeout (killed + failed if exceeded — `:timeout MS` to change). Any test over 1s is listed automatically (`:slow-over MS` to change that threshold); `:slow` also reports the slowest 5 regardless of duration."
+  ;; `:timeout MS` / `:slow-over MS` override the budgets for this run (global rebind
+  ;; — the spawned driver reads `*test-timeout-ms*` from the shared table).
+  (def *test-timeout-ms* (opt-val :timeout opts *test-timeout-ms*))
+  (def *test-slow-ms* (opt-val :slow-over opts *test-slow-ms*))
+  (def *test-trace* (opt? :trace opts))
   (let (units (reverse *units*)
          par
          (filter (fn (u) (not= (first u) :isolated)) units)
@@ -577,7 +656,7 @@ docs/testing.md for the full guide.")
           failed (count-failed results)
           fails (count-failures results))
       (report-failures results)
-      (report-slow-over results 1000)
+      (report-slow-over results *test-slow-ms*)
       (when (opt? :slow opts) (report-slow results))
       (println "")
       (println total

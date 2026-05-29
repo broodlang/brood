@@ -46,10 +46,10 @@ pub use mailbox::{
 pub use message::{from_message, to_message, ClosureArmMsg, ClosureMsg, Message};
 // The reusable blocking-IO → mailbox seam (ADR-059): any subsystem that must
 // block runs it on a non-worker thread and delivers to a process mailbox.
-pub(crate) use io_source::{spawn_io_source, MailboxSink};
+pub(crate) use io_source::{spawn_io_source, MailboxSink, SubscriberHandle};
 pub use monitor::{demonitor, monitor, monitored_by, next_ref};
 pub use scheduler::{
-    gc_block_depth, in_green_process, macro_block_active, parent_of, peak_threads, pid_value,
+    exit, gc_block_depth, in_green_process, macro_block_active, parent_of, peak_threads, pid_value,
     self_pid, set_max_parallel, spawn, spawn_count, stack_budget, stack_overflow_check, tick,
     worker_threads, GcBlockGuard, MacroBlockGuard, CORO_STACK_BYTES,
 };

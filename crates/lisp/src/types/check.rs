@@ -195,8 +195,13 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
     for &f in forms {
         heap.push_root(f);
     }
-    let mut expanded: Vec<Value> = Vec::with_capacity(forms.len());
-    for &f in forms {
+    let n = forms.len();
+    let mut expanded: Vec<Value> = Vec::with_capacity(n);
+    for j in 0..n {
+        // Re-read the (relocated) form from the root stack, NOT the `forms` slice:
+        // an earlier iteration's `(require …)` `eval` can collect at any depth
+        // (ADR-061) and relocate it, so the slice's copy is stale by now.
+        let f = heap.root_at(roots_base + j);
         let exp = crate::eval::macros::macroexpand_all(heap, f, root).unwrap_or(f);
         // Root the just-built expansion *before* possibly triggering a
         // collect via `eval`; otherwise this LOCAL handle dies between
@@ -207,6 +212,15 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
             let _ = crate::eval::eval(heap, exp, root);
         }
     }
+    // A pass-1 `(require …)` `eval` can collect at ANY depth (ADR-061), which
+    // relocates the rooted forms/expansions — so the `expanded` Vec and the
+    // `forms` slice now hold **stale** handles, even though the data survives on
+    // the root stack. Re-read the live, relocated handles from the root stack for
+    // the analysis passes below. Layout: `forms` at `roots_base..+n`, their
+    // expansions at `roots_base+n..+2n` (pushed in pass 1, in order).
+    let n = forms.len();
+    let forms: Vec<Value> = (0..n).map(|j| heap.root_at(roots_base + j)).collect();
+    let expanded: Vec<Value> = (0..n).map(|j| heap.root_at(roots_base + n + j)).collect();
     // Pass 2: collect every `(def name …)` in the expanded tree (top level
     // *or* nested — `defn` inside `test`/`describe`/`when`/… still defines a
     // global once it runs, so the checker honours that). `defmacro` stays a
@@ -227,8 +241,8 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
     // Pass 4: macro-hygiene lint over the *un-expanded* forms — `defmacro`
     // templates and their `~unquote` structure only survive pre-expansion
     // (`macroexpand_all` leaves quasiquote opaque, and the template is gone once
-    // a macro is applied). Reads only, so the existing rooting suffices.
-    for &form in forms {
+    // a macro is applied). Reads only.
+    for &form in &forms {
         hygiene::check_macro_hygiene(heap, form, &mut out);
     }
     // Balance the GC roots we pushed for pass 1 (input forms + their

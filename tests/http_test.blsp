@@ -1,0 +1,54 @@
+;; HTTP/1.0 server (std/http.blsp, ADR-062). Pure parsing/rendering/routing tests,
+;; plus an end-to-end loopback request through a real spawned server.
+;;
+;; Register-only — discovered and run by `nest test` (and cargo test).
+
+(require 'test)
+(require 'http)
+
+(describe "http: request parsing"
+  (test "method, path, version, and lower-cased headers"
+    (let (r (parse-request "GET /hi HTTP/1.1\r\nHost: example\r\nContent-Length: 0\r\n\r\n"))
+      (assert= (get r :method) "GET")
+      (assert= (get r :path) "/hi")
+      (assert= (get r :version) "HTTP/1.1")
+      (assert= (get (get r :headers) "host") "example")))
+  (test "a body after the blank line is captured"
+    (let (r (parse-request "POST /x HTTP/1.0\r\nContent-Length: 5\r\n\r\nhello"))
+      (assert= (get r :body) "hello"))))
+
+(describe "http: response rendering"
+  (test "status line, Content-Length, and body"
+    (let (s (render-response (ok "<p>hi</p>")))
+      (is (string-contains? s "HTTP/1.0 200 OK"))
+      (is (string-contains? s "Content-Length: 9"))
+      (is (string-contains? s "\r\n\r\n<p>hi</p>"))))
+  (test "not-found renders a 404"
+    (is (string-contains? (render-response (not-found)) "404 Not Found"))))
+
+(describe "http: routing + mime"
+  (test "router dispatches by path and falls back to 404"
+    (let (h (router {"/" (fn (req) (text-response "home"))}))
+      (assert= (get (h {:path "/"}) :body) "home")
+      (assert= (get (h {:path "/missing"}) :status) 404)))
+  (test "mime-type guesses by extension"
+    (assert= (mime-type "a/b.html") "text/html; charset=utf-8")
+    (assert= (mime-type "a/b.png") "image/png")
+    (assert= (mime-type "a/b.xyz") "application/octet-stream")))
+
+(describe "http: end-to-end over a loopback server"
+  (test "a GET gets the handler's response back"
+    (let (me (self))
+      ;; the server owns its listener, so it runs in its own process. `spawn` is a
+      ;; macro wrapping its expr in a thunk — pass the (do …), not a (fn () …).
+      (spawn (do
+               (let (ls (http-listen 0))
+                 (send me [:port (tcp-local-port ls)])
+                 (serve-loop ls (router {"/" (fn (req) (ok "<h1>brood</h1>"))})))))
+      (let (port (receive ([:port p] p) (after 5000 :timeout)))
+        (let (c (tcp-connect "127.0.0.1" port))
+          (tcp-send c "GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
+          (let (resp (tcp-drain c))
+            (tcp-close c)
+            (is (string-contains? resp "200 OK"))
+            (is (string-contains? resp "<h1>brood</h1>"))))))))

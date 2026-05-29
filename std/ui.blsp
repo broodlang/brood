@@ -1,0 +1,152 @@
+;; std/ui.blsp — the reusable terminal/GUI app framework. (require 'ui).
+;;
+;; Extracted from the observer so a *new* project (the coming editor) builds on the
+;; same seam instead of re-inventing it. Two pieces:
+;;
+;;  - **Frontends** (ADR-046: one render-op protocol, many frontends). A *display*
+;;    is a map of five fns `{:enter :leave :size :draw :poll}`. `*term-display*` is
+;;    the crossterm terminal; `(gui-display)` opens a native window (needs
+;;    `--features gui`); `display-broadcast` fans one frame out to several at once.
+;;    All over the `term-*` / `gui-*` primitives — the same pure `view` frame paints
+;;    to any of them unchanged.
+;;  - **The app loop** `(ui-run model view update display)` — a tiny TEA-style loop:
+;;    enter the frontend, then render `(view model cols rows)`, poll input, fold it
+;;    with `(update model input cols rows)`, recurse until the model is `:done`, then
+;;    leave. `input` is the frontend's key/mouse value, or `:tick` on the poll
+;;    timeout (the refresh beat).
+;;
+;; Both the observer (`std/observer.blsp`) and the editor are just `ui-run` clients:
+;; they supply a `view` (model+size → frame, built with `display.blsp` ops) and an
+;; `update` (model+input+size → model, dispatching via `keymap.blsp`, prompting via
+;; `lineedit.blsp`, colouring via `highlight.blsp`). That is the dogfooding proof —
+;; the framework is whatever the observer needs, nothing observer-specific.
+
+(defmodule ui
+  "A small terminal/GUI app framework over the M3 display/input seam (ADR-046): a
+`display` frontend (`*term-display*` / `(gui-display)` / `display-broadcast`) plus a
+TEA-style `(ui-run model view update display)` loop. Build an app by supplying a
+pure `view` (model + cols/rows → a render frame) and an `update` (model + input +
+cols/rows → model); set `:done` in the model to quit, `:tick-ms` to set the refresh
+beat. The observer and the coming editor are both `ui-run` clients — see
+`std/observer.blsp`.")
+
+;; ---- frontends (ADR-046: one render-op protocol, many frontends) ------------
+;;
+;; The same pure `view` frame therefore paints to the terminal, a GUI window, or
+;; several at once. `term-*` / `gui-*` are the two Rust-backed frontends (mechanism
+;; only); the composition below — fan a frame out to every frontend, merge their
+;; keys, render at the smallest common grid — is all Brood, so it stays live-
+;; editable and grows to remote frontends.
+
+(def *term-display*
+  ;; the terminal (crossterm) frontend — always available, and single (one
+  ;; terminal), so it's a fixed display map of the 0-arg `term-*` primitives.
+  {:enter term-enter :leave term-leave :size term-size :draw term-draw :poll term-poll})
+
+(defn gui-display ()
+  "Open a **new** native window and return a display (the `{:enter :leave :size
+:draw :poll}` map) bound to it — each call is a separate window, so several
+observers (or editor windows) can run at once. Unlike `*term-display*` (one
+terminal, a constant), the windowed frontend is a *constructor*: it calls `gui-open`
+for a fresh window id and closes the `gui-*` primitives over it. The window is
+opened eagerly here, so `:enter` is a no-op and `:leave` closes it. Needs the
+runtime built with `--features gui` (`./configure --with-gui && make install`), else
+`gui-open` errors. The map also carries the raw `:window` id.
+
+**Create and poll it in the same process.** `:draw`/`:size`/`:leave` act on the
+captured window id, but `:poll` is a `receive` on the *calling* process's mailbox
+(that's where `gui-open` delivers this window's input, ADR-058) — it ignores the
+window id. So a display made here must be polled by the process that made it; don't
+hand it to another process to run. And because the delivered key/mouse messages
+carry no window id, one process should drive **one** window (which is why
+`(observe)` spawns a process per window) — two windows in one process would mix
+their input. Both are deferred trade-offs (ADR-059), fine for the observer."
+  (let (id (gui-open))
+    {:enter (fn () nil)
+     :leave (fn () (gui-close id))
+     :size  (fn () (gui-size id))
+     :draw  (fn (f) (gui-draw id f))
+     ;; Input arrives as mailbox messages (gui-open delivers to this process), so
+     ;; `:poll` is a `receive` that parks the process — it holds no scheduler worker
+     ;; while waiting (ADR-058), unlike a blocking poll. Returns the next key/mouse
+     ;; message, or nil after `ms` (the live-refresh tick).
+     :poll  (fn (ms) (receive (m m) (after ms nil)))
+     :window id}))
+
+(defn display--min-size (displays)
+  "The smallest cols×rows across all frontends, so one broadcast frame fits every
+screen (a larger frontend just shows it in its top-left)."
+  (fold (fn (acc d)
+          (let ([c r] ((get d :size)))
+            (if (nil? acc)
+                [c r]
+                (let ([ac ar] acc) [(min ac c) (min ar r)]))))
+        nil
+        displays))
+
+(defn display--poll-loop (displays slice)
+  (if (empty? displays)
+      nil
+      (let (k ((get (first displays) :poll) slice))
+        (if (nil? k) (display--poll-loop (rest displays) slice) k))))
+
+(defn display--poll-any (displays ms)
+  "Poll each frontend for a slice of `ms` in turn, returning the first key seen
+(or nil) — so a keystroke from *any* attached frontend reaches the loop."
+  (display--poll-loop displays (max 1 (quot ms (max 1 (count displays))))))
+
+(defn display-broadcast (displays)
+  "Compose several displays into one that fans a single frame out to all of them
+and merges their input: update the view and *every* attached frontend updates
+together (a GUI window and the terminal today; remote frontends later — they slot
+in as just another member). The frame renders at the smallest common grid so it
+fits everywhere. Pure Brood over the `term-*`/`gui-*` mechanism."
+  {:enter (fn () (doseq (d displays) ((get d :enter))))
+   :leave (fn () (doseq (d displays) ((get d :leave))))
+   :size  (fn () (display--min-size displays))
+   :draw  (fn (f) (doseq (d displays) ((get d :draw) f)))
+   :poll  (fn (ms) (display--poll-any displays ms))})
+
+;; ---- the app loop (TEA: model + view + update) ------------------------------
+
+(defn ui--tick-ms (model)
+  "The poll timeout (refresh beat) in ms: `(get model :tick-ms)` or 1000 by default."
+  (or (get model :tick-ms) 1000))
+
+(defn ui--loop (model view update display)
+  "The inner recursion of `ui-run` (own function so each turn is a proper tail call —
+O(1) stack). Renders, polls, folds the input, recurses; stops when `:done` (the
+caller, `ui-run`, runs `:leave` in all cases)."
+  (if (get model :done)
+    nil
+    (let ([cols rows] ((get display :size)))
+      ((get display :draw) (view model cols rows))
+      (let (input (or ((get display :poll) (ui--tick-ms model)) :tick))
+        (ui--loop (update model input cols rows) view update display)))))
+
+(defn ui-run (model view update display)
+  "Run a UI app over `display` (a frontend map): enter it, then loop —
+`(view model cols rows)` → `:draw` → `(:poll ms)` → `(update model input cols rows)`
+→ recurse — until the model is `:done`, then `:leave`. `input` is the frontend's
+key/mouse value (`\"a\"`, `:up`, `[:mouse …]`), or `:tick` on the poll timeout (the
+refresh beat, `(model :tick-ms)` or 1000 ms). `view` is pure (model + size → a
+`display.blsp` render frame); `update` folds an input into the next model and sets
+`:done` to quit.
+
+**Teardown is guaranteed.** `:leave` runs on a normal quit *and* if `view`/`update`
+throws (the error is re-raised after) — so a crash never strands the terminal in
+the alternate screen / raw mode; the screen is restored. With `*term-display*` the
+frontend is raw mode + the alternate screen, so `Ctrl-C` arrives as a `:ctrl-c`
+**key** (have `update` quit on it — see the observer's keymap) rather than a SIGINT
+that kills the process mid-draw and leaves stale cells on screen.
+
+Modal: control returns to the caller on quit — run it in a spawned process for a
+non-blocking window. The shared loop behind the observer (and the editor)."
+  (do
+    ((get display :enter))
+    (try
+      (do (ui--loop model view update display)
+          ((get display :leave)))
+      (catch e
+        ((get display :leave))   ; restore the terminal even on a view/update error
+        (throw e)))))

@@ -1,0 +1,59 @@
+;; The reusable app framework (std/ui.blsp): the `ui-run` loop and the display
+;; composition. The frontends themselves (`*term-display*`/`gui-display`) need a
+;; real terminal / window, so here we drive `ui-run` with a *scripted* display —
+;; `:poll` reading the test process's own mailbox, `:draw` echoing frames back —
+;; which is enough to exercise the loop (render → poll → update → done) and the
+;; broadcast composition without any IO.
+
+(require 'test)
+(require 'ui)
+(require 'display)   ; render-op constructors for the view under test
+
+(describe "ui-run — the TEA app loop"
+  (test "loops until the model is :done, then returns the :leave result"
+    (let (me (self))
+      (send me "x")                       ; one input waiting in our mailbox
+      (assert= (ui-run {:done false}
+                       (fn (m c r) [])                       ; view: empty frame
+                       (fn (m input c r) (assoc m :done true)) ; first input quits
+                       {:enter (fn () nil) :leave (fn () :left) :size (fn () [80 24])
+                        :draw (fn (f) nil)
+                        :poll (fn (ms) (receive (m m) (after 0 :tick)))})
+               :left)))
+
+  (test "a nil poll (timeout) is delivered to update as :tick"
+    (let (me (self))
+      (ui-run {:done false}
+              (fn (m c r) [])
+              (fn (m input c r) (do (send me [:saw input]) (assoc m :done true)))
+              {:enter (fn () nil) :leave (fn () nil) :size (fn () [80 24])
+               :draw (fn (f) nil) :poll (fn (ms) nil)})        ; nil ⇒ :tick
+      (assert= (receive ([:saw x] x) (after 200 :none)) :tick)))
+
+  (test "view gets the model + size, and its frame is what gets drawn"
+    (let (me (self))
+      (ui-run {:done false :label "hi"}
+              (fn (m c r) [(text 0 0 (str (get m :label) " " c "x" r))])
+              (fn (m input c r) (assoc m :done true))
+              {:enter (fn () nil) :leave (fn () nil) :size (fn () [40 10])
+               :draw (fn (f) (send me [:frame f]))            ; echo the drawn frame
+               :poll (fn (ms) nil)})
+      (let (f (receive ([:frame fr] fr) (after 200 :none)))
+        (is (string-contains? (nth (first f) 3) "hi 40x10")))))
+
+  (test "tick-ms comes from the model (default 1000)"
+    (assert= (ui--tick-ms {}) 1000)
+    (assert= (ui--tick-ms {:tick-ms 250}) 250)))
+
+(describe "display-broadcast — one frame to many frontends"
+  (test "fans :draw to every member and reports the smallest common size"
+    (let (me (self)
+          d1 {:enter (fn () nil) :leave (fn () nil) :size (fn () [80 24])
+              :draw (fn (f) (send me [:d1 f])) :poll (fn (ms) nil)}
+          d2 {:enter (fn () nil) :leave (fn () nil) :size (fn () [60 30])
+              :draw (fn (f) (send me [:d2 f])) :poll (fn (ms) nil)}
+          b (display-broadcast [d1 d2]))
+      (assert= ((get b :size)) [60 24])    ; min cols (60), min rows (24)
+      ((get b :draw) [:FRAME])
+      (assert= (receive ([:d1 f] f) (after 200 :none)) [:FRAME])
+      (assert= (receive ([:d2 f] f) (after 200 :none)) [:FRAME]))))
