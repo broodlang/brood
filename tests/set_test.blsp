@@ -1,0 +1,89 @@
+;; Sets as an opt-in library over maps (std/set.blsp): a constructor that dedups,
+;; single-element conj/disj, and the set algebra (union/intersection/difference/
+;; subset?). A set IS a map of element→true, so membership is `contains?`,
+;; elements are `keys`, size is `count` — exercised here too.
+;;
+;; Register-only — discovered and run by `nest test` (and cargo test, via
+;; crates/lisp/tests/suite.rs). The whole suite runs each test in its own green
+;; process, so these already run across cores; the final :isolated block adds
+;; explicit spawn/send/receive coverage (a set deep-copies across heaps as the
+;; map it is).
+
+(require 'test)
+(require 'set)
+
+;; Tail-recursive [lo, hi) (the test body runs in a small-stack green process).
+(defn st-range (lo hi) (st-range--down (- hi 1) lo nil))
+(defn st-range--down (i lo acc) (if (< i lo) acc (st-range--down (- i 1) lo (cons i acc))))
+
+(describe "set construction & membership"
+  (test "set dedups its input"
+    (assert= (set [1 1 2 3 3 3]) {1 true 2 true 3 true})
+    (assert= (count (set [1 1 2 3 3 3])) 3))
+  (test "the empty set"
+    (is (empty? (set [])))
+    (is (empty? (set nil))))
+  (test "membership is contains?, elements are keys, size is count"
+    (let (s (set [:a :b :c]))
+      (is (contains? s :a))
+      (refute (contains? s :z))
+      (assert= (count s) 3)
+      (assert= (into [] (sort (keys s))) [:a :b :c])))
+  (test "a set of vector coordinates works (structural keys)"
+    (let (live (set [[0 0] [1 2] [0 0]]))
+      (is (contains? live [1 2]))
+      (refute (contains? live [9 9]))
+      (assert= (count live) 2))))
+
+(describe "conj & disj"
+  (test "conj adds; re-adding is a no-op"
+    (assert= (conj (set [1 2]) 3) (set [1 2 3]))
+    (assert= (conj (set [1 2]) 2) (set [1 2])))
+  (test "disj removes; removing an absent element is a no-op"
+    (assert= (disj (set [1 2 3]) 2) (set [1 3]))
+    (assert= (disj (set [1 2]) 9) (set [1 2])))
+  (test "conj/disj return fresh sets (no mutation)"
+    (let (s (set [1 2]))
+      (conj s 3)
+      (disj s 1)
+      (assert= s (set [1 2])))))
+
+(describe "set algebra"
+  (test "union"
+    (assert= (union (set [1 2 3]) (set [3 4 5])) (set [1 2 3 4 5]))
+    (assert= (union (set [1 2]) (set [])) (set [1 2])))
+  (test "intersection"
+    (assert= (intersection (set [1 2 3]) (set [2 3 4])) (set [2 3]))
+    (is (empty? (intersection (set [1 2]) (set [3 4])))))
+  (test "difference"
+    (assert= (difference (set [1 2 3]) (set [2])) (set [1 3]))
+    (assert= (difference (set [1 2]) (set [1 2 3])) (set [])))
+  (test "subset?"
+    (is (subset? (set [1 2]) (set [1 2 3])))
+    (is (subset? (set []) (set [1])))
+    (refute (subset? (set [1 4]) (set [1 2 3]))))
+  (test "the algebra over a larger range is consistent"
+    (let (a (set (st-range 0 50)) b (set (st-range 25 75)))
+      (assert= (count (union a b)) 75)
+      (assert= (count (intersection a b)) 25)
+      (assert= (count (difference a b)) 25)
+      (is (subset? (intersection a b) a)))))
+
+;; ---- explicit concurrency: a set deep-copies across heaps (it's a map) -------
+(defn st-build-echo (parent ks) (send parent (set ks)))
+(defn st-spawn-builders (parent n)
+  (when (> n 0) (spawn (st-build-echo parent (st-range 0 n))) (st-spawn-builders parent (- n 1))))
+(defn st-collect (got total acc)
+  (if (= got total) acc (st-collect (+ got 1) total (receive (s (union acc s))))))
+
+(describe "sets across processes"
+  :isolated
+  (test "a set round-trips through a worker unchanged"
+    (let (me (self) w (spawn (st-build-echo me [:x :y [1 2]])))
+      (assert= (receive) (set [:x :y [1 2]]))))
+  (test "sets built in many workers fan in and union correctly"
+    (let (me (self))
+      (st-spawn-builders me 4)
+      ; workers send (set 0..1), (set 0..2), (set 0..3), (set 0..4);
+      ; their union is {0,1,2,3}.
+      (assert= (st-collect 0 4 (set [])) (set (st-range 0 4))))))

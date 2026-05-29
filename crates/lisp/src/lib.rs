@@ -29,6 +29,7 @@ pub mod dist; // distributed nodes: connect two runtimes over TCP, route message
 pub mod error; // errors + source positions (cross-cutting)
 pub mod gui; // optional windowed display backend (feature "gui") — ADR-046 frontend #2
 pub mod introspect; // tooling-facing queries on a live Interp (LSP today, MCP next)
+pub mod net; // thin non-blocking TCP socket mechanism (ADR-060); policy in std/tcp.blsp
 pub mod process; // the green-process scheduler // the primitive kernel (Rust mechanism; policy lives in std/*.blsp)
 
 use std::sync::{Arc, LazyLock};

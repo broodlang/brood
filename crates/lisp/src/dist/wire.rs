@@ -332,6 +332,14 @@ fn encode_msg(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
             w.push(M_CLOSURE);
             encode_closure(w, c)?;
         }
+        Message::Socket(_) => {
+            // A socket id is local to one runtime's global registry; it has no
+            // meaning on a peer node. Refuse rather than ship a dangling handle.
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot send a socket across nodes; it is local to its runtime",
+            ));
+        }
     }
     Ok(())
 }

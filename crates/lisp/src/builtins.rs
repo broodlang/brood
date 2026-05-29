@@ -37,6 +37,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     let num = Ty::NUMBER;
     let string = Ty::of(Tag::Str);
     let rope = Ty::of(Tag::Rope);
+    let socket_ty = Ty::of(Tag::Socket);
     let kw = Ty::of(Tag::Keyword);
     let sym = Ty::of(Tag::Sym);
     let bool_ty = Ty::of(Tag::Bool);
@@ -410,6 +411,48 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(2),
         Sig::new(vec![rope, int], int),
         rope_line_to_char,
+    );
+
+    // TCP sockets (ADR-062), built on the blocking-IO → mailbox seam (ADR-059):
+    // inbound data is delivered to the owning process's mailbox as `[:tcp sock
+    // data]` / `[:tcp-closed sock]` / `[:tcp-accept lsock client]` messages, which
+    // Brood `receive`s — no polling, no worker ever blocked. `connect`/`listen`
+    // register the *calling* process as the owner. A socket is an opaque handle,
+    // valid across this runtime's processes, never sent across nodes.
+    def(
+        heap,
+        "tcp-connect",
+        Arity::exact(2),
+        Sig::new(vec![string, int], socket_ty),
+        tcp_connect,
+    );
+    def(
+        heap,
+        "tcp-listen",
+        Arity::exact(2),
+        Sig::new(vec![string, int], socket_ty),
+        tcp_listen,
+    );
+    def(
+        heap,
+        "tcp-send",
+        Arity::exact(2),
+        Sig::new(vec![socket_ty, string], nil_ty),
+        tcp_send,
+    );
+    def(
+        heap,
+        "tcp-close",
+        Arity::exact(1),
+        Sig::new(vec![socket_ty], nil_ty),
+        tcp_close,
+    );
+    def(
+        heap,
+        "tcp-local-port",
+        Arity::exact(1),
+        Sig::new(vec![socket_ty], int.union(nil_ty)),
+        tcp_local_port,
     );
 
     // terminal frontend (ADR-046) — the thin crossterm seam that paints the
@@ -1188,6 +1231,11 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("rope-line", &["r", "n"], "The text of line n (0-based) of rope r, including any trailing newline."),
     ("rope-char->line", &["r", "idx"], "The 0-based line index containing character idx."),
     ("rope-line->char", &["r", "n"], "The character index where line n (0-based) begins."),
+    ("tcp-connect", &["host", "port"], "Connect to host:port; inbound data is delivered to the calling process as [:tcp sock data] / [:tcp-closed sock] messages. Returns a socket. Throws on failure."),
+    ("tcp-listen", &["host", "port"], "Bind a listening socket on host:port (port 0 = OS-assigned); connections arrive as [:tcp-accept lsock client] messages to the calling process. Returns a socket."),
+    ("tcp-send", &["sock", "s"], "Write the whole string s to sock (blocking). Returns nil; throws on error."),
+    ("tcp-close", &["sock"], "Close sock (a stream or listener), releasing its fd / stopping its accept loop. Idempotent; returns nil."),
+    ("tcp-local-port", &["sock"], "The local port sock is bound to, or nil."),
     ("type-of", &["x"], "The runtime type of x as a keyword (:int, :string, :pair, ...)."),
     ("check", &["form"], "Advisory type-check a quoted form: a list of warning strings, or nil. Never raises."),
     ("check-file", &["path"], "Advisory type-check every top-level form in the file at path: a list of `path:line:col: warning: …` strings, or nil. Does not evaluate the file."),
@@ -2110,59 +2158,30 @@ fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let prev = heap.set_current_file(Some(path.clone()));
 
     // **Bounded loading — the core memory guarantee (docs/memory-review.md).**
-    // When `load` is the outermost eval — a spawned-process body (`nest run
-    // --watch`/`--for`) or a top-level form (`nest run <file>`, `(require …)`) —
-    // run the file's forms with the SAME depth-1 form-loop discipline as
-    // `Interp::eval_source`: drop the GC-block depth to 0 so each form's eval
-    // re-enters at the `gc_block_depth() == 1` safepoint where Stage B's
-    // automatic copying GC fires, and root the unevaluated forms across each
-    // collection (re-fetching the relocated handle via `root_at`). Without this a
-    // file loaded here runs one eval frame deeper, where the safepoint never
-    // triggers and a long-running loop climbs unbounded — the `nest run` leak
-    // (~100 MB/s). Living in `load` (the core), not in each tool, means *every*
-    // entry path — `brood`, `nest`, MCP `eval`, the future editor — inherits the
-    // bound for free; that's why this isn't a `nest`-side fix.
-    //
-    // Safe at depth 1: no eval frame below holds an un-rooted LOCAL transient a
-    // collection would strand. The only outer frame is the `(load …)` combination
-    // itself; its `expr`/`call_form` are read solely by `or_form_pos` via
-    // `id.index()` (a bit-extract, no slab deref → no use-after-GC tripwire) and
-    // only when the error lacks a position — which it never does here (`or_pos`).
-    // Deeper than depth 1 (`(cons (load …) xs)`) we fall back to inline eval: a
-    // library load that doesn't loop, so it never crosses the GC threshold.
+    // The collector now reclaims at ANY eval depth (ADR-061), so a file loaded
+    // here is bounded no matter how deep `(load …)` sits — no `GcBlockReset`
+    // depth-1 trick is needed any more. We still root the unevaluated forms across
+    // the per-form eval: a collection during form `i` relocates the LOCAL forms
+    // `i+1..` this loop still holds, so we re-fetch each from the (relocated) root
+    // stack via `root_at` rather than the stale `forms` Vec. (Living in `load`,
+    // the core, means every entry path — `brood`, `nest`, MCP `eval`, the future
+    // editor — inherits the bound for free.)
     let mut result = Ok(Value::Nil);
-    if crate::process::gc_block_depth() == 1 {
-        let _reset = crate::process::GcBlockReset::enter();
-        let base = heap.roots_len();
-        for (form, _) in &forms {
-            heap.push_root(*form);
-        }
-        for (i, &(_, pos)) in forms.iter().enumerate() {
-            // Re-fetch the (possibly relocated) form from the root stack — an
-            // earlier form's eval may have triggered a collection that moved it.
-            let form = heap.root_at(base + i);
-            heap.note_definition(form, pos);
-            result = crate::eval::macros::macroexpand_all(heap, form, root)
-                .and_then(|f| crate::eval::eval(heap, f, root))
-                .map_err(|e| e.or_pos(pos).or_file(path.clone()));
-            if result.is_err() {
-                break;
-            }
-        }
-        heap.truncate_roots(base);
-    } else {
-        for (form, pos) in forms {
-            // Record def sites before expansion (ADR-031): `defn`/`defmacro` are
-            // still recognisable here, before macroexpansion loses their spans.
-            heap.note_definition(form, pos);
-            result = crate::eval::macros::macroexpand_all(heap, form, root)
-                .and_then(|f| crate::eval::eval(heap, f, root))
-                .map_err(|e| e.or_pos(pos).or_file(path.clone()));
-            if result.is_err() {
-                break;
-            }
+    let base = heap.roots_len();
+    for (form, _) in &forms {
+        heap.push_root(*form);
+    }
+    for (i, &(_, pos)) in forms.iter().enumerate() {
+        let form = heap.root_at(base + i);
+        heap.note_definition(form, pos);
+        result = crate::eval::macros::macroexpand_all(heap, form, root)
+            .and_then(|f| crate::eval::eval(heap, f, root))
+            .map_err(|e| e.or_pos(pos).or_file(path.clone()));
+        if result.is_err() {
+            break;
         }
     }
+    heap.truncate_roots(base);
     heap.set_current_file(prev);
     result
 }
@@ -2173,11 +2192,27 @@ fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
 fn eval_string(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let src = expect_string(heap, "eval-string", arg(args, 0))?;
     let root = heap.env_root(env);
-    let mut result = Value::Nil;
-    for form in reader::read_all(heap, &src)? {
-        let form = crate::eval::macros::macroexpand_all(heap, form, root)?;
-        result = crate::eval::eval(heap, form, root)?;
+    let forms = reader::read_all(heap, &src)?;
+    // Root the unevaluated forms across the per-form eval — a collection at any
+    // depth (ADR-061) relocates the LOCAL forms this loop still holds.
+    let base = heap.roots_len();
+    for &form in &forms {
+        heap.push_root(form);
     }
+    let mut result = Value::Nil;
+    for i in 0..forms.len() {
+        let form = heap.root_at(base + i);
+        let outcome = crate::eval::macros::macroexpand_all(heap, form, root)
+            .and_then(|f| crate::eval::eval(heap, f, root));
+        match outcome {
+            Ok(v) => result = v,
+            Err(e) => {
+                heap.truncate_roots(base);
+                return Err(e);
+            }
+        }
+    }
+    heap.truncate_roots(base);
     Ok(result)
 }
 
@@ -2192,6 +2227,12 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
     // lock file + load-path entries. Required lazily by `project-setup` only when a
     // project actually declares deps. Opt-in, never in the prelude.
     ("package", include_str!("../../../std/package.blsp")),
+    // TCP sockets (ADR-062): active-socket helpers + a spawn-per-connection
+    // server over the non-blocking tcp-* primitives. Opt-in, never in the prelude.
+    ("tcp", include_str!("../../../std/tcp.blsp")),
+    // The file & filesystem library: whole-file/line I/O, directory walking, path
+    // helpers — Brood over the fs primitives. Opt-in, never in the prelude.
+    ("file", include_str!("../../../std/file.blsp")),
     ("docs", include_str!("../../../std/docs.blsp")),
     ("hatch", include_str!("../../../std/hatch.blsp")),
     ("supervisor", include_str!("../../../std/supervisor.blsp")),
@@ -2209,6 +2250,11 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
     // directly) — the lightweight counterpart to the `display` render-op
     // protocol. Opt-in, never in the prelude.
     ("ansi", include_str!("../../../std/ansi.blsp")),
+    // Sets as a library over maps (ADR-062): a set is a map of `element → true`,
+    // so membership/elements/size reuse `contains?`/`keys`/`count`; the module
+    // adds `set`/`conj`/`disj`/`union`/`intersection`/`difference`/`subset?`.
+    // Opt-in, never in the prelude (no `#{…}` literal / distinct type yet).
+    ("set", include_str!("../../../std/set.blsp")),
     // The interactive REPL line editor (ADR-052): `highlight` is the pure lexical
     // syntax-highlighter / bracket-matcher / signature + completion scanners;
     // `lineedit` is the raw-mode, emacs-style editor built on it + the inline
@@ -2526,6 +2572,63 @@ fn rope_line_to_char(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::Int(r.line_to_char(n as usize) as i64))
 }
 
+// ---------- TCP sockets (ADR-062) ----------
+//
+// Thin non-blocking mechanism over `crate::net`; the active-socket / framing /
+// HTTP policy is Brood (std/tcp.blsp). A socket is `Value::Socket(id)`.
+
+fn expect_socket(heap: &Heap, who: &str, v: Value) -> Result<u64, LispError> {
+    expect!(heap, who, v, "socket",
+        Value::Socket(id) => id,
+    )
+}
+
+fn socket_port(who: &str, p: i64) -> Result<u16, LispError> {
+    u16::try_from(p).map_err(|_| LispError::runtime(format!("{}: port {} out of range 0..=65535", who, p)))
+}
+
+fn tcp_connect(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let host = expect_string(heap, "tcp-connect", arg(args, 0))?;
+    let port = socket_port("tcp-connect", expect_int(heap, "tcp-connect", arg(args, 1))?)?;
+    let owner = crate::process::self_pid();
+    match crate::net::connect(&host, port, owner) {
+        Ok(id) => Ok(Value::Socket(id)),
+        Err(e) => Err(LispError::runtime(format!("tcp-connect {}:{}: {}", host, port, e))
+            .with_code(crate::error::error_codes::FILE_IO)),
+    }
+}
+
+fn tcp_listen(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let host = expect_string(heap, "tcp-listen", arg(args, 0))?;
+    let port = socket_port("tcp-listen", expect_int(heap, "tcp-listen", arg(args, 1))?)?;
+    let owner = crate::process::self_pid();
+    match crate::net::listen(&host, port, owner) {
+        Ok(id) => Ok(Value::Socket(id)),
+        Err(e) => Err(LispError::runtime(format!("tcp-listen {}:{}: {}", host, port, e))
+            .with_code(crate::error::error_codes::FILE_IO)),
+    }
+}
+
+fn tcp_send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_socket(heap, "tcp-send", arg(args, 0))?;
+    let data = expect_string(heap, "tcp-send", arg(args, 1))?;
+    crate::net::send(id, data.as_bytes()).map_err(|e| LispError::runtime(format!("tcp-send: {}", e)))?;
+    Ok(Value::Nil)
+}
+
+fn tcp_close(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_socket(heap, "tcp-close", arg(args, 0))?;
+    crate::net::close(id);
+    Ok(Value::Nil)
+}
+
+fn tcp_local_port(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_socket(heap, "tcp-local-port", arg(args, 0))?;
+    Ok(crate::net::local_port(id)
+        .map(|p| Value::Int(p as i64))
+        .unwrap_or(Value::Nil))
+}
+
 // ----- terminal frontend (ADR-046) -------------------------------------------
 //
 // The thin crossterm seam: enter/leave the alternate screen, read keys, and
@@ -2758,8 +2861,21 @@ fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// visible, scrollback is preserved. The seam for an *inline* line editor (the
 /// self-hosted REPL, std/lineedit.blsp), as opposed to `term-enter` which takes
 /// over the whole screen for a full-screen TUI. Pair with `term-raw-leave`.
+///
+/// Defensively *shows the cursor and disables mouse capture* on entry: terminal
+/// state persists across processes, so a prior full-screen app (`term-enter` hides
+/// the cursor + captures the mouse) that exited without restoring — a crash, a
+/// hard `Ctrl-C`, a killed observer — would otherwise leave the inline editor with
+/// no cursor and mouse-movement escape sequences injected as input. The inline
+/// editor only runs on a TTY (the REPL gates `lineedit-read` on stdin+stdout being
+/// terminals; the piped path uses `read-line`), so these escapes never reach a
+/// redirected stream. Idempotent: showing a visible cursor / disabling inactive
+/// capture are no-ops.
 fn term_raw_enter(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    use crossterm::cursor::Show;
+    use crossterm::event::DisableMouseCapture;
     crossterm::terminal::enable_raw_mode().map_err(term_err)?;
+    crossterm::execute!(std::io::stdout(), Show, DisableMouseCapture).map_err(term_err)?;
     Ok(Value::Nil)
 }
 
@@ -4010,7 +4126,22 @@ fn isolate(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
 fn try_catch(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let thunk = arg(args, 0);
     let handler = arg(args, 1);
-    match apply(heap, thunk, &[], env) {
+    // The thunk runs through `apply`, which can collect at ANY eval depth
+    // (ADR-061). On the error path we still need `handler` and `env` afterwards,
+    // so root them on the operand stack across the thunk and re-read the
+    // relocated handles. (The thrown value / built error map is fresh after the
+    // unwind — no safepoint runs while an `Err` propagates — so it needs no
+    // rooting.) This is the `(try (loop) (catch e …))` supervised-server shape.
+    let vb = heap.roots_len();
+    let eb = heap.env_roots_len();
+    heap.push_root(handler);
+    heap.push_env_root(env);
+    let outcome = apply(heap, thunk, &[], env);
+    let handler = heap.root_at(vb);
+    let env = heap.env_root_at(eb);
+    heap.truncate_roots(vb);
+    heap.truncate_env_roots(eb);
+    match outcome {
         Ok(value) => Ok(value),
         Err(e) => {
             // The catch sees:

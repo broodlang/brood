@@ -172,6 +172,37 @@ fn gc_stats_counts_automatic_collections() {
     );
 }
 
+/// Collect at ANY eval depth (ADR-061). The same churn loop as
+/// `gc_stats_counts_automatic_collections`, but run **inside a `try`** so the loop
+/// body executes at eval depth ≥ 2 (the supervised-server / `(try (loop) …)`
+/// shape). Before ADR-061 the safepoint only fired at the outermost eval
+/// (`gc_block_depth() == 1`), so a loop this deep reported **0 collections** and
+/// climbed unbounded; now the evaluator roots its transients on the operand stack
+/// and collects at any depth. Asserts the collector actually fired down there.
+#[test]
+fn collects_below_the_outermost_eval() {
+    let mut interp = Interp::new();
+    let prog = r#"
+        (defn churn (n acc)
+          (if (= n 0)
+              (gc-stats)
+              (let (junk (range 200))
+                (churn (- n 1) (+ acc (count junk))))))
+        ;; `try` runs `churn` via a thunk apply, so its loop body sits at eval
+        ;; depth >= 2 — the case that used to never reach a GC safepoint.
+        (try (churn 8000 0) (catch e e))
+    "#;
+    let v = interp.eval_str(prog).expect("churn-in-try program errored");
+    let stats = interp.print(v);
+    let runs = read_field(&stats, ":collections");
+    assert!(
+        runs >= 1,
+        "expected ≥1 collection from a loop at depth ≥2 (ADR-061); got {runs} — \
+         gc-stats: {stats}. A 0 here means the safepoint only fires at the \
+         outermost eval again.",
+    );
+}
+
 /// Pull `:field N` out of a printed Brood map (`{... :field 123 ...}`). The map
 /// printer separates a key from its value by one space; values here are
 /// non-negative integers.

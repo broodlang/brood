@@ -157,6 +157,7 @@ fn tag_rank(v: Value) -> u8 {
         Value::Ref(_) => 12,
         Value::Pid { .. } => 13,
         Value::Rope(_) => 14,
+        Value::Socket(_) => 15,
     }
 }
 
@@ -510,13 +511,22 @@ pub struct Heap {
     /// Empty whenever no `binding` is active — so it's free on the common path
     /// and holds no LOCAL handles across a top-level arena reset.
     dynamics: Vec<(Symbol, Value)>,
-    /// Explicit GC root stack: any LOCAL [`Value`] alive across a possible GC
-    /// safepoint that isn't already reachable from `env`/`expr`/`dynamics` lives
-    /// here. In practice this is one site — `eval_str`/`eval_source` push the
-    /// unevaluated forms vector here for the duration of the per-form eval (the
-    /// only depth-0-reachable transient surface, by the `GC_BLOCK==1` invariant
-    /// — see `docs/memory-model.md`). Empty on the hot path.
+    /// Explicit GC root stack — the evaluator's **operand stack** (ADR-061).
+    /// Every LOCAL [`Value`] an eval frame still needs *after* a nested `eval`
+    /// (its accumulated `argv`, literal accumulators, `callee`, the `call_form`,
+    /// the cons-spine cursor) is pushed here for the duration of that call, then
+    /// re-read via [`root_at`](Self::root_at) afterwards (the copying collector
+    /// relocates these in place). This is what lets the safepoint collect at
+    /// **any** eval depth, not just the outermost — see `docs/memory-model.md`.
+    /// Also used by `eval_str`/`eval_source` for the unevaluated forms vector.
+    /// Empty between top-level forms.
     roots: Vec<Value>,
+    /// The env half of the operand stack (ADR-061): LOCAL [`EnvId`]s an eval
+    /// frame still needs across a nested `eval` (its `scope`/`env`). Relocated in
+    /// place by [`arena_flip`](Self::arena_flip) alongside `roots`; re-read via
+    /// [`env_root_at`](Self::env_root_at). Separate stack because an `EnvId`
+    /// isn't a `Value`. Empty between top-level forms.
+    env_roots: Vec<EnvId>,
     /// Adaptive GC trigger: collect when the LOCAL live-object count crosses
     /// this. Recomputed after each [`collect`](Self::collect) as
     /// `max(GC_FLOOR, 2 * live)`. `usize::MAX` while [`gc_enabled`] is false
@@ -601,6 +611,7 @@ impl Heap {
             current_file: None,
             dynamics: Vec::new(),
             roots: Vec::new(),
+            env_roots: Vec::new(),
             gc_threshold: usize::MAX,
             gc_enabled: false,
             local_epoch: 0,
@@ -626,6 +637,7 @@ impl Heap {
             current_file: None,
             dynamics: Vec::new(),
             roots: Vec::new(),
+            env_roots: Vec::new(),
             gc_threshold: gc_floor(),
             gc_enabled: true,
             local_epoch: 0,
@@ -1800,6 +1812,13 @@ impl Heap {
         for v in self.roots.iter_mut() {
             *v = flush_value(&old, &mut self.local, &mut fwd, *v);
         }
+        // The env half of the operand stack (ADR-061) — relocate in place so an
+        // eval frame's `scope`/`env` held across a deeper collection survives.
+        let mut env_roots = std::mem::take(&mut self.env_roots);
+        for e in env_roots.iter_mut() {
+            *e = flush_env(&old, &mut self.local, &mut fwd, *e);
+        }
+        self.env_roots = env_roots;
         self.local_free.clear();
         // form_pos is keyed by LOCAL pair index, which the copy *relocates*.
         // Re-key it through the pair forwarding table (old idx → new idx) so a
@@ -2109,6 +2128,10 @@ impl Heap {
                 // Only paid when a rope is actually used as a map key (rare).
                 self.rope(id).to_string().hash(h);
             }
+            Value::Socket(id) => {
+                16u8.hash(h);
+                id.hash(h);
+            }
         }
     }
 
@@ -2166,6 +2189,8 @@ impl Heap {
             // Ropes compare by text content (ropey's PartialEq walks chunks; no
             // full materialisation). Distinct handles to equal text are `=`.
             (Rope(x), Rope(y)) => self.rope(x) == self.rope(y),
+            // Sockets are identity values — equal iff the same registry handle.
+            (Socket(x), Socket(y)) => x == y,
             _ => false,
         }
     }
@@ -2576,6 +2601,41 @@ impl Heap {
     /// … heap.truncate_roots(n);` region.
     pub fn truncate_roots(&mut self, n: usize) {
         self.roots.truncate(n);
+    }
+
+    /// Overwrite the `i`th explicit root in place (operand-stack slot update —
+    /// e.g. advancing a rooted cons-spine cursor between argument evals). Paired
+    /// with [`root_at`](Self::root_at) for read-back.
+    pub fn set_root(&mut self, i: usize, v: Value) {
+        self.roots[i] = v;
+    }
+
+    // ----- env operand stack (ADR-061) ----------------------------------------
+    // The `EnvId` half of the operand stack: an eval frame's `scope`/`env` held
+    // across a nested `eval` lives here so a collection at *any* depth relocates
+    // it. Mirrors the value-root API above.
+
+    /// Push an env onto the env-root stack; survives any GC until the matching
+    /// [`truncate_env_roots`](Self::truncate_env_roots).
+    pub fn push_env_root(&mut self, e: EnvId) {
+        self.env_roots.push(e);
+    }
+
+    /// Current env-root depth, for a balanced
+    /// `truncate_env_roots(env_roots_len())` guard.
+    pub fn env_roots_len(&self) -> usize {
+        self.env_roots.len()
+    }
+
+    /// The relocated handle of the `i`th env root (read back after a nested eval
+    /// that may have collected).
+    pub fn env_root_at(&self, i: usize) -> EnvId {
+        self.env_roots[i]
+    }
+
+    /// Shrink the env-root stack to `n` (teardown paired with `push_env_root`).
+    pub fn truncate_env_roots(&mut self, n: usize) {
+        self.env_roots.truncate(n);
     }
 
     // ----- GC trigger / introspection -----------------------------------------

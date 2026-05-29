@@ -3,6 +3,106 @@
 Running scratch list of work to pick up. Promote items to `docs/roadmap.md` /
 an ADR once they're committed to. Newest section at the top.
 
+## Process `kill` primitive + per-test timeout (30s) (2026-05-30)
+
+Two linked pieces. The timeout depends on `kill` (without it a timed-out test can
+only be abandoned as a background zombie — there's no way to stop it).
+
+### A. `kill` — terminate a green process (kernel; ADR-worthy; test across cores)
+
+Two variants (Unix-signal analogy), differing only in **where the kill flag is
+checked** (you can't abort a coroutine mid-computation on another worker):
+
+- **Hard / `-9`** — checked at every **reduction tick** (`tick`/`preempt` in
+  `eval`), so it unwinds ASAP (sub-ms). If the target is **parked** (in `receive`
+  or queued RUNNABLE), drop it and `deregister(:killed)` immediately — never resume
+  it. Unwind a running coroutine via a non-catchable kill error that propagates to
+  the coroutine top → `Return` → `deregister(:killed)` (model on the existing
+  stack-overflow-guard kill / panic→`:killed` path in `scheduler.rs`).
+- **Soft / "wait for next iteration"** — checked at the next **`%receive`** (a
+  server/test loop's natural per-iteration boundary): the current iteration
+  finishes, then it dies. Caveat: a tight non-`receive` loop never honors it
+  (inherent to cooperative termination).
+
+Design notes / decisions to confirm:
+- Surface: one `(kill pid)` + mode (e.g. `(kill pid :force)` vs default soft), or
+  two prims (`kill` / `kill!`)? **Erlang precedent:** `exit(pid, reason)`; a
+  `:kill` reason is the untrappable hard one.
+- `:down` reason delivered to monitors (`:killed`? the given reason?).
+- Per-process atomic kill flag (in the mailbox/process state); set from any worker.
+- Remote pids (dist): defer (error for now) or route as an exit signal later.
+- Self-kill, double-kill, kill-of-dead-pid: all no-ops / idempotent.
+
+### B. Per-test timeout = **30s** (uses `kill`)
+
+A test/unit running > 30s **fails** with "timed out after 30s" and the slow worker
+is killed (hard) so it stops consuming a worker. Default ON at 30s; overridable
+`(run-tests :timeout MS)`.
+
+- Thread `timeout` (default 30000) through `drain-runner → run-driver → run--step
+  → collect-units → collect-loop`. Workers in a batch start together, so a wall
+  deadline `= collect-start + timeout` ≈ per-test in the default one-unit-per-test
+  case (per-unit for `:serial`/`:isolated`).
+- `collect-loop`: bare `(receive)` → `(receive (msg …) (after (max 0 (- deadline
+  (now))) <kill still-unreported workers; fail their units as timeouts>))`.
+- **Harden `:unit-result`**: ignore a result whose pid isn't in the current step's
+  `workers` or is already `reported` (so a late message from a killed/zombie worker
+  can't corrupt a later step's count). `:down` already validates pid; `:unit-result`
+  is currently trusted unconditionally.
+
+Not started — `kill` first (kernel), then wire the timeout to it. Do it with the
+full suite green to regression-test the (delicate) collector. NB the suite already
+has a ~104s test group — a 30s per-test budget would need that group's individual
+tests to each be < 30s (likely fine; confirm).
+
+## Error message: a value in head position should hint C-style call syntax (2026-05-30)
+
+`(println println("foo"))` — i.e. someone wrote `println("foo")` (C/JS call
+syntax), which *reads* in Brood as two forms `println ("foo")`, so the inner
+`("foo")` evaluates `"foo"` as a call head:
+
+```
+brood> (println println("foo"))
+type error: cannot call non-function: "foo" (line 1, col 17)
+```
+
+The message is technically right but unhelpful — it doesn't surface the actual
+mistake. When the "cannot call non-function" head is a **literal** (string /
+number / etc.), that almost always means `name(args)` C-style call syntax
+mis-parsed. Enrich it, e.g.: *"cannot call non-function: "foo" — a value can't be
+called. In Brood the function goes inside the parens: `(f x)`, not `f(x)`."* Even
+better if the reader/checker can see the adjacent `name(` (a symbol immediately
+followed by `(` with no space) and say *"`println(...)` looks like a call —
+write `(println ...)`."* (Reader-level adjacency detection is the most robust spot;
+relates to the function-as-value lint just added to the checker.)
+
+## GoL findings 2026-05-30 (`docs/gol-findings-2026-05-30.md`) — to action
+
+- ✅ **`contains?` was O(n)** (their #1, the headline — ~100× slower than `get`;
+  the real cause of "very slow"). Fixed in `std/prelude.blsp`: `contains?` now
+  probes via the O(1) `map-get` hash path (two-sentinel trick) instead of scanning
+  `(map-pairs m)`. *Verify once the build is green* (`tests/maps_test.blsp` should
+  drop sharply in time/RSS; the set module's membership rides on this).
+- ⬜ **`[DBG] child N …` spam on every `spawn`** (their #2) — leftover `eprintln!`
+  on the spawn/coroutine path; corrupts TUI/`nest run` output. Locate (likely the
+  process/scheduler spawn path) and gate behind a debug flag or remove. **NB:** may
+  be the maintainer's *active* debugging (cf. the `BROOD_TRACE_SAFEPOINT` trace in
+  `eval/mod.rs`) — confirm before deleting.
+- ⬜ **Spawned-process GC threshold vs the depth-1 path** (their #4) — a render
+  loop under a `spawn`/supervisor shows a bounded ~1.1 GB sawtooth, while the same
+  loop at the depth-1 entry path runs ~flat (~5 MB). Bounded + correct, but the two
+  GC thresholds should probably converge so "move the loop under a supervisor"
+  doesn't silently 200× the high-water.
+- ⬜ **Unused-`require` lint** (their #5) — a dead `(require 'x)` (module's symbols
+  never referenced) goes unflagged. Cheap checker addition; same advisory channel
+  as the function-as-value lint.
+- 📝 **Concurrency teaching** (their #3) — naïve per-generation fan-out lost to
+  serial (coordination + serial fan-in merge + per-`send` deep copy swamp a small
+  parallel region). The honest "how to parallelise a CA" is spatial tiling + halo
+  exchange. Worth a teaching note; *not* a "make it concurrent to make it fast"
+  reflex. (The "`nest test` gives false confidence" + "use the MCP `eval` loop"
+  notes are already folded into the `writing-brood` skill this session.)
+
 ## BUG: receive loops weren't TCO'd → coroutine-stack SIGSEGV ✅ FIXED (2026-05-28)
 
 A server driven through ~60 interleaved cast + call cycles segfaulted: `%receive`

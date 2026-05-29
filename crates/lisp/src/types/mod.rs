@@ -32,7 +32,7 @@ use crate::core::value::{self, Tag, Value};
 /// the source of [`TAG_COUNT`]. **Must list every [`Tag`] variant in discriminant
 /// order**; the compiler can't enumerate variants, so `tag_universe_is_consistent`
 /// (below) is what guards completeness, ordering, and the universe size.
-const ALL_TAGS: [Tag; 16] = [
+const ALL_TAGS: [Tag; 17] = [
     Tag::Nil,
     Tag::Bool,
     Tag::Int,
@@ -49,24 +49,25 @@ const ALL_TAGS: [Tag; 16] = [
     Tag::Ref,
     Tag::Pid,
     Tag::Rope,
+    Tag::Socket,
 ];
 
 /// The number of tag atoms — derived from [`ALL_TAGS`], not hand-counted.
 const TAG_COUNT: u32 = ALL_TAGS.len() as u32;
-/// `Ty` is a `u16`, so at most 16 atoms fit. The `UNIVERSE` mask
-/// `(1u16 << TAG_COUNT) - 1` would otherwise fail const-eval with a cryptic
-/// shift-overflow message when someone added the 17th atom — this surfaces
+/// `Ty` is a `u32`, so at most 32 atoms fit. The `UNIVERSE` mask
+/// `(1u32 << TAG_COUNT) - 1` would otherwise fail const-eval with a cryptic
+/// shift-overflow message when someone added the 33rd atom — this surfaces
 /// the cap with a clear message right where the lattice width is set. Widen
-/// `Ty(u16)` to `Ty(u32)` (and this assert) to lift the cap.
+/// `Ty(u32)` to `Ty(u64)` (and this assert) to lift the cap.
 const _: () = assert!(
-    TAG_COUNT <= 16,
-    "Ty is u16-wide; widen the type to add more than 16 atoms",
+    TAG_COUNT <= 32,
+    "Ty is u32-wide; widen the type to add more than 32 atoms",
 );
 /// All bits set for the atoms — the universe `⊤`. Follows [`TAG_COUNT`].
-/// Computed in `u32` then narrowed: at the cap (`TAG_COUNT == 16`) the direct
-/// `1u16 << 16` would overflow in const-eval, so the wider shift sidesteps it
-/// (`(1u32 << 16) - 1 == 0xFFFF`, which narrows to `u16::MAX` losslessly).
-const UNIVERSE: u16 = ((1u32 << TAG_COUNT) - 1) as u16;
+/// Computed in `u64` then narrowed: at the cap (`TAG_COUNT == 32`) the direct
+/// `1u32 << 32` would overflow in const-eval, so the wider shift sidesteps it
+/// (`(1u64 << 32) - 1 == 0xFFFF_FFFF`, which narrows to `u32::MAX` losslessly).
+const UNIVERSE: u32 = ((1u64 << TAG_COUNT) - 1) as u32;
 
 /// The bit position of `tag` in a [`Ty`]'s bitset — its `#[repr(u8)]`
 /// discriminant. No hand-maintained mapping (so no collisions possible); the
@@ -75,9 +76,9 @@ const fn bit(tag: Tag) -> u32 {
     tag as u8 as u32
 }
 
-/// A set-theoretic type: a set of runtime [`Tag`]s. `Copy` and cheap (one `u16`).
+/// A set-theoretic type: a set of runtime [`Tag`]s. `Copy` and cheap (one `u32`).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct Ty(u16);
+pub struct Ty(u32);
 
 impl Ty {
     /// `⊥` — the empty set; the type of no value. A subtype of every type.
@@ -91,7 +92,7 @@ impl Ty {
 
     /// The singleton type containing exactly the values with this tag.
     pub const fn of(tag: Tag) -> Ty {
-        Ty(1u16 << bit(tag))
+        Ty(1u32 << bit(tag))
     }
 
     /// The type of a concrete value — the bridge from a runtime value to its type.
@@ -123,6 +124,7 @@ impl Ty {
             "ref?" => Ty::of(Tag::Ref),
             "pid?" => Ty::of(Tag::Pid),
             "rope?" => Ty::of(Tag::Rope),
+            "socket?" => Ty::of(Tag::Socket),
             // `fn?` holds for both Brood closures and Rust builtins.
             "fn?" => Ty::of(Tag::Fn).union(Ty::of(Tag::Native)),
             "number?" => Ty::NUMBER,
@@ -164,7 +166,7 @@ impl Ty {
 
     /// Does this type admit a value with `tag`?
     pub const fn contains_tag(self, tag: Tag) -> bool {
-        self.0 & (1u16 << bit(tag)) != 0
+        self.0 & (1u32 << bit(tag)) != 0
     }
 
     /// Is this the empty type `⊥` (no value inhabits it)?

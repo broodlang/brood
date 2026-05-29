@@ -456,6 +456,12 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   `(count m)` / `(into [] m)` all walk the map as its `[k v]` pairs — no need
   for `(zip (keys m) (vals m))`. Iteration order is hash-driven (ADR-040), so
   compare via `frequencies` when order would otherwise matter.
+- **set** (`(require 'set)`): a set is a **map of `element → true`**, so
+  membership is `(contains? s x)`, elements `(keys s)`, size `(count s)`, and it's
+  seqable like any map. The module adds `(set coll)` (dedups), `conj`/`disj`,
+  `union`/`intersection`/`difference`/`subset?`. `(set [[0 0] [1 2]])` is the
+  natural live-cell model (structural vector keys). No `#{…}` literal or `set?`
+  yet (deferred) — test a set with `map?`.
 - **types**: `type-of` plus the `?` predicates — `int?` `float?` `string?`
   `symbol?` `keyword?` `bool?` `nil?` `pair?` `vector?` `map?` `fn?` `ref?`
   `pid?`

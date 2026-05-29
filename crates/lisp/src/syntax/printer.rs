@@ -126,6 +126,12 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
             out.push_str(&r.len_lines().to_string());
             out.push('>');
         }
+        Value::Socket(id) => {
+            // A socket is a live OS resource with no readable literal.
+            out.push_str("#<socket ");
+            out.push_str(&id.to_string());
+            out.push('>');
+        }
     }
 }
 

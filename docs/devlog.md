@@ -7713,20 +7713,149 @@ parks in `(receive)`, holding no worker. Plan: `docs/handoff-blocking-io.md`.
   that).
 
 **Result.** Both build configs green; full suite green (incl. `brood_suite_passes`,
-cross-process). Verified at the root process: a window opens, a delivered key is
-consumed via the `receive`-poll, and the loop parks on timeout — i.e. input now
-flows through the mailbox with **no blocking poll / no pinned worker**. Docs:
-ADR-059 + the handoff plan; `gui.rs` threading notes; `gui-*` docstrings.
+cross-process). `(observe)` opens an independent window per call and the spawned
+observer parks in `(receive)` (status `:waiting`) — input flows through the mailbox
+with **no blocking poll / no pinned worker**. Docs: ADR-059 + the handoff plan;
+`gui.rs` threading notes; `gui-*` docstrings.
 
-**Caveat / separate issue found.** End-to-end `(observe)` (which `spawn`s an
-observer per window) couldn't be smoke-tested because **spawned processes don't
-execute their bodies under the `brood` cli / `nest run`** — a 3-line, no-GUI repro
-(`(spawn (fn () (send me [:x]))) (receive (m m) (after 1500 :none))` → `:none`)
-fails there, while `--test`/`cargo test` run spawned processes fine (suite green).
-This is at committed HEAD, independent of this change, and likely entangled with
-the in-flight eval-entry / scheduler work. `(observe-attach (gui-display))` (modal,
-no spawn) works today; `(observe)` will once spawn runs in the cli path.
+**Gotcha banked (a self-inflicted detour).** `(observe)` first didn't run at all,
+and I chased it as a scheduler regression before finding the real cause: `spawn`
+is a **macro** that wraps its argument in a thunk (`(spawn expr)` →
+`(%spawn (fn () expr))`). `(observe)` wrote `(spawn (fn () …))`, which double-wraps
+to `(%spawn (fn () (fn () …)))` — the process runs the outer thunk, which just
+*returns* the inner fn uncalled, so the body never executes. Fix: pass the
+*expression* — `(spawn (observe-attach (gui-display)))`. (The test suite always
+used `(spawn body)`, which is why it worked there and my `(spawn (fn () …))` repros
+didn't — there was never a runtime bug.) Lesson: `spawn` takes a body expression,
+never a pre-built thunk.
 
 **Next (planned, ADR-059).** Phase 2 — terminal input + a socket reactor on the
 same deliver-to-mailbox seam; Phase 3 — a blocking-offload pool for unavoidable
 synchronous FFI.
+
+## 2026-05-30 — Sets as a library over maps (ADR-060)
+
+**Context.** The Game-of-Life retros kept hitting the want for a set; the
+workaround `{[x y] true}` (a map whose values are filler) reads poorly and has no
+`union`/`difference`. Rather than a kernel value kind, ship it in Brood.
+
+**Done.** `std/set.blsp` (`(require 'set)`): a set *is* a map of `element → true`,
+so membership/elements/size are the existing `contains?`/`keys`/`count` and you can
+`fold`/`map`/`into` it directly. The module adds the gaps only — `set` (deduping
+constructor), `conj`/`disj`, and `union`/`intersection`/`difference`/`subset?`.
+Structural equality + vector keys come from the CHAMP map (so `(set [[0 0] [1 2]])`
+is a live-cell set). `tests/set_test.blsp` covers construction/dedup, membership,
+the algebra over a 0–75 range, no-mutation, and an `:isolated` cross-process block
+(a set deep-copies across heaps as the map it is, and many workers fan-in/union).
+
+**Deferred (ADR-060).** The `#{…}` reader literal, `#{…}` printing, and a distinct
+`set?`/`Tag::Set` — they need kernel support and pick up when "set of X" is common
+in editor code. Until then a set is a map (test with `map?`). Docs: ADR-060,
+`language.md` §Sets, `brood-for-claude.md`, the `writing-brood` skill, roadmap
+moved to 🟡.
+
+**Caveat.** Written while the lib build was red (an in-flight `Value::Socket`
+variant left 4 matches non-exhaustive), so the suite couldn't be run green this
+session — `set.blsp` adds no `Value` arms, so it's unaffected, but verify
+`nest test`/`cargo test` once the kernel build is restored.
+
+---
+
+## 2026-05-30 — GC collects at any eval depth (ADR-061)
+
+**Goal.** Continue GC work. Acting on the Game-of-Life retro feedback: the
+supervised run was bounded but spiky (~1.1 GB sawtooth) versus the flat ~5 MB
+top-level run.
+
+**Ruled out a phantom.** The prior handoff flagged a "root-thread depth-1
+regression" from `94811bd`. Re-ran the exact repro — a bare top-level tail loop
+collects fine (540×). There is **no regression**. What looked like "0 collections"
+was always the *fundamental* limitation: Stage B's safepoint fired only at the
+outermost eval (`gc_block_depth() == 1`), so a loop running *deeper* never
+collected. Measured the contrast cleanly: a heavy per-iteration loop at depth 1 =
+131 MB peak / 30 collections; the identical loop at depth 2 (`(println (gen 0))`) =
+3.5 GB / **0 collections**. The retro's spike is the same thing from the spawned
+side.
+
+**Built (ADR-061) — collect at any depth via an operand stack.**
+- `Heap` gains `env_roots: Vec<EnvId>` (the `EnvId` half of the operand stack)
+  alongside `roots`; both relocated in place by `arena_flip`. New helpers:
+  `set_root`, `push_env_root`/`env_root_at`/`env_roots_len`/`truncate_env_roots`.
+- `eval/mod.rs`: every recursive-eval site now roots the LOCAL transients it needs
+  after the call onto these stacks and re-reads the relocated handles —
+  vector/map literals, `if`, `def`, `let`/`letrec` (shared `bind_sequential`),
+  the combination path (extracted `eval_arguments`), the multi-form closure body,
+  `bind_params` (`&optional` defaults), `apply_closure`, and `tail_of_cons` (now
+  returns the relocated env). The common single-body-form tail-call path stays
+  push-free (the safepoint roots `expr`/`env`).
+- Builtins: `try_catch` roots its handler/env across the thunk apply (the
+  `(try (loop) …)` shape); `load` and `eval-string` root their form lists. `load`'s
+  depth-1 `GcBlockReset` trick (ADR-058) and the now-dead `GcBlockReset` itself are
+  removed.
+- The compile pass opts out rather than being rooted: new thread-local
+  `MACRO_BLOCK` (+ `MacroBlockGuard`, saved/restored across suspend like
+  `GC_BLOCK`/`STACK_BASE`) suppresses collection during `macroexpand_all`. The
+  safepoint gate is now `!macro_block_active() && gc_due()`. `GC_BLOCK` now feeds
+  only the stack-overflow byte guard.
+
+**Why this stayed small.** The Game-of-Life churn (`map`/`mapcat`/`reduce`/
+`frequencies`/`fold`/`filter`) is all *Brood prelude*, so eval-level rooting covers
+it — only a handful of Rust builtins re-enter eval, and a non-re-entrant builtin
+can't trigger a collection at all (GC only fires at the eval safepoint).
+
+**Verified.** Depth-2 leak repro: **3.5 GB → 28 MB.** New `gc.rs` test
+`collects_below_the_outermost_eval` (a `try`-wrapped churn loop) asserts
+collections fire at depth ≥ 2. A shape battery (depth-2 loops, `try`, vector/map
+literals, `let`, higher-order prelude, `&optional` defaults, rest params) runs
+clean under `RUSTFLAGS="-C debug-assertions=on" BROOD_GC_STRESS=1` — the
+use-after-GC tripwire (ADR-054) catches any missed root, and none fired. `cargo
+test -p brood --test gc` green (4/4).
+
+---
+
+## 2026-05-30 — TCP sockets on a reusable blocking-IO seam (ADR-062)
+
+**Context.** Brood needs real network I/O (an HTTP client; the M4 server). The
+design conversation converged on the ADR-059 model — blocking work delivers to a
+mailbox, never pins a worker — applied to sockets, and on making that seam a
+*reusable, documented core* (the user's steer: "do the same we did with the
+observer GUI" + "make it a core part of the language" + "refactor for re-use").
+
+**First cut, then replaced.** I built a thin **non-blocking-poll** layer (a
+`tcp-recv` returning would-block + Brood poll loops with `tcp--yield`). It worked
+inline but busy-polls, and a spawned handler capturing a socket hung. Pivoted to
+the right model below; the kernel scaffolding (`Value::Socket`, `Message::Socket`,
+the `Ty` `u16`→`u32` widen for the 17th tag, the `nest/mcp.rs` JSON arm) carried
+straight over.
+
+**Done.**
+- **Reusable seam — `process::spawn_io_source(subscriber, name, |sink| …)` +
+  `MailboxSink`** (`process/io_source.rs`): the one place the "blocking loop on a
+  non-worker thread → `deliver` to a mailbox" pattern lives (ADR-059 made
+  concrete). Sockets are its first consumer; `gui`/`dist`/terminal migrate onto it
+  later.
+- **`crate::net` + 5 primitives** — `tcp-connect`/`tcp-listen`/`tcp-send`/
+  `tcp-close`/`tcp-local-port`. A connected/accepted socket reads on a dedicated
+  thread and delivers `[:tcp sock data]` / `[:tcp-closed sock]`; a listener
+  delivers `[:tcp-accept lsock client]`. `connect`/`listen` register the calling
+  process as owner. No polling on the Brood side; a waiting socket holds no worker.
+- **`Value::Socket(u64)`** — a scalar global-registry handle (GC leaf, never
+  traced/moved; valid across this runtime's processes via `Message::Socket`, but
+  rejected on the cross-node wire). Reused the mutable-resource-behind-a-handle
+  rule (like the rope).
+- **`std/tcp.blsp`** shrank to `socket?` + `tcp-drain`/`tcp-drain-timeout`
+  (collect a response until the peer closes — the HTTP request/response shape).
+- **`tests/tcp_test.blsp`** — a full loopback echo + EOF + drain, driven in **one
+  process** via `receive` (no spawn), so it passes even while the scheduler is
+  being reworked.
+
+**Result.** `tcp_test` 5/5; **full suite 828/828**; workspace compiles clean.
+
+**Deferred (ADR-062).** TLS (`tls-connect` via `rustls`, same handle → `https` for
+`std/http.blsp`); `tcp-controlling-process` (hand a client socket to a per-conn
+handler); a `mio` reactor (fold per-socket threads; ADR-059 Phase 2); binary-safe
+bytes (recv is UTF-8-lossy today). Plus: migrate `gui`/`dist`/terminal onto
+`spawn_io_source`.
+
+**Next.** A **file standard library** (`std/file.blsp`) over the existing
+`slurp`/`spit`/`list-dir`/… primitives; then TLS + `std/http.blsp`.

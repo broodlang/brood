@@ -1,0 +1,69 @@
+;; File & filesystem library (std/file.blsp). Fixtures live under a unique
+;; gensym'd /tmp directory per test, so cases don't collide.
+;;
+;; Register-only — discovered and run by `nest test` (and cargo test).
+
+(require 'test)
+(require 'file)
+
+(defn ftmp () (let (d (path-join "/tmp" (name (gensym "brood-file-")))) (make-dir d) d))
+
+(describe "file: whole-file read/write/append"
+  (test "write-file then read-file round-trips"
+    (let (p (path-join (ftmp) "a.txt"))
+      (write-file p "hello")
+      (assert= (read-file p) "hello")))
+  (test "append-file adds to existing content (and creates if absent)"
+    (let (p (path-join (ftmp) "b.txt"))
+      (append-file p "one")
+      (append-file p "two")
+      (assert= (read-file p) "onetwo"))))
+
+(describe "file: line I/O"
+  (test "write-lines / read-lines round-trip without a trailing blank line"
+    (let (p (path-join (ftmp) "c.txt"))
+      (write-lines p ["alpha" "beta" "gamma"])
+      (assert= (read-lines p) (list "alpha" "beta" "gamma"))))
+  (test "read-lines of an empty file is nil"
+    (let (p (path-join (ftmp) "empty.txt"))
+      (write-file p "")
+      (assert= (read-lines p) nil))))
+
+(describe "file: predicates"
+  (test "file? is true for a regular file, false for a directory"
+    (let (d (ftmp) p (path-join d "f.txt"))
+      (write-file p "x")
+      (is (file? p))
+      (refute (file? d))
+      (is (dir? d))))
+  (test "path-exists? covers files and directories"
+    (let (d (ftmp) p (path-join d "f.txt"))
+      (write-file p "x")
+      (is (path-exists? p))
+      (is (path-exists? d))
+      (refute (path-exists? (path-join d "nope.txt"))))))
+
+(describe "file: directory listing"
+  (test "list-files and list-dirs separate files from subdirectories"
+    (let (d (ftmp))
+      (write-file (path-join d "f1.txt") "a")
+      (write-file (path-join d "f2.txt") "b")
+      (make-dir (path-join d "sub"))
+      (assert= (sort (list-files d)) (list "f1.txt" "f2.txt"))
+      (assert= (list-dirs d) (list "sub"))))
+  (test "walk-files collects files recursively as full paths"
+    (let (d (ftmp))
+      (write-file (path-join d "top.txt") "a")
+      (make-dir (path-join d "sub"))
+      (write-file (path-join (path-join d "sub") "deep.txt") "b")
+      (assert= (sort (walk-files d))
+        (sort (list (path-join d "top.txt") (path-join (path-join d "sub") "deep.txt")))))))
+
+(describe "file: path helpers"
+  (test "path-extension"
+    (assert= (path-extension "a/b.txt") ".txt")
+    (assert= (path-extension "a/b") "")
+    (assert= (path-extension ".bashrc") ""))
+  (test "path-stem"
+    (assert= (path-stem "a/b.txt") "b")
+    (assert= (path-stem "a/b") "b")))

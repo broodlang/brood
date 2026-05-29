@@ -530,6 +530,26 @@ docs/testing.md for the full guide.")
       nil
       (take 5 (sort-by-ms timings)))))
 
+;; "1.3s" from milliseconds — one decimal, rounded to nearest 0.1s.
+(defn secs-str (ms)
+  (let (tenths (quot (+ ms 50) 100)) (str (quot tenths 10) "." (rem tenths 10) "s")))
+
+;; Always-on slow-test surfacing: list every test slower than `over` ms (slowest
+;; first), so a slow test is never hidden behind the one-line summary. Unlike
+;; `report-slow` (the opt-in `:slow` top-5), this fires automatically. Prints
+;; nothing when every test is under the threshold — the common, fast case stays
+;; quiet.
+(defn report-slow-over (results over)
+  (let (slow (filter (fn (p) (> (rest p) over))
+               (map (fn (r) (cons (full-name r) (r-ms r))) results)))
+    (unless (empty? slow)
+      (println "")
+      (println (str "Slow tests (> " (secs-str over) "):"))
+      (fold (fn (_ p)
+              (println (str "  " (pad-right (str (first p)) 40) " " (secs-str (rest p)))))
+        nil
+        (sort-by-ms slow)))))
+
 (defn count-failed (results)
   ; tests with at least one failed assertion
   (fold (fn (acc r) (if (r-failed? r) (+ acc 1) acc)) 0 results))
@@ -539,7 +559,7 @@ docs/testing.md for the full guide.")
 
 ;; --- entry point -------------------------------------------------------------
 (defn run-tests (& opts)
-  "Run every registered test once (the isolated tests first, then the parallel/serial pool), print a summary, and raise if any failed. Pass `:slow` to also report the slowest tests."
+  "Run every registered test once (the isolated tests first, then the parallel/serial pool), print a summary, and raise if any failed. Any test slower than 1s is listed automatically; pass `:slow` to also report the slowest 5 regardless of duration."
   (let (units (reverse *units*)
          par
          (filter (fn (u) (not= (first u) :isolated)) units)
@@ -557,6 +577,7 @@ docs/testing.md for the full guide.")
           failed (count-failed results)
           fails (count-failures results))
       (report-failures results)
+      (report-slow-over results 1000)
       (when (opt? :slow opts) (report-slow results))
       (println "")
       (println total

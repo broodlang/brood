@@ -132,13 +132,17 @@ pub fn macroexpand_all(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
 }
 
 fn macroexpand_all_depth(heap: &mut Heap, form: Value, env: EnvId, depth: u32) -> LispResult {
-    // Block GC during the expansion: this walk holds partially-built LOCAL
-    // forms in Rust locals and recurses into macro applications via `eval`,
-    // whose outermost-eval safepoint would otherwise sweep them. Bumping
-    // `GC_BLOCK` makes any internal eval see `>= 2` ("not outermost") and
-    // skip GC; the expansion is bounded per form, so memory grows briefly
-    // (reclaimed at the *next* runtime safepoint). See `docs/memory-model.md`.
+    // Block GC during the expansion: this walk holds partially-built LOCAL forms
+    // in Rust locals and recurses into macro applications via `eval`, whose
+    // safepoint would otherwise sweep them. The runtime evaluator roots its
+    // transients on the operand stack so its safepoint fires at any depth
+    // (ADR-061) — but the compile pass opts out instead: `MacroBlockGuard` keeps
+    // `MACRO_BLOCK > 0` for the expansion, and the safepoint skips collection
+    // while that holds. Expansion is bounded per form, so memory grows briefly
+    // (reclaimed at the next runtime safepoint). The `GcBlockGuard` is kept too,
+    // purely for the stack-depth accounting it feeds. See `docs/memory-model.md`.
     let _gc_block = crate::process::GcBlockGuard::enter();
+    let _macro_block = crate::process::MacroBlockGuard::enter();
     if depth >= MAX_DEPTH {
         return Err(LispError::runtime(format!(
             "macro expansion nested too deeply (max {} levels)",
