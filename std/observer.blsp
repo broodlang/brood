@@ -379,7 +379,11 @@ errors. The map also carries the raw `:window` id."
      :leave (fn () (gui-close id))
      :size  (fn () (gui-size id))
      :draw  (fn (f) (gui-draw id f))
-     :poll  (fn (ms) (gui-poll id ms))
+     ;; Input arrives as mailbox messages (gui-open delivers to this process), so
+     ;; `:poll` is a `receive` that parks the process — it holds no scheduler worker
+     ;; while waiting (ADR-058), unlike a blocking poll. Returns the next key/mouse
+     ;; message, or nil after `ms` (the live-refresh tick).
+     :poll  (fn (ms) (receive (m m) (after ms nil)))
      :window id}))
 
 (defn display--min-size (displays)

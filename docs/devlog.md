@@ -7687,3 +7687,46 @@ rescue it? No" section; `check.rs` "Not yet" list gained the gap + fix sketch.
 **Next (optional, separate from the dispatch campaign).** Implement the scoped
 operand-position unbound check + tests if more static safety is wanted — small,
 low-risk, in the checker layer.
+
+## 2026-05-29 — GUI input via the mailbox: blocking work never pins a worker (ADR-059)
+
+**Context.** With multiple observer windows (ADR-056), each observer blocked in
+`gui-poll` (a native `recv_timeout`) pinned a scheduler worker for the poll
+interval — enough windows would starve the ≈`nproc` pool while thousands of green
+processes wait. The fix is the runtime's existing *network* pattern: blocking work
+runs on a non-worker thread and **delivers a message to the mailbox**; the process
+parks in `(receive)`, holding no worker. Plan: `docs/handoff-blocking-io.md`.
+
+**Done (Phase 1 — GUI observer).**
+- `gui-open` registers the *calling process* as the window's subscriber. The GUI
+  thread builds each key/mouse event as a `Message` off-heap (`key_message`/
+  `mouse_message`) and `deliver`s it to that mailbox — no per-window channel, no
+  `gui-poll`. `gui-*` now: `gui-open`/`gui-close`/`gui-size`/`gui-draw` (the
+  blocking `gui-poll` is gone).
+- `(gui-display)`'s `:poll` is `(fn (ms) (receive (m m) (after ms nil)))` — parks
+  for the next input message or times out for the refresh tick. The observer loop
+  is otherwise unchanged (same key/mouse value shapes).
+- Used what already existed: `mailbox::deliver` (inject+wake from any thread),
+  `receive (after …)` (the tick — no core change), `Message` as a plain enum
+  (off-heap build). No scheduler changes needed (and none possible cheaply — the
+  pool pins each process to one worker, no migration; deliver-to-mailbox sidesteps
+  that).
+
+**Result.** Both build configs green; full suite green (incl. `brood_suite_passes`,
+cross-process). Verified at the root process: a window opens, a delivered key is
+consumed via the `receive`-poll, and the loop parks on timeout — i.e. input now
+flows through the mailbox with **no blocking poll / no pinned worker**. Docs:
+ADR-059 + the handoff plan; `gui.rs` threading notes; `gui-*` docstrings.
+
+**Caveat / separate issue found.** End-to-end `(observe)` (which `spawn`s an
+observer per window) couldn't be smoke-tested because **spawned processes don't
+execute their bodies under the `brood` cli / `nest run`** — a 3-line, no-GUI repro
+(`(spawn (fn () (send me [:x]))) (receive (m m) (after 1500 :none))` → `:none`)
+fails there, while `--test`/`cargo test` run spawned processes fine (suite green).
+This is at committed HEAD, independent of this change, and likely entangled with
+the in-flight eval-entry / scheduler work. `(observe-attach (gui-display))` (modal,
+no spawn) works today; `(observe)` will once spawn runs in the cli path.
+
+**Next (planned, ADR-059).** Phase 2 — terminal input + a socket reactor on the
+same deliver-to-mailbox seam; Phase 3 — a blocking-offload pool for unavoidable
+synchronous FFI.

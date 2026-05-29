@@ -16,20 +16,24 @@
 //! channels, the same synchronous shape the `term-*` seam has, with the toolkit's
 //! loop-ownership contained entirely behind these primitives:
 //!
-//! * `gui-open` asks the thread (via an `EventLoopProxy` user-event) to create a
-//!   window and replies with its integer id + a per-window input channel; the
-//!   thread starts lazily on the first call.
+//! * `gui-open subscriber` asks the thread (via an `EventLoopProxy` user-event) to
+//!   create a window whose input is delivered to process `subscriber`; replies with
+//!   the window's integer id. The thread starts lazily on the first call.
 //! * `gui-draw id` ships the frame as plain `Op`s to that window; the thread stores
-//!   it and repaints. `gui-poll id` blocks on that window's input channel.
-//! * `gui-size id` reads a shared `(cols, rows)` the thread updates on resize.
+//!   it and repaints. `gui-size id` reads a shared `(cols, rows)` updated on resize.
 //! * `gui-close id` destroys one window. The thread itself never exits (winit can't
 //!   restart a loop); it idles when no windows are open.
 //!
-//! Each window is independent, so `(observe)` can spawn one observer process per
-//! window. Only Send data crosses the channels (`Op`/`Input` are plain values); the
-//! windows, surfaces, and glyph caches never leave the GUI thread. The whole
-//! backend is behind the `gui` cargo feature; without it the primitives return a
-//! clear "rebuild with --features gui" error so the symbols still exist uniformly.
+//! **Input never blocks a worker (ADR-058).** Rather than handing keys back through
+//! a channel the Brood side polls, the GUI thread turns each key/mouse event into a
+//! `Message` and `deliver`s it straight to the subscriber's mailbox — so the
+//! observer parks in `(receive)` (holding no scheduler worker) instead of pinning
+//! one in a blocking poll. Each window is independent, so `(observe)` spawns one
+//! observer process per window. Only Send data crosses (`Op` to the thread,
+//! `Message` to the mailbox); the windows/surfaces/glyph caches never leave the GUI
+//! thread. The whole backend is behind the `gui` cargo feature; without it the
+//! primitives return a clear "rebuild with --features gui" error so the symbols
+//! still exist uniformly.
 
 /// A resolved text face: colours as RGB (already mapped from `:fg`/`:bg`
 /// keywords by the caller, which has heap access), plus the attribute flags.
@@ -128,8 +132,7 @@ pub use backend::{close, draw, open, size};
 mod backend {
     use super::{Key, Mouse, MouseAction, MouseButton, Op};
     use crate::core::value;
-    use crate::process::mailbox;
-    use crate::process::message::Message;
+    use crate::process::{deliver, Message};
     use std::collections::HashMap;
     use std::num::NonZeroU32;
     use std::rc::Rc;
@@ -420,7 +423,7 @@ mod backend {
                         // The window's close button → a quit key, so the Brood loop
                         // tears down (calling gui-close) on its own terms.
                         WindowEvent::CloseRequested => {
-                            mailbox::deliver(w.subscriber, key_message(&Key::Named("escape")));
+                            deliver(w.subscriber, key_message(&Key::Named("escape")));
                         }
                         WindowEvent::ModifiersChanged(m) => w.mods = m.state(),
                         WindowEvent::Resized(_) => {
@@ -439,7 +442,7 @@ mod backend {
                         } => {
                             if ke.state == ElementState::Pressed {
                                 if let Some(k) = translate_key(&ke, w.mods) {
-                                    let _ = w.input.send(Input::Key(k));
+                                    deliver(w.subscriber, key_message(&k));
                                 }
                             }
                         }
@@ -457,12 +460,15 @@ mod backend {
                         } => {
                             if let Some(b) = translate_button(button) {
                                 let (col, row) = w.cursor;
-                                let _ = w.input.send(Input::Mouse(Mouse {
-                                    action: MouseAction::Press,
-                                    button: Some(b),
-                                    row,
-                                    col,
-                                }));
+                                deliver(
+                                    w.subscriber,
+                                    mouse_message(&Mouse {
+                                        action: MouseAction::Press,
+                                        button: Some(b),
+                                        row,
+                                        col,
+                                    }),
+                                );
                             }
                         }
                         WindowEvent::MouseWheel { delta, .. } => {
@@ -478,12 +484,15 @@ mod backend {
                                     MouseAction::ScrollDown
                                 };
                                 let (col, row) = w.cursor;
-                                let _ = w.input.send(Input::Mouse(Mouse {
-                                    action,
-                                    button: None,
-                                    row,
-                                    col,
-                                }));
+                                deliver(
+                                    w.subscriber,
+                                    mouse_message(&Mouse {
+                                        action,
+                                        button: None,
+                                        row,
+                                        col,
+                                    }),
+                                );
                             }
                         }
                         WindowEvent::RedrawRequested => {
