@@ -31,12 +31,48 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use smallvec::SmallVec;
 
+use crate::core::blob::{SharedBlob, SHARED_BLOB_THRESHOLD};
 use crate::core::map_champ::{self, MapNode, MAX_DEPTH};
 use crate::core::value::{
     Closure, ClosureId, EnvId, MapId, NativeFn, NativeId, PairId, StrId, Symbol, Value, VecId,
     LOCAL, PRELUDE, RUNTIME,
 };
 use crate::error::LispError;
+
+/// A LOCAL (and transitively PRELUDE-builder) string slab entry. Small strings
+/// stay inline; strings of [`SHARED_BLOB_THRESHOLD`] bytes or more route through
+/// an `Arc<SharedBlob>` so cross-process sends bump a refcount instead of
+/// deep-copying the bytes (see `core/blob.rs`).
+///
+/// PRELUDE itself contains no `Shared` entries — `freeze_as_shared_code`
+/// inline-extracts any builder-time Shared blobs into `Inline(String)` before
+/// freezing, keeping the cross-runtime PRELUDE region independent of any
+/// runtime-scoped `Arc<SharedBlob>`.
+enum LocalString {
+    Inline(String),
+    Shared(Arc<SharedBlob>),
+}
+
+impl Default for LocalString {
+    fn default() -> Self {
+        LocalString::Inline(String::new())
+    }
+}
+
+impl LocalString {
+    fn as_str(&self) -> &str {
+        match self {
+            LocalString::Inline(s) => s.as_str(),
+            LocalString::Shared(b) => {
+                // UTF-8 by construction: every entry point takes `&str` and
+                // the bytes are immutable after allocation. The validation
+                // cost here is Phase-1 caution; will flip to
+                // `from_utf8_unchecked` once invariants are bedded in.
+                std::str::from_utf8(b.as_bytes()).expect("shared blob bytes are valid UTF-8")
+            }
+        }
+    }
+}
 
 /// Generate a `&self` accessor that resolves a handle to a shared reference by
 /// region: the LOCAL/PRELUDE slab is indexed directly; the append-only RUNTIME
@@ -154,7 +190,7 @@ struct Slabs {
     /// referenced by `MapId`. The root is the only entry-point — internal
     /// nodes are reachable only through the trie itself.
     maps: Vec<MapNode>,
-    strings: Vec<String>,
+    strings: Vec<LocalString>,
     closures: Vec<Closure>,
     natives: Vec<NativeFn>,
     envs: Vec<EnvFrame>,
@@ -555,6 +591,21 @@ impl Heap {
             .collect();
 
         let mut slabs = self.local;
+        // Inline-extract any `Shared` string entries the builder created
+        // (~9 prelude docstrings exceed `SHARED_BLOB_THRESHOLD` at the time
+        // of writing). PRELUDE is shared `Arc<SharedCode>` across runtimes;
+        // `Arc<SharedBlob>` is per-runtime, so leaving them as `Shared` here
+        // would entangle their lifetimes. The blob's `Arc` drops as the old
+        // `LocalString::Shared` is overwritten — freeing the blob if no other
+        // handle remains (none does, at freeze time).
+        for entry in slabs.strings.iter_mut() {
+            if let LocalString::Shared(arc) = entry {
+                let bytes: Vec<u8> = arc.as_bytes().to_vec();
+                *entry = LocalString::Inline(
+                    String::from_utf8(bytes).expect("prelude blob is valid UTF-8"),
+                );
+            }
+        }
         for p in &mut slabs.pairs {
             p.0 = to_prelude(p.0);
             p.1 = to_prelude(p.1);
@@ -1263,9 +1314,32 @@ impl Heap {
         self.alloc_map_node(cloned)
     }
 
+    /// The single chokepoint for materialising a `Value::Str` into LOCAL. Routes
+    /// by size: strings of [`SHARED_BLOB_THRESHOLD`] bytes or more allocate an
+    /// `Arc<SharedBlob>` so a later cross-process send can ship a handle
+    /// instead of copying the bytes; smaller strings stay inline because
+    /// atomic-refcount traffic dominates the per-byte memcpy at small sizes.
+    /// Every `String -> Value::Str` path must come through here — don't add a
+    /// second allocator that bypasses the threshold.
     pub fn alloc_string(&mut self, s: &str) -> Value {
+        let entry = if s.len() >= SHARED_BLOB_THRESHOLD {
+            LocalString::Shared(SharedBlob::new(s.as_bytes()))
+        } else {
+            LocalString::Inline(s.to_string())
+        };
         let idx = self.local.strings.len();
-        self.local.strings.push(s.to_string());
+        self.local.strings.push(entry);
+        Value::Str(StrId::local(idx))
+    }
+
+    /// Install a pre-existing `Arc<SharedBlob>` as a new LOCAL string slot.
+    /// Used by the receive path (`process::message::from_message` in Phase 1b):
+    /// the sender already bumped the refcount via `Arc::clone` for the
+    /// `Message`, so installing it here is just slot bookkeeping — no copy.
+    #[allow(dead_code)] // Used in Phase 1b; lands now so the chokepoint is fully built.
+    pub(crate) fn alloc_string_from_shared(&mut self, blob: Arc<SharedBlob>) -> Value {
+        let idx = self.local.strings.len();
+        self.local.strings.push(LocalString::Shared(blob));
         Value::Str(StrId::local(idx))
     }
 
@@ -1543,7 +1617,39 @@ impl Heap {
     }
     region_ref!(vector, VecId, vectors, &[Value], "runtime vector handle");
     region_ref!(map_node, MapId, maps, &MapNode, "runtime map node");
-    region_ref!(string, StrId, strings, &str, "runtime string handle");
+
+    /// Resolve a string handle to a `&str`. Hand-written (not via the
+    /// `region_ref!` macro) because LOCAL slots are `LocalString` enum
+    /// variants that need a match to extract their bytes, while PRELUDE and
+    /// RUNTIME store plain `String` (PRELUDE is inline-extracted at freeze;
+    /// RUNTIME is append-only via `boxcar::Vec<String>` for stable refs).
+    pub fn string(&self, id: StrId) -> &str {
+        match id.region() {
+            LOCAL => {
+                #[cfg(debug_assertions)]
+                debug_assert!(
+                    !PoisonBits::is(&self.poison.strings, id.index()),
+                    "use-after-GC: string() on freed LOCAL strings slot {} (handle {:#x}).",
+                    id.index(),
+                    id.0
+                );
+                self.local.strings[id.index()].as_str()
+            }
+            // PRELUDE's `Slabs::strings` is also `Vec<LocalString>` because
+            // it shares the `Slabs` shape, but `freeze_as_shared_code`
+            // inline-extracts any `Shared` entries — every prelude slot is
+            // `Inline`. `as_str` works either way.
+            PRELUDE => self.prelude.slabs.strings[id.index()].as_str(),
+            RUNTIME => self
+                .runtime
+                .code
+                .strings
+                .get(id.index())
+                .expect("runtime string handle"),
+            _ => unreachable!("invalid handle region"),
+        }
+    }
+
     region_ref!(
         closure,
         ClosureId,
@@ -2366,8 +2472,12 @@ impl Heap {
         for i in 0..self.local.strings.len() {
             if !marks.is_string_marked(i) {
                 self.local_free.strings.push(i as u32);
-                // Release the dead `String` buffer; alloc_string replaces.
-                self.local.strings[i] = String::new();
+                // Release the slot's owned buffer / `Arc<SharedBlob>` ref;
+                // alloc_string replaces wholesale on reuse. `Default` for
+                // `LocalString` is `Inline(String::new())`, so a dead `Shared`
+                // slot also decrements its refcount via the drop here — if
+                // it was the last handle, the blob is freed.
+                self.local.strings[i] = LocalString::default();
                 #[cfg(debug_assertions)]
                 {
                     self.poison.strings[i] = true;
@@ -2581,9 +2691,18 @@ fn flush_string(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: StrId)
     if let Some(&new_idx) = fwd.strings.get(&key) {
         return StrId::local(new_idx as usize);
     }
-    let s = old.strings[id.index()].clone();
+    // Clone by variant. `Shared(arc)` becomes `Arc::clone` (+1 ref); the old
+    // slab's drop right after `flush` returns will then -1, leaving the
+    // blob's refcount net unchanged across a flush. Survivors keep the same
+    // `SharedBlob` identity (no byte copy); non-surviving Shared slots
+    // simply drop their old `Arc` and free the blob if they were the last
+    // reference.
+    let entry = match &old.strings[id.index()] {
+        LocalString::Inline(s) => LocalString::Inline(s.clone()),
+        LocalString::Shared(arc) => LocalString::Shared(Arc::clone(arc)),
+    };
     let new_idx = new.strings.len();
-    new.strings.push(s);
+    new.strings.push(entry);
     fwd.strings.insert(key, new_idx as u32);
     StrId::local(new_idx)
 }

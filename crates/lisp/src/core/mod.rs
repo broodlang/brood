@@ -3,6 +3,7 @@
 //! every component threads a `&mut Heap` and speaks in `value::Value` handles.
 
 pub mod alloc;
+pub mod blob;
 pub mod heap;
 pub mod map_champ;
 pub mod sync;
