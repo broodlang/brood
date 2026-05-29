@@ -73,14 +73,26 @@
     (assert= (observe--next-sort :id) :mailbox)
     (assert= (observe--next-sort :mailbox) :memory)
     (assert= (observe--next-sort :memory) :id))
-  (test "observe--node-lines summarises the node panel"
+  (test "observe--node-lines summarises the node panel + link status"
     (let (node {:name :nonode :workers 4 :peak 6 :spawned 10
                 :mem 2048 :mem-peak 4096 :peers []}
-          ls (observe--node-lines node 3))
+          ls (observe--node-lines node 3 :ok))
       (is (string-contains? (nth ls 0) "node nonode"))
       (is (string-contains? (nth ls 0) "3 processes"))
       (is (string-contains? (nth ls 1) "workers 4 (peak 6)"))
-      (is (string-contains? (nth ls 1) "2 KB")))))
+      (is (string-contains? (nth ls 1) "2 KB"))
+      ;; :ok shows no indicator; :stale / :down flag the link
+      (refute (string-contains? (nth ls 0) "•"))
+      (is (string-contains? (nth (observe--node-lines node 3 :down) 0) "DISCONNECTED"))
+      (is (string-contains? (nth (observe--node-lines node 3 :stale) 0) "stale"))))
+  (test "observe--apply-result folds a source result into :last / :link"
+    (assert= (get (observe--apply-result {:link :ok} {:node {} :procs []}) :link) :ok)
+    (assert= (get (observe--apply-result {:link :ok} {:node {} :procs [1]}) :last) {:node {} :procs [1]})
+    (assert= (get (observe--apply-result {:link :ok :last :L} :timeout) :link) :stale)
+    (assert= (get (observe--apply-result {:link :ok :last :L} :timeout) :last) :L)   ; kept
+    (assert= (get (observe--apply-result {:link :ok :last :L} :down) :link) :down)
+    ;; :down is sticky — a later good snapshot does NOT revive it
+    (assert= (get (observe--apply-result {:link :down :last :L} {:node {} :procs []}) :link) :down)))
 
 (def sample-node {:name :nonode :workers 4 :peak 6 :spawned 10
                   :mem 2048 :mem-peak 4096 :peers []})
@@ -91,7 +103,7 @@
 (describe "observe-frame (the pure render core)"
   (test "node panel + header + a row per process + detail + footer"
     (let (procs [(pinfo 1 :main :running 0 0) (pinfo 2 nil :waiting 3 1)]
-          f (observe-frame sample-node procs 0 60 12 false :id))
+          f (observe-frame sample-node procs 0 60 12 false :id :ok))
       (is (vector? f))
       ;; clear + 2 node lines + col-header + 2 body rows + detail + footer = 8
       (assert= (count f) 8)
@@ -109,7 +121,7 @@
 
   (test "selected row is reverse-highlighted; others get a status face"
     (let (procs [(pinfo 1 :a :running 0 0) (pinfo 2 :b :waiting 0 0)]
-          f (observe-frame sample-node procs 1 60 12 false :id)
+          f (observe-frame sample-node procs 1 60 12 false :id :ok)
           row0 (nth f 4)        ; index 0, not selected, :running
           row1 (nth f 5))       ; index 1, selected
       (assert= (nth row0 4) {:fg :green})            ; running → green
@@ -118,8 +130,8 @@
 
   (test "detail line names the selection; footer shows sort + paused state"
     (let (procs [(pinfo 1 :zero :running 0 0) (pinfo 2 :one :waiting 9 2)]
-          live (observe-frame sample-node procs 1 60 12 false :mailbox)
-          paused (observe-frame sample-node procs 1 60 12 true :id))
+          live (observe-frame sample-node procs 1 60 12 false :mailbox :ok)
+          paused (observe-frame sample-node procs 1 60 12 true :id :ok))
       ;; detail (second-to-last op) names the selected pid + its fields
       (is (string-contains? (nth (nth live (- (count live) 2)) 3) "pid 2"))
       (is (string-contains? (nth (nth live (- (count live) 2)) 3) "monitored-by 2"))
@@ -129,13 +141,13 @@
 
   (test "long lists are windowed to the terminal with a position counter"
     (let (procs (map (fn (i) (pinfo i nil :waiting 0 0)) (range 20))
-          f (observe-frame sample-node procs 0 60 8 false :id))   ; rows=8 → cap = 3
+          f (observe-frame sample-node procs 0 60 8 false :id :ok))   ; rows=8 → cap = 3
       ;; clear + 2 node + header + 3 body + detail + footer = 9
       (assert= (count f) 9)
       (is (string-contains? (nth (nth f (- (count f) 2)) 3) "/20"))))
 
   (test "every text op is clipped to the terminal width"
-    (let (f (observe-frame sample-node [(pinfo 1 :longname :running 0 0)] 0 20 10 false :id))
+    (let (f (observe-frame sample-node [(pinfo 1 :longname :running 0 0)] 0 20 10 false :id :ok))
       (is (every? (fn (op) (or (not (= (first op) :text))
                                (<= (string-length (nth op 3)) 20)))
                   f)))))
@@ -183,16 +195,21 @@
         ;; the inline source sees the just-spawned process
         (is (includes? ids (get (process-info w) :id))))))
 
-  (test "observe--snapshot reads from a pluggable source (inline = local)"
+  (test "observe--local-snapshot is a frame-ready {:node :procs} snapshot"
     (spawn (receive (_ :done)))
-    (let (snap (observe--snapshot observe--local-source :id))
-      (is (every? (fn (p) (and (number? (get p :id)) (number? (get p :mailbox)))) snap))
-      (is (>= (count (observe-frame (observe--node-info) snap 0 80 24 false :id)) 5))))
+    (let (snap (observe--local-snapshot)
+          procs (observe--sort (get snap :procs) :id))
+      (is (contains? snap :node))
+      (is (every? (fn (p) (and (number? (get p :id)) (number? (get p :mailbox)))) procs))
+      (is (>= (count (observe-frame (get snap :node) procs 0 80 24 false :id :ok)) 5))))
 
-  (test "a custom source feeds the same snapshot path (the remote-attach seam)"
-    ;; A source is just a 0-arg fn → process-info maps; remote attach swaps this
-    ;; for a peer request. The loop / frame don't care which.
-    (let (fake (fn () [{:id 2 :name :b :status :waiting :mailbox 1 :monitored-by 0}
-                       {:id 1 :name :a :status :running :mailbox 0 :monitored-by 0}]))
-      (assert= (map (fn (p) (get p :id)) (observe--snapshot fake :id)) '(1 2))
-      (assert= (map (fn (p) (get p :id)) (observe--snapshot fake :mailbox)) '(2 1)))))
+  (test "the :observe agent replies with a snapshot (the remote-attach seam)"
+    ;; observe-serve's agent, exercised same-runtime: request → snapshot reply.
+    ;; Remote attach is the same protocol with the request routed over a node link.
+    (let (a (spawn (observe--agent-loop)))
+      (register :observe a)
+      (send {:name :observe :node (node-name)} [:snapshot (self) (ref)])
+      (let (reply (receive ([:observe-reply snap] snap) (after 1000 :timeout)))
+        (is (map? reply))
+        (is (contains? reply :node))
+        (is (contains? reply :procs))))))
