@@ -1,6 +1,43 @@
 # Memory model — `Send` heaps and per-process GC
 
-> Status: **implemented.** `Send` heaps shipped first (`Value` is a `Copy` handle
+> **2026-05-29 status — bump + flush (commits `f90f0de` Phase 1,
+> evening-of-2026-05-29 Phase 2).**
+>
+> **Today's memory model is:**
+> 1. **Per-process bump allocator.** Each green process has its own LOCAL
+>    `Slabs` (pairs, vectors, maps, strings, closures, envs). Allocations
+>    grow monotonically; no slot reuse, no sweep, no tracing GC.
+>    `Heap::collect` is a no-op. The bump alone bounds memory for
+>    short-lived processes because the whole heap drops on process exit.
+> 2. **Shared code regions** (PRELUDE + RUNTIME) — immutable / append-only,
+>    `Arc`-shared. No GC needed; closures live forever.
+> 3. **Arena flip on `(hibernate fn & args)`** — long-running processes
+>    opt in: hibernate raises an uncatchable `LispError::Hibernate` that
+>    unwinds back to the process's run loop, which calls
+>    `Heap::flush(&mut roots)` (deep-copy callee + args into fresh `Slabs`,
+>    drop the old) before re-applying. Bounds memory in receive loops
+>    indefinitely.
+> 4. **Arena reset at top-level boundaries** (ADR-016) — still in play for
+>    the REPL/file runner between top-level forms.
+>
+> **What we explicitly *don't* use:** tracing GC (gone), `Rc`/`RefCell`,
+> `gc-arena`, write barriers (data is immutable per ADR-026), generational
+> or incremental collection.
+>
+> See [`devlog.md`](devlog.md) 2026-05-29 (Phase 1 + Phase 2) for the
+> narrative and rationale, and `crates/lisp/src/core/heap.rs:Heap::flush`
+> for the deep-copy details (per-slab forwarding tables; handles cycles
+> via placeholder-allocate-then-recurse).
+>
+> What follows below is the **pre-2026-05-29 design** (mark-sweep + free
+> lists, with the GC-arena alternative survey). Kept as the design path —
+> it documents *why* the simpler bump-plus-flush model became the right
+> step. The Phase-2 caveat earlier in this banner (now resolved) used to
+> warn that long tail-recursive loops grew unboundedly; with hibernate
+> shipped, the `gc.rs` `long_tail_loop_stays_bounded` test is un-`#[ignore]`d
+> and passes.
+
+> Status (pre-2026-05-29): **implemented.** `Send` heaps shipped first (`Value` is a `Copy` handle
 > into arena slabs — see ADR-002 → step 2/3 below). Reclamation arrived in two
 > steps: **arena reset at top-level boundaries** (ADR-016, cheap O(1)
 > truncation), then a **per-process tracing mark-sweep** (ADR-035) that handles

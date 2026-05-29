@@ -8,9 +8,54 @@ Newest first. For the narrative discovery writeup of the scheduler race, see
 
 ## KI-1 — Multi-thread scheduler race: green processes can't resolve globals
 
-**Status:** open · **Severity:** high (blocks all process fan-out under the
-default scheduler) · **First seen:** 2026-05-28 · also in
-[claude-demo-findings.md](claude-demo-findings.md) §1.1
+**Status:** **fixed** (2026-05-29) · **Severity:** was high → none · **First
+seen:** 2026-05-28 · also in [claude-demo-findings.md](claude-demo-findings.md)
+§1.1
+
+### How it was fixed
+
+Three changes landed in series:
+
+1. **`e3d3a0d` (2026-05-28 evening) — supervisor scaffolding stripped.** The
+   kernel-level supervisor (RESUME_SLOT thread-local, safepoint rooting,
+   `supervise()` retry loop, `%spawn-supervised*` primitives, the
+   `(supervise …)` macro) was contributing the bulk of the race surface.
+   Stripping it cut the `recurse.blsp` repro from ~24 worker deaths per run
+   (0/n clean) to ~0–1 per run (5/10 clean). See ADR-039 (reverted) and
+   [`supervision.md`](supervision.md) for the rationale.
+2. **`f90f0de` (2026-05-29 morning) — Phase-1 bump-only allocator.** Heap
+   allocations now grow monotonically per process; no slot reuse and
+   `Heap::collect` is a no-op. Stale handles can't exist because slots are
+   never recycled, which closes the manual-rooting race the panics rode on.
+3. **`2abf05e` (2026-05-29) — per-worker pinned queues.** Each process is
+   assigned to one worker at spawn and stays there for its lifetime; no shared
+   queue, no work stealing, no cross-thread coroutine migration. Closes the
+   remaining plain-release segfault that fired when preempt landed a coroutine
+   on a different worker thread mid-call.
+
+Verified post-fix: `recurse.blsp` and `medium.blsp` repros hit **10/10 clean**
+in both **debug-assertions release** and **plain release**, single- and
+multi-threaded. The 2026-05-28 symptoms (workers dying with bogus `unbound
+symbol: fold` / `+` / pattern-bound `iter`-`acc`-`pred`, plus a Rust `index out
+of bounds` panic in `eval/mod.rs`) are no longer reproducible.
+
+Phase 2 (the arena flip that bounds memory in long-lived receive loops) is
+**also shipped** as the explicit `(hibernate fn & args)` primitive — see
+[`devlog.md`](devlog.md) 2026-05-29 (evening). It's an opt-in, Erlang-style
+hibernate: raises an uncatchable error that unwinds to the process's run
+loop, which deep-copies just the named callee + args into a fresh `Slabs`
+and re-applies. Independent of the race fix above.
+
+### Original 2026-05-28 symptom (kept for the record)
+
+Under the default multi-threaded scheduler (`-j 0`), spawning several green
+processes that each touched prelude/kernel globals reliably crashed workers
+with bogus `unbound symbol` errors on names that *were* bound — both
+pattern-bound locals (`iter`, `acc`, `pred`) and builtins (`fold`, `+`, `%eq`)
+— followed by an interpreter panic.
+
+Reproduced 2026-05-28 via the `foobar` demo's `mandel/render-concurrent`
+(`spawn`ed worker pool + hatch collector), `nest run`:
 
 ### Symptom
 
@@ -41,30 +86,31 @@ reported as `:380` in the earlier findings doc). The shape is constant: a
 worker reads an empty/0-length structure where it expects a populated scope,
 i.e. the global/scope table isn't visible from the spawned process's thread.
 
-### Mitigation
+### Mitigation (when this was open)
 
-Run single-threaded: **`-j 1`** (alias `--max-parallel 1`). Verified
-2026-05-28 — the same `render-concurrent` program renders cleanly and exits 0
-under `nest run -j 1`, and crashes under the default `-j 0`.
+Single-threaded: **`-j 1`** (alias `--max-parallel 1`) — `nest run -j 1` /
+`nest test -j 1`. Still the recommended workaround on plain release, until
+the bundled-WIP segfault under the new allocator is bisected.
 
-```
-$ nest run -j 1      # EXIT=0, full symmetric render, 0 deaths
-$ nest run           # -j 0 default → workers die, hang
-```
+### Root cause (post-mortem)
 
-### Likely area
-
-`crates/lisp/src/eval/mod.rs` around the scope/global lookup that indexes at
-`:474`, plus how the scheduler hands the global environment to worker threads.
-A data race on shared global/scope state (it only manifests with real thread
-parallelism, never under `-j 1`) — see [scheduler.md](scheduler.md) and
-[memory-model.md](memory-model.md).
+A data race on shared global/scope state through the kernel supervisor's
+RESUME_SLOT + safepoint-rooting machinery, exacerbated by free-list slot
+reuse in the allocator (a freed slot could be reallocated to a fresh value
+while another thread still held a stale handle). Two fixes in series — strip
+the supervisor (removes the wide window of shared mutable scheduler state)
+and switch to a bump-only allocator (slots are never recycled, so stale
+handles can't observe a value of the wrong type). See
+[`scheduler.md`](scheduler.md) and [`memory-model.md`](memory-model.md) for
+the substrate.
 
 ---
 
 ## KI-2 — `nest test` flaky + hangs when parallel tests share heavy global lookups
 
-**Status:** open · **Severity:** medium · **First seen:** 2026-05-28
+**Status:** **runner-hang half fixed (2026-05-29)**; underlying race
+**largely fixed** (same as KI-1) · **Severity:** was medium → low · **First
+seen:** 2026-05-28
 
 Same root cause as KI-1, surfacing through the test runner. `nest test` runs
 each `test` in its own parallel green process (default scheduler). When more
@@ -109,9 +155,24 @@ EXIT=124   (runner does not reap the dead process → whole run hangs)
 
 ## Minor
 
-- **Type-checker noise around `(require 'hatch)`** — files using
-  `defprocess` / `cast` / `!` / `hatch` print spurious "unbound symbol"
-  warnings at load (see claude-demo-findings.md §1.2). Cosmetic but reads as
-  breakage to new users.
-- **`nest format` collapses multi-line forms** onto single long lines
-  (claude-demo-findings.md §1.3).
+- ~~**Type-checker noise around `(require 'hatch)`.**~~ **Fixed.** `check_file`
+  pre-evaluates top-level `(require …)` forms before walking, so macros from
+  the required module (`defprocess`, `!`, `hatch`, `gen-call`, `sleep`)
+  resolve correctly and don't trip the unbound-symbol diagnostic. Applies to
+  both `nest check` (project-aware) and `brood file.blsp` direct. See
+  `crates/lisp/src/types/check.rs:148+`.
+- ~~**`nest format` collapses multi-line forms** onto single long lines.~~
+  **Substantially fixed** (commit `5b19787`, "formatter respects author
+  newlines"). Multi-line `let` / `defmacro` body / `cond` / quasiquoted
+  templates stay multi-line. **Still normalizes** author-chosen multi-space
+  alignment *within* a line (`w       64` → `w 64`) — a standard
+  Lisp-formatter trade-off, not the original blocker.
+- ~~**Plain-release segfault** under the multi-threaded scheduler on
+  tail-recursive workers with heavy prelude churn.~~ **Fixed** by `2abf05e`
+  (per-worker pinned queues — no cross-thread coroutine migration). See KI-1.
+- ~~**`cargo test -p brood --test suite` segfault** in debug builds.~~
+  **Fixed** (2026-05-29) — coroutine stack overflow, not a memory bug. Debug
+  eval frames recurse deeper (no inlining) than release, and post-Phase-1
+  poison checks widened them further. Bumped `CORO_STACK_BYTES` from 1 → 2
+  MiB (`crates/lisp/src/process/scheduler.rs`). Pages are mmap'd lazily, so
+  the higher ceiling costs ~0 until depth needs it.

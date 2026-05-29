@@ -228,9 +228,17 @@ docs/testing.md for the full guide.")
 
 ;; Pair it with assert= to pin exact failure output:
 ;;   (assert= (error-of (/ 1 0)) "runtime error: division by zero")
+(defn error-of--render (e)
+  ;; Built-in errors come through `catch` as a structured map (`{:kind :code
+  ;; :message :hint}`); flatten to the legacy "kind error: message" string so
+  ;; tests can pin exact text. A `(throw v)` lands here as the raw value `v` —
+  ;; pass it through unchanged (matches the macro's stated contract).
+  (cond
+    (map? e) (str (name (get e :kind)) " error: " (get e :message))
+    else e))
 (defmacro error-of (& body)
-  "Evaluate `body` and return the error it raised — a built-in error as its message string, a `(throw v)` as the value `v` — or nil if `body` completes without raising."
-  `(try (do ~@body nil) (catch e e)))
+  "Evaluate `body` and return the error it raised — a built-in error as its `\"kind error: message\"` string, a `(throw v)` as the value `v` — or nil if `body` completes without raising."
+  `(try (do ~@body nil) (catch e (error-of--render e))))
 
 ;; --- small text/list helpers for the trace and slow-test output --------------
 (defn opt? (flag opts)

@@ -52,25 +52,91 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // numeric primitives — `%add`..`%div` accept and return the wider NUMBER
     // (int + int may overflow into Float; the others always do on a Float arg).
     // `%lt` is comparison → bool; `%eq` accepts anything and returns bool.
-    def(heap, "%add", Arity::exact(2), Sig::new(vec![num, num], num), prim_add);
-    def(heap, "%sub", Arity::exact(2), Sig::new(vec![num, num], num), prim_sub);
-    def(heap, "%mul", Arity::exact(2), Sig::new(vec![num, num], num), prim_mul);
-    def(heap, "%div", Arity::exact(2), Sig::new(vec![num, num], num), prim_div);
-    def(heap, "%lt", Arity::exact(2), Sig::new(vec![num, num], bool_ty), prim_lt);
-    def(heap, "%eq", Arity::exact(2), Sig::new(vec![any, any], bool_ty), prim_eq);
+    def(
+        heap,
+        "%add",
+        Arity::exact(2),
+        Sig::new(vec![num, num], num),
+        prim_add,
+    );
+    def(
+        heap,
+        "%sub",
+        Arity::exact(2),
+        Sig::new(vec![num, num], num),
+        prim_sub,
+    );
+    def(
+        heap,
+        "%mul",
+        Arity::exact(2),
+        Sig::new(vec![num, num], num),
+        prim_mul,
+    );
+    def(
+        heap,
+        "%div",
+        Arity::exact(2),
+        Sig::new(vec![num, num], num),
+        prim_div,
+    );
+    def(
+        heap,
+        "%lt",
+        Arity::exact(2),
+        Sig::new(vec![num, num], bool_ty),
+        prim_lt,
+    );
+    def(
+        heap,
+        "%eq",
+        Arity::exact(2),
+        Sig::new(vec![any, any], bool_ty),
+        prim_eq,
+    );
     // `mod` is Brood over `rem` (std/prelude.blsp); only `rem` is primitive.
-    def(heap, "rem", Arity::exact(2), Sig::new(vec![int, int], int), remainder);
+    def(
+        heap,
+        "rem",
+        Arity::exact(2),
+        Sig::new(vec![int, int], int),
+        remainder,
+    );
     // `floor` is the single irreducible Float→Int crossing; quot/ceil/round/pow/
     // sqrt are all Brood over it + rem/`/`/`*`/`<` (std/prelude.blsp).
-    def(heap, "floor", Arity::exact(1), Sig::new(vec![num], int), floor);
+    def(
+        heap,
+        "floor",
+        Arity::exact(1),
+        Sig::new(vec![num], int),
+        floor,
+    );
 
     // pair / sequence — `empty?` is Brood (type dispatch over string-length /
     // vector-length / map-keys; std/prelude.blsp). `first`/`rest` ARE the pair
     // accessors (car/cdr), so they stay. `rest` always yields a list (a vector's
     // tail is built via `heap.list`), never a vector.
-    def(heap, "cons", Arity::exact(2), Sig::new(vec![any, any], pair), cons);
-    def(heap, "first", Arity::exact(1), Sig::new(vec![seq], any), first);
-    def(heap, "rest", Arity::exact(1), Sig::new(vec![seq], list_ty), rest);
+    def(
+        heap,
+        "cons",
+        Arity::exact(2),
+        Sig::new(vec![any, any], pair),
+        cons,
+    );
+    def(
+        heap,
+        "first",
+        Arity::exact(1),
+        Sig::new(vec![seq], any),
+        first,
+    );
+    def(
+        heap,
+        "rest",
+        Arity::exact(1),
+        Sig::new(vec![seq], list_ty),
+        rest,
+    );
     // `%sort-asc` is the Rust fast path for the common `(sort coll)` case
     // (ascending by `<`, no custom comparator). Avoids per-comparison Brood
     // eval overhead — the old in-Brood mergesort was ~1.5 s on 10 000 items
@@ -78,71 +144,269 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // `(sort cmp coll)` still routes through the Brood merge sort for
     // arbitrary comparators. Items must be all-`int` or all-`float`; mixed
     // numerics work by promotion (matches `<`'s semantics).
-    def(heap, "%sort-asc", Arity::exact(1), Sig::new(vec![seq], list_ty), sort_asc);
+    def(
+        heap,
+        "%sort-asc",
+        Arity::exact(1),
+        Sig::new(vec![seq], list_ty),
+        sort_asc,
+    );
+    // `%sort-cmp` is the non-numeric fallback for `(sort coll)`: sorts via the
+    // Rust-side structural total order (`value_cmp`). Lets `(sort [[1 0] [2 1]])`
+    // and the like work without a custom comparator. Brood `sort` (prelude)
+    // dispatches: numeric items go through `%sort-asc` (faster), anything else
+    // through `%sort-cmp`.
+    def(
+        heap,
+        "%sort-cmp",
+        Arity::exact(1),
+        Sig::new(vec![seq], list_ty),
+        sort_cmp,
+    );
 
     // vector
-    def(heap, "vector", Arity::any(), Sig::variadic(any, vec_ty), vector);
-    def(heap, "vector-ref", Arity::exact(2), Sig::new(vec![vec_ty, int], any), vector_ref);
-    def(heap, "vector-length", Arity::exact(1), Sig::new(vec![vec_ty], int), vector_length);
+    def(
+        heap,
+        "vector",
+        Arity::any(),
+        Sig::variadic(any, vec_ty),
+        vector,
+    );
+    def(
+        heap,
+        "vector-ref",
+        Arity::exact(2),
+        Sig::new(vec![vec_ty, int], any),
+        vector_ref,
+    );
+    def(
+        heap,
+        "vector-length",
+        Arity::exact(1),
+        Sig::new(vec![vec_ty], int),
+        vector_length,
+    );
 
     // map — the *minimal* kernel: construct, read, two producers, and one
     // enumerator (`map-pairs` → [k v] vectors). `keys`/`vals`/`contains?`/
     // `reduce-kv` and the `get`/`assoc`/`dissoc` surface (variadic + defaults) are
     // all Brood over these (std/prelude.blsp). Maps are immutable: each op returns
     // a fresh map.
-    def(heap, "hash-map", Arity::any(), Sig::variadic(any, map_ty), hash_map);
-    def(heap, "map-get", Arity::range(2, 3), Sig::with_rest(vec![map_ty, any], any, any), map_get);
-    def(heap, "map-assoc", Arity::exact(3), Sig::new(vec![map_ty, any, any], map_ty), map_assoc);
-    def(heap, "map-dissoc", Arity::exact(2), Sig::new(vec![map_ty, any], map_ty), map_dissoc);
-    def(heap, "map-pairs", Arity::exact(1), Sig::new(vec![map_ty], list_ty), map_pairs);
+    def(
+        heap,
+        "hash-map",
+        Arity::any(),
+        Sig::variadic(any, map_ty),
+        hash_map,
+    );
+    def(
+        heap,
+        "map-get",
+        Arity::range(2, 3),
+        Sig::with_rest(vec![map_ty, any], any, any),
+        map_get,
+    );
+    def(
+        heap,
+        "map-assoc",
+        Arity::exact(3),
+        Sig::new(vec![map_ty, any, any], map_ty),
+        map_assoc,
+    );
+    def(
+        heap,
+        "map-dissoc",
+        Arity::exact(2),
+        Sig::new(vec![map_ty, any], map_ty),
+        map_dissoc,
+    );
+    def(
+        heap,
+        "map-pairs",
+        Arity::exact(1),
+        Sig::new(vec![map_ty], list_ty),
+        map_pairs,
+    );
 
     // string
-    def(heap, "string-length", Arity::exact(1), Sig::new(vec![string], int), string_length);
-    def(heap, "substring", Arity::exact(3), Sig::new(vec![string, int, int], string), substring);
+    def(
+        heap,
+        "string-length",
+        Arity::exact(1),
+        Sig::new(vec![string], int),
+        string_length,
+    );
+    def(
+        heap,
+        "substring",
+        Arity::exact(3),
+        Sig::new(vec![string, int, int], string),
+        substring,
+    );
     // Case folding (Unicode tables) and parse-or-nil genuinely need Rust; the rest
     // of the string library (split/join/replace/index-of/trim/…) is Brood over
     // these + `substring`/`str` (std/prelude.blsp).
-    def(heap, "upper", Arity::exact(1), Sig::new(vec![string], string), upper);
-    def(heap, "lower", Arity::exact(1), Sig::new(vec![string], string), lower);
+    def(
+        heap,
+        "upper",
+        Arity::exact(1),
+        Sig::new(vec![string], string),
+        upper,
+    );
+    def(
+        heap,
+        "lower",
+        Arity::exact(1),
+        Sig::new(vec![string], string),
+        lower,
+    );
     // string->number returns int *or* float *or* nil (the parse-failed case).
-    def(heap, "string->number", Arity::exact(1), Sig::new(vec![string], num.union(nil_ty)), string_to_number);
+    def(
+        heap,
+        "string->number",
+        Arity::exact(1),
+        Sig::new(vec![string], num.union(nil_ty)),
+        string_to_number,
+    );
     // `to-fixed` renders a number with a fixed count of decimals — the one
     // float→text op `str`/`pr-str` can't express (they print shortest round-trip
     // form, i.e. full f64 precision). `round-to` (a *number*) is Brood over floor.
-    def(heap, "to-fixed", Arity::exact(2), Sig::new(vec![num, int], string), to_fixed);
+    def(
+        heap,
+        "to-fixed",
+        Arity::exact(2),
+        Sig::new(vec![num, int], string),
+        to_fixed,
+    );
 
     // type reflection — the tag predicates (nil?/int?/string?/…) are Brood
     // (std/prelude.blsp) over this one reflective primitive.
-    def(heap, "type-of", Arity::exact(1), Sig::new(vec![any], kw), type_of);
+    def(
+        heap,
+        "type-of",
+        Arity::exact(1),
+        Sig::new(vec![any], kw),
+        type_of,
+    );
 
     // value <-> text and I/O
-    def(heap, "str", Arity::any(), Sig::variadic(any, string), str_concat);
-    def(heap, "pr-str", Arity::exact(1), Sig::new(vec![any], string), pr_str);
-    def(heap, "print", Arity::any(), Sig::variadic(any, nil_ty), print);
-    def(heap, "eprint", Arity::any(), Sig::variadic(any, nil_ty), eprint);
+    def(
+        heap,
+        "str",
+        Arity::any(),
+        Sig::variadic(any, string),
+        str_concat,
+    );
+    def(
+        heap,
+        "pr-str",
+        Arity::exact(1),
+        Sig::new(vec![any], string),
+        pr_str,
+    );
+    def(
+        heap,
+        "print",
+        Arity::any(),
+        Sig::variadic(any, nil_ty),
+        print,
+    );
+    def(
+        heap,
+        "eprint",
+        Arity::any(),
+        Sig::variadic(any, nil_ty),
+        eprint,
+    );
     // `println` is Brood over `print` (std/prelude.blsp).
-    def(heap, "stdout-tty?", Arity::exact(0), Sig::nullary(bool_ty), stdout_tty);
+    def(
+        heap,
+        "stdout-tty?",
+        Arity::exact(0),
+        Sig::nullary(bool_ty),
+        stdout_tty,
+    );
 
     // time
     def(heap, "now", Arity::exact(0), Sig::nullary(int), now);
     def(heap, "now-ns", Arity::exact(0), Sig::nullary(int), now_ns);
 
     // memory
-    def(heap, "mem-bytes", Arity::exact(0), Sig::nullary(int), mem_bytes);
-    def(heap, "mem-peak", Arity::exact(0), Sig::nullary(int), mem_peak);
+    def(
+        heap,
+        "mem-bytes",
+        Arity::exact(0),
+        Sig::nullary(int),
+        mem_bytes,
+    );
+    def(
+        heap,
+        "mem-peak",
+        Arity::exact(0),
+        Sig::nullary(int),
+        mem_peak,
+    );
 
     // self-hosting — eval/load/etc. take and return arbitrary forms / values.
-    def(heap, "eval", Arity::exact(1), Sig::new(vec![any], any), eval_builtin);
-    def(heap, "read-string", Arity::exact(1), Sig::new(vec![string], any), read_string);
-    def(heap, "eval-string", Arity::exact(1), Sig::new(vec![string], any), eval_string);
+    def(
+        heap,
+        "eval",
+        Arity::exact(1),
+        Sig::new(vec![any], any),
+        eval_builtin,
+    );
+    def(
+        heap,
+        "read-string",
+        Arity::exact(1),
+        Sig::new(vec![string], any),
+        read_string,
+    );
+    def(
+        heap,
+        "eval-string",
+        Arity::exact(1),
+        Sig::new(vec![string], any),
+        eval_string,
+    );
     // CST parse — mechanism for the in-Brood formatter (std/format.blsp); never
     // fails (malformed input becomes [:error "..."] nodes). Returns nested
     // vectors; see `parse_source` for the shape.
-    def(heap, "parse-source", Arity::exact(1), Sig::new(vec![string], vec_ty), parse_source);
-    def(heap, "load", Arity::exact(1), Sig::new(vec![string], any), load);
-    def(heap, "reload-defs", Arity::exact(1), Sig::new(vec![string], nil_ty), reload_defs);
-    def(heap, "%builtin-module", Arity::exact(1), Sig::new(vec![sym.union(kw).union(string)], string.union(nil_ty)), builtin_module);
-    def(heap, "%builtin-doc", Arity::exact(1), Sig::new(vec![sym.union(kw).union(string)], string.union(nil_ty)), builtin_doc);
+    def(
+        heap,
+        "parse-source",
+        Arity::exact(1),
+        Sig::new(vec![string], vec_ty),
+        parse_source,
+    );
+    def(
+        heap,
+        "load",
+        Arity::exact(1),
+        Sig::new(vec![string], any),
+        load,
+    );
+    def(
+        heap,
+        "reload-defs",
+        Arity::exact(1),
+        Sig::new(vec![string], nil_ty),
+        reload_defs,
+    );
+    def(
+        heap,
+        "%builtin-module",
+        Arity::exact(1),
+        Sig::new(vec![sym.union(kw).union(string)], string.union(nil_ty)),
+        builtin_module,
+    );
+    def(
+        heap,
+        "%builtin-doc",
+        Arity::exact(1),
+        Sig::new(vec![sym.union(kw).union(string)], string.union(nil_ty)),
+        builtin_doc,
+    );
     // `apply`'s last positional arg must be a sequence (it's spliced); the
     // intermediate args can be anything. The `Sig` algebra can express
     // "prefix + repeating tail" but not "the *last* item of the tail is
@@ -151,96 +415,419 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // call time by `apply_builtin` via `heap.seq_items(args[last])`, which
     // surfaces a `wrong_type` error if the last arg isn't a seq. So the
     // Sig is loose, but the runtime is tight.
-    def(heap, "apply", Arity::at_least(2), Sig::with_rest(vec![callable], any, any), apply_builtin);
+    def(
+        heap,
+        "apply",
+        Arity::at_least(2),
+        Sig::with_rest(vec![callable], any, any),
+        apply_builtin,
+    );
 
     // symbols
-    def(heap, "name", Arity::exact(1), Sig::new(vec![sym.union(kw).union(string)], string), name_of);
-    def(heap, "symbol", Arity::exact(1), Sig::new(vec![string.union(sym).union(kw)], sym), to_symbol);
-    def(heap, "keyword", Arity::exact(1), Sig::new(vec![string.union(sym).union(kw)], kw), to_keyword);
+    def(
+        heap,
+        "name",
+        Arity::exact(1),
+        Sig::new(vec![sym.union(kw).union(string)], string),
+        name_of,
+    );
+    def(
+        heap,
+        "symbol",
+        Arity::exact(1),
+        Sig::new(vec![string.union(sym).union(kw)], sym),
+        to_symbol,
+    );
+    def(
+        heap,
+        "keyword",
+        Arity::exact(1),
+        Sig::new(vec![string.union(sym).union(kw)], kw),
+        to_keyword,
+    );
 
     // filesystem — mechanism for the Brood module system + project test runner
     def(heap, "cwd", Arity::exact(0), Sig::nullary(string), cwd);
-    def(heap, "file-exists?", Arity::exact(1), Sig::new(vec![string], bool_ty), file_exists);
-    def(heap, "dir?", Arity::exact(1), Sig::new(vec![string], bool_ty), is_dir);
-    def(heap, "list-dir", Arity::exact(1), Sig::new(vec![string], list_ty), list_dir);
-    def(heap, "make-dir", Arity::exact(1), Sig::new(vec![string], nil_ty), make_dir);
-    def(heap, "spit", Arity::exact(2), Sig::new(vec![string, string], nil_ty), spit);
-    def(heap, "slurp", Arity::exact(1), Sig::new(vec![string], string), slurp);
-    def(heap, "file-mtime", Arity::exact(1), Sig::new(vec![string], int.union(nil_ty)), file_mtime);
+    def(
+        heap,
+        "file-exists?",
+        Arity::exact(1),
+        Sig::new(vec![string], bool_ty),
+        file_exists,
+    );
+    def(
+        heap,
+        "dir?",
+        Arity::exact(1),
+        Sig::new(vec![string], bool_ty),
+        is_dir,
+    );
+    def(
+        heap,
+        "list-dir",
+        Arity::exact(1),
+        Sig::new(vec![string], list_ty),
+        list_dir,
+    );
+    def(
+        heap,
+        "make-dir",
+        Arity::exact(1),
+        Sig::new(vec![string], nil_ty),
+        make_dir,
+    );
+    def(
+        heap,
+        "spit",
+        Arity::exact(2),
+        Sig::new(vec![string, string], nil_ty),
+        spit,
+    );
+    def(
+        heap,
+        "slurp",
+        Arity::exact(1),
+        Sig::new(vec![string], string),
+        slurp,
+    );
+    def(
+        heap,
+        "file-mtime",
+        Arity::exact(1),
+        Sig::new(vec![string], int.union(nil_ty)),
+        file_mtime,
+    );
 
     // system / environment
-    def(heap, "getenv", Arity::exact(1), Sig::new(vec![string], string.union(nil_ty)), getenv);
-    def(heap, "run-process", Arity::exact(2), Sig::new(vec![string, seq], int), run_process);
+    def(
+        heap,
+        "getenv",
+        Arity::exact(1),
+        Sig::new(vec![string], string.union(nil_ty)),
+        getenv,
+    );
+    def(
+        heap,
+        "run-process",
+        Arity::exact(2),
+        Sig::new(vec![string, seq], int),
+        run_process,
+    );
 
     // macros
-    def(heap, "macroexpand-1", Arity::exact(1), Sig::new(vec![any], any), macroexpand_1);
-    def(heap, "macroexpand", Arity::exact(1), Sig::new(vec![any], any), macroexpand);
+    def(
+        heap,
+        "macroexpand-1",
+        Arity::exact(1),
+        Sig::new(vec![any], any),
+        macroexpand_1,
+    );
+    def(
+        heap,
+        "macroexpand",
+        Arity::exact(1),
+        Sig::new(vec![any], any),
+        macroexpand,
+    );
     // gensym accepts anything as a prefix (string/sym/keyword/nil/anything is
     // turned into its `display` form), so its prefix slot is `any` — not the
     // narrower `string` the original Sig claimed, which made the checker warn
     // on legitimate `(gensym 'foo)` calls.
-    def(heap, "gensym", Arity::range(0, 1), Sig::new(vec![any], sym), gensym);
+    def(
+        heap,
+        "gensym",
+        Arity::range(0, 1),
+        Sig::new(vec![any], sym),
+        gensym,
+    );
 
     // advisory type checker (the Ty lattice's first consumer; see docs/types.md)
-    def(heap, "check", Arity::exact(1), Sig::new(vec![any], list_ty), check_builtin);
-    def(heap, "check-file", Arity::exact(1), Sig::new(vec![string], list_ty), check_file_builtin);
-    def(heap, "check-file-structured", Arity::exact(1), Sig::new(vec![string], list_ty), check_file_structured);
+    def(
+        heap,
+        "check",
+        Arity::exact(1),
+        Sig::new(vec![any], list_ty),
+        check_builtin,
+    );
+    def(
+        heap,
+        "check-file",
+        Arity::exact(1),
+        Sig::new(vec![string], list_ty),
+        check_file_builtin,
+    );
+    def(
+        heap,
+        "check-file-structured",
+        Arity::exact(1),
+        Sig::new(vec![string], list_ty),
+        check_file_structured,
+    );
 
     // source positions (editor tooling; see docs/tooling.md)
-    def(heap, "form-pos", Arity::exact(1), Sig::new(vec![any], vec_ty.union(nil_ty)), form_pos);
-    def(heap, "current-file", Arity::exact(0), Sig::nullary(string.union(nil_ty)), current_file);
-    def(heap, "source-location", Arity::exact(1), Sig::new(vec![sym], vec_ty.union(nil_ty)), source_location);
-    def(heap, "references-in-source", Arity::exact(2), Sig::new(vec![sym.union(string), string], any), references_in_source);
+    def(
+        heap,
+        "form-pos",
+        Arity::exact(1),
+        Sig::new(vec![any], vec_ty.union(nil_ty)),
+        form_pos,
+    );
+    def(
+        heap,
+        "current-file",
+        Arity::exact(0),
+        Sig::nullary(string.union(nil_ty)),
+        current_file,
+    );
+    def(
+        heap,
+        "source-location",
+        Arity::exact(1),
+        Sig::new(vec![sym], vec_ty.union(nil_ty)),
+        source_location,
+    );
+    def(
+        heap,
+        "references-in-source",
+        Arity::exact(2),
+        Sig::new(vec![sym.union(string), string], any),
+        references_in_source,
+    );
 
     // introspection (editor tooling; see docs/lsp.md) — derive what we can from
     // the bound value (arglist, doc); enumerate the global table for completion.
-    def(heap, "doc", Arity::exact(1), Sig::new(vec![any], string.union(nil_ty)), doc);
-    def(heap, "arglist", Arity::exact(1), Sig::new(vec![any], list_ty), arglist);
-    def(heap, "global-names", Arity::exact(0), Sig::nullary(list_ty), global_names);
-    def(heap, "bound?", Arity::exact(1), Sig::new(vec![sym], bool_ty), bound_p);
+    def(
+        heap,
+        "doc",
+        Arity::exact(1),
+        Sig::new(vec![any], string.union(nil_ty)),
+        doc,
+    );
+    def(
+        heap,
+        "arglist",
+        Arity::exact(1),
+        Sig::new(vec![any], list_ty),
+        arglist,
+    );
+    def(
+        heap,
+        "global-names",
+        Arity::exact(0),
+        Sig::nullary(list_ty),
+        global_names,
+    );
+    def(
+        heap,
+        "bound?",
+        Arity::exact(1),
+        Sig::new(vec![sym], bool_ty),
+        bound_p,
+    );
 
     // errors / control
-    def(heap, "throw", Arity::exact(1), Sig::new(vec![any], Ty::NEVER), throw);
-    def(heap, "%try", Arity::exact(2), Sig::new(vec![callable, callable], any), try_catch);
-    def(heap, "%isolate", Arity::exact(1), Sig::new(vec![callable], any), isolate);
+    def(
+        heap,
+        "throw",
+        Arity::exact(1),
+        Sig::new(vec![any], Ty::NEVER),
+        throw,
+    );
+    def(
+        heap,
+        "hibernate",
+        Arity::at_least(1),
+        Sig::new(vec![callable], Ty::NEVER),
+        hibernate,
+    );
+    // `%force-panic` — deliberately panics the Rust thread when called. Exists
+    // *only* in debug builds: it gives the MCP-host panic-isolation regression
+    // test a reliable trigger without adding a "intentionally crash" knob to
+    // the release surface. `cargo test` (and `nest test` against a debug
+    // binary) sees it; `--release` binaries don't.
+    #[cfg(debug_assertions)]
+    def(
+        heap,
+        "%force-panic",
+        Arity::range(0, 1),
+        Sig::new(vec![any], Ty::NEVER),
+        force_panic,
+    );
+    def(
+        heap,
+        "%try",
+        Arity::exact(2),
+        Sig::new(vec![callable, callable], any),
+        try_catch,
+    );
+    def(
+        heap,
+        "%isolate",
+        Arity::exact(1),
+        Sig::new(vec![callable], any),
+        isolate,
+    );
 
     // dynamic variables (the `defdyn`/`binding` surface is Brood — see prelude)
-    def(heap, "%declare-dynamic", Arity::exact(1), Sig::new(vec![sym], nil_ty), declare_dynamic);
+    def(
+        heap,
+        "%declare-dynamic",
+        Arity::exact(1),
+        Sig::new(vec![sym], nil_ty),
+        declare_dynamic,
+    );
     // `%binding`'s first arg is the *list/vector of names*, second is the
     // *list/vector of values*, third is the thunk — the macro `binding` emits
     // these as `(quote (*a* *b* …))` + `[v1 v2 …]` + `(fn () …)`.
-    def(heap, "%binding", Arity::exact(3), Sig::new(vec![seq, seq, callable], any), binding);
-    def(heap, "dynamic?", Arity::exact(1), Sig::new(vec![any], bool_ty), dynamic_p);
+    def(
+        heap,
+        "%binding",
+        Arity::exact(3),
+        Sig::new(vec![seq, seq, callable], any),
+        binding,
+    );
+    def(
+        heap,
+        "dynamic?",
+        Arity::exact(1),
+        Sig::new(vec![any], bool_ty),
+        dynamic_p,
+    );
 
     // processes (concurrency)
-    def(heap, "%spawn", Arity::exact(1), Sig::new(vec![callable], pid_ty), spawn);
-    def(heap, "%spawn-named", Arity::exact(2), Sig::new(vec![sym.union(kw), callable], pid_ty), spawn_named);
+    def(
+        heap,
+        "%spawn",
+        Arity::exact(1),
+        Sig::new(vec![callable], pid_ty),
+        spawn,
+    );
+    def(
+        heap,
+        "%spawn-named",
+        Arity::exact(2),
+        Sig::new(vec![sym.union(kw), callable], pid_ty),
+        spawn_named,
+    );
     // `send`'s target is a pid OR a `{:name :node}` address map.
-    def(heap, "send", Arity::exact(2), Sig::new(vec![pid_ty.union(map_ty), any], nil_ty), send);
+    def(
+        heap,
+        "send",
+        Arity::exact(2),
+        Sig::new(vec![pid_ty.union(map_ty), any], nil_ty),
+        send,
+    );
     // Arg shape: (matcher: callable, timeout: int|nil, on-timeout: callable|nil).
     // The `receive` macro in `std/prelude.blsp` expands to exactly this; the
     // `callable|nil` on the third position is for the no-`after`-clause case
     // (the macro passes `nil`).
-    def(heap, "%receive", Arity::exact(3), Sig::new(vec![callable, int.union(nil_ty), callable.union(nil_ty)], any), receive_match);
-    def(heap, "self", Arity::exact(0), Sig::nullary(pid_ty), self_pid);
+    def(
+        heap,
+        "%receive",
+        Arity::exact(3),
+        Sig::new(
+            vec![callable, int.union(nil_ty), callable.union(nil_ty)],
+            any,
+        ),
+        receive_match,
+    );
+    def(
+        heap,
+        "self",
+        Arity::exact(0),
+        Sig::nullary(pid_ty),
+        self_pid,
+    );
     def(heap, "ref", Arity::exact(0), Sig::nullary(ref_ty), make_ref);
     // `monitor` also accepts a name map (forwarded to the remote node).
-    def(heap, "monitor", Arity::exact(1), Sig::new(vec![pid_ty.union(map_ty)], ref_ty), monitor);
-    def(heap, "demonitor", Arity::exact(1), Sig::new(vec![ref_ty], nil_ty), demonitor);
-    def(heap, "spawn-count", Arity::exact(0), Sig::nullary(int), spawn_count);
-    def(heap, "peak-threads", Arity::exact(0), Sig::nullary(int), peak_threads);
-    def(heap, "worker-threads", Arity::exact(0), Sig::nullary(int), worker_threads);
-    def(heap, "list-processes", Arity::exact(0), Sig::nullary(list_ty), list_processes);
+    def(
+        heap,
+        "monitor",
+        Arity::exact(1),
+        Sig::new(vec![pid_ty.union(map_ty)], ref_ty),
+        monitor,
+    );
+    def(
+        heap,
+        "demonitor",
+        Arity::exact(1),
+        Sig::new(vec![ref_ty], nil_ty),
+        demonitor,
+    );
+    def(
+        heap,
+        "spawn-count",
+        Arity::exact(0),
+        Sig::nullary(int),
+        spawn_count,
+    );
+    def(
+        heap,
+        "peak-threads",
+        Arity::exact(0),
+        Sig::nullary(int),
+        peak_threads,
+    );
+    def(
+        heap,
+        "worker-threads",
+        Arity::exact(0),
+        Sig::nullary(int),
+        worker_threads,
+    );
+    def(
+        heap,
+        "list-processes",
+        Arity::exact(0),
+        Sig::nullary(list_ty),
+        list_processes,
+    );
 
     // distributed nodes (connect two runtimes over TCP — crate::dist)
-    def(heap, "node-start", Arity::exact(3), Sig::new(vec![sym, string, string], sym), node_start);
-    def(heap, "connect", Arity::exact(1), Sig::new(vec![string], sym), connect);
-    def(heap, "register", Arity::exact(2), Sig::new(vec![sym, pid_ty], pid_ty), register_name);
-    def(heap, "whereis", Arity::exact(1), Sig::new(vec![sym], pid_ty.union(nil_ty)), whereis_name);
+    def(
+        heap,
+        "node-start",
+        Arity::exact(3),
+        Sig::new(vec![sym, string, string], sym),
+        node_start,
+    );
+    def(
+        heap,
+        "connect",
+        Arity::exact(1),
+        Sig::new(vec![string], sym),
+        connect,
+    );
+    def(
+        heap,
+        "register",
+        Arity::exact(2),
+        Sig::new(vec![sym, pid_ty], pid_ty),
+        register_name,
+    );
+    def(
+        heap,
+        "whereis",
+        Arity::exact(1),
+        Sig::new(vec![sym], pid_ty.union(nil_ty)),
+        whereis_name,
+    );
     // `node-name` is the keyword `:nonode` until `node-start` sets it to a symbol.
-    def(heap, "node-name", Arity::exact(0), Sig::nullary(sym.union(kw)), node_name);
+    def(
+        heap,
+        "node-name",
+        Arity::exact(0),
+        Sig::nullary(sym.union(kw)),
+        node_name,
+    );
     def(heap, "nodes", Arity::exact(0), Sig::nullary(list_ty), nodes);
-    def(heap, "monitor-node", Arity::exact(1), Sig::new(vec![sym], ref_ty), monitor_node);
+    def(
+        heap,
+        "monitor-node",
+        Arity::exact(1),
+        Sig::new(vec![sym], ref_ty),
+        monitor_node,
+    );
 }
 
 /// Docstrings + parameter names for the public primitives, so `(doc 'name)`,
@@ -316,6 +903,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("bound?", &["sym"], "Whether sym is bound in scope. Quote it: (bound? 'foo)."),
     ("dynamic?", &["x"], "Whether x is a symbol declared dynamic with defdyn. Quote it: (dynamic? '*foo*)."),
     ("throw", &["x"], "Raise x as an error - a non-local exit caught by try/catch."),
+    ("hibernate", &["fn", "&", "args"], "Discard this process's call stack, flush its LOCAL arena (keeping only `fn` + `args`), and tail-call `(apply fn args)` in the fresh heap. Bounds memory in long-running receive loops. Uncatchable. Use in tail position."),
     ("%spawn", &["thunk"], "Run thunk (a 0-arg fn) in a new green process; returns its pid. Use the `spawn` macro."),
     ("send", &["target", "msg"], "Copy msg into target's mailbox; target is a pid or {:name :node} address. Routes locally or over a node link. Returns nil."),
     ("self", &[], "This process's own pid (carries this node's identity)."),
@@ -423,12 +1011,10 @@ fn num_bin(
 ) -> LispResult {
     let (a, b) = two(args, who)?;
     match (a, b) {
-        (Value::Int(x), Value::Int(y)) => int_op(x, y)
-            .map(Value::Int)
-            .ok_or_else(|| {
-                LispError::runtime(format!("{}: integer overflow", who))
-                    .with_code(crate::error::error_codes::INT_OVERFLOW)
-            }),
+        (Value::Int(x), Value::Int(y)) => int_op(x, y).map(Value::Int).ok_or_else(|| {
+            LispError::runtime(format!("{}: integer overflow", who))
+                .with_code(crate::error::error_codes::INT_OVERFLOW)
+        }),
         _ => Ok(Value::Float(float_op(
             expect_number(heap, who, a)?,
             expect_number(heap, who, b)?,
@@ -522,11 +1108,10 @@ fn floor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             // upper bound `i64::MAX as f64` rounds *up* past `i64::MAX`, so
             // the open upper comparison is the right one.
             if f < i64::MIN as f64 || f >= i64::MAX as f64 + 1.0 {
-                return Err(LispError::runtime(format!(
-                    "floor: {} is out of range for i64",
-                    f
-                ))
-                .with_code(crate::error::error_codes::INT_OVERFLOW));
+                return Err(
+                    LispError::runtime(format!("floor: {} is out of range for i64", f))
+                        .with_code(crate::error::error_codes::INT_OVERFLOW),
+                );
             }
             Ok(Value::Int(f as i64))
         }
@@ -613,6 +1198,19 @@ fn sort_asc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         }
     });
 
+    Ok(heap.list(items))
+}
+
+/// `(%sort-cmp coll)` — stable ascending sort by the structural total order
+/// (`Heap::value_cmp`). The Brood `sort` (prelude) routes here when items
+/// aren't all numeric, so `(sort [[1 0] [2 1]])` and similar work without a
+/// custom comparator. Cross-kind items get a defined tag-rank order rather
+/// than the old "expected number" trap.
+fn sort_cmp(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let mut items = heap.seq_items(arg(args, 0))?;
+    // `value_cmp` reads heap data through `&Heap` only; the items are `Copy`
+    // handles, so no GC root machinery is needed.
+    items.sort_by(|a, b| heap.value_cmp(*a, *b));
     Ok(heap.list(items))
 }
 
@@ -996,11 +1594,10 @@ fn reload_defs(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
 
 fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "load", arg(args, 0))?;
-    let src = std::fs::read_to_string(&path)
-        .map_err(|e| {
-            LispError::runtime(format!("load: cannot read {}: {}", path, e))
-                .with_code(crate::error::error_codes::FILE_IO)
-        })?;
+    let src = std::fs::read_to_string(&path).map_err(|e| {
+        LispError::runtime(format!("load: cannot read {}: {}", path, e))
+            .with_code(crate::error::error_codes::FILE_IO)
+    })?;
     // Read positioned so errors point at a line; tag every error with the file
     // (`FILE:LINE:COL:`, see docs/tooling.md).
     let forms = reader::read_all_positioned(heap, &src).map_err(|e| e.or_file(path.clone()))?;
@@ -1106,7 +1703,13 @@ fn lookup_embedded(
 /// or nil if there is none. Mechanism only: `require` (Brood) consults this
 /// before searching the load-path.
 fn builtin_module(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    lookup_embedded(args, heap, EMBEDDED_MODULES, "%builtin-module", "module name")
+    lookup_embedded(
+        args,
+        heap,
+        EMBEDDED_MODULES,
+        "%builtin-module",
+        "module name",
+    )
 }
 
 /// `(%builtin-doc name)` — the source of a baked-in reference document as a
@@ -1256,8 +1859,10 @@ fn string_to_number(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn cwd(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match std::env::current_dir() {
         Ok(p) => Ok(heap.alloc_string(&p.to_string_lossy())),
-        Err(e) => Err(LispError::runtime(format!("cwd: {}", e))
-            .with_code(crate::error::error_codes::FILE_IO)),
+        Err(e) => {
+            Err(LispError::runtime(format!("cwd: {}", e))
+                .with_code(crate::error::error_codes::FILE_IO))
+        }
     }
 }
 
@@ -1299,11 +1904,10 @@ fn list_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// Returns nil. Used by the project scaffolder (`nest new`).
 fn make_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "make-dir", arg(args, 0))?;
-    std::fs::create_dir_all(&path)
-        .map_err(|e| {
-            LispError::runtime(format!("make-dir: {}: {}", path, e))
-                .with_code(crate::error::error_codes::FILE_IO)
-        })?;
+    std::fs::create_dir_all(&path).map_err(|e| {
+        LispError::runtime(format!("make-dir: {}: {}", path, e))
+            .with_code(crate::error::error_codes::FILE_IO)
+    })?;
     Ok(Value::Nil)
 }
 
@@ -1320,11 +1924,10 @@ fn spit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         Value::Str(id) => heap.string(id).to_string(),
         _ => return Err(LispError::wrong_type(heap, "spit", "string content", cv)),
     };
-    std::fs::write(&path, content)
-        .map_err(|e| {
-            LispError::runtime(format!("spit: {}: {}", path, e))
-                .with_code(crate::error::error_codes::FILE_IO)
-        })?;
+    std::fs::write(&path, content).map_err(|e| {
+        LispError::runtime(format!("spit: {}: {}", path, e))
+            .with_code(crate::error::error_codes::FILE_IO)
+    })?;
     Ok(Value::Nil)
 }
 
@@ -1333,11 +1936,10 @@ fn spit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// doc tooling can inspect a module's source (e.g. its leading docstring form).
 fn slurp(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "slurp", arg(args, 0))?;
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| {
-            LispError::runtime(format!("slurp: {}: {}", path, e))
-                .with_code(crate::error::error_codes::FILE_IO)
-        })?;
+    let content = std::fs::read_to_string(&path).map_err(|e| {
+        LispError::runtime(format!("slurp: {}: {}", path, e))
+            .with_code(crate::error::error_codes::FILE_IO)
+    })?;
     Ok(heap.alloc_string(&content))
 }
 
@@ -1348,9 +1950,15 @@ fn slurp(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// on Linux, truncated to ms here).
 fn file_mtime(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "file-mtime", arg(args, 0))?;
-    let Ok(meta) = std::fs::metadata(&path) else { return Ok(Value::Nil) };
-    let Ok(modified) = meta.modified() else { return Ok(Value::Nil) };
-    let Ok(since) = modified.duration_since(std::time::UNIX_EPOCH) else { return Ok(Value::Nil) };
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return Ok(Value::Nil);
+    };
+    let Ok(modified) = meta.modified() else {
+        return Ok(Value::Nil);
+    };
+    let Ok(since) = modified.duration_since(std::time::UNIX_EPOCH) else {
+        return Ok(Value::Nil);
+    };
     Ok(Value::Int(since.as_millis() as i64))
 }
 
@@ -1453,11 +2061,10 @@ fn check_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
 /// pre-flight.
 fn check_file_builtin(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "check-file", arg(args, 0))?;
-    let src = std::fs::read_to_string(&path)
-        .map_err(|e| {
-            LispError::runtime(format!("check-file: cannot read {}: {}", path, e))
-                .with_code(crate::error::error_codes::FILE_IO)
-        })?;
+    let src = std::fs::read_to_string(&path).map_err(|e| {
+        LispError::runtime(format!("check-file: cannot read {}: {}", path, e))
+            .with_code(crate::error::error_codes::FILE_IO)
+    })?;
     let forms = reader::read_all_positioned(heap, &src).map_err(|e| e.or_file(path.clone()))?;
     let just_forms: Vec<Value> = forms.into_iter().map(|(f, _)| f).collect();
     let warnings = crate::types::check::check_file(heap, &just_forms);
@@ -1481,11 +2088,13 @@ fn check_file_builtin(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResul
 fn check_file_structured(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "check-file-structured", arg(args, 0))?;
     let src = std::fs::read_to_string(&path).map_err(|e| {
-        LispError::runtime(format!("check-file-structured: cannot read {}: {}", path, e))
-            .with_code(crate::error::error_codes::FILE_IO)
+        LispError::runtime(format!(
+            "check-file-structured: cannot read {}: {}",
+            path, e
+        ))
+        .with_code(crate::error::error_codes::FILE_IO)
     })?;
-    let forms =
-        reader::read_all_positioned(heap, &src).map_err(|e| e.or_file(path.clone()))?;
+    let forms = reader::read_all_positioned(heap, &src).map_err(|e| e.or_file(path.clone()))?;
     let just_forms: Vec<Value> = forms.into_iter().map(|(f, _)| f).collect();
     let warnings = crate::types::check::check_file(heap, &just_forms);
     let file_kw = Value::Keyword(value::intern("file"));
@@ -1532,7 +2141,14 @@ fn form_pos(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
 fn source_location(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
     let name = match arg(args, 0) {
         Value::Sym(s) => s,
-        other => return Err(LispError::wrong_type(heap, "source-location", "symbol", other)),
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "source-location",
+                "symbol",
+                other,
+            ))
+        }
     };
     match heap.def_site(name) {
         Some(loc) => {
@@ -1703,6 +2319,41 @@ fn throw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Err(LispError::thrown(arg(args, 0), heap))
 }
 
+/// `(%force-panic [msg])` — debug-only. Deliberately panics from a primitive,
+/// so tests can exercise the host-side `catch_unwind` boundary (currently the
+/// MCP server's `call_tool`). Not a Brood-clean error path — this *is* a Rust
+/// `panic!`; if no host catches it, the process dies. There's no Brood
+/// reason to call this outside the regression test.
+#[cfg(debug_assertions)]
+fn force_panic(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let msg = match args.first() {
+        Some(Value::Str(id)) => heap.string(*id).to_string(),
+        Some(other) => printer::display(heap, *other),
+        None => "%force-panic invoked (no message)".to_string(),
+    };
+    panic!("{}", msg);
+}
+
+/// `(hibernate fn & args)` — Erlang-style hibernate. Out-of-band signal to
+/// the process's run loop: "discard my stack, flush my LOCAL arena (keeping
+/// only `fn` + `args`), and re-apply." Bounds memory in long-running
+/// processes (server-style receive loops, the editor event loop) where the
+/// bump allocator would otherwise grow without bound.
+///
+/// Implementation: raises an [`ErrorKind::Hibernate`] sentinel that unwinds
+/// every intervening eval frame (uncatchable by `try`/`catch`) until the
+/// process's `spawn` coroutine (or `eval_str` for the root thread) catches
+/// it and runs [`Heap::flush`] before re-applying. Because the unwind
+/// discards every Rust frame between here and the run loop, the *only*
+/// LOCAL state that survives is what the user named explicitly — call
+/// hibernate in **tail position** to make this match the user's intent
+/// (`(loop next-state)` ⇒ `(hibernate loop next-state)`).
+fn hibernate(args: &[Value], _: EnvId, _heap: &mut Heap) -> LispResult {
+    let callee = arg(args, 0);
+    let rest_args: Vec<Value> = args.iter().skip(1).copied().collect();
+    Err(LispError::hibernate(callee, rest_args))
+}
+
 // ---------- processes ----------
 
 fn spawn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -1861,11 +2512,10 @@ fn node_start(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let name = expect_node_name(heap, "node-start", arg(args, 0))?;
     let addr = expect_string(heap, "node-start", arg(args, 1))?;
     let cookie = expect_string(heap, "node-start", arg(args, 2))?;
-    crate::dist::node_start(name, &addr, cookie)
-        .map_err(|e| {
-            LispError::runtime(format!("node-start: {e}"))
-                .with_code(crate::error::error_codes::DISTRIBUTION)
-        })?;
+    crate::dist::node_start(name, &addr, cookie).map_err(|e| {
+        LispError::runtime(format!("node-start: {e}"))
+            .with_code(crate::error::error_codes::DISTRIBUTION)
+    })?;
     Ok(Value::Keyword(name))
 }
 
@@ -1892,7 +2542,9 @@ fn register_name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         Value::Pid { .. } => Err(LispError::type_err(
             "register: can only register a local pid",
         )),
-        _ => Err(LispError::type_err("register: second argument must be a pid")),
+        _ => Err(LispError::type_err(
+            "register: second argument must be a pid",
+        )),
     }
 }
 
@@ -1988,6 +2640,11 @@ fn try_catch(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let handler = arg(args, 1);
     match apply(heap, thunk, &[], env) {
         Ok(value) => Ok(value),
+        // `hibernate` is an out-of-band stack-unwind signal, not a user error
+        // — re-raise so the process run loop sees it. `try`/`catch` must not
+        // be able to swallow it, otherwise the user could wedge the unwind
+        // mid-stack and the next eval would touch a stale env.
+        Err(e) if e.kind == crate::error::ErrorKind::Hibernate => Err(e),
         Err(e) => {
             // The catch sees:
             //   * the user-thrown value verbatim, if there is one (preserves the
@@ -2025,7 +2682,9 @@ fn declare_dynamic(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// `(dynamic? x)` — true when `x` is a symbol declared dynamic with `defdyn`.
 /// A non-symbol is simply not dynamic (no error), so it composes in predicates.
 fn dynamic_p(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Bool(matches!(arg(args, 0), Value::Sym(s) if value::is_dynamic(s))))
+    Ok(Value::Bool(
+        matches!(arg(args, 0), Value::Sym(s) if value::is_dynamic(s)),
+    ))
 }
 
 /// `(%binding syms vals thunk)` — run `thunk` (no args) with each dynamic var in

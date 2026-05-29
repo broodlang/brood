@@ -58,6 +58,12 @@ pub enum ErrorKind {
     Runtime,
     /// Raised by `(throw v)` from user code.
     User,
+    /// Raised by `(hibernate fn & args)` — not a real error; an out-of-band
+    /// signal that unwinds the eval stack so the process's run loop can flush
+    /// its LOCAL arena and re-apply `fn` to `args` in a fresh heap. Escapes
+    /// `try`/`catch` (uncatchable by user code) so the unwind always reaches
+    /// the process boundary.
+    Hibernate,
 }
 
 impl ErrorKind {
@@ -73,6 +79,7 @@ impl ErrorKind {
             ErrorKind::Type => "type",
             ErrorKind::Runtime => "runtime",
             ErrorKind::User => "user",
+            ErrorKind::Hibernate => "hibernate",
         }
     }
 }
@@ -84,7 +91,18 @@ pub struct LispError {
     /// The value carried by `(throw v)`, so `catch` can rebind it. Built-in
     /// errors leave this `None`; `try_catch` then projects the structured
     /// fields (kind, code, message, location, hint) into a Brood map.
+    ///
+    /// **Re-used by [`ErrorKind::Hibernate`]** to carry the target function;
+    /// the args ride in [`hibernate_args`](Self::hibernate_args). Process run
+    /// loops read both before flushing the heap and re-applying.
     pub payload: Option<Value>,
+    /// Hibernate args, set only for [`ErrorKind::Hibernate`]. Boxed so the
+    /// common-case `LispError` stays small (a deep parser/reader recursion
+    /// returning `Result<_, LispError>` would otherwise spill the test
+    /// thread's 2 MiB stack). The carrier callee is in
+    /// [`payload`](Self::payload); together they let the process run loop
+    /// rebuild `(apply fn args)` after the LOCAL-arena flush.
+    pub hibernate_args: Option<Box<Vec<Value>>>,
     /// Source position, when known. Set by the reader (precise, for parse
     /// errors) or filled in by the file runner with the enclosing top-level
     /// form's start (for runtime errors). Drives `FILE:LINE:COL:` output.
@@ -147,6 +165,7 @@ impl LispError {
             kind,
             message: message.into(),
             payload: None,
+            hibernate_args: None,
             pos: None,
             file: None,
             code: None,
@@ -257,6 +276,25 @@ impl LispError {
             kind: ErrorKind::User,
             message: crate::syntax::printer::display(heap, value),
             payload: Some(value),
+            hibernate_args: None,
+            pos: None,
+            file: None,
+            code: None,
+            hint: None,
+        }
+    }
+
+    /// Construct the [`ErrorKind::Hibernate`] sentinel — the process run loop
+    /// will pop the [`payload`](Self::payload) (callee) and
+    /// [`hibernate_args`](Self::hibernate_args), flush the LOCAL arena
+    /// (deep-copying just `callee` + `args` to fresh slabs), and re-apply.
+    /// Uncatchable by `try`/`catch` (the eval-level handler re-raises).
+    pub fn hibernate(callee: Value, args: Vec<Value>) -> Self {
+        LispError {
+            kind: ErrorKind::Hibernate,
+            message: "hibernate".to_string(),
+            payload: Some(callee),
+            hibernate_args: Some(Box::new(args)),
             pos: None,
             file: None,
             code: None,
@@ -306,6 +344,10 @@ impl fmt::Display for LispError {
             ErrorKind::Arity => write!(f, "arity error: {}", self.message),
             ErrorKind::Type => write!(f, "type error: {}", self.message),
             ErrorKind::Runtime => write!(f, "runtime error: {}", self.message),
+            // Should never reach the user — the process run loop catches and
+            // consumes the Hibernate sentinel. Falling through with a clear
+            // tag (rather than panicking) keeps a leaked Hibernate debuggable.
+            ErrorKind::Hibernate => write!(f, "internal: hibernate escaped: {}", self.message),
         }
     }
 }

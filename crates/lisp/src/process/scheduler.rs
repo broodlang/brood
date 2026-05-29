@@ -159,8 +159,14 @@ impl GcBlockGuard {
         });
         #[cfg(debug_assertions)]
         if std::env::var_os("BROOD_TRACE_GCBLOCK").is_some() {
-            eprintln!("[gcblock] enter -> {} thread={:?}", new, std::thread::current().id());
+            eprintln!(
+                "[gcblock] enter -> {} thread={:?}",
+                new,
+                std::thread::current().id()
+            );
         }
+        #[cfg(not(debug_assertions))]
+        let _ = new;
         GcBlockGuard
     }
 }
@@ -175,7 +181,11 @@ impl Drop for GcBlockGuard {
         });
         #[cfg(debug_assertions)]
         if std::env::var_os("BROOD_TRACE_GCBLOCK").is_some() {
-            eprintln!("[gcblock] drop -> {} thread={:?}", new, std::thread::current().id());
+            eprintln!(
+                "[gcblock] drop -> {} thread={:?}",
+                new,
+                std::thread::current().id()
+            );
         }
         #[cfg(not(debug_assertions))]
         let _ = new;
@@ -190,11 +200,14 @@ const REDUCTION_BUDGET: u32 = 2000;
 /// 128 KiB out of the box; the tree-walking eval recurses one Rust frame per
 /// combination, so a debug-build evaluator running the in-language test suite
 /// (which spawns processes that load many test files) can run close to that.
-/// 1 MiB gives comfortable headroom in debug *and* survives any future eval
-/// frames a refactor accidentally widens (cf. the post-module-split overflow
-/// reproducible in `cargo test -p brood --test suite` — bd4aa2d → e8567285).
-/// Tunable; bump if the user lands a feature whose frames are heavier.
-const CORO_STACK_BYTES: usize = 1 * 1024 * 1024;
+/// **2 MiB**: debug eval frames are heavy (no inlining), and the in-language
+/// suite has tests that legitimately recurse a few hundred frames (pattern
+/// match, fold-over-cons). 1 MiB used to be enough but post-Phase-1 (bump
+/// allocator + debug poison checks) overflowed it — `cargo test -p brood
+/// --test suite` reproducibly. The pages are mmap'd lazily, so unused tail
+/// pages stay uncommitted — the higher ceiling costs ~0 until the depth needs it.
+/// Tunable; bump if a feature lands with heavier frames.
+const CORO_STACK_BYTES: usize = 2 * 1024 * 1024;
 
 /// Called once per `eval` `'tail:` iteration. Cheap: a thread-local decrement; only
 /// when the budget is exhausted does it touch `CURRENT` and (for a green process)
@@ -255,17 +268,19 @@ thread_local! {
     static EXIT_REASON: RefCell<Option<Message>> = const { RefCell::new(None) };
 }
 
+/// One worker's run queue + the condvar that parks it when the queue is empty.
+type WorkerQueue = (Mutex<VecDeque<Box<Process>>>, Condvar);
+
 /// Per-worker run queues. Index = `worker_id`. Each worker pops only from its
 /// own queue (no shared queue, no work stealing). A process is assigned to one
 /// worker at spawn time and stays there for its lifetime — preempt and receive
 /// re-enqueue to the same worker's queue. The Vec is sized once at the first
 /// `ensure_workers` from `worker_count()`, then never resized.
-static WORKERS: LazyLock<Vec<(Mutex<VecDeque<Box<Process>>>, Condvar)>> =
-    LazyLock::new(|| {
-        (0..worker_count())
-            .map(|_| (Mutex::new(VecDeque::new()), Condvar::new()))
-            .collect()
-    });
+static WORKERS: LazyLock<Vec<WorkerQueue>> = LazyLock::new(|| {
+    (0..worker_count())
+        .map(|_| (Mutex::new(VecDeque::new()), Condvar::new()))
+        .collect()
+});
 
 /// Next worker to assign a newly-spawned process to (round-robin). Read +
 /// incremented under relaxed ordering — the only requirement is approximate
@@ -485,14 +500,35 @@ pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
         gc_block_set(0);
         let mut heap = Heap::with_regions(prelude, runtime);
         heap.set_global(EnvId::GLOBAL);
-        let reason = match eval::apply(&mut heap, f, &[], EnvId::GLOBAL) {
-            Ok(_) => Message::Keyword(value::intern("normal")),
-            Err(e) => {
-                eprintln!("process {} died: {}", proc_descr(pid), e.located());
-                Message::Vector(vec![
-                    Message::Keyword(value::intern("error")),
-                    Message::Str(e.to_string()),
-                ])
+        // `hibernate` raises an uncatchable `ErrorKind::Hibernate` sentinel
+        // that unwinds every intervening eval frame back to here. We catch
+        // it, flush the LOCAL arena (deep-copying only the named callee +
+        // args into fresh slabs), and re-apply. Any *other* error exits the
+        // process. Bounds memory in long-running receive loops.
+        let mut callee = f;
+        let mut argv: Vec<Value> = Vec::new();
+        let reason = loop {
+            match eval::apply(&mut heap, callee, &argv, EnvId::GLOBAL) {
+                Ok(_) => break Message::Keyword(value::intern("normal")),
+                Err(e) if e.kind == crate::error::ErrorKind::Hibernate => {
+                    let new_callee = e.payload.expect("hibernate err carries callee");
+                    let new_args = e
+                        .hibernate_args
+                        .expect("hibernate err carries args (possibly empty)");
+                    let mut roots: Vec<Value> = std::iter::once(new_callee)
+                        .chain(new_args.iter().copied())
+                        .collect();
+                    heap.flush(&mut roots);
+                    callee = roots[0];
+                    argv = roots[1..].to_vec();
+                }
+                Err(e) => {
+                    eprintln!("process {} died: {}", proc_descr(pid), e.located());
+                    break Message::Vector(vec![
+                        Message::Keyword(value::intern("error")),
+                        Message::Str(e.to_string()),
+                    ]);
+                }
             }
         };
         EXIT_REASON.with(|r| *r.borrow_mut() = Some(reason));

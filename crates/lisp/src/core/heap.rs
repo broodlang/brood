@@ -91,6 +91,29 @@ struct EnvFrame {
 ///
 /// Read once on first use and cached — env vars don't change mid-run, and the
 /// safepoint hits this every collection.
+/// Tag ranks for `value_cmp`'s heterogeneous fallback. The order is mostly
+/// aesthetic — what matters is that it's *fixed* so a heterogeneous sort is
+/// reproducible. Numbers come first (most common), then strings/keywords/
+/// symbols (text), then collections, then everything else.
+fn tag_rank(v: Value) -> u8 {
+    match v {
+        Value::Nil => 0,
+        Value::Bool(_) => 1,
+        Value::Int(_) | Value::Float(_) => 2,
+        Value::Str(_) => 3,
+        Value::Keyword(_) => 4,
+        Value::Sym(_) => 5,
+        Value::Pair(_) => 6,
+        Value::Vector(_) => 7,
+        Value::Map(_) => 8,
+        Value::Fn(_) => 9,
+        Value::Native(_) => 10,
+        Value::Macro(_) => 11,
+        Value::Ref(_) => 12,
+        Value::Pid { .. } => 13,
+    }
+}
+
 fn gc_floor() -> usize {
     static FLOOR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *FLOOR.get_or_init(|| {
@@ -793,7 +816,11 @@ impl Heap {
         if node.data_map & bit != 0 {
             let i = map_champ::rank(node.data_map, slot);
             let (k, v) = node.data[i];
-            if self.equal(k, key) { Some(v) } else { None }
+            if self.equal(k, key) {
+                Some(v)
+            } else {
+                None
+            }
         } else if node.node_map & bit != 0 {
             let j = map_champ::rank(node.node_map, slot);
             self.champ_get(node.children[j], key, hash, depth + 1)
@@ -874,7 +901,15 @@ impl Heap {
             // Different key hashed to same slot. Split: turn this inline
             // entry into a child sub-node holding both pairs.
             let other_hash = self.hash_value(existing_k);
-            let child_id = self.champ_split(existing_k, existing_v, other_hash, key, val, hash, depth + 1);
+            let child_id = self.champ_split(
+                existing_k,
+                existing_v,
+                other_hash,
+                key,
+                val,
+                hash,
+                depth + 1,
+            );
             let node = self.map_node(id); // re-borrow after the recursive alloc
             let new_data_map = data_map ^ bit;
             let new_node_map = node_map | bit;
@@ -936,6 +971,11 @@ impl Heap {
     /// possibly the same slot at `depth`. Recursively descends until
     /// the two keys' hash slices diverge (or until [`MAX_DEPTH`], where
     /// it spawns a collision leaf). Used by `champ_assoc`'s split case.
+    //
+    // 8 args: two (k, v, h) triples + depth + &mut self. Bundling the
+    // triples into a struct adds noise for an internal-only helper called
+    // from one site.
+    #[allow(clippy::too_many_arguments)]
     fn champ_split(
         &mut self,
         k1: Value,
@@ -1417,6 +1457,59 @@ impl Heap {
         EnvId::runtime(self.runtime.code.envs.push(EnvFrame { vars, parent }))
     }
 
+    /// **Arena flip / heap flush** (Phase 2, ADR-026 + the bump-allocator
+    /// follow-up): deep-copy the given LOCAL-reachable roots into a brand-new
+    /// `Slabs`, swap it in, and drop the old. Bounds memory in long-lived
+    /// processes (server-style receive loops, REPLs, the editor event loop)
+    /// where the bump allocator would otherwise grow without bound.
+    ///
+    /// Inputs (mutated **in place** to the new handles): the explicit `roots`
+    /// slice the caller cares about, plus this heap's own [`dynamics`] stack
+    /// and [`roots`](Self::push_root) stack. Anything in PRELUDE/RUNTIME is
+    /// returned unchanged. Cycles are handled via forwarding tables — a
+    /// placeholder is allocated before recursing, so a `letrec`-style
+    /// env-↔-closure cycle terminates.
+    ///
+    /// **Safety contract.** The caller must guarantee that no LOCAL handle
+    /// outside the supplied roots / dynamics / extra-roots is reachable from
+    /// the Rust stack — i.e. there is no in-flight eval-loop frame whose
+    /// `expr`/`env` register points at LOCAL. The way to satisfy this is to
+    /// reach flush via an unwinding error ([`LispError::hibernate`]) that
+    /// discards every intervening Rust frame; the process run loop then
+    /// catches the sentinel at the coroutine boundary and calls flush before
+    /// re-applying. Calling flush from inside `eval` without that unwind
+    /// would leave the caller's stale handles dangling.
+    pub fn flush(&mut self, roots: &mut [Value]) {
+        let old = std::mem::take(&mut self.local);
+        let mut fwd = FlushForward::default();
+        for v in roots.iter_mut() {
+            *v = flush_value(&old, &mut self.local, &mut fwd, *v);
+        }
+        for (_, v) in self.dynamics.iter_mut() {
+            *v = flush_value(&old, &mut self.local, &mut fwd, *v);
+        }
+        for v in self.roots.iter_mut() {
+            *v = flush_value(&old, &mut self.local, &mut fwd, *v);
+        }
+        self.local_free.clear();
+        // form_pos keys old LOCAL pair indices that are now invalid; the map
+        // is reader-time metadata for newly-loaded source, so dropping it at
+        // a flush boundary loses nothing meaningful (the form_pos for any
+        // closure body has already been baked into the closure at defn time).
+        self.form_pos.clear();
+        #[cfg(debug_assertions)]
+        {
+            self.poison.pairs.clear();
+            self.poison.vectors.clear();
+            self.poison.maps.clear();
+            self.poison.strings.clear();
+            self.poison.closures.clear();
+            self.poison.envs.clear();
+        }
+        // `old` drops here, releasing every LOCAL slot the previous iteration
+        // ever allocated.
+    }
+
     // ----- access (dispatch on the handle's region) -----
 
     pub fn pair(&self, id: PairId) -> (Value, Value) {
@@ -1723,6 +1816,70 @@ impl Heap {
             }
         }
         true
+    }
+
+    /// A total structural ordering for `(sort coll)`'s non-numeric fallback.
+    /// **Not** Brood-visible as `<`/`compare` — that's a separate decision; this
+    /// is just enough to give the sort builtin a defined order on heterogeneous
+    /// values without throwing.
+    ///
+    /// Within a kind, ordering is the natural one: ints by `<`, floats by IEEE,
+    /// mixed numerics by promotion (same compromise as `prim_lt`); strings/
+    /// symbols/keywords by their text; pairs/vectors lexicographically;
+    /// `nil` < `false` < `true`. Across kinds we use a fixed tag order
+    /// (`tag_rank`) so a heterogeneous list still has *some* total order — the
+    /// alternative is the current "throws on a vector" trap. Maps, fns,
+    /// natives, macros, refs, pids fall through to a tag-rank compare (sorting
+    /// them by content isn't well-defined here).
+    pub fn value_cmp(&self, a: Value, b: Value) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        use Value::*;
+        match (a, b) {
+            (Nil, Nil) => Ordering::Equal,
+            (Bool(x), Bool(y)) => x.cmp(&y),
+            (Int(x), Int(y)) => x.cmp(&y),
+            (Float(x), Float(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+            (Int(x), Float(y)) => (x as f64).partial_cmp(&y).unwrap_or(Ordering::Equal),
+            (Float(x), Int(y)) => x.partial_cmp(&(y as f64)).unwrap_or(Ordering::Equal),
+            (Str(x), Str(y)) => self.string(x).cmp(self.string(y)),
+            // Symbols/keywords sort by spelling so it's stable and human-meaningful.
+            (Sym(x), Sym(y)) | (Keyword(x), Keyword(y)) => {
+                crate::core::value::symbol_name(x).cmp(&crate::core::value::symbol_name(y))
+            }
+            (Vector(x), Vector(y)) => {
+                let xs: Vec<Value> = self.vector(x).to_vec();
+                let ys: Vec<Value> = self.vector(y).to_vec();
+                for (xv, yv) in xs.iter().zip(ys.iter()) {
+                    match self.value_cmp(*xv, *yv) {
+                        Ordering::Equal => continue,
+                        o => return o,
+                    }
+                }
+                xs.len().cmp(&ys.len())
+            }
+            // Lists: walk the cons spine like equal(). Empty list < non-empty.
+            (Nil, Pair(_)) => Ordering::Less,
+            (Pair(_), Nil) => Ordering::Greater,
+            (Pair(x), Pair(y)) => {
+                let (mut x, mut y) = (x, y);
+                loop {
+                    let (a0, a1) = self.pair(x);
+                    let (b0, b1) = self.pair(y);
+                    match self.value_cmp(a0, b0) {
+                        Ordering::Equal => {}
+                        o => return o,
+                    }
+                    match (a1, b1) {
+                        (Pair(nx), Pair(ny)) => {
+                            x = nx;
+                            y = ny;
+                        }
+                        _ => return self.value_cmp(a1, b1),
+                    }
+                }
+            }
+            _ => tag_rank(a).cmp(&tag_rank(b)),
+        }
     }
 
     // ----- environments -----
@@ -2165,7 +2322,9 @@ impl Heap {
             self.poison.strings.clear();
             self.poison.strings.resize(self.local.strings.len(), false);
             self.poison.closures.clear();
-            self.poison.closures.resize(self.local.closures.len(), false);
+            self.poison
+                .closures
+                .resize(self.local.closures.len(), false);
             self.poison.envs.clear();
             self.poison.envs.resize(self.local.envs.len(), false);
         }
@@ -2342,4 +2501,198 @@ fn mark_one(bits: &mut [bool], i: usize) -> bool {
         bits[i] = true;
         true
     }
+}
+
+// ----- heap flush (arena flip / Phase 2) -----------------------------------
+//
+// The standalone deep-copy that backs [`Heap::flush`]. Free functions so the
+// recursion borrows `&old` immutably and `&mut new` mutably without tangling
+// with the `Heap`'s `&mut self`. Cycles are handled with a per-slab
+// forwarding table: when a node is visited, we reserve a placeholder slot
+// in `new` and record `old_idx → new_idx` before recursing into its
+// children — a second hit on the same old handle returns the placeholder
+// instead of re-traversing.
+
+#[derive(Default)]
+struct FlushForward {
+    pairs: HashMap<u32, u32>,
+    vectors: HashMap<u32, u32>,
+    maps: HashMap<u32, u32>,
+    strings: HashMap<u32, u32>,
+    closures: HashMap<u32, u32>,
+    envs: HashMap<u32, u32>,
+}
+
+fn flush_value(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, v: Value) -> Value {
+    match v {
+        Value::Pair(id) if id.region() == LOCAL => {
+            Value::Pair(flush_pair(old, new, fwd, id))
+        }
+        Value::Vector(id) if id.region() == LOCAL => {
+            Value::Vector(flush_vector(old, new, fwd, id))
+        }
+        Value::Map(id) if id.region() == LOCAL => Value::Map(flush_map(old, new, fwd, id)),
+        Value::Str(id) if id.region() == LOCAL => Value::Str(flush_string(old, new, fwd, id)),
+        Value::Fn(id) if id.region() == LOCAL => Value::Fn(flush_closure(old, new, fwd, id)),
+        Value::Macro(id) if id.region() == LOCAL => {
+            Value::Macro(flush_closure(old, new, fwd, id))
+        }
+        // Atoms + PRELUDE/RUNTIME handles are shared and immutable; no copy.
+        _ => v,
+    }
+}
+
+fn flush_pair(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: PairId) -> PairId {
+    let key = id.index() as u32;
+    if let Some(&new_idx) = fwd.pairs.get(&key) {
+        return PairId::local(new_idx as usize);
+    }
+    let (car, cdr) = old.pairs[id.index()];
+    // Reserve the slot *before* recursing so a cycle through (car, cdr)
+    // sees the new handle instead of re-traversing.
+    let new_idx = new.pairs.len();
+    new.pairs.push((Value::Nil, Value::Nil));
+    fwd.pairs.insert(key, new_idx as u32);
+    let new_car = flush_value(old, new, fwd, car);
+    let new_cdr = flush_value(old, new, fwd, cdr);
+    new.pairs[new_idx] = (new_car, new_cdr);
+    PairId::local(new_idx)
+}
+
+fn flush_vector(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: VecId) -> VecId {
+    let key = id.index() as u32;
+    if let Some(&new_idx) = fwd.vectors.get(&key) {
+        return VecId::local(new_idx as usize);
+    }
+    let items: Vec<Value> = old.vectors[id.index()].clone();
+    let new_idx = new.vectors.len();
+    new.vectors.push(Vec::new());
+    fwd.vectors.insert(key, new_idx as u32);
+    let copied: Vec<Value> = items
+        .into_iter()
+        .map(|x| flush_value(old, new, fwd, x))
+        .collect();
+    new.vectors[new_idx] = copied;
+    VecId::local(new_idx)
+}
+
+fn flush_string(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: StrId) -> StrId {
+    let key = id.index() as u32;
+    if let Some(&new_idx) = fwd.strings.get(&key) {
+        return StrId::local(new_idx as usize);
+    }
+    let s = old.strings[id.index()].clone();
+    let new_idx = new.strings.len();
+    new.strings.push(s);
+    fwd.strings.insert(key, new_idx as u32);
+    StrId::local(new_idx)
+}
+
+fn flush_map(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: MapId) -> MapId {
+    let key = id.index() as u32;
+    if let Some(&new_idx) = fwd.maps.get(&key) {
+        return MapId::local(new_idx as usize);
+    }
+    // Snapshot just the scalar/copy fields + arrays we need to walk.
+    let (size, data_map, node_map, is_collision, data_snapshot, children_snapshot): (
+        u32,
+        u16,
+        u16,
+        bool,
+        SmallVec<[(Value, Value); 4]>,
+        SmallVec<[MapId; 4]>,
+    ) = {
+        let node = &old.maps[id.index()];
+        (
+            node.size,
+            node.data_map,
+            node.node_map,
+            node.is_collision,
+            node.data.iter().copied().collect(),
+            node.children.iter().copied().collect(),
+        )
+    };
+    let new_idx = new.maps.len();
+    new.maps.push(MapNode::default());
+    fwd.maps.insert(key, new_idx as u32);
+    let new_children: SmallVec<[MapId; 4]> = children_snapshot
+        .iter()
+        .map(|&c| match c.region() {
+            LOCAL => flush_map(old, new, fwd, c),
+            _ => c,
+        })
+        .collect();
+    let new_data: SmallVec<[(Value, Value); 4]> = data_snapshot
+        .iter()
+        .map(|&(k, v)| (flush_value(old, new, fwd, k), flush_value(old, new, fwd, v)))
+        .collect();
+    new.maps[new_idx] = MapNode {
+        size,
+        data_map,
+        node_map,
+        is_collision,
+        data: new_data,
+        children: new_children,
+    };
+    MapId::local(new_idx)
+}
+
+fn flush_closure(
+    old: &Slabs,
+    new: &mut Slabs,
+    fwd: &mut FlushForward,
+    id: ClosureId,
+) -> ClosureId {
+    let key = id.index() as u32;
+    if let Some(&new_idx) = fwd.closures.get(&key) {
+        return ClosureId::local(new_idx as usize);
+    }
+    let cl = old.closures[id.index()].clone();
+    let new_idx = new.closures.len();
+    new.closures.push(Closure::default());
+    fwd.closures.insert(key, new_idx as u32);
+    let body = cl.body.iter().map(|&f| flush_value(old, new, fwd, f)).collect();
+    let optionals = cl
+        .optionals
+        .iter()
+        .map(|&(s, d)| (s, flush_value(old, new, fwd, d)))
+        .collect();
+    let env = cl.env.map(|e| flush_env(old, new, fwd, e));
+    new.closures[new_idx] = Closure {
+        name: cl.name,
+        params: cl.params,
+        optionals,
+        rest: cl.rest,
+        body,
+        doc: cl.doc,
+        env,
+    };
+    ClosureId::local(new_idx)
+}
+
+fn flush_env(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, env: EnvId) -> EnvId {
+    if env == EnvId::GLOBAL || env.region() != LOCAL {
+        return env;
+    }
+    let key = env.index() as u32;
+    if let Some(&new_idx) = fwd.envs.get(&key) {
+        return EnvId::local(new_idx as usize);
+    }
+    let (parent_snapshot, vars_snapshot): (Option<EnvId>, EnvVars) = {
+        let frame = &old.envs[env.index()];
+        (frame.parent, frame.vars.iter().copied().collect())
+    };
+    let new_idx = new.envs.len();
+    new.envs.push(EnvFrame {
+        vars: SmallVec::new(),
+        parent: None,
+    });
+    fwd.envs.insert(key, new_idx as u32);
+    let parent = parent_snapshot.map(|p| flush_env(old, new, fwd, p));
+    let vars: EnvVars = vars_snapshot
+        .iter()
+        .map(|&(s, v)| (s, flush_value(old, new, fwd, v)))
+        .collect();
+    new.envs[new_idx] = EnvFrame { vars, parent };
+    EnvId::local(new_idx)
 }

@@ -20,10 +20,24 @@
     (assert= (format-source "(def a 1)\n(def b 2)") "(def a 1)\n(def b 2)\n")))
 
 (describe "format: short forms collapse"
-  (test "a multi-line let that fits one line collapses"
-    (assert= (format-source "(let (a 1\n      b 2)\n  (+ a b))") "(let (a 1 b 2) (+ a b))\n"))
-  (test "a multi-line defn that fits one line collapses"
-    (assert= (format-source "(defn add\n  (x y)\n  (+ x y))") "(defn add (x y) (+ x y))\n")))
+  ;; The formatter respects author newlines on forms the user already broke
+  ;; (`5b19787`, "formatter respects author newlines"), so a multi-line let or
+  ;; defn given multi-line input stays multi-line — only whitespace inside each
+  ;; line is normalised. Tests written before that change pinned the collapse
+  ;; behaviour; the new behaviour pins the preservation.
+  (test "a single-line let stays a single line"
+    (assert= (format-source "(let (a 1     b 2) (+ a b))") "(let (a 1 b 2) (+ a b))\n"))
+  (test "an already-multi-line let stays multi-line"
+    (assert= (format-source "(let (a 1\n      b 2)\n  (+ a b))")
+      "(let (a 1\n      b 2)\n  (+ a b))\n"))
+  (test "a single-line defn stays a single line"
+    (assert= (format-source "(defn add (x y) (+   x  y))") "(defn add (x y) (+ x y))\n"))
+  (test "an already-multi-line defn keeps the body break but normalises the header"
+    ;; defn header (name + params) is always one line by rule, so the input's
+    ;; `defn\n  (x y)` collapses to `defn add (x y)`. The body's newline before
+    ;; `(+ x y)` is the author's break — the formatter preserves it.
+    (assert= (format-source "(defn add\n  (x y)\n  (+ x y))")
+      "(defn add (x y)\n  (+ x y))\n")))
 
 (describe "format: long forms break"
   (test "a long generic call rides the first arg on the head line, rest at +2"

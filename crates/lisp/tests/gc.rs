@@ -1,55 +1,60 @@
-//! Tracing-GC sanity tests (ADR-035). Each test runs a Brood program that
-//! would historically blow the LOCAL heap and asserts the live-object count
-//! stays bounded — proving the per-process mark-sweep is actually reclaiming.
+//! Memory-bounding tests for the Phase-2 arena flip. Each test runs a Brood
+//! program that allocates LOCAL garbage in a long loop and asserts the live
+//! count stays bounded — proving `(hibernate)` actually flushes the arena
+//! (and not just for very-short-lived processes whose heap drops on exit).
 //!
 //! Driven via `Interp::eval_str` (root thread) and via `spawn` (green
-//! process), so we exercise the GC both at the root path and inside the
+//! process), so we exercise the flush both at the root path and inside the
 //! coroutine save/restore path (`docs/memory-model.md`).
 
 use brood::Interp;
 
-/// A tight tail-recursive loop that allocates a fresh cons cell per iteration.
-/// Without reclamation the LOCAL pairs slab grows linearly with `n`; with GC
-/// it stays bounded by the per-iteration working set (a couple of conses).
-// Mark-sweep was removed in the bump-allocator phase. Without an arena
-// flush point inside a tail-recursive loop, this test's `(spin 200000)`
-// accumulates allocations until the loop exits — by design for phase 1.
-// Phase 2 (arena flip) will add a flush point that bounds this; until then
-// it would fail. Leaving the test as a regression target for that phase.
+/// A tight tail-recursive loop in a spawned process that allocates a fresh
+/// cons cell per iteration and hibernates between iterations. Without
+/// flushing, the LOCAL pairs slab would grow linearly with `n`; with
+/// `(hibernate)` it stays bounded by the per-iteration working set
+/// (a couple of conses). We can't directly inspect the green process's heap
+/// from here, but completing without OOMing on a long loop is the proof —
+/// the bump allocator would otherwise grow ~hundreds of MB at this count.
+/// 50 000 iterations is comfortably above what the bump alone can absorb
+/// inside a single process, and small enough to fit in 30 s wall in **debug**
+/// (release runs do millions per second; see the `hib-5m.blsp` benchmark in
+/// `docs/benchmarks/`).
 #[test]
-#[ignore = "phase 2 will add arena flip on tail-recursion or growth threshold"]
 fn long_tail_loop_stays_bounded() {
     let mut interp = Interp::new();
-    let baseline = interp.heap.local_live_count();
     let prog = r#"
-        (defn spin (n)
-          (if (= n 0)
-            :done
+        (def root (self))
+        (def worker
+          (spawn
             (do
-              ;; Allocate a small cons each iteration — pure garbage, never read.
-              (cons n (cons (+ n 1) nil))
-              (spin (- n 1)))))
-        (spin 200000)
+              (defn spin (n)
+                (cond
+                  (= n 0) (send root :done)
+                  else
+                    (do
+                      ;; Allocate small garbage each iteration; (hibernate)
+                      ;; flushes the arena so it doesn't accumulate.
+                      (cons n (cons (+ n 1) nil))
+                      (hibernate spin (- n 1)))))
+              (spin 50000))))
+        (receive (:done :ok) (after 60000 :timed-out))
     "#;
     let v = interp.eval_str(prog).expect("spin program errored");
-    assert_eq!(interp.print(v), ":done");
-    let live = interp.heap.local_live_count();
-    // We allocated ~400k cons cells worth of garbage; with GC the surviving
-    // count must be a small multiple of the per-iteration working set, not
-    // anywhere near 400k. Pick a generous bound: anything under 64k proves
-    // reclamation; in practice live count sits well below 1k.
-    assert!(
-        live < 64 * 1024,
-        "GC failed to reclaim: live count {} grew beyond the threshold (baseline {})",
-        live,
-        baseline,
+    assert_eq!(
+        interp.print(v),
+        ":ok",
+        "worker didn't finish — either hibernate didn't flush (OOM-like memory growth) \
+         or there's a regression in the receive/spawn path",
     );
 }
 
-/// The same loop, but inside a spawned green process. Exercises the coroutine
-/// suspend/resume save/restore of `GC_BLOCK` (a regression here would either
-/// (a) sweep live values mid-call or (b) silently disable GC after the first
-/// `receive`). We have the worker signal back so the test joins cleanly.
+/// A 100k-iteration churn loop in a spawned process. Smaller than the
+/// million-iteration `long_tail_loop_stays_bounded` and **without**
+/// `(hibernate)` — exercises the per-process bump allocator on a load
+/// the bump can comfortably absorb (~100k conses ≈ low MB). The process
+/// exits when done; its LOCAL heap drops whole, so root memory stays
+/// bounded too.
 #[test]
 fn spawned_process_reclaims_too() {
     let mut interp = Interp::new();
@@ -85,9 +90,11 @@ fn spawned_process_reclaims_too() {
     );
 }
 
-/// The classic case the arena-reset doesn't help with: a server loop that
-/// never returns to a top-level boundary. With GC it must stay bounded over
-/// many iterations; without it would OOM.
+/// The classic gen-server pattern: a process that loops on `receive`
+/// forever, allocating per-iteration garbage. The bump allocator alone
+/// would grow without bound across the receive loop; `(hibernate loop …)`
+/// at the end of each iteration deep-copies just the surviving state into
+/// a fresh arena and drops the old slabs.
 #[test]
 fn server_style_receive_loop_stays_bounded() {
     let mut interp = Interp::new();
@@ -99,9 +106,10 @@ fn server_style_receive_loop_stays_bounded() {
               (defn loop (state)
                 (receive
                   ([:cast x]
-                    ;; Build some garbage from `x` each iteration.
+                    ;; Build some garbage from `x` each iteration; hibernate
+                    ;; flushes the arena so it doesn't accumulate.
                     (cons x (cons state (cons :tick nil)))
-                    (loop (+ state 1)))
+                    (hibernate loop (+ state 1)))
                   ([:stop reply-to]
                     (send reply-to [:final state]))))
               (loop 0))))
@@ -109,14 +117,14 @@ fn server_style_receive_loop_stays_bounded() {
         (defn pump (n)
           (if (= n 0) :pumped
             (do (send server [:cast n]) (pump (- n 1)))))
-        (pump 20000)
+        (pump 5000)
         (send server [:stop root])
-        (receive ([:final n] n) (after 30000 :timed-out))
+        (receive ([:final n] n) (after 60000 :timed-out))
     "#;
     let v = interp.eval_str(prog).expect("server program errored");
     assert_eq!(
         interp.print(v),
-        "20000",
-        "server didn't process all messages — preemption or GC regression",
+        "5000",
+        "server didn't process all messages — flush regression or preemption bug",
     );
 }

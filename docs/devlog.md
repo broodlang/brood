@@ -5538,3 +5538,503 @@ hanging. Verified in isolation (`--test`, exit 0). Full-suite re-run pending —
 the tree has concurrent core changes in flight.
 
 **Docs.** `docs/known-issues.md` KI-2 part 2 marked fixed; this entry.
+
+---
+
+## 2026-05-29 — Macro-hygiene lint (check-time capture warning)
+
+**Goal.** From the agent-DX feedback: macros are unhygienic by default, and a
+template binder introduced with a literal symbol silently captures caller code
+(`time`'s `start` shadowing the body's `start`). `gensym` is the fix, but
+nothing warned you — the macro miscompiled quietly. Add a `check`-time lint.
+
+**Built.** `crates/lisp/src/types/check/hygiene.rs`, wired into `check_file` as a
+pass over the **un-expanded** forms (defmacro templates vanish after
+macroexpansion). Warns only when both hold for a `let`/`fn` binder inside a
+quasiquote template:
+1. the binder is a *literal* symbol (a gensym'd binder is `(unquote g)`; an
+   unquoted caller-name is `(unquote evar)` — neither is a literal symbol, so
+   neither trips the lint);
+2. a macro *parameter* is spliced (`~p`/`~@p`) into that binder's scope. Brood
+   `let` is sequential, so per-binder scope = the body + *later* bindings' value
+   expressions (not the binder's own value) — which is why `time`'s `start` is
+   flagged but its `v` (bound after `~expr`) is not.
+
+**Why this scope, and the no-false-positive bar.** ADR-024 makes the checker
+advisory and forbids flagging runnable code. The tight two-condition gate is
+what keeps it sound: audited across the entire `std/` tree (`brood --check` on
+every file), it produces **zero** hygiene warnings — every existing macro
+(`and`/`or`/`bench`/`is`/`assert=`/`match*`/`receive`/`defprocess`/…) already
+gensyms or unquotes its binders. The only shape it would flag that could be
+intentional is an anaphoric macro (deliberate capture); none exist in-tree.
+
+**Not done (deliberately).** The sibling feedback ask — a lint for the
+bind-vs-match `~x` trap (a bare pattern symbol shadowing a global) — was *not*
+added: the dangerous variant (a live clause after an irrefutable bare-symbol
+pattern) is already a compile error (`std/prelude.blsp` match compiler rejects
+unreachable clauses), and a broad version would fire on the core mechanism
+itself (binding `first`/`rest`/any global-named pattern var is idiomatic), which
+no sound heuristic can avoid. Recorded here so it isn't re-attempted.
+
+**Tests.** 6 unit tests in `hygiene.rs` (capturing let-binder, capturing fn
+param, gensym binder not flagged, unquoted caller-binder not flagged, splice
+outside scope not flagged, non-macro forms ignored); end-to-end verified via
+`brood --check` (emits `file:line:col: warning: …` with the gensym hint). All 78
+`types::` tests green.
+
+**Docs.** `docs/types.md` Step-4 surface gained a macro-hygiene bullet; this
+entry.
+
+---
+
+## 2026-05-29 — `(format …)` printf-style helper (demo-DX item #5)
+
+**Goal.** Item #5 on the `claude-demo-findings.md` §10 wishlist. `to-fixed`
+already fixed the underlying ugly-float case (`(str 0.015873015873015872)` is
+still f64-precision; `(to-fixed … N)` clips it), but demo writers naturally
+reach for `(format "%.2f" x)` and end up hand-rolling `str` + `to-fixed`
+chains. A small `format` closes that ergonomic gap.
+
+**Built.** `std/prelude.blsp` gains `format` (+ private `format--loop` /
+`format--spec` / `format--prec`), implemented in Brood over `char-at` /
+`string-length` / `string->number` / `to-fixed` / `str` — no new Rust. The
+specifier set is a deliberate subset:
+
+- `%s` — any value, via `str`
+- `%d` — number, via `str` (the type letter is a hint for the reader; no
+  conversion happens — float in, float out, same as `%s`)
+- `%f` — float with 6 fractional digits (the C/Java default)
+- `%.Nf` — float with N fractional digits, rounded via `to-fixed`
+- `%%` — literal `%`
+
+Width/justification is *not* in the specifier (compose with `pad-left` /
+`pad-right` — already in the prelude). Hex / octal / `+ -` flags / explicit
+sign aren't there either; the bar is "what a demo actually reaches for", not
+"feature-parity with C's `printf`". Errors on an unknown specifier or one that
+ends mid-spec (`"%"`, `"%.2"`, `"%.xf"`); a missing arg renders as `nil`
+(debuggable), extra args are ignored.
+
+**Why a function not a special form.** It's a pure data transformation —
+specifiers are scanned at runtime, not at compile time — so there's no
+substrate need for the compile pass to know about it. Keeping it as a regular
+`defn` in the prelude keeps the core small (CLAUDE.md, ADR-011) and lets
+`format`'s parsing be inspected / extended in Brood.
+
+**Why the namespace is fine.** `(require 'format)` loads the source-code
+formatter (`std/format.blsp` — backs `nest format`), which exports
+`format-source` / `format--root--walk` / etc. — *not* a bare `format`. The new
+prelude `format` is unambiguous.
+
+**Tests.** New `describe "format (printf-style)"` block in
+`tests/strings_test.blsp` (9 tests): no-specifier identity, `%%`, `%s` across
+value kinds, `%d`, `%f` default precision, `%.Nf` (incl. `%.0f`), mixed
+specifiers, extra/missing args, and the four error shapes (`%q`, lone `%`,
+truncated `%.2`, non-digit after `.`). Full strings-suite goes from 44 to 53
+tests, all green; full `nest test -j 1` is 512 tests, 503 passing (the 9
+failures are pre-existing structured-error-format assertions, unrelated).
+
+**Docs.** `docs/language.md` (Strings section) and `docs/brood-for-claude.md`
+(string-formatting bullet) both gain a `format` line with the specifier set
+and a worked example; this entry.
+
+---
+
+## 2026-05-29 — Kernel supervisor stripped (ADR-039 reverted)
+
+**Goal.** The kernel-level supervisor that shipped 2026-05-28 (RESUME_SLOT
+thread-local + safepoint rooting + `supervise()` retry loop +
+`%spawn-supervised*` primitives + `(supervise …)` macro + mode gate) was the
+dominant contributor to the multi-thread scheduler race (KI-1). The race
+blocked **every** fan-out program, while supervision was load-bearing for
+only the hot-reload-on-retry story. Trade made: keep the fan-out fix, let
+supervision move to userland.
+
+**Built.** Commit `e3d3a0d`. What's gone:
+
+- `crates/lisp/src/process/scheduler.rs` — `RESUME_SLOT` thread-local + the
+  `ResumeSlot` type + `record_resume` / `take_resume` /
+  `resume_slot_save/set` / `for_each_resume_root`; `SUPERVISION` +
+  `SupervisionPolicy` + `is_supervised` + `supervision_save/set`; the
+  `supervise()` retry loop + `run_call` helper; `spawn`'s `policy:
+  Option<SupervisionPolicy>` parameter (spawn is now always let-it-crash).
+- `crates/lisp/src/eval/mod.rs` — the `Value::Fn` `record_resume` guard +
+  the safepoint's `for_each_resume_root` rooting.
+- `crates/lisp/src/process/mailbox.rs` — `wait_for_message`'s resume-slot /
+  supervision save+restore around suspend.
+- `crates/lisp/src/builtins.rs` — `%spawn-supervised` /
+  `%spawn-supervised-named` + their docstrings + the policy-from-args helper.
+- `std/prelude.blsp` — `(supervise …)` macro, `*supervise-max-restarts*`,
+  `*supervise-max-window-ms*`. The `(spawn …)` docstring no longer mentions
+  supervision.
+- `crates/nest/src/main.rs` — `nest run --watch` now wraps in plain
+  `(%spawn)` instead of `%spawn-supervised`. A throw in the watched program
+  kills the session; editing the file re-spawns from scratch (also a cleaner
+  model — no surprising state retention across edits).
+- `examples/live-script/` — removed (an example of the removed feature).
+- `crates/lisp/tests/basic.rs` — `supervisor_retries_last_iteration_with_same_args`
+  and `supervisor_picks_up_hot_reloaded_definition_on_retry` removed.
+
+**What's retained.** The Erlang-style **building blocks** that supervision
+was built over: `(spawn)`, `(monitor)`, `(demonitor)`, `(send)`, `(receive)`.
+A user wanting recover-on-throw writes a supervisor process in Brood that
+monitors a child and re-spawns on `[:down …]` — same shape Erlang OTP
+supervisors are built from, in ~10 lines.
+
+**What's lost.** The kernel's automatic mid-iteration retry with state
+preservation, and hot-reload-on-supervisor-retry (a freshly-`def`'d fix
+taking effect on the next supervised retry). Plain hot reload — next *call*
+sees the new binding (ADR-013) — is independent and unaffected.
+
+**Why this works after the trade.** The race wasn't worth keeping the
+elegance: Brood's immutability + cheap process spawn + monitor make a
+hand-written supervisor cost ~10 lines, not the chapter Erlang/OTP devotes
+to gen_server + supervisor. The feature *can* come back later (the design
+is preserved in git history at this commit and as the body of
+`docs/supervision.md` for one revision before this entry), but only with
+substrate that doesn't reintroduce the race.
+
+**Effect on the race (single change, before Phase-1 allocator).** The
+`recurse.blsp` repro went from ~24 worker deaths per run (0/n clean) to
+~0–1 per run (**5/10 clean**). The Phase-1 bump-only allocator landing on
+top of this (see the next entry) closed the remainder in debug-assertions
+release.
+
+**Tests.** `cargo test -p brood --lib`: 125/125. `cargo test -p brood --test
+basic`: 72/72. `cargo test -p brood --test gc`: 2/3 — the failing
+`server_style_receive_loop_stays_bounded` was *catching a real pre-existing
+GC root-coverage bug* via the poison tripwire, not a regression from this
+commit. That test became Phase 1's witness (it passes after Phase 1).
+
+**Docs.** ADR-039 marked reverted in [`decisions.md`](decisions.md);
+[`supervision.md`](supervision.md) replaced with a short revert note plus
+the userland respawn pattern; [`README.md`](README.md), [`roadmap.md`](roadmap.md),
+and [`known-issues.md`](known-issues.md) updated; this entry.
+
+---
+
+## 2026-05-29 — Phase-1 bump-only allocator (race goes silent)
+
+**Goal.** Close the remaining ~5% race tail after the supervisor strip. The
+manual-rooting discipline around slot reuse was the substrate for the
+`unbound symbol` / `index out of bounds` panics: a freed slot could be
+reallocated to a fresh value while another thread still held a stale handle
+that re-deref'd it. Removing slot reuse removes the class.
+
+**Built.** Commit `f90f0de`. Heap allocations now **grow monotonically** per
+process — `alloc_slot!` (and the hand-written `new_env` / `alloc_string`)
+drop their free-list reuse paths. Every alloc bumps the slab; nothing is
+ever recycled. `Heap::collect` becomes a no-op, kept as `collect_old`
+(`#[allow(dead_code)]`) for reference until the Phase-2 cleanup removes it.
+Net effect: stale handles can't observe a value of the wrong type, because
+no slot is ever a different type than when it was first allocated.
+
+**Two-phase plan.** This is phase 1 of a two-phase switchover:
+
+- **Phase 1 (this commit).** Bump-only allocation; no sweep. Bounds memory
+  per *short-lived* process (it exits, the per-process heap is dropped
+  whole), but grows unboundedly for long-running tail-recursive computation
+  that never goes through `receive`. The `gc.rs` `long_tail_loop_stays_bounded`
+  test is marked `#[ignore]` with a Phase-2 note.
+- **Phase 2 (next).** Arena flip on `receive` — deep-copy the surviving
+  state to a fresh slab and drop the old. Bounds memory in long-lived
+  receive loops (gen_server / editor event loop / hatch). Independent of
+  Phase 1's race-removal property.
+
+**Effect on the race.** `recurse.blsp` in **debug-assertions release**:
+**10/10 clean** over multiple runs vs ~95% failure before. The
+`server_style_receive_loop_stays_bounded` test that the supervisor-strip
+commit had failing — the poison tripwire catching a real GC-root-coverage
+bug in the receive-loop pattern — now passes (the bug is gone with slot
+reuse).
+
+**Known issue (separate bisect needed).** In **plain release** (no
+`debug-assertions`), the multi-threaded scheduler can still segfault on the
+same shape (tail-recursive workers with heavy prelude churn). The poison
+tripwire suppresses it in debug-assertions release but isn't compiled in
+for plain release. Likely cause per the commit message: the bundled WIP in
+the +698-line heap.rs rewrite alongside Phase 1, not Phase 1 itself — a
+separate task. `-j 1` is reliable on plain release.
+
+**Bundled WIP (not part of Phase 1 proper).** `crates/lisp/src/core/heap.rs`
+substantial rewrite alongside the map_champ integration; map_champ +
+map_entries threaded through eval / macros / message etc.; error.rs /
+printer.rs / reader.rs adjustments; tests + docs.
+
+**Docs.** [`known-issues.md`](known-issues.md) KI-1 marked largely fixed
+with the plain-release caveat preserved; this entry.
+
+---
+
+## 2026-05-29 (afternoon) — Race fully closed; suite-test segfault bisected
+
+**Goal.** Two follow-ups from the Phase-1 morning: (a) close the
+plain-release segfault that survived the bump allocator, and (b) bisect the
+`cargo test -p brood --test suite` segfault that wasn't reproducing through
+`./target/release/brood` directly.
+
+**Built.**
+
+- **`2abf05e` — per-worker pinned queues.** Replaced the shared
+  `RUN: Mutex<VecDeque>` queue with one queue per worker, plus round-robin
+  assignment at spawn. Each `Process` carries its `worker_id`; `enqueue`
+  routes by that field; preempt and receive re-park onto the same worker.
+  No work stealing. The plain-release segfault was a coroutine being
+  migrated to a different worker thread mid-call (corosensei resumes on
+  whichever thread `resume()` runs on) — pinning the process kills that
+  hazard. `recurse.blsp` and `medium.blsp`: 10/10 clean in plain release,
+  single- and multi-threaded.
+
+- **`CORO_STACK_BYTES` 1 MiB → 2 MiB.** The `cargo test -p brood --test
+  suite` segfault was a coroutine **stack overflow**, not a memory bug.
+  gdb showed RSP just below a 1 MiB stack range, deep eval recursion at
+  ~hundreds of frames. Debug eval frames are bigger (no inlining), and
+  post-Phase-1 poison checks widened them further. Bumped the per-coroutine
+  stack ceiling to 2 MiB — pages are mmap'd lazily, so unused tail pages
+  stay uncommitted; the higher ceiling costs ~0 until depth needs it.
+
+- **Stale test assertions fixed.** Nine in-language suite tests pinned old
+  error-message strings and old formatter behaviour:
+  - `error-of` (in `std/test.blsp`) now coerces a structured-error map
+    (`{:kind :code :message :hint}`) back to the legacy `"kind error:
+    message"` string the suite pins. `(throw v)` still passes `v` through
+    unchanged. A throw `(throw :boom)` test in `suite_test.blsp` updated to
+    use `map?` for the catchability check.
+  - `format_test.blsp`'s "short forms collapse" describe replaced — the
+    formatter now respects author newlines (`5b19787`), so the tests pin
+    *preservation* of multi-line input, not its collapse. The defn header
+    `(defn name params)` is still a single line by rule even when the
+    input has the name and params on separate lines.
+  - `vector-ref` error message pinned to its new richer form (`index 9
+    out of range [0, 2)`).
+
+**Effect on tests.** Full `cargo test --workspace` is green again:
+- `cargo test -p brood --test suite` (debug): 1/1 ok in 35s (was: SIGSEGV).
+- `cargo test -p brood --test suite --release`: 1/1 ok in 2.5s.
+- In-language suite: 514 tests passing, 0 failing.
+
+**Phase 2 status.** Initially paused with a safety concern — auto-flush
+from inside `%receive` invalidates the caller's `env` register — then
+resumed later in the day with a safer design (next entry).
+
+**Docs.** This entry; [`known-issues.md`](known-issues.md) KI-1 marked
+fully fixed; the plain-release and suite-test segfaults moved to
+"resolved" entries in the minor list.
+
+---
+
+## 2026-05-29 (evening) — Phase 2: explicit `(hibernate)` primitive
+
+**Goal.** Bound LOCAL-heap growth in long-running processes (server-style
+receive loops, the editor event loop). The morning's bump-only allocator
+killed the GC-race bug class but left long loops growing unboundedly —
+without an arena flush point inside a tail-recursive loop, the bump grows
+linearly with iteration count.
+
+**Considered, rejected.** An *automatic* flush at `%receive` (deep-copy
+the matched thunk into a fresh slab before returning). Safe for the
+canonical `((%receive M ms ot))` macro pattern (the eval loop's `env`
+register is discarded at the tail-apply that follows). **Unsafe** for any
+other use site (`(let (x (%receive …)) …)` etc.) — the *caller's* eval
+frame still has a LOCAL `env` register that would dangle after the flush.
+The eval loop can't reason about which Rust frames are above it on the
+stack, so no in-place flush is generically safe.
+
+**Built.** `(hibernate fn & args)` — Erlang-style hibernate, opt-in.
+
+- **Raises an uncatchable `LispError::Hibernate` sentinel.** The error
+  propagates through every intervening eval frame (Rust `?` unwind), so
+  every Rust-stack reference into LOCAL is discarded by the time we land
+  in the process's run loop. `try`/`catch` filters the kind and re-raises
+  — user code can't swallow the unwind.
+- **Process run loop catches it.** `spawn`'s coroutine body wraps
+  `eval::apply` in a `loop { match … }`: on `Ok` exit, on `Err(Hibernate)`
+  it pulls the callee + args off the error, calls `heap.flush(&mut roots)`
+  (deep-copies just those into a fresh `Slabs` and drops the old),
+  re-applies. Any other `Err` exits the process normally.
+- **`Heap::flush(&mut [Value])`** — the deep-copy mechanism. Uses
+  per-slab forwarding tables (`old_idx → new_idx`) so a `letrec`-style
+  env-↔-closure cycle terminates: placeholder slot allocated before
+  recursing into children. Copies the named roots, the heap's own
+  `dynamics` stack, and its extra `roots` stack; clears `form_pos` (the
+  reader-time metadata is meaningless once LOCAL pair indices reset).
+  PRELUDE/RUNTIME handles pass through unchanged (already shared).
+- **Boxed hibernate args on `LispError`.** A `Vec<Value>` field on
+  `LispError` grew the error's stack footprint enough that the
+  deep-recursion parser test (`(((…` × 5000 → "form nested too deeply")
+  tipped past the 2 MiB test-thread stack. Boxing the (almost-always-None)
+  hibernate args keeps `LispError` small for the common path.
+
+**Effect.**
+
+- The `server_style_receive_loop_stays_bounded` and
+  `long_tail_loop_stays_bounded` `gc.rs` tests pass green (the second
+  was `#[ignore]`d after Phase 1 — un-ignored and rewritten to use
+  hibernate).
+- Microbench: a 5 000 000-iteration loop that conses + hibernates each
+  iteration completes in 25 s wall, **RSS bounded at 4.4 MB**. The same
+  loop without hibernate hits **1.4 GB** at 500 000 iterations — three
+  orders of magnitude more memory at one tenth the work. Hibernate
+  trades ≈5× iteration time for a hard memory bound.
+
+**Constraint (documented, not enforced).** `hibernate` must be called in
+**tail position** of a function body whose call chain is itself
+tail-recursive. Calling from inside a `let` RHS or argument position
+leaves the caller's let-scope dangling — the unwind discards every Rust
+eval frame, not just the current one. The `(loop next-state)` ⇒
+`(hibernate loop next-state)` rewrite is always safe; non-tail uses are
+the user's responsibility.
+
+**Docs.** This entry; [`memory-model.md`](memory-model.md) needs the
+hibernate contract written up (follow-up).
+
+---
+
+## 2026-05-29 — Stdlib ergonomics (Game-of-Life feedback pass)
+
+**Trigger.** A "build something non-trivial" report on writing Conway's Game
+of Life in Brood surfaced a handful of friction points where the obvious
+spelling didn't work: `(map f a-map)` threw "expected list or vector",
+`(sort [[1 0] [2 1]])` threw "expected number", `(index-of (list 1 2 3) 2)`
+threw a substring-search type error, and `\x1b`/`\u{1b}` weren't escape
+sequences (only the named `\e` produced ESC). Conservative fixes — no new
+core forms, no Value kinds, no laziness machinery. The bigger asks (a set
+type + `#{…}` literal; a real `iterate` + laziness; MCP worker-panic
+sandboxing; module-redefinition warnings; `nest format --changed`) need
+their own ADRs and were deferred.
+
+**Built.**
+
+1. **Maps are seqable.** Added `seq` (universal list-view; map → entries
+   via `map-pairs`, everything else pass-through) and `entries` (alias of
+   `map-pairs`) to the prelude. `fold` now coerces once at entry via
+   `seq` and dispatches to a `fold--loop` for the recursive case — so a
+   map costs one extra `map-pairs` pass, not O(n) per step. `reduce`
+   coerces in the 2-arg form (its bare `(first x)`/`(rest x)` bypassed
+   fold). Result: `(map f m)`, `(filter f m)`, `(mapcat f m)`,
+   `(fold f acc m)`, `(reduce f acc m)`, `(count m)`, `(into [] m)` all
+   walk a map as its `[k v]` pairs without the `(zip (keys m) (vals m))`
+   workaround. The type checker's curated `seq` lattice for
+   `map`/`filter`/`reduce` widened to include `Map` so the checker no
+   longer warns on the new shape.
+2. **`into [] coll` now produces a vector.** Previous behaviour: `(into []
+   (list 1 2 3))` silently returned `(1 2 3)` (a list) because the
+   underlying `append` is fold-of-flip-cons. Fixed by re-vectorising in
+   the vector-target branch — `(apply vector (append to from))`.
+3. **Sort accepts any value, no comparator needed.** Added a `value_cmp`
+   on `Heap` — a total structural ordering (numbers by `<`; strings/
+   symbols/keywords by text; vectors lexicographic; lists by spine;
+   different kinds by a fixed `tag_rank`). Exposed as a `%sort-cmp`
+   primitive. Brood `sort` dispatches: empty → `nil`; first item numeric
+   → fast `%sort-asc`; otherwise → `%sort-cmp`. So `(sort [[1 0] [2 1]])`
+   and `(sort (list "c" "a" "b"))` and `(sort (list :c :a :b))` all Just
+   Work. `sort-by` and custom-comparator `(sort less? coll)` unchanged.
+4. **`index-of` is polymorphic; added `includes?`.** `index-of` now
+   dispatches on the collection: string → substring search (existing),
+   list/vector → linear scan returning index or -1. `includes?` is the
+   uniform predicate across lists/vectors/strings/maps (looks at values
+   in a map; `contains?` is still the key check).
+5. **String escapes: `\xHH` and `\u{H..H}`.** Scanner consumes two hex
+   digits after `\x` (single byte/char) or a `{H..H}` block after `\u`
+   (1–6 hex digits → Unicode codepoint, surrogates rejected). Malformed
+   sequences fall through as literal `x`/`u` (matching the existing
+   "unknown escape = literal char" rule, so it's backwards-compatible —
+   not a new parse-error class).
+6. **Hatch: `query` clause + `(stop pid)` graceful shutdown.** The
+   gen-server framework grew a third clause kind: `(query PATTERN body…)`
+   is like `call` but the body is *just the reply* — state passes
+   through unchanged. Removes the `[x s]` boilerplate from "just read a
+   field" cases. Every hatch process also now handles an implicit
+   `[:$stop]` envelope (the `defprocess` macro appends a stop clause
+   that exits the loop), so `(stop pid)` ends the receive loop cleanly
+   without each user having to declare it.
+7. **Docs updated.** `docs/brood-for-claude.md` and the `writing-brood`
+   skill mention maps-are-seqable, structural `sort`, polymorphic
+   `index-of` / `includes?`, the new string escapes, and the `query`/
+   `stop` hatch additions.
+
+**Effect on tests.** `cargo test --workspace` green; `nest test` green;
+no in-language regressions. New tests in `tests/sequence_test.blsp`,
+`tests/strings_test.blsp`, `tests/hatch_test.blsp`, and Rust unit tests
+in `crates/lisp/src/syntax/scanner.rs` pin the new behaviour.
+
+**Deferred.** Five items captured in detail in [`deferred.md`](deferred.md) —
+rationale, design sketch, trigger, and the workaround available today:
+1. First-class set type + `#{…}` literal.
+2. Real laziness + `iterate`.
+3. MCP worker-panic isolation (started immediately after — see the next entry).
+4. Cross-module redefinition warning.
+5. `nest format --changed`.
+
+---
+
+## 2026-05-29 (later) — MCP worker-panic isolation
+
+**Goal.** A Rust panic anywhere in a tool-call code path must not kill the
+`nest mcp` JSON-RPC server. Before this change, a single `panic!` (any
+`unwrap`-on-`None`, any out-of-bounds, any kernel `unimplemented!`) inside
+a handler unwound through `main_loop` and dropped every `mcp__brood__*`
+tool for the rest of the session — the Game-of-Life report's "Connection
+closed; all tools dropped" symptom. The race that was *triggering* the
+panics is fixed (KI-1/KI-2 scheduler race, earlier today), but the same
+shape of failure would resurface for any future bug in Brood-callable Rust
+— so the host-side isolation is its own concern.
+
+**Built.**
+
+1. **`call_tool` wraps its body in `panic::catch_unwind`.** The inner
+   closure (`(require 'mcp)` + `(mcp-tools)` + `find_handler` + `apply` +
+   `value_to_json`) runs inside
+   `panic::catch_unwind(AssertUnwindSafe(|| …))`. `AssertUnwindSafe` is
+   sound because the MCP server is single-threaded (synchronous `main_loop`
+   over stdio); the heap reset that already ran on the no-panic path
+   (`truncate_roots` + `reset_local_to`) is moved *outside* the catch so
+   it runs on **every** termination — early-return error, normal success,
+   or caught panic. That gives the caught-panic path the same recovery
+   the error path has: every LOCAL allocation since the per-call
+   checkpoint is discarded, so subsequent calls start from the same heap
+   shape the failing one did.
+2. **`RpcError::from_panic` projects the unwind payload.** The
+   `Box<dyn Any + Send>` payload is downcast as `&'static str` (from
+   `panic!("literal")`) or `String` (from `panic!("{}", x)`); anything
+   else falls back to a generic "no message" string so the caller still
+   sees that *something* panicked. The result is a JSON-RPC `Internal`
+   error (`code: -32603`) whose `error.data` carries `kind: "panic"`, the
+   original `message`, and a `hint` calling it an interpreter bug.
+   Parallel shape to `from_lisp` so an agent's `error.data.kind` branch
+   covers both cleanly.
+3. **Debug-only `%force-panic` primitive** (`#[cfg(debug_assertions)]` in
+   `builtins.rs`). One-line `panic!()`-from-a-primitive — gives the
+   regression test a reliable trigger, doesn't bloat the release surface.
+4. **Regression test
+   `handler_panic_is_caught_and_server_keeps_serving`** in
+   `crates/nest/src/mcp.rs`. Builds an inline `(mcp-tools)` catalogue
+   with one panicking handler (`%force-panic`) and one plain `echo`,
+   round-trips three messages through `main_loop`, and asserts (a) the
+   panicking call returns a structured error with `code: -32603`,
+   `message` containing "panic in tool handler", `data.kind: "panic"`,
+   and the panic's own message round-tripped on `data.message`; and (b)
+   the `echo` call **succeeds** — proves the server didn't die and
+   `Interp` is in a usable state. Silences the default Rust panic hook
+   for the test's duration so cargo's test output stays clean (stderr in
+   production keeps the panic message + backtrace, which is on a separate
+   stream from the stdio JSON-RPC channel).
+
+**What's NOT covered.** Worker-thread panics — a green process on a
+scheduler pool thread that panics — are out of scope here; the existing
+scheduler is expected to keep workers alive past one process's panic. If
+a real worker-thread panic surfaces, the same `catch_unwind` shape applies
+around the per-coroutine `run` loop. A `SIGSEGV` (the demo's earlier
+symptom, before the race fix) is also out of scope: `catch_unwind` catches
+Rust `panic!`, not segfaults — and the race that triggered the segfaults
+is fixed in the scheduler.
+
+**Effect on tests.** `cargo test --workspace` green (33 MCP tests; 529
+in-language). The new test passes; no regressions elsewhere. The `gc`
+test crate hit its 60s timeout once under full-parallel workspace load
+(`--test-threads=$(nproc)`) but passes cleanly in isolation and under
+`--test-threads=2`; pre-existing slow tests, not a regression from this
+change.
+
+**Docs.** [`deferred.md`](deferred.md) #3 promoted to "shipped" with
+as-built design notes; [`roadmap.md`](roadmap.md)'s deferred-ergonomic
+entry flipped from ⬜ to ✅.
