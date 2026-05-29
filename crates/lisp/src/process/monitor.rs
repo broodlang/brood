@@ -92,6 +92,14 @@ pub fn next_ref() -> u64 {
     NEXT_REF.fetch_add(1, Ordering::Relaxed)
 }
 
+/// How many watchers are currently monitoring `pid` (the `:monitored-by` count
+/// in `process-info`). Takes only the MONITORS lock; 0 for an unwatched/dead pid.
+pub fn monitored_by(pid: u64) -> usize {
+    crate::core::sync::lock(&MONITORS)
+        .get(&pid)
+        .map_or(0, |watchers| watchers.len())
+}
+
 /// Deliver a `[:down …]` to one watcher — the single fan-out point both
 /// [`super::deregister`] (target died) and [`add_monitor`] (target was already dead)
 /// use. Local watchers get an in-process mailbox push; remote watchers get

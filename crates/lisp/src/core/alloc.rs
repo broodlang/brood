@@ -55,14 +55,15 @@ static SOFT_LIMIT: AtomicUsize = AtomicUsize::new(0); // 0 = unlimited; safepoin
 /// unbounded run will eat all host RAM — an unlimited default once OOM-froze the
 /// machine. The cap machinery is still opt-out per run via `BROOD_MEM_LIMIT`.
 ///
-/// **5 GiB hard / 4 GiB soft.** With the `:isolated` phase now running each unit
-/// in its own droppable process (`std/test.blsp`), the whole project suite peaks
-/// ~3 GiB (down from ~18 GiB when every isolated test accumulated on the long-lived
-/// runner heap and OOM-froze the host). 5/4 GiB leaves headroom over that while
-/// staying well under host RAM. Tighten as the GC lands / per-process limits arrive
-/// (ADR-011). A single `(sum-to 100000 0)` tail loop still holds ~500 MiB on its
-/// own — every `(+ …)`/`(- …)` is a prelude Brood call allocating ~22 env frames +
-/// an args list per iteration, unreclaimed without GC (see `docs/devlog.md`).
+/// **5 GiB hard / 4 GiB soft.** With the test runner now hibernating between steps
+/// (`std/test.blsp`, the Stage-A block — each step flips the runner's arena so its
+/// transients are reclaimed), the whole project suite peaks ~1.1 GiB (down from
+/// ~4 GiB tripping this cap, and ~18 GiB before isolated units ran in droppable
+/// processes / OOM-froze the host). 5/4 GiB leaves ample headroom while staying well
+/// under host RAM. Tighten once automatic collection (Stage B, `docs/memory-review.md`)
+/// lands and the hibernate scaffold is removed. A single `(sum-to 100000 0)` tail
+/// loop still holds ~60 MiB unreclaimed without GC (every `(+ …)` is a prelude Brood
+/// call allocating env frames per iteration; see `docs/devlog.md`).
 pub const TEST_DEFAULT_HARD: usize = 5 * 1024 * 1024 * 1024; // 5 GiB
 /// Soft default for the test runners — 4 GiB, so a runaway/accumulating run fails
 /// *cleanly* (catchable `E0043`) before the hard abort and far below host RAM.

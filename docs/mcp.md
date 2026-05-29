@@ -148,7 +148,7 @@ The contract for every operation:
 
 ## The tool surface (Brood, in `std/mcp.blsp`)
 
-Nine tools, each earning its place by needing the runtime to answer —
+Twelve tools, each earning its place by needing the runtime to answer —
 anything a plain file read or grep would answer is **not** here, because
 Claude Code already has those:
 
@@ -163,6 +163,9 @@ Claude Code already has those:
 | `format`      | `{file?, source?}`          | `{formatted}`                          | Idempotent reformatter |
 | `processes`   | `{}`                        | `[{pid, status, ...}]`                 | After `spawn`, list live green processes |
 | `callers`     | `{name}`                    | `{references: [{file, line, col}]}`    | Cross-file find-references — the *use* sites of a global (complements `lookup`'s def site) |
+| `apropos`     | `{pattern}`                 | `{matches: [name]}`                    | Discover globals by name substring — answer "does X exist?" without guessing names |
+| `all-globals` | `{}`                        | `{globals: [name]}`                    | The full name list of the live image (prelude + project) |
+| `doc-search`  | `{query}`                   | `{results: [{name, doc}]}`             | Find a capability by *behaviour* — searches docstrings, not names |
 
 Each tool is a `defn` in `std/mcp.blsp`; `(mcp-tools)` returns the catalogue
 the dispatcher reads at startup. **A project can extend the surface** by

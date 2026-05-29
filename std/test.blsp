@@ -328,9 +328,10 @@ docs/testing.md for the full guide.")
 ;; GC is still a no-op (M1), so every *started* worker holds its entire allocation
 ;; until it exits — and reduction-preemption interleaves all started workers, so
 ;; spawning ALL units at once kept hundreds of heaps live simultaneously and made
-;; the suite peak ~18 GiB (enough to OOM-freeze the host). `run-parallel` instead
-;; spawns at most this many, collects them — each then exits and its LOCAL heap is
-;; reclaimed wholesale — and only then spawns the next group, so the live set is
+;; the suite peak ~18 GiB (enough to OOM-freeze the host). The hibernating driver
+;; (`run-driver`) instead spawns at most this many per group, collects them — each
+;; then exits and its LOCAL heap is reclaimed wholesale — and only then spawns the
+;; next group (and flips its own arena between groups), so the live set is
 ;; bounded by one group. The cap (`-j`) on OS threads does NOT bound this (it
 ;; limits threads, not started-and-suspended coroutines). Lower = less memory,
 ;; less parallelism; raise once the GC reclaims so a unit's transients don't pile
@@ -338,15 +339,10 @@ docs/testing.md for the full guide.")
 ;; freely — this only bounds how many *units* are in flight at once.
 (def *parallel-batch* 4)
 
-;; Run the parallel/serial units in bounded groups so the no-GC live set stays
-;; bounded (see `*parallel-batch*`). Each group is spawned, fully collected (its
-;; workers exit and free), then the next group starts.
-(defn run-parallel (units me acc)
-  (if (empty? units)
-    acc
-    (let (workers (spawn-units (take *parallel-batch* units) me)
-          results (collect-units workers nil))
-      (run-parallel (drop *parallel-batch* units) me (append results acc)))))
+;; The parallel/serial units run in bounded groups (see `*parallel-batch*`) — but
+;; the loop that does so is the hibernating `run-driver` below, which also folds in
+;; the isolated phase. (It used to be a plain `run-parallel`/`run-isolated` pair;
+;; they were merged into the driver so the runner can `(hibernate)` between groups.)
 
 ;; The unit a monitored worker `pid` was spawned for, or nil if `pid` isn't one
 ;; of ours (e.g. a stale `[:down …]` from a previous run still in the mailbox).
@@ -403,30 +399,71 @@ docs/testing.md for the full guide.")
 (defn run-unit-fresh (unit)
   (let (group (second unit)) (map (fn (t) (run-test-fresh group t)) (third unit)))) ; -> results
 
-;; Isolated phase: run each isolated unit in its OWN spawned process, one at a
-;; time (each awaited before the next is spawned). Two reasons it's a separate
-;; process rather than running on the runner:
-;;   1. **Memory.** The GC is still a no-op (M1), so a tree-walk accumulates
-;;      everything it allocates until the heap is dropped. Running every isolated
-;;      test on the long-lived runner accumulated the WHOLE suite's footprint on
-;;      one heap (measured ~18 GiB → host OOM). A spawned process's LOCAL heap is
-;;      reclaimed wholesale when it exits, so the isolated phase now costs only one
-;;      unit's peak at a time.
-;;   2. **Isolation.** Each unit gets its own pid + mailbox, so a test that
-;;      over-sends to `(self)` can't leak stragglers into an unrelated test (which
-;;      it could when all isolated tests shared the runner's mailbox).
-;; Still serial (await each), so `%isolate`'s snapshot/restore of the *shared*
-;; globals table can't race a concurrent unit. A crashed worker (KI-2) is turned
-;; into failing results via `monitor`, exactly like the parallel phase.
-(defn run-isolated (units acc)
-  (if (empty? units)
-    acc
+;; ─── TEMPORARY (Stage A — docs/memory-review.md) ────────────────────────────
+;; Hibernating test runner. The runner is one long-lived process; with automatic
+;; collection disabled (the ADR-035 GC is a no-op) it otherwise accumulates every
+;; step's transients — worker-result copies, the `append` spine, spawn/monitor
+;; machinery — until it trips the memory cap (the ~633-test suite hit ~4 GiB).
+;; So the result-gathering loop runs in a SPAWNED process that `(hibernate)`s
+;; between steps: each flip keeps only `(steps parent acc)` and drops that step's
+;; garbage, turning the unbounded climb into a per-step sawtooth. This is a
+;; userland GC trigger and a SMELL — delete this whole block and gather the two
+;; phases inline (a plain `fold`/recur) once automatic collection (Stage B) lands.
+;;
+;; Each isolated unit still runs in its OWN awaited worker (so its heap is dropped
+;; wholesale on exit, and its mailbox can't leak stragglers into another test);
+;; the parallel units still run in `*parallel-batch*`-sized groups (so the no-GC
+;; live set stays bounded to one group). Isolated steps come first and serially,
+;; so `%isolate`'s snapshot/restore of the shared globals table can't race a
+;; concurrent unit and each sees the clean post-load baseline.
+
+;; Chunk `coll` into ≤`n`-sized groups, KEEPING a short trailing group (`partition`
+;; drops it — which here would silently skip tests).
+(defn run--chunks (n coll acc)
+  (if (empty? coll)
+    (reverse acc)
+    (run--chunks n (drop n coll) (cons (take n coll) acc))))
+
+;; The driver's work list: each isolated unit as its own `(:iso unit)` step, then
+;; the parallel/serial units as `(:par . units)` groups.
+(defn run--steps (iso par)
+  (append (map (fn (u) (list :iso u)) iso)
+          (map (fn (b) (cons :par b)) (run--chunks *parallel-batch* par nil))))
+
+;; Run one step in the current (driver) process, returning its unit results. An
+;; `:iso` step spawns+awaits one unit under `%isolate`; a `:par` step spawns the
+;; group and collects it. A crashed worker (KI-2) becomes failing results via the
+;; `monitor` inside `spawn-units`/here, never a hang.
+(defn run--step (step)
+  (if (= (first step) :iso)
     (let (me (self)
-          unit (first units)
+          unit (second step)
           pid (spawn (send me (list :unit-result (self) (run-unit-fresh unit))))
-          _ (monitor pid)
-          results (collect-units (list (list pid unit)) nil))
-      (run-isolated (rest units) (append results acc)))))
+          _ (monitor pid))
+      (collect-units (list (list pid unit)) nil))
+    (collect-units (spawn-units (rest step) (self)) nil)))
+
+;; The hibernating loop: run a step, then `(hibernate)` into the next with its
+;; results accumulated — the flip reclaims the step's transients. When the work
+;; list is empty, hand the full result list to `parent` (the process exits, so its
+;; heap drops too). Runs in the process `drain-runner` spawns, where `hibernate`
+;; is caught at the coroutine boundary.
+(defn run-driver (steps parent acc)
+  (if (empty? steps)
+    (send parent [:all-results acc])
+    (hibernate run-driver (rest steps) parent
+      (append (run--step (first steps)) acc))))
+
+;; Spawn the driver and block until it reports every unit's results. Monitors it
+;; so a driver crash surfaces as an error instead of hanging the suite.
+(defn drain-runner (iso par)
+  (let (me (self)
+        d  (spawn (run-driver (run--steps iso par) me nil))
+        mref (monitor d))
+    (receive
+      ([:all-results rs] rs)
+      ([:down ~mref ~d reason] (error (str "test runner crashed: " reason))))))
+;; ────────────────────────────────────────────────────────────────────────────
 
 ;; --- reporting ---------------------------------------------------------------
 ;; A failure record is (loc detail-lines): loc is (file line col) or nil.
@@ -486,16 +523,11 @@ docs/testing.md for the full guide.")
          iso
          (filter (fn (u) (= (first u) :isolated)) units)
          start
-         (now)
-         me
-         (self))
-    ;; Isolated phase first: each isolated test runs alone, against a private copy
-    ;; of the globals, so it sees the clean post-load baseline (none of the
-    ;; parallel/serial defs below) and its own defs roll back. Then launch the
-    ;; parallel/serial workers and collect them.
-    (let (iso-results (run-isolated iso nil)
-          par-results (run-parallel par me nil)
-          results (append iso-results par-results)
+         (now))
+    ;; All result-gathering runs in the hibernating driver (isolated units first
+    ;; and serially, then the parallel groups), so the runner's per-step transients
+    ;; are reclaimed between steps. See the Stage-A block above.
+    (let (results (drain-runner iso par)
           elapsed (- (now) start)
           total (count results)
           failed (count-failed results)
@@ -526,12 +558,8 @@ docs/testing.md for the full guide.")
   (let (units (reverse *units*)
         par   (filter (fn (u) (not= (first u) :isolated)) units)
         iso   (filter (fn (u) (= (first u) :isolated)) units)
-        start (now)
-        me    (self))
-    (let (iso-results (run-isolated iso nil)
-          workers     (spawn-units par me)
-          par-results (collect-units workers nil)
-          results     (append iso-results par-results)
+        start (now))
+    (let (results     (drain-runner iso par)
           elapsed     (- (now) start)
           total       (count results)
           failed      (count-failed results)

@@ -1,12 +1,12 @@
-;; The display/input seam (M3, ADR-046): the `display` render-op protocol and the
-;; pure core of the interactive `observe` process viewer. The frame builders are
-;; pure data, so they are fully testable without a terminal; the `term-*`
-;; primitives (the crossterm frontend) need a real TTY and are exercised by
-;; `nest observe`.
+;; The display/input seam (M3, ADR-046) + process introspection (ADR-050): the
+;; `display` render-op protocol and the pure core of the interactive `observe`
+;; process viewer. The frame builders are pure data, fully testable without a
+;; terminal; the `term-*` primitives (the crossterm frontend) need a real TTY and
+;; are exercised by `nest observe`.
 ;;
-;; The closing :isolated block adds cross-process coverage: it spawns real
-;; processes and drives the `mailbox-size` primitive + `observe--snapshot` from a
-;; live runtime, proving the one new Rust accessor works under the scheduler.
+;; The closing :isolated block adds cross-process coverage: it drives the
+;; `process-info` primitive + `observe--snapshot` against a live runtime, proving
+;; the kernel introspection works under the scheduler.
 
 (require 'test)
 (require 'observe)        ; pulls in display too
@@ -39,22 +39,40 @@
     (assert= (observe--bytes->human 512) "512 B")
     (assert= (observe--bytes->human 2048) "2 KB")
     (assert= (observe--bytes->human 3145728) "3 MB"))
-  (test "observe--row lays out a marker + pid + mailbox in fixed columns"
-    (let (r (observe--row "▸ " "p1" 7))
-      (is (string-contains? r "▸"))
-      (is (string-contains? r "p1"))
+  (test "observe--opt renders a value or a dash when absent"
+    (assert= (observe--opt nil name) "-")
+    (assert= (observe--opt :foo name) "foo"))
+  (test "observe--cells lays out six fixed-width columns"
+    (let (r (observe--cells 7 "worker" "waiting" 3 "8 KB" 1))
       (is (string-contains? r "7"))
-      ;; 2-wide marker + 24-wide pid + 8-wide mailbox
-      (assert= (string-length r) 34)))
+      (is (string-contains? r "worker"))
+      (is (string-contains? r "waiting"))
+      (is (string-contains? r "8 KB"))
+      ;; 5 + 12 + 8 + 6 + 8 + 4 columns + 5 single-space gaps
+      (assert= (string-length r) 48)))
+  (test "observe--proc-cells renders a process-info map (absent fields → dash)"
+    (let (r (observe--proc-cells {:id 2 :name nil :status :waiting :mailbox 4 :monitored-by 1}))
+      (is (string-contains? r "waiting"))
+      (is (string-contains? r "-"))))          ; nil name / absent memory
   (test "observe--window-start keeps the selection on screen, clamped"
     (assert= (observe--window-start 0 5 10) 0)      ; top
     (assert= (observe--window-start 5 5 10) 3)      ; centred (5 - 5/2)
     (assert= (observe--window-start 9 5 10) 5))     ; clamped to maxstart = 10-5
-  (test "observe--sel-index follows a pid across the list, recovers if gone"
-    (let (ps [{:pid "a" :mailbox 0} {:pid "b" :mailbox 0} {:pid "c" :mailbox 0}])
-      (assert= (observe--sel-index ps "b") 1)
-      (assert= (observe--sel-index ps "gone") 0)    ; missing → 0
-      (assert= (observe--sel-index [] "b") 0)))     ; empty → 0
+  (test "observe--sel-index follows a pid id across the list, recovers if gone"
+    (let (ps [{:id 1} {:id 2} {:id 3}])
+      (assert= (observe--sel-index ps 2) 1)
+      (assert= (observe--sel-index ps 99) 0)        ; missing → 0
+      (assert= (observe--sel-index [] 2) 0)))       ; empty → 0
+  (test "observe--sort orders by id (asc) / mailbox / memory (desc)"
+    (let (ps [{:id 3 :mailbox 1 :memory 10} {:id 1 :mailbox 9 :memory 30}
+              {:id 2 :mailbox 5 :memory 20}])
+      (assert= (map (fn (p) (get p :id)) (observe--sort ps :id)) '(1 2 3))
+      (assert= (map (fn (p) (get p :id)) (observe--sort ps :mailbox)) '(1 2 3))   ; mbox 9,5,1
+      (assert= (map (fn (p) (get p :id)) (observe--sort ps :memory)) '(1 2 3))))  ; mem 30,20,10
+  (test "observe--next-sort cycles id → mailbox → memory → id"
+    (assert= (observe--next-sort :id) :mailbox)
+    (assert= (observe--next-sort :mailbox) :memory)
+    (assert= (observe--next-sort :memory) :id))
   (test "observe--node-lines summarises the node panel"
     (let (node {:name :nonode :workers 4 :peak 6 :spawned 10
                 :mem 2048 :mem-peak 4096 :peers []}
@@ -67,79 +85,91 @@
 (def sample-node {:name :nonode :workers 4 :peak 6 :spawned 10
                   :mem 2048 :mem-peak 4096 :peers []})
 
+(defn pinfo (id name status mbox mon)
+  {:id id :node :nonode :name name :status status :mailbox mbox :monitored-by mon})
+
 (describe "observe-frame (the pure render core)"
   (test "node panel + header + a row per process + detail + footer"
-    (let (procs [{:pid "#<pid nonode/1>" :mailbox 0}
-                 {:pid "#<pid nonode/2>" :mailbox 3}]
-          f (observe-frame sample-node procs 0 60 12 false))
+    (let (procs [(pinfo 1 :main :running 0 0) (pinfo 2 nil :waiting 3 1)]
+          f (observe-frame sample-node procs 0 60 12 false :id))
       (is (vector? f))
       ;; clear + 2 node lines + col-header + 2 body rows + detail + footer = 8
       (assert= (count f) 8)
       (assert= (first f) [:clear])
-      ;; node panel line 1 names the node and process count
       (is (string-contains? (nth (nth f 1) 3) "brood observer"))
       (is (string-contains? (nth (nth f 1) 3) "2 processes"))
-      ;; first body row is a :text op at row 3 carrying its pid
+      ;; header row (index 3) carries the column titles
+      (is (string-contains? (nth (nth f 3) 3) "STATUS"))
+      ;; first body row (index 4) is a :text op at row 3 carrying its id + status
       (let (row0 (nth f 4))
         (assert= (first row0) :text)
         (assert= (nth row0 1) 3)
-        (is (string-contains? (nth row0 3) "nonode/1")))))
+        (is (string-contains? (nth row0 3) "main"))
+        (is (string-contains? (nth row0 3) "running")))))
 
-  (test "the selected row is marked and highlighted; others are plain"
-    (let (procs [{:pid "a" :mailbox 0} {:pid "b" :mailbox 0}]
-          f (observe-frame sample-node procs 1 60 12 false)
-          row0 (nth f 4)        ; process row at index 0 (not selected)
-          row1 (nth f 5))       ; process row at index 1 (selected)
-      (assert= (count row0) 4)                       ; no face
-      (assert= (count row1) 5)                       ; styled
-      (assert= (nth row1 4) {:reverse true})
+  (test "selected row is reverse-highlighted; others get a status face"
+    (let (procs [(pinfo 1 :a :running 0 0) (pinfo 2 :b :waiting 0 0)]
+          f (observe-frame sample-node procs 1 60 12 false :id)
+          row0 (nth f 4)        ; index 0, not selected, :running
+          row1 (nth f 5))       ; index 1, selected
+      (assert= (nth row0 4) {:fg :green})            ; running → green
+      (assert= (nth row1 4) {:reverse true})         ; selected → reverse
       (is (string-contains? (nth row1 3) "▸"))))
 
-  (test "detail line names the selection; footer reflects paused state"
-    (let (procs [{:pid "p-zero" :mailbox 0} {:pid "p-one" :mailbox 9}]
-          live (observe-frame sample-node procs 1 60 12 false)
-          paused (observe-frame sample-node procs 1 60 12 true))
-      ;; detail is the second-to-last op
-      (is (string-contains? (nth (nth live (- (count live) 2)) 3) "p-one"))
-      (is (string-contains? (nth (last live) 3) "pause"))
+  (test "detail line names the selection; footer shows sort + paused state"
+    (let (procs [(pinfo 1 :zero :running 0 0) (pinfo 2 :one :waiting 9 2)]
+          live (observe-frame sample-node procs 1 60 12 false :mailbox)
+          paused (observe-frame sample-node procs 1 60 12 true :id))
+      ;; detail (second-to-last op) names the selected pid + its fields
+      (is (string-contains? (nth (nth live (- (count live) 2)) 3) "pid 2"))
+      (is (string-contains? (nth (nth live (- (count live) 2)) 3) "monitored-by 2"))
+      ;; footer shows the active sort key and the pause hint
+      (is (string-contains? (nth (last live) 3) "sort(mailbox)"))
       (is (string-contains? (nth (last paused) 3) "PAUSED"))))
 
   (test "long lists are windowed to the terminal with a position counter"
-    (let (procs (map (fn (i) {:pid (str "#<pid nonode/" i ">") :mailbox 0})
-                     (range 20))
-          f (observe-frame sample-node procs 0 60 8 false))   ; rows=8 → cap = 3
+    (let (procs (map (fn (i) (pinfo i nil :waiting 0 0)) (range 20))
+          f (observe-frame sample-node procs 0 60 8 false :id))   ; rows=8 → cap = 3
       ;; clear + 2 node + header + 3 body + detail + footer = 9
       (assert= (count f) 9)
-      ;; the detail line shows a [sel/total] position counter when windowed
       (is (string-contains? (nth (nth f (- (count f) 2)) 3) "/20"))))
 
   (test "every text op is clipped to the terminal width"
-    (let (f (observe-frame sample-node [{:pid "#<pid nonode/1>" :mailbox 0}] 0 20 10 false))
+    (let (f (observe-frame sample-node [(pinfo 1 :longname :running 0 0)] 0 20 10 false :id))
       (is (every? (fn (op) (or (not (= (first op) :text))
                                (<= (string-length (nth op 3)) 20)))
                   f)))))
 
-;; Cross-process coverage: drive the new `mailbox-size` primitive and
-;; `observe--snapshot` against a live runtime (each :isolated test runs alone).
-(describe "observe against live processes"
+;; Cross-process coverage: drive `process-info` + `observe--snapshot` against a
+;; live runtime (each :isolated test runs alone).
+(describe "process-info over live processes"
   :isolated
 
-  (test "mailbox-size reads a process's receive backlog"
-    ;; A worker that only handles [:work _], so other messages pile up.
+  (test "a parked receiver reports :waiting + its mailbox backlog"
+    ;; Only handles [:work _], so other messages pile up and it stays parked.
     (let (w (spawn (receive ([:work _] :done))))
       (send w :a) (send w :b)
       (sleep 20)
-      (is (>= (mailbox-size w) 2))))
+      (let (info (process-info w))
+        (is (map? info))
+        (assert= (get info :status) :waiting)
+        (is (>= (get info :mailbox) 2))
+        (is (number? (get info :id))))))
 
-  (test "mailbox-size of a live process with an empty mailbox is 0, not nil"
-    (is (= (mailbox-size (self)) 0)))
+  (test "monitoring a process shows up in :monitored-by"
+    (let (m (spawn (receive (_ :done))))
+      (monitor m)
+      (sleep 10)
+      (is (>= (get (process-info m) :monitored-by) 1))))
 
-  (test "observe--snapshot yields {:pid :mailbox} maps for live processes"
-    (let (w (spawn (receive (_ :done)))
-          snap (observe--snapshot))
-      (is (vector? (into [] snap)))
-      (is (every? (fn (p) (and (string? (get p :pid))
-                               (number? (get p :mailbox))))
-                  snap))
-      ;; the snapshot is a frame-ready input
-      (is (>= (count (observe-frame (observe--node-info) snap 0 80 24 false)) 5)))))
+  (test "process-info of self is a live map with an id"
+    (let (info (process-info (self)))
+      (is (map? info))
+      (is (number? (get info :id)))
+      (is (includes? [:running :waiting] (get info :status)))))
+
+  (test "observe--snapshot yields frame-ready process-info maps"
+    (spawn (receive (_ :done)))
+    (let (snap (observe--snapshot :id))
+      (is (every? (fn (p) (and (number? (get p :id)) (number? (get p :mailbox)))) snap))
+      (is (>= (count (observe-frame (observe--node-info) snap 0 80 24 false :id)) 5)))))

@@ -755,6 +755,32 @@ detection are deferred. Full reference: [distribution.md](distribution.md).
   primitives; **everything in this section is Brood** on top of them
   (`std/prelude.blsp`) — including `+`, `<`, and `=` themselves.
 
+### Bitwise
+`bit-and`  `bit-or`  `bit-xor`  `bit-not`  `bit-shift-left`  `bit-shift-right`
+
+- Integer bit operations over the 64-bit two's-complement representation.
+  `bit-and`/`bit-or`/`bit-xor` are binary; `bit-not` is the unary complement
+  (`(bit-not n)` = `(- (- n) 1)`).
+- `bit-shift-left` discards bits shifted past bit 63; `bit-shift-right` is an
+  **arithmetic** (sign-preserving) shift. The shift amount must be in `[0, 64)`
+  — outside that range is a clean error, not a crash.
+- These are Rust primitives (they can't be bootstrapped from the numeric ops).
+
+### Randomness
+`rng`  `rand-seed`  `rand-int`  `rand-float`  `shuffle`  `sample`
+
+- Brood has no global mutable state, so the PRNG is **pure and seedable**: every
+  step takes a seed and returns `[value next-seed]`. Thread `next-seed` into the
+  next call (carry it in your loop/process state like any other value). Seed a
+  fresh stream from any integer — e.g. `(now)` — via `rand-seed`.
+- `(rng seed)` → `[value next-seed]` with `value` a non-negative 32-bit int;
+  `(rand-int seed n)` → `[i next-seed]`, `i` in `[0, n)`; `(rand-float seed)` →
+  `[f next-seed]`, `f` in `[0.0, 1.0)`; `(shuffle seed coll)` →
+  `[shuffled next-seed]`; `(sample seed coll)` → `[item next-seed]`.
+- The generator is Marsaglia xorshift32 — fast, fine for simulations, sampling,
+  shuffling, jitter, and ids; **not** for cryptography. All of it is Brood over
+  the bitwise primitives (`std/prelude.blsp`).
+
 ### Comparison & logic
 `=`  `not=`  `<`  `<=`  `>`  `>=`  `not`
 
@@ -915,7 +941,7 @@ These three are the seed of "edit the system while it runs": read code, evaluate
 it into the live environment, replace definitions.
 
 ### Introspection (editor tooling)
-`doc`  `arglist`  `global-names`  `bound?`
+`doc`  `arglist`  `global-names`  `bound?`  `all-globals`  `apropos`  `doc-search`
 
 For self-description — the substrate an editor (and the planned language server,
 `docs/lsp.md`) reads for hover, signature help, completion, and "is this name
@@ -930,6 +956,20 @@ redefined.
 (bound? 'no-such)      ;=> false
 (member? 'map (global-names))  ;=> true        ; every global, for completion
 ```
+
+For **discovery** — finding what exists rather than describing a name you
+already know (the answer to "is there an RNG?" in one call):
+
+```clojure
+(all-globals)            ;=> (… sorted list of every global …)  ; alias of global-names
+(apropos "rand")         ;=> (rand-float rand-int rand-seed …)  ; names containing "rand"
+(apropos :shuffle)       ;=> (shuffle shuffle--acc)             ; string/symbol/keyword pattern
+(doc-search "random")    ;=> ([rand-int "…"] [sample "…"] …)    ; matches docstrings, not names
+```
+
+These three are Brood over `global-names`/`doc` (`std/prelude.blsp`), and are
+also exposed as `nest mcp` tools (`apropos`, `all-globals`, `doc-search`) so an
+agent can explore the live image — see `docs/mcp.md`.
 
 ## Prelude
 

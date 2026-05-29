@@ -2726,3 +2726,58 @@ delimiter counting) is what makes those reuses correct for free.
 (the stable code registry), `docs/llm-native.md` §4 (structured caught errors as
 maps), CLAUDE.md "Keep the language as small as possible" (a reader fact reused, not
 a scanner re-implemented).
+
+## ADR-050 — Randomness is a pure, threaded PRNG (bitwise ops are the only new primitives)
+
+**Status:** accepted (2026-05-29). Prompted by `docs/feedback-retro-game-of-life.md`
+§1/§4 — "no randomness anywhere in the language" was the single biggest ergonomic
+gap an AI assistant hit building a simulation.
+
+**Context.** Almost every language ships a global, stateful RNG: `rand()` mutates a
+hidden seed. Brood is immutable (ADR-026) — there is no global mutable cell to hold a
+PRNG state, and adding one would be a mutation primitive we've sworn off. The
+feedback author hand-rolled a glibc LCG and *threaded the seed through the game
+state* — and noted that's "the idiomatically-correct immutable answer." So the
+language already pointed at the right shape; it was just missing the batteries.
+
+**Decision.** Randomness is a **pure, seedable, threaded** facility, written in Brood
+(`std/prelude.blsp`), not a Rust builtin and not a process-backed mutable `*rng*`:
+- Every step takes a seed and returns `[value next-seed]`; the caller threads
+  `next-seed` into the next call (in loop state, process state, wherever). `rng`,
+  `rand-int`, `rand-float`, `shuffle`, `sample`, `rand-seed`.
+- The generator is Marsaglia **xorshift32**. xorshift32 specifically, because Brood
+  integer `+`/`*` **error on overflow** (they don't wrap, ADR — see `num_bin`): a
+  64-bit PRNG (SplitMix64, PCG) needs wrapping multiply/add we don't have, whereas
+  xorshift32's shifts stay well within i64 and mask back to 32 bits, so it composes
+  from the primitives we *do* have.
+- The **only** new Rust primitives are the **bitwise ops** (`bit-and`/`-or`/`-xor`/
+  `-not`/`-shift-left`/`-shift-right`). These are genuinely irreducible (can't be
+  bootstrapped from the numeric ops) and are independently table-stakes (hashing,
+  flags). Everything stochastic is then Brood on top — exactly the ADR-006 split.
+
+**Rejected alternatives.**
+- *A Rust `rand` builtin / global PRNG.* Fast, familiar, but reintroduces hidden
+  mutable state (violates ADR-026) and moves behaviour into Rust that the language
+  can express itself (violates ADR-006). A non-starter on both counts.
+- *A process-backed `*rng*`* (a green process holding the seed, queried by `send`).
+  This *is* the immutable way to get an ambient generator, and may come later for
+  scripts that don't want to thread — but it's the powerful-but-complex form;
+  ADR-011 says ship the simple threaded form first and defer the rest until a
+  concrete need justifies it.
+- *A cryptographic generator.* Out of scope — xorshift32 is for simulations,
+  sampling, shuffling, jitter, and ids; the docstrings say so explicitly.
+
+**Consequences.**
+- Determinism for free: same seed → same stream, which makes stochastic code
+  **testable** (the PRNG suite asserts exact streams, including across a `send`
+  deep-copy) and reproducible — a property a hidden global RNG can't offer.
+- The threading is visible in the types (`[value next-seed]` everywhere), which is
+  more ceremony than `(rand)` but is the honest cost of purity, and reads naturally
+  once state is already threaded (as it is in any Brood loop/process).
+- If a future need for an ambient generator appears, the process-backed `*rng*` is
+  additive over this — it would *use* these same pure steppers internally.
+
+**References.** ADR-006 (write the language in the language — bitwise primitive,
+stochastic policy in Brood), ADR-026 (immutability — no global mutable PRNG),
+ADR-011 (ship the simple form, defer the process-backed one),
+`docs/feedback-retro-game-of-life.md` §1/§4, `docs/language.md` (Bitwise, Randomness).

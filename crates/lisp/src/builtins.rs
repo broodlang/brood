@@ -113,6 +113,28 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         floor,
     );
 
+    // bitwise — integer bit-twiddling on the i64 two's-complement representation.
+    // Table stakes for hashing, flags, and PRNGs (the std xorshift PRNG is built
+    // on these); they were a noted gap (docs/feedback-retro-game-of-life.md).
+    def(heap, "bit-and", Arity::exact(2), Sig::new(vec![int, int], int), bit_and);
+    def(heap, "bit-or", Arity::exact(2), Sig::new(vec![int, int], int), bit_or);
+    def(heap, "bit-xor", Arity::exact(2), Sig::new(vec![int, int], int), bit_xor);
+    def(heap, "bit-not", Arity::exact(1), Sig::new(vec![int], int), bit_not);
+    def(
+        heap,
+        "bit-shift-left",
+        Arity::exact(2),
+        Sig::new(vec![int, int], int),
+        bit_shift_left,
+    );
+    def(
+        heap,
+        "bit-shift-right",
+        Arity::exact(2),
+        Sig::new(vec![int, int], int),
+        bit_shift_right,
+    );
+
     // pair / sequence — `empty?` is Brood (type dispatch over string-length /
     // vector-length / map-keys; std/prelude.blsp). `first`/`rest` ARE the pair
     // accessors (car/cdr), so they stay. `rest` always yields a list (a vector's
@@ -391,6 +413,17 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![pid_ty], int.union(nil_ty)),
         mailbox_size,
+    );
+    // `(process-info pid)` — an Erlang-`process_info`-style snapshot map for a
+    // live local process (nil for remote/dead), the introspection surface a
+    // process observer/debugger reads. Assembled in Rust because every field is
+    // kernel-internal (registry / scheduler / monitor tables). ADR-051.
+    def(
+        heap,
+        "process-info",
+        Arity::exact(1),
+        Sig::new(vec![pid_ty], map_ty.union(nil_ty)),
+        process_info,
     );
 
     // type reflection — the tag predicates (nil?/int?/string?/…) are Brood
@@ -995,6 +1028,12 @@ pub fn register(heap: &mut Heap, root: EnvId) {
 static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("rem", &["a", "b"], "Integer remainder of a / b (truncated, taking the sign of the dividend)."),
     ("floor", &["x"], "Round x toward negative infinity to an integer."),
+    ("bit-and", &["a", "b"], "Bitwise AND of integers a and b."),
+    ("bit-or", &["a", "b"], "Bitwise (inclusive) OR of integers a and b."),
+    ("bit-xor", &["a", "b"], "Bitwise exclusive-OR of integers a and b."),
+    ("bit-not", &["a"], "Bitwise complement of integer a (two's-complement, so (bit-not n) = (- (- n) 1))."),
+    ("bit-shift-left", &["a", "n"], "Shift integer a left by n bits (0 <= n < 64); bits shifted past bit 63 are discarded."),
+    ("bit-shift-right", &["a", "n"], "Arithmetic (sign-preserving) right shift of integer a by n bits (0 <= n < 64)."),
     ("cons", &["x", "xs"], "A new pair with head x and tail xs."),
     ("first", &["coll"], "The head of a list or vector, or nil if empty."),
     ("rest", &["coll"], "All but the head of a list or vector."),
@@ -1080,6 +1119,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("monitor", &["pid"], "Watch pid; returns a monitor ref. Delivers [:down ref pid reason] when pid dies."),
     ("list-processes", &[], "Every currently-live pid on this runtime (one per registered mailbox). Order is unspecified — sort if you need stability. For agents/tools enumerating spawned processes."),
     ("mailbox-size", &["pid"], "How many messages are queued in pid's mailbox (its receive backlog), or nil if pid is not a live local process. The one process-introspection accessor not reachable from Brood; see std/observe.blsp."),
+    ("process-info", &["pid"], "A snapshot map of a live local process: {:id :node :name :status :mailbox :monitored-by} (:status is :running or :waiting; :name nil if unregistered). nil for a remote/dead pid. The Erlang-process_info-style introspection the observer reads; see std/observe.blsp."),
     ("term-enter", &[], "Enter raw mode + the alternate screen and hide the cursor, taking over the terminal for a full-screen UI. Pair with term-leave. (ADR-046 display seam.)"),
     ("term-leave", &[], "Restore the terminal: show the cursor, leave the alternate screen, disable raw mode. The normal-path teardown for term-enter."),
     ("term-size", &[], "The terminal size as [cols rows] in character cells."),
@@ -1299,6 +1339,55 @@ fn floor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             Ok(Value::Int(f as i64))
         }
     }
+}
+
+// ---------- bitwise ----------
+
+fn bit_and(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let (a, b) = int_pair(heap, args, "bit-and")?;
+    Ok(Value::Int(a & b))
+}
+
+fn bit_or(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let (a, b) = int_pair(heap, args, "bit-or")?;
+    Ok(Value::Int(a | b))
+}
+
+fn bit_xor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let (a, b) = int_pair(heap, args, "bit-xor")?;
+    Ok(Value::Int(a ^ b))
+}
+
+fn bit_not(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let n = expect_int(heap, "bit-not", arg(args, 0))?;
+    Ok(Value::Int(!n))
+}
+
+/// A shift amount must be in `[0, 64)` — Rust's `<<`/`>>` panic outside the bit
+/// width, so reject it as a clean runtime error rather than crash the runtime.
+fn shift_amount(n: i64, who: &str) -> Result<u32, LispError> {
+    if !(0..64).contains(&n) {
+        return Err(LispError::runtime(format!(
+            "{}: shift amount {} out of range [0, 64)",
+            who, n
+        )));
+    }
+    Ok(n as u32)
+}
+
+fn bit_shift_left(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let (a, n) = int_pair(heap, args, "bit-shift-left")?;
+    // Logical shift of the two's-complement bit pattern (bits shifted past the
+    // top are discarded) — the conventional `bit-shift-left`. Wrapping, not
+    // checked: callers mask back down (e.g. the xorshift PRNG) rather than
+    // expecting an overflow error.
+    Ok(Value::Int(a.wrapping_shl(shift_amount(n, "bit-shift-left")?)))
+}
+
+fn bit_shift_right(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let (a, n) = int_pair(heap, args, "bit-shift-right")?;
+    // Arithmetic (sign-preserving) right shift, matching the signed i64 model.
+    Ok(Value::Int(a >> shift_amount(n, "bit-shift-right")?))
 }
 
 // ---------- pair / sequence ----------
@@ -2408,6 +2497,48 @@ fn mailbox_size(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         }
         Value::Pid { .. } => Ok(Value::Nil),
         other => Err(LispError::wrong_type(heap, "mailbox-size", "pid", other)),
+    }
+}
+
+/// `(process-info pid)` — a snapshot map of a **live local** process, or `nil`
+/// for a remote/dead pid (a non-pid is a type error). The fields are all
+/// kernel-internal, so the map is assembled here from the registry / scheduler /
+/// name / monitor tables (ADR-051):
+///
+///   `{:id <int> :node <kw> :name <kw|nil> :status <kw> :mailbox <int>
+///     :monitored-by <int>}`
+///
+/// `:status` is `:running` / `:waiting` (parked in `receive`). `:name` is the
+/// registered name or nil. `:parent` and `:memory` join the map once the kernel
+/// tracks them per-process (the observer already tolerates their absence).
+/// Each accessor takes one lock independently, so no two are held at once.
+fn process_info(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    match arg(args, 0) {
+        Value::Pid { node, id } if crate::dist::is_local(node) => {
+            // Dead/unknown pid → nil (matches `mailbox-size`).
+            if !crate::process::is_alive(id) {
+                return Ok(Value::Nil);
+            }
+            let name = crate::dist::name_for_pid(id)
+                .map(Value::Keyword)
+                .unwrap_or(Value::Nil);
+            let status = crate::process::process_status(id)
+                .map(value::kw)
+                .unwrap_or(Value::Nil);
+            let mailbox = Value::Int(crate::process::mailbox_len(id).unwrap_or(0) as i64);
+            let monitored = Value::Int(crate::process::monitored_by(id) as i64);
+            let pairs = vec![
+                (value::kw("id"), Value::Int(id as i64)),
+                (value::kw("node"), Value::Keyword(node)),
+                (value::kw("name"), name),
+                (value::kw("status"), status),
+                (value::kw("mailbox"), mailbox),
+                (value::kw("monitored-by"), monitored),
+            ];
+            Ok(heap.map_from_pairs(pairs))
+        }
+        Value::Pid { .. } => Ok(Value::Nil),
+        other => Err(LispError::wrong_type(heap, "process-info", "pid", other)),
     }
 }
 
