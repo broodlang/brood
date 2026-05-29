@@ -36,16 +36,10 @@ Used by `std/lineedit.blsp` (the REPL editor); pure, so independently testable."
 (def hl-face-match {:reverse true})
 (def hl-face-error {:fg :red :bold true})
 
-;; The set of names that highlight as a *keyword* (special forms + core macros).
-;; Mirrors `crates/lsp/src/semantic_tokens.rs` SPECIAL_FORMS by hand — that const
-;; is `pub(crate)`, unreachable from Brood; keep the two in sync (ADR-052 notes a
-;; `(special-forms)` primitive as the de-drift follow-up).
-(def hl--special-forms
-  ["if" "do" "def" "fn" "lambda" "let" "let*" "letrec"
-   "quote" "quasiquote" "defmacro" "defn" "defdyn" "defmodule"
-   "when" "unless" "cond" "and" "or" "match" "match*"
-   "try" "catch" "throw" "receive" "binding"
-   "dolist" "doseq" "dotimes" "for" "->" "->>"])
+;; The names that highlight as a *keyword* (special forms + core macros). Read once
+;; from the `(special-forms)` primitive — the canonical Rust `SPECIAL_FORMS`, shared
+;; with the LSP — so this can't drift from the runtime / tooling (ADR-052).
+(def hl--special-forms (special-forms))
 
 (defn special-form? (s)
   "True if string `s` names a Brood special form / core macro that should highlight

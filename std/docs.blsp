@@ -119,6 +119,28 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
           files (fold (fn (acc d) (append acc (project--collect-sources d))) nil dirs))
       (fold (fn (acc f) (str acc (document-file f) "\n")) "" files))))
 
+;; --- the complete builtin/prelude reference (`nest doc --all`) ---------------
+
+;; Is `sym` part of the public surface worth listing in the all-globals
+;; reference? Drops private `foo--bar` helpers and raw `%primitive`s (the
+;; bootstrap layer the prelude builds variadic ops on top of) — what's left is
+;; what a user/agent actually calls.
+(defn docs--public? (sym)
+  (let (nm (name sym))
+    (and (not (string-contains? nm "--")) (not (starts-with? nm "%")))))
+
+(defn document-all ()
+  "The Markdown reference for every *public* global currently bound in the image — each builtin and prelude function/macro with its signature and one-line summary. The complete primitive reference (`nest doc --all`); read this once instead of probing names one at a time. Opt-in std modules (`display`, `buffer`, `ansi`, …) aren't loaded here — `nest doc <module>` documents those."
+  (let (syms (filter docs--public? (global-names)))
+    (str "# Brood — global reference\n\n"
+      "Every public global bound in a fresh image: the Rust builtins plus the "
+      "`std/prelude` functions and macros — i.e. everything callable without a "
+      "`(require …)`. Generated from the live image (`nest doc --all`), so it is "
+      "always in sync. Use `apropos`/`doc-search` to search it interactively; use "
+      "`nest doc <module>` for an opt-in module (`display`, `buffer`, `ansi`, …).\n\n"
+      (docs--section-defs syms)
+      (docs--section-vars syms))))
+
 (defn generate-docs (& args)
   "Print Markdown documentation to stdout: the whole project with no args, or a single module given its name. The policy behind `nest doc`."
   (if (empty? args) (println (document-project)) (println (document-module (first args)))))

@@ -1,0 +1,37 @@
+;; std/keymap.blsp — a rebindable key→command dispatcher. (require 'keymap).
+;;
+;; The shared input seam for interactive Brood UIs (the line editor, the process
+;; observer, the coming text editor). A KEYMAP is a map `key → command-symbol`,
+;; where a key is what `term-poll` returns (a 1-char string, or a keyword like
+;; `:up` / `:ctrl-a`) and a command is a global `(fn (state key) -> state)`. Keys
+;; resolve to commands *by symbol at dispatch time*, so redefining a command (or
+;; rebinding a key) hot-swaps behaviour on the next keystroke — the late-binding
+;; that makes a self-editing UI possible (ADR-046/052).
+;;
+;; This is the counterpart to the display seam: `std/display.blsp` is "render-ops
+;; out"; this is "key events in". Both are policy in Brood over a thin term-* seam.
+
+(defmodule keymap
+  "A rebindable key→command dispatcher for interactive UIs. A *keymap* maps a key
+(a `term-poll` value) to a command **symbol**; `keymap-dispatch` resolves the
+symbol to a global `(fn (state key) -> state)` and applies it, so rebinding a key
+or redefining its command hot-swaps behaviour.
+
+    (require 'keymap)
+    (def *my-keys* {:up 'go-up :down 'go-down})
+    (keymap-dispatch *my-keys* state key (fn (s _) s))   ; unbound → no-op
+
+Used by `std/lineedit.blsp` (self-insert fallback) and `std/observe.blsp` (no-op
+fallback); the same pattern is how the editor's keymaps will work.")
+
+(defn keymap-dispatch (keymap state key fallback)
+  "Dispatch `key` through `keymap` to its command — a global `(fn (state key) ->
+state)` resolved by symbol (so redefining the command, or rebinding the key,
+hot-swaps behaviour). An **unbound** key goes to `fallback` (a `(fn (state key) ->
+state)` — e.g. self-insert, or a no-op `(fn (s _) s)`). A command that throws is
+caught and leaves the state unchanged, so a bad binding can't crash the loop. Pure
+apart from the symbol resolution; testable without a terminal."
+  (let (sym (get keymap key))
+    (if (nil? sym)
+      (fallback state key)
+      (try ((eval sym) state key) (catch e state)))))

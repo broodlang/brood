@@ -407,6 +407,10 @@ time-based behaviour reproducible in CI. It prints `[stopped after …]` on
 the cap and exits 0; the program is dropped where it stood (a TUI may not
 get to restore the terminal — redirect output in CI).
 
+To run a one-off entry point without editing the manifest's `:main`, pass
+`nest run --main module/fn` (or just `--main module`, defaulting the fn to
+`main`) — handy while iterating on a module that isn't the project default.
+
 ## Errors
 
 ```lisp
@@ -421,8 +425,15 @@ get to restore the terminal — redirect output in CI).
 
 ## Common builtins
 
+This is a curated tour, not the full list. For the **complete reference** —
+every builtin and prelude fn/macro with its signature and one-line summary —
+run `nest doc --all` and read it once, rather than probing names one at a time
+in the REPL. (`nest doc <module>` does the same for an opt-in module like
+`display`/`buffer`/`ansi`; `apropos`/`doc-search` search it interactively.)
+
 - **list / seq**: `first` `rest` `cons` `list` `count` `empty?` `nth`
-  `reverse` `map` `filter` `reduce` `fold` `append` `mapcat` `sort` `take`
+  `reverse` `map` `filter` `reduce` `fold` `append`/`concat` (variadic, over
+  lists *and* vectors, returning a list) `mapcat` `sort` `take`
   `drop` `range` `zip` `partition` `frequencies` `enumerate` `repeat`
   `repeatedly`
 - **iteration** (macros, for effect — there is no `while`/`for`-loop): `for`
@@ -470,7 +481,12 @@ get to restore the terminal — redirect output in CI).
   probing names one at a time.
 - **timing**: `now` (ms since epoch) `now-ns` (ns since epoch) `bench`
   (macro: `(bench "label" expr)` prints `label: N ms`, returns `expr`)
-- **I/O**: `print` `println` `slurp` `spit` `load` `eval-string` `read-string`
+- **I/O**: `print` `println` `slurp` `spit` `load` `eval-string` `read-string`.
+  `print`/`println` **flush stdout every call** — there's no separate flush, so
+  an animation frame paints immediately. For raw terminal control without the
+  full display protocol, `(require 'ansi)` gives `ansi-clear`/`ansi-home`/
+  `ansi-cursor`/`ansi-hide-cursor` (escape *strings* you `print`); the ESC byte
+  is the `\e` string escape. (For a render-op frame buffer, use `std/display`.)
 - **Filesystem (stat-class)**: `file-exists?` `dir?` `list-dir` `file-mtime`
 - **processes**: `spawn` (incl. named-spawn `(spawn :name expr)`)
   `send` `receive` `self` `ref` `monitor` `demonitor` `register` `whereis`

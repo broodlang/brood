@@ -2817,15 +2817,20 @@ pid (a non-pid is a type error — same contract as `mailbox-size`):
   (the mailbox holds it in its `waiter` slot) → `:waiting`, else `:running`; dead →
   the whole call is `nil`. An explicit per-process state enum (in-flight kernel
   work) will replace the inference and may widen the vocabulary (`:runnable`).
-- **Incrementally extensible.** The map's key *set* grows monotonically as the
-  kernel exposes more. `:parent` landed via a registry-reachable `pid → parent`
-  side table (the spawner is recorded at `spawn`, dropped at `deregister`) — a
-  side table, not a `Process` field, because the `Process` isn't reachable from
-  the registry while it runs. Still pending: `:memory` (needs per-process alloc
-  attribution — the byte-counting allocator is process-wide, and a process's
-  `Heap` lives inside its coroutine), and a precise `:status` (an explicit state
-  enum set at the scheduler transitions, replacing the `waiter`-slot inference).
-  The observer renders absent fields as "-", so each lands with no rework.
+- **Incrementally extensible — now full.** The map's key *set* grew monotonically
+  as the kernel exposed more; all fields are backed via **registry-reachable cells
+  on the `Mailbox`** (the `Process` itself isn't reachable while it runs):
+  - `:parent` — a `pid → parent` side table (spawner recorded at `spawn`, dropped
+    at `deregister`).
+  - `:status` — a real enum (`:running` / `:runnable` / `:waiting`) read from an
+    `AtomicU8` the scheduler sets at each transition (`enqueue` → runnable,
+    `run_one` → running, `wait_for_message` → waiting; covers root and green),
+    replacing the earlier `waiter`-slot inference (which couldn't see `:runnable`).
+  - `:memory` — the process's LOCAL heap footprint (`Heap::local_bytes`, an
+    estimate from slab `len × size_of`), republished to an `AtomicUsize` each time
+    the process enters `receive`. Bump-allocated, so it shows allocation since the
+    last reset / `hibernate` (an *accumulation* signal, not a GC live set — there
+    is no tracing GC; ADR-016/048). A process that never `receive`s reports `0`.
 
 **Consequences.**
 - The numeric `:id` is monotonic (it's the spawn counter), so it doubles as a
@@ -3005,3 +3010,62 @@ re-doing the node wire codec for nothing.
 (`process-info`, the send-able snapshot maps), ADR-034 (the node handshake/cookie),
 ADR-006 (mechanism in Rust, the agent + loop are Brood), `std/observe.blsp`,
 `docs/roadmap.md` M3.
+
+## ADR-054 — Generational handles: a debug tripwire for use-after-GC
+
+**Status:** accepted (2026-05-29). The debugging/safety foundation for re-enabling
+automatic collection (Stage B, `docs/memory-review.md`). Representation +
+per-process epoch wiring landed; the deref check is debug-only.
+
+**Context.** A Brood handle is an index into a per-process typed slab `Vec`, not a
+raw pointer (for `Send` + the planned arena migration, ADR-002). That makes a
+*stale* handle — one held across an arena flip (`(hibernate)` → `Heap::flush`
+today; the future safepoint `collect`) without being re-rooted — pathological to
+debug: the slab memory is still valid, so the bad access is either an
+out-of-bounds index that panics **far from the cause** (e.g. deep in `pair()` with
+"len 143 index 274"), or, worse, a **silent read of the wrong object** once the
+slab has regrown past that index. Valgrind/heaptrack can't see it (no native
+invalid read). A prototype copying collector at the eval safepoint surfaced
+exactly this, repeatedly, as the dominant cost of doing GC work. The boolean
+`PoisonBits` tripwire can't catch it either: it's cleared on flush and can't
+distinguish a reused slot from its previous occupant (no ABA detection).
+
+**Decision.** Carry a **generation stamp** in every handle and check it at the
+LOCAL deref.
+- **Representation.** Handles widened `u32 → u64` (free — `Value` already has
+  8-byte payloads via `Int`/`Float`/`Ref`): region (2 bits) + **generation
+  (30 bits)** + index (32 bits). `EnvId::GLOBAL` = `u64::MAX`. **Equality and
+  hashing mask the generation** (`canonical()`), so a handle is still "the same
+  object" across epochs — the stamp only gates *derefs*, never identity.
+- **Per-heap epoch, not per-slot.** The allocator is bump-only (it never reuses a
+  slot), so the *only* event that invalidates a LOCAL handle is a whole-arena
+  flip. A single `Heap::local_epoch` therefore suffices: `arena_flip` bumps it
+  before copying, every `alloc_*` stamps the current epoch, and the flush helpers
+  re-mint survivors with the new epoch (carried on `FlushForward`, not threaded).
+  Forward-compatible: when a future collector reuses slots, the stamp becomes a
+  per-slab generation table (the `slotmap` pattern) with no handle-shape change.
+- **Debug-only check.** A `debug_assert!` in each LOCAL accessor compares
+  `handle.generation()` against `local_epoch` and panics **at the bad deref** with
+  the slot and both epochs. Release builds carry the stamp but skip the check
+  (zero cost — same philosophy as the `PoisonBits` it supersedes).
+
+**Consequences.**
+- Use-after-flip is now a precise, located panic, not a far-away bounds error or a
+  silent wrong-slot read — the tool that makes Stage B (and `(hibernate)` misuse)
+  tractable to debug. Proven by `gen_handle_tests` (the tripwire fires; a flushed
+  *root* stays valid) and by the full suite (746 tests, which hibernate per step →
+  thousands of flips) green under `debug_assertions` with **no** false positive.
+- Natives and the `global` sentinel need no stamping: natives are PRELUDE at
+  runtime (LOCAL only during the builder, epoch 0), and `Heap.global` is the
+  `EnvId::GLOBAL` sentinel at runtime (the `local(0)` initializer is builder-only,
+  which never flips).
+- **Limitation:** per-heap granularity catches use-after-flip, not per-slot reuse
+  (there is none yet); and `reset_local_to` deliberately doesn't bump the epoch
+  (it would false-positive below-checkpoint survivors), so the rare reset-regrow
+  ABA stays a documented gap until per-slot generations land.
+
+**References.** ADR-002 (`Rc`→arena migration, why handles are indices),
+ADR-035 (the disabled mark-sweep this helps revive), ADR-026 (immutability — but
+`letrec` cycles mean we still need tracing, not pure refcounting),
+[`docs/memory-review.md`](memory-review.md) (the full memory model review + the
+staged GC plan), [`roadmap.md`](roadmap.md) M1.

@@ -93,6 +93,11 @@ enum Cmd {
         #[arg(long = "for", value_name = "DURATION")]
         for_duration: Option<String>,
 
+        /// Override the entry point for this run — `module` or `module/fn` —
+        /// without editing the manifest's `:main`. Ignored when a FILE is given.
+        #[arg(long = "main", value_name = "MODULE[/FN]")]
+        main: Option<String>,
+
         /// Trailing arguments passed to the entry function as strings.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -137,6 +142,12 @@ enum Cmd {
         /// Module name to document (a baked-in std module or one on the
         /// load-path). Omit to document the whole project.
         module: Option<String>,
+
+        /// Document every public global in a fresh image (the builtins +
+        /// prelude) — the complete primitive reference. Read this instead of
+        /// probing names one at a time. Ignores MODULE.
+        #[arg(long = "all")]
+        all: bool,
     },
 
     /// Serve the project over Model Context Protocol on stdio so an agent
@@ -201,15 +212,17 @@ fn run_main(cli: Cli) {
             file,
             watch,
             for_duration,
+            main,
             args,
         } => cmd_run(
             &mut interp,
             file.as_deref(),
             &watch,
             for_duration.as_deref(),
+            main.as_deref(),
             &args,
         ),
-        Cmd::Doc { module } => cmd_doc(&mut interp, module.as_deref()),
+        Cmd::Doc { module, all } => cmd_doc(&mut interp, module.as_deref(), all),
         Cmd::Repl => cmd_repl(&mut interp),
         Cmd::Mcp => cmd_mcp(&mut interp),
         Cmd::Observe { connect, cookie } => cmd_observe(&mut interp, connect, cookie),
@@ -397,6 +410,7 @@ fn cmd_run(
     file: Option<&str>,
     watch: &[String],
     for_duration: Option<&str>,
+    main: Option<&str>,
     args: &[String],
 ) {
     let promoted: Option<String> = if file.is_none() && watch.len() == 1 {
@@ -464,8 +478,23 @@ fn cmd_run(
             format!("(load \"{}\")", escaped_path)
         }
     };
+    // `--main module/fn` overrides the manifest's `:main` for this run only.
+    // It applies to the project-entry path (no FILE); with a FILE we run that
+    // file directly, so the override is meaningless — warn rather than ignore
+    // silently (the silent-wrong-result lesson from the Game-of-Life retro).
+    let main_override = match (main, file.is_none()) {
+        (Some(spec), true) => format!(
+            "(set-project-main \"{}\") ",
+            brood::introspect::escape_brood_string(spec)
+        ),
+        (Some(_), false) => {
+            eprintln!("nest run: --main is ignored when a FILE is given");
+            String::new()
+        }
+        (None, _) => String::new(),
+    };
     let project_setup = if file.is_none() {
-        "(require 'project) (load-config) ".to_string()
+        format!("(require 'project) (load-config) {}", main_override)
     } else if in_project() {
         "(require 'project) (load-config) \
          (let (root (project--find-root (cwd))) \
@@ -509,14 +538,20 @@ fn cmd_run(
     run(interp, &code);
 }
 
-/// `nest doc [module]` — Markdown docs to stdout.
-fn cmd_doc(interp: &mut Interp, module: Option<&str>) {
-    let code = match module {
-        Some(name) => {
-            let escaped = brood::introspect::escape_brood_string(name);
-            format!("(require 'docs) (generate-docs \"{}\")", escaped)
+/// `nest doc [module] [--all]` — Markdown docs to stdout. `--all` documents
+/// every public global in a fresh image (the complete builtin + prelude
+/// reference) and ignores MODULE.
+fn cmd_doc(interp: &mut Interp, module: Option<&str>, all: bool) {
+    let code = if all {
+        "(require 'docs) (println (document-all))".to_string()
+    } else {
+        match module {
+            Some(name) => {
+                let escaped = brood::introspect::escape_brood_string(name);
+                format!("(require 'docs) (generate-docs \"{}\")", escaped)
+            }
+            None => "(require 'docs) (generate-docs)".to_string(),
         }
-        None => "(require 'docs) (generate-docs)".to_string(),
     };
     run(interp, &code);
 }

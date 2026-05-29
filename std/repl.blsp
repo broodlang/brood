@@ -55,6 +55,12 @@ the dynamic vars `*repl-prompt*` / `*repl-cont-prompt*`; rebind them with
 (defdyn *repl-cont-prompt* "  ...   ")
 (def *repl-banner* "brood — REPL (Ctrl-D to exit)")
 
+;; Persistent history: an interactive session loads its history on start and saves
+;; it (capped to the most recent *repl-history-max* entries) after each submitted
+;; form, so ↑/↓ and C-r span sessions. The file is `$BROOD_HISTORY`, else
+;; `$HOME/.brood_history`; one entry per line, oldest first.
+(def *repl-history-max* 1000)
+
 ;; The reader's INCOMPLETE_INPUT error code (error_codes::INCOMPLETE_INPUT, ADR-049)
 ;; — an unclosed form or string, i.e. "read another line", as opposed to a genuine
 ;; syntax error. A stable code, so matching it is robust (no delimiter re-scanning).
@@ -117,6 +123,39 @@ trimmed, dropping blanks and consecutive duplicates."
       history
       (cons entry history))))
 
+(defn repl--history-path ()
+  "The history file path: `$BROOD_HISTORY`, else `$HOME/.brood_history` (or, with no
+`$HOME`, `.brood_history` in the current directory)."
+  (let (override (getenv "BROOD_HISTORY"))
+    (if override
+      override
+      (str (or (getenv "HOME") ".") "/.brood_history"))))
+
+(defn repl--history->text (history)
+  "Serialize `history` (newest first) to file text: the most recent
+`*repl-history-max*` entries, oldest first, one per line. (Pure — the testable core
+of `repl--save-history`.)"
+  (join "\n" (reverse (take *repl-history-max* history))))
+
+(defn repl--history<-text (text)
+  "Parse history-file `text` into a history list (newest first), dropping blank
+lines. (Pure — the testable core of `repl--load-history`.)"
+  (reverse (filter (fn (l) (not (= l ""))) (string-split text "\n"))))
+
+(defn repl--load-history ()
+  "Load saved history (newest first) from the history file, or `()` if none / on any
+read error — a missing or unreadable history file must never stop the REPL starting."
+  (try
+    (let (path (repl--history-path))
+      (if (file-exists? path) (repl--history<-text (slurp path)) '()))
+    (catch e '())))
+
+(defn repl--save-history (history)
+  "Write the most recent `*repl-history-max*` entries to the history file (oldest
+first, one per line). Best-effort: a write failure is swallowed, never breaking the
+loop."
+  (try (spit (repl--history-path) (repl--history->text history)) (catch e nil)))
+
 ;; ---- I/O loop ---------------------------------------------------------------
 
 (defn repl--read-line (interactive acc history)
@@ -161,7 +200,10 @@ incomplete. Ctrl-C drops the in-progress form and re-prompts. Returns a map
               (let (src (str acc line "\n"))
                 (if (= (repl--eval-print src) :more)
                   (repl--read-eval interactive src history)   ; incomplete — keep reading
-                  {:eof false :history (repl--remember history src)})))))))
+                  (let (h2 (repl--remember history src))
+                    ;; persist only interactive sessions (not piped/scripted runs)
+                    (when interactive (repl--save-history h2))
+                    {:eof false :history h2}))))))))
 
 (defn repl--loop (interactive history)
   "Read-eval one form (skipping blank / comment-only input), then `hibernate` into
@@ -186,7 +228,8 @@ prompts; redirected stdin keeps the plain `read-line` path (prompt echoed only w
 stdout is a TTY). The loop runs in a spawned process — so `hibernate` can flip its
 arena between commands — and this call blocks (parked in `receive`) until that
 process reaches end of input. Returns nil."
-  (let (interactive (and (stdin-tty?) (stdout-tty?)))
+  (let (interactive (and (stdin-tty?) (stdout-tty?))
+        history (if interactive (repl--load-history) '()))
     (when (stdout-tty?) (eprint (str *repl-banner* "\n")))
-    (repl--await (spawn (repl--loop interactive '())))
+    (repl--await (spawn (repl--loop interactive history)))
     nil))

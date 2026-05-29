@@ -791,7 +791,7 @@ detection are deferred. Full reference: [distribution.md](distribution.md).
 
 ### Lists & sequences
 `cons`  `first`  `rest`  `car`  `cdr`  `second`  `third`  `last`  `but-last`
-`list`  `vector`  `append`  `reverse`  `nth`  `count`  `length`  `empty?`
+`list`  `vector`  `append`  `concat`  `reverse`  `nth`  `count`  `length`  `empty?`
 `range`  `take`  `drop`  `take-last`  `drop-last`  `take-while`  `drop-while`
 `member?`  `some?`  `every?`  `find`  `zip`  `partition`  `sort`  `sort-by`
 `remove`  `keep`  `distinct`  `dedupe`  `group-by`  `flatten`  `interpose`
@@ -799,6 +799,9 @@ detection are deferred. Full reference: [distribution.md](distribution.md).
 
 - `first`/`rest` of `nil` are `nil`. `nth` takes an optional default:
   `(nth coll i default)`.
+- `append` / `concat` (`concat` is an alias) concatenate any number of
+  sequences — lists *and* vectors, read as sequences — left to right, returning
+  a **list**; wrap in `(into [] …)` for a vector.
 - `range`: `(range hi)` → `0..hi-1`; `(range lo hi)` → `lo..hi-1`;
   `(range lo hi step)` steps (ascending or descending).
 - `take`/`drop` clamp to the sequence length; `take-last`/`drop-last` take/drop
@@ -905,6 +908,16 @@ the language" principle.
 
 ### I/O
 `print`  `println`
+
+- `print` writes the display forms of its arguments to stdout (space-separated);
+  `println` adds a trailing newline. Both **flush stdout on every call**, so an
+  animation frame paints immediately — there is no separate flush primitive (and
+  none is needed).
+- For simple raw-terminal control, `(require 'ansi)` provides escape *strings*
+  to `print`: `ansi-clear` (erase + home — the per-frame reset), `ansi-cursor`,
+  `ansi-home`, `ansi-hide-cursor`/`ansi-show-cursor`. The ESC byte is the `\e`
+  string escape. For a structured render-op frame buffer instead, use
+  `std/display` (`term-draw`/`term-emit`).
 
 ### Time & memory
 `now`  `now-ns`  `bench`  `mem-bytes`  `mem-peak`

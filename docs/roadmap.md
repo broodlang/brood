@@ -297,14 +297,15 @@ The seam that makes remoteability free later (see architecture.md).
   end-to-end with **no rope/buffer**. A node-stats panel (node name, workers/peak,
   spawn count, memory used/peak, peers) over a navigable process **table** — id ·
   name · status · mailbox · memory · monitors — from `(process-info pid)` (ADR-051,
-  a kernel snapshot map). `↑`/`↓` select, `s` cycles the sort (id/mailbox/memory),
-  `space` pauses the live refresh, `q` quits; status is colour-coded, rows clip to
-  width. Interactivity is a UI-state map threaded through the tail-recursive loop
-  (no mutation); selection tracks the numeric pid **id** (stable across re-sorts).
-  Pure `observe-frame` core (TTY-free, unit-tested) + a thin root-process IO loop.
-  New primitives: `mailbox-size`, `process-info` (incl. `:parent` via a pid→parent
-  side table); `:memory` joins once the kernel tracks per-process bytes (the
-  observer renders absent fields gracefully). `tests/observe_test.blsp` 26/26 incl. GC-stress + an
+  a kernel snapshot map). `↑`/`↓` select, `s` cycles the view (id / mailbox /
+  memory / **tree** — children indented under their parent), `space` pauses the
+  live refresh, `q` quits; status is colour-coded (running/runnable/waiting), rows
+  clip to width. Interactivity is a UI-state map threaded through the tail-recursive
+  loop (no mutation); selection tracks the numeric pid **id** (stable across
+  re-sorts). Pure `observe-frame` core (TTY-free, unit-tested) + a thin root-process
+  IO loop. New primitives: `mailbox-size`, `process-info` — now full (`:status`
+  enum running/runnable/waiting, `:parent`, `:memory` LOCAL footprint), all backed
+  by registry-reachable `Mailbox` cells. `tests/observe_test.blsp` 29/29 incl. GC-stress + an
   `:isolated` live-process block.
 - 🟡 **Observe a *running* runtime — inline + remote (done, ADR-053).** The observer
   loop takes a pluggable **data source** + a snapshot shape (`{:node :procs}`), so

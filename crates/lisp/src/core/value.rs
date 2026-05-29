@@ -128,7 +128,7 @@ pub fn is_dynamic(sym: Symbol) -> bool {
 ///   of that runtime's inner (spawned) processes. This is where `def`'d code
 ///   and the global bindings live, so an update is visible to running processes.
 ///
-/// **Generation stamp (ADR-049 / `docs/memory-review.md`).** A LOCAL handle
+/// **Generation stamp (ADR-054 / `docs/memory-review.md`).** A LOCAL handle
 /// carries the heap's *epoch* at the moment it was minted. Every per-process
 /// arena flip (`(hibernate)` → [`Heap::flush`], and the coming GC) bumps that
 /// epoch and re-mints the survivors, so a handle held across a flip without

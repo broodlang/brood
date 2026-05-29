@@ -243,13 +243,19 @@ mark-sweep — a rooting miss degrades to a debug-catchable dangling handle.
 into nursery + old; minor GC copies only nursery survivors. Standard, and the
 point where copying stops being "slow". Gate on real measurement, not now.
 
-**Optional cross-cutting — generational (slotmap) handles.** If we ever *do* want
-in-place reuse (to reclaim a deep non-tail computation that copying can't reach),
-give each slot a generation counter and carry it in the handle (the Rust
-`slotmap`/`generational-arena` pattern). A stale handle's generation mismatches on
-deref ⇒ a clean detected error, not silent corruption — making invariant #3
-*enforceable* rather than merely *avoided*. This is the principled way to unban
-slot reuse, independent of which collector we run.
+**Cross-cutting — generational handles. ✅ DONE (2026-05-29, ADR-054).** Handles
+now carry a generation stamp (`u64` = region + gen + index), and every LOCAL deref
+debug-checks it against the heap's epoch (bumped on each arena flip). A handle held
+across a flip without re-rooting trips a **precise panic at the bad deref** instead
+of a far-away bounds error or a silent wrong-slot read — the debugging tool that
+makes Stage B tractable. Currently a *per-heap* epoch (the bump allocator never
+reuses a slot, so a whole-arena flip is the only invalidating event); when a
+collector later reuses slots in place, this upgrades to a per-slab generation table
+(the `slotmap`/`generational-arena` pattern) with no handle-shape change — making
+invariant #3 *enforceable* rather than merely *avoided*. Validated: full suite
+746/746 under `debug_assertions` (thousands of flips, no false positive) + dedicated
+fire/stay-valid unit tests. **This is the prerequisite that was blocking a trusted
+Stage B; it's now in place.**
 
 **Explicitly deferred — the operand-stack VM (Model b).** The only thing that
 lets us collect inside a deep non-tail computation precisely. Large; revisit when

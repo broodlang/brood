@@ -101,6 +101,8 @@ macro_rules! region_ref {
                         id.index(),
                         id.0
                     );
+                    #[cfg(debug_assertions)]
+                    self.check_epoch(id.generation(), id.index(), stringify!($name), id.0);
                     &self.local.$field[id.index()]
                 }
                 PRELUDE => &self.prelude.slabs.$field[id.index()],
@@ -517,6 +519,16 @@ pub struct Heap {
     /// prelude `SharedCode` `Arc` is the default (empty) one, since a missing
     /// prelude means a freshly-built builder heap that's about to freeze.
     gc_enabled: bool,
+    /// The LOCAL **generation epoch** — stamped into every LOCAL handle minted
+    /// (the `local_gen` in `alloc_*`), and bumped on every arena flip
+    /// ([`arena_flip`](Self::arena_flip), shared by `flush`/`collect`) so the
+    /// survivors are re-minted with the new value and any handle held across the
+    /// flip without being re-rooted keeps the old one. A debug-only deref check
+    /// in the LOCAL accessors compares `handle.generation()` against this and
+    /// panics at the bad deref. Per-heap (not per-slot): the bump allocator never
+    /// reuses a slot, so a whole-arena flip is the only LOCAL-invalidating event.
+    /// See `docs/memory-review.md`.
+    local_epoch: u32,
 }
 
 impl Default for Heap {
@@ -566,6 +578,7 @@ impl Heap {
             roots: Vec::new(),
             gc_threshold: usize::MAX,
             gc_enabled: false,
+            local_epoch: 0,
         }
     }
 
@@ -587,6 +600,7 @@ impl Heap {
             roots: Vec::new(),
             gc_threshold: gc_floor(),
             gc_enabled: true,
+            local_epoch: 0,
         }
     }
 
@@ -858,12 +872,12 @@ impl Heap {
 
     pub fn alloc_pair(&mut self, head: Value, tail: Value) -> Value {
         let idx = alloc_slot!(self, pairs, (head, tail));
-        Value::Pair(PairId::local(idx))
+        Value::Pair(PairId::local_gen(idx, self.local_epoch))
     }
 
     pub fn alloc_vector(&mut self, items: Vec<Value>) -> Value {
         let idx = alloc_slot!(self, vectors, items);
-        Value::Vector(VecId::local(idx))
+        Value::Vector(VecId::local_gen(idx, self.local_epoch))
     }
 
     // ===== map operations (ADR-040: CHAMP — see `core/map_champ.rs`) =====
@@ -879,7 +893,7 @@ impl Heap {
     /// point for `map_from_pairs`.
     pub fn alloc_empty_map(&mut self) -> Value {
         let idx = alloc_slot!(self, maps, MapNode::default());
-        Value::Map(MapId::local(idx))
+        Value::Map(MapId::local_gen(idx, self.local_epoch))
     }
 
     /// The value `key` maps to, by structural equality, or `None` if absent.
@@ -1327,7 +1341,7 @@ impl Heap {
     /// root in `Value::Map`.
     fn alloc_map_node(&mut self, node: MapNode) -> MapId {
         let idx = alloc_slot!(self, maps, node);
-        MapId::local(idx)
+        MapId::local_gen(idx, self.local_epoch)
     }
 
     /// A fresh root `MapNode` slot holding the same shape as `id`. The
@@ -1365,7 +1379,7 @@ impl Heap {
         };
         let idx = self.local.strings.len();
         self.local.strings.push(entry);
-        Value::Str(StrId::local(idx))
+        Value::Str(StrId::local_gen(idx, self.local_epoch))
     }
 
     /// Materialise a `Value::Rope` into LOCAL from an owned `ropey::Rope`
@@ -1374,7 +1388,7 @@ impl Heap {
     pub fn alloc_rope(&mut self, r: ropey::Rope) -> Value {
         let idx = self.local.ropes.len();
         self.local.ropes.push(r);
-        Value::Rope(RopeId::local(idx))
+        Value::Rope(RopeId::local_gen(idx, self.local_epoch))
     }
 
     /// Resolve a rope handle to its `&ropey::Rope`. LOCAL slots are the common
@@ -1390,6 +1404,8 @@ impl Heap {
                     id.index(),
                     id.0
                 );
+                #[cfg(debug_assertions)]
+                self.check_epoch(id.generation(), id.index(), "rope", id.0);
                 &self.local.ropes[id.index()]
             }
             RUNTIME => self
@@ -1409,7 +1425,7 @@ impl Heap {
     pub(crate) fn alloc_string_from_shared(&mut self, blob: Arc<SharedBlob>) -> Value {
         let idx = self.local.strings.len();
         self.local.strings.push(LocalString::Shared(blob));
-        Value::Str(StrId::local(idx))
+        Value::Str(StrId::local_gen(idx, self.local_epoch))
     }
 
     /// Debug-only: the underlying `SharedBlob` address for a LOCAL Shared
@@ -1429,6 +1445,7 @@ impl Heap {
             id.index(),
             id.0
         );
+        self.check_epoch(id.generation(), id.index(), "local_shared_blob_ptr", id.0);
         match &self.local.strings[id.index()] {
             LocalString::Shared(arc) => Some(Arc::as_ptr(arc)),
             LocalString::Inline(_) => None,
@@ -1452,6 +1469,7 @@ impl Heap {
             id.index(),
             id.0
         );
+        self.check_epoch(id.generation(), id.index(), "local_shared_blob_strong_count", id.0);
         match &self.local.strings[id.index()] {
             LocalString::Shared(arc) => Some(Arc::strong_count(arc)),
             LocalString::Inline(_) => None,
@@ -1474,6 +1492,8 @@ impl Heap {
             id.index(),
             id.0
         );
+        #[cfg(debug_assertions)]
+        self.check_epoch(id.generation(), id.index(), "local_shared_blob", id.0);
         match &self.local.strings[id.index()] {
             LocalString::Shared(arc) => Some(Arc::clone(arc)),
             LocalString::Inline(_) => None,
@@ -1482,7 +1502,7 @@ impl Heap {
 
     pub fn alloc_closure(&mut self, c: Closure) -> ClosureId {
         let idx = alloc_slot!(self, closures, c);
-        ClosureId::local(idx)
+        ClosureId::local_gen(idx, self.local_epoch)
     }
 
     pub fn alloc_native(&mut self, f: NativeFn) -> Value {
@@ -1491,7 +1511,7 @@ impl Heap {
         // swept, so there's no free list to consult.
         let idx = self.local.natives.len();
         self.local.natives.push(f);
-        Value::Native(NativeId::local(idx))
+        Value::Native(NativeId::local_gen(idx, self.local_epoch))
     }
 
     /// Build a proper list from a vector of items.
@@ -1722,8 +1742,16 @@ impl Heap {
     /// drops — so it cannot resurrect the slot-aliasing scheduler race that
     /// disabled the old mark-sweep (`collect_old`).
     fn arena_flip(&mut self, value_roots: &mut [Value], env_roots: &mut [EnvId]) {
+        // Bump the generation epoch *before* copying: survivors are re-minted
+        // into the fresh slabs stamped with the NEW epoch (via `fwd.epoch`), so
+        // any handle held across this flip without being relocated keeps the OLD
+        // epoch and trips the debug deref check. `wrapping_add` is fine — a
+        // collision needs 2^30 flips of one heap between a handle's mint and its
+        // stale use.
+        self.local_epoch = self.local_epoch.wrapping_add(1);
         let old = std::mem::take(&mut self.local);
         let mut fwd = FlushForward::default();
+        fwd.epoch = self.local_epoch;
         for v in value_roots.iter_mut() {
             *v = flush_value(&old, &mut self.local, &mut fwd, *v);
         }
@@ -1758,6 +1786,28 @@ impl Heap {
 
     // ----- access (dispatch on the handle's region) -----
 
+    /// Generational-handle tripwire (debug only). A LOCAL handle carries the
+    /// epoch it was minted in; every arena flip ([`arena_flip`](Self::arena_flip))
+    /// bumps `self.local_epoch` and re-mints survivors, so a handle held across a
+    /// flip without being re-rooted carries a stale epoch. Panic **here**, at the
+    /// bad deref, with the slot + epochs — instead of a far-away out-of-bounds
+    /// index or a silent wrong-slot read. See `docs/memory-review.md`.
+    #[cfg(debug_assertions)]
+    #[inline]
+    fn check_epoch(&self, gen: u32, index: usize, what: &str, raw: u64) {
+        debug_assert!(
+            gen == self.local_epoch,
+            "use-after-GC: {} handle (LOCAL slot {}) is from epoch {}, but the heap is now \
+             epoch {} — a handle held across a (hibernate)/collection arena flip without being \
+             re-rooted (handle {:#x}).",
+            what,
+            index,
+            gen,
+            self.local_epoch,
+            raw,
+        );
+    }
+
     pub fn pair(&self, id: PairId) -> (Value, Value) {
         match id.region() {
             LOCAL => {
@@ -1769,6 +1819,8 @@ impl Heap {
                     id.index(),
                     id.0
                 );
+                #[cfg(debug_assertions)]
+                self.check_epoch(id.generation(), id.index(), "pair", id.0);
                 self.local.pairs[id.index()]
             }
             PRELUDE => self.prelude.slabs.pairs[id.index()],
@@ -1805,6 +1857,8 @@ impl Heap {
                     id.index(),
                     id.0
                 );
+                #[cfg(debug_assertions)]
+                self.check_epoch(id.generation(), id.index(), "string", id.0);
                 self.local.strings[id.index()].as_str()
             }
             // PRELUDE's `Slabs::strings` is also `Vec<LocalString>` because
@@ -2288,6 +2342,8 @@ impl Heap {
                     env.index(),
                     env.0
                 );
+                #[cfg(debug_assertions)]
+                self.check_epoch(env.generation(), env.index(), "env_frame", env.0);
                 &self.local.envs[env.index()]
             }
             RUNTIME => self
@@ -2318,7 +2374,7 @@ impl Heap {
             vars: EnvVars::new(),
             parent,
         });
-        EnvId::local(idx)
+        EnvId::local_gen(idx, self.local_epoch)
     }
 
     pub fn env_get(&self, env: EnvId, sym: Symbol) -> Option<Value> {
@@ -2930,6 +2986,10 @@ fn mark_one(bits: &mut [bool], i: usize) -> bool {
 
 #[derive(Default)]
 struct FlushForward {
+    /// The generation epoch to stamp into every survivor handle minted into the
+    /// fresh slabs (set by [`Heap::arena_flip`] to the post-bump epoch). Carried
+    /// here rather than threaded through every `flush_*` signature.
+    epoch: u32,
     pairs: HashMap<u32, u32>,
     vectors: HashMap<u32, u32>,
     maps: HashMap<u32, u32>,
@@ -2962,7 +3022,7 @@ fn flush_value(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, v: Value) -
 fn flush_pair(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: PairId) -> PairId {
     let key = id.index() as u32;
     if let Some(&new_idx) = fwd.pairs.get(&key) {
-        return PairId::local(new_idx as usize);
+        return PairId::local_gen(new_idx as usize, fwd.epoch);
     }
     let (car, cdr) = old.pairs[id.index()];
     // Reserve the slot *before* recursing so a cycle through (car, cdr)
@@ -2973,13 +3033,13 @@ fn flush_pair(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: PairId) 
     let new_car = flush_value(old, new, fwd, car);
     let new_cdr = flush_value(old, new, fwd, cdr);
     new.pairs[new_idx] = (new_car, new_cdr);
-    PairId::local(new_idx)
+    PairId::local_gen(new_idx, fwd.epoch)
 }
 
 fn flush_vector(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: VecId) -> VecId {
     let key = id.index() as u32;
     if let Some(&new_idx) = fwd.vectors.get(&key) {
-        return VecId::local(new_idx as usize);
+        return VecId::local_gen(new_idx as usize, fwd.epoch);
     }
     let items: Vec<Value> = old.vectors[id.index()].clone();
     let new_idx = new.vectors.len();
@@ -2990,13 +3050,13 @@ fn flush_vector(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: VecId)
         .map(|x| flush_value(old, new, fwd, x))
         .collect();
     new.vectors[new_idx] = copied;
-    VecId::local(new_idx)
+    VecId::local_gen(new_idx, fwd.epoch)
 }
 
 fn flush_string(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: StrId) -> StrId {
     let key = id.index() as u32;
     if let Some(&new_idx) = fwd.strings.get(&key) {
-        return StrId::local(new_idx as usize);
+        return StrId::local_gen(new_idx as usize, fwd.epoch);
     }
     // Clone by variant. `Shared(arc)` becomes `Arc::clone` (+1 ref); the old
     // slab's drop right after `flush` returns will then -1, leaving the
@@ -3011,13 +3071,13 @@ fn flush_string(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: StrId)
     let new_idx = new.strings.len();
     new.strings.push(entry);
     fwd.strings.insert(key, new_idx as u32);
-    StrId::local(new_idx)
+    StrId::local_gen(new_idx, fwd.epoch)
 }
 
 fn flush_rope(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: RopeId) -> RopeId {
     let key = id.index() as u32;
     if let Some(&new_idx) = fwd.ropes.get(&key) {
-        return RopeId::local(new_idx as usize);
+        return RopeId::local_gen(new_idx as usize, fwd.epoch);
     }
     // `ropey::Rope::clone` is a cheap `Arc`-node bump (no byte copy); the old
     // slab drops right after `flush`, leaving the surviving rope's internal
@@ -3026,13 +3086,13 @@ fn flush_rope(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: RopeId) 
     let new_idx = new.ropes.len();
     new.ropes.push(rope);
     fwd.ropes.insert(key, new_idx as u32);
-    RopeId::local(new_idx)
+    RopeId::local_gen(new_idx, fwd.epoch)
 }
 
 fn flush_map(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: MapId) -> MapId {
     let key = id.index() as u32;
     if let Some(&new_idx) = fwd.maps.get(&key) {
-        return MapId::local(new_idx as usize);
+        return MapId::local_gen(new_idx as usize, fwd.epoch);
     }
     // Snapshot just the scalar/copy fields + arrays we need to walk.
     let (size, data_map, node_map, is_collision, data_snapshot, children_snapshot): (
@@ -3075,7 +3135,7 @@ fn flush_map(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: MapId) ->
         data: new_data,
         children: new_children,
     };
-    MapId::local(new_idx)
+    MapId::local_gen(new_idx, fwd.epoch)
 }
 
 fn flush_closure(
@@ -3086,7 +3146,7 @@ fn flush_closure(
 ) -> ClosureId {
     let key = id.index() as u32;
     if let Some(&new_idx) = fwd.closures.get(&key) {
-        return ClosureId::local(new_idx as usize);
+        return ClosureId::local_gen(new_idx as usize, fwd.epoch);
     }
     let cl = old.closures[id.index()].clone();
     let new_idx = new.closures.len();
@@ -3117,7 +3177,7 @@ fn flush_closure(
         doc: cl.doc,
         env,
     };
-    ClosureId::local(new_idx)
+    ClosureId::local_gen(new_idx, fwd.epoch)
 }
 
 fn flush_env(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, env: EnvId) -> EnvId {
@@ -3126,7 +3186,7 @@ fn flush_env(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, env: EnvId) -
     }
     let key = env.index() as u32;
     if let Some(&new_idx) = fwd.envs.get(&key) {
-        return EnvId::local(new_idx as usize);
+        return EnvId::local_gen(new_idx as usize, fwd.epoch);
     }
     let (parent_snapshot, vars_snapshot): (Option<EnvId>, EnvVars) = {
         let frame = &old.envs[env.index()];
@@ -3144,5 +3204,45 @@ fn flush_env(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, env: EnvId) -
         .map(|&(s, v)| (s, flush_value(old, new, fwd, v)))
         .collect();
     new.envs[new_idx] = EnvFrame { vars, parent };
-    EnvId::local(new_idx)
+    EnvId::local_gen(new_idx, fwd.epoch)
+}
+
+#[cfg(test)]
+mod gen_handle_tests {
+    use super::*;
+    use crate::core::value::Value;
+
+    /// The generational-handle tripwire fires at the bad deref. A LOCAL handle
+    /// held across an arena flip (`flush`) without being passed through as a root
+    /// carries a stale generation epoch; dereferencing it must panic *here* with
+    /// a "use-after-GC" message — not a far-away out-of-bounds index. Debug-only
+    /// check; `cargo test` builds with `debug_assertions` on. See
+    /// `docs/memory-review.md`.
+    #[test]
+    #[should_panic(expected = "use-after-GC")]
+    fn stale_handle_after_flip_panics() {
+        let mut h = Heap::new();
+        let id = match h.alloc_pair(Value::Int(1), Value::Int(2)) {
+            Value::Pair(id) => id,
+            _ => unreachable!(),
+        };
+        // Flush with no roots: the pair isn't relocated, and the epoch bumps.
+        h.flush(&mut []);
+        // `id` was minted in the previous epoch → stale → tripwire.
+        let _ = h.pair(id);
+    }
+
+    /// The mirror case: a handle passed through `flush` as a root is relocated
+    /// and re-stamped with the new epoch, so it stays valid (no false positive).
+    #[test]
+    fn flushed_root_handle_stays_valid() {
+        let mut h = Heap::new();
+        let mut roots = [h.alloc_pair(Value::Int(1), Value::Int(2))];
+        h.flush(&mut roots);
+        let (car, _) = match roots[0] {
+            Value::Pair(id) => h.pair(id),
+            _ => unreachable!(),
+        };
+        assert!(matches!(car, Value::Int(1)));
+    }
 }

@@ -7028,3 +7028,97 @@ landed. The lint is a checker pass — it never runs in the eval/heap path the g
 test exercises — and all of: the brood lib unit tests (136), the full `.blsp`
 suite (`brood_suite_passes`), and the `nest` tests (35) are green. Flagged for the
 GC work, not fixed here.
+
+
+## 2026-05-29 — process-info completed: `:status` enum + `:memory`, and an observer process-tree
+
+**Goal.** Fill the last two `process-info` fields (the `:status` enum and per-process
+`:memory`) and add the parent→child **tree view** to the observer. The kernel
+bookkeeping for status/memory didn't exist yet, so this is the kernel work itself
+(scheduler + heap), not a wire-up — done as registry-reachable cells on the
+`Mailbox` (the `Process` isn't reachable from the registry while it runs).
+
+**Built (kernel).**
+- *`:status` — a real enum.* A `status: AtomicU8` on the `Mailbox`, set at the
+  scheduler transitions: `enqueue` → RUNNABLE, `run_one` → RUNNING,
+  `wait_for_message` → WAITING (covers green *and* root; the root inits RUNNING
+  since it never enqueues). `process_status` reads it → `:running`/`:runnable`/
+  `:waiting`, `None` when dead. Replaces the old waiter-slot inference (which
+  couldn't see `:runnable`).
+- *`:memory` — LOCAL footprint.* `Heap::local_bytes()` (slab `len × size_of`, cheap,
+  no traversal) published to a `mem: AtomicUsize` on the `Mailbox` each time the
+  process enters `receive`. Bump-allocated, so it's an *accumulation* signal (shows
+  allocation since the last reset / `hibernate`), not a GC live set — there's no
+  tracing GC. A process that never `receive`s reports `0` (documented limitation).
+- `process-info` now carries `:status` (enum) + `:memory`; the observer's STATUS
+  colours gained `:runnable` (yellow) and the MEM column populates.
+
+**Built (observer tree view).** `s` now cycles id / mailbox / memory / **tree**.
+`observe--tree-order` builds a parent→child forest (roots first — `:parent` nil or
+not in the set — then DFS, each node tagged `:depth`); the row indents the NAME by
+depth, clipped to its column so the rest stay aligned. A **depth cap (= process
+count)** plus the root-filter make a malformed cyclic snapshot (impossible from
+`process-info`, but a buggy remote peer could send one) bounded, not a
+stack-overflow — verified a 2-cycle returns empty rather than hanging.
+
+**Review (asked twice).** Audited the concurrency: status is a Relaxed display cell
+(no sync dependency); transitions are consistent (woken process
+WAITING→`enqueue`-RUNNABLE→RUNNING); `process-info`'s accessors take one lock each
+(REGISTRY→state order matches `deliver`), no new deadlock; a dead pid is gone from
+REGISTRY before any cell is read. Tree-order: terminates via the child>parent id
+invariant, every process emitted once, orphans become roots; O(n²) over all procs
+(fine at observer scale). No correctness bugs; the cycle guard is belt-and-braces.
+
+**Tests.** `tests/observe_test.blsp` 29/29 (status enum incl. self=:running, `:memory`
+> 0 for a parked worker, `observe--tree-order` order+depths, orphan-as-root, the
+sort cycle through `:tree`) + GC-stress; `distribution`/`observe_attach` still green
+(the scheduler edits didn't disturb concurrency / remote attach). Docs: ADR-051
+(now full), primitives, roadmap, observe docstrings.
+
+## 2026-05-29 — Generational handles: a use-after-GC tripwire (ADR-054)
+
+**Goal.** Make GC/memory bugs *debuggable* before re-attempting automatic
+collection. A stale Brood handle (held across an arena flip without re-rooting) is
+an index into a still-valid Rust `Vec` slot — so it surfaces as a bounds panic far
+from the cause, or a silent wrong-slot read. A prototype copying collector kept
+hitting exactly this; valgrind/heaptrack can't see it (no native invalid read).
+
+**Done.** Carry a generation stamp in every handle, check it at the LOCAL deref.
+- *Representation* (committed `3934da3`): handles `u32 → u64` = region(2) + gen(30)
+  + index(32); free, since `Value` already has 8-byte payloads. Eq/Hash mask the
+  gen (`canonical()`), so the stamp gates derefs only, never identity.
+- *Epoch wiring* (this entry): a per-heap `Heap::local_epoch`, bumped in
+  `arena_flip` *before* copying; every `alloc_*` stamps it; the flush helpers
+  re-mint survivors with the new epoch (carried on `FlushForward`, not threaded
+  through 8 signatures). A debug-only `check_epoch` in each LOCAL accessor
+  (`region_ref!` macro + hand-written `pair`/`string`×4/`rope`/`env_frame`) panics
+  at the bad deref with the slot + both epochs. Release skips the check (the
+  `PoisonBits` philosophy). Per-heap (not per-slot) is sufficient while the
+  allocator is bump-only; forward-compatible with per-slab generation tables when
+  a collector later reuses slots.
+
+**Why it's safe / no false positives.** `Heap.global` is the `EnvId::GLOBAL`
+sentinel at runtime (the `local(0)` init is builder-only, never flips); natives are
+PRELUDE at runtime (LOCAL only in the builder, epoch 0) — neither needs stamping.
+`reset_local_to` deliberately doesn't bump the epoch (would false-positive
+below-checkpoint survivors); its rare regrow-ABA stays a documented gap until
+per-slot generations.
+
+**Validation.** Full suite **746/746 under `debug_assertions`** — and the Stage-A
+test runner hibernates per step, so that's *thousands* of arena flips with zero
+false positive (proves the stamping is comprehensive). `gen_handle_tests`:
+`stale_handle_after_flip_panics` (the tripwire fires, `expected = "use-after-GC"`)
++ `flushed_root_handle_stays_valid` (a relocated root stays valid). lib 140, basic
+75, gc 3 (`--test-threads=1`), mem_limit/preemption green. A hand check confirmed a
+correct hibernate loop accumulating a 3000-element list across 3000 flushes reads
+back clean.
+
+**Two false alarms cleared while validating** (don't re-chase): "hibernate hangs"
+was a *buggy test* — `(spawn (send root (spin n)))` where `spin` hibernates is
+misuse (the unwind discards the wrapping `send`; the send must be in the
+hibernating fn's base case). And `gc.rs` failing under parallel `cargo test` is
+cross-test contention on the shared worker pool — passes `--test-threads=1`.
+
+**Next.** Stage B — automatic collection at the eval safepoint — is now
+debuggable: a rooting miss points at itself. Revisit copying-vs-non-moving with
+the tripwire armed (`docs/memory-review.md`).

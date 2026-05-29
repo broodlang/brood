@@ -1049,6 +1049,10 @@ structural order (`compare`), so numeric, string, keyword, and vector keys all w
     (less? (first b) (first a)) (merge--acc less? a (rest b) (cons (first b) acc))
     else (merge--acc less? (rest a) b (cons (first a) acc))))
 
+(defn concat (& seqs)
+  "Concatenate any number of sequences (lists, vectors, or maps read as `[k v]` pairs) into one list, left to right — the variadic sequence join. Alias of `append` (the name reflexively reached for). Returns a list; wrap in `(into [] …)` for a vector."
+  (apply append seqs))
+
 (defn mapcat (f coll)
   "Map `f` over `coll` and concatenate the resulting lists into one."
   (apply append (map f coll)))

@@ -36,6 +36,7 @@ Built on `std/highlight.blsp` (pure analysis) and the inline `term-*` seam.
 `std/repl.blsp` calls it on a TTY in place of `read-line`.")
 
 (require 'highlight)
+(require 'keymap)
 
 (def lineedit-face-hint {:fg :dark-grey})
 
@@ -169,6 +170,62 @@ first time, so ↓ can restore it."
       :else (let (ni (dec idx) entry (nth (get state :hist) ni))
               (assoc state :hist-idx ni :text entry :point (string-length entry))))))
 
+;; ---- reverse incremental history search (C-r) -------------------------------
+;; A modal sub-state on `:search` = `{:query :idx :orig-text :orig-point}`. While
+;; set, `lineedit--handle` routes keys here instead of the keymap: printable chars
+;; extend the query, C-r steps to the next older match, Enter accepts (keeps the
+;; matched line for editing), C-g/Esc cancels (restoring the pre-search line), and
+;; any other key accepts then replays through the normal keymap.
+
+(defn lineedit--search-find (history query i)
+  "Index of the first history entry at or after `i` (older) that contains `query`
+as a substring, or -1. An empty query matches the newest entry."
+  (cond
+    (>= i (count history)) -1
+    (string-contains? (nth history i) query) i
+    :else (lineedit--search-find history query (inc i))))
+
+(defn lineedit--search-step (state query from)
+  "Set the search query to `query` and select the nearest match at or after index
+`from`; on no match, keep the current line but record the (failing) query."
+  (let (s (get state :search)
+        found (lineedit--search-find (get state :hist) query (max 0 from)))
+    (if (< found 0)
+      (assoc state :search (assoc s :query query))
+      (let (entry (nth (get state :hist) found))
+        (assoc state :text entry :point (string-length entry)
+               :search (assoc s :query query :idx found))))))
+
+(defn lineedit--search-cancel (state)
+  "Leave search, restoring the line as it was before C-r."
+  (let (s (get state :search))
+    (assoc state :text (get s :orig-text) :point (get s :orig-point) :search nil)))
+
+(defn lineedit--search-accept (state)
+  "Leave search, keeping the currently matched line for editing."
+  (assoc state :search nil))
+
+(defn lineedit--search-key (state key)
+  "Handle one key while in reverse-search mode (see `:search`)."
+  (let (s (get state :search) q (get s :query) idx (get s :idx))
+    (cond
+      (= key :ctrl-r) (lineedit--search-step state q (inc idx))   ; next older match
+      (or (= key :ctrl-g) (= key :escape)) (lineedit--search-cancel state)
+      (= key :enter) (lineedit--search-accept state)
+      (or (= key :backspace) (= key :ctrl-h))
+        (lineedit--search-step state
+          (if (= q "") "" (substring q 0 (dec (string-length q)))) 0)
+      (and (string? key) (= (string-length key) 1))
+        (lineedit--search-step state (str q key) idx)   ; extend; keep current match if it still matches
+      :else (lineedit--handle (lineedit--search-accept state) key))))
+
+(defn lineedit-reverse-search (state _)
+  "Enter reverse incremental history search (C-r), saving the current line so C-g
+can restore it, and selecting the newest match (empty query → newest entry)."
+  (lineedit--search-step
+    (assoc state :search {:query "" :idx 0 :orig-text (get state :text) :orig-point (get state :point)})
+    "" 0))
+
 ;; ---- completion -------------------------------------------------------------
 
 (defn lineedit--candidates (pfx)
@@ -265,6 +322,7 @@ against `cands` — the candidate itself when unique, else the longest common pr
    :down 'lineedit-history-next
    :ctrl-n 'lineedit-history-next
    :ctrl-l 'lineedit-clear-screen
+   :ctrl-r 'lineedit-reverse-search
    :tab 'lineedit-complete
    :back-tab 'lineedit-complete})
 
@@ -274,17 +332,23 @@ in the editor keymap, taking effect on the next keystroke. The ergonomic way to
 customise the REPL from the REPL: `(lineedit-bind :ctrl-x 'lineedit-clear-screen)`."
   (def *lineedit-keymap* (assoc *lineedit-keymap* key cmd)))
 
+(defn lineedit--fallback (state key)
+  "The unbound-key fallback: a printable 1-char key self-inserts, anything else is
+a no-op. Passed to `keymap-dispatch` as the keymap's default."
+  (if (and (string? key) (= (string-length key) 1))
+    (lineedit-self-insert state key)
+    state))
+
 (defn lineedit--handle (state key)
-  "Dispatch key event `key` through `*lineedit-keymap*` to its command — a global
-`(fn (state key) -> state)` resolved by symbol (so redefining the command, or
-rebinding the key, hot-swaps behaviour). An unbound key self-inserts (a 1-char
-string) or is a no-op; a command that throws is caught so a bad binding can't crash
-the read. Pure apart from that symbol resolution; testable without a terminal."
-  (let (sym (get *lineedit-keymap* key))
-    (cond
-      (not (nil? sym)) (try ((eval sym) state key) (catch e state))
-      (and (string? key) (= (string-length key) 1)) (lineedit-self-insert state key)
-      :else state)))
+  "Dispatch key event `key` through `*lineedit-keymap*` to its command (via the
+shared `keymap-dispatch`): a global `(fn (state key) -> state)` resolved by symbol,
+so redefining the command or rebinding the key hot-swaps behaviour. An unbound key
+self-inserts (a 1-char string) or is a no-op; a command that throws is caught so a
+bad binding can't crash the read. In reverse-search mode (`:search` set) keys route
+to `lineedit--search-key` instead. Pure apart from symbol resolution; testable."
+  (if (not (nil? (get state :search)))
+    (lineedit--search-key state key)
+    (keymap-dispatch *lineedit-keymap* state key lineedit--fallback)))
 
 ;; ---- signature hint + bracket overrides (pure analysis -> render data) -------
 
@@ -350,11 +414,19 @@ matched pair reversed, or a lone unmatched bracket in the error face."
 size (e.g. a pty with no winsize), so layout never collapses to a 1-column window."
   (let ([c r] (term-size)) (if (< c 1) 80 c)))
 
+(defn lineedit--display-prompt (state)
+  "The prompt to show: the `(reverse-i-search)\`query':` prompt while searching, else
+the configured prompt."
+  (let (s (get state :search))
+    (if (nil? s)
+      (get state :prompt)
+      (str "(reverse-i-search)`" (get s :query) "': "))))
+
 (defn lineedit--reflow (state)
   "Recompute the horizontal-scroll window so point is visible, and cache the width,
 available text columns, and prompt width for rendering."
   (let (width (lineedit--cols)
-        promptw (string-length (get state :prompt))
+        promptw (string-length (lineedit--display-prompt state))
         avail (max 1 (- width promptw))
         point (get state :point)
         hs (get state :hscroll)
@@ -386,10 +458,11 @@ already be reflowed by the caller (`lineedit--loop`)."
         cursorpos (+ base point)
         overrides (lineedit--overrides full cursorpos)
         chunks (highlight-chunks full (+ base hs) vis overrides)
-        raw-hint (lineedit--hint-pieces full cursorpos)
+        ;; no signature hint while reverse-searching (the line is a recalled match)
+        raw-hint (if (nil? (get st :search)) (lineedit--hint-pieces full cursorpos) nil)
         hint (if (nil? raw-hint) nil (lineedit--fit raw-hint (dec (get st :width)) '()))
         cursor-col (+ promptw (- point hs))
-        head (append [[:cr] [:clear-below] [:print (get st :prompt)]] (lineedit--chunk-ops chunks))
+        head (append [[:cr] [:clear-below] [:print (lineedit--display-prompt st)]] (lineedit--chunk-ops chunks))
         tail (if (nil? hint)
                (list [:col cursor-col])
                (append (cons [:nl] (lineedit--chunk-ops hint))
