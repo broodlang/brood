@@ -1,12 +1,22 @@
 ;; File & filesystem library (std/file.blsp). Fixtures live under a unique
-;; gensym'd /tmp directory per test, so cases don't collide.
+;; /tmp directory per test, so cases don't collide.
 ;;
 ;; Register-only — discovered and run by `nest test` (and cargo test).
 
 (require 'test)
 (require 'file)
 
-(defn ftmp () (let (d (path-join "/tmp" (name (gensym "brood-file-")))) (make-dir d) d))
+;; A fresh /tmp dir per call. The name must be unique **across runs**, not just
+;; within one: `gensym`'s counter resets every process/run, so a name like
+;; `brood-file-__114` recurs — and a killed run leaves its dir behind, so the next
+;; run's tests `make-dir` onto leftover files (list-files sees extras, append-file
+;; appends to stale content). `(now-ns)` (nanoseconds since the epoch) varies across
+;; runs and between calls; the trailing `gensym` is a tiebreaker for two processes
+;; that read the same nanosecond. Path-safe (digits + `_` only).
+(defn ftmp ()
+  (let (d (path-join "/tmp" (str "brood-file-" (now-ns) "-" (name (gensym "")))))
+    (make-dir d)
+    d))
 
 (describe "file: whole-file read/write/append"
   (test "write-file then read-file round-trips"
