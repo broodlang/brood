@@ -217,3 +217,137 @@ land in a later slice.")
         (package--print-tree *project-dependencies*
           (package--index-by-name (resolve-deps root *project-dependencies*)) "  " nil))
       nil)))
+
+;; --- editing the manifest: `nest add` / `nest remove` -----------------------
+;; These mutate project.blsp's :dependencies clause while preserving the rest of
+;; the file — crucially its comments. We do it over the lossless CST (parse-source
+;; + std/format.blsp): parse → splice an entry node in/out of the :dependencies
+;; vector → re-render with `format-source--root` (which keeps comments). The
+;; manifest is reformatted in the process, which is fine for a tool-managed file.
+;; The pure text transforms (`package--manifest-add`/`-remove`) take a manifest
+;; string and return a new one, so they unit-test without touching the filesystem.
+
+;; Build a CST entry node from a normalised dep map — `[name :path "p"]` /
+;; `[name :git "url" :ref "ref"]` as nested [kind payload] vectors. (String specs
+;; carry no quotes, so the simple `"…"` wrapping is exact for v1.)
+(defn package--str-lit (s) (str "\"" s "\""))
+(defn package--dep->entry-node (dep)
+  (cond
+    (= (get dep :kind) :path)
+    [:vector (vector [:symbol (name (get dep :name))] [:keyword ":path"]
+               [:str (package--str-lit (get dep :path))])]
+    (= (get dep :kind) :git)
+    [:vector (vector [:symbol (name (get dep :name))] [:keyword ":git"]
+               [:str (package--str-lit (get dep :url))]
+               [:keyword ":ref"] [:str (package--str-lit (get dep :ref))])]
+    else (error "package: cannot build a manifest entry for kind " (get dep :kind))))
+
+;; Is `n` the manifest's top-level (project …) list node?
+(defn package--project-list? (n)
+  (and (= (node-kind n) :list)
+    (let (forms (filter (fn (c) (not (trivia? c))) (vec->list (node-children n))))
+      (and (not (empty? forms))
+        (= (node-kind (first forms)) :symbol)
+        (= (node-text (first forms)) "project")))))
+
+;; The list index of the node *following* the :dependencies keyword (its value
+;; vector), or nil if the manifest has no :dependencies clause.
+(defn package--deps-value-index (children)
+  (package--deps-value-index--scan children 0 false))
+(defn package--deps-value-index--scan (children i after-kw)
+  (cond
+    (empty? children) nil
+    after-kw (if (trivia? (first children))
+               (package--deps-value-index--scan (rest children) (inc i) true)
+               i)
+    (and (= (node-kind (first children)) :keyword) (= (node-text (first children)) ":dependencies"))
+    (package--deps-value-index--scan (rest children) (inc i) true)
+    else (package--deps-value-index--scan (rest children) (inc i) false)))
+
+;; Functional list update: `lst` with element `i` replaced by `(f element)`.
+(defn package--list-update (lst i f) (package--list-update--acc lst i f 0 nil))
+(defn package--list-update--acc (lst i f j acc)
+  (if (empty? lst)
+    (reverse acc)
+    (package--list-update--acc (rest lst) i f (inc j)
+      (cons (if (= j i) (f (first lst)) (first lst)) acc))))
+
+;; The dep name (symbol) of an entry node `[:vector [[:symbol "name"] …]]`, or nil.
+(defn package--entry-name (entry-node)
+  (let (forms (filter (fn (c) (not (trivia? c))) (vec->list (node-children entry-node))))
+    (if (and (not (empty? forms)) (= (node-kind (first forms)) :symbol))
+      (symbol (node-text (first forms)))
+      nil)))
+
+;; Append `entry-node` to the project node's :dependencies vector, creating the
+;; clause if absent. `children` is the project list's child-node list.
+(defn package--children-add-dep (children entry-node)
+  (let (didx (package--deps-value-index children))
+    (if (nil? didx)
+      (append children
+        (list [:whitespace " "] [:keyword ":dependencies"] [:whitespace " "] [:vector (vector entry-node)]))
+      (package--list-update children didx
+        (fn (vecnode)
+          [:vector (apply vector (append (vec->list (node-children vecnode)) (list entry-node)))])))))
+
+;; Drop the entry named `nm` from the project node's :dependencies vector.
+(defn package--children-remove-dep (children nm)
+  (let (didx (package--deps-value-index children))
+    (if (nil? didx)
+      children
+      (package--list-update children didx
+        (fn (vecnode)
+          [:vector (apply vector
+                     (filter (fn (c) (not (and (= (node-kind c) :vector) (= (package--entry-name c) nm))))
+                       (vec->list (node-children vecnode))))])))))
+
+;; Re-render `src` after applying `f` to its (project …) node. Comments survive.
+(defn package--manifest-transform (src f)
+  (require 'format)
+  (let (kids (vec->list (node-children (parse-source src))))
+    (format-source--root
+      (apply vector (map (fn (n) (if (package--project-list? n) (f n) n)) kids)))))
+
+(defn package--manifest-add (src entry-node)
+  "Return manifest `src` with `entry-node` added to its :dependencies (pure)."
+  (package--manifest-transform src
+    (fn (proj) [:list (apply vector (package--children-add-dep (vec->list (node-children proj)) entry-node))])))
+
+(defn package--manifest-remove (src nm)
+  "Return manifest `src` with the dep named `nm` removed from :dependencies (pure)."
+  (package--manifest-transform src
+    (fn (proj) [:list (apply vector (package--children-remove-dep (vec->list (node-children proj)) nm))])))
+
+;; A CLI spec token: ":path"/":git"/":ref" → keyword; anything else → the string.
+(defn package--spec-token (tok)
+  (if (starts-with? tok ":") (keyword (substring tok 1 (string-length tok))) tok))
+
+(defn package--has-dep? (deps nm) (some? (fn (d) (= (get d :name) nm)) deps))
+
+(defn add (nm & spec)
+  "Add a dependency to project.blsp and re-lock. `nm` is the require-name; `spec` is `:path PATH` or `:git URL :ref REF` (strings). :git lands in Slice 2. Backs `nest add`."
+  (package--in-project
+    (fn (root)
+      (let (dep (project--parse-dep (apply vector (cons (symbol nm) (map package--spec-token spec)))))
+        (when (not (= (get dep :kind) :path))
+          (error "package: `nest add` supports :path deps for now (git lands in Slice 2)"))
+        (when (package--has-dep? *project-dependencies* (get dep :name))
+          (error "package: " nm " is already a dependency"))
+        (let (manifest (path-join root "project.blsp"))
+          (spit manifest (package--manifest-add (slurp manifest) (package--dep->entry-node dep)))
+          (load manifest)
+          (write-lockfile root (resolve-deps root *project-dependencies*))
+          (println (str "package: added " nm)))))))
+
+(defn remove-dep (nm)
+  "Remove dependency `nm` from project.blsp and re-lock (an empty lock if no deps remain). Backs `nest remove`."
+  (package--in-project
+    (fn (root)
+      (let (name-sym (symbol nm))
+        (when (not (package--has-dep? *project-dependencies* name-sym))
+          (error "package: " nm " is not a dependency"))
+        (let (manifest (path-join root "project.blsp"))
+          (spit manifest (package--manifest-remove (slurp manifest) name-sym))
+          (load manifest)
+          (write-lockfile root (resolve-deps root *project-dependencies*))
+          (println (str "package: removed " nm)))))))
