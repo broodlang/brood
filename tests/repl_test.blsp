@@ -2,36 +2,16 @@
 ;;
 ;; The REPL itself is an IO loop over `read-line`/`eval-string` (driven by the
 ;; `brood` / `nest repl` binaries, exercised manually), so these tests cover the
-;; pure pieces it's built from: complete-form detection (`repl--balanced?`),
-;; datum detection (`repl--content?`), and error rendering (`repl--error-message`).
-;; The closing :isolated block sends an error *map* through a process boundary
-;; (a deep copy across per-process heaps) before formatting it, proving the
-;; structured-error path round-trips under the scheduler.
+;; pure decisions it's built from: datum detection (`repl--content?`), the
+;; incomplete-input signal that drives multi-line reads (`repl--incomplete?`, off
+;; the reader's E0002 code — ADR-049), and error rendering (`repl--error-message`).
+;; One integration test confirms `repl--eval-print` reports `:more` for a partial
+;; form. The closing :isolated block sends an error *map* through a process
+;; boundary (a deep copy across per-process heaps) before formatting it, proving
+;; the structured-error path round-trips under the scheduler.
 
 (require 'test)
 (require 'repl)
-
-(describe "repl--balanced? — complete-form detection"
-  (test "balanced forms are complete"
-    (is (repl--balanced? "(+ 1 2)"))
-    (is (repl--balanced? "[1 2 3]"))
-    (is (repl--balanced? "{:a 1}"))
-    (is (repl--balanced? "42")))
-  (test "unclosed delimiters are incomplete"
-    (refute (repl--balanced? "(+ 1"))
-    (refute (repl--balanced? "[1 2"))
-    (refute (repl--balanced? "{:a")))
-  (test "delimiters inside a string don't count"
-    (is (repl--balanced? "\"(still balanced\""))
-    (refute (repl--balanced? "\"open")))
-  (test "an escaped quote does not close the string"
-    (is (repl--balanced? "\"hi \\\"there\\\"\"")))
-  (test "delimiters inside a ; comment don't count"
-    (is (repl--balanced? "; (a comment"))
-    (is (repl--balanced? "(+ 1 2) ; ) trailing comment")))
-  (test "a multi-line form is complete once all lines are accumulated"
-    (refute (repl--balanced? "(defn f\n"))
-    (is (repl--balanced? "(defn f\n(x)\n(* x 2))\n"))))
 
 (describe "repl--content? — ignore blank / comment-only input"
   (test "whitespace-only input has no datum"
@@ -42,6 +22,23 @@
   (test "real content is detected, even after leading space / comments"
     (is (repl--content? "  (+ 1 1)" 0 9 false))
     (is (repl--content? "; note\n(+ 1 1)" 0 14 false))))
+
+(describe "repl--incomplete? — the read-another-line signal"
+  (test "the reader's E0002 (incomplete input) error is incomplete"
+    (is (repl--incomplete? {:code "E0002" :kind :parse :message "unexpected end of input"})))
+  (test "a real error (different code) is not incomplete"
+    (refute (repl--incomplete? {:code "E0010" :kind :unbound :message "x"}))
+    (refute (repl--incomplete? {:kind :type :message "bad"})))
+  (test "a non-map (user throw) is not incomplete"
+    (refute (repl--incomplete? "boom"))
+    (refute (repl--incomplete? 42))))
+
+(describe "repl--eval-print — completeness reporting"
+  (test "a partial form reports :more (so the loop reads another line)"
+    ;; eval-string reads all forms before evaluating any, so an unclosed form
+    ;; raises E0002 at read time with nothing evaluated — silent, no output.
+    (assert= (repl--eval-print "(+ 1") :more)
+    (assert= (repl--eval-print "(str \"open") :more)))
 
 (describe "repl--error-message — rendering caught values"
   (test "a built-in error map renders kind + message"

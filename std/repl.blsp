@@ -8,11 +8,19 @@
 ;;    it can be redefined at runtime like everything else (the project's reason
 ;;    for existing). Replaces the old Rust `crates/repl`.
 ;;  - No mutation, no loop construct: `repl--loop` is tail-recursive, so it runs
-;;    forever in O(1) stack. NOTE: the per-process tracing GC that was meant to
-;;    reclaim each command's allocations (ADR-035) is currently DISABLED
-;;    (`Heap::collect` is a no-op), and this loop does not `(hibernate)`, so a
-;;    long session accumulates LOCAL allocations with no reclamation. The fix is
-;;    to recur via `(hibernate repl--loop tty)` (arena flip) — see ADR-048.
+;;    forever in O(1) stack. Memory is bounded by recurring through
+;;    `(hibernate repl--loop tty)`: each command flips the process's LOCAL arena,
+;;    keeping only the loop fn + `tty` and discarding that command's transients.
+;;    `hibernate` is caught by the *spawned-process* scheduler loop, not the root
+;;    eval — so `repl-run` runs the loop in a spawned process and `monitor`s it to
+;;    await EOF. (The ADR-035 tracing GC is currently a no-op, so this arena flip,
+;;    not the GC, is what reclaims a long session's allocations — see ADR-048.)
+;;  - Multi-line input is driven by the reader, not a hand-rolled scanner: an
+;;    unclosed form or string makes `eval-string` raise the INCOMPLETE_INPUT
+;;    error (code "E0002", ADR-049), the signal to read another line. Because
+;;    `eval-string` reads *all* forms before evaluating any, an incomplete buffer
+;;    throws at read time with nothing evaluated, so retrying the whole buffer as
+;;    later lines arrive has no partial / double side effects.
 ;;  - Line editing comes free from the terminal's cooked mode (backspace, ^U,
 ;;    ^W), so `read-line` stays a plain blocking read. Arrow-key history is a
 ;;    later addition over the `term-*` raw-key seam + the buffer framework — the
@@ -39,37 +47,17 @@ the dynamic vars `*repl-prompt*` / `*repl-cont-prompt*`; rebind them with
 (defdyn *repl-cont-prompt* "  ...   ")
 (def *repl-banner* "brood — REPL (Ctrl-D to exit)")
 
-;; ---- pure form scanning -----------------------------------------------------
+;; The reader's INCOMPLETE_INPUT error code (error_codes::INCOMPLETE_INPUT, ADR-049)
+;; — an unclosed form or string, i.e. "read another line", as opposed to a genuine
+;; syntax error. A stable code, so matching it is robust (no delimiter re-scanning).
+(def *repl-incomplete-code* "E0002")
 
-(defn repl--balanced? (src)
-  "True when `src` has no unclosed `()`/`[]`/`{}` and no open string — i.e. it's
-a complete form (or forms) ready to evaluate."
-  (repl--scan src 0 (string-length src) 0 false false false))
-
-(defn repl--scan (s i n depth in-str esc in-com)
-  "Tail-recursive delimiter scan over `s`, tracking nesting `depth`, whether we're
-inside a string (`in-str`, with `esc` for a pending backslash) or a `;`-comment
-(`in-com`). Balanced when we finish outside a string with `depth <= 0`."
-  (if (>= i n)
-    (and (not in-str) (<= depth 0))
-    (let (c (char-at s i) j (inc i))
-      (cond
-        in-com (repl--scan s j n depth false false (not (= c "\n")))
-        in-str (cond
-                 esc        (repl--scan s j n depth true false false)
-                 (= c "\\") (repl--scan s j n depth true true false)
-                 (= c "\"") (repl--scan s j n depth false false false)
-                 :else      (repl--scan s j n depth true false false))
-        (= c "\"") (repl--scan s j n depth true false false)
-        (= c ";") (repl--scan s j n depth false false true)
-        (includes? "([{" c) (repl--scan s j n (inc depth) false false false)
-        (includes? ")]}" c) (repl--scan s j n (dec depth) false false false)
-        :else (repl--scan s j n depth false false false)))))
+;; ---- whitespace / comment skip ----------------------------------------------
 
 (defn repl--content? (s i n in-com)
   "True if `s` holds an actual datum — i.e. some character that isn't whitespace
-or part of a `;`-comment. Lets the loop ignore blank lines and comment-only
-input without echoing `nil`."
+or part of a `;`-comment. Lets the loop ignore blank / comment-only lines at a
+fresh prompt without echoing `nil`."
   (if (>= i n)
     false
     (let (c (char-at s i) j (inc i))
@@ -79,23 +67,13 @@ input without echoing `nil`."
         (blank? c) (repl--content? s j n false)
         :else true))))
 
-;; ---- I/O loop ---------------------------------------------------------------
+;; ---- evaluation -------------------------------------------------------------
 
-(defn repl--prompt (acc)
-  "Print the primary or continuation prompt depending on whether we're starting a
-fresh form (`acc` empty) or continuing a multi-line one."
-  (print (if (= acc "") *repl-prompt* *repl-cont-prompt*)))
-
-(defn repl--read-form (tty acc)
-  "Read lines from stdin into `acc` until they form a complete (balanced) form,
-returning that source. Returns `nil` at end of input with nothing pending; a
-partial form pending at EOF is returned as-is (eval will report it)."
-  (when tty (repl--prompt acc))
-  (let (line (read-line))
-    (if (nil? line)
-      (if (= acc "") nil acc)
-      (let (next (str acc line "\n"))
-        (if (repl--balanced? next) next (repl--read-form tty next))))))
+(defn repl--incomplete? (e)
+  "True when caught value `e` is the reader's *incomplete input* error (EOF inside
+a form or string) — the signal to read another line. Matches the stable error
+code rather than re-scanning delimiters (ADR-049)."
+  (and (map? e) (= (get e :code) *repl-incomplete-code*)))
 
 (defn repl--error-message (e)
   "Render a caught value for display: built-in errors arrive as a structured map
@@ -109,26 +87,64 @@ partial form pending at EOF is returned as-is (eval will report it)."
     (str "error: " (if (string? e) e (pr-str e)))))
 
 (defn repl--eval-print (src)
-  "Evaluate `src` in the running image and print its value in readable form, or
-print the error it raised. Never lets an error escape the loop."
+  "Evaluate `src` in the running image. Returns `:ok` after printing its value,
+`:more` if `src` is an incomplete form (read another line), or `:error` after
+reporting a real error. Never lets an error escape the loop."
   (try
-    (println (pr-str (eval-string src)))
-    (catch e (eprint (str (repl--error-message e) "\n")))))
+    (do (println (pr-str (eval-string src))) :ok)
+    (catch e
+      (if (repl--incomplete? e)
+        :more
+        (do (eprint (str (repl--error-message e) "\n")) :error)))))
+
+;; ---- I/O loop ---------------------------------------------------------------
+
+(defn repl--prompt (acc)
+  "Print the primary or continuation prompt depending on whether we're starting a
+fresh form (`acc` empty) or continuing a multi-line one."
+  (print (if (= acc "") *repl-prompt* *repl-cont-prompt*)))
+
+(defn repl--read-eval (tty acc)
+  "Prompt, read a line, accumulate it into `acc`, and evaluate. Recurses (without
+hibernating, so the partial form survives) to read another line when the form is
+incomplete. Returns `:eof` at end of input, otherwise `:ok` once a form (or a
+skipped blank line) is handled."
+  (when tty (repl--prompt acc))
+  (let (line (read-line))
+    (cond
+      ;; EOF: report a half-typed form if one is pending, then stop.
+      (nil? line)
+        (do (when (and (not (= acc "")) (= (repl--eval-print acc) :more))
+              (eprint "error: incomplete input at end of input\n"))
+            :eof)
+      ;; A blank / comment-only line at a fresh prompt: nothing to evaluate.
+      (and (= acc "") (not (repl--content? line 0 (string-length line) false))) :ok
+      :else
+        (let (src (str acc line "\n"))
+          (if (= (repl--eval-print src) :more)
+            (repl--read-eval tty src)     ; incomplete — keep reading this form
+            :ok)))))
 
 (defn repl--loop (tty)
-  "The loop: read a form, evaluate-and-print it (skipping blank / comment-only
-input), repeat until end of input. Tail-recursive — runs in O(1) stack."
-  (let (form (repl--read-form tty ""))
-    (cond
-      (nil? form) (when tty (print "\n"))
-      (repl--content? form 0 (string-length form) false)
-        (do (repl--eval-print form) (repl--loop tty))
-      :else (repl--loop tty))))
+  "Read-eval one form (skipping blank / comment-only input), then `hibernate` into
+the next iteration — flipping the LOCAL arena so the command's transients are
+reclaimed (keeping only this fn + `tty`). Returns (and the process exits) at end
+of input. Runs in the process `repl-run` spawns, where `hibernate` is caught."
+  (if (= (repl--read-eval tty "") :eof)
+    (when tty (print "\n"))
+    (hibernate repl--loop tty)))
+
+(defn repl--await (p)
+  "Block the current process until process `p` exits."
+  (let (r (monitor p))
+    (receive ([:down ~r ~p _] nil))))
 
 (defn repl-run ()
   "Run the read-eval-print loop on stdin until end of input (Ctrl-D). Prompts and
-the banner show only on a TTY; results always print. Returns nil."
+the banner show only on a TTY; results always print. The loop runs in a spawned
+process — so `hibernate` can flip its arena between commands — and this call
+blocks (parked in `receive`) until that process reaches end of input. Returns nil."
   (let (tty (stdout-tty?))
     (when tty (eprint (str *repl-banner* "\n")))
-    (repl--loop tty)
+    (repl--await (spawn (repl--loop tty)))
     nil))

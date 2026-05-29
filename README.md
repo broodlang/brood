@@ -145,8 +145,7 @@ crates/lisp    the language: reader, evaluator, builtins, value model, scheduler
 crates/cli     the `brood` binary: the language — REPL, file runner, `--test`
 crates/nest    the `nest` binary: project tooling — `new`, `test`, `run`, `doc`, `format`, …
 crates/lsp     the `brood-lsp` binary: the language server
-crates/repl    the shared REPL, used by both `brood` and `nest`
-std/           the prelude + opt-in modules (test, project, docs, buffer, display, …), in Brood
+std/           the prelude + opt-in modules (repl, test, project, buffer, display, …), in Brood
 docs/          architecture, language reference, roadmap, decisions, dev log
 ```
 

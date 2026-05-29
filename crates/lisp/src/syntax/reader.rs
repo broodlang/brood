@@ -51,7 +51,7 @@ pub fn read_one(heap: &mut Heap, src: &str) -> Result<Value, LispError> {
     let mut parser = Parser::new(heap, src);
     parser.s.skip_trivia();
     if parser.s.at_end() {
-        return Err(parser.err("unexpected end of input"));
+        return Err(parser.err_incomplete("unexpected end of input"));
     }
     parser.read_form()
 }
@@ -104,12 +104,27 @@ impl<'a> Parser<'a> {
         LispError::parse(msg).with_pos(pos)
     }
 
+    /// An *incomplete input* parse error — input ended mid-form or mid-string.
+    /// Tagged with `INCOMPLETE_INPUT` so a REPL / editor can distinguish "needs
+    /// more input" (keep reading) from a genuine syntax error, without having to
+    /// re-scan the text for balanced delimiters.
+    fn err_incomplete(&self, msg: impl Into<String>) -> LispError {
+        self.err(msg)
+            .with_code(crate::error::error_codes::INCOMPLETE_INPUT)
+    }
+
+    /// `err_at` for an incomplete-input error (see [`err_incomplete`]).
+    fn err_at_incomplete(&self, pos: Pos, msg: impl Into<String>) -> LispError {
+        self.err_at(pos, msg)
+            .with_code(crate::error::error_codes::INCOMPLETE_INPUT)
+    }
+
     fn read_form(&mut self) -> Result<Value, LispError> {
         self.s.skip_trivia();
         let c = self
             .s
             .peek()
-            .ok_or_else(|| self.err("unexpected end of input"))?;
+            .ok_or_else(|| self.err_incomplete("unexpected end of input"))?;
         // Every branch below that recurses through `read_form` is guarded by
         // `enter`/`exit` so a deeply nested input (e.g. 100 000 open parens
         // from a malicious file or LSP buffer) returns a clean parse error
@@ -184,7 +199,7 @@ impl<'a> Parser<'a> {
         loop {
             self.s.skip_trivia();
             match self.s.peek() {
-                None => return Err(self.err_at(start, "unclosed list (opened here)")),
+                None => return Err(self.err_at_incomplete(start, "unclosed list (opened here)")),
                 Some(c) if c == close => {
                     self.s.bump();
                     break;
@@ -197,7 +212,7 @@ impl<'a> Parser<'a> {
                     self.s.bump(); // the '.'
                     self.s.skip_trivia();
                     match self.s.peek() {
-                        None => return Err(self.err("unclosed list")),
+                        None => return Err(self.err_incomplete("unclosed list")),
                         Some(c) if c == close => {
                             return Err(self.err("expected a form after '.' in dotted list"))
                         }
@@ -227,7 +242,7 @@ impl<'a> Parser<'a> {
         loop {
             self.s.skip_trivia();
             match self.s.peek() {
-                None => return Err(self.err_at(start, "unclosed vector (opened here)")),
+                None => return Err(self.err_at_incomplete(start, "unclosed vector (opened here)")),
                 Some(']') => {
                     self.s.bump();
                     break;
@@ -249,7 +264,7 @@ impl<'a> Parser<'a> {
         loop {
             self.s.skip_trivia();
             match self.s.peek() {
-                None => return Err(self.err_at(start, "unclosed map (opened here)")),
+                None => return Err(self.err_at_incomplete(start, "unclosed map (opened here)")),
                 Some('}') => {
                     self.s.bump();
                     break;
@@ -280,7 +295,7 @@ impl<'a> Parser<'a> {
         let mut s = String::new();
         match self.s.scan_string_body(Some(&mut s)) {
             StringScan::Closed => Ok(self.heap.alloc_string(&s)),
-            StringScan::Unterminated => Err(self.err("unterminated string")),
+            StringScan::Unterminated => Err(self.err_incomplete("unterminated string")),
         }
     }
 

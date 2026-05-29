@@ -61,11 +61,11 @@ for every well-formed input. Hand-checked across the brood repo's std/ and tests
     acc
     (count-newlines--at s (inc i) n (if (= (substring s i (inc i)) "\n") (inc acc) acc))))
 
-(defn string-repeat (s n)
-  "The string `s` concatenated with itself `n` times (n ≥ 0)."
-  (string-repeat--acc s n ""))
-(defn string-repeat--acc (s n acc) (if (<= n 0) acc (string-repeat--acc s (dec n) (str acc s))))
-
+;; (`string-repeat` is the prelude's — it used to be redefined here with an
+;; accumulator that did `(str acc s)` each step (O(total length²)); the prelude's
+;; `(apply str (repeat n s))` is a single O(total length) pass. The runtime shares
+;; one global table, so this local copy clobbered the prelude's for the whole image
+;; once `format` was required. Use the prelude's.)
 (defn indent-of (n) (string-repeat " " n))
 
 ;; The whitespace inside a comment node is `";; foo\n"` — the trailing newline

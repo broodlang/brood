@@ -47,7 +47,8 @@ Codes are grouped by [`ErrorKind`]:
 
 | Code | Kind | Raised by | Example trigger |
 |---|---|---|---|
-| `E0001` | `:parse` | reader, `LispError::parse(...)` | `(unclosed` |
+| `E0001` | `:parse` | reader, `LispError::parse(...)` | `)` (unexpected close), `(. .)` |
+| `E0002` | `:parse` | reader, `err_incomplete` / `err_at_incomplete` — input ended mid-form or mid-string (vs a genuine syntax error). A REPL/editor matches this to mean "read another line" (ADR-049). | `(+ 1`, `[1 2`, `"unterminated` |
 | `E0010` | `:unbound` | eval lookup, `LispError::unbound(...)` | `(no-such-fn)` |
 | `E0020` | `:arity` | `bind_params`, `LispError::arity(...)` | `((fn (x) x))` |
 | `E0030` | `:type` | `LispError::wrong_type(...)` / `type_err(...)` | `(first 5)` |

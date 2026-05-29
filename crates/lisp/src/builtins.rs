@@ -164,6 +164,16 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![seq], list_ty),
         sort_cmp,
     );
+    // `(compare a b)` exposes the same structural total order as a binary
+    // comparison (-1/0/1), so `sort-by` / `min-by` / custom comparators work over
+    // any orderable value (strings, keywords, vectors, …), not just numbers.
+    def(
+        heap,
+        "compare",
+        Arity::exact(2),
+        Sig::new(vec![any, any], int),
+        compare,
+    );
 
     // vector
     def(
@@ -991,6 +1001,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("vector", &["&", "items"], "A vector of the given items."),
     ("vector-ref", &["v", "i"], "The element at index i of vector v."),
     ("vector-length", &["v"], "The number of elements in vector v."),
+    ("compare", &["a", "b"], "Structural total-order comparison: -1 if a sorts before b, 0 if equal, 1 if after. Numbers numerically; strings/keywords/symbols by text; vectors/lists lexicographically; cross-kind by a stable tag rank. The binary form of `sort`'s order — `sort-by` and custom comparators build on it."),
     ("hash-map", &["&", "kvs"], "A map from alternating key/value arguments (last wins on duplicate keys)."),
     ("map-get", &["m", "k", "default"], "The value at key k in map m, or default (else nil)."),
     ("map-assoc", &["m", "k", "v"], "A fresh map like m with key k set to v."),
@@ -1384,6 +1395,22 @@ fn sort_cmp(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     // handles, so no GC root machinery is needed.
     items.sort_by(|a, b| heap.value_cmp(*a, *b));
     Ok(heap.list(items))
+}
+
+/// `(compare a b)` — the structural total order as a binary comparison: `-1` if
+/// `a` sorts before `b`, `0` if equal, `1` if after. Numbers compare
+/// numerically; strings/keywords/symbols by text; vectors/lists
+/// lexicographically; cross-kind values by a stable tag rank. The binary form of
+/// the order `sort` uses, so `sort-by` and custom comparators work over any
+/// orderable value, not just numbers.
+fn compare(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use std::cmp::Ordering;
+    let ord = match heap.value_cmp(arg(args, 0), arg(args, 1)) {
+        Ordering::Less => -1,
+        Ordering::Equal => 0,
+        Ordering::Greater => 1,
+    };
+    Ok(Value::Int(ord))
 }
 
 // ---------- vector ----------
