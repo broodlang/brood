@@ -63,11 +63,18 @@ impl LocalString {
     fn as_str(&self) -> &str {
         match self {
             LocalString::Inline(s) => s.as_str(),
+            // SAFETY: `SharedBlob::new` is the only constructor and takes
+            // `&[u8]` from a `&str`'s `as_bytes()` (see [`Heap::alloc_string`]).
+            // Blobs are immutable after construction. The wire decoder
+            // (`get_str` in `dist::wire`) validates UTF-8 on entry before
+            // allocating, so a cross-node payload satisfies the invariant
+            // too. In debug builds an extra `from_utf8` round-trip catches
+            // a missed entry-point — the unchecked read only ships in
+            // release.
+            #[cfg(not(debug_assertions))]
+            LocalString::Shared(b) => unsafe { std::str::from_utf8_unchecked(b.as_bytes()) },
+            #[cfg(debug_assertions)]
             LocalString::Shared(b) => {
-                // UTF-8 by construction: every entry point takes `&str` and
-                // the bytes are immutable after allocation. The validation
-                // cost here is Phase-1 caution; will flip to
-                // `from_utf8_unchecked` once invariants are bedded in.
                 std::str::from_utf8(b.as_bytes()).expect("shared blob bytes are valid UTF-8")
             }
         }
@@ -1333,14 +1340,81 @@ impl Heap {
     }
 
     /// Install a pre-existing `Arc<SharedBlob>` as a new LOCAL string slot.
-    /// Used by the receive path (`process::message::from_message` in Phase 1b):
+    /// Used by the receive path ([`crate::process::message::from_message`]):
     /// the sender already bumped the refcount via `Arc::clone` for the
     /// `Message`, so installing it here is just slot bookkeeping — no copy.
-    #[allow(dead_code)] // Used in Phase 1b; lands now so the chokepoint is fully built.
     pub(crate) fn alloc_string_from_shared(&mut self, blob: Arc<SharedBlob>) -> Value {
         let idx = self.local.strings.len();
         self.local.strings.push(LocalString::Shared(blob));
         Value::Str(StrId::local(idx))
+    }
+
+    /// Debug-only: the underlying `SharedBlob` address for a LOCAL Shared
+    /// string, used by the `%blob-ptr` primitive for identity assertions in
+    /// cross-process tests. `None` for an inline string or a non-LOCAL handle.
+    /// Does **not** clone the `Arc`, so the read leaves the refcount
+    /// untouched. Honours the GC poison bitmap — a use-after-flush trips an
+    /// assertion at the call site, the same as every other LOCAL accessor.
+    #[cfg(debug_assertions)]
+    pub(crate) fn local_shared_blob_ptr(&self, id: StrId) -> Option<*const SharedBlob> {
+        if id.region() != LOCAL {
+            return None;
+        }
+        debug_assert!(
+            !PoisonBits::is(&self.poison.strings, id.index()),
+            "use-after-GC: local_shared_blob_ptr() on freed LOCAL strings slot {} (handle {:#x}).",
+            id.index(),
+            id.0
+        );
+        match &self.local.strings[id.index()] {
+            LocalString::Shared(arc) => Some(Arc::as_ptr(arc)),
+            LocalString::Inline(_) => None,
+        }
+    }
+
+    /// Debug-only: the current `Arc::strong_count` for a LOCAL Shared string.
+    /// Used by `%blob-strong-count` for leak-check assertions; like
+    /// [`Self::local_shared_blob_ptr`] this does not bump the count, so the
+    /// reading caller doesn't itself perturb the value it's checking.
+    /// Honours the poison bitmap.
+    #[cfg(debug_assertions)]
+    pub(crate) fn local_shared_blob_strong_count(&self, id: StrId) -> Option<usize> {
+        if id.region() != LOCAL {
+            return None;
+        }
+        debug_assert!(
+            !PoisonBits::is(&self.poison.strings, id.index()),
+            "use-after-GC: local_shared_blob_strong_count() on freed LOCAL strings slot {} \
+             (handle {:#x}).",
+            id.index(),
+            id.0
+        );
+        match &self.local.strings[id.index()] {
+            LocalString::Shared(arc) => Some(Arc::strong_count(arc)),
+            LocalString::Inline(_) => None,
+        }
+    }
+
+    /// If `id` is a LOCAL `Shared` string, return a cloned `Arc<SharedBlob>`
+    /// (atomic incr, no byte copy). Otherwise return `None` so the caller
+    /// falls back to the byte-copying [`Self::string`] path. Used by
+    /// [`crate::process::message::to_message`] to ship big strings between
+    /// processes without copying.
+    pub(crate) fn local_shared_blob(&self, id: StrId) -> Option<Arc<SharedBlob>> {
+        if id.region() != LOCAL {
+            return None;
+        }
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            !PoisonBits::is(&self.poison.strings, id.index()),
+            "use-after-GC: local_shared_blob() on freed LOCAL strings slot {} (handle {:#x}).",
+            id.index(),
+            id.0
+        );
+        match &self.local.strings[id.index()] {
+            LocalString::Shared(arc) => Some(Arc::clone(arc)),
+            LocalString::Inline(_) => None,
+        }
     }
 
     pub fn alloc_closure(&mut self, c: Closure) -> ClosureId {

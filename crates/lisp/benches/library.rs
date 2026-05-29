@@ -234,4 +234,35 @@ mod concurrency {
             ),
         );
     }
+
+    /// Fan-out send of a string payload to N workers (each replies with its
+    /// length). With `payload_bytes >= SHARED_BLOB_THRESHOLD` (256 B), the
+    /// per-send cost should be near-constant (atomic refcount incr,
+    /// O(1) per send) because the bytes ride along as `Arc<SharedBlob>`. Below
+    /// the threshold, the cost scales with `payload_bytes * n` (deep copy per
+    /// send). Compare 100 B vs 10 000 B at the same `n` to see ADR-041 in
+    /// action; the ratio is the size of the win.
+    ///
+    /// `big` is a LOCAL Shared string (path through `to_message`'s blob
+    /// short-circuit), not a `def`'d RUNTIME string (which goes through the
+    /// `promote` deep-copy path — a separate optimisation surface).
+    #[divan::bench(args = [128, 10_000])]
+    fn big_string_fanout(bencher: divan::Bencher, payload_bytes: usize) {
+        let n = 100;
+        bench_prog(
+            bencher,
+            format!(
+                "(defn bsf-w (p) (receive (s (send p (string-length s))))) \
+                 (defn bsf-sw (parent big k) \
+                   (if (= k 0) nil \
+                     (do (send (spawn (bsf-w parent)) big) \
+                         (bsf-sw parent big (- k 1))))) \
+                 (defn bsf-coll (acc k) \
+                   (if (= k 0) acc (bsf-coll (+ acc (receive (x x))) (- k 1)))) \
+                 (let (me (self) big (string-repeat \"a\" {payload_bytes})) \
+                   (bsf-sw me big {n}) \
+                   (bsf-coll 0 {n}))"
+            ),
+        );
+    }
 }

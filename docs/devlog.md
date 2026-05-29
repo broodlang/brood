@@ -6038,3 +6038,119 @@ change.
 **Docs.** [`deferred.md`](deferred.md) #3 promoted to "shipped" with
 as-built design notes; [`roadmap.md`](roadmap.md)'s deferred-ergonomic
 entry flipped from ⬜ to ✅.
+
+## 2026-05-29 (late) — Shared blob heap (ADR-041): zero-copy send of large strings
+
+**Goal.** Kill the byte-copy cost on the cross-process send path for
+large strings. With Phase 1's bump-only LOCAL allocator and Phase 2's
+`(hibernate)` arena flip, the next throughput cliff was `to_message`
+deep-copying every `Value::Str` — a 10 KB error/log message sent from
+one worker to another paid 10 KB of memcpy *on send* and another 10 KB
+*on receive*. ADR-033's closure-as-data already proved that *handles*
+can ride between processes without copy; this is the analogous story
+for bulk byte data.
+
+**Shipped (two commits — infrastructure, then the send-path flip).**
+
+*Phase 1a (`94cfeb7`).* Infrastructure-only, zero behaviour delta.
+- New `core/blob.rs`: `SharedBlob { bytes: Box<[u8]> }`, `BlobHeap`
+  (per-runtime registry, mostly empty in Phase 1 — debug-only counter
+  reserved for stats / interning), `SHARED_BLOB_THRESHOLD = 256`.
+- `LocalString::{ Inline(String), Shared(Arc<SharedBlob>) }` private
+  enum replaces `Vec<String>` in the LOCAL `Slabs::strings`. The
+  PRELUDE region uses the same `Slabs` shape but `freeze_as_shared_code`
+  inline-extracts any `Shared` entries on freeze, so PRELUDE stays a
+  `Vec<Inline(_)>` and the cross-runtime `Arc<SharedCode>` never holds a
+  runtime-scoped `Arc<SharedBlob>`. (~9 prelude docstrings exceed the
+  threshold at write time — they get inlined back to `String`.)
+- `Heap::alloc_string` is the **single chokepoint**: routes by length
+  into `Inline` or `Shared`. Every `String → Value::Str` path goes
+  through it; we audited the tree (`grep alloc_string`) to confirm 27
+  call sites, no bypasses.
+- `Heap::string()` rewritten off the `region_ref!` macro to match the
+  variant. PRELUDE/RUNTIME branches unchanged. `flush_string` clones by
+  variant (`Arc::clone` for surviving `Shared`, byte-clone for `Inline`),
+  so a hibernate flush preserves blob identity (survivors' `Arc` count
+  goes +1 from the new slab and −1 from the old slab's drop — net
+  unchanged).
+- `cargo test` 317/317, `nest test` 529/529, zero `.blsp`-visible delta.
+
+*Phase 1b (this commit).* Flips the send path.
+- `Message::StrShared(Arc<SharedBlob>)` variant joins `Message::Str`.
+  `to_message_rec` calls a new `Heap::local_shared_blob(id)` first — a
+  LOCAL `Shared` answers `Some(Arc::clone)`; everything else falls
+  through to the byte-copying `Message::Str` path (`Inline`,
+  PRELUDE/RUNTIME).
+- `from_message` for `Message::StrShared` calls
+  `Heap::alloc_string_from_shared(Arc::clone(blob))` — installs the
+  cloned `Arc` directly into the receiver's slab, no `from_utf8` or
+  byte traffic on the receive path.
+- `dist/wire.rs` encodes `StrShared` as `M_STR` (inline bytes) for
+  cross-node sends: a separate runtime has its own `Arc<BlobHeap>` and
+  the `Arc` is not safely portable across the network. The receiving
+  runtime's `from_message → alloc_string` re-routes through the
+  threshold (anything ≥ 256 B becomes `Shared` again, locally).
+- Debug-only `(%blob-ptr s)` / `(%blob-strong-count s)` primitives
+  (cfg(debug_assertions), parallel to `%force-panic`) expose
+  `Arc::as_ptr` and `Arc::strong_count` for tests. They read the slot
+  without cloning, so reading the count does not perturb the value
+  being checked. Heap accessors honour the poison bitmap.
+- `LocalString::as_str` flipped to `from_utf8_unchecked` in release
+  (debug keeps the validating path as a tripwire). UTF-8 invariant
+  holds by construction: every entry to `SharedBlob` is via
+  `&str.as_bytes()` (one chokepoint, `alloc_string`) or via the wire
+  decoder's pre-validated buffer.
+
+**Tests.** `tests/blob_share_test.blsp`:
+1. ≥ 256 B string has a non-nil blob ptr; < 256 B answers nil.
+2. A big string `send`-ed to a worker keeps the same `SharedBlob`
+   identity in the worker (assert via `%blob-ptr` round-trip).
+3. **8-worker fan-out**: spawn 8 workers, send the same big string to
+   every one, assert all 8 replies report the parent's ptr — the same
+   `Arc<SharedBlob>` survives through `to_message` × 8 +
+   `from_message` × 8 + 8 worker reads. (`:isolated` describe — matches
+   the `tests/maps_test.blsp` cross-process pattern.)
+4. `def`'d (RUNTIME) strings answer nil from `%blob-ptr` — RUNTIME is
+   shared by handle retag, not blob heap, as designed.
+5. Strong count is 1 for a freshly-alloc'd big string.
+6. **Hibernate flush preserves blob identity**: a worker receives a big
+   string, reports `%blob-ptr` before, hibernates with the string as an
+   arg, re-reports after; parent asserts before == after. Proves
+   `flush_string`'s Arc::clone-on-survive arithmetic.
+
+The whole suite is green: `cargo test` 317/317; `nest test` (debug)
+536/536; `nest test --release` 536/536 (the `bound?` guards correctly
+skip the debug-only primitives in release).
+
+**Benchmark.** New `concurrency::big_string_fanout` (in
+`benches/library.rs`): spawn N=100 workers, `send` a string of
+`payload_bytes` to each, each replies with its `string-length`. Two
+data points:
+
+| `payload_bytes` | median | notes |
+|---:|---:|---|
+| 128 | 3.86 ms | inline / deep-copy (below threshold) |
+| 10 000 | 20.19 ms | `Arc<SharedBlob>` / no byte copy |
+
+The 78× larger payload costs ~5.2× more wall time — sublinear scaling
+in payload size. Without Phase 1b, both sends would deep-copy bytes
+twice per worker (`to_message` + `from_message`), and the 10 KB case
+would be dominated by the per-byte memcpy. The existing
+`spawn_fanout`, `sequence::*`, `strings::*`, and other benches all
+moved within ±2% — the optimization isn't a slowdown for paths that
+don't use it.
+
+**Architectural finding (worth flagging for follow-up).** `spawn`
+promotes captured locals via `Heap::promote`, which for `Value::Str`
+extracts bytes into a fresh `String` in RUNTIME's
+`boxcar::Vec<String>` — *not* the blob heap. So
+`(spawn (fn () (use big-string)))` deep-copies a captured big string
+once, into shared RUNTIME (where every spawned process reads it by
+handle retag, no further copy). That's correct but not the *same*
+mechanism as the send path. Routing `promote_string` through the blob
+heap would unify the two and eliminate that one-shot copy; deferred to
+a follow-up because the lifecycle story differs (RUNTIME is append-only
+shared; the blob heap is refcounted shared). Flagged in `ADR-041`'s
+Out-of-Scope.
+
+**ADR.** [`decisions.md`](decisions.md) **ADR-041**.

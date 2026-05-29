@@ -1,0 +1,126 @@
+;;; Cross-process zero-copy of large strings via Arc<SharedBlob> (ADR-041).
+;;;
+;;; A string >= 256 bytes lives in a per-runtime shared blob heap, with a
+;;; LOCAL slot that points at it via Arc. Sending such a string between
+;;; processes ships the handle (atomic refcount incr); the bytes are NOT
+;;; copied. Both processes observe the same underlying SharedBlob address.
+;;;
+;;; The %blob-ptr / %blob-strong-count primitives are debug-only (registered
+;;; under cfg(debug_assertions)); the tests guard on `bound?` so a release
+;;; build runs them as no-ops rather than failing with "unbound symbol".
+
+;; Worker helpers — top-level defns are visible inside :isolated describes
+;; (isolation is from *other files'* globals, not from this file's). Distinct
+;; `bs-` prefix so the isolated globals copy never collides with other suites.
+
+(defn bs-blob-worker (parent)
+  "Receive a string, send back [:ptr <its-blob-ptr>] to `parent`."
+  (receive (s (send parent [:ptr (%blob-ptr s)]))))
+
+(defn bs-spawn-workers--acc (parent n acc)
+  (if (= n 0)
+    acc
+    (bs-spawn-workers--acc parent (- n 1) (cons (spawn (bs-blob-worker parent)) acc))))
+
+(defn bs-spawn-workers (parent n)
+  "Spawn `n` workers; return a list of their pids."
+  (bs-spawn-workers--acc parent n '()))
+
+(defn bs-send-all (workers msg)
+  "Send `msg` to every worker. Tail recursive (deep lists are fine)."
+  (when (not (empty? workers))
+    (send (first workers) msg)
+    (bs-send-all (rest workers) msg)))
+
+(defn bs-collect-ptrs--check (got total expected)
+  "Receive `total` [:ptr p] replies; assert every p equals `expected`."
+  (if (= got total)
+    nil
+    (receive ([:ptr p]
+      (do (assert= expected p)
+          (bs-collect-ptrs--check (+ got 1) total expected))))))
+
+;; A def-bound big string: its right-hand-side is a LOCAL Shared string, but
+;; `def` promotes it to RUNTIME (a `boxcar::Vec<String>`), so %blob-ptr should
+;; answer nil for it. Used by the RUNTIME-region assertion below.
+(def bs-big-runtime-string (string-repeat "u" 300))
+
+;; After re-entry from hibernate, report identity to parent (second leg).
+;; `big` must arrive in the worker's LOCAL via send (not spawn-capture), since
+;; spawn promotes captured locals through `Heap::promote`, which copies strings
+;; into RUNTIME (`boxcar::Vec<String>`) — not the per-runtime blob heap. With
+;; send/receive the string travels as Message::StrShared and lands as
+;; LocalString::Shared in the worker's LOCAL — exactly the case the flush
+;; preserves.
+(defn bs-hib-check (big parent)
+  (send parent [:after (%blob-ptr big)]))
+
+(defn bs-hib-worker (parent)
+  (receive (big
+    (do
+      (send parent [:before (%blob-ptr big)])
+      (hibernate bs-hib-check big parent)))))
+
+(describe "shared blob heap (ADR-041)"
+  :isolated
+
+  (test "a >= 256 B string is allocated as Shared (has a non-nil blob ptr)"
+    (when (bound? '%blob-ptr)
+      (let (big (string-repeat "x" 1024))
+        (assert= 1024 (string-length big))
+        (is (not (nil? (%blob-ptr big)))))))
+
+  (test "a < 256 B string is inline (returns nil from %blob-ptr)"
+    (when (bound? '%blob-ptr)
+      (assert= nil (%blob-ptr "short"))
+      (assert= nil (%blob-ptr (string-repeat "x" 255)))))
+
+  (test "a big string sent to a worker keeps the same SharedBlob identity"
+    (when (bound? '%blob-ptr)
+      (let (big (string-repeat "y" 512)
+            parent-ptr (%blob-ptr big)
+            me (self)
+            w (spawn (bs-blob-worker me)))
+        (send w big)
+        (receive ([:ptr p] (assert= parent-ptr p))))))
+
+  (test "fan-out: 8 workers all observe the parent's SharedBlob identity"
+    (when (bound? '%blob-ptr)
+      (let (n 8
+            ;; ~1 KB string, well above threshold
+            big (string-repeat "abcdefghij0123456789" 64)
+            parent-ptr (%blob-ptr big)
+            me (self)
+            workers (bs-spawn-workers me n))
+        (is (not (nil? parent-ptr)))
+        (bs-send-all workers big)
+        (bs-collect-ptrs--check 0 n parent-ptr))))
+
+  (test "RUNTIME strings (def'd globals) return nil from %blob-ptr"
+    ;; A def-bound string is promoted into the RUNTIME region (a
+    ;; `boxcar::Vec<String>`). Even if it's big, it's not in the per-runtime
+    ;; blob heap — RUNTIME is independently shared across processes by handle
+    ;; retag. So %blob-ptr should answer nil.
+    (when (bound? '%blob-ptr)
+      (assert= nil (%blob-ptr bs-big-runtime-string))))
+
+  (test "strong count is 1 for a freshly-allocated big string"
+    (when (bound? '%blob-strong-count)
+      (let (big (string-repeat "z" 300))
+        ;; No other process holds it yet — the count is 1.
+        (assert= 1 (%blob-strong-count big)))))
+
+  (test "hibernate flush preserves SharedBlob identity for a surviving big string"
+    (when (bound? '%blob-ptr)
+      (let (big (string-repeat "h" 400)
+            me (self)
+            w (spawn (bs-hib-worker me)))
+        ;; Worker receives `big` via send (lands as LOCAL Shared in worker),
+        ;; reports its blob-ptr both before and after a hibernate flush. The
+        ;; two ptrs must be equal — flush_string clones the Arc, preserving
+        ;; the underlying SharedBlob's address.
+        (send w big)
+        (let (before (receive ([:before p] p))
+              after  (receive ([:after  p] p)))
+          (is (not (nil? before)))
+          (assert= before after))))))

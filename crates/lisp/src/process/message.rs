@@ -15,6 +15,9 @@
 //! `crate::dist::wire` uses the same depth bound so round-trip is symmetric
 //! and neither side can be tricked into overflowing its native Rust stack.
 
+use std::sync::Arc;
+
+use crate::core::blob::SharedBlob;
 use crate::core::heap::Heap;
 use crate::core::value::{Closure, ClosureId, EnvId, Symbol, Value};
 use crate::error::{LispError, Pos};
@@ -26,7 +29,18 @@ pub enum Message {
     Bool(bool),
     Int(i64),
     Float(f64),
+    /// A small string sent inline by deep copy. Used for strings below
+    /// [`crate::core::blob::SHARED_BLOB_THRESHOLD`] (where atomic refcount
+    /// traffic would dominate the per-byte copy) and for any string arriving
+    /// from a cross-node wire send (the sender's `Arc<SharedBlob>` cannot be
+    /// shared across runtimes — the receiver re-allocates).
     Str(String),
+    /// A large string sent by handle. The sender bumps the `Arc` refcount
+    /// once, both sides keep the same `SharedBlob` identity, and no bytes are
+    /// copied. Only used *within one runtime* (inner processes share an
+    /// `Arc<BlobHeap>`). The dist wire encoder downgrades this back to
+    /// `Str` because separate runtimes have independent blob lifetimes.
+    StrShared(Arc<SharedBlob>),
     Sym(Symbol),
     Keyword(Symbol),
     /// A cons-list value, plus the **source position** of the original pair
@@ -119,7 +133,14 @@ fn to_message_rec(
         Value::Float(f) => Message::Float(f),
         Value::Sym(s) => Message::Sym(s),
         Value::Keyword(s) => Message::Keyword(s),
-        Value::Str(id) => Message::Str(heap.string(id).to_string()),
+        Value::Str(id) => match heap.local_shared_blob(id) {
+            // LOCAL Shared: ship the Arc (atomic incr, no copy). Receiver
+            // installs the same handle into its own slab via
+            // `alloc_string_from_shared`. PRELUDE/RUNTIME and LOCAL Inline
+            // fall through to the deep-copy `Str` path.
+            Some(blob) => Message::StrShared(blob),
+            None => Message::Str(heap.string(id).to_string()),
+        },
         Value::Pair(_) => {
             let pos = heap.form_pos(v);
             let items = heap.list_to_vec(v)?;
@@ -299,6 +320,7 @@ pub fn from_message(heap: &mut Heap, m: &Message) -> Value {
         Message::Sym(s) => Value::Sym(*s),
         Message::Keyword(s) => Value::Keyword(*s),
         Message::Str(s) => heap.alloc_string(s),
+        Message::StrShared(blob) => heap.alloc_string_from_shared(Arc::clone(blob)),
         Message::List(items, pos) => {
             let mut vals = Vec::with_capacity(items.len());
             for item in items {

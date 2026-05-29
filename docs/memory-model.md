@@ -1,7 +1,7 @@
 # Memory model — `Send` heaps and per-process GC
 
-> **2026-05-29 status — bump + flush (commits `f90f0de` Phase 1,
-> evening-of-2026-05-29 Phase 2).**
+> **2026-05-29 status — bump + flush + shared blobs (commits `f90f0de`
+> Phase 1, evening-of-2026-05-29 Phase 2, late-2026-05-29 ADR-041).**
 >
 > **Today's memory model is:**
 > 1. **Per-process bump allocator.** Each green process has its own LOCAL
@@ -19,10 +19,20 @@
 >    indefinitely.
 > 4. **Arena reset at top-level boundaries** (ADR-016) — still in play for
 >    the REPL/file runner between top-level forms.
+> 5. **Shared blob heap for large strings (ADR-041)** — per-runtime
+>    `Arc<BlobHeap>` sibling to `Arc<RuntimeCode>`. A LOCAL string at or
+>    above 256 B is stored as `LocalString::Shared(Arc<SharedBlob>)`;
+>    smaller as `LocalString::Inline(String)`. Cross-process `send` ships
+>    the `Arc` (atomic incr, no byte copy); `from_message` installs the
+>    cloned `Arc` directly into the receiver's LOCAL slab. The `Arc`'s
+>    `Drop` is the free path (process exit, hibernate flush of a
+>    non-surviving slot, etc.). Cross-node sends downgrade to inline
+>    bytes — the receiving runtime has its own `BlobHeap`.
 >
 > **What we explicitly *don't* use:** tracing GC (gone), `Rc`/`RefCell`,
 > `gc-arena`, write barriers (data is immutable per ADR-026), generational
-> or incremental collection.
+> or incremental collection. ADR-026's immutability means no cycles, so
+> the blob heap's plain `Arc` is sound — no `Weak`, no cycle collector.
 >
 > See [`devlog.md`](devlog.md) 2026-05-29 (Phase 1 + Phase 2) for the
 > narrative and rationale, and `crates/lisp/src/core/heap.rs:Heap::flush`

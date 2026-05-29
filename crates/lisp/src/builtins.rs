@@ -653,6 +653,26 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![any], Ty::NEVER),
         force_panic,
     );
+    // Shared-blob inspection primitives — debug-only because they leak the
+    // representation (a raw pointer) and because they only exist to assert
+    // identity / leak-freedom across processes in the blob-share test. Both
+    // return `nil` for an inline string or a non-LOCAL handle (PRELUDE/RUNTIME).
+    #[cfg(debug_assertions)]
+    def(
+        heap,
+        "%blob-ptr",
+        Arity::exact(1),
+        Sig::new(vec![string], Ty::ANY),
+        blob_ptr,
+    );
+    #[cfg(debug_assertions)]
+    def(
+        heap,
+        "%blob-strong-count",
+        Arity::exact(1),
+        Sig::new(vec![string], Ty::ANY),
+        blob_strong_count,
+    );
     def(
         heap,
         "%try",
@@ -2332,6 +2352,41 @@ fn force_panic(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         None => "%force-panic invoked (no message)".to_string(),
     };
     panic!("{}", msg);
+}
+
+/// `(%blob-ptr s)` — debug-only. The raw `SharedBlob` address backing `s`,
+/// as an integer (for identity comparison across processes). `nil` for
+/// inline (small) strings and PRELUDE/RUNTIME handles.
+#[cfg(debug_assertions)]
+fn blob_ptr(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    match arg(args, 0) {
+        Value::Str(id) => Ok(heap
+            .local_shared_blob_ptr(id)
+            .map(|p| Value::Int(p as i64))
+            .unwrap_or(Value::Nil)),
+        other => Err(LispError::type_err(format!(
+            "%blob-ptr: expected a string, got {}",
+            value::tag(other).name()
+        ))),
+    }
+}
+
+/// `(%blob-strong-count s)` — debug-only. Current `Arc::strong_count` for
+/// the `SharedBlob` backing `s`. `nil` for inline / non-LOCAL strings.
+/// Approximate under live concurrent senders/receivers (the count moves);
+/// stable when callers are quiescent (what the leak-check test asserts).
+#[cfg(debug_assertions)]
+fn blob_strong_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    match arg(args, 0) {
+        Value::Str(id) => Ok(heap
+            .local_shared_blob_strong_count(id)
+            .map(|n| Value::Int(n as i64))
+            .unwrap_or(Value::Nil)),
+        other => Err(LispError::type_err(format!(
+            "%blob-strong-count: expected a string, got {}",
+            value::tag(other).name()
+        ))),
+    }
 }
 
 /// `(hibernate fn & args)` — Erlang-style hibernate. Out-of-band signal to

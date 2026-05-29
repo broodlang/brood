@@ -2061,3 +2061,125 @@ strings and vectors today.
 new `Tag` reservation (`MapNode`) and one bit in `types.rs`. Needs the
 maps test suite to be updated to use set comparisons for iteration
 (`tests/maps_test.blsp` lines that fix order).
+
+## ADR-041 — Shared, refcounted blobs for large immutable byte data
+
+**Status:** accepted, implemented 2026-05-29 (see devlog).
+
+**Context.** ADR-026 made data immutable. ADR-033 proved that closure
+*handles* can cross processes without copying — `(spawn …)` ships a closure
+via tag-retag for PRELUDE/RUNTIME pointers, only deep-copying the captured
+local frame. The bump-only LOCAL allocator (commit `f90f0de`, 2026-05-29)
+made every allocation a single bump; combined with `(hibernate fn & args)`
+that resets the arena at a controlled point, that gives bounded memory
+without a tracing GC. What remained as the next throughput cliff was
+**`to_message` deep-copying every string**: a 10 KB error string sent
+from one worker to another paid 10 KB of memcpy on `send` *and* another
+10 KB on `from_message` (alloc + copy). Closures already escape this via
+ADR-033's closure-as-data path; strings should too.
+
+**Decision.** Add a **per-runtime, refcounted blob heap** (`Arc<BlobHeap>`)
+sibling to `Arc<RuntimeCode>` and `Arc<SharedCode>`. The LOCAL string slab
+becomes a `LocalString` enum:
+
+- `LocalString::Inline(String)` for strings below
+  `SHARED_BLOB_THRESHOLD` (256 B) — the atomic-refcount overhead would
+  dominate the per-byte memcpy at this size.
+- `LocalString::Shared(Arc<SharedBlob>)` for strings at or above the
+  threshold — the bytes live in the shared heap (immutable, freed when
+  the last `Arc` drops). Both PRELUDE and RUNTIME stay `Vec<String>` /
+  `boxcar::Vec<String>` unchanged — the prelude builder's freeze
+  inline-extracts any `Shared` entries so the cross-runtime PRELUDE
+  region holds no runtime-scoped `Arc`s.
+
+`Heap::alloc_string` is the **single chokepoint** that routes by threshold;
+no other path materialises a `Value::Str`. `to_message` (process/message.rs)
+calls `local_shared_blob` first — for a LOCAL Shared string it returns the
+`Arc::clone` (atomic incr, no byte copy) into a new `Message::StrShared`
+variant; otherwise it falls back to the deep-copying `Message::Str`.
+`from_message` for `Message::StrShared` calls `alloc_string_from_shared`,
+which installs the cloned `Arc` into the receiver's LOCAL slab — same
+SharedBlob identity, no bytes copied. Process exit drops the Heap → the
+slot drops the `Arc` → the blob is freed at zero. Hibernate flush
+(`flush_string`) clones the `Arc` into the new slab; the old slab's drop
+decrements; net unchanged across the flush (survivors keep blob identity).
+
+Cross-node sends never share the `Arc` — the wire codec (`dist::wire`)
+encodes `Message::StrShared` as inline bytes (`M_STR`), so the receiving
+runtime allocates a fresh blob through its own `alloc_string`. Within one
+runtime, every spawned green process shares the same `Arc<BlobHeap>` (via
+`Arc::clone` on construction), so a blob's identity is preserved across
+every cross-process send.
+
+**Why plain `Arc<T>`, not a hand-rolled raw-ptr + atomic.** ADR-026's
+immutability guarantee means data can't form cycles — a `cons` can only
+point at things allocated *before* it, so an `Arc<SharedBlob>` is sound
+without `Weak`/cycle-collector machinery. The standard library does the
+atomic incr/decr and `Drop` for us; safe code; one extra word (`Arc`'s
+strong/weak counter) per blob, which is negligible against blob sizes
+that justify the threshold. The receiver-side extra `Arc::clone` (we have
+`&Message`, not owned) is one atomic op per send and can be moved later
+if a refactor of the mailbox API lets `from_message` consume the message.
+
+**UTF-8 invariant.** Every entry to `SharedBlob` is via `&str.as_bytes()`
+(in `Heap::alloc_string`) or via the wire decoder's pre-validated UTF-8
+buffer. Blobs are immutable. So `LocalString::as_str` reads with
+`from_utf8_unchecked` in release builds (zero overhead). Debug builds
+keep the validating `from_utf8` as a tripwire — a missed entry point
+would trip the assertion at the call site.
+
+**Threshold (256 B).** A 256-B memcpy is ~30 ns on modern CPUs; an atomic
+incr is ~5–10 ns. Below 256 B, the indirection through the heap + atomic
+is in the noise but adds an L1 miss; above it, the per-byte cost
+dominates. One `const SHARED_BLOB_THRESHOLD: usize = 256` in
+`core/blob.rs`; retunable from one place once profiling warrants it.
+
+**Out of scope (Phase 1).**
+- **Spawn-captured strings.** `(spawn (fn () (use big-string)))` runs
+  `Heap::promote` on the captured frame; promote currently extracts
+  bytes from any `LocalString` into a fresh `String` in RUNTIME's
+  `boxcar::Vec<String>` (so the bytes are still shared — RUNTIME is
+  shared — but through a different mechanism). Routing promote through
+  the blob heap is a follow-up.
+- **Vectors of large byte content.** Vectors hold `Value`s which may
+  themselves be handles, so the byte-flat sharing model needs more design.
+- **Cross-node content-addressing.** The wire codec inlines the bytes;
+  a Phase 2 could dedupe blobs that arrive twice from the same peer.
+- **Blob interning by content.** No global hash-set of blob bytes; two
+  separately-allocated 10-KB identical strings get two `Arc<SharedBlob>`s.
+- **PRELUDE retag unification.** The prelude crosses processes by handle
+  retag today (its strings are read-only). Unifying it with the blob
+  mechanism would be a code-cleanup, not a perf win.
+
+**Consequences.**
+
+- The 10-KB-string send path drops from O(N) bytes to one atomic incr.
+- Strings travel cross-process between green processes (via `(send …)`)
+  without copying. Spawn-capture still copies — see above.
+- A new `Value` *kind* was **not** introduced — the existing `Tag::Str`
+  is unchanged. The Inline/Shared split lives in the LOCAL slab entry
+  type, so the surface language (and the type checker) see strings
+  exactly as before.
+- The wire format is unchanged: `Message::StrShared` encodes as `M_STR`,
+  so the dist protocol remains backwards-compatible.
+- A pair of debug-only primitives — `(%blob-ptr s)` returning the
+  `SharedBlob` address as an integer for identity checks, and
+  `(%blob-strong-count s)` returning the current refcount — ship under
+  `#[cfg(debug_assertions)]` (parallel to the existing `%force-panic`)
+  and are guarded with `(bound? …)` in tests so release runs skip them.
+- Code volume: ~80 lines of new `core/blob.rs`, ~150 lines of changes in
+  `core/heap.rs` (LocalString enum + alloc/string/sweep/flush/freeze
+  updates), ~20 lines in `process/message.rs`, ~15 in `dist/wire.rs`,
+  ~50 in `builtins.rs` for the two debug primitives. Coverage: ~10 new
+  in-language tests in `tests/blob_share_test.blsp` (cross-process
+  identity for ≥ 256 B; nil for inline / RUNTIME; 8-worker fan-out;
+  hibernate flush preserves identity); a new benchmark
+  `concurrency::big_string_fanout` comparing 128 B vs 10 000 B payload
+  fan-out.
+
+**References.** ADR-026 (immutability → no cycles → safe rc), ADR-033
+(closure-as-data established cross-process handle retag), commit
+`f90f0de` (Phase 1 bump-only LOCAL allocator — this design preserves
+"no slot reuse"; a Shared slot's handle still grows monotonically, only
+the *bytes* are shared), commit `dee0814` (Phase 2 hibernate — flush
+must Arc::clone survivors to maintain blob identity).

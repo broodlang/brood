@@ -269,6 +269,21 @@ fn encode_msg(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
             w.push(M_STR);
             put_str(w, s);
         }
+        // Shared blobs cannot cross a runtime boundary — separate runtimes
+        // have independent `Arc<BlobHeap>` lifetimes. Encode the bytes inline
+        // as a plain string; the receiver's `from_message` re-routes through
+        // `alloc_string`, so anything still at-or-above
+        // `SHARED_BLOB_THRESHOLD` rebecomes Shared on the destination side
+        // (with a fresh `Arc`, no shared identity with the sender). The wire
+        // format intentionally has no separate tag for shared blobs.
+        Message::StrShared(blob) => {
+            w.push(M_STR);
+            put_str(
+                w,
+                std::str::from_utf8(blob.as_bytes())
+                    .expect("shared blob bytes are valid UTF-8 by construction"),
+            );
+        }
         Message::Sym(s) => {
             w.push(M_SYM);
             put_sym(w, *s);
