@@ -176,13 +176,18 @@ In a project, run the whole suite with **`nest test`** (or `make suite`, or
 below — forwarded by the runner, and usable directly if you call it yourself:
 
 ```lisp
-(run-tests)            ; parallel, dots (. pass / F fail), summary
-(run-tests :trace)     ; a ✓/✗ line per test as it finishes, instead of dots
-(run-tests :slow)      ; after the summary, list the slowest tests
+(run-tests)            ; run all, print failures + a summary
+(run-tests :trace)     ; print `▶ group › name` as each test STARTS — live progress
+(run-tests :slow)      ; after the summary, list the slowest 5 tests
 (run-tests :timeout 5000)   ; per-test HARD ceiling in ms — killed+failed (default 30000)
 (run-tests :slow-over 200)  ; list any test over this many ms (informational; default 1000)
 (run-tests :trace :slow)
 ```
+
+`nest test` passes `:trace`, so it shows each test's name as it starts (handy for
+spotting a slow or hung one) — the `brood --test` path and `run-tests-structured`
+stay quiet, for clean machine-parseable output. Trace lines from parallel workers
+interleave, in waves of `*parallel-batch*`.
 
 **Two thresholds, distinct on purpose** (both per-test wall-clock ms; module vars,
 overridable as above):

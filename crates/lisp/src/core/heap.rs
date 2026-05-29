@@ -2828,7 +2828,7 @@ impl Heap {
             work.push(W::E(e, format!("env_roots[{i}]")));
         }
         for (i, &(s, v)) in self.dynamics.iter().enumerate() {
-            work.push(W::V(v, format!("dynamics[{i}={}]", value::symbol_name(s))));
+            work.push(W::V(v, format!("dynamics[{i}={}]", crate::core::value::symbol_name(s))));
         }
         // Bounds + epoch assertion with the path that reached the handle.
         let bad = |kind: &str, gen: u32, idx: usize, len: usize, path: &str, raw: u64| {
@@ -2920,7 +2920,7 @@ impl Heap {
                             work.push(W::E(p, format!("{path}.parent")));
                         }
                         for &(s, val) in &frame.vars {
-                            work.push(W::V(val, format!("{path}.{}", value::symbol_name(s))));
+                            work.push(W::V(val, format!("{path}.{}", crate::core::value::symbol_name(s))));
                         }
                     }
                 }
