@@ -139,6 +139,11 @@ fn main() {
     if let Some(n) = cli.max_parallel {
         brood::process::set_max_parallel(n);
     }
+    // Honour BROOD_MEM_LIMIT for every command; `nest test` defaults a ceiling
+    // on (in cmd_test) so a runaway test can't OOM the host. `nest run`/`mcp`
+    // stay unlimited unless the user opts in — the live image edits all day
+    // (ADR-043).
+    brood::core::alloc::init_limits_from_env();
 
     let mut interp = Interp::new();
 
@@ -160,6 +165,12 @@ fn main() {
 /// Single-file mode mirrors the old `brood --test` shape but with project
 /// sources pre-loaded if we're inside a project, so cross-module names work.
 fn cmd_test(interp: &mut Interp, files: &[String]) {
+    // Default a memory ceiling on for test runs (ADR-043); an explicit
+    // BROOD_MEM_LIMIT still wins (init ran first in main()).
+    brood::core::alloc::init_limits_with_default(
+        brood::core::alloc::TEST_DEFAULT_HARD,
+        brood::core::alloc::TEST_DEFAULT_SOFT,
+    );
     if files.is_empty() {
         // Whole-project discovery via std/project.blsp. Raises on failure,
         // so a non-zero exit falls out of the eval error.

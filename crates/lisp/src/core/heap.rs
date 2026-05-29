@@ -1953,6 +1953,42 @@ impl Heap {
         }
     }
 
+    /// Structural equality between two closures — used *only* to dedup a
+    /// hot-reload redefinition that didn't actually change the code (a
+    /// save-without-change, or `nest format` rewriting the whole file) so it
+    /// doesn't append a duplicate into the append-only RUNTIME region
+    /// (docs/live-editing.md Stage 5). Deliberately **conservative**: it bails
+    /// (returns `false`) on any closure that captured a *local* scope
+    /// (`env.is_some()`), handling only the common top-level case where `env`
+    /// resolves to the global per-process. Soundness rests on the asymmetry — a
+    /// false "not equal" merely keeps today's behaviour (append, i.e. the leak),
+    /// while a false "equal" would skip a real redefinition; identical params,
+    /// body, optionals, rest, name and doc with no captured scope means the two
+    /// closures are behaviourally identical, so "equal" is never false-positive.
+    fn closures_structurally_equal(&self, a: ClosureId, b: ClosureId) -> bool {
+        let ca = self.closure(a);
+        let cb = self.closure(b);
+        if ca.env.is_some() || cb.env.is_some() {
+            return false;
+        }
+        ca.name == cb.name
+            && ca.params == cb.params
+            && ca.rest == cb.rest
+            && ca.doc == cb.doc
+            && ca.optionals.len() == cb.optionals.len()
+            && ca.body.len() == cb.body.len()
+            && ca
+                .optionals
+                .iter()
+                .zip(cb.optionals.iter())
+                .all(|((sa, da), (sb, db))| sa == sb && self.equal(*da, *db))
+            && ca
+                .body
+                .iter()
+                .zip(cb.body.iter())
+                .all(|(&x, &y)| self.equal(x, y))
+    }
+
     /// Equality between two CHAMP maps — canonical-form recursion. Two
     /// equal maps have the same node shape (same bitmaps, same children
     /// in slot order), so a structural walk bails on the first mismatch.
@@ -2199,6 +2235,23 @@ impl Heap {
 
     pub fn env_define(&mut self, env: EnvId, sym: Symbol, val: Value) {
         if env == EnvId::GLOBAL {
+            // Dedup an unchanged hot-reload redefinition (Stage 5): if `sym` is
+            // already bound to a closure structurally identical to `val`, keep the
+            // existing (already-promoted) binding rather than append a duplicate
+            // into the append-only RUNTIME region. Bounds the leak for the common
+            // save-without-change / formatter-churn path; any *real* edit differs
+            // structurally and falls through to the normal promote+rebind.
+            let existing = self.runtime.globals_read().get(&sym).copied();
+            if let Some(old) = existing {
+                let unchanged = match (old, val) {
+                    (Value::Fn(o), Value::Fn(n)) => self.closures_structurally_equal(o, n),
+                    (Value::Macro(o), Value::Macro(n)) => self.closures_structurally_equal(o, n),
+                    _ => false,
+                };
+                if unchanged {
+                    return;
+                }
+            }
             // Global code/data is shared across inner processes, so promote it
             // into the shared RUNTIME region before binding.
             let shared = self.promote(val);
@@ -2304,6 +2357,15 @@ impl Heap {
     /// it isn't applicable.
     pub fn gc_enabled(&self) -> bool {
         self.gc_enabled
+    }
+
+    /// Number of closures in the shared, append-only RUNTIME region. For
+    /// introspection / tests of hot-reload growth (Stage 5 dedup): redefining a
+    /// global to *unchanged* code must not increase this; it never decreases
+    /// (append-only — old versions stay live for in-flight calls, reclaimed only
+    /// by the future RUNTIME collector, docs/live-editing.md Stage 5).
+    pub fn runtime_closure_count(&self) -> usize {
+        self.runtime.code.closures.count()
     }
 
     /// Should the next safepoint run a collection? Compares LOCAL live count

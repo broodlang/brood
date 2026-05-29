@@ -6154,3 +6154,58 @@ shared; the blob heap is refcounted shared). Flagged in `ADR-041`'s
 Out-of-Scope.
 
 **ADR.** [`decisions.md`](decisions.md) **ADR-041**.
+
+
+## 2026-05-29 (later still) — Runaway-resource backstops (ADR-043) + live-editing hardening (ADR-042)
+
+**Goal.** Two threads of work that had piled up uncommitted in the tree, now
+documented and finished: stop a runaway program from taking the host down, and
+land the cheap, high-value subset of the [`live-editing.md`](live-editing.md)
+hot-reload plan.
+
+**ADR-043 — backstops.** Adversarial / hostile code (the in-language
+`tests/adversarial_test.blsp`, and eventually the editor `eval`-ing what you
+type) had two ways to kill the *host* instead of failing cleanly:
+
+- **Unbounded allocation** → a counting `#[global_allocator]` (`core/alloc.rs`)
+  with a **soft** limit (polled at the `gc_block_depth() == 1` eval safepoint →
+  catchable `E0043`) below a **hard** limit (enforced in `alloc`/`realloc` →
+  process abort, the backstop for a single giant allocation between safepoints).
+  Off by default; `BROOD_MEM_LIMIT` / `BROOD_MEM_SOFT_LIMIT` opt in; the test
+  runners default a ceiling so a test can't OOM the machine. New
+  `(mem-limit)` / `(mem-soft-limit)` primitives.
+- **Unbounded non-tail recursion** → an **eval-depth ceiling** (`E0044`) checked
+  at the top of `eval`: `GC_BLOCK` already counts non-tail frames (tail calls
+  re-enter the `'tail:` loop without bumping it), so depth > `MAX_EVAL_DEPTH`
+  (default 3500, `BROOD_MAX_DEPTH`) raises *before* the coroutine stack overflows
+  into an uncatchable SIGSEGV.
+
+**Test-memory lowered.** The test-runner default ceiling started at 2 GiB hard /
+1.5 GiB soft; **cut 4× to 512 MiB / 384 MiB.** Per-process heaps are
+`Rc`-reclaimed on green-process exit, so the suite footprint is the *concurrent*
+peak across ~`nproc` workers, not a cumulative total — 512 MiB is ample, and a
+real runaway now trips in a fraction of a second instead of after gigabytes. The
+one test that *deliberately* drives an unbounded allocation
+(`mem_limit.rs::soft_limit_turns_runaway_into_catchable_error`) is now
+`#[ignore]`d so a routine `cargo test` can't OOM if the safepoint ever regresses;
+run it with `cargo test --test mem_limit -- --ignored`. `basic.rs` (its own test
+binary, previously uncapped) now arms the same ceiling via a `LazyLock` guard.
+
+**ADR-042 — live-editing hardening.** Landed Stages 1, 2, 5-dedup, and 7 of the
+[`live-editing.md`](live-editing.md) plan: **`defonce`** (prelude macro — state
+and singletons survive reload, Emacs `defvar`), tighter **`reload-defs`**
+definition detection (a `def`-prefixed *call* like `(default-config)` is now
+correctly skipped — it's a `Fn`, not a macro) plus read-whole-file-first
+atomicity, **dedup-on-identical** redefinition (a save-without-change doesn't
+append a new RUNTIME version), and a **macro-redefinition staleness warning**.
+
+**`defonce` un-removal — resolving the ADR-039 tension.** The 2026-05-28 entry
+("supervised processes; `defonce` removed") scheduled `defonce`'s deletion once
+*named-spawn* shipped. ADR-039 was then **tried and reverted** (named-spawn never
+landed; the kernel supervisor was the bulk of the scheduler-race surface). So the
+removal is **void** — and even had named-spawn shipped, it only covered the
+process-singleton case, not the global-state-cell case. `defonce` is the chosen
+tool, restored to the prelude. The roadmap already foreshadowed this ("the
+`defonce` transitional shim stays in the prelude").
+
+**ADRs.** [`decisions.md`](decisions.md) **ADR-042**, **ADR-043**.

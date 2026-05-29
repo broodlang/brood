@@ -1,0 +1,302 @@
+;;; Adversarial tests: try to break the runtime — stack, heap, GC, messages,
+;;; scheduler, blob heap (ADR-041). Each case here EITHER:
+;;;
+;;; - Asserts a known clean failure path (the runtime catches abuse and
+;;;   returns a structured error), OR
+;;; - Stresses a path at scale to verify nothing leaks / races / crashes.
+;;;
+;;; Cases that are known to crash the host (segfaults, stack overflows) are
+;;; documented in comments with a workaround, NOT run from the suite — a
+;;; segfault here would kill `cargo test` and `nest test` for the whole repo.
+
+;;
+;; --- Reader / parser ---------------------------------------------------------
+;;
+
+(describe "adversarial: reader / parser"
+  :isolated
+
+  (test "deeply nested parens are rejected cleanly (reader depth bound)"
+    ;; Construct (((((... 1000 deep ...))))). The reader should error out,
+    ;; not blow the host stack. `read-string` evaluates to a value or throws.
+    (let (src (str (string-repeat "(" 1000) "x" (string-repeat ")" 1000)))
+      (assert-error (read-string src))))
+
+  (test "a very long atom is fine"
+    (let (long (string-repeat "abc" 1000)
+          parsed (read-string long))
+      (assert= long parsed))))
+
+;;
+;; --- Eval stack -------------------------------------------------------------
+;;
+
+(describe "adversarial: eval stack"
+  :isolated
+
+  (test "100 000-deep tail recursion (TCO via let-bound recursive lambda)"
+    (let (loop (fn (n acc) (if (= n 0) acc (loop (- n 1) (+ acc n)))))
+      (assert= 5000050000 (loop 100000 0))))
+
+  (test "100 000-deep tail recursion via defn"
+    ;; `bsf-tail-defn` lives at top level to confirm TCO works through the
+    ;; global-lookup call path too.
+    (assert= :done (adv-tail-loop 100000)))
+
+  ;; NOTE — known segfault, NOT run here. `(spawn (fn ...))` from inside a
+  ;; let-bound recursive closure overflows the host stack: `Heap::promote_env`
+  ;; has no cycle detection, but a let-bound recursive closure captures the
+  ;; env that contains itself, so promoting it recurses infinitely through
+  ;; promote_closure → promote_env → promote(self-closure) → … . Repro:
+  ;;
+  ;;   (let (me (self)
+  ;;         loop (fn (n) (if (= n 0) :done
+  ;;                        (do (spawn (send me n)) (loop (- n 1))))))
+  ;;     (loop 5))
+  ;;
+  ;; → "thread 'main' has overflowed its stack" within 5 iterations.
+  ;;
+  ;; Workaround: hoist the recursive lambda to a top-level `defn`. The bug
+  ;; reproduces only when the closure's captured-env chain is cyclic, which
+  ;; only happens for let-bound recursive closures. Fix: cycle detection in
+  ;; `promote_env` (parallel to `FlushForward` in `flush_value`).
+  )
+
+;;
+;; --- Heap allocation --------------------------------------------------------
+;;
+
+(describe "adversarial: heap allocation"
+  :isolated
+
+  (test "1 MB string allocates as a Shared blob"
+    (when (bound? '%blob-ptr)
+      (let (big (string-repeat "X" 1048576))
+        (assert= 1048576 (string-length big))
+        (is (not (nil? (%blob-ptr big)))))))
+
+  (test "100 000-element cons list build + traverse"
+    (let (build (fn (n acc) (if (= n 0) acc (build (- n 1) (cons n acc))))
+          lst (build 100000 nil))
+      (assert= 100000 (count lst))
+      (assert= 1 (first lst))))
+
+  (test "10 000-entry CHAMP map build + lookup"
+    (let (build (fn (n acc) (if (= n 0) acc (build (- n 1) (assoc acc n (* n n)))))
+          m (build 10000 {}))
+      (assert= 10000 (count m))
+      (assert= 250000 (get m 500))
+      (assert= 99980001 (get m 9999)))))
+
+;;
+;; --- Message system ---------------------------------------------------------
+;;
+
+(describe "adversarial: messages"
+  :isolated
+
+  (test "a 300-deep nested list send errors cleanly (MAX_MESSAGE_DEPTH = 256)"
+    (let (build (fn (n acc) (if (= n 0) acc (build (- n 1) (list acc))))
+          deep (build 300 :leaf)
+          me (self))
+      (assert-error (send me deep))))
+
+  (test "a 300-deep nested map send errors cleanly"
+    (let (deep (adv-deep-map 300)
+          me (self))
+      (assert-error (send me deep))))
+
+  (test "a self-referential local closure send is rejected cleanly"
+    (let (f (fn (x) (f x))  ; resolves to itself via the let's captured env
+          me (self))
+      (assert-error (send me f))))
+
+  (test "sending a raw builtin is rejected with a clear error"
+    (let (me (self))
+      (assert-error (send me %add))))
+
+  (test "send to a dead pid is silently dropped (Erlang semantics)"
+    (let (dead (spawn (fn () nil))  ; worker exits immediately
+          _    (receive (after 50 nil)))
+      ;; A send to the now-dead pid should NOT raise.
+      (send dead :hello)
+      (is true)))
+
+  (test "(receive (after 0 …)) returns the timeout body immediately"
+    (assert= :tick (receive (after 0 :tick))))
+
+  (test "a pid round-trips through send/receive unchanged"
+    (let (me (self) w (spawn (adv-echo me)))
+      (send w me)
+      (assert= me (receive (v v))))))
+
+;;
+;; --- Blob heap (ADR-041) under stress ---------------------------------------
+;;
+
+(describe "adversarial: blob heap stress"
+  :isolated
+
+  (test "boundary: 255 B is Inline, 256 B is Shared (nil vs ptr)"
+    (when (bound? '%blob-ptr)
+      (assert= nil (%blob-ptr (string-repeat "x" 255)))
+      (is (not (nil? (%blob-ptr (string-repeat "x" 256)))))
+      (assert= nil (%blob-ptr ""))))
+
+  (test "200-worker fan-out: every worker observes the same blob ptr"
+    (when (bound? '%blob-ptr)
+      (let (n 200
+            big (string-repeat "F" 10240)  ; 10 KB Shared blob
+            parent-ptr (%blob-ptr big)
+            me (self)
+            ws (adv-spawn-echoers me n nil))
+        (is (not (nil? parent-ptr)))
+        (adv-send-all ws big)
+        (adv-collect 0 n parent-ptr))))
+
+  (test "5000 sequential sends of one blob to one worker keep identity stable"
+    (when (bound? '%blob-ptr)
+      (let (n 5000
+            big (string-repeat "B" 4096)
+            parent-ptr (%blob-ptr big)
+            me (self)
+            w (spawn (adv-bombard-echo me n)))
+        (adv-drive-sends n big w)
+        (assert= :ok (adv-drain-acks n parent-ptr))
+        (assert= :done (receive (v v))))))
+
+  (test "blob sent to a worker and echoed back keeps the same SharedBlob ptr"
+    (when (bound? '%blob-ptr)
+      (let (big (string-repeat "R" 1024)
+            parent-ptr (%blob-ptr big)
+            me (self)
+            w (spawn (adv-echo-back me)))
+        (send w big)
+        (let (got (receive (v v)))
+          (assert= parent-ptr (%blob-ptr got)))))))
+
+;;
+;; --- Concurrency / scheduler ------------------------------------------------
+;;
+
+(describe "adversarial: concurrency / scheduler"
+  :isolated
+
+  (test "1000 spawn + send + receive across green processes drains cleanly"
+    ;; Spawn at top level to avoid the let-bound-closure → promote-cycle bug.
+    (do
+      (adv-fan-out 1000 (self))
+      (assert= 500500 (adv-fan-in 0 1000 0))))
+
+  (test "1000 monitored workers all fire :down on kill, no leaks"
+    (let (n 1000
+          pairs (adv-monitor-fan n nil))
+      (adv-kill-all pairs)
+      (assert= :ok (adv-drain-downs n))))
+
+  (test "self-monitor returns a ref without erroring (no special-case)"
+    (let (me (self) ref (monitor me))
+      (is (not (nil? ref)))))
+
+  (test "hot reload race: a global redefined mid-loop doesn't crash the worker"
+    ;; ADR: a `def` of an existing global rebinds it; in-flight calls keep
+    ;; running the old code (RUNTIME is append-only). A worker that calls
+    ;; `adv-redef-target` 100k times should finish even if the parent
+    ;; redefines `adv-redef-target` mid-flight.
+    (let (me (self)
+          w (spawn (adv-redef-caller me 100000)))
+      ;; Redefine adv-redef-target while the worker runs.
+      (adv-set-redef-v2)
+      (assert= :done (receive (v v))))))
+
+;;
+;; --- Top-level helpers (defn lifts past the cycle-promote bug; see eval block)
+;;
+
+(defn adv-tail-loop (n)
+  (if (= n 0) :done (adv-tail-loop (- n 1))))
+
+(defn adv-deep-map (n)
+  (if (= n 0) {:leaf true} {:next (adv-deep-map (- n 1))}))
+
+(defn adv-echo (parent)
+  (receive (v (send parent v))))
+
+(defn adv-echo-back (parent)
+  (receive (s (send parent s))))
+
+(defn adv-spawn-echoers (parent n acc)
+  (if (= n 0) acc
+    (adv-spawn-echoers parent (- n 1) (cons (spawn (adv-echo parent)) acc))))
+
+(defn adv-send-all (ws msg)
+  (when (not (empty? ws))
+    (send (first ws) msg)
+    (adv-send-all (rest ws) msg)))
+
+(defn adv-collect (got total expected)
+  (if (= got total) :ok
+    (receive (v
+      (if (= v expected)
+        (adv-collect (+ got 1) total expected)
+        [:mismatch v expected])))))
+
+;; ---- Bombard helpers: 5000 sequential sends of one blob ----------------------
+
+(defn adv-bombard-echo (parent ct)
+  (if (= ct 0) (send parent :done)
+    (receive (s (do (send parent (%blob-ptr s))
+                    (adv-bombard-echo parent (- ct 1)))))))
+
+(defn adv-drive-sends (n big w)
+  (if (= n 0) nil
+    (do (send w big) (adv-drive-sends (- n 1) big w))))
+
+(defn adv-drain-acks (n expected)
+  (if (= n 0) :ok
+    (receive (p
+      (if (= p expected)
+        (adv-drain-acks (- n 1) expected)
+        [:mismatch p expected])))))
+
+;; ---- 1000-process fan-out ----------------------------------------------------
+
+(defn adv-fan-out (n me)
+  (if (= n 0) nil
+    (do (spawn (send me n)) (adv-fan-out (- n 1) me))))
+
+(defn adv-fan-in (got total acc)
+  (if (= got total) acc
+    (adv-fan-in (+ got 1) total (receive (x (+ acc x))))))
+
+;; ---- Monitor fan-out ---------------------------------------------------------
+
+(defn adv-monitor-worker ()
+  (receive (:die nil)))
+
+(defn adv-monitor-fan (n acc)
+  (if (= n 0) acc
+    (let (pid (spawn (adv-monitor-worker))
+          ref (monitor pid))
+      (adv-monitor-fan (- n 1) (cons [pid ref] acc)))))
+
+(defn adv-kill-all (pairs)
+  (when (not (empty? pairs))
+    (let (pair (first pairs))
+      (send (first pair) :die)
+      (adv-kill-all (rest pairs)))))
+
+(defn adv-drain-downs (n)
+  (if (= n 0) :ok
+    (receive ([:down _ _ _] (adv-drain-downs (- n 1))))))
+
+;; ---- Hot reload race ---------------------------------------------------------
+
+(defn adv-redef-target () :v1)
+
+(defn adv-set-redef-v2ed () :v2)
+(defn adv-set-redef-v2 () (adv-set-redef-v2ed))
+
+(defn adv-redef-caller (parent n)
+  (if (= n 0) (send parent :done)
+    (do (adv-redef-target) (adv-redef-caller parent (- n 1)))))

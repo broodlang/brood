@@ -74,6 +74,10 @@ fn main() {
     if let Some(n) = cli.max_parallel {
         brood::process::set_max_parallel(n);
     }
+    // Honour BROOD_MEM_LIMIT / BROOD_MEM_SOFT_LIMIT for every mode; plain runs
+    // and the REPL stay unlimited unless the user opts in (ADR-043). `--test`
+    // additionally defaults a ceiling on (see run_test_files).
+    brood::core::alloc::init_limits_from_env();
 
     // A bare `brood new foo` (or run/test/... ) parses `new` as a FILE and dies
     // with a cryptic "cannot read new". Project tooling lives in `nest`, not
@@ -123,6 +127,14 @@ fn run_test_files(interp: &mut Interp, files: &[String]) {
         eprintln!("brood --test: expected a file, e.g. `brood --test foo_test.blsp`");
         std::process::exit(2);
     }
+    // Default a memory ceiling on for test runs so an adversarial / runaway test
+    // can't OOM the host (ADR-043). An explicit BROOD_MEM_LIMIT still wins —
+    // init_limits_from_env ran first in main(), so re-applying with defaults only
+    // fills in what the env didn't set.
+    brood::core::alloc::init_limits_with_default(
+        brood::core::alloc::TEST_DEFAULT_HARD,
+        brood::core::alloc::TEST_DEFAULT_SOFT,
+    );
     // Ensure `run-tests` exists even if a file forgot to `(require 'test)`.
     if let Err(e) = interp.eval_str("(require 'test)") {
         report_error(&e);

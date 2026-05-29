@@ -2183,3 +2183,171 @@ dominates. One `const SHARED_BLOB_THRESHOLD: usize = 256` in
 "no slot reuse"; a Shared slot's handle still grows monotonically, only
 the *bytes* are shared), commit `dee0814` (Phase 2 hibernate — flush
 must Arc::clone survivors to maintain blob identity).
+
+
+## ADR-042 — Live-editing hardening: `defonce`, reload-defs detection, dedup, macro-staleness warning
+
+**Status:** accepted, implemented 2026-05-29 (see devlog).
+
+**Context.** The hot-reload *mechanism* is built and documented in
+[`shared-code.md`](shared-code.md) (shared RUNTIME region, late-bound globals,
+append-only code). [`live-editing.md`](live-editing.md) is the *next* layer —
+the handful of things still missing before you can edit the running editor all
+day the way you edit a running Emacs. This ADR lands the cheap, high-value
+subset of that plan (its Stages 1, 2, 5-dedup, 7); the rest stays planned.
+
+It also **reverses a planned removal.** ADR-039 (supervised-by-default
+processes) was *tried and reverted* on 2026-05-29 (roadmap M-process; the
+kernel-side supervisor was the bulk of the scheduler-race surface). ADR-039 had
+scheduled `defonce`'s deletion "in the same change that adds named-spawn" —
+but named-spawn never shipped, and even if it had, it only covers the
+*process-singleton* case. The *global state cell* case it does not. So the
+planned removal is **void**; `defonce` is the chosen tool, not a transitional
+shim.
+
+**Decision.** Four small hardening pieces, all Brood or thin Rust:
+
+1. **`defonce` (prelude macro) — kept and blessed.** Evaluate the init form
+   *only if the symbol is not already bound*; otherwise leave the existing
+   binding untouched (Emacs `defvar` / Clojure `defonce`). Reload re-runs every
+   `def…` form, which would otherwise reset global cells
+   (`(defonce *registry* {})`) and re-spawn singletons/reopen resources
+   (`(defonce *server* (spawn (serve)))`, leaking the old one). A **pure prelude
+   macro over existing primitives** — `(unless (bound? '~name) (def ~name ~val))`
+   — zero kernel surface. `bound?` checks *any* binding in scope; it's correct at
+   top level (the only place reload re-evaluates), which is where `defonce`
+   belongs.
+
+2. **`reload-defs` detection tightened.** A top-level form is treated as a
+   definition iff its head symbol starts with `def` **and** is actually a definer
+   — a core `def`/`defmacro` special form, or a symbol currently bound to a
+   `Macro` (so `defn`/`defmodule`/`defdyn`/`defonce` and any user `def…` macro
+   qualify). This drops the false positive where a plain top-level *call* whose
+   name starts with `def` (e.g. `(default-config)`) was re-run on every reload:
+   it resolves to a `Fn`, not a macro, so it's now correctly skipped. **Known
+   limitation:** a definer macro *not* named `def…` (e.g. `(register-handler …)`
+   expanding to a `def`) is skipped — workaround: prefix definer macros with
+   `def`, the Lisp convention anyway. No dependency graph, no registry.
+
+3. **`reload-defs` atomicity (cheap 90%).** The whole file is read and parsed
+   before any form is evaluated, so a syntactically broken / half-saved file
+   applies *zero* defs (the read fails first). The residual non-atomic window — a
+   *runtime* error while evaluating form N, after forms 1..N-1 already landed —
+   is accepted and documented; full snapshot/rollback of the affected bindings is
+   deferred (it's rare and the leak it prevents is "some defs newer than others,"
+   not corruption).
+
+4. **Dedup-on-identical redefinition.** A `def` of structurally-identical code
+   (a save-without-change, or `nest format` rewriting the file) is **not**
+   appended as a new version to the append-only RUNTIME region; a genuine change
+   still appends and is live immediately. This is the cheap half of
+   [`live-editing.md`](live-editing.md) Stage 5 (bounded RUNTIME memory); the real
+   compacting collector for superseded versions is deferred to its own stage.
+
+5. **Macro-redefinition staleness warning.** When `defmacro` *rebinds* an
+   existing macro, print `[reload] macro X redefined; callers expanded before now
+   keep the old expansion — re-eval them`. Silent on first definition (prelude /
+   first file load). Mirrors the existing `def` arity-change diagnostic. A true
+   reverse-dependency index (who expanded X) is deferred — the warning is 90% of
+   the value at 5% of the cost.
+
+**Out of scope / deferred** (tracked in [`live-editing.md`](live-editing.md)):
+editor-driven eval via LSP commands (Stage 3), single-process watcher +
+optional `notify` (Stage 4), the long-lived-process upgrade hook /
+`*code-version*` (Stage 6), and the true RUNTIME collector (Stage 5's later
+half). Schema/record migration is **not applicable** — data is structurally
+typed immutable maps, so there's no nominal type whose field set can drift out
+of sync with live instances.
+
+**References.** [`shared-code.md`](shared-code.md) and
+[`live-editing.md`](live-editing.md) (the mechanism and the plan), ADR-013
+(redefinable globals / hot reload), ADR-026 (immutability — state lives in
+processes, so reload doesn't touch process-threaded state), ADR-039 (reverted;
+its scheduled `defonce` removal is void).
+
+
+## ADR-043 — Runaway-resource backstops: memory limits (E0043) + eval-depth ceiling (E0044)
+
+**Status:** accepted, implemented 2026-05-29 (see devlog).
+
+**Context.** The runtime hosts code it doesn't trust to be well-behaved: the
+in-language suite includes [`tests/adversarial_test.blsp`](../tests/adversarial_test.blsp),
+and the editor's whole point is to `eval` code you're editing. Two runaway
+patterns take down the *host* rather than failing cleanly:
+
+- **Unbounded allocation** (`(cons …)` loop, `(string-repeat "x" huge)`)
+  exhausts host RAM and can freeze the machine.
+- **Unbounded non-tail recursion** (`(defn boom (n) (+ 1 (boom (+ n 1))))`)
+  overflows the coroutine stack — a SIGSEGV the host can't `catch_unwind`, so it
+  aborts the whole REPL / `nest mcp` server, not just the offending process.
+
+Both should become clean, catchable Lisp errors.
+
+**Decision.** Two backstops, both **off by default**, both **process-wide**
+(per-process accounting is deferred — ADR-011):
+
+**Memory (`E0043`).** A counting `#[global_allocator]` (`core/alloc.rs`,
+std-only per ADR-005) tallies live + peak bytes for the *whole* process, with
+two tiers:
+
+- **Hard limit** — enforced in `alloc`/`realloc`: an allocation that would cross
+  it returns null, so Rust's OOM handler aborts the process. Ungraceful (kills
+  every green process) but it is the backstop that guarantees the *host* survives
+  any pattern, including a single huge allocation *between* eval safepoints.
+- **Soft limit** — *not* enforced in the allocator; polled at the eval safepoint
+  (`eval/mod.rs`, gated on `gc_block_depth() == 1`, the same outermost-eval gate
+  as the GC safepoint, ADR-035) and raised as a catchable `E0043`. Set below the
+  hard limit so a runaway *loop* fails gracefully (only the offending process
+  dies; `try`/`catch` can recover) long before the hard abort.
+
+Configured via `BROOD_MEM_LIMIT` (hard) / `BROOD_MEM_SOFT_LIMIT` (soft); soft is
+derived as ¾·hard when only the hard is given. Plain `brood`, the REPL, and
+`nest run`/`mcp` stay **unlimited** unless the user opts in (the live image edits
+all day). The **test runners** (`brood --test`, `nest test`, the `cargo test`
+Brood suite) default a ceiling on (`TEST_DEFAULT_HARD`/`TEST_DEFAULT_SOFT`) so an
+adversarial test can't OOM the machine; an explicit env var still wins.
+`(mem-limit)` / `(mem-soft-limit)` expose the ceilings; `(mem-bytes)` /
+`(mem-peak)` the counters.
+
+**Eval depth (`E0044`).** `GC_BLOCK` already counts nested `eval`/`macroexpand`
+frames — i.e. *non-tail* recursion depth (a tail call re-enters the `'tail:`
+loop without a new frame, so it doesn't bump the counter). At the top of `eval`,
+if that depth exceeds the ceiling, raise a catchable `E0044` *before* the
+coroutine stack overflows. Default `MAX_EVAL_DEPTH_DEFAULT = 3500`, tuned for the
+tightest case (a debug build on the 2 MiB coroutine stack, `CORO_STACK_BYTES`);
+the root thread and release builds have far more headroom. Tune with
+`BROOD_MAX_DEPTH`. This only ever bites runaway non-tail recursion — Brood loops
+are tail recursion (O(1) stack), which doesn't grow `GC_BLOCK`.
+
+**Why two tiers for memory.** The soft limit is the graceful, catchable, common
+path. The hard limit covers the one case the soft path *cannot*: a single giant
+allocation inside one builtin (`string-repeat` of a huge count) with no
+intervening safepoint to poll. The soft check between safepoints can't see it
+coming; the allocator can.
+
+**Test-runner default sizing.** Started at 2 GiB hard / 1.5 GiB soft; **lowered
+to 512 MiB / 384 MiB on 2026-05-29.** Per-process heaps are `Rc`-reclaimed when a
+green process exits, so the suite's footprint is the *concurrent* peak across
+~`nproc` workers plus the shared baseline — not a cumulative total — which 512
+MiB covers with headroom while making a genuine runaway trip in a fraction of a
+second instead of chewing through gigabytes first.
+
+**Known gaps / deferred.**
+- **Per-process limits** — only process-wide accounting today (ADR-011: ship the
+  simple form, defer the powerful one).
+- **Soft check only at `gc_block_depth() == 1`** — a runaway happening entirely
+  inside one builtin reaches only the hard limit (abort), not the catchable soft
+  path. Accepted: the hard limit protects the host, and builtins that can
+  allocate unboundedly are few.
+- **The 3500 depth ceiling is empirical headroom, not a proof** against the 2 MiB
+  debug coroutine stack; a genuinely deep non-tail algorithm raises
+  `BROOD_MAX_DEPTH`.
+- **`mem_limit.rs`'s runaway test is `#[ignore]`d** — it drives an unbounded
+  allocation by construction (to prove the soft limit catches it), so it's not
+  run unattended in a routine `cargo test`; run it with `--ignored` when you can
+  watch it.
+
+**References.** ADR-035 (per-process tracing GC — same `gc_block_depth() == 1`
+outermost-eval safepoint the soft-memory check rides on), ADR-018 (green
+processes and their coroutine stacks), ADR-011 (favour the simple design; defer
+per-process limits), ADR-005 (dependency-free, std-only allocator).

@@ -226,9 +226,11 @@ The seam that makes remoteability free later (see architecture.md).
   clean in debug-assertions release. **Userland supervision is still
   possible** — `spawn` + `monitor` give you `[:down …]` and a respawn
   pattern in ~10 lines of Brood (see [`supervision.md`](supervision.md)).
-  Named-spawn is **not** delivered (was bundled with this); the `defonce`
-  transitional shim stays in the prelude. The editor will be written
-  against let-it-crash + userland supervisors instead.
+  Named-spawn is **not** delivered (was bundled with this); `defonce` stays in
+  the prelude — no longer a transitional shim but the blessed state-survival
+  tool ([ADR-042](decisions.md), since named-spawn would not have covered the
+  global-state-cell case anyway). The editor will be written against
+  let-it-crash + userland supervisors instead.
 - ⬜ The same runtime listens on a socket and serves the M3 protocol
 - ⬜ Remote editor instances attach (the Emacs `--daemon` / `emacsclient` model)
 - ⬜ One core, multiple attached frontends

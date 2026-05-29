@@ -209,6 +209,40 @@ const REDUCTION_BUDGET: u32 = 2000;
 /// Tunable; bump if a feature lands with heavier frames.
 const CORO_STACK_BYTES: usize = 2 * 1024 * 1024;
 
+/// Default eval-depth ceiling: the maximum `GC_BLOCK` depth (nested `eval` /
+/// `macroexpand` frames — i.e. *non-tail* recursion) allowed before `eval`
+/// raises a catchable [`STACK_DEPTH_EXCEEDED`](crate::error::error_codes) error
+/// instead of running on to overflow the [`CORO_STACK_BYTES`] coroutine stack.
+///
+/// Tuned for the *tightest* case: a debug build on the 2 MiB coroutine stack,
+/// where eval frames are heaviest (no inlining + poison checks). Measured
+/// overflow there sits well above this; the ceiling leaves comfortable
+/// headroom while staying far above any legitimate non-tail depth (the
+/// in-language suite's deepest pattern-match / fold-over-cons recursions run a
+/// few hundred frames). The root thread and release builds have much larger
+/// stacks, so the same ceiling is even safer there. Loops in Brood are *tail*
+/// recursion (which doesn't grow `GC_BLOCK`), so this only ever bites runaway
+/// non-tail recursion — exactly the footgun it exists to catch.
+///
+/// Override with `BROOD_MAX_DEPTH=<n>` (e.g. to allow a genuinely deep non-tail
+/// algorithm, or to probe lower). `0` is clamped back to the default.
+const MAX_EVAL_DEPTH_DEFAULT: u32 = 3500;
+
+/// The active eval-depth ceiling, read once from `BROOD_MAX_DEPTH` (or the
+/// default). Cached so the per-`eval` check is a single load + compare with no
+/// env lookup on the hot path.
+pub fn max_eval_depth() -> u32 {
+    use std::sync::LazyLock;
+    static LIMIT: LazyLock<u32> = LazyLock::new(|| {
+        std::env::var("BROOD_MAX_DEPTH")
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(MAX_EVAL_DEPTH_DEFAULT)
+    });
+    *LIMIT
+}
+
 /// Called once per `eval` `'tail:` iteration. Cheap: a thread-local decrement; only
 /// when the budget is exhausted does it touch `CURRENT` and (for a green process)
 /// suspend. Bounds the work any one process does before peers get the worker, so a

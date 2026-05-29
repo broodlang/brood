@@ -3,10 +3,33 @@
 //! the language can currently do.
 
 use brood::Interp;
+use std::sync::LazyLock;
+
+/// Process-wide memory backstop for this test binary (ADR-043). None of these
+/// end-to-end tests is a runaway, but `cargo test` runs each `tests/*.rs` file
+/// as its own process and only `suite.rs` armed a ceiling — so this binary had
+/// none. Forcing this once (idempotent; the limit is a process-wide atomic) means
+/// an *accidental* future runaway here trips a clean `E0043` instead of OOMing
+/// the host. An explicit `BROOD_MEM_LIMIT` still wins (it's applied first inside
+/// `init_limits_with_default`). Forced from `run()` and from each test that builds
+/// its own `Interp`; the limit is process-wide, so the first force covers the
+/// rest of the parallel run too.
+static MEM_GUARD: LazyLock<()> = LazyLock::new(|| {
+    brood::core::alloc::init_limits_with_default(
+        brood::core::alloc::TEST_DEFAULT_HARD,
+        brood::core::alloc::TEST_DEFAULT_SOFT,
+    );
+});
+
+/// Build a fresh interpreter with the [`MEM_GUARD`] memory ceiling installed.
+fn fresh_interp() -> Interp {
+    LazyLock::force(&MEM_GUARD);
+    Interp::new()
+}
 
 /// Evaluate `src` in a fresh interpreter and return the printed result.
 fn run(src: &str) -> String {
-    let mut interp = Interp::new();
+    let mut interp = fresh_interp();
     let value = interp.eval_str(src).expect("evaluation failed");
     interp.print(value)
 }
@@ -219,6 +242,92 @@ fn live_redefinition() {
     interp.eval_str("(def greet (fn () :v2))").unwrap();
     let v = interp.eval_str("(greet)").unwrap();
     assert_eq!(interp.print(v), ":v2");
+}
+
+/// `defonce` initialises a binding once; re-evaluating the same form — which is
+/// exactly what a hot reload (`reload-defs`/`load`) does on every save — is a
+/// no-op, so top-level state and singletons survive the reload instead of being
+/// reset / re-created. (docs/live-editing.md Stage 1.)
+#[test]
+fn defonce_preserves_state_across_reload() {
+    let mut interp = fresh_interp();
+    // First definition binds.
+    let v = interp.eval_str("(defonce s 41)").unwrap();
+    assert_eq!(interp.print(v), "s");
+    let v = interp.eval_str("s").unwrap();
+    assert_eq!(interp.print(v), "41");
+    // The running program changes the value.
+    interp.eval_str("(def s 99)").unwrap();
+    // A reload re-evaluates the original `defonce` form: it must NOT reset to 41.
+    interp.eval_str("(defonce s 41)").unwrap();
+    let v = interp.eval_str("s").unwrap();
+    assert_eq!(interp.print(v), "99");
+    // `bound?` is false for an unbound symbol, so the first `defonce` is safe.
+    let v = interp.eval_str("(bound? 'never-bound)").unwrap();
+    assert_eq!(interp.print(v), "false");
+}
+
+/// `reload-defs` re-evaluates definitions but skips side-effecting top-level
+/// calls — even a call whose name starts with "def" (it resolves to a `Fn`, not
+/// a definer macro). (docs/live-editing.md Stage 2.)
+#[test]
+fn reload_defs_applies_definitions_and_skips_calls() {
+    let mut interp = fresh_interp();
+    // A sentinel we watch for unwanted side effects from skipped calls.
+    interp.eval_str("(def side :untouched)").unwrap();
+
+    let mut path = std::env::temp_dir();
+    path.push(format!("brood-reload-{}.blsp", std::process::id()));
+    let src = "(def rx 1)\n\
+               (defn rf () 2)\n\
+               (defn default-thing () (def side :ran-default))\n\
+               (defn run-it () (def side :ran-call))\n\
+               (default-thing)\n\
+               (run-it)\n";
+    std::fs::write(&path, src).unwrap();
+    let p = path.to_string_lossy().replace('\\', "\\\\");
+    interp
+        .eval_str(&format!("(reload-defs \"{}\")", p))
+        .unwrap();
+
+    // Definitions applied:
+    let v = interp.eval_str("rx").unwrap();
+    assert_eq!(interp.print(v), "1");
+    let v = interp.eval_str("(rf)").unwrap();
+    assert_eq!(interp.print(v), "2");
+    // Both top-level *calls* were skipped — including `(default-thing)`, whose
+    // name starts with "def" but is a function call, not a definition.
+    let v = interp.eval_str("side").unwrap();
+    assert_eq!(interp.print(v), ":untouched");
+
+    std::fs::remove_file(&path).ok();
+}
+
+/// Redefining a global to *unchanged* code (a save-without-change, or `nest
+/// format` rewriting the file) is deduped — it doesn't append a duplicate to the
+/// append-only RUNTIME region. A real change still appends. (Stage 5.)
+#[test]
+fn unchanged_redefinition_is_deduped() {
+    let mut interp = fresh_interp();
+    interp.eval_str("(def f (fn (x) (+ x 1)))").unwrap();
+    let after_first = interp.heap.runtime_closure_count();
+
+    // Re-defining the *same* code must not grow the RUNTIME region…
+    interp.eval_str("(def f (fn (x) (+ x 1)))").unwrap();
+    assert_eq!(
+        interp.heap.runtime_closure_count(),
+        after_first,
+        "identical redefinition should be deduped"
+    );
+
+    // …while a genuine change appends a new version (and is live immediately).
+    interp.eval_str("(def f (fn (x) (+ x 2)))").unwrap();
+    assert!(
+        interp.heap.runtime_closure_count() > after_first,
+        "changed redefinition should append a new version"
+    );
+    let v = interp.eval_str("(f 10)").unwrap();
+    assert_eq!(interp.print(v), "12");
 }
 
 /// `eval` + `read-string` let the language run code it builds at runtime.

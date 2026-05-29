@@ -346,6 +346,20 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::nullary(int),
         mem_peak,
     );
+    def(
+        heap,
+        "mem-limit",
+        Arity::exact(0),
+        Sig::nullary(int),
+        mem_limit,
+    );
+    def(
+        heap,
+        "mem-soft-limit",
+        Arity::exact(0),
+        Sig::nullary(int),
+        mem_soft_limit,
+    );
 
     // self-hosting — eval/load/etc. take and return arbitrary forms / values.
     def(
@@ -890,6 +904,8 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("now-ns", &[], "Wall-clock nanoseconds since the Unix epoch (finer-grained than now)."),
     ("mem-bytes", &[], "Bytes currently allocated process-wide."),
     ("mem-peak", &[], "High-water mark of allocated bytes since process start."),
+    ("mem-limit", &[], "Hard memory ceiling in bytes (0 = unlimited); crossing it aborts the process. Set via BROOD_MEM_LIMIT."),
+    ("mem-soft-limit", &[], "Soft memory ceiling in bytes (0 = unlimited); crossing it raises a catchable E0043 at the next safepoint."),
     ("eval", &["form"], "Evaluate a form in the global environment."),
     ("read-string", &["s"], "Parse and return the first form in string s."),
     ("parse-source", &["s"], "Parse s into a lossless CST tree as nested vectors (mechanism for std/format.blsp)."),
@@ -1457,6 +1473,16 @@ fn mem_peak(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::Int(crate::core::alloc::peak_bytes() as i64))
 }
 
+/// `(mem-limit)` — the hard memory ceiling in bytes (0 = unlimited). ADR-043.
+fn mem_limit(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    Ok(Value::Int(crate::core::alloc::hard_limit() as i64))
+}
+
+/// `(mem-soft-limit)` — the soft memory ceiling in bytes (0 = unlimited). ADR-043.
+fn mem_soft_limit(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    Ok(Value::Int(crate::core::alloc::soft_limit() as i64))
+}
+
 // ---------- self-hosting ----------
 
 fn eval_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
@@ -1559,16 +1585,23 @@ fn cst_to_value(heap: &mut Heap, node: &cst::Node, src: &str) -> Value {
 }
 
 /// `(reload-defs path)` — like `load`, but only re-evaluates **definitions**
-/// (top-level forms whose head symbol starts with `def`: `def`, `defn`,
-/// `defmacro`, `defmodule`, `defdyn`, …). All other top-level forms are
-/// silently skipped. Used by the file watcher (`std/reload.blsp`): on the
-/// **second** and subsequent visits to a file we want to refresh the code
-/// (so the running program sees the new behaviour via late binding) but
-/// **not** re-run side-effecting top-level calls like `(main)` or
-/// `(my-loop 99)` — re-executing those would either spawn a duplicate
-/// long-running process (if it's a tail-recursive loop) or block the
-/// watcher itself (the calling process). Returns `nil`. ADR-013 hot
-/// reload's mechanism flowing through to the tool layer.
+/// (`def`/`defmacro` and `def…`-named macros: `defn`, `defmodule`, `defdyn`,
+/// `defonce`, user definers). All other top-level forms — `(require …)`,
+/// `(load …)`, a `(main-loop 0)` entry call — are silently skipped. Used by the
+/// file watcher (`std/reload.blsp`): on the **second** and subsequent visits to
+/// a file we want to refresh the code (so the running program sees the new
+/// behaviour via late binding) but **not** re-run side-effecting top-level calls
+/// — re-executing those would spawn a duplicate long-running process (a
+/// tail-recursive loop) or block the watcher itself.
+///
+/// **Atomicity:** the whole file is read before any form is evaluated, so a
+/// half-saved / syntactically broken file applies *zero* defs (read fails
+/// first). Forms are then expanded+evaluated one at a time, exactly like
+/// `load`, so a macro a form defines is visible to later forms in the same file
+/// (`lib.rs`). The residual non-atomic window is a *runtime* error while
+/// evaluating form N, after 1..N-1 already landed; full snapshot/rollback is
+/// deferred (docs/live-editing.md Stage 2). Returns `nil`. ADR-013 hot reload's
+/// mechanism flowing through to the tool layer.
 fn reload_defs(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "reload-defs", arg(args, 0))?;
     let src = std::fs::read_to_string(&path).map_err(|e| {
@@ -1580,17 +1613,35 @@ fn reload_defs(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let prev = heap.set_current_file(Some(path.clone()));
     let mut result = Ok(Value::Nil);
     for (form, pos) in forms {
-        // Only re-eval forms whose head is a symbol starting with "def".
-        // That covers `def`/`defn`/`defmacro`/`defmodule`/`defdyn` and any
-        // future `def…`. Other top-level forms — `(require …)`, `(load …)`,
-        // ordinary calls — are skipped. (`require` skipping is intentional:
-        // we don't auto-reload transitive modules from inside another
-        // module's reload; the user explicitly watches each path they
-        // care about with `reload-on-change`.)
+        // Re-eval only *definitions*; skip side-effecting top-level forms
+        // (`(require …)`, `(load …)`, a `(main-loop 0)` entry call). A form is a
+        // definition when its head symbol starts with "def" **and** is actually a
+        // definer — one of the `def`/`defmacro` core special forms, or a symbol
+        // currently bound to a macro (`defn`/`defmodule`/`defdyn`/`defonce` and
+        // any user `def…` macro). The macro check drops the false positive on a
+        // plain top-level *call* to a function whose name merely starts with
+        // "def" (e.g. `(default-config)`): that head resolves to a `Fn`, not a
+        // macro, so it's correctly skipped.
+        //
+        // Known limitation (accepted — docs/live-editing.md Stage 2): a definer
+        // macro *not* named `def…` (e.g. `(register-handler …)` expanding to a
+        // `def`) is skipped. Workaround: prefix definer macros with `def`, the
+        // Lisp convention anyway. (`require` skipping is likewise intentional: we
+        // don't transitively reload other modules; the user watches each path
+        // explicitly with `reload-on-change`.)
         let head_is_def = match form {
             Value::Pair(p) => {
                 let (head, _) = heap.pair(p);
-                matches!(head, Value::Sym(s) if value::symbol_name(s).starts_with("def"))
+                match head {
+                    Value::Sym(s) => {
+                        let nm = value::symbol_name(s);
+                        nm.starts_with("def")
+                            && (nm == "def"
+                                || nm == "defmacro"
+                                || matches!(heap.env_get(root, s), Some(Value::Macro(_))))
+                    }
+                    _ => false,
+                }
             }
             _ => false,
         };

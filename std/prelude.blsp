@@ -139,6 +139,21 @@
   "Evaluate `body` (returning the last) when `test` is falsy, else `nil`."
   `(if ~test nil (do ~@body)))
 
+;; `defonce` — define only if the name is not already bound. The point is
+;; hot-reload: re-evaluating a file (via `reload-defs` or `load`) re-runs every
+;; `def…` form, which would reset top-level state and re-create singletons (a
+;; fresh `(spawn …)`, a reopened connection) on every save. `defonce` makes the
+;; init run *once* — the value survives reload, exactly like Emacs `defvar`.
+;; Idiomatic for global state and resources: (defonce *server* (spawn (serve))),
+;; (defonce *registry* {}). Plain behaviour stays `defn`/`def`. To force re-init,
+;; restart or re-`def` explicitly. (`bound?` returns false on an unbound symbol,
+;; so this is safe on first definition — docs/live-editing.md Stage 1.)
+(defmacro defonce (name val)
+  "Bind `name` to `val` only if it isn't already bound, so the value survives
+hot-reload (cf. Emacs `defvar`). Once bound, re-evaluating is a no-op; restart
+or re-`def` to force re-init."
+  `(unless (bound? '~name) (def ~name ~val)))
+
 ;; `and`/`or` short-circuit left-to-right and return the deciding value, with
 ;; each subexpression evaluated at most once (a gensym holds it across the test).
 (defmacro and (& xs)

@@ -14,6 +14,13 @@ use brood::Interp;
 fn brood_suite_passes() {
     std::env::set_current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
         .expect("cd to repo root");
+    // Match `nest test` / `brood --test`: default a memory ceiling on (ADR-043)
+    // so the in-language suite (which includes tests/adversarial_test.blsp) can't
+    // OOM the host. An explicit BROOD_MEM_LIMIT still wins.
+    brood::core::alloc::init_limits_with_default(
+        brood::core::alloc::TEST_DEFAULT_HARD,
+        brood::core::alloc::TEST_DEFAULT_SOFT,
+    );
     let mut interp = Interp::new();
     if let Err(e) = interp.eval_str("(require 'project) (run-project-tests)") {
         panic!("Brood test suite failed: {}", e);

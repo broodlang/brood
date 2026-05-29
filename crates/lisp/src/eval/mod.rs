@@ -74,6 +74,28 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
     // persist. `Drop` runs on every return path (including `?` and panic).
     let _gc_block = crate::process::GcBlockGuard::enter();
 
+    // Eval-depth ceiling (ADR-043; runaway non-tail recursion). `GC_BLOCK`
+    // counts nested `eval`/`macroexpand` frames — i.e. *non-tail* recursion
+    // depth (tail calls re-enter the `'tail:` loop below without a new frame, so
+    // they don't bump it). When it crosses the ceiling, fail *here* with a
+    // clean, catchable error rather than running on to overflow the coroutine
+    // stack — a stack overflow is a SIGSEGV the host can't `catch_unwind`, so it
+    // would otherwise abort the whole REPL / `nest mcp` server. Mirrors the
+    // soft-memory-limit backstop below. One TLS read + compare on entry.
+    if crate::process::gc_block_depth() > crate::process::max_eval_depth() {
+        return Err(LispError::runtime(format!(
+            "recursion too deep: exceeded the {}-frame eval-depth limit \
+             (runaway non-tail recursion?)",
+            crate::process::max_eval_depth()
+        ))
+        .with_code(crate::error::error_codes::STACK_DEPTH_EXCEEDED)
+        .with_hint(
+            "rewrite as a tail-recursive loop (proper tail calls are O(1) stack), \
+             or raise the ceiling with BROOD_MAX_DEPTH",
+        )
+        .or_form_pos(heap, expr));
+    }
+
     'tail: loop {
         match expr {
             Value::Sym(s) => {
@@ -118,8 +140,25 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
         //   • no other Rust frame holds an unrooted LOCAL transient (the
         //     `GC_BLOCK == 1` invariant — see `docs/memory-model.md`).
         // Cost on inner-eval iterations: one TLS read + compare (fail-fast).
-        if crate::process::gc_block_depth() == 1 && heap.gc_due() {
-            heap.collect(&[expr], &[env]);
+        if crate::process::gc_block_depth() == 1 {
+            if heap.gc_due() {
+                heap.collect(&[expr], &[env]);
+            }
+            // Memory safety backstop (ADR-043): if total allocation has crossed
+            // the soft ceiling, fail *here* with a clean, catchable error rather
+            // than running on to the hard allocator limit (which aborts the whole
+            // process). Off by default; the test runners set it so adversarial /
+            // hostile code can't exhaust host RAM. Process-wide, not per-process
+            // (we only account bytes process-wide today). Cheap when disabled:
+            // one relaxed load of a zero, early return.
+            if let Some(used) = crate::core::alloc::soft_limit_hit() {
+                return Err(LispError::runtime(format!(
+                    "memory limit exceeded: {used} bytes allocated process-wide \
+                     exceeds the {}-byte soft limit (raise or unset BROOD_MEM_LIMIT)",
+                    crate::core::alloc::soft_limit()
+                ))
+                .with_code(crate::error::error_codes::MEMORY_LIMIT));
+            }
         }
         // Reduction-counted preemption: bound the work a process does before it
         // yields its worker (fairness — a CPU-bound process can't monopolise a
@@ -241,6 +280,19 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                         other => other,
                     };
                     let root = heap.env_root(env);
+                    // Staleness diagnostic (hot reload): redefining a macro does
+                    // *not* re-expand callers already compiled with the old
+                    // expansion — they keep the old code until re-evaluated. Warn
+                    // when *rebinding* an existing macro so the mismatch isn't a
+                    // silent surprise; silent on first definition (the prelude/std
+                    // build, and a file's first load). Mirrors the `def`
+                    // arity-change diagnostic above (docs/live-editing.md Stage 7).
+                    if matches!(heap.env_get(root, name), Some(Value::Macro(_))) {
+                        eprintln!(
+                            "[reload] macro {} redefined; callers expanded before now keep the old expansion — re-eval them",
+                            value::symbol_name(name)
+                        );
+                    }
                     heap.env_define(root, name, macro_val);
                     return Ok(Value::Sym(name));
                 }
