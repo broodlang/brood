@@ -70,6 +70,13 @@ struct Cli {
 }
 
 fn main() {
+    // Default to a backtrace on panic — these are the dev/edit binaries, and a
+    // bare panic (e.g. a heap index, a use-after-GC) is far easier to triage with
+    // a trace than a one-line message. Set before any thread spawns (single-
+    // threaded here, so it's sound); an explicit RUST_BACKTRACE=0 still wins.
+    if std::env::var_os("RUST_BACKTRACE").is_none() {
+        std::env::set_var("RUST_BACKTRACE", "1");
+    }
     let cli = Cli::parse();
     // Run the actual work on an explicitly-sized large stack. The tree-walking
     // evaluator recurses one (heavy, in debug) Rust frame per non-tail call, and

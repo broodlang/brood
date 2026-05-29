@@ -15,7 +15,7 @@
 //!   via its coroutine yielder; the root thread blocks on the condvar.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -59,10 +59,20 @@ pub(super) struct Mailbox {
     /// process that's churning memory (many collections) vs. a quiet one. Backs
     /// `process-info`'s `:collections`.
     pub(super) gc_runs: AtomicU64,
+    /// Set by `(exit pid …)`: an exit signal is pending. The lock-free fast flag;
+    /// the reason lives in `MailboxState.kill`. The target notices at its next
+    /// reduction tick (hard `:kill`, via `preempt`) or `receive` (soft), and `exit`
+    /// kills it directly if it's already parked. Stored on the mailbox (not the
+    /// `Process`) because that's what's registry-reachable from another worker.
+    pub(super) kill_pending: AtomicBool,
 }
 
 pub(super) struct MailboxState {
     pub(super) queue: VecDeque<Message>,
+    /// The exit reason set by `(exit pid reason)`, paired with `kill_pending`. Read
+    /// (and cleared) when the target dies; written under this lock before the flag
+    /// is published, so a reader that sees the flag set always sees the reason.
+    pub(super) kill: Option<Message>,
     /// The parked green process waiting on this mailbox, if any. `send` takes it
     /// and re-queues it. (A short-lived `Process → Arc<Mailbox> → Process` cycle
     /// while parked; broken the moment it's re-queued or the process ends.)
@@ -80,6 +90,7 @@ impl Mailbox {
                 queue: VecDeque::new(),
                 waiter: None,
                 scanned: 0,
+                kill: None,
             }),
             cv: Condvar::new(),
             // The root (which never goes through enqueue/run_one) keeps this; a
@@ -87,7 +98,27 @@ impl Mailbox {
             status: AtomicU8::new(ST_RUNNING),
             mem: AtomicUsize::new(0),
             gc_runs: AtomicU64::new(0),
+            kill_pending: AtomicBool::new(false),
         })
+    }
+
+    /// Record a pending exit signal (`(exit pid reason)`). Stores the reason *then*
+    /// publishes the flag, so any reader (`pending_kill`) that observes the flag set
+    /// is guaranteed to see the reason. A later signal overwrites the reason.
+    pub(super) fn request_kill(&self, reason: Message) {
+        crate::core::sync::lock(&self.state).kill = Some(reason);
+        self.kill_pending.store(true, Ordering::Relaxed);
+    }
+
+    /// The pending exit reason, if any. Fast path: one atomic load returning `None`
+    /// when no exit is pending (the common case, checked every `preempt`/`receive`).
+    /// Used by `preempt` (hard `:kill`) and `receive_match` (soft) to decide whether
+    /// to die; a clone (not a take) — the reason is finally consumed at death.
+    pub(super) fn pending_kill(&self) -> Option<Message> {
+        if !self.kill_pending.load(Ordering::Relaxed) {
+            return None;
+        }
+        crate::core::sync::lock(&self.state).kill.clone()
     }
 }
 
@@ -197,11 +228,33 @@ pub fn receive_match(
         .gc_runs
         .store(heap.gc_counters().0, Ordering::Relaxed);
     set_self_status(&ctx, ST_RUNNING);
+    // `matcher` and `on_timeout` are needed across every loop iteration, but
+    // `eval::apply` (the matcher) can now collect at ANY eval depth (ADR-061),
+    // which relocates these LOCAL closure handles. Root them on the operand stack
+    // and re-read the relocated handles each use; tear the region down on every
+    // return path. (The mailbox lock is dropped before `apply` — the matcher
+    // calls eval; only this process removes from its own mailbox, so the scanned
+    // prefix is stable and `send` only appends.)
+    let rbase = heap.roots_len();
+    heap.push_root(matcher); // rbase + 0
+    heap.push_root(on_timeout); // rbase + 1
     let mut i = 0usize;
     loop {
-        // Rebuild candidate `i` into the heap, then run the matcher *without* holding
-        // the mailbox lock (the matcher calls eval). Only this process removes from
-        // its own mailbox, so the scanned prefix is stable; `send` only appends.
+        // Exit at the `receive` boundary (this loop is a server's natural per-
+        // iteration point, and the resume site for a parked process `exit` woke). A
+        // soft `(exit pid reason)` — and any hard `:kill` not already caught at
+        // `preempt` — dies here with its reason instead of taking another message.
+        // The root has no yielder and can't be killed this way; we never resume
+        // after the suspend, so the operand-rooted matcher/on_timeout (freed with
+        // the heap on death) needn't be popped.
+        if let Some(yptr) = ctx.yielder {
+            if let Some(reason) = ctx.mailbox.pending_kill() {
+                // SAFETY: the yielder is valid while this coroutine runs (we're
+                // inside its body, called from eval). `run_one` retires us on `Kill`.
+                unsafe { (*yptr).suspend(Suspend::Kill(reason)) };
+            }
+        }
+        // Rebuild candidate `i` into the heap (no eval here → no collection).
         let candidate = {
             let st = crate::core::sync::lock(&ctx.mailbox.state);
             if i < st.queue.len() {
@@ -212,7 +265,14 @@ pub fn receive_match(
         };
         match candidate {
             Some(v) => {
-                let thunk = eval::apply(heap, matcher, &[v], EnvId::GLOBAL)?;
+                let matcher = heap.root_at(rbase);
+                let thunk = match eval::apply(heap, matcher, &[v], EnvId::GLOBAL) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        heap.truncate_roots(rbase);
+                        return Err(e);
+                    }
+                };
                 if matches!(thunk, Value::Fn(_)) {
                     // Matched — remove exactly this message, then hand the body thunk
                     // *back* (don't run it here). The `receive` macro applies it in
@@ -221,6 +281,7 @@ pub fn receive_match(
                     // O(1) native stack (running it here instead nests a `receive_match`
                     // per message → green-process coroutine-stack overflow).
                     crate::core::sync::lock(&ctx.mailbox.state).queue.remove(i);
+                    heap.truncate_roots(rbase);
                     return Ok(thunk);
                 }
                 i += 1; // no clause matched — leave it queued, try the next message
@@ -231,6 +292,8 @@ pub fn receive_match(
                     if Instant::now() >= d {
                         // Same trampoline: return the timeout thunk to be applied in
                         // tail position (the `receive` macro always supplies a fn).
+                        let on_timeout = heap.root_at(rbase + 1);
+                        heap.truncate_roots(rbase);
                         return Ok(on_timeout);
                     }
                 }

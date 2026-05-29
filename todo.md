@@ -8,32 +8,59 @@ an ADR once they're committed to. Newest section at the top.
 Two linked pieces. The timeout depends on `kill` (without it a timed-out test can
 only be abandoned as a background zombie — there's no way to stop it).
 
-### A. `kill` — terminate a green process (kernel; ADR-worthy; test across cores)
+### A. `(exit pid reason)` — terminate a green process (kernel; ADR-worthy)
 
-Two variants (Unix-signal analogy), differing only in **where the kill flag is
-checked** (you can't abort a coroutine mid-computation on another worker):
+**API: Erlang `(exit pid reason)`** (chosen 2026-05-30). `reason = :kill` is the
+**untrappable hard** kill; any other reason is the **soft/trappable** signal.
 
-- **Hard / `-9`** — checked at every **reduction tick** (`tick`/`preempt` in
-  `eval`), so it unwinds ASAP (sub-ms). If the target is **parked** (in `receive`
-  or queued RUNNABLE), drop it and `deregister(:killed)` immediately — never resume
-  it. Unwind a running coroutine via a non-catchable kill error that propagates to
-  the coroutine top → `Return` → `deregister(:killed)` (model on the existing
-  stack-overflow-guard kill / panic→`:killed` path in `scheduler.rs`).
-- **Soft / "wait for next iteration"** — checked at the next **`%receive`** (a
-  server/test loop's natural per-iteration boundary): the current iteration
-  finishes, then it dies. Caveat: a tight non-`receive` loop never honors it
-  (inherent to cooperative termination).
+**Validated mechanism** (against the current `scheduler.rs`; no coroutine can be
+aborted mid-compute on another worker, so the kill is checked at yield points):
 
-Design notes / decisions to confirm:
-- Surface: one `(kill pid)` + mode (e.g. `(kill pid :force)` vs default soft), or
-  two prims (`kill` / `kill!`)? **Erlang precedent:** `exit(pid, reason)`; a
-  `:kill` reason is the untrappable hard one.
-- `:down` reason delivered to monitors (`:killed`? the given reason?).
-- Per-process atomic kill flag (in the mailbox/process state); set from any worker.
-- Remote pids (dist): defer (error for now) or route as an exit signal later.
-- Self-kill, double-kill, kill-of-dead-pid: all no-ops / idempotent.
+- **Per-mailbox kill flag.** Add to `Mailbox` an `AtomicBool kill_pending` + the
+  reason (a `Message`) under the existing `mailbox.state` lock. `exit` looks up the
+  target via `REGISTRY` and sets both. Cheap to check; reason read only when the
+  bool is set.
+- **`Suspend::Kill(reason)`** — new variant alongside `Preempt`/`Receive`. In
+  `preempt()` (already the yield path, reached every ≤`REDUCTION_BUDGET`=2000
+  reductions), after refreshing the budget check the current proc's `kill_pending`;
+  if set, `(*yptr).suspend(Suspend::Kill(reason))` instead of `Suspend::Preempt`.
+  `run_one`'s match handles `Kill(reason)` by `deregister(proc.pid, reason)` and
+  **dropping** `proc` (never re-enqueue) → coroutine + heap freed. Untrappable **by
+  construction**: it bypasses Brood `%try` entirely (scheduler-level, like the
+  existing overflow-guard / panic→`:killed` paths). This is the hard `:kill`.
+- **Parked target** (suspended as `mailbox.state.waiter`, not running, so `tick`
+  never fires): `exit` must, after setting the flag, take the `waiter` under the
+  state lock and `deregister(reason)` directly (it never resumes). If RUNNABLE in a
+  worker queue, it'll resume, hit `preempt`, and self-kill — fine.
+- **Soft (reason ≠ `:kill`)**: check the flag at `%receive` too (the per-iteration
+  boundary) so a server loop dies *between* messages with `reason`; a trap-exit
+  flag to *handle* it instead of dying is a later add (ADR-011 — defer).
+- `:down` carries `reason` (`:killed` for `:kill`). Self-exit, double-exit,
+  exit-of-dead-pid: idempotent no-ops. Remote pids: error for now (defer dist).
+- Tests: hard-kill a tight CPU loop (the case soft can't catch); soft-kill a
+  receive loop; kill a parked process; monitor sees the right `:down` reason;
+  across cores.
 
-### B. Per-test timeout = **30s** (uses `kill`)
+### C. MCP `eval` (and other MCP tools) timeout = **30s** (uses `kill`)
+
+The `nest mcp` `eval` tool can block indefinitely — e.g. `(term-draw …)` needs a
+TTY and hangs headless, wedging the whole MCP session (observed 2026-05-30). Run
+the tool body in a spawned green process, `monitor` it, and `(receive (after
+30000 …))`; on timeout `(exit pid :kill)` it and return a "timed out after 30s"
+error result instead of hanging. Same deliver-to-mailbox shape as the test runner;
+matches the 30s test budget. Depends on `exit`. (Make it a shared
+`*mcp-tool-timeout-ms*` knob, default 30000, like the test thresholds.)
+
+### B. Per-test timeout = **30s** (uses `kill`) — ✅ DONE (2026-05-30)
+
+Implemented in `std/test.blsp`: `*test-timeout-ms*` (default 30000), threaded as a
+batch deadline into `collect-loop`'s `(receive … (after …))`. On timeout the
+straggler workers are `(exit pid :kill)`'d and reported as "timed out after Ns"
+failures; `:unit-result` is now hardened to ignore late messages from killed/zombie
+workers (so they can't corrupt a later batch's count). Override via
+`(run-tests :timeout MS)`. Verified: a 2.5s test under a 1s budget is hard-killed at
+1.0s and fails; all spawn/receive suites (exit/set/maps/concurrency) still green.
+Original design notes below (kept for reference).
 
 A test/unit running > 30s **fails** with "timed out after 30s" and the slow worker
 is killed (hard) so it stops consuming a worker. Default ON at 30s; overridable

@@ -604,6 +604,7 @@ child's own pid** — to hand the parent's pid in, bind it in an enclosing `let`
 | `(ref)` | A fresh unique reference token — see *Synchronous calls* below. |
 | `(monitor pid)` | Watch `pid`; returns a monitor `ref`. See *Monitors* below. |
 | `(demonitor mref)` | Drop the monitor created by `(monitor …)`. |
+| `(exit pid reason)` | Send an exit signal to a local process (Erlang `exit/2`). `reason` `:kill` is the **untrappable** hard kill — the target dies at its next reduction tick, or immediately if parked, even in a tight loop. Any other `reason` is the **soft** signal — the target dies at its next `receive` (a tight non-`receive` loop won't honour it). Monitors fire `[:down ref pid reason]`. No-op for a dead/unknown pid. |
 | `(spawn-count)` | How many green processes have been spawned since the program started. |
 | `(peak-threads)` | High-water mark of processes running *simultaneously* (bounded by the worker pool). |
 | `(worker-threads)` | Size of the worker-thread pool (≈ `nproc`, or `-j N`). |

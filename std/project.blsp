@@ -651,6 +651,176 @@ the `nest new` scaffolder.")
     "      (! c :inc) (! c :inc) (! c [:add 10])\n"
     "      (assert= (gen-call c :value) 12))))\n"))
 
+;; `http-server`: a minimal HTTP/1.0 web app over `std/http` (ADR-062). Handlers
+;; map a request to a response; `serve` blocks accepting connections. The router
+;; is built by a fn (not a top-level `def`) so its closure isn't promoted.
+(defn project--http-main-template (nm)
+  (str "(defmodule main \"" nm
+    " — a basic HTTP server.\")\n"
+    "\n"
+    "(require 'http)\n"
+    "\n"
+    "(def *port* 8080)\n"
+    "\n"
+    ";; A handler maps a request map to a response (`ok` / `text-response` / `not-found`).\n"
+    "(defn home (req)\n"
+    "  (ok (str \"<!doctype html><meta charset=utf-8>\"\n"
+    "        \"<h1>Hello from " nm "</h1>\"\n"
+    "        \"<p>Served by a web server written in Brood.</p>\"\n"
+    "        \"<p><a href='/hello'>/hello</a></p>\")))\n"
+    "\n"
+    "(defn hello (req) (text-response \"hello, world\"))\n"
+    "\n"
+    ";; Build the router in a fn (not a top-level `def`) so the closure stays local.\n"
+    "(defn app () (router {\"/\" home \"/hello\" hello}))\n"
+    "\n"
+    "(defn main ()\n"
+    "  \"Serve until interrupted. `nest run` blocks here; `nest run --for 2s` bounds it.\"\n"
+    "  (println (str \"Serving on http://localhost:\" *port*))\n"
+    "  (serve *port* (app)))\n"))
+
+(defn project--http-test-template (nm)
+  (str ";; `nest test` loads src/ first, so `home` / `app` are already defined.\n"
+    "(require 'test)\n"
+    "(require 'http)\n"
+    "\n"
+    "(describe \"" nm " routes\"\n"
+    "  (test \"GET / returns a 200 HTML page\"\n"
+    "    (let (resp (home {:path \"/\"}))\n"
+    "      (assert= (get resp :status) 200)\n"
+    "      (is (string-contains? (get resp :body) \"" nm "\"))))\n"
+    "  (test \"an unknown route is a 404\"\n"
+    "    (assert= (get ((app) {:path \"/nope\"}) :status) 404)))\n"))
+
+;; `editor`: a tiny text editor on the `ui` framework (std/ui.blsp) — a `ui-run`
+;; client like the observer. The buffer is a list of line strings + a [row col]
+;; cursor; every edit is a pure `(model -> model)` function (testable without a
+;; terminal); `view`/`update` plug into `ui-run`, which owns the loop + teardown.
+;; Runs in the terminal (`*term-display*`) or, with `--features gui`, a window.
+(defn project--editor-main-template (nm)
+  (str
+    "(defmodule main \"" nm " — a tiny text editor built on the `ui` framework.\n"
+    "\n"
+    "Run it:  nest run   (type to edit, arrows move, Enter splits a line, Backspace\n"
+    "deletes, Ctrl-C quits). The buffer is a list of line strings with a [row col]\n"
+    "cursor; every edit is a pure (model -> model) function and `ui-run` drives the\n"
+    "loop — render `view`, poll a key, fold it with `update`, repeat. Swap\n"
+    "`*term-display*` for `(gui-display)` (a --features gui build) to run in a window.\")\n"
+    "\n"
+    "(require 'ui)       ; the app framework: display frontends + the `ui-run` loop\n"
+    "(require 'display)  ; the render-op constructors (clear / text / cursor / frame)\n"
+    "\n"
+    "(def *welcome*\n"
+    "  (list \"hello, world\"\n"
+    "        \"\"\n"
+    "        \"a tiny editor — grow it from here.\"))\n"
+    "\n"
+    "(defn ed-init ()\n"
+    "  \"The starting model: the welcome buffer, cursor at the top-left.\"\n"
+    "  {:lines *welcome* :row 0 :col 0 :done false :tick-ms 30000})\n"
+    "\n"
+    "(defn ed-line (m) \"The line the cursor is on.\" (nth (get m :lines) (get m :row)))\n"
+    "\n"
+    "(defn ed-set-line (lines row s)\n"
+    "  \"`lines` with line `row` replaced by `s` (lists are immutable — rebuild it).\"\n"
+    "  (concat (take row lines) (cons s (drop (inc row) lines))))\n"
+    "\n"
+    "(defn ed-move (m drow dcol)\n"
+    "  \"Move the cursor by [drow dcol], clamped to the buffer and the target line.\"\n"
+    "  (let (lines (get m :lines)\n"
+    "        row (max 0 (min (dec (count lines)) (+ (get m :row) drow)))\n"
+    "        col (max 0 (min (string-length (nth lines row)) (+ (get m :col) dcol))))\n"
+    "    (assoc m :row row :col col)))\n"
+    "\n"
+    "(defn ed-insert (m ch)\n"
+    "  \"Insert the printable string `ch` at the cursor.\"\n"
+    "  (let (ln (ed-line m) col (get m :col)\n"
+    "        ln2 (str (substring ln 0 col) ch (substring ln col (string-length ln))))\n"
+    "    (assoc m :lines (ed-set-line (get m :lines) (get m :row) ln2)\n"
+    "             :col (+ col (string-length ch)))))\n"
+    "\n"
+    "(defn ed-newline (m)\n"
+    "  \"Split the current line at the cursor into two lines.\"\n"
+    "  (let (ln (ed-line m) row (get m :row) col (get m :col) lines (get m :lines))\n"
+    "    (assoc m\n"
+    "           :lines (concat (take row lines)\n"
+    "                          (list (substring ln 0 col) (substring ln col (string-length ln)))\n"
+    "                          (drop (inc row) lines))\n"
+    "           :row (inc row) :col 0)))\n"
+    "\n"
+    "(defn ed-backspace (m)\n"
+    "  \"Delete the char before the cursor; at column 0, join with the previous line.\"\n"
+    "  (let (row (get m :row) col (get m :col) lines (get m :lines))\n"
+    "    (cond\n"
+    "      (> col 0)\n"
+    "        (let (ln (ed-line m))\n"
+    "          (assoc m :lines (ed-set-line lines row\n"
+    "                            (str (substring ln 0 (dec col)) (substring ln col (string-length ln))))\n"
+    "                   :col (dec col)))\n"
+    "      (> row 0)\n"
+    "        (let (prev (nth lines (dec row)))\n"
+    "          (assoc m\n"
+    "                 :lines (concat (take (dec row) lines)\n"
+    "                                (cons (str prev (ed-line m)) (drop (inc row) lines)))\n"
+    "                 :row (dec row) :col (string-length prev)))\n"
+    "      else m)))\n"
+    "\n"
+    "(defn ed-fit (s w) \"Clip `s` to `w` columns.\" (if (> (string-length s) w) (substring s 0 w) s))\n"
+    "\n"
+    "(defn ed-view (m cols rows)\n"
+    "  \"ui-run view: a `text` op per line, a reverse-video status bar, cursor at point.\"\n"
+    "  (apply frame\n"
+    "    (append\n"
+    "      [(clear)]\n"
+    "      (map (fn ([i ln]) (text i 0 (ed-fit ln cols))) (enumerate (get m :lines)))\n"
+    "      [(text (dec rows) 0\n"
+    "             (ed-fit (str \" \" (inc (get m :row)) \":\" (get m :col) \"  —  Ctrl-C to quit\") cols)\n"
+    "             {:reverse true})\n"
+    "       (cursor (get m :row) (get m :col))])))\n"
+    "\n"
+    "(defn ed-update (m input cols rows)\n"
+    "  \"ui-run update: printable keys insert, specials move/edit, Ctrl-C (or Esc)\n"
+    "quits. `:tick` (the refresh beat) is a no-op here — nothing animates.\"\n"
+    "  (cond\n"
+    "    (= input :tick) m\n"
+    "    (or (= input :ctrl-c) (= input :escape)) (assoc m :done true)\n"
+    "    (= input :up)    (ed-move m -1 0)\n"
+    "    (= input :down)  (ed-move m 1 0)\n"
+    "    (= input :left)  (ed-move m 0 -1)\n"
+    "    (= input :right) (ed-move m 0 1)\n"
+    "    (= input :enter)     (ed-newline m)\n"
+    "    (= input :backspace) (ed-backspace m)\n"
+    "    (string? input)      (ed-insert m input)\n"
+    "    else m))\n"
+    "\n"
+    "(defn main ()\n"
+    "  \"Run the editor in the terminal (Ctrl-C quits). For a window, build with\n"
+    "--features gui and pass `(gui-display)` instead of `*term-display*`.\"\n"
+    "  (ui-run (ed-init) ed-view ed-update *term-display*))\n"))
+
+(defn project--editor-test-template (nm)
+  (str
+    ";; `nest test` loads src/ first, so the pure edit fns (ed-insert, …) are defined.\n"
+    ";; The loop is `ui-run`'s; here we test the edits — pure `(model -> model)`.\n"
+    "(require 'test)\n"
+    "\n"
+    "(describe \"editor edits\"\n"
+    "  (test \"insert puts a char at the cursor\"\n"
+    "    (assert= (get (ed-insert {:lines (list \"ac\") :row 0 :col 1} \"b\") :lines) (list \"abc\")))\n"
+    "  (test \"backspace deletes the char before the cursor\"\n"
+    "    (assert= (get (ed-backspace {:lines (list \"abc\") :row 0 :col 2}) :lines) (list \"ac\")))\n"
+    "  (test \"backspace at column 0 joins with the previous line\"\n"
+    "    (let (m (ed-backspace {:lines (list \"ab\" \"cd\") :row 1 :col 0}))\n"
+    "      (assert= (get m :lines) (list \"abcd\"))\n"
+    "      (assert= (get m :row) 0)\n"
+    "      (assert= (get m :col) 2)))\n"
+    "  (test \"newline splits the line at the cursor\"\n"
+    "    (let (m (ed-newline {:lines (list \"abcd\") :row 0 :col 2}))\n"
+    "      (assert= (get m :lines) (list \"ab\" \"cd\"))\n"
+    "      (assert= (get m :row) 1)))\n"
+    "  (test \"move clamps the column onto a shorter line\"\n"
+    "    (assert= (get (ed-move {:lines (list \"ab\" \"c\") :row 0 :col 2} 1 0) :col) 1)))\n"))
+
 ;; `CLAUDE.md` for a fresh project — short project-specific intro that points
 ;; at the language reference (which `nest new` also drops into `docs/`, so the
 ;; project is self-contained and an AI assistant has everything it needs in-tree).
@@ -731,7 +901,7 @@ the `nest new` scaffolder.")
 ;; .claude/skills/writing-brood skill, so the project is self-contained for
 ;; AI-assisted editing. Errors on a bad name; an existing folder is reused (its
 ;; scaffold files overwritten), not rejected.
-(def *project-templates* ["default" "tui-loop" "hatch"])
+(def *project-templates* ["default" "tui-loop" "hatch" "http-server" "editor"])
 
 ;; Write the template-specific src/ + tests/ files; return the list of relative
 ;; paths written (for the summary). The shared files (manifest, CLAUDE.md, guide,
@@ -748,6 +918,16 @@ the `nest new` scaffolder.")
       (spit (path-join src-dir "main.blsp") (project--hatch-main-template actual-name))
       (spit (path-join tests-dir "main_test.blsp") (project--hatch-test-template actual-name))
       [(str nm "/src/main.blsp") (str nm "/tests/main_test.blsp")])
+    (= tmpl "http-server")
+    (do
+      (spit (path-join src-dir "main.blsp") (project--http-main-template actual-name))
+      (spit (path-join tests-dir "main_test.blsp") (project--http-test-template actual-name))
+      [(str nm "/src/main.blsp") (str nm "/tests/main_test.blsp")])
+    (= tmpl "editor")
+    (do
+      (spit (path-join src-dir "main.blsp") (project--editor-main-template actual-name))
+      (spit (path-join tests-dir "main_test.blsp") (project--editor-test-template actual-name))
+      [(str nm "/src/main.blsp") (str nm "/tests/main_test.blsp")])
     else
     (do
       (spit (path-join src-dir "main.blsp") (project--main-template actual-name))
@@ -758,7 +938,7 @@ the `nest new` scaffolder.")
        (str nm "/tests/main_test.blsp") (str nm "/tests/hello_test.blsp")])))
 
 (defn new-project (nm &optional template)
-  "Scaffold a new project named `nm` (or `\".\"` for the current directory, taking the project name from the cwd's basename): a `project.blsp` manifest, the baked-in language guide, and starter code chosen by `template` — `\"default\"` (a `main`+`hello` module pair, the default), `\"tui-loop\"` (a tail-recursive animation loop), or `\"hatch\"` (a stateful gen_server process). Existing scaffold files are overwritten, not rejected. Backs `nest new [--template …]`."
+  "Scaffold a new project named `nm` (or `\".\"` for the current directory, taking the project name from the cwd's basename): a `project.blsp` manifest, the baked-in language guide, and starter code chosen by `template` — `\"default\"` (a `main`+`hello` module pair, the default), `\"tui-loop\"` (a tail-recursive animation loop), `\"hatch\"` (a stateful gen_server process), `\"http-server\"` (a minimal web app), or `\"editor\"` (a tiny text editor on the `ui` framework). Existing scaffold files are overwritten, not rejected. Backs `nest new [--template …]`."
   ;; `nest new .` scaffolds into the current directory (cargo init's shape);
   ;; the project name is then the cwd's basename. Both forms — `nest new .` and
   ;; `nest new foobar` — *overwrite* existing scaffold files rather than

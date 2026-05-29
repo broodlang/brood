@@ -66,8 +66,9 @@ enum Cmd {
         name: String,
 
         /// Starter template: `default` (a main+hello pair), `tui-loop` (a
-        /// tail-recursive animation loop, pairs with `nest run --for`), or
-        /// `hatch` (a stateful gen_server-style process).
+        /// tail-recursive animation loop, pairs with `nest run --for`), `hatch`
+        /// (a stateful gen_server-style process), or `http-server` (a basic web
+        /// app over std/http). An unknown name lists the full set.
         #[arg(long = "template", short = 't', value_name = "NAME")]
         template: Option<String>,
     },
@@ -209,6 +210,12 @@ enum Cmd {
 }
 
 fn main() {
+    // Default to a backtrace on panic (see the matching note in
+    // `crates/cli/src/main.rs`) — set before any thread spawns; RUST_BACKTRACE=0
+    // still opts out.
+    if std::env::var_os("RUST_BACKTRACE").is_none() {
+        std::env::set_var("RUST_BACKTRACE", "1");
+    }
     let cli = Cli::parse();
     // Run on an explicitly-sized large stack so the stack-budget guard (ADR-043)
     // is uniform across the root thread and spawned coroutines — see the matching
@@ -336,7 +343,10 @@ fn cmd_test(interp: &mut Interp, files: &[String]) {
             std::process::exit(1);
         }
     }
-    run(interp, "(run-tests)");
+    // `:trace` prints each test's name as it starts (live progress) — wanted for the
+    // interactive `nest test`; the `brood --test` path stays quiet for clean,
+    // machine-parseable output.
+    run(interp, "(run-tests :trace)");
 }
 
 /// `nest check [FILES...]` — project-wide if no files, otherwise file-by-file.

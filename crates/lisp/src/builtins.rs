@@ -442,6 +442,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "tcp-controlling-process",
+        Arity::exact(2),
+        Sig::new(vec![socket_ty, pid_ty], nil_ty),
+        tcp_controlling_process,
+    );
+    def(
+        heap,
         "tcp-close",
         Arity::exact(1),
         Sig::new(vec![socket_ty], nil_ty),
@@ -1096,6 +1103,9 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         self_pid,
     );
     def(heap, "ref", Arity::exact(0), Sig::nullary(ref_ty), make_ref);
+    // `(exit pid reason)` — send an exit signal (Erlang `exit/2`). `:kill` is the
+    // untrappable hard kill; any other reason is the soft (next-`receive`) signal.
+    def(heap, "exit", Arity::exact(2), Sig::new(vec![pid_ty, any], nil_ty), exit_proc);
     // `monitor` also accepts a name map (forwarded to the remote node).
     def(
         heap,
@@ -1234,6 +1244,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("tcp-connect", &["host", "port"], "Connect to host:port; inbound data is delivered to the calling process as [:tcp sock data] / [:tcp-closed sock] messages. Returns a socket. Throws on failure."),
     ("tcp-listen", &["host", "port"], "Bind a listening socket on host:port (port 0 = OS-assigned); connections arrive as [:tcp-accept lsock client] messages to the calling process. Returns a socket."),
     ("tcp-send", &["sock", "s"], "Write the whole string s to sock (blocking). Returns nil; throws on error."),
+    ("tcp-controlling-process", &["sock", "pid"], "Make pid the owner of sock's inbound data: starts reading a just-accepted (passive) socket, or retargets an active one. Returns nil."),
     ("tcp-close", &["sock"], "Close sock (a stream or listener), releasing its fd / stopping its accept loop. Idempotent; returns nil."),
     ("tcp-local-port", &["sock"], "The local port sock is bound to, or nil."),
     ("type-of", &["x"], "The runtime type of x as a keyword (:int, :string, :pair, ...)."),
@@ -1292,6 +1303,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("%spawn", &["thunk"], "Run thunk (a 0-arg fn) in a new green process; returns its pid. Use the `spawn` macro."),
     ("send", &["target", "msg"], "Copy msg into target's mailbox; target is a pid or {:name :node} address. Routes locally or over a node link. Returns nil."),
     ("self", &[], "This process's own pid (carries this node's identity)."),
+    ("exit", &["pid", "reason"], "Send an exit signal to local process pid (Erlang exit/2). reason :kill is the untrappable hard kill — pid dies at its next reduction tick, or immediately if parked. Any other reason is the soft signal — pid dies at its next receive. Monitors fire [:down ref pid reason]. No-op for a dead/unknown pid. Returns nil."),
     ("ref", &[], "A fresh, globally-unique reference token (tags a request to its reply)."),
     ("monitor", &["pid"], "Watch pid; returns a monitor ref. Delivers [:down ref pid reason] when pid dies."),
     ("list-processes", &[], "Every currently-live pid on this runtime (one per registered mailbox). Order is unspecified — sort if you need stability. For agents/tools enumerating spawned processes."),
@@ -2091,7 +2103,16 @@ fn reload_defs(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let root = heap.env_root(env);
     let prev = heap.set_current_file(Some(path.clone()));
     let mut result = Ok(Value::Nil);
-    for (form, pos) in forms {
+    // Root the unevaluated forms across the per-form eval — a collection at any
+    // depth (ADR-061) relocates the LOCAL forms this loop still holds; re-fetch
+    // each from the (relocated) root stack rather than the stale `forms` Vec. Same
+    // discipline as `load`.
+    let base = heap.roots_len();
+    for (form, _) in &forms {
+        heap.push_root(*form);
+    }
+    for (i, &(_, pos)) in forms.iter().enumerate() {
+        let form = heap.root_at(base + i);
         // Re-eval only *definitions*; skip side-effecting top-level forms
         // (`(require …)`, `(load …)`, a `(main-loop 0)` entry call). A form is a
         // definition when its head symbol starts with "def" **and** is actually a
@@ -2138,6 +2159,7 @@ fn reload_defs(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
             break;
         }
     }
+    heap.truncate_roots(base);
     heap.set_current_file(prev);
     result.map(|_| Value::Nil)
 }
@@ -2233,6 +2255,9 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
     // The file & filesystem library: whole-file/line I/O, directory walking, path
     // helpers — Brood over the fs primitives. Opt-in, never in the prelude.
     ("file", include_str!("../../../std/file.blsp")),
+    // A minimal HTTP/1.0 server (ADR-062) over the tcp + file libraries — request
+    // parsing, response rendering, a router, static files. Opt-in.
+    ("http", include_str!("../../../std/http.blsp")),
     ("docs", include_str!("../../../std/docs.blsp")),
     ("hatch", include_str!("../../../std/hatch.blsp")),
     ("supervisor", include_str!("../../../std/supervisor.blsp")),
@@ -2245,6 +2270,7 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
     // built on them + the `term-*`/`gui-*` primitives. All opt-in, never in the prelude.
     ("display", include_str!("../../../std/display.blsp")),
     ("keymap", include_str!("../../../std/keymap.blsp")),
+    ("ui", include_str!("../../../std/ui.blsp")),
     ("observer", include_str!("../../../std/observer.blsp")),
     // Bare ANSI escape *strings* for simple terminal scripts (`print` them
     // directly) — the lightweight counterpart to the `display` render-op
@@ -2612,7 +2638,26 @@ fn tcp_listen(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn tcp_send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_socket(heap, "tcp-send", arg(args, 0))?;
     let data = expect_string(heap, "tcp-send", arg(args, 1))?;
-    crate::net::send(id, data.as_bytes()).map_err(|e| LispError::runtime(format!("tcp-send: {}", e)))?;
+    crate::net::send(id, data.as_bytes())
+        .map_err(|e| LispError::runtime(format!("tcp-send: {}", e)))?;
+    Ok(Value::Nil)
+}
+
+fn tcp_controlling_process(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_socket(heap, "tcp-controlling-process", arg(args, 0))?;
+    let pid = match arg(args, 1) {
+        Value::Pid { id, .. } => id,
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "tcp-controlling-process",
+                "pid",
+                other,
+            ))
+        }
+    };
+    crate::net::controlling_process(id, pid)
+        .map_err(|e| LispError::runtime(format!("tcp-controlling-process: {}", e)))?;
     Ok(Value::Nil)
 }
 
@@ -3892,6 +3937,24 @@ fn spawn_named(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     crate::process::send(heap, arg(args, 0), arg(args, 1))?;
     Ok(Value::Nil)
+}
+
+/// `(exit pid reason)` — send an exit signal to a local green process (Erlang
+/// `exit/2`). `reason = :kill` is the untrappable hard kill (dies at its next
+/// reduction tick, or now if parked); any other reason is the soft signal (dies at
+/// its next `receive`). Returns nil. A no-op for a dead/unknown pid.
+fn exit_proc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let reason = crate::process::to_message(heap, arg(args, 1))?;
+    match arg(args, 0) {
+        Value::Pid { node, id } if crate::dist::is_local(node) => {
+            crate::process::exit(id, reason);
+            Ok(Value::Nil)
+        }
+        Value::Pid { .. } => Err(LispError::type_err(
+            "exit: remote pids aren't supported yet — exit only kills local processes",
+        )),
+        _ => Err(LispError::type_err("exit: first argument must be a pid")),
+    }
 }
 
 /// `(monitor pid)` — watch `pid`; returns a monitor `ref`. The caller receives

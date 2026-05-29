@@ -1,0 +1,189 @@
+;; std/http.blsp — a minimal HTTP/1.0 server, in Brood. (require 'http).
+;;
+;; Built entirely on the TCP socket library (ADR-062) and the file library: the
+;; kernel adds nothing for plaintext HTTP. The shape:
+;;
+;;   (serve 8080 (router {"/" home  "/hello" hello}))   ; blocks; spawn to background
+;;
+;; A handler is `(fn (request) -> response)`. A `request` is the map
+;; `{:method :path :version :headers :body}` (`:headers` keys lower-cased); a
+;; `response` is `{:status :headers :body}` — build one with `response`/`ok`/
+;; `not-found`/`serve-file`. Each connection is read, dispatched, answered, and
+;; closed in its own process (HTTP/1.0, `Connection: close`).
+;;
+;; This is deliberately small — no keep-alive, no chunked encoding, no TLS (that
+;; arrives with `tls-connect`/`std/https`). Enough to host a basic web app.
+
+(require 'tcp)
+(require 'file)
+
+(defmodule http
+  "A minimal HTTP/1.0 server over the TCP + file libraries (ADR-062). `(serve port
+handler)` listens and runs one handler process per connection; a handler maps a
+request map to a response map. Includes request parsing, response rendering, a
+`router`, and static-file serving with MIME guessing. Plaintext only; pure Brood.")
+
+;; How long a connection may stall mid-request before we give up.
+(def *http-read-timeout-ms* 15000)
+
+;; ---- reading one request off the wire --------------------------------------
+;; Bytes arrive as [:tcp sock data] messages (the socket is owned by *this*
+;; process — the per-connection handler). Accumulate until the head terminator,
+;; then top up to Content-Length if a body is declared.
+
+(defn http--read-until (sock acc marker)
+  (if (>= (index-of acc marker) 0)
+    acc
+    (receive
+      ([:tcp ~sock d] (http--read-until sock (str acc d) marker))
+      ([:tcp-closed ~sock] (if (= acc "") nil acc))
+      (after *http-read-timeout-ms* (if (= acc "") nil acc)))))
+
+(defn http--read-to-length (sock acc target)
+  (if (>= (string-length acc) target)
+    acc
+    (receive
+      ([:tcp ~sock d] (http--read-to-length sock (str acc d) target))
+      ([:tcp-closed ~sock] acc)
+      (after *http-read-timeout-ms* acc))))
+
+(defn http-read-request (sock)
+  "Read one HTTP request from `sock` (owned by the calling process): the head
+through the blank line, plus the body when `Content-Length` declares one. Returns
+the raw request string, or nil if the peer closed without sending anything."
+  (let (head (http--read-until sock "" "\r\n\r\n"))
+    (if (nil? head)
+      nil
+      (let (clen (http--declared-length head))
+        (if (= clen 0)
+          head
+          (http--read-to-length sock head (+ (index-of head "\r\n\r\n") 4 clen)))))))
+
+;; ---- parsing ----------------------------------------------------------------
+(defn http--split-first (s sep)
+  "Split `s` on the first occurrence of `sep` into a `(before after)` list."
+  (let (i (index-of s sep))
+    (if (< i 0)
+      (list s "")
+      (list (substring s 0 i) (substring s (+ i (string-length sep)) (string-length s))))))
+
+(defn http--parse-headers (lines)
+  (fold (fn (m line)
+          (let (i (index-of line ":"))
+            (if (< i 0)
+              m
+              (assoc m
+                (lower (trim (substring line 0 i)))
+                (trim (substring line (+ i 1) (string-length line)))))))
+    {}
+    lines))
+
+(defn http--declared-length (head)
+  (let (lines (string-split head "\r\n")
+        v (get (http--parse-headers (rest lines)) "content-length"))
+    (if (nil? v) 0 (let (n (string->number v)) (if (nil? n) 0 n)))))
+
+(defn parse-request (raw)
+  "Parse a raw HTTP request string into `{:method :path :version :headers :body}` (`:headers` keys lower-cased)."
+  (let (hb (http--split-first raw "\r\n\r\n")
+        head (first hb)
+        body (second hb)
+        lines (string-split head "\r\n")
+        req (string-split (first lines) " "))
+    {:method (nth req 0 "GET")
+     :path (nth req 1 "/")
+     :version (nth req 2 "HTTP/1.0")
+     :headers (http--parse-headers (rest lines))
+     :body body}))
+
+;; ---- responses --------------------------------------------------------------
+(def *http-status-text*
+  {200 "OK" 201 "Created" 204 "No Content" 301 "Moved Permanently" 302 "Found"
+   400 "Bad Request" 403 "Forbidden" 404 "Not Found" 405 "Method Not Allowed"
+   500 "Internal Server Error"})
+
+(defn response (status headers body)
+  "A response map `{:status :headers :body}`."
+  {:status status :headers headers :body body})
+
+(defn ok (body)
+  "A 200 text/html response with `body`."
+  (response 200 {"Content-Type" "text/html; charset=utf-8"} body))
+
+(defn text-response (body)
+  "A 200 text/plain response with `body`. (Named `text-response`, not `text`, to avoid colliding with `std/display`'s render-op `text`.)"
+  (response 200 {"Content-Type" "text/plain; charset=utf-8"} body))
+
+(defn not-found ()
+  "A 404 text/plain response."
+  (response 404 {"Content-Type" "text/plain; charset=utf-8"} "Not Found"))
+
+(defn http--render-headers (headers)
+  (fold (fn (acc kv) (str acc (first kv) ": " (second kv) "\r\n")) "" (map-pairs headers)))
+
+(defn render-response (resp)
+  "Render a response map into the HTTP/1.0 wire string (adds Content-Length + Connection: close)."
+  (let (status (get resp :status 200)
+        body (or (get resp :body) "")
+        headers (assoc (or (get resp :headers) {})
+                  "Content-Length" (str (string-length body))
+                  "Connection" "close"))
+    (str "HTTP/1.0 " status " " (get *http-status-text* status "OK") "\r\n"
+      (http--render-headers headers)
+      "\r\n"
+      body)))
+
+;; ---- static files -----------------------------------------------------------
+(def *http-mime*
+  {".html" "text/html; charset=utf-8" ".htm" "text/html; charset=utf-8"
+   ".css" "text/css" ".js" "application/javascript" ".json" "application/json"
+   ".txt" "text/plain; charset=utf-8" ".svg" "image/svg+xml" ".png" "image/png"
+   ".jpg" "image/jpeg" ".jpeg" "image/jpeg" ".gif" "image/gif" ".ico" "image/x-icon"})
+
+(defn mime-type (path)
+  "A guessed Content-Type for `path` based on its extension."
+  (get *http-mime* (path-extension path) "application/octet-stream"))
+
+(defn serve-file (path)
+  "A 200 response serving the file at `path` with a guessed Content-Type, or 404 if it is missing."
+  (if (file? path)
+    (response 200 {"Content-Type" (mime-type path)} (read-file path))
+    (not-found)))
+
+;; ---- routing ----------------------------------------------------------------
+(defn router (routes & fallback)
+  "A handler that dispatches on the request's `:path` through `routes` (a map of path string → handler). An unmatched path goes to `fallback` (a handler) or a 404."
+  (let (miss (if (empty? fallback) (fn (req) (not-found)) (first fallback)))
+    (fn (req)
+      (let (h (get routes (get req :path)))
+        (if (nil? h) (miss req) (h req))))))
+
+;; ---- the server -------------------------------------------------------------
+(defn http-listen (port)
+  "A listening socket on 127.0.0.1:`port` (port 0 = OS-assigned), owned by the calling process — which must be the one that runs `serve-loop` on it."
+  (tcp-listen "127.0.0.1" port))
+
+(defn serve-loop (ls handler)
+  "Accept connections on `ls` and handle them **one at a time** in this process,
+forever. Blocks. `ls` must be owned by this process (created here with
+`http-listen`). Selective `receive` interleaves cleanly: while one request is
+read, later `[:tcp-accept …]` notifications simply queue.
+
+Single-connection-at-a-time is plenty for a basic app; true spawn-per-connection
+concurrency awaits a closure-shipping fix (shipping a handler that captures a map
+of closures over a shared scope currently overflows `closure_to_message`)."
+  (receive
+    ([:tcp-accept ~ls c]
+      ;; take ownership so this process receives c's [:tcp …] data, handle it, loop
+      (tcp-controlling-process c (self))
+      (http--serve-conn c handler)
+      (serve-loop ls handler))))
+
+(defn http--serve-conn (c handler)
+  (let (raw (http-read-request c))
+    (when raw (tcp-send c (render-response (handler (parse-request raw)))))
+    (tcp-close c)))
+
+(defn serve (port handler)
+  "Listen on 127.0.0.1:`port` and serve `handler` forever. **Blocks** (the accept loop runs in the calling process) — `(spawn (serve …))` to run it in the background. One handler process per connection (HTTP/1.0)."
+  (serve-loop (http-listen port) handler))

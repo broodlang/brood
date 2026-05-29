@@ -7859,3 +7859,36 @@ bytes (recv is UTF-8-lossy today). Plus: migrate `gui`/`dist`/terminal onto
 
 **Next.** A **file standard library** (`std/file.blsp`) over the existing
 `slurp`/`spit`/`list-dir`/… primitives; then TLS + `std/http.blsp`.
+
+## 2026-05-30 — `(exit pid reason)`: Erlang-style process termination (ADR-063)
+
+**Why.** Green processes could only end themselves; nothing could terminate
+another. Needed for a test-runner per-test timeout, an MCP-tool watchdog, and
+supervision. A coroutine can't be aborted mid-compute from another thread (KI-1b),
+so the kill happens at the target's own yield points.
+
+**Done.** `(exit pid reason)` (Erlang `exit/2`):
+- `:kill` = untrappable hard kill — checked in `preempt()` (reduction boundary), so
+  it stops even a tight CPU loop. A new `Suspend::Kill(reason)` the coroutine yields
+  → `run_one` `deregister`s + drops it (corosensei force-unwinds the suspended
+  coroutine). Below `%try`, so uncatchable by construction.
+- any other reason = soft — checked at the top of `receive_match`'s loop; the target
+  dies at its next `receive` with `reason`.
+- A parked target is woken by re-`enqueue`ing onto **its own** worker (never dropped
+  cross-thread); it self-kills at the receive check. A per-`Mailbox`
+  `kill_pending: AtomicBool` + `MailboxState.kill` carry the signal; the state lock
+  serialises `exit`'s waiter-take with `run_one`'s park (no stuck-parked race).
+- Monitors fire `[:down ref pid reason]`. Dead-pid exit is a no-op; remote pids error.
+
+**Verified.** `tests/exit_test.blsp` (5 tests): hard-kill a tight CPU loop, kill a
+parked process, soft-kill a receive loop, dead-pid no-op, and a 100-process mass
+force-unwind. Full lib suite green.
+
+**Caveat (not this change).** `BROOD_GC_STRESS=1` currently trips the use-after-GC
+tripwire (`heap.rs` `check_epoch`) on the current tree — reproduces with
+`maps_test` too (no `exit`), so it's a pre-existing regression in the ADR-061
+collect-at-any-depth work, independent of `exit`. It blocks GC-stress validation of
+the kill path until fixed.
+
+**Next.** Wire the test-runner 30s per-test timeout and the MCP-tool 10s watchdog,
+both `(exit pid :kill)` on a slow worker (todo.md).

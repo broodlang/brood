@@ -179,8 +179,28 @@ below — forwarded by the runner, and usable directly if you call it yourself:
 (run-tests)            ; parallel, dots (. pass / F fail), summary
 (run-tests :trace)     ; a ✓/✗ line per test as it finishes, instead of dots
 (run-tests :slow)      ; after the summary, list the slowest tests
+(run-tests :timeout 5000)   ; per-test HARD ceiling in ms — killed+failed (default 30000)
+(run-tests :slow-over 200)  ; list any test over this many ms (informational; default 1000)
 (run-tests :trace :slow)
 ```
+
+**Two thresholds, distinct on purpose** (both per-test wall-clock ms; module vars,
+overridable as above):
+
+| knob | default | effect |
+| --- | --- | --- |
+| `*test-slow-ms*` | 1000 | a test over this is **listed** (name + duration) under the summary — still **passes**; informational only |
+| `*test-timeout-ms*` | 30000 | a test over this is **hard-killed** (`(exit worker :kill)`) and **fails** as `test timed out after Ns` |
+
+So a test between the two (1s ≤ t < 30s) is listed but passes; at/over the timeout it's killed and fails. Keep slow < timeout.
+
+**Per-test timeout.** Every test has a wall-clock budget — **30 s by default**. A
+test that exceeds it is **hard-killed** (`(exit worker :kill)`, ADR-063 — so even a
+tight infinite loop is stopped, not just a `receive`-blocked one) and reported as a
+`test timed out after Ns` failure, rather than dragging or wedging the whole suite.
+Override per run with `:timeout MS`, or globally by rebinding `*test-timeout-ms*`.
+Tests in a batch start together, so the budget is effectively per-test. Any test
+over **1 s** (passing or not) is also listed automatically under the summary.
 
 `run-tests` prints progress, then any failures (one line per failed assertion,
 attributed to its test), then a summary:

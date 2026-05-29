@@ -45,6 +45,12 @@ pub(super) enum Suspend {
     Receive,
     /// Preempted by the reduction counter — still runnable, re-queue immediately.
     Preempt,
+    /// An exit signal (`(exit pid reason)`) targeted this process. `run_one`
+    /// `deregister`s it with `reason` and drops it — corosensei force-unwinds the
+    /// suspended coroutine (running destructors), and it is never re-enqueued.
+    /// Untrappable **by construction**: it fires at the scheduler level, below
+    /// Brood's `%try`, so a `:kill` exit can't be caught.
+    Kill(Message),
 }
 
 pub(super) type Yielder0 = Yielder<(), Suspend>;
@@ -406,6 +412,17 @@ fn preempt() {
         None => return, // no process context (e.g. prelude build) — nothing to yield to
     };
     if let Some(yptr) = ctx.yielder {
+        // Hard exit (`(exit pid :kill)`): die now, untrappably. Checked here at the
+        // reduction boundary so a tight CPU loop — which never reaches `receive` —
+        // still dies. (Soft exits wait for the next `receive`; see `receive_match`.)
+        // We never resume after a `Kill` suspend, so no thread-local save/restore.
+        if let Some(reason) = ctx.mailbox.pending_kill() {
+            if is_kill_reason(&reason) {
+                // SAFETY: same invariant as the `Preempt` suspend just below — the
+                // yielder is valid while this coroutine runs (tick → here, inside eval).
+                unsafe { (*yptr).suspend(Suspend::Kill(reason)) };
+            }
+        }
         // Save this process's per-thread state before yielding: a worker may
         // pick up another process whose eval/macroexpand changes these
         // thread-locals, and we need ours back when we resume. GC-block
@@ -587,6 +604,42 @@ fn deregister(pid: u64, reason: Message) {
     }
 }
 
+/// The untrappable hard-kill reason — Erlang's `exit(pid, kill)`. A `:kill` exit
+/// fires at the next reduction tick (`preempt`); any other reason is the soft
+/// signal that waits for the next `receive` iteration.
+fn is_kill_reason(reason: &Message) -> bool {
+    matches!(reason, Message::Keyword(k) if *k == value::intern("kill"))
+}
+
+/// `(exit pid reason)` — deliver an exit signal to a green process (Erlang
+/// `exit/2`). `reason = :kill` is the **untrappable hard** kill: the target dies at
+/// its next reduction tick (`preempt`), or immediately if it's parked. Any other
+/// reason is the **soft** signal: the target dies at its next `receive` iteration
+/// (a tight non-`receive` loop won't honour it — cooperative). Monitors fire
+/// `[:down mref pid reason]`. A no-op for an unknown / already-dead pid, so it's
+/// idempotent (double-exit, exit-of-dead are safe).
+pub fn exit(pid: u64, reason: Message) {
+    let mailbox = match crate::core::sync::lock(&REGISTRY).get(&pid).cloned() {
+        Some(mb) => mb,
+        None => return, // already dead / never existed
+    };
+    mailbox.request_kill(reason);
+    // If the target is parked in `receive` it isn't running, so it'll never reach a
+    // `tick` (preempt) or re-enter `receive` on its own. Wake it by re-queueing onto
+    // **its own worker** (`enqueue` routes by `worker_id`) — exactly how `send`/the
+    // timer wake a parked process — and it self-kills at `receive_match`'s loop-top
+    // `kill_pending` check, on the worker that owns it. We must NOT drop it here:
+    // dropping force-unwinds its coroutine, and that would resume the coroutine on
+    // *this* (the exiter's) thread, not its owning worker — the cross-thread-resume
+    // hazard (KI-1b). Taking the waiter under the state lock serialises with
+    // `run_one`'s park: either we take an already-parked process here, or `run_one`
+    // sees `kill_pending` and retires it instead of parking (exactly one wins).
+    let parked = crate::core::sync::lock(&mailbox.state).waiter.take();
+    if let Some(proc) = parked {
+        enqueue(proc);
+    }
+}
+
 /// Push a ready process onto its owning worker's queue and wake that worker.
 /// Routing by `proc.worker_id` keeps the coroutine on the same OS thread for
 /// its lifetime — no cross-thread `resume`, no KI-1b migration hazard.
@@ -657,7 +710,21 @@ fn run_one(mut proc: Box<Process>) {
             // (unscanned) message arrived during the suspend window, run again;
             // otherwise park here for `send` (or the timer) to wake.
             let mut st = crate::core::sync::lock(&mailbox.state);
-            if st.queue.len() > st.scanned {
+            if mailbox.kill_pending.load(Ordering::Relaxed) {
+                // An `(exit …)` raced in while we were heading to park. Die instead
+                // of parking — the state lock serialises this with `exit`'s
+                // waiter-take, so a process can't end up parked-with-a-pending-kill
+                // and stuck forever. (Without this check, `exit` running in the
+                // window between `suspend(Receive)` and this `Some(proc)` park would
+                // set the flag, find no waiter, and return — leaving us parked.)
+                let reason = st
+                    .kill
+                    .take()
+                    .unwrap_or_else(|| Message::Keyword(value::intern("killed")));
+                drop(st);
+                deregister(proc.pid, reason);
+                // `proc` dropped here → corosensei force-unwinds the parked coroutine.
+            } else if st.queue.len() > st.scanned {
                 drop(st);
                 enqueue(proc);
             } else {
@@ -668,6 +735,12 @@ fn run_one(mut proc: Box<Process>) {
             // Preempted mid-computation (reduction budget hit). Still runnable —
             // re-queue at the back so peers get a turn on this worker (fairness).
             enqueue(proc);
+        }
+        Ok(CoroutineResult::Yield(Suspend::Kill(reason))) => {
+            // `(exit pid reason)` fired at a reduction (`preempt`) or `receive`
+            // safepoint. Retire the process with `reason`; dropping `proc` at the end
+            // of this arm force-unwinds its suspended coroutine (runs destructors).
+            deregister(proc.pid, reason);
         }
         Err(_) => {
             eprintln!("process {} panicked", proc_descr(proc.pid));

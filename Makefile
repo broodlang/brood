@@ -28,8 +28,12 @@ help: ## Show this help
 build: ## Build the whole workspace
 	cargo build
 
-test: ## Run Rust tests + the in-language suite (via cargo test)
-	cargo test
+TEST_TIMEOUT ?= 600   # dev safety net (seconds): cap a hung `make test`. The in-language
+                      # suite times out each test at 30s (std/test.blsp), but a hung Rust
+                      # test or a top-level blocking form (e.g. a socket connect in a
+                      # tcp/http test) isn't covered by that — this is the catch-all.
+test: ## Run Rust tests + the in-language suite (cargo test; whole run capped at $(TEST_TIMEOUT)s — override: make test TEST_TIMEOUT=900)
+	timeout -k 30 $(TEST_TIMEOUT) cargo test || { rc=$$?; [ $$rc -eq 124 ] && echo ">>> make test TIMED OUT after $(TEST_TIMEOUT)s — a test is hanging (try: nest test, which prints each test name as it starts)"; exit $$rc; }
 
 bench: benchmark ## Alias for `benchmark`
 
