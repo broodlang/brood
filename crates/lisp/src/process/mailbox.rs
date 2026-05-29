@@ -15,6 +15,7 @@
 //!   via its coroutine yielder; the root thread blocks on the condvar.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -30,6 +31,15 @@ use super::scheduler::{
 };
 use super::timer::arm_timer;
 
+/// Coarse run-status for `process-info` (ADR-051), stored as a lock-free cell on
+/// the mailbox (which is registry-reachable, unlike the `Process` itself). Set at
+/// the scheduler transitions: `enqueue` → RUNNABLE, `run_one` → RUNNING,
+/// `wait_for_message` → WAITING (covers green *and* root). A dead process is gone
+/// from the registry, so `process_status` returns `None` for it.
+pub(super) const ST_RUNNABLE: u8 = 0;
+pub(super) const ST_RUNNING: u8 = 1;
+pub(super) const ST_WAITING: u8 = 2;
+
 /// A process's mailbox. Guarded by one mutex so the "check empty → park" and
 /// "deliver → wake" handshakes stay race-free (see `receive_match`/`send`/`run_one`).
 pub(super) struct Mailbox {
@@ -37,6 +47,13 @@ pub(super) struct Mailbox {
     /// Wakes a *root* process blocked in `receive` (greens are woken by being
     /// re-queued instead).
     pub(super) cv: Condvar,
+    /// Run-status (`ST_*`) for `process-info`, written at scheduler transitions.
+    pub(super) status: AtomicU8,
+    /// The owning process's LOCAL heap footprint in bytes, republished each time
+    /// it enters `receive` (`Heap::local_bytes`). Registry-reachable for
+    /// `process-info`'s `:memory`; bump-allocated, so it reflects allocation since
+    /// the last arena reset / `hibernate`, not a tracing-GC live set.
+    pub(super) mem: AtomicUsize,
 }
 
 pub(super) struct MailboxState {
@@ -60,6 +77,8 @@ impl Mailbox {
                 scanned: 0,
             }),
             cv: Condvar::new(),
+            status: AtomicU8::new(ST_RUNNABLE),
+            mem: AtomicUsize::new(0),
         })
     }
 }
@@ -163,6 +182,10 @@ pub fn receive_match(
         }
     };
     let ctx = ensure_ctx();
+    // Republish this process's LOCAL footprint and mark it running (the root never
+    // goes through `run_one`, so this is where its status flips back from waiting).
+    ctx.mailbox.mem.store(heap.local_bytes(), Ordering::Relaxed);
+    set_self_status(&ctx, ST_RUNNING);
     let mut i = 0usize;
     loop {
         // Rebuild candidate `i` into the heap, then run the matcher *without* holding
@@ -218,6 +241,7 @@ fn wait_for_message(ctx: &Ctx, i: usize, deadline: Option<Instant>) {
             if st.queue.len() > i {
                 return; // a message arrived between the scan and here — re-scan
             }
+            set_self_status(ctx, ST_WAITING);
             match deadline {
                 Some(d) => {
                     let now = Instant::now();
@@ -242,6 +266,7 @@ fn wait_for_message(ctx: &Ctx, i: usize, deadline: Option<Instant>) {
                 }
                 st.scanned = i;
             }
+            set_self_status(ctx, ST_WAITING);
             if let Some(d) = deadline {
                 arm_timer(ctx.pid, d);
             }
@@ -297,14 +322,32 @@ pub fn mailbox_len(pid: u64) -> Option<usize> {
     Some(len)
 }
 
-/// A coarse run-status for live local process `pid`, inferred from where the
-/// process currently sits (no per-process bookkeeping needed): `"waiting"` if it
-/// is parked in `receive` (its mailbox holds it in the `waiter` slot), else
-/// `"running"` (on a worker or queued). `None` if the pid is dead/unknown. Backs
-/// `process-info`'s `:status`; a future explicit Process state enum can replace
-/// this with a precise reading (and widen the vocabulary, e.g. `"runnable"`).
+/// The run-status of live local process `pid`: `"running"` (executing on a
+/// worker), `"runnable"` (queued, waiting for a worker turn), or `"waiting"`
+/// (parked in `receive`). `None` if the pid is dead/unknown. Read from the
+/// mailbox's `status` cell, which the scheduler sets at each transition. Backs
+/// `process-info`'s `:status`.
 pub fn process_status(pid: u64) -> Option<&'static str> {
     let mailbox = crate::core::sync::lock(&REGISTRY).get(&pid).cloned()?;
-    let parked = crate::core::sync::lock(&mailbox.state).waiter.is_some();
-    Some(if parked { "waiting" } else { "running" })
+    Some(match mailbox.status.load(Ordering::Relaxed) {
+        ST_RUNNING => "running",
+        ST_WAITING => "waiting",
+        _ => "runnable",
+    })
+}
+
+/// The LOCAL heap footprint (bytes) of live local process `pid`, or `None` if the
+/// pid is dead/unknown. Republished by the process each time it enters `receive`
+/// (so an idle actor's figure is its resting working set); a process that never
+/// `receive`s reports `0`. Bump-allocated, so it reflects allocation since the
+/// last arena reset / `hibernate`. Backs `process-info`'s `:memory`.
+pub fn process_mem(pid: u64) -> Option<usize> {
+    let mailbox = crate::core::sync::lock(&REGISTRY).get(&pid).cloned()?;
+    Some(mailbox.mem.load(Ordering::Relaxed))
+}
+
+/// Set the run-status of the *current* process (used by `receive_match` for the
+/// root, which never goes through `run_one`).
+fn set_self_status(ctx: &Ctx, status: u8) {
+    ctx.mailbox.status.store(status, Ordering::Relaxed);
 }

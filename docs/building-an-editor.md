@@ -324,8 +324,10 @@ Everything except the loop is pure, so test it like any other Brood code:
   to `(observe-attach)` — it brings up the full-screen process viewer over *your
   editor's own* processes and returns control on `q`. (Since it `term-leave`s on
   quit, redraw your UI afterward.) The observer reads the same `process-info` /
-  display seam this guide uses; remote-attaching to a running editor over a node
-  link is the same loop with a remote data source.
+  display seam this guide uses. To watch the editor **while it runs** (you can't show
+  both in one terminal), have it `(node-start …)` + `(observe-serve)`, then from
+  another terminal `nest observe --connect editor@host:port --cookie …` — remote
+  attach is the same observer loop with a remote data source (ADR-053).
 
 ## Reference
 

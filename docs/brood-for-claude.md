@@ -495,7 +495,10 @@ get to restore the terminal — redirect output in CI).
 - **`nil` is distinct from `false`** — `(nil? false)` is `false`,
   `(false? nil)` is `false`. Both are falsy, neither is the other.
 - **Tail position matters**: deep *non*-tail recursion overflows the
-  green-process stack. Use a tail-recursive helper with an accumulator.
+  green-process stack. Use a tail-recursive helper with an accumulator — make
+  the self-call the *last* thing the function does. The advisory checker
+  (`nest check`, the LSP, `nest mcp`) **warns** when a function calls itself in
+  non-tail position, e.g. `(* n (fact (- n 1)))`.
 - **Exactly one of every name, project-wide.** The module system is flat
   (ADR-019): a global is a single binding across the *whole* project, not
   per-file. Defining `main` (or any name) in two source files is a bug — the
@@ -517,6 +520,11 @@ get to restore the terminal — redirect output in CI).
   `contains?` for keys).
 
 ## Module skeleton (what `nest new` scaffolds)
+
+`nest new <name>` scaffolds this default `main`+`hello` pair. `nest new <name>
+--template tui-loop` instead scaffolds a tail-recursive animation loop (pairs
+with `nest run --for`), and `--template hatch` a stateful gen_server-style
+process — starter shapes you'd otherwise hand-write.
 
 ```lisp
 ;; src/hello.blsp
@@ -547,6 +555,14 @@ get to restore the terminal — redirect output in CI).
 
 `describe` groups tests; `test` defines one. `(assert= actual expected)` checks
 structural equality with a diff on failure; `(is expr)` asserts truthy.
+`(assert-error body…)` asserts a raise. For stochastic code, **property testing**:
+`(check-property n gen pred)` draws `n` values from a `seed -> [value next-seed]`
+generator (over the PRNG) and asserts `pred` on each — deterministic, and on a
+counterexample it fails with the value + seed:
+
+```clojure
+(check-property 100 (fn (s) (rand-int s 1000)) (fn (x) (and (>= x 0) (< x 1000))))
+```
 
 `nest test` runs each test in its own green process. `nest run` invokes the
 `main/main` entry by default (override in `project.blsp` via `:main`; e.g.

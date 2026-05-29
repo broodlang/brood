@@ -135,9 +135,19 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   structured-error rendering, and tty-gated prompts all in Brood. `brood` (no
   args) and `nest repl` bootstrap into `(repl-run)`; the old `crates/repl` +
   `rustyline` are gone. The per-process GC (ADR-035) reclaims each command's
-  allocations, so there's no Rust heap-reset left. Cooked-mode editing comes free
-  from the terminal; ⬜ arrow-key **history/recall** is the next additive layer
-  over the `term-*` raw-key seam (ADR-046) + the buffer framework.
+  allocations, so there's no Rust heap-reset left.
+- ✅ **Interactive REPL editor in Brood** (ADR-052) — `std/lineedit.blsp` +
+  `std/highlight.blsp`: a raw-mode, emacs/readline-style line editor with live
+  tree-sitter-style lexical **syntax highlighting**, **bracket matching**,
+  function **signature hints**, **Tab completion**, and the core emacs keys
+  (C-a/C-e, C-f/C-b, M-f/M-b, C-k/C-u/C-w, C-y, Home/End, ↑/↓ session history) —
+  all written in Brood over a thin new inline `term-*` seam (`term-raw-enter` /
+  `term-raw-leave` / `term-emit`, plus ALT/BackTab key encoding). On a TTY it
+  replaces `read-line`; piped input keeps the plain path byte-for-byte. ⬜
+  Follow-ups: a scheduler-parking key read (makes the editor's `term-poll` block
+  truly zero-cost — already benign, since it ties up only the REPL's own worker
+  and yields every ≤250 ms), locals-in-scope completion, reverse history search
+  (C-r), persistent history, real wide-char widths.
 - ✅ **Modules** — Emacs-flat `provide` / `require` + `*load-path*` over the shared
   global table; `foo--private` convention (ADR-019). Logic in Brood; the only new
   Rust is `file-exists?` / `dir?` / `list-dir` / `cwd` / `name` / `eval-string` /
@@ -221,6 +231,18 @@ the workaround available today.
 - ⬜ **One-off `nest run --main module/fn` entry override** — run a different
   entry without editing the manifest's `:main`. Low-risk; insertion points in
   `cmd_run` + `run-project` are known (`docs/feedback-retro-game-of-life.md` §5.3).
+- ✅ **Non-tail self-recursion lint** — landed 2026-05-29. The advisory checker
+  warns when a function calls itself outside tail position (overflow footgun);
+  flows through `nest check`, `check-file`, the LSP, and the `nest mcp`
+  `check`/`load` tools. `crates/lisp/src/types/check/recursion.rs`.
+- ✅ **check-on-load** — landed 2026-05-29. The `nest mcp` `load` tool returns
+  `{:diagnostics :shadows}` so an agent sees type/arity/unbound/non-tail and
+  flat-namespace-collision problems at load time, not at run.
+- ✅ **Scaffold templates `nest new --template`** — landed 2026-05-29. `tui-loop`
+  and `hatch` starters alongside the `default` main+hello pair.
+- ✅ **Property-based testing `check-property`** — landed 2026-05-29. Seeded,
+  deterministic, counterexample-shrinking-free but seed-reporting; built on the
+  PRNG (`std/test.blsp`).
 
 ## M2 — Editor data model
 
@@ -284,14 +306,16 @@ The seam that makes remoteability free later (see architecture.md).
   side table); `:memory` joins once the kernel tracks per-process bytes (the
   observer renders absent fields gracefully). `tests/observe_test.blsp` 26/26 incl. GC-stress + an
   `:isolated` live-process block.
-- 🟡 **Observe a *running* runtime (inline done; remote next).** The observer loop
-  takes a pluggable **data source** (a 0-arg fn → `process-info` maps), so it's
-  source-agnostic. `observe-attach` passes the local source — a running program
-  calls it to inspect its *own* live processes (no demo, modal, returns on quit).
-  ⬜ **Remote attach** is the same loop with a remote source: a target-side
-  observer agent ships `(map process-info (list-processes))` over the existing dist
-  node link to a `nest observe --connect name@host:port` — no kernel changes
-  (`process-info` maps are send-able). A hard requirement, built next.
+- 🟡 **Observe a *running* runtime — inline + remote (done, ADR-053).** The observer
+  loop takes a pluggable **data source** + a snapshot shape (`{:node :procs}`), so
+  it's source-agnostic. `observe-attach` uses the local source (a running program
+  inspects its *own* processes, modal). **Remote attach** is the same loop with a
+  remote source: the target `(observe-serve)`s a registered agent that ships
+  snapshots over the dist node link to `nest observe --connect name@host:port`
+  (`--cookie`/`$BROOD_COOKIE`) — the node panel shows the *peer's* stats, a dropped
+  link freezes on the last snapshot with a `DISCONNECTED` banner. No kernel changes
+  (`process-info` maps are send-able); dev-grade auth (shared cookie, LAN/trusted).
+  Cross-node `crates/cli/tests/observe_attach.rs`.
 - ⬜ Keymaps and interactive commands defined in Brood — belong in the **editor
   app** (a new `nest` project), not the framework.
 - ⬜ Minibuffer / status line / multiple windows — editor-app concerns, additive

@@ -53,8 +53,11 @@ arg silently becoming `nil`.
 | **Terminal** (the display/input seam — ADR-046; the in-process crossterm frontend that paints the render-op protocol, `std/display.blsp`) | `term-enter` | 0 | take over the terminal: raw mode + alternate screen, cursor hidden → nil. Pair with `term-leave` |
 | | `term-leave` | 0 | restore the terminal (show cursor, leave alternate screen, disable raw mode) → nil |
 | | `term-size` | 0 | terminal size as `[cols rows]` (character cells) |
-| | `term-poll` | 1 | `(term-poll ms)` → wait up to `ms` ms for a key: a 1-char string (printable), a keyword for specials (`:up` `:down` `:left` `:right` `:enter` `:escape` `:backspace` `:tab` `:delete` `:home` `:end` `:page-up` `:page-down`, ctrl combos like `:ctrl-c`), or `nil` on timeout. Always pass a finite `ms` |
+| | `term-poll` | 1 | `(term-poll ms)` → wait up to `ms` ms for a key: a 1-char string (printable), a keyword for specials (`:up` `:down` `:left` `:right` `:enter` `:escape` `:backspace` `:tab` `:back-tab` `:delete` `:home` `:end` `:page-up` `:page-down`, ctrl combos like `:ctrl-c`, alt combos like `:alt-f`), or `nil` on timeout. Always pass a finite `ms` |
 | | `term-draw` | 1 | paint a **frame** — a vector of render ops `[:clear]` / `[:text row col s]` / `[:text row col s face]` / `[:cursor row col]`, where a face is a map like `{:fg :red :bold true}` → nil. The frontend that interprets the display protocol |
+| | `term-raw-enter` | 0 | enter raw mode **only** — no alternate screen, cursor stays visible, scrollback preserved → nil. The seam for an *inline* editor (the REPL, `std/lineedit.blsp`); use `term-enter` for a full-screen TUI. Pair with `term-raw-leave` |
+| | `term-raw-leave` | 0 | leave raw mode (teardown for `term-raw-enter`) → nil |
+| | `term-emit` | 1 | paint inline, **relative**-motion ops: `[:print str]` / `[:print str face]` / `[:cr]` / `[:nl]` / `[:up n]` / `[:down n]` / `[:col n]` / `[:clear-eol]` / `[:clear-below]` → nil. The inline counterpart to `term-draw` (which is absolute); queues all ops then flushes once |
 | **Process introspection** | `mailbox-size` | 1 | `(mailbox-size pid)` → the number of messages queued in a live local process's mailbox (its receive backlog), or `nil` for a remote/dead pid. The one process-state accessor Brood can't reach (the queue lives behind the scheduler registry); `(list-processes)` + `self` are the others. Used by `std/observe.blsp` |
 | | `process-info` | 1 | `(process-info pid)` → an Erlang-`process_info`-style snapshot map of a live local process — `{:id :node :name :status :mailbox :monitored-by :parent}` (`:status` `:running`/`:waiting`; `:name` nil if unregistered; `:parent` the spawner's id, nil for the root) — or `nil` for a remote/dead pid. Assembled from the registry/scheduler/monitor tables; `:memory` joins once the kernel tracks per-process bytes (ADR-051). The observer reads this |
 | **Type reflection** | `type-of` | 1 | the runtime type tag as a keyword (`:int` `:string` …); the one irreducible reflective primitive. The tag predicates (`nil?` `pair?` `int?` `float?` `bool?` `string?` `symbol?` `keyword?` `vector?` `map?` `fn?`) are Brood wrappers over it, as are the in-language type checks |
@@ -65,6 +68,7 @@ arg silently becoming `nil`.
 | | `print` | n | write display forms to stdout → nil (`println`, which adds a newline, is Brood over it) |
 | | `eprint` | n | write display forms to **stderr** → nil (mirrors `print`; `eprintln` is the Brood newline-adding wrapper) |
 | | `stdout-tty?` | 0 | true when stdout is an interactive terminal (false when piped/captured) — gates colour output |
+| | `stdin-tty?` | 0 | true when stdin is an interactive terminal (false when redirected from a pipe/file) — the REPL gates raw-mode line editing on this |
 | **Time** | `now` | 0 | wall-clock milliseconds since the Unix epoch (integer); subtract two readings for elapsed time |
 | **Memory** | `mem-bytes` | 0 | bytes currently allocated process-wide (from the counting global allocator) |
 | | `mem-peak` | 0 | high-water mark of allocated bytes since process start |

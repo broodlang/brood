@@ -72,6 +72,21 @@
   (test "sample of an empty collection errors"
     (assert-error (sample 1 []))))
 
+(describe "property-based testing (check-property)"
+  (test "a true property over random ints passes"
+    (check-property 200 (fn (s) (rand-int s 1000)) (fn (x) (and (>= x 0) (< x 1000)))))
+  (test "shuffle preserves length, checked over many random orders"
+    (check-property 50 (fn (s) (shuffle s [1 2 3 4 5])) (fn (sh) (= (count sh) 5))))
+  (test "sample always returns a member, over many draws"
+    (check-property 100 (fn (s) (sample s [:a :b :c :d])) (fn (x) (includes? [:a :b :c :d] x))))
+  (test "a false property raises a test-failure carrying the seed"
+    ;; Drive the loop directly so the failure is caught here, not the test runner.
+    (is (test--failure?
+          (try
+            (do (check-property--loop 100 (fn (s) (rand-int s 10)) (fn (x) (< x 5)) nil 1 0)
+                :no-failure)
+            (catch e e))))))
+
 ;; ---- explicit concurrency (spawn / send / fan-in) ---------------------------
 ;; The PRNG is pure, so a value drawn with seed K in a spawned process must equal
 ;; the value drawn with seed K here — proving determinism survives the deep copy

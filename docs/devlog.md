@@ -6874,3 +6874,154 @@ monitor/dist) immediately before touching it. The seam to the kernel work is thr
 accessors — `process_status` / `parent_of` / `process_mem` over the new `Process`
 fields: once they land, `process-info` wires `:parent`/`:memory` and swaps the
 inferred `:status` for the real enum (and the observer columns light up for free).
+
+## 2026-05-29 — Interactive REPL editor: highlighting, brackets, hints, completion (ADR-052)
+
+**Goal.** From the user: *"can we improve the repl. i want color highlighting
+tree-sitter style with param matching when i type and it has to be
+emacs/readline-like."* ADR-048 left the REPL on cooked-mode `read-line` and flagged
+richer editing as the next Brood-over-`term-*` layer — this is that layer.
+
+**What shipped.** A raw-mode, emacs/readline-style line editor, almost all in Brood:
+- **Rust seam (thin, mechanism only).** Three primitives in `builtins.rs`:
+  `term-raw-enter` / `term-raw-leave` (raw mode *only* — no alternate screen, cursor
+  visible, scrollback kept) and `term-emit` (relative-motion ops — `:print` `:cr`
+  `:nl` `:up` `:down` `:col` `:clear-eol` `:clear-below`, sharing `term-draw`'s
+  `apply_face`). `key_to_value` now encodes ALT (`:alt-f`) and `BackTab` (`:back-tab`).
+  Plus `restore_raw` (disable-raw-mode only, *no* escape sequences) behind RAII guards
+  around the REPL bootstrap in both binaries, so a panic restores the terminal without
+  polluting a piped stdout.
+- **`std/highlight.blsp` (new, pure).** A lexical, tree-sitter-style highlighter:
+  source → `[start end face]` spans (comments/strings/numbers/keywords, special forms
+  vs head-position calls), plus `bracket-match` (depth scan skipping strings/comments),
+  `enclosing-call` (callee + arg index for hints), and `symbol-prefix-at`/
+  `common-prefix` for completion. Special-forms set mirrors the LSP's `SPECIAL_FORMS`.
+- **`std/lineedit.blsp` (new).** Pure `lineedit--handle (state, key) → state` keymap
+  (insert/delete, C-a/C-e, C-f/C-b, M-f/M-b, C-k/C-u/C-w, C-y, Home/End, ↑/↓ history,
+  Tab completion, Ctrl-D EOF / Ctrl-C cancel) + a thin `term-emit` render loop with
+  live highlighting, matched-bracket emphasis (red when unbalanced), a signature-hint
+  line, and horizontal scroll for long lines.
+- **`std/repl.blsp` integration.** When stdin + stdout are both a TTY, `repl--read-line`
+  reads via `lineedit-read` (passing the accumulator as read-only `:prefix` for
+  whole-form analysis); redirected stdin keeps `read-line` byte-for-byte. The editor is
+  gated on a new `stdin-tty?` primitive (not `stdout-tty?`), so `echo … | brood` in a
+  terminal — piped stdin, TTY stdout — doesn't block the editor on key events. Session history threads through `repl--loop` /
+  `repl--read-eval` (surviving `hibernate`); multi-line forms still come from the
+  reader's E0002 accumulation (ADR-049). One physical line edited at a time.
+
+**Design calls.** Single-line *editing* + whole-form *analysis* (no second incomplete-
+detector in Brood). Editor runs in the *spawned* `repl--loop` process so `hibernate`
+keeps bounding memory; the `term-poll` block ties up only the REPL's own worker (of
+≈nproc, pinned, no stealing) and yields every ≤250 ms — benign, and *better* than the
+old `read-line` which blocked the same worker indefinitely. Chosen over a root↔spawned
+round-trip, which would push transients onto the un-hibernatable root arena (a real
+cost for a non-problem). A scheduler-parking key read would make it zero-cost — a
+follow-up nicety, not a fix.
+
+**Tests.** `tests/highlight_test.blsp` (18) + `tests/lineedit_test.blsp` (15), pure
+cores incl. an `:isolated` cross-process round-trip each; the `term-*` loop exercised
+manually (incl. a pty harness confirming highlight + eval + completion + Ctrl-C/-D
+end-to-end). Piped path verified clean (`echo '(+ 1 2)' | brood` → `3\n`, no escapes).
+repl/observe/buffer suites still green. Docs: ADR-052, roadmap, primitives.
+
+**Coordination.** Built additively while files moved underneath (the `std/highlight`
+and `std/lineedit` placeholders were already on disk — replaced in place); re-read each
+hot file before editing.
+
+
+## 2026-05-29 — Remote attach: observe a running runtime over the node link (ADR-053)
+
+**Goal.** Watch a *separately-running* program's processes — the real observer use
+case, since one terminal can't show app + observer. Planned very carefully (it has
+real failure modes); the dist link is the only cross-runtime channel and the right
+one (`send`/`receive`, and `process-info` maps are already send-able).
+
+**Built — the same observer loop, a remote source.**
+- *Source unification (refines the inline commit):* a snapshot is now
+  `{:node <node-info> :procs <process-info list>}`, so the panel reflects *whichever*
+  runtime the data came from. `observe--loop` carries `:last`/`:link`;
+  `observe--apply-result` folds a source result: map→`:ok`, `:timeout`→`:stale`
+  (keep last), `:down`→**sticky** `DISCONNECTED`. The local source never fails, so
+  inline is unchanged.
+- *Target:* `(observe-serve)` spawns + `register`s an `:observe` agent that replies
+  to `[:snapshot from _]` with `(observe--local-snapshot)` — the same snapshot inline
+  renders, routed back to the requester's (remote) pid. Opt-in (errors unless
+  `node-start`ed), like Erlang's `-name`.
+- *Observer:* `(observe-connect spec cookie)` / `nest observe --connect spec
+  [--cookie c]` — node-start a unique transient node, `connect` *before* `term-enter`
+  (so refused/cookie/bad-spec errors surface without a wrecked screen), `monitor-node`,
+  then the loop with `(fn () (observe--request peer))`. The request drains stale
+  replies, sends, and `(receive ([:observe-reply snap] snap) ([:nodedown ~peer] :down)
+  (after *observe-timeout* :timeout))`. Cookie: `--cookie` → `$BROOD_COOKIE` → clean
+  error (exit 2), no baked default; host strings escaped into the bootstrap.
+
+**Failure modes (the careful part), all handled:** missing cookie → exit 2 pre-flight;
+connect failure → clean stderr error, terminal never entered; no agent / stalled link
+→ `stale`, keep last, recover; target dies → `[:nodedown]` (socket close, ≤6s
+heartbeat) → frozen `DISCONNECTED` until quit. UI never hangs on the network, never
+crashes on disconnect.
+
+**Tests.** `tests/observe_test.blsp` 27/27 (apply-result transitions incl. sticky-down,
+node-line link indicator, the `:observe` agent protocol same-runtime) + GC-stress. New
+**cross-node** `crates/cli/tests/observe_attach.rs`: two real runtimes — attach reads a
+snapshot of the *peer's* processes (`node=app procs=4`), harness kills the target,
+observer's request reports `:down` (`DOWN-OK`). Docs: ADR-053, roadmap, observe
+docstrings.
+
+**Caveat (documented):** dev-grade auth inherited from `dist.rs` — shared cookie, no
+encryption, LAN/trusted only; read-only (no remote process control). `node-start` with
+a keyword node name draws an advisory type-check warning (its `Sig` says symbol, but
+keywords are the codebase convention and coerce fine) — cosmetic, pre-existing.
+
+---
+
+## 2026-05-29 — Tooling round 2: check-on-load, scaffold templates, non-tail lint, property tests
+
+**Goal.** Act on the follow-up "tools to write better/faster code" feedback. Four
+in-repo items (the harness-level asks — a sanctioned wait/sample, parallel-batch
+isolation — are Claude Code runtime behaviours, out of this repo's scope).
+
+**Built.**
+- **check-on-load** (`std/mcp.blsp`). The `nest mcp` `load` tool now returns
+  `{:ok true :diagnostics [...] :shadows [...]}` — `diagnostics` are
+  `check-file-structured` warnings (type/arity/unbound/**non-tail-recursion**),
+  `shadows` flags names this file defines that another project source file also
+  defines (the flat-namespace collision, ADR-019). So an agent sees mistakes at
+  load time, not at `nest run`. Helper `mcp--shadows-for` filters the project's
+  duplicate-def warnings to ones involving the loaded file.
+- **Scaffold templates** (`nest new -t/--template NAME`; `std/project.blsp` +
+  `crates/nest/src/main.rs`). Besides `default` (the main+hello pair), two starter
+  shapes the feedback hand-wrote repeatedly: **`tui-loop`** (a tail-recursive
+  animation loop, pairs with `nest run --for`) and **`hatch`** (a stateful
+  gen_server-style process). `new-project` gained an `&optional template`;
+  `project--write-template` dispatches; an unknown name errors with the valid set.
+- **Non-tail self-recursion lint** (`crates/lisp/src/types/check/recursion.rs`,
+  new Pass 3.5 in `check.rs`). Brood loops must be tail-recursive (deep non-tail
+  recursion overflows the green-process stack — the silent footgun the feedback
+  flagged). The pass walks the macroexpanded tree (so only core special forms
+  remain), mirrors the evaluator's `'tail:` rules for `if`/`when`/`unless`/`cond`/
+  `do`/`let`/`let*`/`letrec`/`and`/`or`, stops at nested `fn`/`quote` (different
+  frame / data), and flags a self-call it is *certain* is non-tail. Conservative
+  by design (prefers a miss to a false positive). Rides the existing diagnostic
+  channel, so it shows up in `nest check`, `check-file`, the MCP `check`/`load`
+  tools, **and the LSP** (which already publishes `check-file` diagnostics on
+  every keystroke) for free.
+- **Property-based testing** (`check-property` in `std/test.blsp`). `(check-property
+  n gen pred)` draws `n` values from a `seed -> [value next-seed]` generator (over
+  the new PRNG) and asserts `pred`; deterministic, and on the first counterexample
+  fails with the value + trial + seed. Tail-recursive driver (`check-property--loop`),
+  so it doesn't trip the new lint.
+
+**Tests.** New `recursion` unit tests in `check.rs` (5 true-positives across the
+special forms, 7 negatives incl. higher-order self-use and proper tail calls);
+`tests/prng_test.blsp` gained a `check-property` describe (true property passes,
+shuffle/sample invariants, a false property raises a seed-carrying failure); a
+`parse_duration_ms` unit test landed with `--for` last round. `nest` tests 33→35.
+
+**Note — concurrent GC regression (not this work).** `gc.rs::long_tail_loop_stays_bounded`
+began failing mid-session; it passed earlier this same session and broke only
+after concurrent `heap.rs`/`value.rs` edits (the Stage-B / REPL-line-editor work)
+landed. The lint is a checker pass — it never runs in the eval/heap path the gc
+test exercises — and all of: the brood lib unit tests (136), the full `.blsp`
+suite (`brood_suite_passes`), and the `nest` tests (35) are green. Flagged for the
+GC work, not fixed here.

@@ -119,27 +119,30 @@ trimmed, dropping blanks and consecutive duplicates."
 
 ;; ---- I/O loop ---------------------------------------------------------------
 
-(defn repl--read-line (tty acc history)
-  "Read one physical line. On a TTY, the interactive editor (`lineedit-read`) draws
-the prompt and edits with `acc` as read-only form context and `history` for ↑/↓;
-otherwise a plain `read-line` with no prompt (the piped path). Returns a map
-`{:kind :line|:eof|:cancel ...}` — `:cancel` is the editor's Ctrl-C."
-  (if tty
+(defn repl--read-line (interactive acc history)
+  "Read one physical line. When `interactive` (stdin + stdout are both a TTY), the
+editor (`lineedit-read`) draws the prompt and edits with `acc` as read-only form
+context and `history` for ↑/↓. Otherwise a plain `read-line` — the piped path —
+echoing the prompt only when stdout is a TTY (a human watching, stdin redirected).
+Returns a map `{:kind :line|:eof|:cancel ...}` — `:cancel` is the editor's Ctrl-C."
+  (if interactive
     (let (r (lineedit-read (if (= acc "") *repl-prompt* *repl-cont-prompt*) acc history))
       (cond
         (get r :eof) {:kind :eof}
         (get r :cancel) {:kind :cancel}
         :else {:kind :line :text (get r :line)}))
-    (let (line (read-line))
-      (if (nil? line) {:kind :eof} {:kind :line :text line}))))
+    (do
+      (when (stdout-tty?) (print (if (= acc "") *repl-prompt* *repl-cont-prompt*)))
+      (let (line (read-line))
+        (if (nil? line) {:kind :eof} {:kind :line :text line})))))
 
-(defn repl--read-eval (tty acc history)
+(defn repl--read-eval (interactive acc history)
   "Read a line, accumulate it into `acc`, and evaluate. Recurses (without
 hibernating, so the partial form survives) to read another line when the form is
 incomplete. Ctrl-C drops the in-progress form and re-prompts. Returns a map
 `{:eof <bool> :history <list>}` — the (possibly extended) history threads back to
 `repl--loop`."
-  (let (r (repl--read-line tty acc history))
+  (let (r (repl--read-line interactive acc history))
     (cond
       ;; EOF: report a half-typed form if one is pending, then stop.
       (= (get r :kind) :eof)
@@ -157,19 +160,19 @@ incomplete. Ctrl-C drops the in-progress form and re-prompts. Returns a map
             :else
               (let (src (str acc line "\n"))
                 (if (= (repl--eval-print src) :more)
-                  (repl--read-eval tty src history)   ; incomplete — keep reading
+                  (repl--read-eval interactive src history)   ; incomplete — keep reading
                   {:eof false :history (repl--remember history src)})))))))
 
-(defn repl--loop (tty history)
+(defn repl--loop (interactive history)
   "Read-eval one form (skipping blank / comment-only input), then `hibernate` into
 the next iteration — flipping the LOCAL arena so the command's transients are
-reclaimed (keeping only this fn, `tty`, and `history`). Returns (and the process
-exits) at end of input. Runs in the process `repl-run` spawns, where `hibernate`
-is caught."
-  (let (r (repl--read-eval tty "" history))
+reclaimed (keeping only this fn, `interactive`, and `history`). Returns (and the
+process exits) at end of input. Runs in the process `repl-run` spawns, where
+`hibernate` is caught."
+  (let (r (repl--read-eval interactive "" history))
     (if (get r :eof)
-      (when tty (print "\n"))
-      (hibernate repl--loop tty (get r :history)))))
+      (when (stdout-tty?) (print "\n"))
+      (hibernate repl--loop interactive (get r :history)))))
 
 (defn repl--await (p)
   "Block the current process until process `p` exits."
@@ -177,12 +180,13 @@ is caught."
     (receive ([:down ~r ~p _] nil))))
 
 (defn repl-run ()
-  "Run the read-eval-print loop on stdin until end of input (Ctrl-D). On a TTY it
-edits interactively (`std/lineedit.blsp`) with the banner + prompts; piped input
-keeps the plain `read-line` path. The loop runs in a spawned process — so
-`hibernate` can flip its arena between commands — and this call blocks (parked in
-`receive`) until that process reaches end of input. Returns nil."
-  (let (tty (stdout-tty?))
-    (when tty (eprint (str *repl-banner* "\n")))
-    (repl--await (spawn (repl--loop tty '())))
+  "Run the read-eval-print loop on stdin until end of input (Ctrl-D). When stdin and
+stdout are both a TTY it edits interactively (`std/lineedit.blsp`) with the banner +
+prompts; redirected stdin keeps the plain `read-line` path (prompt echoed only when
+stdout is a TTY). The loop runs in a spawned process — so `hibernate` can flip its
+arena between commands — and this call blocks (parked in `receive`) until that
+process reaches end of input. Returns nil."
+  (let (interactive (and (stdin-tty?) (stdout-tty?)))
+    (when (stdout-tty?) (eprint (str *repl-banner* "\n")))
+    (repl--await (spawn (repl--loop interactive '())))
     nil))

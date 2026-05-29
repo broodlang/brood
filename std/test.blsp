@@ -240,6 +240,29 @@ docs/testing.md for the full guide.")
   "Evaluate `body` and return the error it raised — a built-in error as its `\"kind error: message\"` string, a `(throw v)` as the value `v` — or nil if `body` completes without raising."
   `(try (do ~@body nil) (catch e (error-of--render e))))
 
+;; --- property-based testing (over the seedable PRNG) -------------------------
+;; `(check-property n gen pred)` draws `n` values from `gen` (a `seed -> [value
+;; next-seed]` function, e.g. built on `rand-int`/`shuffle`/`sample`) and asserts
+;; `(pred value)` for each. Deterministic (fixed start seed) so a failure
+;; reproduces; on the first counterexample it fails the test with the value, the
+;; trial number, and the seed that produced it. A loop tested by random sampling
+;; catches edge cases a single hand-written example misses.
+(defn check-property--loop (n gen pred loc seed i)
+  (if (>= i n)
+    nil ; all trials held
+    (let ([val nxt] (gen seed))
+      (if (pred val)
+        (check-property--loop n gen pred loc nxt (inc i))
+        (test--fail loc
+          (list (str "property failed on trial " (inc i) "/" n)
+            (str "counterexample: " (pr-str val))
+            (str "reproduce with seed: " seed)))))))
+
+(defmacro check-property (n gen pred)
+  "Property test: run `n` trials, each drawing a value with `gen` (a `seed -> [value next-seed]` function over the PRNG) and asserting `(pred value)`. Deterministic; on the first counterexample fails with the value, trial, and seed. e.g. `(check-property 100 (fn (s) (rand-int s 1000)) (fn (x) (>= x 0)))`."
+  (let (loc (fail-loc pred))
+    `(check-property--loop ~n ~gen ~pred (quote ~loc) 1 0)))
+
 ;; --- small text/list helpers for the trace and slow-test output --------------
 (defn opt? (flag opts)
   ; is flag present in the run-tests args?
