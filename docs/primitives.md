@@ -15,7 +15,7 @@ gate (`eval::call_native`), before the primitive runs — so a wrong-count call 
 a clean arity error (`type-of: expected 1 argument, got 0`) rather than a missing
 arg silently becoming `nil`.
 
-## Native primitive functions (98)
+## Native primitive functions (99)
 
 | Category | Primitive | Arity | Purpose |
 |---|---|---|---|

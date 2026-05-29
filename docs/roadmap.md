@@ -257,13 +257,16 @@ The seam that makes remoteability free later (see architecture.md).
 - 🟡 **First app on the seam: `nest observe` (done).** An Erlang-observer-style
   process viewer (`std/observe.blsp`) — proves the render protocol + key loop
   end-to-end with **no rope/buffer**. A node-stats panel (node name, workers/peak,
-  spawn count, memory used/peak, peers) over a navigable, busiest-mailbox-first
-  process list: `↑`/`↓` select, `space` pauses the live refresh, `q` quits.
-  Interactivity is a UI-state map threaded through the tail-recursive loop (no
-  mutation); selection is tracked **by pid**, so it stays on the same process as
-  the list reorders. Pure `observe-frame` core (testable without a TTY) + a thin
-  root-process IO loop; the only new primitive is `mailbox-size` (node stats reuse
-  existing primitives). `tests/observe_test.blsp` 18/18 incl. GC-stress + an
+  spawn count, memory used/peak, peers) over a navigable process **table** — id ·
+  name · status · mailbox · memory · monitors — from `(process-info pid)` (ADR-051,
+  a kernel snapshot map). `↑`/`↓` select, `s` cycles the sort (id/mailbox/memory),
+  `space` pauses the live refresh, `q` quits; status is colour-coded, rows clip to
+  width. Interactivity is a UI-state map threaded through the tail-recursive loop
+  (no mutation); selection tracks the numeric pid **id** (stable across re-sorts).
+  Pure `observe-frame` core (TTY-free, unit-tested) + a thin root-process IO loop.
+  New primitives: `mailbox-size`, `process-info`; `:parent`/`:memory` join the
+  table once the kernel tracks them per-process (the observer renders absent
+  fields gracefully). `tests/observe_test.blsp` 23/23 incl. GC-stress + an
   `:isolated` live-process block.
 - ⬜ Keymaps and interactive commands defined in Brood — belong in the **editor
   app** (a new `nest` project), not the framework.

@@ -6801,3 +6801,50 @@ seed's stream survives the deep copy on `send`); `tests/introspection_test.blsp`
 - **Set type `#{}`**, **duplicate-global warning** in `check-project-sources`, a
   **`--main`/`module/fn` CLI override**, and a **frame-capped run mode** — all
   mapped (insertion points known) but left for follow-up.
+
+
+## 2026-05-29 — Richer process introspection: `(process-info pid)` + observer (ADR-051)
+
+**Goal.** Turn the observer's bare pid+mailbox list into a real
+`process_info`-style view, surfaced both as a primitive and in the TUI. Planned
+around in-flight kernel changes (an explicit status enum, parent tracking, a
+per-process memory counter) so `process-info` *consumes* that bookkeeping as it
+lands rather than blocking on it.
+
+**Shape (decided with the user).** One primitive `(process-info pid)` → a snapshot
+**map** (not granular accessors), Erlang-idiomatic; `nil` for remote/dead, type
+error for a non-pid (the `mailbox-size` contract). Reachable *today*, no new kernel
+bookkeeping:
+
+    {:id 7 :node :nonode :name :worker :status :waiting :mailbox 3 :monitored-by 1}
+
+- `:id`/`:node` free off the `Value::Pid`; `:name` via `dist::name_for_pid`;
+  `:mailbox` via `mailbox_len`; `:monitored-by` via new `monitor::monitored_by`;
+  `:status` inferred (mailbox `waiter` slot → `:waiting`, else `:running`; dead →
+  nil) via new `mailbox::process_status`. Each accessor takes one lock and releases
+  it before the next, so `process-info` holds no two at once (no lock-ordering
+  risk; a stale-but-coherent snapshot is fine for display).
+- `:parent`/`:memory` **deferred to the kernel work** (the `Process` isn't
+  registry-reachable while running). The map's key *set* grows monotonically; the
+  observer renders absent fields as "-", so they appear with no rework.
+
+**Observer (`std/observe.blsp`).** Snapshot is now `(map process-info
+(list-processes))`, sorted by `:id` — the monotonic id is finally a stable sort key
+(the gap that forced busiest-first). New table: id · NAME · STATUS · MBOX · MEM ·
+MON; status colour-coded (running green, waiting grey); rows clip to width; `s`
+cycles the sort key (id/mailbox/memory, all numeric → `sort-by`); selection tracks
+the numeric `:id` (stable across re-sorts); the detail line shows the full snapshot.
+
+**Tests/docs.** `tests/observe_test.blsp` 23/23 (pure `observe-frame` over the
+richer maps — columns, status faces, sort, windowing — + an `:isolated` block
+asserting `process-info` over live spawned processes: a parked receiver →
+`:waiting` + mailbox depth, a monitored pid → `:monitored-by` ≥ 1, `(self)` alive).
+Incl. `BROOD_GC_STRESS=1`. ADR-051, primitives (+`process-info`), roadmap. Suite
+green apart from the unrelated pre-existing adversarial memory-cap (E0043) trio.
+
+**Coordination.** Built entirely additively (new fns + one primitive) while the
+kernel was edited in parallel; re-read each hot file (builtins/process/mailbox/
+monitor/dist) immediately before touching it. The seam to the kernel work is three
+accessors — `process_status` / `parent_of` / `process_mem` over the new `Process`
+fields: once they land, `process-info` wires `:parent`/`:memory` and swaps the
+inferred `:status` for the real enum (and the observer columns light up for free).
