@@ -145,12 +145,25 @@ enum Cmd {
     /// Errors if cwd is not inside a Brood project.
     Mcp,
 
-    /// Open a live process observer — a full-screen TUI listing every process on
-    /// this runtime and its mailbox backlog (an Erlang-observer-style view). The
-    /// first app on the M3 display/input seam (ADR-046); proves the render
-    /// protocol + key loop end-to-end. Seeds a few demo processes so there is
-    /// something to watch. Press `q` / Esc / Ctrl-C to quit.
-    Observe,
+    /// Open a live process observer — a full-screen TUI listing processes and
+    /// their status / mailbox / memory (an Erlang-observer-style view, ADR-046).
+    ///
+    /// With no `--connect`: a standalone demo over a fresh runtime's own (seeded)
+    /// processes. With `--connect name@host:port`: **remote attach** — observe a
+    /// *running* program over the node link (it must have called `node-start` +
+    /// `observe-serve`); the cookie comes from `--cookie` or `$BROOD_COOKIE`
+    /// (ADR-053). Press `q` / Esc / Ctrl-C to quit.
+    Observe {
+        /// Attach to a running peer node `name@host:port` instead of the local
+        /// demo (the target must have called `observe-serve`).
+        #[arg(long = "connect", value_name = "NODE")]
+        connect: Option<String>,
+
+        /// Shared cookie authenticating the link (must match the target's). Falls
+        /// back to `$BROOD_COOKIE`; required when `--connect` is given.
+        #[arg(long = "cookie", value_name = "COOKIE")]
+        cookie: Option<String>,
+    },
 }
 
 fn main() {
@@ -199,7 +212,7 @@ fn run_main(cli: Cli) {
         Cmd::Doc { module } => cmd_doc(&mut interp, module.as_deref()),
         Cmd::Repl => cmd_repl(&mut interp),
         Cmd::Mcp => cmd_mcp(&mut interp),
-        Cmd::Observe => cmd_observe(&mut interp),
+        Cmd::Observe { connect, cookie } => cmd_observe(&mut interp, connect, cookie),
     }
 }
 
@@ -563,19 +576,50 @@ fn cmd_mcp(interp: &mut Interp) {
 /// `nest observe` — the process observer TUI (ADR-046, the M3 display seam). Runs
 /// the Brood observer loop in the root process (so its blocking key-poll blocks
 /// only this thread, never a scheduler worker running the observed processes).
-fn cmd_observe(interp: &mut Interp) {
+fn cmd_observe(interp: &mut Interp, connect: Option<String>, cookie: Option<String>) {
+    // Pick the bootstrap: a remote attach (`--connect`) or the standalone demo.
+    // For remote, resolve the cookie (--cookie → $BROOD_COOKIE → error) and connect
+    // — `observe-connect` dials the peer *before* taking the terminal, so a bad
+    // host / wrong cookie surfaces as a clean error with the screen never entered.
+    let boot = match connect {
+        Some(spec) => {
+            let cookie = cookie
+                .or_else(|| std::env::var("BROOD_COOKIE").ok())
+                .filter(|c| !c.is_empty())
+                .unwrap_or_else(|| {
+                    eprintln!(
+                        "nest observe --connect: provide --cookie <c> or set $BROOD_COOKIE"
+                    );
+                    std::process::exit(2);
+                });
+            // `spec`/`cookie` are user input embedded in a Brood string literal —
+            // escape backslash and quote so they can't break out of the literal.
+            format!(
+                "(require 'observe) (observe-connect \"{}\" \"{}\")",
+                brood_str_escape(&spec),
+                brood_str_escape(&cookie),
+            )
+        }
+        None => "(require 'observe) (observe-run)".to_string(),
+    };
     // The guard restores the terminal on a panic unwind; the inner scope drops it
     // (restoring) before any error is reported and we exit — `process::exit`
     // skips Drop. On the normal `q` path the Brood `term-leave` already restored;
     // the guard's second restore is idempotent.
     let result = {
         let _guard = TermGuard;
-        interp.eval_str("(require 'observe) (observe-run)")
+        interp.eval_str(&boot)
     };
     if let Err(e) = result {
         report_error(&e);
         std::process::exit(1);
     }
+}
+
+/// Escape a host string for safe embedding in a Brood double-quoted string literal
+/// (backslash and double-quote only — Brood string syntax is C-like).
+fn brood_str_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 // ---------- helpers ----------

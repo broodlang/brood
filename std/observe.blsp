@@ -27,12 +27,15 @@
 ;;    `process-info` / `list-processes` / node-stat primitives.
 
 ;; Entry points:
-;;   (observe-attach)  — observe THIS runtime's own processes (inline; a running
-;;                       program calls it to inspect itself). The data-source seam.
-;;   (observe-run)     — the standalone `nest observe` app: seed demo processes,
-;;                       then observe-attach.
-;;   (observe-connect) — observe a peer runtime (remote attach). Next; same loop,
-;;                       a remote source.
+;;   (observe-attach)        — observe THIS runtime's own processes (inline; a
+;;                             running program calls it to inspect itself).
+;;   (observe-run)           — the standalone `nest observe` app: seed demo
+;;                             processes, then observe-attach.
+;;   (observe-serve)         — make THIS runtime observable from a peer (target
+;;                             side): register an agent that ships snapshots.
+;;   (observe-connect spec cookie) — observe a PEER runtime over the node link
+;;                             (remote attach, `nest observe --connect`). Same
+;;                             loop, a remote source.
 
 (defmodule observe
   "An interactive process observer — a full-screen TUI showing this runtime's node
@@ -102,10 +105,14 @@ attach). Drive the standalone app from the shell with `nest observe`.")
        " · monitored-by " (get p :monitored-by)
        (if (> nprocs cap) (str "   [" (inc sel) "/" nprocs "]") "")))
 
-(defn observe--node-lines (node nprocs)
+(defn observe--node-lines (node nprocs link)
   "The two node-summary header strings from a node-stats map (see
-`observe--node-info`) and the live process count."
-  [(str " brood observer · node " (name (get node :name)) " · " nprocs " processes")
+`observe--node-info`), the live process count, and the `link` status indicator
+(`:ok` shows nothing; `:stale`/`:down` flag a slow/dropped remote link)."
+  [(str " brood observer · node " (name (get node :name)) " · " nprocs " processes"
+        (cond (= link :down)  "  ••• DISCONNECTED"
+              (= link :stale) "  ••• stale"
+              :else ""))
    (str " workers " (get node :workers) " (peak " (get node :peak) ")"
         " · spawned " (get node :spawned)
         " · mem " (observe--bytes->human (get node :mem))
@@ -120,15 +127,15 @@ on screen (roughly centred), clamped so the window never runs past the end."
 
 ;; ---- the pure render core (no IO — the testable heart) ----------------------
 
-(defn observe-frame (node procs sel cols rows paused sort)
+(defn observe-frame (node procs sel cols rows paused sort link)
   "Pure: build a render frame (a vector of display ops) for a `cols`×`rows`
-terminal — a two-line node panel (from `node`), a column header, the `procs` list
-(each a `process-info` map) windowed to fit with row `sel` selected/highlighted, a
-detail line for the selection, and a key-hint footer (showing `PAUSED` when
-`paused`, and the current `sort` key). No IO — the observer's testable core;
-`observe--loop` feeds it live data."
+terminal — a two-line node panel (from `node`, with the `link` status), a column
+header, the `procs` list (each a `process-info` map) windowed to fit with row `sel`
+selected/highlighted, a detail line for the selection, and a key-hint footer
+(showing `PAUSED` when `paused`, and the current `sort` key). No IO — the
+observer's testable core; `observe--loop` feeds it live data."
   (let (nprocs (count procs)
-        lines (observe--node-lines node nprocs)
+        lines (observe--node-lines node nprocs link)
         cap (max 1 (- rows 5))
         start (observe--window-start sel cap nprocs)
         visible (take cap (drop start procs))
@@ -186,10 +193,24 @@ same shape (it requests a peer's snapshot over the node link), so `observe--loop
 is source-agnostic: inline and remote are one loop with a swapped thunk."
   (filter (fn (p) (not (nil? p))) (map process-info (list-processes))))
 
-(defn observe--snapshot (source sort)
-  "Pull a process table from `source` (a 0-arg fn → process-info maps) and order it
-by `sort`. The input `observe-frame` renders."
-  (observe--sort (source) sort))
+(defn observe--local-snapshot ()
+  "A full snapshot of THIS runtime — `{:node <node-info> :procs <process-info list>}`
+— the inline data **source**, and the payload the remote agent (`observe-serve`)
+ships back. A source is a 0-arg fn returning such a snapshot (or, for a stalled /
+dropped remote link, a status keyword `:timeout` / `:down`); `observe--loop` is
+source-agnostic, so inline and remote are one loop with a swapped source."
+  {:node (observe--node-info) :procs (observe--local-source)})
+
+(defn observe--apply-result (state result)
+  "Fold a `source` result into the loop state. A snapshot map → store it as `:last`
+and set link `:ok`. `:timeout` → keep `:last`, link `:stale`. `:down` → link
+`:down`, which is **sticky** — a dropped link stays DISCONNECTED (frozen on the
+last snapshot) until the user quits. Pure."
+  (cond
+    (= (get state :link) :down) state
+    (map? result)               (assoc state :last result :link :ok)
+    (= result :down)            (assoc state :link :down)
+    :else                       (assoc state :link :stale)))
 
 ;; ---- the IO loop (interactive; runs in the root process) --------------------
 
@@ -205,26 +226,28 @@ Clamped to a valid row."
   (assoc state :sel-id (if (empty? procs) nil (get (nth procs idx) :id))))
 
 (defn observe--loop (state source)
-  "The observer event loop: draw the current frame, wait up to 1s for a key, then
-recurse with updated UI state until `q` / Esc / Ctrl-C. `state` is `{:sel-id
-<int|nil> :sort <kw> :frozen <procs|nil>}` (`:frozen` = paused snapshot). `source`
-is the data source (a 0-arg fn → process-info maps) — local for inline, a peer
-request for remote attach; the loop doesn't care which."
+  "The observer event loop: fetch a snapshot from `source` (unless paused), draw it,
+wait up to 1s for a key, then recurse until `q` / Esc / Ctrl-C. `state` is `{:sel-id
+<int|nil> :sort <kw> :paused <bool> :last <snapshot|nil> :link <kw>}`. `source` (a
+0-arg fn → snapshot map | `:timeout` | `:down`) is local for inline, a peer request
+for remote attach — the loop doesn't care which."
   (let ([cols rows] (term-size)
-        paused (not (nil? (get state :frozen)))
+        paused (get state :paused)
+        state (if paused state (observe--apply-result state (source)))
         sort (get state :sort)
-        procs (if paused (get state :frozen) (observe--snapshot source sort))
+        snap (or (get state :last) {:node (observe--node-info) :procs []})
+        procs (observe--sort (get snap :procs) sort)
         n (count procs)
         sel (observe--sel-index procs (get state :sel-id)))
-    (term-draw (observe-frame (observe--node-info) procs sel cols rows paused sort))
+    (term-draw (observe-frame (get snap :node) procs sel cols rows paused sort (get state :link)))
     (let (k (term-poll 1000))
       (cond
         (or (= k "q") (= k :escape) (= k :ctrl-c)) (term-leave)
         (or (= k :up) (= k "k"))   (observe--loop (observe--select state procs (max 0 (dec sel))) source)
         (or (= k :down) (= k "j")) (observe--loop (observe--select state procs (min (max 0 (dec n)) (inc sel))) source)
         (= k "s") (observe--loop (assoc state :sort (observe--next-sort sort)) source)
-        (= k " ") (observe--loop (assoc state :frozen (if paused nil procs)) source)
-        (= k "r") (observe--loop (assoc state :frozen nil) source)
+        (= k " ") (observe--loop (assoc state :paused (not paused)) source)
+        (= k "r") (observe--loop (assoc state :paused false) source)
         :else (observe--loop state source)))))
 
 ;; ---- demo processes (so a fresh observer has something to show) -------------
@@ -259,10 +282,78 @@ process in the shared registry.
 
 Caveat: it `term-leave`s on quit, so a caller that is itself a full-screen TUI
 must redraw afterward. Remote attach (a peer runtime) is the same loop with a
-remote source — see `observe--local-source`."
+remote source — see `observe-connect`."
   (do
     (term-enter)
-    (observe--loop {:sel-id nil :sort :id :frozen nil} observe--local-source)))
+    (observe--loop {:sel-id nil :sort :id :paused false :last nil :link :ok}
+                   observe--local-snapshot)))
+
+;; ---- remote attach (observe a peer runtime over the node link, ADR-053) -----
+;;
+;; The observer is the SAME loop with a different source: instead of reading this
+;; runtime's processes, it requests a snapshot from a peer's `:observe` agent over
+;; the dist node link. `process-info` maps are send-able, so the agent ships
+;; `(observe--local-snapshot)` verbatim — no kernel changes, no new wire format.
+
+(defdyn *observe-timeout* 800)   ; ms to wait for a remote snapshot before :stale
+
+(defn observe--agent-loop ()
+  "The target-side agent's receive loop: reply to each `[:snapshot from _]` with
+this runtime's `observe--local-snapshot`, sent back to the requester's pid (which
+routes over the link). Ignores anything else."
+  (receive
+    ([:snapshot from _] (do (send from [:observe-reply (observe--local-snapshot)])
+                            (observe--agent-loop)))
+    (_ (observe--agent-loop))))
+
+(defn observe-serve ()
+  "Make THIS runtime observable from a peer: spawn an agent and register it as
+`:observe`, so a remote `observe-connect` can request process snapshots. The
+program must already be a node — call `(node-start name addr cookie)` first.
+Returns the agent's pid. Opt-in, like Erlang's `-name`: a program isn't observable
+unless it opens itself up."
+  (if (= (node-name) :nonode)
+    (error "observe-serve: call (node-start name addr cookie) first")
+    (let (agent (spawn (observe--agent-loop)))
+      (register :observe agent)
+      agent)))
+
+(defn observe--gen-node-name ()
+  "A unique transient node name for an observer instance, so two observers attached
+to one target don't collide on node identity."
+  (keyword (str "observer-" (now))))
+
+(defn observe--drain-replies ()
+  "Discard any stale `[:observe-reply …]` already queued (non-blocking), so a flaky
+link can't pile them up in the observer's mailbox."
+  (receive ([:observe-reply _] (observe--drain-replies)) (after 0 nil)))
+
+(defn observe--request (peer)
+  "Request one snapshot from `peer`'s `:observe` agent. Returns the snapshot map, or
+`:down` if the link to `peer` dropped, or `:timeout` if no reply arrived in
+`*observe-timeout*` ms (a stalled link, or the target never called `observe-serve`)."
+  (observe--drain-replies)
+  (send {:name :observe :node peer} [:snapshot (self) (ref)])
+  (receive
+    ([:observe-reply snap] snap)
+    ([:nodedown ~peer] :down)
+    (after *observe-timeout* :timeout)))
+
+(defn observe-connect (spec cookie)
+  "Attach the observer to a peer runtime named in `spec` (\"name@host:port\") over
+the node link, authenticating with `cookie` (both sides share it). The target must
+have called `(node-start …)` + `(observe-serve)`. Connects *before* taking the
+terminal, so a refused / wrong-cookie / bad-spec error surfaces cleanly and exits
+without a wrecked screen. Then runs the standard observer loop against a remote
+source; a dropped link freezes on the last snapshot with a DISCONNECTED banner
+until you quit."
+  (do
+    (node-start (observe--gen-node-name) "127.0.0.1:0" cookie)
+    (let (peer (connect spec))           ; raises a clean error on failure (caught by the caller)
+      (monitor-node peer)
+      (term-enter)
+      (observe--loop {:sel-id nil :sort :id :paused false :last nil :link :ok}
+                     (fn () (observe--request peer))))))
 
 (defn observe-run (&optional (demo true))
   "Run the interactive process observer as a standalone app — a full-screen TUI
