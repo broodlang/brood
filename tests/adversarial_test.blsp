@@ -313,8 +313,10 @@
 
 (defn adv-redef-target () :v1)
 
-(defn adv-set-redef-v2ed () :v2)
-(defn adv-set-redef-v2 () (adv-set-redef-v2ed))
+;; Actually rebind the global (the ADR-013 hot-reload path) — a `def` of an
+;; existing name promotes new code into the shared RUNTIME region and re-points
+;; the table, which the in-flight worker late-binds on its next call.
+(defn adv-set-redef-v2 () (def adv-redef-target (fn () :v2)))
 
 (defn adv-redef-caller (parent n)
   (if (= n 0) (send parent :done)
