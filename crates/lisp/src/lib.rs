@@ -24,10 +24,10 @@ pub mod syntax; // surface: reader (text to Value) + printer (Value to text)
 pub mod types; // the advisory type lattice + checker (nothing gates on it)
 
 pub mod builtins;
-pub mod gui; // optional windowed display backend (feature "gui") — ADR-046 frontend #2
 pub mod cli_support; // tiny mechanism the `brood` and `nest` binaries share
 pub mod dist; // distributed nodes: connect two runtimes over TCP, route messages
 pub mod error; // errors + source positions (cross-cutting)
+pub mod gui; // optional windowed display backend (feature "gui") — ADR-046 frontend #2
 pub mod introspect; // tooling-facing queries on a live Interp (LSP today, MCP next)
 pub mod process; // the green-process scheduler // the primitive kernel (Rust mechanism; policy lives in std/*.blsp)
 

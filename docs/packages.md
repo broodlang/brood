@@ -1,10 +1,26 @@
 # Packages: third-party Brood deps
 
-> Status: **designed, not yet implemented**. ADR-037; design captured here
-> ahead of M2 because the design decisions (manifest shape, cache layout,
-> conflict policy) cross-cut project management and the upcoming editor
-> plugin story. Implementation lands when the existing language work
-> (Stage 1) is paid down — see [`roadmap.md`](roadmap.md).
+> Status: **in progress** (ADR-037). Design captured here ahead of M2 because
+> the decisions (manifest shape, cache layout, conflict policy) cross-cut
+> project management and the upcoming editor plugin story. Landing in vertical
+> slices — see [`roadmap.md`](roadmap.md):
+>
+> - **Slice 0 — done (2026-05-29):** manifest `:dependencies` parsing; the
+>   `(project …)` form is now a *quoting macro* (bare symbols in manifests).
+> - **Slice 1 — done (2026-05-29):** `:path` deps end-to-end. The `%sha256`
+>   primitive + Brood tree-hashing, transitive resolution + conflict detection,
+>   `project.lock.blsp` read/write, and `ensure-deps` wired into `project-setup`
+>   (a path dep's `src/` joins `*load-path*`, so `(require 'dep)` finds it).
+>   `std/package.blsp` is the new module; no git, no network. The `(fetch)` verb
+>   exists; its `nest fetch` subcommand wiring lands with the other verbs.
+> - **Slice 2 — next:** `:git` deps (`%git-resolve-ref`/`%git-clone`, the
+>   `_deps/` cache, clone-then-checkout the pinned commit).
+> - **Slice 3:** the `nest fetch`/`update`/`add`/`remove`/`tree` subcommands +
+>   auto-fetch on every subcommand.
+>
+> Four decisions refined the original sketch when implementation began — they
+> are folded into the relevant sections below and summarised in ADR-037's
+> *Implementation refinements*.
 
 Brood's module system (ADR-019) already resolves `(require 'foo)` through
 `*load-path*`, with embedded std modules baked into the binary. Packages
@@ -31,6 +47,11 @@ A project that depends on two external packages and one internal sibling:
    [pretty :git "https://github.com/bar/brood-pretty.git" :ref "abc1234"]
    [shared :path "../shared"]])
 ```
+
+`(project …)` is a **macro that treats its arguments as literal data** — it
+quotes them and hands them to `project--apply` — so dep names (`parser`,
+`pretty`, `shared`) and the `:main` pair are written as **bare symbols**, no
+leading `'`. A manifest is pure static data; nothing in it is ever evaluated.
 
 ```bash
 nest fetch          # download what's missing, write project.lock.blsp
@@ -142,6 +163,14 @@ The `:deps` slot on each row records the dep's own direct dependencies —
 purely for traceability (`nest tree` and "why is X here?"). Transitive
 resolution is at the root.
 
+> **Slice 1 note.** The current implementation stores `:deps` as a vector of
+> the dep's direct-dependency *names* (symbols), not the full sub-entries shown
+> above. That's enough to reconstruct the graph against the flat root list; the
+> richer sub-entry form lands with `nest tree` (Slice 3). Two other slice-1
+> simplifications: a dep's source dir is assumed to be `<dep>/src` (it doesn't
+> yet read the dep's own `:source-paths`), and a `:path` dep's `resolved-path`
+> is left un-normalised (`app/../greeter` — the OS resolves it; cosmetic).
+
 ## Resolution algorithm
 
 ```
@@ -166,7 +195,7 @@ fn fetch(project_root):
 fn resolve(dep, lock):
     if dep.kind == :path:
         absp  = absolute(dep.path)
-        hash  = sha256_dir(absp)
+        hash  = sha256_tree(absp)
         return {…dep, sha256: hash, deps: read_subdeps_of(absp)}
 
     locked = lock.get(dep.name)
@@ -181,8 +210,8 @@ fn ensure_cache(project_root, resolved):
         if cache_matches(target, entry):            # .brood-pkg.blsp metadata
             continue
         rm -rf target
-        git_clone --depth 1 --branch entry.ref entry.git target
-        sha    = sha256_dir(target)
+        git_clone(entry.git, target, entry.ref, entry.commit)  # clone ref, checkout commit
+        sha    = sha256_tree(target)
         entry.sha256 = sha
         write_pkg_meta(target / ".brood-pkg.blsp", entry)
 ```
@@ -225,6 +254,13 @@ resolved it by hand once and committed the lock file" is *plenty*.
 3. Extends `*load-path*` with each dep's source dir
    (`_deps/<name>/src/` by default; overridable via the dep's own
    `project.blsp` `:source-paths`).
+
+A **`:path` dep loads *in place*** — its `<path>/src/` is added to
+`*load-path*` directly; it is **not** copied into `_deps/`. So `_deps/` only
+exists once a git dep is fetched, and edits to a path-dep's source tree are
+live (the intended local-dev workflow — see [Hot reload + dev
+workflow](#hot-reload--dev-workflow)). The dep is still tree-hashed into the
+lock file for change detection.
 
 The existing `(require 'foo)` machinery resolves through the extended
 path. No special "package require" surface — packages are just modules on
@@ -361,13 +397,19 @@ out-of-scope for v1.
 
 **Rust primitives** (`crates/lisp/src/builtins.rs`):
 
-- `(%git-clone url dest ref)` — shell out to `git clone --depth=1 --branch
-  REF URL DEST`. Returns `:ok` or throws.
+- `(%git-clone url dest ref commit)` — shell out to `git`: clone the ref
+  shallowly into `dest`, then **check out the exact `commit`**. (A plain
+  `clone --depth 1 --branch <ref>` only accepts a branch/tag name, but the
+  lock file always pins a commit SHA — so cloning a pinned dep needs the
+  clone-then-checkout shape, fetching the commit where the server allows it.)
+  Returns `:ok` or throws.
 - `(%git-resolve-ref url ref)` — `git ls-remote URL REF` → commit hash
   string, or nil if not found.
-- `(%sha256-file path)` — bytes → hex string. For a directory, walks the
-  tree depth-first and HMACs the tarball-equivalent (see [Reproducibility
-  notes](#reproducibility-notes) below).
+- `(%sha256 string)` — hash a byte string → hex string. The **only** hashing
+  primitive: per-file hashing is `(%sha256 (slurp path))` and the canonical
+  directory hash is a Brood tree-walk that combines per-file hashes (see
+  [Reproducibility notes](#reproducibility-notes) below) — both live in
+  `std/package.blsp`, not the kernel. Also hashes the lock manifest.
 - `(%http-get url)` — GET → bytes. Lands now (small), used by future
   tarball sources.
 - `(%rm-rf path)` — explicit because `nest update` overwrites cached deps.
@@ -397,12 +439,24 @@ out-of-scope for v1.
 
 ### Reproducibility notes
 
-`(%sha256-file <directory>)` over a working tree needs a canonical
-representation. The straightforward choice: walk paths in sorted order,
-include each path's bytes prefixed by its relative path and a NUL.
-Approximates `git archive | sha256sum` but doesn't depend on git's
-behaviour. Skips `_deps/` (a dep's nested `_deps/` is its own concern,
-not part of this dep's content hash) and `.git/`.
+The directory content-hash is **Brood** over the single `%sha256` primitive,
+not a directory-walking Rust primitive. It needs a canonical representation:
+walk paths in sorted order, and for each file emit its relative path, a NUL,
+and `(%sha256 (slurp path))`; `%sha256` the concatenation of those lines.
+Approximates `git archive | sha256sum` but doesn't depend on git's behaviour.
+Skips `_deps/` (a dep's nested `_deps/` is its own concern, not part of this
+dep's content hash) and `.git/`.
+
+```lisp
+(defn sha256-file (p) (%sha256 (slurp p)))
+(defn sha256-tree (dir)
+  (%sha256 (join "" (map (fn (p) (str (rel dir p) "\0" (sha256-file p) "\n"))
+                         (sort (tree-files dir))))))
+```
+
+(Source files are UTF-8 text, so `slurp`-as-string is exact for v1; a future
+binary/tarball dep kind would want a bytes-level read, but that's deferred
+with the `:tarball` source.)
 
 ## See also
 

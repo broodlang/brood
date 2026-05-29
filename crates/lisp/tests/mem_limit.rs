@@ -19,7 +19,7 @@ fn parse_size_handles_suffixes() {
     assert_eq!(alloc::parse_size("2gb"), Some(2 * 1024 * 1024 * 1024));
     assert_eq!(alloc::parse_size("  8M  "), Some(8 * 1024 * 1024));
     assert_eq!(alloc::parse_size("0"), Some(0)); // valid → unlimited
-    // Garbage parses to None so the caller warns and falls back.
+                                                 // Garbage parses to None so the caller warns and falls back.
     assert_eq!(alloc::parse_size(""), None);
     assert_eq!(alloc::parse_size("notanumber"), None);
     assert_eq!(alloc::parse_size("12X"), None);
@@ -69,6 +69,8 @@ fn soft_limit_turns_runaway_into_catchable_error() {
     alloc::set_soft_limit(0);
 
     // Interpreter is still healthy after the caught memory error.
-    let v = interp.eval_str("(+ 1 2)").expect("interp usable after limit error");
+    let v = interp
+        .eval_str("(+ 1 2)")
+        .expect("interp usable after limit error");
     assert_eq!(interp.print(v), "3");
 }

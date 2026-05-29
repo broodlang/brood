@@ -21,7 +21,7 @@ or redefining its command hot-swaps behaviour.
     (def *my-keys* {:up 'go-up :down 'go-down})
     (keymap-dispatch *my-keys* state key (fn (s _) s))   ; unbound → no-op
 
-Used by `std/lineedit.blsp` (self-insert fallback) and `std/observe.blsp` (no-op
+Used by `std/lineedit.blsp` (self-insert fallback) and `std/observer.blsp` (no-op
 fallback); the same pattern is how the editor's keymaps will work.")
 
 (defn keymap-dispatch (keymap state key fallback)

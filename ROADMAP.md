@@ -125,14 +125,18 @@ The native kernel is **70 primitives** — see [`docs/primitives.md`](docs/primi
 
 ### Adjacent to Stage 1 (designed; lands as the project work catches up)
 
-- ⬜ **Package manager** (ADR-037, [`docs/packages.md`](docs/packages.md)) —
+- 🟡 **Package manager** (ADR-037, [`docs/packages.md`](docs/packages.md)) —
   third-party Brood deps via git URLs, project-local `_deps/` cache, lock
   file for reproducibility. Designed early *because it changes project
   management* (`*load-path*` extension, auto-fetch in `nest test`/`run`/
   `check`, lock-file commit policy); landing the design before M2 keeps the
   editor's plugin story from inventing its own one-off loader. **[Brood]**
   policy in `std/package.blsp`; **[kernel]** primitives are tiny
-  (`%git-clone` / `%git-resolve-ref` / `%sha256-file` / `%http-get`).
+  (`%git-clone` / `%git-resolve-ref` / `%sha256` / `%http-get`). Slices:
+  ✅ **0** (2026-05-29) manifest `:dependencies` + `(project …)` quoting macro;
+  ✅ **1** (2026-05-29) `:path` deps end-to-end (`%sha256` + Brood tree-hashing,
+  transitive resolution, lock-file I/O, `ensure-deps` load-path integration);
+  ⬜ **2** `:git` deps; ⬜ **3** the verbs + auto-fetch.
 - ⬜ **Single-binary bundling** (ADR-038) — `nest bundle` produces a
   self-contained `app` executable (append-to-binary: zip of project +
   `_deps/` appended to a pre-built `brood`, magic-footer record, runtime

@@ -119,3 +119,28 @@
       (let ([nm d] (first hits))
         (is (symbol? nm))
         (is (string? d))))))
+
+;; Runtime introspection: per-process GC observability (Tier-1;
+;; docs/memory-review.md §7). gc-stats reports the *calling* process's own heap.
+(describe "gc-stats"
+  (test "is a map with the documented counter keys"
+    (let (s (gc-stats))
+      (is (map? s))
+      ;; cumulative counters since process start — non-negative integers
+      (is (number? (get s :collections)))
+      (is (>= (get s :collections) 0))
+      (is (number? (get s :copied)))
+      (is (number? (get s :reclaimed)))
+      ;; live snapshot + the next-collection trigger
+      (is (number? (get s :live)))
+      (is (>= (get s :live) 0))
+      (is (number? (get s :live-bytes)))
+      (is (number? (get s :threshold)))
+      (is (> (get s :threshold) 0))))
+  (test "live count rises after allocating retained data"
+    ;; allocate a chunk we keep referenced — :live must reflect it
+    (let (before (get (gc-stats) :live)
+          kept   (range 500)
+          after  (get (gc-stats) :live))
+      (is (> (count kept) 0))
+      (is (>= after before)))))

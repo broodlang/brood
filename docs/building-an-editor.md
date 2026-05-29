@@ -337,6 +337,6 @@ Everything except the loop is pure, so test it like any other Brood code:
   [`primitives.md`](primitives.md) (the **Terminal** section), ADR-046 in
   [`decisions.md`](decisions.md).
 - A complete, smaller worked example on the same seam: the process observer,
-  [`std/observe.blsp`](../std/observe.blsp) + [`tests/observe_test.blsp`](../tests/observe_test.blsp).
+  [`std/observer.blsp`](../std/observer.blsp) + [`tests/observe_test.blsp`](../tests/observe_test.blsp).
 - The immutable-data rule that makes the buffer model what it is: ADR-026
   (`docs/language.md` §Immutability).

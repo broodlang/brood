@@ -28,6 +28,8 @@ the `nest new` scaffolder.")
 ; conventional default
 (def *project-main* (list 'main 'main))
 ; (module fn) — `nest run` entry
+(def *project-dependencies* nil)
+; list of normalised dep maps from the manifest's :dependencies (ADR-037)
 
 ;; (plist-get '(:a 1 :b 2) :b) => 2 — the value after key k in a flat kv list, or nil.
 (defn plist-get (kvs k)
@@ -63,10 +65,80 @@ the `nest new` scaffolder.")
   "Override the `nest run` entry point from a CLI spec string (`\"module\"` or `\"module/fn\"`), without editing the manifest's `:main`. Call after `load-config` so it wins over the manifest. Backs `nest run --main`."
   (def *project-main* (project--parse-main-spec spec)))
 
+;; --- dependency manifest parsing (ADR-037, packages.md) ----------------------
+;; Each :dependencies entry is a vector: `[name :git URL :ref REF]` or
+;; `[name :path PATH]` — `name` is the local symbol `require` will see. Parsed
+;; into a normalised dep map ({:name :kind :url/:path :ref}) for the package
+;; manager (std/package.blsp) to consume. The reserved opts :branch/:dir/:features
+;; are recognised but rejected in v1, so the manifest shape stays forward-compatible.
+
+(def *project--reserved-dep-opts* (list :branch :dir :features))
+
+;; The elements of vector `v` from index `start` onward, as a list (tail-recursive).
+(defn project--vec-drop (v start) (project--vec-drop--acc v start (dec (vector-length v)) nil))
+(defn project--vec-drop--acc (v start i acc)
+  (if (< i start) acc (project--vec-drop--acc v start (dec i) (cons (vector-ref v i) acc))))
+
+;; The keys of a flat plist (every other element from the head).
+(defn project--plist-keys (kvs)
+  (if (empty? kvs) nil (cons (first kvs) (project--plist-keys (rest (rest kvs))))))
+
+;; Reject any reserved opt key present in `opts`, naming the offending dep.
+(defn project--reject-reserved-opts (name opts)
+  (fold (fn (_ k)
+          (when (includes? *project--reserved-dep-opts* k)
+            (error "project: dependency " name " uses " k ", which is reserved for a future version")))
+    nil (project--plist-keys opts)))
+
+(defn project--parse-git-dep (name entry)
+  (let (url (vector-ref entry 2)
+        opts (project--vec-drop entry 3)
+        ref (plist-get opts :ref))
+    (when (not (string? url)) (error "project: :git dependency " name " URL must be a string, got " url))
+    (when (not (string? ref)) (error "project: :git dependency " name " needs a :ref \"<tag-or-commit>\""))
+    (project--reject-reserved-opts name opts)
+    {:name name :kind :git :url url :ref ref}))
+
+(defn project--parse-path-dep (name entry)
+  (let (path (vector-ref entry 2)
+        opts (project--vec-drop entry 3))
+    (when (not (string? path)) (error "project: :path dependency " name " path must be a string, got " path))
+    (project--reject-reserved-opts name opts)
+    {:name name :kind :path :path path}))
+
+;; Normalise one `[name kind spec & opts]` entry into a dep map.
+(defn project--parse-dep (entry)
+  (when (not (vector? entry)) (error "project: each :dependencies entry must be a vector, got " entry))
+  (when (< (vector-length entry) 3) (error "project: dependency entry is too short: " entry))
+  (let (name (vector-ref entry 0)
+        kind (vector-ref entry 1))
+    (when (not (symbol? name)) (error "project: dependency name must be a symbol, got " name))
+    (cond
+      (= kind :git) (project--parse-git-dep name entry)
+      (= kind :path) (project--parse-path-dep name entry)
+      else (error "project: dependency " name " must be :git or :path, got " kind))))
+
+;; Parse the manifest's :dependencies value into a list of normalised dep maps.
+;; Omitted/nil => empty list.
+(defn project--parse-deps (deps)
+  (cond
+    (nil? deps) nil
+    (vector? deps) (map project--parse-dep deps)
+    else (error "project: :dependencies must be a vector of dep entries, got " deps)))
+
 ;; The (project ...) manifest form: records identity, and overrides the
-;; conventional source/test paths and the `nest run` entry when given. Missing
-;; keys keep their defaults. Called when a project.blsp is loaded.
-(defn project (& opts)
+;; conventional source/test paths, the `nest run` entry, and the dependency set
+;; when given. Missing keys keep their defaults. Called when a project.blsp is loaded.
+;;
+;; It is a macro that treats its arguments as **literal data** (it quotes them and
+;; hands them to `project--apply`), so a manifest writes bare symbols — dep names
+;; and the `:main` pair — without quoting. Manifests are static data; nothing in
+;; them is ever evaluated.
+(defmacro project (& opts)
+  "Declare the project manifest (ADR-020/037): `:name` `:version` `:source-paths` `:test-paths` `:main` and `:dependencies`. Arguments are literal data — write dep names and the `:main` pair as bare symbols."
+  (list 'project--apply (list 'quote opts)))
+
+(defn project--apply (opts)
   (def *project-name* (plist-get opts :name))
   (def *project-version* (plist-get opts :version))
   (let (src (plist-get opts :source-paths)
@@ -75,6 +147,7 @@ the `nest new` scaffolder.")
     (when src (def *project-source-paths* src))
     (when tst (def *project-test-paths* tst))
     (when m (def *project-main* (project--parse-main m))))
+  (def *project-dependencies* (project--parse-deps (plist-get opts :dependencies)))
   *project-name*)
 
 ;; --- finding the project + discovering tests ---------------------------------
@@ -128,7 +201,18 @@ the `nest new` scaffolder.")
   (def *project-root* root)
   (when (file-exists? (path-join root "project.blsp")) (load (path-join root "project.blsp")))
   (def *load-path* (append (project--abs-paths root *project-source-paths*) *load-path*))
+  (project--ensure-deps-on-path root)
   root)
+
+;; If the manifest declared :dependencies, resolve them (writing/refreshing
+;; project.lock.blsp) and append each dep's source dir to *load-path* so its
+;; modules are require-able. Deferred to the package module (ADR-037), required
+;; lazily so a depless project never loads it. Dep dirs go at the END of the path,
+;; after the project's own sources, so the project's modules win on a name clash.
+(defn project--ensure-deps-on-path (root)
+  (when *project-dependencies*
+    (require 'package)
+    (def *load-path* (append *load-path* (ensure-deps root *project-dependencies*)))))
 
 ;; Every .blsp file the project owns — its source files plus its test files.
 ;; The set the advisory type-checker walks for `(check-project)`.
@@ -429,7 +513,16 @@ the `nest new` scaffolder.")
     "  :name    \""
     nm
     "\"\n"
-    "  :version \"0.1.0\")\n"))
+    "  :version \"0.1.0\")\n"
+    "\n"
+    ";; To depend on other Brood packages, add a :dependencies vector to the form\n"
+    ";; above (ADR-037). Dep names are bare symbols (no quoting):\n"
+    ";;\n"
+    ";;   :dependencies [[pretty :git \"https://github.com/you/brood-pretty.git\" :ref \"v1.0.0\"]\n"
+    ";;                  [shared :path \"../shared\"]]\n"
+    ";;\n"
+    ";; Then any `nest` command resolves them. project.lock.blsp is committed;\n"
+    ";; _deps/ (the cache) is gitignored.\n"))
 
 (defn project--main-template (nm)
   (str "(defmodule main \"The "
@@ -620,6 +713,16 @@ the `nest new` scaffolder.")
     "  }\n"
     "}\n"))
 
+;; The scaffolded .gitignore: the package cache is regenerable from the lock
+;; file (which IS committed), so it's ignored (ADR-037).
+(defn project--gitignore-template ()
+  (str "# Brood package cache — regenerable from project.lock.blsp (which is committed)\n"
+    "_deps/\n"
+    "\n"
+    "# Editor / OS cruft\n"
+    "*.swp\n"
+    ".DS_Store\n"))
+
 ;; (new-project "foobar") — scaffold ./foobar with a runnable two-module
 ;; skeleton: project.blsp + src/main.blsp + src/hello.blsp (where main `require`s
 ;; hello and calls into it) + a paired test file for each, so `cd foobar && nest
@@ -680,6 +783,7 @@ the `nest new` scaffolder.")
       (make-dir docs-dir)
       (make-dir skill-dir)
       (spit (path-join nm "project.blsp") (project--manifest-template actual-name))
+      (spit (path-join nm ".gitignore") (project--gitignore-template))
       (spit (path-join nm "CLAUDE.md") (project--claude-md-template actual-name))
       (spit (path-join nm ".mcp.json") (project--mcp-json-template actual-name))
       (spit (path-join docs-dir "brood-for-claude.md") (%builtin-doc 'brood-for-claude))
@@ -692,6 +796,7 @@ the `nest new` scaffolder.")
                      reusing-dir " (existing files overwritten)"
                      else       "")))
         (println (str "  " nm "/project.blsp"))
+        (println (str "  " nm "/.gitignore"))
         (println (str "  " nm "/CLAUDE.md"))
         (println (str "  " nm "/.mcp.json"))
         (println (str "  " nm "/docs/brood-for-claude.md"))

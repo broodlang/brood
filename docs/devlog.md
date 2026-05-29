@@ -7305,3 +7305,261 @@ forms — next up is a GC observability layer (`gc-stats`/`gc-collect`/`gc-trace
 
 **Next.** Tier-1 GC observability primitives; then Stage C (generational nursery —
 immutability means it needs no write barrier / remembered set) gated on measurement.
+
+## 2026-05-29 — GUI frontend: finish the observer's input (mouse, back-tab, docs) (ADR-056)
+
+**Context.** A native window frontend (`gui-*`, `winit`/`softbuffer`/`fontdue`
+behind `--features gui`) had landed alongside ADR-055 but shipped **undocumented**
+(no devlog/ADR) and **keyboard-only**, while the terminal frontend already had a
+richer key set. This closes both: documents the GUI as ADR-046's second frontend
+and realises that ADR's deferred mouse/scroll input — across *both* frontends, on
+the same protocol.
+
+**Done.**
+- **Mouse, one shared shape.** `term-poll`/`gui-poll` may now yield
+  `[:mouse action button row col]` with a *minimal, identical* vocabulary from both
+  backends — `:press` / `:scroll-up` / `:scroll-down` (`button`: `:left :right
+  :middle`/nil; 0-based cells) — so one handler drives either. crossterm gets
+  `EnableMouseCapture` in `term-enter` only (not the inline REPL `term-raw-enter`
+  seam); the GUI thread tracks the pointer on winit cursor-move and emits on
+  button/wheel. Release/drag/bare-motion are deliberately *not* surfaced (nothing
+  consumes them, and per-pixel `CursorMoved` would otherwise storm the redraw loop).
+- **Observer reacts to two** (ADR-011): left-press selects the clicked process row,
+  the wheel scrolls the selection. Pure + tested: `observe--mouse?`,
+  `observe--mouse-row->sel`, `observe--apply-mouse` (clears the stale command msg
+  on an acting event; move/drag/other buttons are no-ops). `observe--loop` routes
+  mouse before key/command dispatch. 6 new cases in `tests/observe_test.blsp`.
+- **back-tab parity.** GUI now translates Shift+Tab → `:back-tab`, matching the
+  terminal — so the key vocabularies align across frontends.
+- **Docs filled.** Added the missing `gui-enter/leave/size/poll/draw` primitive
+  docstrings; updated `term-enter`/`term-poll` for mouse capture + the `[:mouse …]`
+  return; ADR-056 records the GUI frontend + mouse decision.
+- Two small build fixes the prior session left mid-compile (a `MutexGuard`
+  lifetime in `gui::size`, an unused import, the `NOT_COMPILED` const gated to the
+  stub) — both `--features gui` and the default build are green.
+
+**Result.** Suite **all green** (`observe_test.blsp` 41/41); both build configs
+clean; the windowed observer smoke-tested by hand (enter/size/draw/poll/leave +
+a live window). No automated GUI test — it needs a real display; the pure input
+mapping carries the coverage.
+
+**Next (deferred, ADR-011).** A `gui-raw-*` inline seam so the self-hosted REPL
+can run *in the window* (today only the full-screen observer can); runtime font
+sizing; multiple windows; attaching a frontend to a remote live image.
+
+## 2026-05-29 — Observer: multiple GUI windows, `(require 'observer)`, GUI-only `(observe)` (ADR-056)
+
+**Context.** Follow-up to the GUI frontend. Three things wanted: `(observe)` was
+opening the window *and* taking over the terminal (a `display-broadcast`), which
+also made GUI input laggy; the module wanted to be `observer`, not `observe`; and
+you wanted to open more than one window.
+
+**Done.**
+- **`(observe)` is GUI-only now** — `(observe-attach (gui-display))`, not a
+  term+gui broadcast. This also fixed the "serious lag on keys/clicks": in the
+  broadcast, `display--poll-any` polled the terminal for its 500 ms slice *first*,
+  so a keystroke/click in the window waited up to ~500 ms behind it. GUI-only polls
+  the window directly → snappy. (Broadcast is still available by hand.)
+- **Module renamed `observe` → `observer`.** `(require 'observer)`; file
+  `std/observer.blsp`, `tests/observer_test.blsp`, embed key, `nest observe`
+  bootstrap, the Rust integration test. The `observe-*` functions and the `nest
+  observe` *command* keep their names.
+- **Multiple windows.** winit allows one event loop per process, so the GUI thread
+  now multiplexes a *registry* of windows. `gui-enter/leave` → `gui-open` (returns
+  an integer window id) / `gui-close id`; `gui-size/draw/poll` take an id.
+  `*gui-display*` → a `(gui-display)` constructor (opens a window, closes the
+  `gui-*` over its id). `(observe)` `spawn`s a process per window and returns its
+  pid, so calling it again opens an independent window (titled `brood observer #N`).
+  Trade-off: a spawned observer pins a worker while blocked in `gui-poll` — fine for
+  a handful (≈`nproc` workers), noted in ADR-056.
+- Docs: ADR-056 updated (multi-window + spawn + worker-pinning), `gui.rs` threading
+  notes, `gui-*` primitive docstrings (now take an id).
+
+**Result.** Both build configs green; `observer_test.blsp` **41/41**; smoke-tested
+**two windows open at once** (independent frames, sizes, close) + `(observe)`
+returns a pid (non-blocking). The `configure`/`make install --with-gui` flow ships
+the window backend.
+
+---
+
+## 2026-05-29 — GC observability + the entry-depth memory leak (the "user must not care" fix)
+
+**Context.** Continuing the Stage-B GC work (ADR-055). Two things this session:
+Tier-1 GC observability, and chasing down why the Game-of-Life app (and any
+`nest run` loop) still leaked despite Stage B being "done".
+
+**Built — GC observability (Tier-1, `docs/memory-review.md` §7).**
+- Per-process heap counters (`gc_runs`/`gc_copied`/`gc_reclaimed`), bumped in
+  `arena_flip` so they count *both* the automatic Stage-B safepoint collections
+  and `(hibernate)` flushes. Exposed via a new builtin **`(gc-stats)`** →
+  `{:collections :copied :reclaimed :live :live-bytes :threshold}`, reporting the
+  *calling* process's own heap.
+- Published per-process too: `process-info` now carries **`:collections`**
+  (republished on each `receive`, alongside `:memory`), and the `observe` TUI
+  shows `· gc N` in the detail line. New `process_gc_runs` accessor on the
+  mailbox registry.
+- Tests: `gc.rs::gc_stats_counts_automatic_collections` (drives a real collection
+  and asserts the counters move + reclaimed > copied); an in-language `gc-stats`
+  block in `introspection_test.blsp`; a `:collections` assertion in
+  `observe_test.blsp`.
+
+**Found — the real leak was entry depth, not allocation.** Stage B fires only at
+`gc_block_depth() == 1`. `nest run <file>` evaluated the program via the
+`(load "path")` builtin, which re-enters `eval` for each form while the `(load …)`
+frame is still live — so the whole program ran at depth ≥ 2 and the safepoint
+*never fired*. A tail loop there climbed ~100 MB/s (measured: a life-style loop hit
+0 collections / 1.16 GB). `brood <file>` never leaked: its `eval_source` form loop
+runs each top-level form at depth 1. So *how you launched the app* silently decided
+whether it leaked — which violates "the user of Brood must not care about this".
+
+**Fix.** `nest run <file>` (the plain, non-`--watch`/`--for` path) now evaluates the
+entry through `eval_source` at depth 1, exactly like `brood <file>`, instead of
+`(load …)`. Same loop, after the fix: **166 collections / ~5 MB, flat.** No
+`(hibernate)` needed in render loops anymore. Considered (and rejected as unsafe)
+resetting `GC_BLOCK` inside `load`: the `(load …)` eval frame itself holds unrooted
+`expr`/`call_form` Rust locals a moving collection would invalidate — the depth-1
+gate is a real invariant, not arbitrary.
+
+**Repositioned, not removed.** `(hibernate)` stays a primitive (user's call) but its
+docstring now says it's rarely needed; it's the escape hatch for the remaining
+depth-≥2 cases — `nest run --watch`/`--for` (program runs inside a wrapper spawn that
+`(load …)`s) and project `:main` (a Brood dispatcher calls the entry fn). The full
+fix for those is the deferred operand-stack VM (collect at any depth).
+
+**Result.** `nest` unit tests 35/35; `gc.rs` green; `observe_test`/`introspection_test`
+green; a scaffolded project runs both `:main` and a file cleanly. `nest run` of a
+life-style loop is now flat without author intervention.
+
+## 2026-05-29 — Package manager, Slice 0: manifest `:dependencies` + the `project` macro (ADR-037)
+
+**Context.** Starting the package manager (the last big M1 language item). The
+design (`docs/packages.md`, ADR-037) was already complete; we're landing it in
+vertical slices so each is testable on its own. Slice 0 is manifest plumbing —
+no fetching, no new Rust.
+
+**Done (`std/project.blsp`).**
+- `(def *project-dependencies* nil)` holds the parsed dep list.
+- A dependency parser — `project--parse-deps` → `project--parse-dep` →
+  `project--parse-git-dep` / `project--parse-path-dep` — normalises each
+  `[name :git URL :ref REF]` / `[name :path PATH]` entry into a map
+  `{:name :kind :url/:path :ref}`. Validates name-is-symbol, kind ∈ `:git`/`:path`,
+  a `:git` dep's `:ref` is a string, and **rejects the reserved opts
+  `:branch`/`:dir`/`:features`** so the manifest shape stays forward-compatible.
+- **`(project …)` is now a quoting macro** over a new `project--apply` fn: it
+  expands to `(project--apply '(…opts…))`, treating manifest arguments as literal
+  data. So dep names and the `:main` pair are written as **bare symbols** — vectors
+  evaluate their elements, so without this `[parser :git …]` would try to *resolve*
+  `parser`. Manifests are pure static data; nothing in one is ever evaluated. The
+  repo's own + scaffolded manifests (string-only values) are unaffected.
+
+**Refinements banked for later slices** (folded into `packages.md` + ADR-037):
+the single hash primitive is `%sha256` over a *string* (tree-walk is Brood, not a
+`%sha256-file` directory primitive); `:path` deps load *in place* (no `_deps/` copy);
+`%git-clone` clones the ref then checks out the pinned commit (a bare
+`--branch <sha>` can't clone a commit SHA, which the lock always stores).
+
+**Result.** `tests/project_test.blsp` 22/22 (11 new — every normalise + reject path,
+plus an `:isolated` test driving the `project` macro so bare symbols round-trip
+without quoting); full suite **784/784** green.
+
+**Next.** Slice 1 — `:path` deps end-to-end in a new `std/package.blsp`: the
+`%sha256` primitive, Brood tree-hashing, `project.lock.blsp` read/write, `:path`
+resolution, and the `(ensure-deps)` load-path step wired into `project-setup`.
+No git, no network — fully testable in CI.
+
+---
+
+## 2026-05-29 — Evaluator-dispatch campaign: Steps 0 + 1
+
+**Why.** Resuming the "make `(sort …)` faster" thread. Re-measuring the sort
+benchmark on the post-ADR-055 GC build overturned its premise: the ~700× gap vs
+Rust `%sort-asc` is **not** comparisons (~9%, multi-arity already fixed that),
+nor allocation (~140 ns/cons), nor GC (never fires below the 64K `gc_floor`; the
+10k sort's peak live is ~40k). It's **evaluator dispatch** — a bare tail loop
+with no allocation costs ~400 ns/iter, dominated by env-chain lookups. Full
+diagnosis and the staged plan are in
+[handoff-eval-dispatch.md](handoff-eval-dispatch.md). User's call: keep the Rust
+sort fast-path, stop the sort-specific work, and attack dispatch generally.
+
+**Step 0 — lock the baseline.** Added three eval benches
+(`crates/lisp/benches/eval.rs`): `cons_build` (global-lookup + alloc heavy),
+`sort_brood` (the end-to-end `(sort < …)` workload, comparator path), alongside
+the existing `sum_tail`/`fib`. Baseline (this machine, current build):
+`sum_tail` 100k = 56 ms · `cons_build` 10k/100k = 12.4/150 ms · `sort_brood`
+1k/5k = 77/451 ms · `fib` 25 = 153 ms.
+
+**Step 1 — integer special-form dispatch.** Replaced the per-combination
+`special_name(s) -> &'static str` + string `match` in `eval` with a closed
+`enum SpecialForm` returned by the same fast integer-hashed `SPECIAL_IDS` map,
+matched as a dense jump table (`crates/lisp/src/eval/mod.rs`). `fn`/`lambda` and
+`let`/`let*` collapse to one variant each. Cleaner, and the scaffold for the
+later body-pre-tagging step.
+
+**Honest result.** The if-heavy bare loop is **406 ns/iter vs 404 ns before —
+within noise.** Step 1's direct payoff is negligible because per-combination
+cost is dominated by env-chain *lookups*, not special-form *classification* —
+which confirms the plan's claim that **Step 2 (lexical addressing → O(1) lookup)
+is where the win is.** Full suite green (784/784 in-language + all Rust tests);
+no behaviour change.
+
+**Next.** Step 2 — a resolution pass (extend `macroexpand_all`) rewriting
+variable refs to lexical `(depth, index)` addresses and globals to stable
+indirection slots (preserving hot-reload late binding). ADR-worthy; measure
+against the Step-0 baseline above.
+
+---
+
+## 2026-05-29 — Package manager, Slice 1: `:path` deps end-to-end (ADR-037)
+
+**Context.** Second slice of the package manager. Slice 0 landed manifest
+`:dependencies` parsing; this makes a *local/sibling* dependency actually
+resolve, lock, and become `require`-able — the whole spine (resolve → hash →
+lock → load-path → require, transitively) with **no git and no network**, so
+it's fully testable in CI before the git slice adds the flaky parts.
+
+**Done.**
+- **One new Rust primitive — `(%sha256 s)`** (`builtins.rs`): lowercase hex
+  SHA-256 of a string's bytes, over the `sha2` crate already in the tree (the
+  dist handshake uses it). The *only* hashing mechanism; per-file and
+  directory-tree hashing are Brood over it (ADR-006), not a directory-walking
+  primitive.
+- **`std/package.blsp`** (new, `(require 'package)`): the canonical directory
+  tree-hash (`package-tree-hash` — sorted rel-paths, `"<rel>\0<filehash>\n"`,
+  skipping `_deps/`/`.git/`); reading a dep's own manifest without `load`
+  (`read-string` the first form, reuse `project--parse-deps`); transitive
+  depth-first resolution with conflict detection (`resolve-deps`); the
+  `project.lock.blsp` round-trip (`write-lockfile`/`read-lockfile`, content-
+  compared so a plain `nest test`/`run` never churns the file); `ensure-deps`
+  returning the source dirs for `*load-path*`; and the `(fetch)` verb.
+- **`:path` deps load *in place*** — no `_deps/` copy; the dep's `src/` is
+  appended to `*load-path*` (after the project's own sources, so the project
+  wins a name clash). Wired into `project-setup` via
+  `project--ensure-deps-on-path`, which lazily `(require 'package)`s only when
+  the manifest actually declared deps. `:git` deps error with a clear
+  "Slice 2" message.
+- Embedded `package` in `EMBEDDED_MODULES`.
+
+**Result.** `tests/package_test.blsp` 15/15 (tree-hash determinism + content-
+sensitivity + `_deps/` skip; manifest reading; single + transitive resolution;
+missing-dep and `:git` errors; lock round-trip; `ensure-deps`; and an
+`:isolated` end-to-end `require` of a path dep). Hand check: a two-project
+fixture where `app` depends on `greeter` via `:path` runs `Hello, packages!`
+under `nest run` and writes a clean one-line lock file. Full suite **799/799**.
+
+**Slice-1 simplifications (noted in `packages.md`).** Lock `:deps` stores subdep
+*names* (full sub-entries land with `nest tree`); a dep's source dir is assumed
+`<dep>/src`; `resolved-path` is left un-normalised (the OS resolves `..`).
+
+**Scaffolding caught up too.** `nest new` now writes a `.gitignore`
+(`project--gitignore-template`) ignoring `_deps/` — the cache is regenerable from
+`project.lock.blsp`, which IS committed — and the manifest template documents how
+to add a `:dependencies` vector (bare-symbol names). This repo's own `.gitignore`
+gained `_deps/`. `tests/project_test.blsp` +2 (gitignore + manifest template;
+24/24). Verified by scaffolding a fresh project and running it (`hello scaffold`),
+confirming the manifest still parses with the trailing doc comments. Full suite
+**801/801**.
+
+**Next.** Slice 2 — `:git` deps: `%git-resolve-ref` (ls-remote) + `%git-clone`
+(clone the ref, then check out the pinned commit — a bare `--branch <sha>` can't
+clone a commit SHA), the `_deps/<name>/` cache + `.brood-pkg.blsp` freshness
+check.

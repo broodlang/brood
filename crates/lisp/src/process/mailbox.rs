@@ -15,7 +15,7 @@
 //!   via its coroutine yielder; the root thread blocks on the condvar.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -54,6 +54,11 @@ pub(super) struct Mailbox {
     /// `process-info`'s `:memory`; bump-allocated, so it reflects allocation since
     /// the last arena reset / `hibernate`, not a tracing-GC live set.
     pub(super) mem: AtomicUsize,
+    /// The owning process's cumulative GC-collection count (`Heap::gc_counters().0`),
+    /// republished alongside `mem` on each `receive`. Lets the observer flag a
+    /// process that's churning memory (many collections) vs. a quiet one. Backs
+    /// `process-info`'s `:collections`.
+    pub(super) gc_runs: AtomicU64,
 }
 
 pub(super) struct MailboxState {
@@ -81,6 +86,7 @@ impl Mailbox {
             // spawned green is set RUNNABLE by `enqueue` immediately after.
             status: AtomicU8::new(ST_RUNNING),
             mem: AtomicUsize::new(0),
+            gc_runs: AtomicU64::new(0),
         })
     }
 }
@@ -187,6 +193,9 @@ pub fn receive_match(
     // Republish this process's LOCAL footprint and mark it running (the root never
     // goes through `run_one`, so this is where its status flips back from waiting).
     ctx.mailbox.mem.store(heap.local_bytes(), Ordering::Relaxed);
+    ctx.mailbox
+        .gc_runs
+        .store(heap.gc_counters().0, Ordering::Relaxed);
     set_self_status(&ctx, ST_RUNNING);
     let mut i = 0usize;
     loop {
@@ -346,6 +355,16 @@ pub fn process_status(pid: u64) -> Option<&'static str> {
 pub fn process_mem(pid: u64) -> Option<usize> {
     let mailbox = crate::core::sync::lock(&REGISTRY).get(&pid).cloned()?;
     Some(mailbox.mem.load(Ordering::Relaxed))
+}
+
+/// The cumulative GC-collection count of live local process `pid`, or `None` if
+/// the pid is dead/unknown. Republished by the process each time it enters
+/// `receive` (so an idle actor's figure is its count as of its last receive);
+/// a process that never `receive`s reports `0`. Backs `process-info`'s
+/// `:collections`.
+pub fn process_gc_runs(pid: u64) -> Option<u64> {
+    let mailbox = crate::core::sync::lock(&REGISTRY).get(&pid).cloned()?;
+    Some(mailbox.gc_runs.load(Ordering::Relaxed))
 }
 
 /// Set the run-status of the *current* process (used by `receive_match` for the

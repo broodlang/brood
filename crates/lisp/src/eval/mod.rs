@@ -20,38 +20,55 @@ pub fn truthy(v: Value) -> bool {
     !matches!(v, Value::Nil | Value::Bool(false))
 }
 
-/// The special-form keywords, mapped to their canonical `&'static str`. The
-/// evaluator dispatches on the head symbol's interned id (a `u32`) via this
-/// table, then matches the returned name — so the hot path (every combination)
-/// avoids `symbol_name`'s global-interner lock and `String` allocation. A symbol
-/// that isn't a special form returns `""`, which falls through to macro/function
-/// application.
-const SPECIAL_NAMES: &[&str] = &[
-    "quote",
-    "if",
-    "do",
-    "def",
-    "fn",
-    "lambda",
-    "quasiquote",
-    "defmacro",
-    "let",
-    "let*",
-    "letrec",
+/// The evaluator's special forms, as a closed enum. The hot path (every
+/// combination) dispatches on the head symbol's interned id (a `u32`) to one of
+/// these — or `None` for an ordinary call — then `match`es the *enum* (a jump on
+/// a small discriminant). Previously this returned a `&'static str` and the
+/// caller matched on the string; the enum drops those per-form string compares
+/// and gives the compiler a dense jump table. (It still avoids `symbol_name`'s
+/// global-interner lock and `String` allocation, as before.)
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SpecialForm {
+    Quote,
+    If,
+    Do,
+    Def,
+    Fn, // `fn` and `lambda` — surface synonyms, identical semantics
+    Quasiquote,
+    Defmacro,
+    Let, // `let` and `let*` — surface synonyms here (sequential binding)
+    Letrec,
+}
+
+/// Spelling → form. `fn`/`lambda` and `let`/`let*` collapse to one variant each.
+/// This is deliberately the evaluator-*core* subset; `builtins.rs::SPECIAL_FORMS`
+/// is the broader, LSP-facing list (it also names the macro keywords).
+const SPECIAL_SPELLINGS: &[(&str, SpecialForm)] = &[
+    ("quote", SpecialForm::Quote),
+    ("if", SpecialForm::If),
+    ("do", SpecialForm::Do),
+    ("def", SpecialForm::Def),
+    ("fn", SpecialForm::Fn),
+    ("lambda", SpecialForm::Fn),
+    ("quasiquote", SpecialForm::Quasiquote),
+    ("defmacro", SpecialForm::Defmacro),
+    ("let", SpecialForm::Let),
+    ("let*", SpecialForm::Let),
+    ("letrec", SpecialForm::Letrec),
 ];
 
-// Keyed by interned symbol id — use the fast integer hasher, since `special_name`
+// Keyed by interned symbol id — use the fast integer hasher, since `special_form`
 // hits this on every combination (the default SipHash-on-a-`u32` is overhead).
-static SPECIAL_IDS: LazyLock<SymbolMap<&'static str>> = LazyLock::new(|| {
-    SPECIAL_NAMES
+static SPECIAL_IDS: LazyLock<SymbolMap<SpecialForm>> = LazyLock::new(|| {
+    SPECIAL_SPELLINGS
         .iter()
-        .map(|&n| (value::intern(n), n))
+        .map(|&(n, f)| (value::intern(n), f))
         .collect()
 });
 
 #[inline]
-fn special_name(s: Symbol) -> &'static str {
-    SPECIAL_IDS.get(&s).copied().unwrap_or("")
+fn special_form(s: Symbol) -> Option<SpecialForm> {
+    SPECIAL_IDS.get(&s).copied()
 }
 
 pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
@@ -195,8 +212,8 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
 
         // --- special forms ---
         if let Value::Sym(s) = head {
-            match special_name(s) {
-                "quote" => {
+            match special_form(s) {
+                Some(SpecialForm::Quote) => {
                     // `(quote x)` returns x literally — but only x; reject
                     // `(quote a b)` rather than silently dropping the tail.
                     let (form, r) = uncons(heap, rest);
@@ -206,7 +223,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     }
                     return Ok(form);
                 }
-                "if" => {
+                Some(SpecialForm::If) => {
                     // (if test then else?) — read the operands straight off the
                     // cons spine; a missing branch defaults to nil (as nth did),
                     // so no intermediate Vec is allocated per conditional.
@@ -218,14 +235,14 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     expr = if truthy(test) { then_form } else { else_form };
                     continue 'tail;
                 }
-                "do" => match tail_of_cons(heap, rest, env)? {
+                Some(SpecialForm::Do) => match tail_of_cons(heap, rest, env)? {
                     Some(last) => {
                         expr = last;
                         continue 'tail;
                     }
                     None => return Ok(Value::Nil),
                 },
-                "def" => {
+                Some(SpecialForm::Def) => {
                     let args = heap.list_to_vec(rest)?;
                     let name = as_symbol(
                         args.first()
@@ -263,7 +280,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     heap.env_define(root, name, val);
                     return Ok(Value::Sym(name));
                 }
-                "fn" | "lambda" => {
+                Some(SpecialForm::Fn) => {
                     // Fallback: a multi-clause / pattern-parameter `fn` normally
                     // lowers to `match*` in the compile pass, but can reach eval
                     // unlowered (built by a quasiquote, or a macro expanded lazily
@@ -276,7 +293,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     }
                     return make_closure(heap, None, rest, env);
                 }
-                "quasiquote" => {
+                Some(SpecialForm::Quasiquote) => {
                     let args = heap.list_to_vec(rest)?;
                     let template = args.into_iter().next().unwrap_or(Value::Nil);
                     // Inner unquote evals tag their own positions; this
@@ -286,7 +303,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     return crate::eval::macros::quasiquote(heap, template, env)
                         .map_err(|e| e.or_form_pos(heap, expr));
                 }
-                "defmacro" => {
+                Some(SpecialForm::Defmacro) => {
                     let parts = heap.list_to_vec(rest)?;
                     let name = as_symbol(
                         parts
@@ -316,7 +333,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     heap.env_define(root, name, macro_val);
                     return Ok(Value::Sym(name));
                 }
-                "let" | "let*" => {
+                Some(SpecialForm::Let) => {
                     let (binds_form, body) = uncons(heap, rest);
                     if !matches!(rest, Value::Pair(_)) {
                         return Err(LispError::runtime("let: missing bindings"));
@@ -354,7 +371,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                         None => return Ok(Value::Nil),
                     }
                 }
-                "letrec" => {
+                Some(SpecialForm::Letrec) => {
                     // Mutual local recursion: every binding's name is visible in
                     // every binding's RHS (and to itself). The frame is a
                     // last-write-wins association vector (`env_define` pushes,
@@ -414,7 +431,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                         None => return Ok(Value::Nil),
                     }
                 }
-                _ => {}
+                None => {}
             }
         }
 

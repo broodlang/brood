@@ -164,15 +164,21 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   `nest format` (and `--check`) reformats every project `.blsp` in place, driven
   by an in-Brood CST walker (`std/format.blsp`) over a `parse-source` primitive.
   ADR-020/028.
-- ⬜ **Package manager** (ADR-037, [`packages.md`](packages.md)) — third-party
+- 🟡 **Package manager** (ADR-037, [`packages.md`](packages.md)) — third-party
   Brood deps. Git-deps + project-local `_deps/` cache + `project.lock.blsp` for
   reproducibility; no registry, no semver solver, no install scripts. Policy in
   Brood (`std/package.blsp`); the only new Rust is `%git-clone` / `%git-resolve-ref`
-  / `%sha256-file` / `%http-get` (the last lands now for future tarball deps,
+  / `%sha256` / `%http-get` (the last lands now for future tarball deps,
   used later). `nest fetch`/`update`/`add`/`remove`/`tree`; existing `nest`
   subcommands auto-fetch missing deps. Designed early — before M2 — because the
   cache layout + manifest extension + auto-fetch behaviour cross-cut project
   management and the upcoming editor plugin story (ADR-006/011/019/020/028).
+  Landing in vertical slices: ✅ **Slice 0** (2026-05-29) — manifest
+  `:dependencies` parsing + `(project …)` as a quoting macro (bare-symbol dep
+  names); ✅ **Slice 1** (2026-05-29) — `:path` deps end-to-end (`%sha256` +
+  Brood tree-hashing, transitive resolution, `project.lock.blsp` I/O,
+  `ensure-deps` on `*load-path*`; `std/package.blsp`); ⬜ **Slice 2** — `:git`
+  deps; ⬜ **Slice 3** — the verbs + auto-fetch.
 - 🟡 **Editor tooling & documentation** — source-position errors (GNU
   `FILE:LINE:COL:`) + structured test output (`docs/tooling.md`); a lossless,
   span-carrying CST and the introspection primitives `doc`/`arglist`/
@@ -303,7 +309,7 @@ The seam that makes remoteability free later (see architecture.md).
   thin interpreter of the frame vector. A GPU-window frontend is a later additive
   path speaking the same protocol.
 - 🟡 **First app on the seam: `nest observe` (done).** An Erlang-observer-style
-  process viewer (`std/observe.blsp`) — proves the render protocol + key loop
+  process viewer (`std/observer.blsp`) — proves the render protocol + key loop
   end-to-end with **no rope/buffer**. A node-stats panel (node name, workers/peak,
   spawn count, memory used/peak, peers) over a navigable process **table** — id ·
   name · status · mailbox · memory · monitors — from `(process-info pid)` (ADR-051,

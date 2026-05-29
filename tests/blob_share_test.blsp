@@ -45,21 +45,27 @@
 ;; answer nil for it. Used by the RUNTIME-region assertion below.
 (def bs-big-runtime-string (string-repeat "u" 300))
 
-;; After re-entry from hibernate, report identity to parent (second leg).
-;; `big` must arrive in the worker's LOCAL via send (not spawn-capture), since
-;; spawn promotes captured locals through `Heap::promote`, which copies strings
-;; into RUNTIME (`boxcar::Vec<String>`) — not the per-runtime blob heap. With
-;; send/receive the string travels as Message::StrShared and lands as
-;; LocalString::Shared in the worker's LOCAL — exactly the case the flush
-;; preserves.
-(defn bs-hib-check (big parent)
-  (send parent [:after (%blob-ptr big)]))
+;; Allocate past the GC floor so Stage B's automatic copying collection fires at
+;; the safepoint (this spin is the worker's depth-1 tail loop), flipping the LOCAL
+;; arena while `big` survives as a rooted loop argument. Then report identity
+;; (second leg). `big` must arrive in the worker's LOCAL via send (not spawn-
+;; capture), since spawn promotes captured locals through `Heap::promote`, which
+;; copies strings into RUNTIME (`boxcar::Vec<String>`) — not the per-runtime blob
+;; heap. With send/receive the string travels as Message::StrShared and lands as
+;; LocalString::Shared in the worker's LOCAL — exactly the case the collection
+;; copy preserves.
+(defn bs-hib-spin (big parent n)
+  (if (= n 0)
+    (send parent [:after (%blob-ptr big)])
+    (do (cons n nil)                       ; per-iteration garbage
+        (bs-hib-spin big parent (- n 1)))))
 
 (defn bs-hib-worker (parent)
   (receive (big
     (do
       (send parent [:before (%blob-ptr big)])
-      (hibernate bs-hib-check big parent)))))
+      ;; > GC floor (65536 live), so a collection definitely flips the arena.
+      (bs-hib-spin big parent 70000)))))
 
 (describe "shared blob heap (ADR-041)"
   :isolated
@@ -110,15 +116,15 @@
         ;; No other process holds it yet — the count is 1.
         (assert= 1 (%blob-strong-count big)))))
 
-  (test "hibernate flush preserves SharedBlob identity for a surviving big string"
+  (test "a GC arena flip preserves SharedBlob identity for a surviving big string"
     (when (bound? '%blob-ptr)
       (let (big (string-repeat "h" 400)
             me (self)
             w (spawn (bs-hib-worker me)))
         ;; Worker receives `big` via send (lands as LOCAL Shared in worker),
-        ;; reports its blob-ptr both before and after a hibernate flush. The
-        ;; two ptrs must be equal — flush_string clones the Arc, preserving
-        ;; the underlying SharedBlob's address.
+        ;; reports its blob-ptr both before and after Stage B's automatic
+        ;; collection flips the arena. The two ptrs must be equal — flush_string
+        ;; clones the Arc, preserving the underlying SharedBlob's address.
         (send w big)
         (let (before (receive ([:before p] p))
               after  (receive ([:after  p] p)))

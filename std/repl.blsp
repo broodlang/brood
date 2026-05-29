@@ -8,13 +8,12 @@
 ;;    it can be redefined at runtime like everything else (the project's reason
 ;;    for existing). Replaces the old Rust `crates/repl`.
 ;;  - No mutation, no loop construct: `repl--loop` is tail-recursive, so it runs
-;;    forever in O(1) stack. Memory is bounded by recurring through
-;;    `(hibernate repl--loop tty)`: each command flips the process's LOCAL arena,
-;;    keeping only the loop fn + `tty` and discarding that command's transients.
-;;    `hibernate` is caught by the *spawned-process* scheduler loop, not the root
-;;    eval — so `repl-run` runs the loop in a spawned process and `monitor`s it to
-;;    await EOF. (The ADR-035 tracing GC is currently a no-op, so this arena flip,
-;;    not the GC, is what reclaims a long session's allocations — see ADR-048.)
+;;    forever in O(1) stack. Memory is bounded by **Stage B's automatic copying
+;;    GC** (ADR-055): the loop is a depth-1 spawned-process body, so each command's
+;;    transients are reclaimed at the eval safepoint between iterations, keeping
+;;    only the loop fn + its args live. `repl-run` runs the loop in a spawned
+;;    process and `monitor`s it to await EOF. (Pre-ADR-055 this used an explicit
+;;    `(hibernate)` arena flip; automatic GC made that redundant — see ADR-048.)
 ;;  - Multi-line input is driven by the reader, not a hand-rolled scanner: an
 ;;    unclosed form or string makes `eval-string` raise the INCOMPLETE_INPUT
 ;;    error (code "E0002", ADR-049), the signal to read another line. Because
@@ -206,15 +205,15 @@ incomplete. Ctrl-C drops the in-progress form and re-prompts. Returns a map
                     {:eof false :history h2}))))))))
 
 (defn repl--loop (interactive history)
-  "Read-eval one form (skipping blank / comment-only input), then `hibernate` into
-the next iteration — flipping the LOCAL arena so the command's transients are
-reclaimed (keeping only this fn, `interactive`, and `history`). Returns (and the
-process exits) at end of input. Runs in the process `repl-run` spawns, where
-`hibernate` is caught."
+  "Read-eval one form (skipping blank / comment-only input), then tail-recurse into
+the next iteration. Each command's transients are reclaimed by Stage B's automatic
+GC at the safepoint between iterations (this loop is a depth-1 spawned-process
+body); `interactive` and `history` stay live as rooted tail-call arguments.
+Returns (and the process exits) at end of input."
   (let (r (repl--read-eval interactive "" history))
     (if (get r :eof)
       (when (stdout-tty?) (print "\n"))
-      (hibernate repl--loop interactive (get r :history)))))
+      (repl--loop interactive (get r :history)))))
 
 (defn repl--await (p)
   "Block the current process until process `p` exits."
@@ -225,9 +224,9 @@ process exits) at end of input. Runs in the process `repl-run` spawns, where
   "Run the read-eval-print loop on stdin until end of input (Ctrl-D). When stdin and
 stdout are both a TTY it edits interactively (`std/lineedit.blsp`) with the banner +
 prompts; redirected stdin keeps the plain `read-line` path (prompt echoed only when
-stdout is a TTY). The loop runs in a spawned process — so `hibernate` can flip its
-arena between commands — and this call blocks (parked in `receive`) until that
-process reaches end of input. Returns nil."
+stdout is a TTY). The loop runs in a spawned process — so Stage B's automatic GC
+reclaims each command's transients at the safepoint — and this call blocks (parked
+in `receive`) until that process reaches end of input. Returns nil."
   (let (interactive (and (stdin-tty?) (stdout-tty?))
         history (if interactive (repl--load-history) '()))
     (when (stdout-tty?) (eprint (str *repl-banner* "\n")))

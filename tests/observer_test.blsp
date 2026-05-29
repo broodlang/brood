@@ -9,7 +9,7 @@
 ;; the kernel introspection works under the scheduler.
 
 (require 'test)
-(require 'observe)        ; pulls in display too
+(require 'observer)        ; pulls in display too
 
 (describe "display render-op constructors"
   (test "clear / text / cursor build tagged op vectors"
@@ -116,6 +116,49 @@
 (defn pinfo (id name status mbox mon)
   {:id id :node :nonode :name name :status status :mailbox mbox :monitored-by mon})
 
+(describe "observer mouse input"
+  (test "observe--mouse? recognises a mouse event, not a key"
+    (is (observe--mouse? [:mouse :press :left 3 0]))
+    (is (not (observe--mouse? "a")))
+    (is (not (observe--mouse? :up)))
+    (is (not (observe--mouse? nil))))
+  (test "observe--mouse-row->sel maps a body row to a process index, else nil"
+    ;; body rows start at 3; cap=10, n=5, sel=2 → window starts at 0
+    (assert= (observe--mouse-row->sel 3 2 10 5) 0)     ; first body row
+    (assert= (observe--mouse-row->sel 7 2 10 5) 4)     ; fifth (last) process
+    (assert= (observe--mouse-row->sel 2 2 10 5) nil)   ; the header row above the list
+    (assert= (observe--mouse-row->sel 8 2 10 5) nil)   ; below the 5 processes
+    (assert= (observe--mouse-row->sel 99 2 10 5) nil)) ; off screen entirely
+  (test "observe--mouse-row->sel accounts for a scrolled window"
+    ;; n=20, cap=5, sel=10 → window-start = 8, so the top body row is index 8
+    (assert= (observe--window-start 10 5 20) 8)
+    (assert= (observe--mouse-row->sel 3 10 5 20) 8)
+    (assert= (observe--mouse-row->sel 7 10 5 20) 12))
+  (test "observe--apply-mouse: left-press selects the clicked row + clears :msg"
+    (let (st {:procs [(pinfo 10 :a :running 0 0) (pinfo 11 :b :running 0 0) (pinfo 12 :c :running 0 0)]
+              :n 3 :sel 0 :sel-id 10 :msg "old"}
+          clicked (observe--apply-mouse st [:mouse :press :left 5 0] 10))   ; row 5 → index 2
+      (assert= (get clicked :sel-id) 12)
+      (assert= (get clicked :msg) nil)))
+  (test "observe--apply-mouse: the wheel scrolls the selection one row, clamped"
+    (let (st {:procs [(pinfo 10 :a :running 0 0) (pinfo 11 :b :running 0 0) (pinfo 12 :c :running 0 0)]
+              :n 3 :sel 1 :sel-id 11})
+      (assert= (get (observe--apply-mouse st [:mouse :scroll-up nil 0 0] 10) :sel-id) 10)
+      (assert= (get (observe--apply-mouse st [:mouse :scroll-down nil 0 0] 10) :sel-id) 12)
+      ;; clamps at the ends
+      (assert= (get (observe--apply-mouse (assoc st :sel 0 :sel-id 10) [:mouse :scroll-up nil 0 0] 10) :sel-id) 10)
+      (assert= (get (observe--apply-mouse (assoc st :sel 2 :sel-id 12) [:mouse :scroll-down nil 0 0] 10) :sel-id) 12)))
+  (test "observe--apply-mouse: anything but left-click / wheel is a no-op (state kept)"
+    ;; right/middle clicks and a left-click off the list do nothing; so do actions
+    ;; the frontends don't emit today (:move/:drag) — robustness to a future one.
+    (let (st {:procs [(pinfo 10 :a :running 0 0) (pinfo 11 :b :running 0 0)]
+              :n 2 :sel 0 :sel-id 10 :msg "keep"})
+      (assert= (observe--apply-mouse st [:mouse :press :right 5 0] 10) st)
+      (assert= (observe--apply-mouse st [:mouse :press :middle 5 0] 10) st)
+      (assert= (observe--apply-mouse st [:mouse :press :left 99 0] 10) st)
+      (assert= (observe--apply-mouse st [:mouse :move nil 5 5] 10) st)
+      (assert= (observe--apply-mouse st [:mouse :drag :left 5 5] 10) st))))
+
 (describe "observe-frame (the pure render core)"
   (test "node panel + header + a row per process + detail + footer"
     (let (procs [(pinfo 1 :main :running 0 0) (pinfo 2 nil :waiting 3 1)]
@@ -219,7 +262,11 @@
         (is (number? (get info :id)))
         ;; :memory is published on receive — the parked worker reports its footprint
         (is (number? (get info :memory)))
-        (is (> (get info :memory) 0)))))
+        (is (> (get info :memory) 0))
+        ;; :collections is published on receive too — a fresh worker has run no
+        ;; collections yet, but the key is present and non-negative.
+        (is (number? (get info :collections)))
+        (is (>= (get info :collections) 0)))))
 
   (test "monitoring a process shows up in :monitored-by"
     (let (m (spawn (receive (_ :done))))

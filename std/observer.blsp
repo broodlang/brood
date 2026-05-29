@@ -1,4 +1,4 @@
-;; std/observe.blsp — an interactive process observer TUI. (require 'observe).
+;; std/observer.blsp — an interactive process observer. (require 'observer).
 ;;
 ;; Design notes (the *why*; the *what* is in the docstrings below):
 ;;  - The first real app on the M3 display/input seam (ADR-046): an
@@ -37,14 +37,16 @@
 ;;                             (remote attach, `nest observe --connect`). Same
 ;;                             loop, a remote source.
 
-(defmodule observe
-  "An interactive process observer — a full-screen TUI showing this runtime's node
-stats and a navigable table of live processes (id, name, status, mailbox backlog,
-memory, monitors), built on the display seam (M3, ADR-046) over `process-info`.
+(defmodule observer
+  "An interactive process observer — showing this runtime's node stats and a
+navigable table of live processes (id, name, status, mailbox backlog, memory,
+monitors), built on the display seam (M3, ADR-046) over `process-info`. Renders to
+a GUI window (`(observe)`) or the terminal (`(observe-attach *term-display*)`).
 
-    (require 'observe)
-    (observe-run)      ; standalone demo app (nest observe)
-    (observe-attach)   ; observe THIS runtime — call it from a running program
+    (require 'observer)
+    (observe)          ; open the observer in a native window (needs --features gui)
+    (observe-run)      ; standalone terminal demo app (nest observe)
+    (observe-attach)   ; observe THIS runtime in the terminal, inline
 
 Keys: ↑/↓ select · s sort · space pause · r refresh · q quit. `observe-frame` is
 the pure core (node + process data → a render frame); `observe--loop` is the IO
@@ -109,6 +111,7 @@ attach). Drive the standalone app from the shell with `nest observe`.")
        " · " (let (s (get p :status)) (if (nil? s) "?" (name s)))
        " · mailbox " (get p :mailbox)
        (let (m (get p :memory)) (if (nil? m) "" (str " · mem " (observe--bytes->human m))))
+       (let (gc (get p :collections)) (if (or (nil? gc) (= gc 0)) "" (str " · gc " gc)))
        (let (pa (get p :parent)) (if (nil? pa) "" (str " · parent " pa)))
        " · monitored-by " (get p :monitored-by)
        (if (> nprocs cap) (str "   [" (inc sel) "/" nprocs "]") "")))
@@ -304,6 +307,50 @@ runtime (locally inline, or on the peer when remote-attached); Ctrl-C cancels."
    ":" 'observe-cmd-command "e" 'observe-cmd-command
    "q" 'observe-cmd-quit :escape 'observe-cmd-quit :ctrl-c 'observe-cmd-quit})
 
+;; ---- mouse (a second input path: click to select, wheel to scroll) ----------
+;;
+;; A frontend may also yield a mouse event `[:mouse action button row col]`
+;; (terminal + GUI both do, via `term-poll`/`gui-poll`, with the same minimal
+;; vocabulary: `:press` / `:scroll-up` / `:scroll-down`). The observer acts on
+;; two — left-press selects the clicked process row, the wheel scrolls the
+;; selection — and ignores anything else (a right/middle click, or any action a
+;; future frontend adds). `observe--loop` routes mouse events here before
+;; key/command dispatch, since a mouse value is never a keymap key. All pure, so
+;; the mapping is unit-testable without a window.
+
+(defn observe--mouse? (k)
+  "True if input `k` is a mouse event `[:mouse action button row col]`, not a key."
+  (and (vector? k) (= (first k) :mouse)))
+
+(defn observe--mouse-row->sel (row sel cap n)
+  "The process index a click on frame `row` selects, or nil if `row` isn't on a
+process line. The body occupies frame rows 3..(3+`cap`) over a window starting at
+`(observe--window-start sel cap n)` — matching `observe-frame`'s layout."
+  (let (start (observe--window-start sel cap n)
+        i (- row 3))
+    (if (and (>= i 0) (< i cap) (< (+ start i) n))
+      (+ start i)
+      nil)))
+
+(defn observe--apply-mouse (state ev cap)
+  "Fold a mouse event into `state` (pure). Left-press on a process row selects it;
+the wheel scrolls the selection one row. Any other event (a right/middle click, a
+click off the list, or an action a future frontend adds) leaves `state` untouched.
+An acting event also clears the stale command-result message. `cap` is the visible
+body height (`(max 1 (- rows 5))`, as in `observe-frame`)."
+  (let ([_ action button row _col] ev
+        procs (get state :procs)
+        n (get state :n)
+        sel (get state :sel)
+        st (assoc state :msg nil))
+    (cond
+      (= action :scroll-up)   (observe--select st procs (max 0 (dec sel)))
+      (= action :scroll-down) (observe--select st procs (min (max 0 (dec n)) (inc sel)))
+      (and (= action :press) (= button :left))
+        (let (idx (observe--mouse-row->sel row sel cap n))
+          (if (nil? idx) state (observe--select st procs idx)))
+      :else state)))
+
 ;; ---- display frontends (ADR-046: one protocol, many frontends) --------------
 ;;
 ;; The observer talks to a *display*: a map of five fns
@@ -314,13 +361,26 @@ runtime (locally inline, or on the peer when remote-attached); Ctrl-C cancels."
 ;; grid — is all Brood, so it stays live-editable and grows to remote frontends.
 
 (def *term-display*
-  ;; the terminal (crossterm) frontend — always available
+  ;; the terminal (crossterm) frontend — always available, and single (one
+  ;; terminal), so it's a fixed display map of the 0-arg `term-*` primitives.
   {:enter term-enter :leave term-leave :size term-size :draw term-draw :poll term-poll})
 
-(def *gui-display*
-  ;; the windowed frontend — needs the runtime built with `--features gui`,
-  ;; else its fns error the first time they're called
-  {:enter gui-enter :leave gui-leave :size gui-size :draw gui-draw :poll gui-poll})
+(defn gui-display ()
+  "Open a **new** native window and return a display (the `{:enter :leave :size
+:draw :poll}` map) bound to it — each call is a separate window, so several
+observers can run at once. Unlike `*term-display*` (one terminal, a constant), the
+windowed frontend is a *constructor*: it calls `gui-open` for a fresh window id and
+closes the `gui-*` primitives over it. The window is opened eagerly here, so
+`:enter` is a no-op and `:leave` closes it. Needs the runtime built with
+`--features gui` (`./configure --with-gui && make install`), else `gui-open`
+errors. The map also carries the raw `:window` id."
+  (let (id (gui-open))
+    {:enter (fn () nil)
+     :leave (fn () (gui-close id))
+     :size  (fn () (gui-size id))
+     :draw  (fn (f) (gui-draw id f))
+     :poll  (fn (ms) (gui-poll id ms))
+     :window id}))
 
 (defn display--min-size (displays)
   "The smallest cols×rows across all frontends, so one broadcast frame fits every
@@ -387,6 +447,7 @@ frontend (`{:enter :leave :size :draw :poll}`) — terminal, GUI, or a broadcast
 both (so one frame paints everywhere). In `:command` mode keys go to the
 minibuffer; in `:nav` mode through `*observe-keymap*` (quit sets `:done`)."
   (let ([cols rows] ((get display :size))
+        cap (max 1 (- rows 5))               ; visible body height (see observe-frame)
         fetching (and (not (get state :paused)) (not (= (get state :mode) :command)))
         state (if fetching (observe--apply-result state ((get backend :source))) state)
         sort (get state :sort)
@@ -401,6 +462,7 @@ minibuffer; in `:nav` mode through `*observe-keymap*` (quit sets `:done`)."
     (let (k ((get display :poll) 1000))
       (cond
         (nil? k) (observe--loop state backend display)                           ; timeout → redraw / refetch
+        (observe--mouse? k) (observe--loop (observe--apply-mouse state k cap) backend display)
         (= (get state :mode) :command) (observe--loop (observe--command-key state backend k) backend display)
         :else (let (next (keymap-dispatch *observe-keymap* (assoc state :msg nil) k (fn (s _) s)))
                 (if (get next :done) ((get display :leave)) (observe--loop next backend display)))))))
@@ -432,14 +494,16 @@ inspect itself: it spawns no demo processes, takes over the terminal, and return
 to the caller when the user quits (`q`/Esc/Ctrl-C). Same-runtime, so it sees every
 process in the shared registry.
 
-    (require 'observe)
-    (observe-attach)   ; modal; control returns on quit
+    (require 'observer)
+    (observe-attach)                  ; modal terminal observer; returns on quit
+    (observe-attach (gui-display))    ; or in a native window (what `(observe)` uses)
 
 Caveat: it tears the display down on quit, so a caller that is itself a
 full-screen TUI must redraw afterward. Remote attach (a peer runtime) is the same
 loop with a remote source — see `observe-connect`. `display` defaults to the
-terminal; pass another frontend (or a `display-broadcast`) to render elsewhere —
-`(observe)` uses this to drive the GUI and terminal together."
+terminal; pass `(gui-display)` for a window, or a `display-broadcast` of several
+frontends to render to all at once. It blocks the calling process until quit, so
+`(observe)` runs it in a spawned process."
   (do
     ((get display :enter))
     (observe--loop {:sel-id nil :sort :id :paused false :last nil :link :ok :mode :nav :edit nil :msg nil}
@@ -447,18 +511,21 @@ terminal; pass another frontend (or a `display-broadcast`) to render elsewhere �
                    display)))
 
 (defn observe ()
-  "Bring up the observer over this runtime's own processes on **every attached
-frontend at once** — a native GUI window *and* the terminal TUI, kept in sync from
-one frame (ADR-046, via `display-broadcast`). Modal; control returns on quit
-(`q`/Esc/Ctrl-C, or closing the window — from either frontend). The window needs
-the runtime built with `--features gui`; without it, `gui-enter` errors.
+  "Open the observer over this runtime's own processes in a **new native GUI
+window**, and return immediately with the observer's pid. Each call opens an
+*independent* window (titled `brood observer #N`), so you can run several at once —
+the work happens in a spawned process that owns the window and runs the loop, so
+the caller (e.g. the REPL) isn't blocked. Quit a window with `q`/Esc/Ctrl-C or its
+close button (that process then exits). Needs the runtime built with `--features
+gui` (`./configure --with-gui && make install`); without it the spawned process
+dies when `gui-open` errors.
 
-    (require 'observe)
-    (observe)   ; opens a window + takes the terminal, both showing the observer
+    (require 'observer)
+    (observe)   ; => a pid; opens 'brood observer #1'
+    (observe)   ; => another pid; a second, independent window
 
-To use only one frontend, call `(observe-attach *term-display*)` or
-`(observe-attach *gui-display*)`."
-  (observe-attach (display-broadcast [*term-display* *gui-display*])))
+For a modal terminal observer instead, call `(observe-attach *term-display*)`."
+  (spawn (fn () (observe-attach (gui-display)))))
 
 ;; ---- remote attach (observe a peer runtime over the node link, ADR-053) -----
 ;;

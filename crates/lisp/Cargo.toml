@@ -17,7 +17,7 @@ path = "src/lib.rs"
 # `--features gui`. winit owns a native window + event loop, softbuffer gives a
 # raw CPU framebuffer, and fontdue rasterises a monospace glyph grid. The display
 # *protocol* is unchanged Brood data (render ops); these just paint it to a window
-# instead of a terminal. See src/gui.rs and std/observe.blsp's `(observe)`.
+# instead of a terminal. See src/gui.rs and std/observer.blsp's `(observe)`.
 gui = ["dep:winit", "dep:softbuffer", "dep:fontdue"]
 
 [dependencies]

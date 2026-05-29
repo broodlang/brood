@@ -739,7 +739,8 @@ detection are deferred. Full reference: [distribution.md](distribution.md).
   (including `i64::MIN` cases like `(mod min -1)`) raises an error rather than
   wrapping or panicking. `(/ min -1)` falls through to a float.
 - `rem` is the truncated remainder (sign of the dividend); `quot` is truncated
-  integer division; `mod` is the euclidean remainder (sign of the divisor).
+  integer division; `mod` is the euclidean remainder (always non-negative, in
+  `[0, |b|)` — so `(mod 7 -3)` is `1`, not the floored `-2`).
 - `floor`/`ceil`/`round` return an **int** (an int passes through unchanged);
   `round` rounds half away from zero. `round-to` keeps a fixed number of
   decimal *places* but stays a **number** (`(round-to 3.14159 2)` → `3.14`); for
@@ -934,10 +935,16 @@ the language" principle.
   byte-counting global allocator, so they cover *all* Rust allocations (the
   interpreter included), not just Brood values — which is what you want for
   "how much memory did this use." The test runner prints the peak alongside the
-  time. (The LOCAL heap is a bump allocator with no slot reuse; memory is
-  reclaimed only at a top-level-form boundary, on `(hibernate …)`, or when a
-  process exits — so within one long-running expression that never hibernates,
-  the two reads sit nearly the same.)
+  time.
+- `(gc-stats)` returns a snapshot map of this process's garbage collection —
+  `{:collections :copied :reclaimed :live :live-bytes :threshold}` — for
+  observing reclamation; `process-info` carries the per-process `:collections`
+  count too. **Memory is reclaimed automatically:** the LOCAL heap is a copying
+  collector that fires at the eval safepoint (ADR-055) whenever a process's live
+  set crosses an adaptive threshold, so a long-running tail loop or `receive`
+  server runs in bounded memory with nothing from the author — no manual GC call,
+  no `while`, just recursion. (You never collect by hand; the old `(hibernate)`
+  primitive that did so was removed once automatic collection landed.)
 
 ### Metaprogramming / self-hosting
 `eval`  `read-string`  `load`  `require`  `macroexpand`  `macroexpand-1`  `gensym`
