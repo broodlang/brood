@@ -1704,10 +1704,31 @@ impl Heap {
     /// re-applying. Calling flush from inside `eval` without that unwind
     /// would leave the caller's stale handles dangling.
     pub fn flush(&mut self, roots: &mut [Value]) {
+        self.arena_flip(roots, &mut []);
+    }
+
+    /// The arena flip shared by [`flush`](Self::flush) (the `(hibernate)` path,
+    /// no env roots) and [`collect`](Self::collect) (the eval safepoint, which
+    /// also roots the live `env`). A **semi-space copy**: move every LOCAL object
+    /// reachable from the value roots, env roots, the dynamic-binding stack, and
+    /// the explicit root stack into fresh slabs, then drop the old slabs whole.
+    ///
+    /// Roots are relocated **in place** — copying MOVES handles, so the caller
+    /// must use the rewritten `value_roots`/`env_roots` afterwards. Cycles
+    /// (`letrec` env↔closure) terminate via the forwarding tables in `fwd`
+    /// (a placeholder is allocated before recursing). PRELUDE/RUNTIME handles are
+    /// returned unchanged (the promotion invariant guarantees they hold no LOCAL
+    /// refs). Crucially this **never reuses a slot index** — it relocates and
+    /// drops — so it cannot resurrect the slot-aliasing scheduler race that
+    /// disabled the old mark-sweep (`collect_old`).
+    fn arena_flip(&mut self, value_roots: &mut [Value], env_roots: &mut [EnvId]) {
         let old = std::mem::take(&mut self.local);
         let mut fwd = FlushForward::default();
-        for v in roots.iter_mut() {
+        for v in value_roots.iter_mut() {
             *v = flush_value(&old, &mut self.local, &mut fwd, *v);
+        }
+        for e in env_roots.iter_mut() {
+            *e = flush_env(&old, &mut self.local, &mut fwd, *e);
         }
         for (_, v) in self.dynamics.iter_mut() {
             *v = flush_value(&old, &mut self.local, &mut fwd, *v);
@@ -2518,11 +2539,19 @@ impl Heap {
 
     /// Bump-allocator era: this is now a no-op. The per-process heap grows
     /// monotonically until the process exits, at which point the whole heap
-    /// is dropped. Long-running receive loops will be bounded by an arena
-    /// flip on receive (next phase). The legacy mark-sweep is kept below as
-    /// `collect_old` for reference; remove on the phase-2 cleanup.
+    /// is dropped. Long-running loops reclaim via the `(hibernate)` arena flip
+    /// ([`flush`](Self::flush), which shares [`arena_flip`](Self::arena_flip)).
+    /// The legacy mark-sweep is kept below as `collect_old` for reference.
+    ///
+    /// Stage B (automatic collection at this safepoint) is **pending generational
+    /// handles** — see `docs/memory-review.md`. A prototype copying collector here
+    /// surfaced (under `BROOD_GC_STRESS=1`) the use-after-move footgun this is
+    /// blocked on: every Rust-held `Value`/`EnvId` copy elsewhere goes stale when
+    /// objects move, and that surfaces as a far-away bounds panic, not at the
+    /// offending deref. Generational handles fix the *debuggability* (and re-open
+    /// non-moving mark-sweep, which avoids the footgun entirely).
     pub fn collect(&mut self, _extra_roots: &[Value], _extra_envs: &[EnvId]) {
-        // no-op
+        // no-op (see doc comment — Stage B blocked on generational handles)
     }
 
     #[allow(dead_code)]

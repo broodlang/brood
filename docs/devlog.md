@@ -6807,15 +6807,25 @@ still proceeds; a clean project stays silent. Tests in `tests/project_test.blsp`
 Mechanism (CST parsing) is the Rust `parse-source` primitive; the policy
 (grouping, the message) is Brood — the ADR-006 split.
 
+**Follow-up — bounded run mode `nest run --for DURATION` (§5.4, the #1 follow-up
+ask).** An infinite loop / TUI never returns, so it couldn't be `eval`'d or
+verified end-to-end — the session fell back to `timeout 1 nest run` + `/proc`
+sampling. Added a first-class cap (`crates/nest/src/main.rs`): `--for 2s` /
+`500ms` / bare-ms. The entry runs in a spawned green process the root monitors,
+with a `(receive … (after ms …))` timeout (the existing `process/timer.rs`
+machinery); on the cap the root prints `[stopped after …]` and exits 0, dropping
+the program where it stood. Composes with `--watch`. `parse_duration_ms` is a
+pure, unit-tested helper (bad input → exit 2). This is what makes the §8 leak
+(and any time-based behaviour) reproducible in CI without a manual `timeout`.
+
 **Deferred (scoped, not done).**
 - **The §8 memory leak** — the headline finding. It's the known "spiky memory":
   the copying collector (`flush`) exists but only fires on a manual `(hibernate)`,
   so a long-running `nest run` loop (a TUI game) never reclaims. The real fix is
   **Stage B** of `docs/memory-review.md` (auto-fire the copy at a memory threshold
   at the eval safepoint), which needs the `GC_BLOCK`/suspend rooting audit first —
-  deliberately *not* rushed.
-- **Set type `#{}`**, a
-  **`--main`/`module/fn` CLI override**, and a **frame-capped run mode** — all
+  deliberately *not* rushed. `--for` above now makes it reproducible in CI.
+- **Set type `#{}`** and a **`--main`/`module/fn` one-off CLI entry override** —
   mapped (insertion points known) but left for follow-up.
 
 

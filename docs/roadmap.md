@@ -200,11 +200,27 @@ the workaround available today.
   error (`error.data.kind = "panic"`), and the server keeps serving.
   Worker-thread panics in the scheduler proper are not covered (revisit
   only if a real case surfaces).
-- ⬜ **Cross-module redefinition warning** — flat-namespace collisions are
-  silent today; record per-name origin file and warn on cross-file
-  redefinition (with an explicit `^:override` opt-out).
+- ✅ **Cross-module redefinition warning** — landed 2026-05-29
+  (`docs/feedback-retro-game-of-life.md` §5.1). `nest run` / `nest test` parse
+  each source file's top-level def-style forms (via `parse-source`'s CST) and
+  warn when one name is defined in more than one file — the silent two-`main`
+  shadow now surfaces. Advisory (stderr, never fatal), silenced project-wide by
+  `BROOD_NO_CHECK=1`; a per-name `^:override` opt-out can follow if a real need
+  appears.
 - ⬜ **`nest format --changed`** — whole-tree `nest format` reformats files
   the current change didn't touch; add a git-aware narrower scope.
+- ✅ **Standard PRNG + bitwise ops + discovery** — landed 2026-05-29
+  (`docs/feedback-retro-game-of-life.md` §1/§4, ADR-050). Pure seedable
+  randomness (`rng`/`rand-int`/`rand-float`/`shuffle`/`sample`, threaded seed)
+  over new `bit-*` primitives; plus `apropos`/`all-globals`/`doc-search`
+  in-language and as `nest mcp` tools.
+- ✅ **Bounded run mode `nest run --for DURATION`** — landed 2026-05-29
+  (`docs/feedback-retro-game-of-life.md` §5.4). Runs a loop/TUI for a bounded
+  time then exits cleanly; the first-class `timeout Ns nest run`, and what makes
+  the still-open §8 memory leak reproducible in CI.
+- ⬜ **One-off `nest run --main module/fn` entry override** — run a different
+  entry without editing the manifest's `:main`. Low-risk; insertion points in
+  `cmd_run` + `run-project` are known (`docs/feedback-retro-game-of-life.md` §5.3).
 
 ## M2 — Editor data model
 
@@ -264,10 +280,18 @@ The seam that makes remoteability free later (see architecture.md).
   width. Interactivity is a UI-state map threaded through the tail-recursive loop
   (no mutation); selection tracks the numeric pid **id** (stable across re-sorts).
   Pure `observe-frame` core (TTY-free, unit-tested) + a thin root-process IO loop.
-  New primitives: `mailbox-size`, `process-info`; `:parent`/`:memory` join the
-  table once the kernel tracks them per-process (the observer renders absent
-  fields gracefully). `tests/observe_test.blsp` 23/23 incl. GC-stress + an
+  New primitives: `mailbox-size`, `process-info` (incl. `:parent` via a pid→parent
+  side table); `:memory` joins once the kernel tracks per-process bytes (the
+  observer renders absent fields gracefully). `tests/observe_test.blsp` 26/26 incl. GC-stress + an
   `:isolated` live-process block.
+- 🟡 **Observe a *running* runtime (inline done; remote next).** The observer loop
+  takes a pluggable **data source** (a 0-arg fn → `process-info` maps), so it's
+  source-agnostic. `observe-attach` passes the local source — a running program
+  calls it to inspect its *own* live processes (no demo, modal, returns on quit).
+  ⬜ **Remote attach** is the same loop with a remote source: a target-side
+  observer agent ships `(map process-info (list-processes))` over the existing dist
+  node link to a `nest observe --connect name@host:port` — no kernel changes
+  (`process-info` maps are send-able). A hard requirement, built next.
 - ⬜ Keymaps and interactive commands defined in Brood — belong in the **editor
   app** (a new `nest` project), not the framework.
 - ⬜ Minibuffer / status line / multiple windows — editor-app concerns, additive

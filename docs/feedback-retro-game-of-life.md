@@ -55,15 +55,20 @@ for follow-up. See the 2026-05-29 devlog entry and ADR-050.
   `check-project-sources` now parse each source file's top-level def-style forms
   and warn (advisory, to stderr) when one name is defined in more than one file,
   so the silent two-`main` shadow surfaces at `nest run`/`nest test` pre-flight.
+- **Bounded run mode** (§5.4, §2 "no good way to test a TUI/infinite-loop app") —
+  `nest run --for DURATION` (`2s`/`500ms`/bare-ms) runs a loop/TUI for a bounded
+  time then exits cleanly. The first-class `timeout Ns nest run`; makes the §8
+  leak (and any time-based behaviour) reproducible in CI.
 
 **Still open (mapped, not yet built):**
 - **§8 memory leak** — the highest-priority item. It is the known "spiky memory":
   the copying collector (`flush`) exists but only fires on a manual `(hibernate)`,
   so a long-running `nest run` loop never reclaims. Fix is **Stage B** of
   `docs/memory-review.md` (auto-fire the copy at a threshold), gated on a
-  `GC_BLOCK`/suspend rooting audit — not rushed.
-- **Set type `#{}`** (§1, §4.2), **`--main`/CLI entry override** (§5.3),
-  **frame-capped run mode** (§5.4).
+  `GC_BLOCK`/suspend rooting audit — not rushed. (`--for` now makes it
+  reproducible in CI.)
+- **Set type `#{}`** (§1, §4.2), and a one-off **`--main`/CLI entry override**
+  (§5.3) for running a different entry without editing the manifest.
 
 ---
 

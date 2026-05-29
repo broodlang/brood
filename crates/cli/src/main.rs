@@ -120,11 +120,30 @@ fn run(cli: Cli) {
         return;
     }
 
-    // The REPL is now Brood (`std/repl.blsp`): bootstrap into `(repl-run)`.
-    // `read-line` drives it; cooked-mode line editing comes from the terminal.
-    if let Err(e) = interp.eval_str("(require 'repl) (repl-run)") {
+    // The REPL is now Brood (`std/repl.blsp`): bootstrap into `(repl-run)`. On a
+    // TTY it raw-mode edits (std/lineedit.blsp); piped input keeps `read-line`.
+    // The guard restores the terminal on a panic unwind (the Brood `term-raw-leave`
+    // is the normal teardown); scope it so it drops before any error report + exit
+    // (`process::exit` skips Drop). Restore is idempotent.
+    let result = {
+        let _guard = TermGuard;
+        interp.eval_str("(require 'repl) (repl-run)")
+    };
+    if let Err(e) = result {
         report_error(&e);
         std::process::exit(1);
+    }
+}
+
+/// Restores the terminal on drop — the panic-path backstop for the REPL's raw
+/// mode (std/lineedit.blsp). The Brood `term-raw-leave` is the normal teardown;
+/// this fires on an unwind so a crash never leaves the shell in raw mode.
+struct TermGuard;
+impl Drop for TermGuard {
+    fn drop(&mut self) {
+        // Only leave raw mode (no escape sequences) — the REPL never enters the
+        // alternate screen, and a piped stdout must stay clean. See restore_raw.
+        brood::builtins::restore_raw();
     }
 }
 

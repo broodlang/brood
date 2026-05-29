@@ -2817,12 +2817,15 @@ pid (a non-pid is a type error — same contract as `mailbox-size`):
   (the mailbox holds it in its `waiter` slot) → `:waiting`, else `:running`; dead →
   the whole call is `nil`. An explicit per-process state enum (in-flight kernel
   work) will replace the inference and may widen the vocabulary (`:runnable`).
-- **Incrementally extensible.** `:parent` and `:memory` are *not* present yet — the
-  `Process` struct isn't reachable from the registry while running, so they need
-  new per-process bookkeeping (a registry-reachable parent table; a per-Heap byte
-  counter). When that kernel work lands, `process-info` gains the keys and the
-  observer (which already renders absent fields as "-") shows them with no rework.
-  The map shape is the stable contract; its key *set* grows monotonically.
+- **Incrementally extensible.** The map's key *set* grows monotonically as the
+  kernel exposes more. `:parent` landed via a registry-reachable `pid → parent`
+  side table (the spawner is recorded at `spawn`, dropped at `deregister`) — a
+  side table, not a `Process` field, because the `Process` isn't reachable from
+  the registry while it runs. Still pending: `:memory` (needs per-process alloc
+  attribution — the byte-counting allocator is process-wide, and a process's
+  `Heap` lives inside its coroutine), and a precise `:status` (an explicit state
+  enum set at the scheduler transitions, replacing the `waiter`-slot inference).
+  The observer renders absent fields as "-", so each lands with no rework.
 
 **Consequences.**
 - The numeric `:id` is monotonic (it's the spawn counter), so it doubles as a

@@ -1,0 +1,104 @@
+;; tests/lineedit_test.blsp — the raw-mode line editor's pure core (std/lineedit.blsp).
+;;
+;; The editor splits into a pure keymap — `lineedit--handle (state, key) -> state`
+;; — and a thin IO loop over the `term-*` seam. These tests drive the keymap
+;; directly (no terminal needed, mirroring observe-frame / repl helper tests);
+;; the live rendering is exercised manually via the REPL. The closing :isolated
+;; block sends an editor-state map through a process boundary and edits it on the
+;; far side, proving the immutable state round-trips the copy-on-send heap copy.
+
+(require 'test)
+(require 'lineedit)
+
+;; Apply a sequence of keys to a state (fold the pure handler).
+(defn le--keys (state keys) (fold lineedit--handle state keys))
+(defn le--fresh () (lineedit--init "brood> " "" '()))
+
+(describe "lineedit--handle — typing and motion"
+  (test "printable chars insert at point and advance it"
+    (let (s (le--keys (le--fresh) (list "(" "+" " " "1" ")")))
+      (assert= (get s :text) "(+ 1)")
+      (assert= (get s :point) 5)))
+  (test "C-a / C-e and arrows move point, clamped"
+    (let (s (le--keys (le--fresh) (list "a" "b" "c")))
+      (assert= (get (lineedit--handle s :ctrl-a) :point) 0)
+      (assert= (get (lineedit--handle s :ctrl-e) :point) 3)
+      (assert= (get (lineedit--handle (lineedit--handle s :ctrl-a) :left) :point) 0)
+      (assert= (get (lineedit--handle s :right) :point) 3)))
+  (test "M-f / M-b move by words"
+    (let (s (le--keys (le--fresh) (list "f" "o" "o" " " "b" "a" "r")))
+      (assert= (get (lineedit--handle (lineedit--handle s :ctrl-a) :alt-f) :point) 3)
+      (assert= (get (lineedit--handle s :alt-b) :point) 4))))
+
+(describe "lineedit--handle — deletion and the kill ring"
+  (test "backspace and delete remove a char"
+    (let (s (le--keys (le--fresh) (list "a" "b" "c")))
+      (assert= (get (lineedit--handle s :backspace) :text) "ab")
+      (assert= (get (lineedit--handle (lineedit--handle s :ctrl-a) :delete) :text) "bc")))
+  (test "C-k kills to end, C-u to start, into :kill"
+    (let (s (lineedit--move (le--keys (le--fresh) (list "a" "b" "c" "d")) 2))
+      (assert= (get (lineedit--handle s :ctrl-k) :text) "ab")
+      (assert= (get (lineedit--handle s :ctrl-k) :kill) "cd")
+      (assert= (get (lineedit--handle s :ctrl-u) :text) "cd")
+      (assert= (get (lineedit--handle s :ctrl-u) :kill) "ab")))
+  (test "C-w kills the previous word; C-y yanks it back"
+    (let (s (le--keys (le--fresh) (list "f" "o" "o" " " "b" "a" "r"))
+          w (lineedit--handle s :ctrl-w))
+      (assert= (get w :text) "foo ")
+      (assert= (get w :kill) "bar")
+      (assert= (get (lineedit--handle w :ctrl-y) :text) "foo bar"))))
+
+(describe "lineedit--handle — history recall"
+  (test "up walks older, down walks newer, restoring the in-progress line"
+    (let (h (lineedit--init "x> " "" (list "(newer)" "(older)"))
+          d (le--keys h (list "w" "i" "p"))          ; in-progress text
+          u1 (lineedit--handle d :up))
+      (assert= (get u1 :text) "(newer)")
+      (assert= (get (lineedit--handle u1 :up) :text) "(older)")
+      ;; back down past the newest restores the saved in-progress text
+      (assert= (get (lineedit--handle u1 :down) :text) "wip"))))
+
+(describe "lineedit--apply-completion — pure (candidates injected)"
+  (test "a unique candidate is inserted in full"
+    (let (s (lineedit--move (le--keys (le--fresh) (list "r" "e" "d" "u")) 4))
+      (assert= (get (lineedit--apply-completion s 0 "redu" (list "reduce")) :text) "reduce")))
+  (test "an ambiguous set extends to the common prefix"
+    (let (s (lineedit--move (le--keys (le--fresh) (list "m" "a")) 2))
+      (assert= (get (lineedit--apply-completion s 0 "ma" (list "map" "max" "mapcat")) :text)
+               "ma"))))
+
+(describe "lineedit--handle — end-of-read signals"
+  (test "C-d on an empty line signals EOF"
+    (assert= (get (lineedit--handle (le--fresh) :ctrl-d) :done) :eof))
+  (test "C-d mid-line deletes forward instead"
+    (let (s (lineedit--move (le--keys (le--fresh) (list "a" "b")) 0))
+      (assert= (get (lineedit--handle s :ctrl-d) :text) "b")
+      (assert= (get (lineedit--handle s :ctrl-d) :done) nil)))
+  (test "Enter submits, C-c cancels"
+    (let (s (le--keys (le--fresh) (list "x")))
+      (assert= (get (lineedit--handle s :enter) :done) :submit)
+      (assert= (get (lineedit--handle s :ctrl-c) :done) :cancel))))
+
+(describe "lineedit--hint-pieces / overrides — analysis -> render data"
+  (test "a call in progress yields signature pieces headed by its name"
+    (let (pieces (lineedit--hint-pieces "(map f " 7))
+      (is (not (nil? pieces)))
+      (assert= (first pieces) ["(" lineedit-face-hint])
+      (assert= (second pieces) ["map" lineedit-face-hint])))
+  (test "bracket overrides: matched pair reversed, lone bracket in error face"
+    (assert= (lineedit--overrides "(+ 1)" 1)
+             (list [0 hl-face-match] [4 hl-face-match]))
+    (assert= (lineedit--overrides "(+ 1" 1) (list [0 hl-face-error]))))
+
+;; Cross-process: an editor-state map crosses a heap boundary via send (deep copy)
+;; and is edited on the far side, proving the immutable state survives copy-on-send
+;; and the keymap runs identically under the scheduler.
+(describe "editor state across processes"
+  :isolated
+
+  (test "a state map sent to a worker edits identically"
+    (let (st (lineedit--init "x> " "" '())
+          w (spawn (receive ([:edit s from]
+                              (send from (get (le--keys s (list "a" "b" "c")) :text))))))
+      (send w [:edit st (self)])
+      (assert= (receive (r r)) "abc"))))

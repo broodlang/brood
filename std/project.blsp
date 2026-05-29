@@ -455,6 +455,90 @@ the `nest new` scaffolder.")
     nm
     "\")))\n"))
 
+;; --- alternate starter templates (`nest new --template …`) ------------------
+
+;; `tui-loop`: a terminal-animation loop — the cellular-automaton / roguelike /
+;; game genre. A pure state tuple threaded through a tail-recursive loop (Brood
+;; has no `while`), one frame per tick. Pairs with `nest run --for 2s` to run it
+;; for a bounded time. Kept to plain stdout for portability; for a real
+;; full-screen UI use the `term-*` seam (docs/building-an-editor.md).
+(defn project--tui-main-template (nm)
+  (str "(defmodule main \"" nm
+    " — a terminal animation loop.\n"
+    "Run it bounded:  nest run --for 2s   (Ctrl-C also stops it).\")\n"
+    "\n"
+    ";; State is threaded through a tail-recursive loop — no mutation, no `while`.\n"
+    "\n"
+    "(defn render (pos width)\n"
+    "  \"One frame: a marker at column `pos` on a `width`-wide track.\"\n"
+    "  (str \"[\" (string-repeat \" \" pos) \"*\" (string-repeat \" \" (- width pos 1)) \"]\"))\n"
+    "\n"
+    "(defn step (pos dir width)\n"
+    "  \"Advance one cell, bouncing off either wall. Returns [pos dir].\"\n"
+    "  (let (nxt (+ pos dir))\n"
+    "    (cond\n"
+    "      (< nxt 0)      [1 1]\n"
+    "      (>= nxt width) [(- width 2) -1]\n"
+    "      else           [nxt dir])))\n"
+    "\n"
+    "(defn loop (pos dir width)\n"
+    "  (println (render pos width))\n"
+    "  (sleep 80)\n"
+    "  (let ([p d] (step pos dir width))\n"
+    "    (loop p d width)))\n"
+    "\n"
+    "(defn main ()\n"
+    "  \"Entry point: animate a bouncing marker.\"\n"
+    "  (loop 0 1 20))\n"))
+
+(defn project--tui-test-template (nm)
+  (str ";; Test the pure frame logic directly — the loop itself is exercised by\n"
+    ";; `nest run --for`, its pure functions by `nest test`.\n"
+    "(require 'test)\n"
+    "\n"
+    "(describe \"animation\"\n"
+    "  (test \"step bounces off the left wall\" (assert= (step 0 -1 20) [1 1]))\n"
+    "  (test \"step bounces off the right wall\" (assert= (step 19 1 20) [18 -1]))\n"
+    "  (test \"step advances in open space\" (assert= (step 5 1 20) [6 1]))\n"
+    "  (test \"render marks the right column\" (assert= (render 0 3) \"[*  ]\")))\n"))
+
+;; `hatch`: a stateful process (gen_server-style) via the `hatch` framework.
+;; Genuine mutable state lives in a process's loop, not a variable (ADR-026):
+;; async `cast` threads new state, synchronous `call` reads/updates it.
+(defn project--hatch-main-template (nm)
+  (str "(defmodule main \"" nm
+    " — a stateful process built with the hatch framework.\")\n"
+    "\n"
+    "(require 'hatch)\n"
+    "\n"
+    ";; A counter server. State `n` is the process's; messages drive it.\n"
+    "(defprocess counter\n"
+    "  (n)\n"
+    "  (cast :inc (+ n 1))      ; async: bump the count\n"
+    "  (cast [:add m] (+ n m))  ; async: add m\n"
+    "  (call :value [n n]))     ; sync: reply n, state unchanged\n"
+    "\n"
+    "(defn main ()\n"
+    "  \"Entry point: start a counter, drive it, read the result.\"\n"
+    "  (let (c (hatch counter 0))\n"
+    "    (! c :inc)\n"
+    "    (! c :inc)\n"
+    "    (! c [:add 10])\n"
+    "    (println \"counter =\" (gen-call c :value))))\n"))
+
+(defn project--hatch-test-template (nm)
+  (str ";; `nest test` loads src/ first, so `counter` (and hatch's `!`/`gen-call`)\n"
+    ";; are already defined. :isolated — these spawn processes.\n"
+    "(require 'test)\n"
+    "(require 'hatch)\n"
+    "\n"
+    "(describe \"counter\"\n"
+    "  :isolated\n"
+    "  (test \"casts thread state; a call reads it\"\n"
+    "    (let (c (hatch counter 0))\n"
+    "      (! c :inc) (! c :inc) (! c [:add 10])\n"
+    "      (assert= (gen-call c :value) 12))))\n"))
+
 ;; `CLAUDE.md` for a fresh project — short project-specific intro that points
 ;; at the language reference (which `nest new` also drops into `docs/`, so the
 ;; project is self-contained and an AI assistant has everything it needs in-tree).
@@ -473,7 +557,11 @@ the `nest new` scaffolder.")
     "  the `main` module; override in `project.blsp` with `:main`:\n"
     "  `:main 'app` runs `app/main`; `:main '(app start)` runs `app/start`.\n"
     "  Names are flat across the whole project (ADR-019) — there is exactly one\n"
-    "  of every global name, so don't define `main` in two modules.\n"
+    "  of every global name, so don't define `main` in two modules (the runner\n"
+    "  warns if you do).\n"
+    "- `nest run --for 2s` — run a loop / full-screen TUI for a bounded time, then\n"
+    "  exit cleanly (`2s`, `500ms`, or a bare integer of ms). The way to exercise\n"
+    "  a never-returning program end-to-end or in CI.\n"
     "- `nest format` — format Brood source.\n"
     "\n"
     "## Writing Brood\n"
@@ -483,13 +571,19 @@ the `nest new` scaffolder.")
     "it before generating Brood code. The `.claude/skills/writing-brood` skill\n"
     "carries the short version and auto-loads when Claude Code edits `.blsp` files.\n"
     "\n"
+    "Brood ships randomness (`rand-int`/`rand-float`/`shuffle`/`sample` — pure and\n"
+    "seedable, thread the seed), bitwise ops (`bit-and`/`bit-or`/`bit-xor`/...),\n"
+    "and discovery (`apropos`, `all-globals`, `doc-search`) — use the last three to\n"
+    "find what exists instead of guessing names.\n"
+    "\n"
     "## MCP integration\n"
     "\n"
     "`.mcp.json` points Claude Code at this project's `nest mcp` server, so `cd "
     nm
     " && claude`\n"
-    "auto-attaches an agent that can `eval`, `load`, `lookup`, `macroexpand`, and `format`\n"
-    "against the live image (ADR-036, `docs/mcp.md` upstream).\n"))
+    "auto-attaches an agent that can `eval`, `load`, `lookup`, `macroexpand`, `format`,\n"
+    "and discover the image with `apropos` / `all-globals` / `doc-search`, against the\n"
+    "live image (ADR-036, `docs/mcp.md` upstream).\n"))
 
 ;; `.mcp.json` for a fresh project — points Claude Code (and other MCP-aware
 ;; agents) at this project's `nest mcp` server. The dispatcher runs from the
@@ -515,17 +609,45 @@ the `nest new` scaffolder.")
 ;; .claude/skills/writing-brood skill, so the project is self-contained for
 ;; AI-assisted editing. Errors on a bad name; an existing folder is reused (its
 ;; scaffold files overwritten), not rejected.
-(defn new-project (nm)
-  "Scaffold a new project named `nm` (or `\".\"` for the current directory, taking the project name from the cwd's basename): a `main` + `hello` module pair with paired tests, a `project.blsp` manifest, and the baked-in language guide. Existing scaffold files are overwritten, not rejected. Backs `nest new`."
+(def *project-templates* ["default" "tui-loop" "hatch"])
+
+;; Write the template-specific src/ + tests/ files; return the list of relative
+;; paths written (for the summary). The shared files (manifest, CLAUDE.md, guide,
+;; …) are written by the caller; only the starter code varies by template.
+(defn project--write-template (tmpl nm src-dir tests-dir actual-name)
+  (cond
+    (= tmpl "tui-loop")
+    (do
+      (spit (path-join src-dir "main.blsp") (project--tui-main-template actual-name))
+      (spit (path-join tests-dir "main_test.blsp") (project--tui-test-template actual-name))
+      [(str nm "/src/main.blsp") (str nm "/tests/main_test.blsp")])
+    (= tmpl "hatch")
+    (do
+      (spit (path-join src-dir "main.blsp") (project--hatch-main-template actual-name))
+      (spit (path-join tests-dir "main_test.blsp") (project--hatch-test-template actual-name))
+      [(str nm "/src/main.blsp") (str nm "/tests/main_test.blsp")])
+    else
+    (do
+      (spit (path-join src-dir "main.blsp") (project--main-template actual-name))
+      (spit (path-join src-dir "hello.blsp") (project--hello-template actual-name))
+      (spit (path-join tests-dir "main_test.blsp") (project--main-test-template actual-name))
+      (spit (path-join tests-dir "hello_test.blsp") (project--hello-test-template actual-name))
+      [(str nm "/src/main.blsp") (str nm "/src/hello.blsp")
+       (str nm "/tests/main_test.blsp") (str nm "/tests/hello_test.blsp")])))
+
+(defn new-project (nm &optional template)
+  "Scaffold a new project named `nm` (or `\".\"` for the current directory, taking the project name from the cwd's basename): a `project.blsp` manifest, the baked-in language guide, and starter code chosen by `template` — `\"default\"` (a `main`+`hello` module pair, the default), `\"tui-loop\"` (a tail-recursive animation loop), or `\"hatch\"` (a stateful gen_server process). Existing scaffold files are overwritten, not rejected. Backs `nest new [--template …]`."
   ;; `nest new .` scaffolds into the current directory (cargo init's shape);
   ;; the project name is then the cwd's basename. Both forms — `nest new .` and
   ;; `nest new foobar` — *overwrite* existing scaffold files rather than
   ;; refusing on an existing folder: re-running `new` re-stamps the skeleton.
-  ;; `reusing-dir` only drives the printed summary. Everything else (file list,
-  ;; templates) is shared.
+  ;; `reusing-dir` only drives the printed summary.
   (let (in-place (= nm ".")
         actual-name (if in-place (path-basename (cwd)) nm)
-        reusing-dir (file-exists? nm))
+        reusing-dir (file-exists? nm)
+        tmpl (or template "default"))
+    (unless (includes? *project-templates* tmpl)
+      (error "new: unknown template '" tmpl "' (use one of: " (join ", " *project-templates*) ")"))
     (unless (or in-place (project--valid-name? nm))
       (error "new: invalid project name '" nm "' (no '/' or spaces, and not empty)"))
     (when (and in-place (= actual-name ""))
@@ -543,29 +665,24 @@ the `nest new` scaffolder.")
       (spit (path-join nm ".mcp.json") (project--mcp-json-template actual-name))
       (spit (path-join docs-dir "brood-for-claude.md") (%builtin-doc 'brood-for-claude))
       (spit (path-join skill-dir "SKILL.md") (%builtin-doc 'writing-brood-skill))
-      (spit (path-join src-dir "main.blsp") (project--main-template actual-name))
-      (spit (path-join src-dir "hello.blsp") (project--hello-template actual-name))
-      (spit (path-join tests-dir "main_test.blsp") (project--main-test-template actual-name))
-      (spit (path-join tests-dir "hello_test.blsp") (project--hello-test-template actual-name))
-      (println (str "Created Brood project '" actual-name "'"
-                 (cond
-                   in-place   " (in-place — files in current directory overwritten)"
-                   reusing-dir " (existing files overwritten)"
-                   else       "")))
-      (println (str "  " nm "/project.blsp"))
-      (println (str "  " nm "/CLAUDE.md"))
-      (println (str "  " nm "/.mcp.json"))
-      (println (str "  " nm "/docs/brood-for-claude.md"))
-      (println (str "  " nm "/.claude/skills/writing-brood/SKILL.md"))
-      (println (str "  " nm "/src/main.blsp"))
-      (println (str "  " nm "/src/hello.blsp"))
-      (println (str "  " nm "/tests/main_test.blsp"))
-      (println (str "  " nm "/tests/hello_test.blsp"))
-    (when *config-git-init*
-      (if (= 0 (run-process "git" (list "init" "-q" nm)))
-        (println "  initialized a git repository")
-        (println "  (git init failed)")))
-    (println (if in-place
-               "Next:  nest test && nest run"
-               (str "Next:  cd " nm " && nest test && nest run")))
-    nm)))
+      (let (code-files (project--write-template tmpl nm src-dir tests-dir actual-name))
+        (println (str "Created Brood project '" actual-name "'"
+                   (if (= tmpl "default") "" (str " [" tmpl " template]"))
+                   (cond
+                     in-place   " (in-place — files in current directory overwritten)"
+                     reusing-dir " (existing files overwritten)"
+                     else       "")))
+        (println (str "  " nm "/project.blsp"))
+        (println (str "  " nm "/CLAUDE.md"))
+        (println (str "  " nm "/.mcp.json"))
+        (println (str "  " nm "/docs/brood-for-claude.md"))
+        (println (str "  " nm "/.claude/skills/writing-brood/SKILL.md"))
+        (dolist (f code-files) (println (str "  " f))))
+      (when *config-git-init*
+        (if (= 0 (run-process "git" (list "init" "-q" nm)))
+          (println "  initialized a git repository")
+          (println "  (git init failed)")))
+      (println (if in-place
+                 "Next:  nest test && nest run"
+                 (str "Next:  cd " nm " && nest test && nest run")))
+      nm)))
