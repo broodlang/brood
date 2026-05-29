@@ -24,6 +24,7 @@ pub mod syntax; // surface: reader (text to Value) + printer (Value to text)
 pub mod types; // the advisory type lattice + checker (nothing gates on it)
 
 pub mod builtins;
+pub mod gui; // optional windowed display backend (feature "gui") — ADR-046 frontend #2
 pub mod cli_support; // tiny mechanism the `brood` and `nest` binaries share
 pub mod dist; // distributed nodes: connect two runtimes over TCP, route messages
 pub mod error; // errors + source positions (cross-cutting)
@@ -118,18 +119,23 @@ impl Interp {
         // globals live in PRELUDE/RUNTIME — so we reclaim that form's garbage
         // before the next. The final form's result is kept for the caller.
         let cp = self.heap.checkpoint();
+        let gc = self.heap.gc_enabled();
         let mut result = Value::Nil;
         let n = forms.len();
-        // GC root the unevaluated forms across the per-form eval: at the
-        // outermost-eval safepoint (`GC_BLOCK == 1`) the collector would
-        // otherwise sweep forms[i+1..], which are LOCAL pairs held only by this
-        // Rust `Vec`. The `roots_len`/`truncate_roots` pairing is balanced even
-        // if a form returns an error (see the `forms` `Vec` consumption below).
+        // GC-root the unevaluated forms across the per-form eval: at the
+        // outermost-eval safepoint (`GC_BLOCK == 1`) the copying collector
+        // relocates forms[i+1..] (LOCAL pairs the loop still needs). We re-fetch
+        // each form from the (relocated) root stack via `root_at` — the `forms`
+        // `Vec`'s own handles go stale across a collection. The
+        // `roots_len`/`truncate_roots` pairing stays balanced on the error path.
         let roots_base = self.heap.roots_len();
         for &form in &forms {
             self.heap.push_root(form);
         }
-        for (i, form) in forms.into_iter().enumerate() {
+        for i in 0..n {
+            // The form's current handle (relocated if an earlier form's eval
+            // triggered a collection); the `forms` Vec copy may be stale.
+            let form = self.heap.root_at(roots_base + i);
             // Compile pass: expand macros once before evaluating (form-by-form,
             // so a macro a form defines is in scope for the forms after it).
             let outcome = eval::macros::macroexpand_all(&mut self.heap, form, self.root)
@@ -141,7 +147,11 @@ impl Interp {
                     return Err(e);
                 }
             }
-            if i + 1 < n {
+            // Per-form arena reset is the *no-GC* reclamation path (ADR-016). With
+            // the safepoint collector on, GC reclaims instead — and a copy moves
+            // the slabs, so the pre-loop checkpoint is stale and a reset would
+            // corrupt. Skip it when GC is enabled.
+            if !gc && i + 1 < n {
                 self.heap.reset_local_to(cp);
             }
         }
@@ -157,17 +167,22 @@ impl Interp {
     pub fn eval_source(&mut self, src: &str) -> Result<Value, LispError> {
         let forms = syntax::reader::read_all_positioned(&mut self.heap, src)?;
         let cp = self.heap.checkpoint();
+        let gc = self.heap.gc_enabled();
         let mut result = Value::Nil;
         let n = forms.len();
-        // GC-root the unevaluated forms across the loop (see `eval_str`).
+        // GC-root the unevaluated forms across the loop (see `eval_str`); re-fetch
+        // each form's relocated handle via `root_at` (positions are plain data in
+        // `forms`, so they don't move).
         let roots_base = self.heap.roots_len();
         for &(form, _) in &forms {
             self.heap.push_root(form);
         }
-        for (i, (form, pos)) in forms.into_iter().enumerate() {
+        for i in 0..n {
+            let form = self.heap.root_at(roots_base + i);
+            let pos = forms[i].1;
             // Record def sites pre-expansion (ADR-031); a no-op unless a file is
-            // set via `current-file`. Survives the per-form arena reset below,
-            // since def sites live in the (shared) RUNTIME region, not LOCAL.
+            // set via `current-file`. Def sites live in the (shared) RUNTIME
+            // region, not LOCAL, so they survive collection / arena reset.
             self.heap.note_definition(form, pos);
             let outcome = eval::macros::macroexpand_all(&mut self.heap, form, self.root)
                 .and_then(|f| eval::eval(&mut self.heap, f, self.root))
@@ -179,7 +194,9 @@ impl Interp {
                     return Err(e);
                 }
             }
-            if i + 1 < n {
+            // See `eval_str`: per-form reset is the no-GC path; with the collector
+            // on, GC reclaims and a move would invalidate the checkpoint.
+            if !gc && i + 1 < n {
                 self.heap.reset_local_to(cp);
             }
         }

@@ -161,6 +161,17 @@ fn tag_rank(v: Value) -> u8 {
     }
 }
 
+/// Opt-in (`BROOD_ENV_DEBUG=1`) for the legacy poison-based env-chain
+/// diagnostics. Off by default: they run per eval / per symbol and walk the env
+/// chain, so leaving them always-on made debug builds pathologically slow — and
+/// they're superseded by the generational-handle tripwire (ADR-054). Kept as an
+/// on-demand tool. Debug-only.
+#[cfg(debug_assertions)]
+fn env_chain_debug() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BROOD_ENV_DEBUG").is_some())
+}
+
 fn gc_floor() -> usize {
     static FLOOR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *FLOOR.get_or_init(|| {
@@ -1765,11 +1776,18 @@ impl Heap {
             *v = flush_value(&old, &mut self.local, &mut fwd, *v);
         }
         self.local_free.clear();
-        // form_pos keys old LOCAL pair indices that are now invalid; the map
-        // is reader-time metadata for newly-loaded source, so dropping it at
-        // a flush boundary loses nothing meaningful (the form_pos for any
-        // closure body has already been baked into the closure at defn time).
-        self.form_pos.clear();
+        // form_pos is keyed by LOCAL pair index, which the copy *relocates*.
+        // Re-key it through the pair forwarding table (old idx → new idx) so a
+        // collection mid-file-load doesn't lose the reader positions later error
+        // messages point at; entries for pairs that didn't survive are dropped
+        // with them. (The hibernate path benefits equally — positions for any
+        // still-live form survive the arena flip rather than being discarded.)
+        let old_form_pos = std::mem::take(&mut self.form_pos);
+        for (old_idx, pos) in old_form_pos {
+            if let Some(&new_idx) = fwd.pairs.get(&(old_idx as u32)) {
+                self.form_pos.insert(new_idx as usize, pos);
+            }
+        }
         #[cfg(debug_assertions)]
         {
             self.poison.pairs.clear();
@@ -2278,9 +2296,16 @@ impl Heap {
     /// point for the use-after-GC chase in [`crate::eval`]; in release the
     /// `poison` field doesn't exist, so the method is `#[cfg]`-gated too —
     /// every call site is `#[cfg(debug_assertions)]`-gated to match.
+    ///
+    /// **Opt-in** (`BROOD_ENV_DEBUG=1`): superseded by the generational-handle
+    /// tripwire (ADR-054), which catches use-after-GC precisely at the deref. Off
+    /// by default because it (and [`debug_walk_env_chain`]) run per eval / per
+    /// symbol and walk the env chain — pathologically slow always-on. Kept as an
+    /// on-demand tool. [`debug_walk_env_chain`]: Self::debug_walk_env_chain
     #[cfg(debug_assertions)]
     pub fn env_is_poisoned(&self, env: EnvId) -> bool {
-        env != EnvId::GLOBAL
+        env_chain_debug()
+            && env != EnvId::GLOBAL
             && env.region() == LOCAL
             && PoisonBits::is(&self.poison.envs, env.index())
     }
@@ -2290,7 +2315,7 @@ impl Heap {
     /// is the use-after-GC offender. Debug-only; no-op in release.
     #[cfg(debug_assertions)]
     pub fn debug_walk_env_chain(&self, env: EnvId, _sym: Symbol) {
-        if !crate::process::in_green_process() {
+        if !env_chain_debug() || !crate::process::in_green_process() {
             return;
         }
         let mut cur = env;
@@ -3039,20 +3064,52 @@ fn flush_value(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, v: Value) -
 }
 
 fn flush_pair(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: PairId) -> PairId {
-    let key = id.index() as u32;
-    if let Some(&new_idx) = fwd.pairs.get(&key) {
+    if let Some(&new_idx) = fwd.pairs.get(&(id.index() as u32)) {
         return PairId::local_gen(new_idx as usize, fwd.epoch);
     }
-    let (car, cdr) = old.pairs[id.index()];
-    // Reserve the slot *before* recursing so a cycle through (car, cdr)
-    // sees the new handle instead of re-traversing.
-    let new_idx = new.pairs.len();
-    new.pairs.push((Value::Nil, Value::Nil));
-    fwd.pairs.insert(key, new_idx as u32);
-    let new_car = flush_value(old, new, fwd, car);
-    let new_cdr = flush_value(old, new, fwd, cdr);
-    new.pairs[new_idx] = (new_car, new_cdr);
-    PairId::local_gen(new_idx, fwd.epoch)
+    // Walk the cdr spine **iteratively** so a long proper list doesn't recurse its
+    // length deep (a `(cons …)` chain of 100k would overflow the native stack —
+    // the same reason `promote_list` is iterative). Recursion is bounded to
+    // element *nesting* via `flush_value` on each car, in phase 2.
+    //
+    // Phase 1: reserve a fresh slot for every not-yet-copied LOCAL pair along the
+    // spine (so cycles/shared tails through any car resolve to the placeholder),
+    // and flush the spine's terminal (a non-pair tail, or the handle a shared/
+    // already-copied cell joins).
+    let mut spine: Vec<(usize, Value)> = Vec::new(); // (new slot, original car)
+    let mut cur = Value::Pair(id);
+    let tail = loop {
+        match cur {
+            Value::Pair(p) if p.region() == LOCAL => {
+                let key = p.index() as u32;
+                if let Some(&n) = fwd.pairs.get(&key) {
+                    break Value::Pair(PairId::local_gen(n as usize, fwd.epoch));
+                }
+                let (car, cdr) = old.pairs[p.index()];
+                let new_idx = new.pairs.len();
+                new.pairs.push((Value::Nil, Value::Nil));
+                fwd.pairs.insert(key, new_idx as u32);
+                spine.push((new_idx, car));
+                cur = cdr;
+            }
+            // Nil / atom / dotted non-pair tail / PRELUDE/RUNTIME pair: flush it
+            // (cheap, no spine recursion) and stop.
+            other => break flush_value(old, new, fwd, other),
+        }
+    };
+    // Phase 2: flush each car and wire the cdrs, walking the spine in reverse so
+    // each cell's cdr is the already-built next handle. Car flushes see the full
+    // spine in `fwd`, so a car cycling back into the list resolves correctly.
+    let mut next = tail;
+    for &(new_idx, car) in spine.iter().rev() {
+        let new_car = flush_value(old, new, fwd, car);
+        new.pairs[new_idx] = (new_car, next);
+        next = Value::Pair(PairId::local_gen(new_idx, fwd.epoch));
+    }
+    match next {
+        Value::Pair(pid) => pid,
+        _ => unreachable!("the spine always has at least the head pair"),
+    }
 }
 
 fn flush_vector(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: VecId) -> VecId {

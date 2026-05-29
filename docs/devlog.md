@@ -7266,3 +7266,42 @@ the test sweep:
 Left alone after a closer look: the `sqrt` epsilon (`mth-approx?` 1e-9) is *not*
 brittle — `sqrt--iter` runs to an exact fixpoint, so `(sqrt 2)` returns the fully
 converged f64 root; loosening would only weaken the test.
+
+## 2026-05-29 — Stage B: automatic copying GC at the eval safepoint (ADR-055)
+
+**Goal.** Re-enable automatic per-process collection so a never-returning,
+non-hibernating loop is memory-bounded — *slow-and-stable*. Built on the
+generational tripwire (ADR-054), which made the copying approach's footgun
+debuggable.
+
+**Done.** `Heap::collect` fires a semi-space copy via the shared `arena_flip` when
+`gc_due()` at the outermost eval; the adaptive `max(floor, 2×live)` threshold is the
+dial. Closed the "everything moves" footgun at its enumerable sites: `eval` writes
+back relocated `expr`/`env`; `eval_str`/`eval_source` re-fetch forms from the
+relocated root stack (`root_at`) and skip the per-form arena reset under GC; the
+type checker brackets itself in `GcBlockGuard` (it holds Rust-Vec handles across
+`(require …)` evals); `flush_pair` made iterative down the cdr spine (a long list
+mustn't recurse its length deep in the collector — uncatchable SIGABRT); `form_pos`
+re-keyed through the pair forwarding table so error positions survive a mid-load
+collection.
+
+**Result.** A 100k-iteration allocating tail loop: release **0.02 s, ~10 MB**
+(was unbounded). Suite **765/765** with the collector active; `basic.rs` **75/75**
+under `BROOD_GC_STRESS=1` (every-safepoint fuzz); `gc.rs` green. Hot reload + node
+connections unaffected (GC only touches the per-process LOCAL heap; RUNTIME/globals
+and cross-node messages are never moved by it).
+
+**Debugging war story (motivates the tooling ask).** `gc.rs` was *timing out* in
+debug while release was 0.02 s. The cause wasn't the collector: `debug_walk_env_chain`
+— a poison-era diagnostic run on **every symbol eval**, now superseded by the
+tripwire — mis-walks a RUNTIME env index into the LOCAL slab and wanders to its
+10k-depth safety belt; post-collect's relocated layout made that bite. Gated behind
+`BROOD_ENV_DEBUG=1` (off by default). Found by release-vs-debug bisection +
+reading, because the runtime can't yet show GC stats / heap composition / hot
+forms — next up is a GC observability layer (`gc-stats`/`gc-collect`/`gc-trace`/
+`heap-stats`), see `docs/memory-review.md` and the session notes.
+
+**Lesson banked.** Debug diagnostics must be opt-in/cheap, never always-on O(n).
+
+**Next.** Tier-1 GC observability primitives; then Stage C (generational nursery —
+immutability means it needs no write barrier / remembered set) gated on measurement.

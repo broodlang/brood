@@ -149,6 +149,15 @@ pub fn check_located(heap: &Heap, form: Value) -> Vec<(Option<Pos>, String)> {
 /// error later anyway, so the checker just stays quiet there.
 pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)> {
     let mut out = Vec::new();
+    // Block the copying GC for the whole check: this fn holds LOCAL handles in
+    // Rust `Vec`s (`forms`/`expanded`) *across* the `eval` of `(require …)` forms
+    // below, and a collection there would relocate them (copying moves objects),
+    // leaving the Vec copies stale. Bumping `GC_BLOCK` makes those inner evals run
+    // at depth ≥ 2 so the outermost-eval safepoint never fires mid-check — the
+    // same guard `macroexpand_all` uses for its partially-built forms. The
+    // checker's allocations are bounded (one file) and reclaimed at the next real
+    // safepoint after it returns. See ADR-054 / `docs/memory-review.md`.
+    let _gc_block = crate::process::GcBlockGuard::enter();
     // Pass 1: macroexpand each form (recording the expanded shape we'll also
     // walk in pass 2). A macroexpand failure isn't this pass's job to report,
     // so we fall back to the un-expanded form silently.

@@ -217,7 +217,20 @@ from ~4 GiB (tripping the cap) to **peak 1135 MB, 655/655 pass** — confirming 
 growth was *garbage*, not live data. This is explicitly a **temporary smell** (a
 userland GC trigger); Stage B removes it.
 
-**Stage B — automatic threshold-triggered collection (the real fix).**
+**Stage B — automatic threshold-triggered collection (the real fix). ✅ DONE
+(2026-05-29, ADR-055).** Copying collection now fires at the `GC_BLOCK == 1`
+safepoint on the adaptive threshold; `eval`'s loop writes back the relocated
+`expr`/`env`; `eval_str`/`eval_source` re-fetch forms from the (relocated) root
+stack and skip the per-form arena reset under GC; the checker bumps `GC_BLOCK` to
+stay collection-free. `flush_pair` was made iterative (a long list no longer
+recurses its length deep in the collector), and `form_pos` is re-keyed across the
+flip (error positions survive a mid-load collection). Validated: full suite
+765/765 + `gc.rs` under the collector; `basic.rs` 75/75 under `BROOD_GC_STRESS=1`
+(every-safepoint fuzz); release churn of 100k allocating iterations stays bounded
+(~10 MB) at 0.02 s. The footgun the review feared is real but bounded and was
+caught loudly by the generational tripwire + GC_STRESS — exactly as predicted.
+The original plan follows.
+
 Promote Model 2 from manual to automatic. At the `GC_BLOCK == 1` safepoint, when
 `mem` crosses a threshold, instead of the disabled in-place `collect`, perform a
 **copying collection** with `expr`/`env` as the mutable roots (reuse `flush`'s
