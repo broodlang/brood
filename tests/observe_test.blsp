@@ -181,7 +181,7 @@
       (assert= (get (keymap-dispatch *observe-keymap* s "s" (fn (x _) x)) :sort) :mailbox)
       (assert= (get (keymap-dispatch *observe-keymap* s " " (fn (x _) x)) :paused) true)
       (assert= (get (keymap-dispatch *observe-keymap* s "q" (fn (x _) x)) :done) true)
-      (assert= (get (keymap-dispatch *observe-keymap* s ":" (fn (x _) x)) :mode) :command))
+      (assert= (get (keymap-dispatch *observe-keymap* s ":" (fn (x _) x)) :mode) :command)))
   (test "an unbound key hits the fallback"
     (assert= (keymap-dispatch *observe-keymap* {:n 1} "Z" (fn (s _) (assoc s :hit true)))
              {:n 1 :hit true}))
