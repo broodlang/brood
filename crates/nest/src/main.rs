@@ -138,6 +138,25 @@ enum Cmd {
     /// Print the project's resolved dependency tree (root → direct → transitive).
     Tree,
 
+    /// Add a dependency to project.blsp and re-lock (ADR-037).
+    ///
+    /// `nest add NAME :path PATH` (`:git` lands in a later slice). NAME is the
+    /// local require-name. The manifest is rewritten preserving its comments.
+    Add {
+        /// The local require-name for the dependency.
+        name: String,
+
+        /// The source spec: `:path PATH` (or, later, `:git URL :ref REF`).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        spec: Vec<String>,
+    },
+
+    /// Remove a dependency from project.blsp and re-lock.
+    Remove {
+        /// The require-name of the dependency to remove.
+        name: String,
+    },
+
     /// Start a REPL. Inside a project, every source file is pre-loaded so the
     /// project's modules are immediately callable.
     Repl,
@@ -237,6 +256,14 @@ fn run_main(cli: Cli) {
         Cmd::Doc { module, all } => cmd_doc(&mut interp, module.as_deref(), all),
         Cmd::Fetch => run(&mut interp, "(require 'package) (fetch)"),
         Cmd::Tree => run(&mut interp, "(require 'package) (tree)"),
+        Cmd::Add { name, spec } => cmd_add(&mut interp, &name, &spec),
+        Cmd::Remove { name } => {
+            let escaped = brood::introspect::escape_brood_string(&name);
+            run(
+                &mut interp,
+                &format!("(require 'package) (remove-dep \"{}\")", escaped),
+            );
+        }
         Cmd::Repl => cmd_repl(&mut interp),
         Cmd::Mcp => cmd_mcp(&mut interp),
         Cmd::Observe { connect, cookie } => cmd_observe(&mut interp, connect, cookie),
@@ -555,6 +582,18 @@ fn cmd_run(
 /// `nest doc [module] [--all]` — Markdown docs to stdout. `--all` documents
 /// every public global in a fresh image (the complete builtin + prelude
 /// reference) and ignores MODULE.
+/// `nest add NAME :path PATH` — dispatch into the package module's `add` verb,
+/// passing NAME and each spec token as escaped string arguments.
+fn cmd_add(interp: &mut Interp, name: &str, spec: &[String]) {
+    use brood::introspect::escape_brood_string;
+    let mut call = format!("(require 'package) (add \"{}\"", escape_brood_string(name));
+    for tok in spec {
+        call.push_str(&format!(" \"{}\"", escape_brood_string(tok)));
+    }
+    call.push(')');
+    run(interp, &call);
+}
+
 fn cmd_doc(interp: &mut Interp, module: Option<&str>, all: bool) {
     let code = if all {
         "(require 'docs) (println (document-all))".to_string()

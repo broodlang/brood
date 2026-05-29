@@ -132,6 +132,37 @@
       (assert= (ensure-deps app nil) nil)
       (refute (file-exists? (path-join app "project.lock.blsp"))))))
 
+;; Editing the manifest — pure string→string transforms (comment-preserving),
+;; so they test without the filesystem. The add/remove *verbs* are cwd-driven
+;; (covered by the hand check `nest add`/`nest remove` in a scaffolded project).
+(describe "package: editing the manifest"
+  (test "add creates a :dependencies clause and preserves comments"
+    (let (src "(project :name \"app\" :version \"0.1.0\")\n\n;; a keeper comment\n"
+          out (package--manifest-add src
+                (package--dep->entry-node {:name 'greeter :kind :path :path "../greeter"})))
+      (is (string-contains? out "a keeper comment"))
+      (let (form (read-string out))
+        (assert= (project--parse-deps (plist-get (rest form) :dependencies))
+          (list {:name 'greeter :kind :path :path "../greeter"})))))
+  (test "add appends to an existing :dependencies"
+    (let (src "(project :name \"app\" :dependencies [[a :path \"../a\"]])\n"
+          out (package--manifest-add src
+                (package--dep->entry-node {:name 'b :kind :path :path "../b"})))
+      (let (form (read-string out))
+        (assert= (map (fn (d) (get d :name)) (project--parse-deps (plist-get (rest form) :dependencies)))
+          (list 'a 'b)))))
+  (test "remove drops the named dep, keeps the rest and comments"
+    (let (src "(project :name \"app\"\n  :dependencies [[a :path \"../a\"] [b :path \"../b\"]])\n;; keep me\n"
+          out (package--manifest-remove src 'a))
+      (is (string-contains? out "keep me"))
+      (let (form (read-string out))
+        (assert= (map (fn (d) (get d :name)) (project--parse-deps (plist-get (rest form) :dependencies)))
+          (list 'b)))))
+  (test "remove of the only dep leaves an empty :dependencies"
+    (let (src "(project :name \"app\" :dependencies [[a :path \"../a\"]])\n"
+          out (package--manifest-remove src 'a))
+      (assert= (project--parse-deps (plist-get (rest (read-string out)) :dependencies)) nil))))
+
 ;; The `fetch`/`tree` verbs themselves are cwd-driven (they walk from `(cwd)` to a
 ;; project root), so — like `run-project` — they can't be isolated from the brood
 ;; repo the suite runs inside. The hand check is `nest fetch`/`nest tree` in a
