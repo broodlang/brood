@@ -800,6 +800,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::nullary(list_ty),
         global_names,
     );
+    def(heap, "special-forms", Arity::exact(0), Sig::nullary(list_ty), special_forms);
     def(
         heap,
         "bound?",
@@ -1124,6 +1125,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("doc", &["f"], "The docstring of a function, macro, or primitive, or nil."),
     ("arglist", &["f"], "The parameter list of a function, macro, or primitive, or nil."),
     ("global-names", &[], "Every globally bound symbol, sorted by spelling."),
+    ("special-forms", &[], "The special-form / core-macro names (strings) that read as keywords — the canonical list shared by the syntax highlighter and the LSP."),
     ("bound?", &["sym"], "Whether sym is bound in scope. Quote it: (bound? 'foo)."),
     ("dynamic?", &["x"], "Whether x is a symbol declared dynamic with defdyn. Quote it: (dynamic? '*foo*)."),
     ("throw", &["x"], "Raise x as an error - a non-local exit caught by try/catch."),
@@ -2001,10 +2003,16 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
     // buffer over the rope primitives, opt-in, never in the prelude.
     ("buffer", include_str!("../../../std/buffer.blsp")),
     // The display/input seam (M3, ADR-046): `display` is the render-op protocol
-    // (pure data constructors); `observe` is a process-viewer TUI built on it +
-    // the `term-*` primitives. Both opt-in, never in the prelude.
+    // (pure data constructors); `keymap` is the rebindable key→command dispatcher
+    // shared by the line editor and the observer; `observe` is a process-viewer
+    // TUI built on them + the `term-*` primitives. All opt-in, never in the prelude.
     ("display", include_str!("../../../std/display.blsp")),
+    ("keymap", include_str!("../../../std/keymap.blsp")),
     ("observe", include_str!("../../../std/observe.blsp")),
+    // Bare ANSI escape *strings* for simple terminal scripts (`print` them
+    // directly) — the lightweight counterpart to the `display` render-op
+    // protocol. Opt-in, never in the prelude.
+    ("ansi", include_str!("../../../std/ansi.blsp")),
     // The interactive REPL line editor (ADR-052): `highlight` is the pure lexical
     // syntax-highlighter / bracket-matcher / signature + completion scanners;
     // `lineedit` is the raw-mode, emacs-style editor built on it + the inline
@@ -3170,6 +3178,27 @@ fn arglist(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
 /// `(global-names)` — a list of every symbol bound in the global table
 /// (prelude + user `def`s), sorted by spelling so the order is deterministic
 /// (for completion / workspace-symbol tooling and reproducible doc generation).
+/// Special forms and the core control/binding macros — the keyword-like heads:
+/// the single source of truth for "what reads as a keyword". Read from Brood via
+/// the `(special-forms)` primitive (so `std/highlight.blsp` highlights from this
+/// list) and from the LSP (`semantic_tokens` / `completion` import it rather than
+/// keeping a copy), so the runtime and the tooling can't drift. Mirrors
+/// `brood.el`'s `brood-special-forms` plus the `def`-family heads.
+pub const SPECIAL_FORMS: &[&str] = &[
+    "if", "do", "def", "fn", "lambda", "let", "let*", "letrec", "quote", "quasiquote",
+    "defmacro", "defn", "defdyn", "defmodule", "when", "unless", "cond", "and", "or",
+    "match", "match*", "try", "catch", "throw", "receive", "binding", "dolist", "doseq",
+    "dotimes", "for", "->", "->>",
+];
+
+/// `(special-forms)` — the list of special-form / core-macro names (strings) that
+/// read as keywords, for tooling (the highlighter, completion). Returns the
+/// canonical `SPECIAL_FORMS`, so Brood and the LSP share one list.
+fn special_forms(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let items: Vec<Value> = SPECIAL_FORMS.iter().map(|s| heap.alloc_string(s)).collect();
+    Ok(heap.list(items))
+}
+
 fn global_names(_args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
     let mut syms = heap.global_symbols();
     // `symbol_name` locks the interner and allocates, so resolve each spelling

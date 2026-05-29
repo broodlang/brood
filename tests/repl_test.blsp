@@ -55,6 +55,15 @@
     (assert= (repl--error-message 42) "error: 42")
     (assert= (repl--error-message [:tag 1]) "error: [:tag 1]")))
 
+(describe "persistent history — serialize / parse round-trip"
+  (test "history serializes oldest-first and parses back newest-first"
+    (assert= (repl--history->text (list "(c)" "(b)" "(a)")) "(a)\n(b)\n(c)")
+    (assert= (repl--history<-text "(a)\n(b)\n(c)") (list "(c)" "(b)" "(a)")))
+  (test "blank lines are dropped on parse; empty history is empty text"
+    (assert= (repl--history<-text "(a)\n\n(b)\n") (list "(b)" "(a)"))
+    (assert= (repl--history->text '()) "")
+    (assert= (repl--history<-text "") '())))
+
 ;; Cross-process: the error map crosses a heap boundary (send deep-copies it)
 ;; before formatting, so this proves the structured-error path survives the
 ;; copy-on-send round-trip — not just same-heap formatting.

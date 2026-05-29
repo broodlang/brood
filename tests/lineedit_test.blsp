@@ -101,6 +101,39 @@
     ;; structure above + that handle and the command agree.
     (is (fn? (eval (get *lineedit-keymap* :ctrl-e))))))
 
+(defn rs--init ()
+  (lineedit--init "x> " "" (list "(map f xs)" "(reduce + 0 ys)" "(filter p zs)")))
+
+(describe "reverse incremental search (C-r)"
+  (test "C-r enters search and selects the newest entry (empty query)"
+    (assert= (get (lineedit-reverse-search (rs--init) :ctrl-r) :text) "(map f xs)"))
+  (test "typing narrows to the newest matching entry"
+    (let (e (lineedit-reverse-search (rs--init) :ctrl-r)
+          r (fold lineedit--handle e (list "r" "e" "d")))
+      (assert= (get r :text) "(reduce + 0 ys)")
+      (assert= (get (get r :search) :query) "red")))
+  (test "C-r steps to the next older match for the query"
+    (let (e (lineedit-reverse-search (rs--init) :ctrl-r)
+          f (lineedit--handle e "f"))                 ; newest with 'f' = (map f xs)
+      (assert= (get f :text) "(map f xs)")
+      (assert= (get (lineedit--handle f :ctrl-r) :text) "(filter p zs)")))
+  (test "C-g cancels and restores the pre-search line"
+    (let (s (le--keys (le--fresh) (list "w" "i" "p"))
+          e (lineedit-reverse-search s :ctrl-r)
+          c (lineedit--handle e :ctrl-g))
+      (assert= (get c :text) "wip")
+      (assert= (get c :search) nil)))
+  (test "Enter accepts the match (keeps it, leaves search)"
+    (let (e (fold lineedit--handle (lineedit-reverse-search (rs--init) :ctrl-r) (list "r" "e" "d"))
+          a (lineedit--handle e :enter))
+      (assert= (get a :text) "(reduce + 0 ys)")
+      (assert= (get a :search) nil)))
+  (test "any other key accepts then replays through the keymap"
+    (let (e (fold lineedit--handle (lineedit-reverse-search (rs--init) :ctrl-r) (list "r" "e" "d"))
+          a (lineedit--handle e :ctrl-a))             ; accept + beginning-of-line
+      (assert= (get a :search) nil)
+      (assert= (get a :point) 0))))
+
 (describe "lineedit--apply-completion — pure (candidates injected)"
   (test "a unique candidate is inserted in full"
     (let (s (lineedit--move (le--keys (le--fresh) (list "r" "e" "d" "u")) 4))

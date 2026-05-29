@@ -106,7 +106,17 @@
     (assert= (sort nil) nil)
     (assert= (sort []) nil)))
 
-(describe "mapcat / frequencies"
+(describe "concat / mapcat / frequencies"
+  (test "concat joins any number of sequences, over lists and vectors, into a list"
+    (assert= (concat (list 1 2) (list 3 4) (list 5)) (list 1 2 3 4 5))
+    (assert= (concat [1 2] [3 4]) (list 1 2 3 4))
+    ; vectors read as sequences
+    (assert= (concat (list 1) [2 3]) (list 1 2 3))
+    ; mixed
+    (assert= (concat) nil)
+    ; no args -> empty
+    (assert= (into [] (concat [1 2] [3 4])) [1 2 3 4]))
+  ; (into [] …) for a vector result
   (test "mapcat maps then concatenates the resulting lists"
     (assert= (mapcat (fn (x) (list x x)) (list 1 2 3)) (list 1 1 2 2 3 3))
     (assert= (mapcat (fn (x) (range x)) (list 1 2 3)) (list 0 0 1 0 1 2))

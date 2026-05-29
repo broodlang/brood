@@ -1,0 +1,35 @@
+;; std/ansi — the bare ANSI escape *strings* for simple terminal scripts. These
+;; are pure string builders (no terminal needed), so the suite exercises them
+;; directly. Register-only — discovered and run by `nest test` / cargo test.
+
+(require 'test)
+(require 'ansi)
+
+(describe "ansi escape strings"
+  (test "clear-screen / home / clear are the expected escapes"
+    (assert= (ansi-clear-screen) (str "\e" "[2J"))
+    (assert= (ansi-home) (str "\e" "[H"))
+    ; `clear` is screen-erase then home — the per-frame reset
+    (assert= (ansi-clear) (str (ansi-clear-screen) (ansi-home)))
+    (assert= (string-length (ansi-clear)) 7))
+  (test "cursor moves to a 1-based (row, col)"
+    (assert= (ansi-cursor 3 5) (str "\e" "[3;5H"))
+    (assert= (ansi-cursor 1 1) (str "\e" "[1;1H")))
+  (test "hide / show cursor"
+    (assert= (ansi-hide-cursor) (str "\e" "[?25l"))
+    (assert= (ansi-show-cursor) (str "\e" "[?25h"))))
+
+;; Across processes: the escape strings must survive copy-on-send between
+;; per-process heaps (proves to_message/from_message round-trip them). The
+;; worker builds a frame and sends it back; `spawn`'s body is an *expression*
+;; run in the new process (not a thunk), so we pass `parent` to a top-level fn.
+(defn ansi-emit-frame (parent)
+  (send parent [:frame (str (ansi-clear) (ansi-cursor 2 2) "x")]))
+
+(describe "ansi frames across processes"
+  :isolated
+  (test "an ansi frame survives a round-trip through another process"
+    (let (me (self))
+      (spawn (ansi-emit-frame me))
+      (receive
+        ([:frame f] (assert= f (str (ansi-clear-screen) (ansi-home) "\e" "[2;2H" "x")))))))

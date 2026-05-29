@@ -40,6 +40,26 @@ in this document.
 A first pass landed the contained, high-value items; the deeper ones are scoped
 for follow-up. See the 2026-05-29 devlog entry and ADR-050.
 
+> **Re-verification, 2026-05-29 (later run, newer binary).** The app was rebuilt
+> from scratch (`foobar/src/life.blsp`) and every claim below was checked against
+> the live image via the MCP server. The `nest` on PATH is now a fresh build
+> (`~/.local/bin/nest`, rebuilt 21:12 — after this retro's 19:02 timestamp;
+> 3.6 MB, `nest 0.1.0`, so leaner than the original *debug* build).
+> - **All five "Done" items confirmed present and working** — `bound?`/
+>   `all-globals` show `rng`/`rand-int`/`rand-float`/`rand-seed`/`shuffle`/
+>   `sample`, the six `bit-*` ops, and `apropos`/`all-globals`/`doc-search`
+>   (in-language + MCP); the scaffolded `CLAUDE.md` documents `:main`, and
+>   `nest run --for 2s` exercised the infinite loop and exited cleanly. The PRNG
+>   and `--for` were used directly in the rebuild.
+> - **§8 leak is NOT fixed.** Re-sampled `/proc/<pid>/VmRSS` once per second over
+>   a `nest run --for 20s` run (output to `/dev/null`): **41 MB → 1333 MB in
+>   19 s**, dead-linear, monotonic, never plateauing — **~80 MB/s** (≈10 MB/gen at
+>   the 120 ms tick). Same signature as below; only the baseline is lower (41 MB
+>   vs 488 MB) on the leaner binary — **the slope, which is the bug, is
+>   unchanged.** `--for` does bound it: the process exited at 20 s and RAM fully
+>   recovered. Remains the highest-priority open item.
+> - **Set type still absent** — `set`/`conj`/`union`/`difference` all unbound.
+
 **Done:**
 - **Standard PRNG** (§1, §4.1) — `rng`/`rand-seed`/`rand-int`/`rand-float`/
   `shuffle`/`sample`, pure & seedable (`[value next-seed]`), in `std/prelude.blsp`.
@@ -61,7 +81,9 @@ for follow-up. See the 2026-05-29 devlog entry and ADR-050.
   leak (and any time-based behaviour) reproducible in CI.
 
 **Still open (mapped, not yet built):**
-- **§8 memory leak** — the highest-priority item. It is the known "spiky memory":
+- **§8 memory leak** — the highest-priority item; **re-confirmed 2026-05-29 on the
+  newer binary (~80 MB/s, see the re-verification note above).** It is the known
+  "spiky memory":
   the copying collector (`flush`) exists but only fires on a manual `(hibernate)`,
   so a long-running `nest run` loop never reclaims. Fix is **Stage B** of
   `docs/memory-review.md` (auto-fire the copy at a threshold), gated on a
@@ -300,9 +322,14 @@ stress test, and it failed it.
 
 ### Caveat & next steps
 
-- This is the **debug build** (`target/debug/nest`). Re-run against
+- This was the **debug build** (`target/debug/nest`). Re-run against
   `cargo build --release` first — but a *linear, unbounded* climb is not
   explained by debug overhead (which inflates the baseline, not the slope).
+  **Update 2026-05-29:** re-sampled against a newer/leaner build (3.6 MB,
+  rebuilt 21:12) — baseline dropped (~488 MB → ~41 MB at 1 s) exactly as a
+  release-grade binary would, **but the slope was unchanged (~80 MB/s, linear,
+  no plateau)**, confirming the prediction: the leak is in the runtime's
+  generation reclamation, not in debug overhead.
 - To localize it in the Rust runtime (neither tool is installed yet —
   `sudo apt install valgrind heaptrack`):
   - **`heaptrack nest run`** → `heaptrack_gui` / `heaptrack_print`: best native

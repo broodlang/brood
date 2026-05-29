@@ -93,6 +93,29 @@ The loop: write a definition → `load` (or `eval` it) → `eval` a call against
 (binding-vs-matching, non-tail recursion, truthiness) at the point of writing
 rather than at `nest test`.
 
+## Don't guess the standard library
+
+Probing for names one at a time (`rand`? `rand-int`? `random`?) burns
+round-trips. Two faster moves:
+
+- **Read the whole reference once.** `nest doc --all` prints every builtin and
+  prelude fn/macro with its signature and one-line summary; `nest doc <module>`
+  does the same for an opt-in module (`display`, `buffer`, `ansi`, …). With the
+  MCP server attached, `apropos` / `all-globals` / `doc-search` (and `lookup`)
+  answer "does X exist / how is it called?" in one call.
+- **Know the reflexes that don't carry over** — what Clojure/Scheme/CL
+  muscle-memory reaches for, and what Brood actually has:
+
+  | You reach for | Brood has |
+  | --- | --- |
+  | `concat` | `concat` (alias of `append`) — variadic over lists *and* vectors, returns a list |
+  | `conj` onto a vector | `cons` (lists); `into` / `(apply vector …)` (vectors) |
+  | `set!` / `swap!` / atoms | nothing — state is a process or a Rust handle (trap #1) |
+  | `loop`/`recur`, `while`, `for`-loop | tail recursion, or `fold`/`map`/`filter`/`reduce` (trap #2) |
+  | a `flush` after `print` | nothing — `print` flushes stdout every call |
+  | raw ANSI (`clear`+`home`, cursor moves) | `(require 'ansi)` → `ansi-clear`/`ansi-home`/`ansi-cursor`/`ansi-hide-cursor` (escape strings you `print`); ESC is `\e`. A render loop wants `std/display` instead. |
+  | a built-in RNG (`rand`) | `rng`/`rand-int`/`rand-float`/`shuffle`/`sample` — pure & seedable, return `[value next-seed]`; thread the seed through your state |
+
 ## Before finishing
 
 - Recursion in hot/iterative paths is **tail** recursion (last thing the

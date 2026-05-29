@@ -44,6 +44,22 @@ the `nest new` scaffolder.")
                                                                                                        (second v))
     else (error "project: :main must be a module symbol or '(module fn), got " v)))
 
+;; Parse a CLI entry spec — "module" or "module/fn" — into a `(module fn)` pair.
+;; The `nest run --main` override: a one-off entry without editing the manifest.
+;;   "app"        => (app main)
+;;   "app/start"  => (app start)
+(defn project--parse-main-spec (spec)
+  (let (parts (string-split spec "/"))
+    (cond
+      (= (count parts) 1) (list (symbol (first parts)) 'main)
+      (and (= (count parts) 2) (not (blank? (second parts)))) (list (symbol (first parts))
+                                                                (symbol (second parts)))
+      else (error "nest run --main: expected \"module\" or \"module/fn\", got " spec))))
+
+(defn set-project-main (spec)
+  "Override the `nest run` entry point from a CLI spec string (`\"module\"` or `\"module/fn\"`), without editing the manifest's `:main`. Call after `load-config` so it wins over the manifest. Backs `nest run --main`."
+  (def *project-main* (project--parse-main-spec spec)))
+
 ;; The (project ...) manifest form: records identity, and overrides the
 ;; conventional source/test paths and the `nest run` entry when given. Missing
 ;; keys keep their defaults. Called when a project.blsp is loaded.

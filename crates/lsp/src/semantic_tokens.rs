@@ -46,43 +46,11 @@ pub fn legend() -> SemanticTokensLegend {
 }
 
 /// Special forms and the core control/binding macros — the keyword-like heads.
-/// The single source of truth for "what reads as a keyword", shared with
-/// completion ([`crate::completion`]) so the two can't drift on the list.
-/// Mirrors `brood.el`'s `brood-special-forms` plus the `def`-family heads.
-pub(crate) const SPECIAL_FORMS: &[&str] = &[
-    "if",
-    "do",
-    "def",
-    "fn",
-    "lambda",
-    "let",
-    "let*",
-    "letrec",
-    "quote",
-    "quasiquote",
-    "defmacro",
-    "defn",
-    "defdyn",
-    "defmodule",
-    "when",
-    "unless",
-    "cond",
-    "and",
-    "or",
-    "match",
-    "match*",
-    "try",
-    "catch",
-    "throw",
-    "receive",
-    "binding",
-    "dolist",
-    "doseq",
-    "dotimes",
-    "for",
-    "->",
-    "->>",
-];
+/// Re-exported from the `brood` lib's canonical `SPECIAL_FORMS` (the same list the
+/// `(special-forms)` primitive returns), so the LSP, the runtime, and `std/`
+/// tooling share one source and can't drift. Used here and by completion
+/// ([`crate::completion`]).
+pub(crate) use brood::builtins::SPECIAL_FORMS;
 
 /// All semantic tokens for the document, delta-encoded.
 pub fn semantic_tokens(
