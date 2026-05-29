@@ -15,7 +15,7 @@ gate (`eval::call_native`), before the primitive runs — so a wrong-count call 
 a clean arity error (`type-of: expected 1 argument, got 0`) rather than a missing
 arg silently becoming `nil`.
 
-## Native primitive functions (97)
+## Native primitive functions (98)
 
 | Category | Primitive | Arity | Purpose |
 |---|---|---|---|
@@ -29,6 +29,7 @@ arg silently becoming `nil`.
 | **Vector** (data type, O(1)) | `vector` | n | construct a vector |
 | | `vector-ref` | 2 | index |
 | | `vector-length` | 1 | length |
+| **Ordering** | `compare` | 2 | `(compare a b)` → `-1`/`0`/`1` by the structural total order (numbers numerically; strings/keywords/symbols by text; vectors/lists lexicographically; cross-kind by stable tag rank). The binary form of `sort`'s order — `sort-by` and custom comparators build on it |
 | **Map** (immutable; data type) | `hash-map` | n | construct a map from `k v k v …` args (the `{ }` literal's programmatic form); last-wins on dup keys |
 | | `map-get` | 2–3 | value at a key, or the optional default (else nil) |
 | | `map-assoc` | 3 | a fresh map with `key`→`val` added/updated |

@@ -54,15 +54,9 @@ caller could check). Safe to send to a pid that has already exited."
   "Spawn a `defprocess` server `f` with its initial `state`; return its pid."
   (spawn (f state)))
 
-(defn sleep (ms)
-  "Block the current process for `ms` milliseconds, leaving its mailbox untouched."
-  ;; A plain `(receive (after ms …))` would grab the next queued message instead
-  ;; of waiting. Pinning a fresh, unforgeable `(ref)` — `~never` — gives a clause
-  ;; no message can ever match, so the timeout always fires and selective receive
-  ;; leaves every real message queued. This parks the green process on the
-  ;; scheduler's timer (it does NOT block a worker thread), which is why sleep is
-  ;; pure Brood rather than a Rust primitive.
-  (let (never (ref)) (receive (~never nil) (after ms nil))))
+;; (`sleep` lives in the prelude — it used to be redefined here with the
+;; unforgeable-`(ref)` trick because the prelude's version was buggy, but that fix
+;; now lives in the prelude itself, so this duplicate global redefinition is gone.)
 
 ;; ---- defprocess -------------------------------------------------------------
 

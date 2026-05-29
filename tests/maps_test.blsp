@@ -254,14 +254,26 @@
     (assert= (->> {:a 1 :b 2} keys count) 2)))
 
 (describe "type errors"
-  ;; A non-map (that isn't nil) is a hard type error on the map primitives.
+  ;; A non-map (that isn't nil) is a hard type error on the map *primitives*.
+  ;; (`get` is no longer one of them — it's the polymorphic accessor below.)
   (test "map primitives reject a non-map"
-    (assert-error (get 5 :a))
-    (assert-error (get "str" :a))
     (assert-error (assoc 5 :a 1))
     (assert-error (dissoc [1 2] :a))
     (assert-error (keys 42))
     (assert-error (contains? :kw :a))))
+
+(describe "get is polymorphic over collections"
+  (test "maps look up by key, vectors/lists/strings by integer index"
+    (assert= (get {:a 1 :b 2} :b) 2)
+    (assert= (get [10 20 30] 1) 20)
+    (assert= (get '(10 20 30) 2) 30)
+    (assert= (get "hello" 1) "e"))
+  (test "out of range / absent yields the default (nil), never an error"
+    (assert= (get {:a 1} :z) nil)
+    (assert= (get [1 2] 9) nil)
+    (assert= (get [1 2] 9 :none) :none)
+    (assert= (get "hi" 5 :none) :none)
+    (assert= (get "hi" -1) nil)))
 
 ;; ---- explicit concurrency / parallelism (spawn, send, copy-on-send) ----------
 ;; :isolated so these run against a private globals copy and don't contend with

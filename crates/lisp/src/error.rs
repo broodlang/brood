@@ -135,6 +135,10 @@ pub struct LispError {
 // the next free slot in their range.
 pub mod error_codes {
     pub const PARSE_GENERIC: &str = "E0001";
+    /// Input ended in the middle of a form or string (EOF mid-parse) — distinct
+    /// from a genuine syntax error, so a REPL / editor can tell "needs more
+    /// input" (read another line) from "this is wrong" without re-scanning text.
+    pub const INCOMPLETE_INPUT: &str = "E0002";
     pub const UNBOUND_SYMBOL: &str = "E0010";
     pub const ARITY_MISMATCH: &str = "E0020";
     pub const TYPE_MISMATCH: &str = "E0030";

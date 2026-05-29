@@ -2625,12 +2625,15 @@ prerequisites had to land first, and now all have:
 - a never-returning Brood loop can be **memory-bounded** — the design target the
   per-process tracing GC (ADR-035) was meant to hit. ⚠️ That mark-sweep is
   currently **disabled** (`Heap::collect` is a no-op — see ADR-035), so the
-  reclamation that actually works today is `(hibernate fn & args)` (arena flip).
-  **Known limitation:** the v1 `repl--loop` is plain tail recursion and does *not*
-  hibernate, so a long interactive session accumulates LOCAL allocations until a
-  cap/host limit — to be closed by looping via `(hibernate repl--loop tty)` (or
-  re-enabling reclamation). The Rust `checkpoint`/`reset_local_to` is gone from the
-  Brood loop regardless.
+  reclamation that actually works today is `(hibernate fn & args)` (arena flip),
+  plus the wholesale free of a process's LOCAL heap when it *exits*. `repl--loop`
+  therefore recurs via `(hibernate repl--loop tty)`: each command flips the arena,
+  keeping only the loop fn + `tty`. Measured: 50 000 allocating commands went from
+  **~15 GB** peak RSS (plain recursion) to **flat** with the hibernate flip. The
+  Rust `checkpoint`/`reset_local_to` is gone from the Brood loop regardless.
+  Because `hibernate` is caught only by the **spawned-process** scheduler loop, not
+  the root `eval_str`, `repl-run` runs the loop in a spawned process and `monitor`s
+  it to await EOF (the root parks in `receive`).
 - **`try`/`catch`** surfaces a built-in error to Brood as a structured map
   (`{:kind :message [:line :col] …}`, ADR + `docs/llm-native.md` §4), so the loop
   can format errors without parsing strings.
@@ -2640,6 +2643,15 @@ add **one** irreducible Rust primitive, and shrink the binaries to a bootstrap.
 - **New primitive: `(read-line)`** — a blocking read of one line from stdin,
   returning the line (trailing newline stripped) or `nil` at EOF. Blocking stdin
   I/O is genuine mechanism the language can't bootstrap; everything else is Brood.
+- **Multi-line input rides the reader, not a hand-rolled scanner.** An unclosed
+  form or string makes `eval-string` raise the reader's `INCOMPLETE_INPUT` error
+  (code `E0002`, ADR-049) — the signal to read another line; any *other* error is
+  a real error to report. Because `eval-string` reads *all* forms before evaluating
+  any, an incomplete buffer throws at read time with nothing evaluated, so retrying
+  the growing buffer as lines arrive has no partial/double side effects. (An earlier
+  draft hand-scanned delimiters in Brood; matching the stable error code is simpler
+  and more correct — it tracks the reader's own notion of "complete," strings and
+  comments included.)
 - **Line editing comes free from the terminal's cooked mode** (backspace, `^U`,
   `^W`), so `read-line` stays a plain read — no raw-mode key handling needed for
   v1. Arrow-key history/recall is a later additive layer over the `term-*` raw-key
@@ -2654,19 +2666,63 @@ add **one** irreducible Rust primitive, and shrink the binaries to a bootstrap.
 **Consequences.**
 - The REPL is now redefinable at runtime like the rest of the system — prompts are
   the dynamic vars `*repl-prompt*` / `*repl-cont-prompt*`; the loop, error
-  rendering, and balance detection are ordinary Brood functions.
+  rendering, and incomplete-input detection are ordinary Brood functions.
 - **Lost (for now):** arrow-key history recall and Emacs keybindings that
   `rustyline` provided. Cooked-mode editing covers in-line correction; history is
   the first thing to add back over the raw-key seam. Acceptable per the dogfooding
   trade (CLAUDE.md): surface the gap rather than carry a Rust escape hatch.
 - One less crate and one fewer third-party dependency; the LSP never depended on
   the REPL, so nothing there changes.
-- `tests/repl_test.blsp` covers the pure pieces (balance/datum detection, error
-  rendering) incl. a cross-process error-map round-trip; the IO loop is exercised
-  manually via `brood` / piped input.
+- `tests/repl_test.blsp` covers the pure pieces (datum detection, incomplete-input
+  detection, error rendering) incl. a cross-process error-map round-trip; the IO
+  loop is exercised manually via `brood` / piped input.
 
 **References.** ADR-006 (write the language in the language), ADR-035 (the
 per-process tracing GC meant to bound a never-returning Brood loop — currently
-disabled; reclamation today is `(hibernate)`), ADR-028 (`brood`/`nest` split —
-both bootstrap the same Brood REPL), ADR-046 (the `term-*` seam a future raw-mode
-line editor rides on), CLAUDE.md "Dogfood first" and "Greenfield".
+disabled; reclamation today is `(hibernate)` + process-exit), ADR-049 (the reader
+`INCOMPLETE_INPUT` signal that drives multi-line reads), ADR-028 (`brood`/`nest`
+split — both bootstrap the same Brood REPL), ADR-046 (the `term-*` seam a future
+raw-mode line editor rides on), CLAUDE.md "Dogfood first" and "Greenfield".
+
+## ADR-049 — Reader `INCOMPLETE_INPUT` as the multi-line continuation signal
+
+**Status:** accepted (2026-05-29). Formalises a use for an error code the reader
+already carried; first consumer is the self-hosted REPL (ADR-048).
+
+**Context.** A REPL — or an editor's interactive evaluator — reading a line at a
+time must tell two failures apart: **"input ended mid-form"** (an unclosed `(`,
+`[`, `{`, or string → *keep reading*) versus a **genuine syntax error** (e.g. an
+unexpected `)` → *report it now*). The naive approach re-scans the text for
+balanced delimiters in the consumer, which duplicates the reader's lexing and gets
+the corner cases wrong (delimiters inside strings, inside `;` comments, escaped
+quotes). The reader already knows precisely when it hit EOF mid-form.
+
+**Decision.** The reader tags exactly the *ended-too-early* parse errors — EOF
+inside a form, EOF inside a string — with the stable code
+`error_codes::INCOMPLETE_INPUT` (`"E0002"`), via `err_incomplete` /
+`err_at_incomplete` (`syntax/reader.rs`). Every other parse error keeps its own
+code. Consumers match the **code**, not the message, to decide "needs more input":
+- a structured caught error is a map `{:kind :message :code …}` (per `try`/`catch`,
+  `docs/llm-native.md` §4), so `(= (get e :code) "E0002")` is the whole test;
+- `eval-string` reads *all* forms before evaluating any, so an incomplete buffer
+  throws at read time with **nothing evaluated** — the consumer can safely retry
+  the whole growing buffer as more lines arrive, with no partial/double effects.
+
+`std/repl.blsp` uses this for line-at-a-time multi-line entry (`repl--incomplete?`).
+The same signal is what a future editor's eval-region / structured-editing layer
+will read; keeping it a reader-owned, code-tagged fact (not consumer-side
+delimiter counting) is what makes those reuses correct for free.
+
+**Consequences.**
+- Multi-line REPL input needs no delimiter scanner in Brood; correctness (strings,
+  comments, escapes) is the reader's, single-sourced.
+- `INCOMPLETE_INPUT` is now a **contract**: the reader must keep tagging only the
+  genuinely-incomplete cases with it, and must not reuse `E0002` for other parse
+  errors. (It predates this ADR — the code and the `err_incomplete` helper were
+  already there "so a REPL / editor can distinguish"; this records the decision and
+  its first real consumer.)
+
+**References.** ADR-048 (the self-hosted REPL, first consumer), `docs/error-codes.md`
+(the stable code registry), `docs/llm-native.md` §4 (structured caught errors as
+maps), CLAUDE.md "Keep the language as small as possible" (a reader fact reused, not
+a scanner re-implemented).

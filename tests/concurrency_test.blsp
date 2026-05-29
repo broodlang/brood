@@ -264,3 +264,18 @@
     ;; fan-in direction: the child constructs the mobile code, the parent runs it.
     (defn cl-maker (parent) (let (base 1000) (send parent (fn (x) (+ base x)))))
     (let (me (self) w (spawn (cl-maker me))) (let (f (receive)) (assert= (f 24) 1024)))))
+
+;; `sleep` is a prelude function (no `require` needed). It must park on the
+;; scheduler timer WITHOUT touching the mailbox — a regression guard against the
+;; old `(receive (after ms nil))` form, which matched (and consumed) any queued
+;; message and returned immediately. (The same properties are checked in
+;; hatch_test, but sleep belongs to the prelude, so it's guarded here too.)
+(describe "prelude: sleep"
+
+  (test "sleep waits roughly the requested time"
+    (let (t (now)) (sleep 30) (is (>= (- (now) t) 25))))
+
+  (test "sleep does not consume a queued message"
+    (send (self) :marker)
+    (sleep 20)
+    (assert= (receive (:marker :still-here) (after 0 :was-consumed)) :still-here)))

@@ -6590,3 +6590,66 @@ ADR-035 mark-sweep). Failures are clean E0043, not crashes. The real fix is
 re-enabling the tracing GC (M1) — see `memory/no-gc-suite-memory.md`. **Note:**
 `roadmap.md` currently marks the tracing GC as landed (ADR-035); in the code
 `collect` is a bump-allocator no-op, so that line overstates the present state.
+
+
+## 2026-05-29 — Three language fixes surfaced by dogfooding the editor seam
+
+Writing the display seam, the observer, and the REPL turned up three rough edges;
+each is a *broad* capability fix, not a one-off (the CLAUDE.md bar), so they went
+in rather than getting worked around.
+
+1. **Reader `INCOMPLETE_INPUT` code (ADR-049).** EOF-mid-form / unterminated-string
+   parse errors now carry the stable code `"E0002"` (via `err_incomplete` /
+   `err_at_incomplete` over the 7 "ran out of input" sites in `syntax/reader.rs`),
+   distinct from genuine syntax errors. The self-hosted REPL (ADR-048) matches the
+   code (`repl--incomplete?`) for multi-line continuation, **deleting** its
+   hand-rolled delimiter scanner (`repl--balanced?`/`repl--scan`) — correctness
+   (strings, comments, escapes) is now the reader's, single-sourced. An editor's
+   eval-region / structured editing reuses the same signal.
+
+2. **Polymorphic `compare` + `sort-by` over it.** Hit while building the observer:
+   `sort-by` compared with numeric `<`, so sorting by a string key threw, even
+   though `(sort coll)` was already structural. New primitive `(compare a b)` →
+   -1/0/1 exposes the existing `Heap::value_cmp` total order; `sort-by` now
+   `(< (compare (key x) (key y)) 0)`. Numeric keys unchanged; string/keyword/vector
+   keys now work. Primitive count 97 → 98.
+
+3. **Polymorphic `get`.** `(get v 1)` used to throw "map-get: expected map" — every
+   data-shuffling snippet hit the `get`-vs-`nth` split. `get` now dispatches: maps
+   by key, strings by char index, vectors/lists by integer index (via `nth`), with
+   out-of-range → default (never an error), matching Clojure. `get` is therefore no
+   longer a map-only primitive — `tests/maps_test.blsp` moved its non-map-rejection
+   assertions off `get` and gained a polymorphic-`get` block.
+
+All in Brood where possible (`get`/`sort-by` are prelude; only `compare` and the
+reader codes are Rust). Suite 650/653 — the 3 failures are the unrelated
+pre-existing adversarial memory-cap (E0043) tests.
+
+---
+
+## 2026-05-29 — std library review: `sleep` mailbox bug + dedup of clobbered globals
+
+**Goal.** Read through the language guide and all of `std/`, looking for
+correctness and consistency improvements without breaking anything.
+
+**Found + fixed.**
+- **`sleep` consumed the mailbox and returned early (real bug).** The prelude's
+  `(defn sleep (ms) (receive (after ms nil)) nil)` had an *empty* clause list, so
+  the generated matcher matched *any* message: `%receive` grabbed whatever was
+  queued and returned immediately, never waiting. Verified:
+  `(send (self) :marker)` then `(sleep 1000)` returned in 0 ms and ate `:marker`.
+  Fixed by pinning a fresh unforgeable `(ref)` as the only clause (`~never`), the
+  trick `hatch.blsp` already used in its *override* of `sleep` — so the fix now
+  lives in the prelude and `hatch`'s duplicate is gone. `tests/hatch_test.blsp`
+  already asserted the correct behaviour (it only passed via that override);
+  added a prelude-level regression guard to `tests/concurrency_test.blsp`.
+- **Removed three `std/` modules' redefinitions of prelude functions.** The
+  runtime shares one global table across all loaded modules, so a `require`-able
+  module redefining a prelude name re-binds it *for the whole image* — the same
+  footgun an existing `test.blsp` comment documents for `take`/`quot`. Cleaned up
+  the stragglers: `test.blsp`'s `pad-left`/`pad-right` (+ non-tail `spaces`
+  helper) and `format.blsp`'s `string-repeat` (an O(n²) `(str acc s)` accumulator
+  vs. the prelude's single-pass `(apply str (repeat n s))`). All now use the
+  prelude's stack-safe versions.
+
+**Verified.** `nest test` — 653 tests, 0 failed (release build).

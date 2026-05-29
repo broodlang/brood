@@ -302,10 +302,17 @@ or re-`def` to force re-init."
 ;; `{ }` literals and `hash-map` construct them; these wrap the `map-*` kernel
 ;; primitives with the variadic / default-bearing surface.
 
-;; (get m k) -> value or nil if absent; (get m k default) -> value or default.
-(defn get (m k & default)
-  "The value at key `k` in map `m`, or `default` (else `nil`) if absent."
-  (map-get m k (first default)))
+;; (get coll k) -> value or nil if absent; (get coll k default) -> value or default.
+(defn get (coll k & default)
+  "The value at key/index `k` in `coll`, or `default` (else `nil`) if absent.
+Maps look up by key; vectors, lists, and strings index by integer position
+(out-of-range yields the default, never an error)."
+  (cond
+    (map? coll) (map-get coll k (first default))
+    (string? coll) (if (and (int? k) (>= k 0) (< k (string-length coll)))
+                     (char-at coll k)
+                     (first default))
+    :else (nth coll k (first default))))
 
 ;; (assoc m k1 v1 k2 v2 …) -> a fresh map with each pair added/updated.
 (defn assoc--pairs (m kvs)
@@ -822,9 +829,17 @@ or re-`def` to force re-init."
     (= (substring addr i (inc i)) "@") (keyword (substring addr 0 i))
     else (ensure-link--peer-name--scan addr (inc i) n)))
 
-;; Sleep `ms` milliseconds in the current process — the receive-with-timeout
-;; idiom; no message-receiving happens because we provide no patterns.
-(defn sleep (ms) (receive (after ms nil)) nil)
+;; Sleep `ms` milliseconds in the current process. A bare `(receive (after ms …))`
+;; would *consume* the next queued message — an empty clause list matches anything,
+;; so `%receive` grabs whatever is in the mailbox and returns immediately instead of
+;; waiting. We pin a fresh, unforgeable `(ref)` as the only real clause (`~never`):
+;; no message can ever match it, so selective receive leaves every real message
+;; queued and the timeout always fires. Parks the green process on the scheduler's
+;; timer (it does NOT block a worker thread) — which is why sleep is pure Brood
+;; rather than a Rust primitive.
+(defn sleep (ms)
+  "Park the current process for `ms` milliseconds without touching its mailbox — every queued message stays queued. Parks on the scheduler timer; it does not block a worker thread."
+  (let (never (ref)) (receive (~never nil) (after ms nil))))
 
 ;; Retry `(connect addr)` on a 200ms backoff until it succeeds — used both on
 ;; first :nodedown and inside the supervisor loop. `monitor-node` is
@@ -1017,8 +1032,9 @@ or re-`def` to force re-init."
     (number? (first a)) (%sort-asc a)
     else (%sort-cmp a)))
 (defn sort-by (key-fn coll)
-  "Sort `coll` (stable, ascending) by comparing `(key-fn x)` of each item."
-  (merge-sort (fn (x y) (< (key-fn x) (key-fn y))) coll))
+  "Sort `coll` (stable, ascending) by comparing `(key-fn x)` of each item with the
+structural order (`compare`), so numeric, string, keyword, and vector keys all work."
+  (merge-sort (fn (x y) (< (compare (key-fn x) (key-fn y)) 0)) coll))
 (defn merge-sort (less? coll)
   (if (or (empty? coll) (empty? (rest coll)))
     coll

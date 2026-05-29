@@ -245,13 +245,11 @@ docs/testing.md for the full guide.")
   ; is flag present in the run-tests args?
   (cond (empty? opts) false (= flag (first opts)) true else (opt? flag (rest opts))))
 
-(defn spaces (n) (if (<= n 0) "" (str " " (spaces (- n 1)))))
-(defn pad-right (s w) (str s (spaces (- w (count s)))))
-(defn pad-left (s w) (str (spaces (- w (count s))) s))
-
-;; (`take` / `quot` are the prelude's — formerly redefined here, which clobbered
-;; the shared global `take` with a non-tail version, since the runtime shares one
-;; global table across all loaded modules. Use the prelude's stack-safe versions.)
+;; (`pad-left` / `pad-right` are the prelude's, like `take` / `quot` — all formerly
+;; redefined here, which clobbered the shared global with a worse version (the local
+;; `spaces` helper was non-tail-recursive; `take` was non-tail), since the runtime
+;; shares one global table across all loaded modules, so `require`-ing test would
+;; re-bind them for the whole image. Use the prelude's stack-safe versions.)
 
 ;; Insertion sort of (name . ms) pairs, slowest first. O(n²), but there are only
 ;; ever a handful of tests, so simplicity wins.
