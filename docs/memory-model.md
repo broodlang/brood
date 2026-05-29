@@ -1,6 +1,22 @@
 # Memory model — `Send` heaps and per-process GC
 
-> **2026-05-29 status (current) — automatic copying GC at the eval safepoint
+> **2026-05-30 status (current) — the collector fires at ANY eval depth
+> (ADR-061).** Supersedes the `gc_block_depth() == 1` gate described throughout the
+> rest of this doc. The evaluator now keeps every in-flight LOCAL transient on an
+> **operand stack** (`Heap::roots` for values + `Heap::env_roots` for envs, both
+> relocated in place by `arena_flip`), so the copying collector can run at any eval
+> depth — not just the outermost. A loop in argument position (`(f (loop))`), a
+> `try`-wrapped loop, or a deep call no longer leaks; the safepoint gate is now
+> `!macro_block_active() && gc_due()`. The one exception is the macro-expansion
+> compile pass, which opts out of collection via `MACRO_BLOCK` instead of being
+> operand-stack rooted. `GC_BLOCK` now feeds only the stack-overflow guard, and the
+> ADR-058 `load` depth-1 trick / `GcBlockReset` are gone. Where the prose below says
+> "fires iff `GC_BLOCK == 1`" / "depth-1 safepoint," read "fires at any depth, with
+> the compile pass excluded." See ADR-061 and the 2026-05-30 devlog entry.
+>
+> ---
+>
+> **2026-05-29 status — automatic copying GC at the eval safepoint
 > (ADR-054/055).** Reclamation is now automatic and needs nothing from the
 > author. The per-process LOCAL heap is still a bump allocator, but a **semi-space
 > copying collector** (`Heap::collect`, sharing the `arena_flip` machinery) fires

@@ -1,0 +1,53 @@
+;; std/set.blsp — sets as an opt-in library over maps.
+(defmodule set
+  "Sets — unordered collections of **unique** values with fast membership.
+
+A set is represented as a **map of `element → true`**, so it is not a new value
+kind: every map and sequence operation already works on it directly. That is the
+whole point of building it in Brood rather than the kernel —
+
+- **membership** is `(contains? s x)` (the prelude's map-key test),
+- **elements** are `(keys s)`, **size** is `(count s)`, **empty?** is `(empty? s)`,
+- you can `fold` / `map` / `into` a set exactly like any map's keys.
+
+This module adds only what maps don't already give: a constructor that dedups
+(`set`), single-element add/remove (`conj` / `disj`), and the set algebra
+(`union` / `intersection` / `difference` / `subset?`). Structural equality and
+vector keys come for free from the map underneath, so a set of coordinates —
+`(set [[0 0] [1 2]])` — Just Works as the live-cell model a cellular automaton
+wants (replacing the `{[x y] true}` map-as-set tell).
+
+**Planned upgrade (deliberately deferred, ADR-011):** a first-class `#{…}` reader
+literal, `#{…}` printing, and a distinct `set?` / `Tag::Set` — which need kernel
+support (reader, printer, a `Value` variant). Until then a set *is* a map, so
+test it with `map?`, not `set?`. The library API below is forward-compatible:
+when the literal lands these functions keep the same names and meanings.")
+
+(defn set (coll)
+  "The set of the distinct elements of `coll` (a list or vector). Duplicates
+collapse: `(set [1 1 2]) ⇒ {1 true 2 true}`."
+  (fold (fn (s x) (assoc s x true)) {} coll))
+
+(defn conj (s x)
+  "`s` with `x` added (a no-op if `x` is already present). Returns a fresh set."
+  (assoc s x true))
+
+(defn disj (s x)
+  "`s` with `x` removed (a no-op if `x` is absent). Returns a fresh set."
+  (dissoc s x))
+
+(defn union (a b)
+  "Every element in either `a` or `b`."
+  (fold (fn (s x) (assoc s x true)) a (keys b)))
+
+(defn intersection (a b)
+  "Every element in both `a` and `b`."
+  (fold (fn (s x) (if (contains? b x) (assoc s x true) s)) {} (keys a)))
+
+(defn difference (a b)
+  "Every element of `a` that is not in `b`."
+  (fold (fn (s x) (dissoc s x)) a (keys b)))
+
+(defn subset? (a b)
+  "True when every element of `a` is also in `b`."
+  (fold (fn (ok x) (if ok (contains? b x) false)) true (keys a)))

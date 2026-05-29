@@ -333,8 +333,16 @@ Maps look up by key; vectors, lists, and strings index by integer position
 (defn keys (m) "The keys of map `m`, in insertion order." (map first (map-pairs m)))
 (defn vals (m) "The values of map `m`, in insertion order." (map second (map-pairs m)))
 (defn contains? (m k)
-  "True if map `m` has key `k` (distinguishes a stored `nil` from absence)."
-  (some? (fn (p) (= k (first p))) (map-pairs m)))
+  "True if map `m` has key `k` (distinguishes a stored `nil`/`false` from
+absence). O(1) via the CHAMP hash path (`map-get`), not an O(n) key scan: probe
+with two distinct sentinels — a present key returns its stored value both times;
+an absent key returns each sentinel, and those differ. (One sentinel can't tell
+absence from a key whose *stored value* happens to equal it; two distinct ones
+can.)"
+  (let (a (map-get m k :%contains-miss-a))
+    (if (= a :%contains-miss-a)
+      (not (= (map-get m k :%contains-miss-b) :%contains-miss-b))
+      true)))
 (defn reduce-kv (f init m)
   "Fold over the entries of map `m`, calling `(f acc k v)`, starting from `init`."
   (fold (fn (acc p) (f acc (first p) (second p))) init (map-pairs m)))

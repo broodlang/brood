@@ -157,6 +157,19 @@ primitives; the internal representation is an insertion-ordered association
 vector, which can be swapped for a hash-array-mapped trie later without any
 surface change.
 
+## Sets
+
+There is no kernel set kind yet. A **set** is an opt-in library (`(require 'set)`,
+`std/set.blsp`) built *on maps*: a set is a map of `element → true`, so every map
+operation already applies — membership is `(contains? s x)`, elements are
+`(keys s)`, size is `(count s)`, and you can `fold`/`map`/`into` it. The module
+adds only what maps lack: `(set coll)` (dedups), `conj`/`disj`, and the algebra
+`union`/`intersection`/`difference`/`subset?`. Structural equality and vector
+keys come from the map underneath, so `(set [[0 0] [1 2]])` is the natural
+live-cell model for a grid. A first-class `#{…}` literal and a distinct `set?` are
+deferred until they earn kernel support (reader/printer/`Value` variant) — see
+the roadmap.
+
 ## Syntax
 
 - `;` starts a line comment.

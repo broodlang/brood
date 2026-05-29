@@ -26,8 +26,8 @@ use crate::eval;
 
 use super::message::{from_message, to_message, Message};
 use super::scheduler::{
-    enqueue, ensure_ctx, gc_block_save, gc_block_set, stack_base_save, stack_base_set, Ctx,
-    Process, Suspend,
+    enqueue, ensure_ctx, gc_block_save, gc_block_set, macro_block_save, macro_block_set,
+    stack_base_save, stack_base_set, Ctx, Process, Suspend,
 };
 use super::timer::arm_timer;
 
@@ -286,6 +286,7 @@ fn wait_for_message(ctx: &Ctx, i: usize, deadline: Option<Instant>) {
             // whose eval/macroexpand changes the thread-local before we resume.
             let saved_block = gc_block_save();
             let saved_base = stack_base_save();
+            let saved_macro = macro_block_save();
             // SAFETY: the yielder is valid while this coroutine runs — which is now
             // (called from within eval, within the coroutine body). Suspending
             // returns control to the worker (`run_one`), which parks us.
@@ -295,6 +296,7 @@ fn wait_for_message(ctx: &Ctx, i: usize, deadline: Option<Instant>) {
             super::scheduler::CURRENT.with(|c| *c.borrow_mut() = Some(ctx.clone()));
             gc_block_set(saved_block);
             stack_base_set(saved_base);
+            macro_block_set(saved_macro);
         }
     }
 }

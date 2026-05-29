@@ -1,0 +1,86 @@
+;; std/file.blsp — the file & filesystem standard library. (require 'file).
+;;
+;; A coherent Brood surface over the kernel's irreducible fs primitives — `slurp`,
+;; `spit`, `file-exists?`, `dir?`, `list-dir`, `make-dir`, `file-mtime`, `cwd` —
+;; plus the prelude's `path-join` / `path-basename` / `parent-dir`. Everything
+;; here is policy (ADR-006): whole-file and line I/O, directory walking, and the
+;; path helpers the prelude doesn't already provide. No new Rust.
+;;
+;; (Deletion / rename / atomic append / file-size await kernel primitives — noted
+;; where relevant; `append-file` is a non-atomic read-modify-write for now.)
+
+(defmodule file
+  "The file & filesystem library (`(require 'file)`): whole-file and line read/write
+(`read-file`/`write-file`/`read-lines`/`write-lines`/`append-file`), predicates
+(`file?`/`dir?`/`path-exists?`), directory listing (`list-files`/`list-dirs`/
+`walk-files`), and path helpers (`path-extension`/`path-stem`, complementing the
+prelude's `path-join`/`path-basename`/`parent-dir`). Pure Brood over the fs
+primitives.")
+
+;; --- whole-file read / write ------------------------------------------------
+(def read-file slurp)
+; friendly alias — read a whole file into a string
+(def write-file spit)
+; friendly alias — write a string to a file (overwriting)
+
+(defn append-file (path s)
+  "Append string `s` to the file at `path` (creating it if absent). Not atomic — a read-modify-write — pending a kernel append primitive."
+  (spit path (str (if (file-exists? path) (slurp path) "") s)))
+
+(defn read-lines (path)
+  "The lines of the file at `path` as a list of strings, without their newlines. A trailing newline does not yield an empty final line; an empty file yields nil."
+  (let (text (slurp path))
+    (cond
+      (= text "") nil
+      (ends-with? text "\n") (string-split (substring text 0 (dec (string-length text))) "\n")
+      else (string-split text "\n"))))
+
+(defn write-lines (path lines)
+  "Write `lines` (a sequence of strings) to `path`, one per line, each terminated by a newline."
+  (spit path (fold (fn (acc l) (str acc l "\n")) "" lines)))
+
+;; --- predicates -------------------------------------------------------------
+(def path-exists? file-exists?)
+; alias — true if a file *or* directory exists at the path
+
+(defn file? (path)
+  "True if `path` exists and is a regular file (not a directory)."
+  (and (file-exists? path) (not (dir? path))))
+
+;; --- directory listing ------------------------------------------------------
+(defn list-files (dir)
+  "The names of regular files directly under `dir` (excluding subdirectories), sorted."
+  (filter (fn (e) (not (dir? (path-join dir e)))) (list-dir dir)))
+
+(defn list-dirs (dir)
+  "The names of subdirectories directly under `dir`, sorted."
+  (filter (fn (e) (dir? (path-join dir e))) (list-dir dir)))
+
+(defn walk-files (dir)
+  "Every file path under `dir`, recursively (full paths, depth-first). nil if `dir` is not a directory."
+  (if (not (dir? dir))
+    nil
+    (fold (fn (acc e)
+            (let (p (path-join dir e))
+              (if (dir? p) (append acc (walk-files p)) (append acc (list p)))))
+      nil
+      (list-dir dir))))
+
+;; --- path helpers (complement prelude path-join / path-basename / parent-dir)
+(defn file--last-dot (s i)
+  (cond
+    (< i 0) -1
+    (= (substring s i (+ i 1)) ".") i
+    else (file--last-dot s (dec i))))
+
+(defn path-extension (path)
+  "The extension of `path` including the leading dot (\"a/b.txt\" -> \".txt\"), or \"\" if there is none. A leading-dot name (\".bashrc\") has no extension."
+  (let (base (path-basename path)
+        i (file--last-dot base (dec (string-length base))))
+    (if (<= i 0) "" (substring base i (string-length base)))))
+
+(defn path-stem (path)
+  "The basename of `path` with its extension removed (\"a/b.txt\" -> \"b\")."
+  (let (base (path-basename path)
+        ext (path-extension path))
+    (if (= ext "") base (substring base 0 (- (string-length base) (string-length ext))))))

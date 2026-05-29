@@ -28,6 +28,18 @@ fn name_of(s: Symbol) -> String {
     value::symbol_name(s)
 }
 
+/// The output sinks the **function-as-value** lint guards. Passing a bare
+/// zero-arg function to one of these stringifies the *function* (`#<fn …>`)
+/// instead of calling it — the silent `(print ansi-clear)`-for-`(print
+/// (ansi-clear))` slip. Four lock-free `symbol_is` compares, only reached on
+/// the generic-call path (so no `symbol_name` allocation on the hot path).
+fn is_output_sink(s: Symbol) -> bool {
+    value::symbol_is(s, "print")
+        || value::symbol_is(s, "println")
+        || value::symbol_is(s, "str")
+        || value::symbol_is(s, "format")
+}
+
 /// What the walk does at a head symbol. `Generic` is the fall-through for any
 /// head that isn't one of the recognised special forms / skip-body markers —
 /// the walk treats it as a normal call (resolves sig + arity, checks for
@@ -206,6 +218,36 @@ pub(super) fn check_into(
                         argc,
                     ),
                 ));
+            }
+        }
+
+        // **Function-as-value lint** (advisory). A bare reference to a known
+        // zero-arity global passed to an output sink (`print`/`println`/`str`/
+        // `format`) is almost always a missing call: it stringifies the function
+        // itself (`#<fn name>`) instead of its result. The classic
+        // `(print ansi-clear)`-for-`(print (ansi-clear))` slip — otherwise
+        // silent (it's legal, types fine, and runs). Restricted to the sinks and
+        // to *globals* (a same-named local is left alone — `arity_of` only reads
+        // the global env, but `is_local` keeps a shadowing binding quiet) so it
+        // stays false-positive-free, per the checker's "rather miss than
+        // misfire" rule. Only zero-arity is flagged: a fn that takes args is a
+        // plausible intentional callback value.
+        if is_output_sink(s) {
+            for &arg in &items[1..] {
+                if let Value::Sym(a) = arg {
+                    if !ctx.is_local(a)
+                        && matches!(arity_of(heap, a), Some(ar) if ar.min == 0 && ar.max == Some(0))
+                    {
+                        let n = name_of(a);
+                        out.push((
+                            heap.form_pos(form),
+                            format!(
+                                "{n}: function used as a value — did you mean ({n})? \
+                                 the bare zero-arg function stringifies as #<fn {n}>, not its result"
+                            ),
+                        ));
+                    }
+                }
             }
         }
 

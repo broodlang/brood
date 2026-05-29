@@ -103,32 +103,27 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   `symbol->string` / `string->symbol` wrappers in Brood, and the side-effecting
   loop macros `dotimes` / `dolist` (lean tail-recursive Brood; `doseq` stays
   for the destructuring / `:when`-filter case).
-- 🟡 **Memory reclamation.** Two coexisting layers are live today, plus a
-  disabled third:
-  - **Arena reset at top-level boundaries** (ADR-016) — `eval_str`/the REPL
-    `checkpoint` then `reset_local_to`, truncating the LOCAL heap after each form
-    (demo: ~712 MB growing → ~78 MB flat). Bounds the REPL / file-runner.
-  - **Bump-only allocator + arena flip on `(hibernate)`** — the LOCAL heap is now
-    a pure bump allocator (`Slabs`: `Vec`s, **no slot reuse**), and a long-running
-    loop reclaims by calling `(hibernate fn & args)`, which `Heap::flush`
-    deep-copies the *live* graph into fresh slabs and drops the garbage. Bounds
-    never-returning receive/spin loops. Validated by `crates/lisp/tests/gc.rs`
-    (50k/100k-iteration loops, 5k-message server loops, root and spawned) — these
-    are bounded by **flush**, not by mark-sweep.
-  - **⛔ Disabled: per-process tracing mark-sweep GC** (ADR-035). `Heap::collect`
-    is a **no-op**; the mark-sweep is kept as `collect_old` (`#[allow(dead_code)]`).
-    It was switched off when the bump-only allocator landed (commit `6e92e8e`):
-    mark-sweep reclaims only by **reusing freed slots**, and slot reuse
-    reintroduced the stale-handle scheduler race the bump allocator was built to
-    eliminate. The `GC_BLOCK == 1` safepoint + poison tripwire are still wired but
-    inert. `BROOD_GC_STRESS=1` lowers the GC threshold but, since `collect` is a
-    no-op, currently exercises nothing.
-  - **Known gap (not host-unsafe):** a *long-lived* process that never hibernates
-    (the in-language test **runner** across ~633 tests) accumulates unreachable
-    garbage until it trips the test memory soft cap (clean `E0043`, not a crash).
-    Planned fix: **hibernate the runner between batches** (the architecturally
-    consistent path — no slot reuse), *not* re-enabling the race-prone mark-sweep.
-  See `memory-model.md`.
+- ✅ **Memory reclamation — automatic, at any eval depth.** A per-process
+  **semi-space copying collector** (`Heap::collect` / `arena_flip`, sharing the
+  bump-allocator's no-slot-reuse discipline so it can't resurrect the old
+  mark-sweep scheduler race) reclaims LOCAL garbage automatically — nothing is
+  asked of the program author (no `while`, no manual collect; the old
+  `(hibernate)` primitive was **removed**).
+  - **Stage B — automatic safepoint** (ADR-055): collection fires at the eval
+    safepoint when the live set crosses an adaptive threshold. A generation epoch
+    on every handle (ADR-054) trips a precise debug tripwire on any stale deref.
+  - **Bounded loading** (ADR-058): `load`/`require`/`eval-string` run a file's
+    forms rooted on the explicit stack, so every entry path inherits the bound.
+  - **Collect at *any* eval depth** (ADR-061): the evaluator keeps its in-flight
+    LOCAL transients on an **operand stack** (`roots` + `env_roots`), so a loop
+    below the outermost eval — argument position, `try`-wrapped, deep — is bounded
+    too (depth-2 leak repro 3.5 GB → 28 MB). The macro compile pass opts out via
+    `MACRO_BLOCK` rather than being rooted. Supersedes the depth-1-only safepoint.
+  - Validated by `crates/lisp/tests/gc.rs` (tail loops, server loops, depth-≥2
+    loops, root and spawned) and the `BROOD_GC_STRESS=1` + `debug-assertions`
+    tripwire. **Deferred:** per-call operand-stack overhead can later skip rooting
+    handles known non-LOCAL; `macros.rs` could be rooted if GC is ever wanted
+    *during* expansion. See `memory-model.md`, `memory-review.md`.
 - ✅ **Self-hosted REPL in Brood** (ADR-048) — the read-eval-print loop is now
   `std/repl.blsp`, not Rust: a tail-recursive loop over `read-line` (the one new
   primitive) + `eval-string` + `pr-str`, with multi-line balance detection,
@@ -207,8 +202,11 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
 Each entry has a design sketch, the trigger that should pull it back in, and
 the workaround available today.
 
-- ⬜ **First-class set type + `#{…}` literal** — maps-as-sets work today;
-  picks up when "set of X" becomes a common pattern in M2+ editor code.
+- 🟡 **First-class set type + `#{…}` literal** — the `(require 'set)` library
+  (`std/set.blsp`, sets-over-maps: `set`/`conj`/`disj`/`union`/`intersection`/
+  `difference`/`subset?`) shipped (ADR-060); the **kernel** piece — a `#{…}` reader
+  literal, `#{…}` printing, and a distinct `set?`/`Tag::Set` — is still deferred,
+  and picks up when "set of X" becomes a common pattern in M2+ editor code.
 - ⬜ **Lazy sequences + `iterate`** — tail-recursive accumulator helpers
   cover the case today; picks up when an editor feature needs unbounded
   streams (animation frames, file lines, undo history).
@@ -377,6 +375,13 @@ The seam that makes remoteability free later (see architecture.md).
   ⬜ `:one-for-all` / `:rest-for-one` deferred — they need a kernel kill/exit
   primitive (no links/`exit` yet), so userland can't terminate healthy siblings.
   See [`supervision.md`](supervision.md) and [`concurrency-v2.md`](concurrency-v2.md) §4.
+- 🟡 **TCP sockets (the substrate, done — ADR-062).** Thin kernel primitives
+  (`tcp-connect`/`tcp-listen`/`tcp-send`/`tcp-close`/`tcp-local-port`) over a
+  reusable blocking-IO → mailbox seam (`process::spawn_io_source`, ADR-059):
+  inbound data and connections arrive as `[:tcp …]` / `[:tcp-accept …]` mailbox
+  messages, consumed with `receive` (no worker ever blocked). `std/tcp.blsp` adds
+  `socket?` + `tcp-drain`. ⬜ Follow-ups: TLS (`rustls`) → `std/http.blsp`;
+  `tcp-controlling-process`; a `mio` reactor for scale.
 - ⬜ The same runtime listens on a socket and serves the M3 protocol
 - ⬜ Remote editor instances attach (the Emacs `--daemon` / `emacsclient` model)
 - ⬜ One core, multiple attached frontends

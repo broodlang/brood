@@ -83,12 +83,12 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
         );
     }
 
-    // GC-block guard: increments `GC_BLOCK` for the lifetime of this `eval`
-    // frame. The safepoint below collects only when this is the **outermost**
-    // contributor (`gc_block_depth() == 1`) — no other eval / macroexpand frame
-    // is on the stack, so the eval's own loop-body locals (`head`/`rest`/
-    // `callee`/`argv`/`scope`) are dead at `continue 'tail` and only `expr`/`env`
-    // persist. `Drop` runs on every return path (including `?` and panic).
+    // GC-block guard: increments `GC_BLOCK` for the lifetime of this `eval` frame.
+    // Since ADR-061 the GC safepoint no longer gates on this depth (it collects at
+    // any eval depth — every frame roots its transients on the operand stack); the
+    // guard now feeds only the stack-overflow byte guard below, which keys its base
+    // off the outermost eval (`gc_block_depth() <= 1`). `Drop` runs on every return
+    // path (including `?` and panic).
     let _gc_block = crate::process::GcBlockGuard::enter();
 
     // Stack-budget guard (ADR-043; runaway non-tail recursion). Every nested
@@ -129,40 +129,101 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     .map_err(|e| e.or_form_pos(heap, expr_sym));
             }
             Value::Vector(id) => {
+                // A vector literal evaluates each element. Those evals can collect
+                // at ANY depth (ADR-061), so keep both the unevaluated elements and
+                // the accumulated results on the operand stack across them.
                 let items = heap.vector(id).to_vec();
-                let mut out = Vec::with_capacity(items.len());
-                for item in items {
-                    out.push(eval(heap, item, env)?);
+                let n = items.len();
+                let vb = heap.roots_len();
+                let eb = heap.env_roots_len();
+                heap.push_env_root(env);
+                for &it in &items {
+                    heap.push_root(it); // vb .. : source elements
                 }
+                let out_base = heap.roots_len(); // accumulated results
+                for i in 0..n {
+                    let env_now = heap.env_root_at(eb);
+                    let item = heap.root_at(vb + i);
+                    match eval(heap, item, env_now) {
+                        Ok(v) => heap.push_root(v),
+                        Err(e) => {
+                            heap.truncate_roots(vb);
+                            heap.truncate_env_roots(eb);
+                            return Err(e);
+                        }
+                    }
+                }
+                let mut out = Vec::with_capacity(n);
+                for i in 0..n {
+                    out.push(heap.root_at(out_base + i));
+                }
+                heap.truncate_roots(vb);
+                heap.truncate_env_roots(eb);
                 return Ok(heap.alloc_vector(out));
             }
             Value::Map(id) => {
                 // A map literal evaluates each key and value, then canonicalises
-                // (last-wins on equal keys). Like a vector literal, but in pairs.
+                // (last-wins on equal keys). Like a vector literal, but in pairs —
+                // and likewise operand-stack-rooted so a deep collection during an
+                // element eval can't dangle the source forms or accumulated pairs.
                 let entries = heap.map_entries(id);
-                let mut pairs = Vec::with_capacity(entries.len());
-                for (k, v) in entries {
-                    let k = eval(heap, k, env)?;
-                    let v = eval(heap, v, env)?;
-                    pairs.push((k, v));
+                let n = entries.len();
+                let vb = heap.roots_len();
+                let eb = heap.env_roots_len();
+                heap.push_env_root(env);
+                for &(k, v) in &entries {
+                    heap.push_root(k); // vb + 2i     : source key
+                    heap.push_root(v); // vb + 2i + 1 : source value
                 }
+                let res_base = heap.roots_len(); // accumulated (k, v) results, flattened
+                for i in 0..n {
+                    let env_now = heap.env_root_at(eb);
+                    let kf = heap.root_at(vb + 2 * i);
+                    let kv = match eval(heap, kf, env_now) {
+                        Ok(x) => x,
+                        Err(e) => {
+                            heap.truncate_roots(vb);
+                            heap.truncate_env_roots(eb);
+                            return Err(e);
+                        }
+                    };
+                    heap.push_root(kv);
+                    let env_now = heap.env_root_at(eb);
+                    let vf = heap.root_at(vb + 2 * i + 1);
+                    let vv = match eval(heap, vf, env_now) {
+                        Ok(x) => x,
+                        Err(e) => {
+                            heap.truncate_roots(vb);
+                            heap.truncate_env_roots(eb);
+                            return Err(e);
+                        }
+                    };
+                    heap.push_root(vv);
+                }
+                let mut pairs = Vec::with_capacity(n);
+                for i in 0..n {
+                    pairs.push((heap.root_at(res_base + 2 * i), heap.root_at(res_base + 2 * i + 1)));
+                }
+                heap.truncate_roots(vb);
+                heap.truncate_env_roots(eb);
                 return Ok(heap.map_from_pairs(pairs));
             }
             Value::Pair(_) => {} // combination, handled below
             _ => return Ok(expr),
         }
 
-        // GC safepoint. Outermost eval only — inner evals (arg evaluation, body
-        // forms, etc.) sit at `GC_BLOCK >= 2` and short-circuit. (The
-        // soft-memory-limit check below is deliberately *not* so gated — see
-        // there.) At the outermost loop top:
-        //   • `expr` / `env` are passed as roots,
-        //   • the dynamic stack and the explicit root stack are scanned by
-        //     `collect` itself,
-        //   • no other Rust frame holds an unrooted LOCAL transient (the
-        //     `GC_BLOCK == 1` invariant — see `docs/memory-model.md`).
-        // Cost on inner-eval iterations: one TLS read + compare (fail-fast).
-        if crate::process::gc_block_depth() == 1 && heap.gc_due() {
+        // GC safepoint — fires at ANY eval depth (ADR-061). The loop-top is the
+        // one point in a frame where its only live LOCAL transients are `expr` /
+        // `env` (the per-iteration `argv`/`scope`/… were already torn down or not
+        // yet built); they're passed as roots below. Every *ancestor* frame's live
+        // transients sit on the heap operand stack (`roots`/`env_roots`), which
+        // `collect` relocates in place, and the dynamic stack is scanned too — so
+        // no Rust frame holds an unrooted LOCAL handle a moving collection would
+        // strand. The one exception is the macro-expansion compile pass (its
+        // forms aren't operand-stack rooted), which opts out via `MACRO_BLOCK`.
+        // (The soft-memory-limit check below is deliberately *not* gated.) Cost
+        // when not collecting: one TLS read + a `gc_due` compare.
+        if !crate::process::macro_block_active() && heap.gc_due() {
             // Copying collection: `expr`/`env` MOVE to fresh slabs, so write the
             // relocated handles back into the loop's live registers (the dynamic
             // stack and explicit root stack are relocated in place by `collect`).
@@ -230,14 +291,36 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     let (test_form, r) = uncons(heap, rest);
                     let (then_form, r) = uncons(heap, r);
                     let (else_form, _) = uncons(heap, r);
-                    let test =
-                        eval(heap, test_form, env).map_err(|e| e.or_form_pos(heap, test_form))?;
+                    // Evaluating the test can collect at ANY depth (ADR-061), so
+                    // keep the unchosen branches + env on the operand stack and
+                    // re-read the relocated handles before the tail hand-off.
+                    let vb = heap.roots_len();
+                    let eb = heap.env_roots_len();
+                    heap.push_env_root(env);
+                    heap.push_root(then_form); // vb+0
+                    heap.push_root(else_form); // vb+1
+                    let test = match eval(heap, test_form, env)
+                        .map_err(|e| e.or_form_pos(heap, test_form))
+                    {
+                        Ok(t) => t,
+                        Err(e) => {
+                            heap.truncate_roots(vb);
+                            heap.truncate_env_roots(eb);
+                            return Err(e);
+                        }
+                    };
+                    let then_form = heap.root_at(vb);
+                    let else_form = heap.root_at(vb + 1);
+                    env = heap.env_root_at(eb);
+                    heap.truncate_roots(vb);
+                    heap.truncate_env_roots(eb);
                     expr = if truthy(test) { then_form } else { else_form };
                     continue 'tail;
                 }
                 Some(SpecialForm::Do) => match tail_of_cons(heap, rest, env)? {
-                    Some(last) => {
+                    Some((last, env_r)) => {
                         expr = last;
+                        env = env_r;
                         continue 'tail;
                     }
                     None => return Ok(Value::Nil),
@@ -250,7 +333,16 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                             .ok_or_else(|| LispError::runtime("def: missing name"))?,
                     )?;
                     let val = if args.len() > 1 {
-                        eval(heap, args[1], env).map_err(|e| e.or_form_pos(heap, args[1]))?
+                        // The value eval can collect at any depth (ADR-061); root
+                        // `env` across it (the result is fresh post-collection, and
+                        // `name` is an interned symbol — neither needs re-reading).
+                        let eb = heap.env_roots_len();
+                        heap.push_env_root(env);
+                        let out =
+                            eval(heap, args[1], env).map_err(|e| e.or_form_pos(heap, args[1]));
+                        env = heap.env_root_at(eb);
+                        heap.truncate_env_roots(eb);
+                        out?
                     } else {
                         Value::Nil
                     };
@@ -354,18 +446,11 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                         continue 'tail;
                     }
                     let scope = heap.new_env(Some(env));
-                    let mut i = 0;
-                    while i < binds.len() {
-                        let bind_name = as_symbol(binds[i])?;
-                        let rhs = binds[i + 1];
-                        let val = eval(heap, rhs, scope).map_err(|e| e.or_form_pos(heap, rhs))?;
-                        heap.env_define(scope, bind_name, val);
-                        i += 2;
-                    }
+                    let (scope, body) = bind_sequential(heap, &binds, scope, body)?;
                     match tail_of_cons(heap, body, scope)? {
-                        Some(last) => {
+                        Some((last, env_r)) => {
                             expr = last;
-                            env = scope;
+                            env = env_r;
                             continue 'tail;
                         }
                         None => return Ok(Value::Nil),
@@ -408,24 +493,20 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                         ));
                     }
                     let scope = heap.new_env(Some(env));
+                    // Pre-define every name to nil so all are visible in every RHS
+                    // (no eval here → no GC). The RHS evals then run via the shared
+                    // operand-stack-rooted helper.
                     let mut i = 0;
                     while i < binds.len() {
                         let bind_name = as_symbol(binds[i])?;
                         heap.env_define(scope, bind_name, Value::Nil);
                         i += 2;
                     }
-                    let mut i = 0;
-                    while i < binds.len() {
-                        let bind_name = as_symbol(binds[i])?;
-                        let rhs = binds[i + 1];
-                        let val = eval(heap, rhs, scope).map_err(|e| e.or_form_pos(heap, rhs))?;
-                        heap.env_define(scope, bind_name, val);
-                        i += 2;
-                    }
+                    let (scope, body) = bind_sequential(heap, &binds, scope, body)?;
                     match tail_of_cons(heap, body, scope)? {
-                        Some(last) => {
+                        Some((last, env_r)) => {
                             expr = last;
-                            env = scope;
+                            env = env_r;
                             continue 'tail;
                         }
                         None => return Ok(Value::Nil),
@@ -448,7 +529,8 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
         // checks `pos.is_none()` first, so the innermost annotation wins; this
         // is only a cost on the error path (`form_pos` lookup is skipped
         // entirely when the error is already tagged).
-        let call_form = expr;
+        let mut call_form = expr;
+        let mut spine = rest;
 
         let callee = match head {
             Value::Sym(s) => {
@@ -459,38 +541,59 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                 // `continue 'tail`) exits this eval frame directly — no outer
                 // `or_form_pos` will see it. Attach `call_form`'s position
                 // here so the diagnostic points at the failing call's line,
-                // not the enclosing top-level form's start.
+                // not the enclosing top-level form's start. (No GC can run
+                // between here and the lookup — `env_get` doesn't eval.)
                 let v = heap
                     .env_get(env, s)
                     .ok_or_else(|| unbound_error(s))
                     .map_err(|e| e.or_form_pos(heap, call_form))?;
                 if let Value::Macro(mid) = v {
-                    let arg_forms = heap.list_to_vec(rest)?;
-                    expr = apply_closure(heap, mid, &arg_forms)
-                        .map_err(|e| e.or_form_pos(heap, call_form))?;
+                    // Macro expansion can collect at any depth (ADR-061); root
+                    // `env` across it so the `continue 'tail` re-reads the
+                    // relocated handle. `arg_forms` is consumed by `bind_params`
+                    // inside `apply_closure`, which roots it itself.
+                    let arg_forms = heap.list_to_vec(spine)?;
+                    let eb = heap.env_roots_len();
+                    heap.push_env_root(env);
+                    let out =
+                        apply_closure(heap, mid, &arg_forms).map_err(|e| e.or_form_pos(heap, call_form));
+                    env = heap.env_root_at(eb);
+                    heap.truncate_env_roots(eb);
+                    expr = out?;
                     continue 'tail;
                 }
                 v
             }
-            _ => eval(heap, head, env).map_err(|e| e.or_form_pos(heap, head))?,
+            _ => {
+                // A computed head (`((f) …)`) is evaluated — and that eval can
+                // collect at any depth, so root `call_form` + `env` across it,
+                // then re-read the relocated handles and re-derive the spine
+                // from the moved `call_form`.
+                let vb = heap.roots_len();
+                let eb = heap.env_roots_len();
+                heap.push_root(call_form);
+                heap.push_env_root(env);
+                let out = eval(heap, head, env).map_err(|e| e.or_form_pos(heap, head));
+                call_form = heap.root_at(vb);
+                env = heap.env_root_at(eb);
+                heap.truncate_roots(vb);
+                heap.truncate_env_roots(eb);
+                let callee = out?;
+                spine = match call_form {
+                    Value::Pair(p) => heap.pair(p).1,
+                    _ => Value::Nil,
+                };
+                callee
+            }
         };
 
-        // Evaluate the argument forms straight off the `rest` cons spine into
-        // `argv`, without first collecting them into an intermediate Vec. Inline
-        // storage (no heap alloc) for the common small-arity call.
-        let mut argv: SmallVec<[Value; 8]> = SmallVec::new();
-        let mut cur = rest;
-        loop {
-            match cur {
-                Value::Nil => break,
-                Value::Pair(p) => {
-                    let (form, next) = heap.pair(p);
-                    argv.push(eval(heap, form, env).map_err(|e| e.or_form_pos(heap, form))?);
-                    cur = next;
-                }
-                _ => return Err(LispError::type_err("improper argument list in call")),
-            }
-        }
+        // Evaluate the argument forms off the cons spine into an owned `argv`,
+        // keeping the callee / accumulated args / spine cursor on the operand
+        // stack (env on the env stack) so a collection at ANY eval depth
+        // relocates them in place (ADR-061). Returns the relocated callee /
+        // call_form / env alongside `argv`.
+        let (argv, callee, call_form, env_r) = eval_arguments(heap, callee, call_form, spine, env)?;
+        env = env_r;
 
         // Inline `apply` unfolding: when the callee is the `apply` builtin,
         // splice the trailing sequence into `argv` and dispatch the real
@@ -530,11 +633,38 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     return Ok(Value::Nil);
                 }
                 let (last, init) = body.split_last().expect("checked non-empty");
-                for &form in init {
-                    eval(heap, form, scope).map_err(|e| e.or_form_pos(heap, form))?;
+                if init.is_empty() {
+                    // Single-form body (the common case): hand `last` straight to
+                    // the loop — the safepoint roots `expr`/`env` for us, so no
+                    // operand-stack push is needed.
+                    expr = *last;
+                    env = scope;
+                    continue 'tail;
                 }
-                expr = *last;
-                env = scope;
+                // Multi-form body: each non-last form is evaluated for effect, and
+                // an eval can collect at any depth (ADR-061) — so root `scope`,
+                // `last`, and the remaining body forms across those evals, then
+                // re-read the relocated handles for the tail hand-off.
+                let vb = heap.roots_len();
+                let eb = heap.env_roots_len();
+                heap.push_env_root(scope);
+                heap.push_root(*last); // vb+0
+                for &form in init {
+                    heap.push_root(form); // vb+1 ..
+                }
+                for i in 0..init.len() {
+                    let scope_now = heap.env_root_at(eb);
+                    let form = heap.root_at(vb + 1 + i);
+                    if let Err(e) = eval(heap, form, scope_now).map_err(|e| e.or_form_pos(heap, form)) {
+                        heap.truncate_roots(vb);
+                        heap.truncate_env_roots(eb);
+                        return Err(e);
+                    }
+                }
+                expr = heap.root_at(vb);
+                env = heap.env_root_at(eb);
+                heap.truncate_roots(vb);
+                heap.truncate_env_roots(eb);
                 continue 'tail;
             }
             other => {
@@ -546,6 +676,70 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
             }
         }
     }
+}
+
+/// Evaluate a combination's argument forms off the `spine` cons list into an
+/// owned `argv`, while keeping every LOCAL transient the call still needs on the
+/// heap **operand stack** (ADR-061): `call_form`, `callee`, the spine cursor, and
+/// each accumulated arg live on `heap.roots`; `env` lives on `heap.env_roots`.
+/// The copying collector relocates those in place, so a GC safepoint at ANY eval
+/// depth (not just the outermost) is safe here. Returns the owned `argv` plus the
+/// post-collection (relocated) `callee`, `call_form`, and `env`. The operand-stack
+/// region is always torn down before returning, including on the error path.
+#[inline]
+fn eval_arguments(
+    heap: &mut Heap,
+    callee: Value,
+    call_form: Value,
+    spine: Value,
+    env: EnvId,
+) -> Result<(SmallVec<[Value; 8]>, Value, Value, EnvId), LispError> {
+    let vbase = heap.roots_len();
+    let ebase = heap.env_roots_len();
+    heap.push_root(call_form); // vbase+0
+    heap.push_root(callee); // vbase+1
+    heap.push_root(spine); // vbase+2 — the cons-spine cursor, advanced in place
+    heap.push_env_root(env); // ebase
+                             // Evaluated args accumulate at vbase+3 ..
+    loop {
+        let cur = heap.root_at(vbase + 2);
+        let form = match cur {
+            Value::Nil => break,
+            Value::Pair(p) => heap.pair(p).0,
+            _ => {
+                heap.truncate_roots(vbase);
+                heap.truncate_env_roots(ebase);
+                return Err(LispError::type_err("improper argument list in call"));
+            }
+        };
+        let env_now = heap.env_root_at(ebase);
+        match eval(heap, form, env_now).map_err(|e| e.or_form_pos(heap, form)) {
+            Ok(v) => heap.push_root(v),
+            Err(e) => {
+                heap.truncate_roots(vbase);
+                heap.truncate_env_roots(ebase);
+                return Err(e);
+            }
+        }
+        // Advance the cursor from the (possibly relocated) slot, not the stale
+        // `cur`/`next` read before the eval.
+        let next = match heap.root_at(vbase + 2) {
+            Value::Pair(p) => heap.pair(p).1,
+            _ => Value::Nil,
+        };
+        heap.set_root(vbase + 2, next);
+    }
+    let argc = heap.roots_len() - (vbase + 3);
+    let mut argv: SmallVec<[Value; 8]> = SmallVec::with_capacity(argc);
+    for i in 0..argc {
+        argv.push(heap.root_at(vbase + 3 + i));
+    }
+    let callee = heap.root_at(vbase + 1);
+    let call_form = heap.root_at(vbase);
+    let env = heap.env_root_at(ebase);
+    heap.truncate_roots(vbase);
+    heap.truncate_env_roots(ebase);
+    Ok((argv, callee, call_form, env))
 }
 
 pub fn apply(heap: &mut Heap, callee: Value, argv: &[Value], env: EnvId) -> LispResult {
@@ -562,12 +756,36 @@ pub fn apply(heap: &mut Heap, callee: Value, argv: &[Value], env: EnvId) -> Lisp
 pub fn apply_closure(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> LispResult {
     // `bind_params` selects the arm for `argv`'s arity and returns its body.
     let (scope, body) = bind_params(heap, cl, argv)?;
-    let mut result = Value::Nil;
+    if body.is_empty() {
+        return Ok(Value::Nil);
+    }
+    // Each body-form eval can collect at ANY depth (ADR-061), so keep `scope` and
+    // the remaining body forms on the operand stack across them (the intermediate
+    // `result`s are dead the moment they're overwritten, so they need no slot).
+    let vb = heap.roots_len();
+    let eb = heap.env_roots_len();
+    heap.push_env_root(scope);
     for &form in &body {
+        heap.push_root(form);
+    }
+    let n = body.len();
+    let mut result = Value::Nil;
+    for i in 0..n {
+        let scope_now = heap.env_root_at(eb);
+        let form = heap.root_at(vb + i);
         // Same as the closure body branch in `eval`: tag the body form's
         // position on any error so the diagnostic points at the failing line.
-        result = eval(heap, form, scope).map_err(|e| e.or_form_pos(heap, form))?;
+        match eval(heap, form, scope_now).map_err(|e| e.or_form_pos(heap, form)) {
+            Ok(v) => result = v,
+            Err(e) => {
+                heap.truncate_roots(vb);
+                heap.truncate_env_roots(eb);
+                return Err(e);
+            }
+        }
     }
+    heap.truncate_roots(vb);
+    heap.truncate_env_roots(eb);
     Ok(result)
 }
 
@@ -609,27 +827,81 @@ fn bind_params(
     for (i, &arg) in argv.iter().enumerate().take(required) {
         heap.env_define(scope, params[i], arg);
     }
+    // Fast path: no `&optional` params. Binding the rest list (if any) does no
+    // eval, so no GC can run — `argv` / `body` stay valid, no rooting needed.
+    if n_opt == 0 {
+        if let Some(rs) = rest_sym {
+            let rest_list = heap.list_from_slice(&argv[required..]);
+            heap.env_define(scope, rs, rest_list);
+        }
+        return Ok((scope, body));
+    }
+    // `&optional` defaults present: each default's eval can collect at ANY depth
+    // (ADR-061). The caller's `argv` slice, `scope`, every default form, and the
+    // body forms are LOCAL transients a deep collection would relocate — root them
+    // all on the operand stack and read back relocated handles. (Only paid by
+    // functions that actually declare `&optional` params.)
+    let vb = heap.roots_len();
+    let eb = heap.env_roots_len();
+    heap.push_env_root(scope); // eb
+    let argv_base = heap.roots_len();
+    for &a in argv {
+        heap.push_root(a); // argv_base ..
+    }
+    let argn = argv.len();
+    let opt_base = heap.roots_len();
+    for &(_, d) in &optionals {
+        heap.push_root(d); // opt_base .. : default forms
+    }
+    let body_base = heap.roots_len();
+    for &f in &body {
+        heap.push_root(f); // body_base .. : body forms
+    }
     let mut idx = required;
     for j in 0..n_opt {
-        let (name, default_form) = optionals[j];
-        if idx < argv.len() {
-            heap.env_define(scope, name, argv[idx]);
+        let name = optionals[j].0;
+        let scope_now = heap.env_root_at(eb);
+        if idx < argn {
+            let arg = heap.root_at(argv_base + idx);
+            heap.env_define(scope_now, name, arg);
             idx += 1;
         } else {
             // Tag the default-form's source position on any error from its
             // evaluation, so a diagnostic from inside an `&optional` default
             // points at the default's line (not at the enclosing top-level
             // form's start).
-            let value =
-                eval(heap, default_form, scope).map_err(|e| e.or_form_pos(heap, default_form))?;
-            heap.env_define(scope, name, value);
+            let default_form = heap.root_at(opt_base + j);
+            let value = match eval(heap, default_form, scope_now)
+                .map_err(|e| e.or_form_pos(heap, default_form))
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    heap.truncate_roots(vb);
+                    heap.truncate_env_roots(eb);
+                    return Err(e);
+                }
+            };
+            let scope_now = heap.env_root_at(eb);
+            heap.env_define(scope_now, name, value);
         }
     }
     if let Some(rs) = rest_sym {
-        let rest_list = heap.list_from_slice(&argv[idx..]);
-        heap.env_define(scope, rs, rest_list);
+        let mut rest_items: SmallVec<[Value; 8]> = SmallVec::new();
+        for i in idx..argn {
+            rest_items.push(heap.root_at(argv_base + i));
+        }
+        let rest_list = heap.list_from_slice(&rest_items);
+        let scope_now = heap.env_root_at(eb);
+        heap.env_define(scope_now, rs, rest_list);
     }
-    Ok((scope, body))
+    let mut body_r: SmallVec<[Value; 4]> = SmallVec::with_capacity(body.len());
+    for i in 0..body.len() {
+        body_r.push(heap.root_at(body_base + i));
+    }
+    let scope_r = heap.env_root_at(eb);
+    heap.truncate_roots(vb);
+    heap.truncate_env_roots(eb);
+    Ok((scope_r, body_r))
 }
 
 /// Build the arity error for a call whose argument count no arm accepts. For a
@@ -897,20 +1169,107 @@ fn uncons(heap: &Heap, v: Value) -> (Value, Value) {
 /// form's source position is attached to any error it raises (innermost wins),
 /// so a `do`-body failure points at the failing form's line, not the enclosing
 /// `do`'s.
-fn tail_of_cons(heap: &mut Heap, body: Value, env: EnvId) -> Result<Option<Value>, LispError> {
-    let mut cur = body;
+/// Evaluate `let`/`letrec` binding RHSs in `scope`, defining each `name`. Each
+/// RHS eval can collect at ANY depth (ADR-061), so `scope`, the binding forms,
+/// and the trailing `body` are kept on the operand stack across the evals;
+/// returns the relocated `(scope, body)`. `binds` is name/value-interleaved with
+/// all even slots already validated as symbols.
+fn bind_sequential(
+    heap: &mut Heap,
+    binds: &[Value],
+    scope: EnvId,
+    body: Value,
+) -> Result<(EnvId, Value), LispError> {
+    let vb = heap.roots_len();
+    let eb = heap.env_roots_len();
+    heap.push_env_root(scope);
+    heap.push_root(body); // vb+0
+    for &b in binds {
+        heap.push_root(b); // vb+1 .. (names + rhs, interleaved)
+    }
+    let n = binds.len();
+    let mut i = 0;
+    while i < n {
+        let bind_name = as_symbol(heap.root_at(vb + 1 + i))?;
+        let rhs = heap.root_at(vb + 1 + i + 1);
+        let scope_now = heap.env_root_at(eb);
+        let val = match eval(heap, rhs, scope_now).map_err(|e| e.or_form_pos(heap, rhs)) {
+            Ok(v) => v,
+            Err(e) => {
+                heap.truncate_roots(vb);
+                heap.truncate_env_roots(eb);
+                return Err(e);
+            }
+        };
+        let scope_now = heap.env_root_at(eb);
+        heap.env_define(scope_now, bind_name, val);
+        i += 2;
+    }
+    let body_r = heap.root_at(vb);
+    let scope_r = heap.env_root_at(eb);
+    heap.truncate_roots(vb);
+    heap.truncate_env_roots(eb);
+    Ok((scope_r, body_r))
+}
+
+fn tail_of_cons(
+    heap: &mut Heap,
+    body: Value,
+    env: EnvId,
+) -> Result<Option<(Value, EnvId)>, LispError> {
+    // Fast peek: empty body, or a single form (no eval → no GC → no rooting).
+    match body {
+        Value::Nil => return Ok(None),
+        Value::Pair(p) => {
+            let (form, next) = heap.pair(p);
+            if matches!(next, Value::Nil) {
+                return Ok(Some((form, env)));
+            }
+        }
+        _ => return Err(LispError::type_err("improper body list")),
+    }
+    // Multi-form body: each non-last form is evaluated for effect, and an eval can
+    // collect at ANY depth (ADR-061). Keep `env` on the env operand stack and the
+    // spine cursor on the value operand stack so a deep collection relocates them
+    // in place; return the relocated `env` alongside the tail form for the
+    // caller's `continue 'tail`.
+    let vb = heap.roots_len();
+    let eb = heap.env_roots_len();
+    heap.push_env_root(env);
+    heap.push_root(body); // vb+0 = spine cursor
     loop {
+        let cur = heap.root_at(vb);
         match cur {
-            Value::Nil => return Ok(None),
+            Value::Nil => {
+                heap.truncate_roots(vb);
+                heap.truncate_env_roots(eb);
+                return Ok(None);
+            }
             Value::Pair(p) => {
                 let (form, next) = heap.pair(p);
                 if matches!(next, Value::Nil) {
-                    return Ok(Some(form));
+                    let env_r = heap.env_root_at(eb);
+                    heap.truncate_roots(vb);
+                    heap.truncate_env_roots(eb);
+                    return Ok(Some((form, env_r)));
                 }
-                eval(heap, form, env).map_err(|e| e.or_form_pos(heap, form))?;
-                cur = next;
+                let env_now = heap.env_root_at(eb);
+                if let Err(e) = eval(heap, form, env_now).map_err(|e| e.or_form_pos(heap, form)) {
+                    heap.truncate_roots(vb);
+                    heap.truncate_env_roots(eb);
+                    return Err(e);
+                }
+                let next = match heap.root_at(vb) {
+                    Value::Pair(p2) => heap.pair(p2).1,
+                    _ => Value::Nil,
+                };
+                heap.set_root(vb, next);
             }
-            _ => return Err(LispError::type_err("improper body list")),
+            _ => {
+                heap.truncate_roots(vb);
+                heap.truncate_env_roots(eb);
+                return Err(LispError::type_err("improper body list"));
+            }
         }
     }
 }

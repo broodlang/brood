@@ -3599,3 +3599,170 @@ removes), ADR-046 (the display/input seam; predicted async-input-to-mailbox),
 ADR-043 (root-vs-worker thread + finite-poll model), ADR-033/034 (the dist
 reader-thread → mailbox precedent), [`handoff-blocking-io.md`](handoff-blocking-io.md),
 [`roadmap.md`](roadmap.md) M3/M4.
+
+## ADR-060 — Sets are a library over maps; the `#{…}` literal is deferred
+
+**Status:** accepted (2026-05-30). `std/set.blsp` implemented.
+
+**Context.** Building cellular automata / editor code surfaced the want for a set
+of values (a Game-of-Life live-cell set is the canonical case). The workaround —
+a map `{[x y] true}` whose values are meaningless filler — works but is a *tell*:
+it doesn't read as "a set," and there's no `union`/`intersection`/`difference`.
+
+**Decision.** Ship sets as an **opt-in Brood library** (`(require 'set)`), not a
+kernel value kind. A set *is* a map of `element → true`. This follows the repo's
+prime directive (write the language in the language — ADR-006) and "defer power
+features" (ADR-011):
+
+- Because a set is a map, **every existing map/sequence operation already applies**
+  — membership is `(contains? s x)`, elements `(keys s)`, size `(count s)`,
+  iteration via `fold`/`map`/`into`. The library adds *only* the genuine gaps: a
+  deduping constructor `set`, single-element `conj`/`disj`, and the algebra
+  `union`/`intersection`/`difference`/`subset?`. Structural equality and vector
+  keys come for free from the CHAMP map underneath (ADR-040).
+- **Deferred to the kernel, deliberately:** a `#{…}` reader literal, `#{…}`
+  printing, and a distinct `set?`/`Tag::Set`. Those need reader, printer, and a new
+  `Value` variant (and the type-system bit, GC trace, copy-on-send arms — the full
+  compatibility contract in `docs/types.md`). Until a concrete need pulls them in,
+  a set is a map, so test it with `map?`. The library API is forward-compatible:
+  the function names/meanings survive the eventual literal.
+
+**Consequences.**
+- Zero kernel surface, zero new `Value` match arms — the feature lands without
+  touching the exhaustive `Value` matches (notably not colliding with in-flight
+  kernel work).
+- A set and the equivalent `{… true}` map are *indistinguishable* (no `set?`).
+  That's the accepted cost of the deferral; it's revisited if/when the literal
+  lands.
+
+**References.** ADR-006 (write the language in the language), ADR-011 (defer power
+features), ADR-040 (CHAMP map the set rides on), [`roadmap.md`](roadmap.md)
+(deferred-features list).
+
+## ADR-061 — Collect at any eval depth via an operand stack
+
+**Status:** accepted (2026-05-30). Implemented.
+
+**Context.** Stage B's automatic copying GC (ADR-055) fired **only at the
+outermost eval** (`gc_block_depth() == 1`). The reason was a rooting invariant: a
+moving (semi-space) collector must relocate *every* live LOCAL handle, and at the
+loop top of the outermost eval the only live transients are the rooted `expr`/`env`
+— every inner eval frame's `argv`/`scope`/accumulators sit unrooted on the Rust
+stack, so collecting while one is live would strand them. ADR-058 worked around
+this for `load` by resetting the block depth so each top-level form re-enters at
+depth 1.
+
+But any loop running *below* the outermost eval never reached a safepoint and grew
+unbounded (bounded only by the ADR-043 host cap):
+
+- a loop in **argument position** — `(println (gen 0))` runs `gen` at depth 2;
+- a **`try`-wrapped** loop — `(try (loop) (catch e …))`, the supervised-server
+  shape (the thunk runs via `apply` at depth ≥ 2);
+- the **Game-of-Life-via-supervisor** case from the retro: a spawned generation
+  loop whose per-generation `mapcat`/`frequencies` churn (all at depth ≥ 2) could
+  only be reclaimed *between* generations, spiking RSS to ~1.1 GB.
+
+Measured: a heavy per-iteration loop at depth 1 peaked **131 MB** (collected every
+iteration); the identical loop at depth 2 hit **3.5 GB / 0 collections**.
+
+**Decision.** Give the evaluator an **operand stack** so the collector can root
+every in-flight LOCAL transient and therefore run at **any** eval depth. The
+existing explicit root stack (`Heap::roots`) gains an `EnvId` sibling
+(`Heap::env_roots`); both are relocated in place by the copying collector
+(`arena_flip`). Every recursive-eval site in `eval/mod.rs` pushes the values it
+still needs *after* a nested `eval` — the accumulating `argv`, the cons-spine
+cursor, the `callee`, the `call_form`, literal accumulators, `scope`, body forms —
+onto these stacks, then re-reads the relocated handles afterwards. The same
+discipline covers `bind_params` (`&optional` defaults), `apply_closure`,
+`tail_of_cons`, `let`/`letrec` bindings, and the re-entrant builtins (`try`'s
+handler; `load`/`eval-string`'s form lists). The safepoint gate changes from
+`gc_block_depth() == 1` to "**not in the macro-expansion compile pass**".
+
+The **compile pass opts out instead of being rooted.** `macroexpand_all` holds
+partially-built LOCAL forms in unrooted Rust locals; rooting all of `macros.rs`
+would be a large, error-prone surface for a path that runs once per top-level form
+and allocates little. So a new thread-local `MACRO_BLOCK` (a `MacroBlockGuard`,
+saved/restored across coroutine suspend exactly like `GC_BLOCK`/`STACK_BASE`)
+suppresses collection during expansion — the brief growth is reclaimed at the next
+runtime safepoint, as before. `GC_BLOCK` survives only to feed the stack-overflow
+byte guard; it no longer gates GC, and the now-vestigial `GcBlockReset`/`load`
+depth-1 trick (ADR-058) is removed.
+
+**Consequences.**
+- A loop at *any* depth is now memory-bounded with no author intervention — the
+  depth-2 leak repro drops from **3.5 GB → 28 MB**. The retro's spawned-vs-top-level
+  spike is gone for the same reason (the mid-generation churn is reclaimable).
+- Every function call now pays a few `Vec` push/re-read/truncate operations to
+  maintain the operand stack. Correctness over speed for now (ADR-006 dogfooding);
+  the hot path can later skip rooting for handles already known non-LOCAL
+  (RUNTIME/PRELUDE forms never move) if benchmarks demand it.
+- Safety rests on the generational use-after-GC tripwire (ADR-054): a missed root
+  panics at the bad deref under `RUSTFLAGS="-C debug-assertions=on"
+  BROOD_GC_STRESS=1`. The full suite and a shape battery run clean under it.
+- Supersedes the depth-1-only safepoint of ADR-055 and the `load` depth-1 reset of
+  ADR-058. `docs/memory-review.md` called this "Model b, the operand-stack VM."
+
+**References.** ADR-055 (Stage B automatic GC), ADR-058 (bounded `load`), ADR-054
+(use-after-GC tripwire), ADR-043 (host memory cap), `docs/memory-model.md`,
+`docs/memory-review.md`.
+
+## ADR-062 — TCP sockets: thin kernel, mailbox-delivered, over a reusable IO seam
+
+**Status:** accepted (2026-05-30). Implemented (client + server; TLS is a planned
+follow-up).
+
+**Context.** Brood needs network I/O — first as a genuine language capability
+(an HTTP client, eventually the M4 server listening on a socket), and to dogfood
+the package-loading story with a real third-party-style package. The kernel had
+no Brood-callable sockets (the `dist` node link reads `TcpStream`s in Rust,
+private). The question was *how thin* the native layer is and *how* a socket
+interacts with the green scheduler.
+
+**Decision.**
+
+- **Thin kernel mechanism, policy in Brood (ADR-006).** Five primitives —
+  `tcp-connect` / `tcp-listen` / `tcp-send` / `tcp-close` / `tcp-local-port` —
+  wrap `std::net`. Framing, request/response draining, and protocols (HTTP next)
+  are Brood (`std/tcp.blsp`).
+- **Mailbox delivery, not polling (ADR-059).** An early non-blocking-poll design
+  (Brood loops over a `tcp-recv` that returns would-block) was built and then
+  **replaced**: it busy-polls and pins no worker only by luck. Instead a socket
+  follows the blocking-IO → mailbox rule: a dedicated **non-worker reader thread**
+  blocks on `read` and `deliver`s events to the **owning process's mailbox**, and
+  Brood consumes them with plain `receive`. Shapes: `[:tcp sock data]`,
+  `[:tcp-closed sock]`, `[:tcp-accept lsock client]`. `connect`/`listen` register
+  the *calling* process as owner; an accepted client is wired to the listener's
+  owner. A socket waiting for data costs zero workers.
+- **A reusable IO seam.** The thread-plus-`deliver` pattern is extracted into one
+  place — `process::spawn_io_source(subscriber, name, |sink| …)` + `MailboxSink`
+  — so sockets are its first consumer and `gui` / `dist` / terminal input migrate
+  onto it later (they hand-roll the same pattern today). This is the concrete
+  form of ADR-059's principle.
+- **`Value::Socket(u64)` — a scalar handle.** Unlike the heap-bound rope, a socket
+  is an id into a global registry, so the GC treats it as a leaf (never traced or
+  moved) and it is valid across this runtime's processes (a spawned handler can
+  own one). It is **not** node-portable: the dist wire codec rejects
+  `Message::Socket`. Adding the 17th `Tag` widened `Ty` from `u16` to `u32`
+  (32-atom cap; the documented widen point).
+
+**Consequences / scope.**
+
+- No polling, no `tcp--yield`; `std/tcp.blsp` shrank to `socket?` + `tcp-drain`
+  (collect a response until the peer closes). `tests/tcp_test.blsp` drives a full
+  loopback echo in a single process via `receive` (so it passes without depending
+  on cross-process spawn).
+- **Blocking corners (v1):** `tcp-connect` and `tcp-send` block their worker
+  briefly (a connect handshake / a `write_all`); the *accept* loop polls on its
+  own dedicated thread. Fine at the dozens-of-connections scale; a `mio` reactor
+  (ADR-059 Phase 2) is the later scale path, under the same primitives.
+- **Deferred:** TLS (a `tls-connect` returning the same socket handle, via
+  `rustls` — the one non-thin, crate-backed exception, so `std/http.blsp` can do
+  `https`); `tcp-controlling-process` (hand a client socket to a per-connection
+  handler); binary-safe bytes (recv is UTF-8-lossy today — fine for text/HTTP).
+- Data crosses as **strings** (UTF-8 lossy on recv); a bytes type is a separate
+  future decision.
+
+**References.** ADR-059 (blocking work → mailbox; the seam this builds on),
+ADR-006 (language-in-the-language), ADR-026 (immutability — sockets are the
+Rust-backed mutable-resource escape hatch, like the rope), ADR-045 (rope, the
+other opaque handle), `docs/handoff-blocking-io.md`.

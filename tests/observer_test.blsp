@@ -217,6 +217,21 @@
       ;; the footer (last text op) is the minibuffer prompt, and a cursor op is placed
       (is (string-contains? (nth (last (filter (fn (op) (= (first op) :text)) f)) 3) "λ"))
       (is (includes? (map first f) :cursor))))
+  (test "command-mode minibuffer syntax-highlights the input (shared with the REPL)"
+    ;; the input is coloured by the same `highlight-chunks` the REPL line editor uses
+    (let (edit (assoc (lineedit--init "λ " "" []) :text "(+ 1 2)" :point 7)
+          f (observe-frame sample-node [(pinfo 1 :a :running 0 0)] 0 60 12 false :id :ok
+                           {:mode :command :edit edit :msg nil})
+          ;; text ops on the minibuffer row (rows-1 = 11) carrying an :fg face — the
+          ;; coloured tokens (e.g. the numbers / the operator)
+          coloured (filter (fn (op)
+                             (and (= (first op) :text)
+                                  (= (nth op 1) 11)
+                                  (>= (count op) 5)
+                                  (map? (nth op 4))
+                                  (contains? (nth op 4) :fg)))
+                           f))
+      (is (> (count coloured) 0))))
   (test "a :msg replaces the detail line"
     (let (f (observe-frame sample-node [(pinfo 1 :a :running 0 0)] 0 60 12 false :id :ok {:msg "=> 42"}))
       (is (string-contains? (nth (nth f (- (count f) 2)) 3) "=> 42")))))

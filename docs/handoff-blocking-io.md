@@ -1,6 +1,14 @@
 # Handoff: blocking work must never pin a worker
 
-**Status:** Phase 1 implemented (GUI observer); Phases 2–3 planned. See ADR-058.
+**Status:** Phase 1 implemented (GUI observer). **The reusable seam now exists**:
+`process::spawn_io_source(subscriber, name, |sink| …)` + `MailboxSink`
+(`process/io_source.rs`) is the one place the thread-plus-`deliver` pattern lives.
+**TCP sockets are its first consumer** (ADR-062, `crate::net` + `std/tcp.blsp`):
+each socket reads on a dedicated non-worker thread and delivers `[:tcp …]` /
+`[:tcp-closed …]` / `[:tcp-accept …]` to the owning process's mailbox. Still
+planned: migrate `gui`/`dist`/terminal onto `spawn_io_source`; a `mio` reactor to
+fold per-socket reader threads into one (Phase 2 scale); the Phase-3 offload pool.
+See ADR-058/059/062.
 
 ## The problem
 
@@ -92,3 +100,15 @@ expressed through the same mailbox mechanism (no process migration required).
   follow-up.
 - **`gui-poll` removed**: the observer uses `receive`; scripts/tests that want raw
   input open a window and `receive` in their own process (the root counts).
+- **The display's `:poll` is process-bound.** `(gui-display)`'s `:draw`/`:size`/
+  `:leave` act on the captured window id, but `:poll` is a `receive` on the
+  *calling* process's mailbox (where `gui-open` registered delivery) — it ignores
+  the window id. So a display must be created and polled by the **same** process;
+  passing it to another process to run would read the wrong mailbox. (The terminal
+  display has no such constraint — it's a constant over the single terminal.)
+- **Input messages carry no window id.** A delivered key/mouse message is the bare
+  `term-poll`-shaped value (`"a"`, `:up`, `[:mouse …]`) so the observer loop stays
+  frontend-agnostic — but it means one process driving two windows can't tell their
+  input apart. Hence one process per window (`(observe)` spawns accordingly). If a
+  future multi-window-single-process app needs it, tag deliveries with the window
+  id and unwrap in that app's loop (keeping the bare shape for the observer).

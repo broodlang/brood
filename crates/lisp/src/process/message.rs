@@ -61,6 +61,10 @@ pub enum Message {
         node: Symbol,
         id: u64,
     },
+    /// A TCP socket id. Valid only *within one runtime* (the socket registry is
+    /// global to the OS process); the dist wire codec rejects it, since the id is
+    /// meaningless on another node.
+    Socket(u64),
     /// A serialised closure (Erlang's "send a fun"). Because a closure's body and
     /// its optionals' defaults are S-expression *forms* (plain data), and its free
     /// globals resolve on the receiver, a function can travel as data. Only its free
@@ -199,6 +203,12 @@ fn to_message_rec(
                  rebuild with (string->rope s) on the other side",
             ));
         }
+        // A socket is a global-registry id (not a per-heap handle like a rope),
+        // so it is valid across every green process *in this runtime* — it may
+        // cross in a message or be captured by a `spawn`ed closure (the
+        // per-connection-handler pattern). It is NOT node-portable: the cross-node
+        // wire codec rejects it (the id means nothing in another runtime).
+        Value::Socket(id) => Message::Socket(id),
     })
 }
 
@@ -382,6 +392,7 @@ pub fn from_message(heap: &mut Heap, m: &Message) -> Value {
             node: *node,
             id: *id,
         },
+        Message::Socket(id) => Value::Socket(*id),
         Message::Closure(c) => closure_from_message(heap, c),
     }
 }

@@ -617,11 +617,14 @@ pub fn value_to_json(heap: &Heap, v: Value) -> Result<Json, String> {
         })),
         Value::Ref(id) => Ok(json!({ "$type": "ref", "id": id })),
         // A rope is editor-internal buffer text with no JSON shape; a tool that
-        // wants its content should return `(rope->string r)` explicitly.
-        Value::Fn(_) | Value::Macro(_) | Value::Native(_) | Value::Rope(_) => Err(format!(
-            "value of kind {:?} has no JSON representation",
-            value::tag(v)
-        )),
+        // wants its content should return `(rope->string r)` explicitly. A socket
+        // is a live OS resource — likewise no JSON shape.
+        Value::Fn(_) | Value::Macro(_) | Value::Native(_) | Value::Rope(_) | Value::Socket(_) => {
+            Err(format!(
+                "value of kind {:?} has no JSON representation",
+                value::tag(v)
+            ))
+        }
     }
 }
 

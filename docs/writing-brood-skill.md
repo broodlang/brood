@@ -52,6 +52,12 @@ will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
      for `(zip (keys m) (vals m))`; map iteration order is hash-driven, so use
      `frequencies` for order-insensitive comparisons. `seq` and `entries` make
      the coercion explicit when you want it.
+   - **Count with `frequencies` + `mapcat`, not a manual scan.** To tally
+     something across a collection, map each item to what it contributes and let
+     `frequencies` do the counting in one pass — e.g. a grid's next-generation
+     neighbour counts are `(frequencies (mapcat neighbours (keys live)))`: no
+     nested loop, no mutable tally. Reach for this before hand-rolling an
+     accumulator over indices.
    - `(sort coll)` is `<` for numbers but **structural lexicographic order** for
      vectors/lists, and text order for strings/keywords/symbols. So
      `(sort [[1 0] [2 1]])` Just Works — no comparator needed.
@@ -115,6 +121,7 @@ round-trips. Two faster moves:
   | a `flush` after `print` | nothing — `print` flushes stdout every call |
   | raw ANSI (`clear`+`home`, cursor moves) | `(require 'ansi)` → **call** `(ansi-clear)`/`(ansi-home)`/`(ansi-cursor r c)`/`(ansi-hide-cursor)` — these are **zero-arg functions** that *return* an escape string, so you must call them: `(print (ansi-clear))`, **never** `(print ansi-clear)` (a bare symbol prints `#<fn …>` and emits no escape). ESC is `\e`. A render loop wants `std/display` instead. |
   | a built-in RNG (`rand`) | `rng`/`rand-int`/`rand-float`/`shuffle`/`sample` — pure & seedable, return `[value next-seed]`; thread the seed through your state |
+  | a set / `#{}` | `(require 'set)` → a set is a **map of `element → true`**: membership `(contains? s x)`, elements `(keys s)`, size `(count s)`; the module adds `(set coll)` (dedups), `conj`/`disj`, `union`/`intersection`/`difference`/`subset?`. No `#{}` literal or `set?` yet — test with `map?`. |
 
 ## Before finishing
 
@@ -122,4 +129,9 @@ round-trips. Two faster moves:
   function does is the self-call). If not, rewrite with an accumulator.
 - No mutation crept in. No `[ ]` in a binding/param position. No bare symbol
   meant as a literal in a pattern.
+- **A TUI / animation render loop is not covered by `nest test`** — the suite
+  tests pure functions, never the loop's output. Verify it by inspecting the raw
+  bytes for escapes: `nest run --for 600ms 2>&1 | cat -v | grep -oE '\^\[\[[0-9;]*[A-Za-z]'`,
+  not by eyeballing a piped frame (which hides a stray `#<fn …>` printed where a
+  call was meant).
 - New public function has a docstring. Run `nest format` and `nest test`.

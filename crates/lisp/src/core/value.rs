@@ -308,6 +308,12 @@ pub enum Value {
         node: Symbol,
         id: u64,
     },
+    /// A TCP socket — an id into the global socket registry (`crate::net`). Like a
+    /// `Pid`/`Ref` it is a scalar handle, not a heap object: the GC never traces or
+    /// moves it, and it carries a live OS resource. Process-local mechanism (the
+    /// owning process drives it via the non-blocking `tcp-*` primitives); **never**
+    /// sent across processes. The TLS counterpart reuses this same handle.
+    Socket(u64),
 }
 
 /// The runtime type tags — the discriminant of [`Value`] made first-class, so it
@@ -340,6 +346,7 @@ pub enum Tag {
     Ref,
     Pid,
     Rope,
+    Socket,
 }
 
 impl Tag {
@@ -363,6 +370,7 @@ impl Tag {
             Tag::Ref => "ref",
             Tag::Pid => "pid",
             Tag::Rope => "rope",
+            Tag::Socket => "socket",
         }
     }
 }
@@ -387,6 +395,7 @@ pub fn tag(v: Value) -> Tag {
         Value::Ref(_) => Tag::Ref,
         Value::Pid { .. } => Tag::Pid,
         Value::Rope(_) => Tag::Rope,
+        Value::Socket(_) => Tag::Socket,
     }
 }
 

@@ -859,6 +859,51 @@ mod tests {
     }
 
     #[test]
+    fn flags_zero_arg_fn_passed_bare_to_an_output_sink() {
+        // The `(print ansi-clear)`-for-`(print (ansi-clear))` slip: a bare
+        // zero-arity global handed to print/println/str/format stringifies the
+        // function (#<fn …>), never its result — silent today.
+        for sink in &["print", "println", "str", "format"] {
+            let w = check_with_defs(&["(defn home () \"\\e[H\")"], &format!("({} home)", sink));
+            assert!(
+                w.iter()
+                    .any(|m| m.contains("home: function used as a value")
+                        && m.contains("did you mean (home)")),
+                "{} should flag a bare zero-arg fn: {:?}",
+                sink,
+                w
+            );
+        }
+    }
+
+    #[test]
+    fn function_as_value_lint_is_quiet_on_the_correct_and_legitimate_shapes() {
+        // Called correctly — no warning.
+        assert!(check_with_defs(&["(defn home () \"\\e[H\")"], "(print (home))")
+            .iter()
+            .all(|m| !m.contains("function used as a value")));
+        // A fn that *takes* arguments is a plausible intentional callback value.
+        assert!(check_with_defs(&["(defn f (x) x)"], "(print f)")
+            .iter()
+            .all(|m| !m.contains("function used as a value")));
+        // A same-named *local* (not the global zero-arg fn) is left alone.
+        assert!(
+            check_with_defs(&["(defn home () 1)"], "(let (home 42) (print home))")
+                .iter()
+                .all(|m| !m.contains("function used as a value"))
+        );
+        // A plain value is fine.
+        assert!(warnings("(print 42)")
+            .iter()
+            .all(|m| !m.contains("function used as a value")));
+        // The lint is sink-scoped: passing a bare zero-arg fn elsewhere (a real
+        // higher-order use) is not flagged.
+        assert!(check_with_defs(&["(defn home () 1)"], "(map home [1 2])")
+            .iter()
+            .all(|m| !m.contains("function used as a value")));
+    }
+
+    #[test]
     fn unbound_is_silent_for_in_scope_names() {
         // fn/lambda params don't look unbound when used as call heads or
         // referenced in the body.

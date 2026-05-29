@@ -16,10 +16,11 @@
 //!   after the worker has run others or migrated us.
 //! - [`REDUCTIONS`] — countdown to the next preempt; [`tick`] decrements
 //!   it from inside `eval`'s loop.
-//! - [`GC_BLOCK`] — eval/macroexpand nesting depth, consulted by the GC
-//!   safepoint in `eval::eval`. Saved/restored around every suspend so
-//!   workers multiplexing several processes don't leak each other's
-//!   depths.
+//! - [`GC_BLOCK`] — eval/macroexpand nesting depth; feeds the stack-overflow
+//!   byte guard (no longer the GC safepoint — ADR-061). [`MACRO_BLOCK`] —
+//!   compile-pass depth; the GC safepoint suppresses collection while it's
+//!   nonzero. Both saved/restored around every suspend so workers
+//!   multiplexing several processes don't leak each other's depths.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
@@ -102,10 +103,10 @@ thread_local! {
     static REDUCTIONS: Cell<u32> = const { Cell::new(0) };
 
     /// GC-block depth: how many `eval` / `macroexpand_all` frames are active on
-    /// this thread. The eval safepoint runs GC iff this is **1** ("we are the
-    /// outermost contributor — no other eval/macroexpand frame holds an
-    /// unrooted LOCAL transient"). See `docs/memory-model.md` and the
-    /// rooting-completeness argument in `eval::eval`.
+    /// this thread. Since ADR-061 this no longer gates the GC safepoint (which now
+    /// collects at any eval depth — see `MACRO_BLOCK` and the operand-stack rooting
+    /// in `eval::eval`); it survives only to feed the stack-overflow byte guard,
+    /// which establishes its base at the outermost eval (`gc_block_depth() <= 1`).
     ///
     /// Per-process: reset to 0 at coroutine entry and saved/restored around
     /// suspend (see `spawn` / `preempt` / `wait_for_message`), so workers
@@ -120,9 +121,22 @@ thread_local! {
     /// its own stack — the base is constant for the coroutine's life, but a
     /// worker running other coroutines in between must not clobber it.
     static STACK_BASE: Cell<usize> = const { Cell::new(0) };
+
+    /// Compile-pass depth (ADR-061): bumped by `macroexpand_all`'s
+    /// [`MacroBlockGuard`] for the duration of macro expansion. The eval safepoint
+    /// collects only when this is **zero** — i.e. never *during* the compile pass,
+    /// which (unlike runtime eval) holds partially-built LOCAL forms in unrooted
+    /// Rust locals. This is what lets the safepoint otherwise fire at ANY eval
+    /// depth (the operand stack roots runtime transients; the compile pass opts
+    /// out instead of being rooted). Reset to 0 at coroutine entry and
+    /// saved/restored across suspend, exactly like `GC_BLOCK`/`STACK_BASE`, since
+    /// expansion can suspend (its inner evals `tick`).
+    static MACRO_BLOCK: Cell<u32> = const { Cell::new(0) };
 }
 
-/// Current GC-block depth — `eval::eval`'s safepoint compares this against 1.
+/// Current GC-block depth — feeds the stack-overflow byte guard's base
+/// (`gc_block_depth() <= 1` = outermost eval). No longer gates the GC safepoint
+/// (ADR-061); see `MACRO_BLOCK`.
 #[inline]
 pub fn gc_block_depth() -> u32 {
     GC_BLOCK.with(|d| d.get())
@@ -147,6 +161,46 @@ pub(super) fn gc_block_set(n: u32) {
             n,
             std::thread::current().id()
         );
+    }
+}
+
+/// True while the macro-expansion compile pass is on the stack — the eval
+/// safepoint suppresses collection then (see `MACRO_BLOCK`).
+#[inline]
+pub fn macro_block_active() -> bool {
+    MACRO_BLOCK.with(|d| d.get() > 0)
+}
+
+/// Read the compile-pass depth for save/restore around a coroutine suspend.
+#[inline]
+pub(super) fn macro_block_save() -> u32 {
+    MACRO_BLOCK.with(|d| d.get())
+}
+
+/// Write the compile-pass depth — paired with `macro_block_save` around a
+/// suspend, and used by a fresh coroutine to wipe the worker's residual value.
+#[inline]
+pub(super) fn macro_block_set(n: u32) {
+    MACRO_BLOCK.with(|d| d.set(n));
+}
+
+/// RAII guard: increments `MACRO_BLOCK` for the lifetime of a `macroexpand_all`
+/// call, so the eval safepoint won't collect during the compile pass (whose
+/// transients aren't operand-stack rooted). `Drop` runs on every return path.
+pub struct MacroBlockGuard;
+
+impl MacroBlockGuard {
+    #[inline]
+    pub fn enter() -> Self {
+        MACRO_BLOCK.with(|d| d.set(d.get() + 1));
+        MacroBlockGuard
+    }
+}
+
+impl Drop for MacroBlockGuard {
+    #[inline]
+    fn drop(&mut self) {
+        MACRO_BLOCK.with(|d| d.set(d.get().saturating_sub(1)));
     }
 }
 
@@ -197,42 +251,6 @@ impl Drop for GcBlockGuard {
         }
         #[cfg(not(debug_assertions))]
         let _ = new;
-    }
-}
-
-/// RAII guard that drops the GC-block depth back to **0** for its lifetime,
-/// restoring the saved value on `Drop`. The inverse of [`GcBlockGuard`]: it lets
-/// a builtin that evaluates a fresh batch of top-level forms (`load` over a file's
-/// forms) re-enter `eval` at the depth-1 safepoint so Stage B can collect between
-/// them — instead of one frame deeper, where it never fires (the `nest run`/load
-/// memory leak, `docs/memory-review.md`).
-///
-/// **Safety contract:** only sound when no eval frame *below* this point holds an
-/// un-rooted LOCAL transient that a moving collection would invalidate. `load`
-/// uses it solely when it is itself at `gc_block_depth() == 1` AND the form being
-/// loaded is a spawned-process body (promoted to the RUNTIME region, so the outer
-/// `(load …)` frame's `expr`/`call_form` are RUNTIME handles a LOCAL collection
-/// never touches) — see `builtins::load`. Validated under
-/// `BROOD_GC_STRESS=1` + `debug_assertions` (the generational tripwire fires on
-/// any violation).
-pub struct GcBlockReset(u32);
-
-impl GcBlockReset {
-    #[inline]
-    pub fn enter() -> Self {
-        let saved = GC_BLOCK.with(|d| {
-            let n = d.get();
-            d.set(0);
-            n
-        });
-        GcBlockReset(saved)
-    }
-}
-
-impl Drop for GcBlockReset {
-    #[inline]
-    fn drop(&mut self) {
-        GC_BLOCK.with(|d| d.set(self.0));
     }
 }
 
@@ -394,6 +412,7 @@ fn preempt() {
         // depth is critical for safepoint correctness.
         let saved_block = gc_block_save();
         let saved_base = stack_base_save();
+        let saved_macro = macro_block_save();
         // SAFETY: same invariant as `receive` — the yielder is valid while this
         // coroutine is running, which is now (tick runs inside eval, inside the
         // coroutine body). Suspending returns control to the worker (`run_one`).
@@ -401,6 +420,7 @@ fn preempt() {
         CURRENT.with(|c| *c.borrow_mut() = Some(ctx));
         gc_block_set(saved_block);
         stack_base_set(saved_base);
+        macro_block_set(saved_macro);
     }
     // Root thread (yielder None): budget refreshed, never suspends.
 }
@@ -704,6 +724,7 @@ pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
         // freshly-allocated coroutine stack, not the worker's).
         gc_block_set(0);
         stack_base_set(0);
+        macro_block_set(0);
         let mut heap = Heap::with_regions(prelude, runtime);
         heap.set_global(EnvId::GLOBAL);
         // Run the process body. Its memory stays bounded with no help from the

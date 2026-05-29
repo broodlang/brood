@@ -57,6 +57,7 @@ attach). Drive the standalone app from the shell with `nest observe`.")
 (require 'display)
 (require 'keymap)     ; the shared key→command dispatcher (also used by the REPL)
 (require 'lineedit)  ; the minibuffer reuses lineedit's pure editing core
+(require 'highlight) ; …and its syntax colouring (shared with the REPL line editor)
 
 ;; ---- pure formatting helpers ------------------------------------------------
 
@@ -136,6 +137,49 @@ on screen (roughly centred), clamped so the window never runs past the end."
   (let (maxstart (max 0 (- n cap)))
     (max 0 (min maxstart (- sel (quot cap 2))))))
 
+;; ---- the eval minibuffer's rendering (colour shared with the REPL) -----------
+;;
+;; The minibuffer reuses the REPL line editor's *pure* analysis: `lineedit--handle`
+;; for editing (incl. Tab completion via its keymap) and `std/highlight.blsp` for
+;; colour. The only observer-specific bit is laying the highlight chunks out as
+;; absolute `text` ops (the observer paints a full frame), where lineedit emits
+;; relative `[:print …]` ops — both over the same `highlight-chunks`.
+
+(defn observe--chunk-ops--acc (chunks row col acc)
+  (if (empty? chunks)
+    (reverse acc)
+    (let ([s f] (first chunks))
+      (observe--chunk-ops--acc (rest chunks) row (+ col (string-length s))
+                               (cons (text row col s f) acc)))))
+
+(defn observe--chunk-ops (chunks row col)
+  "Lay `[substring face]` highlight chunks as absolute `text` ops on `row`, left to
+right from column `col`. Tail-recursive."
+  (observe--chunk-ops--acc chunks row col nil))
+
+(defn observe--minibuffer (edit row cols)
+  "Render the eval minibuffer at frame `row` (width `cols`): the prompt, then the
+input text with the **same** live syntax highlighting + bracket matching the REPL
+line editor uses (`highlight-chunks` / `lineedit--overrides` over
+`std/highlight.blsp`), then the cursor at point. Returns a list of render ops —
+pure, so it shares the REPL's colouring rather than re-implementing it. (Tab
+completion already works via `lineedit--handle`'s keymap in `observe--command-key`.)"
+  (let (prompt (observe--fit (get edit :prompt) cols)
+        promptw (string-length prompt)
+        input (get edit :text)
+        hs (or (get edit :hscroll) 0)
+        avail (max 0 (- cols promptw))
+        len (string-length input)
+        vis (substring input hs (min len (+ hs avail)))
+        point (get edit :point)
+        overrides (lineedit--overrides input point)
+        chunks (highlight-chunks input hs vis overrides)
+        cursor-col (min (max 0 (dec cols)) (+ promptw (- point hs))))
+    (append
+      [(text row 0 prompt nil)]
+      (observe--chunk-ops chunks row promptw)
+      [(cursor row cursor-col)])))
+
 ;; ---- the pure render core (no IO — the testable heart) ----------------------
 
 (defn observe-frame (node procs sel cols rows paused sort link ui)
@@ -165,10 +209,8 @@ the observer's testable core; `observe--loop` feeds it live data."
                  (get ui :msg) (str "  " (get ui :msg))
                  (empty? procs) "  (no live processes)"
                  :else (observe--detail (nth procs (min (max 0 (dec nprocs)) sel)) nprocs cap sel))
-        footer (if cmd?
-                 (str (get edit :prompt) (get edit :text))
-                 (str (if paused "  PAUSED · space resume" "  space pause")
-                      " · ↑/↓ select · s sort(" (name sort) ") · : eval · r refresh · q quit")))
+        footer (str (if paused "  PAUSED · space resume" "  space pause")
+                    " · ↑/↓ select · s sort(" (name sort) ") · : eval · r refresh · q quit"))
     (apply frame
            (append
              [(clear)
@@ -176,12 +218,12 @@ the observer's testable core; `observe--loop` feeds it live data."
               (text 1 0 (observe--fit (pad-right (nth lines 1) cols) cols) {:fg :dark-grey})
               (text 2 0 (observe--fit (str "  " (observe--cells "ID" "NAME" "STATUS" "MBOX" "MEM" "MON")) cols) {:bold true})]
              body
-             [(text (- rows 2) 0 (observe--fit (pad-right detail cols) cols) {:fg :cyan})
-              (text (dec rows) 0 (observe--fit (pad-right footer cols) cols) (if cmd? nil {:reverse true}))
-              ;; place the cursor in the minibuffer when editing a command
-              (if cmd?
-                (cursor (dec rows) (min (max 0 (dec cols)) (+ (string-length (get edit :prompt)) (get edit :point))))
-                nil)]))))
+             [(text (- rows 2) 0 (observe--fit (pad-right detail cols) cols) {:fg :cyan})]
+             ;; last row: the syntax-highlighted minibuffer (command mode, cursor
+             ;; placed) or the reverse-video help footer.
+             (if cmd?
+               (observe--minibuffer edit (dec rows) cols)
+               [(text (dec rows) 0 (observe--fit (pad-right footer cols) cols) {:reverse true})])))))
 
 ;; ---- live data --------------------------------------------------------------
 
@@ -373,7 +415,16 @@ windowed frontend is a *constructor*: it calls `gui-open` for a fresh window id 
 closes the `gui-*` primitives over it. The window is opened eagerly here, so
 `:enter` is a no-op and `:leave` closes it. Needs the runtime built with
 `--features gui` (`./configure --with-gui && make install`), else `gui-open`
-errors. The map also carries the raw `:window` id."
+errors. The map also carries the raw `:window` id.
+
+**Create and poll it in the same process.** `:draw`/`:size`/`:leave` act on the
+captured window id, but `:poll` is a `receive` on the *calling* process's mailbox
+(that's where `gui-open` delivers this window's input, ADR-058) — it ignores the
+window id. So a display made here must be polled by the process that made it; don't
+hand it to another process to run. And because the delivered key/mouse messages
+carry no window id, one process should drive **one** window (which is why
+`(observe)` spawns a process per window) — two windows in one process would mix
+their input. Both are deferred trade-offs (ADR-059), fine for the observer."
   (let (id (gui-open))
     {:enter (fn () nil)
      :leave (fn () (gui-close id))
@@ -529,7 +580,10 @@ dies when `gui-open` errors.
     (observe)   ; => another pid; a second, independent window
 
 For a modal terminal observer instead, call `(observe-attach *term-display*)`."
-  (spawn (fn () (observe-attach (gui-display)))))
+  ;; `spawn` is a macro that wraps its argument in a thunk, so pass the *expression*
+  ;; (not a `(fn () …)`) — `(gui-display)` then opens the window inside the new
+  ;; process, which owns it and receives its input.
+  (spawn (observe-attach (gui-display))))
 
 ;; ---- remote attach (observe a peer runtime over the node link, ADR-053) -----
 ;;
