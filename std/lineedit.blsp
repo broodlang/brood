@@ -230,13 +230,14 @@ against `cands` — the candidate itself when unique, else the longest common pr
 
 ;; ---- the keymap -------------------------------------------------------------
 
+;; The editor's `key → command-symbol` bindings — the bindable keymap (ADR-052).
+;; Override a key by re-`def`ing this map
+;;   (def *lineedit-keymap* (assoc *lineedit-keymap* :ctrl-x 'my-command))
+;; or change what a key does by redefining its command function; both take effect on
+;; the next keystroke (late binding). A command is a global `(fn (state key) -> state)`.
+;; A key not bound here self-inserts (a 1-char string) or is ignored. (Plain `def`
+;; takes no docstring — keep this as a comment, not a string before the map.)
 (def *lineedit-keymap*
-  "The editor's `key → command-symbol` bindings — the bindable keymap (ADR-052).
-Override a key by re-`def`ing this map
-(`(def *lineedit-keymap* (assoc *lineedit-keymap* :ctrl-x 'my-command))`), or change
-what a key does by redefining its command function; both take effect on the next
-keystroke (late binding). A command is a global `(fn (state key) -> state)`. A key
-not bound here self-inserts (a 1-char string) or is ignored."
   {:enter 'lineedit-submit
    :ctrl-c 'lineedit-cancel
    :ctrl-d 'lineedit-eof-or-delete
@@ -267,6 +268,12 @@ not bound here self-inserts (a 1-char string) or is ignored."
    :tab 'lineedit-complete
    :back-tab 'lineedit-complete})
 
+(defn lineedit-bind (key cmd)
+  "Bind `key` (a keyword like `:ctrl-x`, or a 1-char string) to command symbol `cmd`
+in the editor keymap, taking effect on the next keystroke. The ergonomic way to
+customise the REPL from the REPL: `(lineedit-bind :ctrl-x 'lineedit-clear-screen)`."
+  (def *lineedit-keymap* (assoc *lineedit-keymap* key cmd)))
+
 (defn lineedit--handle (state key)
   "Dispatch key event `key` through `*lineedit-keymap*` to its command — a global
 `(fn (state key) -> state)` resolved by symbol (so redefining the command, or
@@ -275,7 +282,7 @@ string) or is a no-op; a command that throws is caught so a bad binding can't cr
 the read. Pure apart from that symbol resolution; testable without a terminal."
   (let (sym (get *lineedit-keymap* key))
     (cond
-      (some? sym) (try ((eval sym) state key) (catch e state))
+      (not (nil? sym)) (try ((eval sym) state key) (catch e state))
       (and (string? key) (= (string-length key) 1)) (lineedit-self-insert state key)
       :else state)))
 
