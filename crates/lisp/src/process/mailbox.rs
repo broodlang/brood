@@ -77,7 +77,9 @@ impl Mailbox {
                 scanned: 0,
             }),
             cv: Condvar::new(),
-            status: AtomicU8::new(ST_RUNNABLE),
+            // The root (which never goes through enqueue/run_one) keeps this; a
+            // spawned green is set RUNNABLE by `enqueue` immediately after.
+            status: AtomicU8::new(ST_RUNNING),
             mem: AtomicUsize::new(0),
         })
     }
