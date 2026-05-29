@@ -69,10 +69,23 @@
       (assert= (map (fn (p) (get p :id)) (observe--sort ps :id)) '(1 2 3))
       (assert= (map (fn (p) (get p :id)) (observe--sort ps :mailbox)) '(1 2 3))   ; mbox 9,5,1
       (assert= (map (fn (p) (get p :id)) (observe--sort ps :memory)) '(1 2 3))))  ; mem 30,20,10
-  (test "observe--next-sort cycles id → mailbox → memory → id"
+  (test "observe--next-sort cycles id → mailbox → memory → tree → id"
     (assert= (observe--next-sort :id) :mailbox)
     (assert= (observe--next-sort :mailbox) :memory)
-    (assert= (observe--next-sort :memory) :id))
+    (assert= (observe--next-sort :memory) :tree)
+    (assert= (observe--next-sort :tree) :id))
+  (test "observe--tree-order builds a parent→child forest with depths"
+    (let (ps [{:id 1 :parent nil} {:id 4 :parent 2} {:id 2 :parent 1}
+              {:id 5 :parent 3} {:id 3 :parent 1}]
+          ordered (observe--tree-order ps))
+      ;; DFS: 1, then 2 and its child 4, then 3 and its child 5
+      (assert= (map (fn (p) (get p :id)) ordered) '(1 2 4 3 5))
+      (assert= (map (fn (p) (get p :depth)) ordered) '(0 1 2 1 2))))
+  (test "observe--tree-order treats an orphan (parent not in set) as a root"
+    (let (ps [{:id 7 :parent 999} {:id 8 :parent 7}]
+          ordered (observe--tree-order ps))
+      (assert= (map (fn (p) (get p :id)) ordered) '(7 8))
+      (assert= (get (first ordered) :depth) 0)))
   (test "observe--node-lines summarises the node panel + link status"
     (let (node {:name :nonode :workers 4 :peak 6 :spawned 10
                 :mem 2048 :mem-peak 4096 :peers []}
@@ -166,7 +179,10 @@
         (is (map? info))
         (assert= (get info :status) :waiting)
         (is (>= (get info :mailbox) 2))
-        (is (number? (get info :id))))))
+        (is (number? (get info :id)))
+        ;; :memory is published on receive — the parked worker reports its footprint
+        (is (number? (get info :memory)))
+        (is (> (get info :memory) 0)))))
 
   (test "monitoring a process shows up in :monitored-by"
     (let (m (spawn (receive (_ :done))))
@@ -174,11 +190,12 @@
       (sleep 10)
       (is (>= (get (process-info m) :monitored-by) 1))))
 
-  (test "process-info of self is a live map with an id"
+  (test "process-info of self is a live, running map with an id"
     (let (info (process-info (self)))
       (is (map? info))
       (is (number? (get info :id)))
-      (is (includes? [:running :waiting] (get info :status)))))
+      ;; self is executing this call, so the status cell reads :running
+      (assert= (get info :status) :running)))
 
   (test ":parent is the spawner's id"
     (let (me (get (process-info (self)) :id)

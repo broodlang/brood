@@ -77,20 +77,26 @@ attach). Drive the standalone app from the shell with `nest observe`.")
        (pad-left (str mbox) 6) " " (pad-left mem 8) " " (pad-left (str mon) 4)))
 
 (defn observe--proc-cells (p)
-  "The table line for one `process-info` map `p`."
-  (observe--cells (get p :id)
-                  (observe--opt (get p :name) name)
-                  (observe--opt (get p :status) name)
-                  (get p :mailbox)
-                  (observe--opt (get p :memory) observe--bytes->human)
-                  (get p :monitored-by)))
+  "The table line for one `process-info` map `p`. In tree view the map carries a
+`:depth`, which indents the NAME (clipped to its column so the rest stay aligned)."
+  (let (depth (or (get p :depth) 0)
+        nm (observe--opt (get p :name) name)
+        nm (if (> depth 0) (observe--fit (str (string-repeat "  " depth) nm) 12) nm))
+    (observe--cells (get p :id)
+                    nm
+                    (observe--opt (get p :status) name)
+                    (get p :mailbox)
+                    (observe--opt (get p :memory) observe--bytes->human)
+                    (get p :monitored-by))))
 
 (defn observe--row-face (p selected?)
-  "Face for a process row: reverse-video when selected, else dimmed/green by status."
+  "Face for a process row: reverse-video when selected, else coloured by status
+(running green, runnable yellow, waiting dim)."
   (if selected?
     {:reverse true}
-    (cond (= (get p :status) :running) {:fg :green}
-          (= (get p :status) :waiting) {:fg :dark-grey}
+    (cond (= (get p :status) :running)  {:fg :green}
+          (= (get p :status) :runnable) {:fg :yellow}
+          (= (get p :status) :waiting)  {:fg :dark-grey}
           :else nil)))
 
 (defn observe--detail (p nprocs cap sel)
@@ -181,9 +187,42 @@ observer's testable core; `observe--loop` feeds it live data."
     (= key :memory)  (sort-by (fn (p) (- (or (get p :memory) 0))) procs)
     :else            (sort-by (fn (p) (get p :id)) procs)))
 
+(defn observe--tree-walk (p procs depth limit)
+  "DFS: emit `p` (tagged with `:depth`) followed by its children's subtrees, each
+child sorted by id. Normally terminates because a child's id exceeds its parent's
+(spawn order). `limit` (the process count) caps the depth as a guard: a malformed
+snapshot with a parent cycle (impossible from `process-info`, but a buggy remote
+peer could send one) is bounded instead of overflowing the stack."
+  (if (>= depth limit)
+    [(assoc p :depth depth)]
+    (let (kids (sort-by (fn (c) (get c :id))
+                        (filter (fn (c) (= (get c :parent) (get p :id))) procs)))
+      (cons (assoc p :depth depth)
+            (mapcat (fn (k) (observe--tree-walk k procs (inc depth) limit)) kids)))))
+
+(defn observe--tree-order (procs)
+  "Order `procs` as a parent→child forest: roots first (a process whose `:parent`
+is nil or not in the set), each followed by its descendants (DFS), with `:depth`
+tagged for indentation. Children appear under their parent."
+  (let (ids (map (fn (p) (get p :id)) procs)
+        limit (count procs)
+        root? (fn (p) (let (pa (get p :parent)) (or (nil? pa) (< (index-of ids pa) 0))))
+        roots (sort-by (fn (p) (get p :id)) (filter root? procs)))
+    (mapcat (fn (r) (observe--tree-walk r procs 0 limit)) roots)))
+
+(defn observe--order (procs sort)
+  "Order `procs` for display by `sort`: `:tree` builds the parent→child forest,
+anything else is `observe--sort` (id / mailbox / memory)."
+  (if (= sort :tree)
+    (observe--tree-order procs)
+    (observe--sort procs sort)))
+
 (defn observe--next-sort (key)
-  "Cycle the sort key: id → mailbox → memory → id."
-  (cond (= key :id) :mailbox (= key :mailbox) :memory :else :id))
+  "Cycle the sort key: id → mailbox → memory → tree → id."
+  (cond (= key :id) :mailbox
+        (= key :mailbox) :memory
+        (= key :memory) :tree
+        :else :id))
 
 (defn observe--local-source ()
   "The inline data **source**: a `process-info` map for every live process in
@@ -236,7 +275,7 @@ for remote attach — the loop doesn't care which."
         state (if paused state (observe--apply-result state (source)))
         sort (get state :sort)
         snap (or (get state :last) {:node (observe--node-info) :procs []})
-        procs (observe--sort (get snap :procs) sort)
+        procs (observe--order (get snap :procs) sort)
         n (count procs)
         sel (observe--sel-index procs (get state :sel-id)))
     (term-draw (observe-frame (get snap :node) procs sel cols rows paused sort (get state :link)))
@@ -358,7 +397,8 @@ until you quit."
 (defn observe-run (&optional (demo true))
   "Run the interactive process observer as a standalone app — a full-screen TUI
 with node stats and a navigable process table. `↑`/`↓` (or `k`/`j`) select, `s`
-cycles the sort (id/mailbox/memory), `space` pauses/resumes the live refresh, `r`
+cycles the view (id / mailbox / memory / tree — tree indents children under their
+parent), `space` pauses/resumes the live refresh, `r`
 refreshes, and `q`/Esc/Ctrl-C quits. With `demo` true (the default), seeds a few
 demo processes first so a fresh runtime has something to watch, then delegates to
 `observe-attach`. Pairs with `nest observe`. To observe a *running* program's own
