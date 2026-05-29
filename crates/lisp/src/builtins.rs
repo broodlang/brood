@@ -1119,7 +1119,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("monitor", &["pid"], "Watch pid; returns a monitor ref. Delivers [:down ref pid reason] when pid dies."),
     ("list-processes", &[], "Every currently-live pid on this runtime (one per registered mailbox). Order is unspecified — sort if you need stability. For agents/tools enumerating spawned processes."),
     ("mailbox-size", &["pid"], "How many messages are queued in pid's mailbox (its receive backlog), or nil if pid is not a live local process. The one process-introspection accessor not reachable from Brood; see std/observe.blsp."),
-    ("process-info", &["pid"], "A snapshot map of a live local process: {:id :node :name :status :mailbox :monitored-by} (:status is :running or :waiting; :name nil if unregistered). nil for a remote/dead pid. The Erlang-process_info-style introspection the observer reads; see std/observe.blsp."),
+    ("process-info", &["pid"], "A snapshot map of a live local process: {:id :node :name :status :mailbox :monitored-by :parent} (:status is :running or :waiting; :name nil if unregistered; :parent the spawner's id, nil for the root). nil for a remote/dead pid. The Erlang-process_info-style introspection the observer reads; see std/observe.blsp."),
     ("term-enter", &[], "Enter raw mode + the alternate screen and hide the cursor, taking over the terminal for a full-screen UI. Pair with term-leave. (ADR-046 display seam.)"),
     ("term-leave", &[], "Restore the terminal: show the cursor, leave the alternate screen, disable raw mode. The normal-path teardown for term-enter."),
     ("term-size", &[], "The terminal size as [cols rows] in character cells."),
@@ -2506,11 +2506,12 @@ fn mailbox_size(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// name / monitor tables (ADR-051):
 ///
 ///   `{:id <int> :node <kw> :name <kw|nil> :status <kw> :mailbox <int>
-///     :monitored-by <int>}`
+///     :monitored-by <int> :parent <int|nil>}`
 ///
 /// `:status` is `:running` / `:waiting` (parked in `receive`). `:name` is the
-/// registered name or nil. `:parent` and `:memory` join the map once the kernel
-/// tracks them per-process (the observer already tolerates their absence).
+/// registered name or nil. `:parent` is the spawner's id (nil for the root).
+/// `:memory` (per-process bytes) joins once the kernel tracks it, and `:status`
+/// sharpens when an explicit state enum lands (the observer tolerates the gap).
 /// Each accessor takes one lock independently, so no two are held at once.
 fn process_info(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match arg(args, 0) {
@@ -2527,6 +2528,10 @@ fn process_info(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
                 .unwrap_or(Value::Nil);
             let mailbox = Value::Int(crate::process::mailbox_len(id).unwrap_or(0) as i64);
             let monitored = Value::Int(crate::process::monitored_by(id) as i64);
+            // `:parent` is the spawner's id, or nil for the root.
+            let parent = crate::process::parent_of(id)
+                .map(|p| Value::Int(p as i64))
+                .unwrap_or(Value::Nil);
             let pairs = vec![
                 (value::kw("id"), Value::Int(id as i64)),
                 (value::kw("node"), Value::Keyword(node)),
@@ -2534,6 +2539,7 @@ fn process_info(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
                 (value::kw("status"), status),
                 (value::kw("mailbox"), mailbox),
                 (value::kw("monitored-by"), monitored),
+                (value::kw("parent"), parent),
             ];
             Ok(heap.map_from_pairs(pairs))
         }

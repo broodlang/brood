@@ -22,7 +22,7 @@
 //!   depths.
 
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, Once};
 
@@ -373,6 +373,17 @@ fn preempt() {
 
 pub(super) static NEXT_PID: AtomicU64 = AtomicU64::new(1);
 static SPAWNED: AtomicU64 = AtomicU64::new(0);
+/// child pid → the pid that `spawn`ed it. Populated at `spawn`, removed at
+/// `deregister` (a parent record lives only as long as the child). Backs
+/// `process-info`'s `:parent` (and a future process-tree view). A side table
+/// rather than a `Process` field because the `Process` isn't reachable from the
+/// registry while it runs; this is.
+static PARENTS: LazyLock<Mutex<HashMap<u64, u64>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The pid that spawned `pid`, or `None` for the root process (or a dead pid).
+pub fn parent_of(pid: u64) -> Option<u64> {
+    crate::core::sync::lock(&PARENTS).get(&pid).copied()
+}
 static RUNNING: AtomicUsize = AtomicUsize::new(0); // processes inside `resume` right now
 static PEAK_RUNNING: AtomicUsize = AtomicUsize::new(0);
 static WORKER_COUNT: AtomicUsize = AtomicUsize::new(0); // 0 = default (≈ nproc)
@@ -499,6 +510,7 @@ fn deregister(pid: u64, reason: Message) {
     // holds REGISTRY while taking NAMES or MONITORS, or this becomes a
     // genuine ordering hazard.
     crate::core::sync::lock(&REGISTRY).remove(&pid);
+    crate::core::sync::lock(&PARENTS).remove(&pid);
     // Drop any registered names that pointed at this pid — Erlang semantics
     // (a name lives only as long as its process). Without this, named-spawn
     // would see the stale entry as "already running" and never respawn.
@@ -605,6 +617,10 @@ fn run_one(mut proc: Box<Process>) {
 /// Erlang-style let-it-crash: an uncaught throw kills the process, monitors
 /// fire `[:down :error …]` immediately.
 pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
+    // The spawner is the parent. Captured before minting the child pid so the
+    // root (whose ctx/pid is lazily minted here on its first spawn) gets the
+    // lower id. `ensure_ctx` needs no heap.
+    let parent = self_pid();
     // Promote the thunk into the shared RUNTIME region so its handle (and any
     // captured local scope) is valid in the child, which shares this runtime's
     // code via the Arcs below. A top-level function is already shared (no-op).
@@ -617,6 +633,7 @@ pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
 
     let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
     SPAWNED.fetch_add(1, Ordering::SeqCst);
+    crate::core::sync::lock(&PARENTS).insert(pid, parent);
     let mailbox = Mailbox::new();
     crate::core::sync::lock(&REGISTRY).insert(pid, Arc::clone(&mailbox));
 
