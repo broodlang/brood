@@ -14,12 +14,14 @@
 //!
 //!   nest new <name>        scaffold a new project
 //!   nest run [<file>]      run :main, or `<file>` if given (project context
-//!                          preloaded when inside a project)
+//!                          preloaded when inside a project); `--main MOD[/FN]`
+//!                          overrides the entry for one run
 //!   nest test [<file>...]  run the project's tests, or the listed files
 //!   nest check [<file>...] type-check the project, or the listed files
 //!   nest repl              project-aware REPL (sources preloaded)
 //!   nest format            in-place reformat (`--check` for CI dry-run)
-//!   nest doc [module]      Markdown docs (whole project or one module)
+//!   nest doc [module]      Markdown docs (whole project or one module);
+//!                          `--all` is the complete builtin + prelude reference
 //!   nest mcp               Model Context Protocol server over stdio
 //!
 //! `-j N` / `--max-parallel N` caps concurrent spawned processes. Hot reload

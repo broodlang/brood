@@ -49,11 +49,14 @@ the `nest new` scaffolder.")
 ;;   "app"        => (app main)
 ;;   "app/start"  => (app start)
 (defn project--parse-main-spec (spec)
-  (let (parts (string-split spec "/"))
+  (let (parts (string-split spec "/")
+        ; reject blank module/fn halves so a typo like "" or "/start" errors
+        ; cleanly here, not as a malformed `(require '||)` downstream.
+        ok? (fn (p) (not (blank? p))))
     (cond
-      (= (count parts) 1) (list (symbol (first parts)) 'main)
-      (and (= (count parts) 2) (not (blank? (second parts)))) (list (symbol (first parts))
-                                                                (symbol (second parts)))
+      (and (= (count parts) 1) (ok? (first parts))) (list (symbol (first parts)) 'main)
+      (and (= (count parts) 2) (ok? (first parts)) (ok? (second parts))) (list (symbol (first parts))
+                                                                          (symbol (second parts)))
       else (error "nest run --main: expected \"module\" or \"module/fn\", got " spec))))
 
 (defn set-project-main (spec)

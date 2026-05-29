@@ -140,14 +140,16 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   `std/highlight.blsp`: a raw-mode, emacs/readline-style line editor with live
   tree-sitter-style lexical **syntax highlighting**, **bracket matching**,
   function **signature hints**, **Tab completion**, and the core emacs keys
-  (C-a/C-e, C-f/C-b, M-f/M-b, C-k/C-u/C-w, C-y, Home/End, ↑/↓ session history) —
-  all written in Brood over a thin new inline `term-*` seam (`term-raw-enter` /
-  `term-raw-leave` / `term-emit`, plus ALT/BackTab key encoding). On a TTY it
-  replaces `read-line`; piped input keeps the plain path byte-for-byte. ⬜
-  Follow-ups: a scheduler-parking key read (makes the editor's `term-poll` block
-  truly zero-cost — already benign, since it ties up only the REPL's own worker
-  and yields every ≤250 ms), locals-in-scope completion, reverse history search
-  (C-r), persistent history, real wide-char widths.
+  (C-a/C-e, C-f/C-b, M-f/M-b, C-k/C-u/C-w, M-d, C-y, C-t, C-h, C-l, Home/End, ↑/↓
+  or C-p/C-n history, **C-r reverse search**) — all written in Brood over a thin new
+  inline `term-*` seam (`term-raw-enter` / `term-raw-leave` / `term-emit`, plus
+  ALT/BackTab key encoding) and a rebindable keymap (`std/keymap.blsp`). On a TTY it
+  replaces `read-line`; piped input keeps the plain path byte-for-byte. **Persistent
+  history** (`~/.brood_history`) spans sessions, and `(special-forms)` keeps the
+  highlighter in sync with the LSP. ⬜ Follow-ups: a scheduler-parking key read
+  (makes the editor's `term-poll` block truly zero-cost — already benign, since it
+  ties up only the REPL's own worker and yields every ≤250 ms), locals-in-scope
+  completion, and real wide-char widths.
 - ✅ **Modules** — Emacs-flat `provide` / `require` + `*load-path*` over the shared
   global table; `foo--private` convention (ADR-019). Logic in Brood; the only new
   Rust is `file-exists?` / `dir?` / `list-dir` / `cwd` / `name` / `eval-string` /
@@ -228,9 +230,17 @@ the workaround available today.
   (`docs/feedback-retro-game-of-life.md` §5.4). Runs a loop/TUI for a bounded
   time then exits cleanly; the first-class `timeout Ns nest run`, and what makes
   the still-open §8 memory leak reproducible in CI.
-- ⬜ **One-off `nest run --main module/fn` entry override** — run a different
-  entry without editing the manifest's `:main`. Low-risk; insertion points in
-  `cmd_run` + `run-project` are known (`docs/feedback-retro-game-of-life.md` §5.3).
+- ✅ **One-off `nest run --main module/fn` entry override** — landed 2026-05-29
+  (`docs/feedback-retro-game-of-life.md` §5.3). `--main module/fn` (or just
+  `module`, defaulting the fn to `main`) overrides the manifest's `:main` for one
+  run; `set-project-main`/`project--parse-main-spec` in `std/project.blsp`, warns
+  when a FILE is also given.
+- ✅ **Complete signature reference `nest doc --all`** — landed 2026-05-29
+  (`docs/feedback-retro-game-of-life.md` round 2). Prints every public global in
+  a fresh image (builtins + prelude) with signature + one-line summary, generated
+  live so it never drifts — the fix for probing builtin names/signatures one at a
+  time. Plus `concat` (variadic alias of `append`) and `std/ansi.blsp` (escape
+  strings for simple terminal output) closing the last GoL ergonomic gaps.
 - ✅ **Non-tail self-recursion lint** — landed 2026-05-29. The advisory checker
   warns when a function calls itself outside tail position (overflow footgun);
   flows through `nest check`, `check-file`, the LSP, and the `nest mcp`

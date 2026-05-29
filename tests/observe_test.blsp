@@ -116,7 +116,7 @@
 (describe "observe-frame (the pure render core)"
   (test "node panel + header + a row per process + detail + footer"
     (let (procs [(pinfo 1 :main :running 0 0) (pinfo 2 nil :waiting 3 1)]
-          f (observe-frame sample-node procs 0 60 12 false :id :ok))
+          f (observe-frame sample-node procs 0 60 12 false :id :ok nil))
       (is (vector? f))
       ;; clear + 2 node lines + col-header + 2 body rows + detail + footer = 8
       (assert= (count f) 8)
@@ -134,7 +134,7 @@
 
   (test "selected row is reverse-highlighted; others get a status face"
     (let (procs [(pinfo 1 :a :running 0 0) (pinfo 2 :b :waiting 0 0)]
-          f (observe-frame sample-node procs 1 60 12 false :id :ok)
+          f (observe-frame sample-node procs 1 60 12 false :id :ok nil)
           row0 (nth f 4)        ; index 0, not selected, :running
           row1 (nth f 5))       ; index 1, selected
       (assert= (nth row0 4) {:fg :green})            ; running → green
@@ -143,8 +143,8 @@
 
   (test "detail line names the selection; footer shows sort + paused state"
     (let (procs [(pinfo 1 :zero :running 0 0) (pinfo 2 :one :waiting 9 2)]
-          live (observe-frame sample-node procs 1 60 12 false :mailbox :ok)
-          paused (observe-frame sample-node procs 1 60 12 true :id :ok))
+          live (observe-frame sample-node procs 1 60 12 false :mailbox :ok nil)
+          paused (observe-frame sample-node procs 1 60 12 true :id :ok nil))
       ;; detail (second-to-last op) names the selected pid + its fields
       (is (string-contains? (nth (nth live (- (count live) 2)) 3) "pid 2"))
       (is (string-contains? (nth (nth live (- (count live) 2)) 3) "monitored-by 2"))
@@ -154,16 +154,50 @@
 
   (test "long lists are windowed to the terminal with a position counter"
     (let (procs (map (fn (i) (pinfo i nil :waiting 0 0)) (range 20))
-          f (observe-frame sample-node procs 0 60 8 false :id :ok))   ; rows=8 → cap = 3
+          f (observe-frame sample-node procs 0 60 8 false :id :ok nil))   ; rows=8 → cap = 3
       ;; clear + 2 node + header + 3 body + detail + footer = 9
       (assert= (count f) 9)
       (is (string-contains? (nth (nth f (- (count f) 2)) 3) "/20"))))
 
   (test "every text op is clipped to the terminal width"
-    (let (f (observe-frame sample-node [(pinfo 1 :longname :running 0 0)] 0 20 10 false :id :ok))
+    (let (f (observe-frame sample-node [(pinfo 1 :longname :running 0 0)] 0 20 10 false :id :ok nil))
       (is (every? (fn (op) (or (not (= (first op) :text))
                                (<= (string-length (nth op 3)) 20)))
-                  f)))))
+                  f))))
+
+  (test "command-mode frame renders the minibuffer + cursor"
+    (let (ui {:mode :command :edit (lineedit--init "λ " "" []) :msg nil}
+          f (observe-frame sample-node [(pinfo 1 :a :running 0 0)] 0 60 12 false :id :ok ui))
+      ;; the footer (last text op) is the minibuffer prompt, and a cursor op is placed
+      (is (string-contains? (nth (last (filter (fn (op) (= (first op) :text)) f)) 3) "λ"))
+      (is (includes? (map first f) :cursor))))
+  (test "a :msg replaces the detail line"
+    (let (f (observe-frame sample-node [(pinfo 1 :a :running 0 0)] 0 60 12 false :id :ok {:msg "=> 42"}))
+      (is (string-contains? (nth (nth f (- (count f) 2)) 3) "=> 42")))))
+
+(describe "observer keymap + eval minibuffer (shared with the REPL)"
+  (test "*observe-keymap* dispatches nav keys to commands"
+    (let (s {:sel-id nil :sort :id :paused false :procs [] :sel 0 :n 0})
+      (assert= (get (keymap-dispatch *observe-keymap* s "s" (fn (x _) x)) :sort) :mailbox)
+      (assert= (get (keymap-dispatch *observe-keymap* s " " (fn (x _) x)) :paused) true)
+      (assert= (get (keymap-dispatch *observe-keymap* s "q" (fn (x _) x)) :done) true)
+      (assert= (get (keymap-dispatch *observe-keymap* s ":" (fn (x _) x)) :mode) :command))
+  (test "an unbound key hits the fallback"
+    (assert= (keymap-dispatch *observe-keymap* {:n 1} "Z" (fn (s _) (assoc s :hit true)))
+             {:n 1 :hit true}))
+  (test "observe--eval-string formats a value or an error"
+    (is (string-contains? (observe--eval-string "(+ 1 2)") "3"))
+    (is (string-contains? (observe--eval-string "(nope)") "error")))
+  (test "observe--command-key edits, then submit evals, cancel returns to nav"
+    (let (s (observe-cmd-command {:sort :id} nil)             ; enter command mode
+          back {:eval observe--eval-string}
+          typed (observe--command-key s back "x")             ; insert a char → still editing
+          submitted (observe--command-key
+                      (assoc s :edit (lineedit--init "λ " "" [])) back :enter))   ; empty submit
+      (assert= (get typed :mode) :command)
+      (assert= (get (get typed :edit) :text) "x")
+      (assert= (get submitted :mode) :nav)                    ; submit leaves command mode
+      (assert= (get (observe--command-key s back :ctrl-c) :mode) :nav))))   ; cancel too
 
 ;; Cross-process coverage: drive `process-info` + `observe--snapshot` against a
 ;; live runtime (each :isolated test runs alone).
@@ -218,7 +252,7 @@
           procs (observe--sort (get snap :procs) :id))
       (is (contains? snap :node))
       (is (every? (fn (p) (and (number? (get p :id)) (number? (get p :mailbox)))) procs))
-      (is (>= (count (observe-frame (get snap :node) procs 0 80 24 false :id :ok)) 5))))
+      (is (>= (count (observe-frame (get snap :node) procs 0 80 24 false :id :ok nil)) 5))))
 
   (test "the :observe agent replies with a snapshot (the remote-attach seam)"
     ;; observe-serve's agent, exercised same-runtime: request → snapshot reply.

@@ -2877,9 +2877,10 @@ hints, Tab completion, and the core emacs/readline keys + ↑/↓ history. The e
   source→data lexer (the `observe-frame` discipline): it classifies tokens by shape +
   head-position (the first symbol after a `(` is a call / special form), not by
   resolving bindings — cheap, robust on incomplete input, and unit-testable without a
-  terminal. The special-forms set is mirrored from the LSP's `SPECIAL_FORMS`
-  (`semantic_tokens.rs`, `pub(crate)` and so unreachable from Brood) by hand; a
-  `(special-forms)` primitive to de-drift the two is a follow-up.
+  terminal. The special-forms set comes from the `(special-forms)` primitive — the
+  canonical Rust `SPECIAL_FORMS` (moved into the `brood` lib), which the LSP
+  (`semantic_tokens`/`completion`) now imports too, so the runtime, the highlighter,
+  and the LSP share one list and can't drift.
 - **Single-line editing, whole-form analysis.** The editor edits one physical line
   and returns it — a `read-line` drop-in — so multi-line forms keep coming from the
   REPL's existing reader-driven accumulation (ADR-049), with no second incomplete-
@@ -2941,11 +2942,16 @@ is ready, like `receive`) would make the block truly zero-cost — a nicety, not
   `echo … | brood` *in a terminal* (piped stdin, TTY stdout) correctly takes the
   plain `read-line` path instead of blocking the editor on key events; cosmetic
   prompts/banner stay gated on `stdout-tty?`.
-- Known v1 limits (all additive follow-ups): a scheduler-parking key read (makes the
+- Follow-ups since shipped: `(special-forms)` de-drift (done — above); **persistent
+  history** (`$BROOD_HISTORY`/`~/.brood_history`, loaded on start, saved capped per
+  submit — `std/repl.blsp`); and **reverse incremental search** (C-r, a `:search`
+  sub-mode in `std/lineedit.blsp`). The keymap was also generalised into a shared
+  `std/keymap.blsp` (`keymap-dispatch`), the input-side counterpart to the display
+  seam, now used by both the editor and `observe`.
+- Remaining limits (all additive follow-ups): a scheduler-parking key read (makes the
   benign worker block above truly zero-cost); lexical (not scope-aware) highlighting;
-  completion from globals only (no locals-in-scope); no reverse history search /
-  persistent history; display width approximated as one column per char (wide
-  CJK/emoji may misposition the cursor).
+  completion from globals only (no locals-in-scope); display width approximated as one
+  column per char (wide CJK/emoji may misposition the cursor).
 
 **References.** ADR-048 (the self-hosted REPL this extends), ADR-049 (the reader's
 INCOMPLETE_INPUT multi-line signal the single-line model relies on), ADR-046 (the
