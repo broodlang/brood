@@ -3539,3 +3539,63 @@ this leans on), ADR-035 (the per-process GC model), ADR-048 (the REPL loop that
 dropped its `(hibernate)`), [`memory-review.md`](memory-review.md) §6,
 [`memory-model.md`](memory-model.md), and the §8 resolution in
 [`feedback-retro-game-of-life.md`](feedback-retro-game-of-life.md).
+
+## ADR-059 — Blocking work delivers to a mailbox; it never pins a worker
+
+**Status:** accepted (2026-05-29). Phase 1 (GUI observer input) implemented; the
+general pattern (terminal, sockets, an offload pool) is planned —
+[`handoff-blocking-io.md`](handoff-blocking-io.md).
+
+**Context.** The green scheduler has a small worker pool (≈`nproc`); green
+processes are cheap but workers are scarce. A process that makes a **native
+blocking call** — `recv_timeout`, a blocking `read`, a synchronous FFI call —
+holds its worker for the whole call, since the scheduler can't preempt a thread
+parked in a syscall. With multiple windows (ADR-056), each observer blocked in
+`gui-poll` pinned a worker; enough of them would block the whole pool while
+thousands of other processes starve. The same hazard applies to any future
+network or interop call.
+
+A process parked in `(receive)` on an empty mailbox is the opposite: it is
+*descheduled* (the mailbox `waiter`), holding **no** worker, until
+`mailbox::deliver` wakes it.
+
+**Decision.** Anything that blocks runs on a **non-worker thread** and **delivers a
+message to the owning process's mailbox**; the process parks in `(receive)`. This
+is not new architecture — it is already the runtime's *network* model (`dist`
+reads each `TcpStream` on a dedicated thread and injects via `mailbox::deliver`).
+We extend it to GUI input, and adopt it as the rule for blocking work generally.
+
+- **Phase 1 — GUI input (done).** `gui-open` registers the *calling process* as the
+  window's subscriber. The GUI thread turns each key/mouse event into a `Message`
+  (built off-heap — `Message` is a plain enum, symbols are a global interner) and
+  `deliver`s it to that mailbox. `(gui-display)`'s `:poll` becomes
+  `(fn (ms) (receive (m m) (after ms nil)))` — park for the next input message, or
+  time out for the live-refresh tick. The observer loop is otherwise unchanged
+  (same key/mouse shapes), but an idle window now holds **no** worker, so hundreds
+  can run at once. `gui-poll` (the blocking primitive) is removed.
+- **Already had what we needed**: `mailbox::deliver` (inject + wake from any
+  thread), `receive` with `(after ms …)` (the tick — no core change), and a plain
+  `Message` enum (off-heap construction). The scheduler pins each process to one
+  worker for life with **no migration**, which is exactly why deliver-to-mailbox is
+  the right shape — a BEAM-style migrate-to-dirty-scheduler design would be far
+  more invasive, while this needs no migration.
+- **Phases 2–3 (planned).** Terminal input via a reader thread (lifting even the
+  root-thread block ADR-046 predicted); sockets via a `mio` reactor; and a blocking
+  *offload pool* (`(blocking (fn () …))`) for unavoidable synchronous calls — all
+  the same deliver-to-mailbox shape. See the handoff doc.
+
+**Consequences.**
+- The observer's input path is uniform with the rest of the system (it's just
+  `receive`), and `(observe)`'s multi-window cost (ADR-056's worker-pinning
+  trade-off) is **removed** — idle observers cost nothing.
+- `gui-*` no longer has a `poll`; input is a mailbox message. A non-process script
+  that wants raw window input opens a window and `receive`s in its own process (the
+  root counts).
+- `deliver` is unbounded — fine for keys/scroll; sockets will want flow control
+  (Phase 2). `%receive` is selective (scans per match) — fine at input rates.
+
+**References.** ADR-056 (multi-window GUI — whose worker-pinning trade-off this
+removes), ADR-046 (the display/input seam; predicted async-input-to-mailbox),
+ADR-043 (root-vs-worker thread + finite-poll model), ADR-033/034 (the dist
+reader-thread → mailbox precedent), [`handoff-blocking-io.md`](handoff-blocking-io.md),
+[`roadmap.md`](roadmap.md) M3/M4.

@@ -501,13 +501,6 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "gui-poll",
-        Arity::exact(2),
-        Sig::new(vec![int, int], string.union(kw).union(vec_ty).union(nil_ty)),
-        gui_poll,
-    );
-    def(
-        heap,
         "gui-draw",
         Arity::exact(2),
         Sig::new(vec![int, vec_ty], nil_ty),
@@ -1261,10 +1254,9 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("term-size", &[], "The terminal size as [cols rows] in character cells."),
     ("term-poll", &["ms"], "Wait up to ms milliseconds for an input event; return a key (a 1-char string for printables, or a keyword for specials: :up :down :left :right :enter :escape :backspace :tab :back-tab :delete :home :end :page-up :page-down, ctrl combos like :ctrl-c, alt combos like :alt-f), a mouse event as a vector [:mouse action button row col] (action: :press :scroll-up :scroll-down; button: :left :right :middle or nil; row/col 0-based cells), or nil on timeout. Always pass a finite ms."),
     ("term-draw", &["frame"], "Paint a frame — a vector of render ops: [:clear], [:text row col str], [:text row col str face], [:cursor row col]. A face is a map like {:fg :red :bold true}. The in-process frontend for the display protocol; returns nil."),
-    ("gui-open", &[], "Open a new native window and return its integer id (needs the runtime built with --features gui; errors otherwise). Starts the GUI thread on the first call; each call is an independent window, so several observers can run at once. Pass the id to the other gui-* primitives; pair with gui-close. The windowed frontend of the ADR-046 display seam."),
+    ("gui-open", &[], "Open a new native window and return its integer id (needs the runtime built with --features gui; errors otherwise). Its key/mouse input is delivered to the CALLING process's mailbox as messages — a key as a 1-char string / keyword (`:up`, `:ctrl-c`), the mouse as `[:mouse action button row col]` — so the consumer parks in `(receive)` instead of polling (ADR-058). Closing the window delivers `:escape`. Starts the GUI thread on the first call; each call is an independent window, so several observers can run at once. Pass the id to the other gui-* primitives; pair with gui-close."),
     ("gui-close", &["id"], "Close window id (the teardown for gui-open). Idempotent; an unknown id is a no-op."),
     ("gui-size", &["id"], "Window id's size as [cols rows] in character cells (tracks resize / HiDPI), same shape as term-size."),
-    ("gui-poll", &["id", "ms"], "Like term-poll for window id: wait up to ms for an input event and return a key (1-char string / keyword), a mouse event [:mouse action button row col], or nil on timeout. Same encoding as term-poll, so one keymap drives both frontends. Closing the window yields :escape."),
     ("gui-draw", &["id", "frame"], "Paint a frame (the same render-op vector term-draw takes) to window id; returns nil. Unknown ops are skipped (forward-compatible)."),
     ("term-raw-enter", &[], "Enter raw mode only — NO alternate screen, cursor stays visible, scrollback preserved. The seam for an inline line editor (the REPL); use term-enter instead for a full-screen TUI. Pair with term-raw-leave."),
     ("term-raw-leave", &[], "Leave raw mode (the teardown for term-raw-enter). Idempotent with the panic-path restore."),
@@ -2966,11 +2958,12 @@ fn gui_window_id(heap: &Heap, who: &str, v: Value) -> Result<u64, LispError> {
     Ok(expect_int(heap, who, v)?.max(0) as u64)
 }
 
-/// `(gui-open)` — open a new native window and return its integer id. Starts the
-/// GUI thread on the first call; each call is an independent window (so several
-/// observers can run at once). Pass the id to the other `gui-*` primitives.
+/// `(gui-open)` — open a new native window and return its integer id. Its key/mouse
+/// input is delivered to the **calling process's mailbox** (ADR-058), so the
+/// observer parks in `(receive)` rather than pinning a worker in a blocking poll.
+/// Starts the GUI thread on the first call; each call is an independent window.
 fn gui_open(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    let id = crate::gui::open().map_err(LispError::runtime)?;
+    let id = crate::gui::open(crate::process::self_pid()).map_err(LispError::runtime)?;
     Ok(Value::Int(id as i64))
 }
 
@@ -2987,50 +2980,6 @@ fn gui_size(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = gui_window_id(heap, "gui-size", arg(args, 0))?;
     let (cols, rows) = crate::gui::size(id).map_err(LispError::runtime)?;
     Ok(heap.alloc_vector(vec![Value::Int(cols as i64), Value::Int(rows as i64)]))
-}
-
-/// `(gui-poll id ms)` — wait up to `ms` for an input event on window `id`; same
-/// return shapes as `term-poll` (a 1-char string / keyword for keys, a `[:mouse …]`
-/// vector for the mouse, or nil on timeout).
-fn gui_poll(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use crate::gui::Input;
-    let id = gui_window_id(heap, "gui-poll", arg(args, 0))?;
-    let ms = expect_int(heap, "gui-poll", arg(args, 1))?.max(0) as u64;
-    match crate::gui::poll(id, ms).map_err(LispError::runtime)? {
-        Some(Input::Key(k)) => Ok(gui_key_to_value(heap, k)),
-        Some(Input::Mouse(m)) => Ok(gui_mouse_to_value(heap, m)),
-        None => Ok(Value::Nil),
-    }
-}
-
-/// Encode a `gui::Key` as a Brood value — identical to `key_to_value`'s encoding
-/// so the same keymaps work across both frontends.
-fn gui_key_to_value(heap: &mut Heap, k: crate::gui::Key) -> Value {
-    use crate::gui::Key;
-    match k {
-        Key::Char(c) => heap.alloc_string(&c.to_string()),
-        Key::Ctrl(c) => Value::Keyword(value::intern(&format!("ctrl-{}", c))),
-        Key::Alt(c) => Value::Keyword(value::intern(&format!("alt-{}", c))),
-        Key::Named(s) => value::kw(s),
-    }
-}
-
-/// Encode a `gui::Mouse` as the shared `[:mouse …]` vector — the GUI counterpart
-/// of `mouse_to_value` (crossterm). Both translate their native event to the same
-/// keywords and hand off to `mouse_value`, so the two frontends can't drift.
-fn gui_mouse_to_value(heap: &mut Heap, m: crate::gui::Mouse) -> Value {
-    use crate::gui::{MouseAction as MA, MouseButton as MB};
-    let action = match m.action {
-        MA::Press => "press",
-        MA::ScrollUp => "scroll-up",
-        MA::ScrollDown => "scroll-down",
-    };
-    let button = m.button.map(|b| match b {
-        MB::Left => "left",
-        MB::Right => "right",
-        MB::Middle => "middle",
-    });
-    mouse_value(heap, action, button, m.row, m.col)
 }
 
 /// `(gui-draw id frame)` — paint a frame (the same op vector `term-draw` takes) to
