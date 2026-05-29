@@ -16,10 +16,23 @@
 ;;    a plain map threaded through the tail-recursive loop — each keypress recurses
 ;;    with a fresh state. Selection is tracked by the numeric pid **id**, so it
 ;;    stays on the same process as the list re-sorts under it (and recovers if it
-;;    dies). The loop runs in the root process, polling with a finite timeout, so
-;;    it blocks only the root thread — never a scheduler worker.
+;;    dies). The loop runs in the calling process, polling with a finite timeout,
+;;    so it blocks only that thread — never a scheduler worker.
+;;  - Pluggable **data source** (the seam that scales to remote attach): the loop
+;;    takes a 0-arg `source` fn returning `process-info` maps. `observe-attach`
+;;    passes `observe--local-source` (this runtime's own processes — the inline
+;;    case). Remote attach (next) passes a source that requests a peer node's
+;;    snapshot over the dist link; the loop and `observe-frame` are unchanged.
 ;;  - Opt-in (`require`), never in the prelude; pure Brood over `display` + the
 ;;    `process-info` / `list-processes` / node-stat primitives.
+
+;; Entry points:
+;;   (observe-attach)  — observe THIS runtime's own processes (inline; a running
+;;                       program calls it to inspect itself). The data-source seam.
+;;   (observe-run)     — the standalone `nest observe` app: seed demo processes,
+;;                       then observe-attach.
+;;   (observe-connect) — observe a peer runtime (remote attach). Next; same loop,
+;;                       a remote source.
 
 (defmodule observe
   "An interactive process observer — a full-screen TUI showing this runtime's node
@@ -27,10 +40,14 @@ stats and a navigable table of live processes (id, name, status, mailbox backlog
 memory, monitors), built on the display seam (M3, ADR-046) over `process-info`.
 
     (require 'observe)
-    (observe-run)   ; ↑/↓ select · s sort · space pause · r refresh · q quit
+    (observe-run)      ; standalone demo app (nest observe)
+    (observe-attach)   ; observe THIS runtime — call it from a running program
 
-`observe-frame` is the pure core (node + process data → a render frame);
-`observe-run` is the IO loop. Drive it from the shell with `nest observe`.")
+Keys: ↑/↓ select · s sort · space pause · r refresh · q quit. `observe-frame` is
+the pure core (node + process data → a render frame); `observe--loop` is the IO
+loop over a pluggable data **source**, so the *same* loop observes the local
+runtime (`observe-attach`) or, later, a peer runtime over a node link (remote
+attach). Drive the standalone app from the shell with `nest observe`.")
 
 (require 'display)
 
@@ -161,12 +178,18 @@ detail line for the selection, and a key-hint footer (showing `PAUSED` when
   "Cycle the sort key: id → mailbox → memory → id."
   (cond (= key :id) :mailbox (= key :mailbox) :memory :else :id))
 
-(defn observe--snapshot (sort)
-  "The live process table: a `process-info` map per live process (dropping any pid
-that died mid-scan), ordered by `sort`. The input `observe-frame` renders."
-  (observe--sort
-    (filter (fn (p) (not (nil? p))) (map process-info (list-processes)))
-    sort))
+(defn observe--local-source ()
+  "The inline data **source**: a `process-info` map for every live process in
+*this* runtime (dropping any pid that died mid-scan), unsorted. A source is just a
+0-arg fn returning process-info maps — the remote-attach source (future) has the
+same shape (it requests a peer's snapshot over the node link), so `observe--loop`
+is source-agnostic: inline and remote are one loop with a swapped thunk."
+  (filter (fn (p) (not (nil? p))) (map process-info (list-processes))))
+
+(defn observe--snapshot (source sort)
+  "Pull a process table from `source` (a 0-arg fn → process-info maps) and order it
+by `sort`. The input `observe-frame` renders."
+  (observe--sort (source) sort))
 
 ;; ---- the IO loop (interactive; runs in the root process) --------------------
 
@@ -181,26 +204,28 @@ Clamped to a valid row."
   "Return `state` with the selection pinned to the `:id` at row `idx` of `procs`."
   (assoc state :sel-id (if (empty? procs) nil (get (nth procs idx) :id))))
 
-(defn observe--loop (state)
-  "The observer event loop (root process): draw the current frame, wait up to 1s
-for a key, then recurse with updated UI state until `q` / Esc / Ctrl-C. `state` is
-`{:sel-id <int|nil> :sort <kw> :frozen <procs|nil>}` (`:frozen` = paused snapshot)."
+(defn observe--loop (state source)
+  "The observer event loop: draw the current frame, wait up to 1s for a key, then
+recurse with updated UI state until `q` / Esc / Ctrl-C. `state` is `{:sel-id
+<int|nil> :sort <kw> :frozen <procs|nil>}` (`:frozen` = paused snapshot). `source`
+is the data source (a 0-arg fn → process-info maps) — local for inline, a peer
+request for remote attach; the loop doesn't care which."
   (let ([cols rows] (term-size)
         paused (not (nil? (get state :frozen)))
         sort (get state :sort)
-        procs (if paused (get state :frozen) (observe--snapshot sort))
+        procs (if paused (get state :frozen) (observe--snapshot source sort))
         n (count procs)
         sel (observe--sel-index procs (get state :sel-id)))
     (term-draw (observe-frame (observe--node-info) procs sel cols rows paused sort))
     (let (k (term-poll 1000))
       (cond
         (or (= k "q") (= k :escape) (= k :ctrl-c)) (term-leave)
-        (or (= k :up) (= k "k"))   (observe--loop (observe--select state procs (max 0 (dec sel))))
-        (or (= k :down) (= k "j")) (observe--loop (observe--select state procs (min (max 0 (dec n)) (inc sel))))
-        (= k "s") (observe--loop (assoc state :sort (observe--next-sort sort)))
-        (= k " ") (observe--loop (assoc state :frozen (if paused nil procs)))
-        (= k "r") (observe--loop (assoc state :frozen nil))
-        :else (observe--loop state)))))
+        (or (= k :up) (= k "k"))   (observe--loop (observe--select state procs (max 0 (dec sel))) source)
+        (or (= k :down) (= k "j")) (observe--loop (observe--select state procs (min (max 0 (dec n)) (inc sel))) source)
+        (= k "s") (observe--loop (assoc state :sort (observe--next-sort sort)) source)
+        (= k " ") (observe--loop (assoc state :frozen (if paused nil procs)) source)
+        (= k "r") (observe--loop (assoc state :frozen nil) source)
+        :else (observe--loop state source)))))
 
 ;; ---- demo processes (so a fresh observer has something to show) -------------
 
@@ -222,14 +247,31 @@ fresh observer has live processes to watch. Returns nil."
       (repeatedly 4 (fn () (send w :idle))))
     nil))
 
+(defn observe-attach ()
+  "Bring up the observer over **this runtime's own live processes** — the inline
+entry point. A running program calls it (e.g. from a key handler or command) to
+inspect itself: it spawns no demo processes, takes over the terminal, and returns
+to the caller when the user quits (`q`/Esc/Ctrl-C). Same-runtime, so it sees every
+process in the shared registry.
+
+    (require 'observe)
+    (observe-attach)   ; modal; control returns on quit
+
+Caveat: it `term-leave`s on quit, so a caller that is itself a full-screen TUI
+must redraw afterward. Remote attach (a peer runtime) is the same loop with a
+remote source — see `observe--local-source`."
+  (do
+    (term-enter)
+    (observe--loop {:sel-id nil :sort :id :frozen nil} observe--local-source)))
+
 (defn observe-run (&optional (demo true))
-  "Run the interactive process observer — a full-screen TUI with node stats and a
-navigable process table. `↑`/`↓` (or `k`/`j`) select, `s` cycles the sort
-(id/mailbox/memory), `space` pauses/resumes the live refresh, `r` refreshes, and
-`q`/Esc/Ctrl-C quits. With `demo` true (the default), seeds a few demo processes
-first so there is something to watch. Runs in the calling process and blocks until
-quit; pairs with `nest observe`."
+  "Run the interactive process observer as a standalone app — a full-screen TUI
+with node stats and a navigable process table. `↑`/`↓` (or `k`/`j`) select, `s`
+cycles the sort (id/mailbox/memory), `space` pauses/resumes the live refresh, `r`
+refreshes, and `q`/Esc/Ctrl-C quits. With `demo` true (the default), seeds a few
+demo processes first so a fresh runtime has something to watch, then delegates to
+`observe-attach`. Pairs with `nest observe`. To observe a *running* program's own
+processes, call `observe-attach` from inside it instead."
   (do
     (when demo (observe--spawn-demo 5))
-    (term-enter)
-    (observe--loop {:sel-id nil :sort :id :frozen nil})))
+    (observe-attach)))
