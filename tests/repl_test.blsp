@@ -1,0 +1,70 @@
+;; tests/repl_test.blsp — the Brood-hosted REPL (std/repl.blsp).
+;;
+;; The REPL itself is an IO loop over `read-line`/`eval-string` (driven by the
+;; `brood` / `nest repl` binaries, exercised manually), so these tests cover the
+;; pure pieces it's built from: complete-form detection (`repl--balanced?`),
+;; datum detection (`repl--content?`), and error rendering (`repl--error-message`).
+;; The closing :isolated block sends an error *map* through a process boundary
+;; (a deep copy across per-process heaps) before formatting it, proving the
+;; structured-error path round-trips under the scheduler.
+
+(require 'test)
+(require 'repl)
+
+(describe "repl--balanced? — complete-form detection"
+  (test "balanced forms are complete"
+    (is (repl--balanced? "(+ 1 2)"))
+    (is (repl--balanced? "[1 2 3]"))
+    (is (repl--balanced? "{:a 1}"))
+    (is (repl--balanced? "42")))
+  (test "unclosed delimiters are incomplete"
+    (refute (repl--balanced? "(+ 1"))
+    (refute (repl--balanced? "[1 2"))
+    (refute (repl--balanced? "{:a")))
+  (test "delimiters inside a string don't count"
+    (is (repl--balanced? "\"(still balanced\""))
+    (refute (repl--balanced? "\"open")))
+  (test "an escaped quote does not close the string"
+    (is (repl--balanced? "\"hi \\\"there\\\"\"")))
+  (test "delimiters inside a ; comment don't count"
+    (is (repl--balanced? "; (a comment"))
+    (is (repl--balanced? "(+ 1 2) ; ) trailing comment")))
+  (test "a multi-line form is complete once all lines are accumulated"
+    (refute (repl--balanced? "(defn f\n"))
+    (is (repl--balanced? "(defn f\n(x)\n(* x 2))\n"))))
+
+(describe "repl--content? — ignore blank / comment-only input"
+  (test "whitespace-only input has no datum"
+    (refute (repl--content? "" 0 0 false))
+    (refute (repl--content? "   \n\t" 0 5 false)))
+  (test "comment-only input has no datum"
+    (refute (repl--content? "; just a comment\n" 0 17 false)))
+  (test "real content is detected, even after leading space / comments"
+    (is (repl--content? "  (+ 1 1)" 0 9 false))
+    (is (repl--content? "; note\n(+ 1 1)" 0 14 false))))
+
+(describe "repl--error-message — rendering caught values"
+  (test "a built-in error map renders kind + message"
+    (assert= (repl--error-message {:kind :type :message "bad arg"})
+             "type error: bad arg")
+    (assert= (repl--error-message {:kind :unbound :message "x"})
+             "unbound error: x"))
+  (test "a located error appends line + col"
+    (assert= (repl--error-message {:kind :unbound :message "x" :line 3 :col 5})
+             "unbound error: x (line 3, col 5)"))
+  (test "a user-thrown string renders without quotes"
+    (assert= (repl--error-message "boom") "error: boom"))
+  (test "a user-thrown non-string renders readably"
+    (assert= (repl--error-message 42) "error: 42")
+    (assert= (repl--error-message [:tag 1]) "error: [:tag 1]")))
+
+;; Cross-process: the error map crosses a heap boundary (send deep-copies it)
+;; before formatting, so this proves the structured-error path survives the
+;; copy-on-send round-trip — not just same-heap formatting.
+(describe "repl--error-message across processes"
+  :isolated
+
+  (test "an error map sent between processes still formats correctly"
+    (let (w (spawn (receive ([:fmt e from] (send from (repl--error-message e))))))
+      (send w [:fmt {:kind :type :message "across"} (self)])
+      (assert= (receive (r r)) "type error: across"))))
