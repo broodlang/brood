@@ -2781,3 +2781,60 @@ language already pointed at the right shape; it was just missing the batteries.
 stochastic policy in Brood), ADR-026 (immutability — no global mutable PRNG),
 ADR-011 (ship the simple form, defer the process-backed one),
 `docs/feedback-retro-game-of-life.md` §1/§4, `docs/language.md` (Bitwise, Randomness).
+
+## ADR-051 — `(process-info pid)` as the kernel introspection snapshot
+
+**Status:** accepted (2026-05-29). The introspection surface a process observer /
+debugger / supervisor reads; first consumer is `nest observe`.
+
+**Context.** The observer (and any process-management tool) needs per-process
+state — status, registered name, mailbox depth, memory, parent, who's monitoring
+it. None of it is reachable from Brood: a `Process` lives inside its coroutine (or
+the mailbox `waiter` slot when parked), not in any Lisp value; the registry,
+name, and monitor tables are all Rust internals. So this is irreducibly kernel
+*mechanism* (the ADR-006 split puts it in Rust), but the *shape* exposed to Brood
+is a plain immutable map the language manipulates freely.
+
+**Decision.** One primitive, `(process-info pid)`, returns a snapshot **map** for a
+live local process (Erlang's `process_info/1` shape), or `nil` for a remote/dead
+pid (a non-pid is a type error — same contract as `mailbox-size`):
+
+```
+{:id <int> :node <kw> :name <kw|nil> :status <kw> :mailbox <int> :monitored-by <int>}
+```
+
+- A **single map primitive**, not granular accessors. The fields are all
+  kernel-internal and naturally read together; a map is the Erlang-idiomatic,
+  one-call shape, and the cheap-snapshot semantics (read now, immutable copy) suit
+  it. (`mailbox-size` stays as the one-field fast path it already was.)
+- **Built from independent one-lock reads.** Each field comes from a `process.rs`
+  accessor that takes exactly one lock and releases it before the next
+  (`mailbox_len`, `process_status`, `monitored_by`, `dist::name_for_pid`,
+  `is_alive`); `process-info` calls them in sequence holding no two at once, so it
+  adds no lock-ordering risk and tolerates a process changing state mid-read
+  (a stale-but-coherent snapshot, fine for display).
+- **`:status` is inferred, for now, with no new bookkeeping:** parked in `receive`
+  (the mailbox holds it in its `waiter` slot) → `:waiting`, else `:running`; dead →
+  the whole call is `nil`. An explicit per-process state enum (in-flight kernel
+  work) will replace the inference and may widen the vocabulary (`:runnable`).
+- **Incrementally extensible.** `:parent` and `:memory` are *not* present yet — the
+  `Process` struct isn't reachable from the registry while running, so they need
+  new per-process bookkeeping (a registry-reachable parent table; a per-Heap byte
+  counter). When that kernel work lands, `process-info` gains the keys and the
+  observer (which already renders absent fields as "-") shows them with no rework.
+  The map shape is the stable contract; its key *set* grows monotonically.
+
+**Consequences.**
+- The numeric `:id` is monotonic (it's the spawn counter), so it doubles as a
+  **stable sort key** — the observer now lists processes in spawn order
+  deterministically (it previously had no orderable pid handle and fell back to
+  busiest-mailbox-first).
+- A pid's numeric id is now reachable from Brood (via `:id`) without string-parsing
+  its printed form — useful beyond the observer.
+- Keeping the snapshot a map (not a process-backed query object) means it's
+  `send`-able, comparable, and testable like any value; the `:isolated` tests
+  assert it across spawned processes.
+
+**References.** ADR-006 (mechanism in Rust, the map is policy-shaped data), ADR-046
+(the observer, first consumer), ADR-026 (the snapshot is an immutable value),
+`std/observe.blsp`, `docs/primitives.md` (the `process-info` entry).
