@@ -129,10 +129,16 @@ today is **arena reset at top-level boundaries**: between top-level forms the
 LOCAL heap holds nothing live but the result, so `eval_str` / the REPL truncate
 it back (globals live in the shared PRELUDE/RUNTIME regions, never in LOCAL).
 
-What's still open: a general tracing GC for *mid-evaluation* / never-returning
-loops, which needs the evaluator's roots to be scannable. The migration stays
-contained because *all heap construction goes through the helpers in
-`core/heap.rs` / `core/value.rs`*. See [memory-model.md](memory-model.md) and
+What's still open: bounding memory inside *long-running tail-recursive
+computation* that never goes through `receive`. As of 2026-05-29
+(commit `f90f0de`) the allocator is **bump-only** — slots are never
+recycled, so a stale handle can't observe a different value, which closed
+most of the scheduler race surface — but a tight loop that doesn't pass
+through `receive` grows unboundedly per process. **Phase 2** (not yet
+landed) is an *arena flip on `receive`*: deep-copy the surviving state to
+a fresh slab, drop the old. The migration stays contained because *all
+heap construction goes through the helpers in `core/heap.rs` /
+`core/value.rs`*. See [memory-model.md](memory-model.md) and
 [shared-code.md](shared-code.md) for the regions and hot-reload story.
 
 ## Dependencies

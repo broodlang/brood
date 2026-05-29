@@ -63,9 +63,7 @@ mod sequence {
     fn transduce_pipeline(bencher: divan::Bencher, n: usize) {
         bench_prog(
             bencher,
-            format!(
-                "(transduce (comp (xmap (fn (x) (* x x))) (xfilter even?)) + 0 (range {n}))"
-            ),
+            format!("(transduce (comp (xmap (fn (x) (* x x))) (xfilter even?)) + 0 (range {n}))"),
         );
     }
 
@@ -89,9 +87,7 @@ mod sequence {
     fn pipeline_no_short_circuit(bencher: divan::Bencher, n: usize) {
         bench_prog(
             bencher,
-            format!(
-                "(reduce + 0 (filter (fn (x) (< x 1000)) (map (fn (x) (* x x)) (range {n}))))"
-            ),
+            format!("(reduce + 0 (filter (fn (x) (< x 1000)) (map (fn (x) (* x x)) (range {n}))))"),
         );
     }
 

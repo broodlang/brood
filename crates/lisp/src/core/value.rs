@@ -32,8 +32,7 @@ pub type Symbol = u32;
 // Symbol ids are consistent across scheduler threads — a prerequisite for
 // sending symbols between process heaps.
 static NAMES: LazyLock<boxcar::Vec<String>> = LazyLock::new(boxcar::Vec::new);
-static IDS: LazyLock<Mutex<HashMap<String, Symbol>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static IDS: LazyLock<Mutex<HashMap<String, Symbol>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 // Recover from a poisoned `IDS` lock rather than letting one panicking thread
 // wedge symbol interning everywhere (the tables are append-only, so a recovered
@@ -99,8 +98,7 @@ pub fn symbol_first_char(sym: Symbol) -> Option<char> {
 // `Heap`); it exists only so `binding` can reject an undeclared var and so
 // `dynamic?` can report. See `docs/language.md` (Dynamic variables).
 
-static DYNAMICS: LazyLock<RwLock<HashSet<Symbol>>> =
-    LazyLock::new(|| RwLock::new(HashSet::new()));
+static DYNAMICS: LazyLock<RwLock<HashSet<Symbol>>> = LazyLock::new(|| RwLock::new(HashSet::new()));
 
 /// Mark `sym` as a dynamic variable (idempotent). Called by `defdyn`.
 pub fn mark_dynamic(sym: Symbol) {
@@ -243,7 +241,10 @@ pub enum Value {
     /// name; a *remote* pid (received from a peer) carries the peer's. The same
     /// value addresses a process whether it's here or across a node link —
     /// `send` dispatches on `node` (see `crate::dist`). Compared by value.
-    Pid { node: Symbol, id: u64 },
+    Pid {
+        node: Symbol,
+        id: u64,
+    },
 }
 
 /// The runtime type tags — the discriminant of [`Value`] made first-class, so it

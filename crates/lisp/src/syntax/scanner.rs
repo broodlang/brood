@@ -167,9 +167,19 @@ impl<'a> Scanner<'a> {
 
     /// Walk past the body of a `"…"` string. Assumes `pos` is currently just
     /// past the opening quote. If `out` is `Some`, decoded chars (handling
-    /// the `\n`/`\t`/`\r`/`\e`/`\0`/`\\`/`\"` escapes + `\X` as literal X)
-    /// are appended. If `out` is `None`, the body is just skipped — the CST
-    /// only needs the span, so it can avoid the allocation.
+    /// the `\n`/`\t`/`\r`/`\e`/`\0`/`\\`/`\"` escapes, the `\xHH` two-hex
+    /// byte escape, the `\u{H..H}` Unicode-codepoint escape, and `\X` as
+    /// literal X for anything else) are appended. If `out` is `None`, the
+    /// body is just skipped — the CST only needs the span, so it can avoid
+    /// the allocation.
+    ///
+    /// Malformed `\x` / `\u{}` (wrong number of hex digits, missing brace,
+    /// non-hex char, codepoint > 0x10FFFF) doesn't abort — the leading `\X`
+    /// passes through as the literal char and the remaining chars come
+    /// through as themselves. That matches the existing "unknown escape =
+    /// literal char" rule, so adding the new escapes is backwards-compatible
+    /// and doesn't introduce new parse errors. (Worth tightening to a hard
+    /// error later — needs a `StringScan::BadEscape` variant.)
     ///
     /// On `Closed`, `pos` is past the close quote. On `Unterminated`, `pos`
     /// is at EOF (the reader treats this as a parse error; the CST records an
@@ -181,25 +191,99 @@ impl<'a> Scanner<'a> {
                 Some('"') => return StringScan::Closed,
                 Some('\\') => match self.bump() {
                     None => return StringScan::Unterminated,
-                    Some(escaped) => {
-                        if let Some(buf) = out.as_deref_mut() {
-                            buf.push(match escaped {
-                                'n' => '\n',
-                                't' => '\t',
-                                'r' => '\r',
-                                'e' => '\u{1b}', // ESC — for ANSI terminal control
-                                '0' => '\0',
-                                '\\' => '\\',
-                                '"' => '"',
-                                other => other, // `\X` falls through to literal X
-                            });
+                    Some(escaped) => match escaped {
+                        // `\xHH` — a two-hex-digit byte (must be ASCII so the
+                        // result is a single valid char). Anything else → fall
+                        // through to literal "x" + whatever came after.
+                        'x' => {
+                            if let Some(ch) = self.try_hex_escape_x() {
+                                if let Some(buf) = out.as_deref_mut() {
+                                    buf.push(ch);
+                                }
+                            } else if let Some(buf) = out.as_deref_mut() {
+                                buf.push('x');
+                            }
                         }
-                    }
+                        // `\u{H..H}` — a 1-to-6-hex-digit Unicode codepoint in
+                        // braces. Up to U+10FFFF; surrogates aren't valid scalar
+                        // values and fall through. Anything malformed → literal "u".
+                        'u' => {
+                            if let Some(ch) = self.try_hex_escape_u_brace() {
+                                if let Some(buf) = out.as_deref_mut() {
+                                    buf.push(ch);
+                                }
+                            } else if let Some(buf) = out.as_deref_mut() {
+                                buf.push('u');
+                            }
+                        }
+                        other => {
+                            if let Some(buf) = out.as_deref_mut() {
+                                buf.push(match other {
+                                    'n' => '\n',
+                                    't' => '\t',
+                                    'r' => '\r',
+                                    'e' => '\u{1b}', // ESC — for ANSI terminal control
+                                    '0' => '\0',
+                                    '\\' => '\\',
+                                    '"' => '"',
+                                    c => c, // `\X` falls through to literal X
+                                });
+                            }
+                        }
+                    },
                 },
                 Some(c) => {
                     if let Some(buf) = out.as_deref_mut() {
                         buf.push(c);
                     }
+                }
+            }
+        }
+    }
+
+    /// Try to consume exactly two hex digits and return the resulting char,
+    /// or `None` (rewinding so we haven't consumed *any* of them) if the next
+    /// two chars aren't both hex. The rewind matters so the outer loop can
+    /// fall back to "literal x" and still see the original chars.
+    fn try_hex_escape_x(&mut self) -> Option<char> {
+        let saved = self.pos();
+        let h1 = self.bump().and_then(|c| c.to_digit(16));
+        let h2 = self.bump().and_then(|c| c.to_digit(16));
+        match (h1, h2) {
+            (Some(h1), Some(h2)) => char::from_u32(h1 * 16 + h2),
+            _ => {
+                self.pos = saved;
+                None
+            }
+        }
+    }
+
+    /// Try to consume `{H..H}` after `\u` and return the resulting char, or
+    /// `None` (rewinding) if anything goes wrong. 1–6 hex digits, surrogate
+    /// halves rejected (not valid Unicode scalar values).
+    fn try_hex_escape_u_brace(&mut self) -> Option<char> {
+        let saved = self.pos();
+        if self.bump() != Some('{') {
+            self.pos = saved;
+            return None;
+        }
+        let mut code: u32 = 0;
+        let mut digits = 0;
+        loop {
+            match self.bump() {
+                Some('}') if digits >= 1 && digits <= 6 => return char::from_u32(code),
+                Some(c) if digits < 6 => {
+                    if let Some(h) = c.to_digit(16) {
+                        code = code * 16 + h;
+                        digits += 1;
+                    } else {
+                        self.pos = saved;
+                        return None;
+                    }
+                }
+                _ => {
+                    self.pos = saved;
+                    return None;
                 }
             }
         }
@@ -266,11 +350,33 @@ mod tests {
     #[test]
     fn scan_string_body_reports_unterminated() {
         let mut s = Scanner::new(r#"oops"#);
-        assert!(matches!(
-            s.scan_string_body(None),
-            StringScan::Unterminated
-        ));
+        assert!(matches!(s.scan_string_body(None), StringScan::Unterminated));
         assert!(s.at_end());
+    }
+
+    #[test]
+    fn scan_string_body_decodes_hex_and_unicode_escapes() {
+        // `\x1b` → ESC (same char as `\e`); `\u{1b}` → ESC; `\u{1F600}` → 😀.
+        let mut s = Scanner::new(r#"a\x1b\u{1b}\u{1F600}b"end"#);
+        let mut out = String::new();
+        assert!(matches!(
+            s.scan_string_body(Some(&mut out)),
+            StringScan::Closed
+        ));
+        assert_eq!(out, "a\u{1b}\u{1b}\u{1F600}b");
+    }
+
+    #[test]
+    fn malformed_hex_escapes_fall_through_as_literal_x() {
+        // `\xZ` — Z isn't hex, so we get a literal "x" then "Z" (matching the
+        // existing "unknown escape = literal char" rule).
+        let mut s = Scanner::new(r#"\xZZ"after"#);
+        let mut out = String::new();
+        assert!(matches!(
+            s.scan_string_body(Some(&mut out)),
+            StringScan::Closed
+        ));
+        assert_eq!(out, "xZZ");
     }
 
     #[test]

@@ -93,13 +93,39 @@
     (assert= (sort-by (fn (s) (string-length s)) (list "ccc" "a" "bb")) (list "a" "bb" "ccc"))
     (assert= (sort-by abs (list -3 1 -2 4)) (list 1 -2 -3 4)))
   (test "sort handles a larger, reversed input correctly"
-    (assert= (sort (range 50 0 -1)) (range 1 51))))
+    (assert= (sort (range 50 0 -1)) (range 1 51)))
+  ;; Structural sort for non-numeric items, no custom comparator needed —
+  ;; lexicographic on vectors, text order on strings/keywords/symbols.
+  (test "sort orders vectors lexicographically"
+    (assert= (sort (list [2 1] [1 0] [2 0])) (list [1 0] [2 0] [2 1]))
+    (assert= (sort (list [3] [1 2] [1 1])) (list [1 1] [1 2] [3])))
+  (test "sort orders strings/keywords/symbols by text"
+    (assert= (sort (list "c" "a" "b")) (list "a" "b" "c"))
+    (assert= (sort (list :c :a :b)) (list :a :b :c)))
+  (test "sort on the empty collection is the empty list"
+    (assert= (sort nil) nil)
+    (assert= (sort []) nil)))
 
 (describe "mapcat / frequencies"
   (test "mapcat maps then concatenates the resulting lists"
     (assert= (mapcat (fn (x) (list x x)) (list 1 2 3)) (list 1 1 2 2 3 3))
     (assert= (mapcat (fn (x) (range x)) (list 1 2 3)) (list 0 0 1 0 1 2))
     (assert= (mapcat (fn (x) (list x)) nil) nil))
+  ;; Maps are seqable: every list-shaped op walks them as `[k v]` pairs without
+  ;; the `(zip (keys m) (vals m))` workaround. Map iteration order is hash-
+  ;; driven (ADR-040), so we compare against frequency maps where order matters.
+  (test "map/filter/mapcat/fold/reduce/count accept a map as the collection"
+    (let (m {:a 1 :b 2 :c 3})
+      (assert= (frequencies (map first m)) {:a 1 :b 1 :c 1})
+      (assert= (count m) 3)
+      (assert= (fold + 0 (map second m)) 6)
+      (assert= (reduce + 0 (map second m)) 6)
+      (assert= (frequencies (filter (fn ([_ v]) (> v 1)) m)) {[:b 2] 1 [:c 3] 1})
+      (assert= (frequencies (mapcat (fn ([k v]) (list k v)) m)) {:a 1 :b 1 :c 1 1 1 2 1 3 1})))
+  (test "seq coerces a map to its pairs; entries is an alias for map-pairs"
+    (let (m {:x 1 :y 2})
+      (assert= (frequencies (seq m)) {[:x 1] 1 [:y 2] 1})
+      (assert= (entries m) (map-pairs m))))
   (test "frequencies tallies occurrences into a map"
     (assert= (frequencies (list :a :b :a :a :b)) {:a 3 :b 2})
     (assert= (frequencies nil) {})
@@ -121,6 +147,13 @@
   (test "into a map assocs [k v] pairs; into a list appends"
     (assert= (into {:a 1} (list [:b 2] [:c 3])) {:a 1 :b 2 :c 3})
     (assert= (into (list 1 2) (list 3 4)) (list 1 2 3 4)))
+  (test "into a vector produces a vector (not a list)"
+    (assert= (into [] (list 1 2 3)) [1 2 3])
+    (assert= (into [0] (list 1 2)) [0 1 2]))
+  (test "into reads a map as its [k v] pairs"
+    ;; insertion order may vary on rehash; compare as a frequency map.
+    (assert= (frequencies (into [] {:a 1 :b 2})) {[:a 1] 1 [:b 2] 1})
+    (assert= (into {} {:a 1 :b 2}) {:a 1 :b 2}))
   (test "times applies f n times" (assert= (times 5 inc 0) 5) (assert= (times 0 inc 9) 9))
   (test "iterate-times yields n+1 successive states"
     (assert= (iterate-times (fn (n) (* n 2)) 1 4) (list 1 2 4 8 16)))

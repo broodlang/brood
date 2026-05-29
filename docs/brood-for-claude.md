@@ -29,7 +29,8 @@ project tooling via `nest test` / `nest run` / `nest new <name>`.
 ```
 ;; comment to end of line
 42  -3  3.14            ; int (i64), float (f64)
-"hello\n"               ; string
+"hello\n"               ; string — escapes: \n \t \r \e (ESC) \0 \\ \" plus
+                        ;   \xHH (two-hex byte) and \u{H..H} (Unicode codepoint)
 true  false  nil        ; booleans, nil
 :keyword                ; keyword — interned, self-evaluating
 name  foo-bar?  +       ; symbol (kebab-case is idiomatic)
@@ -253,20 +254,26 @@ send data and call `def`'d names on the receiving side. `receive` takes
 pattern clauses just like `match`, plus an optional `(after ms body...)`
 clause for timeouts.
 
-**`spawn` is let-it-crash, `supervise` recovers.** Plain `(spawn expr)` is
-Erlang's `spawn/1`: if `expr` throws, the process exits and its monitors
-fire `[:down pid [:error msg]]`. `(supervise expr)` wraps the new process
-in a runtime supervisor — an uncaught throw is caught, the *last tail
-call* is re-invoked (resolving the called fn by name so a hot reload picks
-up the new version, ADR-013), and the process exits only if more than the
-restart intensity allows (Erlang default: 3 restarts in any 5 s window;
-prelude `*supervise-max-restarts*` / `*supervise-max-window-ms*`).
+**`spawn` is let-it-crash.** Plain `(spawn expr)` is Erlang's `spawn/1`:
+if `expr` throws, the process exits and its monitors fire
+`[:down ref pid [:error msg]]`. There is no kernel-level supervisor — a
+hand-written one is ~10 lines of Brood (see [`supervision.md`](supervision.md)).
+Named-spawn `(spawn :name expr)` is idempotent on the name: if `:name` is
+already registered to a live pid, returns that pid; otherwise spawns fresh
+and registers the new pid. The name is auto-reaped on death.
 
 ```lisp
-(spawn (worker))                                   ; fire-and-forget; crashes propagate
-(supervise (long-running-loop))                    ; supervised + retried on throw
-(spawn :ticker (ticker 0))                         ; named + idempotent (no auto-restart)
-(supervise :ticker (ticker 0))                     ; named + idempotent + supervised
+(spawn (worker))                                   ; fire-and-forget; crashes exit the process
+(spawn :ticker (ticker 0))                         ; named + idempotent
+
+;; Userland supervisor — re-spawn on crash:
+(defn supervise (worker-fn)
+  (let (pid (spawn (worker-fn)) ref (monitor pid))
+    (receive
+      ([:down ~ref _ :normal] :ok)
+      ([:down ~ref _ reason]
+        (println "child died: " (pr-str reason) " — restarting")
+        (supervise worker-fn)))))
 ```
 
 ## Stateful servers — the `hatch` framework (`(require 'hatch)`)
@@ -280,24 +287,31 @@ kinds:
   `(! pid payload)`.
 - **call** — synchronous; the clause body is `[reply next-state]` and the caller
   blocks for `reply`. Send with `(gen-call pid payload)`.
+- **query** — synchronous read-only; the body is just the reply, state unchanged.
+  Use this for "just read a field" cases to avoid the `[x s]` boilerplate.
 
 ```lisp
 (require 'hatch)
 
 (defprocess counter (n)                 ; n is the state
-  (cast :inc       (+ n 1))             ; new state = n+1
-  (cast [:add k]   (+ n k))             ; payloads can carry data (pattern binds k)
-  (cast :ping      (do (println "pong") n))  ; side effect, state unchanged
-  (call :value     [n n]))             ; reply n, keep state n
+  (cast  :inc       (+ n 1))            ; new state = n+1
+  (cast  [:add k]   (+ n k))            ; payloads can carry data (pattern binds k)
+  (cast  :ping      (do (println "pong") n))  ; side effect, state unchanged
+  (call  :value     [n n])              ; reply n, keep state n
+  (query :double    (* n 2)))           ; reply n*2; state untouched
 
 (def c (hatch counter 0))               ; spawn with initial state 0 → pid
 (! c :inc)                              ; cast (returns immediately)
 (! c [:add 10])
 (gen-call c :value)                     ; => 11  (synchronous; blocks for reply)
+(gen-call c :double)                    ; => 22  (query — read-only)
+(stop c)                                ; graceful shutdown; ends the loop
 ```
 
 Other primitives: `(sleep ms)` parks the current process without touching its
-mailbox (it does *not* block a worker thread).
+mailbox (it does *not* block a worker thread). `(stop pid)` ends a hatch
+process's receive loop cleanly — every hatch automatically handles the stop
+envelope, no `:stop` clause needed.
 
 **Worker pool — fan out work, fan in results** (plain `spawn`/`receive`, the
 pattern most demos want):
@@ -324,7 +338,7 @@ even for thousands of workers.
 ## Hot reload (`nest run --watch FILE`)
 
 Writing a live script: just write a normal Brood file. The
-`nest run --watch` wrapper handles supervision and reload triggering.
+`nest run --watch` wrapper re-loads on save.
 
 ```lisp
 ;; live.blsp — run with: nest run --watch live.blsp
@@ -340,17 +354,19 @@ What happens when you save:
 - `(my-loop 0)` is **not** re-run — `reload-defs` skips non-`def*` top-level
   forms, so each save doesn't fork a duplicate loop.
 - The running process's next call to `my-loop` late-binds to the new
-  closure, picks up your edit on the next iteration.
+  closure, picks up your edit on the next iteration (ADR-013).
 
 If your save introduces a runtime error (typo, unbound symbol, wrong
-arity), the supervisor catches the throw at the process boundary and
-retries — `--watch` uses a generous 100 restarts in 60 s, so you have
-roughly a minute to type the fix. The supervisor's next retry
-re-resolves the function by name and picks up the corrected code,
-state preserved (it continues from the iteration that threw).
+arity), the process **dies** — there is no kernel supervisor (ADR-039
+reverted, 2026-05-29). `--watch` re-spawns from scratch when you save
+again; state in the watched process is not preserved across a crash. For
+state-preserving recovery, write a userland supervisor (`spawn` +
+`monitor`; pattern in [`supervision.md`](supervision.md)) — but be aware
+that re-spawning means losing the closure's local state and restarting
+the function call from its initial args.
 
 Outside `--watch` (`nest run FILE`, `brood FILE`), the same file runs
-inline as a plain script — no supervision, no reload, throws exit.
+inline as a plain script — no reload, throws exit.
 
 ## Errors
 
@@ -380,8 +396,16 @@ inline as a plain script — no supervision, no reload, throws exit.
   `string->list` `list->string` `starts-with?` `ends-with?`
 - **string formatting**: `string-repeat` `pad-left` `pad-right`
   `to-fixed` (number → string with fixed decimals, e.g. `(to-fixed 3.14159 2)`
-  → `"3.14"` — `str` prints full f64 precision, so reach for this for output)
-- **map**: `assoc` `dissoc` `get` `keys` `vals` `contains?` `into`
+  → `"3.14"` — `str` prints full f64 precision, so reach for this for output) ·
+  `format` (small printf, e.g. `(format "x=%d y=%.2f" 42 3.14)` → `"x=42 y=3.14"`;
+  specifiers `%s %d %f %.Nf %%`; width via `pad-left`/`pad-right`)
+- **map**: `assoc` `dissoc` `get` `keys` `vals` `contains?` `into` `entries`
+  (alias of `map-pairs`) `seq` (universal list-view — coerces a map to its
+  `[k v]` pairs; lists, vectors, strings, nil pass through). **Maps are seqable**:
+  `(map f m)` / `(filter f m)` / `(fold f acc m)` / `(reduce f acc m)` /
+  `(count m)` / `(into [] m)` all walk the map as its `[k v]` pairs — no need
+  for `(zip (keys m) (vals m))`. Iteration order is hash-driven (ADR-040), so
+  compare via `frequencies` when order would otherwise matter.
 - **types**: `type-of` plus the `?` predicates — `int?` `float?` `string?`
   `symbol?` `keyword?` `bool?` `nil?` `pair?` `vector?` `map?` `fn?` `ref?`
   `pid?`
@@ -396,8 +420,9 @@ inline as a plain script — no supervision, no reload, throws exit.
   (macro: `(bench "label" expr)` prints `label: N ms`, returns `expr`)
 - **I/O**: `print` `println` `slurp` `spit` `load` `eval-string` `read-string`
 - **Filesystem (stat-class)**: `file-exists?` `dir?` `list-dir` `file-mtime`
-- **processes**: `spawn` `supervise` `send` `receive` `self` `ref` `monitor`
-  `demonitor` — plus the **`hatch`** framework below
+- **processes**: `spawn` (incl. named-spawn `(spawn :name expr)`)
+  `send` `receive` `self` `ref` `monitor` `demonitor` `register` `whereis`
+  — plus the **`hatch`** framework below
 - **transducers**: `comp` `xmap` `xfilter` `xremove` `xkeep` `xmapcat`
   `xtake-while` `transduce` `reduced` `reduced?`
 
@@ -423,6 +448,15 @@ inline as a plain script — no supervision, no reload, throws exit.
   (just plain recursion), no namespaced names (the module system is flat).
 - **Not Scheme / CL**: no `setq`, no `cond`-with-`t`-catch-all (use `else`
   or `:else`).
+- **`sort` on heterogeneous / non-numeric items uses *structural* order.**
+  `(sort coll)` is `<` for numbers, lexicographic for vectors/lists, text order
+  for strings/symbols/keywords (so `(sort [[1 0] [2 1]])` works, no comparator
+  needed). For custom orderings use `(sort less? coll)` or `(sort-by key-fn coll)`.
+- **`index-of` works on strings *and* on lists/vectors.** Strings → substring
+  search; lists/vectors → linear element search (structural `=`). Returns `-1`
+  if absent. The general "is `x` in `coll`?" predicate is `(includes? coll x)`
+  — handles lists, vectors, strings (substring), and maps (looks at values; use
+  `contains?` for keys).
 
 ## Module skeleton (what `nest new` scaffolds)
 

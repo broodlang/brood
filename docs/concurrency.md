@@ -188,8 +188,13 @@ selective with timeouts. What's still open:
   so the receiver resolves it.
 - **One shared run queue** — no work-stealing yet (phase 5). Fine until run-queue
   contention shows up in a profile.
-- **No supervision / links / monitors / registered names** (phase 6). A process
-  death is currently just an `eprintln!`; pids are bare integers.
+- **No `link` and no supervision trees** (phase 6). `monitor` and registered
+  names *are* in (see ✅ above; `(register name pid)` / `(spawn :name expr)` /
+  `(whereis name)`). The kernel-level supervisor with mid-iteration retry
+  (ADR-039) shipped briefly and was **reverted** — see
+  [`supervision.md`](supervision.md). A process death prints to stderr and
+  fires `[:down …]` to monitors; recover-on-throw is userland (`spawn` +
+  `monitor` in ~10 lines).
 - **Selective-receive scan cost** — testing a candidate rebuilds it into the
   LOCAL heap; non-matching messages leave short-lived garbage (reclaimed at the
   next top-level arena reset, ADR-016). Negligible when the first message matches;

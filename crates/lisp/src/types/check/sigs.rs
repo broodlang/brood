@@ -37,7 +37,10 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     let int = Ty::of(Tag::Int);
     let num = Ty::NUMBER;
     let any = Ty::ANY;
-    let seq = Ty::LIST.union(Ty::of(Tag::Vector));
+    // Maps are seqable in the stdlib (`seq`/`fold` coerce them via `map-pairs`),
+    // so the higher-order combinators accept maps too — without this the
+    // checker would warn on `(map f some-map)` even though it runs fine.
+    let seq = Ty::LIST.union(Ty::of(Tag::Vector)).union(Ty::of(Tag::Map));
     let callable = Ty::of(Tag::Fn).union(Ty::of(Tag::Native));
     let mut m: SymbolMap<Sig> = SymbolMap::default();
     let mut put = |name: &str, sig: Sig| {
@@ -53,7 +56,7 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     }
     // `mod` is Brood (over `rem`), but its types are fixed
     put("mod", Sig::new(vec![int, int], int));
-    // higher-order: first arg callable, second a sequence
+    // higher-order: first arg callable, second a sequence (map included; see above)
     for n in ["map", "filter"] {
         put(n, Sig::new(vec![callable, seq], seq));
     }

@@ -53,3 +53,34 @@
       ;; refs tag each call, so interleaved replies can't be confused
       (assert= (gen-call a [:double 3]) 6)
       (assert= (gen-call b [:double 21]) 42))))
+
+(describe "hatch: query and stop"
+  :isolated
+  ;; `query` is a synchronous read that doesn't change state — the body is just
+  ;; the reply, no `[reply state]` pair needed. State is threaded along by the
+  ;; macro, so casts still observe the right value across queries.
+  (defprocess kv (m)
+    (cast [:put k v] (assoc m k v))
+    (query [:get k]  (get m k))
+    (query :size     (count m)))
+
+  (test "query replies the body and leaves state unchanged"
+    (let (s (hatch kv {}))
+      (! s [:put :a 1])
+      (! s [:put :b 2])
+      (assert= (gen-call s [:get :a]) 1)
+      (assert= (gen-call s [:get :b]) 2)
+      (assert= (gen-call s :size) 2)
+      ;; another cast confirms state survived the queries
+      (! s [:put :c 3])
+      (assert= (gen-call s :size) 3)))
+
+  (test "(stop pid) ends the receive loop cleanly"
+    ;; After stop, further casts to the dead pid are silently dropped (sends to
+    ;; an exited process are no-ops in this kernel). We can't observe the exit
+    ;; from outside without `monitor`, so we just confirm stop returns nil and
+    ;; the surrounding test completes (i.e. the process doesn't deadlock).
+    (let (s (hatch kv {}))
+      (! s [:put :a 1])
+      (assert= (gen-call s :size) 1)
+      (assert= (stop s) nil))))

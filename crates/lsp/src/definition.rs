@@ -47,7 +47,10 @@ pub fn definition(
         // Bound in this buffer (local or a document-level `def`): jump to the
         // binder token, in this same file.
         Resolution::Defined { def, .. } => {
-            let range = Range::new(index.position(text, def.start), index.position(text, def.end));
+            let range = Range::new(
+                index.position(text, def.start),
+                index.position(text, def.end),
+            );
             Some(Location::new(uri.clone(), range))
         }
         // Free here — ask the runtime where the name was defined (another
@@ -106,7 +109,10 @@ fn head_sym<'s>(node: &Node, src: &'s str) -> Option<&'s str> {
 fn head_sym_is_not(chain: &[&Node], src: &str, node: &Node) -> bool {
     !chain.iter().any(|n| {
         n.kind == NodeKind::List
-            && n.forms().next().map(|h| std::ptr::eq(h, node)).unwrap_or(false)
+            && n.forms()
+                .next()
+                .map(|h| std::ptr::eq(h, node))
+                .unwrap_or(false)
             && head_sym(n, src) == Some("require")
     })
 }
@@ -136,7 +142,8 @@ mod tests {
         let tree = scope::analyze(&root, src);
         let index = LineIndex::new(src);
         let at = src.find(needle).unwrap() as u32;
-        definition(&mut interp, &uri, src, &root, &tree, &index, at).map(|l| l.range.start.character)
+        definition(&mut interp, &uri, src, &root, &tree, &index, at)
+            .map(|l| l.range.start.character)
     }
 
     #[test]
@@ -181,10 +188,9 @@ mod tests {
         let loc = definition(&mut interp, &uri, src, &root, &tree, &index, at)
             .expect("cross-file definition");
         assert!(
-            loc.uri.as_str().ends_with(&format!(
-                "brood_lsp_def_{}.blsp",
-                std::process::id()
-            )),
+            loc.uri
+                .as_str()
+                .ends_with(&format!("brood_lsp_def_{}.blsp", std::process::id())),
             "should point at the loaded module file, got {:?}",
             loc.uri
         );

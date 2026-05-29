@@ -44,10 +44,27 @@
             (%eq (map-pairs x) nil)
             (throw (str "empty?: not a collection: " (pr-str x)))))))))
 
+;; ---- universal list view ----
+;; `seq` is what lets every list-shaped op (map/filter/fold/reduce/…) walk a
+;; *map* without callers reaching for `(zip (keys m) (vals m))`: a map becomes
+;; its `[k v]` pairs in one O(n) `map-pairs` pass; lists, vectors, strings, and
+;; `nil` pass through unchanged. Defined here with raw kernel ops (`%eq`,
+;; `type-of`, `map-pairs`) because `fold` calls it before the `map?` predicate /
+;; `cond` macro are available.
+(defn seq (coll)
+  "A list view of `coll`. A map becomes its `[k v]` pairs; lists, vectors, strings, and `nil` pass through. Used by `map`/`filter`/`fold` so they accept any collection."
+  (if (%eq (type-of coll) :map) (map-pairs coll) coll))
+(def entries map-pairs)
+
 ;; ---- folding (the workhorse; tail-recursive, so it is stack-safe) ----
+;; The public entry coerces once via `seq`; the inner `fold--loop` then stays in
+;; list form for the recursion, so a map costs one extra `map-pairs` pass total
+;; rather than O(n) per step.
 (defn fold (f acc coll)
-  "Left-fold: combine the items of `coll` left-to-right with `(f acc item)`, starting from `acc`. Tail-recursive, so it is stack-safe."
-  (if (empty? coll) acc (fold f (f acc (first coll)) (rest coll))))
+  "Left-fold: combine the items of `coll` left-to-right with `(f acc item)`, starting from `acc`. Tail-recursive, so it is stack-safe. Maps fold as their `[k v]` pairs."
+  (fold--loop f acc (seq coll)))
+(defn fold--loop (f acc coll)
+  (if (empty? coll) acc (fold--loop f (f acc (first coll)) (rest coll))))
 
 ;; `cons` with its arguments flipped — the workhorse passed to `fold` to build a
 ;; list in reverse (then reversed once at the end). Hoisted to the top level so
@@ -57,10 +74,14 @@
 
 (defn reverse (coll) "The items of `coll` in reverse order, as a list." (fold flip-cons nil coll))
 
-;; reduce supports both (reduce f init coll) and (reduce f coll).
+;; reduce supports both (reduce f init coll) and (reduce f coll). The 2-arg
+;; form must seq-coerce `x` itself before splitting head/tail, because the bare
+;; `(first x)`/`(rest x)` calls bypass fold's coercion and a map would error.
 (defn reduce (f x & more)
-  "Reduce a collection with `f`. Either `(reduce f init coll)` or `(reduce f coll)` (using the first item as the initial value)."
-  (if (empty? more) (fold f (first x) (rest x)) (fold f x (first more))))
+  "Reduce a collection with `f`. Either `(reduce f init coll)` or `(reduce f coll)` (using the first item as the initial value). Maps reduce as their `[k v]` pairs."
+  (if (empty? more)
+    (let (s (seq x)) (fold f (first s) (rest s)))
+    (fold f x (first more))))
 
 ;; ---- arithmetic (variadic, built on the 2-arg primitives) ----
 ;; These fold directly over the primitive, not via `reduce` — `reduce`'s 3-arg
@@ -919,19 +940,26 @@
     (partition--acc n (drop n coll) (cons (take n coll) acc))
     (reverse acc)))
 
-;; (sort coll) ascending via `<`; (sort less? coll) with a strict less-than
-;; predicate. (sort-by key-fn coll) sorts by `(< (key-fn x) (key-fn y))`. A
-;; stable, O(n log n) merge sort: the merge prefers the left run on ties (stable)
-;; and is tail-recursive; recursion depth is O(log n), so it's stack-safe.
+;; (sort coll) ascending via `<` (numbers) or structural order (anything else);
+;; (sort less? coll) with a strict less-than predicate. (sort-by key-fn coll)
+;; sorts by `(< (key-fn x) (key-fn y))`. A stable, O(n log n) merge sort: the
+;; merge prefers the left run on ties (stable) and is tail-recursive; recursion
+;; depth is O(log n), so it's stack-safe.
 ;;
-;; The single-arg `(sort coll)` case delegates to the Rust `%sort-asc`
-;; primitive — ~50× faster than the in-Brood mergesort on 10 000 items
-;; because every comparison is a Rust `match` instead of an `eval::apply`
-;; round-trip. Custom-comparator `(sort less? coll)` stays on the
-;; Brood-side `merge-sort` (the primitive is `<`-only).
+;; The single-arg `(sort coll)` case has two Rust fast paths: `%sort-asc` for
+;; the all-numeric case (~50× faster than the in-Brood mergesort because every
+;; comparison is a Rust `match` instead of an `eval::apply` round-trip), and
+;; `%sort-cmp` for the heterogeneous / structural case (vectors, strings,
+;; keywords, …). Dispatch checks the first item — non-empty fast since
+;; `(number? (first a))` is one tag-of compare. Empty coll → empty list.
+;; Custom-comparator `(sort less? coll)` stays on the Brood-side `merge-sort`.
 (defn sort (a & more)
-  "Sort a collection (stable). `(sort coll)` is ascending by `<`; `(sort less? coll)` uses a strict less-than predicate."
-  (if (empty? more) (%sort-asc a) (merge-sort a (first more))))
+  "Sort a collection (stable). `(sort coll)` is ascending by `<` for numbers, or by structural order (lexicographic on vectors/lists, text order on strings/symbols/keywords) for anything else. `(sort less? coll)` uses a strict less-than predicate."
+  (cond
+    (not (empty? more)) (merge-sort a (first more))
+    (empty? a) nil
+    (number? (first a)) (%sort-asc a)
+    else (%sort-cmp a)))
 (defn sort-by (key-fn coll)
   "Sort `coll` (stable, ascending) by comparing `(key-fn x)` of each item."
   (merge-sort (fn (x y) (< (key-fn x) (key-fn y))) coll))
@@ -958,9 +986,14 @@
   (fold (fn (m x) (assoc m x (inc (get m x 0)))) {} coll))
 
 (defn into (to from)
-  "Pour each item of `from` into `to`. For a map, items are [k v] pairs (assoc'd);
-otherwise the items are appended (`to` is a list)."
-  (if (map? to) (reduce (fn (m p) (assoc m (first p) (second p))) to from) (append to from)))
+  "Pour each item of `from` into `to`. For a map, items are `[k v]` pairs (assoc'd, map result); for a vector, items are appended (vector result); otherwise items are appended (list result). Maps in `from` are read as their entries, so `(into [] some-map)` and `(into {} other-map)` both work."
+  (cond
+    (map? to) (reduce (fn (m p) (assoc m (first p) (second p))) to from)
+    ;; `append to from` is always a list (fold-of-flip-cons), so we re-vectorise.
+    ;; That's an extra O(n) pass — acceptable; the previous code silently
+    ;; returned a list even when `to` was a vector.
+    (vector? to) (apply vector (append to from))
+    else (append to from)))
 
 ;; ---- more sequence operations -----------------------------------------------
 ;; The eager counterparts of the `x*` transducers, plus the common Clojure-ish
@@ -1252,20 +1285,36 @@ applies to each input first."
   "Concatenate a list of strings (e.g. from `string->list`) into one string."
   (apply str cs))
 
-(defn index-of--from (s needle i)
+(defn index-of--str-from (s needle i)
   (let (nl (string-length needle))
     (cond
       (> (+ i nl) (string-length s)) -1
       (= (substring s i (+ i nl)) needle) i
-      else (index-of--from s needle (inc i)))))
-(defn index-of (s needle)
-  "The char index of the first occurrence of `needle` in `s`, or -1 if absent.
-`needle` may be more than one character; the empty string is found at 0."
-  (index-of--from s needle 0))
+      else (index-of--str-from s needle (inc i)))))
+(defn index-of--seq-from (coll x i)
+  (cond
+    (empty? coll) -1
+    (= (first coll) x) i
+    else (index-of--seq-from (rest coll) x (inc i))))
+(defn index-of (coll x)
+  "The 0-based index of `x` in `coll`, or -1 if absent.
+For a string, `x` is a substring (multi-char ok; the empty string matches at 0).
+For a list or vector, `x` is an element compared structurally."
+  (cond
+    (string? coll) (index-of--str-from coll x 0)
+    (vector? coll) (index-of--seq-from coll x 0)
+    else (index-of--seq-from coll x 0)))
 
 (defn string-contains? (s needle)
   "Does `s` contain `needle` as a substring?"
   (>= (index-of s needle) 0))
+
+(defn includes? (coll x)
+  "True if `coll` contains `x`. Works on lists, vectors, strings (substring), and maps (membership among values — use `contains?` for keys)."
+  (cond
+    (map? coll) (member? x (vals coll))
+    (string? coll) (string-contains? coll x)
+    else (>= (index-of coll x) 0)))
 
 ;; Collect `coll`'s elements interleaved with `sep` into a parts list (tail-
 ;; recursively, reversed), then build the string in one `apply str` pass.
@@ -1328,6 +1377,51 @@ leaves `s` unchanged."
 (defn pad-right (s w)
   "Left-justify `s` in a field of width `w`, padding with spaces on the right; `s` is returned unchanged if it is already at least `w` wide."
   (let (n (string-length s)) (if (>= n w) s (str s (string-repeat " " (- w n))))))
+
+;; ---- string formatting ------------------------------------------------------
+;; A small `printf`-style helper for inline rendering. The supported specifiers
+;; are a deliberate subset — the common cases for demos and tooling output:
+;;   %s    any value, rendered via `str`
+;;   %d    integer (any number; the type tag is a hint for the reader, not a
+;;         converter — float in / float out, same as %s)
+;;   %f    float with 6 fractional digits (matches the C/Java default)
+;;   %.Nf  float with N fractional digits, rounded — uses `to-fixed`
+;;   %%    a literal `%`
+;; Width / justification aren't built in — `pad-left` / `pad-right` cover those
+;; explicitly. Hex/octal/etc. aren't here; add them on demand. Errors on an
+;; unknown spec or a format string that ends inside one; a missing arg renders
+;; as `nil` (debuggable), extra args are ignored.
+(defn format (fmt & args)
+  "Render `fmt`, replacing each %-specifier with the next of `args`. Supports `%s` `%d` `%f` `%.Nf` `%%`; use `pad-left`/`pad-right` for width."
+  (format--loop fmt 0 (string-length fmt) args ""))
+
+(defn format--loop (fmt i n args acc)
+  (cond
+    (>= i n) acc
+    (= (char-at fmt i) "%") (format--spec fmt (inc i) n args acc)
+    else (format--loop fmt (inc i) n args (str acc (char-at fmt i)))))
+
+(defn format--spec (fmt i n args acc)
+  ;; called with `i` pointing one past the `%`
+  (cond
+    (>= i n) (error "format: unterminated specifier (lone '%' at end of format string)")
+    (= (char-at fmt i) "%") (format--loop fmt (inc i) n args (str acc "%"))
+    (= (char-at fmt i) "s") (format--loop fmt (inc i) n (rest args) (str acc (str (first args))))
+    (= (char-at fmt i) "d") (format--loop fmt (inc i) n (rest args) (str acc (str (first args))))
+    (= (char-at fmt i) "f") (format--loop fmt (inc i) n (rest args) (str acc (to-fixed (first args) 6)))
+    (= (char-at fmt i) ".") (format--prec fmt (inc i) n args acc 0)
+    else (error (str "format: unrecognized specifier '%" (char-at fmt i) "' at column " i))))
+
+(defn format--prec (fmt i n args acc p)
+  ;; called with `i` pointing one past the `.`, accumulating precision in `p`
+  (cond
+    (>= i n) (error "format: unterminated %.Nf specifier")
+    (= (char-at fmt i) "f") (format--loop fmt (inc i) n (rest args) (str acc (to-fixed (first args) p)))
+    else (let (d (string->number (char-at fmt i)))
+           (if (and (int? d) (>= d 0) (<= d 9))
+             (format--prec fmt (inc i) n args acc (+ (* p 10) d))
+             (error (str "format: expected digit or 'f' after '.' in specifier, got '"
+                      (char-at fmt i) "' at column " i))))))
 
 ;; ---- strings & paths --------------------------------------------------------
 ;; Helpers over `substring` (char-indexed, like `string-length`). Generic enough

@@ -158,7 +158,10 @@ impl ScopeTree {
             .filter(|n| {
                 matches!(
                     self.resolve(n.span.start, name),
-                    Resolution::Defined { kind: BindingKind::Global, .. } | Resolution::Free
+                    Resolution::Defined {
+                        kind: BindingKind::Global,
+                        ..
+                    } | Resolution::Free
                 )
             })
             .map(|n| n.span)

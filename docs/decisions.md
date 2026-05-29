@@ -1767,8 +1767,18 @@ to look in the embedded archive before falling through to disk.
 
 ## ADR-039 — Supervised processes with mode-gated resume checkpoints
 
-**Status:** proposed (2026-05-28). Design recorded in
-[`supervision.md`](supervision.md).
+**Status:** **reverted** (2026-05-29, commit `e3d3a0d`). Proposed 2026-05-28;
+shipped as opt-in 2026-05-28 (`a4948cd` / mid-day, then `9907401` follow-on);
+stripped 2026-05-29 because the kernel-side supervisor (RESUME_SLOT + safepoint
+rooting + the supervise() retry loop) was contributing the bulk of the
+multi-thread scheduler race surface (KI-1). The fan-out blocker outranked the
+elegance gain. The userland substrate (`spawn` + `monitor`) remains and is
+sufficient to write Erlang-style supervisors by hand. See
+[`supervision.md`](supervision.md) (now a short revert note + userland pattern)
+and [`docs/devlog.md`](devlog.md) for the strip rationale and metrics
+(recurse.blsp failure rate ~95% → 0% across the strip and the Phase-1 bump
+allocator follow-on). The design below is preserved as the **considered**
+shape so a future revisit can pick up the trade-off honestly.
 
 **Context.** Brood is the language a self-editing editor will be written in.
 The editor is one long-running stateful process whose `(receive)` loop *must

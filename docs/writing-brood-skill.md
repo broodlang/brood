@@ -45,6 +45,20 @@ will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
    not the raw 2-arg `%add`/`%lt` primitives (those are for the prelude's own
    bootstrap). Maps have **no commas**: `{:a 1 :b 2}`.
 
+8. **Maps are seqable; `sort` and `index-of` are polymorphic.** Three places
+   where the obvious builtin already covers more than you'd guess:
+   - `(map f m)` / `(filter f m)` / `(fold f acc m)` / `(reduce f acc m)` /
+     `(count m)` / `(into [] m)` all walk a map as its `[k v]` pairs. No need
+     for `(zip (keys m) (vals m))`; map iteration order is hash-driven, so use
+     `frequencies` for order-insensitive comparisons. `seq` and `entries` make
+     the coercion explicit when you want it.
+   - `(sort coll)` is `<` for numbers but **structural lexicographic order** for
+     vectors/lists, and text order for strings/keywords/symbols. So
+     `(sort [[1 0] [2 1]])` Just Works — no comparator needed.
+   - `(index-of coll x)` accepts a list, vector, or string (substring search)
+     and returns -1 if absent. `(includes? coll x)` is the predicate version
+     across lists, vectors, strings, and maps (values).
+
 ## Naming & shape (match std/)
 
 - `foo?` predicate · `*foo*` dynamic/module var · `foo--bar` **private** helper

@@ -27,7 +27,7 @@ pub fn display(heap: &Heap, v: Value) -> String {
 
 fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u32) {
     if depth >= MAX_DEPTH {
-        out.push_str("…");
+        out.push('…');
         return;
     }
     match v {

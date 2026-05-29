@@ -233,12 +233,7 @@ pub(crate) fn spawn_or_get<E>(
 /// monitor target lives elsewhere). If the peer link isn't up, deliver
 /// `:noconnection` immediately — same shape an immediately-dead local target
 /// gets (`:noproc` from `add_monitor`), just a different reason.
-pub(crate) fn monitor_remote(
-    target_node: Symbol,
-    target_pid: u64,
-    watcher_pid: u64,
-    mref: u64,
-) {
+pub(crate) fn monitor_remote(target_node: Symbol, target_pid: u64, watcher_pid: u64, mref: u64) {
     let me = local_node();
     let bytes: Arc<[u8]> = match frame_bytes(&Frame::Monitor {
         from_node: me,
@@ -309,7 +304,10 @@ pub(crate) fn demonitor_remote(target_node: Symbol, watcher_pid: u64, mref: u64)
 /// already down and `[:nodedown]` is delivered immediately (Erlang's
 /// `monitor_node` semantics).
 pub(crate) fn monitor_node(name: Symbol, pid: u64) {
-    crate::core::sync::write(&NODE_MONITORS).entry(name).or_default().push(pid);
+    crate::core::sync::write(&NODE_MONITORS)
+        .entry(name)
+        .or_default()
+        .push(pid);
     if !is_local(name) && !crate::core::sync::read(&NODES).contains_key(&name) {
         process::deliver(pid, nodedown_msg(name));
     }
@@ -357,7 +355,11 @@ pub(crate) fn route(node: Symbol, target: Target, msg: Message) {
     let bytes: Arc<[u8]> = match frame_bytes(&Frame::Send { target, msg }) {
         Ok(b) => Arc::from(b),
         Err(e) => {
-            eprintln!("dist: cannot encode message for {}: {}", value::symbol_name(node), e);
+            eprintln!(
+                "dist: cannot encode message for {}: {}",
+                value::symbol_name(node),
+                e
+            );
             return;
         }
     };
@@ -465,9 +467,8 @@ pub(crate) fn connect(spec: &str) -> io::Result<Symbol> {
         }
     });
     let mut stream = stream.ok_or_else(|| {
-        last_err.unwrap_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "no addresses resolved")
-        })
+        last_err
+            .unwrap_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no addresses resolved"))
     })?;
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
     let peer = handshake(&mut stream, Role::Initiator)?;

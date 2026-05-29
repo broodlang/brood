@@ -40,6 +40,8 @@ Brood code, fetch these three resources in order:
 - `check` — advisory type-check; structured diagnostics back.
 - `run-tests` — structured runner result with per-test pass/fail.
 - `processes` — live pids.
+- `callers` — every reference to a global across the project (rename
+  impact / use sites; complements `lookup`'s definition site).
 
 **When you finish a non-trivial session**, append a one-paragraph entry
 to `docs/incarnations.md` (the format is at the top of that file) and

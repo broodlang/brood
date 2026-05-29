@@ -42,6 +42,23 @@
     (assert= (list->string (list "a" "b" "c")) "abc")
     (assert= (list->string (string->list "round-trip")) "round-trip")))
 
+(describe "escapes"
+  ;; Beyond the named `\e` / `\n` / `\t` / `\r` / `\0` / `\\` / `\"`, Brood
+  ;; strings also support `\xHH` (two-hex-digit byte) and `\u{H..H}` (Unicode
+  ;; codepoint). `\e` and `\x1b` and `\u{1b}` all produce ESC.
+  (test "\\xHH decodes a two-hex-digit byte"
+    (assert= "\x1b" "\e")
+    (assert= "\x41" "A"))
+  (test "\\u{H..H} decodes a Unicode codepoint"
+    (assert= "\u{1b}" "\e")
+    (assert= "\u{41}" "A")
+    ;; 😀 is U+1F600; the literal char round-trips through the string too.
+    (assert= "\u{1F600}" "😀"))
+  (test "malformed escapes pass through as literal chars"
+    (assert= "\xZZ" "xZZ")
+    (assert= "\u{}" "u{}")
+    (assert= "\u{nothex}" "u{nothex}")))
+
 (describe "search"
   (test "index-of finds the first occurrence"
     (assert= (index-of "hello world" "o") 4)
@@ -50,7 +67,23 @@
   (test "the empty needle is found at 0" (assert= (index-of "hello" "") 0))
   (test "string-contains?"
     (is (string-contains? "hello" "ell"))
-    (refute (string-contains? "hello" "xyz"))))
+    (refute (string-contains? "hello" "xyz")))
+  ;; index-of also works on lists and vectors (linear scan; structural `=`).
+  (test "index-of on a list/vector finds the element index"
+    (assert= (index-of (list 10 20 30) 20) 1)
+    (assert= (index-of [10 20 30] 30) 2)
+    (assert= (index-of (list :a :b :c) :b) 1))
+  (test "index-of is -1 for a missing element on lists/vectors"
+    (assert= (index-of (list 1 2 3) 99) -1)
+    (assert= (index-of [] :anything) -1))
+  ;; includes? wraps the common membership test for any collection.
+  (test "includes? works on lists, vectors, strings, and maps"
+    (is (includes? (list 1 2 3) 2))
+    (refute (includes? (list 1 2 3) 9))
+    (is (includes? [10 20] 20))
+    (is (includes? "hello" "ell"))
+    (is (includes? {:a 1 :b 2} 2))
+    (refute (includes? {:a 1} 99))))
 
 (describe "join"
   (test "places the separator between elements" (assert= (join ", " (list "a" "b" "c")) "a, b, c"))
@@ -118,6 +151,41 @@
   (test "rejects a negative decimal count" (assert-error (to-fixed 1.0 -1)))
   (test "lines up in a fixed-width column via pad-left"
     (assert= (pad-left (to-fixed 1.5 2) 7) "   1.50")))
+
+(describe "format (printf-style)"
+  (test "a format string with no specifiers is returned unchanged"
+    (assert= (format "") "")
+    (assert= (format "hello, world") "hello, world"))
+  (test "%% renders a literal %"
+    (assert= (format "100%%") "100%")
+    (assert= (format "%%done") "%done"))
+  (test "%s renders any value via str"
+    (assert= (format "got: %s" "x") "got: x")
+    (assert= (format "got: %s" 42) "got: 42")
+    (assert= (format "got: %s" :foo) "got: :foo")
+    (assert= (format "got: %s" nil) "got: nil")
+    (assert= (format "got: %s" [1 2 3]) "got: [1 2 3]"))
+  (test "%d renders a number"
+    (assert= (format "n=%d" 42) "n=42")
+    (assert= (format "n=%d" -7) "n=-7"))
+  (test "%f renders a float with 6 fractional digits (C default)"
+    (assert= (format "pi=%f" 3.141592653589793) "pi=3.141593"))
+  (test "%.Nf renders a float with N fractional digits"
+    (assert= (format "pi=%.2f" 3.14159) "pi=3.14")
+    (assert= (format "%.0f" 3.7) "4")
+    (assert= (format "%.4f" 0.015873015873) "0.0159"))
+  (test "mixed specifiers consume args left-to-right"
+    (assert= (format "x = %d, y = %.2f" 42 3.14159) "x = 42, y = 3.14")
+    (assert= (format "%s/%s" "a" "b") "a/b"))
+  (test "extra args are ignored; missing args render as nil"
+    (assert= (format "one") "one")
+    (assert= (format "%s" "a" "b" "c") "a")
+    (assert= (format "%s %s" "a") "a nil"))
+  (test "rejects an unknown specifier or a truncated one"
+    (assert-error (format "what is %q" 1))
+    (assert-error (format "ends in %"))
+    (assert-error (format "ends in %.2"))
+    (assert-error (format "%.xf" 1.0))))
 
 ;; ---- across processes -------------------------------------------------------
 ;; Each worker builds a padded string from data and sends it back (deep copy

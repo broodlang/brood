@@ -262,4 +262,3 @@ fn nest_subcommand_misuse(files: &[String]) -> Option<String> {
 fn no_check_env() -> bool {
     std::env::var_os("BROOD_NO_CHECK").is_some()
 }
-

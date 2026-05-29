@@ -50,13 +50,47 @@ pub fn legend() -> SemanticTokensLegend {
 /// completion ([`crate::completion`]) so the two can't drift on the list.
 /// Mirrors `brood.el`'s `brood-special-forms` plus the `def`-family heads.
 pub(crate) const SPECIAL_FORMS: &[&str] = &[
-    "if", "do", "def", "fn", "lambda", "let", "let*", "letrec", "quote", "quasiquote", "defmacro",
-    "defn", "defdyn", "defmodule", "when", "unless", "cond", "and", "or", "match", "match*", "try",
-    "catch", "throw", "receive", "binding", "dolist", "doseq", "dotimes", "for", "->", "->>",
+    "if",
+    "do",
+    "def",
+    "fn",
+    "lambda",
+    "let",
+    "let*",
+    "letrec",
+    "quote",
+    "quasiquote",
+    "defmacro",
+    "defn",
+    "defdyn",
+    "defmodule",
+    "when",
+    "unless",
+    "cond",
+    "and",
+    "or",
+    "match",
+    "match*",
+    "try",
+    "catch",
+    "throw",
+    "receive",
+    "binding",
+    "dolist",
+    "doseq",
+    "dotimes",
+    "for",
+    "->",
+    "->>",
 ];
 
 /// All semantic tokens for the document, delta-encoded.
-pub fn semantic_tokens(text: &str, root: &Node, tree: &ScopeTree, index: &LineIndex) -> SemanticTokens {
+pub fn semantic_tokens(
+    text: &str,
+    root: &Node,
+    tree: &ScopeTree,
+    index: &LineIndex,
+) -> SemanticTokens {
     let mut raws: Vec<Raw> = Vec::new();
     walk(root, text, tree, Role::Normal, index, &mut raws);
     // Source order normally falls out of the depth-first walk, but multi-line
@@ -89,7 +123,14 @@ enum Role {
     Normal,
 }
 
-fn walk(node: &Node, src: &str, tree: &ScopeTree, role: Role, index: &LineIndex, out: &mut Vec<Raw>) {
+fn walk(
+    node: &Node,
+    src: &str,
+    tree: &ScopeTree,
+    role: Role,
+    index: &LineIndex,
+    out: &mut Vec<Raw>,
+) {
     match node.kind {
         NodeKind::List => {
             let def_head = head_sym(node, src).map(is_def_head).unwrap_or(false);
@@ -130,7 +171,14 @@ fn walk(node: &Node, src: &str, tree: &ScopeTree, role: Role, index: &LineIndex,
     }
 }
 
-fn push_symbol(node: &Node, src: &str, tree: &ScopeTree, role: Role, index: &LineIndex, out: &mut Vec<Raw>) {
+fn push_symbol(
+    node: &Node,
+    src: &str,
+    tree: &ScopeTree,
+    role: Role,
+    index: &LineIndex,
+    out: &mut Vec<Raw>,
+) {
     let name = node.text(src);
     let (ttype, tmods) = if role == Role::DefName {
         // The name being defined.
@@ -139,8 +187,14 @@ fn push_symbol(node: &Node, src: &str, tree: &ScopeTree, role: Role, index: &Lin
         (T_KEYWORD, 0)
     } else {
         match tree.resolve(node.span.start, name) {
-            Resolution::Defined { kind: BindingKind::Local, .. } => (T_VARIABLE, 0),
-            Resolution::Defined { kind: BindingKind::Global, .. } => (T_FUNCTION, 0),
+            Resolution::Defined {
+                kind: BindingKind::Local,
+                ..
+            } => (T_VARIABLE, 0),
+            Resolution::Defined {
+                kind: BindingKind::Global,
+                ..
+            } => (T_FUNCTION, 0),
             // A free name in head position is a call; elsewhere treat as a value.
             Resolution::Free if role == Role::Head => (T_FUNCTION, 0),
             _ => (T_VARIABLE, 0),
@@ -189,7 +243,11 @@ fn delta_encode(raws: &[Raw]) -> Vec<SemanticToken> {
     let (mut pl, mut pc) = (0u32, 0u32);
     for r in raws {
         let delta_line = r.line - pl;
-        let delta_start = if delta_line == 0 { r.start - pc } else { r.start };
+        let delta_start = if delta_line == 0 {
+            r.start - pc
+        } else {
+            r.start
+        };
         data.push(SemanticToken {
             delta_line,
             delta_start,
@@ -234,13 +292,22 @@ mod tests {
         // (defn f (x) "doc" (+ x x))
         let toks = tokens("(defn f (x) \"d\" (+ x x))");
         // `defn` keyword at col 1
-        assert!(toks.contains(&(0, 1, 4, T_KEYWORD, 0)), "defn keyword: {toks:?}");
+        assert!(
+            toks.contains(&(0, 1, 4, T_KEYWORD, 0)),
+            "defn keyword: {toks:?}"
+        );
         // `f` is a definition name (function + definition modifier) at col 6
-        assert!(toks.contains(&(0, 6, 1, T_FUNCTION, M_DEFINITION)), "f def: {toks:?}");
+        assert!(
+            toks.contains(&(0, 6, 1, T_FUNCTION, M_DEFINITION)),
+            "f def: {toks:?}"
+        );
         // the docstring is a string token
         assert!(toks.iter().any(|t| t.3 == T_STRING), "string: {toks:?}");
         // `+` heads a call → function; `x` is a local → variable
-        assert!(toks.iter().any(|t| t.3 == T_FUNCTION && t.2 == 1), "+ fn: {toks:?}");
+        assert!(
+            toks.iter().any(|t| t.3 == T_FUNCTION && t.2 == 1),
+            "+ fn: {toks:?}"
+        );
         assert!(toks.iter().any(|t| t.3 == T_VARIABLE), "local x: {toks:?}");
     }
 
@@ -248,8 +315,14 @@ mod tests {
     fn keyword_and_number_and_comment() {
         let toks = tokens("; hi\n(f :k 42)");
         assert!(toks.iter().any(|t| t.3 == T_COMMENT), "comment: {toks:?}");
-        assert!(toks.iter().any(|t| t.3 == T_ENUM_MEMBER), "keyword :k: {toks:?}");
-        assert!(toks.iter().any(|t| t.3 == T_NUMBER && t.2 == 2), "number 42: {toks:?}");
+        assert!(
+            toks.iter().any(|t| t.3 == T_ENUM_MEMBER),
+            "keyword :k: {toks:?}"
+        );
+        assert!(
+            toks.iter().any(|t| t.3 == T_NUMBER && t.2 == 2),
+            "number 42: {toks:?}"
+        );
     }
 
     #[test]

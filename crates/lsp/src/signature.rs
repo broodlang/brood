@@ -10,9 +10,7 @@ use brood::introspect;
 use brood::syntax::cst::{Node, NodeKind};
 use brood::syntax::scope::{BindingKind, Resolution, ScopeTree};
 use brood::Interp;
-use lsp_types::{
-    ParameterInformation, ParameterLabel, SignatureHelp, SignatureInformation,
-};
+use lsp_types::{ParameterInformation, ParameterLabel, SignatureHelp, SignatureInformation};
 
 use crate::defs;
 

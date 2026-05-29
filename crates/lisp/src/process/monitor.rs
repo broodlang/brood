@@ -41,11 +41,7 @@ pub(crate) enum Watcher {
     /// A process on a peer runtime — `node` names that runtime, `pid` is the
     /// watcher's pid *over there* (so a peer's `[:down …]` lands in its own
     /// mailbox), `mref` is the watcher's monitor reference (opaque to us).
-    Remote {
-        node: Symbol,
-        pid: u64,
-        mref: u64,
-    },
+    Remote { node: Symbol, pid: u64, mref: u64 },
 }
 
 impl Watcher {
@@ -287,12 +283,7 @@ pub(crate) fn handle_node_down(node: Symbol) {
 /// the peer to monitor for us). Shared with `dist::monitor_remote`. Uses the
 /// same `down_message` shape as a real DOWN so the watcher's `receive` clause
 /// doesn't have to special-case anything.
-pub(crate) fn fire_noconnection(
-    target_node: Symbol,
-    target_pid: u64,
-    watcher_pid: u64,
-    mref: u64,
-) {
+pub(crate) fn fire_noconnection(target_node: Symbol, target_pid: u64, watcher_pid: u64, mref: u64) {
     deliver(
         watcher_pid,
         down_message(

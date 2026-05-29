@@ -226,15 +226,14 @@ fn cmd_check(interp: &mut Interp, files: &[String]) {
                 std::process::exit(1);
             }
         };
-        let forms =
-            match brood::syntax::reader::read_all_positioned(&mut interp.heap, &src) {
-                Ok(forms) => forms,
-                Err(e) => {
-                    report_error(&e.clone().or_file(path.to_string()));
-                    warned = true;
-                    continue;
-                }
-            };
+        let forms = match brood::syntax::reader::read_all_positioned(&mut interp.heap, &src) {
+            Ok(forms) => forms,
+            Err(e) => {
+                report_error(&e.clone().or_file(path.to_string()));
+                warned = true;
+                continue;
+            }
+        };
         let just_forms: Vec<_> = forms.into_iter().map(|(f, _)| f).collect();
         let warnings = brood::types::check::check_file(&mut interp.heap, &just_forms);
         if !warnings.is_empty() {
@@ -450,11 +449,7 @@ fn run_for_value(interp: &mut Interp, code: &str) -> brood::core::value::Value {
 
 /// Evaluate a file's source with `(current-file)` set so runtime-error /
 /// test locations carry the file. Mirrors the helper in `cli/main.rs`.
-fn eval_file(
-    interp: &mut Interp,
-    path: &str,
-    src: &str,
-) -> Result<(), brood::error::LispError> {
+fn eval_file(interp: &mut Interp, path: &str, src: &str) -> Result<(), brood::error::LispError> {
     let prev = interp.heap.set_current_file(Some(path.to_string()));
     let result = interp.eval_source(src);
     interp.heap.set_current_file(prev);

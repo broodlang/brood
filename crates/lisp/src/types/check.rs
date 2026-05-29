@@ -80,6 +80,7 @@
 
 mod ctx;
 mod guards;
+mod hygiene;
 mod sigs;
 mod walk;
 
@@ -195,13 +196,19 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
     for &form in &expanded {
         check_into(heap, form, &ctx, &mut out);
     }
+    // Pass 4: macro-hygiene lint over the *un-expanded* forms — `defmacro`
+    // templates and their `~unquote` structure only survive pre-expansion
+    // (`macroexpand_all` leaves quasiquote opaque, and the template is gone once
+    // a macro is applied). Reads only, so the existing rooting suffices.
+    for &form in forms {
+        hygiene::check_macro_hygiene(heap, form, &mut out);
+    }
     // Balance the GC roots we pushed for pass 1 (input forms + their
     // expansions). Safe to drop now: nothing after this consults `expanded`
     // or `forms` against the heap.
     heap.truncate_roots(roots_base);
     out
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -348,7 +355,7 @@ mod tests {
             let _ = warnings(src);
         }
         assert!(warnings("(5 6 7)").is_empty()); // head isn't a symbol — no diagnostics
-        // `(first)` is now an arity diagnostic (0 args; first needs 1).
+                                                 // `(first)` is now an arity diagnostic (0 args; first needs 1).
         assert!(warnings("(first)")
             .iter()
             .any(|w| w.contains("first") && w.contains("expected 1")));
@@ -408,10 +415,7 @@ mod tests {
     fn inferred_return_type_propagates() {
         // (defn inc (x) (+ x 1)) returns the number `+` returns; feeding it into
         // `string-length` (wants string) is a provable misuse.
-        let w = check_with_defs(
-            &["(defn inc (x) (+ x 1))"],
-            "(string-length (inc 1))",
-        );
+        let w = check_with_defs(&["(defn inc (x) (+ x 1))"], "(string-length (inc 1))");
         assert!(
             w.iter().any(|s| s.contains("string-length")),
             "expected a `string-length` warning, got {:?}",
@@ -502,7 +506,8 @@ mod tests {
         // shadowing-correctness check (outer narrowing must not leak in).
         let w = warnings("(let (x 1) (let (x \"hi\") (first x)))");
         assert!(
-            w.iter().any(|s| s.contains("first") && s.contains("string")),
+            w.iter()
+                .any(|s| s.contains("first") && s.contains("string")),
             "expected the inner string to be the source, got {:?}",
             w
         );
@@ -586,7 +591,8 @@ mod tests {
         // which is disjoint from list/vector, so `(first x)` flags.
         let w = warnings("(if (number? x) (first x) nil)");
         assert!(
-            w.iter().any(|s| s.contains("first") && s.contains("number")),
+            w.iter()
+                .any(|s| s.contains("first") && s.contains("number")),
             "number? must narrow to int|float: {:?}",
             w
         );
@@ -662,22 +668,14 @@ mod tests {
     fn rebinding_the_guard_name_clears_the_alias() {
         // After `(let (cond <unknown>) …)` shadowing, `cond` no longer aliases
         // the int-guard, so `(if cond …)` must not narrow x.
-        let w = warnings(
-            "(let (cond (int? x)) (let (cond foo) (if cond (first x) nil)))",
-        );
-        assert!(
-            w.is_empty(),
-            "shadowing must drop the guard alias: {:?}",
-            w
-        );
+        let w = warnings("(let (cond (int? x)) (let (cond foo) (if cond (first x) nil)))");
+        assert!(w.is_empty(), "shadowing must drop the guard alias: {:?}", w);
     }
 
     #[test]
     fn rebinding_to_a_non_guard_value_clears_the_alias() {
         // Same as above but with an int literal rather than an unknown var.
-        let w = warnings(
-            "(let (cond (int? x)) (let (cond 1) (if cond (first x) nil)))",
-        );
+        let w = warnings("(let (cond (int? x)) (let (cond 1) (if cond (first x) nil)))");
         assert!(
             w.is_empty(),
             "shadowing with a non-guard value must drop the alias: {:?}",
@@ -706,7 +704,8 @@ mod tests {
         // sees x as string, so the narrowing message names string.
         let w = warnings("(if (int? x) (let (x \"hi\") (first x)) nil)");
         assert!(
-            w.iter().any(|s| s.contains("first") && s.contains("string")),
+            w.iter()
+                .any(|s| s.contains("first") && s.contains("string")),
             "shadow must override the guard narrowing: {:?}",
             w
         );
@@ -761,10 +760,7 @@ mod tests {
             .all(|w| !w.contains("number of arguments")));
         // Variadic: any count is fine.
         for n in 0..=5 {
-            let args = (0..n)
-                .map(|i| i.to_string())
-                .collect::<Vec<_>>()
-                .join(" ");
+            let args = (0..n).map(|i| i.to_string()).collect::<Vec<_>>().join(" ");
             let w = warnings(&format!("(+ {})", args));
             assert!(
                 w.iter().all(|s| !s.contains("number of arguments")),
@@ -819,9 +815,7 @@ mod tests {
             "(map (fn (x) x) [1 2 3])",
         ] {
             assert!(
-                warnings(src)
-                    .iter()
-                    .all(|w| !w.contains("unbound")),
+                warnings(src).iter().all(|w| !w.contains("unbound")),
                 "prelude name must not be flagged unbound: {} → {:?}",
                 src,
                 warnings(src)
@@ -914,7 +908,8 @@ mod tests {
         // Mirror of the int case for a keyword literal.
         let w = warnings_expanded("(match x (:foo (first x)) (_ nil))");
         assert!(
-            w.iter().any(|s| s.contains("first") && s.contains("keyword")),
+            w.iter()
+                .any(|s| s.contains("first") && s.contains("keyword")),
             "match keyword-literal pattern should narrow x: {:?}",
             w
         );

@@ -98,10 +98,7 @@ fn maps_are_immutable_values() {
     // assoc does not mutate the original binding.
     assert_eq!(run("(def m {:a 1}) (assoc m :b 2) m"), "{:a 1}");
     // dissoc result equals the expected map regardless of print order.
-    assert_eq!(
-        run("(= (dissoc {:a 1 :b 2 :c 3} :b) {:a 1 :c 3})"),
-        "true"
-    );
+    assert_eq!(run("(= (dissoc {:a 1 :b 2 :c 3} :b) {:a 1 :c 3})"), "true");
     assert_eq!(run("(count {:a 1 :b 2 :c 3})"), "3");
     // equality is order-independent; any value is a structurally-compared key.
     assert_eq!(run("(= {:a 1 :b 2} {:b 2 :a 1})"), "true");
@@ -263,8 +260,14 @@ fn source_location_records_def_sites_from_a_loaded_file() {
 
     // `defn` (a macro lowering to `def`) is still located: the site is captured
     // pre-expansion. Both names point at their form's line, column 1.
-    assert_eq!(loc(&mut interp, "(source-location 'foo)"), format!("[\"{p}\" 1 1]"));
-    assert_eq!(loc(&mut interp, "(source-location 'bar)"), format!("[\"{p}\" 2 1]"));
+    assert_eq!(
+        loc(&mut interp, "(source-location 'foo)"),
+        format!("[\"{p}\" 1 1]")
+    );
+    assert_eq!(
+        loc(&mut interp, "(source-location 'bar)"),
+        format!("[\"{p}\" 2 1]")
+    );
     // A prelude `defn` (`map`) does have a recorded site — it points at the
     // materialised prelude cache copy on disk (ADR-031 step 4; see
     // `introspect::source_location_resolves_prelude_fns_but_not_builtins_or_unbound`).
@@ -566,10 +569,7 @@ fn throw_and_catch() {
     // come back verbatim — only kernel-raised errors get the wrapper.
     assert_eq!(run("(try (/ 1 0) (catch e (map? e)))"), "true");
     assert_eq!(run("(try (/ 1 0) (catch e (get e :kind)))"), ":runtime");
-    assert_eq!(
-        run("(try (/ 1 0) (catch e (get e :code)))"),
-        "\"E0040\""
-    );
+    assert_eq!(run("(try (/ 1 0) (catch e (get e :code)))"), "\"E0040\"");
     // Hint rides along when the raise site set one — `with_hint("…")`.
     assert_eq!(
         run("(try (/ 1 0) (catch e (string? (get e :hint))))"),
@@ -596,21 +596,18 @@ fn throw_and_catch() {
         run("(try (slurp \"/does/not/exist/anywhere\") (catch e (get e :code)))"),
         "\"E0050\""
     );
-    assert_eq!(run("(try (no-such-fn) (catch e (get e :kind)))"), ":unbound");
+    assert_eq!(
+        run("(try (no-such-fn) (catch e (get e :kind)))"),
+        ":unbound"
+    );
     assert_eq!(
         run("(try (no-such-fn) (catch e (get e :code)))"),
         "\"E0010\""
     );
     // Type errors carry E0030; the message preserves the structured detail
     // (`wrong_type` includes "expected <kind>, got <kind> (<value>)").
-    assert_eq!(
-        run("(try (first 5) (catch e (get e :code)))"),
-        "\"E0030\""
-    );
-    assert_eq!(
-        run("(try (first 5) (catch e (get e :kind)))"),
-        ":type"
-    );
+    assert_eq!(run("(try (first 5) (catch e (get e :code)))"), "\"E0030\"");
+    assert_eq!(run("(try (first 5) (catch e (get e :kind)))"), ":type");
     // Arity errors carry E0020. `((fn (x) x))` calls the unary fn with zero
     // args — the kernel's arity check fires.
     assert_eq!(
@@ -833,8 +830,11 @@ fn located_diagnostic_carries_file_line_col() {
         .unwrap_err();
     let line = err.located();
     // PATH:3:1: type error: first: ...
-    assert!(line.starts_with(&format!("{}:3:1: type error:", p_str)),
-            "unexpected diagnostic: {}", line);
+    assert!(
+        line.starts_with(&format!("{}:3:1: type error:", p_str)),
+        "unexpected diagnostic: {}",
+        line
+    );
 
     let _ = std::fs::remove_file(&path);
 }
@@ -849,7 +849,9 @@ fn eval_str_attaches_position_no_file() {
     let err = interp
         .eval_str("(do\n  (println :a)\n  (first 5))")
         .unwrap_err();
-    let pos = err.pos.expect("eval_str should still tag the innermost pos");
+    let pos = err
+        .pos
+        .expect("eval_str should still tag the innermost pos");
     assert_eq!((pos.line, pos.col), (3, 3));
     assert!(err.file.is_none(), "eval_str must not invent a file");
 }
@@ -944,14 +946,20 @@ fn dotted_pairs_round_trip() {
 fn dynamic_variables() {
     assert_eq!(run("(defdyn *d* 0) *d*"), "0");
     // `binding` shadows for the dynamic extent, then restores.
-    assert_eq!(run("(defdyn *d* 0) (list (binding (*d* 7) *d*) *d*)"), "(7 0)");
+    assert_eq!(
+        run("(defdyn *d* 0) (list (binding (*d* 7) *d*) *d*)"),
+        "(7 0)"
+    );
     // Resolved at call time against the caller's binding, not at definition.
     assert_eq!(
         run("(defdyn *d* 0) (defn rd () *d*) (binding (*d* 42) (rd))"),
         "42"
     );
     // Nested bindings stack; inner wins.
-    assert_eq!(run("(defdyn *d* 0) (binding (*d* 1) (binding (*d* 2) *d*))"), "2");
+    assert_eq!(
+        run("(defdyn *d* 0) (binding (*d* 1) (binding (*d* 2) *d*))"),
+        "2"
+    );
     // The binding is unwound even when the body throws.
     assert_eq!(
         run("(defdyn *d* 0) (try (binding (*d* 5) (throw \"x\")) (catch e nil)) *d*"),
@@ -969,7 +977,9 @@ fn dynamic_variables() {
 #[test]
 fn binding_undeclared_is_an_error() {
     let mut interp = Interp::new();
-    assert!(interp.eval_str("(binding (not-dynamic 1) not-dynamic)").is_err());
+    assert!(interp
+        .eval_str("(binding (not-dynamic 1) not-dynamic)")
+        .is_err());
 }
 
 /// A pathological deeply-nested input is rejected as a parse error rather
@@ -1105,13 +1115,11 @@ fn spawn_with_three_args_is_a_macro_error() {
         .eval_str("(spawn :a :b :c)")
         .expect_err("three-arg spawn must error");
     assert!(
-        err.to_string().contains("spawn:")
-            && err.to_string().contains("expected"),
+        err.to_string().contains("spawn:") && err.to_string().contains("expected"),
         "should be a spawn shape error, got: {}",
         err
     );
 }
-
 
 /// `gensym` must mint process-wide-unique symbols, including across threads — a
 /// thread-local counter would reset per worker and collide.
@@ -1158,7 +1166,11 @@ fn reset_units_prevents_reload_double_count() {
     let doubled = interp
         .eval_str("(get (run-tests-structured) :total)")
         .expect("run twice-registered");
-    assert_eq!(interp.print(doubled), "2", "two registrations should report two tests");
+    assert_eq!(
+        interp.print(doubled),
+        "2",
+        "two registrations should report two tests"
+    );
     // The fix: reset before the (re)load clears the stale registrations.
     interp
         .eval_str(r#"(reset-units!) (test "t" (is true))"#)
@@ -1166,5 +1178,9 @@ fn reset_units_prevents_reload_double_count() {
     let single = interp
         .eval_str("(get (run-tests-structured) :total)")
         .expect("run once-registered");
-    assert_eq!(interp.print(single), "1", "reset should leave exactly one test");
+    assert_eq!(
+        interp.print(single),
+        "1",
+        "reset should leave exactly one test"
+    );
 }

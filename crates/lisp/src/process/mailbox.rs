@@ -24,9 +24,7 @@ use crate::error::{LispError, LispResult};
 use crate::eval;
 
 use super::message::{from_message, to_message, Message};
-use super::scheduler::{
-    enqueue, ensure_ctx, gc_block_save, gc_block_set, Ctx, Process, Suspend,
-};
+use super::scheduler::{enqueue, ensure_ctx, gc_block_save, gc_block_set, Ctx, Process, Suspend};
 use super::timer::arm_timer;
 
 /// A process's mailbox. Guarded by one mutex so the "check empty → park" and
@@ -123,9 +121,7 @@ pub(crate) fn read_name_address(heap: &Heap, mid: MapId) -> Result<(Symbol, Symb
     let field = |key: &str| -> Result<Symbol, LispError> {
         let v = heap
             .map_get(mid, Value::Keyword(value::intern(key)))
-            .ok_or_else(|| {
-                LispError::type_err("send: name address needs :name and :node keys")
-            })?;
+            .ok_or_else(|| LispError::type_err("send: name address needs :name and :node keys"))?;
         match v {
             Value::Keyword(s) | Value::Sym(s) => Ok(s),
             _ => Err(LispError::type_err(

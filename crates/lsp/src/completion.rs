@@ -117,7 +117,10 @@ mod tests {
     #[test]
     fn resolve_attaches_a_signature_and_doc_for_a_global() {
         let mut interp = Interp::new();
-        let resolved = resolve(&mut interp, item("map".into(), CompletionItemKind::FUNCTION));
+        let resolved = resolve(
+            &mut interp,
+            item("map".into(), CompletionItemKind::FUNCTION),
+        );
         assert!(resolved.detail.unwrap().contains("(map "), "signature");
         assert!(resolved.documentation.is_some(), "doc");
     }

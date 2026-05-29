@@ -22,7 +22,10 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
-use lsp_server::{Connection, ErrorCode, Message, Notification as ServerNotification, Request, RequestId, Response};
+use lsp_server::{
+    Connection, ErrorCode, Message, Notification as ServerNotification, Request, RequestId,
+    Response,
+};
 use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument,
     Notification as NotificationTrait, PublishDiagnostics,
@@ -38,8 +41,9 @@ use lsp_types::{
     HoverProviderCapability, OneOf, Position, PositionEncodingKind, PrepareRenameResponse,
     PublishDiagnosticsParams, Range, ReferenceParams, RenameOptions, RenameParams,
     SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
-    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelpOptions, SignatureHelpParams,
-    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
+    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelpOptions,
+    SignatureHelpParams, TextDocumentPositionParams, TextDocumentSyncCapability,
+    TextDocumentSyncKind, Uri,
 };
 
 use brood::core::value::Value;
@@ -95,14 +99,14 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
         })),
         // Semantic tokens (whole-document) — meaning-based highlighting off the
         // CST + scope tree. Range requests aren't offered (full is cheap enough).
-        semantic_tokens_provider: Some(
-            SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
+        semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
+            SemanticTokensOptions {
                 legend: semantic_tokens::legend(),
                 full: Some(SemanticTokensFullOptions::Bool(true)),
                 range: Some(false),
                 work_done_progress_options: Default::default(),
-            }),
-        ),
+            },
+        )),
         // Args are whitespace-separated in Lisp, so `(` opens signature help and
         // a space re-triggers it onto the next parameter.
         signature_help_provider: Some(SignatureHelpOptions {
@@ -273,7 +277,13 @@ fn handle_request(docs: &Documents, interp: &mut Interp, req: Request) -> Respon
                     let a = &doc.analysis;
                     let offset = a.line_index.offset(&doc.text, pos.position);
                     definition::definition(
-                        interp, &uri, &doc.text, &a.cst, &a.scope, &a.line_index, offset,
+                        interp,
+                        &uri,
+                        &doc.text,
+                        &a.cst,
+                        &a.scope,
+                        &a.line_index,
+                        offset,
                     )
                 }
                 None => None,
@@ -307,8 +317,16 @@ fn handle_request(docs: &Documents, interp: &mut Interp, req: Request) -> Respon
                     let a = &doc.analysis;
                     let offset = a.line_index.offset(&doc.text, pos.position);
                     Some(match a.scope.resolve_at(&a.cst, &doc.text, offset) {
-                        Resolution::Defined { kind: BindingKind::Local, .. } => references::references(
-                            &uri, &doc.text, &a.cst, &a.scope, &a.line_index, offset,
+                        Resolution::Defined {
+                            kind: BindingKind::Local,
+                            ..
+                        } => references::references(
+                            &uri,
+                            &doc.text,
+                            &a.cst,
+                            &a.scope,
+                            &a.line_index,
+                            offset,
                         ),
                         Resolution::Defined { .. } | Resolution::Free => {
                             match workspace::symbol_at(&a.cst, &doc.text, offset) {
@@ -365,8 +383,17 @@ fn handle_request(docs: &Documents, interp: &mut Interp, req: Request) -> Respon
                     let a = &doc.analysis;
                     let offset = a.line_index.offset(&doc.text, pos.position);
                     match a.scope.resolve_at(&a.cst, &doc.text, offset) {
-                        Resolution::Defined { kind: BindingKind::Local, .. } => rename::rename(
-                            &uri, &doc.text, &a.cst, &a.scope, &a.line_index, offset, &p.new_name,
+                        Resolution::Defined {
+                            kind: BindingKind::Local,
+                            ..
+                        } => rename::rename(
+                            &uri,
+                            &doc.text,
+                            &a.cst,
+                            &a.scope,
+                            &a.line_index,
+                            offset,
+                            &p.new_name,
                         ),
                         Resolution::Defined { .. } | Resolution::Free => {
                             match workspace::symbol_at(&a.cst, &doc.text, offset) {
@@ -578,14 +605,20 @@ mod uri_tests {
     #[test]
     fn uri_to_path_handles_empty_and_host_authorities() {
         // The common form: empty authority, leading `/` is the path.
-        assert_eq!(p("file:///home/x/a.blsp").as_deref(), Some("/home/x/a.blsp"));
+        assert_eq!(
+            p("file:///home/x/a.blsp").as_deref(),
+            Some("/home/x/a.blsp")
+        );
         // A host authority (WSL / remote) is dropped; the path stays absolute.
         assert_eq!(
             p("file://localhost/home/x/a.blsp").as_deref(),
             Some("/home/x/a.blsp")
         );
         // Percent-escapes in the path decode (a space here).
-        assert_eq!(p("file:///home/a%20b/p.blsp").as_deref(), Some("/home/a b/p.blsp"));
+        assert_eq!(
+            p("file:///home/a%20b/p.blsp").as_deref(),
+            Some("/home/a b/p.blsp")
+        );
     }
 
     #[test]
@@ -652,8 +685,12 @@ fn find_project_root(file_path: &Path) -> Option<PathBuf> {
 /// Best-effort: failures log and continue (the checker still runs with at
 /// least the prelude). Files outside a project are a silent no-op.
 fn bootstrap_project(interp: &mut Interp, bootstrapped: &mut HashSet<PathBuf>, uri: &Uri) {
-    let Some(file_path) = uri_to_path(uri) else { return };
-    let Some(root) = find_project_root(&file_path) else { return };
+    let Some(file_path) = uri_to_path(uri) else {
+        return;
+    };
+    let Some(root) = find_project_root(&file_path) else {
+        return;
+    };
     if bootstrapped.contains(&root) {
         return;
     }
@@ -666,7 +703,10 @@ fn bootstrap_project(interp: &mut Interp, bootstrapped: &mut HashSet<PathBuf>, u
         e = esc,
     );
     if let Err(e) = interp.eval_str(&cmd) {
-        eprintln!("brood-lsp: project bootstrap failed for {}: {e}", root.display());
+        eprintln!(
+            "brood-lsp: project bootstrap failed for {}: {e}",
+            root.display()
+        );
     }
     // Mark bootstrapped regardless of success — a partial load is consistent
     // (each top-level form's `eval_str` is checkpointed), and re-running on
@@ -780,7 +820,9 @@ fn find_symbol(node: &cst::Node, text: &str, name: &str) -> Option<brood::error:
     if node.kind == cst::NodeKind::Symbol && node.text(text) == name {
         return Some(node.span);
     }
-    node.children.iter().find_map(|c| find_symbol(c, text, name))
+    node.children
+        .iter()
+        .find_map(|c| find_symbol(c, text, name))
 }
 
 fn send_diagnostics(
@@ -960,7 +1002,11 @@ mod server_tests {
             )))
             .unwrap();
         loop {
-            match client.receiver.recv().expect("server closed before response") {
+            match client
+                .receiver
+                .recv()
+                .expect("server closed before response")
+            {
                 Message::Response(r) if r.id == RequestId::from(id) => return r,
                 _ => continue,
             }
@@ -992,7 +1038,8 @@ mod server_tests {
             DocumentSymbolRequest::METHOD,
             serde_json::json!({ "textDocument": { "uri": uri() } }),
         );
-        let syms: Vec<lsp_types::DocumentSymbol> = serde_json::from_value(r.result.unwrap()).unwrap();
+        let syms: Vec<lsp_types::DocumentSymbol> =
+            serde_json::from_value(r.result.unwrap()).unwrap();
         assert_eq!(syms.len(), 1);
         assert_eq!(syms[0].name, "f");
 

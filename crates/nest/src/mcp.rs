@@ -1,3 +1,8 @@
+// The header doc block uses column-aligned continuation lines for the
+// protocol-surface table; that's deliberately wider than the lint's 2-space
+// indent rule expects.
+#![allow(clippy::doc_overindented_list_items)]
+
 //! `nest mcp` — the Model Context Protocol dispatcher for a Brood project.
 //!
 //! A synchronous JSON-RPC loop over stdio (newline-delimited JSON — the MCP
@@ -255,7 +260,10 @@ fn list_tools(interp: &mut Interp) -> Vec<Json> {
 /// none).
 fn project_tool_catalogue(heap: &Heap, tools: Value) -> Result<Vec<Json>, String> {
     let items = heap.seq_items(tools).map_err(|e| e.to_string())?;
-    Ok(items.into_iter().filter_map(|item| tool_entry_to_json(heap, item)).collect())
+    Ok(items
+        .into_iter()
+        .filter_map(|item| tool_entry_to_json(heap, item))
+        .collect())
 }
 
 /// Convert one Brood map of tool metadata to the MCP shape `tools/list`
@@ -276,7 +284,10 @@ fn tool_entry_to_json(heap: &Heap, entry: Value) -> Option<Json> {
     obj.insert("name".into(), Json::String(name));
     obj.insert("inputSchema".into(), schema_json);
     if let Some(Value::Str(id)) = map_get_kw(heap, map_id, "description") {
-        obj.insert("description".into(), Json::String(heap.string(id).to_string()));
+        obj.insert(
+            "description".into(),
+            Json::String(heap.string(id).to_string()),
+        );
     }
     Some(Json::Object(obj))
 }
@@ -313,7 +324,19 @@ fn call_tool(interp: &mut Interp, params: &Json) -> Result<Json, RpcError> {
     // debugging is safe rather than a channel-breaking footgun.
     brood::builtins::begin_stdout_capture();
 
-    let outcome = (|| -> Result<Json, RpcError> {
+    // Run the whole handler inside `catch_unwind` so a Rust panic in *any*
+    // Brood-callable path (eval / apply / a builtin / a `defn` body) is
+    // contained at the MCP boundary: it surfaces as a structured RpcError
+    // (`from_panic`) and the server keeps serving the next call instead of
+    // tearing down the whole stdio channel.
+    //
+    // `AssertUnwindSafe` is sound here because the MCP server is
+    // single-threaded (a synchronous `main_loop` over stdio) and the heap
+    // reset just below restores the LOCAL arena to its pre-call checkpoint,
+    // discarding any partial allocations a panicking handler left behind.
+    // That gives us the same recovery the no-panic path has, just triggered
+    // by an unwind instead of an early return.
+    let inner = std::panic::AssertUnwindSafe(|| -> Result<Json, RpcError> {
         // Re-fetch the catalogue per call so a `def` in a previous `eval`
         // call (hot reload) reshapes the tool surface immediately.
         let _ = interp.eval_str("(require 'mcp)");
@@ -329,24 +352,32 @@ fn call_tool(interp: &mut Interp, params: &Json) -> Result<Json, RpcError> {
         // anything we hold across it.
         interp.heap.push_root(handler);
 
-        let args_value = json_to_value(&mut interp.heap, &arguments)
-            .map_err(RpcError::invalid_params)?;
+        let args_value =
+            json_to_value(&mut interp.heap, &arguments).map_err(RpcError::invalid_params)?;
         interp.heap.push_root(args_value);
 
         let result_value =
             brood::eval::apply(&mut interp.heap, handler, &[args_value], interp.root)
                 .map_err(|e| RpcError::from_lisp(&e))?;
 
-        let content = value_to_json(&interp.heap, result_value)
-            .map_err(RpcError::internal)?;
+        let content = value_to_json(&interp.heap, result_value).map_err(RpcError::internal)?;
         Ok(content)
-    })();
+    });
+    let outcome = match std::panic::catch_unwind(inner) {
+        Ok(result) => result,
+        Err(payload) => Err(RpcError::from_panic(payload)),
+    };
 
-    // Always drain the capture buffer (even on error) so it never leaks into the
-    // next call; attach it to a successful reply's content envelope.
+    // Always drain the capture buffer (even on error / panic) so it never leaks
+    // into the next call; attach it to a successful reply's content envelope.
     let captured = brood::builtins::take_captured_stdout().unwrap_or_default();
     let outcome = outcome.map(|content| wrap_as_mcp_content(content, &captured));
 
+    // Reset regardless of how the call ended — early-return error, normal
+    // success, or a caught panic. This drops every LOCAL allocation the
+    // handler made (including any half-formed state the panic left behind),
+    // so subsequent tool calls start from the same heap shape the failing
+    // one did.
     interp.heap.truncate_roots(roots_base);
     interp.heap.reset_local_to(cp);
     outcome
@@ -585,12 +616,10 @@ pub fn value_to_json(heap: &Heap, v: Value) -> Result<Json, String> {
             "id": id,
         })),
         Value::Ref(id) => Ok(json!({ "$type": "ref", "id": id })),
-        Value::Fn(_) | Value::Macro(_) | Value::Native(_) => {
-            Err(format!(
-                "value of kind {:?} has no JSON representation",
-                value::tag(v)
-            ))
-        }
+        Value::Fn(_) | Value::Macro(_) | Value::Native(_) => Err(format!(
+            "value of kind {:?} has no JSON representation",
+            value::tag(v)
+        )),
     }
 }
 
@@ -677,6 +706,43 @@ impl RpcError {
             code: -32603,
             message: e.to_string(),
             data: Some(lisp_error_to_json(e)),
+        }
+    }
+    /// Project a Rust *panic* (caught at the MCP tool-call boundary by
+    /// `panic::catch_unwind`) into a structured error. Without this the
+    /// unwind would tear through `main_loop` and kill the whole server —
+    /// every `mcp__brood__*` tool would drop for the rest of the session.
+    /// Here we keep serving: the agent gets an error response, the panic
+    /// message and the kind-tag `"panic"` on `error.data`, and the next
+    /// tool call works.
+    ///
+    /// The panic payload is `Box<dyn Any + Send>` — usually a `&'static str`
+    /// (from `panic!("…")`) or a `String` (from `panic!("{}", x)`). Anything
+    /// else falls back to a generic message; the caller still sees that
+    /// *something* panicked.
+    fn from_panic(payload: Box<dyn std::any::Any + Send>) -> Self {
+        let message = if let Some(s) = payload.downcast_ref::<&'static str>() {
+            (*s).to_string()
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "Rust panic in tool handler (no message)".to_string()
+        };
+        let mut data = JsonMap::new();
+        data.insert("kind".into(), Json::String("panic".into()));
+        data.insert("message".into(), Json::String(message.clone()));
+        data.insert(
+            "hint".into(),
+            Json::String(
+                "interpreter bug — the tool handler triggered a Rust panic. \
+                 Subsequent calls on this session continue to work."
+                    .into(),
+            ),
+        );
+        Self {
+            code: -32603,
+            message: format!("panic in tool handler: {message}"),
+            data: Some(Json::Object(data)),
         }
     }
 }
@@ -775,7 +841,10 @@ mod tests {
 
         // A leftover `Content-Length:` header is just a non-JSON line → error.
         let mut r = Cursor::new(&b"Content-Length: 17\r\n"[..]);
-        assert!(read_message(&mut r).is_err(), "header must not be accepted as a message");
+        assert!(
+            read_message(&mut r).is_err(),
+            "header must not be accepted as a message"
+        );
     }
 
     #[test]
@@ -783,10 +852,7 @@ mod tests {
         let mut interp = Interp::new();
         let resp = round_trip(
             &mut interp,
-            &[
-                req(1, "initialize", json!({})),
-                notif("exit", json!(null)),
-            ],
+            &[req(1, "initialize", json!({})), notif("exit", json!(null))],
         );
         assert_eq!(resp.len(), 1);
         let result = &resp[0]["result"];
@@ -810,10 +876,20 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         // The full v0 surface — six live, three documented stubs.
         for expected in &[
-            "eval", "load", "lookup", "macroexpand", "format", "check", "run-tests", "processes",
+            "eval",
+            "load",
+            "lookup",
+            "macroexpand",
+            "format",
+            "check",
+            "run-tests",
+            "processes",
             "callers",
         ] {
-            assert!(names.contains(expected), "missing {expected:?} in {names:?}");
+            assert!(
+                names.contains(expected),
+                "missing {expected:?} in {names:?}"
+            );
         }
         // Every entry must carry a JSON-Schema-shaped `inputSchema`.
         for t in tools {
@@ -876,7 +952,11 @@ mod tests {
         let resp = round_trip(
             &mut interp,
             &[
-                req(1, "tools/call", json!({ "name": "double", "arguments": { "n": 21 } })),
+                req(
+                    1,
+                    "tools/call",
+                    json!({ "name": "double", "arguments": { "n": 21 } }),
+                ),
                 notif("exit", json!(null)),
             ],
         );
@@ -909,7 +989,11 @@ mod tests {
         let resp = round_trip(
             &mut interp,
             &[
-                req(1, "tools/call", json!({ "name": "chatty", "arguments": {} })),
+                req(
+                    1,
+                    "tools/call",
+                    json!({ "name": "chatty", "arguments": {} }),
+                ),
                 notif("exit", json!(null)),
             ],
         );
@@ -918,7 +1002,11 @@ mod tests {
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[0]["text"], "42");
         // content[1] carries the captured stdout, clearly labelled.
-        assert_eq!(content.len(), 2, "expected a captured-stdout block: {content:?}");
+        assert_eq!(
+            content.len(),
+            2,
+            "expected a captured-stdout block: {content:?}"
+        );
         let captured = content[1]["text"].as_str().unwrap();
         assert!(captured.contains("debug line"), "{captured:?}");
         assert!(captured.contains("captured stdout"), "{captured:?}");
@@ -932,12 +1020,20 @@ mod tests {
         let resp = round_trip(
             &mut interp,
             &[
-                req(1, "tools/call", json!({ "name": "eval", "arguments": { "source": "(+ 1 1)" } })),
+                req(
+                    1,
+                    "tools/call",
+                    json!({ "name": "eval", "arguments": { "source": "(+ 1 1)" } }),
+                ),
                 notif("exit", json!(null)),
             ],
         );
         let content = resp[0]["result"]["content"].as_array().unwrap();
-        assert_eq!(content.len(), 1, "a non-printing handler should add no block: {content:?}");
+        assert_eq!(
+            content.len(),
+            1,
+            "a non-printing handler should add no block: {content:?}"
+        );
     }
 
     #[test]
@@ -962,10 +1058,16 @@ mod tests {
         let mut interp = Interp::new();
         let resp = round_trip(
             &mut interp,
-            &[req(1, "resources/list", json!({})), notif("exit", json!(null))],
+            &[
+                req(1, "resources/list", json!({})),
+                notif("exit", json!(null)),
+            ],
         );
         let resources = resp[0]["result"]["resources"].as_array().unwrap();
-        let uris: Vec<&str> = resources.iter().map(|r| r["uri"].as_str().unwrap()).collect();
+        let uris: Vec<&str> = resources
+            .iter()
+            .map(|r| r["uri"].as_str().unwrap())
+            .collect();
         assert!(uris.contains(&"brood://docs/brood-for-claude"));
         assert!(uris.contains(&"brood://prelude"));
         // The incarnations index + its companion docs (added in the
@@ -1089,15 +1191,15 @@ mod tests {
     /// Send one `tools/call`, parse the dispatcher's `content[0].text` back
     /// into JSON, and hand it to the assertion closure. Returns the *raw*
     /// response too so tests can read `error`-shaped replies as well.
-    fn invoke_tool(
-        interp: &mut Interp,
-        name: &str,
-        arguments: Json,
-    ) -> (Json, Option<Json>) {
+    fn invoke_tool(interp: &mut Interp, name: &str, arguments: Json) -> (Json, Option<Json>) {
         let resp = round_trip(
             interp,
             &[
-                req(1, "tools/call", json!({ "name": name, "arguments": arguments })),
+                req(
+                    1,
+                    "tools/call",
+                    json!({ "name": name, "arguments": arguments }),
+                ),
                 notif("exit", json!(null)),
             ],
         );
@@ -1125,10 +1227,13 @@ mod tests {
         let body = body.unwrap();
         assert!(body.get("value").is_none(), "{body:?}");
         let err = &body["error"];
-        assert!(err.is_object(), "expected :error to be a structured map, got {err}");
+        assert!(
+            err.is_object(),
+            "expected :error to be a structured map, got {err}"
+        );
         assert_eq!(err["kind"], "unbound");
         assert_eq!(err["code"], "E0010");
-        assert!(err["message"].as_str().unwrap().len() > 0);
+        assert!(!err["message"].as_str().unwrap().is_empty());
     }
 
     #[test]
@@ -1138,8 +1243,16 @@ mod tests {
         let resp = round_trip(
             &mut interp,
             &[
-                req(1, "tools/call", json!({ "name": "eval", "arguments": { "source": "(def mcp-test-x 7)" } })),
-                req(2, "tools/call", json!({ "name": "eval", "arguments": { "source": "(* mcp-test-x 6)" } })),
+                req(
+                    1,
+                    "tools/call",
+                    json!({ "name": "eval", "arguments": { "source": "(def mcp-test-x 7)" } }),
+                ),
+                req(
+                    2,
+                    "tools/call",
+                    json!({ "name": "eval", "arguments": { "source": "(* mcp-test-x 6)" } }),
+                ),
                 notif("exit", json!(null)),
             ],
         );
@@ -1156,7 +1269,7 @@ mod tests {
         assert_eq!(body["name"], "map");
         // `arglist` for the prelude `map` is a non-empty list. JSON-shape: array.
         assert!(body["arglist"].is_array());
-        assert!(body["arglist"].as_array().unwrap().len() >= 1);
+        assert!(!body["arglist"].as_array().unwrap().is_empty());
         // Prelude defs now *do* carry a source location — the prelude build
         // materialises a copy to `$XDG_CACHE_HOME/brood/prelude.blsp` and
         // reads it positioned, so `M-.` can land inside the standard library
@@ -1175,7 +1288,11 @@ mod tests {
     #[test]
     fn std_lookup_tool_handles_unbound_names_softly() {
         let mut interp = Interp::new();
-        let (_, body) = invoke_tool(&mut interp, "lookup", json!({ "name": "no-such-name-xyzzy" }));
+        let (_, body) = invoke_tool(
+            &mut interp,
+            "lookup",
+            json!({ "name": "no-such-name-xyzzy" }),
+        );
         let body = body.unwrap();
         // Unbound is a soft failure surfaced as :error, not a thrown exception
         // (the dispatcher would render that as a JSON-RPC error). After
@@ -1214,7 +1331,11 @@ mod tests {
         let formatted = body.unwrap()["formatted"].as_str().unwrap().to_string();
         assert!(!formatted.is_empty());
         // Idempotent: feeding the formatted source back is a fixed point.
-        let (_, body2) = invoke_tool(&mut interp, "format", json!({ "source": formatted.clone() }));
+        let (_, body2) = invoke_tool(
+            &mut interp,
+            "format",
+            json!({ "source": formatted.clone() }),
+        );
         assert_eq!(body2.unwrap()["formatted"].as_str().unwrap(), formatted);
     }
 
@@ -1255,7 +1376,10 @@ mod tests {
         let body = body.unwrap();
         let has_diag = body["diagnostics"].is_array();
         let has_err = body["error"].is_string();
-        assert!(has_diag || has_err, "neither :diagnostics nor :error: {body:?}");
+        assert!(
+            has_diag || has_err,
+            "neither :diagnostics nor :error: {body:?}"
+        );
         if let Some(err) = body["error"].as_str() {
             assert!(!err.contains("not yet wired"), "still a stub: {err:?}");
         }
@@ -1287,10 +1411,16 @@ mod tests {
         let mut interp = Interp::new();
         let resp = round_trip(
             &mut interp,
-            &[req(1, "prompts/list", json!({})), notif("exit", json!(null))],
+            &[
+                req(1, "prompts/list", json!({})),
+                notif("exit", json!(null)),
+            ],
         );
         let prompts = resp[0]["result"]["prompts"].as_array().unwrap();
-        let names: Vec<&str> = prompts.iter().map(|p| p["name"].as_str().unwrap()).collect();
+        let names: Vec<&str> = prompts
+            .iter()
+            .map(|p| p["name"].as_str().unwrap())
+            .collect();
         assert!(names.contains(&"brood-task"), "{names:?}");
     }
 
@@ -1354,7 +1484,11 @@ mod tests {
         let resp = round_trip(
             &mut interp,
             &[
-                req(1, "tools/call", json!({ "name": "eval", "arguments": { "source": 42 } })),
+                req(
+                    1,
+                    "tools/call",
+                    json!({ "name": "eval", "arguments": { "source": 42 } }),
+                ),
                 notif("exit", json!(null)),
             ],
         );
@@ -1394,7 +1528,11 @@ mod tests {
         let resp = round_trip(
             &mut interp,
             &[
-                req(1, "tools/call", json!({ "name": "blow-up", "arguments": {} })),
+                req(
+                    1,
+                    "tools/call",
+                    json!({ "name": "blow-up", "arguments": {} }),
+                ),
                 notif("exit", json!(null)),
             ],
         );
@@ -1410,5 +1548,104 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("division by zero"));
+    }
+
+    #[test]
+    fn handler_panic_is_caught_and_server_keeps_serving() {
+        // Regression for the MCP-host panic-isolation behaviour
+        // (`docs/deferred.md` §3): a *Rust panic* inside a tool handler must
+        // surface as a structured JSON-RPC error and NOT tear down the server.
+        // Before the `catch_unwind` wrap in `call_tool`, any panic propagated
+        // through `main_loop` and dropped every `mcp__brood__*` tool for the
+        // rest of the session.
+        //
+        // We trigger the panic via `%force-panic` — a debug-only kernel
+        // primitive whose only job is to `panic!()`, giving this test a
+        // reliable trigger without putting an "intentionally crash" knob in
+        // the release surface (`#[cfg(debug_assertions)]`-gated in
+        // `builtins.rs`).
+        //
+        // Without the panic hook silenced, the panic backtrace is also
+        // printed to stderr. That's a side effect of `panic::catch_unwind`'s
+        // contract — useful for debugging server-side, doesn't corrupt the
+        // stdio JSON-RPC channel (stderr is separate).
+        let mut interp = Interp::new();
+        interp
+            .eval_str(
+                r#"
+                (provide 'mcp)
+                (defn mcp-tools ()
+                  (list
+                    {:name "boom"
+                     :schema {:type "object" :properties {}}
+                     :handler (fn (_) (%force-panic "stunt panic for test"))}
+                    {:name "echo"
+                     :schema {:type "object" :properties {:n {:type "integer"}}}
+                     :handler (fn (args) (get args :n))}))
+                "#,
+            )
+            .unwrap();
+
+        // Silence the default panic hook for the duration of this test only,
+        // so cargo's test output stays clean. We restore it on exit. The hook
+        // is process-wide, so other concurrent tests would see this — but the
+        // test binary defaults to single-threaded-per-test for unit tests in
+        // the same module under `cargo test --no-fail-fast`, and crucially
+        // the next assertion (subsequent tool call succeeds) is the proof,
+        // not stderr.
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            round_trip(
+                &mut interp,
+                &[
+                    // First call panics inside the handler.
+                    req(
+                        1,
+                        "tools/call",
+                        json!({ "name": "boom", "arguments": {} }),
+                    ),
+                    // Second call must still work — proves the server didn't
+                    // die and `Interp` is in a usable state.
+                    req(
+                        2,
+                        "tools/call",
+                        json!({ "name": "echo", "arguments": { "n": 7 } }),
+                    ),
+                    notif("exit", json!(null)),
+                ],
+            )
+        }));
+        std::panic::set_hook(prev);
+        let resp = result.expect("the MCP server itself must not unwind");
+
+        // First reply: structured panic error.
+        let err = &resp[0]["error"];
+        assert_eq!(err["code"], -32603, "{err}"); // JSON-RPC internal
+        assert!(
+            err["message"]
+                .as_str()
+                .unwrap()
+                .contains("panic in tool handler"),
+            "message should mark this as a panic: {err}"
+        );
+        let data = &err["data"];
+        assert_eq!(data["kind"], "panic");
+        assert!(
+            data["message"]
+                .as_str()
+                .unwrap()
+                .contains("stunt panic for test"),
+            "the original panic message must round-trip: {data}"
+        );
+        assert!(
+            data["hint"].as_str().unwrap().contains("interpreter bug"),
+            "the hint should call this an interpreter bug: {data}"
+        );
+
+        // Second reply: the server is still alive and the next tool call works.
+        let content = &resp[1]["result"]["content"][0];
+        assert_eq!(content["type"], "text");
+        assert_eq!(content["text"], "7");
     }
 }

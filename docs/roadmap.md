@@ -159,6 +159,28 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
 > candidate to later replace with Brood. This holds for the CLI, the editor
 > commands, keymaps, and UI as the language grows capable enough.
 
+### Deferred ergonomic & tooling items (see [`deferred.md`](deferred.md))
+
+Each entry has a design sketch, the trigger that should pull it back in, and
+the workaround available today.
+
+- ⬜ **First-class set type + `#{…}` literal** — maps-as-sets work today;
+  picks up when "set of X" becomes a common pattern in M2+ editor code.
+- ⬜ **Lazy sequences + `iterate`** — tail-recursive accumulator helpers
+  cover the case today; picks up when an editor feature needs unbounded
+  streams (animation frames, file lines, undo history).
+- ✅ **MCP `nest mcp` worker-panic isolation** — landed 2026-05-29. A Rust
+  panic in any tool-call code path is caught at the handler boundary
+  (`call_tool`'s `panic::catch_unwind`), projected as a structured JSON-RPC
+  error (`error.data.kind = "panic"`), and the server keeps serving.
+  Worker-thread panics in the scheduler proper are not covered (revisit
+  only if a real case surfaces).
+- ⬜ **Cross-module redefinition warning** — flat-namespace collisions are
+  silent today; record per-name origin file and warn on cross-file
+  redefinition (with an explicit `^:override` opt-out).
+- ⬜ **`nest format --changed`** — whole-tree `nest format` reformats files
+  the current change didn't touch; add a git-aware narrower scope.
+
 ## M2 — Editor data model
 
 The text-editing substance, exposed to Brood.
@@ -194,25 +216,19 @@ The seam that makes remoteability free later (see architecture.md).
   [`distribution.md`](distribution.md). Remaining: supervision trees (true
   `link` / restart strategies) and optional TLS — both additive over what's
   here.
-- ⬜ **Supervised-by-default processes** (ADR-039,
-  [`supervision.md`](supervision.md)) — *the* shift in the process model:
-  every spawn is implicitly supervised by the runtime; on uncaught error
-  the runtime catches, logs, and re-invokes from the *current call's
-  resume slot* (same `callee`, same `argv`), so state is preserved across
-  the crash and a freshly-saved redefinition is picked up on the retry.
-  Mode-gated: full supervision + resume in `dev` (default for the REPL,
-  `brood file`, `nest run`/`test`), restart-without-resume in `release`
-  (default for `nest bundle` output). On landing, also adds **named-spawn**
-  (`(spawn :worker expr)` idempotent on the name), which obsoletes the
-  current transitional `defonce` macro (the implementation commit removes
-  it in the same change that adds named-spawn); removes the need for a
-  `live-loop` macro and most user-level `try`/`catch` survival patterns;
-  simplifies `std/reload.blsp`, `std/hatch.blsp`, the `nest test`
-  harness, and `ensure-link`'s respawn loop. Foundation for the editor:
-  the editor's event loop is just `(defn editor-loop (state) …)` and a
-  bad keystroke handler can't kill the editor. Designed *before* M2
-  because it changes the process model that the editor will be written
-  against.
+- ❌ **Kernel-supervised processes** (ADR-039,
+  [`supervision.md`](supervision.md)) — **tried and reverted (2026-05-29,
+  commit `e3d3a0d`).** Shipped as opt-in on 2026-05-28; stripped a day later
+  because the kernel-side supervisor (RESUME_SLOT + safepoint rooting + the
+  retry loop) was the bulk of the multi-thread scheduler race surface. The
+  Phase-1 bump-only allocator (`f90f0de`, 2026-05-29) is the follow-on that
+  brings the `recurse.blsp` repro from ~95% failure under `-j 0` to 10/10
+  clean in debug-assertions release. **Userland supervision is still
+  possible** — `spawn` + `monitor` give you `[:down …]` and a respawn
+  pattern in ~10 lines of Brood (see [`supervision.md`](supervision.md)).
+  Named-spawn is **not** delivered (was bundled with this); the `defonce`
+  transitional shim stays in the prelude. The editor will be written
+  against let-it-crash + userland supervisors instead.
 - ⬜ The same runtime listens on a socket and serves the M3 protocol
 - ⬜ Remote editor instances attach (the Emacs `--daemon` / `emacsclient` model)
 - ⬜ One core, multiple attached frontends

@@ -768,7 +768,7 @@ immutable operations that return fresh maps. `count`/`empty?` work on maps too.
 `list->string`  `upper`  `lower`  `string->number`  `number->string`
 `index-of`  `string-contains?`  `join`  `string-split`  `replace`
 `trim`  `triml`  `trimr`  `blank?`  `starts-with?`  `ends-with?`
-`string-repeat`  `pad-left`  `pad-right`  `to-fixed`
+`string-repeat`  `pad-left`  `pad-right`  `to-fixed`  `format`
 
 - `str` concatenates the *display* form of its args; `pr-str` returns the
   *readable* form of one value.
@@ -795,6 +795,12 @@ immutable operations that return fresh maps. `count`/`empty?` work on maps too.
   — the float→text op `str`/`pr-str` can't do, since they print the shortest
   round-tripping form. Together they handle tabular/console output. `to-fixed` is
   a Rust primitive (Rust's float formatter); the rest are Brood.
+- `format` is a small `printf`-style wrapper: `(format "x = %d, y = %.2f" 42 3.14)`
+  → `"x = 42, y = 3.14"`. Specifiers: `%s` (any, via `str`), `%d` (number),
+  `%f` (float, 6 decimals), `%.Nf` (float, N decimals — uses `to-fixed`), `%%` (literal
+  `%`). Width/justification isn't built in (compose with `pad-left`/`pad-right`).
+  An unknown specifier or a truncated one errors; a missing arg renders as
+  `nil`, extra args are ignored.
 
 ```clojure
 (string-split "a,b,c" ",")      ;=> ("a" "b" "c")

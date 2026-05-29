@@ -69,7 +69,9 @@ fn heartbeat_loop() {
         std::thread::sleep(HEARTBEAT_INTERVAL);
         let now = now_millis();
         // Snapshot under the lock, then act without holding it (shutdown/send can block).
-        let links: Vec<(Arc<TcpStream>, Sender<Arc<[u8]>>, u64)> = {
+        // (sock, tx, last_seen_millis) per link.
+        type LinkSnapshot = (Arc<TcpStream>, Sender<Arc<[u8]>>, u64);
+        let links: Vec<LinkSnapshot> = {
             let nodes = crate::core::sync::read(&NODES);
             nodes
                 .values()

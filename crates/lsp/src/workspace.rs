@@ -30,7 +30,12 @@ pub fn symbol_at<'s>(root: &Node, text: &'s str, offset: u32) -> Option<&'s str>
 }
 
 /// Every cross-file reference to the global `name`, deduped by location.
-pub fn references(interp: &mut Interp, docs: &Documents, current: &Uri, name: &str) -> Vec<Location> {
+pub fn references(
+    interp: &mut Interp,
+    docs: &Documents,
+    current: &Uri,
+    name: &str,
+) -> Vec<Location> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for (uri, text) in project_sources(interp, docs, current) {
@@ -38,7 +43,10 @@ pub fn references(interp: &mut Interp, docs: &Documents, current: &Uri, name: &s
         let tree = scope::analyze(&root, &text);
         let index = LineIndex::new(&text);
         for span in tree.references_to_global(&root, &text, name) {
-            let range = Range::new(index.position(&text, span.start), index.position(&text, span.end));
+            let range = Range::new(
+                index.position(&text, span.start),
+                index.position(&text, span.end),
+            );
             if seen.insert((uri.clone(), range.start, range.end)) {
                 out.push(Location::new(uri.clone(), range));
             }

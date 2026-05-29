@@ -35,10 +35,7 @@ pub fn report_error(e: &LispError) {
 /// first). Any *other* `-*` argument at this point is a typo — we hard-error
 /// with the offending token so the user sees "unknown option" instead of
 /// "cannot read --foo: No such file or directory".
-pub fn parse_jobs_args(
-    prog: &str,
-    args: Vec<String>,
-) -> (Vec<String>, Option<usize>) {
+pub fn parse_jobs_args(prog: &str, args: Vec<String>) -> (Vec<String>, Option<usize>) {
     let mut files = Vec::new();
     let mut max_parallel = None;
     let mut i = 0;
@@ -85,4 +82,3 @@ pub fn parse_jobs_args(
     }
     (files, max_parallel)
 }
-

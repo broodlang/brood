@@ -289,8 +289,8 @@ pub fn macroexpand_to_string(
 ) -> Result<String, String> {
     let cp = interp.heap.checkpoint();
     let result = (|| -> Result<String, String> {
-        let forms = crate::syntax::reader::read_all(&mut interp.heap, src)
-            .map_err(|e| e.to_string())?;
+        let forms =
+            crate::syntax::reader::read_all(&mut interp.heap, src).map_err(|e| e.to_string())?;
         if forms.len() > 1 {
             return Err(format!(
                 "expected exactly one form, got {} (wrap multiple forms in `(do …)`)",
@@ -301,8 +301,7 @@ pub fn macroexpand_to_string(
         let expanded = if recursive {
             crate::eval::macros::macroexpand(&mut interp.heap, form, interp.root)
         } else {
-            crate::eval::macros::macroexpand_1(&mut interp.heap, form, interp.root)
-                .map(|(v, _)| v)
+            crate::eval::macros::macroexpand_1(&mut interp.heap, form, interp.root).map(|(v, _)| v)
         }
         .map_err(|e| e.to_string())?;
         // Build the printed form *before* the LOCAL reset below — once the
@@ -439,10 +438,7 @@ mod tests {
     #[test]
     fn signature_of_an_unbound_name_is_empty() {
         let mut interp = Interp::new();
-        assert_eq!(
-            signature(&mut interp, "no-such-global-xyzzy"),
-            (None, None)
-        );
+        assert_eq!(signature(&mut interp, "no-such-global-xyzzy"), (None, None));
     }
 
     #[test]
@@ -488,7 +484,9 @@ mod tests {
         // set it from Rust directly. A path is just a string; no real file
         // has to exist for the recorded site to be observable.
         let mut interp = Interp::new();
-        let prev = interp.heap.set_current_file(Some("tests/dummy.blsp".into()));
+        let prev = interp
+            .heap
+            .set_current_file(Some("tests/dummy.blsp".into()));
         interp.eval_source("(defn my-fn (x) (* x x))").unwrap();
         interp.heap.set_current_file(prev);
 
@@ -509,7 +507,11 @@ mod tests {
         let ok = heap.alloc_vector(vec![file, Value::Int(10), Value::Int(3)]);
         assert_eq!(
             parse_source_location(&heap, ok),
-            Some(SourceLoc { file: "foo.blsp".into(), line: 10, col: 3 })
+            Some(SourceLoc {
+                file: "foo.blsp".into(),
+                line: 10,
+                col: 3
+            })
         );
         assert_eq!(parse_source_location(&heap, Value::Nil), None);
         let too_short = heap.alloc_vector(vec![Value::Int(1)]);

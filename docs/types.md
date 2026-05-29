@@ -225,6 +225,23 @@ never a false positive.
   g b g))`); `match` through the new let-binding alias + `%eq` guard. The
   whole Step-4 surface is behavioural now — every form a user reaches for
   on a guarded variable narrows it.
+- ✅ **Macro-hygiene lint** (`check/hygiene.rs`). Macros are unhygienic by
+  default (ADR-021/no auto-rename), so a `defmacro` template that introduces a
+  binder with a *literal* symbol can **capture** caller code spliced into that
+  binder's scope — the `(defmacro time (expr) ` `` `(let (start (now) v ~expr) …)) `` ``
+  bug, where the body's `start` binds to the clock instead of the caller's.
+  The lint warns only when **both** hold for a `let`/`fn` binder inside a
+  quasiquote template: (1) the binder is a literal symbol — a gensym'd binder
+  reads as `(unquote g)` and an unquoted caller-name as `(unquote evar)`, so
+  neither trips it; and (2) a macro *parameter* is spliced (`~p`/`~@p`) into
+  that binder's scope (Brood `let` is sequential, so the scope is the body plus
+  *later* bindings' values — not the binder's own value). Both conditions are
+  syntactic, so this is the one pass that runs over the **un-expanded** forms
+  (templates vanish after expansion). Audited over the whole `std/` tree: every
+  macro there gensyms or unquotes its binders, so the lint fires **zero** false
+  positives (contract #5 holds — advisory, never gates). An intentional
+  anaphoric macro (deliberate capture) would be flagged; none exist in-tree, and
+  if one is written the lint should grow an opt-out rather than relax the gate.
 
 With everything above, Step 4 is **done**. The only meaningful next move is
 project-wide check-only entry points already on tap (`nest check`) and the

@@ -58,10 +58,7 @@ pub fn classify(token: &str) -> AtomKind {
 /// An integer-shaped token: `looks_numeric`, but with no fractional/exponent
 /// part — pure digits with an optional leading sign.
 fn looks_integer(token: &str) -> bool {
-    looks_numeric(token)
-        && !token.contains('.')
-        && !token.contains('e')
-        && !token.contains('E')
+    looks_numeric(token) && !token.contains('.') && !token.contains('e') && !token.contains('E')
 }
 
 /// Characters that terminate an atom (and so can't appear unescaped inside one).

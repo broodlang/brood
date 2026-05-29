@@ -142,10 +142,8 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     // `(quote a b)` rather than silently dropping the tail.
                     let (form, r) = uncons(heap, rest);
                     if !matches!(r, Value::Nil) {
-                        return Err(LispError::arity(
-                            "quote: expected exactly one argument",
-                        )
-                        .or_form_pos(heap, expr));
+                        return Err(LispError::arity("quote: expected exactly one argument")
+                            .or_form_pos(heap, expr));
                     }
                     return Ok(form);
                 }
@@ -156,8 +154,8 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     let (test_form, r) = uncons(heap, rest);
                     let (then_form, r) = uncons(heap, r);
                     let (else_form, _) = uncons(heap, r);
-                    let test = eval(heap, test_form, env)
-                        .map_err(|e| e.or_form_pos(heap, test_form))?;
+                    let test =
+                        eval(heap, test_form, env).map_err(|e| e.or_form_pos(heap, test_form))?;
                     expr = if truthy(test) { then_form } else { else_form };
                     continue 'tail;
                 }
@@ -271,8 +269,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     while i < binds.len() {
                         let bind_name = as_symbol(binds[i])?;
                         let rhs = binds[i + 1];
-                        let val = eval(heap, rhs, scope)
-                            .map_err(|e| e.or_form_pos(heap, rhs))?;
+                        let val = eval(heap, rhs, scope).map_err(|e| e.or_form_pos(heap, rhs))?;
                         heap.env_define(scope, bind_name, val);
                         i += 2;
                     }
@@ -332,8 +329,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     while i < binds.len() {
                         let bind_name = as_symbol(binds[i])?;
                         let rhs = binds[i + 1];
-                        let val = eval(heap, rhs, scope)
-                            .map_err(|e| e.or_form_pos(heap, rhs))?;
+                        let val = eval(heap, rhs, scope).map_err(|e| e.or_form_pos(heap, rhs))?;
                         heap.env_define(scope, bind_name, val);
                         i += 2;
                     }
@@ -436,8 +432,8 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     .map_err(|e| e.or_form_pos(heap, call_form));
             }
             Value::Fn(id) => {
-                let scope = bind_params(heap, id, &cur_argv)
-                    .map_err(|e| e.or_form_pos(heap, call_form))?;
+                let scope =
+                    bind_params(heap, id, &cur_argv).map_err(|e| e.or_form_pos(heap, call_form))?;
                 // Snapshot the body forms once. Each `heap.closure(id)` call
                 // is a region-dispatch + slab index; iterating the body four
                 // times (len + per-form read + tail-form read) repeated those
@@ -550,8 +546,8 @@ fn bind_params(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> Result<EnvId, 
             // evaluation, so a diagnostic from inside an `&optional` default
             // points at the default's line (not at the enclosing top-level
             // form's start).
-            let value = eval(heap, default_form, scope)
-                .map_err(|e| e.or_form_pos(heap, default_form))?;
+            let value =
+                eval(heap, default_form, scope).map_err(|e| e.or_form_pos(heap, default_form))?;
             heap.env_define(scope, name, value);
         }
     }

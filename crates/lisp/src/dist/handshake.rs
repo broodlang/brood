@@ -171,9 +171,8 @@ fn ct_eq(a: &[u8; MAC_LEN], b: &[u8; MAC_LEN]) -> bool {
 /// handshake.
 fn fresh_nonce() -> io::Result<[u8; NONCE_LEN]> {
     let mut n = [0u8; NONCE_LEN];
-    getrandom::fill(&mut n).map_err(|e| {
-        io::Error::other(format!("could not read OS RNG for handshake nonce: {e}"))
-    })?;
+    getrandom::fill(&mut n)
+        .map_err(|e| io::Error::other(format!("could not read OS RNG for handshake nonce: {e}")))?;
     Ok(n)
 }
 

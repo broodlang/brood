@@ -83,10 +83,7 @@ impl<'a> Parser<'a> {
     /// into a stack-overflow abort. Pair every successful call with [`exit`].
     fn enter(&mut self) -> Result<(), LispError> {
         if self.depth >= MAX_DEPTH {
-            return Err(self.err(format!(
-                "form nested too deeply (max {} levels)",
-                MAX_DEPTH
-            )));
+            return Err(self.err(format!("form nested too deeply (max {} levels)", MAX_DEPTH)));
         }
         self.depth += 1;
         Ok(())

@@ -43,7 +43,10 @@ pub enum Message {
     /// A process id carrying node identity. In-process this keeps the interned
     /// node `Symbol`; the node-link wire codec (`crate::dist`) re-encodes the
     /// node by *name*, since separate runtimes have independent interners.
-    Pid { node: Symbol, id: u64 },
+    Pid {
+        node: Symbol,
+        id: u64,
+    },
     /// A serialised closure (Erlang's "send a fun"). Because a closure's body and
     /// its optionals' defaults are S-expression *forms* (plain data), and its free
     /// globals resolve on the receiver, a function can travel as data. Only its free

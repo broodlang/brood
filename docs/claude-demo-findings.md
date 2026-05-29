@@ -641,4 +641,46 @@ remain blocked.
 
 ---
 
+## 11. Status (2026-05-29 follow-up)
+
+Re-verified against HEAD post the kernel-supervisor strip (`e3d3a0d`,
+2026-05-28 evening) and the Phase-1 bump-only allocator (`f90f0de`,
+2026-05-29 morning). Most §10 items are now closed.
+
+### Executive-summary items (revisited)
+
+| # | Item | 2026-05-28 status | Today (2026-05-29) | Notes |
+|---|------|-------------------|---------------------|-------|
+| 1 | Multi-thread scheduler race | 🐛 still present | 🟢 **largely fixed** | The kernel supervisor was the bulk of the race surface; stripping it (`e3d3a0d`) took the `recurse.blsp` repro from ~95% failure to ~50%, and Phase-1 bump-only allocation (`f90f0de`) closed the rest in debug-assertions release (**10/10 clean**). Plain release can still segfault — likely bundled WIP in the +698-line heap.rs rewrite, not Phase 1 itself. See [`known-issues.md`](known-issues.md) KI-1. |
+| 2 | Type-checker noise around `(require 'hatch)` | 🟢 partial fix | 🟢 **fully fixed** | `check_file` pre-evaluates top-level `(require …)` forms before walking, so macros from required modules resolve. Verified zero warnings on a correctly-written hatch file via both `nest check` *and* `brood file.blsp` direct. `crates/lisp/src/types/check.rs:148+`. |
+| 3 | `nest format` collapses readable code | 🐛 still present | 🟢 **substantially fixed** | Commit `5b19787` ("formatter respects author newlines"). Multi-line `let` / `defmacro` body / `cond` / quasiquoted templates all stay multi-line. **Still normalizes** multi-space alignment within a line (`w       64` → `w 64`) — a standard Lisp-formatter trade-off, not the original 8-lines-to-1 blocker. |
+| 4 | Quick-ref doc gaps | 🟢 partial fix | 🟢 **substantially closed** | `brood-for-claude.md` now covers `format`, `to-fixed`, `pad-left`/`pad-right`, `string-repeat`, `repeat`, `repeatedly`, `round-to`, plus the hatch concurrency surface. Remaining lookups go through the MCP `lookup` tool. |
+| 5 | Float formatting / no `format` builtin | 🟡 unchanged | 🟢 **shipped** | `(to-fixed x n)` has been the float-formatting primitive for a while; `(format "x=%d y=%.2f" 42 3.14)` lands in the prelude today as a small printf-style helper. Specifiers `%s %d %f %.Nf %%`; width via `pad-left`/`pad-right`. Pure Brood, no new Rust. See [`devlog.md`](devlog.md) 2026-05-29. |
+| 6 | Pattern-destructure failure surfaces as Rust panic | 🐛 still present | 🟢 **fixed** | Every destructure-mismatch shape I could construct (vector/list/string/keyword scrutinee, nested, multi-clause `fn` exhaustion, `match` no-clause) now returns a clean Brood `[:match-error :ctx value pattern]`. No `index out of bounds` panic anywhere — the panic line in the original report (`eval/mod.rs:446`) is the structured-error path now. |
+
+### What's open
+
+- KI-1's **plain-release segfault** (KI-1 caveat) — `-j 1` reliable;
+  debug-assertions release reliable. Bisect through the bundled heap.rs
+  WIP pending.
+- Phase 2 of the allocator switch (arena flip on `receive`) — Phase 1
+  grows unboundedly for long-running tail-recursive workers that never
+  `receive`; the `gc.rs` `long_tail_loop_stays_bounded` test is
+  `#[ignore]`'d with a Phase-2 note.
+- ADR-039 (kernel supervisor) is **reverted, not paused**. The userland
+  pattern in [`supervision.md`](supervision.md) is the supported path;
+  the kernel feature *can* come back later but only over a substrate
+  that doesn't reintroduce the race.
+
+### Items from §6 still standing
+
+- §6.3 (`--quiet` for `nest run`), §6.4 (project-context `nest repl`),
+  §6.5 (process-death printing carries spawn-site / file:line) — all
+  unchanged.
+- §6.6 (`nest check` sharper on typos like `worker-loop col`) — Step-4 of
+  the type checker continues to land but is still advisory by design
+  (ADR-024); rejecting that kind of typo crosses into the "must run" line.
+
+---
+
 *End of document.*
