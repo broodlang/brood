@@ -3,7 +3,7 @@
 //! Strings allocated in a process LOCAL heap above [`SHARED_BLOB_THRESHOLD`]
 //! bytes are routed here instead of being copied inline. Send between
 //! processes then bumps an atomic refcount instead of deep-copying the bytes;
-//! handle death (process exit, hibernate flush of a non-surviving slot) drops
+//! handle death (process exit, a collection dropping a non-surviving slot) drops
 //! the `Arc` and frees the blob when the last reference goes.
 //!
 //! ADR-026 makes data immutable, so there are no cycles — a plain `Arc` is

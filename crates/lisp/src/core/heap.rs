@@ -540,9 +540,10 @@ pub struct Heap {
     /// See `docs/memory-review.md`.
     local_epoch: u32,
     /// GC observability counters (Tier-1; `docs/memory-review.md` §7). Bumped by
-    /// every [`arena_flip`](Self::arena_flip) — so they count *both* the automatic
-    /// Stage-B safepoint collections and the `(hibernate)` flushes, which share
-    /// that path. Read out via `(gc-stats)`. Per-heap (per Brood process), reset
+    /// every [`arena_flip`](Self::arena_flip) — so they count both the automatic
+    /// Stage-B safepoint collections and any bare [`flush`](Self::flush) (the
+    /// tested arena-flip helper), which share that path. Read out via `(gc-stats)`.
+    /// Per-heap (per Brood process), reset
     /// to zero only at process start; survive arena flips (the flip writes them,
     /// it doesn't clear them). `u64` so a long-lived server loop can't wrap them.
     /// `gc_runs` = collections performed; `gc_copied` = cumulative survivors
@@ -1759,7 +1760,7 @@ impl Heap {
         self.arena_flip(roots, &mut []);
     }
 
-    /// The arena flip shared by [`flush`](Self::flush) (the `(hibernate)` path,
+    /// The arena flip shared by [`flush`](Self::flush) (value roots only,
     /// no env roots) and [`collect`](Self::collect) (the eval safepoint, which
     /// also roots the live `env`). A **semi-space copy**: move every LOCAL object
     /// reachable from the value roots, env roots, the dynamic-binding stack, and
@@ -1804,8 +1805,8 @@ impl Heap {
         // Re-key it through the pair forwarding table (old idx → new idx) so a
         // collection mid-file-load doesn't lose the reader positions later error
         // messages point at; entries for pairs that didn't survive are dropped
-        // with them. (The hibernate path benefits equally — positions for any
-        // still-live form survive the arena flip rather than being discarded.)
+        // with them. (Any still-live form's position survives the arena flip
+        // rather than being discarded.)
         let old_form_pos = std::mem::take(&mut self.form_pos);
         for (old_idx, pos) in old_form_pos {
             if let Some(&new_idx) = fwd.pairs.get(&(old_idx as u32)) {
@@ -1849,7 +1850,7 @@ impl Heap {
         debug_assert!(
             gen == self.local_epoch,
             "use-after-GC: {} handle (LOCAL slot {}) is from epoch {}, but the heap is now \
-             epoch {} — a handle held across a (hibernate)/collection arena flip without being \
+             epoch {} — a handle held across a collection arena flip without being \
              re-rooted (handle {:#x}).",
             what,
             index,
@@ -2642,7 +2643,7 @@ impl Heap {
     /// Cheap (no traversal); counts the slab arrays themselves, not nested/shared
     /// content (inner vectors, string bytes, `Arc`-shared ropes), so it's a
     /// comparative figure for an observer, not an exact RSS. Bump-allocated, so it
-    /// reflects allocation since the last arena reset / `hibernate`. Backs
+    /// reflects allocation since the last arena reset / collection. Backs
     /// `process-info`'s `:memory` (published on `receive`).
     pub fn local_bytes(&self) -> usize {
         use std::mem::size_of;
@@ -2660,8 +2661,8 @@ impl Heap {
     /// GC observability counters (Tier-1; `docs/memory-review.md` §7), as a
     /// `(runs, copied, reclaimed)` triple of cumulative figures since process
     /// start: collections performed, LOCAL objects relocated, LOCAL objects
-    /// dropped. Backs the `(gc-stats)` builtin. Counts *both* Stage-B safepoint
-    /// collections and `(hibernate)` flushes (they share [`arena_flip`]).
+    /// dropped. Backs the `(gc-stats)` builtin. Counts both Stage-B safepoint
+    /// collections and bare [`flush`](Self::flush) calls (they share [`arena_flip`]).
     pub fn gc_counters(&self) -> (u64, u64, u64) {
         (self.gc_runs, self.gc_copied, self.gc_reclaimed)
     }
@@ -2703,7 +2704,7 @@ impl Heap {
     /// O(1) copying per allocation — standard semi-space; the threshold is the
     /// slow/stable dial, `BROOD_GC_STRESS=1` ⇒ every safepoint). No-op while GC is
     /// disabled (the builder heap during prelude construction). Shares all of its
-    /// machinery — and the no-slot-reuse safety — with the `(hibernate)` flush.
+    /// machinery — and the no-slot-reuse safety — with the [`flush`](Self::flush) helper.
     pub fn collect(&mut self, extra_roots: &mut [Value], extra_envs: &mut [EnvId]) {
         if !self.gc_enabled {
             return;

@@ -77,6 +77,19 @@
 //! `and`/`or`-chained guards, recursion, higher-order; running automatically
 //! in `brood <file>` / `nest test`. Today the entry points are `brood
 //! --check` (CLI; see [`check_file`]) and the `(check 'form)` builtin.
+//!
+//! **Known coverage gap — operand-position unbound symbols** (audit 2026-05-29):
+//! the unbound-symbol diagnostic fires only on a combination's *head*
+//! ([`walk::check_into`]); a bare symbol in an *operand/value* position —
+//! `(+ 1 typo)`, `(def x typo)`, `(if typo …)`, `(cons a undefined)` — is never
+//! flagged, because [`walk::check_into`] returns at its non-`Pair` guard before
+//! reaching such a leaf. This is deliberate conservatism, not an oversight: an
+//! operand symbol may be an as-yet-unexpanded **macro argument** or a legal
+//! **forward reference**, and the checker's cardinal rule is *no false positives*.
+//! A safe fix flags an evaluated-position leaf symbol only when the enclosing head
+//! is a *known non-macro callee* (primitive or curated/known closure — so its args
+//! are evaluated as-is) plus the `def`/`let`/`if` value slots, reusing the same
+//! `is_local`/`is_globally_bound`/`curated_sig`/`is_syntactic_keyword` predicate.
 
 mod ctx;
 mod guards;

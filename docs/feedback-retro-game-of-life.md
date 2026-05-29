@@ -1,9 +1,7 @@
 # Writing a Game of Life in Brood — a retrospective
 
 **The prompt:** *"can you write a game of life application 80x40 with wrapping in
-a loop."* (Started 40×40; widened to 60×30 then **80×40** over later
-follow-ups. The full turn-by-turn arc is in the third-pass re-verification
-block below.)
+a loop"*
 
 > Feedback from an AI assistant (Claude Code) building a small app in Brood.
 >

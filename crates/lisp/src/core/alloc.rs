@@ -60,9 +60,10 @@ static SOFT_LIMIT: AtomicUsize = AtomicUsize::new(0); // 0 = unlimited; safepoin
 /// transients are reclaimed), the whole project suite peaks ~1.1 GiB (down from
 /// ~4 GiB tripping this cap, and ~18 GiB before isolated units ran in droppable
 /// processes / OOM-froze the host). 5/4 GiB leaves ample headroom while staying well
-/// under host RAM. Tighten once automatic collection (Stage B, `docs/memory-review.md`)
-/// lands and the hibernate scaffold is removed. A single `(sum-to 100000 0)` tail
-/// loop still holds ~60 MiB unreclaimed without GC (every `(+ …)` is a prelude Brood
+/// under host RAM. Now that automatic collection (Stage B, ADR-055/058,
+/// `docs/memory-review.md`) has landed, a long loop is bounded; this cap is a
+/// host-safety backstop, not the reclamation path. A single `(sum-to 100000 0)` tail
+/// loop would hold ~60 MiB unreclaimed *without* GC (every `(+ …)` is a prelude Brood
 /// call allocating env frames per iteration; see `docs/devlog.md`).
 pub const TEST_DEFAULT_HARD: usize = 5 * 1024 * 1024 * 1024; // 5 GiB
 /// Soft default for the test runners — 4 GiB, so a runaway/accumulating run fails

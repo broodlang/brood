@@ -7384,6 +7384,11 @@ the window backend.
 
 ## 2026-05-29 — GC observability + the entry-depth memory leak (the "user must not care" fix)
 
+> **Superseded in part by the later "Core memory guarantee + `(hibernate)` removed"
+> entry below (ADR-058).** The interim fix recorded here routed `nest run <file>`
+> through `eval_source`; that nest-side patch was reverted once the bound was moved
+> into `load` itself (so every entry path inherits it). The diagnosis below stands.**
+
 **Context.** Continuing the Stage-B GC work (ADR-055). Two things this session:
 Tier-1 GC observability, and chasing down why the Game-of-Life app (and any
 `nest run` loop) still leaked despite Stage B being "done".
@@ -7563,3 +7568,122 @@ confirming the manifest still parses with the trailing doc comments. Full suite
 (clone the ref, then check out the pinned commit — a bare `--branch <sha>` can't
 clone a commit SHA), the `_deps/<name>/` cache + `.brood-pkg.blsp` freshness
 check.
+
+---
+
+## 2026-05-29 — Eval-dispatch Step 2 designed, measured, and rejected as scoped
+
+**What.** Designed lexical addressing ([ADR-057](decisions.md#adr-057--lexical-addressing-o1-variable-lookup-eval-dispatch-step-2)):
+resolve every variable reference once at compile time to a `LocalRef{up,idx}` /
+`GlobalRef{slot,sym}` (carved out of the public type universe), globals backed by
+**seqlock** cells (a bare `Value` slot would be a torn-read data race — `Value` is
+multi-word) so concurrent reads + hot-reload `def`s stay sound. Then a "what's the
+benefit?" review sent me to *measure* the premise instead of assuming it.
+
+**Measured** (2 M-iter loops, one cost isolated at a time, `/tmp/{lookup,read,call}_cost.blsp`):
+- local variable read: **~0 ns** over binding a constant (env chains are shallow,
+  so the chain-walk I'd blamed is free)
+- global read: **~9 ns** over a constant (the `RwLock` read + `FxHash` — cheap)
+- one closure call: **~52 ns** (`new_env` alloc + `bind_params` + body)
+- ⇒ the ~400–480 ns/iter loop is **~6% lookup**, ~⅓ calls, **majority
+  per-combination fixed overhead** (the `tick`/`gc_due`/`soft_limit` TLS guards on
+  every combination + spine `uncons` + argv build + native dispatch).
+
+**Decision.** Step 2 (lexical addressing) **rejected as scoped** — ~1–1.5 weeks of
+high-churn work, including the campaign's only real data-race surface (the seqlock),
+for under 10%. ADR-057 kept on record (correct; lexical addressing returns for free
+if we ever do precompiled bodies). **Re-pointed the campaign** ([handoff](handoff-eval-dispatch.md)):
+new Step 2 = the **call path + per-combination overhead** (`new_env` pooling, fold
+the three TLS guards into one), Step 3 = pre-tagged/precompiled closure bodies (the
+multiplier; lexical addressing falls out of it).
+
+**Takeaway.** The Step-0 baseline + "measure every step" caught a 1.5-week detour
+before it was spent. Step 1's enum dispatch stays (done, green); docs-only round —
+no code changed.
+
+**Next.** Profile the call path (`new_env`, the per-combination guards) with a
+flamegraph to confirm the split holds beyond microbenchmarks, then attack
+`new_env` allocation + guard consolidation against the locked bench baseline.
+
+---
+
+## 2026-05-29 — Core memory guarantee: bound every entry path, remove `(hibernate)` (ADR-058)
+
+**Context.** The earlier entry diagnosed the `nest run` leak as an *entry-depth*
+problem: Stage B (ADR-055) only collects at the `gc_block_depth() == 1` safepoint,
+and `(load "path")` runs a file's forms one frame deeper, so a loop launched that
+way never collected. The first cut fixed it *in nest* (run the entry via
+`eval_source`). The user pushed back, rightly: "this has to be brought into the
+core, not a tool issue — a Brood user must not care about GC at all." So the fix
+moved into the kernel and `(hibernate)` came out.
+
+**Core fix — `load` is now bounded.** When `load` is the outermost eval
+(`gc_block_depth() == 1`: a top-level form or a spawned-process body) it evaluates
+the file's forms through the same depth-1 rooted form-loop as `eval_source` — a new
+`GcBlockReset` guard drops the block depth to 0 so each form re-enters at the
+safepoint, and the unevaluated forms are rooted (re-fetched via `root_at`) across
+each collection. Called deeper it stays inline (library loads don't loop). The
+nest `eval_source` patch was reverted — nest just `(load …)`s and inherits the
+bound, as do `brood`, `--watch`/`--for`, MCP `eval`, and the future editor. Safe
+because the only outer frame is the `(load …)` combination, whose handles are read
+only via `id.index()` (no slab deref → no tripwire).
+
+**`(hibernate)` removed.** Redundant once collection reaches every normal entry.
+Gone: the builtin (+ registration/doc), `ErrorKind::Hibernate` + the boxed
+`hibernate_args` carrier (shrinks `LispError` on the hot path), and the scheduler's
+catch-and-flush loop (now a plain `Ok/Err` match). `std/test.blsp`'s runner and
+`std/repl.blsp`'s loop are plain tail calls; `gc.rs` + `blob_share_test` cases that
+asserted hibernate semantics now drive Stage B directly. `Heap::flush` stays as a
+tested arena-flip helper (reworded).
+
+**Validation.**
+- All three `nest run` paths bounded: `<file>` 166 collections / ~5 MB, `:main`
+  109 / ~0.8 MB, `--for` (the leaker) **0 → 108 collections, 775 MB → 776 KB**.
+- `BROOD_GC_STRESS=1` + `debug_assertions`: modules/require-heavy + spawned `--for`
+  loop green, no use-after-GC tripwire.
+- Full in-language suite **799/799** (twice), peak **1137 MB** — the converted
+  test runner stays bounded. `gc.rs` 4/4 (the converted hibernate tests now prove
+  Stage B). `nest` unit 35/35.
+- Benchmarks (`2026-05-29T21-19-57Z`): no hot-path regression — eval is ~7–9×
+  faster than the last archived run, but that's the intervening multi-arity work
+  (ADR-047), not this change; `load`-path startup (`interp_new`/`parse_prelude`)
+  ticked up sub-ms, within noise.
+
+**Docs.** ADR-058; `memory-model.md` current-state banner; `memory-review.md` §6
+entry-depth analysis; `language.md` memory section (`gc-stats`, no manual GC);
+`feedback-retro-game-of-life.md` §8 marked RESOLVED.
+
+---
+
+## 2026-05-29 — Does lexical addressing help code safety? Audit of unbound-ref coverage
+
+**Why.** Follow-up to rejecting ADR-057 on perf grounds: would lexical addressing
+help *user code safety* (not just speed)? The general principle holds — a
+reference-resolution pass is a safety tool — but the question is whether the
+runtime rewrite would add anything Brood doesn't already have.
+
+**Finding — it wouldn't; the capability already exists at the right layer.** Static
+unbound/shadowing/scope analysis lives in `syntax/scope.rs::analyze` (CST tree
+behind go-to-def / find-refs / rename) and the advisory **type checker** Step 4
+(arity + unbound-symbol diagnostics, scope-aware), surfaced by the LSP as warnings.
+The LSP's `diagnostics::collect` is *purely syntactic* (delimiters/strings); its
+unbound warnings come from the type checker. The runtime `LocalRef`/`GlobalRef`
+rewrite changes how a lookup *executes*, not what is *checked* — no new diagnostic.
+And checking is advisory/never-rejecting (ADR-023/024) because late binding +
+hot reload make a currently-unbound global legal.
+
+**One real coverage gap found.** The unbound-symbol diagnostic fires only on a
+combination's **head** (`types/check/walk.rs::check_into` — its non-`Pair` guard
+returns before reaching a leaf operand). So `(+ 1 typo)`, `(def x typo)`,
+`(if typo …)`, `(cons a undefined)` are **not** flagged. Deliberate conservatism:
+an operand symbol may be an unexpanded macro arg or a legal forward ref, and the
+checker's rule is *no false positives*. Documented the gap + a safe-fix sketch
+(flag an evaluated-position leaf only under a *known non-macro* head, plus
+`def`/`let`/`if` value slots) in the `check.rs` module doc's "Not yet" list.
+
+**Done (docs only, no code logic changed).** ADR-057 gained a "Does code-safety
+rescue it? No" section; `check.rs` "Not yet" list gained the gap + fix sketch.
+
+**Next (optional, separate from the dispatch campaign).** Implement the scoped
+operand-position unbound check + tests if more static safety is wanted — small,
+low-risk, in the checker layer.

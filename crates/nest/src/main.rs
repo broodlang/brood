@@ -128,6 +128,16 @@ enum Cmd {
         files: Vec<String>,
     },
 
+    /// Resolve the project's dependencies and write project.lock.blsp (ADR-037).
+    ///
+    /// For `:path` deps this verifies each sibling project exists and records its
+    /// content hash; `:git` deps land in a later slice. Errors if cwd is not
+    /// inside a Brood project.
+    Fetch,
+
+    /// Print the project's resolved dependency tree (root → direct → transitive).
+    Tree,
+
     /// Start a REPL. Inside a project, every source file is pre-loaded so the
     /// project's modules are immediately callable.
     Repl,
@@ -225,6 +235,8 @@ fn run_main(cli: Cli) {
             &args,
         ),
         Cmd::Doc { module, all } => cmd_doc(&mut interp, module.as_deref(), all),
+        Cmd::Fetch => run(&mut interp, "(require 'package) (fetch)"),
+        Cmd::Tree => run(&mut interp, "(require 'package) (tree)"),
         Cmd::Repl => cmd_repl(&mut interp),
         Cmd::Mcp => cmd_mcp(&mut interp),
         Cmd::Observe { connect, cookie } => cmd_observe(&mut interp, connect, cookie),
