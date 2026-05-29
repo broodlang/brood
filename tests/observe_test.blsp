@@ -168,6 +168,12 @@
       (is (number? (get info :id)))
       (is (includes? [:running :waiting] (get info :status)))))
 
+  (test ":parent is the spawner's id"
+    (let (me (get (process-info (self)) :id)
+          kid (spawn (receive (_ :done))))
+      (sleep 10)
+      (assert= (get (process-info kid) :parent) me)))
+
   (test "observe--snapshot yields frame-ready process-info maps"
     (spawn (receive (_ :done)))
     (let (snap (observe--snapshot :id))
