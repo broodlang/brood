@@ -34,8 +34,9 @@ use smallvec::SmallVec;
 use crate::core::blob::{SharedBlob, SHARED_BLOB_THRESHOLD};
 use crate::core::map_champ::{self, MapNode, MAX_DEPTH};
 use crate::core::value::{
-    Closure, ClosureId, EnvId, MapId, NativeFn, NativeId, PairId, StrId, Symbol, Value, VecId,
-    LOCAL, PRELUDE, RUNTIME,
+    Closure, ClosureArm, ClosureId, EnvId, MapId, NativeFn, NativeId, PairId, RopeId, StrId,
+    Symbol, Value,
+    VecId, LOCAL, PRELUDE, RUNTIME,
 };
 use crate::error::LispError;
 
@@ -154,6 +155,7 @@ fn tag_rank(v: Value) -> u8 {
         Value::Macro(_) => 11,
         Value::Ref(_) => 12,
         Value::Pid { .. } => 13,
+        Value::Rope(_) => 14,
     }
 }
 
@@ -181,6 +183,10 @@ fn to_prelude(v: Value) -> Value {
         Value::Fn(id) => Value::Fn(ClosureId::prelude(id.index())),
         Value::Macro(id) => Value::Macro(ClosureId::prelude(id.index())),
         Value::Native(id) => Value::Native(NativeId::prelude(id.index())),
+        // The prelude is pure Brood (no rope literals), so a rope can never
+        // exist at freeze time. Guard the invariant rather than silently
+        // re-tagging a LOCAL handle into PRELUDE.
+        Value::Rope(_) => unreachable!("a Rope cannot appear in the prelude region"),
         other => other,
     }
 }
@@ -198,6 +204,11 @@ struct Slabs {
     /// nodes are reachable only through the trie itself.
     maps: Vec<MapNode>,
     strings: Vec<LocalString>,
+    /// Text ropes (ADR-045). A `ropey::Rope` is itself `Arc`-shared internally,
+    /// so this slab owns one cheap handle per live rope; cloning for an edit
+    /// bumps refcounts, not bytes. Always inline (no SharedBlob split — ropes
+    /// don't cross processes, so there's no cross-heap aliasing to optimise).
+    ropes: Vec<ropey::Rope>,
     closures: Vec<Closure>,
     natives: Vec<NativeFn>,
     envs: Vec<EnvFrame>,
@@ -215,6 +226,7 @@ struct FreeLists {
     vectors: Vec<u32>,
     maps: Vec<u32>,
     strings: Vec<u32>,
+    ropes: Vec<u32>,
     closures: Vec<u32>,
     envs: Vec<u32>,
 }
@@ -225,6 +237,7 @@ impl FreeLists {
         self.vectors.clear();
         self.maps.clear();
         self.strings.clear();
+        self.ropes.clear();
         self.closures.clear();
         self.envs.clear();
     }
@@ -237,6 +250,7 @@ impl FreeLists {
         self.vectors.retain(|&i| (i as usize) < cp.vectors);
         self.maps.retain(|&i| (i as usize) < cp.maps);
         self.strings.retain(|&i| (i as usize) < cp.strings);
+        self.ropes.retain(|&i| (i as usize) < cp.ropes);
         self.closures.retain(|&i| (i as usize) < cp.closures);
         self.envs.retain(|&i| (i as usize) < cp.envs);
     }
@@ -258,6 +272,7 @@ struct PoisonBits {
     vectors: Vec<bool>,
     maps: Vec<bool>,
     strings: Vec<bool>,
+    ropes: Vec<bool>,
     closures: Vec<bool>,
     envs: Vec<bool>,
 }
@@ -308,6 +323,7 @@ pub struct LocalCheckpoint {
     vectors: usize,
     maps: usize,
     strings: usize,
+    ropes: usize,
     closures: usize,
     envs: usize,
     // No `natives` field: a live runtime never allocates a native into its LOCAL
@@ -325,6 +341,11 @@ struct CodeSlabs {
     vectors: boxcar::Vec<Vec<Value>>,
     maps: boxcar::Vec<MapNode>,
     strings: boxcar::Vec<String>,
+    /// Ropes `def`'d into a global (shared read-only across this runtime's
+    /// processes). A `ropey::Rope` is `Send + Sync` and immutable-by-construction
+    /// here (every edit makes a fresh LOCAL rope), so sharing one by handle is
+    /// sound. Append-only like the rest of this region.
+    ropes: boxcar::Vec<ropey::Rope>,
     closures: boxcar::Vec<Closure>,
     /// Captured environments of promoted closures. A closure defined *inside a
     /// function call* (not at top level) closes over a local scope; promoting it
@@ -598,6 +619,10 @@ impl Heap {
             .collect();
 
         let mut slabs = self.local;
+        debug_assert!(
+            slabs.ropes.is_empty(),
+            "a Rope cannot appear in the prelude — it is pure Brood with no rope literals",
+        );
         // Inline-extract any `Shared` string entries the builder created
         // (~9 prelude docstrings exceed `SHARED_BLOB_THRESHOLD` at the time
         // of writing). PRELUDE is shared `Arc<SharedCode>` across runtimes;
@@ -634,11 +659,13 @@ impl Heap {
             }
         }
         for c in &mut slabs.closures {
-            for f in c.body.iter_mut() {
-                *f = to_prelude(*f);
-            }
-            for (_, d) in c.optionals.iter_mut() {
-                *d = to_prelude(*d);
+            for arm in c.arms.iter_mut() {
+                for f in arm.body.iter_mut() {
+                    *f = to_prelude(*f);
+                }
+                for (_, d) in arm.optionals.iter_mut() {
+                    *d = to_prelude(*d);
+                }
             }
             // Hard assert (not debug_assert!) — `slabs.envs` is wiped below,
             // so a closure capturing a non-None env would survive into the
@@ -689,6 +716,7 @@ impl Heap {
             vectors: self.local.vectors.len(),
             maps: self.local.maps.len(),
             strings: self.local.strings.len(),
+            ropes: self.local.ropes.len(),
             closures: self.local.closures.len(),
             envs: self.local.envs.len(),
         }
@@ -710,6 +738,7 @@ impl Heap {
         self.local.vectors.truncate(cp.vectors);
         self.local.maps.truncate(cp.maps);
         self.local.strings.truncate(cp.strings);
+        self.local.ropes.truncate(cp.ropes);
         self.local.closures.truncate(cp.closures);
         self.local.envs.truncate(cp.envs);
         // Drop position metadata for the pairs just reclaimed (indices reused).
@@ -1339,6 +1368,40 @@ impl Heap {
         Value::Str(StrId::local(idx))
     }
 
+    /// Materialise a `Value::Rope` into LOCAL from an owned `ropey::Rope`
+    /// (ADR-045). Bump-only like the other allocators; the rope's internal
+    /// `Arc` nodes mean this stores one cheap handle, not a byte copy.
+    pub fn alloc_rope(&mut self, r: ropey::Rope) -> Value {
+        let idx = self.local.ropes.len();
+        self.local.ropes.push(r);
+        Value::Rope(RopeId::local(idx))
+    }
+
+    /// Resolve a rope handle to its `&ropey::Rope`. LOCAL slots are the common
+    /// case; RUNTIME holds a rope `def`'d to a global (shared read-only across
+    /// the runtime's processes). There is no PRELUDE rope (see `to_prelude`).
+    pub fn rope(&self, id: RopeId) -> &ropey::Rope {
+        match id.region() {
+            LOCAL => {
+                #[cfg(debug_assertions)]
+                debug_assert!(
+                    !PoisonBits::is(&self.poison.ropes, id.index()),
+                    "use-after-GC: rope() on freed LOCAL ropes slot {} (handle {:#x}).",
+                    id.index(),
+                    id.0
+                );
+                &self.local.ropes[id.index()]
+            }
+            RUNTIME => self
+                .runtime
+                .code
+                .ropes
+                .get(id.index())
+                .expect("runtime rope handle"),
+            _ => unreachable!("Rope handles live only in LOCAL or RUNTIME"),
+        }
+    }
+
     /// Install a pre-existing `Arc<SharedBlob>` as a new LOCAL string slot.
     /// Used by the receive path ([`crate::process::message::from_message`]):
     /// the sender already bumped the refcount via `Arc::clone` for the
@@ -1474,6 +1537,12 @@ impl Heap {
                 let s = self.string(id).to_string();
                 Value::Str(StrId::runtime(self.runtime.code.strings.push(s)))
             }
+            Value::Rope(id) if id.region() == LOCAL => {
+                // Cheap `Arc`-node clone into the shared region; the rope is
+                // immutable, so sibling processes read it concurrently.
+                let r = self.rope(id).clone();
+                Value::Rope(RopeId::runtime(self.runtime.code.ropes.push(r)))
+            }
             Value::Pair(id) if id.region() == LOCAL => self.promote_list(id),
             Value::Vector(id) if id.region() == LOCAL => {
                 let items: Vec<Value> = self
@@ -1560,11 +1629,21 @@ impl Heap {
 
     fn promote_closure(&self, id: ClosureId) -> ClosureId {
         let cl = self.closure(id).clone();
-        let body = cl.body.iter().map(|&f| self.promote(f)).collect();
-        let optionals = cl
-            .optionals
+        // Promote every arm's body forms and `&optional` defaults into the shared
+        // region (param symbols and `&` rest are interned/copy, so they ride along).
+        let arms = cl
+            .arms
             .iter()
-            .map(|&(s, d)| (s, self.promote(d)))
+            .map(|arm| ClosureArm {
+                params: arm.params.clone(),
+                optionals: arm
+                    .optionals
+                    .iter()
+                    .map(|&(s, d)| (s, self.promote(d)))
+                    .collect(),
+                rest: arm.rest,
+                body: arm.body.iter().map(|&f| self.promote(f)).collect(),
+            })
             .collect();
         // A top-level closure captures the global env (`None`) and is fully
         // shareable as-is. A closure that captured a *local* scope has its scope
@@ -1572,10 +1651,7 @@ impl Heap {
         let env = cl.env.map(|e| self.promote_env(e));
         let promoted = Closure {
             name: cl.name,
-            params: cl.params,
-            optionals,
-            rest: cl.rest,
-            body,
+            arms,
             doc: cl.doc,
             env,
         };
@@ -1651,6 +1727,7 @@ impl Heap {
             self.poison.vectors.clear();
             self.poison.maps.clear();
             self.poison.strings.clear();
+            self.poison.ropes.clear();
             self.poison.closures.clear();
             self.poison.envs.clear();
         }
@@ -1895,6 +1972,16 @@ impl Heap {
                 node.hash(h);
                 id.hash(h);
             }
+            Value::Rope(id) => {
+                15u8.hash(h);
+                // Hash by text content so two ropes with equal text hash equal,
+                // consistent with `equal` below. Materialise the whole string:
+                // hashing chunk-by-chunk would frame each chunk (str's Hash adds
+                // a terminator), so equal text under different chunk boundaries
+                // could hash differently — breaking the equal⇒same-hash contract.
+                // Only paid when a rope is actually used as a map key (rare).
+                self.rope(id).to_string().hash(h);
+            }
         }
     }
 
@@ -1949,6 +2036,9 @@ impl Heap {
             (Ref(x), Ref(y)) => x == y,
             // Pids are equal by node identity + local id (same process, anywhere).
             (Pid { node: n1, id: i1 }, Pid { node: n2, id: i2 }) => n1 == n2 && i1 == i2,
+            // Ropes compare by text content (ropey's PartialEq walks chunks; no
+            // full materialisation). Distinct handles to equal text are `=`.
+            (Rope(x), Rope(y)) => self.rope(x) == self.rope(y),
             _ => false,
         }
     }
@@ -1972,21 +2062,24 @@ impl Heap {
             return false;
         }
         ca.name == cb.name
-            && ca.params == cb.params
-            && ca.rest == cb.rest
             && ca.doc == cb.doc
-            && ca.optionals.len() == cb.optionals.len()
-            && ca.body.len() == cb.body.len()
-            && ca
-                .optionals
-                .iter()
-                .zip(cb.optionals.iter())
-                .all(|((sa, da), (sb, db))| sa == sb && self.equal(*da, *db))
-            && ca
-                .body
-                .iter()
-                .zip(cb.body.iter())
-                .all(|(&x, &y)| self.equal(x, y))
+            && ca.arms.len() == cb.arms.len()
+            && ca.arms.iter().zip(cb.arms.iter()).all(|(aa, ab)| {
+                aa.params == ab.params
+                    && aa.rest == ab.rest
+                    && aa.optionals.len() == ab.optionals.len()
+                    && aa.body.len() == ab.body.len()
+                    && aa
+                        .optionals
+                        .iter()
+                        .zip(ab.optionals.iter())
+                        .all(|((sa, da), (sb, db))| sa == sb && self.equal(*da, *db))
+                    && aa
+                        .body
+                        .iter()
+                        .zip(ab.body.iter())
+                        .all(|(&x, &y)| self.equal(x, y))
+            })
     }
 
     /// Equality between two CHAMP maps — canonical-form recursion. Two
@@ -2385,12 +2478,14 @@ impl Heap {
             + self.local.vectors.len()
             + self.local.maps.len()
             + self.local.strings.len()
+            + self.local.ropes.len()
             + self.local.closures.len()
             + self.local.envs.len();
         let free = self.local_free.pairs.len()
             + self.local_free.vectors.len()
             + self.local_free.maps.len()
             + self.local_free.strings.len()
+            + self.local_free.ropes.len()
             + self.local_free.closures.len()
             + self.local_free.envs.len();
         // `saturating_sub` rather than `total - free`: if a future bug ever
@@ -2515,14 +2610,20 @@ impl Heap {
                 // No children, but mark it so it survives sweep.
                 marks.mark_string(idx);
             }
+            TraceItem::Rope(idx) => {
+                // A rope is an opaque leaf (no Value children); just mark it.
+                marks.mark_rope(idx);
+            }
             TraceItem::Closure(idx) => {
                 if marks.mark_closure(idx) {
                     let cl = &self.local.closures[idx];
-                    for &f in &cl.body {
-                        push_value(work, f);
-                    }
-                    for &(_, d) in &cl.optionals {
-                        push_value(work, d);
+                    for arm in &cl.arms {
+                        for &f in &arm.body {
+                            push_value(work, f);
+                        }
+                        for &(_, d) in &arm.optionals {
+                            push_value(work, d);
+                        }
                     }
                     if let Some(env) = cl.env {
                         push_env(work, env);
@@ -2563,6 +2664,8 @@ impl Heap {
             self.poison.maps.resize(self.local.maps.len(), false);
             self.poison.strings.clear();
             self.poison.strings.resize(self.local.strings.len(), false);
+            self.poison.ropes.clear();
+            self.poison.ropes.resize(self.local.ropes.len(), false);
             self.poison.closures.clear();
             self.poison
                 .closures
@@ -2620,6 +2723,18 @@ impl Heap {
                 }
             }
         }
+        for i in 0..self.local.ropes.len() {
+            if !marks.is_rope_marked(i) {
+                self.local_free.ropes.push(i as u32);
+                // Replace with an empty rope so the old one's `Arc` nodes drop
+                // (freeing them if this was the last reference).
+                self.local.ropes[i] = ropey::Rope::new();
+                #[cfg(debug_assertions)]
+                {
+                    self.poison.ropes[i] = true;
+                }
+            }
+        }
         for i in 0..self.local.closures.len() {
             if !marks.is_closure_marked(i) {
                 self.local_free.closures.push(i as u32);
@@ -2658,6 +2773,7 @@ enum TraceItem {
     Vector(usize),
     Map(usize),
     Str(usize),
+    Rope(usize),
     Closure(usize),
     Env(usize),
 }
@@ -2670,6 +2786,7 @@ fn push_value(work: &mut Vec<TraceItem>, v: Value) {
         Value::Vector(id) if id.region() == LOCAL => work.push(TraceItem::Vector(id.index())),
         Value::Map(id) if id.region() == LOCAL => work.push(TraceItem::Map(id.index())),
         Value::Str(id) if id.region() == LOCAL => work.push(TraceItem::Str(id.index())),
+        Value::Rope(id) if id.region() == LOCAL => work.push(TraceItem::Rope(id.index())),
         Value::Fn(id) | Value::Macro(id) if id.region() == LOCAL => {
             work.push(TraceItem::Closure(id.index()))
         }
@@ -2693,6 +2810,7 @@ struct Marks {
     vectors: Vec<bool>,
     maps: Vec<bool>,
     strings: Vec<bool>,
+    ropes: Vec<bool>,
     closures: Vec<bool>,
     envs: Vec<bool>,
 }
@@ -2704,6 +2822,7 @@ impl Marks {
             vectors: vec![false; local.vectors.len()],
             maps: vec![false; local.maps.len()],
             strings: vec![false; local.strings.len()],
+            ropes: vec![false; local.ropes.len()],
             closures: vec![false; local.closures.len()],
             envs: vec![false; local.envs.len()],
         }
@@ -2735,6 +2854,7 @@ mark_methods! {
     vectors => mark_vector, is_vector_marked,
     maps => mark_map, is_map_marked,
     strings => mark_string, is_string_marked,
+    ropes => mark_rope, is_rope_marked,
     closures => mark_closure, is_closure_marked,
     envs => mark_env, is_env_marked,
 }
@@ -2765,6 +2885,7 @@ struct FlushForward {
     vectors: HashMap<u32, u32>,
     maps: HashMap<u32, u32>,
     strings: HashMap<u32, u32>,
+    ropes: HashMap<u32, u32>,
     closures: HashMap<u32, u32>,
     envs: HashMap<u32, u32>,
 }
@@ -2779,6 +2900,7 @@ fn flush_value(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, v: Value) -
         }
         Value::Map(id) if id.region() == LOCAL => Value::Map(flush_map(old, new, fwd, id)),
         Value::Str(id) if id.region() == LOCAL => Value::Str(flush_string(old, new, fwd, id)),
+        Value::Rope(id) if id.region() == LOCAL => Value::Rope(flush_rope(old, new, fwd, id)),
         Value::Fn(id) if id.region() == LOCAL => Value::Fn(flush_closure(old, new, fwd, id)),
         Value::Macro(id) if id.region() == LOCAL => {
             Value::Macro(flush_closure(old, new, fwd, id))
@@ -2841,6 +2963,21 @@ fn flush_string(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: StrId)
     new.strings.push(entry);
     fwd.strings.insert(key, new_idx as u32);
     StrId::local(new_idx)
+}
+
+fn flush_rope(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: RopeId) -> RopeId {
+    let key = id.index() as u32;
+    if let Some(&new_idx) = fwd.ropes.get(&key) {
+        return RopeId::local(new_idx as usize);
+    }
+    // `ropey::Rope::clone` is a cheap `Arc`-node bump (no byte copy); the old
+    // slab drops right after `flush`, leaving the surviving rope's internal
+    // refcounts net-unchanged — same structural sharing as `flush_string`.
+    let rope = old.ropes[id.index()].clone();
+    let new_idx = new.ropes.len();
+    new.ropes.push(rope);
+    fwd.ropes.insert(key, new_idx as u32);
+    RopeId::local(new_idx)
 }
 
 fn flush_map(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: MapId) -> MapId {
@@ -2906,19 +3043,28 @@ fn flush_closure(
     let new_idx = new.closures.len();
     new.closures.push(Closure::default());
     fwd.closures.insert(key, new_idx as u32);
-    let body = cl.body.iter().map(|&f| flush_value(old, new, fwd, f)).collect();
-    let optionals = cl
-        .optionals
+    let arms = cl
+        .arms
         .iter()
-        .map(|&(s, d)| (s, flush_value(old, new, fwd, d)))
+        .map(|arm| ClosureArm {
+            params: arm.params.clone(),
+            optionals: arm
+                .optionals
+                .iter()
+                .map(|&(s, d)| (s, flush_value(old, new, fwd, d)))
+                .collect(),
+            rest: arm.rest,
+            body: arm
+                .body
+                .iter()
+                .map(|&f| flush_value(old, new, fwd, f))
+                .collect(),
+        })
         .collect();
     let env = cl.env.map(|e| flush_env(old, new, fwd, e));
     new.closures[new_idx] = Closure {
         name: cl.name,
-        params: cl.params,
-        optionals,
-        rest: cl.rest,
-        body,
+        arms,
         doc: cl.doc,
         env,
     };

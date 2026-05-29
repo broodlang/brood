@@ -346,19 +346,23 @@ fn encode_msg(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
 ///     like any other data.
 fn encode_closure(w: &mut Vec<u8>, c: &crate::process::ClosureMsg) -> io::Result<()> {
     put_opt_sym(w, c.name);
-    put_u32(w, c.params.len() as u32);
-    for &s in &c.params {
-        put_sym(w, s);
-    }
-    put_u32(w, c.optionals.len() as u32);
-    for (s, m) in &c.optionals {
-        put_sym(w, *s);
-        encode_msg(w, m)?;
-    }
-    put_opt_sym(w, c.rest);
-    put_u32(w, c.body.len() as u32);
-    for m in &c.body {
-        encode_msg(w, m)?;
+    // One block per arity arm: params, optionals (sym + default), rest, body.
+    put_u32(w, c.arms.len() as u32);
+    for arm in &c.arms {
+        put_u32(w, arm.params.len() as u32);
+        for &s in &arm.params {
+            put_sym(w, s);
+        }
+        put_u32(w, arm.optionals.len() as u32);
+        for (s, m) in &arm.optionals {
+            put_sym(w, *s);
+            encode_msg(w, m)?;
+        }
+        put_opt_sym(w, arm.rest);
+        put_u32(w, arm.body.len() as u32);
+        for m in &arm.body {
+            encode_msg(w, m)?;
+        }
     }
     put_opt_str(w, c.doc.as_deref());
     put_u32(w, c.captured.len() as u32);
@@ -446,23 +450,33 @@ fn decode_closure_at(
     depth: u32,
 ) -> io::Result<crate::process::ClosureMsg> {
     let name = get_opt_sym(r)?;
-    let n = get_u32(r)? as usize;
-    let mut params = Vec::with_capacity(prealloc(r, n));
-    for _ in 0..n {
-        params.push(get_sym(r)?);
-    }
-    let n = get_u32(r)? as usize;
-    let mut optionals = Vec::with_capacity(prealloc(r, n));
-    for _ in 0..n {
-        let s = get_sym(r)?;
-        let m = decode_msg_at(r, depth)?;
-        optionals.push((s, m));
-    }
-    let rest = get_opt_sym(r)?;
-    let n = get_u32(r)? as usize;
-    let mut body = Vec::with_capacity(prealloc(r, n));
-    for _ in 0..n {
-        body.push(decode_msg_at(r, depth)?);
+    let n_arms = get_u32(r)? as usize;
+    let mut arms = Vec::with_capacity(prealloc(r, n_arms));
+    for _ in 0..n_arms {
+        let n = get_u32(r)? as usize;
+        let mut params = Vec::with_capacity(prealloc(r, n));
+        for _ in 0..n {
+            params.push(get_sym(r)?);
+        }
+        let n = get_u32(r)? as usize;
+        let mut optionals = Vec::with_capacity(prealloc(r, n));
+        for _ in 0..n {
+            let s = get_sym(r)?;
+            let m = decode_msg_at(r, depth)?;
+            optionals.push((s, m));
+        }
+        let rest = get_opt_sym(r)?;
+        let n = get_u32(r)? as usize;
+        let mut body = Vec::with_capacity(prealloc(r, n));
+        for _ in 0..n {
+            body.push(decode_msg_at(r, depth)?);
+        }
+        arms.push(crate::process::ClosureArmMsg {
+            params,
+            optionals,
+            rest,
+            body,
+        });
     }
     let doc = get_opt_str(r)?;
     let n = get_u32(r)? as usize;
@@ -474,10 +488,7 @@ fn decode_closure_at(
     }
     Ok(crate::process::ClosureMsg {
         name,
-        params,
-        optionals,
-        rest,
-        body,
+        arms,
         doc,
         captured,
     })
@@ -761,24 +772,36 @@ mod tests {
         // real `(fn (a &optional (b 10) &) … )` would serialise to. Captures
         // are stand-ins for free locals copied from the sender's frame; on
         // the receiver they chain onto its global scope.
-        use crate::process::ClosureMsg;
+        use crate::process::{ClosureArmMsg, ClosureMsg};
+        // TWO arms, so the round-trip exercises multi-arity dispatch over the
+        // wire: a fixed `(a)` arm and a variadic `(a &optional (c 10) & xs)` arm.
         let c = ClosureMsg {
             name: Some(value::intern("worker")),
-            params: vec![value::intern("a"), value::intern("b")],
-            optionals: vec![(value::intern("c"), Message::Int(10))],
-            rest: Some(value::intern("xs")),
-            // (a body of `(+ a b c)` — just the *message* form of it, with a
-            // source position so the round-trip exercises the optional `pos`
-            // trailer on `Message::List` too)
-            body: vec![Message::List(
-                vec![
-                    Message::Sym(value::intern("+")),
-                    Message::Sym(value::intern("a")),
-                    Message::Sym(value::intern("b")),
-                    Message::Sym(value::intern("c")),
-                ],
-                Some(crate::error::Pos { line: 7, col: 3 }),
-            )],
+            arms: vec![
+                ClosureArmMsg {
+                    params: vec![value::intern("a")],
+                    optionals: vec![],
+                    rest: None,
+                    body: vec![Message::Sym(value::intern("a"))],
+                },
+                ClosureArmMsg {
+                    params: vec![value::intern("a"), value::intern("b")],
+                    optionals: vec![(value::intern("c"), Message::Int(10))],
+                    rest: Some(value::intern("xs")),
+                    // (a body of `(+ a b c)` — just the *message* form of it, with
+                    // a source position so the round-trip exercises the optional
+                    // `pos` trailer on `Message::List` too)
+                    body: vec![Message::List(
+                        vec![
+                            Message::Sym(value::intern("+")),
+                            Message::Sym(value::intern("a")),
+                            Message::Sym(value::intern("b")),
+                            Message::Sym(value::intern("c")),
+                        ],
+                        Some(crate::error::Pos { line: 7, col: 3 }),
+                    )],
+                },
+            ],
             doc: Some("add three".to_string()),
             captured: vec![(value::intern("seed"), Message::Int(42))],
         };
@@ -792,15 +815,22 @@ mod tests {
                 ..
             } => {
                 assert_eq!(value::symbol_name(c.name.unwrap()), "worker");
-                assert_eq!(c.params.len(), 2);
-                assert_eq!(value::symbol_name(c.params[0]), "a");
-                assert_eq!(c.optionals.len(), 1);
-                assert!(matches!(&c.optionals[0].1, Message::Int(10)));
-                assert_eq!(value::symbol_name(c.rest.unwrap()), "xs");
-                assert_eq!(c.body.len(), 1);
+                assert_eq!(c.arms.len(), 2);
+                // arm 0: fixed (a)
+                assert_eq!(c.arms[0].params.len(), 1);
+                assert_eq!(value::symbol_name(c.arms[0].params[0]), "a");
+                assert!(c.arms[0].rest.is_none());
+                // arm 1: (a b &optional (c 10) & xs)
+                let arm = &c.arms[1];
+                assert_eq!(arm.params.len(), 2);
+                assert_eq!(value::symbol_name(arm.params[0]), "a");
+                assert_eq!(arm.optionals.len(), 1);
+                assert!(matches!(&arm.optionals[0].1, Message::Int(10)));
+                assert_eq!(value::symbol_name(arm.rest.unwrap()), "xs");
+                assert_eq!(arm.body.len(), 1);
                 // The body form's source position survived the round-trip,
                 // so a remote diagnostic can point at the sender's line.
-                match &c.body[0] {
+                match &arm.body[0] {
                     Message::List(items, pos) => {
                         assert_eq!(items.len(), 4);
                         assert_eq!(*pos, Some(crate::error::Pos { line: 7, col: 3 }));
@@ -823,13 +853,15 @@ mod tests {
         // The minimal case: no name, no rest, no doc, no optionals, no captures —
         // a global-capturing `(fn (x) x)`. Each Option's 0/1 tag has to survive
         // cleanly, otherwise decoding would mis-align.
-        use crate::process::ClosureMsg;
+        use crate::process::{ClosureArmMsg, ClosureMsg};
         let c = ClosureMsg {
             name: None,
-            params: vec![value::intern("x")],
-            optionals: vec![],
-            rest: None,
-            body: vec![Message::Sym(value::intern("x"))],
+            arms: vec![ClosureArmMsg {
+                params: vec![value::intern("x")],
+                optionals: vec![],
+                rest: None,
+                body: vec![Message::Sym(value::intern("x"))],
+            }],
             doc: None,
             captured: vec![],
         };
@@ -843,12 +875,13 @@ mod tests {
                 ..
             } => {
                 assert!(c.name.is_none());
-                assert!(c.rest.is_none());
                 assert!(c.doc.is_none());
-                assert!(c.optionals.is_empty());
                 assert!(c.captured.is_empty());
-                assert_eq!(c.params.len(), 1);
-                assert_eq!(c.body.len(), 1);
+                assert_eq!(c.arms.len(), 1);
+                assert!(c.arms[0].rest.is_none());
+                assert!(c.arms[0].optionals.is_empty());
+                assert_eq!(c.arms[0].params.len(), 1);
+                assert_eq!(c.arms[0].body.len(), 1);
             }
             _ => panic!("wrong frame"),
         }

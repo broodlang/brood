@@ -326,6 +326,30 @@ docs/testing.md for the full guide.")
     nil
     units))
 
+;; How many units run concurrently in the parallel phase. This BOUNDS MEMORY: the
+;; GC is still a no-op (M1), so every *started* worker holds its entire allocation
+;; until it exits — and reduction-preemption interleaves all started workers, so
+;; spawning ALL units at once kept hundreds of heaps live simultaneously and made
+;; the suite peak ~18 GiB (enough to OOM-freeze the host). `run-parallel` instead
+;; spawns at most this many, collects them — each then exits and its LOCAL heap is
+;; reclaimed wholesale — and only then spawns the next group, so the live set is
+;; bounded by one group. The cap (`-j`) on OS threads does NOT bound this (it
+;; limits threads, not started-and-suspended coroutines). Lower = less memory,
+;; less parallelism; raise once the GC reclaims so a unit's transients don't pile
+;; up. Within a group, a unit that itself spawns many workers still runs them
+;; freely — this only bounds how many *units* are in flight at once.
+(def *parallel-batch* 4)
+
+;; Run the parallel/serial units in bounded groups so the no-GC live set stays
+;; bounded (see `*parallel-batch*`). Each group is spawned, fully collected (its
+;; workers exit and free), then the next group starts.
+(defn run-parallel (units me acc)
+  (if (empty? units)
+    acc
+    (let (workers (spawn-units (take *parallel-batch* units) me)
+          results (collect-units workers nil))
+      (run-parallel (drop *parallel-batch* units) me (append results acc)))))
+
 ;; The unit a monitored worker `pid` was spawned for, or nil if `pid` isn't one
 ;; of ours (e.g. a stale `[:down …]` from a previous run still in the mailbox).
 (defn unit-of-pid (pid workers)
@@ -376,15 +400,34 @@ docs/testing.md for the full guide.")
         ;; Anything else in the runner's mailbox isn't ours — skip it.
         else (collect-loop pending workers reported acc)))))
 
-;; Isolated phase: run each isolated unit on the runner itself, one at a time, so
-;; nothing else is executing — and each test under `%isolate`, so its global defs
-;; are rolled back and can't leak to another test.
+;; Run a whole unit with each test under `%isolate` (global-def rollback). This
+;; is what an isolated unit's *own* worker process evaluates.
+(defn run-unit-fresh (unit)
+  (let (group (second unit)) (map (fn (t) (run-test-fresh group t)) (third unit)))) ; -> results
+
+;; Isolated phase: run each isolated unit in its OWN spawned process, one at a
+;; time (each awaited before the next is spawned). Two reasons it's a separate
+;; process rather than running on the runner:
+;;   1. **Memory.** The GC is still a no-op (M1), so a tree-walk accumulates
+;;      everything it allocates until the heap is dropped. Running every isolated
+;;      test on the long-lived runner accumulated the WHOLE suite's footprint on
+;;      one heap (measured ~18 GiB → host OOM). A spawned process's LOCAL heap is
+;;      reclaimed wholesale when it exits, so the isolated phase now costs only one
+;;      unit's peak at a time.
+;;   2. **Isolation.** Each unit gets its own pid + mailbox, so a test that
+;;      over-sends to `(self)` can't leak stragglers into an unrelated test (which
+;;      it could when all isolated tests shared the runner's mailbox).
+;; Still serial (await each), so `%isolate`'s snapshot/restore of the *shared*
+;; globals table can't race a concurrent unit. A crashed worker (KI-2) is turned
+;; into failing results via `monitor`, exactly like the parallel phase.
 (defn run-isolated (units acc)
   (if (empty? units)
     acc
-    (let (unit (first units)
-          group (second unit)
-          results (map (fn (t) (run-test-fresh group t)) (third unit)))
+    (let (me (self)
+          unit (first units)
+          pid (spawn (send me (list :unit-result (self) (run-unit-fresh unit))))
+          _ (monitor pid)
+          results (collect-units (list (list pid unit)) nil))
       (run-isolated (rest units) (append results acc)))))
 
 ;; --- reporting ---------------------------------------------------------------
@@ -453,8 +496,7 @@ docs/testing.md for the full guide.")
     ;; parallel/serial defs below) and its own defs roll back. Then launch the
     ;; parallel/serial workers and collect them.
     (let (iso-results (run-isolated iso nil)
-          workers (spawn-units par me)
-          par-results (collect-units workers nil)
+          par-results (run-parallel par me nil)
           results (append iso-results par-results)
           elapsed (- (now) start)
           total (count results)

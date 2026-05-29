@@ -197,7 +197,10 @@ and don't conflict with the concurrency work. Concurrency lands in phases:
   match, leaves the rest queued. Green processes are woken at the deadline by a
   timer thread; timeouts are catchable (`throw` in the `after` body → `try`/`catch`).
   A Brood macro over a `%receive` primitive. ADR-027, `docs/pattern-matching.md`.
-- ⬜ later: work-stealing; supervision / links / monitors / registered names
+- ⬜ later: work-stealing; supervision / links / monitors / registered names —
+  both were *removed* to fix the KI-1 scheduler race; the root-cause analysis and
+  the invariants any reintroduction must honour are in
+  [`docs/concurrency-v2.md`](docs/concurrency-v2.md)
 - ⬜ **Distribution across nodes** (future, kept in mind) — link named runtimes
   over TCP; pids carry node identity; `send`/`spawn` stay location-transparent.
   Falls out of share-nothing + copy-on-send (the network is a longer copy). See

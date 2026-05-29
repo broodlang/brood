@@ -71,6 +71,23 @@ struct Cli {
 
 fn main() {
     let cli = Cli::parse();
+    // Run the actual work on an explicitly-sized large stack. The tree-walking
+    // evaluator recurses one (heavy, in debug) Rust frame per non-tail call, and
+    // the OS default main-thread stack (~8 MiB) is too small for the stack-budget
+    // guard (ADR-043) to be uniform with the coroutine stacks — deep non-tail
+    // recursion on the root thread would overflow before the guard fires. Sizing
+    // the root thread to `CORO_STACK_BYTES` makes the guard behave identically on
+    // the root thread and inside spawned processes. The child inherits the
+    // process exit via the `std::process::exit` calls inside `run`.
+    let handle = std::thread::Builder::new()
+        .name("brood-main".into())
+        .stack_size(brood::process::CORO_STACK_BYTES)
+        .spawn(move || run(cli))
+        .expect("spawn brood-main thread");
+    handle.join().expect("brood-main thread panicked");
+}
+
+fn run(cli: Cli) {
     if let Some(n) = cli.max_parallel {
         brood::process::set_max_parallel(n);
     }

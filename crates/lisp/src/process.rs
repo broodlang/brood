@@ -39,12 +39,13 @@ mod monitor;
 mod scheduler;
 mod timer;
 
-pub use mailbox::{list_local_pids, receive_match, send};
-pub use message::{from_message, to_message, ClosureMsg, Message};
+pub use mailbox::{list_local_pids, mailbox_len, receive_match, send};
+pub use message::{from_message, to_message, ClosureArmMsg, ClosureMsg, Message};
 pub use monitor::{demonitor, monitor, next_ref};
 pub use scheduler::{
-    gc_block_depth, in_green_process, max_eval_depth, peak_threads, pid_value, self_pid,
-    set_max_parallel, spawn, spawn_count, tick, worker_threads, GcBlockGuard,
+    gc_block_depth, in_green_process, peak_threads, pid_value, self_pid, set_max_parallel, spawn,
+    spawn_count, stack_budget, stack_overflow_check, tick, worker_threads, GcBlockGuard,
+    CORO_STACK_BYTES,
 };
 
 pub(crate) use mailbox::{deliver, is_alive, read_name_address};

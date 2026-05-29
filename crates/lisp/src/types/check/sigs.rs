@@ -108,12 +108,18 @@ fn infer_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
         return None;
     };
     let closure = heap.closure(cid);
-    if closure.body.len() != 1 || !closure.optionals.is_empty() || closure.rest.is_some() {
+    // Only infer for a plain single-arity, single-body closure (no optionals /
+    // rest). A multi-arity closure has no single signature to infer — bail.
+    if closure.arms.len() != 1 {
         return None;
     }
-    let body = closure.body[0];
+    let arm = &closure.arms[0];
+    if arm.body.len() != 1 || !arm.optionals.is_empty() || arm.rest.is_some() {
+        return None;
+    }
+    let body = arm.body[0];
     // Copy out before we ask sig_of (which borrows the heap again).
-    let params: Vec<Symbol> = closure.params.clone();
+    let params: Vec<Symbol> = arm.params.clone();
     let self_name = closure.name;
 
     let items = list_items(heap, body)?;
@@ -168,13 +174,13 @@ pub(super) fn arity_of(heap: &Heap, sym: Symbol) -> Option<Arity> {
     match heap.env_get(heap.global(), sym)? {
         Value::Native(id) => Some(heap.native(id).arity),
         Value::Fn(cid) => {
+            // Across arms: smallest min, largest max (unbounded if any has rest).
             let c = heap.closure(cid);
-            let min = c.params.len();
-            let max = if c.rest.is_some() {
-                None
-            } else {
-                Some(min + c.optionals.len())
-            };
+            let min = c.arms.iter().map(|a| a.min_arity()).min().unwrap_or(0);
+            let max = c
+                .arms
+                .iter()
+                .try_fold(0usize, |acc, a| a.max_arity().map(|m| acc.max(m)));
             Some(Arity { min, max })
         }
         _ => None,

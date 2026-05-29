@@ -651,7 +651,7 @@ Re-verified against HEAD post the kernel-supervisor strip (`e3d3a0d`,
 
 | # | Item | 2026-05-28 status | Today (2026-05-29) | Notes |
 |---|------|-------------------|---------------------|-------|
-| 1 | Multi-thread scheduler race | 🐛 still present | 🟢 **largely fixed** | The kernel supervisor was the bulk of the race surface; stripping it (`e3d3a0d`) took the `recurse.blsp` repro from ~95% failure to ~50%, and Phase-1 bump-only allocation (`f90f0de`) closed the rest in debug-assertions release (**10/10 clean**). Plain release can still segfault — likely bundled WIP in the +698-line heap.rs rewrite, not Phase 1 itself. See [`known-issues.md`](known-issues.md) KI-1. |
+| 1 | Multi-thread scheduler race | 🐛 still present | ✅ **fixed** | Three fixes in series: stripping the kernel supervisor (`e3d3a0d`) removed the bulk of the race surface; Phase-1 bump-only allocation (`f90f0de`) closed the stale-handle window; **per-worker pinned queues** (`2abf05e`) closed the remaining plain-release segfault (no cross-thread coroutine migration). Now **clean in both debug-assertions release and plain release**, single- and multi-threaded. Re-confirmed 2026-05-29 via a 40-worker prelude-hammering fan-out repro (12/12 clean, `-j 0`, debug-assertions release). See [`known-issues.md`](known-issues.md) KI-1. |
 | 2 | Type-checker noise around `(require 'hatch)` | 🟢 partial fix | 🟢 **fully fixed** | `check_file` pre-evaluates top-level `(require …)` forms before walking, so macros from required modules resolve. Verified zero warnings on a correctly-written hatch file via both `nest check` *and* `brood file.blsp` direct. `crates/lisp/src/types/check.rs:148+`. |
 | 3 | `nest format` collapses readable code | 🐛 still present | 🟢 **substantially fixed** | Commit `5b19787` ("formatter respects author newlines"). Multi-line `let` / `defmacro` body / `cond` / quasiquoted templates all stay multi-line. **Still normalizes** multi-space alignment within a line (`w       64` → `w 64`) — a standard Lisp-formatter trade-off, not the original 8-lines-to-1 blocker. |
 | 4 | Quick-ref doc gaps | 🟢 partial fix | 🟢 **substantially closed** | `brood-for-claude.md` now covers `format`, `to-fixed`, `pad-left`/`pad-right`, `string-repeat`, `repeat`, `repeatedly`, `round-to`, plus the hatch concurrency surface. Remaining lookups go through the MCP `lookup` tool. |
@@ -660,17 +660,19 @@ Re-verified against HEAD post the kernel-supervisor strip (`e3d3a0d`,
 
 ### What's open
 
-- KI-1's **plain-release segfault** (KI-1 caveat) — `-j 1` reliable;
-  debug-assertions release reliable. Bisect through the bundled heap.rs
-  WIP pending.
-- Phase 2 of the allocator switch (arena flip on `receive`) — Phase 1
-  grows unboundedly for long-running tail-recursive workers that never
-  `receive`; the `gc.rs` `long_tail_loop_stays_bounded` test is
-  `#[ignore]`'d with a Phase-2 note.
+- ~~KI-1's **plain-release segfault**~~ — **closed** by per-worker pinned
+  queues (`2abf05e`): a process is pinned to one worker at spawn and never
+  migrates across threads, so the preempt-mid-call segfault can't fire.
+  Both debug-assertions release and plain release are clean.
+- ~~Phase 2 of the allocator switch (arena flip on `receive`)~~ — **shipped**
+  as the explicit `(hibernate fn & args)` primitive (devlog 2026-05-29
+  evening). The `gc.rs` long-loop bound is covered by the hibernate tests.
 - ADR-039 (kernel supervisor) is **reverted, not paused**. The userland
   pattern in [`supervision.md`](supervision.md) is the supported path;
   the kernel feature *can* come back later but only over a substrate
-  that doesn't reintroduce the race.
+  that doesn't reintroduce the race. **Note:** work-stealing and kernel
+  supervision are exactly the two pieces whose removal fixed this race —
+  reintroducing either must clear the bar of *not* reopening it.
 
 ### Items from §6 still standing
 

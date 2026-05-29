@@ -112,6 +112,14 @@ thread_local! {
     /// multiplexing several processes don't leak each other's depths. The root
     /// thread doesn't multiplex, so its depth flows naturally.
     static GC_BLOCK: Cell<u32> = const { Cell::new(0) };
+
+    /// Stack-pointer base for the [`stack_overflow_check`] byte guard: the sp of
+    /// the *outermost* eval on this coroutine. `0` = unset (established by the
+    /// next eval). Reset to 0 at coroutine entry and saved/restored across every
+    /// suspend exactly like `GC_BLOCK`, because a stackful coroutine resumes on
+    /// its own stack — the base is constant for the coroutine's life, but a
+    /// worker running other coroutines in between must not clobber it.
+    static STACK_BASE: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Current GC-block depth — `eval::eval`'s safepoint compares this against 1.
@@ -200,47 +208,121 @@ const REDUCTION_BUDGET: u32 = 2000;
 /// 128 KiB out of the box; the tree-walking eval recurses one Rust frame per
 /// combination, so a debug-build evaluator running the in-language test suite
 /// (which spawns processes that load many test files) can run close to that.
-/// **2 MiB**: debug eval frames are heavy (no inlining), and the in-language
-/// suite has tests that legitimately recurse a few hundred frames (pattern
-/// match, fold-over-cons). 1 MiB used to be enough but post-Phase-1 (bump
-/// allocator + debug poison checks) overflowed it — `cargo test -p brood
-/// --test suite` reproducibly. The pages are mmap'd lazily, so unused tail
-/// pages stay uncommitted — the higher ceiling costs ~0 until the depth needs it.
+/// **16 MiB**: debug eval frames are heavy (no inlining + poison checks) — one
+/// nested `eval` frame is several KiB, and non-tail recursion stacks ~2 of them
+/// per level, so a few hundred levels of legitimate non-tail recursion already
+/// costs low-double-digit MiB of stack. We want the [`stack_budget`] guard to
+/// allow building structures at least as deep as `MAX_MESSAGE_DEPTH` (256) with
+/// headroom, and still fire a clean [`STACK_DEPTH_EXCEEDED`] error well before
+/// the real guard page (with room for the error-construction frames). The pages
+/// are mmap'd lazily, so unused tail pages stay uncommitted — the higher ceiling
+/// costs ~0 until the depth actually needs it (a shallow process resides a few
+/// KiB; only deep recursion commits more, and a runaway is killed by the guard
+/// before it commits much past the budget). The `brood`/`nest` binaries re-home
+/// their root thread onto a stack of this same size (see `cli`/`nest` `main`), so
+/// the budget below is uniform and safe on both the root thread and coroutines.
 /// Tunable; bump if a feature lands with heavier frames.
-const CORO_STACK_BYTES: usize = 2 * 1024 * 1024;
+pub const CORO_STACK_BYTES: usize = 16 * 1024 * 1024;
 
-/// Default eval-depth ceiling: the maximum `GC_BLOCK` depth (nested `eval` /
-/// `macroexpand` frames — i.e. *non-tail* recursion) allowed before `eval`
-/// raises a catchable [`STACK_DEPTH_EXCEEDED`](crate::error::error_codes) error
-/// instead of running on to overflow the [`CORO_STACK_BYTES`] coroutine stack.
+/// Stack-budget guard against runaway *non-tail* recursion (ADR-043). The
+/// evaluator is a native tree-walker: every nested `eval`/`macroexpand` frame
+/// (i.e. every level of non-tail recursion) consumes real Rust stack, and an
+/// unbounded one — `(defn boom (n) (+ 1 (boom (+ n 1))))` — would overflow the
+/// [`CORO_STACK_BYTES`] coroutine stack as a **`SIGSEGV` the host can't
+/// `catch_unwind`**, taking down the whole REPL / `nest mcp` server. The guard
+/// turns that into a clean, catchable [`STACK_DEPTH_EXCEEDED`] error.
 ///
-/// Tuned for the *tightest* case: a debug build on the 2 MiB coroutine stack,
-/// where eval frames are heaviest (no inlining + poison checks). Measured
-/// overflow there sits well above this; the ceiling leaves comfortable
-/// headroom while staying far above any legitimate non-tail depth (the
-/// in-language suite's deepest pattern-match / fold-over-cons recursions run a
-/// few hundred frames). The root thread and release builds have much larger
-/// stacks, so the same ceiling is even safer there. Loops in Brood are *tail*
-/// recursion (which doesn't grow `GC_BLOCK`), so this only ever bites runaway
-/// non-tail recursion — exactly the footgun it exists to catch.
+/// We measure **stack bytes used**, not frame *count*. Frame count (the old
+/// `GC_BLOCK`-ceiling approach) can't work: a heavy frame (`(+ 1 (boom …))`)
+/// and a light one (`{:next (f …)}`) differ several-fold in bytes, so any single
+/// frame-count ceiling is simultaneously too low for legitimate deep recursion
+/// and too high to stop a heavy runaway before the real overflow. Bytes are the
+/// thing the stack actually runs out of, so a byte budget is both safe and
+/// permissive. See [`STACK_BASE`] for how the per-coroutine base is tracked.
 ///
-/// Override with `BROOD_MAX_DEPTH=<n>` (e.g. to allow a genuinely deep non-tail
-/// algorithm, or to probe lower). `0` is clamped back to the default.
-const MAX_EVAL_DEPTH_DEFAULT: u32 = 3500;
+/// Default: [`CORO_STACK_BYTES`] minus a margin generous enough to absorb the
+/// frame we're in plus the error-construction path (`format!` + `LispError`)
+/// without itself overflowing. Override with `BROOD_STACK_BUDGET=<size>`
+/// (e.g. `6M`); `0` or malformed falls back to the default.
+const STACK_BUDGET_MARGIN: usize = 4 * 1024 * 1024;
 
-/// The active eval-depth ceiling, read once from `BROOD_MAX_DEPTH` (or the
-/// default). Cached so the per-`eval` check is a single load + compare with no
-/// env lookup on the hot path.
-pub fn max_eval_depth() -> u32 {
+/// The active stack budget in bytes, read once from `BROOD_STACK_BUDGET` (or
+/// derived from [`CORO_STACK_BYTES`]). Cached so the per-`eval` check is a load
+/// + compare on the hot path.
+pub fn stack_budget() -> usize {
     use std::sync::LazyLock;
-    static LIMIT: LazyLock<u32> = LazyLock::new(|| {
-        std::env::var("BROOD_MAX_DEPTH")
+    static BUDGET: LazyLock<usize> = LazyLock::new(|| {
+        std::env::var("BROOD_STACK_BUDGET")
             .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok())
+            .and_then(|s| crate::core::alloc::parse_size(&s))
             .filter(|&n| n > 0)
-            .unwrap_or(MAX_EVAL_DEPTH_DEFAULT)
+            .unwrap_or(CORO_STACK_BYTES.saturating_sub(STACK_BUDGET_MARGIN))
     });
-    *LIMIT
+    *BUDGET
+}
+
+/// `Some(used_bytes)` when the current stack usage has crossed [`stack_budget`],
+/// else `None`. `sp` is the caller's stack-pointer probe (the address of a local
+/// in the `eval` frame); the per-coroutine base ([`STACK_BASE`]) is the sp of the
+/// *outermost* eval on this coroutine. Stack grows down, so `base - sp` is the
+/// bytes consumed by the nested-eval recursion since the outermost frame.
+///
+/// Self-healing: the base is recorded the first time it's seen unset (`0`) and
+/// reset to `0` at coroutine entry, and saved/restored across every suspend (so
+/// a worker multiplexing coroutines never compares against another coroutine's
+/// base). As a final backstop, an implausibly large `used` (> a whole stack —
+/// impossible within one coroutine) is treated as a stale base from a missed
+/// switch and silently rebased rather than firing a false positive.
+#[inline]
+pub fn stack_overflow_check(sp: usize) -> Option<usize> {
+    // Called from `eval` *after* its `GcBlockGuard` increment, so `gc_block_depth`
+    // is this frame's depth (1 = the outermost eval on this coroutine/thread).
+    STACK_BASE.with(|b| {
+        if gc_block_depth() <= 1 {
+            // Outermost eval frame — (re)establish the base *here*, every time.
+            // This is what keeps the root thread honest: it never resets the base
+            // at a coroutine boundary (it isn't a coroutine), and the base set
+            // during prelude load would otherwise be stale by the time a user
+            // form runs. Re-stamping at every depth-1 entry fixes that, and is
+            // harmless in coroutines (their first eval is depth 1 anyway).
+            b.set(sp);
+            return None;
+        }
+        let base = b.get();
+        if base == 0 || sp > base {
+            // No base yet, or we're somehow shallower than it — rebase, fail safe.
+            b.set(sp);
+            return None;
+        }
+        let used = base - sp;
+        if used > CORO_STACK_BYTES {
+            // Larger than any single coroutine stack: the base must be stale (a
+            // suspend/resume path we didn't account for). Rebase rather than
+            // reject a legitimate program.
+            b.set(sp);
+            return None;
+        }
+        if used > stack_budget() {
+            Some(used)
+        } else {
+            None
+        }
+    })
+}
+
+/// Read the per-coroutine stack base for save/restore around a suspend (paired
+/// with [`stack_base_set`], mirroring [`gc_block_save`]).
+#[inline]
+pub(super) fn stack_base_save() -> usize {
+    STACK_BASE.with(|b| b.get())
+}
+
+/// Write the per-coroutine stack base — paired with [`stack_base_save`] around a
+/// suspend, and called with `0` at coroutine entry so the coroutine's first eval
+/// establishes a fresh base instead of inheriting the worker's residual value.
+#[inline]
+pub(super) fn stack_base_set(n: usize) {
+    STACK_BASE.with(|b| b.set(n));
 }
 
 /// Called once per `eval` `'tail:` iteration. Cheap: a thread-local decrement; only
@@ -275,12 +357,14 @@ fn preempt() {
         // thread-locals, and we need ours back when we resume. GC-block
         // depth is critical for safepoint correctness.
         let saved_block = gc_block_save();
+        let saved_base = stack_base_save();
         // SAFETY: same invariant as `receive` — the yielder is valid while this
         // coroutine is running, which is now (tick runs inside eval, inside the
         // coroutine body). Suspending returns control to the worker (`run_one`).
         unsafe { (*yptr).suspend(Suspend::Preempt) };
         CURRENT.with(|c| *c.borrow_mut() = Some(ctx));
         gc_block_set(saved_block);
+        stack_base_set(saved_base);
     }
     // Root thread (yielder None): budget refreshed, never suspends.
 }
@@ -316,16 +400,38 @@ static WORKERS: LazyLock<Vec<WorkerQueue>> = LazyLock::new(|| {
         .collect()
 });
 
-/// Next worker to assign a newly-spawned process to (round-robin). Read +
+/// Rotating start point for `assign_worker`'s least-loaded scan. Read +
 /// incremented under relaxed ordering — the only requirement is approximate
-/// distribution; an occasional duplicate or skipped index is fine.
+/// rotation; an occasional duplicate or skipped index is fine.
 static NEXT_WORKER: AtomicUsize = AtomicUsize::new(0);
 
-/// Pick the worker that a fresh `Process` should be pinned to. Wraps modulo
-/// `worker_count()` so the assignment fits the actual pool.
+/// Pick the worker that a fresh `Process` should be pinned to (it stays there for
+/// life — no migration, so the KI-1b cross-thread-resume hazard never arises; see
+/// docs/concurrency-v2.md). **Least-loaded with a rotating start:** scan the
+/// queues beginning at a round-robin offset and choose the shortest, breaking
+/// ties toward the rotation. When load is even (the common case — most queues
+/// empty) this degrades to plain round-robin; when one worker is backed up (a
+/// spawn burst, or uneven drain) fresh processes steer to idle workers instead.
+/// Queue lengths are sampled via `try_lock`, so a momentarily-contended queue is
+/// skipped rather than blocking the spawner. Validated clean (incl. under
+/// `BROOD_GC_STRESS`) in the Track-A experiment; replaces pure round-robin.
 fn assign_worker() -> usize {
-    let n = worker_count();
-    NEXT_WORKER.fetch_add(1, Ordering::Relaxed) % n.max(1)
+    let n = worker_count().max(1);
+    let start = NEXT_WORKER.fetch_add(1, Ordering::Relaxed) % n;
+    let mut best = start;
+    let mut best_len = WORKERS[start].0.try_lock().map(|q| q.len()).unwrap_or(usize::MAX);
+    for off in 1..n {
+        if best_len == 0 {
+            break; // can't do better than an empty queue
+        }
+        let i = (start + off) % n;
+        let len = WORKERS[i].0.try_lock().map(|q| q.len()).unwrap_or(usize::MAX);
+        if len < best_len {
+            best_len = len;
+            best = i;
+        }
+    }
+    best
 }
 
 /// Total processes spawned since program start (read by `(spawn-count)`).
@@ -528,10 +634,13 @@ pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
                 yielder: Some(yielder as *const Yielder0),
             });
         });
-        // Wipe the worker's residual GC-block depth — a previous coroutine
-        // on this worker may have left it nonzero. Our depth starts fresh
-        // at 0 (incremented by the eval guard below).
+        // Wipe the worker's residual GC-block depth and stack base — a previous
+        // coroutine on this worker may have left them nonzero. Our depth starts
+        // fresh at 0 (incremented by the eval guard below), and our stack base is
+        // re-established by this coroutine's first `eval` (it runs on our own
+        // freshly-allocated coroutine stack, not the worker's).
         gc_block_set(0);
+        stack_base_set(0);
         let mut heap = Heap::with_regions(prelude, runtime);
         heap.set_global(EnvId::GLOBAL);
         // `hibernate` raises an uncatchable `ErrorKind::Hibernate` sentinel

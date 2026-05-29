@@ -55,6 +55,32 @@ Concretely:
   Treat each one as a candidate to later replace with Brood once the language
   is capable enough.
 
+### Dogfood first; optimize only by building the language up, not around it
+
+**Keep code in Brood even when it's slower, so we surface the language's real
+gaps.** The more of the system that runs on our own functions, the more we learn
+which primitives and capabilities are actually missing — that feedback is the
+whole point of a self-hosted language. Reaching for Rust to make a slow Brood
+function fast *hides* the gap instead of fixing it.
+
+So before optimizing, the change must satisfy **both**:
+
+1. **It improves overall language performance** — a capability that pays off
+   broadly, not a one-off speed-up for a single call site.
+2. **It builds up the right primitive/capability** — it makes the *language*
+   more capable (so Brood code gets faster), rather than moving behaviour out of
+   Brood into a Rust escape hatch.
+
+Worked example: variadic `+`/`-`/`=` (Brood `defn`s over `fold`) cost ~40× a
+direct call. The wrong fix is making them Rust builtins (fast, but reverses
+"write it in Brood" and teaches us nothing). The right fix is giving the
+*evaluator* efficient **multi-arity dispatch** — a general capability that keeps
+`+` in Brood, makes *every* multi-arity function faster, and is exactly the kind
+of primitive dogfooding revealed we were missing.
+
+This bar may relax once the language is more stable and we deliberately tune hot
+paths — but until then, prefer learning over shortcuts.
+
 ## Layout
 
 ```

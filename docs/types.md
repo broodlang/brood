@@ -297,7 +297,10 @@ marked **(enforced)** are compile errors if violated; the rest are review rules.
    The `tag_universe_is_consistent` test checks bits are dense and in order, so a
    tag *missing from* or *misordered in* `ALL_TAGS` fails CI (the gap a plain
    match can't catch, since Rust can't enumerate variants). Don't introduce a
-   value kind that can't be a tag.
+   value kind that can't be a tag. **As of `Tag::Rope` (ADR-045) there are 16
+   tags — the `Ty(u16)` lattice is now full.** `UNIVERSE` computes in `u32` and
+   narrows to dodge the `1u16 << 16` const-overflow; a *17th* tag must widen `Ty`
+   to `u32` (the `TAG_COUNT <= 16` assert in `types/mod.rs` is the tripwire).
 2. **A type is a set of values.** Don't add a typing concept that isn't a set
    (no nominal-only identity, no escape hatch that breaks set semantics).
    Structured types arrive as proper set-theoretic extensions, never bolt-ons.

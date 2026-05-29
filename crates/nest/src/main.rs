@@ -132,10 +132,30 @@ enum Cmd {
     /// read docs against this project's live image (ADR-036, docs/mcp.md).
     /// Errors if cwd is not inside a Brood project.
     Mcp,
+
+    /// Open a live process observer — a full-screen TUI listing every process on
+    /// this runtime and its mailbox backlog (an Erlang-observer-style view). The
+    /// first app on the M3 display/input seam (ADR-046); proves the render
+    /// protocol + key loop end-to-end. Seeds a few demo processes so there is
+    /// something to watch. Press `q` / Esc / Ctrl-C to quit.
+    Observe,
 }
 
 fn main() {
     let cli = Cli::parse();
+    // Run on an explicitly-sized large stack so the stack-budget guard (ADR-043)
+    // is uniform across the root thread and spawned coroutines — see the matching
+    // comment in `crates/cli/src/main.rs`. The OS default main stack (~8 MiB) is
+    // too small for the heavy debug eval frames.
+    let handle = std::thread::Builder::new()
+        .name("nest-main".into())
+        .stack_size(brood::process::CORO_STACK_BYTES)
+        .spawn(move || run_main(cli))
+        .expect("spawn nest-main thread");
+    handle.join().expect("nest-main thread panicked");
+}
+
+fn run_main(cli: Cli) {
     if let Some(n) = cli.max_parallel {
         brood::process::set_max_parallel(n);
     }
@@ -156,6 +176,19 @@ fn main() {
         Cmd::Doc { module } => cmd_doc(&mut interp, module.as_deref()),
         Cmd::Repl => cmd_repl(&mut interp),
         Cmd::Mcp => cmd_mcp(&mut interp),
+        Cmd::Observe => cmd_observe(&mut interp),
+    }
+}
+
+/// Restores the terminal on drop — the abnormal-path backstop for `nest observe`.
+/// The Brood `term-leave` is the normal teardown; this guard fires on a panic
+/// unwind too, so a crash never leaves the terminal in raw mode / the alternate
+/// screen. (`std::process::exit` skips Drop, so `cmd_observe` scopes the guard so
+/// it drops *before* it reports an error and exits.)
+struct TermGuard;
+impl Drop for TermGuard {
+    fn drop(&mut self) {
+        brood::builtins::restore_terminal();
     }
 }
 
@@ -430,6 +463,24 @@ fn cmd_mcp(interp: &mut Interp) {
     run(interp, bootstrap);
     if let Err(e) = mcp::run(interp) {
         eprintln!("nest mcp: {e}");
+        std::process::exit(1);
+    }
+}
+
+/// `nest observe` — the process observer TUI (ADR-046, the M3 display seam). Runs
+/// the Brood observer loop in the root process (so its blocking key-poll blocks
+/// only this thread, never a scheduler worker running the observed processes).
+fn cmd_observe(interp: &mut Interp) {
+    // The guard restores the terminal on a panic unwind; the inner scope drops it
+    // (restoring) before any error is reported and we exit — `process::exit`
+    // skips Drop. On the normal `q` path the Brood `term-leave` already restored;
+    // the guard's second restore is idempotent.
+    let result = {
+        let _guard = TermGuard;
+        interp.eval_str("(require 'observe) (observe-run)")
+    };
+    if let Err(e) = result {
+        report_error(&e);
         std::process::exit(1);
     }
 }

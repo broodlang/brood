@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use crate::core::blob::SharedBlob;
 use crate::core::heap::Heap;
-use crate::core::value::{Closure, ClosureId, EnvId, Symbol, Value};
+use crate::core::value::{self, Closure, ClosureId, EnvId, Symbol, Value};
 use crate::error::{LispError, Pos};
 
 /// A `Send`, self-contained copy of a value, for crossing heaps.
@@ -79,12 +79,8 @@ pub enum Message {
 #[derive(Clone)]
 pub struct ClosureMsg {
     pub(crate) name: Option<Symbol>,
-    pub(crate) params: Vec<Symbol>,
-    /// `&optional` params with their default *forms* (data).
-    pub(crate) optionals: Vec<(Symbol, Message)>,
-    pub(crate) rest: Option<Symbol>,
-    /// The body forms (data — this is the code, homoiconically).
-    pub(crate) body: Vec<Message>,
+    /// One per arity clause (a single-arity closure has one). See `ClosureArm`.
+    pub(crate) arms: Vec<ClosureArmMsg>,
     pub(crate) doc: Option<String>,
     /// The closure's *free variables* that resolve to a **local** binding, flattened
     /// to one frame (name → value). Empty = a global-capturing closure (the common
@@ -93,6 +89,17 @@ pub struct ClosureMsg {
     /// (and possibly unsendable) siblings don't ride along, and a closure capturing a
     /// sibling closure can't form a serialisation cycle through its defining frame.
     pub(crate) captured: Vec<(Symbol, Message)>,
+}
+
+/// One arity clause of a [`ClosureMsg`] — the sendable (deep-copied) form of a
+/// `ClosureArm`. Params/rest are interned symbols; optionals' defaults and the
+/// body are code-as-data.
+#[derive(Clone)]
+pub struct ClosureArmMsg {
+    pub(crate) params: Vec<Symbol>,
+    pub(crate) optionals: Vec<(Symbol, Message)>,
+    pub(crate) rest: Option<Symbol>,
+    pub(crate) body: Vec<Message>,
 }
 
 /// Maximum nesting depth `to_message` will descend into. Past this, the
@@ -183,6 +190,15 @@ fn to_message_rec(
                 "cannot send a builtin in a message; reference it by name (code is shared)",
             ));
         }
+        Value::Rope(_) => {
+            // A rope is process-local: it lives in exactly one process's heap
+            // (the buffer-as-process model, ADR-045). Move its *content* across
+            // as a string instead — the receiver rebuilds a rope if it needs one.
+            return Err(LispError::type_err(
+                "cannot send a rope in a message; send (rope->string r) and \
+                 rebuild with (string->rope s) on the other side",
+            ));
+        }
     })
 }
 
@@ -217,11 +233,13 @@ fn closure_to_message(
     let mut captured = Vec::new();
     if let Some(env) = cl.env {
         let mut mentioned = std::collections::HashSet::new();
-        for &form in &cl.body {
-            collect_symbols(heap, form, &mut mentioned);
-        }
-        for &(_, d) in &cl.optionals {
-            collect_symbols(heap, d, &mut mentioned);
+        for arm in &cl.arms {
+            for &form in &arm.body {
+                collect_symbols(heap, form, &mut mentioned);
+            }
+            for &(_, d) in &arm.optionals {
+                collect_symbols(heap, d, &mut mentioned);
+            }
         }
         for sym in mentioned {
             if let Some(val) = local_lookup(heap, env, sym) {
@@ -230,24 +248,31 @@ fn closure_to_message(
         }
     }
 
-    let optionals = cl
-        .optionals
-        .iter()
-        .map(|&(s, d)| Ok((s, to_message_rec(heap, d, visited, depth)?)))
-        .collect::<Result<Vec<_>, LispError>>()?;
-    let body = cl
-        .body
-        .iter()
-        .map(|&f| to_message_rec(heap, f, visited, depth))
-        .collect::<Result<Vec<_>, LispError>>()?;
+    // Deep-copy each arm's `&optional` defaults and body (code-as-data).
+    let mut arms = Vec::with_capacity(cl.arms.len());
+    for arm in &cl.arms {
+        let optionals = arm
+            .optionals
+            .iter()
+            .map(|&(s, d)| Ok((s, to_message_rec(heap, d, visited, depth)?)))
+            .collect::<Result<Vec<_>, LispError>>()?;
+        let body = arm
+            .body
+            .iter()
+            .map(|&f| to_message_rec(heap, f, visited, depth))
+            .collect::<Result<Vec<_>, LispError>>()?;
+        arms.push(ClosureArmMsg {
+            params: arm.params.clone(),
+            optionals,
+            rest: arm.rest,
+            body,
+        });
+    }
 
     visited.pop();
     Ok(ClosureMsg {
         name: cl.name,
-        params: cl.params.clone(),
-        optionals,
-        rest: cl.rest,
-        body,
+        arms,
         doc: cl.doc.clone(),
         captured,
     })
@@ -367,12 +392,25 @@ pub fn from_message(heap: &mut Heap, m: &Message) -> Value {
 /// resolve here. The result is a fresh, independent copy — a later redefinition
 /// of *this* function won't reach it, but globals it *references* still do.
 fn closure_from_message(heap: &mut Heap, c: &ClosureMsg) -> Value {
-    let optionals = c
-        .optionals
+    // Rebuild every arm's optional-default forms and body as local data.
+    let arms = c
+        .arms
         .iter()
-        .map(|(s, d)| (*s, from_message(heap, d)))
+        .map(|arm| {
+            let optionals = arm
+                .optionals
+                .iter()
+                .map(|(s, d)| (*s, from_message(heap, d)))
+                .collect();
+            let body = arm.body.iter().map(|f| from_message(heap, f)).collect();
+            value::ClosureArm {
+                params: arm.params.clone(),
+                optionals,
+                rest: arm.rest,
+                body,
+            }
+        })
         .collect();
-    let body = c.body.iter().map(|f| from_message(heap, f)).collect();
     // Rebuild the captured free vars as one frame chained onto this process's
     // global scope, so the closure's free globals resolve here. No captures =>
     // a global-capturing closure (`env: None`).
@@ -388,10 +426,7 @@ fn closure_from_message(heap: &mut Heap, c: &ClosureMsg) -> Value {
     };
     let id = heap.alloc_closure(Closure {
         name: c.name,
-        params: c.params.clone(),
-        optionals,
-        rest: c.rest,
-        body,
+        arms,
         doc: c.doc.clone(),
         env,
     });

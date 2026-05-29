@@ -76,6 +76,18 @@ Common macros (expanded once at the compile pass — runtime-free): `defn`,
   ((n)               :pos))
 ```
 
+**Trap — `&optional` doesn't combine with matching.** An `&optional` slot must
+be a plain symbol (it can't be a pattern), and `&optional` does *not* work inside
+multi-clause heads (clause heads are same-arity patterns, so `&optional` there is
+read as a literal symbol and the call won't match). Required params *can* still be
+patterns next to `&optional` — only the optional/rest slot is restricted. To
+branch on an optional, bind it and `match` in the body (`nil` = omitted):
+
+```lisp
+(defn h (x &optional opt) (match opt (nil [:no x]) (v [:yes x v])))
+;; NOT: (defn h ((x) …) ((x &optional (y 9)) …))   ; &optional in a clause head → match error
+```
+
 Local bindings — `let` takes a **flat** name/value list (not Scheme's double-parens), and is sequential (each binding sees the earlier ones):
 
 ```lisp

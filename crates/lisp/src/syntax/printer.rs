@@ -115,6 +115,17 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
             out.push_str(&id.to_string());
             out.push('>');
         }
+        Value::Rope(id) => {
+            // A buffer rope can hold a whole file; print a summary, not the
+            // text (use `rope->string` to get the content). Same for both
+            // readable and display forms — a rope has no re-readable literal.
+            let r = heap.rope(id);
+            out.push_str("#<rope :chars ");
+            out.push_str(&r.len_chars().to_string());
+            out.push_str(" :lines ");
+            out.push_str(&r.len_lines().to_string());
+            out.push('>');
+        }
     }
 }
 

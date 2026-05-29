@@ -74,24 +74,28 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
     // persist. `Drop` runs on every return path (including `?` and panic).
     let _gc_block = crate::process::GcBlockGuard::enter();
 
-    // Eval-depth ceiling (ADR-043; runaway non-tail recursion). `GC_BLOCK`
-    // counts nested `eval`/`macroexpand` frames — i.e. *non-tail* recursion
-    // depth (tail calls re-enter the `'tail:` loop below without a new frame, so
-    // they don't bump it). When it crosses the ceiling, fail *here* with a
-    // clean, catchable error rather than running on to overflow the coroutine
-    // stack — a stack overflow is a SIGSEGV the host can't `catch_unwind`, so it
-    // would otherwise abort the whole REPL / `nest mcp` server. Mirrors the
-    // soft-memory-limit backstop below. One TLS read + compare on entry.
-    if crate::process::gc_block_depth() > crate::process::max_eval_depth() {
+    // Stack-budget guard (ADR-043; runaway non-tail recursion). Every nested
+    // `eval` frame is real Rust stack; an unbounded non-tail recursion —
+    // `(defn boom (n) (+ 1 (boom (+ n 1))))` — would overflow the coroutine
+    // stack as a SIGSEGV the host can't `catch_unwind`, aborting the whole REPL
+    // / `nest mcp` server. We probe the current stack pointer (address of a
+    // local in *this* frame) and compare bytes-used since the outermost eval
+    // against the budget; crossing it fails *here* with a clean, catchable
+    // error. Tail calls re-enter the `'tail:` loop below without a new frame, so
+    // they consume no extra stack and never trip this — it only ever bites
+    // runaway *non-tail* recursion. One TLS read + compare on entry. (Bytes, not
+    // frame count — see `process::stack_overflow_check` for why.)
+    let stack_probe = 0u8;
+    if let Some(used) = crate::process::stack_overflow_check(&stack_probe as *const u8 as usize) {
         return Err(LispError::runtime(format!(
-            "recursion too deep: exceeded the {}-frame eval-depth limit \
-             (runaway non-tail recursion?)",
-            crate::process::max_eval_depth()
+            "recursion too deep: used {used} bytes of stack, over the \
+             {}-byte budget (runaway non-tail recursion?)",
+            crate::process::stack_budget()
         ))
         .with_code(crate::error::error_codes::STACK_DEPTH_EXCEEDED)
         .with_hint(
             "rewrite as a tail-recursive loop (proper tail calls are O(1) stack), \
-             or raise the ceiling with BROOD_MAX_DEPTH",
+             or raise the budget with BROOD_STACK_BUDGET",
         )
         .or_form_pos(heap, expr));
     }
@@ -132,33 +136,42 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
         }
 
         // GC safepoint. Outermost eval only — inner evals (arg evaluation, body
-        // forms, etc.) sit at `GC_BLOCK >= 2` and short-circuit. At the
-        // outermost loop top:
+        // forms, etc.) sit at `GC_BLOCK >= 2` and short-circuit. (The
+        // soft-memory-limit check below is deliberately *not* so gated — see
+        // there.) At the outermost loop top:
         //   • `expr` / `env` are passed as roots,
         //   • the dynamic stack and the explicit root stack are scanned by
         //     `collect` itself,
         //   • no other Rust frame holds an unrooted LOCAL transient (the
         //     `GC_BLOCK == 1` invariant — see `docs/memory-model.md`).
         // Cost on inner-eval iterations: one TLS read + compare (fail-fast).
-        if crate::process::gc_block_depth() == 1 {
-            if heap.gc_due() {
-                heap.collect(&[expr], &[env]);
-            }
-            // Memory safety backstop (ADR-043): if total allocation has crossed
-            // the soft ceiling, fail *here* with a clean, catchable error rather
-            // than running on to the hard allocator limit (which aborts the whole
-            // process). Off by default; the test runners set it so adversarial /
-            // hostile code can't exhaust host RAM. Process-wide, not per-process
-            // (we only account bytes process-wide today). Cheap when disabled:
-            // one relaxed load of a zero, early return.
-            if let Some(used) = crate::core::alloc::soft_limit_hit() {
-                return Err(LispError::runtime(format!(
-                    "memory limit exceeded: {used} bytes allocated process-wide \
-                     exceeds the {}-byte soft limit (raise or unset BROOD_MEM_LIMIT)",
-                    crate::core::alloc::soft_limit()
-                ))
-                .with_code(crate::error::error_codes::MEMORY_LIMIT));
-            }
+        if crate::process::gc_block_depth() == 1 && heap.gc_due() {
+            heap.collect(&[expr], &[env]);
+        }
+        // Memory safety backstop (ADR-043): if total allocation has crossed the
+        // soft ceiling, fail *here* with a clean, catchable error rather than
+        // running on to the hard allocator limit (which aborts the whole
+        // process). Off by default; the test runners set it so adversarial /
+        // hostile code can't exhaust host RAM. Process-wide, not per-process
+        // (we only account bytes process-wide today).
+        //
+        // Unlike the GC safepoint above this is **not** gated on `GC_BLOCK == 1`:
+        // raising the error merely returns `Err` and unwinds (every `GcBlockGuard`
+        // drops on the way out) — it never frees or moves a LOCAL value, so the
+        // "no unrooted transient at depth > 1" invariant that constrains `collect`
+        // doesn't apply. Checking at every depth is what makes the limit actually
+        // catch a runaway loop sitting in *argument* position (`(f (build …))`),
+        // which runs at `GC_BLOCK >= 2` and would otherwise sail past this
+        // safepoint straight into the hard-limit abort. Cheap when disabled: one
+        // relaxed load of a zero, early `None`.
+        if let Some(used) = crate::core::alloc::soft_limit_hit() {
+            return Err(LispError::runtime(format!(
+                "memory limit exceeded: {used} bytes allocated process-wide \
+                 exceeds the {}-byte soft limit (raise or unset BROOD_MEM_LIMIT)",
+                crate::core::alloc::soft_limit()
+            ))
+            .with_code(crate::error::error_codes::MEMORY_LIMIT)
+            .or_form_pos(heap, expr));
         }
         // Reduction-counted preemption: bound the work a process does before it
         // yields its worker (fairness — a CPU-bound process can't monopolise a
@@ -484,15 +497,11 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     .map_err(|e| e.or_form_pos(heap, call_form));
             }
             Value::Fn(id) => {
-                let scope =
+                // `bind_params` selects the arm matching this call's arity, binds
+                // it, and hands back that arm's body (snapshotted into an inline
+                // `SmallVec` so the loop below doesn't re-dispatch the slab).
+                let (scope, body) =
                     bind_params(heap, id, &cur_argv).map_err(|e| e.or_form_pos(heap, call_form))?;
-                // Snapshot the body forms once. Each `heap.closure(id)` call
-                // is a region-dispatch + slab index; iterating the body four
-                // times (len + per-form read + tail-form read) repeated those
-                // dispatches per call. A `SmallVec` of `Value` (each `Copy`)
-                // is one slab read + a stack-resident slice — closures are
-                // immutable, so the snapshot stays correct for this iteration.
-                let body: SmallVec<[Value; 4]> = SmallVec::from_slice(&heap.closure(id).body);
                 if body.is_empty() {
                     return Ok(Value::Nil);
                 }
@@ -527,10 +536,8 @@ pub fn apply(heap: &mut Heap, callee: Value, argv: &[Value], env: EnvId) -> Lisp
 }
 
 pub fn apply_closure(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> LispResult {
-    let scope = bind_params(heap, cl, argv)?;
-    // Snapshot the body once — see the eval-loop equivalent above for the
-    // rationale (avoid a region-dispatch + slab index per body form).
-    let body: SmallVec<[Value; 4]> = SmallVec::from_slice(&heap.closure(cl).body);
+    // `bind_params` selects the arm for `argv`'s arity and returns its body.
+    let (scope, body) = bind_params(heap, cl, argv)?;
     let mut result = Value::Nil;
     for &form in &body {
         // Same as the closure body branch in `eval`: tag the body form's
@@ -540,48 +547,39 @@ pub fn apply_closure(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> LispResu
     Ok(result)
 }
 
-fn bind_params(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> Result<EnvId, LispError> {
-    // Snapshot the closure's metadata once. Every re-read of `heap.closure(cl)`
-    // is a region-dispatch + slab index, and the body below would otherwise
-    // re-read it ~4-6 times per call plus once per parameter in the binding
-    // loop. Closures are immutable once allocated, so this snapshot stays
-    // consistent. `params` and `optionals` copy into inline `SmallVec`s, so
-    // frames of ≤4 params/optionals (the common case) pay no heap alloc here.
+/// Select the closure's arm for this call's arity, bind its parameters into a
+/// fresh scope, and return `(scope, that arm's body)`. Dispatching by argument
+/// count here — and binding each fixed arm's params *directly* — is what makes a
+/// multi-arity function's common small-arity call cheap: no rest-list, no
+/// `match*`, just one env frame (see [`Closure::select_arm`] / `ClosureArm`).
+fn bind_params(
+    heap: &mut Heap,
+    cl: ClosureId,
+    argv: &[Value],
+) -> Result<(EnvId, SmallVec<[Value; 4]>), LispError> {
+    // Snapshot the selected arm's metadata once. Every re-read of `heap.closure`
+    // is a region-dispatch + slab index, and the binding loop below would
+    // otherwise re-read it once per parameter. Closures are immutable once
+    // allocated, so this snapshot stays consistent. `params`/`optionals`/`body`
+    // copy into inline `SmallVec`s, so the common (≤4) case pays no heap alloc.
     let mut params: SmallVec<[Symbol; 4]> = SmallVec::new();
     let mut optionals: SmallVec<[(Symbol, Value); 4]> = SmallVec::new();
-    let (cl_env_opt, cl_name, rest_sym) = {
+    let mut body: SmallVec<[Value; 4]> = SmallVec::new();
+    let (cl_env_opt, rest_sym) = {
         let cl_data = heap.closure(cl);
-        params.extend_from_slice(&cl_data.params);
-        optionals.extend_from_slice(&cl_data.optionals);
-        (cl_data.env, cl_data.name, cl_data.rest)
+        let arm = match cl_data.select_arm(argv.len()) {
+            Some(a) => a,
+            None => return Err(arity_error_for(cl_data, argv.len())),
+        };
+        params.extend_from_slice(&arm.params);
+        optionals.extend_from_slice(&arm.optionals);
+        body.extend_from_slice(&arm.body);
+        (cl_data.env, arm.rest)
     };
     // A global-capturing closure (env == None) resolves to this process's global.
     let cl_env = cl_env_opt.unwrap_or_else(|| heap.global());
     let required = params.len();
     let n_opt = optionals.len();
-    let has_rest = rest_sym.is_some();
-    let max = if has_rest {
-        usize::MAX
-    } else {
-        required + n_opt
-    };
-
-    if argv.len() < required || argv.len() > max {
-        let who = cl_name
-            .map(value::symbol_name)
-            .unwrap_or_else(|| "fn".to_string());
-        let max = if has_rest {
-            None
-        } else {
-            Some(required + n_opt)
-        };
-        return Err(LispError::arity(arity_message(
-            &who,
-            required,
-            max,
-            argv.len(),
-        )));
-    }
 
     let scope = heap.new_env(Some(cl_env));
     for (i, &arg) in argv.iter().enumerate().take(required) {
@@ -607,7 +605,38 @@ fn bind_params(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> Result<EnvId, 
         let rest_list = heap.list_from_slice(&argv[idx..]);
         heap.env_define(scope, rs, rest_list);
     }
-    Ok(scope)
+    Ok((scope, body))
+}
+
+/// Build the arity error for a call whose argument count no arm accepts. For a
+/// single-arity closure this is the familiar "expected N (to M | at least N)";
+/// for a multi-arity one it lists every accepted arity.
+fn arity_error_for(cl: &Closure, got: usize) -> LispError {
+    let who = cl
+        .name
+        .map(value::symbol_name)
+        .unwrap_or_else(|| "fn".to_string());
+    if cl.arms.len() == 1 {
+        let arm = &cl.arms[0];
+        return LispError::arity(arity_message(&who, arm.min_arity(), arm.max_arity(), got));
+    }
+    let mut accepted: Vec<String> = cl
+        .arms
+        .iter()
+        .map(|a| match a.max_arity() {
+            None => format!("{}+", a.min_arity()),
+            Some(m) if m == a.min_arity() => m.to_string(),
+            Some(m) => format!("{}-{}", a.min_arity(), m),
+        })
+        .collect();
+    accepted.sort();
+    accepted.dedup();
+    LispError::arity(format!(
+        "{}: no clause accepts {} argument(s) (arities: {})",
+        who,
+        got,
+        accepted.join(", ")
+    ))
 }
 
 /// Invoke a builtin, enforcing its declared [`Arity`](crate::core::value::Arity) first. The single gate
@@ -664,6 +693,49 @@ fn arity_message(who: &str, min: usize, max: Option<usize>, got: usize) -> Strin
 
 fn make_closure(heap: &mut Heap, name: Option<Symbol>, rest: Value, env: EnvId) -> LispResult {
     let parts = heap.list_to_vec(rest)?;
+    // A closure defined at the global (parent-less) scope captures the env
+    // symbolically (`None`), so it works in any process; otherwise it captures
+    // its specific enclosing scope.
+    let captured = if heap.is_global(env) { None } else { Some(env) };
+
+    // Multi-arity? An optional leading docstring, then every remaining form a
+    // `(param-list body…)` *arity* clause (pattern clauses were lowered to
+    // `match*` by the compile pass, so they never reach here). Each clause
+    // becomes a `ClosureArm`, dispatched by argument count at call time.
+    let (lead_doc, clause_forms): (Option<Value>, &[Value]) = match parts.first() {
+        Some(&Value::Str(_)) if parts.len() > 1 => (Some(parts[0]), &parts[1..]),
+        _ => (None, &parts[..]),
+    };
+    if !clause_forms.is_empty()
+        && clause_forms
+            .iter()
+            .all(|&f| crate::eval::macros::is_arity_clause(heap, f))
+    {
+        let doc = lead_doc.and_then(|d| match d {
+            Value::Str(id) => Some(heap.string(id).to_string()),
+            _ => None,
+        });
+        let mut arms = Vec::with_capacity(clause_forms.len());
+        for &clause in clause_forms {
+            let cparts = heap.list_to_vec(clause)?;
+            let (params, optionals, rest_param) = parse_params(heap, cparts[0])?;
+            arms.push(value::ClosureArm {
+                params,
+                optionals,
+                rest: rest_param,
+                body: cparts[1..].to_vec(),
+            });
+        }
+        let id = heap.alloc_closure(Closure {
+            name,
+            arms,
+            doc,
+            env: captured,
+        });
+        return Ok(Value::Fn(id));
+    }
+
+    // Single-arity: `parts[0]` is the param list, `parts[1..]` the body.
     let param_form = parts
         .first()
         .copied()
@@ -681,19 +753,9 @@ fn make_closure(heap: &mut Heap, name: Option<Symbol>, rest: Value, env: EnvId) 
         }
         _ => None,
     };
-    // A closure defined at the global (parent-less) scope captures the env
-    // symbolically (`None`), so it works in any process; otherwise it captures
-    // its specific enclosing scope.
-    let captured = if heap.is_global(env) { None } else { Some(env) };
-    let id = heap.alloc_closure(Closure {
-        name,
-        params,
-        optionals,
-        rest: rest_param,
-        body,
-        doc,
-        env: captured,
-    });
+    let id = heap.alloc_closure(Closure::single(
+        name, params, optionals, rest_param, body, doc, captured,
+    ));
     Ok(Value::Fn(id))
 }
 
@@ -835,13 +897,14 @@ fn tail_of_cons(heap: &mut Heap, body: Value, env: EnvId) -> Result<Option<Value
 fn value_arity(heap: &Heap, v: Value) -> Option<value::Arity> {
     match v {
         Value::Fn(id) | Value::Macro(id) => {
+            // Across all arms: the smallest min, and the largest max (unbounded if
+            // any arm has `&` rest). A single-arity closure has one arm.
             let c = heap.closure(id);
-            let min = c.params.len();
-            let max = if c.rest.is_some() {
-                None
-            } else {
-                Some(min + c.optionals.len())
-            };
+            let min = c.arms.iter().map(|a| a.min_arity()).min().unwrap_or(0);
+            let max = c
+                .arms
+                .iter()
+                .try_fold(0usize, |acc, a| a.max_arity().map(|m| acc.max(m)));
             Some(value::Arity { min, max })
         }
         Value::Native(id) => Some(heap.native(id).arity),

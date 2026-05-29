@@ -84,17 +84,36 @@
     (fold f x (first more))))
 
 ;; ---- arithmetic (variadic, built on the 2-arg primitives) ----
-;; These fold directly over the primitive, not via `reduce` — `reduce`'s 3-arg
-;; form *is* `fold`, so routing through it only adds a call frame and a second
-;; `& more` rest-list per call. `(fold %add 0 xs)` ≡ `(reduce %add 0 xs)`.
-(defn + (& xs) "Sum of all arguments (0 with none)." (fold %add 0 xs))
-(defn * (& xs) "Product of all arguments (1 with none)." (fold %mul 1 xs))
-(defn - (x & xs)
+;; Multi-arity (ADR-046): the 0/1/2-argument clauses bind their parameters
+;; *directly* and call the primitive — no `& xs` rest-list, no `fold`, just one
+;; env frame — so the overwhelmingly common 2-argument call (`(+ a b)`) is ~40×
+;; cheaper than folding over a variadic rest-list. Only the 3+-argument fallback
+;; folds, starting from the first two combined so it never re-walks them. (This
+;; is the dogfooding payoff: writing `+` in Brood surfaced the missing
+;; multi-arity dispatch; we built that capability rather than moving `+` to Rust
+;; — CLAUDE.md "dogfood first; optimize by building the language up".)
+(defn +
+  "Sum of all arguments (0 with none)."
+  (() 0)
+  ((a) a)
+  ((a b) (%add a b))
+  ((a b & more) (fold %add (%add a b) more)))
+(defn *
+  "Product of all arguments (1 with none)."
+  (() 1)
+  ((a) a)
+  ((a b) (%mul a b))
+  ((a b & more) (fold %mul (%mul a b) more)))
+(defn -
   "Subtract the rest from `x`; negate `x` if it's the only argument."
-  (if (empty? xs) (%sub 0 x) (fold %sub x xs)))
-(defn / (x & xs)
+  ((x) (%sub 0 x))
+  ((a b) (%sub a b))
+  ((x & xs) (fold %sub x xs)))
+(defn /
   "Divide `x` by the rest; reciprocal of `x` if it's the only argument. Errors on division by zero."
-  (if (empty? xs) (%div 1 x) (fold %div x xs)))
+  ((x) (%div 1 x))
+  ((a b) (%div a b))
+  ((x & xs) (fold %div x xs)))
 
 (defn inc (n) "Return `n` + 1." (%add n 1))
 (defn dec (n) "Return `n` - 1." (%sub n 1))
@@ -116,12 +135,33 @@
 (defn cmp--le (a b) (not (%lt b a)))
 (defn cmp--ge (a b) (not (%lt a b)))
 
-(defn < (& xs) "True if the arguments are in strictly increasing order." (chain? %lt xs))
-(defn > (& xs) "True if the arguments are in strictly decreasing order." (chain? cmp--gt xs))
-(defn <= (& xs) "True if the arguments are in non-decreasing order." (chain? cmp--le xs))
-(defn >= (& xs) "True if the arguments are in non-increasing order." (chain? cmp--ge xs))
-(defn = (& xs) "True if all arguments are structurally equal." (chain? %eq xs))
-(defn not= (& xs) "True if the arguments are not all equal." (not (apply = xs)))
+;; Multi-arity like arithmetic above: a direct 2-argument clause (the common
+;; case — `(< a b)`, `(= a b)`) calls the primitive with one env frame; the
+;; variadic clause chains over adjacent pairs for 3+ (or 0/1, trivially true).
+(defn <
+  "True if the arguments are in strictly increasing order."
+  ((a b) (%lt a b))
+  ((& xs) (chain? %lt xs)))
+(defn >
+  "True if the arguments are in strictly decreasing order."
+  ((a b) (%lt b a))
+  ((& xs) (chain? cmp--gt xs)))
+(defn <=
+  "True if the arguments are in non-decreasing order."
+  ((a b) (not (%lt b a)))
+  ((& xs) (chain? cmp--le xs)))
+(defn >=
+  "True if the arguments are in non-increasing order."
+  ((a b) (not (%lt a b)))
+  ((& xs) (chain? cmp--ge xs)))
+(defn =
+  "True if all arguments are structurally equal."
+  ((a b) (%eq a b))
+  ((& xs) (chain? %eq xs)))
+(defn not=
+  "True if the arguments are not all equal."
+  ((a b) (not (%eq a b)))
+  ((& xs) (not (apply = xs))))
 
 ;; ---- control-flow macros ----
 ;; These read like special forms but are ordinary macros over `if`/`do`/`let`.
@@ -201,6 +241,7 @@ or re-`def` to force re-init."
 (defn map? (x) "True if `x` is a map." (%eq (type-of x) :map))
 (defn ref? (x) "True if `x` is a `(ref)` token (a unique reference)." (%eq (type-of x) :ref))
 (defn pid? (x) "True if `x` is a process id (from `self`/`spawn`)." (%eq (type-of x) :pid))
+(defn rope? (x) "True if `x` is a rope (editor buffer text from `string->rope`)." (%eq (type-of x) :rope))
 ;; `fn?` holds for both Brood closures (:fn) and Rust builtins (:native).
 (defn fn? (x)
   "True if `x` is callable (a closure or a primitive)."

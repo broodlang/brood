@@ -145,12 +145,16 @@ pub mod error_codes {
     pub const INT_OVERFLOW: &str = "E0041";
     /// `vector-ref` / `substring` / similar with an out-of-range index.
     pub const INDEX_OUT_OF_RANGE: &str = "E0042";
-    /// Evaluation nested deeper than the eval-depth ceiling (runaway *non-tail*
-    /// recursion). Raised at the top of `eval` *before* the coroutine stack
-    /// overflows, so a `(defn boom (n) (+ 1 (boom (+ n 1))))` becomes a clean,
-    /// catchable error instead of a SIGSEGV that aborts the whole host/REPL/MCP
-    /// process. The fix is to rewrite as a tail-recursive loop (proper tail
-    /// calls are O(1) stack). Tune via `BROOD_MAX_DEPTH`.
+    /// Evaluation used more stack than the [`stack_budget`] guard allows
+    /// (runaway *non-tail* recursion). Raised at the top of `eval` — which
+    /// measures bytes of stack used since the outermost frame on this
+    /// coroutine/thread — *before* the coroutine stack overflows, so a
+    /// `(defn boom (n) (+ 1 (boom (+ n 1))))` becomes a clean, catchable error
+    /// instead of a SIGSEGV that aborts the whole host/REPL/MCP process. The fix
+    /// is to rewrite as a tail-recursive loop (proper tail calls are O(1) stack).
+    /// Tune via `BROOD_STACK_BUDGET`.
+    ///
+    /// [`stack_budget`]: crate::process::stack_budget
     pub const STACK_DEPTH_EXCEEDED: &str = "E0044";
     /// Allocation crossed the configured *soft* memory limit (ADR-043). Raised
     /// at the eval safepoint so a runaway/hostile program fails cleanly instead

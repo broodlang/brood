@@ -1,0 +1,169 @@
+;; The editor framework's buffer model (M2 Phase 1, ADR-045): the immutable
+;; buffer value + pure point/mark/region/movement/editing ops, plus the thin
+;; `spawn-buffer` actor shell. Pure Brood over the rope primitives — opt-in
+;; (`require 'buffer`), never in the prelude.
+;;
+;; Register-only — discovered and run by `nest test` (and cargo test, via
+;; crates/lisp/tests/suite.rs). The whole suite runs in parallel (each test a
+;; process); the final :isolated block adds explicit spawn/send/receive coverage
+;; of the actor shell — and proves a buffer's rope stays inside its process.
+
+(require 'test)
+(require 'buffer)
+
+(describe "buffer construction & reads"
+  (test "make-buffer"
+    (let (b (make-buffer "hello world"))
+      (is (buffer? b))
+      (assert= (buffer-text b) "hello world")
+      (assert= (buffer-point b) 0)
+      (assert= (buffer-mark b) nil)
+      (assert= (buffer-name b) "*scratch*")
+      (assert= (buffer-file b) nil)
+      (assert= (buffer-length b) 11)))
+  (test "make-buffer with name and file"
+    (let (b (make-buffer "x" "notes" "/tmp/notes.txt"))
+      (assert= (buffer-name b) "notes")
+      (assert= (buffer-file b) "/tmp/notes.txt")))
+  (test "buffer? rejects non-buffers"
+    (refute (buffer? "hello"))
+    (refute (buffer? {:rope "not-a-rope"}))
+    (refute (buffer? 3)))
+  (test "line reads"
+    (let (b (make-buffer "alpha\nbeta\ngamma"))
+      (assert= (buffer-line-count b) 3)
+      (assert= (buffer-line-at b 0) "alpha\n")
+      (assert= (buffer-line-at b 2) "gamma")))
+  (test "char-after / char-before at the edges"
+    (let (b (goto-char (make-buffer "abc") 1))
+      (assert= (buffer-char-after b) "b")
+      (assert= (buffer-char-before b) "a"))
+    (assert= (buffer-char-before (make-buffer "abc")) nil)         ; point 0
+    (assert= (buffer-char-after (end-of-buffer (make-buffer "abc"))) nil)))
+
+(describe "buffer movement"
+  (test "goto-char clamps to [0, length]"
+    (let (b (make-buffer "abc"))
+      (assert= (buffer-point (goto-char b 2)) 2)
+      (assert= (buffer-point (goto-char b 99)) 3)
+      (assert= (buffer-point (goto-char b -5)) 0)))
+  (test "forward/backward-char clamp"
+    (let (b (goto-char (make-buffer "abcde") 2))
+      (assert= (buffer-point (forward-char b)) 3)
+      (assert= (buffer-point (forward-char b 10)) 5)
+      (assert= (buffer-point (backward-char b)) 1)
+      (assert= (buffer-point (backward-char b 10)) 0)))
+  (test "beginning/end-of-line"
+    (let (b (goto-char (make-buffer "ab\ncde\nf") 4))   ; on 'd' in line 1
+      (assert= (buffer-point (beginning-of-line b)) 3)
+      (assert= (buffer-point (end-of-line b)) 6)))      ; just before the newline
+  (test "beginning/end-of-buffer"
+    (let (b (make-buffer "abcde"))
+      (assert= (buffer-point (end-of-buffer b)) 5)
+      (assert= (buffer-point (beginning-of-buffer (end-of-buffer b))) 0)))
+  (test "current-line and column"
+    (let (b (goto-char (make-buffer "line0\nline1\nline2") 14))  ; line 2, col 2
+      (assert= (buffer-current-line b) 2)
+      (assert= (buffer-column b) 2)))
+  (test "forward-line preserves the column when the line is long enough"
+    (let (b (-> (make-buffer "hello\nworld\nhi") (goto-char 2) (forward-line 1)))
+      (assert= (buffer-current-line b) 1)
+      (assert= (buffer-column b) 2)))      ; col 2 of "world" = 'r'
+  (test "forward-line clamps the column to a short target line"
+    (let (b (-> (make-buffer "hello\nhi") (goto-char 4) (forward-line 1)))
+      (assert= (buffer-current-line b) 1)
+      (assert= (buffer-column b) 2)))      ; "hi" is only 2 long → column 2 (end)
+  (test "forward/backward-line clamp to the line range"
+    (let (b (make-buffer "a\nb\nc"))
+      (assert= (buffer-current-line (forward-line b 99)) 2)
+      (assert= (buffer-current-line (backward-line (end-of-buffer b) 99)) 0))))
+
+(describe "buffer editing is immutable"
+  (test "insert advances point; the original is untouched"
+    (let (b (goto-char (make-buffer "hello world") 5))
+      (let (b2 (insert b ","))
+        (assert= (buffer-text b2) "hello, world")
+        (assert= (buffer-point b2) 6)
+        ; original unchanged
+        (assert= (buffer-text b) "hello world")
+        (assert= (buffer-point b) 5))))
+  (test "delete-char removes after point; point stays"
+    (let (b (goto-char (make-buffer "hello") 1))
+      (assert= (buffer-text (delete-char b)) "hllo")
+      (assert= (buffer-point (delete-char b)) 1)
+      (assert= (buffer-text (delete-char b 3)) "ho")))
+  (test "delete-backward-char removes before point; point moves back"
+    (let (b (goto-char (make-buffer "hello") 3))
+      (assert= (buffer-text (delete-backward-char b)) "helo")
+      (assert= (buffer-point (delete-backward-char b)) 2)
+      (assert= (buffer-text (delete-backward-char b 2)) "hlo")))
+  (test "edits at the buffer edges clamp safely"
+    (assert= (buffer-text (delete-char (end-of-buffer (make-buffer "ab")))) "ab")
+    (assert= (buffer-text (delete-backward-char (make-buffer "ab"))) "ab")))
+
+(describe "buffer mark & region"
+  (test "set-mark / region / clear-mark"
+    (let (b (-> (make-buffer "abcdef") (goto-char 1) set-mark (goto-char 4)))
+      (assert= (buffer-mark b) 1)
+      (assert= (buffer-region b) "bcd")
+      (assert= (buffer-mark (clear-mark b)) nil)))
+  (test "region works regardless of point/mark order"
+    (let (b (-> (make-buffer "abcdef") (goto-char 4) set-mark (goto-char 1)))
+      (assert= (buffer-region b) "bcd")))
+  (test "no region without a mark"
+    (assert= (buffer-region (make-buffer "abc")) nil))
+  (test "delete-region removes between point and mark, clears mark, point to start"
+    (let (b (-> (make-buffer "abcdef") (goto-char 1) set-mark (goto-char 4) delete-region))
+      (assert= (buffer-text b) "aef")
+      (assert= (buffer-point b) 1)
+      (assert= (buffer-mark b) nil)))
+  (test "delete-region is a no-op without a mark"
+    (assert= (buffer-text (delete-region (make-buffer "abc"))) "abc")))
+
+(describe "buffer file round-trip"
+  (test "buffer-from-file reads, save-buffer writes back"
+    (let (path (str "/tmp/brood-buf-" (name (gensym "test")) ".txt"))
+      (spit path "first line\nsecond line\n")
+      (let (b (buffer-from-file path))
+        (assert= (buffer-text b) "first line\nsecond line\n")
+        (assert= (buffer-file b) path)
+        ; edit and save, then re-read to confirm it persisted
+        (save-buffer (-> b end-of-buffer (insert "third line\n")))
+        (assert= (buffer-text (buffer-from-file path))
+                 "first line\nsecond line\nthird line\n"))))
+  (test "save-buffer with no file raises"
+    (assert-error (save-buffer (make-buffer "x")))))
+
+;; The actor shell: a buffer process owns its buffer (and process-local rope) and
+;; replies only with derived views. Edits/reads cross as closures (ADR-033).
+(describe "buffer actor shell"
+  :isolated
+
+  (test "spawn-buffer + edit + query"
+    (let (bp (spawn-buffer (make-buffer "hello")))
+      (buffer-edit bp (fn (b) (-> b end-of-buffer (insert " world"))))
+      (assert= (buffer-query bp buffer-text) "hello world")
+      (assert= (buffer-query bp buffer-length) 11)
+      (assert= (stop-buffer bp) :stopped)))
+
+  (test "a query returns a derived view (a line string), not the buffer"
+    (let (bp (spawn-buffer (make-buffer "line0\nline1")))
+      (assert= (buffer-query bp (fn (b) (buffer-line-at b 1))) "line1")
+      (stop-buffer bp)))
+
+  (test "spawning preserves point and mark (ships text, rebuilds the rope)"
+    (let (src (-> (make-buffer "abcdef") (goto-char 1) set-mark (goto-char 4))
+          bp (spawn-buffer src))
+      (assert= (buffer-query bp buffer-point) 4)
+      (assert= (buffer-query bp buffer-mark) 1)
+      (assert= (buffer-query bp buffer-region) "bcd")
+      (stop-buffer bp)))
+
+  (test "two buffer processes are independent"
+    (let (a (spawn-buffer (make-buffer "aaa"))
+          b (spawn-buffer (make-buffer "bbb")))
+      (buffer-edit a (fn (buf) (insert buf "!")))
+      (assert= (buffer-query a buffer-text) "!aaa")
+      (assert= (buffer-query b buffer-text) "bbb")
+      (stop-buffer a)
+      (stop-buffer b))))

@@ -32,7 +32,7 @@ use crate::core::value::{self, Tag, Value};
 /// the source of [`TAG_COUNT`]. **Must list every [`Tag`] variant in discriminant
 /// order**; the compiler can't enumerate variants, so `tag_universe_is_consistent`
 /// (below) is what guards completeness, ordering, and the universe size.
-const ALL_TAGS: [Tag; 15] = [
+const ALL_TAGS: [Tag; 16] = [
     Tag::Nil,
     Tag::Bool,
     Tag::Int,
@@ -48,6 +48,7 @@ const ALL_TAGS: [Tag; 15] = [
     Tag::Map,
     Tag::Ref,
     Tag::Pid,
+    Tag::Rope,
 ];
 
 /// The number of tag atoms — derived from [`ALL_TAGS`], not hand-counted.
@@ -62,7 +63,10 @@ const _: () = assert!(
     "Ty is u16-wide; widen the type to add more than 16 atoms",
 );
 /// All bits set for the atoms — the universe `⊤`. Follows [`TAG_COUNT`].
-const UNIVERSE: u16 = (1u16 << TAG_COUNT) - 1;
+/// Computed in `u32` then narrowed: at the cap (`TAG_COUNT == 16`) the direct
+/// `1u16 << 16` would overflow in const-eval, so the wider shift sidesteps it
+/// (`(1u32 << 16) - 1 == 0xFFFF`, which narrows to `u16::MAX` losslessly).
+const UNIVERSE: u16 = ((1u32 << TAG_COUNT) - 1) as u16;
 
 /// The bit position of `tag` in a [`Ty`]'s bitset — its `#[repr(u8)]`
 /// discriminant. No hand-maintained mapping (so no collisions possible); the
@@ -118,6 +122,7 @@ impl Ty {
             "map?" => Ty::of(Tag::Map),
             "ref?" => Ty::of(Tag::Ref),
             "pid?" => Ty::of(Tag::Pid),
+            "rope?" => Ty::of(Tag::Rope),
             // `fn?` holds for both Brood closures and Rust builtins.
             "fn?" => Ty::of(Tag::Fn).union(Ty::of(Tag::Native)),
             "number?" => Ty::NUMBER,

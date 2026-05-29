@@ -15,7 +15,7 @@ gate (`eval::call_native`), before the primitive runs — so a wrong-count call 
 a clean arity error (`type-of: expected 1 argument, got 0`) rather than a missing
 arg silently becoming `nil`.
 
-## Native primitive functions (81)
+## Native primitive functions (91)
 
 | Category | Primitive | Arity | Purpose |
 |---|---|---|---|
@@ -39,6 +39,16 @@ arg silently becoming `nil`.
 | | `upper` | 1 | `s` upper-cased (Unicode-aware, e.g. `ß` → `SS`) |
 | | `lower` | 1 | `s` lower-cased (Unicode-aware) |
 | | `string->number` | 1 | strict parse → int, else float, else `nil` (`"3abc"` → `nil`, unlike `read-string`) |
+| **Rope** (editor buffer text; immutable, char-indexed — ADR-045) | `string->rope` | 1 | a rope holding the characters of a string — the constructor |
+| | `rope->string` | 1 | the full text of a rope as a string (the only way a rope's content crosses a process: ropes are process-local) |
+| | `rope-length` | 1 | character count |
+| | `rope-line-count` | 1 | line count (a trailing newline ends a line; `""` is 1 line) |
+| | `rope-insert` | 3 | `(rope-insert r idx s)` → a **fresh** rope with `s` inserted at char `idx` |
+| | `rope-delete` | 3 | `(rope-delete r start end)` → a **fresh** rope with chars `[start, end)` removed |
+| | `rope-slice` | 3 | text of chars `[start, end)` as a string |
+| | `rope-line` | 2 | text of line `n` (0-based), including its trailing newline — the viewport primitive |
+| | `rope-char->line` | 2 | 0-based line index containing a char index |
+| | `rope-line->char` | 2 | char index where a 0-based line begins |
 | **Type reflection** | `type-of` | 1 | the runtime type tag as a keyword (`:int` `:string` …); the one irreducible reflective primitive. The tag predicates (`nil?` `pair?` `int?` `float?` `bool?` `string?` `symbol?` `keyword?` `vector?` `map?` `fn?`) are Brood wrappers over it, as are the in-language type checks |
 | **Type checking** (advisory; see [types.md](types.md)) | `check` | 1 | run the advisory type checker over a *quoted* form: macro-expand it (like the real compile pass), then return a **list of warning strings** for provably-wrong primitive arguments (e.g. `(first 5)` → `"first: argument 1 expects nil \| pair \| vector, got int (5)"`), or `nil` when nothing is wrong. Advisory: never raises |
 | | `check-file` | 1 | check every top-level form in the file at `path`, returning pre-formatted `"path:line:col: warning: …"` strings (or `nil` if clean). Reads but does **not** evaluate. Used by `(check-project)` for the `nest test` / `nest run` / `nest check` pre-flight |

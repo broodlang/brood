@@ -108,9 +108,9 @@ the substrate.
 
 ## KI-2 — `nest test` flaky + hangs when parallel tests share heavy global lookups
 
-**Status:** **runner-hang half fixed (2026-05-29)**; underlying race
-**largely fixed** (same as KI-1) · **Severity:** was medium → low · **First
-seen:** 2026-05-28
+**Status:** **fixed (2026-05-29)** — runner now fails fast *and* the
+underlying race is fixed (same as KI-1) · **Severity:** was medium → none ·
+**First seen:** 2026-05-28
 
 Same root cause as KI-1, surfacing through the test runner. `nest test` runs
 each `test` in its own parallel green process (default scheduler). When more
@@ -131,7 +131,9 @@ EXIT=124   (runner does not reap the dead process → whole run hangs)
 
 ### Two distinct bugs here
 
-1. The lookup race itself (= KI-1). **Still open.**
+1. The lookup race itself (= KI-1). **Fixed (2026-05-29)** — see KI-1 (supervisor
+   strip + bump allocator + per-worker pinned queues). The race can no longer
+   kill a worker; `-j 1` is no longer required for correctness.
 2. ~~**Runner doesn't fail fast:**~~ **Fixed (2026-05-29).** A test process that
    died with an error was not reaped, so the run hung in `(receive)` forever
    instead of reporting the failure. `spawn-units` now `monitor`s every worker
@@ -144,7 +146,10 @@ EXIT=124   (runner does not reap the dead process → whole run hangs)
    reason rather than hanging. An unattended `nest test` / `cargo test` therefore
    reports red instead of blocking.
 
-### Mitigations
+### Mitigations (no longer required for correctness)
+
+With the race fixed (KI-1), the default multi-threaded scheduler is safe; the
+options below remain useful for *bounding* a heavy run, not for avoiding crashes:
 
 - `nest test -j 1` (serialize the scheduler), or
 - mark heavy tests `:isolated` (std/test.blsp runs isolated units alone on the

@@ -1,0 +1,245 @@
+;; std/buffer.blsp — the editor framework's buffer model. (require 'buffer).
+;;
+;; Design notes (the *why*; the *what* is in the docstrings below):
+;;  - A BUFFER is an immutable value (a map) holding a rope plus cursor state.
+;;    Every operation returns a *fresh* buffer (ADR-026) — nothing mutates. This
+;;    is the pure, trivially-testable core of the editor toolkit (M2, ADR-045).
+;;  - Text lives in a `rope` (the kernel's one editor primitive); all of the
+;;    point / mark / region / movement *policy* here is pure Brood over it.
+;;  - A buffer is process-local because its rope is: you never `send` a buffer
+;;    (or its rope) across processes. `spawn-buffer` makes a thin actor that OWNS
+;;    one and replies only with *derived views* (text, lines, positions) — never
+;;    the buffer or rope themselves. That reply-with-views boundary is the seed
+;;    of the display protocol (M3).
+;;  - This module is NOT part of the language: it is opt-in (`require`), never in
+;;    the prelude, and adds zero kernel surface — pure Brood over rope primitives.
+;;
+;; Char indices are 0-based, like the rope primitives. `point` is a char index in
+;; [0, length]; `mark` is a char index or nil. Lines are 0-based; a line's text
+;; (`buffer-line-at`) includes its trailing newline, matching `rope-line`.
+
+(defmodule buffer
+  "An immutable text buffer for building editors, written in Brood over the rope
+primitives (ADR-045). A *buffer* is a map:
+
+    {:rope <rope> :point <int> :mark <int|nil> :name <string> :file <string|nil>}
+
+Every operation is pure — movement and editing return a **fresh** buffer; nothing
+mutates (ADR-026). `point` is the cursor (a char index); `mark`, with point,
+delimits the region.
+
+    (require 'buffer)
+    (def b (-> (make-buffer \"hello world\")
+               (goto-char 5) (insert \",\") end-of-line))
+    (buffer-text b)            ; => \"hello, world\"
+
+Because a buffer holds a rope, and ropes are **process-local**, a buffer cannot
+cross a process boundary. `spawn-buffer` makes a process that *owns* a buffer and
+serves edits/queries, replying only with derived views (strings, positions) —
+never the buffer itself. Drive it with `buffer-edit` / `buffer-query`.")
+
+;; ---- helpers ----------------------------------------------------------------
+
+(defn buffer--clamp (lo hi x)
+  "Clamp `x` into the inclusive range [lo, hi]."
+  (max lo (min hi x)))
+
+(defn buffer--line-end-col (buf line)
+  "The column at the end of `line` — its length excluding any trailing newline.
+Where `end-of-line` lands and the rightmost column point can hold on that line."
+  (let (lt (rope-line (get buf :rope) line))
+    (if (ends-with? lt "\n") (dec (string-length lt)) (string-length lt))))
+
+;; ---- construction -----------------------------------------------------------
+
+(defn make-buffer (text &optional (name "*scratch*") (file nil))
+  "A fresh buffer holding `text`, with point at 0 and no mark. `name` is a label
+(default `\"*scratch*\"`); `file` is the backing path or nil."
+  {:rope (string->rope text) :point 0 :mark nil :name name :file file})
+
+(defn buffer? (x)
+  "True if `x` is a buffer value (a map with a rope under `:rope`)."
+  (and (map? x) (rope? (get x :rope))))
+
+(defn buffer-from-file (path)
+  "Read the file at `path` into a fresh buffer, with `:file` set to `path` so
+`save-buffer` can write it back."
+  (make-buffer (slurp path) path path))
+
+(defn save-buffer (buf)
+  "Write `buf`'s text to its `:file`; raise if it has none. Returns `buf`."
+  (let (f (get buf :file))
+    (if (nil? f)
+      (error "save-buffer: buffer has no file: " (get buf :name))
+      (do (spit f (buffer-text buf)) buf))))
+
+;; ---- reads ------------------------------------------------------------------
+
+(defn buffer-rope (buf) "The buffer's underlying rope (process-local)." (get buf :rope))
+(defn buffer-text (buf) "The buffer's full text as a string." (rope->string (get buf :rope)))
+(defn buffer-point (buf) "The cursor position (a char index)." (get buf :point))
+(defn buffer-mark (buf) "The mark (a char index), or nil if unset." (get buf :mark))
+(defn buffer-name (buf) "The buffer's name." (get buf :name))
+(defn buffer-file (buf) "The buffer's backing file path, or nil." (get buf :file))
+(defn buffer-length (buf) "The number of characters in the buffer." (rope-length (get buf :rope)))
+(defn buffer-line-count (buf) "The number of lines in the buffer." (rope-line-count (get buf :rope)))
+
+(defn buffer-line-at (buf line)
+  "The text of `line` (0-based), including its trailing newline (like `rope-line`)."
+  (rope-line (get buf :rope) line))
+
+(defn buffer-current-line (buf)
+  "The 0-based line index that point is on."
+  (rope-char->line (get buf :rope) (get buf :point)))
+
+(defn buffer-column (buf)
+  "The 0-based column of point — characters from the start of its line."
+  (let (rope (get buf :rope))
+    (- (get buf :point) (rope-line->char rope (rope-char->line rope (get buf :point))))))
+
+(defn buffer-char-after (buf)
+  "The single-character string just after point, or nil at end of buffer."
+  (let (p (get buf :point))
+    (if (< p (buffer-length buf)) (rope-slice (get buf :rope) p (inc p)) nil)))
+
+(defn buffer-char-before (buf)
+  "The single-character string just before point, or nil at start of buffer."
+  (let (p (get buf :point))
+    (if (> p 0) (rope-slice (get buf :rope) (dec p) p) nil)))
+
+(defn buffer-region (buf)
+  "The text between point and mark (in either order), or nil if no mark is set."
+  (let (m (get buf :mark))
+    (if (nil? m)
+      nil
+      (let (p (get buf :point))
+        (rope-slice (get buf :rope) (min p m) (max p m))))))
+
+;; ---- movement (returns a fresh buffer with point moved) ---------------------
+
+(defn goto-char (buf n)
+  "Point moved to char index `n`, clamped to [0, length]."
+  (assoc buf :point (buffer--clamp 0 (buffer-length buf) n)))
+
+(defn forward-char (buf &optional (n 1))
+  "Point moved `n` characters forward (clamped)."
+  (goto-char buf (+ (get buf :point) n)))
+
+(defn backward-char (buf &optional (n 1))
+  "Point moved `n` characters backward (clamped)."
+  (goto-char buf (- (get buf :point) n)))
+
+(defn beginning-of-line (buf)
+  "Point moved to the first character of its current line."
+  (let (rope (get buf :rope))
+    (goto-char buf (rope-line->char rope (rope-char->line rope (get buf :point))))))
+
+(defn end-of-line (buf)
+  "Point moved to the end of its current line (before the trailing newline)."
+  (let (rope (get buf :rope)
+        line (rope-char->line rope (get buf :point)))
+    (goto-char buf (+ (rope-line->char rope line) (buffer--line-end-col buf line)))))
+
+(defn forward-line (buf &optional (n 1))
+  "Point moved `n` lines forward (negative = backward), keeping the column where
+the target line is long enough. Clamps to the buffer's line range."
+  (let (rope (get buf :rope)
+        col (buffer-column buf)
+        target (buffer--clamp 0 (dec (rope-line-count rope))
+                              (+ (rope-char->line rope (get buf :point)) n))
+        line-start (rope-line->char rope target))
+    (goto-char buf (+ line-start (min col (buffer--line-end-col buf target))))))
+
+(defn backward-line (buf &optional (n 1))
+  "Point moved `n` lines backward (see `forward-line`)."
+  (forward-line buf (- n)))
+
+(defn beginning-of-buffer (buf) "Point moved to the start of the buffer." (goto-char buf 0))
+(defn end-of-buffer (buf) "Point moved to the end of the buffer." (goto-char buf (buffer-length buf)))
+
+;; ---- mark -------------------------------------------------------------------
+
+(defn set-mark (buf) "Set the mark at point (with point, this delimits the region)." (assoc buf :mark (get buf :point)))
+(defn clear-mark (buf) "Clear the mark." (assoc buf :mark nil))
+
+;; ---- editing (returns a fresh buffer; clears the mark) ----------------------
+;;
+;; Edits clear the mark rather than try to track it across the change — the
+;; simple, safe choice for v1 (a smarter mark-adjustment can come later if the
+;; editor app needs it). `delete-region` clears it by definition.
+
+(defn insert (buf s)
+  "Insert string `s` at point; point advances past it."
+  (let (p (get buf :point))
+    (assoc buf
+           :rope (rope-insert (get buf :rope) p s)
+           :point (+ p (string-length s))
+           :mark nil)))
+
+(defn delete-char (buf &optional (n 1))
+  "Delete `n` characters *after* point; point stays put."
+  (let (p (get buf :point)
+        end (buffer--clamp p (buffer-length buf) (+ p n)))
+    (assoc buf :rope (rope-delete (get buf :rope) p end) :mark nil)))
+
+(defn delete-backward-char (buf &optional (n 1))
+  "Delete `n` characters *before* point (backspace); point moves back with it."
+  (let (p (get buf :point)
+        start (buffer--clamp 0 p (- p n)))
+    (assoc buf :rope (rope-delete (get buf :rope) start p) :point start :mark nil)))
+
+(defn delete-region (buf)
+  "Delete the text between point and mark; point moves to the region start and
+the mark is cleared. A no-op (returns `buf`) if no mark is set."
+  (let (m (get buf :mark))
+    (if (nil? m)
+      buf
+      (let (p (get buf :point)
+            lo (min p m)
+            hi (max p m))
+        (assoc buf :rope (rope-delete (get buf :rope) lo hi) :point lo :mark nil)))))
+
+;; ---- the actor shell (buffer-as-process) ------------------------------------
+;;
+;; A buffer process OWNS its buffer (and thus its process-local rope). Clients
+;; never receive the buffer — only derived views. Edits and reads cross as
+;; *closures* (`buffer -> buffer` and `buffer -> view`), shipped by closure-as-
+;; data (ADR-033); the read closure must return a non-rope value.
+
+(defn buffer--serve (buf)
+  "The receive loop of a buffer process over its immutable `buf`."
+  (receive
+    ([:edit f] (buffer--serve (f buf)))
+    ([:get f from r] (do (send from [:reply r (f buf)]) (buffer--serve buf)))
+    ([:stop from r] (send from [:reply r :stopped]))))
+
+(defn spawn-buffer (buf)
+  "Spawn a process that owns a copy of `buf` and serves edits/queries; return its
+pid. The rope can't cross a process boundary, so this ships `buf`'s *text* (plus
+name/file/point/mark) and rebuilds the rope inside the new process. Drive it with
+`buffer-edit` and `buffer-query`."
+  (let (text (buffer-text buf)
+        name (buffer-name buf)
+        file (buffer-file buf)
+        pt (buffer-point buf)
+        mk (buffer-mark buf))
+    (spawn (buffer--serve (assoc (make-buffer text name file) :point pt :mark mk)))))
+
+(defn buffer-edit (bp f)
+  "Apply pure transform `f` (a `buffer -> buffer` fn) inside buffer process `bp`.
+Asynchronous — returns nil."
+  (send bp [:edit f]))
+
+(defn buffer-query (bp f)
+  "Synchronously read a derived view from buffer process `bp` via pure fn `f` (a
+`buffer -> view`). `f` must return a non-rope value — e.g. `buffer-text`,
+`buffer-point`, `(fn (b) (buffer-line-at b 0))`. Blocks for the reply."
+  (let (r (ref))
+    (send bp [:get f (self) r])
+    (receive ([:reply ~r v] v))))
+
+(defn stop-buffer (bp)
+  "Stop buffer process `bp` (it leaves its loop). Synchronous; returns :stopped."
+  (let (r (ref))
+    (send bp [:stop (self) r])
+    (receive ([:reply ~r v] v))))

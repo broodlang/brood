@@ -2351,3 +2351,109 @@ second instead of chewing through gigabytes first.
 outermost-eval safepoint the soft-memory check rides on), ADR-018 (green
 processes and their coroutine stacks), ADR-011 (favour the simple design; defer
 per-process limits), ADR-005 (dependency-free, std-only allocator).
+
+---
+
+## ADR-044 — Supervision is a userland Brood library, not a kernel feature
+
+**Status:** accepted (2026-05-29). Supersedes the kernel-supervisor direction of
+ADR-039 (tried and reverted; see [`supervision.md`](supervision.md)).
+
+**Context.** ADR-039's kernel supervisor was reverted because its RESUME_SLOT +
+safepoint-rooting machinery was the bulk of the multi-thread scheduler race
+(KI-1). The building blocks it was built over — `spawn` / `monitor` / `receive`
+— were never the problem and remain. The roadmap calls for supervisor trees;
+the question was *where* they live.
+
+**Decision.** Supervision is a require-able Brood module, `std/supervisor.blsp`
+(`(require 'supervisor)`), built entirely on `spawn` / `monitor` / `receive`. A
+supervisor is an ordinary green process carrying immutable state through a
+receive loop (the `hatch.blsp` idiom); it `monitor`s each child and reacts to the
+kernel's `[:down ref pid reason]`. **No new kernel surface** — this is the
+mechanism-in-Rust / policy-in-Brood rule (ADR-006) applied to fault tolerance,
+and it adds *zero* scheduler-race surface, the decisive property after KI-1.
+
+**Scope (ADR-011 — ship the simple form, defer the powerful one).**
+- **Strategy: `:one-for-one` only.** `:one-for-all` / `:rest-for-one` must
+  *terminate healthy siblings* on a sibling's death. Brood has **no kill/exit
+  primitive** (no links, no `exit`), so they cannot be expressed in userland;
+  `start-supervisor` rejects them rather than silently degrading.
+- **Restart types:** `:permanent` (always), `:transient` (only on abnormal exit,
+  reason ≠ `:normal`), `:temporary` (never).
+- **Restart intensity:** `:max-restarts` within `:max-seconds` (defaults 3/5);
+  exceeding it exits the supervisor abnormally so a watcher's monitor fires.
+- **Introspection:** `(which-children sup)` → `[{:id :pid :restart}]`.
+
+**Consequences.**
+- The two deferrals share one root cause — the missing kill/exit primitive — and
+  become the concrete trigger for the *one* kernel hook supervision might later
+  justify (a minimal `exit`/link). Until then, `stop-supervisor` ends the
+  supervisor but leaves children running (orphaned), and an intensity shutdown
+  orphans survivors rather than terminating them. Documented, not hidden.
+- A child spec carries a `:start` *closure* (`(fn () (spawn …))`), shipped across
+  the spawn boundary by the closure-as-data path (ADR-033); restart re-invokes it
+  for a from-scratch incarnation.
+- Tests: `tests/supervisor_test.blsp` (restart, all three restart types,
+  intensity give-up via a monitor on the supervisor, introspection, strategy
+  rejection), `:isolated` per the process-test convention.
+
+**References.** ADR-039 (reverted kernel supervisor), ADR-006 (policy in Brood),
+ADR-011 (defer power features), ADR-033 (closures as data),
+[`supervision.md`](supervision.md), [`concurrency-v2.md`](concurrency-v2.md) §4.
+
+## ADR-045 — Text ropes as an opaque, immutable heap value (`Value::Rope`)
+
+**Status:** accepted (2026-05-29). The first M2 (editor data model) substrate —
+the one new `Value` kind the editor's buffer text needs.
+
+**Context.** The editor stores buffer text. A flat `String` is O(n) per edit and
+can't index lines cheaply; the editor needs O(log n) insert/delete and char↔line
+mapping over files. That's a B-tree rope — a structure Brood can't bootstrap over
+its existing primitives, so it's the one irreducible piece of *text mechanism*
+that belongs in Rust (the "Rust is mechanism, Brood is policy" rule, ADR-006).
+The open question was how to expose it without breaking the immutability
+invariant (ADR-026: no data mutation; every op returns a fresh value), the
+tracing-GC assumptions (no write barriers), or the share-nothing process model.
+
+**Decision.** Add a single new heap value, `Value::Rope(RopeId)` / `Tag::Rope`,
+backed by a `ropey::Rope`, with a ~10-primitive kernel (`string->rope`,
+`rope->string`, `rope-length`, `rope-line-count`, `rope-insert`, `rope-delete`,
+`rope-slice`, `rope-line`, `rope-char->line`, `rope-line->char`; all
+character-indexed). Everything above it — points, marks, regions, search, undo,
+the buffer itself — is Brood.
+
+- **Immutable, for free.** `ropey::Rope` is an `Arc`-shared B-tree: `clone()` is
+  O(1) (bump refcounts) and edits are copy-on-write on touched nodes only. So
+  `rope-insert`/`rope-delete` *clone-then-edit* and return a **fresh** rope; the
+  input is untouched and shares all unchanged structure. The ADR-026 contract
+  holds with no special-casing — a rope behaves like every other immutable value.
+- **Process-local.** A rope lives in exactly one process's LOCAL heap and **never
+  crosses in a message** (`to_message` errors with a hint to send `rope->string`
+  and rebuild). This matches the buffer-as-process design (the rope stays put in
+  the buffer process; only edit commands and rendered string slices cross) and
+  keeps copy-on-send from ever deep-copying a whole file. A rope `def`'d to a
+  global *is* promoted into the shared RUNTIME region (mirrors `Str`): immutable
+  + `Send`+`Sync`, so sibling processes read it concurrently and safely.
+- **GC.** The rope slab is wired into every reclamation site — the live arena-flip
+  `flush` path (clone forwards the rope, structural sharing intact), the dormant
+  mark/sweep, the poison tripwire, checkpoint/reset, and `local_live_count`. A
+  rope is an opaque leaf (no `Value` children) so marking it is a one-liner.
+
+**Compatibility contract (types.md #1).** `Tag::Rope` is the 16th tag, filling the
+`Ty(u16)` lattice exactly (`UNIVERSE` now computes in `u32` then narrows, to dodge
+the `1u16 << 16` const-overflow); a 17th tag must widen `Ty` to `u32`. `rope?` is
+a prelude predicate over `type-of`, and `Ty::tested_by` narrows on it.
+
+**Consequences.**
+- One new dependency (`ropey`) in the `brood` lib — squarely the "runtime
+  substrate that removes real complexity" case the dependency rule allows; the
+  Lisp-callable surface is still Brood.
+- This is the *only* new `Value` kind M2 needs; buffers, cursors, and keymaps are
+  all Brood values built from existing kinds. It's also the template for any
+  future opaque resource (a GPU texture, an OS handle), should one ever be
+  justified (deferred per ADR-011 — a concrete rope beats a general FFI-resource
+  system until a second resource type exists).
+
+**References.** ADR-006 (mechanism/policy split), ADR-026 (immutability), ADR-005
+relaxation (runtime-substrate crates), ADR-011 (ship the simple form),
+[`roadmap.md`](roadmap.md) M2, [`types.md`](types.md) compatibility contract.

@@ -183,12 +183,30 @@ the workaround available today.
 
 ## M2 — Editor data model
 
-The text-editing substance, exposed to Brood.
+The text-editing substance, exposed to Brood. Built as a thin end-to-end
+**vertical slice** (TUI-first), not layer-complete — see `docs/devlog.md`
+(2026-05-29) and ADR-045. Text is an **opaque immutable rope** owned by a
+**buffer-as-process**; everything above the rope kernel is Brood.
 
-- ⬜ Rope-backed buffers (`ropey`) — efficient edits on large files
-- ⬜ Points, marks, regions; multiple buffers
-- ⬜ Editing primitives as builtins: `insert`, `delete`, `goto`, `search`, …
-- ⬜ Buffers as first-class Brood values
+- 🟡 **Rope substrate (Phase 0 — done, ADR-045).** `Value::Rope` over `ropey`
+  (Arc-shared B-tree: O(1) clone, copy-on-write edits → immutable for free) + a
+  10-primitive char-indexed kernel (`string->rope`/`rope->string`/`rope-length`/
+  `rope-line-count`/`rope-insert`/`rope-delete`/`rope-slice`/`rope-line`/
+  `rope-char->line`/`rope-line->char`); `rope?` predicate. Process-local (content
+  crosses as a string). `tests/rope_test.blsp` 28/28 incl. GC-stress + a
+  buffer-as-process preview. The efficient large-file edit engine is now in.
+- 🟡 **Buffer model (Phase 1 — done).** `std/buffer.blsp` (`(require 'buffer)`):
+  an **immutable buffer value** (a map over a rope) with pure point/mark/region
+  ops + movement (`goto-char`/`forward-char`/`beginning-of-line`/`forward-line`
+  column-preserving/…) + editing (`insert`/`delete-char`/`delete-backward-char`/
+  `delete-region`) + file round-trip (`buffer-from-file`/`save-buffer`), plus a
+  thin `spawn-buffer` **actor shell** that owns a buffer and replies only with
+  *derived views* (the display-protocol seam appearing early). Opt-in, never in
+  the prelude, **zero new kernel surface** — the editor *framework*, not the
+  language (ADR-045). `tests/buffer_test.blsp` 28/28 incl. GC-stress + actor.
+- ⬜ Editing **commands** + multiple buffers — belong in the **editor app** (a
+  new `nest` project that `(require 'buffer)`s this framework), not here.
+- ✅ Buffers as first-class Brood values — a buffer *is* an immutable value.
 - ✅ The tracing GC migration landed in M1 (ADR-035) — no longer carried forward to M2.
 
 ## M3 — Display protocol + native local frontend
@@ -231,6 +249,14 @@ The seam that makes remoteability free later (see architecture.md).
   tool ([ADR-042](decisions.md), since named-spawn would not have covered the
   global-state-cell case anyway). The editor will be written against
   let-it-crash + userland supervisors instead.
+- 🟡 **Userland supervisor library** (ADR-044, `std/supervisor.blsp`) — the
+  structured form of that respawn pattern, require-able: `start-supervisor` over
+  child specs (`:start` thunk + `:permanent`/`:transient`/`:temporary` restart
+  type), restart-intensity limits, `which-children`. Pure Brood over
+  `spawn`/`monitor`/`receive`, zero kernel surface. ✅ `:one-for-one`;
+  ⬜ `:one-for-all` / `:rest-for-one` deferred — they need a kernel kill/exit
+  primitive (no links/`exit` yet), so userland can't terminate healthy siblings.
+  See [`supervision.md`](supervision.md) and [`concurrency-v2.md`](concurrency-v2.md) §4.
 - ⬜ The same runtime listens on a socket and serves the M3 protocol
 - ⬜ Remote editor instances attach (the Emacs `--daemon` / `emacsclient` model)
 - ⬜ One core, multiple attached frontends

@@ -23,9 +23,12 @@
       (assert-error (read-string src))))
 
   (test "a very long atom is fine"
+    ;; A bare 3000-char token reads as a *symbol* (not a string), so compare its
+    ;; spelling — `(= a-string a-symbol)` is always false (different types).
     (let (long (string-repeat "abc" 1000)
           parsed (read-string long))
-      (assert= long parsed))))
+      (is (symbol? parsed))
+      (assert= long (str parsed)))))
 
 ;;
 ;; --- Eval stack -------------------------------------------------------------
@@ -34,14 +37,19 @@
 (describe "adversarial: eval stack"
   :isolated
 
-  (test "100 000-deep tail recursion (TCO via let-bound recursive lambda)"
+  ;; Counts are 30k (not 100k): these run in the serial :isolated phase ON the
+  ;; runner, whose LOCAL heap is never flushed (no GC yet — M1), so each test's
+  ;; allocations accumulate for the whole phase. 30k still proves TCO emphatically
+  ;; (a non-tail recursion overflows in the low hundreds) without the runner
+  ;; holding ~0.5 GiB per test. basic.rs covers the full 100k tail loop directly.
+  (test "30 000-deep tail recursion (TCO via let-bound recursive lambda)"
     (let (loop (fn (n acc) (if (= n 0) acc (loop (- n 1) (+ acc n)))))
-      (assert= 5000050000 (loop 100000 0))))
+      (assert= 450015000 (loop 30000 0))))
 
-  (test "100 000-deep tail recursion via defn"
-    ;; `bsf-tail-defn` lives at top level to confirm TCO works through the
+  (test "30 000-deep tail recursion via defn"
+    ;; `adv-tail-loop` lives at top level to confirm TCO works through the
     ;; global-lookup call path too.
-    (assert= :done (adv-tail-loop 100000)))
+    (assert= :done (adv-tail-loop 30000)))
 
   ;; NOTE — known segfault, NOT run here. `(spawn (fn ...))` from inside a
   ;; let-bound recursive closure overflows the host stack: `Heap::promote_env`
@@ -75,10 +83,13 @@
         (assert= 1048576 (string-length big))
         (is (not (nil? (%blob-ptr big)))))))
 
-  (test "100 000-element cons list build + traverse"
+  (test "30 000-element cons list build + traverse"
+    ;; 30k (not 100k): see the eval-stack note — :isolated tests accumulate on the
+    ;; unflushed runner heap, and each retained element plus its build transients
+    ;; costs memory without GC. 30k still exercises the build + traverse at scale.
     (let (build (fn (n acc) (if (= n 0) acc (build (- n 1) (cons n acc))))
-          lst (build 100000 nil))
-      (assert= 100000 (count lst))
+          lst (build 30000 nil))
+      (assert= 30000 (count lst))
       (assert= 1 (first lst))))
 
   (test "10 000-entry CHAMP map build + lookup"
@@ -152,7 +163,9 @@
             ws (adv-spawn-echoers me n nil))
         (is (not (nil? parent-ptr)))
         (adv-send-all ws big)
-        (adv-collect 0 n parent-ptr))))
+        ;; Every worker must report the *same* SharedBlob ptr as the parent (the
+        ;; zero-copy invariant) — so `adv-collect` matches all `n` and drains them.
+        (assert= :ok (adv-collect 0 n parent-ptr)))))
 
   (test "5000 sequential sends of one blob to one worker keep identity stable"
     (when (bound? '%blob-ptr)
@@ -225,9 +238,15 @@
 (defn adv-echo-back (parent)
   (receive (s (send parent s))))
 
+;; Echo back the *blob ptr* of the received value (not the value), so the parent
+;; can assert every worker observed the same SharedBlob (the ADR-041 zero-copy
+;; invariant). Used by the 200-worker fan-out below.
+(defn adv-echo-ptr (parent)
+  (receive (v (send parent (%blob-ptr v)))))
+
 (defn adv-spawn-echoers (parent n acc)
   (if (= n 0) acc
-    (adv-spawn-echoers parent (- n 1) (cons (spawn (adv-echo parent)) acc))))
+    (adv-spawn-echoers parent (- n 1) (cons (spawn (adv-echo-ptr parent)) acc))))
 
 (defn adv-send-all (ws msg)
   (when (not (empty? ws))

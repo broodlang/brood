@@ -36,6 +36,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     let int = Ty::of(Tag::Int);
     let num = Ty::NUMBER;
     let string = Ty::of(Tag::Str);
+    let rope = Ty::of(Tag::Rope);
     let kw = Ty::of(Tag::Keyword);
     let sym = Ty::of(Tag::Sym);
     let bool_ty = Ty::of(Tag::Bool);
@@ -277,6 +278,109 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(2),
         Sig::new(vec![num, int], string),
         to_fixed,
+    );
+
+    // rope — the editor buffer's text storage (ADR-045). The irreducible text
+    // mechanism: a `ropey::Rope` gives O(log n) edits + char/line indexing that
+    // Brood can't bootstrap over flat strings. Immutable like every value —
+    // `rope-insert`/`rope-delete` return a *fresh* rope (cheap structural share).
+    // Points, marks, regions, search, the buffer process itself: all Brood above.
+    def(
+        heap,
+        "string->rope",
+        Arity::exact(1),
+        Sig::new(vec![string], rope),
+        string_to_rope,
+    );
+    def(
+        heap,
+        "rope->string",
+        Arity::exact(1),
+        Sig::new(vec![rope], string),
+        rope_to_string,
+    );
+    def(
+        heap,
+        "rope-length",
+        Arity::exact(1),
+        Sig::new(vec![rope], int),
+        rope_length,
+    );
+    def(
+        heap,
+        "rope-line-count",
+        Arity::exact(1),
+        Sig::new(vec![rope], int),
+        rope_line_count,
+    );
+    def(
+        heap,
+        "rope-insert",
+        Arity::exact(3),
+        Sig::new(vec![rope, int, string], rope),
+        rope_insert,
+    );
+    def(
+        heap,
+        "rope-delete",
+        Arity::exact(3),
+        Sig::new(vec![rope, int, int], rope),
+        rope_delete,
+    );
+    def(
+        heap,
+        "rope-slice",
+        Arity::exact(3),
+        Sig::new(vec![rope, int, int], string),
+        rope_slice,
+    );
+    def(
+        heap,
+        "rope-line",
+        Arity::exact(2),
+        Sig::new(vec![rope, int], string),
+        rope_line,
+    );
+    def(
+        heap,
+        "rope-char->line",
+        Arity::exact(2),
+        Sig::new(vec![rope, int], int),
+        rope_char_to_line,
+    );
+    def(
+        heap,
+        "rope-line->char",
+        Arity::exact(2),
+        Sig::new(vec![rope, int], int),
+        rope_line_to_char,
+    );
+
+    // terminal frontend (ADR-046) — the thin crossterm seam that paints the
+    // display protocol and reads keys. The protocol itself is Brood data (a
+    // vector of render ops); these primitives are mechanism only. `term-poll`
+    // returns a key (a 1-char string, or a keyword for specials) or nil on
+    // timeout; `term-draw` interprets a frame vector. See std/observe.blsp.
+    def(heap, "term-enter", Arity::exact(0), Sig::new(vec![], nil_ty), term_enter);
+    def(heap, "term-leave", Arity::exact(0), Sig::new(vec![], nil_ty), term_leave);
+    def(heap, "term-size", Arity::exact(0), Sig::new(vec![], vec_ty), term_size);
+    def(
+        heap,
+        "term-poll",
+        Arity::exact(1),
+        Sig::new(vec![int], string.union(kw).union(nil_ty)),
+        term_poll,
+    );
+    def(heap, "term-draw", Arity::exact(1), Sig::new(vec![vec_ty], nil_ty), term_draw);
+    // The one process-introspection accessor the language can't reach from Brood
+    // (the mailbox queue lives behind the scheduler registry). Everything else an
+    // observer shows — pid id, liveness — is assembled in Brood (std/observe.blsp).
+    def(
+        heap,
+        "mailbox-size",
+        Arity::exact(1),
+        Sig::new(vec![pid_ty], int.union(nil_ty)),
+        mailbox_size,
     );
 
     // type reflection — the tag predicates (nil?/int?/string?/…) are Brood
@@ -891,6 +995,16 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("lower", &["s"], "s lower-cased (Unicode-aware)."),
     ("to-fixed", &["x", "n"], "Render number x as a string with exactly n digits after the decimal point (rounded). n must be >= 0."),
     ("string->number", &["s"], "Parse s strictly as an int, else a float, else nil (unlike read-string)."),
+    ("string->rope", &["s"], "A rope (editor buffer text) holding the characters of string s."),
+    ("rope->string", &["r"], "The full text of rope r as a string."),
+    ("rope-length", &["r"], "The number of characters in rope r."),
+    ("rope-line-count", &["r"], "The number of lines in rope r (a trailing newline ends a line; \"\" is 1 line)."),
+    ("rope-insert", &["r", "idx", "s"], "A fresh rope with string s inserted at character index idx."),
+    ("rope-delete", &["r", "start", "end"], "A fresh rope with characters [start, end) removed."),
+    ("rope-slice", &["r", "start", "end"], "The text of characters [start, end) of rope r, as a string."),
+    ("rope-line", &["r", "n"], "The text of line n (0-based) of rope r, including any trailing newline."),
+    ("rope-char->line", &["r", "idx"], "The 0-based line index containing character idx."),
+    ("rope-line->char", &["r", "n"], "The character index where line n (0-based) begins."),
     ("type-of", &["x"], "The runtime type of x as a keyword (:int, :string, :pair, ...)."),
     ("check", &["form"], "Advisory type-check a quoted form: a list of warning strings, or nil. Never raises."),
     ("check-file", &["path"], "Advisory type-check every top-level form in the file at path: a list of `path:line:col: warning: …` strings, or nil. Does not evaluate the file."),
@@ -946,6 +1060,12 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("ref", &[], "A fresh, globally-unique reference token (tags a request to its reply)."),
     ("monitor", &["pid"], "Watch pid; returns a monitor ref. Delivers [:down ref pid reason] when pid dies."),
     ("list-processes", &[], "Every currently-live pid on this runtime (one per registered mailbox). Order is unspecified — sort if you need stability. For agents/tools enumerating spawned processes."),
+    ("mailbox-size", &["pid"], "How many messages are queued in pid's mailbox (its receive backlog), or nil if pid is not a live local process. The one process-introspection accessor not reachable from Brood; see std/observe.blsp."),
+    ("term-enter", &[], "Enter raw mode + the alternate screen and hide the cursor, taking over the terminal for a full-screen UI. Pair with term-leave. (ADR-046 display seam.)"),
+    ("term-leave", &[], "Restore the terminal: show the cursor, leave the alternate screen, disable raw mode. The normal-path teardown for term-enter."),
+    ("term-size", &[], "The terminal size as [cols rows] in character cells."),
+    ("term-poll", &["ms"], "Wait up to ms milliseconds for a key; return it as a 1-char string (printable) or a keyword for specials (:up :down :left :right :enter :escape :backspace :tab :delete, ctrl combos like :ctrl-c), or nil on timeout. Always pass a finite ms."),
+    ("term-draw", &["frame"], "Paint a frame — a vector of render ops: [:clear], [:text row col str], [:text row col str face], [:cursor row col]. A face is a map like {:fg :red :bold true}. The in-process frontend for the display protocol; returns nil."),
     ("demonitor", &["mref"], "Drop the monitor identified by mref (best-effort)."),
     ("spawn-count", &[], "How many green processes have been spawned since program start."),
     ("peak-threads", &[], "High-water mark of OS threads running processes concurrently."),
@@ -1021,6 +1141,14 @@ fn expect_number(heap: &Heap, who: &str, v: Value) -> Result<f64, LispError> {
 fn expect_string(heap: &Heap, who: &str, v: Value) -> Result<String, LispError> {
     expect!(heap, who, v, "string",
         Value::Str(id) => heap.string(id).to_string(),
+    )
+}
+
+/// Require a rope, returned **owned** (a cheap `Arc`-node clone) so the `heap`
+/// borrow is released before the builtin edits or allocates a fresh rope.
+fn expect_rope(heap: &Heap, who: &str, v: Value) -> Result<ropey::Rope, LispError> {
+    expect!(heap, who, v, "rope",
+        Value::Rope(id) => heap.rope(id).clone(),
     )
 }
 
@@ -1716,6 +1844,15 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
     ("project", include_str!("../../../std/project.blsp")),
     ("docs", include_str!("../../../std/docs.blsp")),
     ("hatch", include_str!("../../../std/hatch.blsp")),
+    ("supervisor", include_str!("../../../std/supervisor.blsp")),
+    // The editor framework's buffer model (M2 Phase 1, ADR-045): an immutable
+    // buffer over the rope primitives, opt-in, never in the prelude.
+    ("buffer", include_str!("../../../std/buffer.blsp")),
+    // The display/input seam (M3, ADR-046): `display` is the render-op protocol
+    // (pure data constructors); `observe` is a process-viewer TUI built on it +
+    // the `term-*` primitives. Both opt-in, never in the prelude.
+    ("display", include_str!("../../../std/display.blsp")),
+    ("observe", include_str!("../../../std/observe.blsp")),
     ("format", include_str!("../../../std/format.blsp")),
     ("reload", include_str!("../../../std/reload.blsp")),
     // The Model Context Protocol tool surface — `(mcp-tools)` returns the
@@ -1903,6 +2040,336 @@ fn upper(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn lower(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let s = expect_string(heap, "lower", arg(args, 0))?;
     Ok(heap.alloc_string(&s.to_lowercase()))
+}
+
+// ---------- rope (editor buffer text — ADR-045) ----------
+//
+// All indices are **character** indices (matching the language's char-based
+// string indexing), not bytes. Edits return a *fresh* rope (immutability):
+// ropey clones share structure, so `clone()`-then-edit only copies touched
+// B-tree nodes. Out-of-range indices raise a clean E-code error rather than
+// letting ropey panic.
+
+/// Raise a uniform out-of-range error attributed to `who`.
+fn rope_oob(who: &str, what: &str, got: i64, max: usize) -> LispError {
+    LispError::runtime(format!(
+        "{}: {} {} out of bounds (valid 0..={})",
+        who, what, got, max
+    ))
+    .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE)
+}
+
+/// `(string->rope s)` — a rope holding the text of string `s`.
+fn string_to_rope(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let s = expect_string(heap, "string->rope", arg(args, 0))?;
+    Ok(heap.alloc_rope(ropey::Rope::from_str(&s)))
+}
+
+/// `(rope->string r)` — the full text of rope `r` as a string.
+fn rope_to_string(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let r = expect_rope(heap, "rope->string", arg(args, 0))?;
+    Ok(heap.alloc_string(&r.to_string()))
+}
+
+/// `(rope-length r)` — the number of characters in `r`.
+fn rope_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let r = expect_rope(heap, "rope-length", arg(args, 0))?;
+    Ok(Value::Int(r.len_chars() as i64))
+}
+
+/// `(rope-line-count r)` — the number of lines in `r` (ropey counts a trailing
+/// newline as ending a line, so `"a\n"` is 2 lines and `""` is 1).
+fn rope_line_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let r = expect_rope(heap, "rope-line-count", arg(args, 0))?;
+    Ok(Value::Int(r.len_lines() as i64))
+}
+
+/// `(rope-insert r idx s)` — a fresh rope with string `s` inserted at character
+/// index `idx` (0..=length).
+fn rope_insert(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let mut r = expect_rope(heap, "rope-insert", arg(args, 0))?;
+    let idx = expect_int(heap, "rope-insert", arg(args, 1))?;
+    let s = expect_string(heap, "rope-insert", arg(args, 2))?;
+    let len = r.len_chars();
+    if idx < 0 || idx as usize > len {
+        return Err(rope_oob("rope-insert", "index", idx, len));
+    }
+    r.insert(idx as usize, &s);
+    Ok(heap.alloc_rope(r))
+}
+
+/// `(rope-delete r start end)` — a fresh rope with characters `[start, end)`
+/// removed.
+fn rope_delete(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let mut r = expect_rope(heap, "rope-delete", arg(args, 0))?;
+    let start = expect_int(heap, "rope-delete", arg(args, 1))?;
+    let end = expect_int(heap, "rope-delete", arg(args, 2))?;
+    let len = r.len_chars();
+    if start < 0 || end < start || end as usize > len {
+        return Err(rope_oob("rope-delete", "range end", end, len));
+    }
+    r.remove(start as usize..end as usize);
+    Ok(heap.alloc_rope(r))
+}
+
+/// `(rope-slice r start end)` — the text of characters `[start, end)` as a string.
+fn rope_slice(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let r = expect_rope(heap, "rope-slice", arg(args, 0))?;
+    let start = expect_int(heap, "rope-slice", arg(args, 1))?;
+    let end = expect_int(heap, "rope-slice", arg(args, 2))?;
+    let len = r.len_chars();
+    if start < 0 || end < start || end as usize > len {
+        return Err(rope_oob("rope-slice", "range end", end, len));
+    }
+    let s = r.slice(start as usize..end as usize).to_string();
+    Ok(heap.alloc_string(&s))
+}
+
+/// `(rope-line r n)` — the text of line `n` (0-based), including its trailing
+/// newline if present. The viewport-rendering primitive.
+fn rope_line(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let r = expect_rope(heap, "rope-line", arg(args, 0))?;
+    let n = expect_int(heap, "rope-line", arg(args, 1))?;
+    let lines = r.len_lines();
+    if n < 0 || n as usize >= lines {
+        return Err(rope_oob("rope-line", "line", n, lines.saturating_sub(1)));
+    }
+    let s = r.line(n as usize).to_string();
+    Ok(heap.alloc_string(&s))
+}
+
+/// `(rope-char->line r idx)` — the 0-based line index containing character `idx`.
+fn rope_char_to_line(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let r = expect_rope(heap, "rope-char->line", arg(args, 0))?;
+    let idx = expect_int(heap, "rope-char->line", arg(args, 1))?;
+    let len = r.len_chars();
+    if idx < 0 || idx as usize > len {
+        return Err(rope_oob("rope-char->line", "index", idx, len));
+    }
+    Ok(Value::Int(r.char_to_line(idx as usize) as i64))
+}
+
+/// `(rope-line->char r n)` — the character index where line `n` (0-based) begins.
+fn rope_line_to_char(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let r = expect_rope(heap, "rope-line->char", arg(args, 0))?;
+    let n = expect_int(heap, "rope-line->char", arg(args, 1))?;
+    let lines = r.len_lines();
+    if n < 0 || n as usize > lines {
+        return Err(rope_oob("rope-line->char", "line", n, lines));
+    }
+    Ok(Value::Int(r.line_to_char(n as usize) as i64))
+}
+
+// ----- terminal frontend (ADR-046) -------------------------------------------
+//
+// The thin crossterm seam: enter/leave the alternate screen, read keys, and
+// paint a *frame* — a Brood vector of render ops. The protocol's meaning is
+// data (the ops); these primitives are the in-process frontend that interprets
+// it, so a remote/web frontend can implement the identical op vocabulary later.
+// Errors surface as clean `LispError`s (never a crossterm panic), mirroring the
+// rope primitives' discipline.
+
+/// Map a crossterm I/O error into a runtime `LispError`.
+fn term_err(e: std::io::Error) -> LispError {
+    LispError::runtime(format!("terminal: {}", e))
+}
+
+/// `(term-enter)` — take over the terminal: raw mode + alternate screen, cursor
+/// hidden. Pair with `term-leave`. The Rust-side `nest observe` guard also
+/// restores the terminal if the program panics, so a crash never wrecks it.
+fn term_enter(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    use crossterm::cursor::Hide;
+    use crossterm::terminal::{enable_raw_mode, EnterAlternateScreen};
+    enable_raw_mode().map_err(term_err)?;
+    crossterm::execute!(std::io::stdout(), EnterAlternateScreen, Hide).map_err(term_err)?;
+    Ok(Value::Nil)
+}
+
+/// `(term-leave)` — restore the terminal (show cursor, leave alternate screen,
+/// disable raw mode). The normal-path teardown for `term-enter`.
+fn term_leave(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    use crossterm::cursor::Show;
+    use crossterm::terminal::{disable_raw_mode, LeaveAlternateScreen};
+    crossterm::execute!(std::io::stdout(), Show, LeaveAlternateScreen).map_err(term_err)?;
+    disable_raw_mode().map_err(term_err)?;
+    Ok(Value::Nil)
+}
+
+/// Best-effort terminal restore — the abnormal-path backstop a host binary holds
+/// in an RAII guard so a panic or error during a full-screen UI (`nest observe`)
+/// never leaves the terminal in raw mode / the alternate screen. Idempotent and
+/// errors are swallowed (the normal path is the Brood `term-leave`).
+pub fn restore_terminal() {
+    use crossterm::cursor::Show;
+    use crossterm::terminal::{disable_raw_mode, LeaveAlternateScreen};
+    let _ = crossterm::execute!(std::io::stdout(), Show, LeaveAlternateScreen);
+    let _ = disable_raw_mode();
+}
+
+/// `(term-size)` — the terminal size as `[cols rows]` (character cells).
+fn term_size(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let (cols, rows) = crossterm::terminal::size().map_err(term_err)?;
+    Ok(heap.alloc_vector(vec![Value::Int(cols as i64), Value::Int(rows as i64)]))
+}
+
+/// `(term-poll ms)` — wait up to `ms` ms for a key; return it (a 1-char string,
+/// or a keyword for specials) or `nil` on timeout. Always called with a finite
+/// `ms`: the observer is the root process, so blocking here blocks only the root
+/// thread (never a scheduler worker), but an *infinite* poll on a green process
+/// would pin a worker (native blocking can't be preempted) — hence finite.
+fn term_poll(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use crossterm::event::{poll, read, Event, KeyEventKind};
+    let ms = expect_int(heap, "term-poll", arg(args, 0))?.max(0) as u64;
+    if poll(std::time::Duration::from_millis(ms)).map_err(term_err)? {
+        match read().map_err(term_err)? {
+            // Ignore key *release* events (reported on some platforms with the
+            // enhanced-keyboard protocol) so a keypress isn't seen twice.
+            Event::Key(k) if k.kind != KeyEventKind::Release => Ok(key_to_value(heap, k)),
+            _ => Ok(Value::Nil),
+        }
+    } else {
+        Ok(Value::Nil)
+    }
+}
+
+/// Encode a crossterm key event as a Brood value: a printable char becomes a
+/// 1-char string; a control combo and the named special keys become keywords.
+fn key_to_value(heap: &mut Heap, k: crossterm::event::KeyEvent) -> Value {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+    match k.code {
+        KeyCode::Char(c) if ctrl => {
+            Value::Keyword(value::intern(&format!("ctrl-{}", c.to_ascii_lowercase())))
+        }
+        KeyCode::Char(c) => heap.alloc_string(&c.to_string()),
+        KeyCode::Up => value::kw("up"),
+        KeyCode::Down => value::kw("down"),
+        KeyCode::Left => value::kw("left"),
+        KeyCode::Right => value::kw("right"),
+        KeyCode::Enter => value::kw("enter"),
+        KeyCode::Esc => value::kw("escape"),
+        KeyCode::Backspace => value::kw("backspace"),
+        KeyCode::Tab => value::kw("tab"),
+        KeyCode::Delete => value::kw("delete"),
+        KeyCode::Home => value::kw("home"),
+        KeyCode::End => value::kw("end"),
+        KeyCode::PageUp => value::kw("page-up"),
+        KeyCode::PageDown => value::kw("page-down"),
+        _ => Value::Nil,
+    }
+}
+
+/// `(term-draw frame)` — paint a frame: a vector of op vectors `[:clear]`,
+/// `[:text row col str]`, `[:text row col str face]`, `[:cursor row col]`.
+/// Unknown ops are skipped (forward-compatible protocol). Queues all ops then
+/// flushes once, so a frame paints without intermediate tearing.
+fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use crossterm::cursor::MoveTo;
+    use crossterm::style::{Attribute, Print, ResetColor, SetAttribute};
+    use crossterm::terminal::{Clear, ClearType};
+    use std::io::Write;
+
+    let ops: Vec<Value> = match arg(args, 0) {
+        Value::Vector(id) => heap.vector(id).to_vec(),
+        other => return Err(LispError::wrong_type(heap, "term-draw", "vector (a frame)", other)),
+    };
+    let clear_t = value::intern("clear");
+    let text_t = value::intern("text");
+    let cursor_t = value::intern("cursor");
+    let mut out = std::io::stdout();
+    for op in ops {
+        let parts: Vec<Value> = match op {
+            Value::Vector(id) => heap.vector(id).to_vec(),
+            _ => continue,
+        };
+        let tag = match parts.first() {
+            Some(Value::Keyword(s)) => *s,
+            _ => continue,
+        };
+        if tag == clear_t {
+            crossterm::queue!(out, Clear(ClearType::All)).map_err(term_err)?;
+        } else if tag == cursor_t {
+            let row = expect_int(heap, "term-draw", arg(&parts, 1))?;
+            let col = expect_int(heap, "term-draw", arg(&parts, 2))?;
+            crossterm::queue!(out, MoveTo(clamp_u16(col), clamp_u16(row))).map_err(term_err)?;
+        } else if tag == text_t {
+            let row = expect_int(heap, "term-draw", arg(&parts, 1))?;
+            let col = expect_int(heap, "term-draw", arg(&parts, 2))?;
+            let s = expect_string(heap, "term-draw", arg(&parts, 3))?;
+            crossterm::queue!(out, MoveTo(clamp_u16(col), clamp_u16(row))).map_err(term_err)?;
+            apply_face(&mut out, heap, parts.get(4).copied().unwrap_or(Value::Nil))?;
+            crossterm::queue!(out, Print(s), SetAttribute(Attribute::Reset), ResetColor)
+                .map_err(term_err)?;
+        }
+    }
+    out.flush().map_err(term_err)?;
+    Ok(Value::Nil)
+}
+
+/// Apply a face map (`{:fg :red :bg :blue :bold true :reverse true}`) as
+/// crossterm style commands. A non-map (or nil) face is a no-op. Unknown colour
+/// names are skipped. Callers reset attributes after the text.
+fn apply_face<W: std::io::Write>(out: &mut W, heap: &Heap, face: Value) -> Result<(), LispError> {
+    use crossterm::style::{Attribute, SetAttribute, SetBackgroundColor, SetForegroundColor};
+    let Value::Map(id) = face else { return Ok(()) };
+    if let Some(fg) = heap.map_get(id, value::kw("fg")).and_then(color_of) {
+        crossterm::queue!(out, SetForegroundColor(fg)).map_err(term_err)?;
+    }
+    if let Some(bg) = heap.map_get(id, value::kw("bg")).and_then(color_of) {
+        crossterm::queue!(out, SetBackgroundColor(bg)).map_err(term_err)?;
+    }
+    if heap.map_get(id, value::kw("bold")).is_some_and(face_truthy) {
+        crossterm::queue!(out, SetAttribute(Attribute::Bold)).map_err(term_err)?;
+    }
+    if heap.map_get(id, value::kw("reverse")).is_some_and(face_truthy) {
+        crossterm::queue!(out, SetAttribute(Attribute::Reverse)).map_err(term_err)?;
+    }
+    Ok(())
+}
+
+/// Brood truthiness for a face flag: only `nil`/`false` are falsy.
+fn face_truthy(v: Value) -> bool {
+    !matches!(v, Value::Nil | Value::Bool(false))
+}
+
+/// A face colour keyword (`:red`, `:dark-grey`, …) to a crossterm `Color`.
+fn color_of(v: Value) -> Option<crossterm::style::Color> {
+    use crossterm::style::Color;
+    let Value::Keyword(s) = v else { return None };
+    Some(match value::symbol_name(s).as_str() {
+        "black" => Color::Black,
+        "red" => Color::Red,
+        "green" => Color::Green,
+        "yellow" => Color::Yellow,
+        "blue" => Color::Blue,
+        "magenta" => Color::Magenta,
+        "cyan" => Color::Cyan,
+        "white" => Color::White,
+        "grey" | "gray" => Color::Grey,
+        "dark-grey" | "dark-gray" => Color::DarkGrey,
+        _ => return None,
+    })
+}
+
+/// Clamp a Brood int to a terminal coordinate (crossterm uses `u16`).
+fn clamp_u16(n: i64) -> u16 {
+    n.clamp(0, u16::MAX as i64) as u16
+}
+
+/// `(mailbox-size pid)` — the number of queued messages in a local process's
+/// mailbox, or `nil` for a remote/dead pid. The one process-introspection
+/// accessor Brood can't reach (the queue lives behind the scheduler registry);
+/// `std/observe.blsp` assembles everything else (id, liveness) from Brood.
+fn mailbox_size(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    match arg(args, 0) {
+        Value::Pid { node, id } if crate::dist::is_local(node) => {
+            Ok(crate::process::mailbox_len(id)
+                .map(|n| Value::Int(n as i64))
+                .unwrap_or(Value::Nil))
+        }
+        Value::Pid { .. } => Ok(Value::Nil),
+        other => Err(LispError::wrong_type(heap, "mailbox-size", "pid", other)),
+    }
 }
 
 /// `(string->number s)` — parse `s` as an integer if it is one, else as a float,
@@ -2333,12 +2800,15 @@ fn arglist(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
         _ => return Ok(Value::Nil),
     };
     // Copy the parts out before re-borrowing the heap mutably to build the list.
+    // For a multi-arity closure there's no single arglist; show the last clause
+    // (conventionally the most general — e.g. the variadic `(a b & more)`).
     let (params, optionals, rest) = {
         let cl = heap.closure(id);
+        let arm = cl.arms.last().expect("closure has at least one arm");
         (
-            cl.params.clone(),
-            cl.optionals.iter().map(|&(s, _)| s).collect::<Vec<_>>(),
-            cl.rest,
+            arm.params.clone(),
+            arm.optionals.iter().map(|&(s, _)| s).collect::<Vec<_>>(),
+            arm.rest,
         )
     };
     let mut items: Vec<Value> = params.into_iter().map(Value::Sym).collect();

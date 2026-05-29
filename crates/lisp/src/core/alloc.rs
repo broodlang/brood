@@ -43,18 +43,30 @@ static HARD_LIMIT: AtomicUsize = AtomicUsize::new(0); // 0 = unlimited; abort if
 static SOFT_LIMIT: AtomicUsize = AtomicUsize::new(0); // 0 = unlimited; safepoint raises if crossed
 
 /// Default ceiling the *test runners* apply when neither env var is set
-/// (`brood --test`, `nest test`, the `cargo test` Brood suite). Sized for the
-/// suite's *concurrent* peak — per-process heaps are `Rc`-reclaimed when a green
-/// process finishes, so the footprint is ~`nproc` workers' simultaneous live
-/// bytes plus the shared baseline, not a cumulative total — with headroom, while
-/// tight enough that a genuinely runaway allocation trips in a fraction of a
-/// second instead of chewing through gigabytes of host RAM first. An explicit
-/// env var overrides it; if the real suite ever legitimately needs more, bump
-/// this (or set `BROOD_MEM_LIMIT`) rather than letting a runaway run wild.
-pub const TEST_DEFAULT_HARD: usize = 512 * 1024 * 1024; // 512 MiB
-/// Soft default for the test runners — 384 MiB, i.e. 3/4 of the hard default, so
-/// a runaway fails *cleanly* (catchable `E0043`) before the hard abort.
-pub const TEST_DEFAULT_SOFT: usize = 384 * 1024 * 1024; // 384 MiB = 3/4 · 512 MiB
+/// (`brood --test`, `nest test`, the `cargo test` Brood suite). Its job is to
+/// **GUARANTEE THE HOST SURVIVES a test run** — it is *not* a precise working-set
+/// budget (that's impossible while the tracing GC is still a no-op, the M1
+/// migration: the bump allocator never reclaims, so even legitimate bounded work
+/// accumulates). The number is chosen *below* a typical dev machine's RAM so a run
+/// whose allocation grows without bound fails with a clean, catchable `E0043`
+/// (then the hard abort) long before the OS OOM-killer or a hard freeze can fire.
+///
+/// **Never default this to `0`/unlimited.** The GC doesn't reclaim yet, so an
+/// unbounded run will eat all host RAM — an unlimited default once OOM-froze the
+/// machine. The cap machinery is still opt-out per run via `BROOD_MEM_LIMIT`.
+///
+/// **5 GiB hard / 4 GiB soft.** With the `:isolated` phase now running each unit
+/// in its own droppable process (`std/test.blsp`), the whole project suite peaks
+/// ~3 GiB (down from ~18 GiB when every isolated test accumulated on the long-lived
+/// runner heap and OOM-froze the host). 5/4 GiB leaves headroom over that while
+/// staying well under host RAM. Tighten as the GC lands / per-process limits arrive
+/// (ADR-011). A single `(sum-to 100000 0)` tail loop still holds ~500 MiB on its
+/// own — every `(+ …)`/`(- …)` is a prelude Brood call allocating ~22 env frames +
+/// an args list per iteration, unreclaimed without GC (see `docs/devlog.md`).
+pub const TEST_DEFAULT_HARD: usize = 5 * 1024 * 1024 * 1024; // 5 GiB
+/// Soft default for the test runners — 4 GiB, so a runaway/accumulating run fails
+/// *cleanly* (catchable `E0043`) before the hard abort and far below host RAM.
+pub const TEST_DEFAULT_SOFT: usize = 4 * 1024 * 1024 * 1024; // 4 GiB
 
 /// System allocator wrapper that tallies bytes in/out and enforces [`HARD_LIMIT`].
 pub struct Counting;

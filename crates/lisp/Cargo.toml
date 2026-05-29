@@ -35,6 +35,21 @@ sha2 = "0.11"
 # Cryptographically-strong random nonces for the handshake. `getrandom` reads
 # the OS RNG directly — no allocator, no global state, just bytes.
 getrandom = "0.4"
+# The text rope backing editor buffers (M2, ADR-045). A `ropey::Rope` is a
+# B-tree of `Arc`-shared chunks: cloning is O(1) (bump refcounts) and edits are
+# copy-on-write on the touched nodes only — so the immutable-data contract
+# (ADR-026) holds *for free* (every edit returns a fresh rope; the original is
+# untouched and shares unchanged structure). The one irreducible text mechanism
+# the language can't bootstrap; everything above it (points/marks/buffers) is
+# Brood. See docs/decisions.md ADR-045.
+ropey = "1.6"
+# The terminal frontend for the M3 display/input seam (ADR-046). crossterm gives
+# raw mode, the alternate screen, key events, and styled cell output across
+# platforms — the irreducible "drawing, I/O" mechanism architecture.md groups
+# with the rope. The display *protocol* is Brood data (a vector of render ops);
+# the `term-*` primitives are just the in-process frontend that paints it, so a
+# remote/web frontend can implement the identical protocol later.
+crossterm = "0.29"
 
 [dev-dependencies]
 # Lightweight microbenchmark harness for the interpreter core. Dev-only (the

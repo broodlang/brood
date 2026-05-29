@@ -177,8 +177,15 @@ fn macroexpand_all_depth(heap: &mut Heap, form: Value, env: EnvId, depth: u32) -
                     if let Some(lowered) = lower_fn(heap, &items) {
                         return macroexpand_all_depth(heap, lowered, env, depth + 1);
                     }
-                    // Ordinary fn: the param list (items[1]) is a binding position,
-                    // not a call — expand only the body.
+                    // `lower_fn` declined: this is either a single-clause fn (its
+                    // param list at items[1]) or an arity-only *multi*-clause fn
+                    // (each remaining form is a `(param-list body…)` clause, built
+                    // into `ClosureArm`s by the evaluator). For multi-clause, expand
+                    // each clause's BODY while leaving its param list opaque; for
+                    // single-clause, expand only the body after the param list.
+                    if fn_is_arity_multi_clause(heap, &items) {
+                        return expand_fn_clauses(heap, original, &items, env, depth + 1);
+                    }
                     return expand_tail(heap, original, &items, 2, env, depth + 1);
                 } else if value::symbol_is(s, "defmacro") {
                     // (defmacro name params body...) — name/params aren't calls.
@@ -245,6 +252,51 @@ fn expand_tail(
     let mut out = items[..start].to_vec();
     for &item in &items[start..] {
         out.push(macroexpand_all_depth(heap, item, env, depth)?);
+    }
+    Ok(rebuild_list(heap, original, out))
+}
+
+/// Does this (post-`lower_fn`) `fn`/`lambda` form's body consist entirely of
+/// `(param-list body…)` clauses — i.e. is it an arity-only multi-clause fn? (A
+/// leading docstring is allowed.) Pattern multi-clause fns were already lowered
+/// to `match*`, so by here "all clauses" implies arity-only.
+fn fn_is_arity_multi_clause(heap: &Heap, items: &[Value]) -> bool {
+    let forms = &items[1..];
+    let forms = match forms.first() {
+        Some(&Value::Str(_)) if forms.len() > 1 => &forms[1..],
+        _ => forms,
+    };
+    !forms.is_empty() && forms.iter().all(|&f| is_clause(heap, f))
+}
+
+/// Expand an arity-only multi-clause `fn`: each clause is `(param-list body…)`.
+/// Leave each clause's param list opaque (a binding position — a name there must
+/// not be expanded as a call) and macroexpand each clause's body forms. A leading
+/// docstring is passed through untouched.
+fn expand_fn_clauses(
+    heap: &mut Heap,
+    original: Value,
+    items: &[Value],
+    env: EnvId,
+    depth: u32,
+) -> LispResult {
+    let mut out = vec![items[0]]; // the `fn`/`lambda` head
+    let mut i = 1;
+    if matches!(items.get(1), Some(&Value::Str(_))) && items.len() > 2 {
+        out.push(items[1]); // leading docstring
+        i = 2;
+    }
+    for &clause in &items[i..] {
+        match form_items(heap, clause) {
+            Some(parts) if !parts.is_empty() => {
+                let mut co = vec![parts[0]]; // param list: opaque
+                for &b in &parts[1..] {
+                    co.push(macroexpand_all_depth(heap, b, env, depth)?);
+                }
+                out.push(rebuild_list(heap, clause, co));
+            }
+            _ => out.push(clause),
+        }
     }
     Ok(rebuild_list(heap, original, out))
 }
@@ -359,6 +411,29 @@ fn is_clause(heap: &Heap, f: Value) -> bool {
     }
 }
 
+/// Is `param_form` an *arity* parameter list — only plain symbols (params) and
+/// the `&optional`/`&` markers, with no literal or destructuring *patterns*?
+/// Arity clauses dispatch by argument count via native multi-arity arms
+/// (`ClosureArm`, cheap — direct bind); a clause with any non-symbol parameter is
+/// a *pattern* clause and must go through the `match*` engine instead.
+pub(crate) fn is_arity_param_list(heap: &Heap, param_form: Value) -> bool {
+    match form_items(heap, param_form) {
+        Some(items) => items.iter().all(|&p| is_sym(p)),
+        None => false,
+    }
+}
+
+/// A clause whose parameter list is an arity list (see [`is_arity_param_list`]).
+pub(crate) fn is_arity_clause(heap: &Heap, f: Value) -> bool {
+    match f {
+        Value::Pair(p) => {
+            let head = heap.car(p);
+            matches!(head, Value::Pair(_) | Value::Nil) && is_arity_param_list(heap, head)
+        }
+        _ => false,
+    }
+}
+
 /// Cheap predicate: does this `fn`/`lambda` form need pattern lowering — i.e. is
 /// it multi-clause, or single-clause with a pattern in a required parameter?
 /// Mirrors [`lower_fn`]'s dispatch. Used by the evaluator as a fallback for `fn`
@@ -381,7 +456,10 @@ pub(crate) fn fn_needs_lowering(heap: &Heap, fn_form: Value) -> bool {
         return false;
     }
     if forms.iter().all(|&f| is_clause(heap, f)) {
-        return true; // multi-clause
+        // Multi-clause. Arity-only clauses dispatch natively (`make_closure`
+        // builds `ClosureArm`s), so they DON'T need `match*` lowering; only a
+        // clause carrying a literal/destructuring pattern does.
+        return !forms.iter().all(|&f| is_arity_clause(heap, f));
     }
     // single-clause: a pattern in a required slot (before &optional / & rest)?
     let params = match form_items(heap, forms[0]) {
@@ -411,6 +489,16 @@ fn lower_fn(heap: &mut Heap, items: &[Value]) -> Option<Value> {
             _ => (None, forms),
         };
         if !clauses.is_empty() && clauses.iter().all(|&f| is_clause(heap, f)) {
+            // This IS a multi-clause fn — never fall through to the single-clause
+            // path below (which would misread the first clause as a param list).
+            if clauses.iter().all(|&f| is_arity_clause(heap, f)) {
+                // Arity-only: dispatches natively (the evaluator's `make_closure`
+                // builds one `ClosureArm` per clause, bound by argument count — no
+                // rest-list, no `match*`). Leave it un-lowered.
+                return None;
+            }
+            // At least one literal/destructuring *pattern* clause → lower the whole
+            // dispatch to the `match*` engine.
             let g = value::gensym("args");
             let params = heap.list(vec![value::sym("&"), g]);
             let mut mexpr = vec![value::sym("match*"), value::kw("fn"), g];

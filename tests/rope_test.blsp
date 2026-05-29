@@ -1,0 +1,159 @@
+;; Ropes (ADR-045): the editor buffer's text storage — `string->rope` plus the
+;; rope-* primitive kernel (length / line-count / insert / delete / slice / line
+;; / char<->line). Immutable like every Brood value: every edit returns a
+;; *fresh* rope and leaves its input untouched. Process-local: a rope lives in
+;; one process's heap and never crosses in a message — its content moves as a
+;; string (`rope->string`), which the across-processes block below proves.
+;;
+;; Register-only — discovered and run by `nest test` (and cargo test, via
+;; crates/lisp/tests/suite.rs). The whole suite runs in parallel (each test is
+;; its own green process), so even the single-process tests here exercise ropes
+;; on multiple cores; the final :isolated block adds explicit spawn/send/receive.
+
+(require 'test)
+
+;; ---- file-local helpers (defined once at load; survive :isolated rollback) ----
+
+;; Tail-recursive [lo, hi) ascending — a `test` body runs in a green process
+;; with a small coroutine stack, so iteration must be tail-recursive.
+(defn rt-range (lo hi) (rt-range--down (- hi 1) lo nil))
+(defn rt-range--down (i lo acc) (if (< i lo) acc (rt-range--down (- i 1) lo (cons i acc))))
+
+;; A worker that builds a rope from its own text, edits it, and sends the
+;; resulting *string* back to `parent` (ropes themselves don't cross heaps).
+;; This *is* the process body — `spawn` wraps the call form in a thunk, so
+;; `(spawn (rt-editor me "x"))` runs this in the new process.
+(defn rt-editor (parent text)
+  (let (r (string->rope text)
+        r2 (rope-insert r 0 ">> "))
+    (send parent (rope->string r2))))
+
+;; A minimal buffer-as-process: holds a rope in its loop state and serves
+;; [:insert idx s], [:text reply] messages. Previews the Phase-1 model.
+(defn rt-buffer (r)
+  (receive
+    ([:insert idx s] (rt-buffer (rope-insert r idx s)))
+    ([:text reply]   (send reply (rope->string r)) (rt-buffer r))
+    ([:stop reply]   (send reply :stopped))))
+
+(describe "rope construction & predicates"
+  (test "string->rope builds a rope"
+    (is (rope? (string->rope "hello")))
+    (assert= (type-of (string->rope "x")) :rope)
+    (refute (rope? "hello"))
+    (refute (rope? 3)))
+  (test "round-trips through a string"
+    (assert= (rope->string (string->rope "hello\nworld\n")) "hello\nworld\n")
+    (assert= (rope->string (string->rope "")) ""))
+  (test "empty rope" (assert= (rope-length (string->rope "")) 0)))
+
+(describe "rope measurement"
+  (test "length is the character count"
+    (assert= (rope-length (string->rope "hello")) 5)
+    ; multi-byte chars count as 1 (char-indexed, like strings)
+    (assert= (rope-length (string->rope "héllo")) 5))
+  (test "line-count counts lines (a trailing newline ends a line)"
+    (assert= (rope-line-count (string->rope "")) 1)
+    (assert= (rope-line-count (string->rope "one line")) 1)
+    (assert= (rope-line-count (string->rope "a\nb")) 2)
+    (assert= (rope-line-count (string->rope "a\nb\n")) 3)))
+
+(describe "rope edits are immutable (return a fresh rope)"
+  (test "insert returns a fresh rope; the original is unchanged"
+    (let (r (string->rope "hello"))
+      (let (r2 (rope-insert r 5 " world"))
+        (assert= (rope->string r2) "hello world")
+        (assert= (rope->string r) "hello"))))
+  (test "insert at the front and middle"
+    (assert= (rope->string (rope-insert (string->rope "ello") 0 "h")) "hello")
+    (assert= (rope->string (rope-insert (string->rope "helo") 3 "l")) "hello"))
+  (test "delete returns a fresh rope; the original is unchanged"
+    (let (r (string->rope "hello world"))
+      (let (r2 (rope-delete r 5 11))
+        (assert= (rope->string r2) "hello")
+        (assert= (rope->string r) "hello world"))))
+  (test "delete an empty range is a no-op (fresh, equal)"
+    (assert= (rope->string (rope-delete (string->rope "hello") 2 2)) "hello"))
+  (test "insert then delete composes"
+    (let (r (string->rope "abc"))
+      ; "abc" -insert@1-> "aXYZbc" -delete[0,2)-> "YZbc"
+      (assert= (rope->string (rope-delete (rope-insert r 1 "XYZ") 0 2)) "YZbc"))))
+
+(describe "rope slicing & lines"
+  (test "slice returns the char range as a string"
+    (let (r (string->rope "hello world"))
+      (assert= (rope-slice r 0 5) "hello")
+      (assert= (rope-slice r 6 11) "world")
+      (assert= (rope-slice r 0 0) "")))
+  (test "rope-line returns each line including its trailing newline"
+    (let (r (string->rope "alpha\nbeta\ngamma"))
+      (assert= (rope-line r 0) "alpha\n")
+      (assert= (rope-line r 1) "beta\n")
+      (assert= (rope-line r 2) "gamma"))))
+
+(describe "rope char<->line mapping"
+  (test "char->line finds the line containing a char index"
+    (let (r (string->rope "ab\ncd\nef"))
+      (assert= (rope-char->line r 0) 0)   ; 'a'
+      (assert= (rope-char->line r 3) 1)   ; 'c'
+      (assert= (rope-char->line r 7) 2))) ; 'f'
+  (test "line->char finds where a line begins"
+    (let (r (string->rope "ab\ncd\nef"))
+      (assert= (rope-line->char r 0) 0)
+      (assert= (rope-line->char r 1) 3)
+      (assert= (rope-line->char r 2) 6)))
+  (test "char->line and line->char round-trip on line starts"
+    (let (r (string->rope "ab\ncd\nef"))
+      (assert= (rope-char->line r (rope-line->char r 1)) 1)
+      (assert= (rope-char->line r (rope-line->char r 2)) 2))))
+
+(describe "rope equality"
+  (test "ropes are = by text content, not identity"
+    (is (= (string->rope "abc") (string->rope "abc")))
+    (refute (= (string->rope "abc") (string->rope "abd"))))
+  (test "an edit that reproduces the text is = to the original text's rope"
+    (let (r (string->rope "ab"))
+      (is (= (rope-delete (rope-insert r 2 "Xc") 2 3) (string->rope "abc")))))
+  (test "a rope is not = to the equivalent string (distinct types)"
+    (refute (= (string->rope "abc") "abc"))))
+
+(describe "rope out-of-bounds errors"
+  (test "insert past the end raises" (assert-error (rope-insert (string->rope "ab") 99 "x")))
+  (test "insert at a negative index raises" (assert-error (rope-insert (string->rope "ab") -1 "x")))
+  (test "delete past the end raises" (assert-error (rope-delete (string->rope "ab") 0 99)))
+  (test "delete with end < start raises" (assert-error (rope-delete (string->rope "abc") 2 1)))
+  (test "slice past the end raises" (assert-error (rope-slice (string->rope "ab") 0 99)))
+  (test "line past the end raises" (assert-error (rope-line (string->rope "ab") 5)))
+  (test "char->line past the end raises" (assert-error (rope-char->line (string->rope "ab") 99))))
+
+(describe "ropes across processes"
+  :isolated
+
+  ;; A rope is process-local: sending one directly is a clean error, not a
+  ;; silent copy. The blessed path is to send its content as a string.
+  (test "sending a rope in a message raises"
+    (assert-error (send (self) (string->rope "nope"))))
+
+  ;; Workers each build + edit a rope on their own core and send back strings;
+  ;; the parent fans them in. Proves rope ops run concurrently across cores and
+  ;; that the content crosses heaps as a string (deep-copied, GC-safe).
+  (test "fan-out / fan-in: workers edit ropes, return strings"
+    (let (me (self))
+      (spawn (rt-editor me "alpha"))
+      (spawn (rt-editor me "beta"))
+      (spawn (rt-editor me "gamma"))
+      ;; collect 3 results, order-independent, into a sorted list
+      (let (got (sort (list (receive) (receive) (receive))))
+        (assert= got (list ">> alpha" ">> beta" ">> gamma")))))
+
+  ;; The buffer-as-process model (Phase 1 preview): a process owns a rope in its
+  ;; loop, mutates by looping with a fresh rope, and serves its text on request.
+  (test "a buffer process holds a rope and serves edits"
+    (let (me (self)
+          buf (spawn (rt-buffer (string->rope "hello"))))
+      (send buf [:insert 5 " world"])
+      (send buf [:insert 0 ">> "])
+      (send buf [:text me])
+      (assert= (receive) ">> hello world")
+      (send buf [:stop me])
+      (assert= (receive) :stopped))))

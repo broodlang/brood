@@ -1,0 +1,56 @@
+;; std/display.blsp — the render-op protocol for the display seam. (require 'display).
+;;
+;; Design notes (the *why*; the *what* is in the docstrings below):
+;;  - The display layer is a *protocol, not a library* (docs/architecture.md): a
+;;    frontend consumes a serialisable stream of "render this" ops and emits input
+;;    events. This module defines that op vocabulary as plain Brood **data** —
+;;    each constructor just builds a tagged vector. The `term-*` primitives are
+;;    the in-process (crossterm) frontend that paints it; a remote or web frontend
+;;    would interpret the identical ops over a socket. That sameness is what makes
+;;    "fast native locally" and "server for other instances" one code path (M3/M4).
+;;  - Pure: every constructor returns a fresh value, no IO, no kernel surface.
+;;    Opt-in (`require`), never in the prelude.
+;;
+;; A FRAME is a vector of OPS. An OP is a tagged vector:
+;;   [:clear]                       clear the whole screen
+;;   [:text row col s]              draw string `s` at (row, col), 0-based cells
+;;   [:text row col s face]         …styled by `face`, a map (see below)
+;;   [:cursor row col]              place the hardware cursor
+;; A FACE is a map of style attributes, any subset of:
+;;   {:fg <colour> :bg <colour> :bold <truthy> :reverse <truthy>}
+;; where a colour is a keyword: :black :red :green :yellow :blue :magenta :cyan
+;;   :white :grey :dark-grey. Unknown keys/colours are ignored by the frontend.
+
+(defmodule display
+  "The render-op protocol for the display seam (M3, ADR-046): pure constructors
+that build a **frame** — a vector of render ops — as plain data.
+
+    (require 'display)
+    (frame (clear)
+           (text 0 0 \"hello\" {:bold true})
+           (cursor 0 5))
+
+A frontend (the `term-*` primitives locally, a socket peer remotely) interprets
+that frame. Ops: `(clear)`, `(text row col s)` / `(text row col s face)`,
+`(cursor row col)`. A *face* is a map like `{:fg :red :bold true}`. Rows and
+columns are 0-based character cells.")
+
+(defn clear ()
+  "A render op that clears the whole screen."
+  [:clear])
+
+(defn text (row col s &optional (face nil))
+  "A render op drawing string `s` at (`row`, `col`) (0-based cells), optionally
+styled by `face` (a map like `{:fg :red :bold true}`)."
+  (if (nil? face)
+    [:text row col s]
+    [:text row col s face]))
+
+(defn cursor (row col)
+  "A render op placing the hardware cursor at (`row`, `col`)."
+  [:cursor row col])
+
+(defn frame (& ops)
+  "Collect render ops into a frame (a vector), dropping any `nil` ops so callers
+can splice in conditional ops inline. Pass the result to a frontend (`term-draw`)."
+  (into [] (filter (fn (o) (not (nil? o))) ops)))

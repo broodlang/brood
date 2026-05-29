@@ -6209,3 +6209,233 @@ tool, restored to the prelude. The roadmap already foreshadowed this ("the
 `defonce` transitional shim stays in the prelude").
 
 **ADRs.** [`decisions.md`](decisions.md) **ADR-042**, **ADR-043**.
+
+
+## 2026-05-29 (re-confirmation) — KI-1 scheduler race verified fixed; docs reconciled
+
+**Goal.** Independently confirm the multi-thread scheduler race (KI-1) is
+actually closed before opening the next work track, and bring the docs that
+still hedged into line.
+
+**Verification.** Built `RUSTFLAGS="-C debug-assertions=on" cargo build
+--release` — the mode that reliably exposed the race — and ran a reconstruction
+of the original symptom: 40 green workers, each hammering prelude globals
+(`fold`/`map`/`reduce`/`filter` + pattern-bound locals) in a tail loop and
+fanning results back to the parent via `send`/`receive`. **12/12 clean** under
+default `-j 0`, deterministic result every run; a heavier 80-worker variant under
+`BROOD_GC_STRESS=1` was 3/3 clean before being stopped. None of the 2026-05-28
+symptoms (bogus `unbound symbol: fold/%eq/iter/acc`, `eval/mod.rs` index panic,
+parent hang, plain-release segfault) reproduce. Matches the as-fixed claim in
+KI-1 (supervisor strip `e3d3a0d` + bump allocator `f90f0de` + per-worker pinned
+queues `2abf05e`).
+
+**Docs reconciled.** `known-issues.md` KI-2 still read "underlying race **largely
+fixed**" / "The lookup race itself … **Still open**" and recommended `-j 1` for
+correctness — all stale. Updated KI-2 to **fixed**, demoted the `-j 1` /
+`:isolated` mitigations to "bounding a heavy run, not avoiding crashes."
+`claude-demo-findings.md` row 1 went from "🟢 largely fixed (plain release can
+still segfault)" to "✅ fixed", and its "What's open" list closed the
+plain-release-segfault and Phase-2-allocator items.
+
+**Heads-up flagged for the next track.** Work-stealing and kernel supervision are
+*exactly* the two pieces whose removal fixed this race. The findings doc now
+records that reintroducing either must clear the bar of not reopening KI-1 — the
+substrate (bump allocator + pinned queues) is what currently makes the race
+impossible, and a naive work-stealing reintroduction would undo the pinning.
+
+
+## 2026-05-29 (concurrency-v2 track) — userland supervisor library (ADR-044)
+
+**Goal.** First concrete deliverable of the concurrency-v2 track
+([`concurrency-v2.md`](concurrency-v2.md), §4.3 "userland-first"): supervisor
+trees as a require-able Brood library, with **zero** new scheduler surface — the
+property that matters after KI-1, since kernel supervision was the bulk of that
+race.
+
+**Shipped.** `std/supervisor.blsp` (embedded module, `(require 'supervisor)`):
+- `start-supervisor` — spawns a supervisor process that starts a list of child
+  specs, `monitor`s each, and restarts them on `[:down ref pid reason]`.
+- Child spec map: `:start` (0-arg fn that spawns the child, returns its pid),
+  optional `:id`, `:restart` type — `:permanent` (always), `:transient` (only on
+  abnormal exit), `:temporary` (never).
+- Restart-intensity window: `:max-restarts` in `:max-seconds` (default 3/5);
+  exceeding it exits the supervisor abnormally so a watcher's monitor fires.
+- `which-children` (synchronous introspection → `[{:id :pid :restart}]`),
+  `stop-supervisor`.
+- Pure Brood policy over `spawn`/`monitor`/`receive` (ADR-006); state is one
+  immutable map threaded through a tail-recursive receive loop (the `hatch.blsp`
+  idiom). The `:start` closures ride into the supervisor process via the
+  closure-as-data path (ADR-033) and are re-invoked on restart.
+
+**Scope (ADR-011 + a real kernel gap).** Only `:one-for-one`. `:one-for-all` /
+`:rest-for-one` must terminate *healthy* siblings; Brood has **no kill/exit
+primitive** (no links, no `exit`), so they're impossible in userland today —
+`start-supervisor` rejects them up front. Same gap means `stop-supervisor` ends
+the supervisor but leaves children running (orphaned), and an intensity shutdown
+orphans survivors. This is now the concrete trigger for the one kernel hook
+supervision might later justify (a minimal `exit`/link) — see
+[`concurrency-v2.md`](concurrency-v2.md) §4.
+
+**Rust delta.** One line: `("supervisor", include_str!("…/std/supervisor.blsp"))`
+in `EMBEDDED_MODULES`. Nothing else.
+
+**Tests.** `tests/supervisor_test.blsp` (`:isolated`): permanent restart yields a
+fresh pid; `:transient` restarts on crash but not on clean `:normal` exit;
+`:temporary` never restarts; exceeding intensity shuts the supervisor down
+abnormally (observed via a monitor on the supervisor); `which-children`
+summaries; unsupported-strategy rejection. 7/7 green. Sibling embedded module
+(`hatch`) 9/9 and the core suite 57/57 confirm the embed-list change is clean.
+
+**Docs.** ADR-044; [`supervision.md`](supervision.md) gained a "supervisor
+library" section; roadmap entry + concurrency-v2 §4.3 flipped to ✅ for the
+one-for-one slice.
+
+## 2026-05-29 — M2 Phase 0: the text rope substrate (`Value::Rope`, ADR-045)
+
+**Goal.** Begin the editor (M2) by adding the one piece of buffer-text mechanism
+the language can't bootstrap: an efficient, immutable text rope. Chosen approach
+(this session's planning): a thin end-to-end editor slice, **TUI-first**, with
+text as an **opaque immutable-rope handle** owned by a **buffer-as-process**.
+Phase 0 is just the rope value + primitive kernel; everything above it is Brood.
+
+**Decision.** ADR-045 — a single new heap value `Value::Rope(RopeId)` / `Tag::Rope`
+backed by `ropey::Rope`. ropey's `Arc`-shared B-tree gives O(1) clone + copy-on-
+write edits, so immutability (ADR-026) holds *for free*: `rope-insert`/`rope-delete`
+clone-then-edit and return a fresh rope sharing unchanged structure. Ropes are
+**process-local** — they never cross in a message (`to_message` errors with a
+hint to send `rope->string`), matching the buffer-as-process design; a rope
+`def`'d to a global *is* promoted into RUNTIME (mirrors `Str`; ropey is Send+Sync).
+
+**Built.**
+- `ropey` dep (lisp crate). `Value::Rope` + `Tag::Rope` (16th tag — fills the
+  `Ty(u16)` lattice exactly; `UNIVERSE` now computes in u32 then narrows to dodge
+  the `1u16 << 16` const-overflow the old comment predicted).
+- Full heap wiring: a `ropes` slab in LOCAL + a `boxcar` slab in RUNTIME, plus
+  every coordinated GC/region site — `FreeLists`/`PoisonBits`/`LocalCheckpoint`/
+  `Marks`/`FlushForward` + their methods, `alloc_rope`, the LOCAL+RUNTIME `rope()`
+  accessor, `promote` (copy to RUNTIME), `flush_rope` (the live arena-flip path),
+  the dormant mark/sweep, `tag_rank`/`to_prelude`/`hash_value_into`/`equal`/
+  `local_live_count`, and the printer (`#<rope :chars N :lines M>` — never dumps
+  a whole buffer). `to_message_rec` and `mcp::value_to_json` reject ropes cleanly.
+- 10 primitives (char-indexed): `string->rope` `rope->string` `rope-length`
+  `rope-line-count` `rope-insert` `rope-delete` `rope-slice` `rope-line`
+  `rope-char->line` `rope-line->char`. Out-of-range → clean `E0012`, never a
+  ropey panic. `rope?` predicate in the prelude.
+
+**Tests.** `tests/rope_test.blsp` — 28 tests: construction/predicates, length/
+lines, immutability (original untouched after edit), slice/line, char↔line round-
+trip, content equality, OOB errors, and an `:isolated` across-processes block
+proving ropes are process-local (sending one raises), that workers edit ropes on
+their own cores and return *strings*, and a buffer-as-process that holds a rope in
+its loop and serves `:insert`/`:text` — the Phase-1 model in miniature. 28/28
+green, including under `BROOD_GC_STRESS=1`. Full workspace builds clean.
+
+**Known issue (pre-existing, NOT this change).** The full `cargo test` suite now
+rides the 4 GiB test soft cap exactly: 3 memory-heavy `adversarial_test` units die
+with a spurious `E0043`. Verified pre-existing — they fail identically with
+`rope_test.blsp` removed (565 tests, same 3, peak 4096 MB), so the current
+(uncommitted-WIP) tree already exceeds the cap independent of ropes. Raising the
+cap was tried and reverted: the suite peak tracked the cap up to 6 GiB, i.e. the
+demand is genuinely runaway, so a bump masks rather than fixes it. Left for
+investigation (likely the in-progress scheduler/alloc changes).
+
+## 2026-05-29 — M2 Phase 1: the buffer framework (`std/buffer.blsp`)
+
+**Goal.** The editor *toolkit* layer on top of Phase 0's rope: buffers, points,
+marks, regions, movement, editing — pure Brood, opt-in, isolated from the
+language. Architecture agreed this session: a three-layer split (Rust rope
+kernel → Brood editor framework → the editor app as a separate nest project),
+mirroring Emacs (C → built-in elisp → packages). The framework is **not part of
+the language**: `(require 'buffer)`, never in the prelude, zero kernel surface.
+
+**Design choices (this session).**
+- *Home:* an embedded, require-able std module (added to `EMBEDDED_MODULES`),
+  so the future editor nest project gets it for free with no package manager
+  (ADR-037 still ⬜). Extractable to a standalone package verbatim later.
+- *Buffer = a pure immutable value* (a map `{:rope :point :mark :name :file}`)
+  with pure ops returning fresh buffers — the testable foundation. The
+  *buffer-as-process* is a thin `spawn-buffer` actor that **holds** such a value.
+- *The rope-locality boundary.* A buffer holds a rope, and ropes are
+  process-local (ADR-045), so a buffer can't cross a process. `spawn-buffer`
+  ships the buffer's *text* (+ name/file/point/mark) and rebuilds the rope inside
+  the child; the actor replies only with **derived views** (text, line strings,
+  positions), never the buffer/rope. Edits and reads cross as **closures**
+  (`buffer -> buffer` / `buffer -> view`) via closure-as-data (ADR-033) — the
+  loop is just `([:edit f] …) ([:get f from r] …)`. That reply-with-views seam
+  is the seed of the M3 display protocol.
+
+**Built.** `std/buffer.blsp`: `make-buffer`/`buffer-from-file`/`save-buffer`,
+reads (`buffer-text`/`-point`/`-mark`/`-length`/`-line-count`/`-line-at`/
+`-current-line`/`-column`/`-char-after`/`-before`/`-region`), movement
+(`goto-char`/`forward`/`backward-char`/`beginning`/`end-of-line`/`forward`/
+`backward-line` (column-preserving)/`beginning`/`end-of-buffer`), mark
+(`set-mark`/`clear-mark`), editing (`insert`/`delete-char`/
+`delete-backward-char`/`delete-region` — all clear the mark, the simple v1
+choice), and the actor shell (`spawn-buffer`/`buffer-edit`/`buffer-query`/
+`stop-buffer`). All pure Brood over the rope primitives; `buffer-`/`buffer--`
+naming, one `(defmodule buffer …)`.
+
+**Tests.** `tests/buffer_test.blsp` — 28 tests: construction/reads, movement
+(clamping, column-preserving `forward-line`), immutable editing (original
+untouched), mark/region (either order), a real file round-trip through `/tmp`
+(slurp → edit → save → re-read), and an `:isolated` actor block (spawn → edit via
+a shipped closure → query a view; point/mark preserved across the spawn; two
+buffer processes independent). 28/28 green incl. `BROOD_GC_STRESS=1`.
+
+**Next.** A new `nest` project for the actual editor — keymaps, commands, config
+— built on `(require 'buffer)`. And/or the crossterm seam (Phase 3) + a simple
+`nest` process observer (needs no rope — just `list-processes` + the seam).
+
+
+## 2026-05-29 (concurrency-v2 track) — spawn-time load balancing; work-stealing ruled out
+
+**Goal.** Resolve the Track-A question from [`concurrency-v2.md`](concurrency-v2.md)
+§3 — is work-stealing viable on today's substrate, and what's the safe
+throughput win — by experiment, in an isolated worktree, without touching the
+just-stabilized scheduler in main until the answer was in.
+
+**Experiment (worktree `track-a-workstealing`, branch committed `2479190`).** Two
+opt-in scheduler variants behind env flags (default path byte-identical), built
+in plain release, 40-worker KI-1 repro × 10:
+
+| config | result |
+|---|---|
+| baseline (pinned round-robin) | 0/10 fail |
+| `BROOD_BALANCE` (least-loaded assign, no migration) | 0/10 (also clean under `BROOD_GC_STRESS`) |
+| `BROOD_STEAL` (work-stealing) | **10/10 segfault** |
+| `BROOD_STEAL` + preempt disabled | 0/10 |
+
+**Finding — work-stealing is blocked at the substrate.** It fails *specifically*
+on preempt-induced cross-thread migration (resuming a coroutine suspended
+mid-computation, deep native stack, on a different OS thread) — the same wall
+`2abf05e` hit. gdb (3/3) puts every crash in `scheduler::preempt` at the
+`(*yptr).suspend(…)` call with a **smashed return address** (`0x7`), *not* in
+corosensei's switch asm; the Brood-side `CURRENT`/yielder re-establishment that
+hypothesis 2 proposed is **already present** and doesn't help. So a deep saved
+coroutine stack is not safely resumable cross-thread in corosensei 0.3.4 — a
+substrate limit, not a cheap TLS fix. (Stealing *fresh, never-resumed* processes
+is safe — a viable migration-free partial, if a spawn-burst workload ever needs
+it. Recorded in §3.2; not built.)
+
+**Landed in main — spawn-time load balancing (default-on).** `assign_worker` now
+scans the worker queues from a rotating (round-robin) start and pins a fresh
+process to the **least-loaded** one (shortest queue, sampled via `try_lock`,
+ties toward the rotation, early-out on an empty queue). No migration — a process
+still lives on one worker for life, so the KI-1b hazard never arises (INV-2
+holds). When load is even (most queues empty) it degrades to plain round-robin;
+when one worker is backed up, fresh processes steer to idle workers. Replaces
+pure round-robin.
+
+**Validation (main, default-on).** Plain release KI-1 repro 0/8; concurrency
+suite 31/31, pids 4/4, supervisor 7/7, core suite 57/57; `preemption` Rust test
+green; 5000-process burst ~1911 ms (no measurable overhead from the per-spawn
+scan — was ~1811–1911 ms either way). Honest caveat: queue-length is an
+imperfect load signal — it doesn't see a long-running process *occupying* a
+worker (only queued ones), so it improves burst distribution, not uneven
+long-task occupancy. A per-worker busy flag is the future refinement if that
+matters.
+
+**Docs.** [`concurrency-v2.md`](concurrency-v2.md) §3.1a (experiment results) +
+§3.2 (revised directions: balance ✅ landed, fresh-only stealing 🟡 optional,
+live-coroutine stealing ❌ substrate-blocked). Experiment preserved on branch
+`track-a-workstealing`, unmerged.

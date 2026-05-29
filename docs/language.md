@@ -402,7 +402,35 @@ inherits both (it forwards to `fn`).
 
 Parameter lists stay **lists** (ADR-010), so a single tuple parameter must be
 wrapped: `(defn g ([x y]) …)` is one 2-tuple param, while `(defn g (x y) …)` is
-two params. Pattern destructuring of `&optional` slots is not supported yet.
+two params.
+
+**Matching and `&optional` don't nest.** `&optional` controls *arity*, patterns
+control *shape*, multi-clause controls *dispatch* — and the three don't combine
+into the optional slot:
+
+- An `&optional` slot **must be a plain symbol** (with an optional default); it
+  **cannot be a pattern**. `(defn k (x &optional ([a b] …)) …)` is a *type
+  error* ("expected a symbol").
+- **`&optional` does not work in multi-clause heads.** Clause heads are matched
+  as same-arity patterns, so an `&optional` inside one is treated as a literal
+  symbol, not an arity marker — the call fails to match. Use one or the other,
+  not both in the same `defn`.
+- Required parameters *can* still be patterns alongside `&optional` / `& rest`
+  (only the optional/rest slots are restricted): `(defn move (p [dx dy]
+  &optional (n 1)) …)` is fine.
+
+To branch on an optional argument, **bind it as a symbol and `match`/`cond` on
+it in the body** — using `nil` as the "was it omitted?" sentinel (or a custom
+sentinel default like `(opt :none)` when `nil` is itself a legal value):
+
+```clojure
+(defn h (x &optional opt)
+  (match opt
+    (nil [:no x])        ; omitted → defaults to nil
+    (v   [:yes x v])))
+(h 1)                    ;=> [:no 1]
+(h 1 2)                  ;=> [:yes 1 2]
+```
 
 **Idiom note.** The form `(defn area ([x y]) …)` is supported but **not
 idiomatic** — it visually collides with multi-clause `(defn f ((p) body))`,

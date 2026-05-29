@@ -187,6 +187,7 @@ macro_rules! handle {
 handle!(PairId);
 handle!(VecId);
 handle!(StrId);
+handle!(RopeId);
 handle!(ClosureId);
 handle!(NativeId);
 handle!(MapId);
@@ -218,6 +219,15 @@ pub enum Value {
     Sym(Symbol),
     Keyword(Symbol),
     Str(StrId),
+    /// A text **rope** — the editor's buffer storage (ADR-045). Backed by a
+    /// `ropey::Rope` (an `Arc`-shared B-tree); immutable like every Brood value,
+    /// so every editing primitive (`rope-insert`/`rope-delete`) returns a *fresh*
+    /// rope that structurally shares the unchanged parts. Process-local: a rope
+    /// lives in exactly one process's heap and never crosses in a message — its
+    /// content moves as a string via `rope->string` (mirrors how a `Pid` is the
+    /// handle, not the process). The one heap object kind that wraps a Rust
+    /// crate's structure rather than being built from `Value`s.
+    Rope(RopeId),
     /// A cons cell. Proper lists are pairs chained to a final `Nil`.
     Pair(PairId),
     Vector(VecId),
@@ -276,6 +286,7 @@ pub enum Tag {
     Map,
     Ref,
     Pid,
+    Rope,
 }
 
 impl Tag {
@@ -298,6 +309,7 @@ impl Tag {
             Tag::Map => "map",
             Tag::Ref => "ref",
             Tag::Pid => "pid",
+            Tag::Rope => "rope",
         }
     }
 }
@@ -321,6 +333,43 @@ pub fn tag(v: Value) -> Tag {
         Value::Map(_) => Tag::Map,
         Value::Ref(_) => Tag::Ref,
         Value::Pid { .. } => Tag::Pid,
+        Value::Rope(_) => Tag::Rope,
+    }
+}
+
+/// One arity-clause of a [`Closure`]: a parameter list plus the body run when the
+/// call's argument count selects this arm. A single-arity `fn`/`defn` has exactly
+/// one arm; a **multi-arity** one (e.g. `(fn (() 0) ((a) a) ((a b) (%add a b))
+/// ((a b & more) …))`) has one arm per clause, dispatched by argument count in
+/// `bind_params` (Clojure-style — each fixed arm binds its params *directly*, no
+/// rest-list, so the common small-arity call is cheap). Only *arity* clauses —
+/// plain symbol params plus optional `&optional`/`&` rest — become arms; clauses
+/// with literal/destructuring *patterns* (e.g. `((3 _) …)`) are lowered to the
+/// `match*` engine instead (see `eval::macros::lower_fn`).
+#[derive(Clone, Default)]
+pub struct ClosureArm {
+    pub params: Vec<Symbol>,
+    pub optionals: Vec<(Symbol, Value)>,
+    pub rest: Option<Symbol>,
+    pub body: Vec<Value>,
+}
+
+impl ClosureArm {
+    /// Smallest argument count this arm accepts.
+    pub fn min_arity(&self) -> usize {
+        self.params.len()
+    }
+    /// Largest argument count this arm accepts (`None` = unbounded, has `&` rest).
+    pub fn max_arity(&self) -> Option<usize> {
+        if self.rest.is_some() {
+            None
+        } else {
+            Some(self.params.len() + self.optionals.len())
+        }
+    }
+    /// Does this arm accept a call of `argc` arguments?
+    pub fn accepts(&self, argc: usize) -> bool {
+        argc >= self.min_arity() && self.max_arity().map_or(true, |m| argc <= m)
     }
 }
 
@@ -329,10 +378,9 @@ pub fn tag(v: Value) -> Tag {
 #[derive(Clone, Default)]
 pub struct Closure {
     pub name: Option<Symbol>,
-    pub params: Vec<Symbol>,
-    pub optionals: Vec<(Symbol, Value)>,
-    pub rest: Option<Symbol>,
-    pub body: Vec<Value>,
+    /// Arity clauses, dispatched by argument count (always ≥ 1). A single-arity
+    /// function has one arm; see [`ClosureArm`].
+    pub arms: Vec<ClosureArm>,
     /// The docstring: a leading string literal in the `fn`/`defn` body, when
     /// more body follows it (a lone string is the return value, not docs — the
     /// CL/Elisp rule). Read by `(doc f)`; powers hover / signature help. See
@@ -342,6 +390,44 @@ pub struct Closure {
     /// resolved per-process at call time, so a (shared) top-level closure works
     /// in any process. `Some(id)` is a specific local enclosing scope.
     pub env: Option<EnvId>,
+}
+
+impl Closure {
+    /// Build a single-arity closure (the common case) from a flat param spec.
+    pub fn single(
+        name: Option<Symbol>,
+        params: Vec<Symbol>,
+        optionals: Vec<(Symbol, Value)>,
+        rest: Option<Symbol>,
+        body: Vec<Value>,
+        doc: Option<String>,
+        env: Option<EnvId>,
+    ) -> Self {
+        Closure {
+            name,
+            arms: vec![ClosureArm {
+                params,
+                optionals,
+                rest,
+                body,
+            }],
+            doc,
+            env,
+        }
+    }
+
+    /// Select the arm to run for a call of `argc` arguments. Prefers an exact
+    /// fixed-arity arm (no `&` rest) over a variadic one; among matching arms,
+    /// the one with the most required params (most specific). `None` if no arm
+    /// accepts `argc` (an arity error). A single-arity closure always returns its
+    /// sole arm when `argc` fits.
+    pub fn select_arm(&self, argc: usize) -> Option<&ClosureArm> {
+        self.arms
+            .iter()
+            .filter(|a| a.accepts(argc))
+            // exact fixed match beats variadic; then most-specific (most params).
+            .max_by_key(|a| (a.rest.is_none(), a.params.len()))
+    }
 }
 
 /// Signature of a builtin: already-evaluated args, the call-site environment,

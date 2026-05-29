@@ -173,3 +173,9 @@ So we're "BEAM-minus-preemption-minus-migration" at first — both are additive 
 Precise mid-eval GC (needs Path B / scannable roots), supervision/links,
 work-stealing (stage 3), and cross-node distribution. None block 4b.
 (Reduction preemption was deferred here originally; it has since landed — ADR-027.)
+
+**Work-stealing note:** stage-3 work-stealing was *deliberately removed* (the
+current scheduler pins each process to one worker — `2abf05e`) because
+cross-thread coroutine resume was the last slice of the KI-1 race. The
+root-cause analysis and the invariants a reintroduction must honour are in
+[`concurrency-v2.md`](concurrency-v2.md).

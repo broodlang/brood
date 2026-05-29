@@ -24,7 +24,10 @@ use crate::error::{LispError, LispResult};
 use crate::eval;
 
 use super::message::{from_message, to_message, Message};
-use super::scheduler::{enqueue, ensure_ctx, gc_block_save, gc_block_set, Ctx, Process, Suspend};
+use super::scheduler::{
+    enqueue, ensure_ctx, gc_block_save, gc_block_set, stack_base_save, stack_base_set, Ctx,
+    Process, Suspend,
+};
 use super::timer::arm_timer;
 
 /// A process's mailbox. Guarded by one mutex so the "check empty → park" and
@@ -246,14 +249,16 @@ fn wait_for_message(ctx: &Ctx, i: usize, deadline: Option<Instant>) {
             // rationale as `preempt`): the worker may run other processes
             // whose eval/macroexpand changes the thread-local before we resume.
             let saved_block = gc_block_save();
+            let saved_base = stack_base_save();
             // SAFETY: the yielder is valid while this coroutine runs — which is now
             // (called from within eval, within the coroutine body). Suspending
             // returns control to the worker (`run_one`), which parks us.
             unsafe { (*yptr).suspend(Suspend::Receive) };
             // Resumed (by send or timer): the worker may have run others or migrated
-            // us to another worker — re-establish the context and depth.
+            // us to another worker — re-establish the context, depth and stack base.
             super::scheduler::CURRENT.with(|c| *c.borrow_mut() = Some(ctx.clone()));
             gc_block_set(saved_block);
+            stack_base_set(saved_base);
         }
     }
 }
@@ -279,4 +284,15 @@ pub(super) fn wake_for_timeout(pid: u64) {
 /// Order is unspecified (hash-map iteration); callers that care can sort.
 pub fn list_local_pids() -> Vec<u64> {
     crate::core::sync::lock(&REGISTRY).keys().copied().collect()
+}
+
+/// The number of messages queued in local process `pid`'s mailbox (its receive
+/// backlog), or `None` if no live local process has that id. Backs the
+/// `mailbox-size` primitive — the one bit of per-process state an observer needs
+/// that lives behind the scheduler registry. Takes the registry lock, then the
+/// mailbox's own lock, briefly.
+pub fn mailbox_len(pid: u64) -> Option<usize> {
+    let mailbox = crate::core::sync::lock(&REGISTRY).get(&pid).cloned()?;
+    let len = crate::core::sync::lock(&mailbox.state).queue.len();
+    Some(len)
 }

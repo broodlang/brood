@@ -1,0 +1,107 @@
+;; The display/input seam (M3, ADR-046): the `display` render-op protocol and the
+;; pure core of the `observe` process viewer. The frame builders are pure data, so
+;; they are fully testable without a terminal; the `term-*` primitives (the
+;; crossterm frontend) need a real TTY and are exercised by `nest observe`.
+;;
+;; The closing :isolated block adds cross-process coverage: it spawns real
+;; processes and drives the `mailbox-size` primitive + `observe--snapshot` from a
+;; live runtime, proving the one new Rust accessor works under the scheduler.
+
+(require 'test)
+(require 'observe)        ; pulls in display too
+
+(describe "display render-op constructors"
+  (test "clear / text / cursor build tagged op vectors"
+    (assert= (clear) [:clear])
+    (assert= (text 2 4 "hi") [:text 2 4 "hi"])
+    (assert= (text 2 4 "hi" {:bold true}) [:text 2 4 "hi" {:bold true}])
+    (assert= (cursor 1 7) [:cursor 1 7]))
+  (test "text omits the face slot when none is given"
+    (assert= (count (text 0 0 "x")) 4)
+    (assert= (count (text 0 0 "x" {:fg :red})) 5))
+  (test "frame collects ops into a vector and drops nils"
+    (let (f (frame (clear) nil (text 0 0 "a") nil (cursor 0 1)))
+      (is (vector? f))
+      (assert= (count f) 3)
+      (assert= (first f) [:clear])
+      (assert= (nth f 2) [:cursor 0 1])))
+  (test "an empty frame is the empty vector"
+    (assert= (frame) [])
+    (assert= (frame nil nil) [])))
+
+(describe "observer pure helpers"
+  (test "observe--fit truncates to width, leaves shorter strings alone"
+    (assert= (observe--fit "hello" 3) "hel")
+    (assert= (observe--fit "hi" 10) "hi")
+    (assert= (observe--fit "abc" 0) ""))
+  (test "observe--row lays out pid + mailbox in fixed columns"
+    (let (r (observe--row "p1" 7))
+      (is (string-contains? r "p1"))
+      (is (string-contains? r "7"))
+      ;; "  " + 24-wide pid + 8-wide mailbox
+      (assert= (string-length r) 34))))
+
+(describe "observe-frame (the pure render core)"
+  (test "lays out clear + title + header + one row per process + help"
+    (let (procs [{:pid "#<pid nonode/1>" :mailbox 0}
+                 {:pid "#<pid nonode/2>" :mailbox 3}]
+          f (observe-frame procs 60 10))
+      (is (vector? f))
+      ;; clear + title + col-header + 2 body rows + help = 6 (no overflow)
+      (assert= (count f) 6)
+      (assert= (first f) [:clear])
+      ;; title op: a styled :text at row 0 naming the process count
+      (let (title (nth f 1))
+        (assert= (first title) :text)
+        (assert= (nth title 1) 0)
+        (is (string-contains? (nth title 3) "brood observer"))
+        (is (string-contains? (nth title 3) "2 processes")))
+      ;; first body row is a :text op at row 2 carrying its pid
+      (let (row0 (nth f 3))
+        (assert= (first row0) :text)
+        (assert= (nth row0 1) 2)
+        (is (string-contains? (nth row0 3) "nonode/1")))))
+
+  (test "caps the list to the window and notes the overflow"
+    (let (procs (map (fn (i) {:pid (str "#<pid nonode/" i ">") :mailbox 0})
+                     (range 5))
+          f (observe-frame procs 60 6))      ; rows=6 → capacity = 2
+      ;; clear + title + header + 2 body + overflow-note + help = 7
+      (assert= (count f) 7)
+      ;; the overflow note mentions the 3 hidden processes
+      (let (note (nth f 5))
+        (assert= (first note) :text)
+        (is (string-contains? (nth note 3) "3 more")))))
+
+  (test "every text op is clipped to the terminal width"
+    (let (f (observe-frame [{:pid "#<pid nonode/1>" :mailbox 0}] 20 8))
+      (is (every? (fn (op) (or (not (= (first op) :text))
+                               (<= (string-length (nth op 3)) 20)))
+                  f)))))
+
+;; Cross-process coverage: drive the new `mailbox-size` primitive and
+;; `observe--snapshot` against a live runtime (each :isolated test runs alone).
+(describe "observe against live processes"
+  :isolated
+
+  (test "mailbox-size reads a process's receive backlog"
+    ;; A worker that only handles [:work _], so other messages pile up.
+    (let (w (spawn (receive ([:work _] :done))))
+      (send w :a) (send w :b)
+      ;; give the messages a moment to be delivered, then read the backlog
+      (sleep 20)
+      (is (>= (mailbox-size w) 2))))
+
+  (test "mailbox-size is nil for a non-pid-less / dead reference"
+    ;; A self with an empty mailbox reports 0, never nil.
+    (is (= (mailbox-size (self)) 0)))
+
+  (test "observe--snapshot yields {:pid :mailbox} maps for live processes"
+    (let (w (spawn (receive (_ :done)))
+          snap (observe--snapshot))
+      (is (vector? (into [] snap)))
+      (is (every? (fn (p) (and (string? (get p :pid))
+                               (number? (get p :mailbox))))
+                  snap))
+      ;; the snapshot is a frame-ready input
+      (is (>= (count (observe-frame snap 80 24)) 4)))))
