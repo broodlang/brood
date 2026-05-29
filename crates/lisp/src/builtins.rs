@@ -412,6 +412,21 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "term-raw-enter", Arity::exact(0), Sig::new(vec![], nil_ty), term_raw_enter);
     def(heap, "term-raw-leave", Arity::exact(0), Sig::new(vec![], nil_ty), term_raw_leave);
     def(heap, "term-emit", Arity::exact(1), Sig::new(vec![vec_ty], nil_ty), term_emit);
+    // The windowed (GUI) frontend — the same seam as `term-*`, painting the same
+    // render-op protocol to a native window (feature "gui"; the symbols always
+    // exist, erroring at call time without the feature). std/observe.blsp's
+    // broadcast display drives this and the terminal from one frame. See gui.rs.
+    def(heap, "gui-enter", Arity::exact(0), Sig::new(vec![], nil_ty), gui_enter);
+    def(heap, "gui-leave", Arity::exact(0), Sig::new(vec![], nil_ty), gui_leave);
+    def(heap, "gui-size", Arity::exact(0), Sig::new(vec![], vec_ty), gui_size);
+    def(
+        heap,
+        "gui-poll",
+        Arity::exact(1),
+        Sig::new(vec![int], string.union(kw).union(nil_ty)),
+        gui_poll,
+    );
+    def(heap, "gui-draw", Arity::exact(1), Sig::new(vec![vec_ty], nil_ty), gui_draw);
     // The one process-introspection accessor the language can't reach from Brood
     // (the mailbox queue lives behind the scheduler registry). Everything else an
     // observer shows — pid id, liveness — is assembled in Brood (std/observe.blsp).
@@ -2633,6 +2648,129 @@ fn color_of(v: Value) -> Option<crossterm::style::Color> {
 /// Clamp a Brood int to a terminal coordinate (crossterm uses `u16`).
 fn clamp_u16(n: i64) -> u16 {
     n.clamp(0, u16::MAX as i64) as u16
+}
+
+// ---- the GUI frontend (ADR-046, feature "gui") ------------------------------
+//
+// `gui-*` mirror `term-*`: a second frontend that paints the *same* render-op
+// protocol (a frame is the same Brood data) to a native window and reads keys
+// back in the same encoding. The window/loop machinery lives in `crate::gui`
+// (behind the `gui` feature); these primitives just translate Brood `Value`s ⇄
+// the plain `gui::Op`/`gui::Key`/`gui::Face` the backend speaks. A composite
+// "broadcast" display in std/observe.blsp drives term + gui (+ remote later)
+// from one frame — so the frontends can't drift. Without `--features gui` the
+// backend functions return a clear "rebuild with --features gui" error.
+
+/// A face colour keyword (`:red`, `:dark-grey`, …) to an RGB triple for the GUI
+/// framebuffer. The same palette `color_of` maps to crossterm `Color`s, so the
+/// two frontends agree on what `:red` looks like.
+fn color_rgb(v: Value) -> Option<[u8; 3]> {
+    let Value::Keyword(s) = v else { return None };
+    Some(match value::symbol_name(s).as_str() {
+        "black" => [0x00, 0x00, 0x00],
+        "red" => [0xcd, 0x31, 0x31],
+        "green" => [0x0d, 0xbc, 0x79],
+        "yellow" => [0xe5, 0xe5, 0x10],
+        "blue" => [0x24, 0x72, 0xc8],
+        "magenta" => [0xbc, 0x3f, 0xbc],
+        "cyan" => [0x11, 0xa8, 0xcd],
+        "white" => [0xe5, 0xe5, 0xe5],
+        "grey" | "gray" => [0x80, 0x80, 0x80],
+        "dark-grey" | "dark-gray" => [0x50, 0x50, 0x50],
+        _ => return None,
+    })
+}
+
+/// Resolve a face map (`{:fg :red :bg :blue :bold true :reverse true}`) into the
+/// plain `gui::Face` the backend renders. A non-map face is the default face.
+fn gui_face(heap: &Heap, face: Value) -> crate::gui::Face {
+    let mut f = crate::gui::Face::default();
+    let Value::Map(id) = face else { return f };
+    f.fg = heap.map_get(id, value::kw("fg")).and_then(color_rgb);
+    f.bg = heap.map_get(id, value::kw("bg")).and_then(color_rgb);
+    f.bold = heap.map_get(id, value::kw("bold")).is_some_and(face_truthy);
+    f.reverse = heap.map_get(id, value::kw("reverse")).is_some_and(face_truthy);
+    f
+}
+
+/// `(gui-enter)` — open the window + start its event-loop thread. Idempotent.
+fn gui_enter(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    crate::gui::enter().map_err(LispError::runtime)?;
+    Ok(Value::Nil)
+}
+
+/// `(gui-leave)` — close the window and stop its thread. The teardown for `gui-enter`.
+fn gui_leave(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    crate::gui::leave().map_err(LispError::runtime)?;
+    Ok(Value::Nil)
+}
+
+/// `(gui-size)` — the window size as `[cols rows]` (character cells), same shape
+/// as `term-size`.
+fn gui_size(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let (cols, rows) = crate::gui::size().map_err(LispError::runtime)?;
+    Ok(heap.alloc_vector(vec![Value::Int(cols as i64), Value::Int(rows as i64)]))
+}
+
+/// `(gui-poll ms)` — wait up to `ms` for a key; same return shape as `term-poll`
+/// (a 1-char string, a keyword for specials, or nil on timeout).
+fn gui_poll(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let ms = expect_int(heap, "gui-poll", arg(args, 0))?.max(0) as u64;
+    match crate::gui::poll(ms).map_err(LispError::runtime)? {
+        Some(k) => Ok(gui_key_to_value(heap, k)),
+        None => Ok(Value::Nil),
+    }
+}
+
+/// Encode a `gui::Key` as a Brood value — identical to `key_to_value`'s encoding
+/// so the same keymaps work across both frontends.
+fn gui_key_to_value(heap: &mut Heap, k: crate::gui::Key) -> Value {
+    use crate::gui::Key;
+    match k {
+        Key::Char(c) => heap.alloc_string(&c.to_string()),
+        Key::Ctrl(c) => Value::Keyword(value::intern(&format!("ctrl-{}", c))),
+        Key::Alt(c) => Value::Keyword(value::intern(&format!("alt-{}", c))),
+        Key::Named(s) => value::kw(s),
+    }
+}
+
+/// `(gui-draw frame)` — paint a frame (the same op vector `term-draw` takes) to
+/// the window. Parses the ops into plain `gui::Op`s (it has heap access) and
+/// ships them to the GUI thread. Unknown ops are skipped (forward-compatible).
+fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let ops_v: Vec<Value> = match arg(args, 0) {
+        Value::Vector(id) => heap.vector(id).to_vec(),
+        other => return Err(LispError::wrong_type(heap, "gui-draw", "vector (a frame)", other)),
+    };
+    let clear_t = value::intern("clear");
+    let text_t = value::intern("text");
+    let cursor_t = value::intern("cursor");
+    let mut ops = Vec::with_capacity(ops_v.len());
+    for op in ops_v {
+        let parts: Vec<Value> = match op {
+            Value::Vector(id) => heap.vector(id).to_vec(),
+            _ => continue,
+        };
+        let tag = match parts.first() {
+            Some(Value::Keyword(s)) => *s,
+            _ => continue,
+        };
+        if tag == clear_t {
+            ops.push(crate::gui::Op::Clear);
+        } else if tag == cursor_t {
+            let row = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 1))?);
+            let col = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 2))?);
+            ops.push(crate::gui::Op::Cursor { row, col });
+        } else if tag == text_t {
+            let row = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 1))?);
+            let col = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 2))?);
+            let s = expect_string(heap, "gui-draw", arg(&parts, 3))?;
+            let face = gui_face(heap, parts.get(4).copied().unwrap_or(Value::Nil));
+            ops.push(crate::gui::Op::Text { row, col, s, face });
+        }
+    }
+    crate::gui::draw(ops).map_err(LispError::runtime)?;
+    Ok(Value::Nil)
 }
 
 /// `(mailbox-size pid)` — the number of queued messages in a local process's

@@ -146,7 +146,14 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
         //     `GC_BLOCK == 1` invariant — see `docs/memory-model.md`).
         // Cost on inner-eval iterations: one TLS read + compare (fail-fast).
         if crate::process::gc_block_depth() == 1 && heap.gc_due() {
-            heap.collect(&[expr], &[env]);
+            // Copying collection: `expr`/`env` MOVE to fresh slabs, so write the
+            // relocated handles back into the loop's live registers (the dynamic
+            // stack and explicit root stack are relocated in place by `collect`).
+            let mut roots = [expr];
+            let mut envs = [env];
+            heap.collect(&mut roots, &mut envs);
+            expr = roots[0];
+            env = envs[0];
         }
         // Memory safety backstop (ADR-043): if total allocation has crossed the
         // soft ceiling, fail *here* with a clean, catchable error rather than

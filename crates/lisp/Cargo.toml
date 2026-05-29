@@ -10,6 +10,16 @@ description = "The Brood language: reader, evaluator, and core for a self-editin
 name = "brood"
 path = "src/lib.rs"
 
+[features]
+# A windowed (GUI) frontend for the M3 display/input seam (ADR-046), alongside
+# the always-on terminal (crossterm) frontend. Off by default so the core lib —
+# which `nest`/`brood-lsp` embed — pulls no windowing stack; opt in with
+# `--features gui`. winit owns a native window + event loop, softbuffer gives a
+# raw CPU framebuffer, and fontdue rasterises a monospace glyph grid. The display
+# *protocol* is unchanged Brood data (render ops); these just paint it to a window
+# instead of a terminal. See src/gui.rs and std/observe.blsp's `(observe)`.
+gui = ["dep:winit", "dep:softbuffer", "dep:fontdue"]
+
 [dependencies]
 # Lock-free, append-only vector for the shared RUNTIME code region: stable
 # references survive concurrent pushes, so many process threads read closure
@@ -50,6 +60,12 @@ ropey = "1.6"
 # the `term-*` primitives are just the in-process frontend that paints it, so a
 # remote/web frontend can implement the identical protocol later.
 crossterm = "0.29"
+
+# The optional `gui` frontend's stack (see the [features] note above). All three
+# are pulled in only with `--features gui`; a default build links none of them.
+winit = { version = "0.29", optional = true }
+softbuffer = { version = "0.4", optional = true }
+fontdue = { version = "0.9", optional = true }
 
 [dev-dependencies]
 # Lightweight microbenchmark harness for the interpreter core. Dev-only (the

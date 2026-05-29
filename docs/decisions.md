@@ -3075,3 +3075,61 @@ ADR-035 (the disabled mark-sweep this helps revive), ADR-026 (immutability — b
 `letrec` cycles mean we still need tracing, not pure refcounting),
 [`docs/memory-review.md`](memory-review.md) (the full memory model review + the
 staged GC plan), [`roadmap.md`](roadmap.md) M1.
+
+## ADR-055 — Stage B: automatic copying collection at the eval safepoint
+
+**Status:** accepted (2026-05-29). Re-enables automatic per-process GC, on the
+generational-handle foundation (ADR-054). The "slow-and-stable" memory the brief
+asked for; supersedes the disabled mark-sweep (ADR-035) and the manual-only
+`(hibernate)` reclamation.
+
+**Context.** `docs/memory-review.md` mapped the fork: **copying** at the safepoint
+(reuses the proven `(hibernate)` `arena_flip` + the per-heap epoch; one unified
+collector; but *moves* every object, so any Rust frame holding a handle across a
+collection goes stale) vs. **non-moving mark-sweep** (live handles don't move, but
+needs new per-slot generation tables and a two-collector design). With the
+generational tripwire (ADR-054) now making a stale handle a *precise, located*
+panic, copying's footgun became a bounded, test-caught fix list rather than a
+silent landmine — so copying won.
+
+**Decision.** When `gc_due()` and `gc_block_depth() == 1` (outermost eval), fire a
+semi-space **copying** collection via the shared `arena_flip`: relocate everything
+reachable from `expr`/`env`/dynamics/the explicit root stack into fresh slabs, drop
+the rest, bump the epoch. The adaptive threshold (`max(floor, 2×live)`) is the
+slow/stable dial; `BROOD_GC_STRESS=1` collects maximally (correctness fuzz).
+
+The "everything moves" footgun was closed at its (few, enumerable) sites:
+- **`eval` loop** writes back the relocated `expr`/`env` after `collect`.
+- **`eval_str`/`eval_source`** re-fetch each form from the relocated root stack
+  (`root_at`) instead of their own now-stale `Vec`, and **skip the per-form arena
+  reset when GC is on** (a copy invalidates the `checkpoint`; GC reclaims instead).
+- **the type checker** brackets itself in `GcBlockGuard` so its `(require …)` evals
+  never collect mid-walk (it holds Rust-`Vec` handles across them).
+- **`flush_pair` made iterative** down the cdr spine — a long list must not recurse
+  its length deep in the collector (an uncatchable SIGABRT); mirrors `promote_list`.
+- **`form_pos` re-keyed** through the pair forwarding table on every flip, so a
+  collection mid-file-load doesn't drop the reader positions error messages need.
+
+**Consequences.**
+- A never-returning, non-hibernating loop is now memory-bounded automatically (a
+  100k-iteration allocating loop: ~10 MB, was unbounded). Hot reload is unaffected
+  — GC only touches the per-process LOCAL heap, never the shared RUNTIME code/global
+  region where `def`s live (and it *reclaims* the LOCAL transient a `def` builds
+  before `promote` copies it to RUNTIME). Node connections are unaffected — messages
+  cross as serialized deep copies, reconstructed via `alloc_*` (correctly stamped).
+- **Immutability shortcut already banked:** no write barriers (data never mutates).
+  The *next* shortcut (deferred, Stage C): a generational nursery needs **no
+  remembered set / write barrier** either, because immutability ⇒ no old→young
+  pointers — a minor GC can copy just the nursery survivors. (Cycles still exist via
+  `letrec`, so tracing — not pure refcounting — remains required; ADR-026/054.)
+- A debug-only diagnostic (`debug_walk_env_chain`, the poison-era env walk
+  superseded by the tripwire) was found mis-walking RUNTIME indices into the LOCAL
+  slab and made debug builds pathologically slow; gated behind `BROOD_ENV_DEBUG=1`.
+- Validated: suite 765/765 + `gc.rs` (collector active); `basic.rs` 75/75 under
+  `BROOD_GC_STRESS=1`; release bounded + fast.
+
+**References.** ADR-054 (generational handles — the tripwire this relies on),
+ADR-035 (the disabled mark-sweep this replaces), ADR-016 (the arena reset it
+supersedes under GC), ADR-026 (immutability — no write barriers; but `letrec`
+cycles), [`docs/memory-review.md`](memory-review.md) (the full plan + the fork),
+[`roadmap.md`](roadmap.md) M1. Stage C (generational nursery) deferred.
