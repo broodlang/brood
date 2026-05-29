@@ -51,6 +51,10 @@ for follow-up. See the 2026-05-29 devlog entry and ADR-050.
   call.
 - **`:main` in the scaffold** (§5.2) — `nest new`'s CLAUDE.md now shows the syntax
   and states the one-name-project-wide rule.
+- **Duplicate-global warning** (§5.1, §6 "the bad miss") — `check-project`/
+  `check-project-sources` now parse each source file's top-level def-style forms
+  and warn (advisory, to stderr) when one name is defined in more than one file,
+  so the silent two-`main` shadow surfaces at `nest run`/`nest test` pre-flight.
 
 **Still open (mapped, not yet built):**
 - **§8 memory leak** — the highest-priority item. It is the known "spiky memory":
@@ -58,8 +62,8 @@ for follow-up. See the 2026-05-29 devlog entry and ADR-050.
   so a long-running `nest run` loop never reclaims. Fix is **Stage B** of
   `docs/memory-review.md` (auto-fire the copy at a threshold), gated on a
   `GC_BLOCK`/suspend rooting audit — not rushed.
-- **Set type `#{}`** (§1, §4.2), **duplicate-global warning** (§5.1, §6 "the bad
-  miss"), **`--main`/CLI entry override** (§5.3), **frame-capped run mode** (§5.4).
+- **Set type `#{}`** (§1, §4.2), **`--main`/CLI entry override** (§5.3),
+  **frame-capped run mode** (§5.4).
 
 ---
 
