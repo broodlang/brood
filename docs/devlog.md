@@ -7246,3 +7246,23 @@ Left as judgment calls (reported, not changed): `examples/wilhelm.blsp` uses nai
 non-tail `fib` (the advisory checker warns on it — fine for a "tiny taste" but a
 wart on a showcase); a handful of low-value test-name/coverage nitpicks. Suite
 green: 765 pass.
+
+**Round 2b — test-hardening nitpicks.** Followed up on the low-value items from
+the test sweep:
+- `concurrency_test`: the "monitor returns a ref distinct from a plain (ref)" test
+  only checked `(ref? mr)`; added `(is (not (= mr (ref))))` so the name's claim is
+  actually exercised.
+- `observe_test`: the `observe--sort` fixture had mailbox/memory rankings that
+  coincided with id order (all three sorts yielded `(1 2 3)`), so a wrong-field bug
+  could pass. Misaligned the three keys (now `(1 2 3)`/`(2 1 3)`/`(3 1 2)`) and
+  pre-scrambled the input.
+- `pattern_matching_test`: "1- and 3-tuples" tested a tagged 2-tuple (dup of
+  "tagged vector") and a 3-tuple identical to the "fixed length" case; replaced
+  with a genuine 1-tuple `[x]` and a `*`-distinguishable 3-tuple.
+- `math_test`: removed the pointless `mth-range` wrapper around the `range` builtin
+  (its "tail-recursive / small coroutine stack" comment was misleading — a builtin
+  isn't recursion); inlined `(range 1 21)`.
+
+Left alone after a closer look: the `sqrt` epsilon (`mth-approx?` 1e-9) is *not*
+brittle — `sqrt--iter` runs to an exact fixpoint, so `(sqrt 2)` returns the fully
+converged f64 root; loosening would only weaken the test.

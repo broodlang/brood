@@ -6,10 +6,6 @@
 
 (require 'test)
 
-;; Tail-recursive [lo, hi) for the at-scale tests (a test runs in a green process
-;; with a small coroutine stack, so deep non-tail recursion would overflow it).
-(defn mth-range (lo hi) (range lo hi))
-
 ;; sqrt is Brood (Newton's method), so it's approximate — compare within epsilon.
 (defn mth-approx? (a b) (< (abs (- a b)) 1e-9))
 
@@ -163,7 +159,7 @@
   :isolated
 
   (test "fan-out / fan-in: workers compute squares and cubes, parent folds them"
-    (mth-spawn (self) (mth-range 1 21))
+    (mth-spawn (self) (range 1 21))
     ; 20 workers, n = 1..20
     (let (m (mth-collect 0 20 {}))
       (assert= (count m) 20)
