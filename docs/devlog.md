@@ -7226,3 +7226,23 @@ fixed:
 The remaining review notes were micro-optimizations not worth the churn (a
 redundant EOF re-parse in `repl.blsp`, `blank?` on single chars, `eval` resolving
 a symbol twice in `docs.blsp`). Full suite green: 765 tests pass.
+
+**Round 2 — tests + examples.** Extended the sweep to `tests/*.blsp` (≈4400
+lines) and `examples/*.blsp`. The suites are unusually careful (correct `~`-pins
+everywhere, `frequencies`/`sort` for hash-order-insensitive map compares, tail
+recursion in every test body). Two fixes:
+
+- **Vacuous test fixed** (`tests/adversarial_test.blsp`). "hot reload race: a
+  global redefined mid-loop doesn't crash the worker" never redefined anything:
+  `adv-set-redef-v2` called `adv-set-redef-v2ed` (returned `:v2`, discarded)
+  instead of `def`-ing `adv-redef-target`, so the ADR-013 late-binding path it
+  guards was never triggered — the worker just ran the original 100k times.
+  Replaced the indirection with a real `(def adv-redef-target (fn () :v2))` so the
+  rebind genuinely races the in-flight worker; still green (no crash, as intended).
+- **Dead code removed** (`tests/rope_test.blsp`). `rt-range`/`rt-range--down` were
+  defined but never called (leftover scaffolding for a dropped at-scale test).
+
+Left as judgment calls (reported, not changed): `examples/wilhelm.blsp` uses naive
+non-tail `fib` (the advisory checker warns on it — fine for a "tiny taste" but a
+wart on a showcase); a handful of low-value test-name/coverage nitpicks. Suite
+green: 765 pass.

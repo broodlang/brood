@@ -14,11 +14,6 @@
 
 ;; ---- file-local helpers (defined once at load; survive :isolated rollback) ----
 
-;; Tail-recursive [lo, hi) ascending — a `test` body runs in a green process
-;; with a small coroutine stack, so iteration must be tail-recursive.
-(defn rt-range (lo hi) (rt-range--down (- hi 1) lo nil))
-(defn rt-range--down (i lo acc) (if (< i lo) acc (rt-range--down (- i 1) lo (cons i acc))))
-
 ;; A worker that builds a rope from its own text, edits it, and sends the
 ;; resulting *string* back to `parent` (ropes themselves don't cross heaps).
 ;; This *is* the process body — `spawn` wraps the call form in a thunk, so
