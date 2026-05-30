@@ -20,6 +20,7 @@
 //! position. It would rather miss a case than warn on correct code.
 
 use crate::core::heap::Heap;
+use crate::core::keywords as kw;
 use crate::core::value::{self, Symbol, Value};
 use crate::error::Pos;
 
@@ -32,7 +33,7 @@ pub(super) fn check_recursion(heap: &Heap, form: Value, out: &mut Vec<(Option<Po
         return;
     };
     if let (Some(&Value::Sym(head)), true) = (items.first(), items.len() >= 3) {
-        if value::symbol_is(head, "def") {
+        if value::symbol_is(head, kw::DEF) {
             if let Value::Sym(name) = items[1] {
                 if is_fn_form(heap, items[2]) {
                     analyze_fn(heap, name, items[2], out);
@@ -50,7 +51,7 @@ pub(super) fn check_recursion(heap: &Heap, form: Value, out: &mut Vec<(Option<Po
 /// Is `v` a `(fn …)` / `(lambda …)` form?
 fn is_fn_form(heap: &Heap, v: Value) -> bool {
     matches!(list_items(heap, v).as_deref(),
-        Some([Value::Sym(h), ..]) if value::symbol_is(*h, "fn") || value::symbol_is(*h, "lambda"))
+        Some([Value::Sym(h), ..]) if value::symbol_is(*h, kw::FN) || value::symbol_is(*h, kw::LAMBDA))
 }
 
 /// Analyze a `(fn …)` value: one body for a single-arity fn, or each arm's body
@@ -107,15 +108,15 @@ fn walk(heap: &Heap, form: Value, tail: bool, name: Symbol, out: &mut Vec<(Optio
 
     if let Value::Sym(head) = first {
         // Forms we don't enter: data, and inner closures (a different frame).
-        if value::symbol_is(head, "quote")
-            || value::symbol_is(head, "quasiquote")
-            || value::symbol_is(head, "fn")
-            || value::symbol_is(head, "lambda")
+        if value::symbol_is(head, kw::QUOTE)
+            || value::symbol_is(head, kw::QUASIQUOTE)
+            || value::symbol_is(head, kw::FN)
+            || value::symbol_is(head, kw::LAMBDA)
         {
             return;
         }
         // Tail-propagating special forms — mirror the evaluator's `'tail:` rules.
-        if value::symbol_is(head, "if") {
+        if value::symbol_is(head, kw::IF) {
             // (if test then else?): test is non-tail; then/else inherit `tail`.
             if let Some(&t) = items.get(1) {
                 walk(heap, t, false, name, out);
@@ -125,7 +126,7 @@ fn walk(heap: &Heap, form: Value, tail: bool, name: Symbol, out: &mut Vec<(Optio
             }
             return;
         }
-        if value::symbol_is(head, "when") || value::symbol_is(head, "unless") {
+        if value::symbol_is(head, kw::WHEN) || value::symbol_is(head, kw::UNLESS) {
             // (when test body…): test non-tail; body is an implicit `do`.
             if let Some(&t) = items.get(1) {
                 walk(heap, t, false, name, out);
@@ -133,16 +134,16 @@ fn walk(heap: &Heap, form: Value, tail: bool, name: Symbol, out: &mut Vec<(Optio
             analyze_body(heap, name, &items[2..], out);
             return;
         }
-        if value::symbol_is(head, "do")
-            || value::symbol_is(head, "and")
-            || value::symbol_is(head, "or")
+        if value::symbol_is(head, kw::DO)
+            || value::symbol_is(head, kw::AND)
+            || value::symbol_is(head, kw::OR)
         {
             // do: last form is tail. and/or: the last operand is the result
             // (tail); earlier operands are tested (non-tail). Same shape.
             analyze_body(heap, name, &items[1..], out);
             return;
         }
-        if value::symbol_is(head, "cond") {
+        if value::symbol_is(head, kw::COND) {
             // (cond test1 res1 test2 res2 … [:else resN]) — flat. Odd offsets
             // (1,3,…) are tests (non-tail); even offsets (2,4,…) are results
             // (inherit `tail`). `:else` sits in a test slot.
@@ -151,9 +152,9 @@ fn walk(heap: &Heap, form: Value, tail: bool, name: Symbol, out: &mut Vec<(Optio
             }
             return;
         }
-        if value::symbol_is(head, "let")
-            || value::symbol_is(head, "let*")
-            || value::symbol_is(head, "letrec")
+        if value::symbol_is(head, kw::LET)
+            || value::symbol_is(head, kw::LET_STAR)
+            || value::symbol_is(head, kw::LETREC)
         {
             // (let (n1 v1 n2 v2 …) body…): binding *values* are non-tail; body
             // is an implicit `do`.
@@ -166,7 +167,7 @@ fn walk(heap: &Heap, form: Value, tail: bool, name: Symbol, out: &mut Vec<(Optio
             analyze_body(heap, name, &items[2..], out);
             return;
         }
-        if value::symbol_is(head, "def") || value::symbol_is(head, "defmacro") {
+        if value::symbol_is(head, kw::DEF) || value::symbol_is(head, kw::DEFMACRO) {
             // A nested definition: its value expression is non-tail.
             if let Some(&v) = items.get(2) {
                 walk(heap, v, false, name, out);

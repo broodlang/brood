@@ -44,6 +44,7 @@
 //! never gating).
 
 use crate::core::heap::Heap;
+use crate::core::keywords as kw;
 use crate::core::value::{self, Value};
 use crate::error::Pos;
 
@@ -58,10 +59,10 @@ pub fn check_macro_hygiene(heap: &Heap, form: Value, out: &mut Vec<(Option<Pos>,
     if let Some(&Value::Sym(head)) = items.first() {
         // Don't descend into quoted data: a `(defmacro …)` under `quote` /
         // `quasiquote` is data being *built*, not a macro definition here.
-        if value::symbol_is(head, "quote") || value::symbol_is(head, "quasiquote") {
+        if value::symbol_is(head, kw::QUOTE) || value::symbol_is(head, kw::QUASIQUOTE) {
             return;
         }
-        if value::symbol_is(head, "defmacro") && items.len() >= 3 {
+        if value::symbol_is(head, kw::DEFMACRO) && items.len() >= 3 {
             analyze_defmacro(heap, &items, form, out);
             // fall through: a nested `defmacro` in the body is still worth scanning.
         }
@@ -108,7 +109,7 @@ fn find_templates(
         None => return,
     };
     if let Some(&Value::Sym(head)) = items.first() {
-        if value::symbol_is(head, "quasiquote") {
+        if value::symbol_is(head, kw::QUASIQUOTE) {
             if let Some(&tpl) = items.get(1) {
                 analyze_template(heap, tpl, macro_name, params, macro_form, out);
             }
@@ -138,16 +139,16 @@ fn analyze_template(
         // `(unquote E)` / `(unquote-splicing E)`: a hole filled with
         // expansion-time code, not template-introduced binders — and a nested
         // `(quote …)`/`(quasiquote …)` is data. Don't hunt binders inside any.
-        if value::symbol_is(head, "unquote")
-            || value::symbol_is(head, "unquote-splicing")
-            || value::symbol_is(head, "quote")
-            || value::symbol_is(head, "quasiquote")
+        if value::symbol_is(head, kw::UNQUOTE)
+            || value::symbol_is(head, kw::UNQUOTE_SPLICING)
+            || value::symbol_is(head, kw::QUOTE)
+            || value::symbol_is(head, kw::QUASIQUOTE)
         {
             return;
         }
 
-        let is_let = value::symbol_is(head, "let") || value::symbol_is(head, "let*");
-        let is_fn = value::symbol_is(head, "fn");
+        let is_let = value::symbol_is(head, kw::LET) || value::symbol_is(head, kw::LET_STAR);
+        let is_fn = value::symbol_is(head, kw::FN);
         if is_let && items.len() >= 2 {
             // `(let (b0 v0 b1 v1 …) body…)`. Brood `let` is sequential, so binder
             // `bj`'s scope is the *later* bindings' value expressions plus the
@@ -243,7 +244,7 @@ fn splice_of_param(heap: &Heap, form: Value, params: &[String]) -> bool {
         None => return false,
     };
     if let Some(&Value::Sym(head)) = items.first() {
-        if value::symbol_is(head, "unquote") || value::symbol_is(head, "unquote-splicing") {
+        if value::symbol_is(head, kw::UNQUOTE) || value::symbol_is(head, kw::UNQUOTE_SPLICING) {
             // The unquoted expression: does it reference a macro parameter?
             return items
                 .get(1)

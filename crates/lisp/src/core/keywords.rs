@@ -48,3 +48,8 @@ pub const DOTIMES: &str = "dotimes";
 pub const FOR: &str = "for";
 pub const THREAD_FIRST: &str = "->";
 pub const THREAD_LAST: &str = "->>";
+
+// Reader markers inside a quasiquote template — recognised by the reader, the
+// quasiquote walker (`eval::macros`), and the checker (`hygiene`/`guards`).
+pub const UNQUOTE: &str = "unquote";
+pub const UNQUOTE_SPLICING: &str = "unquote-splicing";

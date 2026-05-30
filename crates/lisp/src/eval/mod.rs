@@ -5,6 +5,7 @@
 //! the two are mutually recursive — the compile pass lowers the `fn`/`let`
 //! pattern surfaces the evaluator runs, and the evaluator falls back to it.
 
+pub mod compile; // the compiling-VM execution engine (ADR-076) — gated by BROOD_VM
 pub mod macros;
 
 use std::sync::LazyLock;
@@ -879,7 +880,11 @@ pub fn apply_closure(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> LispResu
 /// and params-as-head are excluded at precompute time), so the caller's
 /// resolve-and-redirect is sound.
 #[inline]
-fn passthrough_arm(heap: &Heap, cl: ClosureId, argc: usize) -> Option<(Value, SmallVec<[usize; 4]>)> {
+pub(crate) fn passthrough_arm(
+    heap: &Heap,
+    cl: ClosureId,
+    argc: usize,
+) -> Option<(Value, SmallVec<[usize; 4]>)> {
     let arm = heap.closure(cl).select_arm(argc)?;
     arm.passthrough.as_ref().map(|p| (p.head, p.map.clone()))
 }
@@ -1042,7 +1047,7 @@ fn call_native(heap: &mut Heap, id: NativeId, argv: &[Value], env: EnvId) -> Lis
 /// `acc`/`fold`/`%eq` spuriously look unbound. False positives are
 /// tolerable: the hint conditions on "if this fired under fan-out, try
 /// `-j 1`," not on every unbound being a race. (`docs/error-codes.md`.)
-fn unbound_error(heap: &Heap, sym: Symbol) -> LispError {
+pub(crate) fn unbound_error(heap: &Heap, sym: Symbol) -> LispError {
     let name = value::symbol_name(sym);
     let e = LispError::unbound(format!("unbound symbol: {}", name));
     // A construct an LLM reached for from another Lisp that Brood doesn't have —
