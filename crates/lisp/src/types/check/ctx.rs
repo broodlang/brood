@@ -62,6 +62,17 @@ pub(super) struct Ctx {
     /// evaluated, so these aren't in `heap`'s global table — we track them
     /// here so a later form doesn't flag them as unbound.
     file_globals: HashSet<Symbol>,
+    /// Whether to flag *operand / value-slot* unbound symbols (a bare symbol in
+    /// an evaluated argument or a `def`/`let`/`if` value position). On only when
+    /// checking a **complete file** ([`check_file`]): there every top-level def
+    /// is in `file_globals` and the project image is loaded, so an unresolved
+    /// operand is genuinely unbound. Off for a bare fragment ([`check_form`] /
+    /// the `(check 'form)` builtin / REPL snippets), where a free variable is
+    /// legitimately ambiguous (a surrounding-scope or REPL global), so flagging
+    /// it would be a false positive. Call *heads* are flagged in both modes —
+    /// an unbound callee is reliably a real error. Threads through every cloned
+    /// sub-scope.
+    check_operands: bool,
 }
 
 impl Ctx {
@@ -84,6 +95,14 @@ impl Ctx {
             || self.guards.contains_key(&sym)
             || self.aliases.contains_key(&sym)
             || self.file_globals.contains(&sym)
+    }
+    /// Is `sym` a genuine *lexical* binder in scope — a fn/lambda/defn param or a
+    /// `let`/`letrec` name (the `locals` set), as opposed to a guard-narrowed free
+    /// variable or an accumulated file-global? A lexical local can never be a
+    /// macro, so a call with such a head evaluates its arguments — which is what
+    /// the operand-unbound check needs to know (`evaluates_args` in `walk`).
+    pub(super) fn is_lexical_local(&self, sym: Symbol) -> bool {
+        self.locals.contains(&sym)
     }
     /// **Narrow** `sym` to the intersection with `ty` (a guard refinement —
     /// the same lexical variable in the same scope getting tighter). The
@@ -183,5 +202,15 @@ impl Ctx {
     /// accumulator threads through [`check_file`].
     pub(super) fn add_file_global(&mut self, sym: Symbol) {
         self.file_globals.insert(sym);
+    }
+    /// Turn on operand / value-slot unbound checking — see [`check_operands`].
+    /// [`check_file`] calls this on the root ctx so the whole-file walk runs
+    /// strict; the flag rides every cloned sub-scope.
+    pub(super) fn enable_operand_checks(&mut self) {
+        self.check_operands = true;
+    }
+    /// Whether operand / value-slot unbound checking is on for this scope.
+    pub(super) fn checks_operands(&self) -> bool {
+        self.check_operands
     }
 }

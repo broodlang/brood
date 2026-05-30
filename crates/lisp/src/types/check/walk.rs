@@ -40,6 +40,71 @@ fn is_output_sink(s: Symbol) -> bool {
         || value::symbol_is(s, "format")
 }
 
+/// A symbol in *reference* position that resolves to nothing — not a local
+/// binder, not a syntactic keyword, not a curated stdlib name, and not in the
+/// heap's globals (which includes macros and, once the project is loaded,
+/// file-local defs). The single predicate behind **both** the call-head and the
+/// operand unbound diagnostics, so the two never drift apart.
+fn is_unbound(heap: &Heap, ctx: &Ctx, s: Symbol) -> bool {
+    !ctx.is_local(s)
+        && !is_globally_bound(heap, s)
+        && curated_sig(s).is_none()
+        && !is_syntactic_keyword(&name_of(s))
+}
+
+/// True when a call whose head is `s` *evaluates its arguments as values* — `s`
+/// resolves to a primitive, a known Brood closure, a curated stdlib fn, or a
+/// lexical local (a param / `let` name, never a macro). False for a macro, a
+/// special-form keyword, an unknown head, or anything we can't prove is a
+/// non-macro callable.
+///
+/// This gates the operand-unbound check: only when arguments are genuinely
+/// evaluated is a bare-symbol operand a *reference* (so an unresolvable one is
+/// truly unbound). For a macro or unknown head the operands may be opaque syntax
+/// (pattern keywords, quoted tags) or a forward reference, so they're left
+/// untouched — preserving the checker's no-false-positives rule.
+fn evaluates_args(heap: &Heap, ctx: &Ctx, s: Symbol) -> bool {
+    if ctx.is_lexical_local(s) {
+        return true;
+    }
+    match heap.env_get(heap.global(), s) {
+        Some(Value::Native(_)) | Some(Value::Fn(_)) => true,
+        // A `Value::Macro` does NOT evaluate its args; any other bound non-callable
+        // isn't a call we should reason about either.
+        Some(_) => false,
+        // Not in the heap: only the curated stdlib closures count as known callables.
+        None => curated_sig(s).is_some(),
+    }
+}
+
+/// Flag a bare-symbol form sitting in an evaluated *value* position when it's
+/// unbound, attributing the warning to `parent` (the enclosing call / `def` /
+/// `if` / `let` form the reader positioned — a bare operand symbol carries no
+/// `Pos` of its own). A no-op for any non-symbol form, which `check_into` walks
+/// instead. Shared by the call-operand loop and the `def`/`let`/`if` value
+/// slots so every evaluated-leaf site applies the one [`is_unbound`] rule.
+fn check_value_leaf(
+    heap: &Heap,
+    form: Value,
+    parent: Value,
+    ctx: &Ctx,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
+    // Operand / value-slot checking is whole-file-only — a bare fragment's free
+    // variables are legitimately ambiguous (see `Ctx::check_operands`).
+    if !ctx.checks_operands() {
+        return;
+    }
+    if let Value::Sym(s) = form {
+        if is_unbound(heap, ctx, s) {
+            out.push((
+                heap.form_pos(parent),
+                format!("unbound symbol: {}", name_of(s)),
+            ));
+        }
+    }
+}
+
 /// What the walk does at a head symbol. `Generic` is the fall-through for any
 /// head that isn't one of the recognised special forms / skip-body markers —
 /// the walk treats it as a normal call (resolves sig + arity, checks for
@@ -147,11 +212,11 @@ pub(super) fn check_into(
             match kind {
                 SpecialHead::SkipBody => return,
                 SpecialHead::If => {
-                    check_if(heap, &items, ctx, out);
+                    check_if(heap, form, &items, ctx, out);
                     return;
                 }
                 SpecialHead::Let => {
-                    check_let(heap, &items, ctx, out, false);
+                    check_let(heap, form, &items, ctx, out, false);
                     return;
                 }
                 SpecialHead::Letrec => {
@@ -161,7 +226,7 @@ pub(super) fn check_into(
                     // names into the inner scope *before* walking the RHSs, so a
                     // self-recursive or mutually-recursive call doesn't get
                     // flagged unbound.
-                    check_let(heap, &items, ctx, out, true);
+                    check_let(heap, form, &items, ctx, out, true);
                     return;
                 }
                 SpecialHead::Fn => {
@@ -169,7 +234,7 @@ pub(super) fn check_into(
                     return;
                 }
                 SpecialHead::Def => {
-                    check_def(heap, &items, ctx, out);
+                    check_def(heap, form, &items, ctx, out);
                     return;
                 }
                 SpecialHead::Defn => {
@@ -193,16 +258,25 @@ pub(super) fn check_into(
         // `is_syntactic_keyword` is the one piece that still wants the
         // spelling — but only when every other short-circuit has failed.
         // Compute it lazily.
-        if !ctx.is_local(s)
-            && !is_globally_bound(heap, s)
-            && curated_sig(s).is_none()
-            && !is_syntactic_keyword(&name_of(s))
-        {
+        if is_unbound(heap, ctx, s) {
             out.push((
                 heap.form_pos(form),
                 format!("unbound symbol: {}", name_of(s)),
             ));
             // Still recurse into args below — they may carry their own issues.
+        }
+
+        // Operand-position unbound symbols. When the head evaluates its arguments
+        // (primitive / known closure / lexical local — never a macro), a bare
+        // symbol operand is a value reference, so an unresolvable one is genuinely
+        // unbound. Gated by `evaluates_args` so an unexpanded macro argument or a
+        // forward reference under an unknown head is never mistaken for one. The
+        // bottom recursion walks Pair operands; this only adds the leaf case (a
+        // bare `Sym`, which `check_into` itself skips), so no double-reporting.
+        if evaluates_args(heap, ctx, s) {
+            for &arg in &items[1..] {
+                check_value_leaf(heap, arg, form, ctx, out);
+            }
         }
 
         // Arity check (independent of sig — they're separate concerns).
@@ -318,11 +392,20 @@ fn check_fn(heap: &Heap, items: &[Value], ctx: &Ctx, out: &mut Vec<(Option<Pos>,
 /// flag `name` as an unbound *reference* (it's a binder); walk `value` as an
 /// expression. `name` is added to the file-globals accumulator inside
 /// [`check_file`], not here (which checks one form in isolation).
-fn check_def(heap: &Heap, items: &[Value], ctx: &Ctx, out: &mut Vec<(Option<Pos>, String)>) {
+fn check_def(
+    heap: &Heap,
+    form: Value,
+    items: &[Value],
+    ctx: &Ctx,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
     let Some(&value_form) = items.get(2) else {
         // `(def name)` — degenerate; skip.
         return;
     };
+    // The value slot is evaluated — a bare unbound symbol there (`(def x typo)`)
+    // is a reference error, same rule as a call operand.
+    check_value_leaf(heap, value_form, form, ctx, out);
     check_into(heap, value_form, ctx, out);
 }
 
@@ -397,18 +480,30 @@ fn fn_params(heap: &Heap, form: Value) -> Vec<Symbol> {
 /// into each branch with the ctx narrowed by what the test would assert.
 /// `else` defaults to `nil` (matches the evaluator), so absent or non-pair
 /// branches simply contribute no warnings.
-fn check_if(heap: &Heap, items: &[Value], ctx: &Ctx, out: &mut Vec<(Option<Pos>, String)>) {
+fn check_if(
+    heap: &Heap,
+    form: Value,
+    items: &[Value],
+    ctx: &Ctx,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
     let test = items.get(1).copied().unwrap_or(Value::Nil);
     let then_form = items.get(2).copied().unwrap_or(Value::Nil);
     let else_form = items.get(3).copied().unwrap_or(Value::Nil);
 
+    // All three slots are evaluated value positions — a bare unbound symbol in
+    // any (`(if typo …)`) is a reference error. then/else use the narrowed ctx,
+    // matching how they're walked.
+    check_value_leaf(heap, test, form, ctx, out);
     check_into(heap, test, ctx, out);
 
     let (then_ctx, else_ctx) = match guard_assertion(heap, test, ctx) {
         Some((sym, ty)) => (ctx.narrow(sym, ty), ctx.narrow(sym, ty.negate())),
         None => (ctx.clone(), ctx.clone()),
     };
+    check_value_leaf(heap, then_form, form, &then_ctx, out);
     check_into(heap, then_form, &then_ctx, out);
+    check_value_leaf(heap, else_form, form, &else_ctx, out);
     check_into(heap, else_form, &else_ctx, out);
 }
 
@@ -425,6 +520,7 @@ fn check_if(heap: &Heap, items: &[Value], ctx: &Ctx, out: &mut Vec<(Option<Pos>,
 /// errors and aren't this checker's job.
 fn check_let(
     heap: &Heap,
+    form: Value,
     items: &[Value],
     ctx: &Ctx,
     out: &mut Vec<(Option<Pos>, String)>,
@@ -460,11 +556,15 @@ fn check_let(
         let Value::Sym(name) = binds[i] else {
             // Pattern-target binding (post-Step 4 work) — skip narrowing for it
             // but still check the RHS as an expression.
+            check_value_leaf(heap, binds[i + 1], form, &scope, out);
             check_into(heap, binds[i + 1], &scope, out);
             i += 2;
             continue;
         };
         let rhs = binds[i + 1];
+        // The RHS is an evaluated value position — a bare unbound symbol there
+        // (`(let (x typo) …)`) is a reference error.
+        check_value_leaf(heap, rhs, form, &scope, out);
         check_into(heap, rhs, &scope, out);
         let rhs_ty = expr_ty(heap, rhs, &scope);
         let rhs_guard = guard_assertion(heap, rhs, &scope);

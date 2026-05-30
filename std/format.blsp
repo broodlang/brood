@@ -618,7 +618,7 @@ not a known body form (defaults to call-style — every arg breaks)."
   (let (root (project/project--find-root (cwd)))
     (when (nil? root)
       (error "format: not in a Brood project (no project.blsp found from " (cwd) ")"))
-    (project-setup root)
+    (project/project-setup root)
     root))
 
 (defn format-file (path)

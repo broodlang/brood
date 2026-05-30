@@ -75,10 +75,14 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   one-step inference of straight-line single-expression closures. Step 4
   — the behavioural payoff — is **complete**: the disjointness walk; guard
   narrowing via `Ty::tested_by` (`if` narrows in both branches incl. a
-  leading `(not …)`); arity and unbound-symbol diagnostics with file-local
-  `defn` accumulation; auto-running at file boundaries (`brood <file>` /
-  `brood --test` / `nest test` / `nest run` to stderr; `nest check` to
-  stdout, exit-non-zero for CI; `BROOD_NO_CHECK=1` is the uniform opt-out);
+  leading `(not …)`); arity and unbound-symbol diagnostics — on call *heads*
+  and, in whole-file mode, *operand / value* positions (`(+ 1 typo)` /
+  `(def x typo)`) — with file-local `defn` accumulation; auto-running at file
+  boundaries (`brood <file>` / `brood --test` / `nest test` / `nest run`;
+  `nest check [FILE…]` shares one Brood path that loads the project image first
+  so single-file and whole-project checks resolve cross-namespace names alike;
+  warnings to stderr, exit-non-zero for CI; `BROOD_NO_CHECK=1` is the uniform
+  opt-out);
   let-stored guard aliases (`(let (g (int? x)) (if g …))` narrows `x`);
   **let-binding aliases + `%eq`-as-guard** that close `match` pattern
   narrowing (`(match x (5 (first x)))` now flags `first` on int — the

@@ -203,9 +203,19 @@ never a false positive.
   is flagged `ansi-clear: function used as a value — did you mean (ansi-clear)?`.
   Catches the otherwise-silent slip where a zero-arg helper stringifies as
   `#<fn …>` instead of being called. Restricted to those sinks and to *globals*
-  (a same-named local is left alone) to stay false-positive-free. (The general
-  *operand-position* unbound check is still deferred — it needs pattern-binding
-  and cross-file-global tracking to avoid false positives; see `todo.md`.)
+  (a same-named local is left alone) to stay false-positive-free.
+- ✅ **Operand-position unbound check.** The unbound diagnostic now fires on
+  *operand / value* positions too — `(+ 1 typo)`, `(def x typo)`, `(if typo …)`,
+  `(let (a typo) …)` — not just call heads. A bare-symbol operand is flagged only
+  when its enclosing head is a proven *arg-evaluating, non-macro* callee (a
+  primitive, a curated/known closure, or a lexical local — `evaluates_args` in
+  `check/walk.rs`), so an unexpanded macro argument is never mistaken for a value
+  reference. It is further gated to **whole-file mode** (`check_file` only): there
+  every top-level def is accumulated and the project image is loaded, so an
+  unresolved operand is genuinely unbound — whereas a bare fragment (`(check
+  'form)` / a REPL snippet) keeps free operand variables ambiguous and flags only
+  the head. Both checks reuse the one `is_unbound` predicate, so they can't drift.
+  Audited over the whole `std/` + `tests/` tree: **zero** false positives.
 - ✅ **Auto-running at file boundaries.** The checker now fires automatically:
   `brood <file>` and `brood --test <file>` pre-check before evaluating (CLI
   wiring through `check_one_file`); `nest run` and `nest test` pre-check the
@@ -252,9 +262,12 @@ never a false positive.
   anaphoric macro (deliberate capture) would be flagged; none exist in-tree, and
   if one is written the lint should grow an opt-out rather than relax the gate.
 
-With everything above, Step 4 is **done**. The only meaningful next move is
-project-wide check-only entry points already on tap (`nest check`) and the
-upgrade to Step 5+ (structured types) when a real need surfaces.
+With everything above, Step 4 is **done**, including the operand-position
+unbound check and a single unified `nest check` path (whole-project *and*
+file-list checks both load the project image first via Brood `project/check-files`
+/ `check-project`, so cross-namespace imports resolve identically — no second
+code path). The only meaningful next move is the upgrade to Step 5+ (structured
+types) when a real need surfaces.
 
 ### Step 5+ — structured types ⬜
 Function arrows, vector/list element types, intersections for overloaded fns —
@@ -269,7 +282,10 @@ The checker is a **pre-step at the file/project boundary**, never woven into
 evaluation:
 
 - `brood check <file>` — check a single file (the language binary).
-- `nest check` — check the whole project (the CI / editor entry point).
+- `nest check [FILE…]` — check the whole project, or specific files (the CI /
+  editor entry point). Both forms run one Brood path that loads the project image
+  first, so a single-file check resolves cross-namespace `:use`/qualified names
+  exactly as a whole-project check does.
 - `brood <file>` — check, then run a file.
 - `nest test` — check the project, then run the tests.
 - **Not** in the REPL / `load` / per-form `eval` (maybe later) — so there's no

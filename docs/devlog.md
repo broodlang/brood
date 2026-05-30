@@ -8812,3 +8812,50 @@ conflict was this devlog's tail. Post-merge migration to the new namespace form:
 `link_test.blsp` → `(defmodule link-test (:use test))`; `supervisor.blsp` verified
 under `defmodule`-is-a-namespace. Full `cargo test` + the in-language suite green
 on the merge; link/supervisor suites re-checked under `BROOD_GC_STRESS`/`VERIFY`.
+
+## 2026-05-30 — Checker: operand-position unbound symbols + one unified `nest check` path
+
+**Goal.** Close two related advisory-checker gaps the type-system review surfaced
+(`docs/types.md` Step 4): (1) the unbound-symbol diagnostic only fired on a
+call's *head*, never an operand/value slot; (2) single-file `nest check FILE` was
+a separate Rust reimplementation that skipped the project-image load the
+whole-project path does — so every `:use`d / qualified name in a namespaced file
+false-flagged as unbound (the exact breakage the `.brood-skip-blsp-check`
+migration hatch was added for).
+
+**Built.**
+- **Operand / value-slot unbound check** (`crates/lisp/src/types/check/`). A
+  bare-symbol operand is now flagged — `(+ 1 typo)`, `(def x typo)`, `(if typo …)`,
+  `(let (a typo) …)` — but only when its enclosing head is a proven
+  *arg-evaluating, non-macro* callee (`evaluates_args`: a primitive, a
+  curated/known closure, or a lexical local — never a `Value::Macro`, unknown
+  head, or special form), so an unexpanded macro argument is never mistaken for a
+  value reference. Head and operand checks now share one `is_unbound` predicate
+  (consistency, no drift). Gated to **whole-file mode** via a `Ctx::check_operands`
+  flag that `check_file` sets: in a file every top-level def is accumulated and
+  the project image is loaded, so an unresolved operand is genuinely unbound —
+  whereas a bare fragment (`(check 'form)` / REPL) keeps free operand variables
+  ambiguous and flags only the head (preserves the no-false-positives rule).
+- **One `nest check` path** (`std/project.blsp`, `crates/nest/src/main.rs`). New
+  Brood `project/check-files`, which loads the project image first
+  (`project--ensure-loaded`, same as `check-project`) then runs the same per-file
+  walk (`project--check-files`). `cmd_check` collapsed from two branches (Brood
+  whole-project vs. a Rust single-file loop) to one: both forms go through Brood,
+  return a warning count, exit 1 on non-zero. So a single-file check of a
+  namespaced file now resolves cross-namespace `:use`/qualified names exactly as a
+  whole-project check — and still catches genuine cross-ns errors (unbound
+  qualified refs, arity on imported fns).
+
+**Verification.** `brood` lib 164/164 (70 checker tests, 4 new: operand flagged in
+file mode; `def`/`let`/`if` value slots; scope + forward-ref respected; fragment
+mode stays lenient). Swept the whole `std/` + `tests/` corpus with `nest check`:
+**zero** false positives; a deliberate `(+ x typo)`/`(def y zilch)`/`(if missing
+…)` file flags all three with correct positions. Scratch namespaced project:
+single-file + whole-project checks both clean, genuine cross-ns errors still
+caught. (Note: an unrelated pre-existing `[reload] macro … redefined` line can
+appear on stderr when a source file is alphabetically before a module it
+`:use`s — a source-load ordering quirk in the shared loader, not introduced here.)
+
+**Net.** Step 4 is complete through the operand check and a single unified
+`nest check`. The one remaining advisory-checker item that matters is Step 5+
+(structured types), still gated on real need (ADR-011).

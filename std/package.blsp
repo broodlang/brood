@@ -168,12 +168,23 @@ land in a later slice."
       (map package--dep-src-dir entries))))
 
 ;; --- the `nest` verbs --------------------------------------------------------
+;; Read the project manifest as *data* and apply it (populating the `*project-*`
+;; globals, incl. *project-dependencies*), rather than `(load)`-ing it as code:
+;; the manifest's `(project …)` declaration lives in the `project` namespace now
+;; (ADR-065), so loading it bare wouldn't resolve. Mirrors `project/project-setup`'s
+;; own manifest read.
+(defn package--load-manifest (path)
+  (when (file-exists? path)
+    (let (form (read-string (slurp path)))
+      (when (and (pair? form) (= (first form) 'project))
+        (project/project--apply (rest form))))))
+
 ;; Locate the project root, load its manifest (so *project-dependencies* is set),
 ;; and hand the root to `body-fn`. Shared preamble for the verbs below.
 (defn package--in-project (body-fn)
   (let (root (project/project--find-root (cwd)))
     (when (nil? root) (error "package: not inside a Brood project (no project.blsp found)"))
-    (when (file-exists? (path-join root "project.blsp")) (load (path-join root "project.blsp")))
+    (package--load-manifest (path-join root "project.blsp"))
     (body-fn root)))
 
 (defn fetch ()
@@ -337,7 +348,7 @@ land in a later slice."
           (error "package: " nm " is already a dependency"))
         (let (manifest (path-join root "project.blsp"))
           (spit manifest (package--manifest-add (slurp manifest) (package--dep->entry-node dep)))
-          (load manifest)
+          (package--load-manifest manifest)
           (write-lockfile root (resolve-deps root *project-dependencies*))
           (println (str "package: added " nm)))))))
 
@@ -350,6 +361,6 @@ land in a later slice."
           (error "package: " nm " is not a dependency"))
         (let (manifest (path-join root "project.blsp"))
           (spit manifest (package--manifest-remove (slurp manifest) name-sym))
-          (load manifest)
+          (package--load-manifest manifest)
           (write-lockfile root (resolve-deps root *project-dependencies*))
           (println (str "package: removed " nm)))))))

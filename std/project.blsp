@@ -379,6 +379,22 @@ resolve in the advisory checker. Returns the project root."
     (project--check-duplicate-defs (project--source-files root))
     (project--check-files (project--all-files root))))
 
+;; (check-files paths) — advisory-check a specific list of files, the entry
+;; behind `nest check FILE…`. Loads the project image *first* (same
+;; `project--ensure-loaded` as `check-project`) so cross-module / namespace
+;; imports resolve through the heap's globals exactly as in a whole-project
+;; check — without it a single-file check of a namespaced file false-flags every
+;; `:use`d / qualified name as unbound. Then runs the *same* per-file walk
+;; (`project--check-files`: GNU stderr lines + BROOD_NO_CHECK opt-out + count),
+;; so both `nest check` forms share one checker, not two divergent paths.
+;; Outside a project (no project.blsp) it skips loading and checks each file
+;; against the prelude alone — the standalone-file behaviour.
+(defn check-files (paths)
+  "Advisory type-check the listed files with the project image loaded first (so cross-module/namespace imports resolve), printing GNU `FILE:LINE:COL:` warnings to stderr and returning the total count. The entry behind `nest check FILE…`; shares its loader and per-file walk with `check-project`. Outside a project, checks against the prelude alone."
+  (let (root (project--find-root (cwd)))
+    (when root (project--ensure-loaded root))
+    (project--check-files paths)))
+
 ;; Sources-only variant for `run-project`'s auto pre-flight: skip `tests/`,
 ;; because test files depend on the test-framework macros (`describe`/`test`/
 ;; `assert=`/`is`) loaded by `(require 'test)`, which `nest run` doesn't
@@ -457,17 +473,22 @@ resolve in the advisory checker. Returns the project root."
     (project-setup root)
     (let (modname (first *project-main*) fname (second *project-main*))
       (require modname)
-      (unless (bound? fname)
-        (error "run-project: entry fn '" fname "' is not defined (module '" modname "')"))
-      ;; Advisory pre-flight: warnings go to stderr so they don't pollute the
-      ;; entry point's own stdout. After `require` so cross-module names see
-      ;; the heap's globals (see `check-project`). Sources only — `tests/` is
-      ;; out of scope for `nest run`, and its files reference test-framework
-      ;; macros that `(require 'test)` introduces (which we don't run here).
-      (check-project-sources)
-      (let (f (eval fname))
-        (unless (fn? f) (error "run-project: entry '" fname "' is not callable (" (type-of f) ")"))
-        (apply f args)))))
+      ;; A `(defmodule …)` entry defines its fn as `modname/fname` (ADR-065); a
+      ;; module file with no `defmodule` header defines it bare. Prefer the
+      ;; qualified name, fall back to bare.
+      (let (qual (symbol (str (name modname) "/" (name fname))))
+        (let (target (cond (bound? qual) qual (bound? fname) fname else nil))
+          (when (nil? target)
+            (error "run-project: entry fn '" fname "' is not defined (module '" modname "')"))
+          ;; Advisory pre-flight: warnings go to stderr so they don't pollute the
+          ;; entry point's own stdout. After `require` so cross-module names see
+          ;; the heap's globals (see `check-project`). Sources only — `tests/` is
+          ;; out of scope for `nest run`, and its files reference test-framework
+          ;; macros that `(require 'test)` introduces (which we don't run here).
+          (check-project-sources)
+          (let (f (eval target))
+            (unless (fn? f) (error "run-project: entry '" fname "' is not callable (" (type-of f) ")"))
+            (apply f args)))))))
 
 ;; --- user config (~/.config/brood/config.blsp) -------------------------------
 ;; A user-level Brood file of tooling preferences — the sibling of project.blsp.
@@ -494,16 +515,26 @@ resolve in the advisory checker. Returns the project root."
     "  :git-init false)   ; run `git init` in projects made by `nest new`\n"))
 
 ;; Ensure the config exists (writing a documented default the first time), then
-;; load it. Called by the `brood` subcommands, so a tool use always leaves an
+;; apply it. Called by the `brood` subcommands, so a tool use always leaves an
 ;; editable config behind.
 (defn load-config ()
-  "Ensure the user config (`~/.config/brood/config.blsp`) exists — writing a documented default on first use — then load it. Called by the `nest` subcommands."
+  "Ensure the user config (`~/.config/brood/config.blsp`) exists — writing a documented default on first use — then apply it. Called by the `nest` subcommands."
   (let (p (config--path))
     (unless (file-exists? p)
       (make-dir (config--dir))
       (spit p *config-default-source*)
       (println (str "Created " p)))
-    (load p))
+    ;; Read the config as DATA and apply the `(config …)` form directly, rather
+    ;; than `(load)`-ing it as code. `load` evaluates a file at the *root*
+    ;; namespace with a fresh (empty) import table (ADR-065), so a bare
+    ;; `(config …)` written in the user file would not resolve to this module's
+    ;; `project/config`. Reading-as-data keeps the user config a clean bare DSL
+    ;; (the project manifest is read the same way, ADR-020) and decouples it from
+    ;; namespace resolution — `config` here is `project/config` (this body is
+    ;; compiled in the `project` namespace), so the apply resolves.
+    (let (form (read-string (slurp p)))
+      (when (and (pair? form) (= (first form) 'config))
+        (apply config (rest form)))))
   nil)
 
 ;; --- scaffolding a new project (`nest new <name>`) ---------------------------
@@ -558,9 +589,8 @@ resolve in the advisory checker. Returns the project root."
   (str "(defmodule main \"The "
     nm
     " project's entry-point module — wired up as\n"
-    "the `nest run` entry by default (module `main`, fn `main`).\")\n"
-    "\n"
-    "(require 'hello)\n"
+    "the `nest run` entry by default (module `main`, fn `main`).\"\n"
+    "  (:use hello))\n"
     "\n"
     "(defn main ()\n"
     "  \"Entry point: print the project's greeting.\"\n"
@@ -569,9 +599,10 @@ resolve in the advisory checker. Returns the project root."
 (defn project--hello-template (nm)
   (str "(defmodule hello \"A second module in the "
     nm
-    " project — main requires it\n"
-    "and calls `greeting`. Showcases the flat module system (ADR-019): `hello`\n"
-    "registers `greeting` in the shared global table, so `main` just calls it.\")\n"
+    " project — `main` does\n"
+    "`(:use hello)` to call `greeting`. Showcases the module/namespace system\n"
+    "(ADR-065): `hello` defines `greeting` as `hello/greeting`; `(:use hello)`\n"
+    "imports it so `main` can call it bare.\")\n"
     "\n"
     "(defn greeting ()\n"
     "  \"Return the project's greeting string.\"\n"
@@ -580,17 +611,17 @@ resolve in the advisory checker. Returns the project root."
     "\")\n"))
 
 (defn project--main-test-template (nm)
-  (str ";; Tests for the main module. `nest test` loads src/ first, so we can call\n"
-    ";; main directly — and since `hello` is on the load-path, its defs are too.\n"
-    "(require 'test)\n"
+  (str ";; Tests for the main module. `(:use main)` brings `main` into scope;\n"
+    ";; `(:use test)` the describe/test/is macros. `nest test` loads src/ first.\n"
+    "(defmodule main-test (:use main) (:use test))\n"
     "\n"
     "(describe \"main\"\n"
     "  (test \"main is callable\" (is (fn? main))))\n"))
 
 (defn project--hello-test-template (nm)
-  (str ";; Tests for the hello module. `nest test` loads src/ first, so `greeting`\n"
-    ";; is available without an explicit (require 'hello) here.\n"
-    "(require 'test)\n"
+  (str ";; Tests for the hello module. `(:use hello)` brings `greeting` into scope;\n"
+    ";; `(:use test)` the describe/test/assert= macros.\n"
+    "(defmodule hello-test (:use hello) (:use test))\n"
     "\n"
     "(describe \"hello\"\n"
     "  (test \"greeting\" (assert= (greeting) \"hello "
@@ -636,7 +667,7 @@ resolve in the advisory checker. Returns the project root."
 (defn project--tui-test-template (nm)
   (str ";; Test the pure frame logic directly — the loop itself is exercised by\n"
     ";; `nest run --for`, its pure functions by `nest test`.\n"
-    "(require 'test)\n"
+    "(defmodule main-test (:use main) (:use test))\n"
     "\n"
     "(describe \"animation\"\n"
     "  (test \"step bounces off the left wall\" (assert= (step 0 -1 20) [1 1]))\n"
@@ -649,9 +680,8 @@ resolve in the advisory checker. Returns the project root."
 ;; async `cast` threads new state, synchronous `call` reads/updates it.
 (defn project--hatch-main-template (nm)
   (str "(defmodule main \"" nm
-    " — a stateful process built with the hatch framework.\")\n"
-    "\n"
-    "(require 'hatch)\n"
+    " — a stateful process built with the hatch framework.\"\n"
+    "  (:use hatch))\n"
     "\n"
     ";; A counter server. State `n` is the process's; messages drive it.\n"
     "(defprocess counter\n"
@@ -669,10 +699,9 @@ resolve in the advisory checker. Returns the project root."
     "    (println \"counter =\" (gen-call c :value))))\n"))
 
 (defn project--hatch-test-template (nm)
-  (str ";; `nest test` loads src/ first, so `counter` (and hatch's `!`/`gen-call`)\n"
-    ";; are already defined. :isolated — these spawn processes.\n"
-    "(require 'test)\n"
-    "(require 'hatch)\n"
+  (str ";; `(:use main)` brings `counter`; `(:use hatch)` the `!`/`gen-call` API;\n"
+    ";; `(:use test)` the macros. :isolated — these spawn processes.\n"
+    "(defmodule main-test (:use main) (:use hatch) (:use test))\n"
     "\n"
     "(describe \"counter\"\n"
     "  :isolated\n"
@@ -686,9 +715,8 @@ resolve in the advisory checker. Returns the project root."
 ;; is built by a fn (not a top-level `def`) so its closure isn't promoted.
 (defn project--http-main-template (nm)
   (str "(defmodule main \"" nm
-    " — a basic HTTP server.\")\n"
-    "\n"
-    "(require 'http)\n"
+    " — a basic HTTP server.\"\n"
+    "  (:use http))\n"
     "\n"
     "(def *port* 8080)\n"
     "\n"
@@ -710,9 +738,8 @@ resolve in the advisory checker. Returns the project root."
     "  (serve *port* (app)))\n"))
 
 (defn project--http-test-template (nm)
-  (str ";; `nest test` loads src/ first, so `home` / `app` are already defined.\n"
-    "(require 'test)\n"
-    "(require 'http)\n"
+  (str ";; `(:use main)` brings `home` / `app` into scope; `(:use test)` the macros.\n"
+    "(defmodule main-test (:use main) (:use test))\n"
     "\n"
     "(describe \"" nm " routes\"\n"
     "  (test \"GET / returns a 200 HTML page\"\n"
@@ -735,10 +762,9 @@ resolve in the advisory checker. Returns the project root."
     "deletes, Ctrl-C quits). The buffer is a list of line strings with a [row col]\n"
     "cursor; every edit is a pure (model -> model) function and `ui-run` drives the\n"
     "loop — render `view`, poll a key, fold it with `update`, repeat. Swap\n"
-    "`*term-display*` for `(gui-display)` (a --features gui build) to run in a window.\")\n"
-    "\n"
-    "(require 'ui)       ; the app framework: display frontends + the `ui-run` loop\n"
-    "(require 'display)  ; the render-op constructors (clear / text / cursor / frame)\n"
+    "`*term-display*` for `(gui-display)` (a --features gui build) to run in a window.\"\n"
+    "  (:use ui)        ; the app framework: display frontends + the `ui-run` loop\n"
+    "  (:use display))  ; the render-op constructors (clear / text / cursor / frame)\n"
     "\n"
     "(def *welcome*\n"
     "  (list \"hello, world\"\n"
@@ -830,9 +856,9 @@ resolve in the advisory checker. Returns the project root."
 
 (defn project--editor-test-template (nm)
   (str
-    ";; `nest test` loads src/ first, so the pure edit fns (ed-insert, …) are defined.\n"
+    ";; `(:use main)` brings the pure edit fns (ed-insert, …); `(:use test)` the macros.\n"
     ";; The loop is `ui-run`'s; here we test the edits — pure `(model -> model)`.\n"
-    "(require 'test)\n"
+    "(defmodule main-test (:use main) (:use test))\n"
     "\n"
     "(describe \"editor edits\"\n"
     "  (test \"insert puts a char at the cursor\"\n"
@@ -865,11 +891,10 @@ resolve in the advisory checker. Returns the project root."
     "`--features brood/gui`). ↑/↓ change the counter, Enter resets, Ctrl-C or the\n"
     "window's close button quits. The model is a plain map; `ui-run` drives the loop\n"
     "— render `view`, poll a key, fold it with `update`, repeat — over a window from\n"
-    "`(gui-display)`. Swap that for `*term-display*` to run in the terminal instead.\")\n"
-    "\n"
-    "(require 'ui)       ; the app framework: display frontends + the `ui-run` loop\n"
-    "(require 'display)  ; the render-op constructors (clear / text / cursor / frame)\n"
-    "(require 'face)     ; named text faces — style the sections in one place\n"
+    "`(gui-display)`. Swap that for `*term-display*` to run in the terminal instead.\"\n"
+    "  (:use ui)        ; the app framework: display frontends + the `ui-run` loop\n"
+    "  (:use display)   ; the render-op constructors (clear / text / cursor / frame)\n"
+    "  (:use face))     ; named text faces — style the sections in one place\n"
     "\n"
     ";; Faces: define the look once. Restyle by editing these (or, live, e.g.\n"
     ";; `(face-set :app/count {:fg :magenta})`). On the GUI a face may also carry a\n"
@@ -916,10 +941,10 @@ resolve in the advisory checker. Returns the project root."
 
 (defn project--gui-test-template (nm)
   (str
-    ";; `nest test` loads src/ first, so the pure fns are defined. The window loop is\n"
+    ";; `(:use main)` brings the pure fns; `(:use test)` the macros. The window loop is\n"
     ";; `ui-run`'s (untested here — it needs a display); we test the pure `update` and\n"
     ";; `view` — `(model -> model)` / `(model -> frame)`.\n"
-    "(require 'test)\n"
+    "(defmodule main-test (:use main) (:use test))\n"
     "\n"
     "(describe \"" nm " counter\"\n"
     "  (test \"up increments, down decrements\"\n"
