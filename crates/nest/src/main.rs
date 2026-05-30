@@ -19,8 +19,9 @@
 //!   nest test [<file>...]  run the project's tests, or the listed files
 //!   nest check [<file>...] type-check the project, or the listed files
 //!   nest fetch             resolve dependencies, write project.lock.blsp (ADR-037)
+//!   nest update [<name>…]  re-resolve dependency refs and re-lock (advance moving refs)
 //!   nest tree              print the resolved dependency tree
-//!   nest add <name> …      add a dependency (`:path PATH`) and re-lock
+//!   nest add <name> …      add a dependency (`:path PATH` or `:git URL :ref REF`) and re-lock
 //!   nest remove <name>     remove a dependency and re-lock
 //!   nest repl              project-aware REPL (sources preloaded)
 //!   nest format            in-place reformat (`--check` for CI dry-run)
@@ -146,6 +147,17 @@ enum Cmd {
     /// content hash; `:git` deps land in a later slice. Errors if cwd is not
     /// inside a Brood project.
     Fetch,
+
+    /// Re-resolve dependency refs and re-lock, advancing moving refs (ADR-037).
+    ///
+    /// With no NAMES: re-resolves every dependency (ignoring the locked commits,
+    /// so a branch or floating tag moves forward). With NAMES: only those deps
+    /// re-resolve; the rest keep their locked pins.
+    Update {
+        /// The require-names of the dependencies to update. Omit to update all.
+        #[arg(value_name = "NAME")]
+        names: Vec<String>,
+    },
 
     /// Print the project's resolved dependency tree (root → direct → transitive).
     Tree,
@@ -277,6 +289,7 @@ fn run_main(cli: Cli) {
         ),
         Cmd::Doc { module, all } => cmd_doc(&mut interp, module.as_deref(), all),
         Cmd::Fetch => run(&mut interp, "(require 'package) (package/fetch)"),
+        Cmd::Update { names } => cmd_update(&mut interp, &names),
         Cmd::Tree => run(&mut interp, "(require 'package) (package/tree)"),
         Cmd::Add { name, spec } => cmd_add(&mut interp, &name, &spec),
         Cmd::Remove { name } => {
@@ -596,6 +609,17 @@ fn cmd_run(
 /// reference) and ignores MODULE.
 /// `nest add NAME :path PATH` — dispatch into the package module's `add` verb,
 /// passing NAME and each spec token as escaped string arguments.
+/// `nest update [NAME...]` — re-resolve refs and re-lock (ADR-037). No NAMES
+/// updates every dep; NAMES updates only those.
+fn cmd_update(interp: &mut Interp, names: &[String]) {
+    let args: Vec<&str> = names.iter().map(String::as_str).collect();
+    let call = format!(
+        "(require 'package) {}",
+        brood::introspect::call_form("package/update", &args)
+    );
+    run(interp, &call);
+}
+
 fn cmd_add(interp: &mut Interp, name: &str, spec: &[String]) {
     let mut args: Vec<&str> = vec![name];
     args.extend(spec.iter().map(String::as_str));
