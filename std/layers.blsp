@@ -1,0 +1,368 @@
+;; std/layers.blsp — composable, runtime-reconfigurable behaviour layers.
+;; (require 'layers).
+;;
+;; The generic mechanism the editor's "modes" are built from — but NOT
+;; editor-specific: any interactive Brood UI uses it, with or without buffers. A
+;; *context* (an app model, or a buffer) carries an ordered list of named behaviour
+;; *layers*; input and events resolve through them by precedence. "Major"/"minor"
+;; are positions in that list (base vs. stacked), not types — see docs/layers.md.
+;;
+;; A LAYER is a `def`'d, late-bound value, resolved by symbol at use (so redefining
+;; it hot-swaps everywhere — like a keymap command):
+;;
+;;   (def magit/layer
+;;     {:name 'magit
+;;      :keymap (-> {} (keymap-bind ["s"] 'magit/stage))
+;;      :hooks  {:activate '(magit/setup) :on-close '(magit/kill-worker)}})
+;;
+;; A CONTEXT is any state map carrying `:layers` — a list of layer references
+;; (symbols, or inline maps), **head = highest precedence**.
+;;
+;; This is framework tier (opt-in, never the prelude), pure Brood over `keymap`,
+;; zero kernel surface (ADR-045). Phase 1: the buffer-free core (keys + hooks).
+
+(defmodule layers
+  "Composable, runtime-reconfigurable behaviour layers for interactive UIs.
+`(require 'layers)`. A *context* (any state map — an app model or a buffer) holds
+`:layers`, an ordered list of layer references (head = highest precedence). A
+*layer* is a `def`'d map `{:name … :keymap … :hooks {event → (fn-syms)}}`, resolved
+by symbol at use (late-bound, so redefining it hot-swaps it everywhere).
+
+    (require 'keymap) (require 'layers)
+    (def app/base {:name 'base :keymap (keymap-bind {} [\"q\"] 'app/quit)})
+    (def st (activate-layer {} 'app/base))
+    (layer-dispatch st nil \"q\" (fn (s _) s))   ; => [st' pending']
+
+Keymaps and hooks are resolved by one generic collector (`layer-collect`) — facets.
+`:activate`/`:deactivate` fire for the one layer toggled; `:on-focus`/`:on-blur`/
+`:on-close` (and app-defined events) fan across all active layers via `run-event`.
+Buffer-type binding and focus/scope wiring are layered on in later phases — this
+core knows nothing about buffers."
+  (:use keymap))
+
+(require 'keymap)
+
+;; ============================================================================
+;; HOW TO USE
+;; ============================================================================
+;;
+;; The whole idea: a CONTEXT (any state map) carries `:layers`, an ordered list of
+;; LAYERS (head = highest precedence). A layer bundles a keymap and lifecycle hooks
+;; under a name. Input and events resolve through the active layers. "Modes" (major,
+;; minor) are just positions in the list — there is no mode type.
+;;
+;; ---- 1. Define a layer -----------------------------------------------------
+;; A layer is a `def`'d map, referenced by symbol so redefining it hot-swaps it
+;; everywhere. Commands and hooks are *also* symbols (resolved late). Build the
+;; keymap with `keymap-bind` (chords are vectors of >1 key):
+;;
+;;   (defmodule magit (:use layers) (:use keymap) (:use buffer))
+;;   (require 'layers) (require 'keymap)
+;;
+;;   (defn stage  (st key) …)            ; a command: (state key) -> state
+;;   (defn commit (st key) …)
+;;   (defn refresh (st) …)               ; a hook: (state) -> state
+;;   (defn kill-worker (st) …)
+;;
+;;   (def layer
+;;     {:name 'magit
+;;      :keymap (-> {} (keymap-bind ["s"]     'magit/stage)
+;;                     (keymap-bind ["c" "c"] 'magit/commit))   ; a chord
+;;      :hooks  {:activate '(magit/refresh)        ; turned on  (once)
+;;               :on-focus '(magit/refresh)        ; re-entered (every time)
+;;               :on-close '(magit/kill-worker)}}) ; going away (cleanup)
+;;
+;; ---- 2. Turn layers on/off on a context ------------------------------------
+;; `activate-layer` pushes a layer (highest precedence) and fires its `:activate`;
+;; `deactivate-layer` (by :name) fires `:deactivate` and removes it. `push-layer`
+;; / `remove-layer` are the no-hook primitives. `replace-base-layer` swaps the base
+;; (the "major") while layers above it stay — deactivating the old, activating new.
+;;
+;;   (def st (activate-layer {} 'magit/layer))   ; st now has :layers '(magit/layer)
+;;   (layer-active? st 'magit)                    ; => true
+;;
+;; ---- 3. Dispatch a key -----------------------------------------------------
+;; `layer-dispatch` composes the context's active keymaps and steps one keystroke,
+;; returning [state' pending']. Thread `pending` back on the next key (chords span
+;; keystrokes); a fallback handles unbound keys (e.g. self-insert).
+;;
+;;   (let (r (layer-dispatch st nil "s" (fn (s _) s)))   ; runs magit/stage
+;;     (first r))   ; => new state          (second r) => nil, or a pending sub-keymap
+;;
+;; ---- 4. Buffer types: which layers a new buffer starts with ----------------
+;; Bind layers to a TYPE, and a type to filenames (data registries, hot-reloadable):
+;;
+;;   (register-type-layers :magit-status '(magit/layer))     ; type → layers
+;;   (register-file-type ".el" :elisp)                       ; filename → type (suffix)
+;;   (register-file-type (fn (f) (= f "Makefile")) :make)    ; …or a predicate
+;;
+;;   (init-buffer-layers buf)                ; file → type → seed :layers, fire :activate
+;;   (init-buffer-layers (set-buffer-type buf :magit-status))  ; fileless/special buffer
+;;
+;; `std/buffer` need not be loaded — this only reads/writes :file/:type/:layers on a
+;; plain map. A buffer-less GUI just keeps `:layers` on its own model.
+;;
+;; ---- 5. Scopes & focus (apps with several contexts) ------------------------
+;; The active set is the FOCUSED context's layers. Several scopes compose — a
+;; focused buffer shadowing the window/app. Layers stays focus-agnostic: YOU pass
+;; the scope contexts, highest precedence first.
+;;
+;;   (scope-dispatch (list focused-buffer model) model pending key fallback)
+;;       ; keymap merged from buffer + model layers; command runs on `model`
+;;
+;; Switching focus is *dormancy*, not teardown (no activate/deactivate). Fire the
+;; fanned events yourself at the right moments:
+;;
+;;   (switch-focus old-buf new-buf)   ; => [old' new'] : :on-blur then :on-focus
+;;   (close-context buf)              ; :on-close (kill async workers) then deactivate all
+;;
+;; `:on-close` is the async-cleanup seam: a layer whose `:on-focus` `spawn`ed a
+;; worker kills it in `:on-close`; results from the worker arrive as mailbox
+;; messages the app's loop handles.
+;;
+;; ---- 6. Putting it in a ui-run loop ----------------------------------------
+;; `std/ui`'s loop is (model, view, update). Keep layers in the model (and on each
+;; buffer); dispatch in `update`; thread `pending` in the model:
+;;
+;;   (defn update (model input cols rows)
+;;     (let (buf (current-buffer model)                       ; app's own accessor
+;;           r   (scope-dispatch (list buf model) model (get model :pending) input
+;;                               (fn (m _) m)))               ; fallback: ignore
+;;       (assoc (first r) :pending (second r))))
+;;
+;; Create a buffer → `init-buffer-layers`; switch buffers → `switch-focus` +
+;; stash both; close one → `close-context`. The view reads whatever facets it wants
+;; off the active layers via `(layer-collect ctx :some-facet)`.
+;;
+;; ---- semantics to remember -------------------------------------------------
+;;   * head of :layers = highest precedence (keymap merge + hook order).
+;;   * dormant != deactivated: leaving a context never fires :deactivate.
+;;   * :activate/:deactivate fire for the ONE layer toggled; :on-focus/:on-blur/
+;;     :on-close (and your own events, via `run-event`) fan across ALL active layers.
+;;   * a throwing hook is isolated (state unchanged) — a bad layer can't crash the loop.
+;;   * a chord is owned by its winning layer (no cross-layer prefix merge).
+;; ============================================================================
+
+;; ---- resolution -------------------------------------------------------------
+
+(defn layers--list (ctx)
+  "The context's layer list (highest precedence first), or () when it has none."
+  (or (get ctx :layers) (list)))
+
+(defn layers--resolve (layer)
+  "A layer reference → its map. A map is itself; a symbol is resolved (late-bound,
+so redefining the layer hot-swaps it), like a keymap command."
+  (if (map? layer) layer (eval layer)))
+
+(defn layers--name-of (layer)
+  "The `:name` of a layer reference (resolving it first)."
+  (get (layers--resolve layer) :name))
+
+(defn layers--find (ctx name)
+  "The first active layer reference named `name`, or nil."
+  (first (filter (fn (l) (= name (layers--name-of l))) (layers--list ctx))))
+
+(defn layer-collect (ctx facet)
+  "The `facet` value of every active layer that defines it, highest-precedence
+first (head of `:layers`); layers lacking the facet are dropped. The one generic
+resolver — keymaps and hooks are just facets over it."
+  (remove nil?
+    (map (fn (l) (get (layers--resolve l) facet)) (layers--list ctx))))
+
+;; ---- stack ops (pure; fire no hooks) ----------------------------------------
+
+(defn push-layer (ctx layer)
+  "Add `layer` (a reference) at highest precedence (the head). The low-level
+primitive — `activate-layer` is the hook-firing version."
+  (assoc ctx :layers (cons layer (layers--list ctx))))
+
+(defn remove-layer (ctx name)
+  "Remove every active layer whose `:name` is `name`."
+  (assoc ctx :layers (remove (fn (l) (= name (layers--name-of l))) (layers--list ctx))))
+
+(defn layer-active? (ctx name)
+  "True if an active layer is named `name`."
+  (some? (fn (l) (= name (layers--name-of l))) (layers--list ctx)))
+
+(defn layers--replace-base-list (lst layer)
+  "Replace the base (last) element of `lst` with `layer`, or add it if `lst` empty."
+  (if (empty? lst) (list layer) (concat (but-last lst) (list layer))))
+
+;; ---- hooks ------------------------------------------------------------------
+
+(defn layers--run-hook (hook ctx)
+  "Run one hook — a fn symbol resolved late and applied as `(ctx) -> ctx`. A throw
+leaves `ctx` unchanged, so a bad hook can't crash the loop."
+  (try ((eval hook) ctx) (catch e ctx)))
+
+(defn layers--run-hooks (ctx hooks)
+  "Thread `ctx` through a list of hooks (each `(ctx) -> ctx`)."
+  (fold (fn (acc h) (layers--run-hook h acc)) ctx hooks))
+
+(defn layers--layer-event-hooks (layer event)
+  "The `event` hook list of a single layer reference, or ()."
+  (or (get (get (layers--resolve layer) :hooks) event) (list)))
+
+(defn layers--run-one (ctx layer event)
+  "Run just `layer`'s `event` hooks (the lifecycle path: `:activate`/`:deactivate`)."
+  (layers--run-hooks ctx (layers--layer-event-hooks layer event)))
+
+(defn run-event (ctx event)
+  "Fan `event` across ALL active layers, highest precedence first, threading `ctx`
+through every hook. For broadcast events — `:on-focus`/`:on-blur`/`:on-close` and
+app-defined ones — *not* the lifecycle `:activate`/`:deactivate`."
+  (layers--run-hooks ctx
+    (apply concat (map (fn (hk) (or (get hk event) (list))) (layer-collect ctx :hooks)))))
+
+;; ---- lifecycle toggles ------------------------------------------------------
+
+(defn activate-layer (ctx layer)
+  "Turn a layer on: push `layer` at highest precedence, then run *its* `:activate`
+hooks. (Raw `push-layer` fires no hooks.)"
+  (layers--run-one (push-layer ctx layer) layer :activate))
+
+(defn deactivate-layer (ctx name)
+  "Turn off the layer named `name`: run its `:deactivate` hooks, then remove it. A
+no-op if no such layer is active."
+  (let (layer (layers--find ctx name))
+    (if (nil? layer)
+      ctx
+      (remove-layer (layers--run-one ctx layer :deactivate) name))))
+
+(defn replace-base-layer (ctx layer)
+  "Swap the base (lowest-precedence, the 'major') layer for `layer`: deactivate the
+old base, set the new base, activate it. Layers stacked above are untouched — like
+changing major mode while minor modes stay on."
+  (let (old (last (layers--list ctx))
+        ctx1 (if (nil? old) ctx (layers--run-one ctx old :deactivate))
+        ctx2 (assoc ctx1 :layers (layers--replace-base-list (layers--list ctx1) layer)))
+    (layers--run-one ctx2 layer :activate)))
+
+;; ---- keymap consumer (bridge to keymap) -------------------------------------
+
+(defn active-keymap (ctx)
+  "Merge the keymaps of all active layers into one, head (highest precedence)
+winning. A prefix sub-map comes wholesale from its winning layer (no cross-layer
+prefix merge), so a layer owns its chord."
+  (apply merge (cons {} (reverse (layer-collect ctx :keymap)))))
+
+(defn layer-dispatch (ctx pending key fallback)
+  "One keystroke through the context's composed active keymap, via `keymap-step`:
+returns `[ctx' pending']`. The bridge from layers to keymap — compose, then step."
+  (keymap-step (active-keymap ctx) pending ctx key fallback))
+
+;; ============================================================================
+;; Phase 2 — buffer-type binding
+;; ============================================================================
+;; A new buffer's starting layer set is determined by its TYPE. Two registries
+;; (plain data, rebindable via the helpers → hot-reload) bind layers to types and
+;; types to filenames. This stays buffer-*agnostic* code: it only reads/writes the
+;; `:file` / `:type` / `:layers` keys on a plain map — `std/buffer` need not be
+;; loaded, and a buffer-less context can carry a `:type` too.
+
+;; type → its layer refs, in precedence order (head = highest; activated base-first).
+(def *type-layers* {})
+;; ordered filename→type rules, newest-first (first match wins). Each is
+;; `{:match <suffix-string | (fn (filename) -> bool)> :type <type>}`.
+(def *auto-type-by-file* ())
+
+(defn register-type-layers (type refs)
+  "Bind buffer `type` to `refs` (a list of layer references, head = highest
+precedence). Rebinds the registry, so it hot-swaps on the next buffer of that type.
+To add a single layer to a type, `assoc` onto its existing `(layers-for-type type)`."
+  (def *type-layers* (assoc *type-layers* type refs)))
+
+(defn register-file-type (spec type)
+  "Map filenames to `type`: `spec` is a suffix string (matched with `ends-with?`)
+or a predicate `(fn (filename) -> bool)`. Prepended, so the most-recently-registered
+rule wins — a project can override a default."
+  (def *auto-type-by-file* (cons {:match spec :type type} *auto-type-by-file*)))
+
+(defn layers-for-type (type)
+  "The layer refs bound to `type`, or () if none."
+  (or (get *type-layers* type) ()))
+
+(defn layers--file-matches? (file spec)
+  "Does `file` satisfy a `:match` spec — a suffix string, or a predicate fn?"
+  (if (string? spec) (ends-with? file spec) (spec file)))
+
+(defn layers--match-file (file rules)
+  "Walk `rules` (newest-first); return the `:type` of the first whose `:match` fits
+`file`, else nil."
+  (if (empty? rules)
+    nil
+    (if (layers--file-matches? file (get (first rules) :match))
+      (get (first rules) :type)
+      (layers--match-file file (rest rules)))))
+
+(defn buffer-type-for (buf)
+  "The type of `buf`: match its `:file` against `*auto-type-by-file*` (first match
+wins); with no file or no match, fall back to its explicitly-set `:type`, else
+`:fundamental`."
+  (let (file (get buf :file)
+        matched (if (nil? file) nil (layers--match-file file *auto-type-by-file*)))
+    (or matched (get buf :type) :fundamental)))
+
+(defn set-buffer-type (buf type)
+  "Set `buf`'s `:type` explicitly — the Brood-side override for fileless or special
+buffers (a `*magit-status*`, a scratch buffer). Does not (re)seed layers; pair with
+`init-buffer-layers`."
+  (assoc buf :type type))
+
+(defn init-buffer-layers (buf)
+  "Resolve `buf`'s type, set `:type` to it, and seed `:layers` from `*type-layers*`,
+firing each layer's `:activate` (base-first). Replaces any existing `:layers` — call
+on buffer creation, or after `set-buffer-type`. The registry list's order is
+preserved (head = highest precedence)."
+  (let (type (buffer-type-for buf)
+        refs (layers-for-type type)
+        seeded (assoc buf :type type :layers ()))
+    ;; activate base-first (reverse: each push goes to the head), so the resulting
+    ;; :layers order equals the registry order and a minor's :activate sees the base.
+    (fold (fn (b ref) (activate-layer b ref)) seeded (reverse refs))))
+
+;; ============================================================================
+;; Phase 3 — scopes, focus/close lifecycle, teardown
+;; ============================================================================
+;; The active layer set is whichever context has focus. Several scopes compose —
+;; a focused buffer shadowing the window/app — but layers stays focus-agnostic: the
+;; APP owns "what's focused" and passes the scope contexts here, in precedence order
+;; (first = highest). A keystroke composes their keymaps; commands run on the app
+;; model. Switching focus is dormancy, not lifecycle (no activate/deactivate);
+;; focus/blur/close are *fanned events* — and `:on-close` is where a layer cleans up
+;; async work it started (kill a spawned worker), which `close-context` drives.
+
+(defn compose-layers (ctxs)
+  "Concatenate the `:layers` of `ctxs` in precedence order (first scope = highest) —
+the composite layer list for multi-scope dispatch, e.g. (focused-buffer app-model)."
+  (apply concat (map layers--list ctxs)))
+
+(defn scope-keymap (ctxs)
+  "The merged active keymap across several scopes `ctxs` (first = highest
+precedence; a layer still owns its chord)."
+  (active-keymap {:layers (compose-layers ctxs)}))
+
+(defn scope-dispatch (ctxs state pending key fallback)
+  "Dispatch `key` through the merged keymap of `ctxs` (precedence by order), running
+the resolved command on `state` — typically the app model, which may itself be one
+of `ctxs` so its window-level layers compose with the focused buffer's. Returns
+`[state' pending']`. The multi-scope counterpart to `layer-dispatch`."
+  (keymap-step (scope-keymap ctxs) pending state key fallback))
+
+(defn switch-focus (from to)
+  "Move focus from context `from` to `to`: fan `:on-blur` across `from`'s layers and
+`:on-focus` across `to`'s, returning `[from' to']`. Either side may be nil (a
+no-op). Neither context is activated/deactivated — leaving a context is *dormancy*,
+not teardown; its layers simply stop being consulted."
+  [(if (nil? from) from (run-event from :on-blur))
+   (if (nil? to)   to   (run-event to   :on-focus))])
+
+(defn deactivate-all (ctx)
+  "Deactivate every active layer (head-first), firing each `:deactivate`."
+  (fold (fn (c nm) (deactivate-layer c nm)) ctx (map layers--name-of (layers--list ctx))))
+
+(defn close-context (ctx)
+  "Tear a context down: fan `:on-close` across its active layers — the async-cleanup
+hook, where a layer kills a worker it `spawn`ed — then `deactivate-all` (firing each
+`:deactivate`). The full close path for a buffer or window going away."
+  (deactivate-all (run-event ctx :on-close)))
