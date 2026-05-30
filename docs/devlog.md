@@ -9001,3 +9001,66 @@ were already pre-scanned). Fixed the 7 `hatch` suite failures.
   fundamental ~80× tree-walker gap vs Node needs a bytecode/closure-compiling VM.
 - GC handoff (`docs/handoff-gc.md`) items #1–#5 are all addressed (generational was
   the last one); only the deferred generational *young/old further tuning* remains.
+
+---
+
+## 2026-05-30 — Package manager Slices 2 & 3: `:git` deps + the `nest` verbs
+
+**Goal.** Finish the package manager (ADR-037, [`packages.md`](packages.md)).
+Slice 1 had `:path` deps end-to-end (tree-hash, transitive resolution, lock I/O,
+`ensure-deps` on `*load-path*`). Remaining: `:git` deps (Slice 2) and the
+`nest fetch`/`update`/`add`/`remove`/`tree` verbs + auto-fetch (Slice 3).
+
+**Built.**
+- **Three Rust primitives** (`builtins.rs`), all thin shell-outs — the only new
+  kernel mechanism the design adds:
+  - `%git-resolve-ref url ref` — `git ls-remote URL REF` → commit SHA (prefers an
+    annotated tag's peeled `^{}` line); `nil` if absent. A `ref` that's already a
+    commit SHA the remote doesn't advertise pins itself.
+  - `%git-clone url dest ref commit` — `init` + `remote add` + shallow-fetch the
+    exact `commit` (GitHub-style SHA-in-want), falling back to fetching `ref`,
+    then a detached checkout of `commit`. `:ok` or a thrown error with git's
+    stderr.
+  - `%rm-rf path` — recursive delete **bounded to `_deps/`** (refuses any path
+    without a `_deps` component), so a mis-computed cache path can't nuke
+    something else. `nest update`/`remove` evict cached deps through it.
+  - (`%http-get` **deferred** — it has no caller until the `:tarball` source
+    kind, so per ADR-011 it isn't added yet.)
+- **`std/package.blsp` git policy.** `package--resolve-git` clones into
+  `_deps/<name>/`, pins the commit (reused from the lock when the manifest's
+  url+ref still match — so a re-resolve is network-free), tree-hashes the result,
+  and writes a `.brood-pkg.blsp` stamp (`:git`/`:ref`/`:commit`/`:sha256`/
+  `:fetched-at`). The clone is folded into resolution (not a separate
+  `ensure_cache` pass as the sketch drew it) because the walk needs the dep's own
+  `:dependencies` immediately, and those only exist on disk post-clone. A **cache
+  hit** (`.brood-pkg.blsp` records the wanted commit) skips both the clone and the
+  tree-hash, reusing the locked SHA — important because `ensure-deps` runs on
+  every project-aware `nest` subcommand and must not re-hash every dep file each
+  time.
+- **Lock format** gained `:git`/`:ref`/`:commit` fields alongside the slice-1
+  `:path`/`:sha256`/`:deps`. `resolve-deps` now takes the prior lock; passing
+  `nil` forces re-resolution (how `nest update` advances a moving branch/tag).
+- **Conflict policy completed.** "Direct beats transitive" (Go's MVS-without-the-
+  solver): the root manifest's deps resolve first, so a direct pin silently wins
+  over a transitive request for the same name; two *transitive* deps that disagree
+  is the loud `pin-it-yourself` error. (Slice 1 only had the error; this adds the
+  direct-wins half.)
+- **`nest update [NAME…]`** — new subcommand + `package/update` verb. No names →
+  re-resolve everything (lock passed as `nil`); names → re-resolve only those
+  (the rest keep their locked pins via a filtered lock). `add` now accepts `:git`
+  (the slice-1 path-only guard is gone); `remove` drops the dep's `_deps/` cache.
+- **Tests** (`tests/package_test.blsp`): the slice-1 `resolve-deps` calls gained
+  the lock arg; the obsolete "git not supported yet" case is replaced by a git
+  describe block built against a **local git repo over a `file://` URL** (offline,
+  via `run-process "git"`): resolve→clone→lock fields, cache-hit commit reuse,
+  transitive flattening + direct-beats-transitive, the transitive-conflict error,
+  and an `:isolated` require-able end-to-end. 26 tests green.
+
+**Verified by hand** in a scaffolded project against two local git-repo deps:
+`nest add :git`, `fetch` (idempotent — no re-clone/re-hash on a cache hit), a
+running app `(require)`-ing a git dep, transitive resolution, `nest update`
+advancing a moved branch, and direct-beats-transitive vs the loud conflict error.
+
+**Outcome.** The package manager is **done** for its v1 scope. Deferred to v2 by
+design (ADR-011): a registry, semver + a constraint solver, tarball/HTTP source
+kinds (with `%http-get`), and signed packages.

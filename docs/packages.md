@@ -1,8 +1,8 @@
 # Packages: third-party Brood deps
 
-> Status: **in progress** (ADR-037). Design captured here ahead of M2 because
+> Status: **done** (ADR-037; v1 scope). Design captured here ahead of M2 because
 > the decisions (manifest shape, cache layout, conflict policy) cross-cut
-> project management and the upcoming editor plugin story. Landing in vertical
+> project management and the upcoming editor plugin story. Landed in vertical
 > slices — see [`roadmap.md`](roadmap.md):
 >
 > - **Slice 0 — done (2026-05-29):** manifest `:dependencies` parsing; the
@@ -13,10 +13,21 @@
 >   (a path dep's `src/` joins `*load-path*`, so `(require 'dep)` finds it).
 >   `std/package.blsp` is the new module; no git, no network. The `(fetch)` verb
 >   exists; its `nest fetch` subcommand wiring lands with the other verbs.
-> - **Slice 2 — next:** `:git` deps (`%git-resolve-ref`/`%git-clone`, the
->   `_deps/` cache, clone-then-checkout the pinned commit).
-> - **Slice 3:** the `nest fetch`/`update`/`add`/`remove`/`tree` subcommands +
->   auto-fetch on every subcommand.
+> - **Slice 2 — done (2026-05-30):** `:git` deps end-to-end. The
+>   `%git-resolve-ref` (`ls-remote` a tag/branch/commit → SHA), `%git-clone`
+>   (init + shallow-fetch the pinned commit + detached checkout), and `%rm-rf`
+>   (bounded to `_deps/`) primitives; the `_deps/<name>/` cache with a
+>   `.brood-pkg.blsp` metadata stamp; commit reuse from the lock so a re-resolve
+>   is network-free on a cache hit; the `:git`/`:commit` lock fields; and the
+>   "direct beats transitive" conflict rule.
+> - **Slice 3 — done (2026-05-30):** the `nest fetch`/`update`/`add`/`remove`/
+>   `tree` subcommands, `add`/`remove` editing the manifest over the
+>   comment-preserving CST, and auto-fetch via `ensure-deps` on every
+>   project-aware subcommand.
+>
+> Deferred to v2 by design (ADR-011): a registry, semver + a constraint solver,
+> tarball/HTTP source kinds (`%http-get` not yet added — it lands with the first
+> `:tarball` dep), and signed packages. See *Future work* below.
 >
 > Four decisions refined the original sketch when implementation began — they
 > are folded into the relevant sections below and summarised in ADR-037's
@@ -220,6 +231,23 @@ fn ensure_cache(project_root, resolved):
 `:dependencies`". The depth-first walk keeps the topology straightforward
 and gives nice trace output for `nest tree`.
 
+> **Implementation note (Slice 2).** The sketch shows `resolve` returning
+> `deps: TBD` and a separate `ensure_cache` pass filling them. In the
+> implementation the clone is **folded into `resolve`** for `:git` deps — a dep's
+> own `project.blsp` only exists on disk *after* the clone, and the walk needs its
+> `:dependencies` immediately to queue them. So `package--resolve-git` clones (on
+> a cache miss), then reads the dep's manifest for sub-deps in the same step,
+> exactly as `:path` resolution already does. A **cache hit** (the
+> `.brood-pkg.blsp` records the wanted commit) skips the clone *and* the tree-hash,
+> reusing the locked SHA — so `ensure-deps`, which runs on every project-aware
+> `nest` subcommand, doesn't re-hash every dep file on each invocation.
+>
+> "Direct beats transitive" falls out of the queue order: the root manifest's
+> deps are enqueued first, so each is resolved before any transitive request for
+> the same name. When a duplicate name surfaces and it's a direct dep, the root's
+> pin already won (the transitive request is dropped silently); two *transitive*
+> deps that disagree is the loud error below.
+
 ## Conflicts
 
 If two deps require the same `name` at different refs, that's an **error**.
@@ -410,8 +438,10 @@ out-of-scope for v1.
   directory hash is a Brood tree-walk that combines per-file hashes (see
   [Reproducibility notes](#reproducibility-notes) below) — both live in
   `std/package.blsp`, not the kernel. Also hashes the lock manifest.
-- `(%http-get url)` — GET → bytes. Lands now (small), used by future
-  tarball sources.
+- `(%http-get url)` — GET → bytes. **Deferred** with the `:tarball` source kind
+  (ADR-011): it has no caller until then, so it isn't added yet. When a tarball
+  dep lands, the kernel gains this one primitive and the source-kind dispatch in
+  `std/package.blsp` opens up — no other reshaping.
 - `(%rm-rf path)` — explicit because `nest update` overwrites cached deps.
   Bounded to paths under `_deps/`; refuses anything outside.
 
