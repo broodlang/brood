@@ -490,8 +490,17 @@ The seam that makes remoteability free later (see architecture.md).
   routes `https://` URLs through it, so `http-get`/`http-request` speak both
   transports. **Client-only:** rustls streams don't split read/write across
   threads like a raw fd, so accepting *inbound* TLS (server-side, for the daemon
-  below) is still open. ⬜ Other follow-ups: `tcp-controlling-process`; a `mio`
-  reactor for scale.
+  below) is still open. ✅ `tcp-controlling-process` (hand a passive accepted
+  socket to a per-connection process). ⬜ Remaining follow-up: a `mio` reactor for
+  scale.
+- ✅ **Node names are `name@host`** (ADR-073) — Erlang short/long names: a bare
+  name auto-qualifies (local: `(hostname)`; TCP: the listen address's host), and
+  an explicit `:name@host` gives a long/FQDN name. Pids are now globally unique;
+  `connect` returns the peer's authoritative name. Kernel adds only `(hostname)`;
+  the rest is Brood policy in the prelude.
+- ✅ **Synchronous `remote-spawn`** (`remote-spawn-sync`, ADR-067) — ships a thunk
+  to a peer and returns the child's (node-tagged) pid via a ref-keyed reply, so a
+  remote child is directly `monitor`/`link`-able.
 - ⬜ The same runtime listens on a socket and serves the M3 protocol (incl.
   **server-side TLS** for remote attach)
 - ⬜ Remote editor instances attach (the Emacs `--daemon` / `emacsclient` model)

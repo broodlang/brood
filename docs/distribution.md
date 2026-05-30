@@ -38,16 +38,29 @@ The shared cookie authenticating links lives in `~/.config/brood/cookie`
 a machine share it — no secret to pass. `nest run --name foo app.blsp` brings a
 local node up before running `app.blsp` (the Emacs `--daemon` model).
 
+## Node names are `name@host` (ADR-073)
+
+A node's identity is `name@host`, Erlang-style — globally unique, carried in every
+pid (`#<pid a@whkbus/3>`). `node-start` qualifies a bare name: a **local** node
+takes this machine's short `(hostname)` (`:a@whkbus`); a **TCP** node takes its
+listen address's host (`:a@127.0.0.1`), so peers and `ensure-link` derive the same
+name. Pass an explicit `:name@host` for a long/FQDN name. **`connect` returns the
+peer's authoritative `name@host`** — address peers with that value (a `let`/`def`
+binding, or `(nodes)`), not a bare literal.
+
 ## Primitives
 
 | Primitive | Meaning |
 |---|---|
-| `(node-start name)` | Start a **local** node addressed by `name` (a Unix-domain socket — no port). Returns the node name. |
+| `(node-start name)` | Start a **local** node (Unix-domain socket, no port). Returns its `name@host`. |
 | `(node-start name "host:port")` | Start a node listening over **TCP** for remote peers. |
 | `(node-start name "host:port" cookie)` | …with an explicit cookie (the default is `(node-cookie)`). |
-| `(connect "name")` | Dial a local peer by name (Unix socket). Returns the peer's node name. |
-| `(connect "name@host:port")` | Dial a remote peer over TCP. |
+| `(connect "name")` | Dial a local peer by name (Unix socket). Returns the peer's `name@host`. |
+| `(connect "name@host:port")` | Dial a remote peer over TCP. Returns its `name@host`. |
+| `(remote-spawn node expr)` | Run `expr` in a fresh process on `node` (fire-and-forget, returns nil). |
+| `(remote-spawn-sync node expr)` | Like `remote-spawn` but returns the child's (node-tagged) pid — `monitor`/`link`-able. |
 | `(node-cookie)` | The shared link secret: `$BROOD_COOKIE` → `~/.config/brood/cookie` → freshly minted. |
+| `(hostname)` | This machine's short hostname (used to qualify a local node name). |
 | `(register name pid)` | Bind a local name so peers can address this process. Returns the pid. |
 | `(node-name)` | This runtime's node name (`:nonode` until `node-start`). |
 | `(nodes)` | A list of currently connected peer node names. |

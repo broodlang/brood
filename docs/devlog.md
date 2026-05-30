@@ -9358,3 +9358,40 @@ now errors loudly at both `nest add` and `nest run`, naming both providers.
 **Docs.** ADR-070 → accepted **and implemented**, with the package-rooting analysis
 recorded as *Future direction*; `namespaces.md` §8 and `packages.md` (new "Namespace
 collisions" section) updated to match.
+
+---
+
+## 2026-05-30 — Node names `name@host` (ADR-073) + synchronous `remote-spawn`
+
+**Goal.** Give nodes Erlang's `name@host` identity (globally-unique pids), and
+finish the ADR-067 residual that's actually useful — a `remote-spawn` that returns
+the child pid. (Also confirmed `tcp-controlling-process` was already done; fixed a
+stale roadmap `⬜`.)
+
+**Node names = `name@host`.**
+- Identity is now the keyword `name@host` (`@` is a legal symbol char, so
+  `:server@whkbus` reads/prints fine), carried in every pid (`#<pid a@whkbus/3>`).
+- Qualification is Brood policy (`std/prelude.blsp`): a **bare** name auto-qualifies
+  — local Unix node → `(hostname)`; **TCP** node → the *listen address's host*
+  (so a peer dialing `a@127.0.0.1:9001` and `ensure-link` derive the **same** name
+  the node declares — the load-bearing reason TCP qualifies from the address, not
+  `hostname`). An explicit `:name@host` is verbatim (a long/FQDN name).
+- No epmd → the port stays explicit in `connect` (`name@host:port`); `connect`
+  returns the peer's **authoritative** name from the handshake.
+- Kernel addition is just `(hostname)` (reads `/proc/sys/kernel/hostname`).
+
+**Synchronous `remote-spawn`.** `(remote-spawn-sync node expr)` ships the thunk
+with the caller's pid + a fresh `(ref)`; `remote--spawn-server` gained a
+`[:run-sync …]` clause that spawns it and replies `[:spawned ref child]`; the
+macro blocks in `receive` for that pid. The returned remote pid carries the peer's
+`name@host`, so it's directly `monitor`/`link`-able.
+
+**Breaking (greenfield).** Node names are no longer bare literals — `(node-name)`,
+`(nodes)`, pid prints, and `{:name … :node X}` addressing all use `name@host`.
+Migrated the `distribution.rs` suite (capture `connect`'s return, or the
+deterministic `:a@127.0.0.1` for loopback tests), the node examples, and
+`ensure-link--peer-name` (now returns `name@host`). New tests:
+`node_name_is_qualified_with_host`, `remote_spawn_sync_returns_a_usable_remote_pid`.
+
+**Deferred (ADR-067, ADR-011).** Exact propagated reason for a non-trapping linked
+peer (the `hard` bit — still `:kill`); a `terminate/2` cleanup hook on hard kill.
