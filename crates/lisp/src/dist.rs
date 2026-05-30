@@ -1,5 +1,8 @@
-//! Distributed nodes: connect two Brood runtimes over TCP and route messages
-//! between them. Erlang-style distribution falls out of share-nothing +
+//! Distributed nodes: connect two Brood runtimes and route messages between
+//! them. Two nodes on one machine speak over a **Unix-domain socket** addressed
+//! by name (no port); across machines, over **TCP**. The handshake, framing,
+//! heartbeat and teardown are identical over both — only the carrier ([`Stream`])
+//! differs (ADR-068). Erlang-style distribution falls out of share-nothing +
 //! copy-on-send — *the network is just a longer copy* (ADR-013, `concurrency.md`).
 //!
 //! **Slice 1 (this module):** node naming, an authenticated TCP handshake (a
@@ -29,8 +32,9 @@
 //! interners.
 
 use std::collections::HashMap;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, LazyLock, RwLock};
@@ -71,6 +75,89 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 static START: LazyLock<Instant> = LazyLock::new(Instant::now);
 fn now_millis() -> u64 {
     START.elapsed().as_millis() as u64
+}
+
+// ----- transport (the link carrier) ------------------------------------------
+
+/// A live link's byte stream. The whole protocol above it — handshake, framing,
+/// heartbeat, teardown — is transport-agnostic, so this enum is the *only* place
+/// TCP-vs-Unix matters. The reader/writer threads hold an `Arc<Stream>` and do
+/// I/O through `&Stream`, mirroring the `&TcpStream: Read` shape std provides;
+/// the handshake runs over `&mut Stream` before the link goes steady-state.
+enum Stream {
+    Tcp(TcpStream),
+    Unix(UnixStream),
+}
+
+impl Stream {
+    fn shutdown(&self, how: Shutdown) -> io::Result<()> {
+        match self {
+            Stream::Tcp(s) => s.shutdown(how),
+            Stream::Unix(s) => s.shutdown(how),
+        }
+    }
+    fn set_read_timeout(&self, d: Option<Duration>) -> io::Result<()> {
+        match self {
+            Stream::Tcp(s) => s.set_read_timeout(d),
+            Stream::Unix(s) => s.set_read_timeout(d),
+        }
+    }
+    fn set_write_timeout(&self, d: Option<Duration>) -> io::Result<()> {
+        match self {
+            Stream::Tcp(s) => s.set_write_timeout(d),
+            Stream::Unix(s) => s.set_write_timeout(d),
+        }
+    }
+}
+
+// Owned-stream I/O: the handshake drives `&mut Stream` (`TcpStream`/`UnixStream`
+// each impl `Read`/`Write`).
+impl Read for Stream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Stream::Tcp(s) => s.read(buf),
+            Stream::Unix(s) => s.read(buf),
+        }
+    }
+}
+impl Write for Stream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Stream::Tcp(s) => s.write(buf),
+            Stream::Unix(s) => s.write(buf),
+        }
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Stream::Tcp(s) => s.flush(),
+            Stream::Unix(s) => s.flush(),
+        }
+    }
+}
+
+// Shared-ref I/O: the reader (`&*sock`) and writer (`(&*sock).write_all`) hold an
+// `Arc<Stream>` and never have `&mut`, exactly like `&TcpStream: Read` in std.
+impl Read for &Stream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match **self {
+            Stream::Tcp(ref s) => (&*s).read(buf),
+            Stream::Unix(ref s) => (&*s).read(buf),
+        }
+    }
+}
+impl Write for &Stream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match **self {
+            Stream::Tcp(ref s) => (&*s).write(buf),
+            Stream::Unix(ref s) => (&*s).write(buf),
+        }
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        match **self {
+            Stream::Tcp(ref s) => (&*s).flush(),
+            Stream::Unix(ref s) => (&*s).flush(),
+        }
+    }
 }
 
 // ----- node identity ---------------------------------------------------------
@@ -133,7 +220,7 @@ struct Conn {
     /// instead of cloning a `Vec<u8>` each time.
     tx: Sender<Arc<[u8]>>,
     /// A handle to the socket, for `shutdown` — the single teardown lever.
-    sock: Arc<TcpStream>,
+    sock: Arc<Stream>,
     /// Millis (on the `START` clock) of the last inbound frame. The heartbeat
     /// thread reads this to decide liveness; the reader writes it.
     last_seen: Arc<AtomicU64>,
@@ -468,12 +555,16 @@ pub(crate) fn route(node: Symbol, target: Target, msg: Message) {
 
 // ----- connection lifecycle --------------------------------------------------
 
-/// `(node-start name "host:port" cookie)` — name this runtime, then listen for
-/// peers. Each accepted connection is authenticated (cookie) and, on success,
-/// gets reader + writer threads.
-pub(crate) fn node_start(name: Symbol, addr: &str, cookie: String) -> io::Result<()> {
-    // Bind first (it can fail on a bad/taken address) — but guard against a second
-    // node-start, which would otherwise leak the previous listener + acceptor thread.
+/// `(%node-listen name addr cookie)` — set this runtime's identity (name +
+/// cookie) and listen for peers. `addr` carries the transport: `"unix:PATH"`
+/// (local, addressed by name) or `"tcp:HOST:PORT"` (remote). Each accepted
+/// connection is authenticated (cookie) and, on success, gets reader + writer
+/// threads. Errors if this runtime is already a node — a second listener would
+/// leak the first. The *policy* (socket path, cookie source, transport choice)
+/// lives in `std/prelude.blsp`; this primitive is the mechanism (ADR-068).
+pub(crate) fn node_listen(name: Symbol, addr: &str, cookie: String) -> io::Result<()> {
+    // Guard against a second node-start, which would otherwise leak the previous
+    // listener + acceptor thread.
     {
         let n = crate::core::sync::read(&NODE);
         if n.started {
@@ -483,43 +574,98 @@ pub(crate) fn node_start(name: Symbol, addr: &str, cookie: String) -> io::Result
             ));
         }
     }
-    let listener = TcpListener::bind(addr)?;
+    // Bind first (it can fail on a bad/taken address/path), *then* publish
+    // identity — a failed bind leaves the runtime a non-node, as before.
+    if let Some(path) = addr.strip_prefix("unix:") {
+        let path = path.to_string();
+        prepare_unix_path(&path)?;
+        let listener = UnixListener::bind(&path)?;
+        set_identity(name, cookie);
+        spawn_acceptor(move || listener.accept().map(|(s, _)| Stream::Unix(s)));
+    } else if let Some(hostport) = addr.strip_prefix("tcp:") {
+        let listener = TcpListener::bind(hostport)?;
+        set_identity(name, cookie);
+        spawn_acceptor(move || listener.accept().map(|(s, _)| Stream::Tcp(s)));
+    } else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("node address must start with 'unix:' or 'tcp:' (got {addr})"),
+        ));
+    }
+    Ok(())
+}
+
+/// Publish this runtime's node identity: name + cookie under the `NODE` lock,
+/// then the lock-free name cache. `Release` so a reader on another core that
+/// loads `LOCAL_NODE` with `Acquire` is guaranteed to see the cookie + name too;
+/// the hot path (`local_node`) is the matched `Acquire`.
+fn set_identity(name: Symbol, cookie: String) {
     {
         let mut n = crate::core::sync::write(&NODE);
         n.name = name;
         n.cookie = cookie;
         n.started = true;
     }
-    // `Release` so a reader on another core that loads with `Acquire` is
-    // guaranteed to see the `NODE` lock's write (cookie + name) too. The hot
-    // path (`local_node`) is the matched `Acquire`.
-    LOCAL_NODE.store(name, Ordering::Release); // publish for the lock-free hot path
-    std::thread::spawn(move || {
-        // `flatten()` silently drops accept errors — wrap each iteration so a
-        // transient EMFILE just logs and re-loops with a tiny backoff instead
-        // of burn-looping the acceptor.
-        loop {
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    std::thread::spawn(move || {
-                        // Catch a panic in the per-connection thread so one bad
-                        // peer doesn't take down the runtime via thread-panic
-                        // unwind (the rest of the dist surface assumes its
-                        // background threads stay alive).
-                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            if let Err(e) = accept(stream) {
-                                eprintln!("dist: incoming connection failed: {}", e);
-                            }
-                        }));
-                    });
-                }
-                Err(e) => {
-                    eprintln!("dist: accept error: {}", e);
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
+    LOCAL_NODE.store(name, Ordering::Release);
+}
+
+/// The accept loop, shared by both transports: pull the next link off `accept`
+/// and hand each to a panic-isolated per-connection thread. A transient accept
+/// error (EMFILE etc.) logs and re-loops with a tiny backoff rather than
+/// burn-looping or killing the acceptor.
+fn spawn_acceptor(accept: impl FnMut() -> io::Result<Stream> + Send + 'static) {
+    let mut accept = accept;
+    std::thread::spawn(move || loop {
+        match accept() {
+            Ok(stream) => {
+                std::thread::spawn(move || {
+                    // Catch a panic in the per-connection thread so one bad peer
+                    // doesn't take down the runtime via thread-panic unwind (the
+                    // rest of the dist surface assumes its background threads
+                    // stay alive).
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        if let Err(e) = accept_link(stream) {
+                            eprintln!("dist: incoming connection failed: {}", e);
+                        }
+                    }));
+                });
+            }
+            Err(e) => {
+                eprintln!("dist: accept error: {}", e);
+                std::thread::sleep(Duration::from_millis(50));
             }
         }
     });
+}
+
+/// Ready a Unix-socket path for `bind`: create the parent directory (`0700`) and
+/// clear a **stale** socket left by a crashed node. A path that still has a live
+/// listener is refused (another node owns that name); a path that refuses a
+/// connection is stale and gets unlinked so we can rebind. Best-effort against a
+/// concurrent same-name start — a same-user dev footgun, not a security boundary
+/// (the `0700` dir already gates other users).
+fn prepare_unix_path(path: &str) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let p = std::path::Path::new(path);
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent)?;
+        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+    }
+    if p.exists() {
+        match UnixStream::connect(p) {
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    format!("node socket {path} is already in use by a live node"),
+                ));
+            }
+            // Refused / no listener → a stale file from a dead node; clear it so
+            // `bind` can recreate it.
+            Err(_) => {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -528,46 +674,28 @@ pub(crate) fn node_start(name: Symbol, addr: &str, cookie: String) -> io::Result
 // contained.
 use handshake::{handshake, Role};
 
-/// `(connect "name@host:port")` — dial a peer and complete the client handshake.
-/// Returns the peer's (authoritative) node name on success.
-pub(crate) fn connect(spec: &str) -> io::Result<Symbol> {
-    let (claimed_name, addr) = spec
-        .split_once('@')
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "expected name@host:port"))?;
+/// `(%node-connect peer addr)` — dial a peer and complete the client handshake.
+/// `addr` carries the transport (`"unix:PATH"` / `"tcp:HOST:PORT"`); `peer` is
+/// the name we expect (used for the self-dial guard + de-dup, before the
+/// handshake reveals the peer's authoritative name). Uses this runtime's
+/// already-published identity (the prelude `connect` requires a prior
+/// `node-start`). Returns the peer's authoritative node name on success.
+pub(crate) fn node_connect(peer: Symbol, addr: &str) -> io::Result<Symbol> {
     // Refuse to dial ourselves — it would race through the handshake and form a
     // tie-break loser in the same process; cleaner to reject up front.
-    if claimed_name == value::symbol_name(local_node()) {
+    if peer == local_node() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("cannot connect to self ({claimed_name})"),
+            format!("cannot connect to self ({})", value::symbol_name(peer)),
         ));
     }
     // Best-effort de-dup: if we already have a link to the named node, reuse it
     // instead of dialing a redundant one. (A genuine simultaneous-connect race is
-    // still resolved by the tie-break in `establish`.) `intern_existing` keeps
-    // the interner from growing for names we ultimately don't use.
-    if let Some(claimed) = value::intern_existing(claimed_name) {
-        if crate::core::sync::read(&NODES).contains_key(&claimed) {
-            return Ok(claimed);
-        }
+    // still resolved by the tie-break in `establish`.)
+    if crate::core::sync::read(&NODES).contains_key(&peer) {
+        return Ok(peer);
     }
-    // `connect_timeout` requires a `SocketAddr`, so resolve here and try each
-    // address in turn — gives us the same multi-A-record behaviour as
-    // `TcpStream::connect(spec)` while bounding the wait per attempt.
-    let mut last_err: Option<io::Error> = None;
-    let stream = addr.to_socket_addrs()?.find_map(|sa| {
-        match TcpStream::connect_timeout(&sa, CONNECT_TIMEOUT) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                last_err = Some(e);
-                None
-            }
-        }
-    });
-    let mut stream = stream.ok_or_else(|| {
-        last_err
-            .unwrap_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no addresses resolved"))
-    })?;
+    let mut stream = dial(addr)?;
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
     let peer = handshake(&mut stream, Role::Initiator)?;
     stream.set_read_timeout(None)?; // steady-state reader blocks until the next message
@@ -575,9 +703,42 @@ pub(crate) fn connect(spec: &str) -> io::Result<Symbol> {
     Ok(peer)
 }
 
+/// Open the carrier for `addr`. Unix connects are local and effectively instant
+/// (or refuse immediately); TCP uses `connect_timeout` per resolved address, so
+/// a silently-dropping peer can't wedge the dialer at the kernel SYN timeout.
+fn dial(addr: &str) -> io::Result<Stream> {
+    if let Some(path) = addr.strip_prefix("unix:") {
+        Ok(Stream::Unix(UnixStream::connect(path)?))
+    } else if let Some(hostport) = addr.strip_prefix("tcp:") {
+        // `connect_timeout` requires a `SocketAddr`, so resolve here and try each
+        // address in turn — same multi-A-record behaviour as `TcpStream::connect`
+        // while bounding the wait per attempt.
+        let mut last_err: Option<io::Error> = None;
+        let stream = hostport.to_socket_addrs()?.find_map(|sa| {
+            match TcpStream::connect_timeout(&sa, CONNECT_TIMEOUT) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    last_err = Some(e);
+                    None
+                }
+            }
+        });
+        Ok(Stream::Tcp(stream.ok_or_else(|| {
+            last_err.unwrap_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "no addresses resolved")
+            })
+        })?))
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("node address must start with 'unix:' or 'tcp:' (got {addr})"),
+        ))
+    }
+}
+
 /// Server side of the handshake: drive the v2 exchange, then start the link
 /// threads. See [`handshake`] for the protocol.
-fn accept(mut stream: TcpStream) -> io::Result<()> {
+fn accept_link(mut stream: Stream) -> io::Result<()> {
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
     let peer = handshake(&mut stream, Role::Responder)?;
     stream.set_read_timeout(None)?; // steady-state reader blocks until the next message
@@ -587,7 +748,7 @@ fn accept(mut stream: TcpStream) -> io::Result<()> {
 
 /// Register the authenticated link and spawn its reader + writer threads —
 /// resolving a duplicate against any existing link to the same peer first.
-fn establish(peer: Symbol, stream: TcpStream, role: Role) {
+fn establish(peer: Symbol, stream: Stream, role: Role) {
     // Who initiated *this* connection (the tie-break key).
     let connector = match role {
         Role::Initiator => local_node(),
@@ -663,7 +824,7 @@ fn establish(peer: Symbol, stream: TcpStream, role: Role) {
     // incr), not a `Vec` copy.
     let pong: Arc<[u8]> = Arc::from(frame_bytes(&Frame::Pong).expect("encode Pong"));
     std::thread::spawn(move || {
-        let mut r: &TcpStream = &reader_sock;
+        let mut r: &Stream = &reader_sock;
         // Loop until peer closes, protocol error, or a deliberate `shutdown`.
         // `peer` is the *authenticated* node name from the handshake — we use
         // it instead of the wire's `from_node` field on Monitor/Demonitor so a
