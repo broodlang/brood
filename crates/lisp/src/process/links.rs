@@ -48,12 +48,15 @@ use super::scheduler::{self, self_pid};
 static LINKS: LazyLock<Mutex<HashMap<u64, HashSet<u64>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// **Cross-node** links: a *local* pid → the `(remote_node, remote_pid)` peers it
-/// is linked to. Both nodes keep their own half (each maps its local pid → the
-/// peer's `(node, pid)`), so either process dying — or the link net-splitting —
-/// is actionable from either side. The dual of [`super::monitor`]'s
-/// `PENDING_REMOTE`, but symmetric (a link couples both ways, a monitor one).
-static REMOTE_LINKS: LazyLock<Mutex<HashMap<u64, Vec<(Symbol, u64)>>>> =
+/// A remote link peer — a process `(node, pid)` on another runtime.
+type RemotePeer = (Symbol, u64);
+
+/// **Cross-node** links: a *local* pid → the remote peers it is linked to. Both
+/// nodes keep their own half (each maps its local pid → the peer's `(node, pid)`),
+/// so either process dying — or the link net-splitting — is actionable from either
+/// side. The dual of [`super::monitor`]'s `PENDING_REMOTE`, but symmetric (a link
+/// couples both ways, a monitor one).
+static REMOTE_LINKS: LazyLock<Mutex<HashMap<u64, Vec<RemotePeer>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// `(link pid)` for a **local** `pid` — symmetrically link the current process and
