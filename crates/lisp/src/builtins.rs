@@ -14,6 +14,7 @@ use crate::syntax::{cst, printer, reader};
 use crate::types::{Sig, Ty};
 
 /// Install the primitive kernel into `root`.
+#[allow(non_upper_case_globals)] // the `const` type shorthands below read as locals
 pub fn register(heap: &mut Heap, root: EnvId) {
     let def = |heap: &mut Heap, name: &str, arity: Arity, sig: Sig, func: NativeFnPtr| {
         let (params, doc) = primitive_doc(name);
@@ -33,24 +34,29 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // (the receivers of first/rest). `callable` = fn ∪ native (a thunk or
     // applicable). `ANY` is the "no useful info" lane — overlaps everything,
     // so the disjointness checker never warns against it.
-    let any = Ty::ANY;
-    let int = Ty::of(Tag::Int);
-    let num = Ty::NUMBER;
-    let string = Ty::of(Tag::Str);
-    let rope = Ty::of(Tag::Rope);
-    let socket_ty = Ty::of(Tag::Socket);
-    let kw = Ty::of(Tag::Keyword);
-    let sym = Ty::of(Tag::Sym);
-    let bool_ty = Ty::of(Tag::Bool);
-    let nil_ty = Ty::of(Tag::Nil);
-    let pair = Ty::of(Tag::Pair);
-    let vec_ty = Ty::of(Tag::Vector);
-    let map_ty = Ty::of(Tag::Map);
-    let pid_ty = Ty::of(Tag::Pid);
-    let ref_ty = Ty::of(Tag::Ref);
-    let list_ty = Ty::LIST;
-    let seq = list_ty.union(vec_ty);
-    let callable = Ty::of(Tag::Fn).union(Ty::of(Tag::Native));
+    // `const` (not `let`) so each of the 170-odd uses below re-materialises a
+    // fresh `Ty` — `Ty` is no longer `Copy` (it carries an optional `Arc` arrow
+    // refinement, ADR-078), but a `const` mention is inlined, so reusing these
+    // shorthands by value needs no `.clone()`. Lowercase names kept (they read as
+    // type shorthands, not globals); hence the `allow` on the enclosing fn.
+    const any: Ty = Ty::ANY;
+    const int: Ty = Ty::of(Tag::Int);
+    const num: Ty = Ty::NUMBER;
+    const string: Ty = Ty::of(Tag::Str);
+    const rope: Ty = Ty::of(Tag::Rope);
+    const socket_ty: Ty = Ty::of(Tag::Socket);
+    const kw: Ty = Ty::of(Tag::Keyword);
+    const sym: Ty = Ty::of(Tag::Sym);
+    const bool_ty: Ty = Ty::of(Tag::Bool);
+    const nil_ty: Ty = Ty::of(Tag::Nil);
+    const pair: Ty = Ty::of(Tag::Pair);
+    const vec_ty: Ty = Ty::of(Tag::Vector);
+    const map_ty: Ty = Ty::of(Tag::Map);
+    const pid_ty: Ty = Ty::of(Tag::Pid);
+    const ref_ty: Ty = Ty::of(Tag::Ref);
+    const list_ty: Ty = Ty::LIST;
+    const seq: Ty = Ty::of_tags(&[Tag::Nil, Tag::Pair, Tag::Vector]);
+    const callable: Ty = Ty::of_tags(&[Tag::Fn, Tag::Native]);
 
     // numeric primitives — `%add`..`%div` accept and return the wider NUMBER
     // (int + int may overflow into Float; the others always do on a Float arg).

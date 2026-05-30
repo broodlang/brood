@@ -34,14 +34,20 @@ use super::walk::list_items;
 /// type-check walk. (`SymbolMap` is the same hasher `eval::SPECIAL_IDS`
 /// uses.)
 static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
-    let int = Ty::of(Tag::Int);
-    let num = Ty::NUMBER;
-    let any = Ty::ANY;
+    #[allow(non_upper_case_globals)]
+    const int: Ty = Ty::of(Tag::Int);
+    // `const` (not `let`): `Ty` is non-`Copy` (ADR-078), and these shorthands are
+    // each reused by value across the loops below — a `const` mention inlines a
+    // fresh value, so no `.clone()` is needed.
+    #[allow(non_upper_case_globals)]
+    const num: Ty = Ty::NUMBER;
+    #[allow(non_upper_case_globals)]
+    const any: Ty = Ty::ANY;
     // Maps are seqable in the stdlib (`seq`/`fold` coerce them via `map-pairs`),
     // so the higher-order combinators accept maps too — without this the
     // checker would warn on `(map f some-map)` even though it runs fine.
-    let seq = Ty::LIST.union(Ty::of(Tag::Vector)).union(Ty::of(Tag::Map));
-    let callable = Ty::of(Tag::Fn).union(Ty::of(Tag::Native));
+    #[allow(non_upper_case_globals)]
+    const seq: Ty = Ty::of_tags(&[Tag::Nil, Tag::Pair, Tag::Vector, Tag::Map]);
     let mut m: SymbolMap<Sig> = SymbolMap::default();
     let mut put = |name: &str, sig: Sig| {
         m.insert(value::intern(name), sig);
@@ -56,11 +62,19 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     }
     // `mod` is Brood (over `rem`), but its types are fixed
     put("mod", Sig::new(vec![int, int], int));
-    // higher-order: first arg callable, second a sequence (map included; see above)
+    // higher-order: the first arg is a callback of a *known arity* — what the
+    // combinator calls it with. The arrow's parameter count drives the
+    // callback-arity check (ADR-078): `(map f xs)` calls `(f x)` → 1-ary;
+    // `(reduce f init xs)` / `(fold f init xs)` call `(f acc x)` → 2-ary. The
+    // arrow's tags are still `fn | native`, so the existing "non-function
+    // argument" check is unchanged; the arrow only *adds* the arity refinement.
+    let cb1 = Ty::arrow(Sig::new(vec![any], any));
+    let cb2 = Ty::arrow(Sig::new(vec![any, any], any));
     for n in ["map", "filter"] {
-        put(n, Sig::new(vec![callable, seq], seq));
+        put(n, Sig::new(vec![cb1.clone(), seq], seq));
     }
-    put("reduce", Sig::new(vec![callable, any, seq], any));
+    put("reduce", Sig::new(vec![cb2.clone(), any, seq], any));
+    put("fold", Sig::new(vec![cb2, any, seq], any));
     m
 });
 
@@ -146,7 +160,7 @@ fn infer_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
         let Some(expected) = callee_sig.param(i) else {
             continue;
         };
-        param_tys[pos] = param_tys[pos].intersect(expected);
+        param_tys[pos] = param_tys[pos].clone().intersect(expected);
     }
     Some(Sig::new(param_tys, callee_sig.ret))
 }
