@@ -861,3 +861,180 @@ fn node_down_is_detected() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// Cross-node **links** (ADR-067): node B links a worker on node A and traps
+/// exits; when the worker crashes, A propagates a `Frame::Exit` over the link and
+/// B receives `[:EXIT <remote-pid> [:error …]]`. Exercises `Frame::Link` (B→A,
+/// recording A's reverse half) + `Frame::Exit` (A→B, link death) + trap delivery
+/// carrying a *remote* pid.
+#[test]
+fn remote_link_death_delivers_exit_to_a_trapping_peer() {
+    let _g = port_lock();
+    let dir = std::env::temp_dir().join(format!("brood-dist-link-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let port_a = free_port();
+    let port_b = free_port();
+
+    // A: a worker (a *spawned child*, so the node survives its death) that
+    // reports its pid on :whoami and crashes on :die-now; main parks to keep the
+    // node up so the link `Frame::Exit` is delivered over a live connection.
+    let server = format!(
+        r#"
+(node-start :a "127.0.0.1:{port_a}" "secret")
+(defn worker-loop ()
+  (receive
+    ([:whoami from] (do (send from [:iam (self)]) (worker-loop)))
+    ([:die-now] (error "boom"))
+    (_ (worker-loop))))
+(register :worker (spawn (worker-loop)))
+(receive (:never :x))
+"#
+    );
+    // B: obtain the worker's remote pid, link it (trapping), make it crash, expect [:EXIT].
+    let client = format!(
+        r#"
+(node-start :b "127.0.0.1:{port_b}" "secret")
+(connect "a@127.0.0.1:{port_a}")
+(trap-exit true)
+(send {{:name :worker :node :a}} [:whoami (self)])
+(def w (receive ([:iam p] p) (after 5000 (throw "no whoami"))))
+(unless (pid? w) (throw "whoami reply was not a pid"))
+(link w)                                  ; cross-node link (Frame::Link → A records its half)
+(send w [:die-now])                       ; ordered after the link on this connection
+(receive ([:EXIT ~w [:error _]] (println "REMOTE-LINK-EXIT-OK"))
+         ([:EXIT ~w r] (throw (str "unexpected EXIT reason " r)))
+         (after 5000 (throw "no remote [:EXIT]")))
+"#
+    );
+
+    let mut a = spawn_brood(&dir, "server.blsp", &server);
+    wait_until_listening(port_a);
+    let b = spawn_brood(&dir, "client.blsp", &client);
+    let out = b.wait_with_output().expect("client finished");
+    let _ = a.kill();
+    let _ = a.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains("REMOTE-LINK-EXIT-OK"),
+        "expected [:EXIT remote [:error …]] from a crashed linked remote worker.\n--- stdout ---\n{stdout}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Cross-node **`(exit remote-pid :kill)`** (ADR-067): node B terminates a worker
+/// on node A directly. B also `monitor`s it, so the resulting death comes back as
+/// `[:down … :kill]`. Exercises the non-link `Frame::Exit` (B→A → `scheduler::exit`).
+#[test]
+fn remote_exit_kills_a_worker() {
+    let _g = port_lock();
+    let dir = std::env::temp_dir().join(format!("brood-dist-rexit-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let port_a = free_port();
+    let port_b = free_port();
+
+    let server = format!(
+        r#"
+(node-start :a "127.0.0.1:{port_a}" "secret")
+(defn worker-loop ()
+  (receive
+    ([:whoami from] (do (send from [:iam (self)]) (worker-loop)))
+    (_ (worker-loop))))    ; parks; only an external exit can stop it
+(register :worker (spawn (worker-loop)))
+(receive (:never :x))      ; main parks so the node outlives the worker's kill
+"#
+    );
+    let client = format!(
+        r#"
+(node-start :b "127.0.0.1:{port_b}" "secret")
+(connect "a@127.0.0.1:{port_a}")
+(send {{:name :worker :node :a}} [:whoami (self)])
+(def w (receive ([:iam p] p) (after 5000 (throw "no whoami"))))
+(def m (monitor w))
+(exit w :kill)                            ; remote kill (non-link Frame::Exit)
+(receive ([:down ~m ~w _] (println "REMOTE-EXIT-KILL-OK"))
+         (after 5000 (throw "remote worker did not die")))
+"#
+    );
+
+    let mut a = spawn_brood(&dir, "server.blsp", &server);
+    wait_until_listening(port_a);
+    let b = spawn_brood(&dir, "client.blsp", &client);
+    let out = b.wait_with_output().expect("client finished");
+    let _ = a.kill();
+    let _ = a.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains("REMOTE-EXIT-KILL-OK"),
+        "expected a remote (exit w :kill) to kill the worker and fire [:down].\n--- stdout ---\n{stdout}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// End-to-end **cross-node supervision** (ADR-067, the #1 payoff): a supervisor on
+/// node B supervises a worker on node A, and restarts it when it crashes — all
+/// over the distributed link. The child `:start` does a roundtrip to A's
+/// `:factory` to obtain the remote worker's pid (since `remote-spawn` is
+/// fire-and-forget); the supervisor links that remote pid, so the remote crash
+/// arrives as a link `[:EXIT]` and triggers a restart that spins up a fresh worker.
+#[test]
+fn supervisor_restarts_a_remote_child() {
+    let _g = port_lock();
+    let dir = std::env::temp_dir().join(format!("brood-dist-sup-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let port_a = free_port();
+    let port_b = free_port();
+
+    // A: a factory that makes workers on demand and replies with their pids. Each
+    // worker announces `[:up (self)]` to the observer it's given, then crashes on :die.
+    let server = format!(
+        r#"
+(node-start :a "127.0.0.1:{port_a}" "secret")
+(defn worker-loop (obs)
+  (do (send obs [:up (self)])
+      (receive (:die (error "boom")) (_ (worker-loop obs)))))
+(defn factory ()
+  (receive
+    ([:make reply obs] (do (send reply [:made (spawn (worker-loop obs))]) (factory)))
+    (_ (factory))))
+(register :factory (spawn (factory)))
+(receive (:never :x))
+"#
+    );
+    // B: supervise a remote child. `:start` asks A's factory for a worker pid and
+    // returns it; the supervisor links it. Crash it; expect a fresh incarnation.
+    let client = format!(
+        r#"
+(node-start :b "127.0.0.1:{port_b}" "secret")
+(connect "a@127.0.0.1:{port_a}")
+(require 'supervisor)
+(def me (self))
+(def spec {{:id :w :restart :permanent
+            :start (fn () (do (send {{:name :factory :node :a}} [:make (self) me])
+                              (receive ([:made p] p) (after 5000 (throw "no :made")))))}})
+(def sup (supervisor/start-supervisor (list spec)))
+(def w1 (receive ([:up p] p) (after 6000 (throw "no first :up"))))
+(send w1 :die)                              ; crash the remote worker
+(def w2 (receive ([:up p] p) (after 6000 (throw "no restart :up"))))
+(if (not (= w1 w2)) (println "CROSS-NODE-SUP-OK") (throw "restart reused the pid"))
+"#
+    );
+
+    let mut a = spawn_brood(&dir, "server.blsp", &server);
+    wait_until_listening(port_a);
+    let b = spawn_brood(&dir, "client.blsp", &client);
+    let out = b.wait_with_output().expect("client finished");
+    let _ = a.kill();
+    let _ = a.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains("CROSS-NODE-SUP-OK"),
+        "expected a supervisor on B to restart a crashed remote child on A.\n--- stdout ---\n{stdout}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

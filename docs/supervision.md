@@ -39,11 +39,12 @@ supervisor itself, just the substrate it was built over:
   *healthy* siblings — the capability whose absence used to cap the library at
   `:one-for-one`.
 - `(link pid)` / `(unlink pid)` / `(trap-exit on)` / `(spawn-link expr)` —
-  **symmetric** failure coupling (Erlang links, ADR-067). A linked peer's death
-  takes you down too (abnormal reason) or arrives as a trappable `[:EXIT pid
-  reason]` message if you `(trap-exit true)`. This is what makes a supervisor's
-  *own* death tear its children down (propagation) — the orphan fix monitors
-  couldn't provide.
+  **symmetric** failure coupling (Erlang links, ADR-067), **local or cross-node**.
+  A linked peer's death takes you down too (abnormal reason) or arrives as a
+  trappable `[:EXIT pid reason]` message if you `(trap-exit true)`; a cross-node
+  link fires `:noconnection` on net-split. This is what makes a supervisor's *own*
+  death tear its children down (propagation) — the orphan fix monitors couldn't
+  provide — and lets supervision span nodes (see §Cross-node supervision).
 
 A user wanting *recover-on-throw* writes a supervisor process in Brood:
 
@@ -140,6 +141,31 @@ supervisor child `:shutdown :infinity`** (Erlang's exact rule); workers keep
         {:id :worker :restart :permanent                          ; a plain worker
          :start (fn () (spawn (worker-loop)))}))
 ```
+
+### Cross-node supervision (distributed links)
+
+Links span nodes (ADR-067), so a supervisor on one node can supervise a child on
+another. `link`/`unlink`/`exit` accept a remote pid and route over the dist link
+(`Frame::Link`/`Frame::Unlink`/`Frame::Exit`); a remote child's crash arrives as a
+link `[:EXIT]` and restarts, the supervisor's own death tears the remote child
+down, and a **net-split** fires `:noconnection` to the local side (the same
+semantics a remote monitor has). The supervisor logic is identical to the local
+case — it just links pids.
+
+One ergonomic gap: a child `:start` must *return* the (remote) child's pid, but
+`remote-spawn` is fire-and-forget (returns `nil`). So a remote-child spec obtains
+the pid via a roundtrip today — e.g. ask a remote factory to spawn the worker and
+reply its pid:
+
+```clojure
+{:id :w :restart :permanent
+ :start (fn () (let (me (self))
+                 (send {:name :factory :node :a} [:make me])
+                 (receive ([:made pid] pid))))}   ; returns the remote worker's pid
+```
+
+A synchronous `remote-spawn` that returns the pid (making this turnkey) is the one
+deferred follow-up. End-to-end coverage in `crates/cli/tests/distribution.rs`.
 
 #### Still simplified (ADR-011)
 

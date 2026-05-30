@@ -118,6 +118,16 @@ independent symbol interners. (In-process messages keep the interned id.)
     `[:down mref pid :noconnection]` via the sender-side `PENDING_REMOTE`
     table and `handle_node_down`. See `cross_node_pid_monitor_fires_down` and
     `remote_monitor_fires_noconnection_on_node_down`.
+  - **Distributed links** (ADR-067) — the symmetric cousin of monitors.
+    `(link remote-pid)` ships a `Frame::Link`; each node keeps its half in
+    `links::REMOTE_LINKS` (`local_pid → (node, remote_pid)`). A linked process's
+    death ships a `Frame::Exit { link: true }` routed through the trap-or-propagate
+    path (a trapping peer gets `[:EXIT remote-pid reason]`); `(exit remote-pid
+    reason)` ships `Frame::Exit { link: false }` → `scheduler::exit`. Net-split
+    fires `:noconnection` to local peers via `links::handle_node_down` (wired into
+    `fire_nodedown` beside the monitor path). This is what makes cross-node
+    supervision work (`std/supervisor.blsp`). See the `remote_link_death_*`,
+    `remote_exit_kills_*`, and `supervisor_restarts_a_remote_child` tests.
   - **Auto-reconnect** — `(ensure-link "name@host:port")` (Brood policy in
     `std/prelude.blsp`) maintains a peer link across restarts: synchronous
     initial `connect`, then a small supervisor that `monitor-node`s the peer
