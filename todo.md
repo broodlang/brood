@@ -156,17 +156,28 @@ Bonus: `report_error` (`cli_support.rs`) now renders `hint:` lines, so *every* e
 hint (incl. the existing deep-recursion one) is finally visible in the CLI, not just
 to MCP/LSP. Verified via a file run.
 
-## Operand-position unbound lint — attempted, reverted (needs test updates)
+## Operand-position unbound lint — attempted TWICE, reverted: real checker work needed
 
-Implemented the cousin of the function-as-value/head-unbound checks: flag a bare
-unbound symbol in argument position when the head is a known non-macro callee
-(`arity_of` Some). It works (`(+ 1 frobnicate)` → unbound, `(fn (x) (+ 1 x))` quiet).
-**But** it correctly flags the **free operand vars** that ~5 narrowing tests in
-`types/check.rs` use as placeholders (`(let (cond (int? x)) …)` with `x` free) →
-5 test failures. Finishing it = bind those tests' free vars (wrap in `(fn (x foo) …)`
-— preserves the narrowing intent, more realistic), which touches the actively-churned
-checker test file. Reverted for now; do it with the maintainer. The lint is the right
-feature (the check.rs header's own "safe fix" recipe asks for it).
+The head-callee gate (`arity_of` Some) is **necessary but NOT sufficient**. After
+also binding the narrowing tests' free vars, a `nest check` on the project surfaced
+**genuine false positives** on runtime-valid code (suite is green):
+- **pattern-bound vars** — `a`/`b` in a `match`-arm body (`pattern_matching_test`):
+  bound by the pattern, but the checker's `Ctx` doesn't track pattern bindings as
+  locals in operand position.
+- **cross-file / forward globals** — `greet` (`package_test`, defined in loaded
+  code), `pm-qfac` (defined elsewhere in the file/project): `check-project` checks
+  each file in isolation, so a name defined in another file (or later, dynamically)
+  isn't in this file's `file_globals` or the heap.
+- named-let / recursive-helper bindings (`loop`/`build`/`f` in `adversarial_test`).
+
+These are exactly the "forward reference / pattern binding" cases the check.rs header
+flagged as why the gap is *deliberate conservatism*. Landing the lint violates the
+no-false-positives rule. **To do it properly** the checker must (a) bind `match`
+pattern variables into `Ctx` for the arm body, and (b) resolve cross-file project
+globals (e.g. `check-project` pre-loads all sources / accumulates a project-wide
+global set) before flagging an operand. That's a real checker feature, not a quick
+add — defer until someone takes the checker-scope work. (The function-as-value lint
+and the C-style hint shipped; this third one is the genuinely hard one.)
 
 ## (old) Error message: a value in head position should hint C-style call syntax (2026-05-30)
 
