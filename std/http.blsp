@@ -21,7 +21,9 @@
   "A minimal HTTP/1.0 server over the TCP + file libraries (ADR-062). `(serve port
 handler)` listens and runs one handler process per connection; a handler maps a
 request map to a response map. Includes request parsing, response rendering, a
-`router`, and static-file serving with MIME guessing. Plaintext only; pure Brood.")
+`router`, and static-file serving with MIME guessing. Plaintext only; pure Brood."
+  (:use tcp)
+  (:use file))
 
 ;; How long a connection may stall mid-request before we give up.
 (def *http-read-timeout-ms* 15000)

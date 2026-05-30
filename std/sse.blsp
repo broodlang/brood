@@ -31,9 +31,10 @@
 event to `subscriber`'s mailbox as `[:sse {:event :data :id}]` (`[:sse-open status]`
 once connected, `[:sse-closed reason]` when the link ends); it returns that process's
 pid (kill it to disconnect). The `:data` is the raw payload — `json-parse` it
-yourself. Pair with `with-events` (std/ui.blsp) to feed events into a `ui-run` loop.")
+yourself. Pair with `with-events` (std/ui.blsp) to feed events into a `ui-run` loop."
+  (:use http))
 
-(require 'http)   ; reuse http--parse-url + http--request-headers for the handshake
+(require 'http)   ; reuse http/http--parse-url + http/http--request-headers for the handshake
 
 ;; ---- pure frame parsing -----------------------------------------------------
 
@@ -127,10 +128,10 @@ as `[:sse {:event :data :id}]` messages — `[:sse-open status]` once connected,
 `receive`, holding no worker) and returns that process's pid; `(exit pid :kill)` to
 disconnect. The socket is owned by the reader process, so call this for the process
 that should receive the events (typically the UI process — see `with-events`)."
-  (let (u (http--parse-url url)
+  (let (u (http/http--parse-url url)
         req (str "GET " (get u :path) " HTTP/1.1\r\n"
-              (http--render-headers
-                (http--request-headers u "" {"Accept" "text/event-stream" "Connection" "keep-alive"}))
+              (http/http--render-headers
+                (http/http--request-headers u "" {"Accept" "text/event-stream" "Connection" "keep-alive"}))
               "\r\n"))
     (spawn
       (let (sock (tcp-connect (get u :host) (get u :port)))

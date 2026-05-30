@@ -11,7 +11,7 @@
 ;; the worker and kills it before `(send me …)`. The monitor fires `[:down …]`,
 ;; and the collector must come back with a failing result instead of blocking.
 
-(require 'test)
+(defmodule runner-failfast-test (:use test))
 
 ;; A one-test unit `(mode group tests)` whose worker dies in `run-unit`.
 (def %crashing-unit

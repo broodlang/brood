@@ -1,8 +1,8 @@
 ;;; Namespaces — increment 1 (ADR-065): expand-time resolution over the flat
-;;; table. `(ns foo)` qualifies definitions to `foo/name`; a bare reference
+;;; table. `(defmodule foo)` qualifies definitions to `foo/name`; a bare reference
 ;;; resolves to `foo/name` if this namespace defines it, else falls back to root
 ;;; (the prelude). Each case loads a small namespaced source via `%load-string`
-;;; (the module-load path: resets to root, the source's `(ns …)` sets it, with a
+;;; (the module-load path: resets to root, the source's `(defmodule …)` sets it, with a
 ;;; forward-reference pre-scan) and checks the resulting globals / behaviour.
 ;;;
 ;;; Note: the advisory checker may print `unbound symbol: nsX/…` for these cases —
@@ -10,7 +10,7 @@
 ;;; analysis, exactly as `(eval-string "(def f …)") (f)` is. Advisory only; the
 ;;; tests pass regardless.
 
-(require 'test)
+(defmodule namespace-test (:use test))
 
 ;; A plain root worker that echoes one message back to its parent.
 (defn ns-echo (parent) (send parent (receive)))
@@ -19,52 +19,52 @@
   :isolated
 
   (test "definitions are qualified under the namespace; bare name is unbound"
-    (%load-string "(ns nsA) (defn greet () 42)")
+    (%load-string "(defmodule nsA) (defn greet () 42)")
     (is (bound? 'nsA/greet))
     (is (not (bound? 'greet)))
     (is (= (nsA/greet) 42)))
 
   (test "a bare same-namespace reference resolves to the qualified name"
-    (%load-string "(ns nsB) (defn helper () 7) (defn use-it () (helper))")
+    (%load-string "(defmodule nsB) (defn helper () 7) (defn use-it () (helper))")
     (is (= (nsB/use-it) 7)))
 
   (test "a forward reference resolves (callee defined later in the file)"
-    (%load-string "(ns nsC) (defn front () (back)) (defn back () 99)")
+    (%load-string "(defmodule nsC) (defn front () (back)) (defn back () 99)")
     (is (= (nsC/front) 99)))
 
   (test "root/prelude names fall through and stay bare"
-    (%load-string "(ns nsD) (defn doubled (xs) (map (fn (x) (* x 2)) xs))")
+    (%load-string "(defmodule nsD) (defn doubled (xs) (map (fn (x) (* x 2)) xs))")
     (is (= (nsD/doubled (list 1 2 3)) (list 2 4 6))))
 
   (test "two namespaces define the same short name without colliding"
-    (%load-string "(ns nsE) (defn val () :e)")
-    (%load-string "(ns nsF) (defn val () :f)")
+    (%load-string "(defmodule nsE) (defn val () :e)")
+    (%load-string "(defmodule nsF) (defn val () :f)")
     (is (= (nsE/val) :e))
     (is (= (nsF/val) :f)))
 
   (test "an explicitly qualified cross-namespace reference is left as-is"
-    (%load-string "(ns nsG) (defn target () :got)")
-    (%load-string "(ns nsH) (defn reach () (nsG/target))")
+    (%load-string "(defmodule nsG) (defn target () :got)")
+    (%load-string "(defmodule nsH) (defn reach () (nsG/target))")
     (is (= (nsH/reach) :got)))
 
   (test "a quoted symbol is data — never qualified"
-    (%load-string "(ns nsI) (defn tag () (quote hello))")
+    (%load-string "(defmodule nsI) (defn tag () (quote hello))")
     (is (= (nsI/tag) 'hello))
     (is (= (str (nsI/tag)) "hello")))
 
   (test "a local binding shadows a same-named namespace global"
-    (%load-string "(ns nsJ) (def x 100) (defn shadowed () (let (x 5) x))")
+    (%load-string "(defmodule nsJ) (def x 100) (defn shadowed () (let (x 5) x))")
     (is (= (nsJ/shadowed) 5))
     (is (= nsJ/x 100)))
 
   (test "a namespaced global is late-bound and redefinable (hot-reload property)"
-    (%load-string "(ns nsK) (defn f () 1)")
+    (%load-string "(defmodule nsK) (defn f () 1)")
     (is (= (nsK/f) 1))
-    (%load-string "(ns nsK) (defn f () 2)")
+    (%load-string "(defmodule nsK) (defn f () 2)")
     (is (= (nsK/f) 2)))
 
   (test "def-sites are keyed by the qualified name"
-    (%load-string "(ns nsM) (defn located () 0)")
+    (%load-string "(defmodule nsM) (defn located () 0)")
     ;; recorded only for a real file load; here just assert the qualified global
     ;; is the one that exists (bare is not).
     (is (bound? 'nsM/located))
@@ -82,7 +82,7 @@
         (is (= (str (get back :sym)) "some-ns/some-fn")))))
 
   (test "a value built by a namespaced fn survives a worker round-trip"
-    (%load-string "(ns nsP) (defn make () {:tag 'nsP/make :data (list 1 2 3)})")
+    (%load-string "(defmodule nsP) (defn make () {:tag 'nsP/make :data (list 1 2 3)})")
     (let (me (self) w (spawn (ns-echo me)))
       (send w (nsP/make))
       (is (= (receive) {:tag 'nsP/make :data (list 1 2 3)})))))
@@ -91,39 +91,39 @@
   :isolated
 
   (test "(:use mod) refers all of a module's public names bare"
-    (%load-string "(ns ilibA) (defn pub-x () :x) (defn pub-y () :y)")
-    (%load-string "(ns iappA (:use ilibA)) (defn run () (list (pub-x) (pub-y)))")
+    (%load-string "(defmodule ilibA) (defn pub-x () :x) (defn pub-y () :y)")
+    (%load-string "(defmodule iappA (:use ilibA)) (defn run () (list (pub-x) (pub-y)))")
     (is (= (iappA/run) (list :x :y))))
 
   (test "(:use mod :refer [..]) refers only the named symbols"
-    (%load-string "(ns ilibB) (defn keep-me () :kept) (defn skip-me () :skipped)")
-    (%load-string "(ns iappB (:use ilibB :refer [keep-me])) (defn run () (keep-me))")
+    (%load-string "(defmodule ilibB) (defn keep-me () :kept) (defn skip-me () :skipped)")
+    (%load-string "(defmodule iappB (:use ilibB :refer [keep-me])) (defn run () (keep-me))")
     (is (= (iappB/run) :kept))
     ;; skip-me wasn't referred, so a bare reference would resolve to root (unbound),
     ;; not to ilibB/skip-me — confirm only the qualified one exists.
     (is (bound? 'ilibB/skip-me)))
 
   (test "a `--` private name is not referred by (:use)"
-    (%load-string "(ns ilibC) (defn shown () :shown) (defn hidden--impl () :hidden)")
-    (%load-string "(ns iappC (:use ilibC)) (defn run () (shown))")
+    (%load-string "(defmodule ilibC) (defn shown () :shown) (defn hidden--impl () :hidden)")
+    (%load-string "(defmodule iappC (:use ilibC)) (defn run () (shown))")
     (is (= (iappC/run) :shown))
     ;; the private name is still reachable by its qualified spelling (soft privacy)
     (is (= (ilibC/hidden--impl) :hidden)))
 
   (test "an own-namespace definition shadows an imported name"
-    (%load-string "(ns ilibD) (defn val () :theirs)")
-    (%load-string "(ns iappD (:use ilibD)) (defn val () :mine) (defn run () (val))")
+    (%load-string "(defmodule ilibD) (defn val () :theirs)")
+    (%load-string "(defmodule iappD (:use ilibD)) (defn val () :mine) (defn run () (val))")
     (is (= (iappD/run) :mine)))
 
   (test "(:use) of an already-provided namespace works (require is a no-op)"
-    (%load-string "(ns ilibE) (defn ping () :pong)")
+    (%load-string "(defmodule ilibE) (defn ping () :pong)")
     ;; ilibE is now provided; :use-ing it again should still refer its names
-    (%load-string "(ns iappE (:use ilibE)) (defn run () (ping))")
+    (%load-string "(defmodule iappE (:use ilibE)) (defn run () (ping))")
     (is (= (iappE/run) :pong)))
 
   (test "a result built via imported names round-trips through a worker"
-    (%load-string "(ns ilibF) (defn tag () 'ilibF/tag)")
-    (%load-string "(ns iappF (:use ilibF)) (defn make () {:t (tag) :n 7})")
+    (%load-string "(defmodule ilibF) (defn tag () 'ilibF/tag)")
+    (%load-string "(defmodule iappF (:use ilibF)) (defn make () {:t (tag) :n 7})")
     (let (me (self) w (spawn (ns-echo me)))
       (send w (iappF/make))
       (is (= (receive) {:t 'ilibF/tag :n 7})))))

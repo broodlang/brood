@@ -15,7 +15,7 @@
 ;; in a dedicated Rust test (crates/lisp/tests/preemption.rs); here we only assert
 ;; that many CPU-bound processes all make progress (no deadlock).
 
-(require 'test)
+(defmodule concurrency-test (:use test))
 
 (describe "concurrency: receive"
   :isolated

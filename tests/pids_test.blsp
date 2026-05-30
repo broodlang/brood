@@ -9,7 +9,7 @@
 ;; runs each in its own process (exercising the value across the per-process
 ;; heap boundary, which is the same deep-copy a node link performs).
 
-(require 'test)
+(defmodule pids-test (:use test))
 
 (describe "pids: first-class process handles"
   :isolated

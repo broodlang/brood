@@ -3,7 +3,7 @@
 ;; join, string-split, replace, trim, …). Register-only — discovered and run by
 ;; `nest test` (and cargo test, via crates/lisp/tests/suite.rs).
 
-(require 'test)
+(defmodule strings-test (:use test))
 
 (describe "case folding"
   (test "upper / lower"

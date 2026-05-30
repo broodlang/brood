@@ -2,8 +2,7 @@
 ;; whole thing is unit-testable here; the closing :isolated block sends parsed values
 ;; across processes (deep-copied per-heap) to prove they round-trip under the scheduler.
 
-(require 'test)
-(require 'json)
+(defmodule json-test (:use test) (:use json))
 
 (defn json--errs? (s)
   "True if parsing `s` raises (the malformed-input cases)."

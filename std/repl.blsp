@@ -44,7 +44,8 @@ until end of input (Ctrl-D).
 
 Driven from the shell by `brood` (no arguments) and `nest repl`. The prompts are
 the dynamic vars `*repl-prompt*` / `*repl-cont-prompt*`; rebind them with
-`binding` to customise.")
+`binding` to customise."
+  (:use lineedit))
 
 (require 'lineedit)
 
@@ -189,7 +190,7 @@ incomplete. Ctrl-C drops the in-progress form and re-prompts. Returns a map
               (let (src (str acc line "\n"))
                 (if (= (repl--eval-print src) :more)
                   (repl--read-eval interactive src history)   ; incomplete — keep reading
-                  (let (h2 (lineedit--remember history src))
+                  (let (h2 (lineedit/lineedit--remember history src))
                     ;; persist only interactive sessions (not piped/scripted runs)
                     (when interactive (repl--save-history h2))
                     {:eof false :history h2}))))))))

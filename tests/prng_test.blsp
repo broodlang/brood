@@ -4,7 +4,7 @@
 ;; a check that the [value next-seed] discipline composes. Register-only —
 ;; discovered and run by `nest test` (and cargo test via suite.rs).
 
-(require 'test)
+(defmodule prng-test (:use test))
 
 ;; A tail-recursive helper: n successive draws from `seed`, oldest first.
 (defn prng-draws (seed n acc)
@@ -81,9 +81,9 @@
     (check-property 100 (fn (s) (sample s [:a :b :c :d])) (fn (x) (includes? [:a :b :c :d] x))))
   (test "a false property raises a test-failure carrying the seed"
     ;; Drive the loop directly so the failure is caught here, not the test runner.
-    (is (test--failure?
+    (is (test/test--failure?
           (try
-            (do (check-property--loop 100 (fn (s) (rand-int s 10)) (fn (x) (< x 5)) nil 1 0)
+            (do (test/check-property--loop 100 (fn (s) (rand-int s 10)) (fn (x) (< x 5)) nil 1 0)
                 :no-failure)
             (catch e e))))))
 

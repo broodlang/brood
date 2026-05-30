@@ -6,8 +6,7 @@
 ;; preserves comments, preserves blank-line intent between top-level forms,
 ;; collapses short forms onto a single line, and breaks long ones over multiple.
 
-(require 'test)
-(require 'format)
+(defmodule format-test (:use test) (:use format))
 
 (describe "format: trivial inputs"
   (test "empty input yields empty output" (assert= (format-source "") ""))

@@ -2200,13 +2200,13 @@ fn reload_defs(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
                 match head {
                     Value::Sym(s) => {
                         let nm = value::symbol_name(s);
-                        // Re-evaluate the `(ns …)` header too, so the reloaded
-                        // file's namespace is re-established for its defs (ADR-065).
-                        nm == "ns"
-                            || (nm.starts_with("def")
-                                && (nm == "def"
-                                    || nm == "defmacro"
-                                    || matches!(heap.env_get(root, s), Some(Value::Macro(_)))))
+                        // The `(defmodule …)` header is re-evaluated too (so the
+                        // reloaded file's namespace + imports are re-established for
+                        // its defs, ADR-065) — it's a `def…`-named macro, caught here.
+                        nm.starts_with("def")
+                            && (nm == "def"
+                                || nm == "defmacro"
+                                || matches!(heap.env_get(root, s), Some(Value::Macro(_))))
                     }
                     _ => false,
                 }

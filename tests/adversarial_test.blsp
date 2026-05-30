@@ -13,6 +13,8 @@
 ;; --- Reader / parser ---------------------------------------------------------
 ;;
 
+(defmodule adversarial-test (:use test))
+
 (describe "adversarial: reader / parser"
   :isolated
 
