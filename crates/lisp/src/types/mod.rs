@@ -82,25 +82,32 @@ const fn bit(tag: Tag) -> u32 {
 /// `(int) -> int` describes both.
 const FN_BITS: u32 = (1u32 << bit(Tag::Fn)) | (1u32 << bit(Tag::Native));
 
-/// A set-theoretic type — a **set of runtime [`Tag`]s** with an optional
-/// *structured refinement* on its function members (Step 5+, ADR-077).
+/// The sequence tags an element-type refinement applies to — a list (`pair`;
+/// `nil` is the empty list, no elements) or a `vector`.
+const SEQ_BITS: u32 = (1u32 << bit(Tag::Pair)) | (1u32 << bit(Tag::Vector));
+
+/// A set-theoretic type — a **set of runtime [`Tag`]s** with optional
+/// *structured refinements* on its function and sequence members (Step 5+,
+/// ADR-077).
 ///
 /// The flat `tags` bitset is the coarse set and carries the whole pre-Step-5
-/// behaviour verbatim. `arrow`, when present, refines the function members
-/// (`Fn`/`Native`) to those matching a specific signature — so `(int) -> int`
-/// is `{tags: Fn|Native, arrow: Some((int)->int)}` while a bare "any function"
-/// is `{tags: Fn|Native, arrow: None}`. The refinement is reused from [`Sig`]
-/// (an arrow type *is* a signature).
+/// behaviour verbatim. Two refinements layer on top, each `None` by default
+/// ("any"):
+/// - `arrow` refines the function members (`Fn`/`Native`) to those matching a
+///   specific signature — `(int) -> int` is `{tags: Fn|Native, arrow: Some(…)}`.
+///   Reused from [`Sig`] (an arrow type *is* a signature).
+/// - `elem` refines the sequence members (`pair`/`vector`) to those whose
+///   elements have a given type — `vector<int>` is `{tags: Vector, elem: Some(int)}`.
 ///
-/// **Advisory-soundness rule:** the set operations may only ever *widen* the
-/// refinement (toward `None` = "any function") when they can't represent the
-/// exact result. Widening over-approximates the set, so it can only ever
-/// suppress a warning — never manufacture a false one. The precise arrow check
-/// (callback compatibility) is a dedicated step in [`check`], not something
-/// [`is_disjoint`](Ty::is_disjoint) infers.
+/// **Advisory-soundness rule:** the set operations may only ever *widen* a
+/// refinement (toward `None` = "any") when they can't represent the exact
+/// result. Widening over-approximates the set, so it can only ever suppress a
+/// warning — never manufacture a false one. [`is_disjoint`](Ty::is_disjoint) is
+/// decided on tags alone and never inspects a refinement; the precise arrow check
+/// (callback compatibility) is a dedicated step in [`check`].
 ///
-/// No longer `Copy` (the `Arc` refinement) but cheap to `Clone` — a `u32` plus a
-/// refcount bump. The flat case is a null pointer.
+/// No longer `Copy` (the `Arc` refinements) but cheap to `Clone` — a `u32` plus
+/// refcount bumps. The flat case is two null pointers.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Ty {
     /// The set of possible runtime tags — always present; the coarse set.
@@ -108,6 +115,9 @@ pub struct Ty {
     /// Refinement of the function members (`Fn`/`Native`), when statically known.
     /// `None` means "any function" (the permissive default).
     arrow: Option<Arc<Sig>>,
+    /// Refinement of the sequence members (`pair`/`vector`) — the element type,
+    /// when statically known. `None` means "elements of any type".
+    elem: Option<Arc<Ty>>,
 }
 
 impl Ty {
@@ -124,7 +134,11 @@ impl Ty {
     /// every flat `Ty` funnels through. `const` so the named points above can be
     /// `const`; the set operations that combine refinements can't be.
     const fn flat(tags: u32) -> Ty {
-        Ty { tags, arrow: None }
+        Ty {
+            tags,
+            arrow: None,
+            elem: None,
+        }
     }
 
     /// The singleton type containing exactly the values with this tag.
@@ -152,6 +166,7 @@ impl Ty {
         Ty {
             tags: FN_BITS,
             arrow: Some(Arc::new(sig)),
+            elem: None,
         }
     }
 
@@ -160,6 +175,34 @@ impl Ty {
     /// function expects.
     pub fn as_arrow(&self) -> Option<&Sig> {
         self.arrow.as_deref()
+    }
+
+    /// A sequence type over `tags` (some subset of `pair`/`vector`) whose elements
+    /// have type `elem` — the general element-refinement constructor.
+    pub fn seq_of(tags: u32, elem: Ty) -> Ty {
+        Ty {
+            tags: tags & SEQ_BITS,
+            arrow: None,
+            elem: Some(Arc::new(elem)),
+        }
+    }
+
+    /// `vector<elem>` — a vector whose elements have type `elem`.
+    pub fn vector_of(elem: Ty) -> Ty {
+        Ty::seq_of(1u32 << bit(Tag::Vector), elem)
+    }
+
+    /// `list<elem>` — a (non-empty) list whose elements have type `elem`. Tagged
+    /// `pair`; the empty-list `nil` carries no element type, so a value that may
+    /// be `nil` widens to plain `list` at the join.
+    pub fn list_of(elem: Ty) -> Ty {
+        Ty::seq_of(1u32 << bit(Tag::Pair), elem)
+    }
+
+    /// The element-type refinement, if this sequence type carries one. The bridge
+    /// the checker reads to flow `(first xs)` / `(nth xs i)` to the element type.
+    pub fn elem_ty(&self) -> Option<&Ty> {
+        self.elem.as_deref()
     }
 
     /// The type of a concrete value — the bridge from a runtime value to its type.
@@ -200,40 +243,52 @@ impl Ty {
         })
     }
 
-    /// `self ∪ other` — values in either. The arrow refinement survives only
-    /// where it's unambiguous: if just one side contributes function members,
-    /// that side's arrow carries; if both do, the arrow survives only when they
-    /// agree (the union of two distinct arrows isn't a single arrow → widen to
-    /// "any function"). Widening is sound: a union is a supertype anyway.
+    /// `self ∪ other` — values in either. A refinement survives only where it's
+    /// unambiguous: if just one side contributes the relevant members (functions
+    /// for `arrow`, sequences for `elem`), that side's refinement carries; if both
+    /// do, it survives only when they agree (the union of two distinct
+    /// arrows/element-types isn't a single one → widen to "any"). Widening is
+    /// sound: a union is a supertype anyway.
     pub fn union(self, other: Ty) -> Ty {
         let tags = self.tags | other.tags;
-        let arrow = Self::merge_arrows_union(&self, &other);
-        Ty { tags, arrow }
+        let arrow = merge_union(
+            self.tags & FN_BITS != 0,
+            &self.arrow,
+            other.tags & FN_BITS != 0,
+            &other.arrow,
+        );
+        let elem = merge_union(
+            self.tags & SEQ_BITS != 0,
+            &self.elem,
+            other.tags & SEQ_BITS != 0,
+            &other.elem,
+        );
+        Ty { tags, arrow, elem }
     }
 
-    /// `self ∩ other` — values in both. When the function bit survives and one
-    /// side is unrefined ("any function"), the other side's arrow is the
-    /// narrower — keep it; two distinct known arrows can't be one arrow → widen.
-    /// (Used by guard narrowing `T ∩ tested_by(pred)`, where `tested_by` is flat,
-    /// so a refined `T` keeps its arrow through the narrow.)
+    /// `self ∩ other` — values in both. When the relevant bit survives and one
+    /// side is unrefined ("any"), the other side's refinement is the narrower —
+    /// keep it; two distinct known refinements can't be one → widen. (Used by
+    /// guard narrowing `T ∩ tested_by(pred)`, where `tested_by` is flat, so a
+    /// refined `T` keeps its refinement through the narrow.)
     pub fn intersect(self, other: Ty) -> Ty {
         let tags = self.tags & other.tags;
-        if tags & FN_BITS == 0 {
-            return Ty::flat(tags);
-        }
-        let arrow = match (&self.arrow, &other.arrow) {
-            (Some(a), Some(b)) if a == b => Some(a.clone()),
-            (Some(_), Some(_)) => None,
-            (Some(a), None) => Some(a.clone()),
-            (None, Some(b)) => Some(b.clone()),
-            (None, None) => None,
+        let arrow = if tags & FN_BITS != 0 {
+            merge_intersect(&self.arrow, &other.arrow)
+        } else {
+            None
         };
-        Ty { tags, arrow }
+        let elem = if tags & SEQ_BITS != 0 {
+            merge_intersect(&self.elem, &other.elem)
+        } else {
+            None
+        };
+        Ty { tags, arrow, elem }
     }
 
     /// `¬self` — every value *not* in `self` (complemented within the universe).
-    /// The complement of a refined function type isn't a single arrow, so the
-    /// result is always unrefined (widen — sound).
+    /// The complement of a refined function/sequence type isn't a single
+    /// refinement, so the result is always unrefined (widen — sound).
     pub fn negate(self) -> Ty {
         Ty::flat(!self.tags & UNIVERSE)
     }
@@ -244,27 +299,45 @@ impl Ty {
     }
 
     /// `self ⊆ other` — semantic subtyping: is every value of `self` a value of
-    /// `other`? Tag-level inclusion first; then, if `self` contributes function
-    /// members and `other` refines its function part, `self`'s functions must
-    /// all satisfy `other`'s arrow ([`Sig::is_subtype`], contravariant in
-    /// parameters, covariant in the result). An unrefined `self` ("any function")
-    /// is *not* a subtype of a specifically-refined `other`.
+    /// `other`? Tag-level inclusion first; then, where `other` refines a part
+    /// `self` contributes to, `self`'s refinement must satisfy `other`'s:
+    /// **functions** via [`Sig::is_subtype`] (contravariant params, covariant
+    /// result), **sequences** covariantly on the element type (sound because
+    /// Brood sequences are immutable). An unrefined `self` ("any") is *not* a
+    /// subtype of a specifically-refined `other`.
     pub fn is_subtype(&self, other: &Ty) -> bool {
         if self.tags & other.tags != self.tags {
             return false;
         }
-        match (self.tags & FN_BITS != 0, &other.arrow) {
-            // `other` refines its function part; `self` has functions to check.
-            (true, Some(b)) => match &self.arrow {
-                Some(a) => a.is_subtype(b),
-                None => false, // self = "any function" ⊄ a specific arrow
-            },
-            _ => true,
+        if self.tags & FN_BITS != 0 {
+            if let Some(b) = &other.arrow {
+                match &self.arrow {
+                    Some(a) => {
+                        if !a.is_subtype(b) {
+                            return false;
+                        }
+                    }
+                    None => return false, // self = "any function" ⊄ a specific arrow
+                }
+            }
         }
+        if self.tags & SEQ_BITS != 0 {
+            if let Some(b) = &other.elem {
+                match &self.elem {
+                    Some(a) => {
+                        if !a.is_subtype(b) {
+                            return false;
+                        }
+                    }
+                    None => return false, // self = "any elements" ⊄ a specific elem
+                }
+            }
+        }
+        true
     }
 
     /// Do `self` and `other` share no values? (`self ∩ other = ⊥`.) Decided on
-    /// tags alone — never inferred from an arrow mismatch, so a refinement can
+    /// tags alone — never inferred from a refinement mismatch, so a refinement can
     /// only suppress a warning, never raise a false one (advisory-soundness).
     pub fn is_disjoint(&self, other: &Ty) -> bool {
         self.tags & other.tags == 0
@@ -284,19 +357,37 @@ impl Ty {
     pub const fn is_any(&self) -> bool {
         self.tags == UNIVERSE
     }
+}
 
-    /// The surviving arrow for a union — see [`union`](Ty::union). Pulled out so
-    /// the rule reads in one place.
-    fn merge_arrows_union(a: &Ty, b: &Ty) -> Option<Arc<Sig>> {
-        let a_fn = a.tags & FN_BITS != 0;
-        let b_fn = b.tags & FN_BITS != 0;
-        match (a_fn, b_fn) {
-            (true, false) => a.arrow.clone(),
-            (false, true) => b.arrow.clone(),
-            (true, true) if a.arrow == b.arrow => a.arrow.clone(),
-            (true, true) => None,
-            (false, false) => None,
-        }
+/// The surviving refinement for a **union**: present on just one side → carry it;
+/// on both and equal → keep; on both and different → widen to `None` (the union
+/// of two distinct refinements isn't a single one). Shared by the `arrow` and
+/// `elem` refinements (`present` is "does this side contribute the refined
+/// members").
+fn merge_union<T: PartialEq>(
+    a_present: bool,
+    a: &Option<Arc<T>>,
+    b_present: bool,
+    b: &Option<Arc<T>>,
+) -> Option<Arc<T>> {
+    match (a_present, b_present) {
+        (true, false) => a.clone(),
+        (false, true) => b.clone(),
+        (true, true) if a == b => a.clone(),
+        _ => None,
+    }
+}
+
+/// The surviving refinement for an **intersection** (the relevant tag bit already
+/// known to survive): the narrower of the two — a known refinement beats "any"
+/// (`None`); two distinct known refinements widen to `None`.
+fn merge_intersect<T: PartialEq>(a: &Option<Arc<T>>, b: &Option<Arc<T>>) -> Option<Arc<T>> {
+    match (a, b) {
+        (Some(x), Some(y)) if x == y => Some(x.clone()),
+        (Some(_), Some(_)) => None,
+        (Some(x), None) => Some(x.clone()),
+        (None, Some(y)) => Some(y.clone()),
+        (None, None) => None,
     }
 }
 
@@ -324,6 +415,21 @@ impl fmt::Display for Ty {
         if self.tags & !FN_BITS == 0 {
             if let Some(sig) = self.as_arrow() {
                 return write!(f, "{sig}");
+            }
+        }
+        // A pure sequence type with a known element type: `vector<E>` / `list<E>`
+        // (`nil` may ride along as the empty-list case).
+        if let Some(elem) = self.elem_ty() {
+            if self.tags & !(SEQ_BITS | (1u32 << bit(Tag::Nil))) == 0 {
+                let has_vec = self.contains_tag(Tag::Vector);
+                let has_pair = self.contains_tag(Tag::Pair);
+                if has_vec && !has_pair {
+                    return write!(f, "vector<{elem}>");
+                }
+                if has_pair && !has_vec {
+                    return write!(f, "list<{elem}>");
+                }
+                return write!(f, "(list | vector)<{elem}>");
             }
         }
         let mut first = true;
@@ -879,5 +985,57 @@ mod tests {
         assert!(!f.is_disjoint(&g));
         // a function and a non-function are disjoint (tags don't overlap).
         assert!(f.is_disjoint(&Ty::of(Tag::Int)));
+    }
+
+    // ---- structured (element) types — Step 5+, ADR-077 slice 2 ----
+
+    #[test]
+    fn sequence_types_render_with_element() {
+        assert_eq!(Ty::vector_of(Ty::of(Tag::Int)).to_string(), "vector<int>");
+        assert_eq!(Ty::list_of(Ty::NUMBER).to_string(), "list<number>");
+        assert_eq!(
+            Ty::vector_of(Ty::of(Tag::Int).union(Ty::of(Tag::Str))).to_string(),
+            "vector<int | string>"
+        );
+        // a bare vector (no element refinement) still prints as its tag
+        assert_eq!(Ty::of(Tag::Vector).to_string(), "vector");
+    }
+
+    #[test]
+    fn element_type_is_covariant_under_subtyping() {
+        // vector<int> <: vector<number>  (int ⊆ number; immutable seqs are covariant)
+        assert!(Ty::vector_of(Ty::of(Tag::Int)).is_subtype(&Ty::vector_of(Ty::NUMBER)));
+        assert!(!Ty::vector_of(Ty::NUMBER).is_subtype(&Ty::vector_of(Ty::of(Tag::Int))));
+        // a specific element type <: an unrefined vector ("any elements")
+        assert!(Ty::vector_of(Ty::of(Tag::Int)).is_subtype(&Ty::of(Tag::Vector)));
+        // ...but "any elements" is NOT a subtype of a specific element type
+        assert!(!Ty::of(Tag::Vector).is_subtype(&Ty::vector_of(Ty::of(Tag::Int))));
+        // different containers don't subtype (tags differ)
+        assert!(!Ty::vector_of(Ty::of(Tag::Int)).is_subtype(&Ty::list_of(Ty::of(Tag::Int))));
+    }
+
+    #[test]
+    fn element_refinement_widens_on_a_union_mismatch_but_keeps_a_match() {
+        let vi = Ty::vector_of(Ty::of(Tag::Int));
+        let vs = Ty::vector_of(Ty::of(Tag::Str));
+        // vector<int> ∪ vector<string> → vector (element widened; sound supertype)
+        let u = vi.clone().union(vs);
+        assert!(u.contains_tag(Tag::Vector));
+        assert_eq!(u.elem_ty(), None);
+        // vector<int> ∪ vector<int> → vector<int> (agree → kept)
+        assert_eq!(vi.clone().union(vi.clone()).elem_ty(), vi.elem_ty());
+        // int ∪ vector<int> → only the vector side contributes elements → kept
+        let mixed = Ty::of(Tag::Int).union(vi.clone());
+        assert!(mixed.contains_tag(Tag::Int) && mixed.contains_tag(Tag::Vector));
+        assert_eq!(mixed.elem_ty(), vi.elem_ty());
+    }
+
+    #[test]
+    fn element_disjointness_is_tags_only() {
+        // vector<int> and vector<string> overlap (both vectors) — not disjoint, so
+        // no false positive off an element mismatch.
+        assert!(!Ty::vector_of(Ty::of(Tag::Int)).is_disjoint(&Ty::vector_of(Ty::of(Tag::Str))));
+        // a vector and an int are disjoint (tags don't overlap).
+        assert!(Ty::vector_of(Ty::of(Tag::Int)).is_disjoint(&Ty::of(Tag::Int)));
     }
 }

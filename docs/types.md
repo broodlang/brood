@@ -274,7 +274,7 @@ file-list checks both load the project image first via Brood `project/check-file
 code path). The only meaningful next move is the upgrade to Step 5+ (structured
 types) when a real need surfaces.
 
-### Step 5+ — structured types 🟡 (arrows shipped; ADR-077)
+### Step 5+ — structured types 🟡 (arrows + element types shipped; ADR-077)
 Function arrows, vector/list element types, intersections for overloaded fns —
 the fuller set-theoretic algebra. Additive; gated on real need (ADR-011).
 
@@ -297,10 +297,25 @@ the wrong arity — `(map cons xs)`, `(reduce (fn (a) a) 0 xs)` — whenever the
 callback's arity is knowable (a named global fn, or a simple lambda literal);
 unknown arities are skipped, so zero false positives across `std/` + `tests/`.
 
-**⬜ Still deferred (ADR-011).** Vector/list **element** types (`[1 2 3] :
-vector<int>`, so `first`/`map` flow element types — the `elem` refinement field the
-struct has room for), intersections for overloaded fns, and arrows flowing into the
-straight-line inference. Gated on a concrete consumer.
+**✅ Element types (second slice, ADR-077).** `Ty` gained a second refinement,
+`elem: Option<Arc<Ty>>`, refining the sequence members (`pair`/`vector`) to their
+element type — `vector<int>` is `{tags: Vector, elem: Some(int)}`. Sources: a vector
+literal `[1 2 3]` and the `(list …)`/`(vector …)` constructors get the union of their
+element types (any unknown element → unrefined). Sinks: `(first xs)`/`(last xs)`/
+`(nth xs i)` flow the element type out (widened with `nil` for the empty/out-of-range
+case), so `(+ 1 (first ["a" "b"]))` is flagged (`string | nil` is disjoint from
+`number`) while `(first [1 2 3])` stays a number. Element subtyping is covariant
+(sound — Brood sequences are immutable); union widens on a mismatch; `is_disjoint`
+stays tags-only. Surfacing precise sequence types exposed a latent guarded-use gap —
+the `match` compiler's vector-pattern lowering `(if (and (vector? m) …) (… (vector-ref
+m i) …) …)` — so `guard_assertion` now narrows through the **`and` short-circuit
+shape** `(let (g E) (if g _ g))` (the first conjunct holds in the then-branch; `or`'s
+`(if g g _)` deliberately does not), which keeps the guarded `vector-ref` quiet. Zero
+new false positives across `std/` + `tests/`.
+
+**⬜ Still deferred (ADR-011).** Intersections for overloaded fns; arrows/element
+types flowing into the straight-line inference; a parametric `map` result element
+type (`(map f vector<A>) : list<B>` from `f : A -> B`). Gated on a concrete consumer.
 
 ## How it runs — and why it's outside the runtime
 
