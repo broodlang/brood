@@ -734,13 +734,18 @@ pub struct Heap {
     /// Compiling-VM body cache (ADR-076, `BROOD_VM`). Maps a closure handle's raw
     /// bits to its compiled single-arm body, or `None` if the closure isn't
     /// VM-eligible (so we don't re-attempt). Per-process (a `RefCell`, like
-    /// `global_ic`), keyed by RUNTIME closure handles, whose `.0` is stable
-    /// (region+index, no generation bits) for the life of that closure. A `def`
-    /// rebind promotes a *new* closure (new handle → new key), so a stale entry is
-    /// simply never looked up again. Empty unless `BROOD_VM` is on. `Arc` so the
-    /// trampoline can hold the compiled body across a call without borrowing the
-    /// cache.
-    vm_cache: RefCell<HashMap<u64, Option<Arc<crate::eval::compile::CompiledClosure>>>>,
+    /// `global_ic`). The key is **namespaced** (`VmCacheKey`) because two stable
+    /// handle spaces are mixed: a top-level RUNTIME closure is keyed by its own
+    /// closure-handle `.0`, while a local-capturing closure (Stage 2c) is keyed by
+    /// its **body-code handle** — the closure's `ClosureId` is a LOCAL handle whose
+    /// index is recycled after GC, so it can't be a stable key, but the body forms
+    /// it points at live in the immovable RUNTIME code region (ADR-076 §2c(a)). The
+    /// two spaces share the same numeric range, so the `u8` tag keeps them apart. A
+    /// `def` rebind promotes a *new* closure (new handle → new key), so a stale
+    /// entry is simply never looked up again. Empty unless `BROOD_VM` is on. `Arc`
+    /// so the trampoline can hold the compiled body across a call without borrowing
+    /// the cache.
+    vm_cache: RefCell<HashMap<VmCacheKey, Option<Arc<crate::eval::compile::CompiledClosure>>>>,
 }
 
 impl Default for Heap {
@@ -816,6 +821,19 @@ pub enum Root {
 pub enum EnvRoot {
     Stable(EnvId),
     Slot(usize),
+}
+
+/// A key into the compiling-VM body cache ([`Heap::vm_cache_get`]). Two stable
+/// handle spaces are namespaced apart (ADR-076 §2c): a top-level closure is keyed
+/// by its own RUNTIME [`ClosureId`] handle; a local-capturing closure is keyed by
+/// the immovable **body-code handle** its (recycled LOCAL) `ClosureId` points at.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VmCacheKey {
+    /// A top-level / promoted RUNTIME closure, keyed by its closure-handle `.0`.
+    Runtime(u64),
+    /// A local-capturing closure, keyed by the `.0` of its first body form's
+    /// (RUNTIME-stable) handle — the closure handle itself is unstable across GC.
+    LocalBody(u64),
 }
 
 impl Heap {
@@ -2981,6 +2999,36 @@ impl Heap {
         None
     }
 
+    /// The distinct lexical names bound along `env`'s frame chain, innermost-first,
+    /// stopping at the global scope (whose names are runtime globals, not lexicals).
+    /// Used by the compiling VM (ADR-076 §2c): a nested `(fn …)` must snapshot the
+    /// enclosing lexical environment it closes over, so the compiler asks which
+    /// names that env actually binds. The set is a static property of the closure's
+    /// definition site (every instance of the same source closure binds the same
+    /// names), so it's safe to derive once and bake into the cached body.
+    pub fn env_chain_names(&self, env: EnvId) -> Vec<Symbol> {
+        let mut names: Vec<Symbol> = Vec::new();
+        let mut cur = env;
+        let mut depth = 0;
+        while cur != EnvId::GLOBAL && (cur.region() == LOCAL || cur.region() == RUNTIME) {
+            let frame = self.env_frame(cur);
+            for &(s, _) in frame.vars.iter() {
+                if !names.contains(&s) {
+                    names.push(s);
+                }
+            }
+            match frame.parent {
+                Some(p) => cur = p,
+                None => break,
+            }
+            depth += 1;
+            if depth > 10_000 {
+                break; // safety belt — env chains shouldn't be this deep
+            }
+        }
+        names
+    }
+
     /// Resolve a name in the shared global table, going through this process's
     /// [`global_ic`](Self::global_ic) inline cache. On a version match the cached
     /// (immovable PRELUDE/RUNTIME) handle is returned without touching the
@@ -3351,16 +3399,19 @@ impl Heap {
 
     // ----- compiling-VM body cache (ADR-076; see `eval::compile`) -----
 
-    /// The cached compile result for closure key `k` (a closure handle's `.0`):
+    /// The cached compile result for closure key `k` (see [`VmCacheKey`]):
     /// `None` = not cached yet; `Some(None)` = cached as ineligible; `Some(Some(a))`
     /// = the compiled body. `&self` (interior-mutable `RefCell`), so the VM can
     /// consult it on the read-only hot path.
-    pub fn vm_cache_get(&self, k: u64) -> Option<Option<Arc<crate::eval::compile::CompiledClosure>>> {
+    pub fn vm_cache_get(
+        &self,
+        k: VmCacheKey,
+    ) -> Option<Option<Arc<crate::eval::compile::CompiledClosure>>> {
         self.vm_cache.borrow().get(&k).cloned()
     }
 
     /// Record the compile result for closure key `k` (eligible body or `None`).
-    pub fn vm_cache_put(&self, k: u64, v: Option<Arc<crate::eval::compile::CompiledClosure>>) {
+    pub fn vm_cache_put(&self, k: VmCacheKey, v: Option<Arc<crate::eval::compile::CompiledClosure>>) {
         self.vm_cache.borrow_mut().insert(k, v);
     }
 
