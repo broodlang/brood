@@ -4256,3 +4256,62 @@ ADR-041 (blob heap), ADR-045 (opaque immutable resource handle), ADR-043
 (deliver-to-mailbox offload), ADR-054/055 (moving/generational GC — why the
 boundary marshals), ADR-006 (write the language in the language — wrapper + policy
 in Brood), ADR-011 (defer power features).
+
+## ADR-068 — Node-connect ergonomics: default-cookie file, name-addressed Unix transport, `nest run --name`
+
+**Status.** Accepted, implemented 2026-05-30. Extends ADR-033/034 (distributed
+nodes); the wire protocol, HMAC handshake, pid routing, links/monitors and
+ADR-067 supervision are unchanged. See [`node-connect.md`](node-connect.md),
+[`distribution.md`](distribution.md).
+
+**Context.** Connecting nodes was all hand-wired: `(node-start :a "127.0.0.1:9001"
+"cookie")` + `(connect "a@127.0.0.1:9001")`. Three frictions, all incidental to
+the share-nothing model: you invented a cookie per program (every example
+hardcoded `"demo-cookie"`), you picked an IP+port even for two runtimes on one
+machine (the common dev case *and* the editor-daemon case), and bringing a node
+up was in-program ceremony. The destination — an Emacs-like editor "runnable
+locally as a native app and remotely as a server", M4's "`--daemon`/`emacsclient`
+model" — wants the opposite: address a local peer by name, share one secret,
+start a node from the command line.
+
+**Decision.**
+1. **A per-user shared cookie**, Erlang-style: `~/.config/brood/cookie`
+   (honoring `$XDG_CONFIG_HOME`), one line of hex, mode `0600`, auto-generated on
+   first use. Resolution: `$BROOD_COOKIE` → the file → mint + persist — on the
+   *connecting* side too, not just `node-start`, so "just connect" works.
+2. **A name-addressed Unix-domain transport.** A local node binds
+   `$XDG_RUNTIME_DIR/brood/<name>.sock` (fallback `/tmp/brood-<user>/`); peers
+   reach it with `(connect "name")` — no port, no IP. `(connect "name@host:port")`
+   still means TCP. Dispatch reuses the existing `@` split. Handshake/framing/
+   heartbeat run unchanged over both carriers via a single `Stream { Tcp | Unix }`
+   seam in `dist.rs`. The `0700` socket dir gates other users; the cookie
+   handshake still runs over Unix too, for one uniform protocol.
+3. **`nest run --name NAME`** brings up a local node before the program runs (the
+   `--daemon` model), so the file is pure app logic.
+
+**Policy in Brood, mechanism in Rust** (ADR-006). The friendly `node-start` /
+`connect` / `node-cookie` live in `std/prelude.blsp` (always on, no `require`);
+they compute the socket path, resolve the cookie, and pick the transport, over
+four thin Rust primitives: `%node-listen`, `%node-connect`, `random-token`
+(CSPRNG → hex), `spit-private` (atomic `0600` write). The kernel only carries
+bytes and does the I/O it must (sockets, perms, RNG) — which `nest observe` can
+reach via its `Interp`, so none of the policy needs to be Rust.
+
+**Scope / deferred.** One transport per node for now (arity-1 `node-start` =
+Unix; an addr = TCP); **dual-listen** (a node serving Unix *and* TCP at once —
+the eventual editor-daemon end-state) is cleanly additive later, needs no
+protocol change (ADR-011). Windows (no `$XDG_RUNTIME_DIR` convention) is out of
+scope; TCP works everywhere. Connecting requires a prior `node-start` (no
+implicit ephemeral client node) — explicit over magic.
+
+**Consequences.** The 3-arg `(node-start name "host:port" cookie)` and
+`(connect "name@host:port")` forms are unchanged, so the existing TCP
+`distribution.rs` suite passes as-is; the change is almost entirely additive. The
+M3 observer's remote-attach (`nest observe --connect name`) gains Unix addressing
++ the cookie-file fallback for free — the first consumer, today. New tests:
+`two_unix_nodes_connect_by_name_and_message`, `wrong_cookie_rejected_over_unix`,
+`cookie_file_autogen_and_reuse`.
+
+**References.** ADR-033/034 (distributed nodes), ADR-006 (policy in Brood),
+ADR-011 (defer the powerful form — dual-listen), `node-connect.md`,
+`distribution.md`, `crates/cli/tests/distribution.rs`, `std/prelude.blsp`.

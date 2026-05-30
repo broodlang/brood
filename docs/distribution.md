@@ -1,16 +1,18 @@
 # Distribution: connecting two nodes
 
-> Status: **slice 1 implemented.** Two Brood runtimes connect over TCP and
-> message each other. Erlang-style distribution falls out of share-nothing +
-> copy-on-send — *the network is just a longer copy* (ADR-013, ADR-034). The
-> design intent lives in [`concurrency.md` §Distribution](concurrency.md); this
-> doc is the as-built reference.
+> Status: **slices 1 + 2 implemented; connect ergonomics per ADR-068.** Two Brood
+> runtimes connect and message each other — on one machine over a Unix-domain
+> socket addressed by name, across machines over TCP. Erlang-style distribution
+> falls out of share-nothing + copy-on-send — *the network is just a longer copy*
+> (ADR-013, ADR-034). The design intent lives in
+> [`concurrency.md` §Distribution](concurrency.md); the ergonomics rationale in
+> [`node-connect.md`](node-connect.md); this doc is the as-built reference.
 
 ## What you can do
 
 ```lisp
-;; --- node A ---------------------------------------------------------------
-(node-start :a "127.0.0.1:9001" "secret")   ; name this runtime + listen
+;; --- node A (same machine) ------------------------------------------------
+(node-start :a)                               ; local Unix-socket node, by name
 (register :echo (self))                       ; expose this process by name
 (defn serve ()
   (receive
@@ -18,21 +20,34 @@
     ([:ping from] (do (send from [:pong (self)]) (serve)))))
 (serve)
 
-;; --- node B ---------------------------------------------------------------
-(node-start :b "127.0.0.1:9002" "secret")
-(connect "a@127.0.0.1:9001")                  ; cookie-authenticated link
+;; --- node B (same machine) ------------------------------------------------
+(node-start :b)
+(connect "a")                                 ; dial A by name — no port, no IP
 (send {:name :echo :node :a} [:hi (self)])    ; reach A's :echo by name
 (def remote (receive ([:pong p] p)))          ; p is A's pid — a remote pid
 (send remote [:ping (self)])                  ; now address it directly
 (receive ([:pong _] :done))                   ; location-transparent reply
+
+;; --- across machines: TCP, explicit host:port -----------------------------
+(node-start :a "0.0.0.0:9001")                ; listen over TCP
+(connect "a@10.0.0.4:9001")                   ; dial a remote peer
 ```
+
+The shared cookie authenticating links lives in `~/.config/brood/cookie`
+(auto-generated `0600` on first use; `$BROOD_COOKIE` overrides). All your nodes on
+a machine share it — no secret to pass. `nest run --name foo app.blsp` brings a
+local node up before running `app.blsp` (the Emacs `--daemon` model).
 
 ## Primitives
 
 | Primitive | Meaning |
 |---|---|
-| `(node-start name "host:port" cookie)` | Name this runtime and listen for peers. Returns the node name. |
-| `(connect "name@host:port")` | Dial + authenticate a peer. Returns the peer's node name. |
+| `(node-start name)` | Start a **local** node addressed by `name` (a Unix-domain socket — no port). Returns the node name. |
+| `(node-start name "host:port")` | Start a node listening over **TCP** for remote peers. |
+| `(node-start name "host:port" cookie)` | …with an explicit cookie (the default is `(node-cookie)`). |
+| `(connect "name")` | Dial a local peer by name (Unix socket). Returns the peer's node name. |
+| `(connect "name@host:port")` | Dial a remote peer over TCP. |
+| `(node-cookie)` | The shared link secret: `$BROOD_COOKIE` → `~/.config/brood/cookie` → freshly minted. |
 | `(register name pid)` | Bind a local name so peers can address this process. Returns the pid. |
 | `(node-name)` | This runtime's node name (`:nonode` until `node-start`). |
 | `(nodes)` | A list of currently connected peer node names. |
@@ -67,8 +82,11 @@ two ways:
    site.
 
 ### Transport (off the scheduler)
-`node-start` binds a `TcpListener` and runs an acceptor thread. `connect` dials.
-Both perform the v2 authenticated handshake (ADR-034 v2): a 4-byte
+`node-start` binds a listener — a `UnixListener` for a local name or a
+`TcpListener` for `host:port` — and runs an acceptor thread; `connect` dials the
+matching carrier. A single `Stream { Tcp | Unix }` enum (ADR-068) carries the
+link, so everything below is transport-agnostic. Both ends perform the v2
+authenticated handshake (ADR-034 v2): a 4-byte
 magic+version prefix (`b"BRD\x02"`), then a `Hello { node, nonce }` exchange
 (each side a fresh 32-byte nonce), then an `Auth { mac }` exchange where each
 side sends `HMAC-SHA256(cookie, peer_nonce || peer_name || my_name)`. The
