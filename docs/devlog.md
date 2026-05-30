@@ -10279,3 +10279,29 @@ windows) is independent and left open.
 **Tested.** `cargo build` + `cargo build --features gui` green (the renderer path is
 behind the `gui` feature and needs a display, so not headless-unit-testable; `:scale`
 itself is plain map data, covered by the existing maps tests). Suite green.
+
+## 2026-05-31 — Cursor zones: resize pointer over window dividers (ADR-080)
+
+**Goal.** The editor's drag-to-resize (ADR-077) worked, but the OS pointer never
+became a resize cursor over a divider — no affordance. The pointer shape can only be
+set by the GUI thread, but `ui-run`'s `view`/`update` hold no window handle, and bare
+motion isn't delivered to apps (ADR-056/077, anti-flood). So neither "set the cursor
+in update" nor "react to hover" was possible.
+
+**Built.** A new render op **`[:cursor-zone x y w h shape]`** that rides the frame
+(which already reaches the right window via `:draw`):
+- `gui.rs`: `Op::CursorZone` + frontend-neutral `CursorShape` (→ winit
+  `EwResize`/`NsResize`); each `Win` stores the frame's zones; `CursorMoved`
+  hit-tests them and `set_cursor`s (only on change) — handled locally, so no event
+  reaches the app loop and there's no redraw flood. Hover zones also cover dragging
+  (the pointer is on the divider while you drag).
+- `builtins.rs`: `gui-draw` parses `:cursor-zone`; the terminal skips it (unknown op).
+- `std/display.blsp`: `(cursor-zone x y w h shape)` constructor.
+- myedit `view`: emits one zone per `std/window.blsp` divider (`:col`→`:col-resize`,
+  `:row`→`:row-resize`).
+
+Landed alongside the parallel ADR-079 (`Face` `:scale`) work in the same `gui.rs`.
+
+**Tests.** myedit `tests/main_test.blsp` +1 (the view emits the right resize zone per
+split; a lone window emits none). Full myedit suite green (108); default + `--features
+gui` builds green. Live drag + cursor confirmed in a real window.
