@@ -356,9 +356,31 @@ fn call_tool(interp: &mut Interp, params: &Json) -> Result<Json, RpcError> {
             json_to_value(&mut interp.heap, &arguments).map_err(RpcError::invalid_params)?;
         interp.heap.push_root(args_value);
 
-        let result_value =
-            brood::eval::apply(&mut interp.heap, handler, &[args_value], interp.root)
-                .map_err(|e| RpcError::from_lisp(&e))?;
+        // Run `eval`/`load` — the tools that execute arbitrary, possibly-hanging
+        // code — under a 30s watchdog: `mcp-run-guarded` spawns the handler and
+        // `(exit … :kill)`s it on timeout (ADR-063), so a runaway eval returns a
+        // timeout error instead of wedging the whole MCP session / runtime. The
+        // spawned handler's output still diverts off the JSON-RPC channel because
+        // the capture is process-scoped and inherited (scheduler `Ctx.capture`).
+        // Other tools (fast, or legitimately long like `run-tests`, which self-bounds
+        // per test) run inline (timeout 0 → `mcp-run-guarded` applies directly).
+        let timeout_ms: i64 = if name == "eval" || name == "load" {
+            30_000
+        } else {
+            0
+        };
+        let guard = interp
+            .heap
+            .env_get(interp.root, value::intern("mcp-run-guarded"))
+            .ok_or_else(|| RpcError::internal("mcp-run-guarded missing"))?;
+        interp.heap.push_root(guard);
+        let result_value = brood::eval::apply(
+            &mut interp.heap,
+            guard,
+            &[handler, args_value, Value::Int(timeout_ms)],
+            interp.root,
+        )
+        .map_err(|e| RpcError::from_lisp(&e))?;
 
         let content = value_to_json(&interp.heap, result_value).map_err(RpcError::internal)?;
         Ok(content)

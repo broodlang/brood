@@ -261,6 +261,50 @@ no throwaway lists):
 (transduce (xtake-while (fn (x) (< x 100))) + 0 (map sq (range 1000)))
 ```
 
+### Hot inner loops — fuse passes, skip throwaway intermediates
+
+The combinators above read well, but in a function called hundreds of times per
+frame their *intermediate allocations* dominate. Two rules for code on a hot
+path:
+
+- **`mapcat`-then-reduce builds a list only to walk it once.** `(frequencies
+  (mapcat f xs))` materialises the entire `(len-of-each × count)` list of items
+  before `frequencies` tallies it — thousands of throwaway cells per frame. Fuse
+  the two into one `fold` so nothing intermediate is built:
+
+  ```lisp
+  ;; allocates the full neighbour list, then counts it
+  (frequencies (mapcat neighbours cells))
+  ;; fused: tally straight into the map, no intermediate list
+  (fold (fn (counts cell)
+          (fold (fn (c n) (assoc c n (inc (get c n 0)))) counts (neighbours cell)))
+        {} cells)
+  ```
+
+  Same shape for build-a-collection-then-rebuild: fold the source straight into
+  the target instead of `filter`-then-`into`. (For longer pipelines, transducers
+  do this fusion for you — reach for them before hand-rolling a `fold`.)
+
+- **A comprehension over a tiny fixed set loses to an explicit literal.** `for`
+  lowers to a fused `fold` (no per-element intermediate lists), but it still pays
+  a closure call per item plus a final `reverse`. When the set is small and known
+  — the 8 neighbours of a cell, say — list them directly and compute each shared
+  sub-expression once:
+
+  ```lisp
+  ;; per-call comprehension machinery for a fixed 3×3 minus the centre
+  (for (dx [-1 0 1] dy [-1 0 1] :when (not (and (= dx 0) (= dy 0))))
+    [(+ x dx) (+ y dy)])
+  ;; explicit: the eight cells, allocation-light, edges computed once
+  (let (l (- x 1) r (+ x 1) u (- y 1) d (+ y 1))
+    (list [l u] [x u] [r u] [l y] [r y] [l d] [x d] [r d]))
+  ```
+
+  A comprehension is the right tool for one-shot data shaping; in an inner loop
+  run thousands of times, prefer the explicit construction. Don't guess which
+  matters — `(bench "label" expr)` the sub-expressions and optimise the one the
+  clock actually points at.
+
 ## Concurrency — processes, not shared state
 
 ```lisp

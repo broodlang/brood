@@ -151,7 +151,13 @@
     (assert= (frequencies (for ([k v] (map-pairs {:a 1 :b 2})) [v k]))
              {[1 :a] 1 [2 :b] 1}))
   (test "build a map with into {}"
-    (assert= (into {} (for (x (range 3)) [x (* x x)])) {0 0 1 1 2 4})))
+    (assert= (into {} (for (x (range 3)) [x (* x x)])) {0 0 1 1 2 4}))
+  ;; nested bindings + :when together — the fused-fold lowering threads its
+  ;; accumulator through both the inner fold and the guard, so exercise the
+  ;; combination (the off-diagonal of a 3×3, the Game-of-Life `step` shape).
+  (test "nested bindings with a :when guard"
+    (assert= (for (x (range 3) y (range 3) :when (not (= x y))) [x y])
+             (list [0 1] [0 2] [1 0] [1 2] [2 0] [2 1]))))
 
 (describe "into / times / iterate-times / enumerate / doseq"
   (test "into a map assocs [k v] pairs; into a list appends"

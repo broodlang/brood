@@ -1850,43 +1850,29 @@ fn pr_str(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.alloc_string(&s))
 }
 
-thread_local! {
-    /// When `Some`, output ([`print`], [`write_term_bytes`]) appends here instead
-    /// of the process's real stdout. The `nest mcp` dispatcher installs a buffer
-    /// around each `tools/call` so a handler's output can't corrupt the JSON-RPC
-    /// stdout stream — the captured text rides back in the result envelope. `None`
-    /// (the default) sends output straight to stdout, as in the REPL / file runner.
-    /// Thread-local so it only affects the thread that began the capture — which
-    /// keeps concurrent captures isolated (e.g. parallel `cargo test` MCP servers,
-    /// and any MCP handler we later run on a worker thread under its own capture).
-    static STDOUT_CAPTURE: std::cell::RefCell<Option<String>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// Start capturing output on the current thread into a fresh buffer (discarding any
-/// already installed). Pair with [`take_captured_stdout`]. Used by the `nest mcp`
-/// dispatcher to keep handler output off the JSON-RPC channel.
+/// Start capturing the current process's output into a fresh buffer. While active,
+/// `print` / terminal output ([`write_term_bytes`]) appends there instead of real
+/// stdout — and so does output from any process this one `spawn`s (the capture is
+/// **process-scoped and inherited**, living in the process `Ctx`; see
+/// `scheduler::begin_capture`). The `nest mcp` dispatcher installs one around each
+/// `tools/call` so a handler's output — even a handler run in a spawned, killable
+/// process under a timeout — can't corrupt the JSON-RPC stdout stream; the captured
+/// text rides back in the result envelope. Pair with [`take_captured_stdout`].
 pub fn begin_stdout_capture() {
-    STDOUT_CAPTURE.with(|c| *c.borrow_mut() = Some(String::new()));
+    crate::process::begin_capture();
 }
 
 /// Stop capturing and return what was written since [`begin_stdout_capture`] —
 /// `Some(text)` (possibly empty) if capture was active, `None` otherwise.
 pub fn take_captured_stdout() -> Option<String> {
-    STDOUT_CAPTURE.with(|c| c.borrow_mut().take())
+    crate::process::take_capture()
 }
 
-/// If a capture is active on this thread, append `s` to the buffer and return
+/// If a capture is active on the current process, append `s` to it and return
 /// `true`; otherwise `false`. The single divert point shared by `print` and
 /// `write_term_bytes`.
 fn capture_write(s: &str) -> bool {
-    STDOUT_CAPTURE.with(|c| match c.borrow_mut().as_mut() {
-        Some(buf) => {
-            buf.push_str(s);
-            true
-        }
-        None => false,
-    })
+    crate::process::capture_append(s)
 }
 
 fn print(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {

@@ -41,7 +41,53 @@ aborted mid-compute on another worker, so the kill is checked at yield points):
   receive loop; kill a parked process; monitor sees the right `:down` reason;
   across cores.
 
-### C. MCP `eval` (and other MCP tools) timeout = **30s** (uses `kill`)
+### A′. MCP terminal-output corruption — ✅ DONE (2026-05-30)
+
+The actual `term-draw` "hang" was **stream corruption**, not a hang: `term-draw` /
+`term-emit` write crossterm escapes straight to fd 1, which under `nest mcp` is the
+JSON-RPC channel (the Brood-`print` capture didn't catch them — different write
+path). Fixed in `builtins.rs`: both now build into a buffer and go through
+`write_term_bytes`, which **diverts into the active MCP stdout-capture** (riding
+back in the result content) instead of the raw fd. Test:
+`mcp::tests::term_draw_under_mcp_diverts_escapes_…`. (A timeout wouldn't have helped
+— term-draw returns in ms; the damage was the bytes.)
+
+### C. MCP `eval`/`load` timeout = **30s** (uses `kill`) — BLOCKED on capture
+
+The watchdog **logic is built + tested**: `mcp-run-guarded` (std/mcp.blsp) spawns the
+handler, `(receive (after ms) → (exit p :kill) + error)`; verified directly (a
+runaway is killed at ~205ms, fast returns, ms≤0 inline). It is **not wired into
+`call_tool`** because of the capture problem below.
+
+**The blocker (proven 2026-05-30):** a killable handler must run in a SPAWNED process
+(worker thread), but its `print`/term output must still be captured off the JSON-RPC
+channel. Tried making `STDOUT_CAPTURE` **global** (cross-thread) so the spawned
+handler's output diverts — it **races under concurrent captures**: cargo runs the
+MCP tests in parallel (each its own MCP server, one global buffer), and `begin`/`take`
+clobbered each other → 5 tests failed + term-draw escapes leaked. Reverted to
+thread-local. So:
+- thread-local capture: safe under concurrency, but doesn't reach a spawned worker
+  (handler output escapes) ✗
+- global capture: reaches the worker, but races overlapping captures ✗
+
+**The correct fix** is **per-capture-session** state: `begin_stdout_capture` mints an
+`Arc<Mutex<String>>`, the spawned child is given a clone (plumbed through `spawn` into
+process state) so its output appends to the SAME buffer, `take` drains it. No global,
+no race, reaches the worker. That's a kernel change (process-state capture handle +
+spawn plumbing) — a focused follow-up. Until then, **Fix A (A′) already resolves the
+actual reported wedge** (term-draw corruption); a *hung infinite-loop eval* via MCP is
+the only remaining gap, and it's rare.
+
+For a genuinely infinite eval (`(loop)` via MCP), the synchronous handler hangs the
+server; `:kill` *can* stop an infinite Brood loop (it ticks reductions), so a
+watchdog works — but only for `eval`/`load` (the `run-tests` MCP tool legitimately
+runs >30s; don't wrap it). **Decision needed before building:** the handler must run
+in a spawned process to be killable, but `STDOUT_CAPTURE` is **thread-local to the
+MCP thread**, so a spawned handler's `print`s would escape to JSON-RPC. Options:
+(a) make capture cross-thread (`AtomicBool active` + `Mutex<String>` — ~free when
+off, one atomic load per print); (b) a `%with-output-capture` primitive the spawned
+child calls, shipping captured text back. (a) is cleaner for `call_tool` but changes
+the global `print` path. Confirm approach before touching the print hot path.
 
 The `nest mcp` `eval` tool can block indefinitely — e.g. `(term-draw …)` needs a
 TTY and hangs headless, wedging the whole MCP session (observed 2026-05-30). Run
