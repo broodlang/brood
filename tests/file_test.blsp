@@ -29,6 +29,26 @@
       (append-file p "two")
       (assert= (read-file p) "onetwo"))))
 
+(describe "file: size / delete / rename"
+  (test "file-size reports byte length, nil when missing"
+    (let (p (path-join (ftmp) "s.txt"))
+      (write-file p "12345")
+      (assert= (file-size p) 5)
+      (assert= (file-size (path-join (ftmp) "nope.txt")) nil)))
+  (test "delete-file removes a file and is idempotent"
+    (let (p (path-join (ftmp) "d.txt"))
+      (write-file p "x")
+      (is (file? p))
+      (delete-file p)
+      (refute (path-exists? p))
+      (assert= (delete-file p) nil)))            ; no-op when already gone
+  (test "rename-file moves content to a new path"
+    (let (d (ftmp) a (path-join d "a.txt") b (path-join d "b.txt"))
+      (write-file a "moved")
+      (rename-file a b)
+      (refute (path-exists? a))
+      (assert= (read-file b) "moved"))))
+
 (describe "file: line I/O"
   (test "write-lines / read-lines round-trip without a trailing blank line"
     (let (p (path-join (ftmp) "c.txt"))
