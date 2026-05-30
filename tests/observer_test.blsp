@@ -41,14 +41,15 @@
   (test "observer/observe--opt renders a value or a dash when absent"
     (assert= (observer/observe--opt nil name) "-")
     (assert= (observer/observe--opt :foo name) "foo"))
-  (test "observer/observe--cells lays out six fixed-width columns"
-    (let (r (observer/observe--cells 7 "worker" "waiting" 3 "8 KB" 1))
+  (test "observer/observe--cells lays out seven fixed-width columns"
+    (let (r (observer/observe--cells 7 "worker" "waiting" 3 "8 KB" 240000 1))
       (is (string-contains? r "7"))
       (is (string-contains? r "worker"))
       (is (string-contains? r "waiting"))
       (is (string-contains? r "8 KB"))
-      ;; 5 + 12 + 8 + 6 + 8 + 4 columns + 5 single-space gaps
-      (assert= (string-length r) 48)))
+      (is (string-contains? r "240000"))      ; the reductions column
+      ;; 5 + 12 + 8 + 6 + 8 + 9 + 4 columns + 6 single-space gaps
+      (assert= (string-length r) 58)))
   (test "observer/observe--proc-cells renders a process-info map (absent fields → dash)"
     (let (r (observer/observe--proc-cells {:id 2 :name nil :status :waiting :mailbox 4 :monitored-by 1}))
       (is (string-contains? r "waiting"))
