@@ -53,6 +53,34 @@ pub fn install_crash_dump() {
     }));
 }
 
+/// Print a one-line stderr notice if any non-default GC env knob is active, so a
+/// performance benchmark can't silently measure a stressed or retuned heap. Prints
+/// nothing in the normal (all-default) case, so there's zero noise on a real run.
+/// Called once at binary startup. `BROOD_GC_STRESS` is the dangerous one (collect
+/// at *every* safepoint — order-of-magnitude slower); the tuning knobs and trace
+/// just change behaviour from the shipped defaults. (`BROOD_GC_VERIFY` is debug-only
+/// and inert in a release build, but it's still worth flagging that it's set.)
+pub fn warn_nondefault_gc_env() {
+    const KNOBS: &[&str] = &[
+        "BROOD_GC_STRESS",
+        "BROOD_GC_VERIFY",
+        "BROOD_GC_TRACE",
+        "BROOD_GC_FLOOR",
+        "BROOD_GC_TENURE",
+        "BROOD_GC_MAJOR",
+    ];
+    let active: Vec<String> = KNOBS
+        .iter()
+        .filter_map(|k| std::env::var(k).ok().map(|v| format!("{k}={v}")))
+        .collect();
+    if !active.is_empty() {
+        eprintln!(
+            "brood: note — non-default GC config active ({}); not representative for benchmarking",
+            active.join(", ")
+        );
+    }
+}
+
 /// Print an error as a GNU `FILE:LINE:COL: message` line (editor-parseable),
 /// followed — when the file and position are known — by the offending source
 /// line and a caret under the column. See `docs/tooling.md`.

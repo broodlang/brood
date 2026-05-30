@@ -216,6 +216,62 @@ land in a later slice."
         " required at both \"" (get existing :path) "\" and \"" (get dep :path)
         "\" — pin it explicitly in your root manifest"))))
 
+;; --- namespace-collision detection (ADR-070) --------------------------------
+;; Namespaces aren't package-rooted yet (a deferred upgrade — ADR-070): every
+;; module lands in the one flat global table under its own (defmodule …) name. So
+;; two reachable providers of the same module name — two deps, or a dep and your
+;; own project — would silently clobber: `require` loads whichever `<name>.blsp`
+;; is first on *load-path* and the other never loads, so code depending on the
+;; loser binds the wrong module (the failure demoed in docs/packages.md). We
+;; can't prevent it structurally yet, so we DETECT it at resolution time and error
+;; loudly, naming both providers; the fix is to rename one.
+
+;; The (defmodule X) name a source file claims (a symbol), or nil if it declares
+;; none. That name — not the filename — is the global-table namespace that clobbers.
+(defn package--module-name-of (file)
+  (let (form (read-string (slurp file)))
+    (if (and (pair? form) (= (first form) 'defmodule)) (second form) nil)))
+
+;; The module names a source dir provides: the (defmodule …) name of each
+;; top-level *.blsp file in it.
+(defn package--provided-modules (src-dir)
+  (if (not (dir? src-dir))
+    nil
+    (filter (fn (m) (not (nil? m)))
+      (map (fn (f) (package--module-name-of (path-join src-dir f)))
+        (filter (fn (f) (ends-with? f ".blsp")) (list-dir src-dir))))))
+
+;; The [label src-dir] providers to check: the project's own source dirs first
+;; (so a dep colliding with your own module is caught), then each resolved dep.
+(defn package--collision-sources (root entries)
+  (append
+    (map (fn (d) (list "your project" d))
+      (project/project--abs-paths root *project-source-paths*))
+    (map (fn (e) (list (str "dependency '" (name (get e :name)) "'") (package--dep-src-dir e)))
+      entries)))
+
+;; Walk the providers, accumulating module-name -> first provider; error on the
+;; first name a second provider also declares.
+(defn package--check-namespace-collisions (sources)
+  (package--collision-loop sources {}))
+(defn package--collision-loop (sources seen)
+  (if (empty? sources)
+    nil
+    (let (label (first (first sources))
+          dir (second (first sources)))
+      (package--collision-loop (rest sources)
+        (fold (fn (m mod)
+                (if (contains? m mod)
+                  (error "package: module name collision — '" mod
+                    "' is provided by both " (get m mod) " and " label
+                    "; rename one (namespaces aren't package-rooted yet — ADR-070)")
+                  (assoc m mod label)))
+          seen (package--provided-modules dir))))))
+
+;; The guard the verbs share: reject any cross-provider module-name collision.
+(defn package--guard-collisions (root entries)
+  (package--check-namespace-collisions (package--collision-sources root entries)))
+
 ;; --- the lock file -----------------------------------------------------------
 ;; project.lock.blsp is generated, committed, and plain Brood data so a PR diff is
 ;; reviewable. Each entry is a vector `[name :path PATH :sha256 HASH :deps [names…]]`;
@@ -272,6 +328,7 @@ land in a later slice."
   (if (empty? deps)
     nil
     (let (entries (resolve-deps root deps (read-lockfile root)))
+      (package--guard-collisions root entries)
       (package--write-lockfile-if-changed root entries)
       (map package--dep-src-dir entries))))
 
@@ -302,6 +359,7 @@ land in a later slice."
       (if (empty? *project-dependencies*)
         (do (println "package: no dependencies declared") nil)
         (let (entries (resolve-deps root *project-dependencies* (read-lockfile root)))
+          (package--guard-collisions root entries)
           (write-lockfile root entries)
           (println (str "package: locked " (count entries) " dependencies in project.lock.blsp"))
           entries)))))
@@ -477,7 +535,9 @@ land in a later slice."
         (let (manifest (path-join root "project.blsp"))
           (spit manifest (package--manifest-add (slurp manifest) (package--dep->entry-node dep)))
           (package--load-manifest manifest)
-          (write-lockfile root (resolve-deps root *project-dependencies* (read-lockfile root)))
+          (let (entries (resolve-deps root *project-dependencies* (read-lockfile root)))
+            (package--guard-collisions root entries)
+            (write-lockfile root entries))
           (println (str "package: added " nm)))))))
 
 (defn remove-dep (nm)

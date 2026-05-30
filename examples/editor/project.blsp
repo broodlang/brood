@@ -1,0 +1,7 @@
+;; editor — a super-minimal GUI text editor, built on the rope-backed buffer
+;; framework (std/buffer.blsp) + the ui-run loop (std/ui.blsp). The M2 editor
+;; app: a real `nest` project that `(require 'buffer)`s the framework, as opposed
+;; to the naive `nest new --template editor` starter. See src/main.blsp.
+(project
+  :name    "editor"
+  :version "0.1.0")

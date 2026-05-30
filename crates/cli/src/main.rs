@@ -104,6 +104,8 @@ fn run(cli: Cli) {
     // and the REPL stay unlimited unless the user opts in (ADR-043). `--test`
     // additionally defaults a ceiling on (see run_test_files).
     brood::core::alloc::init_limits_from_env();
+    // Flag a stressed/retuned heap so a benchmark can't silently measure one.
+    brood::cli_support::warn_nondefault_gc_env();
 
     // A bare `brood new foo` (or run/test/... ) parses `new` as a FILE and dies
     // with a cryptic "cannot read new". Project tooling lives in `nest`, not

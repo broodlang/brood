@@ -148,11 +148,14 @@
   ((& xs) (chain? cmp--gt xs)))
 (defn <=
   "True if the arguments are in non-decreasing order."
-  ((a b) (not (%lt b a)))
+  ;; 2-arg body is a direct primitive call (a <= b) so the ADR-069 thin-wrapper
+  ;; elision reaches it — the old `(not (%lt b a))` was a nested call it couldn't.
+  ((a b) (%le a b))
   ((& xs) (chain? cmp--le xs)))
 (defn >=
   "True if the arguments are in non-increasing order."
-  ((a b) (not (%lt a b)))
+  ;; a >= b  ==  b <= a — still a single passthrough (%le with args swapped).
+  ((a b) (%le b a))
   ((& xs) (chain? cmp--ge xs)))
 (defn =
   "True if all arguments are structurally equal."

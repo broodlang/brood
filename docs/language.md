@@ -975,9 +975,10 @@ the language" principle.
   "how much memory did this use." The test runner prints the peak alongside the
   time.
 - `(gc-stats)` returns a snapshot map of this process's garbage collection —
-  `{:collections :copied :reclaimed :live :live-bytes :threshold}` — for
-  observing reclamation; `process-info` carries the per-process `:collections`
-  count too. `(gc-collect)` forces a collection now and returns that same map
+  `{:collections :copied :reclaimed :live :live-bytes :threshold :debug-build}` —
+  for observing reclamation (`:debug-build` is `true` when the binary carries debug
+  assertions, i.e. *not* a performance build); `process-info` carries the
+  per-process `:collections` count too. `(gc-collect)` forces a collection now and returns that same map
   (an observability/test aid, *not* a load-bearing trigger), and `(gc-trace on?)`
   toggles per-collection stderr logging for the calling process (no arg = query;
   defaulted from `BROOD_GC_TRACE`). **Memory is reclaimed automatically:** the
