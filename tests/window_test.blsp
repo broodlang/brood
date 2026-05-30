@@ -1,0 +1,158 @@
+;; std/window.blsp — the Emacs-style tiled-window layout toolkit (ADR-077). Pure,
+;; content-agnostic geometry: a binary split tree, pane/divider layout into a rect,
+;; selection, and drag-to-resize over `[:mouse … row col]` points. The :isolated
+;; block proves a layout tree (plain map/list data) deep-copies across process heaps
+;; unchanged — every feature must hold across cores, not just single-threaded.
+
+(defmodule window-test (:use test) (:use window))
+
+;; A worker that echoes one received message back to `parent` (round-trip proof).
+;; `spawn` is a macro that runs its argument expression in the new process, so the
+;; body IS the work — it must not return a thunk (which would never be called).
+(defn wt-echo (parent) (send parent (receive)))
+;; A worker that splits its copy of a tree and returns the new leaf count — proves
+;; the restructuring ops run unchanged on a deep-copied tree in another process.
+(defn wt-splitter (parent)
+  (receive (t (send parent (window-count (window-split t :row {:buf 9}))))))
+
+;; A 3-pane reference tree: top split side-by-side (a|b), bottom full-width (c).
+;; Selection stays on the first window (buf 0). Built once; ops return fresh trees.
+(defn wt-tree3 ()
+  (window-split (window-split (window-single {:buf 0}) :row {:buf 2}) :col {:buf 1}))
+
+(describe "construction & structure"
+  (test "a lone window is one selected leaf"
+    (let (t (window-single {:buf 0}))
+      (is (window-leaf? t))
+      (assert= (window-count t) 1)
+      (assert= (window-selected-payload t) {:buf 0})
+      (assert= (window-selected-path t) nil)))  ; () prints as nil — the root path
+
+  (test "splitting the selected window adds a leaf and keeps the original selected"
+    (let (t (window-split (window-single {:buf 0}) :col {:buf 1}))
+      (assert= (window-count t) 2)
+      (is (not (window-leaf? t)))
+      (assert= (window-selected-payload t) {:buf 0})))  ; point stays on the original
+
+  (test "leaves are ordered a-before-b across nesting"
+    (assert= (window-leaf-paths (wt-tree3)) (list (list :a :a) (list :a :b) (list :b))))
+
+  (test "delete removes the selected window; sibling takes the space"
+    (let (t (window-delete (window-split (window-single {:buf 0}) :col {:buf 1})))
+      (assert= (window-count t) 1)
+      (assert= (window-selected-payload t) {:buf 1})))  ; the surviving sibling
+
+  (test "deleting the only window is a no-op"
+    (let (t (window-single {:buf 0}))
+      (assert= (window-delete t) t)))
+
+  (test "delete-others collapses to just the selected window"
+    (let (t (window-delete-others (wt-tree3)))
+      (assert= (window-count t) 1)
+      (assert= (window-selected-payload t) {:buf 0}))))
+
+(describe "layout geometry (tree + rect -> pane & divider rects)"
+  (test "a lone window fills the whole rect, no dividers"
+    (let (l (window-layout (window-single {:buf 0}) [0 0 80 24]))
+      (assert= (count (get l :panes)) 1)
+      (assert= (get (first (get l :panes)) :rect) [0 0 80 24])
+      (assert= (get l :dividers) nil)))
+
+  (test ":col splits width and reserves one column for the divider"
+    (let (l (window-layout (window-split (window-single {:buf 0}) :col {:buf 1}) [0 0 80 24])
+          rects (map (fn (p) (get p :rect)) (get l :panes)))
+      (assert= rects (list [0 0 40 24] [41 0 39 24]))  ; 40 + 1 divider + 39 = 80
+      (assert= (get (first (get l :dividers)) :rect) [40 0 1 24])))
+
+  (test ":row splits height and reserves one row for the divider"
+    (let (l (window-layout (window-split (window-single {:buf 0}) :row {:buf 1}) [0 0 80 24])
+          rects (map (fn (p) (get p :rect)) (get l :panes)))
+      (assert= rects (list [0 0 80 12] [0 13 80 11]))  ; 12 + 1 divider + 11 = 24
+      (assert= (get (first (get l :dividers)) :rect) [0 12 80 1])))
+
+  (test "exactly one pane is flagged selected"
+    (let (panes (get (window-layout (wt-tree3) [0 0 80 24]) :panes)
+          sel (filter (fn (p) (get p :selected)) panes))
+      (assert= (count sel) 1)
+      (assert= (get (first sel) :payload) {:buf 0}))))
+
+(describe "selection"
+  (test "window-other cycles in traversal order and wraps"
+    (let (t0 (wt-tree3)
+           ; selected buf 0 at (:a :a)
+           t1
+           (window-other t0)
+           t2
+           (window-other t1)
+           t3
+           (window-other t2))
+      ; wraps back
+      (assert= (window-selected-payload t1) {:buf 1})  ; (:a :b)
+      (assert= (window-selected-payload t2) {:buf 2})  ; (:b)
+      (assert= (window-selected-payload t3) {:buf 0})))  ; (:a :a) again
+
+  (test "window-update-selected touches only the selected window's payload"
+    (let (t (window-update-selected (wt-tree3) (fn (p) (assoc p :top 5))))
+      (assert= (window-selected-payload t) {:buf 0 :top 5})
+      ;; the next window is untouched
+      (assert= (window-selected-payload (window-other t)) {:buf 1})))
+
+  (test "window-map rewrites every window's payload (e.g. re-pointing buffer refs)"
+    (let (t (window-map (wt-tree3) (fn (p) (assoc p :buf (inc (get p :buf)))))
+          p0 (window-selected-payload t)
+          p1 (window-selected-payload (window-other t))
+          p2 (window-selected-payload (window-other (window-other t))))
+      ;; every leaf's :buf bumped by one, selection + structure preserved
+      (assert= (list p0 p1 p2) (list {:buf 1} {:buf 2} {:buf 3}))
+      (assert= (window-selected-payload t) {:buf 1}))))
+
+(describe "drag-to-resize (over :drag mouse points, [row col])"
+  (test "divider-at finds the divider under a point, nil off it"
+    (let (l (window-layout (window-split (window-single {:buf 0}) :col {:buf 1}) [0 0 80 24]))
+      (assert= (get (divider-at l [10 40]) :dir) :col)  ; on the divider column
+      (assert= (divider-at l [10 5]) nil)))  ; inside pane a, not a divider
+
+  (test "a click selects the window under it"
+    (let (tree (window-split (window-single {:buf 0}) :col {:buf 1})
+          l (window-layout tree [0 0 80 24]))
+      (assert= (window-selected-payload (window-select-at tree l [10 60])) {:buf 1})  ; right pane
+      (assert= (window-selected-payload (window-select-at tree l [10 5])) {:buf 0})))  ; left pane
+
+  (test "dragging a divider moves the boundary to the pointer"
+    (let (tree (window-split (window-single {:buf 0}) :col {:buf 1})
+          l (window-layout tree [0 0 80 24])
+          dv (divider-at l [10 40])
+          tree2 (window-set-ratio tree (get dv :path) (window-ratio-for dv [10 20]))
+          rects (map (fn (p) (get p :rect)) (get (window-layout tree2 [0 0 80 24]) :panes)))
+      (assert= rects (list [0 0 20 24] [21 0 59 24]))))  ; boundary dragged from 40 to 20
+
+  (test "the ratio is clamped so neither pane vanishes"
+    (let (tree (window-split (window-single {:buf 0}) :col {:buf 1})
+           ;; drag way past the left edge — ratio 0.0 would zero pane a
+           tiny
+           (window-set-ratio tree nil 0.0)
+           aw
+           (get (first (get (window-layout tiny [0 0 80 24]) :panes)) :rect))
+      (is (>= (nth aw 2) 1)))))  ; pane a still at least 1 col wide
+
+(describe "window layout across processes"
+  :isolated
+
+  (test "a layout tree round-trips through a worker unchanged (deep copy)"
+    (let (me (self) w (spawn (wt-echo me)) t (wt-tree3))
+      (send w t)
+      (assert= (receive) t)))
+
+  (test "a worker restructures its own copy; the sender's tree is unaffected"
+    (let (me (self) w (spawn (wt-splitter me)) t (wt-tree3))
+      (send w t)
+      (assert= (receive) 4)  ; worker split its copy: 3 -> 4 leaves
+      (assert= (window-count t) 3)))  ; sender's tree still 3
+
+  (test "many workers each lay out a sent tree and report the same pane count"
+    (let (me (self) t (wt-tree3))
+      ;; spawn is a macro: pass the work expression directly (it captures me + t)
+      (doseq (i (range 8))
+        (spawn (send me (count (get (window-layout t [0 0 80 24]) :panes)))))
+      ;; fold the 8 replies; every worker must see 3 panes
+      (assert= (fold (fn (acc _) (+ acc (receive))) 0 (range 8)) 24))))
