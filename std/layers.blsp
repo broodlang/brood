@@ -1,0 +1,151 @@
+;; std/layers.blsp — composable, runtime-reconfigurable behaviour layers.
+;; (require 'layers).
+;;
+;; The generic mechanism the editor's "modes" are built from — but NOT
+;; editor-specific: any interactive Brood UI uses it, with or without buffers. A
+;; *context* (an app model, or a buffer) carries an ordered list of named behaviour
+;; *layers*; input and events resolve through them by precedence. "Major"/"minor"
+;; are positions in that list (base vs. stacked), not types — see docs/layers.md.
+;;
+;; A LAYER is a `def`'d, late-bound value, resolved by symbol at use (so redefining
+;; it hot-swaps everywhere — like a keymap command):
+;;
+;;   (def magit/layer
+;;     {:name 'magit
+;;      :keymap (-> {} (keymap-bind ["s"] 'magit/stage))
+;;      :hooks  {:activate '(magit/setup) :on-close '(magit/kill-worker)}})
+;;
+;; A CONTEXT is any state map carrying `:layers` — a list of layer references
+;; (symbols, or inline maps), **head = highest precedence**.
+;;
+;; This is framework tier (opt-in, never the prelude), pure Brood over `keymap`,
+;; zero kernel surface (ADR-045). Phase 1: the buffer-free core (keys + hooks).
+
+(defmodule layers
+  "Composable, runtime-reconfigurable behaviour layers for interactive UIs.
+`(require 'layers)`. A *context* (any state map — an app model or a buffer) holds
+`:layers`, an ordered list of layer references (head = highest precedence). A
+*layer* is a `def`'d map `{:name … :keymap … :hooks {event → (fn-syms)}}`, resolved
+by symbol at use (late-bound, so redefining it hot-swaps it everywhere).
+
+    (require 'keymap) (require 'layers)
+    (def app/base {:name 'base :keymap (keymap-bind {} [\"q\"] 'app/quit)})
+    (def st (activate-layer {} 'app/base))
+    (layer-dispatch st nil \"q\" (fn (s _) s))   ; => [st' pending']
+
+Keymaps and hooks are resolved by one generic collector (`layer-collect`) — facets.
+`:activate`/`:deactivate` fire for the one layer toggled; `:on-focus`/`:on-blur`/
+`:on-close` (and app-defined events) fan across all active layers via `run-event`.
+Buffer-type binding and focus/scope wiring are layered on in later phases — this
+core knows nothing about buffers."
+  (:use keymap))
+
+(require 'keymap)
+
+;; ---- resolution -------------------------------------------------------------
+
+(defn layers--list (ctx)
+  "The context's layer list (highest precedence first), or () when it has none."
+  (or (get ctx :layers) (list)))
+
+(defn layers--resolve (layer)
+  "A layer reference → its map. A map is itself; a symbol is resolved (late-bound,
+so redefining the layer hot-swaps it), like a keymap command."
+  (if (map? layer) layer (eval layer)))
+
+(defn layers--name-of (layer)
+  "The `:name` of a layer reference (resolving it first)."
+  (get (layers--resolve layer) :name))
+
+(defn layers--find (ctx name)
+  "The first active layer reference named `name`, or nil."
+  (first (filter (fn (l) (= name (layers--name-of l))) (layers--list ctx))))
+
+(defn layer-collect (ctx facet)
+  "The `facet` value of every active layer that defines it, highest-precedence
+first (head of `:layers`); layers lacking the facet are dropped. The one generic
+resolver — keymaps and hooks are just facets over it."
+  (remove nil?
+    (map (fn (l) (get (layers--resolve l) facet)) (layers--list ctx))))
+
+;; ---- stack ops (pure; fire no hooks) ----------------------------------------
+
+(defn push-layer (ctx layer)
+  "Add `layer` (a reference) at highest precedence (the head). The low-level
+primitive — `activate-layer` is the hook-firing version."
+  (assoc ctx :layers (cons layer (layers--list ctx))))
+
+(defn remove-layer (ctx name)
+  "Remove every active layer whose `:name` is `name`."
+  (assoc ctx :layers (remove (fn (l) (= name (layers--name-of l))) (layers--list ctx))))
+
+(defn layer-active? (ctx name)
+  "True if an active layer is named `name`."
+  (some? (fn (l) (= name (layers--name-of l))) (layers--list ctx)))
+
+(defn layers--replace-base-list (lst layer)
+  "Replace the base (last) element of `lst` with `layer`, or add it if `lst` empty."
+  (if (empty? lst) (list layer) (concat (but-last lst) (list layer))))
+
+;; ---- hooks ------------------------------------------------------------------
+
+(defn layers--run-hook (hook ctx)
+  "Run one hook — a fn symbol resolved late and applied as `(ctx) -> ctx`. A throw
+leaves `ctx` unchanged, so a bad hook can't crash the loop."
+  (try ((eval hook) ctx) (catch e ctx)))
+
+(defn layers--run-hooks (ctx hooks)
+  "Thread `ctx` through a list of hooks (each `(ctx) -> ctx`)."
+  (fold (fn (acc h) (layers--run-hook h acc)) ctx hooks))
+
+(defn layers--layer-event-hooks (layer event)
+  "The `event` hook list of a single layer reference, or ()."
+  (or (get (get (layers--resolve layer) :hooks) event) (list)))
+
+(defn layers--run-one (ctx layer event)
+  "Run just `layer`'s `event` hooks (the lifecycle path: `:activate`/`:deactivate`)."
+  (layers--run-hooks ctx (layers--layer-event-hooks layer event)))
+
+(defn run-event (ctx event)
+  "Fan `event` across ALL active layers, highest precedence first, threading `ctx`
+through every hook. For broadcast events — `:on-focus`/`:on-blur`/`:on-close` and
+app-defined ones — *not* the lifecycle `:activate`/`:deactivate`."
+  (layers--run-hooks ctx
+    (apply concat (map (fn (hk) (or (get hk event) (list))) (layer-collect ctx :hooks)))))
+
+;; ---- lifecycle toggles ------------------------------------------------------
+
+(defn activate-layer (ctx layer)
+  "Turn a layer on: push `layer` at highest precedence, then run *its* `:activate`
+hooks. (Raw `push-layer` fires no hooks.)"
+  (layers--run-one (push-layer ctx layer) layer :activate))
+
+(defn deactivate-layer (ctx name)
+  "Turn off the layer named `name`: run its `:deactivate` hooks, then remove it. A
+no-op if no such layer is active."
+  (let (layer (layers--find ctx name))
+    (if (nil? layer)
+      ctx
+      (remove-layer (layers--run-one ctx layer :deactivate) name))))
+
+(defn replace-base-layer (ctx layer)
+  "Swap the base (lowest-precedence, the 'major') layer for `layer`: deactivate the
+old base, set the new base, activate it. Layers stacked above are untouched — like
+changing major mode while minor modes stay on."
+  (let (old (last (layers--list ctx))
+        ctx1 (if (nil? old) ctx (layers--run-one ctx old :deactivate))
+        ctx2 (assoc ctx1 :layers (layers--replace-base-list (layers--list ctx1) layer)))
+    (layers--run-one ctx2 layer :activate)))
+
+;; ---- keymap consumer (bridge to keymap) -------------------------------------
+
+(defn active-keymap (ctx)
+  "Merge the keymaps of all active layers into one, head (highest precedence)
+winning. A prefix sub-map comes wholesale from its winning layer (no cross-layer
+prefix merge), so a layer owns its chord."
+  (apply merge (cons {} (reverse (layer-collect ctx :keymap)))))
+
+(defn layer-dispatch (ctx pending key fallback)
+  "One keystroke through the context's composed active keymap, via `keymap-step`:
+returns `[ctx' pending']`. The bridge from layers to keymap — compose, then step."
+  (keymap-step (active-keymap ctx) pending ctx key fallback))
