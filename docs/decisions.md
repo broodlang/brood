@@ -4346,8 +4346,12 @@ cached global handle is safe but a local one wouldn't be), ADR-023/024 +
 
 ## ADR-070 — Namespace-name collisions: detect-and-reject, not mandatory prefixes
 
-**Status:** accepted, 2026-05-30. Closes the one open policy question from ADR-065
-(`namespaces.md` §8). Enforcement lands with the package manager (ADR-037).
+**Status:** accepted **and implemented**, 2026-05-30. Closes the one open policy
+question from ADR-065 (`namespaces.md` §8). The detect-and-reject check is wired
+into the package manager's resolution step (ADR-037 Slices 2–3 having landed) —
+`std/package.blsp` `package--check-namespace-collisions`, run from
+`fetch`/`add`/`ensure-deps`. **Package-rooted namespaces remain the eventual
+upgrade, deliberately deferred** (see *Future direction* below).
 
 **Context.** Namespacing (ADR-065) solves *symbol* collision but raises a *namespace*
 collision: two third-party packages can both declare `(defmodule parser)`, and the
@@ -4364,8 +4368,13 @@ time rather than prevent them structurally:
   collision, and short names keep call sites ergonomic (`parser/parse`, not
   `com.foo.parser/parse`).
 - When the package manager resolves the dependency graph (ADR-037 `nest
-  fetch`/lock), it **errors** if two reachable packages declare the same namespace
+  fetch`/lock), it **errors** if two reachable providers declare the same namespace
   name — surfaced loudly at lock time with both sources named, not silently merged.
+  *(As implemented, "providers" includes the **importing project's own modules**,
+  not just deps — a dep that shadows one of your own modules is the same silent
+  clobber and is caught the same way. A provider's namespaces are read from each
+  source file's `(defmodule …)` name, so a file whose name differs from its module
+  is still checked by the name that actually clobbers.)*
 - The heavier escape hatches — a mandatory per-dependency prefix, or an
   import-site **alias** (`(:use [parser :as p])`) — are **deferred** (ADR-011)
   until a real collision in the wild justifies them. The project-local dep name
@@ -4378,15 +4387,35 @@ call site with a verbose prefix forever to prevent a rare event. It also keeps t
 substrate (ADR-065 §3) and the soft-privacy/hot-reload story untouched — collision
 policy is purely a package-resolution concern.
 
-**Consequences.** Until the package manager's git-deps + resolution land (ADR-037
-Slices 2–3), there is no enforcement point, so the policy is decided but dormant —
-which is correct, since a single-project or path-deps-only setup can't collide. The
-LSP/runtime need no change: they already resolve a fully-qualified `ns/name` and
-don't care how the name was made unique.
+**Consequences.** The check is cheap (list each provider's source dir, read each
+file's leading `defmodule`, reject a name two providers share) and adds no language
+surface, no call-site change, and no migration. The LSP/runtime need no change: they
+already resolve a fully-qualified `ns/name` and don't care how the name was made
+unique.
+
+**Future direction — package-rooted namespaces (deferred, not rejected).** We
+explored the stronger model where a dependency's local manifest name becomes a
+**load-time prefix** (foo's `(defmodule b)` → `foo/b/…`), making collisions
+*impossible* rather than merely detected — plus author-declared `:exports` (soft
+module privacy) and import-site `[mod :as alias]`. It's the Cargo/Go shape
+(consumer-controlled rooting; your *own* project stays bare — no Elixir-style
+self-prefixing). We **deferred it** (ADR-011) for three reasons: (1) there are no
+third-party packages yet, so it's collision-proofing an ecosystem that doesn't
+exist; (2) it touches the just-landed ADR-065 substrate (multi-segment namespaces,
+a package-scope-aware loader, sibling-alias resolution) — high risk on fresh code;
+(3) it adds two permanent knobs (`:exports`, `:as`) to prevent a problem the cheap
+check already surfaces loudly. The key de-risking insight that makes deferral nearly
+free: **rooting is a loader decision, not a source decision** — because intra-package
+references stay short (sibling resolution) regardless, a package's *source* is
+identical whether its modules are filed under `b/` or `foo/b/`. So rooting can be
+added later, when M2 editor-plugins create real multi-author pressure, with the
+loader keeping the flat form working — no package-source churn. The cheap check is
+the interim; rooting is the destination.
 
 **References.** ADR-065 (`namespaces.md` §8), ADR-037 (`packages.md`, the dep
 local-name model + the lock/resolution step that enforces this), ADR-011 (defer the
-powerful form).
+powerful form), ADR-068/071 (the *other* ADR-071 — native extensions — is unrelated;
+rooting is recorded here, not as its own ADR).
 
 ## ADR-071 — Native extensions are WASM components, built on fetch and wrapped in Brood
 

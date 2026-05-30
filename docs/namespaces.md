@@ -258,15 +258,27 @@ both declare `(ns parser)`. Prior art: Clojure uses reverse-domain
   safe but verbose.
 
 `name = URL` packages make this concrete, not hypothetical. **Decided
-([ADR-070](decisions.md)): flat names + detect-and-reject.** Namespace names stay
-short and free-for-all; the package manager's dependency-resolution step (ADR-037
-`nest fetch`/lock) **errors** if two reachable packages declare the same namespace,
-naming both sources, rather than silently merging or taxing every call site with a
-mandatory prefix. The verbose escapes — a per-dep prefix, or an import-site alias
-`(:use [parser :as p])` — are deferred (ADR-011) until a real collision demands one;
-the project-local dep name is the natural alias authority then. Enforcement is
-dormant until the package manager's git-deps/resolution land — correct, since a
-single-project / path-deps-only setup can't collide.
+([ADR-070](decisions.md)): flat names + detect-and-reject — now implemented.**
+Namespace names stay short and free-for-all; the package manager's
+dependency-resolution step (ADR-037 `nest fetch`/`add`/the auto-fetch on every
+project subcommand) **errors** if two reachable providers declare the same
+namespace, naming both sources, rather than silently merging or taxing every call
+site with a mandatory prefix. "Providers" includes **your own project's modules**,
+not just deps — a dep that shadows a module you wrote is the same silent clobber
+(`require` loads whichever `<name>.blsp` is first on `*load-path*`; the loser never
+loads and its dependents bind the wrong module). A provider's namespaces are read
+from each source file's `(defmodule …)` name. (`std/package.blsp`
+`package--check-namespace-collisions`; tested in `tests/package_test.blsp`.)
+
+The verbose escapes — a per-dep prefix, or an import-site alias `[parser :as p]` —
+stay deferred (ADR-011) until a real collision demands one. **Package-rooted
+namespaces** (the dep's local name as a load-time prefix, `foo/b/…`, making
+collisions *impossible*) is the recorded **future direction**, not a rejection — the
+detect-and-reject check is the interim. Crucially it's a *loader* change, not a
+*source* one: intra-package refs stay short either way, so a package's source is
+identical whether filed under `b/` or `foo/b/`, and rooting can land later (M2
+plugin pressure) with the flat form kept working — no package-source churn. Full
+analysis in ADR-070's *Future direction*.
 
 ## 9. Auto-require
 

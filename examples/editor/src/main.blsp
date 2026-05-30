@@ -1,0 +1,145 @@
+(defmodule main "editor — a super-minimal GUI text editor on the rope-backed
+buffer framework.
+
+The M2 editor app (`docs/roadmap.md`): a real project that builds on the editor
+toolkit instead of re-inventing it. Three pieces do all the work, none of them
+ours —
+
+  - `std/buffer.blsp` — the **model**: an immutable, rope-backed buffer with pure
+    point/movement/editing ops. Every edit returns a *fresh* buffer (ADR-026).
+  - `std/display.blsp` — the **view** vocabulary: `clear`/`text`/`cursor`/`frame`
+    render ops as plain data.
+  - `std/ui.blsp` — the **loop**: `ui-run` renders a frame, polls a key, folds it
+    into the next model, repeats. `(gui-display)` paints into a native window
+    (needs a `--features gui` build); `*term-display*` paints the terminal.
+
+So this file is just glue: a `model -> model` `update` mapping keys to `buffer`
+ops, and a pure `view` painting the buffer. Run it:
+
+    nest run                 ; a *scratch* buffer
+    nest run -- notes.txt    ; open (and Ctrl-S saves) that file
+
+Keys: printable inserts, arrows move, Home/End jump line ends, Enter splits,
+Backspace/Delete remove, Ctrl-S saves, Esc / Ctrl-C / the window close button
+quits. Deliberately minimal — no selection, undo, or multiple buffers yet (the
+roadmap's next editor step). Commands are a plain `cond` here; `std/keymap.blsp`
+is the rebindable-keys growth path toward a self-editing editor."
+  (:use buffer)    ; the immutable rope-backed buffer model (the editor's state)
+  (:use ui)        ; gui-display + the ui-run loop
+  (:use display))  ; clear / text / cursor / frame
+
+;; ---- model ------------------------------------------------------------------
+;;
+;; The `ui-run` model is a map threaded through the loop: the buffer being
+;; edited, the first visible line (`:top`, the scroll offset), a `:status` line,
+;; and the loop controls (`:done` to quit, `:tick-ms` the refresh beat — large,
+;; since nothing animates). The buffer holds a process-local rope, and the whole
+;; loop runs in one process, so it lives in the model directly.
+
+(defn ed-init (buf)
+  "The starting model: editing `buf`, scrolled to the top."
+  {:buf buf :top 0 :status (str "editing " (buffer-name buf)) :done false :tick-ms 60000})
+
+;; ---- view helpers -----------------------------------------------------------
+
+(defn ed-fit (s w)
+  "Clip string `s` to `w` columns (long lines don't wrap — v1 has no h-scroll)."
+  (if (> (string-length s) w) (substring s 0 w) s))
+
+(defn ed-line-text (buf line)
+  "Line `line`'s text without its trailing newline (`buffer-line-at` keeps it)."
+  (let (lt (buffer-line-at buf line))
+    (if (ends-with? lt "\n") (substring lt 0 (dec (string-length lt))) lt)))
+
+(defn ed-visible-lines (buf top textrows cols)
+  "`text` render ops for the lines visible in a `textrows`-tall window starting
+at line `top` — one op per line, clipped to `cols`, positioned at its screen row."
+  (let (last-line (min (dec (buffer-line-count buf)) (dec (+ top textrows))))
+    (map (fn (line) (text (- line top) 0 (ed-fit (ed-line-text buf line) cols)))
+         (range top (inc last-line)))))
+
+(defn ed-status-line (m cols rows)
+  "The reverse-video status row: a message, then `line:col` at the buffer point."
+  (let (buf (get m :buf)
+        pos (str (inc (buffer-current-line buf)) ":" (buffer-column buf)))
+    (text (dec rows) 0
+          (ed-fit (str " " (get m :status) "  —  " pos "  —  Ctrl-S save · Esc quit") cols)
+          {:reverse true})))
+
+(defn ed-view (m cols rows)
+  "ui-run view (pure): clear, draw the visible buffer lines, a status row, and
+place the cursor at the buffer point (in screen coordinates, offset by `:top`)."
+  (let (buf (get m :buf)
+        top (get m :top)
+        textrows (dec rows))
+    (apply frame
+      (concat
+        [(clear)]
+        (ed-visible-lines buf top textrows cols)
+        [(ed-status-line m cols rows)
+         (cursor (- (buffer-current-line buf) top) (buffer-column buf))]))))
+
+;; ---- scrolling --------------------------------------------------------------
+
+(defn ed-scroll (m textrows)
+  "Adjust `:top` so the point's line stays inside a `textrows`-tall viewport:
+scroll up if it's above the top, down if it's below the bottom. Pure."
+  (let (line (buffer-current-line (get m :buf))
+        top  (get m :top))
+    (cond
+      (< line top)                  (assoc m :top line)
+      (>= line (+ top textrows))    (assoc m :top (inc (- line textrows)))
+      else                          m)))
+
+;; ---- commands (each: model -> model) ----------------------------------------
+
+(defn ed-edit (m f)
+  "Apply a pure buffer transform `f` (a `buffer -> buffer` op) to the model's
+buffer, marking it modified."
+  (assoc m :buf (f (get m :buf)) :status "modified"))
+
+(defn ed-save (m)
+  "Write the buffer to its file (Ctrl-S); report the outcome in the status line.
+A no-op-with-message if the buffer has no backing file."
+  (let (buf (get m :buf))
+    (if (nil? (buffer-file buf))
+      (assoc m :status "no file to save (run: nest run -- <path>)")
+      (try
+        (do (save-buffer buf) (assoc m :status (str "saved " (buffer-file buf))))
+        (catch e (assoc m :status (str "save failed: " e)))))))
+
+;; ---- update -----------------------------------------------------------------
+
+(defn ed-update (m input cols rows)
+  "ui-run update: fold one key into the next model, then keep the point on
+screen. Printable keys insert; the named keys move/edit; Esc / Ctrl-C / the
+window close button (delivered as `:escape`) quit. `:tick` is a no-op."
+  (ed-scroll
+    (cond
+      (= input :tick)                          m
+      (or (= input :escape) (= input :ctrl-c)) (assoc m :done true)
+      (= input :ctrl-s)    (ed-save m)
+      (= input :up)        (ed-edit m (fn (b) (backward-line b)))
+      (= input :down)      (ed-edit m (fn (b) (forward-line b)))
+      (= input :left)      (ed-edit m (fn (b) (backward-char b)))
+      (= input :right)     (ed-edit m (fn (b) (forward-char b)))
+      (= input :home)      (ed-edit m (fn (b) (beginning-of-line b)))
+      (= input :end)       (ed-edit m (fn (b) (end-of-line b)))
+      (= input :enter)     (ed-edit m (fn (b) (insert b "\n")))
+      (= input :backspace) (ed-edit m (fn (b) (delete-backward-char b)))
+      (= input :delete)    (ed-edit m (fn (b) (delete-char b)))
+      (string? input)      (ed-edit m (fn (b) (insert b input)))
+      else                 m)
+    (dec rows)))
+
+;; ---- entry ------------------------------------------------------------------
+
+(def *welcome*
+  "hello — a tiny editor on the rope buffer framework.\n\nType to edit · arrows move · Enter splits · Backspace deletes · Ctrl-S saves\nEsc (or the window's close button) quits.\n")
+
+(defn main (&optional file)
+  "Open the editor in a native window. With a `file` argument (`nest run --
+<path>`) it edits that file and Ctrl-S saves it; with none, a *scratch* buffer.
+Swap `(gui-display)` for `*term-display*` to run in the terminal instead."
+  (let (buf (if (nil? file) (make-buffer *welcome*) (buffer-from-file file)))
+    (ui-run (ed-init buf) ed-view ed-update (gui-display))))

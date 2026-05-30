@@ -263,6 +263,8 @@ fn run_main(cli: Cli) {
     // stay unlimited unless the user opts in — the live image edits all day
     // (ADR-043).
     brood::core::alloc::init_limits_from_env();
+    // Flag a stressed/retuned heap so a benchmark can't silently measure one.
+    brood::cli_support::warn_nondefault_gc_env();
 
     let mut interp = Interp::new();
 

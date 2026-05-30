@@ -64,9 +64,15 @@ configure: ## Show current build options (./configure --with-gui to enable the G
 	@echo "Run ./configure --with-gui to enable the native window; ./configure --help for more."
 
 install: ## Install `brood`, `nest` and `brood-lsp` into $(PREFIX)/bin (./configure --with-gui first for the window)
-	cargo install --path crates/cli  --force --root $(PREFIX) $(GUI_FEATURES)
-	cargo install --path crates/nest --force --root $(PREFIX) $(GUI_FEATURES)
-	cargo install --path crates/lsp  --force --root $(PREFIX)
+	# Force a clean *performance* build: append `-C debug-assertions=off
+	# -C overflow-checks=off` to any ambient RUSTFLAGS. rustc takes the LAST
+	# `-C <key>=` for a key, so this wins even if the GC-debug build mode
+	# (`RUSTFLAGS="-C debug-assertions=on"`, see CLAUDE.md) is exported in the
+	# shell — so the installed binary is never accidentally debug-armed (which
+	# would carry the GC tripwire/verifier overhead and skew benchmarks).
+	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo install --path crates/cli  --force --root $(PREFIX) $(GUI_FEATURES)
+	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo install --path crates/nest --force --root $(PREFIX) $(GUI_FEATURES)
+	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo install --path crates/lsp  --force --root $(PREFIX)
 
 uninstall: ## Remove the installed `brood`, `nest` and `brood-lsp` binaries from $(PREFIX)/bin
 	cargo uninstall cli --root $(PREFIX)

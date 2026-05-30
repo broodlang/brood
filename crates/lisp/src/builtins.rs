@@ -91,6 +91,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "%le",
+        Arity::exact(2),
+        Sig::new(vec![num, num], bool_ty),
+        prim_le,
+    );
+    def(
+        heap,
         "%eq",
         Arity::exact(2),
         Sig::new(vec![any, any], bool_ty),
@@ -1381,7 +1388,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("mem-peak", &[], "High-water mark of allocated bytes since process start."),
     ("mem-limit", &[], "Hard memory ceiling in bytes (0 = unlimited); crossing it aborts the process. Set via BROOD_MEM_LIMIT."),
     ("mem-soft-limit", &[], "Soft memory ceiling in bytes (0 = unlimited); crossing it raises a catchable E0043 at the next safepoint."),
-    ("gc-stats", &[], "A snapshot map of this process's GC activity: :collections, :copied, :reclaimed (cumulative object counts), :live, :live-bytes, and :threshold (next-collection trigger). Per-process — reports the caller's own heap."),
+    ("gc-stats", &[], "A snapshot map of this process's GC activity: :collections, :copied, :reclaimed (cumulative object counts), :live, :live-bytes, :threshold (next-collection trigger), and :debug-build (true if built with debug assertions — not a perf build). Per-process — reports the caller's own heap."),
     ("gc-collect", &[], "Force a collection of this process's LOCAL heap now, returning the post-collection gc-stats map. An observability/test aid, not a load-bearing trigger — automatic collection at the eval safepoint already keeps memory bounded."),
     ("gc-trace", &["on?"], "Query (no arg) or set (truthy arg) per-collection GC trace logging for this process; returns the resulting state. When on, each minor/major collection prints a one-line summary to stderr. Defaulted from BROOD_GC_TRACE."),
     ("eval", &["form"], "Evaluate a form in the global environment."),
@@ -1611,6 +1618,19 @@ fn prim_lt(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         _ => expect_number(heap, "%lt", a)? < expect_number(heap, "%lt", b)?,
     };
     Ok(Value::Bool(lt))
+}
+
+/// `(%le a b)` — `a <= b`. The `<=`/`>=` kernel: a direct primitive so the 2-arg
+/// clauses of `<=`/`>=` are pure passthroughs the ADR-069 thin-wrapper elision can
+/// reach (the old `(not (%lt …))` bodies were a nested call it couldn't). Same
+/// int-exact / float-coerce care as `%lt`.
+fn prim_le(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let (a, b) = two(args, "%le")?;
+    let le = match (a, b) {
+        (Value::Int(x), Value::Int(y)) => x <= y,
+        _ => expect_number(heap, "%le", a)? <= expect_number(heap, "%le", b)?,
+    };
+    Ok(Value::Bool(le))
 }
 
 fn prim_eq(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -2088,6 +2108,11 @@ fn gc_stats_map(heap: &mut Heap) -> Value {
             value::kw("threshold"),
             Value::Int(heap.gc_threshold() as i64),
         ),
+        // True iff this binary was built with debug assertions (the GC tripwire /
+        // verifier / poison bits are compiled in) — so a benchmark can confirm
+        // it's measuring a clean release build, not a debug-armed one. `false`
+        // for `make install` / `cargo build --release`.
+        (value::kw("debug-build"), Value::Bool(cfg!(debug_assertions))),
     ];
     heap.map_from_pairs(pairs)
 }
