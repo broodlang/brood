@@ -145,7 +145,30 @@ full suite green to regression-test the (delicate) collector. NB the suite alrea
 has a ~104s test group — a 30s per-test budget would need that group's individual
 tests to each be < 30s (likely fine; confirm).
 
-## Error message: a value in head position should hint C-style call syntax (2026-05-30)
+## Error message: C-style call syntax — ✅ DONE (2026-05-30)
+
+`(println println("foo"))` (i.e. `name(args)`) now errors with a fix hint:
+`cannot call non-function: "foo"` + `hint: a value can't be called — in Brood the
+function goes inside the parens: write (f x), not f(x). …`. Implemented in
+`eval/mod.rs` (the `other =>` non-function-callee arm: when the callee is a literal —
+string/int/float/bool/keyword — attach the C-style hint + locate to the call form).
+Bonus: `report_error` (`cli_support.rs`) now renders `hint:` lines, so *every* error
+hint (incl. the existing deep-recursion one) is finally visible in the CLI, not just
+to MCP/LSP. Verified via a file run.
+
+## Operand-position unbound lint — attempted, reverted (needs test updates)
+
+Implemented the cousin of the function-as-value/head-unbound checks: flag a bare
+unbound symbol in argument position when the head is a known non-macro callee
+(`arity_of` Some). It works (`(+ 1 frobnicate)` → unbound, `(fn (x) (+ 1 x))` quiet).
+**But** it correctly flags the **free operand vars** that ~5 narrowing tests in
+`types/check.rs` use as placeholders (`(let (cond (int? x)) …)` with `x` free) →
+5 test failures. Finishing it = bind those tests' free vars (wrap in `(fn (x foo) …)`
+— preserves the narrowing intent, more realistic), which touches the actively-churned
+checker test file. Reverted for now; do it with the maintainer. The lint is the right
+feature (the check.rs header's own "safe fix" recipe asks for it).
+
+## (old) Error message: a value in head position should hint C-style call syntax (2026-05-30)
 
 `(println println("foo"))` — i.e. someone wrote `println("foo")` (C/JS call
 syntax), which *reads* in Brood as two forms `println ("foo")`, so the inner
