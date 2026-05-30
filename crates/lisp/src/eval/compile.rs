@@ -6,14 +6,15 @@
 //! operand stack, so the moving collector relocates them in place (`arena_flip`'s
 //! root walk) with **no new root set** — `Node::Local(i)` reads `root_at(base+i)`.
 //!
-//! **Stage 1 (the first milestone): a bounded slice.** Only **top-level closures**
-//! (captured env `None` → the global env) with a **single exact-arity arm** whose
-//! body is built entirely from the core forms below compile and VM-run; everything
-//! else *defers to the tree-walker* (`eval::eval`). Macros are already expanded by
-//! this point (`eval::macros::compile` ran), so the compiler only handles `if`/`do`
-//! specially and treats any other non-special head as a function call. This proves
-//! the frame-slots-as-roots mechanism and the `env_get`-name-scan elimination on
-//! recursion-heavy code (`fib`, tail loops) before the larger compiler investment.
+//! **The VM is the default engine** (ADR-076 Stage 3); `BROOD_VM=0` forces the
+//! tree-walker. A closure is VM-compiled when it's built from the core vocabulary
+//! ([`Node`] below): `if`/`do`/`let`/`letrec`/`fn` plus calls, with exact-arity
+//! arms and any capture (global *or* local — Stage 2c). Anything outside that —
+//! variadic arms, pattern params / `match*`, `def`/`quote`/`quasiquote`/`and`/`or`/
+//! `binding`, or a body built from movable (conased) forms — **defers to the
+//! tree-walker** (`eval::eval`) per-form, so partial compilation is always safe and
+//! the language is unchanged. Macros are already expanded by this point
+//! (`eval::macros::compile` ran), so the compiler never sees a macro call.
 //!
 //! Naming note: [`run`] runs **after** `eval::macros::compile` (macroexpand-all +
 //! namespace-resolve), on the already-expanded, already-resolved form.
@@ -25,27 +26,19 @@ use crate::core::heap::{EnvRoot, Heap, VmCacheKey};
 use crate::core::value::{self, ClosureId, EnvId, Symbol, Value};
 use crate::error::{error_codes, LispError, LispResult, Pos};
 
-/// Is the compiling VM enabled?
-///
-/// - The **runtime** `BROOD_VM` env var wins when set: a truthy value
-///   (`1`/`true`/`on`/…) forces the VM, a falsy one (`0`/`false`/`off`/empty)
-///   forces the tree-walker.
-/// - Otherwise the **build-time default** decides: off for an ordinary
-///   `cargo build` (so `make test` runs the tree-walker — green, with full
-///   source-position diagnostics), **on** when built with `--features
-///   brood/vm-default`, which is what `make install` ships so the installed
-///   binaries dogfood the VM (ADR-076; the tree-walker stays a one-env-var escape
-///   hatch until the Stage-3 cutover makes the VM unconditional).
-///
-/// Read once and cached; the choice can't change mid-run.
+/// Is the compiling VM enabled? **The VM is the default engine** (ADR-076 Stage 3
+/// cutover): every build runs it unless `BROOD_VM` is set to a falsy value
+/// (`0`/`false`/`off`/`no`/empty), which forces the tree-walker — the one-env-var
+/// escape hatch retained for at least one release. Any other `BROOD_VM` value (or
+/// none) selects the VM. Read once and cached; the choice can't change mid-run.
 pub fn vm_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     fn truthy(v: &str) -> bool {
         !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "off" | "no")
     }
     *ON.get_or_init(|| match std::env::var("BROOD_VM") {
-        Ok(v) => truthy(&v),                  // explicit runtime override
-        Err(_) => cfg!(feature = "vm-default"), // build-time default
+        Ok(v) => truthy(&v), // explicit override (BROOD_VM=0 → tree-walker)
+        Err(_) => true,      // VM is the default engine
     })
 }
 
