@@ -269,6 +269,12 @@ no throwaway lists):
 (receive ([:reply x] x))                           ; selective receive
 ```
 
+**Gotcha: `spawn` is a macro — pass the expression, not a thunk.** `(spawn expr)`
+already wraps `expr` in `(fn () expr)`. So write `(spawn (work c))`, **not**
+`(spawn (fn () (work c)))` — the latter double-wraps: the child just builds a
+closure and returns, the body never runs (a silent no-op that looks like "spawn
+didn't work"). Same for `(spawn name expr)`.
+
 Each process has its own heap; messages are **deep-copied** on `send`. `(self)`
 is the current process's pid. Functions can't be sent (per-heap closures) —
 send data and call `def`'d names on the receiving side. `receive` takes

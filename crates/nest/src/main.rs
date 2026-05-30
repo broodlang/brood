@@ -18,6 +18,10 @@
 //!                          overrides the entry for one run
 //!   nest test [<file>...]  run the project's tests, or the listed files
 //!   nest check [<file>...] type-check the project, or the listed files
+//!   nest fetch             resolve dependencies, write project.lock.blsp (ADR-037)
+//!   nest tree              print the resolved dependency tree
+//!   nest add <name> …      add a dependency (`:path PATH`) and re-lock
+//!   nest remove <name>     remove a dependency and re-lock
 //!   nest repl              project-aware REPL (sources preloaded)
 //!   nest format            in-place reformat (`--check` for CI dry-run)
 //!   nest doc [module]      Markdown docs (whole project or one module);
@@ -216,6 +220,8 @@ fn main() {
     if std::env::var_os("RUST_BACKTRACE").is_none() {
         std::env::set_var("RUST_BACKTRACE", "1");
     }
+    // Capture any panic (use-after-GC tripwire, heap index, …) to .brood_crash_dump.
+    brood::cli_support::install_crash_dump();
     let cli = Cli::parse();
     // Run on an explicitly-sized large stack so the stack-budget guard (ADR-043)
     // is uniform across the root thread and spawned coroutines — see the matching
