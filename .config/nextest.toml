@@ -14,3 +14,19 @@
 # can exceed 2 minutes, while a hung/segfaulting case is reported and the rest of the
 # run continues.
 slow-timeout = { period = "60s", terminate-after = 2 }
+
+# Real-TCP distribution tests (`crates/cli/tests/distribution.rs`) spin two real
+# `brood` child processes that bind/connect over loopback. Under nextest, each test
+# case runs in its OWN process, so the test file's process-global `port_lock()`
+# mutex serialises NOTHING across cases — all ~20 would otherwise run at once,
+# racing `free_port()` for the same just-freed port and saturating every core with
+# simultaneous node pairs, which made a few flake on a ~5s connect/receive timeout
+# under full-workspace load. Pin them to a single-threaded test group so nextest
+# runs them one at a time — the cross-process equivalent of `port_lock` (the Unix
+# tests share the group too; harmless, they're fast).
+[test-groups]
+real-tcp = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'binary(distribution)'
+test-group = 'real-tcp'

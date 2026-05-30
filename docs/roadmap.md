@@ -531,11 +531,15 @@ top* of connect, plus a few deliberately-deferred refinements:
   long name is passed explicitly, no resolver); a `mio` reactor for socket scale;
   Windows Unix-socket transport. One-node-per-OS-process is a structural choice
   (the Erlang model), not a gap.
-- 🟡 **Test hardening:** the end-to-end real-TCP `distribution.rs` tests are
-  timing-flaky under `make test`'s max parallel load (they hit ~5s connect
-  timeouts when all cores are saturated; pass 21/21 in isolation / under nextest
-  alone). Worth bumping the per-test timeouts or serialising the TCP tests under
-  nextest. Not a connect bug.
+- ✅ **Test hardening (done — 2026-05-30):** the end-to-end real-TCP
+  `distribution.rs` tests no longer flake under `make test`'s max parallel load.
+  Root cause: under nextest each case runs in its own process, so the file's
+  process-global `port_lock()` serialised nothing — all ~20 ran at once, racing
+  `free_port()` and saturating every core, tripping a ~5s timeout. Fix: a nextest
+  `real-tcp` test-group (`max-threads = 1`, `.config/nextest.toml`) runs them one
+  at a time — the cross-process equivalent of `port_lock` — plus generous
+  readiness/failsafe timeouts (5s→20s waits, 5s→30s receive failsafes). Full
+  `make test` now green under load.
 
 ## M5 — Web frontend
 
