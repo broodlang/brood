@@ -1,11 +1,20 @@
 # Namespaces — design
 
-> **Status:** increment 1 landed (2026-05-30) — the resolution substrate (`(ns …)`,
-> the resolver pass, forward-ref pre-scan, def-site keying, ns-aware checker) is
-> implemented and tested. Decision in [ADR-065](decisions.md). Supersedes the
-> "deferred, point-2-only" stance of [ADR-019](decisions.md). Macro free-reference
-> resolution (§7, the **α** decision) and package ns-collision policy (§8) remain
-> **open** and are later increments; imports/auto-require are inc-2.
+> **Status:** increments 1–2 landed (2026-05-30). Inc-1: the resolution substrate
+> (`(ns …)`, resolver pass, forward-ref pre-scan, def-site keying, ns-aware checker).
+> Inc-2: **`(:use …)` imports + auto-require** — `(:use mod)` refers a module's
+> public names bare, `(:use mod :refer [a b])` a subset; the resolver consults the
+> per-file import table after the current namespace and before root. Decision in
+> [ADR-065](decisions.md). Supersedes [ADR-019](decisions.md).
+>
+> **Locked decisions not yet executed:** `defmodule` becomes the *single* namespace
+> form and `ns` is dropped (a module **is** a namespace); ubiquitous DSLs like the
+> test framework are namespaced + imported Clojure-style (`(:use test)`). This is
+> the **next phase** (the `ns`→`defmodule` rename + migrating `std/` module-by-module
+> + the 42 test files), gated on inc-2 imports (which now exist). Still open after
+> that: macro free-reference resolution (§7, **α**), the ns-aware *import* checker
+> (imported names currently draw advisory unbound warnings), LSP Tier 2, and package
+> ns-collision policy (§8).
 
 This doc is the design backing for namespaces in Brood. It follows the spectrum
 ADR-019 laid out and commits to the *substrate* (how resolution works) while
@@ -274,21 +283,32 @@ the lock file stays computable. Auto-require collapses `require`+`use` for code 
 - **Side benefit:** the doc tool's "can't tell which module a def belongs to" gap
   (decisions.md) closes — the prefix groups defs.
 
-## 11. Phased implementation (mechanical once §7, §8 are settled)
+## 11. Phased implementation
 
-1. **Resolver pass + `ns` form** — `*ns*` (a `defdyn` the compile pass reads), the
-   import/alias table, the §3 resolution rules over *non-macro* references. Ship
-   β-interim (macros hand-qualify) so this phase doesn't block on §7. Tests:
-   qualified def/call, bare-name resolution, root fall-through, **quoted symbols
-   untouched**, and the mandatory cross-process coverage (spawn → send a
-   ns-qualified value → fan-in; proves promote/`to_message` round-trips qualified
-   symbols).
-2. **Hygiene (§7 decision)** — if α: auto-qualifying quasiquote + `~'` escape +
-   `std/` audit. Coordinate with the ADR-064 quasiquote-to-Brood refactor.
-3. **Auto-require (§9)** — import-driven first; reference-driven if wanted.
-4. **LSP Tier 2 (§6)** — ns→file index, scoped completion, go-to-def, rename, all
-   over the *shared* resolver (§4).
-5. **Package integration (§8)** — ns-name disambiguation against ADR-037.
+1. ✅ **Resolver pass + `ns` form (inc-1)** — current namespace as a per-process
+   `Heap.compile_ns` (not a defdyn — a shared global would race across green
+   processes); the §3 resolution rules over *non-macro* references; forward-ref
+   pre-scan; def-site keying; ns-aware checker. β-interim for macros (§7). Tested
+   incl. the mandatory cross-process round-trip.
+2. ✅ **Imports + auto-require (inc-2)** — `(:use mod)` / `(:use mod :refer [a b])`
+   in the `ns` header; a per-file `imports` table on the `Heap` (bare → qualified)
+   the resolver consults after the current namespace, before root; `%refer`
+   enumerates a module's public (non-`--`) names or a subset; `:use` emits a
+   `(require …)` so it auto-loads (loads-but-never-fetches, §9). Own-namespace defs
+   shadow imports. Tested: refer-all, subset, private excluded, own-ns precedence,
+   cross-process.
+3. ⬜ **Unify `defmodule` = namespace; migrate `std/`** — make `defmodule` the one
+   namespace form, drop `ns`; migrate std module-by-module (start with a leaf like
+   `set`), namespace `test` + add `(:use test)` to the 42 test files; update the
+   formatter/docs/scaffold tooling that hard-codes `defmodule`. Make the checker
+   *import*-aware (eval the `(:use …)` header, or statically populate the import
+   table) so imported names stop drawing advisory unbound warnings.
+4. ⬜ **Hygiene — α (§7)** — auto-qualifying quasiquote + `~'` escape + `std/`
+   macro audit; coordinate with the ADR-064 quasiquote-to-Brood refactor. Needed
+   once std *macros* live in namespaces and are used across them.
+5. ⬜ **LSP Tier 2 (§6)** — ns→file index, scoped completion, go-to-def, rename,
+   over the *shared* resolver (§4); make `mcp--shadows-for` ns-aware.
+6. ⬜ **Package integration (§8)** — ns-name disambiguation against ADR-037.
 
 ## 12. Explicitly *not* doing
 

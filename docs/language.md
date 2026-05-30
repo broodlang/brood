@@ -1022,17 +1022,32 @@ symbol (`/` is an ordinary symbol character), so the runtime, hot reload, and
 (def text/insert (fn …))         ; advice / hot reload works
 ```
 
-Privacy is **soft** (Clojure/CL-style, not Racket sealing): a `foo--internal`
-name marked private by convention is *still reachable* by its qualified spelling,
-so live redefinition and advice keep working. At the REPL the current namespace is
-sticky — `(ns foo)` persists across entries until the next `ns`; `(current-ns)`
-reports it.
+Import other namespaces' names with `(:use …)` clauses in the header. `(:use mod)`
+refers all of `mod`'s public names bare; `(:use mod :refer [a b])` refers just
+those. A bare reference resolves **current namespace → imports → root**, so an
+own-namespace definition shadows an import. `:use` auto-loads the module (it never
+*fetches* a package — declared deps only).
 
-> Status (inc-1): qualified definitions + reference resolution + the ns-aware
-> checker are in. **Not yet:** `import`/`:refer` lists and auto-require, and
-> macro-template *free*-reference resolution — so a macro defined in a non-root
-> namespace must hand-qualify the cross-namespace names it expands to. Quoted
-> symbols (`'foo`, message tags, map keys) are **never** qualified — they are data.
+```clojure
+(ns editor "the editor core"
+  (:use buffer)                 ; refer buffer's public names bare
+  (:use text :refer [insert]))  ; refer just text/insert as `insert`
+(defn open (path) (insert (new-buffer) 0 (slurp path)))   ; insert → text/insert
+```
+
+Privacy is **soft** (Clojure/CL-style, not Racket sealing): a `foo--internal`
+name marked private by convention is skipped by `(:use)` refer-all but *still
+reachable* by its qualified spelling, so live redefinition and advice keep working.
+At the REPL the current namespace is sticky — `(ns foo)` persists across entries
+until the next; `(current-ns)` reports it.
+
+> Status (inc-1/2): qualified definitions + reference resolution + `(:use …)`
+> imports + auto-require + the ns-aware checker are in. **Decided, in progress:**
+> `defmodule` is becoming the single namespace form (`ns` will be dropped — a module
+> *is* a namespace), with `std/` migrating to namespaces. **Not yet:** macro-template
+> *free*-reference resolution — so a macro defined in a non-root namespace must
+> hand-qualify the cross-namespace names it expands to. Quoted symbols (`'foo`,
+> message tags, map keys) are **never** qualified — they are data.
 
 ### Introspection (editor tooling)
 `doc`  `arglist`  `global-names`  `bound?`  `all-globals`  `apropos`  `doc-search`

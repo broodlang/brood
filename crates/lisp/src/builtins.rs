@@ -1093,6 +1093,10 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // `ns` macro (prelude) emits it; the resolver pass reads `heap.compile_ns`.
     def(heap, "%in-ns", Arity::exact(1), Sig::new(vec![sym], sym), in_ns);
     def(heap, "current-ns", Arity::exact(0), Sig::new(vec![], sym), current_ns);
+    // `(%refer 'mod subset)` — populate the current file's import table from a
+    // `(:use …)` clause. `subset` is nil (refer all public names) or a seq of
+    // bare symbols. The `ns` macro emits it after `(require 'mod)`.
+    def(heap, "%refer", Arity::exact(2), Sig::new(vec![sym, any], nil_ty), refer);
     // `%binding`'s first arg is the *list/vector of names*, second is the
     // *list/vector of values*, third is the thunk — the macro `binding` emits
     // these as `(quote (*a* *b* …))` + `[v1 v2 …]` + `(fn () …)`.
@@ -2289,6 +2293,7 @@ fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     heap.set_current_file(prev);
     heap.set_compile_ns(prev_ns);
     heap.set_ns_known_names(prev_known);
+    heap.set_imports(prev_imports);
     result
 }
 
@@ -2318,16 +2323,18 @@ fn eval_string_inner(heap: &mut Heap, env: EnvId, src: &str, reset_ns: bool) -> 
     // When loading a module (`reset_ns`), bracket the namespace at root and
     // pre-scan its def heads for forward references; the plain `eval-string` (REPL,
     // inline) inherits the current namespace and does neither (ADR-065).
-    let (prev_ns, prev_known) = if reset_ns {
+    let (prev_ns, prev_known, prev_imports) = if reset_ns {
         let pn = heap.set_compile_ns(None);
         let known = if crate::eval::macros::file_opens_ns(heap, &forms) {
             crate::eval::macros::scan_def_names(heap, &forms)
         } else {
             std::collections::HashSet::new()
         };
-        (Some(pn), Some(heap.set_ns_known_names(known)))
+        let pk = heap.set_ns_known_names(known);
+        let pi = heap.set_imports(std::collections::HashMap::new());
+        (Some(pn), Some(pk), Some(pi))
     } else {
-        (None, None)
+        (None, None, None)
     };
     // Root the unevaluated forms across the per-form eval — a collection at any
     // depth (ADR-061) relocates the LOCAL forms this loop still holds.
@@ -2354,6 +2361,9 @@ fn eval_string_inner(heap: &mut Heap, env: EnvId, src: &str, reset_ns: bool) -> 
     }
     if let Some(pk) = prev_known {
         heap.set_ns_known_names(pk);
+    }
+    if let Some(pi) = prev_imports {
+        heap.set_imports(pi);
     }
     result
 }
@@ -4550,6 +4560,42 @@ fn in_ns(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// `nil` at root. Reflection + a handle for tests (ADR-065).
 fn current_ns(_args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.compile_ns().map(Value::Sym).unwrap_or(Value::Nil))
+}
+
+/// `(%refer 'mod subset)` — add `(:use …)` imports to the current file's import
+/// table (ADR-065 inc-2). `mod` must already be loaded (the `ns` macro emits a
+/// `(require 'mod)` first). `subset` nil → refer every *public* `mod/name` (no
+/// `--` private marker, not itself nested); else a seq of bare symbols → refer
+/// just those as `mod/name`. Each becomes a bare → qualified entry the resolver
+/// consults after the current namespace and before root.
+fn refer(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let mod_sym = expect_symbol(heap, "%refer", arg(args, 0))?;
+    let mod_name = value::symbol_name(mod_sym);
+    let prefix = format!("{}/", mod_name);
+    match arg(args, 1) {
+        Value::Nil => {
+            // Refer all public names: enumerate the live globals under `mod/`.
+            for g in heap.global_symbols() {
+                let name = value::symbol_name(g);
+                if let Some(bare) = name.strip_prefix(&prefix) {
+                    if !bare.is_empty() && !bare.contains('/') && !bare.contains("--") {
+                        let bare_sym = value::intern(bare);
+                        heap.add_import(bare_sym, g);
+                    }
+                }
+            }
+        }
+        subset => {
+            // Refer just the named symbols as `mod/name` (existence not required —
+            // an unbound `mod/name` surfaces as a normal unbound-reference error).
+            for item in heap.seq_items(subset)? {
+                let bare = expect_symbol(heap, "%refer", item)?;
+                let qualified = value::intern(&format!("{}/{}", mod_name, value::symbol_name(bare)));
+                heap.add_import(bare, qualified);
+            }
+        }
+    }
+    Ok(Value::Nil)
 }
 
 /// `(dynamic? x)` — true when `x` is a symbol declared dynamic with `defdyn`.

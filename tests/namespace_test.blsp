@@ -86,3 +86,44 @@
     (let (me (self) w (spawn (ns-echo me)))
       (send w (nsP/make))
       (is (= (receive) {:tag 'nsP/make :data (list 1 2 3)})))))
+
+(describe "namespaces: (:use …) imports"
+  :isolated
+
+  (test "(:use mod) refers all of a module's public names bare"
+    (%load-string "(ns ilibA) (defn pub-x () :x) (defn pub-y () :y)")
+    (%load-string "(ns iappA (:use ilibA)) (defn run () (list (pub-x) (pub-y)))")
+    (is (= (iappA/run) (list :x :y))))
+
+  (test "(:use mod :refer [..]) refers only the named symbols"
+    (%load-string "(ns ilibB) (defn keep-me () :kept) (defn skip-me () :skipped)")
+    (%load-string "(ns iappB (:use ilibB :refer [keep-me])) (defn run () (keep-me))")
+    (is (= (iappB/run) :kept))
+    ;; skip-me wasn't referred, so a bare reference would resolve to root (unbound),
+    ;; not to ilibB/skip-me — confirm only the qualified one exists.
+    (is (bound? 'ilibB/skip-me)))
+
+  (test "a `--` private name is not referred by (:use)"
+    (%load-string "(ns ilibC) (defn shown () :shown) (defn hidden--impl () :hidden)")
+    (%load-string "(ns iappC (:use ilibC)) (defn run () (shown))")
+    (is (= (iappC/run) :shown))
+    ;; the private name is still reachable by its qualified spelling (soft privacy)
+    (is (= (ilibC/hidden--impl) :hidden)))
+
+  (test "an own-namespace definition shadows an imported name"
+    (%load-string "(ns ilibD) (defn val () :theirs)")
+    (%load-string "(ns iappD (:use ilibD)) (defn val () :mine) (defn run () (val))")
+    (is (= (iappD/run) :mine)))
+
+  (test "(:use) of an already-provided namespace works (require is a no-op)"
+    (%load-string "(ns ilibE) (defn ping () :pong)")
+    ;; ilibE is now provided; :use-ing it again should still refer its names
+    (%load-string "(ns iappE (:use ilibE)) (defn run () (ping))")
+    (is (= (iappE/run) :pong)))
+
+  (test "a result built via imported names round-trips through a worker"
+    (%load-string "(ns ilibF) (defn tag () 'ilibF/tag)")
+    (%load-string "(ns iappF (:use ilibF)) (defn make () {:t (tag) :n 7})")
+    (let (me (self) w (spawn (ns-echo me)))
+      (send w (iappF/make))
+      (is (= (receive) {:t 'ilibF/tag :n 7})))))

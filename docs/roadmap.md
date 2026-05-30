@@ -161,19 +161,21 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   global table; `foo--private` convention (ADR-019). Logic in Brood; the only new
   Rust is `file-exists?` / `dir?` / `list-dir` / `cwd` / `name` / `eval-string` /
   `%builtin-module`.
-- 🟡 **Namespaces** (ADR-065, [`namespaces.md`](namespaces.md)) — **substrate
-  landed (inc-1)**. Expand-time resolution over the flat table (no core namespace
-  axis): `(ns foo)` qualifies definitions to `foo/name` (one interned symbol — `/`
-  is already symbol-legal); a resolver pass (`eval/macros.rs`) qualifies free
-  references, with a forward-reference pre-scan and a binder-safe walk; current
+- 🟡 **Namespaces** (ADR-065, [`namespaces.md`](namespaces.md)) — **substrate +
+  imports landed (inc-1, inc-2)**. Expand-time resolution over the flat table (no
+  core namespace axis): `(ns foo)` qualifies definitions to `foo/name` (one interned
+  symbol — `/` is already symbol-legal); a resolver pass (`eval/macros.rs`) qualifies
+  free references, with a forward-reference pre-scan and a binder-safe walk; current
   namespace is per-process `Heap.compile_ns` (sticky at the REPL, reset per file);
-  def-sites and the advisory checker are ns-aware. **Soft** privacy (Clojure/CL,
-  not Racket sealing — preserves ADR-013 hot reload). Forced by ADR-037 package
-  collisions + `std/` crowding + plugins + LSP completion/cross-file/rename.
-  ⬜ Remaining: imports `:use`/`:refer` + auto-require (inc-2); macro free-ref
-  resolution — the **α** decision (inc-3); LSP Tier 2 (inc-4); package ns-name
-  collision policy (inc-5). β-interim until α: a macro in a non-root namespace
-  hand-qualifies cross-namespace references.
+  def-sites and the advisory checker are ns-aware. **Imports:** `(:use mod)` /
+  `(:use mod :refer [a b])` in the header refer a module's public names bare (own-ns
+  defs shadow imports), auto-requiring the module (loads-but-never-fetches). **Soft**
+  privacy (Clojure/CL, not Racket sealing — preserves ADR-013 hot reload).
+  **Locked, next:** unify — `defmodule` becomes the single namespace form (drop
+  `ns`), migrate `std/` + the 42 test files (`test` namespaced + `(:use test)`),
+  update the formatter/docs/scaffold tooling. ⬜ After: macro free-ref resolution
+  (**α**), import-aware checker, LSP Tier 2, package ns-name collision policy.
+  β-interim until α: a macro in a non-root namespace hand-qualifies cross-ns refs.
 - ✅ **Project model & test tool** — convention over configuration: `src/` is the
   project source (auto on `*load-path*`), `tests/**/*_test.blsp` are the tests; a
   `project.blsp` manifest declares identity (name/version) and overrides paths only
@@ -314,11 +316,12 @@ The text-editing substance, exposed to Brood. Built as a thin end-to-end
 - ⬜ Editing **commands** + multiple buffers — belong in the **editor app** (a
   new `nest` project that `(require 'buffer)`s this framework), not here.
 - ✅ Buffers as first-class Brood values — a buffer *is* an immutable value.
-- ✅ Per-process memory reclamation is solved for M2's needs by the **bump
-  allocator + arena reset + `(hibernate)` flush** (see M1 "Memory reclamation") —
-  so it's no longer carried forward to M2. The ADR-035 tracing **mark-sweep** is
-  *not* what shipped: it's disabled (slot reuse reintroduced a scheduler race);
-  `Heap::collect` is a no-op.
+- ✅ Per-process memory reclamation is solved for M2's needs by the **automatic
+  semi-space copying collector** (ADR-055/058/061; see M1 "Memory reclamation") —
+  it fires at the eval safepoint at any depth and bounds every entry path, so it's
+  no longer carried forward to M2. (The ADR-035 in-place mark-sweep was never
+  shipped — slot reuse reintroduced a scheduler race — and the `(hibernate)`
+  Stage-A expedient was removed once automatic collection landed.)
 
 ## M3 — Display protocol + native local frontend
 

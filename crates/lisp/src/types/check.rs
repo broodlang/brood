@@ -195,6 +195,9 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
     } else {
         heap.set_ns_known_names(std::collections::HashSet::new())
     };
+    // Imports start empty; a `(:use …)` in the header populates them during pass 1
+    // (its `(require …)`/`%refer` is evaluated like any other header form).
+    let prev_imports = heap.set_imports(std::collections::HashMap::new());
     // Root the input forms and the expanding-into vec across the loop:
     // each iteration may call `eval` on a `(require …)`, which runs a
     // GC safepoint at outermost depth — any LOCAL `Value` held only in
@@ -264,6 +267,7 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
     heap.truncate_roots(roots_base);
     heap.set_compile_ns(prev_ns);
     heap.set_ns_known_names(prev_known);
+    heap.set_imports(prev_imports);
     out
 }
 

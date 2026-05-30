@@ -8623,3 +8623,43 @@ marked done), ADR-044.
 **Still on the OTP-parity list (prompt before starting):** `link`/`trap_exit` (the
 structural orphan-on-supervisor-*crash* fix — kernel work + ADR) and a
 DynamicSupervisor/runtime child API (additive Brood).
+
+---
+
+## 2026-05-30 — Namespaces increment 2: `(:use …)` imports + auto-require
+
+**Goal.** The unlock for the rest of the namespace rollout: let a namespaced file
+pull in another module's names, so namespacing `std/` (and the test framework)
+won't break every consumer. Also locked the next-phase design with the user.
+
+**Decisions locked (not yet executed).** `defmodule` becomes the *single* namespace
+form (drop `ns` — a module **is** a namespace); ubiquitous DSLs (the test framework)
+get namespaced + imported Clojure-style (`(:use test)` in each test file). The
+`ns`→`defmodule` rename + `std/` migration is the next phase, gated on these
+imports. Import-clause syntax: clause-per-import `(:use mod)` / `(:use mod :refer […])`.
+
+**Built (inc-2).**
+- `core/heap.rs`: a per-file `imports: HashMap<Symbol,Symbol>` (bare → qualified)
+  with `set_imports` (swap) / `add_import` / `import_of`; reset+restored per file
+  alongside `compile_ns`/`ns_known_names` in every loader + `check_file`.
+- `eval/macros.rs`: the resolver gained one step — bare symbol resolves
+  **local → current-namespace → import table → root**, so an own-namespace def
+  shadows an import.
+- `builtins.rs`: `%refer 'mod subset` populates the import table — `nil` subset
+  refers every public `mod/*` name (skips `--` private, skips nested), else a seq
+  of bare symbols. `%in-ns`/`current-ns` from inc-1 unchanged.
+- `std/prelude.blsp`: the `ns` macro now parses `(:use …)` clauses (via the
+  `ns--use-clause`/`ns--use-forms` expand-time helpers) and emits `(require 'mod)`
+  + `(%refer 'mod subset)` per clause — so `:use` auto-loads the module
+  (loads-but-never-fetches; the `require` is the existing idempotent loader).
+
+**Tested.** 6 new in-language cases in `tests/namespace_test.blsp` (refer-all,
+`:refer` subset, `--` private excluded, own-ns precedence over an import,
+already-provided module, cross-process round-trip of an import-built value) — 18/18
+in that file; resolver unit tests + autogensym green; full suite green.
+
+**Known gap (deferred to the migration phase).** The advisory checker isn't
+*import*-aware yet — it sets `compile_ns` statically but doesn't run the `(:use …)`
+header, so imported names draw advisory `unbound` warnings (same benign class as
+runtime-`eval`-defined globals; never gates). Fix when migrating std: eval the
+header in `check_file`, or statically populate the import table.
