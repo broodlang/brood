@@ -120,6 +120,43 @@ fn render_arglist(interp: &Interp, name: &str, arglist: Value) -> Option<String>
     Some(s)
 }
 
+/// Resolve a symbol token `name` (bare or already `ns/`-qualified) to its
+/// **qualified global**, in the namespace context of the file whose source is
+/// `src` — the shared resolver the LSP uses so its goto/hover/signature agree with
+/// the runtime (ADR-065 §4). It establishes the file's `(defmodule …)` namespace +
+/// `(:use …)` imports the way the loaders do — reset the context, then let the
+/// header's `%in-ns`/`%refer` repopulate it (idempotent once the project is
+/// bootstrapped) — resolves the name as the compile pass would, and restores the
+/// prior context. Returns `name` unchanged for an unnamespaced (root) file, a
+/// prelude/unknown name, or on any read/eval failure (best-effort; never panics).
+///
+/// LOCAL-clean: bracketed by `checkpoint`/`reset_local_to`. The returned `String`
+/// holds no LOCAL handle (`symbol_name` reads the interner).
+pub fn resolve_in_source(interp: &mut Interp, src: &str, name: &str) -> String {
+    use crate::eval::{self, macros};
+    let cp = interp.heap.checkpoint();
+    let resolved = (|| -> Option<String> {
+        let forms = crate::syntax::reader::read_all(&mut interp.heap, src).ok()?;
+        macros::file_ns(&interp.heap, &forms)?; // not namespaced → leave bare
+        // Mirror the loader (lib.rs eval_str/eval_source): reset, eval the header
+        // so its `%in-ns`/`%refer` set compile_ns + imports, resolve, restore.
+        let prev_ns = interp.heap.set_compile_ns(None);
+        let known = macros::scan_def_names(&interp.heap, &forms);
+        let prev_known = interp.heap.set_ns_known_names(known);
+        let prev_imports = interp.heap.set_imports(std::collections::HashMap::new());
+        if let Some(&header) = forms.first() {
+            let _ = eval::eval(&mut interp.heap, header, value::EnvId::GLOBAL);
+        }
+        let out = value::symbol_name(macros::resolve_reference(&interp.heap, value::intern(name)));
+        interp.heap.set_compile_ns(prev_ns);
+        interp.heap.set_ns_known_names(prev_known);
+        interp.heap.set_imports(prev_imports);
+        Some(out)
+    })();
+    interp.heap.reset_local_to(cp);
+    resolved.unwrap_or_else(|| name.to_string())
+}
+
 // ============================================================================
 // Step 1b — wider tooling surface for the planned `nest mcp` (ADR-036). Each
 // operation below holds the same contract as the introspection helpers above:
@@ -458,6 +495,22 @@ mod tests {
         assert!(names.contains(&"+".to_string()), "builtin `+` missing");
         // `global-names` sorts, so the pool is in deterministic order.
         assert!(names.windows(2).all(|w| w[0] <= w[1]), "not sorted");
+    }
+
+    #[test]
+    fn resolve_in_source_qualifies_by_namespace() {
+        let mut interp = Interp::new();
+        let src = "(defmodule foo (:use set))\n(defn bar (x) x)\n";
+        // own-namespace def → ns/name (scan_def_names sees `bar`)
+        assert_eq!(resolve_in_source(&mut interp, src, "bar"), "foo/bar");
+        // imported via `(:use set)` → the import's qualified target
+        assert_eq!(resolve_in_source(&mut interp, src, "union"), "set/union");
+        // prelude/root name → left bare
+        assert_eq!(resolve_in_source(&mut interp, src, "map"), "map");
+        // already qualified → unchanged
+        assert_eq!(resolve_in_source(&mut interp, src, "set/conj"), "set/conj");
+        // a root (unnamespaced) file qualifies nothing
+        assert_eq!(resolve_in_source(&mut interp, "(defn baz (x) x)", "baz"), "baz");
     }
 
     #[test]
