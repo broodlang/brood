@@ -105,6 +105,13 @@ enum Cmd {
         #[arg(long = "main", value_name = "MODULE[/FN]")]
         main: Option<String>,
 
+        /// Start this runtime as a node named NAME before running — a local
+        /// Unix-socket node (no port), the Emacs `--daemon` model. Peers reach
+        /// it with `(connect "NAME")`; the shared `~/.config/brood/cookie`
+        /// authenticates. The program need not call `node-start` itself.
+        #[arg(long = "name", value_name = "NAME")]
+        name: Option<String>,
+
         /// Trailing arguments passed to the entry function as strings.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -257,6 +264,7 @@ fn run_main(cli: Cli) {
             watch,
             for_duration,
             main,
+            name,
             args,
         } => cmd_run(
             &mut interp,
@@ -264,6 +272,7 @@ fn run_main(cli: Cli) {
             &watch,
             for_duration.as_deref(),
             main.as_deref(),
+            name.as_deref(),
             &args,
         ),
         Cmd::Doc { module, all } => cmd_doc(&mut interp, module.as_deref(), all),
@@ -444,6 +453,7 @@ fn cmd_run(
     watch: &[String],
     for_duration: Option<&str>,
     main: Option<&str>,
+    name: Option<&str>,
     args: &[String],
 ) {
     let promoted: Option<String> = if file.is_none() && watch.len() == 1 {
@@ -567,7 +577,17 @@ fn cmd_run(
     } else {
         run_form
     };
-    let code = format!("{}{} {}", project_setup, watch_setup, body);
+    // `--name`: bring up a local Unix-socket node before the program runs, so
+    // the file is pure app logic (the Emacs `--daemon` model). Pass the name as
+    // a keyword built from the escaped string so an odd NAME can't break out.
+    let node_setup = match name {
+        Some(n) => format!(
+            "(node-start (keyword \"{}\")) ",
+            brood::introspect::escape_brood_string(n)
+        ),
+        None => String::new(),
+    };
+    let code = format!("{}{}{} {}", project_setup, node_setup, watch_setup, body);
     run(interp, &code);
 }
 
@@ -663,20 +683,22 @@ fn cmd_observe(interp: &mut Interp, connect: Option<String>, cookie: Option<Stri
     // host / wrong cookie surfaces as a clean error with the screen never entered.
     let boot = match connect {
         Some(spec) => {
+            // Cookie precedence: --cookie → $BROOD_COOKIE → (node-cookie). The
+            // first two are resolved here; when neither is set we omit the arg
+            // and `observe-connect` falls back to the shared cookie file itself
+            // (ADR-068), so a matching local setup needs no flag.
             let cookie = cookie
                 .or_else(|| std::env::var("BROOD_COOKIE").ok())
-                .filter(|c| !c.is_empty())
-                .unwrap_or_else(|| {
-                    eprintln!(
-                        "nest observe --connect: provide --cookie <c> or set $BROOD_COOKIE"
-                    );
-                    std::process::exit(2);
-                });
+                .filter(|c| !c.is_empty());
             // `spec`/`cookie` are user input — `call_form` embeds them as escaped
             // string literals so they can't break out of the call.
+            let args: Vec<&str> = match &cookie {
+                Some(c) => vec![&spec, c],
+                None => vec![&spec],
+            };
             format!(
                 "(require 'observer) {}",
-                brood::introspect::call_form("observer/observe-connect", &[&spec, &cookie])
+                brood::introspect::call_form("observer/observe-connect", &args)
             )
         }
         None => "(require 'observer) (observer/observe-run)".to_string(),

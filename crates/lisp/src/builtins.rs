@@ -1216,17 +1216,31 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // distributed nodes (connect two runtimes over TCP — crate::dist)
     def(
         heap,
-        "node-start",
+        "%node-listen",
         Arity::exact(3),
         Sig::new(vec![sym, string, string], sym),
-        node_start,
+        node_listen,
     );
     def(
         heap,
-        "connect",
+        "%node-connect",
+        Arity::exact(2),
+        Sig::new(vec![sym, string], sym),
+        node_connect,
+    );
+    def(
+        heap,
+        "random-token",
         Arity::exact(1),
-        Sig::new(vec![string], sym),
-        connect,
+        Sig::new(vec![int], string),
+        random_token,
+    );
+    def(
+        heap,
+        "spit-private",
+        Arity::exact(2),
+        Sig::new(vec![string, string], nil_ty),
+        spit_private,
     );
     def(
         heap,
@@ -1344,7 +1358,9 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("list-dir", &["path"], "The entry names directly under directory path, sorted."),
     ("make-dir", &["path"], "Create a directory and any missing parents (like mkdir -p)."),
     ("spit", &["path", "s"], "Write string s to the file at path."),
+    ("spit-private", &["path", "s"], "Write string s to path with owner-only (0600) permissions, creating the parent dir if needed. The private-by-default write for a secret (spit leaves a world-readable file)."),
     ("slurp", &["path"], "Read the whole file at path into a string (does not evaluate it)."),
+    ("random-token", &["n"], "n cryptographically-strong random bytes from the OS RNG, hex-encoded as a 2n-char string. Used to mint a node cookie."),
     ("%sha256", &["s"], "Lowercase hex SHA-256 of string s's bytes. The package manager's one hashing primitive (ADR-037); file/tree hashing is Brood over it."),
     ("read-line", &[], "Read one line from stdin; returns the line as a string (trailing newline stripped) or nil at end of input."),
     ("file-mtime", &["path"], "Last-modified time of path as epoch-milliseconds, or nil if the file is missing. Cheap (stat) — pair with `load` to drive a hot-reloader."),
@@ -1397,8 +1413,6 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("spawn-count", &[], "How many green processes have been spawned since program start."),
     ("peak-threads", &[], "High-water mark of OS threads running processes concurrently."),
     ("worker-threads", &[], "The size of the scheduler's worker-thread pool (about nproc)."),
-    ("node-start", &["name", "addr", "cookie"], "Name this runtime and listen for peers on addr (\"host:port\"); cookie authenticates links. Returns the node name."),
-    ("connect", &["spec"], "Link to a peer node named in spec (\"name@host:port\"); cookie-authenticated. Returns the peer's node name."),
     ("register", &["name", "pid"], "Bind a local name so peers can address this process via {:name name :node this-node}. Returns the pid."),
     ("whereis", &["name"], "The local pid registered under `name`, or nil. Strictly local — does not query other nodes."),
     ("node-name", &[], "This runtime's node name (:nonode until node-start)."),
@@ -4425,26 +4439,81 @@ fn expect_node_name(heap: &Heap, who: &str, v: Value) -> Result<value::Symbol, L
 
 /// `(node-start name "host:port" cookie)` — name this runtime and listen for peer
 /// nodes. Returns the node name.
-fn node_start(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let name = expect_node_name(heap, "node-start", arg(args, 0))?;
-    let addr = expect_string(heap, "node-start", arg(args, 1))?;
-    let cookie = expect_string(heap, "node-start", arg(args, 2))?;
-    crate::dist::node_start(name, &addr, cookie).map_err(|e| {
+/// `(%node-listen name addr cookie)` — the listen mechanism behind the prelude's
+/// `node-start`. `addr` carries the transport (`"unix:PATH"` / `"tcp:HOST:PORT"`);
+/// the path/cookie/transport policy lives in `std/prelude.blsp` (ADR-068).
+fn node_listen(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let name = expect_node_name(heap, "%node-listen", arg(args, 0))?;
+    let addr = expect_string(heap, "%node-listen", arg(args, 1))?;
+    let cookie = expect_string(heap, "%node-listen", arg(args, 2))?;
+    crate::dist::node_listen(name, &addr, cookie).map_err(|e| {
         LispError::runtime(format!("node-start: {e}"))
             .with_code(crate::error::error_codes::DISTRIBUTION)
     })?;
     Ok(Value::Keyword(name))
 }
 
-/// `(connect "name@host:port")` — link to a peer node (cookie-authenticated).
-/// Returns the peer's node name on success.
-fn connect(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let spec = expect_string(heap, "connect", arg(args, 0))?;
-    let peer = crate::dist::connect(&spec).map_err(|e| {
+/// `(%node-connect peer addr)` — the dial mechanism behind the prelude's
+/// `connect`. `peer` is the expected node name (self-guard + de-dup); `addr`
+/// carries the transport. Returns the peer's authoritative node name.
+fn node_connect(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let peer = expect_node_name(heap, "%node-connect", arg(args, 0))?;
+    let addr = expect_string(heap, "%node-connect", arg(args, 1))?;
+    let real = crate::dist::node_connect(peer, &addr).map_err(|e| {
         LispError::runtime(format!("connect: {e}"))
             .with_code(crate::error::error_codes::DISTRIBUTION)
     })?;
-    Ok(Value::Keyword(peer))
+    Ok(Value::Keyword(real))
+}
+
+/// `(random-token n)` — `n` cryptographically-strong random bytes from the OS
+/// RNG, hex-encoded into a `2n`-char string. The CSPRNG is mechanism (Rust); the
+/// node cookie's generation policy is Brood (`node-cookie`, ADR-068).
+fn random_token(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let n = expect_int(heap, "random-token", arg(args, 0))?;
+    if !(0..=4096).contains(&n) {
+        return Err(LispError::runtime(
+            "random-token: byte count must be in 0..=4096",
+        ));
+    }
+    let mut bytes = vec![0u8; n as usize];
+    getrandom::fill(&mut bytes)
+        .map_err(|e| LispError::runtime(format!("random-token: OS RNG unavailable: {e}")))?;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{b:02x}");
+    }
+    Ok(heap.alloc_string(&s))
+}
+
+/// `(spit-private path s)` — write `s` to `path` with owner-only (`0600`)
+/// permissions, creating the parent directory if needed. The private-by-default
+/// write a secret needs (`spit` leaves a world-readable file); the cookie-file
+/// policy that uses it is Brood (`node-cookie`, ADR-068).
+fn spit_private(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use std::io::Write as _;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let path = expect_string(heap, "spit-private", arg(args, 0))?;
+    let content = expect_string(heap, "spit-private", arg(args, 1))?;
+    let err = |e: std::io::Error| {
+        LispError::runtime(format!("spit-private: {path}: {e}"))
+            .with_code(crate::error::error_codes::FILE_IO)
+    };
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        std::fs::create_dir_all(parent).map_err(err)?;
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(err)?;
+    // `.mode` only applies on *create*; enforce 0600 on a pre-existing file too.
+    let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
+    f.write_all(content.as_bytes()).map_err(err)?;
+    Ok(Value::Nil)
 }
 
 /// `(register name pid)` — bind a local name so peers can address this process by

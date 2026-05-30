@@ -4,21 +4,22 @@
 ;;   Terminal 1:  cargo run -p cli examples/node_server.blsp
 ;;   Terminal 2:  cargo run -p cli examples/node_client.blsp
 ;;
-;; It names this runtime :client, connects to the server, reaches the server's
-;; `:echo` process *by name*, then talks to the *remote pid* the server hands
-;; back — proving location transparency (the same pid value works across the
-;; link). It prints the round-trip and exits.
+;; It names this runtime :client (a local Unix-socket node — no port), connects
+;; to the server *by name*, reaches the server's `:echo` process by name, then
+;; talks to the *remote pid* the server hands back — proving location
+;; transparency (the same pid value works across the link). Prints the round-trip
+;; and exits. The shared ~/.config/brood/cookie authenticates the link
+;; automatically (auto-generated on first use); no secret to pass.
 
-(node-start :client "127.0.0.1:9002" "demo-cookie")
+(node-start :client)
 
 ;; The server might not be up yet — retry connect a few times (100ms apart).
-;; `(receive (after 100 nil))` is just a 100ms sleep here.
 (defn connect-retry (tries)
   (try
-    (connect "server@127.0.0.1:9001")
+    (connect "server")
     (catch e
       (if (> tries 0)
-        (do (receive (after 100 nil)) (connect-retry (- tries 1)))
+        (do (sleep 100) (connect-retry (- tries 1)))
         (throw (str "could not reach the server — is it running? " e))))))
 
 (connect-retry 30)
