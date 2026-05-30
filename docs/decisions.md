@@ -4174,11 +4174,19 @@ death tears the remote child down. Verified by `crates/cli/tests/distribution.rs
 restart). The race-safety mirrors `monitor_remote`: record the half before
 consulting `NODES`, so net-split and the wire send can't orphan an entry.
 
+**Synchronous `remote-spawn` (done — 2026-05-30).** `(remote-spawn-sync node
+expr)` ships the thunk to the peer's `:remote-spawn` server with the caller's pid
++ a fresh `(ref)`, the server spawns it and replies `[:spawned ref child-pid]`,
+and the macro blocks in `receive` for that pid (5s timeout). The returned remote
+pid carries the peer's `name@host` (ADR-073), so it's directly `monitor`/`link`-able
+— remote-child specs are now turnkey, not roundtrip-by-hand. Pure Brood in
+`std/prelude.blsp`; `remote--spawn-server` gained a `[:run-sync …]` clause beside
+`[:run …]`. See `remote_spawn_sync_returns_a_usable_remote_pid`.
+
 **Still deferred (ADR-011).** Exact propagated reason for a non-trapping peer (the
 `hard` bit above); a `terminate/2`-style worker cleanup hook (the last OTP-parity
 item — cleanup on an *external* kill needs the trappable-shutdown path, only
-`[:$stop]`-cooperative today); a **synchronous `remote-spawn`** returning the
-child pid (would make remote-child specs turnkey rather than roundtrip-by-hand).
+`[:$stop]`-cooperative today).
 
 **References.** ADR-035 (monitors — the one-way cousin), ADR-063 (`exit/2`),
 ADR-044 (`:shutdown` cascade), ADR-033/034 (the dist wire codec links extend),
@@ -4586,3 +4594,62 @@ ADR-054 (generational handles — the epoch this reuses per-generation), ADR-055
 the operand-stack roots both minor and major relocate), ADR-026 (immutability — why
 there's no general write barrier), ADR-011 (defer power features — the tuning knobs
 are opt-in).
+
+---
+
+## ADR-073 — Node names are `name@host` (Erlang short/long names)
+
+**Status.** Accepted, implemented 2026-05-30. Refines ADR-034/068 (node identity);
+the wire protocol, handshake, transports, and cookie are unchanged. See
+[`distribution.md`](distribution.md), [`node-connect.md`](node-connect.md).
+
+**Context.** A node's identity was a **bare keyword** (`:server`), and the host
+lived only in the *transport* address (`server@host:port`). So `:server` on
+machine A and `:server` on machine B had **identical identity**, and a pid
+`{node: :server, id: 5}` is ambiguous once you're linked to two of them. Erlang
+fixed this in 1998: a node *is* `name@host`, globally unique, carried in every
+pid. The editor-server goal (remote frontends, cross-node supervision) needs
+unambiguous remote pids.
+
+**Decision.** A node's identity is the keyword **`name@host`** (`@` is a legal
+symbol char, so `:server@whkbus` reads/prints fine). Qualification, Erlang's
+short/long split:
+- **Bare name** → qualified automatically (a **short** name). For a **local**
+  Unix node the host is this machine's short `(hostname)` (`:a@whkbus`); for a
+  **TCP** node it's the *listen address's host* (`:a@127.0.0.1`) — so a peer
+  dialing `a@127.0.0.1:9001` and `ensure-link` derive the *same* name the node
+  declares. That consistency is the load-bearing reason TCP qualifies from the
+  address, not from `hostname`.
+- **Already-qualified `name@host`** (passed explicitly) → used verbatim — this is
+  how you get a **long**/FQDN name (`(node-start :a@a.example.com "0.0.0.0:9001")`).
+
+There is no epmd, so the **port stays explicit** in `connect` (`name@host:port`);
+`name@host` is the identity, `:port` the transport. `connect` returns the peer's
+**authoritative** `name@host` (from the handshake) — you address peers with that
+value, not a literal.
+
+**Policy in Brood, mechanism in Rust** (ADR-006). The only kernel addition is
+`(hostname)` (reads `/proc/sys/kernel/hostname`). All qualification — short vs
+verbatim, local-hostname vs listen-address-host, the `name@host:port` parsing —
+lives in `std/prelude.blsp` (`node--qualify`, `node-start`, `connect`,
+`ensure-link--peer-name`). The node-name Symbol flows through `%node-listen` and
+the handshake unchanged.
+
+**Consequences (breaking, greenfield).** Node names are no longer bare literals:
+`(node-name)`, `(nodes)`, and pid prints now show `name@host`, and `{:name …
+:node X}` addressing needs the qualified value (from `connect` / `(node-name)` /
+`nodes`), not `:a`. Migrated the `distribution.rs` suite (capture `connect`'s
+return, or use the deterministic `:a@127.0.0.1` for loopback tests) and the
+node examples. `remote-spawn`/`ensure-link` already take a node *value*, so they
+needed no change beyond `ensure-link--peer-name` now returning `name@host`.
+
+**Scope / deferred (ADR-011).** No FQDN *resolution* in the kernel — a long name
+is had by passing it explicitly (matches how Erlang `-name` is usually given). No
+epmd-style name→port registry. Short and long names interoperate freely (Brood
+compares full `name@host` strings; it doesn't enforce Erlang's short-vs-long
+connection ban).
+
+**References.** ADR-034 (distributed nodes), ADR-068 (connect ergonomics — the
+transport this qualifies), ADR-033 (closure shipping — remote pids carry the
+node), ADR-006 (policy in Brood), ADR-011 (defer FQDN resolution / epmd),
+`distribution.md`, `crates/cli/tests/distribution.rs`, `std/prelude.blsp`.
