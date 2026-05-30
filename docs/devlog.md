@@ -7893,6 +7893,53 @@ the kill path until fixed.
 **Next.** Wire the test-runner 30s per-test timeout and the MCP-tool 10s watchdog,
 both `(exit pid :kill)` on a slow worker (todo.md).
 
+---
+
+## 2026-05-30 — `for` comprehension: fused-fold lowering (~3× faster)
+
+**Goal.** A Game-of-Life retro (a user project building Conway's GoL that animates
+under `nest run`) surfaced that `for`/`:when` comprehensions are a real cost in
+hot inner loops — in their `step`, `life--neighbours` (one comprehension, run once
+per live cell per frame) was 144 ms of a 191 ms step. The retro's fix was to *stop
+using* the comprehension (list the 8 neighbours explicitly). The right reaction
+per "build the language up, not around it" (CLAUDE.md): make the comprehension
+itself cheaper so *every* `for` in the language benefits, not just hand-written
+escape hatches.
+
+**Diagnosed.** `for` lowered (`std/prelude.blsp` `for--build`) to **nested
+`mapcat`**, i.e. `(apply append (map f coll))` per binding, with the body wrapped
+as a one-element `(list body)` per item. So each comprehension allocated a
+singleton list per element and then concatenated them — throwaway intermediate
+cells proportional to the output, plus the `map`/`append` plumbing, at every
+nesting level.
+
+**Built.** Re-lowered `for` to a **fused `fold` + final `reverse`** (`for--fold`):
+each binding becomes a `fold` over its collection threading a single accumulator
+`acc`; each `:when` an `if` that passes `acc` through unchanged; the body a lone
+`(cons body acc)`. Builds the result in reverse with **no per-element intermediate
+lists**, then one O(n) `reverse` restores order. `fold` is tail-recursive, so deep
+comprehensions don't grow the stack (matters for the small green-process stacks).
+Semantics are byte-for-byte unchanged — flat, `:when`, nested (last varies
+fastest), and destructuring (`[k v]`) bindings all verified identical.
+
+**Measured** (release, `/tmp/for_bench.blsp`): flat comprehension over 1000 items
+×200 **1473 → 545 ms (2.7×)**; nested 80×80 with a `:when` ×50 **3817 → 1117 ms
+(3.4×)**.
+
+**Also confirmed (the retro's other claim is stale).** The retro warned "the
+`nest` runtime currently leaks memory in long-running loops." Re-ran the leaker
+shape post-ADR-061 (collect-at-any-depth): a 200k-iteration churning top-level
+tail loop peaks at **16.5 MB**, and the depth-2 variant (loop one frame deeper)
+at **17 MB** — no leak. ADR-061 (`--for` 775 MB → 776 KB in the prior entry)
+already closed it.
+
+**Docs.** Added a "Hot inner loops — fuse passes, skip throwaway intermediates"
+subsection to `docs/brood-for-claude.md` (fuse `mapcat`-then-reduce into one
+`fold`; prefer an explicit literal over a comprehension for a tiny fixed set;
+`bench` before optimising).
+
+**Verified.** Full `cargo test` green (Rust + Brood suite, 0 failures).
+
 ## 2026-05-30 — Close out collect-at-any-depth: GC-safety sweep + debug tooling
 
 **Why.** ADR-061 (collect at any eval depth) shipped with the eval core rooted, but
@@ -7929,3 +7976,37 @@ Brood macro over `cons`/`list`/`eval` (kills the worst offender, ADR-006), then
 
 **Verified.** All test files under `BROOD_GC_VERIFY=1 BROOD_GC_STRESS=1` +
 debug-assertions: 854/854 clean, no crash dump. Full `cargo test` under the same.
+
+---
+
+## 2026-05-30 — TLS + an HTTP client: calling GitHub over `https` (ADR-062)
+
+**Goal.** A real `https` call (fetch from GitHub). TLS is the one place the
+"thin native, rest in Brood" rule bends — you can't bootstrap TLS in Brood, so it
+is a vetted crate (`rustls`, default aws-lc-rs provider; cmake on the box).
+`webpki-roots` bundles the Mozilla CA set — no system trust store.
+
+**The shape.** rustls connections can't be split read/write across threads like a
+raw fd, and an HTTPS client call is request→response anyway, so TLS is a one-shot
+**`tls-request host port request`**: a non-worker thread (the same `spawn_io_source`
+seam, ADR-059) connects, handshakes, writes the request, and streams the response
+back as the *same* `[:tcp id data]` / `[:tcp-closed id]` (and `[:tcp-error id msg]`)
+mailbox messages a plaintext socket uses. So `tcp-drain` and the HTTP parser are
+unchanged across transports.
+
+**Brood.** `std/http.blsp` gained an HTTP client: `http--parse-url`,
+`parse-response`, and `http-get url` — `https://` → `tls-request`, `http://` →
+`tcp-connect`+`tcp-send`, then a shared collect+parse. Always returns a response
+map (`{:status 0 :error msg …}` on transport failure).
+
+**Result.** `(http-get "https://api.github.com/zen")` → `200`, `server: github.com`,
+a real zen line. `http_test` 10/10 (added url/response-parsing cases); full suite
+**858/858**. One new primitive (`tls-request`); `net.rs` wraps a rustls
+`StreamOwned` (UnexpectedEof treated as clean end — many servers skip close_notify).
+
+**Deps.** Added `rustls`/`webpki-roots`; `cargo update` (cmov, typenum bumped);
+`webpki-roots` taken to 1.0. Remaining major behind: `winit` 0.29→0.30 (GUI,
+`--features gui`) — a breaking event-loop redesign, left for the GUI owner.
+
+**Deferred.** Streaming/persistent TLS sockets (non-blocking rustls / a `mio`
+reactor) and server-side TLS (cert+key).

@@ -22,8 +22,11 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::Duration;
+
+use rustls::pki_types::ServerName;
+use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 
 use crate::core::value;
 use crate::process::{spawn_io_source, MailboxSink, Message, SubscriberHandle};
@@ -225,6 +228,79 @@ pub fn local_port(id: u64) -> Option<u16> {
         Sock::Stream { stream, .. } => stream.local_addr().ok().map(|a| a.port()),
         Sock::Listener { port, .. } => Some(*port),
     }
+}
+
+// ---- TLS client (https), one-shot request/response (ADR-062) ----
+//
+// rustls connections can't be split read/write across threads like a raw fd, so
+// the streaming socket model doesn't map cleanly to TLS. But an HTTPS client call
+// is request→response, which IS sequential: connect, handshake, write the request,
+// read the response to EOF. `tls-request` runs exactly that on one non-worker
+// thread and delivers the response as the same `[:tcp id data]` / `[:tcp-closed
+// id]` messages a plaintext socket does — so `tcp-drain` and the HTTP parser work
+// unchanged. Errors arrive as `[:tcp-error id msg]`.
+
+fn tcp_error_msg(id: u64, msg: &str) -> Message {
+    Message::Vector(vec![
+        Message::Keyword(value::intern("tcp-error")),
+        Message::Socket(id),
+        Message::Str(msg.to_string()),
+    ])
+}
+
+/// The shared client TLS config (Mozilla roots via webpki-roots), built once.
+fn tls_config() -> Arc<ClientConfig> {
+    static CFG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    CFG.get_or_init(|| {
+        let mut roots = RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        Arc::new(
+            ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        )
+    })
+    .clone()
+}
+
+/// Connect + TLS handshake + write `request` + stream the response to `sink` as
+/// `[:tcp id data]` chunks. Returns Ok at clean EOF (caller emits `[:tcp-closed]`).
+fn tls_exchange(host: &str, port: u16, request: &str, id: u64, sink: &MailboxSink) -> std::io::Result<()> {
+    let stream = TcpStream::connect((host, port))?;
+    let server_name = ServerName::try_from(host.to_string())
+        .map_err(|_| invalid("tls: invalid server name"))?;
+    let conn = ClientConnection::new(tls_config(), server_name)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let mut tls = StreamOwned::new(conn, stream);
+    tls.write_all(request.as_bytes())?;
+    tls.flush()?;
+    let mut buf = [0u8; 65536];
+    loop {
+        match tls.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => sink.emit(tcp_data_msg(id, &buf[..n])),
+            // Many servers drop the connection without a TLS close_notify; treat
+            // that as the end of the response, not an error.
+            Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// `(tls-request host port request)` — perform one HTTPS request on a non-worker
+/// thread; the response arrives at the calling process as `[:tcp id data]` …
+/// `[:tcp-closed id]` (or `[:tcp-error id msg]`). Returns the id immediately.
+pub fn tls_request(host: &str, port: u16, request: String, subscriber: u64) -> u64 {
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let host = host.to_string();
+    spawn_io_source(subscriber, "brood-tls-request", move |sink| {
+        match tls_exchange(&host, port, &request, id, sink) {
+            Ok(()) => sink.emit(tcp_closed_msg(id)),
+            Err(e) => sink.emit(tcp_error_msg(id, &e.to_string())),
+        }
+    });
+    id
 }
 
 fn invalid(msg: &str) -> std::io::Error {
