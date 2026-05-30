@@ -299,6 +299,20 @@ pub fn resolve(heap: &mut Heap, form: Value) -> Value {
     resolve_walk(heap, form, &ns_name, &[])
 }
 
+/// Resolve a single **reference** symbol `s` against the heap's current namespace
+/// context (`compile_ns` + `(:use …)` imports + `ns_known_names`), exactly as the
+/// compile pass's reference resolution does. This is the shared entry point the
+/// **LSP** uses (ADR-065 §4) so "what does this name mean here" can never disagree
+/// with the runtime: bare `observe` in a `(:use observer)` file → `observer/observe`,
+/// an own-namespace def → `ns/observe`, a prelude/root or unknown name → unchanged.
+/// Identity at root (`compile_ns == None`). Read-only (no allocation).
+pub fn resolve_reference(heap: &Heap, s: value::Symbol) -> value::Symbol {
+    match heap.compile_ns() {
+        Some(ns) => resolve_sym(heap, s, &value::symbol_name(ns), &[]),
+        None => s,
+    }
+}
+
 /// An "earmuffed" `*foo*` name — by Lisp convention a special/dynamic/ambient
 /// global. These are never namespaced (ADR-065): a `(def *load-path* …)` in any
 /// namespace rebinds the *root* `*load-path*` the loader reads, rather than a

@@ -165,21 +165,22 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   global table; `foo--private` convention (ADR-019). Logic in Brood; the only new
   Rust is `file-exists?` / `dir?` / `list-dir` / `cwd` / `name` / `eval-string` /
   `%builtin-module`.
-- 🟡 **Namespaces** (ADR-065, [`namespaces.md`](namespaces.md)) — **substrate +
-  imports landed (inc-1, inc-2)**. Expand-time resolution over the flat table (no
-  core namespace axis): `(ns foo)` qualifies definitions to `foo/name` (one interned
-  symbol — `/` is already symbol-legal); a resolver pass (`eval/macros.rs`) qualifies
-  free references, with a forward-reference pre-scan and a binder-safe walk; current
-  namespace is per-process `Heap.compile_ns` (sticky at the REPL, reset per file);
-  def-sites and the advisory checker are ns-aware. **Imports:** `(:use mod)` /
-  `(:use mod :refer [a b])` in the header refer a module's public names bare (own-ns
-  defs shadow imports), auto-requiring the module (loads-but-never-fetches). **Soft**
-  privacy (Clojure/CL, not Racket sealing — preserves ADR-013 hot reload).
-  **Locked, next:** unify — `defmodule` becomes the single namespace form (drop
-  `ns`), migrate `std/` + the 42 test files (`test` namespaced + `(:use test)`),
-  update the formatter/docs/scaffold tooling. ⬜ After: macro free-ref resolution
-  (**α**), import-aware checker, LSP Tier 2, package ns-name collision policy.
-  β-interim until α: a macro in a non-root namespace hand-qualifies cross-ns refs.
+- ✅ **Namespaces** (ADR-065/066/068, [`namespaces.md`](namespaces.md)) —
+  **done** (substrate + imports + the big-bang + α + LSP ns-awareness; collision
+  policy decided). Expand-time resolution over the flat table (no core namespace
+  axis): `defmodule foo` *is* the namespace, qualifying definitions to `foo/name`
+  (one interned symbol); a resolver pass (`eval/macros.rs`) qualifies free
+  references (forward-ref pre-scan, binder-safe walk, earmuff `*foo*` stays
+  ambient/root); current ns is per-process `Heap.compile_ns`. **Imports:**
+  `(:use mod)` / `(:use mod :refer [a b])` refer a module's public names bare
+  (own-ns defs shadow), auto-requiring (loads-but-never-fetches). **Soft** privacy
+  (preserves ADR-013 hot reload). **Macro hygiene:** auto-gensym `x#` (ADR-066) +
+  α auto-qualifying quasiquote. All of `std/` + the test suite migrated. **LSP is
+  ns-aware** (§6): a shared resolution seam drives ns-correct goto/hover/signature,
+  bare-import completion, and namespace-sound project references/rename.
+  **Collision policy:** ADR-070 (flat names + detect-and-reject at lock time;
+  enforcement with the package manager). ⬜ Cosmetic remainder only: ns prefixes in
+  the symbol outline + semantic-token ns coloring.
 - ✅ **Project model & test tool** — convention over configuration: `src/` is the
   project source (auto on `*load-path*`), `tests/**/*_test.blsp` are the tests; a
   `project.blsp` manifest declares identity (name/version) and overrides paths only

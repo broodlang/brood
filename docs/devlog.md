@@ -8897,6 +8897,48 @@ the worker as a child and parking main.)
 path beside monitors), supervisor module docstring. **Built in the
 `distributed-links` worktree off `main`.**
 
+## 2026-05-30 — Namespaces finished: LSP ns-awareness (§6) + collision policy (ADR-070)
+
+**Goal.** Close out namespaces — the two items left after the big-bang were LSP
+Tier-2 ns-awareness (§6) and the package ns-collision policy (§8). The LSP was
+entirely ns-blind while the runtime resolver was fully ns-aware; an Explore pass
+confirmed goto/hover/signature *broke* on qualified + imported names and rename was
+unsound (flat over-match). Built in the `namespaces-lsp` worktree.
+
+**The seam (single source of truth, §4).** `eval::macros::resolve_reference(heap,
+sym)` — pub wrapper over the compile pass's reference resolution.
+`introspect::resolve_in_source(interp, src, name)` — resolve a symbol token in a
+file's namespace context: read forms (or, mid-edit, just the CST `defmodule`
+header), set `compile_ns`, eval the header so `%in-ns`/`%refer` repopulate imports
+(idempotent post-bootstrap), resolve, restore. `introspect::file_imports` returns
+the file's `(bare, qualified)` import pairs. So the editor resolves a name exactly
+as the runtime does.
+
+**Wired (crates/lsp).** goto/hover/signature resolve a Free symbol to its qualified
+global before querying source-location/arglist/doc — qualified + imported names now
+work. Completion offers `(:use …)` imports **bare** (qualified target stashed in
+`data` for resolve). `workspace.rs` references/rename are **namespace-sound**:
+resolve the cursor symbol to a target, then match per file by *resolved qualified
+identity* — a bare occurrence counts only where that file resolves it to the target,
+a qualified token matches exactly, and rename keeps the `ns/` prefix on qualified
+occurrences. A different namespace's same-named def is never touched.
+
+**§8 — collision policy (ADR-070).** Flat short ns names + detect-and-reject at
+dependency-resolution time (the package manager errors on two reachable packages
+declaring the same ns), rather than mandatory verbose prefixes. Aliases deferred
+(ADR-011); enforcement lands with the package manager (dormant until then).
+
+**Verified.** 73/73 LSP tests incl. `introspect::resolve_in_source_qualifies_by_namespace`,
+`definition::jumps_to_an_imported_def_across_namespaces`,
+`completion::offers_use_imported_names_bare`, and
+`workspace::rename_is_namespace_sound_across_files` (two namespaces each defining
+`observe`; renaming one leaves the other untouched). Full `cargo test` green.
+
+**Cosmetic remainder** (not correctness): ns prefixes in the document/workspace
+symbol outline, semantic-token ns coloring, and `mcp--shadows-for` going ns-aware.
+Namespaces are otherwise **done** (ADR-065/066/070). Built in the `namespaces-lsp`
+worktree off `main`.
+
 ---
 
 ## 2026-05-30 — Namespace migration: `nest` tooling + imported-macro expansion
