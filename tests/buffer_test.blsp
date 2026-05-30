@@ -121,7 +121,7 @@
 
 (describe "buffer file round-trip"
   (test "buffer-from-file reads, save-buffer writes back"
-    (let (path (str "/tmp/brood-buf-" (name (gensym "test")) ".txt"))
+    (let (path (str "/tmp/brood-buf-" (random-token 8) ".txt"))
       (spit path "first line\nsecond line\n")
       (let (b (buffer-from-file path))
         (assert= (buffer-text b) "first line\nsecond line\n")
