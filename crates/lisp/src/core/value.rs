@@ -142,11 +142,22 @@ pub fn is_dynamic(sym: Symbol) -> bool {
 /// `u64` handle doesn't grow it. **Equality/hashing ignore the stamp** — two
 /// handles to the same region+index are the same object regardless of epoch.
 pub const REGION_SHIFT: u32 = 62;
+/// Bit 61: the **generation age** of a LOCAL handle — `0` = young (nursery), `1` =
+/// old (tenured). Stolen from the top of the old 30-bit gen field (now 29 bits),
+/// so the generational collector can tell, from the handle alone, which LOCAL
+/// space a slot lives in — without a boundary scan that a *stale* handle could
+/// fool. Meaningless (always 0) for PRELUDE/RUNTIME, which don't move.
+pub const AGE_SHIFT: u32 = 61;
 pub const GEN_SHIFT: u32 = 32;
 /// Low 32 bits: the slab index.
 pub const INDEX_MASK: u64 = (1u64 << GEN_SHIFT) - 1;
-/// 30 bits between the index and the region tag: the generation stamp.
-pub const GEN_MASK: u64 = (1u64 << (REGION_SHIFT - GEN_SHIFT)) - 1;
+/// 29 bits between the index and the age bit: the generation stamp (epoch). One
+/// bit narrower than before to make room for [`AGE_SHIFT`]; 2^29 epochs is ample
+/// for a *debug-only* stale-deref tripwire (a collision needs that many flips of
+/// one space between a handle's mint and its stale use).
+pub const GEN_MASK: u64 = (1u64 << (AGE_SHIFT - GEN_SHIFT)) - 1;
+/// The age bit, pre-shifted — OR'd into an old (tenured) LOCAL handle.
+pub const AGE_OLD: u64 = 1u64 << AGE_SHIFT;
 pub const LOCAL: u8 = 0b00;
 pub const PRELUDE: u8 = 0b01;
 pub const RUNTIME: u8 = 0b10;
@@ -175,6 +186,18 @@ macro_rules! handle {
                     index,
                 );
                 $name((index as u64) | (((gen as u64) & GEN_MASK) << GEN_SHIFT))
+            }
+            /// A LOCAL handle in the **old (tenured) generation**, stamped with the
+            /// old-space epoch `gen`. Same index space as the nursery but the
+            /// [`AGE_OLD`] bit routes accessors / `check_epoch` to the old slabs.
+            #[inline]
+            pub fn local_old_gen(index: usize, gen: u32) -> Self {
+                debug_assert!(
+                    index < (1usize << GEN_SHIFT),
+                    "handle index {} overflows the 32-bit index field",
+                    index,
+                );
+                $name((index as u64) | (((gen as u64) & GEN_MASK) << GEN_SHIFT) | AGE_OLD)
             }
             /// A handle into the immutable shared prelude region (no generation).
             #[inline]
@@ -211,6 +234,13 @@ macro_rules! handle {
             #[inline]
             pub fn generation(self) -> u32 {
                 ((self.0 >> GEN_SHIFT) & GEN_MASK) as u32
+            }
+            /// Whether a LOCAL handle addresses the **old (tenured)** generation
+            /// ([`AGE_OLD`]). Only meaningful when `region() == LOCAL`; always
+            /// `false` for PRELUDE/RUNTIME (their age bit is 0).
+            #[inline]
+            pub fn is_old(self) -> bool {
+                (self.0 >> AGE_SHIFT) & 1 == 1
             }
             /// Region + index with the generation cleared — the identity used for
             /// equality and hashing, so a handle compares equal to itself across
