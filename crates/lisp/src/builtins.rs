@@ -928,6 +928,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![string], string.union(nil_ty)),
         getenv,
     );
+    def(heap, "hostname", Arity::exact(0), Sig::nullary(string), hostname);
     def(
         heap,
         "run-process",
@@ -1397,6 +1398,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("delete-file", &["path"], "Remove the file at path. Idempotent (nil if already absent); errors on a real I/O failure."),
     ("rename-file", &["from", "to"], "Rename/move file `from` to `to`. Returns nil; errors on failure."),
     ("getenv", &["name"], "The value of environment variable name, or nil if unset."),
+    ("hostname", &[], "This machine's short hostname (no domain). Used to qualify a node name as name@host."),
     ("run-process", &["prog", "args"], "Run external program prog with an args list, inheriting stdio; returns its exit code."),
     ("macroexpand-1", &["form"], "Expand form by a single macro step."),
     // `macroexpand` is a Brood prelude fn (ADR-064), documented via its docstring.
@@ -3947,6 +3949,22 @@ fn getenv(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         Ok(val) => Ok(heap.alloc_string(&val)),
         Err(_) => Ok(Value::Nil),
     }
+}
+
+/// `(hostname)` — this machine's short hostname (no domain), used to qualify a
+/// node name as `name@host` (ADR-073). Reads `/proc/sys/kernel/hostname`,
+/// falling back to `$HOSTNAME` then `"localhost"` — never errors, since a node
+/// must always get *some* identity. Long/FQDN names are had by passing an
+/// already-qualified name to `node-start` (`:foo@my.fqdn`), so we don't resolve
+/// the FQDN here.
+fn hostname(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let h = std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok().filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| "localhost".to_string());
+    Ok(heap.alloc_string(&h))
 }
 
 /// `(run-process prog args)` — run external program `prog` with `args` (a list or

@@ -99,7 +99,7 @@ fn two_nodes_connect_and_message() {
         r#"
 (node-start :b "127.0.0.1:{port_b}" "secret")
 (connect "a@127.0.0.1:{port_a}")
-(send {{:name :echo :node :a}} [:hi (self)])
+(send {{:name :echo :node :a@127.0.0.1}} [:hi (self)])
 (def remote (receive ([:pong p] p) (after 5000 (throw "no reply by name"))))
 (unless (pid? remote) (throw "reply was not a pid"))
 (send remote [:ping (self)])
@@ -189,8 +189,9 @@ fn two_unix_nodes_connect_by_name_and_message() {
 "#;
     let client = r#"
 (node-start :ub)
-(connect "ua")
-(send {:name :echo :node :ua} [:hi (self)])
+;; connect returns the peer's authoritative name@host (ADR-073) — address by it.
+(def peer (connect "ua"))
+(send {:name :echo :node peer} [:hi (self)])
 (def remote (receive ([:pong p] p) (after 5000 (throw "no reply by name"))))
 (unless (pid? remote) (throw "reply was not a pid"))
 (send remote [:hi (self)])
@@ -342,7 +343,7 @@ fn lambda_ships_across_nodes_and_runs() {
 (node-start :b "127.0.0.1:{port_b}" "secret")
 (connect "a@127.0.0.1:{port_a}")
 (let (n 3)
-  (send {{:name :worker :node :a}} [:run (fn (x) (* x n)) 14 (self)]))
+  (send {{:name :worker :node :a@127.0.0.1}} [:run (fn (x) (* x n)) 14 (self)]))
 (receive
   ([:result r] (if (= r 42)
                  (println "CROSS-NODE-LAMBDA-OK")
@@ -414,7 +415,7 @@ fn source_positions_survive_a_cross_node_send() {
 (let (me (self))
   ;; The next line is line 7 in this file — the quoted literal whose position
   ;; must survive across the wire and reach the receiver's `form-pos`.
-  (send {{:name :probe :node :a}} [:run (fn () (form-pos '(positioned-marker))) me]))
+  (send {{:name :probe :node :a@127.0.0.1}} [:run (fn () (form-pos '(positioned-marker))) me]))
 (receive
   ([:pos p] (println (str "GOT: " p)))
   (after 5000 (throw "no reply from probe")))
@@ -479,9 +480,9 @@ fn remote_spawn_runs_a_thunk_on_a_peer() {
 (node-start :b "127.0.0.1:{port_b}" "secret")
 (connect "a@127.0.0.1:{port_a}")
 (let (me (self))
-  (remote-spawn :a (send me [:hello-from-a (node-name)])))
+  (remote-spawn :a@127.0.0.1 (send me [:hello-from-a (node-name)])))
 (receive
-  ([:hello-from-a from] (if (= from :a)
+  ([:hello-from-a from] (if (= from :a@127.0.0.1)
                           (println "REMOTE-SPAWN-OK")
                           (throw (str "spawned on wrong node: " from))))
   (after 5000 (throw "no reply from remote-spawn")))
@@ -546,7 +547,7 @@ fn cross_node_pid_monitor_fires_down() {
         r#"
 (node-start :b "127.0.0.1:{port_b}" "secret")
 (connect "a@127.0.0.1:{port_a}")
-(send {{:name :work-bootstrap :node :a}} [:hello (self)])
+(send {{:name :work-bootstrap :node :a@127.0.0.1}} [:hello (self)])
 (def remote-pid (receive ([:my-pid p] p) (after 5000 (throw "no pid reply"))))
 (def m (monitor remote-pid))
 (send remote-pid :stop)
@@ -616,7 +617,7 @@ fn remote_monitor_fires_noconnection_on_node_down() {
         r#"
 (node-start :b "127.0.0.1:{port_b}" "secret")
 (connect "a@127.0.0.1:{port_a}")
-(send {{:name :work-bootstrap :node :a}} [:hello (self)])
+(send {{:name :work-bootstrap :node :a@127.0.0.1}} [:hello (self)])
 (def remote-pid (receive ([:my-pid p] p) (after 5000 (throw "no pid reply"))))
 (def m (monitor remote-pid))
 ;; Tell the parent harness we're armed; the harness will kill A. We can't
@@ -717,7 +718,7 @@ fn ensure_link_reconnects_across_a_node_restart() {
 (node-start :b "127.0.0.1:{port_b}" "secret")
 (ensure-link "a@127.0.0.1:{port_a}")
 ;; First probe — proves the initial link came up.
-(send {{:name :probe :node :a}} [:ping (self)])
+(send {{:name :probe :node :a@127.0.0.1}} [:ping (self)])
 (receive ([:pong _] (println "FIRST-OK")) (after 5000 (throw "no first pong")))
 ;; Tell the harness we're ready for the restart.
 (println "ARMED")
@@ -725,7 +726,7 @@ fn ensure_link_reconnects_across_a_node_restart() {
 ;; bounce A1 → A2 in between. `ensure-link` re-`connect`s on :nodedown.
 (defn try-second (n)
   (when (= n 0) (throw "no second pong after retries"))
-  (send {{:name :probe :node :a}} [:ping (self)])
+  (send {{:name :probe :node :a@127.0.0.1}} [:ping (self)])
   (receive
     ([:pong _] (println "SECOND-OK"))
     (after 500 (try-second (- n 1)))))
@@ -918,10 +919,10 @@ fn duplicate_connect_is_deduplicated() {
 (node-start :b "127.0.0.1:{port_b}" "secret")
 (connect "a@127.0.0.1:{port_a}")
 (connect "a@127.0.0.1:{port_a}")          ; second connect — should reuse, not add
-(send {{:name :echo :node :a}} [:hi (self)])
+(send {{:name :echo :node :a@127.0.0.1}} [:hi (self)])
 (receive ([:welcome] :ok) (after 5000 (throw "no welcome")))
-(println (str "NODES=" (nodes)))           ; expect exactly (:a)
-(send {{:name :echo :node :a}} [:bye (self)])
+(println (str "NODES=" (nodes)))           ; expect exactly (:a@127.0.0.1)
+(send {{:name :echo :node :a@127.0.0.1}} [:bye (self)])
 "#
     );
 
@@ -935,7 +936,7 @@ fn duplicate_connect_is_deduplicated() {
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        out.status.success() && stdout.contains("NODES=(:a)"),
+        out.status.success() && stdout.contains("NODES=(:a@127.0.0.1)"),
         "expected a single deduplicated link.\n--- stdout ---\n{stdout}\n--- stderr ---\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -1012,9 +1013,9 @@ fn node_down_is_detected() {
 (node-start :b "127.0.0.1:{port_b}" "secret")
 (connect "a@127.0.0.1:{port_a}")
 (monitor-node :a)
-(send {{:name :echo :node :a}} [:hi (self)])
+(send {{:name :echo :node :a@127.0.0.1}} [:hi (self)])
 (receive ([:welcome] :ok) (after 5000 (throw "no welcome")))   ; link + monitor are up
-(send {{:name :echo :node :a}} [:bye (self)])                  ; make :a exit
+(send {{:name :echo :node :a@127.0.0.1}} [:bye (self)])                  ; make :a exit
 (receive ([:nodedown :a] (println "NODEDOWN-OK"))
          (after 10000 (throw "no nodedown")))
 "#
@@ -1070,7 +1071,7 @@ fn remote_link_death_delivers_exit_to_a_trapping_peer() {
 (node-start :b "127.0.0.1:{port_b}" "secret")
 (connect "a@127.0.0.1:{port_a}")
 (trap-exit true)
-(send {{:name :worker :node :a}} [:whoami (self)])
+(send {{:name :worker :node :a@127.0.0.1}} [:whoami (self)])
 (def w (receive ([:iam p] p) (after 5000 (throw "no whoami"))))
 (unless (pid? w) (throw "whoami reply was not a pid"))
 (link w)                                  ; cross-node link (Frame::Link → A records its half)
@@ -1123,7 +1124,7 @@ fn remote_exit_kills_a_worker() {
         r#"
 (node-start :b "127.0.0.1:{port_b}" "secret")
 (connect "a@127.0.0.1:{port_a}")
-(send {{:name :worker :node :a}} [:whoami (self)])
+(send {{:name :worker :node :a@127.0.0.1}} [:whoami (self)])
 (def w (receive ([:iam p] p) (after 5000 (throw "no whoami"))))
 (def m (monitor w))
 (exit w :kill)                            ; remote kill (non-link Frame::Exit)
@@ -1187,7 +1188,7 @@ fn supervisor_restarts_a_remote_child() {
 (require 'supervisor)
 (def me (self))
 (def spec {{:id :w :restart :permanent
-            :start (fn () (do (send {{:name :factory :node :a}} [:make (self) me])
+            :start (fn () (do (send {{:name :factory :node :a@127.0.0.1}} [:make (self) me])
                               (receive ([:made p] p) (after 5000 (throw "no :made")))))}})
 (def sup (supervisor/start-supervisor (list spec)))
 (def w1 (receive ([:up p] p) (after 6000 (throw "no first :up"))))
@@ -1209,6 +1210,82 @@ fn supervisor_restarts_a_remote_child() {
     assert!(
         out.status.success() && stdout.contains("CROSS-NODE-SUP-OK"),
         "expected a supervisor on B to restart a crashed remote child on A.\n--- stdout ---\n{stdout}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Node names are qualified to `name@host` (ADR-073): a TCP node takes the host
+/// from its listen address (so peers can derive the same name from the dial
+/// address), and pids print with that qualified node. Single process — no peer.
+#[test]
+fn node_name_is_qualified_with_host() {
+    let dir = std::env::temp_dir().join(format!("brood-dist-qual-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = r#"
+(node-start :a "127.0.0.1:0")
+(println (str "NODE=" (node-name)))
+(println (str "SELF=" (self)))
+"#;
+    let out = spawn_brood(&dir, "qual.blsp", prog)
+        .wait_with_output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("NODE=:a@127.0.0.1"),
+        "node name should be qualified name@host; got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("a@127.0.0.1/"),
+        "a pid should print with the qualified node name; got:\n{stdout}"
+    );
+}
+
+/// `(remote-spawn-sync node expr)` (ADR-067 residual) runs `expr` on a peer and
+/// **returns the child's pid** — a remote pid carrying the peer's `name@host`.
+/// Proves the request/reply roundtrip and that the returned pid is usable
+/// (the child messages back through a captured local).
+#[test]
+fn remote_spawn_sync_returns_a_usable_remote_pid() {
+    let _g = port_lock();
+    let dir = std::env::temp_dir().join(format!("brood-dist-rss-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let port_a = free_port();
+    let port_b = free_port();
+
+    let server = format!(
+        r#"
+(node-start :a "127.0.0.1:{port_a}" "secret")
+(start-remote-spawn)
+(receive (:never :x))
+"#
+    );
+    let client = format!(
+        r#"
+(node-start :b "127.0.0.1:{port_b}" "secret")
+(connect "a@127.0.0.1:{port_a}")
+(let (me (self))
+  (def child (remote-spawn-sync :a@127.0.0.1 (send me [:ran (self) (* 6 7)]))))
+(unless (pid? child) (throw "remote-spawn-sync did not return a pid"))
+(receive
+  ([:ran on val] (if (= val 42)
+                   (println (str "REMOTE-SPAWN-SYNC-OK child=" child " ran-on=" on))
+                   (throw (str "wrong value " val))))
+  (after 5000 (throw "remote child never ran")))
+"#
+    );
+
+    let mut a = spawn_brood(&dir, "server.blsp", &server);
+    wait_until_listening(port_a);
+    let b = spawn_brood(&dir, "client.blsp", &client);
+    let out = b.wait_with_output().expect("client finished");
+    let _ = a.kill();
+    let _ = a.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains("REMOTE-SPAWN-SYNC-OK"),
+        "remote-spawn-sync should return the child pid and the child should run.\n--- stdout ---\n{stdout}\n--- stderr ---\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
 }
