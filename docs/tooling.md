@@ -137,11 +137,15 @@ declaring anything:
   :version "0.1.0")          ; :main omitted -> (main main)
 
 ;; override the fn name:
-(project ... :main '(main start))
+(project ... :main (main start))
 
 ;; or just the module (fn name defaults to `main`):
-(project ... :main 'cli)
+(project ... :main cli)
 ```
+
+`project.blsp` is read as **data, not evaluated**, so write `:main` as bare
+symbols — `:main cli` / `:main (main start)`, **never** quoted (`:main 'cli`
+misparses: the `quote` is read literally as the module name).
 
 Extra positional args after `run` are passed to the entry fn as strings, so
 `nest run alpha beta` calls `(main "alpha" "beta")`. The entry can be no-arg

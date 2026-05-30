@@ -9758,3 +9758,43 @@ the tree-walker as fallback + a differential test mode; Stage 1 (lexical address
 + frame-slots-as-roots) is the first milestone and de-risks the rooting crux. Full
 invariant checklist (TCO, GC, preemption, hot-reload, multi-arity, immutability) and
 risk register in the doc.
+
+---
+
+## 2026-05-30 — Errors that teach (LLM-native, first two)
+
+**Context.** A field report from an LLM building an app from scratch (and the
+companion [llm-native.md](llm-native.md)) made the case that an LLM with no
+training data on Brood learns from two surfaces: the skill it loads, and the
+errors it hits. The errors are the higher-leverage surface — they teach at the
+exact moment of the mistake, no reading required. Two of the most common
+post-ADR-065 footguns failed silently or opaquely; turned both into fix-it
+errors.
+
+**Built.**
+- **Unbound-symbol `(:use mod)` hint** (`eval::unbound_namespace_hint`). When a
+  bare name is unbound but the global table holds it as `mod/name` — the classic
+  "`(require 'mod)` loaded the module but didn't refer it" mistake — the error
+  now carries a hint: *"`union` is defined as `set/union` — add `(:use set)` to
+  your `defmodule` header, or call it qualified."* Single match → names the
+  namespace; multiple → lists them. Scans `global_symbols()` only on the error
+  path (free in the common case), and only for genuinely bare names (a qualified
+  miss is a different problem). Falls through to the existing scheduler-race hint
+  when there's no namespace match, so the green-process tests are unaffected.
+- **`:main` quote guard** (`project--parse-main`, `std/project.blsp`). A manifest
+  is unevaluated data, so `:main 'app` reads as `(quote app)` and *silently*
+  misparsed to module `quote`. Now a `(quote …)` head is caught with a fix-it:
+  *":main takes a bare symbol, not a quoted one — write `:main app` …"*.
+
+**Tested.** `unbound_bare_name_suggests_use_of_its_namespace` (Rust, `basic.rs`)
+asserts the hint rides the caught error's `:hint`; two in-language cases in
+`tests/project_test.blsp`'s `:main parsing` describe cover the quoted-symbol and
+quoted-list forms (27→29 green). Negative paths verified: an unknown name
+(`frobnicate-xyz`) gets no namespace hint; `no-such-fn` in the root thread still
+gets nil.
+
+**Why these two first.** Cheapest demonstration of the "errors that teach"
+direction (llm-native.md §"explain-error"/§"check"), and each permanently removes
+a class of failure for every future LLM without it reading anything. Next
+candidates: reader-level hints for Clojure/Scheme syntax (`(let ((a 1)) …)`,
+`#{…}`, `set!`, `loop`/`recur`), and an intent→idiom cookbook.

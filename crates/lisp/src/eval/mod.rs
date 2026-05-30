@@ -12,6 +12,7 @@ use std::sync::LazyLock;
 use smallvec::SmallVec;
 
 use crate::core::heap::{Heap, Root, SymbolMap};
+use crate::core::keywords as kw;
 use crate::core::value::{self, Closure, ClosureId, EnvId, NativeId, Symbol, Value};
 use crate::error::{LispError, LispResult};
 
@@ -44,17 +45,17 @@ enum SpecialForm {
 /// This is deliberately the evaluator-*core* subset; `builtins.rs::SPECIAL_FORMS`
 /// is the broader, LSP-facing list (it also names the macro keywords).
 const SPECIAL_SPELLINGS: &[(&str, SpecialForm)] = &[
-    ("quote", SpecialForm::Quote),
-    ("if", SpecialForm::If),
-    ("do", SpecialForm::Do),
-    ("def", SpecialForm::Def),
-    ("fn", SpecialForm::Fn),
-    ("lambda", SpecialForm::Fn),
-    ("quasiquote", SpecialForm::Quasiquote),
-    ("defmacro", SpecialForm::Defmacro),
-    ("let", SpecialForm::Let),
-    ("let*", SpecialForm::Let),
-    ("letrec", SpecialForm::Letrec),
+    (kw::QUOTE, SpecialForm::Quote),
+    (kw::IF, SpecialForm::If),
+    (kw::DO, SpecialForm::Do),
+    (kw::DEF, SpecialForm::Def),
+    (kw::FN, SpecialForm::Fn),
+    (kw::LAMBDA, SpecialForm::Fn),
+    (kw::QUASIQUOTE, SpecialForm::Quasiquote),
+    (kw::DEFMACRO, SpecialForm::Defmacro),
+    (kw::LET, SpecialForm::Let),
+    (kw::LET_STAR, SpecialForm::Let),
+    (kw::LETREC, SpecialForm::Letrec),
 ];
 
 // Keyed by interned symbol id — use the fast integer hasher, since `special_form`
@@ -134,7 +135,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                 let expr_sym = expr;
                 return heap
                     .env_get(env, s)
-                    .ok_or_else(|| unbound_error(s))
+                    .ok_or_else(|| unbound_error(heap, s))
                     .map_err(|e| e.or_form_pos(heap, expr_sym));
             }
             Value::Vector(id) => {
@@ -559,7 +560,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                 // between here and the lookup — `env_get` doesn't eval.)
                 let v = heap
                     .env_get(env, s)
-                    .ok_or_else(|| unbound_error(s))
+                    .ok_or_else(|| unbound_error(heap, s))
                     .map_err(|e| e.or_form_pos(heap, call_form))?;
                 if let Value::Macro(mid) = v {
                     // Macro expansion can collect at any depth (ADR-061); root
@@ -1041,8 +1042,21 @@ fn call_native(heap: &mut Heap, id: NativeId, argv: &[Value], env: EnvId) -> Lis
 /// `acc`/`fold`/`%eq` spuriously look unbound. False positives are
 /// tolerable: the hint conditions on "if this fired under fan-out, try
 /// `-j 1`," not on every unbound being a race. (`docs/error-codes.md`.)
-fn unbound_error(sym: Symbol) -> LispError {
-    let e = LispError::unbound(format!("unbound symbol: {}", value::symbol_name(sym)));
+fn unbound_error(heap: &Heap, sym: Symbol) -> LispError {
+    let name = value::symbol_name(sym);
+    let e = LispError::unbound(format!("unbound symbol: {}", name));
+    // A construct an LLM reached for from another Lisp that Brood doesn't have —
+    // point at the Brood way (`set!` → process, `loop` → tail recursion, …).
+    if let Some(hint) = foreign_construct_hint(&name) {
+        return e.with_hint(hint);
+    }
+    // The post-ADR-065 footgun: a bare name that exists only as `mod/name`
+    // because a `(require 'mod)` loaded the module but didn't refer it. Point
+    // straight at the `(:use mod)` fix — the single most common mistake for code
+    // (and LLMs) written against the old flat-namespace model.
+    if let Some(hint) = unbound_namespace_hint(heap, sym) {
+        return e.with_hint(hint);
+    }
     if crate::process::in_green_process() {
         e.with_hint(
             "this fired inside a spawned process — if it happens only under \
@@ -1051,6 +1065,110 @@ fn unbound_error(sym: Symbol) -> LispError {
         )
     } else {
         e
+    }
+}
+
+/// Guidance for a name an LLM reaches for out of Clojure/Scheme/Common-Lisp
+/// muscle memory that Brood deliberately doesn't have — surfaced as a hint on
+/// both the unbound *error* (runtime) and the advisory checker's unbound
+/// *warning* (write-time), so the Brood way is right there, not a doc lookup.
+/// Only consulted once a name is known-unbound, so a user who defines one of
+/// these sees no hint. Names Brood *does* provide are intentionally absent:
+/// it aliases `car`/`cdr`, and has `lambda`/`let*`/`dotimes`/`doseq`/`dolist`/
+/// `unless`/`when`/`ref` — those Just Work, so hinting them would be wrong.
+pub(crate) fn foreign_construct_hint(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "set!" | "setq" | "setf" | "set-car!" | "set-cdr!" | "vector-set!"
+        | "string-set!" => {
+            "Brood is immutable (ADR-026) — there is no in-place assignment. Hold \
+             changing state in a process (spawn/send/receive), or `def` to rebind a \
+             global; let/fn bindings never mutate."
+        }
+        "atom" | "swap!" | "reset!" | "deref" | "volatile!" | "vreset!" | "vswap!" => {
+            "Brood has no atoms/cells — mutable state lives in a process \
+             (spawn/receive) holding it in its loop, never a mutable value."
+        }
+        "while" | "until" => {
+            "Brood has no `while` — loop with tail recursion (TCO guaranteed, O(1) \
+             stack) or, for evolving state, a process (spawn/receive)."
+        }
+        "loop" | "recur" => {
+            "Brood has no `loop`/`recur` — write a tail-recursive helper that carries \
+             an accumulator; a self-call in tail position is O(1) stack."
+        }
+        "transient" | "persistent!" | "conj!" | "assoc!" | "disj!" | "pop!" => {
+            "Brood collections are persistent and immutable — there are no \
+             transients; `conj`/`assoc`/`dissoc`/`into` return fresh values."
+        }
+        "defprotocol" | "defrecord" | "deftype" | "definterface" | "reify" => {
+            "Brood has no protocols/records/types — model data with plain maps and \
+             behaviour with functions; dispatch with `match` or `cond`."
+        }
+        "lazy-seq" | "lazy-cat" => {
+            "Brood sequences are eager — use `map`/`filter`/`fold`; for streaming, a \
+             process that `send`s values."
+        }
+        "case" | "condp" => "Brood has no `case`/`condp` — use `match` (patterns) or `cond`.",
+        "progn" | "begin" => "Brood spells `progn`/`begin` as `do`.",
+        "mapcar" => "Brood spells `mapcar` as `map`.",
+        "null?" => "Brood tests nil with `nil?` (and `empty?` for an empty collection).",
+        "eq?" | "eql" | "equalp" => "Brood compares with `=` (structural equality).",
+        "defun" => "Brood spells `defun` as `defn`.",
+        "defvar" | "defparameter" => {
+            "Use `def` for a global, or `defdyn` for a dynamic var (rebindable with \
+             `binding`)."
+        }
+        "letfn" => {
+            "Brood has no `letfn` — bind local functions with `let` + `fn`, or define \
+             them top-level with `defn`."
+        }
+        "with-meta" | "vary-meta" => "Brood values carry no metadata.",
+        "#" => {
+            "Brood has no `#` reader macros: `#(…)` lambda shorthand → `(fn (x) …)`; \
+             `#{…}` set literal → `(set […])` after `(:use set)`."
+        }
+        _ => return None,
+    })
+}
+
+/// If a bare unbound `sym` exists in the global table only under a namespace
+/// (`mod/sym`), suggest the `(:use mod)` clause that would refer it bare. Runs
+/// only on the error path, so the global scan costs nothing in the common case.
+fn unbound_namespace_hint(heap: &Heap, sym: Symbol) -> Option<String> {
+    let name = value::symbol_name(sym);
+    if name.contains('/') {
+        return None; // a qualified miss (`mod/foo`) is a different problem
+    }
+    let suffix = format!("/{}", name);
+    let mut mods: Vec<String> = heap
+        .global_symbols()
+        .iter()
+        .filter_map(|&g| {
+            let spelling = value::symbol_name(g);
+            spelling.strip_suffix(&suffix).map(str::to_string)
+        })
+        // keep only a single-segment module name (`mod`, not `a/b`); a `--`
+        // name is private and wouldn't be referred by `(:use)` anyway
+        .filter(|m| !m.is_empty() && !m.contains('/') && !m.contains("--"))
+        .collect();
+    mods.sort();
+    mods.dedup();
+    match mods.as_slice() {
+        [] => None,
+        [m] => Some(format!(
+            "`{name}` is defined as `{m}/{name}` — add `(:use {m})` to your \
+             `defmodule` header to refer it bare, or call it qualified as `{m}/{name}`"
+        )),
+        _ => Some(format!(
+            "`{name}` is defined in namespaces {list} — add the matching `(:use …)` \
+             to your `defmodule` header, or call it qualified (e.g. `{first}/{name}`)",
+            list = mods
+                .iter()
+                .map(|m| format!("`{m}`"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            first = mods[0],
+        )),
     }
 }
 

@@ -5,6 +5,7 @@
 pub mod alloc;
 pub mod blob;
 pub mod heap;
+pub mod keywords;
 pub mod map_champ;
 pub mod sync;
 pub mod value;

@@ -159,8 +159,9 @@ surface change.
 
 ## Sets
 
-There is no kernel set kind yet. A **set** is an opt-in library (`(require 'set)`,
-`std/set.blsp`) built *on maps*: a set is a map of `element → true`, so every map
+There is no kernel set kind yet. A **set** is an opt-in library (`(:use set)` to
+refer its names bare, `std/set.blsp`) built *on maps*: a set is a map of
+`element → true`, so every map
 operation already applies — membership is `(contains? s x)`, elements are
 `(keys s)`, size is `(count s)`, and you can `fold`/`map`/`into` it. The module
 adds only what maps lack: `(set coll)` (dedups), `conj`/`disj`, and the algebra
@@ -261,12 +262,10 @@ string returns that string (the CL/Elisp rule), so it isn't documentation:
 The docstring is stored on the closure and read with `(doc f)` (below); it
 powers editor hover / `describe-function` (see `docs/lsp.md`).
 
-A **module** documents itself the same way: a string literal as a file's
-**first top-level form** is the module's docstring (the file-level analogue of
-the function rule). Loading the file discards it harmlessly; the doc tooling
-reads it from source. `nest doc <module>` renders both — the module docstring
-and every definition's signature + docstring — as Markdown (see
-`docs/tooling.md`).
+A **module** documents itself the same way: the docstring passed to its opening
+`(defmodule name "…")` form (the file-level analogue of the function rule).
+`nest doc <module>` renders both — the module docstring and every definition's
+signature + docstring — as Markdown (see `docs/tooling.md`).
 
 ### Recursion is the loop
 
@@ -354,11 +353,11 @@ The `->` and `->>` threading macros are also defined in the prelude:
 (->> (list 1 2 3) (map inc))  ;=> (2 3 4)
 ```
 
-> Note: nested quasiquote is not level-tracked yet. Macros are otherwise
-> unhygienic — auto-gensym (`x#`) / `gensym` handle *binding* capture; *free*
-> references resolve at the use site until namespaces land (ADR-065). The advisory
-> hygiene lint flags a plain literal binder that could capture a spliced argument.
-> See spec §7.
+> Note: nested quasiquote is not level-tracked yet. Auto-gensym (`x#`) / `gensym`
+> handle *binding* capture; *free* references in a macro template **auto-qualify**
+> to the macro's defining namespace (ADR-066 α), so a macro expands correctly when
+> used in another namespace without hand-qualifying. The advisory hygiene lint
+> flags a plain literal binder that could capture a spliced argument. See spec §7.
 
 ## Pattern matching
 
@@ -960,7 +959,7 @@ the language" principle.
   mcp` tool handler, whose output is diverted off the JSON-RPC channel — drains
   only its own output. The buffer is released even if `body` throws (the error
   re-raises). Built on the `%capture-begin`/`%capture-take` kernel primitives.
-- For simple raw-terminal control, `(require 'ansi)` provides escape *strings*
+- For simple raw-terminal control, `(:use ansi)` provides escape *strings*
   to `print`: `ansi-clear` (erase + home — the per-frame reset), `ansi-cursor`,
   `ansi-home`, `ansi-hide-cursor`/`ansi-show-cursor`. The ESC byte is the `\e`
   string escape. For a structured render-op frame buffer instead, use
@@ -1006,7 +1005,10 @@ the language" principle.
 `eval`  `read-string`  `read-all`  `eval-string`  `load`  `require`  `macroexpand`  `macroexpand-1`  `gensym`
 
 `(require 'name)` loads an embedded standard-library module (e.g. `(require 'test)`
-for the test framework) — works from any directory.
+for the test framework) — works from any directory. It only *loads*: the module's
+names stay qualified (`test/describe`). To refer them **bare**, put a `(:use name)`
+clause in your `defmodule` header (see Namespaces) — that auto-loads too, so
+`(:use test)` subsumes `(require 'test)`.
 
 ```clojure
 (eval (read-string "(+ 40 2)"))  ;=> 42
@@ -1026,19 +1028,20 @@ it into the live environment, replace definitions.
 
 ### Namespaces
 
-A file can open a **namespace** with `(ns foo "optional doc")` as its first form
-(one `ns` per file). Inside it, every `def`/`defn`/`defmacro` defines the
-**qualified** name `foo/name`, and a bare reference resolves to `foo/name` when
-this namespace defines it (including a *forward* reference to something defined
-later in the file), otherwise it falls through to the **root** namespace — the
-prelude and any non-namespaced globals. This keeps first-party and third-party
-code from clobbering each other in the one shared global table (ADR-019/065),
-without a separate namespace axis in the core: `foo/name` is just one interned
-symbol (`/` is an ordinary symbol character), so the runtime, hot reload, and
-`send`/copy are unchanged.
+A file opens a **namespace** with `(defmodule foo "optional doc")` as its first
+form (one per file — `defmodule` *is* the namespace form; there is no separate
+`ns`). Inside it, every `def`/`defn`/`defmacro` defines the **qualified** name
+`foo/name`, and a bare reference resolves to `foo/name` when this namespace
+defines it (including a *forward* reference to something defined later in the
+file), otherwise it falls through to the **root** namespace — the prelude and any
+non-namespaced globals. This keeps first-party and third-party code from
+clobbering each other in the one shared global table (ADR-019/065), without a
+separate namespace axis in the core: `foo/name` is just one interned symbol (`/`
+is an ordinary symbol character), so the runtime, hot reload, and `send`/copy are
+unchanged.
 
 ```clojure
-(ns text "buffer text ops")
+(defmodule text "buffer text ops")
 (defn insert (buf i s) …)        ; defines text/insert
 (defn append (buf s) (insert buf (len buf) s))   ; bare `insert` → text/insert
 (map insert bufs)                ; `map` → root/prelude (not text/map)
@@ -1052,28 +1055,36 @@ Import other namespaces' names with `(:use …)` clauses in the header. `(:use m
 refers all of `mod`'s public names bare; `(:use mod :refer [a b])` refers just
 those. A bare reference resolves **current namespace → imports → root**, so an
 own-namespace definition shadows an import. `:use` auto-loads the module (it never
-*fetches* a package — declared deps only).
+*fetches* a package — declared deps only). A bare top-level `(require 'mod)` only
+*loads* `mod` — its names stay qualified (`mod/foo`); use a `(:use mod)` clause to
+refer them bare. `:use` is the **only** import clause: `(:require …)` is not a
+`defmodule` clause and any non-`:use` form in the header is silently ignored.
 
 ```clojure
-(ns editor "the editor core"
+(defmodule editor "the editor core"
   (:use buffer)                 ; refer buffer's public names bare
   (:use text :refer [insert]))  ; refer just text/insert as `insert`
 (defn open (path) (insert (new-buffer) 0 (slurp path)))   ; insert → text/insert
 ```
 
+**Earmuffed `*foo*` names are ambient** — by convention dynamic/config vars
+(`*load-path*`, `defdyn` vars). They are **never** namespaced: a `(def *width* …)`
+in any module defines root `*width*`, reachable bare everywhere (and so must be
+project-unique). Every non-earmuff name is namespaced.
+
 Privacy is **soft** (Clojure/CL-style, not Racket sealing): a `foo--internal`
 name marked private by convention is skipped by `(:use)` refer-all but *still
 reachable* by its qualified spelling, so live redefinition and advice keep working.
-At the REPL the current namespace is sticky — `(ns foo)` persists across entries
-until the next; `(current-ns)` reports it.
+At the REPL the namespace tracks the last `defmodule`; `(current-ns)` reports it.
 
-> Status (inc-1/2): qualified definitions + reference resolution + `(:use …)`
-> imports + auto-require + the ns-aware checker are in. **Decided, in progress:**
-> `defmodule` is becoming the single namespace form (`ns` will be dropped — a module
-> *is* a namespace), with `std/` migrating to namespaces. **Not yet:** macro-template
-> *free*-reference resolution — so a macro defined in a non-root namespace must
-> hand-qualify the cross-namespace names it expands to. Quoted symbols (`'foo`,
-> message tags, map keys) are **never** qualified — they are data.
+> Status: landed (ADR-065/066, 2026-05-30). `defmodule` is the single namespace
+> form (`ns` removed); all of `std/` and every test file are namespaced; the
+> checker, LSP, and `nest mcp` resolve names ns-aware. Macro templates
+> **auto-qualify** their free references to the defining namespace (ADR-066 α), so
+> a macro is robust across namespaces without hand-qualifying. Quoted symbols
+> (`'foo`, message tags, map keys) are **never** qualified — they are data.
+> Package-level name collisions are detected and rejected at dependency-resolution
+> time (ADR-070), enforced once the package manager lands (ADR-037).
 
 ### Introspection (editor tooling)
 `doc`  `arglist`  `global-names`  `bound?`  `all-globals`  `apropos`  `doc-search`

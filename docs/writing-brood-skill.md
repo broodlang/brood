@@ -45,25 +45,12 @@ will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
    not the raw 2-arg `%add`/`%lt` primitives (those are for the prelude's own
    bootstrap). Maps have **no commas**: `{:a 1 :b 2}`.
 
-8. **Maps are seqable; `sort` and `index-of` are polymorphic.** Three places
-   where the obvious builtin already covers more than you'd guess:
-   - `(map f m)` / `(filter f m)` / `(fold f acc m)` / `(reduce f acc m)` /
-     `(count m)` / `(into [] m)` all walk a map as its `[k v]` pairs. No need
-     for `(zip (keys m) (vals m))`; map iteration order is hash-driven, so use
-     `frequencies` for order-insensitive comparisons. `seq` and `entries` make
-     the coercion explicit when you want it.
-   - **Count with `frequencies` + `mapcat`, not a manual scan.** To tally
-     something across a collection, map each item to what it contributes and let
-     `frequencies` do the counting in one pass — e.g. a grid's next-generation
-     neighbour counts are `(frequencies (mapcat neighbours (keys live)))`: no
-     nested loop, no mutable tally. Reach for this before hand-rolling an
-     accumulator over indices.
-   - `(sort coll)` is `<` for numbers but **structural lexicographic order** for
-     vectors/lists, and text order for strings/keywords/symbols. So
-     `(sort [[1 0] [2 1]])` Just Works — no comparator needed.
-   - `(index-of coll x)` accepts a list, vector, or string (substring search)
-     and returns -1 if absent. `(includes? coll x)` is the predicate version
-     across lists, vectors, strings, and maps (values).
+8. **Maps are seqable; `sort`/`index-of` are polymorphic.** `map`/`filter`/`fold`/
+   `reduce`/`count`/`into` all walk a map as its `[k v]` pairs (no
+   `(zip (keys m) (vals m))`); order is hash-driven, so compare with
+   `frequencies`. `(sort coll)` uses structural lexicographic order for
+   vectors/lists — `(sort [[1 0] [2 1]])` needs no comparator. `index-of` /
+   `includes?` work on lists, vectors, and strings (substring).
 
 ## Naming & shape (match std/)
 
@@ -75,6 +62,15 @@ will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
   backticks/**bold**/`-` bullets render. Each module opens with `(defmodule name "…")`.
 - Errors: `(error "fn-name: what went wrong: " value)` — lowercase, value appended.
 
+**Modules are namespaces (ADR-065).** `(defmodule name …)` compiles the file into
+namespace `name`: `def`/`defn` define `name/foo`. To call another module's names
+**bare**, add a `(:use mod)` clause to the header (`(defmodule app "…" (:use
+display) (:use test))`); a plain `(require 'mod)` only *loads* it, leaving names
+qualified (`mod/foo`), and `(:require …)` is **not** a clause (silently ignored —
+bare calls then fail `unbound symbol`). Earmuffed `*foo*` names are ambient/bare,
+never namespaced. From outside a module (REPL, `nest mcp` eval) reach a `defn`
+qualified: `(life/step …)`.
+
 ## Use the MCP server as your coding loop
 
 A Brood project scaffolds `.mcp.json` pointing at `nest mcp` — a Model Context
@@ -85,8 +81,9 @@ to write actually works. Its tools:
 - **`eval`** — evaluate a Brood expression in the running image. Use it to test a
   function before committing it to a file, or to reproduce a bug. *Return data
   as the result value — don't `(print …)`; that corrupts the JSON-RPC stream.*
-- **`load`** — load a file into the image (re-`def`s its globals, hot-reload), so
-  you can edit a `.blsp` file and immediately exercise the new definitions.
+- **`load`** — load a file into the image (re-`def`s its globals, hot-reload).
+  The image is a separate world from disk: after editing a file, `eval` sees the
+  *old* defs until you `load` it. Reflex: edit → `load` → `eval`.
 - **`lookup`** — a global's arglist, docstring, and source location. Check a
   builtin's real signature here instead of assuming.
 - **`macroexpand`** — see what a macro expands to (essential when writing or
@@ -119,39 +116,30 @@ round-trips. Two faster moves:
   | `set!` / `swap!` / atoms | nothing — state is a process or a Rust handle (trap #1) |
   | `loop`/`recur`, `while`, `for`-loop | tail recursion, or `fold`/`map`/`filter`/`reduce` (trap #2) |
   | a `flush` after `print` | nothing — `print` flushes stdout every call |
-  | raw ANSI (`clear`+`home`, cursor moves) | `(require 'ansi)` → **call** `(ansi-clear)`/`(ansi-home)`/`(ansi-cursor r c)`/`(ansi-hide-cursor)` — these are **zero-arg functions** that *return* an escape string, so you must call them: `(print (ansi-clear))`, **never** `(print ansi-clear)` (a bare symbol prints `#<fn …>` and emits no escape). ESC is `\e`. A render loop wants `std/display` instead. |
+  | raw ANSI (`clear`/`home`/cursor) | `(:use ansi)` (bare `(require 'ansi)` leaves names qualified) → `(ansi-clear)`/`(ansi-home)`/`(ansi-cursor r c)` are **zero-arg fns returning an escape string** — call them: `(print (ansi-clear))`, never `(print ansi-clear)` (prints `#<fn …>`). A render loop wants `std/display`. |
   | a built-in RNG (`rand`) | `rng`/`rand-int`/`rand-float`/`shuffle`/`sample` — pure & seedable, return `[value next-seed]`; thread the seed through your state |
-  | a set / `#{}` | `(require 'set)` → a set is a **map of `element → true`**: membership `(contains? s x)`, elements `(keys s)`, size `(count s)`; the module adds `(set coll)` (dedups), `conj`/`disj`, `union`/`intersection`/`difference`/`subset?`. No `#{}` literal or `set?` yet — test with `map?`. |
+  | a set / `#{}` | `(:use set)` (bare `(require 'set)` leaves names qualified) → a set is a **map of `element → true`**: membership `(contains? s x)`, elements `(keys s)`; adds `(set coll)`, `conj`/`disj`, `union`/`intersection`/`difference`/`subset?`. No `#{}` literal or `set?` — test with `map?`. |
 
 ## When to reach for a process (vs staying pure)
 
-Immutability rightly makes pure functions the default — but don't let that
-over-rotate into avoiding concurrency where it's the *idiom*. Reach for a
-**process** (`spawn`/`send`/`receive`) when you have:
+Pure functions are the default, but reach for a **process**
+(`spawn`/`send`/`receive`) when you have:
 
-- **Long-lived evolving state** — a counter, cache, or session that changes over
-  time. A process holding state in its `receive` loop is *the* way to express
-  mutable state (there are no atoms/cells — trap #1). The packaged form is a
-  gen-server-style actor (`std/hatch`).
-- **CPU fan-out across cores** — an embarrassingly-parallel computation big
-  enough to beat the spawn + copy-on-send overhead. Split the work, `spawn` a
-  worker per band, fan results back in with `receive`. Small inputs won't pay for
-  it — `(bench …)` the sequential version first; don't assume a win.
-- **I/O multiplexing** — several blocking sources (sockets, timers, a TUI input
-  stream) handled at once: one process per source, a coordinator `receive`s.
+- **Long-lived evolving state** — a counter, cache, or session. A process holding
+  state in its `receive` loop is *the* way to express mutable state (no
+  atoms/cells — trap #1); the packaged form is a gen-server actor (`std/hatch`).
+- **CPU fan-out across cores** — split the work, `spawn` a worker per band, fan
+  back in with `receive`. `(bench …)` the sequential version first; small inputs
+  won't beat the spawn + copy-on-send overhead.
+- **I/O multiplexing** — several blocking sources at once: one process per source,
+  a coordinator `receive`s.
 
-Otherwise **stay pure**: a self-contained transform, one render frame, a one-shot
-computation — a tail loop or `fold`/`map` is simpler and easier to test.
+Otherwise **stay pure** — a tail loop or `fold`/`map` is simpler and easier to test.
 
-**The old "concurrency is risky here" caution is retired.** The multi-thread
-scheduler race that once made spawned workers unsafe (KI-1/KI-2 — the
-`render-concurrent` revert) is **fixed** (2026-05-29), and the GC now roots every
-eval site, so concurrent code is safe to write again. Messages **deep-copy**
-across per-process heaps (share-nothing), so a value you `send` is independent in
-the receiver — there are no shared-mutation hazards by construction. Test it with
-spawn-N-then-collect (fan workers out, `receive` the results, assert on the
-aggregate); reserve `:isolated` for tests that need their own process for
-*memory* reasons, not for safety.
+Messages **deep-copy** across per-process heaps (share-nothing), so a `send`-ed
+value is independent in the receiver — no shared-mutation hazards. Test
+concurrency with spawn-N-then-collect (fan out, `receive`, assert on the
+aggregate).
 
 ## Before finishing
 
@@ -159,9 +147,11 @@ aggregate); reserve `:isolated` for tests that need their own process for
   function does is the self-call). If not, rewrite with an accumulator.
 - No mutation crept in. No `[ ]` in a binding/param position. No bare symbol
   meant as a literal in a pattern.
-- **A TUI / animation render loop is not covered by `nest test`** — the suite
-  tests pure functions, never the loop's output. Verify it by inspecting the raw
-  bytes for escapes: `nest run --for 600ms 2>&1 | cat -v | grep -oE '\^\[\[[0-9;]*[A-Za-z]'`,
-  not by eyeballing a piped frame (which hides a stray `#<fn …>` printed where a
-  call was meant).
-- New public function has a docstring. Run `nest format` and `nest test`.
+- **A TUI / animation loop is not covered by `nest test`** (it tests pure
+  functions, never loop output) — verify the emitted escapes. A full-screen
+  `term-enter` TUI needs a real terminal: piped it dies (`os error 6`), so wrap
+  it in a pty —
+  `script -qec "nest run --for 800ms" /dev/null 2>&1 | cat -v | grep -oE '\^\[\[[0-9;]*[A-Za-z]' | sort | uniq -c`.
+- New public function has a docstring. Run `nest format` (whole-tree, **no file
+  arg**) and `nest test`. Keep `;` comments **out of vector/map literals** — the
+  formatter shuffles them; annotate above the form.

@@ -12,6 +12,7 @@
 use std::sync::LazyLock;
 
 use crate::core::heap::{Heap, SymbolMap};
+use crate::core::keywords as kw;
 use crate::core::value::{self, Symbol, Value};
 use crate::error::Pos;
 
@@ -97,10 +98,15 @@ fn check_value_leaf(
     }
     if let Value::Sym(s) = form {
         if is_unbound(heap, ctx, s) {
-            out.push((
-                heap.form_pos(parent),
-                format!("unbound symbol: {}", name_of(s)),
-            ));
+            let nm = name_of(s);
+            let mut msg = format!("unbound symbol: {}", nm);
+            // If it's a construct from another Lisp that Brood doesn't have,
+            // append the Brood way so the fix is visible at write-time too.
+            if let Some(hint) = crate::eval::foreign_construct_hint(&nm) {
+                msg.push_str(" — ");
+                msg.push_str(hint);
+            }
+            out.push((heap.form_pos(parent), msg));
         }
     }
 }
@@ -134,21 +140,21 @@ enum SpecialHead {
 static SPECIAL_HEAD: LazyLock<SymbolMap<SpecialHead>> = LazyLock::new(|| {
     use SpecialHead::*;
     [
-        ("quote", SkipBody),
-        ("quasiquote", SkipBody),
-        ("try", SkipBody),
-        ("error-of", SkipBody),
-        ("assert-error", SkipBody),
-        ("%try", SkipBody),
-        ("if", If),
-        ("let", Let),
-        ("let*", Let),
-        ("letrec", Letrec),
-        ("fn", Fn),
-        ("lambda", Fn),
-        ("def", Def),
-        ("defn", Defn),
-        ("defmacro", Defn),
+        (kw::QUOTE, SkipBody),
+        (kw::QUASIQUOTE, SkipBody),
+        (kw::TRY, SkipBody),
+        (kw::ERROR_OF, SkipBody),
+        (kw::ASSERT_ERROR, SkipBody),
+        (kw::TRY_PRIM, SkipBody),
+        (kw::IF, If),
+        (kw::LET, Let),
+        (kw::LET_STAR, Let),
+        (kw::LETREC, Letrec),
+        (kw::FN, Fn),
+        (kw::LAMBDA, Fn),
+        (kw::DEF, Def),
+        (kw::DEFN, Defn),
+        (kw::DEFMACRO, Defn),
     ]
     .into_iter()
     .map(|(n, k)| (value::intern(n), k))
@@ -259,10 +265,13 @@ pub(super) fn check_into(
         // spelling — but only when every other short-circuit has failed.
         // Compute it lazily.
         if is_unbound(heap, ctx, s) {
-            out.push((
-                heap.form_pos(form),
-                format!("unbound symbol: {}", name_of(s)),
-            ));
+            let nm = name_of(s);
+            let mut msg = format!("unbound symbol: {}", nm);
+            if let Some(hint) = crate::eval::foreign_construct_hint(&nm) {
+                msg.push_str(" — ");
+                msg.push_str(hint);
+            }
+            out.push((heap.form_pos(form), msg));
             // Still recurse into args below — they may carry their own issues.
         }
 
