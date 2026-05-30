@@ -9232,3 +9232,28 @@ were taken by node-connect and perf-eval-dispatch), and a leftover duplicate
 `ADR-068` on main (WASM native extensions vs. node-connect) was de-duped by
 moving WASM to **ADR-071**. The `namespaces-lsp` branch + `brood-ns` worktree
 were merged and cleaned up.
+
+## 2026-05-30 — Fix: eval deadline escaped the ADR-069 passthrough loop (MCP watchdog hang)
+
+**Symptom.** `mcp::tests::eval_deadline_aborts_a_runaway_inline` hung indefinitely
+(>60s, no abort) — a runaway `(defn ginf () (ginf))` under a 300ms inline deadline
+was never aborted, so the `nest mcp` watchdog (ADR-063) couldn't stop a wedged eval.
+
+**Cause.** The ADR-069 thin-wrapper passthrough optimisation (`cd7bab0`): a
+self-referential passthrough arm (`(ginf)` → head `ginf`, empty arg-map) redirects
+`cur_callee` and `continue 'dispatch`, looping inside the inner `'dispatch:` loop
+without ever returning to the `'tail:` top — and the deadline watchdog
+(`deadline_exceeded`) is only checked at the `'tail:` top. The passthrough branch
+already calls `process::tick()` (so green-process *preemption* fairness was
+preserved), but not the deadline, so a passthrough self-loop escaped the watchdog
+and span forever. (`cargo test` enforces no timeout of its own; the in-language
+per-process budget doesn't cover a Rust-level eval — so nothing else caught it.)
+
+**Fix** (`crates/lisp/src/eval/mod.rs`). Mirror the `'tail:`-top deadline check into
+the passthrough redirect, right where `tick()` already runs — one `deadline_exceeded()`
+test before `continue 'dispatch`. Memory isn't a concern there: a passthrough
+self-loop binds no frame and allocates nothing per iteration, so the soft/hard cap
+can't be the relevant guard.
+
+**Verification.** The hung test now aborts at ~300ms and passes (0.35s); full
+`cargo test` green end-to-end (no `--skip`).
