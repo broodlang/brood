@@ -98,7 +98,10 @@ live `:pid`. Runs inside the supervisor process, so the link is owned by it. A
 address the child by a stable name even though its pid changes across restarts."
   (let (start (get spec :start)
         pid (start))
-    (link pid)
+    (when (not (pid? pid))
+      (error "supervisor: a child :start thunk must return a pid (got " pid
+             ") — it should end in (spawn …) / (remote-spawn …) / (start-supervisor …)"))
+    (link pid)                          ; local or remote (ADR-067) — `link` routes by node
     (when (get spec :name) (register (get spec :name) pid))
     (assoc spec :pid pid)))
 
@@ -358,19 +361,30 @@ children start left-to-right and `acc` preserves that order on reverse)."
 
 (defn start-supervisor (children & opts)
   "Spawn a supervisor for `children` (a sequence of child specs); return its pid.
-`opts` is an optional map: `:strategy` (`:one-for-one` default, `:one-for-all`, or
-`:rest-for-one`), and `:max-restarts` (default 3) / `:max-seconds` (default 5)
-bounding the restart-intensity window. Children are started left-to-right inside
-the supervisor process. The caller's pid is recorded as `:parent`; when this is
-itself started as a child of another supervisor, the parent links it, so the
-parent's death tears this sub-tree down too."
+`opts` is an optional map:
+  - `:strategy` — `:one-for-one` (default) | `:one-for-all` | `:rest-for-one`
+  - `:max-restarts` (default 3) / `:max-seconds` (default 5) — intensity window
+  - `:name` — register the *supervisor itself* under this keyword via an
+    idempotent named spawn, so a hot-reloaded file that re-runs `start-supervisor`
+    returns the **existing** supervisor instead of spawning a second one
+    (reload-stable; ADR-013/042). Distinct from a child spec's `:name`.
+
+Children are started left-to-right inside the supervisor process. A child may be
+**remote** (its `:start` returns a remote pid, e.g. via `remote-spawn`): the
+supervisor links it across the node boundary (ADR-067), so a remote child's crash
+reaches the supervisor and the supervisor's death tears the remote child down. The
+caller's pid is recorded as `:parent`; when this supervisor is itself a child of
+another, the parent links it, so the parent's death tears this sub-tree down too."
   (let (opts (or (first opts) {})
         strategy (get opts :strategy :one-for-one)
-        parent (self))
-    (if (supervisor--known-strategy? strategy)
-      (spawn (supervisor--init children opts parent))
-      (error "start-supervisor: unknown :strategy " strategy
-             " (expected :one-for-one, :one-for-all, or :rest-for-one)"))))
+        parent (self)
+        name (get opts :name))
+    (cond
+      (not (supervisor--known-strategy? strategy))
+        (error "start-supervisor: unknown :strategy " strategy
+               " (expected :one-for-one, :one-for-all, or :rest-for-one)")
+      name (spawn name (supervisor--init children opts parent))   ; named & idempotent
+      else (spawn (supervisor--init children opts parent)))))
 
 ;; Each synchronous client fn below sends a `[:tag … (self) r]` **vector** (the
 ;; loop matches vector patterns) with a fresh reply ref, then blocks for the

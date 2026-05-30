@@ -298,6 +298,104 @@ pub(crate) fn demonitor_remote(target_node: Symbol, watcher_pid: u64, mref: u64)
     }
 }
 
+// ---- cross-node links (ADR-067) — the symmetric cousin of monitor_remote ----
+
+/// `(link remote-pid)`: record our half of the link, ship a `Frame::Link` so the
+/// peer records its half, and — if the link to that node isn't up — fire an
+/// immediate `:noconnection` to the local linker (same shape a monitor's
+/// unreachable target gets). `local_pid` is the linker (self). Race-free against
+/// net-split exactly as `monitor_remote`: record before consulting `NODES`.
+pub(crate) fn link_remote(target_node: Symbol, target_pid: u64, local_pid: u64) {
+    let me = local_node();
+    let bytes: Arc<[u8]> = match frame_bytes(&Frame::Link {
+        from_node: me,
+        from_pid: local_pid,
+        to_pid: target_pid,
+    }) {
+        Ok(b) => Arc::from(b),
+        Err(_) => return,
+    };
+    process::record_remote_link(local_pid, target_node, target_pid);
+    let sent = {
+        let nodes = crate::core::sync::read(&NODES);
+        match nodes.get(&target_node) {
+            Some(conn) => {
+                let _ = conn.tx.send(bytes);
+                true
+            }
+            None => false,
+        }
+    };
+    if !sent {
+        // No link to that node: the target is unreachable. Fire `:noconnection`
+        // to the linker (this also drops the half-entry we just recorded).
+        process::deliver_remote_link_exit(
+            local_pid,
+            target_node,
+            target_pid,
+            Message::Keyword(value::intern("noconnection")),
+        );
+    }
+}
+
+/// `(unlink remote-pid)`: drop our half and ship a best-effort `Frame::Unlink`.
+pub(crate) fn unlink_remote(target_node: Symbol, target_pid: u64, local_pid: u64) {
+    process::drop_remote_link(local_pid, target_node, target_pid);
+    let me = local_node();
+    let bytes: Arc<[u8]> = match frame_bytes(&Frame::Unlink {
+        from_node: me,
+        from_pid: local_pid,
+        to_pid: target_pid,
+    }) {
+        Ok(b) => Arc::from(b),
+        Err(_) => return,
+    };
+    if let Some(conn) = crate::core::sync::read(&NODES).get(&target_node) {
+        let _ = conn.tx.send(bytes);
+    }
+}
+
+/// A local linked process `from_pid` died with `reason`: ship a link
+/// `Frame::Exit` to its remote peer `target_pid` on `target_node`. Best-effort —
+/// if the link is down the peer already learns via its own net-split handling.
+/// Called from `links::notify_peers`.
+pub(crate) fn send_link_exit(target_node: Symbol, target_pid: u64, from_pid: u64, reason: Message) {
+    let me = local_node();
+    let bytes: Arc<[u8]> = match frame_bytes(&Frame::Exit {
+        from_node: me,
+        from_pid,
+        to_pid: target_pid,
+        reason,
+        link: true,
+    }) {
+        Ok(b) => Arc::from(b),
+        Err(_) => return,
+    };
+    if let Some(conn) = crate::core::sync::read(&NODES).get(&target_node) {
+        let _ = conn.tx.send(bytes);
+    }
+}
+
+/// `(exit remote-pid reason)`: ship a non-link `Frame::Exit` routed straight to
+/// the peer's `scheduler::exit` (kill-style, like the local builtin). Used for an
+/// explicit remote exit and for a supervisor terminating a remote child.
+pub(crate) fn exit_remote(target_node: Symbol, target_pid: u64, reason: Message) {
+    let me = local_node();
+    let bytes: Arc<[u8]> = match frame_bytes(&Frame::Exit {
+        from_node: me,
+        from_pid: 0, // unused for an explicit (non-link) exit
+        to_pid: target_pid,
+        reason,
+        link: false,
+    }) {
+        Ok(b) => Arc::from(b),
+        Err(_) => return,
+    };
+    if let Some(conn) = crate::core::sync::read(&NODES).get(&target_node) {
+        let _ = conn.tx.send(bytes);
+    }
+}
+
 /// `(monitor-node name pid)` — deliver `[:nodedown name]` to `pid` when a link to
 /// `name` goes down. Persistent (fires on each down) until the process exits.
 /// If `name` isn't us and there's no current link, the node is effectively
@@ -609,6 +707,35 @@ fn establish(peer: Symbol, stream: TcpStream, role: Role) {
                         matches!(*w, process::Watcher::Remote { node, pid, mref: r }
                                      if node == peer && pid == watcher_pid && r == mref)
                     }),
+                    // A peer linked its `from_pid` to our local `to_pid` — record
+                    // our half (keyed by the trusted connection `peer`, not the
+                    // wire's `from_node`, same as the monitor handlers).
+                    Frame::Link {
+                        from_node: _wire_node,
+                        from_pid,
+                        to_pid,
+                    } => process::record_remote_link(to_pid, peer, from_pid),
+                    Frame::Unlink {
+                        from_node: _wire_node,
+                        from_pid,
+                        to_pid,
+                    } => process::drop_remote_link(to_pid, peer, from_pid),
+                    // An exit signal for our local `to_pid`. A link death goes
+                    // through the trap-or-propagate path; an explicit remote exit
+                    // is routed straight to `scheduler::exit` (kill-style).
+                    Frame::Exit {
+                        from_node: _wire_node,
+                        from_pid,
+                        to_pid,
+                        reason,
+                        link,
+                    } => {
+                        if link {
+                            process::deliver_remote_link_exit(to_pid, peer, from_pid, reason);
+                        } else {
+                            process::exit(to_pid, reason);
+                        }
+                    }
                     // Handshake-only frames in steady state: a peer that
                     // re-sends one after the link is up is malformed but harmless
                     // — keep reading.
@@ -653,6 +780,9 @@ fn fire_nodedown(peer: Symbol) {
         }
     }
     process::handle_node_down(peer);
+    // Cross-node links over the dropped link fire `:noconnection` to their local
+    // peers (ADR-067), mirroring the monitor `:noconnection`-on-net-split above.
+    process::handle_link_node_down(peer);
 }
 
 /// An inbound `Send` from a peer: resolve the target locally and deliver.
