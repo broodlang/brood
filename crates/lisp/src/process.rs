@@ -52,6 +52,11 @@ pub(crate) use io_source::{spawn_io_source, MailboxSink, SubscriberHandle};
 pub use monitor::{demonitor, monitor, monitored_by, next_ref};
 // Erlang-style links (ADR-067): symmetric failure coupling + `trap_exit`.
 pub use links::{link_count, link_self, set_trap_exit, unlink_self};
+// Cross-node link machinery, used by `dist` (the senders + inbound handlers).
+pub(crate) use links::{
+    deliver_remote_link_exit, drop_remote_link, handle_node_down as handle_link_node_down,
+    record_remote_link,
+};
 pub use scheduler::{
     begin_capture, capture_append, deadline_exceeded, exit, gc_block_depth, in_green_process,
     macro_block_active, parent_of, peak_threads, pid_value, self_pid, set_deadline,

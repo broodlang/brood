@@ -63,6 +63,33 @@ pub(super) enum Frame {
         watcher_pid: u64,
         mref: u64,
     },
+    /// "Link my `from_pid` (on `from_node`) to your local `to_pid`" (ADR-067).
+    /// The receiver records its half in `links::REMOTE_LINKS` so either side's
+    /// death — or a net-split — reaches the other. Symmetric: each node keeps
+    /// `local_pid → (peer_node, peer_pid)`.
+    Link {
+        from_node: Symbol,
+        from_pid: u64,
+        to_pid: u64,
+    },
+    /// Drop the cross-node link `from_pid@from_node ↔ to_pid` (best effort).
+    Unlink {
+        from_node: Symbol,
+        from_pid: u64,
+        to_pid: u64,
+    },
+    /// An exit signal for local `to_pid`. `link = true` is a **link death**:
+    /// `from_pid@from_node` (a linked peer) exited with `reason`, delivered via
+    /// the trap-or-propagate path (a trapping target gets `[:EXIT pid reason]`).
+    /// `link = false` is an explicit remote `(exit pid reason)` — routed straight
+    /// to `scheduler::exit` (kill-style, like the local builtin).
+    Exit {
+        from_node: Symbol,
+        from_pid: u64,
+        to_pid: u64,
+        reason: Message,
+        link: bool,
+    },
 }
 
 const FRAME_HELLO: u8 = 0;
@@ -72,6 +99,9 @@ const FRAME_PONG: u8 = 3;
 const FRAME_MONITOR: u8 = 4;
 const FRAME_DEMONITOR: u8 = 5;
 const FRAME_AUTH: u8 = 6;
+const FRAME_LINK: u8 = 7;
+const FRAME_UNLINK: u8 = 8;
+const FRAME_EXIT: u8 = 9;
 const TARGET_PID: u8 = 0;
 const TARGET_NAME: u8 = 1;
 
@@ -168,6 +198,40 @@ fn encode_frame(w: &mut Vec<u8>, frame: &Frame) -> io::Result<()> {
             w.extend_from_slice(&watcher_pid.to_be_bytes());
             w.extend_from_slice(&mref.to_be_bytes());
         }
+        Frame::Link {
+            from_node,
+            from_pid,
+            to_pid,
+        } => {
+            w.push(FRAME_LINK);
+            put_sym(w, *from_node);
+            w.extend_from_slice(&from_pid.to_be_bytes());
+            w.extend_from_slice(&to_pid.to_be_bytes());
+        }
+        Frame::Unlink {
+            from_node,
+            from_pid,
+            to_pid,
+        } => {
+            w.push(FRAME_UNLINK);
+            put_sym(w, *from_node);
+            w.extend_from_slice(&from_pid.to_be_bytes());
+            w.extend_from_slice(&to_pid.to_be_bytes());
+        }
+        Frame::Exit {
+            from_node,
+            from_pid,
+            to_pid,
+            reason,
+            link,
+        } => {
+            w.push(FRAME_EXIT);
+            put_sym(w, *from_node);
+            w.extend_from_slice(&from_pid.to_be_bytes());
+            w.extend_from_slice(&to_pid.to_be_bytes());
+            w.push(*link as u8);
+            encode_msg(w, reason)?;
+        }
     }
     Ok(())
 }
@@ -197,6 +261,23 @@ fn decode_frame(r: &mut Cursor<Vec<u8>>) -> io::Result<Frame> {
             from_node: get_sym(r)?,
             watcher_pid: get_u64(r)?,
             mref: get_u64(r)?,
+        }),
+        FRAME_LINK => Ok(Frame::Link {
+            from_node: get_sym(r)?,
+            from_pid: get_u64(r)?,
+            to_pid: get_u64(r)?,
+        }),
+        FRAME_UNLINK => Ok(Frame::Unlink {
+            from_node: get_sym(r)?,
+            from_pid: get_u64(r)?,
+            to_pid: get_u64(r)?,
+        }),
+        FRAME_EXIT => Ok(Frame::Exit {
+            from_node: get_sym(r)?,
+            from_pid: get_u64(r)?,
+            to_pid: get_u64(r)?,
+            link: get_u8(r)? != 0,
+            reason: decode_msg(r)?,
         }),
         t => Err(io::Error::new(
             io::ErrorKind::InvalidData,
