@@ -25,9 +25,12 @@
 > ambient/root, never namespaced) keeps `*load-path*`/`*features*`/`defdyn` vars
 > reachable unqualified from any ns.
 >
-> **Cosmetic remainders (not correctness):** namespace prefixes in the
-> document/workspace-symbol outline, semantic-token ns coloring, and the cross-file
-> shadow-collision warning going ns-aware. Tracked but minor.
+> **Fully complete.** The former cosmetic remainders all landed:
+> namespace-qualified workspace symbols (ns as container), semantic-token ns
+> coloring (a `NAMESPACE` token splitting `ns/name`), and namespace-sound
+> cross-file shadow detection (`project--duplicate-def-warnings` now groups by
+> resolved `ns/name`, so a short name reused across distinct namespaces no longer
+> false-flags). The per-file document outline stays bare by design.
 
 This doc is the design backing for namespaces in Brood. It follows the spectrum
 ADR-019 laid out and commits to the *substrate* (how resolution works) while
@@ -334,8 +337,11 @@ the lock file stays computable. Auto-require collapses `require`+`use` for code 
    **namespace-sound project references/rename** (occurrences are matched by
    *resolved qualified identity*, so a different ns's same-named def is never
    touched). Mid-edit-tolerant (falls back to the CST `defmodule` header when the
-   buffer doesn't fully parse). ⬜ Cosmetic remainder: ns prefixes in the symbol
-   outline, semantic-token ns coloring, and making `mcp--shadows-for` ns-aware.
+   buffer doesn't fully parse). The former cosmetic remainders also landed
+   (2026-05-30): namespace-qualified **workspace symbols** (ns as container),
+   **semantic-token ns coloring** (a `NAMESPACE` token splitting `ns/name`), and
+   **namespace-sound shadow detection** (`mcp--shadows-for` /
+   `project--duplicate-def-warnings` group by resolved `ns/name`).
 6. ✅ **Package integration policy (§8)** — decided in ADR-070 (flat names +
    detect-and-reject at lock time); enforcement lands with the package manager
    (ADR-037), dormant until then.
