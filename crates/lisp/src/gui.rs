@@ -158,16 +158,15 @@ mod backend {
     use std::sync::mpsc::{self, Sender};
     use std::sync::{Arc, Mutex, OnceLock};
 
+    use winit::application::ApplicationHandler;
     use winit::dpi::{LogicalSize, PhysicalPosition};
     use winit::event::{
-        ElementState, Event, KeyEvent, MouseButton as WMouseButton, MouseScrollDelta, WindowEvent,
+        ElementState, KeyEvent, MouseButton as WMouseButton, MouseScrollDelta, WindowEvent,
     };
-    use winit::event_loop::{
-        ControlFlow, EventLoopBuilder, EventLoopProxy, EventLoopWindowTarget,
-    };
+    use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
     use winit::keyboard::{Key as WKey, ModifiersState, NamedKey};
     use winit::platform::wayland::EventLoopBuilderExtWayland;
-    use winit::window::{Window, WindowBuilder, WindowId};
+    use winit::window::{Window, WindowId};
 
     // Bundled monospace font, four styles (see assets/README.md) — the default
     // `:mono` family; a face's :bold/:italic pick the style. No system font discovery.
@@ -409,17 +408,19 @@ mod backend {
     /// Build a window + softbuffer surface + glyph renderer inside the running event
     /// loop. Errors (window / surface creation) propagate to the `open` caller.
     fn build_window(
-        elwt: &EventLoopWindowTarget<UserEvent>,
+        elwt: &ActiveEventLoop,
         id: u64,
         subscriber: u64,
         families: Families,
         base_px: f32,
         default_family: Option<u32>,
     ) -> Result<Win, String> {
-        let window = WindowBuilder::new()
-            .with_title(format!("brood observer #{id}"))
-            .with_inner_size(LogicalSize::new(840.0, 560.0))
-            .build(elwt)
+        let window = elwt
+            .create_window(
+                Window::default_attributes()
+                    .with_title(format!("brood observer #{id}"))
+                    .with_inner_size(LogicalSize::new(840.0, 560.0)),
+            )
             .map_err(|e| format!("window: {e}"))?;
         let window = Rc::new(window);
         let context =
@@ -444,14 +445,245 @@ mod backend {
         })
     }
 
+    /// The single GUI thread's state — the window registry + the shared font
+    /// config — driven by winit 0.30's [`ApplicationHandler`]. Lives entirely on
+    /// the GUI thread, so its non-`Send` fields (`Families` is `Rc`-backed) are fine.
+    struct GuiApp {
+        /// Open windows keyed by winit's `WindowId` (for routing window events).
+        wins: HashMap<WindowId, Win>,
+        /// Our integer id (what `open` returns) → that `WindowId`.
+        ids: HashMap<u64, WindowId>,
+        /// Font-family registry shared by every window's renderer (so a
+        /// `gui-font-register` reaches them all).
+        families: Families,
+        /// Global default cell font (family / px) applied to windows opened later.
+        default_family: Option<u32>,
+        default_px: f32,
+        /// winit 0.30 only lets a window be created once the event loop is
+        /// **resumed** (an `ActiveEventLoop` whose platform display is live). On
+        /// desktop `resumed` fires before the first user event, but rather than
+        /// rely on that ordering we gate window creation on this flag and **queue**
+        /// any `Open` that arrives early, draining it in `resumed`. This is correct
+        /// by construction on every platform. (Surface teardown/recreation across
+        /// `suspended`/`resumed` is a *mobile* concern; this is a desktop tool, so
+        /// windows simply persist — `resumed` only ever fires once here.)
+        resumed: bool,
+        /// `Open` requests received before `resumed`, drained when it fires.
+        pending_open: Vec<(u64, Sender<Result<OpenReply, String>>)>,
+    }
+
+    impl GuiApp {
+        /// Create a window for `subscriber` and register it, replying to the
+        /// `open` caller with its id + shared size (or the build error). Shared by
+        /// the `Open` user event and the `resumed` drain so the path is identical.
+        fn open_window(
+            &mut self,
+            event_loop: &ActiveEventLoop,
+            subscriber: u64,
+            reply: Sender<Result<OpenReply, String>>,
+        ) {
+            let id = next_id();
+            match build_window(
+                event_loop,
+                id,
+                subscriber,
+                self.families.clone(),
+                self.default_px,
+                self.default_family,
+            ) {
+                Ok(win) => {
+                    update_cells(&win.window, &win.renderer, &win.size);
+                    let wid = win.window.id();
+                    let _ = reply.send(Ok(OpenReply {
+                        id,
+                        size: win.size.clone(),
+                    }));
+                    self.ids.insert(id, wid);
+                    self.wins.insert(wid, win);
+                }
+                Err(e) => {
+                    let _ = reply.send(Err(e));
+                }
+            }
+        }
+    }
+
+    impl ApplicationHandler<UserEvent> for GuiApp {
+        // The loop idles (`Wait`) until a proxy or window event arrives. Window
+        // creation is now safe (the display is live), so drain any `Open` that
+        // arrived before this fired.
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            self.resumed = true;
+            for (subscriber, reply) in std::mem::take(&mut self.pending_open) {
+                self.open_window(event_loop, subscriber, reply);
+            }
+        }
+
+        fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+            match event {
+                // Create now if the display is live, else queue until `resumed`.
+                UserEvent::Open { subscriber, reply } => {
+                    if self.resumed {
+                        self.open_window(event_loop, subscriber, reply);
+                    } else {
+                        self.pending_open.push((subscriber, reply));
+                    }
+                }
+                UserEvent::Draw { id, ops } => {
+                    if let Some(w) = self.ids.get(&id).and_then(|wid| self.wins.get_mut(wid)) {
+                        w.frame = ops;
+                        w.window.request_redraw();
+                    }
+                }
+                UserEvent::Close { id } => {
+                    if let Some(wid) = self.ids.remove(&id) {
+                        self.wins.remove(&wid); // dropping the window closes it
+                    }
+                }
+                // Global default cell font: remember it for future windows and apply
+                // it to every open one (recompute the grid + republish size + redraw).
+                UserEvent::Font { family, px } => {
+                    if let Some(f) = family {
+                        self.default_family = Some(f);
+                    }
+                    if let Some(p) = px {
+                        self.default_px = p.max(1.0);
+                    }
+                    for w in self.wins.values_mut() {
+                        w.renderer.set_font(family, px);
+                        update_cells(&w.window, &w.renderer, &w.size);
+                        w.window.request_redraw();
+                    }
+                }
+                // Register a font family from raw TTF bytes; parse here and share it
+                // with every renderer. A bad font is dropped (the family stays
+                // unregistered, so `:family` falls back to the default).
+                UserEvent::RegisterFamily {
+                    name,
+                    regular,
+                    bold,
+                    italic,
+                    bold_italic,
+                } => {
+                    if let Ok(set) = FontSet::from_bytes(&regular, &bold, &italic, &bold_italic) {
+                        self.families.borrow_mut().insert(name, Rc::new(set));
+                        // a re-registration replaces a family; clear caches keyed by
+                        // the old glyphs and repaint.
+                        for w in self.wins.values_mut() {
+                            w.renderer.cache.clear();
+                            w.window.request_redraw();
+                        }
+                    }
+                }
+            }
+        }
+
+        fn window_event(
+            &mut self,
+            _event_loop: &ActiveEventLoop,
+            window_id: WindowId,
+            event: WindowEvent,
+        ) {
+            let Some(w) = self.wins.get_mut(&window_id) else {
+                return;
+            };
+            match event {
+                // The window's close button → a quit key, so the Brood loop
+                // tears down (calling gui-close) on its own terms.
+                WindowEvent::CloseRequested => {
+                    deliver(w.subscriber, key_message(&Key::Named("escape")));
+                }
+                WindowEvent::ModifiersChanged(m) => w.mods = m.state(),
+                WindowEvent::Resized(_) => {
+                    update_cells(&w.window, &w.renderer, &w.size);
+                    w.window.request_redraw();
+                }
+                // We deliberately ignore 0.30's `inner_size_writer` (which could
+                // request a specific new inner size): the cell grid *reflows* to
+                // whatever size the window is, so we just re-derive the scale and
+                // recompute (cols, rows) from the current `inner_size()`.
+                WindowEvent::ScaleFactorChanged { .. } => {
+                    w.renderer.set_scale(w.window.scale_factor());
+                    update_cells(&w.window, &w.renderer, &w.size);
+                    w.window.request_redraw();
+                }
+                WindowEvent::KeyboardInput {
+                    event: ke,
+                    is_synthetic: false,
+                    ..
+                } => {
+                    if ke.state == ElementState::Pressed {
+                        if let Some(k) = translate_key(&ke, w.mods) {
+                            deliver(w.subscriber, key_message(&k));
+                        }
+                    }
+                }
+                WindowEvent::CursorMoved { position, .. } => {
+                    // Track the pointer cell so a later press/scroll reports it; bare
+                    // motion isn't emitted (no consumer, and a per-pixel event would
+                    // flood + force redraws).
+                    w.cursor = px_to_cell(position, &w.renderer);
+                }
+                // Press only — release isn't in the vocabulary (MouseAction).
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button,
+                    ..
+                } => {
+                    if let Some(b) = translate_button(button) {
+                        let (col, row) = w.cursor;
+                        deliver(
+                            w.subscriber,
+                            mouse_message(&Mouse {
+                                action: MouseAction::Press,
+                                button: Some(b),
+                                row,
+                                col,
+                            }),
+                        );
+                    }
+                }
+                WindowEvent::MouseWheel { delta, .. } => {
+                    // Positive y scrolls up (away from the user).
+                    let dy = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y as f64,
+                        MouseScrollDelta::PixelDelta(p) => p.y,
+                    };
+                    if dy != 0.0 {
+                        let action = if dy > 0.0 {
+                            MouseAction::ScrollUp
+                        } else {
+                            MouseAction::ScrollDown
+                        };
+                        let (col, row) = w.cursor;
+                        deliver(
+                            w.subscriber,
+                            mouse_message(&Mouse {
+                                action,
+                                button: None,
+                                row,
+                                col,
+                            }),
+                        );
+                    }
+                }
+                WindowEvent::RedrawRequested => {
+                    paint(&mut w.surface, &w.window, &mut w.renderer, &w.frame)
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// The GUI thread body: build the one event loop, hand its proxy back to
     /// `start_thread`, then run winit's loop forever — opening / closing / painting
     /// windows from a registry as `UserEvent`s arrive. It never exits (winit can't
     /// restart an event loop), so it idles harmlessly when no windows are open.
     fn run_gui(ready: Sender<Result<EventLoopProxy<UserEvent>, String>>) {
-        let mut builder = EventLoopBuilder::<UserEvent>::with_user_event();
         // winit normally requires the main thread; on Linux we explicitly allow
         // the dedicated GUI thread to own the loop.
+        let mut builder = EventLoop::<UserEvent>::with_user_event();
         builder.with_any_thread(true);
         let event_loop = match builder.build() {
             Ok(el) => el,
@@ -462,173 +694,16 @@ mod backend {
         };
         let _ = ready.send(Ok(event_loop.create_proxy()));
 
-        // Open windows keyed by winit's WindowId (for routing window events), plus a
-        // map from our integer id (what `open` returns) to that WindowId.
-        let mut wins: HashMap<WindowId, Win> = HashMap::new();
-        let mut ids: HashMap<u64, WindowId> = HashMap::new();
-        // The font-family registry, shared by every window's renderer (so a
-        // `gui-font-register` reaches them all), plus the global default cell font
-        // (family / px) applied to windows opened later.
-        let families: Families = default_families();
-        let mut default_family: Option<u32> = None;
-        let mut default_px: f32 = DEFAULT_PX;
-
-        let _ = event_loop.run(move |event, elwt| {
-            elwt.set_control_flow(ControlFlow::Wait);
-            match event {
-                Event::UserEvent(UserEvent::Open { subscriber, reply }) => {
-                    let id = next_id();
-                    match build_window(elwt, id, subscriber, families.clone(), default_px, default_family) {
-                        Ok(win) => {
-                            update_cells(&win.window, &win.renderer, &win.size);
-                            let wid = win.window.id();
-                            let _ = reply.send(Ok(OpenReply {
-                                id,
-                                size: win.size.clone(),
-                            }));
-                            ids.insert(id, wid);
-                            wins.insert(wid, win);
-                        }
-                        Err(e) => {
-                            let _ = reply.send(Err(e));
-                        }
-                    }
-                }
-                Event::UserEvent(UserEvent::Draw { id, ops }) => {
-                    if let Some(w) = ids.get(&id).and_then(|wid| wins.get_mut(wid)) {
-                        w.frame = ops;
-                        w.window.request_redraw();
-                    }
-                }
-                Event::UserEvent(UserEvent::Close { id }) => {
-                    if let Some(wid) = ids.remove(&id) {
-                        wins.remove(&wid); // dropping the window closes it
-                    }
-                }
-                // Global default cell font: remember it for future windows and apply
-                // it to every open one (recompute the grid + republish size + redraw).
-                Event::UserEvent(UserEvent::Font { family, px }) => {
-                    if let Some(f) = family {
-                        default_family = Some(f);
-                    }
-                    if let Some(p) = px {
-                        default_px = p.max(1.0);
-                    }
-                    for w in wins.values_mut() {
-                        w.renderer.set_font(family, px);
-                        update_cells(&w.window, &w.renderer, &w.size);
-                        w.window.request_redraw();
-                    }
-                }
-                // Register a font family from raw TTF bytes; parse here and share it
-                // with every renderer. A bad font is dropped (the family stays
-                // unregistered, so `:family` falls back to the default).
-                Event::UserEvent(UserEvent::RegisterFamily {
-                    name,
-                    regular,
-                    bold,
-                    italic,
-                    bold_italic,
-                }) => {
-                    if let Ok(set) = FontSet::from_bytes(&regular, &bold, &italic, &bold_italic) {
-                        families.borrow_mut().insert(name, Rc::new(set));
-                        // a re-registration replaces a family; clear caches keyed by
-                        // the old glyphs and repaint.
-                        for w in wins.values_mut() {
-                            w.renderer.cache.clear();
-                            w.window.request_redraw();
-                        }
-                    }
-                }
-                Event::WindowEvent { window_id, event } => {
-                    let Some(w) = wins.get_mut(&window_id) else {
-                        return;
-                    };
-                    match event {
-                        // The window's close button → a quit key, so the Brood loop
-                        // tears down (calling gui-close) on its own terms.
-                        WindowEvent::CloseRequested => {
-                            deliver(w.subscriber, key_message(&Key::Named("escape")));
-                        }
-                        WindowEvent::ModifiersChanged(m) => w.mods = m.state(),
-                        WindowEvent::Resized(_) => {
-                            update_cells(&w.window, &w.renderer, &w.size);
-                            w.window.request_redraw();
-                        }
-                        WindowEvent::ScaleFactorChanged { .. } => {
-                            w.renderer.set_scale(w.window.scale_factor());
-                            update_cells(&w.window, &w.renderer, &w.size);
-                            w.window.request_redraw();
-                        }
-                        WindowEvent::KeyboardInput {
-                            event: ke,
-                            is_synthetic: false,
-                            ..
-                        } => {
-                            if ke.state == ElementState::Pressed {
-                                if let Some(k) = translate_key(&ke, w.mods) {
-                                    deliver(w.subscriber, key_message(&k));
-                                }
-                            }
-                        }
-                        WindowEvent::CursorMoved { position, .. } => {
-                            // Track the pointer cell so a later press/scroll reports
-                            // it; bare motion isn't emitted (no consumer, and a
-                            // per-pixel event would flood + force redraws).
-                            w.cursor = px_to_cell(position, &w.renderer);
-                        }
-                        // Press only — release isn't in the vocabulary (MouseAction).
-                        WindowEvent::MouseInput {
-                            state: ElementState::Pressed,
-                            button,
-                            ..
-                        } => {
-                            if let Some(b) = translate_button(button) {
-                                let (col, row) = w.cursor;
-                                deliver(
-                                    w.subscriber,
-                                    mouse_message(&Mouse {
-                                        action: MouseAction::Press,
-                                        button: Some(b),
-                                        row,
-                                        col,
-                                    }),
-                                );
-                            }
-                        }
-                        WindowEvent::MouseWheel { delta, .. } => {
-                            // Positive y scrolls up (away from the user).
-                            let dy = match delta {
-                                MouseScrollDelta::LineDelta(_, y) => y as f64,
-                                MouseScrollDelta::PixelDelta(p) => p.y,
-                            };
-                            if dy != 0.0 {
-                                let action = if dy > 0.0 {
-                                    MouseAction::ScrollUp
-                                } else {
-                                    MouseAction::ScrollDown
-                                };
-                                let (col, row) = w.cursor;
-                                deliver(
-                                    w.subscriber,
-                                    mouse_message(&Mouse {
-                                        action,
-                                        button: None,
-                                        row,
-                                        col,
-                                    }),
-                                );
-                            }
-                        }
-                        WindowEvent::RedrawRequested => {
-                            paint(&mut w.surface, &w.window, &mut w.renderer, &w.frame)
-                        }
-                        _ => {}
-                    }
-                }
-                _ => {}
-            }
-        });
+        let mut app = GuiApp {
+            wins: HashMap::new(),
+            ids: HashMap::new(),
+            families: default_families(),
+            default_family: None,
+            default_px: DEFAULT_PX,
+            resumed: false,
+            pending_open: Vec::new(),
+        };
+        let _ = event_loop.run_app(&mut app);
     }
 
     /// Recompute `(cols, rows)` from the window's physical size and the cell
