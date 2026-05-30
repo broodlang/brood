@@ -9480,3 +9480,37 @@ and `brood`'s `run_files`/`--test`, plus the broken-pipe exit in `print`.
 `(term-raw-enter)` followed by an unbound-symbol error returns the terminal to
 `icanon` (cooked) instead of leaving it `-icanon` (wedged). Full suite green
 (985 in-language tests).
+
+---
+
+## 2026-05-30 — Dual-listen: one node, several transports (ADR-074)
+
+**Goal.** Let one node be reachable over more than one transport at once — a
+local Unix socket *and* a TCP endpoint — the "one core, local + remote frontends"
+shape the editor daemon needs.
+
+**Done.** `(node-also-listen [addr])` adds another listener to an already-started
+node, sharing its identity + cookie: no arg opens the local Unix socket (keyed by
+the node's name-part), `"host:port"` opens a TCP endpoint. Dual-listen is *composed*:
+
+```lisp
+(node-start :ed@host "0.0.0.0:9001")   ; identity ed@host, TCP
+(node-also-listen)                     ; + local Unix socket "ed"
+;; (connect "ed") locally, (connect "ed@host:9001") remotely — same node.
+```
+
+- **Kernel:** `node_listen`'s bind+acceptor was extracted into a shared
+  identity-agnostic `start_listener(addr)` (the handshake reads `NODE` at accept
+  time), reused by the new `%node-also-listen` primitive. `node-start` now rolls
+  identity back if its first bind fails (still retryable). One node keeps **one**
+  `name@host`; extra listeners are just more front doors, and the existing
+  `establish` de-dup collapses a peer reached via two transports to one link.
+- **Composable, not auto:** TCP nodes are *not* silently made dual — that would
+  pollute `$XDG_RUNTIME_DIR` and collide same-name TCP nodes on the socket file
+  (and churn the test suite). Opt-in keeps single-transport `node-start` unchanged.
+- **Policy in Brood:** the prelude `node-also-listen` derives the Unix path / picks
+  the scheme; the kernel just binds and accepts.
+
+**Test.** `dual_listen_serves_tcp_and_unix_at_once` — one node bound TCP +
+`node-also-listen`, a client reaches the *same* node (same `name@host`, same
+`:echo`) over both transports. In the serialised `real-tcp` nextest group.
