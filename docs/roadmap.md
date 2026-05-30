@@ -178,7 +178,7 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   α auto-qualifying quasiquote. All of `std/` + the test suite migrated. **LSP is
   ns-aware** (§6): a shared resolution seam drives ns-correct goto/hover/signature,
   bare-import completion, and namespace-sound project references/rename.
-  **Collision policy:** ADR-068 (flat names + detect-and-reject at lock time;
+  **Collision policy:** ADR-069 (flat names + detect-and-reject at lock time;
   enforcement with the package manager). ⬜ Cosmetic remainder only: ns prefixes in
   the symbol outline + semantic-token ns coloring.
 - ✅ **Project model & test tool** — convention over configuration: `src/` is the
@@ -206,6 +206,31 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   Brood tree-hashing, transitive resolution, `project.lock.blsp` I/O,
   `ensure-deps` on `*load-path*`; `std/package.blsp`); ⬜ **Slice 2** — `:git`
   deps; ⬜ **Slice 3** — the verbs + auto-fetch.
+  - **Forward-compat obligation (for native interop below):** keep the manifest
+    and lock schema able to accept a `:native` sibling additively (as ADR-037
+    already reserves `:branch`/`:dir`/`:features`). Costs nothing now; lets
+    ADR-068 slot in without reshaping the package format later.
+- ⬜ **Native interop — WASM components, built on fetch** (ADR-068,
+  [`interop.md`](interop.md)) — how a package ships native code (from another
+  ecosystem, or a perf-critical kernel) with **zero kernel recompilation**. A
+  package declares a `:native` WASM component; the package manager **builds it
+  from source at fetch time** (the Rustler / `mix deps.compile` model — the
+  *package's* artifact, never the runtime binary) or fetches a prebuilt one;
+  it's hash-pinned in the lock and cached under `_deps/`. The runtime
+  instantiates it **sandboxed** via an embedded `wasmtime` host, and a
+  `use-native` macro (the `use Rustler` analog, driven by a **WIT** interface)
+  binds its exports as namespace functions. The boundary **marshals** (`Message`
+  enum / blob heap — never raw handles, the moving GC forbids it); a WASM
+  instance is mutable state, so it's an **opaque resource handle**, never a
+  `Value`; long calls run on the offload pool (deliver-to-mailbox). **Sequencing:**
+  *after* the package manager — the packaging half is a strict extension of
+  ADR-037 Slices 1–2 (lock + cache + git fetch). The **runtime half** (embed
+  `wasmtime`, `%wasm-*` primitives, the marshalling layer) is independent and can
+  be prototyped earlier from a local `.wasm`, but it has its own prereq — the
+  **Phase-3 blocking offload pool** (`handoff-blocking-io.md`, M4). **Demand-
+  driven (ADR-011):** pulled in by the first real native-needing package, which
+  realistically lands during **M2+** editor-plugin work (regex engine, codec,
+  highlighter) — so the package manager precedes it comfortably.
 - 🟡 **Editor tooling & documentation** — source-position errors (GNU
   `FILE:LINE:COL:`) + structured test output (`docs/tooling.md`); a lossless,
   span-carrying CST and the introspection primitives `doc`/`arglist`/

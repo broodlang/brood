@@ -437,7 +437,19 @@ fn resolve_def(heap: &mut Heap, form: Value, items: &[Value], ns_name: &str, loc
     let mut out = Vec::with_capacity(items.len());
     out.push(items[0]); // def / defmacro head, verbatim
     match items.get(1) {
-        Some(&Value::Sym(name)) => out.push(Value::Sym(qualify_name(ns_name, name))),
+        Some(&Value::Sym(name)) => {
+            // Register the (bare) name as known before resolving the value, so a
+            // self-reference in the body — e.g. the recursion in a `defprocess`-
+            // generated receive loop — qualifies to the same `ns/name` the head
+            // gets. `scan_def_names` misses macro-defined names (it scans the raw,
+            // unexpanded form), so without this a `(defn counter … (counter …))`
+            // that came from a macro would bind `ns/counter` but recurse on bare
+            // `counter` → unbound. Harmless for an already-qualified name.
+            if !value::symbol_name(name).contains('/') {
+                heap.add_ns_known_name(name);
+            }
+            out.push(Value::Sym(qualify_name(ns_name, name)));
+        }
         Some(&other) => out.push(other), // not a symbol — leave (eval will complain)
         None => return rebuild_list(heap, form, out),
     }
@@ -1237,6 +1249,37 @@ mod resolve_tests {
     #[test]
     fn already_qualified_symbol_passes_through() {
         assert_eq!(resolved(&["(def other/bar 1)"], "foo", "(other/bar)"), "(other/bar)");
+    }
+
+    #[test]
+    fn imported_macro_expands_in_the_compile_walk() {
+        // The `defprocess` checker bug (ADR-065): a `(:use mod)`-imported macro must
+        // expand during macroexpand/compile, not only a directly-bound one. Without
+        // this, the compile pass (and the advisory checker) walks the macro's raw
+        // body and flags its clause keywords / pattern vars as unbound.
+        let mut interp = Interp::new();
+        interp.eval_str("(defmacro m/double (x) (list (quote +) x x))").unwrap();
+        // Simulate a file that did `(defmodule u (:use m))`: compile in `u` with
+        // `double` imported as `m/double`.
+        interp.heap.add_import(value::intern("double"), value::intern("m/double"));
+        interp.heap.set_compile_ns(Some(value::intern("u")));
+        let g = interp.heap.global();
+        let form = reader::read_one(&mut interp.heap, "(double 5)").unwrap();
+        let out = macroexpand(&mut interp.heap, form, g).unwrap();
+        assert_eq!(crate::syntax::printer::print(&interp.heap, out), "(+ 5 5)");
+    }
+
+    #[test]
+    fn bare_unimported_macro_is_left_unexpanded() {
+        // No `(:use)` import and not directly bound → resolution is positive-evidence
+        // only, so the bare head stays a raw call (never a false expansion).
+        let mut interp = Interp::new();
+        interp.eval_str("(defmacro m/double (x) (list (quote +) x x))").unwrap();
+        interp.heap.set_compile_ns(Some(value::intern("u")));
+        let g = interp.heap.global();
+        let form = reader::read_one(&mut interp.heap, "(double 5)").unwrap();
+        let out = macroexpand(&mut interp.heap, form, g).unwrap();
+        assert_eq!(crate::syntax::printer::print(&interp.heap, out), "(double 5)");
     }
 
     #[test]

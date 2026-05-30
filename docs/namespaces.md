@@ -19,7 +19,7 @@
 > exactly as the runtime does — so goto/hover/signature reach qualified + imported
 > names, completion offers imported names bare, and **project references/rename are
 > namespace-sound** (only occurrences resolving to the *same* qualified global are
-> touched). **Package ns-collision policy decided** in [ADR-068](decisions.md):
+> touched). **Package ns-collision policy decided** in [ADR-069](decisions.md):
 > flat names + detect-and-reject at dependency-resolution time (enforcement lands
 > with the package manager, ADR-037). The earmuff rule (`*foo*` names are
 > ambient/root, never namespaced) keeps `*load-path*`/`*features*`/`defdyn` vars
@@ -255,7 +255,7 @@ both declare `(ns parser)`. Prior art: Clojure uses reverse-domain
   safe but verbose.
 
 `name = URL` packages make this concrete, not hypothetical. **Decided
-([ADR-068](decisions.md)): flat names + detect-and-reject.** Namespace names stay
+([ADR-069](decisions.md)): flat names + detect-and-reject.** Namespace names stay
 short and free-for-all; the package manager's dependency-resolution step (ADR-037
 `nest fetch`/lock) **errors** if two reachable packages declare the same namespace,
 naming both sources, rather than silently merging or taxing every call site with a
@@ -336,7 +336,7 @@ the lock file stays computable. Auto-require collapses `require`+`use` for code 
    touched). Mid-edit-tolerant (falls back to the CST `defmodule` header when the
    buffer doesn't fully parse). ⬜ Cosmetic remainder: ns prefixes in the symbol
    outline, semantic-token ns coloring, and making `mcp--shadows-for` ns-aware.
-6. ✅ **Package integration policy (§8)** — decided in ADR-068 (flat names +
+6. ✅ **Package integration policy (§8)** — decided in ADR-069 (flat names +
    detect-and-reject at lock time); enforcement lands with the package manager
    (ADR-037), dormant until then.
 

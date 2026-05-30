@@ -8897,7 +8897,7 @@ the worker as a child and parking main.)
 path beside monitors), supervisor module docstring. **Built in the
 `distributed-links` worktree off `main`.**
 
-## 2026-05-30 — Namespaces finished: LSP ns-awareness (§6) + collision policy (ADR-068)
+## 2026-05-30 — Namespaces finished: LSP ns-awareness (§6) + collision policy (ADR-069)
 
 **Goal.** Close out namespaces — the two items left after the big-bang were LSP
 Tier-2 ns-awareness (§6) and the package ns-collision policy (§8). The LSP was
@@ -8923,7 +8923,7 @@ identity* — a bare occurrence counts only where that file resolves it to the t
 a qualified token matches exactly, and rename keeps the `ns/` prefix on qualified
 occurrences. A different namespace's same-named def is never touched.
 
-**§8 — collision policy (ADR-068).** Flat short ns names + detect-and-reject at
+**§8 — collision policy (ADR-069).** Flat short ns names + detect-and-reject at
 dependency-resolution time (the package manager errors on two reachable packages
 declaring the same ns), rather than mandatory verbose prefixes. Aliases deferred
 (ADR-011); enforcement lands with the package manager (dormant until then).
@@ -8936,5 +8936,110 @@ declaring the same ns), rather than mandatory verbose prefixes. Aliases deferred
 
 **Cosmetic remainder** (not correctness): ns prefixes in the document/workspace
 symbol outline, semantic-token ns coloring, and `mcp--shadows-for` going ns-aware.
-Namespaces are otherwise **done** (ADR-065/066/068). Built in the `namespaces-lsp`
+Namespaces are otherwise **done** (ADR-065/066/069). Built in the `namespaces-lsp`
 worktree off `main`.
+
+---
+
+## 2026-05-30 — Namespace migration: `nest` tooling + imported-macro expansion
+
+**Context.** After the ADR-065 big-bang (`defmodule` *is* the namespace; `std/` +
+tests migrated), the Rust-side tooling hadn't caught up: the `nest`/`brood`/`lsp`
+bootstrap strings still called now-namespaced module functions by bare name, files
+loaded as code (the user config, the project manifest) hit bare `(config …)` /
+`(project …)` heads that are now `project/…`, the `nest run` entry lookup used the
+bare fn name, the six `nest new` scaffold templates emitted pre-migration source, and
+the macroexpand pass didn't resolve `(:use …)`-imported macro heads. Net effect:
+`nest mcp` failed its bootstrap (and, mid-migration, grabbed the observer's
+alt-screen), every subcommand broke in turn, fresh scaffolds couldn't `test`/`run`,
+and a `hatch` project's `(defprocess …)` tripped spurious "unbound" advisories.
+
+**Fixed.**
+- **Bootstrap strings** (`crates/{nest,cli}/src/main.rs`, `lsp`, `introspect`):
+  qualified every bare module call — `project/load-config`,
+  `project/setup-tooling-image`, `project/project--find-root`, `project/new-project`,
+  `project/run-project*`, `package/tree`/`add`, `docs/document-all`/`generate-docs`,
+  `observer/observe-run`/`observe-connect`, `repl/repl-run`.
+- **Read manifests/config as data, not code.** `project/load-config` and the
+  `package` verbs (new `package--load-manifest`) now `read-string` + apply
+  `(config …)` / `project/project--apply` instead of `(load)`-ing a file whose bare
+  `(config …)` / `(project …)` head is namespaced now — matching the manifest's
+  "read, don't run" contract (ADR-020).
+- **`run-project` entry resolution** — resolves `modname/fname` (e.g. `main/main`),
+  falling back to bare, so a `(defmodule main)` entry is found.
+- **Scaffold templates** — all six (`default`/`tui-loop`/`hatch`/`http-server`/
+  `editor`/`gui`) moved to the `(defmodule … (:use …))` convention: main modules
+  `(:use hatch/http/ui/display/face)`, test files `(defmodule main-test (:use main)
+  … (:use test))`.
+- **Imported macros expand in the compile pass** (`eval/macros.rs::macroexpand_1`):
+  when a bare head isn't directly bound, resolve it through the current namespace +
+  the `(:use)` import table — as the `resolve` pass and eval-time dispatch already do
+  — and expand if it names a macro. Strictly additive: a directly-bound non-macro
+  still shadows (never reinterpreted). Closes the gap where an imported macro head
+  (hatch's `defprocess`) was left unexpanded and the advisory checker walked its raw
+  body; `macroexpand`/`macroexpand-1` now match eval and qualified-head behaviour.
+- **New MCP tool** `bench` (`std/mcp.blsp`) — times `:source` over `:iterations` in
+  the live image; thirteenth tool.
+
+**Verified.** All six `nest new` templates go green through `test` / `run` / `check`
+(hatch: `counter = 12`, no advisory noise; default: `hello demo`). `nest mcp`
+initializes and lists 13 tools with no observer takeover. **166** brood lib unit
+tests pass, including two new `macroexpand` regression tests
+(`imported_macro_expands_in_the_compile_walk`, `bare_unimported_macro_is_left_unexpanded`).
+
+---
+
+## 2026-05-30 — Generational GC, operator-call elision, reductions in the observer
+
+A perf + observability arc on top of the namespace work above.
+
+**Generational GC (Stage C).** Split the per-process LOCAL heap into a **nursery**
++ **old** generation (handle age bit stolen from the gen field; `core/heap.rs`).
+A *minor* collection copies nursery survivors into old; a *major* compacts old.
+**Aging**: a minor only *tenures* when the nursery crossed a pressure threshold
+(`min_tenure`), else it does a young semi-space flip — so transient garbage never
+reaches old (this is what keeps `BROOD_GC_STRESS` from O(n²) premature-tenuring).
+No write barrier needed (immutable data ⇒ no old→young pointers) except a one-site
+remembered set for a frame tenured mid-bind (`env_define`). Found+fixed along the
+way: a `flush_map` cross-generation child bug (CHAMP nodes shared across a tenure
+boundary → OOB/SIGSEGV), and a release-only `cfg` slip. Result vs single-space on
+a stateful workload (process holding ~20k live state across churn): **25.2s→3.1s
+(8×), RSS 538MB→59MB (9×), copy volume 70× less**; compute-bound neutral. Verified
+green under `RUSTFLAGS="-C debug-assertions=on" BROOD_GC_VERIFY=1 BROOD_GC_STRESS=1`
+(verifier made generation-aware: it no longer re-walks immutable old internals).
+Also closed ADR-002 (`Rc`→`gc-arena` superseded by the hand-rolled collector) and
+tightened the ADR-043 caps to 2 GiB / 1 GiB.
+
+**Thin-wrapper elision (`eval/mod.rs`).** A call to a closure whose selected arm is
+a pure pass-through `(head p_i p_j …)` redirects to `head` on the already-evaluated
+argv, skipping the redundant frame/bind/body — halving the cost of the prelude
+operator wrappers (`(+ a b)` → straight to `%add`). Hot-reload-safe (reads the live
+closure each call; special-form/param heads excluded) and ticks the elided call so
+preemption fairness is unchanged. Best-of-3 release: fib 2.28→1.80s, collatz
+5.65→4.54s, mandelbrot 1.57→1.27s (~20%); `>=`/`nth`-bound benches gain less.
+
+**Reductions in the observer.** Erlang's scheduling unit, end-to-end: a cumulative
+`reductions: AtomicU64` on `Mailbox`, accumulated at scheduler quantum boundaries
+(`preempt` tallies the full budget before refreshing it — that ordering was the bug
+that kept the count at 0; `run_one` adds the partial final quantum), exposed as
+`process-info :reductions`, and shown as a **REDS column** in `std/observer.blsp`.
+Exact for spawned processes, coarse (whole-budget) for the root.
+
+**Hatch / `defprocess` fix (`eval/macros.rs::resolve_def`).** A macro that expands to
+a `(defn name … (name …))` (the `defprocess` receive loop) recursed by name, but the
+namespace resolver's forward-ref scan only sees *raw* `def`/`defn` heads — so the
+macro-defined name wasn't in `ns_known_names`, the def head qualified to `ns/name`
+while the recursion stayed bare → unbound in the spawned process. `resolve_def` now
+registers the def's name before resolving its body (matching how literal `defn`s
+were already pre-scanned). Fixed the 7 `hatch` suite failures.
+
+### Loose ends / handoff (context cleared here)
+- **`observe_attach` is the one known-red test** — `observe-serve` unbound, pending
+  the `std/observer.blsp` namespace migration. Goes green when that's finished.
+- **Optional perf follow-ups** (not done, ranked): compile-pass inlining of small
+  prelude fns — reaches the `>=`/`<=` `(not (%lt …))` ops the pass-through can't, and
+  inlines generally (hot-reload tradeoff, lives in the compile pass); `reduce`'s
+  245 MB is `(range 1M)` materialising (lazy/fused range or transducer); the
+  fundamental ~80× tree-walker gap vs Node needs a bytecode/closure-compiling VM.
+- GC handoff (`docs/handoff-gc.md`) items #1–#5 are all addressed (generational was
+  the last one); only the deferred generational *young/old further tuning* remains.
