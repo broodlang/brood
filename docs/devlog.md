@@ -8663,3 +8663,30 @@ in that file; resolver unit tests + autogensym green; full suite green.
 header, so imported names draw advisory `unbound` warnings (same benign class as
 runtime-`eval`-defined globals; never gates). Fix when migrating std: eval the
 header in `check_file`, or statically populate the import table.
+
+---
+
+## 2026-05-30 — Namespaces: import-aware checker + first std module migrated
+
+**Goal.** Start the rollout: the import-aware checker (so migration isn't noisy)
+and prove the `defmodule`→namespace migration pattern on a leaf module.
+
+**Built.**
+- `types/check.rs`: `check_file` now evaluates the `(ns …)`/`(defmodule …)` header
+  during pass 1 (recognised on the un-expanded form via `is_ns_header`), so its
+  `(require …)`/`%refer`/`%in-ns` run — populating the import table. A
+  `(:use …)`-imported name now resolves in the checker instead of drawing an
+  advisory `unbound` warning. (Same eval-during-check policy as `require`.)
+- `std/set.blsp`: `(defmodule set …)` → `(ns set …)` — the first migrated std
+  module. Its functions are now `set/set`/`set/union`/… (verified bare `union` is
+  no longer a root global).
+- `tests/set_test.blsp`: `(require 'set)` → `(ns set-test (:use set))` (keeps
+  `(require 'test)` — the framework is still root). `--check` is clean; 14/14.
+
+**Pattern proven** (for the remaining ~27 modules): header `defmodule X` → `ns X`
+(defs auto-namespace; intra-module refs auto-resolve), consumers become namespaces
+that `(:use X)` (refer-all keeps call sites unchanged) or qualify. The final
+`ns`→`defmodule` rename + tooling update happens once no root `defmodule` remains.
+
+**Next.** Grind the rest of `std/` leaf-out; namespace `test` + the 42 test files;
+then the rename/unify; then α (cross-ns macro hygiene), LSP, packages.

@@ -118,6 +118,21 @@ fn is_require_form(heap: &Heap, form: Value) -> bool {
     false
 }
 
+/// A namespace header — `(ns …)` / `(defmodule …)` (checked on the *un-expanded*
+/// form, before its `(:use …)` clauses lower away). The checker evaluates it so
+/// the header's `(require …)`/`%refer`/`%in-ns` run — populating the import table
+/// — and a `(:use …)`-imported name then resolves instead of looking unbound.
+fn is_ns_header(heap: &Heap, form: Value) -> bool {
+    if let Value::Pair(p) = form {
+        let (head, _) = heap.pair(p);
+        if let Value::Sym(s) = head {
+            return crate::core::value::symbol_is(s, "ns")
+                || crate::core::value::symbol_is(s, "defmodule");
+        }
+    }
+    false
+}
+
 /// Check one form, returning a warning per provable misuse. Empty when nothing is
 /// provably wrong (which includes "not enough static info").
 pub fn check_form(heap: &Heap, form: Value) -> Vec<String> {
@@ -224,7 +239,11 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
         // here and the next iteration's macroexpand.
         heap.push_root(exp);
         expanded.push(exp);
-        if is_require_form(heap, exp) {
+        // Evaluate `(require …)` (so a module's macros/globals resolve) and the
+        // `(ns …)`/`(defmodule …)` header (so its `(:use …)` imports populate the
+        // import table). `f` is the un-expanded form — its head still names the
+        // header before macroexpansion lowered it to a `do`.
+        if is_require_form(heap, exp) || is_ns_header(heap, f) {
             let _ = crate::eval::eval(heap, exp, root);
         }
     }

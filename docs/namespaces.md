@@ -297,12 +297,17 @@ the lock file stays computable. Auto-require collapses `require`+`use` for code 
    `(require …)` so it auto-loads (loads-but-never-fetches, §9). Own-namespace defs
    shadow imports. Tested: refer-all, subset, private excluded, own-ns precedence,
    cross-process.
-3. ⬜ **Unify `defmodule` = namespace; migrate `std/`** — make `defmodule` the one
-   namespace form, drop `ns`; migrate std module-by-module (start with a leaf like
-   `set`), namespace `test` + add `(:use test)` to the 42 test files; update the
-   formatter/docs/scaffold tooling that hard-codes `defmodule`. Make the checker
-   *import*-aware (eval the `(:use …)` header, or statically populate the import
-   table) so imported names stop drawing advisory unbound warnings.
+3. 🟡 **Unify `defmodule` = namespace; migrate `std/`** (in progress).
+   - ✅ **Import-aware checker** — `check_file` now evals the `(ns …)`/`(defmodule …)`
+     header so `(:use …)` imports populate; imported names no longer draw advisory
+     unbound warnings.
+   - ✅ **First leaf migrated** — `std/set.blsp` is now `(ns set)`; its functions are
+     `set/union` etc.; `tests/set_test.blsp` became `(ns set-test (:use set))`. Proves
+     the pattern: `defmodule X` → `ns X`, consumers `(:use X)` (or qualify).
+   - ⬜ Remaining: migrate the other ~27 modules (leaf-out), namespace `test` + add
+     `(:use test)` to the 42 test files, then the **final unify** — rename the `ns`
+     macro to `defmodule`, drop `ns`, and update the formatter/docs/scaffold tooling
+     that hard-codes `defmodule` (once no root `defmodule` remains).
 4. ⬜ **Hygiene — α (§7)** — auto-qualifying quasiquote + `~'` escape + `std/`
    macro audit; coordinate with the ADR-064 quasiquote-to-Brood refactor. Needed
    once std *macros* live in namespaces and are used across them.
