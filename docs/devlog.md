@@ -9480,3 +9480,17 @@ and `brood`'s `run_files`/`--test`, plus the broken-pipe exit in `print`.
 `(term-raw-enter)` followed by an unbound-symbol error returns the terminal to
 `icanon` (cooked) instead of leaving it `-icanon` (wedged). Full suite green
 (985 in-language tests).
+
+**Follow-up: flaky package test (fixture path reuse).** While verifying the
+above, `make test` intermittently failed two ADR-070 cases
+(`provided-modules …` in `tests/package_test.blsp`) with `actual: (alpha json)`
+where one module was expected. Root cause: `pkg-fixture-root` named its `/tmp`
+dir with `(gensym "brood-pkg-")`, but gensym's counter resets to 0 each
+`nest test` process and fixtures are never torn down — so the same
+`/tmp/brood-pkg-__N` path is *reused across runs*, and because concurrent
+scheduling shifts which counter value a given test draws, two different tests
+write into the same numbered dir over successive runs and their files
+accumulate (593 leftover dirs found, the contaminated ones holding both
+`alpha.blsp` and `helpers.blsp`). Fixed by naming the fixture root with
+`(random-token 8)` (entropy-seeded, unique across processes and runs) so a dir
+is never reused. Full suite green across repeated runs.
