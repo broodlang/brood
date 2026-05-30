@@ -409,6 +409,53 @@ Each worker is a green process on the scheduler's pool; `send` deep-copies the
 result across heaps. The `collect` loop is tail-recursive, so it's O(1) stack
 even for thousands of workers.
 
+## Interactive apps — the display seam & `ui-run`
+
+An interactive app (terminal *or* native window) is one render-op protocol with
+several frontends (ADR-046). You write **one** pure `view` and `update`; the same
+code paints to a terminal or a GUI window unchanged.
+
+- **Frame** = a vector of render ops, built with `std/display` constructors:
+  `(frame (clear) (text row col s face?) (cursor row col))`. A *face* is a style
+  map, `{:fg :red :bold true}` (`(:use display)` for the constructors).
+- **Frontend** = a map of five fns `{:enter :leave :size :draw :poll}`. `(:use ui)`
+  gives you `*term-display*` (the terminal) and `(gui-display)` (a native window,
+  needs a `--features gui` build); `display-broadcast` fans one frame to several.
+- **The loop** = `(ui-run model view update display)` — a TEA loop: render
+  `(view model cols rows)` → poll input → fold it with `(update model input cols
+  rows)` → recurse, until the model is `:done`, then tear the frontend down. Set
+  `:tick-ms` in the model for the refresh beat (input is `:tick` on timeout).
+
+```lisp
+(defmodule main "a counter app" (:use ui) (:use display))
+
+(defn view (m cols rows)
+  (frame (clear) (text 0 0 (str "count: " (get m :count)))))
+
+(defn update (m input cols rows)
+  (cond (= input :up)   (assoc m :count (inc (get m :count)))
+        (= input :down) (assoc m :count (dec (get m :count)))
+        (= input :ctrl-c) (assoc m :done true)   ; Esc/Ctrl-C → quit
+        else m))
+
+(defn main () (ui-run {:count 0 :done false :tick-ms 1000} view update *term-display*))
+;; for a window instead: (ui-run … (gui-display))   ; --features gui
+```
+
+**Input vocabulary** (what `:poll` / a raw `(receive)` delivers): a printable key
+is a **1-char string** (`"a"`); the rest are keywords — `:up :down :left :right
+:enter :backspace :escape :ctrl-c` …; the mouse is `[:mouse action button row col]`
+(`action` is `:press` / `:release` / `:drag` / `:scroll-up` / `:scroll-down` —
+`:drag` is motion with a button held, delivered once per cell crossed, so a divider
+drag is bounded; `button` is `:left` / `:right` / `:middle`, nil for scroll);
+a resize is `[:resize cols rows]`. **A GUI window's close button (the X) is its own
+`:close` message** — *not* `:escape`, so an app that binds Esc to cancel/normal-mode
+can still be closed by the X. **`ui-run` quits on `:close` automatically**, so every
+`ui-run` app is closeable for free; you never wire it into `update`. In a hand-rolled
+`(receive)` loop (not on `ui-run`), match it yourself — `(:close :quit)` — or use the
+`ui/quit-request?` predicate. (`nest new --template gui` / `--template editor`
+scaffold complete `ui-run` apps; `--template tui-loop` a plain stdout animation.)
+
 ## Hot reload (`nest run --watch FILE`)
 
 Writing a live script: just write a normal Brood file. The
@@ -619,10 +666,12 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 
 ## Module skeleton (what `nest new` scaffolds)
 
-`nest new <name>` scaffolds this default `main`+`hello` pair. `nest new <name>
---template tui-loop` instead scaffolds a tail-recursive animation loop (pairs
-with `nest run --for`), and `--template hatch` a stateful gen_server-style
-process — starter shapes you'd otherwise hand-write.
+`nest new <name>` scaffolds this default `main`+`hello` pair. Other `--template`
+options scaffold starter shapes you'd otherwise hand-write: `tui-loop` (a
+tail-recursive animation loop, pairs with `nest run --for`), `hatch` (a stateful
+gen_server-style process), `http-server` (a minimal web app), `editor` (a tiny
+text editor on `ui-run`), and `gui` (a windowed `ui-run` app — see *Interactive
+apps* above; needs a `--features gui` build).
 
 ```lisp
 ;; src/hello.blsp
