@@ -11,6 +11,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, MutexGuard, RwLock};
 
+use smallvec::SmallVec;
+
 use crate::core::heap::Heap;
 use crate::error::LispResult;
 
@@ -444,6 +446,28 @@ pub struct ClosureArm {
     pub optionals: Vec<(Symbol, Value)>,
     pub rest: Option<Symbol>,
     pub body: Vec<Value>,
+    /// Precomputed thin-wrapper analysis (perf). `Some` when this arm is a pure
+    /// pass-through — no `&optional`/`&` rest and a single body form
+    /// `(head p_i p_j …)` whose arguments are all the arm's own parameters used
+    /// directly — so a call can redirect straight to `head` on the already-bound
+    /// `argv`, skipping the scope alloc + param bind + body walk. Computed once at
+    /// closure-allocation time (`Heap::alloc_closure`) and carried verbatim across
+    /// promote/freeze/message copies, since it's a pure function of the immutable
+    /// arm. `None` for any arm that isn't a redirectable wrapper. This is what
+    /// keeps the prelude operator wrappers (`(+ a b)` → `(%add a b)`) cheap without
+    /// re-deriving the forwarding map on every call (see `eval::passthrough_arm`).
+    pub passthrough: Option<Passthrough>,
+}
+
+/// A resolved thin-wrapper redirect for a [`ClosureArm`] — see
+/// [`ClosureArm::passthrough`]. `head` is the inner call's head (always a
+/// `Value::Sym`, so it is region-independent and copies verbatim across
+/// promote/freeze/message); `map[k]` is the `argv` index that the inner call's
+/// `k`th argument forwards.
+#[derive(Clone)]
+pub struct Passthrough {
+    pub head: Value,
+    pub map: SmallVec<[usize; 4]>,
 }
 
 impl ClosureArm {
@@ -502,6 +526,8 @@ impl Closure {
                 optionals,
                 rest,
                 body,
+                // Filled by `Heap::alloc_closure` once the closure is interned.
+                passthrough: None,
             }],
             doc,
             env,

@@ -71,6 +71,15 @@ fn special_form(s: Symbol) -> Option<SpecialForm> {
     SPECIAL_IDS.get(&s).copied()
 }
 
+/// Is `s` an evaluator-core special form (`if`/`let`/`fn`/…)? Exposed so
+/// [`Heap::alloc_closure`](crate::core::heap::Heap::alloc_closure) can exclude a
+/// special-form head when precomputing a thin-wrapper [`Passthrough`](crate::core::value::Passthrough)
+/// — a special form isn't a callable value, so it can't be redirected to.
+#[inline]
+pub(crate) fn is_special_form(s: Symbol) -> bool {
+    SPECIAL_IDS.contains_key(&s)
+}
+
 pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
     let mut expr = expr;
     let mut env = env;
@@ -838,11 +847,6 @@ pub fn apply_closure(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> LispResu
     Ok(result)
 }
 
-/// Select the closure's arm for this call's arity, bind its parameters into a
-/// fresh scope, and return `(scope, that arm's body)`. Dispatching by argument
-/// count here — and binding each fixed arm's params *directly* — is what makes a
-/// multi-arity function's common small-arity call cheap: no rest-list, no
-/// `match*`, just one env frame (see [`Closure::select_arm`] / `ClosureArm`).
 /// Thin-wrapper elision (perf). If the arm `cl` selects for an `argc`-argument
 /// call is a **pure pass-through** — no `&optional`/`& rest`, and a single body
 /// form `(head p_i p_j …)` whose arguments are all the arm's *parameters* used as
@@ -853,48 +857,18 @@ pub fn apply_closure(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> LispResu
 ///
 /// This is what makes the prelude operator wrappers cheap — `(+ a b)`'s arm is
 /// `(%add a b)`, so `+` redirects straight to `%add` on the same args instead of
-/// paying a second full call. General (any thin wrapper benefits) and
-/// hot-reload-safe: it reads the live closure on every call, so a redefinition is
-/// picked up. `head` must be an ordinary function reference, so special forms (an
-/// `(if …)` body) and params-as-head are excluded — those fall through to the
-/// normal bind-and-eval path.
+/// paying a second full call. The analysis itself is **precomputed once** at
+/// closure-allocation time (`Heap::compute_passthrough`) and cached on the arm
+/// (`ClosureArm::passthrough`), so this hot-path read is just an arm select plus a
+/// field clone — no per-call body walk or param scan. Still hot-reload-safe: it
+/// reads the *live* closure, and a redefinition rebuilds the closure (recomputing
+/// the analysis). `head` is always an ordinary function reference (special forms
+/// and params-as-head are excluded at precompute time), so the caller's
+/// resolve-and-redirect is sound.
 #[inline]
 fn passthrough_arm(heap: &Heap, cl: ClosureId, argc: usize) -> Option<(Value, SmallVec<[usize; 4]>)> {
-    let cl_data = heap.closure(cl);
-    let arm = cl_data.select_arm(argc)?;
-    if !arm.optionals.is_empty() || arm.rest.is_some() || arm.body.len() != 1 {
-        return None;
-    }
-    let (head, mut rest) = match arm.body[0] {
-        Value::Pair(p) => heap.pair(p),
-        _ => return None,
-    };
-    let head_sym = match head {
-        Value::Sym(s) => s,
-        _ => return None,
-    };
-    // A special form (`if`/`let`/…) isn't a callable value; a param-as-head would
-    // resolve in the wrong scope. Either means this isn't a redirectable wrapper.
-    if special_form(head_sym).is_some() || arm.params.iter().any(|&p| p == head_sym) {
-        return None;
-    }
-    let mut map: SmallVec<[usize; 4]> = SmallVec::new();
-    loop {
-        match rest {
-            Value::Nil => break,
-            Value::Pair(p) => {
-                let (a, next) = heap.pair(p);
-                let asym = match a {
-                    Value::Sym(s) => s,
-                    _ => return None, // a non-symbol arg (literal / nested call) — not a pure forward
-                };
-                map.push(arm.params.iter().position(|&p| p == asym)?);
-                rest = next;
-            }
-            _ => return None, // improper arg list
-        }
-    }
-    Some((head, map))
+    let arm = heap.closure(cl).select_arm(argc)?;
+    arm.passthrough.as_ref().map(|p| (p.head, p.map.clone()))
 }
 
 fn bind_params(
@@ -1111,6 +1085,7 @@ fn make_closure(heap: &mut Heap, name: Option<Symbol>, rest: Value, env: EnvId) 
                 optionals,
                 rest: rest_param,
                 body: cparts[1..].to_vec(),
+                passthrough: None, // filled by `alloc_closure`
             });
         }
         let id = heap.alloc_closure(Closure {

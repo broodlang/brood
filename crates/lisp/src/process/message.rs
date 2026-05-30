@@ -419,6 +419,7 @@ fn closure_from_message(heap: &mut Heap, c: &ClosureMsg) -> Value {
                 optionals,
                 rest: arm.rest,
                 body,
+                passthrough: None, // recomputed by `alloc_closure` on rebuild
             }
         })
         .collect();
