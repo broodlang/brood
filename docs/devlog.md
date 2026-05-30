@@ -9922,3 +9922,68 @@ checklist from a parallel experiment).
 **Next: 2c — local-capturing closures** (the GC-critical unlock — LOCAL-closure
 cache-by-code-handle + rooting the movable captured env in `vm_apply`; deferred to a
 dedicated effort).
+
+---
+
+## 2026-05-30 — Structured types, slice 1: function arrows (ADR-077)
+
+**Goal.** Start the long-deferred Step 5+ of the type system. Steps 0–4 were
+complete, so this is the only remaining type-system work on the staircase. Chosen
+first slice (with the user): the representation change + **function arrow types**,
+because higher-order functions (`map`/`filter`/`reduce`/`fold`) were the biggest
+checker blind spot — a wrong-arity callback sailed straight through.
+
+**Decision (ADR-077): refine, don't replace.** `types.md` had sketched Step 5+ as an
+`enum { Set(u16), Arrow, Vec }` *replacing* the bitset. Instead `Ty` became a
+**refinement struct** `{ tags: u32, arrow: Option<Arc<Sig>> }`: the flat tag bitset
+stays the coarse set (carrying the entire pre-Step-5 algebra verbatim), and `arrow`
+refines the function members when known. An arrow type *is* a `Sig`, so no parallel
+type. Union across kinds (`int ∪ (string -> int)`) is then just the tag union plus a
+per-kind refinement — sidestepping the DNF-of-frames an enum's `Union` variant would
+force (the expensive set-theoretic-algebra part ADR-011 says to defer).
+
+**Built.**
+- `Ty` rewritten in `types/mod.rs`: refinement struct; `Ty::arrow`/`as_arrow`/
+  `of_tags`; arrow-aware `union`/`intersect`/`negate`/`is_subtype` (only ever
+  *widen* a refinement when the exact result isn't representable — sound for an
+  advisory checker); `is_disjoint` decided on tags alone (never off an arrow
+  mismatch). `Sig` gained `is_subtype` (contravariant params, covariant ret) +
+  `Display` (`(int, string) -> number`).
+- `Ty` is no longer `Copy` (the `Arc`). Churn contained by making the builtin /
+  curated **type shorthands `const` items** (a `const` mention re-materialises a
+  fresh value, so the ~170 sig-table sites needed no `.clone()`); the compiler
+  flagged the handful of genuine reuse sites. `Arc` not `Rc` — `Sig` rides on
+  `NativeFn` in the `Arc<RuntimeCode>` region shared across scheduler threads.
+- Checker payoff: `map`/`filter` curated sigs carry a 1-ary callback arrow,
+  `reduce`/`fold` a 2-ary one; a new callback-arity check in `check/walk.rs` flags a
+  callback that can't accept the count the combinator calls it with —
+  `map: argument 1 is a callback called with 1 argument, but cons takes 2`.
+  Conservative: only fires when the callback's arity is knowable (a named *global*
+  fn via `arity_of`, or a simple single-clause lambda literal); locals, variadic /
+  `&optional` / multi-clause lambdas, and file-local names on the read-only
+  `--check` path all skip → **zero false positives**.
+
+**Verified.** 267 lib tests pass (+11: 6 arrow-algebra, 5 callback-checker), full
+in-language `brood_suite_passes` green, pre-existing lattice-law tests pass
+untouched (proves the flat case is behaviour-preserving). Audited `brood --check`
+over all 76 `std/` + `tests/` files: no callback false positives; positive controls
+(`(map cons …)`, `(map (fn (a b) …) …)`, `(reduce (fn (a) …) …)`) all fire with
+located messages.
+
+**LSP.** No new wiring needed — `brood-lsp`'s `publish` already pipes every
+`check_file` finding to `publishDiagnostics` as a `brood` WARNING, so the callback
+diagnostics surface in-editor automatically (and the LSP, which bootstraps project
+sources into the heap, even resolves *project-local* named callbacks that a bare
+`brood --check` of one file can't). Extracted the Tier-1 loop into a testable
+`typecheck_diagnostics` helper and added two LSP-level tests (the warning surfaces;
+correct arity stays quiet). 78 LSP tests green.
+
+**Confirmed no runtime cost.** `NativeFn.sig` (the field carrying `Ty`) is read only
+by the offline checker — `eval/` never constructs or inspects `Ty`/`Sig`, and the
+runtime arity gate uses the separate `Arity` field. So this is offline work plus a
+few KB of constant startup metadata; zero eval hot-path impact. `Ty` losing `Copy`
+is a compile-time ergonomic only.
+
+**Deferred (ADR-011).** Vector/list element types (the `elem` refinement the struct
+has room for), overload intersections, arrows in straight-line inference. Done on
+branch `structured-types`.
