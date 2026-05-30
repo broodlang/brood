@@ -512,10 +512,12 @@ unique `name@host` identity, a shared cookie, monitors/links/supervision, and
 code mobility. What remains under M4 is the **daemon/serving** layer built *on
 top* of connect, plus a few deliberately-deferred refinements:
 
-- ⬜ **Dual-listen** — one node serving a local Unix socket *and* a TCP/TLS
-  endpoint at once (today it's one transport per node; deferred ADR-068/011).
-  The smallest step toward "one core, local + remote frontends"; additive, no
-  protocol change.
+- ✅ **Dual-listen** (ADR-074) — one node serves several transports at once via
+  `(node-also-listen [addr])`: a local Unix socket *and* a TCP endpoint, so it's
+  reachable as `(connect "ed")` locally and `(connect "ed@host:port")` remotely —
+  one identity, multiple front doors. The "one core, local + remote frontends"
+  shape. Composable (opt-in), not forced on every TCP node. Server-side TLS as a
+  third transport is still open (below).
 - ⬜ **Server-side / inbound TLS** — `rustls` is client-only (its streams don't
   split read/write across threads like a raw fd). The cookie *authenticates* a
   link but doesn't *encrypt* it; remote attach over an untrusted network wants

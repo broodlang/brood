@@ -1278,6 +1278,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "%node-also-listen",
+        Arity::exact(1),
+        Sig::new(vec![string], nil_ty),
+        node_also_listen,
+    );
+    def(
+        heap,
         "%node-connect",
         Arity::exact(2),
         Sig::new(vec![sym, string], sym),
@@ -4783,6 +4790,18 @@ fn node_listen(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             .with_code(crate::error::error_codes::DISTRIBUTION)
     })?;
     Ok(Value::Keyword(name))
+}
+
+/// `(%node-also-listen addr)` — add another listener to an already-started node
+/// (dual-listen, ADR-074). `addr` carries the transport (`"unix:PATH"` /
+/// `"tcp:HOST:PORT"`); shares the node's existing identity + cookie.
+fn node_also_listen(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let addr = expect_string(heap, "%node-also-listen", arg(args, 0))?;
+    crate::dist::node_also_listen(&addr).map_err(|e| {
+        LispError::runtime(format!("node-also-listen: {e}"))
+            .with_code(crate::error::error_codes::DISTRIBUTION)
+    })?;
+    Ok(Value::Nil)
 }
 
 /// `(%node-connect peer addr)` — the dial mechanism behind the prelude's

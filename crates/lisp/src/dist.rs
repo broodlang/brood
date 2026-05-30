@@ -574,17 +574,47 @@ pub(crate) fn node_listen(name: Symbol, addr: &str, cookie: String) -> io::Resul
             ));
         }
     }
-    // Bind first (it can fail on a bad/taken address/path), *then* publish
-    // identity — a failed bind leaves the runtime a non-node, as before.
+    // Publish identity, then bind the first listener. The acceptor reads identity
+    // lazily (at accept time), so it's set before any peer can be served; if the
+    // bind fails we roll the identity back, leaving the runtime a non-node so
+    // node-start can be retried.
+    set_identity(name, cookie);
+    if let Err(e) = start_listener(addr) {
+        clear_identity();
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// `(%node-also-listen addr)` — add another listener (`unix:PATH` / `tcp:HOST:PORT`)
+/// to an already-started node, so one node serves several transports at once
+/// (ADR-074): a local Unix socket *and* a remote TCP endpoint — the editor-daemon
+/// "reachable locally by name and remotely over the network" shape. Shares the
+/// node's existing identity + cookie; errors if this runtime isn't a node yet.
+pub(crate) fn node_also_listen(addr: &str) -> io::Result<()> {
+    {
+        let n = crate::core::sync::read(&NODE);
+        if !n.started {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "node-also-listen: this runtime is not a node yet (call node-start first)",
+            ));
+        }
+    }
+    start_listener(addr)
+}
+
+/// Bind one listener for `addr` and spawn its accept loop. Identity-agnostic — the
+/// per-connection handshake reads `NODE` at accept time — so it serves both the
+/// first listener (`node_listen`) and any added later (`node_also_listen`).
+fn start_listener(addr: &str) -> io::Result<()> {
     if let Some(path) = addr.strip_prefix("unix:") {
         let path = path.to_string();
         prepare_unix_path(&path)?;
         let listener = UnixListener::bind(&path)?;
-        set_identity(name, cookie);
         spawn_acceptor(move || listener.accept().map(|(s, _)| Stream::Unix(s)));
     } else if let Some(hostport) = addr.strip_prefix("tcp:") {
         let listener = TcpListener::bind(hostport)?;
-        set_identity(name, cookie);
         spawn_acceptor(move || listener.accept().map(|(s, _)| Stream::Tcp(s)));
     } else {
         return Err(io::Error::new(
@@ -607,6 +637,19 @@ fn set_identity(name: Symbol, cookie: String) {
         n.started = true;
     }
     LOCAL_NODE.store(name, Ordering::Release);
+}
+
+/// Roll back [`set_identity`] — used when the first listener's bind fails, so a
+/// failed `node-start` leaves the runtime a non-node (retryable) rather than a
+/// node with no listener.
+fn clear_identity() {
+    {
+        let mut n = crate::core::sync::write(&NODE);
+        n.name = *NONODE;
+        n.cookie = String::new();
+        n.started = false;
+    }
+    LOCAL_NODE.store(u32::MAX, Ordering::Release);
 }
 
 /// The accept loop, shared by both transports: pull the next link off `accept`

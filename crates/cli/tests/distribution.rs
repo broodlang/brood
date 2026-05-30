@@ -1289,3 +1289,62 @@ fn remote_spawn_sync_returns_a_usable_remote_pid() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// **Dual-listen** (ADR-074): one node serves *both* a TCP endpoint and a local
+/// Unix socket via `node-also-listen`. A client reaches the same node — same
+/// authoritative `name@host`, same registered `:echo` — over each transport.
+/// Needs a shared `$HOME`/`$XDG_*` (for the cookie + the Unix socket dir) *and* a
+/// TCP port, so it uses `spawn_brood_env` + `free_port` together.
+#[test]
+fn dual_listen_serves_tcp_and_unix_at_once() {
+    let _g = port_lock();
+    let home = std::env::temp_dir().join(format!("brood-dual-{}", std::process::id()));
+    let run = home.join("run");
+    let cfg = home.join(".config");
+    std::fs::create_dir_all(&run).unwrap();
+    let port = free_port();
+    let env: Vec<(&str, &str)> = vec![
+        ("HOME", home.to_str().unwrap()),
+        ("XDG_CONFIG_HOME", cfg.to_str().unwrap()),
+        ("XDG_RUNTIME_DIR", run.to_str().unwrap()),
+    ];
+
+    // Explicit `:ed@127.0.0.1` so the TCP dial host matches the node's identity.
+    let server = format!(
+        r#"
+(node-start :ed@127.0.0.1 "127.0.0.1:{port}")
+(node-also-listen)                       ; + the local Unix socket "ed"
+(register :echo (self))
+(defn serve () (receive ([:hi from] (do (send from [:pong (self)]) (serve))) (_ (serve))))
+(serve)
+"#
+    );
+    let client = format!(
+        r#"
+(node-start :cli)
+(defn tc (f n) (try (f) (catch e (if (> n 0) (do (sleep 100) (tc f (- n 1))) (throw e)))))
+(def via-tcp  (tc (fn () (connect "ed@127.0.0.1:{port}")) 50))
+(def via-unix (tc (fn () (connect "ed")) 50))
+(unless (= via-tcp via-unix) (throw (str "transports gave different nodes: " via-tcp " vs " via-unix)))
+(send {{:name :echo :node via-tcp}}  [:hi (self)])
+(receive ([:pong _] :ok) (after 30000 (throw "no pong over tcp")))
+(send {{:name :echo :node via-unix}} [:hi (self)])
+(receive ([:pong _] :ok) (after 30000 (throw "no pong over unix")))
+(println "DUAL-LISTEN-OK")
+"#
+    );
+
+    let mut a = spawn_brood_env(&home, "dserver.blsp", &server, &env);
+    wait_until_listening(port);
+    let b = spawn_brood_env(&home, "dclient.blsp", &client, &env);
+    let out = b.wait_with_output().expect("client finished");
+    let _ = a.kill();
+    let _ = a.wait();
+    let _ = std::fs::remove_dir_all(&home);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains("DUAL-LISTEN-OK"),
+        "one node should be reachable over both TCP and the local Unix socket.\n--- stdout ---\n{stdout}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

@@ -55,6 +55,7 @@ binding, or `(nodes)`), not a bare literal.
 | `(node-start name)` | Start a **local** node (Unix-domain socket, no port). Returns its `name@host`. |
 | `(node-start name "host:port")` | Start a node listening over **TCP** for remote peers. |
 | `(node-start name "host:port" cookie)` | …with an explicit cookie (the default is `(node-cookie)`). |
+| `(node-also-listen)` / `(node-also-listen "host:port")` | **Dual-listen** (ADR-074): add another front door to this node — the local Unix socket, or a TCP endpoint — sharing its identity + cookie. |
 | `(connect "name")` | Dial a local peer by name (Unix socket). Returns the peer's `name@host`. |
 | `(connect "name@host:port")` | Dial a remote peer over TCP. Returns its `name@host`. |
 | `(remote-spawn node expr)` | Run `expr` in a fresh process on `node` (fire-and-forget, returns nil). |
