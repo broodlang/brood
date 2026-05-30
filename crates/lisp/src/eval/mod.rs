@@ -1042,7 +1042,7 @@ fn call_native(heap: &mut Heap, id: NativeId, argv: &[Value], env: EnvId) -> Lis
 /// `acc`/`fold`/`%eq` spuriously look unbound. False positives are
 /// tolerable: the hint conditions on "if this fired under fan-out, try
 /// `-j 1`," not on every unbound being a race. (`docs/error-codes.md`.)
-fn unbound_error(sym: Symbol) -> LispError {
+pub(crate) fn unbound_error(sym: Symbol) -> LispError {
     let e = LispError::unbound(format!("unbound symbol: {}", value::symbol_name(sym)));
     if crate::process::in_green_process() {
         e.with_hint(
