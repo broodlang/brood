@@ -82,15 +82,44 @@
         (assert= (first form) 'project)
         (assert= (plist-get (rest form) :name) "demo")))))
 
-(describe "project: duplicate global detection (flat namespace)"
-  (test "project/project--file-def-names extracts top-level def-style names (and skips defmodule)"
+(describe "project: namespace-aware duplicate global detection (ADR-065)"
+  (test "project/project--file-def-names resolves names to ns/name (ambient earmuffs stay root; defmodule skipped)"
     (let (dir (path-join "/tmp" (name (gensym "brood-dup-"))))
       (make-dir dir)
       (let (f (path-join dir "a.blsp"))
         (spit f "(defmodule a \"x\")\n(defn main () 1)\n(def k 2)\n(defmacro m (x) x)\n(defdyn *d* 0)\n(defn helper (y) y)\n")
+        ;; Under `(defmodule a)` every binding resolves to `a/…`, except the
+        ;; ambient `*d*` earmuff which stays root (mirrors the kernel resolver).
         (assert= (sort (project/project--file-def-names f))
-          (sort ["*d*" "helper" "k" "m" "main"])))))
-  (test "a name in two files is flagged once; unique names are not"
+          (sort ["*d*" "a/helper" "a/k" "a/m" "a/main"])))))
+  (test "the same short name in two DIFFERENT namespaces is not a collision"
+    (let (dir (path-join "/tmp" (name (gensym "brood-dup-"))))
+      (make-dir dir)
+      (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
+        (spit fa "(defmodule alpha)\n(defn main () 1)\n")
+        (spit fb "(defmodule beta)\n(defn main () 2)\n")
+        ;; alpha/main vs beta/main — distinct keys, no warning.
+        (assert= (project/project--duplicate-def-warnings [fa fb]) nil))))
+  (test "the same name in the SAME namespace IS flagged (qualified)"
+    (let (dir (path-join "/tmp" (name (gensym "brood-dup-"))))
+      (make-dir dir)
+      (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
+        (spit fa "(defmodule shared)\n(defn main () 1)\n(defn only-a () 1)\n")
+        (spit fb "(defmodule shared)\n(defn main () 2)\n(defn only-b () 2)\n")
+        (let (warns (project/project--duplicate-def-warnings [fa fb]))
+          (assert= (count warns) 1)
+          (is (string-contains? (first warns) "shared/main"))
+          (refute (string-contains? (first warns) "only-a"))))))
+  (test "an ambient *earmuff* name collides across namespaces (it stays root)"
+    (let (dir (path-join "/tmp" (name (gensym "brood-dup-"))))
+      (make-dir dir)
+      (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
+        (spit fa "(defmodule alpha)\n(defdyn *cfg* 1)\n")
+        (spit fb "(defmodule beta)\n(defdyn *cfg* 2)\n")
+        (let (warns (project/project--duplicate-def-warnings [fa fb]))
+          (assert= (count warns) 1)
+          (is (string-contains? (first warns) "*cfg*"))))))
+  (test "files with no defmodule share the root namespace — same name still collides"
     (let (dir (path-join "/tmp" (name (gensym "brood-dup-"))))
       (make-dir dir)
       (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
@@ -104,6 +133,6 @@
     (let (dir (path-join "/tmp" (name (gensym "brood-dup-"))))
       (make-dir dir)
       (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
-        (spit fa "(defn alpha () 1)\n")
-        (spit fb "(defn beta () 2)\n")
+        (spit fa "(defmodule alpha)\n(defn alpha-fn () 1)\n")
+        (spit fb "(defmodule beta)\n(defn beta-fn () 2)\n")
         (assert= (project/project--duplicate-def-warnings [fa fb]) nil)))))
