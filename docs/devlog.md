@@ -8010,3 +8010,33 @@ a real zen line. `http_test` 10/10 (added url/response-parsing cases); full suit
 
 **Deferred.** Streaming/persistent TLS sockets (non-blocking rustls / a `mio`
 reactor) and server-side TLS (cert+key).
+
+## 2026-05-30 — Shrink the GC-rooting surface: `macroexpand`→Brood + single-shot rule (ADR-064)
+
+**Why.** The collect-at-any-depth sweep found 6 Rust sites that hand-root a LOCAL
+handle across a re-entrant `eval`/`apply` — tedious and easy to reintroduce. The
+asymmetry: **Brood code is immune** (its locals are env bindings the evaluator
+already roots). So push loops/accumulators-over-eval into Brood; keep Rust
+primitives single-shot.
+
+**Done.**
+- **ADR-064** — the rule: *a Rust primitive must be single-shot w.r.t. eval
+  re-entry* (no LOCAL handle held across a re-entrant `eval`/`apply`; loops/builders
+  over eval belong in Brood). Corollary: a primitive that never re-enters eval
+  can't trigger a collection at all → I/O primitives are safe by construction.
+- **`macroexpand` → Brood** — a 3-line tail-recursive prelude `defn` over the
+  single-shot `macroexpand-1` builtin; the Rust `macroexpand` builtin removed
+  (`macros::macroexpand` stays for the compile pass). Behaviour byte-identical
+  (head-only fixpoint).
+- **GC-safety audit of the new I/O subsystems** (the user's ask, covering the
+  in-flight http/tls + file stdlib): `net.rs`, `io_source.rs`, and the file
+  primitives (`slurp`/`spit`/`list-dir`/`make-dir`/…) have **zero `eval`/`apply`
+  re-entry** — they do the syscall and return a Value or *deliver to a mailbox*
+  (handlers run as separate Brood processes via `receive`). Single-shot → GC-safe
+  by construction; nothing to fix. TLS (going into `net.rs`) is safe under the same
+  rule as long as it keeps delivering to a mailbox rather than `apply`ing a
+  callback inline.
+
+**Deferred (same rule).** `quasiquote` → Brood macro (bootstrap surgery — `defn`
+itself uses backtick) and `reload-defs` → Brood (needs `note-definition` exposed);
+tracked as their own tasks.

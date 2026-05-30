@@ -3823,3 +3823,57 @@ trap-exit (`exit` delivered as a *message* to a process that opted in) is deferr
 **References.** ADR-059 (blocking-work→mailbox; the deliver-and-self-handle shape),
 KI-1b (cross-thread-resume hazard this design avoids), ADR-051 (`process-info`),
 ADR-011 (defer trap-exit), [`todo.md`] (the test/MCP timeouts built on this).
+
+## ADR-064 — Rust primitives are single-shot w.r.t. eval re-entry
+
+**Status:** accepted (2026-05-30). `macroexpand` moved to Brood; rule adopted.
+
+**Context.** Collect-at-any-depth (ADR-061) made the copying collector fire at any
+eval depth. That turned a whole class of Rust code into a hazard: a `&mut Heap`
+function that holds a LOCAL handle (`Value`/`EnvId`) in a Rust local **across a
+call that re-enters `eval`/`apply`** can have that handle relocated out from under
+it (the collector moves it; the Rust local isn't updated). The closing sweep found
+**six** such sites (`reload_defs`, `receive_match`, `check_file`, `try_catch`,
+`quasiquote`, `macroexpand`) and hand-rooted each on the operand stack — tedious
+and easy to reintroduce.
+
+**The key asymmetry:** **Brood code is structurally immune.** A Brood function's
+"locals" are environment bindings, and the evaluator already roots the active
+scope across every nested eval (the ADR-061 operand stack). So a loop or
+accumulator written in Brood is GC-safe *by construction* — there is no unrooted
+Rust local to go stale. The hazard exists *only* at the Rust↔eval boundary, and
+only when a Rust frame **loops or accumulates** across eval.
+
+**Decision.** A Rust primitive must be **single-shot with respect to eval
+re-entry**: it may call `eval`/`apply`, but must not hold a LOCAL handle across
+that call — and in particular must not *loop* over eval or *build a structure from
+eval results*. Anything that does belongs in **Brood** (ADR-006), where the
+evaluator roots it for free. Corollaries:
+
+- A primitive that **never** re-enters eval can't trigger a collection at all (GC
+  only runs at the eval safepoint), so its `&[Value]` args and locals are always
+  valid — **I/O primitives are safe by construction** (`net`/`tls`/`file`/the
+  `io_source` mailbox seam: do the syscall, return a Value or *deliver to a
+  mailbox*; never `apply` a Brood callback inline holding a handle).
+- The irreducible kernel that *must* re-enter eval and hold state — `%try`,
+  `receive_match`, `apply`, `load`/`eval-string`, the compile-pass
+  `macros::macroexpand_all` — stays in Rust, hand-rooted, and is the small,
+  auditable exception set. (The compile pass additionally opts out of collection
+  via `MACRO_BLOCK` — ADR-061.)
+
+**First application.** `macroexpand` (the fixpoint loop) moved to a Brood prelude
+`defn` over the single-shot `macroexpand-1` primitive — its loop state is now an
+env-bound local, auto-rooted. The user-facing Rust `macroexpand` builtin is gone;
+`macros::macroexpand` (Rust) remains only for the compile pass.
+
+**Deferred (same rule, bigger moves).** `quasiquote` → a Brood macro over
+`cons`/`list`/`eval` (the worst offender, but a bootstrap refactor: `defn` itself
+uses backtick, so the expander must be raw Brood before `defn`, and the compile
+pass must expand rather than skip `quasiquote`). `reload-defs` → Brood (needs
+`note-definition` / read-file-forms primitives exposed). Both tracked as their own
+tasks; the Rust versions are correctly rooted in the meantime.
+
+**References.** ADR-061 (collect at any depth — the operand stack that makes Brood
+loops safe), ADR-006 (write the language in the language), ADR-059 (the
+mailbox-delivery seam that keeps I/O primitives callback-free), CLAUDE.md "Debug
+tooling" (`BROOD_GC_VERIFY` — how the six sites were found).

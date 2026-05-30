@@ -35,6 +35,26 @@ as errors.")
 (defn mcp--error-shape (e)
   (if (map? e) e {:kind :user :payload e}))
 
+;; Run a tool handler under a watchdog: spawn `(handler args)` in its own process
+;; and wait up to `ms`. If it doesn't finish in time, hard-kill it (`(exit p :kill)`,
+;; ADR-063 — stops even an infinite loop) and raise a timeout error, so a runaway
+;; `eval`/`load` returns a response to the agent instead of wedging the whole MCP
+;; session. `ms <= 0` (or nil) runs the handler inline, no watchdog — used for tools
+;; that are fast or legitimately long (e.g. `run-tests`, which has its own per-test
+;; budget). Output capture is cross-thread (builtins.rs), so the spawned handler's
+;; `print`/terminal output is still diverted off the JSON-RPC channel.
+(defn mcp-run-guarded (handler args ms)
+  (if (or (nil? ms) (<= ms 0))
+    (handler args)
+    (let (me (self) p (spawn (send me [:mcp-ok (handler args)])))
+      (monitor p)
+      (receive
+        ([:mcp-ok v] v)
+        ([:down a ~p reason] (error (str "MCP tool crashed: " (pr-str reason))))
+        (after ms
+          (do (exit p :kill)
+              (error (str "MCP tool timed out after " (quot ms 1000) "s — hard-killed"))))))))
+
 (defn mcp-eval-tool (args)
   "`eval` — evaluate `:source` in the session's global env. State persists
 across calls (hot reload, ADR-013): a `def` here is visible to the next call

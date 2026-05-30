@@ -94,6 +94,15 @@ pub(super) struct Ctx {
     /// `Some` for a green process (suspend via this yielder); `None` for the root
     /// thread (block on the mailbox condvar instead).
     pub(super) yielder: Option<*const Yielder0>,
+    /// An active **output capture** buffer, or `None`. When `Some`, this process's
+    /// `print` / terminal output appends here instead of real stdout (see builtins'
+    /// `capture_write`). A SPAWNED child **inherits** the parent's handle (the same
+    /// `Arc`), so output from a process tree the `nest mcp` dispatcher ran under a
+    /// watchdog is still diverted off the JSON-RPC channel — even though the eval
+    /// runs on a worker thread. Minted fresh per `begin_capture`, so concurrent
+    /// captures (parallel test MCP servers) never share a buffer. Rides `CURRENT`,
+    /// so it's saved/restored across suspend for free.
+    pub(super) capture: Option<Arc<Mutex<String>>>,
 }
 
 thread_local! {
@@ -760,6 +769,9 @@ pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
     // root (whose ctx/pid is lazily minted here on its first spawn) gets the
     // lower id. `ensure_ctx` needs no heap.
     let parent = self_pid();
+    // Inherit the spawner's output-capture buffer (if any), so a child of an
+    // MCP-watchdog'd handler still diverts its output off the JSON-RPC channel.
+    let inherited_capture = CURRENT.with(|c| c.borrow().as_ref().and_then(|ctx| ctx.capture.clone()));
     // Promote the thunk into the shared RUNTIME region so its handle (and any
     // captured local scope) is valid in the child, which shares this runtime's
     // code via the Arcs below. A top-level function is already shared (no-op).
@@ -788,6 +800,7 @@ pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
                 pid,
                 mailbox: Arc::clone(&coro_mailbox),
                 yielder: Some(yielder as *const Yielder0),
+                capture: inherited_capture,
             });
         });
         // Wipe the worker's residual GC-block depth and stack base — a previous
@@ -877,8 +890,48 @@ pub(super) fn ensure_ctx() -> Ctx {
             pid,
             mailbox,
             yielder: None,
+            capture: None,
         };
         *c.borrow_mut() = Some(ctx.clone());
         ctx
+    })
+}
+
+/// Install a fresh output-capture buffer on the current process (minting its ctx
+/// if needed), and return the handle. While installed, this process's — and any it
+/// `spawn`s — `print` / terminal output appends to the buffer instead of real
+/// stdout (see builtins' `capture_write`). The `nest mcp` dispatcher uses this so a
+/// tool handler's output (even a handler it runs in a spawned, killable process)
+/// can't corrupt the JSON-RPC stdout stream. A fresh `Arc` per call → concurrent
+/// captures never collide.
+pub fn begin_capture() {
+    ensure_ctx();
+    let buf = Arc::new(Mutex::new(String::new()));
+    CURRENT.with(|c| {
+        if let Some(ctx) = c.borrow_mut().as_mut() {
+            ctx.capture = Some(buf);
+        }
+    });
+}
+
+/// Stop capturing on the current process and return what was written, or `None` if
+/// no capture was active. Drains the shared buffer (a spawned child wrote to the
+/// same `Arc`).
+pub fn take_capture() -> Option<String> {
+    let arc = CURRENT.with(|c| c.borrow_mut().as_mut().and_then(|ctx| ctx.capture.take()));
+    arc.map(|a| std::mem::take(&mut *crate::core::sync::lock(&a)))
+}
+
+/// If the current process has an active capture, append `s` to it and return
+/// `true`; otherwise `false` (output goes to real stdout). The fast path — no
+/// capture — is a thread-local borrow + `Option` check; the `print` hot path pays
+/// no lock unless capturing.
+pub fn capture_append(s: &str) -> bool {
+    CURRENT.with(|c| match c.borrow().as_ref().and_then(|ctx| ctx.capture.as_ref()) {
+        Some(arc) => {
+            crate::core::sync::lock(arc).push_str(s);
+            true
+        }
+        None => false,
     })
 }
