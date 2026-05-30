@@ -3839,6 +3839,14 @@ impl Heap {
         self.roots[i]
     }
 
+    /// Overwrite the operand-stack slot at `i` (the VM uses this to write a
+    /// computed `let` binding into its frame slot — ADR-076 Stage 2). The slot is
+    /// already a tracked root, so the value is relocated by `arena_flip` like any
+    /// other; writing it is a plain `Vec` store.
+    pub fn set_root_at(&mut self, i: usize, v: Value) {
+        self.roots[i] = v;
+    }
+
     #[allow(dead_code)]
     fn collect_old(&mut self, extra_roots: &[Value], extra_envs: &[EnvId]) {
         if !self.gc_enabled {
