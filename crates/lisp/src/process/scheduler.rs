@@ -95,15 +95,19 @@ pub(super) struct Ctx {
     /// `Some` for a green process (suspend via this yielder); `None` for the root
     /// thread (block on the mailbox condvar instead).
     pub(super) yielder: Option<*const Yielder0>,
-    /// An active **output capture** buffer, or `None`. When `Some`, this process's
-    /// `print` / terminal output appends here instead of real stdout (see builtins'
-    /// `capture_write`). A SPAWNED child **inherits** the parent's handle (the same
-    /// `Arc`), so output from a process tree the `nest mcp` dispatcher ran under a
-    /// watchdog is still diverted off the JSON-RPC channel — even though the eval
-    /// runs on a worker thread. Minted fresh per `begin_capture`, so concurrent
-    /// captures (parallel test MCP servers) never share a buffer. Rides `CURRENT`,
-    /// so it's saved/restored across suspend for free.
-    pub(super) capture: Option<Arc<Mutex<String>>>,
+    /// The **output-capture stack**. Empty means no capture; output goes to real
+    /// stdout. When non-empty, this process's `print` / terminal output appends to
+    /// the **top** buffer instead (see builtins' `capture_write`). It's a *stack*
+    /// so captures **nest**: `begin_capture` pushes a fresh buffer, `take_capture`
+    /// pops the top and returns its text — so a `with-out-str` running inside a
+    /// `nest mcp` `tools/call` (which itself installs a capture) drains only its
+    /// own buffer and the MCP envelope's capture survives underneath. A SPAWNED
+    /// child **inherits** a snapshot of the parent's stack (the same `Arc`s), so a
+    /// process tree the dispatcher ran under a watchdog still diverts off the
+    /// JSON-RPC channel even on a worker thread. Each `Arc` is minted fresh per
+    /// `begin_capture`, so concurrent captures never share a buffer. Rides
+    /// `CURRENT`, so it's saved/restored across suspend for free.
+    pub(super) capture: Vec<Arc<Mutex<String>>>,
 }
 
 thread_local! {
@@ -832,9 +836,11 @@ pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
     // root (whose ctx/pid is lazily minted here on its first spawn) gets the
     // lower id. `ensure_ctx` needs no heap.
     let parent = self_pid();
-    // Inherit the spawner's output-capture buffer (if any), so a child of an
-    // MCP-watchdog'd handler still diverts its output off the JSON-RPC channel.
-    let inherited_capture = CURRENT.with(|c| c.borrow().as_ref().and_then(|ctx| ctx.capture.clone()));
+    // Inherit a snapshot of the spawner's capture stack (the same `Arc`s), so a
+    // child of an MCP-watchdog'd handler still diverts its output off the JSON-RPC
+    // channel. An empty stack (the common case) clones to an empty `Vec`.
+    let inherited_capture =
+        CURRENT.with(|c| c.borrow().as_ref().map(|ctx| ctx.capture.clone()).unwrap_or_default());
     // Promote the thunk into the shared RUNTIME region so its handle (and any
     // captured local scope) is valid in the child, which shares this runtime's
     // code via the Arcs below. A top-level function is already shared (no-op).
@@ -953,44 +959,46 @@ pub(super) fn ensure_ctx() -> Ctx {
             pid,
             mailbox,
             yielder: None,
-            capture: None,
+            capture: Vec::new(),
         };
         *c.borrow_mut() = Some(ctx.clone());
         ctx
     })
 }
 
-/// Install a fresh output-capture buffer on the current process (minting its ctx
-/// if needed), and return the handle. While installed, this process's — and any it
-/// `spawn`s — `print` / terminal output appends to the buffer instead of real
-/// stdout (see builtins' `capture_write`). The `nest mcp` dispatcher uses this so a
-/// tool handler's output (even a handler it runs in a spawned, killable process)
-/// can't corrupt the JSON-RPC stdout stream. A fresh `Arc` per call → concurrent
-/// captures never collide.
+/// Push a fresh output-capture buffer onto the current process's capture stack
+/// (minting its ctx if needed). While it's the top of the stack, this process's —
+/// and any it `spawn`s — `print` / terminal output appends to that buffer instead
+/// of real stdout (see builtins' `capture_write`). Captures **nest**: an inner
+/// `begin_capture` shadows an outer one until its matching `take_capture`. The
+/// `nest mcp` dispatcher uses this so a tool handler's output (even a handler it
+/// runs in a spawned, killable process) can't corrupt the JSON-RPC stdout stream;
+/// a `with-out-str` *inside* such a handler nests cleanly on top. A fresh `Arc` per
+/// call → concurrent captures never collide.
 pub fn begin_capture() {
     ensure_ctx();
     let buf = Arc::new(Mutex::new(String::new()));
     CURRENT.with(|c| {
         if let Some(ctx) = c.borrow_mut().as_mut() {
-            ctx.capture = Some(buf);
+            ctx.capture.push(buf);
         }
     });
 }
 
-/// Stop capturing on the current process and return what was written, or `None` if
-/// no capture was active. Drains the shared buffer (a spawned child wrote to the
-/// same `Arc`).
+/// Pop the top capture buffer and return what was written to it, or `None` if no
+/// capture was active. Drains the buffer (a spawned child wrote to the same `Arc`);
+/// an outer capture, if any, is uncovered and resumes catching subsequent output.
 pub fn take_capture() -> Option<String> {
-    let arc = CURRENT.with(|c| c.borrow_mut().as_mut().and_then(|ctx| ctx.capture.take()));
+    let arc = CURRENT.with(|c| c.borrow_mut().as_mut().and_then(|ctx| ctx.capture.pop()));
     arc.map(|a| std::mem::take(&mut *crate::core::sync::lock(&a)))
 }
 
-/// If the current process has an active capture, append `s` to it and return
-/// `true`; otherwise `false` (output goes to real stdout). The fast path — no
-/// capture — is a thread-local borrow + `Option` check; the `print` hot path pays
-/// no lock unless capturing.
+/// If the current process has an active capture, append `s` to the **top** buffer
+/// and return `true`; otherwise `false` (output goes to real stdout). The fast path
+/// — no capture — is a thread-local borrow + a `Vec::last` check; the `print` hot
+/// path pays no lock unless capturing.
 pub fn capture_append(s: &str) -> bool {
-    CURRENT.with(|c| match c.borrow().as_ref().and_then(|ctx| ctx.capture.as_ref()) {
+    CURRENT.with(|c| match c.borrow().as_ref().and_then(|ctx| ctx.capture.last()) {
         Some(arc) => {
             crate::core::sync::lock(arc).push_str(s);
             true

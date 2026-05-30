@@ -1,37 +1,93 @@
 ;; std/keymap.blsp — a rebindable key→command dispatcher. (require 'keymap).
 ;;
 ;; The shared input seam for interactive Brood UIs (the line editor, the process
-;; observer, the coming text editor). A KEYMAP is a map `key → command-symbol`,
-;; where a key is what `term-poll` returns (a 1-char string, or a keyword like
-;; `:up` / `:ctrl-a`) and a command is a global `(fn (state key) -> state)`. Keys
-;; resolve to commands *by symbol at dispatch time*, so redefining a command (or
-;; rebinding a key) hot-swaps behaviour on the next keystroke — the late-binding
-;; that makes a self-editing UI possible (ADR-046/052).
+;; observer, the coming text editor). A KEYMAP is a map `key → command`, where a
+;; key is what `term-poll` returns (a 1-char string, or a keyword like `:up` /
+;; `:ctrl-a`) and a command is either:
+;;   - a **command symbol** — a global `(fn (state key) -> state)`, resolved *by
+;;     symbol at dispatch time* so redefining the command (or rebinding the key)
+;;     hot-swaps behaviour on the next keystroke (the late-binding that makes a
+;;     self-editing UI possible, ADR-046/052); or
+;;   - a nested **keymap** (a map) — a *prefix* the next key resolves within, i.e.
+;;     a chord like `C-x C-e`. Chords are just data: nest the maps (or use
+;;     `keymap-bind`); no chord is hardcoded here.
+;;
+;; Two dispatch entry points: `keymap-dispatch` is the flat, single-key fast path
+;; (unchanged — what lineedit/observer use); `keymap-step` is the chord-aware
+;; superset that threads a "pending prefix" through the caller's loop.
 ;;
 ;; This is the counterpart to the display seam: `std/display.blsp` is "render-ops
 ;; out"; this is "key events in". Both are policy in Brood over a thin term-* seam.
 
 (defmodule keymap
   "A rebindable key→command dispatcher for interactive UIs. A *keymap* maps a key
-(a `term-poll` value) to a command **symbol**; `keymap-dispatch` resolves the
-symbol to a global `(fn (state key) -> state)` and applies it, so rebinding a key
-or redefining its command hot-swaps behaviour.
+(a `term-poll` value) to either a command **symbol** — a global `(fn (state key) ->
+state)` — or a nested **keymap** (a prefix, for chords like `C-x C-e`). Bindings
+resolve by symbol at dispatch time, so rebinding a key or redefining its command
+hot-swaps behaviour.
 
     (require 'keymap)
     (def *my-keys* {:up 'go-up :down 'go-down})
-    (keymap-dispatch *my-keys* state key (fn (s _) s))   ; unbound → no-op
+    (keymap-dispatch *my-keys* state key (fn (s _) s))   ; flat: unbound → no-op
+
+    ;; a chord, built as data — no specific binding baked into this module:
+    (def *km* (keymap-bind {} [:ctrl-x :ctrl-e] 'eval-last-sexp))
+    (keymap-step *km* pending state key fallback)        ; => [state' pending']
 
 Used by `std/lineedit.blsp` (self-insert fallback) and `std/observer.blsp` (no-op
-fallback); the same pattern is how the editor's keymaps will work.")
+fallback); the same pattern is how the editor's keymaps work.")
 
 (defn keymap-dispatch (keymap state key fallback)
   "Dispatch `key` through `keymap` to its command — a global `(fn (state key) ->
 state)` resolved by symbol (so redefining the command, or rebinding the key,
 hot-swaps behaviour). An **unbound** key goes to `fallback` (a `(fn (state key) ->
 state)` — e.g. self-insert, or a no-op `(fn (s _) s)`). A command that throws is
-caught and leaves the state unchanged, so a bad binding can't crash the loop. Pure
-apart from the symbol resolution; testable without a terminal."
+caught and leaves the state unchanged, so a bad binding can't crash the loop. The
+flat, single-key path: a binding to a nested keymap (a chord prefix) is ignored
+here — use `keymap-step` for chords. Pure apart from the symbol resolution;
+testable without a terminal."
   (let (sym (get keymap key))
-    (if (nil? sym)
+    (if (or (nil? sym) (map? sym))
       (fallback state key)
       (try ((eval sym) state key) (catch e state)))))
+
+(defn keymap-step (keymap pending state key fallback)
+  "One keystroke through a (possibly chorded) `keymap`, returning `[state' pending']`
+— the threaded counterpart to `keymap-dispatch`. `pending` is the prefix sub-keymap
+a prior key left us mid-chord in, or `nil` for a fresh chord; thread the returned
+`pending'` back in on the next keystroke. Resolution looks `key` up in `pending`
+when mid-chord, else in `keymap`:
+  - binds to a nested **keymap** → enter that prefix: `[state <sub-keymap>]` (state
+    unchanged; we wait for the next key);
+  - binds to a **command symbol** → run it and reset: `[(command state key) nil]`
+    (a throwing command leaves state unchanged, like `keymap-dispatch`);
+  - **unbound at the top** (fresh, not mid-chord) → `[(fallback state key) nil]`;
+  - **dead-end chord** (unbound *after* a prefix) → `[state nil]`: the key is
+    dropped and the chord resets (Emacs-style \"undefined\"), so a partial chord
+    never self-inserts via the fallback.
+Pure apart from the symbol resolution; testable without a terminal."
+  (let (active (if (nil? pending) keymap pending)
+        binding (get active key))
+    (cond
+      (map? binding)              [state binding]
+      (nil? binding)              (if (nil? pending)
+                                    [(fallback state key) nil]
+                                    [state nil])
+      :else                       [(try ((eval binding) state key) (catch e state)) nil])))
+
+(defn keymap-bind (keymap keys command)
+  "Bind a key sequence `keys` (a vector of one or more keys) to `command` (a symbol)
+in `keymap`, returning a new keymap — the ergonomic, data-only way to define a
+chord without baking any specific binding into this module. A one-key vector is a
+plain binding; a multi-key vector builds the intermediate prefix sub-keymaps (e.g.
+`[:ctrl-x :ctrl-e]`). Sibling bindings are preserved; an existing prefix sub-keymap
+is extended in place.
+
+    (-> {} (keymap-bind [:ctrl-x :ctrl-e] 'eval-last-sexp)
+           (keymap-bind [:ctrl-x :ctrl-s] 'save-buffer))"
+  (if (= (count keys) 1)
+    (assoc keymap (first keys) command)
+    (let (k (first keys)
+          existing (get keymap k)
+          sub (if (map? existing) existing {}))
+      (assoc keymap k (keymap-bind sub (rest keys) command)))))

@@ -1,0 +1,90 @@
+;; std/eval-command.blsp — evaluate Brood source straight from a buffer.
+;; (require 'eval-command).
+;;
+;; The "eval the Lisp I'm editing" commands — the C-x C-e family — as pure editor
+;; policy over `std/buffer` and the `read-all` / output-capture primitives. Each
+;; command takes a buffer and returns a **message string** (the form's value, with
+;; any output it printed prefixed); none of them edit the buffer, and none bind a
+;; key — the editor (or the user) decides the binding. This is opt-in editor
+;; toolkit, not language: zero kernel surface, pure Brood (ADR-045).
+;;
+;; The message shape mirrors a REPL transcript: captured output (if any) on its own
+;; lines, then `=> <value>`. An error (a read error, or a throw from the form)
+;; comes back as `error: <…>` rather than crashing the caller — C-x C-e in Emacs
+;; shows the error in the echo area, it doesn't kill the editor.
+
+(defmodule eval-command
+  "Evaluate Brood source from a buffer and describe the result. `(require
+'eval-command)`.
+
+    (require 'buffer) (require 'eval-command)
+    (-> (make-buffer \"(+ 1 2)\") end-of-buffer eval-last-sexp)  ; => \"=> 3\"
+
+`eval-last-sexp` evaluates the last complete form ending at or before point;
+`eval-region` evaluates the text between point and mark; `eval-buffer` evaluates
+the whole buffer. Each returns a message string and never edits the buffer or
+throws — the editor binds them to keys itself (none are assumed here)."
+  (:use buffer))
+
+(require 'buffer)
+
+;; ---- the value+output core --------------------------------------------------
+
+(defn eval-command--capturing (thunk)
+  "Run `thunk` with stdout captured; return `[value output-string]`. Pops the
+capture buffer even if `thunk` throws (re-raising), so a failed eval never leaves a
+dangling capture. The low-level pairing of `eval-last-sexp` & friends — it keeps
+*both* halves a REPL shows (the value and what was printed), which `with-out-str`
+can't, since it discards the value."
+  (do
+    (%capture-begin)
+    (let (v (try (thunk) (catch e (do (%capture-take) (throw e)))))
+      [v (%capture-take)])))
+
+(defn eval-command--error-message (e)
+  "A human-readable one-liner for a thrown value `e`: a raised string as-is, the
+`:message` of a structured error map (what the reader and kernel throw), else its
+printed form."
+  (cond
+    (string? e) e
+    (and (map? e) (get e :message)) (get e :message)
+    else (pr-str e)))
+
+(defn eval-command--describe (thunk)
+  "Run `thunk` (which produces a value, perhaps printing along the way) and format a
+message string: any captured output, then `=> <value>`. A throw — from reading or
+from evaluating — becomes `error: <message>` instead of propagating."
+  (try
+    (let (vo (eval-command--capturing thunk)
+          out (second vo))
+      (str (if (= out "") "" (str out (if (ends-with? out "\n") "" "\n")))
+           "=> " (pr-str (first vo))))
+    (catch e (str "error: " (eval-command--error-message e)))))
+
+;; ---- commands (buffer -> message string) ------------------------------------
+
+(defn eval-last-sexp (buf)
+  "Evaluate the **last complete form** ending at or before point in `buf` and return
+a message string (`=> <value>`, with any printed output prefixed). Only that one
+form runs — like Emacs `C-x C-e`, earlier forms in the buffer are not re-evaluated,
+so any names they bind must already be defined. Does not edit `buf`."
+  (eval-command--describe
+    (fn ()
+      (let (forms (read-all (substring (buffer-text buf) 0 (get buf :point))))
+        (if (empty? forms)
+          (throw "no complete form before point")
+          (eval (last forms)))))))
+
+(defn eval-region (buf)
+  "Evaluate the region (the text between point and mark) as Brood source and return
+a message string with the value of its **last** form. All forms in the region run,
+in order. With no mark set, returns a note instead. Does not edit `buf`."
+  (let (region (buffer-region buf))
+    (if (nil? region)
+      "; no region (set the mark first)"
+      (eval-command--describe (fn () (eval-string region))))))
+
+(defn eval-buffer (buf)
+  "Evaluate the **whole buffer** as Brood source and return a message string with
+the value of its last form. All top-level forms run, in order. Does not edit `buf`."
+  (eval-command--describe (fn () (eval-string (buffer-text buf)))))

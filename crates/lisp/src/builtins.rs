@@ -743,6 +743,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "read-all",
+        Arity::exact(1),
+        Sig::new(vec![string], any),
+        read_all,
+    );
+    def(
+        heap,
         "eval-string",
         Arity::exact(1),
         Sig::new(vec![string], any),
@@ -754,6 +761,23 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![string], any),
         load_string,
+    );
+    // Output-capture surface for the `with-out-str` prelude macro: push/pop a
+    // process-scoped capture buffer (the same mechanism the `nest mcp` dispatcher
+    // uses; captures nest). Rust = mechanism, the macro = policy.
+    def(
+        heap,
+        "%capture-begin",
+        Arity::exact(0),
+        Sig::new(vec![], nil_ty),
+        capture_begin,
+    );
+    def(
+        heap,
+        "%capture-take",
+        Arity::exact(0),
+        Sig::new(vec![], any),
+        capture_take,
     );
     // CST parse — mechanism for the in-Brood formatter (std/format.blsp); never
     // fails (malformed input becomes [:error "..."] nodes). Returns nested
@@ -1408,6 +1432,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("gc-trace", &["on?"], "Query (no arg) or set (truthy arg) per-collection GC trace logging for this process; returns the resulting state. When on, each minor/major collection prints a one-line summary to stderr. Defaulted from BROOD_GC_TRACE."),
     ("eval", &["form"], "Evaluate a form in the global environment."),
     ("read-string", &["s"], "Parse and return the first form in string s."),
+    ("read-all", &["s"], "Parse every form in string s and return them as a list (the all-forms sibling of read-string)."),
     ("parse-source", &["s"], "Parse s into a lossless CST tree as nested vectors (mechanism for std/format.blsp)."),
     ("eval-string", &["s"], "Read and evaluate every form in string s (the string analogue of load)."),
     ("load", &["path"], "Read and evaluate every form in the file at path."),
@@ -2014,6 +2039,24 @@ fn capture_write(s: &str) -> bool {
     crate::process::capture_append(s)
 }
 
+/// `(%capture-begin)` — push a fresh output-capture buffer (see
+/// [`begin_stdout_capture`]). The low half of the `with-out-str` macro; pairs with
+/// `%capture-take`. Captures nest, so this composes with an outer MCP capture.
+fn capture_begin(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    begin_stdout_capture();
+    Ok(Value::Nil)
+}
+
+/// `(%capture-take)` — pop the current capture buffer and return its text as a
+/// string (empty string if nothing was written), or `nil` if no capture was active
+/// (see [`take_captured_stdout`]). The high half of the `with-out-str` macro.
+fn capture_take(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    Ok(match take_captured_stdout() {
+        Some(s) => heap.alloc_string(&s),
+        None => Value::Nil,
+    })
+}
+
 fn print(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let parts: Vec<String> = args.iter().map(|&a| printer::display(heap, a)).collect();
     let text = parts.join(" ");
@@ -2199,6 +2242,18 @@ fn eval_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
 fn read_string(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let s = expect_string(heap, "read-string", arg(args, 0))?;
     reader::read_one(heap, &s)
+}
+
+/// `(read-all s)` — parse *every* form in `s` and return them as a list (empty for
+/// blank/comment-only input). The all-forms sibling of `read-string` (which
+/// returns only the first), and the read-half of `eval-string` without the eval —
+/// so form-manipulating Brood (an editor evaluating the last sexp before point,
+/// say) can isolate individual forms. Raises on a malformed/incomplete form, like
+/// `read-string`; use `parse-source` for lossless, error-tolerant parsing.
+fn read_all(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let s = expect_string(heap, "read-all", arg(args, 0))?;
+    let forms = reader::read_all(heap, &s)?;
+    Ok(heap.list(forms))
 }
 
 /// `(parse-source s)` — parse s into a lossless CST tree as nested vectors, the
@@ -2563,6 +2618,10 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
     // The editor framework's buffer model (M2 Phase 1, ADR-045): an immutable
     // buffer over the rope primitives, opt-in, never in the prelude.
     ("buffer", include_str!("../../../std/buffer.blsp")),
+    // "Eval the Lisp I'm editing" commands (the C-x C-e family) over `buffer` +
+    // `read-all` + output capture: each takes a buffer, returns a message string
+    // (value + printed output), edits nothing, binds no key. Opt-in editor policy.
+    ("eval-command", include_str!("../../../std/eval-command.blsp")),
     // The display/input seam (M3, ADR-046): `display` is the render-op protocol
     // (pure data constructors); `keymap` is the rebindable key→command dispatcher
     // shared by the line editor and the observer; `observer` is a process-viewer

@@ -9549,3 +9549,128 @@ the node's name-part), `"host:port"` opens a TCP endpoint. Dual-listen is *compo
 - *One fixture idiom.* All fixture helpers now name dirs via `temp-dir`
   (`random-token`, unique across processes and runs); `file_test`'s `now-ns`
   variant was unified onto it.
+
+---
+
+## 2026-05-30 — `with-out-str`: output capture surfaced to Brood (editor step 1/3)
+
+First step of the editor slice (eval-a-form-and-show-its-output, the C-x C-e
+shape). The kernel already had a process-scoped stdout-capture buffer — `print`
+and `write_term_bytes` divert into it, and `nest mcp` installs one around each
+`tools/call` to keep handler output off the JSON-RPC channel — but it was only
+reachable from Rust (`begin_stdout_capture`/`take_captured_stdout`), never from
+Brood.
+
+- **Made capture a stack.** `Ctx.capture` went from `Option<Arc<Mutex<String>>>`
+  to `Vec<...>`: `begin_capture` pushes, `take_capture` pops + drains, writes go
+  to the top. This is a correctness fix, not polish — without it a `with-out-str`
+  used inside an MCP tool handler would `take` the dispatcher's capture and
+  corrupt the protocol stream. Spawn now inherits a *snapshot* of the stack
+  (same `Arc`s), so a child printer is still captured.
+- **Two `
+---
+
+## 2026-05-30 — `with-out-str`: output capture surfaced to Brood (editor step 1/3)
+
+First step of the editor slice (eval-a-form-and-show-its-output, the C-x C-e
+shape). The kernel already had a process-scoped stdout-capture buffer — `print`
+and `write_term_bytes` divert into it, and `nest mcp` installs one around each
+`tools/call` to keep handler output off the JSON-RPC channel — but it was only
+reachable from Rust (`begin_stdout_capture`/`take_captured_stdout`), never from
+Brood.
+
+- **Made capture a stack.** `Ctx.capture` went from `Option<Arc<Mutex<String>>>`
+  to `Vec<...>`: `begin_capture` pushes, `take_capture` pops + drains, writes go
+  to the top. This is a correctness fix, not polish — without it a `with-out-str`
+  used inside an MCP tool handler would `take` the dispatcher's capture and
+  corrupt the protocol stream. Spawn now inherits a *snapshot* of the stack
+  (same `Arc`s), so a child printer is still captured.
+- **Two `%`-primitives + a macro.** `%capture-begin`/`%capture-take` (mechanism,
+  Rust) under `with-out-str` (policy, prelude) — the repo's standard split. The
+  macro pops the buffer even when the body throws (catch re-raises), so an error
+  never leaves a dangling capture diverting all later output.
+- **Tests** (`tests/capture_test.blsp`): basic/multi-print/empty, pop-isolation,
+  nesting, throw-safety, and across-processes (one and many spawned printers fan
+  their output into one capture). Full suite green (390 tests).
+
+Next (2/3): the eval-a-form editor command, showing the form's **value**
+(`eval-string` returns it) plus any captured output. Then (3/3) prefix-keymap
+(chord) support in `std/keymap.blsp`. Per user: bindings stay user-definable,
+not hardcoded.
+
+---
+
+## 2026-05-30 — `read-all` + `std/eval-command`: eval-the-Lisp-I'm-editing (editor step 2/3)
+
+The C-x C-e command itself, built on step 1's capture plus one new reader
+primitive.
+
+- **`read-all` (kernel).** `read-string` only ever returned the *first* form;
+  `eval-string` reads+evals *all* of them but hands back only the last value.
+  Neither lets you isolate a single form. `(read-all s)` returns the whole list
+  (the reader's `read_all` was already there in Rust — this just surfaces it).
+  It's the read-half of `eval-string` without the eval, and the basis for
+  form-by-form tooling. Raises on malformed/incomplete input like `read-string`;
+  `parse-source` stays the lossless, error-tolerant path.
+- **`std/eval-command` (Brood, opt-in).** The "eval the Lisp I'm editing"
+  commands as pure editor policy over `std/buffer` + `read-all` + capture:
+  `eval-last-sexp` (the last complete form *at or before point* — only that form
+  runs, like Emacs C-x C-e, so earlier defs must already be evaluated),
+  `eval-region`, `eval-buffer`. Each takes a buffer and returns a **message
+  string** — captured output, then `=> <value>` (per the user's "value + output"
+  call) — never editing the buffer, never throwing (a read or eval error comes
+  back as `error: <message>`, surfacing a thrown map's `:message`). **No key is
+  bound** — the editor/user decides bindings (per the user's standing note).
+- **Design note.** This lives in `std/` as reusable editor toolkit alongside
+  `buffer`/`lineedit`/`observer`, not in a downstream app — it's pure Brood with
+  zero kernel surface. The value+output pairing (`eval-command--capturing`)
+  stays in the module rather than the prelude, since `with-out-str` (which
+  discards the value) is the right *general* primitive; keeping both halves is
+  editor policy.
+- **Tests** (`tests/eval_command_test.blsp`, 17): `read-all` (order, single,
+  blank/comment, vs `read-string`, raises-on-incomplete); the three commands
+  (last-form-only, output prefix, point-respecting, region, error reporting);
+  and across-processes (a spawned evaluator builds its own buffer — ropes are
+  process-local — and sends back the message string, exercising inherited
+  capture off the root process). Full suite green.
+
+Next (3/3): prefix-keymap (chord) support in `std/keymap.blsp`, so a binding
+like the C-x prefix can be *expressed* — without hardcoding any specific chord.
+
+---
+
+## 2026-05-30 — prefix-keymap (chord) support in `std/keymap` (editor step 3/3)
+
+The last step of the slice: let a binding like `C-x C-e` be *expressed* — without
+hardcoding any specific chord (per the user's standing note that bindings stay
+user-definable). A keymap value may now be either a command **symbol** (as before)
+or a nested **keymap** (a prefix). Two additions, and the existing flat dispatch
+left untouched:
+
+- **`keymap-step` (chord-aware dispatch).** `[state' pending'] = (keymap-step
+  keymap pending state key fallback)`. `pending` is the prefix sub-keymap a prior
+  key left us in (or nil); the caller threads `pending'` back on the next key. A
+  prefix key enters its sub-keymap (state untouched); a command symbol runs and
+  resets; a fresh unbound key hits the fallback; a **dead-end chord** (unbound
+  after a prefix) drops the key and resets, so a partial chord never self-inserts.
+- **`keymap-bind` (chords as data).** `(keymap-bind km [:ctrl-x :ctrl-e] 'cmd)`
+  builds the nested prefix maps, preserving siblings and extending an existing
+  prefix — the ergonomic, data-only way to define a chord. No binding is baked
+  into the module.
+- **`keymap-dispatch` is deliberately unchanged** — still the flat, single-key
+  fast path lineedit/observer depend on (the `(state,key)->state` contract is
+  preserved; I added a guard so a chord-prefix binding is treated as unbound there
+  rather than crashing). Keeping the chord state machine in a *separate* function
+  that threads `pending` explicitly — rather than changing `keymap-dispatch`'s
+  return shape — was the design call: chordless callers pay nothing and don't
+  change.
+- **Tests** (`tests/keymap_test.blsp`, 13): `keymap-bind` structure (single,
+  nested, sibling-preserving, prefix-extending); `keymap-step` paths (flat run,
+  prefix-enter, chord-complete, dead-end drop, fresh-unbound fallback, throwing
+  command); `keymap-dispatch` unchanged (incl. chord-prefix ignored); and a chord
+  resolved+run inside a spawned process. Full suite green.
+
+This completes the three-step editor slice: `with-out-str` → the `eval-command`
+family (C-x C-e shape) → chord-expressible keymaps. Commands stay user-bound;
+nothing wires a specific key. Deferred next per the user: Emacs-style major/minor
+modes (how a buffer selects which keymap(s) are active).

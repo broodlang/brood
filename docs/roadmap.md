@@ -367,6 +367,17 @@ The text-editing substance, exposed to Brood. Built as a thin end-to-end
   (insert/delete/movement/save) and whose pure `view` paints the buffer + a
   status line, all over `(gui-display)`. 11 pure update/view tests. **Multiple
   buffers** is the remaining step (plus selection/region + undo, both deferred).
+- 🟡 **Evaluate-the-Lisp-I'm-editing (done, 2026-05-30).** The C-x C-e family as
+  editor framework: `with-out-str` (prelude — surfaces the kernel's process-scoped,
+  now-stacked output capture to Brood) + `read-all` (kernel — all forms in a
+  string, vs `read-string`'s first) under `std/eval-command.blsp` —
+  `eval-last-sexp`/`eval-region`/`eval-buffer`, each `buffer -> message string`
+  (value + captured output), editing nothing and never throwing. Chords made
+  expressible (not hardcoded): `std/keymap.blsp` gains `keymap-step` (prefix-aware
+  dispatch threading a pending prefix) + `keymap-bind` (define a chord as data);
+  flat `keymap-dispatch` unchanged. No key is wired — bindings stay user-defined.
+  `tests/{capture,eval_command,keymap}_test.blsp`. **Deferred next:** Emacs-style
+  major/minor modes (how a buffer selects which keymaps are active).
 - ✅ Buffers as first-class Brood values — a buffer *is* an immutable value.
 - ✅ Per-process memory reclamation is solved for M2's needs by the **automatic
   semi-space copying collector** (ADR-055/058/061; see M1 "Memory reclamation") —
