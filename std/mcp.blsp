@@ -53,9 +53,12 @@ error inside the user expression surfaces here as the `:error` branch."
       (catch e
         {:error (mcp--error-shape e)}))))
 
-;; Cross-file shadow warnings (flat namespace, ADR-019) involving `file`: the
-;; names this file defines that are also defined in another project source file.
-;; Empty (and silent) outside a project. Best-effort — never raises.
+;; Cross-file shadow warnings involving `file`: the *qualified* names
+;; (`ns/name`, per `project--file-def-names`) this file defines that another
+;; project source file also defines. Namespace-sound (ADR-065) — a short name
+;; reused across distinct namespaces is not a collision, only a same-namespace
+;; (or ambient/root) rebinding is. Empty (and silent) outside a project.
+;; Best-effort — never raises.
 (defn mcp--shadows-for (file)
   (try
     (let (root (project/project--find-root (cwd)))

@@ -331,13 +331,43 @@ resolve in the advisory checker. Returns the project root."
                 (= (project--node-kind nm) :symbol))
           (project--node-val nm))))))
 
-;; Every global name defined at top level in the file at `path` (name strings, in
-;; source order). `parse-source` never raises — malformed input just yields fewer
-;; recognised defs — so a syntax error in one file can't abort the scan.
+;; An "earmuffed" `*foo*` name — ambient/root regardless of any enclosing
+;; namespace (ADR-065/066), mirroring the kernel resolver's `is_ambient`.
+(defn project--ambient? (name)
+  (and (> (string-length name) 2) (starts-with? name "*") (ends-with? name "*")))
+
+;; The namespace a top-level `(defmodule ns …)` node declares (a string), or nil
+;; if the node isn't a `defmodule`. The file-level shape of `project--def-name`.
+(defn project--module-name (list-node)
+  (let (kids (filter (fn (c) (not (includes? [:whitespace :comment] (project--node-kind c))))
+               (project--node-val list-node)))
+    (when (>= (count kids) 2)
+      (let (head (first kids) nm (second kids))
+        (when (and (= (project--node-kind head) :symbol)
+                (= (project--node-val head) "defmodule")
+                (= (project--node-kind nm) :symbol))
+          (project--node-val nm))))))
+
+;; The effective *global* key a def binds, mirroring the kernel resolver
+;; (`eval::macros`): `ns/name` under a file's `(defmodule ns)` (ADR-065), but
+;; left bare for an already-qualified name, an ambient `*earmuff*`, or a file
+;; with no module header (the root namespace). This is what makes the duplicate
+;; check namespace-sound — two files' same short name in different namespaces no
+;; longer collide.
+(defn project--qualify (ns name)
+  (if (or (nil? ns) (project--ambient? name) (string-contains? name "/"))
+    name
+    (str ns "/" name)))
+
+;; Every global *key* defined at top level in the file at `path` — each a fully
+;; resolved `ns/name` (or bare, per `project--qualify`), in source order.
+;; `parse-source` never raises — malformed input just yields fewer recognised
+;; defs — so a syntax error in one file can't abort the scan.
 (defn project--file-def-names (path)
-  (keep project--def-name
-    (filter (fn (c) (= (project--node-kind c) :list))
-      (project--node-val (parse-source (slurp path))))))
+  (let (nodes (filter (fn (c) (= (project--node-kind c) :list))
+                (project--node-val (parse-source (slurp path))))
+        ns    (first (keep project--module-name nodes)))
+    (map (fn (nm) (project--qualify ns nm)) (keep project--def-name nodes))))
 
 ;; The project's source files (no tests) — the set the flat-namespace rule binds.
 (defn project--source-files (root)
@@ -345,7 +375,11 @@ resolve in the advisory checker. Returns the project root."
     nil
     (project--abs-paths root *project-source-paths*)))
 
-;; Warning strings for names defined across more than one source file.
+;; Warning strings for a *qualified* global key (`ns/name`, per
+;; `project--file-def-names`) defined across more than one source file. Under
+;; namespaces (ADR-065) this fires only on a genuine collision — two files in
+;; the *same* namespace binding the same name, or an ambient `*earmuff*` / root
+;; name bound twice — not on a short name reused across distinct namespaces.
 (defn project--duplicate-def-warnings (files)
   (let (by-name (fold (fn (acc path)
                         (fold (fn (m nm) (assoc m nm (cons path (get m nm))))
@@ -359,7 +393,7 @@ resolve in the advisory checker. Returns the project root."
               (when (> (count where) 1)
                 (str "warning: global '" nm "' is defined in " (count where)
                   " source files (" (join ", " where)
-                  ") — names are flat across the project (ADR-019); the last loaded wins"))))
+                  ") — same namespace; the last loaded wins (ADR-065)"))))
       by-name)))
 
 ;; Print the duplicate-def warnings to stderr and return the count. Advisory
