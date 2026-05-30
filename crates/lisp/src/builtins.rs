@@ -2006,11 +2006,28 @@ fn print(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     // JSON-RPC); otherwise write real stdout.
     let captured = capture_write(&text);
     if !captured {
-        print!("{text}");
-        use std::io::Write;
-        std::io::stdout().flush().ok();
+        write_stdout(&text);
     }
     Ok(Value::Nil)
+}
+
+/// Write `s` to real stdout the way a well-behaved Unix tool does. A **broken
+/// pipe** (the downstream consumer closed — `brood … | head`) is not a program
+/// error: the `print!` macro would panic on it with a Rust backtrace + crash
+/// dump (every observed `failed printing to stdout: Broken pipe` crash bottoms
+/// out here), so instead we restore the terminal and exit quietly, exactly as
+/// the default SIGPIPE disposition would. Any other write/flush failure is
+/// best-effort-dropped (matches the old `.flush().ok()`).
+fn write_stdout(s: &str) {
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    if let Err(e) = out.write_all(s.as_bytes()).and_then(|_| out.flush()) {
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            restore_terminal_on_exit();
+            std::process::exit(0);
+        }
+        // Other errors: nothing useful to do from a print primitive; drop it.
+    }
 }
 
 fn eprint(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -3030,6 +3047,24 @@ pub fn restore_terminal() {
 /// Idempotent; errors are swallowed (the normal path is the Brood `term-raw-leave`).
 pub fn restore_raw() {
     let _ = crossterm::terminal::disable_raw_mode();
+}
+
+/// The abnormal-path terminal restore the binaries call before reporting an
+/// error and exiting (and that `print` calls on a broken pipe). A program that
+/// entered raw mode / the alternate screen and then threw never reached its
+/// Brood `term-raw-leave`, so without this the shell is left wedged in raw mode
+/// — the bug behind a hung terminal after an erroring TUI. On a TTY it does the
+/// full [`restore_terminal`] (show cursor, leave the alternate screen and raw
+/// mode); when stdout is piped/redirected it only leaves raw mode
+/// ([`restore_raw`], a termios ioctl) so it never writes escape bytes into a
+/// captured/closed stream. Idempotent.
+pub fn restore_terminal_on_exit() {
+    use std::io::IsTerminal;
+    if std::io::stdout().is_terminal() {
+        restore_terminal();
+    } else {
+        restore_raw();
+    }
 }
 
 /// `(term-size)` — the terminal size as `[cols rows]` (character cells).
