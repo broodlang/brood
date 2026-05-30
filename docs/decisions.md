@@ -4751,10 +4751,24 @@ in Brood), ADR-011 (defer coalescing), `std/buffer.blsp`,
 
 ## ADR-076 — The execution engine becomes a closure-compiling VM
 
-**Status:** accepted as the plan, not started (2026-05-30). The performance "big
-lever". Long-form companion: [`bytecode-vm.md`](bytecode-vm.md). Supersedes the
-deferral in ADR-069 (which banked the cheap dispatch wins and named the VM as the
-honest fix for the tree-walker's structural tax).
+**Status:** accepted; **Stage 0–1 built** behind `BROOD_VM` (2026-05-30, branch
+`worktree-bytecode-vm`) — **~2× on fib/loop**, off by default. The performance "big
+lever". Long-form companion + as-built numbers/finding:
+[`bytecode-vm.md`](bytecode-vm.md). Supersedes the deferral in ADR-069 (which
+banked the cheap dispatch wins and named the VM as the honest fix for the
+tree-walker's structural tax).
+
+**As-built note (Stage 0–1).** The bounded slice (top-level single-arm exact-arity
+global-capturing closures; frame slots on `Heap::roots`; lexical-addressed
+`Node::Local`; TCO) is correct and de-risks the GC-rooting crux (R1) — green under
+`BROOD_VM=1 BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` — and full-suite parity holds. A
+sharp lesson landed: the mechanism *alone* was ~10 % **slower**, because it
+delegated every primitive op back to the tree-walker via `eval::apply`; the ~2× win
+only appeared once `dispatch` reached primitives directly via the ADR-069
+passthrough redirect (`(< n 2)` → `call_native(%lt)`). The takeaway — *a VM frame
+that delegates primitives can't win; the speedup is in keeping the hot loop off the
+tree-walker* — shapes Stage 2 (depth>0 lexical addressing for local-capturing
+closures, multi-arity, more special forms, call-site inline caches).
 
 **Context.** The tree-walker (`eval::eval`) re-pays per call: a special-form lookup,
 an env-chain **name scan** per variable reference (`env_get`'s assoc-list walk), a

@@ -1,8 +1,12 @@
 # The execution-engine plan — a closure-compiling VM
 
-> **Status:** plan / not started (2026-05-30). The design record is **ADR-076**;
+> **Status (2026-05-30): Stage 0–1 built behind `BROOD_VM`, on branch
+> `worktree-bytecode-vm` — ~2× on fib/loop.** The design record is **ADR-076**;
 > this file is the long-form companion. Nothing here changes the language — it is
 > purely an **execution-engine** swap. `std/*.blsp` and user code are untouched.
+> See [As-built](#as-built-stage-01-2026-05-30) for what's done, the numbers, and
+> the honest finding that the win needed the passthrough redirect (the §7 stages
+> below are the original plan).
 
 This is the project's "big lever" for performance: closing the tree-walker's
 structural ~50–220× tax (ADR-069's measurement) over the Node/Elixir range. It is
@@ -15,6 +19,63 @@ The priority is unchanged from ADR-069: **"stay in Brood" beats raw speed.** The
 VM closes most of the gap *while preserving every GC / TCO / preemption / hot-reload
 invariant* — that is worth more here than the last 2× a hand-tuned bytecode loop
 might extract.
+
+---
+
+## As-built (Stage 0–1, 2026-05-30)
+
+Implemented in `crates/lisp/src/eval/compile.rs` behind the `BROOD_VM` env flag
+(off by default; the tree-walker remains the engine), on branch
+`worktree-bytecode-vm`. Three commits: Stage 0 (scaffolding), Stage 1 (mechanism),
+and the primitive-redirect increment.
+
+**What runs on the VM (the bounded slice).** A call reaches the VM only when the
+top-level form compiles to a core-vocabulary `Node` chain down to it (the seam is
+in `eval_str`/`eval_source`, after `macros::compile`). An eligible callee is a
+**top-level, single-arm, exact-arity, global-capturing** closure whose body is
+built only from `Const` / `Local` / `Global` / `If` / `Do` / `Call`. Its params
+are dense frame slots **on `Heap::roots`** (so `arena_flip` relocates them — no new
+root set); a param ref is a slot index (`Node::Local`), not an `env_get` scan; tail
+calls reuse the frame (TCO). Anything else — deeper/local-capturing closures,
+`let`/`letrec`/`match`/other special forms, multi-arity, patterns — **defers to the
+tree-walker**, which is always correct.
+
+**`dispatch` does the ADR-069 passthrough redirect.** A call whose callee is a
+thin-wrapper prelude op (`(< n 2)` → `<`'s 2-arg arm `(%lt n 2)`; `+`→`%add`, etc.)
+redirects straight to its inner `%native` via `call_native`, late-binding-safe
+(re-resolves the live closure each call). This was **decisive** — see the finding.
+
+**Numbers (release, bare top-level call, i7-14700HX):**
+
+| bench | tree-walker | VM | speedup |
+|---|---|---|---|
+| `fib 32` (non-tail recursion) | 4.22 s | 2.15 s | **~2.0×** |
+| `countdown 20M` (tail loop, TCO) | 13.76 s | 6.85 s | **~2.0×** |
+
+**Verified:** 167 lib + 1035 in-language tests green under `BROOD_VM=1`; lib green
+under `BROOD_VM=1 BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` (the R1 crux — frame slots
+survive constant relocation); correctness under the full stress gate; VM off
+(default) unchanged.
+
+**The honest finding (why the redirect mattered).** The Stage-1 mechanism *alone*
+was **~10 % slower** on fib: it ran fib's frame on the VM but **delegated every
+primitive op back to the tree-walker via `eval::apply`** (a frame alloc + param
+bind + body eval per `<`/`+`/`-`), and `eval::apply` even *misses* the passthrough
+fast-path that `eval`'s own combination dispatch uses — so the VM did *more* work,
+not less, while fib's 1-param frame gave almost no `env_get` saving to offset it.
+The win only appeared once the VM reached primitives directly (the redirect). The
+lesson: **a VM frame that delegates primitives can't win — the speedup comes from
+keeping the hot loop off the tree-walker.** This is exactly what a bounded first
+slice is for: prove the mechanism (the GC-rooting crux), then learn where the win
+actually lives.
+
+**What's next (toward Stage 2).** The slice only engages from a fully-VM-compilable
+top-level chain (e.g. a `(bench …)` macro expands to `let` → ineligible → defers;
+the REPL path doesn't hit the seam), so real programs rarely trigger it yet.
+Widening the win means: closures that capture **local** frames (depth > 0 lexical
+addressing, the real `let`/nested-closure case), **multi-arity** bodies, more
+special forms (`let`/`letrec`/`and`/`or`), and **call-site inline caches** so a
+global callee isn't re-resolved every call. Those are Stage 2.
 
 ---
 
