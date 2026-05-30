@@ -3211,10 +3211,13 @@ The "everything moves" footgun was closed at its (few, enumerable) sites:
   before `promote` copies it to RUNTIME). Node connections are unaffected — messages
   cross as serialized deep copies, reconstructed via `alloc_*` (correctly stamped).
 - **Immutability shortcut already banked:** no write barriers (data never mutates).
-  The *next* shortcut (deferred, Stage C): a generational nursery needs **no
-  remembered set / write barrier** either, because immutability ⇒ no old→young
-  pointers — a minor GC can copy just the nursery survivors. (Cycles still exist via
-  `letrec`, so tracing — not pure refcounting — remains required; ADR-026/054.)
+  The generational nursery (Stage C, **now landed** — ADR-072) builds on this: a
+  minor GC copies just the nursery survivors and never traces the old generation,
+  because immutability ⇒ no old→young pointers. *Almost* no barrier — the one
+  exception is a frame tenured **mid-bind** (a collection during a `let`'s rhs,
+  then bound further), which `env_define` records in a one-entry remembered set; the
+  next minor scans it. (Cycles still exist via `letrec`, so tracing — not pure
+  refcounting — remains required; ADR-026/054.)
 - A debug-only diagnostic (`debug_walk_env_chain`, the poison-era env walk
   superseded by the tripwire) was found mis-walking RUNTIME indices into the LOCAL
   slab and made debug builds pathologically slow; gated behind `BROOD_ENV_DEBUG=1`.
@@ -4484,3 +4487,73 @@ ADR-041 (blob heap), ADR-045 (opaque immutable resource handle), ADR-043
 (deliver-to-mailbox offload), ADR-054/055 (moving/generational GC — why the
 boundary marshals), ADR-006 (write the language in the language — wrapper + policy
 in Brood), ADR-011 (defer power features).
+
+---
+
+## ADR-072 — Stage C: a generational nursery + tenured old generation
+
+**Status:** accepted (2026-05-30). The "make copying fast as well as stable"
+refinement deferred by `docs/memory-review.md` §6 and ADR-055; the last GC item on
+the `handoff-gc.md` list. Builds directly on the single-space copying collector
+(ADR-055/061) and the generational-handle epoch (ADR-054).
+
+**Context.** Stage B's safepoint collector did a **full semi-space copy** every
+time: every *live* object was relocated on each collection, including long-lived
+data that never dies. For a process holding a large working set across churn (a
+`receive` server, the editor's buffer state) the per-collection cost tracked
+*total live*, not *garbage* — so a stateful loop paid to recopy its entire state
+on every minor reclamation. The young-death hypothesis (most allocations die
+almost immediately) says the *survivors* of any one collection are a tiny
+fraction of what was allocated — which is exactly the workload a generational
+split optimizes.
+
+**Decision.** Split the per-process LOCAL heap into a **nursery** (every `alloc_*`
+bumps into it) and a **tenured old generation**. The handle's age is one bit
+stolen from the generation field (`AGE_OLD`), so a handle still says where its
+object lives; LOCAL accessors route young vs. old by that bit, against two epochs
+(`local_epoch` for the nursery, `old_epoch` for old).
+
+- A **minor collection** copies the nursery's survivors and drops the rest whole.
+  Destination depends on *aging*: if the nursery grew past `min_tenure` (real
+  allocation pressure ⇒ survivors are probably long-lived) survivors are **tenured**
+  into old; otherwise they stay young via a **semi-space flip**. The flip is what
+  keeps `BROOD_GC_STRESS=1` (a minor at *every* safepoint, tiny nursery) from
+  prematurely tenuring transient garbage and bloating old.
+- A minor **never traces or recopies the old generation** — the generational win.
+  Sound because Brood data is immutable: an old object can never come to point at a
+  young one, so old is not a root set for a minor. The lone exception is a frame
+  tenured **mid-bind** (a collection during a `let` rhs, then bound further), which
+  is the language's only data mutation (`env_define`); it's recorded in a one-entry
+  **remembered set** the next minor scans. So: *almost* no write barrier, one site.
+- A **major collection** compacts old (a semi-space copy of old → fresh old,
+  dropping dead tenured objects), fired only when old doubles past `major_floor` —
+  rare, so tenured garbage is still reclaimed without recopying old on every minor.
+
+**Consequences.**
+- On a stateful workload (a process holding ~20k live across heavy churn):
+  **~8× faster, ~9× lower RSS, ~70× less copy volume** than the single-space copy;
+  compute-bound (young-death-only) workloads are neutral. A 200k-iteration churn
+  loop holding ~20k live runs flat at ~29 MB RSS.
+- **`:copied` in `(gc-stats)` now counts promotions** (minor: nursery→old; major:
+  old compaction), not "survivors of a flip" — so on a healthy young-death loop
+  `reclaimed` dwarfs `copied`, and under `GC_STRESS` premature tenuring can push
+  `copied` up (the gc.rs assertion accounts for both).
+- **Thresholds are env-tunable** — `BROOD_GC_FLOOR` (adaptive minor trigger),
+  `BROOD_GC_TENURE` (nursery pressure to tenure vs. flip), `BROOD_GC_MAJOR` (old
+  size to trigger a major); object counts, `K`/`M` suffixes accepted. The shipped
+  defaults (64K / 16K / 256K objects) measured well across a sweep of alternatives;
+  the knobs are for workload-specific tuning and experimentation, not a default
+  anyone must set (ADR-011 — the language asks nothing of the author).
+- The heap verifier (`BROOD_GC_VERIFY`) was made generation-aware: it no longer
+  re-walks immutable old-gen internals, only the live young graph + the cross-gen
+  roots. Found along the way: a `flush_map` bug where a CHAMP node shared across a
+  tenure boundary was copied into the wrong generation (OOB/SIGSEGV), and a
+  release-only `cfg` slip.
+
+**References.** `docs/memory-review.md` §5–6 (the design space; Stage C as the
+"copying gets fast" point), `docs/memory-model.md`, `docs/handoff-gc.md` (item #5),
+ADR-054 (generational handles — the epoch this reuses per-generation), ADR-055
+(Stage B copying — the collector this refines), ADR-061 (collect at any depth —
+the operand-stack roots both minor and major relocate), ADR-026 (immutability — why
+there's no general write barrier), ADR-011 (defer power features — the tuning knobs
+are opt-in).

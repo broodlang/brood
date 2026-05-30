@@ -977,12 +977,21 @@ the language" principle.
 - `(gc-stats)` returns a snapshot map of this process's garbage collection —
   `{:collections :copied :reclaimed :live :live-bytes :threshold}` — for
   observing reclamation; `process-info` carries the per-process `:collections`
-  count too. **Memory is reclaimed automatically:** the LOCAL heap is a copying
-  collector that fires at the eval safepoint (ADR-055) whenever a process's live
-  set crosses an adaptive threshold, so a long-running tail loop or `receive`
-  server runs in bounded memory with nothing from the author — no manual GC call,
-  no `while`, just recursion. (You never collect by hand; the old `(hibernate)`
-  primitive that did so was removed once automatic collection landed.)
+  count too. `(gc-collect)` forces a collection now and returns that same map
+  (an observability/test aid, *not* a load-bearing trigger), and `(gc-trace on?)`
+  toggles per-collection stderr logging for the calling process (no arg = query;
+  defaulted from `BROOD_GC_TRACE`). **Memory is reclaimed automatically:** the
+  LOCAL heap is a **generational** copying collector (a nursery every `alloc`
+  bumps into, plus a tenured old generation) that fires at the eval safepoint
+  (ADR-055) whenever a process's live set crosses an adaptive threshold — a minor
+  collection copies the nursery's survivors and drops the rest, an occasional
+  major compacts the old generation (ADR-072). So a long-running tail loop or
+  `receive` server runs in bounded memory with nothing from the author — no
+  manual GC call, no `while`, just recursion. (You never collect by hand; the old
+  `(hibernate)` primitive that did so was removed once automatic collection
+  landed.) The three thresholds are tunable for a given workload via
+  `BROOD_GC_FLOOR` / `BROOD_GC_TENURE` / `BROOD_GC_MAJOR` (object counts, `K`/`M`
+  suffixes accepted).
 
 ### Metaprogramming / self-hosting
 `eval`  `read-string`  `load`  `require`  `macroexpand`  `macroexpand-1`  `gensym`

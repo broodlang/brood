@@ -1,6 +1,28 @@
 # Memory model — `Send` heaps and per-process GC
 
-> **2026-05-30 status (current) — the collector fires at ANY eval depth
+> **2026-05-30 status (current) — the copying collector is now GENERATIONAL
+> (ADR-072), with Tier-1 observability.** The LOCAL heap is split into a
+> **nursery** (every `alloc_*` bumps into it) and a tenured **old** generation. A
+> *minor* collection copies only the nursery's survivors — tenuring them into old
+> once the nursery crosses `min_tenure`, else a young semi-space flip — and **never
+> recopies the old generation**; a rarer *major* compacts old when it doubles past
+> `major_floor`. This is sound with **no write barrier** because immutability
+> (ADR-026) forbids old→young pointers — the one exception being a frame tenured
+> *mid-bind*, tracked in a one-entry remembered set (`env_define`). Result on a
+> stateful workload (a process holding a large live set across churn): ~8× faster,
+> ~9× lower RSS, ~70× less copy volume than the single-space copy below; everything
+> else is the same operand-stack-rooted copy described in the next banner. Handles
+> carry an age bit + per-generation epoch (the nursery and old epochs bump
+> independently). Observability: `(gc-stats)`, `(gc-collect)` (force a collection),
+> `(gc-trace on?)` + `BROOD_GC_TRACE`; thresholds tune via
+> `BROOD_GC_FLOOR`/`BROOD_GC_TENURE`/`BROOD_GC_MAJOR`. So where the banners below
+> say "semi-space copy of the whole live set," read "minor copy of the nursery
+> survivors only, plus a rare major over old." See ADR-072 and the 2026-05-30
+> devlog entry.
+>
+> ---
+>
+> **2026-05-30 status — the collector fires at ANY eval depth
 > (ADR-061).** Supersedes the `gc_block_depth() == 1` gate described throughout the
 > rest of this doc. The evaluator now keeps every in-flight LOCAL transient on an
 > **operand stack** (`Heap::roots` for values + `Heap::env_roots` for envs, both

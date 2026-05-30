@@ -273,9 +273,17 @@ mark-sweep — a rooting miss degrades to a debug-catchable dangling handle.
   `gc.rs` under `RUSTFLAGS="-C debug-assertions=on" BROOD_GC_STRESS=1` on all
   cores; green there is the evidence the old model never had.
 
-**Stage C — generational, if Stage B's copy cost is too high.** Split the slabs
-into nursery + old; minor GC copies only nursery survivors. Standard, and the
-point where copying stops being "slow". Gate on real measurement, not now.
+**Stage C — generational. ✅ DONE (2026-05-30, ADR-072).** The slabs are split
+into nursery + old; a minor GC copies only the nursery's survivors (tenuring them
+into old past a pressure threshold, else a young flip) and never recopies old; a
+rare major compacts old. No write barrier (immutable data ⇒ no old→young edges)
+except a one-site remembered set for a frame tenured mid-bind. Measured on the
+stateful workload this review anticipated (a process holding a large live set
+across churn): **~8× faster, ~9× lower RSS, ~70× less copy volume** vs. the
+single-space copy; compute-bound work neutral. The three thresholds are env-tunable
+(`BROOD_GC_FLOOR`/`BROOD_GC_TENURE`/`BROOD_GC_MAJOR`); the shipped defaults measured
+well across a sweep. This is the point the review predicted "copying stops being
+slow" — and it was gated on real measurement, exactly as said here.
 
 **Cross-cutting — generational handles. ✅ DONE (2026-05-29, ADR-054).** Handles
 now carry a generation stamp (`u64` = region + gen + index), and every LOCAL deref

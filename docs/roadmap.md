@@ -134,12 +134,23 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
     reserve-then-fill (`OnceLock`) for the cyclic-capable RUNTIME closure/env
     slabs, so promoting a self-referential or mutually-recursive local closure
     (`(let (g (fn () g)) g)`, `letrec`) terminates instead of a SIGSEGV.
+  - **Generational young/old split** (ADR-072, 2026-05-30): the LOCAL heap is now
+    a nursery + tenured old generation. A *minor* collection copies the nursery's
+    survivors (tenuring them into old once the nursery crosses `min_tenure`, else a
+    young semi-space flip) and never recopies the old generation; an occasional
+    *major* compacts old. No write barrier (immutable data ⇒ no old→young edges)
+    bar a one-site remembered set for a frame tenured mid-bind. On a stateful
+    workload (a process holding ~20k live across heavy churn) this is ~8× faster
+    and ~9× lower RSS than the single-space copy; copy volume ~70× less. Thresholds
+    are tunable via `BROOD_GC_FLOOR` / `BROOD_GC_TENURE` / `BROOD_GC_MAJOR`.
+  - **GC observability** (Tier-1): `(gc-stats)`, `(gc-collect)` (force a
+    collection), `(gc-trace on?)` (per-collection stderr logging); `BROOD_GC_TRACE`
+    traces a whole run.
   - Validated by `crates/lisp/tests/gc.rs` (tail loops, server loops, depth-≥2
-    loops, root and spawned, cyclic-promote cross-process) and the
-    `BROOD_GC_STRESS=1` + `debug-assertions` tripwire. **Still deferred:**
-    generational young/old split (full semi-space copy each time today);
-    `macros.rs` could be rooted if GC is ever wanted *during* expansion. See
-    `memory-model.md`, `memory-review.md`.
+    loops, root and spawned, cyclic-promote cross-process, gc-stats/gc-collect/
+    gc-trace) and the `BROOD_GC_STRESS=1` + `debug-assertions` tripwire. **Still
+    deferred:** `macros.rs` could be rooted if GC is ever wanted *during*
+    expansion. See `memory-model.md`, `memory-review.md`.
 - ✅ **Self-hosted REPL in Brood** (ADR-048) — the read-eval-print loop is now
   `std/repl.blsp`, not Rust: a tail-recursive loop over `read-line` (the one new
   primitive) + `eval-string` + `pr-str`, with multi-line balance detection,
