@@ -67,6 +67,12 @@ pub fn report_error(e: &LispError) {
             }
         }
     }
+    // Surface the fix hint (the C-style-call nudge, the deep-recursion suggestion,
+    // …) — it's the actionable half of the error, and the CLI is where a human / LLM
+    // most often reads it. Structured consumers (MCP / LSP) get it via `to_value_map`.
+    if let Some(hint) = &e.hint {
+        eprintln!("    hint: {hint}");
+    }
 }
 
 /// Split CLI args into file paths and an optional concurrency cap. Accepts

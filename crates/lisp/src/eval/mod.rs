@@ -11,7 +11,7 @@ use std::sync::LazyLock;
 
 use smallvec::SmallVec;
 
-use crate::core::heap::{Heap, SymbolMap};
+use crate::core::heap::{Heap, Root, SymbolMap};
 use crate::core::value::{self, Closure, ClosureId, EnvId, NativeId, Symbol, Value};
 use crate::error::{LispError, LispResult};
 
@@ -136,16 +136,14 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                 let n = items.len();
                 let vb = heap.roots_len();
                 let eb = heap.env_roots_len();
-                heap.push_env_root(env);
-                for &it in &items {
-                    heap.push_root(it); // vb .. : source elements
-                }
-                let out_base = heap.roots_len(); // accumulated results
-                for i in 0..n {
-                    let env_now = heap.env_root_at(eb);
-                    let item = heap.root_at(vb + i);
+                let env_r = heap.root_env(env);
+                let src: SmallVec<[Root; 8]> = items.iter().map(|&it| heap.root(it)).collect();
+                let mut out_r: SmallVec<[Root; 8]> = SmallVec::with_capacity(n);
+                for &ir in &src {
+                    let env_now = heap.read_root_env(env_r);
+                    let item = heap.read_root(ir);
                     match eval(heap, item, env_now) {
-                        Ok(v) => heap.push_root(v),
+                        Ok(v) => out_r.push(heap.root(v)),
                         Err(e) => {
                             heap.truncate_roots(vb);
                             heap.truncate_env_roots(eb);
@@ -153,10 +151,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                         }
                     }
                 }
-                let mut out = Vec::with_capacity(n);
-                for i in 0..n {
-                    out.push(heap.root_at(out_base + i));
-                }
+                let out: Vec<Value> = out_r.iter().map(|&r| heap.read_root(r)).collect();
                 heap.truncate_roots(vb);
                 heap.truncate_env_roots(eb);
                 return Ok(heap.alloc_vector(out));
@@ -170,15 +165,15 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                 let n = entries.len();
                 let vb = heap.roots_len();
                 let eb = heap.env_roots_len();
-                heap.push_env_root(env);
-                for &(k, v) in &entries {
-                    heap.push_root(k); // vb + 2i     : source key
-                    heap.push_root(v); // vb + 2i + 1 : source value
-                }
-                let res_base = heap.roots_len(); // accumulated (k, v) results, flattened
-                for i in 0..n {
-                    let env_now = heap.env_root_at(eb);
-                    let kf = heap.root_at(vb + 2 * i);
+                let env_r = heap.root_env(env);
+                let src: SmallVec<[(Root, Root); 8]> = entries
+                    .iter()
+                    .map(|&(k, v)| (heap.root(k), heap.root(v)))
+                    .collect();
+                let mut res: SmallVec<[(Root, Root); 8]> = SmallVec::with_capacity(n);
+                for &(kr, vr) in &src {
+                    let env_now = heap.read_root_env(env_r);
+                    let kf = heap.read_root(kr);
                     let kv = match eval(heap, kf, env_now) {
                         Ok(x) => x,
                         Err(e) => {
@@ -187,9 +182,9 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                             return Err(e);
                         }
                     };
-                    heap.push_root(kv);
-                    let env_now = heap.env_root_at(eb);
-                    let vf = heap.root_at(vb + 2 * i + 1);
+                    let kvr = heap.root(kv);
+                    let env_now = heap.read_root_env(env_r);
+                    let vf = heap.read_root(vr);
                     let vv = match eval(heap, vf, env_now) {
                         Ok(x) => x,
                         Err(e) => {
@@ -198,12 +193,12 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                             return Err(e);
                         }
                     };
-                    heap.push_root(vv);
+                    res.push((kvr, heap.root(vv)));
                 }
-                let mut pairs = Vec::with_capacity(n);
-                for i in 0..n {
-                    pairs.push((heap.root_at(res_base + 2 * i), heap.root_at(res_base + 2 * i + 1)));
-                }
+                let pairs: Vec<(Value, Value)> = res
+                    .iter()
+                    .map(|&(k, v)| (heap.read_root(k), heap.read_root(v)))
+                    .collect();
                 heap.truncate_roots(vb);
                 heap.truncate_env_roots(eb);
                 return Ok(heap.map_from_pairs(pairs));
@@ -306,9 +301,9 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     // re-read the relocated handles before the tail hand-off.
                     let vb = heap.roots_len();
                     let eb = heap.env_roots_len();
-                    heap.push_env_root(env);
-                    heap.push_root(then_form); // vb+0
-                    heap.push_root(else_form); // vb+1
+                    let env_r = heap.root_env(env);
+                    let then_r = heap.root(then_form);
+                    let else_r = heap.root(else_form);
                     let test = match eval(heap, test_form, env)
                         .map_err(|e| e.or_form_pos(heap, test_form))
                     {
@@ -319,9 +314,9 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                             return Err(e);
                         }
                     };
-                    let then_form = heap.root_at(vb);
-                    let else_form = heap.root_at(vb + 1);
-                    env = heap.env_root_at(eb);
+                    let then_form = heap.read_root(then_r);
+                    let else_form = heap.read_root(else_r);
+                    env = heap.read_root_env(env_r);
                     heap.truncate_roots(vb);
                     heap.truncate_env_roots(eb);
                     expr = if truthy(test) { then_form } else { else_form };
@@ -347,10 +342,10 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                         // `env` across it (the result is fresh post-collection, and
                         // `name` is an interned symbol — neither needs re-reading).
                         let eb = heap.env_roots_len();
-                        heap.push_env_root(env);
+                        let env_r = heap.root_env(env);
                         let out =
                             eval(heap, args[1], env).map_err(|e| e.or_form_pos(heap, args[1]));
-                        env = heap.env_root_at(eb);
+                        env = heap.read_root_env(env_r);
                         heap.truncate_env_roots(eb);
                         out?
                     } else {
@@ -564,10 +559,10 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     // inside `apply_closure`, which roots it itself.
                     let arg_forms = heap.list_to_vec(spine)?;
                     let eb = heap.env_roots_len();
-                    heap.push_env_root(env);
+                    let env_r = heap.root_env(env);
                     let out =
                         apply_closure(heap, mid, &arg_forms).map_err(|e| e.or_form_pos(heap, call_form));
-                    env = heap.env_root_at(eb);
+                    env = heap.read_root_env(env_r);
                     heap.truncate_env_roots(eb);
                     expr = out?;
                     continue 'tail;
@@ -581,11 +576,11 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                 // from the moved `call_form`.
                 let vb = heap.roots_len();
                 let eb = heap.env_roots_len();
-                heap.push_root(call_form);
-                heap.push_env_root(env);
+                let call_form_r = heap.root(call_form);
+                let env_r = heap.root_env(env);
                 let out = eval(heap, head, env).map_err(|e| e.or_form_pos(heap, head));
-                call_form = heap.root_at(vb);
-                env = heap.env_root_at(eb);
+                call_form = heap.read_root(call_form_r);
+                env = heap.read_root_env(env_r);
                 heap.truncate_roots(vb);
                 heap.truncate_env_roots(eb);
                 let callee = out?;
@@ -657,32 +652,47 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                 // re-read the relocated handles for the tail hand-off.
                 let vb = heap.roots_len();
                 let eb = heap.env_roots_len();
-                heap.push_env_root(scope);
-                heap.push_root(*last); // vb+0
-                for &form in init {
-                    heap.push_root(form); // vb+1 ..
-                }
-                for i in 0..init.len() {
-                    let scope_now = heap.env_root_at(eb);
-                    let form = heap.root_at(vb + 1 + i);
+                let scope_r = heap.root_env(scope);
+                let last_r = heap.root(*last);
+                let init_r: SmallVec<[Root; 8]> = init.iter().map(|&f| heap.root(f)).collect();
+                for &fr in &init_r {
+                    let scope_now = heap.read_root_env(scope_r);
+                    let form = heap.read_root(fr);
                     if let Err(e) = eval(heap, form, scope_now).map_err(|e| e.or_form_pos(heap, form)) {
                         heap.truncate_roots(vb);
                         heap.truncate_env_roots(eb);
                         return Err(e);
                     }
                 }
-                expr = heap.root_at(vb);
-                env = heap.env_root_at(eb);
+                expr = heap.read_root(last_r);
+                env = heap.read_root_env(scope_r);
                 heap.truncate_roots(vb);
                 heap.truncate_env_roots(eb);
                 continue 'tail;
             }
             other => {
                 let shown = crate::syntax::printer::print(heap, other);
-                return Err(LispError::type_err(format!(
-                    "cannot call non-function: {}",
-                    shown
-                )));
+                let mut err =
+                    LispError::type_err(format!("cannot call non-function: {}", shown));
+                // A literal (string / number / keyword / bool) in head position almost
+                // always means C-style call syntax: `f(x)` reads in Brood as two forms
+                // — `f` then `(x)` — so the inner `(x)` tries to call the *value* of
+                // `x`. Nudge toward the Lisp form instead of a bare type error.
+                if matches!(
+                    other,
+                    Value::Str(_)
+                        | Value::Int(_)
+                        | Value::Float(_)
+                        | Value::Bool(_)
+                        | Value::Keyword(_)
+                ) {
+                    err = err.with_hint(
+                        "a value can't be called — in Brood the function goes inside the \
+                         parens: write (f x), not f(x). (`name(args)` reads as two separate \
+                         forms, so the `(args)` tries to call a value.)",
+                    );
+                }
+                return Err(err.or_form_pos(heap, call_form));
             }
         }
     }
@@ -706,13 +716,18 @@ fn eval_arguments(
 ) -> Result<(SmallVec<[Value; 8]>, Value, Value, EnvId), LispError> {
     let vbase = heap.roots_len();
     let ebase = heap.env_roots_len();
-    heap.push_root(call_form); // vbase+0
-    heap.push_root(callee); // vbase+1
-    heap.push_root(spine); // vbase+2 — the cons-spine cursor, advanced in place
-    heap.push_env_root(env); // ebase
-                             // Evaluated args accumulate at vbase+3 ..
+    // Only genuinely LOCAL operands take an operand-stack slot; when running
+    // promoted/RUNTIME code `call_form`/`callee`/`spine` are immovable and stay
+    // inline (the region check — ADR-061 perf follow-up). Evaluated args are
+    // rooted as they accumulate. Teardown truncates back to the entry depth
+    // regardless of how many pushes were skipped.
+    let call_form_r = heap.root(call_form);
+    let callee_r = heap.root(callee);
+    let mut spine_r = heap.root(spine); // the cons-spine cursor, advanced in place
+    let env_r = heap.root_env(env);
+    let mut args: SmallVec<[Root; 8]> = SmallVec::new();
     loop {
-        let cur = heap.root_at(vbase + 2);
+        let cur = heap.read_root(spine_r);
         let form = match cur {
             Value::Nil => break,
             Value::Pair(p) => heap.pair(p).0,
@@ -722,31 +737,27 @@ fn eval_arguments(
                 return Err(LispError::type_err("improper argument list in call"));
             }
         };
-        let env_now = heap.env_root_at(ebase);
+        let env_now = heap.read_root_env(env_r);
         match eval(heap, form, env_now).map_err(|e| e.or_form_pos(heap, form)) {
-            Ok(v) => heap.push_root(v),
+            Ok(v) => args.push(heap.root(v)),
             Err(e) => {
                 heap.truncate_roots(vbase);
                 heap.truncate_env_roots(ebase);
                 return Err(e);
             }
         }
-        // Advance the cursor from the (possibly relocated) slot, not the stale
-        // `cur`/`next` read before the eval.
-        let next = match heap.root_at(vbase + 2) {
+        // Advance the cursor from the (possibly relocated) handle, not the stale
+        // `cur` read before the eval.
+        let next = match heap.read_root(spine_r) {
             Value::Pair(p) => heap.pair(p).1,
             _ => Value::Nil,
         };
-        heap.set_root(vbase + 2, next);
+        spine_r = heap.advance_root(spine_r, next);
     }
-    let argc = heap.roots_len() - (vbase + 3);
-    let mut argv: SmallVec<[Value; 8]> = SmallVec::with_capacity(argc);
-    for i in 0..argc {
-        argv.push(heap.root_at(vbase + 3 + i));
-    }
-    let callee = heap.root_at(vbase + 1);
-    let call_form = heap.root_at(vbase);
-    let env = heap.env_root_at(ebase);
+    let argv: SmallVec<[Value; 8]> = args.iter().map(|&r| heap.read_root(r)).collect();
+    let callee = heap.read_root(callee_r);
+    let call_form = heap.read_root(call_form_r);
+    let env = heap.read_root_env(env_r);
     heap.truncate_roots(vbase);
     heap.truncate_env_roots(ebase);
     Ok((argv, callee, call_form, env))
@@ -774,15 +785,12 @@ pub fn apply_closure(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> LispResu
     // `result`s are dead the moment they're overwritten, so they need no slot).
     let vb = heap.roots_len();
     let eb = heap.env_roots_len();
-    heap.push_env_root(scope);
-    for &form in &body {
-        heap.push_root(form);
-    }
-    let n = body.len();
+    let scope_r = heap.root_env(scope);
+    let body_r: SmallVec<[Root; 8]> = body.iter().map(|&f| heap.root(f)).collect();
     let mut result = Value::Nil;
-    for i in 0..n {
-        let scope_now = heap.env_root_at(eb);
-        let form = heap.root_at(vb + i);
+    for &fr in &body_r {
+        let scope_now = heap.read_root_env(scope_r);
+        let form = heap.read_root(fr);
         // Same as the closure body branch in `eval`: tag the body form's
         // position on any error so the diagnostic points at the failing line.
         match eval(heap, form, scope_now).map_err(|e| e.or_form_pos(heap, form)) {
@@ -853,26 +861,17 @@ fn bind_params(
     // functions that actually declare `&optional` params.)
     let vb = heap.roots_len();
     let eb = heap.env_roots_len();
-    heap.push_env_root(scope); // eb
-    let argv_base = heap.roots_len();
-    for &a in argv {
-        heap.push_root(a); // argv_base ..
-    }
+    let scope_rt = heap.root_env(scope);
+    let argv_r: SmallVec<[Root; 8]> = argv.iter().map(|&a| heap.root(a)).collect();
     let argn = argv.len();
-    let opt_base = heap.roots_len();
-    for &(_, d) in &optionals {
-        heap.push_root(d); // opt_base .. : default forms
-    }
-    let body_base = heap.roots_len();
-    for &f in &body {
-        heap.push_root(f); // body_base .. : body forms
-    }
+    let opt_r: SmallVec<[Root; 8]> = optionals.iter().map(|&(_, d)| heap.root(d)).collect();
+    let body_rt: SmallVec<[Root; 4]> = body.iter().map(|&f| heap.root(f)).collect();
     let mut idx = required;
     for j in 0..n_opt {
         let name = optionals[j].0;
-        let scope_now = heap.env_root_at(eb);
+        let scope_now = heap.read_root_env(scope_rt);
         if idx < argn {
-            let arg = heap.root_at(argv_base + idx);
+            let arg = heap.read_root(argv_r[idx]);
             heap.env_define(scope_now, name, arg);
             idx += 1;
         } else {
@@ -880,7 +879,7 @@ fn bind_params(
             // evaluation, so a diagnostic from inside an `&optional` default
             // points at the default's line (not at the enclosing top-level
             // form's start).
-            let default_form = heap.root_at(opt_base + j);
+            let default_form = heap.read_root(opt_r[j]);
             let value = match eval(heap, default_form, scope_now)
                 .map_err(|e| e.or_form_pos(heap, default_form))
             {
@@ -891,27 +890,24 @@ fn bind_params(
                     return Err(e);
                 }
             };
-            let scope_now = heap.env_root_at(eb);
+            let scope_now = heap.read_root_env(scope_rt);
             heap.env_define(scope_now, name, value);
         }
     }
     if let Some(rs) = rest_sym {
         let mut rest_items: SmallVec<[Value; 8]> = SmallVec::new();
         for i in idx..argn {
-            rest_items.push(heap.root_at(argv_base + i));
+            rest_items.push(heap.read_root(argv_r[i]));
         }
         let rest_list = heap.list_from_slice(&rest_items);
-        let scope_now = heap.env_root_at(eb);
+        let scope_now = heap.read_root_env(scope_rt);
         heap.env_define(scope_now, rs, rest_list);
     }
-    let mut body_r: SmallVec<[Value; 4]> = SmallVec::with_capacity(body.len());
-    for i in 0..body.len() {
-        body_r.push(heap.root_at(body_base + i));
-    }
-    let scope_r = heap.env_root_at(eb);
+    let body_out: SmallVec<[Value; 4]> = body_rt.iter().map(|&r| heap.read_root(r)).collect();
+    let scope_r = heap.read_root_env(scope_rt);
     heap.truncate_roots(vb);
     heap.truncate_env_roots(eb);
-    Ok((scope_r, body_r))
+    Ok((scope_r, body_out))
 }
 
 /// Build the arity error for a call whose argument count no arm accepts. For a
@@ -1192,17 +1188,15 @@ fn bind_sequential(
 ) -> Result<(EnvId, Value), LispError> {
     let vb = heap.roots_len();
     let eb = heap.env_roots_len();
-    heap.push_env_root(scope);
-    heap.push_root(body); // vb+0
-    for &b in binds {
-        heap.push_root(b); // vb+1 .. (names + rhs, interleaved)
-    }
+    let scope_rt = heap.root_env(scope);
+    let body_rt = heap.root(body);
+    let binds_r: SmallVec<[Root; 8]> = binds.iter().map(|&b| heap.root(b)).collect();
     let n = binds.len();
     let mut i = 0;
     while i < n {
-        let bind_name = as_symbol(heap.root_at(vb + 1 + i))?;
-        let rhs = heap.root_at(vb + 1 + i + 1);
-        let scope_now = heap.env_root_at(eb);
+        let bind_name = as_symbol(heap.read_root(binds_r[i]))?;
+        let rhs = heap.read_root(binds_r[i + 1]);
+        let scope_now = heap.read_root_env(scope_rt);
         let val = match eval(heap, rhs, scope_now).map_err(|e| e.or_form_pos(heap, rhs)) {
             Ok(v) => v,
             Err(e) => {
@@ -1211,12 +1205,12 @@ fn bind_sequential(
                 return Err(e);
             }
         };
-        let scope_now = heap.env_root_at(eb);
+        let scope_now = heap.read_root_env(scope_rt);
         heap.env_define(scope_now, bind_name, val);
         i += 2;
     }
-    let body_r = heap.root_at(vb);
-    let scope_r = heap.env_root_at(eb);
+    let body_r = heap.read_root(body_rt);
+    let scope_r = heap.read_root_env(scope_rt);
     heap.truncate_roots(vb);
     heap.truncate_env_roots(eb);
     Ok((scope_r, body_r))
@@ -1245,10 +1239,10 @@ fn tail_of_cons(
     // caller's `continue 'tail`.
     let vb = heap.roots_len();
     let eb = heap.env_roots_len();
-    heap.push_env_root(env);
-    heap.push_root(body); // vb+0 = spine cursor
+    let env_rt = heap.root_env(env);
+    let mut cur_r = heap.root(body); // spine cursor
     loop {
-        let cur = heap.root_at(vb);
+        let cur = heap.read_root(cur_r);
         match cur {
             Value::Nil => {
                 heap.truncate_roots(vb);
@@ -1258,22 +1252,22 @@ fn tail_of_cons(
             Value::Pair(p) => {
                 let (form, next) = heap.pair(p);
                 if matches!(next, Value::Nil) {
-                    let env_r = heap.env_root_at(eb);
+                    let env_r = heap.read_root_env(env_rt);
                     heap.truncate_roots(vb);
                     heap.truncate_env_roots(eb);
                     return Ok(Some((form, env_r)));
                 }
-                let env_now = heap.env_root_at(eb);
+                let env_now = heap.read_root_env(env_rt);
                 if let Err(e) = eval(heap, form, env_now).map_err(|e| e.or_form_pos(heap, form)) {
                     heap.truncate_roots(vb);
                     heap.truncate_env_roots(eb);
                     return Err(e);
                 }
-                let next = match heap.root_at(vb) {
+                let next = match heap.read_root(cur_r) {
                     Value::Pair(p2) => heap.pair(p2).1,
                     _ => Value::Nil,
                 };
-                heap.set_root(vb, next);
+                cur_r = heap.advance_root(cur_r, next);
             }
             _ => {
                 heap.truncate_roots(vb);
