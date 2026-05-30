@@ -65,10 +65,12 @@ no kernel surface to maintain.
 
 The structured version of that pattern ships as a require-able module
 (`(require 'supervisor)`, ADR-044). A supervisor is an ordinary green process
-that starts a set of children, `monitor`s each, and restarts them per a strategy
-and restart type, bounded by a restart-intensity limit. It is **pure Brood policy
-over `spawn` / `monitor` / `receive`** — zero new kernel surface, the
-mechanism-in-Rust / policy-in-Brood rule (ADR-006).
+that starts a set of children, `link`s + traps each (ADR-067), and restarts them
+per a strategy and restart type, bounded by a restart-intensity limit. It is
+**pure Brood policy over `spawn` / `link` / `trap-exit` / `receive` / `exit`** —
+the mechanism-in-Rust / policy-in-Brood rule (ADR-006); the only kernel surface it
+needed was the general Erlang primitives (`monitor`/`exit/2`/`link`/`trap_exit`),
+never a supervision-specific hook.
 
 ```clojure
 (require 'supervisor)
@@ -141,10 +143,13 @@ supervisor child `:shutdown :infinity`** (Erlang's exact rule); workers keep
 
 #### Still simplified (ADR-011)
 
-- **No `link` / bidirectional exit propagation.** Termination is one-directional
-  and supervisor-driven (`monitor` + `exit`), not Erlang's symmetric links. The
-  `:shutdown` cascade covers the shutdown *direction*; what's absent is automatic
-  *upward* propagation (a linked peer's crash taking you down without a monitor).
+- **`link` + `trap_exit` now exist (ADR-067)** — so a supervisor's *own* crash/kill
+  propagates down the links and tears the subtree down (workers die by propagation;
+  a child sub-supervisor traps and recognises its parent's `[:EXIT]`). The
+  `:shutdown :infinity` cascade above still governs a *graceful* `stop-supervisor`
+  (a deliberate hard `:kill` is untrappable). See §How it differs for the full
+  picture. What's still absent is a `terminate/2`-style cleanup hook on an external
+  kill.
 - **No broadcast-`[:$stop]`-to-everyone shutdown.** `:infinity`/ms is opt-in per
   child because sending `[:$stop]` to an arbitrary worker that pattern-matches
   broadly could be consumed as data — so only children that opt in receive it.
