@@ -9,6 +9,9 @@
 
 (defmodule project-test (:use test) (:use project))
 
+;; Drop any fixtures a prior run left in /tmp (at load, before any test runs).
+(purge-stale-temp "brood-dup-")
+
 (describe "project: :main parsing"
   (test "a bare symbol defaults the fn name to `main`"
     (assert= (project/project--parse-main 'foo) '(foo main)))
@@ -84,7 +87,7 @@
 
 (describe "project: namespace-aware duplicate global detection (ADR-065)"
   (test "project/project--file-def-names resolves names to ns/name (ambient earmuffs stay root; defmodule skipped)"
-    (let (dir (path-join "/tmp" (str "brood-dup-" (random-token 8))))
+    (let (dir (temp-dir "brood-dup-"))
       (make-dir dir)
       (let (f (path-join dir "a.blsp"))
         (spit f "(defmodule a \"x\")\n(defn main () 1)\n(def k 2)\n(defmacro m (x) x)\n(defdyn *d* 0)\n(defn helper (y) y)\n")
@@ -93,7 +96,7 @@
         (assert= (sort (project/project--file-def-names f))
           (sort ["*d*" "a/helper" "a/k" "a/m" "a/main"])))))
   (test "the same short name in two DIFFERENT namespaces is not a collision"
-    (let (dir (path-join "/tmp" (str "brood-dup-" (random-token 8))))
+    (let (dir (temp-dir "brood-dup-"))
       (make-dir dir)
       (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
         (spit fa "(defmodule alpha)\n(defn main () 1)\n")
@@ -101,7 +104,7 @@
         ;; alpha/main vs beta/main — distinct keys, no warning.
         (assert= (project/project--duplicate-def-warnings [fa fb]) nil))))
   (test "the same name in the SAME namespace IS flagged (qualified)"
-    (let (dir (path-join "/tmp" (str "brood-dup-" (random-token 8))))
+    (let (dir (temp-dir "brood-dup-"))
       (make-dir dir)
       (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
         (spit fa "(defmodule shared)\n(defn main () 1)\n(defn only-a () 1)\n")
@@ -111,7 +114,7 @@
           (is (string-contains? (first warns) "shared/main"))
           (refute (string-contains? (first warns) "only-a"))))))
   (test "an ambient *earmuff* name collides across namespaces (it stays root)"
-    (let (dir (path-join "/tmp" (str "brood-dup-" (random-token 8))))
+    (let (dir (temp-dir "brood-dup-"))
       (make-dir dir)
       (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
         (spit fa "(defmodule alpha)\n(defdyn *cfg* 1)\n")
@@ -120,7 +123,7 @@
           (assert= (count warns) 1)
           (is (string-contains? (first warns) "*cfg*"))))))
   (test "files with no defmodule share the root namespace — same name still collides"
-    (let (dir (path-join "/tmp" (str "brood-dup-" (random-token 8))))
+    (let (dir (temp-dir "brood-dup-"))
       (make-dir dir)
       (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
         (spit fa "(defn main () 1)\n(defn only-a () 1)\n")
@@ -130,7 +133,7 @@
           (is (string-contains? (first warns) "main"))
           (refute (string-contains? (first warns) "only-a"))))))
   (test "no duplicates yields no warnings"
-    (let (dir (path-join "/tmp" (str "brood-dup-" (random-token 8))))
+    (let (dir (temp-dir "brood-dup-"))
       (make-dir dir)
       (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
         (spit fa "(defmodule alpha)\n(defn alpha-fn () 1)\n")
