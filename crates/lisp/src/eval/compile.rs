@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use crate::core::heap::{EnvRoot, Heap, VmCacheKey};
 use crate::core::value::{self, ClosureId, EnvId, Symbol, Value};
-use crate::error::{error_codes, LispError, LispResult};
+use crate::error::{error_codes, LispError, LispResult, Pos};
 
 /// Is the compiling VM enabled?
 ///
@@ -73,10 +73,17 @@ pub enum Node {
     Do(Box<[Node]>),
     /// A combination. `tail` marks a tail call (the trampoline reuses the frame
     /// instead of recursing — proper TCO). Non-tail calls recurse via [`vm_apply`].
+    /// `pos` is the source `line:col` of this combination, captured at compile time
+    /// (when the form's reader-recorded position is still live — see
+    /// [`Heap::form_pos`]); an error from this call is tagged with it (innermost
+    /// wins, like the tree-walker's `or_form_pos`) so VM diagnostics keep line/col.
+    /// `None` for a promoted RUNTIME body (whose forms carry no recorded position —
+    /// neither engine tags those).
     Call {
         callee: Box<Node>,
         args: Box<[Node]>,
         tail: bool,
+        pos: Option<Pos>,
     },
     /// `let`/`let*`/`letrec` (Stage 2a). Lexical scope is **flattened** into the
     /// single activation frame: each binder owns a frame slot (pre-allocated in
@@ -457,6 +464,10 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                 callee: Box::new(callee),
                 args: args.into_boxed_slice(),
                 tail,
+                // Capture the combination's source position now, while its
+                // reader-recorded `form_pos` entry is live (a later collection moves
+                // the LOCAL form, but `Pos` is plain data and stays valid).
+                pos: heap.form_pos(form),
             })
         }
 
@@ -638,13 +649,22 @@ fn exec_node(
             let cl = crate::eval::make_closure(heap, None, *fn_rest, env)?;
             Ok(Step::Done(cl))
         }
-        Node::Call { callee, args, tail } => {
+        Node::Call { callee, args, tail, pos } => {
+            // Tag an error with this combination's source position if it doesn't
+            // already carry one — so the *innermost* failing call wins (mirrors the
+            // tree-walker's `or_form_pos`); a sub-call that already tagged itself is
+            // left untouched. `None` (a promoted RUNTIME body) is a no-op.
+            let pos = *pos;
+            let tag = |e: LispError| match pos {
+                Some(p) => e.or_pos(p),
+                None => e,
+            };
             // Evaluate the callee, then each argument, keeping them on the operand
             // stack so a collection during a later argument's eval relocates them in
             // place (mirrors `eval::eval_arguments`). `save` is this call's region;
             // it is always truncated back, including on the error path.
-            let cs = exec_node(heap, callee, frame_base, genv)?;
-            let cv = force(heap, cs)?;
+            let cs = exec_node(heap, callee, frame_base, genv).map_err(|e| tag(e))?;
+            let cv = force(heap, cs).map_err(|e| tag(e))?;
             let save = heap.roots_len();
             heap.push_root(cv);
             for a in args.iter() {
@@ -652,14 +672,14 @@ fn exec_node(
                     Ok(s) => s,
                     Err(e) => {
                         heap.truncate_roots(save);
-                        return Err(e);
+                        return Err(tag(e));
                     }
                 };
                 match force(heap, step) {
                     Ok(v) => heap.push_root(v),
                     Err(e) => {
                         heap.truncate_roots(save);
-                        return Err(e);
+                        return Err(tag(e));
                     }
                 }
             }
@@ -675,7 +695,7 @@ fn exec_node(
             let cur_env = heap.read_root_env(genv);
             let result = dispatch(heap, callee_v, argv, *tail, cur_env);
             heap.truncate_roots(save);
-            result
+            result.map_err(|e| tag(e))
         }
     }
 }
