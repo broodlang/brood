@@ -16,7 +16,13 @@
 ;;    so a deliberate kill is never mistaken for a fresh crash (Erlang `receive`
 ;;    semantics make the drain exact — non-matching messages stay queued).
 ;;  - `(stop-supervisor sup)` and an intensity-exceeded shutdown now terminate the
-;;    children too (no more orphans) — same `(exit … :kill)`.
+;;    children too (no more orphans) — by default a hard `(exit … :kill)`.
+;;  - Teardown **cascades into nested supervisors** when a child spec carries
+;;    `:shutdown :infinity`: the supervisor sends that child `[:$stop]` and waits,
+;;    and a child *supervisor* handles `[:$stop]` by tearing down its own children
+;;    first — so a whole tree shuts down depth-first. Mark every supervisor child
+;;    `:shutdown :infinity` (Erlang's rule); ordinary workers keep the default
+;;    `:brutal-kill`, since they don't understand a graceful-stop message.
 
 (defmodule supervisor
   "OTP-style supervision written in Brood over the kernel's spawn / monitor /
@@ -29,10 +35,19 @@ A *child spec* is a map:
 
     {:id     :worker                  ; any value, for diagnostics (optional)
      :start  (fn () (spawn (loop 0))) ; 0-arg fn that spawns the child, returns its pid
-     :restart :permanent}             ; :permanent | :transient | :temporary (default :permanent)
+     :restart :permanent              ; :permanent | :transient | :temporary (default :permanent)
+     :shutdown :brutal-kill}          ; how to terminate it: :brutal-kill (default) | :infinity | <ms>
 
 Restart types: `:permanent` is always restarted; `:transient` only after an
 *abnormal* exit (reason ≠ `:normal`); `:temporary` is never restarted.
+
+Shutdown policy (how the supervisor *terminates* a child — on `stop-supervisor`,
+a group restart, or intensity shutdown): `:brutal-kill` (default) hard-kills it;
+`:infinity` sends `[:$stop]` and waits for a clean exit; an integer waits that many
+ms before falling back to a hard kill. **Mark a supervisor child `:shutdown
+:infinity`** so teardown cascades into its sub-tree (a child supervisor tears down
+its own children on `[:$stop]`) instead of orphaning the grandchildren. Ordinary
+workers keep `:brutal-kill` — they don't understand `[:$stop]`.
 
     (require 'supervisor)
     (def sup (start-supervisor
@@ -86,22 +101,50 @@ never. An uncaught throw exits with reason `[:error msg]`, a clean return with
 
 ;; ---- terminating a healthy child (the kernel exit primitive, ADR-063) -------
 
+(defn supervisor--await-down (ref timeout-ms)
+  "Selectively drain `ref`'s `[:down]` (Erlang `receive` keeps non-matching
+messages queued). `nil` `timeout-ms` waits forever and returns `:ok`; an integer
+returns `:timeout` if the `:down` doesn't arrive in the window."
+  (if (nil? timeout-ms)
+    (receive ([:down ~ref _ _] :ok))
+    (receive ([:down ~ref _ _] :ok) (after timeout-ms :timeout))))
+
 (defn supervisor--terminate-child (child)
-  "Hard-kill `child` and selectively drain the `[:down]` its monitor fires, so the
-supervisor's own loop doesn't later treat this deliberate kill as a fresh crash.
-`(exit pid :kill)` is untrappable — it stops the child even parked in `receive` or
-in a tight loop. Only call on a child believed alive (one whose `:down` hasn't
-already been consumed); if it had already crashed, `exit` is a harmless no-op and
-the selective `receive` drains the `:down` that's already queued. Blocks until the
-`:down` arrives — `exit` guarantees one fires."
+  "Terminate `child` per its `:shutdown` policy and drain the `[:down]` its monitor
+fires (so the supervisor's loop never treats a deliberate termination as a fresh
+crash). Only call on a child believed alive; if it had already crashed, the kill is
+a harmless no-op and the selective drain consumes the `:down` already queued.
+
+`:shutdown` policies (Erlang's, default `:brutal-kill`):
+  - `:brutal-kill` — `(exit pid :kill)`, untrappable: stops the child even parked
+    in `receive` or in a tight loop. The right default for an ordinary worker (it
+    won't understand a graceful-stop message).
+  - `:infinity` — send `[:$stop]` and wait *indefinitely* for the child to exit.
+    This is how teardown **cascades into a nested supervisor**: a child supervisor
+    handles `[:$stop]` by terminating its own children (recursively) before it
+    exits. Use it only for cooperative children (a supervisor, or a worker that
+    handles `[:$stop]`), or the wait never returns.
+  - an integer ms — send `[:$stop]`, wait that long for a clean exit, then fall
+    back to `(exit pid :kill)`. A graceful try with a hard backstop."
   (let (pid (get child :pid)
-        ref (get child :ref))
-    (exit pid :kill)
-    (receive ([:down ~ref _ _] :ok))))
+        ref (get child :ref)
+        shutdown (get child :shutdown :brutal-kill))
+    (cond
+      (= shutdown :infinity)
+        (do (send pid [:$stop]) (supervisor--await-down ref nil))
+      (= shutdown :brutal-kill)
+        (do (exit pid :kill) (supervisor--await-down ref nil))
+      else                                  ; integer ms: graceful, then force
+        (do (send pid [:$stop])
+            (when (= :timeout (supervisor--await-down ref shutdown))
+              (exit pid :kill)
+              (supervisor--await-down ref nil))))))
 
 (defn supervisor--terminate-many (children)
-  "Terminate every child in `children` (each assumed alive / not-yet-drained),
-draining each one's `[:down]`. Order is irrelevant — every kill is independent."
+  "Terminate every child in `children` (each assumed alive / not-yet-drained) per
+its `:shutdown` policy, draining each one's `[:down]`. Sequential: a child marked
+`:infinity` (a sub-supervisor) is fully torn down — recursively — before the next,
+so a whole tree shuts down depth-first and nothing is orphaned."
   (dolist (c children) (supervisor--terminate-child c)))
 
 ;; ---- restart-intensity window -----------------------------------------------

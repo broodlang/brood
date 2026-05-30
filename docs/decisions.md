@@ -2450,10 +2450,19 @@ and it adds *zero* scheduler-race surface, the decisive property after KI-1.
 - **Restart intensity:** `:max-restarts` within `:max-seconds` (defaults 3/5);
   exceeding it exits the supervisor abnormally so a watcher's monitor fires.
 - **Introspection:** `(which-children sup)` → `[{:id :pid :restart}]`.
-- **Still deferred (ADR-011):** `link`/bidirectional exit propagation and a
-  `:shutdown` grace-timeout escalation (group kills use the hard `:kill`); nested
-  supervision trees as a first-class concept (a child whose `:start` spawns a
-  supervisor already composes as a sub-tree).
+- **`:shutdown` policy + nested-tree cascade** (update 2026-05-30): a child spec's
+  `:shutdown` is `:brutal-kill` (default — `exit … :kill`), `:infinity` (send
+  `[:$stop]`, wait), or an integer ms (graceful, then a hard-kill backstop).
+  Marking a supervisor child `:shutdown :infinity` makes teardown **cascade
+  depth-first** into the sub-tree (the child supervisor runs its own
+  `terminate-many` on `[:$stop]`) instead of orphaning grandchildren — Erlang's
+  exact rule. Opt-in per child because broadcasting `[:$stop]` to an arbitrary
+  worker is unsafe (it could match and consume it as data). A child whose `:start`
+  spawns a supervisor composes as a sub-tree; crash *escalation* through it already
+  worked, this closes deliberate *teardown*.
+- **Still deferred (ADR-011):** `link`/bidirectional exit propagation — termination
+  is one-directional and supervisor-driven; the `:shutdown` cascade covers the
+  shutdown direction, not automatic *upward* propagation from a linked peer's crash.
 
 **Consequences.**
 - `stop-supervisor` and an intensity-exceeded shutdown both **terminate the

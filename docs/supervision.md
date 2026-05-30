@@ -105,15 +105,45 @@ orphans): `stop-supervisor` kills every child as it leaves the loop, and a crash
 loop that blows the intensity window terminates the survivors before the
 supervisor throws (Erlang's shutdown behaviour).
 
+### Shutdown policy + nested trees (`:shutdown`)
+
+A child spec may carry a `:shutdown` field controlling *how* it's terminated:
+
+- **`:brutal-kill`** (default) — `(exit pid :kill)`, untrappable. Right for an
+  ordinary worker, which doesn't understand a graceful-stop message.
+- **`:infinity`** — send the child `[:$stop]` and wait (forever) for it to exit.
+- an **integer ms** — send `[:$stop]`, wait that long, then fall back to `:kill`.
+
+This is what makes **nested supervision trees** tear down cleanly. A child whose
+`:start` calls `start-supervisor` *is* a sub-tree (its pid is a supervisor), and
+crash escalation already works through it (a sub-tree that exhausts its restart
+budget dies and the parent restarts the whole sub-tree). The missing piece was
+*deliberate* teardown: a hard `:kill` of a sub-supervisor bypasses its `[:$stop]`
+handler, orphaning the grandchildren. Marking the sub-supervisor child `:shutdown
+:infinity` fixes that — the parent sends `[:$stop]`, the sub-supervisor runs its
+own `terminate-many` (recursively, depth-first), then exits. **Mark every
+supervisor child `:shutdown :infinity`** (Erlang's exact rule); workers keep
+`:brutal-kill`.
+
+```clojure
+(start-supervisor
+  (list {:id :db-sub :restart :permanent :shutdown :infinity     ; a sub-supervisor
+         :start (fn () (start-supervisor (list …) {:strategy :rest-for-one}))}
+        {:id :worker :restart :permanent                          ; a plain worker
+         :start (fn () (spawn (worker-loop)))}))
+```
+
 #### Still simplified (ADR-011)
 
-- **No `link` / bidirectional exit propagation, no `:shutdown` grace timeout.** A
-  group kill is the hard `:kill`; there's no "send `:shutdown`, wait, then
-  `:kill`" escalation. Intensity counts one event per trigger (per group restart),
-  not one per child restarted.
-- **No nested supervision trees as a first-class concept** — but a child whose
-  `:start` thunk itself calls `start-supervisor` *is* a sub-tree (its pid is a
-  supervisor), so trees compose without extra machinery.
+- **No `link` / bidirectional exit propagation.** Termination is one-directional
+  and supervisor-driven (`monitor` + `exit`), not Erlang's symmetric links. The
+  `:shutdown` cascade covers the shutdown *direction*; what's absent is automatic
+  *upward* propagation (a linked peer's crash taking you down without a monitor).
+- **No broadcast-`[:$stop]`-to-everyone shutdown.** `:infinity`/ms is opt-in per
+  child because sending `[:$stop]` to an arbitrary worker that pattern-matches
+  broadly could be consumed as data — so only children that opt in receive it.
+- **Intensity counts one event per trigger** (per group restart), not one per
+  child restarted.
 
 ## What's gone (vs. ADR-039 as proposed)
 

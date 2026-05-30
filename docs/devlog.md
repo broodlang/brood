@@ -8569,3 +8569,32 @@ top-level macro output *is* subject to caller-ns resolution (bounded hazard). Th
 advisory checker can't see globals defined via runtime `eval`/`%load-string` — a
 general property, not ns-specific. `defdyn` inside a namespace can desync the
 `%declare-dynamic` (quoted, bare) from the `def` (qualified) — narrow edge.
+
+## 2026-05-30 — Supervisor: `:shutdown` policy + nested-tree teardown cascade
+
+**Goal.** Close the orphan gap a review of nested supervision turned up. A
+supervisor *can* be a child of another supervisor, and crash *escalation* already
+worked (a sub-tree that exhausts its restart budget dies; the parent rebuilds it).
+But deliberate *teardown* didn't cascade: `stop-supervisor` / a group-restart kill
+/ an intensity shutdown all used `(exit subsup :kill)`, a hard kill that bypasses
+the sub-supervisor's `[:$stop]` cleanup — so the grandchildren were **orphaned**.
+Reproduced the gap (`:ORPHANED`) before fixing.
+
+**Built (pure Brood, `std/supervisor.blsp`).** A per-spec `:shutdown` field (Erlang's):
+`:brutal-kill` (default — `exit … :kill`, right for a worker), `:infinity` (send
+`[:$stop]`, wait), or an integer ms (graceful, then a hard-kill backstop). A child
+supervisor handles `[:$stop]` by running its own `terminate-many`, so marking a
+sub-supervisor child `:shutdown :infinity` shuts a whole tree down **depth-first**.
+Opt-in per child rather than broadcasting `[:$stop]` to everyone — an arbitrary
+worker could consume it as data. New helper `supervisor--await-down` (selective
+drain with an optional `after` deadline).
+
+**Verified.** `tests/supervisor_test.blsp` → 13 tests (added: stop cascades through
+a `:shutdown :infinity` sub-supervisor so the grandchild is torn down; a `:shutdown
+<ms>` child that ignores `[:$stop]` is hard-killed after the timeout). 13/13 clean,
+4× under `BROOD_GC_STRESS=1`; full `cargo test` green. A control confirmed a default
+`:brutal-kill` sub-supervisor still orphans — so it's the policy doing the work.
+
+**Docs.** `supervision.md` (new §Shutdown policy + nested trees), ADR-044, roadmap.
+Still deferred (ADR-011): `link`/bidirectional *upward* exit propagation —
+termination stays one-directional and supervisor-driven.
