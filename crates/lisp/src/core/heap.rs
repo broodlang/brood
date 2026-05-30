@@ -6,9 +6,10 @@
 //!
 //! - **LOCAL** — the per-process [`Heap`]: everything a process allocates at
 //!   runtime (cons cells, vectors, strings, call-frame env scopes). Plain
-//!   `Vec`s, mutated through `&mut Heap`, so the whole `Heap` is `Send`. Has a
-//!   per-slab **free list** so the tracing [`collect`](Self::collect) can reclaim
-//!   dead slots; `alloc_*` pop the free list before extending the slab.
+//!   `Vec`s, mutated through `&mut Heap`, so the whole `Heap` is `Send`.
+//!   Bump-allocated into a **nursery**; survivors are relocated by the copying
+//!   collector (see below), never freed in place, so handle slots are never
+//!   reused.
 //! - **PRELUDE** — a [`SharedCode`] region (behind `Arc`) holding the prelude +
 //!   builtins. Built once, frozen, shared read-only by every runtime.
 //! - **RUNTIME** — a [`RuntimeCode`] region (behind `Arc`) holding a runtime's
@@ -18,13 +19,19 @@
 //!   code slabs are append-only (old code is never moved or freed, so in-flight
 //!   calls keep running it); the global bindings are a `RwLock<HashMap>`.
 //!
-//! GC is **per-process, single-threaded, non-moving mark-sweep** (ADR-035, see
-//! `docs/memory-model.md`). Handles are stable across collection — a live
-//! object's slab slot is never moved — so a Rust local holding a rooted handle
-//! stays valid. PRELUDE and RUNTIME are not swept (they hold no LOCAL refs, by
-//! the promotion invariant — see [`promote`](Self::promote)); the collector
-//! only touches LOCAL. Roots are gathered explicitly at the outermost-eval
-//! safepoint (see the `GC_BLOCK` discipline in `process.rs`).
+//! GC is **per-process, single-threaded, generational semi-space copying**
+//! (ADR-055/061/072, see `docs/memory-model.md` and `docs/memory-review.md`). The
+//! LOCAL heap is a **nursery** + a tenured **old** generation; a *minor*
+//! collection ([`collect`](Self::collect) → [`minor_collect`](Self::minor_collect))
+//! copies the nursery's survivors (tenuring or flipping) and drops the rest, a
+//! rare *major* compacts old. Because survivors **move**, a handle held across a
+//! collection without being re-rooted goes stale — so the evaluator keeps its
+//! in-flight LOCAL handles on an explicit operand stack ([`roots`](Self::roots) +
+//! [`env_roots`](Self::env_roots)) that the collector relocates in place, letting
+//! it collect at **any** eval depth; a generation epoch on every handle (ADR-054)
+//! trips a precise debug tripwire on a stale deref. PRELUDE and RUNTIME are never
+//! traced (they hold no LOCAL refs, by the promotion invariant — see
+//! [`promote`](Self::promote)); the collector only touches LOCAL.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -179,6 +186,28 @@ fn env_chain_debug() -> bool {
     *ON.get_or_init(|| std::env::var_os("BROOD_ENV_DEBUG").is_some())
 }
 
+/// Parse a GC threshold override (an *object count*, with an optional `K`/`M`
+/// suffix — `64K` = 65536, `1M` = 1048576) from env var `key`. `None` if unset;
+/// a malformed value warns and is ignored (so the caller's default stands).
+/// Mirrors the `BROOD_MEM_LIMIT` size-parse style in `core/alloc.rs`, but counts
+/// objects rather than bytes.
+fn gc_count_env(key: &str) -> Option<usize> {
+    let v = std::env::var(key).ok()?;
+    let s = v.trim();
+    let (num, mult) = match s.chars().last() {
+        Some(c @ ('K' | 'k')) => (&s[..s.len() - c.len_utf8()], 1024usize),
+        Some(c @ ('M' | 'm')) => (&s[..s.len() - c.len_utf8()], 1024 * 1024),
+        _ => (s, 1usize),
+    };
+    match num.trim().parse::<usize>() {
+        Ok(n) => n.checked_mul(mult),
+        Err(_) => {
+            eprintln!("[gc] ignoring malformed {key}={v:?} (try e.g. 65536 or 64K)");
+            None
+        }
+    }
+}
+
 fn gc_floor() -> usize {
     static FLOOR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *FLOOR.get_or_init(|| {
@@ -187,7 +216,8 @@ fn gc_floor() -> usize {
         } else {
             // 64 KB of cons cells worth (~3000 entries) is well above per-call
             // working sets but trivial vs the GBs a long-running process leaks.
-            64 * 1024
+            // Overridable for tuning via `BROOD_GC_FLOOR` (object count, K/M ok).
+            gc_count_env("BROOD_GC_FLOOR").unwrap_or(64 * 1024)
         }
     })
 }
@@ -206,7 +236,8 @@ fn major_floor() -> usize {
         if std::env::var_os("BROOD_GC_STRESS").is_some() {
             8192
         } else {
-            256 * 1024
+            // Overridable for tuning via `BROOD_GC_MAJOR` (object count, K/M ok).
+            gc_count_env("BROOD_GC_MAJOR").unwrap_or(256 * 1024)
         }
     })
 }
@@ -222,7 +253,18 @@ fn major_floor() -> usize {
 /// make majors recopy it — the adversarial-under-stress regression). A
 /// long-lived structure still tenures once the nursery genuinely grows past this.
 fn min_tenure() -> usize {
-    16 * 1024
+    static T: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    // Overridable for tuning via `BROOD_GC_TENURE` (object count, K/M ok).
+    *T.get_or_init(|| gc_count_env("BROOD_GC_TENURE").unwrap_or(16 * 1024))
+}
+
+/// Default for the per-process GC **trace** flag, from the `BROOD_GC_TRACE` env
+/// var (set it to trace the whole run — including the root process, which the
+/// `(gc-trace …)` builtin can't reach before user code runs). Read once and
+/// cached; `(gc-trace on/off)` overrides it per process at runtime.
+fn gc_trace_default() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BROOD_GC_TRACE").is_some())
 }
 
 /// Re-tag a value's handle from the local region to the immutable **prelude**
@@ -682,6 +724,13 @@ pub struct Heap {
     gc_runs: u64,
     gc_copied: u64,
     gc_reclaimed: u64,
+    /// Per-process GC **trace** switch (`(gc-trace on/off)`, defaulted from
+    /// `BROOD_GC_TRACE`). When set, each minor/major collection prints a one-line
+    /// summary to stderr — a Tier-1 observability aid for tests/benchmarks (the
+    /// numbers `(gc-stats)` reports as cumulative totals, but per collection as
+    /// they happen). Per-process like every other heap field: a spawned child
+    /// starts from the `BROOD_GC_TRACE` default, not the parent's setting.
+    gc_trace: bool,
 }
 
 impl Default for Heap {
@@ -793,6 +842,7 @@ impl Heap {
             gc_runs: 0,
             gc_copied: 0,
             gc_reclaimed: 0,
+            gc_trace: gc_trace_default(),
         }
     }
 
@@ -827,6 +877,7 @@ impl Heap {
             gc_runs: 0,
             gc_copied: 0,
             gc_reclaimed: 0,
+            gc_trace: gc_trace_default(),
         }
     }
 
@@ -3273,6 +3324,19 @@ impl Heap {
         self.gc_threshold
     }
 
+    /// Whether per-collection GC tracing is on for this process. Backs the
+    /// no-arg `(gc-trace)` query.
+    pub fn gc_trace(&self) -> bool {
+        self.gc_trace
+    }
+
+    /// Turn per-collection GC trace logging on/off for this process (each
+    /// minor/major collection then prints a one-line stderr summary). Backs
+    /// `(gc-trace on/off)`.
+    pub fn set_gc_trace(&mut self, on: bool) {
+        self.gc_trace = on;
+    }
+
     // ----- the tracing GC ------------------------------------------------------
     //
     // Non-moving, single-threaded mark-sweep over the LOCAL heap only. Roots
@@ -3489,6 +3553,16 @@ impl Heap {
         self.gc_reclaimed = self
             .gc_reclaimed
             .saturating_add(before_young.saturating_sub(survivors) as u64);
+        if self.gc_trace {
+            eprintln!(
+                "[gc] minor {}: {} nursery objects, {} {}, {} reclaimed",
+                if tenure { "tenure" } else { "flip" },
+                before_young,
+                survivors,
+                if tenure { "tenured" } else { "kept young" },
+                before_young.saturating_sub(survivors),
+            );
+        }
         // `young` drops here, reclaiming every nursery object that didn't survive.
     }
 
@@ -3522,6 +3596,14 @@ impl Heap {
         self.gc_reclaimed = self
             .gc_reclaimed
             .saturating_add(before_old.saturating_sub(survivors) as u64);
+        if self.gc_trace {
+            eprintln!(
+                "[gc] major: {} old objects, {} survived, {} reclaimed",
+                before_old,
+                survivors,
+                before_old.saturating_sub(survivors),
+            );
+        }
         // `old_src` drops here, releasing the pre-compaction old slabs.
     }
 

@@ -704,6 +704,20 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::nullary(map_ty),
         gc_stats,
     );
+    def(
+        heap,
+        "gc-collect",
+        Arity::exact(0),
+        Sig::nullary(map_ty),
+        gc_collect,
+    );
+    def(
+        heap,
+        "gc-trace",
+        Arity::range(0, 1),
+        Sig::new(vec![any], bool_ty),
+        gc_trace,
+    );
 
     // self-hosting — eval/load/etc. take and return arbitrary forms / values.
     def(
@@ -1368,6 +1382,8 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("mem-limit", &[], "Hard memory ceiling in bytes (0 = unlimited); crossing it aborts the process. Set via BROOD_MEM_LIMIT."),
     ("mem-soft-limit", &[], "Soft memory ceiling in bytes (0 = unlimited); crossing it raises a catchable E0043 at the next safepoint."),
     ("gc-stats", &[], "A snapshot map of this process's GC activity: :collections, :copied, :reclaimed (cumulative object counts), :live, :live-bytes, and :threshold (next-collection trigger). Per-process — reports the caller's own heap."),
+    ("gc-collect", &[], "Force a collection of this process's LOCAL heap now, returning the post-collection gc-stats map. An observability/test aid, not a load-bearing trigger — automatic collection at the eval safepoint already keeps memory bounded."),
+    ("gc-trace", &["on?"], "Query (no arg) or set (truthy arg) per-collection GC trace logging for this process; returns the resulting state. When on, each minor/major collection prints a one-line summary to stderr. Defaulted from BROOD_GC_TRACE."),
     ("eval", &["form"], "Evaluate a form in the global environment."),
     ("read-string", &["s"], "Parse and return the first form in string s."),
     ("parse-source", &["s"], "Parse s into a lossless CST tree as nested vectors (mechanism for std/format.blsp)."),
@@ -2048,6 +2064,13 @@ fn mem_peak(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 /// figure), and `:threshold` (the live count that triggers the next collection —
 /// the slow/stable dial).
 fn gc_stats(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    Ok(gc_stats_map(heap))
+}
+
+/// Build the `(gc-stats)` snapshot map of the calling process's GC activity.
+/// Shared by `gc-stats` and `gc-collect` (which reports the same shape *after*
+/// forcing a collection, so the delta is visible).
+fn gc_stats_map(heap: &mut Heap) -> Value {
     let (runs, copied, reclaimed) = heap.gc_counters();
     let pairs = vec![
         (value::kw("collections"), Value::Int(runs as i64)),
@@ -2066,7 +2089,34 @@ fn gc_stats(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             Value::Int(heap.gc_threshold() as i64),
         ),
     ];
-    Ok(heap.map_from_pairs(pairs))
+    heap.map_from_pairs(pairs)
+}
+
+/// `(gc-collect)` — force a collection of this process's LOCAL heap *now*,
+/// returning the post-collection `(gc-stats)` map so the effect is visible.
+/// An observability/test aid, **not** a load-bearing trigger: automatic
+/// collection at the eval safepoint keeps memory bounded with no help from the
+/// program (the removed `(hibernate)` was the load-bearing manual trigger — this
+/// is not its return). Safe at any eval depth: a nullary builtin holds no
+/// un-rooted LOCAL values across the collection, and every live ancestor frame
+/// is already on the operand stack (ADR-061), so `collect` relocates everything
+/// reachable and the freshly-built result map is allocated post-collection.
+fn gc_collect(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    heap.collect(&mut [], &mut []);
+    Ok(gc_stats_map(heap))
+}
+
+/// `(gc-trace)` / `(gc-trace on?)` — query or set per-collection GC trace
+/// logging for the calling process. With no argument, returns the current state;
+/// with one, sets it (truthy = on) and returns the new state. When on, each
+/// minor/major collection prints a one-line summary to stderr. Per-process and
+/// defaulted from the `BROOD_GC_TRACE` env var (which traces the whole run,
+/// including the root process before any `(gc-trace)` call).
+fn gc_trace(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    if let Some(&v) = args.first() {
+        heap.set_gc_trace(crate::eval::truthy(v));
+    }
+    Ok(Value::Bool(heap.gc_trace()))
 }
 
 /// `(mem-limit)` — the hard memory ceiling in bytes (0 = unlimited). ADR-043.

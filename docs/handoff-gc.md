@@ -4,6 +4,14 @@ Resume point for garbage-collector work, after the 2026-05-30 session that lande
 collect-at-any-depth (ADR-061), rooted the six re-entrant sites it exposed, moved
 `macroexpand` to Brood, and adopted the single-shot-primitive rule (ADR-064).
 
+> **Update (later the same day, 2026-05-30):** the two items this doc left for
+> "later" both landed. **Generational GC** (Stage C — item #5 below, ADR-072) and
+> the **Tier-1 observability** primitives `(gc-stats)`/`(gc-collect)`/`(gc-trace)`
+> (with `BROOD_GC_TRACE` + the `BROOD_GC_FLOOR`/`TENURE`/`MAJOR` tuning knobs) are
+> done and green. **No GC-specific work remains** — the only open items are the
+> surface-reduction refactors in §3 (move `quasiquote`/`reload-defs` to Brood),
+> which aren't GC.
+
 ## State: correctness is done — and no known GC crashes remain
 
 - **Collect at any eval depth** (ADR-061): the copying collector fires at any
@@ -82,9 +90,15 @@ legitimate parallel load, low enough to catch a genuine runaway cleanly via
 stale "GC is a no-op / never reclaims" prose in that doc-comment was corrected too.
 
 ### 5. Deferred optimizations
-- **Generational collection:** today `arena_flip` is a full semi-space copy each
-  time, recopying long-lived data. A young/old split would cut copying of stable
-  data. **(Still open — the one remaining GC perf item.)**
+- **Generational collection — ✅ DONE (2026-05-30, ADR-072).** The LOCAL heap is
+  now a nursery + tenured old generation: a *minor* collection copies only the
+  nursery's survivors (tenuring past `min_tenure`, else a young flip) and never
+  recopies old; a *major* compacts old when it doubles past `major_floor`. No write
+  barrier except a one-site remembered set for a frame tenured mid-bind
+  (`env_define`). ~8× faster / ~9× lower RSS / ~70× less copy volume on a stateful
+  workload; compute-bound neutral. Thresholds env-tunable
+  (`BROOD_GC_FLOOR`/`BROOD_GC_TENURE`/`BROOD_GC_MAJOR`). **This was the last open GC
+  perf item — nothing GC-specific remains.**
 - **`Rc` → `gc-arena` (ADR-002):** ✅ closed (2026-05-30). ADR-002's status now
   records that the `Rc`/`RefCell` substrate was replaced wholesale by the
   hand-rolled handle/slab copying collector (ADR-035/054/055/061), *not* migrated

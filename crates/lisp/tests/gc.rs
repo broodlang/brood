@@ -184,6 +184,69 @@ fn gc_stats_counts_automatic_collections() {
     );
 }
 
+/// `(gc-collect)` forces a collection on demand and reports the post-collection
+/// stats (Tier-1 observability). Allocate a batch of garbage *without* crossing
+/// the GC floor (so no automatic safepoint collection fires — `:collections` is 0),
+/// then call `(gc-collect)` and assert it (a) ran exactly the collection we asked
+/// for and (b) reclaimed the dead batch. This proves the forced collect is a real
+/// collection (not a no-op) and is safe to invoke as a leaf builtin at depth.
+#[test]
+fn gc_collect_forces_a_collection() {
+    let mut interp = Interp::new();
+    let prog = r#"
+        ;; Build a chunk of garbage that stays under the ~64k-object GC floor, so
+        ;; the automatic safepoint does NOT fire on its own here.
+        (defn build (n acc)
+          (if (= n 0) nil (build (- n 1) (cons n acc))))
+        (build 2000 nil)
+        ;; Nothing above is retained (the list is discarded), so a forced collect
+        ;; should reclaim it. Returns the post-collection gc-stats map.
+        (gc-collect)
+    "#;
+    let v = interp.eval_str(prog).expect("gc-collect program errored");
+    let stats = interp.print(v);
+    let runs = read_field(&stats, ":collections");
+    let reclaimed = read_field(&stats, ":reclaimed");
+    assert!(
+        runs >= 1,
+        "gc-collect should perform at least one collection, got {runs} — gc-stats: {stats}"
+    );
+    assert!(
+        reclaimed > 0,
+        "gc-collect should reclaim the discarded garbage, got {reclaimed} — gc-stats: {stats}"
+    );
+}
+
+/// `(gc-trace on/off)` toggles per-collection trace logging and reports state.
+/// We can't capture the child-thread stderr the trace prints to from here, so we
+/// assert the *observable contract*: the query/set protocol returns the right
+/// booleans (no arg = current state; truthy arg = set + return new state), and
+/// the call is side-effect-safe around a real forced collection.
+#[test]
+fn gc_trace_toggles_and_reports_state() {
+    let mut interp = Interp::new();
+    let prog = r#"
+        [(gc-trace)         ;; default: off
+         (gc-trace true)    ;; turn on -> true
+         (gc-trace)         ;; still on
+         (gc-collect)       ;; a traced collection (output goes to stderr)
+         (gc-trace false)   ;; turn off -> false
+         (gc-trace)]        ;; still off
+    "#;
+    let v = interp.eval_str(prog).expect("gc-trace program errored");
+    let out = interp.print(v);
+    // The 4th element is the gc-stats map from gc-collect; assert on the booleans
+    // around it.
+    assert!(
+        out.starts_with("[false true true {"),
+        "gc-trace query/set protocol returned the wrong booleans: {out}"
+    );
+    assert!(
+        out.ends_with("false false]"),
+        "gc-trace should report off after being turned off: {out}"
+    );
+}
+
 /// Collect at ANY eval depth (ADR-061). The same churn loop as
 /// `gc_stats_counts_automatic_collections`, but run **inside a `try`** so the loop
 /// body executes at eval depth ≥ 2 (the supervised-server / `(try (loop) …)`

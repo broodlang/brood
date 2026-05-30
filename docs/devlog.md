@@ -9257,3 +9257,104 @@ can't be the relevant guard.
 
 **Verification.** The hung test now aborts at ~300ms and passes (0.35s); full
 `cargo test` green end-to-end (no `--skip`).
+
+---
+
+## 2026-05-30 — GC Tier-1 finish: `gc-collect`/`gc-trace`, tunable thresholds, doc reconciliation
+
+Closing the GC chapter. The generational collector (ADR-072, earlier today) and
+`(gc-stats)` were already in; this session added the two missing Tier-1
+observability primitives, made the generational thresholds tunable, measured them,
+and reconciled the docs that still described the *pre*-generational design.
+
+**`(gc-collect)` + `(gc-trace)` (`builtins.rs`, `core/heap.rs`).** The rest of the
+originally-planned Tier-1 set (`gc-stats`/`gc-collect`/`gc-trace`/`heap-stats` —
+`heap-stats` is folded into `gc-stats` as `:live`/`:live-bytes`).
+- `(gc-collect)` forces a collection now and returns the post-collection
+  `gc-stats` map. **Safe at any eval depth**: a nullary builtin holds no un-rooted
+  LOCAL values across the collect, and every live ancestor frame is already on the
+  operand stack (ADR-061), so `collect` relocates everything reachable and the
+  result map is built post-collection. It is an observability/test aid, **not** a
+  load-bearing trigger — automatic safepoint collection still does the real work
+  (the removed `(hibernate)` is not back).
+- `(gc-trace on?)` toggles per-collection stderr logging for the calling process
+  (no arg = query); each minor/major prints a one-line summary. Per-process,
+  defaulted from `BROOD_GC_TRACE` (traces the whole run, root process included).
+- Both green under `RUSTFLAGS="-C debug-assertions=on" BROOD_GC_VERIFY=1
+  BROOD_GC_STRESS=1` (the GC-change gate). New `gc.rs` tests:
+  `gc_collect_forces_a_collection`, `gc_trace_toggles_and_reports_state`.
+
+**Tunable thresholds + a tuning sweep.** The three knobs are now env-overridable
+(object counts, `K`/`M` suffixes): `BROOD_GC_FLOOR` (adaptive minor trigger, def
+64K), `BROOD_GC_TENURE` (nursery pressure to tenure vs. flip, def 16K),
+`BROOD_GC_MAJOR` (old size to fire a major, def 256K); `BROOD_GC_STRESS` still wins.
+Swept on a stateful workload (a process holding ~20k live across 50k iterations of
+300-object churn, release):
+
+| floor | wall | maxRSS | collections | copied |
+|---|---|---|---|---|
+| 16K | 52.5s | 26.3 MB | 7397 | 3.2M |
+| 32K | 52.8s | 22.9 MB | 3698 | 1.6M |
+| **64K (default)** | 53.0s | 30.5 MB | 1849 | 826K |
+| 128K | 53.1s | 43.5 MB | 924 | 407K |
+| 256K | 53.2s | 70.1 MB | 461 | 203K |
+
+**Wall time is flat (~53s) across every setting** — collection is cheap because the
+20k live set tenures to old and minors only scan the small nursery (the young-death
+design paying off). The floor is a clean RSS/frequency dial; `BROOD_GC_TENURE` had
+*no* effect on this workload (the tenure decision lands the same way once the live
+set is tenured). **Decision: keep the defaults.** 64K is well-bounded (~30 MB flat),
+avoids thrash on tiny heaps, and the lower-floor RSS win is workload-dependent (a
+large *nursery*-resident live set would pay more per minor) — moving the default off
+one synthetic bench is the premature tuning the review warned against. The knobs are
+the deliverable; the defaults stand.
+
+**Doc reconciliation.** The GC handoff/review docs predated the generational work
+and still said it was "deferred / not started" (which misled a status query at the
+top of this session). Brought current: new **ADR-072** (generational GC as built);
+`memory-model.md` got a new top banner; `memory-review.md` §6 and `handoff-gc.md`
+item #5 marked done; `roadmap.md` M1 GC bullets updated; `language.md` documents the
+new builtins + knobs; and the `core/heap.rs` module doc-comment (which still claimed
+"non-moving mark-sweep" with stable handles) now describes the generational copying
+collector. **No GC-specific work remains.**
+
+---
+
+## 2026-05-30 — Package namespace-collision check (ADR-070); rooting deferred
+
+**Goal.** Close the last package-manager safety gap. With `:git` deps landed, two
+reachable providers can ship a module of the same name and silently clobber in the
+one flat global table — `require` loads whichever `<name>.blsp` is first on
+`*load-path*`, the other never loads, and code depending on the loser binds the
+*wrong* module. Reproduced it live: a dep's `a` (which `:use`s the dep's `b`)
+silently bound the *consumer's* `b`, then errored on a function only the dep's `b`
+had. ADR-070 had decided "detect-and-reject" but left it dormant pending the
+resolution step — which now exists.
+
+**Design discussion first (recorded in ADR-070's *Future direction*).** Explored
+the stronger fix — **package-rooted namespaces** (a dep's local name as a load-time
+prefix, `foo/b/…`, collisions *impossible*) + author `:exports` (soft module
+privacy) + import aliases `[mod :as m]`. It's the Cargo/Go shape, with a real edge
+over Elixir/Clojure: your *own* project stays bare (no self-prefix), only deps are
+prefixed. **Deferred** it (ADR-011): no third-party packages exist yet, it touches
+the just-landed ADR-065 substrate (multi-segment names, package-scope loader), and
+it adds two permanent knobs. De-risking insight: rooting is a *loader* decision, not
+a *source* one — intra-package refs stay short regardless, so package source is
+identical under `b/` or `foo/b/`, and rooting can land later (M2 plugin pressure)
+with the flat form kept working. Deferral is nearly free; the cheap check is the
+interim, rooting is the destination.
+
+**Built (the interim — `std/package.blsp`).** `package--check-namespace-collisions`
+walks every provider — **the project's own source dirs first, then each resolved
+dep** — reading each top-level `.blsp` file's `(defmodule …)` name (the name that
+clobbers, not the filename) and errors on the first name two providers share, naming
+both. Wired into `fetch`, `add`, and `ensure-deps` (so the auto-fetch on every
+project-aware `nest` subcommand catches it). No language surface, no call-site
+change, no migration. Tested via the cwd-free helpers in `tests/package_test.blsp`
+(provided-modules incl. the filename≠module case, the collision error, the
+no-collision pass) — 30 tests green. Hand-verified the original silent-clobber repro
+now errors loudly at both `nest add` and `nest run`, naming both providers.
+
+**Docs.** ADR-070 → accepted **and implemented**, with the package-rooting analysis
+recorded as *Future direction*; `namespaces.md` §8 and `packages.md` (new "Namespace
+collisions" section) updated to match.
