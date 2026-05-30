@@ -149,3 +149,73 @@ prefix merge), so a layer owns its chord."
   "One keystroke through the context's composed active keymap, via `keymap-step`:
 returns `[ctx' pending']`. The bridge from layers to keymap — compose, then step."
   (keymap-step (active-keymap ctx) pending ctx key fallback))
+
+;; ============================================================================
+;; Phase 2 — buffer-type binding
+;; ============================================================================
+;; A new buffer's starting layer set is determined by its TYPE. Two registries
+;; (plain data, rebindable via the helpers → hot-reload) bind layers to types and
+;; types to filenames. This stays buffer-*agnostic* code: it only reads/writes the
+;; `:file` / `:type` / `:layers` keys on a plain map — `std/buffer` need not be
+;; loaded, and a buffer-less context can carry a `:type` too.
+
+;; type → its layer refs, in precedence order (head = highest; activated base-first).
+(def *type-layers* {})
+;; ordered filename→type rules, newest-first (first match wins). Each is
+;; `{:match <suffix-string | (fn (filename) -> bool)> :type <type>}`.
+(def *auto-type-by-file* ())
+
+(defn register-type-layers (type refs)
+  "Bind buffer `type` to `refs` (a list of layer references, head = highest
+precedence). Rebinds the registry, so it hot-swaps on the next buffer of that type.
+To add a single layer to a type, `assoc` onto its existing `(layers-for-type type)`."
+  (def *type-layers* (assoc *type-layers* type refs)))
+
+(defn register-file-type (spec type)
+  "Map filenames to `type`: `spec` is a suffix string (matched with `ends-with?`)
+or a predicate `(fn (filename) -> bool)`. Prepended, so the most-recently-registered
+rule wins — a project can override a default."
+  (def *auto-type-by-file* (cons {:match spec :type type} *auto-type-by-file*)))
+
+(defn layers-for-type (type)
+  "The layer refs bound to `type`, or () if none."
+  (or (get *type-layers* type) ()))
+
+(defn layers--file-matches? (file spec)
+  "Does `file` satisfy a `:match` spec — a suffix string, or a predicate fn?"
+  (if (string? spec) (ends-with? file spec) (spec file)))
+
+(defn layers--match-file (file rules)
+  "Walk `rules` (newest-first); return the `:type` of the first whose `:match` fits
+`file`, else nil."
+  (if (empty? rules)
+    nil
+    (if (layers--file-matches? file (get (first rules) :match))
+      (get (first rules) :type)
+      (layers--match-file file (rest rules)))))
+
+(defn buffer-type-for (buf)
+  "The type of `buf`: match its `:file` against `*auto-type-by-file*` (first match
+wins); with no file or no match, fall back to its explicitly-set `:type`, else
+`:fundamental`."
+  (let (file (get buf :file)
+        matched (if (nil? file) nil (layers--match-file file *auto-type-by-file*)))
+    (or matched (get buf :type) :fundamental)))
+
+(defn set-buffer-type (buf type)
+  "Set `buf`'s `:type` explicitly — the Brood-side override for fileless or special
+buffers (a `*magit-status*`, a scratch buffer). Does not (re)seed layers; pair with
+`init-buffer-layers`."
+  (assoc buf :type type))
+
+(defn init-buffer-layers (buf)
+  "Resolve `buf`'s type, set `:type` to it, and seed `:layers` from `*type-layers*`,
+firing each layer's `:activate` (base-first). Replaces any existing `:layers` — call
+on buffer creation, or after `set-buffer-type`. The registry list's order is
+preserved (head = highest precedence)."
+  (let (type (buffer-type-for buf)
+        refs (layers-for-type type)
+        seeded (assoc buf :type type :layers ()))
+    ;; activate base-first (reverse: each push goes to the head), so the resulting
+    ;; :layers order equals the registry order and a minor's :activate sees the base.
+    (fold (fn (b ref) (activate-layer b ref)) seeded (reverse refs))))
