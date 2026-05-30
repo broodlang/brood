@@ -4842,11 +4842,14 @@ by value into a fresh frame (sound because Brood bindings are immutable), reusin
 capturing a not-yet-finalized `letrec` binder (recursive late-binding) — **defers to
 the tree-walker**. The GC tracer was left unchanged: the cached `Node` tree is gated
 to hold only immovable handles, so it's never a movable root (the simpler outcome
-the original R1 note flagged as the alternative to walking `CompiledArm` bodies). One
-**open item gates Stage 3**: the IR discards source forms, so VM errors don't tag
-line/col (6 pre-existing `basic.rs` diagnostic tests fail under `BROOD_VM=1`) — a
-source `Pos` must be threaded through the IR before the cutover (invariant: the
-language is unchanged).
+the original R1 note flagged as the alternative to walking `CompiledArm` bodies).
+Then **source positions** were threaded through the IR (`Node::Call` carries a
+compile-time `Pos` from `Heap::form_pos`; `exec_node` tags errors innermost-wins like
+the tree-walker), closing the last divergence — the full suite is now green under
+both engines. **Stage 3 cutover done (2026-05-31):** `vm_enabled` defaults the VM
+*on*; `BROOD_VM=0` is the tree-walker escape hatch (kept ≥1 release); the transitional
+`vm-default` cargo feature was removed. Still recommended: a differential test mode as
+a standing CI guard, and widening VM coverage (variadic / patterns / prelude — perf).
 
 ## ADR-077 — Mouse `:drag` and `:release`, at cell granularity
 
