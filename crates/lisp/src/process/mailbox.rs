@@ -59,6 +59,14 @@ pub(super) struct Mailbox {
     /// process that's churning memory (many collections) vs. a quiet one. Backs
     /// `process-info`'s `:collections`.
     pub(super) gc_runs: AtomicU64,
+    /// The owning process's **cumulative reduction count** — the Erlang scheduling
+    /// unit (≈ one per eval combination). Accumulated by the scheduler at each
+    /// quantum boundary (`run_one`: `REDUCTION_BUDGET − remaining`), so it grows
+    /// continuously as the process runs, not only on `receive` like `mem`/`gc_runs`.
+    /// Registry-reachable for `process-info`'s `:reductions`; the observer's
+    /// "is this process doing work?" signal. (The root process isn't scheduled via
+    /// quanta, so its count stays 0.)
+    pub(super) reductions: AtomicU64,
     /// Set by `(exit pid …)`: an exit signal is pending. The lock-free fast flag;
     /// the reason lives in `MailboxState.kill`. The target notices at its next
     /// reduction tick (hard `:kill`, via `preempt`) or `receive` (soft), and `exit`
@@ -103,6 +111,7 @@ impl Mailbox {
             status: AtomicU8::new(ST_RUNNING),
             mem: AtomicUsize::new(0),
             gc_runs: AtomicU64::new(0),
+            reductions: AtomicU64::new(0),
             kill_pending: AtomicBool::new(false),
             trap_exit: AtomicBool::new(false),
         })
@@ -436,6 +445,17 @@ pub fn process_mem(pid: u64) -> Option<usize> {
 pub fn process_gc_runs(pid: u64) -> Option<u64> {
     let mailbox = crate::core::sync::lock(&REGISTRY).get(&pid).cloned()?;
     Some(mailbox.gc_runs.load(Ordering::Relaxed))
+}
+
+/// The cumulative reduction count of live local process `pid`, or `None` if the
+/// pid is dead/unknown. Updated by the scheduler at every quantum boundary (see
+/// `run_one`), so unlike `:memory`/`:collections` it reflects work up to the
+/// process's *latest* scheduling point, not just its last `receive`. Backs
+/// `process-info`'s `:reductions`. The root process (not scheduled via quanta)
+/// reports `0`.
+pub fn process_reductions(pid: u64) -> Option<u64> {
+    let mailbox = crate::core::sync::lock(&REGISTRY).get(&pid).cloned()?;
+    Some(mailbox.reductions.load(Ordering::Relaxed))
 }
 
 /// Set the run-status of the *current* process (used by `receive_match` for the

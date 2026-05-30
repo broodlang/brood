@@ -103,10 +103,13 @@ attach). Drive the standalone app from the shell with `nest observe`."
   "Render optional field `v` with `f`, or `\"-\"` when it's absent (nil)."
   (if (nil? v) "-" (f v)))
 
-(defn observe--cells (id nm status mbox mem mon)
-  "One table line's six fixed-width columns (used for both header and rows)."
+(defn observe--cells (id nm status mbox mem reds mon)
+  "One table line's seven fixed-width columns (used for both header and rows).
+`reds` is the cumulative reduction count — Erlang's scheduling unit — so a busy
+process stands out by a fast-climbing figure."
   (str (pad-left (str id) 5) " " (pad-right nm 12) " " (pad-right status 8) " "
-       (pad-left (str mbox) 6) " " (pad-left mem 8) " " (pad-left (str mon) 4)))
+       (pad-left (str mbox) 6) " " (pad-left mem 8) " " (pad-left (str reds) 9) " "
+       (pad-left (str mon) 4)))
 
 (defn observe--proc-cells (p)
   "The table line for one `process-info` map `p`. In tree view the map carries a
@@ -119,6 +122,7 @@ attach). Drive the standalone app from the shell with `nest observe`."
                     (observe--opt (get p :status) name)
                     (get p :mailbox)
                     (observe--opt (get p :memory) observe--bytes->human)
+                    (observe--opt (get p :reductions) str)
                     (get p :monitored-by))))
 
 (defn observe--row-face (p selected?)
@@ -141,6 +145,7 @@ the colours live in one place (`:observer/*`)."
        " · mailbox " (get p :mailbox)
        (let (m (get p :memory)) (if (nil? m) "" (str " · mem " (observe--bytes->human m))))
        (let (gc (get p :collections)) (if (or (nil? gc) (= gc 0)) "" (str " · gc " gc)))
+       (let (r (get p :reductions)) (if (or (nil? r) (= r 0)) "" (str " · reds " r)))
        (let (pa (get p :parent)) (if (nil? pa) "" (str " · parent " pa)))
        " · monitored-by " (get p :monitored-by)
        (if (> nprocs cap) (str "   [" (inc sel) "/" nprocs "]") "")))
@@ -260,7 +265,7 @@ the observer's testable core; `observe--loop` feeds it live data."
              [(clear)
               (text 0 0 (observe--fit (pad-right (nth lines 0) cols) cols) (face :observer/header))
               (text 1 0 (observe--fit (pad-right (nth lines 1) cols) cols) (face :observer/node-stats))
-              (text 2 0 (observe--fit (str "  " (observe--cells "ID" "NAME" "STATUS" "MBOX" "MEM" "MON")) cols) (face :observer/col-header))]
+              (text 2 0 (observe--fit (str "  " (observe--cells "ID" "NAME" "STATUS" "MBOX" "MEM" "REDS" "MON")) cols) (face :observer/col-header))]
              body
              [(text (- rows 2) 0 (observe--fit (pad-right detail cols) cols) (face :observer/detail))]
              last-row))))

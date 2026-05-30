@@ -450,11 +450,28 @@ pub fn deadline_exceeded() -> bool {
 /// (re-queued Ready by `run_one`). Re-establishes `CURRENT` after resume, since the
 /// worker may have run other processes meanwhile (cf. `receive`).
 fn preempt() {
-    REDUCTIONS.with(|r| r.set(REDUCTION_BUDGET));
     let ctx = match CURRENT.with(|c| c.borrow().clone()) {
-        Some(c) => c,
-        None => return, // no process context (e.g. prelude build) — nothing to yield to
+        Some(c) => {
+            // The budget is exhausted, so a full quantum's worth of reductions was
+            // consumed — accumulate it into the per-process `:reductions` total
+            // before refreshing. (`run_one` adds the *partial* final quantum for a
+            // `receive`/exit yield, where `preempt` isn't called; the two paths are
+            // mutually exclusive per quantum, so no double-count.) Without this the
+            // count stayed 0 for CPU-bound processes — exactly the ones the observer
+            // most wants to flag.
+            c.mailbox
+                .reductions
+                .fetch_add(REDUCTION_BUDGET as u64, Ordering::Relaxed);
+            c
+        }
+        None => {
+            // No process context (e.g. prelude build) — nothing to yield to; just
+            // refresh the budget so the caller keeps running.
+            REDUCTIONS.with(|r| r.set(REDUCTION_BUDGET));
+            return;
+        }
     };
+    REDUCTIONS.with(|r| r.set(REDUCTION_BUDGET));
     if let Some(yptr) = ctx.yielder {
         // Hard exit (`(exit pid :kill)`): die now, untrappably. Checked here at the
         // reduction boundary so a tight CPU loop — which never reaches `receive` —
@@ -744,6 +761,12 @@ fn run_one(mut proc: Box<Process>) {
     EXIT_REASON.with(|r| *r.borrow_mut() = None); // stale from a prior process on this worker
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| proc.coro.resume(())));
     RUNNING.fetch_sub(1, Ordering::SeqCst);
+    // Accumulate the reductions this quantum consumed (budget minus what's left;
+    // a preempted process left 0) into the per-process total for `process-info`'s
+    // `:reductions`. The coroutine shares this worker's `REDUCTIONS` TLS, so its
+    // post-yield value is the remainder. Erlang counts reductions the same way.
+    let used = REDUCTION_BUDGET.saturating_sub(REDUCTIONS.with(|r| r.get()));
+    mailbox.reductions.fetch_add(used as u64, Ordering::Relaxed);
 
     match outcome {
         Ok(CoroutineResult::Return(())) => {

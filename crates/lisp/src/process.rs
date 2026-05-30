@@ -42,7 +42,8 @@ mod scheduler;
 mod timer;
 
 pub use mailbox::{
-    list_local_pids, mailbox_len, process_gc_runs, process_mem, process_status, receive_match, send,
+    list_local_pids, mailbox_len, process_gc_runs, process_mem, process_reductions, process_status,
+    receive_match, send,
 };
 pub use message::{from_message, to_message, ClosureArmMsg, ClosureMsg, Message};
 // The reusable blocking-IO → mailbox seam (ADR-059): any subsystem that must

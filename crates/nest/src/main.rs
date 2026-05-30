@@ -268,7 +268,7 @@ fn run_main(cli: Cli) {
         ),
         Cmd::Doc { module, all } => cmd_doc(&mut interp, module.as_deref(), all),
         Cmd::Fetch => run(&mut interp, "(require 'package) (package/fetch)"),
-        Cmd::Tree => run(&mut interp, "(require 'package) (tree)"),
+        Cmd::Tree => run(&mut interp, "(require 'package) (package/tree)"),
         Cmd::Add { name, spec } => cmd_add(&mut interp, &name, &spec),
         Cmd::Remove { name } => {
             let escaped = brood::introspect::escape_brood_string(&name);
@@ -357,61 +357,37 @@ fn cmd_test(interp: &mut Interp, files: &[String]) {
 
 /// `nest check [FILES...]` — project-wide if no files, otherwise file-by-file.
 fn cmd_check(interp: &mut Interp, files: &[String]) {
-    if files.is_empty() {
-        let v = run_for_value(
-            interp,
-            "(require 'project) (project/load-config) (require 'test) (project/check-project)",
-        );
-        match v {
-            brood::core::value::Value::Int(0) => {}
-            brood::core::value::Value::Int(_) => std::process::exit(1),
-            other => {
-                eprintln!(
-                    "nest check: check-project returned a non-integer ({})",
-                    interp.print(other)
-                );
-                std::process::exit(1);
-            }
+    // One checker, one path. Whole-project and file-list checks both go through
+    // `std/project.blsp`, which loads the project image *first* so cross-module /
+    // namespace imports resolve through the heap's globals. The single-file path
+    // used to be a separate Rust loop that skipped that setup — so every `:use`d
+    // or qualified name in a namespaced file false-flagged as unbound (the
+    // breakage the `.brood-skip-blsp-check` migration hatch was added for). Both
+    // forms now return a warning count; non-zero → exit 1.
+    let code = if files.is_empty() {
+        "(require 'project) (project/load-config) (require 'test) (project/check-project)".to_string()
+    } else {
+        let list = files
+            .iter()
+            .map(|f| format!("\"{}\"", brood::introspect::escape_brood_string(f)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("(require 'project) (require 'test) (project/check-files (list {list}))")
+    };
+    match run_for_value(interp, &code) {
+        brood::core::value::Value::Int(0) => {}
+        brood::core::value::Value::Int(_) => std::process::exit(1),
+        other => {
+            eprintln!(
+                "nest check: checker returned a non-integer ({})",
+                interp.print(other)
+            );
+            std::process::exit(1);
         }
-        return;
-    }
-    // Single-file path: print warnings to stdout (CI-friendly), exit non-zero
-    // if any file warned.
-    let mut warned = false;
-    for path in files {
-        let src = match std::fs::read_to_string(path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("nest check: cannot read {}: {}", path, e);
-                std::process::exit(1);
-            }
-        };
-        let forms = match brood::syntax::reader::read_all_positioned(&mut interp.heap, &src) {
-            Ok(forms) => forms,
-            Err(e) => {
-                report_error(&e.clone().or_file(path.to_string()));
-                warned = true;
-                continue;
-            }
-        };
-        let just_forms: Vec<_> = forms.into_iter().map(|(f, _)| f).collect();
-        let warnings = brood::types::check::check_file(&mut interp.heap, &just_forms);
-        if !warnings.is_empty() {
-            warned = true;
-        }
-        for (pos, msg) in warnings {
-            match pos {
-                Some(p) => println!("{}:{}:{}: warning: {}", path, p.line, p.col, msg),
-                None => println!("{}: warning: {}", path, msg),
-            }
-        }
-    }
-    if warned {
-        std::process::exit(1);
     }
 }
 
-/// `nest new <name> [--template NAME]` — delegates to `(new-project name
+/// `nest new <name> [--template NAME]` — delegates to `(project/new-project name
 /// template)` in std/project.blsp.
 fn cmd_new(interp: &mut Interp, name: &str, template: Option<&str>) {
     let escaped = brood::introspect::escape_brood_string(name);
@@ -420,7 +396,7 @@ fn cmd_new(interp: &mut Interp, name: &str, template: Option<&str>) {
         None => String::new(),
     };
     let code = format!(
-        "(require 'project) (project/load-config) (new-project \"{}\"{})",
+        "(require 'project) (project/load-config) (project/new-project \"{}\"{})",
         escaped, tmpl_arg
     );
     run(interp, &code);
@@ -605,19 +581,19 @@ fn cmd_add(interp: &mut Interp, name: &str, spec: &[String]) {
     args.extend(spec.iter().map(String::as_str));
     let call = format!(
         "(require 'package) {}",
-        brood::introspect::call_form("add", &args)
+        brood::introspect::call_form("package/add", &args)
     );
     run(interp, &call);
 }
 
 fn cmd_doc(interp: &mut Interp, module: Option<&str>, all: bool) {
     let code = if all {
-        "(require 'docs) (println (document-all))".to_string()
+        "(require 'docs) (println (docs/document-all))".to_string()
     } else {
         match module {
             Some(name) => format!(
                 "(require 'docs) {}",
-                brood::introspect::call_form("generate-docs", &[name])
+                brood::introspect::call_form("docs/generate-docs", &[name])
             ),
             None => "(require 'docs) (docs/generate-docs)".to_string(),
         }
@@ -668,7 +644,7 @@ fn cmd_mcp(interp: &mut Interp) {
         (let (root (project/project--find-root (cwd)))
           (when (nil? root)
             (error "nest mcp: not in a Brood project (no project.blsp found from " (cwd) ")"))
-          (setup-tooling-image root))
+          (project/setup-tooling-image root))
     "#;
     run(interp, bootstrap);
     if let Err(e) = mcp::run(interp) {
@@ -700,10 +676,10 @@ fn cmd_observe(interp: &mut Interp, connect: Option<String>, cookie: Option<Stri
             // string literals so they can't break out of the call.
             format!(
                 "(require 'observer) {}",
-                brood::introspect::call_form("observe-connect", &[&spec, &cookie])
+                brood::introspect::call_form("observer/observe-connect", &[&spec, &cookie])
             )
         }
-        None => "(require 'observer) (observe-run)".to_string(),
+        None => "(require 'observer) (observer/observe-run)".to_string(),
     };
     // The guard restores the terminal on a panic unwind; the inner scope drops it
     // (restoring) before any error is reported and we exit — `process::exit`

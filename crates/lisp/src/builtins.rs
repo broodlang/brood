@@ -1375,7 +1375,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("monitor", &["pid"], "Watch pid; returns a monitor ref. Delivers [:down ref pid reason] when pid dies."),
     ("list-processes", &[], "Every currently-live pid on this runtime (one per registered mailbox). Order is unspecified — sort if you need stability. For agents/tools enumerating spawned processes."),
     ("mailbox-size", &["pid"], "How many messages are queued in pid's mailbox (its receive backlog), or nil if pid is not a live local process. The one process-introspection accessor not reachable from Brood; see std/observer.blsp."),
-    ("process-info", &["pid"], "A snapshot map of a live local process: {:id :pid :node :name :status :mailbox :monitored-by :parent :memory :collections} (:pid the process's pid value, for acting on it with exit/send/monitor; :status is :running or :waiting; :name nil if unregistered; :parent the spawner's id, nil for the root; :memory the LOCAL heap bytes and :collections the cumulative GC count, both as of the process's last receive). nil for a remote/dead pid. The Erlang-process_info-style introspection the observer reads; see std/observer.blsp."),
+    ("process-info", &["pid"], "A snapshot map of a live local process: {:id :pid :node :name :status :mailbox :monitored-by :parent :memory :collections :reductions} (:pid the process's pid value, for acting on it with exit/send/monitor; :status is :running or :waiting; :name nil if unregistered; :parent the spawner's id, nil for the root; :memory the LOCAL heap bytes and :collections the cumulative GC count, both as of the process's last receive; :reductions the cumulative reduction count — Erlang's scheduling unit, updated every quantum, 0 for the root). nil for a remote/dead pid. The Erlang-process_info-style introspection the observer reads; see std/observer.blsp."),
     ("term-enter", &[], "Enter raw mode + the alternate screen, hide the cursor, and enable mouse capture, taking over the terminal for a full-screen UI (so click/scroll reach term-poll). Pair with term-leave. (ADR-046 display seam.)"),
     ("term-leave", &[], "Restore the terminal: show the cursor, disable mouse capture, leave the alternate screen, disable raw mode. The normal-path teardown for term-enter."),
     ("term-size", &[], "The terminal size as [cols rows] in character cells."),
@@ -3524,6 +3524,11 @@ fn process_info(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             // its last `receive` (0 for one that has never received). The signal
             // for "is this process churning memory?" in the observer.
             let collections = Value::Int(crate::process::process_gc_runs(id).unwrap_or(0) as i64);
+            // `:reductions` — the process's cumulative reduction count (Erlang's
+            // scheduling unit), updated every scheduling quantum. The observer's
+            // "is this process doing work / busy?" signal. 0 for the root (it isn't
+            // scheduled via quanta).
+            let reductions = Value::Int(crate::process::process_reductions(id).unwrap_or(0) as i64);
             let pairs = vec![
                 (value::kw("id"), Value::Int(id as i64)),
                 // The process's actual pid value (not just its numeric id), so a
@@ -3538,6 +3543,7 @@ fn process_info(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
                 (value::kw("parent"), parent),
                 (value::kw("memory"), memory),
                 (value::kw("collections"), collections),
+                (value::kw("reductions"), reductions),
             ];
             Ok(heap.map_from_pairs(pairs))
         }

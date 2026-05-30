@@ -644,7 +644,32 @@ pub fn macroexpand_1(heap: &mut Heap, form: Value, env: EnvId) -> Result<(Value,
     if let Value::Pair(p) = form {
         let (head, tail) = heap.pair(p);
         if let Value::Sym(s) = head {
-            if let Some(Value::Macro(mid)) = heap.env_get(env, s) {
+            // Resolve the head the way the eval-time dispatch and the `resolve` pass
+            // do, so a bare `(:use mod)`-imported macro (or a same-namespace
+            // `ns/name` macro) is expanded during the compile walk — not only a
+            // directly-bound one (ADR-065). Without this, `macroexpand_all` (and the
+            // advisory checker that rides it) leaves an imported macro like hatch's
+            // `defprocess` unexpanded, then walks its raw body.
+            let mid = match heap.env_get(env, s) {
+                Some(Value::Macro(mid)) => Some(mid),
+                // Directly bound to a non-macro (a local, or a non-macro global):
+                // it shadows — never reinterpret it as an imported macro.
+                Some(_) => None,
+                // Unbound directly: a bare reference that may name an imported /
+                // same-namespace macro. Resolve it the way the `resolve` pass does
+                // and expand only if the resolved name is a macro.
+                None => {
+                    let q = match heap.compile_ns() {
+                        Some(ns) => resolve_sym(heap, s, &value::symbol_name(ns), &[]),
+                        None => heap.import_of(s).unwrap_or(s),
+                    };
+                    match (q != s, heap.env_get(value::EnvId::GLOBAL, q)) {
+                        (true, Some(Value::Macro(mid))) => Some(mid),
+                        _ => None,
+                    }
+                }
+            };
+            if let Some(mid) = mid {
                 let args = heap.list_to_vec(tail)?;
                 let expanded = eval::apply_closure(heap, mid, &args)?;
                 return Ok((expanded, true));

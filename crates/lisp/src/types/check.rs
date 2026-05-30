@@ -74,22 +74,24 @@
 //!   names across the forms in a file.
 //!
 //! Not yet (later increments): inference through `cond`/`match`, structured /
-//! `and`/`or`-chained guards, recursion, higher-order; running automatically
-//! in `brood <file>` / `nest test`. Today the entry points are `brood
-//! --check` (CLI; see [`check_file`]) and the `(check 'form)` builtin.
+//! `and`/`or`-chained guards, recursion, higher-order. The checker runs
+//! automatically as the pre-flight in `brood <file>` / `nest test` / `nest run`
+//! / `nest check`; the in-process entry points are [`check_file`] (whole file)
+//! and the `(check 'form)` builtin (a fragment).
 //!
-//! **Known coverage gap — operand-position unbound symbols** (audit 2026-05-29):
-//! the unbound-symbol diagnostic fires only on a combination's *head*
-//! ([`walk::check_into`]); a bare symbol in an *operand/value* position —
-//! `(+ 1 typo)`, `(def x typo)`, `(if typo …)`, `(cons a undefined)` — is never
-//! flagged, because [`walk::check_into`] returns at its non-`Pair` guard before
-//! reaching such a leaf. This is deliberate conservatism, not an oversight: an
-//! operand symbol may be an as-yet-unexpanded **macro argument** or a legal
-//! **forward reference**, and the checker's cardinal rule is *no false positives*.
-//! A safe fix flags an evaluated-position leaf symbol only when the enclosing head
-//! is a *known non-macro callee* (primitive or curated/known closure — so its args
-//! are evaluated as-is) plus the `def`/`let`/`if` value slots, reusing the same
-//! `is_local`/`is_globally_bound`/`curated_sig`/`is_syntactic_keyword` predicate.
+//! **Operand-position unbound symbols.** The unbound-symbol diagnostic fires on
+//! both a combination's *head* and its *operand / value* positions — `(+ 1 typo)`,
+//! `(def x typo)`, `(if typo …)`, `(let (a typo) …)`. An operand leaf is only
+//! flagged when the enclosing head is a *known non-macro callee* (a primitive,
+//! curated/known closure, or lexical local — see [`walk`]'s `evaluates_args`), so
+//! an unexpanded macro argument is never mistaken for a value reference. It is
+//! further gated to **whole-file mode** ([`check_file`] sets
+//! [`Ctx::enable_operand_checks`](ctx::Ctx::enable_operand_checks)): there every
+//! top-level def is accumulated and the project image is loaded, so an unresolved
+//! operand is genuinely unbound — whereas a bare fragment (`(check 'form)` / a
+//! REPL snippet) keeps free operand variables ambiguous, flagging only the head.
+//! All of it reuses the one `is_unbound` predicate, so head and operand checks
+//! can't drift.
 
 mod ctx;
 mod guards;
@@ -260,6 +262,11 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
     // global once it runs, so the checker honours that). `defmacro` stays a
     // special form (it doesn't expand to `def`), so we match it too.
     let mut ctx = Ctx::default();
+    // Whole-file mode: enable operand / value-slot unbound checking (every
+    // top-level def is accumulated below, and the project image is loaded, so an
+    // unresolved operand is genuinely unbound — not the ambiguous free variable a
+    // bare fragment might carry).
+    ctx.enable_operand_checks();
     for &form in &expanded {
         collect_def_names(heap, form, &mut ctx);
     }
@@ -321,6 +328,23 @@ mod tests {
         let form =
             crate::eval::macros::macroexpand_all(&mut interp.heap, form, interp.root).unwrap();
         check_form(&interp.heap, form)
+    }
+
+    /// Whole-file checking — what `nest check` runs. Unlike [`warnings`] (a bare
+    /// fragment), this enables operand / value-slot unbound checking and threads
+    /// file-local def names, so it exercises the strict, file-mode behaviour.
+    fn file_warnings(src: &str) -> Vec<String> {
+        let interp = crate::Interp::new();
+        let mut heap = crate::core::heap::Heap::with_regions(
+            interp.heap.prelude_arc(),
+            interp.heap.runtime_arc(),
+        );
+        heap.set_global(crate::core::value::EnvId::GLOBAL);
+        let forms = crate::syntax::reader::read_all(&mut heap, src).expect("parse");
+        check_file(&mut heap, &forms)
+            .into_iter()
+            .map(|(_, m)| m)
+            .collect()
     }
 
     /// The non-tail-recursion lint (`recursion::check_recursion`) over a
@@ -907,6 +931,70 @@ mod tests {
         assert!(warnings("(typo-name :hi)")
             .iter()
             .any(|w| w.contains("unbound symbol: typo-name")));
+    }
+
+    // ---- Operand / value-slot unbound symbols (whole-file mode only) --------
+
+    #[test]
+    fn flags_unbound_operand_of_a_known_call() {
+        // `+` evaluates its args, so a bare unresolvable operand is unbound.
+        let w = file_warnings("(defn f (x) (+ x typo))");
+        assert!(
+            w.iter().any(|m| m.contains("unbound symbol: typo")),
+            "operand typo should be flagged: {:?}",
+            w
+        );
+        // Through a primitive too (cons), nested under a body.
+        let w = file_warnings("(defn g () (cons 1 nope))");
+        assert!(
+            w.iter().any(|m| m.contains("unbound symbol: nope")),
+            "{:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn flags_unbound_value_in_def_let_if_slots() {
+        assert!(file_warnings("(def y zilch)")
+            .iter()
+            .any(|m| m.contains("unbound symbol: zilch")));
+        assert!(file_warnings("(defn f () (let (a absent) a))")
+            .iter()
+            .any(|m| m.contains("unbound symbol: absent")));
+        assert!(file_warnings("(defn f () (if missing 1 2))")
+            .iter()
+            .any(|m| m.contains("unbound symbol: missing")));
+    }
+
+    #[test]
+    fn operand_check_respects_scope_and_forward_refs() {
+        // A forward reference to a later top-level def — file-global, not unbound.
+        assert!(file_warnings("(defn a () (cons 1 (b)))\n(defn b () 2)")
+            .iter()
+            .all(|m| !m.contains("unbound")));
+        // A param / let-bound name used as an operand — in scope, not unbound.
+        assert!(file_warnings("(defn f (x) (+ x 1))")
+            .iter()
+            .all(|m| !m.contains("unbound")));
+        assert!(file_warnings("(defn f () (let (y 1) (+ y 2)))")
+            .iter()
+            .all(|m| !m.contains("unbound")));
+        // A prelude name as an operand resolves through the heap globals.
+        assert!(file_warnings("(defn f () (map inc (list 1 2)))")
+            .iter()
+            .all(|m| !m.contains("unbound")));
+    }
+
+    #[test]
+    fn operand_check_is_off_for_bare_fragments() {
+        // The single-form path (REPL / `(check 'form)`) stays lenient: a free
+        // operand variable is ambiguous, not provably unbound — only call *heads*
+        // are flagged there. (Guards the no-false-positives rule for fragments.)
+        assert!(warnings("(first xs)").iter().all(|m| !m.contains("unbound")));
+        assert!(warnings("(+ 1 foo)").iter().all(|m| !m.contains("unbound")));
+        assert!(warnings("(let (x bar) (first x))")
+            .iter()
+            .all(|m| !m.contains("unbound")));
     }
 
     #[test]
