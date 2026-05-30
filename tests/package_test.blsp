@@ -10,7 +10,14 @@
 
 ;; Build a throwaway project dir `<tmp>/<name>` with a manifest + one src module.
 ;; `deps-vec` is a literal :dependencies vector string (or nil for none).
-(defn pkg-fixture-root () (path-join "/tmp" (name (gensym "brood-pkg-"))))
+;; A fresh, unique fixture dir. Must use `random-token` (entropy-seeded), NOT
+;; `gensym`: gensym's counter resets to 0 each `nest test` process, so its
+;; `/tmp` paths are *reused* across runs — and since fixtures aren't torn down,
+;; a path written by one test in run A is reused by a *different* test in run B
+;; (the counter a test draws shifts run-to-run under concurrent scheduling),
+;; accumulating both tests' files and contaminating `provided-modules`. A random
+;; token is unique across processes and runs, so a dir is never reused.
+(defn pkg-fixture-root () (path-join "/tmp" (str "brood-pkg-" (random-token 8))))
 
 ;; Turn a fixture dir into a one-commit git repo (so :git deps can be exercised
 ;; offline via a file:// URL — no network). Returns the file:// URL.
