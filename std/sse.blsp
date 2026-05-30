@@ -1,0 +1,138 @@
+;; std/sse.blsp — a Server-Sent Events (text/event-stream) client. (require 'sse).
+;;
+;; Design notes (the *why*; the *what* is in the docstrings below):
+;;  - SSE is **not** request→response like `http-request`: it's a long-lived `GET`
+;;    that the server holds open and *pushes* frames down forever. So it gets its
+;;    own module (reusing `http`'s URL + header helpers for the handshake) and its
+;;    own **process**: `sse-connect` spawns a reader that streams `[:tcp …]` chunks
+;;    and `send`s each parsed event to a subscriber's mailbox — the same
+;;    deliver-to-a-mailbox shape as `gui-open` input (ADR-058) and the observer's
+;;    remote agent.
+;;  - **Pure frame parsing** (the `observe-frame` discipline): the wire grammar
+;;    (`event:`/`data:`/`id:` field lines, blank-line frame boundaries, comment
+;;    lines, `\n`/`\r\n`/`\r` terminators) is parsed by pure functions
+;;    (`sse--parse-event`, `sse--frames`) that are unit-testable without a socket;
+;;    only `sse-connect`/`sse--stream` touch IO.
+;;  - **Integrates with `ui-run` via `with-events`** (in `std/ui.blsp`): wrap a
+;;    display so its `:poll` surfaces queued `[:sse …]` messages as loop input — so
+;;    pushed events drive the UI on the terminal *and* the GUI.
+;;  - Opt-in (`require`), never in the prelude. http (not https) for now — the
+;;    target is a localhost daemon.
+
+(defmodule sse
+  "A Server-Sent Events (`text/event-stream`) client, written in Brood.
+
+    (require 'sse)
+    (def conn (sse-connect \"http://127.0.0.1:7777/events\" (self)))
+    (receive ([:sse ev] ev))     ; => {:event \"run_started\" :data \"{…}\" :id \"7\"}
+    (exit conn :kill)            ; disconnect
+
+`sse-connect` spawns a reader **process** that opens the stream and delivers each
+event to `subscriber`'s mailbox as `[:sse {:event :data :id}]` (`[:sse-open status]`
+once connected, `[:sse-closed reason]` when the link ends); it returns that process's
+pid (kill it to disconnect). The `:data` is the raw payload — `json-parse` it
+yourself. Pair with `with-events` (std/ui.blsp) to feed events into a `ui-run` loop.")
+
+(require 'http)   ; reuse http--parse-url + http--request-headers for the handshake
+
+;; ---- pure frame parsing -----------------------------------------------------
+
+(defn sse--normalize (s)
+  "Normalise line terminators to `\\n` (SSE allows `\\r\\n`, `\\r`, or `\\n`)."
+  (replace (replace s "\r\n" "\n") "\r" "\n"))
+
+(defn sse--drain (buf acc)
+  "Split `buf` into `[complete-blocks remainder]` on blank lines (`\\n\\n`).
+Tail-recursive; each block is one event's field lines (no trailing blank)."
+  (let (i (index-of buf "\n\n"))
+    (if (< i 0)
+      [(reverse acc) buf]
+      (sse--drain (substring buf (+ i 2) (string-length buf))
+                  (cons (substring buf 0 i) acc)))))
+
+(defn sse--frames (buf)
+  "`[complete-event-blocks remainder]` extracted from accumulated stream text `buf`."
+  (sse--drain buf nil))
+
+(defn sse--field (ev line)
+  "Fold one SSE field `line` into event map `ev`. `data` lines accumulate (joined by
+`\\n`); `event`/`id`/`retry` set their field; comment lines (`:`-prefixed) and blanks
+are ignored. One optional space after the colon is stripped."
+  (cond
+    (= line "") ev
+    (starts-with? line ":") ev
+    :else
+    (let (i (index-of line ":")
+          field (if (< i 0) line (substring line 0 i))
+          raw (if (< i 0) "" (substring line (+ i 1) (string-length line)))
+          val (if (starts-with? raw " ") (substring raw 1 (string-length raw)) raw))
+      (cond
+        (= field "data") (assoc ev :data (if (nil? (get ev :data)) val (str (get ev :data) "\n" val)))
+        (= field "event") (assoc ev :event val)
+        (= field "id") (assoc ev :id val)
+        (= field "retry") (assoc ev :retry val)
+        :else ev))))
+
+(defn sse--parse-event (block)
+  "Parse one event `block` (its field lines) into `{:event :data :id …}`, defaulting
+the type to `\"message\"` and the data to `\"\"` (the SSE spec's defaults). Pure."
+  (let (ev (fold sse--field {} (string-split block "\n")))
+    (assoc ev :event (or (get ev :event) "message") :data (or (get ev :data) ""))))
+
+(defn sse--status (head)
+  "The numeric status from an HTTP response `head` (its first line), or 0."
+  (let (line (first (string-split head "\n"))
+        parts (string-split line " ")
+        n (string->number (nth parts 1 "0")))
+    (if (nil? n) 0 n)))
+
+;; ---- the reader process (IO) ------------------------------------------------
+
+(defn sse--stream (sock subscriber buf)
+  "Process the buffered stream text `buf` — deliver every complete event to
+`subscriber` — then wait for the next chunk and recurse. Notifies the subscriber
+with `[:sse-closed reason]` when the socket closes or errors. Tail-recursive."
+  (let ([blocks rest] (sse--frames buf))
+    (doseq (b blocks)
+      (when (not (= b ""))
+        (send subscriber [:sse (sse--parse-event b)])))
+    (receive
+      ([:tcp ~sock d] (sse--stream sock subscriber (str rest (sse--normalize d))))
+      ([:tcp-closed ~sock] (send subscriber [:sse-closed :closed]))
+      ([:tcp-error ~sock msg] (send subscriber [:sse-closed msg])))))
+
+(defn sse--read-head (sock subscriber buf)
+  "Read until the HTTP response head's blank line, check the status, then hand the
+leftover bytes to `sse--stream`. A non-200 status closes the connection."
+  (receive
+    ([:tcp ~sock d]
+      (let (buf2 (str buf (sse--normalize d))
+            i (index-of buf2 "\n\n"))
+        (if (< i 0)
+          (sse--read-head sock subscriber buf2)
+          (let (status (sse--status (substring buf2 0 i))
+                body (substring buf2 (+ i 2) (string-length buf2)))
+            (if (= status 200)
+              (do (send subscriber [:sse-open status])
+                  (sse--stream sock subscriber body))
+              (do (tcp-close sock)
+                  (send subscriber [:sse-closed (str "http " status)])))))))
+    ([:tcp-closed ~sock] (send subscriber [:sse-closed :closed]))
+    ([:tcp-error ~sock msg] (send subscriber [:sse-closed msg]))))
+
+(defn sse-connect (url subscriber)
+  "Open an SSE stream to `url` (http) and deliver its events to `subscriber`'s mailbox
+as `[:sse {:event :data :id}]` messages — `[:sse-open status]` once connected,
+`[:sse-closed reason]` when it ends. Runs in a **new process** (so it parks on
+`receive`, holding no worker) and returns that process's pid; `(exit pid :kill)` to
+disconnect. The socket is owned by the reader process, so call this for the process
+that should receive the events (typically the UI process — see `with-events`)."
+  (let (u (http--parse-url url)
+        req (str "GET " (get u :path) " HTTP/1.1\r\n"
+              (http--render-headers
+                (http--request-headers u "" {"Accept" "text/event-stream" "Connection" "keep-alive"}))
+              "\r\n"))
+    (spawn
+      (let (sock (tcp-connect (get u :host) (get u :port)))
+        (tcp-send sock req)
+        (sse--read-head sock subscriber "")))))

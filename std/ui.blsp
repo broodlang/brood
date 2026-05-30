@@ -109,6 +109,21 @@ fits everywhere. Pure Brood over the `term-*`/`gui-*` mechanism."
    :draw  (fn (f) (doseq (d displays) ((get d :draw) f)))
    :poll  (fn (ms) (display--poll-any displays ms))})
 
+(defn with-events (display)
+  "Wrap `display` so its `:poll` first returns any queued `[:sse …]` / `[:sse-closed …]`
+mailbox message (from an `sse-connect` whose subscriber is this process), else polls
+`display` as usual. So `ui-run` sees server-pushed events as loop *input* on BOTH the
+terminal (where the raw `:poll` reads only the keyboard) and the GUI — `update` folds
+an `[:sse ev]` in like any other input. The other display ops pass through unchanged.
+A flood of events can starve the keyboard poll; fine for occasional pushes (a daemon's
+event feed). Requires `(require 'sse)` on the producing side."
+  (assoc display :poll
+    (fn (ms)
+      (let (ev (receive ([:sse e] [:sse e])
+                        ([:sse-closed r] [:sse-closed r])
+                        (after 0 nil)))
+        (if (nil? ev) ((get display :poll) ms) ev)))))
+
 ;; ---- the app loop (TEA: model + view + update) ------------------------------
 
 (defn ui--tick-ms (model)
