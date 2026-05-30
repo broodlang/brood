@@ -5048,3 +5048,42 @@ the simple form, defer power), ADR-006 (mechanism in Rust, policy in Brood — t
 pane/buffer font choice stays Brood). Lives in `crates/lisp/src/gui.rs` (`Face` +
 the renderer) and `crates/lisp/src/builtins.rs` (`gui_face` parsing); documented in
 `std/face.blsp`.
+
+## ADR-080 — Cursor zones: pointer-shape hints carried by the frame
+
+**Status:** accepted (2026-05-31). Adds a render op to ADR-046's protocol so an app
+can show a resize cursor over a window divider (the affordance the editor's
+drag-to-resize, ADR-077, was missing).
+
+**Context.** The OS pointer shape can only be set by the GUI thread (it owns the
+window), but `ui-run`'s `view`/`update` are pure and never hold the window handle —
+only the `:draw` step does. And bare pointer motion is deliberately *not* delivered
+to apps (ADR-056/077: it would flood the loop), so an app can't react to hover to set
+the cursor itself. We need a way to say "show a resize cursor over this region"
+without either plumbing the window handle into `update` or streaming motion events.
+
+**Decision.** A new render op **`[:cursor-zone x y w h shape]`** (cells), where
+`shape` is `:col-resize` (↔) or `:row-resize` (↕). It rides the **frame** — the data
+the app already produces and that already reaches the right window via `:draw`. The
+GUI frontend stores the zones from each frame and, on `CursorMoved` (which it already
+tracks per-cell internally), sets the matching `CursorIcon` — or `Default` off every
+zone — calling `set_cursor` only when the shape *changes*. The **terminal frontend
+ignores it** (an unknown op, skipped), so one frame drives both. Constructor:
+`std/display.blsp`'s `(cursor-zone x y w h shape)`.
+
+**Consequences.**
+- **Hover *and* drag for free, no new events, no flood.** The pointer sits on the
+  divider while dragging, so a hover zone covers both; the GUI handles it locally,
+  delivering nothing to the app loop (no redraw churn). This is why it's a *zone*
+  (kernel-hit-tested) rather than a `:move` event stream.
+- **Additive + frontend-neutral.** Existing apps/ops are untouched; the shape enum
+  (`gui::CursorShape`) is mapped to winit's `CursorIcon` only inside the backend
+  (`EwResize`/`NsResize`), so the shared `Op` stays dependency-free.
+- The editor's `view` emits one zone per `std/window.blsp` divider (`:col`→
+  `:col-resize`, `:row`→`:row-resize`); resizing then has a real cursor affordance.
+
+**References.** ADR-046 (the render-op protocol this extends), ADR-077 (the drag this
+affords), ADR-056 (why bare motion isn't delivered — sidestepped by hit-testing zones
+in the frontend), ADR-079 (the sibling GUI-`Face` work this lands alongside). Lives in
+`crates/lisp/src/gui.rs` (`Op::CursorZone`, hit-test on `CursorMoved`) +
+`crates/lisp/src/builtins.rs` (`gui-draw` parsing) + `std/display.blsp`.
