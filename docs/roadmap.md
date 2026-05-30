@@ -213,8 +213,8 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   - **Forward-compat obligation (for native interop below):** keep the manifest
     and lock schema able to accept a `:native` sibling additively (as ADR-037
     already reserves `:branch`/`:dir`/`:features`). Costs nothing now; lets
-    ADR-068 slot in without reshaping the package format later.
-- ⬜ **Native interop — WASM components, built on fetch** (ADR-068,
+    ADR-071 slot in without reshaping the package format later.
+- ⬜ **Native interop — WASM components, built on fetch** (ADR-071,
   [`interop.md`](interop.md)) — how a package ships native code (from another
   ecosystem, or a perf-critical kernel) with **zero kernel recompilation**. A
   package declares a `:native` WASM component; the package manager **builds it
