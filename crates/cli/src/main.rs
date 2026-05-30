@@ -77,6 +77,8 @@ fn main() {
     if std::env::var_os("RUST_BACKTRACE").is_none() {
         std::env::set_var("RUST_BACKTRACE", "1");
     }
+    // Capture any panic (use-after-GC tripwire, heap index, …) to .brood_crash_dump.
+    brood::cli_support::install_crash_dump();
     let cli = Cli::parse();
     // Run the actual work on an explicitly-sized large stack. The tree-walking
     // evaluator recurses one (heavy, in debug) Rust frame per non-tail call, and

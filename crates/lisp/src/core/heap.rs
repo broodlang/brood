@@ -2804,9 +2804,15 @@ impl Heap {
     /// rooting site) is obvious. O(live); only runs under the env flag.
     #[cfg(debug_assertions)]
     fn verify_local_graph(&self, extra_roots: &[Value], extra_envs: &[EnvId]) {
+        // Allocation-light: the worklist carries only Copy handles plus the raw
+        // handle of the containing cell (`parent`, `0` = a root). No per-node
+        // `String` paths — this runs at *every* safepoint under GC_STRESS, so it
+        // must not itself churn the heap. On a hit we panic with the bad handle and
+        // its immediate container, which (with the offending op's `expr`) pinpoints
+        // the missed-rooting site.
         enum W {
-            V(Value, String),
-            E(EnvId, String),
+            V(Value, u64),
+            E(EnvId, u64),
         }
         let ep = self.local_epoch;
         let mut seen_pair = vec![false; self.local.pairs.len()];
@@ -2815,112 +2821,111 @@ impl Heap {
         let mut seen_clo = vec![false; self.local.closures.len()];
         let mut seen_env = vec![false; self.local.envs.len()];
         let mut work: Vec<W> = Vec::new();
-        for (i, &v) in extra_roots.iter().enumerate() {
-            work.push(W::V(v, format!("expr/extra_root[{i}]")));
+        for &v in extra_roots {
+            work.push(W::V(v, 0));
         }
-        for (i, &e) in extra_envs.iter().enumerate() {
-            work.push(W::E(e, format!("env/extra_env[{i}]")));
+        for &e in extra_envs {
+            work.push(W::E(e, 0));
         }
-        for (i, &v) in self.roots.iter().enumerate() {
-            work.push(W::V(v, format!("roots[{i}]")));
+        for &v in &self.roots {
+            work.push(W::V(v, 0));
         }
-        for (i, &e) in self.env_roots.iter().enumerate() {
-            work.push(W::E(e, format!("env_roots[{i}]")));
+        for &e in &self.env_roots {
+            work.push(W::E(e, 0));
         }
-        for (i, &(s, v)) in self.dynamics.iter().enumerate() {
-            work.push(W::V(v, format!("dynamics[{i}={}]", crate::core::value::symbol_name(s))));
+        for &(_, v) in &self.dynamics {
+            work.push(W::V(v, 0));
         }
-        // Bounds + epoch assertion with the path that reached the handle.
-        let bad = |kind: &str, gen: u32, idx: usize, len: usize, path: &str, raw: u64| {
+        let bad = |kind: &str, gen: u32, idx: usize, len: usize, parent: u64, raw: u64| {
             assert!(
                 idx < len,
                 "GC-VERIFY: stored stale {kind} handle OUT OF BOUNDS (slot {idx} \
-                 ≥ slab len {len}) reached via {path} (handle {raw:#x}). A handle \
-                 was held across a collection without re-rooting, then written into \
-                 the live graph — use-after-GC.",
+                 ≥ slab len {len}); handle {raw:#x} held in container {parent:#x}. \
+                 A handle was kept across a collection without re-rooting, then \
+                 written into the live graph — use-after-GC.",
             );
             assert!(
                 gen == ep,
                 "GC-VERIFY: stored stale {kind} handle from epoch {gen}, heap is now \
-                 epoch {ep}, reached via {path} (slot {idx}, handle {raw:#x}). The \
-                 containing cell holds a handle that was held across a collection \
-                 without re-rooting — use-after-GC at the site that built {path}.",
+                 epoch {ep} (slot {idx}, handle {raw:#x}); held in container \
+                 {parent:#x}. That cell holds a handle kept across a collection \
+                 without re-rooting — use-after-GC at the op that built it.",
             );
         };
         while let Some(w) = work.pop() {
             match w {
-                W::V(v, path) => match v {
+                W::V(v, parent) => match v {
                     Value::Pair(id) if id.region() == LOCAL => {
-                        bad("pair", id.generation(), id.index(), self.local.pairs.len(), &path, id.0);
+                        bad("pair", id.generation(), id.index(), self.local.pairs.len(), parent, id.0);
                         if !seen_pair[id.index()] {
                             seen_pair[id.index()] = true;
                             let (a, b) = self.local.pairs[id.index()];
-                            work.push(W::V(a, format!("{path}.car")));
-                            work.push(W::V(b, format!("{path}.cdr")));
+                            work.push(W::V(a, id.0));
+                            work.push(W::V(b, id.0));
                         }
                     }
                     Value::Vector(id) if id.region() == LOCAL => {
-                        bad("vector", id.generation(), id.index(), self.local.vectors.len(), &path, id.0);
+                        bad("vector", id.generation(), id.index(), self.local.vectors.len(), parent, id.0);
                         if !seen_vec[id.index()] {
                             seen_vec[id.index()] = true;
-                            for (k, &el) in self.local.vectors[id.index()].iter().enumerate() {
-                                work.push(W::V(el, format!("{path}[{k}]")));
+                            for &el in &self.local.vectors[id.index()] {
+                                work.push(W::V(el, id.0));
                             }
                         }
                     }
                     Value::Map(id) if id.region() == LOCAL => {
-                        bad("map", id.generation(), id.index(), self.local.maps.len(), &path, id.0);
+                        bad("map", id.generation(), id.index(), self.local.maps.len(), parent, id.0);
                         if !seen_map[id.index()] {
                             seen_map[id.index()] = true;
                             let node = &self.local.maps[id.index()];
                             for &(mk, mv) in &node.data {
-                                work.push(W::V(mk, format!("{path}.key")));
-                                work.push(W::V(mv, format!("{path}.val")));
+                                work.push(W::V(mk, id.0));
+                                work.push(W::V(mv, id.0));
                             }
                             for &c in &node.children {
-                                work.push(W::V(Value::Map(c), format!("{path}.child")));
+                                work.push(W::V(Value::Map(c), id.0));
                             }
                         }
                     }
                     Value::Str(id) if id.region() == LOCAL => {
-                        bad("string", id.generation(), id.index(), self.local.strings.len(), &path, id.0);
+                        bad("string", id.generation(), id.index(), self.local.strings.len(), parent, id.0);
                     }
                     Value::Rope(id) if id.region() == LOCAL => {
-                        bad("rope", id.generation(), id.index(), self.local.ropes.len(), &path, id.0);
+                        bad("rope", id.generation(), id.index(), self.local.ropes.len(), parent, id.0);
                     }
                     Value::Fn(id) | Value::Macro(id) if id.region() == LOCAL => {
-                        bad("closure", id.generation(), id.index(), self.local.closures.len(), &path, id.0);
+                        bad("closure", id.generation(), id.index(), self.local.closures.len(), parent, id.0);
                         if !seen_clo[id.index()] {
                             seen_clo[id.index()] = true;
                             let cl = &self.local.closures[id.index()];
                             for arm in &cl.arms {
                                 for &f in &arm.body {
-                                    work.push(W::V(f, format!("{path}.body")));
+                                    work.push(W::V(f, id.0));
                                 }
                                 for &(_, d) in &arm.optionals {
-                                    work.push(W::V(d, format!("{path}.optional")));
+                                    work.push(W::V(d, id.0));
                                 }
                             }
                             if let Some(e) = cl.env {
-                                work.push(W::E(e, format!("{path}.env")));
+                                work.push(W::E(e, id.0));
                             }
                         }
                     }
                     _ => {}
                 },
-                W::E(e, path) => {
+                W::E(e, parent) => {
                     if e == EnvId::GLOBAL || e.region() != LOCAL {
                         continue;
                     }
-                    bad("env", e.generation(), e.index(), self.local.envs.len(), &path, e.0);
+                    bad("env", e.generation(), e.index(), self.local.envs.len(), parent, e.0);
                     if !seen_env[e.index()] {
                         seen_env[e.index()] = true;
                         let frame = &self.local.envs[e.index()];
                         if let Some(p) = frame.parent {
-                            work.push(W::E(p, format!("{path}.parent")));
+                            work.push(W::E(p, e.0));
                         }
-                        for &(s, val) in &frame.vars {
-                            work.push(W::V(val, format!("{path}.{}", crate::core::value::symbol_name(s))));
+                        for &(_, val) in &frame.vars {
+                            work.push(W::V(val, e.0));
                         }
                     }
                 }

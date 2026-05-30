@@ -2852,11 +2852,35 @@ fn key_to_value(heap: &mut Heap, k: crossterm::event::KeyEvent) -> Value {
 /// `[:text row col str]`, `[:text row col str face]`, `[:cursor row col]`.
 /// Unknown ops are skipped (forward-compatible protocol). Queues all ops then
 /// flushes once, so a frame paints without intermediate tearing.
+/// Write rendered terminal bytes (escape sequences) to stdout — unless an MCP
+/// stdout-capture is active on this thread, in which case divert them into the
+/// capture buffer instead. During a `nest mcp` `tools/call`, stdout *is* the
+/// JSON-RPC channel, so a `term-draw` / `term-emit` writing raw escapes there would
+/// corrupt the protocol and wedge the client (the `print` capture only catches
+/// Brood `print`, not these direct crossterm writes). Diverting keeps the channel
+/// pure and rides the rendered bytes back in the result envelope, so an agent can
+/// still inspect what a frame produced. Mirrors `print`'s capture check.
+fn write_term_bytes(bytes: &[u8]) -> std::io::Result<()> {
+    let diverted = STDOUT_CAPTURE.with(|c| match c.borrow_mut().as_mut() {
+        Some(buf) => {
+            buf.push_str(&String::from_utf8_lossy(bytes));
+            true
+        }
+        None => false,
+    });
+    if !diverted {
+        use std::io::Write;
+        let mut real = std::io::stdout();
+        real.write_all(bytes)?;
+        real.flush()?;
+    }
+    Ok(())
+}
+
 fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use crossterm::cursor::MoveTo;
     use crossterm::style::{Attribute, Print, ResetColor, SetAttribute};
     use crossterm::terminal::{Clear, ClearType};
-    use std::io::Write;
 
     let ops: Vec<Value> = match arg(args, 0) {
         Value::Vector(id) => heap.vector(id).to_vec(),
@@ -2872,7 +2896,7 @@ fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let clear_t = value::intern("clear");
     let text_t = value::intern("text");
     let cursor_t = value::intern("cursor");
-    let mut out = std::io::stdout();
+    let mut out: Vec<u8> = Vec::new();
     for op in ops {
         let parts: Vec<Value> = match op {
             Value::Vector(id) => heap.vector(id).to_vec(),
@@ -2898,7 +2922,7 @@ fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
                 .map_err(term_err)?;
         }
     }
-    out.flush().map_err(term_err)?;
+    write_term_bytes(&out).map_err(term_err)?;
     Ok(Value::Nil)
 }
 
@@ -2948,7 +2972,6 @@ fn term_emit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use crossterm::cursor::{MoveDown, MoveToColumn, MoveUp};
     use crossterm::style::{Attribute, Print, ResetColor, SetAttribute};
     use crossterm::terminal::{Clear, ClearType};
-    use std::io::Write;
 
     let ops: Vec<Value> = match arg(args, 0) {
         Value::Vector(id) => heap.vector(id).to_vec(),
@@ -2970,7 +2993,7 @@ fn term_emit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let clear_eol_t = value::intern("clear-eol");
     let clear_below_t = value::intern("clear-below");
     let clear_screen_t = value::intern("clear-screen");
-    let mut out = std::io::stdout();
+    let mut out: Vec<u8> = Vec::new();
     for op in ops {
         let parts: Vec<Value> = match op {
             Value::Vector(id) => heap.vector(id).to_vec(),
@@ -3011,7 +3034,7 @@ fn term_emit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
                 .map_err(term_err)?;
         }
     }
-    out.flush().map_err(term_err)?;
+    write_term_bytes(&out).map_err(term_err)?;
     Ok(Value::Nil)
 }
 
