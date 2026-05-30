@@ -9528,3 +9528,24 @@ the node's name-part), `"host:port"` opens a TCP endpoint. Dual-listen is *compo
 **Test.** `dual_listen_serves_tcp_and_unix_at_once` — one node bound TCP +
 `node-also-listen`, a client reaches the *same* node (same `name@host`, same
 `:echo`) over both transports. In the serialised `real-tcp` nextest group.
+
+**Robustness round 2 (three follow-ups).**
+- *Terminal always restores, not just on error.* `restore_terminal_on_exit` is
+  now gated on `crossterm::is_raw_mode_enabled`, making it a precise no-op when
+  the terminal was never left raw — so it's safe to call on the **success**
+  exit path too (`nest run` / `brood FILE`), not only the error/broken-pipe
+  paths. A TUI that enters raw mode and *returns without* a `term-raw-leave`
+  (not just one that throws) no longer wedges the shell; a plain non-TUI program
+  emits no stray escapes.
+- *Test fixtures stop piling up in /tmp.* Added a recursive `delete-dir`
+  primitive (sibling of `delete-file`; `remove_dir_all`, idempotent) and, in
+  `std/test.blsp`, shared `temp-dir`/`purge-stale-temp` helpers. Each fixture-
+  using test file (`package`, `project`, `buffer`, `file`) now purges its prior
+  runs' `/tmp/<prefix>*` leftovers at load (before any test creates one, so it
+  never races a live fixture) — bounding accumulation to a single run (~40 dirs)
+  instead of unbounded (1578 found) and recovering from crashed runs. Per-test
+  teardown was rejected: no `finally` + immutable data make body-wrapping high
+  churn, and load-time purge is simpler and also self-heals after a crash.
+- *One fixture idiom.* All fixture helpers now name dirs via `temp-dir`
+  (`random-token`, unique across processes and runs); `file_test`'s `now-ns`
+  variant was unified onto it.

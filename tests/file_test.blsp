@@ -5,15 +5,15 @@
 
 (defmodule file-test (:use test) (:use file))
 
-;; A fresh /tmp dir per call. The name must be unique **across runs**, not just
-;; within one: `gensym`'s counter resets every process/run, so a name like
-;; `brood-file-__114` recurs — and a killed run leaves its dir behind, so the next
-;; run's tests `make-dir` onto leftover files (list-files sees extras, append-file
-;; appends to stale content). `(now-ns)` (nanoseconds since the epoch) varies across
-;; runs and between calls; the trailing `gensym` is a tiebreaker for two processes
-;; that read the same nanosecond. Path-safe (digits + `_` only).
+;; Drop any fixtures a prior run left in /tmp (at load, before any test runs).
+(purge-stale-temp "brood-file-")
+
+;; A fresh, created /tmp dir per call. `temp-dir` names it with `random-token`
+;; (unique across processes *and* runs) — a bare gensym name recurs across runs,
+;; and a killed run's leftovers then poison the next (list-files sees extras,
+;; append-file appends to stale content). See std/test.blsp.
 (defn ftmp ()
-  (let (d (path-join "/tmp" (str "brood-file-" (now-ns) "-" (name (gensym "")))))
+  (let (d (temp-dir "brood-file-"))
     (make-dir d)
     d))
 
