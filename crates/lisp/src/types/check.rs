@@ -1249,4 +1249,89 @@ mod tests {
             w
         );
     }
+
+    // ---- callback-arity check over higher-order combinators (ADR-077) ----
+
+    #[test]
+    fn flags_a_named_callback_of_the_wrong_arity() {
+        // `cons` is arity 2; `map` calls its callback with 1 arg → real bug.
+        let w = warnings("(map cons nil)");
+        assert!(
+            w.iter()
+                .any(|s| s.contains("map") && s.contains("callback") && s.contains("cons")),
+            "map should flag a 2-arg callback called with 1: {w:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_a_named_callback_of_the_right_arity() {
+        // `inc` is arity 1 — exactly what `map` supplies. No warning.
+        let w = warnings("(map inc nil)");
+        assert!(
+            w.iter().all(|s| !s.contains("callback")),
+            "a correct-arity callback must not warn: {w:?}"
+        );
+        // A variadic callback (`+` accepts 1) is fine too.
+        let w = warnings("(map + nil)");
+        assert!(
+            w.iter().all(|s| !s.contains("callback")),
+            "a variadic callback must not warn: {w:?}"
+        );
+    }
+
+    #[test]
+    fn flags_a_lambda_callback_of_the_wrong_arity() {
+        // A 2-param lambda passed where `map` calls it with 1 arg.
+        let w = warnings("(map (fn (a b) a) nil)");
+        assert!(
+            w.iter()
+                .any(|s| s.contains("map") && s.contains("callback") && s.contains("the lambda")),
+            "map should flag a 2-arg lambda: {w:?}"
+        );
+        // Correct arity — no warning.
+        let w = warnings("(map (fn (a) a) nil)");
+        assert!(
+            w.iter().all(|s| !s.contains("callback")),
+            "a 1-arg lambda must not warn under map: {w:?}"
+        );
+    }
+
+    #[test]
+    fn reduce_and_fold_expect_a_two_arg_callback() {
+        // reduce/fold call `(f acc x)` — 2 args. A 1-arg callback is wrong.
+        let w = warnings("(reduce (fn (a) a) 0 nil)");
+        assert!(
+            w.iter()
+                .any(|s| s.contains("reduce") && s.contains("callback")),
+            "reduce should flag a 1-arg callback: {w:?}"
+        );
+        let w = warnings("(fold inc 0 nil)");
+        assert!(
+            w.iter().any(|s| s.contains("fold") && s.contains("callback")),
+            "fold should flag a 1-arg callback (inc): {w:?}"
+        );
+        // A correct 2-arg callback is silent.
+        let w = warnings("(reduce (fn (a b) a) 0 nil)");
+        assert!(
+            w.iter().all(|s| !s.contains("callback")),
+            "a 2-arg callback must not warn under reduce: {w:?}"
+        );
+    }
+
+    #[test]
+    fn callback_arity_is_skipped_when_unknown() {
+        // A multi-arity lambda accepts 1 *and* 2 — must not warn (we bail rather
+        // than risk a false positive).
+        let w = warnings("(map (fn ((a) a) ((a b) a)) nil)");
+        assert!(
+            w.iter().all(|s| !s.contains("callback")),
+            "multi-arity lambda must be skipped: {w:?}"
+        );
+        // A locally-bound callback has unknown arity here — skip.
+        let w = warnings("(fn (f) (map f nil))");
+        assert!(
+            w.iter().all(|s| !s.contains("callback")),
+            "a local callback must be skipped: {w:?}"
+        );
+    }
 }

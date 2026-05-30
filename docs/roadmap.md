@@ -91,10 +91,13 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   `or` chained guards all narrow through the existing guard pipeline. The
   Rust primitive `(check-file path)` exposes the file-level walk; the
   Brood `(check-project)` walks the project's `src/` + `tests/`.
-  ⬜ Step 5+: structured types — function arrows, vector/list element types,
-  intersections for overloaded fns. Replaces the `u16`-bitset rep;
-  additive; gated on real need (ADR-011). Advisory throughout — never
-  gates, never inhibits the dynamic language; not the TypeScript route.
+  🟡 Step 5+: structured types. ✅ **Function arrows shipped** (ADR-077): `Ty`
+  is a refinement struct `{ tags: u32, arrow: Option<Arc<Sig>> }` (arrows *refine*
+  the flat bitset, not replace it), and the checker flags wrong-arity callbacks to
+  `map`/`filter`/`reduce`/`fold` (`(map cons xs)`). ⬜ Still: vector/list element
+  types, intersections for overloaded fns. Additive; gated on real need (ADR-011).
+  Advisory throughout — never gates, never inhibits the dynamic language; not the
+  TypeScript route.
 - ✅ **Maps** (ADR-030 + ADR-040) — immutable `{ }` literals + `get`/`assoc`/
   `dissoc`/`keys`/`vals`/`contains?`/`map?`. Structural-equality keys, order-
   independent `=`; every op returns a fresh map. Small `map-*` Rust kernel, the

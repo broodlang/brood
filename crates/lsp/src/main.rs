@@ -731,6 +731,43 @@ mod uri_tests {
     }
 }
 
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    /// The advisory type-check diagnostics the LSP would publish for `src` — the
+    /// exact path `publish` takes, minus the wire send. `Interp::new()` loads the
+    /// prelude, so prelude names (`cons`, `inc`, `map`, …) resolve.
+    fn warnings(src: &str) -> Vec<Diagnostic> {
+        let mut interp = brood::Interp::new();
+        let a = analyze(src);
+        typecheck_diagnostics(&mut interp, src, &a.cst, &a.line_index)
+    }
+
+    #[test]
+    fn surfaces_the_callback_arity_warning_as_a_brood_warning() {
+        // The Step-5+ arrow check (ADR-077) must reach the editor: `map` calls
+        // its callback with one arg, but `cons` takes two.
+        let diags = warnings("(def r (map cons (list 1 2 3)))");
+        let hit = diags
+            .iter()
+            .find(|d| d.message.contains("callback") && d.message.contains("cons"))
+            .expect("expected a callback-arity warning");
+        assert_eq!(hit.severity, Some(DiagnosticSeverity::WARNING));
+        assert_eq!(hit.source.as_deref(), Some("brood"));
+    }
+
+    #[test]
+    fn a_correct_arity_callback_produces_no_callback_warning() {
+        let diags = warnings("(def r (map inc (list 1 2 3)))");
+        assert!(
+            diags.iter().all(|d| !d.message.contains("callback")),
+            "a correct-arity callback must not warn: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+}
+
 /// Tiny `%`-decoder for the path portion of a `file://` URI — no allocation
 /// unless the path actually contains a `%`. Invalid escapes (`%XY` with
 /// non-hex digits, or a trailing `%`) pass through literally rather than
@@ -850,10 +887,27 @@ fn publish(
         .collect();
 
     // (2) Type-check warnings — Tier 1, only when the parse succeeded enough to
-    // read positioned forms. Wrapped in an arena checkpoint so the document's
-    // parsed forms (allocated in LOCAL) are reclaimed after the check — the
-    // Interp's heap doesn't grow per keystroke. Project sources / `defn`s the
-    // bootstrap loaded promote to RUNTIME, so they survive this reset.
+    // read positioned forms.
+    lsp_diags.extend(typecheck_diagnostics(interp, text, cst_root, index));
+
+    send_diagnostics(connection, uri, lsp_diags, Some(doc.version))
+}
+
+/// The Tier-1 advisory type-check diagnostics for `text`: run [`check_file`] over
+/// the positioned forms and turn each finding into a located `WARNING`. Pulled
+/// out of [`publish`] so it can be unit-tested without a wire connection.
+///
+/// Wrapped in an arena checkpoint so the document's parsed forms (allocated in
+/// LOCAL) are reclaimed after the check — the `Interp`'s heap doesn't grow per
+/// keystroke. Project sources / `defn`s the bootstrap loaded promote to RUNTIME,
+/// so they survive this reset.
+fn typecheck_diagnostics(
+    interp: &mut Interp,
+    text: &str,
+    cst_root: &cst::Node,
+    index: &LineIndex,
+) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
     let cp = interp.heap.checkpoint();
     if let Ok(positioned) = reader::read_all_positioned(&mut interp.heap, text) {
         let forms: Vec<Value> = positioned.into_iter().map(|(f, _)| f).collect();
@@ -874,13 +928,12 @@ fn publish(
                 let mut diag = Diagnostic::new_simple(range, msg);
                 diag.severity = Some(DiagnosticSeverity::WARNING);
                 diag.source = Some("brood".to_string());
-                lsp_diags.push(diag);
+                out.push(diag);
             }
         }
     }
     interp.heap.reset_local_to(cp);
-
-    send_diagnostics(connection, uri, lsp_diags, Some(doc.version))
+    out
 }
 
 /// Tighten a checker finding's squiggle from the whole form to the token it's
