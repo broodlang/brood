@@ -360,8 +360,13 @@ The text-editing substance, exposed to Brood. Built as a thin end-to-end
   *derived views* (the display-protocol seam appearing early). Opt-in, never in
   the prelude, **zero new kernel surface** — the editor *framework*, not the
   language (ADR-045). `tests/buffer_test.blsp` 28/28 incl. GC-stress + actor.
-- ⬜ Editing **commands** + multiple buffers — belong in the **editor app** (a
-  new `nest` project that `(require 'buffer)`s this framework), not here.
+- 🟡 Editing **commands** + multiple buffers — belong in the **editor app** (a
+  new `nest` project that `(:use buffer)`s this framework), not here. **Editing
+  commands done (2026-05-30):** `examples/editor/` is a super-minimal GUI text
+  editor — a `ui-run` client whose `update` maps keys to `std/buffer.blsp` ops
+  (insert/delete/movement/save) and whose pure `view` paints the buffer + a
+  status line, all over `(gui-display)`. 11 pure update/view tests. **Multiple
+  buffers** is the remaining step (plus selection/region + undo, both deferred).
 - ✅ Buffers as first-class Brood values — a buffer *is* an immutable value.
 - ✅ Per-process memory reclamation is solved for M2's needs by the **automatic
   semi-space copying collector** (ADR-055/058/061; see M1 "Memory reclamation") —

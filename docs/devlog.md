@@ -9395,3 +9395,88 @@ deterministic `:a@127.0.0.1` for loopback tests), the node examples, and
 
 **Deferred (ADR-067, ADR-011).** Exact propagated reason for a non-trapping linked
 peer (the `hard` bit — still `:kill`); a `terminate/2` cleanup hook on hard kill.
+
+---
+
+## 2026-05-30 — The M2 editor app: a super-minimal GUI text editor
+
+**Goal.** Start the roadmap's pending M2 editor-app item — "editing commands +
+multiple buffers belong in a *new `nest` project* that builds on the buffer
+framework, not in `std/`". User asked for a **super-minimal**, **GUI** editor.
+
+**Built.** `examples/editor/` — a real (in-repo) `nest` project, not the naive
+`nest new --template editor` starter (which is a list-of-strings model on the
+terminal). It's pure glue over three existing pieces, nothing new in `std/` or
+the kernel:
+- **model** — `std/buffer.blsp` (the immutable rope-backed buffer): `(:use buffer)`
+  brings `insert`/`delete-char`/`forward-line`/`save-buffer`/… in unqualified.
+- **view** — `std/display.blsp` ops (`clear`/`text`/`cursor`/`frame`).
+- **loop** — `std/ui.blsp`'s `ui-run` over `(gui-display)` (a native window;
+  `--features gui`). Swap in `*term-display*` for the terminal unchanged.
+
+`src/main.blsp` is a `model -> model` `update` (a `cond` mapping keys to buffer
+ops — printable inserts, arrows/Home/End move, Enter splits, Backspace/Delete
+remove, Ctrl-S saves, Esc/Ctrl-C/close-button quit) plus a pure `view` that
+paints the visible lines + a reverse-video status row and places the cursor.
+`:top` is a scroll offset kept in range by `ed-scroll` so the point stays
+on-screen. `main` takes an optional file arg (`nest run -- notes.txt`, via the
+entry's trailing-args-as-strings) → `buffer-from-file`, else a `*scratch*`
+buffer. The window close button arrives as `:escape` (`crates/lisp/src/gui.rs`),
+so quitting is uniform. `tests/main_test.blsp`: 11 pure update/view tests (the
+window loop needs a display, so it's untested) — green under plain `nest test`,
+no GUI build.
+
+**Tooling fix (the reason this took a hook change).** The repo's
+`.claude/hooks/blsp-check.sh` PostToolUse lint ran `nest check <file>` per file.
+That's wrong for a *project*: a single-file check can't load sibling modules, so
+`(:use main)` / `(:use buffer)` in a project file made **every** imported symbol
+read as "unbound" (and the manifest's `(project …)`, read as data, flags
+`project` itself). Fixed the hook to (a) skip `project.blsp` / `project.lock.blsp`
+manifests, and (b) when the edited file lives inside a `nest` project (an
+ancestor holds `project.blsp`), check the **whole project** from its root — which
+loads the project image first, resolving cross-module imports — falling back to
+the single-file check for loose `.blsp` files. Whole-project `nest check` exits
+non-zero on warnings, so real issues are still caught.
+
+**Verified.** `nest check` clean; `nest test` 11/11; `cargo build -p cli
+--features brood/gui` compiles. The live window is interactive (needs a Wayland
+display) — left for an on-display run.
+
+**Deferred (ADR-011).** Selection/region, undo, and **multiple buffers** — the
+remaining half of the roadmap item. Commands are a plain `cond`;
+`std/keymap.blsp` is the rebindable-keys path toward the self-editing endgame.
+
+---
+
+## 2026-05-30 — Robustness: a print never panics, an erroring TUI never wedges the shell
+
+**Trigger.** Running a Game-of-Life TUI demo (`examples/`) wedged the terminal:
+after a (transient) `unbound symbol: ansi-hide-cursor` error the shell was left
+in raw mode, and separately a `brood … | head` pipeline crash-dumped with
+`failed printing to stdout: Broken pipe`. The user's point: *the language should
+never silently get into that state — crash or warn, don't wedge.* Two distinct
+runtime-robustness gaps, both fixed here.
+
+**1. `print` no longer panics on a broken pipe.** `builtins::print` wrote via
+the `print!` macro, which **panics** when the downstream consumer closes the
+pipe (EPIPE) — producing a full Rust backtrace + `.brood_crash_dump`. Every
+observed `Broken pipe` crash bottomed out in `builtins::print`. Replaced with a
+`write_stdout` helper: on `ErrorKind::BrokenPipe` it restores the terminal and
+exits quietly (the default SIGPIPE disposition every Unix tool has); other
+write errors are best-effort-dropped as before. (`write_term_bytes` already
+returned a catchable Brood error on I/O failure, so it needed no change.)
+
+**2. An erroring program no longer leaves the terminal in raw mode.** A program
+that called `term-raw-enter` (or entered the alternate screen) and then threw
+never reached its Brood `term-raw-leave`; the binaries' error-exit paths called
+`report_error` + `process::exit` (which skips Drop guards) without restoring the
+terminal. Added `builtins::restore_terminal_on_exit()` — TTY-aware: full
+restore (show cursor, leave alt screen + raw mode) on a real terminal, raw-mode
+only (no escape bytes) when stdout is piped/redirected so a captured stream
+stays clean. Called on every error-exit path: `nest`'s `run`/`run_for_value`
+and `brood`'s `run_files`/`--test`, plus the broken-pipe exit in `print`.
+
+**Verified.** `brood loop.blsp | head` exits 0 with no crash dump; under a PTY,
+`(term-raw-enter)` followed by an unbound-symbol error returns the terminal to
+`icanon` (cooked) instead of leaving it `-icanon` (wedged). Full suite green
+(985 in-language tests).
