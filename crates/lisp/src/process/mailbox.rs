@@ -65,6 +65,11 @@ pub(super) struct Mailbox {
     /// kills it directly if it's already parked. Stored on the mailbox (not the
     /// `Process`) because that's what's registry-reachable from another worker.
     pub(super) kill_pending: AtomicBool,
+    /// `process_flag(trap_exit, …)` (ADR-067): when set, a *linked* peer's death
+    /// arrives as a trappable `[:EXIT pid reason]` message instead of killing this
+    /// process. Read from another worker during the dying peer's `deregister`
+    /// (link teardown), so it lives on the registry-reachable mailbox too.
+    pub(super) trap_exit: AtomicBool,
 }
 
 pub(super) struct MailboxState {
@@ -99,6 +104,7 @@ impl Mailbox {
             mem: AtomicUsize::new(0),
             gc_runs: AtomicU64::new(0),
             kill_pending: AtomicBool::new(false),
+            trap_exit: AtomicBool::new(false),
         })
     }
 

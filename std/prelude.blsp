@@ -810,6 +810,15 @@ can.)"
       `(%spawn-named ~head (fn () ~(first more)))
       (throw "spawn: expected (spawn expr) or (spawn name expr)"))))
 
+(defmacro spawn-link (expr)
+  "Spawn a new green process running `expr` and `link` it to the caller in one
+step (Erlang `spawn_link`, ADR-067) — returns its pid. The link is symmetric: if
+either process dies abnormally the other is taken down too (or receives a
+trappable `[:EXIT …]` if it `(trap-exit true)`'d). Equivalent to `(let (p (spawn
+expr)) (link p) p)` but reads as one intent; linking a child that dies in the gap
+is still safe (a `link` to an already-dead pid fires `[:EXIT … :noproc]`)."
+  `(let (p# (spawn ~expr)) (link p#) p#))
+
 ;; A long-lived `:remote-spawn` server: the receiver-side machinery behind the
 ;; `remote-spawn` macro. Receives `[:run thunk]` messages and applies the thunk
 ;; in a fresh local process — that's "the receiver runs my code". A permanent

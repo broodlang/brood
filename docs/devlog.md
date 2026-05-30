@@ -8663,3 +8663,49 @@ in that file; resolver unit tests + autogensym green; full suite green.
 header, so imported names draw advisory `unbound` warnings (same benign class as
 runtime-`eval`-defined globals; never gates). Fix when migrating std: eval the
 header in `check_file`, or statically populate the import table.
+
+## 2026-05-30 — Process links + `trap_exit` (ADR-067); supervisor crash no longer orphans
+
+**Goal.** Close the one structural gap the vs-OTP deep dive named: a supervisor
+that *crashes* (or is killed) left its children running — `monitor` is one-way and
+can't tear a subtree down on the watcher's own death. Fix = Erlang **links** +
+`trap_exit`. Done in an isolated worktree (`links-trap-exit`) since it touches the
+scheduler/mailbox kernel the user was editing concurrently.
+
+**Kernel (Rust).** New `process/links.rs`: a symmetric `LINKS` table (the
+structural cousin of `MONITORS`, same race-free lock discipline — liveness checked
+inside the table critical section; `deregister` takes tables sequentially, never
+REGISTRY-while-LINKS). A `trap_exit` `AtomicBool` on the mailbox. `deregister`
+gained a link-teardown walk after the monitor fan-out: a trapping peer gets a
+trappable `[:EXIT pid reason]` message; a non-trapping peer with an abnormal reason
+is hard-killed (propagation, cascading through *its* links); `:normal` never
+propagates. Builtins `link`/`unlink`/`trap-exit`; `spawn-link` is a prelude macro.
+**Propagation hardness = D-simple** (non-trap propagation routes through the
+existing hard `(exit … :kill)`; the peer reports `:kill` not the originating
+reason — immaterial for supervision, upgradeable later with a `hard` bit).
+
+**Supervisor rewrite (`std/supervisor.blsp`).** monitor/`[:down]`/`:ref` →
+`trap-exit` + `link` + `[:EXIT]`/`:pid`. A child crash arrives as `[:EXIT child
+reason]`; the supervisor's own death propagates to children (workers die by
+propagation; a child sub-supervisor traps, recognises its `:parent`'s `[:EXIT]` —
+captured at `start-supervisor` — and tears its own subtree down). The `:shutdown
+:infinity` cascade still governs *graceful* stop (a deliberate hard kill is
+untrappable).
+
+**Verified.** Full worktree `cargo test` green (incl. the 103s/64s concurrency
+suites). New `tests/link_test.blsp` (7: trap delivery, link-to-dead `:noproc`,
+`:normal` non-propagation, propagation, unlink, a kill-the-chain cascade) +
+supervisor suite now 17 (added: killing a supervisor tears its worker child down;
+and cascades through a nested sub-supervisor to the grandchild). Both clean 3×
+under `BROOD_GC_STRESS=1` and once under `BROOD_GC_VERIFY=1`. Does **not** reopen
+ADR-039/KI-1: no per-call scheduler-global state, no cross-thread resume, teardown
+on the cold `deregister` path, a general primitive.
+
+**Docs.** ADR-067; `supervision.md` (the vs-OTP "load-bearing difference" section
+flipped to *resolved*, parity item #1 ✅, building-blocks + table updated);
+roadmap. **Lands in the `links-trap-exit` worktree** — not yet merged to `main`.
+
+**Hook note.** The `blsp-check` PostToolUse hook lints worktree `.blsp` edits with
+the PATH `nest`, which predates the new builtins, so `link`/`trap-exit`/`unlink`
+draw false `unbound` warnings on edit. Advisory only; `cargo test` is the gate;
+they vanish once D merges and `nest` is rebuilt.
