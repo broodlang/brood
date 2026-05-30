@@ -21,12 +21,21 @@ use brood::introspect;
 use crate::semantic_tokens::SPECIAL_FORMS;
 
 /// Candidates visible at byte `offset`. `tree` is the document's scope analysis
-/// (already built by the caller, which also parses the CST).
-pub fn completions(interp: &mut Interp, tree: &ScopeTree, offset: u32) -> Vec<CompletionItem> {
+/// (already built by the caller); `text` is the document source, used to read its
+/// namespace + `(:use …)` imports so imported names are offered **bare** (ADR-065
+/// §6). The client does prefix filtering, so we offer the whole visible set.
+pub fn completions(
+    interp: &mut Interp,
+    tree: &ScopeTree,
+    text: &str,
+    offset: u32,
+) -> Vec<CompletionItem> {
     let mut items = Vec::new();
     let mut seen = HashSet::new();
 
     // Locals (and document-level defs) first — they shadow same-named globals.
+    // (A namespaced file's own defs are document-level globals here, so they're
+    // already offered bare by this path.)
     for b in tree.names_in_scope(offset) {
         if seen.insert(b.name.clone()) {
             items.push(item(
@@ -45,7 +54,18 @@ pub fn completions(interp: &mut Interp, tree: &ScopeTree, offset: u32) -> Vec<Co
             items.push(item(kw.to_string(), CompletionItemKind::KEYWORD));
         }
     }
-    // Then the interpreter's globals (prelude + builtins).
+    // `(:use …)`-imported names, offered **bare** with the qualified global stashed
+    // in `data` so `resolve` can fetch its signature/doc (a bare import isn't a
+    // global under its short name, so it'd otherwise be missing from the list).
+    for (bare, qualified) in introspect::file_imports(interp, text) {
+        if seen.insert(bare.clone()) {
+            let mut it = item(bare, CompletionItemKind::FUNCTION);
+            it.data = Some(serde_json::Value::String(qualified));
+            items.push(it);
+        }
+    }
+    // Then the interpreter's globals (prelude + builtins + every `mod/name` for
+    // explicit qualified completion).
     for name in introspect::global_names(interp) {
         if seen.insert(name.clone()) {
             items.push(item(name, CompletionItemKind::FUNCTION));
@@ -58,7 +78,15 @@ pub fn completions(interp: &mut Interp, tree: &ScopeTree, offset: u32) -> Vec<Co
 /// `completionItem/resolve` is for. Looked up by label against the interpreter's
 /// introspection; a local (or anything with neither) is returned unchanged.
 pub fn resolve(interp: &mut Interp, mut item: CompletionItem) -> CompletionItem {
-    let (sig, doc) = introspect::signature(interp, &item.label);
+    // A bare imported item carries its qualified global in `data` (its label isn't
+    // a global under its short name); everything else looks up by label.
+    let lookup = item
+        .data
+        .as_ref()
+        .and_then(|d| d.as_str())
+        .unwrap_or(&item.label)
+        .to_string();
+    let (sig, doc) = introspect::signature(interp, &lookup);
     if let Some(sig) = sig {
         item.detail = Some(sig);
     }
@@ -89,7 +117,7 @@ mod tests {
         let root = cst::parse(src);
         let tree = scope::analyze(&root, src);
         let at = src.find(needle).unwrap() as u32;
-        completions(&mut interp, &tree, at)
+        completions(&mut interp, &tree, src, at)
             .into_iter()
             .map(|i| i.label)
             .collect()
@@ -112,6 +140,27 @@ mod tests {
             1,
             "shadowing local should be de-duped: {labels:?}"
         );
+    }
+
+    #[test]
+    fn offers_use_imported_names_bare() {
+        // In a `(:use set)` file, `union` (a `set` export) is offered **bare**,
+        // carrying its qualified target in `data` for resolve.
+        let mut interp = Interp::new();
+        let src = "(defmodule app (:use set))\n(uni";
+        let root = cst::parse(src);
+        let tree = scope::analyze(&root, src);
+        let at = src.rfind("uni").unwrap() as u32;
+        let items = completions(&mut interp, &tree, src, at);
+        let union = items.iter().find(|i| i.label == "union").expect("bare `union` offered");
+        assert_eq!(
+            union.data.as_ref().and_then(|d| d.as_str()),
+            Some("set/union"),
+            "data should carry the qualified target"
+        );
+        // and resolve uses that data to fetch the real signature.
+        let r = resolve(&mut interp, union.clone());
+        assert!(r.detail.unwrap_or_default().contains("union"), "resolved signature");
     }
 
     #[test]

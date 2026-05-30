@@ -35,7 +35,12 @@ pub fn signature_help(
             def,
             kind: BindingKind::Global,
         } => defs::find_def(root, text, def).map(|d| owned(&d.params))?,
-        _ => introspect::arglist_tokens(interp, name)?,
+        // Resolve against this file's namespace + imports (ADR-065 §4) so a call
+        // to a bare imported fn or a qualified `mod/fn` finds its parameters.
+        _ => {
+            let resolved = introspect::resolve_in_source(interp, text, name);
+            introspect::arglist_tokens(interp, &resolved)?
+        }
     };
 
     let slots = slots(&raw);
