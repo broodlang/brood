@@ -9997,3 +9997,57 @@ builds green.
 Purely additive to the input seam — existing `:press`/`:scroll-*` consumers (the
 observer) untouched. Next: `std/window.blsp` (the window-tree layout toolkit), then
 the myedit split-window model/view/commands + mouse drag-resize.
+
+## 2026-05-31 — std/window.blsp: the tiled-window layout toolkit (ADR-077, Part 1b)
+
+**Goal.** The reusable mechanism behind Emacs-style split windows in `myedit`, kept
+in Brood's `std/` (editor *toolkit*) rather than the editor — content-agnostic, so
+the editor supplies only the payload + keybindings.
+
+**Built.** `std/window.blsp` (registered in the `%builtin-module` table; `(require
+'window)`): an immutable **binary split tree**. A leaf shows an opaque payload; a
+`:row`/`:col` split divides its rect by a `:ratio`, reserving one cell for a
+divider. Exactly one leaf carries a `:selected` marker (travels with the tree — no
+separate selected-path to keep in sync).
+- Structure: `window-single` / `window-split` (C-x 2 / C-x 3) / `window-delete`
+  (C-x 0) / `window-delete-others` (C-x 1) / `window-other` (C-x o) /
+  `window-update-selected` (apply an edit to the active window's payload).
+- Layout: `window-layout tree [x y w h]` → `{:panes :dividers}` — pane rects (one
+  flagged `:selected`) + 1-cell divider rects (each carrying its split's `:split-rect`).
+- Drag-resize over ADR-077 mouse events: `divider-at` (hit-test a point), `window-
+  ratio-for` (drag point → ratio), `window-set-ratio` (clamped so no pane vanishes),
+  `window-select-at` (a click selects the pane under it).
+
+**Tests.** `tests/window_test.blsp` — 19 tests: construction/structure, exact layout
+geometry (divider reservation, the 40+1+39 / 12+1+11 splits), selection cycling,
+divider hit-test + drag-resize math + clamp, and an `:isolated` across-processes
+block proving the tree (plain map/list data) deep-copies through `send` unchanged
+and the ops run in a worker. All green (89 ms).
+
+The tree helpers recurse on tree *depth* (nested splits — bounded), not list length;
+the non-tail checker flags them but they're safe (noted in-file). Next (Part 2):
+the myedit model/view/commands + mouse wiring on top of this.
+
+## 2026-05-31 — Formatter: two comment-handling bugs (shared by nest format + the LSP)
+
+While reviewing `std/format.blsp` (the CST-based pretty-printer behind `nest format`,
+the LSP's `textDocument/formatting` via `introspect::format_source`, and the MCP
+`format` tool — all one implementation), found and fixed two comment bugs. The first
+was what a stray whole-tree `nest format` had used to break `tests/adversarial_test.blsp`.
+
+1. **Closing delimiter swallowed by a trailing comment.** When the last child of a
+   broken list is a comment, `render--break` appended the close directly after it
+   (`;; note)`) — commenting out the `)` and leaving the list unclosed (unparseable
+   by the real reader; `parse-source` is lenient and hid it). Fix: drop the close to
+   its own line at the opening indent when the last non-whitespace child is a comment
+   (`last-nonws-comment?`).
+2. **`cond`/`case` comment dropped (data loss).** The pair-body emitter found a
+   clause's partner via `kids--next-form`, which skips *comments* — so a comment where
+   a partner was expected got stepped over and silently dropped. Fix: pair only across
+   whitespace (`kids--next-nonws`); a comment ends the pair, emitted on its own line.
+
+Tests: `tests/format_test.blsp` +5 (close drops below a trailing comment, re-readable
+by the *real* reader not just the CST parser, idempotent, and both cond comment cases).
+Full suite green; prelude idempotency holds. Not addressed (deliberately): the broader
+style divergence where the formatter inlines a `defn` docstring the repo keeps on its
+own line — that's a separate decision + a dedicated tree-wide reformat, not a bug.
