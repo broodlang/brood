@@ -610,30 +610,60 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
         // canonical "expected at least 2 arguments" message.
         let mut cur_callee = callee;
         let mut cur_argv = argv;
-        while let Value::Native(id) = cur_callee {
-            if heap.native(id).name != "apply" || cur_argv.len() < 2 {
-                break;
+        // Dispatch loop: re-entered when `apply` is unfolded or a thin-wrapper
+        // closure (`passthrough_arm`) redirects to its inner call — both rewrite
+        // `cur_callee`/`cur_argv` and `continue 'dispatch` rather than recursing.
+        'dispatch: loop {
+            while let Value::Native(id) = cur_callee {
+                if heap.native(id).name != "apply" || cur_argv.len() < 2 {
+                    break;
+                }
+                let last = cur_argv.pop().expect("argv non-empty (checked above)");
+                let real = cur_argv.remove(0);
+                cur_argv.extend(
+                    heap.seq_items(last)
+                        .map_err(|e| e.or_form_pos(heap, call_form))?,
+                );
+                cur_callee = real;
             }
-            let last = cur_argv.pop().expect("argv non-empty (checked above)");
-            let real = cur_argv.remove(0);
-            cur_argv.extend(
-                heap.seq_items(last)
-                    .map_err(|e| e.or_form_pos(heap, call_form))?,
-            );
-            cur_callee = real;
-        }
 
-        match cur_callee {
-            Value::Native(id) => {
-                return call_native(heap, id, &cur_argv, env)
-                    .map_err(|e| e.or_form_pos(heap, call_form));
-            }
-            Value::Fn(id) => {
-                // `bind_params` selects the arm matching this call's arity, binds
-                // it, and hands back that arm's body (snapshotted into an inline
-                // `SmallVec` so the loop below doesn't re-dispatch the slab).
-                let (scope, body) =
-                    bind_params(heap, id, &cur_argv).map_err(|e| e.or_form_pos(heap, call_form))?;
+            match cur_callee {
+                Value::Native(id) => {
+                    return call_native(heap, id, &cur_argv, env)
+                        .map_err(|e| e.or_form_pos(heap, call_form));
+                }
+                Value::Fn(id) => {
+                    // Thin-wrapper elision: redirect a pure pass-through arm
+                    // (`(%add a b)` for `+`, etc.) straight to its inner call on the
+                    // already-evaluated args, skipping the redundant frame + bind +
+                    // body walk. `eval`ing `head` here is a symbol lookup (no GC, so
+                    // `cur_argv` stays valid). Only redirect when it resolves to a
+                    // function; anything else falls through to the normal path.
+                    if let Some((head, map)) = passthrough_arm(heap, id, cur_argv.len()) {
+                        let cl_env = heap.closure(id).env.unwrap_or_else(|| heap.global());
+                        let inner = eval(heap, head, cl_env)
+                            .map_err(|e| e.or_form_pos(heap, call_form))?;
+                        if matches!(inner, Value::Fn(_) | Value::Native(_)) {
+                            let mut next_argv: SmallVec<[Value; 8]> =
+                                SmallVec::with_capacity(map.len());
+                            for &i in &map {
+                                next_argv.push(cur_argv[i]);
+                            }
+                            // The elided inner call would have been its own
+                            // combination (a reduction). Count it so a
+                            // passthrough-heavy loop still yields to peers at the
+                            // same rate, preserving preemption fairness.
+                            crate::process::tick();
+                            cur_callee = inner;
+                            cur_argv = next_argv;
+                            continue 'dispatch;
+                        }
+                    }
+                    // `bind_params` selects the arm matching this call's arity, binds
+                    // it, and hands back that arm's body (snapshotted into an inline
+                    // `SmallVec` so the loop below doesn't re-dispatch the slab).
+                    let (scope, body) =
+                        bind_params(heap, id, &cur_argv).map_err(|e| e.or_form_pos(heap, call_form))?;
                 if body.is_empty() {
                     return Ok(Value::Nil);
                 }
@@ -694,6 +724,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                 }
                 return Err(err.or_form_pos(heap, call_form));
             }
+        }
         }
     }
 }
@@ -812,6 +843,60 @@ pub fn apply_closure(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> LispResu
 /// count here — and binding each fixed arm's params *directly* — is what makes a
 /// multi-arity function's common small-arity call cheap: no rest-list, no
 /// `match*`, just one env frame (see [`Closure::select_arm`] / `ClosureArm`).
+/// Thin-wrapper elision (perf). If the arm `cl` selects for an `argc`-argument
+/// call is a **pure pass-through** — no `&optional`/`& rest`, and a single body
+/// form `(head p_i p_j …)` whose arguments are all the arm's *parameters* used as
+/// direct arguments — return `(head, map)` where `map[k]` is the `argv` index that
+/// the inner call's `k`th argument forwards. The caller can then redirect the call
+/// to `head` on the already-evaluated `argv` (remapped), skipping the scope alloc,
+/// parameter bind, and body walk.
+///
+/// This is what makes the prelude operator wrappers cheap — `(+ a b)`'s arm is
+/// `(%add a b)`, so `+` redirects straight to `%add` on the same args instead of
+/// paying a second full call. General (any thin wrapper benefits) and
+/// hot-reload-safe: it reads the live closure on every call, so a redefinition is
+/// picked up. `head` must be an ordinary function reference, so special forms (an
+/// `(if …)` body) and params-as-head are excluded — those fall through to the
+/// normal bind-and-eval path.
+#[inline]
+fn passthrough_arm(heap: &Heap, cl: ClosureId, argc: usize) -> Option<(Value, SmallVec<[usize; 4]>)> {
+    let cl_data = heap.closure(cl);
+    let arm = cl_data.select_arm(argc)?;
+    if !arm.optionals.is_empty() || arm.rest.is_some() || arm.body.len() != 1 {
+        return None;
+    }
+    let (head, mut rest) = match arm.body[0] {
+        Value::Pair(p) => heap.pair(p),
+        _ => return None,
+    };
+    let head_sym = match head {
+        Value::Sym(s) => s,
+        _ => return None,
+    };
+    // A special form (`if`/`let`/…) isn't a callable value; a param-as-head would
+    // resolve in the wrong scope. Either means this isn't a redirectable wrapper.
+    if special_form(head_sym).is_some() || arm.params.iter().any(|&p| p == head_sym) {
+        return None;
+    }
+    let mut map: SmallVec<[usize; 4]> = SmallVec::new();
+    loop {
+        match rest {
+            Value::Nil => break,
+            Value::Pair(p) => {
+                let (a, next) = heap.pair(p);
+                let asym = match a {
+                    Value::Sym(s) => s,
+                    _ => return None, // a non-symbol arg (literal / nested call) — not a pure forward
+                };
+                map.push(arm.params.iter().position(|&p| p == asym)?);
+                rest = next;
+            }
+            _ => return None, // improper arg list
+        }
+    }
+    Some((head, map))
+}
+
 fn bind_params(
     heap: &mut Heap,
     cl: ClosureId,
