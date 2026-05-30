@@ -50,6 +50,13 @@ styled by `face` (a map like `{:fg :red :bold true}`)."
   "A render op placing the hardware cursor at (`row`, `col`)."
   [:cursor row col])
 
+(defn cursor-zone (x y w h shape)
+  "A render op marking a rectangular hot-zone (cells: `[x y]` origin, `w`×`h`) that
+asks the frontend to show pointer `shape` while the cursor is over it — e.g.
+`:col-resize` (↔) on a side-by-side split's divider, `:row-resize` (↕) on a stacked
+one. The GUI frontend hit-tests it on pointer-move; the terminal ignores it (ADR-080)."
+  [:cursor-zone x y w h shape])
+
 (defn frame (& ops)
   "Collect render ops into a frame (a vector), dropping any `nil` ops so callers
 can splice in conditional ops inline. Pass the result to a frontend (`term-draw`)."
