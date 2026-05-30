@@ -64,8 +64,9 @@ pub(super) struct Mailbox {
     /// quantum boundary (`run_one`: `REDUCTION_BUDGET − remaining`), so it grows
     /// continuously as the process runs, not only on `receive` like `mem`/`gc_runs`.
     /// Registry-reachable for `process-info`'s `:reductions`; the observer's
-    /// "is this process doing work?" signal. (The root process isn't scheduled via
-    /// quanta, so its count stays 0.)
+    /// "is this process doing work?" signal. Exact for spawned processes; the root
+    /// accrues only in whole-budget increments (it's not scheduled via `run_one`),
+    /// so its figure is coarse.
     pub(super) reductions: AtomicU64,
     /// Set by `(exit pid …)`: an exit signal is pending. The lock-free fast flag;
     /// the reason lives in `MailboxState.kill`. The target notices at its next
@@ -451,8 +452,8 @@ pub fn process_gc_runs(pid: u64) -> Option<u64> {
 /// pid is dead/unknown. Updated by the scheduler at every quantum boundary (see
 /// `run_one`), so unlike `:memory`/`:collections` it reflects work up to the
 /// process's *latest* scheduling point, not just its last `receive`. Backs
-/// `process-info`'s `:reductions`. The root process (not scheduled via quanta)
-/// reports `0`.
+/// `process-info`'s `:reductions`. Exact for spawned processes; the root accrues
+/// only in whole-budget increments (it bypasses `run_one`), so its figure is coarse.
 pub fn process_reductions(pid: u64) -> Option<u64> {
     let mailbox = crate::core::sync::lock(&REGISTRY).get(&pid).cloned()?;
     Some(mailbox.reductions.load(Ordering::Relaxed))
