@@ -22,11 +22,13 @@
         (do (sleep 100) (connect-retry (- tries 1)))
         (throw (str "could not reach the server — is it running? " e))))))
 
-(connect-retry 30)
-(println "[client] connected to " (nodes))
+;; connect returns the peer's authoritative name@host identity (ADR-073) —
+;; address the peer by that value, not a bare literal.
+(def srv (connect-retry 30))
+(println "[client] connected to " srv)
 
 ;; 1) Reach :echo by registered name (you don't have its pid yet).
-(send {:name :echo :node :server} [:hi (self)])
+(send {:name :echo :node srv} [:hi (self)])
 (def remote (receive ([:pong p] p) (after 5000 (throw "no reply from :echo"))))
 (println "[client] got the server's pid: " remote " (pid? " (pid? remote) ")")
 
