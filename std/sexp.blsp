@@ -1,0 +1,150 @@
+;; std/sexp.blsp — structural (s-expression) navigation over Brood's own CST.
+;; (require 'sexp).
+;;
+;; The "tree-sitter" for Brood code is the reader itself: `parse-source` returns a
+;; lossless CST (typed nodes — :list/:vector/:map/:symbol/:str/:comment/:quote…),
+;; and because concatenating every leaf's raw text reproduces the source, char
+;; positions are recoverable by one walk. This module annotates that tree with
+;; absolute [start,end) positions and navigates it by structure.
+;;
+;; Navigation is written against an abstract NODE shape — `{:kind :start :end
+;; :kids}` (`:kids` only on containers/wrappers) — so a different parser backend
+;; (e.g. tree-sitter, for foreign languages, living in the editor crate) can later
+;; produce the same shape and reuse these commands unchanged. Today the only
+;; backend is `parse-source` (Brood code). Pure over (text, point); the buffer
+;; commands at the end are the only buffer-aware part. Framework tier, opt-in,
+;; zero kernel surface (ADR-045).
+
+(defmodule sexp
+  "Structural s-expression navigation over Brood's CST (`parse-source`). Pure
+position functions `(text point) -> point` — `point-forward` / `point-backward`
+/ `point-up` / `point-down` / `point-defun-start` — plus buffer commands
+`forward` / `backward` / `up` / `down` / `beginning-of-defun` `(buf key) -> buf`
+for binding in a keymap. `(require 'sexp)`."
+  (:use buffer))
+
+(require 'buffer)
+
+;; ---- node-kind predicates ---------------------------------------------------
+
+(defn container-kind? (k)
+  "Kinds whose payload is a child vector (we descend into these)."
+  (or (= k :root) (= k :list) (= k :vector) (= k :map)))
+
+(defn wrapper-kind? (k)
+  "Reader-macro kinds that wrap a single child (the prefix char is implicit)."
+  (or (= k :quote) (= k :quasi) (= k :unquote) (= k :splice)))
+
+(defn prefix-len (k)
+  "Source length of a wrapper's implicit prefix: `~@` is 2, `'`/`` ` ``/`~` are 1."
+  (if (= k :splice) 2 1))
+
+(defn delim-len (k)
+  "Width of a container's (implicit, not emitted as leaves) opening/closing
+delimiter: 0 for the whole-file `:root`, 1 for `(`/`[`/`{`."
+  (if (= k :root) 0 1))
+
+(defn form? (anode)
+  "A real s-expression node — anything but whitespace and comments."
+  (let (k (get anode :kind))
+    (and (not (= k :whitespace)) (not (= k :comment)))))
+
+;; ---- annotate the CST with absolute positions -------------------------------
+
+(defn annotate (node start)
+  "Annotate one `parse-source` node with absolute positions, returning
+`[anode end]`. A leaf → `{:kind :start :end}`; a container/wrapper also carries
+`:kids` (annotated children). Wrappers account for their implicit prefix char(s)."
+  (let (kind (first node) payload (second node))
+    (cond
+      (container-kind? kind)
+        ;; children start after the opening delimiter; the close delimiter adds its
+        ;; width to the container's end (delimiters aren't emitted as leaves).
+        (let (dl (delim-len kind)
+              [kids cend] (annotate-list payload (+ start dl))
+              end (+ cend dl))
+          [{:kind kind :start start :end end :kids kids} end])
+      (wrapper-kind? kind)
+        (let (cstart (+ start (prefix-len kind))
+              [child cend] (annotate payload cstart))
+          [{:kind kind :start start :end cend :kids (list child)} cend])
+      :else
+        (let (end (+ start (string-length payload)))
+          [{:kind kind :start start :end end} end]))))
+
+(defn annotate-list (nodes start)
+  "Annotate a child-node vector left to right; returns `[annotated-list end]`."
+  (annotate-list* nodes start (list)))
+(defn annotate-list* (nodes pos acc)
+  (if (empty? nodes)
+    [(reverse acc) pos]
+    (let ([anode end] (annotate (first nodes) pos))
+      (annotate-list* (rest nodes) end (cons anode acc)))))
+
+(defn tree (text)
+  "The annotated CST root for `text` (a `{:kind :root :kids …}` node)."
+  (first (annotate (parse-source text) 0)))
+
+;; ---- structure queries ------------------------------------------------------
+
+(defn enclosing (anode point)
+  "The deepest container node strictly containing `point` (descending into
+list/vector/map children); the root if none. Reader-macro wrappers are navigated
+as a unit — descending through them is a deferred refinement."
+  (let (hit (first (filter (fn (k) (and (container-kind? (get k :kind))
+                                        (< (get k :start) point)
+                                        (< point (get k :end))))
+                           (or (get anode :kids) (list)))))
+    (if (nil? hit) anode (enclosing hit point))))
+
+(defn forms-of (anode)
+  "The form (non-whitespace, non-comment) children of `anode`."
+  (filter form? (or (get anode :kids) (list))))
+
+;; ---- pure navigation: (text point) -> point ---------------------------------
+
+(defn point-forward (text point)
+  "End of the next sexp at or after `point` within the enclosing list; unchanged if
+there is none (the Emacs `forward-sexp`)."
+  (let (enc (enclosing (tree text) point)
+        nxt (first (filter (fn (f) (>= (get f :start) point)) (forms-of enc))))
+    (if (nil? nxt) point (get nxt :end))))
+
+(defn point-backward (text point)
+  "Start of the previous sexp ending at or before `point` (Emacs `backward-sexp`)."
+  (let (enc (enclosing (tree text) point)
+        prev (last (filter (fn (f) (<= (get f :end) point)) (forms-of enc))))
+    (if (nil? prev) point (get prev :start))))
+
+(defn point-up (text point)
+  "Start of the enclosing list — before its opening delimiter (Emacs
+`backward-up-list`); unchanged at top level."
+  (let (enc (enclosing (tree text) point))
+    (if (= (get enc :kind) :root) point (get enc :start))))
+
+(defn point-down (text point)
+  "Just inside the next list at or after `point` (Emacs `down-list`); unchanged if
+none."
+  (let (enc (enclosing (tree text) point)
+        lst (first (filter (fn (f) (and (container-kind? (get f :kind))
+                                        (>= (get f :start) point)))
+                           (forms-of enc))))
+    (if (nil? lst) point (+ (get lst :start) 1))))
+
+(defn point-defun-start (text point)
+  "Start of the top-level form containing `point` (Emacs `beginning-of-defun`);
+unchanged if `point` isn't within one."
+  (let (root (tree text)
+        top (first (filter (fn (f) (and (<= (get f :start) point)
+                                        (<= point (get f :end))))
+                           (forms-of root))))
+    (if (nil? top) point (get top :start))))
+
+;; ---- buffer commands: (buf key) -> buf (bind these in a keymap) -------------
+
+(defn forward (buf key)  (goto-char buf (point-forward  (buffer-text buf) (get buf :point))))
+(defn backward (buf key) (goto-char buf (point-backward (buffer-text buf) (get buf :point))))
+(defn up (buf key)       (goto-char buf (point-up       (buffer-text buf) (get buf :point))))
+(defn down (buf key)     (goto-char buf (point-down     (buffer-text buf) (get buf :point))))
+(defn beginning-of-defun (buf key)
+  (goto-char buf (point-defun-start (buffer-text buf) (get buf :point))))

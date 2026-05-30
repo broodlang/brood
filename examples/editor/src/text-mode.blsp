@@ -1,0 +1,49 @@
+;; examples/editor/src/text-mode.blsp — the default editing layer: plain-text
+;; motion, no structure. An *editor* module (policy: keys + the default mode),
+;; loaded from the editor project's src/, not part of the language. (require 'text-mode).
+;;
+;; A `text-mode` LAYER (in the `layers` sense) for ordinary prose/text buffers: it
+;; binds character / word / line motion over `std/buffer`, and nothing structural.
+;; It registers itself as the layer for the `:fundamental` type — which
+;; `buffer-type-for` returns for any buffer with no matching filename and no
+;; explicit `:type` — so **text-mode is the default** a fresh buffer gets.
+;;
+;; The motion commands are `(buf key) -> buf` wrappers over the buffer fns (a keymap
+;; command takes the key as a second arg, which plain motion ignores); they're
+;; defined here once and reused by `brood-mode` too. Printable keys are not bound —
+;; they fall through to the app's self-insert fallback. Opt-in, zero kernel surface.
+
+(defmodule text-mode
+  "The default text-editing layer: character/word/line motion over `std/buffer`,
+registered as the `:fundamental` type so a plain buffer gets it by default. Its
+motion commands `(buf key) -> buf` are shared with `brood-mode`. `(require
+'text-mode)`."
+  (:use layers))
+
+(require 'buffer)
+(require 'layers)
+
+;; ---- motion commands: (buf key) -> buf (key ignored) ------------------------
+(defn forward-char  (b k) (buffer/forward-char b))
+(defn backward-char (b k) (buffer/backward-char b))
+(defn forward-word  (b k) (buffer/forward-word b))
+(defn backward-word (b k) (buffer/backward-word b))
+(defn forward-line  (b k) (buffer/forward-line b))
+(defn backward-line (b k) (buffer/backward-line b))
+(defn beginning-of-line (b k) (buffer/beginning-of-line b))
+(defn end-of-line   (b k) (buffer/end-of-line b))
+(defn beginning-of-buffer (b k) (buffer/beginning-of-buffer b))
+(defn end-of-buffer (b k) (buffer/end-of-buffer b))
+
+;; ---- the layer --------------------------------------------------------------
+(def km
+  {:right 'text-mode/forward-char  :left 'text-mode/backward-char
+   :down  'text-mode/forward-line  :up   'text-mode/backward-line
+   :alt-f 'text-mode/forward-word  :alt-b 'text-mode/backward-word
+   :ctrl-a 'text-mode/beginning-of-line :ctrl-e 'text-mode/end-of-line
+   :home  'text-mode/beginning-of-line  :end  'text-mode/end-of-line})
+
+(def layer {:name 'text :keymap km})
+
+;; text-mode is the default: :fundamental is what buffer-type-for falls back to.
+(register-type-layers :fundamental (list 'text-mode/layer))

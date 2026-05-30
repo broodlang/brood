@@ -1,0 +1,39 @@
+;; std/sexp — structural (s-expression) navigation over Brood's parse-source CST.
+;; Reusable Brood-code tooling (the editor's brood-mode binds these, but they're not
+;; editor-specific). Register-only — run by `nest test` (and cargo test, via suite.rs).
+
+(defmodule sexp-test (:use test) (:use sexp) (:use buffer))
+(require 'sexp) (require 'buffer)
+
+;; (defn f (x)\n  (+ x 1))   — outer list [0,22); 'defn' [1,5); 'f' [6,7);
+;; (x) [8,11); inner (+ x 1) [14,21).
+(def src "(defn f (x)\n  (+ x 1))")
+
+(describe "sexp navigation (pure, over the parse-source CST)"
+  (test "forward over the whole top form, and over inner atoms"
+    (assert= (point-forward src 0) 22)     ; before outer → end of the whole form
+    (assert= (point-forward src 1) 5)      ; → end of 'defn'
+    (assert= (point-forward src 5) 7))     ; from the space → end of 'f'
+  (test "backward"
+    (assert= (point-backward src 22) 0)    ; before close → start of the top form
+    (assert= (point-backward src 5) 1))    ; end of 'defn' → its start
+  (test "down-list enters, up-list leaves"
+    (assert= (point-down src 0) 1)         ; just inside the outer list
+    (assert= (point-up src 15) 14)         ; inside (+ x 1) → its open paren
+    (assert= (point-up src 1) 0)           ; inside outer → its open paren
+    (assert= (point-up src 0) 0))          ; at top level → unchanged
+  (test "beginning-of-defun finds the enclosing top-level form"
+    (assert= (point-defun-start src 15) 0)
+    (assert= (point-defun-start src 8) 0))
+  (test "positions account for delimiters & reader-macro prefixes"
+    ;; "'(a) [b]"  → quoted list [0,4), vector [5,8)
+    (assert= (point-forward "'(a) [b]" 0) 4)
+    (assert= (point-forward "'(a) [b]" 4) 8)))
+
+(describe "sexp buffer commands"
+  (test "forward moves point to the end of the next sexp"
+    (assert= (get (forward (make-buffer "(+ 1 2)") nil) :point) 7))
+  (test "down enters the next list, up leaves it"
+    (let (b (down (make-buffer "(a b)") nil))
+      (assert= (get b :point) 1)
+      (assert= (get (up b nil) :point) 0))))
