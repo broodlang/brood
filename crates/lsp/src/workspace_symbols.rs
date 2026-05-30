@@ -11,7 +11,7 @@
 //! again, but a server-side filter keeps the payload small on a big project. An
 //! empty query returns every symbol (the "show all" affordance some clients use).
 
-use brood::syntax::cst;
+use brood::syntax::cst::{self, Node, NodeKind};
 use brood::Interp;
 use lsp_types::{Location, OneOf, Range, SymbolKind, Uri, WorkspaceSymbol};
 
@@ -29,9 +29,17 @@ pub fn workspace_symbols(
     for (uri, text) in workspace::all_sources(interp, docs) {
         let root = cst::parse(&text);
         let index = LineIndex::new(&text);
-        let container = file_label(&uri);
+        // A file's `(defmodule ns …)` is its namespace (ADR-065). Display each
+        // symbol qualified (`ns/name`) with the namespace as the container, so
+        // two same-named defs in different namespaces are distinguishable in the
+        // picker. A file with no `defmodule` falls back to the bare name + file.
+        let ns = file_namespace(&root, &text);
         for d in defs::top_level(&root, &text) {
-            if !matches(query, d.name) {
+            let name = match ns {
+                Some(ns) => format!("{ns}/{}", d.name),
+                None => d.name.to_string(),
+            };
+            if !matches(query, &name) {
                 continue;
             }
             let range = Range::new(
@@ -39,16 +47,38 @@ pub fn workspace_symbols(
                 index.position(&text, d.name_span.end),
             );
             out.push(WorkspaceSymbol {
-                name: d.name.to_string(),
+                name,
                 kind: symbol_kind(d.kind),
                 tags: None,
-                container_name: container.clone(),
+                container_name: ns.map(str::to_string).or_else(|| file_label(&uri)),
                 location: OneOf::Left(Location::new(uri.clone(), range)),
                 data: None,
             });
         }
     }
     out
+}
+
+/// The namespace a file declares via a top-level `(defmodule ns …)` form
+/// (ADR-065), or `None` if it declares none. A pure CST scan — the same
+/// substrate the rest of the LSP uses, no evaluation.
+fn file_namespace<'s>(root: &Node, text: &'s str) -> Option<&'s str> {
+    for form in root.forms() {
+        if form.kind != NodeKind::List {
+            continue;
+        }
+        let mut forms = form.forms();
+        let Some(head) = forms.next() else { continue };
+        if head.kind != NodeKind::Symbol || head.text(text) != "defmodule" {
+            continue;
+        }
+        if let Some(name) = forms.next() {
+            if name.kind == NodeKind::Symbol {
+                return Some(name.text(text));
+            }
+        }
+    }
+    None
 }
 
 /// Map a Brood def kind to the LSP symbol kind the editor renders an icon for.
@@ -99,6 +129,15 @@ mod tests {
         assert!(matches("frmtsrc", "format-source"));
         assert!(!matches("xyz", "format-source"));
         assert!(!matches("sf", "format-source")); // order matters
+    }
+
+    #[test]
+    fn extracts_the_file_namespace_from_defmodule() {
+        let root = cst::parse("(defmodule parser)\n(defn parse (s) s)");
+        assert_eq!(file_namespace(&root, "(defmodule parser)\n(defn parse (s) s)"), Some("parser"));
+        // No defmodule → no namespace.
+        let bare = cst::parse("(defn parse (s) s)");
+        assert_eq!(file_namespace(&bare, "(defn parse (s) s)"), None);
     }
 
     #[test]
