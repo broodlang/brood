@@ -1,5 +1,8 @@
 ;; std/set.blsp — sets as an opt-in library over maps.
-(defmodule set
+;; A namespace (ADR-065): its functions are `set/set`, `set/union`, … — consumers
+;; `(:use set)` to refer them bare, or call them qualified. (First migrated std
+;; module; the rest follow the same defmodule→ns pattern.)
+(ns set
   "Sets — unordered collections of **unique** values with fast membership.
 
 A set is represented as a **map of `element → true`**, so it is not a new value
