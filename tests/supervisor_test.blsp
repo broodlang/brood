@@ -1,9 +1,9 @@
 ;; std/supervisor.blsp — OTP-style supervision built in Brood on
-;; spawn/monitor/receive. :isolated because each test spawns processes (and
+;; spawn/monitor/receive/exit. :isolated because each test spawns processes (and
 ;; supervisors) and observes restarts via messages to the test process.
 ;;
-;; The idiom throughout: a child reports `[:up (self)]` to the test process when
-;; it starts, then parks on `receive`. The test crashes it with `:die`; if the
+;; The idiom throughout: a child reports `[:up …]` to the test process when it
+;; starts, then parks on `receive`. The test crashes it with `:die`; if the
 ;; supervisor restarts it, a *new* incarnation reports `[:up …]` with a fresh
 ;; pid. A `(receive … (after ms :none))` proves the *absence* of a restart.
 
@@ -18,6 +18,21 @@
    :start (fn () (spawn (do (send to [:up (self)])
                             (receive (:die (error "boom"))
                                      (:done :ok)))))})
+
+;; Like `watched-spec` but tags its announcement `[:up tag (self)]`, so a test
+;; supervising several children can tell their incarnations apart.
+(defn tagged-spec (to tag restart)
+  {:id tag
+   :restart restart
+   :start (fn () (spawn (do (send to [:up tag (self)])
+                            (receive (:die (error "boom"))
+                                     (:done :ok)))))})
+
+;; Collect `n` tagged `[:up tag pid]` announcements into a `{tag pid}` map.
+;; Tail-recursive via the receive trampoline (a test runs in a small-stack proc).
+(defn collect-ups (n acc)
+  (if (= n 0) acc
+    (receive ([:up tag pid] (collect-ups (- n 1) (assoc acc tag pid))))))
 
 (describe "supervisor: one-for-one restart"
   :isolated
@@ -57,6 +72,55 @@
       (assert= :none (receive ([:up _] :restarted) (after 150 :none)))
       (stop-supervisor sup))))
 
+(describe "supervisor: one-for-all"
+  :isolated
+
+  (test "a crash restarts every child with a fresh pid"
+    (let (me   (self)
+          sup  (start-supervisor (list (tagged-spec me :a :permanent)
+                                       (tagged-spec me :b :permanent))
+                                 {:strategy :one-for-all :max-restarts 5 :max-seconds 5})
+          gen1 (collect-ups 2 {}))
+      (send (get gen1 :a) :die)               ; crash a → kills + restarts both
+      (let (gen2 (collect-ups 2 {}))          ; both announce fresh incarnations
+        (is (not (= (get gen1 :a) (get gen2 :a))))
+        (is (not (= (get gen1 :b) (get gen2 :b))))   ; the healthy sibling restarted too
+        (stop-supervisor sup))))
+
+  (test "a :temporary sibling is terminated but not revived"
+    (let (me   (self)
+          sup  (start-supervisor (list (tagged-spec me :a :permanent)
+                                       (tagged-spec me :b :temporary))
+                                 {:strategy :one-for-all})
+          gen1 (collect-ups 2 {})
+          mb   (monitor (get gen1 :b)))        ; watch the temporary sibling
+      (send (get gen1 :a) :die)
+      ;; b is force-killed as part of the group restart (our monitor sees it)…
+      (assert= :down (receive ([:down ~mb _ _] :down) (after 1000 :alive)))
+      ;; …only a comes back (one fresh :up); b is dropped, so no second :up.
+      (let (g2a (receive ([:up :a p] p)))
+        (is (not (= (get gen1 :a) g2a)))
+        (assert= :none (receive ([:up :b _] :revived) (after 150 :none))))
+      (stop-supervisor sup))))
+
+(describe "supervisor: rest-for-one"
+  :isolated
+
+  (test "restarts the crashed child and those started after it, not before"
+    (let (me   (self)
+          sup  (start-supervisor (list (tagged-spec me :a :permanent)
+                                       (tagged-spec me :b :permanent)
+                                       (tagged-spec me :c :permanent))
+                                 {:strategy :rest-for-one})
+          gen1 (collect-ups 3 {}))
+      (send (get gen1 :b) :die)               ; crash b → restart b and c, leave a
+      (let (gen2 (collect-ups 2 {}))          ; exactly two restarts announce
+        (is (not (= (get gen1 :b) (get gen2 :b))))
+        (is (not (= (get gen1 :c) (get gen2 :c))))
+        (is (nil? (get gen2 :a)))             ; a was not restarted…
+        (assert= :none (receive ([:up _ _] :more) (after 150 :none)))  ; …and nothing else did
+        (stop-supervisor sup)))))
+
 (describe "supervisor: restart intensity"
   :isolated
 
@@ -74,6 +138,18 @@
         (receive ([:down ~mref ~sup [:error _]] :gaveup)
                  (after 2000 :still-up))))))
 
+(describe "supervisor: shutdown terminates children"
+  :isolated
+
+  (test "stop-supervisor kills its children (no orphans)"
+    (let (me   (self)
+          sup  (start-supervisor (list (watched-spec me :permanent)))
+          p1   (receive ([:up p] p))
+          mp   (monitor p1))                  ; watch the child directly
+      (stop-supervisor sup)
+      ;; the supervisor exits *and* hard-kills the child → our monitor fires.
+      (assert= :down (receive ([:down ~mp ~p1 _] :down) (after 1000 :orphaned))))))
+
 (describe "supervisor: introspection and validation"
   :isolated
 
@@ -87,5 +163,5 @@
       (is (not (nil? (get (first kids) :pid))))
       (stop-supervisor sup)))
 
-  (test "an unsupported strategy is rejected up front"
-    (assert-error (start-supervisor (list) {:strategy :one-for-all}))))
+  (test "an unknown strategy is rejected up front"
+    (assert-error (start-supervisor (list) {:strategy :every-which-way}))))

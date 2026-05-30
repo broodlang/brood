@@ -5,21 +5,25 @@
 ;;    `monitor`s each child and reacts to the `[:down ref pid reason]` the kernel
 ;;    delivers when a child exits. There is NO kernel supervisor (ADR-039 was
 ;;    reverted — see docs/supervision.md); this is pure Brood policy over
-;;    spawn / monitor / receive, the "mechanism in Rust, policy in Brood" rule.
+;;    spawn / monitor / receive / exit, the "mechanism in Rust, policy in Brood" rule.
 ;;  - State is one immutable map carried through the loop (the hatch.blsp idiom).
-;;  - Only the `:one-for-one` strategy ships today. `:one-for-all` and
-;;    `:rest-for-one` must *terminate* healthy siblings on a sibling's death, and
-;;    Brood has no kill/exit primitive yet (no links, no `exit`) — so they cannot
-;;    be expressed in userland. They are deferred until that kernel capability
-;;    lands; `start-supervisor` rejects them rather than silently degrading.
-;;  - We likewise cannot forcibly stop children: `(stop-supervisor sup)` ends the
-;;    *supervisor*, leaving its children running (orphaned). Same kernel gap.
+;;  - All three OTP strategies ship: `:one-for-one` (restart just the crashed
+;;    child), `:one-for-all` (restart every child), and `:rest-for-one` (restart
+;;    the crashed child and every child started after it). The latter two must
+;;    *terminate* healthy siblings before restarting them; that's the kernel
+;;    `(exit pid :kill)` primitive (ADR-063) — an untrappable hard kill that fires
+;;    the sibling's monitor `[:down …]`, which the supervisor selectively drains
+;;    so a deliberate kill is never mistaken for a fresh crash (Erlang `receive`
+;;    semantics make the drain exact — non-matching messages stay queued).
+;;  - `(stop-supervisor sup)` and an intensity-exceeded shutdown now terminate the
+;;    children too (no more orphans) — same `(exit … :kill)`.
 
 (defmodule supervisor
   "OTP-style supervision written in Brood over the kernel's spawn / monitor /
-receive (ADR-006). A supervisor process starts a set of children, monitors each,
-and restarts them per a strategy and restart type when they exit — bounded by a
-restart-intensity limit so a crash loop eventually gives up instead of spinning.
+receive / exit (ADR-006). A supervisor process starts a set of children, monitors
+each, and restarts them per a strategy and restart type when they exit — bounded
+by a restart-intensity limit so a crash loop eventually gives up instead of
+spinning.
 
 A *child spec* is a map:
 
@@ -34,13 +38,16 @@ Restart types: `:permanent` is always restarted; `:transient` only after an
     (def sup (start-supervisor
                [{:id :a :start (fn () (spawn (worker-a)))}
                 {:id :b :start (fn () (spawn (worker-b))) :restart :transient}]
-               {:max-restarts 3 :max-seconds 5}))
+               {:strategy :one-for-all :max-restarts 3 :max-seconds 5}))
     (which-children sup)   ; => list of {:id :pid :restart}
-    (stop-supervisor sup)  ; stop supervising (children keep running — see notes)
+    (stop-supervisor sup)  ; stop supervising AND terminate the children
 
-**Today only `:one-for-one`** (restart just the crashed child) is supported;
-`:one-for-all` / `:rest-for-one` need a kernel exit primitive that doesn't exist
-yet (see the module source and docs/supervision.md).")
+Strategies: `:one-for-one` (default — restart only the crashed child),
+`:one-for-all` (restart every child), `:rest-for-one` (restart the crashed child
+and every child started after it). The crashed child's `:restart` type gates
+whether the restart procedure runs at all; within a group restart each member is
+restarted only if its own `:restart` type permits (a `:temporary` sibling is
+terminated and dropped, not revived).")
 
 ;; ---- restart policy ---------------------------------------------------------
 
@@ -77,11 +84,40 @@ never. An uncaught throw exits with reason `[:error msg]`, a clean return with
   "`children` without the record whose `:ref` is `ref`."
   (remove (fn (c) (= (get c :ref) ref)) children))
 
+;; ---- terminating a healthy child (the kernel exit primitive, ADR-063) -------
+
+(defn supervisor--terminate-child (child)
+  "Hard-kill `child` and selectively drain the `[:down]` its monitor fires, so the
+supervisor's own loop doesn't later treat this deliberate kill as a fresh crash.
+`(exit pid :kill)` is untrappable — it stops the child even parked in `receive` or
+in a tight loop. Only call on a child believed alive (one whose `:down` hasn't
+already been consumed); if it had already crashed, `exit` is a harmless no-op and
+the selective `receive` drains the `:down` that's already queued. Blocks until the
+`:down` arrives — `exit` guarantees one fires."
+  (let (pid (get child :pid)
+        ref (get child :ref))
+    (exit pid :kill)
+    (receive ([:down ~ref _ _] :ok))))
+
+(defn supervisor--terminate-many (children)
+  "Terminate every child in `children` (each assumed alive / not-yet-drained),
+draining each one's `[:down]`. Order is irrelevant — every kill is independent."
+  (dolist (c children) (supervisor--terminate-child c)))
+
 ;; ---- restart-intensity window -----------------------------------------------
 
 (defn supervisor--recent (restarts now-ms window-ms)
   "Keep only restart timestamps within `window-ms` of `now-ms` (prune the rest)."
   (filter (fn (t) (<= (- now-ms t) window-ms)) restarts))
+
+(defn supervisor--bump-intensity (state)
+  "Record a restart at `now` and prune the window; return `[over? recent]` where
+`over?` is true if the count now exceeds `:max-restarts` (the crash loop won't
+settle) and `recent` is the pruned-and-extended timestamp list."
+  (let (t (now)
+        window (* 1000 (get state :max-seconds))
+        recent (cons t (supervisor--recent (get state :restarts) t window)))
+    [(> (count recent) (get state :max-restarts)) recent]))
 
 ;; ---- the supervisor process -------------------------------------------------
 
@@ -91,34 +127,81 @@ and `:ref` so the reply stays small and copies cheaply across `send`)."
   (map (fn (c) {:id (get c :id) :pid (get c :pid) :restart (get c :restart :permanent)})
        children))
 
+(defn supervisor--giveup (state survivors)
+  "Restart intensity exceeded: terminate the still-running `survivors` (we *can*
+now — `exit`), then throw so anyone monitoring the supervisor sees `[:down …
+[:error …]]`. Erlang terminates children on shutdown; so do we."
+  (supervisor--terminate-many survivors)
+  (error "supervisor: restart intensity exceeded ("
+         (get state :max-restarts) " restarts in " (get state :max-seconds) "s)"))
+
 (defn supervisor--restart (state child)
-  "Restart `child` (one-for-one): record the restart in the intensity window;
-if the window is now over budget, give up (the supervisor exits abnormally so a
-watcher's monitor fires); otherwise re-`:start` the child and resume the loop."
-  (let (t (now)
-        window (* 1000 (get state :max-seconds))
-        recent (cons t (supervisor--recent (get state :restarts) t window)))
-    (if (> (count recent) (get state :max-restarts))
-      ;; Intensity exceeded — the crash loop won't settle. Erlang terminates the
-      ;; children and shuts the supervisor down; we can't kill children (no exit
-      ;; primitive), so the children are orphaned and the supervisor throws,
-      ;; propagating [:error …] to anyone monitoring it.
-      (error "supervisor: restart intensity exceeded ("
-             (get state :max-restarts) " restarts in " (get state :max-seconds) "s)")
+  "Restart `child` (`:one-for-one`): record the restart in the intensity window;
+if the window is now over budget, give up; otherwise re-`:start` just this child
+and resume the loop. The crashed `child` is already down (its `:down` consumed),
+so giving up terminates only the *other* children."
+  (let ([over? recent] (supervisor--bump-intensity state))
+    (if over?
+      (supervisor--giveup state (supervisor--drop (get state :children) (get child :ref)))
       (let (fresh (supervisor--start-child child)
             children (supervisor--replace (get state :children) (get child :ref) fresh))
         (supervisor--loop (assoc state :children children :restarts recent))))))
 
+(defn supervisor--split-affected (children ref strategy)
+  "The `[unaffected affected]` split of `children` for a group restart triggered
+by the child with monitor `ref`. `:one-for-all` → everything is affected;
+`:rest-for-one` → the trigger and everything started *after* it (the suffix), with
+the earlier-started prefix left untouched. (`children` is in start order.)"
+  (if (= strategy :rest-for-one)
+    [(take-while (fn (c) (not (= (get c :ref) ref))) children)
+     (drop-while (fn (c) (not (= (get c :ref) ref))) children)]
+    [() children]))   ; :one-for-all (and the never-here :one-for-one)
+
+(defn supervisor--maybe-restart (child reason)
+  "After a group termination, restart `child` if its `:restart` type permits given
+exit `reason`; return the fresh child record, or `nil` to drop it from supervision
+(e.g. a `:temporary` sibling, which is terminated but never revived)."
+  (if (supervisor--restartable? (get child :restart :permanent) reason)
+    (supervisor--start-child child)
+    nil))
+
+(defn supervisor--group-restart (state trigger reason)
+  "Run a `:one-for-all` / `:rest-for-one` restart triggered by `trigger` (already
+down, its `:down` consumed) exiting with `reason`. Terminate the affected
+*survivors* (everyone affected except the trigger), then restart the affected set
+in start order — the trigger by its real `reason`, the force-killed survivors as
+abnormal (`:killed`) — leaving unaffected children running. Bounded by intensity."
+  (let ([over? recent] (supervisor--bump-intensity state)
+        trig-ref (get trigger :ref))
+    (if over?
+      (supervisor--giveup state (supervisor--drop (get state :children) trig-ref))
+      (let ([unaffected affected]
+              (supervisor--split-affected (get state :children) trig-ref (get state :strategy))
+            survivors (remove (fn (c) (= (get c :ref) trig-ref)) affected)
+            _ (supervisor--terminate-many survivors)
+            restarted (remove nil?
+                        (map (fn (c)
+                               (supervisor--maybe-restart
+                                 c (if (= (get c :ref) trig-ref) reason :killed)))
+                             affected)))
+        (supervisor--loop (assoc state
+                                 :children (append unaffected restarted)
+                                 :restarts recent))))))
+
 (defn supervisor--handle-down (state ref reason)
-  "A monitored child exited. Restart it per its `:restart` type, or drop it from
-supervision if its type/reason says not to. Ignore an unknown `ref`."
+  "A monitored child exited. If its `:restart` type/reason says don't restart, drop
+it (siblings untouched, whatever the strategy — Erlang only disturbs siblings when
+the trigger actually restarts). Otherwise run the strategy. Ignore an unknown
+`ref` (a stale `:down` for a child already removed)."
   (let (child (supervisor--find (get state :children) ref))
     (cond
       (nil? child) (supervisor--loop state)
-      (supervisor--restartable? (get child :restart :permanent) reason)
+      (not (supervisor--restartable? (get child :restart :permanent) reason))
+        (supervisor--loop (assoc state :children (supervisor--drop (get state :children) ref)))
+      (= (get state :strategy) :one-for-one)
         (supervisor--restart state child)
-      else (supervisor--loop (assoc state :children
-                                    (supervisor--drop (get state :children) ref))))))
+      else
+        (supervisor--group-restart state child reason))))
 
 (defn supervisor--loop (state)
   "The supervisor's receive loop over its immutable `state` map."
@@ -127,7 +210,7 @@ supervision if its type/reason says not to. Ignore an unknown `ref`."
     ([:which-children from r]
       (do (send from [:reply r (supervisor--summarize (get state :children))])
           (supervisor--loop state)))
-    ([:$stop] nil)))
+    ([:$stop] (supervisor--terminate-many (get state :children)))))
 
 (defn supervisor--init (children opts)
   "Runs inside the freshly spawned supervisor process: start and monitor every
@@ -135,7 +218,7 @@ child, build the initial state, and enter the loop."
   (let (started (supervisor--start-each children ()))
     (supervisor--loop
       {:children started
-       :strategy :one-for-one
+       :strategy (get opts :strategy :one-for-one)
        :max-restarts (get opts :max-restarts 3)
        :max-seconds (get opts :max-seconds 5)
        :restarts ()})))
@@ -150,18 +233,21 @@ children start left-to-right and `acc` preserves that order on reverse)."
 
 ;; ---- public client API ------------------------------------------------------
 
+(defn supervisor--known-strategy? (s)
+  (or (= s :one-for-one) (= s :one-for-all) (= s :rest-for-one)))
+
 (defn start-supervisor (children & opts)
   "Spawn a supervisor for `children` (a sequence of child specs); return its pid.
-`opts` is an optional map: `:max-restarts` (default 3) and `:max-seconds`
-(default 5) bound the restart-intensity window; `:strategy` defaults to
-`:one-for-one` and is the only value accepted today. Children are started
-left-to-right inside the supervisor process."
+`opts` is an optional map: `:strategy` (`:one-for-one` default, `:one-for-all`, or
+`:rest-for-one`), and `:max-restarts` (default 3) / `:max-seconds` (default 5)
+bounding the restart-intensity window. Children are started left-to-right inside
+the supervisor process."
   (let (opts (or (first opts) {})
         strategy (get opts :strategy :one-for-one))
-    (if (not (= strategy :one-for-one))
-      (error "start-supervisor: only :one-for-one is supported today (no kernel "
-             "exit primitive for terminating healthy siblings); got " strategy)
-      (spawn (supervisor--init children opts)))))
+    (if (supervisor--known-strategy? strategy)
+      (spawn (supervisor--init children opts))
+      (error "start-supervisor: unknown :strategy " strategy
+             " (expected :one-for-one, :one-for-all, or :rest-for-one)"))))
 
 (defn which-children (sup)
   "Ask supervisor `sup` for its current children: a list of `{:id :pid :restart}`
@@ -171,7 +257,7 @@ summaries. Synchronous (blocks for the reply)."
     (receive ([:reply ~r v] v))))
 
 (defn stop-supervisor (sup)
-  "Stop the supervisor `sup` — it leaves its receive loop and no longer restarts
-children. NOTE: the children themselves keep running (Brood has no kill/exit
-primitive, so a supervisor cannot terminate them). Returns nil."
+  "Stop the supervisor `sup`: it leaves its receive loop and terminates each of its
+children (`exit … :kill`), so nothing is left orphaned. Fire-and-forget — returns
+nil immediately; the teardown happens in the supervisor process."
   (send sup [:$stop]))

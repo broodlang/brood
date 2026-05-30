@@ -205,11 +205,14 @@ ADR-039's and stay clear of root cause #1.
   ✅ **Done (2026-05-29, ADR-044):** `std/supervisor.blsp` — `start-supervisor`
   over child specs, `:permanent`/`:transient`/`:temporary` restart types,
   restart-intensity windows, `which-children` — all Brood policy over the
-  existing primitives, **zero** scheduler surface. **Only `:one-for-one`
-  shipped:** `:one-for-all` / `:rest-for-one` need to terminate healthy siblings,
-  which requires the kernel kill/exit primitive Brood lacks (§4.2 below / the
-  missing-`exit` gap). That gap is now the concrete trigger for the *one* kernel
-  hook supervision might justify.
+  existing primitives, **zero** scheduler surface. **All three strategies now
+  ship** (`:one-for-one`, `:one-for-all`, `:rest-for-one`): the `(exit pid :kill)`
+  primitive (ADR-063) closed the one gap — terminating healthy siblings — so the
+  group strategies are still pure-Brood policy (hard-kill the siblings to restart,
+  selectively drain their `[:down]`). Notably this kernel hook is *not* the
+  supervision-specific one §4.2 warned about: `exit/2` is a general Erlang
+  primitive (any process can signal any other), keeps no scheduler-global retry
+  state, and is independently useful — so it adds no ADR-039-style race surface.
 - **Kernel-assisted (only if userland proves insufficient).** If a specific need
   appears that userland can't serve (e.g. hot-reload-on-retry, the one thing
   ADR-039 uniquely did), reintroduce the *minimum* kernel hook — and per 4.2,

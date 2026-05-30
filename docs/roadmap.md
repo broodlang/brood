@@ -393,22 +393,35 @@ The seam that makes remoteability free later (see architecture.md).
   tool ([ADR-042](decisions.md), since named-spawn would not have covered the
   global-state-cell case anyway). The editor will be written against
   let-it-crash + userland supervisors instead.
-- 🟡 **Userland supervisor library** (ADR-044, `std/supervisor.blsp`) — the
+- ✅ **Userland supervisor library** (ADR-044, `std/supervisor.blsp`) — the
   structured form of that respawn pattern, require-able: `start-supervisor` over
   child specs (`:start` thunk + `:permanent`/`:transient`/`:temporary` restart
   type), restart-intensity limits, `which-children`. Pure Brood over
-  `spawn`/`monitor`/`receive`, zero kernel surface. ✅ `:one-for-one`;
-  ⬜ `:one-for-all` / `:rest-for-one` deferred — they need a kernel kill/exit
-  primitive (no links/`exit` yet), so userland can't terminate healthy siblings.
-  See [`supervision.md`](supervision.md) and [`concurrency-v2.md`](concurrency-v2.md) §4.
+  `spawn`/`monitor`/`receive`/`exit`, zero new kernel surface. **All three
+  strategies now ship** — `:one-for-one`, `:one-for-all`, `:rest-for-one` — over
+  the `(exit pid :kill)` primitive (ADR-063): the group strategies hard-kill the
+  healthy siblings they must restart and selectively drain each one's `[:down]`
+  so a deliberate kill isn't mistaken for a crash. `stop-supervisor` and an
+  intensity-exceeded shutdown terminate the children too (no orphans). Deferred
+  (ADR-011): `link`/bidirectional exit propagation and a `:shutdown` grace
+  timeout. See [`supervision.md`](supervision.md) and [`concurrency-v2.md`](concurrency-v2.md) §4.
 - 🟡 **TCP sockets (the substrate, done — ADR-062).** Thin kernel primitives
   (`tcp-connect`/`tcp-listen`/`tcp-send`/`tcp-close`/`tcp-local-port`) over a
   reusable blocking-IO → mailbox seam (`process::spawn_io_source`, ADR-059):
   inbound data and connections arrive as `[:tcp …]` / `[:tcp-accept …]` mailbox
   messages, consumed with `receive` (no worker ever blocked). `std/tcp.blsp` adds
-  `socket?` + `tcp-drain`. ⬜ Follow-ups: TLS (`rustls`) → `std/http.blsp`;
-  `tcp-controlling-process`; a `mio` reactor for scale.
-- ⬜ The same runtime listens on a socket and serves the M3 protocol
+  `socket?` + `tcp-drain`.
+- ✅ **TLS client / HTTPS (ADR-062).** `rustls 0.23` (pure-Rust, Mozilla roots via
+  `webpki-roots`) backs a one-shot `(tls-request host port request)` primitive
+  (`crate::net`): connect + handshake + write + stream the response back as the
+  same `[:tcp …]`/`[:tcp-closed …]` mailbox messages a plain socket uses. `std/http.blsp`
+  routes `https://` URLs through it, so `http-get`/`http-request` speak both
+  transports. **Client-only:** rustls streams don't split read/write across
+  threads like a raw fd, so accepting *inbound* TLS (server-side, for the daemon
+  below) is still open. ⬜ Other follow-ups: `tcp-controlling-process`; a `mio`
+  reactor for scale.
+- ⬜ The same runtime listens on a socket and serves the M3 protocol (incl.
+  **server-side TLS** for remote attach)
 - ⬜ Remote editor instances attach (the Emacs `--daemon` / `emacsclient` model)
 - ⬜ One core, multiple attached frontends
 

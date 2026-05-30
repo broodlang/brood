@@ -8471,3 +8471,46 @@ split remains (perf, not correctness) — the collector is correct without it.
 **Tree note.** Concurrent edits landed during this work (LSP `workspace.rs` +
 new LSP modules, macro `hygiene.rs`). Left untouched; this change is confined to
 `core/heap.rs` + `core/alloc.rs` + the new `gc.rs` test + docs.
+
+## 2026-05-30 — Supervisor: `:one-for-all` + `:rest-for-one` (and no more orphans)
+
+**Goal.** Finish the OTP strategy set in `std/supervisor.blsp`. The roadmap (and
+the lib's own docstrings) said this was blocked on "a kernel kill/exit primitive
+Brood lacks" — but that's **stale**: `(exit pid reason)` (ADR-063, commit
+`fe3a1f0`) already shipped. So this was a pure-Brood task, no kernel work.
+
+**First, a doc correction.** While confirming, also found the roadmap marked TLS
+as a ⬜ follow-up — it's done too (`rustls` + `tls-request` + `https://` in
+`std/http.blsp`, ADR-062). Marked it ✅ (client-only; server-side TLS for the
+daemon is still open).
+
+**Built (all in `std/supervisor.blsp`).**
+- **`:one-for-all`** — on a (restartable) child's death, terminate the surviving
+  children and restart the whole set. **`:rest-for-one`** — restart the crashed
+  child and every child started *after* it (start order preserved in `:children`),
+  leaving the earlier ones running.
+- The mechanism that made it possible: `(exit pid :kill)` is an untrappable hard
+  kill that fires the target's `[:down]` even when it's parked or in a tight loop;
+  and `receive` is **selective**, so the supervisor drains *just* the killed
+  sibling's `[:down]` (`(receive ([:down ~ref _ _] :ok))`) and never mistakes a
+  deliberate kill for a fresh crash. Same trick handles a sibling that had
+  *also* crashed (its queued `[:down]` is drained uniformly).
+- Restart-type semantics inside a group restart: the crashed child's type gates
+  whether the procedure runs; each member is then restarted only if its own type
+  permits — a `:temporary` sibling is terminated and **dropped**, not revived.
+- **No more orphans:** `stop-supervisor` now hard-kills every child as it leaves
+  the loop, and an intensity-exceeded shutdown terminates the survivors before
+  throwing (Erlang's behaviour). `start-supervisor` validates `:strategy` and
+  rejects unknown values.
+
+**Verified.** `tests/supervisor_test.blsp` grew to 11 tests (one-for-all incl. the
+`:temporary`-not-revived case, rest-for-one, stop-terminates-children, unknown-
+strategy rejection); **5/5 clean runs under `BROOD_GC_STRESS=1`** (each test runs
+in its own green process across the worker pool, so kills/drains are exercised
+concurrently). Full `cargo test` green.
+
+**Docs.** `supervision.md`, `concurrency-v2.md` §4, roadmap (supervisor ✅ + TLS
+✅), ADR-044 (scope updated: all three strategies; deferrals narrowed to
+`link`/`:shutdown`-grace). Deferred (ADR-011): bidirectional `link` exit
+propagation, a `:shutdown` grace-timeout before the hard kill, first-class nested
+trees (a child that spawns a supervisor already composes as one).

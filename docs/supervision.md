@@ -31,6 +31,13 @@ supervisor itself, just the substrate it was built over:
 - `(monitor pid)` — watch a pid; receive `[:down ref pid reason]` when it dies.
 - `(demonitor ref)` — drop a monitor.
 - `(send pid msg)` / `(receive …)` — communicate.
+- `(exit pid reason)` — **terminate another process** (Erlang `exit/2`, ADR-063).
+  `:kill` is the untrappable hard kill (caught at the reduction tick, so it stops
+  even a tight CPU loop); any other reason is the soft signal (the target dies at
+  its next `receive`). Either way the target's monitors fire `[:down ref pid
+  reason]`. This is the primitive that lets a userland supervisor terminate
+  *healthy* siblings — the capability whose absence used to cap the library at
+  `:one-for-one` (see below).
 
 A user wanting *recover-on-throw* writes a supervisor process in Brood:
 
@@ -62,9 +69,9 @@ mechanism-in-Rust / policy-in-Brood rule (ADR-006).
 (def sup (start-supervisor
            (list {:id :a :start (fn () (spawn (worker-a)))}
                  {:id :b :start (fn () (spawn (worker-b))) :restart :transient})
-           {:max-restarts 3 :max-seconds 5}))
+           {:strategy :one-for-all :max-restarts 3 :max-seconds 5}))
 (which-children sup)    ; => list of {:id :pid :restart}
-(stop-supervisor sup)   ; stop supervising (children keep running — see below)
+(stop-supervisor sup)   ; stop supervising AND terminate the children
 ```
 
 A **child spec** is a map: `:start` (a 0-arg fn that spawns the child and returns
@@ -74,24 +81,39 @@ restart), `:transient` (restart only after an *abnormal* exit, reason ≠
 `:max-seconds`) caps a crash loop: when exceeded, the supervisor exits abnormally
 so a watcher's monitor fires.
 
-### What it does *not* do (and why)
+### Strategies (all three, since `exit/2` landed)
 
-Both limits below are the same missing kernel capability — **there is no
-kill/exit primitive** (no links, no `exit`), so a supervisor cannot terminate a
-process it didn't crash:
+The `(exit pid reason)` primitive (ADR-063) supplied the one missing capability —
+terminating a *healthy* sibling — so the full OTP strategy set is now pure-Brood
+policy. `start-supervisor` takes `:strategy`:
 
-- **Only `:one-for-one`.** `:one-for-all` and `:rest-for-one` must terminate
-  *healthy* siblings when one dies; without a kill primitive that's impossible in
-  userland. `start-supervisor` rejects them rather than silently degrading.
-- **`stop-supervisor` doesn't stop the children.** It ends the supervisor's loop;
-  the children keep running (orphaned). Likewise an intensity-exceeded shutdown
-  orphans the surviving children instead of terminating them (Erlang terminates
-  them).
+- **`:one-for-one`** (default) — restart only the crashed child.
+- **`:one-for-all`** — restart every child: terminate the survivors, then restart
+  the whole set.
+- **`:rest-for-one`** — restart the crashed child and every child started *after*
+  it (in start order); earlier-started children are left running.
 
-These are the natural trigger for the *one* kernel hook supervision might
-justify later — a minimal `exit`/link primitive — at which point the deferred
-strategies become a pure-Brood addition. See
-[`concurrency-v2.md`](concurrency-v2.md) §4.
+For the group strategies the supervisor `(exit pid :kill)`s each healthy member it
+must restart and **selectively drains that member's `[:down]`** (Erlang `receive`
+keeps non-matching messages queued), so a deliberate kill is never mistaken for a
+fresh crash. The crashed child's `:restart` type gates whether the procedure runs
+at all; within a group restart each member is restarted only if its *own* type
+permits — a `:temporary` sibling is terminated and dropped, not revived.
+
+**`stop-supervisor` and intensity-exceeded both terminate the children now** (no
+orphans): `stop-supervisor` kills every child as it leaves the loop, and a crash
+loop that blows the intensity window terminates the survivors before the
+supervisor throws (Erlang's shutdown behaviour).
+
+#### Still simplified (ADR-011)
+
+- **No `link` / bidirectional exit propagation, no `:shutdown` grace timeout.** A
+  group kill is the hard `:kill`; there's no "send `:shutdown`, wait, then
+  `:kill`" escalation. Intensity counts one event per trigger (per group restart),
+  not one per child restarted.
+- **No nested supervision trees as a first-class concept** — but a child whose
+  `:start` thunk itself calls `start-supervisor` *is* a sub-tree (its pid is a
+  supervisor), so trees compose without extra machinery.
 
 ## What's gone (vs. ADR-039 as proposed)
 
