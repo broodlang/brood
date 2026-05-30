@@ -45,30 +45,28 @@ static SOFT_LIMIT: AtomicUsize = AtomicUsize::new(0); // 0 = unlimited; safepoin
 /// Default ceiling the *test runners* apply when neither env var is set
 /// (`brood --test`, `nest test`, the `cargo test` Brood suite). Its job is to
 /// **GUARANTEE THE HOST SURVIVES a test run** — it is *not* a precise working-set
-/// budget (that's impossible while the tracing GC is still a no-op, the M1
-/// migration: the bump allocator never reclaims, so even legitimate bounded work
-/// accumulates). The number is chosen *below* a typical dev machine's RAM so a run
-/// whose allocation grows without bound fails with a clean, catchable `E0043`
-/// (then the hard abort) long before the OS OOM-killer or a hard freeze can fire.
+/// budget. The number is chosen *below* a typical dev machine's RAM so a run whose
+/// allocation grows without bound fails with a clean, catchable `E0043` (then the
+/// hard abort) long before the OS OOM-killer or a hard freeze can fire.
 ///
-/// **Never default this to `0`/unlimited.** The GC doesn't reclaim yet, so an
-/// unbounded run will eat all host RAM — an unlimited default once OOM-froze the
-/// machine. The cap machinery is still opt-out per run via `BROOD_MEM_LIMIT`.
+/// **2 GiB hard / 1 GiB soft.** Now that automatic collection at any eval depth
+/// (Stage B + ADR-061, `docs/memory-review.md`) reclaims LOCAL garbage, the whole
+/// project suite peaks ~240 MB *under collection* (down from ~1.1 GiB when the
+/// runner merely hibernated between steps, ~4 GiB tripping the old cap, and ~18 GiB
+/// before isolated units ran in droppable processes / OOM-froze the host). So these
+/// were sized for an era that's gone: 1 GiB soft is ~4× the live peak — high enough
+/// never to trip on legitimate parallel load, low enough to catch a genuine runaway
+/// (which heads to many GB) *cleanly* via the catchable `E0043` before the hard
+/// abort. This cap is a **host-survival backstop, not a working-set budget** — the
+/// collector is the reclamation path. Opt out per run via `BROOD_MEM_LIMIT`.
 ///
-/// **5 GiB hard / 4 GiB soft.** With the test runner now hibernating between steps
-/// (`std/test.blsp`, the Stage-A block — each step flips the runner's arena so its
-/// transients are reclaimed), the whole project suite peaks ~1.1 GiB (down from
-/// ~4 GiB tripping this cap, and ~18 GiB before isolated units ran in droppable
-/// processes / OOM-froze the host). 5/4 GiB leaves ample headroom while staying well
-/// under host RAM. Now that automatic collection (Stage B, ADR-055/058,
-/// `docs/memory-review.md`) has landed, a long loop is bounded; this cap is a
-/// host-safety backstop, not the reclamation path. A single `(sum-to 100000 0)` tail
-/// loop would hold ~60 MiB unreclaimed *without* GC (every `(+ …)` is a prelude Brood
-/// call allocating env frames per iteration; see `docs/devlog.md`).
-pub const TEST_DEFAULT_HARD: usize = 5 * 1024 * 1024 * 1024; // 5 GiB
-/// Soft default for the test runners — 4 GiB, so a runaway/accumulating run fails
+/// **Never default this to `0`/unlimited** — a pathological non-collecting path (or
+/// the prelude *builder*, where GC is off) could still eat host RAM; an unlimited
+/// default once OOM-froze the machine.
+pub const TEST_DEFAULT_HARD: usize = 2 * 1024 * 1024 * 1024; // 2 GiB
+/// Soft default for the test runners — 1 GiB, so a runaway/accumulating run fails
 /// *cleanly* (catchable `E0043`) before the hard abort and far below host RAM.
-pub const TEST_DEFAULT_SOFT: usize = 4 * 1024 * 1024 * 1024; // 4 GiB
+pub const TEST_DEFAULT_SOFT: usize = 1024 * 1024 * 1024; // 1 GiB
 
 /// System allocator wrapper that tallies bytes in/out and enforces [`HARD_LIMIT`].
 pub struct Counting;

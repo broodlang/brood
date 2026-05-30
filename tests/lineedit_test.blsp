@@ -58,6 +58,19 @@
       ;; back down past the newest restores the saved in-progress text
       (assert= (get (lineedit--handle u1 :down) :text) "wip"))))
 
+(describe "lineedit--remember — pushing onto history (shared by REPL + observer)"
+  (test "pushes a trimmed entry newest-first"
+    (assert= (lineedit--remember '("(a)") "  (b)  ") '("(b)" "(a)")))
+  (test "turns internal newlines into spaces so a multi-line form recalls as one line"
+    (assert= (lineedit--remember '() "(do\n1\n2)") '("(do 1 2)")))
+  (test "drops blanks and whitespace-only submissions"
+    (assert= (lineedit--remember '("(a)") "   ") '("(a)"))
+    (assert= (lineedit--remember '() "") '()))
+  (test "drops a consecutive duplicate of the newest entry"
+    (assert= (lineedit--remember '("(a)" "(b)") "(a)") '("(a)" "(b)"))
+    ;; …but a non-consecutive repeat is kept (it becomes the newest)
+    (assert= (lineedit--remember '("(b)" "(a)") "(a)") '("(a)" "(b)" "(a)"))))
+
 (describe "lineedit--handle — extra emacs/readline keys"
   (test "C-p / C-n walk history like ↑ / ↓"
     (let (h (lineedit--init "x> " "" (list "(b)" "(a)")))

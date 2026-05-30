@@ -4,7 +4,7 @@ Resume point for garbage-collector work, after the 2026-05-30 session that lande
 collect-at-any-depth (ADR-061), rooted the six re-entrant sites it exposed, moved
 `macroexpand` to Brood, and adopted the single-shot-primitive rule (ADR-064).
 
-## State: correctness is done
+## State: correctness is done — and no known GC crashes remain
 
 - **Collect at any eval depth** (ADR-061): the copying collector fires at any
   depth, not just the outermost. The evaluator keeps in-flight LOCAL transients on
@@ -15,6 +15,11 @@ collect-at-any-depth (ADR-061), rooted the six re-entrant sites it exposed, move
   `macroexpand-1` builtin.
 - **I/O subsystems audited safe** (`net`/`tls`/`file`/`io_source`): zero eval
   re-entry → single-shot → GC-safe by construction.
+- **Region-check rooting** (item #1, 2026-05-30): per-call rooting skips immovable
+  handles → recovered ~10–14% of the collect-at-any-depth overhead.
+- **`promote` cycle guard** (item #2, 2026-05-30): the last known GC-adjacent
+  crash — a cyclic local closure promoted via `def`/`spawn` SIGSEGV'd — is fixed
+  (forwarding table + `OnceLock` reserve-then-fill). **No known GC crashes remain.**
 - **Verified:** full `cargo test` green under
   `RUSTFLAGS="-C debug-assertions=on" BROOD_GC_VERIFY=1 BROOD_GC_STRESS=1`.
 
@@ -25,27 +30,37 @@ Tooling for any GC change (see CLAUDE.md "Debug tooling"): `BROOD_GC_VERIFY=1`
 
 ## Remaining work (priority order)
 
-### 1. Tune the operand-stack rooting for perf
-Every call now pays a few `Vec` push / re-read / truncate ops (`eval_arguments`,
-`bind_sequential`, the literal/`if`/`let` sites in `eval/mod.rs`). **Fix if the
-benchmark regression warrants it:** a **region check before rooting** — RUNTIME and
-PRELUDE handles never move, so the hot path (running compiled/promoted code, where
-forms are RUNTIME) can skip the push entirely and pay ~nothing. Add a
-`v.region() == LOCAL` (and `env.region() == LOCAL`) guard before each
-`push_root`/`push_env_root`. See the benchmark comparison below for whether this is
-needed and where.
+### 1. Tune the operand-stack rooting for perf — ✅ DONE (2026-05-30)
+A **region check before rooting**, shipped as a token-based rooting API in
+`core/heap.rs` (`is_movable`, `Root`/`EnvRoot`, `root`/`read_root`/`advance_root`/
+`root_env`/`read_root_env`). `root(v)` takes an operand-stack slot **only when `v`
+is movable** (a LOCAL heap object); immovable values (atoms, `PRELUDE`/`RUNTIME`
+handles — the hot path running promoted code) stay inline and pay nothing. All hot
+per-call sites in `eval/mod.rs` were converted off the positional
+`push_root`/`root_at` protocol (`eval_arguments`, `apply_closure`, `bind_params`,
+`bind_sequential`, `tail_of_cons`, the call-dispatch/`if`/`def`/macro/multi-body
+sites, vector/map literals). **Recovered ~10–14% across eval-bound benches**;
+overhead vs the pre-operand-stack baseline dropped from ~1.7–1.95× to ~1.5–1.71×
+(about a third of the regression — the residue is the inherent per-arg/per-scope
+LOCAL rooting that can't be skipped while collecting at depth). See the
+2026-05-30 devlog entry and archive `benchmarks/2026-05-30T00-54-34Z.md`. Verified
+green under `BROOD_GC_VERIFY=1 BROOD_GC_STRESS=1` + debug-assertions.
 
-### 2. `promote` has no cycle guard — a genuine latent crash
-`Heap::promote_env` ↔ `Heap::promote_closure` (`core/heap.rs` ~1700–1745) recurse
-with **no visited/forwarding table**, so promoting a *cyclic* local-env↔closure
-graph stack-overflows. Reachable: `(def f (let (g (fn () g)) g))` — `g` captures
-the scope that binds `g`, and `def` promotes it → infinite recursion → SIGSEGV.
-(Normal recursive `defn`s capture the *global* env, which short-circuits in
-`promote_env`, so they're fine — this only bites a closure capturing a
-self-referential **local** scope.) **Fix:** give `promote` a `fwd`-style forwarding
-table keyed by LOCAL closure/env index, exactly as `arena_flip`/`flush_value`
-already do (`core/heap.rs`), so a revisit resolves to the in-progress placeholder.
-This is an actual bug, independent of the collector but adjacent — do it soon.
+*Further headroom if ever needed (not pursued):* a leaner operand-stack
+representation avoiding the per-call `SmallVec<Root>` materialize, or arming
+rooting only when `gc_enabled`.
+
+### 2. `promote` has no cycle guard — ✅ DONE (2026-05-30)
+`promote` now threads a `PromoteForward` table (LOCAL index → RUNTIME handle) and
+**reserves-then-fills** the two cyclic-capable RUNTIME slabs — `closures` and
+`envs` are `boxcar::Vec<OnceLock<…>>`, so `promote_closure`/`promote_env` push an
+empty cell, register the handle in `fwd`, recurse (the back-edge resolves to the
+reserved handle), then `set` the cell once. Pairs/vectors/maps stay un-forwarded
+(acyclic by construction). The `(let (g (fn () g)) g)` repro and `letrec`
+mutual-recursion now promote correctly — verified cross-process by
+`gc.rs::promotes_cyclic_local_closures_without_crashing`. The `OnceLock` adds an
+infallible `get()` to the hot RUNTIME-closure read path; fib shows no measurable
+regression. See the 2026-05-30 devlog entry.
 
 ### 3. Surface reduction (same single-shot rule, ADR-064/ADR-006)
 - **`quasiquote` → Brood macro** over `cons`/`list`/`eval`. Highest structural
@@ -59,20 +74,28 @@ This is an actual bug, independent of the collector but adjacent — do it soon.
 - **`reload-defs` → Brood**: needs `note-definition` and a read-file-forms
   primitive exposed (it currently records def-sites for goto-definition in Rust).
 
-### 4. Tighten the ADR-043 memory caps
-`TEST_DEFAULT_HARD/SOFT` (`core/alloc.rs`) are 5 GiB / 4 GiB — sized for the old
-~18 GB suite peak. The suite now peaks ~240 MB under collection, so these can drop
-substantially (they're a host-survival backstop, not a working-set budget).
+### 4. Tighten the ADR-043 memory caps — ✅ DONE (2026-05-30)
+`TEST_DEFAULT_HARD/SOFT` (`core/alloc.rs`) dropped from 5 GiB / 4 GiB to **2 GiB /
+1 GiB** — ~4× the ~240 MB collected suite peak: high enough never to trip on
+legitimate parallel load, low enough to catch a genuine runaway cleanly via
+`E0043` before the hard abort. Full suite passes under the tighter caps. The
+stale "GC is a no-op / never reclaims" prose in that doc-comment was corrected too.
 
 ### 5. Deferred optimizations
 - **Generational collection:** today `arena_flip` is a full semi-space copy each
   time, recopying long-lived data. A young/old split would cut copying of stable
-  data.
-- **`Rc` → `gc-arena` (ADR-002):** effectively superseded by the hand-rolled
-  copying collector now in place. Confirm and close it in the roadmap rather than
-  carry it as pending.
+  data. **(Still open — the one remaining GC perf item.)**
+- **`Rc` → `gc-arena` (ADR-002):** ✅ closed (2026-05-30). ADR-002's status now
+  records that the `Rc`/`RefCell` substrate was replaced wholesale by the
+  hand-rolled handle/slab copying collector (ADR-035/054/055/061), *not* migrated
+  to `gc-arena`; nothing left to carry.
 
 ## Benchmark: collect-at-any-depth overhead
+
+> **Resolved by item #1 (2026-05-30).** The region-check rooting clawed back
+> ~10–14% of the overhead below — archive `docs/benchmarks/2026-05-30T00-54-34Z.md`
+> and the 2026-05-30 devlog entry have the post-fix numbers. The table here is the
+> *pre-fix* measurement that motivated the work.
 
 Baseline = commit `243debb` (pre-operand-stack; archive
 `docs/benchmarks/2026-05-29T21-19-57Z.md`). Fresh run = commit `317190b`

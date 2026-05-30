@@ -1,9 +1,11 @@
 //! Macro-hygiene lint: warn when a `defmacro` template introduces a binder
 //! that can **capture** code spliced in from the macro's arguments.
 //!
-//! Brood macros are unhygienic by default (no automatic renaming), so a binder
-//! a quasiquote template introduces with a *literal* symbol lives in the same
-//! namespace as whatever the caller's code uses. The classic bug:
+//! Brood macros are unhygienic by default *except* for opt-in auto-gensym (a
+//! binder written `tmp#` is rewritten to a fresh symbol by the quasiquote
+//! expander). So a binder introduced with a *plain literal* symbol — no `#`
+//! suffix, no `~gensym` — lives in the same namespace as the caller's code. The
+//! classic bug:
 //!
 //! ```text
 //! (defmacro time (expr)
@@ -12,18 +14,20 @@
 //! ```
 //!
 //! If the caller writes `(time (+ start 1))`, the body's `start` no longer
-//! refers to the caller's `start` — the template captured it. The fix is
-//! `(gensym)`: bind `~(gensym "start")` so the binder is a fresh, uncapturable
-//! symbol (this is what `and`/`or`/`bench`/`is`/… in the prelude all do).
+//! refers to the caller's `start` — the template captured it. The fix is a fresh,
+//! uncapturable binder: either the auto-gensym shorthand `start#`, or an explicit
+//! `~(gensym "start")` (the latter is what `and`/`or`/`bench`/`is`/… in the
+//! prelude do; either silences this lint).
 //!
 //! ## The firing condition (kept tight to honour the no-false-positive contract)
 //!
 //! We warn only when **both** hold for a `let`/`fn` binder inside a quasiquote
 //! template:
-//!   1. the binder is a *literal* symbol — written bare, e.g. `start`. A
+//!   1. the binder is a *plain literal* symbol — written bare, e.g. `start`. A
 //!      gensym'd binder reads as `(unquote g)` (you write `~g`), which is not a
 //!      symbol, so it never trips this; nor does an unquoted caller-supplied
-//!      binder name (`~evar` in `try`).
+//!      binder name (`~evar` in `try`); nor does a `#`-suffixed binder (`start#`),
+//!      which the expander auto-gensyms.
 //!   2. a macro **parameter** is spliced (`~p` / `~@p`) somewhere in that
 //!      binder's scope — i.e. caller code actually lands where the binder is
 //!      visible. A macro that binds a private temp it never exposes caller code
@@ -206,6 +210,12 @@ fn flag_if_captures(
     if bname == "_" || is_amp_marker(&bname) {
         return;
     }
+    // A `#`-suffixed binder (`tmp#`) is rewritten to a fresh gensym by the
+    // quasiquote expander (auto-gensym, `eval::macros::maybe_autogensym`), so it
+    // is uncapturable by construction — not a literal binder. Don't flag it.
+    if bname.len() > 1 && bname.ends_with('#') {
+        return;
+    }
     if !scope_splices_param(heap, scope, params) {
         return;
     }
@@ -214,8 +224,8 @@ fn flag_if_captures(
         pos,
         format!(
             "macro `{macro_name}` binds `{bname}` in a template that splices a parameter into \
-             its scope — `{bname}` can capture references in the spliced code. Bind it with \
-             `(gensym)` instead, e.g. `(let (g (gensym \"{bname}\")) \\`(let (~g …) …))`."
+             its scope — `{bname}` can capture references in the spliced code. Give the binder a \
+             `#` suffix (`{bname}#`) for an auto-gensym, or bind `~(gensym \"{bname}\")`."
         ),
     ));
 }
@@ -326,6 +336,16 @@ mod tests {
             "(defmacro safe (x) (let (g (gensym)) `(let (~g ~x) (if ~g ~g 0))))"
         )
         .is_empty());
+    }
+
+    #[test]
+    fn autogensym_binder_is_not_flagged() {
+        // `r#` is auto-gensym'd by the quasiquote expander, so it's uncapturable
+        // even though `~a`/`~b` (params) are spliced into its scope.
+        assert!(
+            hygiene_warnings("(defmacro my-or (a b) `(let (r# ~a) (if r# r# ~b)))").is_empty(),
+            "a `#`-suffixed (auto-gensym) binder must not be flagged"
+        );
     }
 
     #[test]

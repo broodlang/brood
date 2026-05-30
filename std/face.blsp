@@ -1,0 +1,108 @@
+;; std/face.blsp — named text faces + a theme registry for UI apps. (require 'face).
+;;
+;; Design notes (the *why*; the *what* is in the docstrings below):
+;;  - An emacs-style **face system** shared by every UI on the display seam (the
+;;    process observer today, the REPL line editor and the coming editor next), so
+;;    styling is policy in Brood, named once and referenced everywhere — restyle a
+;;    "section" by redefining ONE face, not by hunting inline `{:fg …}` literals
+;;    through a renderer. The counterpart to `keymap` (key→command) and `display`
+;;    (render-ops): this is "name → style".
+;;  - A FACE is the same attribute map `display.blsp`/`term-draw`/`gui-draw` already
+;;    consume (`{:fg :red :bold true …}`), so `(face :ui/header)` drops straight into
+;;    a `[:text row col s <face>]` op with no frontend change. `face` is the only
+;;    resolution step — call sites never touch `*faces*` directly.
+;;  - The registry is a single global map, mutated only by `def` rebinding it (the
+;;    language's one mutation, as `provide` does for `*features*`). That rebind is
+;;    visible across processes (shared code region, ADR), so a theme set in the REPL
+;;    restyles a running observer on its next frame — late binding, like a redefined
+;;    command through `keymap`. (A `def` rebind isn't an atomic read-modify-write,
+;;    so *concurrent* `def-face`s from many processes can lose updates — like
+;;    concurrent `(def *features* …)`. Define a theme from one place — startup or
+;;    the REPL — not from a fan-out; reads are always safe.)
+;;  - Pure resolution (`face` is data→data, no IO), opt-in (`require`), never in the
+;;    prelude.
+;;
+;; ATTRIBUTES a face map may carry (all optional; unknown keys are ignored by every
+;; frontend, so the vocabulary grows without breaking older ones):
+;;   :fg :bg        — a colour keyword (:red :green … :dark-grey), both frontends
+;;   :bold :reverse — flags, both frontends
+;;   :underline :italic — flags (terminal + GUI)
+;;   :family        — GUI only: a font-family keyword (`:mono` is the bundled
+;;                    default; others registered via `gui-font-register`)
+;;   :height        — GUI only: a hint, honored by the whole-window `gui-font!` knob
+;;   :inherit       — a face NAME this face is layered over (local keys win)
+
+(defmodule face
+  "Named text faces + a theme registry for UI apps on the display seam (the
+counterpart to `keymap`/`display`): style is named once and referenced everywhere,
+so restyling a section is a one-line redefinition rather than an edit at every call
+site.
+
+    (require 'face)
+    (def-face :ui/header {:fg :white :bold true :reverse true})
+    (def-face :note      {:inherit :ui/dim :italic true})
+    (text 0 0 \"hi\" (face :ui/header))   ; resolve a face into a render op
+    (face-set :ui/header {:fg :cyan})    ; restyle everywhere, live
+
+A *face* is the same attribute map `term-draw`/`gui-draw` consume (`{:fg :red :bold
+true …}`); `face` resolves a name (following an `:inherit` chain) to that map, or
+nil (the default face) for an unknown name. The registry is a shared global, so a
+theme change is visible to a running UI on its next frame (late binding).")
+
+;; ---- the registry -----------------------------------------------------------
+
+(def *faces* {})
+; the theme: face-name (keyword) -> attribute map
+
+(defn def-face (name attrs)
+  "Register (or replace) face `name` with the attribute map `attrs`; returns `name`.
+`attrs` may carry an `:inherit` face name layered under it at resolution time."
+  (def *faces* (assoc *faces* name attrs))
+  name)
+
+(defn face-set (name attrs)
+  "Merge `attrs` into face `name` (creating it if absent) — restyle a face in one
+place, keeping its other attributes. Returns `name`."
+  (def *faces* (assoc *faces* name (merge (or (get *faces* name) {}) attrs)))
+  name)
+
+(defn faces ()
+  "The whole face registry (a map of name → attribute map). For introspection — a
+theme editor or the docs; resolve a single face with `face`."
+  *faces*)
+
+;; ---- resolution -------------------------------------------------------------
+
+(defn face--resolve (name depth)
+  "Resolve face `name` to a flat attribute map, layering an `:inherit` parent
+underneath (local keys win). `depth` bounds the `:inherit` chain so an accidental
+cycle terminates instead of overflowing the stack (cf. `observe--tree-walk`)."
+  (let (attrs (get *faces* name))
+    (cond
+      (nil? attrs)   nil
+      (>= depth 16)  (dissoc attrs :inherit)
+      :else (let (parent (get attrs :inherit)
+                  self (dissoc attrs :inherit))
+              (if (nil? parent)
+                self
+                (merge (or (face--resolve parent (inc depth)) {}) self))))))
+
+(defn face (name)
+  "Resolve face `name` to the attribute map a render op wants (`{:fg :red …}`),
+following its `:inherit` chain. An unknown name resolves to `nil` — the default
+face — so `(text r c s (face :missing))` is just unstyled text. Pure."
+  (face--resolve name 0))
+
+;; ---- the core `:ui/*` faces -------------------------------------------------
+;;
+;; A small base palette every UI app can build on (and an app overrides or inherits
+;; from): the neutral default, an emphatic header, dimmed/secondary text, an error
+;; colour, the reverse-video selection, and a highlight. Apps add their own named
+;; faces (often `:inherit`-ing these) — see `std/observer.blsp`.
+
+(def-face :ui/default   {})
+(def-face :ui/header    {:bold true :reverse true})
+(def-face :ui/dim       {:fg :dark-grey})
+(def-face :ui/error     {:fg :red :bold true})
+(def-face :ui/selected  {:reverse true})
+(def-face :ui/highlight {:fg :cyan})

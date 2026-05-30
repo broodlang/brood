@@ -160,6 +160,17 @@ first time, so ↓ can restore it."
             entry (nth hist ni))
         (assoc state :hist-idx ni :saved saved :text entry :point (string-length entry))))))
 
+(defn lineedit--remember (history src)
+  "Push submitted source `src` onto `history` (newest first) for ↑/↓ recall —
+internal newlines collapsed to spaces (so a multi-line form recalls as one line),
+trimmed, dropping blanks and consecutive duplicates. Shared by the REPL and the
+observer's eval minibuffer (the `:hist` list `lineedit--init` is seeded with)."
+  (let (entry (trim (replace src "\n" " ")))
+    (if (or (= entry "")
+            (and (not (empty? history)) (= (first history) entry)))
+      history
+      (cons entry history))))
+
 (defn lineedit--hist-next (state)
   "Recall the next (newer) history entry, or the saved in-progress line at the end (↓)."
   (let (idx (get state :hist-idx))

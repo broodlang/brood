@@ -204,6 +204,23 @@ the `nest new` scaffolder.")
   (project--ensure-deps-on-path root)
   root)
 
+;; Load a full project image for **tooling** (the LSP and the `nest mcp` server):
+;; put the project's sources on *load-path* and load them (so cross-module names
+;; resolve), then require the `test` and `format` frameworks so their macros and
+;; functions (`describe`/`test`/`assert=`/`is`, `format-source`) are bound too —
+;; otherwise a buffer that uses them false-positives as "unbound" in the advisory
+;; checker the tooling runs. One definition both servers share, so they can't
+;; drift on which frameworks a tooling image carries. Returns `root`.
+(defn setup-tooling-image (root)
+  "Bootstrap a project image for tooling (LSP / MCP): load the project's sources
+plus the test + format frameworks, so cross-module names and framework macros
+resolve in the advisory checker. Returns the project root."
+  (project-setup root)
+  (project-load-sources root)
+  (require 'test)
+  (require 'format)
+  root)
+
 ;; If the manifest declared :dependencies, resolve them (writing/refreshing
 ;; project.lock.blsp) and append each dep's source dir to *load-path* so its
 ;; modules are require-able. Deferred to the package module (ADR-037), required
@@ -821,6 +838,92 @@ the `nest new` scaffolder.")
     "  (test \"move clamps the column onto a shorter line\"\n"
     "    (assert= (get (ed-move {:lines (list \"ab\" \"c\") :row 0 :col 2} 1 0) :col) 1)))\n"))
 
+;; `gui`: a windowed app on the `ui` framework — like `editor`, a `ui-run` client,
+;; but opened in a NATIVE WINDOW via `(gui-display)` (needs a `--features gui`
+;; runtime) and styled through the shared `face` registry (define the look once,
+;; restyle in one place). The model is a plain map threaded through `ui-run`'s
+;; loop; the starting point for a real GUI app (e.g. a daemon dashboard).
+(defn project--gui-main-template (nm)
+  (str
+    "(defmodule main \"" nm " — a windowed GUI app on the `ui` framework.\n"
+    "\n"
+    "Run it:  nest run   (opens a native window — needs the runtime built with the\n"
+    "GUI backend: `./configure --with-gui && make install`, or run with\n"
+    "`--features brood/gui`). ↑/↓ change the counter, Enter resets, Ctrl-C or the\n"
+    "window's close button quits. The model is a plain map; `ui-run` drives the loop\n"
+    "— render `view`, poll a key, fold it with `update`, repeat — over a window from\n"
+    "`(gui-display)`. Swap that for `*term-display*` to run in the terminal instead.\")\n"
+    "\n"
+    "(require 'ui)       ; the app framework: display frontends + the `ui-run` loop\n"
+    "(require 'display)  ; the render-op constructors (clear / text / cursor / frame)\n"
+    "(require 'face)     ; named text faces — style the sections in one place\n"
+    "\n"
+    ";; Faces: define the look once. Restyle by editing these (or, live, e.g.\n"
+    ";; `(face-set :app/count {:fg :magenta})`). On the GUI a face may also carry a\n"
+    ";; font `:family` / `:italic`; the terminal honours the colours + bold/reverse.\n"
+    "(def-face :app/title {:inherit :ui/header})\n"
+    "(def-face :app/count {:fg :cyan :bold true})\n"
+    "(def-face :app/hint  {:inherit :ui/dim})\n"
+    "\n"
+    "(defn app-init ()\n"
+    "  \"The starting model (`:done` quits; `:tick-ms` is the refresh beat).\"\n"
+    "  {:count 0 :done false :tick-ms 1000})\n"
+    "\n"
+    "(defn app-step (m d) \"Change the counter by `d` (pure).\" (assoc m :count (+ (get m :count) d)))\n"
+    "\n"
+    "(defn app-center (s cols) \"Left column that centres `s` in `cols`.\"\n"
+    "  (max 0 (quot (- cols (string-length s)) 2)))\n"
+    "\n"
+    "(defn app-view (m cols rows)\n"
+    "  \"ui-run view: a centred title, the counter, and key hints (pure).\"\n"
+    "  (let (mid   (quot rows 2)\n"
+    "        title \"" nm "\"\n"
+    "        count (str \"count: \" (get m :count))\n"
+    "        hint  \"up/down change · enter reset · ctrl-c quit\")\n"
+    "    (frame\n"
+    "      (clear)\n"
+    "      (text (- mid 2) (app-center title cols) title (face :app/title))\n"
+    "      (text mid       (app-center count cols) count (face :app/count))\n"
+    "      (text (+ mid 2) (app-center hint cols)  hint  (face :app/hint)))))\n"
+    "\n"
+    "(defn app-update (m input cols rows)\n"
+    "  \"ui-run update: arrows change the count, Enter resets, Ctrl-C/Esc/close quit.\n"
+    "`:tick` (the refresh beat) is a no-op here — nothing animates yet.\"\n"
+    "  (cond\n"
+    "    (= input :up)    (app-step m 1)\n"
+    "    (= input :down)  (app-step m -1)\n"
+    "    (= input :enter) (assoc m :count 0)\n"
+    "    (or (= input :ctrl-c) (= input :escape)) (assoc m :done true)\n"
+    "    else m))\n"
+    "\n"
+    "(defn main ()\n"
+    "  \"Open the app in a native window. Needs a --features gui build (see the module\n"
+    "doc); for the terminal instead, pass `*term-display*` for `(gui-display)`.\"\n"
+    "  (ui-run (app-init) app-view app-update (gui-display)))\n"))
+
+(defn project--gui-test-template (nm)
+  (str
+    ";; `nest test` loads src/ first, so the pure fns are defined. The window loop is\n"
+    ";; `ui-run`'s (untested here — it needs a display); we test the pure `update` and\n"
+    ";; `view` — `(model -> model)` / `(model -> frame)`.\n"
+    "(require 'test)\n"
+    "\n"
+    "(describe \"" nm " counter\"\n"
+    "  (test \"up increments, down decrements\"\n"
+    "    (assert= (get (app-update {:count 5} :up 80 24) :count) 6)\n"
+    "    (assert= (get (app-update {:count 5} :down 80 24) :count) 4))\n"
+    "  (test \"enter resets to zero\"\n"
+    "    (assert= (get (app-update {:count 9} :enter 80 24) :count) 0))\n"
+    "  (test \"ctrl-c and escape quit\"\n"
+    "    (is (get (app-update {:count 0} :ctrl-c 80 24) :done))\n"
+    "    (is (get (app-update {:count 0} :escape 80 24) :done)))\n"
+    "  (test \"view shows the counter value\"\n"
+    "    (let (f (app-view {:count 3} 80 24))\n"
+    "      (is (> (count (filter (fn (op) (and (= (first op) :text)\n"
+    "                                          (string-contains? (nth op 3) \"count: 3\")))\n"
+    "                            f))\n"
+    "             0)))))\n"))
+
 ;; `CLAUDE.md` for a fresh project — short project-specific intro that points
 ;; at the language reference (which `nest new` also drops into `docs/`, so the
 ;; project is self-contained and an AI assistant has everything it needs in-tree).
@@ -901,7 +1004,7 @@ the `nest new` scaffolder.")
 ;; .claude/skills/writing-brood skill, so the project is self-contained for
 ;; AI-assisted editing. Errors on a bad name; an existing folder is reused (its
 ;; scaffold files overwritten), not rejected.
-(def *project-templates* ["default" "tui-loop" "hatch" "http-server" "editor"])
+(def *project-templates* ["default" "tui-loop" "hatch" "http-server" "editor" "gui"])
 
 ;; Write the template-specific src/ + tests/ files; return the list of relative
 ;; paths written (for the summary). The shared files (manifest, CLAUDE.md, guide,
@@ -928,6 +1031,11 @@ the `nest new` scaffolder.")
       (spit (path-join src-dir "main.blsp") (project--editor-main-template actual-name))
       (spit (path-join tests-dir "main_test.blsp") (project--editor-test-template actual-name))
       [(str nm "/src/main.blsp") (str nm "/tests/main_test.blsp")])
+    (= tmpl "gui")
+    (do
+      (spit (path-join src-dir "main.blsp") (project--gui-main-template actual-name))
+      (spit (path-join tests-dir "main_test.blsp") (project--gui-test-template actual-name))
+      [(str nm "/src/main.blsp") (str nm "/tests/main_test.blsp")])
     else
     (do
       (spit (path-join src-dir "main.blsp") (project--main-template actual-name))
@@ -938,7 +1046,7 @@ the `nest new` scaffolder.")
        (str nm "/tests/main_test.blsp") (str nm "/tests/hello_test.blsp")])))
 
 (defn new-project (nm &optional template)
-  "Scaffold a new project named `nm` (or `\".\"` for the current directory, taking the project name from the cwd's basename): a `project.blsp` manifest, the baked-in language guide, and starter code chosen by `template` — `\"default\"` (a `main`+`hello` module pair, the default), `\"tui-loop\"` (a tail-recursive animation loop), `\"hatch\"` (a stateful gen_server process), `\"http-server\"` (a minimal web app), or `\"editor\"` (a tiny text editor on the `ui` framework). Existing scaffold files are overwritten, not rejected. Backs `nest new [--template …]`."
+  "Scaffold a new project named `nm` (or `\".\"` for the current directory, taking the project name from the cwd's basename): a `project.blsp` manifest, the baked-in language guide, and starter code chosen by `template` — `\"default\"` (a `main`+`hello` module pair, the default), `\"tui-loop\"` (a tail-recursive animation loop), `\"hatch\"` (a stateful gen_server process), `\"http-server\"` (a minimal web app), `\"editor\"` (a tiny text editor on the `ui` framework), or `\"gui\"` (a windowed app on the `ui` framework, opened with `(gui-display)` — needs a `--features gui` runtime). Existing scaffold files are overwritten, not rejected. Backs `nest new [--template …]`."
   ;; `nest new .` scaffolds into the current directory (cargo init's shape);
   ;; the project name is then the cwd's basename. Both forms — `nest new .` and
   ;; `nest new foobar` — *overwrite* existing scaffold files rather than

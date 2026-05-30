@@ -325,16 +325,40 @@ evaluated in its place. Templates are written with quasiquote: `` `x `` quotes,
 (macroexpand-1 '(defn f (x) x))   ;=> (def f (fn (x) x))
 ```
 
-`gensym` returns a fresh unique symbol for hygiene-by-convention. The `->` and
-`->>` threading macros are also defined in the prelude:
+### Auto-gensym (`x#`) — opt-in hygiene
+
+Inside a backtick template, a symbol whose name ends in `#` (e.g. `tmp#`) expands
+to a **fresh gensym**, the *same* one for every occurrence within that one
+backtick expansion and a *distinct* one per expansion. This is the Clojure
+shorthand for a non-capturing macro binding — a `tmp#` the template introduces can
+neither capture nor be captured by the caller's `tmp`, with no manual `gensym`:
+
+```clojure
+(defmacro my-or (a b)
+  `(let (r# ~a)            ; r# -> a fresh symbol, e.g. r__417
+     (if r# r# ~b)))       ; same r__417
+
+(let (r 1) (my-or false r))   ;=> 1  (the caller's `r` is not captured)
+```
+
+Auto-gensym fires only on *literal* template symbols; a `x#` inside an unquote
+(`~(… x# …)`) is ordinary user code and is left alone. To emit a **literal**
+`x#` (e.g. an anaphoric binding the caller is meant to see), unquote a quoted
+symbol: `` `(let (~'it ~val) ~@body) ``. `gensym` itself remains available for
+cases where you need a fresh symbol outside a template.
+
+The `->` and `->>` threading macros are also defined in the prelude:
 
 ```clojure
 (-> 5 (- 1) (* 2))            ;=> 8     ; (* (- 5 1) 2)
 (->> (list 1 2 3) (map inc))  ;=> (2 3 4)
 ```
 
-> Note: nested quasiquote is not level-tracked yet, and macros are unhygienic
-> (use `gensym`). See spec §7.
+> Note: nested quasiquote is not level-tracked yet. Macros are otherwise
+> unhygienic — auto-gensym (`x#`) / `gensym` handle *binding* capture; *free*
+> references resolve at the use site until namespaces land (ADR-065). The advisory
+> hygiene lint flags a plain literal binder that could capture a spliced argument.
+> See spec §7.
 
 ## Pattern matching
 

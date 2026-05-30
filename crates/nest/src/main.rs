@@ -601,12 +601,12 @@ fn cmd_run(
 /// `nest add NAME :path PATH` — dispatch into the package module's `add` verb,
 /// passing NAME and each spec token as escaped string arguments.
 fn cmd_add(interp: &mut Interp, name: &str, spec: &[String]) {
-    use brood::introspect::escape_brood_string;
-    let mut call = format!("(require 'package) (add \"{}\"", escape_brood_string(name));
-    for tok in spec {
-        call.push_str(&format!(" \"{}\"", escape_brood_string(tok)));
-    }
-    call.push(')');
+    let mut args: Vec<&str> = vec![name];
+    args.extend(spec.iter().map(String::as_str));
+    let call = format!(
+        "(require 'package) {}",
+        brood::introspect::call_form("add", &args)
+    );
     run(interp, &call);
 }
 
@@ -615,10 +615,10 @@ fn cmd_doc(interp: &mut Interp, module: Option<&str>, all: bool) {
         "(require 'docs) (println (document-all))".to_string()
     } else {
         match module {
-            Some(name) => {
-                let escaped = brood::introspect::escape_brood_string(name);
-                format!("(require 'docs) (generate-docs \"{}\")", escaped)
-            }
+            Some(name) => format!(
+                "(require 'docs) {}",
+                brood::introspect::call_form("generate-docs", &[name])
+            ),
             None => "(require 'docs) (generate-docs)".to_string(),
         }
     };
@@ -659,16 +659,16 @@ fn cmd_repl(interp: &mut Interp) {
 
 /// `nest mcp` — see docs/mcp.md (ADR-036). Strictly per-project.
 fn cmd_mcp(interp: &mut Interp) {
+    // `setup-tooling-image` (std/project.blsp) is the shared tooling bootstrap
+    // the LSP also uses (via `introspect::load_tooling_image`) — sources + the
+    // test/format frameworks — so the two servers can't drift on its contents.
     let bootstrap = r#"
         (require 'project)
         (load-config)
         (let (root (project--find-root (cwd)))
           (when (nil? root)
             (error "nest mcp: not in a Brood project (no project.blsp found from " (cwd) ")"))
-          (project-setup root)
-          (project-load-sources root)
-          (require 'test)
-          (require 'format))
+          (setup-tooling-image root))
     "#;
     run(interp, bootstrap);
     if let Err(e) = mcp::run(interp) {
@@ -696,12 +696,11 @@ fn cmd_observe(interp: &mut Interp, connect: Option<String>, cookie: Option<Stri
                     );
                     std::process::exit(2);
                 });
-            // `spec`/`cookie` are user input embedded in a Brood string literal —
-            // escape backslash and quote so they can't break out of the literal.
+            // `spec`/`cookie` are user input — `call_form` embeds them as escaped
+            // string literals so they can't break out of the call.
             format!(
-                "(require 'observer) (observe-connect \"{}\" \"{}\")",
-                brood_str_escape(&spec),
-                brood_str_escape(&cookie),
+                "(require 'observer) {}",
+                brood::introspect::call_form("observe-connect", &[&spec, &cookie])
             )
         }
         None => "(require 'observer) (observe-run)".to_string(),
@@ -718,12 +717,6 @@ fn cmd_observe(interp: &mut Interp, connect: Option<String>, cookie: Option<Stri
         report_error(&e);
         std::process::exit(1);
     }
-}
-
-/// Escape a host string for safe embedding in a Brood double-quoted string literal
-/// (backslash and double-quote only — Brood string syntax is C-like).
-fn brood_str_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 // ---------- helpers ----------

@@ -231,15 +231,30 @@ of closures over a shared scope currently overflows `closure_to_message`)."
     ([:tcp-error ~sock msg] [:error msg])
     (after 30000 [:error "http: timed out waiting for a response"])))
 
-(defn http-get (url)
-  "GET `url` (http or https). Always returns a response map {:status :headers :body};
-a transport failure yields {:status 0 :error msg :headers {} :body \"\"}. Must run in
-a process (it `receive`s the response); the root process counts."
+(defn http--request-headers (u body extra)
+  "The request header map: Host / User-Agent / Connection: close, plus
+Content-Length when `body` is non-empty, with the caller's `extra` headers merged
+on top (so any of those can be overridden). `extra` is a name→value map (or nil)."
+  (let (base {"Host" (get u :host) "User-Agent" "brood" "Connection" "close"}
+        base2 (if (= body "") base (assoc base "Content-Length" (str (string-length body)))))
+    (merge base2 (or extra {}))))
+
+(defn http-request (method url &optional (opts {}))
+  "Make an HTTP/1.0 request: `method` (e.g. \"GET\"/\"POST\"), `url` (http or https),
+and `opts` `{:headers <name→value map> :body <string>}`. Always returns a response
+map `{:status :headers :body}`; a transport failure yields `{:status 0 :error msg
+:headers {} :body \"\"}`. Adds Host / User-Agent / Connection: close, and (with a
+body) Content-Length — each overridable via `:headers`. Must run in a process (it
+`receive`s the response); the root process counts. (Content-Length is the body's
+character count — correct for ASCII/Latin-1 bodies; this client targets a local
+JSON API, not arbitrary multi-byte payloads.)"
   (let (u (http--parse-url url)
-        req (str "GET " (get u :path) " HTTP/1.0\r\n"
-              "Host: " (get u :host) "\r\n"
-              "User-Agent: brood\r\n"
-              "Connection: close\r\n\r\n")
+        body (or (get opts :body) "")
+        headers (http--request-headers u body (get opts :headers))
+        req (str method " " (get u :path) " HTTP/1.0\r\n"
+              (http--render-headers headers)
+              "\r\n"
+              body)
         sock (if (= (get u :scheme) "https")
                (tls-request (get u :host) (get u :port) req)
                (let (s (tcp-connect (get u :host) (get u :port))) (tcp-send s req) s)))
@@ -247,3 +262,15 @@ a process (it `receive`s the response); the root process counts."
       (if (= (first result) :error)
         {:status 0 :error (second result) :headers {} :body ""}
         (parse-response (second result))))))
+
+(defn http-get (url &optional (opts {}))
+  "GET `url` (http or https) — `http-request` with method \"GET\". `opts` may carry a
+`:headers` map. Returns `{:status :headers :body}` (`:status 0` + `:error` on a
+transport failure). Must run in a process."
+  (http-request "GET" url opts))
+
+(defn http-post (url body &optional (opts {}))
+  "POST `body` (a string) to `url` — `http-request` with method \"POST\". Set the
+content type yourself via `opts` `:headers`, e.g.
+`{:headers {\"Content-Type\" \"application/json\"}}`. Returns the response map."
+  (http-request "POST" url (assoc opts :body body)))

@@ -5,9 +5,10 @@
 //! (v0.1) — unquotes resolve at the first enclosing quasiquote.
 
 use crate::core::heap::Heap;
-use crate::core::value::{self, EnvId, Value};
+use crate::core::value::{self, EnvId, Symbol, Value};
 use crate::error::{LispError, LispResult};
 use crate::eval;
+use std::collections::HashMap;
 
 /// Bound on recursion depth for the quasiquote walker and the compile pass.
 /// Past this, return `LispError::runtime` rather than overflowing the native
@@ -15,12 +16,47 @@ use crate::eval;
 /// a misbehaving macro) should produce a clean error, not abort the process.
 const MAX_DEPTH: u32 = 256;
 
+/// Per-expansion auto-gensym table (Clojure-style `x#`). Maps a literal template
+/// symbol whose name ends in `#` to a single fresh gensym, so every occurrence of
+/// that name *within one backtick expansion* refers to the same fresh symbol — and
+/// two expansions (or two macro uses) get distinct ones. Holds only interned
+/// `Value::Sym`s and `Symbol` (`u32`) keys, both GC-immune (symbols never move and
+/// ship by name), so it needs no operand-stack rooting even though quasiquote runs
+/// with collection enabled (ADR-061). See `maybe_autogensym`.
+type AutoGen = HashMap<Symbol, Value>;
+
 /// Expand a quasiquote template against `env`.
 pub fn quasiquote(heap: &mut Heap, template: Value, env: EnvId) -> LispResult {
-    quasiquote_depth(heap, template, env, 0)
+    let mut autogen = AutoGen::new();
+    quasiquote_depth(heap, template, env, 0, &mut autogen)
 }
 
-fn quasiquote_depth(heap: &mut Heap, template: Value, env: EnvId, depth: u32) -> LispResult {
+/// Clojure-style auto-gensym: a literal template symbol whose name ends in `#`
+/// (e.g. `tmp#`) becomes a fresh gensym, consistently for every occurrence within
+/// one backtick expansion (tracked in `autogen`). This is opt-in binding hygiene —
+/// a macro-introduced binding named `tmp#` can neither capture nor be captured by
+/// the caller's `tmp`. Only *literal* template symbols reach here; symbols inside
+/// `~unquote` go through `eval` instead, so a user's `x#` in unquoted code is left
+/// alone. A bare `#` (no prefix) is not rewritten.
+fn maybe_autogensym(v: Value, autogen: &mut AutoGen) -> Value {
+    if let Value::Sym(s) = v {
+        let name = value::symbol_name(s);
+        if name.len() > 1 && name.ends_with('#') {
+            return *autogen
+                .entry(s)
+                .or_insert_with(|| value::gensym(&name[..name.len() - 1]));
+        }
+    }
+    v
+}
+
+fn quasiquote_depth(
+    heap: &mut Heap,
+    template: Value,
+    env: EnvId,
+    depth: u32,
+    autogen: &mut AutoGen,
+) -> LispResult {
     if depth >= MAX_DEPTH {
         return Err(LispError::runtime(format!(
             "quasiquote template nested too deeply (max {} levels)",
@@ -33,12 +69,12 @@ fn quasiquote_depth(heap: &mut Heap, template: Value, env: EnvId, depth: u32) ->
     match template {
         Value::Pair(_) => {
             let items = heap.list_to_vec(template)?;
-            let out = expand_seq(heap, &items, env, depth + 1)?;
+            let out = expand_seq(heap, &items, env, depth + 1, autogen)?;
             Ok(heap.list(out))
         }
         Value::Vector(id) => {
             let items = heap.vector(id).to_vec();
-            let out = expand_seq(heap, &items, env, depth + 1)?;
+            let out = expand_seq(heap, &items, env, depth + 1, autogen)?;
             Ok(heap.alloc_vector(out))
         }
         Value::Map(id) => {
@@ -59,14 +95,14 @@ fn quasiquote_depth(heap: &mut Heap, template: Value, env: EnvId, depth: u32) ->
             for i in 0..n {
                 let env_now = heap.env_root_at(eb);
                 let kf = heap.root_at(vb + 2 * i);
-                let k = match quasiquote_depth(heap, kf, env_now, depth + 1) {
+                let k = match quasiquote_depth(heap, kf, env_now, depth + 1, autogen) {
                     Ok(k) => k,
                     Err(e) => return teardown_err(heap, vb, eb, e),
                 };
                 heap.push_root(k);
                 let env_now = heap.env_root_at(eb);
                 let vf = heap.root_at(vb + 2 * i + 1);
-                let v = match quasiquote_depth(heap, vf, env_now, depth + 1) {
+                let v = match quasiquote_depth(heap, vf, env_now, depth + 1, autogen) {
                     Ok(v) => v,
                     Err(e) => return teardown_err(heap, vb, eb, e),
                 };
@@ -80,7 +116,7 @@ fn quasiquote_depth(heap: &mut Heap, template: Value, env: EnvId, depth: u32) ->
             heap.truncate_env_roots(eb);
             Ok(heap.map_from_pairs(pairs))
         }
-        other => Ok(other),
+        other => Ok(maybe_autogensym(other, autogen)),
     }
 }
 
@@ -97,6 +133,7 @@ fn expand_seq(
     items: &[Value],
     env: EnvId,
     depth: u32,
+    autogen: &mut AutoGen,
 ) -> Result<Vec<Value>, LispError> {
     // Each `~unquote` / `~@unquote-splicing` evaluates a sub-form, which can
     // collect at ANY eval depth (ADR-061) — and runtime quasiquote runs with
@@ -128,7 +165,7 @@ fn expand_seq(
                 heap.push_root(v);
             }
         } else {
-            match quasiquote_depth(heap, el, env_now, depth) {
+            match quasiquote_depth(heap, el, env_now, depth, autogen) {
                 Ok(v) => heap.push_root(v),
                 Err(e) => return teardown_err(heap, vb, eb, e),
             }

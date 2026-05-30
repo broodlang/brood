@@ -26,8 +26,8 @@
 //! only touches LOCAL. Roots are gathered explicitly at the outermost-eval
 //! safepoint (see the `GC_BLOCK` discipline in `process.rs`).
 
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use smallvec::SmallVec;
 
@@ -359,12 +359,20 @@ struct CodeSlabs {
     /// here (every edit makes a fresh LOCAL rope), so sharing one by handle is
     /// sound. Append-only like the rest of this region.
     ropes: boxcar::Vec<ropey::Rope>,
-    closures: boxcar::Vec<Closure>,
+    /// `OnceLock`-wrapped so `promote` can **reserve a slot, then fill it** — the
+    /// append-only `boxcar` can't write-back the way the GC's mutable slabs do, so
+    /// a *cyclic* promote (a closure whose captured scope binds the closure itself,
+    /// e.g. `(let (g (fn () g)) g)` or mutually-recursive `letrec` closures) would
+    /// otherwise recurse forever → SIGSEGV. Reserve-then-fill lets the recursion
+    /// resolve the back-edge to the reserved handle. Each cell is set exactly once
+    /// before the handle is ever published, so reads (`get().unwrap()`) never race.
+    closures: boxcar::Vec<OnceLock<Closure>>,
     /// Captured environments of promoted closures. A closure defined *inside a
     /// function call* (not at top level) closes over a local scope; promoting it
     /// for sharing copies that scope here so it resolves in any process. Frozen
-    /// once promoted (read-only), so append-only is sound.
-    envs: boxcar::Vec<EnvFrame>,
+    /// once promoted (read-only), so append-only is sound. `OnceLock`-wrapped for
+    /// the same reserve-then-fill cycle break as `closures` above.
+    envs: boxcar::Vec<OnceLock<EnvFrame>>,
 }
 
 /// A runtime's mutable, shared code region: the code `def`'d at runtime plus the
@@ -502,6 +510,22 @@ pub struct Heap {
     /// The file currently being `load`ed, exposed via `(current-file)`. Saved and
     /// restored around each load so nested loads don't clobber the outer file.
     current_file: Option<String>,
+    /// The namespace currently being compiled into (ADR-065). `None` = root (the
+    /// prelude, plain code, and the REPL until an `(ns …)` form runs). Set by the
+    /// `(ns foo)` form via the `%in-ns` primitive; read by the resolver pass
+    /// (`eval::macros::resolve`) to qualify definition heads and free references to
+    /// `foo/name`. Per-process compile state — NOT a shared global, which would race
+    /// across green processes (`RuntimeCode` is shared). File/module loaders save +
+    /// reset this to root per file (so a `require`d file starts at root); the REPL
+    /// driver leaves it sticky across entries.
+    compile_ns: Option<Symbol>,
+    /// Names the current-namespace file will define (its top-level `def`/`defmacro`
+    /// heads), pre-scanned when an `(ns …)` form runs so the resolver can qualify a
+    /// *forward* reference (`bar` used before `foo/bar` is defined) — without it,
+    /// such a reference would silently stay bare (order-dependent miscompile). Bare
+    /// symbols only; consulted alongside the live global table. Cleared/repopulated
+    /// per file by the loader.
+    ns_known_names: HashSet<Symbol>,
     /// This process's dynamic-variable binding stack (the `binding` form). Each
     /// `binding` pushes its `(symbol, value)` pairs and pops them when its body
     /// returns (even on error); a read of a dynamic var consults this — latest
@@ -592,6 +616,47 @@ macro_rules! alloc_slot {
     }};
 }
 
+/// True iff `v` is a LOCAL heap object the copying collector relocates — the
+/// only kind that must be rooted across a collection safepoint. Atoms (`Int`,
+/// `Sym`, `Pid`, …) and shared-region (`PRELUDE`/`RUNTIME`) handles never move,
+/// so a copy held across a safepoint stays valid and needs no operand-stack
+/// slot. Mirrors exactly the set `push_value`/`flush_value` relocate.
+#[inline]
+pub fn is_movable(v: Value) -> bool {
+    match v {
+        Value::Pair(id) => id.region() == LOCAL,
+        Value::Vector(id) => id.region() == LOCAL,
+        Value::Map(id) => id.region() == LOCAL,
+        Value::Str(id) => id.region() == LOCAL,
+        Value::Rope(id) => id.region() == LOCAL,
+        Value::Fn(id) | Value::Macro(id) => id.region() == LOCAL,
+        _ => false,
+    }
+}
+
+/// A rooted value handle from [`Heap::root`]: either an immovable value kept
+/// inline (no operand-stack slot) or the index of a LOCAL slot the collector
+/// relocates. Read back with [`Heap::read_root`] after any potential collection.
+/// The region check means running compiled/promoted (RUNTIME) or prelude code —
+/// the hot path — pays no `Vec` churn, only genuinely LOCAL transients do.
+#[derive(Clone, Copy)]
+pub enum Root {
+    /// An immovable value (atom or `PRELUDE`/`RUNTIME` handle); the inline copy
+    /// stays valid across collections.
+    Stable(Value),
+    /// A movable LOCAL value parked at this operand-root-stack index.
+    Slot(usize),
+}
+
+/// The [`EnvId`] counterpart of [`Root`] — see [`Heap::root_env`]. The
+/// [`EnvId::GLOBAL`] sentinel and RUNTIME-promoted frames are immovable and kept
+/// inline; only a LOCAL frame takes a slot.
+#[derive(Clone, Copy)]
+pub enum EnvRoot {
+    Stable(EnvId),
+    Slot(usize),
+}
+
 impl Heap {
     /// A bare heap with empty shared regions — used to *build* the prelude
     /// before freezing it. Real runtimes use [`Heap::with_regions`]. GC is
@@ -609,6 +674,8 @@ impl Heap {
             global: EnvId::local(0),
             form_pos: HashMap::new(),
             current_file: None,
+            compile_ns: None,
+            ns_known_names: HashSet::new(),
             dynamics: Vec::new(),
             roots: Vec::new(),
             env_roots: Vec::new(),
@@ -635,6 +702,8 @@ impl Heap {
             global: EnvId::local(0),
             form_pos: HashMap::new(),
             current_file: None,
+            compile_ns: None,
+            ns_known_names: HashSet::new(),
             dynamics: Vec::new(),
             roots: Vec::new(),
             env_roots: Vec::new(),
@@ -841,6 +910,31 @@ impl Heap {
     /// The file currently being loaded, exposed to Brood via `(current-file)`.
     pub fn current_file(&self) -> Option<&str> {
         self.current_file.as_deref()
+    }
+
+    // ----- current namespace (ADR-065) -----
+
+    /// Set the namespace being compiled into (`None` = root), returning the prior
+    /// value so the caller can restore it. File/module loaders save + reset to
+    /// `None` per file; the `%in-ns` primitive sets it from an `(ns …)` form.
+    pub fn set_compile_ns(&mut self, ns: Option<Symbol>) -> Option<Symbol> {
+        std::mem::replace(&mut self.compile_ns, ns)
+    }
+
+    /// The namespace currently being compiled into, or `None` at root.
+    pub fn compile_ns(&self) -> Option<Symbol> {
+        self.compile_ns
+    }
+
+    /// Record the bare names the current-namespace file will define, so the
+    /// resolver can qualify forward references (replaces the set wholesale).
+    pub fn set_ns_known_names(&mut self, names: HashSet<Symbol>) {
+        self.ns_known_names = names;
+    }
+
+    /// Is `sym` (a bare name) known to be defined in the current namespace's file?
+    pub fn ns_knows_name(&self, sym: Symbol) -> bool {
+        self.ns_known_names.contains(&sym)
     }
 
     // ----- definition sites (cross-file xref; ADR-031, docs/lsp.md) -----
@@ -1600,6 +1694,19 @@ impl Heap {
     /// Appends only (never mutates existing shared code), so a redefinition adds
     /// a new version while in-flight calls keep running the old one.
     pub fn promote(&self, v: Value) -> Value {
+        let mut fwd = PromoteForward::default();
+        self.promote_in(v, &mut fwd)
+    }
+
+    /// The recursive core of [`promote`](Self::promote), threading a forwarding
+    /// table so a *cyclic* graph (a closure capturing its own binding scope)
+    /// terminates: closures and envs reserve their RUNTIME slot and register it in
+    /// `fwd` *before* recursing, so the back-edge resolves to the reserved handle
+    /// instead of recursing forever. The table also collapses shared (DAG)
+    /// closures/envs to one RUNTIME copy. Pairs/vectors/maps/strings/ropes are
+    /// acyclic by construction (immutable, built bottom-up), so they aren't
+    /// forwarded — they just recurse through `fwd` to reach any closures inside.
+    fn promote_in(&self, v: Value, fwd: &mut PromoteForward) -> Value {
         match v {
             Value::Str(id) if id.region() == LOCAL => {
                 let s = self.string(id).to_string();
@@ -1611,13 +1718,13 @@ impl Heap {
                 let r = self.rope(id).clone();
                 Value::Rope(RopeId::runtime(self.runtime.code.ropes.push(r)))
             }
-            Value::Pair(id) if id.region() == LOCAL => self.promote_list(id),
+            Value::Pair(id) if id.region() == LOCAL => self.promote_list(id, fwd),
             Value::Vector(id) if id.region() == LOCAL => {
                 let items: Vec<Value> = self
                     .vector(id)
                     .to_vec()
                     .into_iter()
-                    .map(|x| self.promote(x))
+                    .map(|x| self.promote_in(x, fwd))
                     .collect();
                 Value::Vector(VecId::runtime(self.runtime.code.vectors.push(items)))
             }
@@ -1626,10 +1733,10 @@ impl Heap {
                 // promoted before their parent so the parent's `children`
                 // array can be wired to the freshly-allocated RUNTIME
                 // sub-node handles.
-                Value::Map(self.promote_map_node(id))
+                Value::Map(self.promote_map_node(id, fwd))
             }
-            Value::Fn(id) if id.region() == LOCAL => Value::Fn(self.promote_closure(id)),
-            Value::Macro(id) if id.region() == LOCAL => Value::Macro(self.promote_closure(id)),
+            Value::Fn(id) if id.region() == LOCAL => Value::Fn(self.promote_closure(id, fwd)),
+            Value::Macro(id) if id.region() == LOCAL => Value::Macro(self.promote_closure(id, fwd)),
             // Atoms, and values already in PRELUDE/RUNTIME, need no copy.
             _ => v,
         }
@@ -1637,20 +1744,20 @@ impl Heap {
 
     /// Promote a local cons-chain. Walks the `cdr` spine *iteratively* so a long
     /// list doesn't recurse its length deep (which overflowed the native stack);
-    /// recursion is bounded by element nesting via `promote` on each `car`.
+    /// recursion is bounded by element nesting via `promote_in` on each `car`.
     /// Stops at the first already-shared cell or non-pair tail, preserving both
     /// improper (dotted) lists and existing structure sharing.
-    fn promote_list(&self, first: PairId) -> Value {
+    fn promote_list(&self, first: PairId, fwd: &mut PromoteForward) -> Value {
         let mut heads = Vec::new();
         let mut cur = Value::Pair(first);
         let tail = loop {
             match cur {
                 Value::Pair(id) if id.region() == LOCAL => {
                     let (head, next) = self.pair(id);
-                    heads.push(self.promote(head));
+                    heads.push(self.promote_in(head, fwd));
                     cur = next;
                 }
-                other => break self.promote(other),
+                other => break self.promote_in(other, fwd),
             }
         };
         let mut acc = tail;
@@ -1663,11 +1770,11 @@ impl Heap {
     /// Promote a LOCAL CHAMP trie into the shared RUNTIME region. Walks
     /// depth-first: child sub-nodes are promoted before their parent so
     /// the parent's `children` array references the new RUNTIME handles.
-    /// Every `(k, v)` entry is promoted recursively (matches `promote`
+    /// Every `(k, v)` entry is promoted recursively (matches `promote_in`
     /// on vectors / lists). The result is a brand-new trie in RUNTIME;
     /// the original LOCAL trie is left untouched (it'll be GC'd when its
     /// last reference goes).
-    fn promote_map_node(&self, id: MapId) -> MapId {
+    fn promote_map_node(&self, id: MapId, fwd: &mut PromoteForward) -> MapId {
         let node = self.map_node(id);
         // Promote children first (bottom-up) so the new RUNTIME node can
         // be built with the new child handles in one push.
@@ -1675,14 +1782,14 @@ impl Heap {
             .children
             .iter()
             .map(|&c| match c.region() {
-                LOCAL => self.promote_map_node(c),
+                LOCAL => self.promote_map_node(c, fwd),
                 _ => c, // already shared
             })
             .collect();
         let new_data: SmallVec<[(Value, Value); 4]> = node
             .data
             .iter()
-            .map(|&(k, v)| (self.promote(k), self.promote(v)))
+            .map(|&(k, v)| (self.promote_in(k, fwd), self.promote_in(v, fwd)))
             .collect();
         let promoted = MapNode {
             size: node.size,
@@ -1695,7 +1802,19 @@ impl Heap {
         MapId::runtime(self.runtime.code.maps.push(promoted))
     }
 
-    fn promote_closure(&self, id: ClosureId) -> ClosureId {
+    fn promote_closure(&self, id: ClosureId, fwd: &mut PromoteForward) -> ClosureId {
+        // Already promoted on this walk? Return the shared handle (cycle break +
+        // DAG-sharing collapse). Keyed on LOCAL slot index.
+        let key = id.index() as u32;
+        if let Some(&existing) = fwd.closures.get(&key) {
+            return existing;
+        }
+        // Reserve the RUNTIME slot *first* and register it, so a reference back to
+        // this closure reached while promoting its captured scope resolves here
+        // rather than recursing forever (e.g. `(let (g (fn () g)) g)`).
+        let new_idx = self.runtime.code.closures.push(OnceLock::new());
+        let runtime_id = ClosureId::runtime(new_idx);
+        fwd.closures.insert(key, runtime_id);
         let cl = self.closure(id).clone();
         // Promote every arm's body forms and `&optional` defaults into the shared
         // region (param symbols and `&` rest are interned/copy, so they ride along).
@@ -1707,32 +1826,51 @@ impl Heap {
                 optionals: arm
                     .optionals
                     .iter()
-                    .map(|&(s, d)| (s, self.promote(d)))
+                    .map(|&(s, d)| (s, self.promote_in(d, fwd)))
                     .collect(),
                 rest: arm.rest,
-                body: arm.body.iter().map(|&f| self.promote(f)).collect(),
+                body: arm.body.iter().map(|&f| self.promote_in(f, fwd)).collect(),
             })
             .collect();
         // A top-level closure captures the global env (`None`) and is fully
         // shareable as-is. A closure that captured a *local* scope has its scope
         // promoted too, so it resolves its free variables in any process.
-        let env = cl.env.map(|e| self.promote_env(e));
+        let env = cl.env.map(|e| self.promote_env(e, fwd));
         let promoted = Closure {
             name: cl.name,
             arms,
             doc: cl.doc,
             env,
         };
-        ClosureId::runtime(self.runtime.code.closures.push(promoted))
+        // Fill the reserved slot exactly once. The handle isn't published (bound
+        // in a global / shipped to a process) until `promote` returns, so nothing
+        // can observe the cell before this set.
+        self.runtime
+            .code
+            .closures
+            .get(new_idx)
+            .expect("reserved closure slot")
+            .set(promoted)
+            .ok()
+            .expect("promote: closure slot filled exactly once");
+        runtime_id
     }
 
     /// Deep-copy an environment frame chain from LOCAL into the shared RUNTIME
     /// region, promoting each bound value. Stops at the global scope (the shared
-    /// sentinel). Already-shared (RUNTIME) frames are returned unchanged.
-    fn promote_env(&self, env: EnvId) -> EnvId {
+    /// sentinel). Already-shared (RUNTIME) frames are returned unchanged. Reserves
+    /// its slot before recursing (same cycle break as [`promote_closure`]).
+    fn promote_env(&self, env: EnvId, fwd: &mut PromoteForward) -> EnvId {
         if env == EnvId::GLOBAL || env.region() == RUNTIME {
             return env;
         }
+        let key = env.index() as u32;
+        if let Some(&existing) = fwd.envs.get(&key) {
+            return existing;
+        }
+        let new_idx = self.runtime.code.envs.push(OnceLock::new());
+        let runtime_id = EnvId::runtime(new_idx);
+        fwd.envs.insert(key, runtime_id);
         // Snapshot the frame, then promote its parent and values (no borrow held).
         let (parent, bindings): (Option<EnvId>, Vec<(Symbol, Value)>) = {
             let frame = self.env_frame(env);
@@ -1741,12 +1879,20 @@ impl Heap {
                 frame.vars.iter().map(|&(s, v)| (s, v)).collect(),
             )
         };
-        let parent = parent.map(|p| self.promote_env(p));
+        let parent = parent.map(|p| self.promote_env(p, fwd));
         let vars = bindings
             .into_iter()
-            .map(|(s, v)| (s, self.promote(v)))
+            .map(|(s, v)| (s, self.promote_in(v, fwd)))
             .collect();
-        EnvId::runtime(self.runtime.code.envs.push(EnvFrame { vars, parent }))
+        self.runtime
+            .code
+            .envs
+            .get(new_idx)
+            .expect("reserved env slot")
+            .set(EnvFrame { vars, parent })
+            .ok()
+            .expect("promote: env slot filled exactly once");
+        runtime_id
     }
 
     /// **Arena flip with value roots only** (no env roots) — the thin
@@ -1947,13 +2093,37 @@ impl Heap {
         }
     }
 
-    region_ref!(
-        closure,
-        ClosureId,
-        closures,
-        &Closure,
-        "runtime closure handle"
-    );
+    /// Resolve a closure handle to its `&Closure`. Hand-written (not via
+    /// `region_ref!`) because the RUNTIME slab wraps each entry in a `OnceLock`
+    /// (reserve-then-fill cycle break, see `CodeSlabs::closures`); the cell is
+    /// always filled before its handle is published, so `get()` is infallible in
+    /// practice.
+    pub fn closure(&self, id: ClosureId) -> &Closure {
+        match id.region() {
+            LOCAL => {
+                #[cfg(debug_assertions)]
+                debug_assert!(
+                    !PoisonBits::is(&self.poison.closures, id.index()),
+                    "use-after-GC: closure() on freed LOCAL closures slot {} (handle {:#x}).",
+                    id.index(),
+                    id.0
+                );
+                #[cfg(debug_assertions)]
+                self.check_epoch(id.generation(), id.index(), "closure", id.0);
+                &self.local.closures[id.index()]
+            }
+            PRELUDE => &self.prelude.slabs.closures[id.index()],
+            RUNTIME => self
+                .runtime
+                .code
+                .closures
+                .get(id.index())
+                .expect("runtime closure handle")
+                .get()
+                .expect("runtime closure read before promote filled its slot"),
+            _ => unreachable!("invalid handle region"),
+        }
+    }
 
     pub fn native(&self, id: NativeId) -> &NativeFn {
         match id.region() {
@@ -2435,7 +2605,9 @@ impl Heap {
                 .code
                 .envs
                 .get(env.index())
-                .expect("runtime env frame"),
+                .expect("runtime env frame")
+                .get()
+                .expect("runtime env read before promote filled its slot"),
             _ => unreachable!("env frames live only in the local or runtime region"),
         }
     }
@@ -2608,6 +2780,80 @@ impl Heap {
     /// with [`root_at`](Self::root_at) for read-back.
     pub fn set_root(&mut self, i: usize, v: Value) {
         self.roots[i] = v;
+    }
+
+    /// Root `v` for the duration of a collection-bearing region, **skipping the
+    /// operand-stack push when `v` is immovable** (an atom, or a `PRELUDE`/
+    /// `RUNTIME` handle — the common case when running compiled/promoted code).
+    /// Returns a [`Root`] token to read back with [`read_root`](Self::read_root)
+    /// after any nested eval. The cheaper, region-aware sibling of
+    /// [`push_root`](Self::push_root): on the hot path it pays nothing. Teardown
+    /// is still the shared `truncate_roots(base)` — it drops exactly the LOCAL
+    /// slots this region pushed, regardless of how many were skipped.
+    #[inline]
+    pub fn root(&mut self, v: Value) -> Root {
+        if is_movable(v) {
+            let i = self.roots.len();
+            self.roots.push(v);
+            Root::Slot(i)
+        } else {
+            Root::Stable(v)
+        }
+    }
+
+    /// Read back a [`Root`] (the relocated handle if it took a slot, else the
+    /// inline immovable value).
+    #[inline]
+    pub fn read_root(&self, r: Root) -> Value {
+        match r {
+            Root::Stable(v) => v,
+            Root::Slot(i) => self.roots[i],
+        }
+    }
+
+    /// Advance an in-place cursor (e.g. a cons spine) to `v`, reusing the same
+    /// slot if the cursor is rooted. The region is invariant along a *promoted*
+    /// cons chain (a RUNTIME pair's cdr is RUNTIME, a PRELUDE pair's cdr is
+    /// PRELUDE), so a `Stable` cursor's successor is normally immovable too and
+    /// stays inline — no per-iteration slot growth. A `Stable` cursor whose
+    /// successor *is* movable (e.g. a `(cons x runtime-list)` LOCAL pair tailing
+    /// into shared code, walked from the other side) falls back to a real root
+    /// rather than risk a dangling handle — costs nothing on the common path
+    /// (`root` of an immovable value never pushes).
+    #[inline]
+    pub fn advance_root(&mut self, r: Root, v: Value) -> Root {
+        match r {
+            Root::Slot(i) => {
+                self.roots[i] = v;
+                Root::Slot(i)
+            }
+            Root::Stable(_) => self.root(v),
+        }
+    }
+
+    /// The [`EnvId`] counterpart of [`root`](Self::root): roots a frame only if
+    /// it's a movable LOCAL frame, keeping the [`EnvId::GLOBAL`] sentinel and
+    /// RUNTIME-promoted frames inline. Read back with
+    /// [`read_root_env`](Self::read_root_env).
+    #[inline]
+    pub fn root_env(&mut self, e: EnvId) -> EnvRoot {
+        if e != EnvId::GLOBAL && e.region() == LOCAL {
+            let i = self.env_roots.len();
+            self.env_roots.push(e);
+            EnvRoot::Slot(i)
+        } else {
+            EnvRoot::Stable(e)
+        }
+    }
+
+    /// Read back an [`EnvRoot`] (the relocated frame if it took a slot, else the
+    /// inline immovable env).
+    #[inline]
+    pub fn read_root_env(&self, r: EnvRoot) -> EnvId {
+        match r {
+            EnvRoot::Stable(e) => e,
+            EnvRoot::Slot(i) => self.env_roots[i],
+        }
     }
 
     // ----- env operand stack (ADR-061) ----------------------------------------
@@ -3297,6 +3543,18 @@ fn mark_one(bits: &mut [bool], i: usize) -> bool {
 // in `new` and record `old_idx → new_idx` before recursing into its
 // children — a second hit on the same old handle returns the placeholder
 // instead of re-traversing.
+
+/// Forwarding table for [`Heap::promote`]: LOCAL slot index → the RUNTIME handle
+/// it was promoted to, for the two handle kinds that can form a cycle (a closure
+/// capturing its own binding scope). Lets a cyclic graph terminate — the back-edge
+/// resolves to the already-reserved RUNTIME handle — and collapses a shared (DAG)
+/// closure/env to one RUNTIME copy. Pairs/vectors/maps are acyclic by construction
+/// so they need no forwarding (they'd only ever be a finite tree to re-copy).
+#[derive(Default)]
+struct PromoteForward {
+    closures: HashMap<u32, ClosureId>,
+    envs: HashMap<u32, EnvId>,
+}
 
 #[derive(Default)]
 struct FlushForward {

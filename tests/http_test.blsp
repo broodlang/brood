@@ -69,3 +69,47 @@
             (tcp-close c)
             (is (string-contains? resp "200 OK"))
             (is (string-contains? resp "<h1>brood</h1>"))))))))
+
+(describe "http: request building (http--request-headers)"
+  (test "adds Host / User-Agent / Connection, and Content-Length when there's a body"
+    (let (h (http--request-headers {:host "localhost"} "abc" nil))
+      (assert= (get h "Host") "localhost")
+      (assert= (get h "User-Agent") "brood")
+      (assert= (get h "Connection") "close")
+      (assert= (get h "Content-Length") "3")))
+  (test "no Content-Length for an empty body"
+    (refute (contains? (http--request-headers {:host "h"} "" nil) "Content-Length")))
+  (test "caller headers override the defaults and add new ones"
+    (let (h (http--request-headers {:host "h"} "" {"User-Agent" "bw" "X-Token" "k"}))
+      (assert= (get h "User-Agent") "bw")        ; overridden
+      (assert= (get h "X-Token") "k"))))         ; added
+
+(describe "http: end-to-end POST + headers over a loopback server"
+  (test "http-post round-trips the method, body, and a custom header"
+    (let (me (self))
+      ;; a handler that echoes back the request's method | body | a custom header
+      (spawn (do
+               (let (ls (http-listen 0))
+                 (send me [:port (tcp-local-port ls)])
+                 (serve-loop ls
+                   (fn (req)
+                     (ok (str (get req :method) "|"
+                           (get req :body) "|"
+                           (get (get req :headers) "x-token"))))))))
+      (let (port (receive ([:port p] p) (after 5000 :timeout)))
+        (let (resp (http-post (str "http://127.0.0.1:" port "/act")
+                     "{\"a\":1}"
+                     {:headers {"X-Token" "secret" "Content-Type" "application/json"}}))
+          (assert= (get resp :status) 200)
+          ;; method echoed as POST, the JSON body intact, the custom header received
+          (assert= (get resp :body) "POST|{\"a\":1}|secret")))))
+  (test "http-get still works through http-request (delegation intact)"
+    (let (me (self))
+      (spawn (do
+               (let (ls (http-listen 0))
+                 (send me [:port (tcp-local-port ls)])
+                 (serve-loop ls (fn (req) (text-response (str "got " (get req :path))))))))
+      (let (port (receive ([:port p] p) (after 5000 :timeout)))
+        (let (resp (http-get (str "http://127.0.0.1:" port "/zen")))
+          (assert= (get resp :status) 200)
+          (assert= (get resp :body) "got /zen"))))))

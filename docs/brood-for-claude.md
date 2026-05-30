@@ -61,6 +61,8 @@ Common macros (expanded once at the compile pass — runtime-free): `defn`,
 (defn opt-arg (x &optional (y 10)) (+ x y))         ; optionals with defaults
 
 (defmacro when (test & body) `(if ~test (do ~@body) nil))
+(defmacro my-or (a b) `(let (r# ~a) (if r# r# ~b)))  ; `r#` = auto-gensym: a fresh,
+                                                     ; non-capturing binder (no manual gensym)
 
 (def *flag* true)                                   ; global; def re-binds (hot reload)
 (defdyn *log-level* :info)                          ; dynamic variable

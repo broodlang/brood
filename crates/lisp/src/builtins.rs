@@ -563,6 +563,23 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![int, vec_ty], nil_ty),
         gui_draw,
     );
+    // The font seam: a global default cell font (`gui-font!`) and runtime family
+    // registration (`gui-font-register`); a face's `:family`/`:italic` then select
+    // per-section, within the fixed cell grid. (gui feature; error without it.)
+    def(
+        heap,
+        "gui-font!",
+        Arity::exact(1),
+        Sig::new(vec![map_ty], nil_ty),
+        gui_font,
+    );
+    def(
+        heap,
+        "gui-font-register",
+        Arity::exact(2),
+        Sig::new(vec![kw, map_ty], kw),
+        gui_font_register,
+    );
     // The one process-introspection accessor the language can't reach from Brood
     // (the mailbox queue lives behind the scheduler registry). Everything else an
     // observer shows — pid id, liveness — is assembled in Brood (std/observer.blsp).
@@ -1337,7 +1354,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("monitor", &["pid"], "Watch pid; returns a monitor ref. Delivers [:down ref pid reason] when pid dies."),
     ("list-processes", &[], "Every currently-live pid on this runtime (one per registered mailbox). Order is unspecified — sort if you need stability. For agents/tools enumerating spawned processes."),
     ("mailbox-size", &["pid"], "How many messages are queued in pid's mailbox (its receive backlog), or nil if pid is not a live local process. The one process-introspection accessor not reachable from Brood; see std/observer.blsp."),
-    ("process-info", &["pid"], "A snapshot map of a live local process: {:id :node :name :status :mailbox :monitored-by :parent :memory :collections} (:status is :running or :waiting; :name nil if unregistered; :parent the spawner's id, nil for the root; :memory the LOCAL heap bytes and :collections the cumulative GC count, both as of the process's last receive). nil for a remote/dead pid. The Erlang-process_info-style introspection the observer reads; see std/observer.blsp."),
+    ("process-info", &["pid"], "A snapshot map of a live local process: {:id :pid :node :name :status :mailbox :monitored-by :parent :memory :collections} (:pid the process's pid value, for acting on it with exit/send/monitor; :status is :running or :waiting; :name nil if unregistered; :parent the spawner's id, nil for the root; :memory the LOCAL heap bytes and :collections the cumulative GC count, both as of the process's last receive). nil for a remote/dead pid. The Erlang-process_info-style introspection the observer reads; see std/observer.blsp."),
     ("term-enter", &[], "Enter raw mode + the alternate screen, hide the cursor, and enable mouse capture, taking over the terminal for a full-screen UI (so click/scroll reach term-poll). Pair with term-leave. (ADR-046 display seam.)"),
     ("term-leave", &[], "Restore the terminal: show the cursor, disable mouse capture, leave the alternate screen, disable raw mode. The normal-path teardown for term-enter."),
     ("term-size", &[], "The terminal size as [cols rows] in character cells."),
@@ -1347,6 +1364,8 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("gui-close", &["id"], "Close window id (the teardown for gui-open). Idempotent; an unknown id is a no-op."),
     ("gui-size", &["id"], "Window id's size as [cols rows] in character cells (tracks resize / HiDPI), same shape as term-size."),
     ("gui-draw", &["id", "frame"], "Paint a frame (the same render-op vector term-draw takes) to window id; returns nil. Unknown ops are skipped (forward-compatible)."),
+    ("gui-font!", &["spec"], "Set the global default cell font from spec, a map {:family <keyword> :height <px>} (both keys optional): :family picks a registered font family (bundled :mono, or one added by gui-font-register), :height the cell pixel size. Applies to every open window and ones opened later — the whole-window knob; per-section fonts come from a face's :family/:italic. Needs --features gui. Returns nil."),
+    ("gui-font-register", &["name", "styles"], "Register font family name (a keyword) from styles, a map of style → TTF file path {:regular \"…\" :bold \"…\" :italic \"…\" :bold-italic \"…\"}. Only :regular is required; a missing style reuses the regular file. Afterwards a face's :family <name> (or gui-font!) selects it. Needs --features gui. Returns name."),
     ("term-raw-enter", &[], "Enter raw mode only — NO alternate screen, cursor stays visible, scrollback preserved. The seam for an inline line editor (the REPL); use term-enter instead for a full-screen TUI. Pair with term-raw-leave."),
     ("term-raw-leave", &[], "Leave raw mode (the teardown for term-raw-enter). Idempotent with the panic-path restore."),
     ("term-emit", &["ops"], "Paint inline, relative-motion render ops (for an in-place editor that must not take over the screen): [:print str], [:print str face], [:cr], [:nl], [:up n], [:down n], [:col n], [:clear-eol], [:clear-below], [:clear-screen]. A face is a map like {:fg :cyan :bold true}. Queues all ops then flushes once; unknown ops are skipped; returns nil."),
@@ -2197,6 +2216,10 @@ fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     // so the test macros can record each test's source location; restore the
     // previous file afterward since loads nest.
     let prev = heap.set_current_file(Some(path.clone()));
+    // A loaded file starts at the root namespace and its own `(ns …)` form sets the
+    // current namespace for the rest of the file (ADR-065); restore the caller's
+    // namespace afterward so loads nest and ns state never leaks out of a file.
+    let prev_ns = heap.set_compile_ns(None);
 
     // **Bounded loading — the core memory guarantee (docs/memory-review.md).**
     // The collector now reclaims at ANY eval depth (ADR-061), so a file loaded
@@ -2278,6 +2301,10 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
     // parsing, response rendering, a router, static files. Opt-in.
     ("http", include_str!("../../../std/http.blsp")),
     ("docs", include_str!("../../../std/docs.blsp")),
+    // JSON ↔ Brood data, written entirely in Brood (a recursive-descent parser +
+    // encoder over the string primitives; the reader's `\u{}` escape is the
+    // codepoint→char mechanism). Opt-in, never in the prelude.
+    ("json", include_str!("../../../std/json.blsp")),
     ("hatch", include_str!("../../../std/hatch.blsp")),
     ("supervisor", include_str!("../../../std/supervisor.blsp")),
     // The editor framework's buffer model (M2 Phase 1, ADR-045): an immutable
@@ -2287,6 +2314,10 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
     // (pure data constructors); `keymap` is the rebindable key→command dispatcher
     // shared by the line editor and the observer; `observer` is a process-viewer
     // built on them + the `term-*`/`gui-*` primitives. All opt-in, never in the prelude.
+    // The shared named-face / theme registry (the counterpart to `keymap`): style
+    // named once, referenced everywhere, restyled in one place. Required by `ui`
+    // (so every ui-run app gets it) and the observer.
+    ("face", include_str!("../../../std/face.blsp")),
     ("display", include_str!("../../../std/display.blsp")),
     ("keymap", include_str!("../../../std/keymap.blsp")),
     ("ui", include_str!("../../../std/ui.blsp")),
@@ -3075,6 +3106,18 @@ fn apply_face<W: std::io::Write>(out: &mut W, heap: &Heap, face: Value) -> Resul
         crossterm::queue!(out, SetAttribute(Attribute::Bold)).map_err(term_err)?;
     }
     if heap
+        .map_get(id, value::kw("italic"))
+        .is_some_and(face_truthy)
+    {
+        crossterm::queue!(out, SetAttribute(Attribute::Italic)).map_err(term_err)?;
+    }
+    if heap
+        .map_get(id, value::kw("underline"))
+        .is_some_and(face_truthy)
+    {
+        crossterm::queue!(out, SetAttribute(Attribute::Underlined)).map_err(term_err)?;
+    }
+    if heap
         .map_get(id, value::kw("reverse"))
         .is_some_and(face_truthy)
     {
@@ -3151,9 +3194,21 @@ fn gui_face(heap: &Heap, face: Value) -> crate::gui::Face {
     f.fg = heap.map_get(id, value::kw("fg")).and_then(color_rgb);
     f.bg = heap.map_get(id, value::kw("bg")).and_then(color_rgb);
     f.bold = heap.map_get(id, value::kw("bold")).is_some_and(face_truthy);
+    f.italic = heap
+        .map_get(id, value::kw("italic"))
+        .is_some_and(face_truthy);
+    f.underline = heap
+        .map_get(id, value::kw("underline"))
+        .is_some_and(face_truthy);
     f.reverse = heap
         .map_get(id, value::kw("reverse"))
         .is_some_and(face_truthy);
+    // `:family` is a keyword naming a registered font family; carry its interned
+    // id so the renderer can pick the matching font set (`:mono` / unknown → default).
+    f.family = match heap.map_get(id, value::kw("family")) {
+        Some(Value::Keyword(s)) => Some(s),
+        _ => None,
+    };
     f
 }
 
@@ -3234,6 +3289,85 @@ fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::Nil)
 }
 
+/// Read a `:height` value from a font spec as a pixel size (int or float), or None.
+fn font_px(heap: &Heap, id: crate::core::value::MapId) -> Option<f32> {
+    match heap.map_get(id, value::kw("height")) {
+        Some(Value::Int(n)) => Some(n as f32),
+        Some(Value::Float(f)) => Some(f as f32),
+        _ => None,
+    }
+}
+
+/// `(gui-font! spec)` — set the global default cell font from `spec`, a map
+/// `{:family <keyword> :height <px>}` (either key optional): `:family` picks a
+/// registered font family (the bundled `:mono`, or one added by
+/// `gui-font-register`), `:height` the cell pixel size. Applies to every open
+/// window and any opened later — the whole-window knob (per-section fonts come
+/// from a face's `:family`). Returns nil.
+fn gui_font(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let Value::Map(id) = arg(args, 0) else {
+        return Err(LispError::wrong_type(
+            heap,
+            "gui-font!",
+            "map (a font spec)",
+            arg(args, 0),
+        ));
+    };
+    let family = match heap.map_get(id, value::kw("family")) {
+        Some(Value::Keyword(s)) => Some(s),
+        _ => None,
+    };
+    crate::gui::font(family, font_px(heap, id)).map_err(LispError::runtime)?;
+    Ok(Value::Nil)
+}
+
+/// `(gui-font-register name styles)` — register font family `name` (a keyword) from
+/// `styles`, a map of style → TTF file path: `{:regular "…" :bold "…" :italic "…"
+/// :bold-italic "…"}`. Only `:regular` is required; a missing style reuses the
+/// regular file (so a single-file family works). The fonts are read here and parsed
+/// on the GUI thread; afterwards a face's `:family <name>` selects them. Returns
+/// `name`.
+fn gui_font_register(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let name = match arg(args, 0) {
+        Value::Keyword(s) => s,
+        other => return Err(LispError::wrong_type(heap, "gui-font-register", "keyword", other)),
+    };
+    let Value::Map(id) = arg(args, 1) else {
+        return Err(LispError::wrong_type(
+            heap,
+            "gui-font-register",
+            "map (style → path)",
+            arg(args, 1),
+        ));
+    };
+    // a style's path, or None when the key is absent/nil
+    let path = |key: &str| -> Result<Option<String>, LispError> {
+        match heap.map_get(id, value::kw(key)) {
+            None | Some(Value::Nil) => Ok(None),
+            Some(v) => Ok(Some(expect_string(heap, "gui-font-register", v)?)),
+        }
+    };
+    let read = |p: &str| -> Result<Vec<u8>, LispError> {
+        std::fs::read(p).map_err(|e| LispError::runtime(format!("gui-font-register: {p}: {e}")))
+    };
+    let regular_path = path("regular")?
+        .ok_or_else(|| LispError::runtime("gui-font-register: a :regular path is required"))?;
+    let regular = read(&regular_path)?;
+    // each missing style falls back to the regular file's bytes
+    let style = |key: &str| -> Result<Vec<u8>, LispError> {
+        match path(key)? {
+            Some(p) => read(&p),
+            None => Ok(regular.clone()),
+        }
+    };
+    let bold = style("bold")?;
+    let italic = style("italic")?;
+    let bold_italic = style("bold-italic")?;
+    crate::gui::register_family(name, regular, bold, italic, bold_italic)
+        .map_err(LispError::runtime)?;
+    Ok(Value::Keyword(name))
+}
+
 /// `(mailbox-size pid)` — the number of queued messages in a local process's
 /// mailbox, or `nil` for a remote/dead pid. The one process-introspection
 /// accessor Brood can't reach (the queue lives behind the scheduler registry);
@@ -3291,6 +3425,10 @@ fn process_info(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             let collections = Value::Int(crate::process::process_gc_runs(id).unwrap_or(0) as i64);
             let pairs = vec![
                 (value::kw("id"), Value::Int(id as i64)),
+                // The process's actual pid value (not just its numeric id), so a
+                // caller — e.g. the observer's kill command — can act on the
+                // process directly with `exit`/`send`/`monitor`.
+                (value::kw("pid"), Value::Pid { node, id }),
                 (value::kw("node"), Value::Keyword(node)),
                 (value::kw("name"), name),
                 (value::kw("status"), status),
@@ -4358,4 +4496,42 @@ fn binding(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
         heap.pop_dynamic();
     }
     result
+}
+
+#[cfg(test)]
+mod gui_face_tests {
+    use super::gui_face;
+    use crate::core::heap::Heap;
+    use crate::core::value::{self, Value};
+
+    // `gui_face` is the seam between a Brood face map and the GUI backend; verify it
+    // reads the per-section font keys (`:family`/`:italic`) + flags. No window needed.
+    #[test]
+    fn reads_family_italic_and_flags() {
+        let mut heap = Heap::new();
+        let mono = value::intern("mono");
+        let face = heap.map_from_pairs(vec![
+            (value::kw("fg"), value::kw("red")),
+            (value::kw("bold"), Value::Bool(true)),
+            (value::kw("italic"), Value::Bool(true)),
+            (value::kw("underline"), Value::Bool(true)),
+            (value::kw("family"), Value::Keyword(mono)),
+        ]);
+        let f = gui_face(&heap, face);
+        assert_eq!(f.fg, Some([0xcd, 0x31, 0x31]));
+        assert!(f.bold);
+        assert!(f.italic);
+        assert!(f.underline);
+        assert_eq!(f.family, Some(mono));
+    }
+
+    // A non-map (or nil) face is the default face: no colours, no flags, no family.
+    #[test]
+    fn non_map_face_is_default() {
+        let heap = Heap::new();
+        let f = gui_face(&heap, Value::Nil);
+        assert!(f.fg.is_none());
+        assert!(!f.bold && !f.italic && !f.underline && !f.reverse);
+        assert!(f.family.is_none());
+    }
 }

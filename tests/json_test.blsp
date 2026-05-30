@@ -1,0 +1,126 @@
+;; std/json.blsp — JSON ↔ Brood, written entirely in Brood. Pure data→data, so the
+;; whole thing is unit-testable here; the closing :isolated block sends parsed values
+;; across processes (deep-copied per-heap) to prove they round-trip under the scheduler.
+
+(require 'test)
+(require 'json)
+
+(defn json--errs? (s)
+  "True if parsing `s` raises (the malformed-input cases)."
+  (try (do (json-parse s) false) (catch e true)))
+
+(describe "json-parse — scalars"
+  (test "integers and floats (incl. sign + exponent)"
+    (assert= (json-parse "42") 42)
+    (assert= (json-parse "-7") -7)
+    (assert= (json-parse "-2.5") -2.5)
+    (assert= (json-parse "1e3") 1000.0)
+    (assert= (json-parse "-2.5e3") -2500.0))
+  (test "the literals true / false / null"
+    (assert= (json-parse "true") true)
+    (assert= (json-parse "false") false)
+    (assert= (json-parse "null") nil))
+  (test "leading + trailing whitespace is skipped"
+    (assert= (json-parse "   true  ") true)
+    (assert= (json-parse "\n\t [1] \n") [1])))
+
+(describe "json-parse — strings + escapes"
+  (test "a plain string"
+    (assert= (json-parse "\"hello\"") "hello")
+    (assert= (json-parse "\"\"") ""))
+  (test "the named escapes"
+    (assert= (json-parse "\"a\\\"b\"") "a\"b")          ; \"  -> "
+    (assert= (json-parse "\"a\\\\b\"") "a\\b")          ; \\  -> \
+    (assert= (json-parse "\"a\\/b\"") "a/b")            ; \/  -> /
+    (assert= (json-parse "\"a\\nb\"") "a\nb")           ; \n
+    (assert= (json-parse "\"a\\tb\"") "a\tb"))          ; \t
+  (test "\\b and \\f decode to single control chars (no codepoint primitive needed)"
+    (assert= (string-length (json-parse "\"\\b\"")) 1)
+    (assert= (string-length (json-parse "\"\\f\"")) 1))
+  (test "\\uXXXX BMP escapes (via the reader's \\u{} mechanism)"
+    (assert= (json-parse "\"\\u0041\"") "A")
+    (assert= (json-parse "\"caf\\u00e9\"") "café"))
+  (test "a surrogate pair combines into one astral code point"
+    (assert= (json-parse "\"\\ud83d\\ude00\"") "😀")
+    (assert= (string-length (json-parse "\"\\ud83d\\ude00\"")) 1)))
+
+(describe "json-parse — arrays + objects"
+  (test "arrays: empty, flat, mixed, nested"
+    (assert= (json-parse "[]") [])
+    (assert= (json-parse "[1,2,3]") [1 2 3])
+    (assert= (json-parse "[1, \"a\", true, null]") [1 "a" true nil])
+    (assert= (json-parse "[[1],[2,3]]") [[1] [2 3]]))
+  (test "objects: empty, flat (KEYWORD keys), nested"
+    (assert= (json-parse "{}") {})
+    (assert= (json-parse "{\"a\":1,\"b\":2}") {:a 1 :b 2})
+    (assert= (get (json-parse "{\"repo\":\"brood\"}") :repo) "brood")
+    (assert= (json-parse "{\"o\":{\"x\":[true]}}") {:o {:x [true]}}))
+  (test "whitespace between tokens is ignored"
+    (assert= (json-parse "{ \"a\" : [ 1 , 2 ] }") {:a [1 2]})))
+
+(describe "json-parse — malformed input errors"
+  (test "structural errors"
+    (is (json--errs? ""))                 ; empty
+    (is (json--errs? "{"))                ; unterminated object
+    (is (json--errs? "[1,2"))             ; unterminated array
+    (is (json--errs? "{\"a\" 1}"))        ; missing colon
+    (is (json--errs? "[1 2]"))            ; missing comma
+    (is (json--errs? "tru"))              ; bad literal
+    (is (json--errs? "\"abc"))            ; unterminated string
+    (is (json--errs? "1 2"))              ; trailing content
+    (is (json--errs? "nope"))))           ; not a value
+
+(describe "json-encode"
+  (test "scalars"
+    (assert= (json-encode nil) "null")
+    (assert= (json-encode true) "true")
+    (assert= (json-encode false) "false")
+    (assert= (json-encode 42) "42")
+    (assert= (json-encode -2.5) "-2.5"))
+  (test "strings are quoted + escaped"
+    (assert= (json-encode "hi") "\"hi\"")
+    (assert= (json-encode "a\"b") "\"a\\\"b\"")
+    (assert= (json-encode "a\\b") "\"a\\\\b\"")
+    (assert= (json-encode "a\nb") "\"a\\nb\""))
+  (test "keywords / symbols encode as their name string"
+    (assert= (json-encode :foo) "\"foo\"")
+    (assert= (json-encode 'bar) "\"bar\""))
+  (test "arrays and lists both encode as JSON arrays"
+    (assert= (json-encode [1 2 3]) "[1,2,3]")
+    (assert= (json-encode '(1 2 3)) "[1,2,3]")
+    (assert= (json-encode []) "[]"))
+  (test "a single-key object (order is deterministic for one key)"
+    (assert= (json-encode {"a" 1}) "{\"a\":1}")
+    (assert= (json-encode {:b [true nil]}) "{\"b\":[true,null]}"))   ; keyword key → string key
+  (test "cannot encode a non-JSON value"
+    (is (try (do (json-encode (self)) false) (catch e true)))))
+
+(describe "json round-trips (parse ∘ encode = identity)"
+  (test "values survive encode → parse (objects come back keyword-keyed)"
+    (assert= (json-parse (json-encode {:k [1 "two" true nil]})) {:k [1 "two" true nil]})
+    (assert= (json-parse (json-encode [1 [2 [3 []]]])) [1 [2 [3 []]]])
+    (assert= (json-parse (json-encode {:n -2.5 :s "a\"b\nc"})) {:n -2.5 :s "a\"b\nc"}))
+  (test "string keys encode fine and parse back as keywords (encode accepts either)"
+    (assert= (json-parse (json-encode {"repo" "brood" "stars" 3})) {:repo "brood" :stars 3})))
+
+;; Cross-process: parse in spawned workers and fan the results back in — the parsed
+;; maps/vectors are deep-copied across per-process heaps on `send`, proving they
+;; round-trip through to_message/from_message + promote under the scheduler.
+(describe "json across processes"
+  :isolated
+  (test "workers parse the same payload; results agree after crossing heaps"
+    (let (me (self)
+          src "{\"id\":7,\"tags\":[\"a\",\"b\"],\"ok\":true}")
+      (doseq (i (range 8))
+        (spawn (send me [:r (json-parse src)])))
+      (let (results (map (fn (_) (receive ([:r m] m) (after 2000 :timeout))) (range 8)))
+        (is (every? (fn (m) (and (= (get m :id) 7)
+                                 (= (get m :tags) ["a" "b"])
+                                 (= (get m :ok) true)))
+                    results)))))
+  (test "a value encoded in a worker parses back identically here"
+    (let (me (self)
+          v {:repo "brood" :runs [1 2 3]})
+      (spawn (send me [:enc (json-encode v)]))
+      (let (s (receive ([:enc s] s) (after 2000 :timeout)))
+        (assert= (json-parse s) v)))))
