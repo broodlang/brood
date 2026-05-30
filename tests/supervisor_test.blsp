@@ -150,6 +150,37 @@
       ;; the supervisor exits *and* hard-kills the child → our monitor fires.
       (assert= :down (receive ([:down ~mp ~p1 _] :down) (after 1000 :orphaned))))))
 
+(describe "supervisor: nested trees + graceful shutdown"
+  :isolated
+
+  (test "stop-supervisor cascades through a :shutdown :infinity sub-supervisor"
+    ;; parent → (sub-supervisor child, :shutdown :infinity) → announcing worker.
+    ;; Stopping the parent must tear the *grandchild* down too, not orphan it.
+    (let (me      (self)
+          subtree {:id :sub :restart :permanent :shutdown :infinity
+                   :start (fn () (start-supervisor
+                                   (list (watched-spec me :permanent))
+                                   {:max-restarts 5 :max-seconds 5}))}
+          parent  (start-supervisor (list subtree) {:strategy :one-for-one})
+          gc      (receive ([:up p] p))         ; the grandchild announced itself
+          gm      (monitor gc))
+      (stop-supervisor parent)
+      (assert= :torn-down
+        (receive ([:down ~gm ~gc _] :torn-down) (after 1500 :orphaned)))))
+
+  (test "a :shutdown <ms> child that ignores [:$stop] is hard-killed after the timeout"
+    ;; The worker's receive only matches :die — it never consumes [:$stop], so the
+    ;; supervisor's graceful attempt times out and falls back to (exit :kill).
+    (let (me   (self)
+          spec {:id :w :restart :permanent :shutdown 100
+                :start (fn () (spawn (do (send me [:up (self)]) (receive (:die :ok)))))}
+          sup  (start-supervisor (list spec))
+          p    (receive ([:up x] x))
+          pm   (monitor p))
+      (stop-supervisor sup)
+      (assert= :killed
+        (receive ([:down ~pm ~p _] :killed) (after 1500 :alive))))))
+
 (describe "supervisor: introspection and validation"
   :isolated
 

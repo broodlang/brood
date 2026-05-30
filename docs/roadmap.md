@@ -406,9 +406,12 @@ The seam that makes remoteability free later (see architecture.md).
   the `(exit pid :kill)` primitive (ADR-063): the group strategies hard-kill the
   healthy siblings they must restart and selectively drain each one's `[:down]`
   so a deliberate kill isn't mistaken for a crash. `stop-supervisor` and an
-  intensity-exceeded shutdown terminate the children too (no orphans). Deferred
-  (ADR-011): `link`/bidirectional exit propagation and a `:shutdown` grace
-  timeout. See [`supervision.md`](supervision.md) and [`concurrency-v2.md`](concurrency-v2.md) §4.
+  intensity-exceeded shutdown terminate the children too (no orphans). A child
+  spec's `:shutdown` (`:brutal-kill` default / `:infinity` / ms) makes **nested
+  trees tear down depth-first** — a sub-supervisor child marked `:shutdown
+  :infinity` cascades `[:$stop]` to its own children instead of orphaning them.
+  Deferred (ADR-011): `link`/bidirectional (upward) exit propagation. See
+  [`supervision.md`](supervision.md) and [`concurrency-v2.md`](concurrency-v2.md) §4.
 - 🟡 **TCP sockets (the substrate, done — ADR-062).** Thin kernel primitives
   (`tcp-connect`/`tcp-listen`/`tcp-send`/`tcp-close`/`tcp-local-port`) over a
   reusable blocking-IO → mailbox seam (`process::spawn_io_source`, ADR-059):
