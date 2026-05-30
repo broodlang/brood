@@ -899,6 +899,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "delete-dir",
+        Arity::exact(1),
+        Sig::new(vec![string], nil_ty),
+        delete_dir,
+    );
+    def(
+        heap,
         "rename-file",
         Arity::exact(2),
         Sig::new(vec![string, string], nil_ty),
@@ -1419,6 +1426,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("file-mtime", &["path"], "Last-modified time of path as epoch-milliseconds, or nil if the file is missing. Cheap (stat) — pair with `load` to drive a hot-reloader."),
     ("file-size", &["path"], "Size of the file at path in bytes, or nil if it is missing."),
     ("delete-file", &["path"], "Remove the file at path. Idempotent (nil if already absent); errors on a real I/O failure."),
+    ("delete-dir", &["path"], "Remove a directory and everything under it (recursive). Idempotent (nil if already absent); errors on a real I/O failure."),
     ("rename-file", &["from", "to"], "Rename/move file `from` to `to`. Returns nil; errors on failure."),
     ("getenv", &["name"], "The value of environment variable name, or nil if unset."),
     ("hostname", &[], "This machine's short hostname (no domain). Used to qualify a node name as name@host."),
@@ -3049,16 +3057,27 @@ pub fn restore_raw() {
     let _ = crossterm::terminal::disable_raw_mode();
 }
 
-/// The abnormal-path terminal restore the binaries call before reporting an
-/// error and exiting (and that `print` calls on a broken pipe). A program that
-/// entered raw mode / the alternate screen and then threw never reached its
-/// Brood `term-raw-leave`, so without this the shell is left wedged in raw mode
-/// — the bug behind a hung terminal after an erroring TUI. On a TTY it does the
-/// full [`restore_terminal`] (show cursor, leave the alternate screen and raw
-/// mode); when stdout is piped/redirected it only leaves raw mode
-/// ([`restore_raw`], a termios ioctl) so it never writes escape bytes into a
-/// captured/closed stream. Idempotent.
+/// The terminal restore the binaries call on **every** exit path — normal
+/// return, error report, and the broken-pipe exit in `print`. A program that
+/// entered raw mode / the alternate screen (`term-raw-enter` / `term-enter`)
+/// and then threw — or simply returned without a matching `term-raw-leave` —
+/// would otherwise leave the shell wedged in raw mode (the hung-terminal bug).
+///
+/// It is gated on `is_raw_mode_enabled`, so it is a precise no-op whenever the
+/// terminal was never left raw: that lets it sit on the common path (e.g. a
+/// `nest test` run that never touched the terminal) without emitting a single
+/// stray escape. When a restore *is* needed: on a TTY it does the full
+/// [`restore_terminal`] (show cursor, leave the alternate screen and raw mode);
+/// when stdout is piped/redirected it only leaves raw mode ([`restore_raw`], a
+/// termios ioctl) so it never writes escape bytes into a captured/closed
+/// stream. Idempotent.
 pub fn restore_terminal_on_exit() {
+    // Only act if the program actually left the terminal in raw mode. This is
+    // what makes the call safe to drop onto the success path too, not just the
+    // error/broken-pipe paths.
+    if !matches!(crossterm::terminal::is_raw_mode_enabled(), Ok(true)) {
+        return;
+    }
     use std::io::IsTerminal;
     if std::io::stdout().is_terminal() {
         restore_terminal();
@@ -4021,6 +4040,19 @@ fn delete_file(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         Ok(()) => Ok(Value::Nil),
         Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Value::Nil),
         Err(e) => Err(LispError::runtime(format!("delete-file: {}: {}", path, e))
+            .with_code(crate::error::error_codes::FILE_IO)),
+    }
+}
+
+/// `(delete-dir path)` — remove a directory and everything under it. The
+/// recursive sibling of `delete-file`; idempotent (nil if already absent),
+/// errors on a real I/O failure. The mechanism behind test-fixture teardown.
+fn delete_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "delete-dir", arg(args, 0))?;
+    match std::fs::remove_dir_all(&path) {
+        Ok(()) => Ok(Value::Nil),
+        Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Value::Nil),
+        Err(e) => Err(LispError::runtime(format!("delete-dir: {}: {}", path, e))
             .with_code(crate::error::error_codes::FILE_IO)),
     }
 }
