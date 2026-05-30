@@ -199,6 +199,11 @@ fn run_test_files(interp: &mut Interp, files: &[String]) {
                     check_one_file(interp, path, &src, CheckSink::Stderr);
                 }
                 if let Err(e) = eval_file(interp, path, &src) {
+                    // Restore the terminal first: a TUI program that entered raw
+                    // mode and then threw never reached its `term-raw-leave`, and
+                    // `process::exit` skips Drop guards. Without this the shell is
+                    // left wedged in raw mode after an erroring full-screen run.
+                    brood::builtins::restore_terminal_on_exit();
                     report_error(&e.or_file(path.clone()));
                     std::process::exit(1);
                 }
@@ -288,6 +293,11 @@ fn run_files(interp: &mut Interp, files: &[String]) {
                     check_one_file(interp, path, &src, CheckSink::Stderr);
                 }
                 if let Err(e) = eval_file(interp, path, &src) {
+                    // Restore the terminal first: a TUI program that entered raw
+                    // mode and then threw never reached its `term-raw-leave`, and
+                    // `process::exit` skips Drop guards. Without this the shell is
+                    // left wedged in raw mode after an erroring full-screen run.
+                    brood::builtins::restore_terminal_on_exit();
                     report_error(&e.or_file(path.clone()));
                     std::process::exit(1);
                 }

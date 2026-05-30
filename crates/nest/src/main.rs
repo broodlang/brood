@@ -749,6 +749,12 @@ fn cmd_observe(interp: &mut Interp, connect: Option<String>, cookie: Option<Stri
 /// non-zero on failure.
 fn run(interp: &mut Interp, code: &str) {
     if let Err(e) = interp.eval_str(code) {
+        // A program (e.g. `nest run` of a TUI demo) that entered raw mode / the
+        // alternate screen and then threw never reached its Brood
+        // `term-raw-leave`; restore the terminal before exiting so an erroring
+        // TUI never wedges the shell. `process::exit` skips Drop, so a guard
+        // wouldn't fire — restore explicitly here.
+        brood::builtins::restore_terminal_on_exit();
         report_error(&e);
         std::process::exit(1);
     }
@@ -761,6 +767,7 @@ fn run_for_value(interp: &mut Interp, code: &str) -> brood::core::value::Value {
     match interp.eval_str(code) {
         Ok(v) => v,
         Err(e) => {
+            brood::builtins::restore_terminal_on_exit();
             report_error(&e);
             std::process::exit(1);
         }
