@@ -88,6 +88,24 @@ pub struct CompiledArm {
     pub body: Node,
 }
 
+/// A compiled closure: the VM-eligible **exact-arity** arms, each `Arc`'d so the
+/// trampoline can hold one across a call (Stage 2b — multi-arity). `dispatch`
+/// selects by argument count (`nparams`), matching eval's preference for an exact
+/// arm. Arms that aren't VM-eligible (variadic — `&optional`/`&` rest — or a
+/// non-core body) are simply absent, so a call to such an arity defers to the
+/// tree-walker.
+pub struct CompiledClosure {
+    pub arms: Vec<Arc<CompiledArm>>,
+}
+
+impl CompiledClosure {
+    /// The compiled arm for a call of `argc` args, if one was VM-compiled. Exact
+    /// arms have distinct arities, so this is unambiguous.
+    fn arm_for(&self, argc: usize) -> Option<&Arc<CompiledArm>> {
+        self.arms.iter().find(|a| a.nparams == argc)
+    }
+}
+
 /// The result of running a node: a finished value, or a *tail call* the trampoline
 /// must continue (reusing the frame). `Tail` is only ever produced for a `Call`
 /// node compiled with `tail == true`, which only appears in a closure body run by
@@ -303,35 +321,45 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
 /// VM-eligible (multi-arm, has `&optional`/`&` rest, captures a *local* env, or its
 /// body uses a non-core form). The slice handles single-arm, exact-arity,
 /// global-capturing closures only.
-fn compile_closure(heap: &Heap, id: ClosureId) -> Option<CompiledArm> {
+fn compile_closure(heap: &Heap, id: ClosureId) -> Option<CompiledClosure> {
     let cl = heap.closure(id);
-    if cl.arms.len() != 1 {
-        return None;
-    }
     // Only closures with no captured *local* frame — env `None` (the global
     // sentinel) or env == the process global env. A real local capture is out of
-    // the slice: its free vars would need that frame, which isn't on the VM stack.
+    // the slice: its free vars would need that frame, which isn't on the VM stack
+    // (Stage 2c).
     if let Some(e) = cl.env {
         if !heap.is_global(e) {
             return None;
         }
     }
-    let arm = &cl.arms[0];
-    if !arm.optionals.is_empty() || arm.rest.is_some() {
-        return None;
+    // Snapshot the **exact-arity** arms (params + body); variadic arms
+    // (`&optional`/`&` rest) are skipped — a call to that arity defers. Cloning
+    // ends the `cl` borrow so `compile_body` can re-borrow the heap.
+    let arms_src: Vec<(Vec<Symbol>, Vec<Value>)> = cl
+        .arms
+        .iter()
+        .filter(|a| a.optionals.is_empty() && a.rest.is_none())
+        .map(|a| (a.params.clone(), a.body.clone()))
+        .collect();
+    let mut arms: Vec<Arc<CompiledArm>> = Vec::with_capacity(arms_src.len());
+    for (params, body_forms) in arms_src {
+        let nparams = params.len();
+        // Params occupy slots 0..nparams; `let`/`letrec` binders extend the frame.
+        let mut scope = Scope::with_params(&params);
+        // A non-core arm body just isn't added — that arity defers, others VM-run.
+        if let Some(body) = compile_body(heap, &body_forms, &mut scope, true) {
+            arms.push(Arc::new(CompiledArm {
+                nparams,
+                nslots: scope.max,
+                body,
+            }));
+        }
     }
-    let params = arm.params.clone();
-    let body_forms = arm.body.clone();
-    // `cl`/`arm` borrows end here; `compile_node` re-borrows the heap immutably.
-    let nparams = params.len();
-    // Params occupy slots 0..nparams; `let`/`letrec` binders extend the frame.
-    let mut scope = Scope::with_params(&params);
-    let body = compile_body(heap, &body_forms, &mut scope, true)?;
-    Some(CompiledArm {
-        nparams,
-        nslots: scope.max,
-        body,
-    })
+    if arms.is_empty() {
+        None
+    } else {
+        Some(CompiledClosure { arms })
+    }
 }
 
 /// The compiled body for closure `id`, compiling-and-caching on first use. Only
@@ -339,7 +367,7 @@ fn compile_closure(heap: &Heap, id: ClosureId) -> Option<CompiledArm> {
 /// run; LOCAL closures return `None` (deferred), since the slice doesn't handle
 /// captured local frames. `None` is cached too, so an ineligible closure isn't
 /// re-analysed on every call.
-fn compiled_for(heap: &Heap, id: ClosureId) -> Option<Arc<CompiledArm>> {
+fn compiled_for(heap: &Heap, id: ClosureId) -> Option<Arc<CompiledClosure>> {
     if id.region() != value::RUNTIME {
         return None;
     }
@@ -507,12 +535,13 @@ fn dispatch(
     // to the tree-walker via `eval::apply` (which is just `call_native` for a
     // native — cheap).
     if let Value::Fn(id) = cur_callee {
-        if let Some(compiled) = compiled_for(heap, id) {
-            if compiled.nparams == cur_argv.len() {
+        if let Some(cc) = compiled_for(heap, id) {
+            if let Some(arm) = cc.arm_for(cur_argv.len()) {
+                let arm = Arc::clone(arm);
                 if tail {
-                    return Ok(Step::Tail { compiled, args: cur_argv });
+                    return Ok(Step::Tail { compiled: arm, args: cur_argv });
                 }
-                return Ok(Step::Done(vm_apply(heap, compiled, &cur_argv, genv)?));
+                return Ok(Step::Done(vm_apply(heap, arm, &cur_argv, genv)?));
             }
         }
     }

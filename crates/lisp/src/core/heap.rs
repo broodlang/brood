@@ -740,7 +740,7 @@ pub struct Heap {
     /// simply never looked up again. Empty unless `BROOD_VM` is on. `Arc` so the
     /// trampoline can hold the compiled body across a call without borrowing the
     /// cache.
-    vm_cache: RefCell<HashMap<u64, Option<Arc<crate::eval::compile::CompiledArm>>>>,
+    vm_cache: RefCell<HashMap<u64, Option<Arc<crate::eval::compile::CompiledClosure>>>>,
 }
 
 impl Default for Heap {
@@ -3355,12 +3355,12 @@ impl Heap {
     /// `None` = not cached yet; `Some(None)` = cached as ineligible; `Some(Some(a))`
     /// = the compiled body. `&self` (interior-mutable `RefCell`), so the VM can
     /// consult it on the read-only hot path.
-    pub fn vm_cache_get(&self, k: u64) -> Option<Option<Arc<crate::eval::compile::CompiledArm>>> {
+    pub fn vm_cache_get(&self, k: u64) -> Option<Option<Arc<crate::eval::compile::CompiledClosure>>> {
         self.vm_cache.borrow().get(&k).cloned()
     }
 
     /// Record the compile result for closure key `k` (eligible body or `None`).
-    pub fn vm_cache_put(&self, k: u64, v: Option<Arc<crate::eval::compile::CompiledArm>>) {
+    pub fn vm_cache_put(&self, k: u64, v: Option<Arc<crate::eval::compile::CompiledClosure>>) {
         self.vm_cache.borrow_mut().insert(k, v);
     }
 
