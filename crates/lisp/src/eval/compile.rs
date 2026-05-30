@@ -25,12 +25,28 @@ use crate::core::heap::{EnvRoot, Heap, VmCacheKey};
 use crate::core::value::{self, ClosureId, EnvId, Symbol, Value};
 use crate::error::{error_codes, LispError, LispResult};
 
-/// Is the compiling VM enabled? `BROOD_VM` set in the environment turns it on.
-/// **Off by default** — the tree-walker is the engine until the Stage 3 cutover
-/// (ADR-076). Read once and cached; the flag can't change mid-run.
+/// Is the compiling VM enabled?
+///
+/// - The **runtime** `BROOD_VM` env var wins when set: a truthy value
+///   (`1`/`true`/`on`/…) forces the VM, a falsy one (`0`/`false`/`off`/empty)
+///   forces the tree-walker.
+/// - Otherwise the **build-time default** decides: off for an ordinary
+///   `cargo build` (so `make test` runs the tree-walker — green, with full
+///   source-position diagnostics), **on** when built with `--features
+///   brood/vm-default`, which is what `make install` ships so the installed
+///   binaries dogfood the VM (ADR-076; the tree-walker stays a one-env-var escape
+///   hatch until the Stage-3 cutover makes the VM unconditional).
+///
+/// Read once and cached; the choice can't change mid-run.
 pub fn vm_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("BROOD_VM").is_some())
+    fn truthy(v: &str) -> bool {
+        !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "off" | "no")
+    }
+    *ON.get_or_init(|| match std::env::var("BROOD_VM") {
+        Ok(v) => truthy(&v),                  // explicit runtime override
+        Err(_) => cfg!(feature = "vm-default"), // build-time default
+    })
 }
 
 /// A compiled IR node (ADR-076). Stage 1 vocabulary — the core forms a top-level
