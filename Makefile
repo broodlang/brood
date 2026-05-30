@@ -16,6 +16,13 @@ WITH_GUI ?= 0
 # binaries that run user code (brood, nest); the LSP never opens a UI.
 GUI_FEATURES := $(if $(filter-out 0,$(WITH_GUI)),--features brood/gui,)
 
+# The installed binaries ship with the closure-compiling VM as the default engine
+# (ADR-076) so real usage dogfoods it; `cargo build`/`make test` stay on the
+# tree-walker (green + full diagnostics). Runtime `BROOD_VM=0` still forces the
+# tree-walker on an installed binary. Set `VM_DEFAULT=0` to install tree-walker-only.
+VM_DEFAULT ?= 1
+VM_FEATURES := $(if $(filter-out 0,$(VM_DEFAULT)),--features brood/vm-default,)
+
 .DEFAULT_GOAL := help
 .PHONY: help build test ensure-nextest bench benchmark quickbench suite repl configure install uninstall fmt clippy check clean
 
@@ -70,9 +77,9 @@ install: ## Install `brood`, `nest` and `brood-lsp` into $(PREFIX)/bin (./config
 	# (`RUSTFLAGS="-C debug-assertions=on"`, see CLAUDE.md) is exported in the
 	# shell — so the installed binary is never accidentally debug-armed (which
 	# would carry the GC tripwire/verifier overhead and skew benchmarks).
-	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo install --path crates/cli  --force --root $(PREFIX) $(GUI_FEATURES)
-	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo install --path crates/nest --force --root $(PREFIX) $(GUI_FEATURES)
-	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo install --path crates/lsp  --force --root $(PREFIX)
+	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo install --path crates/cli  --force --root $(PREFIX) $(GUI_FEATURES) $(VM_FEATURES)
+	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo install --path crates/nest --force --root $(PREFIX) $(GUI_FEATURES) $(VM_FEATURES)
+	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo install --path crates/lsp  --force --root $(PREFIX) $(VM_FEATURES)
 
 uninstall: ## Remove the installed `brood`, `nest` and `brood-lsp` binaries from $(PREFIX)/bin
 	cargo uninstall cli --root $(PREFIX)
