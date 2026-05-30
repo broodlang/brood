@@ -1209,6 +1209,25 @@ mod tests {
     }
 
     #[test]
+    fn eq_guard_does_not_narrow_the_else_branch() {
+        // `(= m "x")` being *false* does NOT prove `m` isn't a string — it could
+        // be another string. So the else-branch must not narrow `m` to `¬string`
+        // and flag a valid `(string-length m)`. (Same then-only soundness as the
+        // `and` guard.)
+        let w = warnings(r#"(if (%eq m "x") :yes (string-length m))"#);
+        assert!(
+            w.iter().all(|s| !s.contains("string-length")),
+            "the else-branch of an `=`/`%eq` guard must not be narrowed: {w:?}"
+        );
+        // The then-branch must still narrow (sanity): `(= m 5)` true ⇒ m : int.
+        let w = warnings("(if (%eq m 5) (first m) nil)");
+        assert!(
+            w.iter().any(|s| s.contains("first") && s.contains("int")),
+            "the then-branch must still narrow m to int: {w:?}"
+        );
+    }
+
+    #[test]
     fn let_alias_propagates_narrowing_in_both_directions() {
         // The match pattern compiler's exact shape: alias `m` to `x`, then
         // narrow `m` via a guard. The narrowing must flow back onto `x` so a

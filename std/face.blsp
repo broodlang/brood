@@ -30,6 +30,12 @@
 ;;   :family        — GUI only: a font-family keyword (`:mono` is the bundled
 ;;                    default; others registered via `gui-font-register`)
 ;;   :height        — GUI only: a hint, honored by the whole-window `gui-font!` knob
+;;   :scale         — GUI only: a positive integer (default 1, capped at 16). The
+;;                    op's text is drawn `:scale`× larger, occupying a scale×scale
+;;                    block of cells anchored at its (row, col) — the per-section /
+;;                    per-pane / per-buffer font knob (ADR-079). Distinct from
+;;                    `:height` (which only re-sizes the whole window via
+;;                    `gui-font!`); the terminal frontend ignores it (renders 1×).
 ;;   :inherit       — a face NAME this face is layered over (local keys win)
 
 (defmodule face

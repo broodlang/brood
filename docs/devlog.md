@@ -10245,6 +10245,43 @@ cutover (still wants the soak + differential-test mode first).
 
 ---
 
+## 2026-05-31 — Per-op font scale on the GUI `Face` (per-buffer fonts)
+
+**Goal.** Close the GUI display seam's biggest font gap (GG-1 in
+[known-issues.md](known-issues.md)): the frontend had one font size for everything,
+so a larger status strip / heading / per-buffer font needed a hand-rolled "block
+font" (what foobar's `life.blsp` does). User ask: per-buffer font.
+
+**Decision (ADR-079).** Add the size to the existing per-op styling hook — the face
+— not a new render op. `gui::Face` gains `scale: u16` (default 1); the renderer
+draws that op's text `scale`× larger in a `scale`×`scale` block of base cells
+anchored at its `(row, col)`. Integer multiples, not arbitrary px, so the **uniform
+grid is unchanged** — positions stay in base cells, an app lays out a scaled region
+by leaving `scale`-cell gaps, and "per-buffer font" becomes Brood policy (a pane's
+text drawn with a face carrying its scale). Terminal renders 1×. Arbitrary `:height
+px` deferred (breaks the single grid; would need a metrics query).
+
+**Built.**
+- `crates/lisp/src/gui.rs`: `Face.scale` (+ a manual `Default` so scale defaults to
+  1, not a derived 0); `draw_char` takes `scale` and rasterises at `px*scale` with
+  baseline `ascent*scale`; the glyph cache key gains `scale`; `paint`'s `Op::Text`
+  fills a `cw*scale`×`ch*scale` block, scales the underline rule, and advances
+  `scale` columns per char.
+- `crates/lisp/src/builtins.rs`: `gui_face` parses `:scale`, clamped to
+  `1..=GUI_MAX_SCALE` (16, bounding framebuffer + cache); `gui-draw` doc updated.
+- `std/face.blsp`: `:scale` documented in the ATTRIBUTES block (GUI only; distinct
+  from `:height`, the whole-window `gui-font!` hint).
+
+**Resolves.** GG-1 and the per-pane-font remainder of GG-3 (`std/window.blsp`
+already gives pane layout + clipping). **GG-2** (`gui-font!` global across all
+windows) is independent and left open.
+
+**Tested.** `cargo build` + `cargo build --features gui` green (the renderer path is
+behind the `gui` feature and needs a display, so not headless-unit-testable; `:scale`
+itself is plain map data, covered by the existing maps tests). Suite green.
+
+---
+
 ## 2026-05-31 — VM is the default engine (ADR-076 Stage 3 cutover)
 
 With the engines behaviourally identical (full suite green under both), flipped the

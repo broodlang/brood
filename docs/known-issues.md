@@ -158,6 +158,44 @@ options below remain useful for *bounding* a heavy run, not for avoiding crashes
 
 ---
 
+## Platform gaps — GUI display seam (not defects, missing capability)
+
+**Status:** GG-1 + GG-3 **resolved 2026-05-31** (ADR-079); GG-2 still open ·
+**Severity:** low (was medium) · **First seen:** 2026-05-31 · **Source:** building
+the `foobar` Game of Life demo's split view (`~/src/whk/foobar/src/life.blsp` —
+board + a larger-font status strip).
+
+The GUI frontend used to have exactly **one font size for everything** — no pane,
+op, or buffer could be bigger than another, so the only way to enlarge text was a
+hand-rolled "block font" magnified out of grid cells (what `life.blsp`'s
+`status`/`glyph-row`/`scale-row`/`status-ops` do). The three gaps:
+
+- **GG-1 — no per-op / per-region font size. ✅ Resolved (ADR-079).** A `Face` now
+  carries an integer `:scale` (≥1, default 1, capped at 16): the renderer draws that
+  op's text `scale`× larger in a `scale`×`scale` block of base cells anchored at its
+  `(row, col)` (`crates/lisp/src/gui.rs` — `Face.scale` + `paint`/`draw_char`;
+  parsed in `builtins.rs` `gui_face`; documented in `std/face.blsp`). Mixed-size text
+  in one frame is now `[:text r c s {:scale 2}]`; the terminal renders 1×. Chose the
+  face-key route over a new op or a std block-font module (faces already flow
+  end-to-end; the grid stays uniform — positions are still base cells). Arbitrary
+  per-pixel `:height` sizing is deferred (would break the single grid; needs a
+  metrics-query primitive).
+- **GG-2 — `gui-font!` is global across *all* windows. ⬜ Open.** The
+  `UserEvent::Font` handler applies the spec to every open window (`gui.rs`: `for w
+  in self.wins.values_mut() { w.renderer.set_font(…) }`), so the "two windows"
+  escape hatch fails — enlarging a second window resizes the first too. *Possible
+  fix:* a per-window form `(gui-font! id spec)`, leaving the no-id call as the global
+  default. Independent of GG-1 and smaller; not yet done.
+- **GG-3 — no display-side pane/clip/font layer. ✅ Resolved.** `std/window.blsp`
+  (ADR-077/078) provides the *pane layout + clip-rect* abstraction (a split tree →
+  pane rects + dividers), and the *per-pane font scale* remainder collapsed into
+  GG-1 — a pane/buffer now renders its text with a face carrying its `:scale`, so
+  per-buffer font is pure Brood policy.
+
+**Resolution:** GG-1 shipped as a `Face` `:scale` (ADR-079) — it also closed GG-3's
+remainder and reduces the `life.blsp` block-font workaround to `[:text … {:scale
+n}]`. **GG-2 remains open** as an independent, smaller follow-up.
+
 ## Minor
 
 - ~~**Type-checker noise around `(require 'hatch)`.**~~ **Fixed.** `check_file`
