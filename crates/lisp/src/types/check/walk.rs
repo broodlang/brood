@@ -13,7 +13,7 @@ use std::sync::LazyLock;
 
 use crate::core::heap::{Heap, SymbolMap};
 use crate::core::keywords as kw;
-use crate::core::value::{self, Symbol, Value};
+use crate::core::value::{self, Arity, Symbol, Value};
 use crate::error::Pos;
 
 use super::ctx::Ctx;
@@ -27,6 +27,71 @@ use super::sigs::{arity_of, arity_str, curated_sig, is_globally_bound, sig_of};
 #[inline]
 fn name_of(s: Symbol) -> String {
     value::symbol_name(s)
+}
+
+/// The arity of a callback argument, when it can be determined *unambiguously* —
+/// the input to the callback-arity check (ADR-078). A named **global** function
+/// (its arity lives in the heap) or a simple single-clause lambda literal yields
+/// an arity; a local variable (arity unknown here), a multi-clause / pattern /
+/// variadic lambda, or any non-function form yields `None` (skip — so the check
+/// never produces a false positive).
+fn callback_arity(heap: &Heap, arg: Value, ctx: &Ctx) -> Option<Arity> {
+    match arg {
+        // A local binding shadows the global table — its arity isn't known here.
+        Value::Sym(s) if ctx.is_local(s) => None,
+        Value::Sym(s) => arity_of(heap, s),
+        Value::Pair(_) => lambda_literal_arity(heap, arg),
+        _ => None,
+    }
+}
+
+/// The arity of a **simple single-clause** lambda literal `(fn (a b) body…)` /
+/// `(lambda (a b) …)`. `None` for anything we can't read off cleanly — a
+/// multi-arity `fn`, an `&optional`/`&`-variadic or destructuring parameter
+/// list, or a non-`fn` head — so the callback-arity check stays
+/// false-positive-free.
+fn lambda_literal_arity(heap: &Heap, form: Value) -> Option<Arity> {
+    let items = list_items(heap, form)?;
+    let Some(Value::Sym(head)) = items.first().copied() else {
+        return None;
+    };
+    if !(value::symbol_is(head, "fn") || value::symbol_is(head, "lambda")) {
+        return None;
+    }
+    // Peel an optional leading docstring, matching the evaluator's `fn` parse.
+    let parts = &items[1..];
+    let parts = match parts.first() {
+        Some(Value::Str(_)) if parts.len() > 1 => &parts[1..],
+        _ => parts,
+    };
+    // The parameter list. A multi-arity `fn` has clause *lists* here instead
+    // (`((a) …) ((a b) …)`), whose elements aren't bare symbols → we bail below.
+    let params = list_items(heap, *parts.first()?)?;
+    let mut n = 0usize;
+    for p in params {
+        match p {
+            Value::Sym(sym) => {
+                // `&optional` / `&` make the arity variable — bail (skip).
+                if value::symbol_is(sym, "&") || value::symbol_is(sym, "&optional") {
+                    return None;
+                }
+                n += 1;
+            }
+            // A destructuring pattern (nested list/vector) or a clause list →
+            // not a simple parameter, so not a shape we count here.
+            _ => return None,
+        }
+    }
+    Some(Arity::exact(n))
+}
+
+/// How a callback argument reads in a diagnostic — a named function by its name,
+/// an inline lambda as "the lambda".
+fn callback_desc(arg: Value) -> String {
+    match arg {
+        Value::Sym(s) => name_of(s),
+        _ => "the lambda".to_string(),
+    }
 }
 
 /// The output sinks the **function-as-value** lint guards. Passing a bare
@@ -352,7 +417,7 @@ pub(super) fn check_into(
                     if arg_ty.is_never() {
                         continue;
                     }
-                    if arg_ty.is_disjoint(param) {
+                    if arg_ty.is_disjoint(&param) {
                         let msg = format!(
                             "{}: argument {} expects {}, got {} ({})",
                             name_of(s),
@@ -363,6 +428,35 @@ pub(super) fn check_into(
                         );
                         // Locate to the call form (a Pair the reader positioned).
                         out.push((heap.form_pos(form), msg));
+                    }
+                }
+
+                // Callback-arity check (ADR-078 arrows): when the parameter is a
+                // function arrow with a fixed arity — a higher-order combinator
+                // (`map`/`filter`/`reduce`/`fold`) that calls its callback with a
+                // known argument count — flag a callback that provably can't
+                // accept that count. Conservative: only fires when the callback's
+                // arity is *known* (a named global fn, or a simple single-clause
+                // lambda literal); a local, variadic, or multi-clause callback is
+                // skipped — no false positives.
+                if let Some(expected) = param.as_arrow() {
+                    if expected.rest.is_none() {
+                        let wanted = expected.params.len();
+                        if let Some(cb) = callback_arity(heap, arg, ctx) {
+                            if !cb.accepts(wanted) {
+                                let msg = format!(
+                                    "{}: argument {} is a callback called with {} \
+                                     argument{}, but {} takes {}",
+                                    name_of(s),
+                                    i + 1,
+                                    wanted,
+                                    if wanted == 1 { "" } else { "s" },
+                                    callback_desc(arg),
+                                    arity_str(cb),
+                                );
+                                out.push((heap.form_pos(form), msg));
+                            }
+                        }
                     }
                 }
             }
@@ -507,7 +601,18 @@ fn check_if(
     check_into(heap, test, ctx, out);
 
     let (then_ctx, else_ctx) = match guard_assertion(heap, test, ctx) {
-        Some((sym, ty)) => (ctx.narrow(sym, ty), ctx.narrow(sym, ty.negate())),
+        Some(g) => {
+            let then_ctx = ctx.narrow(g.sym, g.ty.clone());
+            // Only narrow the else-branch when the guard is biconditional — a
+            // `then_only` guard (the `and` short-circuit) doesn't establish `¬ty`
+            // on a falsy test, so negating there would be a false positive.
+            let else_ctx = if g.then_only {
+                ctx.clone()
+            } else {
+                ctx.narrow(g.sym, g.ty.negate())
+            };
+            (then_ctx, else_ctx)
+        }
         None => (ctx.clone(), ctx.clone()),
     };
     check_value_leaf(heap, then_form, form, &then_ctx, out);
@@ -578,8 +683,13 @@ fn check_let(
         let rhs_ty = expr_ty(heap, rhs, &scope);
         let rhs_guard = guard_assertion(heap, rhs, &scope);
         scope = scope.bind(name, rhs_ty);
-        if let Some((target, gty)) = rhs_guard {
-            scope = scope.add_guard(name, target, gty);
+        // Only alias a *biconditional* guard: a `then_only` guard (the `and`
+        // short-circuit) must not be stored as a let-alias, or a later
+        // `(if alias …)` would negate it in the else-branch (unsound).
+        if let Some(g) = rhs_guard {
+            if !g.then_only {
+                scope = scope.add_guard(name, g.sym, g.ty);
+            }
         }
         // A plain `(let (name other) …)` aliases `name` to `other` — narrowing
         // either propagates to the other via `narrow_chain`. This is what

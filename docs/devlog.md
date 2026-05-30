@@ -10112,6 +10112,113 @@ line/col (the 6 failing tests). Then Stage 3 can flip the default to the VM.
 
 ---
 
+## 2026-05-30 — Structured types, slice 1: function arrows (ADR-078)
+
+**Goal.** Start the long-deferred Step 5+ of the type system. Steps 0–4 were
+complete, so this is the only remaining type-system work on the staircase. Chosen
+first slice (with the user): the representation change + **function arrow types**,
+because higher-order functions (`map`/`filter`/`reduce`/`fold`) were the biggest
+checker blind spot — a wrong-arity callback sailed straight through.
+
+**Decision (ADR-078): refine, don't replace.** `types.md` had sketched Step 5+ as an
+`enum { Set(u16), Arrow, Vec }` *replacing* the bitset. Instead `Ty` became a
+**refinement struct** `{ tags: u32, arrow: Option<Arc<Sig>> }`: the flat tag bitset
+stays the coarse set (carrying the entire pre-Step-5 algebra verbatim), and `arrow`
+refines the function members when known. An arrow type *is* a `Sig`, so no parallel
+type. Union across kinds (`int ∪ (string -> int)`) is then just the tag union plus a
+per-kind refinement — sidestepping the DNF-of-frames an enum's `Union` variant would
+force (the expensive set-theoretic-algebra part ADR-011 says to defer).
+
+**Built.**
+- `Ty` rewritten in `types/mod.rs`: refinement struct; `Ty::arrow`/`as_arrow`/
+  `of_tags`; arrow-aware `union`/`intersect`/`negate`/`is_subtype` (only ever
+  *widen* a refinement when the exact result isn't representable — sound for an
+  advisory checker); `is_disjoint` decided on tags alone (never off an arrow
+  mismatch). `Sig` gained `is_subtype` (contravariant params, covariant ret) +
+  `Display` (`(int, string) -> number`).
+- `Ty` is no longer `Copy` (the `Arc`). Churn contained by making the builtin /
+  curated **type shorthands `const` items** (a `const` mention re-materialises a
+  fresh value, so the ~170 sig-table sites needed no `.clone()`); the compiler
+  flagged the handful of genuine reuse sites. `Arc` not `Rc` — `Sig` rides on
+  `NativeFn` in the `Arc<RuntimeCode>` region shared across scheduler threads.
+- Checker payoff: `map`/`filter` curated sigs carry a 1-ary callback arrow,
+  `reduce`/`fold` a 2-ary one; a new callback-arity check in `check/walk.rs` flags a
+  callback that can't accept the count the combinator calls it with —
+  `map: argument 1 is a callback called with 1 argument, but cons takes 2`.
+  Conservative: only fires when the callback's arity is knowable (a named *global*
+  fn via `arity_of`, or a simple single-clause lambda literal); locals, variadic /
+  `&optional` / multi-clause lambdas, and file-local names on the read-only
+  `--check` path all skip → **zero false positives**.
+
+**Verified.** 267 lib tests pass (+11: 6 arrow-algebra, 5 callback-checker), full
+in-language `brood_suite_passes` green, pre-existing lattice-law tests pass
+untouched (proves the flat case is behaviour-preserving). Audited `brood --check`
+over all 76 `std/` + `tests/` files: no callback false positives; positive controls
+(`(map cons …)`, `(map (fn (a b) …) …)`, `(reduce (fn (a) …) …)`) all fire with
+located messages.
+
+**LSP.** No new wiring needed — `brood-lsp`'s `publish` already pipes every
+`check_file` finding to `publishDiagnostics` as a `brood` WARNING, so the callback
+diagnostics surface in-editor automatically (and the LSP, which bootstraps project
+sources into the heap, even resolves *project-local* named callbacks that a bare
+`brood --check` of one file can't). Extracted the Tier-1 loop into a testable
+`typecheck_diagnostics` helper and added two LSP-level tests (the warning surfaces;
+correct arity stays quiet). 78 LSP tests green.
+
+**Confirmed no runtime cost.** `NativeFn.sig` (the field carrying `Ty`) is read only
+by the offline checker — `eval/` never constructs or inspects `Ty`/`Sig`, and the
+runtime arity gate uses the separate `Arity` field. So this is offline work plus a
+few KB of constant startup metadata; zero eval hot-path impact. `Ty` losing `Copy`
+is a compile-time ergonomic only.
+
+**Deferred (ADR-011).** Vector/list element types (the `elem` refinement the struct
+has room for), overload intersections, arrows in straight-line inference. Done on
+branch `structured-types`.
+
+---
+
+## 2026-05-31 — Structured types, slice 2: vector/list element types (ADR-078)
+
+**Goal.** The second Step 5+ slice, building on the arrow refinement: give `Ty` an
+element-type refinement so `[1 2 3] : vector<int>` and the element flows through
+`first`/`last`/`nth`.
+
+**Built.**
+- `Ty` gained `elem: Option<Arc<Ty>>` next to `arrow` — refines the sequence
+  members (`pair`/`vector`). Constructors `vector_of`/`list_of`/`seq_of`, accessor
+  `elem_ty`, `Display` `vector<int>`/`list<int>`. The two refinements share generic
+  `merge_union`/`merge_intersect` helpers (widen on mismatch); element subtyping is
+  covariant (sound — sequences are immutable); `is_disjoint` stays tags-only.
+- `expr_ty` (the checker): **sources** — a vector literal `[…]` and the
+  `(list …)`/`(vector …)` constructors take the union of their element forms' types
+  (any unknown → unrefined, never wrong); **sinks** — `(first xs)`/`(last xs)`/
+  `(nth xs i)` flow the element type out, widened with `nil` for the empty case. So
+  `(+ 1 (first ["a" "b"]))` is flagged (`string|nil` disjoint from number) while
+  `(first [1 2 3])` stays numeric. The existing disjointness check does the rest.
+
+**Latent gap surfaced + fixed.** Typing `(list 1 2)` precisely (was untyped: `list`
+is a variadic prelude `defn`, which `infer_sig` skips) meant the `match` compiler's
+vector-pattern lowering `(if (and (vector? m) (= (vector-length m) 2)) (… (vector-ref
+m i) …) …)` tried to flag the guarded `vector-ref` against a `list<int>` scrutinee —
+a false positive. Root cause: occurrence typing didn't see through the `and`
+short-circuit. Fixed in `guard_assertion` by recognising the post-`macroexpand_all`
+shape `(let (g E) (if g _ g))` (a truthy `and` ⟹ first conjunct `E` holds; `or`'s
+`(if g g _)` deliberately excluded). General win: any `(if (and (pred? x) …) …)` now
+narrows `x` in the then-branch.
+
+**Verified.** 353 lib + lsp tests green (incl. full in-language `brood_suite_passes`);
++11 new (4 element-algebra, 4 checker element-flow, 3 `and`-guard / match-lowering
+regression). Re-audited `brood --check` across all 76 `std/` + `tests/` files: the
+one `vector-ref` false positive is gone; the remaining warnings are all pre-existing
+(single-file `--check` can't see project-local names; one `(rest pair)`-as-cdr
+modelling gap in `std/test.blsp`, untouched by this work).
+
+**Deferred (ADR-011).** Overload intersections; element/arrow types in straight-line
+inference; a parametric `map` result element type (needs dependent sigs). Done on
+branch `structured-types`.
+
+---
+
 ## 2026-05-31 — VM source positions + `make install` ships the VM
 
 Two follow-ups closing out the Stage-2c work.

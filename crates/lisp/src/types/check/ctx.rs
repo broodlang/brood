@@ -78,11 +78,11 @@ pub(super) struct Ctx {
 impl Ctx {
     /// The locally-known type for `sym`, or `None` if it isn't tracked.
     pub(super) fn get(&self, sym: Symbol) -> Option<Ty> {
-        self.types.get(&sym).copied()
+        self.types.get(&sym).cloned()
     }
     /// The guard (variable + asserted type) `sym` was bound to, if any.
     pub(super) fn guard(&self, sym: Symbol) -> Option<(Symbol, Ty)> {
-        self.guards.get(&sym).copied()
+        self.guards.get(&sym).cloned()
     }
     /// Is `sym` in scope here? — a local binder (fn-param or let), a recorded
     /// narrowing, guard alias, or let-binding alias, or an accumulated
@@ -131,8 +131,8 @@ impl Ctx {
             if !visited.insert(s) {
                 continue;
             }
-            let prior = self.types.get(&s).copied().unwrap_or(Ty::ANY);
-            self.types.insert(s, prior.intersect(ty));
+            let prior = self.types.get(&s).cloned().unwrap_or(Ty::ANY);
+            self.types.insert(s, prior.intersect(ty.clone()));
             if let Some(neighbours) = self.aliases.get(&s) {
                 for &n in neighbours {
                     if !visited.contains(&n) {

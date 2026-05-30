@@ -1249,4 +1249,199 @@ mod tests {
             w
         );
     }
+
+    // ---- callback-arity check over higher-order combinators (ADR-078) ----
+
+    #[test]
+    fn flags_a_named_callback_of_the_wrong_arity() {
+        // `cons` is arity 2; `map` calls its callback with 1 arg → real bug.
+        let w = warnings("(map cons nil)");
+        assert!(
+            w.iter()
+                .any(|s| s.contains("map") && s.contains("callback") && s.contains("cons")),
+            "map should flag a 2-arg callback called with 1: {w:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_a_named_callback_of_the_right_arity() {
+        // `inc` is arity 1 — exactly what `map` supplies. No warning.
+        let w = warnings("(map inc nil)");
+        assert!(
+            w.iter().all(|s| !s.contains("callback")),
+            "a correct-arity callback must not warn: {w:?}"
+        );
+        // A variadic callback (`+` accepts 1) is fine too.
+        let w = warnings("(map + nil)");
+        assert!(
+            w.iter().all(|s| !s.contains("callback")),
+            "a variadic callback must not warn: {w:?}"
+        );
+    }
+
+    #[test]
+    fn flags_a_lambda_callback_of_the_wrong_arity() {
+        // A 2-param lambda passed where `map` calls it with 1 arg.
+        let w = warnings("(map (fn (a b) a) nil)");
+        assert!(
+            w.iter()
+                .any(|s| s.contains("map") && s.contains("callback") && s.contains("the lambda")),
+            "map should flag a 2-arg lambda: {w:?}"
+        );
+        // Correct arity — no warning.
+        let w = warnings("(map (fn (a) a) nil)");
+        assert!(
+            w.iter().all(|s| !s.contains("callback")),
+            "a 1-arg lambda must not warn under map: {w:?}"
+        );
+    }
+
+    #[test]
+    fn reduce_and_fold_expect_a_two_arg_callback() {
+        // reduce/fold call `(f acc x)` — 2 args. A 1-arg callback is wrong.
+        let w = warnings("(reduce (fn (a) a) 0 nil)");
+        assert!(
+            w.iter()
+                .any(|s| s.contains("reduce") && s.contains("callback")),
+            "reduce should flag a 1-arg callback: {w:?}"
+        );
+        let w = warnings("(fold inc 0 nil)");
+        assert!(
+            w.iter().any(|s| s.contains("fold") && s.contains("callback")),
+            "fold should flag a 1-arg callback (inc): {w:?}"
+        );
+        // A correct 2-arg callback is silent.
+        let w = warnings("(reduce (fn (a b) a) 0 nil)");
+        assert!(
+            w.iter().all(|s| !s.contains("callback")),
+            "a 2-arg callback must not warn under reduce: {w:?}"
+        );
+    }
+
+    #[test]
+    fn callback_arity_is_skipped_when_unknown() {
+        // A multi-arity lambda accepts 1 *and* 2 — must not warn (we bail rather
+        // than risk a false positive).
+        let w = warnings("(map (fn ((a) a) ((a b) a)) nil)");
+        assert!(
+            w.iter().all(|s| !s.contains("callback")),
+            "multi-arity lambda must be skipped: {w:?}"
+        );
+        // A locally-bound callback has unknown arity here — skip.
+        let w = warnings("(fn (f) (map f nil))");
+        assert!(
+            w.iter().all(|s| !s.contains("callback")),
+            "a local callback must be skipped: {w:?}"
+        );
+    }
+
+    // ---- element types flow through first/last/nth (ADR-078 slice 2) ----
+
+    #[test]
+    fn first_of_a_string_vector_is_not_a_number() {
+        // `(first ["a" "b"])` : string | nil — disjoint from number → flagged.
+        let w = warnings(r#"(+ 1 (first ["a" "b"]))"#);
+        assert!(
+            w.iter().any(|s| s.contains("+") && s.contains("string")),
+            "expected a number/string mismatch from the element type: {w:?}"
+        );
+    }
+
+    #[test]
+    fn first_of_an_int_vector_is_a_number() {
+        // `(first [10 20])` : int | nil — overlaps number → no warning.
+        let w = warnings("(+ 1 (first [10 20]))");
+        assert!(
+            w.iter().all(|s| !s.contains("expects number")),
+            "an int element must not warn against +: {w:?}"
+        );
+    }
+
+    #[test]
+    fn list_constructor_carries_its_element_type() {
+        // `(list "a" "b")` : list<string>, so `(first …)` is string|nil.
+        let w = warnings(r#"(+ 1 (first (list "a" "b")))"#);
+        assert!(
+            w.iter().any(|s| s.contains("+") && s.contains("string")),
+            "(list …) element type should flow to first: {w:?}"
+        );
+    }
+
+    #[test]
+    fn heterogeneous_or_unknown_elements_do_not_warn() {
+        // Mixed elements → int|string element; first → int|string|nil, which
+        // overlaps number → no false positive.
+        let w = warnings(r#"(+ 1 (first [1 "a"]))"#);
+        assert!(
+            w.iter().all(|s| !s.contains("expects number")),
+            "a heterogeneous element type must not warn: {w:?}"
+        );
+        // first of an unknown (variable) sequence → unknown → no warning.
+        let w = warnings("(fn (xs) (+ 1 (first xs)))");
+        assert!(
+            w.iter().all(|s| !s.contains("expects number")),
+            "an unknown sequence must not warn: {w:?}"
+        );
+    }
+
+    // ---- `and`-guard narrowing in an `if` test (the match-lowering fix) ----
+
+    #[test]
+    fn and_guard_narrows_in_the_then_branch() {
+        // `(and (int? x) …)` as an `if` test must narrow `x` to int in the then
+        // branch — so a use that would mismatch the *original* type is suppressed
+        // (here `x` is a string, narrowed to never → the `+` use is unreachable).
+        let w = warnings_expanded(r#"(let (x "s") (if (and (int? x) true) (+ x 1) 0))"#);
+        assert!(
+            w.iter().all(|s| !s.contains("expects number")),
+            "an `and` guard should narrow x in the then branch: {w:?}"
+        );
+    }
+
+    #[test]
+    fn matching_a_list_against_a_vector_pattern_is_not_flagged() {
+        // The match compiler lowers a vector pattern to
+        // `(if (and (vector? m) (= (vector-length m) 2)) (… (vector-ref m i) …) …)`.
+        // With `(list 1 2)` now typed `list<int>`, the guarded `vector-ref` must
+        // not be flagged — the `and` guard narrows `m` to a vector (→ never here).
+        let w = warnings_expanded("(match (list 1 2) ([a b] :vec) (_ :not-vec))");
+        assert!(
+            w.iter().all(|s| !s.contains("vector-ref") && !s.contains("vector-length")),
+            "a list matched against a vector pattern must not warn: {w:?}"
+        );
+    }
+
+    #[test]
+    fn and_guard_does_not_narrow_the_else_branch() {
+        // A falsy `(and (vector? m) …)` does NOT imply `m` isn't a vector — a
+        // *later* conjunct may have failed. So the else-branch must keep `m`'s
+        // full type; flagging a vector op there would be a false positive.
+        let w = warnings_expanded(
+            "(fn (m) (if (and (vector? m) (%eq (vector-length m) 2)) \
+                         (vector-ref m 0) (vector-ref m 0)))",
+        );
+        assert!(
+            w.iter().all(|s| !s.contains("vector-ref")),
+            "the else-branch of an `and` guard must not be narrowed: {w:?}"
+        );
+        // The then-branch still narrows (sanity: the guard didn't go silent).
+        let w = warnings_expanded(r#"(fn (m) (if (and (int? m) true) (string-length m) 0))"#);
+        assert!(
+            w.iter().any(|s| s.contains("string-length")),
+            "the then-branch should still narrow m to int: {w:?}"
+        );
+    }
+
+    #[test]
+    fn or_guard_does_not_falsely_narrow() {
+        // `or` must NOT narrow from its first operand (a truthy `or` implies
+        // nothing about it). `(or (int? x) true)` is always true, so the then
+        // branch keeps `x`'s full (string) type — and a genuine misuse there is
+        // still seen. (Guards against the `and`-fix over-reaching into `or`.)
+        let w = warnings_expanded(r#"(let (x "s") (if (or (int? x) true) (string-length x) 0))"#);
+        assert!(
+            w.iter().all(|s| !s.contains("expects")),
+            "a correct use under an `or` guard must not warn: {w:?}"
+        );
+    }
 }

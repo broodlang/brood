@@ -4902,3 +4902,102 @@ seam, which must keep the terminal's own text selection.
 **References.** ADR-056 (the mouse vocabulary this extends, and whose deferral it
 resolves), ADR-046 (the display/input seam), ADR-058 (GUI input as mailbox
 messages), ADR-011 (ship the minimal form; additive features wait for a consumer).
+
+## ADR-078 — Structured types: arrow + element refinements on the flat lattice
+
+**Status:** accepted; **shipped 2026-05-30** (the first slice of Step 5+ in
+[`types.md`](types.md)). Function-arrow types are in the `Ty` lattice and the
+advisory checker uses them to flag callbacks of the wrong arity passed to the
+higher-order combinators (`map`/`filter`/`reduce`/`fold`). Advisory throughout —
+contract #5 holds (warns, never gates). Refines the Step 5+ sketch in ADR-024.
+
+**Context.** Steps 0–4 left `Ty` a flat `u32` bitset over the runtime tags —
+expressive enough for `int | string` or `not nil`, but it can't say *what kind of
+function* a value is. So the biggest blind spot was higher-order functions: `(map
+(fn (a b) …) xs)` (a 2-arg callback where `map` calls it with one) or `(map 5 xs)`
+sailed through. [`types.md`](types.md) named the next move as Step 5+ "structured
+types", sketched as an `enum { Set(u16), Arrow(..), Vec(elem) }` that *replaces* the
+bitset.
+
+**Decision.** Add structure as a **refinement on the flat bitset**, not as a
+replacing enum. `Ty` becomes a struct `{ tags: u32, arrow: Option<Arc<Sig>> }`: the
+tag bitset stays the coarse set (carrying the entire pre-Step-5 behaviour verbatim),
+and `arrow`, when present, refines the function members (`Fn`/`Native`) to those
+matching a specific signature. An arrow type *is* a [`Sig`] (params + rest + ret),
+so the refinement reuses `Sig` rather than a parallel type. `(int) -> int` is
+`{tags: Fn|Native, arrow: Some((int)->int)}`; a bare "any function" is the same tags
+with `arrow: None`.
+
+**Why a refinement struct over the sketched enum.**
+1. **Union across kinds is natural.** `int ∪ (string -> int)` is just
+   `{tags: Int|Fn|Native, arrow: …}` — the bitset already unions the tags, and the
+   refinement attaches per-kind. A replacing enum would need a `Union(Vec<Ty>)`
+   variant (a DNF of type frames), which is the bulk of the set-theoretic-algebra
+   complexity ADR-011 says to defer until a consumer needs it.
+2. **The flat case is unchanged.** Every existing `Ty` is `{tags, arrow: None}`, so
+   the lattice ops degrade to exactly today's bitset algebra — proven by the
+   pre-existing lattice-law unit tests still passing untouched.
+3. **Advisory-soundness by construction.** The set operations may only ever *widen*
+   the refinement toward `None` (= "any function") when they can't represent the
+   exact result (union of two distinct arrows; negation; intersection of two known
+   arrows). Widening over-approximates the set, so it can only ever *suppress* a
+   warning, never manufacture a false one. `is_disjoint` is decided on tags alone
+   and never inspects arrows — so an arrow mismatch can't be mistaken for
+   disjointness (contract #5). The precise arrow check is a **dedicated step in the
+   checker**, not something the generic lattice infers.
+
+**Trade-off accepted.** `Ty` is no longer `Copy` (the `Arc` refinement), so it is
+`Clone` (a `u32` + a refcount bump; the flat case is a null pointer). The churn was
+contained by making the builtin/curated **type shorthands `const` items** (a `const`
+mention re-materialises a fresh value, so the ~170 sig-table sites need no `.clone()`)
+and by the compiler flagging the handful of real reuse sites. `Arc` (not `Rc`)
+because `Sig` rides on `NativeFn` inside the `Arc<RuntimeCode>` region shared across
+scheduler threads, which must stay `Send + Sync`.
+
+**Arrow algebra.** Subtyping is **contravariant in parameters, covariant in the
+result** (`Sig::is_subtype`), with arities required compatible — the standard
+function-subtyping rule, kept as set inclusion (contract #3). A specific arrow `<:`
+"any function"; "any function" is *not* `<:` a specific arrow.
+
+**The checker payoff (this slice).** The curated sigs for `map`/`filter` carry a
+1-ary callback arrow, `reduce`/`fold` a 2-ary one. When a parameter is a fixed-arity
+arrow and the argument's callback arity is **knowable unambiguously** — a named
+*global* function (arity from the heap) or a simple single-clause lambda literal —
+the checker flags a callback that can't accept that count: `map: argument 1 is a
+callback called with 1 argument, but cons takes 2`. Conservative by design: a local
+variable, a variadic/`&optional` or multi-clause lambda, or a file-local name on the
+read-only `--check` path all yield "unknown arity → skip", so there are **zero false
+positives** (audited across the whole `std/` + `tests/` tree). The arrow's tags are
+still `fn | native`, so the existing "non-function argument" check (`(map 5 xs)`) is
+unchanged — the arrow only *adds* the arity refinement.
+
+**Element types (second slice, shipped).** `Ty` gained the second refinement the
+struct was designed for — `elem: Option<Arc<Ty>>`, refining the sequence members
+(`pair`/`vector`) to their element type (`vector<int>` = `{tags: Vector, elem:
+Some(int)}`). **Sources:** a vector literal `[1 2 3]` and the `(list …)`/`(vector …)`
+constructors take the union of their element types (any unknown element → unrefined,
+never wrong). **Sinks:** `(first xs)`/`(last xs)`/`(nth xs i)` flow the element type
+out — widened with `nil` for the empty/out-of-range case — so `(+ 1 (first ["a"
+"b"]))` is flagged (`string | nil` disjoint from `number`) while `(first [1 2 3])`
+stays numeric. Element subtyping is covariant (sound — sequences are immutable);
+union widens on a mismatch; `is_disjoint` stays tags-only (same advisory-soundness
+rule as `arrow`). The refinements share the generic `merge_union`/`merge_intersect`
+helpers. **Latent gap surfaced + fixed:** typing `(list …)` precisely meant the
+`match` compiler's vector-pattern lowering `(if (and (vector? m) (= (vector-length m)
+2)) (… (vector-ref m i) …) …)` tried to flag the guarded `vector-ref` against a
+`list<int>` scrutinee. The root cause was occurrence typing not seeing through the
+`and` short-circuit — so `guard_assertion` now narrows through the post-expansion
+shape `(let (g E) (if g _ g))` (a truthy `and` ⟹ first conjunct `E` holds; `or`'s
+`(if g g _)` deliberately doesn't match). General win beyond this case: any `(if (and
+(pred? x) …) …)` now narrows `x` in the then-branch.
+
+**Still deferred (⬜, ADR-011).** Intersections for overloaded fns; arrow/element
+types flowing into the straight-line inference; a parametric `map` result element
+type (`(map f vector<A>) : list<B>` from `f : A -> B`) — needs dependent signatures.
+
+**References.** [`types.md`](types.md) (Step 5+, the compatibility contract), ADR-024
+(the set-theoretic/gradual model this extends), ADR-023, ADR-011 (ship the simple
+form, defer power), ADR-006 (mechanism in Rust, the arrow/element algebra; policy
+stays Brood). Lives in `crates/lisp/src/types/mod.rs` (the lattice) and
+`crates/lisp/src/types/check/{sigs,walk,guards}.rs` (callback check, element flow,
+and the `and`-guard narrowing).

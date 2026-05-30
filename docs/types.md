@@ -1,6 +1,7 @@
 # Brood types — set-theoretic, gradual, advisory
 
-**Status:** steps 1–2 done; 3–4 started — a v0 advisory checker (`(check 'form)`)
+**Status:** steps 0–4 done; Step 5+ started — function arrows shipped (ADR-078),
+the advisory checker (`(check 'form)`)
 is the lattice's first consumer (`crates/lisp/src/types/{mod,check}.rs`). This doc is the
 plan *and* the compatibility contract: the staircase says what to build next, the
 [Compatibility contract](#compatibility-contract) says what every other change
@@ -34,9 +35,11 @@ A `Ty` **is a set of values**, and the type operations *are* set operations:
 | negation ("not nil") | `¬` | `Ty::negate` (complement) |
 | **subtyping** | `⊆` inclusion | `Ty::is_subtype` — *semantic*, no syntactic rules |
 
-- **Atoms** are the 12 runtime [`Tag`](../crates/lisp/src/core/value.rs)s
-  (`int float string symbol keyword bool nil pair vector fn macro native`). The
-  type universe is built from these; `type-of` observes one at runtime.
+- **Atoms** are the 17 runtime [`Tag`](../crates/lisp/src/core/value.rs)s
+  (`int float string symbol keyword bool nil pair vector fn macro native map ref
+  pid rope socket`). The type universe is built from these; `type-of` observes one
+  at runtime. Function members can additionally carry a structured *arrow*
+  refinement (Step 5+, ADR-078).
 - `Ty::NEVER` = `⊥` (empty set, subtype of everything); `Ty::ANY` = `⊤` (all
   tags); the named unions `Ty::NUMBER` (`int∪float`), `Ty::LIST` (`nil∪pair`)
   match the `number?`/`list?` predicates.
@@ -58,8 +61,10 @@ A `Ty` **is a set of values**, and the type operations *are* set operations:
   Elixir uses.) **Note:** the advisory *checker* (Step 4) doesn't use `GradualTy`
   — it carries `Option<Ty>` (known / unknown). `dynamic()` is foundation for a
   later gradual-*assignment* checker, not the disjointness pass.
-- **Structured types** (function arrows `int -> int`, a vector's element type)
-  are a later step; today `Ty` is flat (sets of tags only).
+- **Structured types** arrive as refinements on the flat lattice (Step 5+): a
+  **function arrow** `int -> int` ships (ADR-078, the `arrow` refinement); a
+  vector's element type is the next slice. The flat tag bitset remains the coarse
+  set under any refinement.
 
 ## The staircase — tackle one at a time
 
@@ -269,12 +274,48 @@ file-list checks both load the project image first via Brood `project/check-file
 code path). The only meaningful next move is the upgrade to Step 5+ (structured
 types) when a real need surfaces.
 
-### Step 5+ — structured types ⬜
+### Step 5+ — structured types 🟡 (arrows + element types shipped; ADR-078)
 Function arrows, vector/list element types, intersections for overloaded fns —
-the fuller set-theoretic algebra. Additive; gated on real need (ADR-011). **Note:
-this *replaces* the `u16`-bitset representation of `Ty`** (likely an
-`enum { Set(u16), Arrow(..), Vec(elem), … }`), it doesn't extend it — which is a
-reason to keep the flat lattice lean now rather than over-build on the bitset.
+the fuller set-theoretic algebra. Additive; gated on real need (ADR-011).
+
+**✅ Function arrows (first slice, ADR-078).** `Ty` is now a **refinement struct**
+`{ tags: u32, arrow: Option<Arc<Sig>> }`: the flat tag bitset stays the coarse set
+(the whole pre-Step-5 behaviour, verbatim), and `arrow` refines the function members
+(`Fn`/`Native`) to a specific signature when known — an arrow type *is* a [`Sig`].
+So `(int) -> int` is `{tags: Fn|Native, arrow: Some((int)->int)}`; a bare "any
+function" is the same tags with `arrow: None`. This **refines** the bitset rather
+than *replacing* it with the originally-sketched `enum { Set, Arrow, Vec }` — a
+union across kinds (`int ∪ (string -> int)`) is then just the tag union plus a
+per-kind refinement, sidestepping the DNF-of-frames an enum would force (the
+expensive part ADR-011 says to defer). Arrow subtyping is contravariant in
+parameters / covariant in the result (`Sig::is_subtype`); the set ops only ever
+*widen* a refinement toward `None` when they can't represent the exact result, and
+`is_disjoint` ignores arrows entirely — so a refinement can only suppress a warning,
+never raise a false one (contract #5). **The payoff:** `map`/`filter` carry a 1-ary
+callback arrow and `reduce`/`fold` a 2-ary one, so the checker flags a callback of
+the wrong arity — `(map cons xs)`, `(reduce (fn (a) a) 0 xs)` — whenever the
+callback's arity is knowable (a named global fn, or a simple lambda literal);
+unknown arities are skipped, so zero false positives across `std/` + `tests/`.
+
+**✅ Element types (second slice, ADR-078).** `Ty` gained a second refinement,
+`elem: Option<Arc<Ty>>`, refining the sequence members (`pair`/`vector`) to their
+element type — `vector<int>` is `{tags: Vector, elem: Some(int)}`. Sources: a vector
+literal `[1 2 3]` and the `(list …)`/`(vector …)` constructors get the union of their
+element types (any unknown element → unrefined). Sinks: `(first xs)`/`(last xs)`/
+`(nth xs i)` flow the element type out (widened with `nil` for the empty/out-of-range
+case), so `(+ 1 (first ["a" "b"]))` is flagged (`string | nil` is disjoint from
+`number`) while `(first [1 2 3])` stays a number. Element subtyping is covariant
+(sound — Brood sequences are immutable); union widens on a mismatch; `is_disjoint`
+stays tags-only. Surfacing precise sequence types exposed a latent guarded-use gap —
+the `match` compiler's vector-pattern lowering `(if (and (vector? m) …) (… (vector-ref
+m i) …) …)` — so `guard_assertion` now narrows through the **`and` short-circuit
+shape** `(let (g E) (if g _ g))` (the first conjunct holds in the then-branch; `or`'s
+`(if g g _)` deliberately does not), which keeps the guarded `vector-ref` quiet. Zero
+new false positives across `std/` + `tests/`.
+
+**⬜ Still deferred (ADR-011).** Intersections for overloaded fns; arrows/element
+types flowing into the straight-line inference; a parametric `map` result element
+type (`(map f vector<A>) : list<B>` from `f : A -> B`). Gated on a concrete consumer.
 
 ## How it runs — and why it's outside the runtime
 
@@ -322,10 +363,11 @@ marked **(enforced)** are compile errors if violated; the rest are review rules.
    The `tag_universe_is_consistent` test checks bits are dense and in order, so a
    tag *missing from* or *misordered in* `ALL_TAGS` fails CI (the gap a plain
    match can't catch, since Rust can't enumerate variants). Don't introduce a
-   value kind that can't be a tag. **As of `Tag::Rope` (ADR-045) there are 16
-   tags — the `Ty(u16)` lattice is now full.** `UNIVERSE` computes in `u32` and
-   narrows to dodge the `1u16 << 16` const-overflow; a *17th* tag must widen `Ty`
-   to `u32` (the `TAG_COUNT <= 16` assert in `types/mod.rs` is the tripwire).
+   value kind that can't be a tag. **There are 17 tags today** (…`Rope`, `Socket`),
+   and the lattice's tag bitset is a **`u32`** (`Ty { tags: u32, … }`, ADR-078), so
+   it has headroom to 32 atoms. `UNIVERSE` computes in `u64` and narrows to dodge
+   the `1u32 << 32` const-overflow at the cap; a *33rd* tag must widen the `tags`
+   field to `u64` (the `TAG_COUNT <= 32` assert in `types/mod.rs` is the tripwire).
 2. **A type is a set of values.** Don't add a typing concept that isn't a set
    (no nominal-only identity, no escape hatch that breaks set semantics).
    Structured types arrive as proper set-theoretic extensions, never bolt-ons.
