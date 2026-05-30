@@ -162,10 +162,22 @@ fn gc_stats_counts_automatic_collections() {
         "expected ≥1 automatic collection, got {runs} — gc-stats: {stats}"
     );
     assert!(
-        reclaimed > copied,
-        "young-death churn should reclaim far more than it copies \
-         (reclaimed {reclaimed} vs copied {copied}) — gc-stats: {stats}"
+        reclaimed > 0,
+        "young-death churn should reclaim garbage, got {reclaimed} — gc-stats: {stats}"
     );
+    // In the **generational** collector `:copied` counts *promotions* (minor:
+    // nursery→old; major: old compaction). At the normal GC floor, junk dies in
+    // the nursery before a collection, so reclaim dwarfs promotion. But under
+    // `BROOD_GC_STRESS=1` a minor fires at *every* safepoint, so anything live for
+    // even one safepoint is tenured (premature promotion) — `copied` can then
+    // exceed `reclaimed`. So only assert young-death-dominates when not stressing.
+    if std::env::var_os("BROOD_GC_STRESS").is_none() {
+        assert!(
+            reclaimed > copied,
+            "young-death churn should reclaim far more than it promotes \
+             (reclaimed {reclaimed} vs copied {copied}) — gc-stats: {stats}"
+        );
+    }
     assert!(
         threshold > 0,
         "threshold should be a positive live-count trigger, got {threshold} — gc-stats: {stats}"
