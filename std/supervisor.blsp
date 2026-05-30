@@ -59,6 +59,15 @@ link propagation — but a deliberate hard kill is untrappable, hence `:infinity
     (which-children sup)   ; => list of {:id :pid :restart}
     (stop-supervisor sup)  ; stop supervising AND terminate the children
 
+Children can also be managed at runtime (Elixir's DynamicSupervisor / OTP's
+start_child·terminate_child·restart_child·count_children) — a supervisor started
+with `[]` children and grown this way *is* a dynamic supervisor:
+
+    (start-child sup spec)    ; start + supervise a new child; returns its pid
+    (terminate-child sup key) ; stop a child (by :id or pid), no restart; :ok|:not-found
+    (restart-child sup key)   ; stop + restart a child from its spec; new pid|:not-found
+    (count-children sup)      ; how many children right now
+
 Strategies: `:one-for-one` (default — restart only the crashed child),
 `:one-for-all` (restart every child), `:rest-for-one` (restart the crashed child
 and every child started after it). The crashed child's `:restart` type gates
@@ -104,6 +113,11 @@ address the child by a stable name even though its pid changes across restarts."
 (defn supervisor--drop (children pid)
   "`children` without the record whose `:pid` is `pid`."
   (remove (fn (c) (= (get c :pid) pid)) children))
+
+(defn supervisor--find-by-key (children key)
+  "Find a child by its `:pid` *or* its `:id` — the runtime child API
+(`terminate-child`/`restart-child`) accepts either. `nil` if neither matches."
+  (find (fn (c) (or (= (get c :pid) key) (= (get c :id) key))) children))
 
 ;; ---- terminating a healthy child (link + exit, ADR-063/067) -----------------
 
@@ -260,6 +274,44 @@ abnormal (`:killed`) — leaving unaffected children running. Bounded by intensi
           else
             (supervisor--group-restart state child reason)))))
 
+;; ---- runtime child management (Elixir's DynamicSupervisor / OTP's
+;; start_child / terminate_child / restart_child / count_children) -------------
+;; A supervisor started with `[]` children and grown at runtime *is* a dynamic
+;; supervisor. A dynamically-added child is a full member: it's linked, restarted
+;; per its `:restart` type, and torn down on shutdown like any other.
+
+(defn supervisor--do-start-child (state spec from r)
+  "Handle `[:start-child spec]`: start + link the new child, append it (preserving
+start order), reply its pid."
+  (let (child (supervisor--start-child spec))
+    (send from [:reply r (get child :pid)])
+    (supervisor--loop (assoc state :children (append (get state :children) (list child))))))
+
+(defn supervisor--do-terminate-child (state key from r)
+  "Handle `[:terminate-child key]` (key = `:id` or pid): terminate the child per
+its `:shutdown` and drop it from supervision (no restart). Reply `:ok`, or
+`:not-found`."
+  (let (child (supervisor--find-by-key (get state :children) key))
+    (if (nil? child)
+      (do (send from [:reply r :not-found]) (supervisor--loop state))
+      (do (supervisor--terminate-child child)
+          (send from [:reply r :ok])
+          (supervisor--loop (assoc state :children
+                                   (supervisor--drop (get state :children) (get child :pid))))))))
+
+(defn supervisor--do-restart-child (state key from r)
+  "Handle `[:restart-child key]`: terminate the child and start a fresh incarnation
+from the same spec (not counted against the intensity window — it's an explicit
+request, like OTP's `restart_child`). Reply the new pid, or `:not-found`."
+  (let (child (supervisor--find-by-key (get state :children) key))
+    (if (nil? child)
+      (do (send from [:reply r :not-found]) (supervisor--loop state))
+      (do (supervisor--terminate-child child)
+          (let (fresh (supervisor--start-child child))
+            (send from [:reply r (get fresh :pid)])
+            (supervisor--loop (assoc state :children
+                                     (supervisor--replace (get state :children) (get child :pid) fresh))))))))
+
 (defn supervisor--loop (state)
   "The supervisor's receive loop over its immutable `state` map."
   (receive
@@ -267,6 +319,12 @@ abnormal (`:killed`) — leaving unaffected children running. Bounded by intensi
     ([:which-children from r]
       (do (send from [:reply r (supervisor--summarize (get state :children))])
           (supervisor--loop state)))
+    ([:count-children from r]
+      (do (send from [:reply r (count (get state :children))])
+          (supervisor--loop state)))
+    ([:start-child spec from r] (supervisor--do-start-child state spec from r))
+    ([:terminate-child key from r] (supervisor--do-terminate-child state key from r))
+    ([:restart-child key from r] (supervisor--do-restart-child state key from r))
     ([:$stop] (supervisor--terminate-many (get state :children)))))
 
 (defn supervisor--init (children opts parent)
@@ -314,11 +372,45 @@ parent's death tears this sub-tree down too."
       (error "start-supervisor: unknown :strategy " strategy
              " (expected :one-for-one, :one-for-all, or :rest-for-one)"))))
 
+;; Each synchronous client fn below sends a `[:tag … (self) r]` **vector** (the
+;; loop matches vector patterns) with a fresh reply ref, then blocks for the
+;; matching `[:reply ~r v]`. Built as vector literals, not via `append` — a list
+;; wouldn't match the loop's `[:tag …]` vector patterns.
+
 (defn which-children (sup)
   "Ask supervisor `sup` for its current children: a list of `{:id :pid :restart}`
 summaries. Synchronous (blocks for the reply)."
   (let (r (ref))
     (send sup [:which-children (self) r])
+    (receive ([:reply ~r v] v))))
+
+(defn count-children (sup)
+  "How many children supervisor `sup` currently has. Synchronous."
+  (let (r (ref))
+    (send sup [:count-children (self) r])
+    (receive ([:reply ~r v] v))))
+
+(defn start-child (sup spec)
+  "Start a new child under a running supervisor `sup` from child `spec` (the same
+map shape `start-supervisor` takes) — the dynamic-supervisor entry point. The
+child is linked and supervised like any static child. Returns its pid. Synchronous."
+  (let (r (ref))
+    (send sup [:start-child spec (self) r])
+    (receive ([:reply ~r v] v))))
+
+(defn terminate-child (sup key)
+  "Terminate a child of `sup` identified by `key` (its `:id` or pid) and drop it
+from supervision — it is *not* restarted. Returns `:ok`, or `:not-found`. Synchronous."
+  (let (r (ref))
+    (send sup [:terminate-child key (self) r])
+    (receive ([:reply ~r v] v))))
+
+(defn restart-child (sup key)
+  "Terminate the child of `sup` identified by `key` (`:id` or pid) and start a fresh
+incarnation from the same spec (not counted against the restart-intensity window).
+Returns the new pid, or `:not-found`. Synchronous."
+  (let (r (ref))
+    (send sup [:restart-child key (self) r])
     (receive ([:reply ~r v] v))))
 
 (defn stop-supervisor (sup)

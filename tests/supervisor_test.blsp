@@ -258,6 +258,49 @@
       (assert= :torn-down
         (receive ([:down ~gm ~gc _] :torn-down) (after 1500 :orphaned))))))
 
+(describe "supervisor: runtime child API (DynamicSupervisor)"
+  :isolated
+
+  (test "start-child adds and supervises a child at runtime"
+    (let (me  (self)
+          sup (start-supervisor (list))                 ; empty — a dynamic supervisor
+          _   (assert= 0 (count-children sup))
+          pid (start-child sup (watched-spec me :permanent))
+          p1  (receive ([:up p] p)))
+      (is (= pid p1))                                    ; start-child returned the live pid
+      (assert= 1 (count-children sup))
+      ;; it's fully supervised: crash it, it restarts with a fresh pid
+      (send p1 :die)
+      (let (p2 (receive ([:up p] p)))
+        (is (not (= p1 p2)))
+        (assert= 1 (count-children sup)))
+      (stop-supervisor sup)))
+
+  (test "terminate-child stops a child and removes it (no restart)"
+    (let (me  (self)
+          sup (start-supervisor (list))
+          pid (start-child sup (tagged-spec me :w :permanent))
+          _   (receive ([:up :w _] :ok))
+          wm  (monitor pid))
+      (assert= :ok (terminate-child sup :w))             ; by :id
+      (assert= :down (receive ([:down ~wm ~pid _] :down) (after 1000 :alive)))
+      (assert= 0 (count-children sup))                   ; dropped, not restarted
+      (assert= :none (receive ([:up :w _] :restarted) (after 150 :none)))
+      (assert= :not-found (terminate-child sup :w))       ; already gone
+      (stop-supervisor sup)))
+
+  (test "restart-child replaces a child with a fresh incarnation"
+    (let (me  (self)
+          sup (start-supervisor (list))
+          p1  (start-child sup (tagged-spec me :w :permanent))
+          _   (receive ([:up :w _] :ok))
+          p2  (restart-child sup :w))                    ; by :id
+      (receive ([:up :w _] :ok))                         ; the fresh incarnation announces
+      (is (not (= p1 p2)))
+      (assert= 1 (count-children sup))
+      (assert= :not-found (restart-child sup :nope))
+      (stop-supervisor sup))))
+
 (describe "supervisor: introspection and validation"
   :isolated
 

@@ -4111,10 +4111,17 @@ Validated: full worktree `cargo test` green, the 17-test supervisor suite + new
 7-test `link_test.blsp` clean 3× under `BROOD_GC_STRESS=1` and once under
 `BROOD_GC_VERIFY=1`.
 
+**Runtime child API (DynamicSupervisor).** Rides on the same rewrite:
+`start-child`/`terminate-child`/`restart-child`/`count-children` (synchronous
+request/reply messages the loop handles). A supervisor started with `[]` children
+and grown at runtime is Elixir's DynamicSupervisor; a dynamically-added child is a
+full member (linked, restarted per its type, torn down on shutdown). No dedicated
+`simple_one_for_one` mode — the API works under any strategy.
+
 **Still deferred (ADR-011).** Remote (cross-node) links; exact propagated reason
-for a non-trapping peer (the `hard` bit above); `link`-based bidirectional coupling
-exposed to *user* code beyond the supervisor is available but undocumented as a
-pattern.
+for a non-trapping peer (the `hard` bit above); a `terminate/2`-style worker
+cleanup hook (the last OTP-parity item — cleanup on an *external* kill needs the
+trappable-shutdown path, only `[:$stop]`-cooperative today).
 
 **References.** ADR-035 (monitors — the one-way cousin), ADR-063 (`exit/2`),
 ADR-044 (`:shutdown` cascade), ADR-039 (the reverted kernel supervisor — why
