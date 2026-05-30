@@ -26,6 +26,7 @@ const T_STRING: u32 = 3;
 const T_NUMBER: u32 = 4;
 const T_COMMENT: u32 = 5;
 const T_ENUM_MEMBER: u32 = 6;
+const T_NAMESPACE: u32 = 7;
 // Token-modifier bits into [`legend`]'s `token_modifiers`.
 const M_DEFINITION: u32 = 1 << 0;
 
@@ -40,6 +41,7 @@ pub fn legend() -> SemanticTokensLegend {
             SemanticTokenType::NUMBER,
             SemanticTokenType::COMMENT,
             SemanticTokenType::ENUM_MEMBER,
+            SemanticTokenType::NAMESPACE,
         ],
         token_modifiers: vec![SemanticTokenModifier::DEFINITION],
     }
@@ -168,6 +170,19 @@ fn push_symbol(
             _ => (T_VARIABLE, 0),
         }
     };
+    // A qualified reference `ns/name` (ADR-065): colour the `ns` prefix as a
+    // NAMESPACE and the `name` suffix as its resolved kind, so the editor can
+    // tint the module path distinctly. Only a genuine qualifier splits — the
+    // bare `/` division operator (slash at index 0) and a trailing slash don't.
+    if let Some(i) = name.find('/') {
+        if i > 0 && i + 1 < name.len() {
+            let start = node.span.start;
+            let slash = start + i as u32;
+            emit_span(start, slash, src, index, T_NAMESPACE, 0, out);
+            emit_span(slash + 1, node.span.end, src, index, ttype, tmods, out);
+            return;
+        }
+    }
     emit(node, src, index, ttype, tmods, out);
 }
 
@@ -203,6 +218,35 @@ fn emit(node: &Node, src: &str, index: &LineIndex, ttype: u32, tmods: u32, out: 
         }
         byte += part.len() as u32 + 1; // + the '\n' that `split` removed
     }
+}
+
+/// Emit a single token for an arbitrary byte range within one line (used to
+/// split a qualified `ns/name` symbol into its NAMESPACE prefix + suffix). A
+/// symbol never spans a line, so unlike [`emit`] this needs no newline split.
+fn emit_span(
+    start: u32,
+    end: u32,
+    src: &str,
+    index: &LineIndex,
+    ttype: u32,
+    tmods: u32,
+    out: &mut Vec<Raw>,
+) {
+    if end <= start {
+        return;
+    }
+    let pos = index.position(src, start);
+    let len: u32 = src[start as usize..end as usize]
+        .chars()
+        .map(|c| c.len_utf16() as u32)
+        .sum();
+    out.push(Raw {
+        line: pos.line,
+        start: pos.character,
+        len,
+        ttype,
+        tmods,
+    });
 }
 
 /// Delta-encode absolute tokens into the protocol's relative triples.
@@ -290,6 +334,33 @@ mod tests {
         assert!(
             toks.iter().any(|t| t.3 == T_NUMBER && t.2 == 2),
             "number 42: {toks:?}"
+        );
+    }
+
+    #[test]
+    fn a_qualified_symbol_splits_into_namespace_and_name() {
+        // `(parser/parse x)` — `parser` is a NAMESPACE token, `parse` keeps its
+        // function classification; the `/` separator carries no token.
+        let toks = tokens("(parser/parse x)");
+        // `parser` (6 chars) at col 1 is the namespace prefix.
+        assert!(
+            toks.contains(&(0, 1, 6, T_NAMESPACE, 0)),
+            "namespace prefix: {toks:?}"
+        );
+        // `parse` (5 chars) after the slash at col 8 is the function head.
+        assert!(
+            toks.contains(&(0, 8, 5, T_FUNCTION, 0)),
+            "name suffix: {toks:?}"
+        );
+    }
+
+    #[test]
+    fn bare_slash_operator_is_not_split() {
+        // The division operator `/` must not be treated as a qualifier.
+        let toks = tokens("(/ 6 2)");
+        assert!(
+            !toks.iter().any(|t| t.3 == T_NAMESPACE),
+            "no namespace token for bare slash: {toks:?}"
         );
     }
 
