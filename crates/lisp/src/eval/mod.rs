@@ -663,6 +663,18 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                             // passthrough-heavy loop still yields to peers at the
                             // same rate, preserving preemption fairness.
                             crate::process::tick();
+                            // The eval deadline (`nest mcp` watchdog) is otherwise
+                            // only checked at the `'tail:` top — but a
+                            // self-referential passthrough (`(defn ginf () (ginf))`)
+                            // loops here in `'dispatch` and never returns there, so a
+                            // runaway would escape the watchdog and hang. Mirror the
+                            // top-of-loop check so the deadline still aborts it.
+                            if crate::process::deadline_exceeded() {
+                                return Err(LispError::runtime(
+                                    "evaluation exceeded its time limit (MCP tool watchdog)",
+                                )
+                                .or_form_pos(heap, call_form));
+                            }
                             cur_callee = inner;
                             cur_argv = next_argv;
                             continue 'dispatch;
