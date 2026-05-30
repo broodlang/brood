@@ -748,13 +748,15 @@ fn cmd_observe(interp: &mut Interp, connect: Option<String>, cookie: Option<Stri
 /// Evaluate a bootstrap snippet, reporting any error in GNU form and exiting
 /// non-zero on failure.
 fn run(interp: &mut Interp, code: &str) {
-    if let Err(e) = interp.eval_str(code) {
-        // A program (e.g. `nest run` of a TUI demo) that entered raw mode / the
-        // alternate screen and then threw never reached its Brood
-        // `term-raw-leave`; restore the terminal before exiting so an erroring
-        // TUI never wedges the shell. `process::exit` skips Drop, so a guard
-        // wouldn't fire — restore explicitly here.
-        brood::builtins::restore_terminal_on_exit();
+    let result = interp.eval_str(code);
+    // Restore the terminal on the way out — whether the program returned
+    // cleanly or threw. A `nest run` of a TUI demo that entered raw mode / the
+    // alternate screen and never reached its Brood `term-raw-leave` (because it
+    // threw, *or* because it returned without one) would otherwise leave the
+    // shell wedged. `process::exit` skips Drop, so a guard wouldn't fire —
+    // restore explicitly. The call is a no-op unless the terminal was left raw.
+    brood::builtins::restore_terminal_on_exit();
+    if let Err(e) = result {
         report_error(&e);
         std::process::exit(1);
     }

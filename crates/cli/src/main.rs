@@ -308,6 +308,9 @@ fn run_files(interp: &mut Interp, files: &[String]) {
             }
         }
     }
+    // Success path too: a program may have entered raw mode and returned
+    // without a matching `term-raw-leave`. No-op unless the terminal is raw.
+    brood::builtins::restore_terminal_on_exit();
 }
 
 /// If the first FILE is actually a `nest` subcommand the user typed at `brood`

@@ -92,6 +92,26 @@ docs/testing.md for the full guide.")
   "Clear the test registry (drop every registered unit). The project test runner calls this before (re)loading test files so a long-lived image — e.g. a `nest mcp` hot-reload session — doesn't accumulate duplicate registrations across runs."
   (def *units* nil))
 
+;; --- temp fixtures -----------------------------------------------------------
+;; A test that needs a real directory builds one under /tmp. Two rules keep these
+;; from biting each other (learned the hard way — see docs/devlog.md):
+;;   1. Name it with `(temp-dir PREFIX)`, which uses `random-token` — unique
+;;      across processes *and* runs. NOT `gensym`, whose counter resets every
+;;      process, so its names recur and a leftover from a prior run contaminates
+;;      the next test that draws the same number.
+;;   2. Purge prior runs' leftovers at file LOAD with `(purge-stale-temp PREFIX)`,
+;;      *before* any test creates a fixture — so it never races a live one and a
+;;      crashed run can't accumulate forever. `delete-dir` removes a tree.
+(defn temp-dir (prefix)
+  "A fresh, unique /tmp path `<prefix><random>` (NOT created — `make-dir` it). Unique across processes and runs, so concurrent tests never collide."
+  (path-join "/tmp" (str prefix (random-token 8))))
+
+(defn purge-stale-temp (prefix)
+  "Best-effort remove every `/tmp/<prefix>*` left by an earlier run. Call once at FILE LOAD (a top-level form), before any test creates fixtures, so it never deletes a live one. Bounds /tmp growth to a single run and recovers from crashed runs."
+  (doseq (e (list-dir "/tmp"))
+    (when (starts-with? e prefix)
+      (delete-dir (path-join "/tmp" e)))))
+
 ;; Full source location of a form as (file line col), or nil. Captured at
 ;; macro-expansion time (by the assertion macros), while the original read form
 ;; still carries its position — `current-file` / `form-pos` are Rust primitives
