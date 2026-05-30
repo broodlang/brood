@@ -117,6 +117,18 @@ thread_local! {
     /// decrements it via `tick`, and the process yields when it hits zero.
     static REDUCTIONS: Cell<u32> = const { Cell::new(0) };
 
+    /// An eval **deadline** (wall clock) for this thread, or `None`. The `nest mcp`
+    /// dispatcher sets it around an `eval`/`load` so a runaway (an infinite Brood
+    /// loop) is aborted — see [`deadline_exceeded`], checked in eval's `'tail:`
+    /// loop — instead of wedging the server. Inline (no spawn), so the dispatcher's
+    /// error / panic / output-capture handling is untouched; a *native* blocking
+    /// call still can't be interrupted (it never reaches the check — the same limit
+    /// `(exit … :kill)` has).
+    static DEADLINE: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+    /// Call counter so [`deadline_exceeded`] reads the clock only every ~1024 ticks;
+    /// the no-deadline fast path is a single `Cell` get, so eval's loop pays ~nothing.
+    static DEADLINE_TICK: Cell<u32> = const { Cell::new(0) };
+
     /// GC-block depth: how many `eval` / `macroexpand_all` frames are active on
     /// this thread. Since ADR-061 this no longer gates the GC safepoint (which now
     /// collects at any eval depth — see `MACRO_BLOCK` and the operand-stack rooting
@@ -409,6 +421,28 @@ pub fn tick() {
             r.set(n - 1);
         }
     });
+}
+
+/// Set (or clear with `None`) this thread's eval deadline. Paired set/clear by the
+/// `nest mcp` dispatcher around a guarded `eval`/`load`. Thread-local: only the
+/// thread running the guarded eval is affected.
+pub fn set_deadline(at: Option<std::time::Instant>) {
+    DEADLINE.with(|d| d.set(at));
+    DEADLINE_TICK.with(|c| c.set(0));
+}
+
+/// True iff a deadline is set and has passed. The clock is read only every ~1024
+/// calls, so the common (no-deadline) path is one `Cell` get — eval's loop checks
+/// this every combination but pays almost nothing when no deadline is armed.
+pub fn deadline_exceeded() -> bool {
+    DEADLINE.with(|d| match d.get() {
+        None => false,
+        Some(at) => DEADLINE_TICK.with(|c| {
+            let n = c.get().wrapping_add(1);
+            c.set(n);
+            n % 1024 == 0 && std::time::Instant::now() >= at
+        }),
+    })
 }
 
 /// Budget exhausted: refresh it, then — if we're a green process — yield the worker

@@ -52,7 +52,24 @@ back in the result content) instead of the raw fd. Test:
 `mcp::tests::term_draw_under_mcp_diverts_escapes_…`. (A timeout wouldn't have helped
 — term-draw returns in ms; the damage was the bytes.)
 
-### C. MCP `eval`/`load` timeout = **30s** (uses `kill`) — BLOCKED on capture
+### C. MCP `eval`/`load` timeout = **30s** — ✅ DONE (2026-05-30, inline deadline)
+
+A runaway MCP `eval`/`load` no longer wedges the server. **Not** via spawn-and-kill
+(that relocates execution and breaks the dispatcher's error/panic/output handling —
+proved: it failed 4 core MCP tests). Instead an **inline deadline**: the dispatcher
+`set_deadline(now+30s)` around the call (`crates/nest/src/mcp.rs`), and eval's
+`'tail:` loop checks `process::deadline_exceeded()` per combination (clock read only
+every ~1024 ticks — the no-deadline path is one `Cell` get). A runaway surfaces as an
+ordinary error ("evaluation exceeded its time limit"), so the dispatcher's existing
+error/panic/capture handling is untouched. Verified:
+`mcp::tests::eval_deadline_aborts_a_runaway_inline` (a `(ginf)` infinite loop aborts
+at ~300ms). **Limit:** a *native* blocking call still can't be interrupted (it never
+reaches the check — same as `(exit … :kill)`); that's what Fix A (A′) already covers
+for the term-draw case. Also kept from this work: **output capture is now
+process-scoped + inherited** (scheduler `Ctx.capture`), so an MCP eval that *spawns* a
+printing process still diverts that output off the JSON-RPC channel.
+
+#### (historical) earlier dead-end — kept for the record
 
 The watchdog **logic is built + tested**: `mcp-run-guarded` (std/mcp.blsp) spawns the
 handler, `(receive (after ms) → (exit p :kill) + error)`; verified directly (a

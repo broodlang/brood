@@ -265,6 +265,16 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
         // above without a tick. A cheap thread-local decrement; a no-op for the
         // root thread. See `process::tick`.
         crate::process::tick();
+        // Eval deadline (the `nest mcp` watchdog): abort a runaway that's exceeded
+        // its time budget so it can't wedge the server. Inline — propagates as an
+        // ordinary error through the dispatcher's existing handling. Cheap when no
+        // deadline is armed (one thread-local `Cell` get).
+        if crate::process::deadline_exceeded() {
+            return Err(LispError::runtime(
+                "evaluation exceeded its time limit (MCP tool watchdog)",
+            )
+            .or_form_pos(heap, expr));
+        }
 
         let (head, rest) = match expr {
             Value::Pair(p) => heap.pair(p),
