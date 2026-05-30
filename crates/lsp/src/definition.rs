@@ -54,13 +54,17 @@ pub fn definition(
             Some(Location::new(uri.clone(), range))
         }
         // Free here — ask the runtime where the name was defined (another
-        // module, the prelude). `None` if it has no recorded site.
+        // module, the prelude). The name is first resolved against this file's
+        // namespace + `(:use …)` imports (ADR-065 §4), so a bare imported name
+        // (`observe` in a `(:use observer)` file) or a qualified `observer/observe`
+        // both reach the right def site. `None` if it has no recorded site.
         Resolution::Free => {
             let node = root.node_at(offset)?;
             if node.kind != NodeKind::Symbol {
                 return None;
             }
-            let loc = introspect::source_location(interp, node.text(text))?;
+            let resolved = introspect::resolve_in_source(interp, text, node.text(text));
+            let loc = introspect::source_location(interp, &resolved)?;
             cross_file_location(&loc)
         }
         Resolution::NotASymbol => None,
@@ -198,5 +202,37 @@ mod tests {
         assert_eq!(loc.range.start, Position::new(0, 0));
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn jumps_to_an_imported_def_across_namespaces() {
+        // A bare reference to an imported name (`(:use greeter)`) resolves through
+        // the namespace + import table to `greeter/greet`, then to greeter's file
+        // (ADR-065 §4/§6). The module must be require-able by name, so write it as
+        // `greeter.blsp` on the load-path.
+        let dir = std::env::temp_dir().join(format!("brood_ns_def_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("greeter.blsp"), "(defmodule greeter)\n(defn greet (who) who)\n").unwrap();
+
+        let mut interp = Interp::new();
+        interp
+            .eval_str(&format!("(def *load-path* (cons \"{}\" *load-path*))", dir.display()))
+            .expect("extend load-path");
+
+        let src = "(defmodule app (:use greeter))\n(greet \"world\")";
+        let uri: Uri = "file:///app.blsp".parse().unwrap();
+        let root = cst::parse(src);
+        let tree = scope::analyze(&root, src);
+        let index = LineIndex::new(src);
+        let at = src.rfind("greet").unwrap() as u32; // the call site
+
+        let loc = definition(&mut interp, &uri, src, &root, &tree, &index, at)
+            .expect("cross-namespace goto");
+        assert!(
+            loc.uri.as_str().ends_with("greeter.blsp"),
+            "should jump to greeter.blsp, got {:?}",
+            loc.uri
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

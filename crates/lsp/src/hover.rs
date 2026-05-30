@@ -44,7 +44,10 @@ pub fn hover(
             .map(|d| render_def(&d))
             .unwrap_or_else(|| code(name)),
         Resolution::Free => {
-            let (sig, doc) = introspect::signature(interp, name);
+            // Resolve against this file's namespace + imports (ADR-065 §4) so a
+            // bare imported name or a qualified `observer/observe` finds its docs.
+            let resolved = introspect::resolve_in_source(interp, text, name);
+            let (sig, doc) = introspect::signature(interp, &resolved);
             render_global(name, sig, doc)?
         }
         Resolution::NotASymbol => return None,
