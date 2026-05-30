@@ -336,6 +336,27 @@ the workaround available today.
 - ✅ **Property-based testing `check-property`** — landed 2026-05-29. Seeded,
   deterministic, counterexample-shrinking-free but seed-reporting; built on the
   PRNG (`std/test.blsp`).
+- 🟡 **Central `kw` keyword-spelling module** — landed 2026-05-30
+  (`core/keywords.rs`, devlog). One `pub const` per special-form / core-macro /
+  marker spelling, killing the magic strings that were re-typed across the three
+  registries (`eval::SPECIAL_SPELLINGS`, `walk::SPECIAL_HEAD`,
+  `builtins::SPECIAL_FORMS`) plus `recursion`/`hygiene`/`macros`/`scope`/
+  `introspect`/`check`/`guards`. **Remaining:** the core hot-path files
+  (`core/value.rs`, `core/heap.rs`, `syntax/reader.rs`, `eval/compile.rs`) still
+  re-type a few spellings — left for a deliberate pass when those files aren't
+  being edited concurrently. Future families worth the same treatment: the
+  type/tag-name strings (vs `Tag::name()`, but the checker's gradual-type
+  vocabulary is a superset — design call) and process/dist message tags.
+- 🟡 **Errors that teach (LLM-native)** — first instances landed 2026-05-30
+  ([`llm-native.md`](llm-native.md), devlog): the unbound-symbol `(:use mod)`
+  fix-it, the `:main` quote guard, and `foreign_construct_hint` (a construct from
+  another Lisp — `set!`/`loop`/`atom`/`defprotocol`/… → the Brood way), surfaced
+  on both the runtime error `:hint` and the advisory checker. **More to do:**
+  reader-level hints for Clojure/Scheme syntax the lexer mis-parses (`(let ((a 1))
+  …)`, `#{…}`/`#(…)`), the `brood.explain-error`/`brood.find-pattern` MCP tools
+  (llm-native.md §1), an intent→idiom cookbook, and folding each new repeat
+  mistake into the rule-of-three (skill line + teaching error/lint + regression
+  test).
 
 ## M2 — Editor data model
 

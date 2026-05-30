@@ -16,6 +16,7 @@
 //!     not leak a fresh list per query.
 
 use crate::core::heap::Heap;
+use crate::core::keywords as kw;
 use crate::core::value::{self, Value};
 use crate::error::Pos;
 use crate::Interp;
@@ -136,7 +137,7 @@ fn ns_context_forms(heap: &mut Heap, src: &str) -> Option<Vec<Value>> {
         n.kind == NodeKind::List
             && n.forms()
                 .next()
-                .is_some_and(|h| h.kind == NodeKind::Symbol && h.text(src) == "defmodule")
+                .is_some_and(|h| h.kind == NodeKind::Symbol && h.text(src) == kw::DEFMODULE)
     })?;
     let header_src = &src[header.span.start as usize..header.span.end as usize];
     crate::syntax::reader::read_all(heap, header_src).ok()

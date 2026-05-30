@@ -17,6 +17,7 @@
 
 use std::collections::HashSet;
 
+use crate::core::keywords as kw;
 use crate::error::Span;
 use crate::syntax::cst::{Node, NodeKind};
 
@@ -205,7 +206,7 @@ fn head_sym<'s>(node: &Node, src: &'s str) -> Option<&'s str> {
 /// Pass 1: collect `def`/`defn`/`defmacro` names into the global scope.
 fn collect_globals(node: &Node, src: &str, out: &mut Vec<Binding>) {
     if let Some(head) = head_sym(node, src) {
-        if matches!(head, "def" | "defn" | "defmacro") {
+        if matches!(head, kw::DEF | kw::DEFN | kw::DEFMACRO) {
             if let Some(name) = node.forms().nth(1) {
                 if name.kind == NodeKind::Symbol {
                     out.push(Binding {
@@ -225,10 +226,10 @@ fn collect_globals(node: &Node, src: &str, out: &mut Vec<Binding>) {
 /// Pass 2: descend, opening a child scope at each binding form.
 fn build(node: &Node, src: &str, current: usize, tree: &mut ScopeTree) {
     let opened = match head_sym(node, src) {
-        Some("let") | Some("let*") => Some(let_names(node, src)),
-        Some("fn") | Some("lambda") => Some(param_names(node, src, 1)),
+        Some(kw::LET) | Some(kw::LET_STAR) => Some(let_names(node, src)),
+        Some(kw::FN) | Some(kw::LAMBDA) => Some(param_names(node, src, 1)),
         // defn/defmacro: name at index 1, param list at 2.
-        Some("defn") | Some("defmacro") => Some(param_names(node, src, 2)),
+        Some(kw::DEFN) | Some(kw::DEFMACRO) => Some(param_names(node, src, 2)),
         _ => None,
     };
     let scope = match opened {
@@ -283,7 +284,7 @@ fn param_names(node: &Node, src: &str, idx: usize) -> Vec<Binding> {
         match item.kind {
             NodeKind::Symbol => {
                 let t = item.text(src);
-                if t != "&optional" && t != "&" {
+                if t != kw::AMP_OPTIONAL && t != kw::AMP {
                     out.push(Binding {
                         name: t.to_string(),
                         def: item.span,

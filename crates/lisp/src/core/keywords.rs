@@ -53,3 +53,10 @@ pub const THREAD_LAST: &str = "->>";
 // quasiquote walker (`eval::macros`), and the checker (`hygiene`/`guards`).
 pub const UNQUOTE: &str = "unquote";
 pub const UNQUOTE_SPLICING: &str = "unquote-splicing";
+
+// Parameter-list markers — the `&optional`/`&rest` (and bare `&`) separators a
+// `fn`/`defn` param list uses, recognised by the macro lowering, the scope
+// walker, introspection, and the checker.
+pub const AMP: &str = "&";
+pub const AMP_OPTIONAL: &str = "&optional";
+pub const AMP_REST: &str = "&rest";

@@ -101,6 +101,7 @@ mod sigs;
 mod walk;
 
 use crate::core::heap::Heap;
+use crate::core::keywords as kw;
 use crate::core::value::Value;
 use crate::error::Pos;
 
@@ -128,7 +129,7 @@ fn is_ns_header(heap: &Heap, form: Value) -> bool {
     if let Value::Pair(p) = form {
         let (head, _) = heap.pair(p);
         if let Value::Sym(s) = head {
-            return crate::core::value::symbol_is(s, "defmodule");
+            return crate::core::value::symbol_is(s, kw::DEFMODULE);
         }
     }
     false
