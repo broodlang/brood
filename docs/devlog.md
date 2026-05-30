@@ -10109,3 +10109,29 @@ a movable root.
 
 **Known gap → gates Stage 3.** Thread a source `Pos` through the IR so VM errors tag
 line/col (the 6 failing tests). Then Stage 3 can flip the default to the VM.
+
+---
+
+## 2026-05-31 — VM source positions + `make install` ships the VM
+
+Two follow-ups closing out the Stage-2c work.
+
+**`make install` ships the VM by default.** A `brood/vm-default` cargo feature gates
+the build-time default in `compile::vm_enabled`; `make install` passes it (via
+`VM_FEATURES`, `VM_DEFAULT=0` to opt out) so the installed `brood`/`nest`/`brood-lsp`
+dogfood the VM, while `cargo build`/`make test` stay on the tree-walker (green, full
+diagnostics). Runtime `BROOD_VM` still wins — and `BROOD_VM=0` now correctly means
+*off* (the old code treated any set value as on).
+
+**Source positions in VM diagnostics (the last engine divergence).** The compiled
+`Node` tree discarded source forms, so the VM tagged an error with the top-level
+form's position, not the failing inner combination — 6 `basic.rs` diagnostic tests
+failed under `BROOD_VM=1` (pre-existing on the 2a/2b base, not a 2c regression). Fix:
+`Node::Call` gained a `pos: Option<Pos>` captured at **compile time** from
+`Heap::form_pos` (while the LOCAL form is still live — `Pos` is plain data, so it's
+collection-safe), and `exec_node` tags an error with it if none is set yet —
+innermost wins, exactly like the tree-walker's `or_form_pos`. RUNTIME (promoted)
+bodies carry no recorded position in either engine, so they stay untagged
+identically. **The full Rust + in-language suite is now green under `BROOD_VM=0`
+*and* `=1`** (394/394 each), removing the last blocker on the Stage-3 default-on
+cutover (still wants the soak + differential-test mode first).

@@ -1,14 +1,18 @@
 # The execution-engine plan — a closure-compiling VM
 
-> **Status (2026-05-31): Stage 0–2c built behind `BROOD_VM` — ~1.6–2.3×.** The
-> design record is **ADR-076**; this file is the long-form companion. Nothing here
-> changes the language — it is purely an **execution-engine** swap. `std/*.blsp`
-> and user code are untouched. Stage 0–1 (mechanism + the passthrough redirect),
-> Stage 2a (`let`/`letrec`), 2b (multi-arity), and **2c (local-capturing closures —
-> the GC-critical one)** are merged to `main`. **Next: Stage 3 — flip the default to
-> the VM**, after closing the one remaining gap (the IR carries no source positions,
-> so VM error diagnostics lose line/col — see [As-built §2c](#stage-2c-local-capturing-closures-done)).
-> See [As-built](#as-built-stage-01-2026-05-30) for the numbers and the §7 plan.
+> **Status (2026-05-31): Stage 0–2c built behind `BROOD_VM` — ~1.6–2.3×; full suite
+> green under *both* engines.** The design record is **ADR-076**; this file is the
+> long-form companion. Nothing here changes the language — it is purely an
+> **execution-engine** swap. `std/*.blsp` and user code are untouched. Stage 0–1
+> (mechanism + the passthrough redirect), Stage 2a (`let`/`letrec`), 2b
+> (multi-arity), and **2c (local-capturing closures — the GC-critical one)** are
+> merged to `main`, as is **source-position threading** (VM error diagnostics now
+> carry `line:col`, so the last divergence from the tree-walker is closed).
+> `make install` already ships the VM by default (the `brood/vm-default` cargo
+> feature); `cargo build`/`make test` stay on the tree-walker. **Next: Stage 3 —
+> flip the *global* default to the VM** after an extended soak (green-process
+> fan-out, `receive` suspend/resume, hot-reload) + the differential test mode. See
+> [As-built](#as-built-stage-01-2026-05-30) for the numbers and the §7 plan.
 
 This is the project's "big lever" for performance: closing the tree-walker's
 structural ~50–220× tax (ADR-069's measurement) over the Node/Elixir range. It is
@@ -138,11 +142,17 @@ it, 5M iters: 7.72 s → 4.72 s (~1.6×)**; **call a pre-built captured closure 
 20M-iter tail loop: 17.71 s → 9.06 s (~1.9×)**. Full Rust + in-language suites green
 under `BROOD_VM=0/1`; the suite green under the full GC-stress gate.
 
-**Known gap (not 2c-specific; gates Stage 3).** The compiled `Node` tree discards
-source forms, so the VM never tags an error's line/col (`or_form_pos`) — 6 `basic.rs`
-diagnostic tests fail under `BROOD_VM=1` (confirmed pre-existing on the 2a/2b base,
-not a 2c regression). Fixing needs a source `Pos` threaded through the IR; do it
-before the Stage 3 cutover (invariant #8: the language must be unchanged).
+**Source positions in VM diagnostics (done, 2026-05-31).** The compiled `Node` tree
+discards source forms, so the VM used to tag an error with the top-level form's
+position instead of the failing inner combination (6 `basic.rs` diagnostic tests —
+pre-existing on the 2a/2b base, not a 2c regression). Fixed by capturing each
+combination's `line:col` at **compile time** (`Node::Call { pos }`, from
+`Heap::form_pos` while the LOCAL form is still live) and tagging an error with it on
+the way out — innermost wins, exactly like the tree-walker's `or_form_pos`, and
+collection-safe (`Pos` is plain data, not a movable handle). RUNTIME (promoted) body
+forms carry no recorded position in *either* engine, so those stay untagged
+identically. The full suite is now green under `BROOD_VM=0` **and** `=1`, removing
+the last blocker on the Stage-3 default-on cutover.
 
 ---
 
