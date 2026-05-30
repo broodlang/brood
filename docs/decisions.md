@@ -4746,3 +4746,60 @@ cross a process boundary (process-local view state) — acceptable.
 **References.** ADR-045 (buffer framework), ADR-026 (immutability), ADR-006 (policy
 in Brood), ADR-011 (defer coalescing), `std/buffer.blsp`,
 `tests/buffer_test.blsp` (the `buffer undo / redo` block).
+
+---
+
+## ADR-076 — The execution engine becomes a closure-compiling VM
+
+**Status:** accepted as the plan, not started (2026-05-30). The performance "big
+lever". Long-form companion: [`bytecode-vm.md`](bytecode-vm.md). Supersedes the
+deferral in ADR-069 (which banked the cheap dispatch wins and named the VM as the
+honest fix for the tree-walker's structural tax).
+
+**Context.** The tree-walker (`eval::eval`) re-pays per call: a special-form lookup,
+an env-chain **name scan** per variable reference (`env_get`'s assoc-list walk), a
+fresh frame allocation, cons-spine walking, and operand-stack rooting — all by
+*interpreting the tree*. ADR-069 measured the structural tax at ~50–220× and
+deferred lexical addressing partly because a `(depth,index)` reference as a runtime
+`Value` would bump the type-system compatibility contract (new `Tag` + `Ty` bit +
+GC/printer/wire support).
+
+**Decision.** Replace the tree-walker with a **closure-compiling engine over a
+lexically-addressed IR** (not flat bytecode). Each form compiles once into a `Node`
+tree run by a trampoline structurally identical to today's `'tail:` loop; tail
+positions compile to a `TailCall` outcome the trampoline loops on. Chosen over
+bytecode for four codebase-specific reasons:
+
+1. **GC rooting for free (the crux).** Frame slots are allocated as regions of the
+   **existing** `Heap::roots` operand stack and addressed via `root_at(base+index)`,
+   so `arena_flip` already relocates every live frame slot — **no new root set**. A
+   bytecode VM would need its own root-array operand stack, forcing a rewrite of the
+   most subtle correct code we have (`eval_arguments`' rooting).
+2. **Keeps the invariant-enforcing trampoline** — the loop's `tick()` /
+   `deadline_exceeded()` / `gc_due()` checks stay; the body just runs a compiled node.
+3. **Lexical addressing needs no new `Value` tag** — the `(depth,index)` coordinate
+   is compiled-node state, never a runtime value, dissolving ADR-069's objection.
+4. **Multi-arity / passthrough / macros already key off the closure structures** —
+   compile per `ClosureArm`; `select_arm` is unchanged.
+
+Lexical addressing lands as a `lex_resolve` sub-pass in `eval::macros::compile`
+(after `macroexpand_all` + `resolve`), turning the per-reference name scan into a
+dense `Vec<Value>` frame-slot index — the single biggest win, and the deferred
+ADR-069 Inc-3.
+
+**Consequences.** Purely an execution-engine swap — the language, reader, `Value`,
+primitives, and `std/*.blsp` are unchanged (invariant). Rollout is staged behind a
+`BROOD_VM` flag with the tree-walker as a one-flag fallback and a **differential
+test mode** (both engines must agree) guarding the transition: Stage 0 scaffolding
++ benchmarks → Stage 1 lexical addressing (the first milestone, de-risks GC rooting)
+→ Stage 2 full compiler/trampoline → Stage 3 cutover. Invariants preserved
+explicitly: proper TCO (frame-reuse), generational GC + operand-stack rooting (no
+new root set), preemption/deadline (per-iteration checks), hot-reload (globals via
+the version-stamped inline cache — never hard-bind a `ClosureId`), multi-arity,
+immutability. Top risk is R1 (the VM stack as GC roots), mitigated by reusing
+`Heap::roots` and gating on `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`.
+
+**References.** [`bytecode-vm.md`](bytecode-vm.md) (the full plan, risk register,
+data structures), ADR-069 (the deferral this resolves), ADR-061 (the operand stack
+the VM reuses), ADR-054/055/072 (the generational copying GC `arena_flip` relocates),
+ADR-047 (multi-arity), ADR-022 (the compile pass), ADR-026 (immutability), ADR-011.

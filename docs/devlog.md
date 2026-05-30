@@ -9711,3 +9711,41 @@ keybindings, the kill ring, the minibuffer). ADR-075.
   buffers, region/kill-ring, the minibuffer (switch-buffer / find-file with
   completion), and a keymap refactored onto `std/keymap.blsp`'s `keymap-step` on
   top of these.
+
+---
+
+## 2026-05-30 — `%le` comparison fast-path, benchmark-safe builds, and the VM plan
+
+A perf + tooling tail to the GC session, plus the design for the big lever.
+
+**`%le` comparison fast-path.** The `<=`/`>=` 2-arg clauses were `(not (%lt …))` —
+a *nested* call the ADR-069 thin-wrapper passthrough can't elide. Added one Rust
+primitive `%le` (a ≤ b) and rewrote the clauses to `(%le a b)` / `(%le b a)`, which
+the **existing** passthrough elides like `<`/`>`. `>=`/`<=` on a tight comparison
+loop: ~4500 ms → ~3330 ms (~26%), now matching `<`. Chosen over a general
+compile-pass inliner (which carries a hot-reload tradeoff and overlaps the coming
+VM) — the simpler, safe route for the named win; general inlining is folded into
+ADR-076. Suite 985 green.
+
+**Benchmark-safe builds (the two caveats, solved).** (1) `make install` now appends
+`-C debug-assertions=off -C overflow-checks=off` to any ambient `RUSTFLAGS` — rustc
+takes the last `-C <key>=`, so a leaked GC-debug build mode (`RUSTFLAGS="-C
+debug-assertions=on"`) can't silently ship a tripwire/verifier-armed perf binary
+(proven: a simulated leaked `=on` + the append yields `:debug-build false`). (2)
+`(gc-stats)` gains `:debug-build` (a benchmark can confirm a clean build), and
+`brood`/`nest` print a one-line stderr notice at startup when any `BROOD_GC_*` knob
+is set (`gc_count_env`/stress/trace) so a benchmark can't silently measure a
+stressed or retuned heap.
+
+**The big lever — planned (ADR-076, [`bytecode-vm.md`](bytecode-vm.md)).** Decided
+the execution engine becomes a **closure-compiling VM over a lexically-addressed
+IR**, not flat bytecode. The deciding factor is GC rooting: frame slots are
+allocated as regions of the **existing** `Heap::roots` operand stack, so
+`arena_flip` relocates them with no new root set — a bytecode VM would need its own
+root-array stack and a rewrite of `eval_arguments`' rooting. Lexical addressing
+(the deferred ADR-069 Inc-3) lands as a `lex_resolve` sub-pass, with `(depth,index)`
+as compiled-node state (no new `Value` tag). Staged behind a `BROOD_VM` flag with
+the tree-walker as fallback + a differential test mode; Stage 1 (lexical addressing
++ frame-slots-as-roots) is the first milestone and de-risks the rooting crux. Full
+invariant checklist (TCO, GC, preemption, hot-reload, multi-arity, immutability) and
+risk register in the doc.
