@@ -1284,17 +1284,24 @@ applies to each input first."
 ;; are data (ADR-010); a vector is still accepted in binding position.
 
 ;; Compile the binding forms (a list: alternating pattern/coll, plus :when pred)
-;; from the inside out: each binding becomes a `mapcat`, each :when an `if`, and
-;; the body a one-element list that the mapcats concatenate.
-(defn for--build (binds body)
+;; from the inside out, threading a single accumulator `acc` through. Each
+;; binding becomes a `fold` over its collection that conses the body onto `acc`;
+;; each :when an `if` that passes `acc` through unchanged when the guard fails;
+;; the body a single `(cons body acc)`. The whole thing builds the result in
+;; reverse with no intermediate per-element lists (the old `mapcat` lowering
+;; allocated a one-element `(list body)` per item and concatenated them) — so a
+;; final `reverse` restores order in one extra O(n) pass. `fold` is tail-
+;; recursive, so deep comprehensions don't grow the stack.
+(defn for--fold (acc binds body)
   (cond
-    (empty? binds) `(list ~body)
-    (= (first binds) :when) `(if ~(second binds) ~(for--build (rest (rest binds)) body) nil)
-    else `(mapcat (fn (~(first binds)) ~(for--build (rest (rest binds)) body)) ~(second binds))))
+    (empty? binds) `(cons ~body ~acc)
+    (= (first binds) :when) `(if ~(second binds) ~(for--fold acc (rest (rest binds)) body) ~acc)
+    else `(fold (fn (~acc ~(first binds)) ~(for--fold acc (rest (rest binds)) body)) ~acc ~(second binds))))
 
 (defmacro for (binds body)
   "List comprehension: `(for (x xs) expr)` yields `expr` for each `x`; supports `:when guard` filters and multiple bindings (last varies fastest). Bindings may destructure."
-  (for--build (map identity binds) body))
+  (let (acc (gensym "acc"))
+    `(reverse (let (~acc nil) ~(for--fold acc (map identity binds) body)))))
 
 ;; (doseq (pat coll) body...) — run `body` for its side effects over each item,
 ;; returning nil. Just `for` run for effect (the result list is discarded). The

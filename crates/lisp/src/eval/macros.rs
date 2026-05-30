@@ -43,17 +43,53 @@ fn quasiquote_depth(heap: &mut Heap, template: Value, env: EnvId, depth: u32) ->
         }
         Value::Map(id) => {
             // Expand each key and value (no `~@` splicing into a map — ill-defined).
+            // Runtime quasiquote runs with MACRO_BLOCK *off*, so an inner unquote
+            // eval can collect at any depth (ADR-061); keep `env`, the unexpanded
+            // entries, and the accumulated results on the operand stack.
             let entries = heap.map_entries(id);
-            let mut pairs = Vec::with_capacity(entries.len());
-            for (k, v) in entries {
-                let k = quasiquote_depth(heap, k, env, depth + 1)?;
-                let v = quasiquote_depth(heap, v, env, depth + 1)?;
-                pairs.push((k, v));
+            let n = entries.len();
+            let vb = heap.roots_len();
+            let eb = heap.env_roots_len();
+            heap.push_env_root(env);
+            for &(k, v) in &entries {
+                heap.push_root(k); // vb + 2i
+                heap.push_root(v); // vb + 2i + 1
             }
+            let res_base = heap.roots_len();
+            for i in 0..n {
+                let env_now = heap.env_root_at(eb);
+                let kf = heap.root_at(vb + 2 * i);
+                let k = match quasiquote_depth(heap, kf, env_now, depth + 1) {
+                    Ok(k) => k,
+                    Err(e) => return teardown_err(heap, vb, eb, e),
+                };
+                heap.push_root(k);
+                let env_now = heap.env_root_at(eb);
+                let vf = heap.root_at(vb + 2 * i + 1);
+                let v = match quasiquote_depth(heap, vf, env_now, depth + 1) {
+                    Ok(v) => v,
+                    Err(e) => return teardown_err(heap, vb, eb, e),
+                };
+                heap.push_root(v);
+            }
+            let mut pairs = Vec::with_capacity(n);
+            for i in 0..n {
+                pairs.push((heap.root_at(res_base + 2 * i), heap.root_at(res_base + 2 * i + 1)));
+            }
+            heap.truncate_roots(vb);
+            heap.truncate_env_roots(eb);
             Ok(heap.map_from_pairs(pairs))
         }
         other => Ok(other),
     }
+}
+
+/// Tear down an operand-stack region and return the error (helper for the rooted
+/// quasiquote loops, whose `?` would otherwise leak the pushed roots).
+fn teardown_err<T>(heap: &mut Heap, vb: usize, eb: usize, e: LispError) -> Result<T, LispError> {
+    heap.truncate_roots(vb);
+    heap.truncate_env_roots(eb);
+    Err(e)
 }
 
 fn expand_seq(
@@ -62,15 +98,49 @@ fn expand_seq(
     env: EnvId,
     depth: u32,
 ) -> Result<Vec<Value>, LispError> {
-    let mut out = Vec::new();
-    for &el in items {
+    // Each `~unquote` / `~@unquote-splicing` evaluates a sub-form, which can
+    // collect at ANY eval depth (ADR-061) — and runtime quasiquote runs with
+    // MACRO_BLOCK *off*. So the accumulated `out`, the remaining template `items`,
+    // and `env` are LOCAL transients a collection would strand: keep them on the
+    // operand stack and read back relocated handles, instead of the plain `Vec`s
+    // (whose copies go stale, then `heap.list(out)` would store stale handles).
+    let n = items.len();
+    let vb = heap.roots_len();
+    let eb = heap.env_roots_len();
+    heap.push_env_root(env);
+    for &it in items {
+        heap.push_root(it); // vb .. vb+n : unexpanded template elements
+    }
+    let out_base = heap.roots_len(); // expanded results accumulate here
+    for i in 0..n {
+        let el = heap.root_at(vb + i);
+        let env_now = heap.env_root_at(eb);
         if let Some(inner) = tagged(heap, el, "unquote-splicing") {
-            let spliced = eval::eval(heap, inner, env)?;
-            out.extend(heap.seq_items(spliced)?);
+            let spliced = match eval::eval(heap, inner, env_now) {
+                Ok(s) => s,
+                Err(e) => return teardown_err(heap, vb, eb, e),
+            };
+            let seq = match heap.seq_items(spliced) {
+                Ok(s) => s,
+                Err(e) => return teardown_err(heap, vb, eb, e),
+            };
+            for v in seq {
+                heap.push_root(v);
+            }
         } else {
-            out.push(quasiquote_depth(heap, el, env, depth)?);
+            match quasiquote_depth(heap, el, env_now, depth) {
+                Ok(v) => heap.push_root(v),
+                Err(e) => return teardown_err(heap, vb, eb, e),
+            }
         }
     }
+    let outn = heap.roots_len() - out_base;
+    let mut out = Vec::with_capacity(outn);
+    for i in 0..outn {
+        out.push(heap.root_at(out_base + i));
+    }
+    heap.truncate_roots(vb);
+    heap.truncate_env_roots(eb);
     Ok(out)
 }
 
@@ -106,10 +176,25 @@ pub fn macroexpand_1(heap: &mut Heap, form: Value, env: EnvId) -> Result<(Value,
 
 /// Repeatedly expand `form` until its head is no longer a macro.
 pub fn macroexpand(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
+    // `macroexpand_1` applies the expander, which can collect at ANY depth
+    // (ADR-061) — and the `(macroexpand …)` builtin reaches this at runtime with
+    // MACRO_BLOCK *off* — so `env` must survive across iterations. Root it and
+    // re-read; `cur` is the expander's fresh (current-epoch) result each round, or
+    // the initial `form` before any eval, so it needs no slot.
+    let eb = heap.env_roots_len();
+    heap.push_env_root(env);
     let mut cur = form;
     loop {
-        let (next, expanded) = macroexpand_1(heap, cur, env)?;
+        let env_now = heap.env_root_at(eb);
+        let (next, expanded) = match macroexpand_1(heap, cur, env_now) {
+            Ok(r) => r,
+            Err(e) => {
+                heap.truncate_env_roots(eb);
+                return Err(e);
+            }
+        };
         if !expanded {
+            heap.truncate_env_roots(eb);
             return Ok(next);
         }
         cur = next;

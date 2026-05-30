@@ -7892,3 +7892,40 @@ the kill path until fixed.
 
 **Next.** Wire the test-runner 30s per-test timeout and the MCP-tool 10s watchdog,
 both `(exit pid :kill)` on a slow worker (todo.md).
+
+## 2026-05-30 — Close out collect-at-any-depth: GC-safety sweep + debug tooling
+
+**Why.** ADR-061 (collect at any eval depth) shipped with the eval core rooted, but
+turning the collector on everywhere meant every *other* Rust site that holds a
+LOCAL handle across a re-entrant `eval`/`apply` could now strand it. The
+`BROOD_GC_STRESS` regression the `exit` devlog entry flagged was exactly this.
+
+**Built the detector first** (the user's steer — "build a tool to catch this bug
+easier" / "more data"):
+- **`BROOD_GC_VERIFY=1`** (`Heap::verify_local_graph`, debug only): before each
+  collection, walk the whole reachable LOCAL graph and assert every handle is
+  in-bounds + current-epoch, reporting the offending cell. Catches a *stored* stale
+  handle — the class the per-deref tripwire misses (it surfaces far away as an OOB
+  index or a `promote` stack-overflow). This is what localised the bug.
+- **`.brood_crash_dump`** (`cli_support::install_crash_dump`): panic hook appending
+  message + backtrace, durable under TUI scroll.
+- **`RUST_BACKTRACE=1` default** in `brood`/`nest` (opt out `=0`).
+- Documented in CLAUDE.md's "Debug tooling" section.
+
+**Found + fixed 6 unrooted re-entrant sites** (all the same shape — a Rust frame
+holding a LOCAL handle across a collecting `eval`/`apply`): `reload_defs`,
+`receive_match` (matcher closure), `check_file` pass-1 + passes 2–4, `try_catch`
+(handler), **`quasiquote`** (`expand_seq`/map — built lists from stale handles at
+runtime; the main corruption source), and the **`macroexpand`** fixpoint loop (stale
+`env`). Suite failures under verify+stress went 16 → 1 → **0**.
+
+**Design rule learned (→ surface reduction).** The hazard exists *only* at a Rust
+frame that loops/accumulates across `eval`; **Brood code is immune** (its locals are
+env bindings the evaluator already roots). So: *a Rust primitive must be single-shot
+w.r.t. eval re-entry — anything that loops over eval, or builds a structure from eval
+results, belongs in Brood.* Follow-ups (noted, not yet done): move `quasiquote` to a
+Brood macro over `cons`/`list`/`eval` (kills the worst offender, ADR-006), then
+`macroexpand`/`reload-defs`; record the rule as an ADR.
+
+**Verified.** All test files under `BROOD_GC_VERIFY=1 BROOD_GC_STRESS=1` +
+debug-assertions: 854/854 clean, no crash dump. Full `cargo test` under the same.

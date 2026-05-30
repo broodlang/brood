@@ -139,23 +139,48 @@ shortcuts (`make help` lists them): `make build`, `make test`, `make suite`,
 environment metadata to `docs/benchmarks/<UTC-timestamp>.md`. `make -j$(nproc)`
 parallelism isn't relevant — it's a Cargo workspace, not a recursive make.
 
-### Hunting GC / use-after-GC bugs
+### Debug tooling — knobs, env flags, and crash artifacts
 
-```bash
-RUSTFLAGS="-C debug-assertions=on" cargo build --release
-BROOD_GC_STRESS=1 ./target/release/brood <file>   # collect at every safepoint
-```
+The kit for chasing GC / use-after-GC and other kernel faults. **Build with
+`RUSTFLAGS="-C debug-assertions=on" cargo build --release`** to keep release
+speed while arming every debug check below (plain `--release` strips them for
+zero shipped cost; plain `cargo build` debug is correct but too slow to expose
+contention races).
 
-Every LOCAL handle accessor (`pair`, `env_frame`, `closure`, `vector`, `map`,
-`string`) in `crates/lisp/src/core/heap.rs` `debug_assert!`s its slot isn't in
-the GC poison bitmap. Sweep sets the bit; `alloc_*` / `new_env` clear it. A
-use-after-GC panics at the *instant of the bad deref* with a backtrace pointing
-at the offender — instead of surfacing as an "unbound symbol" or wrong-arity
-error many frames later. Plain `cargo build --release` strips it (zero hot-path
-cost shipped); `cargo build` (debug) is too slow to expose contention races but
-will still catch single-threaded ones. The combo above keeps release timing
-while leaving the tripwire armed — what reliably reproduces the scheduler race
-from `docs/claude-demo-findings.md`.
+| Env flag | Effect |
+|----------|--------|
+| `BROOD_GC_STRESS=1` | Collect at **every** eval safepoint (not just when the threshold is crossed). Turns rare GC races into deterministic ones. |
+| `BROOD_GC_VERIFY=1` | **Heap verifier** (debug only): before each collection, walk the whole reachable LOCAL graph and assert every handle is in-bounds + current-epoch. Catches a *stored* stale handle and prints the `root→…→cell` path. See below. |
+| `BROOD_TRACE_GCBLOCK=1` / `BROOD_TRACE_SAFEPOINT` | Trace GC-block depth / safepoint hits (debug). |
+| `BROOD_MEM_LIMIT=<bytes>` | Arm the ADR-043 soft/hard memory cap for a run. |
+| `BROOD_STACK_BUDGET=<bytes>` | Raise/lower the non-tail-recursion stack guard. |
+| `RUST_BACKTRACE` | `brood`/`nest` **default it to `1`** (set in each `main`); `RUST_BACKTRACE=0` opts out, `full` for verbose. |
+
+**Two layers of use-after-GC detection** (a moving collector relocates LOCAL
+handles; a handle held across a collection without re-rooting goes stale):
+
+1. **Per-deref tripwire** (always on under debug-assertions). Every LOCAL handle
+   accessor (`pair`, `env_frame`, `closure`, `vector`, `map`, `string`) in
+   `crates/lisp/src/core/heap.rs` checks a poison bit + a 30-bit generation epoch
+   (`check_epoch`), panicking at the *instant of the bad deref*. Catches a stale
+   handle that's **dereferenced**.
+2. **Heap verifier** (`BROOD_GC_VERIFY=1`, `Heap::verify_local_graph`). The
+   tripwire misses a stale handle that's **stored** into a heap cell without being
+   deref'd (it surfaces far away — an OOB slab index in release, or `promote`
+   recursing a corrupted env/closure graph to a `SIGSEGV`). The verifier walks the
+   live graph each safepoint and flags it *at the store site's next collection*,
+   with the path to the offending cell — so you find the missed-rooting site, not
+   the distant blow-up. Reach for this when GC_STRESS gives a `SIGSEGV` or a raw
+   index panic rather than a clean tripwire message.
+
+**Crash artifacts.** `brood`/`nest` install a panic hook
+(`cli_support::install_crash_dump`) that appends the panic + backtrace to
+**`.brood_crash_dump`** in the cwd (in addition to stderr) — durable when a TUI /
+`nest run` animation scrolls the message away. Catches Rust *panics*, **not**
+`SIGSEGV` (a coroutine stack overflow leaves no panic — use `gdb --batch -ex run
+-ex bt <test-binary>` for those; `rr` isn't installed, and `valgrind` won't see a
+*logical* use-after-GC over safe `Vec` slabs). The first reliable repro of the
+scheduler race lives in `docs/claude-demo-findings.md`.
 
 ## Working in this repo (the tree changes under you)
 

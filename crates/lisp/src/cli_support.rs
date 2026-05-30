@@ -8,6 +8,51 @@
 
 use crate::error::LispError;
 
+/// Install a panic hook that appends a full crash report (message + location +
+/// backtrace) to `.brood_crash_dump` in the working directory, *in addition* to
+/// the normal stderr output. A Rust panic in these binaries is almost always a
+/// kernel-level fault — a use-after-GC tripwire, a heap index, a runtime invariant
+/// — and the one-line stderr message often scrolls past (especially under a TUI /
+/// `nest run` animation). The dump captures it durably with a backtrace
+/// (`force_capture`, so it works even without `RUST_BACKTRACE`). Appends, so a
+/// burst of worker-thread panics all land. Best-effort: a write failure is
+/// swallowed (we never want the crash handler to itself panic).
+///
+/// **Caveat:** this catches Rust *panics*, not `SIGSEGV` (e.g. a coroutine
+/// stack overflow) — a signal handler writing from an async-signal context is a
+/// separate, much hairier mechanism, deliberately not done here.
+pub fn install_crash_dump() {
+    let prior = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // Preserve the normal behaviour first (stderr message / default trace).
+        prior(info);
+        use std::io::Write;
+        let bt = std::backtrace::Backtrace::force_capture();
+        let when = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let thread = std::thread::current();
+        let mut body = String::new();
+        body.push_str("\n=== brood crash dump ===\n");
+        body.push_str(&format!("when:    {when} ms since epoch\n"));
+        body.push_str(&format!("thread:  {}\n", thread.name().unwrap_or("<unnamed>")));
+        body.push_str(&format!("panic:   {info}\n"));
+        body.push_str(&format!("backtrace:\n{bt}\n"));
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(".brood_crash_dump")
+        {
+            if f.write_all(body.as_bytes()).is_ok() {
+                // Point the user at the dump (the panic message itself already
+                // went to stderr via `prior`).
+                eprintln!("brood: crash report appended to .brood_crash_dump");
+            }
+        }
+    }));
+}
+
 /// Print an error as a GNU `FILE:LINE:COL: message` line (editor-parseable),
 /// followed — when the file and position are known — by the offending source
 /// line and a caret under the column. See `docs/tooling.md`.

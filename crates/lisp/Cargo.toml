@@ -60,6 +60,13 @@ ropey = "1.6"
 # the `term-*` primitives are just the in-process frontend that paints it, so a
 # remote/web frontend can implement the identical protocol later.
 crossterm = "0.29"
+# TLS for `https` (ADR-062): rustls is pure-Rust (no system OpenSSL). webpki-roots
+# bundles the Mozilla CA set, so no system trust store is needed. The socket layer
+# (crate::net) wraps a rustls client connection behind the same `Value::Socket`
+# handle, so the Brood code above the transport is unchanged. Default (aws-lc-rs)
+# crypto provider — builds with cc + cmake.
+rustls = "0.23"
+webpki-roots = "0.26"
 
 # The optional `gui` frontend's stack (see the [features] note above). All three
 # are pulled in only with `--features gui`; a default build links none of them.

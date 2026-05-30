@@ -1042,6 +1042,43 @@ mod tests {
     }
 
     #[test]
+    fn term_draw_under_mcp_diverts_escapes_instead_of_corrupting_the_stream() {
+        // term-draw writes terminal escapes via crossterm straight to fd 1 — which,
+        // under `nest mcp`, is the JSON-RPC channel. Without the capture-divert
+        // (`write_term_bytes`), those bytes corrupt the stream and wedge the client.
+        // With it: the call returns a clean result envelope and the rendered escapes
+        // ride back inside the captured-stdout content block.
+        let mut interp = Interp::new();
+        let resp = round_trip(
+            &mut interp,
+            &[
+                req(
+                    1,
+                    "tools/call",
+                    json!({ "name": "eval", "arguments": {
+                        "source": "(term-draw [[:clear] [:text 0 0 \"ab\"]])" } }),
+                ),
+                notif("exit", json!(null)),
+            ],
+        );
+        assert!(
+            resp[0].get("result").is_some(),
+            "term-draw must return a clean result envelope, got {:?}",
+            resp[0]
+        );
+        let content = resp[0]["result"]["content"].as_array().unwrap();
+        let joined: String = content
+            .iter()
+            .filter_map(|c| c["text"].as_str())
+            .collect();
+        assert!(
+            joined.contains("[2J"),
+            "rendered escapes should be diverted into the result content (not the raw \
+             channel): {joined:?}"
+        );
+    }
+
+    #[test]
     fn tools_call_returns_an_error_for_an_unknown_tool() {
         let mut interp = Interp::new();
         let resp = round_trip(
