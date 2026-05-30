@@ -22,11 +22,14 @@
   "An immutable text buffer for building editors, written in Brood over the rope
 primitives (ADR-045). A *buffer* is a map:
 
-    {:rope <rope> :point <int> :mark <int|nil> :name <string> :file <string|nil>}
+    {:rope <rope> :point <int> :mark <int|nil> :name <string> :file <string|nil>
+     :undo (<snapshot>…) :redo (<snapshot>…)}
 
 Every operation is pure — movement and editing return a **fresh** buffer; nothing
 mutates (ADR-026). `point` is the cursor (a char index); `mark`, with point,
-delimits the region.
+delimits the region. Each editing op records the pre-edit state on `:undo` (a stack
+of `{:rope :point :mark}` snapshots), so `undo`/`redo` are pure stack moves — see
+below.
 
     (require 'buffer)
     (def b (-> (make-buffer \"hello world\")
@@ -53,9 +56,10 @@ Where `end-of-line` lands and the rightmost column point can hold on that line."
 ;; ---- construction -----------------------------------------------------------
 
 (defn make-buffer (text &optional (name "*scratch*") (file nil))
-  "A fresh buffer holding `text`, with point at 0 and no mark. `name` is a label
-(default `\"*scratch*\"`); `file` is the backing path or nil."
-  {:rope (string->rope text) :point 0 :mark nil :name name :file file})
+  "A fresh buffer holding `text`, with point at 0, no mark, and empty undo/redo
+history. `name` is a label (default `\"*scratch*\"`); `file` is the backing path or
+nil."
+  {:rope (string->rope text) :point 0 :mark nil :name name :file file :undo () :redo ()})
 
 (defn buffer? (x)
   "True if `x` is a buffer value (a map with a rope under `:rope`)."
@@ -107,13 +111,19 @@ Where `end-of-line` lands and the rightmost column point can hold on that line."
   (let (p (get buf :point))
     (if (> p 0) (rope-slice (get buf :rope) (dec p) p) nil)))
 
+(defn buffer-region-bounds (buf)
+  "The region's char bounds as `[lo hi]` (lo ≤ hi, point and mark in either order),
+or nil if no mark is set. The half-open span `[lo, hi)` the view highlights and
+`delete-region`/`buffer-region` act on."
+  (let (m (get buf :mark))
+    (if (nil? m) nil (let (p (get buf :point)) [(min p m) (max p m)]))))
+
 (defn buffer-region (buf)
   "The text between point and mark (in either order), or nil if no mark is set."
-  (let (m (get buf :mark))
-    (if (nil? m)
+  (let (b (buffer-region-bounds buf))
+    (if (nil? b)
       nil
-      (let (p (get buf :point))
-        (rope-slice (get buf :rope) (min p m) (max p m))))))
+      (let ([lo hi] b) (rope-slice (get buf :rope) lo hi)))))
 
 ;; ---- movement (returns a fresh buffer with point moved) ---------------------
 
@@ -157,47 +167,139 @@ the target line is long enough. Clamps to the buffer's line range."
 (defn beginning-of-buffer (buf) "Point moved to the start of the buffer." (goto-char buf 0))
 (defn end-of-buffer (buf) "Point moved to the end of the buffer." (goto-char buf (buffer-length buf)))
 
+;; ---- word motion (M-f / M-b) ------------------------------------------------
+;; A word is a run of non-delimiter, non-whitespace chars (same notion as the
+;; line editor's M-f/M-b). Forward skips any non-word chars then the word;
+;; backward is the mirror. Pure scans over the buffer text.
+
+(defn buffer--word-char? (c)
+  "True if `c` is part of a word (not whitespace or a delimiter) — matches the
+line editor's M-f/M-b notion of a word."
+  (not (or (= c " ") (= c "\t") (= c "\n") (= c "(") (= c ")") (= c "[") (= c "]")
+           (= c "{") (= c "}") (= c "\"") (= c ";") (= c ","))))
+
+(defn buffer--scan-fwd (text i n pred)
+  "Smallest index ≥ `i` (up to `n`) whose char fails `pred` — advance while `pred`."
+  (if (or (>= i n) (not (pred (char-at text i)))) i (buffer--scan-fwd text (inc i) n pred)))
+
+(defn buffer--scan-bwd (text i pred)
+  "Largest index ≤ `i` (down to 0) whose preceding char fails `pred` — retreat while `pred`."
+  (if (or (<= i 0) (not (pred (char-at text (dec i))))) i (buffer--scan-bwd text (dec i) pred)))
+
+(defn forward-word (buf)
+  "Point moved to the end of the next word forward (skip non-word chars, then the word)."
+  (let (text (buffer-text buf)
+        n (string-length text)
+        i (buffer--scan-fwd text (get buf :point) n (fn (c) (not (buffer--word-char? c)))))
+    (goto-char buf (buffer--scan-fwd text i n buffer--word-char?))))
+
+(defn backward-word (buf)
+  "Point moved to the start of the previous word backward (skip non-word chars, then the word)."
+  (let (text (buffer-text buf)
+        i (buffer--scan-bwd text (get buf :point) (fn (c) (not (buffer--word-char? c)))))
+    (goto-char buf (buffer--scan-bwd text i buffer--word-char?))))
+
 ;; ---- mark -------------------------------------------------------------------
 
 (defn set-mark (buf) "Set the mark at point (with point, this delimits the region)." (assoc buf :mark (get buf :point)))
 (defn clear-mark (buf) "Clear the mark." (assoc buf :mark nil))
 
-;; ---- editing (returns a fresh buffer; clears the mark) ----------------------
+;; ---- undo / redo ------------------------------------------------------------
+;;
+;; Undo is per-buffer, riding the immutable buffer for free: a snapshot is just
+;; the edit-mutable triple `{:rope :point :mark}` (ropey shares structure, so a
+;; snapshot is O(1)), and `:undo`/`:redo` are stacks of them. Each editing op
+;; pushes a pre-edit snapshot onto `:undo` (clearing `:redo`) *only when it really
+;; changes the text*, so undo never has dead steps. A snapshot deliberately
+;; excludes `:undo`/`:redo` so snapshots don't nest and grow geometrically. v1
+;; does not coalesce consecutive inserts — one keystroke is one undo step (the
+;; editor app would track last-command to merge them; deferred).
+
+(defn buffer--snapshot (buf)
+  "The restorable edit state of `buf` — just `{:rope :point :mark}` (no history)."
+  {:rope (get buf :rope) :point (get buf :point) :mark (get buf :mark)})
+
+(defn buffer--push-undo (buf)
+  "Push `buf`'s current snapshot onto its `:undo` stack and clear `:redo` — called
+by an editing op before it changes the text, so the change becomes undoable."
+  (assoc buf :undo (cons (buffer--snapshot buf) (or (get buf :undo) ()))
+             :redo ()))
+
+(defn buffer--restore (buf snap)
+  "Restore the `{:rope :point :mark}` of `snap` into `buf`, keeping `buf`'s history."
+  (assoc buf :rope (get snap :rope) :point (get snap :point) :mark (get snap :mark)))
+
+(defn undo (buf)
+  "Undo the last edit: restore the most recent `:undo` snapshot, pushing the
+current state onto `:redo`. A no-op (returns `buf`) when there's nothing to undo."
+  (let (u (get buf :undo))
+    (if (empty? u)
+      buf
+      (assoc (buffer--restore buf (first u))
+             :undo (rest u)
+             :redo (cons (buffer--snapshot buf) (or (get buf :redo) ()))))))
+
+(defn redo (buf)
+  "Redo the last undone edit: restore the most recent `:redo` snapshot, pushing the
+current state back onto `:undo`. A no-op when there's nothing to redo. (A fresh
+edit clears `:redo`, so redo is only available immediately after `undo`.)"
+  (let (r (get buf :redo))
+    (if (empty? r)
+      buf
+      (assoc (buffer--restore buf (first r))
+             :redo (rest r)
+             :undo (cons (buffer--snapshot buf) (or (get buf :undo) ()))))))
+
+;; ---- editing (returns a fresh buffer; records undo; clears the mark) ---------
 ;;
 ;; Edits clear the mark rather than try to track it across the change — the
 ;; simple, safe choice for v1 (a smarter mark-adjustment can come later if the
-;; editor app needs it). `delete-region` clears it by definition.
+;; editor app needs it). `delete-region` clears it by definition. Each op records
+;; an undo snapshot (see above) only when it actually changes the text.
 
 (defn insert (buf s)
-  "Insert string `s` at point; point advances past it."
-  (let (p (get buf :point))
-    (assoc buf
-           :rope (rope-insert (get buf :rope) p s)
-           :point (+ p (string-length s))
-           :mark nil)))
+  "Insert string `s` at point; point advances past it. Recorded for undo."
+  (if (= (string-length s) 0)
+    buf
+    (let (p (get buf :point)
+          buf (buffer--push-undo buf))
+      (assoc buf
+             :rope (rope-insert (get buf :rope) p s)
+             :point (+ p (string-length s))
+             :mark nil))))
 
 (defn delete-char (buf &optional (n 1))
-  "Delete `n` characters *after* point; point stays put."
+  "Delete `n` characters *after* point; point stays put. Recorded for undo (a
+no-op at end-of-buffer is not recorded)."
   (let (p (get buf :point)
         end (buffer--clamp p (buffer-length buf) (+ p n)))
-    (assoc buf :rope (rope-delete (get buf :rope) p end) :mark nil)))
+    (if (= p end)
+      buf
+      (let (buf (buffer--push-undo buf))
+        (assoc buf :rope (rope-delete (get buf :rope) p end) :mark nil)))))
 
 (defn delete-backward-char (buf &optional (n 1))
-  "Delete `n` characters *before* point (backspace); point moves back with it."
+  "Delete `n` characters *before* point (backspace); point moves back with it.
+Recorded for undo (a no-op at point 0 is not recorded)."
   (let (p (get buf :point)
         start (buffer--clamp 0 p (- p n)))
-    (assoc buf :rope (rope-delete (get buf :rope) start p) :point start :mark nil)))
+    (if (= p start)
+      buf
+      (let (buf (buffer--push-undo buf))
+        (assoc buf :rope (rope-delete (get buf :rope) start p) :point start :mark nil)))))
 
 (defn delete-region (buf)
   "Delete the text between point and mark; point moves to the region start and
-the mark is cleared. A no-op (returns `buf`) if no mark is set."
-  (let (m (get buf :mark))
-    (if (nil? m)
+the mark is cleared. A no-op (returns `buf`, unrecorded) if no mark is set or the
+region is empty. Recorded for undo (restoring it brings back the mark too)."
+  (let (b (buffer-region-bounds buf))
+    (if (nil? b)
       buf
-      (let (p (get buf :point)
-            lo (min p m)
-            hi (max p m))
-        (assoc buf :rope (rope-delete (get buf :rope) lo hi) :point lo :mark nil)))))
+      (let ([lo hi] b)
+        (if (= lo hi)
+          (assoc buf :mark nil)
+          (let (buf (buffer--push-undo buf))
+            (assoc buf :rope (rope-delete (get buf :rope) lo hi) :point lo :mark nil)))))))
 
 ;; ---- the actor shell (buffer-as-process) ------------------------------------
 ;;

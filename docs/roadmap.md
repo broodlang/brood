@@ -360,13 +360,19 @@ The text-editing substance, exposed to Brood. Built as a thin end-to-end
   *derived views* (the display-protocol seam appearing early). Opt-in, never in
   the prelude, **zero new kernel surface** — the editor *framework*, not the
   language (ADR-045). `tests/buffer_test.blsp` 28/28 incl. GC-stress + actor.
-- 🟡 Editing **commands** + multiple buffers — belong in the **editor app** (a
-  new `nest` project that `(:use buffer)`s this framework), not here. **Editing
-  commands done (2026-05-30):** `examples/editor/` is a super-minimal GUI text
-  editor — a `ui-run` client whose `update` maps keys to `std/buffer.blsp` ops
-  (insert/delete/movement/save) and whose pure `view` paints the buffer + a
-  status line, all over `(gui-display)`. 11 pure update/view tests. **Multiple
-  buffers** is the remaining step (plus selection/region + undo, both deferred).
+- ✅ Editing **commands** + **multiple buffers** + **selection/region** + **undo**
+  — belong in the **editor app** (`~/src/whk/myedit`, a `nest` project that
+  `(:use buffer)`s this framework), not here. The app is a `ui-run` client whose
+  `update` dispatches keys through `std/keymap.blsp` (chords via `keymap-step`) to
+  `model -> model` commands and whose pure `view` paints the buffer(s) + mode line
+  + echo area. **All three M2 enablers are done (2026-05-30):** a buffer ring
+  (`:buffers` + `:current`, C-x ←/→/b/k, `*Messages*` as a real buffer), region +
+  kill ring (C-SPC/C-w/M-w/C-y, reverse-video highlight), per-buffer undo/redo
+  (C-/, M-/), a minibuffer (switch-buffer / find-file with completion), word motion
+  (M-f/M-b), and multi-line `eval-last-sexp` (C-x C-e). 45 pure tests. The
+  **language-side** enablers landed in `std/buffer.blsp` — `undo`/`redo`
+  (per-buffer history, ADR-075), `buffer-region-bounds`, `forward-word`/
+  `backward-word` — plus the GUI `C-SPC` key fix in `crates/lisp/src/gui.rs`.
 - 🟡 **Evaluate-the-Lisp-I'm-editing (done, 2026-05-30).** The C-x C-e family as
   editor framework: `with-out-str` (prelude — surfaces the kernel's process-scoped,
   now-stacked output capture to Brood) + `read-all` (kernel — all forms in a
