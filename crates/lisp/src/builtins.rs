@@ -2162,6 +2162,7 @@ fn reload_defs(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
         std::collections::HashSet::new()
     };
     let prev_known = heap.set_ns_known_names(known);
+    let prev_imports = heap.set_imports(std::collections::HashMap::new());
     let mut result = Ok(Value::Nil);
     // Root the unevaluated forms across the per-form eval — a collection at any
     // depth (ADR-061) relocates the LOCAL forms this loop still holds; re-fetch
@@ -2226,6 +2227,7 @@ fn reload_defs(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     heap.set_current_file(prev);
     heap.set_compile_ns(prev_ns);
     heap.set_ns_known_names(prev_known);
+    heap.set_imports(prev_imports);
     result.map(|_| Value::Nil)
 }
 
@@ -2257,6 +2259,7 @@ fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
         std::collections::HashSet::new()
     };
     let prev_known = heap.set_ns_known_names(known);
+    let prev_imports = heap.set_imports(std::collections::HashMap::new());
 
     // **Bounded loading — the core memory guarantee (docs/memory-review.md).**
     // The collector now reclaims at ANY eval depth (ADR-061), so a file loaded

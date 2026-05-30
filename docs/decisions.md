@@ -2450,6 +2450,10 @@ and it adds *zero* scheduler-race surface, the decisive property after KI-1.
 - **Restart intensity:** `:max-restarts` within `:max-seconds` (defaults 3/5);
   exceeding it exits the supervisor abnormally so a watcher's monitor fires.
 - **Introspection:** `(which-children sup)` → `[{:id :pid :restart}]`.
+- **Managed names + reverse-order shutdown** (update 2026-05-30): a `:name`
+  keyword in a child spec is `register`ed to the fresh pid on every (re)start, so
+  callers address a stable name via `whereis` across restarts; and `terminate-many`
+  tears children down in **reverse start order** (OTP's dependency-safe order).
 - **`:shutdown` policy + nested-tree cascade** (update 2026-05-30): a child spec's
   `:shutdown` is `:brutal-kill` (default — `exit … :kill`), `:infinity` (send
   `[:$stop]`, wait), or an integer ms (graceful, then a hard-kill backstop).

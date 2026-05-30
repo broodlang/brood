@@ -124,6 +124,7 @@ impl Interp {
             std::collections::HashSet::new()
         };
         let prev_known = self.heap.set_ns_known_names(known);
+        let prev_imports = self.heap.set_imports(std::collections::HashMap::new());
         // The parsed forms sit in LOCAL below this checkpoint; each form's eval
         // allocates above it. Between top-level forms the eval stack is empty and
         // nothing in LOCAL is live but the (discarded) intermediate result —
@@ -157,6 +158,7 @@ impl Interp {
                     self.heap.truncate_roots(roots_base);
                     self.heap.set_compile_ns(prev_ns);
                     self.heap.set_ns_known_names(prev_known);
+                    self.heap.set_imports(prev_imports);
                     return Err(e);
                 }
             }
@@ -171,6 +173,7 @@ impl Interp {
         self.heap.truncate_roots(roots_base);
         self.heap.set_compile_ns(prev_ns);
         self.heap.set_ns_known_names(prev_known);
+        self.heap.set_imports(prev_imports);
         Ok(result)
     }
 
@@ -191,6 +194,7 @@ impl Interp {
             std::collections::HashSet::new()
         };
         let prev_known = self.heap.set_ns_known_names(known);
+        let prev_imports = self.heap.set_imports(std::collections::HashMap::new());
         let cp = self.heap.checkpoint();
         let gc = self.heap.gc_enabled();
         let mut result = Value::Nil;
@@ -218,6 +222,7 @@ impl Interp {
                     self.heap.truncate_roots(roots_base);
                     self.heap.set_compile_ns(prev_ns);
                     self.heap.set_ns_known_names(prev_known);
+                    self.heap.set_imports(prev_imports);
                     return Err(e);
                 }
             }
@@ -230,6 +235,7 @@ impl Interp {
         self.heap.truncate_roots(roots_base);
         self.heap.set_compile_ns(prev_ns);
         self.heap.set_ns_known_names(prev_known);
+        self.heap.set_imports(prev_imports);
         Ok(result)
     }
 

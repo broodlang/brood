@@ -36,10 +36,16 @@ A *child spec* is a map:
     {:id     :worker                  ; any value, for diagnostics (optional)
      :start  (fn () (spawn (loop 0))) ; 0-arg fn that spawns the child, returns its pid
      :restart :permanent              ; :permanent | :transient | :temporary (default :permanent)
-     :shutdown :brutal-kill}          ; how to terminate it: :brutal-kill (default) | :infinity | <ms>
+     :shutdown :brutal-kill           ; how to terminate it: :brutal-kill (default) | :infinity | <ms>
+     :name    :worker}                ; optional keyword: register the pid under this name (re-registered on restart)
 
 Restart types: `:permanent` is always restarted; `:transient` only after an
 *abnormal* exit (reason ≠ `:normal`); `:temporary` is never restarted.
+
+A `:name` (keyword) registers the child's pid so callers address it by a **stable
+name** (`(whereis :worker)`, or a `{:name :worker :node …}` send target) that
+survives restarts — the supervisor re-registers the fresh pid each time. Without
+`:name`, a pid held across a restart is a dead reference.
 
 Shutdown policy (how the supervisor *terminates* a child — on `stop-supervisor`,
 a group restart, or intensity shutdown): `:brutal-kill` (default) hard-kills it;
@@ -80,11 +86,18 @@ never. An uncaught throw exits with reason `[:error msg]`, a clean return with
 
 (defn supervisor--start-child (spec)
   "Start one child from its `spec`: call its `:start` thunk to obtain a pid,
-`monitor` it, and return the spec augmented with the live `:pid` and monitor
-`:ref`. Runs inside the supervisor process so the monitor is owned by it."
+`monitor` it, register its `:name` (if any), and return the spec augmented with
+the live `:pid` and monitor `:ref`. Runs inside the supervisor process so the
+monitor is owned by it. A `:name` (a keyword) is `register`ed to the fresh pid on
+every (re)start, so callers can address the child by a **stable name** through
+`whereis` / `{:name … :node …}` even though its pid changes across restarts; the
+dead incarnation's name is dropped automatically when it exits (Erlang semantics),
+so a restart just overwrites it (a tiny window where `whereis` is nil between the
+crash and the re-register — the same gap OTP has)."
   (let (start (get spec :start)
         pid (start)
         r (monitor pid))
+    (when (get spec :name) (register (get spec :name) pid))
     (assoc spec :pid pid :ref r)))
 
 (defn supervisor--find (children ref)
@@ -142,10 +155,13 @@ a harmless no-op and the selective drain consumes the `:down` already queued.
 
 (defn supervisor--terminate-many (children)
   "Terminate every child in `children` (each assumed alive / not-yet-drained) per
-its `:shutdown` policy, draining each one's `[:down]`. Sequential: a child marked
-`:infinity` (a sub-supervisor) is fully torn down — recursively — before the next,
-so a whole tree shuts down depth-first and nothing is orphaned."
-  (dolist (c children) (supervisor--terminate-child c)))
+its `:shutdown` policy, draining each one's `[:down]`. **Reverse start order**
+(`children` is kept in start order, so we tear down last-started-first) — matching
+OTP, so a child that depends on an earlier-started sibling is stopped before that
+sibling goes away. Sequential: a child marked `:infinity` (a sub-supervisor) is
+fully torn down — recursively — before the next, so a whole tree shuts down
+depth-first and nothing is orphaned."
+  (dolist (c (reverse children)) (supervisor--terminate-child c)))
 
 ;; ---- restart-intensity window -----------------------------------------------
 

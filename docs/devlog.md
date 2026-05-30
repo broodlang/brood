@@ -8598,3 +8598,28 @@ a `:shutdown :infinity` sub-supervisor so the grandchild is torn down; a `:shutd
 **Docs.** `supervision.md` (new §Shutdown policy + nested trees), ADR-044, roadmap.
 Still deferred (ADR-011): `link`/bidirectional *upward* exit propagation —
 termination stays one-directional and supervisor-driven.
+
+## 2026-05-30 — Supervisor: OTP-parity quick wins (reverse-order shutdown + managed `:name`)
+
+**Goal.** Two pure-Brood ergonomics from the "vs OTP/Elixir" review (the harder
+`link`/`trap_exit` item is scoped separately).
+
+- **Reverse-order shutdown.** `supervisor--terminate-many` now tears children down
+  **last-started-first** (`(reverse children)`), matching OTP — a child that
+  depends on an earlier-started sibling is stopped before that sibling goes away.
+- **Supervisor-managed `:name`.** A `:name` keyword in a child spec is `register`ed
+  to the fresh pid on every (re)start, so callers address a **stable name**
+  (`(whereis :svc)`) instead of a pid that dies on restart. Re-register overwrites;
+  the dead incarnation's name was already dropped on exit (Erlang semantics), so
+  there's only a tiny `whereis`→nil window between crash and re-register — the same
+  gap OTP has. Backward-compatible (no `:name` → unchanged).
+
+**Verified.** `tests/supervisor_test.blsp` → 15 tests (added: reverse-order
+teardown observed via `:shutdown :infinity` children that announce on `[:$stop]`;
+a named child reachable by `whereis`, name follows a restart to the new pid). 15/15
+clean, 4× under `BROOD_GC_STRESS=1`. Docs: `supervision.md` (parity items #2/#3
+marked done), ADR-044.
+
+**Still on the OTP-parity list (prompt before starting):** `link`/`trap_exit` (the
+structural orphan-on-supervisor-*crash* fix — kernel work + ADR) and a
+DynamicSupervisor/runtime child API (additive Brood).
