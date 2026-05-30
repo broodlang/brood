@@ -356,39 +356,29 @@ fn call_tool(interp: &mut Interp, params: &Json) -> Result<Json, RpcError> {
             json_to_value(&mut interp.heap, &arguments).map_err(RpcError::invalid_params)?;
         interp.heap.push_root(args_value);
 
-        // Run `eval`/`load` — the tools that execute arbitrary, possibly-hanging
-        // code — under a 30s watchdog: `mcp-run-guarded` spawns the handler and
-        // `(exit … :kill)`s it on timeout (ADR-063), so a runaway eval returns a
-        // timeout error instead of wedging the whole MCP session / runtime. The
-        // spawned handler's output still diverts off the JSON-RPC channel because
-        // the capture is process-scoped and inherited (scheduler `Ctx.capture`).
-        // Other tools (fast, or legitimately long like `run-tests`, which self-bounds
-        // per test) run inline (timeout 0 → `mcp-run-guarded` applies directly).
-        let timeout_ms: i64 = if name == "eval" || name == "load" {
-            30_000
-        } else {
-            0
-        };
-        let guard = interp
-            .heap
-            .env_get(interp.root, value::intern("mcp-run-guarded"))
-            .ok_or_else(|| RpcError::internal("mcp-run-guarded missing"))?;
-        interp.heap.push_root(guard);
-        let result_value = brood::eval::apply(
-            &mut interp.heap,
-            guard,
-            &[handler, args_value, Value::Int(timeout_ms)],
-            interp.root,
-        )
-        .map_err(|e| RpcError::from_lisp(&e))?;
+        let result_value =
+            brood::eval::apply(&mut interp.heap, handler, &[args_value], interp.root)
+                .map_err(|e| RpcError::from_lisp(&e))?;
 
         let content = value_to_json(&interp.heap, result_value).map_err(RpcError::internal)?;
         Ok(content)
     });
+    // Watchdog: bound `eval`/`load` (which run arbitrary, possibly-runaway code) to
+    // 30s, so a runaway can't wedge the server / runtime. Checked inline in eval's
+    // loop (scheduler deadline, ADR-063), so it surfaces as an ordinary error and
+    // leaves the dispatcher's existing error / panic / output-capture handling
+    // intact. Other tools (fast, or legitimately long like `run-tests`) run
+    // unbounded. Cleared right after, regardless of how the call ends.
+    if name == "eval" || name == "load" {
+        brood::process::set_deadline(Some(
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+        ));
+    }
     let outcome = match std::panic::catch_unwind(inner) {
         Ok(result) => result,
         Err(payload) => Err(RpcError::from_panic(payload)),
     };
+    brood::process::set_deadline(None);
 
     // Always drain the capture buffer (even on error / panic) so it never leaks
     // into the next call; attach it to a successful reply's content envelope.
@@ -1097,6 +1087,28 @@ mod tests {
             joined.contains("[2J"),
             "rendered escapes should be diverted into the result content (not the raw \
              channel): {joined:?}"
+        );
+    }
+
+    #[test]
+    fn eval_deadline_aborts_a_runaway_inline() {
+        // The MCP watchdog: a runaway eval (here an infinite tail loop) is aborted by
+        // the inline deadline (scheduler `DEADLINE`, ADR-063) and surfaces as an
+        // ordinary error — not a hang — so the server keeps serving. Inline, so it
+        // doesn't disturb the dispatcher's error/panic/output handling. A short
+        // deadline stands in for the dispatcher's 30s.
+        let mut interp = Interp::new();
+        interp.eval_str("(defn ginf () (ginf))").unwrap();
+        brood::process::set_deadline(Some(
+            std::time::Instant::now() + std::time::Duration::from_millis(300),
+        ));
+        let r = interp.eval_str("(ginf)");
+        brood::process::set_deadline(None);
+        let err = r.expect_err("a runaway must be aborted by the deadline, not hang");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("time limit"),
+            "expected a time-limit error, got: {msg}"
         );
     }
 

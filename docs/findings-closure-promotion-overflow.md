@@ -3,6 +3,17 @@
 **Status:** open bug, with workarounds in place. Found 2026-05-30 while building
 the HTTP server (`std/http.blsp`). Two sites, one root cause.
 
+> **2026-05-30 — confirmed the *only* remaining memory-safety hole.** A full
+> kernel GC/memory-safety audit of every Rust primitive and evaluator re-entry
+> site (builtins, `eval/mod.rs`, `macros.rs`, the collector, the scheduler, and
+> dist) came back clean *except for this bug*. The operand-stack rooting
+> discipline (ADR-061) is correctly and consistently applied — including the
+> argv-building loop, the `MACRO_BLOCK`-off quasiquote paths, and `binding` via
+> `heap.dynamics`; and the mailbox is safe by design (off-heap `Message` trees,
+> never LOCAL handles). So this `promote`/`closure_to_message` cyclic-capture
+> overflow is the single thing left to fix for full GC safety. See the
+> 2026-05-30 devlog entry.
+
 ## Symptom
 
 ```lisp

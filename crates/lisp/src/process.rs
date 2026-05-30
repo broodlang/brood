@@ -49,10 +49,10 @@ pub use message::{from_message, to_message, ClosureArmMsg, ClosureMsg, Message};
 pub(crate) use io_source::{spawn_io_source, MailboxSink, SubscriberHandle};
 pub use monitor::{demonitor, monitor, monitored_by, next_ref};
 pub use scheduler::{
-    begin_capture, capture_append, exit, gc_block_depth, in_green_process, macro_block_active,
-    parent_of, peak_threads, pid_value, self_pid, set_max_parallel, spawn, spawn_count,
-    stack_budget, stack_overflow_check, take_capture, tick, worker_threads, GcBlockGuard,
-    MacroBlockGuard, CORO_STACK_BYTES,
+    begin_capture, capture_append, deadline_exceeded, exit, gc_block_depth, in_green_process,
+    macro_block_active, parent_of, peak_threads, pid_value, self_pid, set_deadline,
+    set_max_parallel, spawn, spawn_count, stack_budget, stack_overflow_check, take_capture, tick,
+    worker_threads, GcBlockGuard, MacroBlockGuard, CORO_STACK_BYTES,
 };
 
 pub(crate) use mailbox::{deliver, is_alive, read_name_address};

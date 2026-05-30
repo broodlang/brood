@@ -8040,3 +8040,134 @@ primitives single-shot.
 **Deferred (same rule).** `quasiquote` → Brood macro (bootstrap surgery — `defn`
 itself uses backtick) and `reload-defs` → Brood (needs `note-definition` exposed);
 tracked as their own tasks.
+
+## 2026-05-30 — MCP tool watchdog + terminal-output isolation
+
+Two fixes so the `nest mcp` server can't be wedged by a tool.
+
+**Terminal output corruption (the reported `term-draw` "hang").** `term-draw` /
+`term-emit` wrote crossterm escapes straight to fd 1 — under MCP that's the JSON-RPC
+channel — bypassing the Brood-`print` capture. Now both build into a buffer and go
+through `write_term_bytes`, which diverts into the active capture (riding back in the
+result content). Not a timeout issue: term-draw returns in ms; the damage was the
+bytes. Test: `mcp::tests::term_draw_under_mcp_diverts_escapes_…`.
+
+**Runaway `eval`/`load` (30s watchdog).** First tried spawn-and-kill — it relocates
+the handler off the dispatcher's inline path, turning throws/panics into `:down`
+events and breaking the structured error/panic projection (4 MCP tests failed).
+Reverted. The right design is an **inline deadline**: the dispatcher sets a 30s
+deadline around `eval`/`load`, and eval's `'tail:` loop checks
+`process::deadline_exceeded()` (clock read every ~1024 ticks; no-deadline path is one
+`Cell` get). A runaway surfaces as an ordinary error, so error/panic/capture handling
+is untouched, and an infinite Brood loop is aborted (a *native* block still can't be —
+same limit as `(exit … :kill)`). Test: `eval_deadline_aborts_a_runaway_inline`.
+
+**Capture is now process-scoped + inherited** (scheduler `Ctx.capture`, minted fresh
+per `begin_capture`): a child a captured process `spawn`s writes to the same buffer,
+so an MCP eval that spawns a printing process still diverts that output off the
+channel. Concurrency-safe (fresh `Arc` per capture — parallel test MCP servers don't
+collide), unlike the global-buffer attempt that raced 5 tests.
+
+---
+
+## 2026-05-30 — Observer hot-reload: where `def` lands, and a live `:bg` theme (design note, not yet built)
+
+**Question that started it.** "When I redefine a function from a REPL/minibuffer,
+why doesn't the observed runtime update? — that must be a core principle." It is,
+and the answer pins down exactly how far hot reload reaches.
+
+**The principle (recap, no new code).** A `def` rebinds a global in *that
+runtime's* shared `RuntimeCode.globals` table (`heap.rs:2492-2516`); every process
+the runtime `spawn`s shares the same `Arc<RuntimeCode>` and resolves globals by
+**late binding** on each lookup (`heap.rs:2468-2491`). So a `def` is visible to all
+of a runtime's processes — parent *and* child, no asymmetry — on their next by-name
+lookup. The hard boundary: **separate runtimes/nodes each get their own
+`RuntimeCode`** (`docs/shared-code.md:146-160`), so a redef in one never reaches
+another. Hence remote attach (`nest observe --connect`) can't see a REPL redef by
+design — it's read-only over the dist link (ADR-053).
+
+**Emacs vs Erlang, stated precisely.** Both models share the mechanics (function-cell
+indirection for named calls; value-capture for grabbed function objects). What differs
+is *what holds running state*. Emacs = one mutable image, state in places you can also
+mutate, so redefinition is total. Brood/Erlang = behavior is hot-swappable (by-name
+re-resolution) but **state is sealed** — a process's state lives in its immutable loop
+args, and immutability (ADR-026) means there's no live place to fix it up. We have
+Erlang's old-code/new-code split *without* OTP's `code_change/3` escape hatch: a
+stateful process must thread its own upgrade (receive a `:reload`, recompute state,
+tail-call the new code). Editor *commands* will feel Emacs-live; stateful *processes*
+(buffer-as-process) hot-swap behavior, not in-flight state. (Candidate ADR/devlog topic
+for later: a userland `code_change` convention.)
+
+**Applied to the observer.** The observer *is* live-redefinable, and it ships its own
+eval minibuffer (`:`/`e` → `observe-cmd-command`, same-runtime `eval-string`), so you
+can redefine its rendering from inside and watch the next tick repaint. It works
+because the render chain is all by-name: `ui--loop` calls the captured `view` →
+`observe--view` (`observer.blsp:451`) → `observe-frame` (`:204`) → `observe--row-face`
+(`:205`), each a free global re-resolved every frame. **Caveat:** `observe-attach`
+passes `observe--view`/`observe--update` to `ui-run` as *values* (`observer.blsp:513`),
+so redefining *those two exact symbols* won't hot-swap the running loop — but
+everything they call by name does. Live demo (paste at the `λ ` prompt):
+`(def observe--row-face (fn (p selected?) (if selected? {:reverse true} {:bg :dark-grey :fg :green})))`.
+
+**Background color is already in the seam — unused by policy.** `:bg` is a documented
+face key (`std/display.blsp:20`); both frontends honor it — terminal `apply_face`
+queues `SetBackgroundColor` (`builtins.rs:3071-3072`), GUI `gui_face` resolves it to RGB
+(`builtins.rs:3151`). The observer's faces just never set a `:bg` today
+(`observe--row-face` at `observer.blsp:98`, frame at `:215`). So nothing to add in the
+kernel.
+
+**Next step (NOT yet done — picking up in a new session).** Add a *persistent*
+themeable background to the observer, in pure Brood (`std/observer.blsp`):
+- thread a `:bg` into the faces in `observe-frame` / `observe--row-face` (ideally via a
+  small theme map the frame reads, so it's one place to retint);
+- since `(clear)` only resets to the terminal default, paint the full-width rows with
+  that `:bg` so *empty* cells get the background too (otherwise only glyph cells tint);
+- keep it all by-name so it stays live-redefinable from the minibuffer;
+- update the observer docstring + roadmap tick; add tests against the pure `observe-frame`
+  (face assertions) since it's IO-free.
+
+---
+
+## 2026-05-30 — Full kernel GC/memory-safety audit (review only)
+
+**Goal.** Review *all* the Rust primitives and evaluator call sites to confirm
+they are memory- and GC-safe under the ADR-061 collect-at-any-depth model.
+
+**Method.** Established the contract first: the LOCAL heap is a *copying*
+collector (`arena_flip`) that relocates survivors + bumps the epoch, and fires
+**only at the eval safepoint, at any depth**. So the *only* way a primitive can
+strand a handle is to hold a heap-backed `Value`/`EnvId` across a re-entry into
+the evaluator (`eval`/`apply`/`macroexpand`/`load`) without rooting it on the
+operand stack (`push_root`/`push_env_root` → re-read `root_at`/`env_root_at` →
+`truncate`). Plain allocation never collects. Then audited the four re-entry
+regions.
+
+**Result — sound everywhere except one already-known bug.**
+- `builtins.rs` — clean. `eval`/`eval-string`/`load`/`reload-defs` root the
+  unevaluated forms and truncate on both Ok/Err; `apply`/`macroexpand-1` are tail
+  calls; `try` roots handler+env across the thunk; `binding` rides `heap.dynamics`
+  (relocated by `arena_flip`); `sort`/`sort-by` Rust paths do no eval.
+- `eval/mod.rs` — clean, including the highest-risk site, the argv-building loop
+  (`eval_arguments`): already-evaluated args sit on the operand stack and the
+  spine cursor is advanced from the *relocated* slot, not a pre-eval local.
+  `if`/`let`/`let*`/`letrec`/`do`/closure-body/`bind_params`/`bind_sequential`/
+  `tail_of_cons` all root-and-re-read.
+- `macros.rs` — clean. Compile pass opts out via `MACRO_BLOCK` over its whole
+  transitive tree; the `MACRO_BLOCK`-off paths (runtime quasiquote,
+  `macroexpand`/`macroexpand-1`) root env/template/accumulator and re-read. (The
+  "macros.rs rooting" the handoff flagged as deferred is in fact done.)
+- collector + scheduler + dist — clean. **Mailbox is SAFE by design:** messages
+  are deep-copied on `send` into an off-heap owned `Message` tree
+  (`process/message.rs`), never LOCAL slab handles, so a collection between
+  `send`/`receive` is a non-event and `arena_flip` correctly doesn't relocate the
+  queue. Suspend/resume saves/restores `GC_BLOCK`/`MACRO_BLOCK`/`STACK_BASE` and
+  the operand stacks travel inside the coroutine's owned `Heap`. `flush_*` and
+  `collect`'s root set verified complete.
+
+**The one hole — already tracked.** `Heap::promote` (and its `closure_to_message`
+twin) lack a forwarding table, so promoting/sending a closure that captures
+another closure recurses forever → uncatchable stack-overflow abort. This is the
+*sole* remaining memory-safety issue and is fully documented in
+[`findings-closure-promotion-overflow.md`](findings-closure-promotion-overflow.md)
+(decided fix: two-pass back-patching `promote`, GC-author track; `std/http.blsp`
+workarounds in place). No new bugs found.
