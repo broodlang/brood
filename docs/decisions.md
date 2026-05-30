@@ -4123,12 +4123,32 @@ and grown at runtime is Elixir's DynamicSupervisor; a dynamically-added child is
 full member (linked, restarted per its type, torn down on shutdown). No dedicated
 `simple_one_for_one` mode — the API works under any strategy.
 
-**Still deferred (ADR-011).** Remote (cross-node) links; exact propagated reason
-for a non-trapping peer (the `hard` bit above); a `terminate/2`-style worker
-cleanup hook (the last OTP-parity item — cleanup on an *external* kill needs the
-trappable-shutdown path, only `[:$stop]`-cooperative today).
+**Distributed links (cross-node, update 2026-05-30).** Links span nodes, mirroring
+the remote-monitor machinery: `link`/`unlink`/`exit` accept a remote pid and route
+over the dist link. Three wire frames — `Frame::Link`/`Frame::Unlink` (each node
+records its half of the symmetric link in `links::REMOTE_LINKS`, keyed
+`local_pid → (node, remote_pid)`) and `Frame::Exit { link }` (a `link`-death goes
+through the trap-or-propagate path carrying the *remote* pid; a non-`link` exit is
+the explicit remote `(exit pid reason)`, routed to `scheduler::exit`). A net-split
+fires `:noconnection` to every local peer of a process on the dropped node — the
+exact `:noconnection`-on-net-split semantics monitors have (wired into
+`dist::fire_nodedown` alongside `handle_node_down`). This makes **cross-node
+supervision** work: a supervisor links a remote child (its `:start` must return a
+remote pid — `remote-spawn` is fire-and-forget, so obtain it via a roundtrip), a
+remote crash arrives as a link `[:EXIT]` and restarts, and the supervisor's own
+death tears the remote child down. Verified by `crates/cli/tests/distribution.rs`
+(remote link death → `[:EXIT]`, remote `(exit :kill)`, and a B-supervises-A child
+restart). The race-safety mirrors `monitor_remote`: record the half before
+consulting `NODES`, so net-split and the wire send can't orphan an entry.
+
+**Still deferred (ADR-011).** Exact propagated reason for a non-trapping peer (the
+`hard` bit above); a `terminate/2`-style worker cleanup hook (the last OTP-parity
+item — cleanup on an *external* kill needs the trappable-shutdown path, only
+`[:$stop]`-cooperative today); a **synchronous `remote-spawn`** returning the
+child pid (would make remote-child specs turnkey rather than roundtrip-by-hand).
 
 **References.** ADR-035 (monitors — the one-way cousin), ADR-063 (`exit/2`),
-ADR-044 (`:shutdown` cascade), ADR-039 (the reverted kernel supervisor — why
-general primitives), `supervision.md` (the vs-OTP deep dive that motivated this),
-`tests/link_test.blsp`.
+ADR-044 (`:shutdown` cascade), ADR-033/034 (the dist wire codec links extend),
+ADR-039 (the reverted kernel supervisor — why general primitives), `supervision.md`
+(the vs-OTP deep dive that motivated this), `tests/link_test.blsp`,
+`crates/cli/tests/distribution.rs`.

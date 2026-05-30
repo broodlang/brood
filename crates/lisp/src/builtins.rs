@@ -1370,7 +1370,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("%spawn", &["thunk"], "Run thunk (a 0-arg fn) in a new green process; returns its pid. Use the `spawn` macro."),
     ("send", &["target", "msg"], "Copy msg into target's mailbox; target is a pid or {:name :node} address. Routes locally or over a node link. Returns nil."),
     ("self", &[], "This process's own pid (carries this node's identity)."),
-    ("exit", &["pid", "reason"], "Send an exit signal to local process pid (Erlang exit/2). reason :kill is the untrappable hard kill — pid dies at its next reduction tick, or immediately if parked. Any other reason is the soft signal — pid dies at its next receive. Monitors fire [:down ref pid reason]. No-op for a dead/unknown pid. Returns nil."),
+    ("exit", &["pid", "reason"], "Send an exit signal to process pid, local or remote (Erlang exit/2). reason :kill is the untrappable hard kill — pid dies at its next reduction tick, or immediately if parked. Any other reason is the soft signal — pid dies at its next receive. Monitors fire [:down ref pid reason]. A remote pid is routed to its node over the link. No-op for a dead/unknown pid. Returns nil."),
     ("ref", &[], "A fresh, globally-unique reference token (tags a request to its reply)."),
     ("monitor", &["pid"], "Watch pid; returns a monitor ref. Delivers [:down ref pid reason] when pid dies."),
     ("list-processes", &[], "Every currently-live pid on this runtime (one per registered mailbox). Order is unspecified — sort if you need stability. For agents/tools enumerating spawned processes."),
@@ -1391,8 +1391,8 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("term-raw-leave", &[], "Leave raw mode (the teardown for term-raw-enter). Idempotent with the panic-path restore."),
     ("term-emit", &["ops"], "Paint inline, relative-motion render ops (for an in-place editor that must not take over the screen): [:print str], [:print str face], [:cr], [:nl], [:up n], [:down n], [:col n], [:clear-eol], [:clear-below], [:clear-screen]. A face is a map like {:fg :cyan :bold true}. Queues all ops then flushes once; unknown ops are skipped; returns nil."),
     ("demonitor", &["mref"], "Drop the monitor identified by mref (best-effort)."),
-    ("link", &["pid"], "Symmetrically link the current process and local pid (Erlang link/1). When either dies, the other gets a [:EXIT pid reason] message if it set (trap-exit true), else dies too on an abnormal reason (propagation cascades through links; :normal does not propagate). Linking an already-dead pid notifies the caller with reason :noproc. Returns nil."),
-    ("unlink", &["pid"], "Drop the symmetric link between the current process and pid (best-effort). Returns nil."),
+    ("link", &["pid"], "Symmetrically link the current process and pid, local or remote (Erlang link/1). When either dies, the other gets a [:EXIT pid reason] message if it set (trap-exit true), else dies too on an abnormal reason (propagation cascades through links; :normal does not propagate). A remote link fires :noconnection on net-split; linking an already-dead/unreachable pid notifies the caller (:noproc / :noconnection). Returns nil."),
+    ("unlink", &["pid"], "Drop the symmetric link between the current process and pid (local or remote; best-effort). Returns nil."),
     ("trap-exit", &["on"], "Set the current process's trap_exit flag (Erlang process_flag(trap_exit, …)); returns the previous value. When on, a linked peer's death arrives as a trappable [:EXIT pid reason] message instead of killing this process."),
     ("spawn-count", &[], "How many green processes have been spawned since program start."),
     ("peak-threads", &[], "High-water mark of OS threads running processes concurrently."),
@@ -4266,38 +4266,45 @@ fn exit_proc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             crate::process::exit(id, reason);
             Ok(Value::Nil)
         }
-        Value::Pid { .. } => Err(LispError::type_err(
-            "exit: remote pids aren't supported yet — exit only kills local processes",
-        )),
+        // Cross-node exit (ADR-067): ship a non-link `Frame::Exit` routed to the
+        // peer's `scheduler::exit` (kill-style, like the local path).
+        Value::Pid { node, id } => {
+            crate::dist::exit_remote(node, id, reason);
+            Ok(Value::Nil)
+        }
         _ => Err(LispError::type_err("exit: first argument must be a pid")),
     }
 }
 
-/// `(link pid)` — symmetrically link the current process and the local `pid`
-/// (ADR-067). Remote links aren't supported (links are intra-runtime). Returns nil.
+/// `(link pid)` — symmetrically link the current process and `pid`, local or
+/// remote (ADR-067). A cross-node link ships a `Frame::Link`; either side's death
+/// reaches the other, and a net-split fires `:noconnection`. Returns nil.
 fn link_proc(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     match arg(args, 0) {
         Value::Pid { node, id } if crate::dist::is_local(node) => {
             crate::process::link_self(id);
             Ok(Value::Nil)
         }
-        Value::Pid { .. } => Err(LispError::type_err(
-            "link: remote pids aren't supported — links are within one runtime",
-        )),
+        Value::Pid { node, id } => {
+            crate::dist::link_remote(node, id, crate::process::self_pid());
+            Ok(Value::Nil)
+        }
         _ => Err(LispError::type_err("link: argument must be a pid")),
     }
 }
 
-/// `(unlink pid)` — drop the link between the current process and local `pid`.
+/// `(unlink pid)` — drop the link between the current process and `pid` (local or
+/// remote).
 fn unlink_proc(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     match arg(args, 0) {
         Value::Pid { node, id } if crate::dist::is_local(node) => {
             crate::process::unlink_self(id);
             Ok(Value::Nil)
         }
-        Value::Pid { .. } => Err(LispError::type_err(
-            "unlink: remote pids aren't supported — links are within one runtime",
-        )),
+        Value::Pid { node, id } => {
+            crate::dist::unlink_remote(node, id, crate::process::self_pid());
+            Ok(Value::Nil)
+        }
         _ => Err(LispError::type_err("unlink: argument must be a pid")),
     }
 }

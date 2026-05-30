@@ -8812,3 +8812,40 @@ conflict was this devlog's tail. Post-merge migration to the new namespace form:
 `link_test.blsp` → `(defmodule link-test (:use test))`; `supervisor.blsp` verified
 under `defmodule`-is-a-namespace. Full `cargo test` + the in-language suite green
 on the merge; link/supervisor suites re-checked under `BROOD_GC_STRESS`/`VERIFY`.
+
+## 2026-05-30 — Distributed links + cross-node supervision; named/reload-stable supervisors
+
+**Goal.** The supervisor review across remote-nodes/GC/hot-reload found: GC is sound
+by construction (link state is heap-free pids + atomics), hot reload works (late
+binding) with the captured-`:start` + process-identity caveats, but supervision was
+**local-only** — `link`/`exit` rejected remote pids. This closes that, plus the two
+hot-reload follow-ups.
+
+**Built.**
+- **Distributed links (ADR-067), mirroring the remote-monitor machinery.** Three
+  wire frames (`Frame::Link`/`Unlink`/`Exit`); a `REMOTE_LINKS` table
+  (`local_pid → (node, remote_pid)`, each node keeps its half); `link`/`unlink`/
+  `exit` builtins route remote. A link-death ships `Frame::Exit { link: true }`
+  (trap-or-propagate, carrying the *remote* pid); explicit `(exit remote reason)`
+  ships `link: false` → `scheduler::exit`. Net-split fires `:noconnection` to local
+  peers (`links::handle_node_down`, wired into `fire_nodedown`). Race-safety mirrors
+  `monitor_remote` (record the half before consulting `NODES`).
+- **#1 supervisor supports remote children** — `start-child` links local *or*
+  remote pids; a non-pid `:start` return now errors clearly. (A remote child's pid
+  comes via a roundtrip — `remote-spawn` is fire-and-forget; a synchronous variant
+  is the one deferred follow-up.)
+- **#3 `start-supervisor … :name`** — idempotent named spawn so a hot-reloaded file
+  doesn't spawn a second supervisor (reload-stable; ADR-013/042).
+
+**Verified.** Kernel lib + full workspace build clean. Local link 7/7 + supervisor
+20/20 unchanged. New cross-node tests in `crates/cli/tests/distribution.rs` (16/16):
+`remote_link_death_delivers_exit_to_a_trapping_peer`, `remote_exit_kills_a_worker`,
+and `supervisor_restarts_a_remote_child` (B supervises + restarts a crashed worker
+on A end-to-end). (A test-design bug — making the worker the node's *main* process,
+so its death killed the node and produced `:noconnection` — was fixed by spawning
+the worker as a child and parking main.)
+
+**Docs.** ADR-067 (distributed-links section + deferral update), `supervision.md`
+(§Cross-node supervision + the roundtrip-pid caveat), `distribution.md` (links wire
+path beside monitors), supervisor module docstring. **Built in the
+`distributed-links` worktree off `main`.**
