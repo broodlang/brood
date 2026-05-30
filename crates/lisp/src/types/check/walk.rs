@@ -601,7 +601,18 @@ fn check_if(
     check_into(heap, test, ctx, out);
 
     let (then_ctx, else_ctx) = match guard_assertion(heap, test, ctx) {
-        Some((sym, ty)) => (ctx.narrow(sym, ty.clone()), ctx.narrow(sym, ty.negate())),
+        Some(g) => {
+            let then_ctx = ctx.narrow(g.sym, g.ty.clone());
+            // Only narrow the else-branch when the guard is biconditional — a
+            // `then_only` guard (the `and` short-circuit) doesn't establish `¬ty`
+            // on a falsy test, so negating there would be a false positive.
+            let else_ctx = if g.then_only {
+                ctx.clone()
+            } else {
+                ctx.narrow(g.sym, g.ty.negate())
+            };
+            (then_ctx, else_ctx)
+        }
         None => (ctx.clone(), ctx.clone()),
     };
     check_value_leaf(heap, then_form, form, &then_ctx, out);
@@ -672,8 +683,13 @@ fn check_let(
         let rhs_ty = expr_ty(heap, rhs, &scope);
         let rhs_guard = guard_assertion(heap, rhs, &scope);
         scope = scope.bind(name, rhs_ty);
-        if let Some((target, gty)) = rhs_guard {
-            scope = scope.add_guard(name, target, gty);
+        // Only alias a *biconditional* guard: a `then_only` guard (the `and`
+        // short-circuit) must not be stored as a let-alias, or a later
+        // `(if alias …)` would negate it in the else-branch (unsound).
+        if let Some(g) = rhs_guard {
+            if !g.then_only {
+                scope = scope.add_guard(name, g.sym, g.ty);
+            }
         }
         // A plain `(let (name other) …)` aliases `name` to `other` — narrowing
         // either propagates to the other via `narrow_chain`. This is what

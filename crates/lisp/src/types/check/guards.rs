@@ -76,26 +76,53 @@ pub(super) fn is_syntactic_keyword(name: &str) -> bool {
 // would descend into the "I expect this to fail" body and flag every
 // `(error-of (cons 1))` in the test suite.
 
+/// A recognised type guard over a single variable: when `test` is truthy, `sym`
+/// provably has type `ty`. `then_only` marks a guard whose *negation is unsound*
+/// — a falsy `test` does **not** establish `¬ty`, so the else-branch must not be
+/// narrowed (the `and` short-circuit is the case: a falsy `and` may have failed
+/// on a *later* conjunct, so the first conjunct can still hold). An ordinary type
+/// predicate is biconditional (`then_only = false`): the else-branch narrows to
+/// `¬ty` soundly.
+pub(super) struct Guard {
+    pub(super) sym: Symbol,
+    pub(super) ty: Ty,
+    pub(super) then_only: bool,
+}
+
 /// If `test` is a recognisable type guard over a single variable, return the
-/// `(sym, asserted_type)` pair — the type `sym` provably has when `test` is
-/// truthy. A leading `(not …)` flips the assertion via [`Ty::negate`]. A bare
-/// `Sym` is looked up in `ctx`'s guard-alias table (a `let`-stored guard
-/// result — `(let (cond (int? x)) (if cond …))`). `None` for any test that
-/// isn't a pure pattern-matchable guard (so we never narrow on something we
-/// can't soundly invert in the else-branch).
-pub(super) fn guard_assertion(heap: &Heap, test: Value, ctx: &Ctx) -> Option<(Symbol, Ty)> {
+/// [`Guard`] it implies. A leading `(not …)` flips the assertion via
+/// [`Ty::negate`]. A bare `Sym` is looked up in `ctx`'s guard-alias table (a
+/// `let`-stored guard result — `(let (cond (int? x)) (if cond …))`). `None` for
+/// any test that isn't a pure single-variable guard.
+pub(super) fn guard_assertion(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Guard> {
     if let Value::Sym(s) = test {
-        return ctx.guard(s);
+        // A let-stored guard alias — recorded only for biconditional guards
+        // (see `check_let`), so it narrows the else-branch too.
+        let (sym, ty) = ctx.guard(s)?;
+        return Some(Guard {
+            sym,
+            ty,
+            then_only: false,
+        });
     }
     let items = list_items(heap, test)?;
     let Value::Sym(head) = *items.first()? else {
         return None;
     };
     let head_name = value::symbol_name(head);
-    // (not <inner>) — invert the inner assertion; everything else proceeds.
+    // (not <inner>) — invert the inner assertion. Only invertible when `inner`
+    // is itself biconditional; a `then_only` inner can't be soundly negated
+    // (we'd be reasoning from `inner` being false), so we decline.
     if items.len() == 2 && head_name == "not" {
-        let (sym, ty) = guard_assertion(heap, items[1], ctx)?;
-        return Some((sym, ty.negate()));
+        let inner = guard_assertion(heap, items[1], ctx)?;
+        if inner.then_only {
+            return None;
+        }
+        return Some(Guard {
+            sym: inner.sym,
+            ty: inner.ty.negate(),
+            then_only: false,
+        });
     }
     // `(%eq sym literal)` / `(%eq literal sym)` — equality against a literal
     // asserts the variable has the literal's runtime tag. The `match` pattern
@@ -105,11 +132,14 @@ pub(super) fn guard_assertion(heap: &Heap, test: Value, ctx: &Ctx) -> Option<(Sy
     // pre-expanded as `%eq` calls when arities are 2, so we only need to
     // recognise the primitive shape.
     if items.len() == 3 && head_name == "%eq" {
-        if let Some(g) = literal_eq_guard(items[1], items[2]) {
-            return Some(g);
-        }
-        if let Some(g) = literal_eq_guard(items[2], items[1]) {
-            return Some(g);
+        if let Some((sym, ty)) = literal_eq_guard(items[1], items[2])
+            .or_else(|| literal_eq_guard(items[2], items[1]))
+        {
+            return Some(Guard {
+                sym,
+                ty,
+                then_only: false,
+            });
         }
         return None;
     }
@@ -121,6 +151,9 @@ pub(super) fn guard_assertion(heap: &Heap, test: Value, ctx: &Ctx) -> Option<(Sy
     // about its first operand). This is what lets the `match` compiler's
     // `(if (and (vector? m) (= (vector-length m) 2)) …)` narrow `m` to a vector,
     // so the guarded `vector-ref m i` isn't flagged against a list/other scrutinee.
+    // **`then_only`:** a falsy `and` may have failed on a later conjunct, so the
+    // else-branch must NOT be narrowed to `¬E` (that was a real false positive —
+    // an else-branch `(vector-ref m i)` on a value that *is* a longer vector).
     if head_name == "let" && items.len() == 3 {
         if let Some(g) = and_first_conjunct_guard(heap, items[1], items[2], ctx) {
             return Some(g);
@@ -131,22 +164,21 @@ pub(super) fn guard_assertion(heap: &Heap, test: Value, ctx: &Ctx) -> Option<(Sy
     }
     let ty = Ty::tested_by(&head_name)?;
     match items[1] {
-        Value::Sym(s) => Some((s, ty)),
+        Value::Sym(s) => Some(Guard {
+            sym: s,
+            ty,
+            then_only: false,
+        }),
         _ => None,
     }
 }
 
 /// Recognise the `and`-expansion `(let (g E) (if g _ g))` and return the guard
-/// its first conjunct `E` asserts. The binding must be exactly one name `g`, and
-/// the body must be `(if g <then> g)` — test and *else* both `g` (the `and`
-/// shape; `or` is `(if g g <else>)` and must not match). Sound because a truthy
-/// result requires `g` (= `E`) truthy.
-fn and_first_conjunct_guard(
-    heap: &Heap,
-    binding: Value,
-    body: Value,
-    ctx: &Ctx,
-) -> Option<(Symbol, Ty)> {
+/// its first conjunct `E` asserts, marked `then_only` (the negation is unsound —
+/// see [`Guard`]). The binding must be exactly one name `g`, and the body must be
+/// `(if g <then> g)` — test and *else* both `g` (the `and` shape; `or` is
+/// `(if g g <else>)` and must not match).
+fn and_first_conjunct_guard(heap: &Heap, binding: Value, body: Value, ctx: &Ctx) -> Option<Guard> {
     let bs = list_items(heap, binding)?;
     if bs.len() != 2 {
         return None; // a multi-binding `let` isn't the `and` shape
@@ -163,7 +195,11 @@ fn and_first_conjunct_guard(
     if !is_g(body_items[1]) || !is_g(body_items[3]) {
         return None;
     }
-    guard_assertion(heap, cond, ctx)
+    let inner = guard_assertion(heap, cond, ctx)?;
+    Some(Guard {
+        then_only: true, // a falsy `and` doesn't establish `¬E`
+        ..inner
+    })
 }
 
 /// If `a` is a symbol and `b` is a self-evaluating literal, return the guard

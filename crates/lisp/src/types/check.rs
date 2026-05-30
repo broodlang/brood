@@ -1412,6 +1412,27 @@ mod tests {
     }
 
     #[test]
+    fn and_guard_does_not_narrow_the_else_branch() {
+        // A falsy `(and (vector? m) …)` does NOT imply `m` isn't a vector — a
+        // *later* conjunct may have failed. So the else-branch must keep `m`'s
+        // full type; flagging a vector op there would be a false positive.
+        let w = warnings_expanded(
+            "(fn (m) (if (and (vector? m) (%eq (vector-length m) 2)) \
+                         (vector-ref m 0) (vector-ref m 0)))",
+        );
+        assert!(
+            w.iter().all(|s| !s.contains("vector-ref")),
+            "the else-branch of an `and` guard must not be narrowed: {w:?}"
+        );
+        // The then-branch still narrows (sanity: the guard didn't go silent).
+        let w = warnings_expanded(r#"(fn (m) (if (and (int? m) true) (string-length m) 0))"#);
+        assert!(
+            w.iter().any(|s| s.contains("string-length")),
+            "the then-branch should still narrow m to int: {w:?}"
+        );
+    }
+
+    #[test]
     fn or_guard_does_not_falsely_narrow() {
         // `or` must NOT narrow from its first operand (a truthy `or` implies
         // nothing about it). `(or (int? x) true)` is always true, so the then
