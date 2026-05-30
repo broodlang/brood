@@ -559,6 +559,11 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   `def`.
 - **No `while` / `for`.** Use recursion (TCO is guaranteed) or
   `fold` / `map` / `filter` / `reduce` / `transduce`.
+- **Calls are `(f x)`, never `f(x)`.** Brood has no C-style call syntax: `f(x)`
+  reads as *two* forms — `f`, then `(x)` — so the `(x)` tries to *call the value
+  of* `x` and you get `cannot call non-function`. Write `(println "hi")`, not
+  `println("hi")`. (The evaluator now hints this when the mis-called head is a
+  literal.)
 - **Bare symbols in patterns *bind*.** Match a literal symbol with `'foo`;
   match a runtime value with `~expr`.
 - **`=` is structural** and recursive — two unrelated structures that look the

@@ -172,6 +172,17 @@ the dispatcher reads at startup. **A project can extend the surface** by
 contributing entries to a shared registry from its own `mcp.blsp` — that's
 the ADR-006 part: agent surfaces are Brood, not Rust.
 
+**`eval`/`load` run under a 30s watchdog (2026-05-30).** They evaluate arbitrary
+code, so a runaway (an infinite loop) would otherwise wedge the single-threaded
+server. The dispatcher arms a 30s eval deadline around the call; eval's loop checks
+it (cheap when unarmed) and a runaway aborts as an ordinary `evaluation exceeded its
+time limit` error — inline, so the dispatcher's error / panic / output-capture
+handling is unchanged (ADR-063; a *native* blocking call still can't be interrupted).
+The other tools run unbounded (`run-tests` self-bounds per test). Handler output
+(`print`, and terminal escapes from `term-draw`/`term-emit`) is captured off the
+JSON-RPC stream via a **process-scoped, spawn-inherited** capture buffer, so even a
+handler that spawns can't corrupt the channel.
+
 ## Resources
 
 URI-addressed read-only blobs, served directly by the dispatcher (no eval):

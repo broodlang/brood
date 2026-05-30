@@ -197,6 +197,15 @@ never a false positive.
   threads top-level `def`/`defn` names across forms so a later call to an
   earlier definition isn't flagged. The CLI's `brood --check` now uses
   `check_file`.
+- ✅ **Function-as-value lint** (advisory). A bare reference to a *known
+  zero-arity* global passed to an output sink (`print` / `println` / `str` /
+  `format`) — e.g. `(print ansi-clear)` where `(print (ansi-clear))` was meant —
+  is flagged `ansi-clear: function used as a value — did you mean (ansi-clear)?`.
+  Catches the otherwise-silent slip where a zero-arg helper stringifies as
+  `#<fn …>` instead of being called. Restricted to those sinks and to *globals*
+  (a same-named local is left alone) to stay false-positive-free. (The general
+  *operand-position* unbound check is still deferred — it needs pattern-binding
+  and cross-file-global tracking to avoid false positives; see `todo.md`.)
 - ✅ **Auto-running at file boundaries.** The checker now fires automatically:
   `brood <file>` and `brood --test <file>` pre-check before evaluating (CLI
   wiring through `check_one_file`); `nest run` and `nest test` pre-check the
