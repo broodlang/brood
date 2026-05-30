@@ -4152,3 +4152,47 @@ ADR-044 (`:shutdown` cascade), ADR-033/034 (the dist wire codec links extend),
 ADR-039 (the reverted kernel supervisor — why general primitives), `supervision.md`
 (the vs-OTP deep dive that motivated this), `tests/link_test.blsp`,
 `crates/cli/tests/distribution.rs`.
+
+## ADR-068 — Namespace-name collisions: detect-and-reject, not mandatory prefixes
+
+**Status:** accepted, 2026-05-30. Closes the one open policy question from ADR-065
+(`namespaces.md` §8). Enforcement lands with the package manager (ADR-037).
+
+**Context.** Namespacing (ADR-065) solves *symbol* collision but raises a *namespace*
+collision: two third-party packages can both declare `(defmodule parser)`, and the
+flat global table would merge their `parser/…` defs. Prior art: Clojure's
+reverse-domain names (`com.foo.parser` — safe, verbose, author-controlled); CL has
+no real answer; ADR-037 gives each dependency a project-local name the *importing*
+project controls.
+
+**Decision.** Keep namespace names **flat and short** (`parser`, `observer`) — no
+mandatory prefix — and **detect-and-reject** collisions at dependency-resolution
+time rather than prevent them structurally:
+
+- Namespace names are free-for-all; the common case (descriptive names) has no
+  collision, and short names keep call sites ergonomic (`parser/parse`, not
+  `com.foo.parser/parse`).
+- When the package manager resolves the dependency graph (ADR-037 `nest
+  fetch`/lock), it **errors** if two reachable packages declare the same namespace
+  name — surfaced loudly at lock time with both sources named, not silently merged.
+- The heavier escape hatches — a mandatory per-dependency prefix, or an
+  import-site **alias** (`(:use [parser :as p])`) — are **deferred** (ADR-011)
+  until a real collision in the wild justifies them. The project-local dep name
+  (ADR-037) is the natural authority for an alias when that day comes.
+
+**Rationale.** This is the ADR-011 "ship the simple form, defer the powerful one"
+call applied to names: flat names are the ergonomic default; a *detected* collision
+is a clear, actionable error (rename, or — later — alias), which beats taxing every
+call site with a verbose prefix forever to prevent a rare event. It also keeps the
+substrate (ADR-065 §3) and the soft-privacy/hot-reload story untouched — collision
+policy is purely a package-resolution concern.
+
+**Consequences.** Until the package manager's git-deps + resolution land (ADR-037
+Slices 2–3), there is no enforcement point, so the policy is decided but dormant —
+which is correct, since a single-project or path-deps-only setup can't collide. The
+LSP/runtime need no change: they already resolve a fully-qualified `ns/name` and
+don't care how the name was made unique.
+
+**References.** ADR-065 (`namespaces.md` §8), ADR-037 (`packages.md`, the dep
+local-name model + the lock/resolution step that enforces this), ADR-011 (defer the
+powerful form).
