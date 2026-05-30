@@ -708,16 +708,17 @@ link rather than throwing."
     ([:nodedown ~peer] "error: link down")
     (after *observe-timeout* "error: kill timed out")))
 
-(defn observe-connect (spec cookie)
+(defn observe-connect (spec &optional cookie)
   "Attach the observer to a peer runtime named in `spec` (\"name@host:port\") over
-the node link, authenticating with `cookie` (both sides share it). The target must
-have called `(node-start …)` + `(observe-serve)`. Connects *before* taking the
-terminal, so a refused / wrong-cookie / bad-spec error surfaces cleanly and exits
-without a wrecked screen. Then runs the standard observer loop against a remote
-source; a dropped link freezes on the last snapshot with a DISCONNECTED banner
-until you quit."
+the node link, authenticating with `cookie` (both sides share it). `cookie`
+defaults to `(node-cookie)` — the shared `~/.config/brood/cookie` — so a matching
+local setup needs no explicit secret. The target must have called `(node-start …)`
++ `(observe-serve)`. Connects *before* taking the terminal, so a refused /
+wrong-cookie / bad-spec error surfaces cleanly and exits without a wrecked screen.
+Then runs the standard observer loop against a remote source; a dropped link
+freezes on the last snapshot with a DISCONNECTED banner until you quit."
   (do
-    (node-start (observe--gen-node-name) "127.0.0.1:0" cookie)
+    (node-start (observe--gen-node-name) "127.0.0.1:0" (or cookie (node-cookie)))
     (let (peer (connect spec))            ; raises a clean error on failure (caught by the caller)
       (monitor-node peer)
       ;; `ui-run` enters the display — and we only reach here after `connect`

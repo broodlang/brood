@@ -20,7 +20,6 @@
 //! The HMAC also doesn't disclose the cookie (it only proves possession).
 
 use std::io::{self, Read, Write};
-use std::net::TcpStream;
 
 use crate::core::value::{self, Symbol};
 
@@ -38,7 +37,7 @@ pub(super) enum Role {
 
 /// Drive the four-step exchange. Returns the peer's authoritative node name
 /// on success — `dist::establish` then registers the link under this name.
-pub(super) fn handshake(stream: &mut TcpStream, role: Role) -> io::Result<Symbol> {
+pub(super) fn handshake<S: Read + Write>(stream: &mut S, role: Role) -> io::Result<Symbol> {
     // Step 1: magic + version. Reject before any allocation if we don't speak
     // the same dialect.
     stream.write_all(&PROTOCOL_MAGIC)?;
@@ -111,14 +110,14 @@ pub(super) fn handshake(stream: &mut TcpStream, role: Role) -> io::Result<Symbol
     Ok(peer_name)
 }
 
-fn read_hello(stream: &mut TcpStream) -> io::Result<(Symbol, [u8; NONCE_LEN])> {
+fn read_hello<S: Read>(stream: &mut S) -> io::Result<(Symbol, [u8; NONCE_LEN])> {
     match read_frame(stream)? {
         Frame::Hello { node, nonce } => Ok((node, nonce)),
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, "expected Hello")),
     }
 }
 
-fn read_auth(stream: &mut TcpStream) -> io::Result<[u8; MAC_LEN]> {
+fn read_auth<S: Read>(stream: &mut S) -> io::Result<[u8; MAC_LEN]> {
     match read_frame(stream)? {
         Frame::Auth { mac } => Ok(mac),
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, "expected Auth")),

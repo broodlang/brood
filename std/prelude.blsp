@@ -841,6 +841,81 @@ is still safe (a `link` to an already-dead pid fires `[:EXIT … :noproc]`)."
      (send {:name :remote-spawn :node ~node} [:run (fn () ~expr)])
      nil))
 
+;; ---- node identity: name-addressing + the shared cookie (ADR-068) ----------
+;; A node is addressed by NAME on the local machine (a Unix-domain socket — no
+;; port to pick) and by "name@host:port" across machines (TCP). The shared secret
+;; lives in ~/.config/brood/cookie, auto-generated on first use. All of this is
+;; policy in Brood over the %node-listen / %node-connect / random-token /
+;; spit-private primitives — the kernel only carries bytes.
+
+(defn node--config-dir ()
+  (str (or (getenv "XDG_CONFIG_HOME") (str (getenv "HOME") "/.config")) "/brood"))
+
+(defn node--cookie-path () (str (node--config-dir) "/cookie"))
+
+;; Strip trailing newlines so a hand-edited cookie file (or one written by a
+;; tool that appends "\n") still matches the bytes we minted.
+(defn node--chomp (s)
+  (let (n (string-length s))
+    (if (and (> n 0) (= (substring s (dec n) n) "\n"))
+      (node--chomp (substring s 0 (dec n)))
+      s)))
+
+(defn node-cookie ()
+  "The shared secret authenticating node links, resolved as: `$BROOD_COOKIE` →
+`~/.config/brood/cookie` → freshly generated and persisted (0600). All your nodes
+on this machine share one cookie, Erlang-style; set `$BROOD_COOKIE` to override."
+  (or (getenv "BROOD_COOKIE")
+      (let (path (node--cookie-path))
+        (if (file-exists? path)
+          (node--chomp (slurp path))
+          (let (secret (random-token 32))
+            (spit-private path secret)
+            secret)))))
+
+;; The per-user dir holding local node sockets. $XDG_RUNTIME_DIR is the right
+;; home (tmpfs, cleared on logout); fall back to /tmp/brood-<user> when a bare /
+;; cron / ssh session leaves it unset.
+(defn node--runtime-dir ()
+  (str (or (getenv "XDG_RUNTIME_DIR")
+           (str "/tmp/brood-" (or (getenv "USER") (getenv "LOGNAME") "shared")))
+       "/brood"))
+
+(defn node--socket-path (s) (str (node--runtime-dir) "/" s ".sock"))
+
+;; Index of the first "@" in s, or -1. No string-split primitive — and a node
+;; spec only ever has the one separator — so a small char scan is plenty.
+(defn node--at (s i n)
+  (cond
+    (>= i n) -1
+    (= (substring s i (inc i)) "@") i
+    else (node--at s (inc i) n)))
+
+(defn node-start (nm &optional addr cookie)
+  "Start this runtime as a node so peers can reach it. `(node-start name)` listens
+on a local Unix-domain socket addressed by `name` (no port) — the common
+same-machine case. `(node-start name \"host:port\")` listens over TCP for remote
+peers. The cookie defaults to `(node-cookie)`; pass one to override. Returns the
+node name. Errors if this runtime is already a node."
+  (%node-listen nm
+                (if (nil? addr)
+                  (str "unix:" (node--socket-path (name nm)))
+                  (str "tcp:" addr))
+                (or cookie (node-cookie))))
+
+(defn connect (spec)
+  "Link to a peer node. `(connect \"name\")` dials a local node by name over its
+Unix socket; `(connect \"name@host:port\")` dials a remote node over TCP. Cookie-
+authenticated with this runtime's `(node-cookie)`; returns the peer's node name.
+This runtime must already be a node — call `(node-start …)` first."
+  (when (= (node-name) :nonode)
+    (error "connect: this runtime is not a node yet — call (node-start name) first"))
+  (let (at (node--at spec 0 (string-length spec)))
+    (if (>= at 0)
+      (%node-connect (keyword (substring spec 0 at))
+                     (str "tcp:" (substring spec (inc at) (string-length spec))))
+      (%node-connect (keyword spec) (str "unix:" (node--socket-path spec))))))
+
 ;; ---- node-link reconnect: policy in Brood over connect + monitor-node ------
 ;; Today's `(connect addr)` is one-shot; if the peer is down it raises, if it
 ;; later disconnects nothing notices. `ensure-link` is a thin reconnect loop —
