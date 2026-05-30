@@ -838,6 +838,27 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![string], int.union(nil_ty)),
         file_mtime,
     );
+    def(
+        heap,
+        "file-size",
+        Arity::exact(1),
+        Sig::new(vec![string], int.union(nil_ty)),
+        file_size,
+    );
+    def(
+        heap,
+        "delete-file",
+        Arity::exact(1),
+        Sig::new(vec![string], nil_ty),
+        delete_file,
+    );
+    def(
+        heap,
+        "rename-file",
+        Arity::exact(2),
+        Sig::new(vec![string, string], nil_ty),
+        rename_file,
+    );
     // The one hashing primitive (ADR-037): SHA-256 of a string's bytes → hex.
     // Per-file and directory-tree hashing for the package manager are Brood over
     // this + `slurp`/`list-dir` (std/package.blsp), not a directory primitive.
@@ -1289,10 +1310,13 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("%sha256", &["s"], "Lowercase hex SHA-256 of string s's bytes. The package manager's one hashing primitive (ADR-037); file/tree hashing is Brood over it."),
     ("read-line", &[], "Read one line from stdin; returns the line as a string (trailing newline stripped) or nil at end of input."),
     ("file-mtime", &["path"], "Last-modified time of path as epoch-milliseconds, or nil if the file is missing. Cheap (stat) — pair with `load` to drive a hot-reloader."),
+    ("file-size", &["path"], "Size of the file at path in bytes, or nil if it is missing."),
+    ("delete-file", &["path"], "Remove the file at path. Idempotent (nil if already absent); errors on a real I/O failure."),
+    ("rename-file", &["from", "to"], "Rename/move file `from` to `to`. Returns nil; errors on failure."),
     ("getenv", &["name"], "The value of environment variable name, or nil if unset."),
     ("run-process", &["prog", "args"], "Run external program prog with an args list, inheriting stdio; returns its exit code."),
     ("macroexpand-1", &["form"], "Expand form by a single macro step."),
-    ("macroexpand", &["form"], "Fully expand the macros in form."),
+    // `macroexpand` is a Brood prelude fn (ADR-064), documented via its docstring.
     ("gensym", &["prefix"], "A fresh, unique symbol, with an optional name prefix."),
     ("form-pos", &["form"], "A form's [line col] source position, or nil."),
     ("current-file", &[], "The path of the file currently being loaded, or nil."),
@@ -1826,46 +1850,43 @@ fn pr_str(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.alloc_string(&s))
 }
 
-/// Cross-thread output capture. When `CAPTURE_ACTIVE`, `(print …)` and terminal
-/// output ([`write_term_bytes`]) append to `CAPTURE_BUF` instead of the process's
-/// real stdout. The `nest mcp` dispatcher installs a capture around each
-/// `tools/call` so a handler's output can't corrupt the JSON-RPC stdout stream —
-/// the captured text rides back in the result envelope instead.
-///
-/// **Global, not thread-local, on purpose:** an MCP handler may run in a SPAWNED
-/// green process on a worker thread (so a watchdog can `(exit … :kill)` a hung one
-/// — ADR-063), and its prints must still be captured rather than escape to the
-/// channel. The MCP server dispatches one tool call at a time, so there is never a
-/// concurrent capture. The fast path (REPL / file runner, not capturing) is a
-/// single relaxed atomic load, so normal `print` stays cheap.
-static CAPTURE_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static CAPTURE_BUF: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+thread_local! {
+    /// When `Some`, output ([`print`], [`write_term_bytes`]) appends here instead
+    /// of the process's real stdout. The `nest mcp` dispatcher installs a buffer
+    /// around each `tools/call` so a handler's output can't corrupt the JSON-RPC
+    /// stdout stream — the captured text rides back in the result envelope. `None`
+    /// (the default) sends output straight to stdout, as in the REPL / file runner.
+    /// Thread-local so it only affects the thread that began the capture — which
+    /// keeps concurrent captures isolated (e.g. parallel `cargo test` MCP servers,
+    /// and any MCP handler we later run on a worker thread under its own capture).
+    static STDOUT_CAPTURE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
 
-/// Start capturing output into a fresh buffer (clearing any prior content). Pair
-/// with [`take_captured_stdout`]. Used by the `nest mcp` dispatcher.
+/// Start capturing output on the current thread into a fresh buffer (discarding any
+/// already installed). Pair with [`take_captured_stdout`]. Used by the `nest mcp`
+/// dispatcher to keep handler output off the JSON-RPC channel.
 pub fn begin_stdout_capture() {
-    crate::core::sync::lock(&CAPTURE_BUF).clear();
-    CAPTURE_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
+    STDOUT_CAPTURE.with(|c| *c.borrow_mut() = Some(String::new()));
 }
 
 /// Stop capturing and return what was written since [`begin_stdout_capture`] —
-/// `Some(text)` (possibly empty) if capture was active, `None` otherwise. After
-/// this, output goes to real stdout again.
+/// `Some(text)` (possibly empty) if capture was active, `None` otherwise.
 pub fn take_captured_stdout() -> Option<String> {
-    if !CAPTURE_ACTIVE.swap(false, std::sync::atomic::Ordering::Relaxed) {
-        return None;
-    }
-    Some(std::mem::take(&mut *crate::core::sync::lock(&CAPTURE_BUF)))
+    STDOUT_CAPTURE.with(|c| c.borrow_mut().take())
 }
 
-/// If a capture is active, append `s` to the buffer and return `true`; otherwise
-/// `false`. The single divert point shared by `print` and `write_term_bytes`.
+/// If a capture is active on this thread, append `s` to the buffer and return
+/// `true`; otherwise `false`. The single divert point shared by `print` and
+/// `write_term_bytes`.
 fn capture_write(s: &str) -> bool {
-    if !CAPTURE_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
-        return false;
-    }
-    crate::core::sync::lock(&CAPTURE_BUF).push_str(s);
-    true
+    STDOUT_CAPTURE.with(|c| match c.borrow_mut().as_mut() {
+        Some(buf) => {
+            buf.push_str(s);
+            true
+        }
+        None => false,
+    })
 }
 
 fn print(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -3451,6 +3472,42 @@ fn slurp(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// read — pairs with `load` to drive a hot-reloader: poll `file-mtime`, reload
 /// only when it changes. Resolution is platform-dependent (typically nanoseconds
 /// on Linux, truncated to ms here).
+/// `(file-size path)` — the size of `path` in bytes, or nil if it's missing.
+/// GC-safe: the arg is copied to an owned `String` up front and the result is a
+/// scalar — no `Value` handle is held across an allocation or eval (and a builtin
+/// never fires GC mid-execution; see `docs/memory-model.md`).
+fn file_size(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "file-size", arg(args, 0))?;
+    match std::fs::metadata(&path) {
+        Ok(meta) => Ok(Value::Int(meta.len() as i64)),
+        Err(_) => Ok(Value::Nil),
+    }
+}
+
+/// `(delete-file path)` — remove the file at `path`. Idempotent (nil if already
+/// absent); errors on a real I/O failure (e.g. it's a directory, or permission).
+fn delete_file(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "delete-file", arg(args, 0))?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(Value::Nil),
+        Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Value::Nil),
+        Err(e) => Err(LispError::runtime(format!("delete-file: {}: {}", path, e))
+            .with_code(crate::error::error_codes::FILE_IO)),
+    }
+}
+
+/// `(rename-file from to)` — rename/move `from` to `to` (replacing `to` if it
+/// exists, per the platform). Returns nil; errors on failure.
+fn rename_file(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let from = expect_string(heap, "rename-file", arg(args, 0))?;
+    let to = expect_string(heap, "rename-file", arg(args, 1))?;
+    std::fs::rename(&from, &to).map_err(|e| {
+        LispError::runtime(format!("rename-file: {} -> {}: {}", from, to, e))
+            .with_code(crate::error::error_codes::FILE_IO)
+    })?;
+    Ok(Value::Nil)
+}
+
 fn file_mtime(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "file-mtime", arg(args, 0))?;
     let Ok(meta) = std::fs::metadata(&path) else {

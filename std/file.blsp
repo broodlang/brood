@@ -15,7 +15,9 @@
 (`file?`/`dir?`/`path-exists?`), directory listing (`list-files`/`list-dirs`/
 `walk-files`), and path helpers (`path-extension`/`path-stem`, complementing the
 prelude's `path-join`/`path-basename`/`parent-dir`). Pure Brood over the fs
-primitives.")
+primitives. The kernel also provides the always-available file primitives
+`slurp`/`spit`/`make-dir`/`file-exists?`/`dir?`/`list-dir`/`file-mtime`/`file-size`/
+`delete-file`/`rename-file`/`cwd`.")
 
 ;; --- whole-file read / write ------------------------------------------------
 (def read-file slurp)
