@@ -67,8 +67,12 @@ uninstall: ## Remove the installed `brood`, `nest` and `brood-lsp` binaries from
 fmt: ## Format all Rust code
 	cargo fmt
 
-clippy: ## Lint with clippy (all targets; warnings reported, not fatal)
-	cargo clippy --all-targets
+clippy: ## Lint with clippy (all targets + all features; warnings reported, not fatal)
+	# `--all-features` type-checks + lints the optional backends (the `gui`
+	# feature: winit/softbuffer/fontdue) too, so a dependency bump that breaks
+	# `gui.rs` is caught here at the gate, not at `make install`. Compile/lint
+	# only — GUI *runtime* behaviour still needs an on-display check (WITH_GUI=1).
+	cargo clippy --all-targets --all-features
 
 check: clippy test ## Lint + test (the pre-commit gate). Run `make fmt` separately — it rewrites files.
 
