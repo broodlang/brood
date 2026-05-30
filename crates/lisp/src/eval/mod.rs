@@ -879,7 +879,11 @@ pub fn apply_closure(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> LispResu
 /// and params-as-head are excluded at precompute time), so the caller's
 /// resolve-and-redirect is sound.
 #[inline]
-fn passthrough_arm(heap: &Heap, cl: ClosureId, argc: usize) -> Option<(Value, SmallVec<[usize; 4]>)> {
+pub(crate) fn passthrough_arm(
+    heap: &Heap,
+    cl: ClosureId,
+    argc: usize,
+) -> Option<(Value, SmallVec<[usize; 4]>)> {
     let arm = heap.closure(cl).select_arm(argc)?;
     arm.passthrough.as_ref().map(|p| (p.head, p.map.clone()))
 }

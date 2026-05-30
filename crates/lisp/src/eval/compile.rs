@@ -319,17 +319,64 @@ fn dispatch(
     tail: bool,
     genv: EnvId,
 ) -> Result<Step, LispError> {
-    if let Value::Fn(id) = callee {
+    let mut cur_callee = callee;
+    let mut cur_argv = argv;
+    // Thin-wrapper passthrough redirect (ADR-069), mirroring `eval`'s `'dispatch`
+    // loop: a pure pass-through prelude op (`(< n 2)` → `<` whose 2-arg arm is
+    // `(%lt n 2)`, etc.) redirects straight to its inner `%native` on remapped
+    // args — so the hot loop reaches `call_native` directly instead of re-entering
+    // `apply_closure` (a frame alloc + param binds + a body eval) for every
+    // arithmetic/comparison op. Late-binding safe: it reads the *live* closure and
+    // re-resolves the inner head each call (a symbol lookup — no GC, so `cur_argv`
+    // stays valid). Looped for chained passthroughs.
+    loop {
+        let id = match cur_callee {
+            Value::Fn(id) => id,
+            _ => break,
+        };
+        let Some((head, map)) = crate::eval::passthrough_arm(heap, id, cur_argv.len()) else {
+            break;
+        };
+        let cl_env = heap.closure(id).env.unwrap_or_else(|| heap.global());
+        let inner = match head {
+            Value::Sym(s) => heap.env_get(cl_env, s),
+            other => Some(other),
+        };
+        let Some(inner) = inner else { break };
+        if !matches!(inner, Value::Fn(_) | Value::Native(_)) {
+            break;
+        }
+        let mut next: SmallVec<[Value; 4]> = SmallVec::with_capacity(map.len());
+        for &i in &map {
+            next.push(cur_argv[i]);
+        }
+        // The elided inner call would have been its own reduction — count it (and
+        // honour the deadline) so a passthrough-heavy / self-passthrough loop keeps
+        // preemption fairness and can't escape the watchdog (the bug eval hit).
+        crate::process::tick();
+        if crate::process::deadline_exceeded() {
+            return Err(LispError::runtime(
+                "evaluation exceeded its time limit (MCP tool watchdog)",
+            ));
+        }
+        cur_callee = inner;
+        cur_argv = next;
+    }
+    // A VM-eligible closure of matching arity runs on the VM (or yields a tail
+    // call for the trampoline); a native or non-passthrough/ineligible callee goes
+    // to the tree-walker via `eval::apply` (which is just `call_native` for a
+    // native — cheap).
+    if let Value::Fn(id) = cur_callee {
         if let Some(compiled) = compiled_for(heap, id) {
-            if compiled.nparams == argv.len() {
+            if compiled.nparams == cur_argv.len() {
                 if tail {
-                    return Ok(Step::Tail { compiled, args: argv });
+                    return Ok(Step::Tail { compiled, args: cur_argv });
                 }
-                return Ok(Step::Done(vm_apply(heap, compiled, &argv, genv)?));
+                return Ok(Step::Done(vm_apply(heap, compiled, &cur_argv, genv)?));
             }
         }
     }
-    Ok(Step::Done(crate::eval::apply(heap, callee, &argv, genv)?))
+    Ok(Step::Done(crate::eval::apply(heap, cur_callee, &cur_argv, genv)?))
 }
 
 /// Run a compiled closure body — the trampoline. `args` become the frame's dense
