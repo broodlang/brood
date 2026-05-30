@@ -1615,7 +1615,8 @@ no protocol change.
 
 ## ADR-037 — Packages: git deps + project-local cache + lock file
 
-**Status:** proposed (2026-05-28). Design recorded in [`packages.md`](packages.md).
+**Status:** **accepted / implemented** (v1 scope complete 2026-05-30; proposed
+2026-05-28). Design recorded in [`packages.md`](packages.md).
 
 **Context.** The module system (ADR-019) resolves `(require 'foo)` by walking
 `*load-path*`, with embedded std modules baked into the binary. That's enough
@@ -1744,7 +1745,8 @@ grows a `:dependencies` clause in its `(project …)` form and an
 `(ensure-deps)` step in `project-setup`. `nest`'s Rust shell gains
 `fetch`/`update`/`add`/`remove`/`tree` subcommands (each a one-liner that
 calls into `std/package.blsp`). The Rust kernel grows `%git-clone`,
-`%sha256`, `%git-resolve-ref`, `%http-get` primitives. `.gitignore`
+`%sha256`, `%git-resolve-ref`, `%rm-rf` primitives (`%http-get` deferred with
+tarball deps — refinement 5 below). `.gitignore`
 templates from `nest new` get `_deps/` added. `nest mcp` gets a
 `packages.list` tool surface later (separate ADR if needed). No change to
 the require/load semantics — the existing module system is the runtime;
@@ -1777,13 +1779,37 @@ build started, refining the original sketch (full rationale in
    dep. `%git-clone` instead clones the ref shallowly then checks out the exact
    commit (fetching it where the server allows).
 
-Implementation lands in vertical slices: **Slice 0** — manifest
-`:dependencies` parsing + the `project` macro (done); **Slice 1** —
-`:path` deps end-to-end (`%sha256`, tree hashing, lock-file I/O, `ensure-deps`
-load-path integration) — no git, no network, fully testable; **Slice 2** —
-`:git` deps (`%git-resolve-ref`/`%git-clone`, `_deps/` cache, `fetch`/`update`/
-`tree`); **Slice 3** — `add`/`remove`, auto-fetch on every subcommand,
-`%http-get` (added unused, for future tarball deps).
+Implementation landed in vertical slices (all done): **Slice 0** (2026-05-29) —
+manifest `:dependencies` parsing + the `project` macro; **Slice 1** (2026-05-29)
+— `:path` deps end-to-end (`%sha256`, tree hashing, lock-file I/O, `ensure-deps`
+load-path integration), no git/network; **Slice 2** (2026-05-30) — `:git` deps
+(`%git-resolve-ref`/`%git-clone`/`%rm-rf`, the `_deps/<name>/` cache + a
+`.brood-pkg.blsp` stamp, lock commit-reuse on a cache hit, the direct-beats-
+transitive conflict rule); **Slice 3** (2026-05-30) — the
+`fetch`/`update`/`add`/`remove`/`tree` verbs + auto-fetch on every project-aware
+subcommand.
+
+**Further refinements taken at Slice 2 (2026-05-30):**
+
+5. **`%http-get` deferred, not added-unused.** The original plan added it early
+   "for future tarball deps." With no caller until the `:tarball` source kind
+   (itself deferred), adding it now would be unused kernel surface — so per
+   ADR-011 it's deferred *with* tarball deps. The git path needs only
+   `%git-resolve-ref`/`%git-clone`/`%rm-rf`.
+6. **Clone folded into resolution, not a separate `ensure_cache` pass.** The
+   resolution sketch returned `deps: TBD` and filled it in a later `ensure_cache`.
+   But the depth-first walk needs each git dep's own `:dependencies` *immediately*
+   to queue them, and those live in the dep's `project.blsp` — which only exists
+   after the clone. So `package--resolve-git` clones (on a cache miss) and reads
+   sub-deps in the same step, mirroring `:path` resolution. A **cache hit** (the
+   `.brood-pkg.blsp` stamp records the wanted commit) skips both the clone and the
+   tree-hash and reuses the locked SHA — necessary because `ensure-deps` runs on
+   every project-aware `nest` subcommand and must stay cheap.
+7. **`nest update` = re-resolve with the lock dropped.** Rather than a `--update`
+   flag threaded through resolution, `resolve-deps` takes the prior lock and
+   `update` simply passes `nil` (all deps) or a lock with the named deps filtered
+   out (those re-resolve; the rest keep their pins). Moving refs advance; the
+   "network-free on a cache hit" property is just "the lock still matches."
 
 ## ADR-038 — Single-binary bundling: deferred until distribution matters
 
