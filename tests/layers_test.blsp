@@ -131,3 +131,56 @@
     (let (me (self))
       (spawn (lt-worker me))
       (assert= (receive) "[a-on]X"))))
+
+;; ---- Phase 2: buffer-type binding -------------------------------------------
+;; :isolated so register-* (which rebinds the global registries) can't leak into
+;; other test files; unique :type keys keep tests independent within the block too.
+(describe "buffer-type binding"
+  :isolated
+
+  (test "register-type-layers / layers-for-type round-trip"
+    (register-type-layers :t-rt (list 'layers-test/layer-a 'layers-test/layer-b))
+    (assert= (layers-for-type :t-rt) (list 'layers-test/layer-a 'layers-test/layer-b))
+    (is (empty? (layers-for-type :t-missing))))
+
+  (test "buffer-type-for matches a filename suffix"
+    (register-file-type ".foo" :t-foo)
+    (assert= (buffer-type-for {:file "x.foo"}) :t-foo))
+
+  (test "buffer-type-for matches a predicate spec"
+    (register-file-type (fn (f) (= f "Makefile")) :t-make)
+    (assert= (buffer-type-for {:file "Makefile"}) :t-make))
+
+  (test "most-recently-registered rule wins (first match, newest-first)"
+    (register-file-type ".bar" :t-bar1)
+    (register-file-type ".bar" :t-bar2)
+    (assert= (buffer-type-for {:file "x.bar"}) :t-bar2))
+
+  (test "no file → explicit :type, else :fundamental"
+    (assert= (buffer-type-for {:type :special}) :special)
+    (assert= (buffer-type-for {}) :fundamental))
+
+  (test "a file with no matching rule and no :type → :fundamental"
+    (assert= (buffer-type-for {:file "x.no-such-ext"}) :fundamental))
+
+  (test "set-buffer-type sets :type without seeding layers"
+    (let (b (set-buffer-type {} :special))
+      (assert= (get b :type) :special)
+      (is (nil? (get b :layers)))))
+
+  (test "init-buffer-layers seeds layers in registry order, activating base-first"
+    (register-type-layers :t-init (list 'layers-test/layer-a 'layers-test/layer-b))
+    (let (b (init-buffer-layers (set-buffer-type {:log ""} :t-init)))
+      (assert= (get b :type) :t-init)
+      ;; registry order preserved (layer-a head/highest, layer-b base/last)…
+      (assert= (get b :layers) (list 'layers-test/layer-a 'layers-test/layer-b))
+      ;; …but :activate fires base-first, so layer-b ([b-on]) before layer-a ([a-on])
+      (assert= (get b :log) "[b-on][a-on]")))
+
+  (test "init-buffer-layers resolves type from filename when no :type is set"
+    (register-file-type ".lisp-ext" :t-byfile)
+    (register-type-layers :t-byfile (list 'layers-test/layer-a))
+    (let (b (init-buffer-layers {:log "" :file "x.lisp-ext"}))
+      (assert= (get b :type) :t-byfile)
+      (is (layer-active? b 'a))
+      (assert= (get b :log) "[a-on]"))))

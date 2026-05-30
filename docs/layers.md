@@ -123,8 +123,11 @@ layer-dispatch (ctx pending key fb)  -> active-keymap + keymap-step → [ctx' pe
 
 ## Status
 
-- **Phase 1 — layer core (keys + hooks), buffer-free.** ← implementing now.
-- Phase 2 — buffer-type binding (filename + programmatic).
+- ✅ **Phase 1 — layer core (keys + hooks), buffer-free.**
+- ✅ **Phase 2 — buffer-type binding** (`*type-layers*` / `*auto-type-by-file*`,
+  `register-type-layers` / `register-file-type` / `layers-for-type`,
+  `buffer-type-for` / `set-buffer-type` / `init-buffer-layers`). Filename matching
+  is suffix or predicate, newest-rule-wins. `std/buffer` stays layer-agnostic.
 - Phase 3 — scopes, focus/blur/close events, async, `ui-run` integration + demo.
 
 ## Deferred (named, not precluded)
