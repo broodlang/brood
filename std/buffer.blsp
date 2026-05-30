@@ -221,9 +221,19 @@ line editor's M-f/M-b notion of a word."
 
 (defn buffer--push-undo (buf)
   "Push `buf`'s current snapshot onto its `:undo` stack and clear `:redo` — called
-by an editing op before it changes the text, so the change becomes undoable."
-  (assoc buf :undo (cons (buffer--snapshot buf) (or (get buf :undo) ()))
-             :redo ()))
+by an editing op before it changes the text, so the change becomes undoable. A
+no-op when undo is disabled for the buffer (`disable-undo`)."
+  (if (get buf :undo-disabled)
+    buf
+    (assoc buf :undo (cons (buffer--snapshot buf) (or (get buf :undo) ()))
+               :redo ())))
+
+(defn disable-undo (buf)
+  "Turn off undo recording for `buf` and drop any existing history. For a log /
+output buffer (e.g. `*Messages*`) where undo is meaningless and would otherwise
+grow without bound — editing ops on the result record nothing, so `undo`/`redo`
+stay no-ops. Like Emacs `buffer-disable-undo`."
+  (assoc buf :undo-disabled true :undo () :redo ()))
 
 (defn buffer--restore (buf snap)
   "Restore the `{:rope :point :mark}` of `snap` into `buf`, keeping `buf`'s history."

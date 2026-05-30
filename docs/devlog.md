@@ -9712,6 +9712,15 @@ keybindings, the kill ring, the minibuffer). ADR-075.
   completion), and a keymap refactored onto `std/keymap.blsp`'s `keymap-step` on
   top of these.
 
+**Follow-up (review pass).** Added **`disable-undo`** to `std/buffer.blsp` (like
+Emacs `buffer-disable-undo`): turns off undo recording for a buffer and drops its
+history, so `buffer--push-undo` is a no-op for it. A log/output buffer
+(`*Messages*`, a REPL transcript) would otherwise record one undo snapshot per
+appended line and grow without bound. `tests/buffer_test.blsp` now 41. (The myedit
+app reuses this for `*Messages*`, switches to the embedded `std/eval-command.blsp`
+instead of its own inline `eval-last-sexp`, and fixes a few app-only bugs — its
+own repo.)
+
 ---
 
 ## 2026-05-30 — `%le` comparison fast-path, benchmark-safe builds, and the VM plan

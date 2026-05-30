@@ -182,7 +182,12 @@
     (let (a (-> (make-buffer "") (insert "a"))
           c (-> (make-buffer "") (insert "c")))
       (assert= (buffer-text (undo a)) "")
-      (assert= (buffer-text c) "c"))))            ; undoing `a` left `c` untouched
+      (assert= (buffer-text c) "c")))            ; undoing `a` left `c` untouched
+  (test "disable-undo stops recording (a log buffer), so undo is a no-op"
+    (let (b (-> (disable-undo (make-buffer "")) (insert "a") (insert "b")))
+      (assert= (buffer-text b) "ab")
+      (assert= (get b :undo) ())                 ; nothing recorded
+      (assert= (buffer-text (undo b)) "ab"))))
 
 (describe "buffer file round-trip"
   (test "buffer-from-file reads, save-buffer writes back"

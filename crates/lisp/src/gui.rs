@@ -390,6 +390,18 @@ mod backend {
         ])
     }
 
+    /// A resize event as the `[:resize cols rows]` vector (the new cell grid),
+    /// built as a `Message` (no heap) so the GUI thread can deliver it to a
+    /// mailbox. Wakes the app loop so it re-renders at the new size instead of
+    /// waiting out its poll timeout.
+    fn resize_message(cols: u16, rows: u16) -> Message {
+        Message::Vector(vec![
+            Message::Keyword(value::intern("resize")),
+            Message::Int(cols as i64),
+            Message::Int(rows as i64),
+        ])
+    }
+
     /// One open window's GUI-thread-side state.
     struct Win {
         window: Rc<Window>,
@@ -597,6 +609,10 @@ mod backend {
                 WindowEvent::ModifiersChanged(m) => w.mods = m.state(),
                 WindowEvent::Resized(_) => {
                     update_cells(&w.window, &w.renderer, &w.size);
+                    // Wake the app loop so it re-renders at the new (cols, rows)
+                    // now, rather than after its (possibly long) poll timeout.
+                    let (cols, rows) = *w.size.lock().unwrap();
+                    deliver(w.subscriber, resize_message(cols, rows));
                     w.window.request_redraw();
                 }
                 // We deliberately ignore 0.30's `inner_size_writer` (which could
@@ -606,6 +622,8 @@ mod backend {
                 WindowEvent::ScaleFactorChanged { .. } => {
                     w.renderer.set_scale(w.window.scale_factor());
                     update_cells(&w.window, &w.renderer, &w.size);
+                    let (cols, rows) = *w.size.lock().unwrap();
+                    deliver(w.subscriber, resize_message(cols, rows));
                     w.window.request_redraw();
                 }
                 WindowEvent::KeyboardInput {
