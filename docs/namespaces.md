@@ -13,11 +13,21 @@
 > qualifying. Decisions in [ADR-065](decisions.md) (namespaces) and
 > [ADR-066](decisions.md) (auto-gensym). Supersedes [ADR-019](decisions.md).
 >
-> **Still open:** LSP Tier 2 (§6 — refs/rename/semantic tokens over the shared
-> resolver) and package ns-collision policy (§8). Both are additive and don't touch
-> the substrate. The earmuff rule (`*foo*` names are ambient/root, never namespaced)
-> is the one resolution refinement the big-bang added beyond the inc-1 design — it
-> keeps `*load-path*`/`*features*`/`defdyn` vars reachable unqualified from any ns.
+> **LSP ns-awareness landed (2026-05-30, §6):** a shared resolution seam
+> (`eval::macros::resolve_reference` + `introspect::resolve_in_source`/`file_imports`)
+> lets the LSP resolve a symbol against a file's namespace + `(:use …)` imports
+> exactly as the runtime does — so goto/hover/signature reach qualified + imported
+> names, completion offers imported names bare, and **project references/rename are
+> namespace-sound** (only occurrences resolving to the *same* qualified global are
+> touched). **Package ns-collision policy decided** in [ADR-068](decisions.md):
+> flat names + detect-and-reject at dependency-resolution time (enforcement lands
+> with the package manager, ADR-037). The earmuff rule (`*foo*` names are
+> ambient/root, never namespaced) keeps `*load-path*`/`*features*`/`defdyn` vars
+> reachable unqualified from any ns.
+>
+> **Cosmetic remainders (not correctness):** namespace prefixes in the
+> document/workspace-symbol outline, semantic-token ns coloring, and the cross-file
+> shadow-collision warning going ns-aware. Tracked but minor.
 
 This doc is the design backing for namespaces in Brood. It follows the spectrum
 ADR-019 laid out and commits to the *substrate* (how resolution works) while
@@ -244,9 +254,16 @@ both declare `(ns parser)`. Prior art: Clojure uses reverse-domain
   prefix (the root project disambiguates two `parser`s by their `[name …]`),
   safe but verbose.
 
-`name = URL` packages make this concrete, not hypothetical. **Left open** — it's a
-policy choice that doesn't block the substrate (§3) and is best decided against
-the package manager's real shape.
+`name = URL` packages make this concrete, not hypothetical. **Decided
+([ADR-068](decisions.md)): flat names + detect-and-reject.** Namespace names stay
+short and free-for-all; the package manager's dependency-resolution step (ADR-037
+`nest fetch`/lock) **errors** if two reachable packages declare the same namespace,
+naming both sources, rather than silently merging or taxing every call site with a
+mandatory prefix. The verbose escapes — a per-dep prefix, or an import-site alias
+`(:use [parser :as p])` — are deferred (ADR-011) until a real collision demands one;
+the project-local dep name is the natural alias authority then. Enforcement is
+dormant until the package manager's git-deps/resolution land — correct, since a
+single-project / path-deps-only setup can't collide.
 
 ## 9. Auto-require
 
@@ -310,9 +327,18 @@ the lock file stays computable. Auto-require collapses `require`+`use` for code 
    (resolver descends quasiquote, qualifies free template refs to the defining ns,
    earmuff names stay bare). Coordinates cleanly with the ADR-064 quasiquote-to-Brood
    refactor (resolution is a separate pass over the expanded tree).
-5. ⬜ **LSP Tier 2 (§6)** — ns→file index, scoped completion, go-to-def, rename,
-   over the *shared* resolver (§4); make `mcp--shadows-for` ns-aware.
-6. ⬜ **Package integration (§8)** — ns-name disambiguation against ADR-037.
+5. ✅ **LSP ns-awareness (§6, 2026-05-30)** — the shared resolution seam
+   (`macros::resolve_reference` + `introspect::resolve_in_source`/`file_imports`,
+   §4) wired into goto-def, hover, signature (resolve a Free symbol to its
+   qualified global first), completion (offer `(:use …)` imports bare), and
+   **namespace-sound project references/rename** (occurrences are matched by
+   *resolved qualified identity*, so a different ns's same-named def is never
+   touched). Mid-edit-tolerant (falls back to the CST `defmodule` header when the
+   buffer doesn't fully parse). ⬜ Cosmetic remainder: ns prefixes in the symbol
+   outline, semantic-token ns coloring, and making `mcp--shadows-for` ns-aware.
+6. ✅ **Package integration policy (§8)** — decided in ADR-068 (flat names +
+   detect-and-reject at lock time); enforcement lands with the package manager
+   (ADR-037), dormant until then.
 
 ## 12. Explicitly *not* doing
 
