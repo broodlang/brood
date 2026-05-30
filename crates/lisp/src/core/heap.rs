@@ -26,7 +26,9 @@
 //! only touches LOCAL. Roots are gathered explicitly at the outermost-eval
 //! safepoint (see the `GC_BLOCK` discipline in `process.rs`).
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use smallvec::SmallVec;
@@ -34,8 +36,8 @@ use smallvec::SmallVec;
 use crate::core::blob::{SharedBlob, SHARED_BLOB_THRESHOLD};
 use crate::core::map_champ::{self, MapNode, MAX_DEPTH};
 use crate::core::value::{
-    Closure, ClosureArm, ClosureId, EnvId, MapId, NativeFn, NativeId, PairId, RopeId, StrId,
-    Symbol, Value, VecId, LOCAL, PRELUDE, RUNTIME,
+    Closure, ClosureArm, ClosureId, EnvId, MapId, NativeFn, NativeId, PairId, Passthrough, RopeId,
+    StrId, Symbol, Value, VecId, LOCAL, PRELUDE, RUNTIME,
 };
 use crate::error::LispError;
 
@@ -440,6 +442,15 @@ pub struct RuntimeCode {
     /// The global bindings (prelude + user `def`s). Read on every global lookup,
     /// written on `def` (the only mutation). The values point into PRELUDE or RUNTIME.
     globals: RwLock<SymbolMap<Value>>,
+    /// Monotonic version of `globals`, bumped on every binding change (`def`
+    /// rebind, `restore_globals`). Per-process global **inline caches**
+    /// (`Heap::global_ic`) stamp the version they resolved at and re-resolve only
+    /// when it has moved — so a steady-state global read is an atomic load + a
+    /// local hash hit instead of taking the shared `RwLock`. Late-binding stays
+    /// exact: any `def` makes every stamped cache entry stale at once. `Relaxed`
+    /// is sufficient — a global value is an immovable PRELUDE/RUNTIME handle, so
+    /// there's no data it gates publication of; the counter only has to *change*.
+    version: AtomicU64,
     /// Where each global was *defined* — file + form position, recorded at load
     /// time before macroexpansion (ADR-031). Lives here, beside `globals`, so it
     /// is shared across a runtime's processes and updated by a redefinition, the
@@ -462,6 +473,7 @@ impl Default for RuntimeCode {
         RuntimeCode {
             code: CodeSlabs::default(),
             globals: RwLock::new(SymbolMap::default()),
+            version: AtomicU64::new(0),
             def_sites: RwLock::new(HashMap::new()),
         }
     }
@@ -479,6 +491,7 @@ impl RuntimeCode {
         RuntimeCode {
             code: CodeSlabs::default(),
             globals: RwLock::new(globals),
+            version: AtomicU64::new(0),
             def_sites: RwLock::new(HashMap::new()),
         }
     }
@@ -585,6 +598,17 @@ pub struct Heap {
     /// Empty whenever no `binding` is active — so it's free on the common path
     /// and holds no LOCAL handles across a top-level arena reset.
     dynamics: Vec<(Symbol, Value)>,
+    /// Per-process **global inline cache** (perf): `symbol -> (runtime version,
+    /// resolved value)`. Consulted by [`env_get`](Self::env_get) only after the
+    /// local env chain misses *and* no dynamic binding shadows the name — i.e.
+    /// exactly where a lookup would otherwise take the shared `RwLock` on
+    /// `runtime.globals`. On a version match it returns the cached handle with no
+    /// lock; a stale entry (a `def` bumped `runtime.version`) falls through to the
+    /// locked table and re-stamps. Cached values are always immovable
+    /// PRELUDE/RUNTIME handles (globals are `promote`d before binding), so an entry
+    /// survives a local GC untouched and needs no rooting. `RefCell` because
+    /// `env_get` is `&self`; per-process, so never shared across threads.
+    global_ic: RefCell<SymbolMap<(u64, Value)>>,
     /// Explicit GC root stack — the evaluator's **operand stack** (ADR-061).
     /// Every LOCAL [`Value`] an eval frame still needs *after* a nested `eval`
     /// (its accumulated `argv`, literal accumulators, `callee`, the `call_form`,
@@ -757,6 +781,7 @@ impl Heap {
             ns_known_names: HashSet::new(),
             imports: HashMap::new(),
             dynamics: Vec::new(),
+            global_ic: RefCell::new(SymbolMap::default()),
             roots: Vec::new(),
             env_roots: Vec::new(),
             gc_threshold: usize::MAX,
@@ -790,6 +815,7 @@ impl Heap {
             ns_known_names: HashSet::new(),
             imports: HashMap::new(),
             dynamics: Vec::new(),
+            global_ic: RefCell::new(SymbolMap::default()),
             roots: Vec::new(),
             env_roots: Vec::new(),
             gc_threshold: gc_floor(),
@@ -1788,9 +1814,60 @@ impl Heap {
         }
     }
 
-    pub fn alloc_closure(&mut self, c: Closure) -> ClosureId {
+    pub fn alloc_closure(&mut self, mut c: Closure) -> ClosureId {
+        // Precompute each arm's thin-wrapper redirect once, here at the single
+        // closure-construction choke point — every LOCAL closure (`fn`/`defn`,
+        // and a message-rebuilt one) flows through here. promote/freeze copy the
+        // result verbatim, so it never has to be re-derived per call (see
+        // `eval::passthrough_arm` and `ClosureArm::passthrough`).
+        for arm in &mut c.arms {
+            if arm.passthrough.is_none() {
+                arm.passthrough = self.compute_passthrough(arm);
+            }
+        }
         let idx = alloc_slot!(self, closures, c);
         ClosureId::local_gen(idx, self.local_epoch)
+    }
+
+    /// Analyse whether `arm` is a pure pass-through wrapper — a single body form
+    /// `(head p_i p_j …)` with no `&optional`/`&` rest, `head` an ordinary
+    /// function reference (not a special form, not one of the arm's own params),
+    /// and every argument one of the arm's parameters used directly. Returns the
+    /// forwarding `(head, map)` if so. A pure function of the immutable arm, run
+    /// once at allocation; mirrors the predicate `eval::passthrough_arm` used to
+    /// recompute on every call.
+    fn compute_passthrough(&self, arm: &ClosureArm) -> Option<Passthrough> {
+        if !arm.optionals.is_empty() || arm.rest.is_some() || arm.body.len() != 1 {
+            return None;
+        }
+        let (head, mut rest) = match arm.body[0] {
+            Value::Pair(p) => self.pair(p),
+            _ => return None,
+        };
+        let head_sym = match head {
+            Value::Sym(s) => s,
+            _ => return None,
+        };
+        if crate::eval::is_special_form(head_sym) || arm.params.iter().any(|&p| p == head_sym) {
+            return None;
+        }
+        let mut map: SmallVec<[usize; 4]> = SmallVec::new();
+        loop {
+            match rest {
+                Value::Nil => break,
+                Value::Pair(p) => {
+                    let (a, next) = self.pair(p);
+                    let asym = match a {
+                        Value::Sym(s) => s,
+                        _ => return None, // a literal / nested call — not a pure forward
+                    };
+                    map.push(arm.params.iter().position(|&p| p == asym)?);
+                    rest = next;
+                }
+                _ => return None, // improper arg list
+            }
+        }
+        Some(Passthrough { head, map })
     }
 
     pub fn alloc_native(&mut self, f: NativeFn) -> Value {
@@ -1976,6 +2053,9 @@ impl Heap {
                     .collect(),
                 rest: arm.rest,
                 body: arm.body.iter().map(|&f| self.promote_in(f, fwd)).collect(),
+                // The forwarding head is an interned symbol and the map is plain
+                // indices, so the analysis is region-independent — copy it verbatim.
+                passthrough: arm.passthrough.clone(),
             })
             .collect();
         // A top-level closure captures the global env (`None`) and is fully
@@ -2820,7 +2900,7 @@ impl Heap {
                         return Some(v);
                     }
                 }
-                return self.runtime.globals_read().get(&sym).copied();
+                return self.global_lookup_cached(sym);
             }
             let frame = self.env_frame(e);
             // Scan from the end: a later binding shadows an earlier same-named one.
@@ -2830,6 +2910,28 @@ impl Heap {
             cur = frame.parent;
         }
         None
+    }
+
+    /// Resolve a name in the shared global table, going through this process's
+    /// [`global_ic`](Self::global_ic) inline cache. On a version match the cached
+    /// (immovable PRELUDE/RUNTIME) handle is returned without touching the
+    /// `RwLock`; otherwise the locked table is read and the entry re-stamped.
+    /// Only reached after the local chain and dynamics have missed, so it never
+    /// shadows a lexical or dynamic binding. An *unbound* name isn't cached (so it
+    /// resolves the moment it's later `def`'d).
+    #[inline]
+    fn global_lookup_cached(&self, sym: Symbol) -> Option<Value> {
+        let cur = self.runtime.version.load(Ordering::Relaxed);
+        if let Some(&(ver, val)) = self.global_ic.borrow().get(&sym) {
+            if ver == cur {
+                return Some(val);
+            }
+        }
+        let val = self.runtime.globals_read().get(&sym).copied();
+        if let Some(val) = val {
+            self.global_ic.borrow_mut().insert(sym, (cur, val));
+        }
+        val
     }
 
     pub fn env_define(&mut self, env: EnvId, sym: Symbol, val: Value) {
@@ -2855,6 +2957,8 @@ impl Heap {
             // into the shared RUNTIME region before binding.
             let shared = self.promote(val);
             self.runtime.globals_write().insert(sym, shared);
+            // Invalidate every process's global inline cache (late binding).
+            self.runtime.version.fetch_add(1, Ordering::Relaxed);
         } else if env.is_old() {
             // The frame was tenured (a minor collection promoted it while it was
             // still being bound — e.g. a collection during a `let` rhs eval). Mutate
@@ -2907,6 +3011,8 @@ impl Heap {
     /// again, and a rebound name returns to its earlier value.
     pub fn restore_globals(&self, snapshot: SymbolMap<Value>) {
         *self.runtime.globals_write() = snapshot;
+        // Wholesale table swap — invalidate every stamped global inline cache.
+        self.runtime.version.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Walk to the global scope at the bottom of the frame chain.
@@ -4257,6 +4363,8 @@ fn flush_closure(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: Closu
                 .iter()
                 .map(|&f| flush_value(old, new, fwd, f))
                 .collect(),
+            // Region-independent (symbol head + index map) — carry it verbatim.
+            passthrough: arm.passthrough.clone(),
         })
         .collect();
     let env = cl.env.map(|e| flush_env(old, new, fwd, e));

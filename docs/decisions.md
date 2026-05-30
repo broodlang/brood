@@ -4256,3 +4256,102 @@ ADR-041 (blob heap), ADR-045 (opaque immutable resource handle), ADR-043
 (deliver-to-mailbox offload), ADR-054/055 (moving/generational GC — why the
 boundary marshals), ADR-006 (write the language in the language — wrapper + policy
 in Brood), ADR-011 (defer power features).
+
+## ADR-069 — Evaluator dispatch performance: cache the analysis, not the behaviour
+
+**Status:** partially accepted (2026-05-30). Increments 1–2 **implemented** (branch
+`perf-eval-dispatch`); increments 3–4 **deferred** (recorded here, gated on need).
+
+**Context.** Cross-language benchmarks put Brood ~50–220× behind Node/BEAM on
+interpreted hot loops (collatz, fib, loop, reduce). The project's bar (ADR-006,
+`CLAUDE.md`) is explicit: close that gap by making the **evaluator** more capable —
+a general mechanism that keeps `+`/`rem`/`fold`/`sum` written in Brood — **not** by
+moving hot functions into Rust builtins (an escape hatch that hides the gap and
+teaches us nothing). The stated goal is "at least in Elixir's range, but it doesn't
+have to be there; using as much Brood as possible matters more — we'll even accept
+some slowdown for a lighter Rust footprint." So the question isn't "how do we beat
+Node," it's "what evaluator capabilities remove dispatch cost without moving
+behaviour out of Brood." Tracing one hot inner op (`(+ a b)`) found the tax is
+**symbol resolution and re-deriving immutable facts**, not the arithmetic:
+
+1. two global lookups (`+`, then `%add`), each an `RwLock` acquire + hash on the
+   shared `globals` table — plus cross-core contention under fan-out;
+2. a wasted full local-env-chain *name scan* for `+` before it ever reaches the
+   global table (it's never locally bound);
+3. the thin-wrapper passthrough analysis (`(+ a b)` → forward to `%add`) **rebuilt
+   from scratch on every call** — an immutable property of the closure;
+4. ~5 thread-local reads per combination (gc-due / macro-block / soft-limit / tick /
+   deadline).
+
+**Decision (done — increments 1 & 2).**
+
+- **Inc-1: precompute the passthrough analysis.** `ClosureArm` gains a
+  `passthrough: Option<Passthrough>` field, computed once at the single
+  closure-construction choke point (`Heap::compute_passthrough` in `alloc_closure`)
+  and carried verbatim across promote/freeze/message copies (the forwarding head is
+  an interned symbol, the arg-map plain indices — region-independent). The hot-path
+  `eval::passthrough_arm` becomes an arm-select + field clone. Hot-reload-safe: a
+  `def` rebuilds the closure, recomputing the field.
+- **Inc-2: per-process global inline cache.** `RuntimeCode` gains a monotonic
+  `version: AtomicU64`, bumped on every binding change (`def` rebind,
+  `restore_globals`). Each `Heap` holds a `global_ic: symbol -> (version, value)`
+  cache, consulted in `env_get` **only after** the local chain and dynamics miss
+  (so it can never shadow a lexical or dynamic binding). A version match returns the
+  cached handle with no `RwLock`; any `def` makes every stamped entry stale at once,
+  so late binding stays exact. GC-safe with no rooting — globals are `promote`d to
+  immovable PRELUDE/RUNTIME before binding, so a cached handle can't dangle across a
+  local collection; unbound names aren't cached.
+
+  Measured (release, best-of-2, vs `main` @ 59ae226): fib(32) 4.78→4.24s, loop(3M)
+  3.18→2.86s, collatz(30k) 4.50→4.13s, reduce(1M) 3.60→3.37s — a consistent
+  **6–11%**, no behaviour moved into Rust.
+
+**Deferred (increments 3 & 4 — recorded, not yet justified).**
+
+- **Inc-3: lexical addressing.** A resolution step in the existing compile pass
+  (`eval::macros::compile`) rewrites each *local* variable reference to its
+  `(depth, index)` frame coordinate, replacing the assoc-list **name scan** in
+  `env_get` (cost 2 above) with a direct index. Biggest remaining win for
+  param-heavy bodies (fib/loop). **Why deferred:** it's the largest change and bumps
+  the type-system compatibility contract (`docs/types.md`) — a new first-class
+  `Value` kind needs a `Tag` + type bit + GC/printer/message support, which is
+  heavyweight for what is really an internal IR node. Likely wants a *side
+  representation* (a resolved-ref encoding that isn't a public `Value`) rather than a
+  new tag; that design isn't settled. Also interacts with `letrec`'s
+  last-write-wins frame and macro-introduced bindings, which must resolve
+  consistently.
+- **Inc-4: fold the per-combination TLS reads** (cost 4) into one counter check.
+  Low-risk, low-reward; only moves the "pure overhead floor" (the `loop` bench).
+
+**Should we still do 3 & 4? (the gate.)** Not now. Inc-1/2 banked the cheap,
+low-risk dispatch wins. The residual gap is dominated by two things Inc-3 addresses
+(the env-chain name scan, and per-call env-frame allocation) — but the *honest*
+fix for a tree-walker's structural ~50–220× tax is a bytecode / closure-compiling VM
+(already flagged in `devlog.md`'s perf follow-ups), and lexical addressing is a
+down payment on exactly that compile step. So the decision is: **revisit Inc-3 when
+we commit to the compilation step** (it becomes a natural sub-task of building the
+resolver/IR), rather than as a standalone `Value`-kind change now. Inc-4 rides along
+with whatever next touches the eval loop's safepoint. Until then, neither is on the
+critical path — the goal was "Elixir-range is nice-to-have; stay in Brood is the
+priority," and the banked wins move us toward it without any Rust escape hatch.
+
+**Why (the shape).** Both shipped increments follow the ADR-006 worked example
+(multi-arity dispatch): a general evaluator capability that makes *every* Brood
+global reference / operator wrapper cheaper, so the prelude stays in Brood and gets
+faster — the opposite of moving `+`/`sum` into `builtins.rs`. The version-counter
+inline cache is the standard late-binding-safe monomorphic cache; it preserves the
+hot-reload contract (`docs/shared-code.md`) exactly.
+
+**Consequences.** `ClosureArm` carries a derived field (copied by every arm-rebuild
+site — `alloc_closure` computes, promote/freeze/message carry it). `RuntimeCode`
+carries a version atomic bumped by the two global-table writers; `Heap` carries a
+per-process `RefCell` cache (keeps `Heap: Send`, never shared across threads).
+`eval::is_special_form` is exposed `pub(crate)` so the precompute can exclude
+special-form heads. No language-visible change; no new primitive; no Rust builtin.
+
+**References.** ADR-006 (write the language in the language — the governing
+principle), ADR-013 / `docs/shared-code.md` (late binding / hot reload — why the
+inline cache is version-guarded), ADR-035/054/055 (moving/generational GC — why a
+cached global handle is safe but a local one wouldn't be), ADR-023/024 +
+`docs/types.md` (the compatibility contract Inc-3 must clear), `docs/devlog.md`
+(the original thin-wrapper elision this caches, and the bytecode-VM follow-up).

@@ -9001,3 +9001,41 @@ were already pre-scanned). Fixed the 7 `hatch` suite failures.
   fundamental ~80× tree-walker gap vs Node needs a bytecode/closure-compiling VM.
 - GC handoff (`docs/handoff-gc.md`) items #1–#5 are all addressed (generational was
   the last one); only the deferred generational *young/old further tuning* remains.
+
+## 2026-05-30 — Evaluator dispatch: cache the passthrough analysis + global inline cache (ADR-069)
+
+Two evaluator-level perf wins, both squarely "make the *language* faster, keep the
+behaviour in Brood" (ADR-006 / the multi-arity-dispatch worked example in
+`CLAUDE.md`) — no function moved into Rust. Done on branch `perf-eval-dispatch`.
+
+**1 — Precompute the thin-wrapper passthrough.** The operator-call elision (above)
+recomputed its `(head, arg-map)` analysis on *every* call — re-reading the closure,
+walking the one-form body, and rebuilding the forward map by scanning the param
+list. That's an immutable property of the closure, so it now computes **once** at
+closure-allocation time (`Heap::compute_passthrough`, the single `alloc_closure`
+choke point) and caches on `ClosureArm::passthrough`; `eval::passthrough_arm` is just
+an arm-select + field clone. Carried verbatim across promote/freeze/message copies
+(the head is an interned symbol, the map plain indices), so it survives sharing into
+RUNTIME/PRELUDE and crossing process boundaries. Still hot-reload-safe — a `def`
+rebuilds the closure, recomputing the analysis.
+
+**2 — Global inline cache (`Heap::global_ic`).** Every reference to a global
+(`+`, `rem`, `fold`, a user `fib`) read the shared `RwLock<globals>` — a lock
+acquire + hash on the hottest path, and cross-core contention under fan-out. Added a
+monotonic `RuntimeCode::version` (bumped on every binding change — `def` rebind and
+`restore_globals`) and a per-process `symbol -> (version, value)` cache consulted in
+`env_get` *after* the local chain and dynamics miss (so it never shadows a lexical or
+dynamic binding). A version match returns the cached handle with no lock; any `def`
+makes every stamped entry stale at once, so late binding stays exact. GC-safe with no
+rooting: globals are `promote`d to immovable PRELUDE/RUNTIME before binding, so a
+cached handle can't dangle across a local collection. Unbound names aren't cached
+(they resolve the instant they're later `def`'d).
+
+Best-of-2 release (`-C debug-assertions` off), vs `main` @ 59ae226: **fib(32)
+4.78→4.24s, loop(3M) 3.18→2.86s, collatz(30k) 4.50→4.13s, reduce(1M) 3.60→3.37s**
+— a consistent **6–11%** across the interpreted hot-loop benches. The residual gap
+to JIT/BEAM is the tree-walker tax itself (per-op dispatch + the env-chain *name
+scan* that precedes the global cache, and per-call env-frame allocation) — that's
+the deferred #3/#4 work, written up in ADR-069 (lexical addressing + folding the
+per-combination TLS reads). Whether to take those on is gated on need: the cheap,
+low-risk dispatch wins are now banked.
