@@ -1,0 +1,71 @@
+;; std/regex — the small backtracking regex engine (pure Brood). Register-only —
+;; run by `nest test` (and cargo test, via crates/lisp/tests/suite.rs).
+
+(defmodule regex-test (:use test) (:use regex))
+(require 'regex)
+
+(describe "regex match? (search)"
+  (test "literals search anywhere in the string"
+    (is (match? "lo" "hello"))
+    (is (not (match? "xy" "hello"))))
+  (test ". matches any one character"
+    (is (match? "h.llo" "hello"))
+    (is (not (match? "h.llo" "hllo"))))
+  (test "anchors ^ and $"
+    (is (match? "^he" "hello"))
+    (is (not (match? "^el" "hello")))
+    (is (match? "lo$" "hello"))
+    (is (not (match? "el$" "hello"))))
+  (test "suffix match — the .blsp file-type case"
+    (is (match? "\\.blsp$" "foo.blsp"))
+    (is (not (match? "\\.blsp$" "foo.blsp.txt")))
+    (is (not (match? "\\.blsp$" "fooXblsp")))     ; \\. is a literal dot, not any-char
+    (is (not (match? "\\.blsp$" "foo.BLSP")))))   ; case-sensitive
+
+(describe "regex quantifiers"
+  (test "* matches zero or more (greedy)"
+    (is (matches? "ab*c" "ac"))
+    (is (matches? "ab*c" "abbbc")))
+  (test "+ matches one or more"
+    (is (matches? "ab+c" "abc"))
+    (is (not (matches? "ab+c" "ac"))))
+  (test "? matches zero or one"
+    (is (matches? "ab?c" "ac"))
+    (is (matches? "ab?c" "abc"))
+    (is (not (matches? "ab?c" "abbc"))))
+  (test "greedy * still lets the rest match (backtracks)"
+    (is (matches? "a.*z" "abcz"))
+    (is (matches? "a.*z" "az"))))
+
+(describe "regex classes & sets"
+  (test "\\d \\w \\s"
+    (is (matches? "\\d+" "2026"))
+    (is (not (matches? "\\d+" "20x6")))
+    (is (matches? "\\w+" "foo_bar9"))
+    (is (not (matches? "\\w+" "foo-bar")))    ; '-' isn't a word char
+    (is (match? "\\s" "a b")))
+  (test "[...] set and [^...] negated set (explicit chars, no ranges yet)"
+    (is (matches? "[abc]+" "cabba"))
+    (is (not (matches? "[abc]+" "cabx")))
+    (is (matches? "[^abc]+" "xyz"))
+    (is (not (matches? "[^abc]+" "xya")))))
+
+(describe "regex alternation & groups"
+  (test "| alternation"
+    (is (matches? "cat|dog" "cat"))
+    (is (matches? "cat|dog" "dog"))
+    (is (not (matches? "cat|dog" "cow"))))
+  (test "(...) grouping, quantified"
+    (is (matches? "(ab)+" "ababab"))
+    (is (not (matches? "(ab)+" "aba")))
+    (is (matches? "(foo|bar)+baz" "foobarbaz")))
+  (test "escaped metacharacters are literal"
+    (is (matches? "a\\+b" "a+b"))
+    (is (not (matches? "a\\+b" "aab")))
+    (is (matches? "\\(x\\)" "(x)"))))
+
+(describe "regex matches? anchors the whole string"
+  (test "must cover the entire string"
+    (is (matches? "abc" "abc"))
+    (is (not (matches? "abc" "abcd")))
+    (is (not (matches? "abc" "xabc")))))

@@ -41,7 +41,28 @@
 
   (test "tick-ms comes from the model (default 1000)"
     (assert= (ui/ui--tick-ms {}) 1000)
-    (assert= (ui/ui--tick-ms {:tick-ms 250}) 250)))
+    (assert= (ui/ui--tick-ms {:tick-ms 250}) 250))
+
+  (test "a :close input (the window's X button) quits regardless of update"
+    (let (me (self))
+      (send me :close)                      ; the close button, waiting in the mailbox
+      (assert= (ui-run {:done false}
+                       (fn (m c r) [])
+                       ;; update NEVER sets :done — only :close can stop this loop,
+                       ;; proving ui-run quits on :close without update's help.
+                       (fn (m input c r) (do (send me [:update-saw input]) m))
+                       {:enter (fn () nil) :leave (fn () :left) :size (fn () [80 24])
+                        :draw (fn (f) nil)
+                        :poll (fn (ms) (receive (m m) (after 0 :tick)))})
+               :left)
+      ;; update is bypassed entirely for :close (the loop quits before calling it).
+      (assert= (receive ([:update-saw x] x) (after 100 :never-called)) :never-called)))
+
+  (test "quit-request? recognises :close, not the Escape key or other input"
+    (is (quit-request? :close))
+    (is (not (quit-request? :escape)))      ; the Escape key is NOT a close request
+    (is (not (quit-request? "q")))
+    (is (not (quit-request? :tick)))))
 
 (describe "display-broadcast — one frame to many frontends"
   (test "fans :draw to every member and reports the smallest common size"

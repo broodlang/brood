@@ -1258,7 +1258,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![ref_ty], nil_ty),
         demonitor,
     );
-    // Links (ADR-067): symmetric failure coupling + `trap_exit`, the bidirectional
+    // Links (ADR-077): symmetric failure coupling + `trap_exit`, the bidirectional
     // cousin of `monitor`. `link`/`unlink` couple the current process to a pid;
     // `trap-exit` turns a linked peer's death into a `[:EXIT pid reason]` message.
     def(heap, "link", Arity::exact(1), Sig::new(vec![pid_ty], nil_ty), link_proc);
@@ -1490,9 +1490,9 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("term-enter", &[], "Enter raw mode + the alternate screen, hide the cursor, and enable mouse capture, taking over the terminal for a full-screen UI (so click/scroll reach term-poll). Pair with term-leave. (ADR-046 display seam.)"),
     ("term-leave", &[], "Restore the terminal: show the cursor, disable mouse capture, leave the alternate screen, disable raw mode. The normal-path teardown for term-enter."),
     ("term-size", &[], "The terminal size as [cols rows] in character cells."),
-    ("term-poll", &["ms"], "Wait up to ms milliseconds for an input event; return a key (a 1-char string for printables, or a keyword for specials: :up :down :left :right :enter :escape :backspace :tab :back-tab :delete :home :end :page-up :page-down, ctrl combos like :ctrl-c, alt combos like :alt-f), a mouse event as a vector [:mouse action button row col] (action: :press :scroll-up :scroll-down; button: :left :right :middle or nil; row/col 0-based cells), or nil on timeout. Always pass a finite ms."),
+    ("term-poll", &["ms"], "Wait up to ms milliseconds for an input event; return a key (a 1-char string for printables, or a keyword for specials: :up :down :left :right :enter :escape :backspace :tab :back-tab :delete :home :end :page-up :page-down, ctrl combos like :ctrl-c, alt combos like :alt-f), a mouse event as a vector [:mouse action button row col] (action: :press :release :drag :scroll-up :scroll-down — :drag is motion with a button held, reported once per cell crossed; button: :left :right :middle or nil for scroll; row/col 0-based cells), or nil on timeout. Always pass a finite ms."),
     ("term-draw", &["frame"], "Paint a frame — a vector of render ops: [:clear], [:text row col str], [:text row col str face], [:cursor row col]. A face is a map like {:fg :red :bold true}. The in-process frontend for the display protocol; returns nil."),
-    ("gui-open", &[], "Open a new native window and return its integer id (needs the runtime built with --features gui; errors otherwise). Its key/mouse input is delivered to the CALLING process's mailbox as messages — a key as a 1-char string / keyword (`:up`, `:ctrl-c`), the mouse as `[:mouse action button row col]`, a resize as `[:resize cols rows]` (the new cell grid, so the loop re-renders at the new size) — so the consumer parks in `(receive)` instead of polling (ADR-058). Closing the window delivers `:escape`. Starts the GUI thread on the first call; each call is an independent window, so several observers can run at once. Pass the id to the other gui-* primitives; pair with gui-close."),
+    ("gui-open", &[], "Open a new native window and return its integer id (needs the runtime built with --features gui; errors otherwise). Its key/mouse input is delivered to the CALLING process's mailbox as messages — a key as a 1-char string / keyword (`:up`, `:ctrl-c`), the mouse as `[:mouse action button row col]` (action `:press`/`:release`/`:drag`/`:scroll-up`/`:scroll-down` — `:drag` is motion with a button held, delivered once per cell crossed), a resize as `[:resize cols rows]` (the new cell grid, so the loop re-renders at the new size) — so the consumer parks in `(receive)` instead of polling (ADR-058). Clicking the window's close button delivers a dedicated `:close` message — distinct from the Escape *key* (`:escape`), so an app can quit on the X without conflating it with Escape (which an editor binds to cancel/normal-mode); `ui-run` quits on `:close` automatically. Starts the GUI thread on the first call; each call is an independent window, so several observers can run at once. Pass the id to the other gui-* primitives; pair with gui-close."),
     ("gui-close", &["id"], "Close window id (the teardown for gui-open). Idempotent; an unknown id is a no-op."),
     ("gui-size", &["id"], "Window id's size as [cols rows] in character cells (tracks resize / HiDPI), same shape as term-size."),
     ("gui-draw", &["id", "frame"], "Paint a frame (the same render-op vector term-draw takes) to window id; returns nil. Unknown ops are skipped (forward-compatible)."),
@@ -2642,6 +2642,9 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
     // (The text-mode/brood-mode *layers* built on it are editor policy and live in
     // the editor app — examples/editor/src/ — not here.) Opt-in. (docs/layers.md)
     ("sexp", include_str!("../../../std/sexp.blsp")),
+    // A small backtracking regular-expression engine, pure Brood (literals, ., * + ?,
+    // ^ $, [...] sets, \d \w \s, |, groups; no ranges/captures yet). Opt-in.
+    ("regex", include_str!("../../../std/regex.blsp")),
     ("ui", include_str!("../../../std/ui.blsp")),
     ("observer", include_str!("../../../std/observer.blsp")),
     // Bare ANSI escape *strings* for simple terminal scripts (`print` them
@@ -3217,6 +3220,11 @@ fn mouse_to_value(heap: &mut Heap, m: crossterm::event::MouseEvent) -> Value {
     };
     let (action, btn) = match m.kind {
         MK::Down(b) => ("press", Some(button(b))),
+        MK::Up(b) => ("release", Some(button(b))),
+        // Motion with a button held — a drag (e.g. resizing a divider, ADR-077).
+        // Crossterm already reports this per-cell, matching the GUI's cell-granular
+        // throttle. Bare `Moved` (no button) falls through to nil, as before.
+        MK::Drag(b) => ("drag", Some(button(b))),
         MK::ScrollUp => ("scroll-up", None),
         MK::ScrollDown => ("scroll-down", None),
         _ => return Value::Nil,
@@ -4694,7 +4702,7 @@ fn exit_proc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             crate::process::exit(id, reason);
             Ok(Value::Nil)
         }
-        // Cross-node exit (ADR-067): ship a non-link `Frame::Exit` routed to the
+        // Cross-node exit (ADR-077): ship a non-link `Frame::Exit` routed to the
         // peer's `scheduler::exit` (kill-style, like the local path).
         Value::Pid { node, id } => {
             crate::dist::exit_remote(node, id, reason);
@@ -4705,7 +4713,7 @@ fn exit_proc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 }
 
 /// `(link pid)` — symmetrically link the current process and `pid`, local or
-/// remote (ADR-067). A cross-node link ships a `Frame::Link`; either side's death
+/// remote (ADR-077). A cross-node link ships a `Frame::Link`; either side's death
 /// reaches the other, and a net-split fires `:noconnection`. Returns nil.
 fn link_proc(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     match arg(args, 0) {
@@ -5224,5 +5232,67 @@ mod gui_face_tests {
         assert!(f.fg.is_none());
         assert!(!f.bold && !f.italic && !f.underline && !f.reverse);
         assert!(f.family.is_none());
+    }
+}
+
+#[cfg(test)]
+mod mouse_event_tests {
+    use super::mouse_to_value;
+    use crate::core::heap::Heap;
+    use crate::core::value::{self, Value};
+    use crossterm::event::{KeyModifiers, MouseButton as CB, MouseEvent, MouseEventKind as MK};
+
+    fn ev(kind: MK) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: 7,
+            row: 3,
+            modifiers: KeyModifiers::empty(),
+        }
+    }
+
+    // The `[:mouse action button row col]` shape: pull out the action keyword (idx 1)
+    // and the button keyword (idx 2) as interned ids — `Value` has no `PartialEq`, so
+    // we compare the underlying `u32`s. Lets us assert the crossterm → Brood mapping,
+    // including the newly added :drag / :release (ADR-077).
+    fn action_button(heap: &Heap, v: Value) -> (u32, u32) {
+        let Value::Vector(id) = v else {
+            panic!("expected a [:mouse …] vector, got {v:?}");
+        };
+        let xs = heap.vector(id);
+        let (Value::Keyword(head), Value::Keyword(a), Value::Keyword(b)) = (xs[0], xs[1], xs[2])
+        else {
+            panic!("expected keywords for head/action/button, got {xs:?}");
+        };
+        assert_eq!(head, value::intern("mouse"));
+        (a, b)
+    }
+
+    #[test]
+    fn drag_and_release_map_to_keywords_carrying_their_button() {
+        let mut heap = Heap::new();
+
+        let v = mouse_to_value(&mut heap, ev(MK::Drag(CB::Left)));
+        let (a, b) = action_button(&heap, v);
+        assert_eq!(a, value::intern("drag"));
+        assert_eq!(b, value::intern("left"));
+
+        let v = mouse_to_value(&mut heap, ev(MK::Up(CB::Right)));
+        let (a, b) = action_button(&heap, v);
+        assert_eq!(a, value::intern("release"));
+        assert_eq!(b, value::intern("right"));
+
+        let v = mouse_to_value(&mut heap, ev(MK::Down(CB::Middle)));
+        let (a, b) = action_button(&heap, v);
+        assert_eq!(a, value::intern("press"));
+        assert_eq!(b, value::intern("middle"));
+    }
+
+    // Bare motion (no button held) still isn't surfaced — it stays nil, as before, so
+    // the input channel isn't flooded with per-cell moves when nothing is dragging.
+    #[test]
+    fn bare_motion_is_not_emitted() {
+        let mut heap = Heap::new();
+        assert!(matches!(mouse_to_value(&mut heap, ev(MK::Moved)), Value::Nil));
     }
 }
