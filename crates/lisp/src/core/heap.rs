@@ -190,6 +190,39 @@ fn gc_floor() -> usize {
     })
 }
 
+/// Live old-gen object count below which a **major** collection never fires —
+/// the old-gen counterpart of [`gc_floor`]. Crucially this is **not** zeroed by
+/// `BROOD_GC_STRESS`: stress makes *minor* collection fire at every safepoint
+/// (its purpose), but a major every safepoint would recompact the whole old
+/// generation on an incremental large-structure build — O(n²). Keeping a nonzero
+/// floor makes majors periodic under stress (still exercised) and rare in normal
+/// operation (the old gen grows to a few MB before a compaction reclaims tenured
+/// garbage, so live tenured data isn't recopied often).
+fn major_floor() -> usize {
+    static FLOOR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *FLOOR.get_or_init(|| {
+        if std::env::var_os("BROOD_GC_STRESS").is_some() {
+            8192
+        } else {
+            256 * 1024
+        }
+    })
+}
+
+/// Nursery-pressure threshold (live object count) at or above which a minor
+/// collection **tenures** survivors into the old generation; below it the minor
+/// does a young **semi-space flip** (survivors stay in a fresh nursery) instead.
+/// This is the *aging* policy: an object tenures only when it survives a
+/// collection that followed real allocation pressure — never a premature one.
+/// Stress-independent (unlike [`gc_floor`]) so that `BROOD_GC_STRESS=1`, which
+/// fires a minor at *every* safepoint with a tiny nursery, always flips and so
+/// never tenures transient garbage (which would otherwise bloat the old gen and
+/// make majors recopy it — the adversarial-under-stress regression). A
+/// long-lived structure still tenures once the nursery genuinely grows past this.
+fn min_tenure() -> usize {
+    16 * 1024
+}
+
 /// Re-tag a value's handle from the local region to the immutable **prelude**
 /// region (same slab index, region bits set). Atoms are unchanged.
 fn to_prelude(v: Value) -> Value {
@@ -764,7 +797,7 @@ impl Heap {
             local_epoch: 0,
             remembered: Vec::new(),
             old_epoch: 0,
-            major_threshold: gc_floor(),
+            major_threshold: major_floor(),
             gc_runs: 0,
             gc_copied: 0,
             gc_reclaimed: 0,
@@ -2107,23 +2140,14 @@ impl Heap {
 
     // ----- access (dispatch on the handle's region) -----
 
-    /// Generational-handle tripwire (debug only). A LOCAL handle carries the
-    /// epoch it was minted in; every arena flip ([`arena_flip`](Self::arena_flip))
-    /// bumps `self.local_epoch` and re-mints survivors, so a handle held across a
-    /// flip without being re-rooted carries a stale epoch. Panic **here**, at the
-    /// bad deref, with the slot + epochs — instead of a far-away out-of-bounds
-    /// index or a silent wrong-slot read. See `docs/memory-review.md`.
-    #[cfg(debug_assertions)]
-    #[inline]
-    fn check_epoch(&self, gen: u32, index: usize, what: &str, raw: u64) {
-        self.check_epoch_aged(false, gen, index, what, raw);
-    }
-
     /// Generation-aware epoch tripwire. Young (`is_old == false`) handles are
     /// checked against the nursery epoch (bumped by every collection); old handles
     /// against the old-generation epoch (bumped only by a major collection, since a
     /// minor leaves old objects in place). A mismatch means a handle was held
-    /// across a collection that moved its space without being re-rooted.
+    /// across a collection that moved its space without being re-rooted. Only the
+    /// debug-gated accessors call it, so it's `cfg(debug_assertions)` too (no
+    /// release dead-code).
+    #[cfg(debug_assertions)]
     fn check_epoch_aged(&self, is_old: bool, gen: u32, index: usize, what: &str, raw: u64) {
         let (expected, space) = if is_old {
             (self.old_epoch, "OLD")
@@ -3172,11 +3196,15 @@ impl Heap {
         if Self::gc_verify_enabled() {
             self.verify_local_graph(extra_roots, extra_envs);
         }
-        // Generational: a *minor* collection promotes the nursery's survivors into
-        // the old generation and reclaims the rest (the common, cheap case — it
-        // never recopies tenured data). The young threshold tracks the now-empty
-        // nursery, so it drops back to the floor.
-        self.minor_collect(extra_roots, extra_envs);
+        // Generational: a *minor* collection either tenures the nursery's
+        // survivors into the old gen (when the nursery grew past `min_tenure` —
+        // real allocation pressure, so survivors are probably long-lived) or does
+        // a young semi-space flip (survivors stay young) when this is a premature
+        // collection. The flip is what keeps `BROOD_GC_STRESS` (a minor at every
+        // safepoint) from tenuring transient garbage. Either way it reclaims dead
+        // nursery objects and never recopies the tenured old gen.
+        let tenure = self.local_live_count() >= min_tenure();
+        self.minor_collect(tenure, extra_roots, extra_envs);
         self.gc_threshold = std::cmp::max(gc_floor(), self.local_live_count().saturating_mul(2));
         // Escalate to a *major* (compact the old generation) only when it has
         // doubled since the last major — so majors stay rare while minors keep the
@@ -3184,7 +3212,7 @@ impl Heap {
         if self.old_live_count() >= self.major_threshold {
             self.major_collect(extra_roots, extra_envs);
             self.major_threshold =
-                std::cmp::max(gc_floor(), self.old_live_count().saturating_mul(2));
+                std::cmp::max(major_floor(), self.old_live_count().saturating_mul(2));
         }
     }
 
@@ -3201,60 +3229,96 @@ impl Heap {
             + self.old.envs.len()
     }
 
-    /// A **minor collection**: copy the nursery's survivors into the old
-    /// generation (tenuring them) and drop the rest by dropping the whole nursery.
-    /// Old objects are left in place — never recopied — which is the entire point.
-    /// Bumps the nursery epoch (stale young handles trip the tripwire) but **not**
-    /// the old epoch (old handles stay valid). Roots, dynamics, the operand stack,
-    /// and the write-barrier remembered set are all relocated/rewritten in place.
-    fn minor_collect(&mut self, value_roots: &mut [Value], env_roots: &mut [EnvId]) {
+    /// A **minor collection**. `tenure` selects the destination of the nursery's
+    /// survivors:
+    /// - `true` (allocation pressure crossed `min_tenure`): survivors are copied
+    ///   into the **old** generation (tenured) — old objects are left in place,
+    ///   never recopied, which is the generational win.
+    /// - `false` (a premature/stress collection): survivors are copied into a
+    ///   **fresh nursery** (a young semi-space flip) and stay young, so transient
+    ///   garbage never reaches the old gen.
+    ///
+    /// Either way the dead nursery objects are reclaimed by dropping the source
+    /// nursery whole, and the nursery epoch is bumped (stale young handles trip the
+    /// tripwire). Roots, dynamics, the operand stack, and the write-barrier
+    /// remembered set are relocated/rewritten in place.
+    fn minor_collect(&mut self, tenure: bool, value_roots: &mut [Value], env_roots: &mut [EnvId]) {
         let before_young = self.local_live_count();
         let old_before = self.old_live_count();
         self.local_epoch = self.local_epoch.wrapping_add(1);
         let young = std::mem::take(&mut self.local);
+        // Tenure: append survivors to the old gen (take it out, append, put back).
+        // Flip: survivors go to a fresh nursery that becomes the new `local`.
+        let (mut dest, epoch, dest_old) = if tenure {
+            (std::mem::take(&mut self.old), self.old_epoch, true)
+        } else {
+            (Slabs::default(), self.local_epoch, false)
+        };
         let mut fwd = FlushForward::default();
-        fwd.epoch = self.old_epoch; // promote into old, stamped with the old epoch
+        fwd.epoch = epoch;
         fwd.src_old = false; // copy nursery objects
-        fwd.dest_old = true; // mint tenured (old) handles
+        fwd.dest_old = dest_old;
         for v in value_roots.iter_mut() {
-            *v = flush_value(&young, &mut self.old, &mut fwd, *v);
+            *v = flush_value(&young, &mut dest, &mut fwd, *v);
         }
         for e in env_roots.iter_mut() {
-            *e = flush_env(&young, &mut self.old, &mut fwd, *e);
+            *e = flush_env(&young, &mut dest, &mut fwd, *e);
         }
         for (_, v) in self.dynamics.iter_mut() {
-            *v = flush_value(&young, &mut self.old, &mut fwd, *v);
+            *v = flush_value(&young, &mut dest, &mut fwd, *v);
         }
         for v in self.roots.iter_mut() {
-            *v = flush_value(&young, &mut self.old, &mut fwd, *v);
+            *v = flush_value(&young, &mut dest, &mut fwd, *v);
         }
         let mut er = std::mem::take(&mut self.env_roots);
         for e in er.iter_mut() {
-            *e = flush_env(&young, &mut self.old, &mut fwd, *e);
+            *e = flush_env(&young, &mut dest, &mut fwd, *e);
         }
         self.env_roots = er;
-        // Write barrier: a frame tenured *mid-bind* may have had young values
-        // bound into it afterwards (`env_define`). Those OLD->YOUNG edges aren't
-        // reachable from the normal roots, so trace each remembered old frame's
-        // bindings and rewrite them to the promoted handles, in place.
+        // Write barrier: an old frame that gained a young binding (`env_define`
+        // after a mid-bind tenure) holds an OLD->YOUNG edge not reachable from the
+        // normal roots. Its frame lives in `dest` while tenuring (we took the old
+        // gen into `dest`) or in `self.old` while flipping (old untouched). Flush
+        // each such var into `dest` and write it back.
         let remembered = std::mem::take(&mut self.remembered);
         for &e in &remembered {
-            let n = self.old.envs[e.index()].vars.len();
+            let n = if tenure {
+                dest.envs[e.index()].vars.len()
+            } else {
+                self.old.envs[e.index()].vars.len()
+            };
             for i in 0..n {
-                let (s, v) = self.old.envs[e.index()].vars[i];
-                let nv = flush_value(&young, &mut self.old, &mut fwd, v);
-                self.old.envs[e.index()].vars[i] = (s, nv);
+                let (s, v) = if tenure {
+                    dest.envs[e.index()].vars[i]
+                } else {
+                    self.old.envs[e.index()].vars[i]
+                };
+                let nv = flush_value(&young, &mut dest, &mut fwd, v);
+                if tenure {
+                    dest.envs[e.index()].vars[i] = (s, nv);
+                } else {
+                    self.old.envs[e.index()].vars[i] = (s, nv);
+                }
             }
         }
+        // Tenuring resolves those edges to old->old (survivors are now old): drop
+        // the set. A flip keeps survivors young, so the old->young edges persist —
+        // retain the set (the frames didn't move) for the next collection.
+        if !tenure {
+            self.remembered = remembered;
+        }
         self.local_free.clear();
-        // form_pos: a promoted nursery pair's position moves to its new OLD key;
-        // dead nursery entries drop; OLD entries are untouched (old didn't move).
+        // form_pos re-key: a surviving nursery pair moves to its new slot with the
+        // destination's age bit (old when tenuring, young when flipping); dead
+        // nursery entries drop; existing OLD entries are untouched (old didn't move
+        // in a minor).
+        let new_age_bit: u64 = if tenure { 1 << 32 } else { 0 };
         let old_form_pos = std::mem::take(&mut self.form_pos);
         for (key, pos) in old_form_pos {
             if (key >> 32) & 1 == 1 {
-                self.form_pos.insert(key, pos); // old pair stayed put
+                self.form_pos.insert(key, pos);
             } else if let Some(&new_idx) = fwd.pairs.get(&(key as u32)) {
-                self.form_pos.insert((new_idx as u64) | (1 << 32), pos);
+                self.form_pos.insert((new_idx as u64) | new_age_bit, pos);
             }
         }
         #[cfg(debug_assertions)]
@@ -3267,13 +3331,25 @@ impl Heap {
             self.poison.closures.clear();
             self.poison.envs.clear();
         }
-        let promoted = self.old_live_count().saturating_sub(old_before);
+        // Install the relocated space. Tenure: `dest` is the grown old gen; the
+        // nursery stays the empty Slabs left by the take. Flip: `dest` is the fresh
+        // nursery; the old gen was untouched.
+        if tenure {
+            self.old = dest;
+        } else {
+            self.local = dest;
+        }
+        let survivors = if tenure {
+            self.old_live_count().saturating_sub(old_before)
+        } else {
+            self.local_live_count()
+        };
         self.gc_runs = self.gc_runs.saturating_add(1);
-        self.gc_copied = self.gc_copied.saturating_add(promoted as u64);
+        self.gc_copied = self.gc_copied.saturating_add(survivors as u64);
         self.gc_reclaimed = self
             .gc_reclaimed
-            .saturating_add(before_young.saturating_sub(promoted) as u64);
-        // `young` drops here, reclaiming every nursery object that didn't tenure.
+            .saturating_add(before_young.saturating_sub(survivors) as u64);
+        // `young` drops here, reclaiming every nursery object that didn't survive.
     }
 
     /// A **major collection**: compact the old generation (a semi-space copy of
@@ -3355,15 +3431,35 @@ impl Heap {
             E(EnvId, u64),
         }
         // Generational: a LOCAL handle is checked against its own generation's
-        // epoch + slab length (nursery via `is_old()==false`, old otherwise). A
-        // `HashSet` of canonical handles (region+age+index) dedups across both
-        // spaces. We do *not* assert the no-old→young invariant here — the
-        // write-barrier `remembered` set legitimately carries transient old→young
-        // edges between a tenure-mid-bind and the next minor — only that every
-        // reachable handle is in-bounds and current for its generation.
+        // epoch + slab length (nursery via `is_old()==false`, old otherwise). The
+        // seen-sets are `[young, old]` bool vecs per kind (O(1) mark, not a
+        // `HashSet` — this runs every collection under GC_VERIFY, so it must not be
+        // the bottleneck on a large live graph). We do *not* assert the no-old→young
+        // invariant here — the write-barrier `remembered` set legitimately carries
+        // transient old→young edges between a tenure-mid-bind and the next minor —
+        // only that every reachable handle is in-bounds and current for its gen.
         let young_ep = self.local_epoch;
         let old_ep = self.old_epoch;
-        let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let mut seen_pair = [
+            vec![false; self.local.pairs.len()],
+            vec![false; self.old.pairs.len()],
+        ];
+        let mut seen_vec = [
+            vec![false; self.local.vectors.len()],
+            vec![false; self.old.vectors.len()],
+        ];
+        let mut seen_map = [
+            vec![false; self.local.maps.len()],
+            vec![false; self.old.maps.len()],
+        ];
+        let mut seen_clo = [
+            vec![false; self.local.closures.len()],
+            vec![false; self.old.closures.len()],
+        ];
+        let mut seen_env = [
+            vec![false; self.local.envs.len()],
+            vec![false; self.old.envs.len()],
+        ];
         let mut work: Vec<W> = Vec::new();
         for &v in extra_roots {
             work.push(W::V(v, 0));
@@ -3379,6 +3475,22 @@ impl Heap {
         }
         for &(_, v) in &self.dynamics {
             work.push(W::V(v, 0));
+        }
+        // The write-barrier `remembered` old frames are the *only* mutable old
+        // objects (they gained young bindings after tenuring). Seed their bindings
+        // as roots so a stale handle stored there is still checked, even though the
+        // walk below doesn't recurse into old-gen internals (see the `is_old`
+        // guards): old objects are immutable after promotion, so re-walking them
+        // every collection is redundant work — that redundancy is what made
+        // GC_VERIFY O(old) per collection and timed out the large-structure tests.
+        for &e in &self.remembered {
+            if e.is_old() {
+                if let Some(frame) = self.old.envs.get(e.index()) {
+                    for &(_, v) in &frame.vars {
+                        work.push(W::V(v, e.0));
+                    }
+                }
+            }
         }
         let bad = |kind: &str, is_old: bool, gen: u32, idx: usize, len: usize, parent: u64, raw: u64| {
             let (ep, space) = if is_old { (old_ep, "OLD") } else { (young_ep, "nursery") };
@@ -3404,7 +3516,7 @@ impl Heap {
                     Value::Pair(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
                         bad("pair", id.is_old(), id.generation(), id.index(), slabs.pairs.len(), parent, id.0);
-                        if seen.insert(id.0 & !((1u64 << 61) - (1u64 << 32))) {
+                        if !id.is_old() && !std::mem::replace(&mut seen_pair[id.is_old() as usize][id.index()], true) {
                             let (a, b) = slabs.pairs[id.index()];
                             work.push(W::V(a, id.0));
                             work.push(W::V(b, id.0));
@@ -3413,7 +3525,7 @@ impl Heap {
                     Value::Vector(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
                         bad("vector", id.is_old(), id.generation(), id.index(), slabs.vectors.len(), parent, id.0);
-                        if seen.insert(id.0 & !((1u64 << 61) - (1u64 << 32))) {
+                        if !id.is_old() && !std::mem::replace(&mut seen_vec[id.is_old() as usize][id.index()], true) {
                             for &el in &slabs.vectors[id.index()] {
                                 work.push(W::V(el, id.0));
                             }
@@ -3422,7 +3534,7 @@ impl Heap {
                     Value::Map(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
                         bad("map", id.is_old(), id.generation(), id.index(), slabs.maps.len(), parent, id.0);
-                        if seen.insert(id.0 & !((1u64 << 61) - (1u64 << 32))) {
+                        if !id.is_old() && !std::mem::replace(&mut seen_map[id.is_old() as usize][id.index()], true) {
                             let node = &slabs.maps[id.index()];
                             for &(mk, mv) in &node.data {
                                 work.push(W::V(mk, id.0));
@@ -3444,7 +3556,7 @@ impl Heap {
                     Value::Fn(id) | Value::Macro(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
                         bad("closure", id.is_old(), id.generation(), id.index(), slabs.closures.len(), parent, id.0);
-                        if seen.insert(id.0 & !((1u64 << 61) - (1u64 << 32))) {
+                        if !id.is_old() && !std::mem::replace(&mut seen_clo[id.is_old() as usize][id.index()], true) {
                             let cl = &slabs.closures[id.index()];
                             for arm in &cl.arms {
                                 for &f in &arm.body {
@@ -3467,7 +3579,7 @@ impl Heap {
                     }
                     let slabs = if e.is_old() { &self.old } else { &self.local };
                     bad("env", e.is_old(), e.generation(), e.index(), slabs.envs.len(), parent, e.0);
-                    if seen.insert(e.0 & !((1u64 << 61) - (1u64 << 32))) {
+                    if !e.is_old() && !std::mem::replace(&mut seen_env[e.is_old() as usize][e.index()], true) {
                         let frame = &slabs.envs[e.index()];
                         if let Some(p) = frame.parent {
                             work.push(W::E(p, e.0));
@@ -4109,9 +4221,17 @@ fn flush_map(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: MapId) ->
     fwd.maps.insert(key, new_idx as u32);
     let new_children: SmallVec<[MapId; 4]> = children_snapshot
         .iter()
-        .map(|&c| match c.region() {
-            LOCAL => flush_map(old, new, fwd, c),
-            _ => c,
+        .map(|&c| {
+            // Age-aware, like every other flush edge: a CHAMP trie built
+            // incrementally shares child nodes across a tenure boundary, so a
+            // child can be in the *other* generation than the node being copied.
+            // Only recurse into a child of the generation this pass is collecting;
+            // a child of the other age (or PRELUDE/RUNTIME) is left as-is.
+            if fwd.copies(c.region(), c.is_old()) {
+                flush_map(old, new, fwd, c)
+            } else {
+                c
+            }
         })
         .collect();
     let new_data: SmallVec<[(Value, Value); 4]> = data_snapshot
