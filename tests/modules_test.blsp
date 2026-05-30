@@ -1,7 +1,7 @@
 ;; Module system + path/string helpers (ADR-019). Register-only — discovered and
 ;; run by `brood test` (and cargo test, via crates/lisp/tests/suite.rs).
 
-(require 'test)
+(defmodule modules-test (:use test))
 
 (describe "strings: substring & affixes"
   (test "substring is char-indexed"

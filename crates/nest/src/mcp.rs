@@ -15,7 +15,7 @@
 //!
 //! - `initialize`            — return server info + capabilities.
 //! - `initialized` (notif)    — acknowledged, no reply.
-//! - `tools/list`            — call `(mcp-tools)` in the session's Brood image
+//! - `tools/list`            — call `(mcp/mcp-tools)` in the session's Brood image
 //!                             and project the catalogue to MCP's
 //!                             `{name, description, inputSchema}` shape.
 //! - `tools/call`            — convert the JSON `arguments` to a Brood map,
@@ -33,7 +33,7 @@
 //!
 //! One [`Interp`] for the connection's lifetime; the `def`s a `tools/call`
 //! creates promote into RUNTIME and survive between calls (the hot-reload
-//! contract, ADR-013). `(mcp-tools)` is re-evaluated on every `tools/list`
+//! contract, ADR-013). `(mcp/mcp-tools)` is re-evaluated on every `tools/list`
 //! and `tools/call`, so an agent that redefines the catalogue mid-session
 //! sees its own changes — agreed by design (`docs/mcp.md`).
 //!
@@ -222,7 +222,7 @@ fn initialize_result() -> Json {
 // `tools/list` + `tools/call`
 // ============================================================================
 
-/// Project the Brood-side tool catalogue (`(mcp-tools)`, in `std/mcp.blsp` —
+/// Project the Brood-side tool catalogue (`(mcp/mcp-tools)`, in `std/mcp.blsp` —
 /// and any project-side extensions step 3 introduces) to the JSON shape
 /// `tools/list` requires. A missing `std/mcp.blsp` (or any error) collapses
 /// to an empty list — the server stays useful, just with no tools yet.
@@ -240,7 +240,7 @@ fn list_tools(interp: &mut Interp) -> Vec<Json> {
     // even if a project hasn't defined its own MCP extensions yet.
     let _ = interp.eval_str("(require 'mcp)");
 
-    let tools = match interp.eval_str("(mcp-tools)") {
+    let tools = match interp.eval_str("(mcp/mcp-tools)") {
         Ok(v) => {
             interp.heap.push_root(v);
             project_tool_catalogue(&interp.heap, v).unwrap_or_default()
@@ -341,7 +341,7 @@ fn call_tool(interp: &mut Interp, params: &Json) -> Result<Json, RpcError> {
         // call (hot reload) reshapes the tool surface immediately.
         let _ = interp.eval_str("(require 'mcp)");
         let tools = interp
-            .eval_str("(mcp-tools)")
+            .eval_str("(mcp/mcp-tools)")
             .map_err(|_| RpcError::invalid_params(format!("no such tool: {name}")))?;
         interp.heap.push_root(tools);
 
@@ -880,7 +880,7 @@ mod tests {
     #[test]
     fn tools_list_returns_the_baked_std_catalogue() {
         // Step 3 ships `std/mcp.blsp` as a baked-in `EMBEDDED_MODULES` entry, so
-        // `(require 'mcp) (mcp-tools)` succeeds in a fresh `Interp` and the
+        // `(require 'mcp) (mcp/mcp-tools)` succeeds in a fresh `Interp` and the
         // dispatcher exposes the initial tool catalogue without any project setup.
         let mut interp = Interp::new();
         let resp = round_trip(
@@ -924,7 +924,7 @@ mod tests {
             .eval_str(
                 r#"
                 (provide 'mcp)
-                (defn mcp-tools ()
+                (defn mcp/mcp-tools ()
                   (list
                     {:name "echo"
                      :description "Echo the :msg argument back"
@@ -950,12 +950,12 @@ mod tests {
         let mut interp = Interp::new();
         // Same pattern as `tools_list_projects_a_brood_defined_catalogue`:
         // claim the feature so the dispatcher's `(require 'mcp)` is a no-op
-        // and our inline catalogue is what `(mcp-tools)` returns.
+        // and our inline catalogue is what `(mcp/mcp-tools)` returns.
         interp
             .eval_str(
                 r#"
                 (provide 'mcp)
-                (defn mcp-tools ()
+                (defn mcp/mcp-tools ()
                   (list
                     {:name "double"
                      :schema {:type "object" :properties {:n {:type "integer"}}}
@@ -993,7 +993,7 @@ mod tests {
             .eval_str(
                 r#"
                 (provide 'mcp)
-                (defn mcp-tools ()
+                (defn mcp/mcp-tools ()
                   (list
                     {:name "chatty"
                      :schema {:type "object" :properties {}}
@@ -1415,7 +1415,7 @@ mod tests {
 
     #[test]
     fn run_tests_structured_returns_a_structured_summary() {
-        // Drive the underlying `(run-tests-structured)` directly — invoking
+        // Drive the underlying `(test/run-tests-structured)` directly — invoking
         // the `run-tests` MCP tool would discover and run the workspace's
         // entire in-language suite (cwd-dependent), which is slow and
         // potentially recursive in CI. Register two inline tests and verify
@@ -1425,11 +1425,11 @@ mod tests {
             .eval_str(
                 r#"
                 (require 'test)
-                (test "always-ok" (assert= 1 1))
+                (test/test "always-ok" (test/assert= 1 1))
                 "#,
             )
             .unwrap();
-        let result = interp.eval_str("(run-tests-structured)").unwrap();
+        let result = interp.eval_str("(test/run-tests-structured)").unwrap();
         let printed = interp.print(result);
         // Pin the contract keys without counting (the test framework can
         // auto-register tests of its own across versions).
@@ -1440,7 +1440,7 @@ mod tests {
 
     #[test]
     fn std_check_tool_returns_structured_diagnostics_or_an_error() {
-        // After step 1c-a, `check` calls `(check-project-structured)` and
+        // After step 1c-a, `check` calls `(project/check-project-structured)` and
         // returns either `{:diagnostics [...]}` (when invoked from inside a
         // Brood project — the workspace root in `cargo test`'s cwd usually
         // is one) or `{:error msg}` (when it isn't). Either shape passes;
@@ -1591,7 +1591,7 @@ mod tests {
             .eval_str(
                 r#"
                 (provide 'mcp)
-                (defn mcp-tools ()
+                (defn mcp/mcp-tools ()
                   (list
                     {:name "blow-up"
                      :schema {:type "object" :properties {}}
@@ -1648,7 +1648,7 @@ mod tests {
             .eval_str(
                 r#"
                 (provide 'mcp)
-                (defn mcp-tools ()
+                (defn mcp/mcp-tools ()
                   (list
                     {:name "boom"
                      :schema {:type "object" :properties {}}

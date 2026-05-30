@@ -8,8 +8,7 @@
 ;; process); the final :isolated block adds explicit spawn/send/receive coverage
 ;; of the actor shell — and proves a buffer's rope stays inside its process.
 
-(require 'test)
-(require 'buffer)
+(defmodule buffer-test (:use test) (:use buffer))
 
 (describe "buffer construction & reads"
   (test "make-buffer"

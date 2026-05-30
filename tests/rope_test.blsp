@@ -10,7 +10,7 @@
 ;; its own green process), so even the single-process tests here exercise ropes
 ;; on multiple cores; the final :isolated block adds explicit spawn/send/receive.
 
-(require 'test)
+(defmodule rope-test (:use test))
 
 ;; ---- file-local helpers (defined once at load; survive :isolated rollback) ----
 

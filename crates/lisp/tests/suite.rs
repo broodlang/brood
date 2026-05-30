@@ -39,7 +39,7 @@ fn run_suite() {
         brood::core::alloc::TEST_DEFAULT_SOFT,
     );
     let mut interp = Interp::new();
-    if let Err(e) = interp.eval_str("(require 'project) (run-project-tests)") {
+    if let Err(e) = interp.eval_str("(require 'project) (project/run-project-tests)") {
         panic!("Brood test suite failed: {}", e);
     }
 }

@@ -2,7 +2,7 @@
 ;; doc, arglist, global-names, bound?. Register-only — discovered and run by
 ;; `brood test` (and cargo test, via crates/lisp/tests/suite.rs).
 
-(require 'test)
+(defmodule introspection-test (:use test))
 
 (describe "docstrings"
   (test "a leading string is a docstring when more body follows"
@@ -45,7 +45,7 @@
 (describe "global table introspection"
   (test "bound? reflects the global table"
     (defn a-defined-name () nil)
-    (is (bound? 'a-defined-name))
+    (is (bound? 'introspection-test/a-defined-name))
     (is (bound? 'map))
     ; a prelude binding
     (refute (bound? 'definitely-not-bound-xyz)))
@@ -53,7 +53,7 @@
   (test "global-names includes prelude and user definitions"
     (defn another-name () nil)
     (is (member? 'map (global-names)))
-    (is (member? 'another-name (global-names)))))
+    (is (member? 'introspection-test/another-name (global-names)))))
 
 ;; source-location (ADR-031; docs/lsp.md §Cross-file): loading a file records
 ;; where each *top-level* def/defn/defmacro was defined, so tooling can answer
@@ -62,11 +62,11 @@
 (defn sl-subject (x) (* x x))
 ;; Sends the parent its own view of the site, to prove a spawned process sees the
 ;; same shared def-site table (it lives in the runtime code region, like globals).
-(defn sl-worker (parent) (send parent (source-location 'sl-subject)))
+(defn sl-worker (parent) (send parent (source-location 'introspection-test/sl-subject)))
 
 (describe "source-location (cross-file def sites)"
   (test "records a top-level defn's site in this file"
-    (let (loc (source-location 'sl-subject))
+    (let (loc (source-location 'introspection-test/sl-subject))
       (refute (nil? loc))
       (is (vector? loc))
       (assert= (count loc) 3)
@@ -86,7 +86,7 @@
   (test "the site is visible from a spawned process (shared runtime code)"
     (let (me (self) w (spawn (sl-worker me)))
       ;; the worker's copied-across value equals the parent's own lookup
-      (assert= (receive) (source-location 'sl-subject)))))
+      (assert= (receive) (source-location 'introspection-test/sl-subject)))))
 
 ;; Discovery over the flat namespace (std/prelude.blsp): apropos matches names,
 ;; doc-search matches docstrings, all-globals lists everything. Built on the

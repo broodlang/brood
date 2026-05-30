@@ -8,7 +8,7 @@
 ;; link/trap/propagate is exercised across cores; the `:isolated` block at the end
 ;; stresses a propagation chain concurrently.
 
-(require 'test)
+(defmodule link-test (:use test))
 
 ;; file-local worker bodies (tail-recursive — a test runs in a small-stack proc)
 (defn lk-park () (receive (:never :x)))           ; parks forever

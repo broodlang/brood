@@ -48,7 +48,7 @@ struct Cli {
     files: Vec<String>,
 
     /// Run the file(s) as a single in-language test suite (registers each
-    /// `deftest`, then calls `(run-tests)` once). For project-wide discovery
+    /// `deftest`, then calls `(test/run-tests)` once). For project-wide discovery
     /// use `nest test`.
     #[arg(long, conflicts_with = "check")]
     test: bool,
@@ -129,14 +129,14 @@ fn run(cli: Cli) {
         return;
     }
 
-    // The REPL is now Brood (`std/repl.blsp`): bootstrap into `(repl-run)`. On a
+    // The REPL is now Brood (`std/repl.blsp`): bootstrap into `(repl/repl-run)`. On a
     // TTY it raw-mode edits (std/lineedit.blsp); piped input keeps `read-line`.
     // The guard restores the terminal on a panic unwind (the Brood `term-raw-leave`
     // is the normal teardown); scope it so it drops before any error report + exit
     // (`process::exit` skips Drop). Restore is idempotent.
     let result = {
         let _guard = TermGuard;
-        interp.eval_str("(require 'repl) (repl-run)")
+        interp.eval_str("(require 'repl) (repl/repl-run)")
     };
     if let Err(e) = result {
         report_error(&e);
@@ -207,7 +207,7 @@ fn run_test_files(interp: &mut Interp, files: &[String]) {
             }
         }
     }
-    if let Err(e) = interp.eval_str("(run-tests)") {
+    if let Err(e) = interp.eval_str("(test/run-tests)") {
         report_error(&e);
         std::process::exit(1);
     }

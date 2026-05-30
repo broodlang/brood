@@ -12,7 +12,8 @@ in `std/project.blsp`; Rust supplies only that mechanism (ADR-006).
 Attribution uses a `(global-names)` delta around loading the module, so it can't
 document a module already loaded before the snapshot (the delta is empty). For
 that reason `project` is required lazily, inside `document-project`, rather than
-at the top — keeping it out of the snapshot when it is itself the doc target.")
+at the top — keeping it out of the snapshot when it is itself the doc target."
+  (:use project))
 
 ;; --- module source + leading docstring ---------------------------------------
 
@@ -111,12 +112,12 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
 (defn document-project ()
   "The Markdown documentation for the whole project (every source file under it), found from the cwd. Errors if not in a project."
   (require 'project)
-  ; project--find-root / --collect-sources / project-setup
-  (let (root (project--find-root (cwd)))
+  ; project/project--find-root / --collect-sources / project-setup
+  (let (root (project/project--find-root (cwd)))
     (when (nil? root) (error "doc: not in a Brood project (no project.blsp found from " (cwd) ")"))
     (project-setup root)
-    (let (dirs (project--abs-paths root *project-source-paths*)
-          files (fold (fn (acc d) (append acc (project--collect-sources d))) nil dirs))
+    (let (dirs (project/project--abs-paths root *project-source-paths*)
+          files (fold (fn (acc d) (append acc (project/project--collect-sources d))) nil dirs))
       (fold (fn (acc f) (str acc (document-file f) "\n")) "" files))))
 
 ;; --- the complete builtin/prelude reference (`nest doc --all`) ---------------

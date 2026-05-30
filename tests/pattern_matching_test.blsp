@@ -15,7 +15,7 @@
 ;; `match`) or `(eval (read-string "…"))` (for `let`/`fn`, which lower in the
 ;; compile pass, not the `macroexpand` builtin).
 
-(require 'test)
+(defmodule pattern-matching-test (:use test))
 
 ;; ─────────────────────────────────────────────────────────────────────────────
 ;; LITERALS — matched by `=` (type-sensitive)

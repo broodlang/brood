@@ -7,25 +7,24 @@
 ;; isolate it from here without changing the working directory. The hand-run
 ;; equivalent — `nest new foo && cd foo && nest run` — is the integration check.
 
-(require 'test)
-(require 'project)
+(defmodule project-test (:use test) (:use project))
 
 (describe "project: :main parsing"
   (test "a bare symbol defaults the fn name to `main`"
-    (assert= (project--parse-main 'foo) '(foo main)))
+    (assert= (project/project--parse-main 'foo) '(foo main)))
   (test "a 2-list of symbols is taken as (module fn)"
-    (assert= (project--parse-main '(foo bar)) '(foo bar)))
+    (assert= (project/project--parse-main '(foo bar)) '(foo bar)))
   (test "a 1-list is rejected"
     (assert= "project: :main must be a module symbol or '(module fn), got (foo)"
-      (try (project--parse-main '(foo)) (catch e e))))
+      (try (project/project--parse-main '(foo)) (catch e e))))
   (test "a 3-list is rejected"
     (assert= "project: :main must be a module symbol or '(module fn), got (foo bar baz)"
-      (try (project--parse-main '(foo bar baz)) (catch e e))))
+      (try (project/project--parse-main '(foo bar baz)) (catch e e))))
   (test "a non-symbol head is rejected"
-    (is (string? (try (project--parse-main '("foo" main)) (catch e e)))))
+    (is (string? (try (project/project--parse-main '("foo" main)) (catch e e)))))
   (test "a non-symbol fn is rejected"
-    (is (string? (try (project--parse-main '(foo "main")) (catch e e)))))
-  (test "a string is rejected" (is (string? (try (project--parse-main "main") (catch e e))))))
+    (is (string? (try (project/project--parse-main '(foo "main")) (catch e e)))))
+  (test "a string is rejected" (is (string? (try (project/project--parse-main "main") (catch e e))))))
 
 (describe "project: default entry"
   (test "*project-main* defaults to (main main)"
@@ -36,30 +35,30 @@
 
 (describe "project: :dependencies parsing (ADR-037)"
   (test "a :git entry normalises to a dep map"
-    (assert= (project--parse-dep '[parser :git "https://example.com/p.git" :ref "v1.2.0"])
+    (assert= (project/project--parse-dep '[parser :git "https://example.com/p.git" :ref "v1.2.0"])
       {:name 'parser :kind :git :url "https://example.com/p.git" :ref "v1.2.0"}))
   (test "a :path entry normalises to a dep map"
-    (assert= (project--parse-dep '[shared :path "../shared"])
+    (assert= (project/project--parse-dep '[shared :path "../shared"])
       {:name 'shared :kind :path :path "../shared"}))
   (test "parse-deps maps over the whole vector"
-    (assert= (project--parse-deps '[[a :path "../a"] [b :path "../b"]])
+    (assert= (project/project--parse-deps '[[a :path "../a"] [b :path "../b"]])
       (list {:name 'a :kind :path :path "../a"} {:name 'b :kind :path :path "../b"})))
   (test "nil dependencies parse to nil"
-    (assert= (project--parse-deps nil) nil))
+    (assert= (project/project--parse-deps nil) nil))
   (test "a non-vector :dependencies value is rejected"
-    (is (string-contains? (try (project--parse-deps '(a b)) (catch e e)) "must be a vector")))
+    (is (string-contains? (try (project/project--parse-deps '(a b)) (catch e e)) "must be a vector")))
   (test "a non-symbol dep name is rejected"
-    (is (string-contains? (try (project--parse-dep '["parser" :path "../p"]) (catch e e)) "must be a symbol")))
+    (is (string-contains? (try (project/project--parse-dep '["parser" :path "../p"]) (catch e e)) "must be a symbol")))
   (test "an unknown source kind is rejected"
-    (is (string-contains? (try (project--parse-dep '[parser :svn "../p"]) (catch e e)) "must be :git or :path")))
+    (is (string-contains? (try (project/project--parse-dep '[parser :svn "../p"]) (catch e e)) "must be :git or :path")))
   (test "a :git dep without a :ref is rejected"
-    (is (string-contains? (try (project--parse-dep '[parser :git "https://x.git"]) (catch e e)) "needs a :ref")))
+    (is (string-contains? (try (project/project--parse-dep '[parser :git "https://x.git"]) (catch e e)) "needs a :ref")))
   (test "a reserved opt is rejected so the manifest stays forward-compatible"
     (is (string-contains?
-          (try (project--parse-dep '[parser :git "https://x.git" :ref "v1" :branch "main"]) (catch e e))
+          (try (project/project--parse-dep '[parser :git "https://x.git" :ref "v1" :branch "main"]) (catch e e))
           "reserved for a future version")))
   (test "an entry that is too short is rejected"
-    (is (string-contains? (try (project--parse-dep '[parser :path]) (catch e e)) "too short"))))
+    (is (string-contains? (try (project/project--parse-dep '[parser :path]) (catch e e)) "too short"))))
 
 ;; `:isolated` runs against a rolled-back private copy of the globals (ADR-017),
 ;; so the *project-* globals this clobbers via `(project ...)` don't leak.
@@ -74,9 +73,9 @@
 
 (describe "project: scaffold templates (ADR-037)"
   (test "the .gitignore template ignores the package cache"
-    (is (string-contains? (project--gitignore-template) "_deps/")))
+    (is (string-contains? (project/project--gitignore-template) "_deps/")))
   (test "the manifest template documents how to add :dependencies"
-    (let (m (project--manifest-template "demo"))
+    (let (m (project/project--manifest-template "demo"))
       (is (string-contains? m ":dependencies"))
       ;; still a valid manifest: the first form is the (project …) call
       (let (form (read-string m))
@@ -84,12 +83,12 @@
         (assert= (plist-get (rest form) :name) "demo")))))
 
 (describe "project: duplicate global detection (flat namespace)"
-  (test "project--file-def-names extracts top-level def-style names (and skips defmodule)"
+  (test "project/project--file-def-names extracts top-level def-style names (and skips defmodule)"
     (let (dir (path-join "/tmp" (name (gensym "brood-dup-"))))
       (make-dir dir)
       (let (f (path-join dir "a.blsp"))
         (spit f "(defmodule a \"x\")\n(defn main () 1)\n(def k 2)\n(defmacro m (x) x)\n(defdyn *d* 0)\n(defn helper (y) y)\n")
-        (assert= (sort (project--file-def-names f))
+        (assert= (sort (project/project--file-def-names f))
           (sort ["*d*" "helper" "k" "m" "main"])))))
   (test "a name in two files is flagged once; unique names are not"
     (let (dir (path-join "/tmp" (name (gensym "brood-dup-"))))
@@ -97,7 +96,7 @@
       (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
         (spit fa "(defn main () 1)\n(defn only-a () 1)\n")
         (spit fb "(defn main () 2)\n(defn only-b () 2)\n")
-        (let (warns (project--duplicate-def-warnings [fa fb]))
+        (let (warns (project/project--duplicate-def-warnings [fa fb]))
           (assert= (count warns) 1)
           (is (string-contains? (first warns) "main"))
           (refute (string-contains? (first warns) "only-a"))))))
@@ -107,4 +106,4 @@
       (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
         (spit fa "(defn alpha () 1)\n")
         (spit fb "(defn beta () 2)\n")
-        (assert= (project--duplicate-def-warnings [fa fb]) nil)))))
+        (assert= (project/project--duplicate-def-warnings [fa fb]) nil)))))

@@ -123,6 +123,36 @@ round-trips. Two faster moves:
   | a built-in RNG (`rand`) | `rng`/`rand-int`/`rand-float`/`shuffle`/`sample` — pure & seedable, return `[value next-seed]`; thread the seed through your state |
   | a set / `#{}` | `(require 'set)` → a set is a **map of `element → true`**: membership `(contains? s x)`, elements `(keys s)`, size `(count s)`; the module adds `(set coll)` (dedups), `conj`/`disj`, `union`/`intersection`/`difference`/`subset?`. No `#{}` literal or `set?` yet — test with `map?`. |
 
+## When to reach for a process (vs staying pure)
+
+Immutability rightly makes pure functions the default — but don't let that
+over-rotate into avoiding concurrency where it's the *idiom*. Reach for a
+**process** (`spawn`/`send`/`receive`) when you have:
+
+- **Long-lived evolving state** — a counter, cache, or session that changes over
+  time. A process holding state in its `receive` loop is *the* way to express
+  mutable state (there are no atoms/cells — trap #1). The packaged form is a
+  gen-server-style actor (`std/hatch`).
+- **CPU fan-out across cores** — an embarrassingly-parallel computation big
+  enough to beat the spawn + copy-on-send overhead. Split the work, `spawn` a
+  worker per band, fan results back in with `receive`. Small inputs won't pay for
+  it — `(bench …)` the sequential version first; don't assume a win.
+- **I/O multiplexing** — several blocking sources (sockets, timers, a TUI input
+  stream) handled at once: one process per source, a coordinator `receive`s.
+
+Otherwise **stay pure**: a self-contained transform, one render frame, a one-shot
+computation — a tail loop or `fold`/`map` is simpler and easier to test.
+
+**The old "concurrency is risky here" caution is retired.** The multi-thread
+scheduler race that once made spawned workers unsafe (KI-1/KI-2 — the
+`render-concurrent` revert) is **fixed** (2026-05-29), and the GC now roots every
+eval site, so concurrent code is safe to write again. Messages **deep-copy**
+across per-process heaps (share-nothing), so a value you `send` is independent in
+the receiver — there are no shared-mutation hazards by construction. Test it with
+spawn-N-then-collect (fan workers out, `receive` the results, assert on the
+aggregate); reserve `:isolated` for tests that need their own process for
+*memory* reasons, not for safety.
+
 ## Before finishing
 
 - Recursion in hot/iterative paths is **tail** recursion (last thing the

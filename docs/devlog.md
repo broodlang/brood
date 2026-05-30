@@ -8733,3 +8733,82 @@ under `BROOD_GC_STRESS=1`; full worktree `cargo test` green.
 divergences + parity item #4 ✅), this entry. Now the only OTP-parity gap left is a
 `terminate/2`-style worker cleanup hook. **Still in the `links-trap-exit`
 worktree** — not merged to `main`.
+
+---
+
+## 2026-05-30 — Namespaces: import-aware checker + first std module migrated
+
+**Goal.** Start the rollout: the import-aware checker (so migration isn't noisy)
+and prove the `defmodule`→namespace migration pattern on a leaf module.
+
+**Built.**
+- `types/check.rs`: `check_file` now evaluates the `(ns …)`/`(defmodule …)` header
+  during pass 1 (recognised on the un-expanded form via `is_ns_header`), so its
+  `(require …)`/`%refer`/`%in-ns` run — populating the import table. A
+  `(:use …)`-imported name now resolves in the checker instead of drawing an
+  advisory `unbound` warning. (Same eval-during-check policy as `require`.)
+- `std/set.blsp`: `(defmodule set …)` → `(ns set …)` — the first migrated std
+  module. Its functions are now `set/set`/`set/union`/… (verified bare `union` is
+  no longer a root global).
+- `tests/set_test.blsp`: `(require 'set)` → `(ns set-test (:use set))` (keeps
+  `(require 'test)` — the framework is still root). `--check` is clean; 14/14.
+
+**Pattern proven** (for the remaining ~27 modules): header `defmodule X` → `ns X`
+(defs auto-namespace; intra-module refs auto-resolve), consumers become namespaces
+that `(:use X)` (refer-all keeps call sites unchanged) or qualify. The final
+`ns`→`defmodule` rename + tooling update happens once no root `defmodule` remains.
+
+**Next.** Grind the rest of `std/` leaf-out; namespace `test` + the 42 test files;
+then the rename/unify; then α (cross-ns macro hygiene), LSP, packages.
+
+## 2026-05-30 — Namespaces: the big-bang (unify `defmodule` = namespace, migrate everything, α)
+
+**Goal.** Finish namespaces in one pass: make `defmodule` *the* namespace form
+(drop `ns`), migrate all of `std/` + every test file, and ship α (cross-ns macro
+hygiene) — accepting a large, briefly-broken tree mid-migration rather than a long
+incremental drip. Land it green: full Rust suite + the in-language suite (962/962).
+
+**Built.**
+- **`defmodule` *is* the namespace form.** The `ns` macro (`std/prelude.blsp`) was
+  renamed to `defmodule`; `ns` dropped. `defmodule` parses `(:use mod)` /
+  `(:use mod :refer [a b])` clauses (`defmodule--use-clause`/`defmodule--use-forms`),
+  emits `%in-ns` + `provide`, and keeps `*module-docs*`. No root `defmodule` remains.
+- **α — auto-qualifying quasiquote** (`eval/macros.rs`). The resolver's `resolve_list`
+  now skips only `quote`, **not** `quasiquote`: it descends quasiquote templates and
+  qualifies free reference-position symbols to the defining `compile_ns`. So a
+  namespaced macro's `` `(helper ~x) `` emits `a/helper` and is correct in any consumer
+  namespace — closing the β-interim wall that broke `test/describe`'s bare helper
+  emission in consumers. `~expr` resolves as ordinary code; `'foo` / `` `(quote foo) ``
+  escape to a bare data symbol.
+- **Earmuff rule.** `*foo*` names are treated as ambient/root and never namespaced
+  (`is_ambient` checked first in `resolve_sym`; `qualify_name`/`def_form_name` skip
+  them). Keeps `defdyn` vars, `*load-path*`, `*features*` reachable unqualified from
+  inside any namespace — a `(def *load-path* …)` in a namespace no longer shadows root.
+- **All `std/` migrated leaf-out** — every module is `(defmodule X (:use …))`;
+  cross-module refs qualified or imported. **`test` is namespaced**, so 40+ test files
+  declare `(defmodule x-test (:use test) …)`.
+- **Special cases.** Keymap/dispatch tables hold *quoted* handler symbols, which α
+  doesn't reach (data) — hand-qualified (`'lineedit/…`, `'observer/observe-cmd-…`).
+  The `project` manifest is read as **data** (`project-setup` does
+  `(project--apply (read-string (slurp mf)))`) rather than evaluating a namespaced
+  macro. The project↔package circular `:use` was broken by dropping project's
+  `(:use package)` and making `ensure-deps` a lazy `package/ensure-deps` call.
+- **Rust call sites qualified** — `repl/repl-run`, `test/run-tests`,
+  `project/run-project-tests`, `mcp/mcp-tools`, `observer/observe-serve`, … across
+  `crates/cli`, `crates/nest`, and the Rust test files.
+
+**Verification.** Full `cargo test` green; in-language suite 962/962;
+`cargo clippy --all-targets --all-features` clean (gui feature included).
+
+**Net.** Namespaces are done through inc-3 + α. Left open (additive): LSP Tier 2 and
+ns-name collision policy. See [`namespaces.md`](namespaces.md), ADR-065/066.
+
+## 2026-05-30 — Merge: links/trap_exit + DynamicSupervisor onto the namespaces+generational-GC trunk
+
+Merged `links-trap-exit` (ADR-067 + the runtime child API) into `main` after the
+namespaces big-bang and generational GC landed. Kernel pieces merged clean
+(`main` never touched `process/scheduler.rs`/`mailbox.rs`); the only textual
+conflict was this devlog's tail. Post-merge migration to the new namespace form:
+`link_test.blsp` → `(defmodule link-test (:use test))`; `supervisor.blsp` verified
+under `defmodule`-is-a-namespace. Full `cargo test` + the in-language suite green
+on the merge; link/supervisor suites re-checked under `BROOD_GC_STRESS`/`VERIFY`.

@@ -1270,10 +1270,10 @@ fn reset_units_prevents_reload_double_count() {
     interp.eval_str("(require 'test)").expect("require test");
     // Simulate a test file loaded twice into one image: two registrations.
     interp
-        .eval_str(r#"(reset-units!) (test "t" (is true)) (test "t" (is true))"#)
+        .eval_str(r#"(test/reset-units!) (test/test "t" (test/is true)) (test/test "t" (test/is true))"#)
         .expect("register twice");
     let doubled = interp
-        .eval_str("(get (run-tests-structured) :total)")
+        .eval_str("(get (test/run-tests-structured) :total)")
         .expect("run twice-registered");
     assert_eq!(
         interp.print(doubled),
@@ -1282,10 +1282,10 @@ fn reset_units_prevents_reload_double_count() {
     );
     // The fix: reset before the (re)load clears the stale registrations.
     interp
-        .eval_str(r#"(reset-units!) (test "t" (is true))"#)
+        .eval_str(r#"(test/reset-units!) (test/test "t" (test/is true))"#)
         .expect("reset then register once");
     let single = interp
-        .eval_str("(get (run-tests-structured) :total)")
+        .eval_str("(get (test/run-tests-structured) :total)")
         .expect("run once-registered");
     assert_eq!(
         interp.print(single),

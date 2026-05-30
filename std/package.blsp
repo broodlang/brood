@@ -10,7 +10,7 @@
 ;; to a path-dep's tree are live. `:git` deps (the _deps/ cache + clone) land in
 ;; Slice 2 and error cleanly here.
 ;;
-;; Manifest parsing (`project--parse-deps`) lives in std/project.blsp — the manifest
+;; Manifest parsing (`project/project--parse-deps`) lives in std/project.blsp — the manifest
 ;; owner — and we reuse it both for the root manifest and for each dep's own.
 
 (require 'project)
@@ -19,7 +19,9 @@
   "The package manager behind `nest fetch` (ADR-037). Resolves the project's
 :dependencies into a flat, transitively-closed lock file and puts each dep's
 source on *load-path*. Slice 1 handles `:path` (local/sibling) deps; `:git` deps
-land in a later slice.")
+land in a later slice."
+  (:use format)
+  (:use project))
 
 ;; --- canonical directory content hash (ADR-037 reproducibility) --------------
 ;; A directory's hash is Brood over the single `%sha256` primitive: walk files in
@@ -61,7 +63,7 @@ land in a later slice.")
     nil
     (let (form (read-string (slurp manifest-path)))
       (if (and (pair? form) (= (first form) 'project))
-        (project--parse-deps (plist-get (rest form) :dependencies))
+        (project/project--parse-deps (plist-get (rest form) :dependencies))
         nil))))
 
 ;; --- resolution --------------------------------------------------------------
@@ -169,7 +171,7 @@ land in a later slice.")
 ;; Locate the project root, load its manifest (so *project-dependencies* is set),
 ;; and hand the root to `body-fn`. Shared preamble for the verbs below.
 (defn package--in-project (body-fn)
-  (let (root (project--find-root (cwd)))
+  (let (root (project/project--find-root (cwd)))
     (when (nil? root) (error "package: not inside a Brood project (no project.blsp found)"))
     (when (file-exists? (path-join root "project.blsp")) (load (path-join root "project.blsp")))
     (body-fn root)))
@@ -222,7 +224,7 @@ land in a later slice.")
 ;; These mutate project.blsp's :dependencies clause while preserving the rest of
 ;; the file — crucially its comments. We do it over the lossless CST (parse-source
 ;; + std/format.blsp): parse → splice an entry node in/out of the :dependencies
-;; vector → re-render with `format-source--root` (which keeps comments). The
+;; vector → re-render with `format/format-source--root` (which keeps comments). The
 ;; manifest is reformatted in the process, which is fine for a tool-managed file.
 ;; The pure text transforms (`package--manifest-add`/`-remove`) take a manifest
 ;; string and return a new one, so they unit-test without touching the filesystem.
@@ -305,7 +307,7 @@ land in a later slice.")
 (defn package--manifest-transform (src f)
   (require 'format)
   (let (kids (vec->list (node-children (parse-source src))))
-    (format-source--root
+    (format/format-source--root
       (apply vector (map (fn (n) (if (package--project-list? n) (f n) n)) kids)))))
 
 (defn package--manifest-add (src entry-node)
@@ -328,7 +330,7 @@ land in a later slice.")
   "Add a dependency to project.blsp and re-lock. `nm` is the require-name; `spec` is `:path PATH` or `:git URL :ref REF` (strings). :git lands in Slice 2. Backs `nest add`."
   (package--in-project
     (fn (root)
-      (let (dep (project--parse-dep (apply vector (cons (symbol nm) (map package--spec-token spec)))))
+      (let (dep (project/project--parse-dep (apply vector (cons (symbol nm) (map package--spec-token spec)))))
         (when (not (= (get dep :kind) :path))
           (error "package: `nest add` supports :path deps for now (git lands in Slice 2)"))
         (when (package--has-dep? *project-dependencies* (get dep :name))

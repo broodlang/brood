@@ -33,7 +33,9 @@ C-d, C-l, arrows, Home/End, and ↑/↓ (or C-p/C-n) history; it returns
 `{:line <str|nil> :eof <bool> :cancel <bool>}`.
 
 Built on `std/highlight.blsp` (pure analysis) and the inline `term-*` seam.
-`std/repl.blsp` calls it on a TTY in place of `read-line`.")
+`std/repl.blsp` calls it on a TTY in place of `read-line`."
+  (:use highlight)
+  (:use keymap))
 
 (require 'highlight)
 (require 'keymap)
@@ -315,36 +317,36 @@ globals by default; a project can rebind it to complete its own vocabulary)."
 ;; A key not bound here self-inserts (a 1-char string) or is ignored. (Plain `def`
 ;; takes no docstring — keep this as a comment, not a string before the map.)
 (def *lineedit-keymap*
-  {:enter 'lineedit-submit
-   :ctrl-c 'lineedit-cancel
-   :ctrl-d 'lineedit-eof-or-delete
-   :backspace 'lineedit-delete-backward
-   :ctrl-h 'lineedit-delete-backward
-   :delete 'lineedit-delete-forward
-   :left 'lineedit-backward-char
-   :ctrl-b 'lineedit-backward-char
-   :right 'lineedit-forward-char
-   :ctrl-f 'lineedit-forward-char
-   :home 'lineedit-beginning-of-line
-   :ctrl-a 'lineedit-beginning-of-line
-   :end 'lineedit-end-of-line
-   :ctrl-e 'lineedit-end-of-line
-   :alt-f 'lineedit-forward-word
-   :alt-b 'lineedit-backward-word
-   :ctrl-k 'lineedit-kill-line
-   :ctrl-u 'lineedit-kill-to-start
-   :ctrl-w 'lineedit-kill-word-backward
-   :alt-d 'lineedit-kill-word-forward
-   :ctrl-y 'lineedit-yank
-   :ctrl-t 'lineedit-transpose-chars
-   :up 'lineedit-history-prev
-   :ctrl-p 'lineedit-history-prev
-   :down 'lineedit-history-next
-   :ctrl-n 'lineedit-history-next
-   :ctrl-l 'lineedit-clear-screen
-   :ctrl-r 'lineedit-reverse-search
-   :tab 'lineedit-complete
-   :back-tab 'lineedit-complete})
+  {:enter 'lineedit/lineedit-submit
+   :ctrl-c 'lineedit/lineedit-cancel
+   :ctrl-d 'lineedit/lineedit-eof-or-delete
+   :backspace 'lineedit/lineedit-delete-backward
+   :ctrl-h 'lineedit/lineedit-delete-backward
+   :delete 'lineedit/lineedit-delete-forward
+   :left 'lineedit/lineedit-backward-char
+   :ctrl-b 'lineedit/lineedit-backward-char
+   :right 'lineedit/lineedit-forward-char
+   :ctrl-f 'lineedit/lineedit-forward-char
+   :home 'lineedit/lineedit-beginning-of-line
+   :ctrl-a 'lineedit/lineedit-beginning-of-line
+   :end 'lineedit/lineedit-end-of-line
+   :ctrl-e 'lineedit/lineedit-end-of-line
+   :alt-f 'lineedit/lineedit-forward-word
+   :alt-b 'lineedit/lineedit-backward-word
+   :ctrl-k 'lineedit/lineedit-kill-line
+   :ctrl-u 'lineedit/lineedit-kill-to-start
+   :ctrl-w 'lineedit/lineedit-kill-word-backward
+   :alt-d 'lineedit/lineedit-kill-word-forward
+   :ctrl-y 'lineedit/lineedit-yank
+   :ctrl-t 'lineedit/lineedit-transpose-chars
+   :up 'lineedit/lineedit-history-prev
+   :ctrl-p 'lineedit/lineedit-history-prev
+   :down 'lineedit/lineedit-history-next
+   :ctrl-n 'lineedit/lineedit-history-next
+   :ctrl-l 'lineedit/lineedit-clear-screen
+   :ctrl-r 'lineedit/lineedit-reverse-search
+   :tab 'lineedit/lineedit-complete
+   :back-tab 'lineedit/lineedit-complete})
 
 (defn lineedit-bind (key cmd)
   "Bind `key` (a keyword like `:ctrl-x`, or a 1-char string) to command symbol `cmd`

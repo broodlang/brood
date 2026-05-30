@@ -5,7 +5,7 @@
 ;; :isolated block adds explicit spawn/send/fan-in coverage. Register-only —
 ;; discovered and run by `nest test` / cargo test.
 
-(require 'test)
+(defmodule sequence-test (:use test))
 
 (describe "range"
   (test "(range hi) counts 0..hi-1"
