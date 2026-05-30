@@ -1691,21 +1691,41 @@ the feature. Put it first in the file. e.g. (defmodule hatch \"A gen_server …\
   "The docstring declared by `(defmodule mod …)` (a symbol or string), or nil."
   (get *module-docs* (name mod)))
 
-;; `(ns foo "doc")` — like `defmodule`, but also compiles the *rest of the file*
-;; into namespace `foo` (ADR-065): each `def`/`defn`/`defmacro` defines `foo/name`,
-;; and a bare reference resolves to `foo/name` if this namespace defines it, else
-;; falls back to the root namespace (the prelude). Put it first in the file; one
-;; `ns` per file. The `%in-ns` primitive sets the namespace the resolver pass reads.
-;; e.g. (ns observer "process viewer").
+;; The `(require …)`+`(%refer …)` forms for one `(:use mod [:refer [a b]])` clause:
+;; load the module, then import its names. `:refer [a b]` imports just those;
+;; otherwise all of `mod`'s public (non-`--`) names. Used at `ns` expand time.
+(defn ns--use-clause (clause)
+  (let (mod (second clause)
+         opts (rest (rest clause))
+         subset (if (= (first opts) :refer) (second opts) nil))
+    (list (list 'require (list 'quote mod))
+          (list '%refer (list 'quote mod) (list 'quote subset)))))
+
+;; All require/refer forms for the `(:use …)` clauses in an `ns` header (skipping
+;; the optional docstring / any non-`:use` form), flattened for splicing.
+(defn ns--use-forms (clauses)
+  (apply concat
+    (map ns--use-clause
+      (filter (fn (c) (and (pair? c) (= (first c) :use))) clauses))))
+
+;; `(ns foo "doc" (:use bar) (:use baz :refer [a b]))` — like `defmodule`, but also
+;; compiles the *rest of the file* into namespace `foo` (ADR-065): each
+;; `def`/`defn`/`defmacro` defines `foo/name`, and a bare reference resolves to
+;; `foo/name` if this namespace defines it, then to a `(:use …)` import, then falls
+;; back to root (the prelude). A `(:use mod)` clause refers `mod`'s public names
+;; bare; `(:use mod :refer [a b])` refers just `a`/`b`. Put it first; one `ns` per
+;; file. e.g. (ns observer "process viewer" (:use display)).
 (defmacro ns (nsname & more)
-  "Declare namespace `nsname` (a symbol) and compile the rest of the file into it —
-definitions become `nsname/name`; bare references resolve there, then fall back to
-root. Records an optional docstring and `provide`s the feature. Put it first."
+  "Declare namespace `nsname` and compile the rest of the file into it — definitions
+become `nsname/name`; bare references resolve there, then through `(:use …)` imports,
+then root. Records an optional docstring and `provide`s the feature. Put it first."
   (let (key (name nsname)
-         doc (if (string? (first more)) (first more) nil))
+         doc (if (string? (first more)) (first more) nil)
+         clauses (if (string? (first more)) (rest more) more))
     `(do (def *module-docs* (assoc *module-docs* ~key ~doc))
          (provide ~key)
-         (%in-ns '~nsname))))
+         (%in-ns '~nsname)
+         ~@(ns--use-forms clauses))))
 
 ;; First existing <filename> across the load-path dirs, or nil.
 (defn require--find (filename dirs)

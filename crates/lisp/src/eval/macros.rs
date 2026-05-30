@@ -321,9 +321,13 @@ fn resolve_sym(heap: &Heap, s: value::Symbol, ns_name: &str, locals: &[value::Sy
     if name.contains('/') {
         return s; // already qualified
     }
+    // Own namespace first (a same-named local def shadows an import), then a
+    // `(:use …)` import, then root/prelude fall-through (left bare).
     let qsym = value::intern(&format!("{}/{}", ns_name, name));
     if heap.ns_knows_name(s) || heap.env_get(value::EnvId::GLOBAL, qsym).is_some() {
         qsym
+    } else if let Some(imported) = heap.import_of(s) {
+        imported
     } else {
         s
     }

@@ -3912,12 +3912,18 @@ tooling" (`BROOD_GC_VERIFY` — how the six sites were found).
 
 ## ADR-065 — Namespaces: expand-time resolution over the flat table, soft privacy
 
-**Status:** accepted; **increment 1 implemented** (2026-05-30) — the substrate
-(`(ns …)` form, the resolver pass, per-process `compile_ns`, forward-ref pre-scan,
-qualified def-site keying, ns-aware advisory checker) is in and tested. Imports /
-auto-require (inc-2), macro free-ref resolution / **α** (inc-3), LSP Tier 2
-(inc-4), and package ns-collision policy (inc-5) remain. Full design in
-[`namespaces.md`](namespaces.md). Supersedes the "deferred, point-2-only" stance
+**Status:** accepted; **increments 1–2 implemented** (2026-05-30). Inc-1: the
+substrate (`(ns …)` form, resolver pass, per-process `compile_ns`, forward-ref
+pre-scan, qualified def-site keying, ns-aware advisory checker). Inc-2: `(:use …)`
+imports + auto-require — a per-file `Heap.imports` table the resolver consults
+after the current namespace and before root; `%refer` enumerates a module's public
+(non-`--`) names or a `:refer` subset; `:use` emits `(require …)` so the module
+auto-loads (never *fetches*). Own-namespace defs shadow imports. **Decided, next:**
+unify — `defmodule` becomes the single namespace form (drop `ns`; a module *is* a
+namespace), migrating `std/` + the test framework (namespaced + `(:use test)`).
+Then macro free-ref resolution / **α**, an import-aware checker, LSP Tier 2, and
+package ns-collision policy. Full design in [`namespaces.md`](namespaces.md).
+Supersedes the "deferred, point-2-only" stance
 of ADR-019. **Two questions left open** (hygiene, ns-name collision) — they don't
 block the substrate.
 
