@@ -184,3 +184,61 @@
       (assert= (get b :type) :t-byfile)
       (is (layer-active? b 'a))
       (assert= (get b :log) "[a-on]"))))
+
+;; ---- Phase 3: scopes, focus/close, teardown ---------------------------------
+(defn hk-blur   (s) (assoc s :log (str (get s :log) "B!")))
+(defn hk-close  (s) (assoc s :log (str (get s :log) "C")))
+(defn hk-cl-off (s) (assoc s :log (str (get s :log) "D")))
+(def layer-fb    {:name 'fb :hooks {:on-focus '(layers-test/hk-focus) :on-blur '(layers-test/hk-blur)}})
+(def layer-close {:name 'cl :hooks {:on-close '(layers-test/hk-close) :deactivate '(layers-test/hk-cl-off)}})
+
+(describe "scopes & focus lifecycle"
+  (test "scope-keymap composes scopes, the earlier (higher-precedence) scope winning"
+    (let (buffer (push-layer {} 'layers-test/layer-hi)   ; binds x→cmd-y
+          window (push-layer {} 'layers-test/layer-a))    ; binds x→cmd-x
+      ;; buffer scope listed first → shadows the window
+      (assert= (get (scope-keymap (list buffer window)) "x") 'layers-test/cmd-y)))
+
+  (test "scope-dispatch resolves through the scopes but runs the command on the state"
+    (let (buffer (push-layer {} 'layers-test/layer-a)     ; binds x→cmd-x
+          model {:log "M"}
+          r (scope-dispatch (list buffer) model nil "x" no-fb))
+      ;; cmd-x runs on the model (not the buffer the keymap came from)
+      (assert= (get (first r) :log) "MX")
+      (assert= (second r) nil)))
+
+  (test "switch-focus fires :on-blur on the old context and :on-focus on the new"
+    (let (from (activate-layer {:log ""} 'layers-test/layer-fb)
+          to   (activate-layer {:log ""} 'layers-test/layer-fb)
+          r (switch-focus from to))
+      (assert= (get (first r) :log) "B!")     ; from blurred
+      (assert= (get (second r) :log) "F")))   ; to focused
+
+  (test "switch-focus tolerates a nil side"
+    (assert= (switch-focus nil (activate-layer {:log ""} 'layers-test/layer-fb))
+             [nil {:log "F" :layers (list 'layers-test/layer-fb)}]))
+
+  (test "close-context fans :on-close then deactivates every layer"
+    (let (ctx (activate-layer {:log ""} 'layers-test/layer-close)
+          closed (close-context ctx))
+      (assert= (get closed :log) "CD")          ; :on-close (C) then :deactivate (D)
+      (is (not (layer-active? closed 'cl))))))
+
+;; ---- Phase 3: async cleanup (the reason :on-close exists) -------------------
+;; A layer that spawns a worker on focus must be able to kill it on close. The
+;; worker is one-shot: on :stop it acks its parent and exits.
+(defn demo-worker (parent) (receive (:stop (send parent :stopped))))
+(defn demo-start  (ctx) (assoc ctx :worker (spawn (demo-worker (get ctx :parent)))))
+(defn demo-stop   (ctx) (send (get ctx :worker) :stop) ctx)
+(def layer-async
+  {:name 'async :hooks {:on-focus '(layers-test/demo-start) :on-close '(layers-test/demo-stop)}})
+
+(describe "layers async lifecycle across processes"
+  :isolated
+  (test "an :on-focus-spawned worker is torn down by :on-close"
+    (let (me (self)
+          ctx (activate-layer {:parent me} 'layers-test/layer-async)
+          focused (run-event ctx :on-focus)     ; spawns the worker, pid in :worker
+          _ (close-context focused))             ; :on-close sends it :stop
+      ;; the worker acks its stop — proving :on-focus spawned and :on-close cleaned up
+      (assert= (receive) :stopped))))

@@ -128,7 +128,13 @@ layer-dispatch (ctx pending key fb)  -> active-keymap + keymap-step → [ctx' pe
   `register-type-layers` / `register-file-type` / `layers-for-type`,
   `buffer-type-for` / `set-buffer-type` / `init-buffer-layers`). Filename matching
   is suffix or predicate, newest-rule-wins. `std/buffer` stays layer-agnostic.
-- Phase 3 — scopes, focus/blur/close events, async, `ui-run` integration + demo.
+- ✅ **Phase 3 — scopes, focus/close lifecycle, async.** `compose-layers` /
+  `scope-keymap` / `scope-dispatch` (multi-scope dispatch, command runs on the app
+  model); `switch-focus` (`:on-blur`→`:on-focus`, dormancy not teardown);
+  `deactivate-all` / `close-context` (`:on-close` async cleanup, then `:deactivate`).
+  A big in-code **HOW TO USE** guide in `std/layers.blsp` covers the whole flow incl.
+  a `ui-run` loop recipe. (A live TTY/GUI demo is left to the editor app, since it
+  can't run in the test suite; the loop recipe is documented.)
 
 ## Deferred (named, not precluded)
 
