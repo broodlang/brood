@@ -161,15 +161,19 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   global table; `foo--private` convention (ADR-019). Logic in Brood; the only new
   Rust is `file-exists?` / `dir?` / `list-dir` / `cwd` / `name` / `eval-string` /
   `%builtin-module`.
-- 🟡 **Namespaces** (ADR-065, [`namespaces.md`](namespaces.md)) — design recorded,
-  not yet implemented. Expand-time resolution over the flat table (no core
-  namespace axis): `(ns …)` + qualified `observer/observe` (a single interned
-  symbol — `/` is already symbol-legal), a resolver pass shared by `eval` *and*
-  the LSP, **soft** privacy (Clojure/CL, not Racket sealing — preserves ADR-013
-  hot reload), auto-require that loads-but-never-fetches. Forced by ADR-037
-  package collisions + `std/` crowding + plugins + LSP completion/cross-file/rename.
-  **Two open questions:** macro hygiene (auto-qualifying `quasiquote` vs.
-  hand-qualify) and ns-name collision across packages.
+- 🟡 **Namespaces** (ADR-065, [`namespaces.md`](namespaces.md)) — **substrate
+  landed (inc-1)**. Expand-time resolution over the flat table (no core namespace
+  axis): `(ns foo)` qualifies definitions to `foo/name` (one interned symbol — `/`
+  is already symbol-legal); a resolver pass (`eval/macros.rs`) qualifies free
+  references, with a forward-reference pre-scan and a binder-safe walk; current
+  namespace is per-process `Heap.compile_ns` (sticky at the REPL, reset per file);
+  def-sites and the advisory checker are ns-aware. **Soft** privacy (Clojure/CL,
+  not Racket sealing — preserves ADR-013 hot reload). Forced by ADR-037 package
+  collisions + `std/` crowding + plugins + LSP completion/cross-file/rename.
+  ⬜ Remaining: imports `:use`/`:refer` + auto-require (inc-2); macro free-ref
+  resolution — the **α** decision (inc-3); LSP Tier 2 (inc-4); package ns-name
+  collision policy (inc-5). β-interim until α: a macro in a non-root namespace
+  hand-qualifies cross-namespace references.
 - ✅ **Project model & test tool** — convention over configuration: `src/` is the
   project source (auto on `*load-path*`), `tests/**/*_test.blsp` are the tests; a
   `project.blsp` manifest declares identity (name/version) and overrides paths only

@@ -1691,6 +1691,22 @@ the feature. Put it first in the file. e.g. (defmodule hatch \"A gen_server …\
   "The docstring declared by `(defmodule mod …)` (a symbol or string), or nil."
   (get *module-docs* (name mod)))
 
+;; `(ns foo "doc")` — like `defmodule`, but also compiles the *rest of the file*
+;; into namespace `foo` (ADR-065): each `def`/`defn`/`defmacro` defines `foo/name`,
+;; and a bare reference resolves to `foo/name` if this namespace defines it, else
+;; falls back to the root namespace (the prelude). Put it first in the file; one
+;; `ns` per file. The `%in-ns` primitive sets the namespace the resolver pass reads.
+;; e.g. (ns observer "process viewer").
+(defmacro ns (nsname & more)
+  "Declare namespace `nsname` (a symbol) and compile the rest of the file into it —
+definitions become `nsname/name`; bare references resolve there, then fall back to
+root. Records an optional docstring and `provide`s the feature. Put it first."
+  (let (key (name nsname)
+         doc (if (string? (first more)) (first more) nil))
+    `(do (def *module-docs* (assoc *module-docs* ~key ~doc))
+         (provide ~key)
+         (%in-ns '~nsname))))
+
 ;; First existing <filename> across the load-path dirs, or nil.
 (defn require--find (filename dirs)
   (cond
@@ -1708,7 +1724,7 @@ the feature. Put it first in the file. e.g. (defmodule hatch \"A gen_server …\
       key
       (let (src (%builtin-module key))
         (if src
-          (do (eval-string src) (provide key))
+          (do (%load-string src) (provide key))
           (let (path (require--find (str key ".blsp") *load-path*))
             (if path (do (load path) (provide key)) (error "require: cannot find module '" key "'"))))))))
 

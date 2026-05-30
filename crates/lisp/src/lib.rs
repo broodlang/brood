@@ -67,9 +67,10 @@ static SHARED: LazyLock<SharedBundle> = LazyLock::new(|| {
         // `defn`/`defmacro` to `def` and discard spans), exactly as the file
         // loader does. No-op when no file was set, or the form isn't a def.
         heap.note_definition(form, pos);
-        // Expand macros once (the compile pass), then evaluate. Form-by-form so
-        // a macro defined by one form is visible to the next.
-        let form = eval::macros::macroexpand_all(&mut heap, form, root)
+        // Compile pass (expand macros, then namespace-resolve — a no-op here since
+        // the prelude is the root namespace), then evaluate. Form-by-form so a
+        // macro defined by one form is visible to the next.
+        let form = eval::macros::compile(&mut heap, form, root)
             .unwrap_or_else(|e| panic!("prelude expand: {}", e));
         eval::eval(&mut heap, form, root).unwrap_or_else(|e| panic!("prelude: {}", e));
     }
@@ -114,6 +115,15 @@ impl Interp {
     /// and return the value of the last.
     pub fn eval_str(&mut self, src: &str) -> Result<Value, LispError> {
         let forms = syntax::reader::read_all(&mut self.heap, src)?;
+        // A top-level run starts at the root namespace; the source's own `(ns …)`
+        // sets it, with a forward-reference pre-scan (ADR-065). Restored after.
+        let prev_ns = self.heap.set_compile_ns(None);
+        let known = if eval::macros::file_opens_ns(&self.heap, &forms) {
+            eval::macros::scan_def_names(&self.heap, &forms)
+        } else {
+            std::collections::HashSet::new()
+        };
+        let prev_known = self.heap.set_ns_known_names(known);
         // The parsed forms sit in LOCAL below this checkpoint; each form's eval
         // allocates above it. Between top-level forms the eval stack is empty and
         // nothing in LOCAL is live but the (discarded) intermediate result —
@@ -139,12 +149,14 @@ impl Interp {
             let form = self.heap.root_at(roots_base + i);
             // Compile pass: expand macros once before evaluating (form-by-form,
             // so a macro a form defines is in scope for the forms after it).
-            let outcome = eval::macros::macroexpand_all(&mut self.heap, form, self.root)
+            let outcome = eval::macros::compile(&mut self.heap, form, self.root)
                 .and_then(|f| eval::eval(&mut self.heap, f, self.root));
             match outcome {
                 Ok(v) => result = v,
                 Err(e) => {
                     self.heap.truncate_roots(roots_base);
+                    self.heap.set_compile_ns(prev_ns);
+                    self.heap.set_ns_known_names(prev_known);
                     return Err(e);
                 }
             }
@@ -157,6 +169,8 @@ impl Interp {
             }
         }
         self.heap.truncate_roots(roots_base);
+        self.heap.set_compile_ns(prev_ns);
+        self.heap.set_ns_known_names(prev_known);
         Ok(result)
     }
 
@@ -167,6 +181,16 @@ impl Interp {
     /// `docs/tooling.md`); parse errors keep the reader's precise position.
     pub fn eval_source(&mut self, src: &str) -> Result<Value, LispError> {
         let forms = syntax::reader::read_all_positioned(&mut self.heap, src)?;
+        // Root namespace + forward-ref pre-scan for a file run (ADR-065), restored
+        // after. The file's own `(ns …)` form sets the namespace.
+        let prev_ns = self.heap.set_compile_ns(None);
+        let form_vals: Vec<Value> = forms.iter().map(|&(f, _)| f).collect();
+        let known = if eval::macros::file_opens_ns(&self.heap, &form_vals) {
+            eval::macros::scan_def_names(&self.heap, &form_vals)
+        } else {
+            std::collections::HashSet::new()
+        };
+        let prev_known = self.heap.set_ns_known_names(known);
         let cp = self.heap.checkpoint();
         let gc = self.heap.gc_enabled();
         let mut result = Value::Nil;
@@ -185,13 +209,15 @@ impl Interp {
             // set via `current-file`. Def sites live in the (shared) RUNTIME
             // region, not LOCAL, so they survive collection / arena reset.
             self.heap.note_definition(form, pos);
-            let outcome = eval::macros::macroexpand_all(&mut self.heap, form, self.root)
+            let outcome = eval::macros::compile(&mut self.heap, form, self.root)
                 .and_then(|f| eval::eval(&mut self.heap, f, self.root))
                 .map_err(|e| e.or_pos(pos));
             match outcome {
                 Ok(v) => result = v,
                 Err(e) => {
                     self.heap.truncate_roots(roots_base);
+                    self.heap.set_compile_ns(prev_ns);
+                    self.heap.set_ns_known_names(prev_known);
                     return Err(e);
                 }
             }
@@ -202,6 +228,8 @@ impl Interp {
             }
         }
         self.heap.truncate_roots(roots_base);
+        self.heap.set_compile_ns(prev_ns);
+        self.heap.set_ns_known_names(prev_known);
         Ok(result)
     }
 

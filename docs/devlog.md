@@ -8514,3 +8514,58 @@ concurrently). Full `cargo test` green.
 `link`/`:shutdown`-grace). Deferred (ADR-011): bidirectional `link` exit
 propagation, a `:shutdown` grace-timeout before the hard kill, first-class nested
 trees (a child that spawns a supervisor already composes as one).
+
+---
+
+## 2026-05-30 — Namespaces: increment 1 (the resolution substrate)
+
+**Goal.** Start the namespacing substrate decided in ADR-065 — `(ns …)` + an
+expand-time resolver over the flat global table, no namespace axis in the core —
+so first-party `std/`, plugins, and (later) packages stop clobbering each other.
+β-interim for macros (concern #1 / **α** deferred); imports, LSP, package
+ns-collision are later increments.
+
+**Design calls locked this session.** Sticky REPL namespace (persists across
+entries); one `ns` per file. Current namespace lives as a **per-process
+`Heap.compile_ns`** (not a shared global — that would race across green
+processes), mirroring `current_file`/`dynamics`.
+
+**Built.**
+- `core/heap.rs` — `compile_ns: Option<Symbol>` + swap accessor; a
+  `ns_known_names` set (forward-ref pre-scan) + swap accessor; `def_form_name`
+  qualifies recorded def-sites under `compile_ns`.
+- `builtins.rs` — `%in-ns` (sets `compile_ns`) + `current-ns`; split
+  `eval-string` (inherits ns — REPL sticky) from new `%load-string` (brackets ns
+  at root — module loads); `load`/`reload_defs` reset + pre-scan + restore and
+  `reload_defs` re-evals the `(ns …)` header.
+- `eval/macros.rs` — the resolver: `resolve` (identity at root; otherwise a
+  binder-tracking walk mirroring the type checker's scope logic — `let`/`fn`/
+  `match*` etc.), `compile` (= macroexpand + resolve), `scan_def_names` /
+  `file_ns` / `file_opens_ns`, `qualify_name`. **Safety invariant:** never rewrite
+  a binder/param/pattern position (over-qualify = silent miscompile;
+  under-qualify = loud unbound). `quote`/`quasiquote` skipped (data, ADR-034).
+  Wrapped in the same GC/MACRO block guards as the compile pass.
+- `std/prelude.blsp` — `ns` macro (evolves `defmodule`: doc + `provide` +
+  `%in-ns`); `require-one` loads embedded modules via `%load-string`.
+- Pipeline wired through `compile` at all 5 form-eval sites (lib.rs prelude /
+  `eval_str` / `eval_source`; builtins `load` / `eval_string_inner`), with
+  reset+pre-scan+restore on the file/driver paths.
+- `types/check.rs` — the advisory checker is **ns-aware**: resolves under the
+  file's `(ns …)` so qualified defs/refs analyse consistently (no false
+  "unbound `foo/bar`").
+
+**Tested.** 11 Rust unit tests for the resolver in isolation (qualify free ref,
+leave bare, skip quoted, skip locals, def-head, fn params, letrec, `match*`
+pattern binders, already-qualified, root identity). `tests/namespace_test.blsp`:
+12 cases incl. forward references, root fall-through, two-namespace coexistence,
+local shadowing, redefinition (hot-reload property), **cross-process** round-trip
+of a qualified symbol and a namespaced value. Green under `BROOD_GC_STRESS=1`.
+Full `cargo test` green — the root-ns fast path leaves all existing behaviour
+unchanged.
+
+**Known inc-1 limitations (documented).** Macro free-ref resolution deferred to α
+(hand-qualify cross-ns refs from a non-root macro for now); the eagerly-expanded
+top-level macro output *is* subject to caller-ns resolution (bounded hazard). The
+advisory checker can't see globals defined via runtime `eval`/`%load-string` — a
+general property, not ns-specific. `defdyn` inside a namespace can desync the
+`%declare-dynamic` (quoted, bare) from the `def` (qualified) — narrow edge.
