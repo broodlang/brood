@@ -1,0 +1,88 @@
+;;; Namespaces — increment 1 (ADR-065): expand-time resolution over the flat
+;;; table. `(ns foo)` qualifies definitions to `foo/name`; a bare reference
+;;; resolves to `foo/name` if this namespace defines it, else falls back to root
+;;; (the prelude). Each case loads a small namespaced source via `%load-string`
+;;; (the module-load path: resets to root, the source's `(ns …)` sets it, with a
+;;; forward-reference pre-scan) and checks the resulting globals / behaviour.
+;;;
+;;; Note: the advisory checker may print `unbound symbol: nsX/…` for these cases —
+;;; the fixtures are defined dynamically (`%load-string`), invisible to static
+;;; analysis, exactly as `(eval-string "(def f …)") (f)` is. Advisory only; the
+;;; tests pass regardless.
+
+(require 'test)
+
+;; A plain root worker that echoes one message back to its parent.
+(defn ns-echo (parent) (send parent (receive)))
+
+(describe "namespaces: definition + resolution"
+  :isolated
+
+  (test "definitions are qualified under the namespace; bare name is unbound"
+    (%load-string "(ns nsA) (defn greet () 42)")
+    (is (bound? 'nsA/greet))
+    (is (not (bound? 'greet)))
+    (is (= (nsA/greet) 42)))
+
+  (test "a bare same-namespace reference resolves to the qualified name"
+    (%load-string "(ns nsB) (defn helper () 7) (defn use-it () (helper))")
+    (is (= (nsB/use-it) 7)))
+
+  (test "a forward reference resolves (callee defined later in the file)"
+    (%load-string "(ns nsC) (defn front () (back)) (defn back () 99)")
+    (is (= (nsC/front) 99)))
+
+  (test "root/prelude names fall through and stay bare"
+    (%load-string "(ns nsD) (defn doubled (xs) (map (fn (x) (* x 2)) xs))")
+    (is (= (nsD/doubled (list 1 2 3)) (list 2 4 6))))
+
+  (test "two namespaces define the same short name without colliding"
+    (%load-string "(ns nsE) (defn val () :e)")
+    (%load-string "(ns nsF) (defn val () :f)")
+    (is (= (nsE/val) :e))
+    (is (= (nsF/val) :f)))
+
+  (test "an explicitly qualified cross-namespace reference is left as-is"
+    (%load-string "(ns nsG) (defn target () :got)")
+    (%load-string "(ns nsH) (defn reach () (nsG/target))")
+    (is (= (nsH/reach) :got)))
+
+  (test "a quoted symbol is data — never qualified"
+    (%load-string "(ns nsI) (defn tag () (quote hello))")
+    (is (= (nsI/tag) 'hello))
+    (is (= (str (nsI/tag)) "hello")))
+
+  (test "a local binding shadows a same-named namespace global"
+    (%load-string "(ns nsJ) (def x 100) (defn shadowed () (let (x 5) x))")
+    (is (= (nsJ/shadowed) 5))
+    (is (= nsJ/x 100)))
+
+  (test "a namespaced global is late-bound and redefinable (hot-reload property)"
+    (%load-string "(ns nsK) (defn f () 1)")
+    (is (= (nsK/f) 1))
+    (%load-string "(ns nsK) (defn f () 2)")
+    (is (= (nsK/f) 2)))
+
+  (test "def-sites are keyed by the qualified name"
+    (%load-string "(ns nsM) (defn located () 0)")
+    ;; recorded only for a real file load; here just assert the qualified global
+    ;; is the one that exists (bare is not).
+    (is (bound? 'nsM/located))
+    (is (not (bound? 'located)))))
+
+(describe "namespaces across processes"
+  :isolated
+
+  (test "a qualified symbol round-trips through send (re-intern by name)"
+    (let (me (self) w (spawn (ns-echo me)))
+      (send w {:sym 'some-ns/some-fn :n 1})
+      (let (back (receive))
+        (is (symbol? (get back :sym)))
+        (is (= (get back :sym) 'some-ns/some-fn))
+        (is (= (str (get back :sym)) "some-ns/some-fn")))))
+
+  (test "a value built by a namespaced fn survives a worker round-trip"
+    (%load-string "(ns nsP) (defn make () {:tag 'nsP/make :data (list 1 2 3)})")
+    (let (me (self) w (spawn (ns-echo me)))
+      (send w (nsP/make))
+      (is (= (receive) {:tag 'nsP/make :data (list 1 2 3)})))))

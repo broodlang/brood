@@ -998,6 +998,42 @@ for the test framework) — works from any directory.
 These three are the seed of "edit the system while it runs": read code, evaluate
 it into the live environment, replace definitions.
 
+### Namespaces
+
+A file can open a **namespace** with `(ns foo "optional doc")` as its first form
+(one `ns` per file). Inside it, every `def`/`defn`/`defmacro` defines the
+**qualified** name `foo/name`, and a bare reference resolves to `foo/name` when
+this namespace defines it (including a *forward* reference to something defined
+later in the file), otherwise it falls through to the **root** namespace — the
+prelude and any non-namespaced globals. This keeps first-party and third-party
+code from clobbering each other in the one shared global table (ADR-019/065),
+without a separate namespace axis in the core: `foo/name` is just one interned
+symbol (`/` is an ordinary symbol character), so the runtime, hot reload, and
+`send`/copy are unchanged.
+
+```clojure
+(ns text "buffer text ops")
+(defn insert (buf i s) …)        ; defines text/insert
+(defn append (buf s) (insert buf (len buf) s))   ; bare `insert` → text/insert
+(map insert bufs)                ; `map` → root/prelude (not text/map)
+
+;; from elsewhere — fully-qualified, and still openly redefinable:
+(text/insert b 0 "x")
+(def text/insert (fn …))         ; advice / hot reload works
+```
+
+Privacy is **soft** (Clojure/CL-style, not Racket sealing): a `foo--internal`
+name marked private by convention is *still reachable* by its qualified spelling,
+so live redefinition and advice keep working. At the REPL the current namespace is
+sticky — `(ns foo)` persists across entries until the next `ns`; `(current-ns)`
+reports it.
+
+> Status (inc-1): qualified definitions + reference resolution + the ns-aware
+> checker are in. **Not yet:** `import`/`:refer` lists and auto-require, and
+> macro-template *free*-reference resolution — so a macro defined in a non-root
+> namespace must hand-qualify the cross-namespace names it expands to. Quoted
+> symbols (`'foo`, message tags, map keys) are **never** qualified — they are data.
+
 ### Introspection (editor tooling)
 `doc`  `arglist`  `global-names`  `bound?`  `all-globals`  `apropos`  `doc-search`
 

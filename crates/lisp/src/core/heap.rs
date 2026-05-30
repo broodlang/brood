@@ -927,9 +927,10 @@ impl Heap {
     }
 
     /// Record the bare names the current-namespace file will define, so the
-    /// resolver can qualify forward references (replaces the set wholesale).
-    pub fn set_ns_known_names(&mut self, names: HashSet<Symbol>) {
-        self.ns_known_names = names;
+    /// resolver can qualify forward references. Returns the prior set so the
+    /// caller can restore it (loads nest).
+    pub fn set_ns_known_names(&mut self, names: HashSet<Symbol>) -> HashSet<Symbol> {
+        std::mem::replace(&mut self.ns_known_names, names)
     }
 
     /// Is `sym` (a bare name) known to be defined in the current namespace's file?
@@ -976,7 +977,13 @@ impl Heap {
             return None;
         };
         match self.car(rest) {
-            Value::Sym(name) => Some(name),
+            // Qualify the recorded name to the current namespace (ADR-065) so the
+            // def-site key matches the global the resolver will actually define
+            // (`foo/name`); a no-op at root or for an already-qualified name.
+            Value::Sym(name) => Some(match self.compile_ns {
+                Some(ns) => crate::eval::macros::qualify_name(&crate::core::value::symbol_name(ns), name),
+                None => name,
+            }),
             _ => None,
         }
     }

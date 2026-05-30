@@ -8,7 +8,7 @@ use crate::core::heap::Heap;
 use crate::core::value::{self, EnvId, Symbol, Value};
 use crate::error::{LispError, LispResult};
 use crate::eval;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Bound on recursion depth for the quasiquote walker and the compile pass.
 /// Past this, return `LispError::runtime` rather than overflowing the native
@@ -194,6 +194,418 @@ fn tagged(heap: &Heap, v: Value, name: &str) -> Option<Value> {
         }
     }
     None
+}
+
+// ============================================================================
+// Namespace resolution (ADR-065)
+// ============================================================================
+//
+// Rewrite a *macroexpanded* top-level form against the current namespace
+// (`heap.compile_ns`): qualify definition heads and free references to `ns/name`.
+// Runs after `macroexpand_all`, before `eval`. At root (`compile_ns == None`) it
+// is an identity no-op (one branch) — so the prelude and all non-namespaced code
+// are untouched; only a file that opened `(ns …)` pays for the walk.
+//
+// Safety invariant: NEVER rewrite a binder/param/pattern position. Over-qualifying
+// a local (treating a bound name as free) is a *silent* miscompile; under-qualifying
+// a genuine reference is at worst a loud unbound error. So when the binder shape is
+// uncertain (e.g. `match*` patterns, `&optional` defaults) we over-approximate the
+// bound set and leave those positions verbatim — safe, occasionally incomplete.
+// Data is inviolate: `quote`/`quasiquote` are skipped wholesale (a quoted symbol is
+// a message tag / map key that travels by name across processes — ADR-034).
+
+/// The compile pass for one top-level form: expand macros, then resolve
+/// namespaces. Every loader/driver runs forms through here before `eval` so the
+/// runtime evaluator never sees an unexpanded macro or an unqualified namespaced
+/// reference. At root (`compile_ns == None`) the resolve step is a no-op.
+pub fn compile(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
+    let expanded = macroexpand_all(heap, form, env)?;
+    Ok(resolve(heap, expanded))
+}
+
+/// Does any top-level form open a namespace (head `ns`)? Cheap gate so the
+/// forward-reference pre-scan only runs for namespaced files.
+pub fn file_opens_ns(heap: &Heap, forms: &[Value]) -> bool {
+    file_ns(heap, forms).is_some()
+}
+
+/// The namespace symbol a file declares via a top-level `(ns NAME …)`, or `None`.
+/// One ns per file (inc-1), so the first such form wins. Used by the advisory
+/// checker to resolve qualified references without evaluating the `ns` form.
+pub fn file_ns(heap: &Heap, forms: &[Value]) -> Option<Symbol> {
+    for &f in forms {
+        if let Ok(items) = heap.list_to_vec(f) {
+            if let Some(&Value::Sym(h)) = items.first() {
+                if value::symbol_is(h, "ns") {
+                    if let Some(&Value::Sym(name)) = items.get(1) {
+                        return Some(name);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Pre-scan UNEXPANDED top-level forms for the bare names a file will define
+/// (`def`/`defn`/`defmacro`/`defdyn` heads, recursively), so the resolver can
+/// qualify a *forward* reference to a same-namespace name defined later in the
+/// file. Skips `quote`/`quasiquote` data.
+pub fn scan_def_names(heap: &Heap, forms: &[Value]) -> HashSet<Symbol> {
+    let mut names = HashSet::new();
+    for &form in forms {
+        scan_def_form(heap, form, &mut names);
+    }
+    names
+}
+
+fn scan_def_form(heap: &Heap, form: Value, names: &mut HashSet<Symbol>) {
+    let items = match heap.list_to_vec(form) {
+        Ok(i) => i,
+        Err(_) => return,
+    };
+    let Some(&Value::Sym(h)) = items.first() else { return };
+    if value::symbol_is(h, "quote") || value::symbol_is(h, "quasiquote") {
+        return;
+    }
+    let hn = value::symbol_name(h);
+    if matches!(hn.as_str(), "def" | "defn" | "defmacro" | "defdyn") {
+        if let Some(&Value::Sym(name)) = items.get(1) {
+            // Only bare names get pre-recorded; an already-qualified def head needs
+            // no forward-ref help.
+            if !value::symbol_name(name).contains('/') {
+                names.insert(name);
+            }
+        }
+    }
+    // Recurse so a def nested in a top-level `(do …)`/`(when …)` is still found.
+    for &it in &items[1..] {
+        scan_def_form(heap, it, names);
+    }
+}
+
+/// Resolve `form` against `heap.compile_ns`. Identity when at root.
+pub fn resolve(heap: &mut Heap, form: Value) -> Value {
+    let ns = match heap.compile_ns() {
+        Some(ns) => ns,
+        None => return form,
+    };
+    // Bounded compile walk — block the safepoint so the partially-built output tree
+    // and the Rust-local Vecs aren't relocated/swept mid-walk (resolve allocates a
+    // parallel tree, like `macroexpand_all`; it re-enters neither eval nor expand).
+    let _gc_block = crate::process::GcBlockGuard::enter();
+    let _macro_block = crate::process::MacroBlockGuard::enter();
+    let ns_name = value::symbol_name(ns);
+    resolve_walk(heap, form, &ns_name, &[])
+}
+
+/// Qualify a definition head: `bar` -> `ns/bar`; an already-`/`-qualified name is
+/// taken as-is. Shared with `Heap::def_form_name` so def-site keys match.
+pub fn qualify_name(ns_name: &str, name: value::Symbol) -> value::Symbol {
+    let spelling = value::symbol_name(name);
+    if spelling.contains('/') {
+        name
+    } else {
+        value::intern(&format!("{}/{}", ns_name, spelling))
+    }
+}
+
+/// Resolve one free reference symbol. Qualify only with positive evidence the name
+/// belongs to this namespace (already a `ns/name` global, or pre-scanned as a def
+/// head this file will create); otherwise leave bare for root/prelude fall-through.
+fn resolve_sym(heap: &Heap, s: value::Symbol, ns_name: &str, locals: &[value::Symbol]) -> value::Symbol {
+    if locals.contains(&s) {
+        return s;
+    }
+    let name = value::symbol_name(s);
+    if name.contains('/') {
+        return s; // already qualified
+    }
+    let qsym = value::intern(&format!("{}/{}", ns_name, name));
+    if heap.ns_knows_name(s) || heap.env_get(value::EnvId::GLOBAL, qsym).is_some() {
+        qsym
+    } else {
+        s
+    }
+}
+
+fn resolve_walk(heap: &mut Heap, form: Value, ns_name: &str, locals: &[value::Symbol]) -> Value {
+    match form {
+        Value::Sym(s) => Value::Sym(resolve_sym(heap, s, ns_name, locals)),
+        Value::Pair(_) => resolve_list(heap, form, ns_name, locals),
+        Value::Vector(id) => {
+            let items = heap.vector(id).to_vec();
+            let mut out = Vec::with_capacity(items.len());
+            for it in items {
+                out.push(resolve_walk(heap, it, ns_name, locals));
+            }
+            heap.alloc_vector(out)
+        }
+        Value::Map(id) => {
+            let entries = heap.map_entries(id);
+            let mut pairs = Vec::with_capacity(entries.len());
+            for (k, v) in entries {
+                let k = resolve_walk(heap, k, ns_name, locals);
+                let v = resolve_walk(heap, v, ns_name, locals);
+                pairs.push((k, v));
+            }
+            heap.map_from_pairs(pairs)
+        }
+        other => other,
+    }
+}
+
+fn resolve_list(heap: &mut Heap, form: Value, ns_name: &str, locals: &[value::Symbol]) -> Value {
+    let items = match heap.list_to_vec(form) {
+        Ok(i) => i,
+        Err(_) => return form, // improper list — leave verbatim
+    };
+    if let Some(&Value::Sym(h)) = items.first() {
+        if value::symbol_is(h, "quote") || value::symbol_is(h, "quasiquote") {
+            return form; // data — never descend (ADR-034)
+        }
+        if value::symbol_is(h, "def") || value::symbol_is(h, "defmacro") {
+            return resolve_def(heap, form, &items, ns_name, locals);
+        }
+        if value::symbol_is(h, "fn") || value::symbol_is(h, "lambda") {
+            return resolve_fn(heap, form, &items, ns_name, locals);
+        }
+        if value::symbol_is(h, "let") || value::symbol_is(h, "let*") || value::symbol_is(h, "letrec") {
+            return resolve_let(heap, form, &items, ns_name, locals);
+        }
+        if value::symbol_is(h, "match*") {
+            return resolve_match(heap, form, &items, ns_name, locals);
+        }
+    }
+    // Generic: resolve every element (the head too — a call head resolves).
+    let mut out = Vec::with_capacity(items.len());
+    for it in items {
+        out.push(resolve_walk(heap, it, ns_name, locals));
+    }
+    rebuild_list(heap, form, out)
+}
+
+/// `(def NAME value)` / `(defmacro NAME params body…)` — qualify NAME; resolve the
+/// value (def) or the body with params bound (defmacro). Params left verbatim.
+fn resolve_def(heap: &mut Heap, form: Value, items: &[Value], ns_name: &str, locals: &[value::Symbol]) -> Value {
+    let is_defmacro = matches!(items.first(), Some(&Value::Sym(h)) if value::symbol_is(h, "defmacro"));
+    let mut out = Vec::with_capacity(items.len());
+    out.push(items[0]); // def / defmacro head, verbatim
+    match items.get(1) {
+        Some(&Value::Sym(name)) => out.push(Value::Sym(qualify_name(ns_name, name))),
+        Some(&other) => out.push(other), // not a symbol — leave (eval will complain)
+        None => return rebuild_list(heap, form, out),
+    }
+    if is_defmacro {
+        let params = items.get(2).copied().unwrap_or(Value::Nil);
+        out.push(params); // params verbatim
+        let mut inner = locals.to_vec();
+        collect_param_syms(heap, params, &mut inner);
+        for &b in items.get(3..).unwrap_or(&[]) {
+            out.push(resolve_walk(heap, b, ns_name, &inner));
+        }
+    } else {
+        for &v in items.get(2..).unwrap_or(&[]) {
+            out.push(resolve_walk(heap, v, ns_name, locals));
+        }
+    }
+    rebuild_list(heap, form, out)
+}
+
+/// `(fn …)` / `(lambda …)` — single-arity `(params body…)` or multi-arity
+/// `(doc? (params body…)…)`. Params bind in their body; param lists left verbatim.
+fn resolve_fn(heap: &mut Heap, form: Value, items: &[Value], ns_name: &str, locals: &[value::Symbol]) -> Value {
+    let parts = &items[1..];
+    let (has_doc, clause_start) = match parts.first() {
+        Some(Value::Str(_)) if parts.len() > 1 => (true, 1),
+        _ => (false, 0),
+    };
+    let clauses = &parts[clause_start..];
+    let multi = !clauses.is_empty() && clauses.iter().all(|&f| is_arity_clause(heap, f));
+    let mut out = Vec::with_capacity(items.len());
+    out.push(items[0]); // fn / lambda head
+    if multi {
+        if has_doc {
+            out.push(parts[0]);
+        }
+        for &clause in clauses {
+            out.push(resolve_arity_clause(heap, clause, ns_name, locals));
+        }
+    } else {
+        let params = parts.first().copied().unwrap_or(Value::Nil);
+        out.push(params); // verbatim
+        let mut inner = locals.to_vec();
+        collect_param_syms(heap, params, &mut inner);
+        for &b in parts.get(1..).unwrap_or(&[]) {
+            out.push(resolve_walk(heap, b, ns_name, &inner));
+        }
+    }
+    rebuild_list(heap, form, out)
+}
+
+/// One `(params body…)` arity clause: params bind in the body.
+fn resolve_arity_clause(heap: &mut Heap, clause: Value, ns_name: &str, locals: &[value::Symbol]) -> Value {
+    let cparts = match heap.list_to_vec(clause) {
+        Ok(c) if !c.is_empty() => c,
+        _ => return clause,
+    };
+    let mut inner = locals.to_vec();
+    collect_param_syms(heap, cparts[0], &mut inner);
+    let mut out = Vec::with_capacity(cparts.len());
+    out.push(cparts[0]); // params verbatim
+    for &b in &cparts[1..] {
+        out.push(resolve_walk(heap, b, ns_name, &inner));
+    }
+    rebuild_list(heap, clause, out)
+}
+
+/// `(let/let*/letrec (s1 v1 …) body…)` — simple symbol binders post-expand
+/// (patterns lowered to `match*`). Binders left verbatim; RHSs and body resolved
+/// with binders in scope (sequential — a safe over-approximation for plain `let`).
+fn resolve_let(heap: &mut Heap, form: Value, items: &[Value], ns_name: &str, locals: &[value::Symbol]) -> Value {
+    let letrec = matches!(items.first(), Some(&Value::Sym(h)) if value::symbol_is(h, "letrec"));
+    let binds = match items.get(1).and_then(|&b| form_items(heap, b)) {
+        Some(b) if b.len() % 2 == 0 => b,
+        _ => return generic_resolve(heap, form, items, ns_name, locals),
+    };
+    let mut scope = locals.to_vec();
+    if letrec {
+        for &t in binds.iter().step_by(2) {
+            if let Value::Sym(s) = t {
+                scope.push(s);
+            }
+        }
+    }
+    let mut new_binds = Vec::with_capacity(binds.len());
+    let mut i = 0;
+    while i < binds.len() {
+        let target = binds[i];
+        let rhs_r = resolve_walk(heap, binds[i + 1], ns_name, &scope);
+        new_binds.push(target); // binder verbatim
+        new_binds.push(rhs_r);
+        if !letrec {
+            if let Value::Sym(s) = target {
+                scope.push(s);
+            }
+        }
+        i += 2;
+    }
+    let new_bind_form = rebuild_seq_like(heap, items[1], new_binds);
+    let mut out = Vec::with_capacity(items.len());
+    out.push(items[0]);
+    out.push(new_bind_form);
+    for &b in items.get(2..).unwrap_or(&[]) {
+        out.push(resolve_walk(heap, b, ns_name, &scope));
+    }
+    rebuild_list(heap, form, out)
+}
+
+/// `(match* :ctx valexpr (pattern body…) …)` — resolve `valexpr` and each clause
+/// body with the clause pattern's symbols treated as bound (over-approximation:
+/// all symbols anywhere in the pattern are collected, so a binder is never
+/// qualified; a pinned reference there is left bare — safe, occasionally lossy).
+fn resolve_match(heap: &mut Heap, form: Value, items: &[Value], ns_name: &str, locals: &[value::Symbol]) -> Value {
+    if items.len() < 3 {
+        return generic_resolve(heap, form, items, ns_name, locals);
+    }
+    let mut out = Vec::with_capacity(items.len());
+    out.push(items[0]); // match*
+    out.push(items[1]); // :ctx keyword
+    out.push(resolve_walk(heap, items[2], ns_name, locals)); // value expression
+    for &clause in &items[3..] {
+        let cparts = match heap.list_to_vec(clause) {
+            Ok(c) if c.len() >= 2 => c,
+            _ => {
+                out.push(clause);
+                continue;
+            }
+        };
+        let mut scope = locals.to_vec();
+        collect_all_syms(heap, cparts[0], &mut scope);
+        let mut cout = Vec::with_capacity(cparts.len());
+        cout.push(cparts[0]); // pattern verbatim
+        for &b in &cparts[1..] {
+            cout.push(resolve_walk(heap, b, ns_name, &scope));
+        }
+        out.push(rebuild_list(heap, clause, cout));
+    }
+    rebuild_list(heap, form, out)
+}
+
+/// Resolve every element of a list and rebuild (the fallback for binder forms whose
+/// shape didn't match — never over-qualifies because it adds no bound names).
+fn generic_resolve(heap: &mut Heap, form: Value, items: &[Value], ns_name: &str, locals: &[value::Symbol]) -> Value {
+    let mut out = Vec::with_capacity(items.len());
+    for &it in items {
+        out.push(resolve_walk(heap, it, ns_name, locals));
+    }
+    rebuild_list(heap, form, out)
+}
+
+/// Collect parameter-binder symbols from a param list (mirrors `fn_params` /
+/// `parse_params`): plain symbols, `(name default)` optionals' names; skips the
+/// `&`/`&optional`/`&rest` markers. Appends to `out`.
+fn collect_param_syms(heap: &Heap, params: Value, out: &mut Vec<value::Symbol>) {
+    let items = match form_items(heap, params) {
+        Some(i) => i,
+        None => return,
+    };
+    for item in items {
+        match item {
+            Value::Sym(s) => {
+                if value::symbol_is(s, "&")
+                    || value::symbol_is(s, "&optional")
+                    || value::symbol_is(s, "&rest")
+                {
+                    continue;
+                }
+                out.push(s);
+            }
+            Value::Pair(_) | Value::Vector(_) => {
+                // `(name default)` — the binder is the first element.
+                let inner = form_items(heap, item).unwrap_or_default();
+                if let Some(&Value::Sym(s)) = inner.first() {
+                    out.push(s);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Collect every symbol appearing anywhere in `v` (used to over-approximate a
+/// pattern's bound names — see `resolve_match`).
+fn collect_all_syms(heap: &Heap, v: Value, out: &mut Vec<value::Symbol>) {
+    match v {
+        Value::Sym(s) => out.push(s),
+        Value::Pair(_) => {
+            if let Ok(items) = heap.list_to_vec(v) {
+                for it in items {
+                    collect_all_syms(heap, it, out);
+                }
+            }
+        }
+        Value::Vector(id) => {
+            for it in heap.vector(id).to_vec() {
+                collect_all_syms(heap, it, out);
+            }
+        }
+        Value::Map(id) => {
+            for (k, val) in heap.map_entries(id) {
+                collect_all_syms(heap, k, out);
+                collect_all_syms(heap, val, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Rebuild a binding container preserving list-vs-vector shape (and position).
+fn rebuild_seq_like(heap: &mut Heap, original: Value, items: Vec<Value>) -> Value {
+    match original {
+        Value::Vector(_) => heap.alloc_vector(items),
+        _ => rebuild_list(heap, original, items),
+    }
 }
 
 /// Expand `form` by one step if its head is a macro; returns `(expanded, did_expand)`.
@@ -686,4 +1098,111 @@ fn lower_fn(heap: &mut Heap, items: &[Value]) -> Option<Value> {
     }
     lowered.push(acc);
     Some(heap.list(lowered))
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+    use crate::syntax::reader;
+    use crate::Interp;
+
+    /// Resolve `form_src` in namespace `ns`, after evaluating each `defs` line to
+    /// set up globals. Returns the printed resolved form.
+    fn resolved(defs: &[&str], ns: &str, form_src: &str) -> String {
+        let mut interp = Interp::new();
+        for d in defs {
+            interp.eval_str(d).expect("setup def");
+        }
+        let nssym = value::intern(ns);
+        interp.heap.set_compile_ns(Some(nssym));
+        let form = reader::read_one(&mut interp.heap, form_src).expect("parse");
+        let out = resolve(&mut interp.heap, form);
+        crate::syntax::printer::print(&interp.heap, out)
+    }
+
+    #[test]
+    fn free_ref_qualifies_when_ns_global_exists() {
+        assert_eq!(resolved(&["(def foo/bar 1)"], "foo", "(bar)"), "(foo/bar)");
+    }
+
+    #[test]
+    fn unknown_free_ref_stays_bare() {
+        // `baz` is neither an existing `foo/baz` global nor pre-scanned — root
+        // fall-through, left bare (would be unbound at worst, never miscompiled).
+        assert_eq!(resolved(&[], "foo", "(baz)"), "(baz)");
+    }
+
+    #[test]
+    fn root_prelude_name_stays_bare() {
+        // `map` is a prelude global; there is no `foo/map`, so it stays root.
+        assert_eq!(resolved(&[], "foo", "(map f xs)"), "(map f xs)");
+    }
+
+    #[test]
+    fn definition_head_is_qualified() {
+        assert_eq!(resolved(&[], "foo", "(def bar 1)"), "(def foo/bar 1)");
+    }
+
+    #[test]
+    fn local_binding_shadows_and_is_not_qualified() {
+        // `foo/x` exists, but the `let`-bound `x` is local — must NOT qualify.
+        assert_eq!(resolved(&["(def foo/x 1)"], "foo", "(let (x 1) x)"), "(let (x 1) x)");
+    }
+
+    #[test]
+    fn fn_param_is_not_qualified_but_free_body_ref_is() {
+        // `x` is a param (local); `bar` is a free ref to a ns global → qualified.
+        assert_eq!(
+            resolved(&["(def foo/bar 1)"], "foo", "(fn (x) (bar x))"),
+            "(fn (x) (foo/bar x))"
+        );
+    }
+
+    #[test]
+    fn quoted_symbol_is_never_qualified() {
+        // Data: even though `foo/bar` exists, a quoted `bar` is untouched (ADR-034).
+        assert_eq!(resolved(&["(def foo/bar 1)"], "foo", "(quote bar)"), "(quote bar)");
+    }
+
+    #[test]
+    fn already_qualified_symbol_passes_through() {
+        assert_eq!(resolved(&["(def other/bar 1)"], "foo", "(other/bar)"), "(other/bar)");
+    }
+
+    #[test]
+    fn root_namespace_is_identity() {
+        // No `(ns …)` active → compile_ns is None → resolve is a no-op even for a
+        // name that would otherwise look qualifiable.
+        let mut interp = Interp::new();
+        interp.eval_str("(def foo/bar 1)").unwrap();
+        // compile_ns left as None (root)
+        let form = reader::read_one(&mut interp.heap, "(bar)").unwrap();
+        let out = resolve(&mut interp.heap, form);
+        assert_eq!(crate::syntax::printer::print(&interp.heap, out), "(bar)");
+    }
+
+    #[test]
+    fn letrec_binders_visible_in_every_rhs() {
+        // Mutually-referenced letrec names are local, never qualified, even with a
+        // same-named ns global present.
+        // (printer renders an empty param list `()` as `nil`)
+        assert_eq!(
+            resolved(&["(def foo/a 9)"], "foo", "(letrec (a (fn () (b)) b (fn () (a))) (a))"),
+            "(letrec (a (fn nil (b)) b (fn nil (a))) (a))"
+        );
+    }
+
+    #[test]
+    fn match_pattern_binders_are_not_qualified() {
+        // The `match*` clause pattern binds `n`; the body ref to `n` must stay local
+        // even though `foo/n` exists, while a free `bar` qualifies.
+        assert_eq!(
+            resolved(
+                &["(def foo/n 1)", "(def foo/bar 2)"],
+                "foo",
+                "(match* :match v (n (bar n)))"
+            ),
+            "(match* :match v (n (foo/bar n)))"
+        );
+    }
 }

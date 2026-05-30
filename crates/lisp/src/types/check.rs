@@ -184,6 +184,17 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
     // the same form is a no-op. Failures are swallowed: the checker is
     // advisory and shouldn't gate on a missing module.
     let root = heap.global();
+    // Namespace-aware checking (ADR-065): if the file declares `(ns foo)`, set the
+    // compile namespace + forward-ref pre-scan so pass 1's resolve qualifies both
+    // definition heads and references to `foo/…` — otherwise every qualified
+    // reference would look unbound. Restored before returning.
+    let file_ns = crate::eval::macros::file_ns(heap, forms);
+    let prev_ns = heap.set_compile_ns(file_ns);
+    let prev_known = if file_ns.is_some() {
+        heap.set_ns_known_names(crate::eval::macros::scan_def_names(heap, forms))
+    } else {
+        heap.set_ns_known_names(std::collections::HashSet::new())
+    };
     // Root the input forms and the expanding-into vec across the loop:
     // each iteration may call `eval` on a `(require …)`, which runs a
     // GC safepoint at outermost depth — any LOCAL `Value` held only in
@@ -202,7 +213,9 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
         // an earlier iteration's `(require …)` `eval` can collect at any depth
         // (ADR-061) and relocate it, so the slice's copy is stale by now.
         let f = heap.root_at(roots_base + j);
-        let exp = crate::eval::macros::macroexpand_all(heap, f, root).unwrap_or(f);
+        // Compile pass: macroexpand then namespace-resolve, so the analysed tree
+        // matches what `eval` will see (qualified defs + references).
+        let exp = crate::eval::macros::compile(heap, f, root).unwrap_or(f);
         // Root the just-built expansion *before* possibly triggering a
         // collect via `eval`; otherwise this LOCAL handle dies between
         // here and the next iteration's macroexpand.
@@ -249,6 +262,8 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
     // expansions). Safe to drop now: nothing after this consults `expanded`
     // or `forms` against the heap.
     heap.truncate_roots(roots_base);
+    heap.set_compile_ns(prev_ns);
+    heap.set_ns_known_names(prev_known);
     out
 }
 

@@ -1,9 +1,11 @@
 # Namespaces — design
 
-> **Status:** proposed (2026-05-30). Design recorded here; decision in
-> [ADR-065](decisions.md). Supersedes the "deferred, point-2-only" stance of
-> [ADR-019](decisions.md). Two questions are deliberately left **open** (§7, §8)
-> — they don't block the substrate.
+> **Status:** increment 1 landed (2026-05-30) — the resolution substrate (`(ns …)`,
+> the resolver pass, forward-ref pre-scan, def-site keying, ns-aware checker) is
+> implemented and tested. Decision in [ADR-065](decisions.md). Supersedes the
+> "deferred, point-2-only" stance of [ADR-019](decisions.md). Macro free-reference
+> resolution (§7, the **α** decision) and package ns-collision policy (§8) remain
+> **open** and are later increments; imports/auto-require are inc-2.
 
 This doc is the design backing for namespaces in Brood. It follows the spectrum
 ADR-019 laid out and commits to the *substrate* (how resolution works) while
@@ -69,7 +71,14 @@ today with zero core change.
 We therefore implement **the entire Clojure/CL surface as an expand-time rewrite
 over the existing flat table** — the core never grows a namespace axis:
 
-- `(ns observer …)` sets a compile-time/dynamic **current namespace** (`*ns*`).
+- `(ns observer …)` sets the **current namespace** — a **per-process `Heap`
+  field** (`compile_ns: Option<Symbol>`, set by the `%in-ns` primitive the `ns`
+  macro emits), *not* a shared global. A global would race across green processes
+  (`RuntimeCode` is shared); the per-process field mirrors the existing
+  `current_file` slot and `dynamics` stack. File/module loaders (`load`,
+  `%load-string`, `eval_source`) reset it to root per file and restore the
+  caller's after; the interactive `eval-string` path leaves it **sticky** so a
+  REPL `(ns foo)` persists across entries. One `ns` per file (inc-1).
 - Inside it, `(defn observe …)` defines the full symbol **`observer/observe`** in
   the one shared global table.
 - A **resolver pass** maps reference-position symbols at expand time:
@@ -91,11 +100,23 @@ one thing it deliberately can't do is *hard* sealing — which §2 says we don't
 - A symbol that **already contains `/`** is fully-qualified — taken as-is, never
   re-prefixed (so `(def observer/observe …)` from outside works; matches Clojure).
 - A bare symbol resolves in order: **(1)** local lexical binding (unchanged —
-  resolution only touches *free* references), **(2)** an imported/`:refer`'d name,
-  **(3)** `*ns*`-qualified (`observe` → `observer/observe`) if such a global
-  exists, **(4)** root/prelude global, **(5)** left bare (an unbound-global
+  resolution only touches *free* references; the resolver tracks `let`/`let*`/
+  `letrec`/`fn` binders and over-approximates `match*` pattern binders), **(2)**
+  an imported/`:refer`'d name *(inc-2 — not yet)*, **(3)** ns-qualified
+  (`observe` → `observer/observe`) if such a global **already exists** *or* the
+  name was **pre-scanned** as a def head this file will create (the forward-ref
+  pre-scan — without it a reference to a later definition would silently stay
+  bare), **(4)** root/prelude global, **(5)** left bare (an unbound-global
   diagnostic, as today).
 - **Quoted / data symbols are never rewritten** (§5).
+- **Safety invariant:** never rewrite a binder/param/pattern position. Over-
+  qualifying a local is a *silent* miscompile; under-qualifying a free reference
+  is at worst a loud unbound error — so the resolver errs toward leaving bare.
+- The advisory **checker is ns-aware**: `check_file` resolves under the file's
+  `(ns …)` so qualified definitions and references are analysed consistently
+  (no false "unbound `foo/bar`"). Def-sites (`source-location`) key on the
+  qualified name. Implemented in `eval/macros.rs` (`resolve`/`compile`),
+  `core/heap.rs` (`compile_ns`, `def_form_name`), and the loaders.
 
 ### Rejected alternative: partition the interner (CL-style)
 

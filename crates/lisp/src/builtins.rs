@@ -727,6 +727,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![string], any),
         eval_string,
     );
+    def(
+        heap,
+        "%load-string",
+        Arity::exact(1),
+        Sig::new(vec![string], any),
+        load_string,
+    );
     // CST parse — mechanism for the in-Brood formatter (std/format.blsp); never
     // fails (malformed input becomes [:error "..."] nodes). Returns nested
     // vectors; see `parse_source` for the shape.
@@ -1082,6 +1089,10 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![sym], nil_ty),
         declare_dynamic,
     );
+    // Namespaces (ADR-065): `%in-ns` sets the namespace being compiled into. The
+    // `ns` macro (prelude) emits it; the resolver pass reads `heap.compile_ns`.
+    def(heap, "%in-ns", Arity::exact(1), Sig::new(vec![sym], sym), in_ns);
+    def(heap, "current-ns", Arity::exact(0), Sig::new(vec![], sym), current_ns);
     // `%binding`'s first arg is the *list/vector of names*, second is the
     // *list/vector of values*, third is the thunk — the macro `binding` emits
     // these as `(quote (*a* *b* …))` + `[v1 v2 …]` + `(fn () …)`.
@@ -2140,6 +2151,17 @@ fn reload_defs(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let forms = reader::read_all_positioned(heap, &src).map_err(|e| e.or_file(path.clone()))?;
     let root = heap.env_root(env);
     let prev = heap.set_current_file(Some(path.clone()));
+    // Namespace bracketing + forward-ref pre-scan, like `load` (ADR-065): a
+    // reloaded namespaced file re-establishes its own namespace (its `(ns …)` form
+    // is re-evaluated below) so its re-saved defs are qualified correctly.
+    let prev_ns = heap.set_compile_ns(None);
+    let form_vals: Vec<Value> = forms.iter().map(|(f, _)| *f).collect();
+    let known = if crate::eval::macros::file_opens_ns(heap, &form_vals) {
+        crate::eval::macros::scan_def_names(heap, &form_vals)
+    } else {
+        std::collections::HashSet::new()
+    };
+    let prev_known = heap.set_ns_known_names(known);
     let mut result = Ok(Value::Nil);
     // Root the unevaluated forms across the per-form eval — a collection at any
     // depth (ADR-061) relocates the LOCAL forms this loop still holds; re-fetch
@@ -2173,10 +2195,13 @@ fn reload_defs(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
                 match head {
                     Value::Sym(s) => {
                         let nm = value::symbol_name(s);
-                        nm.starts_with("def")
-                            && (nm == "def"
-                                || nm == "defmacro"
-                                || matches!(heap.env_get(root, s), Some(Value::Macro(_))))
+                        // Re-evaluate the `(ns …)` header too, so the reloaded
+                        // file's namespace is re-established for its defs (ADR-065).
+                        nm == "ns"
+                            || (nm.starts_with("def")
+                                && (nm == "def"
+                                    || nm == "defmacro"
+                                    || matches!(heap.env_get(root, s), Some(Value::Macro(_)))))
                     }
                     _ => false,
                 }
@@ -2190,7 +2215,7 @@ fn reload_defs(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
         // forms we *do* evaluate, so cross-file goto still lands at the
         // re-saved def site.
         heap.note_definition(form, pos);
-        result = crate::eval::macros::macroexpand_all(heap, form, root)
+        result = crate::eval::macros::compile(heap, form, root)
             .and_then(|f| crate::eval::eval(heap, f, root))
             .map_err(|e| e.or_pos(pos).or_file(path.clone()));
         if result.is_err() {
@@ -2199,6 +2224,8 @@ fn reload_defs(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     }
     heap.truncate_roots(base);
     heap.set_current_file(prev);
+    heap.set_compile_ns(prev_ns);
+    heap.set_ns_known_names(prev_known);
     result.map(|_| Value::Nil)
 }
 
@@ -2220,6 +2247,16 @@ fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     // current namespace for the rest of the file (ADR-065); restore the caller's
     // namespace afterward so loads nest and ns state never leaks out of a file.
     let prev_ns = heap.set_compile_ns(None);
+    // Forward-reference pre-scan (ADR-065): if the file opens a namespace, record
+    // the bare names it will define so a reference to a later definition resolves.
+    // Cheap (read-only, no GC), gated on the file actually using `(ns …)`.
+    let form_vals: Vec<Value> = forms.iter().map(|(f, _)| *f).collect();
+    let known = if crate::eval::macros::file_opens_ns(heap, &form_vals) {
+        crate::eval::macros::scan_def_names(heap, &form_vals)
+    } else {
+        std::collections::HashSet::new()
+    };
+    let prev_known = heap.set_ns_known_names(known);
 
     // **Bounded loading — the core memory guarantee (docs/memory-review.md).**
     // The collector now reclaims at ANY eval depth (ADR-061), so a file loaded
@@ -2238,7 +2275,7 @@ fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     for (i, &(_, pos)) in forms.iter().enumerate() {
         let form = heap.root_at(base + i);
         heap.note_definition(form, pos);
-        result = crate::eval::macros::macroexpand_all(heap, form, root)
+        result = crate::eval::macros::compile(heap, form, root)
             .and_then(|f| crate::eval::eval(heap, f, root))
             .map_err(|e| e.or_pos(pos).or_file(path.clone()));
         if result.is_err() {
@@ -2247,37 +2284,75 @@ fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     }
     heap.truncate_roots(base);
     heap.set_current_file(prev);
+    heap.set_compile_ns(prev_ns);
+    heap.set_ns_known_names(prev_known);
     result
 }
 
 /// `(eval-string "src")` — read and evaluate every form in a string against the
-/// global environment (the string analogue of `load`). The module system uses it
-/// to evaluate embedded std modules; it's a general self-hosting hook besides.
+/// global environment. Inherits the current namespace (ADR-065): the REPL evaluates
+/// each entry through here, so a `(ns foo)` typed at the REPL sticks to later
+/// entries. To load a *module* source at the root namespace, use `%load-string`.
 fn eval_string(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let src = expect_string(heap, "eval-string", arg(args, 0))?;
+    eval_string_inner(heap, env, &src, false)
+}
+
+/// `(%load-string "src")` — the string analogue of `load`: read+eval every form,
+/// but bracket the current namespace (reset to root, restore the caller's after),
+/// so an embedded module's own `(ns …)` governs it and ns state doesn't leak to the
+/// caller. Used by `require-one` for baked-in std modules (ADR-065).
+fn load_string(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
+    let src = expect_string(heap, "%load-string", arg(args, 0))?;
+    eval_string_inner(heap, env, &src, true)
+}
+
+/// Shared body of `eval-string` / `%load-string`. When `reset_ns`, the current
+/// namespace is reset to root for the duration and the caller's restored after.
+fn eval_string_inner(heap: &mut Heap, env: EnvId, src: &str, reset_ns: bool) -> LispResult {
     let root = heap.env_root(env);
-    let forms = reader::read_all(heap, &src)?;
+    let forms = reader::read_all(heap, src)?;
+    // When loading a module (`reset_ns`), bracket the namespace at root and
+    // pre-scan its def heads for forward references; the plain `eval-string` (REPL,
+    // inline) inherits the current namespace and does neither (ADR-065).
+    let (prev_ns, prev_known) = if reset_ns {
+        let pn = heap.set_compile_ns(None);
+        let known = if crate::eval::macros::file_opens_ns(heap, &forms) {
+            crate::eval::macros::scan_def_names(heap, &forms)
+        } else {
+            std::collections::HashSet::new()
+        };
+        (Some(pn), Some(heap.set_ns_known_names(known)))
+    } else {
+        (None, None)
+    };
     // Root the unevaluated forms across the per-form eval — a collection at any
     // depth (ADR-061) relocates the LOCAL forms this loop still holds.
     let base = heap.roots_len();
     for &form in &forms {
         heap.push_root(form);
     }
-    let mut result = Value::Nil;
+    let mut result: LispResult = Ok(Value::Nil);
     for i in 0..forms.len() {
         let form = heap.root_at(base + i);
-        let outcome = crate::eval::macros::macroexpand_all(heap, form, root)
-            .and_then(|f| crate::eval::eval(heap, f, root));
-        match outcome {
-            Ok(v) => result = v,
+        match crate::eval::macros::compile(heap, form, root)
+            .and_then(|f| crate::eval::eval(heap, f, root))
+        {
+            Ok(v) => result = Ok(v),
             Err(e) => {
-                heap.truncate_roots(base);
-                return Err(e);
+                result = Err(e);
+                break;
             }
         }
     }
     heap.truncate_roots(base);
-    Ok(result)
+    if let Some(pn) = prev_ns {
+        heap.set_compile_ns(pn);
+    }
+    if let Some(pk) = prev_known {
+        heap.set_ns_known_names(pk);
+    }
+    result
 }
 
 /// Standard-library modules baked into the binary (like the prelude), so they load
@@ -2305,6 +2380,10 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
     // encoder over the string primitives; the reader's `\u{}` escape is the
     // codepoint→char mechanism). Opt-in, never in the prelude.
     ("json", include_str!("../../../std/json.blsp")),
+    // A Server-Sent Events (text/event-stream) client: a reader process that streams
+    // events to a subscriber's mailbox (pairs with ui's `with-events`). Pure frame
+    // parsing + a thin IO loop over tcp; reuses http's URL/header helpers. Opt-in.
+    ("sse", include_str!("../../../std/sse.blsp")),
     ("hatch", include_str!("../../../std/hatch.blsp")),
     ("supervisor", include_str!("../../../std/supervisor.blsp")),
     // The editor framework's buffer model (M2 Phase 1, ADR-045): an immutable
@@ -4453,6 +4532,21 @@ fn declare_dynamic(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let sym = expect_symbol(heap, "%declare-dynamic", arg(args, 0))?;
     value::mark_dynamic(sym);
     Ok(Value::Sym(sym))
+}
+
+/// `(%in-ns 'foo)` — set the namespace being compiled into (ADR-065). Emitted by
+/// the `ns` macro; the resolver pass qualifies subsequent definitions and free
+/// references to `foo/…`. Returns the namespace symbol.
+fn in_ns(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let sym = expect_symbol(heap, "%in-ns", arg(args, 0))?;
+    heap.set_compile_ns(Some(sym));
+    Ok(Value::Sym(sym))
+}
+
+/// `(current-ns)` — the namespace currently being compiled into (a symbol), or
+/// `nil` at root. Reflection + a handle for tests (ADR-065).
+fn current_ns(_args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    Ok(heap.compile_ns().map(Value::Sym).unwrap_or(Value::Nil))
 }
 
 /// `(dynamic? x)` — true when `x` is a symbol declared dynamic with `defdyn`.

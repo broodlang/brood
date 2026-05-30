@@ -3899,7 +3899,11 @@ tooling" (`BROOD_GC_VERIFY` — how the six sites were found).
 
 ## ADR-065 — Namespaces: expand-time resolution over the flat table, soft privacy
 
-**Status:** proposed (2026-05-30). Full design in
+**Status:** accepted; **increment 1 implemented** (2026-05-30) — the substrate
+(`(ns …)` form, the resolver pass, per-process `compile_ns`, forward-ref pre-scan,
+qualified def-site keying, ns-aware advisory checker) is in and tested. Imports /
+auto-require (inc-2), macro free-ref resolution / **α** (inc-3), LSP Tier 2
+(inc-4), and package ns-collision policy (inc-5) remain. Full design in
 [`namespaces.md`](namespaces.md). Supersedes the "deferred, point-2-only" stance
 of ADR-019. **Two questions left open** (hygiene, ns-name collision) — they don't
 block the substrate.
