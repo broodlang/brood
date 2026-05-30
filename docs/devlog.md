@@ -10305,3 +10305,23 @@ Landed alongside the parallel ADR-079 (`Face` `:scale`) work in the same `gui.rs
 **Tests.** myedit `tests/main_test.blsp` +1 (the view emits the right resize zone per
 split; a lone window emits none). Full myedit suite green (108); default + `--features
 gui` builds green. Live drag + cursor confirmed in a real window.
+
+---
+
+## 2026-05-31 — VM is the default engine (ADR-076 Stage 3 cutover)
+
+With the engines behaviourally identical (full suite green under both), flipped the
+**closure-compiling VM on by default**: `eval::compile::vm_enabled` now returns true
+unless `BROOD_VM=0` (the tree-walker escape hatch, kept for ≥1 release). Removed the
+now-redundant transitional scaffolding — the `brood/vm-default` cargo feature and the
+Makefile `VM_FEATURES`/`VM_DEFAULT` plumbing (`make install` no longer needs a
+special feature; the VM is just the default everywhere). `make test`/`cargo build`
+now run the VM and stay green (419/419), as does `BROOD_VM=0`. A core-vocabulary
+closure runs on the VM; everything else still transparently defers to the tree-walker
+per-form, so the language is unchanged.
+
+**Pre-alpha call** (greenfield, no users): we flipped now rather than after a long
+soak, trusting the dual-engine suite agreement. **Still recommended next:** a
+differential test mode (run the suite through both engines, assert identical output)
+as a standing CI guard, and widening VM coverage (variadic / pattern / prelude
+closures — pure perf, deferral already correct).
