@@ -414,6 +414,17 @@ The seam that makes remoteability free later (see architecture.md).
   [`distribution.md`](distribution.md). Remaining: supervision trees (true
   `link` / restart strategies) and optional TLS — both additive over what's
   here.
+- ✅ **Node-connect ergonomics (ADR-068,
+  [`node-connect.md`](node-connect.md)).** The Emacs `--daemon`/`emacsclient`
+  model for the local case: a node is addressed by **name** over a Unix-domain
+  socket (`(node-start :foo)` / `(connect "foo")` — no port), with TCP
+  (`name@host:port`) still there for remote. One `Stream { Tcp | Unix }` seam,
+  one handshake over both — "the frontend is a protocol, same code path,
+  different transports". A per-user shared cookie (`~/.config/brood/cookie`,
+  auto-generated, `0600`) replaces hand-invented secrets, and `nest run --name`
+  brings a node up from the CLI. Policy in Brood (prelude), mechanism in Rust
+  (`%node-listen`/`%node-connect`/`random-token`/`spit-private`). Deferred:
+  **dual-listen** (one node on Unix + TCP at once — the editor-daemon end-state).
 - ❌ **Kernel-supervised processes** (ADR-039,
   [`supervision.md`](supervision.md)) — **tried and reverted (2026-05-29,
   commit `e3d3a0d`).** Shipped as opt-in on 2026-05-28; stripped a day later
