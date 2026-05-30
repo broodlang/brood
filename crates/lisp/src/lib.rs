@@ -151,7 +151,15 @@ impl Interp {
             // Compile pass: expand macros once before evaluating (form-by-form,
             // so a macro a form defines is in scope for the forms after it).
             let outcome = eval::macros::compile(&mut self.heap, form, self.root)
-                .and_then(|f| eval::eval(&mut self.heap, f, self.root));
+                .and_then(|f| {
+                    // BROOD_VM → the compiling engine (ADR-076); off → tree-walker.
+                    // Stage 0 defers, so this is at parity. Mirrors `eval_source`.
+                    if eval::compile::vm_enabled() {
+                        eval::compile::run(&mut self.heap, f, self.root)
+                    } else {
+                        eval::eval(&mut self.heap, f, self.root)
+                    }
+                });
             match outcome {
                 Ok(v) => result = v,
                 Err(e) => {
@@ -214,7 +222,17 @@ impl Interp {
             // region, not LOCAL, so they survive collection / arena reset.
             self.heap.note_definition(form, pos);
             let outcome = eval::macros::compile(&mut self.heap, form, self.root)
-                .and_then(|f| eval::eval(&mut self.heap, f, self.root))
+                .and_then(|f| {
+                    // BROOD_VM routes the resolved form through the compiling
+                    // engine (ADR-076); off by default → the tree-walker. Stage 0:
+                    // the VM path defers every form back to `eval`, so this is at
+                    // exact parity until lexical addressing lands (Stage 1).
+                    if eval::compile::vm_enabled() {
+                        eval::compile::run(&mut self.heap, f, self.root)
+                    } else {
+                        eval::eval(&mut self.heap, f, self.root)
+                    }
+                })
                 .map_err(|e| e.or_pos(pos));
             match outcome {
                 Ok(v) => result = v,
