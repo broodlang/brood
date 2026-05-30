@@ -135,10 +135,17 @@ pub(super) fn guard_assertion(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Gua
         if let Some((sym, ty)) = literal_eq_guard(items[1], items[2])
             .or_else(|| literal_eq_guard(items[2], items[1]))
         {
+            // **`then_only`:** `(%eq m lit)` being true proves `m` has `lit`'s
+            // tag, but being *false* proves nothing about the tag — `m ≠ "x"`
+            // can still be another string. So the else-branch must NOT narrow to
+            // `¬ty` (that flagged a valid `(string-length m)` after `(= m "x")`).
+            // (`nil` is the one tag where `≠ nil` *would* imply `¬nil`, but we
+            // don't special-case it — dropping that narrowing only loses
+            // precision, never soundness.)
             return Some(Guard {
                 sym,
                 ty,
-                then_only: false,
+                then_only: true,
             });
         }
         return None;
