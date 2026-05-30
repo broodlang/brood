@@ -1501,7 +1501,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("gui-open", &[], "Open a new native window and return its integer id (needs the runtime built with --features gui; errors otherwise). Its key/mouse input is delivered to the CALLING process's mailbox as messages — a key as a 1-char string / keyword (`:up`, `:ctrl-c`), the mouse as `[:mouse action button row col]` (action `:press`/`:release`/`:drag`/`:scroll-up`/`:scroll-down` — `:drag` is motion with a button held, delivered once per cell crossed), a resize as `[:resize cols rows]` (the new cell grid, so the loop re-renders at the new size) — so the consumer parks in `(receive)` instead of polling (ADR-058). Clicking the window's close button delivers a dedicated `:close` message — distinct from the Escape *key* (`:escape`), so an app can quit on the X without conflating it with Escape (which an editor binds to cancel/normal-mode); `ui-run` quits on `:close` automatically. Starts the GUI thread on the first call; each call is an independent window, so several observers can run at once. Pass the id to the other gui-* primitives; pair with gui-close."),
     ("gui-close", &["id"], "Close window id (the teardown for gui-open). Idempotent; an unknown id is a no-op."),
     ("gui-size", &["id"], "Window id's size as [cols rows] in character cells (tracks resize / HiDPI), same shape as term-size."),
-    ("gui-draw", &["id", "frame"], "Paint a frame (the same render-op vector term-draw takes) to window id; returns nil. Unknown ops are skipped (forward-compatible)."),
+    ("gui-draw", &["id", "frame"], "Paint a frame (the same render-op vector term-draw takes) to window id; returns nil. Unknown ops are skipped (forward-compatible). A text op's face may carry :scale n (GUI only, integer >=1, capped at 16): the text is drawn n× larger in an n×n block of cells anchored at its row/col — the per-pane/per-buffer font knob; the terminal frontend renders scale 1."),
     ("gui-font!", &["spec"], "Set the global default cell font from spec, a map {:family <keyword> :height <px>} (both keys optional): :family picks a registered font family (bundled :mono, or one added by gui-font-register), :height the cell pixel size. Applies to every open window and ones opened later — the whole-window knob; per-section fonts come from a face's :family/:italic. Needs --features gui. Returns nil."),
     ("gui-font-register", &["name", "styles"], "Register font family name (a keyword) from styles, a map of style → TTF file path {:regular \"…\" :bold \"…\" :italic \"…\" :bold-italic \"…\"}. Only :regular is required; a missing style reuses the regular file. Afterwards a face's :family <name> (or gui-font!) selects it. Needs --features gui. Returns name."),
     ("term-raw-enter", &[], "Enter raw mode only — NO alternate screen, cursor stays visible, scrollback preserved. The seam for an inline line editor (the REPL); use term-enter instead for a full-screen TUI. Pair with term-raw-leave."),
@@ -3579,8 +3579,18 @@ fn gui_face(heap: &Heap, face: Value) -> crate::gui::Face {
         Some(Value::Keyword(s)) => Some(s),
         _ => None,
     };
+    // `:scale n` (GUI only, ADR-079): draw the op's text n× larger, in an n×n cell
+    // block. Clamp to 1..=GUI_MAX_SCALE — a non-positive value falls back to the
+    // default 1, and the cap bounds the per-op framebuffer work + glyph cache.
+    if let Some(Value::Int(n)) = heap.map_get(id, value::kw("scale")) {
+        f.scale = n.clamp(1, GUI_MAX_SCALE as i64) as u16;
+    }
     f
 }
+
+/// Upper bound on a face's `:scale` (a `:scale 3` glyph already covers 9 cells; the
+/// cap keeps a stray huge value from blowing up framebuffer work + the glyph cache).
+const GUI_MAX_SCALE: u16 = 16;
 
 /// Read a window-id argument (the integer `gui-open` returned) for the windowed
 /// primitives. Negative ids clamp to 0 (no such window → a clean "not open" error).
@@ -3631,6 +3641,9 @@ fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let clear_t = value::intern("clear");
     let text_t = value::intern("text");
     let cursor_t = value::intern("cursor");
+    let cursor_zone_t = value::intern("cursor-zone");
+    let col_resize_t = value::intern("col-resize");
+    let row_resize_t = value::intern("row-resize");
     let mut ops = Vec::with_capacity(ops_v.len());
     for op in ops_v {
         let parts: Vec<Value> = match op {
@@ -3653,6 +3666,20 @@ fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             let s = expect_string(heap, "gui-draw", arg(&parts, 3))?;
             let face = gui_face(heap, parts.get(4).copied().unwrap_or(Value::Nil));
             ops.push(crate::gui::Op::Text { row, col, s, face });
+        } else if tag == cursor_zone_t {
+            // [:cursor-zone x y w h shape] — a hover hot-zone. Unknown shape: skip.
+            let x = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 1))?);
+            let y = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 2))?);
+            let w = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 3))?);
+            let h = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 4))?);
+            let shape = match parts.get(5) {
+                Some(Value::Keyword(s)) if *s == col_resize_t => Some(crate::gui::CursorShape::ColResize),
+                Some(Value::Keyword(s)) if *s == row_resize_t => Some(crate::gui::CursorShape::RowResize),
+                _ => None,
+            };
+            if let Some(shape) = shape {
+                ops.push(crate::gui::Op::CursorZone { x, y, w, h, shape });
+            }
         }
     }
     crate::gui::draw(win, ops).map_err(LispError::runtime)?;

@@ -36,10 +36,13 @@
 //! still exist uniformly.
 
 /// A resolved text face: colours as RGB (already mapped from `:fg`/`:bg`
-/// keywords by the caller, which has heap access), the attribute flags, and the
+/// keywords by the caller, which has heap access), the attribute flags, the
 /// optional font family (an interned `:family` keyword id, resolved to a loaded
-/// font set by the renderer; `None` = the default family).
-#[derive(Clone, Copy, Default)]
+/// font set by the renderer; `None` = the default family), and an integer font
+/// `scale` (≥1): the op's text is drawn `scale`× larger, occupying a
+/// `scale`×`scale` block of base cells anchored at its `(row, col)`. The terminal
+/// frontend has no notion of scale and renders 1×. See ADR-079.
+#[derive(Clone, Copy)]
 pub struct Face {
     pub fg: Option<[u8; 3]>,
     pub bg: Option<[u8; 3]>,
@@ -48,6 +51,34 @@ pub struct Face {
     pub underline: bool,
     pub reverse: bool,
     pub family: Option<u32>,
+    pub scale: u16,
+}
+
+impl Default for Face {
+    /// The default face: unstyled, default family, scale 1 — a derived `Default`
+    /// would give `scale: 0`, but scale is always at least one cell.
+    fn default() -> Self {
+        Face {
+            fg: None,
+            bg: None,
+            bold: false,
+            italic: false,
+            underline: false,
+            reverse: false,
+            family: None,
+            scale: 1,
+        }
+    }
+}
+
+/// The pointer shape a cursor zone requests — frontend-neutral (mapped to a winit
+/// `CursorIcon` only inside the GUI backend). `ColResize` is the ↔ used for a
+/// side-by-side (`:col`) split's divider; `RowResize` the ↕ for a stacked (`:row`)
+/// one. (ADR-080.)
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CursorShape {
+    ColResize,
+    RowResize,
 }
 
 /// One render op, parsed out of a frame vector into plain (Send) data so it can
@@ -63,6 +94,16 @@ pub enum Op {
     Cursor {
         row: u16,
         col: u16,
+    },
+    /// A rectangular hot-zone (cells) that asks the frontend to show `shape` while
+    /// the pointer is over it — e.g. a resize cursor on a window divider. The GUI
+    /// hit-tests it on pointer-move; the terminal ignores it. (ADR-080.)
+    CursorZone {
+        x: u16,
+        y: u16,
+        w: u16,
+        h: u16,
+        shape: CursorShape,
     },
 }
 
@@ -171,7 +212,27 @@ mod backend {
     use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
     use winit::keyboard::{Key as WKey, ModifiersState, NamedKey};
     use winit::platform::wayland::EventLoopBuilderExtWayland;
-    use winit::window::{Window, WindowId};
+    use winit::window::{CursorIcon, Window, WindowId};
+
+    /// The winit cursor for a frontend-neutral `CursorShape`.
+    fn cursor_icon(shape: super::CursorShape) -> CursorIcon {
+        match shape {
+            super::CursorShape::ColResize => CursorIcon::EwResize, // ↔ side-by-side divider
+            super::CursorShape::RowResize => CursorIcon::NsResize, // ↕ stacked divider
+        }
+    }
+
+    /// The cursor shape for the pointer at cell `(col, row)`, given the window's
+    /// zones — the first zone containing the point, or None (default cursor).
+    fn shape_at(zones: &[(u16, u16, u16, u16, super::CursorShape)], col: u16, row: u16) -> Option<super::CursorShape> {
+        zones.iter().find_map(|&(x, y, w, h, shape)| {
+            if col >= x && col < x + w && row >= y && row < y + h {
+                Some(shape)
+            } else {
+                None
+            }
+        })
+    }
 
     // Bundled monospace font, four styles (see assets/README.md) — the default
     // `:mono` family; a face's :bold/:italic pick the style. No system font discovery.
@@ -426,6 +487,13 @@ mod backend {
         /// `CursorMoved` while it's held can be reported as a `:drag` carrying that
         /// button. One button at a time is all a drag gesture needs.
         held: Option<MouseButton>,
+        /// Cursor hot-zones from the last drawn frame (`Op::CursorZone`): cell rect
+        /// `(x, y, w, h)` + the shape to show while the pointer is inside. Hit-tested
+        /// on `CursorMoved`. (ADR-080.)
+        zones: Vec<(u16, u16, u16, u16, super::CursorShape)>,
+        /// The shape currently applied to the window, so we only call `set_cursor`
+        /// when the hit-test result changes (not on every pointer move).
+        shape: Option<super::CursorShape>,
     }
 
     /// Build a window + softbuffer surface + glyph renderer inside the running event
@@ -466,6 +534,8 @@ mod backend {
             mods: ModifiersState::empty(),
             cursor: (0, 0),
             held: None,
+            zones: Vec::new(),
+            shape: None,
         })
     }
 
@@ -556,6 +626,14 @@ mod backend {
                 }
                 UserEvent::Draw { id, ops } => {
                     if let Some(w) = self.ids.get(&id).and_then(|wid| self.wins.get_mut(wid)) {
+                        // Refresh the cursor hot-zones from this frame, then store it.
+                        w.zones = ops
+                            .iter()
+                            .filter_map(|op| match op {
+                                Op::CursorZone { x, y, w: zw, h, shape } => Some((*x, *y, *zw, *h, *shape)),
+                                _ => None,
+                            })
+                            .collect();
                         w.frame = ops;
                         w.window.request_redraw();
                     }
@@ -663,8 +741,8 @@ mod backend {
                     let cell = px_to_cell(position, &w.renderer);
                     if cell != w.cursor {
                         w.cursor = cell;
+                        let (col, row) = w.cursor;
                         if let Some(b) = w.held {
-                            let (col, row) = w.cursor;
                             deliver(
                                 w.subscriber,
                                 mouse_message(&Mouse {
@@ -674,6 +752,15 @@ mod backend {
                                     col,
                                 }),
                             );
+                        }
+                        // Hover cursor: show a zone's shape (e.g. a resize cursor on
+                        // a divider) while the pointer is over it. Locally handled —
+                        // no event reaches the app, so no redraw flood. (ADR-080.)
+                        let want = shape_at(&w.zones, col, row);
+                        if want != w.shape {
+                            w.shape = want;
+                            w.window
+                                .set_cursor(want.map(cursor_icon).unwrap_or(CursorIcon::Default));
                         }
                     }
                 }
@@ -912,9 +999,9 @@ mod backend {
         cell_w: usize,
         cell_h: usize,
         ascent: i32,
-        // keyed by (char, family id, bold, italic): the same glyph at a different
-        // family/style rasterises differently.
-        cache: HashMap<(char, u32, bool, bool), Glyph>,
+        // keyed by (char, family id, bold, italic, scale): the same glyph at a
+        // different family/style/scale rasterises differently.
+        cache: HashMap<(char, u32, bool, bool, u16), Glyph>,
     }
 
     impl Renderer {
@@ -987,7 +1074,10 @@ mod backend {
 
         /// Blit one glyph's coverage into the framebuffer, alpha-compositing `fg`
         /// over whatever is already there (the cell background), in the given
-        /// `family`/style.
+        /// `family`/style. `scale` (≥1) rasterises the glyph at `scale`× the cell
+        /// px, anchoring it into the `scale`×`scale` block whose top-left is
+        /// `(left, top)` — so a `:scale 3` op draws a glyph filling a 3×3 cell block.
+        #[allow(clippy::too_many_arguments)]
         fn draw_char(
             &mut self,
             buf: &mut [u32],
@@ -999,19 +1089,24 @@ mod backend {
             family: Option<u32>,
             bold: bool,
             italic: bool,
+            scale: u16,
             fg: [u8; 3],
         ) {
             if c == ' ' {
                 return;
             }
-            let px = self.px;
-            let ascent = self.ascent;
+            let scale = scale.max(1);
+            let px = self.px * scale as f32;
+            let ascent = self.ascent * scale as i32;
             let fid = family.unwrap_or(self.default_family);
             let set = self.family_of(fid);
-            let g = self.cache.entry((c, fid, bold, italic)).or_insert_with(|| {
-                let (metrics, bitmap) = set.pick(bold, italic).rasterize(c, px);
-                Glyph { metrics, bitmap }
-            });
+            let g = self
+                .cache
+                .entry((c, fid, bold, italic, scale))
+                .or_insert_with(|| {
+                    let (metrics, bitmap) = set.pick(bold, italic).rasterize(c, px);
+                    Glyph { metrics, bitmap }
+                });
             let baseline = top as i32 + ascent;
             let x0 = left as i32 + g.metrics.xmin;
             let y0 = baseline - g.metrics.ymin - g.metrics.height as i32;
@@ -1128,22 +1223,28 @@ mod backend {
                     if face.reverse {
                         std::mem::swap(&mut fg, &mut bg);
                     }
+                    // `:scale n` draws each glyph n× larger, occupying an n×n block
+                    // of base cells anchored at this op's (row, col); positions stay
+                    // in base-cell units, so a scaled char advances `scale` columns.
+                    let scale = face.scale.max(1) as usize;
+                    let (cw_s, ch_s) = (cw * scale, ch * scale);
                     let top = *row as usize * ch;
                     let mut cx = *col as usize;
                     let bg_packed = pack(bg);
                     for c in s.chars() {
                         let left = cx * cw;
-                        fill_cell(&mut buf, fb_w, fb_h, left, top, cw, ch, bg_packed);
+                        fill_cell(&mut buf, fb_w, fb_h, left, top, cw_s, ch_s, bg_packed);
                         r.draw_char(
                             &mut buf, fb_w, fb_h, left, top, c, face.family, face.bold,
-                            face.italic, fg,
+                            face.italic, face.scale, fg,
                         );
                         if face.underline {
-                            // a 1px rule near the cell bottom, in the text colour
-                            let uy = top + ch.saturating_sub(2);
-                            fill_cell(&mut buf, fb_w, fb_h, left, uy, cw, 1, pack(fg));
+                            // a rule near the block bottom, in the text colour
+                            // (scaled with the glyph so it stays proportional).
+                            let uy = top + ch_s.saturating_sub(2 * scale);
+                            fill_cell(&mut buf, fb_w, fb_h, left, uy, cw_s, scale, pack(fg));
                         }
-                        cx += 1;
+                        cx += scale;
                     }
                 }
                 Op::Cursor { row, col } => {
@@ -1157,6 +1258,9 @@ mod backend {
                         ch,
                     );
                 }
+                // Not painted — a cursor zone is hover metadata, hit-tested on
+                // pointer-move in the window event handler (ADR-080).
+                Op::CursorZone { .. } => {}
             }
         }
         let _ = buf.present();

@@ -5001,3 +5001,50 @@ form, defer power), ADR-006 (mechanism in Rust, the arrow/element algebra; polic
 stays Brood). Lives in `crates/lisp/src/types/mod.rs` (the lattice) and
 `crates/lisp/src/types/check/{sigs,walk,guards}.rs` (callback check, element flow,
 and the `and`-guard narrowing).
+
+## ADR-079 — Per-op font scale on the GUI `Face`
+
+**Status:** accepted; **shipped 2026-05-31.** The GUI `Face` carries an integer
+`:scale` (≥1, default 1, capped at 16); the renderer draws that op's text
+`scale`× larger, occupying a `scale`×`scale` block of base cells anchored at the
+op's `(row, col)`. The terminal frontend ignores it (renders 1×).
+
+**Context.** On the GUI frontend there was exactly **one font size for everything**
+— `Face` carried `fg`/`bg`/`bold`/`italic`/`underline`/`reverse`/`family` but no
+size, and the grid is one global `cell_w`/`cell_h`. A "big heading", a larger
+status strip, or a per-pane / per-buffer font was inexpressible except by a
+hand-rolled "block font" magnified out of many cells (what the foobar Game-of-Life
+demo's status strip did by hand). Recorded as **GG-1** in
+[`known-issues.md`](known-issues.md); `gui-font!`'s `:height` only resizes the
+*whole window*, not an op. `std/window.blsp` (ADR-077/078) already supplies the
+pane layout + clip-rect mechanism, so the only missing piece for per-pane fonts was
+a per-op size.
+
+**Decision.** Add the size to the existing per-op styling hook — the face — rather
+than a new render op or a std block-font generator. `Face` gains `scale: u16`
+(`gui_face` parses `:scale`, clamping to `1..=16`); the renderer rasterises the
+glyph at `px * scale`, fills a `scale`×`scale` cell block, and advances `scale`
+columns per char. Positions stay in **base-cell units**, so the uniform grid is
+unchanged and an app lays a scaled region out by leaving `scale`-cell gaps —
+"per-buffer font" is then pure Brood policy (a pane's text drawn with a face
+carrying that buffer's scale). This resolves GG-1 and the per-pane-font remainder
+of GG-3, and reduces the foobar block-font workaround to `[:text … {:scale n}]`.
+
+**Why integer scale, not arbitrary `:height px`.** A faces-already-flow-end-to-end
+addition over a new op (ADR-011: extend the existing hook, don't grow the protocol
+shape — a new optional face key is forward-compatible, and the terminal + old
+frames ignore it). Integer multiples keep the **single uniform grid**: text still
+lands on base cells, so no new metrics-query primitive and no per-pane grid math is
+needed. Arbitrary per-pixel sizing (14px vs 18px buffers) would break the single
+grid and force a `gui-font-metrics` query into Brood for layout — deferred until a
+concrete need justifies it (ADR-011).
+
+**Not addressed.** **GG-2** (`gui-font!` is global across *all* windows) is
+independent and smaller — left open. Arbitrary `:height px` per buffer is deferred
+(see above).
+
+**References.** ADR-046 (the display-protocol seam + frame-as-data), ADR-011 (ship
+the simple form, defer power), ADR-006 (mechanism in Rust, policy in Brood — the
+pane/buffer font choice stays Brood). Lives in `crates/lisp/src/gui.rs` (`Face` +
+the renderer) and `crates/lisp/src/builtins.rs` (`gui_face` parsing); documented in
+`std/face.blsp`.
