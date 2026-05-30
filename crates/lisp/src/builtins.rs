@@ -893,6 +893,32 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![string], string),
         sha256_hex,
     );
+    // The package manager's git mechanism (ADR-037): resolve a ref to a commit,
+    // and clone+checkout a pinned commit. Thin shell-outs to `git`; the cache
+    // layout / lock file / conflict policy are all Brood (std/package.blsp).
+    def(
+        heap,
+        "%git-resolve-ref",
+        Arity::exact(2),
+        Sig::new(vec![string, string], string.union(nil_ty)),
+        git_resolve_ref,
+    );
+    def(
+        heap,
+        "%git-clone",
+        Arity::exact(4),
+        Sig::new(vec![string, string, string, string], kw),
+        git_clone,
+    );
+    // Delete a cached dependency tree. Bounded to paths under `_deps/` — refuses
+    // anything else, so a mis-pathed `nest update` can't rm the wrong directory.
+    def(
+        heap,
+        "%rm-rf",
+        Arity::exact(1),
+        Sig::new(vec![string], kw),
+        rm_rf,
+    );
 
     // system / environment
     def(
@@ -1346,6 +1372,9 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("spit", &["path", "s"], "Write string s to the file at path."),
     ("slurp", &["path"], "Read the whole file at path into a string (does not evaluate it)."),
     ("%sha256", &["s"], "Lowercase hex SHA-256 of string s's bytes. The package manager's one hashing primitive (ADR-037); file/tree hashing is Brood over it."),
+    ("%git-resolve-ref", &["url", "ref"], "Resolve git `ref` (tag/branch/commit) at remote `url` to a commit hash (via `git ls-remote`), or nil if not found. The package manager's ref-pinning mechanism (ADR-037)."),
+    ("%git-clone", &["url", "dest", "ref", "commit"], "Shallow-clone `url` into `dest` and check out the exact `commit` (detached); `ref` is the fetch fallback. Returns :ok or throws. The package manager's fetch mechanism (ADR-037)."),
+    ("%rm-rf", &["path"], "Recursively delete `path`. Bounded to paths under `_deps/` (refuses anything else). Idempotent. The package manager's cache-eviction mechanism (ADR-037)."),
     ("read-line", &[], "Read one line from stdin; returns the line as a string (trailing newline stripped) or nil at end of input."),
     ("file-mtime", &["path"], "Last-modified time of path as epoch-milliseconds, or nil if the file is missing. Cheap (stat) — pair with `load` to drive a hot-reloader."),
     ("file-size", &["path"], "Size of the file at path in bytes, or nil if it is missing."),
@@ -3663,6 +3692,149 @@ fn sha256_hex(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         let _ = write!(hex, "{:02x}", b);
     }
     Ok(heap.alloc_string(&hex))
+}
+
+/// Run `git` with `args` (optionally in `cwd`), capturing stdout+stderr. The
+/// shared mechanism behind the package manager's git primitives (ADR-037).
+fn run_git(args: &[&str], cwd: Option<&str>) -> Result<std::process::Output, LispError> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(args);
+    if let Some(d) = cwd {
+        cmd.current_dir(d);
+    }
+    cmd.output().map_err(|e| {
+        LispError::runtime(format!("git {}: {}", args.join(" "), e))
+            .with_code(crate::error::error_codes::SUBPROCESS_FAILED)
+            .with_hint("is `git` installed and on PATH?")
+    })
+}
+
+/// Run a `git` subcommand that's expected to succeed; turn a non-zero exit into a
+/// `LispError` carrying git's stderr.
+fn git_or_err(args: &[&str], cwd: Option<&str>) -> Result<(), LispError> {
+    let out = run_git(args, cwd)?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(LispError::runtime(format!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+        .with_code(crate::error::error_codes::SUBPROCESS_FAILED))
+    }
+}
+
+/// `(%git-resolve-ref url ref)` — resolve `ref` (a tag, branch, or commit) at the
+/// remote `url` to a full commit hash via `git ls-remote`, or `nil` if no such
+/// ref exists. For an annotated tag, prefers the peeled `^{}` line (the commit the
+/// tag points to). When `ref` is already a commit SHA the remote doesn't advertise
+/// (ls-remote returns nothing), it's returned as-is — a commit pins itself.
+/// The package manager's ref-pinning mechanism (ADR-037); pinning policy is Brood.
+fn git_resolve_ref(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let url = expect_string(heap, "%git-resolve-ref", arg(args, 0))?;
+    let r = expect_string(heap, "%git-resolve-ref", arg(args, 1))?;
+    let out = run_git(&["ls-remote", &url, &r], None)?;
+    if !out.status.success() {
+        return Err(LispError::runtime(format!(
+            "%git-resolve-ref: git ls-remote {} {} failed: {}",
+            url,
+            r,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+        .with_code(crate::error::error_codes::SUBPROCESS_FAILED));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut first: Option<&str> = None;
+    let mut peeled: Option<&str> = None;
+    for line in stdout.lines() {
+        let sha = line.split_whitespace().next();
+        if first.is_none() {
+            first = sha;
+        }
+        if line.trim_end().ends_with("^{}") {
+            peeled = sha;
+        }
+    }
+    if let Some(s) = peeled.or(first) {
+        return Ok(heap.alloc_string(s));
+    }
+    // No advertised ref: if `ref` itself looks like a commit SHA, it pins itself.
+    let looks_like_sha = r.len() >= 7 && r.len() <= 40 && r.chars().all(|c| c.is_ascii_hexdigit());
+    if looks_like_sha {
+        Ok(heap.alloc_string(&r))
+    } else {
+        Ok(Value::Nil)
+    }
+}
+
+/// `(%git-clone url dest ref commit)` — populate `dest` with a shallow clone of
+/// `url` checked out at the exact `commit` (detached HEAD). Tries to fetch the
+/// commit directly (servers that allow SHA-in-want, e.g. GitHub); falls back to
+/// fetching `ref` then checking out `commit`. Returns `:ok`, or throws with git's
+/// stderr. The package manager's fetch mechanism (ADR-037); the cache layout and
+/// when-to-reclone policy are Brood (std/package.blsp).
+fn git_clone(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let url = expect_string(heap, "%git-clone", arg(args, 0))?;
+    let dest = expect_string(heap, "%git-clone", arg(args, 1))?;
+    let gref = expect_string(heap, "%git-clone", arg(args, 2))?;
+    let commit = expect_string(heap, "%git-clone", arg(args, 3))?;
+
+    if let Some(parent) = std::path::Path::new(&dest).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                LispError::runtime(format!("%git-clone: cannot create {}: {}", parent.display(), e))
+                    .with_code(crate::error::error_codes::FILE_IO)
+            })?;
+        }
+    }
+
+    git_or_err(&["init", "-q", &dest], None)?;
+    git_or_err(&["-C", &dest, "remote", "add", "origin", &url], None)?;
+
+    // Fast path: fetch the exact commit shallowly. Many servers (GitHub) allow it.
+    let direct = run_git(&["-C", &dest, "fetch", "-q", "--depth", "1", "origin", &commit], None)?;
+    if !direct.status.success() {
+        // Fallback: fetch the named ref (shallow first, then full if the server
+        // rejects a shallow ref fetch), which must contain the locked commit.
+        if git_or_err(&["-C", &dest, "fetch", "-q", "--depth", "1", "origin", &gref], None).is_err() {
+            git_or_err(&["-C", &dest, "fetch", "-q", "origin", &gref], None)?;
+        }
+    }
+
+    if git_or_err(&["-C", &dest, "checkout", "-q", "--detach", &commit], None).is_err() {
+        return Err(LispError::runtime(format!(
+            "%git-clone: commit {} is not reachable from {} at {}",
+            commit, gref, url
+        ))
+        .with_code(crate::error::error_codes::SUBPROCESS_FAILED)
+        .with_hint("the ref may have moved since it was locked — try `nest update`"));
+    }
+    Ok(crate::core::value::kw("ok"))
+}
+
+/// `(%rm-rf path)` — recursively delete `path`. **Bounded to `_deps/`**: refuses
+/// any path without a `_deps` component, so a mis-computed cache path can't delete
+/// something outside the package cache. Idempotent (`:ok` if already absent). The
+/// package manager's cache-eviction mechanism (ADR-037); `nest update` re-clones.
+fn rm_rf(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "%rm-rf", arg(args, 0))?;
+    let under_deps = std::path::Path::new(&path)
+        .components()
+        .any(|c| c.as_os_str() == "_deps");
+    if !under_deps {
+        return Err(LispError::runtime(format!(
+            "%rm-rf: refusing to delete {} — only paths under _deps/ may be removed",
+            path
+        ))
+        .with_code(crate::error::error_codes::FILE_IO));
+    }
+    match std::fs::remove_dir_all(&path) {
+        Ok(()) => Ok(crate::core::value::kw("ok")),
+        Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => Ok(crate::core::value::kw("ok")),
+        Err(e) => Err(LispError::runtime(format!("%rm-rf: {}: {}", path, e))
+            .with_code(crate::error::error_codes::FILE_IO)),
+    }
 }
 
 /// `(slurp path)` — read the whole file at `path` and return it as a string. The
