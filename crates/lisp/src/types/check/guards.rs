@@ -13,7 +13,7 @@
 
 use crate::core::heap::Heap;
 use crate::core::keywords as kw;
-use crate::core::value::{self, Symbol, Value};
+use crate::core::value::{self, Symbol, Tag, Value};
 use crate::types::Ty;
 
 use super::ctx::Ctx;
@@ -113,6 +113,19 @@ pub(super) fn guard_assertion(heap: &Heap, test: Value, ctx: &Ctx) -> Option<(Sy
         }
         return None;
     }
+    // The `and` short-circuit expansion `(let (g E) (if g _ g))` — a truthy
+    // `and` implies its first conjunct `E` holds, so an `(if (and (pred? x) …) …)`
+    // narrows `x` in the *then* branch. Matched post-`macroexpand_all` (when the
+    // `(and …)` surface is already this shape); the `or` expansion
+    // `(if g g _)` is deliberately *not* matched (a truthy `or` implies nothing
+    // about its first operand). This is what lets the `match` compiler's
+    // `(if (and (vector? m) (= (vector-length m) 2)) …)` narrow `m` to a vector,
+    // so the guarded `vector-ref m i` isn't flagged against a list/other scrutinee.
+    if head_name == "let" && items.len() == 3 {
+        if let Some(g) = and_first_conjunct_guard(heap, items[1], items[2], ctx) {
+            return Some(g);
+        }
+    }
     if items.len() != 2 {
         return None;
     }
@@ -121,6 +134,36 @@ pub(super) fn guard_assertion(heap: &Heap, test: Value, ctx: &Ctx) -> Option<(Sy
         Value::Sym(s) => Some((s, ty)),
         _ => None,
     }
+}
+
+/// Recognise the `and`-expansion `(let (g E) (if g _ g))` and return the guard
+/// its first conjunct `E` asserts. The binding must be exactly one name `g`, and
+/// the body must be `(if g <then> g)` — test and *else* both `g` (the `and`
+/// shape; `or` is `(if g g <else>)` and must not match). Sound because a truthy
+/// result requires `g` (= `E`) truthy.
+fn and_first_conjunct_guard(
+    heap: &Heap,
+    binding: Value,
+    body: Value,
+    ctx: &Ctx,
+) -> Option<(Symbol, Ty)> {
+    let bs = list_items(heap, binding)?;
+    if bs.len() != 2 {
+        return None; // a multi-binding `let` isn't the `and` shape
+    }
+    let Value::Sym(g) = bs[0] else { return None };
+    let cond = bs[1];
+    let body_items = list_items(heap, body)?;
+    // `(if test then else)` — 4 items; test == g and else == g.
+    let is_if = matches!(body_items.first(), Some(&Value::Sym(s)) if value::symbol_is(s, "if"));
+    if body_items.len() != 4 || !is_if {
+        return None;
+    }
+    let is_g = |v: Value| matches!(v, Value::Sym(s) if s == g);
+    if !is_g(body_items[1]) || !is_g(body_items[3]) {
+        return None;
+    }
+    guard_assertion(heap, cond, ctx)
 }
 
 /// If `a` is a symbol and `b` is a self-evaluating literal, return the guard
@@ -149,6 +192,16 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
         // A bare symbol is a variable reference — looked up in the local ctx
         // (let-bound RHS / if-guard narrowing). A miss = unknown, not flagged.
         Value::Sym(s) => ctx.get(s),
+        // A vector literal `[a b c]` — its elements are evaluated, so the element
+        // type is the union of their types (Step 5+, ADR-077). Any unknown element
+        // → unrefined `vector`.
+        Value::Vector(id) => {
+            let items = heap.vector(id).to_vec();
+            Some(match element_union(heap, &items, ctx) {
+                Some(e) => Ty::vector_of(e),
+                None => Ty::of(Tag::Vector),
+            })
+        }
         Value::Pair(_) => {
             let items = list_items(heap, form)?;
             match items.first().copied() {
@@ -156,12 +209,58 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                     if value::symbol_is(s, kw::QUOTE) {
                         return items.get(1).map(|&d| Ty::of_value(d));
                     }
+                    // Sequence-aware refinements (`list`/`vector` constructors,
+                    // `first`/`last`/`nth` extractors) when the head isn't a local
+                    // shadow; else the callee's flat result type.
+                    if !ctx.is_local(s) {
+                        if let Some(t) = seq_aware_call_ty(heap, s, &items, ctx) {
+                            return Some(t);
+                        }
+                    }
                     sig_of(heap, s).map(|sig| sig.ret)
                 }
                 _ => None,
             }
         }
-        // Int / Float / Str / Keyword / Bool / Nil / Vector: self-evaluating.
+        // Int / Float / Str / Keyword / Bool / Nil: self-evaluating.
         other => Some(Ty::of_value(other)),
     }
+}
+
+/// The union of the element forms' types, or `None` if empty or any element is
+/// unknown (so the element type can't be pinned — stay unrefined, never wrong).
+fn element_union(heap: &Heap, items: &[Value], ctx: &Ctx) -> Option<Ty> {
+    let mut acc: Option<Ty> = None;
+    for &it in items {
+        let t = expr_ty(heap, it, ctx)?;
+        acc = Some(match acc {
+            Some(a) => a.union(t),
+            None => t,
+        });
+    }
+    acc
+}
+
+/// Element-aware result type for the sequence builtins — `None` falls through to
+/// the callee's flat signature. `(list …)`/`(vector …)` build a refined
+/// sequence; `(first xs)`/`(last xs)`/`(nth xs i)` extract the element type
+/// (widened with `nil` for the empty / out-of-range case, so the result is a
+/// sound superset). Only refines when the element type is actually known.
+fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Option<Ty> {
+    if value::symbol_is(head, "list") {
+        return element_union(heap, &items[1..], ctx).map(Ty::list_of);
+    }
+    if value::symbol_is(head, "vector") {
+        return element_union(heap, &items[1..], ctx).map(Ty::vector_of);
+    }
+    if value::symbol_is(head, "first")
+        || value::symbol_is(head, "last")
+        || value::symbol_is(head, "nth")
+    {
+        let arg = *items.get(1)?;
+        let elem = expr_ty(heap, arg, ctx)?.elem_ty().cloned()?;
+        // first/last/nth yield `nil` on an empty / out-of-range sequence.
+        return Some(elem.union(Ty::of(Tag::Nil)));
+    }
+    None
 }

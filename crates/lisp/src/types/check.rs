@@ -1334,4 +1334,93 @@ mod tests {
             "a local callback must be skipped: {w:?}"
         );
     }
+
+    // ---- element types flow through first/last/nth (ADR-077 slice 2) ----
+
+    #[test]
+    fn first_of_a_string_vector_is_not_a_number() {
+        // `(first ["a" "b"])` : string | nil — disjoint from number → flagged.
+        let w = warnings(r#"(+ 1 (first ["a" "b"]))"#);
+        assert!(
+            w.iter().any(|s| s.contains("+") && s.contains("string")),
+            "expected a number/string mismatch from the element type: {w:?}"
+        );
+    }
+
+    #[test]
+    fn first_of_an_int_vector_is_a_number() {
+        // `(first [10 20])` : int | nil — overlaps number → no warning.
+        let w = warnings("(+ 1 (first [10 20]))");
+        assert!(
+            w.iter().all(|s| !s.contains("expects number")),
+            "an int element must not warn against +: {w:?}"
+        );
+    }
+
+    #[test]
+    fn list_constructor_carries_its_element_type() {
+        // `(list "a" "b")` : list<string>, so `(first …)` is string|nil.
+        let w = warnings(r#"(+ 1 (first (list "a" "b")))"#);
+        assert!(
+            w.iter().any(|s| s.contains("+") && s.contains("string")),
+            "(list …) element type should flow to first: {w:?}"
+        );
+    }
+
+    #[test]
+    fn heterogeneous_or_unknown_elements_do_not_warn() {
+        // Mixed elements → int|string element; first → int|string|nil, which
+        // overlaps number → no false positive.
+        let w = warnings(r#"(+ 1 (first [1 "a"]))"#);
+        assert!(
+            w.iter().all(|s| !s.contains("expects number")),
+            "a heterogeneous element type must not warn: {w:?}"
+        );
+        // first of an unknown (variable) sequence → unknown → no warning.
+        let w = warnings("(fn (xs) (+ 1 (first xs)))");
+        assert!(
+            w.iter().all(|s| !s.contains("expects number")),
+            "an unknown sequence must not warn: {w:?}"
+        );
+    }
+
+    // ---- `and`-guard narrowing in an `if` test (the match-lowering fix) ----
+
+    #[test]
+    fn and_guard_narrows_in_the_then_branch() {
+        // `(and (int? x) …)` as an `if` test must narrow `x` to int in the then
+        // branch — so a use that would mismatch the *original* type is suppressed
+        // (here `x` is a string, narrowed to never → the `+` use is unreachable).
+        let w = warnings_expanded(r#"(let (x "s") (if (and (int? x) true) (+ x 1) 0))"#);
+        assert!(
+            w.iter().all(|s| !s.contains("expects number")),
+            "an `and` guard should narrow x in the then branch: {w:?}"
+        );
+    }
+
+    #[test]
+    fn matching_a_list_against_a_vector_pattern_is_not_flagged() {
+        // The match compiler lowers a vector pattern to
+        // `(if (and (vector? m) (= (vector-length m) 2)) (… (vector-ref m i) …) …)`.
+        // With `(list 1 2)` now typed `list<int>`, the guarded `vector-ref` must
+        // not be flagged — the `and` guard narrows `m` to a vector (→ never here).
+        let w = warnings_expanded("(match (list 1 2) ([a b] :vec) (_ :not-vec))");
+        assert!(
+            w.iter().all(|s| !s.contains("vector-ref") && !s.contains("vector-length")),
+            "a list matched against a vector pattern must not warn: {w:?}"
+        );
+    }
+
+    #[test]
+    fn or_guard_does_not_falsely_narrow() {
+        // `or` must NOT narrow from its first operand (a truthy `or` implies
+        // nothing about it). `(or (int? x) true)` is always true, so the then
+        // branch keeps `x`'s full (string) type — and a genuine misuse there is
+        // still seen. (Guards against the `and`-fix over-reaching into `or`.)
+        let w = warnings_expanded(r#"(let (x "s") (if (or (int? x) true) (string-length x) 0))"#);
+        assert!(
+            w.iter().all(|s| !s.contains("expects")),
+            "a correct use under an `or` guard must not warn: {w:?}"
+        );
+    }
 }

@@ -9987,3 +9987,45 @@ is a compile-time ergonomic only.
 **Deferred (ADR-011).** Vector/list element types (the `elem` refinement the struct
 has room for), overload intersections, arrows in straight-line inference. Done on
 branch `structured-types`.
+
+---
+
+## 2026-05-31 — Structured types, slice 2: vector/list element types (ADR-077)
+
+**Goal.** The second Step 5+ slice, building on the arrow refinement: give `Ty` an
+element-type refinement so `[1 2 3] : vector<int>` and the element flows through
+`first`/`last`/`nth`.
+
+**Built.**
+- `Ty` gained `elem: Option<Arc<Ty>>` next to `arrow` — refines the sequence
+  members (`pair`/`vector`). Constructors `vector_of`/`list_of`/`seq_of`, accessor
+  `elem_ty`, `Display` `vector<int>`/`list<int>`. The two refinements share generic
+  `merge_union`/`merge_intersect` helpers (widen on mismatch); element subtyping is
+  covariant (sound — sequences are immutable); `is_disjoint` stays tags-only.
+- `expr_ty` (the checker): **sources** — a vector literal `[…]` and the
+  `(list …)`/`(vector …)` constructors take the union of their element forms' types
+  (any unknown → unrefined, never wrong); **sinks** — `(first xs)`/`(last xs)`/
+  `(nth xs i)` flow the element type out, widened with `nil` for the empty case. So
+  `(+ 1 (first ["a" "b"]))` is flagged (`string|nil` disjoint from number) while
+  `(first [1 2 3])` stays numeric. The existing disjointness check does the rest.
+
+**Latent gap surfaced + fixed.** Typing `(list 1 2)` precisely (was untyped: `list`
+is a variadic prelude `defn`, which `infer_sig` skips) meant the `match` compiler's
+vector-pattern lowering `(if (and (vector? m) (= (vector-length m) 2)) (… (vector-ref
+m i) …) …)` tried to flag the guarded `vector-ref` against a `list<int>` scrutinee —
+a false positive. Root cause: occurrence typing didn't see through the `and`
+short-circuit. Fixed in `guard_assertion` by recognising the post-`macroexpand_all`
+shape `(let (g E) (if g _ g))` (a truthy `and` ⟹ first conjunct `E` holds; `or`'s
+`(if g g _)` deliberately excluded). General win: any `(if (and (pred? x) …) …)` now
+narrows `x` in the then-branch.
+
+**Verified.** 353 lib + lsp tests green (incl. full in-language `brood_suite_passes`);
++11 new (4 element-algebra, 4 checker element-flow, 3 `and`-guard / match-lowering
+regression). Re-audited `brood --check` across all 76 `std/` + `tests/` files: the
+one `vector-ref` false positive is gone; the remaining warnings are all pre-existing
+(single-file `--check` can't see project-local names; one `(rest pair)`-as-cdr
+modelling gap in `std/test.blsp`, untouched by this work).
+
+**Deferred (ADR-011).** Overload intersections; element/arrow types in straight-line
+inference; a parametric `map` result element type (needs dependent sigs). Done on
+branch `structured-types`.

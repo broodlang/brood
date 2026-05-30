@@ -4889,14 +4889,33 @@ positives** (audited across the whole `std/` + `tests/` tree). The arrow's tags 
 still `fn | native`, so the existing "non-function argument" check (`(map 5 xs)`) is
 unchanged — the arrow only *adds* the arity refinement.
 
-**Deferred (still ⬜, ADR-011).** Vector/list **element** types (`Seq(elem)` — the
-next slice; `[1 2 3] : vector<int>`, so `first`/`map` flow element types),
-intersections for overloaded fns, and arrow types flowing into the checker's
-straight-line inference. The struct has room for an `elem` refinement field added
-the same way when that slice lands.
+**Element types (second slice, shipped).** `Ty` gained the second refinement the
+struct was designed for — `elem: Option<Arc<Ty>>`, refining the sequence members
+(`pair`/`vector`) to their element type (`vector<int>` = `{tags: Vector, elem:
+Some(int)}`). **Sources:** a vector literal `[1 2 3]` and the `(list …)`/`(vector …)`
+constructors take the union of their element types (any unknown element → unrefined,
+never wrong). **Sinks:** `(first xs)`/`(last xs)`/`(nth xs i)` flow the element type
+out — widened with `nil` for the empty/out-of-range case — so `(+ 1 (first ["a"
+"b"]))` is flagged (`string | nil` disjoint from `number`) while `(first [1 2 3])`
+stays numeric. Element subtyping is covariant (sound — sequences are immutable);
+union widens on a mismatch; `is_disjoint` stays tags-only (same advisory-soundness
+rule as `arrow`). The refinements share the generic `merge_union`/`merge_intersect`
+helpers. **Latent gap surfaced + fixed:** typing `(list …)` precisely meant the
+`match` compiler's vector-pattern lowering `(if (and (vector? m) (= (vector-length m)
+2)) (… (vector-ref m i) …) …)` tried to flag the guarded `vector-ref` against a
+`list<int>` scrutinee. The root cause was occurrence typing not seeing through the
+`and` short-circuit — so `guard_assertion` now narrows through the post-expansion
+shape `(let (g E) (if g _ g))` (a truthy `and` ⟹ first conjunct `E` holds; `or`'s
+`(if g g _)` deliberately doesn't match). General win beyond this case: any `(if (and
+(pred? x) …) …)` now narrows `x` in the then-branch.
+
+**Still deferred (⬜, ADR-011).** Intersections for overloaded fns; arrow/element
+types flowing into the straight-line inference; a parametric `map` result element
+type (`(map f vector<A>) : list<B>` from `f : A -> B`) — needs dependent signatures.
 
 **References.** [`types.md`](types.md) (Step 5+, the compatibility contract), ADR-024
 (the set-theoretic/gradual model this extends), ADR-023, ADR-011 (ship the simple
-form, defer power), ADR-006 (mechanism in Rust, the arrow algebra; policy stays
-Brood). Lives in `crates/lisp/src/types/mod.rs` (the lattice) and
-`crates/lisp/src/types/check/{sigs,walk}.rs` (the callback check).
+form, defer power), ADR-006 (mechanism in Rust, the arrow/element algebra; policy
+stays Brood). Lives in `crates/lisp/src/types/mod.rs` (the lattice) and
+`crates/lisp/src/types/check/{sigs,walk,guards}.rs` (callback check, element flow,
+and the `and`-guard narrowing).
