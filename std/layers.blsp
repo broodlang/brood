@@ -169,6 +169,12 @@ resolver — keymaps and hooks are just facets over it."
   (remove nil?
     (map (fn (l) (get (layers--resolve l) facet)) (layers--list ctx))))
 
+(defn active-layers (ctx)
+  "The active layers of `ctx` as **resolved maps**, highest-precedence first — for
+inspecting whole layers (e.g. to skip `:system` ones when naming the mode), where
+`layer-collect` (which projects a single facet) isn't enough."
+  (map layers--resolve (layers--list ctx)))
+
 ;; ---- stack ops (pure; fire no hooks) ----------------------------------------
 
 (defn push-layer (ctx layer)
@@ -266,6 +272,18 @@ returns `[ctx' pending']`. The bridge from layers to keymap — compose, then st
 ;; `{:match <suffix-string | (fn (filename) -> bool)> :type <type>}`.
 (def *auto-type-by-file* ())
 
+;; Always-on **system layers** — included (at lowest precedence) on every buffer by
+;; `init-buffer-layers`, regardless of type. The home for global behaviour (a
+;; baseline keymap, etc.) that isn't a "mode". Mark such a layer `:system true` so a
+;; UI can keep it out of the mode display (e.g. show the major mode, not "global").
+(def *system-layers* ())
+
+(defn register-system-layer (ref)
+  "Register `ref` as an always-on system layer (appended at lowest precedence to
+every buffer). Idempotent-ish: re-registering the same ref adds a duplicate, so
+register once at load."
+  (def *system-layers* (concat *system-layers* (list ref))))
+
 (defn register-type-layers (type refs)
   "Bind buffer `type` to `refs` (a list of layer references, head = highest
 precedence). Rebinds the registry, so it hot-swaps on the next buffer of that type.
@@ -310,15 +328,16 @@ buffers (a `*magit-status*`, a scratch buffer). Does not (re)seed layers; pair w
   (assoc buf :type type))
 
 (defn init-buffer-layers (buf)
-  "Resolve `buf`'s type, set `:type` to it, and seed `:layers` from `*type-layers*`,
-firing each layer's `:activate` (base-first). Replaces any existing `:layers` — call
-on buffer creation, or after `set-buffer-type`. The registry list's order is
-preserved (head = highest precedence)."
+  "Resolve `buf`'s type, set `:type` to it, and seed `:layers` from `*type-layers*`
+**plus the always-on `*system-layers*`** (at lowest precedence), firing each
+layer's `:activate` (base-first). Replaces any existing `:layers` — call on buffer
+creation, or after `set-buffer-type`. The type list's order is preserved (head =
+highest precedence); system layers come last."
   (let (type (buffer-type-for buf)
-        refs (layers-for-type type)
+        refs (concat (layers-for-type type) *system-layers*)
         seeded (assoc buf :type type :layers ()))
     ;; activate base-first (reverse: each push goes to the head), so the resulting
-    ;; :layers order equals the registry order and a minor's :activate sees the base.
+    ;; :layers order equals `refs` order and a minor's :activate sees the base.
     (fold (fn (b ref) (activate-layer b ref)) seeded (reverse refs))))
 
 ;; ============================================================================

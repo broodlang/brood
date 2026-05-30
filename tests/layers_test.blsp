@@ -242,3 +242,15 @@
           _ (close-context focused))             ; :on-close sends it :stop
       ;; the worker acks its stop — proving :on-focus spawned and :on-close cleaned up
       (assert= (receive) :stopped))))
+
+;; ---- active-layers + always-on system layers --------------------------------
+(describe "system layers & active-layers"
+  :isolated
+  (test "active-layers resolves refs to maps, highest precedence first"
+    (let (ctx (push-layer (push-layer {} 'layers-test/layer-a) 'layers-test/layer-hi))
+      (assert= (map (fn (l) (get l :name)) (active-layers ctx)) (list 'hi 'a))))
+  (test "system layers are appended (lowest precedence) to every buffer"
+    (register-type-layers :t-sys (list 'layers-test/layer-a))
+    (register-system-layer 'layers-test/layer-b)
+    (let (b (init-buffer-layers (set-buffer-type {} :t-sys)))
+      (assert= (map (fn (l) (get l :name)) (active-layers b)) (list 'a 'b)))))
