@@ -9893,3 +9893,32 @@ whole-project warning count unchanged at 36), 77 Rust tests green.
 **Not yet converted** (deliberate — core hot-path files edited concurrently, left
 for a separate deliberate pass): `core/value.rs`, `core/heap.rs`,
 `syntax/reader.rs`, `eval/compile.rs`.
+
+---
+
+## 2026-05-30 — Bytecode VM Stage 2a/2b: `let`/`letrec` + multi-arity
+
+Continuing ADR-076 in a worktree (`worktree-vm-stage2`), behind `BROOD_VM`.
+
+**2a — `let`/`letrec` (flatten-scope lexical addressing).** A `let`/`letrec` body
+no longer defers to the tree-walker. Lexical scope is flattened into the single
+activation frame: a compile-time `Scope` (name→flat-slot, sequential, shadowing;
+high-water = `nslots`) replaces the param-only list; `Node::LetBind` writes each rhs
+into its frame slot (`Heap::set_root_at`) in order, then runs the body; `vm_apply`
+nil-fills the frame to `nslots`. `let`/`let*` sequential, `letrec` pre-allocated;
+top-level `let` handled; list-or-vector binding forms; pattern binders defer. **A
+`let`-body tail loop (30M iters): 25.5 s → 10.9 s (~2.3×).** GC-stress clean (let
+slots survive relocation incl. the `set_root_at` writes).
+
+**2b — multi-arity.** `compile_closure` compiles every exact-arity arm into a
+`CompiledClosure { arms: Vec<Arc<CompiledArm>> }`; `dispatch` selects by argc.
+Variadic arms / non-core bodies defer.
+
+**Verified + merged to `main`** (off by default): 167 lib + 1038 in-language green
+under `BROOD_VM=1`; lib green under `BROOD_VM=1 BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`;
+VM off unchanged. Also captured `docs/lexical-addressing-gotchas.md` (a handoff
+checklist from a parallel experiment).
+
+**Next: 2c — local-capturing closures** (the GC-critical unlock — LOCAL-closure
+cache-by-code-handle + rooting the movable captured env in `vm_apply`; deferred to a
+dedicated effort).

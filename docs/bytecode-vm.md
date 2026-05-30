@@ -1,12 +1,13 @@
 # The execution-engine plan — a closure-compiling VM
 
-> **Status (2026-05-30): Stage 0–1 built behind `BROOD_VM`, on branch
-> `worktree-bytecode-vm` — ~2× on fib/loop.** The design record is **ADR-076**;
-> this file is the long-form companion. Nothing here changes the language — it is
-> purely an **execution-engine** swap. `std/*.blsp` and user code are untouched.
-> See [As-built](#as-built-stage-01-2026-05-30) for what's done, the numbers, and
-> the honest finding that the win needed the passthrough redirect (the §7 stages
-> below are the original plan).
+> **Status (2026-05-30): Stage 0–2b built behind `BROOD_VM` — ~2–2.3×.** The
+> design record is **ADR-076**; this file is the long-form companion. Nothing here
+> changes the language — it is purely an **execution-engine** swap. `std/*.blsp`
+> and user code are untouched. Stage 0–1 (mechanism + the passthrough redirect) and
+> Stage 2a (`let`/`letrec`) + 2b (multi-arity) are merged to `main`. **Next: Stage
+> 2c — local-capturing closures** (the unlock for closures created *inside*
+> functions; the GC-critical one — see `lexical-addressing-gotchas.md`). See
+> [As-built](#as-built-stage-01-2026-05-30) for the numbers and the §7 plan.
 
 This is the project's "big lever" for performance: closing the tree-walker's
 structural ~50–220× tax (ADR-069's measurement) over the Node/Elixir range. It is
@@ -69,13 +70,37 @@ keeping the hot loop off the tree-walker.** This is exactly what a bounded first
 slice is for: prove the mechanism (the GC-rooting crux), then learn where the win
 actually lives.
 
-**What's next (toward Stage 2).** The slice only engages from a fully-VM-compilable
-top-level chain (e.g. a `(bench …)` macro expands to `let` → ineligible → defers;
-the REPL path doesn't hit the seam), so real programs rarely trigger it yet.
-Widening the win means: closures that capture **local** frames (depth > 0 lexical
-addressing, the real `let`/nested-closure case), **multi-arity** bodies, more
-special forms (`let`/`letrec`/`and`/`or`), and **call-site inline caches** so a
-global callee isn't re-resolved every call. Those are Stage 2.
+### Stage 2a — `let`/`letrec` (done)
+
+Lexical scope is **flattened into the single activation frame**: a compile-time
+`Scope` (name→flat-slot, sequential, shadowing; high-water = `nslots`) replaces the
+param-only list. `Node::LetBind` evaluates each rhs and writes it into its frame
+slot (`Heap::set_root_at`), in order, then runs the body; `vm_apply` pushes the args
+then nil-fills to `nslots`. `let`/`let*` are sequential, `letrec` pre-allocates all
+slots (init nil). Top-level forms get a frame too. Binding forms accept a list or
+vector; pattern binders defer. **A `let`-body tail loop (30M iters): 25.5 s →
+10.9 s (~2.3×)**; `let` slots on `Heap::roots` survive GC-stress.
+
+### Stage 2b — multi-arity (done)
+
+`compile_closure` compiles *every* exact-arity arm into a `CompiledClosure {
+arms: Vec<Arc<CompiledArm>> }`; `dispatch` selects by argument count (exact arms
+have distinct arities, matching eval's preference). Variadic arms / non-core
+bodies defer.
+
+### Stage 2c — local-capturing closures (next, the GC-critical one)
+
+The remaining unlock: closures created *inside* a function (callbacks, let-bound
+helpers) that capture a local frame — so the VM engages in real programs, not just
+top-level chains. Free-var resolution is already name-based (`Global(sym)` →
+`env_get(genv, …)`), so it's robust to the shipped-closure reorder
+(`lexical-addressing-gotchas.md` #1) — the body just needs `genv = the closure's
+captured env`. The hard, GC-critical parts: (a) LOCAL closures have no stable handle
+for caching (index reuse after GC → stale-body miscompile) — key the cache by the
+**body-code handle** (RUNTIME-stable) and defer the rest; (b) the captured env is a
+**movable `EnvId`** — `vm_apply` must root it on `env_roots` and re-read it across
+collections (the R1 path). Plus **call-site inline caches** so a global callee
+isn't re-resolved each call. Deferred to a dedicated effort.
 
 ---
 
