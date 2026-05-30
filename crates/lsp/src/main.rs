@@ -746,7 +746,7 @@ mod diagnostic_tests {
 
     #[test]
     fn surfaces_the_callback_arity_warning_as_a_brood_warning() {
-        // The Step-5+ arrow check (ADR-077) must reach the editor: `map` calls
+        // The Step-5+ arrow check (ADR-078) must reach the editor: `map` calls
         // its callback with one arg, but `cons` takes two.
         let diags = warnings("(def r (map cons (list 1 2 3)))");
         let hit = diags

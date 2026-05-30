@@ -1,0 +1,180 @@
+;; std/regex.blsp — a small regular-expression engine, written in Brood.
+;; (require 'regex).
+;;
+;; A practical subset — enough for tokenising, filename/type matching, and most
+;; text-processing — implemented as a recursive-descent parser to an AST plus a
+;; continuation-passing **backtracking** matcher (no new kernel primitives; pure
+;; Brood over the string ops). Supported syntax:
+;;
+;;   literals            a b c …
+;;   .                   any one character
+;;   * + ?               greedy quantifiers (on the preceding atom or group)
+;;   ^ $                 start / end of string anchors
+;;   [...] [^...]        a character set / negated set (explicit chars; NO ranges yet)
+;;   \d \w \s            digit / word (letter|digit|_) / whitespace classes
+;;   \. \* …             escape — a metacharacter taken literally
+;;   |                   alternation
+;;   (...)               grouping (quantifiable; not a capture)
+;;
+;; NOT yet: ranges `[a-z]`, backreferences, lookaround, capture groups, `{m,n}`.
+;; It backtracks, so a pathological pattern can be slow — fine for the short
+;; inputs (filenames, tokens) this is built for. Framework/tooling tier, opt-in.
+
+(defmodule regex
+  "A small backtracking regular-expression engine in pure Brood. `(require
+'regex)`. `(regex/match? pattern s)` searches `s` for `pattern` (anchors `^`/`$`
+tie to the string's start/end); `(regex/matches? pattern s)` requires the whole
+string to match. Subset: literals, `.`, `* + ?`, `^ $`, `[...]`/`[^...]` sets
+(explicit chars), `\\d \\w \\s`, escapes, `|`, and `(...)` groups. No ranges,
+captures, or backreferences yet."
+  (:use buffer))
+
+;; ---- parse: pattern string -> AST -------------------------------------------
+;; A pattern parses to a list of BRANCHES (the top-level alternation); each branch
+;; is a list of PIECES; a piece is an ATOM, optionally wrapped `{:q :star/:plus/:opt
+;; :a atom}`. Atoms are tagged maps: {:t :lit :c c} {:t :any} {:t :bol} {:t :eol}
+;; {:t :set :neg b :chars (…)} {:t :class :k :digit/:word/:space} {:t :group :alt …}.
+
+(defn regex--peek (pcs i) (if (< i (count pcs)) (nth pcs i) nil))
+
+(defn regex--escape (pcs i)
+  "Parse the atom after a backslash at `i`; returns [atom next]."
+  (let (c (regex--peek pcs i))
+    (cond
+      (= c "d") [{:t :class :k :digit} (inc i)]
+      (= c "w") [{:t :class :k :word}  (inc i)]
+      (= c "s") [{:t :class :k :space} (inc i)]
+      (nil? c)  [{:t :lit :c "\\"} i]          ; trailing backslash → literal
+      :else     [{:t :lit :c c} (inc i)])))    ; \. \* \\ … → that char, literal
+
+(defn regex--set-chars (pcs i acc)
+  "Collect set members until the closing `]`; returns [chars next]."
+  (let (c (regex--peek pcs i))
+    (cond
+      (nil? c)   [acc i]               ; unterminated set → take what we have
+      (= c "]")  [acc (inc i)]         ; consume the ]
+      :else      (regex--set-chars pcs (inc i) (cons c acc)))))
+
+(defn regex--set (pcs i)
+  "Parse a `[...]` set whose body starts at `i` (just past `[`); returns [atom next]."
+  (let (neg (= (regex--peek pcs i) "^")
+        start (if neg (inc i) i)
+        [chars nxt] (regex--set-chars pcs start (list)))
+    [{:t :set :neg neg :chars chars} nxt]))
+
+(defn regex--atom (pcs i)
+  "Parse one atom at `i`; returns [atom next]."
+  (let (c (regex--peek pcs i))
+    (cond
+      (= c "(") (let ([alt nxt] (regex--alt pcs (inc i)))
+                  [{:t :group :alt alt} (inc nxt)])   ; (inc nxt) skips the ')'
+      (= c "[") (regex--set pcs (inc i))
+      (= c ".") [{:t :any} (inc i)]
+      (= c "^") [{:t :bol} (inc i)]
+      (= c "$") [{:t :eol} (inc i)]
+      (= c "\\") (regex--escape pcs (inc i))
+      :else [{:t :lit :c c} (inc i)])))
+
+(defn regex--piece (pcs i)
+  "Parse an atom plus an optional quantifier; returns [piece next]."
+  (let ([atom i2] (regex--atom pcs i)
+        q (regex--peek pcs i2))
+    (cond
+      (= q "*") [{:q :star :a atom} (inc i2)]
+      (= q "+") [{:q :plus :a atom} (inc i2)]
+      (= q "?") [{:q :opt  :a atom} (inc i2)]
+      :else [atom i2])))
+
+(defn regex--seq (pcs i)
+  "Parse a branch — pieces until `|`, `)`, or end; returns [pieces next]."
+  (let (c (regex--peek pcs i))
+    (if (or (nil? c) (= c "|") (= c ")"))
+      [(list) i]
+      (let ([piece i2] (regex--piece pcs i)
+            [rest i3] (regex--seq pcs i2))
+        [(cons piece rest) i3]))))
+
+(defn regex--alt (pcs i)
+  "Parse an alternation — branches separated by `|`; returns [branches next]."
+  (let ([branch i2] (regex--seq pcs i))
+    (if (= (regex--peek pcs i2) "|")
+      (let ([rest i3] (regex--alt pcs (inc i2)))
+        [(cons branch rest) i3])
+      [(list branch) i2])))
+
+(defn regex--parse (pattern)
+  "Parse `pattern` into its list of top-level branches."
+  (first (regex--alt (apply vector (string->list pattern)) 0)))
+
+;; ---- match: CPS backtracking over the AST -----------------------------------
+;; Each matcher takes the char vector `cs`, its length `n`, a position `i`, and a
+;; continuation `k` (`(i') -> bool`: does the rest of the pattern match from `i'`).
+
+(defn regex--letter? (c) "ASCII/Unicode cased letter: upper-case ≠ lower-case." (not (= (upper c) (lower c))))
+
+(defn regex--member? (chars c) (some? (fn (x) (= x c)) chars))
+
+(defn regex--class-match? (k c)
+  (cond
+    (= k :digit) (regex--member? (string->list "0123456789") c)
+    (= k :space) (regex--member? (string->list " \t\n\r") c)
+    (= k :word)  (or (regex--letter? c) (regex--member? (string->list "0123456789") c) (= c "_"))
+    :else false))
+
+(defn regex--atom-match (a cs n i k)
+  (let (t (get a :t))
+    (cond
+      (= t :bol)   (if (= i 0) (k i) false)
+      (= t :eol)   (if (= i n) (k i) false)
+      (= t :group) (regex--alt-match (get a :alt) cs n i k)
+      (>= i n)     false                                   ; the rest need a char
+      (= t :lit)   (if (= (nth cs i) (get a :c)) (k (inc i)) false)
+      (= t :any)   (k (inc i))
+      (= t :set)   (let (m (regex--member? (get a :chars) (nth cs i)))
+                     (if (if (get a :neg) (not m) m) (k (inc i)) false))
+      (= t :class) (if (regex--class-match? (get a :k) (nth cs i)) (k (inc i)) false)
+      :else false)))
+
+(defn regex--star (a cs n i k)
+  "Greedy `*`: match the atom as many times as possible, backtracking via `k`. The
+`(> i2 i)` guard stops an empty match (e.g. `()*`) from looping forever."
+  (or (regex--atom-match a cs n i (fn (i2) (if (> i2 i) (regex--star a cs n i2 k) false)))
+      (k i)))
+
+(defn regex--piece-match (p cs n i k)
+  (let (q (get p :q))
+    (cond
+      (= q :star) (regex--star (get p :a) cs n i k)
+      (= q :plus) (regex--atom-match (get p :a) cs n i (fn (i2) (regex--star (get p :a) cs n i2 k)))
+      (= q :opt)  (or (regex--atom-match (get p :a) cs n i k) (k i))
+      :else (regex--atom-match p cs n i k))))
+
+(defn regex--seq-match (pieces cs n i k)
+  (if (empty? pieces)
+    (k i)
+    (regex--piece-match (first pieces) cs n i
+                        (fn (i2) (regex--seq-match (rest pieces) cs n i2 k)))))
+
+(defn regex--alt-match (branches cs n i k)
+  (if (empty? branches)
+    false
+    (or (regex--seq-match (first branches) cs n i k)
+        (regex--alt-match (rest branches) cs n i k))))
+
+;; ---- public entry points ----------------------------------------------------
+
+(defn regex--search (branches cs n i)
+  (if (regex--alt-match branches cs n i (fn (_) true))
+    true
+    (if (< i n) (regex--search branches cs n (inc i)) false)))
+
+(defn match? (pattern s)
+  "True if `pattern` matches anywhere in `s` (a search). `^`/`$` anchor to the
+start/end of the whole string, so e.g. `(match? \"\\\\.blsp$\" name)` tests a suffix."
+  (let (cs (apply vector (string->list s)))
+    (regex--search (regex--parse pattern) cs (count cs) 0)))
+
+(defn matches? (pattern s)
+  "True if `pattern` matches the **entire** string `s` (anchored both ends)."
+  (let (cs (apply vector (string->list s)))
+    (regex--alt-match (regex--parse pattern) cs (count cs) 0 (fn (i) (= i (count cs))))))

@@ -1250,7 +1250,7 @@ mod tests {
         );
     }
 
-    // ---- callback-arity check over higher-order combinators (ADR-077) ----
+    // ---- callback-arity check over higher-order combinators (ADR-078) ----
 
     #[test]
     fn flags_a_named_callback_of_the_wrong_arity() {
@@ -1335,7 +1335,7 @@ mod tests {
         );
     }
 
-    // ---- element types flow through first/last/nth (ADR-077 slice 2) ----
+    // ---- element types flow through first/last/nth (ADR-078 slice 2) ----
 
     #[test]
     fn first_of_a_string_vector_is_not_a_number() {

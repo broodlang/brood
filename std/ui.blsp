@@ -31,7 +31,7 @@ beat. The observer and the coming editor are both `ui-run` clients — see
 `std/observer.blsp`."
   (:use face))
 
-(require 'face)   ; the shared named-face / theme registry, for every ui-run client
+(require 'face)  ; the shared named-face / theme registry, for every ui-run client
 
 ;; ---- frontends (ADR-046: one render-op protocol, many frontends) ------------
 ;;
@@ -66,15 +66,20 @@ carry no window id, one process should drive **one** window (which is why
 their input. Both are deferred trade-offs (ADR-059), fine for the observer."
   (let (id (gui-open))
     {:enter (fn () nil)
-     :leave (fn () (gui-close id))
-     :size  (fn () (gui-size id))
-     :draw  (fn (f) (gui-draw id f))
-     ;; Input arrives as mailbox messages (gui-open delivers to this process), so
-     ;; `:poll` is a `receive` that parks the process — it holds no scheduler worker
-     ;; while waiting (ADR-058), unlike a blocking poll. Returns the next key/mouse
-     ;; message, or nil after `ms` (the live-refresh tick).
-     :poll  (fn (ms) (receive (m m) (after ms nil)))
-     :window id}))
+      :leave
+      (fn () (gui-close id))
+      :size
+      (fn () (gui-size id))
+      :draw
+      (fn (f) (gui-draw id f))
+      ;; Input arrives as mailbox messages (gui-open delivers to this process), so
+      ;; `:poll` is a `receive` that parks the process — it holds no scheduler worker
+      ;; while waiting (ADR-058), unlike a blocking poll. Returns the next key/mouse
+      ;; message, or nil after `ms` (the live-refresh tick).
+      :poll
+      (fn (ms) (receive (m m) (after ms nil)))
+      :window
+      id}))
 
 (defn display--min-size (displays)
   "The smallest cols×rows across all frontends, so one broadcast frame fits every
@@ -82,16 +87,16 @@ screen (a larger frontend just shows it in its top-left)."
   (fold (fn (acc d)
           (let ([c r] ((get d :size)))
             (if (nil? acc)
-                [c r]
-                (let ([ac ar] acc) [(min ac c) (min ar r)]))))
-        nil
-        displays))
+              [c r]
+              (let ([ac ar] acc) [(min ac c) (min ar r)]))))
+    nil
+    displays))
 
 (defn display--poll-loop (displays slice)
   (if (empty? displays)
-      nil
-      (let (k ((get (first displays) :poll) slice))
-        (if (nil? k) (display--poll-loop (rest displays) slice) k))))
+    nil
+    (let (k ((get (first displays) :poll) slice))
+      (if (nil? k) (display--poll-loop (rest displays) slice) k))))
 
 (defn display--poll-any (displays ms)
   "Poll each frontend for a slice of `ms` in turn, returning the first key seen
@@ -106,9 +111,9 @@ in as just another member). The frame renders at the smallest common grid so it
 fits everywhere. Pure Brood over the `term-*`/`gui-*` mechanism."
   {:enter (fn () (doseq (d displays) ((get d :enter))))
    :leave (fn () (doseq (d displays) ((get d :leave))))
-   :size  (fn () (display--min-size displays))
-   :draw  (fn (f) (doseq (d displays) ((get d :draw) f)))
-   :poll  (fn (ms) (display--poll-any displays ms))})
+   :size (fn () (display--min-size displays))
+   :draw (fn (f) (doseq (d displays) ((get d :draw) f)))
+   :poll (fn (ms) (display--poll-any displays ms))})
 
 (defn with-events (display)
   "Wrap `display` so its `:poll` first returns any queued `[:sse …]` / `[:sse-closed …]`
@@ -118,11 +123,10 @@ terminal (where the raw `:poll` reads only the keyboard) and the GUI — `update
 an `[:sse ev]` in like any other input. The other display ops pass through unchanged.
 A flood of events can starve the keyboard poll; fine for occasional pushes (a daemon's
 event feed). Requires `(require 'sse)` on the producing side."
-  (assoc display :poll
+  (assoc display
+    :poll
     (fn (ms)
-      (let (ev (receive ([:sse e] [:sse e])
-                        ([:sse-closed r] [:sse-closed r])
-                        (after 0 nil)))
+      (let (ev (receive ([:sse e] [:sse e]) ([:sse-closed r] [:sse-closed r]) (after 0 nil)))
         (if (nil? ev) ((get display :poll) ms) ev)))))
 
 ;; ---- the app loop (TEA: model + view + update) ------------------------------
@@ -131,16 +135,28 @@ event feed). Requires `(require 'sse)` on the producing side."
   "The poll timeout (refresh beat) in ms: `(get model :tick-ms)` or 1000 by default."
   (or (get model :tick-ms) 1000))
 
+(defn quit-request? (input)
+  "True if `input` is a window-close request (`:close`) — the frontend (the GUI's X
+button) asking the app to quit, as distinct from the Escape *key* (`:escape`).
+`ui-run` already quits on `:close` for you; reach for this only in a hand-rolled
+`receive` loop (one not built on `ui-run`) so the X button closes the window
+alongside whatever quit keys you bind — e.g. `(:close :quit)` next to your own."
+  (= input :close))
+
 (defn ui--loop (model view update display)
   "The inner recursion of `ui-run` (own function so each turn is a proper tail call —
 O(1) stack). Renders, polls, folds the input, recurses; stops when `:done` (the
-caller, `ui-run`, runs `:leave` in all cases)."
+caller, `ui-run`, runs `:leave` in all cases). A `:close` input (the window's X
+button) always quits, so every `ui-run` app is closeable by its close button without
+wiring it into `update` — independent of how the app binds the Escape key."
   (if (get model :done)
     nil
     (let ([cols rows] ((get display :size)))
       ((get display :draw) (view model cols rows))
       (let (input (or ((get display :poll) (ui--tick-ms model)) :tick))
-        (ui--loop (update model input cols rows) view update display)))))
+        (if (quit-request? input)
+          nil  ; the window's close button always quits; `ui-run` then runs `:leave`
+          (ui--loop (update model input cols rows) view update display))))))
 
 (defn ui-run (model view update display)
   "Run a UI app over `display` (a frontend map): enter it, then loop —
@@ -150,6 +166,13 @@ key/mouse value (`\"a\"`, `:up`, `[:mouse …]`), or `:tick` on the poll timeout
 refresh beat, `(model :tick-ms)` or 1000 ms). `view` is pure (model + size → a
 `display.blsp` render frame); `update` folds an input into the next model and sets
 `:done` to quit.
+
+**The window's close button (the X) always quits.** A GUI frontend delivers it as
+a `:close` input (distinct from the Escape *key*, `:escape`), and `ui-run` treats
+`:close` as an immediate quit — before `update` even sees it — then runs `:leave`.
+So every app is closeable by its X button for free, no matter how it binds Escape
+(an editor binds Escape to cancel/normal-mode, not quit). Intercepting `:close` to
+prompt first (\"unsaved changes\") is a deferred power feature (ADR-011).
 
 **Teardown is guaranteed.** `:leave` runs on a normal quit *and* if `view`/`update`
 throws (the error is re-raised after) — so a crash never strands the terminal in
@@ -163,8 +186,9 @@ non-blocking window. The shared loop behind the observer (and the editor)."
   (do
     ((get display :enter))
     (try
-      (do (ui--loop model view update display)
-          ((get display :leave)))
+      (do
+        (ui--loop model view update display)
+        ((get display :leave)))
       (catch e
-        ((get display :leave))   ; restore the terminal even on a view/update error
+        ((get display :leave))  ; restore the terminal even on a view/update error
         (throw e)))))

@@ -344,7 +344,25 @@ not a known body form (defaults to call-style — every arg breaks)."
                    body-text (if pair-bd
                                (render--body-pairs kids first-body-idx body-ind)
                                (render--body kids first-body-idx body-ind)))
-               (str open header-line body-text close))))))
+               ;; If the body ends in a comment, the close delimiter must drop to
+               ;; its own line at the opening indent — appended directly it would
+               ;; land *inside* the comment (`;; note)`), commenting out the `)`
+               ;; and leaving the list unclosed (an unparseable file).
+               (str open
+                 header-line
+                 body-text
+                 (if (last-nonws-comment? kids) (str "\n" (indent-of indent)) "")
+                 close))))))
+
+(defn last-nonws-comment? (kids)
+  "True if `kids`' last non-whitespace child is a comment — the case where a
+closing delimiter has to break to its own line so it isn't swallowed."
+  (last-nonws-comment?--at kids (dec (vector-length kids))))
+(defn last-nonws-comment?--at (kids i)
+  (cond
+    (< i 0) false
+    (whitespace? (vector-ref kids i)) (last-nonws-comment?--at kids (dec i))
+    else (comment? (vector-ref kids i))))
 
 ;; Index in `kids` of the (1-based) Nth structural form (0 = head).
 (defn kids--index-of-form (kids form-i)
@@ -445,11 +463,14 @@ not a known body form (defaults to call-style — every arg breaks)."
                          (if (>= nl 2) "\n\n" "\n")
                          (indent-of body-ind)
                          (comment--strip-trailing-nl (node-text c))))
-        else (let (j (kids--next-form kids (inc i) n))
-               (if (= j n)
-                 ;; Odd remainder — emit alone.
+        ;; A structural clause. Pair it with the *next* form — but only if a form
+        ;; is what comes next. If a comment intervenes first (or we're at the end),
+        ;; emit this clause alone and let the loop handle the comment on its own
+        ;; line; pairing across a comment would step over and DROP it.
+        else (let (j (kids--next-nonws kids (inc i) n))
+               (if (or (= j n) (comment? (vector-ref kids j)))
                  (render--body-pairs--at kids
-                   j
+                   (inc i)
                    n
                    body-ind
                    0
@@ -463,8 +484,10 @@ not a known body form (defaults to call-style — every arg breaks)."
                      0
                      (str acc (if (>= nl 2) "\n\n" "\n") (indent-of body-ind) arendr " " brendr)))))))))
 
-(defn kids--next-form (kids i n)
-  (cond (= i n) n (trivia? (vector-ref kids i)) (kids--next-form kids (inc i) n) else i))
+;; Next non-WHITESPACE child at or after `i` (comments are NOT skipped — a
+;; comment is a meaningful boundary the pair emitter must not pair across).
+(defn kids--next-nonws (kids i n)
+  (cond (= i n) n (whitespace? (vector-ref kids i)) (kids--next-nonws kids (inc i) n) else i))
 
 ;; "Trailing same-line comment" detection. After emitting a structural form at
 ;; index `form-i`, peek through any following whitespace. If that whitespace

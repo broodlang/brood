@@ -91,7 +91,7 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   `or` chained guards all narrow through the existing guard pipeline. The
   Rust primitive `(check-file path)` exposes the file-level walk; the
   Brood `(check-project)` walks the project's `src/` + `tests/`.
-  🟡 Step 5+: structured types (ADR-077). ✅ **Function arrows**: `Ty` is a
+  🟡 Step 5+: structured types (ADR-078). ✅ **Function arrows**: `Ty` is a
   refinement struct (`arrow`/`elem` *refine* the flat bitset, not replace it); the
   checker flags wrong-arity callbacks to `map`/`filter`/`reduce`/`fold` (`(map cons
   xs)`). ✅ **Element types**: `[1 2 3]`/`(list …)` carry `vector<int>`/`list<int>`,

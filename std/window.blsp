@@ -1,0 +1,249 @@
+;; std/window.blsp — Emacs-style tiled window splits over the display seam.
+;; (require 'window) — pure, content-agnostic.
+;;
+;; A *window layout* is an immutable **binary tree**: a leaf is one window showing
+;; an opaque PAYLOAD (the toolkit never inspects it — an editor stores e.g.
+;; `{:buffer <i> :top <n>}` there); a split divides its rect between two children
+;; either `:row` (stacked, a above b) or `:col` (side by side, a left of b), with a
+;; `:ratio` (the fraction given to child `a`). Exactly one leaf is *selected* (the
+;; `:selected` marker travels with the tree, so there is no separate selected-path
+;; to keep in sync — `C-x o` just moves the marker).
+;;
+;; The split point reserves **one cell** for a divider (a column for `:col`, a row
+;; for `:row`), and `window-layout` reports those divider rects so a frontend can
+;; paint them and hit-test a drag. Resizing is then pure: `divider-at` finds the
+;; divider under a `[:mouse … row col]` point, `window-ratio-for` turns a drag point
+;; into the split's new ratio, and `window-set-ratio` returns the re-proportioned
+;; tree. The kernel `:drag`/`:release` mouse events (ADR-077) are what let a frontend
+;; drive that loop; the geometry here is all Brood, so it stays live-editable.
+;;
+;; This is reusable editor *mechanism* (the editor toolkit), not policy: which keys
+;; split/cycle/resize, and what a payload is, live in the editor (see myedit).
+
+(defmodule window
+  "An immutable binary-tree window layout (Emacs-style tiled splits) over the M3
+display seam. A leaf shows an opaque payload; a `:row`/`:col` split divides its rect
+by a `:ratio`, reserving one cell for a divider. `window-layout` turns a tree + a
+rect into pane rects + divider rects; `window-split`/`window-delete`/`window-other`
+restructure it; `divider-at` + `window-ratio-for` + `window-set-ratio` implement
+drag-to-resize over the kernel's `:drag` mouse events (ADR-077). Pure and
+content-agnostic — the editor supplies the payload and the keybindings.")
+
+;; Note on recursion: the helpers below walk the layout *tree*, so they recurse on
+;; its DEPTH — the number of nested splits — not on any list length or leaf count.
+;; That depth is bounded by how many times a user has split the frame (a handful;
+;; each split halves a pane, so a screen tops out well before deep nesting). The
+;; non-tail-recursion checker can't see that bound and flags these; they're safe as
+;; plain tree recursion (cf. std/sexp.blsp's CST walk). Don't contort them into an
+;; explicit-stack tail loop — there's no overflow to prevent here.
+
+;; ---- nodes ------------------------------------------------------------------
+
+(defn window-single (payload)
+  "A lone window layout: one selected leaf showing `payload`. The starting tree
+(and what `window-delete-others` collapses back to)."
+  {:window true :payload payload :selected true})
+
+(defn window-leaf? (node)
+  "True if `node` is a window (a leaf), false if it's a split."
+  (= true (get node :window)))
+
+;; ---- paths (a list of :a/:b from the root to a node) ------------------------
+;; Paths are transient addresses derived from the tree (e.g. by `window-layout`
+;; for a divider, or to find the selected leaf); they're never stored long-term, so
+;; restructuring can't leave a stale one behind. Selection itself is a `:selected`
+;; marker on the leaf, not a path.
+
+(defn window--get (node path)
+  "The node at `path` (a list of `:a`/`:b`) under `node`."
+  (if (empty? path) node (window--get (get node (first path)) (rest path))))
+
+(defn window--update (node path f)
+  "The tree like `node` with the node at `path` replaced by `(f node-at-path)`."
+  (if (empty? path)
+    (f node)
+    (let (k (first path))
+      (assoc node k (window--update (get node k) (rest path) f)))))
+
+(defn window--paths (node prefix)
+  "All leaf paths under `node` in traversal order (a before b), each prefixed by
+the forward-order `prefix`."
+  (if (window-leaf? node)
+    (list prefix)
+    (append (window--paths (get node :a) (append prefix (list :a)))
+      (window--paths (get node :b) (append prefix (list :b))))))
+
+(defn window-leaf-paths (tree)
+  "Every leaf's path, in left-to-right / top-to-bottom traversal order."
+  (window--paths tree ()))
+
+(defn window-count (tree)
+  "How many windows (leaves) the layout holds."
+  (count (window-leaf-paths tree)))
+
+;; ---- selection --------------------------------------------------------------
+
+(defn window-selected-path (tree)
+  "The path of the selected leaf (`()` for a lone window)."
+  (first (filter (fn (p) (get (window--get tree p) :selected))
+                 (window-leaf-paths tree))))
+
+(defn window--clear (node)
+  "The tree with the `:selected` marker cleared from every leaf."
+  (if (window-leaf? node)
+    (assoc node :selected false)
+    (assoc node :a (window--clear (get node :a)) :b (window--clear (get node :b)))))
+
+(defn window-select-path (tree path)
+  "The tree with the leaf at `path` made the sole selected window."
+  (window--update (window--clear tree) path (fn (leaf) (assoc leaf :selected true))))
+
+(defn window-selected-payload (tree)
+  "The payload of the selected window."
+  (get (window--get tree (window-selected-path tree)) :payload))
+
+(defn window-update-selected (tree f)
+  "The tree with the selected window's payload replaced by `(f payload)` — how an
+editor applies an edit to whatever the active window shows."
+  (window--update tree
+    (window-selected-path tree)
+    (fn (leaf) (assoc leaf :payload (f (get leaf :payload))))))
+
+(defn window-map (tree f)
+  "The tree with `f` applied to *every* window's payload (leaves only; splits and
+selection unchanged). For an editor re-pointing window→buffer references after the
+buffer pool changes — e.g. decrementing indices above a killed buffer."
+  (if (window-leaf? tree)
+    (assoc tree :payload (f (get tree :payload)))
+    (assoc tree :a (window-map (get tree :a) f) :b (window-map (get tree :b) f))))
+
+(defn window-other (tree)
+  "Move selection to the next window in traversal order, wrapping (Emacs `C-x o`)."
+  (let (paths (window-leaf-paths tree)
+        i (index-of paths (window-selected-path tree)))
+    (window-select-path tree (nth paths (mod (inc i) (count paths))))))
+
+;; ---- structure (split / delete) ---------------------------------------------
+
+(defn window-split (tree dir new-payload)
+  "Split the selected window in `dir` (`:row` stacked, `:col` side by side) into two
+even panes: the original (still selected) becomes child `a`, a new window showing
+`new-payload` becomes child `b` (Emacs `C-x 2` / `C-x 3` — point stays put)."
+  (window--update tree
+    (window-selected-path tree)
+    (fn (leaf)
+      {:split true
+       :dir dir
+       :ratio 0.5
+       :a leaf
+       :b {:window true :payload new-payload :selected false}})))
+
+(defn window-delete (tree)
+  "Delete the selected window: its sibling subtree takes the split's place, and
+selection moves to that subtree's first window (Emacs `C-x 0`). A lone window is
+returned unchanged — you can't delete the only one."
+  (let (p (window-selected-path tree))
+    (if (empty? p)
+      tree
+      (let (parent (drop-last 1 p)
+            sib (if (= (last p) :a) :b :a)
+            pruned (window--update tree parent (fn (split) (get split sib))))
+        (window-select-path pruned (first (window-leaf-paths pruned)))))))
+
+(defn window-delete-others (tree)
+  "Collapse the layout to just the selected window, filling the whole frame (Emacs
+`C-x 1`)."
+  (window-single (window-selected-payload tree)))
+
+;; ---- layout (tree + rect -> pane rects + divider rects) ---------------------
+;; A rect is `[x y w h]` in cells (x = column origin, y = row origin). A point (from
+;; a `[:mouse … row col]` event) is `[row col]`.
+
+(defn window--clampi (v lo hi)
+  "Clamp integer `v` into `[lo hi]`."
+  (max lo (min hi v)))
+
+(defn window--layout (node path rect)
+  "Lay `node` (at `path`) into `rect`, returning `{:panes (…) :dividers (…)}`."
+  (if (window-leaf? node)
+    {:panes (list {:path path
+                   :payload (get node :payload)
+                   :selected (= true (get node :selected))
+                   :rect rect})
+     :dividers ()}
+    (let ([x y w h] rect
+           col?
+           (= (get node :dir) :col)
+           ;; the extent split between the two children (less the 1-cell divider),
+           ;; and child a's share of it, clamped so neither pane vanishes
+           ext
+           (- (if col? w h) 1)
+           a-ext
+           (window--clampi (round (* ext (get node :ratio))) 1 (max 1 (- ext 1)))
+           arect
+           (if col? [x y a-ext h] [x y w a-ext])
+           drect
+           (if col? [(+ x a-ext) y 1 h] [x (+ y a-ext) w 1])
+           brect
+           (if col?
+             [(+ x a-ext 1) y (- w a-ext 1) h]
+             [x (+ y a-ext 1) w (- h a-ext 1)])
+           la
+           (window--layout (get node :a) (append path (list :a)) arect)
+           lb
+           (window--layout (get node :b) (append path (list :b)) brect))
+      {:panes (append (get la :panes) (get lb :panes))
+       :dividers (cons {:path path :dir (get node :dir) :rect drect :split-rect rect}
+                   (append (get la :dividers) (get lb :dividers)))})))
+
+(defn window-layout (tree rect)
+  "Lay `tree` out in `rect` (`[x y w h]` cells): a map `{:panes :dividers}` where
+each pane is `{:path :payload :selected :rect}` and each divider is `{:path :dir
+:rect :split-rect}` (`:rect` the 1-cell divider line, `:split-rect` the whole rect
+that split feeds `window-ratio-for`). Pure — the frontend paints each pane's payload
+into its rect and the dividers between them."
+  (window--layout tree () rect))
+
+;; ---- hit-testing + resize (drag-to-resize over :drag mouse events) ----------
+
+(defn window--in-rect? (rect point)
+  "Whether `point` (`[row col]`) falls inside `rect` (`[x y w h]`)."
+  (let ([x y w h] rect [row col] point)
+    (and (>= col x) (< col (+ x w)) (>= row y) (< row (+ y h)))))
+
+(defn window--find (items point)
+  "The first `{:rect …}` in `items` whose rect contains `point`, or nil."
+  (cond
+    (empty? items) nil
+    (window--in-rect? (get (first items) :rect) point) (first items)
+    else (window--find (rest items) point)))
+
+(defn window-pane-at (layout point)
+  "The pane (`{:path :payload :selected :rect}`) under `point`, or nil."
+  (window--find (get layout :panes) point))
+
+(defn divider-at (layout point)
+  "The divider (`{:path :dir :rect :split-rect}`) under `point`, or nil — what a
+frontend stashes on a left-press to begin a drag-resize."
+  (window--find (get layout :dividers) point))
+
+(defn window-select-at (tree layout point)
+  "Move selection to the window under `point` (a click selects it); unchanged if the
+point is off every pane."
+  (let (pane (window-pane-at layout point))
+    (if (nil? pane) tree (window-select-path tree (get pane :path)))))
+
+(defn window-ratio-for (divider point)
+  "The ratio that places `divider` at `point`, within the divider's `:split-rect` —
+i.e. dragging the divider to the pointer. Feed the result to `window-set-ratio`."
+  (let ([x y w h] (get divider :split-rect) [row col] point)
+    (if (= (get divider :dir) :col)
+      (/ (- col x) (max 1 (- w 1)))
+      (/ (- row y) (max 1 (- h 1))))))
+
+(defn window-set-ratio (tree path ratio)
+  "Set the `:ratio` of the split at `path` (clamped to `[0.1 0.9]` so neither pane
+vanishes), returning the re-proportioned tree — one step of a divider drag."
+  (window--update tree
+    path
+    (fn (split) (assoc split :ratio (max 0.1 (min 0.9 ratio))))))
