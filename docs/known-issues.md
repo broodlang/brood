@@ -39,12 +39,12 @@ multi-threaded. The 2026-05-28 symptoms (workers dying with bogus `unbound
 symbol: fold` / `+` / pattern-bound `iter`-`acc`-`pred`, plus a Rust `index out
 of bounds` panic in `eval/mod.rs`) are no longer reproducible.
 
-Phase 2 (the arena flip that bounds memory in long-lived receive loops) is
-**also shipped** as the explicit `(hibernate fn & args)` primitive — see
-[`devlog.md`](devlog.md) 2026-05-29 (evening). It's an opt-in, Erlang-style
-hibernate: raises an uncatchable error that unwinds to the process's run
-loop, which deep-copies just the named callee + args into a fresh `Slabs`
-and re-applies. Independent of the race fix above.
+Phase 2 (bounding memory in long-lived receive loops) first shipped as the
+explicit `(hibernate fn & args)` primitive (an arena flip), but that was a
+Stage-A expedient: it was **removed** (ADR-058) once the automatic semi-space
+copying collector (ADR-055) made reclamation fire at the eval safepoint with
+nothing asked of the author. Memory is now bounded on every entry path
+automatically. Independent of the race fix above.
 
 ### Original 2026-05-28 symptom (kept for the record)
 

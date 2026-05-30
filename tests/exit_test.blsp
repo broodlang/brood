@@ -9,7 +9,7 @@
 ;; across the worker pool; the final :isolated block mass-kills to stress the
 ;; force-unwind-on-drop path concurrently.
 
-(require 'test)
+(defmodule exit-test (:use test))
 
 ;; file-local worker bodies (tail-recursive: a test runs in a small-stack green proc)
 (defn ex-spin () (ex-spin))                 ; tight CPU loop — only a hard :kill (preempt) catches it

@@ -90,18 +90,23 @@ macro_rules! region_ref {
     ($name:ident, $id:ty, $field:ident, $ret:ty, $what:literal) => {
         pub fn $name(&self, id: $id) -> $ret {
             match id.region() {
+                LOCAL if id.is_old() => {
+                    #[cfg(debug_assertions)]
+                    self.check_epoch_aged(true, id.generation(), id.index(), stringify!($name), id.0);
+                    &self.old.$field[id.index()]
+                }
                 LOCAL => {
                     #[cfg(debug_assertions)]
                     debug_assert!(
                         !PoisonBits::is(&self.poison.$field, id.index()),
-                        "use-after-GC: {}() on freed LOCAL {} slot {} (handle {:#x}).",
+                        "use-after-GC: {}() on freed nursery {} slot {} (handle {:#x}).",
                         stringify!($name),
                         stringify!($field),
                         id.index(),
                         id.0
                     );
                     #[cfg(debug_assertions)]
-                    self.check_epoch(id.generation(), id.index(), stringify!($name), id.0);
+                    self.check_epoch_aged(false, id.generation(), id.index(), stringify!($name), id.0);
                     &self.local.$field[id.index()]
                 }
                 PRELUDE => &self.prelude.slabs.$field[id.index()],
@@ -183,6 +188,39 @@ fn gc_floor() -> usize {
             64 * 1024
         }
     })
+}
+
+/// Live old-gen object count below which a **major** collection never fires —
+/// the old-gen counterpart of [`gc_floor`]. Crucially this is **not** zeroed by
+/// `BROOD_GC_STRESS`: stress makes *minor* collection fire at every safepoint
+/// (its purpose), but a major every safepoint would recompact the whole old
+/// generation on an incremental large-structure build — O(n²). Keeping a nonzero
+/// floor makes majors periodic under stress (still exercised) and rare in normal
+/// operation (the old gen grows to a few MB before a compaction reclaims tenured
+/// garbage, so live tenured data isn't recopied often).
+fn major_floor() -> usize {
+    static FLOOR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *FLOOR.get_or_init(|| {
+        if std::env::var_os("BROOD_GC_STRESS").is_some() {
+            8192
+        } else {
+            256 * 1024
+        }
+    })
+}
+
+/// Nursery-pressure threshold (live object count) at or above which a minor
+/// collection **tenures** survivors into the old generation; below it the minor
+/// does a young **semi-space flip** (survivors stay in a fresh nursery) instead.
+/// This is the *aging* policy: an object tenures only when it survives a
+/// collection that followed real allocation pressure — never a premature one.
+/// Stress-independent (unlike [`gc_floor`]) so that `BROOD_GC_STRESS=1`, which
+/// fires a minor at *every* safepoint with a tiny nursery, always flips and so
+/// never tenures transient garbage (which would otherwise bloat the old gen and
+/// make majors recopy it — the adversarial-under-stress regression). A
+/// long-lived structure still tenures once the nursery genuinely grows past this.
+fn min_tenure() -> usize {
+    16 * 1024
 }
 
 /// Re-tag a value's handle from the local region to the immutable **prelude**
@@ -469,7 +507,21 @@ impl RuntimeCode {
 }
 
 pub struct Heap {
+    /// The **nursery** (young generation): every `alloc_*` bumps into here, so it
+    /// holds the freshly-allocated, mostly-short-lived objects. A *minor*
+    /// collection ([`minor_collect`](Self::minor_collect)) copies its survivors
+    /// into [`old`](Self::old) and drops the rest whole. Kept named `local` because
+    /// it's the allocation hot path and the common case for an accessor.
     local: Slabs,
+    /// The **old (tenured) generation**: objects that survived a minor collection,
+    /// addressed by LOCAL handles with the [`AGE_OLD`](crate::core::value::AGE_OLD)
+    /// bit set. Grows by append on each minor collection (cheap — old objects are
+    /// never recopied); reclaimed only by a *major* collection
+    /// ([`major_collect`](Self::major_collect)), which compacts it. Because Brood
+    /// data is immutable, an old object can never come to point at a young one, so
+    /// the old generation is **not a root set for a minor collection** — no write
+    /// barrier, no remembered set.
+    old: Slabs,
     /// Reclaimed-but-not-yet-reused LOCAL slots. Grown by [`Heap::collect`]'s
     /// sweep, drained by `alloc_*` before extending the slab. PRELUDE/RUNTIME
     /// (append-only) have no equivalent.
@@ -495,7 +547,10 @@ pub struct Heap {
     /// by the reader. Queried via `(form-pos …)` (e.g. by the test macros, which
     /// look up a form's line *before* it expands). LOCAL-only and dropped on
     /// reset, since it is read-time metadata for the source being loaded.
-    form_pos: HashMap<usize, crate::error::Pos>,
+    /// Keyed by [`form_pos_key`] — the pair's slab index packed with its
+    /// generation age bit, so a nursery pair and an old pair at the same slab
+    /// index don't collide (the two LOCAL spaces share an index range).
+    form_pos: HashMap<u64, crate::error::Pos>,
     /// The file currently being `load`ed, exposed via `(current-file)`. Saved and
     /// restored around each load so nested loads don't clobber the outer file.
     current_file: Option<String>,
@@ -568,6 +623,26 @@ pub struct Heap {
     /// reuses a slot, so a whole-arena flip is the only LOCAL-invalidating event.
     /// See `docs/memory-review.md`.
     local_epoch: u32,
+    /// **Write-barrier remembered set.** Old-generation env frames mutated by
+    /// [`env_define`](Self::env_define) since the last minor collection — the only
+    /// way an old object can come to reference a young one (a frame promoted while
+    /// still mid-bind, e.g. a collection during a `let` rhs eval, then bound
+    /// further). A minor collection scans these as extra roots and rewrites their
+    /// bindings to the promoted handles, then clears the set. Empty on the common
+    /// path (binds finish in the nursery). Brood's immutability means env-frame
+    /// binding is the sole data mutation, so this is the language's one barrier site.
+    remembered: Vec<EnvId>,
+    /// The **old-generation** epoch — stamped into tenured handles
+    /// (`local_old_gen`) and bumped only by a *major* collection (which moves old
+    /// objects). A minor collection leaves old objects in place, so it does **not**
+    /// bump this — old handles stay valid across minor GCs. Routed to by the
+    /// LOCAL accessors when `handle.is_old()`. See [`local_epoch`](Self::local_epoch)
+    /// for the nursery counterpart.
+    old_epoch: u32,
+    /// Live old-generation object count after the last collection; a *major*
+    /// collection is triggered when `old` grows past `2×` this (recomputed each
+    /// major), so major GCs stay rare while minors keep the nursery bounded.
+    major_threshold: usize,
     /// GC observability counters (Tier-1; `docs/memory-review.md` §7). Bumped by
     /// every [`arena_flip`](Self::arena_flip) — so they count both the automatic
     /// Stage-B safepoint collections and any bare [`flush`](Self::flush) (the
@@ -609,6 +684,14 @@ macro_rules! alloc_slot {
         $self.local.$field.push($value);
         idx
     }};
+}
+
+/// The `form_pos` map key for a LOCAL pair: its slab index packed with the
+/// generation age bit (bit 32). Nursery and old pairs share one slab-index range,
+/// so the age bit keeps their source-position entries from colliding.
+#[inline]
+fn form_pos_key(id: PairId) -> u64 {
+    (id.index() as u64) | ((id.is_old() as u64) << 32)
 }
 
 /// True iff `v` is a LOCAL heap object the copying collector relocates — the
@@ -661,6 +744,7 @@ impl Heap {
     pub fn new() -> Self {
         Heap {
             local: Slabs::default(),
+            old: Slabs::default(),
             local_free: FreeLists::default(),
             #[cfg(debug_assertions)]
             poison: PoisonBits::default(),
@@ -678,6 +762,9 @@ impl Heap {
             gc_threshold: usize::MAX,
             gc_enabled: false,
             local_epoch: 0,
+            remembered: Vec::new(),
+            old_epoch: 0,
+            major_threshold: usize::MAX,
             gc_runs: 0,
             gc_copied: 0,
             gc_reclaimed: 0,
@@ -690,6 +777,7 @@ impl Heap {
     pub fn with_regions(prelude: Arc<SharedCode>, runtime: Arc<RuntimeCode>) -> Self {
         Heap {
             local: Slabs::default(),
+            old: Slabs::default(),
             local_free: FreeLists::default(),
             #[cfg(debug_assertions)]
             poison: PoisonBits::default(),
@@ -707,6 +795,9 @@ impl Heap {
             gc_threshold: gc_floor(),
             gc_enabled: true,
             local_epoch: 0,
+            remembered: Vec::new(),
+            old_epoch: 0,
+            major_threshold: major_floor(),
             gc_runs: 0,
             gc_copied: 0,
             gc_reclaimed: 0,
@@ -865,8 +956,10 @@ impl Heap {
         self.local.closures.truncate(cp.closures);
         self.local.envs.truncate(cp.envs);
         // Drop position metadata for the pairs just reclaimed (indices reused).
+        // Keys pack the age bit at bit 32; this checkpoint path is nursery-only,
+        // so compare the low-32 slab index against the checkpoint length.
         if !self.form_pos.is_empty() {
-            self.form_pos.retain(|&i, _| i < cp.pairs);
+            self.form_pos.retain(|&k, _| (k as u32 as usize) < cp.pairs);
         }
         // Drop free-list entries pointing into the truncated tail — those slots
         // no longer exist. Entries below the cap remain valid (holes inside the
@@ -883,7 +976,7 @@ impl Heap {
     pub fn set_form_pos(&mut self, v: Value, pos: crate::error::Pos) {
         if let Value::Pair(id) = v {
             if id.region() == crate::core::value::LOCAL {
-                self.form_pos.insert(id.index(), pos);
+                self.form_pos.insert(form_pos_key(id), pos);
             }
         }
     }
@@ -892,7 +985,7 @@ impl Heap {
     pub fn form_pos(&self, v: Value) -> Option<crate::error::Pos> {
         if let Value::Pair(id) = v {
             if id.region() == crate::core::value::LOCAL {
-                return self.form_pos.get(&id.index()).copied();
+                return self.form_pos.get(&form_pos_key(id)).copied();
             }
         }
         None
@@ -1553,16 +1646,21 @@ impl Heap {
     /// the runtime's processes). There is no PRELUDE rope (see `to_prelude`).
     pub fn rope(&self, id: RopeId) -> &ropey::Rope {
         match id.region() {
+            LOCAL if id.is_old() => {
+                #[cfg(debug_assertions)]
+                self.check_epoch_aged(true, id.generation(), id.index(), "rope", id.0);
+                &self.old.ropes[id.index()]
+            }
             LOCAL => {
                 #[cfg(debug_assertions)]
                 debug_assert!(
                     !PoisonBits::is(&self.poison.ropes, id.index()),
-                    "use-after-GC: rope() on freed LOCAL ropes slot {} (handle {:#x}).",
+                    "use-after-GC: rope() on freed nursery ropes slot {} (handle {:#x}).",
                     id.index(),
                     id.0
                 );
                 #[cfg(debug_assertions)]
-                self.check_epoch(id.generation(), id.index(), "rope", id.0);
+                self.check_epoch_aged(false, id.generation(), id.index(), "rope", id.0);
                 &self.local.ropes[id.index()]
             }
             RUNTIME => self
@@ -1585,6 +1683,17 @@ impl Heap {
         Value::Str(StrId::local_gen(idx, self.local_epoch))
     }
 
+    /// A LOCAL string slot, routed to the nursery or old generation by the
+    /// handle's age bit. Caller must have checked `id.region() == LOCAL`. Not
+    /// debug-gated — the production `local_shared_blob` path uses it too.
+    fn string_slot(&self, id: StrId) -> &LocalString {
+        if id.is_old() {
+            &self.old.strings[id.index()]
+        } else {
+            &self.local.strings[id.index()]
+        }
+    }
+
     /// Debug-only: the underlying `SharedBlob` address for a LOCAL Shared
     /// string, used by the `%blob-ptr` primitive for identity assertions in
     /// cross-process tests. `None` for an inline string or a non-LOCAL handle.
@@ -1596,14 +1705,16 @@ impl Heap {
         if id.region() != LOCAL {
             return None;
         }
-        debug_assert!(
-            !PoisonBits::is(&self.poison.strings, id.index()),
-            "use-after-GC: local_shared_blob_ptr() on freed LOCAL strings slot {} (handle {:#x}).",
-            id.index(),
-            id.0
-        );
-        self.check_epoch(id.generation(), id.index(), "local_shared_blob_ptr", id.0);
-        match &self.local.strings[id.index()] {
+        if !id.is_old() {
+            debug_assert!(
+                !PoisonBits::is(&self.poison.strings, id.index()),
+                "use-after-GC: local_shared_blob_ptr() on freed nursery strings slot {} (handle {:#x}).",
+                id.index(),
+                id.0
+            );
+        }
+        self.check_epoch_aged(id.is_old(), id.generation(), id.index(), "local_shared_blob_ptr", id.0);
+        match self.string_slot(id) {
             LocalString::Shared(arc) => Some(Arc::as_ptr(arc)),
             LocalString::Inline(_) => None,
         }
@@ -1619,20 +1730,23 @@ impl Heap {
         if id.region() != LOCAL {
             return None;
         }
-        debug_assert!(
-            !PoisonBits::is(&self.poison.strings, id.index()),
-            "use-after-GC: local_shared_blob_strong_count() on freed LOCAL strings slot {} \
-             (handle {:#x}).",
-            id.index(),
-            id.0
-        );
-        self.check_epoch(
+        if !id.is_old() {
+            debug_assert!(
+                !PoisonBits::is(&self.poison.strings, id.index()),
+                "use-after-GC: local_shared_blob_strong_count() on freed nursery strings slot {} \
+                 (handle {:#x}).",
+                id.index(),
+                id.0
+            );
+        }
+        self.check_epoch_aged(
+            id.is_old(),
             id.generation(),
             id.index(),
             "local_shared_blob_strong_count",
             id.0,
         );
-        match &self.local.strings[id.index()] {
+        match self.string_slot(id) {
             LocalString::Shared(arc) => Some(Arc::strong_count(arc)),
             LocalString::Inline(_) => None,
         }
@@ -1648,15 +1762,17 @@ impl Heap {
             return None;
         }
         #[cfg(debug_assertions)]
-        debug_assert!(
-            !PoisonBits::is(&self.poison.strings, id.index()),
-            "use-after-GC: local_shared_blob() on freed LOCAL strings slot {} (handle {:#x}).",
-            id.index(),
-            id.0
-        );
+        if !id.is_old() {
+            debug_assert!(
+                !PoisonBits::is(&self.poison.strings, id.index()),
+                "use-after-GC: local_shared_blob() on freed nursery strings slot {} (handle {:#x}).",
+                id.index(),
+                id.0
+            );
+        }
         #[cfg(debug_assertions)]
-        self.check_epoch(id.generation(), id.index(), "local_shared_blob", id.0);
-        match &self.local.strings[id.index()] {
+        self.check_epoch_aged(id.is_old(), id.generation(), id.index(), "local_shared_blob", id.0);
+        match self.string_slot(id) {
             LocalString::Shared(arc) => Some(Arc::clone(arc)),
             LocalString::Inline(_) => None,
         }
@@ -1992,10 +2108,11 @@ impl Heap {
         // messages point at; entries for pairs that didn't survive are dropped
         // with them. (Any still-live form's position survives the arena flip
         // rather than being discarded.)
+        // Legacy single-space flush: nursery→nursery, so keys stay young (age 0).
         let old_form_pos = std::mem::take(&mut self.form_pos);
-        for (old_idx, pos) in old_form_pos {
-            if let Some(&new_idx) = fwd.pairs.get(&(old_idx as u32)) {
-                self.form_pos.insert(new_idx as usize, pos);
+        for (key, pos) in old_form_pos {
+            if let Some(&new_idx) = fwd.pairs.get(&(key as u32)) {
+                self.form_pos.insert(new_idx as u64, pos);
             }
         }
         #[cfg(debug_assertions)]
@@ -2023,41 +2140,52 @@ impl Heap {
 
     // ----- access (dispatch on the handle's region) -----
 
-    /// Generational-handle tripwire (debug only). A LOCAL handle carries the
-    /// epoch it was minted in; every arena flip ([`arena_flip`](Self::arena_flip))
-    /// bumps `self.local_epoch` and re-mints survivors, so a handle held across a
-    /// flip without being re-rooted carries a stale epoch. Panic **here**, at the
-    /// bad deref, with the slot + epochs — instead of a far-away out-of-bounds
-    /// index or a silent wrong-slot read. See `docs/memory-review.md`.
+    /// Generation-aware epoch tripwire. Young (`is_old == false`) handles are
+    /// checked against the nursery epoch (bumped by every collection); old handles
+    /// against the old-generation epoch (bumped only by a major collection, since a
+    /// minor leaves old objects in place). A mismatch means a handle was held
+    /// across a collection that moved its space without being re-rooted. Only the
+    /// debug-gated accessors call it, so it's `cfg(debug_assertions)` too (no
+    /// release dead-code).
     #[cfg(debug_assertions)]
-    #[inline]
-    fn check_epoch(&self, gen: u32, index: usize, what: &str, raw: u64) {
+    fn check_epoch_aged(&self, is_old: bool, gen: u32, index: usize, what: &str, raw: u64) {
+        let (expected, space) = if is_old {
+            (self.old_epoch, "OLD")
+        } else {
+            (self.local_epoch, "nursery")
+        };
         debug_assert!(
-            gen == self.local_epoch,
-            "use-after-GC: {} handle (LOCAL slot {}) is from epoch {}, but the heap is now \
-             epoch {} — a handle held across a collection arena flip without being \
-             re-rooted (handle {:#x}).",
+            gen == expected,
+            "use-after-GC: {} handle ({} slot {}) is from epoch {}, but that generation is \
+             now epoch {} — a handle held across a collection without being re-rooted \
+             (handle {:#x}).",
             what,
+            space,
             index,
             gen,
-            self.local_epoch,
+            expected,
             raw,
         );
     }
 
     pub fn pair(&self, id: PairId) -> (Value, Value) {
         match id.region() {
+            LOCAL if id.is_old() => {
+                #[cfg(debug_assertions)]
+                self.check_epoch_aged(true, id.generation(), id.index(), "pair", id.0);
+                self.old.pairs[id.index()]
+            }
             LOCAL => {
                 #[cfg(debug_assertions)]
                 debug_assert!(
                     !PoisonBits::is(&self.poison.pairs, id.index()),
-                    "use-after-GC: pair() on freed LOCAL pair slot {} \
+                    "use-after-GC: pair() on freed nursery pair slot {} \
                      (handle {:#x}).",
                     id.index(),
                     id.0
                 );
                 #[cfg(debug_assertions)]
-                self.check_epoch(id.generation(), id.index(), "pair", id.0);
+                self.check_epoch_aged(false, id.generation(), id.index(), "pair", id.0);
                 self.local.pairs[id.index()]
             }
             PRELUDE => self.prelude.slabs.pairs[id.index()],
@@ -2086,16 +2214,21 @@ impl Heap {
     /// RUNTIME is append-only via `boxcar::Vec<String>` for stable refs).
     pub fn string(&self, id: StrId) -> &str {
         match id.region() {
+            LOCAL if id.is_old() => {
+                #[cfg(debug_assertions)]
+                self.check_epoch_aged(true, id.generation(), id.index(), "string", id.0);
+                self.old.strings[id.index()].as_str()
+            }
             LOCAL => {
                 #[cfg(debug_assertions)]
                 debug_assert!(
                     !PoisonBits::is(&self.poison.strings, id.index()),
-                    "use-after-GC: string() on freed LOCAL strings slot {} (handle {:#x}).",
+                    "use-after-GC: string() on freed nursery strings slot {} (handle {:#x}).",
                     id.index(),
                     id.0
                 );
                 #[cfg(debug_assertions)]
-                self.check_epoch(id.generation(), id.index(), "string", id.0);
+                self.check_epoch_aged(false, id.generation(), id.index(), "string", id.0);
                 self.local.strings[id.index()].as_str()
             }
             // PRELUDE's `Slabs::strings` is also `Vec<LocalString>` because
@@ -2120,16 +2253,21 @@ impl Heap {
     /// practice.
     pub fn closure(&self, id: ClosureId) -> &Closure {
         match id.region() {
+            LOCAL if id.is_old() => {
+                #[cfg(debug_assertions)]
+                self.check_epoch_aged(true, id.generation(), id.index(), "closure", id.0);
+                &self.old.closures[id.index()]
+            }
             LOCAL => {
                 #[cfg(debug_assertions)]
                 debug_assert!(
                     !PoisonBits::is(&self.poison.closures, id.index()),
-                    "use-after-GC: closure() on freed LOCAL closures slot {} (handle {:#x}).",
+                    "use-after-GC: closure() on freed nursery closures slot {} (handle {:#x}).",
                     id.index(),
                     id.0
                 );
                 #[cfg(debug_assertions)]
-                self.check_epoch(id.generation(), id.index(), "closure", id.0);
+                self.check_epoch_aged(false, id.generation(), id.index(), "closure", id.0);
                 &self.local.closures[id.index()]
             }
             PRELUDE => &self.prelude.slabs.closures[id.index()],
@@ -2605,11 +2743,16 @@ impl Heap {
              use env_get / globals_read instead",
         );
         match env.region() {
+            LOCAL if env.is_old() => {
+                #[cfg(debug_assertions)]
+                self.check_epoch_aged(true, env.generation(), env.index(), "env_frame", env.0);
+                &self.old.envs[env.index()]
+            }
             LOCAL => {
                 #[cfg(debug_assertions)]
                 debug_assert!(
                     !PoisonBits::is(&self.poison.envs, env.index()),
-                    "use-after-GC: env_frame on freed LOCAL env slot {} \
+                    "use-after-GC: env_frame on freed nursery env slot {} \
                      (handle {:#x}). Sweep poisoned this slot; some caller \
                      held the EnvId across a GC safepoint without rooting it. \
                      See docs/claude-demo-findings.md § Scheduler race.",
@@ -2617,7 +2760,7 @@ impl Heap {
                     env.0
                 );
                 #[cfg(debug_assertions)]
-                self.check_epoch(env.generation(), env.index(), "env_frame", env.0);
+                self.check_epoch_aged(false, env.generation(), env.index(), "env_frame", env.0);
                 &self.local.envs[env.index()]
             }
             RUNTIME => self
@@ -2702,6 +2845,14 @@ impl Heap {
             // into the shared RUNTIME region before binding.
             let shared = self.promote(val);
             self.runtime.globals_write().insert(sym, shared);
+        } else if env.is_old() {
+            // The frame was tenured (a minor collection promoted it while it was
+            // still being bound — e.g. a collection during a `let` rhs eval). Mutate
+            // it in the old space and remember it: this push can create an
+            // OLD->YOUNG edge (`val` is a fresh nursery value), which the next minor
+            // collection must trace and rewrite, since it otherwise never scans old.
+            self.old.envs[env.index()].vars.push((sym, val));
+            self.remembered.push(env);
         } else {
             self.local.envs[env.index()].vars.push((sym, val));
         }
@@ -3045,8 +3196,211 @@ impl Heap {
         if Self::gc_verify_enabled() {
             self.verify_local_graph(extra_roots, extra_envs);
         }
-        self.arena_flip(extra_roots, extra_envs);
+        // Generational: a *minor* collection either tenures the nursery's
+        // survivors into the old gen (when the nursery grew past `min_tenure` —
+        // real allocation pressure, so survivors are probably long-lived) or does
+        // a young semi-space flip (survivors stay young) when this is a premature
+        // collection. The flip is what keeps `BROOD_GC_STRESS` (a minor at every
+        // safepoint) from tenuring transient garbage. Either way it reclaims dead
+        // nursery objects and never recopies the tenured old gen.
+        let tenure = self.local_live_count() >= min_tenure();
+        self.minor_collect(tenure, extra_roots, extra_envs);
         self.gc_threshold = std::cmp::max(gc_floor(), self.local_live_count().saturating_mul(2));
+        // Escalate to a *major* (compact the old generation) only when it has
+        // doubled since the last major — so majors stay rare while minors keep the
+        // nursery bounded.
+        if self.old_live_count() >= self.major_threshold {
+            self.major_collect(extra_roots, extra_envs);
+            self.major_threshold =
+                std::cmp::max(major_floor(), self.old_live_count().saturating_mul(2));
+        }
+    }
+
+    /// Live objects in the **old generation** (`Σ old.slab.len()`). Old has no
+    /// free list — it's append-only between major collections — so the slab
+    /// lengths *are* the live count. Drives the major-collection threshold.
+    pub fn old_live_count(&self) -> usize {
+        self.old.pairs.len()
+            + self.old.vectors.len()
+            + self.old.maps.len()
+            + self.old.strings.len()
+            + self.old.ropes.len()
+            + self.old.closures.len()
+            + self.old.envs.len()
+    }
+
+    /// A **minor collection**. `tenure` selects the destination of the nursery's
+    /// survivors:
+    /// - `true` (allocation pressure crossed `min_tenure`): survivors are copied
+    ///   into the **old** generation (tenured) — old objects are left in place,
+    ///   never recopied, which is the generational win.
+    /// - `false` (a premature/stress collection): survivors are copied into a
+    ///   **fresh nursery** (a young semi-space flip) and stay young, so transient
+    ///   garbage never reaches the old gen.
+    ///
+    /// Either way the dead nursery objects are reclaimed by dropping the source
+    /// nursery whole, and the nursery epoch is bumped (stale young handles trip the
+    /// tripwire). Roots, dynamics, the operand stack, and the write-barrier
+    /// remembered set are relocated/rewritten in place.
+    /// Relocate every GC root through `fwd`, from `src` into `dest`: the caller's
+    /// `value_roots`/`env_roots` (the eval frame's `expr`/`env`), this process's
+    /// dynamic-binding stack, and the operand stack (`roots` + `env_roots`). The
+    /// single place the GC root set is enumerated — minor and major collection
+    /// share it so the two can't drift (a divergent root set would be a
+    /// use-after-GC bug). `dest` is a *local* `Slabs` (never a `self` field) so the
+    /// `&mut self` for the stacks doesn't alias it.
+    fn flush_roots(
+        &mut self,
+        src: &Slabs,
+        dest: &mut Slabs,
+        fwd: &mut FlushForward,
+        value_roots: &mut [Value],
+        env_roots: &mut [EnvId],
+    ) {
+        for v in value_roots.iter_mut() {
+            *v = flush_value(src, dest, fwd, *v);
+        }
+        for e in env_roots.iter_mut() {
+            *e = flush_env(src, dest, fwd, *e);
+        }
+        for (_, v) in self.dynamics.iter_mut() {
+            *v = flush_value(src, dest, fwd, *v);
+        }
+        for v in self.roots.iter_mut() {
+            *v = flush_value(src, dest, fwd, *v);
+        }
+        let mut er = std::mem::take(&mut self.env_roots);
+        for e in er.iter_mut() {
+            *e = flush_env(src, dest, fwd, *e);
+        }
+        self.env_roots = er;
+    }
+
+    fn minor_collect(&mut self, tenure: bool, value_roots: &mut [Value], env_roots: &mut [EnvId]) {
+        let before_young = self.local_live_count();
+        let old_before = self.old_live_count();
+        self.local_epoch = self.local_epoch.wrapping_add(1);
+        let young = std::mem::take(&mut self.local);
+        // Tenure: append survivors to the old gen (take it out, append, put back).
+        // Flip: survivors go to a fresh nursery that becomes the new `local`.
+        let (mut dest, epoch, dest_old) = if tenure {
+            (std::mem::take(&mut self.old), self.old_epoch, true)
+        } else {
+            (Slabs::default(), self.local_epoch, false)
+        };
+        let mut fwd = FlushForward::default();
+        fwd.epoch = epoch;
+        fwd.src_old = false; // copy nursery objects
+        fwd.dest_old = dest_old;
+        self.flush_roots(&young, &mut dest, &mut fwd, value_roots, env_roots);
+        // Write barrier: an old frame that gained a young binding (`env_define`
+        // after a mid-bind tenure) holds an OLD->YOUNG edge not reachable from the
+        // normal roots. Its frame lives in `dest` while tenuring (we took the old
+        // gen into `dest`) or in `self.old` while flipping (old untouched). Flush
+        // each such var into `dest` and write it back.
+        let remembered = std::mem::take(&mut self.remembered);
+        for &e in &remembered {
+            let n = if tenure {
+                dest.envs[e.index()].vars.len()
+            } else {
+                self.old.envs[e.index()].vars.len()
+            };
+            for i in 0..n {
+                let (s, v) = if tenure {
+                    dest.envs[e.index()].vars[i]
+                } else {
+                    self.old.envs[e.index()].vars[i]
+                };
+                let nv = flush_value(&young, &mut dest, &mut fwd, v);
+                if tenure {
+                    dest.envs[e.index()].vars[i] = (s, nv);
+                } else {
+                    self.old.envs[e.index()].vars[i] = (s, nv);
+                }
+            }
+        }
+        // Tenuring resolves those edges to old->old (survivors are now old): drop
+        // the set. A flip keeps survivors young, so the old->young edges persist —
+        // retain the set (the frames didn't move) for the next collection.
+        if !tenure {
+            self.remembered = remembered;
+        }
+        self.local_free.clear();
+        // form_pos re-key: a surviving nursery pair moves to its new slot with the
+        // destination's age bit (old when tenuring, young when flipping); dead
+        // nursery entries drop; existing OLD entries are untouched (old didn't move
+        // in a minor).
+        let new_age_bit: u64 = if tenure { 1 << 32 } else { 0 };
+        let old_form_pos = std::mem::take(&mut self.form_pos);
+        for (key, pos) in old_form_pos {
+            if (key >> 32) & 1 == 1 {
+                self.form_pos.insert(key, pos);
+            } else if let Some(&new_idx) = fwd.pairs.get(&(key as u32)) {
+                self.form_pos.insert((new_idx as u64) | new_age_bit, pos);
+            }
+        }
+        #[cfg(debug_assertions)]
+        {
+            self.poison.pairs.clear();
+            self.poison.vectors.clear();
+            self.poison.maps.clear();
+            self.poison.strings.clear();
+            self.poison.ropes.clear();
+            self.poison.closures.clear();
+            self.poison.envs.clear();
+        }
+        // Install the relocated space. Tenure: `dest` is the grown old gen; the
+        // nursery stays the empty Slabs left by the take. Flip: `dest` is the fresh
+        // nursery; the old gen was untouched.
+        if tenure {
+            self.old = dest;
+        } else {
+            self.local = dest;
+        }
+        let survivors = if tenure {
+            self.old_live_count().saturating_sub(old_before)
+        } else {
+            self.local_live_count()
+        };
+        self.gc_runs = self.gc_runs.saturating_add(1);
+        self.gc_copied = self.gc_copied.saturating_add(survivors as u64);
+        self.gc_reclaimed = self
+            .gc_reclaimed
+            .saturating_add(before_young.saturating_sub(survivors) as u64);
+        // `young` drops here, reclaiming every nursery object that didn't survive.
+    }
+
+    /// A **major collection**: compact the old generation (a semi-space copy of
+    /// `old` into fresh `old` slabs, dropping dead tenured objects). Assumes a
+    /// minor has just run, so the nursery is empty and everything live is in old
+    /// and reachable from the roots. Bumps the old epoch.
+    fn major_collect(&mut self, value_roots: &mut [Value], env_roots: &mut [EnvId]) {
+        let before_old = self.old_live_count();
+        self.old_epoch = self.old_epoch.wrapping_add(1);
+        let old_src = std::mem::take(&mut self.old);
+        let mut dest = Slabs::default();
+        let mut fwd = FlushForward::default();
+        fwd.epoch = self.old_epoch;
+        fwd.src_old = true; // copy old-gen objects
+        fwd.dest_old = true; // into the fresh old space
+        self.flush_roots(&old_src, &mut dest, &mut fwd, value_roots, env_roots);
+        // `remembered` is empty (the minor cleared it; no binding has run since).
+        let old_form_pos = std::mem::take(&mut self.form_pos);
+        for (key, pos) in old_form_pos {
+            if (key >> 32) & 1 == 1 {
+                if let Some(&new_idx) = fwd.pairs.get(&(key as u32)) {
+                    self.form_pos.insert((new_idx as u64) | (1 << 32), pos);
+                }
+            }
+        }
+        self.old = dest;
+        let survivors = self.old_live_count();
+        self.gc_runs = self.gc_runs.saturating_add(1);
+        self.gc_copied = self.gc_copied.saturating_add(survivors as u64);
+        self.gc_reclaimed = self
+            .gc_reclaimed
+            .saturating_add(before_old.saturating_sub(survivors) as u64);
+        // `old_src` drops here, releasing the pre-compaction old slabs.
     }
 
     /// Is the `BROOD_GC_VERIFY` heap-verifier armed? Read once. Debug only.
@@ -3080,12 +3434,36 @@ impl Heap {
             V(Value, u64),
             E(EnvId, u64),
         }
-        let ep = self.local_epoch;
-        let mut seen_pair = vec![false; self.local.pairs.len()];
-        let mut seen_vec = vec![false; self.local.vectors.len()];
-        let mut seen_map = vec![false; self.local.maps.len()];
-        let mut seen_clo = vec![false; self.local.closures.len()];
-        let mut seen_env = vec![false; self.local.envs.len()];
+        // Generational: a LOCAL handle is checked against its own generation's
+        // epoch + slab length (nursery via `is_old()==false`, old otherwise). The
+        // seen-sets are `[young, old]` bool vecs per kind (O(1) mark, not a
+        // `HashSet` — this runs every collection under GC_VERIFY, so it must not be
+        // the bottleneck on a large live graph). We do *not* assert the no-old→young
+        // invariant here — the write-barrier `remembered` set legitimately carries
+        // transient old→young edges between a tenure-mid-bind and the next minor —
+        // only that every reachable handle is in-bounds and current for its gen.
+        let young_ep = self.local_epoch;
+        let old_ep = self.old_epoch;
+        let mut seen_pair = [
+            vec![false; self.local.pairs.len()],
+            vec![false; self.old.pairs.len()],
+        ];
+        let mut seen_vec = [
+            vec![false; self.local.vectors.len()],
+            vec![false; self.old.vectors.len()],
+        ];
+        let mut seen_map = [
+            vec![false; self.local.maps.len()],
+            vec![false; self.old.maps.len()],
+        ];
+        let mut seen_clo = [
+            vec![false; self.local.closures.len()],
+            vec![false; self.old.closures.len()],
+        ];
+        let mut seen_env = [
+            vec![false; self.local.envs.len()],
+            vec![false; self.old.envs.len()],
+        ];
         let mut work: Vec<W> = Vec::new();
         for &v in extra_roots {
             work.push(W::V(v, 0));
@@ -3102,48 +3480,66 @@ impl Heap {
         for &(_, v) in &self.dynamics {
             work.push(W::V(v, 0));
         }
-        let bad = |kind: &str, gen: u32, idx: usize, len: usize, parent: u64, raw: u64| {
+        // The write-barrier `remembered` old frames are the *only* mutable old
+        // objects (they gained young bindings after tenuring). Seed their bindings
+        // as roots so a stale handle stored there is still checked, even though the
+        // walk below doesn't recurse into old-gen internals (see the `is_old`
+        // guards): old objects are immutable after promotion, so re-walking them
+        // every collection is redundant work — that redundancy is what made
+        // GC_VERIFY O(old) per collection and timed out the large-structure tests.
+        for &e in &self.remembered {
+            if e.is_old() {
+                if let Some(frame) = self.old.envs.get(e.index()) {
+                    for &(_, v) in &frame.vars {
+                        work.push(W::V(v, e.0));
+                    }
+                }
+            }
+        }
+        let bad = |kind: &str, is_old: bool, gen: u32, idx: usize, len: usize, parent: u64, raw: u64| {
+            let (ep, space) = if is_old { (old_ep, "OLD") } else { (young_ep, "nursery") };
             assert!(
                 idx < len,
-                "GC-VERIFY: stored stale {kind} handle OUT OF BOUNDS (slot {idx} \
+                "GC-VERIFY: stored stale {kind} handle OUT OF BOUNDS ({space} slot {idx} \
                  ≥ slab len {len}); handle {raw:#x} held in container {parent:#x}. \
                  A handle was kept across a collection without re-rooting, then \
                  written into the live graph — use-after-GC.",
             );
             assert!(
                 gen == ep,
-                "GC-VERIFY: stored stale {kind} handle from epoch {gen}, heap is now \
-                 epoch {ep} (slot {idx}, handle {raw:#x}); held in container \
+                "GC-VERIFY: stored stale {kind} handle from epoch {gen}, {space} generation is \
+                 now epoch {ep} (slot {idx}, handle {raw:#x}); held in container \
                  {parent:#x}. That cell holds a handle kept across a collection \
                  without re-rooting — use-after-GC at the op that built it.",
             );
         };
+        // Routed slab views: young vs old by the handle's age bit.
         while let Some(w) = work.pop() {
             match w {
                 W::V(v, parent) => match v {
                     Value::Pair(id) if id.region() == LOCAL => {
-                        bad("pair", id.generation(), id.index(), self.local.pairs.len(), parent, id.0);
-                        if !seen_pair[id.index()] {
-                            seen_pair[id.index()] = true;
-                            let (a, b) = self.local.pairs[id.index()];
+                        let slabs = if id.is_old() { &self.old } else { &self.local };
+                        bad("pair", id.is_old(), id.generation(), id.index(), slabs.pairs.len(), parent, id.0);
+                        if !id.is_old() && !std::mem::replace(&mut seen_pair[id.is_old() as usize][id.index()], true) {
+                            let (a, b) = slabs.pairs[id.index()];
                             work.push(W::V(a, id.0));
                             work.push(W::V(b, id.0));
                         }
                     }
                     Value::Vector(id) if id.region() == LOCAL => {
-                        bad("vector", id.generation(), id.index(), self.local.vectors.len(), parent, id.0);
-                        if !seen_vec[id.index()] {
-                            seen_vec[id.index()] = true;
-                            for &el in &self.local.vectors[id.index()] {
+                        let slabs = if id.is_old() { &self.old } else { &self.local };
+                        bad("vector", id.is_old(), id.generation(), id.index(), slabs.vectors.len(), parent, id.0);
+                        if !id.is_old() && !std::mem::replace(&mut seen_vec[id.is_old() as usize][id.index()], true) {
+                            for &el in &slabs.vectors[id.index()] {
                                 work.push(W::V(el, id.0));
                             }
                         }
                     }
                     Value::Map(id) if id.region() == LOCAL => {
-                        bad("map", id.generation(), id.index(), self.local.maps.len(), parent, id.0);
-                        if !seen_map[id.index()] {
-                            seen_map[id.index()] = true;
-                            let node = &self.local.maps[id.index()];
+                        let slabs = if id.is_old() { &self.old } else { &self.local };
+                        bad("map", id.is_old(), id.generation(), id.index(), slabs.maps.len(), parent, id.0);
+                        if !id.is_old() && !std::mem::replace(&mut seen_map[id.is_old() as usize][id.index()], true) {
+                            let node = &slabs.maps[id.index()];
                             for &(mk, mv) in &node.data {
                                 work.push(W::V(mk, id.0));
                                 work.push(W::V(mv, id.0));
@@ -3154,16 +3550,18 @@ impl Heap {
                         }
                     }
                     Value::Str(id) if id.region() == LOCAL => {
-                        bad("string", id.generation(), id.index(), self.local.strings.len(), parent, id.0);
+                        let slabs = if id.is_old() { &self.old } else { &self.local };
+                        bad("string", id.is_old(), id.generation(), id.index(), slabs.strings.len(), parent, id.0);
                     }
                     Value::Rope(id) if id.region() == LOCAL => {
-                        bad("rope", id.generation(), id.index(), self.local.ropes.len(), parent, id.0);
+                        let slabs = if id.is_old() { &self.old } else { &self.local };
+                        bad("rope", id.is_old(), id.generation(), id.index(), slabs.ropes.len(), parent, id.0);
                     }
                     Value::Fn(id) | Value::Macro(id) if id.region() == LOCAL => {
-                        bad("closure", id.generation(), id.index(), self.local.closures.len(), parent, id.0);
-                        if !seen_clo[id.index()] {
-                            seen_clo[id.index()] = true;
-                            let cl = &self.local.closures[id.index()];
+                        let slabs = if id.is_old() { &self.old } else { &self.local };
+                        bad("closure", id.is_old(), id.generation(), id.index(), slabs.closures.len(), parent, id.0);
+                        if !id.is_old() && !std::mem::replace(&mut seen_clo[id.is_old() as usize][id.index()], true) {
+                            let cl = &slabs.closures[id.index()];
                             for arm in &cl.arms {
                                 for &f in &arm.body {
                                     work.push(W::V(f, id.0));
@@ -3183,10 +3581,10 @@ impl Heap {
                     if e == EnvId::GLOBAL || e.region() != LOCAL {
                         continue;
                     }
-                    bad("env", e.generation(), e.index(), self.local.envs.len(), parent, e.0);
-                    if !seen_env[e.index()] {
-                        seen_env[e.index()] = true;
-                        let frame = &self.local.envs[e.index()];
+                    let slabs = if e.is_old() { &self.old } else { &self.local };
+                    bad("env", e.is_old(), e.generation(), e.index(), slabs.envs.len(), parent, e.0);
+                    if !e.is_old() && !std::mem::replace(&mut seen_env[e.is_old() as usize][e.index()], true) {
+                        let frame = &slabs.envs[e.index()];
                         if let Some(p) = frame.parent {
                             work.push(W::E(p, e.0));
                         }
@@ -3362,9 +3760,9 @@ impl Heap {
         for i in 0..self.local.pairs.len() {
             if !marks.is_pair_marked(i) {
                 self.local_free.pairs.push(i as u32);
-                // form_pos is keyed by pair index; drop the entry since the
-                // slot will be reused for an unrelated pair.
-                self.form_pos.remove(&i);
+                // form_pos is keyed by (age,index); this nursery sweep drops the
+                // young (age 0) entry since the slot will be reused.
+                self.form_pos.remove(&(i as u64));
                 #[cfg(debug_assertions)]
                 {
                     self.poison.pairs[i] = true;
@@ -3579,9 +3977,19 @@ struct PromoteForward {
 #[derive(Default)]
 struct FlushForward {
     /// The generation epoch to stamp into every survivor handle minted into the
-    /// fresh slabs (set by [`Heap::arena_flip`] to the post-bump epoch). Carried
-    /// here rather than threaded through every `flush_*` signature.
+    /// destination slabs. Carried here rather than threaded through every
+    /// `flush_*` signature.
     epoch: u32,
+    /// Which generation the *source* objects being copied live in: `false` =
+    /// nursery (a minor or legacy whole-heap flush), `true` = old (a major
+    /// compaction). A `flush_*` copies a LOCAL handle only when its age matches;
+    /// the other generation (and PRELUDE/RUNTIME) is left untouched.
+    src_old: bool,
+    /// Whether minted destination handles are tagged **old** (`local_old_gen`).
+    /// `true` for the generational paths (minor promotes nursery→old, major
+    /// compacts old→old); `false` only for the legacy single-space `flush()` test
+    /// helper, which stays nursery→nursery.
+    dest_old: bool,
     pairs: HashMap<u32, u32>,
     vectors: HashMap<u32, u32>,
     maps: HashMap<u32, u32>,
@@ -3591,23 +3999,73 @@ struct FlushForward {
     envs: HashMap<u32, u32>,
 }
 
+impl FlushForward {
+    /// Does a `flush_*` copy this LOCAL handle? Only if its generation age matches
+    /// the source space being collected; the other generation / shared regions are
+    /// left in place.
+    #[inline]
+    fn copies(&self, region: u8, is_old: bool) -> bool {
+        region == LOCAL && is_old == self.src_old
+    }
+}
+
+/// Generate a `FlushForward::mint_*` that mints a destination handle of type `$id`,
+/// tagged old or young by `dest_old` and stamped with the dest `epoch`. One per
+/// handle kind — they differ only in the `Id` type.
+macro_rules! mint_fn {
+    ($name:ident, $id:ty) => {
+        impl FlushForward {
+            #[inline]
+            fn $name(&self, idx: usize) -> $id {
+                if self.dest_old {
+                    <$id>::local_old_gen(idx, self.epoch)
+                } else {
+                    <$id>::local_gen(idx, self.epoch)
+                }
+            }
+        }
+    };
+}
+mint_fn!(mint_pair, PairId);
+mint_fn!(mint_vector, VecId);
+mint_fn!(mint_map, MapId);
+mint_fn!(mint_string, StrId);
+mint_fn!(mint_rope, RopeId);
+mint_fn!(mint_closure, ClosureId);
+mint_fn!(mint_env, EnvId);
+
 fn flush_value(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, v: Value) -> Value {
     match v {
-        Value::Pair(id) if id.region() == LOCAL => Value::Pair(flush_pair(old, new, fwd, id)),
-        Value::Vector(id) if id.region() == LOCAL => Value::Vector(flush_vector(old, new, fwd, id)),
-        Value::Map(id) if id.region() == LOCAL => Value::Map(flush_map(old, new, fwd, id)),
-        Value::Str(id) if id.region() == LOCAL => Value::Str(flush_string(old, new, fwd, id)),
-        Value::Rope(id) if id.region() == LOCAL => Value::Rope(flush_rope(old, new, fwd, id)),
-        Value::Fn(id) if id.region() == LOCAL => Value::Fn(flush_closure(old, new, fwd, id)),
-        Value::Macro(id) if id.region() == LOCAL => Value::Macro(flush_closure(old, new, fwd, id)),
-        // Atoms + PRELUDE/RUNTIME handles are shared and immutable; no copy.
+        Value::Pair(id) if fwd.copies(id.region(), id.is_old()) => {
+            Value::Pair(flush_pair(old, new, fwd, id))
+        }
+        Value::Vector(id) if fwd.copies(id.region(), id.is_old()) => {
+            Value::Vector(flush_vector(old, new, fwd, id))
+        }
+        Value::Map(id) if fwd.copies(id.region(), id.is_old()) => {
+            Value::Map(flush_map(old, new, fwd, id))
+        }
+        Value::Str(id) if fwd.copies(id.region(), id.is_old()) => {
+            Value::Str(flush_string(old, new, fwd, id))
+        }
+        Value::Rope(id) if fwd.copies(id.region(), id.is_old()) => {
+            Value::Rope(flush_rope(old, new, fwd, id))
+        }
+        Value::Fn(id) if fwd.copies(id.region(), id.is_old()) => {
+            Value::Fn(flush_closure(old, new, fwd, id))
+        }
+        Value::Macro(id) if fwd.copies(id.region(), id.is_old()) => {
+            Value::Macro(flush_closure(old, new, fwd, id))
+        }
+        // Atoms, shared (PRELUDE/RUNTIME), and LOCAL handles of the *other*
+        // generation are left unchanged (no copy this pass).
         _ => v,
     }
 }
 
 fn flush_pair(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: PairId) -> PairId {
     if let Some(&new_idx) = fwd.pairs.get(&(id.index() as u32)) {
-        return PairId::local_gen(new_idx as usize, fwd.epoch);
+        return fwd.mint_pair(new_idx as usize);
     }
     // Walk the cdr spine **iteratively** so a long proper list doesn't recurse its
     // length deep (a `(cons …)` chain of 100k would overflow the native stack —
@@ -3622,10 +4080,10 @@ fn flush_pair(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: PairId) 
     let mut cur = Value::Pair(id);
     let tail = loop {
         match cur {
-            Value::Pair(p) if p.region() == LOCAL => {
+            Value::Pair(p) if fwd.copies(p.region(), p.is_old()) => {
                 let key = p.index() as u32;
                 if let Some(&n) = fwd.pairs.get(&key) {
-                    break Value::Pair(PairId::local_gen(n as usize, fwd.epoch));
+                    break Value::Pair(fwd.mint_pair(n as usize));
                 }
                 let (car, cdr) = old.pairs[p.index()];
                 let new_idx = new.pairs.len();
@@ -3646,7 +4104,7 @@ fn flush_pair(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: PairId) 
     for &(new_idx, car) in spine.iter().rev() {
         let new_car = flush_value(old, new, fwd, car);
         new.pairs[new_idx] = (new_car, next);
-        next = Value::Pair(PairId::local_gen(new_idx, fwd.epoch));
+        next = Value::Pair(fwd.mint_pair(new_idx));
     }
     match next {
         Value::Pair(pid) => pid,
@@ -3657,7 +4115,7 @@ fn flush_pair(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: PairId) 
 fn flush_vector(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: VecId) -> VecId {
     let key = id.index() as u32;
     if let Some(&new_idx) = fwd.vectors.get(&key) {
-        return VecId::local_gen(new_idx as usize, fwd.epoch);
+        return fwd.mint_vector(new_idx as usize);
     }
     let items: Vec<Value> = old.vectors[id.index()].clone();
     let new_idx = new.vectors.len();
@@ -3668,13 +4126,13 @@ fn flush_vector(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: VecId)
         .map(|x| flush_value(old, new, fwd, x))
         .collect();
     new.vectors[new_idx] = copied;
-    VecId::local_gen(new_idx, fwd.epoch)
+    fwd.mint_vector(new_idx)
 }
 
 fn flush_string(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: StrId) -> StrId {
     let key = id.index() as u32;
     if let Some(&new_idx) = fwd.strings.get(&key) {
-        return StrId::local_gen(new_idx as usize, fwd.epoch);
+        return fwd.mint_string(new_idx as usize);
     }
     // Clone by variant. `Shared(arc)` becomes `Arc::clone` (+1 ref); the old
     // slab's drop right after `flush` returns will then -1, leaving the
@@ -3689,13 +4147,13 @@ fn flush_string(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: StrId)
     let new_idx = new.strings.len();
     new.strings.push(entry);
     fwd.strings.insert(key, new_idx as u32);
-    StrId::local_gen(new_idx, fwd.epoch)
+    fwd.mint_string(new_idx)
 }
 
 fn flush_rope(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: RopeId) -> RopeId {
     let key = id.index() as u32;
     if let Some(&new_idx) = fwd.ropes.get(&key) {
-        return RopeId::local_gen(new_idx as usize, fwd.epoch);
+        return fwd.mint_rope(new_idx as usize);
     }
     // `ropey::Rope::clone` is a cheap `Arc`-node bump (no byte copy); the old
     // slab drops right after `flush`, leaving the surviving rope's internal
@@ -3704,13 +4162,13 @@ fn flush_rope(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: RopeId) 
     let new_idx = new.ropes.len();
     new.ropes.push(rope);
     fwd.ropes.insert(key, new_idx as u32);
-    RopeId::local_gen(new_idx, fwd.epoch)
+    fwd.mint_rope(new_idx)
 }
 
 fn flush_map(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: MapId) -> MapId {
     let key = id.index() as u32;
     if let Some(&new_idx) = fwd.maps.get(&key) {
-        return MapId::local_gen(new_idx as usize, fwd.epoch);
+        return fwd.mint_map(new_idx as usize);
     }
     // Snapshot just the scalar/copy fields + arrays we need to walk.
     let (size, data_map, node_map, is_collision, data_snapshot, children_snapshot): (
@@ -3736,9 +4194,17 @@ fn flush_map(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: MapId) ->
     fwd.maps.insert(key, new_idx as u32);
     let new_children: SmallVec<[MapId; 4]> = children_snapshot
         .iter()
-        .map(|&c| match c.region() {
-            LOCAL => flush_map(old, new, fwd, c),
-            _ => c,
+        .map(|&c| {
+            // Age-aware, like every other flush edge: a CHAMP trie built
+            // incrementally shares child nodes across a tenure boundary, so a
+            // child can be in the *other* generation than the node being copied.
+            // Only recurse into a child of the generation this pass is collecting;
+            // a child of the other age (or PRELUDE/RUNTIME) is left as-is.
+            if fwd.copies(c.region(), c.is_old()) {
+                flush_map(old, new, fwd, c)
+            } else {
+                c
+            }
         })
         .collect();
     let new_data: SmallVec<[(Value, Value); 4]> = data_snapshot
@@ -3753,13 +4219,13 @@ fn flush_map(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: MapId) ->
         data: new_data,
         children: new_children,
     };
-    MapId::local_gen(new_idx, fwd.epoch)
+    fwd.mint_map(new_idx)
 }
 
 fn flush_closure(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: ClosureId) -> ClosureId {
     let key = id.index() as u32;
     if let Some(&new_idx) = fwd.closures.get(&key) {
-        return ClosureId::local_gen(new_idx as usize, fwd.epoch);
+        return fwd.mint_closure(new_idx as usize);
     }
     let cl = old.closures[id.index()].clone();
     let new_idx = new.closures.len();
@@ -3790,16 +4256,16 @@ fn flush_closure(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: Closu
         doc: cl.doc,
         env,
     };
-    ClosureId::local_gen(new_idx, fwd.epoch)
+    fwd.mint_closure(new_idx)
 }
 
 fn flush_env(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, env: EnvId) -> EnvId {
-    if env == EnvId::GLOBAL || env.region() != LOCAL {
+    if env == EnvId::GLOBAL || !fwd.copies(env.region(), env.is_old()) {
         return env;
     }
     let key = env.index() as u32;
     if let Some(&new_idx) = fwd.envs.get(&key) {
-        return EnvId::local_gen(new_idx as usize, fwd.epoch);
+        return fwd.mint_env(new_idx as usize);
     }
     let (parent_snapshot, vars_snapshot): (Option<EnvId>, EnvVars) = {
         let frame = &old.envs[env.index()];
@@ -3817,7 +4283,7 @@ fn flush_env(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, env: EnvId) -
         .map(|&(s, v)| (s, flush_value(old, new, fwd, v)))
         .collect();
     new.envs[new_idx] = EnvFrame { vars, parent };
-    EnvId::local_gen(new_idx, fwd.epoch)
+    fwd.mint_env(new_idx)
 }
 
 #[cfg(test)]

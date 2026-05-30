@@ -13,6 +13,8 @@
 ;; (isolation is from *other files'* globals, not from this file's). Distinct
 ;; `bs-` prefix so the isolated globals copy never collides with other suites.
 
+(defmodule blob-share-test (:use test))
+
 (defn bs-blob-worker (parent)
   "Receive a string, send back [:ptr <its-blob-ptr>] to `parent`."
   (receive (s (send parent [:ptr (%blob-ptr s)]))))

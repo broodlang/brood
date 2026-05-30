@@ -3912,20 +3912,25 @@ tooling" (`BROOD_GC_VERIFY` — how the six sites were found).
 
 ## ADR-065 — Namespaces: expand-time resolution over the flat table, soft privacy
 
-**Status:** accepted; **increments 1–2 implemented** (2026-05-30). Inc-1: the
-substrate (`(ns …)` form, resolver pass, per-process `compile_ns`, forward-ref
-pre-scan, qualified def-site keying, ns-aware advisory checker). Inc-2: `(:use …)`
-imports + auto-require — a per-file `Heap.imports` table the resolver consults
-after the current namespace and before root; `%refer` enumerates a module's public
-(non-`--`) names or a `:refer` subset; `:use` emits `(require …)` so the module
-auto-loads (never *fetches*). Own-namespace defs shadow imports. **Decided, next:**
-unify — `defmodule` becomes the single namespace form (drop `ns`; a module *is* a
-namespace), migrating `std/` + the test framework (namespaced + `(:use test)`).
-Then macro free-ref resolution / **α**, an import-aware checker, LSP Tier 2, and
-package ns-collision policy. Full design in [`namespaces.md`](namespaces.md).
-Supersedes the "deferred, point-2-only" stance
-of ADR-019. **Two questions left open** (hygiene, ns-name collision) — they don't
-block the substrate.
+**Status:** accepted; **increments 1–3 + α implemented** (2026-05-30). Inc-1: the
+substrate (resolver pass, per-process `compile_ns`, forward-ref pre-scan, qualified
+def-site keying, ns-aware advisory checker). Inc-2: `(:use …)` imports + auto-require
+— a per-file `Heap.imports` table the resolver consults after the current namespace
+and before root; `%refer` enumerates a module's public (non-`--`) names or a `:refer`
+subset; `:use` emits `(require …)` so the module auto-loads (never *fetches*).
+Own-namespace defs shadow imports. **Inc-3 (the big-bang):** `defmodule` *is* the
+single namespace form — the `ns` macro was renamed to `defmodule` and `ns` dropped (a
+module *is* a namespace); all of `std/` + every test file migrated in one pass
+(leaf-out), with `test` namespaced and `(:use test)` added throughout.
+**α** shipped in the same pass: the resolver descends quasiquote templates and
+auto-qualifies free reference-position symbols to the *defining* namespace, so
+namespaced macros are correct across namespaces without hand-qualifying (the
+β-interim wall, e.g. `test/describe`'s bare helper emission, is closed). The
+**earmuff rule** (`*foo*` names are ambient/root, never namespaced) was added so
+`defdyn` vars / `*load-path*` / `*features*` stay reachable unqualified. Full design
+in [`namespaces.md`](namespaces.md). Supersedes the "deferred, point-2-only" stance
+of ADR-019. **Left open** (additive, don't block anything): LSP Tier 2 and ns-name
+collision policy.
 
 **Context.** ADR-019 chose Emacs-flat modules and deferred namespaces, betting
 they'd fight the editor's "any code can redefine any behaviour live" grain

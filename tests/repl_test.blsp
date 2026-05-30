@@ -2,75 +2,74 @@
 ;;
 ;; The REPL itself is an IO loop over `read-line`/`eval-string` (driven by the
 ;; `brood` / `nest repl` binaries, exercised manually), so these tests cover the
-;; pure decisions it's built from: datum detection (`repl--content?`), the
-;; incomplete-input signal that drives multi-line reads (`repl--incomplete?`, off
-;; the reader's E0002 code — ADR-049), and error rendering (`repl--error-message`).
-;; One integration test confirms `repl--eval-print` reports `:more` for a partial
+;; pure decisions it's built from: datum detection (`repl/repl--content?`), the
+;; incomplete-input signal that drives multi-line reads (`repl/repl--incomplete?`, off
+;; the reader's E0002 code — ADR-049), and error rendering (`repl/repl--error-message`).
+;; One integration test confirms `repl/repl--eval-print` reports `:more` for a partial
 ;; form. The closing :isolated block sends an error *map* through a process
 ;; boundary (a deep copy across per-process heaps) before formatting it, proving
 ;; the structured-error path round-trips under the scheduler.
 
-(require 'test)
-(require 'repl)
+(defmodule repl-test (:use test) (:use repl))
 
-(describe "repl--content? — ignore blank / comment-only input"
+(describe "repl/repl--content? — ignore blank / comment-only input"
   (test "whitespace-only input has no datum"
-    (refute (repl--content? "" 0 0 false))
-    (refute (repl--content? "   \n\t" 0 5 false)))
+    (refute (repl/repl--content? "" 0 0 false))
+    (refute (repl/repl--content? "   \n\t" 0 5 false)))
   (test "comment-only input has no datum"
-    (refute (repl--content? "; just a comment\n" 0 17 false)))
+    (refute (repl/repl--content? "; just a comment\n" 0 17 false)))
   (test "real content is detected, even after leading space / comments"
-    (is (repl--content? "  (+ 1 1)" 0 9 false))
-    (is (repl--content? "; note\n(+ 1 1)" 0 14 false))))
+    (is (repl/repl--content? "  (+ 1 1)" 0 9 false))
+    (is (repl/repl--content? "; note\n(+ 1 1)" 0 14 false))))
 
-(describe "repl--incomplete? — the read-another-line signal"
+(describe "repl/repl--incomplete? — the read-another-line signal"
   (test "the reader's E0002 (incomplete input) error is incomplete"
-    (is (repl--incomplete? {:code "E0002" :kind :parse :message "unexpected end of input"})))
+    (is (repl/repl--incomplete? {:code "E0002" :kind :parse :message "unexpected end of input"})))
   (test "a real error (different code) is not incomplete"
-    (refute (repl--incomplete? {:code "E0010" :kind :unbound :message "x"}))
-    (refute (repl--incomplete? {:kind :type :message "bad"})))
+    (refute (repl/repl--incomplete? {:code "E0010" :kind :unbound :message "x"}))
+    (refute (repl/repl--incomplete? {:kind :type :message "bad"})))
   (test "a non-map (user throw) is not incomplete"
-    (refute (repl--incomplete? "boom"))
-    (refute (repl--incomplete? 42))))
+    (refute (repl/repl--incomplete? "boom"))
+    (refute (repl/repl--incomplete? 42))))
 
-(describe "repl--eval-print — completeness reporting"
+(describe "repl/repl--eval-print — completeness reporting"
   (test "a partial form reports :more (so the loop reads another line)"
     ;; eval-string reads all forms before evaluating any, so an unclosed form
     ;; raises E0002 at read time with nothing evaluated — silent, no output.
-    (assert= (repl--eval-print "(+ 1") :more)
-    (assert= (repl--eval-print "(str \"open") :more)))
+    (assert= (repl/repl--eval-print "(+ 1") :more)
+    (assert= (repl/repl--eval-print "(str \"open") :more)))
 
-(describe "repl--error-message — rendering caught values"
+(describe "repl/repl--error-message — rendering caught values"
   (test "a built-in error map renders kind + message"
-    (assert= (repl--error-message {:kind :type :message "bad arg"})
+    (assert= (repl/repl--error-message {:kind :type :message "bad arg"})
              "type error: bad arg")
-    (assert= (repl--error-message {:kind :unbound :message "x"})
+    (assert= (repl/repl--error-message {:kind :unbound :message "x"})
              "unbound error: x"))
   (test "a located error appends line + col"
-    (assert= (repl--error-message {:kind :unbound :message "x" :line 3 :col 5})
+    (assert= (repl/repl--error-message {:kind :unbound :message "x" :line 3 :col 5})
              "unbound error: x (line 3, col 5)"))
   (test "a user-thrown string renders without quotes"
-    (assert= (repl--error-message "boom") "error: boom"))
+    (assert= (repl/repl--error-message "boom") "error: boom"))
   (test "a user-thrown non-string renders readably"
-    (assert= (repl--error-message 42) "error: 42")
-    (assert= (repl--error-message [:tag 1]) "error: [:tag 1]")))
+    (assert= (repl/repl--error-message 42) "error: 42")
+    (assert= (repl/repl--error-message [:tag 1]) "error: [:tag 1]")))
 
 (describe "persistent history — serialize / parse round-trip"
   (test "history serializes oldest-first and parses back newest-first"
-    (assert= (repl--history->text (list "(c)" "(b)" "(a)")) "(a)\n(b)\n(c)")
-    (assert= (repl--history<-text "(a)\n(b)\n(c)") (list "(c)" "(b)" "(a)")))
+    (assert= (repl/repl--history->text (list "(c)" "(b)" "(a)")) "(a)\n(b)\n(c)")
+    (assert= (repl/repl--history<-text "(a)\n(b)\n(c)") (list "(c)" "(b)" "(a)")))
   (test "blank lines are dropped on parse; empty history is empty text"
-    (assert= (repl--history<-text "(a)\n\n(b)\n") (list "(b)" "(a)"))
-    (assert= (repl--history->text '()) "")
-    (assert= (repl--history<-text "") '())))
+    (assert= (repl/repl--history<-text "(a)\n\n(b)\n") (list "(b)" "(a)"))
+    (assert= (repl/repl--history->text '()) "")
+    (assert= (repl/repl--history<-text "") '())))
 
 ;; Cross-process: the error map crosses a heap boundary (send deep-copies it)
 ;; before formatting, so this proves the structured-error path survives the
 ;; copy-on-send round-trip — not just same-heap formatting.
-(describe "repl--error-message across processes"
+(describe "repl/repl--error-message across processes"
   :isolated
 
   (test "an error map sent between processes still formats correctly"
-    (let (w (spawn (receive ([:fmt e from] (send from (repl--error-message e))))))
+    (let (w (spawn (receive ([:fmt e from] (send from (repl/repl--error-message e))))))
       (send w [:fmt {:kind :type :message "across"} (self)])
       (assert= (receive (r r)) "type error: across"))))

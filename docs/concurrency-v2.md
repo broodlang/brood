@@ -12,7 +12,7 @@
 
 See also: [`scheduler.md`](scheduler.md) (current M:N design),
 [`supervision.md`](supervision.md) (userland pattern + ADR-039 revert),
-[`memory-model.md`](memory-model.md) (bump allocator + hibernate),
+[`memory-model.md`](memory-model.md) (bump allocator + automatic copying GC),
 [`known-issues.md`](known-issues.md) KI-1/KI-2, [`decisions.md`](decisions.md)
 ADR-018/027/039.
 
@@ -39,12 +39,14 @@ programs that triggered KI-1 hit all three at once.
 These are **load-bearing**. Anything we add must preserve them or replace them
 with something equally strong.
 
-- **INV-1 — slots are never reused** (`f90f0de`, [`memory-model.md`](memory-model.md)).
-  Every `alloc_*` bumps the slab; `Heap::collect` is a no-op. A stale handle can
-  therefore never observe a value of the wrong type — the engine of the
-  use-after-free race is structurally gone. (Cost: per-process heaps grow
-  unboundedly until `(hibernate)` flips the arena; that's the memory story, not
-  the safety story.)
+- **INV-1 — slots are never reused in place** (`f90f0de`, [`memory-model.md`](memory-model.md)).
+  Every `alloc_*` bumps the slab; the automatic copying collector (ADR-055)
+  relocates survivors into a *fresh* arena rather than reusing freed slots, and
+  bumps a per-handle generation epoch (ADR-054) so a stale handle trips a debug
+  tripwire instead of silently aliasing a reused slot. A stale handle can therefore
+  never observe a value of the wrong type — the engine of the use-after-free race
+  is structurally gone. (The `(hibernate)` arena flip this invariant once leaned on
+  is gone, ADR-058 — automatic GC bounds memory on every entry path now.)
 - **INV-2 — one process is owned by exactly one thread at any instant**
   (`2abf05e`, `scheduler.rs:58-77`). A `Process` is `Send` only under the
   hand-written `unsafe impl`, justified by "moved once from spawn into its

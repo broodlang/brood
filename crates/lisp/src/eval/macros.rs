@@ -229,14 +229,14 @@ pub fn file_opens_ns(heap: &Heap, forms: &[Value]) -> bool {
     file_ns(heap, forms).is_some()
 }
 
-/// The namespace symbol a file declares via a top-level `(ns NAME …)`, or `None`.
-/// One ns per file (inc-1), so the first such form wins. Used by the advisory
-/// checker to resolve qualified references without evaluating the `ns` form.
+/// The namespace symbol a file declares via a top-level `(defmodule NAME …)`, or
+/// `None`. One per file, so the first such form wins. Used by the advisory checker
+/// to resolve qualified references without evaluating the header.
 pub fn file_ns(heap: &Heap, forms: &[Value]) -> Option<Symbol> {
     for &f in forms {
         if let Ok(items) = heap.list_to_vec(f) {
             if let Some(&Value::Sym(h)) = items.first() {
-                if value::symbol_is(h, "ns") {
+                if value::symbol_is(h, "defmodule") {
                     if let Some(&Value::Sym(name)) = items.get(1) {
                         return Some(name);
                     }
@@ -299,11 +299,20 @@ pub fn resolve(heap: &mut Heap, form: Value) -> Value {
     resolve_walk(heap, form, &ns_name, &[])
 }
 
-/// Qualify a definition head: `bar` -> `ns/bar`; an already-`/`-qualified name is
-/// taken as-is. Shared with `Heap::def_form_name` so def-site keys match.
+/// An "earmuffed" `*foo*` name — by Lisp convention a special/dynamic/ambient
+/// global. These are never namespaced (ADR-065): a `(def *load-path* …)` in any
+/// namespace rebinds the *root* `*load-path*` the loader reads, rather than a
+/// namespace-local shadow — likewise `*features*`, `*project-*`, `defdyn` vars.
+fn is_ambient(name: &str) -> bool {
+    name.len() > 2 && name.starts_with('*') && name.ends_with('*')
+}
+
+/// Qualify a definition head: `bar` -> `ns/bar`; an already-`/`-qualified name, or
+/// an ambient `*earmuffed*` name, is taken as-is. Shared with `Heap::def_form_name`
+/// so def-site keys match.
 pub fn qualify_name(ns_name: &str, name: value::Symbol) -> value::Symbol {
     let spelling = value::symbol_name(name);
-    if spelling.contains('/') {
+    if spelling.contains('/') || is_ambient(&spelling) {
         name
     } else {
         value::intern(&format!("{}/{}", ns_name, spelling))
@@ -320,6 +329,9 @@ fn resolve_sym(heap: &Heap, s: value::Symbol, ns_name: &str, locals: &[value::Sy
     let name = value::symbol_name(s);
     if name.contains('/') {
         return s; // already qualified
+    }
+    if is_ambient(&name) {
+        return s; // earmuffed `*foo*` — ambient/root by convention (ADR-065)
     }
     // Own namespace first (a same-named local def shadows an import), then a
     // `(:use …)` import, then root/prelude fall-through (left bare).
@@ -365,8 +377,23 @@ fn resolve_list(heap: &mut Heap, form: Value, ns_name: &str, locals: &[value::Sy
         Err(_) => return form, // improper list — leave verbatim
     };
     if let Some(&Value::Sym(h)) = items.first() {
-        if value::symbol_is(h, "quote") || value::symbol_is(h, "quasiquote") {
-            return form; // data — never descend (ADR-034)
+        if value::symbol_is(h, "quote") {
+            return form; // pure data — never descend (ADR-034)
+        }
+        if value::symbol_is(h, "quasiquote") {
+            // α (ADR-065 §7): descend the template so a macro's *free* references
+            // qualify to the **defining** namespace — frozen here at macro-def time,
+            // so the expansion resolves in any consumer. `~unquote`/`~@` contents
+            // resolve as code (the macro's params are in `locals`); a nested `quote`
+            // stays data; `#` auto-gensyms and template-local binders stay bare
+            // (not known ns names). At root (`compile_ns == None`) the whole resolver
+            // is a no-op, so prelude macro templates are untouched.
+            let mut out = Vec::with_capacity(items.len());
+            out.push(items[0]); // the `quasiquote` head itself
+            for &it in &items[1..] {
+                out.push(resolve_walk(heap, it, ns_name, locals));
+            }
+            return rebuild_list(heap, form, out);
         }
         if value::symbol_is(h, "def") || value::symbol_is(h, "defmacro") {
             return resolve_def(heap, form, &items, ns_name, locals);
@@ -1193,6 +1220,35 @@ mod resolve_tests {
         assert_eq!(
             resolved(&["(def foo/a 9)"], "foo", "(letrec (a (fn () (b)) b (fn () (a))) (a))"),
             "(letrec (a (fn nil (b)) b (fn nil (a))) (a))"
+        );
+    }
+
+    #[test]
+    fn quasiquote_template_free_refs_qualify_to_defining_ns() {
+        // α: a macro template's free ref to a same-namespace name is frozen
+        // qualified at definition time; a prelude name (`map`) stays bare; the
+        // macro param (`x`, unquoted) stays bare.
+        assert_eq!(
+            resolved(
+                &["(def foo/helper 1)"],
+                "foo",
+                "(defmacro m (x) `(helper (map ~x)))"
+            ),
+            "(defmacro foo/m (x) (quasiquote (foo/helper (map (unquote x)))))"
+        );
+    }
+
+    #[test]
+    fn quasiquote_autogensym_and_quoted_stay_bare() {
+        // A `#` auto-gensym binder and a quoted symbol inside a template are left
+        // bare (not qualified), even with same-named ns globals present.
+        assert_eq!(
+            resolved(
+                &["(def foo/tmp 1)", "(def foo/k 2)"],
+                "foo",
+                "(defmacro m () `(let (tmp# 1) (quote k)))"
+            ),
+            "(defmacro foo/m nil (quasiquote (let (tmp# 1) (quote k))))"
         );
     }
 

@@ -2,48 +2,47 @@
 ;; load+introspect renderer behind `nest doc`. Register-only — discovered and run
 ;; by `nest test` (and cargo test, via crates/lisp/tests/suite.rs).
 
-(require 'test)
-(require 'docs)
+(defmodule docs-test (:use test) (:use docs))
 
 (describe "docs: leading module docstring"
   (test "a file's leading string form is its module doc"
-    (assert= (docs--leading-doc "\"Hi.\" (def x 1)") "Hi."))
-  (test "a leading non-string means no module doc" (assert= (docs--leading-doc "(def x 1)") nil))
+    (assert= (docs/docs--leading-doc "\"Hi.\" (def x 1)") "Hi."))
+  (test "a leading non-string means no module doc" (assert= (docs/docs--leading-doc "(def x 1)") nil))
   (test "comments before the string are skipped"
-    (assert= (docs--leading-doc ";; a comment\n\"Hi.\"\n(def x 1)") "Hi."))
+    (assert= (docs/docs--leading-doc ";; a comment\n\"Hi.\"\n(def x 1)") "Hi."))
   (test "the baked-in test module carries a module docstring"
-    (is (starts-with? (docs--leading-doc (%builtin-module "test")) "A tiny ExUnit"))))
+    (is (starts-with? (docs/docs--leading-doc (%builtin-module "test")) "A tiny ExUnit"))))
 
 (describe "docs: name attribution (global-names delta)"
   (test "added names are those in after but not before"
-    (assert= (docs--added '(a b) '(a b c d)) '(c d)))
-  (test "nothing newly bound is empty" (assert= (docs--added '(a b) '(a b)) nil)))
+    (assert= (docs/docs--added '(a b) '(a b c d)) '(c d)))
+  (test "nothing newly bound is empty" (assert= (docs/docs--added '(a b) '(a b)) nil)))
 
 (describe "docs: classification"
   (test "functions and macros are documentable; plain values are not"
     (defn doc-test-fn (x) x)
     (defmacro doc-test-macro (x) x)
-    (is (docs--documentable? doc-test-fn))
-    (is (docs--documentable? doc-test-macro))
-    (is (docs--documentable? map))
+    (is (docs/docs--documentable? doc-test-fn))
+    (is (docs/docs--documentable? doc-test-macro))
+    (is (docs/docs--documentable? map))
     ; a native/closure builtin is a fn
-    (refute (docs--documentable? 42))
-    (refute (docs--documentable? "a string"))))
+    (refute (docs/docs--documentable? 42))
+    (refute (docs/docs--documentable? "a string"))))
 
 (describe "docs: basename from a path"
   (test "strips the directory and the .blsp suffix"
-    (assert= (docs--basename "a/b/foo.blsp") "foo")
-    (assert= (docs--basename "foo.blsp") "foo")
-    (assert= (docs--basename "foo") "foo")))
+    (assert= (docs/docs--basename "a/b/foo.blsp") "foo")
+    (assert= (docs/docs--basename "foo.blsp") "foo")
+    (assert= (docs/docs--basename "foo") "foo")))
 
 (describe "docs: rendering one definition"
   (test "a documented function renders its signature and docstring"
     (defn doc-squared (x) "Return x times itself." (* x x))
-    (assert= (docs--entry 'doc-squared doc-squared)
+    (assert= (docs/docs--entry 'doc-squared doc-squared)
       "### `(doc-squared x)`\n\nReturn x times itself.\n"))
   (test "a macro entry is tagged"
     (defmacro doc-inc! (x) "Add one." `(+ ~x 1))
-    (assert= (docs--entry 'doc-inc! doc-inc!) "### `(doc-inc! x)`  *(macro)*\n\nAdd one.\n"))
+    (assert= (docs/docs--entry 'doc-inc! doc-inc!) "### `(doc-inc! x)`  *(macro)*\n\nAdd one.\n"))
   (test "an undocumented function gets a placeholder"
     (defn doc-bare (x) (* x x))
-    (assert= (docs--entry 'doc-bare doc-bare) "### `(doc-bare x)`\n\n_Undocumented._\n")))
+    (assert= (docs/docs--entry 'doc-bare doc-bare) "### `(doc-bare x)`\n\n_Undocumented._\n")))

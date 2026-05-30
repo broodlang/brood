@@ -28,7 +28,8 @@ TEA-style `(ui-run model view update display)` loop. Build an app by supplying a
 pure `view` (model + cols/rows → a render frame) and an `update` (model + input +
 cols/rows → model); set `:done` in the model to quit, `:tick-ms` to set the refresh
 beat. The observer and the coming editor are both `ui-run` clients — see
-`std/observer.blsp`.")
+`std/observer.blsp`."
+  (:use face))
 
 (require 'face)   ; the shared named-face / theme registry, for every ui-run client
 

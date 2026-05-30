@@ -194,14 +194,14 @@ pub fn source_location(interp: &mut Interp, name: &str) -> Option<SourceLoc> {
 }
 
 /// Every `.blsp` file the bootstrapped project owns — its sources plus its
-/// tests — by asking the Brood side `(project--all-files *project-root*)` (the
+/// tests — by asking the Brood side `(project/project--all-files *project-root*)` (the
 /// same set `check-project` walks). Empty when no project has been set up (e.g.
 /// a bare buffer outside a project, where `*project-root*` is unbound). Feeds
 /// the cross-file reference / rename sweep (ADR-031 §Cross-file): under the flat
 /// module model these files are the whole search space for a global.
 pub fn project_files(interp: &mut Interp) -> Vec<String> {
     let cp = interp.heap.checkpoint();
-    let out = match interp.eval_str("(project--all-files *project-root*)") {
+    let out = match interp.eval_str("(project/project--all-files *project-root*)") {
         Ok(v) => interp
             .heap
             .list_to_vec(v)
@@ -325,7 +325,7 @@ pub fn macroexpand_to_string(
 pub fn format_source(interp: &mut Interp, src: &str) -> Result<String, String> {
     let cp = interp.heap.checkpoint();
     let escaped = escape_brood_string(src);
-    let code = format!("(require 'format) (format-source \"{escaped}\")");
+    let code = format!("(require 'format) (format/format-source \"{escaped}\")");
     let result = match interp.eval_str(&code) {
         Ok(Value::Str(id)) => Ok(interp.heap.string(id).to_string()),
         Ok(_) => Err("format-source did not return a string".to_string()),
@@ -442,7 +442,7 @@ pub fn call_form(fn_name: &str, string_args: &[&str]) -> String {
 /// least the prelude), never panics. The policy lives in Brood; this is the
 /// thin typed seam Rust callers reach it through.
 pub fn load_tooling_image(interp: &mut Interp, root: &str) -> Result<(), String> {
-    let code = format!("(require 'project) {}", call_form("setup-tooling-image", &[root]));
+    let code = format!("(require 'project) {}", call_form("project/setup-tooling-image", &[root]));
     interp.eval_str(&code).map(|_| ()).map_err(|e| e.to_string())
 }
 

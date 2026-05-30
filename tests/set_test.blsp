@@ -9,8 +9,10 @@
 ;; explicit spawn/send/receive coverage (a set deep-copies across heaps as the
 ;; map it is).
 
-(require 'test)
-(require 'set)
+;; This test file is itself a namespace so it can `(:use set)` — referring set's
+;; functions (`set`/`conj`/`union`/…) bare, now that they live in the `set`
+;; namespace. The test framework is still root, so `(require 'test)` as before.
+(defmodule set-test (:use set) (:use test))
 
 ;; Tail-recursive [lo, hi) (the test body runs in a small-stack green process).
 (defn st-range (lo hi) (st-range--down (- hi 1) lo nil))
