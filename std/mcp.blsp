@@ -17,7 +17,9 @@ Args arrive as a *keyword-keyed* Brood map (JSON object keys become Brood
 keywords) — so `(get args :source)` is the idiomatic accessor. Handlers
 return Brood data (nil, bool, int, float, string, keyword/symbol,
 list/vector, map). Closures, refs, pids etc. can't be JSON-ified and surface
-as errors.")
+as errors."
+  (:use format)
+  (:use project))
 
 ;; ---- handlers --------------------------------------------------------------
 ;; Each handler is `(handler args-map) -> result-map`. Handlers `throw` on
@@ -56,7 +58,7 @@ error inside the user expression surfaces here as the `:error` branch."
 ;; Empty (and silent) outside a project. Best-effort — never raises.
 (defn mcp--shadows-for (file)
   (try
-    (let (root (project--find-root (cwd)))
+    (let (root (project/project--find-root (cwd)))
       (if (nil? root)
         nil
         (let (defined (project--file-def-names file))
@@ -214,6 +216,38 @@ exist?\" without guessing names one at a time."
     {:results (map (fn (pair) {:name (name (first pair)) :doc (second pair)})
                 (doc-search query))}))
 
+(defn mcp--bench-loop (form n)
+  "Eval `form` `n` more times for timing, discarding the results; returns nil."
+  (when (> n 0)
+    (eval form)
+    (mcp--bench-loop form (- n 1))))
+
+(defn mcp-bench-tool (args)
+  "`bench` — time evaluating `:source` in the session image. Runs it
+`:iterations` times (default 1) and returns `{:ms total :iterations n
+:per-iter-ms float :value pr-str-of-last-result}`. Resolution is the
+millisecond `now` clock, so time a sub-millisecond expression with a larger
+`:iterations` to amortise it. Side effects persist — it really runs the code,
+like `eval`. Returns `{:error msg}` on failure."
+  (let (src   (get args :source)
+        iters (or (get args :iterations) 1))
+    (when (not (string? src))
+      (throw "bench: :source must be a string"))
+    (when (not (and (int? iters) (> iters 0)))
+      (throw "bench: :iterations must be a positive integer"))
+    (try
+      (let (form  (read-string src)
+            t0    (now)
+            value (eval form)
+            _done (mcp--bench-loop form (- iters 1))
+            total (- (now) t0))
+        {:ms total
+         :iterations iters
+         :per-iter-ms (/ (* 1.0 total) iters)
+         :value (pr-str value)})
+      (catch e
+        {:error (mcp--error-shape e)}))))
+
 ;; ---- catalogue -------------------------------------------------------------
 
 (defn mcp-tools ()
@@ -223,10 +257,11 @@ its own list that conses additional entries onto this one — `def` rebinds
 globals (ADR-013), so the dispatcher sees the project's version on its next
 fetch.
 
-Twelve tools work today: the eight v0 tools, `callers` (cross-file
-find-references), and the three discovery tools `apropos` / `all-globals` /
+Thirteen tools work today: the eight v0 tools, `callers` (cross-file
+find-references), the three discovery tools `apropos` / `all-globals` /
 `doc-search` (search the flat namespace by name or docstring rather than
-looking up a name you already know)."
+looking up a name you already know), and `bench` (time an expression in the
+live image)."
   (list
     {:name "eval"
      :description "Evaluate a Brood expression in the session's global environment. State persists across calls (hot reload — `def` mutates the runtime image, ADR-013)."
@@ -292,7 +327,14 @@ looking up a name you already know)."
      :schema {:type "object"
               :properties {:query {:type "string" :description "Text to search for in docstrings"}}
               :required ["query"]}
-     :handler mcp-doc-search-tool}))
+     :handler mcp-doc-search-tool}
+    {:name "bench"
+     :description "Time evaluating a Brood expression in the session image. Runs it :iterations times (default 1) and returns {:ms :iterations :per-iter-ms :value}. Side effects persist (it really runs the code). Raise :iterations to amortise sub-millisecond expressions against the ms clock."
+     :schema {:type "object"
+              :properties {:source {:type "string" :description "Brood source to time"}
+                           :iterations {:type "integer" :description "How many times to run it (default 1); raise to amortise sub-ms expressions"}}
+              :required ["source"]}
+     :handler mcp-bench-tool}))
 
 ;; ---- project-defined extensions (step 5b) ---------------------------------
 ;; If the project root has its own `mcp.blsp`, load it now so it can:
@@ -305,7 +347,7 @@ looking up a name you already know)."
 ;; `nest mcp` startup, which is exactly when the agent's `.mcp.json` would
 ;; have wired it up — the right time for a hard error.
 (require 'project)
-(let (root (project--find-root (cwd)))
+(let (root (project/project--find-root (cwd)))
   (when root
     (let (project-mcp (path-join root "mcp.blsp"))
       (when (file-exists? project-mcp)

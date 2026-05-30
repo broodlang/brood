@@ -16,7 +16,8 @@ them. Comments inside a list force the multi-line shape; they're re-emitted on
 their own lines at the surrounding indent.
 
 Idempotency is a contract: `(= (format-source (format-source s)) (format-source s))`
-for every well-formed input. Hand-checked across the brood repo's std/ and tests/.")
+for every well-formed input. Hand-checked across the brood repo's std/ and tests/."
+  (:use project))
 
 ;; ---- knobs ------------------------------------------------------------------
 (def *format-width* 100)
@@ -614,7 +615,7 @@ not a known body form (defaults to call-style — every arg breaks)."
 
 (defn format--require-root ()
   (require 'project)
-  (let (root (project--find-root (cwd)))
+  (let (root (project/project--find-root (cwd)))
     (when (nil? root)
       (error "format: not in a Brood project (no project.blsp found from " (cwd) ")"))
     (project-setup root)

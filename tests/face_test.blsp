@@ -4,8 +4,7 @@
 ;; one process is visible in others (the shared-global rebind, like a theme set in
 ;; the REPL restyling a running observer).
 
-(require 'test)
-(require 'face)
+(defmodule face-test (:use test) (:use face))
 
 ;; These describes `def-face` into the shared global `*faces*`. Concurrent
 ;; `def`-rebinds of one global race (lost updates) — fine for real config-style

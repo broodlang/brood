@@ -154,5 +154,5 @@ Track separately; not needed for the sort or for typical programs.
 - Special forms: `eval/mod.rs:45` (`SPECIAL_IDS`), `builtins.rs:3437`
   (`SPECIAL_FORMS`, shared with the LSP).
 - Closures: `core/value.rs:394` (`ClosureArm`), `:423` (`Closure`).
-- Prior perf work: `docs/handoff-multi-arity.md` (ADR-047, multi-arity dispatch
-  — done; comparisons are no longer the floor, which is why this is next).
+- Prior perf work: ADR-047 (multi-arity dispatch — done; comparisons are no
+  longer the floor, which is why this is next).

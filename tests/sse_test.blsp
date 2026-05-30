@@ -2,40 +2,38 @@
 ;; functions (unit-tested directly); `with-events` (std/ui.blsp) merges pushed events
 ;; into a ui-run loop; and one end-to-end test streams frames from a loopback server.
 
-(require 'test)
-(require 'sse)
-(require 'ui)
+(defmodule sse-test (:use test) (:use sse) (:use ui))
 
 (describe "sse — pure event-field parsing"
   (test "parses event / data / id, stripping one space after the colon"
-    (let (ev (sse--parse-event "event: run_started\ndata: {\"id\":42}\nid: 7"))
+    (let (ev (sse/sse--parse-event "event: run_started\ndata: {\"id\":42}\nid: 7"))
       (assert= (get ev :event) "run_started")
       (assert= (get ev :data) "{\"id\":42}")
       (assert= (get ev :id) "7")))
   (test "multiple data lines join with a newline"
-    (assert= (get (sse--parse-event "data: a\ndata: b\ndata: c") :data) "a\nb\nc"))
+    (assert= (get (sse/sse--parse-event "data: a\ndata: b\ndata: c") :data) "a\nb\nc"))
   (test "missing type defaults to \"message\"; missing data to \"\""
-    (assert= (get (sse--parse-event "data: x") :event) "message")
-    (assert= (get (sse--parse-event "event: ping") :data) ""))
+    (assert= (get (sse/sse--parse-event "data: x") :event) "message")
+    (assert= (get (sse/sse--parse-event "event: ping") :data) ""))
   (test "comment lines (:-prefixed) are ignored"
-    (assert= (get (sse--parse-event ": keep-alive\ndata: y") :data) "y"))
+    (assert= (get (sse/sse--parse-event ": keep-alive\ndata: y") :data) "y"))
   (test "a value with no leading space is kept verbatim"
-    (assert= (get (sse--parse-event "data:tight") :data) "tight")))
+    (assert= (get (sse/sse--parse-event "data:tight") :data) "tight")))
 
 (describe "sse — frame splitting + line endings"
   (test "frames splits complete blocks from a trailing remainder"
-    (let ([blocks rest] (sse--frames "x: 1\n\ny: 2\n\nrest"))
+    (let ([blocks rest] (sse/sse--frames "x: 1\n\ny: 2\n\nrest"))
       (assert= blocks (list "x: 1" "y: 2"))
       (assert= rest "rest")))
   (test "no complete frame yet → no blocks, all remainder"
-    (let ([blocks rest] (sse--frames "partial data"))
+    (let ([blocks rest] (sse/sse--frames "partial data"))
       (assert= blocks '())
       (assert= rest "partial data")))
   (test "normalise turns \\r\\n and \\r into \\n"
-    (assert= (sse--normalize "a\r\nb\rc\nd") "a\nb\nc\nd"))
+    (assert= (sse/sse--normalize "a\r\nb\rc\nd") "a\nb\nc\nd"))
   (test "status reads the numeric code from a response head"
-    (assert= (sse--status "HTTP/1.1 200 OK\nContent-Type: text/event-stream") 200)
-    (assert= (sse--status "HTTP/1.1 404 Not Found") 404)))
+    (assert= (sse/sse--status "HTTP/1.1 200 OK\nContent-Type: text/event-stream") 200)
+    (assert= (sse/sse--status "HTTP/1.1 404 Not Found") 404)))
 
 (describe "with-events — merges [:sse …] into ui-run input"
   (test "a queued sse message is returned by :poll before the underlying display"

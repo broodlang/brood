@@ -118,16 +118,15 @@ fn is_require_form(heap: &Heap, form: Value) -> bool {
     false
 }
 
-/// A namespace header — `(ns …)` / `(defmodule …)` (checked on the *un-expanded*
-/// form, before its `(:use …)` clauses lower away). The checker evaluates it so
-/// the header's `(require …)`/`%refer`/`%in-ns` run — populating the import table
-/// — and a `(:use …)`-imported name then resolves instead of looking unbound.
+/// A namespace header — `(defmodule …)` (checked on the *un-expanded* form, before
+/// its `(:use …)` clauses lower away). The checker evaluates it so the header's
+/// `(require …)`/`%refer`/`%in-ns` run — populating the import table — and a
+/// `(:use …)`-imported name then resolves instead of looking unbound.
 fn is_ns_header(heap: &Heap, form: Value) -> bool {
     if let Value::Pair(p) = form {
         let (head, _) = heap.pair(p);
         if let Value::Sym(s) = head {
-            return crate::core::value::symbol_is(s, "ns")
-                || crate::core::value::symbol_is(s, "defmodule");
+            return crate::core::value::symbol_is(s, "defmodule");
         }
     }
     false

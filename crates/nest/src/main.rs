@@ -267,14 +267,14 @@ fn run_main(cli: Cli) {
             &args,
         ),
         Cmd::Doc { module, all } => cmd_doc(&mut interp, module.as_deref(), all),
-        Cmd::Fetch => run(&mut interp, "(require 'package) (fetch)"),
+        Cmd::Fetch => run(&mut interp, "(require 'package) (package/fetch)"),
         Cmd::Tree => run(&mut interp, "(require 'package) (tree)"),
         Cmd::Add { name, spec } => cmd_add(&mut interp, &name, &spec),
         Cmd::Remove { name } => {
             let escaped = brood::introspect::escape_brood_string(&name);
             run(
                 &mut interp,
-                &format!("(require 'package) (remove-dep \"{}\")", escaped),
+                &format!("(require 'package) (package/remove-dep \"{}\")", escaped),
             );
         }
         Cmd::Repl => cmd_repl(&mut interp),
@@ -322,15 +322,15 @@ fn cmd_test(interp: &mut Interp, files: &[String]) {
         // so a non-zero exit falls out of the eval error.
         run(
             interp,
-            "(require 'project) (load-config) (run-project-tests)",
+            "(require 'project) (project/load-config) (project/run-project-tests)",
         );
         return;
     }
     // Single-file path: mirror brood --test, but pre-load project image when
     // we're inside a project so cross-module names resolve.
     let bootstrap = if in_project() {
-        "(require 'project) (load-config) (let (root (project--find-root (cwd))) \
-            (when root (project-setup root) (project-load-sources root))) \
+        "(require 'project) (project/load-config) (let (root (project/project--find-root (cwd))) \
+            (when root (project/project-setup root) (project/project-load-sources root))) \
             (require 'test)"
     } else {
         "(require 'test)"
@@ -352,7 +352,7 @@ fn cmd_test(interp: &mut Interp, files: &[String]) {
     // `:trace` prints each test's name as it starts (live progress) — wanted for the
     // interactive `nest test`; the `brood --test` path stays quiet for clean,
     // machine-parseable output.
-    run(interp, "(run-tests :trace)");
+    run(interp, "(test/run-tests :trace)");
 }
 
 /// `nest check [FILES...]` — project-wide if no files, otherwise file-by-file.
@@ -360,7 +360,7 @@ fn cmd_check(interp: &mut Interp, files: &[String]) {
     if files.is_empty() {
         let v = run_for_value(
             interp,
-            "(require 'project) (load-config) (require 'test) (check-project)",
+            "(require 'project) (project/load-config) (require 'test) (project/check-project)",
         );
         match v {
             brood::core::value::Value::Int(0) => {}
@@ -420,7 +420,7 @@ fn cmd_new(interp: &mut Interp, name: &str, template: Option<&str>) {
         None => String::new(),
     };
     let code = format!(
-        "(require 'project) (load-config) (new-project \"{}\"{})",
+        "(require 'project) (project/load-config) (new-project \"{}\"{})",
         escaped, tmpl_arg
     );
     run(interp, &code);
@@ -429,12 +429,12 @@ fn cmd_new(interp: &mut Interp, name: &str, template: Option<&str>) {
 /// `nest format [--check]` — reformat in place, or dry-run on `--check`.
 fn cmd_format(interp: &mut Interp, check: bool) {
     let entry = if check {
-        "(format-project-check)"
+        "(format/format-project-check)"
     } else {
-        "(format-project)"
+        "(format/format-project)"
     };
     let code = format!(
-        "(require 'project) (load-config) (require 'format) {}",
+        "(require 'project) (project/load-config) (require 'format) {}",
         entry
     );
     run(interp, &code);
@@ -524,7 +524,7 @@ fn cmd_run(
     let wrap = !watch.is_empty() || timed.is_some();
     let run_form: String = match file {
         // No FILE: run the project's :main via std/project.blsp.
-        None => format!("(run-project (list {}))", escaped_args),
+        None => format!("(project/run-project (list {}))", escaped_args),
         // FILE: run that file. Inside a project, set up the project so its
         // `src/` is on `*load-path*` (the file can `(require 'foo)` other
         // project modules), but *don't* eager-load every source — otherwise a
@@ -541,7 +541,7 @@ fn cmd_run(
     // silently (the silent-wrong-result lesson from the Game-of-Life retro).
     let main_override = match (main, file.is_none()) {
         (Some(spec), true) => format!(
-            "(set-project-main \"{}\") ",
+            "(project/set-project-main \"{}\") ",
             brood::introspect::escape_brood_string(spec)
         ),
         (Some(_), false) => {
@@ -551,11 +551,11 @@ fn cmd_run(
         (None, _) => String::new(),
     };
     let project_setup = if file.is_none() {
-        format!("(require 'project) (load-config) {}", main_override)
+        format!("(require 'project) (project/load-config) {}", main_override)
     } else if in_project() {
-        "(require 'project) (load-config) \
-         (let (root (project--find-root (cwd))) \
-           (when root (project-setup root))) "
+        "(require 'project) (project/load-config) \
+         (let (root (project/project--find-root (cwd))) \
+           (when root (project/project-setup root))) "
             .to_string()
     } else {
         String::new()
@@ -619,7 +619,7 @@ fn cmd_doc(interp: &mut Interp, module: Option<&str>, all: bool) {
                 "(require 'docs) {}",
                 brood::introspect::call_form("generate-docs", &[name])
             ),
-            None => "(require 'docs) (generate-docs)".to_string(),
+            None => "(require 'docs) (docs/generate-docs)".to_string(),
         }
     };
     run(interp, &code);
@@ -629,14 +629,14 @@ fn cmd_doc(interp: &mut Interp, module: Option<&str>, all: bool) {
 /// file so the project's modules are immediately callable from the prompt.
 /// Outside a project, fall through to the plain language REPL (same UX as
 /// `brood`). The REPL itself is Brood (`std/repl.blsp`, ADR-048) — one
-/// implementation both binaries bootstrap into via `(repl-run)`.
+/// implementation both binaries bootstrap into via `(repl/repl-run)`.
 fn cmd_repl(interp: &mut Interp) {
     if in_project() {
         run(
             interp,
-            "(require 'project) (load-config) \
-             (let (root (project--find-root (cwd))) \
-               (when root (project-setup root) (project-load-sources root)))",
+            "(require 'project) (project/load-config) \
+             (let (root (project/project--find-root (cwd))) \
+               (when root (project/project-setup root) (project/project-load-sources root)))",
         );
         eprintln!("nest repl — project sources loaded; Ctrl-D to exit");
     } else {
@@ -649,7 +649,7 @@ fn cmd_repl(interp: &mut Interp) {
     // (restoring) before any error report + exit (`process::exit` skips Drop).
     let result = {
         let _guard = ReplTermGuard;
-        interp.eval_str("(require 'repl) (repl-run)")
+        interp.eval_str("(require 'repl) (repl/repl-run)")
     };
     if let Err(e) = result {
         report_error(&e);
@@ -664,8 +664,8 @@ fn cmd_mcp(interp: &mut Interp) {
     // test/format frameworks — so the two servers can't drift on its contents.
     let bootstrap = r#"
         (require 'project)
-        (load-config)
-        (let (root (project--find-root (cwd)))
+        (project/load-config)
+        (let (root (project/project--find-root (cwd)))
           (when (nil? root)
             (error "nest mcp: not in a Brood project (no project.blsp found from " (cwd) ")"))
           (setup-tooling-image root))

@@ -6,8 +6,7 @@
 ;;
 ;; Register-only — discovered and run by `nest test` (and cargo test).
 
-(require 'test)
-(require 'package)
+(defmodule package-test (:use test) (:use package) (:use project))
 
 ;; Build a throwaway project dir `<tmp>/<name>` with a manifest + one src module.
 ;; `deps-vec` is a literal :dependencies vector string (or nil for none).
@@ -44,14 +43,14 @@
     (let (root (pkg-fixture-root))
       (pkg-write-project root "a" "a" "(defn f () 1)"
         " :dependencies [[b :path \"../b\"]]")
-      (assert= (package--manifest-deps (path-join root "project.blsp"))
+      (assert= (package/package--manifest-deps (path-join root "project.blsp"))
         (list {:name 'b :kind :path :path "../b"}))))
   (test "a manifest without :dependencies yields nil"
     (let (root (pkg-fixture-root))
       (pkg-write-project root "a" "a" "(defn f () 1)" "")
-      (assert= (package--manifest-deps (path-join root "project.blsp")) nil)))
+      (assert= (package/package--manifest-deps (path-join root "project.blsp")) nil)))
   (test "a missing manifest yields nil"
-    (assert= (package--manifest-deps "/tmp/does-not-exist-xyz/project.blsp") nil)))
+    (assert= (package/package--manifest-deps "/tmp/does-not-exist-xyz/project.blsp") nil)))
 
 (describe "package: resolving :path deps"
   (test "a single path dep resolves to an entry with name/kind/path/sha/deps"
@@ -138,30 +137,30 @@
 (describe "package: editing the manifest"
   (test "add creates a :dependencies clause and preserves comments"
     (let (src "(project :name \"app\" :version \"0.1.0\")\n\n;; a keeper comment\n"
-          out (package--manifest-add src
-                (package--dep->entry-node {:name 'greeter :kind :path :path "../greeter"})))
+          out (package/package--manifest-add src
+                (package/package--dep->entry-node {:name 'greeter :kind :path :path "../greeter"})))
       (is (string-contains? out "a keeper comment"))
       (let (form (read-string out))
-        (assert= (project--parse-deps (plist-get (rest form) :dependencies))
+        (assert= (project/project--parse-deps (plist-get (rest form) :dependencies))
           (list {:name 'greeter :kind :path :path "../greeter"})))))
   (test "add appends to an existing :dependencies"
     (let (src "(project :name \"app\" :dependencies [[a :path \"../a\"]])\n"
-          out (package--manifest-add src
-                (package--dep->entry-node {:name 'b :kind :path :path "../b"})))
+          out (package/package--manifest-add src
+                (package/package--dep->entry-node {:name 'b :kind :path :path "../b"})))
       (let (form (read-string out))
-        (assert= (map (fn (d) (get d :name)) (project--parse-deps (plist-get (rest form) :dependencies)))
+        (assert= (map (fn (d) (get d :name)) (project/project--parse-deps (plist-get (rest form) :dependencies)))
           (list 'a 'b)))))
   (test "remove drops the named dep, keeps the rest and comments"
     (let (src "(project :name \"app\"\n  :dependencies [[a :path \"../a\"] [b :path \"../b\"]])\n;; keep me\n"
-          out (package--manifest-remove src 'a))
+          out (package/package--manifest-remove src 'a))
       (is (string-contains? out "keep me"))
       (let (form (read-string out))
-        (assert= (map (fn (d) (get d :name)) (project--parse-deps (plist-get (rest form) :dependencies)))
+        (assert= (map (fn (d) (get d :name)) (project/project--parse-deps (plist-get (rest form) :dependencies)))
           (list 'b)))))
   (test "remove of the only dep leaves an empty :dependencies"
     (let (src "(project :name \"app\" :dependencies [[a :path \"../a\"]])\n"
-          out (package--manifest-remove src 'a))
-      (assert= (project--parse-deps (plist-get (rest (read-string out)) :dependencies)) nil))))
+          out (package/package--manifest-remove src 'a))
+      (assert= (project/project--parse-deps (plist-get (rest (read-string out)) :dependencies)) nil))))
 
 ;; The `fetch`/`tree` verbs themselves are cwd-driven (they walk from `(cwd)` to a
 ;; project root), so — like `run-project` — they can't be isolated from the brood
@@ -169,13 +168,13 @@
 ;; scaffolded project. Here we cover their pure, cwd-free helpers.
 (describe "package: tree helpers"
   (test "dep-label renders a path dep"
-    (assert= (package--dep-label {:name 'shared :kind :path :path "../shared"})
+    (assert= (package/package--dep-label {:name 'shared :kind :path :path "../shared"})
       "shared  (path \"../shared\")"))
   (test "dep-label renders a git dep"
-    (assert= (package--dep-label {:name 'p :kind :git :url "https://x.git" :ref "v1"})
+    (assert= (package/package--dep-label {:name 'p :kind :git :url "https://x.git" :ref "v1"})
       "p  (git https://x.git @ v1)"))
   (test "index-by-name keys resolved entries by their name"
-    (let (idx (package--index-by-name
+    (let (idx (package/package--index-by-name
                 (list {:name 'a :kind :path :path "../a" :deps nil}
                       {:name 'b :kind :path :path "../b" :deps nil})))
       (assert= (get (get idx 'a) :path) "../a")
@@ -195,4 +194,5 @@
       (let (dirs (ensure-deps app-dir (list {:name 'greeter :kind :path :path "../greeter"})))
         (def *load-path* (append *load-path* dirs))
         (require 'greeter)
-        (assert= (greet "you") "hi you")))))
+        ;; greeter is a `(defmodule greeter)`, so its `greet` is `greeter/greet`
+        (assert= (greeter/greet "you") "hi you")))))

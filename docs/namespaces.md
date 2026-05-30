@@ -1,20 +1,23 @@
 # Namespaces — design
 
-> **Status:** increments 1–2 landed (2026-05-30). Inc-1: the resolution substrate
-> (`(ns …)`, resolver pass, forward-ref pre-scan, def-site keying, ns-aware checker).
-> Inc-2: **`(:use …)` imports + auto-require** — `(:use mod)` refers a module's
-> public names bare, `(:use mod :refer [a b])` a subset; the resolver consults the
-> per-file import table after the current namespace and before root. Decision in
-> [ADR-065](decisions.md). Supersedes [ADR-019](decisions.md).
+> **Status:** increments 1–3 + α landed (2026-05-30). Inc-1: the resolution substrate
+> (resolver pass, forward-ref pre-scan, def-site keying, ns-aware checker). Inc-2:
+> **`(:use …)` imports + auto-require** — `(:use mod)` refers a module's public names
+> bare, `(:use mod :refer [a b])` a subset; the resolver consults the per-file import
+> table after the current namespace and before root. Inc-3 (**the big-bang**):
+> `defmodule` **is** the single namespace form — `ns` was dropped, a module *is* a
+> namespace — and all of `std/` + every test file were migrated in one pass
+> (leaf-out, with `test` itself namespaced + `(:use test)` added). **α** (§7) shipped
+> in the same pass: the quasiquote walker auto-qualifies free template references to
+> the defining namespace, so macros are robust across namespaces without hand-
+> qualifying. Decisions in [ADR-065](decisions.md) (namespaces) and
+> [ADR-066](decisions.md) (auto-gensym). Supersedes [ADR-019](decisions.md).
 >
-> **Locked decisions not yet executed:** `defmodule` becomes the *single* namespace
-> form and `ns` is dropped (a module **is** a namespace); ubiquitous DSLs like the
-> test framework are namespaced + imported Clojure-style (`(:use test)`). This is
-> the **next phase** (the `ns`→`defmodule` rename + migrating `std/` module-by-module
-> + the 42 test files), gated on inc-2 imports (which now exist). Still open after
-> that: macro free-reference resolution (§7, **α**), the ns-aware *import* checker
-> (imported names currently draw advisory unbound warnings), LSP Tier 2, and package
-> ns-collision policy (§8).
+> **Still open:** LSP Tier 2 (§6 — refs/rename/semantic tokens over the shared
+> resolver) and package ns-collision policy (§8). Both are additive and don't touch
+> the substrate. The earmuff rule (`*foo*` names are ambient/root, never namespaced)
+> is the one resolution refinement the big-bang added beyond the inc-1 design — it
+> keeps `*load-path*`/`*features*`/`defdyn` vars reachable unqualified from any ns.
 
 This doc is the design backing for namespaces in Brood. It follows the spectrum
 ADR-019 laid out and commits to the *substrate* (how resolution works) while
@@ -80,14 +83,14 @@ today with zero core change.
 We therefore implement **the entire Clojure/CL surface as an expand-time rewrite
 over the existing flat table** — the core never grows a namespace axis:
 
-- `(ns observer …)` sets the **current namespace** — a **per-process `Heap`
-  field** (`compile_ns: Option<Symbol>`, set by the `%in-ns` primitive the `ns`
-  macro emits), *not* a shared global. A global would race across green processes
-  (`RuntimeCode` is shared); the per-process field mirrors the existing
+- `(defmodule observer …)` sets the **current namespace** — a **per-process `Heap`
+  field** (`compile_ns: Option<Symbol>`, set by the `%in-ns` primitive the
+  `defmodule` macro emits), *not* a shared global. A global would race across green
+  processes (`RuntimeCode` is shared); the per-process field mirrors the existing
   `current_file` slot and `dynamics` stack. File/module loaders (`load`,
   `%load-string`, `eval_source`) reset it to root per file and restore the
   caller's after; the interactive `eval-string` path leaves it **sticky** so a
-  REPL `(ns foo)` persists across entries. One `ns` per file (inc-1).
+  REPL `(defmodule foo)` persists across entries. One `defmodule` per file.
 - Inside it, `(defn observe …)` defines the full symbol **`observer/observe`** in
   the one shared global table.
 - A **resolver pass** maps reference-position symbols at expand time:
@@ -195,11 +198,11 @@ Everything LSP Tier 2 wants is blocked by flatness and unlocked by namespaces,
   resolving to the *definition* site's binding, not the use site's). This is the
   one namespacing creates, and it's the open question below.
 
-### OPEN — free-reference resolution forces a quasiquote decision
+### DONE — α: free-reference resolution via auto-qualifying quasiquote
 
-Binding capture (#2) is handled (auto-gensym, above). But **free** references in a
-macro template are still resolved as plain symbols, and with use-site expand-time
-rewriting that breaks across namespaces:
+Binding capture (#2) is handled (auto-gensym, above). The remaining hazard was that
+**free** references in a macro template would resolve as plain symbols, and with
+use-site expand-time rewriting that breaks across namespaces:
 
 ```clojure
 (ns a)
@@ -215,26 +218,19 @@ template symbols to the macro's *defining* namespace** (`` `helper `` reads as
 `a/helper` at definition time), so macro output is already correct and needs no
 use-site resolution.
 
-- **Option α — Clojure-style auto-qualifying quasiquote.** Make `quasiquote`
-  qualify reference-position symbols to the current `*ns*`, with an escape (`~'foo`
-  → emit a bare symbol). Macros become robust across namespaces for free; gensym
-  shrinks to true fresh locals. **Cost:** changes what `` `foo `` *means*
-  (now `ns/foo`); every `std/` template must be audited (most reference prelude /
-  root names, which stay reachable unqualified). Also fixes resolution *order*:
-  syntax-quote resolves at macro-body expand time, so the use-site pass only
-  handles names the author wrote bare — clean.
-- **Option β — stay unhygienic.** Quasiquote emits bare names; macro authors
-  hand-qualify cross-ns refs (`` `(a/helper ~x) ``). Zero quasiquote change, but
-  every cross-ns macro becomes a latent capture bug — exactly when packages
-  (multi-ns) arrive.
-
-**Lean: α**, *because* we're shipping packages — third-party macros expanding in
-your namespaces is the common case, and β makes each one a sharp edge. α is the
-larger semantic change of the two namespacing pieces; it interacts with the
-ADR-064 "quasiquote → Brood" deferred refactor and must be decided deliberately.
-Note α is *only* concern #1 (qualify free refs at def time) — concern #2
-(auto-gensym) is already done (ADR-066), so α is narrower than it first appears.
-**Left open.**
+**Chosen and shipped: α — Clojure-style auto-qualifying quasiquote.** The resolver
+now descends quasiquote templates (`resolve_list` skips only `quote`, not
+`quasiquote`) and qualifies reference-position symbols to the *defining* namespace's
+`compile_ns` at macro-definition time. So `` `(helper ~x) `` in namespace `a` reads
+as `` `(a/helper ~x) ``; the expansion is already correct and the use-site pass only
+handles names the author wrote bare. The escape is `` `(quote foo) `` / a plain
+`'foo` for a bare data symbol; `~expr` (unquote) is ordinary code and resolves
+normally; the **earmuff rule** keeps `*ambient*` names bare. Root/prelude names
+referenced from a template stay reachable unqualified (resolution falls through to
+root). This was implemented in the same big-bang pass as the migration — without it,
+namespaced macros like `test/describe` emitting bare helper calls broke in consumer
+namespaces (the β-interim wall). β (hand-qualify every cross-ns ref) was rejected:
+with packages shipping third-party macros, it makes every macro a latent capture bug.
 
 ## 8. OPEN — namespace-name collision moves up a level
 
@@ -297,20 +293,23 @@ the lock file stays computable. Auto-require collapses `require`+`use` for code 
    `(require …)` so it auto-loads (loads-but-never-fetches, §9). Own-namespace defs
    shadow imports. Tested: refer-all, subset, private excluded, own-ns precedence,
    cross-process.
-3. 🟡 **Unify `defmodule` = namespace; migrate `std/`** (in progress).
-   - ✅ **Import-aware checker** — `check_file` now evals the `(ns …)`/`(defmodule …)`
-     header so `(:use …)` imports populate; imported names no longer draw advisory
-     unbound warnings.
-   - ✅ **First leaf migrated** — `std/set.blsp` is now `(ns set)`; its functions are
-     `set/union` etc.; `tests/set_test.blsp` became `(ns set-test (:use set))`. Proves
-     the pattern: `defmodule X` → `ns X`, consumers `(:use X)` (or qualify).
-   - ⬜ Remaining: migrate the other ~27 modules (leaf-out), namespace `test` + add
-     `(:use test)` to the 42 test files, then the **final unify** — rename the `ns`
-     macro to `defmodule`, drop `ns`, and update the formatter/docs/scaffold tooling
-     that hard-codes `defmodule` (once no root `defmodule` remains).
-4. ⬜ **Hygiene — α (§7)** — auto-qualifying quasiquote + `~'` escape + `std/`
-   macro audit; coordinate with the ADR-064 quasiquote-to-Brood refactor. Needed
-   once std *macros* live in namespaces and are used across them.
+3. ✅ **Unify `defmodule` = namespace; migrate `std/` (the big-bang).**
+   - **Import-aware checker** — `check_file` evals the `(defmodule …)` header so
+     `(:use …)` imports populate; imported names no longer draw advisory unbound
+     warnings.
+   - **`defmodule` *is* the namespace form** — the `ns` macro was renamed to
+     `defmodule` and `ns` dropped; `defmodule` parses `(:use …)` clauses, emits
+     `%in-ns` + `provide`, and keeps `*module-docs*`. No root `defmodule` remains.
+   - **All `std/` migrated leaf-out** — every module is `(defmodule X (:use …))`;
+     cross-module references are qualified or imported. `test` itself is namespaced,
+     so the 40+ test files declare `(defmodule x-test (:use test) …)`. Special cases
+     handled: keymap/dispatch tables hold hand-qualified quoted handler symbols
+     (`'lineedit/…`); the `project` manifest is read as **data** (not a namespaced
+     macro call); circular `:use` (project↔package) broken via lazy `package/…`.
+4. ✅ **Hygiene — α (§7)** — auto-qualifying quasiquote shipped in the big-bang
+   (resolver descends quasiquote, qualifies free template refs to the defining ns,
+   earmuff names stay bare). Coordinates cleanly with the ADR-064 quasiquote-to-Brood
+   refactor (resolution is a separate pass over the expanded tree).
 5. ⬜ **LSP Tier 2 (§6)** — ns→file index, scoped completion, go-to-def, rename,
    over the *shared* resolver (§4); make `mcp--shadows-for` ns-aware.
 6. ⬜ **Package integration (§8)** — ns-name disambiguation against ADR-037.

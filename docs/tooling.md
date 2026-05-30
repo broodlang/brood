@@ -183,6 +183,32 @@ whole loop (not just its pure functions) be exercised, and makes time-based
 behaviour — e.g. a memory-growth check — reproducible in CI without a manual
 `timeout`.
 
+### Proposed: assertable TUI frames (`nest run --snapshot N`)
+
+**Status: not built — design note.** `--for` lets a TUI *run*, but its output
+still isn't *assertable*: today the only way to verify an animation is to drop to
+the shell and byte-grep the escapes
+(`nest run --for 600ms 2>&1 | cat -v | grep -oE '\^\[\[[0-9;]*[A-Za-z]'`). That's
+the one place the otherwise-tight feedback loop falls back to shell archaeology,
+and it's invisible to `nest test` and to the MCP eval loop.
+
+The fix is a headless **frame-capture** mode: `nest run --snapshot N` renders the
+first `N` frames to a plaintext file — either escapes resolved into a character
+grid, or a structured dump of the display-protocol render ops (`std/display.blsp`)
+— so a frame becomes a value you can assert on: `(assert= frame expected)`. Two
+payoffs:
+
+1. **Testable TUIs.** A render loop's output stops being "eyeball the bytes" and
+   becomes a fixture in a `tests/*_test.blsp` file.
+2. **An MCP `run-frame` tool.** A "render one frame to a string" entry point lets
+   an agent exercise an animation's output over MCP without the CLI detour — and
+   it rewards structuring code so the pure frame-builder is separable from the
+   blocking loop (the right shape anyway).
+
+This belongs with the M3 display protocol (`std/display.blsp` is the natural seam
+— a snapshot is just "run the render ops against a string backend instead of the
+terminal"). Pairs with a `verify-tui` skill once the entry point exists.
+
 ## Formatting source: `nest format`
 
 `nest format` rewrites every `.blsp` under the project's source + test paths in

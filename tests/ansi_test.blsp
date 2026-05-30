@@ -2,8 +2,7 @@
 ;; are pure string builders (no terminal needed), so the suite exercises them
 ;; directly. Register-only — discovered and run by `nest test` / cargo test.
 
-(require 'test)
-(require 'ansi)
+(defmodule ansi-test (:use test) (:use ansi))
 
 (describe "ansi escape strings"
   (test "clear-screen / home / clear are the expected escapes"

@@ -7,8 +7,7 @@
 ;; supervisor restarts it, a *new* incarnation reports `[:up …]` with a fresh
 ;; pid. A `(receive … (after ms :none))` proves the *absence* of a restart.
 
-(require 'test)
-(require 'supervisor)
+(defmodule supervisor-test (:use test) (:use supervisor))
 
 ;; A child spec whose worker announces itself to `to`, then waits. `:die` makes
 ;; it crash (abnormal exit); `:done` makes it return cleanly (`:normal` exit).

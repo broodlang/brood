@@ -10,7 +10,7 @@
 ;; under contention, no leak into a child, and survival when one process crashes
 ;; mid-`binding`.
 
-(require 'test)
+(defmodule dynamic-test (:use test))
 
 ;; ---- file-local fixtures (defined once at load; survive :isolated rollback) ----
 

@@ -10,7 +10,7 @@
 ;; `is` / `refute` for boolean predicates. Each failure names the source
 ;; expression that failed, so the report is self-explanatory.
 
-(require 'test)
+(defmodule suite-test (:use test))
 
 (describe "arithmetic"
   (test "addition" (assert= (+ 1 2 3) 6) (assert= (+ 1 (* 2 3)) 7))
@@ -207,7 +207,7 @@
     (assert= (error-of (1 2 3)) "type error: cannot call non-function: 1"))
   (test "arity errors name the fn, the expected count, and what arrived"
     (defn one-arg (x) x)
-    (assert= (error-of (one-arg 1 2)) "arity error: one-arg: expected 1 argument, got 2")
+    (assert= (error-of (one-arg 1 2)) "arity error: suite-test/one-arg: expected 1 argument, got 2")
     (assert= (error-of ((fn (a b) a) 1)) "arity error: fn: expected 2 arguments, got 1")
     (assert= (error-of (cons 1)) "arity error: cons: expected 2 arguments, got 1"))
   (test "built-ins enforce their declared arity (no silent extra/missing args)"

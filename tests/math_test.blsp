@@ -4,7 +4,7 @@
 ;; ops on multiple cores; the final :isolated block adds explicit spawn/send/
 ;; fan-in coverage. Register-only — discovered and run by `nest test` / cargo test.
 
-(require 'test)
+(defmodule math-test (:use test))
 
 ;; sqrt is Brood (Newton's method), so it's approximate — compare within epsilon.
 (defn mth-approx? (a b) (< (abs (- a b)) 1e-9))

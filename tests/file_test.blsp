@@ -3,8 +3,7 @@
 ;;
 ;; Register-only — discovered and run by `nest test` (and cargo test).
 
-(require 'test)
-(require 'file)
+(defmodule file-test (:use test) (:use file))
 
 ;; A fresh /tmp dir per call. The name must be unique **across runs**, not just
 ;; within one: `gensym`'s counter resets every process/run, so a name like

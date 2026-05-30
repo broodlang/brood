@@ -6,7 +6,7 @@
 ;;; binding that can neither capture nor be captured by the caller's code,
 ;;; without a manual `(gensym)`. See `eval::macros::maybe_autogensym`.
 
-(require 'test)
+(defmodule autogensym-test (:use test))
 
 ;; Two occurrences of `a#` in ONE expansion -> one symbol; the quoted list it
 ;; builds therefore has two equal elements.
