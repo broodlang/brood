@@ -70,6 +70,13 @@ webpki-roots = "1"
 
 # The optional `gui` frontend's stack (see the [features] note above). All three
 # are pulled in only with `--features gui`; a default build links none of them.
+# COUPLING: winit and softbuffer must agree on a `raw-window-handle` version —
+# softbuffer's `Surface<D, W>` is generic over the window-handle types winit's
+# `Window` provides. winit 0.30 + softbuffer 0.4 both speak raw-window-handle 0.6.
+# When bumping winit's *major*, bump softbuffer to a version on the same rwh line,
+# else the surface won't accept the window. (winit majors also rewrite the
+# event-loop API — the migration surface is `GuiApp` + `build_window` in gui.rs.)
+# `make clippy` lints `--all-features`, so a mismatch is caught at the gate.
 winit = { version = "0.30", optional = true }
 softbuffer = { version = "0.4", optional = true }
 fontdue = { version = "0.9", optional = true }

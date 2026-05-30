@@ -37,11 +37,6 @@ impl MailboxSink {
     pub fn emit(&self, msg: Message) {
         deliver(self.subscriber.load(Ordering::Relaxed), msg);
     }
-
-    /// The local pid of the subscriber this sink currently feeds.
-    pub fn subscriber(&self) -> u64 {
-        self.subscriber.load(Ordering::Relaxed)
-    }
 }
 
 /// A handle to retarget a running source's subscriber — e.g. to hand an accepted

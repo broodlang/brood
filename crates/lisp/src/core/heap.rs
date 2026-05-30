@@ -292,17 +292,6 @@ struct PoisonBits {
 
 #[cfg(debug_assertions)]
 impl PoisonBits {
-    /// Mark/clear one slot — `poisoned == true` after sweep frees it, `false`
-    /// when an allocation reuses it. The Vec auto-grows so callers don't have
-    /// to size it eagerly (sweep resizes once before its loop; alloc paths
-    /// just write the bit they own).
-    fn set(bits: &mut Vec<bool>, idx: usize, poisoned: bool) {
-        if idx >= bits.len() {
-            bits.resize(idx + 1, false);
-        }
-        bits[idx] = poisoned;
-    }
-
     /// Is `idx` currently poisoned? Out-of-range answers `false` — a slot we
     /// never sized for can't have been freed by sweep.
     fn is(bits: &[bool], idx: usize) -> bool {
