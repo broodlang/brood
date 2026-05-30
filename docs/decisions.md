@@ -2434,23 +2434,31 @@ kernel's `[:down ref pid reason]`. **No new kernel surface** — this is the
 mechanism-in-Rust / policy-in-Brood rule (ADR-006) applied to fault tolerance,
 and it adds *zero* scheduler-race surface, the decisive property after KI-1.
 
-**Scope (ADR-011 — ship the simple form, defer the powerful one).**
-- **Strategy: `:one-for-one` only.** `:one-for-all` / `:rest-for-one` must
-  *terminate healthy siblings* on a sibling's death. Brood has **no kill/exit
-  primitive** (no links, no `exit`), so they cannot be expressed in userland;
-  `start-supervisor` rejects them rather than silently degrading.
+**Scope.**
+- **All three strategies ship** (update 2026-05-30, once `exit/2` landed —
+  ADR-063): `:one-for-one`, `:one-for-all`, `:rest-for-one`. The group strategies
+  must *terminate healthy siblings* on a sibling's death; the `(exit pid :kill)`
+  primitive (untrappable hard kill, fires the target's `[:down]`) supplies exactly
+  that, and `receive` being selective lets the supervisor drain just the killed
+  sibling's `[:down]` so a deliberate kill isn't mistaken for a crash. The crashed
+  child's `:restart` type gates whether the procedure runs; within a group restart
+  each member is restarted only if its own type permits (`:temporary` → terminated
+  and dropped). *Originally `:one-for-one`-only* — the group strategies were
+  deferred for want of a kill primitive (ADR-011); that deferral is now closed.
 - **Restart types:** `:permanent` (always), `:transient` (only on abnormal exit,
   reason ≠ `:normal`), `:temporary` (never).
 - **Restart intensity:** `:max-restarts` within `:max-seconds` (defaults 3/5);
   exceeding it exits the supervisor abnormally so a watcher's monitor fires.
 - **Introspection:** `(which-children sup)` → `[{:id :pid :restart}]`.
+- **Still deferred (ADR-011):** `link`/bidirectional exit propagation and a
+  `:shutdown` grace-timeout escalation (group kills use the hard `:kill`); nested
+  supervision trees as a first-class concept (a child whose `:start` spawns a
+  supervisor already composes as a sub-tree).
 
 **Consequences.**
-- The two deferrals share one root cause — the missing kill/exit primitive — and
-  become the concrete trigger for the *one* kernel hook supervision might later
-  justify (a minimal `exit`/link). Until then, `stop-supervisor` ends the
-  supervisor but leaves children running (orphaned), and an intensity shutdown
-  orphans survivors rather than terminating them. Documented, not hidden.
+- `stop-supervisor` and an intensity-exceeded shutdown both **terminate the
+  children** now (no orphans) — the same `(exit … :kill)`. (Pre-`exit/2` they left
+  children running; that limitation is gone.)
 - A child spec carries a `:start` *closure* (`(fn () (spawn …))`), shipped across
   the spawn boundary by the closure-as-data path (ADR-033); restart re-invokes it
   for a from-scratch incarnation.
