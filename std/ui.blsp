@@ -131,16 +131,28 @@ event feed). Requires `(require 'sse)` on the producing side."
   "The poll timeout (refresh beat) in ms: `(get model :tick-ms)` or 1000 by default."
   (or (get model :tick-ms) 1000))
 
+(defn quit-request? (input)
+  "True if `input` is a window-close request (`:close`) — the frontend (the GUI's X
+button) asking the app to quit, as distinct from the Escape *key* (`:escape`).
+`ui-run` already quits on `:close` for you; reach for this only in a hand-rolled
+`receive` loop (one not built on `ui-run`) so the X button closes the window
+alongside whatever quit keys you bind — e.g. `(:close :quit)` next to your own."
+  (= input :close))
+
 (defn ui--loop (model view update display)
   "The inner recursion of `ui-run` (own function so each turn is a proper tail call —
 O(1) stack). Renders, polls, folds the input, recurses; stops when `:done` (the
-caller, `ui-run`, runs `:leave` in all cases)."
+caller, `ui-run`, runs `:leave` in all cases). A `:close` input (the window's X
+button) always quits, so every `ui-run` app is closeable by its close button without
+wiring it into `update` — independent of how the app binds the Escape key."
   (if (get model :done)
     nil
     (let ([cols rows] ((get display :size)))
       ((get display :draw) (view model cols rows))
       (let (input (or ((get display :poll) (ui--tick-ms model)) :tick))
-        (ui--loop (update model input cols rows) view update display)))))
+        (if (quit-request? input)
+          nil   ; the window's close button always quits; `ui-run` then runs `:leave`
+          (ui--loop (update model input cols rows) view update display))))))
 
 (defn ui-run (model view update display)
   "Run a UI app over `display` (a frontend map): enter it, then loop —
@@ -150,6 +162,13 @@ key/mouse value (`\"a\"`, `:up`, `[:mouse …]`), or `:tick` on the poll timeout
 refresh beat, `(model :tick-ms)` or 1000 ms). `view` is pure (model + size → a
 `display.blsp` render frame); `update` folds an input into the next model and sets
 `:done` to quit.
+
+**The window's close button (the X) always quits.** A GUI frontend delivers it as
+a `:close` input (distinct from the Escape *key*, `:escape`), and `ui-run` treats
+`:close` as an immediate quit — before `update` even sees it — then runs `:leave`.
+So every app is closeable by its X button for free, no matter how it binds Escape
+(an editor binds Escape to cancel/normal-mode, not quit). Intercepting `:close` to
+prompt first (\"unsaved changes\") is a deferred power feature (ADR-011).
 
 **Teardown is guaranteed.** `:leave` runs on a normal quit *and* if `view`/`update`
 throws (the error is re-raised after) — so a crash never strands the terminal in

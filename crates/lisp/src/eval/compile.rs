@@ -21,7 +21,7 @@
 use smallvec::SmallVec;
 use std::sync::Arc;
 
-use crate::core::heap::Heap;
+use crate::core::heap::{EnvRoot, Heap, VmCacheKey};
 use crate::core::value::{self, ClosureId, EnvId, Symbol, Value};
 use crate::error::{error_codes, LispError, LispResult};
 
@@ -115,6 +115,10 @@ enum Step {
     Tail {
         compiled: Arc<CompiledArm>,
         args: SmallVec<[Value; 4]>,
+        /// The tail callee's own captured env — the trampoline switches `genv` to
+        /// this so the next arm resolves its free vars in *its* scope (Stage 2c: a
+        /// tail call can cross into a closure with a different captured env).
+        genv: EnvId,
     },
 }
 
@@ -318,20 +322,14 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
 }
 
 /// Compile a closure's body to a [`CompiledArm`], or `None` if it isn't
-/// VM-eligible (multi-arm, has `&optional`/`&` rest, captures a *local* env, or its
-/// body uses a non-core form). The slice handles single-arm, exact-arity,
-/// global-capturing closures only.
+/// VM-eligible (multi-arm with no exact arity, every arm `&optional`/`&` rest, or
+/// every arm body uses a non-core form). Single-arm, exact-arity arms compile;
+/// **local-capturing closures are eligible** (Stage 2c) — a free var resolves by
+/// name through the closure's captured env (`Node::Global` → `env_get(genv, …)`),
+/// which `vm_apply` sets to the closure's own env, so the body compiles the same
+/// way whether the capture is global or local.
 fn compile_closure(heap: &Heap, id: ClosureId) -> Option<CompiledClosure> {
     let cl = heap.closure(id);
-    // Only closures with no captured *local* frame — env `None` (the global
-    // sentinel) or env == the process global env. A real local capture is out of
-    // the slice: its free vars would need that frame, which isn't on the VM stack
-    // (Stage 2c).
-    if let Some(e) = cl.env {
-        if !heap.is_global(e) {
-            return None;
-        }
-    }
     // Snapshot the **exact-arity** arms (params + body); variadic arms
     // (`&optional`/`&` rest) are skipped — a call to that arity defers. Cloning
     // ends the `cl` borrow so `compile_body` can re-borrow the heap.
@@ -362,16 +360,38 @@ fn compile_closure(heap: &Heap, id: ClosureId) -> Option<CompiledClosure> {
     }
 }
 
-/// The compiled body for closure `id`, compiling-and-caching on first use. Only
-/// **RUNTIME** closures (top-level / promoted — stable handle bits) are cached and
-/// run; LOCAL closures return `None` (deferred), since the slice doesn't handle
-/// captured local frames. `None` is cached too, so an ineligible closure isn't
-/// re-analysed on every call.
-fn compiled_for(heap: &Heap, id: ClosureId) -> Option<Arc<CompiledClosure>> {
-    if id.region() != value::RUNTIME {
-        return None;
+/// A stable cache key for closure `id`, or `None` if it can't be safely cached /
+/// VM-run (ADR-076 §2c(a)). A **RUNTIME** closure (top-level / promoted) is keyed
+/// by its own handle `.0`, which is stable for the closure's life. A **LOCAL**
+/// closure's handle index is recycled by the collector, so it's keyed instead by
+/// the handle of its first body form — but only when that form lives in the
+/// immovable RUNTIME code region. A LOCAL closure whose body was built from movable
+/// LOCAL forms (e.g. conased by `eval`/quasiquote) has no stable key *and* would
+/// put movable handles in the cached `Node` tree, so it's left to the tree-walker.
+fn cache_key(heap: &Heap, id: ClosureId) -> Option<VmCacheKey> {
+    match id.region() {
+        value::RUNTIME => Some(VmCacheKey::Runtime(id.0)),
+        value::LOCAL => {
+            // Key on the first arm's first body form. Require an allocated RUNTIME
+            // handle so the key is both stable and collision-free (immediates and
+            // interned symbols are shared, so they'd alias unrelated closures).
+            let first = heap.closure(id).arms.first()?.body.first().copied()?;
+            match first {
+                Value::Pair(p) if p.region() == value::RUNTIME => Some(VmCacheKey::LocalBody(p.0)),
+                _ => None,
+            }
+        }
+        _ => None, // PRELUDE closures stay on the tree-walker (as before).
     }
-    let key = id.0;
+}
+
+/// The compiled body for closure `id`, compiling-and-caching on first use. Keyed by
+/// [`cache_key`] so a local-capturing closure is found by its RUNTIME body code,
+/// not its recycled LOCAL handle. `None` (ineligible) is cached too — but only when
+/// the closure *has* a stable key; an unkeyable closure simply defers each call
+/// (cheap: a region check + a body-handle peek).
+fn compiled_for(heap: &Heap, id: ClosureId) -> Option<Arc<CompiledClosure>> {
+    let key = cache_key(heap, id)?;
     if let Some(entry) = heap.vm_cache_get(key) {
         return entry;
     }
@@ -384,30 +404,38 @@ fn compiled_for(heap: &Heap, id: ClosureId) -> Option<Arc<CompiledClosure>> {
 
 /// Resolve a [`Step`] to a value, running a `Tail` to completion. In value
 /// positions the step is always `Done` (sub-nodes compile with `tail = false`);
-/// this also makes a stray tail safe rather than a panic.
-fn force(heap: &mut Heap, step: Step, genv: EnvId) -> LispResult {
+/// this also makes a stray tail safe rather than a panic. A `Tail` carries its own
+/// callee env (Stage 2c), so `force` needs no ambient env.
+fn force(heap: &mut Heap, step: Step) -> LispResult {
     match step {
         Step::Done(v) => Ok(v),
-        Step::Tail { compiled, args } => vm_apply(heap, compiled, &args, genv),
+        Step::Tail { compiled, args, genv } => vm_apply(heap, compiled, &args, genv),
     }
 }
 
 /// Execute one node. `frame_base` is the start of this activation's slot region on
-/// `Heap::roots`; `genv` is the global env for free-name resolution. Returns a
-/// [`Step`] so a tail call can bubble up to [`vm_apply`]'s trampoline.
-fn exec_node(heap: &mut Heap, node: &Node, frame_base: usize, genv: EnvId) -> Result<Step, LispError> {
+/// `Heap::roots`; `genv` is an [`EnvRoot`] for the *current* closure's captured env
+/// — read fresh via [`Heap::read_root_env`] wherever it's needed, since a nested
+/// call can collect and relocate a movable LOCAL captured env (Stage 2c, R1b).
+/// Returns a [`Step`] so a tail call can bubble up to [`vm_apply`]'s trampoline.
+fn exec_node(
+    heap: &mut Heap,
+    node: &Node,
+    frame_base: usize,
+    genv: EnvRoot,
+) -> Result<Step, LispError> {
     match node {
         Node::Const(v) => Ok(Step::Done(*v)),
         // Slot read — depth 0: the callee's own frame. (Deeper depths arrive with
         // the full compiler; the slice only binds params.)
         Node::Local(i) => Ok(Step::Done(heap.root_at(frame_base + i))),
-        Node::Global(s) => match heap.env_get(genv, *s) {
+        Node::Global(s) => match heap.env_get(heap.read_root_env(genv), *s) {
             Some(v) => Ok(Step::Done(v)),
             None => Err(crate::eval::unbound_error(heap, *s)),
         },
         Node::If(cond, then, els) => {
             let cs = exec_node(heap, cond, frame_base, genv)?;
-            let c = force(heap, cs, genv)?;
+            let c = force(heap, cs)?;
             if crate::eval::truthy(c) {
                 exec_node(heap, then, frame_base, genv)
             } else {
@@ -422,7 +450,7 @@ fn exec_node(heap: &mut Heap, node: &Node, frame_base: usize, genv: EnvId) -> Re
             for n in &nodes[..last] {
                 // for effect — must be a value (compiled tail=false)
                 let s = exec_node(heap, n, frame_base, genv)?;
-                force(heap, s, genv)?;
+                force(heap, s)?;
             }
             exec_node(heap, &nodes[last], frame_base, genv)
         }
@@ -432,7 +460,7 @@ fn exec_node(heap: &mut Heap, node: &Node, frame_base: usize, genv: EnvId) -> Re
             // `Heap::roots`, relocated in place, so `frame_base + slot` stays valid.
             for (slot, rhs) in binds.iter() {
                 let s = exec_node(heap, rhs, frame_base, genv)?;
-                let v = force(heap, s, genv)?;
+                let v = force(heap, s)?;
                 heap.set_root_at(frame_base + slot, v);
             }
             // Body is tail-propagated (its tail call bubbles up to the trampoline).
@@ -444,7 +472,7 @@ fn exec_node(heap: &mut Heap, node: &Node, frame_base: usize, genv: EnvId) -> Re
             // place (mirrors `eval::eval_arguments`). `save` is this call's region;
             // it is always truncated back, including on the error path.
             let cs = exec_node(heap, callee, frame_base, genv)?;
-            let cv = force(heap, cs, genv)?;
+            let cv = force(heap, cs)?;
             let save = heap.roots_len();
             heap.push_root(cv);
             for a in args.iter() {
@@ -455,7 +483,7 @@ fn exec_node(heap: &mut Heap, node: &Node, frame_base: usize, genv: EnvId) -> Re
                         return Err(e);
                     }
                 };
-                match force(heap, step, genv) {
+                match force(heap, step) {
                     Ok(v) => heap.push_root(v),
                     Err(e) => {
                         heap.truncate_roots(save);
@@ -469,7 +497,11 @@ fn exec_node(heap: &mut Heap, node: &Node, frame_base: usize, genv: EnvId) -> Re
             for k in 0..args.len() {
                 argv.push(heap.root_at(save + 1 + k));
             }
-            let result = dispatch(heap, callee_v, argv, *tail, genv);
+            // The *current* env (read fresh post-collection) is what a native callee
+            // runs in; a VM-eligible closure callee instead runs in its own captured
+            // env, which `dispatch` reads off the closure.
+            let cur_env = heap.read_root_env(genv);
+            let result = dispatch(heap, callee_v, argv, *tail, cur_env);
             heap.truncate_roots(save);
             result
         }
@@ -538,10 +570,16 @@ fn dispatch(
         if let Some(cc) = compiled_for(heap, id) {
             if let Some(arm) = cc.arm_for(cur_argv.len()) {
                 let arm = Arc::clone(arm);
+                // Run the callee in *its own* captured env (Stage 2c): a
+                // global-capturing closure (`env == None`) resolves to the process
+                // global as before, while a local-capturing one resolves its free
+                // vars in the env it closed over. `genv` (the caller's env) is only
+                // for natives below.
+                let callee_env = heap.closure(id).env.unwrap_or_else(|| heap.global());
                 if tail {
-                    return Ok(Step::Tail { compiled: arm, args: cur_argv });
+                    return Ok(Step::Tail { compiled: arm, args: cur_argv, genv: callee_env });
                 }
-                return Ok(Step::Done(vm_apply(heap, arm, &cur_argv, genv)?));
+                return Ok(Step::Done(vm_apply(heap, arm, &cur_argv, callee_env)?));
             }
         }
     }
@@ -554,7 +592,7 @@ fn dispatch(
 /// for O(1) stack (proper TCO). Mirrors `eval`'s per-iteration discipline: a GC
 /// safepoint, the soft-memory backstop, reduction-counted preemption, the eval
 /// deadline, and the non-tail-recursion stack guard.
-fn vm_apply(heap: &mut Heap, compiled0: Arc<CompiledArm>, args: &[Value], genv: EnvId) -> LispResult {
+fn vm_apply(heap: &mut Heap, compiled0: Arc<CompiledArm>, args: &[Value], genv0: EnvId) -> LispResult {
     // Match `eval`: a GC-block guard (feeds the stack-overflow base) + the stack
     // budget check, so deep *non-tail* VM recursion fails cleanly instead of a
     // SIGSEGV. Tail calls reuse the frame below and never grow the Rust stack.
@@ -573,6 +611,16 @@ fn vm_apply(heap: &mut Heap, compiled0: Arc<CompiledArm>, args: &[Value], genv: 
         ));
     }
 
+    // Root the captured env on `env_roots` (Stage 2c): for a global-capturing
+    // closure this is the immovable `EnvId::GLOBAL` (kept inline, free), but a
+    // local-capturing closure's env is a movable LOCAL frame that a collection at
+    // the safepoint — or inside any nested call — would relocate. `root_env` parks
+    // it so `arena_flip` relocates it in place; we re-read the live handle after
+    // every collection via the `EnvRoot`. A tail call into a *different* closure
+    // re-roots that callee's env here.
+    let env_base = heap.env_roots_len();
+    let mut genv = heap.root_env(genv0);
+
     // Build the frame: `nparams` args fill slots 0..nparams, then nil-fill the
     // `let`/`letrec` binder slots up to `nslots`. The whole region lives on
     // `Heap::roots`, so `collect` relocates it in place.
@@ -585,15 +633,16 @@ fn vm_apply(heap: &mut Heap, compiled0: Arc<CompiledArm>, args: &[Value], genv: 
     }
     let mut compiled = compiled0;
     loop {
-        // GC safepoint — the frame slots live on `Heap::roots`, so `collect`
-        // relocates them in place; the compiled body holds only immovable handles
-        // and `genv` is the (immovable) global env, so no extra roots are needed.
+        // GC safepoint — the frame slots live on `Heap::roots` and the captured env
+        // on `Heap::env_roots`, so `collect` relocates both in place; the compiled
+        // body itself holds only immovable handles, so no further extra roots.
         if !crate::process::macro_block_active() && heap.gc_due() {
             heap.collect(&mut [], &mut []);
         }
         // Soft-memory backstop (ADR-043) — catchable, never frees/moves.
         if let Some(used) = crate::core::alloc::soft_limit_hit() {
             heap.truncate_roots(base);
+            heap.truncate_env_roots(env_base);
             return Err(LispError::runtime(format!(
                 "memory limit exceeded: {used} bytes allocated process-wide \
                  exceeds the {}-byte soft limit (raise or unset BROOD_MEM_LIMIT)",
@@ -606,6 +655,7 @@ fn vm_apply(heap: &mut Heap, compiled0: Arc<CompiledArm>, args: &[Value], genv: 
         crate::process::tick();
         if crate::process::deadline_exceeded() {
             heap.truncate_roots(base);
+            heap.truncate_env_roots(env_base);
             return Err(LispError::runtime(
                 "evaluation exceeded its time limit (MCP tool watchdog)",
             ));
@@ -614,9 +664,10 @@ fn vm_apply(heap: &mut Heap, compiled0: Arc<CompiledArm>, args: &[Value], genv: 
         match exec_node(heap, &compiled.body, base, genv) {
             Ok(Step::Done(v)) => {
                 heap.truncate_roots(base);
+                heap.truncate_env_roots(env_base);
                 return Ok(v);
             }
-            Ok(Step::Tail { compiled: c2, args: a2 }) => {
+            Ok(Step::Tail { compiled: c2, args: a2, genv: g2 }) => {
                 // Reuse the frame: drop the old slots, push the new args + nil-fill
                 // to the new arm's slot count at `base`.
                 heap.truncate_roots(base);
@@ -626,10 +677,16 @@ fn vm_apply(heap: &mut Heap, compiled0: Arc<CompiledArm>, args: &[Value], genv: 
                 for _ in a2.len()..c2.nslots {
                     heap.push_root(Value::Nil);
                 }
+                // Switch to the tail callee's env: drop the old env root and root
+                // the new one (`g2` is still valid — no collection since `dispatch`
+                // read it off the callee closure).
+                heap.truncate_env_roots(env_base);
+                genv = heap.root_env(g2);
                 compiled = c2;
             }
             Err(e) => {
                 heap.truncate_roots(base);
+                heap.truncate_env_roots(env_base);
                 return Err(e);
             }
         }
@@ -648,12 +705,17 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
         Some(node) => {
             // A top-level `let` introduces frame slots too — give the form a frame
             // of `scope.max` nil slots (like a 0-param closure), then tear it down.
+            // The top-level env is the (immovable) process global, so `root_env`
+            // keeps it inline; rooting it uniformly keeps `exec_node`'s contract.
+            let env_base = heap.env_roots_len();
+            let genv = heap.root_env(env);
             let base = heap.roots_len();
             for _ in 0..scope.max {
                 heap.push_root(Value::Nil);
             }
-            let r = exec_node(heap, &node, base, env).and_then(|s| force(heap, s, env));
+            let r = exec_node(heap, &node, base, genv).and_then(|s| force(heap, s));
             heap.truncate_roots(base);
+            heap.truncate_env_roots(env_base);
             r
         }
         None => crate::eval::eval(heap, form, env),

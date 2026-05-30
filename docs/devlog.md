@@ -9937,3 +9937,63 @@ uses the `(upper c) ≠ (lower c)` letter trick — classes/sets need only `=`.
 `tests/regex_test.blsp` (14). First user: the editor's `brood-mode` triggers on a
 `:file-pattern` regex (`\.blsp$`). Deferred: ranges, captures, backreferences,
 `{m,n}`.
+
+---
+
+## 2026-05-30 — GUI close button: a dedicated `:close` event
+
+**Bug.** A windowed app's close button (the X) didn't reliably quit. `gui.rs`
+delivered `WindowEvent::CloseRequested` as `:escape` — the *same* value as the
+Escape **key**. So "does the X close the app?" depended on the app treating Escape
+as quit: the observer (Esc→quit) and `life.blsp` worked by luck, but any app that
+binds Escape to cancel/normal-mode (the coming editor) could never be closed by its
+X button — Escape did the cancel and there was no separate "window wants to close"
+signal.
+
+**Fix.** The close button now delivers a dedicated **`:close`** message, distinct
+from the Escape key (`:escape`) — a frontend signal, not a keystroke.
+- `ui-run` (`std/ui.blsp`) treats `:close` as an immediate quit *before* `update`
+  sees it, so **every** `ui-run` app is closeable by its X for free, independent of
+  its Escape binding. New helper `ui/quit-request?` recognises `:close` for
+  hand-rolled `receive` loops that don't use `ui-run`.
+- `life.blsp` (a raw loop) now matches `(:close :quit)` alongside `q`/Esc/Ctrl-C.
+- Prompt-on-close ("unsaved changes") is a deferred power feature (ADR-011).
+
+Greenfield clean break (no compat shim): close was `:escape`, is now `:close`.
+`tests/ui_test.blsp` +2 (close quits without update; `quit-request?` rejects the
+Escape key). Docs: `gui-open` docstring, `std/ui.blsp`, ADR (decisions.md).
+
+---
+
+## 2026-05-30 — Mouse `:drag` + `:release` (ADR-077): the drag gesture the editor needs
+
+**Goal.** `myedit` wants Emacs-style split windows you resize by **dragging the
+divider**. That gesture is press → motion-while-held → release — but the kernel's
+mouse vocabulary (ADR-056) was deliberately `:press` / `:scroll-up` / `:scroll-down`
+only; drag/release/bare-motion were dropped at *both* frontends to avoid winit's
+per-pixel `CursorMoved` becoming a redraw storm. No way to observe a held-and-dragged
+pointer from Brood. This is the "improve the language first" half of the myedit plan.
+
+**Built.** Two actions added to the shared `[:mouse action button row col]` shape,
+identical across both frontends:
+- **`:drag`** — motion with a button held, **throttled to cell granularity** (one
+  event per character cell crossed, never per pixel). That throttle is what makes it
+  safe where ADR-056 balked: a divider drag is bounded by cells of travel, not pixels.
+- **`:release`** — the held button coming back up.
+
+Bare motion (no button) is still **not** emitted at either backend — no consumer,
+and it would reintroduce the flood.
+
+- `gui.rs`: each `Win` tracks the held button (`held`); `CursorMoved` emits `:drag`
+  only on a cell change while held; `MouseInput{Released}` emits `:release` + clears it.
+- `builtins.rs::mouse_to_value`: crossterm already reports `Drag(b)`/`Up(b)` per-cell
+  → mapped straight through; bare `Moved` still falls to a nil poll.
+- Docstrings (`term-poll`, `gui-open`), `docs/brood-for-claude.md`, ADR-077.
+
+**Tests.** `mouse_event_tests` (Rust): `:drag`/`:release`/`:press` map to the right
+keyword carrying their button; bare `Moved` stays nil. Default + `--features gui`
+builds green.
+
+Purely additive to the input seam — existing `:press`/`:scroll-*` consumers (the
+observer) untouched. Next: `std/window.blsp` (the window-tree layout toolkit), then
+the myedit split-window model/view/commands + mouse drag-resize.

@@ -1,6 +1,6 @@
 ---
 name: brood-debug
-description: Use when a Brood (`.blsp`) program crashed, hung, segfaulted, overflowed the stack, leaked memory, or a spawned process "just died" — the recovery playbook for diagnosing a failed Brood run. Brood has no exception unwind for stack overflow and (by default) no supervisor, so the default failure mode is a silent dead process. Load this to debug it methodically instead of guessing.
+description: Use when a Brood (`.blsp`) program crashed, hung, segfaulted, overflowed the stack, leaked memory, a spawned process "just died", or a GUI/terminal app won't respond or close — the recovery playbook for diagnosing a failed Brood run. Brood has no exception unwind for stack overflow and (by default) no supervisor, so the default failure mode is a silent dead process. Load this to debug it methodically instead of guessing.
 ---
 
 # Debugging Brood
@@ -105,3 +105,65 @@ vanishes. To see it:
   pid confirms it died.
 - Remember messages **deep-copy** across heaps: a value that worked in the parent
   can still fail to build in the child if the child lacks a `require`d module.
+
+## 7. A GUI / TUI app that runs but won't respond or close
+
+A windowed (`--features gui`) or terminal app that *paints* but ignores keys and
+the close button is almost never a crash — it's an **input bug**. Don't stare at
+the render code; isolate the input path.
+
+**First, split "doesn't run" from "doesn't respond."** Run the cheap layers in
+order — they localise the fault before you touch a window:
+
+```
+nest check src/app.blsp          # logic / non-tail recursion (§1)
+nest test                        # the pure view/step fns
+nest run --for 3s                # does it run + exit cleanly? (--for bounds it so a
+                                 # hung window can't trap your session)
+```
+
+If check/test/`--for` all pass but the live window misbehaves, it's
+interactivity, not a crash — go straight to the input path.
+
+**You can't click in a headless/agent session — so drive input directly.** GUI
+input is delivered as ordinary **mailbox messages** to the process that called
+`gui-open` (ADR-058), in the same encoding the terminal uses:
+
+| Event | Message |
+|-------|---------|
+| printable key | a **1-char string** — `"a"` |
+| special keys | keywords — `:up :down :enter :backspace :escape :ctrl-c` … |
+| **window close button (the X)** | **`:close`** — *distinct from* the Escape key `:escape` |
+| mouse | `[:mouse action button row col]` |
+| resize | `[:resize cols rows]` |
+
+Because the loop reads its **own** mailbox, you can unit-test the whole input
+path with no window: `(send (self) :close)` then call the loop's wait/select
+function and assert it quits. That turns "did clicking X work?" into a
+deterministic test (see `foobar/tests/life_test.blsp` → "wait-frame stays
+responsive"). On this GNOME/Wayland box the screenshot D-Bus is access-denied to
+the agent, so this *is* the verification path — plus the render frame is plain
+data, so `(println (render …))` lets you inspect the emitted ops directly.
+
+**The #1 hand-rolled-loop bug: input starvation on over-budget frames.** A loop
+that only polls input *inside* a deadline/timeout branch skips it entirely once a
+frame runs over its time budget — and a big board + small font + interpreted
+render easily exceeds the frame period. Symptom: paints fine, ignores every key
+and the close button. The tell is a guard like `(if (>= (now-ns) due) … (receive …))`
+that bypasses the `receive`, plus a fallback `receive` that matches only the
+worker reply (e.g. `[:gen g]`) and not input. **Fix: scan the mailbox every frame
+regardless of the clock**; gate only the *pacing* on the deadline, never the input
+read.
+
+**Know the close contract.** The X delivers `:close`, not `:escape`. `ui-run`
+(`std/ui.blsp`) quits on `:close` automatically, so prefer it — it also owns
+pacing and guaranteed teardown (`:leave`/`gui-close` runs even if `view`/`update`
+throws). A hand-rolled `(receive)` loop must match `:close` itself (`(:close :quit)`)
+or use `ui/quit-request?`. If the app binds Esc to cancel/normal-mode, **only**
+`:close` can close it — that's the whole reason the two are separate.
+
+**Build/feature gotchas.** The GUI backend is behind the `gui` cargo feature —
+`cargo build -p nest --features brood/gui`. Without it the `gui-*` primitives
+return a clear `gui backend not compiled in; rebuild with --features gui` error
+rather than opening a window; an app that "does nothing" may simply be running a
+non-GUI build.
