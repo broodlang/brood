@@ -3295,8 +3295,13 @@ and a new render-op-protocol input shape, with zero change to the frame protocol
   `(observe-attach …)` stays modal for the single-window/terminal case.
 - **Same GUI-thread bridge as ADR-046.** Only `Send` plain data (`Op`/`Input`)
   crosses the channels; the windows/surfaces/glyph caches never leave the GUI
-  thread. Closing a window surfaces as `:escape` to that window's input, so its
-  Brood loop tears down (and calls `gui-close`) on its own terms.
+  thread. Clicking a window's close button surfaces as a dedicated `:close`
+  message to that window's input — distinct from the Escape *key* (`:escape`) so
+  an app can quit on the X without conflating it with Escape (which an editor binds
+  to cancel/normal-mode) — so its Brood loop tears down (and calls `gui-close`) on
+  its own terms. `ui-run` quits on `:close` automatically; a raw `receive` loop
+  matches it (or uses `ui/quit-request?`). (Earlier this was delivered as `:escape`;
+  the conflation made any Escape-binds-cancel app uncloseable by its X button.)
 
 **Consequences.**
 - Three optional deps (`winit`/`softbuffer`/`fontdue`), all gated behind `gui`; a
@@ -4820,3 +4825,58 @@ immutability. Top risk is R1 (the VM stack as GC roots), mitigated by reusing
 data structures), ADR-069 (the deferral this resolves), ADR-061 (the operand stack
 the VM reuses), ADR-054/055/072 (the generational copying GC `arena_flip` relocates),
 ADR-047 (multi-arity), ADR-022 (the compile pass), ADR-026 (immutability), ADR-011.
+
+## ADR-077 — Mouse `:drag` and `:release`, at cell granularity
+
+**Status:** accepted (2026-05-30). Extends ADR-056's mouse vocabulary; resolves
+the deferral ADR-056 itself flagged ("Release/drag are additive when a consumer …
+needs them").
+
+**Context.** ADR-056 gave both display frontends (crossterm `term-poll`, the GUI
+`gui-open`) a deliberately minimal mouse vocabulary — `:press`, `:scroll-up`,
+`:scroll-down` — and explicitly dropped release / drag / bare motion at *both*
+backends, for one good reason: winit's `CursorMoved` fires per pixel, and a
+consumer that refetches+redraws on every input would turn a mouse wiggle into a
+redraw storm. There was also no consumer. The editor (`myedit`) now has one:
+**Emacs-style split windows whose dividers you resize by dragging** — a gesture
+that is exactly press → (track motion while held) → release, none of which the
+vocabulary could express.
+
+**Decision.** Add two actions to the shared `[:mouse action button row col]`
+shape, identical across both frontends:
+
+- **`:release`** — the held button coming back up (carries the button + cell).
+- **`:drag`** — pointer motion *with a button held*, carrying that button + the
+  new cell. **Throttled to cell granularity**: emitted only when the pointer
+  crosses into a new character cell, never per pixel. This is the move that makes
+  it safe where ADR-056 balked — a divider drag produces at most one event per
+  cell of travel, not per pixel, so the redraw-storm footgun is gone.
+
+**Bare motion (no button) is still not emitted** at either backend — no consumer,
+and it would reintroduce the flood. So the vocabulary grows by exactly what the
+drag gesture needs and no more (ADR-011).
+
+**Mechanism.**
+- *GUI* (`gui.rs`): each `Win` tracks the currently-held button (`held`, set on
+  press, cleared on release). `CursorMoved` updates the tracked cell and, only on
+  a cell change *while a button is held*, emits `:drag`. `MouseInput{Released}`
+  emits `:release` and clears `held`.
+- *Crossterm* (`builtins.rs::mouse_to_value`): crossterm already reports
+  `Drag(button)` and `Up(button)` per-cell — mapped straight to `:drag`/`:release`;
+  bare `Moved` still falls through to a nil poll.
+
+One encoding from both frontends, so a single keymap/handler drives either — the
+ADR-056 invariant holds. Rust tests (`mouse_event_tests`) lock the crossterm
+mapping (incl. bare-motion-is-nil); the GUI path is the same `Mouse`→`Message`
+shape.
+
+**Consequences.** Purely additive to the input half of the seam: existing
+`:press`/`:scroll-*` consumers (the observer) are untouched. Unlocks divider
+drag-resize in `myedit`, and drag-select / drag-scroll generally, with no further
+kernel change. **Mouse capture caveat unchanged:** the crossterm side reports
+these only under `term-enter` (full-screen), not the inline REPL `term-raw-enter`
+seam, which must keep the terminal's own text selection.
+
+**References.** ADR-056 (the mouse vocabulary this extends, and whose deferral it
+resolves), ADR-046 (the display/input seam), ADR-058 (GUI input as mailbox
+messages), ADR-011 (ship the minimal form; additive features wait for a consumer).
