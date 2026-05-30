@@ -29,7 +29,11 @@ land in a later slice."
 ;; Approximates `git archive | sha256sum` without depending on git. Skips _deps/
 ;; and .git/ (a dep's nested cache / VCS data is not part of its content).
 
-(def *package--hash-skip* (list "_deps" ".git"))
+;; Skip _deps/ and .git/ (a dep's nested cache / VCS data isn't part of its
+;; content) and .brood-pkg.blsp (the cache stamp we write *into* the dir post-clone
+;; — excluding it keeps the tree hash invariant whether or not the stamp is present,
+;; so a re-resolve of an unchanged commit produces the same hash).
+(def *package--hash-skip* (list "_deps" ".git" ".brood-pkg.blsp"))
 
 ;; The file paths under `dir`, relative to it, sorted. Recurses into subdirs.
 (defn package--tree-files (dir) (sort (package--tree-files--walk dir "")))
