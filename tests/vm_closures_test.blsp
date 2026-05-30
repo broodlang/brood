@@ -1,0 +1,113 @@
+;; Local-capturing closures — the Stage 2c VM unlock (ADR-076, docs/bytecode-vm.md).
+;; These exercise closures *created inside* a function (so they capture a local
+;; frame) and *called* afterwards. They must behave identically on the tree-walker
+;; and the compiling VM, so run this file under both `BROOD_VM=0` and `BROOD_VM=1`
+;; (the Stage-2 gate runs the whole suite under each). The `across processes` block
+;; additionally proves the captured env survives a `send` deep-copy + closure
+;; flatten/rebuild (lexical-addressing-gotchas.md #1).
+
+(defmodule vm-closures-test (:use test))
+
+;; ---- file-local helpers (defined once at load; survive :isolated rollback) ----
+(defn make-adder (n) (fn (x) (+ x n)))
+
+(defn scaled (k)
+  (let (factor (* k 2))
+    (fn (x) (* x factor))))
+
+;; two levels of nesting: the innermost closure captures a param + an intermediate
+;; let binding from two different enclosing frames.
+(defn adder3 (a)
+  (fn (b)
+    (let (s (+ a b))
+      (fn (c) (+ s c)))))
+
+;; drive a captured closure in a hot tail loop (TCO + GC churn on the captured env)
+(defn drive (f acc i n) (if (= i n) acc (drive f (f acc) (+ i 1) n)))
+
+;; mutual recursion via letrec: the closures capture letrec siblings, which the VM
+;; must defer to the tree-walker (a value snapshot can't do recursive late-binding)
+;; while still returning the right answer.
+(defn parity (n)
+  (letrec (ev? (fn (k) (if (= k 0) true  (od? (- k 1))))
+           od? (fn (k) (if (= k 0) false (ev? (- k 1)))))
+    (ev? n)))
+
+;; a closure capturing a letrec helper from the letrec *body* (slot finalized) is
+;; VM-eligible — distinct from the deferred rhs-capture case above.
+(defn quad (n)
+  (letrec (dbl (fn (x) (* x 2)))
+    (let (g (fn (y) (dbl (dbl y))))
+      (g n))))
+
+(describe "local-capturing closures"
+  (test "captures a parameter"
+    (assert= ((make-adder 5) 3) 8)
+    (assert= ((make-adder 100) 1) 101))
+
+  (test "distinct captures are independent"
+    (let (a5 (make-adder 5) a9 (make-adder 9))
+      (assert= (a5 0) 5)
+      (assert= (a9 0) 9)
+      (assert= (a5 (a9 1)) 15)))
+
+  (test "captures a let binding, not just a param"
+    (assert= ((scaled 3) 10) 60))
+
+  (test "two levels of nesting capture from different frames"
+    (assert= (((adder3 1) 2) 3) 6)
+    (assert= (((adder3 10) 20) 30) 60))
+
+  (test "a captured closure drives a hot tail loop (TCO + GC churn on the capture)"
+    (assert= (drive (make-adder 1) 0 0 20000) 20000)
+    (assert= (drive (make-adder 2) 0 0 10000) 20000))
+
+  (test "letrec mutual recursion (deferred capture) is still correct"
+    (assert= (parity 0) true)
+    (assert= (parity 10) true)
+    (assert= (parity 7) false))
+
+  (test "capture of a finalized letrec helper from the body"
+    (assert= (quad 5) 20)
+    (assert= (quad 0) 0)))
+
+;; ---- across processes --------------------------------------------------------
+;; A closure sent between processes is deep-copied: its captured env is flattened
+;; to just its free vars and rebuilt on the receiver, so calling it must still
+;; resolve those frees by name. This proves to_message/from_message round-trip the
+;; captured environment for both engines.
+
+(defn cc-apply-worker (parent)
+  ;; receive a closure + an argument, apply it locally, send the result back
+  (receive ([f x] (send parent (f x)))))
+
+(defn cc-build-worker (parent n x)
+  ;; build a capturing closure *in this process* and send its result back
+  (let (f (make-adder n))
+    (send parent (f x))))
+
+(defn cc-spawn-builders (parent ks base)
+  (when (not (empty? ks))
+    (spawn (cc-build-worker parent (first ks) base))
+    (cc-spawn-builders parent (rest ks) base)))
+
+(defn cc-sum (got total acc)
+  (if (= got total) acc (cc-sum (+ got 1) total (+ acc (receive (v v))))))
+
+(describe "capturing closures across processes"
+  :isolated
+
+  (test "a captured closure round-trips through send and applies on the receiver"
+    (let (me (self) w (spawn (cc-apply-worker me)))
+      (send w [(make-adder 1000) 5])
+      (assert= (receive) 1005)))
+
+  (test "a nested captured closure survives the round-trip"
+    (let (me (self) w (spawn (cc-apply-worker me)))
+      (send w [((adder3 7) 8) 5])      ; closure capturing s = 15
+      (assert= (receive) 20)))
+
+  (test "fan-out: many workers each build and apply their own capture"
+    ;; worker i computes (i + 100); Σ for i in 1..20 = 210 + 2000 = 2210
+    (cc-spawn-builders (self) (range 1 21) 100)
+    (assert= (cc-sum 0 20 0) 2210)))

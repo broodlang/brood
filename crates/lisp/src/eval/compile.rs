@@ -25,12 +25,28 @@ use crate::core::heap::{EnvRoot, Heap, VmCacheKey};
 use crate::core::value::{self, ClosureId, EnvId, Symbol, Value};
 use crate::error::{error_codes, LispError, LispResult};
 
-/// Is the compiling VM enabled? `BROOD_VM` set in the environment turns it on.
-/// **Off by default** — the tree-walker is the engine until the Stage 3 cutover
-/// (ADR-076). Read once and cached; the flag can't change mid-run.
+/// Is the compiling VM enabled?
+///
+/// - The **runtime** `BROOD_VM` env var wins when set: a truthy value
+///   (`1`/`true`/`on`/…) forces the VM, a falsy one (`0`/`false`/`off`/empty)
+///   forces the tree-walker.
+/// - Otherwise the **build-time default** decides: off for an ordinary
+///   `cargo build` (so `make test` runs the tree-walker — green, with full
+///   source-position diagnostics), **on** when built with `--features
+///   brood/vm-default`, which is what `make install` ships so the installed
+///   binaries dogfood the VM (ADR-076; the tree-walker stays a one-env-var escape
+///   hatch until the Stage-3 cutover makes the VM unconditional).
+///
+/// Read once and cached; the choice can't change mid-run.
 pub fn vm_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("BROOD_VM").is_some())
+    fn truthy(v: &str) -> bool {
+        !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "off" | "no")
+    }
+    *ON.get_or_init(|| match std::env::var("BROOD_VM") {
+        Ok(v) => truthy(&v),                  // explicit runtime override
+        Err(_) => cfg!(feature = "vm-default"), // build-time default
+    })
 }
 
 /// A compiled IR node (ADR-076). Stage 1 vocabulary — the core forms a top-level
@@ -71,6 +87,21 @@ pub enum Node {
     LetBind {
         binds: Box<[(usize, Node)]>,
         body: Box<Node>,
+    },
+    /// `(fn …)`/`(lambda …)` evaluated *inside* a compiled body (Stage 2c). Builds
+    /// a closure value that closes over a **flat snapshot** of the enclosing lexical
+    /// environment: a fresh env frame (parent = the process global) is filled from
+    /// `captures` — each `(name, src)` evaluates `src` in the current frame and
+    /// binds it under `name` — and the closure captures that frame. Free vars in the
+    /// new closure's body then resolve by name through it (`env_get`), exactly as a
+    /// tree-walker-built closure resolves through its captured env chain (Brood
+    /// bindings are immutable, so a value snapshot is equivalent to an env
+    /// reference). `fn_rest` is the `(fn …)` form's cdr — an immovable RUNTIME
+    /// sub-form parsed by [`crate::eval::make_closure`] at run time (reusing all the
+    /// arity/optional/doc parsing).
+    MakeClosure {
+        fn_rest: Value,
+        captures: Box<[(Symbol, Node)]>,
     },
 }
 
@@ -130,21 +161,48 @@ enum Step {
 /// `nslots`). Shadowing: `lookup` scans newest-first. `bind` claims a slot;
 /// `restore` pops a scope's binders (reusing their slots — safe, the bindings are
 /// dead once out of scope).
+///
+/// `enclosing` (Stage 2c) holds the names lexically visible from *outer* closures —
+/// derived once, by walking this closure's captured env, in [`compile_closure`].
+/// They aren't frame slots (they live in the captured env, reached by name via
+/// `Node::Global`), but a nested `(fn …)` must still snapshot them when it captures
+/// the lexical environment, so the compiler has to know which free names are
+/// enclosing *lexicals* (snapshot) vs true globals (resolved live, never snapshot).
+///
+/// `unsafe_slots` marks frame slots that are **not yet finalized** — the binders of
+/// a `letrec` whose rhs are still being compiled. A `(fn …)` that would capture one
+/// can't be VM-built (a value snapshot can't express letrec's recursive
+/// late-binding), so it defers to the tree-walker.
 struct Scope {
     names: Vec<(Symbol, usize)>,
     next: usize,
     max: usize,
+    enclosing: Vec<Symbol>,
+    unsafe_slots: Vec<usize>,
 }
 
 impl Scope {
     fn new() -> Self {
-        Scope { names: Vec::new(), next: 0, max: 0 }
+        Scope {
+            names: Vec::new(),
+            next: 0,
+            max: 0,
+            enclosing: Vec::new(),
+            unsafe_slots: Vec::new(),
+        }
     }
     fn with_params(params: &[Symbol]) -> Self {
         let mut s = Scope::new();
         for &p in params {
             s.bind(p);
         }
+        s
+    }
+    /// As [`with_params`](Self::with_params) but seeded with the enclosing lexical
+    /// names a nested closure closes over (Stage 2c).
+    fn with_params_enclosing(params: &[Symbol], enclosing: Vec<Symbol>) -> Self {
+        let mut s = Scope::with_params(params);
+        s.enclosing = enclosing;
         s
     }
     fn lookup(&self, sym: Symbol) -> Option<usize> {
@@ -158,6 +216,9 @@ impl Scope {
         }
         self.names.push((sym, slot));
         slot
+    }
+    fn is_unsafe(&self, slot: usize) -> bool {
+        self.unsafe_slots.contains(&slot)
     }
     /// Snapshot for scope exit: `(names-len, next-slot)`.
     fn mark(&self) -> (usize, usize) {
@@ -211,6 +272,7 @@ fn compile_let(heap: &Heap, items: &[Value], scope: &mut Scope, tail: bool, rec:
         return None;
     }
     let saved = scope.mark();
+    let unsafe_saved = scope.unsafe_slots.len();
     let result = (|| {
         let mut binds: Vec<(usize, Node)> = Vec::with_capacity(elems.len() / 2);
         if rec {
@@ -223,9 +285,15 @@ fn compile_let(heap: &Heap, items: &[Value], scope: &mut Scope, tail: bool, rec:
                     _ => return None,
                 }
             }
+            // While compiling the rhs, the letrec slots aren't yet filled — a
+            // nested `(fn …)` capturing one would snapshot `nil` (a value snapshot
+            // can't do letrec's recursive late-binding), so mark them unsafe to
+            // capture; they become safe once we reach the body (all rhs done).
+            scope.unsafe_slots.extend_from_slice(&slots);
             for (pair, &slot) in elems.chunks_exact(2).zip(slots.iter()) {
                 binds.push((slot, compile_node(heap, pair[1], scope, false)?));
             }
+            scope.unsafe_slots.truncate(unsafe_saved);
         } else {
             // let/let*: sequential — a rhs sees only earlier binders.
             for pair in elems.chunks_exact(2) {
@@ -245,7 +313,78 @@ fn compile_let(heap: &Heap, items: &[Value], scope: &mut Scope, tail: bool, rec:
         })
     })();
     scope.restore(saved);
+    scope.unsafe_slots.truncate(unsafe_saved); // also undo on the early-`None` paths
     result
+}
+
+/// Is `fn_rest` (a `(fn …)` form's cdr) safe to bake into a cached [`Node`]? It
+/// must be an immovable handle: the body the closure will parse from it lives there
+/// for the life of the compiled body, so a movable LOCAL form (e.g. a top-level
+/// freshly-read or quasiquote-built `fn`) would dangle after a collection. Such a
+/// form simply defers to the tree-walker.
+fn fn_rest_is_stable(v: Value) -> bool {
+    match v {
+        Value::Pair(p) => p.region() != value::LOCAL,
+        Value::Nil => true, // `(fn)` — degenerate, but stable
+        _ => false,
+    }
+}
+
+/// The capture list for a nested `(fn …)` — the enclosing lexical environment it
+/// closes over, snapshotted by value (Brood bindings are immutable, so this is
+/// equivalent to capturing the env by reference). Each current-frame lexical maps
+/// to a `Node::Local` slot read; each name inherited from an *outer* closure maps
+/// to a `Node::Global` read through the current captured env. True globals are
+/// **not** captured — they resolve live (late-bound) through the new closure's
+/// frame parent. Returns `None` (defer) if a capture would read a not-yet-finalized
+/// `letrec` slot, which a value snapshot can't express.
+fn compile_captures(scope: &Scope) -> Option<Vec<(Symbol, Node)>> {
+    let mut seen: Vec<Symbol> = Vec::new();
+    let mut caps: Vec<(Symbol, Node)> = Vec::new();
+    // Current-frame lexicals, innermost binding first (so shadowing wins).
+    for &(sym, slot) in scope.names.iter().rev() {
+        if seen.contains(&sym) {
+            continue;
+        }
+        seen.push(sym);
+        if scope.is_unsafe(slot) {
+            return None; // capturing an in-progress letrec binder → defer
+        }
+        caps.push((sym, Node::Local(slot)));
+    }
+    // Lexicals inherited from outer closures — read by name from the current env.
+    for &sym in scope.enclosing.iter() {
+        if seen.contains(&sym) {
+            continue;
+        }
+        seen.push(sym);
+        caps.push((sym, Node::Global(sym)));
+    }
+    Some(caps)
+}
+
+/// Compile a `(fn …)`/`(lambda …)` evaluated inside a compiled body to a
+/// [`Node::MakeClosure`] (Stage 2c), or `None` (defer) if it can't be VM-built. The
+/// closure's *body* is not compiled here — it's compiled lazily by [`compiled_for`]
+/// when the closure is first called, keyed by its RUNTIME body handle.
+fn compile_make_closure(heap: &Heap, form: Value, scope: &Scope) -> Option<Node> {
+    // Post-macroexpand a pattern-param / multi-clause `fn` is already lowered to
+    // `match*`; a `fn` reaching here should be plain. Defer defensively otherwise.
+    if crate::eval::macros::fn_needs_lowering(heap, form) {
+        return None;
+    }
+    let fn_rest = match form {
+        Value::Pair(p) => heap.pair(p).1,
+        _ => return None,
+    };
+    if !fn_rest_is_stable(fn_rest) {
+        return None;
+    }
+    let captures = compile_captures(scope)?;
+    Some(Node::MakeClosure {
+        fn_rest,
+        captures: captures.into_boxed_slice(),
+    })
 }
 
 /// Compile an already-expanded, already-resolved `form` against the lexical
@@ -296,7 +435,12 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                 if value::symbol_is(h, "letrec") {
                     return compile_let(heap, &items, scope, tail, true);
                 }
-                // Any *other* special form (def/fn/quote/quasiquote/and/or/
+                // `(fn …)`/`(lambda …)` inside a compiled body (Stage 2c): build a
+                // closure capturing a flat snapshot of the enclosing lexicals.
+                if value::symbol_is(h, "fn") || value::symbol_is(h, "lambda") {
+                    return compile_make_closure(heap, form, scope);
+                }
+                // Any *other* special form (def/quote/quasiquote/and/or/
                 // binding/match*/…) is outside the VM's vocabulary — defer the
                 // whole closure to the tree-walker.
                 if crate::eval::is_special_form(h) {
@@ -330,6 +474,13 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
 /// way whether the capture is global or local.
 fn compile_closure(heap: &Heap, id: ClosureId) -> Option<CompiledClosure> {
     let cl = heap.closure(id);
+    // The lexical names this closure inherits from outer closures (Stage 2c) —
+    // empty for a global-capturing (top-level) closure. A nested `(fn …)` in the
+    // body needs these to snapshot the enclosing environment it captures.
+    let enclosing: Vec<Symbol> = match cl.env {
+        Some(e) if !heap.is_global(e) => heap.env_chain_names(e),
+        _ => Vec::new(),
+    };
     // Snapshot the **exact-arity** arms (params + body); variadic arms
     // (`&optional`/`&` rest) are skipped — a call to that arity defers. Cloning
     // ends the `cl` borrow so `compile_body` can re-borrow the heap.
@@ -343,7 +494,7 @@ fn compile_closure(heap: &Heap, id: ClosureId) -> Option<CompiledClosure> {
     for (params, body_forms) in arms_src {
         let nparams = params.len();
         // Params occupy slots 0..nparams; `let`/`letrec` binders extend the frame.
-        let mut scope = Scope::with_params(&params);
+        let mut scope = Scope::with_params_enclosing(&params, enclosing.clone());
         // A non-core arm body just isn't added — that arity defers, others VM-run.
         if let Some(body) = compile_body(heap, &body_forms, &mut scope, true) {
             arms.push(Arc::new(CompiledArm {
@@ -465,6 +616,27 @@ fn exec_node(
             }
             // Body is tail-propagated (its tail call bubbles up to the trampoline).
             exec_node(heap, body, frame_base, genv)
+        }
+        Node::MakeClosure { fn_rest, captures } => {
+            // Build the captured env: a flat snapshot of the enclosing lexicals
+            // (parent = the process global, so true globals + dynamics still resolve
+            // live and late-bound). No `captures` source is a call, so evaluating
+            // them runs no safepoint — the fresh `frame` and the (immovable) node
+            // fields stay valid until `make_closure` consumes them below. With no
+            // captures the closure is global-capturing (`env == None`).
+            let env = if captures.is_empty() {
+                heap.global()
+            } else {
+                let frame = heap.new_env(Some(heap.global()));
+                for (name, src) in captures.iter() {
+                    let step = exec_node(heap, src, frame_base, genv)?;
+                    let v = force(heap, step)?;
+                    heap.env_define(frame, *name, v);
+                }
+                frame
+            };
+            let cl = crate::eval::make_closure(heap, None, *fn_rest, env)?;
+            Ok(Step::Done(cl))
         }
         Node::Call { callee, args, tail } => {
             // Evaluate the callee, then each argument, keeping them on the operand

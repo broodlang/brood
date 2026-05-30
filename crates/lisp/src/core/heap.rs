@@ -2999,6 +2999,36 @@ impl Heap {
         None
     }
 
+    /// The distinct lexical names bound along `env`'s frame chain, innermost-first,
+    /// stopping at the global scope (whose names are runtime globals, not lexicals).
+    /// Used by the compiling VM (ADR-076 §2c): a nested `(fn …)` must snapshot the
+    /// enclosing lexical environment it closes over, so the compiler asks which
+    /// names that env actually binds. The set is a static property of the closure's
+    /// definition site (every instance of the same source closure binds the same
+    /// names), so it's safe to derive once and bake into the cached body.
+    pub fn env_chain_names(&self, env: EnvId) -> Vec<Symbol> {
+        let mut names: Vec<Symbol> = Vec::new();
+        let mut cur = env;
+        let mut depth = 0;
+        while cur != EnvId::GLOBAL && (cur.region() == LOCAL || cur.region() == RUNTIME) {
+            let frame = self.env_frame(cur);
+            for &(s, _) in frame.vars.iter() {
+                if !names.contains(&s) {
+                    names.push(s);
+                }
+            }
+            match frame.parent {
+                Some(p) => cur = p,
+                None => break,
+            }
+            depth += 1;
+            if depth > 10_000 {
+                break; // safety belt — env chains shouldn't be this deep
+            }
+        }
+        names
+    }
+
     /// Resolve a name in the shared global table, going through this process's
     /// [`global_ic`](Self::global_ic) inline cache. On a version match the cached
     /// (immovable PRELUDE/RUNTIME) handle is returned without touching the
