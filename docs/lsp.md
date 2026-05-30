@@ -6,10 +6,12 @@ of the editor contract in [`tooling.md`](tooling.md): instead of every editor
 re-implementing "run the file and parse the GNU error lines", they speak LSP to
 one server that owns the language knowledge.
 
-> Status: **Tiers 0–2 live** — diagnostics (syntactic + semantic), completion,
-> hover, signature help, document symbols, goto-definition (in-file, cross-module,
-> stdlib, and `require`-target), references, document-highlight, rename, and
-> semantic tokens. Recorded as
+> Status: **Tiers 0–2 live, plus a "developer ergonomics" pass** —
+> diagnostics (syntactic + semantic), completion, hover, signature help, document
+> symbols, goto-definition (in-file, cross-module, stdlib, and `require`-target),
+> references, document-highlight, rename, semantic tokens, **document formatting,
+> workspace symbol search, code actions, folding ranges, and inlay hints**.
+> Recorded as
 > [ADR-025](decisions.md#adr-025--a-lossless-span-carrying-cst-for-tooling-separate-from-the-eval-value);
 > this document is the full plan it points to (the `types.md` ↔ ADR-024 pattern).
 > **Done:** Foundation A — the CST (`syntax::cst`) + shared lexical rules
@@ -39,10 +41,13 @@ one server that owns the language knowledge.
 > • **Semantic diagnostics** — `publish` runs the advisory checker
 > (`types::check::check_file`) over the positioned forms and emits its
 > unbound-name / arity / type-misuse findings as `WARNING`s (located; a 1-char
-> marker at the form). It bootstraps the enclosing project first
-> (`bootstrap_project`: `project-setup` + `project-load-sources` + `require
-> 'test`), so cross-module names and the test-framework macros resolve and don't
-> false-positive as unbound.
+> marker at the form). It bootstraps the enclosing project first through the
+> shared tooling-image seam (`introspect::load_tooling_image` →
+> `std/project.blsp`'s `setup-tooling-image`: `project-setup` +
+> `project-load-sources` + `require 'test` + `require 'format`), so cross-module
+> names and the test/format-framework macros resolve and don't false-positive as
+> unbound. `nest mcp` boots through the *same* Brood function, so the two servers
+> can't drift on what a tooling image contains.
 > • **Cross-file goto-definition** — the §Cross-file hybrid is wired: a name that
 > resolves `Free` in the buffer falls back to `(source-location 'name)` against
 > the bootstrapped image, including **into the standard library** (the prelude is
@@ -59,9 +64,36 @@ one server that owns the language knowledge.
 > `WorkspaceEdit`. Locals stay single-file; no project → just the open buffer.
 > The same engine is exposed to agents as the MCP **`callers`** tool, via the
 > pure `(references-in-source name src)` primitive (docs/mcp.md).
+> **Developer-ergonomics pass (also done):**
+> • **`textDocument/formatting`** (`formatting.rs`) — whole-document reformat,
+> delegated to the Brood formatter (`std/format.blsp`) via
+> `introspect::format_source`. One full-document `TextEdit`; `None` on a parse
+> error (don't mangle an un-parseable buffer) or when already canonical. Honors
+> "policy in Brood" — the server only transports. No range/onType (the formatter
+> works on whole files).
+> • **`workspace/symbol`** (`workspace_symbols.rs`) — project-wide symbol search
+> over every file's top-level `def`/`defn`/`defmacro` (reusing `defs::top_level`
+> and a new `workspace::all_sources` that unions project files + every open
+> buffer). Case-insensitive **subsequence** matching (`fs` → `format-source`);
+> empty query lists all.
+> • **`textDocument/codeAction`** (`code_actions.rs`) — quick-fixes off published
+> diagnostics. Today: **"did you mean?"** for `unbound symbol: X` — Levenshtein
+> against locals-in-scope + special forms + globals, within a length-relative
+> threshold, top-3 nearest, edited onto the diagnostic's (already token-narrowed)
+> range. Marked `isPreferred`.
+> • **`textDocument/foldingRange`** (`folding.rs`) — collapsible regions off the
+> CST: every multi-line container (`()`/`[]`/`{}`) and every run of consecutive
+> comment lines. Pure structural walk, no eval.
+> • **`textDocument/inlayHint`** (`inlay_hints.rs`) — parameter-name hints at
+> call sites from `arglist` (the signature-help source). Conservative: only the
+> **leading required** params (stops at the first `&optional`/`&` marker, since
+> `arglist` drops `(opt default)` groups); a head resolving to a **local** is
+> skipped; per-name `arglist` memoized per request; range-scoped to the visible
+> region.
 > **Still next:** incremental document sync; range / delta semantic-token
-> requests; and finer spans for arity/type findings (wants spans threaded
-> through the checker, not just the call operator).
+> requests; finer spans for arity/type findings (wants spans threaded through the
+> checker, not just the call operator); and more code actions (remove unused
+> `require`, create-missing-`defn`).
 
 ## Why a server, and why not brute-force it
 
@@ -351,6 +383,7 @@ additive change behind the same feature handlers.
 | **1** | completion (locals + globals), hover, `documentSymbol`, **goto-definition**, **signature help** | `arglist` / `global-names` primitives; CST top-level walk (`defs`) + scope walker | **done** |
 | **1+** | semantic diagnostics ("unbound" / arity / type misuse), **cross-file & stdlib goto**, `require`-target goto | located `check_file`; project bootstrap; `source-location` + prelude-cache; `require--find` | **done** |
 | **2** | **cross-file** references & rename (+prepareRename), document-highlight, semantic tokens, completion resolve | `scope::references` / `references_to_global`; `project_files`; CST token classification | **done** |
+| **2+** | formatting, workspace symbol, code actions (did-you-mean), folding ranges, inlay hints | `introspect::format_source`; `defs::top_level` + `workspace::all_sources`; `global_names`/`names_in_scope` + Levenshtein; CST container/comment walk; `arglist_tokens` | **done** |
 
 Tier 0 was reachable immediately because syntactic diagnostics need only the
 CST. Goto-definition landed early with Tier 1 (rather than Tier 2 as first

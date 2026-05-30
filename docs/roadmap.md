@@ -32,7 +32,9 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   Brood (`std/prelude.blsp`) over a small Rust kernel (ADR-008)
 - ✅ **Macros** (`defmacro`, `macroexpand`/`macroexpand-1`, `gensym`); `defn` and
   the `->`/`->>` threading macros are now defined *in Brood* (`std/prelude.blsp`)
-- ✅ **Quasiquote** — Clojure-style `` ` `` / `~` / `~@` (ADR-009)
+- ✅ **Quasiquote** — Clojure-style `` ` `` / `~` / `~@` (ADR-009); **auto-gensym
+  `x#`** for opt-in non-capturing macro binders (ADR-066), the first half of macro
+  hygiene ahead of namespaces (ADR-065)
 - ✅ **Parameter grammar** — `required` + `&optional` (with defaults) + `& rest`,
   in the closure calling convention (`fn`/`lambda`/`defn` all share it).
   `&key` (named args) is designed but **deferred for simplicity** (ADR-011) —
@@ -119,11 +121,21 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
     below the outermost eval — argument position, `try`-wrapped, deep — is bounded
     too (depth-2 leak repro 3.5 GB → 28 MB). The macro compile pass opts out via
     `MACRO_BLOCK` rather than being rooted. Supersedes the depth-1-only safepoint.
+  - **Region-check rooting** (ADR-061 perf follow-up, 2026-05-30): the per-call
+    operand-stack push now skips immovable handles (atoms, `PRELUDE`/`RUNTIME`),
+    rooting only genuine LOCAL transients — recovered ~10–14% of the
+    collect-at-any-depth overhead (token API in `core/heap.rs`: `is_movable` /
+    `Root` / `root`/`read_root`/`advance_root`/`root_env`).
+  - **`promote` cycle guard** (2026-05-30): `promote` grew a forwarding table +
+    reserve-then-fill (`OnceLock`) for the cyclic-capable RUNTIME closure/env
+    slabs, so promoting a self-referential or mutually-recursive local closure
+    (`(let (g (fn () g)) g)`, `letrec`) terminates instead of a SIGSEGV.
   - Validated by `crates/lisp/tests/gc.rs` (tail loops, server loops, depth-≥2
-    loops, root and spawned) and the `BROOD_GC_STRESS=1` + `debug-assertions`
-    tripwire. **Deferred:** per-call operand-stack overhead can later skip rooting
-    handles known non-LOCAL; `macros.rs` could be rooted if GC is ever wanted
-    *during* expansion. See `memory-model.md`, `memory-review.md`.
+    loops, root and spawned, cyclic-promote cross-process) and the
+    `BROOD_GC_STRESS=1` + `debug-assertions` tripwire. **Still deferred:**
+    generational young/old split (full semi-space copy each time today);
+    `macros.rs` could be rooted if GC is ever wanted *during* expansion. See
+    `memory-model.md`, `memory-review.md`.
 - ✅ **Self-hosted REPL in Brood** (ADR-048) — the read-eval-print loop is now
   `std/repl.blsp`, not Rust: a tail-recursive loop over `read-line` (the one new
   primitive) + `eval-string` + `pr-str`, with multi-line balance detection,
@@ -148,7 +160,16 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
 - ✅ **Modules** — Emacs-flat `provide` / `require` + `*load-path*` over the shared
   global table; `foo--private` convention (ADR-019). Logic in Brood; the only new
   Rust is `file-exists?` / `dir?` / `list-dir` / `cwd` / `name` / `eval-string` /
-  `%builtin-module`. *Namespaces stay deferred — a later, additive Brood macro layer.*
+  `%builtin-module`.
+- 🟡 **Namespaces** (ADR-065, [`namespaces.md`](namespaces.md)) — design recorded,
+  not yet implemented. Expand-time resolution over the flat table (no core
+  namespace axis): `(ns …)` + qualified `observer/observe` (a single interned
+  symbol — `/` is already symbol-legal), a resolver pass shared by `eval` *and*
+  the LSP, **soft** privacy (Clojure/CL, not Racket sealing — preserves ADR-013
+  hot reload), auto-require that loads-but-never-fetches. Forced by ADR-037
+  package collisions + `std/` crowding + plugins + LSP completion/cross-file/rename.
+  **Two open questions:** macro hygiene (auto-qualifying `quasiquote` vs.
+  hand-qualify) and ns-name collision across packages.
 - ✅ **Project model & test tool** — convention over configuration: `src/` is the
   project source (auto on `*load-path*`), `tests/**/*_test.blsp` are the tests; a
   `project.blsp` manifest declares identity (name/version) and overrides paths only
@@ -183,11 +204,16 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   the `crates/lsp` binary with stdio lifecycle, full document sync, and
   syntactic `publishDiagnostics` off the CST; ✅ Tier 1 (complete) — completion
   (locals + globals), hover, `documentSymbol`, goto-definition (pulled forward
-  off Foundation B's scope walker), and signature help; ⬜ Tier 2 (refs/rename,
-  semantic tokens, located checker diagnostics) + **cross-file navigation as an
-  image query** — record def sites at load time + `(source-location 'foo)`, then
-  resolve `Free` names against the running image (ADR-031), not a static
-  workspace index (all Tier-1 features are single-file today).
+  off Foundation B's scope walker), and signature help; ✅ Tier 2 (cross-file
+  refs/rename, document-highlight, semantic tokens, completion resolve, located
+  checker diagnostics) + **cross-file navigation as an image query** — def sites
+  recorded at load time + `(source-location 'foo)` resolving `Free` names against
+  the running image (ADR-031), not a static workspace index; ✅ a
+  **developer-ergonomics pass** on top — `textDocument/formatting` (delegated to
+  the Brood `std/format.blsp` formatter), `workspace/symbol`, code actions
+  (did-you-mean for unbound symbols), folding ranges, and inlay hints (param-name
+  at call sites). ⬜ Still next: incremental sync; range/delta semantic tokens;
+  finer checker-finding spans.
 
 > v0.1 is the ✅ slice above: enough to be a real, usable language. The ⬜ items
 > complete M1.

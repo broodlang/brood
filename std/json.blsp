@@ -1,0 +1,256 @@
+;; std/json.blsp — JSON ↔ Brood data, written entirely in Brood. (require 'json).
+;;
+;; Design notes (the *why*; the *what* is in the docstrings below):
+;;  - **Policy in Brood, not Rust** (ADR-006): a JSON reader/writer is exactly the
+;;    kind of thing that belongs in the language, not the kernel. It's pure
+;;    data→data, so it's a recursive-descent parser threaded through a position
+;;    index (Brood has no loops — tail recursion + an accumulator), and an encoder
+;;    that walks a value. Not built for speed; built to dogfood the language (and to
+;;    unblock the build-watcher frontend, which speaks JSON to its daemon).
+;;  - **The JSON ⇄ Brood mapping:**
+;;      object → map with **keyword** keys — idiomatic Brood (`(get obj :repo)`,
+;;             destructuring, `match`). A JSON key becomes `(keyword k)`; encoding
+;;             turns it back into a string key via the keyword's name, so the data
+;;             round-trips even for keys that print oddly (spaces / digits).
+;;      array  → vector       string → string     number → int or float
+;;      true/false → bool     null   → nil
+;;    Encoding accepts those plus string keys (emitted as-is) and lists (as arrays).
+;;  - **`\uXXXX` with no codepoint primitive:** pure Brood can't build a character
+;;    from an integer — but the *reader* decodes `\u{H..H}` escapes, so we synthesize
+;;    the one-char Brood source `"\u{H..H}"` and `read-string` it. That makes the
+;;    whole library Rust-free (the reader is the codepoint→char mechanism), including
+;;    `\b`/`\f` and astral surrogate pairs.
+;;  - Pure, opt-in (`require`), never in the prelude.
+
+(defmodule json
+  "JSON ↔ Brood data, written entirely in Brood (pure; opt-in).
+
+    (require 'json)
+    (json-parse \"{\\\"a\\\":[1,2],\\\"b\\\":true}\")  ; => {:a [1 2] :b true}
+    (json-encode {:a [1 2] :b nil})                ; => \"{\\\"a\\\":[1,2],\\\"b\\\":null}\"
+
+`json-parse` maps a JSON object → a Brood map with **keyword** keys (`(get m :repo)`),
+array → vector, string → string, number → int/float, true/false → bool, null → nil;
+it errors on malformed input. `json-encode` is the inverse — it accepts keyword,
+symbol, or string keys (all emitted as JSON string keys) and keyword/symbol values
+(emitted as their name) and lists (as arrays). Not optimised — a recursive-descent
+parser for dogfooding and modest payloads (e.g. a daemon's JSON API).")
+
+;; ---- codepoint → char, via the reader (the one tricky bit) ------------------
+;;
+;; Pure Brood has no integer→char primitive, but the scanner decodes `\u{H..H}`
+;; string escapes — so `(read-string "\"\\u{41}\"")` reads the Brood string "A".
+;; We build that source and read it. Used for `\uXXXX`, `\b`, `\f`.
+
+(def json--hex-digits "0123456789abcdef")
+
+(defn json--int->hex--acc (n acc)
+  (if (= n 0) acc
+    (json--int->hex--acc (quot n 16) (str (char-at json--hex-digits (rem n 16)) acc))))
+
+(defn json--int->hex (n)
+  "The lowercase hex string for non-negative int `n` (`0` → \"0\")."
+  (if (= n 0) "0" (json--int->hex--acc n "")))
+
+(defn json--cp->string (cp)
+  "The one-character string for Unicode code point `cp`, via a `\\u{…}` reader
+escape (the codepoint→char mechanism pure Brood otherwise lacks)."
+  (read-string (str "\"\\u{" (json--int->hex cp) "}\"")))
+
+;; ---- parse ------------------------------------------------------------------
+;;
+;; Each `json--X (s i n)` reads from char index `i` of source `s` (length `n`) and
+;; returns `[value next-index]`. Whitespace is skipped between tokens. Tail
+;; recursion + accumulators throughout; `error` on anything malformed.
+
+(defn json--at (s i n)
+  "The char at `i`, or \"\" at/after the end (so callers never index past `n`)."
+  (if (< i n) (char-at s i) ""))
+
+(defn json--ws? (c) (or (= c " ") (= c "\t") (= c "\n") (= c "\r")))
+
+(defn json--skip-ws (s i n)
+  (if (and (< i n) (json--ws? (char-at s i))) (json--skip-ws s (inc i) n) i))
+
+(defn json--digit? (c) (includes? "0123456789" c))
+
+;; -- numbers --
+(defn json--num-end (s i n)
+  (if (and (< i n) (or (json--digit? (char-at s i)) (includes? "-+.eE" (char-at s i))))
+    (json--num-end s (inc i) n)
+    i))
+
+(defn json--number (s i n)
+  (let (end (json--num-end s i n)
+        tok (substring s i end)
+        v (string->number tok))
+    (if (nil? v) (error "json: invalid number '" tok "' at index " i) [v end])))
+
+;; -- strings --
+(defn json--hex-val (c) (index-of json--hex-digits (lower c)))   ; "a"→10, "0"→0, …
+
+(defn json--hex4 (s i)
+  "The int value of the four hex digits at `i` (a `\\uXXXX` body)."
+  (+ (* 4096 (json--hex-val (char-at s i)))
+     (* 256  (json--hex-val (char-at s (+ i 1))))
+     (* 16   (json--hex-val (char-at s (+ i 2))))
+     (json--hex-val (char-at s (+ i 3)))))
+
+(defn json--unicode (s i n)
+  "A `\\uXXXX` escape body starting at `i` (after the `u`): decode one BMP code
+point, or combine a high+low surrogate pair into one astral code point. Returns
+`[char next-index]`."
+  (if (> (+ i 4) n)
+    (error "json: truncated \\u escape at index " i)
+    (let (hi (json--hex4 s i))
+      (if (and (>= hi 55296) (<= hi 56319))                      ; D800..DBFF: high surrogate
+        (if (and (<= (+ i 10) n) (= (substring s (+ i 4) (+ i 6)) "\\u"))
+          (let (lo (json--hex4 s (+ i 6))
+                cp (+ 65536 (* 1024 (- hi 55296)) (- lo 56320)))
+            [(json--cp->string cp) (+ i 10)])
+          (error "json: lone high surrogate at index " i))
+        [(json--cp->string hi) (+ i 4)]))))
+
+(defn json--escape (s i n)
+  "An escape body starting at `i` (after the backslash). Returns `[char next-index]`."
+  (let (c (json--at s i n))
+    (cond
+      (= c "\"") ["\"" (inc i)]
+      (= c "\\") ["\\" (inc i)]
+      (= c "/")  ["/" (inc i)]
+      (= c "n")  ["\n" (inc i)]
+      (= c "t")  ["\t" (inc i)]
+      (= c "r")  ["\r" (inc i)]
+      (= c "b")  [(json--cp->string 8) (inc i)]
+      (= c "f")  [(json--cp->string 12) (inc i)]
+      (= c "u")  (json--unicode s (inc i) n)
+      :else (error "json: invalid escape '\\" c "' at index " i))))
+
+(defn json--string--acc (s i n acc)
+  (let (c (json--at s i n))
+    (cond
+      (= c "")   (error "json: unterminated string")
+      (= c "\"") [acc (inc i)]
+      (= c "\\") (let ([ch j] (json--escape s (inc i) n)) (json--string--acc s j n (str acc ch)))
+      :else      (json--string--acc s (inc i) n (str acc c)))))
+
+(defn json--string (s i n)
+  "A string body starting at `i` (just after the opening quote). Returns `[str end]`."
+  (json--string--acc s i n ""))
+
+;; -- literals --
+(defn json--lit (s i n word val)
+  (let (end (+ i (string-length word)))
+    (if (and (<= end n) (= (substring s i end) word))
+      [val end]
+      (error "json: invalid literal at index " i))))
+
+;; -- arrays --
+(defn json--array--acc (s i n acc)
+  (let ([v j0] (json--value s i n)
+        j (json--skip-ws s j0 n)
+        acc2 (cons v acc)
+        c (json--at s j n))
+    (cond
+      (= c ",") (json--array--acc s (json--skip-ws s (inc j) n) n acc2)
+      (= c "]") [(into [] (reverse acc2)) (inc j)]
+      :else (error "json: expected ',' or ']' in array at index " j))))
+
+(defn json--array (s i n)
+  "An array body starting at `i` (just after `[`). Returns `[vector end]`."
+  (let (i2 (json--skip-ws s i n))
+    (if (= (json--at s i2 n) "]")
+      [[] (inc i2)]
+      (json--array--acc s i2 n nil))))
+
+;; -- objects --
+(defn json--object--acc (s i n acc)
+  (let (i2 (json--skip-ws s i n))
+    (if (not (= (json--at s i2 n) "\""))
+      (error "json: expected string key at index " i2)
+      (let ([k j0] (json--string s (inc i2) n)
+            j1 (json--skip-ws s j0 n))
+        (if (not (= (json--at s j1 n) ":"))
+          (error "json: expected ':' after key at index " j1)
+          (let ([v j2] (json--value s (json--skip-ws s (inc j1) n) n)
+                j3 (json--skip-ws s j2 n)
+                acc2 (assoc acc (keyword k) v)              ; JSON keys → keywords
+                c (json--at s j3 n))
+            (cond
+              (= c ",") (json--object--acc s (inc j3) n acc2)
+              (= c "}") [acc2 (inc j3)]
+              :else (error "json: expected ',' or '}' in object at index " j3))))))))
+
+(defn json--object (s i n)
+  "An object body starting at `i` (just after `{`). Returns `[map end]`."
+  (let (i2 (json--skip-ws s i n))
+    (if (= (json--at s i2 n) "}")
+      [{} (inc i2)]
+      (json--object--acc s i2 n {}))))
+
+(defn json--value (s i n)
+  "One JSON value at index `i` (whitespace already skipped). Returns `[value end]`."
+  (let (c (json--at s i n))
+    (cond
+      (= c "{") (json--object s (inc i) n)
+      (= c "[") (json--array s (inc i) n)
+      (= c "\"") (json--string s (inc i) n)
+      (= c "t") (json--lit s i n "true" true)
+      (= c "f") (json--lit s i n "false" false)
+      (= c "n") (json--lit s i n "null" nil)
+      (= c "") (error "json: unexpected end of input")
+      :else (json--number s i n))))
+
+(defn json-parse (s)
+  "Parse JSON text `s` into Brood data: object → a map with **keyword** keys, array →
+a vector, string → string, number → int/float, true/false → bool, null → nil. Errors
+on malformed input or trailing content. Pure."
+  (let (n (string-length s)
+        i (json--skip-ws s 0 n))
+    (if (>= i n)
+      (error "json: empty input")
+      (let ([v j] (json--value s i n)
+            k (json--skip-ws s j n))
+        (if (< k n)
+          (error "json: trailing content at index " k)
+          v)))))
+
+;; ---- encode -----------------------------------------------------------------
+
+(defn json--enc-escapes (s)
+  "Escape the JSON-special characters in `s` (backslash first)."
+  (-> s
+      (replace "\\" "\\\\")
+      (replace "\"" "\\\"")
+      (replace "\n" "\\n")
+      (replace "\r" "\\r")
+      (replace "\t" "\\t")))
+
+(defn json--enc-string (s) (str "\"" (json--enc-escapes s) "\""))
+
+(defn json--enc-key (k)
+  "A JSON object key: a string as-is, a keyword/symbol by name, else its `str`."
+  (json--enc-string (cond (keyword? k) (name k) (symbol? k) (name k) (string? k) k :else (str k))))
+
+(defn json--enc-pair ([k v]) (str (json--enc-key k) ":" (json-encode v)))
+
+(defn json--enc-object (m) (str "{" (join "," (map json--enc-pair m)) "}"))
+(defn json--enc-array (xs) (str "[" (join "," (map json-encode xs)) "]"))
+
+(defn json-encode (v)
+  "Encode Brood value `v` as JSON text: nil → null, true/false → bool, a number → a
+number, a string → a quoted string, a keyword/symbol → a string of its name, a map →
+an object (keyword keys become string keys), a vector or list → an array. Errors on
+anything else (a pid, fn, …). Pure."
+  (cond
+    (nil? v)     "null"
+    (= v true)   "true"
+    (= v false)  "false"
+    (number? v)  (number->string v)
+    (string? v)  (json--enc-string v)
+    (keyword? v) (json--enc-string (name v))
+    (symbol? v)  (json--enc-string (name v))
+    (map? v)     (json--enc-object v)
+    (vector? v)  (json--enc-array v)
+    (list? v)    (json--enc-array v)
+    :else (error "json: cannot encode " v)))

@@ -31,19 +31,22 @@ use lsp_types::notification::{
     Notification as NotificationTrait, PublishDiagnostics,
 };
 use lsp_types::request::{
-    Completion, DocumentHighlightRequest, DocumentSymbolRequest, GotoDefinition, HoverRequest,
+    CodeActionRequest, Completion, DocumentHighlightRequest, DocumentSymbolRequest,
+    FoldingRangeRequest, Formatting, GotoDefinition, HoverRequest, InlayHintRequest,
     PrepareRenameRequest, References, Rename, Request as RequestTrait, ResolveCompletionItem,
-    SemanticTokensFullRequest, SignatureHelpRequest,
+    SemanticTokensFullRequest, SignatureHelpRequest, WorkspaceSymbolRequest,
 };
 use lsp_types::{
-    CompletionItem, CompletionOptions, CompletionParams, Diagnostic, DiagnosticSeverity,
-    DocumentHighlightParams, DocumentSymbolParams, GotoDefinitionParams, HoverParams,
-    HoverProviderCapability, OneOf, Position, PositionEncodingKind, PrepareRenameResponse,
+    CodeActionParams, CodeActionProviderCapability, CompletionItem, CompletionOptions,
+    CompletionParams, Diagnostic, DiagnosticSeverity, DocumentFormattingParams,
+    DocumentHighlightParams, DocumentSymbolParams, FoldingRangeParams,
+    FoldingRangeProviderCapability, GotoDefinitionParams, HoverParams, HoverProviderCapability,
+    InlayHintParams, OneOf, Position, PositionEncodingKind, PrepareRenameResponse,
     PublishDiagnosticsParams, Range, ReferenceParams, RenameOptions, RenameParams,
     SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
     SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelpOptions,
     SignatureHelpParams, TextDocumentPositionParams, TextDocumentSyncCapability,
-    TextDocumentSyncKind, Uri,
+    TextDocumentSyncKind, Uri, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 
 use brood::core::value::Value;
@@ -52,11 +55,15 @@ use brood::syntax::{cst, reader, scope};
 use brood::types::check::check_file;
 use brood::Interp;
 
+mod code_actions;
 mod completion;
 mod definition;
 mod defs;
 mod diagnostics;
+mod folding;
+mod formatting;
 mod hover;
+mod inlay_hints;
 mod line_index;
 mod references;
 mod rename;
@@ -64,6 +71,7 @@ mod semantic_tokens;
 mod signature;
 mod symbols;
 mod workspace;
+mod workspace_symbols;
 
 use line_index::LineIndex;
 
@@ -88,6 +96,19 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
         }),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
+        // Project-wide symbol search over every file's top-level definitions.
+        workspace_symbol_provider: Some(OneOf::Left(true)),
+        // Quick-fixes off published diagnostics (e.g. "did you mean?" for an
+        // unbound symbol). Simple capability — no codeAction/resolve.
+        code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+        // Collapsible regions (multi-line forms, comment blocks) off the CST.
+        folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+        // Parameter-name hints at call sites, from `arglist`.
+        inlay_hint_provider: Some(OneOf::Left(true)),
+        // Whole-document formatting, delegated to the Brood formatter
+        // (`std/format.blsp`) via `introspect::format_source`. Range/onType
+        // formatting isn't offered — the formatter works on whole files.
+        document_formatting_provider: Some(OneOf::Left(true)),
         definition_provider: Some(OneOf::Left(true)),
         references_provider: Some(OneOf::Left(true)),
         document_highlight_provider: Some(OneOf::Left(true)),
@@ -434,6 +455,86 @@ fn handle_request(docs: &Documents, interp: &mut Interp, req: Request) -> Respon
             };
             Response::new_ok(id, completion::resolve(interp, item))
         }
+        Formatting::METHOD => {
+            let (id, p) = match extract::<DocumentFormattingParams>(req) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            // `&mut interp` (format-source evaluates the Brood formatter) plus the
+            // immutable `docs` borrow — inline like goto-definition to keep both.
+            let result = match docs.get(&p.text_document.uri) {
+                Some(doc) => formatting::formatting(interp, &doc.text, &doc.analysis.line_index),
+                None => None,
+            };
+            Response::new_ok(id, result)
+        }
+        WorkspaceSymbolRequest::METHOD => {
+            let (id, p) = match extract::<WorkspaceSymbolParams>(req) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            let symbols = workspace_symbols::workspace_symbols(interp, docs, &p.query);
+            Response::new_ok(id, WorkspaceSymbolResponse::Nested(symbols))
+        }
+        CodeActionRequest::METHOD => {
+            let (id, p) = match extract::<CodeActionParams>(req) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            let result = match docs.get(&p.text_document.uri) {
+                Some(doc) => {
+                    let a = &doc.analysis;
+                    // Resolve a diagnostic's range to the byte offset of its
+                    // start — where the unbound name sits, for `names_in_scope`.
+                    let offset_of = |r: Range| a.line_index.offset(&doc.text, r.start);
+                    code_actions::code_actions(
+                        interp,
+                        &p.text_document.uri,
+                        &a.scope,
+                        offset_of,
+                        &p.context.diagnostics,
+                    )
+                }
+                None => Vec::new(),
+            };
+            Response::new_ok(id, result)
+        }
+        FoldingRangeRequest::METHOD => {
+            let (id, p) = match extract::<FoldingRangeParams>(req) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            let result = docs.get(&p.text_document.uri).map(|doc| {
+                let a = &doc.analysis;
+                folding::folding_ranges(&a.cst, &doc.text, &a.line_index)
+            });
+            Response::new_ok(id, result)
+        }
+        InlayHintRequest::METHOD => {
+            let (id, p) = match extract::<InlayHintParams>(req) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            let result = match docs.get(&p.text_document.uri) {
+                Some(doc) => {
+                    let a = &doc.analysis;
+                    let range = (
+                        a.line_index.offset(&doc.text, p.range.start),
+                        a.line_index.offset(&doc.text, p.range.end),
+                    );
+                    Some(inlay_hints::inlay_hints(
+                        interp,
+                        &a.cst,
+                        &doc.text,
+                        &a.scope,
+                        &a.line_index,
+                        range,
+                    ))
+                }
+                None => None,
+            };
+            Response::new_ok(id, result)
+        }
         // Nothing else is advertised: reply method-not-found rather than leave
         // the client waiting on a response.
         _ => Response::new_err(
@@ -694,19 +795,12 @@ fn bootstrap_project(interp: &mut Interp, bootstrapped: &mut HashSet<PathBuf>, u
     if bootstrapped.contains(&root) {
         return;
     }
-    // Escape backslashes and quotes for embedding into a Brood string literal.
-    // Common Unix paths have neither, but be safe — shared rule with
-    // `nest`/`introspect` so any future escape gets one fix.
-    let esc = brood::introspect::escape_brood_string(&root.display().to_string());
-    let cmd = format!(
-        "(require 'project) (project-setup \"{e}\") (project-load-sources \"{e}\") (require 'test)",
-        e = esc,
-    );
-    if let Err(e) = interp.eval_str(&cmd) {
-        eprintln!(
-            "brood-lsp: project bootstrap failed for {}: {e}",
-            root.display()
-        );
+    // Load the project image for tooling through the shared seam, so the LSP
+    // and `nest mcp` can't drift on which frameworks a tooling image carries
+    // (this used to inline `project-setup`/`load-sources`/`require 'test` and
+    // omitted `'format`). Policy lives in Brood (`setup-tooling-image`).
+    if let Err(e) = brood::introspect::load_tooling_image(interp, &root.display().to_string()) {
+        eprintln!("brood-lsp: project bootstrap failed for {}: {e}", root.display());
     }
     // Mark bootstrapped regardless of success — a partial load is consistent
     // (each top-level form's `eval_str` is checkpointed), and re-running on
@@ -1071,6 +1165,113 @@ mod server_tests {
     }
 
     #[test]
+    fn serves_new_features_end_to_end() {
+        let (server, client) = Connection::memory();
+        let handle = thread::spawn(move || main_loop(&server));
+
+        // A messy multi-line buffer with a typo'd call to a prelude global.
+        client
+            .sender
+            .send(did_open("(defn f (x)\n  (reduc + x))"))
+            .unwrap();
+
+        // formatting → one whole-document edit that canonicalises the source.
+        let r = request(
+            &client,
+            10,
+            Formatting::METHOD,
+            serde_json::json!({
+                "textDocument": { "uri": uri() },
+                "options": { "tabSize": 2, "insertSpaces": true },
+            }),
+        );
+        let edits: Vec<lsp_types::TextEdit> = serde_json::from_value(r.result.unwrap()).unwrap();
+        assert_eq!(edits.len(), 1, "one whole-document edit");
+        assert!(edits[0].new_text.contains("(defn f (x)"), "{:?}", edits[0]);
+
+        // workspace/symbol "f" → finds the top-level def `f`.
+        let r = request(
+            &client,
+            11,
+            WorkspaceSymbolRequest::METHOD,
+            serde_json::json!({ "query": "f" }),
+        );
+        let syms: Vec<lsp_types::WorkspaceSymbol> =
+            serde_json::from_value(r.result.unwrap()).unwrap();
+        assert!(syms.iter().any(|s| s.name == "f"), "got: {syms:?}");
+
+        // foldingRange → the multi-line defn folds (lines 0..1).
+        let r = request(
+            &client,
+            12,
+            FoldingRangeRequest::METHOD,
+            serde_json::json!({ "textDocument": { "uri": uri() } }),
+        );
+        let folds: Vec<lsp_types::FoldingRange> =
+            serde_json::from_value(r.result.unwrap()).unwrap();
+        assert!(folds.iter().any(|f| f.start_line == 0), "got: {folds:?}");
+
+        // inlayHint over the whole doc → labels the `(reduc + x)` args? `reduc`
+        // is unbound (typo), so no hint there; but the outer call has none too.
+        // Just assert the request succeeds and returns an array.
+        let r = request(
+            &client,
+            13,
+            InlayHintRequest::METHOD,
+            serde_json::json!({
+                "textDocument": { "uri": uri() },
+                "range": {
+                    "start": { "line": 0, "character": 0 },
+                    "end": { "line": 1, "character": 14 },
+                },
+            }),
+        );
+        let _hints: Vec<lsp_types::InlayHint> = serde_json::from_value(r.result.unwrap()).unwrap();
+
+        // codeAction over the `reduc` token, passing the published unbound-symbol
+        // diagnostic in context → a "did you mean `reduce`?" quick-fix.
+        let r = request(
+            &client,
+            14,
+            CodeActionRequest::METHOD,
+            serde_json::json!({
+                "textDocument": { "uri": uri() },
+                "range": {
+                    "start": { "line": 1, "character": 3 },
+                    "end": { "line": 1, "character": 8 },
+                },
+                "context": {
+                    "diagnostics": [{
+                        "range": {
+                            "start": { "line": 1, "character": 3 },
+                            "end": { "line": 1, "character": 8 },
+                        },
+                        "message": "unbound symbol: reduc",
+                        "severity": 2,
+                        "source": "brood",
+                    }],
+                },
+            }),
+        );
+        let actions: Vec<lsp_types::CodeActionOrCommand> =
+            serde_json::from_value(r.result.unwrap()).unwrap();
+        let titles: Vec<String> = actions
+            .iter()
+            .filter_map(|a| match a {
+                lsp_types::CodeActionOrCommand::CodeAction(ca) => Some(ca.title.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            titles.iter().any(|t| t.contains("reduce")),
+            "expected a 'did you mean reduce' fix, got: {titles:?}"
+        );
+
+        shutdown(&client);
+        handle.join().unwrap().unwrap();
+    }
+
+    #[test]
     fn unknown_request_gets_method_not_found() {
         let (server, client) = Connection::memory();
         let handle = thread::spawn(move || main_loop(&server));
@@ -1079,7 +1280,7 @@ mod server_tests {
             .sender
             .send(Message::Request(Request::new(
                 RequestId::from(7),
-                "textDocument/formatting".to_string(), // not advertised
+                "textDocument/onTypeFormatting".to_string(), // not advertised
                 serde_json::json!({}),
             )))
             .unwrap();

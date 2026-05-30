@@ -112,16 +112,6 @@ reporting a real error. Never lets an error escape the loop."
 
 ;; ---- history ----------------------------------------------------------------
 
-(defn repl--remember (history src)
-  "Push submitted source `src` onto `history` (newest first) for ↑/↓ recall —
-internal newlines collapsed to spaces (so a multi-line form recalls as one line),
-trimmed, dropping blanks and consecutive duplicates."
-  (let (entry (trim (replace src "\n" " ")))
-    (if (or (= entry "")
-            (and (not (empty? history)) (= (first history) entry)))
-      history
-      (cons entry history))))
-
 (defn repl--history-path ()
   "The history file path: `$BROOD_HISTORY`, else `$HOME/.brood_history` (or, with no
 `$HOME`, `.brood_history` in the current directory)."
@@ -199,7 +189,7 @@ incomplete. Ctrl-C drops the in-progress form and re-prompts. Returns a map
               (let (src (str acc line "\n"))
                 (if (= (repl--eval-print src) :more)
                   (repl--read-eval interactive src history)   ; incomplete — keep reading
-                  (let (h2 (repl--remember history src))
+                  (let (h2 (lineedit--remember history src))
                     ;; persist only interactive sessions (not piped/scripted runs)
                     (when interactive (repl--save-history h2))
                     {:eof false :history h2}))))))))

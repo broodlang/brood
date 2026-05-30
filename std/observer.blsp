@@ -56,9 +56,29 @@ attach). Drive the standalone app from the shell with `nest observe`.")
 
 (require 'display)
 (require 'keymap)     ; the shared key→command dispatcher (also used by the REPL)
+(require 'face)       ; the shared named-face / theme registry
 (require 'ui)         ; the reusable app framework — frontends + the `ui-run` loop
 (require 'lineedit)  ; the minibuffer reuses lineedit's pure editing core
 (require 'highlight) ; …and its syntax colouring (shared with the REPL line editor)
+
+;; ---- faces (named, via the shared `face` registry) --------------------------
+;;
+;; Every styled section names a face here instead of inlining `{:fg …}` at the
+;; render site, so the whole observer is reskinned by redefining these (or, live,
+;; `(face-set :observer/detail {:fg :magenta})` from the REPL). Most inherit a core
+;; `:ui/*` face; they resolve to the same attribute maps the renderer always used.
+
+(def-face :observer/header     {:inherit :ui/header})      ; node banner: bold reverse
+(def-face :observer/node-stats {:inherit :ui/dim})         ; the second header line
+(def-face :observer/col-header {:bold true})               ; the column titles
+(def-face :observer/detail     {:inherit :ui/highlight})   ; the selection detail line
+(def-face :observer/footer     {:inherit :ui/selected})    ; the help / status footer
+(def-face :observer/selected   {:inherit :ui/selected})    ; the selected process row
+(def-face :observer/row-running  {:fg :green})             ; a running process row
+(def-face :observer/row-runnable {:fg :yellow})            ; a runnable process row
+(def-face :observer/row-waiting  {:inherit :ui/dim})       ; a parked (waiting) row
+(def-face :observer/minibuffer-prompt {:inherit :ui/highlight}) ; the eval prompt
+(def-face :observer/confirm    {:inherit :ui/error})       ; the kill confirm prompt
 
 ;; ---- pure formatting helpers ------------------------------------------------
 
@@ -96,13 +116,14 @@ attach). Drive the standalone app from the shell with `nest observe`.")
                     (get p :monitored-by))))
 
 (defn observe--row-face (p selected?)
-  "Face for a process row: reverse-video when selected, else coloured by status
-(running green, runnable yellow, waiting dim)."
+  "Face for a process row: the selection face when selected, else the row face for
+its status (running / runnable / waiting), resolved through the shared registry so
+the colours live in one place (`:observer/*`)."
   (if selected?
-    {:reverse true}
-    (cond (= (get p :status) :running)  {:fg :green}
-          (= (get p :status) :runnable) {:fg :yellow}
-          (= (get p :status) :waiting)  {:fg :dark-grey}
+    (face :observer/selected)
+    (cond (= (get p :status) :running)  (face :observer/row-running)
+          (= (get p :status) :runnable) (face :observer/row-runnable)
+          (= (get p :status) :waiting)  (face :observer/row-waiting)
           :else nil)))
 
 (defn observe--detail (p nprocs cap sel)
@@ -177,9 +198,16 @@ completion already works via `lineedit--handle`'s keymap in `observe--command-ke
         chunks (highlight-chunks input hs vis overrides)
         cursor-col (min (max 0 (dec cols)) (+ promptw (- point hs))))
     (append
-      [(text row 0 prompt nil)]
+      [(text row 0 prompt (face :observer/minibuffer-prompt))]
       (observe--chunk-ops chunks row promptw)
       [(cursor row cursor-col)])))
+
+(defn observe--confirm-line (c)
+  "The footer prompt for a pending action confirmation `c` (a map `{:id :name …}`):
+e.g. `  kill pid 7 (worker)? y/n`. The name is shown when the process has one."
+  (str "  kill pid " (get c :id)
+       (let (nm (get c :name)) (if (nil? nm) "" (str " (" (name nm) ")")))
+       "? y/n"))
 
 ;; ---- the pure render core (no IO — the testable heart) ----------------------
 
@@ -205,26 +233,31 @@ the observer's testable core; `observe--loop` feeds it live data."
                             (observe--row-face p selected?))))
                   (enumerate visible))
         cmd? (= (get ui :mode) :command)
+        confirm (get ui :confirm)
         edit (get ui :edit)
         detail (cond
                  (get ui :msg) (str "  " (get ui :msg))
                  (empty? procs) "  (no live processes)"
                  :else (observe--detail (nth procs (min (max 0 (dec nprocs)) sel)) nprocs cap sel))
         footer (str (if paused "  PAUSED · space resume" "  space pause")
-                    " · ↑/↓ select · s sort(" (name sort) ") · : eval · r refresh · q quit"))
+                    " · ↑/↓ select · t tree · s sort(" (name sort) ") · x kill · : eval · r refresh · q quit")
+        ;; last row: the minibuffer (command mode), the kill confirm prompt, or the
+        ;; help footer — each a list of ops so `append` splices it in.
+        last-row (cond
+                   cmd?    (observe--minibuffer edit (dec rows) cols)
+                   confirm [(text (dec rows) 0 (observe--fit (pad-right (observe--confirm-line confirm) cols) cols)
+                                  (face :observer/confirm))]
+                   :else   [(text (dec rows) 0 (observe--fit (pad-right footer cols) cols)
+                                  (face :observer/footer))]))
     (apply frame
            (append
              [(clear)
-              (text 0 0 (observe--fit (pad-right (nth lines 0) cols) cols) {:reverse true :bold true})
-              (text 1 0 (observe--fit (pad-right (nth lines 1) cols) cols) {:fg :dark-grey})
-              (text 2 0 (observe--fit (str "  " (observe--cells "ID" "NAME" "STATUS" "MBOX" "MEM" "MON")) cols) {:bold true})]
+              (text 0 0 (observe--fit (pad-right (nth lines 0) cols) cols) (face :observer/header))
+              (text 1 0 (observe--fit (pad-right (nth lines 1) cols) cols) (face :observer/node-stats))
+              (text 2 0 (observe--fit (str "  " (observe--cells "ID" "NAME" "STATUS" "MBOX" "MEM" "MON")) cols) (face :observer/col-header))]
              body
-             [(text (- rows 2) 0 (observe--fit (pad-right detail cols) cols) {:fg :cyan})]
-             ;; last row: the syntax-highlighted minibuffer (command mode, cursor
-             ;; placed) or the reverse-video help footer.
-             (if cmd?
-               (observe--minibuffer edit (dec rows) cols)
-               [(text (dec rows) 0 (observe--fit (pad-right footer cols) cols) {:reverse true})])))))
+             [(text (- rows 2) 0 (observe--fit (pad-right detail cols) cols) (face :observer/detail))]
+             last-row))))
 
 ;; ---- live data --------------------------------------------------------------
 
@@ -338,13 +371,33 @@ Clamped to a valid row."
 (defn observe-cmd-quit (state _) "Quit the observer." (assoc state :done true))
 (defn observe-cmd-command (state _)
   "Open the eval minibuffer (a Brood prompt). Enter evaluates in the observed
-runtime (locally inline, or on the peer when remote-attached); Ctrl-C cancels."
-  (assoc state :mode :command :edit (lineedit--init "λ " "" []) :msg nil))
+runtime (locally inline, or on the peer when remote-attached); Ctrl-C cancels.
+Seeds the line editor with the session's command history (↑/↓ recall, C-r search)."
+  (assoc state :mode :command :edit (lineedit--init "λ " "" (get state :history)) :msg nil))
+
+(defn observe-cmd-tree (state _)
+  "Toggle the tree view — the parent→child process forest (children indented under
+their spawner) — on and off (back to id order). The view is also one stop of the
+`s` sort cycle; `t` jumps straight to it."
+  (assoc state :sort (if (= (get state :sort) :tree) :id :tree)))
+
+(defn observe-cmd-kill (state _)
+  "Ask to kill the selected process: stash a pending confirmation (`:confirm`); the
+actual `(exit … :kill)` waits for `y` (see `observe--confirm-key`). No-op when no
+process is selected."
+  (let (procs (get state :procs) sel (get state :sel))
+    (if (empty? procs)
+      state
+      (let (p (nth procs sel))
+        (assoc state :confirm {:pid (get p :pid) :id (get p :id) :name (get p :name)}
+                     :msg nil)))))
 
 (def *observe-keymap*
   {:up 'observe-cmd-up :ctrl-p 'observe-cmd-up "k" 'observe-cmd-up
    :down 'observe-cmd-down :ctrl-n 'observe-cmd-down "j" 'observe-cmd-down
    "s" 'observe-cmd-sort
+   "t" 'observe-cmd-tree
+   "x" 'observe-cmd-kill
    " " 'observe-cmd-pause
    "r" 'observe-cmd-refresh
    ":" 'observe-cmd-command "e" 'observe-cmd-command
@@ -417,17 +470,38 @@ EOF, return to navigation; otherwise keep editing."
   (let (edit (lineedit--handle (get state :edit) key)
         done (get edit :done))
     (cond
-      (= done :submit) (assoc state :mode :nav :edit nil :msg ((get backend :eval) (get edit :text)))
+      (= done :submit) (assoc state :mode :nav :edit nil
+                                    :history (lineedit--remember (get state :history) (get edit :text))
+                                    :msg ((get backend :eval) (get edit :text)))
       (nil? done)      (assoc state :edit edit)
       :else            (assoc state :mode :nav :edit nil))))
+
+(defn observe--kill-msg (pid id)
+  "Kill local process `pid` (`exit … :kill`) and return a one-line result for the
+minibuffer (`id` for display). Used by both the local backend and the remote
+`:observe` agent. A nil pid (a process gone before confirm) reports an error."
+  (if (nil? pid)
+    "error: no pid to kill"
+    (do (exit pid :kill) (str "killed pid " id))))
+
+(defn observe--confirm-key (model backend key)
+  "Resolve a pending kill confirmation (`:confirm`): `y`/Enter kills the process via
+the backend's `:kill` and reports the result; any other key cancels. Clears
+`:confirm` either way (the result, or `kill cancelled`, shows on the detail line)."
+  (let (c (get model :confirm))
+    (if (or (= key "y") (= key :enter))
+      (assoc model :confirm nil :msg ((get backend :kill) c))
+      (assoc model :confirm nil :msg "kill cancelled"))))
 
 ;; The observer is a `ui-run` client (std/ui.blsp): a pure `view` (model + size →
 ;; frame) and an `update` (model + input + size → model). `ui-run` owns the loop —
 ;; enter, render, poll, fold, recurse, leave — so the observer holds no loop of its
 ;; own. The session model is `{:sel-id :sort :paused :last :link :mode :edit :msg
-;; :backend}`; `:backend` is `{:source <0-arg fn → snapshot | :timeout | :down>
-;; :eval <fn src → result-string>}` (local inline, or a peer request/eval for remote
-;; attach). `ui-run` quits when a command sets `:done`.
+;; :history :confirm :backend}` (`:history` the minibuffer's command recall, newest
+;; first; `:confirm` a pending kill `{:pid :id :name}` or nil); `:backend` is
+;; `{:source <0-arg fn → snapshot | :timeout | :down> :eval <fn src → result-string>
+;; :kill <fn confirm → result-string>}` (local inline, or peer request/eval/kill for
+;; remote attach). `ui-run` quits when a command sets `:done`.
 
 (defn observe--derived (model cols rows)
   "Thread the currently-rendered process list / selection / count into `model`, so
@@ -447,23 +521,29 @@ the minibuffer UI state. Paints to whatever frontend `ui-run` holds."
         sort (get model :sort)
         procs (observe--order (get snap :procs) sort)
         sel (observe--sel-index procs (get model :sel-id))
-        ui {:mode (get model :mode) :edit (get model :edit) :msg (get model :msg)})
+        ui {:mode (get model :mode) :edit (get model :edit) :msg (get model :msg)
+            :confirm (get model :confirm)})
     (observe-frame (get snap :node) procs sel cols rows (get model :paused) sort (get model :link) ui)))
 
 (defn observe--update (model input cols rows)
   "The observer's `ui-run` **update**: fold one input into the next model. `:tick`
 (the refresh beat) fetches a fresh snapshot from the backend's `:source` unless
-paused or in the minibuffer; a `[:mouse …]` event selects/scrolls; in `:command`
-mode keys drive the eval minibuffer; otherwise keys dispatch through
-`*observe-keymap*` (quit sets `:done`, which `ui-run` honours). The backend rides in
-the model under `:backend`."
+paused, in the minibuffer, or awaiting a kill confirmation (so the list can't shift
+under a pending action); a `[:mouse …]` event selects/scrolls; a pending `:confirm`
+routes keys to y/n; in `:command` mode keys drive the eval minibuffer; otherwise
+keys dispatch through `*observe-keymap*` (quit sets `:done`, which `ui-run`
+honours). The backend rides in the model under `:backend`."
   (let (backend (get model :backend)
         cap (max 1 (- rows 5)))             ; visible body height (see observe-frame)
     (cond
       (= input :tick)
-        (if (and (not (get model :paused)) (not (= (get model :mode) :command)))
+        (if (and (not (get model :paused))
+                 (not (= (get model :mode) :command))
+                 (not (get model :confirm)))
           (observe--apply-result model ((get backend :source)))
           model)
+      (get model :confirm)
+        (observe--confirm-key model backend input)
       (observe--mouse? input)
         (observe--apply-mouse (observe--derived model cols rows) input cap)
       (= (get model :mode) :command)
@@ -484,11 +564,15 @@ mailbox — giving the observer a non-zero backlog to display."
   (receive ([:work _] (observe--backlog-worker))))
 
 (defn observe--spawn-demo (n)
-  "Spawn `n` idle demo processes plus one with a deliberate mailbox backlog, so a
-fresh observer has live processes to watch. Returns nil."
+  "Spawn `n` idle demo processes plus one with a deliberate mailbox backlog, each
+**registered with a name** (`:idle-1`…`:idle-n`, `:backlog`) so a fresh observer
+shows named processes (most live processes are anonymous and render `-`). Returns
+nil."
   (do
-    (repeatedly n (fn () (spawn (observe--idle-worker))))
+    (doseq (i (range n))
+      (register (keyword (str "idle-" (inc i))) (spawn (observe--idle-worker))))
     (let (w (spawn (observe--backlog-worker)))
+      (register :backlog w)
       (repeatedly 4 (fn () (send w :idle))))
     nil))
 
@@ -510,7 +594,9 @@ terminal; pass `(gui-display)` for a window, or a `display-broadcast` of several
 frontends to render to all at once. It blocks the calling process until quit, so
 `(observe)` runs it in a spawned process."
   (ui-run {:sel-id nil :sort :id :paused false :last nil :link :ok :mode :nav :edit nil :msg nil
-           :backend {:source observe--local-snapshot :eval observe--eval-string}}
+           :history [] :confirm nil
+           :backend {:source observe--local-snapshot :eval observe--eval-string
+                     :kill (fn (c) (observe--kill-msg (get c :pid) (get c :id)))}}
           observe--view observe--update display))
 
 (defn observe ()
@@ -544,14 +630,17 @@ For a modal terminal observer instead, call `(observe-attach *term-display*)`."
 
 (defn observe--agent-loop ()
   "The target-side agent's receive loop: reply to `[:snapshot from _]` with this
-runtime's `observe--local-snapshot`, and to `[:eval src from _]` with the result of
-evaluating `src` HERE (the remote eval minibuffer) — both sent back to the
+runtime's `observe--local-snapshot`, to `[:eval src from _]` with the result of
+evaluating `src` HERE (the remote eval minibuffer), and to `[:kill pid id from _]`
+by killing `pid` HERE and replying with the result — all sent back to the
 requester's pid (which routes over the link). Ignores anything else."
   (receive
     ([:snapshot from _] (do (send from [:observe-reply (observe--local-snapshot)])
                             (observe--agent-loop)))
     ([:eval src from _] (do (send from [:eval-reply (observe--eval-string src)])
                             (observe--agent-loop)))
+    ([:kill pid id from _] (do (send from [:kill-reply (observe--kill-msg pid id)])
+                               (observe--agent-loop)))
     (_ (observe--agent-loop))))
 
 (defn observe-serve ()
@@ -597,6 +686,17 @@ string on a dropped/stalled link rather than throwing (the minibuffer shows it).
     ([:nodedown ~peer] "error: link down")
     (after *observe-timeout* "error: eval timed out")))
 
+(defn observe--remote-kill (peer c)
+  "Kill the process in confirmation `c` on `peer` via its `:observe` agent (the
+process runs on the peer, so the kill must too): send the target-side `:pid` + `:id`
+and await the agent's result string. Returns an error string on a dropped/stalled
+link rather than throwing."
+  (send {:name :observe :node peer} [:kill (get c :pid) (get c :id) (self) (ref)])
+  (receive
+    ([:kill-reply r] r)
+    ([:nodedown ~peer] "error: link down")
+    (after *observe-timeout* "error: kill timed out")))
+
 (defn observe-connect (spec cookie)
   "Attach the observer to a peer runtime named in `spec` (\"name@host:port\") over
 the node link, authenticating with `cookie` (both sides share it). The target must
@@ -612,8 +712,10 @@ until you quit."
       ;; `ui-run` enters the display — and we only reach here after `connect`
       ;; succeeded, so a bad spec/cookie never wrecks the screen.
       (ui-run {:sel-id nil :sort :id :paused false :last nil :link :ok :mode :nav :edit nil :msg nil
+               :history [] :confirm nil
                :backend {:source (fn () (observe--request peer))
-                         :eval (fn (src) (observe--remote-eval peer src))}}
+                         :eval (fn (src) (observe--remote-eval peer src))
+                         :kill (fn (c) (observe--remote-kill peer c))}}
               observe--view observe--update *term-display*))))
 
 (defn observe-run (&optional (demo true))

@@ -260,6 +260,62 @@
       (assert= (get submitted :mode) :nav)                    ; submit leaves command mode
       (assert= (get (observe--command-key s back :ctrl-c) :mode) :nav))))   ; cancel too
 
+(describe "observer kill / confirm / tree (pure)"
+  (test "observe-cmd-tree toggles the tree view on and off"
+    (assert= (get (observe-cmd-tree {:sort :id} nil) :sort) :tree)
+    (assert= (get (observe-cmd-tree {:sort :tree} nil) :sort) :id)
+    (assert= (get (observe-cmd-tree {:sort :mailbox} nil) :sort) :tree))   ; any non-tree → tree
+  (test "observe-cmd-kill stashes a confirmation for the selected process"
+    (let (st {:procs [{:id 10 :pid :p10 :name :a} {:id 11 :pid :p11 :name :b}] :sel 1}
+          r (observe-cmd-kill st nil)
+          c (get r :confirm))
+      (assert= (get c :id) 11)
+      (assert= (get c :pid) :p11)
+      (assert= (get c :name) :b)))
+  (test "observe-cmd-kill is a no-op with no selected process"
+    (assert= (observe-cmd-kill {:procs [] :sel 0} nil) {:procs [] :sel 0}))
+  (test "observe--confirm-key: y kills via the backend; other keys cancel; both clear :confirm"
+    (let (model {:confirm {:pid :p7 :id 7 :name :w}}
+          back {:kill (fn (c) (str "killed " (get c :id)))}
+          killed (observe--confirm-key model back "y")
+          entered (observe--confirm-key model back :enter)
+          cancelled (observe--confirm-key model back "n"))
+      (assert= (get killed :msg) "killed 7")
+      (assert= (get killed :confirm) nil)
+      (assert= (get entered :msg) "killed 7")          ; Enter also confirms
+      (assert= (get cancelled :msg) "kill cancelled")
+      (assert= (get cancelled :confirm) nil)))
+  (test "observe--kill-msg guards a nil pid"
+    (is (string-contains? (observe--kill-msg nil 9) "error")))
+  (test "observe--confirm-line formats the kill prompt (name only when present)"
+    (is (string-contains? (observe--confirm-line {:id 7 :name :worker}) "kill pid 7"))
+    (is (string-contains? (observe--confirm-line {:id 7 :name :worker}) "(worker)"))
+    (is (string-contains? (observe--confirm-line {:id 7 :name nil}) "kill pid 7"))
+    (refute (string-contains? (observe--confirm-line {:id 7 :name nil}) "(")))
+  (test "*observe-keymap* binds t→tree and x→kill"
+    (assert= (get (keymap-dispatch *observe-keymap* {:sort :id} "t" (fn (x _) x)) :sort) :tree)
+    (let (s {:sort :id :procs [{:id 5 :pid :p5 :name :w}] :sel 0}
+          r (keymap-dispatch *observe-keymap* s "x" (fn (x _) x)))
+      (assert= (get (get r :confirm) :id) 5)))
+  (test "observe-frame renders the kill-confirm prompt in the footer"
+    (let (f (observe-frame sample-node [(pinfo 1 :a :running 0 0)] 0 60 12 false :id :ok
+                           {:confirm {:id 1 :name :a}}))
+      (is (string-contains? (nth (last f) 3) "kill pid 1"))
+      (is (string-contains? (nth (last f) 3) "y/n"))
+      (assert= (nth (last f) 4) {:fg :red :bold true}))))   ; :observer/confirm ← :ui/error
+
+(describe "observer minibuffer history (shared with the REPL)"
+  (test "command mode seeds the editor with session history; submit appends it"
+    (let (s {:sort :id :history '("(+ 1 2)")}
+          opened (observe-cmd-command s nil))
+      ;; the line editor is seeded with the session history (so ↑ recalls)
+      (assert= (get (get opened :edit) :hist) '("(+ 1 2)"))
+      (let (typed (assoc opened :edit (assoc (get opened :edit) :text "(* 3 4)"))
+            back {:eval (fn (_) "=> 12")}
+            submitted (observe--command-key typed back :enter))
+        ;; submit pushes the new command onto history, newest first
+        (assert= (get submitted :history) '("(* 3 4)" "(+ 1 2)"))))))
+
 ;; Cross-process coverage: drive `process-info` + `observe--snapshot` against a
 ;; live runtime (each :isolated test runs alone).
 (describe "process-info over live processes"
@@ -295,6 +351,15 @@
       (is (number? (get info :id)))
       ;; self is executing this call, so the status cell reads :running
       (assert= (get info :status) :running)))
+
+  (test "process-info carries the process's :pid value (for kill/exit)"
+    (let (w (spawn (receive (_ :done))))
+      (sleep 10)
+      (let (info (process-info w))
+        (is (contains? info :pid))
+        (is (pid? (get info :pid)))
+        ;; the pid round-trips: it equals the value spawn returned
+        (assert= (get info :pid) w))))
 
   (test ":parent is the spawner's id"
     (let (me (get (process-info (self)) :id)

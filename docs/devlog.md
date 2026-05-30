@@ -8171,3 +8171,303 @@ another closure recurses forever → uncatchable stack-overflow abort. This is t
 [`findings-closure-promotion-overflow.md`](findings-closure-promotion-overflow.md)
 (decided fix: two-pass back-patching `promote`, GC-author track; `std/http.blsp`
 workarounds in place). No new bugs found.
+
+---
+
+## 2026-05-30 — Namespaces: design decided (substrate), implementation deferred
+
+**Goal.** The user named the elephant: "we have modules but need namespacing."
+Worked it as a design conversation; recorded the outcome rather than implementing
+(two deep questions still open — see below).
+
+**Decisions taken** (full design in [`namespaces.md`](namespaces.md); ADR-065,
+*proposed*).
+- The pressure is **four-fold and now**: ADR-037 packages clobbering the one flat
+  global table (the forcing function — package manager is unsafe without this),
+  first-party `std/` crowding, M2+ plugins, and the LSP needing qualified names.
+- **Reframe that breaks the ADR-019 stalemate:** Clojure/CL are namespaced *and*
+  openly redefinable; only Racket-style **hard** privacy fights hot reload. So
+  Brood takes **soft privacy** — "private" = not auto-imported + `--` + a lint,
+  never erased; a fully-qualified name stays reachable and live-redefinable
+  (ADR-013 grain preserved).
+- **Substrate: expand-time resolution over the existing flat table**, no
+  namespace axis in the core. `/` is already symbol-legal (`syntax/atom.rs`), so
+  `observer/observe` is one interned symbol that already defines/calls today.
+  `(ns …)` sets `*ns*`; a **resolver pass** in the compile pipeline rewrites
+  reference-position symbols (bare → ns-qualified → imported → root fall-through).
+  Runtime / `def`-rebind / hot reload / `send`+promote / GC all unchanged.
+  Rejected partitioning the `value.rs` interner (the big core change ADR-019
+  argued against, for no surface gain).
+- **One resolver shared by `eval` and the LSP** — the editor can't disagree with
+  the runtime; unlocks completion / cross-file go-to-def / sound rename and
+  subsumes the current flat-collision `:shadows` tooling.
+- **Data symbols inviolate** (quoted content never rewritten — they re-intern by
+  name across runtimes, ADR-034). **Auto-require loads-but-never-fetches**
+  (keeps ADR-037's lock file computable).
+
+**Left open (don't block the substrate).**
+1. **Macro hygiene.** Brood macros are unhygienic (bare-symbol `quasiquote` +
+   manual `gensym`); use-site rewriting breaks cross-ns macros. Lean **α** =
+   Clojure-style auto-qualifying `quasiquote` (`~'foo` escapes), but it's the
+   biggest semantic change and rides on the ADR-064 quasiquote→Brood refactor.
+2. **Ns-name collision across packages** (two deps `(ns parser)`): free short
+   names vs. package-local-name prefix. Decide against ADR-037's real shape.
+
+**Built.** Docs only — `docs/namespaces.md` (design), ADR-065 in `decisions.md`
+(*proposed*), roadmap entry (🟡), this log. No code changes; the substrate +
+phased plan are ready to implement once α-vs-β and the ns-naming policy are
+greenlit.
+
+---
+
+## 2026-05-30 — GC: region-check before rooting (collect-at-any-depth perf recovery)
+
+**Goal.** Remaining-item #1 from [`handoff-gc.md`](handoff-gc.md): ADR-061
+(collect at any eval depth) made every call root its in-flight transients on the
+operand stack, costing a ~1.5–2.0× eval-bound regression (`Vec` push / re-read /
+truncate per call). Recover it without giving up collect-at-any-depth.
+
+**Built.**
+- `core/heap.rs`: `is_movable(v)` — the value kinds the copying collector actually
+  relocates (LOCAL `Pair`/`Vector`/`Map`/`Str`/`Rope`/`Fn`/`Macro`); mirrors
+  `push_value`/`flush_value`. Everything else (atoms, `PRELUDE`/`RUNTIME` handles)
+  never moves, so a copy held across a safepoint stays valid.
+- A token-based rooting API beside the positional one: `Root`/`EnvRoot` enums +
+  `root`/`read_root`/`advance_root`/`root_env`/`read_root_env`. `root(v)` pushes a
+  slot **only when `v` is movable**, else returns `Stable(v)` inline (no `Vec`
+  churn). Teardown is the same `truncate_roots(base)` — it drops exactly the slots
+  that were pushed, regardless of how many were skipped. `advance_root` keeps a
+  cons-spine cursor in its slot (or inline), self-correcting if a `Stable` cursor
+  ever tails into movable data.
+- `eval/mod.rs`: converted every hot per-call rooting site off the positional
+  `push_root`/`root_at` protocol — `eval_arguments`, `apply_closure`,
+  `bind_params` (`&optional`), `bind_sequential`, `tail_of_cons`, the call-dispatch
+  / `if` / `def` / macro-expand / multi-body sites, and the vector/map literals.
+  In promoted/RUNTIME code (the hot path) `call_form`/`callee`/`spine`/body-forms
+  are immovable and now pay nothing; only evaluated args and fresh scopes (genuine
+  LOCAL transients that *must* survive a mid-call collection) still root.
+
+**Result.** ~10–14% faster across eval-bound benches; init/parse flat. Overhead
+vs the pre-operand-stack baseline (`243debb`) dropped from ~1.7–1.95× to
+~1.5–1.71× — about a third of the regression recovered, as the handoff predicted
+(the residue is the inherent per-arg / per-scope rooting that can't be skipped
+while collecting at depth). Medians, `bench` profile, this host:
+
+| bench | pre-opstack | post-ADR-061 | region-check | overhead |
+|---|---|---|---|---|
+| `eval/fib/20` | 11.12 ms | 21.12 ms | 18.70 ms | 1.90× → 1.68× |
+| `eval/sum_tail/100000` | 58.83 ms | 115.0 ms | 98.77 ms | 1.95× → 1.68× |
+| `eval/cons_build/100000` | 156.1 ms | 293.0 ms | 258.2 ms | 1.88× → 1.65× |
+| `eval/sort_brood/5000` | 456.6 ms | 790.3 ms | 689.8 ms | 1.73× → 1.51× |
+| `maps/build_and_get/1000` | 6.31 ms | 12.22 ms | 10.80 ms | 1.94× → 1.71× |
+| `maps/frequencies/10000` | 65.71 ms | 111.8 ms | 100.2 ms | 1.70× → 1.52× |
+| `sequence/mapcat/10000` | 100.5 ms | 184.1 ms | 166.6 ms | 1.83× → 1.66× |
+| `sequence/pipeline/10000` | 55.53 ms | 94.36 ms | 84.86 ms | 1.70× → 1.53× |
+| `pattern/dispatch/10000` | 43.83 ms | 77.57 ms | 72.01 ms | 1.77× → 1.64× |
+| `sequence/sort/10000` | 45.43 ms | 77.88 ms | 70.30 ms | 1.71× → 1.55× |
+| `compile/macroexpand` | 1.145 ms | 1.66 ms | 1.495 ms | 1.45× → 1.31× |
+
+Archive: [`benchmarks/2026-05-30T00-54-34Z.md`](benchmarks/2026-05-30T00-54-34Z.md)
+(vs `2026-05-30T00-26-06Z.md`).
+
+**Verified.** Full `cargo test` green under
+`RUSTFLAGS="-C debug-assertions=on" BROOD_GC_VERIFY=1 BROOD_GC_STRESS=1` — the
+heap verifier + collect-every-safepoint + per-deref epoch tripwire all pass,
+including the in-language suite (which runs each test in its own green process on
+the worker pool). `cargo clippy -p brood` clean of any new warnings.
+
+**Left.** Items #2–#5 in the handoff still stand — next up is #2, the `promote`
+cycle guard (a genuine latent SIGSEGV on a self-referential local closure).
+
+## 2026-05-30 — `contains?` is O(1), not O(n)
+
+`contains?` was `(some? (fn (p) (= k (first p))) (map-pairs m))` — a full O(n)
+enumeration + linear scan (and an allocation) per call. On a "set of coords as
+`{[x y] true}`, test with `contains?`" workload (Game of Life) that made `step`
+~100× too slow (a single `contains?` ~0.3 ms vs `get` ~3 µs). Now it probes the
+O(1) CHAMP hash path via `map-get` with a two-sentinel trick — present key returns
+its value both times, an absent key returns each distinct sentinel — so it still
+distinguishes a stored `nil`/`false` from absence. Pure Brood (rides the existing
+`map-get`); no kernel change. `tests/maps_test.blsp` dropped sharply in time/RSS.
+The `(require 'set)` library (ADR-060) rides on this for membership.
+
+## 2026-05-30 — LSP developer-ergonomics pass (formatting, workspace symbol, code actions, folding, inlay hints)
+
+**Goal.** Parallel, kernel-free work while GC/namespace/observer changes were in
+flight: extend `brood-lsp` with the developer-facing features it was still
+missing. All in `crates/lsp` — the server embeds the `brood` lib read-only and
+never touches eval/heap/GC, so this couldn't collide with the concurrent kernel
+edits. Five new requests, each its own module mirroring the existing handler
+pattern:
+
+- **`textDocument/formatting`** (`formatting.rs`) — whole-document reformat.
+  The formatter *is* Brood (`std/format.blsp`); the server just calls
+  `introspect::format_source` and wraps the result in one full-document
+  `TextEdit`. Honors "policy in Brood, mechanism in Rust" — the only thing in
+  Rust is the transport + the range arithmetic. Returns `None` on a parse error
+  (don't emit a mangled edit) or when the buffer is already canonical. No
+  range/onType formatting — the formatter works on whole files.
+- **`workspace/symbol`** (`workspace_symbols.rs`) — project-wide symbol search
+  over every file's top-level `def`/`defn`/`defmacro`. Reuses `defs::top_level`
+  (the outline walker) and a new `workspace::all_sources` (project files +
+  every open buffer, deduped by decoded path). Case-insensitive **subsequence**
+  match (`fs` → `format-source`); empty query → everything.
+- **`textDocument/codeAction`** (`code_actions.rs`) — quick-fixes off the
+  diagnostics we already publish. First action: **did-you-mean** for
+  `unbound symbol: X` — Levenshtein against locals-in-scope + special forms +
+  globals within a length-relative threshold, top-3 nearest, edited onto the
+  diagnostic's already-token-narrowed range, `isPreferred`.
+- **`textDocument/foldingRange`** (`folding.rs`) — multi-line containers
+  (`()`/`[]`/`{}`) + consecutive-comment-line blocks, a pure CST walk.
+- **`textDocument/inlayHint`** (`inlay_hints.rs`) — parameter-name hints at call
+  sites from `arglist` (signature-help's source). Conservative: only the leading
+  *required* params (stop at the first `&optional`/`&` — `arglist` drops
+  `(opt default)` groups, so positions would drift); a head resolving to a
+  **local** is skipped; `arglist` memoized per request; range-scoped.
+
+**Verified.** `cargo test -p brood-lsp` 70/70 (each feature has unit tests plus
+one `serves_new_features_end_to_end` that drives all five through the real
+message loop over `Connection::memory()`). `cargo clippy -p brood-lsp` clean.
+The existing `unknown_request_gets_method_not_found` test had asserted on
+`textDocument/formatting` as its "unsupported" method — now genuinely supported,
+so it probes `onTypeFormatting` instead.
+
+**Note.** Mid-session the workspace briefly didn't compile — a concurrent
+in-flight edit to `eval/macros.rs` (a `quasiquote_depth` signature change). Left
+it untouched (kernel, not this task); it resolved on its own and the LSP work
+compiled against it cleanly.
+
+---
+
+## 2026-05-30 — Auto-gensym (`x#`): macro binding hygiene, ahead of namespaces
+
+**Goal.** Solve macro hygiene as a prerequisite to namespacing (ADR-065), but
+without the risky/sweeping change full Scheme hygiene would be. Split "hygiene"
+into its two real concerns and ship the independent one.
+
+**Decision (ADR-066).** "Hygiene" = **(#1)** free-reference transparency
+(namespacing-coupled — deferred to ADR-065 α) + **(#2)** introduced-binding capture
+(pre-existing, independent). Shipped #2 via Clojure-style **auto-gensym**: a literal
+backtick-template symbol ending in `#` (`tmp#`) becomes a fresh gensym — consistent
+within one expansion, distinct per expansion (per call site, since macros expand at
+compile time). Declined full Scheme/Racket syntax-object hygiene: it needs
+context-bearing identifiers that fight Brood's *symbols-ship-by-name* (ADR-034) and
+*code-is-data* invariants, and Clojure (the closest sibling) declined it too.
+
+**Built.**
+- `eval/macros.rs` — `maybe_autogensym` + a per-expansion `HashMap<Symbol, Value>`
+  threaded through `quasiquote_depth`/`expand_seq`. One interception in the leaf
+  arm. **No** change to the reader (`#` already symbol-legal), `value.rs`, `eval`,
+  or the symbol model. GC-safe by construction (the table holds only interned
+  symbols — never relocated — so no operand-stack rooting needed).
+- `types/check/hygiene.rs` — the capture lint now treats a `#`-suffixed binder as
+  safe (it's auto-gensym'd) and suggests `x#` as the lighter alternative to
+  `(gensym)`; header + firing-condition docs updated. New Rust test
+  `autogensym_binder_is_not_flagged`.
+- `tests/autogensym_test.blsp` — 8 in-language tests: consistency within an
+  expansion, distinctness across expansions, no-capture (`my-or`), the `~'x#`
+  literal escape, manual-gensym macros unaffected, **+ cross-process** (a generated
+  symbol round-trips through `send` — deep-copy + re-intern by name — preserving
+  consistency; distinct call sites stay distinct after re-intern).
+- Docs: `language.md` (auto-gensym section + updated hygiene note), ADR-066,
+  `namespaces.md` §7 (recast as the two-concerns split; #2 done, #1/α still open),
+  `brood-for-claude.md` (an `x#` example), roadmap tick.
+
+**Verified.** Full workspace `cargo test` green (0 failures across all crates).
+The `x#`-distinctness gotcha surfaced and is documented: distinctness is *per call
+site* (compile-time expansion), not per runtime invocation — a worker function with
+one `(macro)` call site sends the *same* baked symbol on every call.
+
+## 2026-05-30 — Shared abstractions across the LSP and MCP servers
+
+**Goal.** Both `brood-lsp` and `nest mcp` are JSON-RPC-over-stdio facades over one
+Brood image's language knowledge. A review for reuse (no kernel/GUI touch) found
+three genuine duplications — and confirmed the *good* pattern already in place:
+the references engine (`scope::references_to_global`) is shared, with MCP reaching
+it through the `references-in-source` primitive and the LSP through the scope
+walker directly. Lifted the three duplications; deliberately did **not** merge the
+transports (LSP `Content-Length` vs MCP newline-JSON are different wire protocols)
+or invent a unified "describe-global" facade (they already converge at
+`introspect::*`; forcing one would drag Brood into the LSP's pure-Rust hot path).
+
+**Built.**
+- **Project-bootstrap unification.** The "load a project image for tooling" string
+  was hand-written ~7× across the two servers with real drift — the LSP omitted
+  `(require 'format)`, so `format-*` names could false-positive as unbound in its
+  published diagnostics. Now there's one Brood `(setup-tooling-image root)` in
+  `std/project.blsp` (sources + `test` + `format`), with a thin Rust seam
+  `introspect::load_tooling_image(interp, root)`. The LSP's `bootstrap_project`
+  and `nest mcp`'s bootstrap both route through it — policy in Brood, one place to
+  change what a tooling image carries.
+- **`introspect::call_form(fn, &[args])`** — builds `(fn "a" "b")` with each arg
+  embedded as an escaped string literal. Replaces the scattered
+  `format!("(… \"{}\")", escape_brood_string(x))` pattern in `nest` (`cmd_add`,
+  `cmd_doc`, `cmd_observe`) and removed `nest`'s duplicate `brood_str_escape`
+  (it re-implemented `introspect::escape_brood_string`).
+- **Error→JSON derivation.** `mcp.rs::lisp_error_to_json` hand-rebuilt the same
+  `{kind, message, code?, …}` shape `LispError::to_value_map` already produces.
+  Now it *derives* the JSON by projecting that canonical Brood map through
+  `value_to_json` — so the JSON an agent reads off `error.data` and the map a
+  handler reads off `(catch …)` can't drift (`value_to_json` renders `:kind` →
+  `"kind"`, matching the prior shape exactly). No serde dep added to the lib; the
+  projection stays in `nest`.
+
+**Verified.** Full `cargo test` green (0 failures). The MCP error-contract tests
+(`uncaught_handler_throw_projects_structured_data` → `code "E0040"`,
+`argument_validation_throws_a_protocol_error` → `kind "user"`, the panic-isolation
+test) still pass, proving the derived projection preserves the pinned shape. New
+unit tests: `call_form_escapes_and_spaces_arguments`,
+`load_tooling_image_is_best_effort_outside_a_project`. `cargo clippy` clean for the
+touched crates (remaining warnings are all pre-existing, in `crates/lisp`).
+
+**Tree note.** Concurrent edits landed during this work (`heap.rs`, `eval/mod.rs`,
+`cli_support.rs`, `types/check/walk.rs`, an LSP `workspace.rs` fix). Left untouched;
+this change is confined to `macros.rs` + `hygiene.rs` + the new test + docs.
+
+---
+
+## 2026-05-30 — GC: promote cycle guard + memory-cap cleanup (v1 GC close-out)
+
+**Goal.** Handoff items #2 and #4 (`docs/handoff-gc.md`): the one remaining
+GC-adjacent *crash* and the stale memory caps. With these, the GC has no known
+crashes left for v1.
+
+**Built — #2, the `promote` cycle guard (was a latent SIGSEGV).**
+`def`/`spawn` `promote` a value into the shared append-only RUNTIME region. The
+cyclic case — a closure whose captured scope binds the closure itself
+(`(let (g (fn () g)) g)`, or mutually-recursive `letrec` closures) — recursed
+forever because `promote_closure` <-> `promote_env` had no forwarding table.
+- Added `PromoteForward` (LOCAL slot index -> RUNTIME handle) threaded through the
+  `promote_*` family. Closures and envs **reserve their RUNTIME slot, register it,
+  then recurse** — so the back-edge resolves to the reserved handle. Pairs/vectors/
+  maps stay un-forwarded (acyclic by construction, immutable, built bottom-up).
+- The append-only `boxcar` can't write-back the way the GC's mutable slabs do, so
+  the two cyclic-capable slabs became `boxcar::Vec<OnceLock<Closure>>` /
+  `<OnceLock<EnvFrame>>`: push an empty cell -> get index -> `set` once after
+  recursing. The cell is filled before its handle is ever published, so reads never
+  race. `closure()` pulled out of `region_ref!` and hand-written; `env_frame()`'s
+  RUNTIME arm dereferences the cell.
+- The handoff repro and `letrec` mutual recursion now promote correctly, verified
+  **cross-process** by `gc.rs::promotes_cyclic_local_closures_without_crashing` (a
+  spawned worker reads the promoted cycle from shared RUNTIME). The added
+  `OnceLock::get()` on the hot RUNTIME-closure read path shows no measurable fib
+  regression (18.56 vs 18.7 ms at fib/20 — noise).
+
+**Built — #4, tighten the ADR-043 caps.** `TEST_DEFAULT_HARD/SOFT` dropped 5 GiB /
+4 GiB -> **2 GiB / 1 GiB** (~4x the ~240 MB collected suite peak; a host-survival
+backstop, not a working-set budget). Corrected the doc-comment's stale "GC is a
+no-op / never reclaims" prose. Suite passes under the tighter caps.
+
+**Closed — ADR-002 (`Rc`->`gc-arena`).** Status updated: the `Rc`/`RefCell`
+substrate was replaced wholesale by the hand-rolled handle/slab copying collector
+(ADR-035/054/055/061), *not* migrated to `gc-arena`. Nothing left to carry.
+
+**Verified.** Full `cargo test` green under
+`RUSTFLAGS="-C debug-assertions=on" BROOD_GC_VERIFY=1 BROOD_GC_STRESS=1`.
+
+**Left on GC for v1: nothing blocking.** Only the deferred generational young/old
+split remains (perf, not correctness) — the collector is correct without it.
+
+**Tree note.** Concurrent edits landed during this work (LSP `workspace.rs` +
+new LSP modules, macro `hygiene.rs`). Left untouched; this change is confined to
+`core/heap.rs` + `core/alloc.rs` + the new `gc.rs` test + docs.

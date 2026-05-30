@@ -36,13 +36,18 @@
 //! still exist uniformly.
 
 /// A resolved text face: colours as RGB (already mapped from `:fg`/`:bg`
-/// keywords by the caller, which has heap access), plus the attribute flags.
+/// keywords by the caller, which has heap access), the attribute flags, and the
+/// optional font family (an interned `:family` keyword id, resolved to a loaded
+/// font set by the renderer; `None` = the default family).
 #[derive(Clone, Copy, Default)]
 pub struct Face {
     pub fg: Option<[u8; 3]>,
     pub bg: Option<[u8; 3]>,
     pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
     pub reverse: bool,
+    pub family: Option<u32>,
 }
 
 /// One render op, parsed out of a frame vector into plain (Send) data so it can
@@ -120,19 +125,32 @@ mod disabled {
     pub fn draw(_id: u64, _ops: Vec<Op>) -> Result<(), String> {
         Err(NOT_COMPILED.into())
     }
+    pub fn font(_family: Option<u32>, _px: Option<f32>) -> Result<(), String> {
+        Err(NOT_COMPILED.into())
+    }
+    pub fn register_family(
+        _name: u32,
+        _regular: Vec<u8>,
+        _bold: Vec<u8>,
+        _italic: Vec<u8>,
+        _bold_italic: Vec<u8>,
+    ) -> Result<(), String> {
+        Err(NOT_COMPILED.into())
+    }
 }
 
 #[cfg(not(feature = "gui"))]
-pub use disabled::{close, draw, open, size};
+pub use disabled::{close, draw, font, open, register_family, size};
 
 #[cfg(feature = "gui")]
-pub use backend::{close, draw, open, size};
+pub use backend::{close, draw, font, open, register_family, size};
 
 #[cfg(feature = "gui")]
 mod backend {
     use super::{Key, Mouse, MouseAction, MouseButton, Op};
     use crate::core::value;
     use crate::process::{deliver, Message};
+    use std::cell::RefCell;
     use std::collections::HashMap;
     use std::num::NonZeroU32;
     use std::rc::Rc;
@@ -151,9 +169,15 @@ mod backend {
     use winit::platform::wayland::EventLoopBuilderExtWayland;
     use winit::window::{Window, WindowBuilder, WindowId};
 
-    // Bundled monospace font (see assets/README.md) — no system font discovery.
+    // Bundled monospace font, four styles (see assets/README.md) — the default
+    // `:mono` family; a face's :bold/:italic pick the style. No system font discovery.
     const FONT_REGULAR: &[u8] = include_bytes!("../assets/DejaVuSansMono.ttf");
     const FONT_BOLD: &[u8] = include_bytes!("../assets/DejaVuSansMono-Bold.ttf");
+    const FONT_ITALIC: &[u8] = include_bytes!("../assets/DejaVuSansMono-Oblique.ttf");
+    const FONT_BOLD_ITALIC: &[u8] = include_bytes!("../assets/DejaVuSansMono-BoldOblique.ttf");
+    // The default font family keyword (`:mono`), and the default cell pixel size.
+    const DEFAULT_FAMILY: &str = "mono";
+    const DEFAULT_PX: f32 = 15.0;
 
     // A terminal-ish dark theme for unstyled cells.
     const DEFAULT_BG: [u8; 3] = [0x10, 0x14, 0x18];
@@ -173,6 +197,23 @@ mod backend {
         Draw { id: u64, ops: Vec<Op> },
         /// Destroy window `id`.
         Close { id: u64 },
+        /// Set the global default cell font — family and/or pixel size — applied to
+        /// every open window and remembered for windows opened later. The
+        /// whole-window knob behind `gui-font!`; `None` fields are left unchanged.
+        Font {
+            family: Option<u32>,
+            px: Option<f32>,
+        },
+        /// Register a font family (interned `name`) from raw TTF bytes per style, so
+        /// a face's `:family` can select it. Parsed on the GUI thread and shared by
+        /// every renderer. Behind `gui-font-register`.
+        RegisterFamily {
+            name: u32,
+            regular: Vec<u8>,
+            bold: Vec<u8>,
+            italic: Vec<u8>,
+            bold_italic: Vec<u8>,
+        },
     }
 
     /// A freshly opened window's wiring, handed back to the Brood side: its id and
@@ -278,6 +319,42 @@ mod backend {
             .map_err(|_| "gui thread is gone".to_string())
     }
 
+    /// `(gui-font! …)` — set the global default cell font (family and/or pixel
+    /// size), applied to every open window and remembered for ones opened later.
+    /// No-op (silently) if the GUI thread never started.
+    pub fn font(family: Option<u32>, px: Option<f32>) -> Result<(), String> {
+        if let Ok(g) = gui() {
+            let _ = g
+                .lock()
+                .unwrap()
+                .send_event(UserEvent::Font { family, px });
+        }
+        Ok(())
+    }
+
+    /// `(gui-font-register …)` — register a font family (interned `name`) from raw
+    /// TTF bytes per style; the GUI thread parses + shares it so `:family` can pick
+    /// it. Starts the GUI thread if needed (so a family can be registered up front).
+    pub fn register_family(
+        name: u32,
+        regular: Vec<u8>,
+        bold: Vec<u8>,
+        italic: Vec<u8>,
+        bold_italic: Vec<u8>,
+    ) -> Result<(), String> {
+        gui()?
+            .lock()
+            .unwrap()
+            .send_event(UserEvent::RegisterFamily {
+                name,
+                regular,
+                bold,
+                italic,
+                bold_italic,
+            })
+            .map_err(|_| "gui thread is gone".to_string())
+    }
+
     /// A key as the Brood value `term-poll`/`gui` deliver: a printable → a 1-char
     /// string, the rest → keywords. Built as a `Message` (no heap) so the GUI thread
     /// can deliver it straight to a mailbox (ADR-058). Mirrors `key_to_value`.
@@ -335,6 +412,9 @@ mod backend {
         elwt: &EventLoopWindowTarget<UserEvent>,
         id: u64,
         subscriber: u64,
+        families: Families,
+        base_px: f32,
+        default_family: Option<u32>,
     ) -> Result<Win, String> {
         let window = WindowBuilder::new()
             .with_title(format!("brood observer #{id}"))
@@ -346,7 +426,11 @@ mod backend {
             softbuffer::Context::new(window.clone()).map_err(|e| format!("softbuffer context: {e}"))?;
         let surface = softbuffer::Surface::new(&context, window.clone())
             .map_err(|e| format!("softbuffer surface: {e}"))?;
-        let renderer = Renderer::new(window.scale_factor());
+        let mut renderer = Renderer::new(window.scale_factor(), families, base_px);
+        // honour a global default family set before this window opened
+        if let Some(f) = default_family {
+            renderer.set_font(Some(f), None);
+        }
         Ok(Win {
             window,
             _context: context,
@@ -382,13 +466,19 @@ mod backend {
         // map from our integer id (what `open` returns) to that WindowId.
         let mut wins: HashMap<WindowId, Win> = HashMap::new();
         let mut ids: HashMap<u64, WindowId> = HashMap::new();
+        // The font-family registry, shared by every window's renderer (so a
+        // `gui-font-register` reaches them all), plus the global default cell font
+        // (family / px) applied to windows opened later.
+        let families: Families = default_families();
+        let mut default_family: Option<u32> = None;
+        let mut default_px: f32 = DEFAULT_PX;
 
         let _ = event_loop.run(move |event, elwt| {
             elwt.set_control_flow(ControlFlow::Wait);
             match event {
                 Event::UserEvent(UserEvent::Open { subscriber, reply }) => {
                     let id = next_id();
-                    match build_window(elwt, id, subscriber) {
+                    match build_window(elwt, id, subscriber, families.clone(), default_px, default_family) {
                         Ok(win) => {
                             update_cells(&win.window, &win.renderer, &win.size);
                             let wid = win.window.id();
@@ -413,6 +503,41 @@ mod backend {
                 Event::UserEvent(UserEvent::Close { id }) => {
                     if let Some(wid) = ids.remove(&id) {
                         wins.remove(&wid); // dropping the window closes it
+                    }
+                }
+                // Global default cell font: remember it for future windows and apply
+                // it to every open one (recompute the grid + republish size + redraw).
+                Event::UserEvent(UserEvent::Font { family, px }) => {
+                    if let Some(f) = family {
+                        default_family = Some(f);
+                    }
+                    if let Some(p) = px {
+                        default_px = p.max(1.0);
+                    }
+                    for w in wins.values_mut() {
+                        w.renderer.set_font(family, px);
+                        update_cells(&w.window, &w.renderer, &w.size);
+                        w.window.request_redraw();
+                    }
+                }
+                // Register a font family from raw TTF bytes; parse here and share it
+                // with every renderer. A bad font is dropped (the family stays
+                // unregistered, so `:family` falls back to the default).
+                Event::UserEvent(UserEvent::RegisterFamily {
+                    name,
+                    regular,
+                    bold,
+                    italic,
+                    bold_italic,
+                }) => {
+                    if let Ok(set) = FontSet::from_bytes(&regular, &bold, &italic, &bold_italic) {
+                        families.borrow_mut().insert(name, Rc::new(set));
+                        // a re-registration replaces a family; clear caches keyed by
+                        // the old glyphs and repaint.
+                        for w in wins.values_mut() {
+                            w.renderer.cache.clear();
+                            w.window.request_redraw();
+                        }
                     }
                 }
                 Event::WindowEvent { window_id, event } => {
@@ -577,50 +702,113 @@ mod backend {
         bitmap: Vec<u8>,
     }
 
-    struct Renderer {
+    /// One font family's four styles. A face's `:bold`/`:italic` pick the style;
+    /// `:family` picks the set.
+    struct FontSet {
         regular: fontdue::Font,
         bold: fontdue::Font,
+        italic: fontdue::Font,
+        bold_italic: fontdue::Font,
+    }
+
+    impl FontSet {
+        /// Parse four TTF byte slices into a family (errors propagate to the caller).
+        fn from_bytes(
+            regular: &[u8],
+            bold: &[u8],
+            italic: &[u8],
+            bold_italic: &[u8],
+        ) -> Result<FontSet, String> {
+            let opts = fontdue::FontSettings::default();
+            let f = |b| fontdue::Font::from_bytes(b, opts).map_err(|e| e.to_string());
+            Ok(FontSet {
+                regular: f(regular)?,
+                bold: f(bold)?,
+                italic: f(italic)?,
+                bold_italic: f(bold_italic)?,
+            })
+        }
+        fn pick(&self, bold: bool, italic: bool) -> &fontdue::Font {
+            match (bold, italic) {
+                (false, false) => &self.regular,
+                (true, false) => &self.bold,
+                (false, true) => &self.italic,
+                (true, true) => &self.bold_italic,
+            }
+        }
+    }
+
+    /// The font-family registry, shared by every window's renderer on the single
+    /// GUI thread (so `gui-font-register` is visible everywhere at once). Keyed by
+    /// the interned family keyword id; `:mono` (bundled) is always present.
+    type Families = Rc<RefCell<HashMap<u32, Rc<FontSet>>>>;
+
+    /// Build the families registry seeded with the bundled `:mono` family.
+    fn default_families() -> Families {
+        let mono = FontSet::from_bytes(FONT_REGULAR, FONT_BOLD, FONT_ITALIC, FONT_BOLD_ITALIC)
+            .expect("bundled mono font");
+        let mut m = HashMap::new();
+        m.insert(value::intern(DEFAULT_FAMILY), Rc::new(mono));
+        Rc::new(RefCell::new(m))
+    }
+
+    struct Renderer {
+        families: Families,
+        default_family: u32,
         base_px: f32,
+        scale: f64,
         px: f32,
         cell_w: usize,
         cell_h: usize,
         ascent: i32,
-        cache: HashMap<(char, bool), Glyph>,
+        // keyed by (char, family id, bold, italic): the same glyph at a different
+        // family/style rasterises differently.
+        cache: HashMap<(char, u32, bool, bool), Glyph>,
     }
 
     impl Renderer {
-        fn new(scale: f64) -> Self {
-            let opts = fontdue::FontSettings::default();
-            let regular =
-                fontdue::Font::from_bytes(FONT_REGULAR, opts).expect("bundled regular font");
-            let bold = fontdue::Font::from_bytes(FONT_BOLD, opts).expect("bundled bold font");
+        fn new(scale: f64, families: Families, base_px: f32) -> Self {
             let mut r = Renderer {
-                regular,
-                bold,
-                base_px: 15.0,
-                px: 15.0,
+                families,
+                default_family: value::intern(DEFAULT_FAMILY),
+                base_px,
+                scale,
+                px: base_px,
                 cell_w: 1,
                 cell_h: 1,
                 ascent: 0,
                 cache: HashMap::new(),
             };
-            r.set_scale(scale);
+            r.recompute();
             r
         }
 
-        /// Recompute the px size + cell metrics for a HiDPI scale factor, and drop
-        /// the glyph cache (it's rasterised at the old px).
-        fn set_scale(&mut self, scale: f64) {
-            self.px = self.base_px * scale as f32;
+        /// The family for `id` (or the default if unknown / `None`), as a cheap
+        /// `Rc` clone so it can be held across a `&mut self` cache borrow.
+        fn family_of(&self, id: u32) -> Rc<FontSet> {
+            let fams = self.families.borrow();
+            fams.get(&id)
+                .or_else(|| fams.get(&self.default_family))
+                .cloned()
+                .expect("default family present")
+        }
+
+        /// Recompute the px size + cell metrics from the default family at the
+        /// current size × HiDPI scale, dropping the glyph cache (rasterised at the
+        /// old px). The grid stays uniform — sized to the default family — so a
+        /// per-face `:family`/`:italic` only changes glyphs within the fixed cell.
+        fn recompute(&mut self) {
+            self.px = self.base_px * self.scale as f32;
             self.cache.clear();
-            let lm = self
+            let set = self.family_of(self.default_family);
+            let lm = set
                 .regular
                 .horizontal_line_metrics(self.px)
                 .expect("line metrics");
             self.ascent = lm.ascent.round() as i32;
             self.cell_h = lm.new_line_size.round().max(1.0) as usize;
             // Monospace: every glyph advances the same; 'M' is a safe probe.
-            self.cell_w = self
+            self.cell_w = set
                 .regular
                 .metrics('M', self.px)
                 .advance_width
@@ -628,8 +816,27 @@ mod backend {
                 .max(1.0) as usize;
         }
 
+        /// Adjust for a new HiDPI scale factor (then recompute metrics).
+        fn set_scale(&mut self, scale: f64) {
+            self.scale = scale;
+            self.recompute();
+        }
+
+        /// Set the global default cell font — family and/or pixel size — then
+        /// recompute the grid. The whole-window knob behind `gui-font!`.
+        fn set_font(&mut self, family: Option<u32>, px: Option<f32>) {
+            if let Some(f) = family {
+                self.default_family = f;
+            }
+            if let Some(p) = px {
+                self.base_px = p.max(1.0);
+            }
+            self.recompute();
+        }
+
         /// Blit one glyph's coverage into the framebuffer, alpha-compositing `fg`
-        /// over whatever is already there (the cell background).
+        /// over whatever is already there (the cell background), in the given
+        /// `family`/style.
         fn draw_char(
             &mut self,
             buf: &mut [u32],
@@ -638,7 +845,9 @@ mod backend {
             left: usize,
             top: usize,
             c: char,
+            family: Option<u32>,
             bold: bool,
+            italic: bool,
             fg: [u8; 3],
         ) {
             if c == ' ' {
@@ -646,10 +855,10 @@ mod backend {
             }
             let px = self.px;
             let ascent = self.ascent;
-            let (reg, bold_f) = (&self.regular, &self.bold);
-            let g = self.cache.entry((c, bold)).or_insert_with(|| {
-                let font = if bold { bold_f } else { reg };
-                let (metrics, bitmap) = font.rasterize(c, px);
+            let fid = family.unwrap_or(self.default_family);
+            let set = self.family_of(fid);
+            let g = self.cache.entry((c, fid, bold, italic)).or_insert_with(|| {
+                let (metrics, bitmap) = set.pick(bold, italic).rasterize(c, px);
                 Glyph { metrics, bitmap }
             });
             let baseline = top as i32 + ascent;
@@ -774,7 +983,15 @@ mod backend {
                     for c in s.chars() {
                         let left = cx * cw;
                         fill_cell(&mut buf, fb_w, fb_h, left, top, cw, ch, bg_packed);
-                        r.draw_char(&mut buf, fb_w, fb_h, left, top, c, face.bold, fg);
+                        r.draw_char(
+                            &mut buf, fb_w, fb_h, left, top, c, face.family, face.bold,
+                            face.italic, fg,
+                        );
+                        if face.underline {
+                            // a 1px rule near the cell bottom, in the text colour
+                            let uy = top + ch.saturating_sub(2);
+                            fill_cell(&mut buf, fb_w, fb_h, left, uy, cw, 1, pack(fg));
+                        }
                         cx += 1;
                     }
                 }

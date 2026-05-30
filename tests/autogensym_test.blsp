@@ -1,0 +1,79 @@
+;;; Auto-gensym (`x#`) — Clojure-style opt-in macro hygiene.
+;;;
+;;; A literal template symbol whose name ends in `#` is rewritten by the
+;;; quasiquote expander to a *fresh* gensym, consistently within one backtick
+;;; expansion and distinctly across expansions. This gives a macro-introduced
+;;; binding that can neither capture nor be captured by the caller's code,
+;;; without a manual `(gensym)`. See `eval::macros::maybe_autogensym`.
+
+(require 'test)
+
+;; Two occurrences of `a#` in ONE expansion -> one symbol; the quoted list it
+;; builds therefore has two equal elements.
+(defmacro ag-pair () `'(a# a#))
+;; A single `a#` -> a fresh symbol each time the macro expands.
+(defmacro ag-one () `'a#)
+;; The classic capture trap, made safe with `r#`: the binding must not capture
+;; the caller's `r` spliced in as `~b`.
+(defmacro ag-or (a b) `(let (r# ~a) (if r# r# ~b)))
+;; Escape hatch: `~'x#` unquotes a quoted symbol, so it emits a *literal* `x#`,
+;; NOT an auto-gensym — distinct from the auto-gensym `x#` beside it.
+(defmacro ag-escape () `'(~'x# x#))
+
+(describe "auto-gensym (x#)"
+  :isolated
+
+  (test "the same x# within one expansion is one symbol"
+    (let (l (ag-pair))
+      (is (= (first l) (second l)))))
+
+  (test "an auto-gensym binder is a symbol"
+    (is (symbol? (ag-one))))
+
+  (test "separate expansions produce distinct symbols"
+    (is (not (= (ag-one) (ag-one)))))
+
+  (test "a #-binder does not capture a spliced caller binding"
+    ;; Naive (`r` instead of `r#`) would expand to (let (r false) (if r r r))
+    ;; capturing the caller's `r`, wrongly yielding false. With `r#` the caller's
+    ;; `r` (= 1) is returned.
+    (assert= (let (r 1) (ag-or false r)) 1))
+
+  (test "~'x# escapes auto-gensym — literal, distinct from the auto-gensym x#"
+    (let (l (ag-escape))
+      (is (not (= (first l) (second l))))))
+
+  (test "manual-gensym prelude macros are unaffected"
+    (assert= (or false 7) 7)
+    (assert= (and 1 2 3) 3)))
+
+;; ---- across processes -------------------------------------------------------
+;; A generated symbol is ordinary data: it must survive `send` (deep copy +
+;; re-intern by name across per-process heaps), and the consistency /
+;; distinctness properties must hold after the round-trip.
+
+;; NB: macros expand at compile time, so each *call site* of `(ag-one)` bakes one
+;; fixed gensym — two runtime calls of the same function reuse it (as in Clojure).
+;; Distinctness is therefore per call site: `worker-a`/`worker-b` are two distinct
+;; `(ag-one)` occurrences, so they bake two distinct symbols.
+(defn ag-pair-worker (parent) (send parent (ag-pair)))
+(defn ag-one-worker-a (parent) (send parent (ag-one)))
+(defn ag-one-worker-b (parent) (send parent (ag-one)))
+
+(describe "auto-gensym across processes"
+  :isolated
+
+  (test "consistency survives send: a worker's (a# a#) round-trips equal"
+    (let (me (self) w (spawn (ag-pair-worker me)))
+      (let (l (receive))
+        (is (symbol? (first l)))
+        (is (= (first l) (second l))))))
+
+  (test "distinct call sites stay distinct after send + re-intern by name"
+    (let (me (self))
+      (spawn (ag-one-worker-a me))
+      (spawn (ag-one-worker-b me))
+      (let (a (receive) b (receive))
+        (is (symbol? a))
+        (is (symbol? b))
+        (is (not (= a b)))))))

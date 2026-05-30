@@ -42,18 +42,29 @@ re-evaluating definitions already gives hot-reload, regardless of host language.
 
 ## ADR-002 — `Rc`/`RefCell` now, tracing GC later
 
-**Status:** accepted.
+**Status:** ✅ **fulfilled, then superseded** — by the hand-rolled per-process
+copying collector (ADR-035 → ADR-054/055/058/061), *not* by the `gc-arena`
+migration this ADR originally planned. Closed: nothing left to do.
 
-**Decision.** Use `Rc<…>` for heap values and `RefCell` for environment
-mutation in v0.1. Plan a migration to `gc-arena` before editor sessions become
-long-lived.
+**What actually happened.** The `Rc`/`RefCell` substrate was replaced wholesale,
+not migrated to `gc-arena`. Heap values are now **`u64` handles into per-process
+slabs** (`core/heap.rs`), environments are immutable frames (ADR-026 — no
+`RefCell` mutation), and reclamation is a **moving semi-space copying collector**
+that fires automatically at the eval safepoint, at any depth. The cycle-leak cost
+this ADR accepted ("a closure capturing an environment that reaches it") is also
+gone — the collector traces, and `promote` grew a forwarding table so even
+*promoting* such a cycle into the shared region terminates (ADR-061 follow-up,
+2026-05-30 devlog). `gc-arena`'s `'gc` lifetime brand was evaluated and rejected
+for our native recursive evaluator (see ADR-035 "Why not … gc-arena").
 
-**Why.** Simplest correct thing; gets us moving. The known cost is that
-reference cycles (a closure capturing an environment that reaches it) leak —
-irrelevant for a REPL and the early milestones.
+**Why the containment still paid off.** All heap construction goes through
+`value.rs` helpers, which is exactly what made replacing the substrate localised —
+the migration target changed, but the discipline that made it cheap held.
 
-**Containment.** All heap construction goes through helpers in `value.rs`, so the
-GC migration is localised.
+**Original decision (historical).** Use `Rc<…>` for heap values and `RefCell` for
+environment mutation in v0.1; plan a migration to `gc-arena` before sessions
+become long-lived. Rationale: simplest correct thing to get moving, accepting that
+reference cycles leak (irrelevant for a REPL / early milestones).
 
 ---
 
@@ -3877,3 +3888,137 @@ tasks; the Rust versions are correctly rooted in the meantime.
 loops safe), ADR-006 (write the language in the language), ADR-059 (the
 mailbox-delivery seam that keeps I/O primitives callback-free), CLAUDE.md "Debug
 tooling" (`BROOD_GC_VERIFY` — how the six sites were found).
+
+## ADR-065 — Namespaces: expand-time resolution over the flat table, soft privacy
+
+**Status:** proposed (2026-05-30). Full design in
+[`namespaces.md`](namespaces.md). Supersedes the "deferred, point-2-only" stance
+of ADR-019. **Two questions left open** (hygiene, ns-name collision) — they don't
+block the substrate.
+
+**Context.** ADR-019 chose Emacs-flat modules and deferred namespaces, betting
+they'd fight the editor's "any code can redefine any behaviour live" grain
+(ADR-013 hot reload). Four pressures now arrive together and force the question:
+the package manager (ADR-037) loads third-party `name = URL` code into the one
+flat global table (silent clobbering — the package manager is unsafe without an
+answer); first-party `std/` crowds the flat namespace; M2+ editor plugins from
+many authors must coexist; and the LSP needs qualified names for completion /
+cross-file nav / rename. ADR-019 left a spectrum: (1) flat [done]; (2) a Brood
+prefix-macro layer; (3) first-class per-file resolution. This commits the
+*substrate* and most of the surface of (3), built like (2).
+
+**The reframe.** Surveying Lisps, "namespaces" is two languages. Clojure and CL
+are namespaced **and** openly redefinable; Racket is sealed **and** not
+redefinable. **Hard privacy and hot reload are the same trade-off seen from two
+sides.** ADR-019's worry holds only for the Racket end. So Brood takes the
+**Clojure/CL position — namespaced with *soft* privacy**: "private" = not
+auto-imported + `--` convention + a checker lint, *never* erased from the runtime.
+A fully-qualified name (`observer/observe--internal`, like CL `::`) stays reachable
+and live-redefinable. The grain is preserved.
+
+**Decision.**
+- **Expand-time resolution over the existing flat table — no namespace axis in
+  the core.** `/` is already a legal symbol char and lookup is "find the full
+  symbol," so `text/insert` is one interned symbol that already works. `(ns …)`
+  sets a current namespace (`*ns*`, a `defdyn` the compile pass reads); `(defn
+  observe …)` inside `(ns observer)` defines `observer/observe`; a **resolver
+  pass** in the compile pipeline rewrites reference-position symbols
+  (bare → ns-qualified → imported → root/prelude fall-through). The **runtime,
+  `def`-rebinding, ADR-013 hot reload, `send`/promote/freeze, and the GC are all
+  unchanged** — resolution emits a plain late-bound global. Rejected: partitioning
+  the `value.rs` interner into `(ns, name)` (touches reader/eval/env/RuntimeCode/
+  dist/hot-reload for a result the flat substrate already gives at the surface —
+  the big core change ADR-019 argued against).
+- **One shared resolver for eval *and* the LSP.** The evaluator and the language
+  server run the *same* pass, so the editor can never disagree with the runtime.
+  Requires the `ns`/`:use`/`:refer` forms be statically analyzable from the CST
+  (they are — keyworded data).
+- **Data symbols are inviolate.** The resolver rewrites only resolved
+  variable/operator positions, never `quote`d content — symbols travel by name and
+  re-intern across runtimes (ADR-034); rewriting a message tag or map key would
+  break cross-process protocols. `resolve`/computed-symbol/`apply` are the runtime
+  escape hatches.
+- **Auto-require resolves + loads from the load-path; it never *fetches*.** Deps
+  stay explicit in `project.blsp` so the lock file (ADR-037) stays computable.
+- **Migration.** Prelude = the root namespace (unqualified `map`/`+`/`cons`,
+  ergonomic macros `describe`/`test`/`is` stay root). `defmodule` evolves into
+  `ns`; `provide`/`require`/`*load-path*` become the loader underneath. std
+  namespaces gradually; user/package code is namespaced from birth. No hard
+  sealing, ever.
+
+**Open (don't block the substrate; see `namespaces.md` §7–8).**
+- **Macro hygiene.** Brood macros are unhygienic (bare-symbol `quasiquote` +
+  manual `gensym`); use-site rewriting breaks cross-ns macros. *Lean:* α —
+  Clojure-style auto-qualifying `quasiquote` (template symbols qualify to the
+  macro's defining ns; `~'foo` escapes to a bare symbol) — but it's the biggest
+  semantic change and interacts with the ADR-064 quasiquote→Brood refactor.
+  Alternative β: stay unhygienic, hand-qualify cross-ns refs.
+- **Namespace-name collision across packages.** Namespacing relocates collision
+  from symbol level to ns level (two packages declaring `(ns parser)`). Free-for-all
+  short names vs. package-local-name-prefixed. Best decided against ADR-037's shape.
+
+**References.** ADR-019 (the flat-modules decision this supersedes + its spectrum),
+ADR-037/`packages.md` (the collision pressure + the no-fetch line), ADR-013
+(hot reload — the grain soft-privacy preserves), ADR-034 (symbols re-intern by
+name across runtimes — why data symbols can't be rewritten), ADR-064 (the
+quasiquote→Brood refactor that the hygiene decision rides on), ADR-011 (ship the
+simple form), ADR-025/`lsp.md` (Tier 2 — the resolver is shared with the LSP).
+
+## ADR-066 — Auto-gensym (`x#`): opt-in macro binding hygiene
+
+**Status:** accepted (2026-05-30). Implemented in `eval/macros.rs`.
+
+**Context.** Brood macros are unhygienic: a `defmacro` template that introduces a
+binder with a plain literal symbol (`(let (tmp …) …)`) shares one flat namespace
+with the caller's code, so the binder can **capture** a spliced argument (or be
+captured by it). The standing fix is a manual `(gensym)` — verbose, easy to forget
+(the `types/check/hygiene.rs` lint exists precisely because forgetting is a real
+bug). Solving this *before* namespaces (ADR-065) was chosen deliberately: "macro
+hygiene" is two separable concerns — **(#1)** free-reference transparency (a
+template's `helper`/`map` resolving to the def site — the namespacing-coupled one)
+and **(#2)** introduced-binding capture (this, pre-existing and independent). #2
+should not be entangled with the namespace work.
+
+**The roads not taken.** Full Scheme/Racket automatic hygiene (syntax objects /
+sets-of-scopes) makes capture impossible without author effort, but requires
+identifiers that carry per-occurrence lexical context — fattening `Value::Sym`
+(taxes every eval + the GC) or a parallel syntax-object representation, and it
+fights two Brood invariants: symbols ship **by name** across runtimes (ADR-034 — no
+meaning to a local scope set) and code is ordinary data (homoiconic; syntax objects
+need `datum->syntax`/`syntax->datum` bridges). That's the large, core-deep,
+"sweeping" change we declined. Elixir-style context-tagging is lighter but still
+touches the symbol representation and the cross-process question. **Clojure** — the
+closest sibling (Lisp-1, namespaces over a mutable var table, live redefinition) —
+deliberately declined full hygiene for these same reasons and shipped auto-gensym;
+we follow it.
+
+**Decision.** Clojure-style **auto-gensym**: inside one backtick expansion, a
+*literal* template symbol whose name ends in `#` (e.g. `tmp#`) is rewritten to a
+**fresh** `gensym`, the **same** one for every occurrence within that expansion and
+a **distinct** one per expansion (per call site — macros expand at compile time, so
+two runtime calls of one compiled body reuse the baked symbol, as in Clojure).
+- **Smallest possible change.** One interception in the quasiquote walker's leaf
+  arm (`maybe_autogensym`), threading a per-expansion `HashMap<Symbol, Value>`. **No
+  change to the reader** (`#` is already symbol-legal), `value.rs`, `eval`, or the
+  symbol model. `value::gensym` already existed.
+- **GC-safe by construction.** The table holds only interned `Value::Sym`/`u32` —
+  which the copying collector never relocates and which ship by name — so it needs
+  none of quasiquote's operand-stack rooting; it sits outside the GC-sensitive path.
+- **Correct by the walker's structure.** Only literal template symbols reach the
+  leaf arm; a `x#` inside `~unquote` goes through `eval` and is left alone (it's
+  user code). The escape for a deliberately-literal/anaphoric binding is `~'it`
+  (unquote a quoted symbol).
+- **Non-breaking.** No existing `std/` or test symbol ends in `#`; manual-`gensym`
+  macros are unaffected. The hygiene lint now treats a `#`-binder as safe and
+  suggests `x#` as the lighter alternative to `(gensym)`.
+
+**Scope.** This is concern **#2** only — *binding* capture. Concern **#1** (free
+references resolving at the def site across namespaces) is the α decision left open
+in ADR-065/`namespaces.md` §7; it is *not* addressed here. Full automatic
+(Scheme-grade) hygiene remains deferrable indefinitely — `x#` is forward-compatible
+with adding scopes later if a real need ever appears.
+
+**References.** ADR-009 (quasiquote), ADR-065/`namespaces.md` §7 (the two-concerns
+split; #1 still open), ADR-064 (the quasiquote→Brood move this rides alongside),
+ADR-034 (symbols ship by name — why scope-bearing identifiers are costly here),
+ADR-006/011 (Brood-first, smallest core), `types/check/hygiene.rs` (the lint).

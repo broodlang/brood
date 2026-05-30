@@ -358,7 +358,7 @@ fn call_tool(interp: &mut Interp, params: &Json) -> Result<Json, RpcError> {
 
         let result_value =
             brood::eval::apply(&mut interp.heap, handler, &[args_value], interp.root)
-                .map_err(|e| RpcError::from_lisp(&e))?;
+                .map_err(|e| RpcError::from_lisp(&mut interp.heap, &e))?;
 
         let content = value_to_json(&interp.heap, result_value).map_err(RpcError::internal)?;
         Ok(content)
@@ -717,12 +717,17 @@ impl RpcError {
     /// Project a `LispError` into a JSON-RPC `Internal` error carrying the
     /// structured fields in `data`. Used when a Brood-side operation
     /// (`eval_str`, `apply`) errors and we want the agent to see the kind /
-    /// code / location rather than only the rendered message.
-    fn from_lisp(e: &brood::error::LispError) -> Self {
+    /// code / location rather than only the rendered message. The `data` shape
+    /// is *derived* from `LispError::to_value_map` (the canonical Brood-map
+    /// shape `try`/`catch` exposes), so the JSON an agent reads off
+    /// `error.data` and the map a handler reads off `(catch …)` can't drift —
+    /// see [`lisp_error_to_json`]. Allocates a transient map into LOCAL; the
+    /// caller's `reset_local_to` reclaims it.
+    fn from_lisp(heap: &mut Heap, e: &brood::error::LispError) -> Self {
         Self {
             code: -32603,
             message: e.to_string(),
-            data: Some(lisp_error_to_json(e)),
+            data: Some(lisp_error_to_json(heap, e)),
         }
     }
     /// Project a Rust *panic* (caught at the MCP tool-call boundary by
@@ -764,29 +769,22 @@ impl RpcError {
     }
 }
 
-/// Convert a [`LispError`]'s structured fields to a JSON object — the same
-/// shape `try_catch` builds via `LispError::to_value_map`, projected to JSON.
-/// Used for `RpcError`'s `data` field; the Brood map shape and the JSON one
-/// stay parallel by construction so an agent's `error.data.kind` and a
-/// `(get e :kind)` match.
-fn lisp_error_to_json(e: &brood::error::LispError) -> Json {
-    let mut obj = JsonMap::new();
-    obj.insert("kind".into(), Json::String(e.kind.tag_name().into()));
-    obj.insert("message".into(), Json::String(e.message.clone()));
-    if let Some(code) = e.code {
-        obj.insert("code".into(), Json::String(code.into()));
-    }
-    if let Some(file) = &e.file {
-        obj.insert("file".into(), Json::String(file.clone()));
-    }
-    if let Some(pos) = e.pos {
-        obj.insert("line".into(), json!(pos.line));
-        obj.insert("col".into(), json!(pos.col));
-    }
-    if let Some(hint) = &e.hint {
-        obj.insert("hint".into(), Json::String(hint.clone()));
-    }
-    Json::Object(obj)
+/// Convert a [`LispError`]'s structured fields to a JSON object, **derived** from
+/// the canonical `LispError::to_value_map` (the Brood map shape `try`/`catch`
+/// exposes) by projecting that map through [`value_to_json`]. Used for
+/// `RpcError`'s `data` field. Deriving — rather than hand-rebuilding the same
+/// `{kind, message, code?, file?, line?, col?, hint?}` shape here — is what
+/// keeps an agent's `error.data.kind` and a handler's `(get e :kind)` identical
+/// by construction: a field added to `to_value_map` shows up in both at once,
+/// with no second site to keep in sync. (`value_to_json` renders keyword keys
+/// as their bare name, so `:kind` → `"kind"`, matching the prior hand-built
+/// shape exactly.) Falls back to a minimal object only if the projection
+/// somehow fails (it can't for this map — every value is a string/int/keyword).
+fn lisp_error_to_json(heap: &mut Heap, e: &brood::error::LispError) -> Json {
+    let map = e.to_value_map(heap);
+    value_to_json(heap, map).unwrap_or_else(|_| {
+        json!({ "kind": e.kind.tag_name(), "message": e.message.clone() })
+    })
 }
 
 // ============================================================================

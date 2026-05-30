@@ -411,6 +411,41 @@ pub fn escape_brood_string(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// Build a Brood call form `(fn-name "a1" "a2" …)` with each argument embedded
+/// as a properly-escaped string literal. The one place the "interpolate user
+/// strings into a Brood call" pattern lives — callers in `nest` / `brood-lsp`
+/// were each hand-writing `format!("(… \"{}\")", escape_brood_string(x))`,
+/// which is easy to get subtly wrong (a forgotten escape, a missing space).
+/// All arguments are strings, which is what every current call site needs
+/// (paths, names, source); a literal/number arg would be a separate helper.
+pub fn call_form(fn_name: &str, string_args: &[&str]) -> String {
+    let mut s = String::from("(");
+    s.push_str(fn_name);
+    for a in string_args {
+        s.push_str(" \"");
+        s.push_str(&escape_brood_string(a));
+        s.push('"');
+    }
+    s.push(')');
+    s
+}
+
+/// Bootstrap a project image for **tooling** — the shared entry the `brood-lsp`
+/// server and `nest mcp` both use so they can't drift on what a tooling image
+/// contains. Routes to the Brood `(setup-tooling-image root)` in
+/// `std/project.blsp`: it puts the project's sources on `*load-path*`, loads
+/// them, and requires the `test` + `format` frameworks (so cross-module names
+/// and framework macros resolve in the advisory checker). `root` is the already
+/// resolved project-root directory.
+///
+/// Best-effort: an `Err` is returned (the caller logs and continues with at
+/// least the prelude), never panics. The policy lives in Brood; this is the
+/// thin typed seam Rust callers reach it through.
+pub fn load_tooling_image(interp: &mut Interp, root: &str) -> Result<(), String> {
+    let code = format!("(require 'project) {}", call_form("setup-tooling-image", &[root]));
+    interp.eval_str(&code).map(|_| ()).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,6 +488,27 @@ mod tests {
             assert_eq!(global_names(&mut interp), first);
             assert_eq!(signature(&mut interp, "map"), first_sig);
         }
+    }
+
+    #[test]
+    fn call_form_escapes_and_spaces_arguments() {
+        assert_eq!(call_form("f", &[]), "(f)");
+        assert_eq!(call_form("f", &["a", "b"]), "(f \"a\" \"b\")");
+        // A backslash and a quote in the argument are escaped per the reader's
+        // string rule — the produced form must read back as the literal path.
+        assert_eq!(
+            call_form("setup-tooling-image", &["/a b/\"x\"\\y"]),
+            "(setup-tooling-image \"/a b/\\\"x\\\"\\\\y\")"
+        );
+    }
+
+    #[test]
+    fn load_tooling_image_is_best_effort_outside_a_project() {
+        // No project at this path → `setup-tooling-image` runs against an empty
+        // load set; it must not panic, and the Interp stays usable afterwards.
+        let mut interp = Interp::new();
+        let _ = load_tooling_image(&mut interp, "/nonexistent/path/xyzzy");
+        assert!(interp.eval_str("(+ 1 2)").is_ok(), "interp still usable");
     }
 
     // ---- step 1b — wider tooling surface ------------------------------------

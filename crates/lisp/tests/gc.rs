@@ -203,6 +203,48 @@ fn collects_below_the_outermost_eval() {
     );
 }
 
+/// Promoting a *cyclic* local graph — a closure whose captured scope binds the
+/// closure itself — must terminate, not stack-overflow. `def` (and `spawn`)
+/// promote a value into the shared append-only RUNTIME region; before `promote`
+/// grew a forwarding table the closure↔env back-edge recursed forever → SIGSEGV
+/// (`docs/handoff-gc.md` item #2). Covers the self-referential case and the
+/// realistic `letrec` mutual-recursion case, and reads the promoted cycle back
+/// from a *separate* process (whose own LOCAL heap never held it) — proving the
+/// shared cyclic graph is sound cross-heap, per the multi-core test rule.
+#[test]
+fn promotes_cyclic_local_closures_without_crashing() {
+    let mut interp = Interp::new();
+    let prog = r#"
+        ;; Self-referential local closure (the handoff repro): `g` captures the
+        ;; `let` scope that binds `g`, so `def` promotes a closure<->env cycle.
+        (def selfref (let (g (fn () g)) g))
+        ;; Mutually recursive local closures via letrec, def'd: both capture the
+        ;; one shared scope that binds both — a cycle through two closures.
+        (def even-pred
+          (letrec (even? (fn (n) (if (= n 0) true  (odd?  (- n 1))))
+                   odd?  (fn (n) (if (= n 0) false (even? (- n 1)))))
+            even?))
+        ;; Resolve the promoted cycles from ANOTHER process: the worker reads
+        ;; `selfref`/`even-pred` out of the shared RUNTIME region (its LOCAL heap
+        ;; never built the cycle), so a correct answer proves the promoted graph.
+        (def root (self))
+        (spawn
+          (let (ok (and (fn? (selfref))      ;; f returns the closure g
+                        (fn? ((selfref)))    ;; g returns itself, still callable
+                        (even-pred 10)       ;; 10 is even
+                        (not (even-pred 7)))) ;; 7 is odd
+            (send root (if ok :pass :fail))))
+        (receive (:pass :pass) (:fail :fail) (after 10000 :timed-out))
+    "#;
+    let v = interp.eval_str(prog).expect("cyclic-promote program errored");
+    assert_eq!(
+        interp.print(v),
+        ":pass",
+        "promoted cyclic closures didn't round-trip through a spawned process — \
+         either promote regressed or the shared RUNTIME cycle reads wrong",
+    );
+}
+
 /// Pull `:field N` out of a printed Brood map (`{... :field 123 ...}`). The map
 /// printer separates a key from its value by one space; values here are
 /// non-negative integers.

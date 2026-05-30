@@ -132,3 +132,48 @@ fn project_sources(interp: &mut Interp, docs: &Documents, current: &Uri) -> Vec<
     }
     out
 }
+
+/// `(uri, text)` for *every* searchable source: the project files (preferring
+/// an open buffer's in-memory text over its on-disk copy) unioned with every
+/// open document — so a scratch buffer outside any project is searched too.
+/// Unlike [`project_sources`], there is no "current" document: workspace-wide
+/// features (symbol search) aren't anchored to one open file. Deduped by the
+/// decoded filesystem path, same as `project_sources` (see its note).
+pub fn all_sources(interp: &mut Interp, docs: &Documents) -> Vec<(Uri, String)> {
+    let open: HashMap<PathBuf, &str> = docs
+        .iter()
+        .filter_map(|(u, d)| Some((crate::uri_to_path(u)?, d.text.as_str())))
+        .collect();
+
+    let mut out = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    for path in introspect::project_files(interp) {
+        let pb = PathBuf::from(&path);
+        if !seen.insert(pb.clone()) {
+            continue;
+        }
+        let Some(uri) = crate::path_to_uri(&path) else {
+            continue;
+        };
+        let text = open
+            .get(&pb)
+            .map(|s| s.to_string())
+            .or_else(|| std::fs::read_to_string(&path).ok());
+        if let Some(text) = text {
+            out.push((uri, text));
+        }
+    }
+    // Any open document not already covered by the project set (a file:// path
+    // outside the project, or a non-`file:` scratch URI).
+    for (uri, doc) in docs {
+        // A `file:` path already in the project set is skipped; a non-`file:`
+        // scratch URI (no path) is always included.
+        if let Some(p) = crate::uri_to_path(uri) {
+            if !seen.insert(p) {
+                continue;
+            }
+        }
+        out.push((uri.clone(), doc.text.clone()));
+    }
+    out
+}

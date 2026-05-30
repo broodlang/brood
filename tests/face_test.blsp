@@ -1,0 +1,86 @@
+;; The shared named-face / theme registry (std/face.blsp): def-face/face-set/face
+;; over a global map, with :inherit resolution. Pure data→data, so the core is
+;; fully testable without a frontend; the :isolated block proves a face defined in
+;; one process is visible in others (the shared-global rebind, like a theme set in
+;; the REPL restyling a running observer).
+
+(require 'test)
+(require 'face)
+
+;; These describes `def-face` into the shared global `*faces*`. Concurrent
+;; `def`-rebinds of one global race (lost updates) — fine for real config-style
+;; use, but the suite runs every test at once — so run them `:isolated` (alone,
+;; against a private rolled-back copy of the globals).
+(describe "face registry"
+  :isolated
+  (test "def-face registers a face and face resolves it"
+    (def-face :t/plain {:fg :red :bold true})
+    (assert= (face :t/plain) {:fg :red :bold true}))
+  (test "def-face returns the name"
+    (assert= (def-face :t/ret {:fg :green}) :t/ret))
+  (test "an unknown face resolves to nil (the default face)"
+    (assert= (face :t/never-defined) nil))
+  (test "face-set merges into an existing face, keeping other attrs"
+    (def-face :t/merge {:fg :red :bold true})
+    (face-set :t/merge {:fg :cyan :italic true})
+    (assert= (face :t/merge) {:fg :cyan :bold true :italic true}))
+  (test "face-set creates the face when absent"
+    (face-set :t/fresh {:fg :yellow})
+    (assert= (face :t/fresh) {:fg :yellow}))
+  (test "the core :ui/* faces are predefined"
+    (assert= (face :ui/default) {})
+    (is (get (face :ui/header) :reverse))
+    (assert= (get (face :ui/dim) :fg) :dark-grey)
+    (assert= (get (face :ui/error) :fg) :red)))
+
+(describe "face :inherit resolution"
+  :isolated
+  (test "a face layers over its :inherit parent, local keys winning"
+    (def-face :t/base  {:fg :blue :bold true})
+    (def-face :t/derived {:inherit :t/base :fg :green :italic true})
+    ;; parent contributes :bold; child overrides :fg and adds :italic; :inherit stripped
+    (assert= (face :t/derived) {:fg :green :bold true :italic true}))
+  (test "the resolved map never carries the :inherit key"
+    (def-face :t/p {:fg :red})
+    (def-face :t/c {:inherit :t/p :bold true})
+    (refute (contains? (face :t/c) :inherit)))
+  (test "inheriting an unknown parent contributes nothing (just the local attrs)"
+    (def-face :t/orphan {:inherit :t/no-such :fg :magenta})
+    (assert= (face :t/orphan) {:fg :magenta}))
+  (test "a multi-level chain resolves top-down"
+    (def-face :t/a {:fg :red})
+    (def-face :t/b {:inherit :t/a :bold true})
+    (def-face :t/d {:inherit :t/b :italic true})
+    (assert= (face :t/d) {:fg :red :bold true :italic true}))
+  (test "an :inherit cycle terminates (bounded) instead of overflowing"
+    (def-face :t/cyc1 {:inherit :t/cyc2 :fg :red})
+    (def-face :t/cyc2 {:inherit :t/cyc1 :bold true})
+    ;; resolves to *some* map without looping forever; both attrs are present
+    (let (r (face :t/cyc1))
+      (is (map? r))
+      (assert= (get r :fg) :red)
+      (is (get r :bold)))))
+
+;; Cross-process coverage: a face defined in one process is visible in spawned
+;; workers — proving the registry's `def` rebind reaches the shared code region
+;; (the mechanism behind "set a theme in the REPL, the running observer restyles").
+(describe "faces across processes"
+  :isolated
+  (test "a face defined here resolves in spawned workers, fanned back in"
+    (def-face :t/shared {:fg :cyan :bold true})
+    (let (me (self)
+          workers (map (fn (i)
+                         (spawn (send me [:face i (face :t/shared)])))
+                       (range 8)))
+      ;; collect each worker's resolution of the shared face
+      (let (results (map (fn (_)
+                           (receive ([:face _ f] f) (after 1000 :timeout)))
+                         (range 8)))
+        (is (every? (fn (f) (= f {:fg :cyan :bold true})) results)))))
+  (test "a face-set in this process is seen by a later-spawned worker"
+    (def-face :t/live {:fg :red})
+    (face-set :t/live {:bold true})
+    (let (me (self))
+      (spawn (send me [:got (face :t/live)]))
+      (assert= (receive ([:got f] f) (after 1000 :timeout))
+               {:fg :red :bold true}))))
