@@ -349,7 +349,7 @@ and registers the new pid. The name is auto-reaped on death.
         (supervise worker-fn)))))
 ```
 
-## Stateful servers — the `hatch` framework (`(require 'hatch)`)
+## Stateful servers — the `hatch` framework (`(:use hatch)`)
 
 Raw `spawn`/`receive` is the substrate; for a process that **holds state and
 answers messages** (a gen_server / actor), use `hatch`. State is immutable —
@@ -364,7 +364,8 @@ kinds:
   Use this for "just read a field" cases to avoid the `[x s]` boilerplate.
 
 ```lisp
-(require 'hatch)
+(defmodule my-counter "…" (:use hatch))   ; (:use hatch), not (require 'hatch),
+                                           ; to write defprocess/cast/gen-call bare
 
 (defprocess counter (n)                 ; n is the state
   (cast  :inc       (+ n 1))            ; new state = n+1
@@ -508,7 +509,9 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   `(count m)` / `(into [] m)` all walk the map as its `[k v]` pairs — no need
   for `(zip (keys m) (vals m))`. Iteration order is hash-driven (ADR-040), so
   compare via `frequencies` when order would otherwise matter.
-- **set** (`(require 'set)`): a set is a **map of `element → true`**, so
+- **set** (`(:use set)` in your `defmodule` header — `(require 'set)` alone
+  leaves the names qualified, `set/union`): a set is a **map of `element →
+  true`**, so
   membership is `(contains? s x)`, elements `(keys s)`, size `(count s)`, and it's
   seqable like any map. The module adds `(set coll)` (dedups), `conj`/`disj`,
   `union`/`intersection`/`difference`/`subset?`. `(set [[0 0] [1 2]])` is the
@@ -542,7 +545,9 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 - **I/O**: `print` `println` `slurp` `spit` `load` `eval-string` `read-string`.
   `print`/`println` **flush stdout every call** — there's no separate flush, so
   an animation frame paints immediately. For raw terminal control without the
-  full display protocol, `(require 'ansi)` gives `(ansi-clear)`/`(ansi-home)`/
+  full display protocol, `(:use ansi)` in your `defmodule` header (a bare
+  `(require 'ansi)` leaves them qualified, `ansi/ansi-clear`) gives
+  `(ansi-clear)`/`(ansi-home)`/
   `(ansi-cursor r c)`/`(ansi-hide-cursor)` — **zero-arg functions you call**, each
   *returning* an escape string. Call them: `(print (ansi-clear))`, **never**
   `(print ansi-clear)` (a bare symbol prints `#<fn …>` and emits no escape). The
@@ -581,14 +586,25 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   the self-call the *last* thing the function does. The advisory checker
   (`nest check`, the LSP, `nest mcp`) **warns** when a function calls itself in
   non-tail position, e.g. `(* n (fact (- n 1)))`.
-- **Exactly one of every name, project-wide.** The module system is flat
-  (ADR-019): a global is a single binding across the *whole* project, not
-  per-file. Defining `main` (or any name) in two source files is a bug — the
-  last one loaded silently wins. `nest run` / `nest test` warn on cross-file
-  duplicates, but it's on you to keep names unique. This is a naming *rule*,
-  not just a module fact.
+- **Each module is a namespace (ADR-065).** A file's `(defmodule name …)`
+  compiles the rest of the file into namespace `name`: every `def`/`defn`/
+  `defmacro` defines `name/foo`, and a bare reference resolves first in the
+  current namespace, then through the header's `(:use …)` imports, then root
+  (the prelude). So the *same* short name in two modules is fine — `a/parse`
+  and `b/parse` are distinct globals, and `nest run`/`nest test` no longer
+  false-flag them. From *outside* a module (e.g. the REPL or `nest mcp` eval),
+  reach a `defn` by its qualified name: `(life/step …)`, found via `apropos`.
+  **The one exception is earmuffed `*foo*` names** — by convention they're
+  *ambient* (dynamic/config vars) and stay bare/root, never namespaced, so a
+  `(def *width* …)` is reachable as `*width*` everywhere and must be unique.
+- **Importing a module**: inside `defmodule`, add a `(:use mod)` clause to refer
+  `mod`'s public names **bare** (`(:use mod :refer [a b])` for a subset). A
+  plain top-level `(require 'mod)` only *loads* `mod` — its names stay
+  qualified (`mod/foo`). `(:require …)` is **not** a `defmodule` clause; only
+  `:use` is (anything else in the header is silently ignored).
 - **Not Clojure**: no `defprotocol`, no transients, no `loop` / `recur`
-  (just plain recursion), no namespaced names (the module system is flat).
+  (just plain recursion). Namespaces *do* exist now (ADR-065) but are
+  `mod/name`-flat, not Clojure's `require :as` aliasing.
 - **Not Scheme / CL**: no `setq`, no `cond`-with-`t`-catch-all (use `else`
   or `:else`).
 - **`sort` on heterogeneous / non-numeric items uses *structural* order.**
@@ -617,9 +633,11 @@ process — starter shapes you'd otherwise hand-write.
 
 ```lisp
 ;; src/main.blsp
-(defmodule main "The project's entry-point module (nest run -> main/main).")
-
-(require 'hello)
+;; `(:use hello)` brings `hello`'s public names (here `greeting`) into scope
+;; bare; without it you'd call `(hello/greeting)`. A plain `(require 'hello)`
+;; only loads the file — it does not refer the names.
+(defmodule main "The project's entry-point module (nest run -> main/main)."
+  (:use hello))
 
 (defn main ()
   "Entry point: print the project's greeting."
@@ -628,7 +646,8 @@ process — starter shapes you'd otherwise hand-write.
 
 ```lisp
 ;; tests/hello_test.blsp
-(require 'test)
+;; `(:use hello)` brings `greeting` into scope; `(:use test)` the test macros.
+(defmodule hello-test (:use hello) (:use test))
 
 (describe "hello"
   (test "greeting works"   (assert= (greeting) "hello world"))
@@ -648,7 +667,9 @@ counterexample it fails with the value + seed:
 
 `nest test` runs each test in its own green process. `nest run` invokes the
 `main/main` entry by default (override in `project.blsp` via `:main`; e.g.
-`:main 'app` runs `app/main`, `:main '(app start)` runs `app/start`). Add
+`:main app` runs `app/main`, `:main (app start)` runs `app/start`). The manifest
+is **unevaluated data**, so write these as bare symbols — *not* `:main 'app`
+(a leading quote misparses). Add
 `--for DURATION` (e.g. `nest run --for 2s`) to run a loop/TUI for a bounded
 time and exit cleanly.
 

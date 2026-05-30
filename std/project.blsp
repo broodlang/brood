@@ -44,6 +44,12 @@ the `nest new` scaffolder."
 (defn project--parse-main (v)
   (cond
     (symbol? v) (list v 'main)
+    ;; `:main 'app` / `:main '(app start)` reads as `(quote …)` — the manifest is
+    ;; data and never evaluated, so the quote is literal, not stripped. Catch it
+    ;; with a fix-it instead of silently parsing module `quote`.
+    (and (pair? v) (= (first v) 'quote))
+    (error "project: :main takes a bare symbol, not a quoted one — write `:main "
+      (second v) "` (the manifest is data, so drop the leading quote)")
     (and (pair? v) (symbol? (first v)) (pair? (rest v)) (symbol? (second v)) (nil? (rest (rest v)))) (list (first v)
                                                                                                        (second v))
     else (error "project: :main must be a module symbol or '(module fn), got " v)))
@@ -1011,11 +1017,14 @@ resolve in the advisory checker. Returns the project root."
     "\n"
     "- `nest test`   — run the test suite (each test runs in its own green process).\n"
     "- `nest run`    — invoke the entry point. Defaults to the `main` function in\n"
-    "  the `main` module; override in `project.blsp` with `:main`:\n"
-    "  `:main 'app` runs `app/main`; `:main '(app start)` runs `app/start`.\n"
-    "  Names are flat across the whole project (ADR-019) — there is exactly one\n"
-    "  of every global name, so don't define `main` in two modules (the runner\n"
-    "  warns if you do).\n"
+    "  the `main` module; override in `project.blsp` with `:main` (bare symbols,\n"
+    "  the manifest is data — `:main app` runs `app/main`; `:main (app start)`\n"
+    "  runs `app/start`; never quote them).\n"
+    "  Each module is a namespace (ADR-065): a file's `defmodule name` makes its\n"
+    "  `def`/`defn` define `name/foo`; a bare reference resolves in the current\n"
+    "  namespace, then through `(:use …)` imports, then root/prelude. So the same\n"
+    "  short name in two modules is fine (`a/parse` vs `b/parse`) — only earmuffed\n"
+    "  `*foo*` vars are ambient/bare and must stay unique.\n"
     "- `nest run --for 2s` — run a loop / full-screen TUI for a bounded time, then\n"
     "  exit cleanly (`2s`, `500ms`, or a bare integer of ms). The way to exercise\n"
     "  a never-returning program end-to-end or in CI.\n"

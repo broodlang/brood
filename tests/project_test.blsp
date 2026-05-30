@@ -27,7 +27,16 @@
     (is (string? (try (project/project--parse-main '("foo" main)) (catch e e)))))
   (test "a non-symbol fn is rejected"
     (is (string? (try (project/project--parse-main '(foo "main")) (catch e e)))))
-  (test "a string is rejected" (is (string? (try (project/project--parse-main "main") (catch e e))))))
+  (test "a string is rejected" (is (string? (try (project/project--parse-main "main") (catch e e)))))
+  ;; `:main 'app` reads as `(quote app)` (the manifest is data, never evaluated),
+  ;; which would silently misparse to module `quote` — guard it with a fix-it.
+  (test "a quoted symbol is rejected with a drop-the-quote fix-it"
+    (let (msg (try (project/project--parse-main '(quote app)) (catch e e)))
+      (and (is (string-contains? msg "drop the leading quote"))
+        (is (string-contains? msg "`:main app`")))))
+  (test "a quoted list is rejected with a drop-the-quote fix-it"
+    (is (string-contains? (try (project/project--parse-main '(quote (app start))) (catch e e))
+      "drop the leading quote"))))
 
 (describe "project: default entry"
   (test "*project-main* defaults to (main main)"

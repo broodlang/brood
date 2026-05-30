@@ -6,6 +6,7 @@
 //! The annotated list is in `docs/primitives.md`.
 
 use crate::core::heap::Heap;
+use crate::core::keywords as kw;
 use crate::core::value::{self, Arity, EnvId, NativeFn, NativeFnPtr, Tag, Value};
 use crate::error::{LispError, LispResult};
 use crate::eval::apply;
@@ -4495,38 +4496,38 @@ fn arglist(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
 /// keeping a copy), so the runtime and the tooling can't drift. Mirrors
 /// `brood.el`'s `brood-special-forms` plus the `def`-family heads.
 pub const SPECIAL_FORMS: &[&str] = &[
-    "if",
-    "do",
-    "def",
-    "fn",
-    "lambda",
-    "let",
-    "let*",
-    "letrec",
-    "quote",
-    "quasiquote",
-    "defmacro",
-    "defn",
-    "defdyn",
-    "defmodule",
-    "when",
-    "unless",
-    "cond",
-    "and",
-    "or",
-    "match",
-    "match*",
-    "try",
-    "catch",
-    "throw",
-    "receive",
-    "binding",
-    "dolist",
-    "doseq",
-    "dotimes",
-    "for",
-    "->",
-    "->>",
+    kw::IF,
+    kw::DO,
+    kw::DEF,
+    kw::FN,
+    kw::LAMBDA,
+    kw::LET,
+    kw::LET_STAR,
+    kw::LETREC,
+    kw::QUOTE,
+    kw::QUASIQUOTE,
+    kw::DEFMACRO,
+    kw::DEFN,
+    kw::DEFDYN,
+    kw::DEFMODULE,
+    kw::WHEN,
+    kw::UNLESS,
+    kw::COND,
+    kw::AND,
+    kw::OR,
+    kw::MATCH,
+    kw::MATCH_STAR,
+    kw::TRY,
+    kw::CATCH,
+    kw::THROW,
+    kw::RECEIVE,
+    kw::BINDING,
+    kw::DOLIST,
+    kw::DOSEQ,
+    kw::DOTIMES,
+    kw::FOR,
+    kw::THREAD_FIRST,
+    kw::THREAD_LAST,
 ];
 
 /// `(special-forms)` — the list of special-form / core-macro names (strings) that

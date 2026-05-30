@@ -283,7 +283,10 @@ co-author trailer, overriding any default that would append one.
    prelude fn in `std/prelude.blsp`).
 2. Add tests — an `(assert= …)`/`(is …)` inside a `(test …)` within a `describe`
    block in a `tests/*_test.blsp` file (in-language, via the `std/test.blsp`
-   framework, `(require 'test)`), and/or a Rust case in `crates/lisp/tests/`.
+   framework: open the file with `(defmodule foo-test (:use test) (:use foo))`
+   so the test macros and the module under test refer bare — post-ADR-065 a bare
+   `(require 'test)` only loads it and leaves `describe`/`test`/`assert=`
+   qualified), and/or a Rust case in `crates/lisp/tests/`.
    **Every language feature must also be tested across multiple cores**, not just
    single-threaded. The in-language suite already helps here — `std/test.blsp`
    runs each test in its own green process on the ≈`nproc` worker pool, so a plain

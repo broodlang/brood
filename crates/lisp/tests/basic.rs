@@ -755,7 +755,40 @@ fn scheduler_race_hint_attaches_to_unbound_in_green_processes() {
 fn unbound_in_root_thread_has_no_scheduler_hint() {
     // Negative case: the root thread (REPL / file runner / nest mcp
     // dispatcher) is *not* a green process, so the hint stays nil.
+    // (`no-such-fn` has no `mod/no-such-fn`, so the namespace hint below
+    // doesn't fire either.)
     assert_eq!(run("(try (no-such-fn) (catch e (get e :hint)))"), "nil");
+}
+
+/// A construct from another Lisp that Brood doesn't have gets a "the Brood way"
+/// hint — at runtime (the caught error's `:hint`) and at write-time (the advisory
+/// checker), both via the shared `eval::foreign_construct_hint`.
+#[test]
+fn foreign_constructs_hint_at_the_brood_way() {
+    // Runtime: hint rides the caught error.
+    assert!(run("(try (set! x 1) (catch e (get e :hint)))").contains("immutable"));
+    assert!(run("(try (loop 1) (catch e (get e :hint)))").contains("tail-recursive"));
+    // Write-time: `check` appends the same guidance to the unbound warning.
+    assert!(run("(check '(swap! a 1))").contains("atoms"));
+    // A name Brood *does* provide (it aliases `car` → `first`) gets no foreign
+    // hint — it simply runs.
+    assert_eq!(run("(try (car (list 1)) (catch e e))"), "1");
+}
+
+/// A bare name that exists only as `mod/name` — because `(require 'mod)` loaded
+/// the module but didn't refer it — gets a `(:use mod)` fix-it hint. This is the
+/// most common post-ADR-065 mistake for code (and LLMs) written against the old
+/// flat-namespace model. `eval::unbound_namespace_hint`.
+#[test]
+fn unbound_bare_name_suggests_use_of_its_namespace() {
+    let mut interp = Interp::new();
+    interp.eval_str("(require 'set)").unwrap(); // defines set/union, set/set, …
+    let r = interp
+        .eval_str("(try (union {} {}) (catch e (get e :hint)))")
+        .unwrap();
+    let printed = interp.print(r);
+    assert!(printed.contains("(:use set)"), "{printed}");
+    assert!(printed.contains("set/union"), "{printed}");
 }
 
 /// Parse errors caught by `try`/`catch` carry the `:line` and `:col` the
