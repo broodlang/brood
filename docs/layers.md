@@ -136,6 +136,29 @@ layer-dispatch (ctx pending key fb)  -> active-keymap + keymap-step → [ctx' pe
   a `ui-run` loop recipe. (A live TTY/GUI demo is left to the editor app, since it
   can't run in the test suite; the loop recipe is documented.)
 
+## First consumer: structural navigation + editor modes
+
+The first real use of layers is editing modes — and it sets the tier line:
+
+- **`std/sexp.blsp` (std).** Structural s-expression navigation over Brood's own
+  `parse-source` CST (a lossless typed tree — our "tree-sitter" for Brood code):
+  annotate positions in one walk, then navigate by structure
+  (`point-forward`/`backward`/`up`/`down`/`defun-start`, plus buffer commands).
+  Written against an abstract node shape `{:kind :start :end :kids}`, so a
+  foreign-language backend (tree-sitter, in the editor) can later produce the same
+  shape and reuse these commands. This is *reusable Brood-code tooling* — same tier
+  as the formatter / LSP — so it lives in std, not the editor.
+- **The modes live in the editor, not brood** (`examples/editor/src/`).
+  `text-mode` (the default — registered for `:fundamental`) and `brood-mode`
+  (`.blsp` → `:brood`; reuses text-mode's motion + `sexp` nav + `eval-command`'s
+  `C-x C-e`, stashing the result in `:message`) are *policy* — which keys do what,
+  which file types map to which mode. A different Brood editor would ship different
+  ones, so they're app config, loaded from the editor project's `src/` at runtime,
+  **not baked into the `brood` binary.** Each mode is just a layer; the
+  `:parser :brood` facet marks the structural backend (a `ruby`/`elixir` layer is
+  the same shape with a tree-sitter `:parser`/`:grammar` facet — no new concept).
+  Tested by the editor's own `nest test` (`examples/editor/tests/`).
+
 ## Deferred (named, not precluded)
 
 `:applies-to` (decentralised type binding) · per-binding `when`-guards · cross-layer

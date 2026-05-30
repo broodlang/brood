@@ -1,0 +1,8 @@
+;; The editor — a Brood program built on the standard editor framework
+;; (std/buffer, std/keymap, std/layers, std/sexp, std/eval-command). This is an
+;; *app*, not part of the language: its modes are editor policy (which keys do
+;; what, which file types map to which mode), so they live here in src/, loaded at
+;; runtime — not baked into the `brood` binary. `nest test` / `nest run` from here.
+;;
+;; src/ holds the editor's modules (added to *load-path*); tests/ holds its suite.
+(project :name "editor" :version "0.1.0")

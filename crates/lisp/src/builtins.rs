@@ -2636,6 +2636,11 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
     // generic mechanism the editor's "modes" are built from; buffer-agnostic).
     // Opt-in, never in the prelude. See docs/layers.md.
     ("layers", include_str!("../../../std/layers.blsp")),
+    // Structural (s-expression) navigation over the parse-source CST — reusable
+    // Brood-code tooling (same tier as the formatter / LSP), not editor-specific.
+    // (The text-mode/brood-mode *layers* built on it are editor policy and live in
+    // the editor app — examples/editor/src/ — not here.) Opt-in. (docs/layers.md)
+    ("sexp", include_str!("../../../std/sexp.blsp")),
     ("ui", include_str!("../../../std/ui.blsp")),
     ("observer", include_str!("../../../std/observer.blsp")),
     // Bare ANSI escape *strings* for simple terminal scripts (`print` them

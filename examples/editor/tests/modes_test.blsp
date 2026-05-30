@@ -1,0 +1,40 @@
+;; The editor's modes — text-mode (the default) and brood-mode (.blsp source) —
+;; over the std framework (layers/sexp/buffer/keymap/eval-command). Run by
+;; `nest test` from examples/editor (its src/ is on the load-path, so requiring
+;; the modes resolves them).
+
+(defmodule modes-test (:use test) (:use buffer) (:use layers))
+(require 'buffer) (require 'layers)
+(require 'brood-mode) (require 'text-mode)   ; from src/ (editor policy, not embedded)
+
+(describe "mode resolution & the default"
+  (test "text-mode is the default for a plain buffer (:fundamental)"
+    (assert= (buffer-type-for {}) :fundamental)
+    (is (layer-active? (init-buffer-layers {}) 'text)))
+
+  (test "a .blsp buffer gets brood-mode"
+    (assert= (buffer-type-for {:file "x.blsp"}) :brood)
+    (is (layer-active? (init-buffer-layers {:file "x.blsp"}) 'brood))))
+
+(describe "brood-mode behaviour"
+  (test "eval-last-sexp evaluates the last sexp and stashes the result in :message"
+    (let (b (end-of-buffer (make-buffer "(+ 1 2)" "x.blsp" "x.blsp")))
+      (assert= (get (brood-mode/eval-last-sexp b nil) :message) "=> 3")))
+
+  (test "dispatching C-M-f through the brood layer runs structural forward-sexp"
+    (let (b (init-buffer-layers (make-buffer "(+ 1 2)" "x.blsp" "x.blsp"))
+          r (layer-dispatch b nil :ctrl-meta-f (fn (s _) s)))
+      (assert= (get (first r) :point) 7))))    ; moved over the whole form
+
+;; ---- across processes -------------------------------------------------------
+(defn mode-worker (parent)
+  (let (b (init-buffer-layers (make-buffer "(+ 1 2)" "x.blsp" "x.blsp"))
+        r (layer-dispatch b nil :ctrl-meta-f (fn (s _) s)))
+    (send parent (get (first r) :point))))
+
+(describe "modes across processes"
+  :isolated
+  (test "a .blsp buffer's brood-mode dispatch works in a spawned process"
+    (let (me (self))
+      (spawn (mode-worker me))
+      (assert= (receive) 7))))

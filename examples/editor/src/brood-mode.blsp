@@ -1,0 +1,56 @@
+;; examples/editor/src/brood-mode.blsp — the editing layer for Brood (.blsp)
+;; source. An *editor* module (policy: keys, file associations), loaded from the
+;; editor project's src/, not part of the language. (require 'brood-mode).
+;;
+;; A `brood-mode` LAYER (in the `layers` sense) for Brood code: it reuses
+;; `text-mode`'s motion commands, adds structural s-expression navigation
+;; (`std/sexp`, over the `parse-source` CST), and binds `C-x C-e` to evaluate the
+;; last sexp before point (`std/eval-command`), stashing the result message in the
+;; buffer's `:message` (the editor's echo area reads it). It registers `.blsp`
+;; files as the `:brood` type and binds the `:brood` type to this layer.
+;;
+;; The `:parser :brood` facet marks which structural backend the sexp commands use;
+;; today that's `parse-source`. When a foreign-language backend (tree-sitter, in the
+;; editor crate) arrives, a `ruby`/`elixir` layer is the *same* shape with a
+;; different `:parser`/`:grammar` facet — no new concept (see docs/layers.md).
+;; Opt-in, zero kernel surface.
+
+(defmodule brood-mode
+  "The editing layer for Brood (`.blsp`) source: `text-mode` motion + structural
+sexp navigation (`std/sexp`) + `C-x C-e` evaluate-last-sexp (`std/eval-command`,
+result into `:message`). Registers `.blsp` → `:brood` → this layer. `(require
+'brood-mode)`."
+  (:use layers)
+  (:use keymap))
+
+(require 'buffer)
+(require 'layers)
+(require 'keymap)
+(require 'sexp)
+(require 'eval-command)
+(require 'text-mode)
+
+;; C-x C-e: evaluate the last sexp before point; the result message (value +
+;; captured output) goes in :message for the editor to show. Does not edit the
+;; buffer's text.
+(defn eval-last-sexp (buf key)
+  (assoc buf :message (eval-command/eval-last-sexp buf)))
+
+(def km
+  (-> {;; motion (shared with text-mode)
+       :right 'text-mode/forward-char  :left 'text-mode/backward-char
+       :down  'text-mode/forward-line  :up   'text-mode/backward-line
+       :alt-f 'text-mode/forward-word  :alt-b 'text-mode/backward-word
+       :ctrl-a 'text-mode/beginning-of-line :ctrl-e 'text-mode/end-of-line
+       ;; structural s-expression navigation
+       :ctrl-meta-f 'sexp/forward      :ctrl-meta-b 'sexp/backward
+       :ctrl-meta-u 'sexp/up           :ctrl-meta-d 'sexp/down
+       :ctrl-meta-a 'sexp/beginning-of-defun}
+      ;; C-x C-e — a chord
+      (keymap-bind [:ctrl-x :ctrl-e] 'brood-mode/eval-last-sexp)))
+
+(def layer {:name 'brood :parser :brood :keymap km})
+
+;; Bind .blsp files to the :brood type, and the :brood type to this layer.
+(register-file-type ".blsp" :brood)
+(register-type-layers :brood (list 'brood-mode/layer))
