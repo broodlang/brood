@@ -1,17 +1,18 @@
 # The execution-engine plan — a closure-compiling VM
 
-> **Status (2026-05-31): Stage 0–2c built behind `BROOD_VM` — ~1.6–2.3×; full suite
-> green under *both* engines.** The design record is **ADR-076**; this file is the
-> long-form companion. Nothing here changes the language — it is purely an
-> **execution-engine** swap. `std/*.blsp` and user code are untouched. Stage 0–1
-> (mechanism + the passthrough redirect), Stage 2a (`let`/`letrec`), 2b
-> (multi-arity), and **2c (local-capturing closures — the GC-critical one)** are
-> merged to `main`, as is **source-position threading** (VM error diagnostics now
-> carry `line:col`, so the last divergence from the tree-walker is closed).
-> `make install` already ships the VM by default (the `brood/vm-default` cargo
-> feature); `cargo build`/`make test` stay on the tree-walker. **Next: Stage 3 —
-> flip the *global* default to the VM** after an extended soak (green-process
-> fan-out, `receive` suspend/resume, hot-reload) + the differential test mode. See
+> **Status (2026-05-31): Stage 0–3 done — the VM is the default engine (~1.6–2.3×).**
+> The design record is **ADR-076**; this file is the long-form companion. Nothing
+> here changes the language — it is purely an **execution-engine** swap; `std/*.blsp`
+> and user code are untouched, and the full Rust + in-language suite is green on
+> **both** engines. Stage 0–1 (mechanism + passthrough redirect), 2a (`let`/`letrec`),
+> 2b (multi-arity), **2c (local-capturing closures — the GC-critical one)**, and
+> source-position threading are all merged. **Stage 3 cutover (done):
+> `eval::compile::vm_enabled` now defaults the VM *on*; `BROOD_VM=0` is the
+> tree-walker escape hatch (retained for ≥1 release).** A core-vocabulary closure
+> runs on the VM; anything else transparently defers to the tree-walker per-form, so
+> the language is unchanged. **Still worth doing:** a differential test mode (run the
+> suite through both engines, assert identical output) as a standing CI guard, and
+> widening VM coverage (variadic / patterns / prelude closures — pure perf). See
 > [As-built](#as-built-stage-01-2026-05-30) for the numbers and the §7 plan.
 
 This is the project's "big lever" for performance: closing the tree-walker's

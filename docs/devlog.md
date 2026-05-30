@@ -10242,3 +10242,23 @@ bodies carry no recorded position in either engine, so they stay untagged
 identically. **The full Rust + in-language suite is now green under `BROOD_VM=0`
 *and* `=1`** (394/394 each), removing the last blocker on the Stage-3 default-on
 cutover (still wants the soak + differential-test mode first).
+
+---
+
+## 2026-05-31 — VM is the default engine (ADR-076 Stage 3 cutover)
+
+With the engines behaviourally identical (full suite green under both), flipped the
+**closure-compiling VM on by default**: `eval::compile::vm_enabled` now returns true
+unless `BROOD_VM=0` (the tree-walker escape hatch, kept for ≥1 release). Removed the
+now-redundant transitional scaffolding — the `brood/vm-default` cargo feature and the
+Makefile `VM_FEATURES`/`VM_DEFAULT` plumbing (`make install` no longer needs a
+special feature; the VM is just the default everywhere). `make test`/`cargo build`
+now run the VM and stay green (419/419), as does `BROOD_VM=0`. A core-vocabulary
+closure runs on the VM; everything else still transparently defers to the tree-walker
+per-form, so the language is unchanged.
+
+**Pre-alpha call** (greenfield, no users): we flipped now rather than after a long
+soak, trusting the dual-engine suite agreement. **Still recommended next:** a
+differential test mode (run the suite through both engines, assert identical output)
+as a standing CI guard, and widening VM coverage (variadic / pattern / prelude
+closures — pure perf, deferral already correct).
