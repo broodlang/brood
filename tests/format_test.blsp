@@ -72,6 +72,33 @@
   (test "blank lines between two top-level comments are preserved"
     (assert= (format-source ";; a\n\n;; b\n(def x 1)") ";; a\n\n;; b\n(def x 1)\n")))
 
+(describe "format: a comment just before a closing delimiter"
+  ;; Regression (the bug that broke tests/adversarial_test.blsp): when the last
+  ;; child of a broken list is a comment, the close delimiter must drop to its
+  ;; own line. Appended directly it lands inside the comment (`;; note)`), which
+  ;; comments out the `)` and leaves the list unclosed — an unparseable file.
+  (test "the closing paren drops below a trailing comment, not into it"
+    (let (out (format-source "(describe \"x\"\n  (test \"a\" (is true))\n  ;; note\n  )"))
+      (is (string-contains? out ";; note\n)"))      ; `)` on its own line
+      (is (not (string-contains? out ";; note)"))))) ; never swallowed
+  (test "the result is re-readable (not just CST-parseable)"
+    ;; parse-source is lenient on unclosed lists; the real reader is not — pin it.
+    (let (out (format-source "(describe \"x\"\n  (test \"a\")\n  ;; note\n  )"))
+      (is (= (read-string (str "(do " out ")")) (read-string "(do (describe \"x\" (test \"a\")))")))))
+  (test "idempotent with a trailing comment"
+    (let (out (format-source "(foo\n  (bar)\n  ;; note\n  )"))
+      (assert= out (format-source out))))
+  ;; The pair-body emitter (cond/case) used to skip over a comment while hunting
+  ;; for a clause's partner form, DROPPING the comment. It must be preserved.
+  (test "a comment after the last cond clause is not dropped"
+    (let (out (format-source "(cond\n  (a 1)\n  ;; fallback\n  )"))
+      (is (string-contains? out ";; fallback"))
+      (is (string-contains? out ";; fallback\n)"))))
+  (test "a comment between cond clauses is preserved and breaks the pair"
+    (let (out (format-source "(cond\n  (a 1)\n  ;; mid\n  (b 2))"))
+      (is (string-contains? out ";; mid"))
+      (is (string-contains? out "(b 2)")))))
+
 (describe "format: comment markers preserved verbatim"
   ;; Lisp convention is `;` for trailing comments, `;;` at the current code
   ;; column, `;;;` for top-level banners. The formatter must not "normalise"

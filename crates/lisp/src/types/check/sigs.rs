@@ -36,7 +36,7 @@ use super::walk::list_items;
 static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     #[allow(non_upper_case_globals)]
     const int: Ty = Ty::of(Tag::Int);
-    // `const` (not `let`): `Ty` is non-`Copy` (ADR-077), and these shorthands are
+    // `const` (not `let`): `Ty` is non-`Copy` (ADR-078), and these shorthands are
     // each reused by value across the loops below — a `const` mention inlines a
     // fresh value, so no `.clone()` is needed.
     #[allow(non_upper_case_globals)]
@@ -64,7 +64,7 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     put("mod", Sig::new(vec![int, int], int));
     // higher-order: the first arg is a callback of a *known arity* — what the
     // combinator calls it with. The arrow's parameter count drives the
-    // callback-arity check (ADR-077): `(map f xs)` calls `(f x)` → 1-ary;
+    // callback-arity check (ADR-078): `(map f xs)` calls `(f x)` → 1-ary;
     // `(reduce f init xs)` / `(fold f init xs)` call `(f acc x)` → 2-ary. The
     // arrow's tags are still `fn | native`, so the existing "non-function
     // argument" check is unchanged; the arrow only *adds* the arity refinement.

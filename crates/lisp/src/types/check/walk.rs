@@ -30,7 +30,7 @@ fn name_of(s: Symbol) -> String {
 }
 
 /// The arity of a callback argument, when it can be determined *unambiguously* —
-/// the input to the callback-arity check (ADR-077). A named **global** function
+/// the input to the callback-arity check (ADR-078). A named **global** function
 /// (its arity lives in the heap) or a simple single-clause lambda literal yields
 /// an arity; a local variable (arity unknown here), a multi-clause / pattern /
 /// variadic lambda, or any non-function form yields `None` (skip — so the check
@@ -431,7 +431,7 @@ pub(super) fn check_into(
                     }
                 }
 
-                // Callback-arity check (ADR-077 arrows): when the parameter is a
+                // Callback-arity check (ADR-078 arrows): when the parameter is a
                 // function arrow with a fixed arity — a higher-order combinator
                 // (`map`/`filter`/`reduce`/`fold`) that calls its callback with a
                 // known argument count — flag a callback that provably can't

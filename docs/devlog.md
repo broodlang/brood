@@ -9925,7 +9925,136 @@ dedicated effort).
 
 ---
 
-## 2026-05-30 — Structured types, slice 1: function arrows (ADR-077)
+## 2026-05-30 — `std/regex`: a small regex engine in Brood
+
+The roadmap's regex engine (M2+), written in **pure Brood** — no new kernel
+primitive (the prime directive). A recursive-descent parser to a tagged-map AST +
+a CPS **backtracking** matcher. Subset: literals, `.`, `* + ?` (greedy), `^ $`,
+`[...]`/`[^...]` sets (explicit chars), `\d \w \s`, escapes, `|`, and `(...)`
+groups. No char-code primitive exists, so ranges (`[a-z]`) are deferred and `\w`
+uses the `(upper c) ≠ (lower c)` letter trick — classes/sets need only `=`.
+`(regex/match? pat s)` searches; `(regex/matches? pat s)` anchors the whole string.
+`tests/regex_test.blsp` (14). First user: the editor's `brood-mode` triggers on a
+`:file-pattern` regex (`\.blsp$`). Deferred: ranges, captures, backreferences,
+`{m,n}`.
+
+---
+
+## 2026-05-30 — GUI close button: a dedicated `:close` event
+
+**Bug.** A windowed app's close button (the X) didn't reliably quit. `gui.rs`
+delivered `WindowEvent::CloseRequested` as `:escape` — the *same* value as the
+Escape **key**. So "does the X close the app?" depended on the app treating Escape
+as quit: the observer (Esc→quit) and `life.blsp` worked by luck, but any app that
+binds Escape to cancel/normal-mode (the coming editor) could never be closed by its
+X button — Escape did the cancel and there was no separate "window wants to close"
+signal.
+
+**Fix.** The close button now delivers a dedicated **`:close`** message, distinct
+from the Escape key (`:escape`) — a frontend signal, not a keystroke.
+- `ui-run` (`std/ui.blsp`) treats `:close` as an immediate quit *before* `update`
+  sees it, so **every** `ui-run` app is closeable by its X for free, independent of
+  its Escape binding. New helper `ui/quit-request?` recognises `:close` for
+  hand-rolled `receive` loops that don't use `ui-run`.
+- `life.blsp` (a raw loop) now matches `(:close :quit)` alongside `q`/Esc/Ctrl-C.
+- Prompt-on-close ("unsaved changes") is a deferred power feature (ADR-011).
+
+Greenfield clean break (no compat shim): close was `:escape`, is now `:close`.
+`tests/ui_test.blsp` +2 (close quits without update; `quit-request?` rejects the
+Escape key). Docs: `gui-open` docstring, `std/ui.blsp`, ADR (decisions.md).
+
+---
+
+## 2026-05-30 — Mouse `:drag` + `:release` (ADR-077): the drag gesture the editor needs
+
+**Goal.** `myedit` wants Emacs-style split windows you resize by **dragging the
+divider**. That gesture is press → motion-while-held → release — but the kernel's
+mouse vocabulary (ADR-056) was deliberately `:press` / `:scroll-up` / `:scroll-down`
+only; drag/release/bare-motion were dropped at *both* frontends to avoid winit's
+per-pixel `CursorMoved` becoming a redraw storm. No way to observe a held-and-dragged
+pointer from Brood. This is the "improve the language first" half of the myedit plan.
+
+**Built.** Two actions added to the shared `[:mouse action button row col]` shape,
+identical across both frontends:
+- **`:drag`** — motion with a button held, **throttled to cell granularity** (one
+  event per character cell crossed, never per pixel). That throttle is what makes it
+  safe where ADR-056 balked: a divider drag is bounded by cells of travel, not pixels.
+- **`:release`** — the held button coming back up.
+
+Bare motion (no button) is still **not** emitted at either backend — no consumer,
+and it would reintroduce the flood.
+
+- `gui.rs`: each `Win` tracks the held button (`held`); `CursorMoved` emits `:drag`
+  only on a cell change while held; `MouseInput{Released}` emits `:release` + clears it.
+- `builtins.rs::mouse_to_value`: crossterm already reports `Drag(b)`/`Up(b)` per-cell
+  → mapped straight through; bare `Moved` still falls to a nil poll.
+- Docstrings (`term-poll`, `gui-open`), `docs/brood-for-claude.md`, ADR-077.
+
+**Tests.** `mouse_event_tests` (Rust): `:drag`/`:release`/`:press` map to the right
+keyword carrying their button; bare `Moved` stays nil. Default + `--features gui`
+builds green.
+
+Purely additive to the input seam — existing `:press`/`:scroll-*` consumers (the
+observer) untouched. Next: `std/window.blsp` (the window-tree layout toolkit), then
+the myedit split-window model/view/commands + mouse drag-resize.
+
+## 2026-05-31 — std/window.blsp: the tiled-window layout toolkit (ADR-077, Part 1b)
+
+**Goal.** The reusable mechanism behind Emacs-style split windows in `myedit`, kept
+in Brood's `std/` (editor *toolkit*) rather than the editor — content-agnostic, so
+the editor supplies only the payload + keybindings.
+
+**Built.** `std/window.blsp` (registered in the `%builtin-module` table; `(require
+'window)`): an immutable **binary split tree**. A leaf shows an opaque payload; a
+`:row`/`:col` split divides its rect by a `:ratio`, reserving one cell for a
+divider. Exactly one leaf carries a `:selected` marker (travels with the tree — no
+separate selected-path to keep in sync).
+- Structure: `window-single` / `window-split` (C-x 2 / C-x 3) / `window-delete`
+  (C-x 0) / `window-delete-others` (C-x 1) / `window-other` (C-x o) /
+  `window-update-selected` (apply an edit to the active window's payload).
+- Layout: `window-layout tree [x y w h]` → `{:panes :dividers}` — pane rects (one
+  flagged `:selected`) + 1-cell divider rects (each carrying its split's `:split-rect`).
+- Drag-resize over ADR-077 mouse events: `divider-at` (hit-test a point), `window-
+  ratio-for` (drag point → ratio), `window-set-ratio` (clamped so no pane vanishes),
+  `window-select-at` (a click selects the pane under it).
+
+**Tests.** `tests/window_test.blsp` — 19 tests: construction/structure, exact layout
+geometry (divider reservation, the 40+1+39 / 12+1+11 splits), selection cycling,
+divider hit-test + drag-resize math + clamp, and an `:isolated` across-processes
+block proving the tree (plain map/list data) deep-copies through `send` unchanged
+and the ops run in a worker. All green (89 ms).
+
+The tree helpers recurse on tree *depth* (nested splits — bounded), not list length;
+the non-tail checker flags them but they're safe (noted in-file). Next (Part 2):
+the myedit model/view/commands + mouse wiring on top of this.
+
+## 2026-05-31 — Formatter: two comment-handling bugs (shared by nest format + the LSP)
+
+While reviewing `std/format.blsp` (the CST-based pretty-printer behind `nest format`,
+the LSP's `textDocument/formatting` via `introspect::format_source`, and the MCP
+`format` tool — all one implementation), found and fixed two comment bugs. The first
+was what a stray whole-tree `nest format` had used to break `tests/adversarial_test.blsp`.
+
+1. **Closing delimiter swallowed by a trailing comment.** When the last child of a
+   broken list is a comment, `render--break` appended the close directly after it
+   (`;; note)`) — commenting out the `)` and leaving the list unclosed (unparseable
+   by the real reader; `parse-source` is lenient and hid it). Fix: drop the close to
+   its own line at the opening indent when the last non-whitespace child is a comment
+   (`last-nonws-comment?`).
+2. **`cond`/`case` comment dropped (data loss).** The pair-body emitter found a
+   clause's partner via `kids--next-form`, which skips *comments* — so a comment where
+   a partner was expected got stepped over and silently dropped. Fix: pair only across
+   whitespace (`kids--next-nonws`); a comment ends the pair, emitted on its own line.
+
+Tests: `tests/format_test.blsp` +5 (close drops below a trailing comment, re-readable
+by the *real* reader not just the CST parser, idempotent, and both cond comment cases).
+Full suite green; prelude idempotency holds. Not addressed (deliberately): the broader
+style divergence where the formatter inlines a `defn` docstring the repo keeps on its
+own line — that's a separate decision + a dedicated tree-wide reformat, not a bug.
+
+---
+
+## 2026-05-30 — Structured types, slice 1: function arrows (ADR-078)
 
 **Goal.** Start the long-deferred Step 5+ of the type system. Steps 0–4 were
 complete, so this is the only remaining type-system work on the staircase. Chosen
@@ -9933,7 +10062,7 @@ first slice (with the user): the representation change + **function arrow types*
 because higher-order functions (`map`/`filter`/`reduce`/`fold`) were the biggest
 checker blind spot — a wrong-arity callback sailed straight through.
 
-**Decision (ADR-077): refine, don't replace.** `types.md` had sketched Step 5+ as an
+**Decision (ADR-078): refine, don't replace.** `types.md` had sketched Step 5+ as an
 `enum { Set(u16), Arrow, Vec }` *replacing* the bitset. Instead `Ty` became a
 **refinement struct** `{ tags: u32, arrow: Option<Arc<Sig>> }`: the flat tag bitset
 stays the coarse set (carrying the entire pre-Step-5 algebra verbatim), and `arrow`
@@ -9990,7 +10119,7 @@ branch `structured-types`.
 
 ---
 
-## 2026-05-31 — Structured types, slice 2: vector/list element types (ADR-077)
+## 2026-05-31 — Structured types, slice 2: vector/list element types (ADR-078)
 
 **Goal.** The second Step 5+ slice, building on the arrow refinement: give `Ty` an
 element-type refinement so `[1 2 3] : vector<int>` and the element flows through

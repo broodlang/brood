@@ -84,14 +84,19 @@ pub enum MouseButton {
     Middle,
 }
 
-/// What the mouse did. `Scroll*` carry no button. Deliberately minimal — exactly
-/// what a frontend consumer needs today (a click and the wheel); release / drag /
-/// bare motion are deferred (ADR-056/011) since nothing consumes them and emitting
-/// them per-pixel would flood the input channel. The crossterm frontend maps to
+/// What the mouse did. `Scroll*` carry no button. `Drag` is motion with a button
+/// held; `Release` is the button coming back up — together they let an app track a
+/// press→drag→release gesture (dragging a window divider to resize, ADR-077). Bare
+/// motion (no button) is still not emitted — no consumer, and a per-pixel event
+/// would flood. `Drag` is throttled to **cell granularity** (emitted only when the
+/// pointer crosses into a new character cell, not per pixel), which is what made
+/// adding it safe where ADR-056 had deferred it. The crossterm frontend maps to
 /// this same set, so one `[:mouse …]` shape covers both.
 #[derive(Clone, Copy)]
 pub enum MouseAction {
     Press,
+    Release,
+    Drag,
     ScrollUp,
     ScrollDown,
 }
@@ -372,6 +377,8 @@ mod backend {
     fn mouse_message(m: &Mouse) -> Message {
         let action = match m.action {
             MouseAction::Press => "press",
+            MouseAction::Release => "release",
+            MouseAction::Drag => "drag",
             MouseAction::ScrollUp => "scroll-up",
             MouseAction::ScrollDown => "scroll-down",
         };
@@ -415,6 +422,10 @@ mod backend {
         frame: Vec<Op>,
         mods: ModifiersState,
         cursor: (u16, u16),
+        /// The button currently held down (set on press, cleared on release), so a
+        /// `CursorMoved` while it's held can be reported as a `:drag` carrying that
+        /// button. One button at a time is all a drag gesture needs.
+        held: Option<MouseButton>,
     }
 
     /// Build a window + softbuffer surface + glyph renderer inside the running event
@@ -454,6 +465,7 @@ mod backend {
             frame: Vec::new(),
             mods: ModifiersState::empty(),
             cursor: (0, 0),
+            held: None,
         })
     }
 
@@ -601,10 +613,15 @@ mod backend {
                 return;
             };
             match event {
-                // The window's close button → a quit key, so the Brood loop
-                // tears down (calling gui-close) on its own terms.
+                // The window's close button → a dedicated `:close` message,
+                // distinct from the Escape *key* (`:escape`): a frontend signal
+                // ("the user wants this window gone"), not a keystroke. The Brood
+                // loop tears down (calling gui-close) on its own terms — `ui-run`
+                // quits on `:close` automatically; a raw loop matches it like any
+                // other input. Keeping it separate means an app that binds Escape
+                // to cancel/normal-mode can still be closed by the X button.
                 WindowEvent::CloseRequested => {
-                    deliver(w.subscriber, key_message(&Key::Named("escape")));
+                    deliver(w.subscriber, Message::Keyword(value::intern("close")));
                 }
                 WindowEvent::ModifiersChanged(m) => w.mods = m.state(),
                 WindowEvent::Resized(_) => {
@@ -638,23 +655,59 @@ mod backend {
                     }
                 }
                 WindowEvent::CursorMoved { position, .. } => {
-                    // Track the pointer cell so a later press/scroll reports it; bare
-                    // motion isn't emitted (no consumer, and a per-pixel event would
-                    // flood + force redraws).
-                    w.cursor = px_to_cell(position, &w.renderer);
+                    // Track the pointer cell. Bare motion (no button) isn't emitted —
+                    // no consumer, and a per-pixel event would flood + force redraws.
+                    // But while a button is held, crossing into a NEW cell emits a
+                    // `:drag` (cell-granular, so still bounded), which is how a divider
+                    // drag is tracked (ADR-077).
+                    let cell = px_to_cell(position, &w.renderer);
+                    if cell != w.cursor {
+                        w.cursor = cell;
+                        if let Some(b) = w.held {
+                            let (col, row) = w.cursor;
+                            deliver(
+                                w.subscriber,
+                                mouse_message(&Mouse {
+                                    action: MouseAction::Drag,
+                                    button: Some(b),
+                                    row,
+                                    col,
+                                }),
+                            );
+                        }
+                    }
                 }
-                // Press only — release isn't in the vocabulary (MouseAction).
                 WindowEvent::MouseInput {
                     state: ElementState::Pressed,
                     button,
                     ..
                 } => {
                     if let Some(b) = translate_button(button) {
+                        w.held = Some(b);
                         let (col, row) = w.cursor;
                         deliver(
                             w.subscriber,
                             mouse_message(&Mouse {
                                 action: MouseAction::Press,
+                                button: Some(b),
+                                row,
+                                col,
+                            }),
+                        );
+                    }
+                }
+                WindowEvent::MouseInput {
+                    state: ElementState::Released,
+                    button,
+                    ..
+                } => {
+                    if let Some(b) = translate_button(button) {
+                        w.held = None;
+                        let (col, row) = w.cursor;
+                        deliver(
+                            w.subscriber,
+                            mouse_message(&Mouse {
+                                action: MouseAction::Release,
                                 button: Some(b),
                                 row,
                                 col,

@@ -229,7 +229,7 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
         // (let-bound RHS / if-guard narrowing). A miss = unknown, not flagged.
         Value::Sym(s) => ctx.get(s),
         // A vector literal `[a b c]` — its elements are evaluated, so the element
-        // type is the union of their types (Step 5+, ADR-077). Any unknown element
+        // type is the union of their types (Step 5+, ADR-078). Any unknown element
         // → unrefined `vector`.
         Value::Vector(id) => {
             let items = heap.vector(id).to_vec();

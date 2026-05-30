@@ -88,7 +88,7 @@ const SEQ_BITS: u32 = (1u32 << bit(Tag::Pair)) | (1u32 << bit(Tag::Vector));
 
 /// A set-theoretic type — a **set of runtime [`Tag`]s** with optional
 /// *structured refinements* on its function and sequence members (Step 5+,
-/// ADR-077).
+/// ADR-078).
 ///
 /// The flat `tags` bitset is the coarse set and carries the whole pre-Step-5
 /// behaviour verbatim. Two refinements layer on top, each `None` by default
@@ -911,7 +911,7 @@ mod tests {
         }
     }
 
-    // ---- structured (arrow) types — Step 5+, ADR-077 ----
+    // ---- structured (arrow) types — Step 5+, ADR-078 ----
 
     fn arr(params: Vec<Ty>, ret: Ty) -> Ty {
         Ty::arrow(Sig::new(params, ret))
@@ -987,7 +987,7 @@ mod tests {
         assert!(f.is_disjoint(&Ty::of(Tag::Int)));
     }
 
-    // ---- structured (element) types — Step 5+, ADR-077 slice 2 ----
+    // ---- structured (element) types — Step 5+, ADR-078 slice 2 ----
 
     #[test]
     fn sequence_types_render_with_element() {
