@@ -9922,3 +9922,18 @@ checklist from a parallel experiment).
 **Next: 2c — local-capturing closures** (the GC-critical unlock — LOCAL-closure
 cache-by-code-handle + rooting the movable captured env in `vm_apply`; deferred to a
 dedicated effort).
+
+---
+
+## 2026-05-30 — `std/regex`: a small regex engine in Brood
+
+The roadmap's regex engine (M2+), written in **pure Brood** — no new kernel
+primitive (the prime directive). A recursive-descent parser to a tagged-map AST +
+a CPS **backtracking** matcher. Subset: literals, `.`, `* + ?` (greedy), `^ $`,
+`[...]`/`[^...]` sets (explicit chars), `\d \w \s`, escapes, `|`, and `(...)`
+groups. No char-code primitive exists, so ranges (`[a-z]`) are deferred and `\w`
+uses the `(upper c) ≠ (lower c)` letter trick — classes/sets need only `=`.
+`(regex/match? pat s)` searches; `(regex/matches? pat s)` anchors the whole string.
+`tests/regex_test.blsp` (14). First user: the editor's `brood-mode` triggers on a
+`:file-pattern` regex (`\.blsp$`). Deferred: ranges, captures, backreferences,
+`{m,n}`.
