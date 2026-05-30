@@ -4653,3 +4653,56 @@ connection ban).
 transport this qualifies), ADR-033 (closure shipping — remote pids carry the
 node), ADR-006 (policy in Brood), ADR-011 (defer FQDN resolution / epmd),
 `distribution.md`, `crates/cli/tests/distribution.rs`, `std/prelude.blsp`.
+
+## ADR-074 — Dual-listen: one node, several transports (`node-also-listen`)
+
+**Status.** Accepted, implemented 2026-05-30. Builds on ADR-068 (transports) and
+ADR-073 (`name@host` identity); wire protocol, handshake, and cookie unchanged.
+See [`distribution.md`](distribution.md).
+
+**Context.** A node bound *one* transport: `(node-start :a)` → a local Unix
+socket, or `(node-start :a "host:port")` → TCP. But the editor-daemon end-state
+(M4) wants **one core reachable both ways at once** — local frontends by name
+over a Unix socket (the `emacsclient` case) *and* remote frontends over TCP. That
+needs a single node serving multiple listeners.
+
+**Decision.** Add **`(node-also-listen [addr])`** — add another listener to an
+already-started node, sharing its identity + cookie. No arg opens the local Unix
+socket (keyed by the node's name-part); `"host:port"` opens a TCP endpoint. So
+dual-listen is composed, not a special start mode:
+
+```lisp
+(node-start :ed@host "0.0.0.0:9001")   ; identity ed@host, TCP endpoint
+(node-also-listen)                     ; + local Unix socket "ed"
+;; now: (connect "ed") locally, (connect "ed@host:9001") remotely — same node.
+```
+
+The node keeps **one** identity (set once at `node-start`); extra listeners are
+just more front doors. A peer reaching it via any transport completes the same
+handshake and learns the same authoritative `name@host`; the de-dup/tie-break in
+`establish` already collapses two links to one peer, so connecting via both
+transports is harmless. Pairs naturally with an **explicit** `:name@host` start
+(ADR-073) so the TCP dial host matches the identity.
+
+**Why composable, not "TCP nodes are always dual."** Auto-binding a Unix socket
+for every TCP node would pollute `$XDG_RUNTIME_DIR` and make same-name TCP nodes
+on one host collide on the socket file (and silently churn the test suite, which
+doesn't sandbox `$XDG_RUNTIME_DIR` for the TCP cases). Opt-in keeps the simple
+single-transport `node-start` unchanged and lets the daemon ask for what it wants.
+
+**Mechanism in Rust, policy in Brood** (ADR-006). `node_listen`'s bind+acceptor
+was extracted into `start_listener(addr)` (identity-agnostic — the handshake
+reads `NODE` at accept time), shared by the first listener and by the new
+`%node-also-listen` primitive. `node-start` rolls identity back if its first bind
+fails (still retryable). The prelude `node-also-listen` derives the Unix path and
+picks the scheme; the kernel just binds and accepts.
+
+**Scope / deferred.** Listeners can only be *added*, not removed (no
+`node-stop-listening` — no need yet, ADR-011). Server-side TLS as a third
+transport is still open (`rustls` is client-only). Many listeners are allowed but
+the expected shape is one Unix + one TCP.
+
+**References.** ADR-068 (transports + the `Stream` seam), ADR-073 (`name@host`),
+ADR-034 (distributed nodes), ADR-006 (policy in Brood), ADR-011 (defer listener
+removal), `crates/cli/tests/distribution.rs` (`dual_listen_serves_tcp_and_unix_at_once`),
+`std/prelude.blsp`.
