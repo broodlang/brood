@@ -9749,3 +9749,48 @@ the tree-walker as fallback + a differential test mode; Stage 1 (lexical address
 + frame-slots-as-roots) is the first milestone and de-risks the rooting crux. Full
 invariant checklist (TCO, GC, preemption, hot-reload, multi-arity, immutability) and
 risk register in the doc.
+
+---
+
+## 2026-05-30 — Bytecode VM Stage 0–1: built behind `BROOD_VM`, ~2× on fib/loop
+
+Built the first slice of ADR-076 in a worktree (branch `worktree-bytecode-vm`),
+`crates/lisp/src/eval/compile.rs`, gated by the `BROOD_VM` flag (off by default).
+
+**Stage 0 — scaffolding.** The `Node` IR + `vm_enabled()` + a `compile`/`exec`
+pipeline wired into `eval_str`/`eval_source`; every form deferred → exact parity.
+
+**Stage 1 — the mechanism.** Top-level single-arm exact-arity global-capturing
+closures compile to `Const`/`Local`/`Global`/`If`/`Do`/`Call` and run on a
+trampoline whose frame slots are a region of **`Heap::roots`** — so the moving GC
+relocates them in place, **no new root set** (the R1 crux). A param ref is a
+frame-slot index (`Node::Local`), not an `env_get` name scan; tail calls reuse the
+frame (TCO). Everything else defers to the tree-walker. Per-process VM body cache
+on `Heap` (`vm_cache`, keyed by stable RUNTIME closure handle).
+
+**The finding that mattered.** The mechanism *alone* was **~10 % slower** on fib —
+it ran fib's frame on the VM but **delegated every primitive op (`<`/`+`/`-`) back
+to the tree-walker via `eval::apply`** (a frame alloc + bind + body eval each, and
+`eval::apply` even misses the passthrough fast-path `eval`'s own dispatch uses). So
+`dispatch` got the **ADR-069 passthrough redirect**: a thin-wrapper prelude call
+redirects straight to its inner `%native` (`call_native`), late-binding-safe. That
+flipped it to **~2×**:
+
+| bench | tree-walker | VM |
+|---|---|---|
+| `fib 32` (non-tail) | 4.22 s | 2.15 s |
+| `countdown 20M` (tail loop) | 13.76 s | 6.85 s |
+
+Lesson: *a VM frame that delegates primitives can't win — the speedup is in keeping
+the hot loop off the tree-walker.*
+
+**Verified.** R1 crux de-risked: fib/countdown correct under `BROOD_VM=1
+BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` + debug-assertions (frame slots survive
+constant relocation, no tripwire/SIGSEGV). Parity: 167 lib + 1035 in-language green
+under `BROOD_VM=1`; lib green under VM+stress+verify; VM off (default) unchanged.
+
+**Caveat / next.** The slice engages only from a fully-VM-compilable top-level
+chain (a `(bench …)`/`let`-wrapping macro or the REPL path defers), so real
+programs rarely trigger it yet. Stage 2: depth>0 lexical addressing
+(local-capturing closures — the real `let`/nested case), multi-arity, more special
+forms, call-site inline caches. See ADR-076 / `bytecode-vm.md` "As-built".
