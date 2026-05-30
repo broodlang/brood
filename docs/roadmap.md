@@ -361,6 +361,15 @@ the workaround available today.
   (llm-native.md §1), an intent→idiom cookbook, and folding each new repeat
   mistake into the rule-of-three (skill line + teaching error/lint + regression
   test).
+- 🟡 **Closure-compiling VM** (ADR-076, [`bytecode-vm.md`](bytecode-vm.md)) — the
+  execution-engine swap that closes the tree-walker's structural tax (ADR-069's
+  deferred lexical addressing). Behind `BROOD_VM` (default off). **Done:** Stage 0–1
+  (mechanism + passthrough redirect), 2a (`let`/`letrec`), 2b (multi-arity), and 2c
+  (local-capturing closures — created *and* called on the VM, GC-rooted captured
+  envs, body-handle cache key). ~1.6–2.3× on the hot path, no language change, full
+  suite green under `BROOD_VM=0/1`. **Remaining before the Stage-3 cutover:** thread
+  source positions through the IR (VM errors currently lose line/col), then flip the
+  default to the VM with the tree-walker as a one-flag escape hatch.
 
 ## M2 — Editor data model
 

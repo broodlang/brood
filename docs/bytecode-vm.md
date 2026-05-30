@@ -1,13 +1,14 @@
 # The execution-engine plan — a closure-compiling VM
 
-> **Status (2026-05-30): Stage 0–2b built behind `BROOD_VM` — ~2–2.3×.** The
+> **Status (2026-05-31): Stage 0–2c built behind `BROOD_VM` — ~1.6–2.3×.** The
 > design record is **ADR-076**; this file is the long-form companion. Nothing here
 > changes the language — it is purely an **execution-engine** swap. `std/*.blsp`
-> and user code are untouched. Stage 0–1 (mechanism + the passthrough redirect) and
-> Stage 2a (`let`/`letrec`) + 2b (multi-arity) are merged to `main`. **Next: Stage
-> 2c — local-capturing closures** (the unlock for closures created *inside*
-> functions; the GC-critical one — see `lexical-addressing-gotchas.md`). See
-> [As-built](#as-built-stage-01-2026-05-30) for the numbers and the §7 plan.
+> and user code are untouched. Stage 0–1 (mechanism + the passthrough redirect),
+> Stage 2a (`let`/`letrec`), 2b (multi-arity), and **2c (local-capturing closures —
+> the GC-critical one)** are merged to `main`. **Next: Stage 3 — flip the default to
+> the VM**, after closing the one remaining gap (the IR carries no source positions,
+> so VM error diagnostics lose line/col — see [As-built §2c](#stage-2c-local-capturing-closures-done)).
+> See [As-built](#as-built-stage-01-2026-05-30) for the numbers and the §7 plan.
 
 This is the project's "big lever" for performance: closing the tree-walker's
 structural ~50–220× tax (ADR-069's measurement) over the Node/Elixir range. It is
@@ -88,19 +89,60 @@ arms: Vec<Arc<CompiledArm>> }`; `dispatch` selects by argument count (exact arms
 have distinct arities, matching eval's preference). Variadic arms / non-core
 bodies defer.
 
-### Stage 2c — local-capturing closures (next, the GC-critical one)
+### Stage 2c — local-capturing closures (done)
 
-The remaining unlock: closures created *inside* a function (callbacks, let-bound
-helpers) that capture a local frame — so the VM engages in real programs, not just
-top-level chains. Free-var resolution is already name-based (`Global(sym)` →
-`env_get(genv, …)`), so it's robust to the shipped-closure reorder
-(`lexical-addressing-gotchas.md` #1) — the body just needs `genv = the closure's
-captured env`. The hard, GC-critical parts: (a) LOCAL closures have no stable handle
-for caching (index reuse after GC → stale-body miscompile) — key the cache by the
-**body-code handle** (RUNTIME-stable) and defer the rest; (b) the captured env is a
-**movable `EnvId`** — `vm_apply` must root it on `env_roots` and re-read it across
-collections (the R1 path). Plus **call-site inline caches** so a global callee
-isn't re-resolved each call. Deferred to a dedicated effort.
+The unlock: closures created *inside* a function (callbacks, let-bound helpers)
+that capture a local frame — so the VM engages in real programs, not just
+top-level chains. Two halves, both behind `BROOD_VM`:
+
+**Calling** a local-capturing closure. `dispatch` now runs a VM-eligible closure in
+its **own** captured env, not the caller's: `genv = closure.env.unwrap_or(global)`.
+A free var resolves by name through that env (`Node::Global(sym)` →
+`env_get(genv, …)`), so the body compiles identically whether the capture is global
+or local — and it's robust to the shipped-closure flatten/reorder
+(`lexical-addressing-gotchas.md` #1), since nothing addresses by frame offset across
+a process boundary. `Step::Tail` carries the callee env so a tail call can cross
+into a closure with a *different* captured env.
+
+**The two GC-critical parts, as solved:**
+- *(a) caching.* A LOCAL closure's `ClosureId` index is recycled by the collector,
+  so it can't key the compile cache (`docs` §2c warned of a stale-body miscompile).
+  Keyed instead by the **body-code handle** — the closure's body forms live in the
+  immovable RUNTIME code region (they're sub-forms of a promoted top-level fn), so
+  `arms[0].body[0]`'s handle is stable and identifies the source. `VmCacheKey`
+  namespaces the two spaces (`Runtime(id)` vs `LocalBody(handle)`). A LOCAL closure
+  whose body was built from *movable* forms (conased by `eval`/quasiquote) has no
+  stable key and would put movable handles in the cached `Node` tree, so it defers.
+- *(b) env rooting (R1).* The captured env is a **movable LOCAL `EnvId`**. `vm_apply`
+  roots it on `env_roots` (`root_env`, inline+free for the global sentinel) and
+  re-reads the live handle via an `EnvRoot` after every collection — at the
+  safepoint *and* inside nested calls (`exec_node` carries the `EnvRoot`, not a raw
+  `EnvId`). Gated green under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1 BROOD_VM=1`.
+
+**Creating** a local-capturing closure on the VM (`Node::MakeClosure`). A `(fn …)`
+inside a compiled body builds a closure over a **flat snapshot** of the enclosing
+lexical environment: a fresh env frame (parent = global, so true globals + dynamics
+stay live and late-bound) filled from a compile-time capture list — current-frame
+lexicals as `Local` slot reads, names inherited from outer closures (found by
+walking the closure's captured env at compile time, `Heap::env_chain_names`) as
+`Global` reads. Brood's immutability makes a value snapshot equivalent to capturing
+the env by reference. The `(fn …)`'s arms are parsed at run time by the shared
+`eval::make_closure` (so multi-arity / `&optional` / docstrings all work). **Deferred
+to the tree-walker:** a `(fn …)` capturing a not-yet-finalized `letrec` binder — a
+value snapshot can't express letrec's recursive late-binding (mutual recursion),
+so those run correctly on the interpreter, just unaccelerated.
+
+**Numbers (release, Raptor Lake-S):** `fib 32` unchanged (4.22 s → 2.29 s, ~1.8×,
+no closures in-loop, confirming no regression); **build-a-capturing-closure-and-call
+it, 5M iters: 7.72 s → 4.72 s (~1.6×)**; **call a pre-built captured closure in a
+20M-iter tail loop: 17.71 s → 9.06 s (~1.9×)**. Full Rust + in-language suites green
+under `BROOD_VM=0/1`; the suite green under the full GC-stress gate.
+
+**Known gap (not 2c-specific; gates Stage 3).** The compiled `Node` tree discards
+source forms, so the VM never tags an error's line/col (`or_form_pos`) — 6 `basic.rs`
+diagnostic tests fail under `BROOD_VM=1` (confirmed pre-existing on the 2a/2b base,
+not a 2c regression). Fixing needs a source `Pos` threaded through the IR; do it
+before the Stage 3 cutover (invariant #8: the language must be unchanged).
 
 ---
 

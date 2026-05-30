@@ -4826,6 +4826,28 @@ data structures), ADR-069 (the deferral this resolves), ADR-061 (the operand sta
 the VM reuses), ADR-054/055/072 (the generational copying GC `arena_flip` relocates),
 ADR-047 (multi-arity), ADR-022 (the compile pass), ADR-026 (immutability), ADR-011.
 
+**As-built update (2026-05-31): Stage 0–2c done.** One refinement to the plan
+emerged in 2c. The merged VM does *not* address locals by `(depth,index)` and does
+*not* rewrite bodies; it keeps a single flat frame on `Heap::roots` and resolves all
+free names through `genv` (`Node::Global` → `env_get`). So a local-capturing closure
+needed only: (a) running it with `genv = its own captured env` (`dispatch` reads
+`closure.env`; `Step::Tail` carries it so tail calls can cross envs); (b) keying the
+compile cache by the **body-code handle** (RUNTIME-stable), since a LOCAL
+`ClosureId`'s index is recycled by the collector (`VmCacheKey::{Runtime,LocalBody}`);
+(c) rooting the movable captured `EnvId` on `env_roots` in `vm_apply` and re-reading
+it via an `EnvRoot` across collections (R1, the crux — gated green under the full
+stress flags). Creating one (`Node::MakeClosure`) snapshots the enclosing lexicals
+by value into a fresh frame (sound because Brood bindings are immutable), reusing
+`eval::make_closure` to parse arms; the one case a value snapshot can't express —
+capturing a not-yet-finalized `letrec` binder (recursive late-binding) — **defers to
+the tree-walker**. The GC tracer was left unchanged: the cached `Node` tree is gated
+to hold only immovable handles, so it's never a movable root (the simpler outcome
+the original R1 note flagged as the alternative to walking `CompiledArm` bodies). One
+**open item gates Stage 3**: the IR discards source forms, so VM errors don't tag
+line/col (6 pre-existing `basic.rs` diagnostic tests fail under `BROOD_VM=1`) — a
+source `Pos` must be threaded through the IR before the cutover (invariant: the
+language is unchanged).
+
 ## ADR-077 — Mouse `:drag` and `:release`, at cell granularity
 
 **Status:** accepted (2026-05-30). Extends ADR-056's mouse vocabulary; resolves

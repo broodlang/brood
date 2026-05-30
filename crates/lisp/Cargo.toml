@@ -20,6 +20,15 @@ path = "src/lib.rs"
 # instead of a terminal. See src/gui.rs and std/observer.blsp's `(observe)`.
 gui = ["dep:winit", "dep:softbuffer", "dep:fontdue"]
 
+# Make the closure-compiling VM (ADR-076) the *build-time default* engine — what
+# `make install` ships, so the installed `brood`/`nest` dogfood the VM in real use.
+# Off for `cargo build`/`make test` (the suite stays on the tree-walker, green, with
+# full source-position diagnostics). The runtime `BROOD_VM` env var overrides either
+# way (`BROOD_VM=0` forces the tree-walker, `BROOD_VM=1` forces the VM). See
+# `eval::compile::vm_enabled`. Remove this knob once the VM becomes the unconditional
+# default at the Stage-3 cutover.
+vm-default = []
+
 [dependencies]
 # Lock-free, append-only vector for the shared RUNTIME code region: stable
 # references survive concurrent pushes, so many process threads read closure

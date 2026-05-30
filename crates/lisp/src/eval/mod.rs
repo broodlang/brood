@@ -1187,7 +1187,12 @@ fn arity_message(who: &str, min: usize, max: Option<usize>, got: usize) -> Strin
     format!("{}: expected {} {}, got {}", who, expected, noun, got)
 }
 
-fn make_closure(heap: &mut Heap, name: Option<Symbol>, rest: Value, env: EnvId) -> LispResult {
+pub(crate) fn make_closure(
+    heap: &mut Heap,
+    name: Option<Symbol>,
+    rest: Value,
+    env: EnvId,
+) -> LispResult {
     let parts = heap.list_to_vec(rest)?;
     // A closure defined at the global (parent-less) scope captures the env
     // symbolically (`None`), so it works in any process; otherwise it captures

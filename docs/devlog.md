@@ -9998,6 +9998,8 @@ Purely additive to the input seam — existing `:press`/`:scroll-*` consumers (t
 observer) untouched. Next: `std/window.blsp` (the window-tree layout toolkit), then
 the myedit split-window model/view/commands + mouse drag-resize.
 
+---
+
 ## 2026-05-31 — std/window.blsp: the tiled-window layout toolkit (ADR-077, Part 1b)
 
 **Goal.** The reusable mechanism behind Emacs-style split windows in `myedit`, kept
@@ -10051,6 +10053,62 @@ by the *real* reader not just the CST parser, idempotent, and both cond comment 
 Full suite green; prelude idempotency holds. Not addressed (deliberately): the broader
 style divergence where the formatter inlines a `defn` docstring the repo keeps on its
 own line — that's a separate decision + a dedicated tree-wide reformat, not a bug.
+
+---
+
+## 2026-05-31 — Bytecode VM Stage 2c: local-capturing closures
+
+**Goal.** The Stage-2c unlock (ADR-076): closures created *inside* a function — so
+the VM engages in real programs, not just top-level recursion/loops. In a worktree
+(`worktree-vm-stage2c`), behind `BROOD_VM`. Built in two verifiable increments.
+
+**Increment A — VM-*call* a local-capturing closure (the R1b crux).**
+- `compiled_for`/`cache_key`: a LOCAL closure (recycled handle) is now keyed by its
+  **body-code handle** (RUNTIME-stable, since the body forms are sub-forms of a
+  promoted top-level fn), namespaced from RUNTIME closures by a new `VmCacheKey`
+  enum (`Runtime(id)` vs `LocalBody(handle)`). LOCAL closures whose body is movable
+  (conased) have no stable key → defer. Removed `compile_closure`'s `is_global`
+  rejection; the body compiles the same way for a local capture (free var →
+  `Global(sym)` → `env_get(genv, …)`).
+- `dispatch` runs a VM closure in its **own** captured env, not the caller's; the
+  caller's env stays only for native calls. `Step::Tail` carries the callee env so
+  a tail call can cross captured envs.
+- **R1b:** `vm_apply` roots the (movable LOCAL) captured env on `env_roots` and
+  re-reads the live handle via an `EnvRoot` — at the safepoint and inside nested
+  calls (`exec_node`/`force` carry the `EnvRoot`, not a raw `EnvId`). Verified under
+  `BROOD_VM=1 BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`: a captured frame survives
+  relocation across every call.
+
+**Increment B — VM-*create* one (`Node::MakeClosure`).** A `(fn …)` in a compiled
+body builds a closure over a **flat snapshot** of the enclosing lexicals (fresh env
+frame, parent = global). Capture list computed at compile time: current-frame
+lexicals as `Local` reads; outer-closure lexicals (found via
+`Heap::env_chain_names`, walking the closure's captured env) as `Global` reads; true
+globals not captured (resolve live). Arms parsed at run time by the shared
+`eval::make_closure` (now `pub(crate)`). **Deferred:** a `(fn …)` capturing a
+not-yet-finalized `letrec` binder (snapshot can't do recursive late-binding) — runs
+on the interpreter. `Scope` gained `enclosing` + `unsafe_slots`.
+
+**Why snapshot is sound.** Brood bindings are immutable, so a value snapshot of the
+captured env is equivalent to capturing it by reference — *except* letrec's
+recursive pre-binding, which is the one deferred case.
+
+**Numbers (release, Raptor Lake-S).** `fib 32` 4.22 s → 2.29 s (~1.8×, unchanged —
+no closures in-loop; base VM measured 2.30 s here, so 2c adds no regression);
+build-a-capturing-closure-and-call-it 5M iters 7.72 s → 4.72 s (~1.6×); call a
+pre-built captured closure in a 20M-iter tail loop 17.71 s → 9.06 s (~1.9×).
+
+**Verified.** Full Rust lib suite under `BROOD_VM=1`: 250/256, the 6 failures all
+pre-existing diagnostic tests (the VM IR carries no source positions — confirmed on
+the 2a/2b base too, **not** a 2c regression). Full in-language suite green under both
+`BROOD_VM=0` and `BROOD_VM=1`, incl. a new `tests/vm_closures_test.blsp` (nesting,
+letrec deferral, hot loops, and a cross-process block proving the captured env
+round-trips a `send` deep-copy + closure flatten/rebuild). The GC tracer needed *no*
+change: the cached `Node` tree holds only immovable handles (gated), so it's never
+a movable root.
+
+**Known gap → gates Stage 3.** Thread a source `Pos` through the IR so VM errors tag
+line/col (the 6 failing tests). Then Stage 3 can flip the default to the VM.
 
 ---
 
