@@ -984,6 +984,22 @@ node — call `(node-start …)` first."
         (%node-connect (keyword (substring spec 0 lc))
                        (str "tcp:" (substring spec (inc at) n)))))))
 
+(defn node-also-listen (&optional addr)
+  "Add another listener to this (already-started) node so it serves several
+transports at once — **dual-listen** (ADR-074). `(node-also-listen)` opens the
+local Unix socket (reachable by name); `(node-also-listen \"host:port\")` opens a
+TCP endpoint (reachable remotely). Both share the node's identity + cookie. The
+shape behind a local+remote editor daemon — e.g. `(node-start :ed@host
+\"0.0.0.0:9001\")` then `(node-also-listen)` is reachable as `(connect \"ed\")`
+locally and `(connect \"ed@host:9001\")` from another machine. Errors if this
+runtime isn't a node yet."
+  (when (= (node-name) :nonode)
+    (error "node-also-listen: this runtime is not a node yet — call (node-start name) first"))
+  (%node-also-listen
+    (if (nil? addr)
+      (str "unix:" (node--socket-path (node--name-part (name (node-name)))))
+      (str "tcp:" addr))))
+
 ;; ---- node-link reconnect: policy in Brood over connect + monitor-node ------
 ;; Today's `(connect addr)` is one-shot; if the peer is down it raises, if it
 ;; later disconnects nothing notices. `ensure-link` is a thin reconnect loop —
