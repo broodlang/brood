@@ -1044,6 +1044,12 @@ impl Heap {
         self.imports.get(&bare).copied()
     }
 
+    /// Every `(bare, qualified)` import pair in the current file's table — for the
+    /// LSP to offer imported names as bare completion candidates (ADR-065 §6).
+    pub fn imported_pairs(&self) -> Vec<(Symbol, Symbol)> {
+        self.imports.iter().map(|(&b, &q)| (b, q)).collect()
+    }
+
     // ----- definition sites (cross-file xref; ADR-031, docs/lsp.md) -----
 
     /// If `form` is a top-level `def`/`defn`/`defmacro`, record its name's source
