@@ -101,6 +101,45 @@ append-only. (3) is a good cheap stopgap to ship alongside so the failure is nev
 a crash. (2) is attractive if a capture-minimization pass is wanted for perf
 reasons anyway.
 
+## Decision (2026-05-30)
+
+**Approach: (1) two-pass back-patching `promote`.** Owner: the GC author (it's
+core `heap.rs`, in flight with ADR-061/063); not to be done from outside that
+work.
+
+**Two code paths, both need the forwarding fix — they're independent:**
+
+1. **`promote`** (`core/heap.rs`) — the `def` path. The chosen two-pass fix lands
+   here. Watch the concurrency: RUNTIME (`runtime.code.closures`/`envs`) is
+   append-only *and* appended by other processes, so a "snapshot `len()` as base
+   offset, then append" scheme can race. Options: take the RUNTIME write lock
+   across the append batch, or resolve into a temp arena keyed by temp index and
+   append atomically.
+2. **`closure_to_message` / `from_message`** (`process/message.rs`) — the
+   `spawn`/`send` path. **The promote fix does NOT cover this.** It has the same
+   cyclic-graph overflow and needs its own forwarding table (here it's easier:
+   the message form is a plain owned tree, so a `HashMap<old, new>` with a
+   reserve-then-fill works without append-only constraints). Until this lands,
+   `serve` must keep handling connections inline (no per-connection spawn).
+
+## Acceptance repros (must pass after the fix)
+
+```lisp
+;; promote (def) path:
+(def g (let (h (fn () 1)) (fn () (h))))      ; no overflow
+(assert= (g) 1)
+(def app (router {"/" (fn (r) :ok)}))         ; no overflow
+(assert= (app {:path "/"}) :ok)
+
+;; closure_to_message (spawn) path — needs the message-side fix too:
+(let (me (self) handler (router {"/" (fn (r) :ok)}))
+  (spawn (send me (handler {:path "/"})))      ; no overflow
+  (assert= (receive (m m) (after 2000 :to)) :ok))
+```
+
+When both land, revert the `std/http.blsp` workarounds: `serve` can spawn one
+process per connection again, and routers/handlers can be top-level `def`s.
+
 ## See also
 
 ADR-062 (TCP/HTTP — where the workarounds live), ADR-059 (mailbox seam), the GC
