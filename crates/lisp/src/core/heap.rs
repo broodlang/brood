@@ -731,6 +731,16 @@ pub struct Heap {
     /// they happen). Per-process like every other heap field: a spawned child
     /// starts from the `BROOD_GC_TRACE` default, not the parent's setting.
     gc_trace: bool,
+    /// Compiling-VM body cache (ADR-076, `BROOD_VM`). Maps a closure handle's raw
+    /// bits to its compiled single-arm body, or `None` if the closure isn't
+    /// VM-eligible (so we don't re-attempt). Per-process (a `RefCell`, like
+    /// `global_ic`), keyed by RUNTIME closure handles, whose `.0` is stable
+    /// (region+index, no generation bits) for the life of that closure. A `def`
+    /// rebind promotes a *new* closure (new handle → new key), so a stale entry is
+    /// simply never looked up again. Empty unless `BROOD_VM` is on. `Arc` so the
+    /// trampoline can hold the compiled body across a call without borrowing the
+    /// cache.
+    vm_cache: RefCell<HashMap<u64, Option<Arc<crate::eval::compile::CompiledArm>>>>,
 }
 
 impl Default for Heap {
@@ -843,6 +853,7 @@ impl Heap {
             gc_copied: 0,
             gc_reclaimed: 0,
             gc_trace: gc_trace_default(),
+            vm_cache: RefCell::new(HashMap::new()),
         }
     }
 
@@ -878,6 +889,7 @@ impl Heap {
             gc_copied: 0,
             gc_reclaimed: 0,
             gc_trace: gc_trace_default(),
+            vm_cache: RefCell::new(HashMap::new()),
         }
     }
 
@@ -3335,6 +3347,21 @@ impl Heap {
     /// `(gc-trace on/off)`.
     pub fn set_gc_trace(&mut self, on: bool) {
         self.gc_trace = on;
+    }
+
+    // ----- compiling-VM body cache (ADR-076; see `eval::compile`) -----
+
+    /// The cached compile result for closure key `k` (a closure handle's `.0`):
+    /// `None` = not cached yet; `Some(None)` = cached as ineligible; `Some(Some(a))`
+    /// = the compiled body. `&self` (interior-mutable `RefCell`), so the VM can
+    /// consult it on the read-only hot path.
+    pub fn vm_cache_get(&self, k: u64) -> Option<Option<Arc<crate::eval::compile::CompiledArm>>> {
+        self.vm_cache.borrow().get(&k).cloned()
+    }
+
+    /// Record the compile result for closure key `k` (eligible body or `None`).
+    pub fn vm_cache_put(&self, k: u64, v: Option<Arc<crate::eval::compile::CompiledArm>>) {
+        self.vm_cache.borrow_mut().insert(k, v);
     }
 
     // ----- the tracing GC ------------------------------------------------------

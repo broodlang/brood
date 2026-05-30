@@ -9798,3 +9798,85 @@ direction (llm-native.md §"explain-error"/§"check"), and each permanently remo
 a class of failure for every future LLM without it reading anything. Next
 candidates: reader-level hints for Clojure/Scheme syntax (`(let ((a 1)) …)`,
 `#{…}`, `set!`, `loop`/`recur`), and an intent→idiom cookbook.
+
+---
+
+## 2026-05-30 — Bytecode VM Stage 0–1: built behind `BROOD_VM`, ~2× on fib/loop
+
+Built the first slice of ADR-076 in a worktree (branch `worktree-bytecode-vm`),
+`crates/lisp/src/eval/compile.rs`, gated by the `BROOD_VM` flag (off by default).
+
+**Stage 0 — scaffolding.** The `Node` IR + `vm_enabled()` + a `compile`/`exec`
+pipeline wired into `eval_str`/`eval_source`; every form deferred → exact parity.
+
+**Stage 1 — the mechanism.** Top-level single-arm exact-arity global-capturing
+closures compile to `Const`/`Local`/`Global`/`If`/`Do`/`Call` and run on a
+trampoline whose frame slots are a region of **`Heap::roots`** — so the moving GC
+relocates them in place, **no new root set** (the R1 crux). A param ref is a
+frame-slot index (`Node::Local`), not an `env_get` name scan; tail calls reuse the
+frame (TCO). Everything else defers to the tree-walker. Per-process VM body cache
+on `Heap` (`vm_cache`, keyed by stable RUNTIME closure handle).
+
+**The finding that mattered.** The mechanism *alone* was **~10 % slower** on fib —
+it ran fib's frame on the VM but **delegated every primitive op (`<`/`+`/`-`) back
+to the tree-walker via `eval::apply`** (a frame alloc + bind + body eval each, and
+`eval::apply` even misses the passthrough fast-path `eval`'s own dispatch uses). So
+`dispatch` got the **ADR-069 passthrough redirect**: a thin-wrapper prelude call
+redirects straight to its inner `%native` (`call_native`), late-binding-safe. That
+flipped it to **~2×**:
+
+| bench | tree-walker | VM |
+|---|---|---|
+| `fib 32` (non-tail) | 4.22 s | 2.15 s |
+| `countdown 20M` (tail loop) | 13.76 s | 6.85 s |
+
+Lesson: *a VM frame that delegates primitives can't win — the speedup is in keeping
+the hot loop off the tree-walker.*
+
+**Verified.** R1 crux de-risked: fib/countdown correct under `BROOD_VM=1
+BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` + debug-assertions (frame slots survive
+constant relocation, no tripwire/SIGSEGV). Parity: 167 lib + 1035 in-language green
+under `BROOD_VM=1`; lib green under VM+stress+verify; VM off (default) unchanged.
+
+**Caveat / next.** The slice engages only from a fully-VM-compilable top-level
+chain (a `(bench …)`/`let`-wrapping macro or the REPL path defers), so real
+programs rarely trigger it yet. Stage 2: depth>0 lexical addressing
+(local-capturing closures — the real `let`/nested case), multi-arity, more special
+forms, call-site inline caches. See ADR-076 / `bytecode-vm.md` "As-built".
+
+---
+
+## 2026-05-30 — Foreign-construct hints + a central `kw` keyword module
+
+**Foreign-construct hints (the third "errors that teach").** Extended
+`eval::unbound_error` with `eval::foreign_construct_hint(name) -> Option<&str>`:
+a table mapping a construct an LLM reaches for out of Clojure/Scheme/CL muscle
+memory that Brood doesn't have onto "the Brood way" — `set!`/`setq` → "immutable,
+use a process or `def`"; `while`/`loop`/`recur` → tail recursion; `atom`/`swap!`
+→ a process; `transient`/`conj!` → persistent ops; `defprotocol`/`defrecord` →
+maps + functions; `progn`→`do`, `mapcar`→`map`, `null?`→`nil?`, `defun`→`defn`,
+`case`/`condp`→`match`; plus a `#` entry for `#(…)`/`#{…}` reader macros. The same
+helper feeds the advisory checker (`types::check::walk`, both the head- and
+operand-position unbound sites), so the guidance shows at write-time
+(`nest check`/LSP/MCP) *and* runtime (the caught error's `:hint`). Gated strictly
+on genuinely-unbound names — Brood already aliases `car`/`cdr` and has
+`lambda`/`let*`/`dotimes`/`doseq`/`unless`/`ref`, so those are deliberately absent
+from the table (a hint would be wrong). Tested in `basic.rs`
+(`foreign_constructs_hint_at_the_brood_way`): runtime + checker + the no-false-hint
+case (`car` runs).
+
+**Central `kw` keyword module (`core/keywords.rs`).** The special-form/core-macro
+spellings (`"if"`, `"quote"`, `"fn"`, …) were re-typed as bare string literals
+across at least three registries — `eval::SPECIAL_SPELLINGS`,
+`types::check::walk::SPECIAL_HEAD`, `builtins::SPECIAL_FORMS` — plus scattered
+`value::symbol_is(head, "…")` chains in the checker. Hoisted every spelling into
+one `pub const` per keyword in `crate::core::keywords` (imported as `kw`), so the
+spelling lives in exactly one place and a typo is a compile error. Converted all
+three registries and the `symbol_is` sites in `recursion.rs` + `hygiene.rs`. The
+consts are the identical interned strings, so dispatch is provably unchanged
+(special forms eval correctly; the checker still flags non-tail recursion + the
+foreign hints; 77 Rust `basic.rs` tests green). **Not yet converted** (noted
+follow-ups): `guards::is_syntactic_keyword` (a one-place allowlist that also holds
+guards-only markers `module-doc`/`spawn`), and the `&`/`&optional`/`&rest`
+parameter-marker family duplicated across ~7 files — both are separate
+magic-string families a later pass can fold into `kw`.
