@@ -12,6 +12,17 @@
 ;; `deps-vec` is a literal :dependencies vector string (or nil for none).
 (defn pkg-fixture-root () (path-join "/tmp" (name (gensym "brood-pkg-"))))
 
+;; Turn a fixture dir into a one-commit git repo (so :git deps can be exercised
+;; offline via a file:// URL — no network). Returns the file:// URL.
+(defn pkg-git-init (dir)
+  (run-process "git" (list "-C" dir "init" "-q"))
+  (run-process "git" (list "-C" dir "config" "user.email" "t@example.com"))
+  (run-process "git" (list "-C" dir "config" "user.name" "Test"))
+  (run-process "git" (list "-C" dir "add" "-A"))
+  (run-process "git" (list "-C" dir "commit" "-q" "-m" "init"))
+  (str "file://" dir))
+(defn pkg-git-tag (dir tag) (run-process "git" (list "-C" dir "tag" tag)))
+
 (defn pkg-write-project (root nm src-module body deps-line)
   (make-dir (path-join root "src"))
   (spit (path-join root "project.blsp")
@@ -60,7 +71,7 @@
       (pkg-write-project dep-dir "greeter" "greeter" "(defn greet (w) (str \"hi \" w))" "")
       (pkg-write-project app-dir "app" "main" "(defn main () 1)"
         " :dependencies [[greeter :path \"../greeter\"]]")
-      (let (entries (resolve-deps app-dir (list {:name 'greeter :kind :path :path "../greeter"})))
+      (let (entries (resolve-deps app-dir (list {:name 'greeter :kind :path :path "../greeter"}) nil))
         (assert= (count entries) 1)
         (let (e (first entries))
           (assert= (get e :name) 'greeter)
@@ -76,19 +87,100 @@
       (pkg-write-project b "b" "b" "(defn bf () 1)" "")
       (pkg-write-project a "a" "a" "(defn af () 1)" " :dependencies [[b :path \"../b\"]]")
       (pkg-write-project app "app" "main" "(defn main () 1)" " :dependencies [[a :path \"../a\"]]")
-      (let (entries (resolve-deps app (list {:name 'a :kind :path :path "../a"})))
+      (let (entries (resolve-deps app (list {:name 'a :kind :path :path "../a"}) nil))
         (assert= (map (fn (e) (get e :name)) entries) (list 'a 'b)))))
   (test "a missing path dep is a clear error"
     (let (app (pkg-fixture-root))
       (pkg-write-project app "app" "main" "(defn main () 1)" "")
       (is (string-contains?
-            (try (resolve-deps app (list {:name 'gone :kind :path :path "../gone"})) (catch e e))
-            "not found"))))
-  (test "a :git dep errors with the Slice-2 message"
-    (is (string-contains?
-          (try (resolve-deps "/tmp" (list {:name 'p :kind :git :url "https://x.git" :ref "v1"}))
-            (catch e e))
-          "not supported yet"))))
+            (try (resolve-deps app (list {:name 'gone :kind :path :path "../gone"}) nil) (catch e e))
+            "not found")))))
+
+;; :git deps (Slice 2) — exercised against a local git repo over a file:// URL, so
+;; the suite stays offline. Covers cloning into _deps/, commit pinning, the lock
+;; fields, transitive resolution, the direct-beats-transitive rule, and the loud
+;; conflict error.
+(describe "package: resolving :git deps"
+  (test "a :git dep clones into _deps/, pins a commit, and records a sha"
+    (let (parent (pkg-fixture-root)
+          dep-dir (path-join parent "greeter")
+          app-dir (path-join parent "app"))
+      (pkg-write-project dep-dir "greeter" "greeter" "(defn greet (w) w)" "")
+      (let (url (pkg-git-init dep-dir))
+        (pkg-git-tag dep-dir "v1.0.0")
+        (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+        (let (entries (resolve-deps app-dir (list {:name 'greeter :kind :git :url url :ref "v1.0.0"}) nil))
+          (assert= (count entries) 1)
+          (let (e (first entries))
+            (assert= (get e :kind) :git)
+            (assert= (get e :url) url)
+            (assert= (get e :ref) "v1.0.0")
+            (is (string? (get e :commit)))
+            (is (string? (get e :sha256)))
+            (is (dir? (path-join (path-join app-dir "_deps") "greeter")))
+            (is (file-exists? (path-join (path-join (path-join app-dir "_deps") "greeter") ".brood-pkg.blsp"))))))))
+  (test "a second resolve reuses the locked commit (cache hit, no re-clone)"
+    (let (parent (pkg-fixture-root)
+          dep-dir (path-join parent "greeter")
+          app-dir (path-join parent "app"))
+      (pkg-write-project dep-dir "greeter" "greeter" "(defn greet (w) w)" "")
+      (let (url (pkg-git-init dep-dir))
+        (pkg-git-tag dep-dir "v1.0.0")
+        (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+        (let (dep (list {:name 'greeter :kind :git :url url :ref "v1.0.0"})
+              e1 (first (resolve-deps app-dir dep nil)))
+          (write-lockfile app-dir (list e1))
+          ;; re-resolve with the lock present: same commit + sha, cache untouched
+          (let (e2 (first (resolve-deps app-dir dep (read-lockfile app-dir))))
+            (assert= (get e2 :commit) (get e1 :commit))
+            (assert= (get e2 :sha256) (get e1 :sha256)))))))
+  (test "transitive :git deps are flattened; a direct pin beats a transitive one"
+    (let (parent (pkg-fixture-root)
+          ansi (path-join parent "ansi")
+          greeter (path-join parent "greeter")
+          app (path-join parent "app"))
+      (pkg-write-project ansi "ansi" "ansi" "(defn bold (s) s)" "")
+      (let (ansi-url (pkg-git-init ansi))
+        (pkg-git-tag ansi "v1.0.0")
+        (pkg-git-tag ansi "v2.0.0")
+        ;; greeter (transitively) wants ansi v1.0.0
+        (pkg-write-project greeter "greeter" "greeter" "(defn g () 1)"
+          (str " :dependencies [[ansi :git \"" ansi-url "\" :ref \"v1.0.0\"]]"))
+        (let (greeter-url (pkg-git-init greeter))
+          (pkg-git-tag greeter "v1.0.0")
+          (pkg-write-project app "app" "main" "(defn main () 1)" "")
+          ;; app pins ansi v2.0.0 directly + depends on greeter → v2 wins, no error
+          (let (entries (resolve-deps app
+                          (list {:name 'ansi :kind :git :url ansi-url :ref "v2.0.0"}
+                                {:name 'greeter :kind :git :url greeter-url :ref "v1.0.0"})
+                          nil)
+                idx (package/package--index-by-name entries))
+            (assert= (sort (map (fn (e) (get e :name)) entries)) (list 'ansi 'greeter))
+            (assert= (get (get idx 'ansi) :ref) "v2.0.0"))))))
+  (test "two transitive :git deps at different refs, with no direct pin, error loudly"
+    (let (parent (pkg-fixture-root)
+          ansi (path-join parent "ansi")
+          greeter (path-join parent "greeter")
+          pretty (path-join parent "pretty")
+          app (path-join parent "app"))
+      (pkg-write-project ansi "ansi" "ansi" "(defn bold (s) s)" "")
+      (let (ansi-url (pkg-git-init ansi))
+        (pkg-git-tag ansi "v1.0.0")
+        (pkg-git-tag ansi "v2.0.0")
+        (pkg-write-project greeter "greeter" "greeter" "(defn g () 1)"
+          (str " :dependencies [[ansi :git \"" ansi-url "\" :ref \"v1.0.0\"]]"))
+        (pkg-write-project pretty "pretty" "pretty" "(defn p () 1)"
+          (str " :dependencies [[ansi :git \"" ansi-url "\" :ref \"v2.0.0\"]]"))
+        (let (greeter-url (pkg-git-init greeter)
+              pretty-url (pkg-git-init pretty))
+          (pkg-write-project app "app" "main" "(defn main () 1)" "")
+          (is (string-contains?
+                (try (resolve-deps app
+                       (list {:name 'greeter :kind :git :url greeter-url :ref "main"}
+                             {:name 'pretty :kind :git :url pretty-url :ref "main"})
+                       nil)
+                  (catch e e))
+                "conflicting dependency")))))))
 
 (describe "package: the lock file round-trips"
   (test "write-lockfile then read-lockfile recovers the dep vector"
@@ -98,7 +190,7 @@
       (pkg-write-project dep-dir "greeter" "greeter" "(defn greet (w) w)" "")
       (pkg-write-project app-dir "app" "main" "(defn main () 1)"
         " :dependencies [[greeter :path \"../greeter\"]]")
-      (let (entries (resolve-deps app-dir (list {:name 'greeter :kind :path :path "../greeter"})))
+      (let (entries (resolve-deps app-dir (list {:name 'greeter :kind :path :path "../greeter"}) nil))
         (write-lockfile app-dir entries)
         (let (locked (read-lockfile app-dir))
           (is (vector? locked))
@@ -196,3 +288,22 @@
         (require 'greeter)
         ;; greeter is a `(defmodule greeter)`, so its `greet` is `greeter/greet`
         (assert= (greeter/greet "you") "hi you")))))
+
+;; The git equivalent: a :git dep is cloned into _deps/, its src/ joins *load-path*,
+;; and its module becomes require-able. :isolated for the same load-path reason.
+(describe "package: a resolved :git dep is require-able" :isolated
+  (test "require finds a cloned git dep's module after ensure-deps"
+    (let (parent (pkg-fixture-root)
+          dep-dir (path-join parent "salutation")
+          app-dir (path-join parent "app"))
+      (pkg-write-project dep-dir "salutation" "salutation" "(defn hi (w) (str \"yo \" w))" "")
+      (let (url (pkg-git-init dep-dir))
+        (pkg-git-tag dep-dir "v1.0.0")
+        (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+        (let (dirs (ensure-deps app-dir (list {:name 'salutation :kind :git :url url :ref "v1.0.0"})))
+          (def *load-path* (append *load-path* dirs))
+          (require 'salutation)
+          (assert= (salutation/hi "you") "yo you")
+          ;; and the clone + lock landed under the app
+          (is (dir? (path-join (path-join app-dir "_deps") "salutation")))
+          (is (file-exists? (path-join app-dir "project.lock.blsp"))))))))
