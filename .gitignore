@@ -11,3 +11,7 @@
 
 # Brood package cache — regenerable from project.lock.blsp (committed) (ADR-037)
 _deps/
+
+# Local debug artifacts (never commit)
+.brood_crash_dump
+.brood-skip-blsp-check
