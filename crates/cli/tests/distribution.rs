@@ -129,6 +129,180 @@ fn two_nodes_connect_and_message() {
     );
 }
 
+/// Run a `.blsp` program in a fresh `brood` subprocess with extra env vars —
+/// used by the Unix-socket tests to sandbox `$HOME`/`$XDG_*` (so the cookie file
+/// lands in the test's temp dir, never the runner's real `~/.config`) and to set
+/// `$BROOD_COOKIE` for the wrong-cookie case.
+fn spawn_brood_env(dir: &std::path::Path, name: &str, src: &str, env: &[(&str, &str)]) -> Child {
+    let path = dir.join(name);
+    std::fs::write(&path, src).unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_brood"));
+    cmd.arg(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    cmd.spawn().expect("spawn brood")
+}
+
+/// Wait until a Unix socket file appears (the peer's listener is bound), or panic
+/// after ~5s — the name-addressed analogue of [`wait_until_listening`].
+fn wait_until_socket(path: &std::path::Path) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if path.exists() {
+            return;
+        }
+        if Instant::now() >= deadline {
+            panic!("node socket never appeared at {}", path.display());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Two local nodes connect **by name** over a Unix-domain socket — no port, no
+/// explicit cookie. Proves the name-addressed transport + the auto-generated
+/// shared cookie file end-to-end (ADR-068): both children share one sandboxed
+/// `$HOME`, so `(node-cookie)` mints the secret once and the second reads it back.
+#[test]
+fn two_unix_nodes_connect_by_name_and_message() {
+    let home = std::env::temp_dir().join(format!("brood-unix-{}", std::process::id()));
+    let run = home.join("run");
+    let cfg = home.join(".config");
+    std::fs::create_dir_all(&run).unwrap();
+    let env: Vec<(&str, &str)> = vec![
+        ("HOME", home.to_str().unwrap()),
+        ("XDG_CONFIG_HOME", cfg.to_str().unwrap()),
+        ("XDG_RUNTIME_DIR", run.to_str().unwrap()),
+    ];
+
+    let server = r#"
+(node-start :ua)
+(register :echo (self))
+(defn serve ()
+  (receive
+    ([:hi from] (do (send from [:pong (self)]) (serve)))
+    (_ (serve))))
+(serve)
+"#;
+    let client = r#"
+(node-start :ub)
+(connect "ua")
+(send {:name :echo :node :ua} [:hi (self)])
+(def remote (receive ([:pong p] p) (after 5000 (throw "no reply by name"))))
+(unless (pid? remote) (throw "reply was not a pid"))
+(send remote [:hi (self)])
+(receive ([:pong _] (println "UNIX-ROUNDTRIP-OK")) (after 5000 (throw "no reply by pid")))
+"#;
+
+    let mut a = spawn_brood_env(&home, "userver.blsp", server, &env);
+    wait_until_socket(&run.join("brood").join("ua.sock"));
+    let b = spawn_brood_env(&home, "uclient.blsp", client, &env);
+
+    let out = b.wait_with_output().expect("client finished");
+    let _ = a.kill();
+    let _ = a.wait();
+    let mut a_err = String::new();
+    if let Some(mut e) = a.stderr.take() {
+        let _ = e.read_to_string(&mut a_err);
+    }
+    let _ = std::fs::remove_dir_all(&home);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success() && stdout.contains("UNIX-ROUNDTRIP-OK"),
+        "unix client failed.\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}\n--- server stderr ---\n{a_err}"
+    );
+}
+
+/// A mismatched cookie is rejected over the Unix transport: the HMAC handshake
+/// fails (the same `PermissionDenied` path as TCP) and `connect` raises. Each
+/// side pins a distinct `$BROOD_COOKIE`, so the file fallback is bypassed.
+#[test]
+fn wrong_cookie_rejected_over_unix() {
+    let home = std::env::temp_dir().join(format!("brood-unix-bad-{}", std::process::id()));
+    let run = home.join("run");
+    std::fs::create_dir_all(&run).unwrap();
+    let run_s = run.to_str().unwrap();
+    let home_s = home.to_str().unwrap();
+    let env_a: Vec<(&str, &str)> = vec![
+        ("XDG_RUNTIME_DIR", run_s),
+        ("HOME", home_s),
+        ("BROOD_COOKIE", "alpha"),
+    ];
+    let env_b: Vec<(&str, &str)> = vec![
+        ("XDG_RUNTIME_DIR", run_s),
+        ("HOME", home_s),
+        ("BROOD_COOKIE", "beta"),
+    ];
+
+    let server = r#"
+(node-start :uc)
+(register :echo (self))
+(defn serve () (receive (_ (serve))))
+(serve)
+"#;
+    // A wrong cookie → handshake MAC mismatch → connect raises → we print REJECTED.
+    let client = r#"
+(node-start :ud)
+(try (do (connect "uc") (println "UNEXPECTED-CONNECT"))
+     (catch _ (println "REJECTED")))
+"#;
+
+    let mut a = spawn_brood_env(&home, "bserver.blsp", server, &env_a);
+    wait_until_socket(&run.join("brood").join("uc.sock"));
+    let b = spawn_brood_env(&home, "bclient.blsp", client, &env_b);
+    let out = b.wait_with_output().expect("client finished");
+    let _ = a.kill();
+    let _ = a.wait();
+    let _ = std::fs::remove_dir_all(&home);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("REJECTED") && !stdout.contains("UNEXPECTED-CONNECT"),
+        "wrong cookie should have been rejected.\n--- stdout ---\n{stdout}"
+    );
+}
+
+/// The cookie file is auto-generated once (mode `0600`) and reused: two runs in
+/// the same sandboxed `$HOME` print the *same* secret (ADR-068).
+#[test]
+fn cookie_file_autogen_and_reuse() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = std::env::temp_dir().join(format!("brood-cookie-{}", std::process::id()));
+    std::fs::create_dir_all(&home).unwrap();
+    let cfg = home.join(".config");
+    let env: Vec<(&str, &str)> = vec![
+        ("HOME", home.to_str().unwrap()),
+        ("XDG_CONFIG_HOME", cfg.to_str().unwrap()),
+    ];
+    let prog = "(println (node-cookie))";
+
+    let first = spawn_brood_env(&home, "c1.blsp", prog, &env)
+        .wait_with_output()
+        .unwrap();
+    let second = spawn_brood_env(&home, "c2.blsp", prog, &env)
+        .wait_with_output()
+        .unwrap();
+    let s1 = String::from_utf8_lossy(&first.stdout).trim().to_string();
+    let s2 = String::from_utf8_lossy(&second.stdout).trim().to_string();
+
+    let cookie_path = home.join(".config").join("brood").join("cookie");
+    let mode = std::fs::metadata(&cookie_path)
+        .expect("cookie file exists")
+        .permissions()
+        .mode()
+        & 0o777;
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert_eq!(s1.len(), 64, "cookie should be 32 bytes hex");
+    assert_eq!(s1, s2, "second run must reuse the persisted cookie");
+    assert_eq!(mode, 0o600, "cookie file must be owner-only");
+}
+
 /// Cross-node closure shipping (ADR-033, the wire codec's `M_CLOSURE` path).
 /// The client ships a `(fn (x) (* x n))` to a remote worker, with `n` a free
 /// local captured from the surrounding `let`. The worker applies it and sends

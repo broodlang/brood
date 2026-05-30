@@ -1,11 +1,10 @@
 # Node connect ergonomics (design)
 
-> Status: **design / proposed** (targets ADR-068). This is the plan to make
-> connecting nodes cheap: a default shared secret, a name-addressed local
-> transport, and `nest run --name`. It extends [`distribution.md`](distribution.md)
-> (the as-built TCP + cookie-handshake reference) — the wire protocol, HMAC
-> handshake, pid routing, links/monitors, and ADR-067 cross-node supervision are
-> all unchanged.
+> Status: **implemented** (ADR-068, 2026-05-30). Makes connecting nodes cheap: a
+> default shared secret, a name-addressed local transport, and `nest run --name`.
+> This file is the design rationale; [`distribution.md`](distribution.md) is the
+> as-built reference. The wire protocol, HMAC handshake, pid routing,
+> links/monitors, and ADR-067 cross-node supervision are all unchanged.
 
 ## Fit with the project goals
 

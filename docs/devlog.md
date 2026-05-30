@@ -9064,3 +9064,47 @@ advancing a moved branch, and direct-beats-transitive vs the loud conflict error
 **Outcome.** The package manager is **done** for its v1 scope. Deferred to v2 by
 design (ADR-011): a registry, semver + a constraint solver, tarball/HTTP source
 kinds (with `%http-get`), and signed packages.
+
+---
+
+## 2026-05-30 — Node-connect ergonomics (ADR-068)
+
+**Goal.** Make connecting nodes cheap — the Emacs `--daemon`/`emacsclient` model
+for the local case. Three asks: a shared secret you don't invent per program;
+drop the IP+port for same-machine nodes (address by name); a one-liner to bring a
+node up.
+
+**Done.**
+- **Transport seam.** A single `Stream { Tcp | Unix }` in `dist.rs` carries the
+  link; handshake, framing, heartbeat, teardown are transport-agnostic (the
+  handshake went generic over `Read + Write`). Local nodes bind a Unix-domain
+  socket at `$XDG_RUNTIME_DIR/brood/<name>.sock` (fallback `/tmp/brood-<user>/`),
+  addressed by **name**: `(connect "foo")` dials it, `(connect "foo@host:port")`
+  is TCP as before — dispatch reuses the existing `@` split. A stale socket from a
+  crashed node is detected (probe-connect → unlink) and rebound.
+- **Shared cookie.** `~/.config/brood/cookie` (honoring `$XDG_CONFIG_HOME`), hex,
+  `0600`, auto-generated on first use. Resolution `$BROOD_COOKIE` → file →
+  mint+persist, on both the listen and connect sides.
+- **`nest run --name NAME`** starts a local node before the program runs.
+- **Policy in Brood** (`std/prelude.blsp`: `node-start` / `connect` /
+  `node-cookie` / socket-path), **mechanism in Rust**: four thin primitives —
+  `%node-listen`, `%node-connect`, `random-token` (CSPRNG → hex), `spit-private`
+  (atomic `0600`). `node-start`/`connect` are no longer builtins; the old names
+  moved to the `%`-primitives and the friendly forms are prelude functions.
+
+**Unchanged / deferred.** The 3-arg `(node-start name "host:port" cookie)` and
+`name@host:port` `connect` forms still work, so the TCP `distribution.rs` suite
+passed untouched. Deferred (ADR-011): **dual-listen** (one node on Unix + TCP at
+once — the editor-daemon end-state, cleanly additive). Windows out of scope.
+`connect` requires a prior `node-start`.
+
+**Tests.** `crates/cli/tests/distribution.rs` gains
+`two_unix_nodes_connect_by_name_and_message`, `wrong_cookie_rejected_over_unix`,
+`cookie_file_autogen_and_reuse` (each sandboxes `$HOME`/`$XDG_*` to a temp dir so
+the cookie never touches the runner's real `~/.config`). The observer's
+remote-attach gains Unix + the cookie-file fallback.
+
+**Note.** Branched from a base predating the namespace-resolver fix (`59ae226`,
+"qualify macro-defined self-recursion"); merged `main` in before landing — that
+fix is what makes `defprocess`/`hatch` resolve under namespaces in spawned
+processes, unrelated to this work.
