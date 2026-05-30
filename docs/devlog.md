@@ -8709,3 +8709,27 @@ roadmap. **Lands in the `links-trap-exit` worktree** — not yet merged to `main
 the PATH `nest`, which predates the new builtins, so `link`/`trap-exit`/`unlink`
 draw false `unbound` warnings on edit. Advisory only; `cargo test` is the gate;
 they vanish once D merges and `nest` is rebuilt.
+
+## 2026-05-30 — Supervisor: runtime child API (DynamicSupervisor), on top of links
+
+**Goal.** The last additive OTP-parity piece (after links): manage children at
+runtime. Pure Brood on top of the link/trap rewrite, same worktree.
+
+**Built (`std/supervisor.blsp`).** `start-child` / `terminate-child` /
+`restart-child` / `count-children` — synchronous request/reply messages the loop
+handles, with a `supervisor--find-by-key` that accepts a child's `:id` *or* pid.
+A supervisor started with `[]` children and grown via `start-child` *is* Elixir's
+DynamicSupervisor; a dynamically-added child is a full member (linked, restarted
+per its `:restart` type, torn down on shutdown). `restart-child` is an explicit
+request and isn't counted against the intensity window (OTP's `restart_child`).
+No dedicated `simple_one_for_one` mode — the API works under any strategy.
+
+**Verified.** supervisor suite 17 → **20** (start-child adds + supervises + the
+child still restarts on crash; terminate-child stops without restart and reports
+`:not-found` after; restart-child swaps in a fresh incarnation). 20/20 clean 3×
+under `BROOD_GC_STRESS=1`; full worktree `cargo test` green.
+
+**Docs.** ADR-067 (runtime-API paragraph + parity note), `supervision.md` (table +
+divergences + parity item #4 ✅), this entry. Now the only OTP-parity gap left is a
+`terminate/2`-style worker cleanup hook. **Still in the `links-trap-exit`
+worktree** — not merged to `main`.

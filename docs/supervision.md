@@ -191,7 +191,7 @@ are deliberate design choices, not missing plumbing.
 | Shutdown order | **reverse** start order | start order |
 | Startup | synchronous, ordered, **rollback on failure** | async (returns the spawned pid); a throwing `:start` orphans earlier children |
 | Named children | supervisor-managed names; survive restart transparently | `register` exists, but **not supervisor-managed** |
-| Runtime child mgmt | start/terminate/restart/delete/count_children | `which-children` + `stop` only |
+| Runtime child mgmt | start/terminate/restart/delete/count_children | `start-child`/`terminate-child`/`restart-child`/`count-children`/`which-children` (ADR-067) |
 
 ### The load-bearing difference (now closed): links + `trap_exit`
 
@@ -236,9 +236,10 @@ restarts the whole sub-tree).
 like OTP, and a `:name` in a child spec is **supervisor-managed** — re-registered
 on each restart so callers address a stable name. See §Shutdown policy and the
 parity list below.)
-- **No `simple_one_for_one`/DynamicSupervisor** and **no runtime child API**
-  (`start_child`/`terminate_child`/`restart_child`/`delete_child`/`count_children`)
-  — the child set is fixed at `start-supervisor` time.
+- **No dedicated `simple_one_for_one` mode** — but the **runtime child API**
+  (`start-child`/`terminate-child`/`restart-child`/`count-children`) covers the
+  DynamicSupervisor use case: a supervisor started with `[]` children and grown at
+  runtime *is* a dynamic supervisor, under any strategy.
 - **No child `type` / `modules` / `significant` / `auto_shutdown`**, and **no
   `code_change`/release upgrades** (though ADR-013 late binding gives a different
   hot-reload: redefining the module changes a *running* supervisor on its next
@@ -264,8 +265,11 @@ kernel feature (the path ADR-039 took and reverted).
    address a stable name via `whereis`. Pure Brood over the existing `register`.
 3. ✅ **Reverse-order shutdown** (done 2026-05-30) — `terminate-many` tears down
    last-started-first.
-4. **DynamicSupervisor + a runtime child API** (`start-child`/`terminate-child`/…).
-5. **A worker cleanup convention** layered on `[:$stop]` (a `terminate`-style hook).
+4. ✅ **DynamicSupervisor + a runtime child API** (done 2026-05-30, ADR-067) —
+   `start-child`/`terminate-child`/`restart-child`/`count-children`; a supervisor
+   grown from `[]` at runtime is a dynamic supervisor.
+5. **A worker cleanup convention** layered on `[:$stop]` (a `terminate`-style hook)
+   — the last remaining item.
 
 ## See also
 
