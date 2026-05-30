@@ -4183,106 +4183,6 @@ ADR-039 (the reverted kernel supervisor — why general primitives), `supervisio
 (the vs-OTP deep dive that motivated this), `tests/link_test.blsp`,
 `crates/cli/tests/distribution.rs`.
 
-## ADR-068 — Native extensions are WASM components, built on fetch and wrapped in Brood
-
-**Status:** proposed (2026-05-30). Design recorded in [`interop.md`](interop.md).
-Nothing implemented yet.
-
-**Context.** ADR-037 closed the native-code door: a package wanting native code
-"does it the standard Rust way (a separate crate, baked into the kernel); the
-Brood side just `require`s a wrapper." That keeps the supply chain safe but makes
-**every native capability kernel-blessed** — adding one means a PR against the
-core, a recompile, and a new binary tied to one kernel build and host triple. As
-the editor (M2+) invites plugins (highlighters, codecs, a regex engine), that's a
-wall: third parties can't ship native code at all, and the kernel accretes every
-capability anyone ever wants. The requirement is native extensions that (1) ship
-and version *with the package*, (2) require **zero kernel recompilation**, (3)
-are portable across kernels/platforms, (4) keep ADR-037's supply-chain door shut,
-and (5) don't break the moving GC / per-process-heap / immutability / no-worker-
-pinning invariants.
-
-**Decision.** A package may ship a **WebAssembly component** as a native
-extension. The package manager **builds it from source at `nest fetch` time** (or
-fetches a prebuilt artifact), pins it in the lock file, and caches the `.wasm`
-under `_deps/`. The runtime instantiates it **sandboxed** via an embedded
-`wasmtime` host and surfaces its exports through a **Brood wrapper module**. The
-committed decisions:
-
-- **WASM, not a native dlopen ABI.** A `.wasm` is portable across kernel versions
-  and host architectures (its only ABI is the **WIT interface**, decoupled from
-  the kernel's `Value`/GC layout) and **sandboxed** (linear-memory isolation — a
-  buggy/hostile guest can't segfault the runtime or scribble the Brood heap, so
-  fault isolation survives) and **metered** (`wasmtime` fuel/epoch — fits ADR-043
-  and the scheduler). A native `.so` fails all three. `wasmtime` is a runtime
-  crate alongside `boxcar`/`ropey` — infrastructure, not Lisp-callable behaviour.
-- **Zero kernel recompilation.** The `wasmtime` host is compiled into the kernel
-  *once*; thereafter a native extension is **hash-pinned `.wasm` data, never
-  kernel code**. Adding/updating/removing one never rebuilds the runtime; the
-  same shipped binary runs extensions written after it was built, in languages
-  the kernel never heard of. The recompile boundary becomes exactly the
-  kernel/package boundary.
-- **Built on fetch (the Rustler model), wrapped in Brood (the `use Rustler`
-  model).** Native code is compiled from source when the package is pulled —
-  `mix deps.compile` runs `cargo`, we run the manifest's declared
-  `:wasm-build` toolchain — **for that package only; the kernel binary is
-  untouched.** The Brood side gets a `use-native` macro (the `use Rustler`
-  analog) that binds every WIT-exported function as a namespace function. Because
-  the contract is WIT, the bindings are *generated*, not hand-stubbed per
-  function (better than Rustler's manual stub list). A prebuilt `:wasm-artifact`
-  (the `rustler_precompiled` analog) is the escape hatch for consumers without
-  the toolchain.
-- **The boundary marshals; it never shares handles.** The moving GC forbids
-  passing a `Value` handle across a safepoint, so values cross as the **`Message`
-  enum** (Brood's existing copy-on-send serialization boundary), large bytes ride
-  the **blob heap (ADR-041)**, and stateful guest objects are **opaque resource
-  handles** (the rope precedent, ADR-045). A **WASM instance is mutable state**,
-  so it is modelled the only two ways Brood allows — an opaque handle behind
-  primitives, or owned by a process — **never a `Value`** (not sendable, not
-  map-able). No new state concept.
-- **No worker pinning.** A guest call is CPU-bound; short calls run inline
-  fuel-capped, long calls run on the Phase-3 **blocking offload pool** and
-  **deliver to the mailbox** (`handoff-blocking-io.md`) — the same rule as TCP,
-  GUI input, and dist.
-- **Supply-chain door stays shut, reframed.** ADR-037 banned arbitrary install
-  hooks; build-on-fetch keeps that because the build is a **declared toolchain
-  invocation** (not a free-form `postinstall`) and the **output is sandboxed
-  regardless** — strictly stronger than today's "bake an opaque crate into the
-  kernel with full host privileges." Capabilities are **deny-by-default** (WASI
-  imports granted per-manifest). Honest cost (shared with Rustler): build-on-fetch
-  needs the wasm toolchain present and pays compile time — hence `:wasm-artifact`.
-
-**Why.** It's the *only* shape that gives per-package native code with zero kernel
-recompile **without** reopening the supply-chain hole — the sandbox is what makes
-"run untrusted native code" compatible with "don't trust it." It reuses machinery
-already built: the `Message` marshalling boundary, the blob heap, the opaque-handle
-pattern, the deliver-to-mailbox offload seam, and ADR-037's manifest/lock/cache.
-And it tracks a proven trajectory (Elixir: Rustler build-on-fetch → `rustler_precompiled`).
-
-**Scope / deferred (ADR-011).** Component Model + WIT as the ABI (vs. core WASM +
-a hand-rolled ABI) — recommended but revisit if wasmtime's component support is
-too green; async guests (WASI 0.3) composing with the offload pool; zero-copy blob
-read-mapping into linear memory; sandboxing the *build* toolchain (v1: trust the
-declared toolchain); a richer per-extension capability/permission UI (the editor
-will want it). Cross-node: a WASM instance is local mutable state, so it doesn't
-travel in `send`/closure-ship — cross-node use is "talk to the owning process."
-
-**Consequences.** `project.blsp` gains a `:native` clause; `project.lock.blsp`
-gains a per-dep `:native` artifact hash + build provenance; `std/package.blsp`
-grows build orchestration + the WASM cache layout; a new `use-native` wrapper
-macro lands (likely `std/native.blsp`). The kernel embeds `wasmtime` and grows a
-small primitive set (`%wasm-instantiate`/`%wasm-call`/`%wasm-build` + resource-drop
-wiring), mirroring ADR-037's `%git-clone`/`%sha256`. No change to `require`/load
-semantics — a native extension is code on the load path whose wrapper calls a
-primitive.
-
-**References.** [`interop.md`](interop.md) (the full design), ADR-037 (packages —
-the manifest/lock/cache extended, the "no install scripts" line reframed),
-ADR-041 (blob heap), ADR-045 (opaque immutable resource handle), ADR-043
-(resource backstops — fuel/epoch), ADR-059/062 + `handoff-blocking-io.md`
-(deliver-to-mailbox offload), ADR-054/055 (moving/generational GC — why the
-boundary marshals), ADR-006 (write the language in the language — wrapper + policy
-in Brood), ADR-011 (defer power features).
-
 ## ADR-068 — Node-connect ergonomics: default-cookie file, name-addressed Unix transport, `nest run --name`
 
 **Status.** Accepted, implemented 2026-05-30. Extends ADR-033/034 (distributed
@@ -4484,3 +4384,103 @@ don't care how the name was made unique.
 **References.** ADR-065 (`namespaces.md` §8), ADR-037 (`packages.md`, the dep
 local-name model + the lock/resolution step that enforces this), ADR-011 (defer the
 powerful form).
+
+## ADR-071 — Native extensions are WASM components, built on fetch and wrapped in Brood
+
+**Status:** proposed (2026-05-30). Design recorded in [`interop.md`](interop.md).
+Nothing implemented yet.
+
+**Context.** ADR-037 closed the native-code door: a package wanting native code
+"does it the standard Rust way (a separate crate, baked into the kernel); the
+Brood side just `require`s a wrapper." That keeps the supply chain safe but makes
+**every native capability kernel-blessed** — adding one means a PR against the
+core, a recompile, and a new binary tied to one kernel build and host triple. As
+the editor (M2+) invites plugins (highlighters, codecs, a regex engine), that's a
+wall: third parties can't ship native code at all, and the kernel accretes every
+capability anyone ever wants. The requirement is native extensions that (1) ship
+and version *with the package*, (2) require **zero kernel recompilation**, (3)
+are portable across kernels/platforms, (4) keep ADR-037's supply-chain door shut,
+and (5) don't break the moving GC / per-process-heap / immutability / no-worker-
+pinning invariants.
+
+**Decision.** A package may ship a **WebAssembly component** as a native
+extension. The package manager **builds it from source at `nest fetch` time** (or
+fetches a prebuilt artifact), pins it in the lock file, and caches the `.wasm`
+under `_deps/`. The runtime instantiates it **sandboxed** via an embedded
+`wasmtime` host and surfaces its exports through a **Brood wrapper module**. The
+committed decisions:
+
+- **WASM, not a native dlopen ABI.** A `.wasm` is portable across kernel versions
+  and host architectures (its only ABI is the **WIT interface**, decoupled from
+  the kernel's `Value`/GC layout) and **sandboxed** (linear-memory isolation — a
+  buggy/hostile guest can't segfault the runtime or scribble the Brood heap, so
+  fault isolation survives) and **metered** (`wasmtime` fuel/epoch — fits ADR-043
+  and the scheduler). A native `.so` fails all three. `wasmtime` is a runtime
+  crate alongside `boxcar`/`ropey` — infrastructure, not Lisp-callable behaviour.
+- **Zero kernel recompilation.** The `wasmtime` host is compiled into the kernel
+  *once*; thereafter a native extension is **hash-pinned `.wasm` data, never
+  kernel code**. Adding/updating/removing one never rebuilds the runtime; the
+  same shipped binary runs extensions written after it was built, in languages
+  the kernel never heard of. The recompile boundary becomes exactly the
+  kernel/package boundary.
+- **Built on fetch (the Rustler model), wrapped in Brood (the `use Rustler`
+  model).** Native code is compiled from source when the package is pulled —
+  `mix deps.compile` runs `cargo`, we run the manifest's declared
+  `:wasm-build` toolchain — **for that package only; the kernel binary is
+  untouched.** The Brood side gets a `use-native` macro (the `use Rustler`
+  analog) that binds every WIT-exported function as a namespace function. Because
+  the contract is WIT, the bindings are *generated*, not hand-stubbed per
+  function (better than Rustler's manual stub list). A prebuilt `:wasm-artifact`
+  (the `rustler_precompiled` analog) is the escape hatch for consumers without
+  the toolchain.
+- **The boundary marshals; it never shares handles.** The moving GC forbids
+  passing a `Value` handle across a safepoint, so values cross as the **`Message`
+  enum** (Brood's existing copy-on-send serialization boundary), large bytes ride
+  the **blob heap (ADR-041)**, and stateful guest objects are **opaque resource
+  handles** (the rope precedent, ADR-045). A **WASM instance is mutable state**,
+  so it is modelled the only two ways Brood allows — an opaque handle behind
+  primitives, or owned by a process — **never a `Value`** (not sendable, not
+  map-able). No new state concept.
+- **No worker pinning.** A guest call is CPU-bound; short calls run inline
+  fuel-capped, long calls run on the Phase-3 **blocking offload pool** and
+  **deliver to the mailbox** (`handoff-blocking-io.md`) — the same rule as TCP,
+  GUI input, and dist.
+- **Supply-chain door stays shut, reframed.** ADR-037 banned arbitrary install
+  hooks; build-on-fetch keeps that because the build is a **declared toolchain
+  invocation** (not a free-form `postinstall`) and the **output is sandboxed
+  regardless** — strictly stronger than today's "bake an opaque crate into the
+  kernel with full host privileges." Capabilities are **deny-by-default** (WASI
+  imports granted per-manifest). Honest cost (shared with Rustler): build-on-fetch
+  needs the wasm toolchain present and pays compile time — hence `:wasm-artifact`.
+
+**Why.** It's the *only* shape that gives per-package native code with zero kernel
+recompile **without** reopening the supply-chain hole — the sandbox is what makes
+"run untrusted native code" compatible with "don't trust it." It reuses machinery
+already built: the `Message` marshalling boundary, the blob heap, the opaque-handle
+pattern, the deliver-to-mailbox offload seam, and ADR-037's manifest/lock/cache.
+And it tracks a proven trajectory (Elixir: Rustler build-on-fetch → `rustler_precompiled`).
+
+**Scope / deferred (ADR-011).** Component Model + WIT as the ABI (vs. core WASM +
+a hand-rolled ABI) — recommended but revisit if wasmtime's component support is
+too green; async guests (WASI 0.3) composing with the offload pool; zero-copy blob
+read-mapping into linear memory; sandboxing the *build* toolchain (v1: trust the
+declared toolchain); a richer per-extension capability/permission UI (the editor
+will want it). Cross-node: a WASM instance is local mutable state, so it doesn't
+travel in `send`/closure-ship — cross-node use is "talk to the owning process."
+
+**Consequences.** `project.blsp` gains a `:native` clause; `project.lock.blsp`
+gains a per-dep `:native` artifact hash + build provenance; `std/package.blsp`
+grows build orchestration + the WASM cache layout; a new `use-native` wrapper
+macro lands (likely `std/native.blsp`). The kernel embeds `wasmtime` and grows a
+small primitive set (`%wasm-instantiate`/`%wasm-call`/`%wasm-build` + resource-drop
+wiring), mirroring ADR-037's `%git-clone`/`%sha256`. No change to `require`/load
+semantics — a native extension is code on the load path whose wrapper calls a
+primitive.
+
+**References.** [`interop.md`](interop.md) (the full design), ADR-037 (packages —
+the manifest/lock/cache extended, the "no install scripts" line reframed),
+ADR-041 (blob heap), ADR-045 (opaque immutable resource handle), ADR-043
+(resource backstops — fuel/epoch), ADR-059/062 + `handoff-blocking-io.md`
+(deliver-to-mailbox offload), ADR-054/055 (moving/generational GC — why the
+boundary marshals), ADR-006 (write the language in the language — wrapper + policy
+in Brood), ADR-011 (defer power features).

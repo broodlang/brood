@@ -1,6 +1,6 @@
 # Native interop: WASM components, shipped and built with packages
 
-> **Status:** design note (2026-05-30). Backs **ADR-068** (proposed). Nothing
+> **Status:** design note (2026-05-30). Backs **ADR-071** (proposed). Nothing
 > here is implemented yet. This is the long-term answer to "how does a Brood
 > package use code from another ecosystem (or ship a perf-critical native
 > kernel) without forking the Rust kernel?" The short answer: **a package may
