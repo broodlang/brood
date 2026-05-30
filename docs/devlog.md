@@ -9674,3 +9674,40 @@ This completes the three-step editor slice: `with-out-str` → the `eval-command
 family (C-x C-e shape) → chord-expressible keymaps. Commands stay user-bound;
 nothing wires a specific key. Deferred next per the user: Emacs-style major/minor
 modes (how a buffer selects which keymap(s) are active).
+
+## 2026-05-30 — Buffer framework: undo/redo, region bounds, word motion (M2 enablers)
+
+The `std/buffer.blsp` additions the editor app (`~/src/whk/myedit`) needed to
+enable **multiple buffers + selection/region + undo** — all general buffer-model
+capabilities, kept in the language toolkit (the editor app supplies only policy:
+keybindings, the kill ring, the minibuffer). ADR-075.
+
+- **Per-buffer undo/redo** (ADR-075). A buffer carries `:undo`/`:redo` stacks of
+  `{:rope :point :mark}` snapshots; each editing op (`insert`/`delete-char`/
+  `delete-backward-char`/`delete-region`) pushes a pre-edit snapshot **only on a
+  real text change** (a no-op edit — delete at end, backspace at 0, empty region —
+  records nothing, so undo has no dead steps) and clears `:redo`. `(undo buf)` /
+  `(redo buf)` are pure stack moves; restoring a region delete brings the mark
+  back too. Snapshots exclude the history fields, so they don't nest. Rides the
+  immutable rope (Arc-shared B-tree → O(1) snapshot). No coalescing in v1 (one
+  keystroke = one step). Per-buffer because the history lives *in the buffer
+  value*, so switching buffers preserves each one's history for free.
+- **`buffer-region-bounds`** → `[lo hi]` or nil (point/mark in either order) — the
+  half-open span the view highlights and `delete-region`/`buffer-region` act on;
+  `buffer-region` is now expressed over it.
+- **`forward-word` / `backward-word`** (M-f/M-b) — word motion over the buffer
+  (a word = a run of non-whitespace, non-delimiter chars, the same notion the line
+  editor uses), pure scans over the text.
+- **GUI `C-Space` fix** (`crates/lisp/src/gui.rs`). `translate_key` mapped
+  `NamedKey::Space` unconditionally to a plain space, dropping Ctrl/Alt — so Emacs
+  `C-SPC` (set-mark) self-inserted a space in the native window. Now Space carries
+  its modifiers like a character key, so `C-SPC` arrives as the keyword `:ctrl- `
+  (matching crossterm). The one Rust change; everything else is Brood.
+- **Tests** (`tests/buffer_test.blsp`, now 40): undo/redo restore + redo
+  invalidation + no-op-not-recorded + region-delete-restores-mark + independent
+  per-buffer histories; `buffer-region-bounds` order-independence + matches
+  `buffer-region`; word motion forward/back across delimiters and lines. Full
+  brood suite green (390 tests); the myedit editor app (45 tests) builds multiple
+  buffers, region/kill-ring, the minibuffer (switch-buffer / find-file with
+  completion), and a keymap refactored onto `std/keymap.blsp`'s `keymap-step` on
+  top of these.

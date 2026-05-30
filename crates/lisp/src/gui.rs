@@ -753,6 +753,11 @@ mod backend {
                 NamedKey::End => Key::Named("end"),
                 NamedKey::PageUp => Key::Named("page-up"),
                 NamedKey::PageDown => Key::Named("page-down"),
+                // Space carries modifiers like a character key would, so Ctrl/Alt
+                // survive (Emacs `C-SPC` set-mark → :ctrl- , matching crossterm)
+                // rather than collapsing to a self-inserted space.
+                NamedKey::Space if mods.control_key() => Key::Ctrl(' '),
+                NamedKey::Space if mods.alt_key() => Key::Alt(' '),
                 NamedKey::Space => Key::Char(' '),
                 _ => return None,
             }),

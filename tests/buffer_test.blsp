@@ -78,7 +78,21 @@
   (test "forward/backward-line clamp to the line range"
     (let (b (make-buffer "a\nb\nc"))
       (assert= (buffer-current-line (forward-line b 99)) 2)
-      (assert= (buffer-current-line (backward-line (end-of-buffer b) 99)) 0))))
+      (assert= (buffer-current-line (backward-line (end-of-buffer b) 99)) 0)))
+  (test "forward-word moves to the end of the next word"
+    (let (b (make-buffer "foo bar  baz"))
+      (assert= (buffer-point (forward-word b)) 3)                  ; end of "foo"
+      (assert= (buffer-point (forward-word (forward-word b))) 7)   ; end of "bar"
+      (assert= (buffer-point (forward-word (goto-char b 12))) 12))) ; at end, stays
+  (test "backward-word moves to the start of the previous word"
+    (let (b (goto-char (make-buffer "foo bar  baz") 12))            ; end of "baz"
+      (assert= (buffer-point (backward-word b)) 9)                  ; start of "baz"
+      (assert= (buffer-point (backward-word (backward-word b))) 4)  ; start of "bar"
+      (assert= (buffer-point (backward-word (goto-char b 0))) 0)))  ; at start, stays
+  (test "word motion crosses lines and delimiters"
+    (let (b (make-buffer "(foo\n bar)"))
+      (assert= (buffer-point (forward-word b)) 4)                   ; skips '(', ends "foo"
+      (assert= (buffer-point (forward-word (forward-word b))) 9)))) ; ends "bar" before ')'
 
 (describe "buffer editing is immutable"
   (test "insert advances point; the original is untouched"
@@ -120,7 +134,55 @@
       (assert= (buffer-point b) 1)
       (assert= (buffer-mark b) nil)))
   (test "delete-region is a no-op without a mark"
-    (assert= (buffer-text (delete-region (make-buffer "abc"))) "abc")))
+    (assert= (buffer-text (delete-region (make-buffer "abc"))) "abc"))
+  (test "buffer-region-bounds gives [lo hi], order-independent, nil without a mark"
+    (assert= (buffer-region-bounds (make-buffer "abc")) nil)
+    (assert= (buffer-region-bounds (-> (make-buffer "abcdef") (goto-char 1) set-mark (goto-char 4))) [1 4])
+    (assert= (buffer-region-bounds (-> (make-buffer "abcdef") (goto-char 4) set-mark (goto-char 1))) [1 4]))
+  (test "buffer-region-bounds matches the buffer-region span"
+    (let (b (-> (make-buffer "abcdef") (goto-char 1) set-mark (goto-char 4))
+          [lo hi] (buffer-region-bounds b))
+      (assert= (substring (buffer-text b) lo hi) (buffer-region b)))))
+
+(describe "buffer undo / redo"
+  (test "undo restores the text and point before the last edit"
+    (let (b (-> (make-buffer "hello") (goto-char 5) (insert "!"))
+          u (undo b))
+      (assert= (buffer-text b) "hello!")
+      (assert= (buffer-text u) "hello")
+      (assert= (buffer-point u) 5)))
+  (test "redo re-applies an undone edit"
+    (let (b (-> (make-buffer "hi") end-of-buffer (insert "!"))
+          r (-> b undo redo))
+      (assert= (buffer-text r) "hi!")
+      (assert= (buffer-point r) 3)))
+  (test "a fresh edit clears the redo stack"
+    (let (b (-> (make-buffer "") (insert "a") (insert "b"))   ; "ab"
+          back (undo b)                                       ; "a", redo has "ab"
+          edited (insert back "z"))                           ; "az", redo cleared
+      (assert= (buffer-text edited) "az")
+      (assert= (buffer-text (redo edited)) "az")))            ; redo is now a no-op
+  (test "undo with no history is a no-op"
+    (let (b (make-buffer "abc"))
+      (assert= (buffer-text (undo b)) "abc")
+      (assert= (buffer-text (redo b)) "abc")))
+  (test "a no-op edit records nothing (undo skips past it)"
+    (let (b (-> (make-buffer "ab") (insert "X"))              ; "Xab", one undo step
+          noop (delete-char (end-of-buffer b)))               ; delete at end → unchanged
+      (assert= (buffer-text noop) "Xab")
+      (assert= (buffer-text (undo noop)) "ab")))              ; undo reaches the real edit
+  (test "undoing a region delete restores the text and the mark"
+    (let (b (-> (make-buffer "abcdef") (goto-char 1) set-mark (goto-char 4) delete-region)
+          u (undo b))
+      (assert= (buffer-text b) "aef")
+      (assert= (buffer-text u) "abcdef")
+      (assert= (buffer-mark u) 1)
+      (assert= (buffer-point u) 4)))
+  (test "two buffers keep independent histories"
+    (let (a (-> (make-buffer "") (insert "a"))
+          c (-> (make-buffer "") (insert "c")))
+      (assert= (buffer-text (undo a)) "")
+      (assert= (buffer-text c) "c"))))            ; undoing `a` left `c` untouched
 
 (describe "buffer file round-trip"
   (test "buffer-from-file reads, save-buffer writes back"

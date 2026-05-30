@@ -4706,3 +4706,43 @@ the expected shape is one Unix + one TCP.
 ADR-034 (distributed nodes), ADR-006 (policy in Brood), ADR-011 (defer listener
 removal), `crates/cli/tests/distribution.rs` (`dual_listen_serves_tcp_and_unix_at_once`),
 `std/prelude.blsp`.
+
+## ADR-075 — Undo lives in the buffer value (per-buffer undo/redo stacks)
+
+**Status.** Accepted, implemented 2026-05-30. Extends ADR-045 (the immutable,
+rope-backed buffer framework) and ADR-026 (immutability). See
+[`devlog.md`](devlog.md) (2026-05-30) and `std/buffer.blsp`.
+
+**Context.** The editor app (`~/src/whk/myedit`) needs undo, and — with multiple
+buffers — undo must be **per-buffer** (Emacs keeps an undo list per buffer). The
+question was *where* it lives: in the editor app (a stack of buffers in the app's
+model) or in the buffer value itself (`std/buffer.blsp`). The prime directive
+(ADR-006) says general capabilities belong in the language toolkit; keybindings
+and the kill-ring/minibuffer UX are app policy and stay in the app.
+
+**Decision.** A buffer **carries its own history**: `:undo` and `:redo` stacks of
+`{:rope :point :mark}` snapshots. Each editing op pushes a pre-edit snapshot onto
+`:undo` (clearing `:redo`) **only when it actually changes the text**; `undo`/`redo`
+are pure stack moves restoring the snapshot triple. A snapshot deliberately
+**excludes** the history fields, so snapshots don't nest or grow geometrically.
+
+Rationale:
+- **Per-buffer for free.** History lives in the buffer value, so switching buffers
+  (just moving the app's `:current`) preserves each buffer's undo without any app
+  bookkeeping — the immutable-value payoff.
+- **Cheap.** A snapshot is `{:rope :point :mark}`; the rope is an Arc-shared B-tree
+  (ADR-045), so a snapshot is O(1) and stacks share structure.
+- **No no-op steps.** Guarding the push on a real text change keeps undo from
+  having dead steps (delete at end-of-buffer, backspace at 0, empty-region delete).
+- **Restoring a region delete brings the mark back**, since the snapshot is taken
+  before the delete clears it — a small nicety over Emacs.
+
+**Deferred (ADR-011).** No coalescing in v1 — one keystroke is one undo step.
+Coalescing consecutive self-inserts needs last-command tracking, which is *command*
+identity (app policy), not buffer state; pull it into the app when the editor wants
+it. The `spawn-buffer` actor ships text+point+mark and rebuilds, so history doesn't
+cross a process boundary (process-local view state) — acceptable.
+
+**References.** ADR-045 (buffer framework), ADR-026 (immutability), ADR-006 (policy
+in Brood), ADR-011 (defer coalescing), `std/buffer.blsp`,
+`tests/buffer_test.blsp` (the `buffer undo / redo` block).
