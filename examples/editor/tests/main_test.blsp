@@ -1,0 +1,71 @@
+;; Tests for the editor. The window loop (`ui-run`) needs a display, so it's not
+;; tested here; we test the pure pieces — `ed-update` (key + model -> model) and
+;; `ed-view` (model -> render frame) — exactly as they run in the loop. `(:use
+;; main)` brings the editor fns into scope; `(:use buffer)` the buffer accessors
+;; the assertions read through; `(:use test)` the describe/test/assert macros.
+;; These run under plain `nest test` — no GUI build needed.
+(defmodule main-test (:use main) (:use buffer) (:use test))
+
+;; A model over a fresh buffer of `text`, used as the starting point for edits.
+(defn m-of (text) (ed-init (make-buffer text)))
+
+;; The text after folding key `k` into a model over `text` (80x24 viewport).
+(defn after (text k) (buffer-text (get (ed-update (m-of text) k 80 24) :buf)))
+
+(describe "editor edits"
+  (test "a printable key inserts at point"
+    (assert= (after "ac" "b") "bac"))  ; point starts at 0
+  (test "Enter splits the line at point"
+    (let (m (ed-update (assoc (m-of "abcd") :buf (goto-char (get (m-of "abcd") :buf) 2))
+              :enter
+              80
+              24))
+      (assert= (buffer-text (get m :buf)) "ab\ncd")))
+  (test "Backspace deletes the char before point"
+    ;; point at 2 (after the 'b'), so backspace removes it
+    (let (b (forward-char (make-buffer "abc") 2)
+          m (ed-update (assoc (m-of "") :buf b) :backspace 80 24))
+      (assert= (buffer-text (get m :buf)) "ac")))
+  (test "Delete removes the char after point"
+    (assert= (after "abc" :delete) "bc"))
+  (test "a tick leaves the buffer unchanged"
+    (assert= (after "hello" :tick) "hello")))
+
+(describe "editor movement"
+  (test "Right then a key inserts one char over"
+    (let (m1 (ed-update (m-of "ac") :right 80 24)
+          m2 (ed-update m1 "b" 80 24))
+      (assert= (buffer-text (get m2 :buf)) "abc")))
+  (test "Down moves point to the next line, column-preserving"
+    (let (m (ed-update (m-of "abc\ndef") :down 80 24))
+      (assert= (buffer-current-line (get m :buf)) 1))))
+
+(describe "editor quit + status"
+  (test "Esc and Ctrl-C set :done (Esc is also the window close button)"
+    (is (get (ed-update (m-of "x") :escape 80 24) :done))
+    (is (get (ed-update (m-of "x") :ctrl-c 80 24) :done)))
+  (test "Ctrl-S on a fileless buffer reports it can't save (no crash)"
+    (let (m (ed-update (m-of "x") :ctrl-s 80 24))
+      (is (not (get m :done)))
+      (is (string-contains? (get m :status) "no file")))))
+
+(describe "editor scrolling"
+  (test "the point line stays inside the viewport after moving past the bottom"
+    ;; a 5-line buffer in a 3-row viewport (textrows = rows-1 = 2): moving the
+    ;; point to the last line must scroll :top down so the line is visible.
+    (let (text "l0\nl1\nl2\nl3\nl4"
+          m (ed-scroll (assoc (m-of text) :buf (end-of-buffer (get (m-of text) :buf))) 2)
+          line (buffer-current-line (get m :buf))
+          top (get m :top))
+      (is (>= line top))
+      (is (< line (+ top 2))))))
+
+(describe "editor view"
+  (test "the frame draws the first buffer line and places the cursor"
+    (let (f (ed-view (m-of "hello\nworld") 80 24))
+      (is (> (count (filter (fn (op)
+                              (and (= (first op) :text)
+                                (string-contains? (nth op 3) "hello")))
+                      f))
+            0))
+      (is (> (count (filter (fn (op) (= (first op) :cursor)) f)) 0)))))

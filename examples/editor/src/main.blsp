@@ -1,4 +1,5 @@
-(defmodule main "editor — a super-minimal GUI text editor on the rope-backed
+(defmodule main
+  "editor — a super-minimal GUI text editor on the rope-backed
 buffer framework.
 
 The M2 editor app (`docs/roadmap.md`): a real project that builds on the editor
@@ -24,8 +25,8 @@ Backspace/Delete remove, Ctrl-S saves, Esc / Ctrl-C / the window close button
 quits. Deliberately minimal — no selection, undo, or multiple buffers yet (the
 roadmap's next editor step). Commands are a plain `cond` here; `std/keymap.blsp`
 is the rebindable-keys growth path toward a self-editing editor."
-  (:use buffer)    ; the immutable rope-backed buffer model (the editor's state)
-  (:use ui)        ; gui-display + the ui-run loop
+  (:use buffer)  ; the immutable rope-backed buffer model (the editor's state)
+  (:use ui)  ; gui-display + the ui-run loop
   (:use display))  ; clear / text / cursor / frame
 
 ;; ---- model ------------------------------------------------------------------
@@ -56,15 +57,16 @@ is the rebindable-keys growth path toward a self-editing editor."
 at line `top` — one op per line, clipped to `cols`, positioned at its screen row."
   (let (last-line (min (dec (buffer-line-count buf)) (dec (+ top textrows))))
     (map (fn (line) (text (- line top) 0 (ed-fit (ed-line-text buf line) cols)))
-         (range top (inc last-line)))))
+      (range top (inc last-line)))))
 
 (defn ed-status-line (m cols rows)
   "The reverse-video status row: a message, then `line:col` at the buffer point."
   (let (buf (get m :buf)
         pos (str (inc (buffer-current-line buf)) ":" (buffer-column buf)))
-    (text (dec rows) 0
-          (ed-fit (str " " (get m :status) "  —  " pos "  —  Ctrl-S save · Esc quit") cols)
-          {:reverse true})))
+    (text (dec rows)
+      0
+      (ed-fit (str " " (get m :status) "  —  " pos "  —  Ctrl-S save · Esc quit") cols)
+      {:reverse true})))
 
 (defn ed-view (m cols rows)
   "ui-run view (pure): clear, draw the visible buffer lines, a status row, and
@@ -73,11 +75,9 @@ place the cursor at the buffer point (in screen coordinates, offset by `:top`)."
         top (get m :top)
         textrows (dec rows))
     (apply frame
-      (concat
-        [(clear)]
+      (concat [(clear)]
         (ed-visible-lines buf top textrows cols)
-        [(ed-status-line m cols rows)
-         (cursor (- (buffer-current-line buf) top) (buffer-column buf))]))))
+        [(ed-status-line m cols rows) (cursor (- (buffer-current-line buf) top) (buffer-column buf))]))))
 
 ;; ---- scrolling --------------------------------------------------------------
 
@@ -85,11 +85,11 @@ place the cursor at the buffer point (in screen coordinates, offset by `:top`)."
   "Adjust `:top` so the point's line stays inside a `textrows`-tall viewport:
 scroll up if it's above the top, down if it's below the bottom. Pure."
   (let (line (buffer-current-line (get m :buf))
-        top  (get m :top))
+        top (get m :top))
     (cond
-      (< line top)                  (assoc m :top line)
-      (>= line (+ top textrows))    (assoc m :top (inc (- line textrows)))
-      else                          m)))
+      (< line top) (assoc m :top line)
+      (>= line (+ top textrows)) (assoc m :top (inc (- line textrows)))
+      else m)))
 
 ;; ---- commands (each: model -> model) ----------------------------------------
 
@@ -114,22 +114,21 @@ A no-op-with-message if the buffer has no backing file."
   "ui-run update: fold one key into the next model, then keep the point on
 screen. Printable keys insert; the named keys move/edit; Esc / Ctrl-C / the
 window close button (delivered as `:escape`) quit. `:tick` is a no-op."
-  (ed-scroll
-    (cond
-      (= input :tick)                          m
-      (or (= input :escape) (= input :ctrl-c)) (assoc m :done true)
-      (= input :ctrl-s)    (ed-save m)
-      (= input :up)        (ed-edit m (fn (b) (backward-line b)))
-      (= input :down)      (ed-edit m (fn (b) (forward-line b)))
-      (= input :left)      (ed-edit m (fn (b) (backward-char b)))
-      (= input :right)     (ed-edit m (fn (b) (forward-char b)))
-      (= input :home)      (ed-edit m (fn (b) (beginning-of-line b)))
-      (= input :end)       (ed-edit m (fn (b) (end-of-line b)))
-      (= input :enter)     (ed-edit m (fn (b) (insert b "\n")))
-      (= input :backspace) (ed-edit m (fn (b) (delete-backward-char b)))
-      (= input :delete)    (ed-edit m (fn (b) (delete-char b)))
-      (string? input)      (ed-edit m (fn (b) (insert b input)))
-      else                 m)
+  (ed-scroll (cond
+               (= input :tick) m
+               (or (= input :escape) (= input :ctrl-c)) (assoc m :done true)
+               (= input :ctrl-s) (ed-save m)
+               (= input :up) (ed-edit m (fn (b) (backward-line b)))
+               (= input :down) (ed-edit m (fn (b) (forward-line b)))
+               (= input :left) (ed-edit m (fn (b) (backward-char b)))
+               (= input :right) (ed-edit m (fn (b) (forward-char b)))
+               (= input :home) (ed-edit m (fn (b) (beginning-of-line b)))
+               (= input :end) (ed-edit m (fn (b) (end-of-line b)))
+               (= input :enter) (ed-edit m (fn (b) (insert b "\n")))
+               (= input :backspace) (ed-edit m (fn (b) (delete-backward-char b)))
+               (= input :delete) (ed-edit m (fn (b) (delete-char b)))
+               (string? input) (ed-edit m (fn (b) (insert b input)))
+               else m)
     (dec rows)))
 
 ;; ---- entry ------------------------------------------------------------------
