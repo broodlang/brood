@@ -435,6 +435,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "tls-request",
+        Arity::exact(3),
+        Sig::new(vec![string, int, string], socket_ty),
+        tls_request,
+    );
+    def(
+        heap,
         "tcp-send",
         Arity::exact(2),
         Sig::new(vec![socket_ty, string], nil_ty),
@@ -866,13 +873,10 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![any], any),
         macroexpand_1,
     );
-    def(
-        heap,
-        "macroexpand",
-        Arity::exact(1),
-        Sig::new(vec![any], any),
-        macroexpand,
-    );
+    // `macroexpand` (the fixpoint loop) is written in Brood (`std/prelude.blsp`)
+    // over this single-step primitive — ADR-064, so its loop state is auto-rooted
+    // rather than hand-rooted in Rust. `macros::macroexpand` (Rust) stays for the
+    // compile pass, which runs under MACRO_BLOCK.
     // gensym accepts anything as a prefix (string/sym/keyword/nil/anything is
     // turned into its `display` form), so its prefix slot is `any` — not the
     // narrower `string` the original Sig claimed, which made the checker warn
@@ -1243,6 +1247,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("rope-line->char", &["r", "n"], "The character index where line n (0-based) begins."),
     ("tcp-connect", &["host", "port"], "Connect to host:port; inbound data is delivered to the calling process as [:tcp sock data] / [:tcp-closed sock] messages. Returns a socket. Throws on failure."),
     ("tcp-listen", &["host", "port"], "Bind a listening socket on host:port (port 0 = OS-assigned); connections arrive as [:tcp-accept lsock client] messages to the calling process. Returns a socket."),
+    ("tls-request", &["host", "port", "request"], "Make one HTTPS request to host:port (TLS): the response arrives at the calling process as [:tcp sock data] … [:tcp-closed sock] messages (or [:tcp-error sock msg]). Returns a socket id; pair with tcp-drain. Low-level — prefer http-get."),
     ("tcp-send", &["sock", "s"], "Write the whole string s to sock (blocking). Returns nil; throws on error."),
     ("tcp-controlling-process", &["sock", "pid"], "Make pid the owner of sock's inbound data: starts reading a just-accepted (passive) socket, or retargets an active one. Returns nil."),
     ("tcp-close", &["sock"], "Close sock (a stream or listener), releasing its fd / stopping its accept loop. Idempotent; returns nil."),
@@ -1821,47 +1826,54 @@ fn pr_str(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.alloc_string(&s))
 }
 
-thread_local! {
-    /// When `Some`, `(print …)` appends here instead of writing to the process's
-    /// real stdout. The `nest mcp` dispatcher installs a buffer around each
-    /// `tools/call` (see [`begin_stdout_capture`]) so a handler's `(print …)`
-    /// can't corrupt the JSON-RPC stdout stream — the captured text rides back in
-    /// the result envelope instead. `None` (the default) sends `print` straight
-    /// to stdout, as in the REPL and the file runner. Thread-local, so it only
-    /// affects `print`s on the thread that began the capture — spawned green
-    /// processes on other workers are unaffected (and shouldn't be printing to a
-    /// protocol channel anyway).
-    static STDOUT_CAPTURE: std::cell::RefCell<Option<String>> =
-        const { std::cell::RefCell::new(None) };
-}
+/// Cross-thread output capture. When `CAPTURE_ACTIVE`, `(print …)` and terminal
+/// output ([`write_term_bytes`]) append to `CAPTURE_BUF` instead of the process's
+/// real stdout. The `nest mcp` dispatcher installs a capture around each
+/// `tools/call` so a handler's output can't corrupt the JSON-RPC stdout stream —
+/// the captured text rides back in the result envelope instead.
+///
+/// **Global, not thread-local, on purpose:** an MCP handler may run in a SPAWNED
+/// green process on a worker thread (so a watchdog can `(exit … :kill)` a hung one
+/// — ADR-063), and its prints must still be captured rather than escape to the
+/// channel. The MCP server dispatches one tool call at a time, so there is never a
+/// concurrent capture. The fast path (REPL / file runner, not capturing) is a
+/// single relaxed atomic load, so normal `print` stays cheap.
+static CAPTURE_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static CAPTURE_BUF: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
-/// Start capturing `(print …)` output on the current thread into a fresh
-/// in-memory buffer (discarding any buffer already installed). Pair with
-/// [`take_captured_stdout`]. Used by the `nest mcp` dispatcher to keep handler
-/// output off the JSON-RPC channel.
+/// Start capturing output into a fresh buffer (clearing any prior content). Pair
+/// with [`take_captured_stdout`]. Used by the `nest mcp` dispatcher.
 pub fn begin_stdout_capture() {
-    STDOUT_CAPTURE.with(|c| *c.borrow_mut() = Some(String::new()));
+    crate::core::sync::lock(&CAPTURE_BUF).clear();
+    CAPTURE_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Stop capturing and return what `(print …)` wrote since [`begin_stdout_capture`]
-/// — `Some(text)` (possibly empty) if capture was active, `None` if it wasn't.
-/// After this call `print` writes to real stdout again.
+/// Stop capturing and return what was written since [`begin_stdout_capture`] —
+/// `Some(text)` (possibly empty) if capture was active, `None` otherwise. After
+/// this, output goes to real stdout again.
 pub fn take_captured_stdout() -> Option<String> {
-    STDOUT_CAPTURE.with(|c| c.borrow_mut().take())
+    if !CAPTURE_ACTIVE.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    Some(std::mem::take(&mut *crate::core::sync::lock(&CAPTURE_BUF)))
+}
+
+/// If a capture is active, append `s` to the buffer and return `true`; otherwise
+/// `false`. The single divert point shared by `print` and `write_term_bytes`.
+fn capture_write(s: &str) -> bool {
+    if !CAPTURE_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    crate::core::sync::lock(&CAPTURE_BUF).push_str(s);
+    true
 }
 
 fn print(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let parts: Vec<String> = args.iter().map(|&a| printer::display(heap, a)).collect();
     let text = parts.join(" ");
-    // If a capture buffer is installed on this thread, divert there instead of
-    // touching real stdout — the MCP channel must stay pure JSON-RPC.
-    let captured = STDOUT_CAPTURE.with(|c| match c.borrow_mut().as_mut() {
-        Some(buf) => {
-            buf.push_str(&text);
-            true
-        }
-        None => false,
-    });
+    // Divert to the capture buffer if one is active (the MCP channel must stay pure
+    // JSON-RPC); otherwise write real stdout.
+    let captured = capture_write(&text);
     if !captured {
         print!("{text}");
         use std::io::Write;
@@ -2635,6 +2647,15 @@ fn tcp_listen(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     }
 }
 
+fn tls_request(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let host = expect_string(heap, "tls-request", arg(args, 0))?;
+    let port = socket_port("tls-request", expect_int(heap, "tls-request", arg(args, 1))?)?;
+    let request = expect_string(heap, "tls-request", arg(args, 2))?;
+    let owner = crate::process::self_pid();
+    let id = crate::net::tls_request(&host, port, request.to_string(), owner);
+    Ok(Value::Socket(id))
+}
+
 fn tcp_send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_socket(heap, "tcp-send", arg(args, 0))?;
     let data = expect_string(heap, "tcp-send", arg(args, 1))?;
@@ -2861,14 +2882,7 @@ fn key_to_value(heap: &mut Heap, k: crossterm::event::KeyEvent) -> Value {
 /// pure and rides the rendered bytes back in the result envelope, so an agent can
 /// still inspect what a frame produced. Mirrors `print`'s capture check.
 fn write_term_bytes(bytes: &[u8]) -> std::io::Result<()> {
-    let diverted = STDOUT_CAPTURE.with(|c| match c.borrow_mut().as_mut() {
-        Some(buf) => {
-            buf.push_str(&String::from_utf8_lossy(bytes));
-            true
-        }
-        None => false,
-    });
-    if !diverted {
+    if !capture_write(&String::from_utf8_lossy(bytes)) {
         use std::io::Write;
         let mut real = std::io::stdout();
         real.write_all(bytes)?;
@@ -3519,10 +3533,7 @@ fn macroexpand_1(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let (expanded, _) = crate::eval::macros::macroexpand_1(heap, arg(args, 0), env)?;
     Ok(expanded)
 }
-
-fn macroexpand(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
-    crate::eval::macros::macroexpand(heap, arg(args, 0), env)
-}
+// `macroexpand` is now a Brood prelude fn over `macroexpand-1` (ADR-064).
 
 /// `(check 'form)` — run the advisory type checker over `form` (macro-expanded
 /// first, like the real compile pass) and return a list of warning strings, or

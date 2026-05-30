@@ -3755,12 +3755,22 @@ interacts with the green scheduler.
   briefly (a connect handshake / a `write_all`); the *accept* loop polls on its
   own dedicated thread. Fine at the dozens-of-connections scale; a `mio` reactor
   (ADR-059 Phase 2) is the later scale path, under the same primitives.
-- **Deferred:** TLS (a `tls-connect` returning the same socket handle, via
-  `rustls` — the one non-thin, crate-backed exception, so `std/http.blsp` can do
-  `https`); `tcp-controlling-process` (hand a client socket to a per-connection
-  handler); binary-safe bytes (recv is UTF-8-lossy today — fine for text/HTTP).
-- Data crosses as **strings** (UTF-8 lossy on recv); a bytes type is a separate
-  future decision.
+- **TLS (done, client) — 2026-05-30.** `https` via `rustls` (the one non-thin,
+  crate-backed exception; aws-lc-rs provider + bundled `webpki-roots`, no system
+  OpenSSL/trust store). rustls connections can't be split read/write across
+  threads like a raw fd, and an HTTPS client call is request→response anyway, so
+  TLS is a **one-shot `tls-request host port request`**: a non-worker thread
+  connects, handshakes, writes the request, and streams the response back as the
+  *same* `[:tcp id data]` / `[:tcp-closed id]` (and `[:tcp-error id msg]`)
+  messages — so `tcp-drain` and the HTTP parser are unchanged. `std/http.blsp`'s
+  `http-get` picks `tls-request` for `https://`, `tcp-connect`+`tcp-send` for
+  `http://`; verified against `https://api.github.com`. ⬜ Still deferred:
+  *streaming/persistent* TLS sockets (needs a non-blocking rustls integration or
+  a `mio` reactor), and **server-side** TLS (cert+key).
+- **`tcp-controlling-process` (done — 2026-05-30):** hand a passive accepted
+  socket to a per-connection handler; accepted sockets are passive until claimed.
+- **Deferred:** binary-safe bytes (recv is UTF-8-lossy today — fine for
+  text/HTTP); a bytes type is a separate future decision.
 
 **References.** ADR-059 (blocking work → mailbox; the seam this builds on),
 ADR-006 (language-in-the-language), ADR-026 (immutability — sockets are the

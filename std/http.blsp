@@ -187,3 +187,63 @@ of closures over a shared scope currently overflows `closure_to_message`)."
 (defn serve (port handler)
   "Listen on 127.0.0.1:`port` and serve `handler` forever. **Blocks** (the accept loop runs in the calling process) — `(spawn (serve …))` to run it in the background. One handler process per connection (HTTP/1.0)."
   (serve-loop (http-listen port) handler))
+
+;; ---- HTTP client -----------------------------------------------------------
+;; `http-get` works over both `http://` (plaintext, via tcp-connect) and
+;; `https://` (TLS, via tls-request). Either transport delivers the response as
+;; `[:tcp sock data]` … `[:tcp-closed sock]` messages to this process, so the
+;; collection + parsing is shared.
+
+(defn http--parse-url (url)
+  "Parse `url` into {:scheme :host :port :path}. Defaults: scheme http, port 80/443, path \"/\"."
+  (let (rest (cond
+               (starts-with? url "https://") (substring url 8 (string-length url))
+               (starts-with? url "http://") (substring url 7 (string-length url))
+               else url)
+        scheme (if (starts-with? url "https://") "https" "http")
+        slash (index-of rest "/")
+        hostport (if (< slash 0) rest (substring rest 0 slash))
+        path (if (< slash 0) "/" (substring rest slash (string-length rest)))
+        colon (index-of hostport ":")
+        host (if (< colon 0) hostport (substring hostport 0 colon))
+        port (if (< colon 0)
+               (if (= scheme "https") 443 80)
+               (let (n (string->number (substring hostport (+ colon 1) (string-length hostport))))
+                 (if (nil? n) 80 n))))
+    {:scheme scheme :host host :port port :path path}))
+
+(defn parse-response (raw)
+  "Parse a raw HTTP response string into {:status :headers :body} (`:headers` keys lower-cased)."
+  (let (hb (http--split-first raw "\r\n\r\n")
+        head (first hb)
+        body (second hb)
+        lines (string-split head "\r\n")
+        status (string-split (first lines) " "))
+    {:status (let (n (string->number (nth status 1 "0"))) (if (nil? n) 0 n))
+     :headers (http--parse-headers (rest lines))
+     :body body}))
+
+;; Collect the response delivered as messages until close; [:ok body] or [:error msg].
+(defn http--collect (sock acc)
+  (receive
+    ([:tcp ~sock d] (http--collect sock (str acc d)))
+    ([:tcp-closed ~sock] [:ok acc])
+    ([:tcp-error ~sock msg] [:error msg])
+    (after 30000 [:error "http: timed out waiting for a response"])))
+
+(defn http-get (url)
+  "GET `url` (http or https). Always returns a response map {:status :headers :body};
+a transport failure yields {:status 0 :error msg :headers {} :body \"\"}. Must run in
+a process (it `receive`s the response); the root process counts."
+  (let (u (http--parse-url url)
+        req (str "GET " (get u :path) " HTTP/1.0\r\n"
+              "Host: " (get u :host) "\r\n"
+              "User-Agent: brood\r\n"
+              "Connection: close\r\n\r\n")
+        sock (if (= (get u :scheme) "https")
+               (tls-request (get u :host) (get u :port) req)
+               (let (s (tcp-connect (get u :host) (get u :port))) (tcp-send s req) s)))
+    (let (result (http--collect sock ""))
+      (if (= (first result) :error)
+        {:status 0 :error (second result) :headers {} :body ""}
+        (parse-response (second result))))))
