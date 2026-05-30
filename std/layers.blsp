@@ -280,9 +280,11 @@ returns `[ctx' pending']`. The bridge from layers to keymap — compose, then st
 
 (defn register-system-layer (ref)
   "Register `ref` as an always-on system layer (appended at lowest precedence to
-every buffer). Idempotent-ish: re-registering the same ref adds a duplicate, so
-register once at load."
-  (def *system-layers* (concat *system-layers* (list ref))))
+every buffer). **Idempotent** — registering the same ref again is a no-op, so a
+module that registers at load is safe to (re)load."
+  (if (some? (fn (r) (= r ref)) *system-layers*)
+    *system-layers*
+    (def *system-layers* (concat *system-layers* (list ref)))))
 
 (defn register-type-layers (type refs)
   "Bind buffer `type` to `refs` (a list of layer references, head = highest
