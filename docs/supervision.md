@@ -37,7 +37,13 @@ supervisor itself, just the substrate it was built over:
   its next `receive`). Either way the target's monitors fire `[:down ref pid
   reason]`. This is the primitive that lets a userland supervisor terminate
   *healthy* siblings — the capability whose absence used to cap the library at
-  `:one-for-one` (see below).
+  `:one-for-one`.
+- `(link pid)` / `(unlink pid)` / `(trap-exit on)` / `(spawn-link expr)` —
+  **symmetric** failure coupling (Erlang links, ADR-067). A linked peer's death
+  takes you down too (abnormal reason) or arrives as a trappable `[:EXIT pid
+  reason]` message if you `(trap-exit true)`. This is what makes a supervisor's
+  *own* death tear its children down (propagation) — the orphan fix monitors
+  couldn't provide.
 
 A user wanting *recover-on-throw* writes a supervisor process in Brood:
 
@@ -176,8 +182,8 @@ are deliberate design choices, not missing plumbing.
 | Dimension | Erlang/OTP & Elixir | Brood |
 |---|---|---|
 | What a supervisor *is* | A sealed generic OTP **behaviour** (runtime stdlib) | ~230 lines of **editable Brood**, hot-reloadable |
-| Failure-coupling primitive | **Links** (bidirectional) + `trap_exit` | **Monitors** (one-way) + explicit `(exit pid …)` — no links, no `trap_exit` |
-| Supervisor dies → its children | Auto-killed via links | **Orphaned** unless torn down gracefully first |
+| Failure-coupling primitive | **Links** (bidirectional) + `trap_exit` | **Links + `trap_exit`** (ADR-067) *and* monitors — `link`/`unlink`/`trap-exit`/`spawn-link` |
+| Supervisor dies → its children | Auto-killed via links | **Auto-killed via links** (ADR-067) — propagation, like OTP |
 | Graceful child cleanup | `trap_exit` → `terminate/2`, deadline-enforced | Cooperative `[:$stop]` *message*; no forced signal, no cleanup callback |
 | Strategies | one/all/rest_for_one + `simple_one_for_one`/DynamicSupervisor | one/all/rest_for_one only |
 | Restart types | permanent / transient / temporary | **same** |
@@ -187,25 +193,27 @@ are deliberate design choices, not missing plumbing.
 | Named children | supervisor-managed names; survive restart transparently | `register` exists, but **not supervisor-managed** |
 | Runtime child mgmt | start/terminate/restart/delete/count_children | `which-children` + `stop` only |
 
-### The load-bearing difference: monitors + explicit `exit` vs links + `trap_exit`
+### The load-bearing difference (now closed): links + `trap_exit`
 
-Almost every other difference flows from this. In Erlang a supervisor
-`spawn_link`s its children and sets `trap_exit`; links are **symmetric**, so a
-child death arrives as a *trappable* `{'EXIT', …}` message **and the supervisor
-dying propagates exit signals down the links, killing the children automatically**.
-Brood's `monitor` is **one-directional** — it notifies (`[:down …]`) but couples
-nothing; teardown is explicit and supervisor-driven (the supervisor calls
-`(exit child …)` itself). Two consequences:
+This *was* the deepest difference, and it's now resolved (ADR-067). Like Erlang,
+the supervisor `link`s its children and `(trap-exit true)`s, so a child death
+arrives as a trappable `[:EXIT pid reason]` message **and the supervisor dying
+propagates exit signals down the links, killing the children automatically**. The
+kernel still also offers `monitor` (the one-way notification) for watchers that
+shouldn't be coupled.
 
-1. **A supervisor's own death does not kill its children.** The `:shutdown
-   :infinity` cascade covers a *graceful* `stop-supervisor`, but a supervisor that
-   **crashes** (or is hard-`:kill`ed from above) never runs its `[:$stop]` handler,
-   so its whole subtree **orphans**. This is the single biggest gap, and it's
-   structural — only links/`trap_exit` close it.
-2. **No trappable shutdown / no `terminate/2`.** `[:$stop]` is an ordinary message
-   a child must voluntarily match; there's no kernel-enforced trappable signal and
-   no cleanup callback, so a worker can't run orderly cleanup on shutdown the way a
-   trapping `gen_server` runs `terminate/2`.
+What this fixed: **a supervisor's own death now tears its subtree down.** A
+*crash* (or external `(exit sup …)`) propagates through the links — workers die by
+propagation; a child **sub-supervisor** traps, recognises its parent's `[:EXIT]`,
+and tears its own subtree down (it records the caller as `:parent` at
+`start-supervisor`). Previously this orphaned the whole subtree; it was the single
+biggest gap and was structural — only links closed it. The `:shutdown :infinity`
+cascade still governs a *graceful* `stop-supervisor` (a deliberate hard `:kill` is
+untrappable, so a sub-supervisor opts into the cooperative `[:$stop]` path).
+
+The one remaining piece of this axis is **`terminate/2`-style cleanup**: a worker
+still can't run orderly cleanup on an *external* kill (a `:kill` is untrappable);
+a cooperative worker that handles `[:$stop]` can, under `:shutdown :infinity`/ms.
 
 ### Faithful
 
@@ -238,19 +246,19 @@ parity list below.)
 
 ### Where Brood is arguably nicer
 
-The whole supervisor is ~230 lines of readable, redefinable Brood — no opaque
+The whole supervisor is ~250 lines of readable, redefinable Brood — no opaque
 behaviour, immutable-state-through-the-loop instead of `gen_server` callback
-ceremony — and it forced the kernel to grow only **general** primitives
-(`monitor`, `exit/2`) rather than a supervision-specific kernel feature (the path
-ADR-039 took and reverted).
+ceremony — and it forced the kernel to grow only **general** Erlang primitives
+(`monitor`, `exit/2`, now `link`/`trap_exit`) rather than a supervision-specific
+kernel feature (the path ADR-039 took and reverted).
 
 ### Path to OTP parity (roughly by value)
 
-1. **`link` + `trap_exit`** (or a userland "linker" process) — the deepest fix:
-   automatic subtree teardown when a supervisor *crashes*, not just on graceful
-   stop. The one remaining ADR-011 deferral; needs careful kernel work (the
-   ADR-039 race lesson applies — keep it a *general* primitive, not supervision-
-   specific).
+1. ✅ **`link` + `trap_exit`** (done 2026-05-30, ADR-067) — automatic subtree
+   teardown when a supervisor *crashes*, not just on graceful stop. Added as the
+   general Erlang primitives (`link`/`unlink`/`trap-exit`/`spawn-link`), not a
+   supervision-specific hook (the ADR-039 lesson); link teardown rides the cold
+   `deregister` path, no new scheduler-global state.
 2. ✅ **Supervisor-managed registration** (done 2026-05-30) — a `:name` keyword in
    the child spec, registered to the fresh pid on every (re)start, so callers
    address a stable name via `whereis`. Pure Brood over the existing `register`.

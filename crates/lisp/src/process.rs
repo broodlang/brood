@@ -34,6 +34,7 @@
 //!   thread that calls back into the mailbox's `wake_for_timeout`.
 
 mod io_source;
+mod links;
 mod mailbox;
 mod message;
 mod monitor;
@@ -48,6 +49,8 @@ pub use message::{from_message, to_message, ClosureArmMsg, ClosureMsg, Message};
 // block runs it on a non-worker thread and delivers to a process mailbox.
 pub(crate) use io_source::{spawn_io_source, MailboxSink, SubscriberHandle};
 pub use monitor::{demonitor, monitor, monitored_by, next_ref};
+// Erlang-style links (ADR-067): symmetric failure coupling + `trap_exit`.
+pub use links::{link_count, link_self, set_trap_exit, unlink_self};
 pub use scheduler::{
     begin_capture, capture_append, deadline_exceeded, exit, gc_block_depth, in_green_process,
     macro_block_active, parent_of, peak_threads, pid_value, self_pid, set_deadline,

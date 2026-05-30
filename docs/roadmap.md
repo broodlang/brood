@@ -413,7 +413,11 @@ The seam that makes remoteability free later (see architecture.md).
   spec's `:shutdown` (`:brutal-kill` default / `:infinity` / ms) makes **nested
   trees tear down depth-first** — a sub-supervisor child marked `:shutdown
   :infinity` cascades `[:$stop]` to its own children instead of orphaning them.
-  Deferred (ADR-011): `link`/bidirectional (upward) exit propagation. See
+  And **process links + `trap_exit` (ADR-067)** close the structural gap: the
+  supervisor `link`s + traps its children, so a supervisor's *own* crash/kill
+  propagates down the links and tears the whole subtree down (no orphans even when
+  the supervisor never runs cleanup). General Erlang primitives
+  (`link`/`unlink`/`trap-exit`/`spawn-link`), not a supervision-specific hook. See
   [`supervision.md`](supervision.md) and [`concurrency-v2.md`](concurrency-v2.md) §4.
 - 🟡 **TCP sockets (the substrate, done — ADR-062).** Thin kernel primitives
   (`tcp-connect`/`tcp-listen`/`tcp-send`/`tcp-close`/`tcp-local-port`) over a

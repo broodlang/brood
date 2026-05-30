@@ -1178,6 +1178,12 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![ref_ty], nil_ty),
         demonitor,
     );
+    // Links (ADR-067): symmetric failure coupling + `trap_exit`, the bidirectional
+    // cousin of `monitor`. `link`/`unlink` couple the current process to a pid;
+    // `trap-exit` turns a linked peer's death into a `[:EXIT pid reason]` message.
+    def(heap, "link", Arity::exact(1), Sig::new(vec![pid_ty], nil_ty), link_proc);
+    def(heap, "unlink", Arity::exact(1), Sig::new(vec![pid_ty], nil_ty), unlink_proc);
+    def(heap, "trap-exit", Arity::exact(1), Sig::new(vec![any], bool_ty), trap_exit_proc);
     def(
         heap,
         "spawn-count",
@@ -1385,6 +1391,9 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("term-raw-leave", &[], "Leave raw mode (the teardown for term-raw-enter). Idempotent with the panic-path restore."),
     ("term-emit", &["ops"], "Paint inline, relative-motion render ops (for an in-place editor that must not take over the screen): [:print str], [:print str face], [:cr], [:nl], [:up n], [:down n], [:col n], [:clear-eol], [:clear-below], [:clear-screen]. A face is a map like {:fg :cyan :bold true}. Queues all ops then flushes once; unknown ops are skipped; returns nil."),
     ("demonitor", &["mref"], "Drop the monitor identified by mref (best-effort)."),
+    ("link", &["pid"], "Symmetrically link the current process and local pid (Erlang link/1). When either dies, the other gets a [:EXIT pid reason] message if it set (trap-exit true), else dies too on an abnormal reason (propagation cascades through links; :normal does not propagate). Linking an already-dead pid notifies the caller with reason :noproc. Returns nil."),
+    ("unlink", &["pid"], "Drop the symmetric link between the current process and pid (best-effort). Returns nil."),
+    ("trap-exit", &["on"], "Set the current process's trap_exit flag (Erlang process_flag(trap_exit, …)); returns the previous value. When on, a linked peer's death arrives as a trappable [:EXIT pid reason] message instead of killing this process."),
     ("spawn-count", &[], "How many green processes have been spawned since program start."),
     ("peak-threads", &[], "High-water mark of OS threads running processes concurrently."),
     ("worker-threads", &[], "The size of the scheduler's worker-thread pool (about nproc)."),
@@ -4262,6 +4271,43 @@ fn exit_proc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         )),
         _ => Err(LispError::type_err("exit: first argument must be a pid")),
     }
+}
+
+/// `(link pid)` — symmetrically link the current process and the local `pid`
+/// (ADR-067). Remote links aren't supported (links are intra-runtime). Returns nil.
+fn link_proc(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    match arg(args, 0) {
+        Value::Pid { node, id } if crate::dist::is_local(node) => {
+            crate::process::link_self(id);
+            Ok(Value::Nil)
+        }
+        Value::Pid { .. } => Err(LispError::type_err(
+            "link: remote pids aren't supported — links are within one runtime",
+        )),
+        _ => Err(LispError::type_err("link: argument must be a pid")),
+    }
+}
+
+/// `(unlink pid)` — drop the link between the current process and local `pid`.
+fn unlink_proc(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    match arg(args, 0) {
+        Value::Pid { node, id } if crate::dist::is_local(node) => {
+            crate::process::unlink_self(id);
+            Ok(Value::Nil)
+        }
+        Value::Pid { .. } => Err(LispError::type_err(
+            "unlink: remote pids aren't supported — links are within one runtime",
+        )),
+        _ => Err(LispError::type_err("unlink: argument must be a pid")),
+    }
+}
+
+/// `(trap-exit on)` — set the current process's `trap_exit` flag; return the
+/// previous value. Only `nil`/`false` are falsy (the language truthiness rule).
+fn trap_exit_proc(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    let on = !matches!(arg(args, 0), Value::Nil | Value::Bool(false));
+    let prev = crate::process::set_trap_exit(crate::process::self_pid(), on);
+    Ok(Value::Bool(prev))
 }
 
 /// `(monitor pid)` — watch `pid`; returns a monitor `ref`. The caller receives

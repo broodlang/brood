@@ -227,6 +227,37 @@
         (assert= p2 (wait-name :sup-test-svc p2 50)) ; the name now points at the new pid
         (stop-supervisor sup)))))
 
+(describe "supervisor: crash teardown (link propagation, ADR-067)"
+  :isolated
+
+  (test "killing a supervisor tears its child down too (no orphan)"
+    ;; The supervisor links its children; when the *supervisor itself* dies, the
+    ;; kernel propagates the exit down the links and the child dies. Monitors
+    ;; couldn't do this — the whole reason for the link rewrite.
+    (let (me  (self)
+          sup (start-supervisor (list (watched-spec me :permanent)))
+          w   (receive ([:up p] p))
+          wm  (monitor w))
+      (exit sup :kill)                          ; the supervisor dies abnormally
+      (assert= :torn-down
+        (receive ([:down ~wm ~w _] :torn-down) (after 1500 :orphaned)))))
+
+  (test "killing a supervisor cascades through a nested sub-supervisor"
+    ;; parent → (sub-supervisor child) → grandchild. Killing the *parent* must
+    ;; reach the grandchild: the sub-supervisor (linked + trapping) sees its
+    ;; parent's [:EXIT] and tears its own subtree down.
+    (let (me      (self)
+          subtree {:id :sub :restart :permanent :shutdown :infinity
+                   :start (fn () (start-supervisor
+                                   (list (watched-spec me :permanent))
+                                   {:max-restarts 5 :max-seconds 5}))}
+          parent  (start-supervisor (list subtree) {:strategy :one-for-one})
+          gc      (receive ([:up p] p))
+          gm      (monitor gc))
+      (exit parent :kill)                       ; parent dies abnormally
+      (assert= :torn-down
+        (receive ([:down ~gm ~gc _] :torn-down) (after 1500 :orphaned))))))
+
 (describe "supervisor: introspection and validation"
   :isolated
 

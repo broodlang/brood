@@ -37,6 +37,7 @@ use crate::eval;
 
 use super::mailbox::{Mailbox, REGISTRY, ST_RUNNABLE, ST_RUNNING};
 use super::message::Message;
+use super::links;
 use super::monitor;
 
 /// Why a green process's coroutine yielded control back to its worker.
@@ -645,6 +646,11 @@ fn deregister(pid: u64, reason: Message) {
     for w in watchers {
         monitor::fire_down(w, pid, reason.clone());
     }
+    // Links (ADR-067), after monitors and with no table lock held: notify every
+    // linked peer — a trappable `[:EXIT pid reason]` if it traps, else an abnormal
+    // reason propagates as a hard kill that cascades through *its* links. Mirrors
+    // the sequential lock discipline above (never holds REGISTRY/MONITORS here).
+    links::notify_peers(pid, &reason);
 }
 
 /// The untrappable hard-kill reason — Erlang's `exit(pid, kill)`. A `:kill` exit

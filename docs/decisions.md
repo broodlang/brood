@@ -4053,3 +4053,70 @@ with adding scopes later if a real need ever appears.
 split; #1 still open), ADR-064 (the quasiquote→Brood move this rides alongside),
 ADR-034 (symbols ship by name — why scope-bearing identifiers are costly here),
 ADR-006/011 (Brood-first, smallest core), `types/check/hygiene.rs` (the lint).
+
+## ADR-067 — Process links + `trap_exit` (the supervisor's structural orphan fix)
+
+**Status:** accepted, 2026-05-30. Implemented in a worktree (`links-trap-exit`).
+
+**Context.** `monitor` (ADR-035) is a *one-directional* death notification — it
+never affects the watched process. That's the wrong tool for the one thing the
+userland supervisor couldn't do: when the **supervisor itself** dies (crash,
+intensity-exceeded, or an external `(exit sup …)`), its children kept running —
+orphaned. `(exit pid reason)` (ADR-063) added termination but not *coupling*: the
+supervisor still had to explicitly kill each child, which a dead/crashing
+supervisor can't do. The deep-dive vs Erlang (`supervision.md`) named this the
+single biggest gap, and named the fix: Erlang's **links** (symmetric) + `trap_exit`.
+
+**Decision.** Add the general Erlang primitives, not a supervision-specific hook
+(the ADR-039 lesson — a narrow "kill my dependents" kernel feature was rejected in
+favour of the general one):
+
+- **`link`/`unlink`** — symmetric coupling in a `LINKS` table (`process/links.rs`),
+  the structural cousin of `MONITORS`. Same race-free discipline (liveness checked
+  inside the table critical section; `deregister` takes tables sequentially, never
+  holding REGISTRY while reaching for LINKS).
+- **`trap-exit`** — a per-mailbox `AtomicBool`. When set, a linked peer's death
+  arrives as a trappable `[:EXIT pid reason]` *message* instead of killing this
+  process.
+- **`deregister` hook** — after firing monitors, walk the dying pid's links: a
+  trapping peer gets `[:EXIT]`; a non-trapping peer with an **abnormal** reason is
+  killed (propagation, cascading through *its* links); `:normal` never propagates
+  to a non-trapping peer.
+- **`spawn-link`** — a prelude macro (`(let (p# (spawn …)) (link p#) p#)`); no
+  kernel surface (linking a child that dies in the gap is safe — link-to-dead
+  fires `[:EXIT … :noproc]`).
+
+**Propagation hardness — D-simple.** Brood couples "untrappable/immediate" to
+`reason == :kill`. A non-trapping peer must die *immediately* (even mid-CPU-loop),
+so propagation routes through the hard `(exit peer :kill)`: the peer dies promptly
+but reports `:kill` to its own monitors rather than the originating reason. That's
+immaterial for supervision (a torn-down worker isn't monitored by anyone but its
+dead supervisor). A future "hard kill carrying an arbitrary reason" (a `hard` bit
+on the mailbox kill-state) would make it exact; deferred (ADR-011).
+
+**Supervisor rewrite.** `std/supervisor.blsp` switched from `monitor`/`[:down]`/
+`:ref` to `trap-exit` + `link` + `[:EXIT]`/`:pid`. A child crash now arrives as
+`[:EXIT child reason]`; a supervisor's *own* death propagates to its children
+(workers die by propagation; a child **sub-supervisor** traps, recognises its
+parent's `[:EXIT]` — it records the caller as `:parent` at `start-supervisor` — and
+tears its own subtree down). The `:shutdown :infinity` cascade (ADR-044) still
+governs *graceful* teardown (a deliberate hard kill is untrappable, so a
+sub-supervisor must opt into the cooperative `[:$stop]` path).
+
+**Why this doesn't reopen ADR-039 (KI-1).** Links add no per-call scheduler-global
+state and no cross-thread coroutine resume; the teardown walk runs on the cold
+`deregister` path (where monitors already fan out), is a general primitive (any
+process links any process), and propagation reuses the existing `exit` path.
+Validated: full worktree `cargo test` green, the 17-test supervisor suite + new
+7-test `link_test.blsp` clean 3× under `BROOD_GC_STRESS=1` and once under
+`BROOD_GC_VERIFY=1`.
+
+**Still deferred (ADR-011).** Remote (cross-node) links; exact propagated reason
+for a non-trapping peer (the `hard` bit above); `link`-based bidirectional coupling
+exposed to *user* code beyond the supervisor is available but undocumented as a
+pattern.
+
+**References.** ADR-035 (monitors — the one-way cousin), ADR-063 (`exit/2`),
+ADR-044 (`:shutdown` cascade), ADR-039 (the reverted kernel supervisor — why
+general primitives), `supervision.md` (the vs-OTP deep dive that motivated this),
+`tests/link_test.blsp`.
