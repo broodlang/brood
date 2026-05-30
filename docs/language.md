@@ -946,12 +946,20 @@ Brood over `substring`/`str` (`std/prelude.blsp`) — the "write the language in
 the language" principle.
 
 ### I/O
-`print`  `println`
+`print`  `println`  `with-out-str`
 
 - `print` writes the display forms of its arguments to stdout (space-separated);
   `println` adds a trailing newline. Both **flush stdout on every call**, so an
   animation frame paints immediately — there is no separate flush primitive (and
   none is needed).
+- `(with-out-str body...)` evaluates `body` with stdout **captured** and returns
+  everything it printed as a string (`""` if nothing), discarding `body`'s own
+  value. Capture is process-scoped *and* inherited by any process `body` spawns,
+  so a printer running in a child is captured too; and captures **nest** (the
+  buffer is a stack), so a `with-out-str` inside another capture — e.g. a `nest
+  mcp` tool handler, whose output is diverted off the JSON-RPC channel — drains
+  only its own output. The buffer is released even if `body` throws (the error
+  re-raises). Built on the `%capture-begin`/`%capture-take` kernel primitives.
 - For simple raw-terminal control, `(require 'ansi)` provides escape *strings*
   to `print`: `ansi-clear` (erase + home — the per-frame reset), `ansi-cursor`,
   `ansi-home`, `ansi-hide-cursor`/`ansi-show-cursor`. The ESC byte is the `\e`
@@ -995,15 +1003,23 @@ the language" principle.
   suffixes accepted).
 
 ### Metaprogramming / self-hosting
-`eval`  `read-string`  `load`  `require`  `macroexpand`  `macroexpand-1`  `gensym`
+`eval`  `read-string`  `read-all`  `eval-string`  `load`  `require`  `macroexpand`  `macroexpand-1`  `gensym`
 
 `(require 'name)` loads an embedded standard-library module (e.g. `(require 'test)`
 for the test framework) — works from any directory.
 
 ```clojure
 (eval (read-string "(+ 40 2)"))  ;=> 42
+(read-all "(a) (b) (c)")         ;=> ((a) (b) (c))  — every form, vs read-string's first
+(eval-string "(def x 1) (+ x 1)");=> 2  — read+eval all forms, last value wins
 (load "some-file.blsp")          ; evaluate a file into the global environment
 ```
+
+`read-string` returns the *first* form in a string; `read-all` returns *all* of
+them as a list (the read-half of `eval-string` without the eval) — the basis for
+form-by-form tooling, e.g. an editor evaluating the last sexp before point. Both
+raise on a malformed/incomplete form; `parse-source` is the lossless,
+error-tolerant alternative (it yields a CST, used by the formatter).
 
 These three are the seed of "edit the system while it runs": read code, evaluate
 it into the live environment, replace definitions.

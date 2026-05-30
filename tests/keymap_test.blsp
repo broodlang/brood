@@ -1,0 +1,86 @@
+;; std/keymap — the rebindable key→command dispatcher, plus chord (prefix-keymap)
+;; support: `keymap-bind` (define chords as data) and `keymap-step` (chord-aware
+;; dispatch threading a pending prefix). Register-only — run by `nest test` (and
+;; cargo test, via crates/lisp/tests/suite.rs).
+
+(defmodule keymap-test (:use test) (:use keymap))
+(require 'keymap)
+
+;; Commands are `(state key) -> state`; we accumulate a string so the path is
+;; visible. Stored in keymaps as **qualified** symbols (resolved by `eval` at
+;; dispatch time), matching how `std/lineedit` stores its bindings.
+(defn km-cmd-e (s k) (str s "E"))
+(defn km-cmd-x (s k) (str s "X"))
+(defn km-boom  (s k) (throw "boom"))
+(defn km-fb    (s k) (str s "?"))   ; fallback: marks an unhandled key
+
+;; Thread a whole key sequence through keymap-step (tail-recursive), returning the
+;; final [state pending].
+(defn km-run* (km pending state keys)
+  (if (empty? keys)
+    [state pending]
+    (let (r (keymap-step km pending state (first keys) km-fb))
+      (km-run* km (second r) (first r) (rest keys)))))
+(defn km-run (km keys state) (km-run* km nil state keys))
+
+(describe "keymap-bind builds chords as data"
+  (test "a one-key sequence is a plain binding"
+    (assert= (keymap-bind {} ["a"] 'keymap-test/km-cmd-x) {"a" 'keymap-test/km-cmd-x}))
+  (test "a multi-key sequence nests prefix sub-keymaps"
+    (assert= (keymap-bind {} [:ctrl-x :ctrl-e] 'keymap-test/km-cmd-e)
+             {:ctrl-x {:ctrl-e 'keymap-test/km-cmd-e}}))
+  (test "sibling bindings are preserved; an existing prefix is extended"
+    (let (km (-> {}
+                 (keymap-bind [:ctrl-x :ctrl-e] 'keymap-test/km-cmd-e)
+                 (keymap-bind [:ctrl-x :ctrl-s] 'keymap-test/km-cmd-x)
+                 (keymap-bind ["a"] 'keymap-test/km-cmd-x)))
+      (assert= km {:ctrl-x {:ctrl-e 'keymap-test/km-cmd-e :ctrl-s 'keymap-test/km-cmd-x}
+                   "a" 'keymap-test/km-cmd-x}))))
+
+(describe "keymap-step chord dispatch"
+  (test "a flat command runs and resets pending"
+    (let (km (keymap-bind {} ["a"] 'keymap-test/km-cmd-x))
+      (assert= (keymap-step km nil "S" "a" km-fb) ["SX" nil])))
+
+  (test "a prefix key enters its sub-keymap, leaving state untouched"
+    (let (km (keymap-bind {} [:ctrl-x :ctrl-e] 'keymap-test/km-cmd-e))
+      (assert= (keymap-step km nil "S" :ctrl-x km-fb) ["S" {:ctrl-e 'keymap-test/km-cmd-e}])))
+
+  (test "completing the chord runs the command and resets"
+    (let (km (keymap-bind {} [:ctrl-x :ctrl-e] 'keymap-test/km-cmd-e))
+      (assert= (km-run km [:ctrl-x :ctrl-e] "S") ["SE" nil])))
+
+  (test "a dead-end chord drops the key and resets (no fallback / self-insert)"
+    (let (km (keymap-bind {} [:ctrl-x :ctrl-e] 'keymap-test/km-cmd-e))
+      ;; :ctrl-x then an unbound :ctrl-q — state unchanged, pending cleared.
+      (assert= (km-run km [:ctrl-x :ctrl-q] "S") ["S" nil])))
+
+  (test "a fresh unbound key goes to the fallback"
+    (let (km (keymap-bind {} [:ctrl-x :ctrl-e] 'keymap-test/km-cmd-e))
+      (assert= (keymap-step km nil "S" :ctrl-z km-fb) ["S?" nil])))
+
+  (test "a throwing command leaves state unchanged (loop can't crash)"
+    (let (km (keymap-bind {} ["b"] 'keymap-test/km-boom))
+      (assert= (keymap-step km nil "S" "b" km-fb) ["S" nil]))))
+
+(describe "keymap-dispatch flat fast-path is unchanged"
+  (test "a flat command still runs"
+    (assert= (keymap-dispatch {:a 'keymap-test/km-cmd-x} "S" :a km-fb) "SX"))
+  (test "an unbound key goes to fallback"
+    (assert= (keymap-dispatch {:a 'keymap-test/km-cmd-x} "S" :z km-fb) "S?"))
+  (test "a chord-prefix binding is ignored here (treated as unbound → fallback)"
+    (let (km (keymap-bind {} [:ctrl-x :ctrl-e] 'keymap-test/km-cmd-e))
+      (assert= (keymap-dispatch km "S" :ctrl-x km-fb) "S?"))))
+
+;; ---- across processes -------------------------------------------------------
+;; Keymaps are plain data and commands are symbols (resolved against shared code),
+;; so chord dispatch works in any process. A worker threads a chord and replies.
+(defn km-worker (parent km keys) (send parent (first (km-run km keys ""))))
+
+(describe "keymap chords across processes"
+  :isolated
+  (test "a spawned process can resolve and run a chord"
+    (let (me (self)
+          km (keymap-bind {} [:ctrl-x :ctrl-e] 'keymap-test/km-cmd-e))
+      (spawn (km-worker me km [:ctrl-x :ctrl-e]))
+      (assert= (receive) "E"))))

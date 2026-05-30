@@ -504,6 +504,24 @@ can.)"
   (apply eprint xs)
   (eprint "\n"))
 
+;; `with-out-str` runs `body` for effect with stdout diverted into a capture
+;; buffer, and returns the captured text (a string) instead of `body`'s value —
+;; the standard "what did this print?" sink. Capture is process-scoped *and*
+;; inherited by anything `body` spawns, so a printer running in a child process is
+;; captured too. Captures nest (the buffer is a stack), so a `with-out-str` inside
+;; an outer capture — e.g. a `nest mcp` tool handler — drains only its own output.
+;; The buffer is popped even if `body` throws (the `catch` re-raises), so a thrown
+;; error never leaves a dangling capture diverting all later output.
+(defmacro with-out-str (& body)
+  "Evaluate `body` with stdout captured, and return everything it printed as a
+string (`\"\"` if it printed nothing), discarding `body`'s own value. Output from
+processes `body` spawns is captured too; nested `with-out-str`s compose."
+  `(do
+     (%capture-begin)
+     (try
+       (do ~@body (%capture-take))
+       (catch e (do (%capture-take) (throw e))))))
+
 ;; ---- threading macros (demonstrate that macros compute at expansion time) ----
 ;; (-> x (f a) (g b))  =>  (g (f x a) b)   ; thread as FIRST argument
 ;; (->> x (f a) (g b)) =>  (g b (f a x))   ; thread as LAST argument
