@@ -1,0 +1,16 @@
+# cargo-nextest configuration. Drives `make test` (and any bare `cargo nextest run`).
+#
+# Why nextest here: nextest runs every test case in its OWN process, so Brood's
+# signature failure mode — an uncatchable SIGSEGV from a green-process coroutine
+# stack overflow (see docs/devlog.md, the brood-debug skill) — is contained to the
+# single offending case instead of aborting the whole test binary and taking every
+# sibling case down with it. It also gives a true per-CASE timeout (below), which
+# plain `cargo test`/libtest cannot.
+
+[profile.default]
+# Per-test-case hard cap. nextest prints a "slow" warning every `period`, and after
+# `terminate-after` periods it kills the test (SIGTERM, then SIGKILL on its own grace
+# timer). 60s × 2 = a heads-up at 1 min and a hard kill at 2 min — so no single test
+# can exceed 2 minutes, while a hung/segfaulting case is reported and the rest of the
+# run continues.
+slow-timeout = { period = "60s", terminate-after = 2 }

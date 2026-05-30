@@ -124,7 +124,8 @@ today: `new`, `test`, `check`, `run` (with `--watch`), `doc`, `format`, `repl`,
 
 ```bash
 cargo build                       # build the workspace
-cargo test                        # Rust tests + the Brood suite
+make test                         # Rust tests + the Brood suite via cargo-nextest
+cargo test                        # same, but plain libtest — NO per-test timeout (can hang)
 cargo run -p cli                  # start the REPL  (or: ./bin/cli)
 cargo run -p cli file.blsp        # run a program file
 cargo run -p cli -- --test f.blsp # run one self-contained test file
@@ -134,7 +135,12 @@ cargo run -p nest -- new foo      # scaffold a new project
 
 Cargo is the source of truth; a thin **`Makefile`** wraps the common commands as
 shortcuts (`make help` lists them): `make build`, `make test`, `make suite`,
-`make repl`, and `make benchmark`. The last runs the `divan` benches
+`make repl`, and `make benchmark`. **`make test` runs the suite via
+[`cargo-nextest`](https://nexte.st)** — each test runs in its own process (so a
+SIGSEGV from a green-process stack overflow is contained to that one case, not the
+whole binary) and is **hard-capped at 2 min** (`.config/nextest.toml`), so a hung
+test is killed on its own and the run still finishes. Get it with
+`make ensure-nextest`. The last runs the `divan` benches
 (`crates/lisp/benches/`) via `scripts/bench.sh`, which archives each run with full
 environment metadata to `docs/benchmarks/<UTC-timestamp>.md`. `make -j$(nproc)`
 parallelism isn't relevant — it's a Cargo workspace, not a recursive make.

@@ -17,7 +17,7 @@ WITH_GUI ?= 0
 GUI_FEATURES := $(if $(filter-out 0,$(WITH_GUI)),--features brood/gui,)
 
 .DEFAULT_GOAL := help
-.PHONY: help build test bench benchmark quickbench suite repl configure install uninstall fmt clippy check clean
+.PHONY: help build test ensure-nextest bench benchmark quickbench suite repl configure install uninstall fmt clippy check clean
 
 help: ## Show this help
 	@echo "Brood — available make targets:"
@@ -28,12 +28,21 @@ help: ## Show this help
 build: ## Build the whole workspace
 	cargo build
 
-TEST_TIMEOUT ?= 600   # dev safety net (seconds): cap a hung `make test`. The in-language
-                      # suite times out each test at 30s (std/test.blsp), but a hung Rust
-                      # test or a top-level blocking form (e.g. a socket connect in a
-                      # tcp/http test) isn't covered by that — this is the catch-all.
-test: ## Run Rust tests + the in-language suite (cargo test; whole run capped at $(TEST_TIMEOUT)s — override: make test TEST_TIMEOUT=900)
-	timeout -k 30 $(TEST_TIMEOUT) cargo test || { rc=$$?; [ $$rc -eq 124 ] && echo ">>> make test TIMED OUT after $(TEST_TIMEOUT)s — a test is hanging (try: nest test, which prints each test name as it starts)"; exit $$rc; }
+test: ## Run Rust tests + the in-language suite via cargo-nextest (each test case process-isolated and hard-capped at 2 min — see .config/nextest.toml)
+	# nextest runs each test in its own process: a single hung case is killed at the
+	# 2-min per-case cap (and a SIGSEGV — Brood's stack-overflow failure mode — is
+	# contained to that case instead of aborting the whole binary). `--no-fail-fast`
+	# surfaces every result. Install: `make ensure-nextest` (or see https://nexte.st).
+	@command -v cargo-nextest >/dev/null 2>&1 || { echo ">>> cargo-nextest not found — run 'make ensure-nextest' (or install from https://nexte.st)"; exit 1; }
+	cargo nextest run --no-fail-fast
+	cargo test --doc   # nextest doesn't run doctests; none today, kept so future ones still run
+
+ensure-nextest: ## Install cargo-nextest into ~/.local/bin (prebuilt binary) if it's missing
+	@command -v cargo-nextest >/dev/null 2>&1 && { echo "cargo-nextest already installed: $$(cargo nextest --version)"; } || { \
+		echo "installing cargo-nextest into $(HOME)/.local/bin ..."; \
+		mkdir -p $(HOME)/.local/bin; \
+		curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C $(HOME)/.local/bin; \
+		echo "installed: $$(cargo nextest --version)"; }
 
 bench: benchmark ## Alias for `benchmark`
 
