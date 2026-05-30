@@ -62,6 +62,16 @@ pub enum Node {
         args: Box<[Node]>,
         tail: bool,
     },
+    /// `let`/`let*`/`letrec` (Stage 2a). Lexical scope is **flattened** into the
+    /// single activation frame: each binder owns a frame slot (pre-allocated in
+    /// `nslots`). Evaluate each `rhs` and write it into its `slot`
+    /// (`set_root_at`), in order, then run `body` (tail-propagated). `let`/`let*`
+    /// are sequential (a rhs sees earlier binders); `letrec` pre-allocates all
+    /// slots (init `nil`) so a rhs can reference any binder.
+    LetBind {
+        binds: Box<[(usize, Node)]>,
+        body: Box<Node>,
+    },
 }
 
 /// The compiled counterpart of a [`ClosureArm`](crate::core::value::ClosureArm):
@@ -69,8 +79,31 @@ pub enum Node {
 /// the heap (`Heap::vm_cache_*`). Immutable and `Send + Sync` (its `Node`s hold
 /// only immovable handles + symbols + indices), so it lives behind an `Arc`.
 pub struct CompiledArm {
+    /// Number of parameters — the call's argv fills slots `0..nparams`.
     pub nparams: usize,
+    /// Total frame slots: params plus every `let`/`letrec` binder in the body
+    /// (flattened lexical scope). `vm_apply` pushes `nparams` args then nil-fills
+    /// to `nslots`.
+    pub nslots: usize,
     pub body: Node,
+}
+
+/// A compiled closure: the VM-eligible **exact-arity** arms, each `Arc`'d so the
+/// trampoline can hold one across a call (Stage 2b — multi-arity). `dispatch`
+/// selects by argument count (`nparams`), matching eval's preference for an exact
+/// arm. Arms that aren't VM-eligible (variadic — `&optional`/`&` rest — or a
+/// non-core body) are simply absent, so a call to such an arity defers to the
+/// tree-walker.
+pub struct CompiledClosure {
+    pub arms: Vec<Arc<CompiledArm>>,
+}
+
+impl CompiledClosure {
+    /// The compiled arm for a call of `argc` args, if one was VM-compiled. Exact
+    /// arms have distinct arities, so this is unambiguous.
+    fn arm_for(&self, argc: usize) -> Option<&Arc<CompiledArm>> {
+        self.arms.iter().find(|a| a.nparams == argc)
+    }
 }
 
 /// The result of running a node: a finished value, or a *tail call* the trampoline
@@ -87,12 +120,135 @@ enum Step {
 
 // ===================== compiler (form → Node) =====================
 
+/// Compile-time lexical scope: `let`/`letrec`/param binders flattened into one
+/// activation frame (ADR-076 Stage 2a). Each in-scope name maps to a frame slot;
+/// `next` is the next free slot and `max` is the high-water mark (= the arm's
+/// `nslots`). Shadowing: `lookup` scans newest-first. `bind` claims a slot;
+/// `restore` pops a scope's binders (reusing their slots — safe, the bindings are
+/// dead once out of scope).
+struct Scope {
+    names: Vec<(Symbol, usize)>,
+    next: usize,
+    max: usize,
+}
+
+impl Scope {
+    fn new() -> Self {
+        Scope { names: Vec::new(), next: 0, max: 0 }
+    }
+    fn with_params(params: &[Symbol]) -> Self {
+        let mut s = Scope::new();
+        for &p in params {
+            s.bind(p);
+        }
+        s
+    }
+    fn lookup(&self, sym: Symbol) -> Option<usize> {
+        self.names.iter().rev().find(|(n, _)| *n == sym).map(|&(_, slot)| slot)
+    }
+    fn bind(&mut self, sym: Symbol) -> usize {
+        let slot = self.next;
+        self.next += 1;
+        if self.next > self.max {
+            self.max = self.next;
+        }
+        self.names.push((sym, slot));
+        slot
+    }
+    /// Snapshot for scope exit: `(names-len, next-slot)`.
+    fn mark(&self) -> (usize, usize) {
+        (self.names.len(), self.next)
+    }
+    fn restore(&mut self, (names_len, next): (usize, usize)) {
+        self.names.truncate(names_len);
+        self.next = next;
+    }
+}
+
+/// Extract a binding form's elements (`[n1, v1, n2, v2, …]`) from either a list
+/// `(n1 v1 …)` or a vector `[n1 v1 …]` (both accepted in Brood binding position),
+/// or `None` if it isn't one.
+fn binding_elems(heap: &Heap, form: Value) -> Option<Vec<Value>> {
+    match form {
+        Value::Nil => Some(Vec::new()),
+        Value::Vector(vid) => Some(heap.vector(vid).to_vec()),
+        Value::Pair(_) => heap.list_to_vec(form).ok(),
+        _ => None,
+    }
+}
+
+/// Compile a body (a `do`-like sequence): all but the last for effect, the last
+/// in `tail` position. Empty → `nil`. A single form returns that node directly.
+fn compile_body(heap: &Heap, forms: &[Value], scope: &mut Scope, tail: bool) -> Option<Node> {
+    if forms.is_empty() {
+        return Some(Node::Const(Value::Nil));
+    }
+    let n = forms.len();
+    let mut nodes = Vec::with_capacity(n);
+    for (i, &f) in forms.iter().enumerate() {
+        nodes.push(compile_node(heap, f, scope, tail && i + 1 == n)?);
+    }
+    Some(if nodes.len() == 1 {
+        nodes.pop().unwrap()
+    } else {
+        Node::Do(nodes.into_boxed_slice())
+    })
+}
+
+/// Compile a `let`/`let*` (sequential) or `letrec` form to a [`Node::LetBind`], or
+/// `None` (defer) if a binder isn't a plain symbol or anything fails. Pushes the
+/// binders into `scope` for the body, then restores on the way out.
+fn compile_let(heap: &Heap, items: &[Value], scope: &mut Scope, tail: bool, rec: bool) -> Option<Node> {
+    if items.len() < 2 {
+        return None;
+    }
+    let elems = binding_elems(heap, items[1])?;
+    if elems.len() % 2 != 0 {
+        return None;
+    }
+    let saved = scope.mark();
+    let result = (|| {
+        let mut binds: Vec<(usize, Node)> = Vec::with_capacity(elems.len() / 2);
+        if rec {
+            // letrec: pre-allocate every binder's slot (init nil) so a rhs can
+            // reference any binder; then compile the rhs in order.
+            let mut slots = Vec::with_capacity(elems.len() / 2);
+            for pair in elems.chunks_exact(2) {
+                match pair[0] {
+                    Value::Sym(s) => slots.push(scope.bind(s)),
+                    _ => return None,
+                }
+            }
+            for (pair, &slot) in elems.chunks_exact(2).zip(slots.iter()) {
+                binds.push((slot, compile_node(heap, pair[1], scope, false)?));
+            }
+        } else {
+            // let/let*: sequential — a rhs sees only earlier binders.
+            for pair in elems.chunks_exact(2) {
+                let name = match pair[0] {
+                    Value::Sym(s) => s,
+                    _ => return None,
+                };
+                let rhs = compile_node(heap, pair[1], scope, false)?;
+                let slot = scope.bind(name);
+                binds.push((slot, rhs));
+            }
+        }
+        let body = compile_body(heap, &items[2..], scope, tail)?;
+        Some(Node::LetBind {
+            binds: binds.into_boxed_slice(),
+            body: Box::new(body),
+        })
+    })();
+    scope.restore(saved);
+    result
+}
+
 /// Compile an already-expanded, already-resolved `form` against the lexical
-/// `scope` (the in-scope local names, innermost last — depth 0 only in the slice).
-/// `tail` is whether this form is in tail position. Returns `None` when the form
-/// uses anything outside the Stage-1 core vocabulary (the caller then defers the
+/// `scope`. `tail` is whether this form is in tail position. Returns `None` when
+/// the form uses anything outside the VM's vocabulary (the caller then defers the
 /// whole closure to the tree-walker).
-fn compile_node(heap: &Heap, form: Value, scope: &[Symbol], tail: bool) -> Option<Node> {
+fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Option<Node> {
     match form {
         // Self-evaluating literals.
         Value::Int(_)
@@ -103,8 +259,8 @@ fn compile_node(heap: &Heap, form: Value, scope: &[Symbol], tail: bool) -> Optio
         | Value::Keyword(_) => Some(Node::Const(form)),
 
         // A name: a local frame slot if bound, else a global reference.
-        Value::Sym(s) => match scope.iter().position(|&p| p == s) {
-            Some(idx) => Some(Node::Local(idx)),
+        Value::Sym(s) => match scope.lookup(s) {
+            Some(slot) => Some(Node::Local(slot)),
             None => Some(Node::Global(s)),
         },
 
@@ -127,19 +283,18 @@ fn compile_node(heap: &Heap, form: Value, scope: &[Symbol], tail: bool) -> Optio
                     return Some(Node::If(Box::new(cond), Box::new(then), Box::new(els)));
                 }
                 if value::symbol_is(h, "do") {
-                    let forms = &items[1..];
-                    if forms.is_empty() {
-                        return Some(Node::Const(Value::Nil));
-                    }
-                    let n = forms.len();
-                    let mut nodes = Vec::with_capacity(n);
-                    for (i, &f) in forms.iter().enumerate() {
-                        nodes.push(compile_node(heap, f, scope, tail && i + 1 == n)?);
-                    }
-                    return Some(Node::Do(nodes.into_boxed_slice()));
+                    return compile_body(heap, &items[1..], scope, tail);
                 }
-                // Any *other* special form (def/let/fn/letrec/quote/quasiquote/
-                // and/or/binding/…) is outside the slice — defer the whole closure.
+                // `let`/`let*` are sequential; `letrec` pre-allocates all slots.
+                if value::symbol_is(h, "let") || value::symbol_is(h, "let*") {
+                    return compile_let(heap, &items, scope, tail, false);
+                }
+                if value::symbol_is(h, "letrec") {
+                    return compile_let(heap, &items, scope, tail, true);
+                }
+                // Any *other* special form (def/fn/quote/quasiquote/and/or/
+                // binding/match*/…) is outside the VM's vocabulary — defer the
+                // whole closure to the tree-walker.
                 if crate::eval::is_special_form(h) {
                     return None;
                 }
@@ -166,44 +321,45 @@ fn compile_node(heap: &Heap, form: Value, scope: &[Symbol], tail: bool) -> Optio
 /// VM-eligible (multi-arm, has `&optional`/`&` rest, captures a *local* env, or its
 /// body uses a non-core form). The slice handles single-arm, exact-arity,
 /// global-capturing closures only.
-fn compile_closure(heap: &Heap, id: ClosureId) -> Option<CompiledArm> {
+fn compile_closure(heap: &Heap, id: ClosureId) -> Option<CompiledClosure> {
     let cl = heap.closure(id);
-    if cl.arms.len() != 1 {
-        return None;
-    }
     // Only closures with no captured *local* frame — env `None` (the global
     // sentinel) or env == the process global env. A real local capture is out of
-    // the slice: its free vars would need that frame, which isn't on the VM stack.
+    // the slice: its free vars would need that frame, which isn't on the VM stack
+    // (Stage 2c).
     if let Some(e) = cl.env {
         if !heap.is_global(e) {
             return None;
         }
     }
-    let arm = &cl.arms[0];
-    if !arm.optionals.is_empty() || arm.rest.is_some() {
-        return None;
+    // Snapshot the **exact-arity** arms (params + body); variadic arms
+    // (`&optional`/`&` rest) are skipped — a call to that arity defers. Cloning
+    // ends the `cl` borrow so `compile_body` can re-borrow the heap.
+    let arms_src: Vec<(Vec<Symbol>, Vec<Value>)> = cl
+        .arms
+        .iter()
+        .filter(|a| a.optionals.is_empty() && a.rest.is_none())
+        .map(|a| (a.params.clone(), a.body.clone()))
+        .collect();
+    let mut arms: Vec<Arc<CompiledArm>> = Vec::with_capacity(arms_src.len());
+    for (params, body_forms) in arms_src {
+        let nparams = params.len();
+        // Params occupy slots 0..nparams; `let`/`letrec` binders extend the frame.
+        let mut scope = Scope::with_params(&params);
+        // A non-core arm body just isn't added — that arity defers, others VM-run.
+        if let Some(body) = compile_body(heap, &body_forms, &mut scope, true) {
+            arms.push(Arc::new(CompiledArm {
+                nparams,
+                nslots: scope.max,
+                body,
+            }));
+        }
     }
-    let params = arm.params.clone();
-    let body_forms = arm.body.clone();
-    // `cl`/`arm` borrows end here; `compile_node` re-borrows the heap immutably.
-    let nparams = params.len();
-    if body_forms.is_empty() {
-        return Some(CompiledArm {
-            nparams,
-            body: Node::Const(Value::Nil),
-        });
-    }
-    let n = body_forms.len();
-    let mut nodes = Vec::with_capacity(n);
-    for (i, &f) in body_forms.iter().enumerate() {
-        nodes.push(compile_node(heap, f, &params, i + 1 == n)?);
-    }
-    let body = if nodes.len() == 1 {
-        nodes.pop().unwrap()
+    if arms.is_empty() {
+        None
     } else {
-        Node::Do(nodes.into_boxed_slice())
-    };
-    Some(CompiledArm { nparams, body })
+        Some(CompiledClosure { arms })
+    }
 }
 
 /// The compiled body for closure `id`, compiling-and-caching on first use. Only
@@ -211,7 +367,7 @@ fn compile_closure(heap: &Heap, id: ClosureId) -> Option<CompiledArm> {
 /// run; LOCAL closures return `None` (deferred), since the slice doesn't handle
 /// captured local frames. `None` is cached too, so an ineligible closure isn't
 /// re-analysed on every call.
-fn compiled_for(heap: &Heap, id: ClosureId) -> Option<Arc<CompiledArm>> {
+fn compiled_for(heap: &Heap, id: ClosureId) -> Option<Arc<CompiledClosure>> {
     if id.region() != value::RUNTIME {
         return None;
     }
@@ -269,6 +425,18 @@ fn exec_node(heap: &mut Heap, node: &Node, frame_base: usize, genv: EnvId) -> Re
                 force(heap, s, genv)?;
             }
             exec_node(heap, &nodes[last], frame_base, genv)
+        }
+        Node::LetBind { binds, body } => {
+            // Evaluate each rhs and write it into its (pre-allocated) frame slot,
+            // in order. A binding's rhs eval can collect — the frame slots live on
+            // `Heap::roots`, relocated in place, so `frame_base + slot` stays valid.
+            for (slot, rhs) in binds.iter() {
+                let s = exec_node(heap, rhs, frame_base, genv)?;
+                let v = force(heap, s, genv)?;
+                heap.set_root_at(frame_base + slot, v);
+            }
+            // Body is tail-propagated (its tail call bubbles up to the trampoline).
+            exec_node(heap, body, frame_base, genv)
         }
         Node::Call { callee, args, tail } => {
             // Evaluate the callee, then each argument, keeping them on the operand
@@ -367,12 +535,13 @@ fn dispatch(
     // to the tree-walker via `eval::apply` (which is just `call_native` for a
     // native — cheap).
     if let Value::Fn(id) = cur_callee {
-        if let Some(compiled) = compiled_for(heap, id) {
-            if compiled.nparams == cur_argv.len() {
+        if let Some(cc) = compiled_for(heap, id) {
+            if let Some(arm) = cc.arm_for(cur_argv.len()) {
+                let arm = Arc::clone(arm);
                 if tail {
-                    return Ok(Step::Tail { compiled, args: cur_argv });
+                    return Ok(Step::Tail { compiled: arm, args: cur_argv });
                 }
-                return Ok(Step::Done(vm_apply(heap, compiled, &cur_argv, genv)?));
+                return Ok(Step::Done(vm_apply(heap, arm, &cur_argv, genv)?));
             }
         }
     }
@@ -404,9 +573,15 @@ fn vm_apply(heap: &mut Heap, compiled0: Arc<CompiledArm>, args: &[Value], genv: 
         ));
     }
 
+    // Build the frame: `nparams` args fill slots 0..nparams, then nil-fill the
+    // `let`/`letrec` binder slots up to `nslots`. The whole region lives on
+    // `Heap::roots`, so `collect` relocates it in place.
     let base = heap.roots_len();
     for &a in args {
         heap.push_root(a);
+    }
+    for _ in args.len()..compiled0.nslots {
+        heap.push_root(Value::Nil);
     }
     let mut compiled = compiled0;
     loop {
@@ -442,10 +617,14 @@ fn vm_apply(heap: &mut Heap, compiled0: Arc<CompiledArm>, args: &[Value], genv: 
                 return Ok(v);
             }
             Ok(Step::Tail { compiled: c2, args: a2 }) => {
-                // Reuse the frame: drop the old slots, push the new args at `base`.
+                // Reuse the frame: drop the old slots, push the new args + nil-fill
+                // to the new arm's slot count at `base`.
                 heap.truncate_roots(base);
                 for &a in &a2 {
                     heap.push_root(a);
+                }
+                for _ in a2.len()..c2.nslots {
+                    heap.push_root(Value::Nil);
                 }
                 compiled = c2;
             }
@@ -464,11 +643,18 @@ fn vm_apply(heap: &mut Heap, compiled0: Arc<CompiledArm>, args: &[Value], genv: 
 /// empty lexical scope: no locals at top level); anything else defers to the
 /// tree-walker. `env` is the process's global/root env.
 pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
-    match compile_node(heap, form, &[], false) {
+    let mut scope = Scope::new();
+    match compile_node(heap, form, &mut scope, false) {
         Some(node) => {
+            // A top-level `let` introduces frame slots too — give the form a frame
+            // of `scope.max` nil slots (like a 0-param closure), then tear it down.
             let base = heap.roots_len();
-            let step = exec_node(heap, &node, base, env)?;
-            force(heap, step, env)
+            for _ in 0..scope.max {
+                heap.push_root(Value::Nil);
+            }
+            let r = exec_node(heap, &node, base, env).and_then(|s| force(heap, s, env));
+            heap.truncate_roots(base);
+            r
         }
         None => crate::eval::eval(heap, form, env),
     }

@@ -4751,8 +4751,11 @@ in Brood), ADR-011 (defer coalescing), `std/buffer.blsp`,
 
 ## ADR-076 — The execution engine becomes a closure-compiling VM
 
-**Status:** accepted; **Stage 0–1 built** behind `BROOD_VM` (2026-05-30, branch
-`worktree-bytecode-vm`) — **~2× on fib/loop**, off by default. The performance "big
+**Status:** accepted; **Stage 0–2b built** behind `BROOD_VM` (2026-05-30) — off by
+default. **~2–2.3×**: Stage 0–1 (mechanism + ADR-069 passthrough redirect, ~2× on
+fib/loop), **2a** (`let`/`letrec` via flatten-scope addressing, ~2.3× on let-loops),
+**2b** (multi-arity, exact-arm dispatch). **Next: 2c** — local-capturing closures
+(the GC-critical unlock; see `lexical-addressing-gotchas.md`). The performance "big
 lever". Long-form companion + as-built numbers/finding:
 [`bytecode-vm.md`](bytecode-vm.md). Supersedes the deferral in ADR-069 (which
 banked the cheap dispatch wins and named the VM as the honest fix for the
