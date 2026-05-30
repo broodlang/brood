@@ -3242,6 +3242,40 @@ impl Heap {
     /// nursery whole, and the nursery epoch is bumped (stale young handles trip the
     /// tripwire). Roots, dynamics, the operand stack, and the write-barrier
     /// remembered set are relocated/rewritten in place.
+    /// Relocate every GC root through `fwd`, from `src` into `dest`: the caller's
+    /// `value_roots`/`env_roots` (the eval frame's `expr`/`env`), this process's
+    /// dynamic-binding stack, and the operand stack (`roots` + `env_roots`). The
+    /// single place the GC root set is enumerated — minor and major collection
+    /// share it so the two can't drift (a divergent root set would be a
+    /// use-after-GC bug). `dest` is a *local* `Slabs` (never a `self` field) so the
+    /// `&mut self` for the stacks doesn't alias it.
+    fn flush_roots(
+        &mut self,
+        src: &Slabs,
+        dest: &mut Slabs,
+        fwd: &mut FlushForward,
+        value_roots: &mut [Value],
+        env_roots: &mut [EnvId],
+    ) {
+        for v in value_roots.iter_mut() {
+            *v = flush_value(src, dest, fwd, *v);
+        }
+        for e in env_roots.iter_mut() {
+            *e = flush_env(src, dest, fwd, *e);
+        }
+        for (_, v) in self.dynamics.iter_mut() {
+            *v = flush_value(src, dest, fwd, *v);
+        }
+        for v in self.roots.iter_mut() {
+            *v = flush_value(src, dest, fwd, *v);
+        }
+        let mut er = std::mem::take(&mut self.env_roots);
+        for e in er.iter_mut() {
+            *e = flush_env(src, dest, fwd, *e);
+        }
+        self.env_roots = er;
+    }
+
     fn minor_collect(&mut self, tenure: bool, value_roots: &mut [Value], env_roots: &mut [EnvId]) {
         let before_young = self.local_live_count();
         let old_before = self.old_live_count();
@@ -3258,23 +3292,7 @@ impl Heap {
         fwd.epoch = epoch;
         fwd.src_old = false; // copy nursery objects
         fwd.dest_old = dest_old;
-        for v in value_roots.iter_mut() {
-            *v = flush_value(&young, &mut dest, &mut fwd, *v);
-        }
-        for e in env_roots.iter_mut() {
-            *e = flush_env(&young, &mut dest, &mut fwd, *e);
-        }
-        for (_, v) in self.dynamics.iter_mut() {
-            *v = flush_value(&young, &mut dest, &mut fwd, *v);
-        }
-        for v in self.roots.iter_mut() {
-            *v = flush_value(&young, &mut dest, &mut fwd, *v);
-        }
-        let mut er = std::mem::take(&mut self.env_roots);
-        for e in er.iter_mut() {
-            *e = flush_env(&young, &mut dest, &mut fwd, *e);
-        }
-        self.env_roots = er;
+        self.flush_roots(&young, &mut dest, &mut fwd, value_roots, env_roots);
         // Write barrier: an old frame that gained a young binding (`env_define`
         // after a mid-bind tenure) holds an OLD->YOUNG edge not reachable from the
         // normal roots. Its frame lives in `dest` while tenuring (we took the old
@@ -3360,27 +3378,12 @@ impl Heap {
         let before_old = self.old_live_count();
         self.old_epoch = self.old_epoch.wrapping_add(1);
         let old_src = std::mem::take(&mut self.old);
+        let mut dest = Slabs::default();
         let mut fwd = FlushForward::default();
         fwd.epoch = self.old_epoch;
         fwd.src_old = true; // copy old-gen objects
         fwd.dest_old = true; // into the fresh old space
-        for v in value_roots.iter_mut() {
-            *v = flush_value(&old_src, &mut self.old, &mut fwd, *v);
-        }
-        for e in env_roots.iter_mut() {
-            *e = flush_env(&old_src, &mut self.old, &mut fwd, *e);
-        }
-        for (_, v) in self.dynamics.iter_mut() {
-            *v = flush_value(&old_src, &mut self.old, &mut fwd, *v);
-        }
-        for v in self.roots.iter_mut() {
-            *v = flush_value(&old_src, &mut self.old, &mut fwd, *v);
-        }
-        let mut er = std::mem::take(&mut self.env_roots);
-        for e in er.iter_mut() {
-            *e = flush_env(&old_src, &mut self.old, &mut fwd, *e);
-        }
-        self.env_roots = er;
+        self.flush_roots(&old_src, &mut dest, &mut fwd, value_roots, env_roots);
         // `remembered` is empty (the minor cleared it; no binding has run since).
         let old_form_pos = std::mem::take(&mut self.form_pos);
         for (key, pos) in old_form_pos {
@@ -3390,6 +3393,7 @@ impl Heap {
                 }
             }
         }
+        self.old = dest;
         let survivors = self.old_live_count();
         self.gc_runs = self.gc_runs.saturating_add(1);
         self.gc_copied = self.gc_copied.saturating_add(survivors as u64);
@@ -4003,63 +4007,32 @@ impl FlushForward {
     fn copies(&self, region: u8, is_old: bool) -> bool {
         region == LOCAL && is_old == self.src_old
     }
-    #[inline]
-    fn mint_pair(&self, idx: usize) -> PairId {
-        if self.dest_old {
-            PairId::local_old_gen(idx, self.epoch)
-        } else {
-            PairId::local_gen(idx, self.epoch)
-        }
-    }
-    #[inline]
-    fn mint_vector(&self, idx: usize) -> VecId {
-        if self.dest_old {
-            VecId::local_old_gen(idx, self.epoch)
-        } else {
-            VecId::local_gen(idx, self.epoch)
-        }
-    }
-    #[inline]
-    fn mint_map(&self, idx: usize) -> MapId {
-        if self.dest_old {
-            MapId::local_old_gen(idx, self.epoch)
-        } else {
-            MapId::local_gen(idx, self.epoch)
-        }
-    }
-    #[inline]
-    fn mint_string(&self, idx: usize) -> StrId {
-        if self.dest_old {
-            StrId::local_old_gen(idx, self.epoch)
-        } else {
-            StrId::local_gen(idx, self.epoch)
-        }
-    }
-    #[inline]
-    fn mint_rope(&self, idx: usize) -> RopeId {
-        if self.dest_old {
-            RopeId::local_old_gen(idx, self.epoch)
-        } else {
-            RopeId::local_gen(idx, self.epoch)
-        }
-    }
-    #[inline]
-    fn mint_closure(&self, idx: usize) -> ClosureId {
-        if self.dest_old {
-            ClosureId::local_old_gen(idx, self.epoch)
-        } else {
-            ClosureId::local_gen(idx, self.epoch)
-        }
-    }
-    #[inline]
-    fn mint_env(&self, idx: usize) -> EnvId {
-        if self.dest_old {
-            EnvId::local_old_gen(idx, self.epoch)
-        } else {
-            EnvId::local_gen(idx, self.epoch)
-        }
-    }
 }
+
+/// Generate a `FlushForward::mint_*` that mints a destination handle of type `$id`,
+/// tagged old or young by `dest_old` and stamped with the dest `epoch`. One per
+/// handle kind — they differ only in the `Id` type.
+macro_rules! mint_fn {
+    ($name:ident, $id:ty) => {
+        impl FlushForward {
+            #[inline]
+            fn $name(&self, idx: usize) -> $id {
+                if self.dest_old {
+                    <$id>::local_old_gen(idx, self.epoch)
+                } else {
+                    <$id>::local_gen(idx, self.epoch)
+                }
+            }
+        }
+    };
+}
+mint_fn!(mint_pair, PairId);
+mint_fn!(mint_vector, VecId);
+mint_fn!(mint_map, MapId);
+mint_fn!(mint_string, StrId);
+mint_fn!(mint_rope, RopeId);
+mint_fn!(mint_closure, ClosureId);
+mint_fn!(mint_env, EnvId);
 
 fn flush_value(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, v: Value) -> Value {
     match v {
