@@ -107,10 +107,11 @@ docs/testing.md for the full guide.")
   (path-join "/tmp" (str prefix (random-token 8))))
 
 (defn purge-stale-temp (prefix)
-  "Best-effort remove every `/tmp/<prefix>*` left by an earlier run. Call once at FILE LOAD (a top-level form), before any test creates fixtures, so it never deletes a live one. Bounds /tmp growth to a single run and recovers from crashed runs."
+  "Best-effort remove every `/tmp/<prefix>*` left by an earlier run — a directory tree *or* a plain file (a fixture may be either). Call once at FILE LOAD (a top-level form), before any test creates fixtures, so it never deletes a live one. Bounds /tmp growth to a single run and recovers from crashed runs."
   (doseq (e (list-dir "/tmp"))
     (when (starts-with? e prefix)
-      (delete-dir (path-join "/tmp" e)))))
+      (let (p (path-join "/tmp" e))
+        (if (dir? p) (delete-dir p) (delete-file p))))))
 
 ;; Full source location of a form as (file line col), or nil. Captured at
 ;; macro-expansion time (by the assertion macros), while the original read form
