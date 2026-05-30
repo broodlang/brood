@@ -506,10 +506,36 @@ The seam that makes remoteability free later (see architecture.md).
 - ✅ **Synchronous `remote-spawn`** (`remote-spawn-sync`, ADR-067) — ships a thunk
   to a peer and returns the child's (node-tagged) pid via a ref-keyed reply, so a
   remote child is directly `monitor`/`link`-able.
-- ⬜ The same runtime listens on a socket and serves the M3 protocol (incl.
-  **server-side TLS** for remote attach)
-- ⬜ Remote editor instances attach (the Emacs `--daemon` / `emacsclient` model)
-- ⬜ One core, multiple attached frontends
+**Node connect itself is complete** — two runtimes find each other, authenticate,
+and talk (locally by name over a Unix socket, remotely over TCP) with globally
+unique `name@host` identity, a shared cookie, monitors/links/supervision, and
+code mobility. What remains under M4 is the **daemon/serving** layer built *on
+top* of connect, plus a few deliberately-deferred refinements:
+
+- ⬜ **Dual-listen** — one node serving a local Unix socket *and* a TCP/TLS
+  endpoint at once (today it's one transport per node; deferred ADR-068/011).
+  The smallest step toward "one core, local + remote frontends"; additive, no
+  protocol change.
+- ⬜ **Server-side / inbound TLS** — `rustls` is client-only (its streams don't
+  split read/write across threads like a raw fd). The cookie *authenticates* a
+  link but doesn't *encrypt* it; remote attach over an untrusted network wants
+  this. Fine for LAN/trusted today.
+- ⬜ The same runtime **listens on a socket and serves the M3 protocol** to
+  attached frontends — the Emacs `--daemon` / `emacsclient` model; **one core,
+  multiple attached frontends**. The `nest observe --connect` remote-attach is a
+  vertical-slice proof; the general server mode (session lifecycle, multi-client)
+  is the headline M4 deliverable.
+- ⬜ **Deferred connect/dist refinements** (ADR-011): exact propagated exit reason
+  for a *non-trapping* linked peer (the `hard` bit — reports `:kill` today); a
+  `terminate/2` cleanup hook on hard kill; **long-name FQDN resolution** (today a
+  long name is passed explicitly, no resolver); a `mio` reactor for socket scale;
+  Windows Unix-socket transport. One-node-per-OS-process is a structural choice
+  (the Erlang model), not a gap.
+- 🟡 **Test hardening:** the end-to-end real-TCP `distribution.rs` tests are
+  timing-flaky under `make test`'s max parallel load (they hit ~5s connect
+  timeouts when all cores are saturated; pass 21/21 in isolation / under nextest
+  alone). Worth bumping the per-test timeouts or serialising the TCP tests under
+  nextest. Not a connect bug.
 
 ## M5 — Web frontend
 
