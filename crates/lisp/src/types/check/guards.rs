@@ -12,6 +12,7 @@
 //!   reads off.
 
 use crate::core::heap::Heap;
+use crate::core::keywords as kw;
 use crate::core::value::{self, Symbol, Value};
 use crate::types::Ty;
 
@@ -27,41 +28,41 @@ use super::walk::list_items;
 pub(super) fn is_syntactic_keyword(name: &str) -> bool {
     matches!(
         name,
-        "quote"
-            | "quasiquote"
-            | "unquote"
-            | "unquote-splicing"
-            | "if"
-            | "do"
-            | "def"
-            | "fn"
-            | "lambda"
-            | "let"
-            | "let*"
-            | "letrec"
-            | "defmacro"
-            | "defn"
-            | "defdyn"
-            | "defmodule"
+        kw::QUOTE
+            | kw::QUASIQUOTE
+            | kw::UNQUOTE
+            | kw::UNQUOTE_SPLICING
+            | kw::IF
+            | kw::DO
+            | kw::DEF
+            | kw::FN
+            | kw::LAMBDA
+            | kw::LET
+            | kw::LET_STAR
+            | kw::LETREC
+            | kw::DEFMACRO
+            | kw::DEFN
+            | kw::DEFDYN
+            | kw::DEFMODULE
             | "module-doc"
-            | "when"
-            | "unless"
-            | "cond"
-            | "and"
-            | "or"
-            | "->"
-            | "->>"
-            | "match"
+            | kw::WHEN
+            | kw::UNLESS
+            | kw::COND
+            | kw::AND
+            | kw::OR
+            | kw::THREAD_FIRST
+            | kw::THREAD_LAST
+            | kw::MATCH
             | "case"
-            | "try"
-            | "catch"
-            | "throw"
-            | "binding"
-            | "for"
+            | kw::TRY
+            | kw::CATCH
+            | kw::THROW
+            | kw::BINDING
+            | kw::FOR
             | "spawn"
-            | "&"
-            | "&optional"
-            | "&rest"
+            | kw::AMP
+            | kw::AMP_OPTIONAL
+            | kw::AMP_REST
     )
 }
 
@@ -152,7 +153,7 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
             let items = list_items(heap, form)?;
             match items.first().copied() {
                 Some(Value::Sym(s)) => {
-                    if value::symbol_is(s, "quote") {
+                    if value::symbol_is(s, kw::QUOTE) {
                         return items.get(1).map(|&d| Ty::of_value(d));
                     }
                     sig_of(heap, s).map(|sig| sig.ret)

@@ -9875,8 +9875,21 @@ spelling lives in exactly one place and a typo is a compile error. Converted all
 three registries and the `symbol_is` sites in `recursion.rs` + `hygiene.rs`. The
 consts are the identical interned strings, so dispatch is provably unchanged
 (special forms eval correctly; the checker still flags non-tail recursion + the
-foreign hints; 77 Rust `basic.rs` tests green). **Not yet converted** (noted
-follow-ups): `guards::is_syntactic_keyword` (a one-place allowlist that also holds
-guards-only markers `module-doc`/`spawn`), and the `&`/`&optional`/`&rest`
-parameter-marker family duplicated across ~7 files — both are separate
-magic-string families a later pass can fold into `kw`.
+foreign hints; 77 Rust `basic.rs` tests green).
+
+**Safe-pass extension.** Added the parameter-marker consts (`kw::AMP`/
+`AMP_OPTIONAL`/`AMP_REST`) and reader-marker consts (`kw::UNQUOTE`/
+`UNQUOTE_SPLICING`), then converted the remaining tooling/checker-layer files:
+`eval/macros.rs` (the quasiquote walker + compile/lowering pass — `symbol_is`,
+`value::sym`, `tagged`, `refutable_bind` sites; the lone `value::kw("fn")`
+context-*label* keyword is deliberately left a literal), `syntax/scope.rs`,
+`introspect.rs`, `types/check.rs`, and `guards::is_syntactic_keyword` (the big
+allowlist `matches!`, now `kw::*` with only the genuinely guards-local
+`module-doc`/`case`/`spawn` as literals). Verified behaviour-preserving:
+quasiquote macros expand, `&optional`/`&rest` params work, the checker still
+recognises every keyword (no special-form name wrongly flagged unbound;
+whole-project warning count unchanged at 36), 77 Rust tests green.
+
+**Not yet converted** (deliberate — core hot-path files edited concurrently, left
+for a separate deliberate pass): `core/value.rs`, `core/heap.rs`,
+`syntax/reader.rs`, `eval/compile.rs`.
