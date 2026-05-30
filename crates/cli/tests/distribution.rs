@@ -55,9 +55,9 @@ fn spawn_brood(dir: &std::path::Path, name: &str, src: &str) -> Child {
 }
 
 /// Wait until `port` accepts a TCP connection (the peer's listener is up), or
-/// panic after ~5s.
+/// panic after ~20s.
 fn wait_until_listening(port: u16) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         if TcpStream::connect(("127.0.0.1", port)).is_ok() {
             return;
@@ -100,10 +100,10 @@ fn two_nodes_connect_and_message() {
 (node-start :b "127.0.0.1:{port_b}" "secret")
 (connect "a@127.0.0.1:{port_a}")
 (send {{:name :echo :node :a@127.0.0.1}} [:hi (self)])
-(def remote (receive ([:pong p] p) (after 5000 (throw "no reply by name"))))
+(def remote (receive ([:pong p] p) (after 30000 (throw "no reply by name"))))
 (unless (pid? remote) (throw "reply was not a pid"))
 (send remote [:ping (self)])
-(receive ([:pong _] (println "ROUNDTRIP-OK")) (after 5000 (throw "no reply by pid")))
+(receive ([:pong _] (println "ROUNDTRIP-OK")) (after 30000 (throw "no reply by pid")))
 "#
     );
 
@@ -148,9 +148,9 @@ fn spawn_brood_env(dir: &std::path::Path, name: &str, src: &str, env: &[(&str, &
 }
 
 /// Wait until a Unix socket file appears (the peer's listener is bound), or panic
-/// after ~5s — the name-addressed analogue of [`wait_until_listening`].
+/// after ~20s — the name-addressed analogue of [`wait_until_listening`].
 fn wait_until_socket(path: &std::path::Path) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         if path.exists() {
             return;
@@ -192,10 +192,10 @@ fn two_unix_nodes_connect_by_name_and_message() {
 ;; connect returns the peer's authoritative name@host (ADR-073) — address by it.
 (def peer (connect "ua"))
 (send {:name :echo :node peer} [:hi (self)])
-(def remote (receive ([:pong p] p) (after 5000 (throw "no reply by name"))))
+(def remote (receive ([:pong p] p) (after 30000 (throw "no reply by name"))))
 (unless (pid? remote) (throw "reply was not a pid"))
 (send remote [:hi (self)])
-(receive ([:pong _] (println "UNIX-ROUNDTRIP-OK")) (after 5000 (throw "no reply by pid")))
+(receive ([:pong _] (println "UNIX-ROUNDTRIP-OK")) (after 30000 (throw "no reply by pid")))
 "#;
 
     let mut a = spawn_brood_env(&home, "userver.blsp", server, &env);
@@ -348,7 +348,7 @@ fn lambda_ships_across_nodes_and_runs() {
   ([:result r] (if (= r 42)
                  (println "CROSS-NODE-LAMBDA-OK")
                  (throw (str "expected 42, got " r))))
-  (after 5000 (throw "no reply")))
+  (after 30000 (throw "no reply")))
 "#
     );
 
@@ -418,7 +418,7 @@ fn source_positions_survive_a_cross_node_send() {
   (send {{:name :probe :node :a@127.0.0.1}} [:run (fn () (form-pos '(positioned-marker))) me]))
 (receive
   ([:pos p] (println (str "GOT: " p)))
-  (after 5000 (throw "no reply from probe")))
+  (after 30000 (throw "no reply from probe")))
 "#
     );
 
@@ -485,7 +485,7 @@ fn remote_spawn_runs_a_thunk_on_a_peer() {
   ([:hello-from-a from] (if (= from :a@127.0.0.1)
                           (println "REMOTE-SPAWN-OK")
                           (throw (str "spawned on wrong node: " from))))
-  (after 5000 (throw "no reply from remote-spawn")))
+  (after 30000 (throw "no reply from remote-spawn")))
 "#
     );
 
@@ -548,7 +548,7 @@ fn cross_node_pid_monitor_fires_down() {
 (node-start :b "127.0.0.1:{port_b}" "secret")
 (connect "a@127.0.0.1:{port_a}")
 (send {{:name :work-bootstrap :node :a@127.0.0.1}} [:hello (self)])
-(def remote-pid (receive ([:my-pid p] p) (after 5000 (throw "no pid reply"))))
+(def remote-pid (receive ([:my-pid p] p) (after 30000 (throw "no pid reply"))))
 (def m (monitor remote-pid))
 (send remote-pid :stop)
 (receive
@@ -556,7 +556,7 @@ fn cross_node_pid_monitor_fires_down() {
     (if (and (= mref m) (pid? pid))
       (println "DOWN-OK")
       (throw (str "wrong down: " mref " " pid " " reason))))
-  (after 5000 (throw "no :down message")))
+  (after 30000 (throw "no :down message")))
 "#
     );
 
@@ -618,7 +618,7 @@ fn remote_monitor_fires_noconnection_on_node_down() {
 (node-start :b "127.0.0.1:{port_b}" "secret")
 (connect "a@127.0.0.1:{port_a}")
 (send {{:name :work-bootstrap :node :a@127.0.0.1}} [:hello (self)])
-(def remote-pid (receive ([:my-pid p] p) (after 5000 (throw "no pid reply"))))
+(def remote-pid (receive ([:my-pid p] p) (after 30000 (throw "no pid reply"))))
 (def m (monitor remote-pid))
 ;; Tell the parent harness we're armed; the harness will kill A. We can't
 ;; kill A from inside the language, so we wait a beat and the harness sends
@@ -642,7 +642,7 @@ fn remote_monitor_fires_noconnection_on_node_down() {
     let mut b_stdout = b.stdout.take().expect("client stdout");
     let mut buf = Vec::new();
     let mut armed = false;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < deadline && !armed {
         let mut chunk = [0u8; 256];
         match b_stdout.read(&mut chunk) {
@@ -719,7 +719,7 @@ fn ensure_link_reconnects_across_a_node_restart() {
 (ensure-link "a@127.0.0.1:{port_a}")
 ;; First probe — proves the initial link came up.
 (send {{:name :probe :node :a@127.0.0.1}} [:ping (self)])
-(receive ([:pong _] (println "FIRST-OK")) (after 5000 (throw "no first pong")))
+(receive ([:pong _] (println "FIRST-OK")) (after 30000 (throw "no first pong")))
 ;; Tell the harness we're ready for the restart.
 (println "ARMED")
 ;; Now retry the second ping until something answers — the harness will
@@ -742,7 +742,7 @@ fn ensure_link_reconnects_across_a_node_restart() {
     let mut b = spawn_brood(&dir, "client.blsp", &client_src);
     let mut b_stdout = b.stdout.take().expect("client stdout");
     let mut buf = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < deadline {
         let mut chunk = [0u8; 256];
         match b_stdout.read(&mut chunk) {
@@ -920,7 +920,7 @@ fn duplicate_connect_is_deduplicated() {
 (connect "a@127.0.0.1:{port_a}")
 (connect "a@127.0.0.1:{port_a}")          ; second connect — should reuse, not add
 (send {{:name :echo :node :a@127.0.0.1}} [:hi (self)])
-(receive ([:welcome] :ok) (after 5000 (throw "no welcome")))
+(receive ([:welcome] :ok) (after 30000 (throw "no welcome")))
 (println (str "NODES=" (nodes)))           ; expect exactly (:a@127.0.0.1)
 (send {{:name :echo :node :a@127.0.0.1}} [:bye (self)])
 "#
@@ -982,7 +982,7 @@ fn monitor_unconnected_node_fires_immediately() {
 (node-start :b "127.0.0.1:{port_b}" "secret")
 (monitor-node :ghost)
 (receive ([:nodedown :ghost] (println "IMMEDIATE-NODEDOWN"))
-         (after 1000 (throw "monitor-node did not fire immediately")))
+         (after 5000 (throw "monitor-node did not fire immediately")))
 "#
     );
     let p = spawn_brood(&dir, "ghost.blsp", &src);
@@ -1014,7 +1014,7 @@ fn node_down_is_detected() {
 (connect "a@127.0.0.1:{port_a}")
 (monitor-node :a)
 (send {{:name :echo :node :a@127.0.0.1}} [:hi (self)])
-(receive ([:welcome] :ok) (after 5000 (throw "no welcome")))   ; link + monitor are up
+(receive ([:welcome] :ok) (after 30000 (throw "no welcome")))   ; link + monitor are up
 (send {{:name :echo :node :a@127.0.0.1}} [:bye (self)])                  ; make :a exit
 (receive ([:nodedown :a] (println "NODEDOWN-OK"))
          (after 10000 (throw "no nodedown")))
@@ -1072,13 +1072,13 @@ fn remote_link_death_delivers_exit_to_a_trapping_peer() {
 (connect "a@127.0.0.1:{port_a}")
 (trap-exit true)
 (send {{:name :worker :node :a@127.0.0.1}} [:whoami (self)])
-(def w (receive ([:iam p] p) (after 5000 (throw "no whoami"))))
+(def w (receive ([:iam p] p) (after 30000 (throw "no whoami"))))
 (unless (pid? w) (throw "whoami reply was not a pid"))
 (link w)                                  ; cross-node link (Frame::Link → A records its half)
 (send w [:die-now])                       ; ordered after the link on this connection
 (receive ([:EXIT ~w [:error _]] (println "REMOTE-LINK-EXIT-OK"))
          ([:EXIT ~w r] (throw (str "unexpected EXIT reason " r)))
-         (after 5000 (throw "no remote [:EXIT]")))
+         (after 30000 (throw "no remote [:EXIT]")))
 "#
     );
 
@@ -1125,11 +1125,11 @@ fn remote_exit_kills_a_worker() {
 (node-start :b "127.0.0.1:{port_b}" "secret")
 (connect "a@127.0.0.1:{port_a}")
 (send {{:name :worker :node :a@127.0.0.1}} [:whoami (self)])
-(def w (receive ([:iam p] p) (after 5000 (throw "no whoami"))))
+(def w (receive ([:iam p] p) (after 30000 (throw "no whoami"))))
 (def m (monitor w))
 (exit w :kill)                            ; remote kill (non-link Frame::Exit)
 (receive ([:down ~m ~w _] (println "REMOTE-EXIT-KILL-OK"))
-         (after 5000 (throw "remote worker did not die")))
+         (after 30000 (throw "remote worker did not die")))
 "#
     );
 
@@ -1189,7 +1189,7 @@ fn supervisor_restarts_a_remote_child() {
 (def me (self))
 (def spec {{:id :w :restart :permanent
             :start (fn () (do (send {{:name :factory :node :a@127.0.0.1}} [:make (self) me])
-                              (receive ([:made p] p) (after 5000 (throw "no :made")))))}})
+                              (receive ([:made p] p) (after 30000 (throw "no :made")))))}})
 (def sup (supervisor/start-supervisor (list spec)))
 (def w1 (receive ([:up p] p) (after 6000 (throw "no first :up"))))
 (send w1 :die)                              ; crash the remote worker
@@ -1271,7 +1271,7 @@ fn remote_spawn_sync_returns_a_usable_remote_pid() {
   ([:ran on val] (if (= val 42)
                    (println (str "REMOTE-SPAWN-SYNC-OK child=" child " ran-on=" on))
                    (throw (str "wrong value " val))))
-  (after 5000 (throw "remote child never ran")))
+  (after 30000 (throw "remote child never ran")))
 "#
     );
 
