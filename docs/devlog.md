@@ -9188,3 +9188,47 @@ scan* that precedes the global cache, and per-call env-frame allocation) — tha
 the deferred #3/#4 work, written up in ADR-069 (lexical addressing + folding the
 per-combination TLS reads). Whether to take those on is gated on need: the cheap,
 low-risk dispatch wins are now banked.
+
+---
+
+## 2026-05-30 — Namespaces fully complete: ns-aware symbols/tokens + ns-sound shadow detection
+
+**Goal.** Close the last three cosmetic remainders left after the LSP
+ns-awareness landing, so namespaces (ADR-065/066/070) are *fully* done — not
+just correct, but polished. All parallel-safe (no kernel, no GUI).
+
+**Workspace symbols (LSP).** `workspace_symbols` now displays each def
+**qualified** (`ns/name`) with the file's `(defmodule …)` namespace as the
+`containerName`, so two same-named defs in different namespaces are
+distinguishable in "go to symbol". A pure CST `defmodule` scan
+(`file_namespace`) reads the ns — same substrate as the rest of the LSP, no
+eval. The per-file **document** outline stays bare by design (a uniform `ns/`
+prefix on every line is noise).
+
+**Semantic tokens (LSP).** Added a `NAMESPACE` token type to the legend. A
+qualified `ns/name` symbol is split at the `/`: the `ns` prefix emits as
+`NAMESPACE`, the suffix keeps its resolved kind (function/variable). The bare
+`/` division operator (slash at index 0) is never split. `main`'s advertised
+legend reuses `legend()`, so it tracked the new type automatically.
+
+**Cross-file shadow detection (Brood, `std/project.blsp`).** The flat-namespace
+duplicate-def check (ADR-019) misfired under namespaces: two files with
+different `(defmodule …)` defining the same short name were flagged, though they
+resolve to distinct `ns/name` globals. Now **namespace-sound** —
+`project--file-def-names` resolves each def to its effective global key via a
+new `project--qualify`, mirroring the kernel resolver (`ns/name` under a
+`defmodule`, but bare for an already-qualified name, an ambient `*earmuff*`, or
+a no-`defmodule` root file). `project--duplicate-def-warnings` groups by that
+key, firing only on a real collision (same namespace, or an ambient/root name
+bound twice). `mcp--shadows-for` (the MCP `load` tool's `:shadows`) inherits it.
+
+**Verified.** 76 LSP tests (+3: qualified-split, bare-slash, `file_namespace`);
+6 ns-aware project tests (different-ns no-collision, same-ns collision, ambient
+earmuff across ns, root no-`defmodule`); full in-language suite **981/981**.
+
+**Bookkeeping.** Resolved a triple ADR-number collision picked up while merging
+(`namespaces-lsp` → main): the collision-policy ADR ended up at **070** (068/069
+were taken by node-connect and perf-eval-dispatch), and a leftover duplicate
+`ADR-068` on main (WASM native extensions vs. node-connect) was de-duped by
+moving WASM to **ADR-071**. The `namespaces-lsp` branch + `brood-ns` worktree
+were merged and cleaned up.

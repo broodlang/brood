@@ -179,8 +179,10 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   ns-aware** (§6): a shared resolution seam drives ns-correct goto/hover/signature,
   bare-import completion, and namespace-sound project references/rename.
   **Collision policy:** ADR-070 (flat names + detect-and-reject at lock time;
-  enforcement with the package manager). ⬜ Cosmetic remainder only: ns prefixes in
-  the symbol outline + semantic-token ns coloring.
+  enforcement with the package manager). Namespace-qualified workspace symbols,
+  semantic-token ns coloring (a `NAMESPACE` token splitting `ns/name`), and
+  namespace-sound cross-file shadow detection (`project--duplicate-def-warnings`,
+  ADR-065) all landed — **namespaces are fully complete.**
 - ✅ **Project model & test tool** — convention over configuration: `src/` is the
   project source (auto on `*load-path*`), `tests/**/*_test.blsp` are the tests; a
   `project.blsp` manifest declares identity (name/version) and overrides paths only
