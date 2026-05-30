@@ -2646,6 +2646,11 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
     // ^ $, [...] sets, \d \w \s, |, groups; no ranges/captures yet). Opt-in.
     ("regex", include_str!("../../../std/regex.blsp")),
     ("ui", include_str!("../../../std/ui.blsp")),
+    // Emacs-style tiled window splits: an immutable binary layout tree + pure
+    // pane/divider geometry + drag-to-resize over `:drag` mouse events (ADR-077).
+    // Reusable editor toolkit (content-agnostic); the keybindings + payload are
+    // editor policy. Opt-in, never in the prelude.
+    ("window", include_str!("../../../std/window.blsp")),
     ("observer", include_str!("../../../std/observer.blsp")),
     // Bare ANSI escape *strings* for simple terminal scripts (`print` them
     // directly) — the lightweight counterpart to the `display` render-op
