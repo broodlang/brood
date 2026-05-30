@@ -34,6 +34,25 @@
   (if (= n 0) acc
     (receive ([:up tag pid] (collect-ups (- n 1) (assoc acc tag pid))))))
 
+;; A child that announces `[:up tag pid]` on start and `[:stopped tag]` when it
+;; receives `[:$stop]` — with `:shutdown :infinity` so we can observe teardown
+;; ORDER (the supervisor stops children one at a time, waiting for each).
+(defn stop-announce-spec (to tag)
+  {:id tag :restart :permanent :shutdown :infinity
+   :start (fn () (spawn (do (send to [:up tag (self)])
+                            (receive ([:$stop] (send to [:stopped tag]))))))})
+
+(defn collect-stops (n acc)
+  (if (= n 0) (reverse acc)
+    (receive ([:stopped t] (collect-stops (- n 1) (cons t acc))))))
+
+;; Registration races the child's own `[:up]`, so a holder may briefly see the
+;; old/nil value after a (re)start — poll `whereis` until it settles (or give up).
+(defn wait-name (name expected tries)
+  (cond (= (whereis name) expected) expected
+        (= tries 0) (whereis name)
+        else (do (sleep 5) (wait-name name expected (- tries 1)))))
+
 (describe "supervisor: one-for-one restart"
   :isolated
 
@@ -180,6 +199,33 @@
       (stop-supervisor sup)
       (assert= :killed
         (receive ([:down ~pm ~p _] :killed) (after 1500 :alive))))))
+
+(describe "supervisor: shutdown order + named children"
+  :isolated
+
+  (test "stop-supervisor terminates children in reverse start order"
+    (let (me  (self)
+          sup (start-supervisor (list (stop-announce-spec me :a)
+                                      (stop-announce-spec me :b)
+                                      (stop-announce-spec me :c)))
+          _   (collect-ups 3 {}))           ; wait until all three are up
+      (stop-supervisor sup)
+      ;; started a, b, c → torn down c, b, a
+      (assert= (list :c :b :a) (collect-stops 3 ()))))
+
+  (test "a named child is addressable by name, and the name follows a restart"
+    (let (me  (self)
+          sup (start-supervisor
+                (list {:id :svc :name :sup-test-svc :restart :permanent
+                       :start (fn () (spawn (do (send me [:up (self)])
+                                                (receive (:die (error "boom"))))))}))
+          p1  (receive ([:up p] p)))
+      (assert= p1 (wait-name :sup-test-svc p1 50))   ; reachable by its name
+      (send p1 :die)                                 ; crash it
+      (let (p2 (receive ([:up p] p)))                ; restarted with a fresh pid
+        (is (not (= p1 p2)))
+        (assert= p2 (wait-name :sup-test-svc p2 50)) ; the name now points at the new pid
+        (stop-supervisor sup)))))
 
 (describe "supervisor: introspection and validation"
   :isolated

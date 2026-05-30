@@ -165,6 +165,100 @@ supervisor child `:shutdown :infinity`** (Erlang's exact rule); workers keep
   program now kills the session; editing the file re-spawns from scratch
   (which is also a cleaner model — no surprising state retention across edits).
 
+## How it differs from Erlang/OTP & Elixir
+
+Brood's process substrate is genuinely Erlang-family — per-process heaps,
+copy-on-send messages, a preemptive reduction-counting scheduler, let-it-crash,
+`monitor`/`[:down]`, `(exit pid reason)` (Erlang `exit/2`, incl. the untrappable
+`:kill`), and a registered-name table dropped on death. So the differences below
+are deliberate design choices, not missing plumbing.
+
+| Dimension | Erlang/OTP & Elixir | Brood |
+|---|---|---|
+| What a supervisor *is* | A sealed generic OTP **behaviour** (runtime stdlib) | ~230 lines of **editable Brood**, hot-reloadable |
+| Failure-coupling primitive | **Links** (bidirectional) + `trap_exit` | **Monitors** (one-way) + explicit `(exit pid …)` — no links, no `trap_exit` |
+| Supervisor dies → its children | Auto-killed via links | **Orphaned** unless torn down gracefully first |
+| Graceful child cleanup | `trap_exit` → `terminate/2`, deadline-enforced | Cooperative `[:$stop]` *message*; no forced signal, no cleanup callback |
+| Strategies | one/all/rest_for_one + `simple_one_for_one`/DynamicSupervisor | one/all/rest_for_one only |
+| Restart types | permanent / transient / temporary | **same** |
+| `:shutdown` | brutal_kill / infinity / ms; default by child `type` | brutal-kill (default) / infinity / ms; **no type-derived default** |
+| Shutdown order | **reverse** start order | start order |
+| Startup | synchronous, ordered, **rollback on failure** | async (returns the spawned pid); a throwing `:start` orphans earlier children |
+| Named children | supervisor-managed names; survive restart transparently | `register` exists, but **not supervisor-managed** |
+| Runtime child mgmt | start/terminate/restart/delete/count_children | `which-children` + `stop` only |
+
+### The load-bearing difference: monitors + explicit `exit` vs links + `trap_exit`
+
+Almost every other difference flows from this. In Erlang a supervisor
+`spawn_link`s its children and sets `trap_exit`; links are **symmetric**, so a
+child death arrives as a *trappable* `{'EXIT', …}` message **and the supervisor
+dying propagates exit signals down the links, killing the children automatically**.
+Brood's `monitor` is **one-directional** — it notifies (`[:down …]`) but couples
+nothing; teardown is explicit and supervisor-driven (the supervisor calls
+`(exit child …)` itself). Two consequences:
+
+1. **A supervisor's own death does not kill its children.** The `:shutdown
+   :infinity` cascade covers a *graceful* `stop-supervisor`, but a supervisor that
+   **crashes** (or is hard-`:kill`ed from above) never runs its `[:$stop]` handler,
+   so its whole subtree **orphans**. This is the single biggest gap, and it's
+   structural — only links/`trap_exit` close it.
+2. **No trappable shutdown / no `terminate/2`.** `[:$stop]` is an ordinary message
+   a child must voluntarily match; there's no kernel-enforced trappable signal and
+   no cleanup callback, so a worker can't run orderly cleanup on shutdown the way a
+   trapping `gen_server` runs `terminate/2`.
+
+### Faithful
+
+`:one-for-one` / `:one-for-all` / `:rest-for-one` match OTP semantics (incl. the
+trigger's restart type gating a group restart, and per-member type within it);
+`:permanent` / `:transient` / `:temporary`; the restart-intensity window
+(defaults 3-in-5, matching Elixir); the `:shutdown` *vocabulary*; nested-tree
+crash **escalation** (a sub-tree that exhausts its budget dies and the parent
+restarts the whole sub-tree).
+
+### Divergent (beyond the links gap)
+
+- **Startup is async with no rollback** — `start-supervisor` returns the spawned
+  pid immediately; a throwing `:start` thunk crashes the supervisor and orphans
+  whatever already started (Erlang's `start_link` is synchronous and rolls back).
+- **Intensity counts one event per trigger** (a group restart = 1 tick), not one
+  per child restarted.
+
+(Two earlier divergences are now resolved: shutdown is **reverse start order**
+like OTP, and a `:name` in a child spec is **supervisor-managed** — re-registered
+on each restart so callers address a stable name. See §Shutdown policy and the
+parity list below.)
+- **No `simple_one_for_one`/DynamicSupervisor** and **no runtime child API**
+  (`start_child`/`terminate_child`/`restart_child`/`delete_child`/`count_children`)
+  — the child set is fixed at `start-supervisor` time.
+- **No child `type` / `modules` / `significant` / `auto_shutdown`**, and **no
+  `code_change`/release upgrades** (though ADR-013 late binding gives a different
+  hot-reload: redefining the module changes a *running* supervisor on its next
+  message — but captured `:start` closures keep their old code until restarted).
+
+### Where Brood is arguably nicer
+
+The whole supervisor is ~230 lines of readable, redefinable Brood — no opaque
+behaviour, immutable-state-through-the-loop instead of `gen_server` callback
+ceremony — and it forced the kernel to grow only **general** primitives
+(`monitor`, `exit/2`) rather than a supervision-specific kernel feature (the path
+ADR-039 took and reverted).
+
+### Path to OTP parity (roughly by value)
+
+1. **`link` + `trap_exit`** (or a userland "linker" process) — the deepest fix:
+   automatic subtree teardown when a supervisor *crashes*, not just on graceful
+   stop. The one remaining ADR-011 deferral; needs careful kernel work (the
+   ADR-039 race lesson applies — keep it a *general* primitive, not supervision-
+   specific).
+2. ✅ **Supervisor-managed registration** (done 2026-05-30) — a `:name` keyword in
+   the child spec, registered to the fresh pid on every (re)start, so callers
+   address a stable name via `whereis`. Pure Brood over the existing `register`.
+3. ✅ **Reverse-order shutdown** (done 2026-05-30) — `terminate-many` tears down
+   last-started-first.
+4. **DynamicSupervisor + a runtime child API** (`start-child`/`terminate-child`/…).
+5. **A worker cleanup convention** layered on `[:$stop]` (a `terminate`-style hook).
+
 ## See also
 
 - [`decisions.md`](decisions.md) — ADR-039 (the accept→revert record).

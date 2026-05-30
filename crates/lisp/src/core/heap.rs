@@ -515,6 +515,12 @@ pub struct Heap {
     /// symbols only; consulted alongside the live global table. Cleared/repopulated
     /// per file by the loader.
     ns_known_names: HashSet<Symbol>,
+    /// Names the current file `(:use …)`-imported: bare name → qualified global
+    /// (`describe` → `test/describe`). Populated by `%refer` when the `(ns …)`
+    /// header runs; consulted by the resolver after the current namespace and
+    /// before root fall-through. Per-file like `ns_known_names` — reset/restored
+    /// by the loaders so imports never leak across files (ADR-065 inc-2).
+    imports: HashMap<Symbol, Symbol>,
     /// This process's dynamic-variable binding stack (the `binding` form). Each
     /// `binding` pushes its `(symbol, value)` pairs and pops them when its body
     /// returns (even on error); a read of a dynamic var consults this — latest
@@ -665,6 +671,7 @@ impl Heap {
             current_file: None,
             compile_ns: None,
             ns_known_names: HashSet::new(),
+            imports: HashMap::new(),
             dynamics: Vec::new(),
             roots: Vec::new(),
             env_roots: Vec::new(),
@@ -693,6 +700,7 @@ impl Heap {
             current_file: None,
             compile_ns: None,
             ns_known_names: HashSet::new(),
+            imports: HashMap::new(),
             dynamics: Vec::new(),
             roots: Vec::new(),
             env_roots: Vec::new(),
@@ -925,6 +933,22 @@ impl Heap {
     /// Is `sym` (a bare name) known to be defined in the current namespace's file?
     pub fn ns_knows_name(&self, sym: Symbol) -> bool {
         self.ns_known_names.contains(&sym)
+    }
+
+    /// Replace the current file's `(:use …)` import table, returning the prior one
+    /// so the caller can restore it (loads nest). Maps bare → qualified.
+    pub fn set_imports(&mut self, imports: HashMap<Symbol, Symbol>) -> HashMap<Symbol, Symbol> {
+        std::mem::replace(&mut self.imports, imports)
+    }
+
+    /// Add one imported binding (bare name → qualified global). Used by `%refer`.
+    pub fn add_import(&mut self, bare: Symbol, qualified: Symbol) {
+        self.imports.insert(bare, qualified);
+    }
+
+    /// The qualified global a bare name was `(:use …)`-imported to, if any.
+    pub fn import_of(&self, bare: Symbol) -> Option<Symbol> {
+        self.imports.get(&bare).copied()
     }
 
     // ----- definition sites (cross-file xref; ADR-031, docs/lsp.md) -----
