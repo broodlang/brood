@@ -48,11 +48,16 @@ stderr if none is running, so a log is never silently lost. A *backend* is an
 ;; ---- backends ---------------------------------------------------------------
 (defn backend (sink & opts)
   "A logger backend over `sink` (an `io` port). `opts` is a map: `:min-level`
-(default `:debug` — everything) gates by severity, `:format` (default the
-`[LEVEL ts] msg` line) is a `(fn (record) -> string)`."
+(default `:debug` — everything) gates by severity; `:filter` (default nil — accept
+all) is a `(fn (record) -> bool)` predicate; `:format` (default the `[LEVEL ts] msg`
+line) is a `(fn (record) -> string)`. A backend writes a record only when it passes
+*both* `:min-level` and `:filter` — so several backends on one logger can route by
+category/source (read off the record's `:meta`) to different sinks (e.g. an editor's
+`*LSP*` vs `*Messages*` buffer), the OTP-handler-filter / Elixir-metadata-filter idea."
   (let (o (if (empty? opts) {} (first opts)))
     {:sink sink
      :min-level (or (get o :min-level) :debug)
+     :filter (get o :filter)  ; nil = accept all
      :format (or (get o :format) log--default-format)}))
 
 (defn stdout-backend (& opts)
@@ -80,9 +85,13 @@ e.g. an editor appending to its `*Messages*` buffer. Async and share-nothing."
 
 ;; ---- the logger process -----------------------------------------------------
 (defn log--emit (b rec)
-  "Write `rec` through backend `b` if its level passes `b`'s `:min-level`."
-  (when (>= (log--rank (get rec :level)) (log--rank (get b :min-level)))
-    (io-write (get b :sink) ((get b :format) rec))))
+  "Write `rec` through backend `b` when it passes `b`'s `:min-level` *and* its
+`:filter` (nil filter = accept all) — so a category/source backend writes only its
+own records."
+  (let (flt (get b :filter))
+    (when (and (>= (log--rank (get rec :level)) (log--rank (get b :min-level)))
+            (or (nil? flt) (flt rec)))
+      (io-write (get b :sink) ((get b :format) rec)))))
 
 (defn log--dispatch (backends rec)
   "Write `rec` through every backend in `backends` (a list or vector). Uses `fold`
