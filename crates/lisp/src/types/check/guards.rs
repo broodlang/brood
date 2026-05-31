@@ -252,6 +252,15 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                     if value::symbol_is(s, kw::QUOTE) {
                         return items.get(1).map(|&d| Ty::of_value(d));
                     }
+                    // A user `(sig …)` declaration is authoritative for the
+                    // result type — consult it unless a *lexical* local (fn/let)
+                    // shadows the name. (A file-global with a declared sig is the
+                    // target, so guard on `is_lexical_local`, not `is_local`.)
+                    if !ctx.is_lexical_local(s) {
+                        if let Some(sg) = ctx.declared_sig(s) {
+                            return Some(sg.ret);
+                        }
+                    }
                     // Sequence-aware refinements (`list`/`vector` constructors,
                     // `first`/`last`/`nth` extractors) when the head isn't a local
                     // shadow; else the callee's flat result type.

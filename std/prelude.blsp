@@ -187,6 +187,20 @@ hot-reload (cf. Emacs `defvar`). Once bound, re-evaluating is a no-op; restart
 or re-`def` to force re-init."
   `(unless (bound? '~name) (def ~name ~val)))
 
+;; `(sig name (params… -> ret))` — a type-signature declaration the advisory
+;; checker reads (it parses the type-expression and treats it as `name`'s
+;; authoritative signature, ahead of inferred/curated ones). At run time it is a
+;; no-op today: the form expands to `nil`, so a signature never changes behaviour
+;; — it only informs checking and (later) editor tooling. See
+;; `docs/type-annotations.md`. NOTE: the checker reads the *un-expanded* form, so
+;; this macro intentionally discards its arguments.
+(defmacro sig (name type)
+  "Declare a type signature for `name`, e.g. `(sig area (number -> number))`.
+Read by the advisory type checker; a runtime no-op. Type grammar: base names
+(`int` `string` `number` `list` `vector` `map` `fn` `any` …), arrows
+`(p… -> r)`, `(list E)`/`(vector E)`, and `(or A B)`."
+  nil)
+
 ;; `and`/`or` short-circuit left-to-right and return the deciding value, with
 ;; each subexpression evaluated at most once (a gensym holds it across the test).
 (defmacro and (& xs)

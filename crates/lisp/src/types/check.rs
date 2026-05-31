@@ -93,6 +93,7 @@
 //! All of it reuses the one `is_unbound` predicate, so head and operand checks
 //! can't drift.
 
+mod annot;
 mod ctx;
 mod guards;
 mod hygiene;
@@ -270,6 +271,15 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
     ctx.enable_operand_checks();
     for &form in &expanded {
         collect_def_names(heap, form, &mut ctx);
+    }
+    // Pass 2.5: collect `(sig name (… -> …))` declarations from the *un-expanded*
+    // forms (the `sig` macro expands to nil, so the declaration is gone in
+    // `expanded` — same reason the hygiene lint reads un-expanded forms). These
+    // become the authoritative signatures the call-check consults first.
+    for &form in &forms {
+        if let Some((name, sig)) = annot::parse_sig_decl(heap, form) {
+            ctx.add_declared_sig(name, sig);
+        }
     }
     // Pass 3: check each expanded form with the accumulated file-globals.
     for &form in &expanded {
@@ -457,6 +467,55 @@ mod tests {
         // Correct uses, and an unknown (variable) callable, stay silent.
         assert!(warnings("(+ 1 2)").is_empty());
         assert!(warnings("(map inc xs)").is_empty()); // inc is a variable → unknown
+    }
+
+    #[test]
+    fn sig_declaration_is_read_by_the_checker() {
+        // A user (sig …) gives a branchy fn a signature the checker trusts:
+        // arguments checked against the declared params.
+        let w = file_warnings("(sig f (int -> int))\n(defn f (x) (if (> x 0) x (- x)))\n(f \"s\")");
+        assert!(
+            w.iter()
+                .any(|m| m.contains("f:") && m.contains("argument 1") && m.contains("int")),
+            "declared param type should flag (f \"s\"): {w:?}"
+        );
+        // The declared *result* flows out: f : int, string-length wants string.
+        let w = file_warnings("(sig f (int -> int))\n(defn f (x) x)\n(string-length (f 3))");
+        assert!(
+            w.iter().any(|m| m.contains("string-length")),
+            "declared result type should flag string-length: {w:?}"
+        );
+        // Correct uses stay silent.
+        let w = file_warnings("(sig f (int -> int))\n(defn f (x) x)\n(f 3)\n(+ 1 (f 4))");
+        assert!(
+            w.iter().all(|m| !m.contains("expects")),
+            "correct uses of a declared fn must be silent: {w:?}"
+        );
+    }
+
+    #[test]
+    fn sig_declaration_handles_arity_unions_and_bad_exprs() {
+        // Arity comes from the declared param count for a file-local defn the
+        // read-only checker can't otherwise inspect.
+        let w = file_warnings("(sig g (int int -> int))\n(defn g (a b) (+ a b))\n(g 1)");
+        assert!(
+            w.iter().any(|m| m.contains("expected 2")),
+            "declared arity should flag (g 1): {w:?}"
+        );
+        // Union result type: (or int nil) — feeding it to a sink that wants a
+        // string is still a provable mismatch.
+        let w =
+            file_warnings("(sig h (int -> (or int nil)))\n(defn h (x) x)\n(string-length (h 1))");
+        assert!(
+            w.iter().any(|m| m.contains("string-length")),
+            "union result (int|nil) is disjoint from string: {w:?}"
+        );
+        // An unparseable type-expr is dropped — never a false signal.
+        let w = file_warnings("(sig k (bogus -> int))\n(defn k (x) x)\n(k \"s\")");
+        assert!(
+            w.iter().all(|m| !m.contains("k:") || !m.contains("argument")),
+            "an unrecognised type-expr must be ignored, not guessed: {w:?}"
+        );
     }
 
     #[test]
