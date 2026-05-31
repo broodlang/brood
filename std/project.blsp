@@ -29,7 +29,12 @@ the `nest new` scaffolder."
 (def *project-test-paths* (list "tests"))
 ; conventional default
 (def *project-main* (list 'main 'main))
-; (module fn) — `nest run` entry
+; (module fn) — `nest run` entry, as declared by the manifest's `:main`
+(def *project-main-override* nil)
+; (module fn) or nil — a `nest run --main` override that wins over the manifest.
+; A separate slot (not `*project-main*`) because the manifest is re-applied
+; inside `run-project` (via `project-setup`), which would otherwise clobber an
+; override set before the run.
 (def *project-dependencies* nil)
 ; list of normalised dep maps from the manifest's :dependencies (ADR-037)
 
@@ -71,8 +76,8 @@ the `nest new` scaffolder."
       else (error "nest run --main: expected \"module\" or \"module/fn\", got " spec))))
 
 (defn set-project-main (spec)
-  "Override the `nest run` entry point from a CLI spec string (`\"module\"` or `\"module/fn\"`), without editing the manifest's `:main`. Call after `load-config` so it wins over the manifest. Backs `nest run --main`."
-  (def *project-main* (project--parse-main-spec spec)))
+  "Override the `nest run` entry point from a CLI spec string (`\"module\"` or `\"module/fn\"`), without editing the manifest's `:main`. Sets a dedicated override slot that wins over the manifest even though `run-project` re-applies the manifest internally. Backs `nest run --main`."
+  (def *project-main-override* (project--parse-main-spec spec)))
 
 ;; --- dependency manifest parsing (ADR-037, packages.md) ----------------------
 ;; Each :dependencies entry is a vector: `[name :git URL :ref REF]` or
@@ -208,12 +213,56 @@ the `nest new` scaffolder."
       (list-dir dir))
     nil))
 
+;; The feature a source file provides — the name of its top-level `(defmodule NAME …)`
+;; as a string, or nil when it declares none. Parses the file read-only (never
+;; evaluates it), so the loader can tell whether a file is already loaded (its module
+;; on `*features*`) without running it. A parse error yields nil → the file is loaded,
+;; and the load surfaces the real error.
+(defn project--file-feature (path)
+  (try
+    (fold (fn (acc f)
+            (if (and (nil? acc) (pair? f) (= (first f) 'defmodule) (symbol? (second f)))
+              (name (second f))
+              acc))
+      nil
+      (read-all (slurp path)))
+    (catch e nil)))
+
+;; Whether to (re-)load a source file that provides feature `feat`, given the
+;; `*features*` snapshot `before` taken at the start of this walk:
+;;   - no module header (`feat` nil) → always load (can't dedup it).
+;;   - `skip-all?` (the check pre-flight) → load only if not already provided.
+;;   - otherwise → load unless `feat` was provided *during this walk* (in `*features*`
+;;     now but not in `before`): that means an earlier file already `require`d it, so
+;;     re-loading would wipe its just-built state (e.g. an interactive-command
+;;     registry) and re-`defmacro` it. A module provided in a PRIOR walk (so present
+;;     in `before`) is still reloaded — that's the long-lived-image re-run picking up
+;;     edits.
+(defn project--should-load? (feat skip-all? before)
+  (cond
+    (nil? feat) true
+    skip-all? (not (member? feat *features*))
+    else (or (not (member? feat *features*)) (member? feat before))))
+
 ;; Load every source file under the project's source paths, so tests and other
-;; code can use the project's definitions directly — no per-file `require`.
-(defn project-load-sources (root)
-  (fold (fn (_ dir) (fold (fn (_ f) (load f)) nil (project--collect-sources dir)))
-    nil
-    (project--abs-paths root *project-source-paths*)))
+;; code can use the project's definitions directly — no per-file `require`. Within
+;; one walk each module loads once even when an earlier file `require`d it (its
+;; `defmodule` `provide` is the load-once key — see `project--should-load?`); across
+;; separate walks a file is re-loaded, so a re-run in a long-lived image picks up
+;; edits (the hot-reload contract; the file watcher in std/reload uses `reload-defs`).
+;; With `:skip-loaded`, any module already on `*features*` is skipped (the check
+;; pre-flight, which runs *after* the image is loaded and must not re-evaluate it).
+(defn project-load-sources (root & opts)
+  (let (skip-all? (member? :skip-loaded opts)
+        before *features*)
+    (fold (fn (_ dir)
+            (fold (fn (_ f)
+                    (when (project--should-load? (project--file-feature f) skip-all? before)
+                      (load f)))
+              nil
+              (project--collect-sources dir)))
+      nil
+      (project--abs-paths root *project-source-paths*))))
 
 ;; Load the manifest (if present) and put the project's source dirs on *load-path*
 ;; so its modules are require-able by name.
@@ -293,12 +342,13 @@ resolve in the advisory checker. Returns the project root."
 
 ;; Make sure the project is set up and all its sources are loaded — the
 ;; precondition for the checker to resolve cross-file names through the
-;; heap's globals. Idempotent: `project-setup` re-runs harmlessly, and
-;; `load`/`def` replace; running after `run-project-tests`/`run-project`
-;; already did the work is a small CPU re-spend, not a correctness issue.
-;; Standalone callers (`nest check`, an interactive `(check-project)`) need
-;; this; the embedded callers re-invoke it for free.
-(defn project--ensure-loaded (root) (project-setup root) (project-load-sources root))
+;; heap's globals. Loads with `:skip-loaded`, so a module already on
+;; `*features*` (loaded by the `run-project`/`run-project-tests` that called the
+;; check pre-flight, or by a prior require) is NOT re-evaluated — which would
+;; re-run its `defmacro`s and trip the hot-reload "macro redefined" warning.
+;; Standalone callers (`nest check`, an interactive `(check-project)`) start from
+;; an image with nothing loaded, so this still loads every source.
+(defn project--ensure-loaded (root) (project-setup root) (project-load-sources root :skip-loaded))
 
 ;; Structured analogue of `check-project` — returns a flat list of
 ;; `{:file :line :col :message}` maps instead of printing GNU lines + a
@@ -529,7 +579,10 @@ resolve in the advisory checker. Returns the project root."
     (when (nil? root)
       (error "run-project: not in a Brood project (no project.blsp found from " (cwd) ")"))
     (project-setup root)
-    (let (modname (first *project-main*) fname (second *project-main*))
+    ;; A `--main` override (set via `set-project-main`) wins over the manifest's
+    ;; `:main`, which `project-setup` just re-applied into `*project-main*`.
+    (let (entry (or *project-main-override* *project-main*)
+          modname (first entry) fname (second entry))
       (require modname)
       ;; A `(defmodule …)` entry defines its fn as `modname/fname` (ADR-065); a
       ;; module file with no `defmodule` header defines it bare. Prefer the
@@ -1112,6 +1165,18 @@ resolve in the advisory checker. Returns the project root."
     "*.swp\n"
     ".DS_Store\n"))
 
+;; The scaffolded .gitattributes: GitHub's Linguist doesn't know the `.blsp`
+;; extension, so it renders Brood source as plain text. Until Brood is its own
+;; Linguist language, map `.blsp` to Clojure — the closest common Lisp grammar
+;; (it highlights [] vectors, {} maps, and :keywords, all of which Brood uses).
+;; `linguist-detectable=false` keeps `.blsp` out of the repo's language stats
+;; (so a Brood project isn't mislabelled "Clojure") while still highlighting.
+(defn project--gitattributes-template ()
+  (str "# Brood source (.blsp) is a Lisp; until it's its own Linguist language,\n"
+    "# highlight it as Clojure on GitHub — the closest common grammar — but keep\n"
+    "# it out of the language stats (it's Brood, not Clojure).\n"
+    "*.blsp linguist-language=Clojure linguist-detectable=false\n"))
+
 ;; (new-project "foobar") — scaffold ./foobar with a runnable two-module
 ;; skeleton: project.blsp + src/main.blsp + src/hello.blsp (where main `require`s
 ;; hello and calls into it) + a paired test file for each, so `cd foobar && nest
@@ -1192,6 +1257,7 @@ resolve in the advisory checker. Returns the project root."
       (make-dir skill-dir)
       (spit (path-join nm "project.blsp") (project--manifest-template actual-name))
       (spit (path-join nm ".gitignore") (project--gitignore-template))
+      (spit (path-join nm ".gitattributes") (project--gitattributes-template))
       (spit (path-join nm "CLAUDE.md") (project--claude-md-template actual-name))
       (spit (path-join nm ".mcp.json") (project--mcp-json-template actual-name))
       (spit (path-join docs-dir "brood-for-claude.md") (%builtin-doc 'brood-for-claude))
@@ -1207,6 +1273,7 @@ resolve in the advisory checker. Returns the project root."
                      else "")))
         (println (str "  " nm "/project.blsp"))
         (println (str "  " nm "/.gitignore"))
+        (println (str "  " nm "/.gitattributes"))
         (println (str "  " nm "/CLAUDE.md"))
         (println (str "  " nm "/.mcp.json"))
         (println (str "  " nm "/docs/brood-for-claude.md"))
