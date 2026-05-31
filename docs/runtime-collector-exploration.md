@@ -117,12 +117,30 @@ The live set = everything reachable from these, transitively through RUNTIME cod
     pass: every RUNTIME handle in globals + both LOCAL generations + roots/env_roots/
     dynamics is evacuated-and-rewritten; the `vm_cache` + `global_ic` are cleared;
     the compacted region is swapped in (`mem::take` avoids the borrow conflict).
-    **Opt-in — never wired into the automatic GC.** Validated: reclaims 2999/3001
+    Validated: reclaims 2999/3001
     after churn; program correct afterwards incl. a RUNTIME closure held in a LOCAL
     binding *across* a collect (`(let (g f) (runtime-collect) (g 3))`); green under
     `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`; full suite 437/437 both engines.
     **Bounds memory** — 40k redefs: no-collect 34 MB (growing) vs periodic collect
     14.5 MB (flat). The Stage-5 goal, for the single-process case.
+  - **2b-auto — automatic safepoint trigger. ✅ done (branch `runtime-gc`).** The
+    eval safepoint now calls `Heap::maybe_runtime_collect` (the shared-code analog of
+    the LOCAL `collect`), so the single-process case is bounded with **no explicit
+    `(runtime-collect)`** — the builtin is now just the force form. **Safe at exactly
+    the points the LOCAL collect is**: it only *rewrites* RUNTIME handles (never moves
+    LOCAL data), and the rooted set it touches — globals + `roots`/`env_roots`/
+    `dynamics` + both LOCAL generations — is the same ADR-061 invariant the LOCAL
+    safepoint relies on (so the VM's frame slots on `roots` are covered), plus the
+    live `expr`/`env` passed in via `runtime_collect_with`; gated on the same
+    `!macro_block_active()` condition. **Adaptive trigger** `rt_gc_threshold`: a
+    closure-count floor (`rt_gc_floor()` — 4096 default, ~4 MB of churn; 256 under
+    `BROOD_GC_STRESS`, nonzero like `major_floor` so stress doesn't recompact every
+    safepoint; `BROOD_RT_GC_FLOOR` override), reset to `max(floor, 2*live)` after a
+    real collect. A **shared** runtime (collect can't run without 2c) backs off
+    `2*count` so a multi-process runtime attempts only O(log) times as it grows.
+    Tests: `auto_safepoint_collect_bounds_runtime_region` (6000 redefs → region stays
+    ~1900 ≪ 6000, `f` still correct); green under `BROOD_GC_STRESS=1
+    BROOD_GC_VERIFY=1`. The manual-path tests opt out via `set_rt_auto_collect(false)`.
   - **2c — runtime-wide stop-the-world (design; the race-prone part, deferred).**
     Lets the collector run when *other processes are live* — today 2b's `Arc::get_mut`
     gate skips (`:ran false`) because parked processes still hold runtime-`Arc`
@@ -159,10 +177,12 @@ The live set = everything reachable from these, transitively through RUNTIME cod
 
 ## Effort / risk
 
-The compacting collector is the **single largest and riskiest** remaining kernel
-piece: it introduces runtime-wide STW (new, race-prone) and a moving GC over shared
-cross-process state. Step 1 (estimator) is small and safe and worth doing on its
-own as a diagnostic; Step 2 should wait for demonstrated need (a long server
-session), per ADR-011 / the dogfooding principle — accept a slow, bounded,
-non-corrupting leak rather than contort the hot read path for memory reclaimable
-later.
+**Status:** Steps 1, 2a, 2b, and 2b-auto are **done and on `main`** — the single-
+process / quiescent case is fully bounded *automatically* (no `(runtime-collect)`
+call needed), validated under `BROOD_GC_STRESS`/`VERIFY`. The remaining piece, **2c
+(runtime-wide stop-the-world)**, stays deferred: it's the single largest and most
+race-prone kernel piece (the project's known races live in the scheduler), it's
+only needed for a long-lived **multi-process** server that never quiesces, and it
+requires contorting the hot code-read path (swappable region) — so it waits for a
+demonstrated need (per ADR-011 / the dogfooding principle), accepting a slow,
+bounded, non-corrupting leak in that one not-yet-real scenario.

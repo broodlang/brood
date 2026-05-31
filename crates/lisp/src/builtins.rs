@@ -1455,7 +1455,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("mem-soft-limit", &[], "Soft memory ceiling in bytes (0 = unlimited); crossing it raises a catchable E0043 at the next safepoint."),
     ("gc-stats", &[], "A snapshot map of this process's GC activity: :collections, :copied, :reclaimed (cumulative object counts), :live, :live-bytes, :threshold (next-collection trigger), and :debug-build (true if built with debug assertions — not a perf build). Per-process — reports the caller's own heap."),
     ("gc-collect", &[], "Force a collection of this process's LOCAL heap now, returning the post-collection gc-stats map. An observability/test aid, not a load-bearing trigger — automatic collection at the eval safepoint already keeps memory bounded."),
-    ("runtime-collect", &[], "Compact the shared RUNTIME code region, reclaiming superseded versions of redefined globals (hot-reload churn). Returns {:before N :after M :reclaimed (N-M) :ran bool} (closure counts). Runs only when this runtime is uniquely owned (no other live process) — otherwise :ran is false and nothing changes; opt-in (never automatic). ADR-076 follow-up / docs/runtime-collector-exploration.md."),
+    ("runtime-collect", &[], "Compact the shared RUNTIME code region, reclaiming superseded versions of redefined globals (hot-reload churn). Returns {:before N :after M :reclaimed (N-M) :ran bool} (closure counts). Runs only when this runtime is uniquely owned (no other live process) — otherwise :ran is false and nothing changes. Usually unnecessary: the eval safepoint auto-compacts once hot-reload churn crosses a threshold (single-process); this forces it now. ADR-076 follow-up / docs/runtime-collector-exploration.md."),
     ("gc-trace", &["on?"], "Query (no arg) or set (truthy arg) per-collection GC trace logging for this process; returns the resulting state. When on, each minor/major collection prints a one-line summary to stderr. Defaulted from BROOD_GC_TRACE."),
     ("eval", &["form"], "Evaluate a form in the global environment."),
     ("read-string", &["s"], "Parse and return the first form in string s."),
@@ -2224,7 +2224,9 @@ fn gc_stats_map(heap: &mut Heap) -> Value {
 /// `(runtime-collect)` — compact the shared RUNTIME code region now (reclaim
 /// superseded hot-reload versions), returning `{:before :after :reclaimed :ran}`.
 /// `:ran` is false (and nothing changes) when the runtime is shared with another
-/// live process — see [`Heap::runtime_collect`]'s safety gate.
+/// live process — see [`Heap::runtime_collect`]'s safety gate. Rarely needed: the
+/// eval safepoint auto-compacts ([`Heap::maybe_runtime_collect`]) once churn
+/// crosses the threshold; this is the explicit/force form.
 fn runtime_collect(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let (before, after, ran) = match heap.runtime_collect() {
         Some((b, a)) => (b, a, true),
