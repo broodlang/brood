@@ -125,10 +125,14 @@ simplest-first — deliberately **no inference engine** (see the rationale in
   Example sigs: `%add: (number,number)→number`, `first: (list|vector)→any`,
   `string-length: (string)→int`, `string->number: (string)→number|nil`.
 - ✅ **Curated stdlib** — a small hand-written table for the variadic /
-  `reduce`-based / higher-order Brood closures the checker can't infer but that
-  matter: `+ - * / < <= > >= mod`, `map`, `filter`, `reduce`. Hand-vetted, so
-  sound. This is what makes `(+ 1 "x")` catchable even though `+` is
-  `(reduce %add 0 xs)`.
+  `reduce`-based / branchy / higher-order Brood closures the checker can't infer
+  but that matter: `+ - * / < <= > >= mod`, `map`, `filter`, `reduce`, `fold`,
+  plus common helpers with branchy or nested-param bodies — `even? odd? abs`
+  (numeric), `not zero?` (any → bool, for the result type), `count length`
+  (string|map|seq → int). Hand-vetted against `std/prelude.blsp`, so sound; the
+  domains are kept to the widest type the body accepts so a tighter sig never
+  false-positives. This is what makes `(+ 1 "x")` and `(even? "x")` catchable
+  even though both are plain Brood closures.
 - ✅ **Basic inference** (`check::infer_sig`) — *only* for a fn whose body is a
   **single straight-line expression** (no `if`/`cond`/`when`/`let`/`match`/
   recursion, no `&optional`/rest params): each closure parameter inherits the
