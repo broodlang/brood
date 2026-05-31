@@ -453,7 +453,7 @@ resolve in the advisory checker. Returns the project root."
 ;; name bound twice — not on a short name reused across distinct namespaces.
 (defn project--duplicate-def-warnings (files)
   (let (by-name (fold (fn (acc path)
-                        (fold (fn (m nm) (assoc m nm (cons path (get m nm))))
+                        (fold (fn (m nm) (map-assoc m nm (cons path (map-get m nm nil))))
                           acc
                           (project--file-def-names path)))
                   {}

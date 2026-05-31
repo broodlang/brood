@@ -128,17 +128,20 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
       (= c "u") (json--unicode s (inc i) n)
       :else (error "json: invalid escape '\\" c "' at index " i))))
 
+;; `acc` is the chars/escapes collected in reverse; assemble with one
+;; `(apply str …)` at the close quote. The old `(str acc c)` per char rebuilt
+;; the whole accumulator each step — O(n²) over a long string body.
 (defn json--string--acc (s i n acc)
   (let (c (json--at s i n))
     (cond
       (= c "") (error "json: unterminated string")
-      (= c "\"") [acc (inc i)]
-      (= c "\\") (let ([ch j] (json--escape s (inc i) n)) (json--string--acc s j n (str acc ch)))
-      :else (json--string--acc s (inc i) n (str acc c)))))
+      (= c "\"") [(apply str (reverse acc)) (inc i)]
+      (= c "\\") (let ([ch j] (json--escape s (inc i) n)) (json--string--acc s j n (cons ch acc)))
+      :else (json--string--acc s (inc i) n (cons c acc)))))
 
 (defn json--string (s i n)
   "A string body starting at `i` (just after the opening quote). Returns `[str end]`."
-  (json--string--acc s i n ""))
+  (json--string--acc s i n nil))
 
 ;; -- literals --
 (defn json--lit (s i n word val)
@@ -178,7 +181,7 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
                  j3
                  (json--skip-ws s j2 n)
                  acc2
-                 (assoc acc (keyword k) v)  ; JSON keys → keywords
+                 (map-assoc acc (keyword k) v)  ; JSON keys → keywords (acc is always a map)
                  c
                  (json--at s j3 n))
             (cond

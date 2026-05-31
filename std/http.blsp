@@ -136,7 +136,9 @@ the raw request string, or nil if the peer closed without sending anything."
   (response 404 {"Content-Type" "text/plain; charset=utf-8"} "Not Found"))
 
 (defn http--render-headers (headers)
-  (fold (fn (acc kv) (str acc (first kv) ": " (second kv) "\r\n")) "" (map-pairs headers)))
+  ;; Render each header line, then one `(apply str …)` — the old `(str acc …)`
+  ;; fold rebuilt the whole accumulator per header (O(headers²) in total bytes).
+  (apply str (map (fn (kv) (str (first kv) ": " (second kv) "\r\n")) (map-pairs headers))))
 
 (defn render-response (resp)
   "Render a response map into the HTTP/1.0 wire string (adds Content-Length + Connection: close)."
