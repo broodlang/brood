@@ -129,6 +129,68 @@ fn two_nodes_connect_and_message() {
     );
 }
 
+/// A **clean** peer exit (process returns → OS closes the socket) fires
+/// `[:nodedown]` on the survivor **promptly** — via the reader's socket-EOF path,
+/// not the ~6s heartbeat timeout — and drops the peer from `(nodes)`.
+///
+/// Regression guard for a misdiagnosed report ("clean disconnects are not detected
+/// until heartbeat timeout"): in fact the kernel has detected clean close since
+/// the reader's `drop_link`-on-EOF landed (2026-05-28). The survivor's
+/// `(after 5000 …)` cap is *below* the 6s heartbeat window, so reaching the
+/// `[:nodedown]` clause proves close-detection rather than heartbeat liveness.
+/// (The dialer-watches-acceptor direction; the symmetric case works the same.)
+#[test]
+fn clean_peer_exit_fires_nodedown_promptly() {
+    let _g = port_lock();
+    let dir = std::env::temp_dir().join(format!("brood-dist-nodedown-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let port_a = free_port();
+    let port_b = free_port();
+
+    // Node B: come up, accept A's link, stay briefly, then *return* — a clean exit
+    // that closes the socket (the `/quit` path, not a `kill`).
+    let quitter = format!(
+        r#"
+(node-start :b "127.0.0.1:{port_b}" "secret")
+(sleep 1500)
+"#
+    );
+
+    // Node A: connect, monitor B by the authoritative name `connect` returns, then
+    // wait for `[:nodedown]`. B exits ~1.5s in; nodedown must arrive well under the
+    // 5s cap (which is itself under the 6s heartbeat) — and `(nodes)` must prune.
+    let watcher = format!(
+        r#"
+(node-start :a "127.0.0.1:{port_a}" "secret")
+(def peer (connect "b@127.0.0.1:{port_b}"))
+(monitor-node peer)
+(receive
+  ([:nodedown p]
+    (if (empty? (nodes))
+      (println "NODEDOWN-OK " p)
+      (println "NODEDOWN-BUT-NODES-NOT-PRUNED " (nodes))))
+  (after 5000 (println "TIMEOUT-no-nodedown " (nodes))))
+"#
+    );
+
+    let mut b = spawn_brood(&dir, "quitter.blsp", &quitter);
+    wait_until_listening(port_b);
+    let a = spawn_brood(&dir, "watcher.blsp", &watcher);
+
+    let out = a.wait_with_output().expect("watcher finished");
+    let _ = b.kill(); // already exited cleanly; reap defensively
+    let _ = b.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success() && stdout.contains("NODEDOWN-OK"),
+        "expected prompt nodedown + pruned (nodes) on a clean peer exit.\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+    );
+}
+
 /// Run a `.blsp` program in a fresh `brood` subprocess with extra env vars —
 /// used by the Unix-socket tests to sandbox `$HOME`/`$XDG_*` (so the cookie file
 /// lands in the test's temp dir, never the runner's real `~/.config`) and to set
