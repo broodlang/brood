@@ -35,7 +35,7 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use smallvec::SmallVec;
@@ -209,18 +209,68 @@ fn gc_count_env(key: &str) -> Option<usize> {
     }
 }
 
+/// Live **green-process** gauge: incremented when a process is spawned,
+/// decremented when it is torn down (the scheduler calls [`live_process_inc`] /
+/// [`live_process_dec`]). The root thread is *not* counted — `gc_floor`'s
+/// `.max(1)` covers it. Kept here in `core` so the GC can read it without a
+/// `core → process` dependency; `process` is the only writer.
+static LIVE_PROCESSES: AtomicUsize = AtomicUsize::new(0);
+
+/// Note a newly spawned green process (scheduler `spawn`).
+pub fn live_process_inc() {
+    LIVE_PROCESSES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Note a torn-down green process (scheduler `deregister`).
+pub fn live_process_dec() {
+    LIVE_PROCESSES.fetch_sub(1, Ordering::Relaxed);
+}
+
+/// Current count of live green processes (excludes the root).
+pub fn live_process_count() -> usize {
+    LIVE_PROCESSES.load(Ordering::Relaxed)
+}
+
+/// Object-count budget a process may accumulate before its **first** GC (the
+/// initial/minimum value of the adaptive `gc_threshold`, which after each GC
+/// becomes `max(gc_floor, live*2)` — so a genuinely large live set keeps its own
+/// `live*2` threshold and the floor is irrelevant to it). The floor therefore
+/// only bites churny processes whose working set stays *below* it.
+///
+/// **Process-count-aware** (the fix for the `pfib` 1-GB blowup): a fixed object
+/// budget is divided among the live processes, so fanning out N short-lived
+/// churny processes doesn't have each one climb to the single-process ceiling
+/// before collecting. A lone process is unchanged at `FLOOR_MAX`; the
+/// per-process floor scales down toward `FLOOR_MIN` as concurrency rises
+/// (e.g. 100-way `pfib`: ~64K each → ~4K each, ~990 MB → ~90 MB peak, no
+/// throughput cost — the churn GCs were happening regardless, just later).
+///
+/// Read only at process creation and after each GC (never on the allocation hot
+/// path), so the relaxed atomic load is free. `BROOD_GC_FLOOR` / `BROOD_GC_STRESS`
+/// still pin a fixed value and opt out of the adaptive policy.
 fn gc_floor() -> usize {
-    static FLOOR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *FLOOR.get_or_init(|| {
+    // An explicit override pins a fixed floor and bypasses the adaptive policy —
+    // used by the GC stress tests and honoured by the "non-default GC config"
+    // benchmark guard. Cached: the env is read once.
+    static OVERRIDE: OnceLock<Option<usize>> = OnceLock::new();
+    let fixed = *OVERRIDE.get_or_init(|| {
         if std::env::var_os("BROOD_GC_STRESS").is_some() {
-            0
+            Some(0)
         } else {
-            // 64 KB of cons cells worth (~3000 entries) is well above per-call
-            // working sets but trivial vs the GBs a long-running process leaks.
             // Overridable for tuning via `BROOD_GC_FLOOR` (object count, K/M ok).
-            gc_count_env("BROOD_GC_FLOOR").unwrap_or(64 * 1024)
+            gc_count_env("BROOD_GC_FLOOR")
         }
-    })
+    });
+    if let Some(n) = fixed {
+        return n;
+    }
+    // ~64K objects for a lone process (well above per-call working sets, trivial
+    // vs the GBs a long-running process leaks); ~4K is the floor under heavy
+    // fan-out (below this, GC churn starts to cost more than the memory saved).
+    const FLOOR_MAX: usize = 64 * 1024;
+    const FLOOR_MIN: usize = 4 * 1024;
+    let live = live_process_count().max(1);
+    (FLOOR_MAX / live).clamp(FLOOR_MIN, FLOOR_MAX)
 }
 
 /// RUNTIME-closure count at or above which the eval safepoint auto-runs a

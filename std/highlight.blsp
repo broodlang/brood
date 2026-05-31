@@ -193,26 +193,69 @@ highlight, isearch overlays, and bracket-match are all such ranges."
     nil
     ranges))
 
-(defn fontify-runs--face (base spans ranges k)
-  "The face for run char `k` (offset `base+k`): the lexer span face with every
-covering range face merged on top (ranges win)."
-  (let (pos (+ base k)
-        sf (face-at spans pos)
-        rf (ranges-face ranges pos))
-    (cond
-      (nil? rf) sf
-      (nil? sf) rf
-      :else (into sf rf))))
+(defn fontify-runs--drop (spans pos)
+  "Drop the leading spans that end at or before `pos` — they can't cover `pos` or any
+later offset. The monotonic-advance helper that keeps the span lookup O(1) amortized
+as the tiler walks a line left-to-right (`spans` must be ascending and non-overlapping,
+which `highlight-spans` guarantees)."
+  (cond
+    (empty? spans) spans
+    :else (let ([s e f] (first spans))
+            (if (<= e pos) (fontify-runs--drop (rest spans) pos) spans))))
+
+(defn fontify-runs--head-face (spans pos)
+  "The face of `spans`' head span iff it covers `pos`, else nil — assumes `spans` has
+already been advanced past every span ending at or before `pos` (`fontify-runs--drop`),
+so only the head can be the covering one."
+  (cond
+    (empty? spans) nil
+    :else (let ([s e f] (first spans))
+            (if (and (>= pos s) (< pos e)) f nil))))
+
+(defn fontify-runs--push (acc seg face)
+  "Cons `[seg face]` onto `acc`, coalescing into the previous run when the faces are
+equal (so touching same-face spans stay one run, as the per-char coalescer produced)."
+  (cond
+    (empty? acc) (cons [seg face] acc)
+    :else (let ([pseg pface] (first acc))
+            (if (= pface face)
+              (cons [(str pseg seg) face] (rest acc))
+              (cons [seg face] acc)))))
+
+(defn fontify-runs--spans (text base end spans cur acc)
+  "O(spans) tiler for a line with no overlay `ranges`: emit a nil-faced run for each
+gap between the lexer `spans` and each span's text in its own face, over `[cur, end)`.
+`spans` must be advanced past `cur` and is consumed left-to-right — no per-char scan."
+  (cond
+    (or (empty? spans) (>= (first (first spans)) end))
+    (reverse (if (< cur end)
+               (fontify-runs--push acc (substring text (- cur base) (- end base)) nil)
+               acc))
+    :else (let ([s e f] (first spans)
+                lo (max s cur)
+                hi (min e end)
+                acc1 (if (> lo cur)
+                       (fontify-runs--push acc (substring text (- cur base) (- lo base)) nil)
+                       acc)
+                acc2 (fontify-runs--push acc1 (substring text (- lo base) (- hi base)) f))
+            (fontify-runs--spans text base end (rest spans) hi acc2))))
 
 (defn fontify-runs--acc (text base spans ranges len i start cur acc)
   "Tail-recursive run-length coalescer: emit a `[substring face]` run whenever the
-per-char face changes."
+per-char face changes. `spans` is advanced monotonically (`fontify-runs--drop`) so the
+whole line costs O(chars + spans), not O(chars × spans); `ranges` stays a linear merge
+(the overlay channel — region / overlays / brackets — is tiny). The per-char path: used
+only for the few lines an overlay range actually touches (`fontify-runs` filters)."
   (if (>= i len)
     (reverse (cons [(substring text start len) cur] acc))
-    (let (f (fontify-runs--face base spans ranges i))
+    (let (pos (+ base i)
+          spans2 (fontify-runs--drop spans pos)
+          sf (fontify-runs--head-face spans2 pos)
+          rf (ranges-face ranges pos)
+          f (cond (nil? rf) sf (nil? sf) rf :else (into sf rf)))
       (if (= f cur)
-        (fontify-runs--acc text base spans ranges len (inc i) start cur acc)
-        (fontify-runs--acc text base spans ranges len (inc i) i f
+        (fontify-runs--acc text base spans2 ranges len (inc i) start cur acc)
+        (fontify-runs--acc text base spans2 ranges len (inc i) i f
           (cons [(substring text start i) cur] acc))))))
 
 (defn fontify-runs (text base spans ranges)
@@ -220,12 +263,23 @@ per-char face changes."
 `[substring face]` runs: each char's face is its `spans` lexer face with every
 covering `ranges` (`[lo hi face]`) face merged on top, and a new run starts wherever
 that face changes. The shared run-length tiler — callers turn runs into display ops
-or HTML; `()` for empty `text`."
+or HTML; `()` for empty `text`. `spans` must be ascending + non-overlapping (the
+`highlight-spans` shape) so the tiler can advance through them in lockstep with `text`;
+`ranges` may overlap and be unordered (it's merged linearly). Lines no overlay range
+touches take an O(spans) path; only lines a range crosses pay the per-char merge."
   (let (len (string-length text))
     (if (= len 0)
       '()
-      (fontify-runs--acc text base spans ranges len 1 0
-        (fontify-runs--face base spans ranges 0) '()))))
+      (let (end (+ base len)
+            spans0 (fontify-runs--drop spans base)
+            line-ranges (filter (fn ([lo hi f]) (and (< lo end) (> hi base))) ranges))
+        (if (empty? line-ranges)
+          (fontify-runs--spans text base end spans0 base '())
+          (fontify-runs--acc text base spans0 line-ranges len 1 0
+            (let (sf (fontify-runs--head-face spans0 base)
+                  rf (ranges-face line-ranges base))
+              (cond (nil? rf) sf (nil? sf) rf :else (into sf rf)))
+          '()))))))
 
 (defn highlight-chunks (full base line overrides)
   "Return `[substring face]` chunks that tile `line` — the visible region starting
