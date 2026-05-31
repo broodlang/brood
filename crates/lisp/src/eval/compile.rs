@@ -26,12 +26,33 @@ use crate::core::heap::{EnvRoot, Heap, VmCacheKey};
 use crate::core::value::{self, ClosureId, EnvId, Symbol, Value};
 use crate::error::{error_codes, LispError, LispResult, Pos};
 
-/// Is the compiling VM enabled? **The VM is the default engine** (ADR-076 Stage 3
-/// cutover): every build runs it unless `BROOD_VM` is set to a falsy value
-/// (`0`/`false`/`off`/`no`/empty), which forces the tree-walker — the one-env-var
-/// escape hatch retained for at least one release. Any other `BROOD_VM` value (or
-/// none) selects the VM. Read once and cached; the choice can't change mid-run.
+thread_local! {
+    /// Per-thread engine override for the differential test harness (and any tool
+    /// that wants to pin the engine): `Some(true)` forces the VM, `Some(false)` the
+    /// tree-walker, `None` defers to the cached `BROOD_VM`/default choice. Checked
+    /// before the cache so it wins; only a top-level form consults it, so the cost
+    /// is negligible. See [`set_forced_engine`].
+    static FORCED_ENGINE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Force (or clear) the execution engine for the current thread, overriding
+/// `BROOD_VM` and the build default — lets one process run a form through *both*
+/// engines (the differential harness, `crates/lisp/tests/differential.rs`).
+/// `Some(true)` = VM, `Some(false)` = tree-walker, `None` = default.
+pub fn set_forced_engine(choice: Option<bool>) {
+    FORCED_ENGINE.with(|c| c.set(choice));
+}
+
+/// Is the compiling VM enabled? A per-thread [`set_forced_engine`] override wins;
+/// otherwise **the VM is the default engine** (ADR-076 Stage 3 cutover): every build
+/// runs it unless `BROOD_VM` is set to a falsy value (`0`/`false`/`off`/`no`/empty),
+/// which forces the tree-walker — the one-env-var escape hatch retained for at least
+/// one release. Any other `BROOD_VM` value (or none) selects the VM. The env/default
+/// choice is read once and cached; it can't change mid-run, but the override can.
 pub fn vm_enabled() -> bool {
+    if let Some(forced) = FORCED_ENGINE.with(|c| c.get()) {
+        return forced;
+    }
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     fn truthy(v: &str) -> bool {
         !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "off" | "no")
@@ -106,34 +127,68 @@ pub enum Node {
 }
 
 /// The compiled counterpart of a [`ClosureArm`](crate::core::value::ClosureArm):
-/// the dense frame width (`nparams`) and the compiled body. Cached per closure on
-/// the heap (`Heap::vm_cache_*`). Immutable and `Send + Sync` (its `Node`s hold
-/// only immovable handles + symbols + indices), so it lives behind an `Arc`.
+/// the frame layout and the compiled body. Cached per closure on the heap
+/// (`Heap::vm_cache_*`). Immutable and `Send + Sync` (its `Node`s hold only
+/// immovable handles + symbols + indices), so it lives behind an `Arc`.
+///
+/// Slot layout: required params `0..nrequired`, then `&optional` params
+/// `nrequired..nrequired+noptional`, then the `&` rest slot (if any), then the
+/// `let`/`letrec` binders — up to `nslots`. Only nil-default optionals are
+/// compiled (a real default form defers the arm), so a missing optional is just the
+/// frame's nil — no default eval (and no extra GC rooting) needed.
 pub struct CompiledArm {
-    /// Number of parameters — the call's argv fills slots `0..nparams`.
-    pub nparams: usize,
-    /// Total frame slots: params plus every `let`/`letrec` binder in the body
-    /// (flattened lexical scope). `vm_apply` pushes `nparams` args then nil-fills
-    /// to `nslots`.
+    /// Required params — `argv[0..nrequired]` fill slots `0..nrequired`. Selection
+    /// guarantees `argc >= nrequired`, so they're always present.
+    pub nrequired: usize,
+    /// Count of `&optional` params (all nil-default). A provided arg fills the slot,
+    /// a missing one stays nil.
+    pub noptional: usize,
+    /// `&` rest param's slot, if any: collects `argv[nrequired+noptional..]` into a
+    /// fresh list.
+    pub rest_slot: Option<usize>,
+    /// Total frame slots (params + optionals + rest + `let`/`letrec` binders).
     pub nslots: usize,
     pub body: Node,
 }
 
-/// A compiled closure: the VM-eligible **exact-arity** arms, each `Arc`'d so the
-/// trampoline can hold one across a call (Stage 2b — multi-arity). `dispatch`
-/// selects by argument count (`nparams`), matching eval's preference for an exact
-/// arm. Arms that aren't VM-eligible (variadic — `&optional`/`&` rest — or a
-/// non-core body) are simply absent, so a call to such an arity defers to the
-/// tree-walker.
+/// One arm of a closure: its arity shape plus the compiled body **if** it was
+/// VM-eligible. Every arm is recorded — even ones that defer — so [`arm_for`]
+/// reproduces [`Closure::select_arm`](crate::core::value::Closure::select_arm)
+/// *exactly* (picks the same arm) before checking whether that arm can run on the
+/// VM. Without the full table a variadic arm (which accepts a *range* of arities)
+/// could be picked where the tree-walker would pick an overlapping fixed arm — a
+/// silent wrong-arm miscompile.
+struct ArmSpec {
+    nrequired: usize,
+    noptional: usize,
+    has_rest: bool,
+    compiled: Option<Arc<CompiledArm>>,
+}
+
+impl ArmSpec {
+    fn accepts(&self, argc: usize) -> bool {
+        argc >= self.nrequired && (self.has_rest || argc <= self.nrequired + self.noptional)
+    }
+}
+
+/// A compiled closure: every arm's arity shape + (if VM-eligible) its compiled body.
 pub struct CompiledClosure {
-    pub arms: Vec<Arc<CompiledArm>>,
+    arms: Vec<ArmSpec>,
 }
 
 impl CompiledClosure {
-    /// The compiled arm for a call of `argc` args, if one was VM-compiled. Exact
-    /// arms have distinct arities, so this is unambiguous.
+    /// The compiled arm to run for `argc`, or `None` to defer to the tree-walker.
+    /// Mirrors `Closure::select_arm`: among accepting arms, prefer a fixed (no-rest)
+    /// arm, then the most required params; ties resolve to the later arm (Rust's
+    /// `max_by_key`, same as eval). Returns the winner's compiled body iff it was
+    /// VM-eligible — otherwise `None`, so the tree-walker runs the *same* arm.
     fn arm_for(&self, argc: usize) -> Option<&Arc<CompiledArm>> {
-        self.arms.iter().find(|a| a.nparams == argc)
+        let winner = self
+            .arms
+            .iter()
+            .filter(|a| a.accepts(argc))
+            .max_by_key(|a| (!a.has_rest, a.nrequired))?;
+        winner.compiled.as_ref()
     }
 }
 
@@ -485,33 +540,63 @@ fn compile_closure(heap: &Heap, id: ClosureId) -> Option<CompiledClosure> {
         Some(e) if !heap.is_global(e) => heap.env_chain_names(e),
         _ => Vec::new(),
     };
-    // Snapshot the **exact-arity** arms (params + body); variadic arms
-    // (`&optional`/`&` rest) are skipped — a call to that arity defers. Cloning
-    // ends the `cl` borrow so `compile_body` can re-borrow the heap.
-    let arms_src: Vec<(Vec<Symbol>, Vec<Value>)> = cl
+    // Snapshot every arm's shape + body (cloning ends the `cl` borrow). An arm is
+    // VM-eligible when its body is core vocabulary **and** its `&optional` params all
+    // default to `nil` (a real default form would need eval — deferred; `&` rest is
+    // fine). Ineligible arms are still recorded (`compiled: None`) so `arm_for`
+    // selection stays faithful to `select_arm` (variadic/exact overlap — see ArmSpec).
+    struct Src {
+        required: Vec<Symbol>,
+        optionals: Vec<Symbol>, // names only — eligible arms have all-nil defaults
+        rest: Option<Symbol>,
+        body: Vec<Value>,
+        eligible: bool,
+    }
+    let arms_src: Vec<Src> = cl
         .arms
         .iter()
-        .filter(|a| a.optionals.is_empty() && a.rest.is_none())
-        .map(|a| (a.params.clone(), a.body.clone()))
+        .map(|a| Src {
+            required: a.params.clone(),
+            optionals: a.optionals.iter().map(|(s, _)| *s).collect(),
+            rest: a.rest,
+            body: a.body.clone(),
+            eligible: a.optionals.iter().all(|(_, d)| matches!(d, Value::Nil)),
+        })
         .collect();
-    let mut arms: Vec<Arc<CompiledArm>> = Vec::with_capacity(arms_src.len());
-    for (params, body_forms) in arms_src {
-        let nparams = params.len();
-        // Params occupy slots 0..nparams; `let`/`letrec` binders extend the frame.
-        let mut scope = Scope::with_params_enclosing(&params, enclosing.clone());
-        // A non-core arm body just isn't added — that arity defers, others VM-run.
-        if let Some(body) = compile_body(heap, &body_forms, &mut scope, true) {
-            arms.push(Arc::new(CompiledArm {
-                nparams,
-                nslots: scope.max,
-                body,
-            }));
-        }
+    let mut specs: Vec<ArmSpec> = Vec::with_capacity(arms_src.len());
+    for s in arms_src {
+        let nrequired = s.required.len();
+        let noptional = s.optionals.len();
+        let has_rest = s.rest.is_some();
+        let compiled = if s.eligible {
+            // Slots in order: required, then optionals, then the rest param, then the
+            // body's `let`/`letrec` binders (assigned by `compile_body`).
+            let mut params: Vec<Symbol> = s.required.clone();
+            params.extend_from_slice(&s.optionals);
+            if let Some(r) = s.rest {
+                params.push(r);
+            }
+            let mut scope = Scope::with_params_enclosing(&params, enclosing.clone());
+            compile_body(heap, &s.body, &mut scope, true).map(|body| {
+                Arc::new(CompiledArm {
+                    nrequired,
+                    noptional,
+                    rest_slot: has_rest.then_some(nrequired + noptional),
+                    nslots: scope.max,
+                    body,
+                })
+            })
+        } else {
+            None
+        };
+        specs.push(ArmSpec { nrequired, noptional, has_rest, compiled });
     }
-    if arms.is_empty() {
+    // Nothing to gain if no arm compiled (and a wholly-`None` entry would just mask
+    // the tree-walker on every call) — defer the closure.
+    if specs.iter().all(|s| s.compiled.is_none()) {
         None
     } else {
-        Some(CompiledClosure { arms })
+        Some(CompiledClosure { arms: specs })
     }
 }
 
@@ -771,11 +856,34 @@ fn dispatch(
     Ok(Step::Done(crate::eval::apply(heap, cur_callee, &cur_argv, genv)?))
 }
 
+/// Push a fresh activation frame for `arm` onto `Heap::roots`: required args, then
+/// `&optional` slots (the provided arg, or nil if missing), then the `&` rest list
+/// (the trailing args conased into a fresh list), then nil for the `let`/`letrec`
+/// binders — `nslots` values total. Selection guarantees `args.len() >= nrequired`.
+/// No eval runs here (the rest is a plain `list_from_slice`), so no collection can
+/// happen between reading `args` and rooting the slots.
+fn push_frame(heap: &mut Heap, arm: &CompiledArm, args: &[Value]) {
+    let fixed = arm.nrequired + arm.noptional;
+    for i in 0..fixed {
+        heap.push_root(args.get(i).copied().unwrap_or(Value::Nil));
+    }
+    let mut pushed = fixed;
+    if arm.rest_slot.is_some() {
+        let start = fixed.min(args.len());
+        let rest = heap.list_from_slice(&args[start..]);
+        heap.push_root(rest);
+        pushed += 1;
+    }
+    for _ in pushed..arm.nslots {
+        heap.push_root(Value::Nil);
+    }
+}
+
 /// Run a compiled closure body — the trampoline. `args` become the frame's dense
-/// slots, pushed as a region of `Heap::roots` (so `arena_flip` relocates them); a
-/// tail call truncates the frame and re-pushes the new args, **reusing the frame**
-/// for O(1) stack (proper TCO). Mirrors `eval`'s per-iteration discipline: a GC
-/// safepoint, the soft-memory backstop, reduction-counted preemption, the eval
+/// slots (via [`push_frame`]), pushed as a region of `Heap::roots` (so `arena_flip`
+/// relocates them); a tail call truncates the frame and rebuilds it, **reusing the
+/// region** for O(1) stack (proper TCO). Mirrors `eval`'s per-iteration discipline:
+/// a GC safepoint, the soft-memory backstop, reduction-counted preemption, the eval
 /// deadline, and the non-tail-recursion stack guard.
 fn vm_apply(heap: &mut Heap, compiled0: Arc<CompiledArm>, args: &[Value], genv0: EnvId) -> LispResult {
     // Match `eval`: a GC-block guard (feeds the stack-overflow base) + the stack
@@ -806,16 +914,10 @@ fn vm_apply(heap: &mut Heap, compiled0: Arc<CompiledArm>, args: &[Value], genv0:
     let env_base = heap.env_roots_len();
     let mut genv = heap.root_env(genv0);
 
-    // Build the frame: `nparams` args fill slots 0..nparams, then nil-fill the
-    // `let`/`letrec` binder slots up to `nslots`. The whole region lives on
-    // `Heap::roots`, so `collect` relocates it in place.
+    // Build the frame (required / optional / rest / nil-filled binders). The whole
+    // region lives on `Heap::roots`, so `collect` relocates it in place.
     let base = heap.roots_len();
-    for &a in args {
-        heap.push_root(a);
-    }
-    for _ in args.len()..compiled0.nslots {
-        heap.push_root(Value::Nil);
-    }
+    push_frame(heap, &compiled0, args);
     let mut compiled = compiled0;
     loop {
         // GC safepoint — the frame slots live on `Heap::roots` and the captured env
@@ -853,15 +955,10 @@ fn vm_apply(heap: &mut Heap, compiled0: Arc<CompiledArm>, args: &[Value], genv0:
                 return Ok(v);
             }
             Ok(Step::Tail { compiled: c2, args: a2, genv: g2 }) => {
-                // Reuse the frame: drop the old slots, push the new args + nil-fill
-                // to the new arm's slot count at `base`.
+                // Reuse the frame region: drop the old slots and rebuild at `base`
+                // for the (possibly different, possibly variadic) tail arm.
                 heap.truncate_roots(base);
-                for &a in &a2 {
-                    heap.push_root(a);
-                }
-                for _ in a2.len()..c2.nslots {
-                    heap.push_root(Value::Nil);
-                }
+                push_frame(heap, &c2, &a2);
                 // Switch to the tail callee's env: drop the old env root and root
                 // the new one (`g2` is still valid — no collection since `dispatch`
                 // read it off the callee closure).
