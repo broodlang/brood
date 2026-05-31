@@ -501,6 +501,21 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                 if crate::eval::is_special_form(h) {
                     return None;
                 }
+                // A call whose head is an (as-yet-)**unexpanded macro**. The compile
+                // pass (`macroexpand_all`) expands macros that are already defined,
+                // but a macro **defined after** the closure — a forward reference, or
+                // a prelude fn using a macro defined later in the prelude (e.g.
+                // `sleep` calls `receive`) — can't be expanded then, so it survives
+                // verbatim in the stored body. The VM only runs *expanded* forms (and
+                // would otherwise compile the macro's argument syntax — pin patterns,
+                // `~`-unquotes — as ordinary calls), so defer the whole closure to the
+                // tree-walker, which expands macros lazily at eval time. Macros live
+                // in the global table; a locally-bound head can't be one.
+                if scope.lookup(h).is_none()
+                    && crate::eval::macros::macro_head_id(heap, heap.global(), h).is_some()
+                {
+                    return None;
+                }
             }
             // Function call: compile the callee and every argument (value position).
             let callee = compile_node(heap, head, scope, false)?;
@@ -610,14 +625,14 @@ fn compile_closure(heap: &Heap, id: ClosureId) -> Option<CompiledClosure> {
 /// put movable handles in the cached `Node` tree, so it's left to the tree-walker.
 fn cache_key(heap: &Heap, id: ClosureId) -> Option<VmCacheKey> {
     match id.region() {
-        value::RUNTIME => Some(VmCacheKey::Runtime(id.0)),
+        value::RUNTIME | value::PRELUDE => Some(VmCacheKey::Runtime(id.0)),
         value::LOCAL => {
             // Key on the first arm's first body form. Require an allocated RUNTIME
             // handle so the key is both stable and collision-free (immediates and
             // interned symbols are shared, so they'd alias unrelated closures).
             let first = heap.closure(id).arms.first()?.body.first().copied()?;
             match first {
-                Value::Pair(p) if p.region() == value::RUNTIME => Some(VmCacheKey::LocalBody(p.0)),
+                Value::Pair(p) if p.region() != value::LOCAL => Some(VmCacheKey::LocalBody(p.0)),
                 _ => None,
             }
         }
