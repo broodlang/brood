@@ -149,6 +149,33 @@
           [lo hi] (buffer-region-bounds b))
       (assert= (substring (buffer-text b) lo hi) (buffer-region b)))))
 
+(describe "buffer mark ring"
+  (test "push-mark sets the mark and pushes point onto the ring"
+    (let (b (-> (make-buffer "abcdef") (goto-char 3) push-mark))
+      (assert= (buffer-mark b) 3)
+      (assert= (get b :mark-ring) (list 3))))
+  (test "pop-mark moves point to the newest ring entry, rotating it to the back"
+    (let (b (-> (make-buffer "abcdef") (goto-char 2) push-mark (goto-char 5) push-mark (goto-char 0))
+          p1 (pop-mark b))
+      (assert= (buffer-point p1) 5)                 ; newest mark first
+      (assert= (buffer-point (pop-mark p1)) 2)      ; then the older one
+      (assert= (buffer-point (pop-mark (pop-mark p1))) 5)))  ; ring cycles
+  (test "pop-mark is a no-op on an empty ring"
+    (assert= (buffer-point (pop-mark (goto-char (make-buffer "abc") 1))) 1)))
+
+(describe "buffer search"
+  (test "buffer-search-forward finds the first match at or after `from`"
+    (let (b (make-buffer "abc abc"))
+      (assert= (buffer-search-forward b "abc" 0) 0)
+      (assert= (buffer-search-forward b "abc" 1) 4)
+      (assert= (buffer-search-forward b "zzz" 0) nil)))
+  (test "buffer-search-backward finds the last match before `before`"
+    (let (b (make-buffer "abc abc"))
+      (assert= (buffer-search-backward b "abc" 7) 4)
+      (assert= (buffer-search-backward b "abc" 4) 0)
+      (assert= (buffer-search-backward b "abc" 0) nil)
+      (assert= (buffer-search-backward b "zzz" 7) nil))))
+
 (describe "buffer undo / redo"
   (test "undo restores the text and point before the last edit"
     (let (b (-> (make-buffer "hello") (goto-char 5) (insert "!"))

@@ -1714,6 +1714,30 @@ equality); recover the item itself with `find`."
   "Does `s` contain `needle` as a substring?"
   (>= (index-of s needle) 0))
 
+(defn string-index-of (s needle &optional from)
+  "The 0-based char index of the first occurrence of `needle` in `s` **at or after**
+`from` (default 0), or -1 if there is none. Like `index-of` but with a start offset
+— the substring-search primitive incremental search rides on. `from` is clamped to
+`[0, (string-length s)]`; the empty needle matches at `from`."
+  (let (n (string-length s)
+        start (max 0 (min n (or from 0)))
+        rel (%str-index-of (substring s start n) needle))
+    (if (< rel 0) -1 (+ start rel))))
+
+(defn string-last-index-of--scan (s needle before i best)
+  ;; walk forward collecting match starts < `before`, keeping the greatest seen
+  (let (j (string-index-of s needle i))
+    (cond
+      (< j 0) best
+      (>= j before) best
+      else (string-last-index-of--scan s needle before (inc j) j))))
+(defn string-last-index-of (s needle &optional before)
+  "The 0-based char index of the **last** occurrence of `needle` in `s` whose start
+is strictly **before** `before` (default `(string-length s)`), or -1 if there is
+none. The backward counterpart of `string-index-of` — what reverse incremental
+search rides on."
+  (string-last-index-of--scan s needle (or before (string-length s)) 0 -1))
+
 (defn includes? (coll x)
   "True if `coll` contains `x`. Works on lists, vectors, strings (substring), and maps (membership among values — use `contains?` for keys)."
   (cond
