@@ -3365,6 +3365,36 @@ impl Heap {
         visited.len()
     }
 
+    /// **RUNTIME collector — Step 2a (out-of-place evacuation).** Trace the live
+    /// RUNTIME code reachable from the global bindings + this process's operand roots
+    /// and *copy* it into a fresh [`CodeSlabs`], returning `(new_slabs, forwarding)`.
+    /// Installs nothing and mutates nothing live — purely an evacuation preview, the
+    /// safe foundation for the in-place swap + cross-process handle-rewrite (2b) and
+    /// the runtime-wide stop-the-world (2c). Single-process root view.
+    fn runtime_evacuate(&self) -> (CodeSlabs, RuntimeForward) {
+        let new = CodeSlabs::default();
+        let mut fwd = RuntimeForward::default();
+        let mut roots: Vec<Value> = self.runtime.globals_read().values().copied().collect();
+        roots.extend(self.roots.iter().copied());
+        for r in roots {
+            flush_rt_value(&self.runtime.code, &new, &mut fwd, r);
+        }
+        (new, fwd)
+    }
+
+    /// Test/diagnostic hook for Step 2a: `(total RUNTIME closures, live closures in
+    /// the evacuated region, evacuated-region verifier passed)`. `live` should equal
+    /// [`runtime_live_closure_count`](Self::runtime_live_closure_count) and the
+    /// verifier ([`verify_rt_slabs`]) confirms no handle dangles outside the new,
+    /// compacted region.
+    pub fn runtime_evacuate_check(&self) -> (usize, usize, bool) {
+        let total = self.runtime.code.closures.count();
+        let (new, _fwd) = self.runtime_evacuate();
+        let live = new.closures.count();
+        let ok = verify_rt_slabs(&new);
+        (total, live, ok)
+    }
+
     /// Should the next safepoint run a collection? Compares LOCAL live count
     /// against the adaptive threshold (recomputed by [`Self::collect`] as
     /// `max(GC_FLOOR, 2 * live)`). Cheap: an addition over six small `usize`s
@@ -4634,6 +4664,279 @@ fn flush_env(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, env: EnvId) -
         .collect();
     new.envs[new_idx] = EnvFrame { vars, parent };
     fwd.mint_env(new_idx)
+}
+
+// ===================== RUNTIME-region compaction (ADR-076 follow-up) =====================
+//
+// The compacting collector for the shared RUNTIME code region (the one open GC
+// item — `docs/runtime-collector-exploration.md`). This is **Step 2a: the
+// out-of-place evacuation core** — it traces the live RUNTIME code reachable from a
+// root set and *copies* it into a fresh `CodeSlabs`, building an old→new forwarding
+// map, exactly mirroring the LOCAL GC's `flush_*` but over `CodeSlabs` (`boxcar`,
+// `OnceLock` closures/envs) and RUNTIME handles. It **installs nothing** — the
+// in-place swap + full cross-process handle-rewrite (2b) and the runtime-wide
+// stop-the-world (2c) come next. Out-of-place means it cannot corrupt the live
+// region; it's the safe, testable algorithmic foundation.
+
+/// Old→new RUNTIME index maps, one per slab kind (the RUNTIME counterpart of
+/// [`FlushForward`] — but no generation epoch: RUNTIME handles are region+index).
+#[derive(Default)]
+struct RuntimeForward {
+    pairs: HashMap<u32, u32>,
+    vectors: HashMap<u32, u32>,
+    maps: HashMap<u32, u32>,
+    strings: HashMap<u32, u32>,
+    ropes: HashMap<u32, u32>,
+    closures: HashMap<u32, u32>,
+    envs: HashMap<u32, u32>,
+}
+
+/// Copy a value's RUNTIME sub-graph into `new`, returning the value with its RUNTIME
+/// handles rewritten to their new indices. Non-RUNTIME values (atoms, LOCAL,
+/// PRELUDE) are returned unchanged — only the runtime region moves.
+fn flush_rt_value(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, v: Value) -> Value {
+    match v {
+        Value::Pair(id) if id.region() == RUNTIME => Value::Pair(flush_rt_pair(old, new, fwd, id)),
+        Value::Vector(id) if id.region() == RUNTIME => {
+            Value::Vector(flush_rt_vector(old, new, fwd, id))
+        }
+        Value::Map(id) if id.region() == RUNTIME => Value::Map(flush_rt_map(old, new, fwd, id)),
+        Value::Str(id) if id.region() == RUNTIME => Value::Str(flush_rt_string(old, new, fwd, id)),
+        Value::Rope(id) if id.region() == RUNTIME => Value::Rope(flush_rt_rope(old, new, fwd, id)),
+        Value::Fn(id) if id.region() == RUNTIME => Value::Fn(flush_rt_closure(old, new, fwd, id)),
+        Value::Macro(id) if id.region() == RUNTIME => {
+            Value::Macro(flush_rt_closure(old, new, fwd, id))
+        }
+        _ => v,
+    }
+}
+
+fn flush_rt_pair(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, id: PairId) -> PairId {
+    let key = id.index() as u32;
+    if let Some(&n) = fwd.pairs.get(&key) {
+        return PairId::runtime(n as usize);
+    }
+    // `boxcar` is append-only (no write-back), so we can't reserve-then-fill. RUNTIME
+    // code lists are **immutable and acyclic** — no cons cycle is constructible — so
+    // flush the car/cdr *first*, then push the finished cell once. Sharing (a DAG)
+    // is handled by the `fwd` check on revisit; a true cycle would only arise
+    // through a closure, and `flush_rt_closure` breaks that with `OnceLock`. NOTE:
+    // recursive on the cdr — fine for code (shallow bodies); a pathological
+    // 100k-element quoted literal would want the iterative spine `flush_pair` uses
+    // (2a hardening follow-up).
+    let (h, t) = *old.pairs.get(id.index()).expect("rt pair");
+    let nh = flush_rt_value(old, new, fwd, h);
+    let nt = flush_rt_value(old, new, fwd, t);
+    let new_idx = new.pairs.push((nh, nt));
+    fwd.pairs.insert(key, new_idx as u32);
+    PairId::runtime(new_idx)
+}
+
+fn flush_rt_vector(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, id: VecId) -> VecId {
+    let key = id.index() as u32;
+    if let Some(&n) = fwd.vectors.get(&key) {
+        return VecId::runtime(n as usize);
+    }
+    let items: Vec<Value> = old.vectors.get(id.index()).expect("rt vector").clone();
+    let copied: Vec<Value> = items.into_iter().map(|x| flush_rt_value(old, new, fwd, x)).collect();
+    let new_idx = new.vectors.push(copied);
+    fwd.vectors.insert(key, new_idx as u32);
+    VecId::runtime(new_idx)
+}
+
+fn flush_rt_string(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, id: StrId) -> StrId {
+    let key = id.index() as u32;
+    if let Some(&n) = fwd.strings.get(&key) {
+        return StrId::runtime(n as usize);
+    }
+    let s = old.strings.get(id.index()).expect("rt string").clone();
+    let new_idx = new.strings.push(s);
+    fwd.strings.insert(key, new_idx as u32);
+    StrId::runtime(new_idx)
+}
+
+fn flush_rt_rope(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, id: RopeId) -> RopeId {
+    let key = id.index() as u32;
+    if let Some(&n) = fwd.ropes.get(&key) {
+        return RopeId::runtime(n as usize);
+    }
+    let r = old.ropes.get(id.index()).expect("rt rope").clone();
+    let new_idx = new.ropes.push(r);
+    fwd.ropes.insert(key, new_idx as u32);
+    RopeId::runtime(new_idx)
+}
+
+fn flush_rt_map(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, id: MapId) -> MapId {
+    let key = id.index() as u32;
+    if let Some(&n) = fwd.maps.get(&key) {
+        return MapId::runtime(n as usize);
+    }
+    let node = old.maps.get(id.index()).expect("rt map");
+    let (size, data_map, node_map, is_collision) =
+        (node.size, node.data_map, node.node_map, node.is_collision);
+    let data_snapshot: SmallVec<[(Value, Value); 4]> = node.data.iter().copied().collect();
+    let children_snapshot: SmallVec<[MapId; 4]> = node.children.iter().copied().collect();
+    // CHAMP nodes form a trie (acyclic): flush children + data first, push once.
+    let new_children: SmallVec<[MapId; 4]> = children_snapshot
+        .iter()
+        .map(|&c| {
+            if c.region() == RUNTIME {
+                flush_rt_map(old, new, fwd, c)
+            } else {
+                c
+            }
+        })
+        .collect();
+    let new_data: SmallVec<[(Value, Value); 4]> = data_snapshot
+        .iter()
+        .map(|&(k, v)| (flush_rt_value(old, new, fwd, k), flush_rt_value(old, new, fwd, v)))
+        .collect();
+    let new_idx = new.maps.push(MapNode {
+        size,
+        data_map,
+        node_map,
+        is_collision,
+        data: new_data,
+        children: new_children,
+    });
+    fwd.maps.insert(key, new_idx as u32);
+    MapId::runtime(new_idx)
+}
+
+fn flush_rt_closure(
+    old: &CodeSlabs,
+    new: &CodeSlabs,
+    fwd: &mut RuntimeForward,
+    id: ClosureId,
+) -> ClosureId {
+    let key = id.index() as u32;
+    if let Some(&n) = fwd.closures.get(&key) {
+        return ClosureId::runtime(n as usize);
+    }
+    let cl = old.closures.get(id.index()).expect("rt closure slot").get().expect("rt closure set").clone();
+    // Reserve-then-fill (OnceLock) breaks cyclic closures (a closure whose captured
+    // env binds the closure itself), exactly as `promote_closure` does.
+    let new_idx = new.closures.push(OnceLock::new());
+    fwd.closures.insert(key, new_idx as u32);
+    let arms = cl
+        .arms
+        .iter()
+        .map(|arm| ClosureArm {
+            params: arm.params.clone(),
+            optionals: arm
+                .optionals
+                .iter()
+                .map(|&(s, d)| (s, flush_rt_value(old, new, fwd, d)))
+                .collect(),
+            rest: arm.rest,
+            body: arm.body.iter().map(|&f| flush_rt_value(old, new, fwd, f)).collect(),
+            passthrough: arm.passthrough.clone(),
+        })
+        .collect();
+    let env = cl.env.map(|e| flush_rt_env(old, new, fwd, e));
+    let _ = new
+        .closures
+        .get(new_idx)
+        .unwrap()
+        .set(Closure { name: cl.name, arms, doc: cl.doc, env });
+    ClosureId::runtime(new_idx)
+}
+
+fn flush_rt_env(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, env: EnvId) -> EnvId {
+    if env == EnvId::GLOBAL || env.region() != RUNTIME {
+        return env;
+    }
+    let key = env.index() as u32;
+    if let Some(&n) = fwd.envs.get(&key) {
+        return EnvId::runtime(n as usize);
+    }
+    let (parent, vars_snapshot): (Option<EnvId>, EnvVars) = {
+        let frame = old.envs.get(env.index()).expect("rt env slot").get().expect("rt env set");
+        (frame.parent, frame.vars.iter().copied().collect())
+    };
+    let new_idx = new.envs.push(OnceLock::new());
+    fwd.envs.insert(key, new_idx as u32);
+    let new_parent = parent.map(|p| flush_rt_env(old, new, fwd, p));
+    let vars: EnvVars =
+        vars_snapshot.iter().map(|&(s, v)| (s, flush_rt_value(old, new, fwd, v))).collect();
+    let _ = new.envs.get(new_idx).unwrap().set(EnvFrame { vars, parent: new_parent });
+    EnvId::runtime(new_idx)
+}
+
+/// Verify an evacuated `CodeSlabs`: every RUNTIME handle it contains must point
+/// *within* the new region (`index < that slab's len`). A handle still pointing at
+/// an old index (≥ the new, smaller length) means the evacuation missed a rewrite —
+/// the exact failure mode a moving collector must never ship. (In-bounds is a
+/// necessary soundness check; the redef test additionally pins the live *count*.)
+fn verify_rt_slabs(s: &CodeSlabs) -> bool {
+    let (np, nv, nm, ns, nr, nc, ne) = (
+        s.pairs.count(),
+        s.vectors.count(),
+        s.maps.count(),
+        s.strings.count(),
+        s.ropes.count(),
+        s.closures.count(),
+        s.envs.count(),
+    );
+    let ok = |v: Value| -> bool {
+        match v {
+            Value::Pair(id) if id.region() == RUNTIME => id.index() < np,
+            Value::Vector(id) if id.region() == RUNTIME => id.index() < nv,
+            Value::Map(id) if id.region() == RUNTIME => id.index() < nm,
+            Value::Str(id) if id.region() == RUNTIME => id.index() < ns,
+            Value::Rope(id) if id.region() == RUNTIME => id.index() < nr,
+            Value::Fn(id) | Value::Macro(id) if id.region() == RUNTIME => id.index() < nc,
+            _ => true,
+        }
+    };
+    let env_ok = |e: EnvId| e == EnvId::GLOBAL || e.region() != RUNTIME || e.index() < ne;
+    for i in 0..np {
+        let (h, t) = *s.pairs.get(i).unwrap();
+        if !ok(h) || !ok(t) {
+            return false;
+        }
+    }
+    for i in 0..nv {
+        if !s.vectors.get(i).unwrap().iter().all(|&x| ok(x)) {
+            return false;
+        }
+    }
+    for i in 0..nm {
+        let node = s.maps.get(i).unwrap();
+        if !node.data.iter().all(|&(k, v)| ok(k) && ok(v)) {
+            return false;
+        }
+        if !node.children.iter().all(|c| c.region() != RUNTIME || c.index() < nm) {
+            return false;
+        }
+    }
+    for i in 0..nc {
+        if let Some(cl) = s.closures.get(i).unwrap().get() {
+            for arm in &cl.arms {
+                if !arm.body.iter().all(|&f| ok(f)) || !arm.optionals.iter().all(|&(_, d)| ok(d)) {
+                    return false;
+                }
+            }
+            if let Some(e) = cl.env {
+                if !env_ok(e) {
+                    return false;
+                }
+            }
+        }
+    }
+    for i in 0..ne {
+        if let Some(fr) = s.envs.get(i).unwrap().get() {
+            if !fr.vars.iter().all(|&(_, v)| ok(v)) {
+                return false;
+            }
+            if let Some(p) = fr.parent {
+                if !env_ok(p) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 #[cfg(test)]
