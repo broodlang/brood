@@ -70,9 +70,12 @@ pub fn vm_enabled() -> bool {
 /// `Defer` node: a VM-run body is *fully* compiled, which is what lets `exec_node`
 /// never need an `EnvId` for locals.
 pub enum Node {
-    /// A self-evaluating literal (number, bool, nil, string, keyword). Holds an
-    /// immovable value (atoms, or a RUNTIME/PRELUDE handle from a promoted body),
-    /// so the cached `Node` tree needs no GC rooting.
+    /// A self-evaluating literal (number, bool, nil, string, keyword). **Invariant:
+    /// holds an immovable value** — an inline atom, an interned keyword, or a
+    /// PRELUDE/RUNTIME handle — so the cached `Node` tree (an `Arc` off the GC root
+    /// graph) needs no rooting and can't dangle. Construct only via [`const_node`],
+    /// which `promote`s to enforce this; a bare `Const(local_handle)` is the
+    /// use-after-GC bug fixed 2026-05-31.
     Const(Value),
     /// A lexically-addressed local read: frame-slot `index` (depth 0 in the
     /// slice — only the callee's own params). Reads `root_at(frame_base + index)`.
@@ -302,7 +305,7 @@ fn binding_elems(heap: &Heap, form: Value) -> Option<Vec<Value>> {
 /// in `tail` position. Empty → `nil`. A single form returns that node directly.
 fn compile_body(heap: &Heap, forms: &[Value], scope: &mut Scope, tail: bool) -> Option<Node> {
     if forms.is_empty() {
-        return Some(Node::Const(Value::Nil));
+        return Some(const_node(heap, Value::Nil));
     }
     let n = forms.len();
     let mut nodes = Vec::with_capacity(n);
@@ -386,6 +389,50 @@ fn fn_rest_is_stable(v: Value) -> bool {
     }
 }
 
+/// Bake a self-evaluating literal into a [`Node::Const`], guaranteeing the embedded
+/// value is **immovable**. A compiled `Node` tree lives in an `Arc` *off* the GC
+/// root graph, so the collector neither traces nor relocates a handle inside it: a
+/// LOCAL heap handle (e.g. a freshly-read `Value::Str` in a top-level form, which
+/// `run()` never `promote`s) would dangle after a collection *during that form's own
+/// evaluation* and be read as freed/moved memory by a later sub-form — a
+/// use-after-GC (the bug fixed 2026-05-31; it's why `(do (doc-search …) "lit")`
+/// crashed under GC stress). `promote` freezes a LOCAL string/heap literal into the
+/// immovable RUNTIME code region (the same freeze a `def`/`defn` body's literals
+/// get) and is a no-op for inline atoms, interned keywords, and already-shared
+/// PRELUDE/RUNTIME handles. **Route every literal `Const` through here** — the
+/// invariant is easy to bypass with a bare `Node::Const(form)` (which is exactly how
+/// the `Value::Str` arm originally introduced the bug); the sibling `MakeClosure`
+/// path guards the same hazard via [`fn_rest_is_stable`] (deferring instead of
+/// freezing).
+fn const_node(heap: &Heap, v: Value) -> Node {
+    let frozen = heap.promote(v);
+    debug_assert!(
+        value_is_immovable(frozen),
+        "Node::Const must hold an immovable handle (the Arc'd AST is off the GC root \
+         graph and can't relocate it); promote left a movable {frozen:?}"
+    );
+    Node::Const(frozen)
+}
+
+/// A `Value` carrying no relocatable LOCAL heap handle — an inline scalar, an
+/// interned symbol/keyword, or a PRELUDE/RUNTIME handle. The postcondition
+/// [`const_node`] asserts; the handle kinds mirror those [`Heap::promote`] copies
+/// out of LOCAL.
+#[cfg(debug_assertions)]
+fn value_is_immovable(v: Value) -> bool {
+    match v {
+        Value::Str(id) => id.region() != value::LOCAL,
+        Value::Pair(id) => id.region() != value::LOCAL,
+        Value::Vector(id) => id.region() != value::LOCAL,
+        Value::Map(id) => id.region() != value::LOCAL,
+        Value::Rope(id) => id.region() != value::LOCAL,
+        Value::Fn(id) | Value::Macro(id) => id.region() != value::LOCAL,
+        // Inline scalars (Int/Float/Bool/Nil), interned Sym/Keyword, and the
+        // remaining handle-free kinds carry nothing the GC relocates.
+        _ => true,
+    }
+}
+
 /// The capture list for a nested `(fn …)` — the enclosing lexical environment it
 /// closes over, snapshotted by value (Brood bindings are immutable, so this is
 /// equivalent to capturing the env by reference). Each current-frame lexical maps
@@ -449,24 +496,16 @@ fn compile_make_closure(heap: &Heap, form: Value, scope: &Scope) -> Option<Node>
 /// whole closure to the tree-walker).
 fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Option<Node> {
     match form {
-        // Self-evaluating atoms — immovable (inline scalars, or an interned
-        // keyword `u32`), so embedding the handle directly in the `Const` is safe.
+        // Self-evaluating literals. `const_node` freezes any embedded heap handle
+        // into the immovable RUNTIME region — load-bearing for `Value::Str` (a LOCAL
+        // string baked raw into the off-GC-graph AST is the use-after-GC class; see
+        // `const_node`), a no-op for the inline/interned atoms.
         Value::Int(_)
         | Value::Float(_)
         | Value::Bool(_)
         | Value::Nil
-        | Value::Keyword(_) => Some(Node::Const(form)),
-
-        // A string literal is a *LOCAL* heap handle, but the compiled node it lands
-        // in is snapshotted into an `Arc`'d AST that lives off the GC root graph —
-        // the collector neither traces nor relocates it. A top-level form run via
-        // `run()` is never promoted (only `def`/`defn` bodies are), so a collection
-        // during that form's *own* evaluation (e.g. `(do (heavy-alloc) "lit")`)
-        // would dangle the handle → use-after-GC when a later sub-form reads it.
-        // Freeze it into the immovable RUNTIME code region now — the same promotion
-        // a defn's body literals already get, so the embedded handle never moves.
-        // (Already-immovable PRELUDE/RUNTIME strings: `promote` is a no-op.)
-        Value::Str(_) => Some(Node::Const(heap.promote(form))),
+        | Value::Str(_)
+        | Value::Keyword(_) => Some(const_node(heap, form)),
 
         // A name: a local frame slot if bound, else a global reference.
         Value::Sym(s) => match scope.lookup(s) {
@@ -488,7 +527,7 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                     let then = compile_node(heap, items[2], scope, tail)?;
                     let els = match items.get(3) {
                         Some(&e) => compile_node(heap, e, scope, tail)?,
-                        None => Node::Const(Value::Nil),
+                        None => const_node(heap, Value::Nil),
                     };
                     return Some(Node::If(Box::new(cond), Box::new(then), Box::new(els)));
                 }
