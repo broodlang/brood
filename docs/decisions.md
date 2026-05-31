@@ -5535,3 +5535,64 @@ hierarchical module names (the language change) first, then curate `std/` and li
 the frameworks into packages. Gated like every additive capability (ADR-011) — the
 GUI framework is the first concrete consumer that pulls the hierarchical-name work
 in. Tracked in `roadmap.md` (M1, after Namespaces / Package manager).
+
+## ADR-086 — GUI keys are press/release transitions, not an OS-repeat flood
+
+**Status:** accepted (2026-05-31). The keyboard analogue of ADR-077 (which added
+mouse `:release`/`:drag`); same motive — give the app the *transitions* it needs to
+track a held input itself, rather than a producer-paced stream it can't keep up with.
+
+**Context.** `myedit` had a visible input bug: hold `C-n` and release, and the cursor
+kept scrolling for a beat *after* the key was up. The cause was the GUI key path
+(`gui.rs`): it relayed **every** `ElementState::Pressed` event — including the OS's
+auto-repeat — straight into the subscriber's mailbox, and the `ui-run` loop drains
+**one** message per render (`std/ui.blsp` `:poll` is a single `receive`). When the OS
+repeat rate outruns the render rate (easy under a heavy fontify), the mailbox grows a
+backlog of `:ctrl-n`s; the release was *discarded* (only `Pressed` was handled), so on
+key-up nothing cancelled the backlog and it kept "playing." A producer-driven repeat
+with an unbounded queue and no release signal.
+
+**Decision.** Make the GUI key vocabulary press/release transitions, so repeat is the
+*consumer's* job (paced by its loop, stoppable on release) instead of the OS's:
+
+- **Drop OS auto-repeat.** `Pressed` with winit's `ke.repeat` set is *not* relayed.
+  A held key now yields exactly one down event.
+- **Deliver releases.** `Released` → `[:key-up <key>]`, where `<key>` is the same value
+  a press yields (`:ctrl-n`, `"a"`, `:up`). The press stays the **bare** value, so
+  every existing keymap/dispatch path is untouched — release is purely additive (the
+  ADR-077 move, for keys).
+
+**Missed key-up — the hard part.** A press/release model is only as good as the
+guarantee that the release arrives. The case where it doesn't is **focus loss**: you
+Alt-Tab away mid-hold and let go in another window. Two backstops, belt-and-suspenders:
+
+- **Honor *synthetic* releases.** winit marks focus-driven key events `is_synthetic`.
+  We drop synthetic *presses* (focus-gain replays of still-held keys — they'd be
+  phantom keystrokes) but **deliver synthetic *releases*** — they're precisely "the key
+  was let go while you weren't looking," which is what must stop the repeat.
+- **`:blur` on focus-out.** `WindowEvent::Focused(false)` delivers a `:blur` keyword, so
+  even when no release comes at all the app has an unambiguous "stop everything" signal.
+
+In-focus releases are always real (non-synthetic) key-ups, so they're never missed; the
+only gap is focus change, and both backstops close it. A consumer can layer a hard
+repeat cap on top if it wants absolute insurance, but it isn't needed for correctness.
+
+**Consequences.**
+- *Additive to the press path.* A consumer that ignores `[:key-up …]`/`:blur` (the
+  terminal observer) is unaffected — it just loses nothing it had. Dropping OS
+  auto-repeat *is* a behaviour change for any GUI consumer that relied on it: holding a
+  key now emits one down, and the consumer must drive its own repeat off the down/up
+  pair (which is the point).
+- *Terminal is unchanged.* `term-poll` (crossterm) has no release events and is not
+  touched; a terminal app keeps the terminal's own key repeat. So a portable consumer
+  must treat GUI-style repeat as opt-in — `myedit` gates it on having actually seen a
+  `[:key-up]` (a `:gui-keys` flag), so a release-less terminal never engages it and so
+  can't run away with no release to stop it.
+- *The myedit half.* Track `:held-key`; re-issue it on the refresh `:tick` at a short
+  repeat beat (idle 60 s → 300 ms initial delay → 35 ms rate), restored to idle on
+  `[:key-up]`/`:blur`. Repeat is now paced by the render loop — it can't outrun the
+  screen and stops the instant the key lifts. (Editor-side; lives in `myedit/src`.)
+
+**References.** ADR-077 (mouse `:release`/`:drag` — the same "give the app transitions"
+move), ADR-058 (GUI input as mailbox messages), ADR-056 (the minimal display/input
+vocabulary, grown only when a consumer needs it), ADR-011 (ship the minimal form).
