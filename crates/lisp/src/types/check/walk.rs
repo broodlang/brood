@@ -327,6 +327,9 @@ pub(super) fn check_into(
             ctx.declared_sig(s)
         };
         let sig = declared.clone().or_else(|| sig_of(heap, s));
+        // The real callable's arity is authoritative when known (a `sig!` wrapper
+        // preserves the wrapped fn's arity); fall back to the declared param count
+        // for a file-local defn the read-only checker can't inspect.
         let arity =
             arity_of(heap, s).or_else(|| declared.map(|sg| Arity::exact(sg.params.len())));
         // Unbound-symbol diagnostic: warn only when the head is **truly not
