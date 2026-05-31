@@ -313,6 +313,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![map_ty], list_ty),
         map_pairs,
     );
+    def(
+        heap,
+        "%map-into",
+        Arity::exact(2),
+        Sig::new(vec![map_ty, any], map_ty),
+        map_into,
+    );
 
     // string
     def(
@@ -2065,6 +2072,46 @@ fn hash_map(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     }
     let pairs: Vec<(Value, Value)> = args.chunks_exact(2).map(|kv| (kv[0], kv[1])).collect();
     Ok(heap.map_from_pairs(pairs))
+}
+
+/// The `[k v]` of a pair item — a `[k v]` vector or a `(k v)` list — with
+/// `first`/`second` semantics (missing slots read as `nil`). Used by
+/// [`map_into`] to read the items of an `into`/`zipmap` sequence.
+fn pair_kv(heap: &Heap, who: &str, p: Value) -> Result<(Value, Value), LispError> {
+    match p {
+        Value::Vector(id) => {
+            let v = heap.vector(id);
+            Ok((
+                v.first().copied().unwrap_or(Value::Nil),
+                v.get(1).copied().unwrap_or(Value::Nil),
+            ))
+        }
+        Value::Pair(id) => {
+            let (k, rest) = heap.pair(id);
+            let val = match rest {
+                Value::Pair(rid) => heap.pair(rid).0,
+                _ => Value::Nil,
+            };
+            Ok((k, val))
+        }
+        _ => Err(LispError::wrong_type(heap, who, "pair or vector", p)),
+    }
+}
+
+/// `(%map-into m seq)` — pour each `[k v]` item of `seq` into map `m`, returning
+/// a fresh map, via the transient builder (`Heap::map_from_pairs_into`, see
+/// `docs/transients.md`). The kernel hook behind the prelude's `into` (map
+/// branch), `zipmap`, and `select-keys`; equals `(reduce assoc m seq)` but
+/// mutates only build-local trie nodes, so it allocates O(result-nodes) rather
+/// than O(n·depth).
+fn map_into(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let into = expect_map(heap, "%map-into", arg(args, 0))?;
+    let items = heap.seq_items(arg(args, 1))?;
+    let mut pairs = Vec::with_capacity(items.len());
+    for it in items {
+        pairs.push(pair_kv(heap, "%map-into", it)?);
+    }
+    Ok(heap.map_from_pairs_into(into, pairs))
 }
 
 /// `(map-get m k [default])` — the value `k` maps to, or `default` (nil if

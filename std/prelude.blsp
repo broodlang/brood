@@ -1284,7 +1284,11 @@ structural order (`compare`), so numeric, string, keyword, and vector keys all w
 (defn into (to from)
   "Pour each item of `from` into `to`. For a map, items are `[k v]` pairs (assoc'd, map result); for a vector, items are appended (vector result); otherwise items are appended (list result). Maps in `from` are read as their entries, so `(into [] some-map)` and `(into {} other-map)` both work."
   (cond
-    (map? to) (reduce (fn (m p) (assoc m (first p) (second p))) to from)
+    ;; Map target: build via the transient kernel hook (docs/transients.md) —
+    ;; mutates only build-local trie nodes, so O(result-nodes) allocation, not
+    ;; O(n) fresh path-copies. A map `from` is read as its entries first
+    ;; (`%map-into` takes a list/vector of `[k v]`, not a map).
+    (map? to) (%map-into to (if (map? from) (map-pairs from) from))
     ;; `append to from` is always a list (fold-of-flip-cons), so we re-vectorise.
     ;; That's an extra O(n) pass — acceptable; the previous code silently
     ;; returned a list even when `to` was a vector.

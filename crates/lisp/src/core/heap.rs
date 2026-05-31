@@ -1342,11 +1342,46 @@ impl Heap {
     /// leaf; every other node is structurally shared with the input map.
     pub fn map_assoc(&mut self, id: MapId, key: Value, val: Value) -> Value {
         let hash = self.hash_value(key);
-        let new_root = self.champ_assoc(id, key, val, hash, 0);
+        // A lone assoc has no build-local node to reuse — copy-on-write (`None`).
+        let new_root = self.champ_assoc(id, key, val, hash, 0, None);
         Value::Map(new_root)
     }
 
-    fn champ_assoc(&mut self, id: MapId, key: Value, val: Value, hash: u64, depth: u32) -> MapId {
+    /// True iff `id` names a node *this transient build allocated*, so it is
+    /// safe to mutate in place (see `docs/transients.md`). The rule is a single
+    /// integer compare because `alloc_slot!` only ever appends to the nursery
+    /// and GC cannot fire mid-build: a node whose nursery index is `>= watermark`
+    /// (the slab length captured at build entry) was created by this build; any
+    /// input node — older nursery slot, tenured `old` generation, or a shared
+    /// PRELUDE/RUNTIME region — fails the test and is copied instead. `None`
+    /// watermark is copy-on-write mode: nothing is owned.
+    #[inline]
+    fn is_owned(id: MapId, watermark: Option<usize>) -> bool {
+        match watermark {
+            Some(w) => id.region() == LOCAL && !id.is_old() && id.index() >= w,
+            None => false,
+        }
+    }
+
+    /// Insert/replace `key → val`, in O(log₁₆ N). `watermark` selects the write
+    /// strategy: `None` path-copies every touched node (the immutable
+    /// contract — used by `map_assoc` and all single-op callers); `Some(w)`
+    /// runs the **transient build** — every node this build owns
+    /// ([`is_owned`]) is rewritten in place instead of re-allocated, collapsing
+    /// the per-level `SmallVec` clone + slab push. The *structural* decisions
+    /// (slot, bitmap, rank, position, size) are identical to the copy-on-write
+    /// arm, so both produce the byte-identical canonical CHAMP shape — only the
+    /// write differs (mutate the owned slot vs. allocate a fresh one).
+    fn champ_assoc(
+        &mut self,
+        id: MapId,
+        key: Value,
+        val: Value,
+        hash: u64,
+        depth: u32,
+        watermark: Option<usize>,
+    ) -> MapId {
+        let owned = Self::is_owned(id, watermark);
         // Snapshot the node fields we need — releases the immutable borrow
         // on `self` before we go allocating new slots.
         let node = self.map_node(id);
@@ -1357,30 +1392,50 @@ impl Heap {
         if is_collision {
             // At max depth — all entries share the full hash. Linear scan
             // by `equal`.
-            let data = node.data.clone();
-            let pos = data.iter().position(|(k, _)| self.equal(*k, key));
-            let (new_data, delta) = match pos {
+            let pos = self
+                .map_node(id)
+                .data
+                .iter()
+                .position(|(k, _)| self.equal(*k, key));
+            match pos {
                 Some(i) => {
-                    let mut d = data;
-                    d[i].1 = val;
-                    (d, 0i64)
+                    if owned {
+                        self.local.maps[id.index()].data[i].1 = val;
+                        return id;
+                    }
+                    let mut new_data = self.map_node(id).data.clone();
+                    let size = self.map_node(id).size;
+                    new_data[i].1 = val;
+                    return self.alloc_map_node(MapNode {
+                        size,
+                        data_map: 0,
+                        node_map: 0,
+                        is_collision: true,
+                        data: new_data,
+                        children: SmallVec::new(),
+                    });
                 }
                 None => {
-                    let mut d = data;
-                    d.push((key, val));
-                    (d, 1i64)
+                    if owned {
+                        let n = &mut self.local.maps[id.index()];
+                        n.data.push((key, val));
+                        n.size += 1;
+                        return id;
+                    }
+                    let node = self.map_node(id);
+                    let mut new_data = node.data.clone();
+                    let size = node.size + 1;
+                    new_data.push((key, val));
+                    return self.alloc_map_node(MapNode {
+                        size,
+                        data_map: 0,
+                        node_map: 0,
+                        is_collision: true,
+                        data: new_data,
+                        children: SmallVec::new(),
+                    });
                 }
-            };
-            let new_size = node.size as i64 + delta;
-            let new_node = MapNode {
-                size: new_size as u32,
-                data_map: 0,
-                node_map: 0,
-                is_collision: true,
-                data: new_data,
-                children: SmallVec::new(),
-            };
-            return self.alloc_map_node(new_node);
+            }
         }
 
         let slot = map_champ::slot_at(hash, depth);
@@ -1389,11 +1444,16 @@ impl Heap {
         // Case 1: slot already holds an inline (k, v) entry.
         if data_map & bit != 0 {
             let i = map_champ::rank(data_map, slot);
-            let (existing_k, existing_v) = node.data[i];
+            let (existing_k, existing_v) = self.map_node(id).data[i];
             if self.equal(existing_k, key) {
                 // Overwrite. If the value is identical by `equal`, we could
                 // return id unchanged — but assoc's contract is "returns a
                 // fresh map", and callers can dedup themselves if they care.
+                if owned {
+                    self.local.maps[id.index()].data[i].1 = val;
+                    return id;
+                }
+                let node = self.map_node(id);
                 let mut new_data = node.data.clone();
                 new_data[i].1 = val;
                 let new_node = MapNode {
@@ -1407,7 +1467,8 @@ impl Heap {
                 return self.alloc_map_node(new_node);
             }
             // Different key hashed to same slot. Split: turn this inline
-            // entry into a child sub-node holding both pairs.
+            // entry into a child sub-node holding both pairs. (The child is
+            // freshly allocated, so it is auto-owned for the rest of the build.)
             let other_hash = self.hash_value(existing_k);
             let child_id = self.champ_split(
                 existing_k,
@@ -1418,12 +1479,21 @@ impl Heap {
                 hash,
                 depth + 1,
             );
-            let node = self.map_node(id); // re-borrow after the recursive alloc
             let new_data_map = data_map ^ bit;
             let new_node_map = node_map | bit;
+            let child_pos = map_champ::rank(new_node_map, slot);
+            if owned {
+                let n = &mut self.local.maps[id.index()];
+                n.data.remove(i);
+                n.children.insert(child_pos, child_id);
+                n.data_map = new_data_map;
+                n.node_map = new_node_map;
+                n.size += 1;
+                return id;
+            }
+            let node = self.map_node(id); // re-borrow after the recursive alloc
             let mut new_data = node.data.clone();
             new_data.remove(i);
-            let child_pos = map_champ::rank(new_node_map, slot);
             let mut new_children = node.children.clone();
             new_children.insert(child_pos, child_id);
             let new_node = MapNode {
@@ -1441,10 +1511,16 @@ impl Heap {
         // child handle.
         if node_map & bit != 0 {
             let j = map_champ::rank(node_map, slot);
-            let old_child = node.children[j];
+            let old_child = self.map_node(id).children[j];
             let old_child_size = self.map_node(old_child).size;
-            let new_child = self.champ_assoc(old_child, key, val, hash, depth + 1);
+            let new_child = self.champ_assoc(old_child, key, val, hash, depth + 1, watermark);
             let new_child_size = self.map_node(new_child).size;
+            if owned {
+                let n = &mut self.local.maps[id.index()];
+                n.children[j] = new_child;
+                n.size = n.size + new_child_size - old_child_size;
+                return id;
+            }
             let node = self.map_node(id);
             let mut new_children = node.children.clone();
             new_children[j] = new_child;
@@ -1462,6 +1538,14 @@ impl Heap {
         // Case 3: empty slot — insert a fresh inline entry.
         let new_data_map = data_map | bit;
         let new_data_pos = map_champ::rank(new_data_map, slot);
+        if owned {
+            let n = &mut self.local.maps[id.index()];
+            n.data.insert(new_data_pos, (key, val));
+            n.data_map = new_data_map;
+            n.size += 1;
+            return id;
+        }
+        let node = self.map_node(id);
         let mut new_data = node.data.clone();
         new_data.insert(new_data_pos, (key, val));
         let new_node = MapNode {
@@ -1674,16 +1758,34 @@ impl Heap {
     /// reader path and `(hash-map …)`. Folds `assoc` over a fresh empty
     /// root — O(N log N) overall, in line with CHAMP's per-op cost.
     pub fn map_from_pairs(&mut self, pairs: Vec<(Value, Value)>) -> Value {
+        // Transient build (see `docs/transients.md`): the fresh root is allocated
+        // at `watermark`, so it and every node below it is build-owned and
+        // rewritten in place — no per-`assoc` path-copy. The result is the
+        // byte-identical canonical CHAMP shape a copy-on-write fold would yield.
+        let watermark = Some(self.local.maps.len());
         let mut current = match self.alloc_empty_map() {
             Value::Map(id) => id,
             _ => unreachable!("alloc_empty_map returns Value::Map"),
         };
         for (k, v) in pairs {
-            let next = match self.map_assoc(current, k, v) {
-                Value::Map(id) => id,
-                _ => unreachable!("map_assoc returns Value::Map"),
-            };
-            current = next;
+            let hash = self.hash_value(k);
+            current = self.champ_assoc(current, k, v, hash, 0, watermark);
+        }
+        Value::Map(current)
+    }
+
+    /// Pour `pairs` into the existing map `into` via a transient build. The
+    /// input `into` is *not* build-owned (it was allocated before the watermark),
+    /// so the first `assoc` path-copies its touched nodes once; every node
+    /// allocated thereafter is owned and mutated in place. Backs `(into m …)` /
+    /// `zipmap` / `select-keys` in the prelude. The result equals the
+    /// copy-on-write `(reduce assoc into pairs)`.
+    pub fn map_from_pairs_into(&mut self, into: MapId, pairs: Vec<(Value, Value)>) -> Value {
+        let watermark = Some(self.local.maps.len());
+        let mut current = into;
+        for (k, v) in pairs {
+            let hash = self.hash_value(k);
+            current = self.champ_assoc(current, k, v, hash, 0, watermark);
         }
         Value::Map(current)
     }
