@@ -68,6 +68,15 @@ pub(super) struct Ctx {
     /// Slice 1 trusts these without runtime enforcement; slice 2 (the strong
     /// arrow) makes that trust sound. See `docs/type-annotations.md`.
     declared: HashMap<Symbol, Sig>,
+    /// Parameters whose type was **seeded from the enclosing function's `(sig …)`
+    /// declaration** — the subset of `types` we trust enough to flag a *dead
+    /// clause* on. A guard that narrows one of these to the empty type means a
+    /// `match`/`cond` clause can never run (the declared type is incompatible
+    /// with the pattern). Gating on this set is what keeps the dead-clause lint
+    /// free of false positives: a literal scrutinee or a compiler-generated guard
+    /// (destructure / `match` lowering) never involves a sig-typed param, so it
+    /// is never flagged. Shadowing removes a name (see [`bind`](Ctx::bind)).
+    sig_params: HashSet<Symbol>,
     /// Whether to flag *operand / value-slot* unbound symbols (a bare symbol in
     /// an evaluated argument or a `def`/`let`/`if` value position). On only when
     /// checking a **complete file** ([`check_file`]): there every top-level def
@@ -167,6 +176,9 @@ impl Ctx {
         }
         c.locals.insert(sym);
         c.guards.remove(&sym);
+        // A fresh binding shadows the sig-typed param of the same name — the new
+        // binding's type is unrelated, so it must not drive the dead-clause lint.
+        c.sig_params.remove(&sym);
         if let Some(neighbours) = c.aliases.remove(&sym) {
             for n in neighbours {
                 if let Some(set) = c.aliases.get_mut(&n) {
@@ -217,6 +229,32 @@ impl Ctx {
     /// [`check_file`] like [`add_file_global`](Ctx::add_file_global).
     pub(super) fn add_declared_sig(&mut self, sym: Symbol, sig: Sig) {
         self.declared.insert(sym, sig);
+    }
+    /// Seed parameter `sym` with the type `ty` its enclosing function's `(sig …)`
+    /// declared for it, and remember it as a sig-typed param (so a guard that
+    /// later narrows it to `never` is a provable dead clause). Returns the
+    /// extended scope.
+    pub(super) fn bind_sig_param(&self, sym: Symbol, ty: Ty) -> Ctx {
+        let mut c = self.bind(sym, Some(ty));
+        c.sig_params.insert(sym);
+        c
+    }
+    /// After a guard narrowed this scope from `before`, return a **sig-typed
+    /// param that has just become the empty type** (with the type it had in
+    /// `before`), if any — i.e. a parameter whose declared type is disjoint from
+    /// what the guard asserts, so the branch is unreachable. `sig_params` is tiny
+    /// (one function's params), so this scan is cheap. Only sig-typed params are
+    /// considered, which is exactly what makes the dead-clause lint sound.
+    pub(super) fn newly_dead_sig_param(&self, before: &Ctx) -> Option<(Symbol, Ty)> {
+        self.sig_params.iter().find_map(|&p| {
+            let now_never = self.types.get(&p).is_some_and(Ty::is_never);
+            let was_never = before.types.get(&p).is_some_and(Ty::is_never);
+            if now_never && !was_never {
+                before.types.get(&p).map(|prior| (p, prior.clone()))
+            } else {
+                None
+            }
+        })
     }
     /// Turn on operand / value-slot unbound checking — see [`check_operands`].
     /// [`check_file`] calls this on the root ctx so the whole-file walk runs

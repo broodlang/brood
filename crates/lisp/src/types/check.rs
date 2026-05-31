@@ -519,6 +519,51 @@ mod tests {
     }
 
     #[test]
+    fn dead_clause_flagged_for_a_sig_typed_param() {
+        // A `match` literal pattern that can't match the parameter's declared type.
+        let w =
+            file_warnings("(sig f (int -> keyword))\n(defn f (n) (match n (\"hi\" :s) (_ :other)))");
+        assert!(
+            w.iter()
+                .any(|m| m.contains("unreachable clause") && m.contains("int")),
+            "a string-literal clause when n : int should be dead: {w:?}"
+        );
+        // A `cond` predicate disjoint from the declared parameter type.
+        let w =
+            file_warnings("(sig g (int -> keyword))\n(defn g (n) (cond (string? n) :s :else :o))");
+        assert!(
+            w.iter().any(|m| m.contains("unreachable clause")),
+            "(string? n) when n : int should be dead: {w:?}"
+        );
+    }
+
+    #[test]
+    fn dead_clause_silent_without_sig_or_when_compatible_or_a_literal_scrutinee() {
+        // No `sig` → the parameter is untyped → never flagged (no false positive).
+        assert!(
+            file_warnings("(defn k (n) (match n (\"hi\" :s) (_ :o)))")
+                .iter()
+                .all(|m| !m.contains("unreachable")),
+            "no sig ⇒ no dead-clause"
+        );
+        // A recognised but *compatible* guard narrows, it isn't dead.
+        assert!(
+            file_warnings("(sig h (int -> keyword))\n(defn h (n) (cond (int? n) :i :else :o))")
+                .iter()
+                .all(|m| !m.contains("unreachable")),
+            "(int? n) when n : int must not flag"
+        );
+        // A literal scrutinee is not a sig-typed param — the gate excludes it (this
+        // is the intentional non-match test shape that the naive lint flagged).
+        assert!(
+            file_warnings("(defn m () (match [1 2] ((a) :one) (_ :o)))")
+                .iter()
+                .all(|m| !m.contains("unreachable")),
+            "a literal scrutinee must never be flagged dead"
+        );
+    }
+
+    #[test]
     fn curated_helper_sigs_catch_misuse() {
         // even?/odd?/abs require a number.
         assert!(warnings("(even? \"x\")")
