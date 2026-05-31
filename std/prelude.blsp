@@ -1736,7 +1736,13 @@ equality); recover the item itself with `find`."
 is strictly **before** `before` (default `(string-length s)`), or -1 if there is
 none. The backward counterpart of `string-index-of` — what reverse incremental
 search rides on."
-  (string-last-index-of--scan s needle (or before (string-length s)) 0 -1))
+  (let (b (or before (string-length s)))
+    (cond
+      ;; the empty needle matches at every position 0..length; the last one strictly
+      ;; before `b` is `b-1` (clamped). Handled directly — the scan would loop forever
+      ;; when `b` exceeds the length (every probe returns the same index).
+      (= needle "") (cond (<= b 0) -1 (> b (string-length s)) (string-length s) else (dec b))
+      else (string-last-index-of--scan s needle b 0 -1))))
 
 (defn includes? (coll x)
   "True if `coll` contains `x`. Works on lists, vectors, strings (substring), and maps (membership among values — use `contains?` for keys)."
