@@ -4,7 +4,7 @@
 //! - [`display`] is *human* (strings raw) — what `print`/`str` use.
 
 use crate::core::heap::Heap;
-use crate::core::value::{symbol_name, Value};
+use crate::core::value::{symbol_name_ref, Value};
 
 /// Maximum nesting the printer will descend into. Past this we emit `…`
 /// rather than recursing — a printed REPL value should never be the thing
@@ -35,10 +35,10 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
         Value::Bool(b) => out.push_str(if b { "true" } else { "false" }),
         Value::Int(n) => out.push_str(&n.to_string()),
         Value::Float(f) => out.push_str(&format_float(f)),
-        Value::Sym(s) => out.push_str(&symbol_name(s)),
+        Value::Sym(s) => out.push_str(symbol_name_ref(s)),
         Value::Keyword(s) => {
             out.push(':');
-            out.push_str(&symbol_name(s));
+            out.push_str(symbol_name_ref(s));
         }
         Value::Str(id) => {
             let s = heap.string(id);
@@ -86,7 +86,7 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
             out.push_str("#<fn");
             if let Some(name) = heap.closure(id).name {
                 out.push(' ');
-                out.push_str(&symbol_name(name));
+                out.push_str(symbol_name_ref(name));
             }
             out.push('>');
         }
@@ -94,7 +94,7 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
             out.push_str("#<macro");
             if let Some(name) = heap.closure(id).name {
                 out.push(' ');
-                out.push_str(&symbol_name(name));
+                out.push_str(symbol_name_ref(name));
             }
             out.push('>');
         }
@@ -110,7 +110,7 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
         }
         Value::Pid { node, id } => {
             out.push_str("#<pid ");
-            out.push_str(&symbol_name(node));
+            out.push_str(symbol_name_ref(node));
             out.push('/');
             out.push_str(&id.to_string());
             out.push('>');
