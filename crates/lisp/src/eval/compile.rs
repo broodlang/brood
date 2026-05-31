@@ -23,11 +23,12 @@
 //! namespace-resolve), on the already-expanded, already-resolved form.
 
 use smallvec::SmallVec;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::core::heap::{EnvRoot, Heap, VmCacheKey};
 use crate::core::keywords as kw;
-use crate::core::value::{self, ClosureId, EnvId, Symbol, Value};
+use crate::core::value::{self, ClosureId, EnvId, NativeId, Symbol, Value};
 use crate::error::{error_codes, LispError, LispResult, Pos};
 
 thread_local! {
@@ -65,6 +66,49 @@ pub fn vm_enabled() -> bool {
         Ok(v) => truthy(&v), // explicit override (BROOD_VM=0 → tree-walker)
         Err(_) => true,      // VM is the default engine
     })
+}
+
+/// A core 2-ary numeric/comparison primitive the compiler inlines (perf #1). Each
+/// maps to a Rust builtin (`%add`/`%sub`/`%mul`/`%lt`/`%le`/`%eq`); a
+/// [`Node::Prim2`] runs the `(Int, Int)` case inline (a plain `i64` op — no call
+/// frame, no `argv`, no native dispatch) and defers every other operand shape to
+/// the real primitive so semantics (float coercion, overflow, structural `=`) stay
+/// bit-identical. Comparisons spelt `>`/`>=` reach `%lt`/`%le` through the
+/// passthrough arg-map (the operands are swapped), so they inline too.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PrimOp {
+    Add,
+    Sub,
+    Mul,
+    Lt,
+    Le,
+    Eq,
+}
+
+impl PrimOp {
+    /// The `%`-prefixed builtin name this op inlines — used for the fallback call
+    /// and to keep the integer-overflow message identical to `num_bin`'s.
+    fn native_name(self) -> &'static str {
+        match self {
+            PrimOp::Add => "%add",
+            PrimOp::Sub => "%sub",
+            PrimOp::Mul => "%mul",
+            PrimOp::Lt => "%lt",
+            PrimOp::Le => "%le",
+            PrimOp::Eq => kw::EQ_PRIM,
+        }
+    }
+    fn from_native_name(name: &str) -> Option<PrimOp> {
+        Some(match name {
+            "%add" => PrimOp::Add,
+            "%sub" => PrimOp::Sub,
+            "%mul" => PrimOp::Mul,
+            "%lt" => PrimOp::Lt,
+            "%le" => PrimOp::Le,
+            _ if name == kw::EQ_PRIM => PrimOp::Eq,
+            _ => return None,
+        })
+    }
 }
 
 /// A compiled IR node (ADR-076). Stage 1 vocabulary — the core forms a top-level
@@ -137,6 +181,25 @@ pub enum Node {
     MakeClosure {
         fn_rest: Value,
         captures: Box<[(Symbol, Node)]>,
+    },
+    /// An inlined 2-ary primitive (perf #1) — `(+ a b)`, `(< a b)`, `(= a b)`, etc.
+    /// `a`/`b` are the operands in **source order**; `map` routes them to the
+    /// underlying `%`-primitive's argument order (`[0,1]` for `+`/`<`, `[1,0]` for the
+    /// `>`/`>=` wrappers that forward to `%lt`/`%le` with swapped args). The
+    /// `(Int, Int)` case runs inline; any other operand shape — or a redefinition of
+    /// the operator (detected by `guard` ≠ the current [`Heap::global_epoch`]) — falls
+    /// back to a general call on `head`, so the language stays exactly as the
+    /// tree-walker sees it. `guard` is the global epoch at which `head` was last
+    /// confirmed to resolve to `op`; an [`AtomicU64`] (not a `Cell`) so the node stays
+    /// `Send + Sync` and a migrating process's heap stays `Send`.
+    Prim2 {
+        op: PrimOp,
+        a: Box<Node>,
+        b: Box<Node>,
+        map: [u8; 2],
+        head: Symbol,
+        guard: AtomicU64,
+        pos: Option<Pos>,
     },
 }
 
@@ -511,6 +574,39 @@ fn compile_make_closure(heap: &Heap, form: Value, scope: &Scope) -> Option<Node>
     })
 }
 
+/// Resolve a 2-arg call head `h` to a core inlinable [`PrimOp`] plus the arg-map
+/// that routes the call's operands to the underlying `%`-primitive (perf #1), or
+/// `None` if `h` isn't (currently) one. `h` may bind the primitive **directly** (a
+/// `Value::Native`, map `[0,1]`) or — the common case — be a prelude wrapper
+/// (`+`/`<`/`>`…) whose 2-arg arm is a pure passthrough to the `%`-native; that one
+/// hop is followed via [`crate::eval::passthrough_arm`], inheriting its arg-map so
+/// the `>`/`>=` wrappers (which forward to `%lt`/`%le` with swapped args) inline
+/// too. Read against the live global env, so a user who has redefined the operator
+/// away from the builtin simply doesn't match (and the call compiles normally).
+fn resolve_prim(heap: &Heap, h: Symbol) -> Option<(PrimOp, [usize; 2])> {
+    let v = heap.env_get(heap.global(), h)?;
+    let (nid, map): (NativeId, [usize; 2]) = match v {
+        Value::Native(id) => (id, [0, 1]),
+        Value::Fn(id) => {
+            let (inner_head, m) = crate::eval::passthrough_arm(heap, id, 2)?;
+            if m.len() != 2 {
+                return None;
+            }
+            let inner = match inner_head {
+                Value::Sym(s) => heap.env_get(heap.global(), s)?,
+                other => other,
+            };
+            match inner {
+                Value::Native(id) => (id, [m[0], m[1]]),
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    let op = PrimOp::from_native_name(&heap.native(nid).name)?;
+    Some((op, map))
+}
+
 /// Compile an already-expanded, already-resolved `form` against the lexical
 /// `scope`. `tail` is whether this form is in tail position. Returns `None` when
 /// the form uses anything outside the VM's vocabulary (the caller then defers the
@@ -598,6 +694,29 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                     && crate::eval::macros::macro_head_id(heap, heap.global(), h).is_some()
                 {
                     return None;
+                }
+                // Primitive inlining (perf #1): a 2-arg call whose head is a free
+                // (non-shadowed) reference resolving — through at most one passthrough
+                // hop — to a core numeric/comparison primitive compiles to a
+                // `Node::Prim2`. The `(Int, Int)` case then runs inline in `exec_node`,
+                // skipping the global lookup, passthrough redirect, `compiled_for`
+                // cache hit, arity check, and native dispatch the generic call path
+                // pays per operator per iteration. Guarded by the global epoch so a
+                // redefinition of the operator cleanly falls back (see `Node::Prim2`).
+                if items.len() == 3 && scope.lookup(h).is_none() {
+                    if let Some((op, map)) = resolve_prim(heap, h) {
+                        let a = compile_node(heap, items[1], scope, false)?;
+                        let b = compile_node(heap, items[2], scope, false)?;
+                        return Some(Node::Prim2 {
+                            op,
+                            a: Box::new(a),
+                            b: Box::new(b),
+                            map: [map[0] as u8, map[1] as u8],
+                            head: h,
+                            guard: AtomicU64::new(heap.global_epoch()),
+                            pos: heap.form_pos(form),
+                        });
+                    }
                 }
             }
             // Function call: compile the callee and every argument (value position).
@@ -798,6 +917,33 @@ fn force(heap: &mut Heap, step: Step) -> LispResult {
     }
 }
 
+/// The inline fast path for a [`Node::Prim2`] (perf #1): handle the `(Int, Int)`
+/// case of `op` directly, returning `Ok(Some(v))` when done inline, `Ok(None)` to
+/// defer to the real `%`-primitive (any non-`(Int, Int)` operands — float coercion,
+/// structural `=`, and the canonical type errors all live there), or `Err` on
+/// integer overflow with the **same** message + code [`num_bin`](crate::builtins)
+/// raises, so diagnostics are byte-identical to the un-inlined call. Needs no heap:
+/// the result is an inline scalar, so nothing is allocated and no GC can intervene.
+fn prim_apply(op: PrimOp, x: Value, y: Value) -> Result<Option<Value>, LispError> {
+    let (a, b) = match (x, y) {
+        (Value::Int(a), Value::Int(b)) => (a, b),
+        _ => return Ok(None),
+    };
+    let overflow = || {
+        LispError::runtime(format!("{}: integer overflow", op.native_name()))
+            .with_code(error_codes::INT_OVERFLOW)
+    };
+    let v = match op {
+        PrimOp::Add => Value::Int(a.checked_add(b).ok_or_else(overflow)?),
+        PrimOp::Sub => Value::Int(a.checked_sub(b).ok_or_else(overflow)?),
+        PrimOp::Mul => Value::Int(a.checked_mul(b).ok_or_else(overflow)?),
+        PrimOp::Lt => Value::Bool(a < b),
+        PrimOp::Le => Value::Bool(a <= b),
+        PrimOp::Eq => Value::Bool(a == b),
+    };
+    Ok(Some(v))
+}
+
 /// Execute one node. `frame_base` is the start of this activation's slot region on
 /// `Heap::roots`; `genv` is an [`EnvRoot`] for the *current* closure's captured env
 /// — read fresh via [`Heap::read_root_env`] wherever it's needed, since a nested
@@ -978,6 +1124,79 @@ fn exec_node(
             // env, which `dispatch` reads off the closure.
             let cur_env = heap.read_root_env(genv);
             let result = dispatch(heap, callee_v, argv, *tail, cur_env);
+            heap.truncate_roots(save);
+            result.map_err(|e| tag(e))
+        }
+        Node::Prim2 { op, a, b, map, head, guard, pos } => {
+            let pos = *pos;
+            let tag = |e: LispError| match pos {
+                Some(p) => e.or_pos(p),
+                None => e,
+            };
+            // Evaluate operands in source order, keeping both on the operand stack
+            // (so a collect during the second — or the fallback dispatch — relocates
+            // them in place), exactly as `Node::Call`. `save` is always truncated back.
+            let save = heap.roots_len();
+            let sa = match exec_node(heap, a, frame_base, genv).and_then(|s| force(heap, s)) {
+                Ok(v) => v,
+                Err(e) => return Err(tag(e)),
+            };
+            heap.push_root(sa);
+            let sb = match exec_node(heap, b, frame_base, genv).and_then(|s| force(heap, s)) {
+                Ok(v) => v,
+                Err(e) => {
+                    heap.truncate_roots(save);
+                    return Err(tag(e));
+                }
+            };
+            heap.push_root(sb);
+            // Re-read post-collection, then route to the primitive's argument order.
+            let sa = heap.root_at(save);
+            let sb = heap.root_at(save + 1);
+            let src = [sa, sb];
+            let x = src[map[0] as usize];
+            let y = src[map[1] as usize];
+            // Inline only while `head` still resolves to `op` (epoch-guarded). A
+            // redefinition bumps `global_epoch`, forcing one re-validate; if it no
+            // longer maps to the primitive we drop to the general fallback below.
+            let cur = heap.global_epoch();
+            let inlinable = if guard.load(Ordering::Relaxed) == cur {
+                true
+            } else {
+                match resolve_prim(heap, *head) {
+                    Some((op2, m2)) if op2 == *op && m2 == [map[0] as usize, map[1] as usize] => {
+                        guard.store(cur, Ordering::Relaxed);
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            if inlinable {
+                match prim_apply(*op, x, y) {
+                    Ok(Some(v)) => {
+                        heap.truncate_roots(save);
+                        return Ok(Step::Done(v));
+                    }
+                    Ok(None) => {} // non-(Int,Int) → defer to the real primitive
+                    Err(e) => {
+                        heap.truncate_roots(save);
+                        return Err(tag(e));
+                    }
+                }
+            }
+            // Fallback: call the surface operator on the source-order operands (still
+            // rooted), exactly as the generic call path would — covers a redefined
+            // operator and every non-(Int,Int) operand shape, with identical semantics.
+            let cur_env = heap.read_root_env(genv);
+            let callee = match heap.env_get(cur_env, *head) {
+                Some(c) => c,
+                None => {
+                    heap.truncate_roots(save);
+                    return Err(tag(crate::eval::unbound_error(heap, *head)));
+                }
+            };
+            let argv: SmallVec<[Value; 4]> = SmallVec::from_slice(&[sa, sb]);
+            let result = dispatch(heap, callee, argv, false, cur_env);
             heap.truncate_roots(save);
             result.map_err(|e| tag(e))
         }
