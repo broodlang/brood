@@ -137,16 +137,23 @@ pub enum Node {
 ///
 /// Slot layout: required params `0..nrequired`, then `&optional` params
 /// `nrequired..nrequired+noptional`, then the `&` rest slot (if any), then the
-/// `let`/`letrec` binders — up to `nslots`. Only nil-default optionals are
-/// compiled (a real default form defers the arm), so a missing optional is just the
-/// frame's nil — no default eval (and no extra GC rooting) needed.
+/// `let`/`letrec` binders — up to `nslots`. A missing optional takes its default:
+/// `nil` (no eval) for a nil-default param, or the compiled `optional_defaults`
+/// node (evaluated against the partially-built frame, so it can reference earlier
+/// params) for a real default.
 pub struct CompiledArm {
     /// Required params — `argv[0..nrequired]` fill slots `0..nrequired`. Selection
     /// guarantees `argc >= nrequired`, so they're always present.
     pub nrequired: usize,
-    /// Count of `&optional` params (all nil-default). A provided arg fills the slot,
-    /// a missing one stays nil.
+    /// Count of `&optional` params. A provided arg fills the slot; a missing one
+    /// takes its default (see `optional_defaults`).
     pub noptional: usize,
+    /// Per-optional default, indexed `0..noptional`: `None` = nil-default (just push
+    /// `nil`), `Some(node)` = a real default form, compiled in a scope where the
+    /// required params and *earlier* optionals are bound. Evaluated by `push_frame`
+    /// only when the optional's arg is missing — left-to-right, so a later default
+    /// sees earlier ones (matching the tree-walker).
+    pub optional_defaults: Box<[Option<Node>]>,
     /// `&` rest param's slot, if any: collects `argv[nrequired+noptional..]` into a
     /// fresh list.
     pub rest_slot: Option<usize>,
@@ -601,6 +608,52 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
 /// name through the closure's captured env (`Node::Global` → `env_get(genv, …)`),
 /// which `vm_apply` sets to the closure's own env, so the body compiles the same
 /// way whether the capture is global or local.
+/// Compile one arm to a [`CompiledArm`], or `None` (defer this arm to the
+/// tree-walker) if its body or any real `&optional` default uses a form outside the
+/// VM vocabulary. Binds frame slots in layout order — required params, then each
+/// optional (its default compiled *before* the optional's own slot is bound, so a
+/// default sees the required params and earlier optionals but never itself), then
+/// the `&` rest param — then compiles the body. The default nodes ride along in
+/// `optional_defaults` for `push_frame` to evaluate on a missing arg.
+fn compile_arm(
+    heap: &Heap,
+    required: &[Symbol],
+    optionals: &[(Symbol, Value)],
+    rest: Option<Symbol>,
+    body: &[Value],
+    enclosing: Vec<Symbol>,
+) -> Option<CompiledArm> {
+    let nrequired = required.len();
+    let noptional = optionals.len();
+    let mut scope = Scope::with_params_enclosing(&[], enclosing);
+    for &p in required {
+        scope.bind(p);
+    }
+    let mut optional_defaults: Vec<Option<Node>> = Vec::with_capacity(noptional);
+    for (name, default) in optionals {
+        // A nil default needs no eval (push_frame just leaves the slot nil); a real
+        // default compiles in the current scope (required + earlier optionals bound).
+        let node = match default {
+            Value::Nil => None,
+            d => Some(compile_node(heap, *d, &mut scope, false)?),
+        };
+        optional_defaults.push(node);
+        scope.bind(*name);
+    }
+    if let Some(r) = rest {
+        scope.bind(r);
+    }
+    let body = compile_body(heap, body, &mut scope, true)?;
+    Some(CompiledArm {
+        nrequired,
+        noptional,
+        optional_defaults: optional_defaults.into_boxed_slice(),
+        rest_slot: rest.map(|_| nrequired + noptional),
+        nslots: scope.max,
+        body,
+    })
+}
+
 fn compile_closure(heap: &Heap, id: ClosureId) -> Option<CompiledClosure> {
     let cl = heap.closure(id);
     // The lexical names this closure inherits from outer closures (Stage 2c) —
@@ -610,27 +663,25 @@ fn compile_closure(heap: &Heap, id: ClosureId) -> Option<CompiledClosure> {
         Some(e) if !heap.is_global(e) => heap.env_chain_names(e),
         _ => Vec::new(),
     };
-    // Snapshot every arm's shape + body (cloning ends the `cl` borrow). An arm is
-    // VM-eligible when its body is core vocabulary **and** its `&optional` params all
-    // default to `nil` (a real default form would need eval — deferred; `&` rest is
-    // fine). Ineligible arms are still recorded (`compiled: None`) so `arm_for`
-    // selection stays faithful to `select_arm` (variadic/exact overlap — see ArmSpec).
+    // Snapshot every arm's shape + body (cloning ends the `cl` borrow), then compile
+    // each via [`compile_arm`]. An arm is VM-eligible when its body — and every real
+    // `&optional` default form — is core vocabulary; otherwise that arm defers
+    // (`compiled: None`). Ineligible arms are still recorded so `arm_for` selection
+    // stays faithful to `select_arm` (variadic/exact overlap — see ArmSpec).
     struct Src {
         required: Vec<Symbol>,
-        optionals: Vec<Symbol>, // names only — eligible arms have all-nil defaults
+        optionals: Vec<(Symbol, Value)>, // name + default form (`Nil` = nil-default)
         rest: Option<Symbol>,
         body: Vec<Value>,
-        eligible: bool,
     }
     let arms_src: Vec<Src> = cl
         .arms
         .iter()
         .map(|a| Src {
             required: a.params.clone(),
-            optionals: a.optionals.iter().map(|(s, _)| *s).collect(),
+            optionals: a.optionals.clone(),
             rest: a.rest,
             body: a.body.clone(),
-            eligible: a.optionals.iter().all(|(_, d)| matches!(d, Value::Nil)),
         })
         .collect();
     let mut specs: Vec<ArmSpec> = Vec::with_capacity(arms_src.len());
@@ -638,27 +689,9 @@ fn compile_closure(heap: &Heap, id: ClosureId) -> Option<CompiledClosure> {
         let nrequired = s.required.len();
         let noptional = s.optionals.len();
         let has_rest = s.rest.is_some();
-        let compiled = if s.eligible {
-            // Slots in order: required, then optionals, then the rest param, then the
-            // body's `let`/`letrec` binders (assigned by `compile_body`).
-            let mut params: Vec<Symbol> = s.required.clone();
-            params.extend_from_slice(&s.optionals);
-            if let Some(r) = s.rest {
-                params.push(r);
-            }
-            let mut scope = Scope::with_params_enclosing(&params, enclosing.clone());
-            compile_body(heap, &s.body, &mut scope, true).map(|body| {
-                Arc::new(CompiledArm {
-                    nrequired,
-                    noptional,
-                    rest_slot: has_rest.then_some(nrequired + noptional),
-                    nslots: scope.max,
-                    body,
-                })
-            })
-        } else {
-            None
-        };
+        let compiled =
+            compile_arm(heap, &s.required, &s.optionals, s.rest, &s.body, enclosing.clone())
+                .map(Arc::new);
         specs.push(ArmSpec { nrequired, noptional, has_rest, compiled });
     }
     // Nothing to gain if no arm compiled (and a wholly-`None` entry would just mask
@@ -932,21 +965,50 @@ fn dispatch(
 /// binders — `nslots` values total. Selection guarantees `args.len() >= nrequired`.
 /// No eval runs here (the rest is a plain `list_from_slice`), so no collection can
 /// happen between reading `args` and rooting the slots.
-fn push_frame(heap: &mut Heap, arm: &CompiledArm, args: &[Value]) {
-    let fixed = arm.nrequired + arm.noptional;
-    for i in 0..fixed {
-        heap.push_root(args.get(i).copied().unwrap_or(Value::Nil));
-    }
-    let mut pushed = fixed;
-    if arm.rest_slot.is_some() {
-        let start = fixed.min(args.len());
-        let rest = heap.list_from_slice(&args[start..]);
-        heap.push_root(rest);
-        pushed += 1;
-    }
-    for _ in pushed..arm.nslots {
+fn push_frame(
+    heap: &mut Heap,
+    arm: &CompiledArm,
+    args: &[Value],
+    genv: EnvRoot,
+) -> Result<(), LispError> {
+    let base = heap.roots_len();
+    // Pre-allocate the whole frame as nil: every slot (params, optionals, rest, and
+    // the body's `let`/`letrec` binders) must exist before anything writes it via
+    // `set_root_at` — including a real `&optional` default whose body may bind its
+    // own `let` slots.
+    for _ in 0..arm.nslots {
         heap.push_root(Value::Nil);
     }
+    // Consume ALL provided args into their (now-rooted) slots FIRST, before any
+    // default is evaluated: a default's eval can collect, which would strand the
+    // still-live `args` slice (LOCAL handles) if it were read afterwards.
+    for i in 0..arm.nrequired {
+        heap.set_root_at(base + i, args.get(i).copied().unwrap_or(Value::Nil));
+    }
+    // Provided optionals are a left-to-right prefix of `args`; the remainder are
+    // missing and take their defaults below.
+    let provided_opt = args.len().saturating_sub(arm.nrequired).min(arm.noptional);
+    for j in 0..provided_opt {
+        heap.set_root_at(base + arm.nrequired + j, args[arm.nrequired + j]);
+    }
+    if let Some(rslot) = arm.rest_slot {
+        let start = (arm.nrequired + arm.noptional).min(args.len());
+        let rest = heap.list_from_slice(&args[start..]);
+        heap.set_root_at(base + rslot, rest);
+    }
+    // Missing optionals take their default, left-to-right (so a later default sees an
+    // earlier one). `None` is a nil-default — the slot is already nil. A real default
+    // evaluates against the frame: earlier params/optionals are filled and rooted;
+    // its own slot and later slots are still nil (the compiler bound it after the
+    // default, so the default can't name itself).
+    for j in provided_opt..arm.noptional {
+        if let Some(node) = &arm.optional_defaults[j] {
+            let step = exec_node(heap, node, base, genv)?;
+            let v = force(heap, step)?;
+            heap.set_root_at(base + arm.nrequired + j, v);
+        }
+    }
+    Ok(())
 }
 
 /// Run a compiled closure body — the trampoline. `args` become the frame's dense
@@ -984,10 +1046,15 @@ fn vm_apply(heap: &mut Heap, compiled0: Arc<CompiledArm>, args: &[Value], genv0:
     let env_base = heap.env_roots_len();
     let mut genv = heap.root_env(genv0);
 
-    // Build the frame (required / optional / rest / nil-filled binders). The whole
-    // region lives on `Heap::roots`, so `collect` relocates it in place.
+    // Build the frame (required / optional / rest / nil-filled binders), evaluating
+    // any real `&optional` default for a missing arg. The whole region lives on
+    // `Heap::roots`, so `collect` relocates it in place.
     let base = heap.roots_len();
-    push_frame(heap, &compiled0, args);
+    if let Err(e) = push_frame(heap, &compiled0, args, genv) {
+        heap.truncate_roots(base);
+        heap.truncate_env_roots(env_base);
+        return Err(e);
+    }
     let mut compiled = compiled0;
     loop {
         // GC safepoint — the frame slots live on `Heap::roots` and the captured env
@@ -1025,15 +1092,21 @@ fn vm_apply(heap: &mut Heap, compiled0: Arc<CompiledArm>, args: &[Value], genv0:
                 return Ok(v);
             }
             Ok(Step::Tail { compiled: c2, args: a2, genv: g2 }) => {
+                // Switch to the tail callee's env FIRST (`g2` is still valid — no
+                // collection since `dispatch` read it off the callee closure), and
+                // root it before rebuilding the frame, so a real `&optional` default
+                // in `c2` both resolves its free vars through `g2` and survives any
+                // collection its own eval triggers.
+                heap.truncate_env_roots(env_base);
+                genv = heap.root_env(g2);
                 // Reuse the frame region: drop the old slots and rebuild at `base`
                 // for the (possibly different, possibly variadic) tail arm.
                 heap.truncate_roots(base);
-                push_frame(heap, &c2, &a2);
-                // Switch to the tail callee's env: drop the old env root and root
-                // the new one (`g2` is still valid — no collection since `dispatch`
-                // read it off the callee closure).
-                heap.truncate_env_roots(env_base);
-                genv = heap.root_env(g2);
+                if let Err(e) = push_frame(heap, &c2, &a2, genv) {
+                    heap.truncate_roots(base);
+                    heap.truncate_env_roots(env_base);
+                    return Err(e);
+                }
                 compiled = c2;
             }
             Err(e) => {
