@@ -367,11 +367,12 @@ the workaround available today.
   forces the tree-walker, kept ≥1 release). Stage 0–1 (mechanism + passthrough
   redirect), 2a (`let`/`letrec`), 2b (multi-arity), 2c (local-capturing closures —
   created *and* called on the VM, GC-rooted captured envs, body-handle cache key),
-  source-position threading, and the Stage-3 cutover are all done. ~1.6–2.3× on the
-  hot path, no language change, full suite green under both engines. **Still worth
-  doing:** a differential test mode (both engines, assert identical) as a CI guard;
-  widening VM coverage (variadic / patterns / prelude closures — pure perf, the
-  deferrals are already correct).
+  source-position threading, the Stage-3 cutover, a **differential test harness**
+  (`differential.rs` + `make test-both` — both engines, assert identical), and
+  **variadic-arm coverage** (`&rest` + nil-default `&optional`) are all done.
+  ~1.6–2.3× on the hot path, no language change, full suite green under both
+  engines. **Still worth doing (pure perf, deferrals already correct):** widening
+  coverage to pattern/`match*` and prelude (PRELUDE-region) closures.
 
 ## M2 — Editor data model
 

@@ -10366,3 +10366,34 @@ takes the modifier triple and builds the vector, `mouse_to_value` reads crosster
 
 **Tested.** New Rust `modifiers_ride_on_the_event` (Ctrl→`[:ctrl]` at idx 5; none→
 `[]`); observer suite 53/53 incl. a new 6-vector tolerance test; both builds green.
+
+---
+
+## 2026-05-31 — VM differential harness + variadic-arm coverage
+
+Two follow-ups on the now-default VM (both gated by the differential harness).
+
+**Differential harness.** `compile::set_forced_engine` (a thread-local) lets one
+process pin the engine, so `crates/lisp/tests/differential.rs` evaluates a corpus
+through *both* the tree-walker and the VM (fresh `Interp` each) and asserts identical
+result/error — the standing guard that the VM never diverges from the reference
+semantics. `make test-both` runs the whole suite under each engine. The harness
+immediately earned its keep: it caught a non-function call being worded differently
+by `eval::apply` ("not a function") vs the evaluator's direct path ("cannot call
+non-function") — even the tree-walker was internally inconsistent (direct vs
+`apply`-routed). Unified `apply` to the asserted "cannot call non-function" wording.
+
+**Variadic arms.** `&rest` and nil-default `&optional` arms now VM-compile (a real
+`&optional` default form still defers — it'd need eval-with-rooting; rare). The
+frame layout grew to required / optional / rest / binders, and `push_frame` builds
+the rest list with `list_from_slice` (no eval ⇒ no safepoint ⇒ no extra rooting).
+The subtle part is **arm selection**: a variadic arm accepts a *range* of arities
+that can overlap a fixed arm, so picking the wrong one would silently miscompile.
+`CompiledClosure` now records *every* arm's shape (`ArmSpec`, compiled or not) and
+`arm_for` reproduces `select_arm` exactly, running the chosen arm only if it
+VM-compiled (else defers — the tree-walker runs the same arm). Verified: full suite
+green under both engines (421/421) and under the `BROOD_VM=1 BROOD_GC_STRESS=1
+BROOD_GC_VERIFY=1` gate (the rest-list survives relocation); differential corpus
+extended with `&optional`/`&rest`/mixed/multi-arity-with-variadic cases. Perf is
+modest (~1.08× on a variadic hot loop — the per-call rest-list alloc dominates and is
+shared by both engines), as expected; the win is coverage, not speed.
