@@ -218,6 +218,44 @@ line editor's M-f/M-b notion of a word."
         i (buffer--scan-bwd text (get buf :point) (fn (c) (not (buffer--word-char? c)))))
     (goto-char buf (buffer--scan-bwd text i buffer--word-char?))))
 
+;; ---- paragraph motion (M-{ / M-}) -------------------------------------------
+;; A paragraph is a run of non-blank lines bounded by blank (empty / whitespace-only)
+;; lines. Forward motion skips any blank lines then the paragraph, landing at the next
+;; blank separator (or end of buffer); backward is the mirror, landing at the
+;; paragraph's first line. Pure line scans over the rope.
+
+(defn buffer--line-blank? (buf line)
+  "True if buffer `line` is empty or whitespace-only (a paragraph separator)."
+  (blank? (buffer-line-at buf line)))
+
+(defn buffer--scan-lines (buf line n step want-blank?)
+  "First line index walking from `line` by `step` (±1, within `[0, n)`) whose
+blankness differs from `want-blank?`; stops at the buffer edge."
+  (if (or (< line 0) (>= line n) (not (= (buffer--line-blank? buf line) want-blank?)))
+    line
+    (buffer--scan-lines buf (+ line step) n step want-blank?)))
+
+(defn forward-paragraph (buf)
+  "Point moved to the start of the next blank line after the current paragraph (end of
+buffer if none) — Emacs `forward-paragraph` (M-})."
+  (let (rope (get buf :rope)
+        n (rope-line-count rope)
+        line (rope-char->line rope (get buf :point))
+        afterblank (buffer--scan-lines buf line n 1 true)        ; skip leading blank lines
+        boundary (buffer--scan-lines buf afterblank n 1 false))  ; skip the paragraph
+    (goto-char buf (if (>= boundary n) (buffer-length buf) (rope-line->char rope boundary)))))
+
+(defn backward-paragraph (buf)
+  "Point moved to the start of the current/previous paragraph (start of buffer if none)
+— Emacs `backward-paragraph` (M-{)."
+  (let (rope (get buf :rope)
+        n (rope-line-count rope)
+        line (rope-char->line rope (get buf :point))
+        ;; step back over blank lines directly above, then over the paragraph's lines.
+        afterblank (buffer--scan-lines buf (dec line) n -1 true)
+        start (buffer--scan-lines buf afterblank n -1 false))
+    (goto-char buf (rope-line->char rope (max 0 (if (< start 0) 0 (inc start)))))))
+
 ;; ---- mark -------------------------------------------------------------------
 
 (defn set-mark (buf)

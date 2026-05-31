@@ -100,6 +100,22 @@
       (assert= (buffer-point (forward-word b)) 4)  ; skips '(', ends "foo"
       (assert= (buffer-point (forward-word (forward-word b))) 9))))  ; ends "bar" before ')'
 
+;; paragraphs {a,b} {c,d} {e}, blank-line separated.
+;;  offsets: a0 b2  blank4  c5 d7  blank9  e10  (len 11)
+(describe "buffer paragraph motion (M-{ / M-})"
+  (test "forward-paragraph stops at the start of the next blank line"
+    (let (txt "a\nb\n\nc\nd\n\ne")
+      (assert= (buffer-point (forward-paragraph (make-buffer txt))) 4)               ; from line 0
+      (assert= (buffer-point (forward-paragraph (goto-char (make-buffer txt) 8))) 9)))  ; from inside {c,d}
+  (test "forward-paragraph in the last paragraph lands at end of buffer"
+    (assert= (buffer-point (forward-paragraph (goto-char (make-buffer "a\nb\n\nc\nd\n\ne") 10))) 11))
+  (test "backward-paragraph goes to the current paragraph's start, then the previous"
+    (let (txt "a\nb\n\nc\nd\n\ne")
+      (assert= (buffer-point (backward-paragraph (goto-char (make-buffer txt) 8))) 5)   ; from inside {c,d}
+      (assert= (buffer-point (backward-paragraph (goto-char (make-buffer txt) 5))) 0)))  ; from {c,d} start → {a,b}
+  (test "backward-paragraph at buffer start stays at 0"
+    (assert= (buffer-point (backward-paragraph (make-buffer "a\nb\n\nc"))) 0)))
+
 (describe "buffer editing is immutable"
   (test "insert advances point; the original is untouched"
     (let (b (goto-char (make-buffer "hello world") 5))
