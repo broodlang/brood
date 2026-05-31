@@ -176,12 +176,19 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
     `def`/hot-reload `promote`s code) is never reclaimed, so it grows with
     hot-reload churn. Doesn't matter for short runs; matters for a long-lived,
     live-edited server. Design not started.
-  - ⬜ **Shrink the remaining rooted-Rust `eval` re-entry** (*deferred, low priority*)
-    — quasiquote was moved off the runtime walker to a compile/eval-time transform
-    (ADR-084), removing the worst offender; the `macroexpand` fixpoint and
-    `reload-defs` are the remaining Rust frames that loop across `eval`, candidates
-    for the same transform-not-walker treatment (or rooting if GC is ever wanted
-    *during* expansion).
+  - ✅ **Rooted-Rust `eval` re-entry — done / nothing left** (re-examined 2026-05-31).
+    Quasiquote moved off the runtime walker to a compile/eval-time transform
+    (ADR-084), the worst offender. The remaining frames are already safe: the
+    `macroexpand` *fixpoint* roots its `env` (collects at any depth), the
+    compile-pass walk suppresses GC via `MACRO_BLOCK` (bounded per form), and
+    `reload-defs` mirrors the rooted `eval_str` loop. macroexpand can't be a
+    transform-not-walker (running a macro *is* eval re-entry), so there's no
+    quasiquote-style hazard left to shrink.
+  - ⬜ **RUNTIME-region collector** (ADR-072 "Stage 5 later half", *deferred*) — the
+    one genuinely-open GC item: the shared mutable RUNTIME code region (where
+    `def`/hot-reload `promote`s code) is never reclaimed, so it grows with
+    hot-reload churn. Matters for a long-lived, live-edited server; design not
+    started.
 - ✅ **Self-hosted REPL in Brood** (ADR-048) — the read-eval-print loop is now
   `std/repl.blsp`, not Rust: a tail-recursive loop over `read-line` (the one new
   primitive) + `eval-string` + `pr-str`, with multi-line balance detection,
@@ -487,12 +494,15 @@ the workaround available today.
   compiling `quote` + vector/map literals, which unblocked `match*`'s no-match arm)
   are all done. ~1.6–2.3× on the hot path (pattern fib ~2×), no language change,
   full suite green under both engines.
-  - ⬜ **Retire the tree-walker (the kept `BROOD_VM=0` fallback)** — the remaining
-    VM gap. Blocked on the *other* deferrals, not on match/optional: `def`/
-    `quasiquote`/`defmacro`/`binding` bodies, **unexpanded forward-referenced
-    macros** (e.g. prelude `sleep`→`receive`), movable-LOCAL (conased) bodies, and
-    **PRELUDE-region closures**. Each needs covering, or a deliberate decision to
-    keep a minimal fallback. ADR-076: don't rush — no profile yet demands it.
+  - **Keep the `BROOD_VM=0` tree-walker as the per-form fallback — *not* a
+    retirement target** (re-examined 2026-05-31). PRELUDE-region closures already
+    compile on the VM (`cache_key` keys `RUNTIME | PRELUDE`; ~1.9× on a `reduce`/`+`
+    loop). The remaining deferrals are correct by design, not gaps: an **unexpanded
+    forward-referenced macro** can't be compiled without expanding it, and a
+    **movable-LOCAL (conased) body** has no stable cache key — both belong on the
+    fallback. The only true gap is `def`/`quasiquote`/`binding` in a closure *body*
+    (uncommon, low value). So the fallback stays; "retire the tree-walker" is a
+    non-goal.
   - ⬜ **Bytecode lowering** — explicitly deferred until a profile shows node-
     dispatch dominating (ADR-076).
 

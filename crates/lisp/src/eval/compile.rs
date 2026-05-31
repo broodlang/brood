@@ -885,7 +885,7 @@ fn cache_key(heap: &Heap, id: ClosureId) -> Option<VmCacheKey> {
                 _ => None,
             }
         }
-        _ => None, // PRELUDE closures stay on the tree-walker (as before).
+        _ => None, // any other region (e.g. a blob/shared handle) — not VM-cached.
     }
 }
 
