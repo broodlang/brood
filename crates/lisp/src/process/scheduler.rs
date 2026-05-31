@@ -896,7 +896,18 @@ pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
         // loop reclaims its per-iteration garbage. (Pre-ADR-055 a `(hibernate)`
         // sentinel was caught here and flushed the arena manually; automatic GC
         // made it redundant and the primitive was removed — docs/memory-review.md.)
-        let reason = match eval::apply(&mut heap, f, &[], EnvId::GLOBAL) {
+        //
+        // Route through the VM when enabled (ADR-076): `eval::apply` is the
+        // tree-walk entry, so without this a green process ran its whole body
+        // tree-walked even under `BROOD_VM=1` — ~4–5× slower than the same code at
+        // top level (which goes through the VM). `apply_value` runs a VM-eligible
+        // body on the bytecode engine and falls back to `eval::apply` otherwise.
+        let body = if eval::compile::vm_enabled() {
+            eval::compile::apply_value(&mut heap, f, &[], EnvId::GLOBAL)
+        } else {
+            eval::apply(&mut heap, f, &[], EnvId::GLOBAL)
+        };
+        let reason = match body {
             Ok(_) => Message::Keyword(value::intern(pk::NORMAL)),
             Err(e) => {
                 eprintln!("process {} died: {}", proc_descr(pid), e.located());
