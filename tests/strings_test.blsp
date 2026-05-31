@@ -79,6 +79,27 @@
   (test "string-contains?"
     (is (string-contains? "hello" "ell"))
     (refute (string-contains? "hello" "xyz")))
+  ;; string-index-of — index-of with a start offset (the incremental-search primitive)
+  (test "string-index-of defaults to the whole string (from 0)"
+    (assert= (string-index-of "hello world" "o") 4)
+    (assert= (string-index-of "hello" "z") -1))
+  (test "string-index-of finds the first occurrence at or after `from`"
+    (assert= (string-index-of "hello world" "o" 5) 7)   ; skips the o at 4
+    (assert= (string-index-of "aaa" "a" 1) 1)
+    (assert= (string-index-of "aaa" "a" 3) -1))          ; from == length: no more
+  (test "string-index-of clamps `from` and matches the empty needle at `from`"
+    (assert= (string-index-of "hello" "l" -5) 2)         ; negative clamps to 0
+    (assert= (string-index-of "hello" "" 3) 3)
+    (assert= (string-index-of "hello" "x" 99) -1))       ; past end: clamped, absent
+  ;; string-last-index-of — the backward counterpart (reverse incremental search)
+  (test "string-last-index-of finds the last occurrence before `before`"
+    (assert= (string-last-index-of "hello world" "o") 7)         ; default before = length
+    (assert= (string-last-index-of "hello world" "o" 7) 4)       ; strictly before 7 → the first o
+    (assert= (string-last-index-of "abcabc" "bc") 4)
+    (assert= (string-last-index-of "abcabc" "bc" 4) 1))
+  (test "string-last-index-of is -1 when absent or nothing is before `before`"
+    (assert= (string-last-index-of "hello" "z") -1)
+    (assert= (string-last-index-of "hello" "h" 0) -1))
   ;; index-of also works on lists and vectors (linear scan; structural `=`).
   (test "index-of on a list/vector finds the element index"
     (assert= (index-of (list 10 20 30) 20) 1)

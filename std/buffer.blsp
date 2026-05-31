@@ -221,6 +221,46 @@ line editor's M-f/M-b notion of a word."
   (assoc buf :mark (get buf :point)))
 (defn clear-mark (buf) "Clear the mark." (assoc buf :mark nil))
 
+;; ---- mark ring (a history of marks; the substrate for C-u C-SPC) ------------
+
+(def *mark-ring-max* 16)  ; like Emacs `mark-ring-max`
+
+(defn push-mark (buf)
+  "Set the mark at point **and** push point onto the buffer's `:mark-ring` (bounded
+by `*mark-ring-max*`, newest first). The ring records where the mark has been so
+`pop-mark` can revisit prior locations."
+  (let (p (get buf :point))
+    (assoc buf
+      :mark p
+      :mark-ring (take *mark-ring-max* (cons p (or (get buf :mark-ring) ()))))))
+
+(defn pop-mark (buf)
+  "Move point to the newest entry on the buffer's `:mark-ring`, rotating that entry
+to the back so repeated calls cycle through the ring (Emacs `pop-to-mark-command`).
+A no-op when the ring is empty."
+  (let (ring (or (get buf :mark-ring) ()))
+    (if (empty? ring)
+      buf
+      (assoc buf
+        :point (buffer--clamp 0 (buffer-length buf) (first ring))
+        :mark-ring (append (rest ring) (list (first ring)))))))
+
+;; ---- search (pure position queries; the caller moves point) -----------------
+
+(defn buffer-search-forward (buf needle from)
+  "The char index of the first occurrence of `needle` in `buf`'s text at or after
+`from`, or nil if there is none. Pure — it does not move point; the caller composes
+`goto-char`/`set-mark`. The forward primitive incremental search rides on."
+  (let (i (string-index-of (buffer-text buf) needle from))
+    (if (< i 0) nil i)))
+
+(defn buffer-search-backward (buf needle before)
+  "The char index of the last occurrence of `needle` in `buf`'s text whose start is
+strictly before `before`, or nil if there is none. The backward counterpart of
+`buffer-search-forward`."
+  (let (i (string-last-index-of (buffer-text buf) needle before))
+    (if (< i 0) nil i)))
+
 ;; ---- undo / redo ------------------------------------------------------------
 ;;
 ;; Undo is per-buffer, riding the immutable buffer for free: a snapshot is just
