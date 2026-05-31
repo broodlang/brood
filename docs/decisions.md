@@ -5597,6 +5597,33 @@ repeat cap on top if it wants absolute insurance, but it isn't needed for correc
 move), ADR-058 (GUI input as mailbox messages), ADR-056 (the minimal display/input
 vocabulary, grown only when a consumer needs it), ADR-011 (ship the minimal form).
 
+**Addendum (2026-05-31) — `ke.repeat` is unreliable on Wayland; dedup by transition,
+and expose the held key for a poll.** The original decision filtered auto-repeat with
+winit's `ke.repeat` flag. On GNOME/Wayland that flag is **not reliable** — a held key
+arrives as a flood of *fresh* presses with `repeat == false`, so the filter let the
+flood straight through (it only ever worked on X11). Observed in the wild: holding a
+key that opens a window spawned one window per repeat. Two changes close it properly:
+
+- **Suppress repeat by transition, not the flag.** The GUI event loop now tracks the
+  physically-held key in `Win.held_key` (set on a fresh press, cleared on its release
+  or on focus loss). A `Pressed` for the key *already* held is the auto-repeat → drop
+  it; a genuine re-press (double-tap) only arrives after a release cleared the slot, so
+  it still registers. This is platform-independent (it doesn't consult `ke.repeat` at
+  all) and kills the flood **at the source**, so no app has to work around it.
+
+- **`gui-held-key id` — poll the source of truth.** That same `held_key` is exposed as
+  a primitive returning the held key value (or nil). A consumer-paced repeat confirms
+  the key is still down *each tick* before repeating — the games-engine pattern (re-read
+  device state per frame instead of trusting accumulated edges). This is what makes a
+  missed key-up structurally unable to run away: the very next tick polls nil and stops,
+  regardless of whether the `:key-up`/`:blur` event was delivered. The events remain as
+  the instant-stop fast path; the poll is the guarantee. (`myedit` threads the window id
+  onto its model and gates the poll on it, falling back to the events on the terminal /
+  in tests, where there's no window to ask.)
+
+The `:key-up`/`:blur` events from the original decision stay; the flag-based filter is
+replaced by the transition rule above.
+
 ## ADR-087 — Expose O(1) kernel facts (`map-count`) as primitives rather than recompute them in Brood
 
 **Context.** "Write the language in the language" (ADR-006) says a capability

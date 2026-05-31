@@ -617,10 +617,24 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "gui-focus",
+        Arity::exact(1),
+        Sig::new(vec![int], nil_ty),
+        gui_focus,
+    );
+    def(
+        heap,
         "gui-size",
         Arity::exact(1),
         Sig::new(vec![int], vec_ty),
         gui_size,
+    );
+    def(
+        heap,
+        "gui-held-key",
+        Arity::exact(1),
+        Sig::new(vec![int], string.union(kw).union(nil_ty)),
+        gui_held_key,
     );
     def(
         heap,
@@ -1633,7 +1647,9 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("term-draw", &["frame"], "Paint a frame — a vector of render ops: [:clear], [:text row col str], [:text row col str face], [:cursor row col]. A face is a map like {:fg :red :bold true}. The in-process frontend for the display protocol; returns nil."),
     ("gui-open", &[], "Open a new native window and return its integer id (needs the runtime built with --features gui; errors otherwise). Its key/mouse input is delivered to the CALLING process's mailbox as messages — a key as a 1-char string / keyword (`:up`, `:ctrl-c`), the mouse as `[:mouse action button row col mods]` (action `:press`/`:release`/`:drag`/`:scroll-up`/`:scroll-down` — `:drag` is motion with a button held, delivered once per cell crossed; `mods` a vector of held modifier keywords in `:ctrl :alt :shift` order, `[]` when none, so Ctrl+wheel / Ctrl+drag are bindable), a resize as `[:resize cols rows]` (the new cell grid, so the loop re-renders at the new size) — so the consumer parks in `(receive)` instead of polling (ADR-058). Clicking the window's close button delivers a dedicated `:close` message — distinct from the Escape *key* (`:escape`), so an app can quit on the X without conflating it with Escape (which an editor binds to cancel/normal-mode); `ui-run` quits on `:close` automatically. Starts the GUI thread on the first call; each call is an independent window, so several observers can run at once. Pass the id to the other gui-* primitives; pair with gui-close."),
     ("gui-close", &["id"], "Close window id (the teardown for gui-open). Idempotent; an unknown id is a no-op."),
+    ("gui-focus", &["id"], "Raise window id to the front and give it OS keyboard focus, un-minimising it first. Lets an app surface an already-open (singleton) window instead of opening a duplicate — e.g. `(observe)` focuses its existing window rather than spawning a second. Errors only if id isn't a live window. Needs --features gui. Returns nil."),
     ("gui-size", &["id"], "Window id's size as [cols rows] in character cells (tracks resize / HiDPI), same shape as term-size."),
+    ("gui-held-key", &["id"], "The key window id currently sees as physically held — the same value its press delivered (a 1-char string, or a keyword like :ctrl-n / :up) — or nil when none is held. Tracked from press/release transitions in the event loop (NOT winit's ke.repeat, unreliable on Wayland), so it's the source of truth for a held key: a consumer-paced auto-repeat polls it each tick and stops the instant it no longer matches, so a missed key-up (e.g. lost on focus change) can't cause runaway repeat."),
     ("gui-draw", &["id", "frame"], "Paint a frame (the same render-op vector term-draw takes) to window id; returns nil. Unknown ops are skipped (forward-compatible). A text op's face may carry :scale n (GUI only, integer >=1, capped at 16): the text is drawn n× larger in an n×n block of cells anchored at its row/col — the per-pane/per-buffer font knob; the terminal frontend renders scale 1. A `[:cursor-zone x y w h shape]` op marks a hover hot-zone: while the pointer is over it the window shows the resize cursor `shape` (:col-resize ↔ / :row-resize ↕), hit-tested on the GUI thread (ADR-080); it draws nothing and the terminal ignores it."),
     ("gui-font!", &["id?", "spec"], "Set a cell font from spec, a map {:family <keyword> :height <px>} (both keys optional): :family picks a registered font family (bundled :mono, or one added by gui-font-register), :height the cell pixel size. (gui-font! spec) sets the global default — every open window and ones opened later; (gui-font! id spec) retunes just window id, leaving the global default and other windows alone, so two windows can run different fonts. Per-section fonts within a window come from a face's :family/:scale. Needs --features gui. Returns nil."),
     ("gui-font-register", &["name", "styles"], "Register font family name (a keyword) from styles, a map of style → TTF file path {:regular \"…\" :bold \"…\" :italic \"…\" :bold-italic \"…\"}. Only :regular is required; a missing style reuses the regular file. Afterwards a face's :family <name> (or gui-font!) selects it. Needs --features gui. Returns name."),
@@ -4066,12 +4082,48 @@ fn gui_close(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::Nil)
 }
 
+/// `(gui-focus id)` — raise window `id` and give it OS keyboard focus (un-minimising
+/// it). Lets an app surface an already-open singleton window instead of opening a
+/// duplicate. Errors only if `id` isn't a live window.
+fn gui_focus(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = gui_window_id(heap, "gui-focus", arg(args, 0))?;
+    crate::gui::focus(id).map_err(LispError::runtime)?;
+    Ok(Value::Nil)
+}
+
 /// `(gui-size id)` — window `id`'s size as `[cols rows]` (character cells), same
 /// shape as `term-size`.
 fn gui_size(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = gui_window_id(heap, "gui-size", arg(args, 0))?;
     let (cols, rows) = crate::gui::size(id).map_err(LispError::runtime)?;
     Ok(heap.alloc_vector(vec![Value::Int(cols as i64), Value::Int(rows as i64)]))
+}
+
+/// A held `gui::Key` as the same Brood value `gui-open` delivers for that press —
+/// a 1-char string, else a `:ctrl-…` / `:alt-…` / `:ctrl-meta-…` / named keyword —
+/// so an app can compare `(gui-held-key id)` directly against the key it last saw.
+fn gui_key_to_value(heap: &mut Heap, k: crate::gui::Key) -> Value {
+    use crate::gui::Key;
+    match k {
+        Key::Char(c) => heap.alloc_string(&c.to_string()),
+        Key::Ctrl(c) => Value::Keyword(value::intern(&format!("ctrl-{c}"))),
+        Key::Alt(c) => Value::Keyword(value::intern(&format!("alt-{c}"))),
+        Key::CtrlAlt(c) => Value::Keyword(value::intern(&format!("ctrl-meta-{c}"))),
+        Key::Named(s) => Value::Keyword(value::intern(s)),
+    }
+}
+
+/// `(gui-held-key id)` — the key window `id` currently sees as physically held (the
+/// same value its press delivered), or nil when none. Tracked from press/release
+/// transitions, not winit's unreliable `ke.repeat`, so it's the source of truth a
+/// consumer-paced key repeat polls to stop the instant the key is up — making a
+/// missed key-up unable to cause runaway repeat (ADR-086).
+fn gui_held_key(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = gui_window_id(heap, "gui-held-key", arg(args, 0))?;
+    match crate::gui::held_key(id).map_err(LispError::runtime)? {
+        Some(k) => Ok(gui_key_to_value(heap, k)),
+        None => Ok(Value::Nil),
+    }
 }
 
 /// `(gui-draw id frame)` — paint a frame (the same op vector `term-draw` takes) to

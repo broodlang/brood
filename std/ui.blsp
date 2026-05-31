@@ -78,6 +78,11 @@ their input. Both are deferred trade-offs (ADR-059), fine for the observer."
       ;; message, or nil after `ms` (the live-refresh tick).
       :poll
       (fn (ms) (receive (m m) (after ms nil)))
+      ;; Raise this window to the front + focus it (un-minimising) — `ui-run` calls
+      ;; this when a `:focus` control message lands in the mailbox, so another process
+      ;; can surface an already-open singleton window (e.g. a second `(observe)`).
+      :focus
+      (fn () (gui-focus id))
       :window
       id}))
 
@@ -143,20 +148,35 @@ button) asking the app to quit, as distinct from the Escape *key* (`:escape`).
 alongside whatever quit keys you bind — e.g. `(:close :quit)` next to your own."
   (= input :close))
 
+(defn focus-request? (input)
+  "True if `input` is a `:focus` control message — a request (delivered to this
+process's mailbox by another process) to raise this app's window to the front.
+`ui-run` handles it by calling the display's `:focus`; a frontend without one (the
+terminal) just ignores it. The seam a singleton launcher uses to surface an
+already-open window instead of opening a duplicate (e.g. a repeated `(observe)`)."
+  (= input :focus))
+
 (defn ui--loop (model view update display)
   "The inner recursion of `ui-run` (own function so each turn is a proper tail call —
 O(1) stack). Renders, polls, folds the input, recurses; stops when `:done` (the
 caller, `ui-run`, runs `:leave` in all cases). A `:close` input (the window's X
 button) always quits, so every `ui-run` app is closeable by its close button without
-wiring it into `update` — independent of how the app binds the Escape key."
+wiring it into `update` — independent of how the app binds the Escape key. A `:focus`
+control message (from another process) raises the window via the display's `:focus`
+and is NOT folded into `update`."
   (if (get model :done)
     nil
     (let ([cols rows] ((get display :size)))
       ((get display :draw) (view model cols rows))
       (let (input (or ((get display :poll) (ui--tick-ms model)) :tick))
-        (if (quit-request? input)
-          nil  ; the window's close button always quits; `ui-run` then runs `:leave`
-          (ui--loop (update model input cols rows) view update display))))))
+        (cond
+          ;; the window's close button always quits; `ui-run` then runs `:leave`
+          ((quit-request? input) nil)
+          ;; raise-to-front request: act on the display, keep the model untouched
+          ((focus-request? input)
+           (let (f (get display :focus))
+             (do (when f (f)) (ui--loop model view update display))))
+          (:else (ui--loop (update model input cols rows) view update display)))))))
 
 (defn ui-run (model view update display)
   "Run a UI app over `display` (a frontend map): enter it, then loop —
