@@ -37,6 +37,16 @@ test: ## Run Rust tests + the in-language suite via cargo-nextest (each test cas
 	cargo nextest run --no-fail-fast
 	cargo test --doc   # nextest doesn't run doctests; none today, kept so future ones still run
 
+test-both: ## Run the whole suite through BOTH engines (tree-walker + VM) — the differential gate (ADR-076)
+	# The VM is the default engine; this also exercises the tree-walker escape hatch
+	# (BROOD_VM=0) so a regression in either is caught. `differential.rs` additionally
+	# checks per-expression engine agreement within one run.
+	@command -v cargo-nextest >/dev/null 2>&1 || { echo ">>> cargo-nextest not found — run 'make ensure-nextest'"; exit 1; }
+	@echo ">>> suite under the VM (default engine)"
+	BROOD_VM=1 cargo nextest run --no-fail-fast
+	@echo ">>> suite under the tree-walker (BROOD_VM=0 escape hatch)"
+	BROOD_VM=0 cargo nextest run --no-fail-fast
+
 ensure-nextest: ## Install cargo-nextest into ~/.local/bin (prebuilt binary) if it's missing
 	@command -v cargo-nextest >/dev/null 2>&1 && { echo "cargo-nextest already installed: $$(cargo nextest --version)"; } || { \
 		echo "installing cargo-nextest into $(HOME)/.local/bin ..."; \
