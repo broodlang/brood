@@ -893,6 +893,8 @@ mod tests {
         for expected in &[
             "eval",
             "load",
+            "write",
+            "edit",
             "lookup",
             "macroexpand",
             "format",
@@ -1511,6 +1513,95 @@ mod tests {
         // A bogus id yields a soft error map, not a thrown tool error.
         let (_, miss) = invoke_tool(&mut interp, "process-info", json!({ "id": 9_999_999 }));
         assert!(miss.unwrap()["error"].is_string());
+    }
+
+    /// A fresh interp with `*project-root*` pinned to a unique temp dir, so the
+    /// sandboxed `write`/`edit` tools have a project to write into. Returns the
+    /// root path. The first `eval` call triggers the dispatcher's `(require
+    /// 'mcp)` (which loads `project`, defining `*project-root*` as nil); we then
+    /// rebind it — a later `(require 'mcp)` is idempotent and won't reset it.
+    fn interp_with_project_root(tag: &str) -> (Interp, std::path::PathBuf) {
+        let mut interp = Interp::new();
+        let _ = invoke_tool(&mut interp, "eval", json!({ "source": "1" }));
+        let root = std::env::temp_dir().join(format!("brood-mcp-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        interp
+            .eval_str(&format!("(def *project-root* {:?})", root.to_str().unwrap()))
+            .unwrap();
+        (interp, root)
+    }
+
+    #[test]
+    fn std_write_tool_writes_a_blsp_file_into_the_project_and_loads_it() {
+        let (mut interp, root) = interp_with_project_root("write");
+        let (_, body) = invoke_tool(
+            &mut interp,
+            "write",
+            json!({ "path": "src/gen.blsp", "content": "(defn gen-answer () 42)" }),
+        );
+        let body = body.unwrap();
+        assert_eq!(body["ok"], true, "{body:?}");
+        assert_eq!(body["path"], "src/gen.blsp");
+        // The file landed on disk under the project root...
+        let on_disk = std::fs::read_to_string(root.join("src/gen.blsp")).unwrap();
+        assert_eq!(on_disk, "(defn gen-answer () 42)");
+        // ...and `.blsp` content was loaded into the live image (def is callable).
+        let (_, called) = invoke_tool(&mut interp, "eval", json!({ "source": "(gen-answer)" }));
+        assert_eq!(called.unwrap()["value"], "42");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn std_write_tool_refuses_to_escape_the_project_root() {
+        let (mut interp, root) = interp_with_project_root("escape");
+        for bad in ["../escape.blsp", "/etc/passwd", "~/secret", "a/../../b.blsp"] {
+            let (_, body) = invoke_tool(
+                &mut interp,
+                "write",
+                json!({ "path": bad, "content": "nope" }),
+            );
+            let body = body.unwrap();
+            assert_eq!(body["ok"], false, "should reject {bad:?}: {body:?}");
+        }
+        // None of those wrote anything under (or above) the root.
+        assert!(!root.exists(), "sandbox-violating write created files");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn std_edit_tool_replaces_unique_text_and_rejects_ambiguity() {
+        let (mut interp, root) = interp_with_project_root("edit");
+        invoke_tool(
+            &mut interp,
+            "write",
+            json!({ "path": "notes.txt", "content": "alpha beta beta gamma" }),
+        );
+        // Ambiguous: "beta" occurs twice → soft error, file untouched.
+        let (_, dup) = invoke_tool(
+            &mut interp,
+            "edit",
+            json!({ "path": "notes.txt", "old": "beta", "new": "X" }),
+        );
+        assert_eq!(dup.unwrap()["ok"], false);
+        // Unique: "alpha" once → replaced.
+        let (_, ok) = invoke_tool(
+            &mut interp,
+            "edit",
+            json!({ "path": "notes.txt", "old": "alpha", "new": "ALPHA" }),
+        );
+        assert_eq!(ok.unwrap()["ok"], true);
+        assert_eq!(
+            std::fs::read_to_string(root.join("notes.txt")).unwrap(),
+            "ALPHA beta beta gamma"
+        );
+        // Missing file → soft error.
+        let (_, miss) = invoke_tool(
+            &mut interp,
+            "edit",
+            json!({ "path": "nope.txt", "old": "x", "new": "y" }),
+        );
+        assert_eq!(miss.unwrap()["ok"], false);
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
