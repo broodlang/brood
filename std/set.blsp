@@ -39,17 +39,20 @@ collapse: `(set [1 1 2]) ⇒ {1 true 2 true}`."
   "`s` with `x` removed (a no-op if `x` is absent). Returns a fresh set."
   (dissoc s x))
 
+;; The accumulator is always a set (a map), so the per-element folds use the
+;; 3-arg kernel `map-assoc`/`map-dissoc` directly — variadic `assoc`/`dissoc`
+;; would build a rest-list on every element.
 (defn union (a b)
   "Every element in either `a` or `b`."
-  (fold (fn (s x) (assoc s x true)) a (keys b)))
+  (fold (fn (s x) (map-assoc s x true)) a (keys b)))
 
 (defn intersection (a b)
   "Every element in both `a` and `b`."
-  (fold (fn (s x) (if (contains? b x) (assoc s x true) s)) {} (keys a)))
+  (fold (fn (s x) (if (contains? b x) (map-assoc s x true) s)) {} (keys a)))
 
 (defn difference (a b)
   "Every element of `a` that is not in `b`."
-  (fold (fn (s x) (dissoc s x)) a (keys b)))
+  (fold (fn (s x) (map-dissoc s x)) a (keys b)))
 
 (defn subset? (a b)
   "True when every element of `a` is also in `b`."

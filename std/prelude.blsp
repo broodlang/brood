@@ -1397,11 +1397,30 @@ runtime isn't a node yet."
   "Sort `coll` (stable, ascending) by comparing `(key-fn x)` of each item with the
 structural order (`compare`), so numeric, string, keyword, and vector keys all work."
   (merge-sort (fn (x y) (< (compare (key-fn x) (key-fn y)) 0)) coll))
-(defn merge-sort (less? coll)
-  (if (or (empty? coll) (empty? (rest coll)))
+;; Split `coll` into its first `n` items and the rest in ONE pass — what
+;; merge-sort needs instead of a separate `take` + `drop` (two walks). Generally
+;; useful, so it's public.
+(defn split-at--acc (n coll acc)
+  (if (or (<= n 0) (empty? coll))
+    [(reverse acc) coll]
+    (split-at--acc (dec n) (rest coll) (cons (first coll) acc))))
+(defn split-at (n coll)
+  "The vector `[front back]` splitting `coll` at index `n`: `front` is its first `n` items (a list), `back` the remainder. One pass, unlike a separate `take`/`drop`."
+  (split-at--acc n coll nil))
+
+;; Length-carrying merge sort: count once up front and halve `n` down the
+;; recursion, and split each run in a single `split-at` pass. The previous form
+;; re-`count`ed and ran a separate `take`+`drop` at every level — three O(n)
+;; walks per level, O(n log n) wasted overall — purely to find the midpoint.
+(defn merge-sort (less? coll) (merge-sort--n less? coll (count coll)))
+(defn merge-sort--n (less? coll n)
+  (if (<= n 1)
     coll
-    (let (n (quot (count coll) 2))
-      (merge--runs less? (merge-sort less? (take n coll)) (merge-sort less? (drop n coll))))))
+    (let (h (quot n 2)
+          parts (split-at h coll))
+      (merge--runs less?
+        (merge-sort--n less? (nth parts 0) h)
+        (merge-sort--n less? (nth parts 1) (- n h))))))
 (defn merge--runs (less? a b) (merge--acc less? a b nil))
 (defn merge--acc (less? a b acc)
   (cond
