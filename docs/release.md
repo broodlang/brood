@@ -12,16 +12,16 @@ nest release            # → ./<project-name>, a single executable
 ./<project-name>        # runs the project's :main, anywhere, with nothing else
 ```
 
-`nest release` appends the project's source to a copy of the prebuilt `brood`
-runtime. The result is an ordinary executable that, on startup, finds the
-appended archive and boots `:main` instead of starting a REPL.
+`nest release` appends the project's source to a copy of a **lean** `brood`
+runtime (built on demand — see below). The result is an ordinary executable that,
+on startup, finds the appended archive and boots `:main` instead of a REPL.
 
 ```
 nest release [-o PATH] [--runtime PATH] [--target TRIPLE]
   -o, --output PATH    output path (default: the manifest's :name)
-      --runtime PATH   base `brood` to append to (default: the `brood` beside
-                       `nest`, else target/release/brood)
-      --target TRIPLE   informational; cross-targets need --runtime (see below)
+      --runtime PATH   base runtime to append to (default: a freshly built,
+                       cached lean `brood`); use to supply a prebuilt/cross runtime
+      --target TRIPLE  informational; cross-targets need --runtime (see below)
 ```
 
 ## What's in the binary
@@ -42,6 +42,53 @@ modules are already compiled into `brood` itself (`include_str!` +
 It is **code-only**: runtime file reads (`(slurp "data.txt")`, `(list-dir …)`)
 still go to the real filesystem on the target — the bundle is not a virtual FS.
 If you need data files, ship them alongside for now.
+
+## The lean runtime
+
+`nest release` does **not** append to your dev `brood`. It builds (once, then
+caches) a *lean* runtime with `--no-default-features`, so a shipped app carries
+no dev/debug surface. Stripped out — never compiled in:
+
+- the **test framework** (`test`),
+- the **process observer** + GC debug builtins (`observer`, `gc-stats`,
+  `gc-collect`, `gc-trace`, `runtime-collect`),
+- the **MCP / doc / hot-reload** tooling (`mcp`, `docs`, `reload`),
+- the interactive **REPL** (`repl`).
+
+Kept in the lean runtime (an app legitimately needs them): the whole prelude,
+`project` (it boots the bundle), and the UI/editor toolkit — `display`, `keymap`,
+`layers`, `ui`, `pane`, `buffer`, `sexp`, `regex`, `face`, `highlight`,
+**`lineedit`** (an editor's minibuffer reuses it), plus `tcp`/`http`/`file`/
+`json`/`set`/`format`/`task`/`hatch`/`supervisor`/`ansi`/`package`.
+
+On top of `--no-default-features`, the lean build uses the `release-lean` cargo
+profile (`strip` + fat `lto` + one codegen unit). Net effect: ~13 MB dev `brood`
+→ ~6 MB shipped runtime. The lean runtime is built **once and cached** under
+`target/release-lean/`; changing your *app* only re-appends the archive (the app
+lives in the archive, not compiled in), so you pay the runtime build (and LTO)
+only when the brood source itself changes.
+
+`gc-stats`/`require 'test`/`require 'observer` etc. are therefore unavailable in
+a shipped app — that's the point. If you genuinely want one back, ship it as a
+`.blsp` on the load-path, or pass a fuller `--runtime`.
+
+## Extending a shipped app at runtime (`init.blsp`)
+
+A bundled binary is a full evaluator — `load`, `slurp`, `require`, and
+`eval-string` all read the **real filesystem**, and `def` rebinds globals (live
+hot reload). So a shipped app reads external `.blsp` to extend/reconfigure itself
+exactly like an editor reading `~/.config/app/init.blsp`:
+
+```lisp
+(defn main ()
+  (when (file-exists? (init-path))
+    (load (init-path)))     ; user code redefines/extends the running runtime
+  (app-loop (initial-state)))
+```
+
+The init file can `(require 'layers)` (or any kept module), add layers/keymaps/
+modes, `def` new commands, and redefine existing functions — all against the live
+runtime. Only the *stripped* modules above are unavailable to it.
 
 ## How it works
 
@@ -97,8 +144,14 @@ the payload rather than nesting a second archive.
 - `crates/lisp/src/bundle.rs` — wire format, `current_exe` mount, `strip_existing`,
   `write_release` (+ unit tests)
 - `crates/lisp/src/builtins.rs` — `%bundled?`, `%bundle-manifest`,
-  `%bundle-module-names`; `%builtin-module` extended to consult the bundle
-- `std/project.blsp` — `bundle-collect` (gather sources) + `run-bundle` (boot)
+  `%bundle-module-names`; `%builtin-module` consults the bundle; `CORE_MODULES`
+  vs `DEV_MODULES` (the latter `#[cfg(feature = "dev-tools")]`); GC debug builtins
+  cfg-gated
+- `crates/lisp/Cargo.toml` / `crates/cli/Cargo.toml` — the `dev-tools` feature
+  (default on; `cli` forwards `brood/dev-tools`, off via `--no-default-features`)
+- `Cargo.toml` — the `release-lean` profile (strip + LTO + 1 codegen unit)
+- `std/project.blsp` — `bundle-collect` (gather sources) + `run-bundle` (boot);
+  no load-time `(:use test)` so a lean runtime can load it
 - `crates/cli/src/main.rs` — `brood` boots the app when bundled
-- `crates/nest/src/main.rs` — the `nest release` subcommand
+- `crates/nest/src/main.rs` — `nest release` + `build_lean_runtime` (cached)
 - `crates/cli/tests/release_bundle.rs` — end-to-end boot test

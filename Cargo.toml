@@ -7,3 +7,15 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 authors = ["Wilhelm Kirschbaum"]
+
+# The runtime `nest release` appends an app to (ADR-038). Inherits `release` and
+# squeezes the shipped binary: `strip` drops symbols + debug info; fat `lto` +
+# a single codegen unit cross-module-inline and dead-code-eliminate the whole
+# (lean, `--no-default-features`) tree. Built once and cached — changing the app
+# only re-appends the archive, so LTO's cost is paid a single time. Kept off the
+# default `release` profile so `make install` / benches stay fast to build.
+[profile.release-lean]
+inherits = "release"
+strip = true
+lto = true
+codegen-units = 1

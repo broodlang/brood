@@ -10,8 +10,16 @@ description = "The Brood command-line REPL and file runner."
 name = "brood"
 path = "src/main.rs"
 
+[features]
+# Forward the runtime's dev/tooling surface (test/observer/mcp/docs/reload/repl
+# + GC debug builtins). On by default for the dev `brood`; `nest release` builds
+# the bundle-base `brood` with `--no-default-features` for a lean shipped runtime
+# (ADR-038). `default-features = false` on the dep below makes this the *only*
+# switch, so `--no-default-features` here fully strips the dev surface.
+default = ["brood/dev-tools"]
+
 [dependencies]
-brood = { path = "../lisp" }
+brood = { path = "../lisp", default-features = false }
 # Argument parsing + help text. The CLI is small enough to hand-roll, but
 # we've already paid for one typo-detection bug from doing so — clap's
 # typo suggestions and uniform `--foo=bar`/`--foo bar` handling pay for
