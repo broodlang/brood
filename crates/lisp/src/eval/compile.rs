@@ -1468,3 +1468,19 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
         None => crate::eval::eval(heap, form, env),
     }
 }
+
+/// Apply a closure *value* (not a source form) to `args` through the VM when it's
+/// VM-eligible, falling back to the tree-walker (`eval::apply`) otherwise — the
+/// entry point for callers that hold a [`Value::Fn`] and want VM execution. A
+/// spawned process's body uses this so it runs on the VM (with inlined
+/// primitives) like top-level code via [`run`], instead of the tree-walker:
+/// before this, `eval::apply` ran every green process tree-walked even under
+/// `BROOD_VM=1`, ~4–5× slower (most of `pfib`'s gap to Elixir). `genv` is the
+/// env a *native* callee runs in; a VM closure runs in its own captured env
+/// (read off the closure inside `dispatch`). `tail = false`: this is a value
+/// context, so any tail call is forced to completion by `force`.
+pub fn apply_value(heap: &mut Heap, callee: Value, args: &[Value], genv: EnvId) -> LispResult {
+    let argv: SmallVec<[Value; 4]> = args.iter().copied().collect();
+    let step = dispatch(heap, callee, argv, false, genv)?;
+    force(heap, step)
+}
