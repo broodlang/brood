@@ -39,6 +39,41 @@ multi-threaded. The 2026-05-28 symptoms (workers dying with bogus `unbound
 symbol: fold` / `+` / pattern-bound `iter`-`acc`-`pred`, plus a Rust `index out
 of bounds` panic in `eval/mod.rs`) are no longer reproducible.
 
+### 2026-05-31 — re-reported via foobar `pstep`, re-confirmed fixed
+
+A fresh report came in of a slab out-of-bounds **panic in the GC copy phase**
+(`heap.rs` `flush_pair`: `index out of bounds: the len is 3007 but the index is
+7187`) under foobar's parallel `pstep` (a coordinator fans a Game-of-Life
+generation across row-band worker processes that allocate heavily, `send` slices
+back, and merge — with a global rebound underfoot). Also seen as a *silently
+wrong* `pstep` result on other runs. This is the same use-after-GC / stale-handle
+signature as KI-1, surfacing in the moving collector's `flush_*` rather than in
+`eval`: a LOCAL-tagged handle reachable from the GC roots whose `index()` is past
+the live source slab.
+
+**Confirmed already fixed — does not reproduce on HEAD.** The captured panic came
+from a long-lived `nest mcp` server **pinned to a pre-fix binary** (it still had
+the 1-arg `gui-font!`). On a current debug-assertions build the exact repro ran:
+
+- the leaner variant under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` (collect +
+  live-graph verify at every safepoint) — **clean, no verifier trip**, and
+- the full repro (2000 trials × 16 workers × 4000-entry maps) on the default
+  28-worker scheduler — **30+ min CPU, no panic, no `.brood_crash_dump`**.
+
+Two durable follow-ups landed so a recurrence is self-diagnosing and guarded:
+
+- **Self-diagnosing flush OOB** (`heap.rs` `flush_oob` + `flush_bound!`): every
+  `flush_*` source-slab access is now bounds-checked and, on OOB, panics naming
+  the handle's kind / region / age / epoch / index / slab-len / collected space —
+  instead of the bare slice panic with `<unknown>` release frames. (`copies()`
+  gates a copy by region + generation-age but not by slab bound, so this is where
+  a stale/foreign handle would land.)
+- **Regression test** (`crates/lisp/tests/concurrency_race.rs`,
+  `fanout_with_concurrent_global_rebind_matches_serial`): the spawn-N-fan-out +
+  concurrent global-rebind reconstruction, asserting the parallel total equals the
+  deterministic serial `k*n` over many trials. Encodes the
+  [`concurrency-v2.md`](concurrency-v2.md) §6 acceptance bar in the standing suite.
+
 Phase 2 (bounding memory in long-lived receive loops) first shipped as the
 explicit `(hibernate fn & args)` primitive (an arena flip), but that was a
 Stage-A expedient: it was **removed** (ADR-058) once the automatic semi-space
