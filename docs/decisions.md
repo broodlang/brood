@@ -5596,3 +5596,56 @@ repeat cap on top if it wants absolute insurance, but it isn't needed for correc
 **References.** ADR-077 (mouse `:release`/`:drag` — the same "give the app transitions"
 move), ADR-058 (GUI input as mailbox messages), ADR-056 (the minimal display/input
 vocabulary, grown only when a consumer needs it), ADR-011 (ship the minimal form).
+
+## ADR-087 — Expose O(1) kernel facts (`map-count`) as primitives rather than recompute them in Brood
+
+**Context.** "Write the language in the language" (ADR-006) says a capability
+goes in Brood unless it genuinely needs Rust. `count`/`empty?` on a map were
+pure Brood over the one map enumerator, `map-pairs`: `(count (map-pairs m))` and
+`(%eq (map-pairs m) nil)`. But `map-pairs` *materialises* the whole entries list
+(an O(n) walk + n freshly-allocated `[k v]` vectors) — so asking a map only how
+*many* entries it has, or *whether* it has any, paid O(n) time and allocation
+for a fact the CHAMP trie (ADR-040) already stores: every node carries the
+`size` of its own subtree, so the root's `size` is the count, in O(1).
+
+**Decision.** Add a thin Rust primitive `map-count` that returns
+`Heap::map_size(id)` (the root node's `size`), and route `count`/`empty?` on a
+map through it (`(map-count m)` / `(%eq (map-count m) 0)`). No `map-pairs`
+allocation for a length or an emptiness test.
+
+**Why this clears the "prefer Brood" bar (ADR-006).** The rule is *mechanism in
+Rust, policy in Brood* — a primitive is justified when it exposes something the
+language can't bootstrap cheaply, not when it merely moves behaviour out of
+Brood for speed. The entry *count* is structural metadata the kernel data type
+already maintains and that no Brood code can read without walking the structure;
+exposing it is mechanism, exactly like `vector-length` or `string-length` (the
+sibling O(1) length kernels `count` already used). It is **not** an escape hatch
+— the policy (what `count`/`empty?` mean, the dispatch over collection types)
+stays in `std/prelude.blsp`; only the irreducible "ask the trie its size" step
+is in Rust. Contrast a *wrong* primitive — e.g. moving `frequencies` to Rust —
+which would relocate real policy and teach us nothing.
+
+**Sibling decision (same session): `%quot`.** `quot` was Brood
+`(/ (- a (rem a b)) b)` — three dispatched ops per call, paid by every tight
+integer loop. It now passes through to a `%quot` primitive (truncating integer
+division), and the VM inlines the `Rem`/`Div`/`Quot` `PrimOp`s on `(Int, Int)`;
+non-integer and edge cases (`÷0`, the `i64::MIN / -1` overflow) defer to the
+native so semantics and error messages are byte-identical. Same shape as this
+ADR: expose/inline an irreducible arithmetic step the language can't make fast
+on its own, keep the surface in Brood.
+
+**Consequences.**
+- `(count m)` / `(empty? m)` are O(1) and allocation-free on maps; `frequencies`,
+  `group-by`, and any `(count some-map)` caller stop paying an O(n) `map-pairs`
+  pass purely to measure size.
+- One more small entry in the map kernel surface (`map-get`/`map-assoc`/
+  `map-dissoc`/`map-pairs`/`map-count`). The bar for the next one stays: a fact
+  the structure already holds, not behaviour that belongs in Brood.
+- After adding a Rust primitive, the embedded `nest`/`brood-lsp` binaries must be
+  rebuilt (`make install`) or `nest check` flags the new name as unbound until
+  the on-PATH toolchain catches up.
+
+**References.** ADR-006 (write the language in Brood; mechanism vs policy),
+ADR-040 (CHAMP map — the per-node `size` this reads), ADR-076 (the VM that
+inlines the `%quot` family), `docs/transients.md` (the other CHAMP-aware kernel
+hook, `%map-into`).
