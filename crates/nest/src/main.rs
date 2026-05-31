@@ -230,6 +230,30 @@ enum Cmd {
         #[arg(long = "cookie", value_name = "COOKIE")]
         cookie: Option<String>,
     },
+
+    /// Bundle the project into a single self-contained executable (ADR-038).
+    ///
+    /// Appends the project's manifest + every `src/**/*.blsp` (and resolved
+    /// dependency sources) to a copy of the prebuilt `brood` runtime. The result
+    /// runs `:main` on any compatible machine with no interpreter, project dir,
+    /// or source files alongside — just the one binary. `tests/` is excluded.
+    Release {
+        /// Output path for the binary. Defaults to the project's `:name`.
+        #[arg(long = "output", short = 'o', value_name = "PATH")]
+        output: Option<String>,
+
+        /// The base `brood` runtime to append to. Defaults to the `brood`
+        /// installed beside `nest`, else `target/release/brood`. For a different
+        /// OS/arch, build a `brood` for that target and pass it here.
+        #[arg(long = "runtime", value_name = "PATH")]
+        runtime: Option<String>,
+
+        /// Target triple — informational; cross-compiling the runtime is out of
+        /// scope, so this requires `--runtime` pointing at a prebuilt `brood` for
+        /// the target (ADR-038).
+        #[arg(long = "target", value_name = "TRIPLE")]
+        target: Option<String>,
+    },
 }
 
 fn main() {
@@ -304,6 +328,16 @@ fn run_main(cli: Cli) {
         Cmd::Repl => cmd_repl(&mut interp),
         Cmd::Mcp => cmd_mcp(&mut interp),
         Cmd::Observe { connect, cookie } => cmd_observe(&mut interp, connect, cookie),
+        Cmd::Release {
+            output,
+            runtime,
+            target,
+        } => cmd_release(
+            &mut interp,
+            output.as_deref(),
+            runtime.as_deref(),
+            target.as_deref(),
+        ),
     }
 }
 
@@ -740,6 +774,141 @@ fn cmd_observe(interp: &mut Interp, connect: Option<String>, cookie: Option<Stri
     if let Err(e) = result {
         report_error(&e);
         std::process::exit(1);
+    }
+}
+
+/// `nest release [-o PATH] [--runtime PATH] [--target TRIPLE]` — bundle the
+/// project into one self-contained executable (ADR-038). Collection is policy
+/// (Brood: `project/bundle-collect`); byte assembly + I/O is mechanism (Rust:
+/// `brood::bundle`). See `crates/lisp/src/bundle.rs` for the wire format.
+fn cmd_release(
+    interp: &mut Interp,
+    output: Option<&str>,
+    runtime: Option<&str>,
+    target: Option<&str>,
+) {
+    use brood::core::value::Value;
+
+    // 1. Collect the manifest + module sources as a flat list of strings
+    //    `(manifest stem0 src0 stem1 src1 …)`. Errors (e.g. not in a project) are
+    //    reported + exit by `run_for_value`.
+    let collected = run_for_value(
+        interp,
+        "(require 'project) (let (root (project/project--find-root (cwd))) \
+         (project/bundle-collect root))",
+    );
+    let items = match interp.heap.seq_items(collected) {
+        Ok(v) => v,
+        Err(e) => {
+            report_error(&e);
+            std::process::exit(1);
+        }
+    };
+    // Extract to owned Strings *before* any further eval — the list isn't rooted,
+    // so a later collection could reclaim it.
+    let strings: Vec<String> = items
+        .iter()
+        .map(|v| match v {
+            Value::Str(id) => Ok(interp.heap.string(*id).to_string()),
+            other => Err(interp.print(*other)),
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_else(|bad| {
+            eprintln!("nest release: bundle-collect returned a non-string ({bad})");
+            std::process::exit(1);
+        });
+    let (manifest, rest) = match strings.split_first() {
+        Some(pair) => pair,
+        None => {
+            eprintln!("nest release: nothing to bundle");
+            std::process::exit(1);
+        }
+    };
+    let modules: Vec<(String, String)> = rest
+        .chunks(2)
+        .map(|c| (c[0].clone(), c.get(1).cloned().unwrap_or_default()))
+        .collect();
+
+    // 2. Default the output name from the manifest's `:name` (set in the interp
+    //    by `bundle-collect`'s `project--apply`).
+    let name = match run_for_value(interp, "(if *project-name* (name *project-name*) \"app\")") {
+        Value::Str(id) => interp.heap.string(id).to_string(),
+        _ => "app".to_string(),
+    };
+    let out = std::path::PathBuf::from(output.unwrap_or(&name));
+
+    // 3. Locate + read the base `brood` runtime.
+    let base_path = locate_runtime(runtime, target);
+    let base = std::fs::read(&base_path).unwrap_or_else(|e| {
+        eprintln!(
+            "nest release: cannot read runtime binary {}: {e}",
+            base_path.display()
+        );
+        std::process::exit(1);
+    });
+
+    // 4. Serialize the archive and write the release binary.
+    let archive = brood::bundle::serialize(manifest, &modules);
+    if let Err(e) = brood::bundle::write_release(&base, &archive, &out) {
+        eprintln!("nest release: cannot write {}: {e}", out.display());
+        std::process::exit(1);
+    }
+    let size = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+    println!(
+        "Wrote {} ({} module{}, {})",
+        out.display(),
+        modules.len(),
+        if modules.len() == 1 { "" } else { "s" },
+        human_size(size),
+    );
+}
+
+/// Find the base `brood` runtime to append to: `--runtime` wins; otherwise the
+/// `brood` installed beside this `nest` (the `make install` layout), then the
+/// workspace `target/release/brood`. Cross-targeting needs an explicit
+/// `--runtime` (cross-compiling the runtime is out of scope, ADR-038).
+fn locate_runtime(runtime: Option<&str>, target: Option<&str>) -> std::path::PathBuf {
+    if let Some(r) = runtime {
+        return std::path::PathBuf::from(r);
+    }
+    if let Some(t) = target {
+        eprintln!(
+            "nest release: cross-target builds need a prebuilt `brood` for {t} — \
+             pass it with --runtime PATH (cross-compiling the runtime is out of scope, ADR-038)"
+        );
+        std::process::exit(2);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(sib) = exe.parent().map(|d| d.join("brood")) {
+            if sib.exists() {
+                return sib;
+            }
+        }
+    }
+    let dev = std::path::PathBuf::from("target/release/brood");
+    if dev.exists() {
+        return dev;
+    }
+    eprintln!(
+        "nest release: cannot find the `brood` runtime binary. \
+         Build it (`cargo build --release`) or pass --runtime PATH."
+    );
+    std::process::exit(2);
+}
+
+/// Human-friendly byte size for the release summary (e.g. `4.2 MB`).
+fn human_size(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB"];
+    let mut n = bytes as f64;
+    let mut u = 0;
+    while n >= 1024.0 && u < UNITS.len() - 1 {
+        n /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{bytes} {}", UNITS[0])
+    } else {
+        format!("{n:.1} {}", UNITS[u])
     }
 }
 

@@ -602,6 +602,78 @@ resolve in the advisory checker. Returns the project root."
               (error "run-project: entry '" fname "' is not callable (" (type-of f) ")"))
             (apply f args)))))))
 
+;; --- single-binary release (ADR-038) -----------------------------------------
+;; `nest release` appends a project's source to a copy of the `brood` binary;
+;; the resulting executable boots `:main` with no interpreter, project dir, or
+;; source files on the target. Two halves: `bundle-collect` (here) gathers the
+;; source for `nest` to embed, and `run-bundle` (below) boots it inside the
+;; embedded runtime. Mechanism (append/extract the archive) is Rust; this is the
+;; policy (ADR-006).
+
+;; The module name `require` knows a source file by — its filename stem, since
+;; `require--find` searches `<stem>.blsp`. So a bundle keyed by stem resolves
+;; through the same `%builtin-module` path with no load-path on disk.
+(defn project--module-stem (path)
+  (let (base (path-basename path))
+    (if (ends-with? base ".blsp")
+      (substring base 0 (- (string-length base) 5))
+      base)))
+
+(defn bundle-collect (root)
+  "Collect a project's shippable source for `nest release`: a flat list of
+strings `(manifest-src stem0 src0 stem1 src1 …)` the `nest` side embeds in the
+binary (ADR-038). Includes resolved dependency sources; excludes `tests/`.
+Modules are keyed by filename stem (the name `require` searches for). Errors if
+`root` is nil (not in a project)."
+  (when (nil? root)
+    (error "bundle-collect: not in a Brood project (no project.blsp found)"))
+  (let (manifest (slurp (path-join root "project.blsp")))
+    ;; Apply the manifest as DATA (not `load`) to learn its source paths + deps,
+    ;; mirroring `project-setup`. We don't load any source here — just read it.
+    (let (form (read-string manifest))
+      (when (and (pair? form) (= (first form) 'project)) (project--apply (rest form))))
+    ;; Project source dirs first, then resolved dependency dirs (so a project
+    ;; module wins a stem clash with a dep — matches `*load-path*` ordering).
+    (let (src-dirs (project--abs-paths root *project-source-paths*)
+          dep-dirs (if *project-dependencies*
+                     (do (require 'package) (package/ensure-deps root *project-dependencies*))
+                     nil)
+          files (fold (fn (acc d) (append acc (project--collect-sources d)))
+                  nil
+                  (append src-dirs dep-dirs)))
+      (cons manifest
+        (fold (fn (acc f) (append acc (list (project--module-stem f) (slurp f))))
+          nil
+          files)))))
+
+;; (run-bundle args) — boot an embedded release bundle. The `brood` binary,
+;; detecting its appended archive, calls this instead of starting a REPL. No
+;; disk/cwd: every module comes from the embedded archive via `%builtin-module`
+;; (which `require-one` consults). Mirrors `run-project`'s entry resolution minus
+;; the project walk and the advisory checker (a shipped app isn't a dev image).
+(defn run-bundle (args)
+  "Run an embedded release bundle's entry point, passing `args` (a list of CLI
+string arguments). The `brood` binary calls this when it detects it is a `nest
+release` bundle. Loads the embedded manifest + modules and invokes `:main`
+(default module `main`, fn `main`). Errors if the entry fn is missing/uncallable."
+  (let (form (read-string (%bundle-manifest)))
+    (when (and (pair? form) (= (first form) 'project)) (project--apply (rest form))))
+  ;; Load every embedded module once. Order-independent: cross-module
+  ;; `:use`/`require` resolve through the same embedded table, and require is
+  ;; idempotent — so a `(:use foo)` in the first module pulls `foo` on demand.
+  (map require-one (%bundle-module-names))
+  (let (entry (or *project-main-override* *project-main*)
+        modname (first entry) fname (second entry))
+    (require modname)
+    (let (qual (symbol (str (name modname) "/" (name fname))))
+      (let (target (cond (bound? qual) qual (bound? fname) fname else nil))
+        (when (nil? target)
+          (error "run-bundle: entry fn '" fname "' is not defined (module '" modname "')"))
+        (let (f (eval target))
+          (unless (fn? f)
+            (error "run-bundle: entry '" fname "' is not callable (" (type-of f) ")"))
+          (apply f args))))))
+
 ;; --- user config (~/.config/brood/config.blsp) -------------------------------
 ;; A user-level Brood file of tooling preferences — the sibling of project.blsp.
 ;; It's auto-created with documented defaults on first tool use, then loaded by

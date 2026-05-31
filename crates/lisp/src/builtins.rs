@@ -867,6 +867,25 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![sym.union(kw).union(string)], string.union(nil_ty)),
         builtin_doc,
     );
+    // Release-bundle mechanism (ADR-038): an app produced by `nest release`
+    // carries its source appended to the binary. These let `std/project.blsp`
+    // boot it; `%builtin-module` (above) already consults the bundle, so
+    // `require` resolves an app's modules with no load-path change.
+    def(heap, "%bundled?", Arity::exact(0), Sig::nullary(bool_ty), bundled_p);
+    def(
+        heap,
+        "%bundle-manifest",
+        Arity::exact(0),
+        Sig::nullary(string.union(nil_ty)),
+        bundle_manifest,
+    );
+    def(
+        heap,
+        "%bundle-module-names",
+        Arity::exact(0),
+        Sig::nullary(list_ty),
+        bundle_module_names,
+    );
     // `apply`'s last positional arg must be a sequence (it's spliced); the
     // intermediate args can be anything. The `Sig` algebra can express
     // "prefix + repeating tail" but not "the *last* item of the tail is
@@ -2920,13 +2939,58 @@ fn lookup_embedded(
 /// or nil if there is none. Mechanism only: `require` (Brood) consults this
 /// before searching the load-path.
 fn builtin_module(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    lookup_embedded(
+    let found = lookup_embedded(
         args,
         heap,
         EMBEDDED_MODULES,
         "%builtin-module",
         "module name",
-    )
+    )?;
+    if !matches!(found, Value::Nil) {
+        return Ok(found);
+    }
+    // Not a baked-in std module — consult a mounted release bundle (the app's
+    // own modules + bundled deps), so `require` resolves them with no change to
+    // its load-path logic (ADR-038). The arg type was already validated above.
+    let name = match arg(args, 0) {
+        Value::Sym(s) | Value::Keyword(s) => value::symbol_name(s),
+        Value::Str(id) => heap.string(id).to_string(),
+        _ => return Ok(Value::Nil),
+    };
+    match crate::bundle::mounted() {
+        Some(b) => match b.module_src(&name) {
+            Some(src) => Ok(heap.alloc_string(src)),
+            None => Ok(Value::Nil),
+        },
+        None => Ok(Value::Nil),
+    }
+}
+
+/// `(%bundled?)` — true when this executable is a release bundle (an app built
+/// by `nest release`), false for a plain `brood`/`nest` runtime.
+fn bundled_p(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    Ok(Value::Bool(crate::bundle::is_bundled()))
+}
+
+/// `(%bundle-manifest)` — the embedded `project.blsp` source of a release
+/// bundle, or nil when not bundled.
+fn bundle_manifest(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    match crate::bundle::mounted() {
+        Some(b) => Ok(heap.alloc_string(&b.manifest)),
+        None => Ok(Value::Nil),
+    }
+}
+
+/// `(%bundle-module-names)` — the list of module names (filename stems) embedded
+/// in a release bundle, or nil when not bundled.
+fn bundle_module_names(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    match crate::bundle::mounted() {
+        Some(b) => {
+            let items: Vec<Value> = b.module_names().map(|n| heap.alloc_string(n)).collect();
+            Ok(heap.list(items))
+        }
+        None => Ok(Value::Nil),
+    }
 }
 
 /// `(%builtin-doc name)` — the source of a baked-in reference document as a
