@@ -114,6 +114,7 @@ pub enum Key {
     Char(char),
     Ctrl(char),
     Alt(char),
+    CtrlAlt(char),
     Named(&'static str),
 }
 
@@ -438,6 +439,7 @@ mod backend {
             Key::Char(c) => Message::Str(c.to_string()),
             Key::Ctrl(c) => Message::Keyword(value::intern(&format!("ctrl-{c}"))),
             Key::Alt(c) => Message::Keyword(value::intern(&format!("alt-{c}"))),
+            Key::CtrlAlt(c) => Message::Keyword(value::intern(&format!("ctrl-meta-{c}"))),
             Key::Named(s) => Message::Keyword(value::intern(s)),
         }
     }
@@ -967,8 +969,10 @@ mod backend {
                 NamedKey::PageUp => Key::Named("page-up"),
                 NamedKey::PageDown => Key::Named("page-down"),
                 // Space carries modifiers like a character key would, so Ctrl/Alt
-                // survive (Emacs `C-SPC` set-mark → :ctrl- , matching crossterm)
-                // rather than collapsing to a self-inserted space.
+                // survive (Emacs `C-SPC` set-mark → :ctrl- , `C-M-SPC` mark-sexp →
+                // :ctrl-meta- , matching crossterm) rather than collapsing to a
+                // self-inserted space. The Ctrl+Alt arm must come first.
+                NamedKey::Space if mods.control_key() && mods.alt_key() => Key::CtrlAlt(' '),
                 NamedKey::Space if mods.control_key() => Key::Ctrl(' '),
                 NamedKey::Space if mods.alt_key() => Key::Alt(' '),
                 NamedKey::Space => Key::Char(' '),
@@ -976,7 +980,9 @@ mod backend {
             }),
             WKey::Character(s) => {
                 let c = s.chars().next()?;
-                if mods.control_key() {
+                if mods.control_key() && mods.alt_key() {
+                    Some(Key::CtrlAlt(c.to_ascii_lowercase()))
+                } else if mods.control_key() {
                     Some(Key::Ctrl(c.to_ascii_lowercase()))
                 } else if mods.alt_key() {
                     Some(Key::Alt(c.to_ascii_lowercase()))
