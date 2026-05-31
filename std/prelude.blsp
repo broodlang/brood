@@ -92,7 +92,12 @@
 ;; on every call.
 (defn flip-cons (acc x) (cons x acc))
 
-(defn reverse (coll) "The items of `coll` in reverse order, as a list." (fold flip-cons nil coll))
+;; A dedicated loop, not `(fold flip-cons …)`: `reverse` is the final pass of
+;; nearly every sequence builder (`map`/`filter`/`take`/`zip`/`range`/…), so
+;; dropping the per-element `flip-cons` `apply` frame here pays off across the
+;; whole library. Coerce a map to its pairs once via `seq`, as `fold` did.
+(defn reverse--acc (coll acc) (if (empty? coll) acc (reverse--acc (rest coll) (cons (first coll) acc))))
+(defn reverse (coll) "The items of `coll` in reverse order, as a list." (reverse--acc (seq coll) nil))
 
 ;; reduce supports both (reduce f init coll) and (reduce f coll). The 2-arg
 ;; form must seq-coerce `x` itself before splitting head/tail, because the bare
@@ -1456,13 +1461,23 @@ a vector for a vector and a list for a list. `i` must be in `[0, count)`."
 ;; builders. All tail-recursive (reverse-accumulate, reverse once) so they stay
 ;; stack-safe on long inputs — see the sequence-library note above.
 
+;; `remove`/`keep` recur over a dedicated loop (like `map`/`filter` above) rather
+;; than folding a per-element closure — one fewer `apply` frame per item.
+(defn remove--acc (pred coll acc)
+  (if (empty? coll)
+    acc
+    (let (x (first coll)) (remove--acc pred (rest coll) (if (pred x) acc (cons x acc))))))
 (defn remove (pred coll)
   "A list of the items of `coll` for which `(pred x)` is *falsy* — the complement of `filter`."
-  (reverse (fold (fn (acc x) (if (pred x) acc (cons x acc))) nil coll)))
+  (reverse (remove--acc pred (seq coll) nil)))
 
+(defn keep--acc (f coll acc)
+  (if (empty? coll)
+    acc
+    (let (y (f (first coll))) (keep--acc f (rest coll) (if (nil? y) acc (cons y acc))))))
 (defn keep (f coll)
   "A list of the non-nil results of `(f x)` over `coll` — map and filter fused (the eager counterpart of `xkeep`)."
-  (reverse (fold (fn (acc x) (let (y (f x)) (if (nil? y) acc (cons y acc)))) nil coll)))
+  (reverse (keep--acc f (seq coll) nil)))
 
 ;; distinct: keep the first occurrence of each item. A map carried alongside the
 ;; result acts as the "seen" set, so membership is O(1)-ish, not the O(n²) a
