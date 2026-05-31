@@ -180,7 +180,14 @@
 ;; myedit editor defines `defcommand` in interactive.blsp, which commands.blsp
 ;; `:use`s to register every command into a registry; the walker force-reloading
 ;; interactive.blsp after commands.blsp ran wiped that registry (and warned).
+;; `:isolated` — these tests mutate process-global project state (the module
+;; load-path via `project-setup`, `*features*`, and earmuffed root counters like
+;; `*zzz-loads*`). Run concurrently they race other tests' `project-setup` (a peer
+;; clobbers the load-path between this unit's setup and its walk → "cannot find
+;; module 'zzz'"). Isolation runs them alone against a rolled-back private copy of
+;; the globals, so the walk sees its own freshly-`spit` project. (KI-2 class.)
 (describe "project: source load-once"
+  :isolated
   (test "project--file-feature reads a file's (defmodule NAME) as a string"
     (let (dir (temp-dir "brood-feat-"))
       (make-dir dir)

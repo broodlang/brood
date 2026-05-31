@@ -10979,3 +10979,46 @@ mutating primitive exists) to a *local invariant* in `champ_assoc` ("only write 
 node with `index >= watermark`"). A breach would corrupt a shared/PRELUDE map; the
 differential test + the watermark's degrade-to-copy property are the guards.
 `BROOD_GC_VERIFY` does not catch a mis-owned write.
+
+## 2026-05-31 — use-after-GC for string literals in compiled top-level forms (+ fallout fixes)
+
+**The bug.** Running `(do (doc-search "x") (println "y"))` under debug-assertions
+panicked with a use-after-GC tripwire: a string handle from epoch 0 deref'd many
+collections later. Root cause in the closure-compiling VM (ADR-076): `compile_node`
+stored a string literal directly as `Node::Const(Value::Str(local_id))` — a **LOCAL
+heap handle baked into the `Arc`'d compiled AST**, which the collector neither
+traces nor relocates. A `def`/`defn` body is `promote`d (its literals frozen into
+the immovable RUNTIME region), so those were safe — but a **top-level form run via
+`run()` is never promoted**, so a collection during that form's *own* evaluation
+(here, `doc-search`'s heavy allocation) dangled the literal, and the next sub-form
+(`println`) read freed/moved memory. Release hid it (the per-deref tripwire is
+debug-only); the debug `cargo test --test suite` surfaced it as the long-standing
+"doc-search flaky" failure (a crash in a test green-process looked like a 30 s
+timeout). Deterministic once isolated.
+
+**Fix.** `compile_node` now `heap.promote`s a `Value::Str` literal before storing
+it in a `Const` (immovable RUNTIME handle; promote is a no-op for already-immovable
+PRELUDE/RUNTIME strings). This is the same freeze a defn body's literals already
+get — and the same hazard the sibling `MakeClosure { fn_rest }` path already
+guarded against via `fn_rest_is_stable` (which *defers* a LOCAL `fn` form to the
+tree-walker). The two Value-bearing `Node` variants (`Const`, `fn_rest`) are now
+both safe; `Global` holds an interned symbol, the rest hold indices.
+
+**Fallout 1 — `doc-search` was also genuinely O(n²).** With the crash gone the
+suite test still timed out: `string-contains?` → `index-of` → `index-of--str-from`
+re-`substring`s at each position, and `substring s i …` skips `i` chars (UTF-8 is
+byte-addressed), so a whole-docstring scan is quadratic — ~14 s for four
+whole-namespace queries in debug (fine in release: 0.11 s/call). Pure Brood can't
+fix it (no O(1) char access; even `string->list` is O(n²) the same way). Added the
+**`%str-index-of` kernel primitive** (byte-level `str::find` → char index) — the
+search counterpart of the existing `substring` slice primitive, in the same "needs
+Rust because Brood has no char-array" category as `substring`/`lower`/`string-length`.
+`index-of`/`string-contains?`/`includes?` (Brood) now ride on it. doc-search 4-call
+debug time **14.7 s → 0.49 s** (30×); the suite test 58.8 s → 1.7 s.
+
+**Fallout 2 — `project: source load-once` race.** The `zzz` "cannot find module"
+failure was a parallel global-state race (the describe mutates the process-global
+module load-path / `*features*` / earmuffed counters; a peer test's `project-setup`
+clobbered the load-path between this unit's setup and its walk). Marked the describe
+`:isolated` (runs alone against a rolled-back private global copy). Full
+`cargo nextest run` green 3×.

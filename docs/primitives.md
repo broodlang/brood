@@ -39,6 +39,7 @@ arg silently becoming `nil`.
 | | `map-pairs` | 1 | entries as a list of `[k v]` vectors, insertion order, one O(n) pass — the sole enumerator; `keys`/`vals`/`contains?`/`reduce-kv` are all Brood over it |
 | **String** | `string-length` | 1 | char count |
 | | `substring` | 2-3 | characters `[start, end)`, char-indexed; `end` defaults to `(string-length s)` |
+| | `%str-index-of` | 2 | char index of the first occurrence of a substring (or -1; empty needle → 0). Linear (byte-level `find` → char index) — the search counterpart of `substring`, needed in Rust because Brood has no O(1) char access (a pure-Brood scan is O(n²)). `index-of` / `string-contains?` / `includes?` ride on it |
 | | `upper` | 1 | `s` upper-cased (Unicode-aware, e.g. `ß` → `SS`) |
 | | `lower` | 1 | `s` lower-cased (Unicode-aware) |
 | | `string->number` | 1 | strict parse → int, else float, else `nil` (`"3abc"` → `nil`, unlike `read-string`) |
