@@ -10614,3 +10614,20 @@ prelude-heavy code got *zero* VM speedup.
 (`tests/differential.rs`) gained forward-macro-ref cases + a named regression test
 `vm_defers_unexpanded_forward_referenced_macro`. The harness + both-engines gate are
 what caught the regression in the first place.
+
+---
+
+## 2026-05-31 — `eval-command` moved out of std → the myedit project
+
+`std/eval-command.blsp` (the `eval-last-sexp`/`eval-region`/`eval-buffer` C-x C-e
+family) was the one piece of **editor command *policy*** living in std: its own
+docstring called it "opt-in editor toolkit, not language," and the only consumer was
+the **myedit** editor. Per the mechanism-vs-policy line (Rust/std = reusable
+mechanism; apps = policy), it now lives in `myedit/src/eval-command.blsp`. Removed the
+`include_str!` registration from `builtins.rs` and deleted the std file. Its test
+split: the `eval-*` cases moved to `myedit/tests/`, while the kernel **`read-all`**
+cases (a reader primitive, rightly tested here) stay as the new
+`tests/read_all_test.blsp`. No kernel/runtime change. Part of a small audit making
+myedit self-contained on brood's reusable substrate (the editor commands are the
+editor's; the analysis primitives — buffer/sexp/highlight/pane/check-string-structured
+— remain shared mechanism in std).
