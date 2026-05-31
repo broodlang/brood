@@ -444,11 +444,13 @@ The seam that makes remoteability free later (see architecture.md).
   primitives over `crossterm` paint the protocol + read keys; `term-draw` is a
   thin interpreter of the frame vector. A GPU-window frontend is a later additive
   path speaking the same protocol.
-- 🟡 **Per-op font scale (done, ADR-079).** A `Face` carries an integer `:scale`
-  (≥1): the GUI renderer draws that op's text `scale`× larger in a `scale`×`scale`
-  cell block — the per-pane / per-buffer / big-heading font knob, on the existing
-  uniform grid. Terminal renders 1×. (Closes GG-1 in `known-issues.md`; the
-  per-window `gui-font!` gap GG-2 stays open. Arbitrary per-px sizing deferred.)
+- 🟡 **Per-op + per-window font (done, ADR-079).** A `Face` carries an integer
+  `:scale` (≥1): the GUI renderer draws that op's text `scale`× larger in a
+  `scale`×`scale` cell block — the per-pane / per-buffer / big-heading font knob, on
+  the existing uniform grid (terminal renders 1×). And `gui-font!` takes an optional
+  window id (`(gui-font! id spec)`) so each window can run its own font, the no-id
+  call staying the global default. (Closes GG-1, GG-2, GG-3 in `known-issues.md`;
+  arbitrary per-px buffer sizing deferred.)
 - 🟡 **First app on the seam: `nest observe` (done).** An Erlang-observer-style
   process viewer (`std/observer.blsp`) — proves the render protocol + key loop
   end-to-end with **no rope/buffer**. A node-stats panel (node name, workers/peak,
