@@ -35,14 +35,18 @@ Authoritative detail lives in `docs/decisions.md` (ADRs cited inline),
 
 ### GC
 
-1. **`promote` / `closure_to_message` cyclic-capture overflow — the SOLE open
-   memory-safety hole.** `def`-ing or `send`-ing a closure that *captures another
-   closure* stack-overflows and aborts the process:
-   `(def g (let (h (fn () 1)) (fn () (h))))`; real trigger: a router closure over a
-   map of handler closures (`std/http.blsp`). Workarounds in place; **decided fix =
-   two-pass back-patching `promote`** (the tracing forwarding table doesn't cover
-   the promote/serialize path). Full writeup: `docs/findings-closure-promotion-overflow.md`
-   + the 2026-05-30 devlog entry. **This is the one thing left for full GC safety.**
+1. **`promote` / `closure_to_message` cyclic-capture overflow — RESOLVED
+   (2026-05-31).** Was the sole open memory-safety hole: `def`-ing or `send`-ing a
+   closure that *captures another closure* stack-overflowed. Both sites are now
+   fixed — `promote` got the two-pass back-patching `PromoteForward` table over
+   `OnceLock` slabs (`def` path, commit `517d6d1`); `closure_to_message` is sound
+   via capture-minimization + a `visited` cycle guard (`send`/`spawn` path). The
+   `std/http.blsp` workarounds are reverted (spawn-per-connection + top-level
+   router `def`s). Covered cross-process by `gc.rs::promotes_cyclic_local_closures_without_crashing`
+   and `gc.rs::sends_closure_capturing_closure_without_crashing`, green under
+   `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`. Full writeup + acceptance repros:
+   `docs/findings-closure-promotion-overflow.md`. **GC has no known
+   memory-safety holes left.**
 
 2. **RUNTIME-region collector (deferred, ADR-072 / `live-editing.md` "Stage 5 later
    half").** The LOCAL-heap GC is done; the **shared mutable RUNTIME code region**
@@ -88,12 +92,13 @@ Authoritative detail lives in `docs/decisions.md` (ADRs cited inline),
 
 ## Suggested order if picking this up cold
 
-1. **Fix #1 (promote cyclic-capture)** — it's a correctness bug that aborts real
-   programs (HTTP routers), and the audit says it's the *only* memory-safety hole.
-   Two-pass back-patching `promote`; the design is already decided in the findings doc.
-2. **#10 then #9** — cheap: measure, then right-size the caps.
-3. **#5/#6 (VM coverage)** when perf wants it — unlocks #7 (retire the tree-walker).
-4. **#4 (quasiquote → Brood)** and **#2 (RUNTIME-region GC)** are larger, lower-urgency.
+1. ~~Fix #1 (promote cyclic-capture)~~ — **DONE (2026-05-31).** GC has no known
+   memory-safety holes left.
+2. **#4 (quasiquote → Brood macro)** + record the "single-shot Rust primitive" rule
+   as an ADR — *in progress next* (the chosen follow-up after #1).
+3. **#10 then #9** — cheap: measure suite peak, then right-size the ADR-043 caps.
+4. **#5/#6 (VM coverage)** when perf wants it — unlocks #7 (retire the tree-walker).
+5. **#2 (RUNTIME-region GC)** is the larger, lower-urgency item.
 
 ## Key files
 

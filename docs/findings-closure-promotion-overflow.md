@@ -1,7 +1,28 @@
 # Findings: `def`-promoting (and sending) a closure that captures a closure overflows
 
-**Status:** open bug, with workarounds in place. Found 2026-05-30 while building
-the HTTP server (`std/http.blsp`). Two sites, one root cause.
+**Status: RESOLVED (2026-05-31).** Both sites are fixed and the workarounds are
+reverted. Found 2026-05-30 while building the HTTP server (`std/http.blsp`); two
+sites, one root cause. This doc is kept as the record of the bug and the fix.
+
+> **2026-05-31 — closed.**
+> - **`promote` (`def` path):** fixed by the two-pass back-patching design below
+>   (option 1). `promote_closure`/`promote_env` thread a `PromoteForward` table and
+>   **reserve their RUNTIME slot before recursing**, so the closure↔env back-edge
+>   resolves to the reserved handle instead of recursing forever. The append-only
+>   `boxcar` slabs became `boxcar::Vec<OnceLock<Closure>>` / `<OnceLock<EnvFrame>>`
+>   (push-empty → `set` once) to allow the write-back. Landed in `core/heap.rs`
+>   (commit `517d6d1`); covered cross-process by
+>   `gc.rs::promotes_cyclic_local_closures_without_crashing`.
+> - **`closure_to_message` (`send`/`spawn` path):** sound via capture-minimization
+>   (option 2 — only free locals that resolve to a binding are shipped, so
+>   `(fn () 1)` captures nothing and the cycle never forms) plus a `visited` guard
+>   that returns a clean `LispError` on a genuinely self-referential local closure
+>   (option 3) instead of overflowing. Covered cross-process by
+>   `gc.rs::sends_closure_capturing_closure_without_crashing`.
+> - **Workarounds reverted:** `std/http.blsp`'s `serve` now spawns one process per
+>   connection again, and routers/handlers can be top-level `def`s
+>   (`examples/webserver.blsp`). All acceptance repros below pass under
+>   `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`.
 
 > **2026-05-30 — confirmed the *only* remaining memory-safety hole.** A full
 > kernel GC/memory-safety audit of every Rust primitive and evaluator re-entry
@@ -71,7 +92,7 @@ The repro is **two** levels deep. It's unbounded recursion (a cycle), not a deep
 structure, so raising a stack limit wouldn't help — and today the overflow is an
 **uncatchable abort/segfault**, not a clean error.
 
-## Workarounds in place (so the HTTP stack ships)
+## Workarounds (now reverted — kept for the record)
 
 - **Build routers in a fn, never `def` them.** `std/http.blsp`'s `serve` takes the
   handler as an argument; `examples/webserver.blsp` and the `http-server` template

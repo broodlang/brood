@@ -320,6 +320,42 @@ fn promotes_cyclic_local_closures_without_crashing() {
     );
 }
 
+/// The `send`/`spawn` twin of the promote bug: shipping a closure that *captures
+/// another closure* must serialise without overflowing. `closure_to_message`
+/// (`process/message.rs`) is the message-path analogue of `promote` — it copies a
+/// closure's captured locals into the wire form. A router (a closure capturing a
+/// map whose values are handler closures) is the realistic trigger from
+/// `std/http.blsp`; before this was sound, `(spawn …)` of a thunk capturing such a
+/// handler overflowed the same way `def` did. Here a worker process captures the
+/// router via its spawn thunk, applies it, and sends the result back — proving the
+/// closure-capturing-closure graph round-trips a per-heap message copy. Companion
+/// to `promotes_cyclic_local_closures_without_crashing`, which covers the `def`
+/// (promote) path; this covers the `send` (message) path.
+#[test]
+fn sends_closure_capturing_closure_without_crashing() {
+    let mut interp = Interp::new();
+    let prog = r#"
+        ;; A router: a closure capturing a map of handler closures (each value is
+        ;; itself a closure). Kept LOCAL — never def'd — so shipping it exercises
+        ;; closure_to_message, not promote.
+        (defn router (routes)
+          (fn (req) ((get routes (get req :path)) req)))
+        (def root (self))
+        (let (handler (router {"/" (fn (r) :ok)}))
+          ;; The spawn thunk captures `handler` (a closure capturing a map of
+          ;; closures) and `root`; it ships across to the worker's own heap.
+          (spawn (send root (handler {:path "/"}))))
+        (receive (m m) (after 10000 :timed-out))
+    "#;
+    let v = interp.eval_str(prog).expect("send-closure-capturing-closure errored");
+    assert_eq!(
+        interp.print(v),
+        ":ok",
+        "a router (closure capturing a map of handler closures) didn't round-trip \
+         through spawn/send — closure_to_message regressed on nested capture",
+    );
+}
+
 /// Pull `:field N` out of a printed Brood map (`{... :field 123 ...}`). The map
 /// printer separates a key from its value by one space; values here are
 /// non-negative integers.

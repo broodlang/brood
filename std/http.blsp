@@ -185,20 +185,23 @@ the raw request string, or nil if the peer closed without sending anything."
   (tcp-listen "127.0.0.1" port))
 
 (defn serve-loop (ls handler)
-  "Accept connections on `ls` and handle them **one at a time** in this process,
-forever. Blocks. `ls` must be owned by this process (created here with
-`http-listen`). Selective `receive` interleaves cleanly: while one request is
-read, later `[:tcp-accept …]` notifications simply queue.
-
-Single-connection-at-a-time is plenty for a basic app; true spawn-per-connection
-concurrency awaits a closure-shipping fix (shipping a handler that captures a map
-of closures over a shared scope currently overflows `closure_to_message`)."
+  "Accept connections on `ls` and serve each in its **own** process, forever.
+Blocks. `ls` must be owned by this process (created here with `http-listen`). On
+each `[:tcp-accept …]`, `spawn` a worker that takes control of the connection and
+runs `handler`, then loop immediately — so a slow request never blocks the accept
+loop or other connections. Shipping the `handler` closure to the worker is sound
+(closure-capturing-closure round-trips `closure_to_message`); the freshly-accepted
+socket is registered *passive* (no reader until the worker calls
+`tcp-controlling-process`), so no inbound bytes are lost in the handoff."
   (receive
-    ([:tcp-accept ~ls c] (tcp-controlling-process c (self))
-      (http--serve-conn c handler)
+    ([:tcp-accept ~ls c]
+      (spawn (http--serve-conn c handler))
       (serve-loop ls handler))))
 
 (defn http--serve-conn (c handler)
+  ;; Runs in the per-connection worker: take ownership so `c`'s reader starts
+  ;; delivering `[:tcp …]` to *this* process, then read/handle/close.
+  (tcp-controlling-process c (self))
   (let (raw (http-read-request c))
     (when raw (tcp-send c (render-response (handler (parse-request raw)))))
     (tcp-close c)))

@@ -11129,3 +11129,97 @@ branch context → dead" lint fires as noise on compiler-generated guard plumbin
 (destructure/match lowering) and intentional non-match tests; needs user-surface
 scoping. Also (ADR-011): a `BROOD_CONTRACTS=1` enforce-every-`sig` switch;
 element-level `(list E)` runtime checks.
+
+## 2026-05-31 — Close-out: closure-capturing-closure promote/send (GC's last hole) + http spawn-per-connection
+
+**Goal.** The VM/GC/Memory handoff's TASK 1: the `promote`/`closure_to_message`
+cyclic-capture overflow — the *sole* open memory-safety hole per the 2026-05-30
+audit. Picking it up cold, found the **core fix had already landed** (commit
+`517d6d1`): `promote_closure`/`promote_env` thread a `PromoteForward` table and
+reserve their RUNTIME slot before recursing (the append-only `boxcar` slabs are now
+`boxcar::Vec<OnceLock<…>>`, push-empty → `set`-once), so the closure↔env back-edge
+resolves instead of recursing forever. The `send` side (`closure_to_message`) was
+already sound too — capture-minimization (only free locals that resolve to a
+binding ship) + a `visited` guard that returns a clean `LispError` on a genuinely
+self-referential local closure. The handoff + findings docs were **stale**.
+
+**What was actually left, and done here.**
+- **The `send`-path regression test was missing.** `gc.rs` only covered the `def`
+  (promote) path (`promotes_cyclic_local_closures_without_crashing`). Added
+  `sends_closure_capturing_closure_without_crashing`: a router (closure capturing a
+  map of handler closures) shipped through `spawn`/`send` to a worker's own heap,
+  applied there. Green under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`.
+- **Reverted the `std/http.blsp` workarounds.** `serve-loop` now `spawn`s one
+  process per connection again (was handling them inline, one at a time). Safe
+  because a freshly-accepted stream is registered **passive** — no reader thread
+  until the worker calls `tcp-controlling-process c (self)` — so no inbound bytes
+  are lost in the accept→worker handoff (`net.rs:107`). `examples/webserver.blsp`
+  now binds the router at top level with `def` (was kept inline to dodge promote).
+- **Added concurrency coverage.** New `http_test.blsp` case fires 8 simultaneous
+  GETs from 8 client processes and fans the results back in — proving connections
+  are served in separate processes. All 16 HTTP tests green under GC stress.
+
+**Verified.** Acceptance repros from the findings doc + both `gc.rs` tests + the
+full HTTP suite pass under `RUSTFLAGS="-C debug-assertions=on" BROOD_GC_STRESS=1
+BROOD_GC_VERIFY=1`. **The GC now has no known memory-safety holes.**
+
+**Docs.** `findings-closure-promotion-overflow.md` → RESOLVED; `handoff-vm-gc-memory.md`
+item #1 closed and the suggested order re-pointed at #4 (quasiquote → Brood macro +
+the "single-shot Rust primitive" ADR) as the next item.
+
+**Housekeeping.** Removed the merged `brood-transients` / `brood-symname` worktrees
++ branches.
+
+---
+
+## 2026-05-31 — `nest release`: ship a Brood app as one binary (ADR-038)
+
+**Goal.** From the user: *"I want to ship brood apps into a single binary… I
+want a release nest command."* Until now the distribution story was "copy the
+`brood`/`nest` binary plus the project's `src/` tree and run `nest run`." The ask:
+one file that runs the app, with no interpreter, project dir, or sources on the
+target.
+
+**Built — ADR-038's append-to-binary, now `nest release`.**
+- **Wire format** (`crates/lisp/src/bundle.rs`): `[brood][archive][20-byte footer]`.
+  Footer = magic `b"BRDBNDL1"` + `u32` version + `u64` archive-len, read
+  last-bytes-first via `std::env::current_exe()`. Archive = length-prefixed
+  manifest + each module's source keyed by filename **stem** (the name
+  `require--find` searches for). Appended trailing bytes don't disturb the ELF
+  loader. `strip_existing` makes re-release idempotent (no nested payloads);
+  `write_release` chmods +x. Unit-tested (round-trip, plain-binary, strip).
+- **The hook is `%builtin-module`, not `load`.** A mounted bundle is *more
+  embedded modules*: `builtin_module` consults it after `EMBEDDED_MODULES`, so
+  `require`/`:use` resolve an app's own modules **and bundled deps** through the
+  existing path — zero change to `require-one`. New thin primitives `%bundled?`,
+  `%bundle-manifest`, `%bundle-module-names`.
+- **Policy in Brood** (`std/project.blsp`, ADR-006): `bundle-collect` gathers the
+  manifest + `src/**/*.blsp` + resolved `_deps/` (skips `tests/`) as a flat list;
+  `run-bundle` applies the manifest, loads every embedded module, and calls
+  `:main` with argv. `brood`'s `main` detects a bundle *before* `Cli::parse` and
+  boots it, so the app's own args/flags aren't intercepted.
+- **`nest release [-o PATH] [--runtime PATH] [--target TRIPLE]`** — collection is
+  Brood, byte assembly + I/O is Rust (the established `nest` split). Base runtime
+  defaults to the `brood` beside `nest`, else `target/release/brood`.
+
+**Decisions with the user.** Code-only (no virtual filesystem — runtime asset
+reads still hit disk); **include `_deps/`** so a dep'd app is self-contained.
+
+**Verified.** `nest new` → `nest release` → ran the binary in-project, then from a
+clean dir with **no sources on disk** (`hello releasetest`); argv passthrough
+(`args: (alpha beta)`); re-release from an already-released binary is
+byte-identical (strip works); a `:path`-dependency app bundles its dep and runs
+from a clean dir (`>> bundled with a dep <<`); plain `brood` reports
+`(%bundled?)` → false and still runs files/REPL. New integration test
+`crates/cli/tests/release_bundle.rs` (boot embedded `:main` + cross-module `:use`
++ argv) and the `bundle.rs` unit tests pass.
+
+**Docs.** ADR-038 flipped to *implemented* with an as-built note; roadmap
+"ship a binary" closed; new [`release.md`](release.md) as-built reference.
+
+**Pre-existing break noted (not this work).** `cargo build --release` *without*
+`debug-assertions` fails in `eval/compile.rs:410` — `value_is_immovable` is
+`#[cfg(debug_assertions)]` but referenced from a `debug_assert!` (whose condition
+is always compiled). Introduced by `b072125`; masked because the documented
+release build uses `RUSTFLAGS="-C debug-assertions=on"`. Verified `nest release`
+with debug binaries (functionally identical); flagged for a one-line fix.
