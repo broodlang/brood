@@ -319,8 +319,35 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         let f = *items.get(1)?;
         let coll = *items.get(2)?;
         let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty().cloned());
-        let b = callback_ret(heap, f, a, ctx);
+        let b = callback_ret(heap, f, &[a], ctx);
         return list_result(b);
+    }
+    // `(reduce f init coll)` / `(fold f init coll)` reduce to an accumulator typed
+    // `ty(init) | B`, where `B` is the 2-arg callback's return (`(f acc x)`). The
+    // accumulator can grow across steps, so it's over-approximated as `any` for
+    // the callback inference (sound — a superset); the result joins the
+    // empty-input case (`init`) with a step result (`B`). The no-init
+    // `(reduce f coll)` form starts the accumulator at `coll`'s first element.
+    // Both `init` and `B` must be known, else flat.
+    if value::symbol_is(head, "reduce") || value::symbol_is(head, "fold") {
+        let f = *items.get(1)?;
+        let (init_ty, coll) = match items.len() {
+            // (fold f init coll) / (reduce f init coll)
+            4 => (expr_ty(heap, items[2], ctx), items[3]),
+            // (reduce f coll) — initial accumulator is the first element
+            3 if value::symbol_is(head, "reduce") => {
+                let coll = items[2];
+                let elem = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty().cloned());
+                (elem, coll)
+            }
+            _ => return None,
+        };
+        let elem = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty().cloned());
+        let b = callback_ret(heap, f, &[Some(Ty::ANY), elem], ctx);
+        return match (init_ty, b) {
+            (Some(i), Some(b)) => Some(i.union(b)),
+            _ => None,
+        };
     }
     None
 }
@@ -332,32 +359,34 @@ fn list_result(elem: Option<Ty>) -> Option<Ty> {
     elem.map(|e| Ty::list_of(e).union(Ty::of(Tag::Nil)))
 }
 
-/// The return type of a HOF callback `f` over elements of type `elem_in` (which
-/// may be unknown) — used to compute `map`'s result element type.
+/// The return type of a HOF callback `f` whose parameters receive the given
+/// `inputs` types (`[elem]` for `map`'s `(f x)`; `[any, elem]` for `reduce`/`fold`'s
+/// `(f acc x)`, the accumulator over-approximated as `any`). A `None` input is an
+/// unknown parameter type.
 /// - a named **global** fn → its signature's return type (`sig_of`);
-/// - a straight-line single-param lambda `(fn (p) body)` → `body`'s type with `p`
-///   bound to `elem_in` (identity preserves the element; `(+ x 1)` → number);
+/// - a straight-line lambda with exactly `inputs.len()` plain params → `body`'s
+///   type with each `pᵢ` bound to `inputs[i]` (identity preserves its input);
 /// - anything else (a local var, an unknown form) → `None` (flat result).
 ///
 /// The lambda case is the only new inference, and it only computes a *forward*
 /// result type — it never *checks* the body, so it doesn't reopen the deferred
 /// guarded-use false-positive class.
-fn callback_ret(heap: &Heap, f: Value, elem_in: Option<Ty>, ctx: &Ctx) -> Option<Ty> {
+fn callback_ret(heap: &Heap, f: Value, inputs: &[Option<Ty>], ctx: &Ctx) -> Option<Ty> {
     match f {
         // A local binding shadows the global table — its return type isn't known.
         Value::Sym(s) if ctx.is_local(s) => None,
         Value::Sym(s) => sig_of(heap, s).map(|sig| sig.ret),
-        Value::Pair(_) => lambda_ret(heap, f, elem_in, ctx),
+        Value::Pair(_) => lambda_ret(heap, f, inputs, ctx),
         _ => None,
     }
 }
 
-/// The return type of a **simple** single-clause lambda `(fn (p) body)` —
-/// exactly one plain-symbol parameter and one body expression — computed by
-/// binding `p` to `elem_in` and typing `body`. `None` for anything subtler
-/// (multi-param / multi-body / docstring / variadic / non-`fn` head), so the
-/// result stays flat.
-fn lambda_ret(heap: &Heap, form: Value, elem_in: Option<Ty>, ctx: &Ctx) -> Option<Ty> {
+/// The return type of a **simple** single-clause lambda `(fn (p…) body)` —
+/// exactly `inputs.len()` plain-symbol parameters and one body expression —
+/// computed by binding each `pᵢ` to `inputs[i]` and typing `body`. `None` for
+/// anything subtler (wrong param count / multi-body / docstring / variadic /
+/// destructuring / non-`fn` head), so the result stays flat.
+fn lambda_ret(heap: &Heap, form: Value, inputs: &[Option<Ty>], ctx: &Ctx) -> Option<Ty> {
     let items = list_items(heap, form)?;
     let Some(Value::Sym(head)) = items.first().copied() else {
         return None;
@@ -371,9 +400,15 @@ fn lambda_ret(heap: &Heap, form: Value, elem_in: Option<Ty>, ctx: &Ctx) -> Optio
         return None;
     }
     let params = list_items(heap, parts[0])?;
-    let [Value::Sym(p)] = params.as_slice() else {
-        return None; // not exactly one plain-symbol parameter
-    };
-    let sub = ctx.bind(*p, elem_in);
+    if params.len() != inputs.len() {
+        return None; // arity must match what the combinator supplies
+    }
+    let mut sub = ctx.clone();
+    for (param, input) in params.iter().zip(inputs) {
+        let Value::Sym(p) = param else {
+            return None; // not a plain-symbol parameter
+        };
+        sub = sub.bind(*p, input.clone());
+    }
     expr_ty(heap, parts[1], &sub)
 }

@@ -317,16 +317,18 @@ new false positives across `std/` + `tests/`.
 element type derived from their arguments — `(map f vector<A>) : nil | list<B>`
 where `B` is the callback's return (a named fn's sig result, or a straight-line
 lambda's body typed with its parameter bound to `A`), and `(filter pred coll)`
-preserves `coll`'s element type. Done as **per-HOF result rules** in
-`seq_aware_call_ty` (Option B — no lattice change, the same place `first`/`list`
-derive a refined result), not type variables. So `(first (map inc [1 2 3])) :
-number | nil` flows through. Uncertain callback / element → flat `list` (sound;
+preserves `coll`'s element type, and `reduce`/`fold` give an accumulator typed
+`ty(init) | B` (`B` = the 2-arg callback's return, accumulator over-approximated as
+`any`). Done as **per-HOF result rules** in `seq_aware_call_ty` (Option B — no
+lattice change, the same place `first`/`list` derive a refined result), not type
+variables. So `(first (map inc [1 2 3])) : number | nil` and `(reduce + 0 [1 2 3]) :
+number` flow through. Uncertain callback / element → flat fallback (sound;
 `is_disjoint` stays tags-only). See [`parametric-result-types.md`](parametric-result-types.md).
 
-**⬜ Still deferred (ADR-011).** `reduce`/`fold` results (accumulator-typed — slice
-2); intersections for overloaded fns; arrows/element types flowing into the
-straight-line `infer_sig`; **type variables** for *user-defined* generic functions
-(Option A — gated on a real consumer; the curated HOFs needed only the per-rule form).
+**⬜ Still deferred (ADR-011).** Intersections for overloaded fns; arrows/element
+types flowing into the straight-line `infer_sig`; **type variables** for
+*user-defined* generic functions (Option A — gated on a real consumer; the curated
+HOFs needed only the per-rule form).
 
 ## How it runs — and why it's outside the runtime
 

@@ -5009,17 +5009,22 @@ shape `(let (g E) (if g _ g))` (a truthy `and` ⟹ first conjunct `E` holds; `or
 `(if g g _)` deliberately doesn't match). General win beyond this case: any `(if (and
 (pred? x) …) …)` now narrows `x` in the then-branch.
 
-**Parametric HOF results (third slice, shipped).** `map`/`filter` results now flow
-an element type from their arguments — `(map f vector<A>) : nil | list<B>` (`B` =
-the callback's return), `(filter pred coll)` preserves `coll`'s element. Done as
-**per-HOF result rules** in `check/guards.rs::seq_aware_call_ty` (Option B), *not*
+**Parametric HOF results (third slice, shipped).** Element types flow *through* the
+higher-order functions: `(map f vector<A>) : nil | list<B>` (`B` = the callback's
+return), `(filter pred coll)` preserves `coll`'s element, and `(reduce f init coll)`
+/ `(fold f init coll)` give an accumulator typed `ty(init) | B` (`B` = the 2-arg
+callback's return, accumulator over-approximated as `any` — a sound superset). Done
+as **per-HOF result rules** in `check/guards.rs::seq_aware_call_ty` (Option B), *not*
 type variables — no lattice change, the same mechanism `first`/`list` already use.
-Sound: uncertain callback/element → flat `list`. See
+The one new inference is `callback_ret`: a named fn's sig result, or a straight-line
+lambda's body typed with its params bound to the input types — *forward* result
+typing only, never a body check, so it doesn't reopen the deferred guarded-use FP
+class. Sound: uncertain callback/element/init → flat fallback. See
 [`parametric-result-types.md`](parametric-result-types.md).
 
-**Still deferred (⬜, ADR-011).** `reduce`/`fold` results (accumulator-typed); arrow/
-element types in the straight-line `infer_sig`; intersections for overloaded fns;
-**type variables** for user-defined generics (Option A — no consumer yet).
+**Still deferred (⬜, ADR-011).** Arrow/element types in the straight-line
+`infer_sig`; intersections for overloaded fns; **type variables** for user-defined
+generics (Option A — no consumer yet).
 
 **References.** [`types.md`](types.md) (Step 5+, the compatibility contract), ADR-024
 (the set-theoretic/gradual model this extends), ADR-023, ADR-011 (ship the simple

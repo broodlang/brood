@@ -96,10 +96,10 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   checker flags wrong-arity callbacks to `map`/`filter`/`reduce`/`fold` (`(map cons
   xs)`). ✅ **Element types**: `[1 2 3]`/`(list …)` carry `vector<int>`/`list<int>`,
   and `first`/`last`/`nth` flow the element type out, so `(+ 1 (first ["a" "b"]))` is
-  flagged. ✅ **Parametric `map`/`filter` results**: `(map inc [1 2 3]) : list<number>`,
-  `filter` preserves the element — so element types flow *through* HOFs (per-HOF
-  rules, no type variables). ⬜ Still: `reduce`/`fold` results; intersections;
-  user-generic type variables.
+  flagged. ✅ **Parametric HOF results**: `(map inc [1 2 3]) : list<number>`, `filter`
+  preserves the element, `(reduce + 0 xs) : number` — element types flow *through*
+  `map`/`filter`/`reduce`/`fold` (per-HOF rules, no type variables). ⬜ Still:
+  intersections for overloaded fns; user-generic type variables.
   Additive; gated on real need (ADR-011). Advisory throughout — never gates, never
   inhibits the dynamic language; not the TypeScript route.
 - ✅ **Maps** (ADR-030 + ADR-040) — immutable `{ }` literals + `get`/`assoc`/

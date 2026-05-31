@@ -10434,3 +10434,27 @@ over all 95 project files byte-identical to baseline (170 warnings, 0 added/remo
 **Deferred (ADR-011).** `reduce`/`fold` results (accumulator-typed — slice 2);
 intersections for overloaded fns; type variables for user generics. Branch
 `parametric-types`.
+
+---
+
+## 2026-05-31 — Parametric results slice 2: reduce/fold (ADR-078)
+
+**Goal.** Finish parametric HOF results — after `map`/`filter`, give `reduce`/`fold`
+an accumulator-typed result so `(reduce + 0 [1 2 3]) : number` flows out.
+
+**Built.** `(reduce f init coll)` / `(fold f init coll)` → `ty(init) | B`, where `B`
+is the 2-arg callback's return (`(f acc x)`). The accumulator grows across steps, so
+it's over-approximated as `any` for the callback inference (a sound superset); the
+result joins the empty-input case (`init`) with a step result (`B`). Also the no-init
+`(reduce f coll)` form (initial accumulator = `coll`'s first element). Both `init`
+and `B` must be known, else flat fallback. Generalised `callback_ret`/`lambda_ret`
+to N parameter inputs — `map` passes `[elem]`, `reduce`/`fold` pass `[any, elem]`.
+
+**Verified.** `(reduce + 0 [1 2 3]) : number` (string-length flags, + doesn't);
+fold with a lambda callback types the accumulator; unknown callback / init → flat,
+no warning. 369 lib+lsp tests green (+3). FP audit byte-identical to baseline (170
+warnings, 0 added/removed) over all 96 project files.
+
+**Deferred (ADR-011).** Intersections for overloaded fns; arrow/element types in the
+straight-line `infer_sig`; type variables for user-defined generics (Option A — no
+consumer). Branch `parametric-types`.
