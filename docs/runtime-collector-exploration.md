@@ -99,10 +99,34 @@ The live set = everything reachable from these, transitively through RUNTIME cod
   the mark to all processes' roots for a multi-process-accurate figure. This makes
   the leak **observable** and de-risks the real collector with none of the
   STW/moving hazard.
-- **Step 2 — the STW compacting collector (its own stage + ADR).** Build the
-  runtime-wide safepoint first (reusable beyond GC — e.g. consistent snapshots for
-  `nest observe`), then the trace + compact + rewrite + `vm_cache` clear. Only when
-  a real session actually hurts (per the Stage-5 principle).
+- **Step 2 — the STW compacting collector (its own stage + ADR).** Decomposed:
+  - **2a — evacuation core. ✅ done (out-of-place, branch `runtime-gc`).**
+    `Heap::runtime_evacuate` traces the live RUNTIME code from globals + roots and
+    *copies* it into a fresh `CodeSlabs`, building an old→new forwarding map —
+    mirroring the LOCAL GC's `flush_*` but over `boxcar`/`OnceLock` and RUNTIME
+    handles (closures/envs use `OnceLock` reserve-then-fill for cycles; pairs/
+    vectors/maps are acyclic immutable code, so child-first then push-once).
+    `verify_rt_slabs` confirms every handle in the evacuated region is in-bounds (no
+    missed rewrite). Validated: after 3000 redefs, evacuate → 2 live closures of
+    3001, verifier passes, program unchanged (`tests/runtime_collector.rs`).
+    **Installs nothing — cannot corrupt the live region.**
+  - **2b — in-place collect. ✅ done (branch `runtime-gc`).** `Heap::runtime_collect`
+    + the `(runtime-collect)` builtin. **Gated on `Arc::get_mut`** — runs only when
+    this heap uniquely owns the runtime region (no concurrent reader), so it's sound
+    *without* stop-the-world; returns `:ran false` when the runtime is shared. One
+    pass: every RUNTIME handle in globals + both LOCAL generations + roots/env_roots/
+    dynamics is evacuated-and-rewritten; the `vm_cache` + `global_ic` are cleared;
+    the compacted region is swapped in (`mem::take` avoids the borrow conflict).
+    **Opt-in — never wired into the automatic GC.** Validated: reclaims 2999/3001
+    after churn; program correct afterwards incl. a RUNTIME closure held in a LOCAL
+    binding *across* a collect (`(let (g f) (runtime-collect) (g 3))`); green under
+    `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`; full suite 437/437 both engines.
+    **Bounds memory** — 40k redefs: no-collect 34 MB (growing) vs periodic collect
+    14.5 MB (flat). The Stage-5 goal, for the single-process case.
+  - **2c — runtime-wide stop-the-world.** The scheduler barrier (doesn't exist yet)
+    to pause every process at a safepoint, so 2b can run with other processes
+    present (rewriting their state too). The race-prone part; last.
+  Build only as far as a real session needs (per the Stage-5 principle).
 
 ## Effort / risk
 
