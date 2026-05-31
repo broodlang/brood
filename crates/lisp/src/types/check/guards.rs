@@ -44,7 +44,7 @@ pub(super) fn is_syntactic_keyword(name: &str) -> bool {
             | kw::DEFN
             | kw::DEFDYN
             | kw::DEFMODULE
-            | "module-doc"
+            | kw::MODULE_DOC
             | kw::WHEN
             | kw::UNLESS
             | kw::COND
@@ -53,13 +53,13 @@ pub(super) fn is_syntactic_keyword(name: &str) -> bool {
             | kw::THREAD_FIRST
             | kw::THREAD_LAST
             | kw::MATCH
-            | "case"
+            | kw::CASE
             | kw::TRY
             | kw::CATCH
             | kw::THROW
             | kw::BINDING
             | kw::FOR
-            | "spawn"
+            | kw::SPAWN
             | kw::AMP
             | kw::AMP_OPTIONAL
             | kw::AMP_REST
@@ -113,7 +113,7 @@ pub(super) fn guard_assertion(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Gua
     // (not <inner>) — invert the inner assertion. Only invertible when `inner`
     // is itself biconditional; a `then_only` inner can't be soundly negated
     // (we'd be reasoning from `inner` being false), so we decline.
-    if items.len() == 2 && head_name == "not" {
+    if items.len() == 2 && head_name == kw::NOT {
         let inner = guard_assertion(heap, items[1], ctx)?;
         if inner.then_only {
             return None;
@@ -131,7 +131,7 @@ pub(super) fn guard_assertion(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Gua
     // machinery threads the narrowing back to `x`). Variadic `=` reaches us
     // pre-expanded as `%eq` calls when arities are 2, so we only need to
     // recognise the primitive shape.
-    if items.len() == 3 && head_name == "%eq" {
+    if items.len() == 3 && head_name == kw::EQ_PRIM {
         if let Some((sym, ty)) = literal_eq_guard(items[1], items[2])
             .or_else(|| literal_eq_guard(items[2], items[1]))
         {
@@ -161,7 +161,7 @@ pub(super) fn guard_assertion(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Gua
     // **`then_only`:** a falsy `and` may have failed on a later conjunct, so the
     // else-branch must NOT be narrowed to `¬E` (that was a real false positive —
     // an else-branch `(vector-ref m i)` on a value that *is* a longer vector).
-    if head_name == "let" && items.len() == 3 {
+    if head_name == kw::LET && items.len() == 3 {
         if let Some(g) = and_first_conjunct_guard(heap, items[1], items[2], ctx) {
             return Some(g);
         }
@@ -194,7 +194,7 @@ fn and_first_conjunct_guard(heap: &Heap, binding: Value, body: Value, ctx: &Ctx)
     let cond = bs[1];
     let body_items = list_items(heap, body)?;
     // `(if test then else)` — 4 items; test == g and else == g.
-    let is_if = matches!(body_items.first(), Some(&Value::Sym(s)) if value::symbol_is(s, "if"));
+    let is_if = matches!(body_items.first(), Some(&Value::Sym(s)) if value::symbol_is(s, kw::IF));
     if body_items.len() != 4 || !is_if {
         return None;
     }
@@ -391,7 +391,7 @@ fn lambda_ret(heap: &Heap, form: Value, inputs: &[Option<Ty>], ctx: &Ctx) -> Opt
     let Some(Value::Sym(head)) = items.first().copied() else {
         return None;
     };
-    if !(value::symbol_is(head, "fn") || value::symbol_is(head, "lambda")) {
+    if !(value::symbol_is(head, kw::FN) || value::symbol_is(head, kw::LAMBDA)) {
         return None;
     }
     // Exactly `(fn <param-list> <body>)` — one param list + one body expression.

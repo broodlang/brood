@@ -343,17 +343,27 @@ the workaround available today.
 - ✅ **Property-based testing `check-property`** — landed 2026-05-29. Seeded,
   deterministic, counterexample-shrinking-free but seed-reporting; built on the
   PRNG (`std/test.blsp`).
-- 🟡 **Central `kw` keyword-spelling module** — landed 2026-05-30
+- ✅ **Central `kw` keyword-spelling module** — landed 2026-05-30
   (`core/keywords.rs`, devlog). One `pub const` per special-form / core-macro /
   marker spelling, killing the magic strings that were re-typed across the three
   registries (`eval::SPECIAL_SPELLINGS`, `walk::SPECIAL_HEAD`,
   `builtins::SPECIAL_FORMS`) plus `recursion`/`hygiene`/`macros`/`scope`/
-  `introspect`/`check`/`guards`. **Remaining:** the core hot-path files
-  (`core/value.rs`, `core/heap.rs`, `syntax/reader.rs`, `eval/compile.rs`) still
-  re-type a few spellings — left for a deliberate pass when those files aren't
-  being edited concurrently. Future families worth the same treatment: the
-  type/tag-name strings (vs `Tag::name()`, but the checker's gradual-type
-  vocabulary is a superset — design call) and process/dist message tags.
+  `introspect`/`check`/`guards`. **The hot-path sweep is now done (2026-05-31):**
+  `syntax/reader.rs`, `eval/compile.rs`, `core/heap.rs`'s def-name matcher (now
+  lock-free `symbol_is` instead of an allocating `symbol_name` match),
+  `types/check/{walk,guards}.rs`, and `eval/mod.rs`'s `&`/`&optional` markers all
+  reference `kw::*`; the `%eq` primitive (a macro-expansion contract, like the
+  existing `%try`) gained `kw::EQ_PRIM`, wired through `builtins.rs` + the guard
+  recognizer. (`core/value.rs`'s `Tag::name()` strings are deliberately *not*
+  touched — they're type names, owned by `Tag::name()`, not special-form
+  spellings.) A second domain-scoped module, **`process/keywords.rs`** (`pk`),
+  centralizes the **process/dist message tags** — `:down`/`:EXIT`/`:nodedown`,
+  the exit reasons `:normal`/`:kill`/`:killed`/`:error`/`:noproc`/`:noconnection`,
+  `:nonode`, and the `process-info` status strings — the Rust↔Brood mailbox wire
+  contract, previously re-typed across `process/{scheduler,monitor,links,mailbox}.rs`
+  and `dist.rs`. Remaining future families (lower value, mostly one-off per site):
+  the display-protocol op/face keywords in `builtins.rs` and the env-var names
+  scattered across crates.
 - 🟡 **Errors that teach (LLM-native)** — first instances landed 2026-05-30
   ([`llm-native.md`](llm-native.md), devlog): the unbound-symbol `(:use mod)`
   fix-it, the `:main` quote guard, and `foreign_construct_hint` (a construct from

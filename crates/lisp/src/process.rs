@@ -34,6 +34,7 @@
 //!   thread that calls back into the mailbox's `wake_for_timeout`.
 
 mod io_source;
+pub(crate) mod keywords;
 mod links;
 mod mailbox;
 mod message;

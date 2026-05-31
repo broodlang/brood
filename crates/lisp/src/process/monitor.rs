@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 
 use crate::core::value::{self, Symbol, Value};
+use crate::process::keywords as pk;
 
 use super::mailbox::{deliver, REGISTRY};
 use super::message::Message;
@@ -131,7 +132,7 @@ fn local_node_pid_msg(pid: u64) -> Message {
 /// correct: the dying pid lives on us).
 fn down_message(pid_msg: Message, mref: u64, reason: Message) -> Message {
     Message::Vector(vec![
-        Message::Keyword(value::intern("down")),
+        Message::Keyword(value::intern(pk::DOWN)),
         Message::Ref(mref),
         pid_msg,
         reason,
@@ -180,7 +181,7 @@ pub(crate) fn add_monitor(target: u64, watcher: Watcher) {
         return;
     }
     drop(mons); // release before delivering — `fire_down` may need other locks
-    fire_down(watcher, target, Message::Keyword(value::intern("noproc")));
+    fire_down(watcher, target, Message::Keyword(value::intern(pk::NOPROC)));
 }
 
 /// `(demonitor mref)` — drop the calling process's monitor with that ref. Best
@@ -280,7 +281,7 @@ pub(crate) fn handle_node_down(node: Symbol) {
                     id: p.target_pid,
                 },
                 p.mref,
-                Message::Keyword(value::intern("noconnection")),
+                Message::Keyword(value::intern(pk::NOCONNECTION)),
             ),
         );
     }
@@ -300,7 +301,7 @@ pub(crate) fn fire_noconnection(target_node: Symbol, target_pid: u64, watcher_pi
                 id: target_pid,
             },
             mref,
-            Message::Keyword(value::intern("noconnection")),
+            Message::Keyword(value::intern(pk::NOCONNECTION)),
         ),
     );
 }

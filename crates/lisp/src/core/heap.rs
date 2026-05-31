@@ -41,6 +41,7 @@ use std::sync::{Arc, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use smallvec::SmallVec;
 
 use crate::core::blob::{SharedBlob, SHARED_BLOB_THRESHOLD};
+use crate::core::keywords as kw;
 use crate::core::map_champ::{self, MapNode, MAX_DEPTH};
 use crate::core::value::{
     Closure, ClosureArm, ClosureId, EnvId, MapId, NativeFn, NativeId, PairId, Passthrough, RopeId,
@@ -1196,10 +1197,10 @@ impl Heap {
         let Value::Sym(head) = self.car(p) else {
             return None;
         };
-        if !matches!(
-            crate::core::value::symbol_name(head).as_str(),
-            "def" | "defn" | "defmacro"
-        ) {
+        if !(crate::core::value::symbol_is(head, kw::DEF)
+            || crate::core::value::symbol_is(head, kw::DEFN)
+            || crate::core::value::symbol_is(head, kw::DEFMACRO))
+        {
             return None;
         }
         let Value::Pair(rest) = self.cdr(p) else {

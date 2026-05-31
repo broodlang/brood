@@ -41,6 +41,7 @@ use std::sync::{Arc, LazyLock, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::core::value::{self, Symbol};
+use crate::process::keywords as pk;
 use crate::process::{self, Message};
 
 /// Hard ceiling on a single wire frame (bytes). A peer can otherwise put any
@@ -169,7 +170,7 @@ struct NodeIdentity {
 }
 
 /// The name a pid carries before `node-start` runs: every such pid is local.
-static NONODE: LazyLock<Symbol> = LazyLock::new(|| value::intern("nonode"));
+static NONODE: LazyLock<Symbol> = LazyLock::new(|| value::intern(pk::NONODE));
 
 static NODE: LazyLock<RwLock<NodeIdentity>> = LazyLock::new(|| {
     RwLock::new(NodeIdentity {
@@ -420,7 +421,7 @@ pub(crate) fn link_remote(target_node: Symbol, target_pid: u64, local_pid: u64) 
             local_pid,
             target_node,
             target_pid,
-            Message::Keyword(value::intern("noconnection")),
+            Message::Keyword(value::intern(pk::NOCONNECTION)),
         );
     }
 }
@@ -501,7 +502,7 @@ pub(crate) fn monitor_node(name: Symbol, pid: u64) {
 /// The `[:nodedown <name>]` message a downed link delivers to its watchers.
 fn nodedown_msg(name: Symbol) -> Message {
     Message::Vector(vec![
-        Message::Keyword(value::intern("nodedown")),
+        Message::Keyword(value::intern(pk::NODEDOWN)),
         Message::Keyword(name),
     ])
 }

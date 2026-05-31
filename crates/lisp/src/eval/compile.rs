@@ -23,6 +23,7 @@ use smallvec::SmallVec;
 use std::sync::Arc;
 
 use crate::core::heap::{EnvRoot, Heap, VmCacheKey};
+use crate::core::keywords as kw;
 use crate::core::value::{self, ClosureId, EnvId, Symbol, Value};
 use crate::error::{error_codes, LispError, LispResult, Pos};
 
@@ -467,7 +468,7 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
             let items = heap.list_to_vec(form).ok()?;
             let head = *items.first()?;
             if let Value::Sym(h) = head {
-                if value::symbol_is(h, "if") {
+                if value::symbol_is(h, kw::IF) {
                     // (if cond then) or (if cond then else)
                     if items.len() != 3 && items.len() != 4 {
                         return None;
@@ -480,19 +481,19 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                     };
                     return Some(Node::If(Box::new(cond), Box::new(then), Box::new(els)));
                 }
-                if value::symbol_is(h, "do") {
+                if value::symbol_is(h, kw::DO) {
                     return compile_body(heap, &items[1..], scope, tail);
                 }
                 // `let`/`let*` are sequential; `letrec` pre-allocates all slots.
-                if value::symbol_is(h, "let") || value::symbol_is(h, "let*") {
+                if value::symbol_is(h, kw::LET) || value::symbol_is(h, kw::LET_STAR) {
                     return compile_let(heap, &items, scope, tail, false);
                 }
-                if value::symbol_is(h, "letrec") {
+                if value::symbol_is(h, kw::LETREC) {
                     return compile_let(heap, &items, scope, tail, true);
                 }
                 // `(fn …)`/`(lambda …)` inside a compiled body (Stage 2c): build a
                 // closure capturing a flat snapshot of the enclosing lexicals.
-                if value::symbol_is(h, "fn") || value::symbol_is(h, "lambda") {
+                if value::symbol_is(h, kw::FN) || value::symbol_is(h, kw::LAMBDA) {
                     return compile_make_closure(heap, form, scope);
                 }
                 // Any *other* special form (def/quote/quasiquote/and/or/

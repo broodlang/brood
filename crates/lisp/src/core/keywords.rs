@@ -12,6 +12,14 @@
 //! (the evaluator's `SpecialForm`, the checker's `SpecialHead`); this module
 //! deliberately holds no behaviour. Conventionally imported as
 //! `use crate::core::keywords as kw;` so call sites read `kw::IF`.
+//!
+//! Beyond the special forms and core macros, this module also holds a few
+//! *syntax-significant* head spellings that aren't themselves special forms —
+//! the `%try`/`%eq` primitives the macro pass emits as a contract, and the heads
+//! the advisory checker recognises (`not`/`spawn`/`case`/`module-doc`) so they
+//! aren't mistaken for unbound symbols. They live here so the checker's
+//! recognition lists read uniformly (`kw::*` throughout, no interleaved bare
+//! strings) and a spelling still lives in exactly one place.
 
 pub const QUOTE: &str = "quote";
 pub const QUASIQUOTE: &str = "quasiquote";
@@ -38,6 +46,7 @@ pub const TRY: &str = "try";
 pub const CATCH: &str = "catch";
 pub const THROW: &str = "throw";
 pub const TRY_PRIM: &str = "%try";
+pub const EQ_PRIM: &str = "%eq";
 pub const ERROR_OF: &str = "error-of";
 pub const ASSERT_ERROR: &str = "assert-error";
 pub const RECEIVE: &str = "receive";
@@ -48,6 +57,18 @@ pub const DOTIMES: &str = "dotimes";
 pub const FOR: &str = "for";
 pub const THREAD_FIRST: &str = "->";
 pub const THREAD_LAST: &str = "->>";
+
+// Heads that aren't special forms but are recognised by syntax-aware passes —
+// chiefly the advisory checker's `is_syntactic_keyword` list, so they read
+// uniformly alongside the special forms above. `not` is a boolean fn (also a
+// guard head, like `%eq`); `spawn` is a primitive; `module-doc` is the
+// module-docstring marker form; `case` is a construct Brood deliberately *lacks*
+// — kept here so the checker routes it to the foreign-construct hint instead of
+// flagging it as unbound (the runtime hint lives in `eval/mod.rs`).
+pub const NOT: &str = "not";
+pub const SPAWN: &str = "spawn";
+pub const CASE: &str = "case";
+pub const MODULE_DOC: &str = "module-doc";
 
 // Reader markers inside a quasiquote template — recognised by the reader, the
 // quasiquote walker (`eval::macros`), and the checker (`hygiene`/`guards`).

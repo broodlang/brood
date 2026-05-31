@@ -5047,7 +5047,7 @@ status strip, or a per-pane / per-buffer font was inexpressible except by a
 hand-rolled "block font" magnified out of many cells (what the foobar Game-of-Life
 demo's status strip did by hand). Recorded as **GG-1** in
 [`known-issues.md`](known-issues.md); `gui-font!`'s `:height` only resizes the
-*whole window*, not an op. `std/window.blsp` (ADR-077/078) already supplies the
+*whole window*, not an op. `std/pane.blsp` (ADR-077/078) already supplies the
 pane layout + clip-rect mechanism, so the only missing piece for per-pane fonts was
 a per-op size.
 
@@ -5118,7 +5118,7 @@ ignores it** (an unknown op, skipped), so one frame drives both. Constructor:
 - **Additive + frontend-neutral.** Existing apps/ops are untouched; the shape enum
   (`gui::CursorShape`) is mapped to winit's `CursorIcon` only inside the backend
   (`EwResize`/`NsResize`), so the shared `Op` stays dependency-free.
-- The editor's `view` emits one zone per `std/window.blsp` divider (`:col`→
+- The editor's `view` emits one zone per `std/pane.blsp` divider (`:col`→
   `:col-resize`, `:row`→`:row-resize`); resizing then has a real cursor affordance.
 
 **References.** ADR-046 (the render-op protocol this extends), ADR-077 (the drag this

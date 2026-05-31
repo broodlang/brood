@@ -32,6 +32,7 @@ use corosensei::{Coroutine, CoroutineResult, Yielder};
 
 use crate::core::heap::Heap;
 use crate::core::value::{self, EnvId, Value};
+use crate::process::keywords as pk;
 use crate::error::LispError;
 use crate::eval;
 
@@ -678,7 +679,7 @@ fn deregister(pid: u64, reason: Message) {
 /// fires at the next reduction tick (`preempt`); any other reason is the soft
 /// signal that waits for the next `receive` iteration.
 fn is_kill_reason(reason: &Message) -> bool {
-    matches!(reason, Message::Keyword(k) if *k == value::intern("kill"))
+    matches!(reason, Message::Keyword(k) if *k == value::intern(pk::KILL))
 }
 
 /// `(exit pid reason)` — deliver an exit signal to a green process (Erlang
@@ -777,7 +778,7 @@ fn run_one(mut proc: Box<Process>) {
             // The coroutine set its exit reason just before returning (see `spawn`).
             let reason = EXIT_REASON
                 .with(|r| r.borrow_mut().take())
-                .unwrap_or_else(|| Message::Keyword(value::intern("normal")));
+                .unwrap_or_else(|| Message::Keyword(value::intern(pk::NORMAL)));
             deregister(proc.pid, reason);
         }
         Ok(CoroutineResult::Yield(Suspend::Receive)) => {
@@ -796,7 +797,7 @@ fn run_one(mut proc: Box<Process>) {
                 let reason = st
                     .kill
                     .take()
-                    .unwrap_or_else(|| Message::Keyword(value::intern("killed")));
+                    .unwrap_or_else(|| Message::Keyword(value::intern(pk::KILLED)));
                 drop(st);
                 deregister(proc.pid, reason);
                 // `proc` dropped here → corosensei force-unwinds the parked coroutine.
@@ -820,7 +821,7 @@ fn run_one(mut proc: Box<Process>) {
         }
         Err(_) => {
             eprintln!("process {} panicked", proc_descr(proc.pid));
-            deregister(proc.pid, Message::Keyword(value::intern("killed")));
+            deregister(proc.pid, Message::Keyword(value::intern(pk::KILLED)));
         }
     }
 }
@@ -889,11 +890,11 @@ pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
         // sentinel was caught here and flushed the arena manually; automatic GC
         // made it redundant and the primitive was removed — docs/memory-review.md.)
         let reason = match eval::apply(&mut heap, f, &[], EnvId::GLOBAL) {
-            Ok(_) => Message::Keyword(value::intern("normal")),
+            Ok(_) => Message::Keyword(value::intern(pk::NORMAL)),
             Err(e) => {
                 eprintln!("process {} died: {}", proc_descr(pid), e.located());
                 Message::Vector(vec![
-                    Message::Keyword(value::intern("error")),
+                    Message::Keyword(value::intern(pk::ERROR)),
                     Message::Str(e.to_string()),
                 ])
             }

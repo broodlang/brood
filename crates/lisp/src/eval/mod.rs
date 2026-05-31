@@ -1281,7 +1281,7 @@ fn parse_params(heap: &Heap, form: Value) -> Result<ParamSpec, LispError> {
 
     while i < items.len() {
         if let Value::Sym(s) = items[i] {
-            if value::symbol_is(s, "&optional") {
+            if value::symbol_is(s, kw::AMP_OPTIONAL) {
                 if in_optional {
                     return Err(LispError::runtime("&optional may appear only once"));
                 }
@@ -1289,7 +1289,7 @@ fn parse_params(heap: &Heap, form: Value) -> Result<ParamSpec, LispError> {
                 i += 1;
                 continue;
             }
-            if value::symbol_is(s, "&") {
+            if value::symbol_is(s, kw::AMP) {
                 let r = items.get(i + 1).copied().ok_or_else(|| {
                     LispError::runtime("expected a symbol after & in parameter list")
                 })?;

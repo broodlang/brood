@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use crate::core::heap::Heap;
 use crate::core::value::{self, EnvId, MapId, Symbol, Value};
+use crate::process::keywords as pk;
 use crate::error::{LispError, LispResult};
 use crate::eval;
 
@@ -422,9 +423,9 @@ pub fn mailbox_len(pid: u64) -> Option<usize> {
 pub fn process_status(pid: u64) -> Option<&'static str> {
     let mailbox = crate::core::sync::lock(&REGISTRY).get(&pid).cloned()?;
     Some(match mailbox.status.load(Ordering::Relaxed) {
-        ST_RUNNING => "running",
-        ST_WAITING => "waiting",
-        _ => "runnable",
+        ST_RUNNING => pk::STATUS_RUNNING,
+        ST_WAITING => pk::STATUS_WAITING,
+        _ => pk::STATUS_RUNNABLE,
     })
 }
 
