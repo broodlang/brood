@@ -366,13 +366,25 @@ reads it exactly like `(sig …)`."
 (defn third (coll) "The third item of `coll`." (first (rest (rest coll))))
 
 ;; ---- sequence operations ----
+;; `map`/`filter` recur over a dedicated `--acc` loop rather than folding a
+;; per-element closure: the loop calls the user fn directly, saving one
+;; `apply` frame per element on the language's most-used sequence ops (the
+;; closure-over-`fold` form spent an extra call per item indirecting through
+;; the reducing lambda). `seq` coerces a map to its `[k v]` pairs once up front,
+;; exactly as `fold` did.
+(defn map--acc (f coll acc)
+  (if (empty? coll) acc (map--acc f (rest coll) (cons (f (first coll)) acc))))
 (defn map (f coll)
   "A list of `(f x)` for each `x` in `coll`."
-  (reverse (fold (fn (acc x) (cons (f x) acc)) nil coll)))
+  (reverse (map--acc f (seq coll) nil)))
 
+(defn filter--acc (pred coll acc)
+  (if (empty? coll)
+    acc
+    (let (x (first coll)) (filter--acc pred (rest coll) (if (pred x) (cons x acc) acc)))))
 (defn filter (pred coll)
   "A list of the items of `coll` for which `(pred x)` is truthy."
-  (reverse (fold (fn (acc x) (if (pred x) (cons x acc) acc)) nil coll)))
+  (reverse (filter--acc pred (seq coll) nil)))
 
 (defn append-two (a b) "Concatenate two lists (`a` before `b`)." (fold flip-cons b (reverse a)))
 
@@ -386,12 +398,15 @@ reads it exactly like `(sig …)`."
   ;; re-reversed the growing accumulator each step, making it O(lists²).
   (reverse (fold append--onto nil lists)))
 
+(defn count--acc (coll n) (if (empty? coll) n (count--acc (rest coll) (%add n 1))))
 (defn count (coll)
   "The number of items in `coll` (a list, vector, string, or map)."
   (cond
     (string? coll) (string-length coll)
+    (vector? coll) (vector-length coll)            ; O(1) — was an O(n) fold walk
     (map? coll) (count (map-pairs coll))
-    else (fold (fn (acc x) (inc acc)) 0 coll)))
+    ;; lists/nil: a dedicated tail loop, not a per-element counting closure.
+    else (count--acc coll 0)))
 (def length count)
 
 (defn nth-list (coll i d)
@@ -1385,8 +1400,11 @@ structural order (`compare`), so numeric, string, keyword, and vector keys all w
 (defn merge--runs (less? a b) (merge--acc less? a b nil))
 (defn merge--acc (less? a b acc)
   (cond
-    (empty? a) (append (reverse acc) b)
-    (empty? b) (append (reverse acc) a)
+    ;; `acc` holds the merged prefix reversed; `(fold flip-cons tail acc)` splices
+    ;; `reverse(acc)` in front of the remaining run in ONE pass — the old
+    ;; `(append (reverse acc) …)` reversed `acc` and then re-walked it.
+    (empty? a) (fold flip-cons b acc)
+    (empty? b) (fold flip-cons a acc)
     ;; strict `<` on b-vs-a: equal elements take from `a` first, so it's stable.
     (less? (first b) (first a)) (merge--acc less? a (rest b) (cons (first b) acc))
     else (merge--acc less? (rest a) b (cons (first a) acc))))
@@ -1395,13 +1413,22 @@ structural order (`compare`), so numeric, string, keyword, and vector keys all w
   "Concatenate any number of sequences (lists, vectors, or maps read as `[k v]` pairs) into one list, left to right — the variadic sequence join. Alias of `append` (the name reflexively reached for). Returns a list; wrap in `(into [] …)` for a vector."
   (apply append seqs))
 
+;; Concatenate each `(f x)` straight onto the reversed accumulator (`append--onto`
+;; prepends a list's items in reverse), then reverse once — so we never
+;; materialise the intermediate list-of-sublists nor spread it through `apply
+;; append`. Two passes over the output total, like the eager builders above.
+(defn mapcat--acc (f coll acc)
+  (if (empty? coll) acc (mapcat--acc f (rest coll) (append--onto acc (f (first coll))))))
 (defn mapcat (f coll)
   "Map `f` over `coll` and concatenate the resulting lists into one."
-  (apply append (map f coll)))
+  (reverse (mapcat--acc f (seq coll) nil)))
 
 (defn frequencies (coll)
   "A map from each distinct element of `coll` to how many times it occurs."
-  (fold (fn (m x) (assoc m x (inc (get m x 0)))) {} coll))
+  ;; The map accumulator is always a map, so hit the 3-arg kernel ops
+  ;; (`map-assoc`/`map-get`) directly — variadic `assoc` would build a rest-list
+  ;; and `get` a `cond` dispatch on every one of the n elements.
+  (fold (fn (m x) (map-assoc m x (%add (map-get m x 0) 1))) {} coll))
 
 (defn into (to from)
   "Pour each item of `from` into `to`. For a map, items are `[k v]` pairs (assoc'd, map result); for a vector, items are appended (vector result); otherwise items are appended (list result). Maps in `from` are read as their entries, so `(into [] some-map)` and `(into {} other-map)` both work."
@@ -1463,7 +1490,9 @@ a vector for a vector and a list for a list. `i` must be in `[0, count)`."
 (defn group-by (f coll)
   "A map from each `(f x)` to the list of items of `coll` that produced it, each list in original order."
   ;; Prepend per group (O(1)) then reverse every group's list once at the end.
-  (update-vals (fold (fn (m x) (let (k (f x)) (assoc m k (cons x (get m k))))) {} coll) reverse))
+  ;; Direct kernel `map-assoc`/`map-get` — the accumulator is always a map.
+  (update-vals (fold (fn (m x) (let (k (f x)) (map-assoc m k (cons x (map-get m k nil))))) {} coll)
+    reverse))
 
 ;; flatten: splice nested lists into one flat list. Descends through `pair?`/`nil`
 ;; (so empty sub-lists and nils vanish); vectors and maps are leaf items. The
