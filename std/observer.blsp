@@ -66,6 +66,7 @@ attach). Drive the standalone app from the shell with `nest observe`."
 (require 'ui)  ; the reusable app framework — frontends + the `ui-run` loop
 (require 'lineedit)  ; the minibuffer reuses lineedit's pure editing core
 (require 'highlight)  ; …and its syntax colouring (shared with the REPL line editor)
+(require 'proctree)  ; the parent→child forest ordering (shared with myedit's process list)
 
 ;; ---- faces (named, via the shared `face` registry) --------------------------
 ;;
@@ -364,28 +365,11 @@ the live reductions/second rate, so the *currently* busiest process floats up)."
     (= key :reds) (sort-by (fn (p) (- (or (get p :reds-rate) 0))) procs)
     :else (sort-by (fn (p) (get p :id)) procs)))
 
-(defn observe--tree-walk (p procs depth limit)
-  "DFS: emit `p` (tagged with `:depth`) followed by its children's subtrees, each
-child sorted by id. Normally terminates because a child's id exceeds its parent's
-(spawn order). `limit` (the process count) caps the depth as a guard: a malformed
-snapshot with a parent cycle (impossible from `process-info`, but a buggy remote
-peer could send one) is bounded instead of overflowing the stack."
-  (if (>= depth limit)
-    [(assoc p :depth depth)]
-    (let (kids (sort-by (fn (c) (get c :id))
-                 (filter (fn (c) (= (get c :parent) (get p :id))) procs)))
-      (cons (assoc p :depth depth)
-        (mapcat (fn (k) (observe--tree-walk k procs (inc depth) limit)) kids)))))
-
 (defn observe--tree-order (procs)
-  "Order `procs` as a parent→child forest: roots first (a process whose `:parent`
-is nil or not in the set), each followed by its descendants (DFS), with `:depth`
-tagged for indentation. Children appear under their parent."
-  (let (ids (map (fn (p) (get p :id)) procs)
-        limit (count procs)
-        root? (fn (p) (let (pa (get p :parent)) (or (nil? pa) (< (index-of ids pa) 0))))
-        roots (sort-by (fn (p) (get p :id)) (filter root? procs)))
-    (mapcat (fn (r) (observe--tree-walk r procs 0 limit)) roots)))
+  "Order `procs` as a parent→child forest (roots first, each followed by its DFS
+descendants, `:depth`-tagged) — the depth-indented tree view. Delegates to the shared
+`proctree/tree-order` (the same walk myedit's *Process List* uses)."
+  (proctree/tree-order procs))
 
 (defn observe--order (procs sort)
   "Order `procs` for display by `sort`: `:tree` builds the parent→child forest,

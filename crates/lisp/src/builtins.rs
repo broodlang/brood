@@ -2973,6 +2973,8 @@ const DEV_MODULES: &[(&str, &str)] = &[
     ("test", include_str!("../../../std/test.blsp")),
     // Doc generation (`nest doc`) — tooling, not runtime.
     ("docs", include_str!("../../../std/docs.blsp")),
+    // Order a process-info snapshot as a parent→child forest (the tree view).
+    ("proctree", include_str!("../../../std/proctree.blsp")),
     // The process viewer / debug tooling (`nest observe`, `(observe)`).
     ("observer", include_str!("../../../std/observer.blsp")),
     // The hot-reload file watcher — a dev-loop convenience.
