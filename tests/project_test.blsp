@@ -172,14 +172,15 @@
         (spit fb "(defmodule beta)\n(defn beta-fn () 2)\n")
         (assert= (project/project--duplicate-def-warnings [fa fb]) nil)))))
 
-;; The source loader is load-once on `:skip-loaded` (the check pre-flight), so a
-;; module already loaded by `run-project`/`run-project-tests` isn't re-evaluated —
-;; which would re-run its `defmacro`s and print the "macro redefined" hot-reload
-;; warning. Without `:skip-loaded` it still force-loads (so a re-run in a long-lived
-;; image picks up edits). Regression: the myedit editor's command.blsp defines a
-;; macro that commands.blsp `:use`s, so the double-load made every `nest run`/`test`
-;; print the warning.
-(describe "project: source load-once pre-flight"
+;; The source loader is load-once *within a walk* (a module another file already
+;; `require`d isn't loaded a second time when the walk reaches its file) and on
+;; `:skip-loaded` (the check pre-flight skips anything already provided). Both guard
+;; against re-evaluating a module — which re-runs its `defmacro`s (the "macro
+;; redefined" hot-reload warning) and wipes any state it just built. Regression: the
+;; myedit editor defines `defcommand` in interactive.blsp, which commands.blsp
+;; `:use`s to register every command into a registry; the walker force-reloading
+;; interactive.blsp after commands.blsp ran wiped that registry (and warned).
+(describe "project: source load-once"
   (test "project--file-feature reads a file's (defmodule NAME) as a string"
     (let (dir (temp-dir "brood-feat-"))
       (make-dir dir)
@@ -198,9 +199,22 @@
       (let (f (path-join dir "m.blsp"))
         (spit f "(defmodule oops \n")  ; unbalanced — won't parse
         (is (nil? (project/project--file-feature f))))))
-  (test ":skip-loaded skips an already-provided module; the default force-reloads it"
-    ;; The fixture bumps the *earmuffed* (root) counter on every evaluation, so the
-    ;; count is exactly the number of times the file was actually loaded.
+  ;; The fixtures below bump an *earmuffed* (root) counter on every evaluation, so
+  ;; the counter is exactly how many times the file was actually loaded.
+  (test "a module another file already require'd is NOT reloaded when the walk reaches it"
+    ;; aaa.blsp `:use`s zzz (loading zzz via require); the walk then reaches zzz.blsp.
+    ;; The fix skips it — without it, zzz would load twice (re-defmacro, state wipe).
+    (let (root (temp-dir "brood-walk-"))
+      (make-dir root)
+      (make-dir (path-join root "src"))
+      (let (src (path-join root "src"))
+        (spit (path-join src "aaa.blsp") "(defmodule aaa (:use zzz))\n")
+        (spit (path-join src "zzz.blsp") "(defmodule zzz)\n(def *zzz-loads* (inc *zzz-loads*))\n")
+        (def *zzz-loads* 0)
+        (project/project-setup root)
+        (project/project-load-sources root)
+        (assert= *zzz-loads* 1))))            ; loaded once, not twice
+  (test ":skip-loaded skips an already-provided module; a later walk reloads it"
     (let (root (temp-dir "brood-skip-"))
       (make-dir root)
       (make-dir (path-join root "src"))
@@ -208,10 +222,10 @@
         (spit f "(defmodule skipfix)\n(def *skip-load-count* (inc *skip-load-count*))\n")
         (def *skip-load-count* 0)
         (project/project-setup root)
-        (project/project-load-sources root)              ; force: always loads → 1
+        (project/project-load-sources root)              ; first walk: loads → 1
         (assert= *skip-load-count* 1)
         (is (member? "skipfix" *features*))
-        (project/project-load-sources root :skip-loaded) ; provided → skipped → still 1
+        (project/project-load-sources root :skip-loaded) ; pre-flight: provided → skip → 1
         (assert= *skip-load-count* 1)
-        (project/project-load-sources root)              ; force again → reloads → 2
+        (project/project-load-sources root)              ; later walk: reloads edits → 2
         (assert= *skip-load-count* 2)))))
