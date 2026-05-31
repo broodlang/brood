@@ -109,7 +109,10 @@ pub enum Op {
 
 /// A keystroke, in a backend-neutral shape the Brood side turns into the same
 /// values `term-poll` yields: `Char` → a 1-char string, the rest → keywords
-/// (`:ctrl-c`, `:alt-f`, `:up`, …).
+/// (`:ctrl-c`, `:alt-f`, `:up`, …). `PartialEq` so the event loop can tell an
+/// auto-repeat (a press for the key *already* held) from a fresh press without
+/// trusting winit's `ke.repeat` flag — unreliable on Wayland (ADR-086).
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Key {
     Char(char),
     Ctrl(char),
@@ -171,7 +174,13 @@ mod disabled {
     pub fn close(_id: u64) -> Result<(), String> {
         Err(NOT_COMPILED.into())
     }
+    pub fn focus(_id: u64) -> Result<(), String> {
+        Err(NOT_COMPILED.into())
+    }
     pub fn size(_id: u64) -> Result<(u16, u16), String> {
+        Err(NOT_COMPILED.into())
+    }
+    pub fn held_key(_id: u64) -> Result<Option<super::Key>, String> {
         Err(NOT_COMPILED.into())
     }
     pub fn draw(_id: u64, _ops: Vec<Op>) -> Result<(), String> {
@@ -192,10 +201,10 @@ mod disabled {
 }
 
 #[cfg(not(feature = "gui"))]
-pub use disabled::{close, draw, font, open, register_family, size};
+pub use disabled::{close, draw, focus, font, held_key, open, register_family, size};
 
 #[cfg(feature = "gui")]
-pub use backend::{close, draw, font, open, register_family, size};
+pub use backend::{close, draw, focus, font, held_key, open, register_family, size};
 
 #[cfg(feature = "gui")]
 mod backend {
@@ -268,6 +277,10 @@ mod backend {
         Draw { id: u64, ops: Vec<Op> },
         /// Destroy window `id`.
         Close { id: u64 },
+        /// Raise window `id` to the front and give it OS keyboard focus (un-
+        /// minimising it first). Behind `gui-focus` — surfaces an already-open
+        /// singleton window instead of opening a duplicate.
+        Focus { id: u64 },
         /// Set a cell font — family and/or pixel size; `None` fields are left
         /// unchanged. `id: None` is the **global default**: applied to every open
         /// window and remembered for windows opened later. `id: Some(w)` targets
@@ -297,6 +310,7 @@ mod backend {
     struct OpenReply {
         id: u64,
         size: Arc<Mutex<(u16, u16)>>,
+        held_key: Arc<Mutex<Option<Key>>>,
     }
 
     /// What the Brood side keeps per open window (keyed by the id `open` returns) —
@@ -304,6 +318,10 @@ mod backend {
     /// so there is no receiver to keep here (ADR-058).
     struct WinHandle {
         size: Arc<Mutex<(u16, u16)>>,
+        /// The key the window currently sees as physically held (set on press,
+        /// cleared on release / focus loss), so `gui-held-key` can be polled as the
+        /// source of truth for a held key — immune to a missed key-up (ADR-086).
+        held_key: Arc<Mutex<Option<Key>>>,
     }
 
     /// The one GUI thread's event-loop proxy, started lazily on the first `open`.
@@ -355,10 +373,13 @@ mod backend {
                 reply: reply_tx,
             })
             .map_err(|_| "gui thread is gone".to_string())?;
-        let OpenReply { id, size } = reply_rx
+        let OpenReply { id, size, held_key } = reply_rx
             .recv()
             .map_err(|_| "gui thread did not reply".to_string())??;
-        windows().lock().unwrap().insert(id, WinHandle { size });
+        windows()
+            .lock()
+            .unwrap()
+            .insert(id, WinHandle { size, held_key });
         Ok(id)
     }
 
@@ -371,12 +392,42 @@ mod backend {
         Ok(())
     }
 
+    /// `(gui-focus id)` — raise window `id` and request OS keyboard focus (un-
+    /// minimising it). The window lives on the GUI thread, so this routes the
+    /// request through the event-loop proxy like `close`/`draw`; the actual
+    /// `focus_window` runs there. Errors only if the id isn't a live window.
+    pub fn focus(id: u64) -> Result<(), String> {
+        {
+            let w = windows().lock().unwrap();
+            if !w.contains_key(&id) {
+                return Err("gui window not open".into());
+            }
+        }
+        gui()?
+            .lock()
+            .unwrap()
+            .send_event(UserEvent::Focus { id })
+            .map_err(|_| "gui thread is gone".to_string())
+    }
+
     /// `(gui-size id)` — window `id`'s size in character cells.
     pub fn size(id: u64) -> Result<(u16, u16), String> {
         let w = windows().lock().unwrap();
         let h = w.get(&id).ok_or("gui window not open")?;
         let size = *h.size.lock().unwrap();
         Ok(size)
+    }
+
+    /// `(gui-held-key id)` — the key window `id` currently sees as physically held,
+    /// or `None` when none is. Read from the shared state the event loop keeps current
+    /// from press/release transitions (not winit's unreliable `ke.repeat`), so an app
+    /// can confirm a key is still down before repeating — the source of truth that
+    /// makes a missed key-up unable to cause runaway repeat (ADR-086).
+    pub fn held_key(id: u64) -> Result<Option<Key>, String> {
+        let w = windows().lock().unwrap();
+        let h = w.get(&id).ok_or("gui window not open")?;
+        let k = *h.held_key.lock().unwrap();
+        Ok(k)
     }
 
     /// `(gui-draw id ops)` — paint a frame to window `id`.
@@ -523,6 +574,11 @@ mod backend {
         /// `CursorMoved` while it's held can be reported as a `:drag` carrying that
         /// button. One button at a time is all a drag gesture needs.
         held: Option<MouseButton>,
+        /// The key currently held down (set on a fresh press, cleared on its release
+        /// or focus loss), shared with the Brood side for `gui-held-key`. Also how the
+        /// event loop suppresses auto-repeat: a press for the key already here is a
+        /// repeat, dropped — reliable on Wayland where `ke.repeat` isn't (ADR-086).
+        held_key: Arc<Mutex<Option<Key>>>,
         /// Cursor hot-zones from the last drawn frame (`Op::CursorZone`): cell rect
         /// `(x, y, w, h)` + the shape to show while the pointer is inside. Hit-tested
         /// on `CursorMoved`. (ADR-080.)
@@ -570,6 +626,7 @@ mod backend {
             mods: ModifiersState::empty(),
             cursor: (0, 0),
             held: None,
+            held_key: Arc::new(Mutex::new(None)),
             zones: Vec::new(),
             shape: None,
         })
@@ -627,6 +684,7 @@ mod backend {
                     let _ = reply.send(Ok(OpenReply {
                         id,
                         size: win.size.clone(),
+                        held_key: win.held_key.clone(),
                     }));
                     self.ids.insert(id, wid);
                     self.wins.insert(wid, win);
@@ -677,6 +735,14 @@ mod backend {
                 UserEvent::Close { id } => {
                     if let Some(wid) = self.ids.remove(&id) {
                         self.wins.remove(&wid); // dropping the window closes it
+                    }
+                }
+                // Un-minimise, then raise + focus, so a singleton window that's
+                // already open is surfaced rather than re-spawned (behind gui-focus).
+                UserEvent::Focus { id } => {
+                    if let Some(w) = self.ids.get(&id).and_then(|wid| self.wins.get(wid)) {
+                        w.window.set_minimized(false);
+                        w.window.focus_window();
                     }
                 }
                 // Cell font. `id: Some(w)` retunes just that window, leaving the
@@ -774,29 +840,42 @@ mod backend {
                     is_synthetic,
                     ..
                 } => match ke.state {
-                    // A *real* fresh press goes straight through. A held key's OS
-                    // auto-repeat (`ke.repeat`) is dropped, not relayed: the OS fires
-                    // it faster than the app drains its mailbox, so on release a
-                    // backlog of repeats kept "playing" after the key was up (the
-                    // cursor scrolling on past). The app drives its own repeat off the
-                    // down/up pair, paced by its render loop, so it stops the instant
-                    // the key lifts (ADR-086). Synthetic presses (winit replaying
-                    // still-held keys on focus *gain*) are dropped too — they'd be
-                    // phantom keystrokes, and the matching down already fired.
-                    ElementState::Pressed if !ke.repeat && !is_synthetic => {
+                    // A fresh press goes through; an auto-repeat is dropped. We detect
+                    // a repeat by TRANSITION, not winit's `ke.repeat` flag: on
+                    // GNOME/Wayland that flag is unreliable — held keys arrive as a
+                    // flood of `repeat == false` presses (ADR-086) — so a press for the
+                    // key already in `held_key` (no release has cleared it) is the
+                    // repeat, and we drop it. A genuine re-press (double-tap) comes only
+                    // after a release, which clears `held_key`, so it still registers.
+                    // Synthetic presses (winit replaying held keys on focus *gain*) are
+                    // dropped too — they'd be phantom keystrokes. Relaying the flood was
+                    // the original bug: it outran the mailbox drain, so a backlog kept
+                    // "playing" after key-up (the cursor scrolling on past).
+                    ElementState::Pressed if !is_synthetic => {
                         if let Some(k) = translate_key(&ke, w.mods) {
-                            deliver(w.subscriber, key_message(&k));
+                            let mut hk = w.held_key.lock().unwrap();
+                            if *hk != Some(k) {
+                                *hk = Some(k);
+                                drop(hk);
+                                deliver(w.subscriber, key_message(&k));
+                            }
                         }
                     }
-                    ElementState::Pressed => {} // auto-repeat / synthetic — see above
-                    // Key release → `[:key-up <key>]`, so the app can pair it with the
-                    // press and know the key is no longer held. *Synthetic* releases
-                    // are delivered too (not filtered): winit emits them when a key was
-                    // let go while we weren't focused, so honoring them is exactly what
-                    // stops a held key's repeat from surviving a focus change. Modifier-
-                    // only releases (Ctrl/Shift/…) translate to None and are skipped.
+                    ElementState::Pressed => {} // synthetic press (focus-gain replay)
+                    // Key release → clear `held_key` (so `gui-held-key` and the repeat
+                    // stop) and deliver `[:key-up <key>]` as the fast-path stop signal.
+                    // Clear only on a matching key so releasing a modifier while a key
+                    // is held doesn't end the repeat early. *Synthetic* releases count
+                    // too (not filtered): winit emits them when a key was let go while
+                    // unfocused, exactly when we must stop. Modifier-only releases
+                    // (Ctrl/Shift/…) translate to None and are skipped.
                     ElementState::Released => {
                         if let Some(k) = translate_key(&ke, w.mods) {
+                            let mut hk = w.held_key.lock().unwrap();
+                            if *hk == Some(k) {
+                                *hk = None;
+                            }
+                            drop(hk);
                             deliver(w.subscriber, key_up_message(&k));
                         }
                     }
@@ -808,6 +887,10 @@ mod backend {
                 // (ADR-086). Focus *gain* (`true`) needs no signal — the next real
                 // press resumes input.
                 WindowEvent::Focused(false) => {
+                    // Drop the held key: we can't observe its release while unfocused,
+                    // so `gui-held-key` must not keep reporting it (the poll-based stop)
+                    // and the `:blur` is the event-based stop. Both, belt-and-braces.
+                    *w.held_key.lock().unwrap() = None;
                     deliver(w.subscriber, Message::Keyword(value::intern("blur")));
                 }
                 WindowEvent::CursorMoved { position, .. } => {
@@ -993,6 +1076,7 @@ mod backend {
     }
 
     fn translate_key(ke: &KeyEvent, mods: ModifiersState) -> Option<Key> {
+        use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
         match &ke.logical_key {
             WKey::Named(n) => Some(match n {
                 NamedKey::ArrowUp => Key::Named("up"),
@@ -1021,7 +1105,19 @@ mod backend {
                 _ => return None,
             }),
             WKey::Character(s) => {
-                let c = s.chars().next()?;
+                // For a Ctrl/Alt chord, read the key WITHOUT modifiers, so layout
+                // composition (on some layouts Alt+`-` composes to en-dash `–`, Alt+
+                // letters to accents) doesn't mangle the chord — the keymap binds the
+                // BASE character (`-`, `f`). Plain typing keeps the composed/logical
+                // char, so AltGr and dead keys still insert their glyph.
+                let c = if mods.control_key() || mods.alt_key() {
+                    match ke.key_without_modifiers() {
+                        WKey::Character(b) => b.chars().next(),
+                        _ => s.chars().next(),
+                    }
+                } else {
+                    s.chars().next()
+                }?;
                 if mods.control_key() && mods.alt_key() {
                     Some(Key::CtrlAlt(c.to_ascii_lowercase()))
                 } else if mods.control_key() {

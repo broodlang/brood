@@ -768,25 +768,46 @@ frontends to render to all at once. It blocks the calling process until quit, so
     observe--update
     display))
 
-(defn observe ()
-  "Open the observer over this runtime's own processes in a **new native GUI
-window**, and return immediately with the observer's pid. Each call opens an
-*independent* window (titled `brood observer #N`), so you can run several at once —
-the work happens in a spawned process that owns the window and runs the loop, so
-the caller (e.g. the REPL) isn't blocked. Quit a window with `q`/Esc/Ctrl-C or its
-close button (that process then exits). Needs the runtime built with `--features
-gui` (`./configure --with-gui && make install`); without it the spawned process
-dies when `gui-open` errors.
+(defn observe--window-key (key)
+  "The registry name the windowed observer for identity `key` registers under, so
+two `(observe key)` calls with the same key share **one** window (named `spawn` is
+idempotent) while distinct keys get their own. Namespaced under `observer/` so it
+never collides with an app's own process names; any `key` — keyword, symbol, node
+name, string, number — is stringified and interned to that one keyword."
+  (keyword (str "observer/" (if (or (keyword? key) (symbol? key)) (name key) key))))
+
+(defn observe (&optional (key :self))
+  "Open the observer over this runtime's own processes in a **native GUI window**,
+and return immediately with the window process's pid. **Idempotent per `key`**
+(default `:self`): calling `(observe)` again while that window is open returns the
+SAME pid — no duplicate window — because the work process is spawned under the
+per-key name `(observe--window-key key)` and named `spawn` returns the live pid
+instead of re-running. The name is auto-reaped when the window closes (`q`/Esc/
+Ctrl-C or the X), so a later `(observe)` opens a fresh one. The work happens in that
+spawned process, so the caller (e.g. the REPL) isn't blocked.
+
+A single runtime has one set of processes, so one self-window is what you want — but
+pass a **distinct `key`** for a SEPARATE window when you genuinely want a different
+*kind* of view side by side (a second pane, or — later — a remote source): different
+keys coexist, each unique. Needs a `--features gui` runtime (`./configure --with-gui
+&& make install`); without it the spawned process dies when `gui-open` errors.
 
     (require 'observer)
-    (observe)   ; => a pid; opens 'brood observer #1'
-    (observe)   ; => another pid; a second, independent window
+    (observe)         ; => pid; opens the self window
+    (observe)         ; => the SAME pid; no second window
+    (observe :audit)  ; => a different pid; an independent second window
 
 For a modal terminal observer instead, call `(observe-attach *term-display*)`."
-  ;; `spawn` is a macro that wraps its argument in a thunk, so pass the *expression*
-  ;; (not a `(fn () …)`) — `(gui-display)` then opens the window inside the new
-  ;; process, which owns it and receives its input.
-  (spawn (observe-attach (gui-display))))
+  ;; The window process registers under the per-key name. If one is already alive,
+  ;; don't re-spawn (the named `spawn` would no-op anyway, ADR-039) — instead send it
+  ;; `:focus`, which `ui-run` turns into `gui-focus` on its window, surfacing it to
+  ;; the front. Otherwise spawn fresh; `(gui-display)` (opening the window) runs only
+  ;; in that branch. `send` to a just-died pid is a harmless no-op (race-safe).
+  (let (nm (observe--window-key key)
+        live (whereis nm))
+    (if (nil? live)
+      (spawn nm (observe-attach (gui-display)))
+      (do (send live :focus) live))))
 
 ;; ---- remote attach (observe a peer runtime over the node link, ADR-053) -----
 ;;
