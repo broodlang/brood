@@ -17,8 +17,16 @@
 as pure functions over a source string (ADR-052):
 
   - `(highlight-spans src)` — `[start end face]` colour spans for the tokens.
+  - `(highlight-window slice base)` — `highlight-spans` for a windowed `slice`, with
+    every span shifted into the larger source's absolute coordinates by `base`.
+  - `(safe-restart src pos)` — a column-0 form start ≤ `pos` to (re)start lexing from,
+    so a viewport can be fontified without lexing the whole buffer.
   - `(highlight-chunks full base line overrides)` — `[substring face]` chunks that
     tile a visible line (with caller `overrides`, e.g. bracket-match colours).
+  - `(face-at spans pos)` / `(ranges-face ranges pos)` / `(fontify-runs text base spans ranges)`
+    — the shared span→runs tiler: look up a span's face, merge an overlay `ranges`
+    channel, and coalesce `text` into `[substring face]` runs (renderers turn each
+    run into its own output — display ops, HTML, …).
   - `(bracket-match full pos)` — the bracket pair adjacent to cursor `pos`.
   - `(enclosing-call full pos)` — `[callee arg-index]` for the call enclosing the cursor.
   - `(symbol-prefix-at full pos)` / `(common-prefix strs)` — completion helpers.
@@ -122,67 +130,112 @@ strings, numbers, keywords, and head-position symbols (special forms vs calls).
 Whitespace and plain variable references carry no span (the default colour)."
   (hl--lex src 0 (string-length src) false '()))
 
-;; ---- projecting spans onto a visible line -----------------------------------
+;; ---- windowed highlighting (fontify just a viewport) ------------------------
+;; A large buffer is too costly to lex whole every frame. The editor instead lexes
+;; only a slice — the visible lines plus a `safe-restart` lead-in for context — and
+;; shifts the spans back into absolute coordinates with `highlight-window`.
 
-(defn hl--face-at (spans pos)
-  "The face of the span covering offset `pos`, or nil."
+(defn highlight-window (slice base)
+  "Like `highlight-spans`, but for a windowed `slice` that begins at offset `base`
+in some larger source: every `[start end face]` span is shifted by `base`, so the
+result is in the larger source's absolute coordinates. Lets a viewport fontify only
+its visible slice yet hand the renderer absolute offsets; `base` 0 is exactly
+`highlight-spans`."
+  (map (fn ([s e f]) [(+ s base) (+ e base) f]) (highlight-spans slice)))
+
+(defn hl--col0? (src i)
+  "True if offset `i` begins a line — it's the start of `src` or follows a newline."
+  (or (= i 0) (= (char-at src (dec i)) "\n")))
+
+(defn hl--restart-scan (src i)
+  "Backward scan for the nearest column-0 open bracket at or before offset `i`; 0 if
+there is none."
+  (cond
+    (< i 0) 0
+    (and (hl--open? (char-at src i)) (hl--col0? src i)) i
+    :else (hl--restart-scan src (dec i))))
+
+(defn safe-restart (src pos)
+  "The offset of the nearest *top-level form start* at or before `pos`: an open
+bracket (`(`/`[`/`{`) that begins a line (column 0), or 0 if there is none. A safe
+point to (re)start lexing `src` from — head-position state is known-false there, so a
+viewport can be highlighted from here without lexing everything above it (the Brood
+analogue of Emacs `beginning-of-defun`). Caveat: a column-0 bracket inside an
+unterminated multi-line string reads as a form start; top-level Brood forms live at
+column 0 and strings are indented, so this is rare in practice."
+  (let (n (string-length src))
+    (if (<= n 0) 0 (hl--restart-scan src (min pos (dec n))))))
+
+;; ---- the shared span -> runs tiler ------------------------------------------
+;; `face-at` / `ranges-face` / `fontify-runs` are the renderer-agnostic core: a
+;; caller hands in the lexer `spans` plus one `ranges` overlay channel and gets
+;; `[substring face]` runs back, then turns each run into its own output (display
+;; ops, HTML, …). The offset/merge/coalesce math lives here once.
+
+(defn face-at (spans pos)
+  "The face of the `[start end face]` span covering offset `pos`, or nil. Linear
+scan; spans need not be sorted."
   (cond
     (empty? spans) nil
     :else (let ([s e f] (first spans))
-            (if (and (>= pos s) (< pos e)) f (hl--face-at (rest spans) pos)))))
+            (if (and (>= pos s) (< pos e)) f (face-at (rest spans) pos)))))
 
-(defn hl--override-at (overrides pos)
-  "The override face for offset `pos` in the `[pos face]` list `overrides`, or nil."
-  (cond
-    (empty? overrides) nil
-    :else (let ([p f] (first overrides))
-            (if (= p pos) f (hl--override-at (rest overrides) pos)))))
+(defn ranges-face (ranges pos)
+  "Merge the faces of every `[lo hi face]` range in `ranges` covering offset `pos`
+(later ranges win on key conflict via `into`), or nil when none cover it. Region
+highlight, isearch overlays, and bracket-match are all such ranges."
+  (fold
+    (fn (acc [lo hi f])
+      (cond
+        (not (and (>= pos lo) (< pos hi))) acc
+        (nil? acc) f
+        :else (into acc f)))
+    nil
+    ranges))
 
-(defn hl--face (full base spans overrides k)
-  "The face for line char `k` (offset `base+k` in `full`): an override wins, else
-the lexer's span face, else nil (default)."
-  (let (pos (+ base k))
-    (or (hl--override-at overrides pos) (hl--face-at spans pos))))
+(defn fontify-runs--face (base spans ranges k)
+  "The face for run char `k` (offset `base+k`): the lexer span face with every
+covering range face merged on top (ranges win)."
+  (let (pos (+ base k)
+        sf (face-at spans pos)
+        rf (ranges-face ranges pos))
+    (cond
+      (nil? rf) sf
+      (nil? sf) rf
+      :else (into sf rf))))
 
-(defn hl--chunk (full base line spans overrides len i start cur acc)
-  "Tail-recursive run-length coalescer: emit a `[substring face]` chunk whenever
-the per-char face changes."
+(defn fontify-runs--acc (text base spans ranges len i start cur acc)
+  "Tail-recursive run-length coalescer: emit a `[substring face]` run whenever the
+per-char face changes."
   (if (>= i len)
-    (reverse (cons [(substring line start len) cur] acc))
-    (let (f (hl--face full base spans overrides i))
+    (reverse (cons [(substring text start len) cur] acc))
+    (let (f (fontify-runs--face base spans ranges i))
       (if (= f cur)
-        (hl--chunk full base line spans overrides len (inc i) start cur acc)
-        (hl--chunk full
-          base
-          line
-          spans
-          overrides
-          len
-          (inc i)
-          i
-          f
-          (cons [(substring line start i) cur] acc))))))
+        (fontify-runs--acc text base spans ranges len (inc i) start cur acc)
+        (fontify-runs--acc text base spans ranges len (inc i) i f
+          (cons [(substring text start i) cur] acc))))))
+
+(defn fontify-runs (text base spans ranges)
+  "Coalesce `text` (its first char at buffer offset `base`) into a list of
+`[substring face]` runs: each char's face is its `spans` lexer face with every
+covering `ranges` (`[lo hi face]`) face merged on top, and a new run starts wherever
+that face changes. The shared run-length tiler — callers turn runs into display ops
+or HTML; `()` for empty `text`."
+  (let (len (string-length text))
+    (if (= len 0)
+      '()
+      (fontify-runs--acc text base spans ranges len 1 0
+        (fontify-runs--face base spans ranges 0) '()))))
 
 (defn highlight-chunks (full base line overrides)
   "Return `[substring face]` chunks that tile `line` — the visible region starting
 at offset `base` in `full` — coloured by lexing `full`, with `overrides` (a list of
-`[pos face]` in full-coordinates, e.g. bracket-match colours) winning over the
-lexer. Adjacent chars of equal face coalesce into one chunk; feed each to a
-`[:print str face]` op."
-  (let (len (string-length line))
-    (if (= len 0)
-      '()
-      (let (spans (highlight-spans full))
-        (hl--chunk full
-          base
-          line
-          spans
-          overrides
-          len
-          1
-          0
-          (hl--face full base spans overrides 0)
-          '())))))
+`[pos face]` in full-coordinates, e.g. bracket-match colours) merged over the lexer.
+Adjacent chars of equal face coalesce into one chunk; feed each to a `[:print str
+face]` op. A thin shell over `fontify-runs`: each `[pos face]` override is the
+one-char range `[pos (inc pos) face]`."
+  (fontify-runs line base (highlight-spans full)
+    (map (fn ([p f]) [p (inc p) f]) overrides)))
 
 ;; ---- bracket matching -------------------------------------------------------
 

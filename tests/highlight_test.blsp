@@ -27,6 +27,25 @@
   (test "a plain variable reference carries no span"
     (assert= (highlight-spans "x") '())))
 
+(describe "highlight-window — spans shifted into absolute coordinates"
+  (test "base 0 equals highlight-spans"
+    (assert= (highlight-window "(+ 1)" 0) (highlight-spans "(+ 1)")))
+  (test "every span start/end is shifted by base"
+    (assert= (highlight-window "(+ 1)" 10)
+      (list [11 12 hl-face-function] [13 14 hl-face-number]))))
+
+(describe "safe-restart — a column-0 form start to lex from"
+  (test "backs up to the start of the enclosing top-level form"
+    ;; pos 18 sits inside the second form, whose `(` is at offset 11 (after the \n at 10)
+    (assert= (safe-restart "(defn a ()\n(defn b ()" 18) 11))
+  (test "a column-0 open bracket at pos is itself the restart"
+    (assert= (safe-restart "(a)\n(b)" 4) 4))
+  (test "no column-0 form start yields 0"
+    (assert= (safe-restart "   (indented)" 8) 0)
+    (assert= (safe-restart "" 0) 0))
+  (test "an indented form falls back to the column-0 form above it"
+    (assert= (safe-restart "(let (x 1)\n  (f x))" 15) 0)))
+
 (describe "highlight-chunks — tiling a visible line"
   (test "chunks cover the whole line, coalescing default runs"
     (assert= (highlight-chunks "(+ 1)" 0 "(+ 1)" '())
@@ -37,6 +56,39 @@
         [")" nil])))
   (test "an empty line yields no chunks"
     (assert= (highlight-chunks "" 0 "" '()) '())))
+
+(describe "face-at — the span covering an offset"
+  (test "a hit inside a span returns its face"
+    (assert= (face-at (list [1 2 hl-face-function] [3 4 hl-face-number]) 3) hl-face-number))
+  (test "a gap between spans has no face"
+    (assert= (face-at (list [1 2 hl-face-function] [3 4 hl-face-number]) 2) nil))
+  (test "the end offset is exclusive"
+    (assert= (face-at (list [1 4 hl-face-string]) 4) nil)))
+
+(describe "ranges-face — merged overlay faces at an offset"
+  (test "no covering range yields nil"
+    (assert= (ranges-face (list [0 2 {:reverse true}]) 5) nil))
+  (test "overlapping ranges merge, later winning on key conflict"
+    (assert= (ranges-face (list [0 5 {:fg :red :bold true}] [0 5 {:fg :blue}]) 2)
+      {:fg :blue :bold true})))
+
+(describe "fontify-runs — span + range tiling into runs"
+  (test "plain text is one nil-faced run"
+    (assert= (fontify-runs "abc" 0 '() '()) (list ["abc" nil])))
+  (test "adjacent equal-face chars coalesce into one run"
+    (assert= (fontify-runs "abc" 0 (list [0 3 hl-face-string]) '())
+      (list ["abc" hl-face-string])))
+  (test "a covering range splits a run and merges on top of the span face"
+    (assert= (fontify-runs "abc" 0 (list [0 3 {:fg :green}]) (list [1 2 {:reverse true}]))
+      (list ["a" {:fg :green}]
+        ["b" {:fg :green :reverse true}]
+        ["c" {:fg :green}])))
+  (test "base offsets span / range lookups into buffer coordinates"
+    ;; text "bc" begins at buffer offset 1, so the [1 2 …] span faces only "b"
+    (assert= (fontify-runs "bc" 1 (list [1 2 hl-face-number]) '())
+      (list ["b" hl-face-number] ["c" nil])))
+  (test "empty text yields no runs"
+    (assert= (fontify-runs "" 0 '() '()) '())))
 
 (describe "special-form?"
   (test "core forms / macros are special"
