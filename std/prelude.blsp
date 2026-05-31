@@ -406,11 +406,12 @@ reads it exactly like `(sig …)`."
 (defn count--acc (coll n) (if (empty? coll) n (count--acc (rest coll) (%add n 1))))
 (defn count (coll)
   "The number of items in `coll` (a list, vector, string, or map)."
+  ;; `vector?` short-circuits to the O(1) `vector-length` (was an O(n) fold
+  ;; walk); lists/nil go through a dedicated tail loop, not a counting closure.
   (cond
     (string? coll) (string-length coll)
-    (vector? coll) (vector-length coll)            ; O(1) — was an O(n) fold walk
+    (vector? coll) (vector-length coll)
     (map? coll) (count (map-pairs coll))
-    ;; lists/nil: a dedicated tail loop, not a per-element counting closure.
     else (count--acc coll 0)))
 (def length count)
 

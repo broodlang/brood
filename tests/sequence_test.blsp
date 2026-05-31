@@ -35,6 +35,19 @@
   (test "take and drop at index n partition the sequence"
     (let (xs (range 10)) (assert= (append (take 4 xs) (drop 4 xs)) xs))))
 
+(describe "split-at"
+  (test "split-at returns [front back], one pass equivalent to [take drop]"
+    (assert= (split-at 3 (range 6)) [(list 0 1 2) (list 3 4 5)])
+    (assert= (split-at 0 (list 1 2 3)) [nil (list 1 2 3)])
+    (assert= (split-at 99 (list 1 2 3)) [(list 1 2 3) nil])
+    (assert= (split-at 2 nil) [nil nil]))
+  (test "split-at agrees with take/drop at the same index"
+    (let (xs (range 10) p (split-at 4 xs))
+      (assert= (nth p 0) (take 4 xs))
+      (assert= (nth p 1) (drop 4 xs))))
+  (test "split-at accepts a vector and splits its [k v]-free elements"
+    (assert= (split-at 2 [10 20 30 40]) [(list 10 20) (list 30 40)])))
+
 (describe "take-while / drop-while"
   (test "take-while keeps the leading run that satisfies pred"
     (assert= (take-while (fn (x) (< x 4)) (range 10)) (list 0 1 2 3))
