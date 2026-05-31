@@ -3187,6 +3187,16 @@ impl Heap {
         val
     }
 
+    /// The current global-binding **epoch** — bumped on every `def`/`defmacro`
+    /// (and hot-reload) via `runtime.version`. The compiling VM stamps it into a
+    /// `Node::Prim2`'s inline-op guard at compile time and re-validates against it
+    /// at run time, so a primitive baked inline (`+` → inline `i64` add) self-heals
+    /// to the general call path the moment the operator is redefined. Mirrors the
+    /// version `global_lookup_cached` already keys the symbol inline-cache on.
+    pub fn global_epoch(&self) -> u64 {
+        self.runtime.version.load(Ordering::Relaxed)
+    }
+
     pub fn env_define(&mut self, env: EnvId, sym: Symbol, val: Value) {
         if env == EnvId::GLOBAL {
             // Dedup an unchanged hot-reload redefinition (Stage 5): if `sym` is
