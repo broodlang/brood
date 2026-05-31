@@ -657,6 +657,9 @@ fn deregister(pid: u64, reason: Message) {
     // holds REGISTRY while taking NAMES or MONITORS, or this becomes a
     // genuine ordering hazard.
     crate::core::sync::lock(&REGISTRY).remove(&pid);
+    // Balances the `live_process_inc` in `spawn` (see the process-count-aware
+    // `gc_floor`). `deregister` runs exactly once per spawned green process.
+    crate::core::heap::live_process_dec();
     crate::core::sync::lock(&PARENTS).remove(&pid);
     // Drop any registered names that pointed at this pid — Erlang semantics
     // (a name lives only as long as its process). Without this, named-spawn
@@ -854,6 +857,10 @@ pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
 
     let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
     SPAWNED.fetch_add(1, Ordering::SeqCst);
+    // Live green-process gauge: drives the process-count-aware `gc_floor` so a
+    // fan-out of many churny processes doesn't each climb to the single-process
+    // GC ceiling. Balanced by the `live_process_dec` in `deregister`.
+    crate::core::heap::live_process_inc();
     crate::core::sync::lock(&PARENTS).insert(pid, parent);
     let mailbox = Mailbox::new();
     crate::core::sync::lock(&REGISTRY).insert(pid, Arc::clone(&mailbox));
