@@ -378,6 +378,36 @@ region is empty. Recorded for undo (restoring it brings back the mark too)."
           (let (buf (buffer--push-undo buf))
             (assoc buf :rope (rope-delete (get buf :rope) lo hi) :point lo :mark nil)))))))
 
+(defn replace-region (buf start end s)
+  "Replace the characters in `[start, end)` with string `s`, leaving point just after
+the inserted text. The splice primitive: completion-at-point, comment toggling,
+query-replace, re-indentation, and transpose are all this. Composes `delete-char` +
+`insert`, so range clamping and undo behave exactly as those do."
+  (insert (delete-char (goto-char buf start) (- end start)) s))
+
+;; ---- line-wise region ops (the scaffold for comment / indent-region / …) -----
+
+(defn region-line-range (buf)
+  "The inclusive `[startline endline]` line span to act on: the lines the region
+covers when a mark is set, else the current line twice. A region ending exactly at a
+line's start does **not** pull that trailing line in (Emacs's line-wise convention)."
+  (let (rb (buffer-region-bounds buf))
+    (if (nil? rb)
+      (let (l (buffer-current-line buf)) [l l])
+      (let ([lo hi] rb
+            sl (buffer-current-line (goto-char buf lo))
+            elraw (buffer-current-line (goto-char buf hi))
+            hicol (- hi (rope-line->char (buffer-rope buf) elraw)))
+        [sl (if (and (> elraw sl) (= hicol 0)) (dec elraw) elraw)]))))
+
+(defn map-region-lines (buf f)
+  "Fold `(f buf line)` over each line in `buf`'s `region-line-range`, threading the
+buffer through — the scaffold for line-wise commands (comment, indent-region, …).
+`f` must not add or remove lines (line numbers stay valid across the fold). Returns
+the resulting buffer."
+  (let ([sl el] (region-line-range buf))
+    (fold f buf (range sl (inc el)))))
+
 ;; ---- the actor shell (buffer-as-process) ------------------------------------
 ;;
 ;; A buffer process OWNS its buffer (and thus its process-local rope). Clients

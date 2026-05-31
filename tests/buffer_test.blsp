@@ -152,6 +152,33 @@
           [lo hi] (buffer-region-bounds b))
       (assert= (substring (buffer-text b) lo hi) (buffer-region b)))))
 
+(describe "replace-region (the splice primitive)"
+  (test "replaces [start,end) with the string, point after the insert"
+    (let (b (replace-region (make-buffer "hello world") 6 11 "there"))
+      (assert= (buffer-text b) "hello there")
+      (assert= (buffer-point b) 11)))   ; 6 + len("there")
+  (test "an empty replacement deletes the range"
+    (assert= (buffer-text (replace-region (make-buffer "abcdef") 1 4 "")) "aef"))
+  (test "an empty range inserts at the point"
+    (assert= (buffer-text (replace-region (make-buffer "abc") 1 1 "XY")) "aXYbc")))
+
+(describe "line-wise region ops"
+  (test "region-line-range is the current line when there's no mark"
+    (assert= (region-line-range (-> (make-buffer "a\nb\nc") (goto-char 2))) [1 1]))
+  (test "region-line-range spans the region's lines"
+    (assert= (region-line-range (-> (make-buffer "a\nb\nc\nd") (goto-char 0) set-mark (goto-char 4)))
+      [0 1]))   ; covers lines 0–1
+  (test "a region ending at a line start doesn't pull that trailing line in"
+    ;; "a\nb\nc": mark 0, point 4 = start of line 2 → range is lines 0–1, not 0–2
+    (assert= (region-line-range (-> (make-buffer "a\nb\nc") (goto-char 0) set-mark (goto-char 4)))
+      [0 1]))
+  (test "map-region-lines threads the buffer over each line in range"
+    ;; prefix every line of the region with '> '
+    (let (b (-> (make-buffer "a\nb\nc") (goto-char 0) set-mark (goto-char 3))  ; lines 0–1
+          out (map-region-lines b
+                (fn (bb l) (insert (goto-char bb (rope-line->char (buffer-rope bb) l)) "> "))))
+      (assert= (buffer-text out) "> a\n> b\nc"))))
+
 (describe "buffer mark ring"
   (test "push-mark sets the mark and pushes point onto the ring"
     (let (b (-> (make-buffer "abcdef") (goto-char 3) push-mark))
