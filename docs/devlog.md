@@ -11460,3 +11460,22 @@ collection, vs ~18 GB pre-GC) — the stale `no-gc-suite-memory` note is refresh
 *other* deferrals: `def`/`quasiquote`/`binding` bodies, unexpanded forward-ref macros
 (prelude `sleep`→`receive`), movable-LOCAL bodies, PRELUDE closures. ADR-076 says
 don't rush it. (#3 residual: `macroexpand` fixpoint + `reload-defs`.)
+
+## 2026-05-31 — Confirmed the `nest mcp` GC `flush_oob` was a stale binary + added a guardrail
+
+**Investigated `docs/gc-flush-panic-mcp-2026-05-31.md`.** Re-ran all three triggers
+(shuffle of 4800 cells; `doc-search "append to file"`; a 20k-iteration nursery
+map-churn `reduce`) on HEAD `00f06ce` under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` —
+**none panics**. Triggers 1 and 3 are *single-threaded*, the path the report's
+hypothesis B feared the concurrent-`pstep` KI-1 re-confirmation hadn't covered, so
+the generational collector has no rooting/liveness defect there. **Confirmed
+hypothesis A:** the panics came from two `nest mcp` servers pinned to pre-rebuild
+(pre-fix) binaries — the documented KI-1 stale-binary cause, not a live regression.
+
+**Guardrail (the one real gap — operational).** Added `StalenessGuard` to
+`crates/nest/src/mcp.rs`: per request it checks whether the executable's mtime is
+newer than the server's start time and, if so, prints a loud one-shot stderr warning
+to restart `nest mcp` (best-effort — a missing exe/mtime never false-alarms; the
+decision is unit-tested, `main_loop` owns the message so stdout stays a clean
+JSON-RPC stream). A stale MCP server can no longer silently serve a pre-fix runtime
+for hours unnoticed — which is exactly how this was hit. Doc updated to CONFIRMED.

@@ -24,10 +24,12 @@ rooting/liveness defect on these paths**. The original panics therefore came fro
 the two `nest mcp` servers **pinned to pre-17:57 binaries** (started 15:27 / 16:28,
 before the rebuild) — the documented KI-1 stale-binary cause.
 
-**Action that remains (operational, not a code bug):** the `nest mcp` guardrail in
-the note below — warn/refuse when the server's binary mtime is newer than its start
-time — so a stale server can't silently serve a pre-fix runtime for hours. That's
-the only thing that actually let this happen.
+**Action taken (operational, not a code bug): guardrail implemented.** `nest mcp`
+now checks per request whether its executable's mtime is newer than the server's
+start time and, if so, prints a loud one-shot stderr warning to restart (the
+`StalenessGuard` in `crates/nest/src/mcp.rs`, unit-tested). A stale server can no
+longer silently serve a pre-fix runtime for hours unnoticed — which is the only
+thing that actually let this happen.
 
 ## Summary
 
@@ -157,7 +159,8 @@ magnitudes argue for a real stale handle either way.
 ## Note for `nest mcp` operators
 
 Because the panic kills the eval image, a long-running MCP server should be
-restarted after every `make install` / binary rebuild. Worth a guardrail: have
-`nest mcp` compare its own binary's mtime to its start time and log a loud
-"binary updated — restart me" warning, so a stale server can't silently serve a
-pre-fix runtime for hours (which is exactly how this was hit).
+restarted after every `make install` / binary rebuild. **This is now guarded:**
+`nest mcp` compares its executable's mtime to its start time on each request and
+logs a loud one-shot "rebuilt — restart me" warning to stderr (`StalenessGuard`,
+`crates/nest/src/mcp.rs`), so a stale server can't silently serve a pre-fix runtime
+for hours unnoticed (which is exactly how this was hit).
