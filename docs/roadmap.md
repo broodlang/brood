@@ -297,6 +297,57 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
 > candidate to later replace with Brood. This holds for the CLI, the editor
 > commands, keymaps, and UI as the language grows capable enough.
 
+### Type system — what full Elixir parity would take (reference, not a target)
+
+Brood's types follow the **Elixir set-theoretic model** (ADR-023/024/078/082) and
+share its *foundation*: types as sets of values, semantic subtyping, union/
+intersection/negation, function arrows, sequence element types, and occurrence
+typing. But the **goal is deliberately different** — Brood's checker is *advisory*
+(never gates, zero false positives, serves the live editor and hot reload), with
+soundness available **on opt-in** via `(sig! …)` runtime contracts (the strong
+arrow done with a runtime check, not static casts). Elixir's is a *sound, gating,
+whole-program* checker. So this list is a **map of the distance to Elixir**, kept
+for reference — **not a backlog we intend to burn down**. Each item is additive
+and gated on a real consumer (ADR-011); a few we are consciously **not** pursuing.
+
+What we already have on par: set-theoretic core, semantic subtyping, arrows +
+element types (ADR-078), occurrence typing through `if`/`cond`/`match` guards,
+opt-in `(sig …)`/`(sig! …)` annotations + contracts (ADR-082), a sig-gated
+dead-clause lint, and soundness-oracle tests.
+
+Gaps to parity (⬜ = not started; ✋ = deliberately not pursuing):
+
+- ⬜ **Intersection of arrows** — input-dependent return types for multi-clause
+  functions (`(int->int) and (bool->bool)`). The single biggest expressiveness
+  gap; pulls in when overloaded/multi-clause typing has a real consumer.
+- ⬜ **Singleton / literal types** (`:ok` vs `:error`, `5` as a type) — the basis
+  for precise `case`/`match` **exhaustiveness** and redundancy checking.
+- ⬜ **Map / record types** — key ⇒ value with `required`/`optional`, open maps,
+  static `KeyError` elimination. Brood has one flat `map` tag today.
+- ⬜ **Tuple / positional product types** (Brood has no tuple kind; vectors carry
+  a single element type, not positional types).
+- ⬜ **Type variables / parametric polymorphism** for user-defined generics
+  (the curated HOFs use per-rule result types, not type variables).
+- ⬜ **Full type inference / reconstruction** — Brood infers only one-step
+  straight-line bodies + guard narrowing; Elixir does guard-driven + local
+  inference across a function.
+- ⬜ **Narrowing through non-variable expressions** (`is_integer(p.age)` refining
+  `p`), and richer `(sig …)` type-exprs (rest/optional params, nested generics).
+- ✋ **Pervasive static soundness / gating** — Elixir rejects ill-typed programs;
+  Brood **won't** (it would fight hot reload + the never-gate principle). Brood's
+  soundness is opt-in and runtime-backed (`sig!`), not static.
+- ✋ **Wiring `dynamic()` / full gradual consistency into the checker** — kept as
+  a foundation (`GradualTy`); only wire it in if a real gradual-*assignment*
+  consumer appears. The advisory disjointness pass doesn't need it.
+- ⬜ **Fast-follows on what's shipped:** a `BROOD_CONTRACTS=1` switch to enforce
+  *every* `(sig …)` at run time; element-level `(list E)` / `(vector E)` contract
+  checks; broadening the dead-clause lint beyond sig-typed params (needs the
+  surface-vs-generated scoping noted in `docs/type-annotations.md`).
+
+The deeper rationale (why advisory + editor-serving rather than Elixir's sound
+gate) is in [`research/set-theoretic-types-in-brood.md`](research/set-theoretic-types-in-brood.md);
+the as-built design in [`types.md`](types.md) + [`type-annotations.md`](type-annotations.md).
+
 ### Deferred ergonomic & tooling items (see [`deferred.md`](deferred.md))
 
 Each entry has a design sketch, the trigger that should pull it back in, and
