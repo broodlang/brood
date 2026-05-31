@@ -379,10 +379,16 @@ the workaround available today.
   memory, GC count, monitors) instead of bare pids — the observer's per-process
   view; plus new `process-info` (one process by numeric id) and `node`
   (runtime-wide stats: workers, peak concurrency, spawned, live count,
-  memory, peers) tools. All pure Brood in `std/mcp.blsp` (ADR-006); catalogue is
-  sixteen tools. ⬜ Still open: a *streaming*/progress-notification tier so an
-  agent sees long-running tool output incrementally (the dispatcher is
-  synchronous today), and exposing GC/process *traces* (not just snapshots).
+  memory, peers) tools. Plus the **project-scoped editing pair** `write`
+  (create/overwrite a file) and `edit` (exact-string replace) — both sandboxed
+  under `*project-root*` (absolute / `~` / `..` paths refused, lexically) and
+  reloading+checking any `.blsp` they touch, so an agent writes code *through*
+  nest mcp (the live image stays in sync with disk) rather than the raw
+  filesystem. All pure Brood in `std/mcp.blsp` (ADR-006); catalogue is eighteen
+  tools. ⬜ Still open: a *streaming*/progress-notification tier so an agent sees
+  long-running tool output incrementally (the dispatcher is synchronous today);
+  exposing GC/process *traces* (not just snapshots); and tightening the write
+  sandbox against symlink escapes (a `canonicalize` primitive) if it matters.
 - ✅ **MCP `nest mcp` worker-panic isolation** — landed 2026-05-29. A Rust
   panic in any tool-call code path is caught at the handler boundary
   (`call_tool`'s `panic::catch_unwind`), projected as a structured JSON-RPC

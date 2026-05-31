@@ -89,6 +89,92 @@ defines (the silent flat-namespace collision). On a load error:
       (catch e
         {:ok false :error (mcp--error-shape e)}))))
 
+;; ---- the project sandbox for write/edit -----------------------------------
+;; Every file the MCP server writes goes through `mcp--project-path`, which
+;; refuses to resolve anything outside `*project-root*`. That's the whole
+;; guarantee the `write`/`edit` tools rest on: an agent driving nest mcp can only
+;; touch files **inside the project it serves**, never the wider filesystem.
+
+(defn mcp--safe-rel? (rel)
+  "Whether `rel` is a safe project-relative path: a non-empty string, not
+absolute (`/…`) or home-anchored (`~…`), with no `..` segment that could climb
+out of the project. Purely lexical — symlinks inside the tree aren't chased (an
+acceptable bar for a project-scoped tool)."
+  (and (string? rel)
+    (> (string-length rel) 0)
+    (not (starts-with? rel "/"))
+    (not (starts-with? rel "~"))
+    (not (includes? (string-split rel "/") ".."))))
+
+(defn mcp--project-path (rel)
+  "Resolve project-relative `rel` to an absolute path under `*project-root*`, or
+`throw` if it would escape the project (an absolute/`~`/`..` path, or no project
+root at all). The sandbox boundary the `write`/`edit` tools share."
+  (when (nil? *project-root*)
+    (throw "no project root — nest mcp must run inside a Brood project"))
+  (when (not (mcp--safe-rel? rel))
+    (throw (str "path must be project-relative — no leading '/' or '~', no '..': " (pr-str rel))))
+  (path-join *project-root* rel))
+
+(defn mcp-write-tool (args)
+  "`write` — create or overwrite a project file through the live image. `:path`
+is **project-relative** (sandboxed under the project root — an absolute path,
+`~`, or any `..` segment is rejected); `:content` is the full new file contents.
+Missing parent directories are created. A `.blsp` file is then loaded into the
+session and checked, so the result carries `:diagnostics` and `:shadows` exactly
+like the `load` tool — closing the edit→load→check loop in one call; any other
+file is written verbatim. Returns `{:ok true :path rel :diagnostics [...]
+:shadows [...]}` or `{:ok false :error ...}`. This is how an agent writes code —
+through nest mcp, never the raw filesystem."
+  (let (rel (get args :path)
+        content (get args :content))
+    (when (not (string? content))
+      (throw "write: :content must be a string"))
+    (try
+      (let (abs (mcp--project-path rel)
+            _dir (make-dir (parent-dir abs))
+            _w (spit abs content))
+        (if (ends-with? rel ".blsp")
+          (assoc (mcp-load-tool {:file abs}) :path rel)
+          {:ok true :path rel}))
+      (catch e
+        {:ok false :error (mcp--error-shape e)}))))
+
+(defn mcp-edit-tool (args)
+  "`edit` — exact-string replacement in a project file through the live image.
+`:path` is **project-relative** (the same sandbox as `write`); `:old` must occur
+**exactly once** in the file (so the edit is unambiguous) and is replaced by
+`:new`. A `.blsp` file is reloaded and checked afterwards (result carries
+`:diagnostics`/`:shadows`, like `load`). Returns `{:ok true :path rel ...}`, or
+`{:ok false :error msg}` when the file is missing, or `:old` is absent or not
+unique. The editor's exact-replace Edit, routed through nest mcp so the session
+image stays in sync with disk."
+  (let (rel (get args :path)
+        old (get args :old)
+        new (get args :new))
+    (when (not (string? old))
+      (throw "edit: :old must be a string"))
+    (when (not (string? new))
+      (throw "edit: :new must be a string"))
+    (when (= old "")
+      (throw "edit: :old must be non-empty"))
+    (try
+      (let (abs (mcp--project-path rel))
+        (if (not (file-exists? abs))
+          {:ok false :error (str "edit: no such file: " rel)}
+          (let (text (slurp abs)
+                hits (- (count (string-split text old)) 1))
+            (cond
+              (= hits 0) {:ok false :error (str "edit: :old not found in " rel)}
+              (> hits 1) {:ok false
+                          :error (str "edit: :old occurs " hits " times in " rel " — make it unique")}
+              :else (let (_w (spit abs (replace text old new)))
+                      (if (ends-with? rel ".blsp")
+                        (assoc (mcp-load-tool {:file abs}) :path rel)
+                        {:ok true :path rel}))))))
+      (catch e
+        {:ok false :error (mcp--error-shape e)}))))
+
 (defn mcp-lookup-tool (args)
   "`lookup` — describe a global name. Returns `{:name :arglist :doc
 :source-location}` (arglist a list of param symbols incl. `&optional`/`&`
@@ -301,14 +387,17 @@ its own list that conses additional entries onto this one — `def` rebinds
 globals (ADR-013), so the dispatcher sees the project's version on its next
 fetch.
 
-Sixteen tools work today: the eight v0 tools, `callers` (cross-file
+Eighteen tools work today: the eight v0 tools, `callers` (cross-file
 find-references), the three discovery tools `apropos` / `all-globals` /
 `doc-search` (search the flat namespace by name or docstring rather than
 looking up a name you already know), `bench` (time an expression in the
-live image), and the runtime-introspection pair `process-info` (one
-process's stats by id) and `node` (runtime-wide stats) — together with
-the now-enriched `processes`, these give an agent the same live view the
-observer (`std/observer.blsp`) shows in the terminal."
+live image), the runtime-introspection pair `process-info` (one process's
+stats by id) and `node` (runtime-wide stats) — which, with the now-enriched
+`processes`, give an agent the same live view the observer
+(`std/observer.blsp`) shows — and the project-scoped editing pair `write`
+(create/overwrite a file) and `edit` (exact-string replace), both sandboxed
+under `*project-root*` so an agent writes code *through* nest mcp rather than
+the raw filesystem."
   (list {:name "eval"
          :description "Evaluate a Brood expression in the session's global environment. State persists across calls (hot reload — `def` mutates the runtime image, ADR-013)."
          :schema {:type "object"
@@ -321,6 +410,21 @@ observer (`std/observer.blsp`) shows in the terminal."
               :properties {:file {:type "string" :description "Path to a .blsp file"}}
               :required ["file"]}
      :handler mcp-load-tool}
+    {:name "write"
+     :description "Create or overwrite a project file (the way to write code through nest mcp, not the raw filesystem). :path is project-relative and sandboxed under the project root — absolute paths, '~', and '..' are rejected. A .blsp file is loaded into the session and checked, so the result carries :diagnostics + :shadows like `load`. Returns {:ok true :path :diagnostics :shadows} or {:ok false :error}."
+     :schema {:type "object"
+              :properties {:path {:type "string" :description "Project-relative file path (no leading '/' or '~', no '..')"}
+                           :content {:type "string" :description "Full new file contents"}}
+              :required ["path" "content"]}
+     :handler mcp-write-tool}
+    {:name "edit"
+     :description "Exact-string replacement in a project file (sandboxed like `write`). :old must occur exactly once in the file and is replaced by :new. A .blsp file is reloaded and checked (result carries :diagnostics/:shadows). Returns {:ok true :path ...} or {:ok false :error}."
+     :schema {:type "object"
+              :properties {:path {:type "string" :description "Project-relative file path (no leading '/' or '~', no '..')"}
+                           :old {:type "string" :description "Exact text to replace — must be unique in the file"}
+                           :new {:type "string" :description "Replacement text"}}
+              :required ["path" "old" "new"]}
+     :handler mcp-edit-tool}
     {:name "lookup"
      :description "Look up a global name: returns its arglist, docstring, and source location (file/line/col)."
      :schema {:type "object"
