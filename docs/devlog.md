@@ -11084,3 +11084,48 @@ the axes that matter most:
 
 **Decision.** ADR-081 records both the hardening and the policy that a
 network-facing node *requires* an authenticated-encrypted channel once TLS lands.
+
+---
+
+## 2026-05-31 — Type system: review vs the Elixir paper, soundness oracles, opt-in `(sig …)`/`(sig! …)` contracts
+
+**Goal.** "Critically review the type system" against Castagna/Duboc/Valim, *The
+Design Principles of the Elixir Type System* (notes saved to `docs/research/`;
+applied Brood mapping in `docs/research/set-theoretic-types-in-brood.md`). Verdict:
+Brood faithfully has the set-theoretic *foundation*, but is deliberately an
+**advisory disjointness linter**, not a *sound gradual* checker — a different goal
+(greenfield, editor-serving, hot-reload, never-gate) from Elixir's retrofit sound
+gate. Most of "the gap" is the soundness/structural layer we intentionally defer.
+
+**Bugs fixed.** `Ty::negate` was unsound on a *refined* type — it dropped the
+refined tag, returning a *subset* of the true complement (could manufacture a
+false `is_disjoint`); now a sound over-approximation (latent only — the checker
+negates flat `tested_by`/`%eq` types). `Display` hid `nil` in sequence unions
+(`nil | list<E>` rendered as `list<E>`); fixed.
+
+**Soundness oracles** (the `soundness_oracle` test module). Two directly-testable
+facets for a never-gating checker: (I) every `expr_ty` is a *superset* of the
+runtime value — the checker may widen, never under-approximate (verified teeth:
+dropping the `| nil` widening makes it fail); (II) a program that evaluates
+cleanly draws no disjointness warning (guards the narrowing path).
+
+**Curated sigs** for `even?/odd?/abs/not/zero?/count/length` — more provable
+misuse caught (`(even? "x")`, `(+ 1 (not x))`), zero new false positives across
+`std/` + `tests/`. (Primitive sigs were already tight — the remaining `any`s are
+genuinely permissive.)
+
+**`(sig …)` / `(sig! …)`** (ADR-082). Opt-in type annotations. `(sig name (… ->
+…))` is a runtime no-op the checker reads *first* (closing the multi-clause /
+branchy gap `infer_sig` can't reach); `(sig! …)` *also* installs a runtime
+contract — a same-arity wrapper checks args + result and throws — making the fn a
+**strong arrow**, so the checker's trust is sound. All policy in Brood
+(`type-matches?` + `contract--check-args` + the macros in `prelude.blsp`); parser
+in `types/check/annot.rs`. Spelled `sig` (not `::`, which lexes as a keyword).
+`tests/contract_test.blsp` (6 cases) + the new checker unit tests; 207 lib + 1144
+in-language tests green.
+
+**Deferred.** Dead-clause (`match`/`cond`) warnings — a naive "contradictory
+branch context → dead" lint fires as noise on compiler-generated guard plumbing
+(destructure/match lowering) and intentional non-match tests; needs user-surface
+scoping. Also (ADR-011): a `BROOD_CONTRACTS=1` enforce-every-`sig` switch;
+element-level `(list E)` runtime checks.

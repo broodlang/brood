@@ -107,7 +107,7 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   intersections for overloaded fns; user-generic type variables.
   Additive; gated on real need (ADR-011). Advisory throughout — never gates, never
   inhibits the dynamic language; not the TypeScript route.
-- ✅ **Opt-in type annotations + runtime contracts** (ADR-081). `(sig name (… ->
+- ✅ **Opt-in type annotations + runtime contracts** (ADR-082). `(sig name (… ->
   …))` declares a signature the advisory checker reads first — closing the
   multi-clause/branchy gap inference can't reach; `(sig! …)` *also* enforces it at
   run time (a same-arity wrapper checks args + result and throws — the opt-in
