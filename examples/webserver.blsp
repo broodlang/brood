@@ -48,10 +48,15 @@
                    (get (get req :headers) "user-agent" "(none)")
                    "\n")))
 
+;; The application: a router (a closure capturing a map of handler closures),
+;; bound at top level. `def` promotes it into the shared code region — sound now
+;; that `promote` back-patches cyclic/nested closure capture (closure-capturing-
+;; closure no longer overflows).
+(def app (router {"/" home "/hello" hello "/echo" echo}))
+
 (println (str "Brood web server listening on http://localhost:" *port*))
 (println "Routes: /  /hello  /echo   (Ctrl-C to stop)")
 
 ;; `serve` blocks here, accepting connections and dispatching each request through
-;; the router. The router is passed inline (kept a local value) rather than bound
-;; with `def`, which would promote the closure to the shared code region.
-(serve *port* (router {"/" home "/hello" hello "/echo" echo}))
+;; `app`. Each connection is handled in its own spawned process.
+(serve *port* app)

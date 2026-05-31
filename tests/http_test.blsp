@@ -69,6 +69,32 @@
             (is (string-contains? resp "200 OK"))
             (is (string-contains? resp "<h1>brood</h1>"))))))))
 
+(describe "http: concurrent connections each get their own process"
+  (test "many simultaneous GETs all complete (spawn-per-connection)"
+    (let (me (self))
+      ;; A handler that echoes the request path, so each concurrent client can
+      ;; confirm it got *its own* response and not another connection's.
+      (spawn (do
+               (let (ls (http-listen 0))
+                 (send me [:port (tcp-local-port ls)])
+                 (serve-loop ls (fn (req) (text-response (get req :path)))))))
+      (let (port (receive ([:port p] p) (after 5000 :timeout))
+            n 4)
+        ;; Fire N clients at once, each in its own process; the server must serve
+        ;; them in N separate handler processes (the connections overlap in time).
+        (dotimes (i n)
+          (spawn (do
+                   (let (path (str "/" i)
+                         resp (http-get (str "http://127.0.0.1:" port path)))
+                     (send me [:done (get resp :status) (get resp :body)])))))
+        ;; Fan-in: every client reports a 200 whose body is its own requested path.
+        (dotimes (_ n)
+          (receive
+            ([:done status body]
+              (assert= status 200)
+              (is (string-contains? body "/")))
+            (after 5000 (is false))))))))
+
 (describe "http: request building (http/http--request-headers)"
   (test "adds Host / User-Agent / Connection, and Content-Length when there's a body"
     (let (h (http/http--request-headers {:host "localhost"} "abc" nil))
