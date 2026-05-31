@@ -4848,8 +4848,20 @@ compile-time `Pos` from `Heap::form_pos`; `exec_node` tags errors innermost-wins
 the tree-walker), closing the last divergence — the full suite is now green under
 both engines. **Stage 3 cutover done (2026-05-31):** `vm_enabled` defaults the VM
 *on*; `BROOD_VM=0` is the tree-walker escape hatch (kept ≥1 release); the transitional
-`vm-default` cargo feature was removed. Still recommended: a differential test mode as
-a standing CI guard, and widening VM coverage (variadic / patterns / prelude — perf).
+`vm-default` cargo feature was removed. Also done (2026-05-31): the **differential
+test mode** (`crates/lisp/tests/differential.rs` + `make test-both` — a corpus run
+through both engines, asserting identical results; the standing CI guard); **variadic
+arms** (`&rest` + nil-default `&optional`, with a full arity table so selection
+reproduces `select_arm`); and **prelude-closure compilation** (stdlib `map`/`fold`/
+`sort` etc. now VM-run — `sort_brood` ~1.0×→1.77×). The last required closing a latent
+hole — `compile_node` defers a call whose head is an **unexpanded (forward-referenced)
+macro** (via `macros::macro_head_id`), since the VM runs only expanded forms.
+**Still open (pure perf, deferrals already correct):** pattern/`match*` and
+real-default `&optional` coverage; bytecode lowering is premature (no profiling shows
+node-dispatch dominating); retiring the tree-walker is infeasible until the VM is a
+complete engine (it depends on the tree-walker for every deferred form). Unrelated:
+the GC **RUNTIME-region collector** (hot-reload code churn) stays deferred (ADR-072
+finished the LOCAL-heap GC; live-editing.md "Stage 5 later half").
 
 ## ADR-077 — Mouse `:drag` and `:release`, at cell granularity
 
