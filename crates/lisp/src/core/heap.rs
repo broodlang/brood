@@ -491,6 +491,12 @@ impl std::hash::Hasher for SymbolHasher {
     fn write_u32(&mut self, i: u32) {
         self.0 = (self.0 ^ i as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
     }
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        // The hot path for a `VmCacheKey` (its handle `.0`): same odd-multiply
+        // bijection as `write_u32`, so distinct handles never collide.
+        self.0 = (self.0 ^ i).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
     fn write(&mut self, bytes: &[u8]) {
         // Fallback for any non-`u32` key (none on the hot path); kept correct.
         for &b in bytes {
@@ -501,6 +507,12 @@ impl std::hash::Hasher for SymbolHasher {
 
 /// A `HashMap` keyed by interned `Symbol`s, using the fast [`SymbolHasher`].
 pub type SymbolMap<V> = HashMap<Symbol, V, std::hash::BuildHasherDefault<SymbolHasher>>;
+
+/// A `HashMap` keyed by [`VmCacheKey`], using the fast [`SymbolHasher`] (its
+/// manual `Hash` writes a single `u64`, so it takes the `write_u64` fast path).
+/// The compiling VM hits this on **every closure call** (`compiled_for`), so the
+/// stock `SipHash` was pure per-call overhead (perf #2).
+pub type VmCacheMap<V> = HashMap<VmCacheKey, V, std::hash::BuildHasherDefault<SymbolHasher>>;
 
 pub struct RuntimeCode {
     code: CodeSlabs,
@@ -777,7 +789,7 @@ pub struct Heap {
     /// entry is simply never looked up again. Empty unless `BROOD_VM` is on. `Arc`
     /// so the trampoline can hold the compiled body across a call without borrowing
     /// the cache.
-    vm_cache: RefCell<HashMap<VmCacheKey, Option<Arc<crate::eval::compile::CompiledClosure>>>>,
+    vm_cache: RefCell<VmCacheMap<Option<Arc<crate::eval::compile::CompiledClosure>>>>,
 }
 
 impl Default for Heap {
@@ -859,13 +871,28 @@ pub enum EnvRoot {
 /// handle spaces are namespaced apart (ADR-076 §2c): a top-level closure is keyed
 /// by its own RUNTIME [`ClosureId`] handle; a local-capturing closure is keyed by
 /// the immovable **body-code handle** its (recycled LOCAL) `ClosureId` points at.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum VmCacheKey {
     /// A top-level / promoted RUNTIME closure, keyed by its closure-handle `.0`.
     Runtime(u64),
     /// A local-capturing closure, keyed by the `.0` of its first body form's
     /// (RUNTIME-stable) handle — the closure handle itself is unstable across GC.
     LocalBody(u64),
+}
+
+impl std::hash::Hash for VmCacheKey {
+    /// Hash to a single `u64` (variant bit folded into the handle), so the fast
+    /// [`SymbolHasher::write_u64`] path runs instead of the derived multi-write.
+    /// The two handle spaces are already disjoint by construction, but the variant
+    /// fold keeps the key total even if that ever changed.
+    #[inline]
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        let (tag, v) = match *self {
+            VmCacheKey::Runtime(x) => (0u64, x),
+            VmCacheKey::LocalBody(x) => (1u64, x),
+        };
+        h.write_u64(v.rotate_left(1) ^ tag);
+    }
 }
 
 impl Heap {
@@ -904,7 +931,7 @@ impl Heap {
             gc_copied: 0,
             gc_reclaimed: 0,
             gc_trace: gc_trace_default(),
-            vm_cache: RefCell::new(HashMap::new()),
+            vm_cache: RefCell::new(VmCacheMap::default()),
         }
     }
 
@@ -941,7 +968,7 @@ impl Heap {
             gc_copied: 0,
             gc_reclaimed: 0,
             gc_trace: gc_trace_default(),
-            vm_cache: RefCell::new(HashMap::new()),
+            vm_cache: RefCell::new(VmCacheMap::default()),
         }
     }
 
