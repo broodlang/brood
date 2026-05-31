@@ -85,6 +85,10 @@ nil."
 (defn buffer-mark (buf) "The mark (a char index), or nil if unset." (get buf :mark))
 (defn buffer-name (buf) "The buffer's name." (get buf :name))
 (defn buffer-file (buf) "The buffer's backing file path, or nil." (get buf :file))
+(defn read-only? (buf)
+  "True if `buf` is marked read-only — its mutators (`insert`, `delete-char`,
+`delete-backward-char`, `delete-region`, `replace-region`) refuse to change it.
+Unset/false on a fresh buffer (`make-buffer` builds freely)." (= (get buf :read-only) true))
 (defn buffer-length (buf) "The number of characters in the buffer." (rope-length (get buf :rope)))
 (defn buffer-line-count (buf)
   "The number of lines in the buffer."
@@ -331,8 +335,23 @@ edit clears `:redo`, so redo is only available immediately after `undo`.)"
 ;; editor app needs it). `delete-region` clears it by definition. Each op records
 ;; an undo snapshot (see above) only when it actually changes the text.
 
+(defn set-read-only (buf flag)
+  "Mark `buf` read-only (`flag` truthy) or writable. While read-only, the text
+mutators throw `\"buffer is read-only\"` (Emacs's `buffer-read-only` signal) — point
+and mark still move, so the buffer stays navigable. Build the contents *before*
+flipping this on (construction never checks the flag), the way a generated report
+or `special-mode` buffer does." (assoc buf :read-only (if flag true false)))
+
+(defn buffer--barf-if-read-only (buf)
+  "Throw if `buf` is read-only — the guard every text mutator runs first, so the
+read-only contract lives in the model (no consumer has to remember to check). Returns
+`buf` unchanged when writable, for use as a guard expression."
+  (if (read-only? buf) (error "buffer is read-only") buf))
+
 (defn insert (buf s)
-  "Insert string `s` at point; point advances past it. Recorded for undo."
+  "Insert string `s` at point; point advances past it. Recorded for undo. Throws if
+`buf` is read-only."
+  (buffer--barf-if-read-only buf)
   (if (= (string-length s) 0)
     buf
     (let (p (get buf :point)
@@ -347,7 +366,8 @@ edit clears `:redo`, so redo is only available immediately after `undo`.)"
 
 (defn delete-char (buf &optional (n 1))
   "Delete `n` characters *after* point; point stays put. Recorded for undo (a
-no-op at end-of-buffer is not recorded)."
+no-op at end-of-buffer is not recorded). Throws if `buf` is read-only."
+  (buffer--barf-if-read-only buf)
   (let (p (get buf :point)
         end (buffer--clamp p (buffer-length buf) (+ p n)))
     (if (= p end)
@@ -357,7 +377,8 @@ no-op at end-of-buffer is not recorded)."
 
 (defn delete-backward-char (buf &optional (n 1))
   "Delete `n` characters *before* point (backspace); point moves back with it.
-Recorded for undo (a no-op at point 0 is not recorded)."
+Recorded for undo (a no-op at point 0 is not recorded). Throws if `buf` is read-only."
+  (buffer--barf-if-read-only buf)
   (let (p (get buf :point)
         start (buffer--clamp 0 p (- p n)))
     (if (= p start)
@@ -368,7 +389,9 @@ Recorded for undo (a no-op at point 0 is not recorded)."
 (defn delete-region (buf)
   "Delete the text between point and mark; point moves to the region start and
 the mark is cleared. A no-op (returns `buf`, unrecorded) if no mark is set or the
-region is empty. Recorded for undo (restoring it brings back the mark too)."
+region is empty. Recorded for undo (restoring it brings back the mark too). Throws if
+`buf` is read-only."
+  (buffer--barf-if-read-only buf)
   (let (b (buffer-region-bounds buf))
     (if (nil? b)
       buf

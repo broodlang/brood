@@ -123,6 +123,30 @@
     (assert= (buffer-text (delete-char (end-of-buffer (make-buffer "ab")))) "ab")
     (assert= (buffer-text (delete-backward-char (make-buffer "ab"))) "ab")))
 
+(describe "read-only buffers"
+  (test "fresh buffers are writable; set-read-only / read-only? round-trip"
+    (let (b (make-buffer "hi"))
+      (refute (read-only? b))
+      (is (read-only? (set-read-only b true)))
+      (refute (read-only? (set-read-only (set-read-only b true) false)))))
+  (test "every text mutator refuses a read-only buffer"
+    (let (b (set-read-only (goto-char (set-mark (make-buffer "hello")) 5) true))
+      ;; mark at 0, point at 5 → a non-empty region for delete-region
+      (assert-error (insert b "x"))
+      (assert-error (delete-char b))
+      (assert-error (delete-backward-char b))
+      (assert-error (delete-region b))
+      (assert-error (replace-region b 0 1 "X"))))
+  (test "construction and movement still work while read-only"
+    (let (b (set-read-only (make-buffer "hello world") true))
+      ;; make-buffer built the text before the flag; navigation never checks it
+      (assert= (buffer-text b) "hello world")
+      (assert= (buffer-point (forward-word b)) 5)
+      (assert= (buffer-point (end-of-buffer b)) 11)))
+  (test "clearing read-only restores editing"
+    (let (b (set-read-only (make-buffer "ab") true))
+      (assert= (buffer-text (insert (set-read-only b false) "!")) "!ab"))))
+
 (describe "buffer mark & region"
   (test "set-mark / region / clear-mark"
     (let (b (-> (make-buffer "abcdef") (goto-char 1) set-mark (goto-char 4)))
