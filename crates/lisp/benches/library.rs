@@ -157,6 +157,30 @@ mod maps {
             format!("(count (frequencies (map (fn (x) (rem x 7)) (range {n}))))"),
         );
     }
+
+    // --- transient map build (docs/transients.md) ---------------------------
+    // `build_via_into` is the end-to-end prelude path (`into {}` → `%map-into`),
+    // now routed through the in-place transient builder; `build_transient` hits
+    // the `%map-into` kernel hook directly. Both build an n-entry map from a
+    // freshly-mapped `[k v]` sequence.
+
+    /// Transient build: kernel `%map-into` mutates build-local trie nodes.
+    #[divan::bench(args = [200, 1_000, 10_000])]
+    fn build_transient(bencher: divan::Bencher, n: usize) {
+        bench_prog(
+            bencher,
+            format!("(count (%map-into {{}} (map (fn (i) [i (* i i)]) (range {n}))))"),
+        );
+    }
+
+    /// End-to-end prelude `into {}` (now routed through the transient builder).
+    #[divan::bench(args = [200, 1_000, 10_000])]
+    fn build_via_into(bencher: divan::Bencher, n: usize) {
+        bench_prog(
+            bencher,
+            format!("(count (into {{}} (map (fn (i) [i (* i i)]) (range {n}))))"),
+        );
+    }
 }
 
 /// Pattern matching — the Brood `match` compiler emits nested `if`/`let`; this
