@@ -10614,3 +10614,44 @@ prelude-heavy code got *zero* VM speedup.
 (`tests/differential.rs`) gained forward-macro-ref cases + a named regression test
 `vm_defers_unexpanded_forward_referenced_macro`. The harness + both-engines gate are
 what caught the regression in the first place.
+
+---
+
+## 2026-05-31 — RUNTIME collector: automatic safepoint trigger (2b-auto)
+
+**Goal.** Solidify what we have. Without the (deferred, multi-process) 2c
+collector, is memory a problem? No — *normal programs don't leak* (each global is
+`def`'d once; the RUNTIME region grows only on **redefinition**, and all data lives
+in the fully-GC'd LOCAL heap). The one accumulating case is sustained hot-reload
+(REPL / editor save-reload, ~1 KB/real-redef). 2b's `(runtime-collect)` reclaims it,
+but was opt-in. This makes it **automatic** for the single-process case so no manual
+call is needed.
+
+**Built.** The eval safepoint now also runs a RUNTIME compaction when churn crosses
+a threshold — `Heap::maybe_runtime_collect`, the shared-code analog of the LOCAL
+`collect`:
+- **Safety = the LOCAL safepoint's, reused.** `runtime_collect` only *rewrites*
+  RUNTIME handles (never moves LOCAL data), and the rooted set it walks — `globals`
+  + `roots`/`env_roots`/`dynamics` + both LOCAL generations — is exactly the ADR-061
+  invariant the LOCAL safepoint already depends on (so the VM's frame slots on
+  `roots` are covered). Refactored to `runtime_collect_with(extra_roots, extra_envs)`
+  so the safepoint also rewrites the live `expr`/`env` (the one pair not yet on the
+  operand stack), mirroring how the LOCAL collect relocates them. Same
+  `!macro_block_active()` gate.
+- **Adaptive trigger** `rt_gc_threshold`: closure-count floor `rt_gc_floor()` —
+  4096 default (~4 MB of churn; normal programs define far fewer globals so they
+  *never* auto-collect), 256 under `BROOD_GC_STRESS` (nonzero like `major_floor`, so
+  stress doesn't recompact the whole region every safepoint), `BROOD_RT_GC_FLOOR`
+  override. Reset to `max(floor, 2*live)` after a real collect; a **shared** runtime
+  (can't collect without 2c) backs off to `2*count` → O(log) attempts as it grows.
+- `(runtime-collect)` is now the **force** form (rarely needed); docs updated.
+
+**Verified.** New `auto_safepoint_collect_bounds_runtime_region`: 6000 single-process
+redefs leave the region at **~1907 closures (≪ 6000)** — bounded automatically, `f`
+still correct. Full `brood` suite **301/301**; the stress+verify gate
+(`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`) green on gc/basic/differential/runtime_collector
+(**91/91**) — the auto-collect fires repeatedly under the tripwire+verifier with no
+use-after-collect. The three manual-path tests opt out via `set_rt_auto_collect(false)`
+(else stress's low floor compacts the churn they measure). `docs/runtime-collector-exploration.md`
+§2b-auto. **The RUNTIME leak is now bounded automatically for every single-process
+session; only the multi-process server case (2c) remains deferred.**

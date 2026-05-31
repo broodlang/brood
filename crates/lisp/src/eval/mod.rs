@@ -239,6 +239,24 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
             expr = roots[0];
             env = envs[0];
         }
+        // RUNTIME-region safepoint — auto-compact the shared code region once
+        // hot-reload churn crosses the threshold (the shared-code analog of the
+        // LOCAL collect above). Same `macro_block_active` gate and same `expr`/
+        // `env` rewrite contract: `maybe_runtime_collect` only rewrites RUNTIME
+        // handles (never moves LOCAL data), and the rooted set it touches —
+        // globals + `roots`/`env_roots`/`dynamics` + both LOCAL gens — is exactly
+        // the ADR-061 invariant the LOCAL safepoint already relies on (so the VM's
+        // frame slots on `roots` are covered), plus the live `expr`/`env` passed
+        // here. Runs only when this heap uniquely owns the runtime (single-process
+        // / quiescent); a shared runtime backs off. Cost when not due: a `boxcar`
+        // length read + a compare.
+        if !crate::process::macro_block_active() && heap.rt_gc_due() {
+            let mut roots = [expr];
+            let mut envs = [env];
+            heap.maybe_runtime_collect(&mut roots, &mut envs);
+            expr = roots[0];
+            env = envs[0];
+        }
         // Memory safety backstop (ADR-043): if total allocation has crossed the
         // soft ceiling, fail *here* with a clean, catchable error rather than
         // running on to the hard allocator limit (which aborts the whole
