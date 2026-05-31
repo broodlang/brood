@@ -18,8 +18,13 @@
 > **Variadic arms (done):** `&rest` and nil-default `&optional` arms VM-compile
 > (real-default optionals still defer); selection uses a full arity table
 > (`ArmSpec`) so it reproduces `select_arm` exactly even when a variadic arm's range
-> overlaps a fixed arm. **Still worth doing (pure perf):** patterns / `match*` and
-> prelude (PRELUDE-region) closures. See
+> overlaps a fixed arm. **Prelude closures (done):** PRELUDE-region (stdlib) closures
+> VM-compile now too (immovable + immutable), so `map`/`filter`/`reduce`/`fold`/`sort`
+> stop deferring — **`sort_brood` ~1.0×→1.77×, `cons_build` ~1.15×→1.70×**. This
+> required closing a latent hole: `compile_node` must **defer a call whose head is an
+> unexpanded (forward-referenced) macro** (via `macros::macro_head_id`), or it
+> compiles the macro's argument syntax as calls (the `sleep`→`receive` bug). **Still
+> worth doing (pure perf):** patterns / `match*`. See
 > [As-built](#as-built-stage-01-2026-05-30) for the numbers and the §7 plan.
 
 This is the project's "big lever" for performance: closing the tree-walker's

@@ -10579,3 +10579,38 @@ tags across per-process heaps); `distribution` 22/22 (incl.
 (scheduler exit-reason construction). Deliberately **not** done (flagged as churn —
 mostly one-off-per-site or out of the chosen scope): the display-protocol op/face
 keywords in `builtins.rs`, the MCP JSON keys, and the cross-crate env-var names.
+
+---
+
+## 2026-05-31 — VM: defer unexpanded macro heads + compile prelude closures
+
+**The bug (a latent VM correctness hole).** The compiling VM (`eval::compile`) only
+runs *macro-expanded* forms, but `macroexpand_all` can't expand a macro **defined
+after** the closure that uses it (a forward reference) — that call stays verbatim in
+the stored body and is expanded lazily at eval time. The VM saw the raw macro call,
+treated it as a function call, and compiled the macro's *argument syntax* (pin
+patterns, `~`-unquotes) as ordinary calls → "cannot call non-function: #<macro …>",
+or, recursing into a `~`-pin, "unbound symbol: unquote". This was already latent for
+user RUNTIME closures (`(defn uf (n) (fwm n))` with `fwm` defined later); it bit hard
+the moment **prelude closures became VM-eligible**, because the prelude's `sleep`
+(line ~1050) calls `receive` (defined ~1121) — a forward reference — so every
+`(sleep …)` mis-compiled.
+
+**Fix.** `compile_node` now **defers** a call whose head resolves to a macro, via a
+shared `macros::macro_head_id` (the *same* resolution `macroexpand_1` uses, incl.
+imported / same-namespace macros — ADR-065), so the tree-walker expands it lazily.
+A macro-defined-*before* the closure is still expanded → still VM-runs (no
+over-deferral).
+
+**Prelude closures now VM-compile.** With the macro hole closed, `cache_key` accepts
+PRELUDE-region closures (immovable + stable, immutable so the cache never goes
+stale). This was the big remaining coverage win — stdlib `map`/`filter`/`reduce`/
+`fold`/`sort` stop deferring: **`sort_brood` ~1.0×→1.77×, `cons_build` ~1.15×→1.70×**
+(divan; recursion/loops unchanged at ~1.8×). Found via the benchmark, which showed
+prelude-heavy code got *zero* VM speedup.
+
+**Verified.** Full suite green under both engines (431/431) and under
+`BROOD_VM=1 BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` (293/293); the differential harness
+(`tests/differential.rs`) gained forward-macro-ref cases + a named regression test
+`vm_defers_unexpanded_forward_referenced_macro`. The harness + both-engines gate are
+what caught the regression in the first place.

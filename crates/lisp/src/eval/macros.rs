@@ -6,7 +6,7 @@
 
 use crate::core::heap::Heap;
 use crate::core::keywords as kw;
-use crate::core::value::{self, EnvId, Symbol, Value};
+use crate::core::value::{self, ClosureId, EnvId, Symbol, Value};
 use crate::error::{LispError, LispResult};
 use crate::eval;
 use std::collections::{HashMap, HashSet};
@@ -666,37 +666,40 @@ fn rebuild_seq_like(heap: &mut Heap, original: Value, items: Vec<Value>) -> Valu
     }
 }
 
+/// If `sym` (a combination head, resolved in `env`) names a **macro**, return its
+/// closure id. Resolves the head the way the eval-time dispatch and the `resolve`
+/// pass do, so a bare `(:use mod)`-imported macro (or a same-namespace `ns/name`
+/// macro) is recognised — not only a directly-bound one (ADR-065). Used by
+/// `macroexpand_1` to expand, and by the compiling VM (`eval::compile`) to **defer**
+/// a closure whose body still contains an unexpanded (forward-referenced) macro
+/// call — both must agree on what "is a macro head" means.
+pub(crate) fn macro_head_id(heap: &Heap, env: EnvId, sym: value::Symbol) -> Option<ClosureId> {
+    match heap.env_get(env, sym) {
+        Some(Value::Macro(mid)) => Some(mid),
+        // Directly bound to a non-macro (a local, or a non-macro global): it
+        // shadows — never reinterpret it as an imported macro.
+        Some(_) => None,
+        // Unbound directly: a bare reference that may name an imported /
+        // same-namespace macro. Resolve it as the `resolve` pass does.
+        None => {
+            let q = match heap.compile_ns() {
+                Some(ns) => resolve_sym(heap, sym, &value::symbol_name(ns), &[]),
+                None => heap.import_of(sym).unwrap_or(sym),
+            };
+            match (q != sym, heap.env_get(value::EnvId::GLOBAL, q)) {
+                (true, Some(Value::Macro(mid))) => Some(mid),
+                _ => None,
+            }
+        }
+    }
+}
+
 /// Expand `form` by one step if its head is a macro; returns `(expanded, did_expand)`.
 pub fn macroexpand_1(heap: &mut Heap, form: Value, env: EnvId) -> Result<(Value, bool), LispError> {
     if let Value::Pair(p) = form {
         let (head, tail) = heap.pair(p);
         if let Value::Sym(s) = head {
-            // Resolve the head the way the eval-time dispatch and the `resolve` pass
-            // do, so a bare `(:use mod)`-imported macro (or a same-namespace
-            // `ns/name` macro) is expanded during the compile walk — not only a
-            // directly-bound one (ADR-065). Without this, `macroexpand_all` (and the
-            // advisory checker that rides it) leaves an imported macro like hatch's
-            // `defprocess` unexpanded, then walks its raw body.
-            let mid = match heap.env_get(env, s) {
-                Some(Value::Macro(mid)) => Some(mid),
-                // Directly bound to a non-macro (a local, or a non-macro global):
-                // it shadows — never reinterpret it as an imported macro.
-                Some(_) => None,
-                // Unbound directly: a bare reference that may name an imported /
-                // same-namespace macro. Resolve it the way the `resolve` pass does
-                // and expand only if the resolved name is a macro.
-                None => {
-                    let q = match heap.compile_ns() {
-                        Some(ns) => resolve_sym(heap, s, &value::symbol_name(ns), &[]),
-                        None => heap.import_of(s).unwrap_or(s),
-                    };
-                    match (q != s, heap.env_get(value::EnvId::GLOBAL, q)) {
-                        (true, Some(Value::Macro(mid))) => Some(mid),
-                        _ => None,
-                    }
-                }
-            };
-            if let Some(mid) = mid {
+            if let Some(mid) = macro_head_id(heap, env, s) {
                 let args = heap.list_to_vec(tail)?;
                 let expanded = eval::apply_closure(heap, mid, &args)?;
                 return Ok((expanded, true));
