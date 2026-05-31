@@ -169,9 +169,19 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
     traces a whole run.
   - Validated by `crates/lisp/tests/gc.rs` (tail loops, server loops, depth-≥2
     loops, root and spawned, cyclic-promote cross-process, gc-stats/gc-collect/
-    gc-trace) and the `BROOD_GC_STRESS=1` + `debug-assertions` tripwire. **Still
-    deferred:** `macros.rs` could be rooted if GC is ever wanted *during*
-    expansion. See `memory-model.md`, `memory-review.md`.
+    gc-trace) and the `BROOD_GC_STRESS=1` + `debug-assertions` tripwire. See
+    `memory-model.md`, `memory-review.md`, `handoff-vm-gc-memory.md`.
+  - ⬜ **RUNTIME-region collector** (ADR-072 Stage 5, *deferred*) — the per-process
+    LOCAL heap is collected; the **shared mutable RUNTIME code region** (where
+    `def`/hot-reload `promote`s code) is never reclaimed, so it grows with
+    hot-reload churn. Doesn't matter for short runs; matters for a long-lived,
+    live-edited server. Design not started.
+  - ⬜ **Shrink the remaining rooted-Rust `eval` re-entry** (*deferred, low priority*)
+    — quasiquote was moved off the runtime walker to a compile/eval-time transform
+    (ADR-084), removing the worst offender; the `macroexpand` fixpoint and
+    `reload-defs` are the remaining Rust frames that loop across `eval`, candidates
+    for the same transform-not-walker treatment (or rooting if GC is ever wanted
+    *during* expansion).
 - ✅ **Self-hosted REPL in Brood** (ADR-048) — the read-eval-print loop is now
   `std/repl.blsp`, not Rust: a tail-recursive loop over `read-line` (the one new
   primitive) + `eval-string` + `pr-str`, with multi-line balance detection,
@@ -465,11 +475,20 @@ the workaround available today.
   redirect), 2a (`let`/`letrec`), 2b (multi-arity), 2c (local-capturing closures —
   created *and* called on the VM, GC-rooted captured envs, body-handle cache key),
   source-position threading, the Stage-3 cutover, a **differential test harness**
-  (`differential.rs` + `make test-both` — both engines, assert identical), and
-  **variadic-arm coverage** (`&rest` + nil-default `&optional`) are all done.
-  ~1.6–2.3× on the hot path, no language change, full suite green under both
-  engines. **Still worth doing (pure perf, deferrals already correct):** widening
-  coverage to pattern/`match*` and prelude (PRELUDE-region) closures.
+  (`differential.rs` + `make test-both` — both engines, assert identical),
+  **variadic-arm coverage** (`&rest` + nil-default `&optional`), **real-default
+  `&optional`** (`4146419`), and **`match`/pattern-dispatch `fn`s** (`c27e9d7` — via
+  compiling `quote` + vector/map literals, which unblocked `match*`'s no-match arm)
+  are all done. ~1.6–2.3× on the hot path (pattern fib ~2×), no language change,
+  full suite green under both engines.
+  - ⬜ **Retire the tree-walker (the kept `BROOD_VM=0` fallback)** — the remaining
+    VM gap. Blocked on the *other* deferrals, not on match/optional: `def`/
+    `quasiquote`/`defmacro`/`binding` bodies, **unexpanded forward-referenced
+    macros** (e.g. prelude `sleep`→`receive`), movable-LOCAL (conased) bodies, and
+    **PRELUDE-region closures**. Each needs covering, or a deliberate decision to
+    keep a minimal fallback. ADR-076: don't rush — no profile yet demands it.
+  - ⬜ **Bytecode lowering** — explicitly deferred until a profile shows node-
+    dispatch dominating (ADR-076).
 
 ## M2 — Editor data model
 
