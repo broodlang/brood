@@ -1,0 +1,22 @@
+;; `read-all` (kernel reader primitive) — every form in a source string, in order.
+;; Register-only — discovered and run by `nest test` (and cargo test, via
+;; crates/lisp/tests/suite.rs). (The `eval-command` editor commands that used to ride
+;; alongside these here now live in the myedit project — see myedit/src/eval-command.blsp.)
+
+(defmodule read-all-test
+  (:use test))
+
+(describe "read-all"
+  (test "returns every form in source order"
+    (assert= (read-all "(+ 1 2) :x 3") (list '(+ 1 2) :x 3)))
+  (test "single form"
+    (assert= (read-all "hello") (list 'hello)))
+  (test "blank / comment-only source is the empty list"
+    (is (empty? (read-all "")))
+    (is (empty? (read-all "   \n  ;; just a comment\n"))))
+  (test "the all-forms sibling of read-string (first only)"
+    (let (src "(a) (b) (c)")
+      (assert= (read-string src) '(a))
+      (assert= (last (read-all src)) '(c))))
+  (test "raises on an incomplete form (like read-string)"
+    (assert= (try (do (read-all "(+ 1 2") :no-throw) (catch e :threw)) :threw)))

@@ -2666,10 +2666,6 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
     // The editor framework's buffer model (M2 Phase 1, ADR-045): an immutable
     // buffer over the rope primitives, opt-in, never in the prelude.
     ("buffer", include_str!("../../../std/buffer.blsp")),
-    // "Eval the Lisp I'm editing" commands (the C-x C-e family) over `buffer` +
-    // `read-all` + output capture: each takes a buffer, returns a message string
-    // (value + printed output), edits nothing, binds no key. Opt-in editor policy.
-    ("eval-command", include_str!("../../../std/eval-command.blsp")),
     // The display/input seam (M3, ADR-046): `display` is the render-op protocol
     // (pure data constructors); `keymap` is the rebindable key→command dispatcher
     // shared by the line editor and the observer; `observer` is a process-viewer
