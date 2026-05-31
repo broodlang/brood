@@ -27,7 +27,8 @@
     (is (string? (try (project/project--parse-main '("foo" main)) (catch e e)))))
   (test "a non-symbol fn is rejected"
     (is (string? (try (project/project--parse-main '(foo "main")) (catch e e)))))
-  (test "a string is rejected" (is (string? (try (project/project--parse-main "main") (catch e e)))))
+  (test "a string is rejected"
+    (is (string? (try (project/project--parse-main "main") (catch e e)))))
   ;; `:main 'app` reads as `(quote app)` (the manifest is data, never evaluated),
   ;; which would silently misparse to module `quote` — guard it with a fix-it.
   (test "a quoted symbol is rejected with a drop-the-quote fix-it"
@@ -36,7 +37,7 @@
         (is (string-contains? msg "`:main app`")))))
   (test "a quoted list is rejected with a drop-the-quote fix-it"
     (is (string-contains? (try (project/project--parse-main '(quote (app start))) (catch e e))
-      "drop the leading quote"))))
+          "drop the leading quote"))))
 
 (describe "project: default entry"
   (test "*project-main* defaults to (main main)"
@@ -60,28 +61,44 @@
   (test "a non-vector :dependencies value is rejected"
     (is (string-contains? (try (project/project--parse-deps '(a b)) (catch e e)) "must be a vector")))
   (test "a non-symbol dep name is rejected"
-    (is (string-contains? (try (project/project--parse-dep '["parser" :path "../p"]) (catch e e)) "must be a symbol")))
+    (is (string-contains? (try (project/project--parse-dep '["parser" :path "../p"]) (catch e e))
+          "must be a symbol")))
   (test "an unknown source kind is rejected"
-    (is (string-contains? (try (project/project--parse-dep '[parser :svn "../p"]) (catch e e)) "must be :git or :path")))
+    (is (string-contains? (try (project/project--parse-dep '[parser :svn "../p"]) (catch e e))
+          "must be :git or :path")))
   (test "a :git dep without a :ref is rejected"
-    (is (string-contains? (try (project/project--parse-dep '[parser :git "https://x.git"]) (catch e e)) "needs a :ref")))
+    (is (string-contains? (try
+                            (project/project--parse-dep '[parser :git "https://x.git"])
+                            (catch e e))
+          "needs a :ref")))
   (test "a reserved opt is rejected so the manifest stays forward-compatible"
-    (is (string-contains?
-          (try (project/project--parse-dep '[parser :git "https://x.git" :ref "v1" :branch "main"]) (catch e e))
+    (is (string-contains? (try
+                            (project/project--parse-dep '[parser :git
+                                                           "https://x.git"
+                                                           :ref
+                                                           "v1"
+                                                           :branch
+                                                           "main"])
+                            (catch e e))
           "reserved for a future version")))
   (test "an entry that is too short is rejected"
-    (is (string-contains? (try (project/project--parse-dep '[parser :path]) (catch e e)) "too short"))))
+    (is (string-contains? (try (project/project--parse-dep '[parser :path]) (catch e e))
+          "too short"))))
 
 ;; `:isolated` runs against a rolled-back private copy of the globals (ADR-017),
 ;; so the *project-* globals this clobbers via `(project ...)` don't leak.
-(describe "project: the (project ...) manifest macro treats its args as data" :isolated
+(describe "project: the (project ...) manifest macro treats its args as data"
+  :isolated
   (test "bare dep-name symbols survive without quoting; :dependencies populates *project-dependencies*"
-    (project :name "demo" :version "0.0.1"
-      :dependencies [[parser :git "https://example.com/p.git" :ref "v1"]
-                     [shared :path "../shared"]])
+    (project :name
+      "demo"
+      :version
+      "0.0.1"
+      :dependencies
+      [[parser :git "https://example.com/p.git" :ref "v1"] [shared :path "../shared"]])
     (assert= *project-dependencies*
       (list {:name 'parser :kind :git :url "https://example.com/p.git" :ref "v1"}
-            {:name 'shared :kind :path :path "../shared"}))))
+        {:name 'shared :kind :path :path "../shared"}))))
 
 (describe "project: scaffold templates (ADR-037)"
   (test "the .gitignore template ignores the package cache"
@@ -99,7 +116,8 @@
     (let (dir (temp-dir "brood-dup-"))
       (make-dir dir)
       (let (f (path-join dir "a.blsp"))
-        (spit f "(defmodule a \"x\")\n(defn main () 1)\n(def k 2)\n(defmacro m (x) x)\n(defdyn *d* 0)\n(defn helper (y) y)\n")
+        (spit f
+          "(defmodule a \"x\")\n(defn main () 1)\n(def k 2)\n(defmacro m (x) x)\n(defdyn *d* 0)\n(defn helper (y) y)\n")
         ;; Under `(defmodule a)` every binding resolves to `a/…`, except the
         ;; ambient `*d*` earmuff which stays root (mirrors the kernel resolver).
         (assert= (sort (project/project--file-def-names f))

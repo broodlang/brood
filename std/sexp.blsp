@@ -58,19 +58,17 @@ delimiter: 0 for the whole-file `:root`, 1 for `(`/`[`/`{`."
   (let (kind (first node) payload (second node))
     (cond
       (container-kind? kind)
-        ;; children start after the opening delimiter; the close delimiter adds its
-        ;; width to the container's end (delimiters aren't emitted as leaves).
-        (let (dl (delim-len kind)
-              [kids cend] (annotate-list payload (+ start dl))
-              end (+ cend dl))
-          [{:kind kind :start start :end end :kids kids} end])
-      (wrapper-kind? kind)
-        (let (cstart (+ start (prefix-len kind))
-              [child cend] (annotate payload cstart))
-          [{:kind kind :start start :end cend :kids (list child)} cend])
-      :else
-        (let (end (+ start (string-length payload)))
-          [{:kind kind :start start :end end} end]))))
+      ;; children start after the opening delimiter; the close delimiter adds its
+      ;; width to the container's end (delimiters aren't emitted as leaves).
+      (let (dl (delim-len kind)
+            [kids cend] (annotate-list payload (+ start dl))
+            end (+ cend dl))
+        [{:kind kind :start start :end end :kids kids} end]) (wrapper-kind? kind)
+      (let (cstart (+ start (prefix-len kind))
+            [child cend] (annotate payload cstart))
+        [{:kind kind :start start :end cend :kids (list child)} cend]) :else
+      (let (end (+ start (string-length payload)))
+        [{:kind kind :start start :end end} end]))))
 
 (defn annotate-list (nodes start)
   "Annotate a child-node vector left to right; returns `[annotated-list end]`."
@@ -91,10 +89,11 @@ delimiter: 0 for the whole-file `:root`, 1 for `(`/`[`/`{`."
   "The deepest container node strictly containing `point` (descending into
 list/vector/map children); the root if none. Reader-macro wrappers are navigated
 as a unit — descending through them is a deferred refinement."
-  (let (hit (first (filter (fn (k) (and (container-kind? (get k :kind))
-                                        (< (get k :start) point)
-                                        (< point (get k :end))))
-                           (or (get anode :kids) (list)))))
+  (let (hit (first (filter (fn (k)
+                             (and (container-kind? (get k :kind))
+                               (< (get k :start) point)
+                               (< point (get k :end))))
+                     (or (get anode :kids) (list)))))
     (if (nil? hit) anode (enclosing hit point))))
 
 (defn forms-of (anode)
@@ -126,25 +125,23 @@ there is none (the Emacs `forward-sexp`)."
   "Just inside the next list at or after `point` (Emacs `down-list`); unchanged if
 none."
   (let (enc (enclosing (tree text) point)
-        lst (first (filter (fn (f) (and (container-kind? (get f :kind))
-                                        (>= (get f :start) point)))
-                           (forms-of enc))))
+        lst (first (filter (fn (f) (and (container-kind? (get f :kind)) (>= (get f :start) point)))
+                     (forms-of enc))))
     (if (nil? lst) point (+ (get lst :start) 1))))
 
 (defn point-defun-start (text point)
   "Start of the top-level form containing `point` (Emacs `beginning-of-defun`);
 unchanged if `point` isn't within one."
   (let (root (tree text)
-        top (first (filter (fn (f) (and (<= (get f :start) point)
-                                        (<= point (get f :end))))
-                           (forms-of root))))
+        top (first (filter (fn (f) (and (<= (get f :start) point) (<= point (get f :end))))
+                     (forms-of root))))
     (if (nil? top) point (get top :start))))
 
 ;; ---- buffer commands: (buf key) -> buf (bind these in a keymap) -------------
 
-(defn forward (buf key)  (goto-char buf (point-forward  (buffer-text buf) (get buf :point))))
+(defn forward (buf key) (goto-char buf (point-forward (buffer-text buf) (get buf :point))))
 (defn backward (buf key) (goto-char buf (point-backward (buffer-text buf) (get buf :point))))
-(defn up (buf key)       (goto-char buf (point-up       (buffer-text buf) (get buf :point))))
-(defn down (buf key)     (goto-char buf (point-down     (buffer-text buf) (get buf :point))))
+(defn up (buf key) (goto-char buf (point-up (buffer-text buf) (get buf :point))))
+(defn down (buf key) (goto-char buf (point-down (buffer-text buf) (get buf :point))))
 (defn beginning-of-defun (buf key)
   (goto-char buf (point-defun-start (buffer-text buf) (get buf :point))))

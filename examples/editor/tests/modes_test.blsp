@@ -4,8 +4,10 @@
 ;; the modes resolves them).
 
 (defmodule modes-test (:use test) (:use buffer) (:use layers))
-(require 'buffer) (require 'layers)
-(require 'brood-mode) (require 'text-mode)   ; from src/ (editor policy, not embedded)
+(require 'buffer)
+(require 'layers)
+(require 'brood-mode)
+(require 'text-mode)  ; from src/ (editor policy, not embedded)
 
 (describe "mode resolution & the default"
   (test "text-mode is the default for a plain buffer (:fundamental)"
@@ -24,7 +26,7 @@
   (test "dispatching C-M-f through the brood layer runs structural forward-sexp"
     (let (b (init-buffer-layers (make-buffer "(+ 1 2)" "x.blsp" "x.blsp"))
           r (layer-dispatch b nil :ctrl-meta-f (fn (s _) s)))
-      (assert= (get (first r) :point) 7))))    ; moved over the whole form
+      (assert= (get (first r) :point) 7))))  ; moved over the whole form
 
 ;; ---- across processes -------------------------------------------------------
 (defn mode-worker (parent)

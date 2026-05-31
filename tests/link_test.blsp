@@ -11,7 +11,7 @@
 (defmodule link-test (:use test))
 
 ;; file-local worker bodies (tail-recursive — a test runs in a small-stack proc)
-(defn lk-park () (receive (:never :x)))           ; parks forever
+(defn lk-park () (receive (:never :x)))  ; parks forever
 (defn lk-crash-on (sig) (receive (~sig (error "boom"))))  ; crash when told
 
 (describe "links: trap-exit delivers [:EXIT], no trap propagates"
@@ -28,7 +28,8 @@
 
   (test "a trapping process gets [:EXIT pid :normal] when a linked peer returns"
     (trap-exit true)
-    (let (p (spawn :ok))                          ; returns immediately → :normal
+    (let (p (spawn :ok))
+      ; returns immediately → :normal
       (link p)
       (assert= :normal
         (receive ([:EXIT ~p r] r) (after 2000 :NONE))))
@@ -37,7 +38,7 @@
   (test "linking an already-dead pid notifies immediately with :noproc"
     (trap-exit true)
     (let (p (spawn :ok))
-      (sleep 30)                                  ; let it finish
+      (sleep 30)  ; let it finish
       (link p)
       (assert= :noproc
         (receive ([:EXIT ~p r] r) (after 2000 :NONE))))
@@ -48,26 +49,28 @@
   (test "a non-trapping linked peer dies when its partner crashes"
     ;; watcher doesn't trap; it's linked to a crasher → it must die too.
     (let (watcher (spawn (do (trap-exit false) (lk-park)))
-          wm      (monitor watcher))
+          wm (monitor watcher))
       (spawn (do (link watcher) (sleep 20) (error "crash")))
-      (is (not (= :SURVIVED
-        (receive ([:down ~wm ~watcher _] :died) (after 2000 :SURVIVED)))))))
+      (is (not (= :SURVIVED (receive ([:down ~wm ~watcher _] :died) (after 2000 :SURVIVED)))))))
 
   (test "a :normal exit does NOT take down a non-trapping linked peer"
     (let (me (self)
-          survivor (spawn (do (trap-exit false)
-                              (let (c (spawn :ok))   ; child returns :normal
-                                (link c)
-                                (sleep 80)           ; outlive the child's normal exit
-                                (send me [:alive (self)])
-                                (receive (:stop :ok))))))
+          survivor (spawn
+                     (do
+                       (trap-exit false)
+                       (let (c (spawn :ok))
+                         ; child returns :normal
+                         (link c)
+                         (sleep 80)  ; outlive the child's normal exit
+                         (send me [:alive (self)])
+                         (receive (:stop :ok))))))
       (assert= true
         (receive ([:alive ~survivor] true) (after 2000 false)))
       (exit survivor :kill)))
 
   (test "unlink breaks the coupling — a later crash doesn't propagate"
     (let (watcher (spawn (do (trap-exit false) (lk-park)))
-          wm      (monitor watcher))
+          wm (monitor watcher))
       (let (c (spawn (do (link watcher) (sleep 20) (unlink watcher) (sleep 20) (error "crash"))))
         ;; after unlink, c's crash must NOT kill watcher
         (assert= :still-linked-free
@@ -85,7 +88,7 @@
           b (spawn (do (trap-exit false) (link c) (lk-park)))
           a (spawn (do (trap-exit false) (link b) (lk-park)))
           cm (monitor c))
-      (sleep 40)                                   ; let the chain wire up
-      (exit a :stop)                               ; abnormal (≠ :normal) → propagates b→c
+      (sleep 40)  ; let the chain wire up
+      (exit a :stop)  ; abnormal (≠ :normal) → propagates b→c
       (assert= :chain-down
         (receive ([:down ~cm ~c _] :chain-down) (after 2000 :SURVIVED))))))

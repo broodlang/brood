@@ -38,9 +38,7 @@
   "Receive `total` [:ptr p] replies; assert every p equals `expected`."
   (if (= got total)
     nil
-    (receive ([:ptr p]
-      (do (assert= expected p)
-          (bs-collect-ptrs--check (+ got 1) total expected))))))
+    (receive ([:ptr p] (do (assert= expected p) (bs-collect-ptrs--check (+ got 1) total expected))))))
 
 ;; A def-bound big string: its right-hand-side is a LOCAL Shared string, but
 ;; `def` promotes it to RUNTIME (a `boxcar::Vec<String>`), so %blob-ptr should
@@ -59,15 +57,17 @@
 (defn bs-hib-spin (big parent n)
   (if (= n 0)
     (send parent [:after (%blob-ptr big)])
-    (do (cons n nil)                       ; per-iteration garbage
-        (bs-hib-spin big parent (- n 1)))))
+    (do
+      (cons n nil)  ; per-iteration garbage
+      (bs-hib-spin big parent (- n 1)))))
 
 (defn bs-hib-worker (parent)
-  (receive (big
-    (do
-      (send parent [:before (%blob-ptr big)])
-      ;; > GC floor (65536 live), so a collection definitely flips the arena.
-      (bs-hib-spin big parent 70000)))))
+  (receive
+    (big
+      (do
+        (send parent [:before (%blob-ptr big)])
+        ;; > GC floor (65536 live), so a collection definitely flips the arena.
+        (bs-hib-spin big parent 70000)))))
 
 (describe "shared blob heap (ADR-041)"
   :isolated
@@ -95,11 +95,15 @@
   (test "fan-out: 8 workers all observe the parent's SharedBlob identity"
     (when (bound? '%blob-ptr)
       (let (n 8
-            ;; ~1 KB string, well above threshold
-            big (string-repeat "abcdefghij0123456789" 64)
-            parent-ptr (%blob-ptr big)
-            me (self)
-            workers (bs-spawn-workers me n))
+             ;; ~1 KB string, well above threshold
+             big
+             (string-repeat "abcdefghij0123456789" 64)
+             parent-ptr
+             (%blob-ptr big)
+             me
+             (self)
+             workers
+             (bs-spawn-workers me n))
         (is (not (nil? parent-ptr)))
         (bs-send-all workers big)
         (bs-collect-ptrs--check 0 n parent-ptr))))
@@ -129,6 +133,6 @@
         ;; clones the Arc, preserving the underlying SharedBlob's address.
         (send w big)
         (let (before (receive ([:before p] p))
-              after  (receive ([:after  p] p)))
+              after (receive ([:after p] p)))
           (is (not (nil? before)))
           (assert= before after))))))

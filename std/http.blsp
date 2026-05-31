@@ -36,16 +36,14 @@ request map to a response map. Includes request parsing, response rendering, a
 (defn http--read-until (sock acc marker)
   (if (>= (index-of acc marker) 0)
     acc
-    (receive
-      ([:tcp ~sock d] (http--read-until sock (str acc d) marker))
+    (receive ([:tcp ~sock d] (http--read-until sock (str acc d) marker))
       ([:tcp-closed ~sock] (if (= acc "") nil acc))
       (after *http-read-timeout-ms* (if (= acc "") nil acc)))))
 
 (defn http--read-to-length (sock acc target)
   (if (>= (string-length acc) target)
     acc
-    (receive
-      ([:tcp ~sock d] (http--read-to-length sock (str acc d) target))
+    (receive ([:tcp ~sock d] (http--read-to-length sock (str acc d) target))
       ([:tcp-closed ~sock] acc)
       (after *http-read-timeout-ms* acc))))
 
@@ -100,8 +98,15 @@ the raw request string, or nil if the peer closed without sending anything."
 
 ;; ---- responses --------------------------------------------------------------
 (def *http-status-text*
-  {200 "OK" 201 "Created" 204 "No Content" 301 "Moved Permanently" 302 "Found"
-   400 "Bad Request" 403 "Forbidden" 404 "Not Found" 405 "Method Not Allowed"
+  {200 "OK"
+   201 "Created"
+   204 "No Content"
+   301 "Moved Permanently"
+   302 "Found"
+   400 "Bad Request"
+   403 "Forbidden"
+   404 "Not Found"
+   405 "Method Not Allowed"
    500 "Internal Server Error"})
 
 (defn response (status headers body)
@@ -128,19 +133,33 @@ the raw request string, or nil if the peer closed without sending anything."
   (let (status (get resp :status 200)
         body (or (get resp :body) "")
         headers (assoc (or (get resp :headers) {})
-                  "Content-Length" (str (string-length body))
-                  "Connection" "close"))
-    (str "HTTP/1.0 " status " " (get *http-status-text* status "OK") "\r\n"
+                  "Content-Length"
+                  (str (string-length body))
+                  "Connection"
+                  "close"))
+    (str "HTTP/1.0 "
+      status
+      " "
+      (get *http-status-text* status "OK")
+      "\r\n"
       (http--render-headers headers)
       "\r\n"
       body)))
 
 ;; ---- static files -----------------------------------------------------------
 (def *http-mime*
-  {".html" "text/html; charset=utf-8" ".htm" "text/html; charset=utf-8"
-   ".css" "text/css" ".js" "application/javascript" ".json" "application/json"
-   ".txt" "text/plain; charset=utf-8" ".svg" "image/svg+xml" ".png" "image/png"
-   ".jpg" "image/jpeg" ".jpeg" "image/jpeg" ".gif" "image/gif" ".ico" "image/x-icon"})
+  {".html" "text/html; charset=utf-8"
+   ".htm" "text/html; charset=utf-8"
+   ".css" "text/css"
+   ".js" "application/javascript"
+   ".json" "application/json"
+   ".txt" "text/plain; charset=utf-8"
+   ".svg" "image/svg+xml"
+   ".png" "image/png"
+   ".jpg" "image/jpeg"
+   ".jpeg" "image/jpeg"
+   ".gif" "image/gif"
+   ".ico" "image/x-icon"})
 
 (defn mime-type (path)
   "A guessed Content-Type for `path` based on its extension."
@@ -175,9 +194,7 @@ Single-connection-at-a-time is plenty for a basic app; true spawn-per-connection
 concurrency awaits a closure-shipping fix (shipping a handler that captures a map
 of closures over a shared scope currently overflows `closure_to_message`)."
   (receive
-    ([:tcp-accept ~ls c]
-      ;; take ownership so this process receives c's [:tcp …] data, handle it, loop
-      (tcp-controlling-process c (self))
+    ([:tcp-accept ~ls c] (tcp-controlling-process c (self))
       (http--serve-conn c handler)
       (serve-loop ls handler))))
 
@@ -227,8 +244,7 @@ of closures over a shared scope currently overflows `closure_to_message`)."
 
 ;; Collect the response delivered as messages until close; [:ok body] or [:error msg].
 (defn http--collect (sock acc)
-  (receive
-    ([:tcp ~sock d] (http--collect sock (str acc d)))
+  (receive ([:tcp ~sock d] (http--collect sock (str acc d)))
     ([:tcp-closed ~sock] [:ok acc])
     ([:tcp-error ~sock msg] [:error msg])
     (after 30000 [:error "http: timed out waiting for a response"])))
@@ -253,7 +269,10 @@ JSON API, not arbitrary multi-byte payloads.)"
   (let (u (http--parse-url url)
         body (or (get opts :body) "")
         headers (http--request-headers u body (get opts :headers))
-        req (str method " " (get u :path) " HTTP/1.0\r\n"
+        req (str method
+              " "
+              (get u :path)
+              " HTTP/1.0\r\n"
               (http--render-headers headers)
               "\r\n"
               body)

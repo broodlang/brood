@@ -37,17 +37,35 @@ result into `:message`). Registers `.blsp` → `:brood` → this layer. `(requir
   (assoc buf :message (eval-command/eval-last-sexp buf)))
 
 (def km
-  (-> {;; motion (shared with text-mode)
-       :right 'text-mode/forward-char  :left 'text-mode/backward-char
-       :down  'text-mode/forward-line  :up   'text-mode/backward-line
-       :alt-f 'text-mode/forward-word  :alt-b 'text-mode/backward-word
-       :ctrl-a 'text-mode/beginning-of-line :ctrl-e 'text-mode/end-of-line
-       ;; structural s-expression navigation
-       :ctrl-meta-f 'sexp/forward      :ctrl-meta-b 'sexp/backward
-       :ctrl-meta-u 'sexp/up           :ctrl-meta-d 'sexp/down
-       :ctrl-meta-a 'sexp/beginning-of-defun}
-      ;; C-x C-e — a chord
-      (keymap-bind [:ctrl-x :ctrl-e] 'brood-mode/eval-last-sexp)))
+  (->
+    {:right 'text-mode/forward-char
+      :left
+      'text-mode/backward-char
+      :down
+      'text-mode/forward-line
+      :up
+      'text-mode/backward-line
+      :alt-f
+      'text-mode/forward-word
+      :alt-b
+      'text-mode/backward-word
+      :ctrl-a
+      'text-mode/beginning-of-line
+      :ctrl-e
+      'text-mode/end-of-line
+      ;; structural s-expression navigation
+      :ctrl-meta-f
+      'sexp/forward
+      :ctrl-meta-b
+      'sexp/backward
+      :ctrl-meta-u
+      'sexp/up
+      :ctrl-meta-d
+      'sexp/down
+      :ctrl-meta-a
+      'sexp/beginning-of-defun}
+    ;; C-x C-e — a chord
+    (keymap-bind [:ctrl-x :ctrl-e] 'brood-mode/eval-last-sexp)))
 
 (def layer {:name 'brood :parser :brood :keymap km})
 

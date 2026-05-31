@@ -69,11 +69,11 @@ Pure apart from the symbol resolution; testable without a terminal."
   (let (active (if (nil? pending) keymap pending)
         binding (get active key))
     (cond
-      (map? binding)              [state binding]
-      (nil? binding)              (if (nil? pending)
-                                    [(fallback state key) nil]
-                                    [state nil])
-      :else                       [(try ((eval binding) state key) (catch e state)) nil])))
+      (map? binding) [state binding]
+      (nil? binding) (if (nil? pending)
+                       [(fallback state key) nil]
+                       [state nil])
+      :else [(try ((eval binding) state key) (catch e state)) nil])))
 
 (defn keymap-bind (keymap keys command)
   "Bind a key sequence `keys` (a vector of one or more keys) to `command` (a symbol)

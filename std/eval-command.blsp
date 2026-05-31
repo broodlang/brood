@@ -58,7 +58,8 @@ from evaluating — becomes `error: <message>` instead of propagating."
     (let (vo (eval-command--capturing thunk)
           out (second vo))
       (str (if (= out "") "" (str out (if (ends-with? out "\n") "" "\n")))
-           "=> " (pr-str (first vo))))
+        "=> "
+        (pr-str (first vo))))
     (catch e (str "error: " (eval-command--error-message e)))))
 
 ;; ---- commands (buffer -> message string) ------------------------------------
@@ -68,12 +69,11 @@ from evaluating — becomes `error: <message>` instead of propagating."
 a message string (`=> <value>`, with any printed output prefixed). Only that one
 form runs — like Emacs `C-x C-e`, earlier forms in the buffer are not re-evaluated,
 so any names they bind must already be defined. Does not edit `buf`."
-  (eval-command--describe
-    (fn ()
-      (let (forms (read-all (substring (buffer-text buf) 0 (get buf :point))))
-        (if (empty? forms)
-          (throw "no complete form before point")
-          (eval (last forms)))))))
+  (eval-command--describe (fn ()
+                            (let (forms (read-all (substring (buffer-text buf) 0 (get buf :point))))
+                              (if (empty? forms)
+                                (throw "no complete form before point")
+                                (eval (last forms)))))))
 
 (defn eval-region (buf)
   "Evaluate the region (the text between point and mark) as Brood source and return

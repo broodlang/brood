@@ -29,8 +29,7 @@ helper. Policy is Brood; only the syscalls are Rust.")
   (tcp--drain-acc sock ""))
 
 (defn tcp--drain-acc (sock acc)
-  (receive
-    ([:tcp ~sock d] (tcp--drain-acc sock (str acc d)))
+  (receive ([:tcp ~sock d] (tcp--drain-acc sock (str acc d)))
     ([:tcp-closed ~sock] acc)))
 
 (defn tcp-drain-timeout (sock ms)
@@ -38,7 +37,6 @@ helper. Policy is Brood; only the syscalls are Rust.")
   (tcp--drain-to sock "" ms))
 
 (defn tcp--drain-to (sock acc ms)
-  (receive
-    ([:tcp ~sock d] (tcp--drain-to sock (str acc d) ms))
+  (receive ([:tcp ~sock d] (tcp--drain-to sock (str acc d) ms))
     ([:tcp-closed ~sock] [:closed acc])
     (after ms [:timeout acc])))

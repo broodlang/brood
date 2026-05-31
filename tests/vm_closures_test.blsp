@@ -29,7 +29,7 @@
 ;; must defer to the tree-walker (a value snapshot can't do recursive late-binding)
 ;; while still returning the right answer.
 (defn parity (n)
-  (letrec (ev? (fn (k) (if (= k 0) true  (od? (- k 1))))
+  (letrec (ev? (fn (k) (if (= k 0) true (od? (- k 1))))
            od? (fn (k) (if (= k 0) false (ev? (- k 1)))))
     (ev? n)))
 
@@ -104,7 +104,7 @@
 
   (test "a nested captured closure survives the round-trip"
     (let (me (self) w (spawn (cc-apply-worker me)))
-      (send w [((adder3 7) 8) 5])      ; closure capturing s = 15
+      (send w [((adder3 7) 8) 5])  ; closure capturing s = 15
       (assert= (receive) 20)))
 
   (test "fan-out: many workers each build and apply their own capture"

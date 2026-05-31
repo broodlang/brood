@@ -26,10 +26,9 @@
 ;; A minimal buffer-as-process: holds a rope in its loop state and serves
 ;; [:insert idx s], [:text reply] messages. Previews the Phase-1 model.
 (defn rt-buffer (r)
-  (receive
-    ([:insert idx s] (rt-buffer (rope-insert r idx s)))
-    ([:text reply]   (send reply (rope->string r)) (rt-buffer r))
-    ([:stop reply]   (send reply :stopped))))
+  (receive ([:insert idx s] (rt-buffer (rope-insert r idx s)))
+    ([:text reply] (send reply (rope->string r)) (rt-buffer r))
+    ([:stop reply] (send reply :stopped))))
 
 (describe "rope construction & predicates"
   (test "string->rope builds a rope"
@@ -89,9 +88,9 @@
 (describe "rope char<->line mapping"
   (test "char->line finds the line containing a char index"
     (let (r (string->rope "ab\ncd\nef"))
-      (assert= (rope-char->line r 0) 0)   ; 'a'
-      (assert= (rope-char->line r 3) 1)   ; 'c'
-      (assert= (rope-char->line r 7) 2))) ; 'f'
+      (assert= (rope-char->line r 0) 0)  ; 'a'
+      (assert= (rope-char->line r 3) 1)  ; 'c'
+      (assert= (rope-char->line r 7) 2)))  ; 'f'
   (test "line->char finds where a line begins"
     (let (r (string->rope "ab\ncd\nef"))
       (assert= (rope-line->char r 0) 0)

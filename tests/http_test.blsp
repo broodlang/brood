@@ -80,8 +80,8 @@
     (refute (contains? (http/http--request-headers {:host "h"} "" nil) "Content-Length")))
   (test "caller headers override the defaults and add new ones"
     (let (h (http/http--request-headers {:host "h"} "" {"User-Agent" "bw" "X-Token" "k"}))
-      (assert= (get h "User-Agent") "bw")        ; overridden
-      (assert= (get h "X-Token") "k"))))         ; added
+      (assert= (get h "User-Agent") "bw")  ; overridden
+      (assert= (get h "X-Token") "k"))))  ; added
 
 (describe "http: end-to-end POST + headers over a loopback server"
   (test "http-post round-trips the method, body, and a custom header"
@@ -92,8 +92,10 @@
                  (send me [:port (tcp-local-port ls)])
                  (serve-loop ls
                    (fn (req)
-                     (ok (str (get req :method) "|"
-                           (get req :body) "|"
+                     (ok (str (get req :method)
+                           "|"
+                           (get req :body)
+                           "|"
                            (get (get req :headers) "x-token"))))))))
       (let (port (receive ([:port p] p) (after 5000 :timeout)))
         (let (resp (http-post (str "http://127.0.0.1:" port "/act")

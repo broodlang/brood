@@ -30,5 +30,4 @@
   (test "an ansi frame survives a round-trip through another process"
     (let (me (self))
       (spawn (ansi-emit-frame me))
-      (receive
-        ([:frame f] (assert= f (str (ansi-clear-screen) (ansi-home) "\e" "[2;2H" "x")))))))
+      (receive ([:frame f] (assert= f (str (ansi-clear-screen) (ansi-home) "\e" "[2;2H" "x")))))))

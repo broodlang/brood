@@ -152,8 +152,16 @@ the per-char face changes."
     (let (f (hl--face full base spans overrides i))
       (if (= f cur)
         (hl--chunk full base line spans overrides len (inc i) start cur acc)
-        (hl--chunk full base line spans overrides len (inc i) i f
-                   (cons [(substring line start i) cur] acc))))))
+        (hl--chunk full
+          base
+          line
+          spans
+          overrides
+          len
+          (inc i)
+          i
+          f
+          (cons [(substring line start i) cur] acc))))))
 
 (defn highlight-chunks (full base line overrides)
   "Return `[substring face]` chunks that tile `line` — the visible region starting
@@ -165,8 +173,16 @@ lexer. Adjacent chars of equal face coalesce into one chunk; feed each to a
     (if (= len 0)
       '()
       (let (spans (highlight-spans full))
-        (hl--chunk full base line spans overrides len 1 0
-                   (hl--face full base spans overrides 0) '())))))
+        (hl--chunk full
+          base
+          line
+          spans
+          overrides
+          len
+          1
+          0
+          (hl--face full base spans overrides 0)
+          '())))))
 
 ;; ---- bracket matching -------------------------------------------------------
 

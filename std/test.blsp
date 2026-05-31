@@ -270,7 +270,7 @@ docs/testing.md for the full guide.")
 ;; catches edge cases a single hand-written example misses.
 (defn check-property--loop (n gen pred loc seed i)
   (if (>= i n)
-    nil ; all trials held
+    nil  ; all trials held
     (let ([val nxt] (gen seed))
       (if (pred val)
         (check-property--loop n gen pred loc nxt (inc i))
@@ -291,9 +291,10 @@ docs/testing.md for the full guide.")
 
 (defn opt-val (key opts default)
   ; the value following `key` in the run-tests args (e.g. `:timeout 5000`), or default.
-  (cond (empty? opts) default
-        (= key (first opts)) (second opts)
-        else (opt-val key (rest opts) default)))
+  (cond
+    (empty? opts) default
+    (= key (first opts)) (second opts)
+    else (opt-val key (rest opts) default)))
 
 ;; (`pad-left` / `pad-right` are the prelude's, like `take` / `quot` — all formerly
 ;; redefined here, which clobbered the shared global with a worse version (the local
@@ -373,11 +374,10 @@ docs/testing.md for the full guide.")
   ;; it into a failure instead of blocking forever in `receive`. The kernel fires
   ;; `[:down …]` immediately if the worker has already exited, so there is no
   ;; lost-death window between `spawn` and `monitor`.
-  (fold
-    (fn (acc unit)
-      (let (pid (spawn (send me (list :unit-result (self) (run-unit unit)))))
-        (monitor pid)
-        (cons (list pid unit) acc)))
+  (fold (fn (acc unit)
+          (let (pid (spawn (send me (list :unit-result (self) (run-unit unit)))))
+            (monitor pid)
+            (cons (list pid unit) acc)))
     nil
     units))
 
@@ -430,9 +430,10 @@ docs/testing.md for the full guide.")
 ;; The unit a monitored worker `pid` was spawned for, or nil if `pid` isn't one
 ;; of ours (e.g. a stale `[:down …]` from a previous run still in the mailbox).
 (defn unit-of-pid (pid workers)
-  (cond (empty? workers) nil
-        (= (first (first workers)) pid) (second (first workers))
-        else (unit-of-pid pid (rest workers))))
+  (cond
+    (empty? workers) nil
+    (= (first (first workers)) pid) (second (first workers))
+    else (unit-of-pid pid (rest workers))))
 
 ;; A worker died before reporting (KI-2). Synthesize a failing result for every
 ;; test in its unit, carrying the exit reason — so a crashed/raced worker fails
@@ -440,7 +441,8 @@ docs/testing.md for the full guide.")
 ;; `(group name fails ms)`; a failure record is `(loc detail-lines)` with loc nil.
 (defn dead-unit-results (unit reason)
   (map (fn (t)
-         (list (second unit) (first t)
+         (list (second unit)
+           (first t)
            (list (list nil (list (str "test process died: " (pr-str reason)))))
            0))
     (third unit)))
@@ -461,8 +463,9 @@ docs/testing.md for the full guide.")
   (fold (fn (a w)
           (if (member? (first w) reported)
             a
-            (do (exit (first w) :kill)
-                (append (timeout-unit-results (second w)) a))))
+            (do
+              (exit (first w) :kill)
+              (append (timeout-unit-results (second w)) a))))
     acc
     workers))
 
@@ -470,9 +473,12 @@ docs/testing.md for the full guide.")
 ;; `(group name fails ms)`, `fails` = `((loc detail-lines))`.
 (defn timeout-unit-results (unit)
   (map (fn (t)
-         (list (second unit) (first t)
-           (list (list nil (list (str "test timed out after " (quot *test-timeout-ms* 1000)
-                                    "s — hard-killed (raise *test-timeout-ms* if legitimately slow)"))))
+         (list (second unit)
+           (first t)
+           (list (list nil
+                   (list (str "test timed out after "
+                           (quot *test-timeout-ms* 1000)
+                           "s — hard-killed (raise *test-timeout-ms* if legitimately slow)"))))
            *test-timeout-ms*))
     (third unit)))
 
@@ -487,27 +493,33 @@ docs/testing.md for the full guide.")
     ;; `(m m)` takes the next message; `(after …)` fires when the budget is spent.
     (let (msg (receive (m m) (after (max 0 (- deadline (now))) :%test-timeout)))
       (cond
-        (= msg :%test-timeout)               ; budget spent — kill + fail the stragglers
-        (collect-timeout workers reported acc)
-
-        (= (first msg) :unit-result)         ; [:unit-result pid results]
+        (= msg :%test-timeout)
+        ; budget spent — kill + fail the stragglers
+        (collect-timeout workers reported acc) (= (first msg) :unit-result)
+        ; [:unit-result pid results]
         (let (pid (second msg))
           ;; Ignore a result from a pid that isn't one of THIS batch's workers, or
           ;; one already counted — a late message from a timed-out/killed worker of a
           ;; prior step must not corrupt this step's `pending` count.
           (if (or (member? pid reported) (nil? (unit-of-pid pid workers)))
             (collect-loop pending workers reported acc deadline)
-            (collect-loop (- pending 1) workers (cons pid reported)
-              (append (third msg) acc) deadline)))
-
-        (= (first msg) :down)                ; [:down mref pid reason]
+            (collect-loop (- pending 1)
+              workers
+              (cons pid reported)
+              (append (third msg) acc)
+              deadline))) (= (first msg)
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              :down)
+        ; [:down mref pid reason]
         (let (pid (third msg)
               unit (unit-of-pid pid workers))
           (cond
             (member? pid reported) (collect-loop pending workers reported acc deadline)
-            (nil? unit)            (collect-loop pending workers reported acc deadline)
-            else (collect-loop (- pending 1) workers reported
-                   (append (dead-unit-results unit (nth msg 3)) acc) deadline)))
+            (nil? unit) (collect-loop pending workers reported acc deadline)
+            else (collect-loop (- pending 1)
+                   workers
+                   reported
+                   (append (dead-unit-results unit (nth msg 3)) acc)
+                   deadline)))
 
         ;; Anything else in the runner's mailbox isn't ours — skip it.
         else (collect-loop pending workers reported acc deadline)))))
@@ -515,7 +527,7 @@ docs/testing.md for the full guide.")
 ;; Run a whole unit with each test under `%isolate` (global-def rollback). This
 ;; is what an isolated unit's *own* worker process evaluates.
 (defn run-unit-fresh (unit)
-  (let (group (second unit)) (map (fn (t) (run-test-fresh group t)) (third unit)))) ; -> results
+  (let (group (second unit)) (map (fn (t) (run-test-fresh group t)) (third unit))))  ; -> results
 
 ;; ─── The test runner ────────────────────────────────────────────────────────
 ;; The runner is one long-lived process gathering every step's results. Its
@@ -547,7 +559,7 @@ docs/testing.md for the full guide.")
 ;; the parallel/serial units as `(:par . units)` groups.
 (defn run--steps (iso par)
   (append (map (fn (u) (list :iso u)) iso)
-          (map (fn (b) (cons :par b)) (run--chunks *parallel-batch* par nil))))
+    (map (fn (b) (cons :par b)) (run--chunks *parallel-batch* par nil))))
 
 ;; Run one step in the current (driver) process, returning its unit results. An
 ;; `:iso` step spawns+awaits one unit under `%isolate`; a `:par` step spawns the
@@ -570,17 +582,17 @@ docs/testing.md for the full guide.")
 (defn run-driver (steps parent acc)
   (if (empty? steps)
     (send parent [:all-results acc])
-    (run-driver (rest steps) parent
+    (run-driver (rest steps)
+      parent
       (append (run--step (first steps)) acc))))
 
 ;; Spawn the driver and block until it reports every unit's results. Monitors it
 ;; so a driver crash surfaces as an error instead of hanging the suite.
 (defn drain-runner (iso par)
   (let (me (self)
-        d  (spawn (run-driver (run--steps iso par) me nil))
+        d (spawn (run-driver (run--steps iso par) me nil))
         mref (monitor d))
-    (receive
-      ([:all-results rs] rs)
+    (receive ([:all-results rs] rs)
       ([:down ~mref ~d reason] (error (str "test runner crashed: " reason))))))
 ;; ────────────────────────────────────────────────────────────────────────────
 
@@ -701,30 +713,35 @@ docs/testing.md for the full guide.")
 (defn run-tests-structured (& opts)
   "Like `run-tests`, but returns the result as data — `{:total :passed :failed :failed-assertions :ms :results [...]}` — instead of printing and raising. Backs the `nest mcp` `run-tests` tool."
   (let (units (reverse *units*)
-        par   (filter (fn (u) (not= (first u) :isolated)) units)
-        iso   (filter (fn (u) (= (first u) :isolated)) units)
+        par (filter (fn (u) (not= (first u) :isolated)) units)
+        iso (filter (fn (u) (= (first u) :isolated)) units)
         start (now))
-    (let (results     (drain-runner iso par)
-          elapsed     (- (now) start)
-          total       (count results)
-          failed      (count-failed results)
-          fails       (count-failures results))
+    (let (results (drain-runner iso par)
+          elapsed (- (now) start)
+          total (count results)
+          failed (count-failed results)
+          fails (count-failures results))
       {:total total
-       :passed (- total failed)
-       :failed failed
-       :failed-assertions fails
-       :ms elapsed
-       ;; `(or … [])` on every list field so empty results render as JSON
-       ;; `[]` rather than `null`. Matters when the suite has zero tests, or
-       ;; a passing test has zero failures — agents branch on `length`, not
-       ;; `(= null)`.
-       :results (or (map (fn (r)
-                       {:group (r-group r)
-                        :name (r-name r)
-                        :passed (not (r-failed? r))
-                        :ms (r-ms r)
-                        :failures (or (map (fn (f) {:loc (first f) :details (second f)})
-                                       (r-fails r))
-                                      [])})
-                  results)
-                 [])})))
+        :passed
+        (- total failed)
+        :failed
+        failed
+        :failed-assertions
+        fails
+        :ms
+        elapsed
+        ;; `(or … [])` on every list field so empty results render as JSON
+        ;; `[]` rather than `null`. Matters when the suite has zero tests, or
+        ;; a passing test has zero failures — agents branch on `length`, not
+        ;; `(= null)`.
+        :results
+        (or (map (fn (r)
+                   {:group (r-group r)
+                    :name (r-name r)
+                    :passed (not (r-failed? r))
+                    :ms (r-ms r)
+                    :failures (or (map (fn (f) {:loc (first f) :details (second f)})
+                                    (r-fails r))
+                                [])})
+              results)
+          [])})))

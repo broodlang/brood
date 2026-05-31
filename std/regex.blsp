@@ -42,18 +42,21 @@ captures, or backreferences yet."
   (let (c (regex--peek pcs i))
     (cond
       (= c "d") [{:t :class :k :digit} (inc i)]
-      (= c "w") [{:t :class :k :word}  (inc i)]
+      (= c "w") [{:t :class :k :word} (inc i)]
       (= c "s") [{:t :class :k :space} (inc i)]
-      (nil? c)  [{:t :lit :c "\\"} i]          ; trailing backslash → literal
-      :else     [{:t :lit :c c} (inc i)])))    ; \. \* \\ … → that char, literal
+      (nil? c) [{:t :lit :c "\\"} i]
+      ; trailing backslash → literal
+      :else [{:t :lit :c c} (inc i)])))  ; \. \* \\ … → that char, literal
 
 (defn regex--set-chars (pcs i acc)
   "Collect set members until the closing `]`; returns [chars next]."
   (let (c (regex--peek pcs i))
     (cond
-      (nil? c)   [acc i]               ; unterminated set → take what we have
-      (= c "]")  [acc (inc i)]         ; consume the ]
-      :else      (regex--set-chars pcs (inc i) (cons c acc)))))
+      (nil? c) [acc i]
+      ; unterminated set → take what we have
+      (= c "]") [acc (inc i)]
+      ; consume the ]
+      :else (regex--set-chars pcs (inc i) (cons c acc)))))
 
 (defn regex--set (pcs i)
   "Parse a `[...]` set whose body starts at `i` (just past `[`); returns [atom next]."
@@ -67,7 +70,8 @@ captures, or backreferences yet."
   (let (c (regex--peek pcs i))
     (cond
       (= c "(") (let ([alt nxt] (regex--alt pcs (inc i)))
-                  [{:t :group :alt alt} (inc nxt)])   ; (inc nxt) skips the ')'
+                  [{:t :group :alt alt} (inc nxt)])
+      ; (inc nxt) skips the ')'
       (= c "[") (regex--set pcs (inc i))
       (= c ".") [{:t :any} (inc i)]
       (= c "^") [{:t :bol} (inc i)]
@@ -82,7 +86,7 @@ captures, or backreferences yet."
     (cond
       (= q "*") [{:q :star :a atom} (inc i2)]
       (= q "+") [{:q :plus :a atom} (inc i2)]
-      (= q "?") [{:q :opt  :a atom} (inc i2)]
+      (= q "?") [{:q :opt :a atom} (inc i2)]
       :else [atom i2])))
 
 (defn regex--seq (pcs i)
@@ -110,7 +114,9 @@ captures, or backreferences yet."
 ;; Each matcher takes the char vector `cs`, its length `n`, a position `i`, and a
 ;; continuation `k` (`(i') -> bool`: does the rest of the pattern match from `i'`).
 
-(defn regex--letter? (c) "ASCII/Unicode cased letter: upper-case ≠ lower-case." (not (= (upper c) (lower c))))
+(defn regex--letter? (c)
+  "ASCII/Unicode cased letter: upper-case ≠ lower-case."
+  (not (= (upper c) (lower c))))
 
 (defn regex--member? (chars c) (some? (fn (x) (= x c)) chars))
 
@@ -118,20 +124,21 @@ captures, or backreferences yet."
   (cond
     (= k :digit) (regex--member? (string->list "0123456789") c)
     (= k :space) (regex--member? (string->list " \t\n\r") c)
-    (= k :word)  (or (regex--letter? c) (regex--member? (string->list "0123456789") c) (= c "_"))
+    (= k :word) (or (regex--letter? c) (regex--member? (string->list "0123456789") c) (= c "_"))
     :else false))
 
 (defn regex--atom-match (a cs n i k)
   (let (t (get a :t))
     (cond
-      (= t :bol)   (if (= i 0) (k i) false)
-      (= t :eol)   (if (= i n) (k i) false)
+      (= t :bol) (if (= i 0) (k i) false)
+      (= t :eol) (if (= i n) (k i) false)
       (= t :group) (regex--alt-match (get a :alt) cs n i k)
-      (>= i n)     false                                   ; the rest need a char
-      (= t :lit)   (if (= (nth cs i) (get a :c)) (k (inc i)) false)
-      (= t :any)   (k (inc i))
-      (= t :set)   (let (m (regex--member? (get a :chars) (nth cs i)))
-                     (if (if (get a :neg) (not m) m) (k (inc i)) false))
+      (>= i n) false
+      ; the rest need a char
+      (= t :lit) (if (= (nth cs i) (get a :c)) (k (inc i)) false)
+      (= t :any) (k (inc i))
+      (= t :set) (let (m (regex--member? (get a :chars) (nth cs i)))
+                   (if (if (get a :neg) (not m) m) (k (inc i)) false))
       (= t :class) (if (regex--class-match? (get a :k) (nth cs i)) (k (inc i)) false)
       :else false)))
 
@@ -139,27 +146,30 @@ captures, or backreferences yet."
   "Greedy `*`: match the atom as many times as possible, backtracking via `k`. The
 `(> i2 i)` guard stops an empty match (e.g. `()*`) from looping forever."
   (or (regex--atom-match a cs n i (fn (i2) (if (> i2 i) (regex--star a cs n i2 k) false)))
-      (k i)))
+    (k i)))
 
 (defn regex--piece-match (p cs n i k)
   (let (q (get p :q))
     (cond
       (= q :star) (regex--star (get p :a) cs n i k)
       (= q :plus) (regex--atom-match (get p :a) cs n i (fn (i2) (regex--star (get p :a) cs n i2 k)))
-      (= q :opt)  (or (regex--atom-match (get p :a) cs n i k) (k i))
+      (= q :opt) (or (regex--atom-match (get p :a) cs n i k) (k i))
       :else (regex--atom-match p cs n i k))))
 
 (defn regex--seq-match (pieces cs n i k)
   (if (empty? pieces)
     (k i)
-    (regex--piece-match (first pieces) cs n i
-                        (fn (i2) (regex--seq-match (rest pieces) cs n i2 k)))))
+    (regex--piece-match (first pieces)
+      cs
+      n
+      i
+      (fn (i2) (regex--seq-match (rest pieces) cs n i2 k)))))
 
 (defn regex--alt-match (branches cs n i k)
   (if (empty? branches)
     false
     (or (regex--seq-match (first branches) cs n i k)
-        (regex--alt-match (rest branches) cs n i k))))
+      (regex--alt-match (rest branches) cs n i k))))
 
 ;; ---- public entry points ----------------------------------------------------
 

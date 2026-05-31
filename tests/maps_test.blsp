@@ -82,7 +82,7 @@
     ;; corresponds to the i-th value — that's the invariant we test.
     (let (m {:a 1 :b 2 :c 3})
       (assert= (map-pairs m)
-               (map (fn (k) [k (get m k)]) (keys m)))))
+        (map (fn (k) [k (get m k)]) (keys m)))))
   (test "count and empty? on a populated map"
     (assert= (count {:a 1 :b 2 :c 3}) 3)
     (refute (empty? {:a 1}))))
@@ -94,7 +94,7 @@
       ;; Round-trip through reduce + assoc recovers the original — proves
       ;; every entry is present without depending on iteration order.
       (assert= (reduce (fn (m kv) (assoc m (first kv) (last kv))) {} ps)
-               {:a 1 :b 2 :c 3}))
+        {:a 1 :b 2 :c 3}))
     (assert= (map-pairs {}) nil))
   (test "keys and vals enumerate every entry (incl. falsy) — set, not order"
     ;; CHAMP iteration isn't insertion order; assert content via maps.
@@ -111,7 +111,7 @@
     ;; compare. The earlier `(cons k acc)` assertion depended on iteration
     ;; order which CHAMP doesn't preserve.
     (assert= (reduce-kv (fn (acc k v) (assoc acc k true)) {} {:a 1 :b 2})
-             {:a true :b true})
+      {:a true :b true})
     (assert= (reduce-kv (fn (acc k v) (assoc acc v k)) {} {:a 1 :b 2}) {1 :a 2 :b}))
   (test "reduce-kv on the empty map returns the seed untouched"
     (assert= (reduce-kv (fn (acc k v) (+ acc 1)) 99 {}) 99)))
@@ -250,7 +250,7 @@
   ; Σ i² for i in 0..9
   (test "threading macros compose map ops"
     (assert= (frequencies (-> {:x 1} (assoc :y 2) (assoc :z 3) (dissoc :x) keys))
-             {:y 1 :z 1})
+      {:y 1 :z 1})
     (assert= (->> {:a 1 :b 2} keys count) 2)))
 
 (describe "type errors"

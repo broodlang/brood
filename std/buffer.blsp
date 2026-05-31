@@ -86,7 +86,9 @@ nil."
 (defn buffer-name (buf) "The buffer's name." (get buf :name))
 (defn buffer-file (buf) "The buffer's backing file path, or nil." (get buf :file))
 (defn buffer-length (buf) "The number of characters in the buffer." (rope-length (get buf :rope)))
-(defn buffer-line-count (buf) "The number of lines in the buffer." (rope-line-count (get buf :rope)))
+(defn buffer-line-count (buf)
+  "The number of lines in the buffer."
+  (rope-line-count (get buf :rope)))
 
 (defn buffer-line-at (buf line)
   "The text of `line` (0-based), including its trailing newline (like `rope-line`)."
@@ -155,8 +157,9 @@ or nil if no mark is set. The half-open span `[lo, hi)` the view highlights and
 the target line is long enough. Clamps to the buffer's line range."
   (let (rope (get buf :rope)
         col (buffer-column buf)
-        target (buffer--clamp 0 (dec (rope-line-count rope))
-                              (+ (rope-char->line rope (get buf :point)) n))
+        target (buffer--clamp 0
+                 (dec (rope-line-count rope))
+                 (+ (rope-char->line rope (get buf :point)) n))
         line-start (rope-line->char rope target))
     (goto-char buf (+ line-start (min col (buffer--line-end-col buf target))))))
 
@@ -165,7 +168,9 @@ the target line is long enough. Clamps to the buffer's line range."
   (forward-line buf (- n)))
 
 (defn beginning-of-buffer (buf) "Point moved to the start of the buffer." (goto-char buf 0))
-(defn end-of-buffer (buf) "Point moved to the end of the buffer." (goto-char buf (buffer-length buf)))
+(defn end-of-buffer (buf)
+  "Point moved to the end of the buffer."
+  (goto-char buf (buffer-length buf)))
 
 ;; ---- word motion (M-f / M-b) ------------------------------------------------
 ;; A word is a run of non-delimiter, non-whitespace chars (same notion as the
@@ -175,8 +180,18 @@ the target line is long enough. Clamps to the buffer's line range."
 (defn buffer--word-char? (c)
   "True if `c` is part of a word (not whitespace or a delimiter) — matches the
 line editor's M-f/M-b notion of a word."
-  (not (or (= c " ") (= c "\t") (= c "\n") (= c "(") (= c ")") (= c "[") (= c "]")
-           (= c "{") (= c "}") (= c "\"") (= c ";") (= c ","))))
+  (not (or (= c " ")
+         (= c "\t")
+         (= c "\n")
+         (= c "(")
+         (= c ")")
+         (= c "[")
+         (= c "]")
+         (= c "{")
+         (= c "}")
+         (= c "\"")
+         (= c ";")
+         (= c ","))))
 
 (defn buffer--scan-fwd (text i n pred)
   "Smallest index ≥ `i` (up to `n`) whose char fails `pred` — advance while `pred`."
@@ -201,7 +216,9 @@ line editor's M-f/M-b notion of a word."
 
 ;; ---- mark -------------------------------------------------------------------
 
-(defn set-mark (buf) "Set the mark at point (with point, this delimits the region)." (assoc buf :mark (get buf :point)))
+(defn set-mark (buf)
+  "Set the mark at point (with point, this delimits the region)."
+  (assoc buf :mark (get buf :point)))
 (defn clear-mark (buf) "Clear the mark." (assoc buf :mark nil))
 
 ;; ---- undo / redo ------------------------------------------------------------
@@ -225,8 +242,11 @@ by an editing op before it changes the text, so the change becomes undoable. A
 no-op when undo is disabled for the buffer (`disable-undo`)."
   (if (get buf :undo-disabled)
     buf
-    (assoc buf :undo (cons (buffer--snapshot buf) (or (get buf :undo) ()))
-               :redo ())))
+    (assoc buf
+      :undo
+      (cons (buffer--snapshot buf) (or (get buf :undo) ()))
+      :redo
+      ())))
 
 (defn disable-undo (buf)
   "Turn off undo recording for `buf` and drop any existing history. For a log /
@@ -246,8 +266,10 @@ current state onto `:redo`. A no-op (returns `buf`) when there's nothing to undo
     (if (empty? u)
       buf
       (assoc (buffer--restore buf (first u))
-             :undo (rest u)
-             :redo (cons (buffer--snapshot buf) (or (get buf :redo) ()))))))
+        :undo
+        (rest u)
+        :redo
+        (cons (buffer--snapshot buf) (or (get buf :redo) ()))))))
 
 (defn redo (buf)
   "Redo the last undone edit: restore the most recent `:redo` snapshot, pushing the
@@ -257,8 +279,10 @@ edit clears `:redo`, so redo is only available immediately after `undo`.)"
     (if (empty? r)
       buf
       (assoc (buffer--restore buf (first r))
-             :redo (rest r)
-             :undo (cons (buffer--snapshot buf) (or (get buf :undo) ()))))))
+        :redo
+        (rest r)
+        :undo
+        (cons (buffer--snapshot buf) (or (get buf :undo) ()))))))
 
 ;; ---- editing (returns a fresh buffer; records undo; clears the mark) ---------
 ;;
@@ -274,9 +298,12 @@ edit clears `:redo`, so redo is only available immediately after `undo`.)"
     (let (p (get buf :point)
           buf (buffer--push-undo buf))
       (assoc buf
-             :rope (rope-insert (get buf :rope) p s)
-             :point (+ p (string-length s))
-             :mark nil))))
+        :rope
+        (rope-insert (get buf :rope) p s)
+        :point
+        (+ p (string-length s))
+        :mark
+        nil))))
 
 (defn delete-char (buf &optional (n 1))
   "Delete `n` characters *after* point; point stays put. Recorded for undo (a
@@ -320,8 +347,7 @@ region is empty. Recorded for undo (restoring it brings back the mark too)."
 
 (defn buffer--serve (buf)
   "The receive loop of a buffer process over its immutable `buf`."
-  (receive
-    ([:edit f] (buffer--serve (f buf)))
+  (receive ([:edit f] (buffer--serve (f buf)))
     ([:get f from r] (do (send from [:reply r (f buf)]) (buffer--serve buf)))
     ([:stop from r] (send from [:reply r :stopped]))))
 

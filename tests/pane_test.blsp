@@ -97,6 +97,12 @@
       ;; the next pane is untouched
       (assert= (pane-selected-payload (pane-other t)) {:buf 1})))
 
+  (test "pane-update-path touches the pane at a path, leaving selection put"
+    (let (t (pane-update-path (wt-tree3) (list :b) (fn (p) (assoc p :top 9))))
+      ;; (:b) is buf 2 — reach it via pane-other×2; selection itself stays buf 0
+      (assert= (pane-selected-payload (pane-other (pane-other t))) {:buf 2 :top 9})
+      (assert= (pane-selected-payload t) {:buf 0})))  ; selection (buf 0) unchanged
+
   (test "pane-map rewrites every pane's payload (e.g. re-pointing buffer refs)"
     (let (t (pane-map (wt-tree3) (fn (p) (assoc p :buf (inc (get p :buf)))))
           p0 (pane-selected-payload t)

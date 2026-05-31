@@ -47,9 +47,9 @@ the `nest new` scaffolder."
     ;; `:main 'app` / `:main '(app start)` reads as `(quote …)` — the manifest is
     ;; data and never evaluated, so the quote is literal, not stripped. Catch it
     ;; with a fix-it instead of silently parsing module `quote`.
-    (and (pair? v) (= (first v) 'quote))
-    (error "project: :main takes a bare symbol, not a quoted one — write `:main "
-      (second v) "` (the manifest is data, so drop the leading quote)")
+    (and (pair? v) (= (first v) 'quote)) (error "project: :main takes a bare symbol, not a quoted one — write `:main "
+                                           (second v)
+                                           "` (the manifest is data, so drop the leading quote)")
     (and (pair? v) (symbol? (first v)) (pair? (rest v)) (symbol? (second v)) (nil? (rest (rest v)))) (list (first v)
                                                                                                        (second v))
     else (error "project: :main must be a module symbol or '(module fn), got " v)))
@@ -60,13 +60,14 @@ the `nest new` scaffolder."
 ;;   "app/start"  => (app start)
 (defn project--parse-main-spec (spec)
   (let (parts (string-split spec "/")
-        ; reject blank module/fn halves so a typo like "" or "/start" errors
-        ; cleanly here, not as a malformed `(require '||)` downstream.
-        ok? (fn (p) (not (blank? p))))
+         ; reject blank module/fn halves so a typo like "" or "/start" errors
+         ; cleanly here, not as a malformed `(require '||)` downstream.
+         ok?
+         (fn (p) (not (blank? p))))
     (cond
       (and (= (count parts) 1) (ok? (first parts))) (list (symbol (first parts)) 'main)
       (and (= (count parts) 2) (ok? (first parts)) (ok? (second parts))) (list (symbol (first parts))
-                                                                          (symbol (second parts)))
+                                                                           (symbol (second parts)))
       else (error "nest run --main: expected \"module\" or \"module/fn\", got " spec))))
 
 (defn set-project-main (spec)
@@ -95,28 +96,37 @@ the `nest new` scaffolder."
 (defn project--reject-reserved-opts (name opts)
   (fold (fn (_ k)
           (when (includes? *project--reserved-dep-opts* k)
-            (error "project: dependency " name " uses " k ", which is reserved for a future version")))
-    nil (project--plist-keys opts)))
+            (error "project: dependency "
+              name
+              " uses "
+              k
+              ", which is reserved for a future version")))
+    nil
+    (project--plist-keys opts)))
 
 (defn project--parse-git-dep (name entry)
   (let (url (vector-ref entry 2)
         opts (project--vec-drop entry 3)
         ref (plist-get opts :ref))
-    (when (not (string? url)) (error "project: :git dependency " name " URL must be a string, got " url))
-    (when (not (string? ref)) (error "project: :git dependency " name " needs a :ref \"<tag-or-commit>\""))
+    (when (not (string? url))
+      (error "project: :git dependency " name " URL must be a string, got " url))
+    (when (not (string? ref))
+      (error "project: :git dependency " name " needs a :ref \"<tag-or-commit>\""))
     (project--reject-reserved-opts name opts)
     {:name name :kind :git :url url :ref ref}))
 
 (defn project--parse-path-dep (name entry)
   (let (path (vector-ref entry 2)
         opts (project--vec-drop entry 3))
-    (when (not (string? path)) (error "project: :path dependency " name " path must be a string, got " path))
+    (when (not (string? path))
+      (error "project: :path dependency " name " path must be a string, got " path))
     (project--reject-reserved-opts name opts)
     {:name name :kind :path :path path}))
 
 ;; Normalise one `[name kind spec & opts]` entry into a dep map.
 (defn project--parse-dep (entry)
-  (when (not (vector? entry)) (error "project: each :dependencies entry must be a vector, got " entry))
+  (when (not (vector? entry))
+    (error "project: each :dependencies entry must be a vector, got " entry))
   (when (< (vector-length entry) 3) (error "project: dependency entry is too short: " entry))
   (let (name (vector-ref entry 0)
         kind (vector-ref entry 1))
@@ -299,13 +309,15 @@ resolve in the advisory checker. Returns the project root."
   "Advisory type-check the whole project, returning a list of `{:file :line :col :message}` diagnostic maps (one per warning) instead of printing. Returns nil under `BROOD_NO_CHECK=1`. Errors if not in a project. Backs the `nest mcp` `check` tool."
   (let (root (project--find-root (cwd)))
     (when (nil? root)
-      (error "check-project-structured: not in a Brood project (no project.blsp found from " (cwd) ")"))
+      (error "check-project-structured: not in a Brood project (no project.blsp found from "
+        (cwd)
+        ")"))
     (project--ensure-loaded root)
     (if (= (getenv "BROOD_NO_CHECK") "1")
       nil
       (fold (fn (acc f) (append acc (check-file-structured f)))
-            nil
-            (project--all-files root)))))
+        nil
+        (project--all-files root)))))
 
 ;; --- duplicate-global detection (flat namespace, ADR-019) --------------------
 ;; The project shares one flat global table: exactly one binding per name across
@@ -372,7 +384,7 @@ resolve in the advisory checker. Returns the project root."
 (defn project--file-def-names (path)
   (let (nodes (filter (fn (c) (= (project--node-kind c) :list))
                 (project--node-val (parse-source (slurp path))))
-        ns    (first (keep project--module-name nodes)))
+        ns (first (keep project--module-name nodes)))
     (map (fn (nm) (project--qualify ns nm)) (keep project--def-name nodes))))
 
 ;; The project's source files (no tests) — the set the flat-namespace rule binds.
@@ -397,8 +409,12 @@ resolve in the advisory checker. Returns the project root."
             (let ([nm paths] entry
                   where (sort (distinct paths)))
               (when (> (count where) 1)
-                (str "warning: global '" nm "' is defined in " (count where)
-                  " source files (" (join ", " where)
+                (str "warning: global '"
+                  nm
+                  "' is defined in "
+                  (count where)
+                  " source files ("
+                  (join ", " where)
                   ") — same namespace; the last loaded wins (ADR-065)"))))
       by-name)))
 
@@ -486,7 +502,9 @@ resolve in the advisory checker. Returns the project root."
   "Like `run-project-tests`, but returns the structured result `{:total :passed :failed :ms :results [...]}` instead of printing and raising on failure. Backs the `nest mcp` `run-tests` tool."
   (let (root (project--find-root (cwd)))
     (when (nil? root)
-      (error "run-project-tests-structured: not in a Brood project (no project.blsp found from " (cwd) ")"))
+      (error "run-project-tests-structured: not in a Brood project (no project.blsp found from "
+        (cwd)
+        ")"))
     (project-setup root)
     (require 'test)
     (project-load-sources root)
@@ -527,7 +545,8 @@ resolve in the advisory checker. Returns the project root."
           ;; macros that `(require 'test)` introduces (which we don't run here).
           (check-project-sources)
           (let (f (eval target))
-            (unless (fn? f) (error "run-project: entry '" fname "' is not callable (" (type-of f) ")"))
+            (unless (fn? f)
+              (error "run-project: entry '" fname "' is not callable (" (type-of f) ")"))
             (apply f args)))))))
 
 ;; --- user config (~/.config/brood/config.blsp) -------------------------------
@@ -593,17 +612,17 @@ resolve in the advisory checker. Returns the project root."
 ;; into a parent or hidden directory — see CLAUDE.md / docs/devlog.md.
 (defn project--valid-name? (nm)
   (and (> (string-length nm) 0)
-       (not (= nm "."))
-       (not (= nm ".."))
-       (not (str-contains? nm "/"))
-       (not (str-contains? nm "\\"))
-       (not (str-contains? nm " "))
-       (not (str-contains? nm "\t"))
-       (not (str-contains? nm "\n"))
-       (not (str-contains? nm "\0"))
-       (not (= (substring nm 0 1) "."))
-       (not (= (substring nm 0 1) "-"))
-       (not (= (substring nm 0 1) "~"))))
+    (not (= nm "."))
+    (not (= nm ".."))
+    (not (str-contains? nm "/"))
+    (not (str-contains? nm "\\"))
+    (not (str-contains? nm " "))
+    (not (str-contains? nm "\t"))
+    (not (str-contains? nm "\n"))
+    (not (str-contains? nm "\0"))
+    (not (= (substring nm 0 1) "."))
+    (not (= (substring nm 0 1) "-"))
+    (not (= (substring nm 0 1) "~"))))
 
 ;; --- file templates (the starter skeleton) ---
 (defn project--manifest-template (nm)
@@ -676,7 +695,8 @@ resolve in the advisory checker. Returns the project root."
 ;; for a bounded time. Kept to plain stdout for portability; for a real
 ;; full-screen UI use the `term-*` seam (docs/building-an-editor.md).
 (defn project--tui-main-template (nm)
-  (str "(defmodule main \"" nm
+  (str "(defmodule main \""
+    nm
     " — a terminal animation loop.\n"
     "Run it bounded:  nest run --for 2s   (Ctrl-C also stops it).\")\n"
     "\n"
@@ -719,7 +739,8 @@ resolve in the advisory checker. Returns the project root."
 ;; Genuine mutable state lives in a process's loop, not a variable (ADR-026):
 ;; async `cast` threads new state, synchronous `call` reads/updates it.
 (defn project--hatch-main-template (nm)
-  (str "(defmodule main \"" nm
+  (str "(defmodule main \""
+    nm
     " — a stateful process built with the hatch framework.\"\n"
     "  (:use hatch))\n"
     "\n"
@@ -754,7 +775,8 @@ resolve in the advisory checker. Returns the project root."
 ;; map a request to a response; `serve` blocks accepting connections. The router
 ;; is built by a fn (not a top-level `def`) so its closure isn't promoted.
 (defn project--http-main-template (nm)
-  (str "(defmodule main \"" nm
+  (str "(defmodule main \""
+    nm
     " — a basic HTTP server.\"\n"
     "  (:use http))\n"
     "\n"
@@ -763,7 +785,9 @@ resolve in the advisory checker. Returns the project root."
     ";; A handler maps a request map to a response (`ok` / `text-response` / `not-found`).\n"
     "(defn home (req)\n"
     "  (ok (str \"<!doctype html><meta charset=utf-8>\"\n"
-    "        \"<h1>Hello from " nm "</h1>\"\n"
+    "        \"<h1>Hello from "
+    nm
+    "</h1>\"\n"
     "        \"<p>Served by a web server written in Brood.</p>\"\n"
     "        \"<p><a href='/hello'>/hello</a></p>\")))\n"
     "\n"
@@ -781,11 +805,15 @@ resolve in the advisory checker. Returns the project root."
   (str ";; `(:use main)` brings `home` / `app` into scope; `(:use test)` the macros.\n"
     "(defmodule main-test (:use main) (:use test))\n"
     "\n"
-    "(describe \"" nm " routes\"\n"
+    "(describe \""
+    nm
+    " routes\"\n"
     "  (test \"GET / returns a 200 HTML page\"\n"
     "    (let (resp (home {:path \"/\"}))\n"
     "      (assert= (get resp :status) 200)\n"
-    "      (is (string-contains? (get resp :body) \"" nm "\"))))\n"
+    "      (is (string-contains? (get resp :body) \""
+    nm
+    "\"))))\n"
     "  (test \"an unknown route is a 404\"\n"
     "    (assert= (get ((app) {:path \"/nope\"}) :status) 404)))\n"))
 
@@ -795,8 +823,9 @@ resolve in the advisory checker. Returns the project root."
 ;; terminal); `view`/`update` plug into `ui-run`, which owns the loop + teardown.
 ;; Runs in the terminal (`*term-display*`) or, with `--features gui`, a window.
 (defn project--editor-main-template (nm)
-  (str
-    "(defmodule main \"" nm " — a tiny text editor built on the `ui` framework.\n"
+  (str "(defmodule main \""
+    nm
+    " — a tiny text editor built on the `ui` framework.\n"
     "\n"
     "Run it:  nest run   (type to edit, arrows move, Enter splits a line, Backspace\n"
     "deletes, Ctrl-C quits). The buffer is a list of line strings with a [row col]\n"
@@ -895,8 +924,7 @@ resolve in the advisory checker. Returns the project root."
     "  (ui-run (ed-init) ed-view ed-update *term-display*))\n"))
 
 (defn project--editor-test-template (nm)
-  (str
-    ";; `(:use main)` brings the pure edit fns (ed-insert, …); `(:use test)` the macros.\n"
+  (str ";; `(:use main)` brings the pure edit fns (ed-insert, …); `(:use test)` the macros.\n"
     ";; The loop is `ui-run`'s; here we test the edits — pure `(model -> model)`.\n"
     "(defmodule main-test (:use main) (:use test))\n"
     "\n"
@@ -923,8 +951,9 @@ resolve in the advisory checker. Returns the project root."
 ;; restyle in one place). The model is a plain map threaded through `ui-run`'s
 ;; loop; the starting point for a real GUI app (e.g. a daemon dashboard).
 (defn project--gui-main-template (nm)
-  (str
-    "(defmodule main \"" nm " — a windowed GUI app on the `ui` framework.\n"
+  (str "(defmodule main \""
+    nm
+    " — a windowed GUI app on the `ui` framework.\n"
     "\n"
     "Run it:  nest run   (opens a native window — needs the runtime built with the\n"
     "GUI backend: `./configure --with-gui && make install`, or run with\n"
@@ -955,7 +984,9 @@ resolve in the advisory checker. Returns the project root."
     "(defn app-view (m cols rows)\n"
     "  \"ui-run view: a centred title, the counter, and key hints (pure).\"\n"
     "  (let (mid   (quot rows 2)\n"
-    "        title \"" nm "\"\n"
+    "        title \""
+    nm
+    "\"\n"
     "        count (str \"count: \" (get m :count))\n"
     "        hint  \"up/down change · enter reset · ctrl-c quit\")\n"
     "    (frame\n"
@@ -983,13 +1014,14 @@ resolve in the advisory checker. Returns the project root."
     "  (ui-run (app-init) app-view app-update (gui-display)))\n"))
 
 (defn project--gui-test-template (nm)
-  (str
-    ";; `(:use main)` brings the pure fns; `(:use test)` the macros. The window loop is\n"
+  (str ";; `(:use main)` brings the pure fns; `(:use test)` the macros. The window loop is\n"
     ";; `ui-run`'s (untested here — it needs a display); we test the pure `update` and\n"
     ";; `view` — `(model -> model)` / `(model -> frame)`.\n"
     "(defmodule main-test (:use main) (:use test))\n"
     "\n"
-    "(describe \"" nm " counter\"\n"
+    "(describe \""
+    nm
+    " counter\"\n"
     "  (test \"up increments, down decrements\"\n"
     "    (assert= (get (app-update {:count 5} :up 80 24) :count) 6)\n"
     "    (assert= (get (app-update {:count 5} :down 80 24) :count) 4))\n"
@@ -1095,39 +1127,43 @@ resolve in the advisory checker. Returns the project root."
 ;; …) are written by the caller; only the starter code varies by template.
 (defn project--write-template (tmpl nm src-dir tests-dir actual-name)
   (cond
-    (= tmpl "tui-loop")
-    (do
-      (spit (path-join src-dir "main.blsp") (project--tui-main-template actual-name))
-      (spit (path-join tests-dir "main_test.blsp") (project--tui-test-template actual-name))
-      [(str nm "/src/main.blsp") (str nm "/tests/main_test.blsp")])
-    (= tmpl "hatch")
-    (do
-      (spit (path-join src-dir "main.blsp") (project--hatch-main-template actual-name))
-      (spit (path-join tests-dir "main_test.blsp") (project--hatch-test-template actual-name))
-      [(str nm "/src/main.blsp") (str nm "/tests/main_test.blsp")])
-    (= tmpl "http-server")
-    (do
-      (spit (path-join src-dir "main.blsp") (project--http-main-template actual-name))
-      (spit (path-join tests-dir "main_test.blsp") (project--http-test-template actual-name))
-      [(str nm "/src/main.blsp") (str nm "/tests/main_test.blsp")])
-    (= tmpl "editor")
-    (do
-      (spit (path-join src-dir "main.blsp") (project--editor-main-template actual-name))
-      (spit (path-join tests-dir "main_test.blsp") (project--editor-test-template actual-name))
-      [(str nm "/src/main.blsp") (str nm "/tests/main_test.blsp")])
-    (= tmpl "gui")
-    (do
-      (spit (path-join src-dir "main.blsp") (project--gui-main-template actual-name))
-      (spit (path-join tests-dir "main_test.blsp") (project--gui-test-template actual-name))
-      [(str nm "/src/main.blsp") (str nm "/tests/main_test.blsp")])
-    else
-    (do
-      (spit (path-join src-dir "main.blsp") (project--main-template actual-name))
-      (spit (path-join src-dir "hello.blsp") (project--hello-template actual-name))
-      (spit (path-join tests-dir "main_test.blsp") (project--main-test-template actual-name))
-      (spit (path-join tests-dir "hello_test.blsp") (project--hello-test-template actual-name))
-      [(str nm "/src/main.blsp") (str nm "/src/hello.blsp")
-       (str nm "/tests/main_test.blsp") (str nm "/tests/hello_test.blsp")])))
+    (= tmpl "tui-loop") (do
+                          (spit (path-join src-dir "main.blsp")
+                            (project--tui-main-template actual-name))
+                          (spit (path-join tests-dir "main_test.blsp")
+                            (project--tui-test-template actual-name))
+                          [(str nm "/src/main.blsp") (str nm "/tests/main_test.blsp")])
+    (= tmpl "hatch") (do
+                       (spit (path-join src-dir "main.blsp")
+                         (project--hatch-main-template actual-name))
+                       (spit (path-join tests-dir "main_test.blsp")
+                         (project--hatch-test-template actual-name))
+                       [(str nm "/src/main.blsp") (str nm "/tests/main_test.blsp")])
+    (= tmpl "http-server") (do
+                             (spit (path-join src-dir "main.blsp")
+                               (project--http-main-template actual-name))
+                             (spit (path-join tests-dir "main_test.blsp")
+                               (project--http-test-template actual-name))
+                             [(str nm "/src/main.blsp") (str nm "/tests/main_test.blsp")])
+    (= tmpl "editor") (do
+                        (spit (path-join src-dir "main.blsp")
+                          (project--editor-main-template actual-name))
+                        (spit (path-join tests-dir "main_test.blsp")
+                          (project--editor-test-template actual-name))
+                        [(str nm "/src/main.blsp") (str nm "/tests/main_test.blsp")])
+    (= tmpl "gui") (do
+                     (spit (path-join src-dir "main.blsp") (project--gui-main-template actual-name))
+                     (spit (path-join tests-dir "main_test.blsp")
+                       (project--gui-test-template actual-name))
+                     [(str nm "/src/main.blsp") (str nm "/tests/main_test.blsp")])
+    else (do
+           (spit (path-join src-dir "main.blsp") (project--main-template actual-name))
+           (spit (path-join src-dir "hello.blsp") (project--hello-template actual-name))
+           (spit (path-join tests-dir "main_test.blsp") (project--main-test-template actual-name))
+           (spit (path-join tests-dir "hello_test.blsp") (project--hello-test-template actual-name))
+           [(str nm "/src/main.blsp") (str nm "/src/hello.blsp")
+             (str nm "/tests/main_test.blsp")
+             (str nm "/tests/hello_test.blsp")])))
 
 (defn new-project (nm &optional template)
   "Scaffold a new project named `nm` (or `\".\"` for the current directory, taking the project name from the cwd's basename): a `project.blsp` manifest, the baked-in language guide, and starter code chosen by `template` — `\"default\"` (a `main`+`hello` module pair, the default), `\"tui-loop\"` (a tail-recursive animation loop), `\"hatch\"` (a stateful gen_server process), `\"http-server\"` (a minimal web app), `\"editor\"` (a tiny text editor on the `ui` framework), or `\"gui\"` (a windowed app on the `ui` framework, opened with `(gui-display)` — needs a `--features gui` runtime). Existing scaffold files are overwritten, not rejected. Backs `nest new [--template …]`."
@@ -1161,12 +1197,14 @@ resolve in the advisory checker. Returns the project root."
       (spit (path-join docs-dir "brood-for-claude.md") (%builtin-doc 'brood-for-claude))
       (spit (path-join skill-dir "SKILL.md") (%builtin-doc 'writing-brood-skill))
       (let (code-files (project--write-template tmpl nm src-dir tests-dir actual-name))
-        (println (str "Created Brood project '" actual-name "'"
+        (println (str "Created Brood project '"
+                   actual-name
+                   "'"
                    (if (= tmpl "default") "" (str " [" tmpl " template]"))
                    (cond
-                     in-place   " (in-place — files in current directory overwritten)"
+                     in-place " (in-place — files in current directory overwritten)"
                      reusing-dir " (existing files overwritten)"
-                     else       "")))
+                     else "")))
         (println (str "  " nm "/project.blsp"))
         (println (str "  " nm "/.gitignore"))
         (println (str "  " nm "/CLAUDE.md"))

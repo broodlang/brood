@@ -61,11 +61,11 @@ attach). Drive the standalone app from the shell with `nest observe`."
   (:use ui))
 
 (require 'display)
-(require 'keymap)     ; the shared key→command dispatcher (also used by the REPL)
-(require 'face)       ; the shared named-face / theme registry
-(require 'ui)         ; the reusable app framework — frontends + the `ui-run` loop
+(require 'keymap)  ; the shared key→command dispatcher (also used by the REPL)
+(require 'face)  ; the shared named-face / theme registry
+(require 'ui)  ; the reusable app framework — frontends + the `ui-run` loop
 (require 'lineedit)  ; the minibuffer reuses lineedit's pure editing core
-(require 'highlight) ; …and its syntax colouring (shared with the REPL line editor)
+(require 'highlight)  ; …and its syntax colouring (shared with the REPL line editor)
 
 ;; ---- faces (named, via the shared `face` registry) --------------------------
 ;;
@@ -74,17 +74,17 @@ attach). Drive the standalone app from the shell with `nest observe`."
 ;; `(face-set :observer/detail {:fg :magenta})` from the REPL). Most inherit a core
 ;; `:ui/*` face; they resolve to the same attribute maps the renderer always used.
 
-(def-face :observer/header     {:inherit :ui/header})      ; node banner: bold reverse
-(def-face :observer/node-stats {:inherit :ui/dim})         ; the second header line
-(def-face :observer/col-header {:bold true})               ; the column titles
-(def-face :observer/detail     {:inherit :ui/highlight})   ; the selection detail line
-(def-face :observer/footer     {:inherit :ui/selected})    ; the help / status footer
-(def-face :observer/selected   {:inherit :ui/selected})    ; the selected process row
-(def-face :observer/row-running  {:fg :green})             ; a running process row
-(def-face :observer/row-runnable {:fg :yellow})            ; a runnable process row
-(def-face :observer/row-waiting  {:inherit :ui/dim})       ; a parked (waiting) row
-(def-face :observer/minibuffer-prompt {:inherit :ui/highlight}) ; the eval prompt
-(def-face :observer/confirm    {:inherit :ui/error})       ; the kill confirm prompt
+(def-face :observer/header {:inherit :ui/header})  ; node banner: bold reverse
+(def-face :observer/node-stats {:inherit :ui/dim})  ; the second header line
+(def-face :observer/col-header {:bold true})  ; the column titles
+(def-face :observer/detail {:inherit :ui/highlight})  ; the selection detail line
+(def-face :observer/footer {:inherit :ui/selected})  ; the help / status footer
+(def-face :observer/selected {:inherit :ui/selected})  ; the selected process row
+(def-face :observer/row-running {:fg :green})  ; a running process row
+(def-face :observer/row-runnable {:fg :yellow})  ; a runnable process row
+(def-face :observer/row-waiting {:inherit :ui/dim})  ; a parked (waiting) row
+(def-face :observer/minibuffer-prompt {:inherit :ui/highlight})  ; the eval prompt
+(def-face :observer/confirm {:inherit :ui/error})  ; the kill confirm prompt
 
 ;; ---- pure formatting helpers ------------------------------------------------
 
@@ -107,9 +107,19 @@ attach). Drive the standalone app from the shell with `nest observe`."
   "One table line's seven fixed-width columns (used for both header and rows).
 `reds` is the cumulative reduction count — Erlang's scheduling unit — so a busy
 process stands out by a fast-climbing figure."
-  (str (pad-left (str id) 5) " " (pad-right nm 12) " " (pad-right status 8) " "
-       (pad-left (str mbox) 6) " " (pad-left mem 8) " " (pad-left (str reds) 9) " "
-       (pad-left (str mon) 4)))
+  (str (pad-left (str id) 5)
+    " "
+    (pad-right nm 12)
+    " "
+    (pad-right status 8)
+    " "
+    (pad-left (str mbox) 6)
+    " "
+    (pad-left mem 8)
+    " "
+    (pad-left (str reds) 9)
+    " "
+    (pad-left (str mon) 4)))
 
 (defn observe--proc-cells (p)
   "The table line for one `process-info` map `p`. In tree view the map carries a
@@ -118,12 +128,12 @@ process stands out by a fast-climbing figure."
         nm (observe--opt (get p :name) name)
         nm (if (> depth 0) (observe--fit (str (string-repeat "  " depth) nm) 12) nm))
     (observe--cells (get p :id)
-                    nm
-                    (observe--opt (get p :status) name)
-                    (get p :mailbox)
-                    (observe--opt (get p :memory) observe--bytes->human)
-                    (observe--opt (get p :reductions) str)
-                    (get p :monitored-by))))
+      nm
+      (observe--opt (get p :status) name)
+      (get p :mailbox)
+      (observe--opt (get p :memory) observe--bytes->human)
+      (observe--opt (get p :reductions) str)
+      (get p :monitored-by))))
 
 (defn observe--row-face (p selected?)
   "Face for a process row: the selection face when selected, else the row face for
@@ -131,38 +141,65 @@ its status (running / runnable / waiting), resolved through the shared registry 
 the colours live in one place (`:observer/*`)."
   (if selected?
     (face :observer/selected)
-    (cond (= (get p :status) :running)  (face :observer/row-running)
-          (= (get p :status) :runnable) (face :observer/row-runnable)
-          (= (get p :status) :waiting)  (face :observer/row-waiting)
-          :else nil)))
+    (cond
+      (= (get p :status) :running) (face :observer/row-running)
+      (= (get p :status) :runnable) (face :observer/row-runnable)
+      (= (get p :status) :waiting) (face :observer/row-waiting)
+      :else nil)))
 
 (defn observe--detail (p nprocs cap sel)
   "The detail line for the selected process-info map `p`. Absent fields
 (`:name`/`:memory`/`:parent`) are omitted rather than shown as a placeholder."
-  (str "  pid " (get p :id)
-       (let (nm (get p :name)) (if (nil? nm) "" (str " (" (name nm) ")")))
-       " · " (let (s (get p :status)) (if (nil? s) "?" (name s)))
-       " · mailbox " (get p :mailbox)
-       (let (m (get p :memory)) (if (nil? m) "" (str " · mem " (observe--bytes->human m))))
-       (let (gc (get p :collections)) (if (or (nil? gc) (= gc 0)) "" (str " · gc " gc)))
-       (let (r (get p :reductions)) (if (or (nil? r) (= r 0)) "" (str " · reds " r)))
-       (let (pa (get p :parent)) (if (nil? pa) "" (str " · parent " pa)))
-       " · monitored-by " (get p :monitored-by)
-       (if (> nprocs cap) (str "   [" (inc sel) "/" nprocs "]") "")))
+  (str "  pid "
+    (get p :id)
+    (let (nm (get p :name)) (if (nil? nm) "" (str " (" (name nm) ")")))
+    " · "
+    (let (s (get p :status)) (if (nil? s) "?" (name s)))
+    " · mailbox "
+    (get p :mailbox)
+    (let (m (get p :memory)) (if (nil? m) "" (str " · mem " (observe--bytes->human m))))
+    (let (gc (get p :collections)) (if (or (nil? gc) (= gc 0)) "" (str " · gc " gc)))
+    (let (r (get p :reductions)) (if (or (nil? r) (= r 0)) "" (str " · reds " r)))
+    (let (pa (get p :parent)) (if (nil? pa) "" (str " · parent " pa)))
+    " · monitored-by "
+    (get p :monitored-by)
+    (if (> nprocs cap) (str "   [" (inc sel) "/" nprocs "]") "")))
 
 (defn observe--node-lines (node nprocs link)
   "The two node-summary header strings from a node-stats map (see
 `observe--node-info`), the live process count, and the `link` status indicator
 (`:ok` shows nothing; `:stale`/`:down` flag a slow/dropped remote link)."
-  [(str " brood observer · node " (name (get node :name)) " · " nprocs " processes"
-        (cond (= link :down)  "  ••• DISCONNECTED"
-              (= link :stale) "  ••• stale"
-              :else ""))
-   (str " workers " (get node :workers) " (peak " (get node :peak) ")"
-        " · spawned " (get node :spawned)
-        " · mem " (observe--bytes->human (get node :mem))
-        " (peak " (observe--bytes->human (get node :mem-peak)) ")"
-        (let (ps (get node :peers)) (if (empty? ps) "" (str " · peers " (count ps)))))])
+  [(str " brood observer · node "
+     (name (get node :name))
+     " · "
+     nprocs
+     " processes"
+     (cond
+       (= link :down) "  ••• DISCONNECTED"
+       (= link :stale) "  ••• stale"
+       :else "")) (str " workers "
+                                                                                                                                                                                                                       (get node
+                                                                                                                                                                                                                         :workers)
+                                                                                                                                                                                                                       " (peak "
+                                                                                                                                                                                                                       (get node
+                                                                                                                                                                                                                         :peak)
+                                                                                                                                                                                                                       ")"
+                                                                                                                                                                                                                       " · spawned "
+                                                                                                                                                                                                                       (get node
+                                                                                                                                                                                                                         :spawned)
+                                                                                                                                                                                                                       " · mem "
+                                                                                                                                                                                                                       (observe--bytes->human (get node
+                                                                                                                                                                                                                                                :mem))
+                                                                                                                                                                                                                       " (peak "
+                                                                                                                                                                                                                       (observe--bytes->human (get node
+                                                                                                                                                                                                                                                :mem-peak))
+                                                                                                                                                                                                                       ")"
+                                                                                                                                                                                                                       (let (ps (get node
+                                                                                                                                                                                                                                  :peers))
+                                                                                                                                                                                                                         (if (empty? ps)
+                                                                                                                                                                                                                           ""
+                                                                                                                                                                                                                           (str " · peers "
+                                                                                                                                                                                                                             (count ps)))))])
 
 (defn observe--window-start (sel cap n)
   "First visible index of a `cap`-row window over `n` items that keeps row `sel`
@@ -182,8 +219,10 @@ on screen (roughly centred), clamped so the window never runs past the end."
   (if (empty? chunks)
     (reverse acc)
     (let ([s f] (first chunks))
-      (observe--chunk-ops--acc (rest chunks) row (+ col (string-length s))
-                               (cons (text row col s f) acc)))))
+      (observe--chunk-ops--acc (rest chunks)
+        row
+        (+ col (string-length s))
+        (cons (text row col s f) acc)))))
 
 (defn observe--chunk-ops (chunks row col)
   "Lay `[substring face]` highlight chunks as absolute `text` ops on `row`, left to
@@ -208,17 +247,17 @@ completion already works via `lineedit/lineedit--handle`'s keymap in `observe--c
         overrides (lineedit/lineedit--overrides input point)
         chunks (highlight-chunks input hs vis overrides)
         cursor-col (min (max 0 (dec cols)) (+ promptw (- point hs))))
-    (append
-      [(text row 0 prompt (face :observer/minibuffer-prompt))]
+    (append [(text row 0 prompt (face :observer/minibuffer-prompt))]
       (observe--chunk-ops chunks row promptw)
       [(cursor row cursor-col)])))
 
 (defn observe--confirm-line (c)
   "The footer prompt for a pending action confirmation `c` (a map `{:id :name …}`):
 e.g. `  kill pid 7 (worker)? y/n`. The name is shown when the process has one."
-  (str "  kill pid " (get c :id)
-       (let (nm (get c :name)) (if (nil? nm) "" (str " (" (name nm) ")")))
-       "? y/n"))
+  (str "  kill pid "
+    (get c :id)
+    (let (nm (get c :name)) (if (nil? nm) "" (str " (" (name nm) ")")))
+    "? y/n"))
 
 ;; ---- the pure render core (no IO — the testable heart) ----------------------
 
@@ -232,43 +271,70 @@ minibuffer (the `:edit` line-editor state's prompt+text, with the cursor placed)
 and `(:msg ui)` — the last command's result — replaces the detail line. No IO —
 the observer's testable core; `observe--loop` feeds it live data."
   (let (nprocs (count procs)
-        lines (observe--node-lines node nprocs link)
-        cap (max 1 (- rows 5))
-        start (observe--window-start sel cap nprocs)
-        visible (take cap (drop start procs))
-        body (map (fn ([i p])
-                    (let (a (+ start i)
-                          selected? (= a sel))
-                      (text (+ 3 i) 0
-                            (observe--fit (str (if selected? "▸ " "  ") (observe--proc-cells p)) cols)
-                            (observe--row-face p selected?))))
-                  (enumerate visible))
-        cmd? (= (get ui :mode) :command)
-        confirm (get ui :confirm)
-        edit (get ui :edit)
-        detail (cond
-                 (get ui :msg) (str "  " (get ui :msg))
-                 (empty? procs) "  (no live processes)"
-                 :else (observe--detail (nth procs (min (max 0 (dec nprocs)) sel)) nprocs cap sel))
-        footer (str (if paused "  PAUSED · space resume" "  space pause")
-                    " · ↑/↓ select · t tree · s sort(" (name sort) ") · x kill · : eval · r refresh · q quit")
-        ;; last row: the minibuffer (command mode), the kill confirm prompt, or the
-        ;; help footer — each a list of ops so `append` splices it in.
-        last-row (cond
-                   cmd?    (observe--minibuffer edit (dec rows) cols)
-                   confirm [(text (dec rows) 0 (observe--fit (pad-right (observe--confirm-line confirm) cols) cols)
-                                  (face :observer/confirm))]
-                   :else   [(text (dec rows) 0 (observe--fit (pad-right footer cols) cols)
-                                  (face :observer/footer))]))
+         lines
+         (observe--node-lines node nprocs link)
+         cap
+         (max 1 (- rows 5))
+         start
+         (observe--window-start sel cap nprocs)
+         visible
+         (take cap (drop start procs))
+         body
+         (map (fn ([i p])
+                (let (a (+ start i)
+                      selected? (= a sel))
+                  (text (+ 3 i)
+                    0
+                    (observe--fit (str (if selected? "▸ " "  ") (observe--proc-cells p)) cols)
+                    (observe--row-face p selected?))))
+           (enumerate visible))
+         cmd?
+         (= (get ui :mode) :command)
+         confirm
+         (get ui :confirm)
+         edit
+         (get ui :edit)
+         detail
+         (cond
+           (get ui :msg) (str "  " (get ui :msg))
+           (empty? procs) "  (no live processes)"
+           :else (observe--detail (nth procs (min (max 0 (dec nprocs)) sel)) nprocs cap sel))
+         footer
+         (str (if paused "  PAUSED · space resume" "  space pause")
+           " · ↑/↓ select · t tree · s sort("
+           (name sort)
+           ") · x kill · : eval · r refresh · q quit")
+         ;; last row: the minibuffer (command mode), the kill confirm prompt, or the
+         ;; help footer — each a list of ops so `append` splices it in.
+         last-row
+         (cond
+           cmd? (observe--minibuffer edit (dec rows) cols)
+           confirm [(text (dec rows)
+                      0
+                      (observe--fit (pad-right (observe--confirm-line confirm) cols) cols)
+                      (face :observer/confirm))]
+           :else [(text (dec rows)
+                    0
+                    (observe--fit (pad-right footer cols) cols)
+                    (face :observer/footer))]))
     (apply frame
-           (append
-             [(clear)
-              (text 0 0 (observe--fit (pad-right (nth lines 0) cols) cols) (face :observer/header))
-              (text 1 0 (observe--fit (pad-right (nth lines 1) cols) cols) (face :observer/node-stats))
-              (text 2 0 (observe--fit (str "  " (observe--cells "ID" "NAME" "STATUS" "MBOX" "MEM" "REDS" "MON")) cols) (face :observer/col-header))]
-             body
-             [(text (- rows 2) 0 (observe--fit (pad-right detail cols) cols) (face :observer/detail))]
-             last-row))))
+      (append [(clear) (text 0
+                         0
+                         (observe--fit (pad-right (nth lines 0) cols) cols)
+                         (face :observer/header))
+                (text 1
+                  0
+                  (observe--fit (pad-right (nth lines 1) cols) cols)
+                  (face :observer/node-stats))
+                (text 2
+                  0
+                  (observe--fit (str "  "
+                                  (observe--cells "ID" "NAME" "STATUS" "MBOX" "MEM" "REDS" "MON"))
+                    cols)
+                  (face :observer/col-header))]
+        body
+        [(text (- rows 2) 0 (observe--fit (pad-right detail cols) cols) (face :observer/detail))]
+        last-row))))
 
 ;; ---- live data --------------------------------------------------------------
 
@@ -287,8 +353,8 @@ the observer's testable core; `observe--loop` feeds it live data."
 `:mailbox` or `:memory` descending (busiest/biggest first)."
   (cond
     (= key :mailbox) (sort-by (fn (p) (- (get p :mailbox))) procs)
-    (= key :memory)  (sort-by (fn (p) (- (or (get p :memory) 0))) procs)
-    :else            (sort-by (fn (p) (get p :id)) procs)))
+    (= key :memory) (sort-by (fn (p) (- (or (get p :memory) 0))) procs)
+    :else (sort-by (fn (p) (get p :id)) procs)))
 
 (defn observe--tree-walk (p procs depth limit)
   "DFS: emit `p` (tagged with `:depth`) followed by its children's subtrees, each
@@ -299,9 +365,9 @@ peer could send one) is bounded instead of overflowing the stack."
   (if (>= depth limit)
     [(assoc p :depth depth)]
     (let (kids (sort-by (fn (c) (get c :id))
-                        (filter (fn (c) (= (get c :parent) (get p :id))) procs)))
+                 (filter (fn (c) (= (get c :parent) (get p :id))) procs)))
       (cons (assoc p :depth depth)
-            (mapcat (fn (k) (observe--tree-walk k procs (inc depth) limit)) kids)))))
+        (mapcat (fn (k) (observe--tree-walk k procs (inc depth) limit)) kids)))))
 
 (defn observe--tree-order (procs)
   "Order `procs` as a parent→child forest: roots first (a process whose `:parent`
@@ -322,10 +388,11 @@ anything else is `observe--sort` (id / mailbox / memory)."
 
 (defn observe--next-sort (key)
   "Cycle the sort key: id → mailbox → memory → tree → id."
-  (cond (= key :id) :mailbox
-        (= key :mailbox) :memory
-        (= key :memory) :tree
-        :else :id))
+  (cond
+    (= key :id) :mailbox
+    (= key :mailbox) :memory
+    (= key :memory) :tree
+    :else :id))
 
 (defn observe--local-source ()
   "The inline data **source**: a `process-info` map for every live process in
@@ -350,9 +417,9 @@ and set link `:ok`. `:timeout` → keep `:last`, link `:stale`. `:down` → link
 last snapshot) until the user quits. Pure."
   (cond
     (= (get state :link) :down) state
-    (map? result)               (assoc state :last result :link :ok)
-    (= result :down)            (assoc state :link :down)
-    :else                       (assoc state :link :stale)))
+    (map? result) (assoc state :last result :link :ok)
+    (= result :down) (assoc state :link :down)
+    :else (assoc state :link :stale)))
 
 ;; ---- the IO loop (interactive; runs in the root process) --------------------
 
@@ -374,10 +441,20 @@ Clamped to a valid row."
 ;; resolve through `*observe-keymap*` via `keymap-dispatch` (rebindable + testable,
 ;; like the line editor). Quit sets `:done`; `:`/`e` enter the eval minibuffer.
 
-(defn observe-cmd-up (state _) "Select the previous row." (observe--select state (get state :procs) (max 0 (dec (get state :sel)))))
-(defn observe-cmd-down (state _) "Select the next row." (observe--select state (get state :procs) (min (max 0 (dec (get state :n))) (inc (get state :sel)))))
-(defn observe-cmd-sort (state _) "Cycle the view (id/mailbox/memory/tree)." (assoc state :sort (observe--next-sort (get state :sort))))
-(defn observe-cmd-pause (state _) "Pause / resume the live refresh." (assoc state :paused (not (get state :paused))))
+(defn observe-cmd-up (state _)
+  "Select the previous row."
+  (observe--select state (get state :procs) (max 0 (dec (get state :sel)))))
+(defn observe-cmd-down (state _)
+  "Select the next row."
+  (observe--select state
+    (get state :procs)
+    (min (max 0 (dec (get state :n))) (inc (get state :sel)))))
+(defn observe-cmd-sort (state _)
+  "Cycle the view (id/mailbox/memory/tree)."
+  (assoc state :sort (observe--next-sort (get state :sort))))
+(defn observe-cmd-pause (state _)
+  "Pause / resume the live refresh."
+  (assoc state :paused (not (get state :paused))))
 (defn observe-cmd-refresh (state _) "Resume live (un-pause)." (assoc state :paused false))
 (defn observe-cmd-quit (state _) "Quit the observer." (assoc state :done true))
 (defn observe-cmd-command (state _)
@@ -400,19 +477,29 @@ process is selected."
     (if (empty? procs)
       state
       (let (p (nth procs sel))
-        (assoc state :confirm {:pid (get p :pid) :id (get p :id) :name (get p :name)}
-                     :msg nil)))))
+        (assoc state
+          :confirm
+          {:pid (get p :pid) :id (get p :id) :name (get p :name)}
+          :msg
+          nil)))))
 
 (def *observe-keymap*
-  {:up 'observer/observe-cmd-up :ctrl-p 'observer/observe-cmd-up "k" 'observer/observe-cmd-up
-   :down 'observer/observe-cmd-down :ctrl-n 'observer/observe-cmd-down "j" 'observer/observe-cmd-down
+  {:up 'observer/observe-cmd-up
+   :ctrl-p 'observer/observe-cmd-up
+   "k" 'observer/observe-cmd-up
+   :down 'observer/observe-cmd-down
+   :ctrl-n 'observer/observe-cmd-down
+   "j" 'observer/observe-cmd-down
    "s" 'observer/observe-cmd-sort
    "t" 'observer/observe-cmd-tree
    "x" 'observer/observe-cmd-kill
    " " 'observer/observe-cmd-pause
    "r" 'observer/observe-cmd-refresh
-   ":" 'observer/observe-cmd-command "e" 'observer/observe-cmd-command
-   "q" 'observer/observe-cmd-quit :escape 'observer/observe-cmd-quit :ctrl-c 'observer/observe-cmd-quit})
+   ":" 'observer/observe-cmd-command
+   "e" 'observer/observe-cmd-command
+   "q" 'observer/observe-cmd-quit
+   :escape 'observer/observe-cmd-quit
+   :ctrl-c 'observer/observe-cmd-quit})
 
 ;; ---- mouse (a second input path: click to select, wheel to scroll) ----------
 ;;
@@ -452,17 +539,18 @@ body height (`(max 1 (- rows 5))`, as in `observe-frame`)."
   ;; matching. `nth` is length-agnostic — robust to that and any future element.
   (let (action (nth ev 1)
         button (nth ev 2)
-        row    (nth ev 3)
+        row (nth ev 3)
         procs (get state :procs)
         n (get state :n)
         sel (get state :sel)
         st (assoc state :msg nil))
     (cond
-      (= action :scroll-up)   (observe--select st procs (max 0 (dec sel)))
+      (= action :scroll-up) (observe--select st procs (max 0 (dec sel)))
       (= action :scroll-down) (observe--select st procs (min (max 0 (dec n)) (inc sel)))
-      (and (= action :press) (= button :left))
-        (let (idx (observe--mouse-row->sel row sel cap n))
-          (if (nil? idx) state (observe--select st procs idx)))
+      (and (= action :press) (= button :left)) (let (idx (observe--mouse-row->sel row sel cap n))
+                                                 (if (nil? idx)
+                                                   state
+                                                   (observe--select st procs idx)))
       :else state)))
 
 ;; ---- display frontends + app loop now live in `ui` (std/ui.blsp) ------------
@@ -478,8 +566,7 @@ body height (`(max 1 (- rows 5))`, as in `observe-frame`)."
 string for the minibuffer. The local backend, and what the remote agent runs."
   (try
     (str "=> " (pr-str (eval-string src)))
-    (catch e (str "error: "
-                  (if (and (map? e) (contains? e :message)) (get e :message) (pr-str e))))))
+    (catch e (str "error: " (if (and (map? e) (contains? e :message)) (get e :message) (pr-str e))))))
 
 (defn observe--command-key (state backend key)
   "Feed `key` to the minibuffer's line editor (reusing lineedit's pure core). On
@@ -488,11 +575,17 @@ EOF, return to navigation; otherwise keep editing."
   (let (edit (lineedit/lineedit--handle (get state :edit) key)
         done (get edit :done))
     (cond
-      (= done :submit) (assoc state :mode :nav :edit nil
-                                    :history (lineedit/lineedit--remember (get state :history) (get edit :text))
-                                    :msg ((get backend :eval) (get edit :text)))
-      (nil? done)      (assoc state :edit edit)
-      :else            (assoc state :mode :nav :edit nil))))
+      (= done :submit) (assoc state
+                         :mode
+                         :nav
+                         :edit
+                         nil
+                         :history
+                         (lineedit/lineedit--remember (get state :history) (get edit :text))
+                         :msg
+                         ((get backend :eval) (get edit :text)))
+      (nil? done) (assoc state :edit edit)
+      :else (assoc state :mode :nav :edit nil))))
 
 (defn observe--kill-msg (pid id)
   "Kill local process `pid` (`exit … :kill`) and return a one-line result for the
@@ -539,9 +632,19 @@ the minibuffer UI state. Paints to whatever frontend `ui-run` holds."
         sort (get model :sort)
         procs (observe--order (get snap :procs) sort)
         sel (observe--sel-index procs (get model :sel-id))
-        ui {:mode (get model :mode) :edit (get model :edit) :msg (get model :msg)
+        ui {:mode (get model :mode)
+            :edit (get model :edit)
+            :msg (get model :msg)
             :confirm (get model :confirm)})
-    (observe-frame (get snap :node) procs sel cols rows (get model :paused) sort (get model :link) ui)))
+    (observe-frame (get snap :node)
+      procs
+      sel
+      cols
+      rows
+      (get model :paused)
+      sort
+      (get model :link)
+      ui)))
 
 (defn observe--update (model input cols rows)
   "The observer's `ui-run` **update**: fold one input into the next model. `:tick`
@@ -552,23 +655,21 @@ routes keys to y/n; in `:command` mode keys drive the eval minibuffer; otherwise
 keys dispatch through `*observe-keymap*` (quit sets `:done`, which `ui-run`
 honours). The backend rides in the model under `:backend`."
   (let (backend (get model :backend)
-        cap (max 1 (- rows 5)))             ; visible body height (see observe-frame)
+        cap (max 1 (- rows 5)))
+    ; visible body height (see observe-frame)
     (cond
-      (= input :tick)
-        (if (and (not (get model :paused))
-                 (not (= (get model :mode) :command))
-                 (not (get model :confirm)))
-          (observe--apply-result model ((get backend :source)))
-          model)
-      (get model :confirm)
-        (observe--confirm-key model backend input)
-      (observe--mouse? input)
-        (observe--apply-mouse (observe--derived model cols rows) input cap)
-      (= (get model :mode) :command)
-        (observe--command-key model backend input)
-      :else
-        (keymap-dispatch *observe-keymap* (assoc (observe--derived model cols rows) :msg nil)
-                         input (fn (s _) s)))))
+      (= input :tick) (if (and (not (get model :paused))
+                            (not (= (get model :mode) :command))
+                            (not (get model :confirm)))
+                        (observe--apply-result model ((get backend :source)))
+                        model)
+      (get model :confirm) (observe--confirm-key model backend input)
+      (observe--mouse? input) (observe--apply-mouse (observe--derived model cols rows) input cap)
+      (= (get model :mode) :command) (observe--command-key model backend input)
+      :else (keymap-dispatch *observe-keymap*
+              (assoc (observe--derived model cols rows) :msg nil)
+              input
+              (fn (s _) s)))))
 
 ;; ---- demo processes (so a fresh observer has something to show) -------------
 
@@ -611,11 +712,22 @@ loop with a remote source — see `observe-connect`. `display` defaults to the
 terminal; pass `(gui-display)` for a window, or a `display-broadcast` of several
 frontends to render to all at once. It blocks the calling process until quit, so
 `(observe)` runs it in a spawned process."
-  (ui-run {:sel-id nil :sort :id :paused false :last nil :link :ok :mode :nav :edit nil :msg nil
-           :history [] :confirm nil
-           :backend {:source observe--local-snapshot :eval observe--eval-string
+  (ui-run {:sel-id nil
+           :sort :id
+           :paused false
+           :last nil
+           :link :ok
+           :mode :nav
+           :edit nil
+           :msg nil
+           :history []
+           :confirm nil
+           :backend {:source observe--local-snapshot
+                     :eval observe--eval-string
                      :kill (fn (c) (observe--kill-msg (get c :pid) (get c :id)))}}
-          observe--view observe--update display))
+    observe--view
+    observe--update
+    display))
 
 (defn observe ()
   "Open the observer over this runtime's own processes in a **new native GUI
@@ -644,7 +756,7 @@ For a modal terminal observer instead, call `(observe-attach *term-display*)`."
 ;; the dist node link. `process-info` maps are send-able, so the agent ships
 ;; `(observe--local-snapshot)` verbatim — no kernel changes, no new wire format.
 
-(defdyn *observe-timeout* 800)   ; ms to wait for a remote snapshot before :stale
+(defdyn *observe-timeout* 800)  ; ms to wait for a remote snapshot before :stale
 
 (defn observe--agent-loop ()
   "The target-side agent's receive loop: reply to `[:snapshot from _]` with this
@@ -652,13 +764,15 @@ runtime's `observe--local-snapshot`, to `[:eval src from _]` with the result of
 evaluating `src` HERE (the remote eval minibuffer), and to `[:kill pid id from _]`
 by killing `pid` HERE and replying with the result — all sent back to the
 requester's pid (which routes over the link). Ignores anything else."
-  (receive
-    ([:snapshot from _] (do (send from [:observe-reply (observe--local-snapshot)])
-                            (observe--agent-loop)))
-    ([:eval src from _] (do (send from [:eval-reply (observe--eval-string src)])
-                            (observe--agent-loop)))
-    ([:kill pid id from _] (do (send from [:kill-reply (observe--kill-msg pid id)])
-                               (observe--agent-loop)))
+  (receive ([:snapshot from _] (do
+                                 (send from [:observe-reply (observe--local-snapshot)])
+                                 (observe--agent-loop)))
+    ([:eval src from _] (do
+                          (send from [:eval-reply (observe--eval-string src)])
+                          (observe--agent-loop)))
+    ([:kill pid id from _] (do
+                             (send from [:kill-reply (observe--kill-msg pid id)])
+                             (observe--agent-loop)))
     (_ (observe--agent-loop))))
 
 (defn observe-serve ()
@@ -689,8 +803,7 @@ link can't pile them up in the observer's mailbox."
 `*observe-timeout*` ms (a stalled link, or the target never called `observe-serve`)."
   (observe--drain-replies)
   (send {:name :observe :node peer} [:snapshot (self) (ref)])
-  (receive
-    ([:observe-reply snap] snap)
+  (receive ([:observe-reply snap] snap)
     ([:nodedown ~peer] :down)
     (after *observe-timeout* :timeout)))
 
@@ -699,8 +812,7 @@ link can't pile them up in the observer's mailbox."
 send `[:eval …]`, await the agent's formatted result string. Returns an error
 string on a dropped/stalled link rather than throwing (the minibuffer shows it)."
   (send {:name :observe :node peer} [:eval src (self) (ref)])
-  (receive
-    ([:eval-reply r] r)
+  (receive ([:eval-reply r] r)
     ([:nodedown ~peer] "error: link down")
     (after *observe-timeout* "error: eval timed out")))
 
@@ -710,8 +822,7 @@ process runs on the peer, so the kill must too): send the target-side `:pid` + `
 and await the agent's result string. Returns an error string on a dropped/stalled
 link rather than throwing."
   (send {:name :observe :node peer} [:kill (get c :pid) (get c :id) (self) (ref)])
-  (receive
-    ([:kill-reply r] r)
+  (receive ([:kill-reply r] r)
     ([:nodedown ~peer] "error: link down")
     (after *observe-timeout* "error: kill timed out")))
 
@@ -726,16 +837,27 @@ Then runs the standard observer loop against a remote source; a dropped link
 freezes on the last snapshot with a DISCONNECTED banner until you quit."
   (do
     (node-start (observe--gen-node-name) "127.0.0.1:0" (or cookie (node-cookie)))
-    (let (peer (connect spec))            ; raises a clean error on failure (caught by the caller)
+    (let (peer (connect spec))
+      ; raises a clean error on failure (caught by the caller)
       (monitor-node peer)
       ;; `ui-run` enters the display — and we only reach here after `connect`
       ;; succeeded, so a bad spec/cookie never wrecks the screen.
-      (ui-run {:sel-id nil :sort :id :paused false :last nil :link :ok :mode :nav :edit nil :msg nil
-               :history [] :confirm nil
+      (ui-run {:sel-id nil
+               :sort :id
+               :paused false
+               :last nil
+               :link :ok
+               :mode :nav
+               :edit nil
+               :msg nil
+               :history []
+               :confirm nil
                :backend {:source (fn () (observe--request peer))
                          :eval (fn (src) (observe--remote-eval peer src))
                          :kill (fn (c) (observe--remote-kill peer c))}}
-              observe--view observe--update *term-display*))))
+        observe--view
+        observe--update
+        *term-display*))))
 
 (defn observe-run (&optional (demo true))
   "Run the interactive process observer as a standalone app — a full-screen TUI

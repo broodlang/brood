@@ -56,22 +56,22 @@ watched until you call `reload-on-change`.
 (defn reload--loop (path last)
   (let (now (file-mtime path))
     (cond
-      (nil? now)
-        (do (println "[reload] missing:" path)
-            (sleep *reload-poll-ms*)
-            (reload--loop path last))
-      (= now last)
-        (do (sleep *reload-poll-ms*)
-            (reload--loop path last))
-      else
-        (do
-          (try
-            (do (reload-defs path)
-                (println "[reload]" path))
-            (catch e
-              (println "[reload] failed:" path "—" e)))
-          (sleep *reload-poll-ms*)
-          (reload--loop path now)))))
+      (nil? now) (do
+                   (println "[reload] missing:" path)
+                   (sleep *reload-poll-ms*)
+                   (reload--loop path last))
+      (= now last) (do
+                     (sleep *reload-poll-ms*)
+                     (reload--loop path last))
+      else (do
+             (try
+               (do
+                 (reload-defs path)
+                 (println "[reload]" path))
+               (catch e
+                 (println "[reload] failed:" path "—" e)))
+             (sleep *reload-poll-ms*)
+             (reload--loop path now)))))
 
 ;; Recursive .blsp collector. Returns a flat list of paths (relative to the
 ;; original `dir` argument). Mirrors the walk in std/project.blsp; lives here
@@ -126,20 +126,18 @@ swallowed — the watcher keeps running. Returns nil. To stop watching, kill
 the parent process (per-watcher stop is deferred; there's no compelling
 use yet)."
   (cond
-    (not (file-exists? path))
-      (error "reload-on-change: no such path: " path)
+    (not (file-exists? path)) (error "reload-on-change: no such path: " path)
     (dir? path)
-      ;; Two-step setup for a directory:
-      ;;   1. spawn a per-file watcher for every .blsp currently in the tree
-      ;;      (silently — no "+" line; these files were already loaded by the
-      ;;      caller, typically `nest run`'s `run-project` walk);
-      ;;   2. spawn the dir watcher with `known` pre-seeded to that set, so
-      ;;      it only fires on files that appear *after* startup, and does
-      ;;      `load` + per-file watcher for each.
-      (let (initial (reload--collect-blsp path))
-        (dolist (p initial)
-          (spawn (reload--loop p (file-mtime p))))
-        (spawn (reload--dir-loop path initial))
-        nil)
-    else
-      (do (spawn (reload--loop path (file-mtime path))) nil)))
+    ;; Two-step setup for a directory:
+    ;;   1. spawn a per-file watcher for every .blsp currently in the tree
+    ;;      (silently — no "+" line; these files were already loaded by the
+    ;;      caller, typically `nest run`'s `run-project` walk);
+    ;;   2. spawn the dir watcher with `known` pre-seeded to that set, so
+    ;;      it only fires on files that appear *after* startup, and does
+    ;;      `load` + per-file watcher for each.
+    (let (initial (reload--collect-blsp path))
+      (dolist (p initial)
+        (spawn (reload--loop p (file-mtime p))))
+      (spawn (reload--dir-loop path initial))
+      nil) else
+    (do (spawn (reload--loop path (file-mtime path))) nil)))

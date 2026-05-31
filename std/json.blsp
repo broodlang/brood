@@ -45,7 +45,8 @@ parser for dogfooding and modest payloads (e.g. a daemon's JSON API).")
 (def json--hex-digits "0123456789abcdef")
 
 (defn json--int->hex--acc (n acc)
-  (if (= n 0) acc
+  (if (= n 0)
+    acc
     (json--int->hex--acc (quot n 16) (str (char-at json--hex-digits (rem n 16)) acc))))
 
 (defn json--int->hex (n)
@@ -87,14 +88,14 @@ escape (the codepoint→char mechanism pure Brood otherwise lacks)."
     (if (nil? v) (error "json: invalid number '" tok "' at index " i) [v end])))
 
 ;; -- strings --
-(defn json--hex-val (c) (index-of json--hex-digits (lower c)))   ; "a"→10, "0"→0, …
+(defn json--hex-val (c) (index-of json--hex-digits (lower c)))  ; "a"→10, "0"→0, …
 
 (defn json--hex4 (s i)
   "The int value of the four hex digits at `i` (a `\\uXXXX` body)."
   (+ (* 4096 (json--hex-val (char-at s i)))
-     (* 256  (json--hex-val (char-at s (+ i 1))))
-     (* 16   (json--hex-val (char-at s (+ i 2))))
-     (json--hex-val (char-at s (+ i 3)))))
+    (* 256 (json--hex-val (char-at s (+ i 1))))
+    (* 16 (json--hex-val (char-at s (+ i 2))))
+    (json--hex-val (char-at s (+ i 3)))))
 
 (defn json--unicode (s i n)
   "A `\\uXXXX` escape body starting at `i` (after the `u`): decode one BMP code
@@ -103,7 +104,8 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
   (if (> (+ i 4) n)
     (error "json: truncated \\u escape at index " i)
     (let (hi (json--hex4 s i))
-      (if (and (>= hi 55296) (<= hi 56319))                      ; D800..DBFF: high surrogate
+      (if (and (>= hi 55296) (<= hi 56319))
+        ; D800..DBFF: high surrogate
         (if (and (<= (+ i 10) n) (= (substring s (+ i 4) (+ i 6)) "\\u"))
           (let (lo (json--hex4 s (+ i 6))
                 cp (+ 65536 (* 1024 (- hi 55296)) (- lo 56320)))
@@ -117,22 +119,22 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
     (cond
       (= c "\"") ["\"" (inc i)]
       (= c "\\") ["\\" (inc i)]
-      (= c "/")  ["/" (inc i)]
-      (= c "n")  ["\n" (inc i)]
-      (= c "t")  ["\t" (inc i)]
-      (= c "r")  ["\r" (inc i)]
-      (= c "b")  [(json--cp->string 8) (inc i)]
-      (= c "f")  [(json--cp->string 12) (inc i)]
-      (= c "u")  (json--unicode s (inc i) n)
+      (= c "/") ["/" (inc i)]
+      (= c "n") ["\n" (inc i)]
+      (= c "t") ["\t" (inc i)]
+      (= c "r") ["\r" (inc i)]
+      (= c "b") [(json--cp->string 8) (inc i)]
+      (= c "f") [(json--cp->string 12) (inc i)]
+      (= c "u") (json--unicode s (inc i) n)
       :else (error "json: invalid escape '\\" c "' at index " i))))
 
 (defn json--string--acc (s i n acc)
   (let (c (json--at s i n))
     (cond
-      (= c "")   (error "json: unterminated string")
+      (= c "") (error "json: unterminated string")
       (= c "\"") [acc (inc i)]
       (= c "\\") (let ([ch j] (json--escape s (inc i) n)) (json--string--acc s j n (str acc ch)))
-      :else      (json--string--acc s (inc i) n (str acc c)))))
+      :else (json--string--acc s (inc i) n (str acc c)))))
 
 (defn json--string (s i n)
   "A string body starting at `i` (just after the opening quote). Returns `[str end]`."
@@ -173,9 +175,12 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
         (if (not (= (json--at s j1 n) ":"))
           (error "json: expected ':' after key at index " j1)
           (let ([v j2] (json--value s (json--skip-ws s (inc j1) n) n)
-                j3 (json--skip-ws s j2 n)
-                acc2 (assoc acc (keyword k) v)              ; JSON keys → keywords
-                c (json--at s j3 n))
+                 j3
+                 (json--skip-ws s j2 n)
+                 acc2
+                 (assoc acc (keyword k) v)  ; JSON keys → keywords
+                 c
+                 (json--at s j3 n))
             (cond
               (= c ",") (json--object--acc s (inc j3) n acc2)
               (= c "}") [acc2 (inc j3)]
@@ -220,11 +225,11 @@ on malformed input or trailing content. Pure."
 (defn json--enc-escapes (s)
   "Escape the JSON-special characters in `s` (backslash first)."
   (-> s
-      (replace "\\" "\\\\")
-      (replace "\"" "\\\"")
-      (replace "\n" "\\n")
-      (replace "\r" "\\r")
-      (replace "\t" "\\t")))
+    (replace "\\" "\\\\")
+    (replace "\"" "\\\"")
+    (replace "\n" "\\n")
+    (replace "\r" "\\r")
+    (replace "\t" "\\t")))
 
 (defn json--enc-string (s) (str "\"" (json--enc-escapes s) "\""))
 
@@ -243,14 +248,14 @@ number, a string → a quoted string, a keyword/symbol → a string of its name,
 an object (keyword keys become string keys), a vector or list → an array. Errors on
 anything else (a pid, fn, …). Pure."
   (cond
-    (nil? v)     "null"
-    (= v true)   "true"
-    (= v false)  "false"
-    (number? v)  (number->string v)
-    (string? v)  (json--enc-string v)
+    (nil? v) "null"
+    (= v true) "true"
+    (= v false) "false"
+    (number? v) (number->string v)
+    (string? v) (json--enc-string v)
     (keyword? v) (json--enc-string (name v))
-    (symbol? v)  (json--enc-string (name v))
-    (map? v)     (json--enc-object v)
-    (vector? v)  (json--enc-array v)
-    (list? v)    (json--enc-array v)
+    (symbol? v) (json--enc-string (name v))
+    (map? v) (json--enc-object v)
+    (vector? v) (json--enc-array v)
+    (list? v) (json--enc-array v)
     :else (error "json: cannot encode " v)))

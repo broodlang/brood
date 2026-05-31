@@ -13,12 +13,12 @@
 (describe "highlight-spans — token classification"
   (test "special form vs call vs number"
     (assert= (highlight-spans "(+ 1)")
-             (list [1 2 hl-face-function] [3 4 hl-face-number]))
+      (list [1 2 hl-face-function] [3 4 hl-face-number]))
     (assert= (highlight-spans "(if x)")
-             (list [1 3 hl-face-special])))
+      (list [1 3 hl-face-special])))
   (test "strings and comments"
     (assert= (highlight-spans "\"hi\" ; c")
-             (list [0 4 hl-face-string] [5 8 hl-face-comment])))
+      (list [0 4 hl-face-string] [5 8 hl-face-comment])))
   (test "keywords colour as keywords"
     (assert= (highlight-spans ":foo") (list [0 4 hl-face-keyword])))
   (test "nil / true / false colour as constants, even in head position"
@@ -30,8 +30,11 @@
 (describe "highlight-chunks — tiling a visible line"
   (test "chunks cover the whole line, coalescing default runs"
     (assert= (highlight-chunks "(+ 1)" 0 "(+ 1)" '())
-             (list ["(" nil] ["+" hl-face-function] [" " nil]
-                   ["1" hl-face-number] [")" nil])))
+      (list ["(" nil]
+        ["+" hl-face-function]
+        [" " nil]
+        ["1" hl-face-number]
+        [")" nil])))
   (test "an empty line yields no chunks"
     (assert= (highlight-chunks "" 0 "" '()) '())))
 
@@ -84,4 +87,4 @@
     (let (w (spawn (receive ([:lex src from] (send from (highlight-spans src))))))
       (send w [:lex "(+ 1)" (self)])
       (assert= (receive (r r))
-               (list [1 2 hl-face-function] [3 4 hl-face-number])))))
+        (list [1 2 hl-face-function] [3 4 hl-face-number])))))

@@ -85,8 +85,8 @@ underneath (local keys win). `depth` bounds the `:inherit` chain so an accidenta
 cycle terminates instead of overflowing the stack (cf. `observe--tree-walk`)."
   (let (attrs (get *faces* name))
     (cond
-      (nil? attrs)   nil
-      (>= depth 16)  (dissoc attrs :inherit)
+      (nil? attrs) nil
+      (>= depth 16) (dissoc attrs :inherit)
       :else (let (parent (get attrs :inherit)
                   self (dissoc attrs :inherit))
               (if (nil? parent)
@@ -106,9 +106,9 @@ face — so `(text r c s (face :missing))` is just unstyled text. Pure."
 ;; colour, the reverse-video selection, and a highlight. Apps add their own named
 ;; faces (often `:inherit`-ing these) — see `std/observer.blsp`.
 
-(def-face :ui/default   {})
-(def-face :ui/header    {:bold true :reverse true})
-(def-face :ui/dim       {:fg :dark-grey})
-(def-face :ui/error     {:fg :red :bold true})
-(def-face :ui/selected  {:reverse true})
+(def-face :ui/default {})
+(def-face :ui/header {:bold true :reverse true})
+(def-face :ui/dim {:fg :dark-grey})
+(def-face :ui/error {:fg :red :bold true})
+(def-face :ui/selected {:reverse true})
 (def-face :ui/highlight {:fg :cyan})

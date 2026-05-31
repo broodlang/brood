@@ -85,8 +85,7 @@ the forward-order `prefix`."
 
 (defn pane-selected-path (tree)
   "The path of the selected leaf (`()` for a lone pane)."
-  (first (filter (fn (p) (get (pane--get tree p) :selected))
-                 (pane-leaf-paths tree))))
+  (first (filter (fn (p) (get (pane--get tree p) :selected)) (pane-leaf-paths tree))))
 
 (defn pane--clear (node)
   "The tree with the `:selected` marker cleared from every leaf."
@@ -108,6 +107,13 @@ editor applies an edit to whatever the active pane shows."
   (pane--update tree
     (pane-selected-path tree)
     (fn (leaf) (assoc leaf :payload (f (get leaf :payload))))))
+
+(defn pane-update-path (tree path f)
+  "The tree with the payload of the pane at `path` replaced by `(f payload)` — the
+position-targeted sibling of `pane-update-selected`. Lets an editor act on the pane
+*under the pointer* (via `pane-at`'s `:path`) — e.g. wheel zoom / scroll — without
+disturbing which pane is selected."
+  (pane--update tree path (fn (leaf) (assoc leaf :payload (f (get leaf :payload))))))
 
 (defn pane-map (tree f)
   "The tree with `f` applied to *every* pane's payload (leaves only; splits and
