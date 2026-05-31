@@ -418,7 +418,11 @@ fn const_node(heap: &Heap, v: Value) -> Node {
 /// interned symbol/keyword, or a PRELUDE/RUNTIME handle. The postcondition
 /// [`const_node`] asserts; the handle kinds mirror those [`Heap::promote`] copies
 /// out of LOCAL.
-#[cfg(debug_assertions)]
+///
+/// Not `#[cfg(debug_assertions)]`: `debug_assert!` still *compiles* its condition
+/// in release (it expands to `if cfg!(debug_assertions) { assert!(…) }` — a dead
+/// branch, but the call must resolve), so gating this out breaks the release
+/// build. In release the optimizer drops the never-taken branch.
 fn value_is_immovable(v: Value) -> bool {
     match v {
         Value::Str(id) => id.region() != value::LOCAL,
