@@ -602,6 +602,47 @@ crashes mid-`binding` takes its binding stack down with it and disturbs no one.
 `defdyn`/`binding` are Brood macros over a tiny kernel (`%declare-dynamic`,
 `%binding`, `dynamic?`) — no new special form, the `try`/`catch` precedent.
 
+## Type annotations
+
+Types in Brood are **optional and advisory** — you never have to write one, and a
+program with no annotations checks and runs exactly as before (see
+[types.md](types.md) for the set-theoretic model). Two opt-in declaration forms
+let you inform — and optionally *enforce* — the type system. Both are macros, not
+special forms.
+
+`(sig name (params… -> ret))` declares a function's signature. It is a pure
+declaration — a runtime no-op — read by the advisory checker, which then flags a
+provably wrong call against it (both the argument and the result type flow):
+
+```clojure
+(sig area (number -> number))
+(defn area (r) (* 3.14159 r r))
+
+(area "circle")           ; warning: area: argument 1 expects number, got string
+(string-length (area 2))  ; warning: string-length: argument 1 expects string, got number
+```
+
+The type grammar: base names (`int float number string symbol keyword bool nil
+pair vector list map fn any`), function arrows `(p… -> r)`, element-typed
+sequences `(list E)` / `(vector E)`, and unions `(or A B …)`. An unrecognised
+type-expression is ignored, never guessed.
+
+`(sig! name (params… -> ret))` declares the **same** signature *and enforces it at
+run time*: it wraps `name` so each argument and the result are checked on every
+call, throwing on a mismatch (an opt-in "strong arrow"). Place it **after** the
+definition — it rebinds the name, preserving arity.
+
+```clojure
+(defn area (r) (* 3.14159 r r))
+(sig! area (number -> number))
+(area "circle")   ;=> throws — area: argument 1 expected number, got string
+```
+
+`sig` is checker-only (zero runtime cost); `sig!` adds the runtime guarantee
+exactly where you want soundness. The checker treats both identically. Writing a
+*type* never changes behaviour; opting into *enforcement* (`sig!`) does. Full
+design: [type-annotations.md](type-annotations.md) (ADR-081).
+
 ## Processes (concurrency)
 
 Erlang-style **green processes**: cheap, lightweight, share-nothing (each runs

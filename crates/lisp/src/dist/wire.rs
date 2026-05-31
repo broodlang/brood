@@ -142,15 +142,25 @@ pub(super) fn write_frame(w: &mut impl Write, frame: &Frame) -> io::Result<()> {
 }
 
 /// Read one length-prefixed frame, rejecting an over-large prefix before
-/// allocating for it.
+/// allocating for it. The steady-state reader caps at [`MAX_FRAME`].
 pub(super) fn read_frame(r: &mut impl Read) -> io::Result<Frame> {
+    read_frame_capped(r, MAX_FRAME)
+}
+
+/// Read one frame, rejecting a length prefix over `max` **before** allocating
+/// the buffer. The cap is a parameter so the *handshake* can pass a far smaller
+/// ceiling than the 64 MiB steady-state one: a `Hello`/`Auth` is only tens of
+/// bytes, and an unauthenticated peer must not be able to make us `vec![0u8;
+/// 64MiB]` off an 8-byte (magic + length-prefix) probe. See
+/// `super::MAX_HANDSHAKE_FRAME`.
+pub(super) fn read_frame_capped(r: &mut impl Read, max: usize) -> io::Result<Frame> {
     let mut len = [0u8; 4];
     r.read_exact(&mut len)?;
     let len = u32::from_be_bytes(len) as usize;
-    if len > MAX_FRAME {
+    if len > max {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("frame of {len} bytes exceeds the {MAX_FRAME}-byte limit"),
+            format!("frame of {len} bytes exceeds the {max}-byte limit"),
         ));
     }
     let mut buf = vec![0u8; len];
@@ -973,6 +983,29 @@ mod tests {
                 assert_eq!(c.arms[0].body.len(), 1);
             }
             _ => panic!("wrong frame"),
+        }
+    }
+
+    #[test]
+    fn handshake_cap_rejects_a_frame_over_the_small_ceiling_pre_auth() {
+        // A frame whose length prefix is within MAX_FRAME but over the tiny
+        // handshake ceiling must be rejected at the length check — never
+        // allocated — so an unauthenticated peer can't force a big buffer with
+        // a few probe bytes. (8 KiB > the 4 KiB handshake cap, < 64 MiB MAX_FRAME.)
+        let mut bytes = (8 * 1024u32).to_be_bytes().to_vec();
+        bytes.push(M_NIL); // a token byte; we must fail before reading a body
+        match read_frame_capped(&mut Cursor::new(bytes), 4 * 1024) {
+            Err(e) => assert_eq!(e.kind(), io::ErrorKind::InvalidData),
+            Ok(_) => panic!("a frame over the handshake cap should be rejected"),
+        }
+        // …and the same bytes are fine under the steady-state ceiling — proving
+        // the cap is the gate, not a malformed frame. (It'll EOF on the missing
+        // body, not reject on length.)
+        let mut bytes = (8 * 1024u32).to_be_bytes().to_vec();
+        bytes.push(M_NIL);
+        match read_frame_capped(&mut Cursor::new(bytes), MAX_FRAME) {
+            Err(e) => assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof),
+            Ok(_) => panic!("the truncated body should EOF, not parse"),
         }
     }
 

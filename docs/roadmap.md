@@ -107,6 +107,15 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   intersections for overloaded fns; user-generic type variables.
   Additive; gated on real need (ADR-011). Advisory throughout — never gates, never
   inhibits the dynamic language; not the TypeScript route.
+- ✅ **Opt-in type annotations + runtime contracts** (ADR-081). `(sig name (… ->
+  …))` declares a signature the advisory checker reads first — closing the
+  multi-clause/branchy gap inference can't reach; `(sig! …)` *also* enforces it at
+  run time (a same-arity wrapper checks args + result and throws — the opt-in
+  "strong arrow", sound where you ask for it). All policy in Brood, never
+  required, never gates. Plus soundness-oracle tests (results never
+  under-approximate; correct programs never warn) and curated sigs for common
+  predicates. `docs/type-annotations.md`. ⬜ Future: a `BROOD_CONTRACTS=1`
+  enforce-every-`sig` switch; element-level `(list E)` runtime checks.
 - ✅ **Maps** (ADR-030 + ADR-040) — immutable `{ }` literals + `get`/`assoc`/
   `dissoc`/`keys`/`vals`/`contains?`/`map?`. Structural-equality keys, order-
   independent `=`; every op returns a fresh map. Small `map-*` Rust kernel, the
@@ -607,10 +616,31 @@ top* of connect, plus a few deliberately-deferred refinements:
   one identity, multiple front doors. The "one core, local + remote frontends"
   shape. Composable (opt-in), not forced on every TCP node. Server-side TLS as a
   third transport is still open (below).
-- ⬜ **Server-side / inbound TLS** — `rustls` is client-only (its streams don't
-  split read/write across threads like a raw fd). The cookie *authenticates* a
-  link but doesn't *encrypt* it; remote attach over an untrusted network wants
-  this. Fine for LAN/trusted today.
+- ⬜ **Server-side / inbound TLS — and per-frame channel integrity** (the
+  headline network-security item; ADR-081). `rustls` is client-only (its streams
+  don't split read/write across threads like a raw fd). Two gaps, both closed by
+  an authenticated-encrypted channel (TLS, or a Noise-style session over the
+  existing `Stream` seam):
+  - **No confidentiality** — node-link frames travel in cleartext; an on-path
+    observer reads every inter-node message (and shipped closure source).
+  - **No per-frame integrity** — the HMAC cookie authenticates the *handshake*
+    only; steady-state frames carry no MAC. On a TCP link an on-path attacker who
+    lets the handshake complete can inject forged frames afterward — including a
+    `Send` carrying a closure → RCE — *without knowing the cookie*.
+  Confined to `dist/` (the transport seam); **does not touch the language
+  kernel** (eval/heap/GC/value model unchanged). Fine for LAN/trusted and the
+  Unix transport (0700 dir) today; **do not expose a TCP node on an untrusted
+  network until this lands.** See ADR-081 for the decision to treat TLS-or-Noise
+  as required (not "optional") for any network-facing node.
+- ✅ **Pre-auth connection hardening (DoS) — done 2026-05-31 (ADR-081).** The
+  inbound-handshake path is now bounded against an unauthenticated flood: a
+  `HandshakeSlot` semaphore caps **concurrent in-flight handshakes**
+  (`MAX_IN_FLIGHT_HANDSHAKES = 128`) — past it a connection is shed (socket
+  closed, no thread spawned, no log) before any allocation — and the handshake
+  reads use a tiny `MAX_HANDSHAKE_FRAME = 4 KiB` ceiling instead of the 64 MiB
+  steady-state one, so an unauthenticated peer can't force a 64 MiB allocation
+  off an 8-byte probe. Localized to `dist.rs`/`dist/handshake.rs`/`dist/wire.rs`;
+  no kernel change.
 - ⬜ The same runtime **listens on a socket and serves the M3 protocol** to
   attached frontends — the Emacs `--daemon` / `emacsclient` model; **one core,
   multiple attached frontends**. The `nest observe --connect` remote-attach is a

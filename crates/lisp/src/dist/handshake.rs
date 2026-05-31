@@ -23,7 +23,8 @@ use std::io::{self, Read, Write};
 
 use crate::core::value::{self, Symbol};
 
-use super::wire::{read_frame, write_frame, Frame, MAC_LEN, NONCE_LEN, PROTOCOL_MAGIC};
+use super::wire::{read_frame_capped, write_frame, Frame, MAC_LEN, NONCE_LEN, PROTOCOL_MAGIC};
+use super::MAX_HANDSHAKE_FRAME;
 
 /// Which end opened a connection — the tie-break for a duplicate keeps the link
 /// initiated by the smaller node name, so both ends need to know who that is.
@@ -111,14 +112,15 @@ pub(super) fn handshake<S: Read + Write>(stream: &mut S, role: Role) -> io::Resu
 }
 
 fn read_hello<S: Read>(stream: &mut S) -> io::Result<(Symbol, [u8; NONCE_LEN])> {
-    match read_frame(stream)? {
+    // Pre-auth: a tiny ceiling, not the 64 MiB steady-state one.
+    match read_frame_capped(stream, MAX_HANDSHAKE_FRAME)? {
         Frame::Hello { node, nonce } => Ok((node, nonce)),
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, "expected Hello")),
     }
 }
 
 fn read_auth<S: Read>(stream: &mut S) -> io::Result<[u8; MAC_LEN]> {
-    match read_frame(stream)? {
+    match read_frame_capped(stream, MAX_HANDSHAKE_FRAME)? {
         Frame::Auth { mac } => Ok(mac),
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, "expected Auth")),
     }

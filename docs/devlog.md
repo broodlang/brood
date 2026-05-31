@@ -11022,3 +11022,65 @@ module load-path / `*features*` / earmuffed counters; a peer test's `project-set
 clobbered the load-path between this unit's setup and its walk). Marked the describe
 `:isolated` (runs alone against a rolled-back private global copy). Full
 `cargo nextest run` green 3×.
+
+---
+
+## 2026-05-31 — Security review of the language; pre-auth dist hardening
+
+**Goal.** "Find security issues in the language." Focused review of the only
+untrusted-input surface — the distributed-node layer (`dist/`, `net.rs`), which
+ships *closures* (code) between runtimes, so it's RCE-by-design gated on
+authentication.
+
+**What held up.** The dist code is unusually careful and I couldn't break it on
+the axes that matter most:
+- **Handshake crypto** (`dist/handshake.rs`): HMAC-SHA256 challenge–response over
+  a fresh 32-byte CSPRNG nonce per handshake (replay-resistant), constant-time
+  MAC compare, NUL-delimited names (collision-free encoding), cookie never on
+  the wire.
+- **Cookie** is 256-bit from the OS CSPRNG (`getrandom`, *not* the userland
+  xorshift PRNG), persisted `0600`. Not guessable.
+- **Wire decoder** (`dist/wire.rs`): `MAX_DECODE_DEPTH = 256` stops
+  stack-overflow-by-nesting; `prealloc()` bounds every allocation by *remaining
+  frame bytes*, so a "claims 4 billion elements" frame fails cleanly on EOF.
+- **No command injection** (`run-process` uses `Command::new(prog).args(argv)`,
+  never `sh -c`); the one scary `unsafe` (`from_utf8_unchecked` on shared blobs,
+  `heap.rs:85`) is sound because every blob is built from `&str`.
+- The reader keys monitors/links/exits on the *authenticated* node name, not the
+  wire's `from_node`, so a peer can't spoof identity.
+
+**Three findings, all in `dist/` — none touch the language kernel.**
+1. **No confidentiality + no per-frame integrity** on the node link. The cookie
+   authenticates the *handshake*; steady-state frames are cleartext with no MAC.
+   Over TCP an on-path attacker who lets the handshake complete can inject forged
+   frames (incl. a `Send` carrying a closure → RCE) without the cookie. Already
+   on the roadmap as deferred TLS; reframed as the headline network-security item
+   and made *required* (not "optional") for network-facing nodes (ADR-081).
+2. **Pre-auth DoS** — `spawn_acceptor` spawned an unbounded OS thread per
+   inbound connection, and `read_frame` allowed a full 64 MiB frame *during the
+   handshake*, so an 8-byte probe (magic + length prefix) could commit a 64 MiB
+   alloc, and a flood could exhaust threads/FDs/memory before authenticating.
+   **Fixed this session.**
+3. **Blast radius** — machine-wide shared cookie + the documented `0.0.0.0`
+   dual-listen example: one cookie leak = RCE on every node on the host from the
+   whole network. Doc/policy note for ADR-081.
+
+**Built (fix for #2).**
+- `MAX_HANDSHAKE_FRAME = 4 KiB` — handshake reads (`read_hello`/`read_auth`) use
+  a new `read_frame_capped` with this tiny ceiling instead of the 64 MiB
+  steady-state `MAX_FRAME`. A `Hello`/`Auth` is tens of bytes; even a long FQDN
+  node name stays well under 4 KiB.
+- `HandshakeSlot` — an RAII permit over an `AtomicUsize`, capping concurrent
+  in-flight handshakes at `MAX_IN_FLIGHT_HANDSHAKES = 128`. The acceptor takes a
+  slot *before* spawning a thread or reading a byte; past the cap the connection
+  is shed (socket closed, no thread, no log — a per-shed log would itself be a
+  flood vector). The slot is held for the pre-auth window only and released on
+  thread end (success/failure/timeout); steady-state links hold none.
+- Tests: `dist::wire` `handshake_cap_rejects_a_frame_over_the_small_ceiling_pre_auth`
+  (the cap is the gate, not a malformed frame) and `dist`
+  `handshake_slot_caps_in_flight_and_releases_on_drop` (cap + rollback + RAII
+  release). All 24 real-TCP `crates/cli/tests/distribution.rs` cases still green —
+  legitimate handshakes unaffected (128 is far above any real fan-in).
+
+**Decision.** ADR-081 records both the hardening and the policy that a
+network-facing node *requires* an authenticated-encrypted channel once TLS lands.
