@@ -91,23 +91,41 @@ pub fn unused_require_actions(
         if src.contains(&format!("{module}/")) {
             continue;
         }
-        let edit = TextEdit {
-            range: line_delete_range(src, form.span, line_index),
-            new_text: String::new(),
-        };
-        let mut changes = HashMap::new();
-        changes.insert(uri.clone(), vec![edit]);
-        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-            title: format!("Remove seemingly-unused `(require '{module})`"),
-            kind: Some(CodeActionKind::QUICKFIX),
-            edit: Some(WorkspaceEdit {
-                changes: Some(changes),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }));
+        actions.push(quickfix(
+            uri,
+            format!("Remove seemingly-unused `(require '{module})`"),
+            line_delete_range(src, form.span, line_index),
+            String::new(),
+            None,
+        ));
     }
     actions
+}
+
+/// A `QUICKFIX` code action applying a single text edit on `uri`. Passing the
+/// `diag` it resolves attaches that diagnostic and marks the action preferred
+/// (the obvious one-keystroke fix); `None` is a structural fix tied to no
+/// diagnostic, left non-preferred.
+fn quickfix(
+    uri: &Uri,
+    title: String,
+    range: Range,
+    new_text: String,
+    diag: Option<&Diagnostic>,
+) -> CodeActionOrCommand {
+    let mut changes = HashMap::new();
+    changes.insert(uri.clone(), vec![TextEdit { range, new_text }]);
+    CodeActionOrCommand::CodeAction(CodeAction {
+        title,
+        kind: Some(CodeActionKind::QUICKFIX),
+        diagnostics: diag.map(|d| vec![d.clone()]),
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        is_preferred: diag.map(|_| true),
+        ..Default::default()
+    })
 }
 
 /// The module name of a standalone `(require 'mod)` form, or `None` if `form`
@@ -162,27 +180,16 @@ fn line_delete_range(src: &str, span: Span, li: &LineIndex) -> Range {
     }
 }
 
-/// One "Replace with `X`" quick-fix targeting the diagnostic's range.
+/// One "Replace with `X`" quick-fix targeting the diagnostic's range — preferred,
+/// so a single keystroke applies the top suggestion.
 fn did_you_mean(uri: &Uri, diag: &Diagnostic, suggestion: &str) -> CodeActionOrCommand {
-    let edit = TextEdit {
-        range: diag.range,
-        new_text: suggestion.to_string(),
-    };
-    let mut changes = HashMap::new();
-    changes.insert(uri.clone(), vec![edit]);
-    CodeActionOrCommand::CodeAction(CodeAction {
-        title: format!("Replace with `{suggestion}`"),
-        kind: Some(CodeActionKind::QUICKFIX),
-        diagnostics: Some(vec![diag.clone()]),
-        edit: Some(WorkspaceEdit {
-            changes: Some(changes),
-            ..Default::default()
-        }),
-        // A quick-fix that resolves the diagnostic the user is looking at — mark
-        // it preferred so a single keystroke applies the top suggestion.
-        is_preferred: Some(true),
-        ..Default::default()
-    })
+    quickfix(
+        uri,
+        format!("Replace with `{suggestion}`"),
+        diag.range,
+        suggestion.to_string(),
+        Some(diag),
+    )
 }
 
 /// Up to three known names closest to `name` by edit distance, nearest first.

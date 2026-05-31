@@ -1,0 +1,32 @@
+;; std/fuzzy.blsp — subsequence matching + ranking. Register-only; run by `nest test`
+;; (and cargo test, via the suite). Pure functions, so no fixtures.
+
+(defmodule fuzzy-test (:use fuzzy) (:use test))
+
+(describe "fuzzy-match"
+  (test "matches a case-insensitive subsequence, reporting positions"
+    (assert= (get (fuzzy-match "fb" "foo-bar") :positions) (list 0 4))
+    (assert= (get (fuzzy-match "FB" "foo-bar") :positions) (list 0 4)))  ; case-insensitive
+  (test "is nil when the query is not a subsequence"
+    (is (nil? (fuzzy-match "xz" "foo-bar")))
+    (is (nil? (fuzzy-match "rab" "foo-bar"))))                           ; order matters
+  (test "the empty query matches anything, score 0"
+    (assert= (fuzzy-match "" "abc") {:score 0 :positions ()}))
+  (test "a boundary/contiguous match outscores a scattered one"
+    (is (> (get (fuzzy-match "fb" "foo-bar") :score)     ; f@0, b@4 — both word starts
+          (get (fuzzy-match "fb" "fluffball") :score))))  ; f@0, b@? scattered, no boundary on b
+  (test "an exact prefix scores well (contiguous + boundary + early)"
+    (is (> (get (fuzzy-match "foo" "foobar") :score)
+          (get (fuzzy-match "foo" "barfoo") :score)))))
+
+(describe "fuzzy-filter"
+  (test "keeps matches, best score first"
+    ;; "fb": foo-bar has two boundary hits, foobar one, afb none — that's the order.
+    (assert= (fuzzy-filter "fb" (list "afb" "foobar" "foo-bar"))
+      (list "foo-bar" "foobar" "afb")))
+  (test "a prefix match ranks above a tail match"
+    (assert= (fuzzy-filter "foo" (list "barfoo" "foobar")) (list "foobar" "barfoo")))
+  (test "drops non-matches"
+    (assert= (fuzzy-filter "zzz" (list "abc" "def")) ()))
+  (test "an empty query returns the candidates unchanged"
+    (assert= (fuzzy-filter "" (list "a" "b" "c")) (list "a" "b" "c"))))

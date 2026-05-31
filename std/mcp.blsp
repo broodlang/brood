@@ -69,6 +69,21 @@ error inside the user expression surfaces here as the `:error` branch."
             (project--duplicate-def-warnings (project--source-files root))))))
     (catch _ nil)))
 
+(defn mcp--load-checked (file)
+  "Load `file` into the session image and report the result as `{:ok true
+:diagnostics [...] :shadows [...]}` (or `{:ok false :error ...}` on failure) —
+the shared body of the `load`/`write`/`edit` tools. `def`s persist (hot reload,
+ADR-013); `diagnostics` are `check-file-structured` warnings, `shadows` the
+cross-file flat-namespace collisions."
+  (try
+    (do
+      (load file)
+      {:ok true
+       :diagnostics (or (check-file-structured file) [])
+       :shadows (or (mcp--shadows-for file) [])})
+    (catch e
+      {:ok false :error (mcp--error-shape e)})))
+
 (defn mcp-load-tool (args)
   "`load` — load a `.blsp` file into the session and check it. Side-effects
 (`def`, `defn`, `defmacro`) persist. Returns `{:ok true :diagnostics [...]
@@ -80,14 +95,7 @@ defines (the silent flat-namespace collision). On a load error:
   (let (file (get args :file))
     (when (not (string? file))
       (throw "load: :file must be a string"))
-    (try
-      (do
-        (load file)
-        {:ok true
-         :diagnostics (or (check-file-structured file) [])
-         :shadows (or (mcp--shadows-for file) [])})
-      (catch e
-        {:ok false :error (mcp--error-shape e)}))))
+    (mcp--load-checked file)))
 
 ;; ---- the project sandbox for write/edit -----------------------------------
 ;; Every file the MCP server writes goes through `mcp--project-path`, which
@@ -116,6 +124,14 @@ root at all). The sandbox boundary the `write`/`edit` tools share."
     (throw (str "path must be project-relative — no leading '/' or '~', no '..': " (pr-str rel))))
   (path-join *project-root* rel))
 
+(defn mcp--write-result (rel abs)
+  "The shared tail of `write`/`edit`: a `.blsp` file at absolute `abs` is loaded
++ checked (so the result mirrors `load`'s `:diagnostics`/`:shadows`) and tagged
+with its project-relative `:path`; any other file just confirms the write."
+  (if (ends-with? rel ".blsp")
+    (assoc (mcp--load-checked abs) :path rel)
+    {:ok true :path rel}))
+
 (defn mcp-write-tool (args)
   "`write` — create or overwrite a project file through the live image. `:path`
 is **project-relative** (sandboxed under the project root — an absolute path,
@@ -134,9 +150,7 @@ through nest mcp, never the raw filesystem."
       (let (abs (mcp--project-path rel)
             _dir (make-dir (parent-dir abs))
             _w (spit abs content))
-        (if (ends-with? rel ".blsp")
-          (assoc (mcp-load-tool {:file abs}) :path rel)
-          {:ok true :path rel}))
+        (mcp--write-result rel abs))
       (catch e
         {:ok false :error (mcp--error-shape e)}))))
 
@@ -169,9 +183,7 @@ image stays in sync with disk."
               (> hits 1) {:ok false
                           :error (str "edit: :old occurs " hits " times in " rel " — make it unique")}
               :else (let (_w (spit abs (replace text old new)))
-                      (if (ends-with? rel ".blsp")
-                        (assoc (mcp-load-tool {:file abs}) :path rel)
-                        {:ok true :path rel}))))))
+                      (mcp--write-result rel abs))))))
       (catch e
         {:ok false :error (mcp--error-shape e)}))))
 
@@ -252,6 +264,12 @@ Outside a Brood project, returns `{:error msg}`."
     (catch e
       {:error (str e)})))
 
+(defn mcp--process-infos ()
+  "A `(process-info pid)` stat map for every live process, dropping any that died
+mid-scan. The shared snapshot behind both the `processes` and `process-info`
+tools — one definition of \"what we know about a process\"."
+  (remove nil? (map process-info (or (list-processes) []))))
+
 (defn mcp-processes-tool (args)
   "`processes` — snapshot every live green process with its runtime stats.
 Returns `{:processes [{:id :pid :node :name :status :mailbox :memory
@@ -260,20 +278,8 @@ Returns `{:processes [{:id :pid :node :name :status :mailbox :memory
 backlog, cumulative reductions (Erlang's work counter — is it busy?),
 heap bytes, GC count and monitors per process, not just the id. Order
 is unspecified — sort by `:id` (or `:reductions` to find the busiest)
-if you need stability. A process that dies mid-snapshot is dropped
-(`process-info` → nil, filtered). `(or … [])` so an empty runtime
-renders as JSON `[]` rather than `null`."
-  {:processes (filter (fn (p) (not (nil? p)))
-                (map process-info (or (list-processes) [])))})
-
-(defn mcp--pid-by-id (id)
-  "The live local pid whose numeric id is `id`, or nil if none. Lets the
-`process-info` tool take the plain integer id an agent sees in a
-`processes` listing rather than a reconstructed pid value."
-  (first (filter (fn (p)
-                   (let (info (process-info p))
-                     (and (not (nil? info)) (= (get info :id) id))))
-           (or (list-processes) []))))
+if you need stability."
+  {:processes (mcp--process-infos)})
 
 (defn mcp-process-info-tool (args)
   "`process-info` — the full stat map for a single process by `:id` (an
@@ -284,10 +290,8 @@ process carries that id."
   (let (id (get args :id))
     (when (not (int? id))
       (throw "process-info: :id must be an integer"))
-    (let (pid (mcp--pid-by-id id))
-      (if (nil? pid)
-        {:error (str "no live process with id " id)}
-        (process-info pid)))))
+    (or (find (fn (p) (= (get p :id) id)) (mcp--process-infos))
+      {:error (str "no live process with id " id)})))
 
 (defn mcp-node-tool (args)
   "`node` — runtime-wide stats, the header the observer shows: which node

@@ -1,0 +1,88 @@
+;; std/fuzzy.blsp — fuzzy (subsequence) string matching + ranking. (require 'fuzzy).
+;;
+;; The matcher completion UIs ride on: a query matches a candidate when its characters
+;; appear IN ORDER somewhere in the candidate (case-insensitive) — "fb" matches
+;; "foo-bar". Matches are scored so the best rise first: contiguous runs, matches at
+;; word boundaries (string start, after a `- _ / . space`, or a camelCase upper), and
+;; early matches all score higher. Greedy left-to-right (flx/fzf-lite — not the optimal
+;; DP, but cheap and good in practice). Pure Brood, tail-recursive; zero kernel surface.
+
+(defmodule fuzzy
+  "Fuzzy (subsequence) matching + ranking (`(require 'fuzzy)`).
+
+    (fuzzy-match \"fb\" \"foo-bar\")   ; => {:score N :positions [0 4]}
+    (fuzzy-match \"xz\" \"foo-bar\")   ; => nil
+    (fuzzy-filter \"fb\" cands)        ; => the matching cands, best score first
+
+`fuzzy-match` returns nil when `query` isn't a case-insensitive subsequence of the
+candidate, else `{:score :positions}` (`positions` are the matched char indices, for
+highlighting). `fuzzy-filter` keeps the matches and sorts them best-first (ties: shorter
+candidate, then lexicographic); an empty query returns the candidates unchanged.")
+
+;; ---- the greedy subsequence match -------------------------------------------
+
+(defn fuzzy--next (cand c i n)
+  "The index ≥ `i` of the next `c` in `cand` (length `n`), or -1."
+  (cond
+    (>= i n) -1
+    (= (char-at cand i) c) i
+    else (fuzzy--next cand c (inc i) n)))
+
+(defn fuzzy--positions (qlow clow qi qn ci cn acc)
+  "The matched char indices (greedy, in order) of `qlow` within `clow`, or nil when
+`qlow` isn't a subsequence of `clow`. Both args are already lower-cased."
+  (if (>= qi qn)
+    (reverse acc)
+    (let (pos (fuzzy--next clow (char-at qlow qi) ci cn))
+      (if (< pos 0)
+        nil
+        (fuzzy--positions qlow clow (inc qi) qn (inc pos) cn (cons pos acc))))))
+
+;; ---- scoring ----------------------------------------------------------------
+
+(def fuzzy--separators "-_/. ")  ; a match just after one of these is a word boundary
+
+(defn fuzzy--upper? (ch) "True if 1-char string `ch` is an upper-case letter." (not (= (lower ch) ch)))
+
+(defn fuzzy--boundary? (cand pos)
+  "True if char `pos` starts a word in `cand`: index 0, after a separator, or a
+camelCase hump (an upper preceded by a non-upper)."
+  (or (= pos 0)
+    (let (prev (char-at cand (dec pos)))
+      (or (includes? fuzzy--separators prev)
+        (and (fuzzy--upper? (char-at cand pos)) (not (fuzzy--upper? prev)))))))
+
+(defn fuzzy--score--step (cand st pos)
+  "Fold step: add `pos`'s bonus to the running `{:score :prev}`."
+  (let (prev (get st :prev)
+        contiguous (and (not (nil? prev)) (= pos (inc prev)))
+        bonus (+ 1
+                (if (fuzzy--boundary? cand pos) 8 0)
+                (if contiguous 6 0)
+                (if (nil? prev) (- 0 (min 3 pos)) 0)))  ; small leading-offset penalty, first match only
+    {:score (+ (get st :score) bonus) :prev pos}))
+
+(defn fuzzy--score (cand positions)
+  "The match score for `positions` within `cand` (higher = better)."
+  (get (fold (fn (st pos) (fuzzy--score--step cand st pos)) {:score 0 :prev nil} positions) :score))
+
+;; ---- public -----------------------------------------------------------------
+
+(defn fuzzy-match (query cand)
+  "`nil` if `query` isn't a case-insensitive subsequence of `cand`, else
+`{:score <int> :positions [i …]}`. The empty query matches anything (score 0)."
+  (let (positions (fuzzy--positions (lower query) (lower cand)
+                    0 (string-length query) 0 (string-length cand) '()))
+    (if (nil? positions)
+      nil
+      {:score (fuzzy--score cand positions) :positions positions})))
+
+(defn fuzzy-filter (query cands)
+  "The candidates in `cands` that fuzzily match `query`, best score first (ties:
+shorter candidate, then lexicographic). An empty `query` returns `cands` unchanged."
+  (if (= query "")
+    cands
+    (let (scored (filter (fn (x) (not (nil? (first x))))
+                   (map (fn (c) [(fuzzy-match query c) c]) cands)))
+      (map second
+        (sort-by (fn (x) [(- 0 (get (first x) :score)) (string-length (second x)) (second x)]) scored)))))
