@@ -1,10 +1,10 @@
 # Parametric HOF result types — design note
 
-> Status: **slice 1 shipped** (`map` + `filter`). Branch `parametric-types`.
-> Extends the structured-types work (ADR-078): function arrows + sequence element
-> types. Implemented via Option B (per-HOF result rules in `seq_aware_call_ty`) —
-> no lattice change. Slice 2 (`reduce`/`fold`) and Option A (type variables) remain
-> deferred.
+> Status: **slices 1 + 2 shipped** (`map`/`filter` + `reduce`/`fold`). Branch
+> `parametric-types`. Extends the structured-types work (ADR-078): function arrows
+> + sequence element types. Implemented via Option B (per-HOF result rules in
+> `seq_aware_call_ty`) — no lattice change. Option A (type variables for
+> user-defined generics) remains deferred (no consumer).
 
 ## Problem
 

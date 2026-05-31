@@ -1526,4 +1526,50 @@ mod tests {
             "a branchy lambda body must bail to a flat result: {w:?}"
         );
     }
+
+    // ---- reduce / fold result types (slice 2) ----
+
+    #[test]
+    fn reduce_result_is_the_accumulator_type() {
+        // `(reduce + 0 (list 1 2 3))` : number (init int ∪ +'s number return) —
+        // disjoint from string → flagged.
+        let w = warnings("(string-length (reduce + 0 (list 1 2 3)))");
+        assert!(
+            w.iter().any(|s| s.contains("string-length")),
+            "reduce's accumulator type should flow out: {w:?}"
+        );
+        // ...and a numeric sink is fine.
+        let w = warnings("(+ 1 (reduce + 0 (list 1 2 3)))");
+        assert!(
+            w.iter().all(|s| !s.contains("expects")),
+            "a numeric reduce result must not warn against +: {w:?}"
+        );
+    }
+
+    #[test]
+    fn fold_with_a_lambda_callback_types_the_result() {
+        // `(fold (fn (acc x) (+ acc x)) 0 …)` : number — the 2-arg callback's
+        // return (number) joined with the init (int).
+        let w = warnings("(string-length (fold (fn (acc x) (+ acc x)) 0 (list 1 2 3)))");
+        assert!(
+            w.iter().any(|s| s.contains("string-length")),
+            "fold should type the accumulator from a lambda callback: {w:?}"
+        );
+    }
+
+    #[test]
+    fn reduce_fold_bail_when_init_or_callback_unknown() {
+        // Unknown callback (local) → flat, no warning.
+        let w = warnings("(fn (g) (string-length (reduce g 0 (list 1 2 3))))");
+        assert!(
+            w.iter().all(|s| !s.contains("string-length")),
+            "an unknown reduce callback must not refine: {w:?}"
+        );
+        // Unknown init type (a fn param) → flat, no warning.
+        let w = warnings("(fn (init) (string-length (reduce + init (list 1 2 3))))");
+        assert!(
+            w.iter().all(|s| !s.contains("string-length")),
+            "an unknown init must not refine the reduce result: {w:?}"
+        );
+    }
 }
