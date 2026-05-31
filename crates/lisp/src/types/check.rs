@@ -460,6 +460,46 @@ mod tests {
     }
 
     #[test]
+    fn curated_helper_sigs_catch_misuse() {
+        // even?/odd?/abs require a number.
+        assert!(warnings("(even? \"x\")")
+            .iter()
+            .any(|w| w.contains("even?") && w.contains("number")));
+        assert!(warnings("(odd? :k)")
+            .iter()
+            .any(|w| w.contains("odd?") && w.contains("number")));
+        assert!(warnings("(abs :k)")
+            .iter()
+            .any(|w| w.contains("abs") && w.contains("number")));
+        // count/length want a string | map | sequence, not a number.
+        assert!(warnings("(count 5)").iter().any(|w| w.contains("count")));
+        assert!(warnings("(length :k)").iter().any(|w| w.contains("length")));
+        // not/zero? accept any arg but pin a bool *result*, so feeding it to a
+        // numeric sink is caught (the result-type payoff).
+        assert!(warnings("(+ 1 (not x))")
+            .iter()
+            .any(|w| w.contains('+') && w.contains("bool")));
+        assert!(warnings("(+ 1 (zero? x))")
+            .iter()
+            .any(|w| w.contains('+') && w.contains("bool")));
+        // Correct uses stay silent (no false positives).
+        for ok in [
+            "(even? 4)",
+            "(abs -3)",
+            "(count [1 2 3])",
+            "(count \"hi\")",
+            "(not x)",
+            "(zero? n)",
+        ] {
+            assert!(
+                warnings(ok).iter().all(|w| !w.contains("expects")),
+                "{ok} should be silent: {:?}",
+                warnings(ok)
+            );
+        }
+    }
+
+    #[test]
     fn skips_error_testing_forms() {
         // `try` and the error-asserting helpers deliberately exercise failures,
         // so misuse inside them is not flagged.

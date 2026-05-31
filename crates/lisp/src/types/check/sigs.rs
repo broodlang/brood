@@ -48,6 +48,12 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     // checker would warn on `(map f some-map)` even though it runs fine.
     #[allow(non_upper_case_globals)]
     const seq: Ty = Ty::of_tags(&[Tag::Nil, Tag::Pair, Tag::Vector, Tag::Map]);
+    #[allow(non_upper_case_globals)]
+    const bool_ty: Ty = Ty::of(Tag::Bool);
+    // `count`/`length` accept a string, map, or sequence (the prelude `count`
+    // dispatches string?/map?/else-fold) — but not a number/keyword/etc.
+    #[allow(non_upper_case_globals)]
+    const countable: Ty = Ty::of_tags(&[Tag::Str, Tag::Map, Tag::Nil, Tag::Pair, Tag::Vector]);
     let mut m: SymbolMap<Sig> = SymbolMap::default();
     let mut put = |name: &str, sig: Sig| {
         m.insert(value::intern(name), sig);
@@ -62,6 +68,22 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     }
     // `mod` is Brood (over `rem`), but its types are fixed
     put("mod", Sig::new(vec![int, int], int));
+    // Common helpers the checker can't infer (branchy / nested-param bodies),
+    // hand-vetted against std/prelude.blsp — same soundness basis as the rest of
+    // this table. Conservative on the domain (widest type the body accepts) so a
+    // tighter type never false-positives:
+    //   even?/odd? — body reduces via `rem`/`=`; require a number → bool.
+    //   abs        — `(if (< n 0) (- n) n)`: numeric in and out.
+    //   not/zero?  — accept any value (truthiness / `=`), but pin the `bool`
+    //                result, so a non-bool sink like `(+ 1 (not x))` is catchable.
+    //   count/len  — a string, map, or sequence → int.
+    put("even?", Sig::new(vec![num], bool_ty));
+    put("odd?", Sig::new(vec![num], bool_ty));
+    put("abs", Sig::new(vec![num], num));
+    put("not", Sig::new(vec![any], bool_ty));
+    put("zero?", Sig::new(vec![any], bool_ty));
+    put("count", Sig::new(vec![countable], int));
+    put("length", Sig::new(vec![countable], int));
     // higher-order: the first arg is a callback of a *known arity* — what the
     // combinator calls it with. The arrow's parameter count drives the
     // callback-arity check (ADR-078): `(map f xs)` calls `(f x)` → 1-ary;
