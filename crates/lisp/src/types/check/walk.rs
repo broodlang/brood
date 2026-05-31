@@ -317,8 +317,18 @@ pub(super) fn check_into(
         // Resolve the callee's signature + arity (separate concerns; either
         // may be available without the other). Both take `Symbol` directly —
         // no `symbol_name` round-trip — so the success path doesn't allocate.
-        let sig = sig_of(heap, s);
-        let arity = arity_of(heap, s);
+        // A user `(sig …)` declaration wins over primitive/curated/inferred sigs
+        // (it's the author's stated contract). For arity, the real callable's
+        // arity stays authoritative; the declared param count only fills in when
+        // the callee can't be inspected (a file-local `defn` in --check mode).
+        let declared = if ctx.is_lexical_local(s) {
+            None // a fn/let local shadows the name → not the declared global
+        } else {
+            ctx.declared_sig(s)
+        };
+        let sig = declared.clone().or_else(|| sig_of(heap, s));
+        let arity =
+            arity_of(heap, s).or_else(|| declared.map(|sg| Arity::exact(sg.params.len())));
         // Unbound-symbol diagnostic: warn only when the head is **truly not
         // resolvable** — not local, not a syntactic keyword, not in the global
         // env (which includes `Value::Macro`s like `test` / `assert=` that
