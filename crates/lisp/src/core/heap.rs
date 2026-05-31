@@ -4585,6 +4585,61 @@ mint_fn!(mint_rope, RopeId);
 mint_fn!(mint_closure, ClosureId);
 mint_fn!(mint_env, EnvId);
 
+/// Cold diagnostic for the GC copy phase: a LOCAL handle reachable from the GC
+/// roots whose `index()` is past the **source** slab it would be copied from.
+/// [`FlushForward::copies`] admits a handle by region + generation-age but *not*
+/// by slab bound, so a stale (use-after-GC), foreign, or mis-tagged handle that
+/// slips into the root set indexes the source slab out of bounds here. Rather
+/// than the bare `Vec` slice panic — an opaque `index out of bounds` with no
+/// provenance, and `<unknown>` frames in a release backtrace — name the handle
+/// directly: kind, region, age, epoch, index, slab length, and which space this
+/// pass collects. See the GC slab-OOB investigation (`docs/known-issues.md` KI-2,
+/// `docs/concurrency-v2.md`).
+#[cold]
+#[inline(never)]
+fn flush_oob(
+    kind: &str,
+    region: u8,
+    is_old: bool,
+    epoch: u32,
+    idx: usize,
+    len: usize,
+    src_old: bool,
+) -> ! {
+    panic!(
+        "GC flush: {kind} handle indexes the source slab out of bounds — \
+         region={region} age={age} epoch={epoch} index={idx} slab_len={len}, \
+         collecting {space}. A handle reachable from the GC roots is not a live \
+         this-pass object (missed rooting / use-after-GC / foreign handle). \
+         Re-run with BROOD_GC_VERIFY=1 for the root→cell path.",
+        age = if is_old { "old" } else { "young" },
+        space = if src_old { "old-gen (major)" } else { "nursery (minor)" },
+    );
+}
+
+/// Bounds-check a source-slab index during a flush, returning the index or
+/// calling [`flush_oob`] with the handle's full provenance. Used in place of a
+/// bare `slab[id.index()]` at every `flush_*` source access (the handle types
+/// share `index`/`region`/`is_old`/`generation` but no trait, hence a macro).
+macro_rules! flush_bound {
+    ($slab:expr, $id:expr, $fwd:expr, $kind:literal) => {{
+        let idx = $id.index();
+        let len = $slab.len();
+        if idx >= len {
+            flush_oob(
+                $kind,
+                $id.region(),
+                $id.is_old(),
+                $id.generation(),
+                idx,
+                len,
+                $fwd.src_old,
+            );
+        }
+        idx
+    }};
+}
+
 fn flush_value(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, v: Value) -> Value {
     match v {
         Value::Pair(id) if fwd.copies(id.region(), id.is_old()) => {
@@ -4636,7 +4691,7 @@ fn flush_pair(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: PairId) 
                 if let Some(&n) = fwd.pairs.get(&key) {
                     break Value::Pair(fwd.mint_pair(n as usize));
                 }
-                let (car, cdr) = old.pairs[p.index()];
+                let (car, cdr) = old.pairs[flush_bound!(old.pairs, p, fwd, "pair")];
                 let new_idx = new.pairs.len();
                 new.pairs.push((Value::Nil, Value::Nil));
                 fwd.pairs.insert(key, new_idx as u32);
@@ -4668,7 +4723,7 @@ fn flush_vector(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: VecId)
     if let Some(&new_idx) = fwd.vectors.get(&key) {
         return fwd.mint_vector(new_idx as usize);
     }
-    let items: Vec<Value> = old.vectors[id.index()].clone();
+    let items: Vec<Value> = old.vectors[flush_bound!(old.vectors, id, fwd, "vector")].clone();
     let new_idx = new.vectors.len();
     new.vectors.push(Vec::new());
     fwd.vectors.insert(key, new_idx as u32);
@@ -4691,7 +4746,7 @@ fn flush_string(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: StrId)
     // `SharedBlob` identity (no byte copy); non-surviving Shared slots
     // simply drop their old `Arc` and free the blob if they were the last
     // reference.
-    let entry = match &old.strings[id.index()] {
+    let entry = match &old.strings[flush_bound!(old.strings, id, fwd, "string")] {
         LocalString::Inline(s) => LocalString::Inline(s.clone()),
         LocalString::Shared(arc) => LocalString::Shared(Arc::clone(arc)),
     };
@@ -4709,7 +4764,7 @@ fn flush_rope(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: RopeId) 
     // `ropey::Rope::clone` is a cheap `Arc`-node bump (no byte copy); the old
     // slab drops right after `flush`, leaving the surviving rope's internal
     // refcounts net-unchanged — same structural sharing as `flush_string`.
-    let rope = old.ropes[id.index()].clone();
+    let rope = old.ropes[flush_bound!(old.ropes, id, fwd, "rope")].clone();
     let new_idx = new.ropes.len();
     new.ropes.push(rope);
     fwd.ropes.insert(key, new_idx as u32);
@@ -4730,7 +4785,7 @@ fn flush_map(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: MapId) ->
         SmallVec<[(Value, Value); 4]>,
         SmallVec<[MapId; 4]>,
     ) = {
-        let node = &old.maps[id.index()];
+        let node = &old.maps[flush_bound!(old.maps, id, fwd, "map")];
         (
             node.size,
             node.data_map,
@@ -4778,7 +4833,7 @@ fn flush_closure(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: Closu
     if let Some(&new_idx) = fwd.closures.get(&key) {
         return fwd.mint_closure(new_idx as usize);
     }
-    let cl = old.closures[id.index()].clone();
+    let cl = old.closures[flush_bound!(old.closures, id, fwd, "closure")].clone();
     let new_idx = new.closures.len();
     new.closures.push(Closure::default());
     fwd.closures.insert(key, new_idx as u32);
@@ -4821,7 +4876,7 @@ fn flush_env(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, env: EnvId) -
         return fwd.mint_env(new_idx as usize);
     }
     let (parent_snapshot, vars_snapshot): (Option<EnvId>, EnvVars) = {
-        let frame = &old.envs[env.index()];
+        let frame = &old.envs[flush_bound!(old.envs, env, fwd, "env")];
         (frame.parent, frame.vars.iter().copied().collect())
     };
     let new_idx = new.envs.len();

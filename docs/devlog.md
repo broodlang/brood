@@ -10634,6 +10634,32 @@ editor's; the analysis primitives — buffer/sexp/highlight/pane/check-string-st
 
 ---
 
+## 2026-05-31 — Scope the scheduler-race hint to *bare* unbound names
+
+**Fact corrected first.** `docs/brood-for-claude.md` claimed "Functions can't be
+sent (per-heap closures)" — empirically **false**, and already contradicted by
+`docs/language.md` §662–666: a `send`-ed closure travels as data (body as
+S-exprs, captured locals deep-copied; free globals re-resolve on the receiver).
+Verified same-node: a closure capturing `k=100` sent to another process returns
+`101`; `(fn () (* 6 7))` returns `42`. Only a bare *builtin* value can't be sent
+(no portable form — reference it by symbol). Fixed the pocket-ref claim.
+
+**The hint bug.** `eval::unbound_error` attached the scheduler-race hint
+("…the scheduler may be racing prelude lookups; try -j 1…") to *any* unbound
+symbol raised in a green process. But the race only loses **bare** internal
+names (`fold`/`acc`/`%eq`). The cross-node sent-closure case — a closure whose
+free global exists only on the *sending* node — arrives `unbound symbol:
+<ns>/<name>` on the receiver, and got the race hint, which is a red herring (the
+symbol is genuinely absent, not racing). Gated the hint on `!name.contains('/')`
+in addition to `in_green_process()`; a qualified miss is never the race
+(consistent with `unbound_namespace_hint`, which already treats a qualified miss
+as a different problem). New regression test
+`qualified_unbound_in_green_process_has_no_scheduler_hint`; the existing
+bare-name positive test still passes. Docs: `error-codes.md` hint-conditions
+section updated. No language-surface change.
+
+---
+
 ## 2026-05-31 — RUNTIME collector: automatic safepoint trigger (2b-auto)
 
 **Goal.** Solidify what we have. Without the (deferred, multi-process) 2c
@@ -10672,3 +10698,44 @@ use-after-collect. The three manual-path tests opt out via `set_rt_auto_collect(
 (else stress's low floor compacts the churn they measure). `docs/runtime-collector-exploration.md`
 §2b-auto. **The RUNTIME leak is now bounded automatically for every single-process
 session; only the multi-process server case (2c) remains deferred.**
+
+---
+
+## 2026-05-31 — GC slab-OOB panic re-report: confirmed already-fixed + hardened
+
+**Trigger.** A detailed report of a memory-unsafety-class fault: an `index out of
+bounds: the len is 3007 but the index is 7187` panic in the generational GC's copy
+phase (`heap.rs` `flush_pair`, `old.pairs[p.index()]`), plus a silently-wrong
+result on other runs, under foobar's parallel `pstep` (coordinator fans a
+Game-of-Life generation across row-band worker processes, each allocating heavily
+and `send`ing a slice back, with a global rebound underfoot). A LOCAL-tagged handle
+reachable from the GC roots indexing the source slab past its length — the
+use-after-GC / stale-handle signature of the KI-1/KI-2 scheduler race.
+
+**Finding: already fixed; does not reproduce on HEAD.** The captured panic came
+from a `nest mcp` server **pinned to a pre-fix binary** (still had 1-arg
+`gui-font!`). KI-1/KI-2 were killed on 2026-05-29 by three changes in series —
+supervisor shared-state strip (`e3d3a0d`), bump-only allocator / no slot reuse
+(`f90f0de`), per-worker pinned queues / no cross-thread coroutine migration
+(`2abf05e`) — now the load-bearing INV-1/2/3 of `concurrency-v2.md`. Re-ran the
+exact repro on a fresh debug-assertions build (28-worker default scheduler): the
+lean variant under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` was clean (no verifier
+trip), and the full 2000-trial repro ran 30+ min CPU with no panic / no crash dump.
+
+**Two durable follow-ups (so a recurrence is self-diagnosing and guarded):**
+- **Self-diagnosing flush OOB** — `heap.rs` gains `flush_oob` (cold) + the
+  `flush_bound!` macro; every `flush_*` source-slab access (pair/vector/string/
+  rope/map/closure/env) is bounds-checked and, on OOB, panics naming the handle's
+  kind/region/age/epoch/index/slab-len/collected-space instead of the bare slice
+  panic with `<unknown>` release frames. `copies()` admits a handle by region +
+  generation-age but **not** by slab bound, so this is exactly where a stale/
+  foreign handle lands — now it names its own provenance.
+- **Regression test** — `crates/lisp/tests/concurrency_race.rs`
+  (`fanout_with_concurrent_global_rebind_matches_serial`): spawn-N fan-out + a
+  concurrent global-rebinding writer process, asserting the parallel total equals
+  the deterministic serial `k*n` over 120 trials. Encodes the `concurrency-v2.md`
+  §6 acceptance bar in the standing suite (≈16 s, well under the nextest cap).
+
+Verified: new test green; `gc`/`runtime_collector` suites green under
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` with the hardened flush path. KI-1 in
+`known-issues.md` gains a 2026-05-31 re-confirmation note.
