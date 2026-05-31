@@ -35,6 +35,41 @@
     (assert= (mime-type "a/b.png") "image/png")
     (assert= (mime-type "a/b.xyz") "application/octet-stream")))
 
+(describe "http: streaming responses (the connection-handoff seam)"
+  (test "render-head emits the status line + custom headers, no Content-Length"
+    (let (h (render-head 200 {"Content-Type" "text/event-stream"}))
+      (is (string-contains? h "HTTP/1.0 200 OK"))
+      (is (string-contains? h "Content-Type: text/event-stream"))
+      (is (string-contains? h "\r\n\r\n"))
+      (refute (string-contains? h "Content-Length"))))
+  (test "streaming? distinguishes a stream-response from a plain response"
+    (is (streaming? (stream-response 200 {} (fn (sock) nil))))
+    (refute (streaming? (ok "hi"))))
+  (test "a stream-response keeps the connection open and pushes frames"
+    (let (me (self))
+      ;; A handler that hands the live socket to a stream-fn pushing two frames,
+      ;; then closes — so a draining client sees both before EOF (deterministic).
+      (spawn (do
+               (let (ls (http-listen 0))
+                 (send me [:port (tcp-local-port ls)])
+                 (serve-loop ls
+                   (fn (req)
+                     (stream-response 200 {"Content-Type" "text/event-stream"}
+                       (fn (sock)
+                         (tcp-send sock "data: one\n\n")
+                         (tcp-send sock "data: two\n\n")
+                         (tcp-close sock))))))))
+      (let (port (receive ([:port p] p) (after 5000 :timeout)))
+        (let (c (tcp-connect "127.0.0.1" port))
+          (tcp-send c "GET /events HTTP/1.0\r\nHost: localhost\r\n\r\n")
+          (let (resp (tcp-drain c))
+            (tcp-close c)
+            (is (string-contains? resp "text/event-stream"))
+            (is (string-contains? resp "data: one"))
+            (is (string-contains? resp "data: two"))
+            ;; the streaming path sends no Content-Length / Connection: close
+            (refute (string-contains? resp "Content-Length"))))))))
+
 (describe "http: client url + response parsing"
   (test "parse-url splits scheme/host/port/path"
     (let (u (http/http--parse-url "https://api.github.com/zen"))

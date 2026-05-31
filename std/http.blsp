@@ -13,6 +13,14 @@
 ;;
 ;; This is deliberately small — no keep-alive, no chunked encoding, no TLS (that
 ;; arrives with `tls-connect`/`std/https`). Enough to host a basic web app.
+;;
+;; One escape hatch lifts the read→one-response→close shape: a handler may return
+;; a `stream-response` instead of a plain `{:status :headers :body}`. The server
+;; then sends only the head and hands the *live socket* to the response's
+;; `stream-fn`, never closing it — the handler owns the connection and writes over
+;; time. That single, protocol-agnostic seam is what SSE (`std/sse`), long-poll,
+;; chunked downloads, and a WebSocket upgrade all build on; the kernel still adds
+;; nothing.
 
 (require 'tcp)
 (require 'file)
@@ -21,7 +29,9 @@
   "A minimal HTTP/1.0 server over the TCP + file libraries (ADR-062). `(serve port
 handler)` listens and runs one handler process per connection; a handler maps a
 request map to a response map. Includes request parsing, response rendering, a
-`router`, and static-file serving with MIME guessing. Plaintext only; pure Brood."
+`router`, and static-file serving with MIME guessing. A handler may instead return
+a `stream-response` to keep the connection open and push over the live socket (the
+seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
   (:use tcp)
   (:use file))
 
@@ -146,6 +156,35 @@ the raw request string, or nil if the peer closed without sending anything."
       "\r\n"
       body)))
 
+;; ---- streaming responses (the connection-handoff seam) ----------------------
+;; A handler that returns `(stream-response …)` keeps the connection open: the
+;; server renders the head, then hands the live socket to `stream-fn` instead of
+;; writing a body and closing. Everything long-lived — SSE, long-poll, chunked
+;; downloads — is a `stream-fn`, not a new server feature.
+
+(defn render-head (status headers)
+  "Render just the HTTP/1.0 status line + `headers` + the blank line — no body and
+no Content-Length. For a streaming response whose body is written incrementally
+over the socket afterwards (see `stream-response`)."
+  (str "HTTP/1.0 "
+    status
+    " "
+    (get *http-status-text* status "OK")
+    "\r\n"
+    (http--render-headers headers)
+    "\r\n"))
+
+(defn stream-response (status headers stream-fn)
+  "A streaming response `{:status :headers :stream}`. After the head is sent the
+server hands the live socket to `stream-fn` (a `(fn (sock) …)`) instead of closing
+it; `stream-fn` runs in the connection's own worker process — which owns the socket
+— and writes (`tcp-send`) over time, calling `tcp-close` when done."
+  {:status status :headers headers :stream stream-fn})
+
+(defn streaming? (resp)
+  "True if `resp` is a `stream-response` (carries a `:stream` fn) rather than a plain body response."
+  (contains? resp :stream))
+
 ;; ---- static files -----------------------------------------------------------
 (def *http-mime*
   {".html" "text/html; charset=utf-8"
@@ -200,11 +239,20 @@ socket is registered *passive* (no reader until the worker calls
 
 (defn http--serve-conn (c handler)
   ;; Runs in the per-connection worker: take ownership so `c`'s reader starts
-  ;; delivering `[:tcp …]` to *this* process, then read/handle/close.
+  ;; delivering `[:tcp …]` to *this* process, then read and dispatch. A plain
+  ;; response is rendered and the socket closed; a `stream-response` gets only the
+  ;; head, then the socket is handed to its `:stream` fn (which owns it from here —
+  ;; it writes over time and closes when done), so the worker does not close it.
   (tcp-controlling-process c (self))
   (let (raw (http-read-request c))
-    (when raw (tcp-send c (render-response (handler (parse-request raw)))))
-    (tcp-close c)))
+    (if (nil? raw)
+      (tcp-close c)
+      (let (resp (handler (parse-request raw)))
+        (if (streaming? resp)
+          (do (tcp-send c (render-head (get resp :status 200) (or (get resp :headers) {})))
+            ((get resp :stream) c))
+          (do (tcp-send c (render-response resp))
+            (tcp-close c)))))))
 
 (defn serve (port handler)
   "Listen on 127.0.0.1:`port` and serve `handler` forever. **Blocks** (the accept loop runs in the calling process) — `(spawn (serve …))` to run it in the background. One handler process per connection (HTTP/1.0)."

@@ -35,6 +35,23 @@
     (assert= (sse/sse--status "HTTP/1.1 200 OK\nContent-Type: text/event-stream") 200)
     (assert= (sse/sse--status "HTTP/1.1 404 Not Found") 404)))
 
+(describe "sse — server-side frame building"
+  (test "a single-line payload becomes one data: line + the blank line"
+    (assert= (sse/sse-frame "hello") "data: hello\n\n"))
+  (test "a multi-line payload prefixes every line with data:"
+    (assert= (sse/sse-frame "a\nb\nc") "data: a\ndata: b\ndata: c\n\n"))
+  (test "an event type adds the leading event: line"
+    (assert= (sse/sse-frame "x" "tick") "event: tick\ndata: x\n\n"))
+  (test "sse-headers declares text/event-stream and disables caching"
+    (let (h (sse/sse-headers))
+      (assert= (get h "Content-Type") "text/event-stream")
+      (assert= (get h "Cache-Control") "no-cache")))
+  (test "sse-frame is the inverse of sse--parse-event (round-trip)"
+    (let ([blocks _] (sse/sse--frames (sse/sse-frame "a\nb" "tick"))
+          ev (sse/sse--parse-event (first blocks)))
+      (assert= (get ev :event) "tick")
+      (assert= (get ev :data) "a\nb"))))
+
 (describe "with-events — merges [:sse …] into ui-run input"
   (test "a queued sse message is returned by :poll before the underlying display"
     (let (fake {:poll (fn (ms) :keyboard) :size (fn () [80 24])}

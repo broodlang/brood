@@ -11479,3 +11479,38 @@ to restart `nest mcp` (best-effort — a missing exe/mtime never false-alarms; t
 decision is unit-tested, `main_loop` owns the message so stdout stays a clean
 JSON-RPC stream). A stale MCP server can no longer silently serve a pre-fix runtime
 for hours unnoticed — which is exactly how this was hit. Doc updated to CONFIRMED.
+
+## 2026-05-31 — HTTP streaming responses + SSE server framing (the push seam)
+
+**The gap.** `std/http`'s `http--serve-conn` was read→one-response→`tcp-close`,
+hardwired — a handler returned `{:status :headers :body}` and the socket always
+closed. No way to hold a connection open and push; `std/sse` was client-only. Server
+push (SSE, long-poll, chunked download) is a *general* capability, so it belongs in
+Brood, not a one-off.
+
+**The seam (general, not SSE-specific).** Added one escape hatch to `std/http`:
+`(stream-response status headers stream-fn)` returns `{:status :headers :stream}`
+instead of a body map; `streaming?` detects it; `render-head` emits just the status
+line + headers + blank line (no Content-Length / `Connection: close`). The only
+behavioural change is one branch in `http--serve-conn`: a streaming response gets the
+head, then the **live socket is handed to `stream-fn`** and *not* closed — the
+handler owns it, writing over time in its per-connection worker. Fully
+backward-compatible: any response without `:stream` flows exactly as before. SSE,
+long-poll, chunked downloads, even a WebSocket upgrade are all `stream-fn`s on top —
+the kernel adds nothing (ADR-006/011; amendment under ADR-062).
+
+**SSE server framing.** `std/sse` (was client-only) gained the symmetric counterpart
+to its parser: `sse-headers` (`text/event-stream`, no-cache, keep-alive), `sse-frame`
+(prefixes every line of the payload with `data: `, optional `event:` line, blank-line
+terminator), and `sse-send` (`tcp-send` of a frame). `sse-frame` is the exact inverse
+of `sse--parse-event` — a round-trip test proves it. So an `http` handler returns
+`(stream-response 200 (sse-headers) (fn (sock) … (sse-send sock data) …))` and a
+browser `EventSource` reads the open stream. Pure string-building over `tcp-send`.
+
+**Tests.** `tests/http_test.blsp`: `render-head` (status line + custom header, no
+Content-Length), `streaming?`, and an e2e loopback where a handler returns a
+`stream-response` pushing two raw frames then closing — a `tcp-drain`ing client sees
+both + the `text/event-stream` header + no Content-Length (deterministic: handler
+closes after two frames). `tests/sse_test.blsp`: `sse-frame` single/multi-line/with
+event, `sse-headers`, and the framer↔parser round-trip. The http e2e stays
+SSE-free (raw `tcp-send`) so it exercises the *generic* seam.
