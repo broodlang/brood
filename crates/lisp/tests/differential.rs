@@ -64,6 +64,15 @@ const CORPUS: &[&str] = &[
     "(letrec (ev? (fn (n) (if (= n 0) true (od? (- n 1)))) od? (fn (n) (if (= n 0) false (ev? (- n 1))))) (ev? 10))",
     "(cond false :a (= 1 1) :b else :c)",
     "(when (< 1 2) (+ 1 1) (* 3 3))",
+    // macros in a fn body — the VM must defer a closure whose body still holds an
+    // *unexpanded* (forward-referenced / lazily-expanded) macro, or it would compile
+    // the macro's argument syntax as ordinary calls (the prelude `sleep`→`receive`
+    // regression). `earlym` is defined before its use (expanded → VM-runs); `fwm`
+    // after (forward ref → must defer to the tree-walker).
+    "(defmacro earlym (x) `(+ ~x 1)) (defn ue (n) (earlym n)) (ue 5)",
+    "(defn uf (n) (fwm n)) (defmacro fwm (x) `(* ~x 3)) (uf 7)",
+    // a forward-referenced macro whose argument is itself macro syntax (pin/unquote)
+    "(defn uw (n) (wrapm (~n))) (defmacro wrapm (x) `(quote ~x)) (uw 9)",
     // recursion + tail loops
     "(def fib (fn (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))) (fib 15)",
     "(defn down (i acc) (if (= i 0) acc (down (- i 1) (+ acc 1)))) (down 50000 0)",
@@ -112,4 +121,32 @@ fn engines_agree_on_corpus() {
     for &src in CORPUS {
         agree(src);
     }
+}
+
+/// Regression: a closure body that holds a macro **defined after** it (a forward
+/// reference) keeps the macro call *unexpanded* — `macroexpand_all` couldn't expand
+/// it at definition time, and it's expanded lazily at eval. The VM must **defer**
+/// such a closure to the tree-walker, not compile the raw macro call (which would
+/// treat the macro's argument syntax — pin patterns, `~`-unquotes — as ordinary
+/// calls → "unbound symbol: unquote" / "cannot call non-function"). This was a
+/// latent VM bug for user closures, and the prelude's `sleep`→`receive` (sleep is
+/// defined before receive) hit it the moment prelude closures became VM-eligible.
+#[test]
+fn vm_defers_unexpanded_forward_referenced_macro() {
+    // forward ref: `fwm` defined after `uf` → must defer, still produce 21.
+    assert_eq!(
+        eval_on("(defn uf (n) (fwm n)) (defmacro fwm (x) `(* ~x 3)) (uf 7)", true),
+        Ok("21".to_string()),
+    );
+    // a forward macro whose argument is itself macro syntax (the `~`-pin shape that
+    // produced the original "unbound unquote").
+    assert_eq!(
+        eval_on("(defn uw (n) (pm (~n))) (defmacro pm (x) `(quote ~x)) (uw 9)", true),
+        eval_on("(defn uw (n) (pm (~n))) (defmacro pm (x) `(quote ~x)) (uw 9)", false),
+    );
+    // a macro defined *before* still VM-compiles (we didn't over-defer).
+    assert_eq!(
+        eval_on("(defmacro em (x) `(+ ~x 1)) (defn ue (n) (em n)) (ue 41)", true),
+        Ok("42".to_string()),
+    );
 }
