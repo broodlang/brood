@@ -837,8 +837,9 @@ fn cmd_release(
     };
     let out = std::path::PathBuf::from(output.unwrap_or(&name));
 
-    // 3. Locate + read the base `brood` runtime.
-    let base_path = locate_runtime(runtime, target);
+    // 3. Resolve + read the base runtime — a *lean* `brood` (no test/observer/
+    //    debug/REPL), built on demand and cached, unless `--runtime` overrides it.
+    let base_path = resolve_runtime(runtime, target);
     let base = std::fs::read(&base_path).unwrap_or_else(|e| {
         eprintln!(
             "nest release: cannot read runtime binary {}: {e}",
@@ -863,37 +864,77 @@ fn cmd_release(
     );
 }
 
-/// Find the base `brood` runtime to append to: `--runtime` wins; otherwise the
-/// `brood` installed beside this `nest` (the `make install` layout), then the
-/// workspace `target/release/brood`. Cross-targeting needs an explicit
-/// `--runtime` (cross-compiling the runtime is out of scope, ADR-038).
-fn locate_runtime(runtime: Option<&str>, target: Option<&str>) -> std::path::PathBuf {
+/// Resolve the base runtime to append the app to. By default this is a **lean**
+/// `brood` — built on demand (and cached) with `--no-default-features`, so it
+/// carries no test/observer/MCP/doc/hot-reload/REPL code or GC debug builtins
+/// (ADR-038). `--runtime PATH` overrides it (a prebuilt runtime — e.g. a cross
+/// target, or one you trimmed differently). `--target` without `--runtime` is an
+/// error: cross-compiling the runtime is out of scope.
+fn resolve_runtime(runtime: Option<&str>, target: Option<&str>) -> std::path::PathBuf {
     if let Some(r) = runtime {
         return std::path::PathBuf::from(r);
     }
     if let Some(t) = target {
         eprintln!(
-            "nest release: cross-target builds need a prebuilt `brood` for {t} — \
-             pass it with --runtime PATH (cross-compiling the runtime is out of scope, ADR-038)"
+            "nest release: cross-target builds need a prebuilt lean `brood` for {t} — build it \
+             (`cargo build --release -p cli --no-default-features` on/for that target) and pass \
+             it with --runtime PATH (cross-compiling the runtime is out of scope, ADR-038)"
         );
         std::process::exit(2);
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(sib) = exe.parent().map(|d| d.join("brood")) {
-            if sib.exists() {
-                return sib;
-            }
+    build_lean_runtime()
+}
+
+/// Build the lean `brood` runtime from the workspace this `nest` was built in:
+/// `--no-default-features` (no test/observer/MCP/doc/reload/REPL/GC-debug) under
+/// the `release-lean` profile (strip + LTO + one codegen unit). Its artifacts
+/// land in `target/release-lean/` — never clobbering the dev `target/release/`.
+/// Built once and cached: changing the *app* only re-appends the archive, so the
+/// runtime (and LTO's cost) is rebuilt only when the brood source changes.
+/// Returns the lean binary's path.
+fn build_lean_runtime() -> std::path::PathBuf {
+    let workspace = workspace_dir();
+    let cli_manifest = workspace.join("crates/cli/Cargo.toml");
+    if !cli_manifest.exists() {
+        eprintln!(
+            "nest release: can't find the brood runtime source at {} to build a lean runtime.\n\
+             Pass --runtime PATH to a prebuilt lean `brood` \
+             (`cargo build --profile release-lean -p cli --no-default-features`).",
+            workspace.display()
+        );
+        std::process::exit(2);
+    }
+    // A custom `--profile NAME` lands artifacts in `target/NAME/` (not /release/).
+    let lean_bin = workspace.join("target/release-lean/brood");
+    eprintln!("nest release: building lean runtime (no test/observer/debug/REPL; stripped + LTO)…");
+    let status = std::process::Command::new("cargo")
+        .args(["build", "--profile", "release-lean", "--no-default-features"])
+        .arg("--manifest-path")
+        .arg(&cli_manifest)
+        .status();
+    match status {
+        Ok(s) if s.success() => lean_bin,
+        Ok(s) => {
+            eprintln!("nest release: lean runtime build failed (cargo exited {:?})", s.code());
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("nest release: could not run cargo to build the lean runtime: {e}");
+            std::process::exit(1);
         }
     }
-    let dev = std::path::PathBuf::from("target/release/brood");
-    if dev.exists() {
-        return dev;
-    }
-    eprintln!(
-        "nest release: cannot find the `brood` runtime binary. \
-         Build it (`cargo build --release`) or pass --runtime PATH."
-    );
-    std::process::exit(2);
+}
+
+/// The brood workspace root, as baked in at *this* `nest`'s build time
+/// (`crates/nest` → up two). For the in-repo dev workflow this is the live
+/// source tree; if it's gone (installed `nest`, source moved), the caller hits a
+/// clear "pass --runtime" error.
+fn workspace_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
 /// Human-friendly byte size for the release summary (e.g. `4.2 MB`).

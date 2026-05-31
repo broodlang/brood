@@ -747,34 +747,34 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::nullary(int),
         mem_soft_limit,
     );
-    def(
-        heap,
-        "gc-stats",
-        Arity::exact(0),
-        Sig::nullary(map_ty),
-        gc_stats,
-    );
-    def(
-        heap,
-        "gc-collect",
-        Arity::exact(0),
-        Sig::nullary(map_ty),
-        gc_collect,
-    );
-    def(
-        heap,
-        "runtime-collect",
-        Arity::exact(0),
-        Sig::nullary(map_ty),
-        runtime_collect,
-    );
-    def(
-        heap,
-        "gc-trace",
-        Arity::range(0, 1),
-        Sig::new(vec![any], bool_ty),
-        gc_trace,
-    );
+    // GC debug/introspection builtins — dev surface only. A lean `nest release`
+    // runtime (`--no-default-features`) omits them so a shipped app carries no
+    // debug instrumentation (ADR-038). Their fn defs are gated to match.
+    #[cfg(feature = "dev-tools")]
+    {
+        def(heap, "gc-stats", Arity::exact(0), Sig::nullary(map_ty), gc_stats);
+        def(
+            heap,
+            "gc-collect",
+            Arity::exact(0),
+            Sig::nullary(map_ty),
+            gc_collect,
+        );
+        def(
+            heap,
+            "runtime-collect",
+            Arity::exact(0),
+            Sig::nullary(map_ty),
+            runtime_collect,
+        );
+        def(
+            heap,
+            "gc-trace",
+            Arity::range(0, 1),
+            Sig::new(vec![any], bool_ty),
+            gc_trace,
+        );
+    }
 
     // self-hosting — eval/load/etc. take and return arbitrary forms / values.
     def(
@@ -2347,6 +2347,7 @@ fn mem_peak(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 /// cheap byte estimate of the LOCAL slabs — see `mem-bytes` for the process-wide
 /// figure), and `:threshold` (the live count that triggers the next collection —
 /// the slow/stable dial).
+#[cfg(feature = "dev-tools")]
 fn gc_stats(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(gc_stats_map(heap))
 }
@@ -2354,6 +2355,7 @@ fn gc_stats(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// Build the `(gc-stats)` snapshot map of the calling process's GC activity.
 /// Shared by `gc-stats` and `gc-collect` (which reports the same shape *after*
 /// forcing a collection, so the delta is visible).
+#[cfg(feature = "dev-tools")]
 fn gc_stats_map(heap: &mut Heap) -> Value {
     let (runs, copied, reclaimed) = heap.gc_counters();
     let pairs = vec![
@@ -2387,6 +2389,7 @@ fn gc_stats_map(heap: &mut Heap) -> Value {
 /// live process — see [`Heap::runtime_collect`]'s safety gate. Rarely needed: the
 /// eval safepoint auto-compacts ([`Heap::maybe_runtime_collect`]) once churn
 /// crosses the threshold; this is the explicit/force form.
+#[cfg(feature = "dev-tools")]
 fn runtime_collect(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let (before, after, ran) = match heap.runtime_collect() {
         Some((b, a)) => (b, a, true),
@@ -2413,6 +2416,7 @@ fn runtime_collect(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// un-rooted LOCAL values across the collection, and every live ancestor frame
 /// is already on the operand stack (ADR-061), so `collect` relocates everything
 /// reachable and the freshly-built result map is allocated post-collection.
+#[cfg(feature = "dev-tools")]
 fn gc_collect(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     heap.collect(&mut [], &mut []);
     Ok(gc_stats_map(heap))
@@ -2424,6 +2428,7 @@ fn gc_collect(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// minor/major collection prints a one-line summary to stderr. Per-process and
 /// defaulted from the `BROOD_GC_TRACE` env var (which traces the whole run,
 /// including the root process before any `(gc-trace)` call).
+#[cfg(feature = "dev-tools")]
 fn gc_trace(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     if let Some(&v) = args.first() {
         heap.set_gc_trace(crate::eval::truthy(v));
@@ -2798,8 +2803,12 @@ fn eval_string_inner(heap: &mut Heap, env: EnvId, src: &str, reset_ns: bool) -> 
 /// from any directory with no file paths. The require / provide / load-path
 /// *policy* is written in Brood (`std/prelude.blsp`, ADR-019); Rust only exposes
 /// an embedded module's source here, via `%builtin-module` (ADR-006/008).
-const EMBEDDED_MODULES: &[(&str, &str)] = &[
-    ("test", include_str!("../../../std/test.blsp")),
+///
+/// Split into [`CORE_MODULES`] (always baked in) and [`DEV_MODULES`] (only under
+/// the `dev-tools` feature), so a `nest release` lean runtime
+/// (`--no-default-features`) carries no test/observer/tooling/REPL source
+/// (ADR-038, docs/release.md). `builtin_module` consults both.
+const CORE_MODULES: &[(&str, &str)] = &[
     ("project", include_str!("../../../std/project.blsp")),
     // The package manager (ADR-037): resolves the manifest's :dependencies into a
     // lock file + load-path entries. Required lazily by `project-setup` only when a
@@ -2814,7 +2823,6 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
     // A minimal HTTP/1.0 server (ADR-062) over the tcp + file libraries — request
     // parsing, response rendering, a router, static files. Opt-in.
     ("http", include_str!("../../../std/http.blsp")),
-    ("docs", include_str!("../../../std/docs.blsp")),
     // JSON ↔ Brood data, written entirely in Brood (a recursive-descent parser +
     // encoder over the string primitives; the reader's `\u{}` escape is the
     // codepoint→char mechanism). Opt-in, never in the prelude.
@@ -2861,7 +2869,6 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
     // Reusable editor toolkit (content-agnostic); the keybindings + payload are
     // editor policy. Opt-in, never in the prelude.
     ("pane", include_str!("../../../std/pane.blsp")),
-    ("observer", include_str!("../../../std/observer.blsp")),
     // Bare ANSI escape *strings* for simple terminal scripts (`print` them
     // directly) — the lightweight counterpart to the `display` render-op
     // protocol. Opt-in, never in the prelude.
@@ -2875,18 +2882,44 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
     // syntax-highlighter / bracket-matcher / signature + completion scanners;
     // `lineedit` is the raw-mode, emacs-style editor built on it + the inline
     // `term-*` seam. Both opt-in, never in the prelude; `repl` requires them.
+    // `highlight`/`lineedit` stay in CORE: they are reusable UI a shipped app may
+    // `require` (the editor's minibuffer reuses `std/lineedit`'s core), not just
+    // REPL plumbing — so a lean release keeps them.
     ("highlight", include_str!("../../../std/highlight.blsp")),
     ("lineedit", include_str!("../../../std/lineedit.blsp")),
     ("format", include_str!("../../../std/format.blsp")),
+];
+
+/// Dev/tooling modules — baked in only under the `dev-tools` feature (the dev
+/// `brood`/`nest` + tests). A `nest release` lean runtime
+/// (`--no-default-features`) omits them, so a shipped app carries no test
+/// framework, process observer, MCP/doc/hot-reload tooling, or interactive REPL
+/// (ADR-038, docs/release.md). `project` stays in CORE — it boots the bundle;
+/// `lineedit`/`highlight` stay too (reusable UI, e.g. the editor's minibuffer).
+#[cfg(feature = "dev-tools")]
+const DEV_MODULES: &[(&str, &str)] = &[
+    // The test framework — `deftest`/`describe`/`assert=`/`is`. Never shipped.
+    ("test", include_str!("../../../std/test.blsp")),
+    // Doc generation (`nest doc`) — tooling, not runtime.
+    ("docs", include_str!("../../../std/docs.blsp")),
+    // The process viewer / debug tooling (`nest observe`, `(observe)`).
+    ("observer", include_str!("../../../std/observer.blsp")),
+    // The hot-reload file watcher — a dev-loop convenience.
     ("reload", include_str!("../../../std/reload.blsp")),
     // The Model Context Protocol tool surface — `(mcp-tools)` returns the
     // catalogue the `nest mcp` dispatcher reads (ADR-036, docs/mcp.md, step 3).
     ("mcp", include_str!("../../../std/mcp.blsp")),
     // The read-eval-print loop itself, written in Brood (`(require 'repl)`):
     // policy over the `read-line`/`eval-string`/`pr-str` primitives. The Rust
-    // binaries (`brood`, `nest repl`) just bootstrap into `(repl-run)`.
+    // binaries (`brood`, `nest repl`) just bootstrap into `(repl-run)`. A shipped
+    // app runs its own `:main`, never the REPL.
     ("repl", include_str!("../../../std/repl.blsp")),
 ];
+
+/// Empty in a lean (`--no-default-features`) release runtime — the dev modules
+/// above are not compiled in at all (their `include_str!` never runs).
+#[cfg(not(feature = "dev-tools"))]
+const DEV_MODULES: &[(&str, &str)] = &[];
 
 /// Baked-in reference *documents* (markdown), the counterpart to
 /// [`EMBEDDED_MODULES`] for non-module text. `(%builtin-doc 'brood-for-claude)`
@@ -2939,13 +2972,13 @@ fn lookup_embedded(
 /// or nil if there is none. Mechanism only: `require` (Brood) consults this
 /// before searching the load-path.
 fn builtin_module(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let found = lookup_embedded(
-        args,
-        heap,
-        EMBEDDED_MODULES,
-        "%builtin-module",
-        "module name",
-    )?;
+    // Core modules first, then dev/tooling modules (absent in a lean release
+    // runtime). Both go through `lookup_embedded`, which also validates the arg.
+    let found = lookup_embedded(args, heap, CORE_MODULES, "%builtin-module", "module name")?;
+    if !matches!(found, Value::Nil) {
+        return Ok(found);
+    }
+    let found = lookup_embedded(args, heap, DEV_MODULES, "%builtin-module", "module name")?;
     if !matches!(found, Value::Nil) {
         return Ok(found);
     }

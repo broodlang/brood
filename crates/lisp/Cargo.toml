@@ -11,6 +11,14 @@ name = "brood"
 path = "src/lib.rs"
 
 [features]
+default = ["dev-tools"]
+# Dev/tooling surface baked into the runtime: the test framework (`test`), the
+# process observer (`observer`), the agent/doc/hot-reload tooling (`mcp`/`docs`/
+# `reload`), the interactive REPL (`repl`/`lineedit`), and the GC debug builtins
+# (`gc-stats`/`gc-collect`/`gc-trace`/`runtime-collect`). On for `brood`/`nest`/
+# tests. `nest release` builds the runtime *without* it (`--no-default-features`)
+# so a shipped app carries no test/observer/debug code (ADR-038, docs/release.md).
+dev-tools = []
 # A windowed (GUI) frontend for the M3 display/input seam (ADR-046), alongside
 # the always-on terminal (crossterm) frontend. Off by default so the core lib —
 # which `nest`/`brood-lsp` embed — pulls no windowing stack; opt in with

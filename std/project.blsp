@@ -16,8 +16,11 @@ Convention over configuration: `src/` holds source (added to *load-path*),
 `tests/` holds <name>_test.blsp cases; a `project.blsp` manifest declares
 identity and may override those paths. Also home to the user-config loader and
 the `nest new` scaffolder."
-  (:use format)
-  (:use test))
+  ;; NOT `(:use test)`: that would `(require 'test)` at *load* time, so a lean
+  ;; release runtime (which strips the test framework, ADR-038) couldn't even
+  ;; load `project` to boot a bundle. The test runner needs test only when it
+  ;; actually runs — `run-project-tests` `(require 'test)`s and qualifies it.
+  (:use format))
 
 ;; --- the project, as set by the manifest -------------------------------------
 
@@ -533,7 +536,7 @@ resolve in the advisory checker. Returns the project root."
     (require 'test)
     (project-load-sources root)
     ; the project's own src/, so tests use it directly
-    (reset-units!)
+    (test/reset-units!)
     ; drop any stale registrations from a prior run (long-lived image / hot reload)
     (let (dirs (project--abs-paths root *project-test-paths*)
           files (fold (fn (acc d) (append acc (project--collect-tests d))) nil dirs))
@@ -541,7 +544,7 @@ resolve in the advisory checker. Returns the project root."
       ; load each: registers its tests
       (check-project)
       ; advisory; warnings to stderr
-      (apply run-tests opts))))
+      (apply test/run-tests opts))))
 
 ;; Structured analogue of `run-project-tests` — same bootstrap (discovery,
 ;; load, type-check pre-flight) but `(run-tests-structured)` at the end, so
@@ -558,14 +561,14 @@ resolve in the advisory checker. Returns the project root."
     (project-setup root)
     (require 'test)
     (project-load-sources root)
-    (reset-units!)
+    (test/reset-units!)
     ; drop any stale registrations so a re-run in a long-lived `nest mcp` image
     ; (each `load` re-registers, ADR-013) counts each test once, not N times
     (let (dirs (project--abs-paths root *project-test-paths*)
           files (fold (fn (acc d) (append acc (project--collect-tests d))) nil dirs))
       (fold (fn (_ f) (load f)) nil files)
       ; loader-only: tests register themselves
-      (apply run-tests-structured opts))))
+      (apply test/run-tests-structured opts))))
 
 ;; (run-project args) — find the project from the cwd, set it up (which may
 ;; override *project-main* via the manifest), `require` the entry module, and
