@@ -108,7 +108,7 @@
       (is (> (count g) 100))
       (is (includes? g 'map))
       (is (includes? g 'rand-int))
-      (assert= g (global-names)))) ; it's an alias
+      (assert= g (global-names))))  ; it's an alias
   (test "doc-search finds globals whose docstring mentions a word"
     (let (names (map first (doc-search "uniformly random")))
       (is (includes? names 'shuffle))
@@ -140,7 +140,7 @@
   (test "live count rises after allocating retained data"
     ;; allocate a chunk we keep referenced — :live must reflect it
     (let (before (get (gc-stats) :live)
-          kept   (range 500)
-          after  (get (gc-stats) :live))
+          kept (range 500)
+          after (get (gc-stats) :live))
       (is (> (count kept) 0))
       (is (>= after before)))))

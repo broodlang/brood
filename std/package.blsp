@@ -46,16 +46,16 @@ land in a later slice."
               (if (dir? full)
                 (append acc (package--tree-files--walk full rel))
                 (append acc (list rel))))))
-    nil (list-dir dir)))
+    nil
+    (list-dir dir)))
 
 (defn package--sha256-file (path) (%sha256 (slurp path)))
 
 (defn package-tree-hash (dir)
   "The canonical SHA-256 (hex) of a directory's file contents — order-independent of the filesystem, stable across machines (ADR-037)."
-  (%sha256
-    (join ""
-      (map (fn (rel) (str rel "\0" (package--sha256-file (path-join dir rel)) "\n"))
-        (package--tree-files dir)))))
+  (%sha256 (join ""
+             (map (fn (rel) (str rel "\0" (package--sha256-file (path-join dir rel)) "\n"))
+               (package--tree-files dir)))))
 
 ;; --- reading a dependency's own manifest -------------------------------------
 ;; A dep declares its own deps in its project.blsp. We read (not eval) the first
@@ -80,30 +80,41 @@ land in a later slice."
   ;; `deps` is the direct (root-manifest) set; it's queued first, so every direct
   ;; dep is resolved before any transitive one (the loop appends sub-deps to the
   ;; queue's tail). That ordering is what makes "direct wins" a simple lookup.
-  (package--resolve-loop root deps {} nil (package--lock-index lock)
+  (package--resolve-loop root
+    deps
+    {}
+    nil
+    (package--lock-index lock)
     (map (fn (d) (get d :name)) deps)))
 
 (defn package--resolve-loop (root queue resolved order lock-index direct)
   (cond
     (empty? queue) (map (fn (nm) (get resolved nm)) (reverse order))
-    (contains? resolved (get (first queue) :name))
-    (do
-      ;; A name already resolved: if it's a direct dep, the root's pin wins and we
-      ;; ignore the transitive re-request silently; otherwise the two requesters
-      ;; must agree on the source (else a loud, pin-it-yourself error).
-      (when (not (includes? direct (get (first queue) :name)))
-        (package--check-compatible (get resolved (get (first queue) :name)) (first queue)))
-      (package--resolve-loop root (rest queue) resolved order lock-index direct))
-    else
-    (let (dep (first queue)
-          nm (get dep :name)
-          entry (package--resolve-one root dep lock-index))
-      (package--resolve-loop root
-        (append (rest queue) (get entry :deps))
-        (assoc resolved nm entry)
-        (cons nm order)
-        lock-index
-        direct))))
+    (contains? resolved (get (first queue) :name)) (do
+                                                     ;; A name already resolved: if it's a direct dep, the root's pin wins and we
+                                                     ;; ignore the transitive re-request silently; otherwise the two requesters
+                                                     ;; must agree on the source (else a loud, pin-it-yourself error).
+                                                     (when (not (includes? direct
+                                                                  (get (first queue) :name)))
+                                                       (package--check-compatible (get resolved
+                                                                                    (get (first queue)
+                                                                                      :name))
+                                                         (first queue)))
+                                                     (package--resolve-loop root
+                                                       (rest queue)
+                                                       resolved
+                                                       order
+                                                       lock-index
+                                                       direct))
+    else (let (dep (first queue)
+               nm (get dep :name)
+               entry (package--resolve-one root dep lock-index))
+           (package--resolve-loop root
+             (append (rest queue) (get entry :deps))
+             (assoc resolved nm entry)
+             (cons nm order)
+             lock-index
+             direct))))
 
 (defn package--resolve-one (root dep lock-index)
   (cond
@@ -115,7 +126,8 @@ land in a later slice."
 ;; :commit/… key-values), for reuse during resolution. nil lock → empty index.
 (defn package--lock-index (lock)
   (fold (fn (m v) (let (lst (vec->list v)) (assoc m (first lst) (rest lst))))
-    {} (if (nil? lock) nil (vec->list lock))))
+    {}
+    (if (nil? lock) nil (vec->list lock))))
 
 (defn package--resolve-path (root dep)
   (let (abs (path-join root (get dep :path)))
@@ -147,17 +159,24 @@ land in a later slice."
         (plist-get locked :commit))
     (plist-get locked :commit)
     (or (%git-resolve-ref (get dep :url) (get dep :ref))
-      (error "package: cannot resolve git ref \"" (get dep :ref) "\" for " (get dep :name)
-        " at " (get dep :url) " (no such tag/branch/commit on the remote?)"))))
+      (error "package: cannot resolve git ref \""
+        (get dep :ref)
+        "\" for "
+        (get dep :name)
+        " at "
+        (get dep :url)
+        " (no such tag/branch/commit on the remote?)"))))
 
 ;; .brood-pkg.blsp is the cache's source of truth: a clone is current when it
 ;; records the same commit we want.
 (defn package--pkg-meta-path (target) (path-join target ".brood-pkg.blsp"))
 (defn package--cache-current? (target commit)
   (let (meta (package--pkg-meta-path target))
-    (and (dir? target) (file-exists? meta)
+    (and (dir? target)
+      (file-exists? meta)
       (let (form (read-string (slurp meta)))
-        (and (pair? form) (= (first form) 'brood-pkg)
+        (and (pair? form)
+          (= (first form) 'brood-pkg)
           (= commit (plist-get (rest form) :commit)))))))
 
 (defn package--write-pkg-meta (target url ref commit sha)
@@ -177,7 +196,11 @@ land in a later slice."
       ;; plain `nest run`/`test` (which auto-resolves via ensure-deps) walk and
       ;; SHA-256 every dep file each invocation. Reuse the locked hash; only read
       ;; the dep's manifest (one small file) for its transitive deps.
-      {:name nm :kind :git :url url :ref ref :commit commit
+      {:name nm
+       :kind :git
+       :url url
+       :ref ref
+       :commit commit
        :resolved-path target
        :sha256 (package--reuse-or-hash locked commit target)
        :deps (package--manifest-deps (path-join target "project.blsp"))}
@@ -187,8 +210,13 @@ land in a later slice."
         (%git-clone url target ref commit)
         (let (sha (package-tree-hash target))
           (package--write-pkg-meta target url ref commit sha)
-          {:name nm :kind :git :url url :ref ref :commit commit
-           :resolved-path target :sha256 sha
+          {:name nm
+           :kind :git
+           :url url
+           :ref ref
+           :commit commit
+           :resolved-path target
+           :sha256 sha
            :deps (package--manifest-deps (path-join target "project.blsp"))})))))
 
 ;; The locked sha when it's for this exact commit; otherwise hash the tree.
@@ -200,21 +228,34 @@ land in a later slice."
 ;; Two resolutions of the same name must agree on their source (kind + location).
 (defn package--check-compatible (existing dep)
   (cond
-    (not (= (get existing :kind) (get dep :kind)))
-    (error "package: conflicting dependency " (get dep :name)
-      " required as both " (get existing :kind) " and " (get dep :kind)
-      " — pin it explicitly in your root manifest")
-    (= (get dep :kind) :git)
-    (when (not (and (= (get existing :url) (get dep :url)) (= (get existing :ref) (get dep :ref))))
-      (error "package: conflicting dependency " (get dep :name)
-        " required at both " (get existing :url) " @ " (get existing :ref)
-        " and " (get dep :url) " @ " (get dep :ref)
-        " — pin it explicitly in your root manifest"))
-    else
-    (when (not (= (get existing :path) (get dep :path)))
-      (error "package: conflicting dependency " (get dep :name)
-        " required at both \"" (get existing :path) "\" and \"" (get dep :path)
-        "\" — pin it explicitly in your root manifest"))))
+    (not (= (get existing :kind) (get dep :kind))) (error "package: conflicting dependency "
+                                                     (get dep :name)
+                                                     " required as both "
+                                                     (get existing :kind)
+                                                     " and "
+                                                     (get dep :kind)
+                                                     " — pin it explicitly in your root manifest")
+    (= (get dep :kind) :git) (when (not (and (= (get existing :url) (get dep :url))
+                                          (= (get existing :ref) (get dep :ref))))
+                               (error "package: conflicting dependency "
+                                 (get dep :name)
+                                 " required at both "
+                                 (get existing :url)
+                                 " @ "
+                                 (get existing :ref)
+                                 " and "
+                                 (get dep :url)
+                                 " @ "
+                                 (get dep :ref)
+                                 " — pin it explicitly in your root manifest"))
+    else (when (not (= (get existing :path) (get dep :path)))
+           (error "package: conflicting dependency "
+             (get dep :name)
+             " required at both \""
+             (get existing :path)
+             "\" and \""
+             (get dep :path)
+             "\" — pin it explicitly in your root manifest"))))
 
 ;; --- namespace-collision detection (ADR-070) --------------------------------
 ;; Namespaces aren't package-rooted yet (a deferred upgrade — ADR-070): every
@@ -244,9 +285,8 @@ land in a later slice."
 ;; The [label src-dir] providers to check: the project's own source dirs first
 ;; (so a dep colliding with your own module is caught), then each resolved dep.
 (defn package--collision-sources (root entries)
-  (append
-    (map (fn (d) (list "your project" d))
-      (project/project--abs-paths root *project-source-paths*))
+  (append (map (fn (d) (list "your project" d))
+            (project/project--abs-paths root *project-source-paths*))
     (map (fn (e) (list (str "dependency '" (name (get e :name)) "'") (package--dep-src-dir e)))
       entries)))
 
@@ -262,11 +302,16 @@ land in a later slice."
       (package--collision-loop (rest sources)
         (fold (fn (m mod)
                 (if (contains? m mod)
-                  (error "package: module name collision — '" mod
-                    "' is provided by both " (get m mod) " and " label
+                  (error "package: module name collision — '"
+                    mod
+                    "' is provided by both "
+                    (get m mod)
+                    " and "
+                    label
                     "; rename one (namespaces aren't package-rooted yet — ADR-070)")
                   (assoc m mod label)))
-          seen (package--provided-modules dir))))))
+          seen
+          (package--provided-modules dir))))))
 
 ;; The guard the verbs share: reject any cross-provider module-name collision.
 (defn package--guard-collisions (root entries)
@@ -282,16 +327,26 @@ land in a later slice."
 (defn package--entry->lock-vec (e)
   (apply vector
     (cond
-      (= (get e :kind) :git)
-      (append (list (get e :name) :git (get e :url) :ref (get e :ref) :commit (get e :commit) :sha256 (get e :sha256))
-        (list :deps (package--dep-names-vec (get e :deps))))
-      else
-      (append (list (get e :name) :path (get e :path) :sha256 (get e :sha256))
-        (list :deps (package--dep-names-vec (get e :deps)))))))
+      (= (get e :kind) :git) (append (list (get e :name)
+                                       :git
+                                       (get e :url)
+                                       :ref
+                                       (get e :ref)
+                                       :commit
+                                       (get e :commit)
+                                       :sha256
+                                       (get e :sha256))
+                               (list :deps (package--dep-names-vec (get e :deps))))
+      else (append (list (get e :name) :path (get e :path) :sha256 (get e :sha256))
+             (list :deps (package--dep-names-vec (get e :deps)))))))
 
 (defn package--lockfile-content (entries)
   (str ";; project.lock.blsp — generated by `nest fetch`. Do not edit by hand.\n"
-    (pr-str (list 'lock :version 1 :dependencies (apply vector (map package--entry->lock-vec entries))))
+    (pr-str (list 'lock
+              :version
+              1
+              :dependencies
+              (apply vector (map package--entry->lock-vec entries))))
     "\n"))
 
 (defn package--lockfile-path (root) (path-join root "project.lock.blsp"))
@@ -354,28 +409,34 @@ land in a later slice."
 
 (defn fetch ()
   "Resolve and lock the current project's dependencies, (re)writing project.lock.blsp. Reuses the existing lock's pins where the manifest still matches (so a re-run is network-free); :git deps whose ref changed are re-resolved and (re)cloned into _deps/, :path deps are re-hashed. Returns the resolved entries (nil when none are declared). Backs `nest fetch`."
-  (package--in-project
-    (fn (root)
-      (if (empty? *project-dependencies*)
-        (do (println "package: no dependencies declared") nil)
-        (let (entries (resolve-deps root *project-dependencies* (read-lockfile root)))
-          (package--guard-collisions root entries)
-          (write-lockfile root entries)
-          (println (str "package: locked " (count entries) " dependencies in project.lock.blsp"))
-          entries)))))
+  (package--in-project (fn (root)
+                         (if (empty? *project-dependencies*)
+                           (do (println "package: no dependencies declared") nil)
+                           (let (entries (resolve-deps root
+                                           *project-dependencies*
+                                           (read-lockfile root)))
+                             (package--guard-collisions root entries)
+                             (write-lockfile root entries)
+                             (println (str "package: locked "
+                                        (count entries)
+                                        " dependencies in project.lock.blsp"))
+                             entries)))))
 
 (defn update (& names)
   "Re-resolve dependency refs and re-lock, ignoring the locked commits so moving refs (a branch or floating tag) advance. With no NAMES, re-resolves every dep; with NAMES, only those (others keep their locked pins). Re-clones any :git dep whose commit changed. Backs `nest update`."
-  (package--in-project
-    (fn (root)
-      (if (empty? *project-dependencies*)
-        (do (println "package: no dependencies declared") nil)
-        (let (lock (package--lock-without (read-lockfile root) (map symbol names))
-              entries (resolve-deps root *project-dependencies* lock))
-          (write-lockfile root entries)
-          (println (str "package: updated " (if (empty? names) "all dependencies" (join ", " names))
-                     " (" (count entries) " locked)"))
-          entries)))))
+  (package--in-project (fn (root)
+                         (if (empty? *project-dependencies*)
+                           (do (println "package: no dependencies declared") nil)
+                           (let (lock (package--lock-without (read-lockfile root)
+                                        (map symbol names))
+                                 entries (resolve-deps root *project-dependencies* lock))
+                             (write-lockfile root entries)
+                             (println (str "package: updated "
+                                        (if (empty? names) "all dependencies" (join ", " names))
+                                        " ("
+                                        (count entries)
+                                        " locked)"))
+                             entries)))))
 
 ;; The lock's :dependencies with `names` (symbols) dropped, so they re-resolve.
 ;; Empty `names` drops everything → a full update.
@@ -410,14 +471,17 @@ land in a later slice."
 
 (defn tree ()
   "Print the resolved dependency tree of the current project (root → direct → transitive). Backs `nest tree`."
-  (package--in-project
-    (fn (root)
-      (println (or *project-name* "(this project)"))
-      (if (empty? *project-dependencies*)
-        (println "  (no dependencies)")
-        (package--print-tree *project-dependencies*
-          (package--index-by-name (resolve-deps root *project-dependencies* (read-lockfile root))) "  " nil))
-      nil)))
+  (package--in-project (fn (root)
+                         (println (or *project-name* "(this project)"))
+                         (if (empty? *project-dependencies*)
+                           (println "  (no dependencies)")
+                           (package--print-tree *project-dependencies*
+                             (package--index-by-name (resolve-deps root
+                                                       *project-dependencies*
+                                                       (read-lockfile root)))
+                             "  "
+                             nil))
+                         nil)))
 
 ;; --- editing the manifest: `nest add` / `nest remove` -----------------------
 ;; These mutate project.blsp's :dependencies clause while preserving the rest of
@@ -434,13 +498,14 @@ land in a later slice."
 (defn package--str-lit (s) (str "\"" s "\""))
 (defn package--dep->entry-node (dep)
   (cond
-    (= (get dep :kind) :path)
-    [:vector (vector [:symbol (name (get dep :name))] [:keyword ":path"]
-               [:str (package--str-lit (get dep :path))])]
-    (= (get dep :kind) :git)
-    [:vector (vector [:symbol (name (get dep :name))] [:keyword ":git"]
-               [:str (package--str-lit (get dep :url))]
-               [:keyword ":ref"] [:str (package--str-lit (get dep :ref))])]
+    (= (get dep :kind) :path) [:vector (vector [:symbol (name (get dep :name))]
+                                         [:keyword ":path"]
+                                         [:str (package--str-lit (get dep :path))])]
+    (= (get dep :kind) :git) [:vector (vector [:symbol (name (get dep :name))]
+                                        [:keyword ":git"]
+                                        [:str (package--str-lit (get dep :url))]
+                                        [:keyword ":ref"]
+                                        [:str (package--str-lit (get dep :ref))])]
     else (error "package: cannot build a manifest entry for kind " (get dep :kind))))
 
 ;; Is `n` the manifest's top-level (project …) list node?
@@ -461,8 +526,9 @@ land in a later slice."
     after-kw (if (trivia? (first children))
                (package--deps-value-index--scan (rest children) (inc i) true)
                i)
-    (and (= (node-kind (first children)) :keyword) (= (node-text (first children)) ":dependencies"))
-    (package--deps-value-index--scan (rest children) (inc i) true)
+    (and (= (node-kind (first children)) :keyword) (= (node-text (first children)) ":dependencies")) (package--deps-value-index--scan (rest children)
+                                                                                                       (inc i)
+                                                                                                       true)
     else (package--deps-value-index--scan (rest children) (inc i) false)))
 
 ;; Functional list update: `lst` with element `i` replaced by `(f element)`.
@@ -470,7 +536,10 @@ land in a later slice."
 (defn package--list-update--acc (lst i f j acc)
   (if (empty? lst)
     (reverse acc)
-    (package--list-update--acc (rest lst) i f (inc j)
+    (package--list-update--acc (rest lst)
+      i
+      f
+      (inc j)
       (cons (if (= j i) (f (first lst)) (first lst)) acc))))
 
 ;; The dep name (symbol) of an entry node `[:vector [[:symbol "name"] …]]`, or nil.
@@ -486,8 +555,12 @@ land in a later slice."
   (let (didx (package--deps-value-index children))
     (if (nil? didx)
       (append children
-        (list [:whitespace " "] [:keyword ":dependencies"] [:whitespace " "] [:vector (vector entry-node)]))
-      (package--list-update children didx
+        (list [:whitespace " "]
+          [:keyword ":dependencies"]
+          [:whitespace " "]
+          [:vector (vector entry-node)]))
+      (package--list-update children
+        didx
         (fn (vecnode)
           [:vector (apply vector (append (vec->list (node-children vecnode)) (list entry-node)))])))))
 
@@ -496,28 +569,32 @@ land in a later slice."
   (let (didx (package--deps-value-index children))
     (if (nil? didx)
       children
-      (package--list-update children didx
+      (package--list-update children
+        didx
         (fn (vecnode)
           [:vector (apply vector
-                     (filter (fn (c) (not (and (= (node-kind c) :vector) (= (package--entry-name c) nm))))
+                     (filter (fn (c)
+                               (not (and (= (node-kind c) :vector) (= (package--entry-name c) nm))))
                        (vec->list (node-children vecnode))))])))))
 
 ;; Re-render `src` after applying `f` to its (project …) node. Comments survive.
 (defn package--manifest-transform (src f)
   (require 'format)
   (let (kids (vec->list (node-children (parse-source src))))
-    (format/format-source--root
-      (apply vector (map (fn (n) (if (package--project-list? n) (f n) n)) kids)))))
+    (format/format-source--root (apply vector
+                                  (map (fn (n) (if (package--project-list? n) (f n) n)) kids)))))
 
 (defn package--manifest-add (src entry-node)
   "Return manifest `src` with `entry-node` added to its :dependencies (pure)."
   (package--manifest-transform src
-    (fn (proj) [:list (apply vector (package--children-add-dep (vec->list (node-children proj)) entry-node))])))
+    (fn (proj)
+      [:list (apply vector (package--children-add-dep (vec->list (node-children proj)) entry-node))])))
 
 (defn package--manifest-remove (src nm)
   "Return manifest `src` with the dep named `nm` removed from :dependencies (pure)."
   (package--manifest-transform src
-    (fn (proj) [:list (apply vector (package--children-remove-dep (vec->list (node-children proj)) nm))])))
+    (fn (proj)
+      [:list (apply vector (package--children-remove-dep (vec->list (node-children proj)) nm))])))
 
 ;; A CLI spec token: ":path"/":git"/":ref" → keyword; anything else → the string.
 (defn package--spec-token (tok)
@@ -527,18 +604,23 @@ land in a later slice."
 
 (defn add (nm & spec)
   "Add a dependency to project.blsp and re-lock. `nm` is the require-name; `spec` is `:path PATH` or `:git URL :ref REF` (strings). A :git dep is resolved and cloned into _deps/ as part of the re-lock. Backs `nest add`."
-  (package--in-project
-    (fn (root)
-      (let (dep (project/project--parse-dep (apply vector (cons (symbol nm) (map package--spec-token spec)))))
-        (when (package--has-dep? *project-dependencies* (get dep :name))
-          (error "package: " nm " is already a dependency"))
-        (let (manifest (path-join root "project.blsp"))
-          (spit manifest (package--manifest-add (slurp manifest) (package--dep->entry-node dep)))
-          (package--load-manifest manifest)
-          (let (entries (resolve-deps root *project-dependencies* (read-lockfile root)))
-            (package--guard-collisions root entries)
-            (write-lockfile root entries))
-          (println (str "package: added " nm)))))))
+  (package--in-project (fn (root)
+                         (let (dep (project/project--parse-dep (apply vector
+                                                                 (cons (symbol nm)
+                                                                   (map package--spec-token spec)))))
+                           (when (package--has-dep? *project-dependencies* (get dep :name))
+                             (error "package: " nm " is already a dependency"))
+                           (let (manifest (path-join root "project.blsp"))
+                             (spit manifest
+                               (package--manifest-add (slurp manifest)
+                                 (package--dep->entry-node dep)))
+                             (package--load-manifest manifest)
+                             (let (entries (resolve-deps root
+                                             *project-dependencies*
+                                             (read-lockfile root)))
+                               (package--guard-collisions root entries)
+                               (write-lockfile root entries))
+                             (println (str "package: added " nm)))))))
 
 (defn remove-dep (nm)
   "Remove dependency `nm` from project.blsp and re-lock (an empty lock if no deps remain). Backs `nest remove`."
@@ -551,6 +633,6 @@ land in a later slice."
               target (package--git-target root name-sym))
           (spit manifest (package--manifest-remove (slurp manifest) name-sym))
           (package--load-manifest manifest)
-          (when (dir? target) (%rm-rf target))   ; drop its _deps/ cache, if any
+          (when (dir? target) (%rm-rf target))  ; drop its _deps/ cache, if any
           (write-lockfile root (resolve-deps root *project-dependencies* (read-lockfile root)))
           (println (str "package: removed " nm)))))))

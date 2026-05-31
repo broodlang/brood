@@ -70,7 +70,7 @@
   ;; reproduces only when the closure's captured-env chain is cyclic, which
   ;; only happens for let-bound recursive closures. Fix: cycle detection in
   ;; `promote_env` (parallel to `FlushForward` in `flush_value`).
-  )
+)
 
 ;;
 ;; --- Heap allocation --------------------------------------------------------
@@ -120,8 +120,10 @@
       (assert-error (send me deep))))
 
   (test "a self-referential local closure send is rejected cleanly"
-    (let (f (fn (x) (f x))  ; resolves to itself via the let's captured env
-          me (self))
+    (let (f (fn (x) (f x))
+           ; resolves to itself via the let's captured env
+           me
+           (self))
       (assert-error (send me f))))
 
   (test "sending a raw builtin is rejected with a clear error"
@@ -129,8 +131,10 @@
       (assert-error (send me %add))))
 
   (test "send to a dead pid is silently dropped (Erlang semantics)"
-    (let (dead (spawn (fn () nil))  ; worker exits immediately
-          _    (receive (after 50 nil)))
+    (let (dead (spawn (fn () nil))
+           ; worker exits immediately
+           _
+           (receive (after 50 nil)))
       ;; A send to the now-dead pid should NOT raise.
       (send dead :hello)
       (is true)))
@@ -159,10 +163,14 @@
   (test "200-worker fan-out: every worker observes the same blob ptr"
     (when (bound? '%blob-ptr)
       (let (n 200
-            big (string-repeat "F" 10240)  ; 10 KB Shared blob
-            parent-ptr (%blob-ptr big)
-            me (self)
-            ws (adv-spawn-echoers me n nil))
+             big
+             (string-repeat "F" 10240)  ; 10 KB Shared blob
+             parent-ptr
+             (%blob-ptr big)
+             me
+             (self)
+             ws
+             (adv-spawn-echoers me n nil))
         (is (not (nil? parent-ptr)))
         (adv-send-all ws big)
         ;; Every worker must report the *same* SharedBlob ptr as the parent (the
@@ -247,7 +255,8 @@
   (receive (v (send parent (%blob-ptr v)))))
 
 (defn adv-spawn-echoers (parent n acc)
-  (if (= n 0) acc
+  (if (= n 0)
+    acc
     (adv-spawn-echoers parent (- n 1) (cons (spawn (adv-echo-ptr parent)) acc))))
 
 (defn adv-send-all (ws msg)
@@ -256,38 +265,37 @@
     (adv-send-all (rest ws) msg)))
 
 (defn adv-collect (got total expected)
-  (if (= got total) :ok
-    (receive (v
-      (if (= v expected)
-        (adv-collect (+ got 1) total expected)
-        [:mismatch v expected])))))
+  (if (= got total)
+    :ok
+    (receive (v (if (= v expected) (adv-collect (+ got 1) total expected) [:mismatch v expected])))))
 
 ;; ---- Bombard helpers: 5000 sequential sends of one blob ----------------------
 
 (defn adv-bombard-echo (parent ct)
-  (if (= ct 0) (send parent :done)
-    (receive (s (do (send parent (%blob-ptr s))
-                    (adv-bombard-echo parent (- ct 1)))))))
+  (if (= ct 0)
+    (send parent :done)
+    (receive (s (do (send parent (%blob-ptr s)) (adv-bombard-echo parent (- ct 1)))))))
 
 (defn adv-drive-sends (n big w)
-  (if (= n 0) nil
+  (if (= n 0)
+    nil
     (do (send w big) (adv-drive-sends (- n 1) big w))))
 
 (defn adv-drain-acks (n expected)
-  (if (= n 0) :ok
-    (receive (p
-      (if (= p expected)
-        (adv-drain-acks (- n 1) expected)
-        [:mismatch p expected])))))
+  (if (= n 0)
+    :ok
+    (receive (p (if (= p expected) (adv-drain-acks (- n 1) expected) [:mismatch p expected])))))
 
 ;; ---- 1000-process fan-out ----------------------------------------------------
 
 (defn adv-fan-out (n me)
-  (if (= n 0) nil
+  (if (= n 0)
+    nil
     (do (spawn (send me n)) (adv-fan-out (- n 1) me))))
 
 (defn adv-fan-in (got total acc)
-  (if (= got total) acc
+  (if (= got total)
+    acc
     (adv-fan-in (+ got 1) total (receive (x (+ acc x))))))
 
 ;; ---- Monitor fan-out ---------------------------------------------------------
@@ -296,7 +304,8 @@
   (receive (:die nil)))
 
 (defn adv-monitor-fan (n acc)
-  (if (= n 0) acc
+  (if (= n 0)
+    acc
     (let (pid (spawn (adv-monitor-worker))
           ref (monitor pid))
       (adv-monitor-fan (- n 1) (cons [pid ref] acc)))))
@@ -308,7 +317,8 @@
       (adv-kill-all (rest pairs)))))
 
 (defn adv-drain-downs (n)
-  (if (= n 0) :ok
+  (if (= n 0)
+    :ok
     (receive ([:down _ _ _] (adv-drain-downs (- n 1))))))
 
 ;; ---- Hot reload race ---------------------------------------------------------
@@ -321,5 +331,6 @@
 (defn adv-set-redef-v2 () (def adv-redef-target (fn () :v2)))
 
 (defn adv-redef-caller (parent n)
-  (if (= n 0) (send parent :done)
+  (if (= n 0)
+    (send parent :done)
     (do (adv-redef-target) (adv-redef-caller parent (- n 1)))))

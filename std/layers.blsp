@@ -375,8 +375,7 @@ of `ctxs` so its window-level layers compose with the focused buffer's. Returns
 `:on-focus` across `to`'s, returning `[from' to']`. Either side may be nil (a
 no-op). Neither context is activated/deactivated — leaving a context is *dormancy*,
 not teardown; its layers simply stop being consulted."
-  [(if (nil? from) from (run-event from :on-blur))
-   (if (nil? to)   to   (run-event to   :on-focus))])
+  [(if (nil? from) from (run-event from :on-blur)) (if (nil? to) to (run-event to :on-focus))])
 
 (defn deactivate-all (ctx)
   "Deactivate every active layer (head-first), firing each `:deactivate`."

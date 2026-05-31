@@ -24,24 +24,29 @@ motion commands `(buf key) -> buf` are shared with `brood-mode`. `(require
 (require 'layers)
 
 ;; ---- motion commands: (buf key) -> buf (key ignored) ------------------------
-(defn forward-char  (b k) (buffer/forward-char b))
+(defn forward-char (b k) (buffer/forward-char b))
 (defn backward-char (b k) (buffer/backward-char b))
-(defn forward-word  (b k) (buffer/forward-word b))
+(defn forward-word (b k) (buffer/forward-word b))
 (defn backward-word (b k) (buffer/backward-word b))
-(defn forward-line  (b k) (buffer/forward-line b))
+(defn forward-line (b k) (buffer/forward-line b))
 (defn backward-line (b k) (buffer/backward-line b))
 (defn beginning-of-line (b k) (buffer/beginning-of-line b))
-(defn end-of-line   (b k) (buffer/end-of-line b))
+(defn end-of-line (b k) (buffer/end-of-line b))
 (defn beginning-of-buffer (b k) (buffer/beginning-of-buffer b))
 (defn end-of-buffer (b k) (buffer/end-of-buffer b))
 
 ;; ---- the layer --------------------------------------------------------------
 (def km
-  {:right 'text-mode/forward-char  :left 'text-mode/backward-char
-   :down  'text-mode/forward-line  :up   'text-mode/backward-line
-   :alt-f 'text-mode/forward-word  :alt-b 'text-mode/backward-word
-   :ctrl-a 'text-mode/beginning-of-line :ctrl-e 'text-mode/end-of-line
-   :home  'text-mode/beginning-of-line  :end  'text-mode/end-of-line})
+  {:right 'text-mode/forward-char
+   :left 'text-mode/backward-char
+   :down 'text-mode/forward-line
+   :up 'text-mode/backward-line
+   :alt-f 'text-mode/forward-word
+   :alt-b 'text-mode/backward-word
+   :ctrl-a 'text-mode/beginning-of-line
+   :ctrl-e 'text-mode/end-of-line
+   :home 'text-mode/beginning-of-line
+   :end 'text-mode/end-of-line})
 
 (def layer {:name 'text :keymap km})
 

@@ -42,12 +42,12 @@
 (describe "repl/repl--error-message — rendering caught values"
   (test "a built-in error map renders kind + message"
     (assert= (repl/repl--error-message {:kind :type :message "bad arg"})
-             "type error: bad arg")
+      "type error: bad arg")
     (assert= (repl/repl--error-message {:kind :unbound :message "x"})
-             "unbound error: x"))
+      "unbound error: x"))
   (test "a located error appends line + col"
     (assert= (repl/repl--error-message {:kind :unbound :message "x" :line 3 :col 5})
-             "unbound error: x (line 3, col 5)"))
+      "unbound error: x (line 3, col 5)"))
   (test "a user-thrown string renders without quotes"
     (assert= (repl/repl--error-message "boom") "error: boom"))
   (test "a user-thrown non-string renders readably"

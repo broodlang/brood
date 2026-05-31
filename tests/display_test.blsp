@@ -1,0 +1,33 @@
+;; The render-op constructors (std/display.blsp): pure data→data, so they're fully
+;; testable without a frontend — assert on the exact op vectors they build. Focus is
+;; on `bar` (the full-width status / mode / buffer-bar component, ADR-046); the other
+;; constructors are one-liners exercised throughout the suite.
+
+(defmodule display-test (:use test) (:use display))
+
+(describe "bar — full-width status / buffer bar"
+  (test "pads to the full width so a :bg/:reverse face fills the line"
+    (assert= (bar 0 6 "hi" {:face {:reverse true}})
+      [:text 0 0 "hi    " {:reverse true}]))
+
+  (test "left is the default alignment"
+    (assert= (bar 0 6 "hi" {}) [:text 0 0 "hi    "])
+    (assert= (bar 0 6 "hi" {:align :left}) [:text 0 0 "hi    "]))
+
+  (test ":center and :right position the text within the bar"
+    (assert= (bar 0 6 "hi" {:align :center}) [:text 0 0 "  hi  "])
+    (assert= (bar 0 6 "hi" {:align :right}) [:text 0 0 "    hi"]))
+
+  (test "a string wider than the bar is truncated, never wrapped"
+    (assert= (bar 0 4 "toolong" {}) [:text 0 0 "tool"]))
+
+  (test "no :face yields a bare text op (no style map)"
+    (assert= (bar 2 3 "x" {}) [:text 2 0 "x  "]))
+
+  (test ":scale magnifies: width/scale characters, :scale merged into the face"
+    ;; width 12 at scale 3 → 4 cells of text; \"G5\" centred → \" G5 \".
+    (assert= (bar 5 12 "G5" {:face {:bg :blue} :align :center :scale 3})
+      [:text 5 0 " G5 " {:bg :blue :scale 3}]))
+
+  (test ":scale on a faceless bar still carries the scale"
+    (assert= (bar 0 4 "ab" {:scale 2}) [:text 0 0 "ab" {:scale 2}])))

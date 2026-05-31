@@ -196,7 +196,7 @@
       (send w :go)
       ; let it finish (drain the down)
       (is (ref? mr))
-      (is (not (= mr (ref))))            ; a monitor ref is a distinct, fresh token
+      (is (not (= mr (ref))))  ; a monitor ref is a distinct, fresh token
       (receive ([:down ~mr _ _] :ok) (after 500 :timeout))))
   (test "a normal return reports reason :normal, with the right ref and pid"
     (let (w (spawn (receive (:go nil))) mr (monitor w))

@@ -47,7 +47,7 @@ error inside the user expression surfaces here as the `:error` branch."
     (when (not (string? src))
       (throw "eval: :source must be a string"))
     (try
-      (let (form  (read-string src)
+      (let (form (read-string src)
             value (eval form))
         {:value (pr-str value)})
       (catch e
@@ -81,10 +81,11 @@ defines (the silent flat-namespace collision). On a load error:
     (when (not (string? file))
       (throw "load: :file must be a string"))
     (try
-      (do (load file)
-          {:ok true
-           :diagnostics (or (check-file-structured file) [])
-           :shadows (or (mcp--shadows-for file) [])})
+      (do
+        (load file)
+        {:ok true
+         :diagnostics (or (check-file-structured file) [])
+         :shadows (or (mcp--shadows-for file) [])})
       (catch e
         {:ok false :error (mcp--error-shape e)}))))
 
@@ -114,15 +115,15 @@ the agent can branch on `(get r :error)` cleanly."
 default) or recursively (`:mode \"all\"`). Returns `{:expanded pr-str}`.
 Reads the form ourselves rather than letting it interpolate into surrounding
 text — unbalanced parens in `:form` can't break the host expression."
-  (let (src  (get args :form)
+  (let (src (get args :form)
         mode (get args :mode))
     (when (not (string? src))
       (throw "macroexpand: :form must be a string"))
     (try
       (let (form (read-string src)
-            out  (if (= mode "all")
-                   (macroexpand form)
-                   (macroexpand-1 form)))
+            out (if (= mode "all")
+                  (macroexpand form)
+                  (macroexpand-1 form)))
         {:expanded (pr-str out)})
       (catch e
         {:error (mcp--error-shape e)}))))
@@ -186,15 +187,12 @@ synthesised by macros aren't included. Complements `lookup` (which gives the
   (let (name (get args :name))
     (when (not (string? name))
       (throw "callers: :name must be a string"))
-    {:references
-     ;; One unreadable file (deleted/permissions between listing and read)
-     ;; must not abort the whole sweep — skip it (`catch` → nil) and continue.
-     (mapcat (fn (f)
-               (try
-                 (map (fn (lc) {:file f :line (first lc) :col (second lc)})
-                   (references-in-source name (slurp f)))
-                 (catch _ nil)))
-       (project--all-files *project-root*))}))
+    {:references (mapcat (fn (f)
+                           (try
+                             (map (fn (lc) {:file f :line (first lc) :col (second lc)})
+                               (references-in-source name (slurp f)))
+                             (catch _ nil)))
+                   (project--all-files *project-root*))}))
 
 (defn mcp-apropos-tool (args)
   "`apropos` — discover globals whose name contains a pattern. Returns
@@ -216,8 +214,7 @@ exist?\" without guessing names one at a time."
   (let (query (get args :query))
     (when (not (string? query))
       (throw "doc-search: :query must be a string"))
-    {:results (map (fn (pair) {:name (name (first pair)) :doc (second pair)})
-                (doc-search query))}))
+    {:results (map (fn (pair) {:name (name (first pair)) :doc (second pair)}) (doc-search query))}))
 
 (defn mcp--bench-loop (form n)
   "Eval `form` `n` more times for timing, discarding the results; returns nil."
@@ -232,15 +229,15 @@ exist?\" without guessing names one at a time."
 millisecond `now` clock, so time a sub-millisecond expression with a larger
 `:iterations` to amortise it. Side effects persist — it really runs the code,
 like `eval`. Returns `{:error msg}` on failure."
-  (let (src   (get args :source)
+  (let (src (get args :source)
         iters (or (get args :iterations) 1))
     (when (not (string? src))
       (throw "bench: :source must be a string"))
     (when (not (and (int? iters) (> iters 0)))
       (throw "bench: :iterations must be a positive integer"))
     (try
-      (let (form  (read-string src)
-            t0    (now)
+      (let (form (read-string src)
+            t0 (now)
             value (eval form)
             _done (mcp--bench-loop form (- iters 1))
             total (- (now) t0))
@@ -265,13 +262,12 @@ find-references), the three discovery tools `apropos` / `all-globals` /
 `doc-search` (search the flat namespace by name or docstring rather than
 looking up a name you already know), and `bench` (time an expression in the
 live image)."
-  (list
-    {:name "eval"
-     :description "Evaluate a Brood expression in the session's global environment. State persists across calls (hot reload — `def` mutates the runtime image, ADR-013)."
-     :schema {:type "object"
-              :properties {:source {:type "string" :description "Brood source to evaluate"}}
-              :required ["source"]}
-     :handler mcp-eval-tool}
+  (list {:name "eval"
+         :description "Evaluate a Brood expression in the session's global environment. State persists across calls (hot reload — `def` mutates the runtime image, ADR-013)."
+         :schema {:type "object"
+                  :properties {:source {:type "string" :description "Brood source to evaluate"}}
+                  :required ["source"]}
+         :handler mcp-eval-tool}
     {:name "load"
      :description "Load a `.blsp` file into the session's image. Side-effects (def/defn/defmacro) persist."
      :schema {:type "object"
@@ -281,14 +277,17 @@ live image)."
     {:name "lookup"
      :description "Look up a global name: returns its arglist, docstring, and source location (file/line/col)."
      :schema {:type "object"
-              :properties {:name {:type "string" :description "The name to look up (no leading quote)"}}
+              :properties {:name {:type "string"
+                                  :description "The name to look up (no leading quote)"}}
               :required ["name"]}
      :handler mcp-lookup-tool}
     {:name "macroexpand"
      :description "Macro-expand a form. Default is one step (`:mode \"1\"`); pass `:mode \"all\"` for full expansion."
      :schema {:type "object"
               :properties {:form {:type "string" :description "Source for the form to expand"}
-                           :mode {:type "string" :enum ["1" "all"] :description "\"1\" (default) or \"all\""}}
+                           :mode {:type "string"
+                                  :enum ["1" "all"]
+                                  :description "\"1\" (default) or \"all\""}}
               :required ["form"]}
      :handler mcp-macroexpand-tool}
     {:name "format"
@@ -312,13 +311,15 @@ live image)."
     {:name "callers"
      :description "Find every reference to a global name across the project's source and test files (cross-file find-references). Returns {:references [{:file :line :col} ...]}. Complements `lookup`, which gives the definition site."
      :schema {:type "object"
-              :properties {:name {:type "string" :description "The global name to find references to (no leading quote)"}}
+              :properties {:name {:type "string"
+                                  :description "The global name to find references to (no leading quote)"}}
               :required ["name"]}
      :handler mcp-callers-tool}
     {:name "apropos"
      :description "Discover globals whose name contains a pattern (substring search over the flat namespace). Returns {:matches [name ...]}. Use this to find out whether something exists before guessing exact names."
      :schema {:type "object"
-              :properties {:pattern {:type "string" :description "Substring to search for in global names"}}
+              :properties {:pattern {:type "string"
+                                     :description "Substring to search for in global names"}}
               :required ["pattern"]}
      :handler mcp-apropos-tool}
     {:name "all-globals"
@@ -335,7 +336,8 @@ live image)."
      :description "Time evaluating a Brood expression in the session image. Runs it :iterations times (default 1) and returns {:ms :iterations :per-iter-ms :value}. Side effects persist (it really runs the code). Raise :iterations to amortise sub-millisecond expressions against the ms clock."
      :schema {:type "object"
               :properties {:source {:type "string" :description "Brood source to time"}
-                           :iterations {:type "integer" :description "How many times to run it (default 1); raise to amortise sub-ms expressions"}}
+                           :iterations {:type "integer"
+                                        :description "How many times to run it (default 1); raise to amortise sub-ms expressions"}}
               :required ["source"]}
      :handler mcp-bench-tool}))
 

@@ -11,8 +11,8 @@
 ;; dispatch time), matching how `std/lineedit` stores its bindings.
 (defn km-cmd-e (s k) (str s "E"))
 (defn km-cmd-x (s k) (str s "X"))
-(defn km-boom  (s k) (throw "boom"))
-(defn km-fb    (s k) (str s "?"))   ; fallback: marks an unhandled key
+(defn km-boom (s k) (throw "boom"))
+(defn km-fb (s k) (str s "?"))  ; fallback: marks an unhandled key
 
 ;; Thread a whole key sequence through keymap-step (tail-recursive), returning the
 ;; final [state pending].
@@ -28,14 +28,15 @@
     (assert= (keymap-bind {} ["a"] 'keymap-test/km-cmd-x) {"a" 'keymap-test/km-cmd-x}))
   (test "a multi-key sequence nests prefix sub-keymaps"
     (assert= (keymap-bind {} [:ctrl-x :ctrl-e] 'keymap-test/km-cmd-e)
-             {:ctrl-x {:ctrl-e 'keymap-test/km-cmd-e}}))
+      {:ctrl-x {:ctrl-e 'keymap-test/km-cmd-e}}))
   (test "sibling bindings are preserved; an existing prefix is extended"
     (let (km (-> {}
-                 (keymap-bind [:ctrl-x :ctrl-e] 'keymap-test/km-cmd-e)
-                 (keymap-bind [:ctrl-x :ctrl-s] 'keymap-test/km-cmd-x)
-                 (keymap-bind ["a"] 'keymap-test/km-cmd-x)))
-      (assert= km {:ctrl-x {:ctrl-e 'keymap-test/km-cmd-e :ctrl-s 'keymap-test/km-cmd-x}
-                   "a" 'keymap-test/km-cmd-x}))))
+               (keymap-bind [:ctrl-x :ctrl-e] 'keymap-test/km-cmd-e)
+               (keymap-bind [:ctrl-x :ctrl-s] 'keymap-test/km-cmd-x)
+               (keymap-bind ["a"] 'keymap-test/km-cmd-x)))
+      (assert= km
+        {:ctrl-x {:ctrl-e 'keymap-test/km-cmd-e :ctrl-s 'keymap-test/km-cmd-x}
+         "a" 'keymap-test/km-cmd-x}))))
 
 (describe "keymap-step chord dispatch"
   (test "a flat command runs and resets pending"

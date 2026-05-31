@@ -35,7 +35,7 @@
 (describe "face :inherit resolution"
   :isolated
   (test "a face layers over its :inherit parent, local keys winning"
-    (def-face :t/base  {:fg :blue :bold true})
+    (def-face :t/base {:fg :blue :bold true})
     (def-face :t/derived {:inherit :t/base :fg :green :italic true})
     ;; parent contributes :bold; child overrides :fg and adds :italic; :inherit stripped
     (assert= (face :t/derived) {:fg :green :bold true :italic true}))
@@ -70,11 +70,9 @@
     (let (me (self)
           workers (map (fn (i)
                          (spawn (send me [:face i (face :t/shared)])))
-                       (range 8)))
+                    (range 8)))
       ;; collect each worker's resolution of the shared face
-      (let (results (map (fn (_)
-                           (receive ([:face _ f] f) (after 1000 :timeout)))
-                         (range 8)))
+      (let (results (map (fn (_) (receive ([:face _ f] f) (after 1000 :timeout))) (range 8)))
         (is (every? (fn (f) (= f {:fg :cyan :bold true})) results)))))
   (test "a face-set in this process is seen by a later-spawned worker"
     (def-face :t/live {:fg :red})
@@ -82,4 +80,4 @@
     (let (me (self))
       (spawn (send me [:got (face :t/live)]))
       (assert= (receive ([:got f] f) (after 1000 :timeout))
-               {:fg :red :bold true}))))
+        {:fg :red :bold true}))))

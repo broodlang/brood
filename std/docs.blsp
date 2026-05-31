@@ -145,4 +145,3 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
 (defn generate-docs (& args)
   "Print Markdown documentation to stdout: the whole project with no args, or a single module given its name. The policy behind `nest doc`."
   (if (empty? args) (println (document-project)) (println (document-module (first args)))))
-

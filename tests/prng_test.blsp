@@ -34,7 +34,7 @@
     (refute (= (rand-seed 0) 0)))
   (test "normalization keeps the low 32 bits"
     (assert= (rand-seed 5) 5)
-    (assert= (rand-seed 4294967296) 2463534242))) ; 2^32 -> 0 -> default seed
+    (assert= (rand-seed 4294967296) 2463534242)))  ; 2^32 -> 0 -> default seed
 
 (describe "rand-int / rand-float — ranged draws"
   (test "rand-int stays in [0, n) across many draws"
@@ -81,11 +81,16 @@
     (check-property 100 (fn (s) (sample s [:a :b :c :d])) (fn (x) (includes? [:a :b :c :d] x))))
   (test "a false property raises a test-failure carrying the seed"
     ;; Drive the loop directly so the failure is caught here, not the test runner.
-    (is (test/test--failure?
-          (try
-            (do (test/check-property--loop 100 (fn (s) (rand-int s 10)) (fn (x) (< x 5)) nil 1 0)
-                :no-failure)
-            (catch e e))))))
+    (is (test/test--failure? (try
+                               (do
+                                 (test/check-property--loop 100
+                                   (fn (s) (rand-int s 10))
+                                   (fn (x) (< x 5))
+                                   nil
+                                   1
+                                   0)
+                                 :no-failure)
+                               (catch e e))))))
 
 ;; ---- explicit concurrency (spawn / send / fan-in) ---------------------------
 ;; The PRNG is pure, so a value drawn with seed K in a spawned process must equal
@@ -107,7 +112,7 @@
   :isolated
 
   (test "a worker's stream for seed K matches the parent's stream for seed K"
-    (prng-spawn (self) (range 1 11)) ; 10 workers, seeds 1..10
+    (prng-spawn (self) (range 1 11))  ; 10 workers, seeds 1..10
     (let (m (prng-collect 0 10 {}))
       (assert= (count m) 10)
       (assert= (get m 1) (prng-draws 1 5 nil))

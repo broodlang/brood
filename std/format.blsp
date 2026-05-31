@@ -265,14 +265,15 @@ not a known body form (defaults to call-style — every arg breaks)."
   ;; element on its own line. Comments inside a map fall through to the
   ;; default list break so they survive.
   (let (one (single-line n)
-        ;; Respect the author's line structure: if the source had newlines
-        ;; *inside this form's own children*, keep it broken even if the
-        ;; collapsed form would fit. Standard Lisp formatter behaviour
-        ;; (matches Clojure/Racket/Emacs-lisp), and idempotent — a form
-        ;; already on one line stays on one line, a form already broken
-        ;; stays broken. Maps follow the same rule but get the pair-break
-        ;; layout below.
-        keep-broken (had-author-newlines? n))
+         ;; Respect the author's line structure: if the source had newlines
+         ;; *inside this form's own children*, keep it broken even if the
+         ;; collapsed form would fit. Standard Lisp formatter behaviour
+         ;; (matches Clojure/Racket/Emacs-lisp), and idempotent — a form
+         ;; already on one line stays on one line, a form already broken
+         ;; stays broken. Maps follow the same rule but get the pair-break
+         ;; layout below.
+         keep-broken
+         (had-author-newlines? n))
     (cond
       (and one (not keep-broken) (<= (+ indent (string-length one)) *format-width*)) one
       (and (= (node-kind n) :map) (not (any-comment? (node-children n)))) (render--pair-break (node-children n)

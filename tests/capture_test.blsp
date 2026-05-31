@@ -22,12 +22,10 @@
     (assert= (with-out-str (print "second")) "second"))
 
   (test "nested captures compose: inner drains only its own output"
-    (let (result
-           (with-out-str
-             (print "outer-1")
-             (let (inner (with-out-str (print "inner")))
-               (assert= inner "inner")
-               (print "outer-2"))))
+    (let (result (with-out-str (print "outer-1")
+                   (let (inner (with-out-str (print "inner")))
+                     (assert= inner "inner")
+                     (print "outer-2"))))
       (assert= result "outer-1outer-2"))))
 
 ;; ---- error safety -----------------------------------------------------------
@@ -50,17 +48,13 @@
   :isolated
 
   (test "captures output printed by a spawned child"
-    (let (out (with-out-str
-                (let (me (self))
-                  (spawn (cap-child me))
-                  (receive (:done nil)))))
+    (let (out (with-out-str (let (me (self)) (spawn (cap-child me)) (receive (:done nil)))))
       (assert= out "from-child")))
 
   (test "many children fan their output into one capture"
-    (let (out (with-out-str
-                (let (me (self))
-                  (spawn (cap-child me))
-                  (spawn (cap-child me))
-                  (spawn (cap-child me))
-                  (receive (:done (receive (:done (receive (:done nil)))))))))
+    (let (out (with-out-str (let (me (self))
+                              (spawn (cap-child me))
+                              (spawn (cap-child me))
+                              (spawn (cap-child me))
+                              (receive (:done (receive (:done (receive (:done nil)))))))))
       (assert= out "from-childfrom-childfrom-child"))))

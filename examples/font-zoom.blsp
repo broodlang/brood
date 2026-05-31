@@ -20,20 +20,19 @@ Run (the GUI backend is behind a cargo feature):
 (defn render (win px)
   "Paint the instructions + the current font height."
   (gui-draw win
-    [[:clear]
-     [:text 1 2 "Ctrl + mouse-wheel to zoom this window's font." {:fg :cyan}]
-     [:text 3 2 (str "height: " px " px") {:fg :white :bold true}]
-     [:text 5 2 "plain wheel does nothing · q / close-box to quit" {:fg :dark-grey}]]))
+    [[:clear] [:text 1 2 "Ctrl + mouse-wheel to zoom this window's font." {:fg :cyan}]
+      [:text 3 2 (str "height: " px " px") {:fg :white :bold true}]
+      [:text 5 2 "plain wheel does nothing · q / close-box to quit" {:fg :dark-grey}]]))
 
 (defn ctrl-wheel-px (ev px)
   "The new font px after mouse event `ev`, given the current `px`. A Ctrl+wheel
 grows/shrinks within [*min-px* *max-px*]; anything else leaves `px` unchanged."
   (let (action (nth ev 1)
-        mods   (nth ev 5 []))
+        mods (nth ev 5 []))
     (cond
       (not (includes? mods :ctrl)) px
-      (= action :scroll-up)        (min *max-px* (+ px *step*))
-      (= action :scroll-down)      (max *min-px* (- px *step*))
+      (= action :scroll-up) (min *max-px* (+ px *step*))
+      (= action :scroll-down) (max *min-px* (- px *step*))
       :else px)))
 
 (defn loop (win px)
@@ -42,16 +41,14 @@ this process's mailbox (ADR-058), so we park in `receive` holding no worker."
   (render win px)
   (let (ev (receive (m m)))
     (cond
-      (or (= ev :close) (= ev "q"))
-        (gui-close win)
-      (and (vector? ev) (= (first ev) :mouse))
-        (let (px* (ctrl-wheel-px ev px))
-          (when (not (= px* px))
-            (gui-font! win {:height px*}))   ; retune just THIS window
-          (loop win px*))
-      :else (loop win px))))    ; keys, resizes, etc. — just re-render
+      (or (= ev :close) (= ev "q")) (gui-close win)
+      (and (vector? ev) (= (first ev) :mouse)) (let (px* (ctrl-wheel-px ev px))
+                                                 (when (not (= px* px))
+                                                   (gui-font! win {:height px*}))  ; retune just THIS window
+                                                 (loop win px*))
+      :else (loop win px))))  ; keys, resizes, etc. — just re-render
 
 (let (win (gui-open)
-      px  15)
+      px 15)
   (gui-font! win {:height px})
   (loop win px))

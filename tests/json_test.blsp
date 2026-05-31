@@ -28,11 +28,11 @@
     (assert= (json-parse "\"hello\"") "hello")
     (assert= (json-parse "\"\"") ""))
   (test "the named escapes"
-    (assert= (json-parse "\"a\\\"b\"") "a\"b")          ; \"  -> "
-    (assert= (json-parse "\"a\\\\b\"") "a\\b")          ; \\  -> \
-    (assert= (json-parse "\"a\\/b\"") "a/b")            ; \/  -> /
-    (assert= (json-parse "\"a\\nb\"") "a\nb")           ; \n
-    (assert= (json-parse "\"a\\tb\"") "a\tb"))          ; \t
+    (assert= (json-parse "\"a\\\"b\"") "a\"b")  ; \"  -> "
+    (assert= (json-parse "\"a\\\\b\"") "a\\b")  ; \\  -> \
+    (assert= (json-parse "\"a\\/b\"") "a/b")  ; \/  -> /
+    (assert= (json-parse "\"a\\nb\"") "a\nb")  ; \n
+    (assert= (json-parse "\"a\\tb\"") "a\tb"))  ; \t
   (test "\\b and \\f decode to single control chars (no codepoint primitive needed)"
     (assert= (string-length (json-parse "\"\\b\"")) 1)
     (assert= (string-length (json-parse "\"\\f\"")) 1))
@@ -59,15 +59,15 @@
 
 (describe "json-parse — malformed input errors"
   (test "structural errors"
-    (is (json--errs? ""))                 ; empty
-    (is (json--errs? "{"))                ; unterminated object
-    (is (json--errs? "[1,2"))             ; unterminated array
-    (is (json--errs? "{\"a\" 1}"))        ; missing colon
-    (is (json--errs? "[1 2]"))            ; missing comma
-    (is (json--errs? "tru"))              ; bad literal
-    (is (json--errs? "\"abc"))            ; unterminated string
-    (is (json--errs? "1 2"))              ; trailing content
-    (is (json--errs? "nope"))))           ; not a value
+    (is (json--errs? ""))  ; empty
+    (is (json--errs? "{"))  ; unterminated object
+    (is (json--errs? "[1,2"))  ; unterminated array
+    (is (json--errs? "{\"a\" 1}"))  ; missing colon
+    (is (json--errs? "[1 2]"))  ; missing comma
+    (is (json--errs? "tru"))  ; bad literal
+    (is (json--errs? "\"abc"))  ; unterminated string
+    (is (json--errs? "1 2"))  ; trailing content
+    (is (json--errs? "nope"))))  ; not a value
 
 (describe "json-encode"
   (test "scalars"
@@ -90,7 +90,7 @@
     (assert= (json-encode []) "[]"))
   (test "a single-key object (order is deterministic for one key)"
     (assert= (json-encode {"a" 1}) "{\"a\":1}")
-    (assert= (json-encode {:b [true nil]}) "{\"b\":[true,null]}"))   ; keyword key → string key
+    (assert= (json-encode {:b [true nil]}) "{\"b\":[true,null]}"))  ; keyword key → string key
   (test "cannot encode a non-JSON value"
     (is (try (do (json-encode (self)) false) (catch e true)))))
 
@@ -113,10 +113,11 @@
       (doseq (i (range 8))
         (spawn (send me [:r (json-parse src)])))
       (let (results (map (fn (_) (receive ([:r m] m) (after 2000 :timeout))) (range 8)))
-        (is (every? (fn (m) (and (= (get m :id) 7)
-                                 (= (get m :tags) ["a" "b"])
-                                 (= (get m :ok) true)))
-                    results)))))
+        (is (every? (fn (m)
+                      (and (= (get m :id) 7)
+                        (= (get m :tags) ["a" "b"])
+                        (= (get m :ok) true)))
+              results)))))
   (test "a value encoded in a worker parses back identically here"
     (let (me (self)
           v {:repo "brood" :runs [1 2 3]})

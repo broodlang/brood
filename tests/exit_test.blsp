@@ -12,11 +12,12 @@
 (defmodule exit-test (:use test))
 
 ;; file-local worker bodies (tail-recursive: a test runs in a small-stack green proc)
-(defn ex-spin () (ex-spin))                 ; tight CPU loop — only a hard :kill (preempt) catches it
-(defn ex-park () (receive (x x)))           ; parks forever on an empty mailbox
-(defn ex-echo () (receive (m (ex-echo))))   ; a receive loop (one iteration per message)
+(defn ex-spin () (ex-spin))  ; tight CPU loop — only a hard :kill (preempt) catches it
+(defn ex-park () (receive (x x)))  ; parks forever on an empty mailbox
+(defn ex-echo () (receive (m (ex-echo))))  ; a receive loop (one iteration per message)
 
-(defn ex-down-reason (p m)                  ; wait for p's :down, return its reason (or :TIMEOUT)
+(defn ex-down-reason (p m)
+  ; wait for p's :down, return its reason (or :TIMEOUT)
   (receive ([:down ~m ~p r] r) (after 3000 :TIMEOUT)))
 
 (describe "exit / kill signals"
@@ -27,15 +28,15 @@
 
   (test "exit kills a process parked in receive, with its reason"
     (let (p (spawn (ex-park)) m (monitor p))
-      (sleep 30)                            ; let it park
+      (sleep 30)  ; let it park
       (exit p :stopped)
       (assert= (ex-down-reason p m) :stopped)))
 
   (test "soft exit stops a receive loop at its next iteration"
     (let (p (spawn (ex-echo)) m (monitor p))
       (sleep 30)
-      (send p :ping)                        ; one iteration
-      (exit p :done)                        ; soft — dies at the next receive
+      (send p :ping)  ; one iteration
+      (exit p :done)  ; soft — dies at the next receive
       (assert= (ex-down-reason p m) :done)))
 
   (test "exit of an already-dead pid is a harmless no-op"
@@ -43,22 +44,24 @@
       (sleep 30)
       (exit p :kill)
       (assert= (ex-down-reason p m) :kill)
-      (exit p :kill)                        ; already dead — must not error or hang
+      (exit p :kill)  ; already dead — must not error or hang
       (is true))))
 
 ;; ---- mass force-unwind: kill many parked processes concurrently --------------
 (defn ex-spawn-parked (n acc)
-  (if (= n 0) acc
+  (if (= n 0)
+    acc
     (let (p (spawn (ex-park)) m (monitor p)) (ex-spawn-parked (- n 1) (cons p acc)))))
 (defn ex-kill-all (ps)
   (if (empty? ps) nil (do (exit (first ps) :bye) (ex-kill-all (rest ps)))))
-(defn ex-collect-downs (k)                  ; tail-recursive via the receive trampoline
+(defn ex-collect-downs (k)
+  ; tail-recursive via the receive trampoline
   (if (= k 0) :all-down (receive ([:down a b c] (ex-collect-downs (- k 1))))))
 
 (describe "exit under load"
   :isolated
   (test "mass kill: spawn 100 parked processes, exit all, collect every :down"
     (let (n 100 ps (ex-spawn-parked n nil))
-      (sleep 50)                            ; let them all park
+      (sleep 50)  ; let them all park
       (ex-kill-all ps)
       (assert= (ex-collect-downs n) :all-down))))

@@ -40,7 +40,7 @@
     (let (b (goto-char (make-buffer "abc") 1))
       (assert= (buffer-char-after b) "b")
       (assert= (buffer-char-before b) "a"))
-    (assert= (buffer-char-before (make-buffer "abc")) nil)         ; point 0
+    (assert= (buffer-char-before (make-buffer "abc")) nil)  ; point 0
     (assert= (buffer-char-after (end-of-buffer (make-buffer "abc"))) nil)))
 
 (describe "buffer movement"
@@ -56,43 +56,46 @@
       (assert= (buffer-point (backward-char b)) 1)
       (assert= (buffer-point (backward-char b 10)) 0)))
   (test "beginning/end-of-line"
-    (let (b (goto-char (make-buffer "ab\ncde\nf") 4))   ; on 'd' in line 1
+    (let (b (goto-char (make-buffer "ab\ncde\nf") 4))
+      ; on 'd' in line 1
       (assert= (buffer-point (beginning-of-line b)) 3)
-      (assert= (buffer-point (end-of-line b)) 6)))      ; just before the newline
+      (assert= (buffer-point (end-of-line b)) 6)))  ; just before the newline
   (test "beginning/end-of-buffer"
     (let (b (make-buffer "abcde"))
       (assert= (buffer-point (end-of-buffer b)) 5)
       (assert= (buffer-point (beginning-of-buffer (end-of-buffer b))) 0)))
   (test "current-line and column"
-    (let (b (goto-char (make-buffer "line0\nline1\nline2") 14))  ; line 2, col 2
+    (let (b (goto-char (make-buffer "line0\nline1\nline2") 14))
+      ; line 2, col 2
       (assert= (buffer-current-line b) 2)
       (assert= (buffer-column b) 2)))
   (test "forward-line preserves the column when the line is long enough"
     (let (b (-> (make-buffer "hello\nworld\nhi") (goto-char 2) (forward-line 1)))
       (assert= (buffer-current-line b) 1)
-      (assert= (buffer-column b) 2)))      ; col 2 of "world" = 'r'
+      (assert= (buffer-column b) 2)))  ; col 2 of "world" = 'r'
   (test "forward-line clamps the column to a short target line"
     (let (b (-> (make-buffer "hello\nhi") (goto-char 4) (forward-line 1)))
       (assert= (buffer-current-line b) 1)
-      (assert= (buffer-column b) 2)))      ; "hi" is only 2 long → column 2 (end)
+      (assert= (buffer-column b) 2)))  ; "hi" is only 2 long → column 2 (end)
   (test "forward/backward-line clamp to the line range"
     (let (b (make-buffer "a\nb\nc"))
       (assert= (buffer-current-line (forward-line b 99)) 2)
       (assert= (buffer-current-line (backward-line (end-of-buffer b) 99)) 0)))
   (test "forward-word moves to the end of the next word"
     (let (b (make-buffer "foo bar  baz"))
-      (assert= (buffer-point (forward-word b)) 3)                  ; end of "foo"
-      (assert= (buffer-point (forward-word (forward-word b))) 7)   ; end of "bar"
-      (assert= (buffer-point (forward-word (goto-char b 12))) 12))) ; at end, stays
+      (assert= (buffer-point (forward-word b)) 3)  ; end of "foo"
+      (assert= (buffer-point (forward-word (forward-word b))) 7)  ; end of "bar"
+      (assert= (buffer-point (forward-word (goto-char b 12))) 12)))  ; at end, stays
   (test "backward-word moves to the start of the previous word"
-    (let (b (goto-char (make-buffer "foo bar  baz") 12))            ; end of "baz"
-      (assert= (buffer-point (backward-word b)) 9)                  ; start of "baz"
+    (let (b (goto-char (make-buffer "foo bar  baz") 12))
+      ; end of "baz"
+      (assert= (buffer-point (backward-word b)) 9)  ; start of "baz"
       (assert= (buffer-point (backward-word (backward-word b))) 4)  ; start of "bar"
       (assert= (buffer-point (backward-word (goto-char b 0))) 0)))  ; at start, stays
   (test "word motion crosses lines and delimiters"
     (let (b (make-buffer "(foo\n bar)"))
-      (assert= (buffer-point (forward-word b)) 4)                   ; skips '(', ends "foo"
-      (assert= (buffer-point (forward-word (forward-word b))) 9)))) ; ends "bar" before ')'
+      (assert= (buffer-point (forward-word b)) 4)  ; skips '(', ends "foo"
+      (assert= (buffer-point (forward-word (forward-word b))) 9))))  ; ends "bar" before ')'
 
 (describe "buffer editing is immutable"
   (test "insert advances point; the original is untouched"
@@ -137,8 +140,10 @@
     (assert= (buffer-text (delete-region (make-buffer "abc"))) "abc"))
   (test "buffer-region-bounds gives [lo hi], order-independent, nil without a mark"
     (assert= (buffer-region-bounds (make-buffer "abc")) nil)
-    (assert= (buffer-region-bounds (-> (make-buffer "abcdef") (goto-char 1) set-mark (goto-char 4))) [1 4])
-    (assert= (buffer-region-bounds (-> (make-buffer "abcdef") (goto-char 4) set-mark (goto-char 1))) [1 4]))
+    (assert= (buffer-region-bounds (-> (make-buffer "abcdef") (goto-char 1) set-mark (goto-char 4)))
+      [1 4])
+    (assert= (buffer-region-bounds (-> (make-buffer "abcdef") (goto-char 4) set-mark (goto-char 1)))
+      [1 4]))
   (test "buffer-region-bounds matches the buffer-region span"
     (let (b (-> (make-buffer "abcdef") (goto-char 1) set-mark (goto-char 4))
           [lo hi] (buffer-region-bounds b))
@@ -157,20 +162,27 @@
       (assert= (buffer-text r) "hi!")
       (assert= (buffer-point r) 3)))
   (test "a fresh edit clears the redo stack"
-    (let (b (-> (make-buffer "") (insert "a") (insert "b"))   ; "ab"
-          back (undo b)                                       ; "a", redo has "ab"
-          edited (insert back "z"))                           ; "az", redo cleared
+    (let (b (-> (make-buffer "") (insert "a") (insert "b"))
+           ; "ab"
+           back
+           (undo b)  ; "a", redo has "ab"
+           edited
+           (insert back "z"))
+      ; "az", redo cleared
       (assert= (buffer-text edited) "az")
-      (assert= (buffer-text (redo edited)) "az")))            ; redo is now a no-op
+      (assert= (buffer-text (redo edited)) "az")))  ; redo is now a no-op
   (test "undo with no history is a no-op"
     (let (b (make-buffer "abc"))
       (assert= (buffer-text (undo b)) "abc")
       (assert= (buffer-text (redo b)) "abc")))
   (test "a no-op edit records nothing (undo skips past it)"
-    (let (b (-> (make-buffer "ab") (insert "X"))              ; "Xab", one undo step
-          noop (delete-char (end-of-buffer b)))               ; delete at end → unchanged
+    (let (b (-> (make-buffer "ab") (insert "X"))
+           ; "Xab", one undo step
+           noop
+           (delete-char (end-of-buffer b)))
+      ; delete at end → unchanged
       (assert= (buffer-text noop) "Xab")
-      (assert= (buffer-text (undo noop)) "ab")))              ; undo reaches the real edit
+      (assert= (buffer-text (undo noop)) "ab")))  ; undo reaches the real edit
   (test "undoing a region delete restores the text and the mark"
     (let (b (-> (make-buffer "abcdef") (goto-char 1) set-mark (goto-char 4) delete-region)
           u (undo b))
@@ -182,11 +194,11 @@
     (let (a (-> (make-buffer "") (insert "a"))
           c (-> (make-buffer "") (insert "c")))
       (assert= (buffer-text (undo a)) "")
-      (assert= (buffer-text c) "c")))            ; undoing `a` left `c` untouched
+      (assert= (buffer-text c) "c")))  ; undoing `a` left `c` untouched
   (test "disable-undo stops recording (a log buffer), so undo is a no-op"
     (let (b (-> (disable-undo (make-buffer "")) (insert "a") (insert "b")))
       (assert= (buffer-text b) "ab")
-      (assert= (get b :undo) ())                 ; nothing recorded
+      (assert= (get b :undo) ())  ; nothing recorded
       (assert= (buffer-text (undo b)) "ab"))))
 
 (describe "buffer file round-trip"
@@ -199,7 +211,7 @@
         ; edit and save, then re-read to confirm it persisted
         (save-buffer (-> b end-of-buffer (insert "third line\n")))
         (assert= (buffer-text (buffer-from-file path))
-                 "first line\nsecond line\nthird line\n"))))
+          "first line\nsecond line\nthird line\n"))))
   (test "save-buffer with no file raises"
     (assert-error (save-buffer (make-buffer "x")))))
 

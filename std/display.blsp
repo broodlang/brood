@@ -57,6 +57,43 @@ asks the frontend to show pointer `shape` while the cursor is over it — e.g.
 one. The GUI frontend hit-tests it on pointer-move; the terminal ignores it (ADR-080)."
   [:cursor-zone x y w h shape])
 
+(defn bar (row width s &optional (opts {}))
+  "A full-width status / mode / **buffer bar**: string `s` drawn on `row` from column
+0 and padded with spaces to `width` cells (truncated if it overflows), so a
+`:reverse` or `:bg` face fills the whole line — the header / footer / buffer-bar
+shape `std/observer` draws by hand. Returns one `text` op.
+
+`opts` (all optional):
+  `:face`  — the style map: `{:reverse true}`, a named `(face :ui/header)`, or
+             `{:bg :blue :fg :white :bold true}`.
+  `:align` — `:left` (default), `:center`, or `:right`: where `s` sits on the bar.
+  `:scale` — GUI per-op font scale (ADR-079, an integer >= 1, default 1): the bar is
+             drawn that many times larger — `scale` rows tall, holding `width/scale`
+             characters — with the terminal frontend rendering it 1x.
+
+    (bar 0 cols \" file.blsp        UTF-8  L1\" {:face (face :ui/header)})
+    (bar (dec rows) cols msg {:face {:bg :blue :fg :white} :align :center})"
+  (let (scale (max 1 (get opts :scale 1))
+        cells (max 1 (quot width scale)))
+    (text row 0
+      (bar--fit s cells (get opts :align :left))
+      (bar--face (get opts :face) scale))))
+
+(defn bar--face (face scale)
+  "`face` with `:scale` added when `scale` > 1 (a magnified bar); the face unchanged
+(possibly `nil`) at scale 1."
+  (if (> scale 1) (assoc (or face {}) :scale scale) face))
+
+(defn bar--fit (s cells align)
+  "`s` fitted to exactly `cells` characters — padded with spaces (positioned per
+`align`: `:left` / `:center` / `:right`) or truncated when longer."
+  (let (n (string-length s))
+    (cond
+      (>= n cells) (substring s 0 cells)
+      (= align :right) (pad-left s cells)
+      (= align :center) (pad-right (str (string-repeat " " (quot (- cells n) 2)) s) cells)
+      :else (pad-right s cells))))
+
 (defn frame (& ops)
   "Collect render ops into a frame (a vector), dropping any `nil` ops so callers
 can splice in conditional ops inline. Pass the result to a frontend (`term-draw`)."

@@ -94,10 +94,11 @@ code rather than re-scanning delimiters (ADR-049)."
 `{:kind :message [:line :col] …}`, a user `throw` arrives as the raw value."
   (if (and (map? e) (contains? e :message))
     (str (if (contains? e :kind) (str (name (get e :kind)) " error") "error")
-         ": " (get e :message)
-         (if (contains? e :line)
-           (str " (line " (get e :line) ", col " (get e :col) ")")
-           ""))
+      ": "
+      (get e :message)
+      (if (contains? e :line)
+        (str " (line " (get e :line) ", col " (get e :col) ")")
+        ""))
     (str "error: " (if (string? e) e (pr-str e)))))
 
 (defn repl--eval-print (src)
@@ -174,26 +175,24 @@ incomplete. Ctrl-C drops the in-progress form and re-prompts. Returns a map
   (let (r (repl--read-line interactive acc history))
     (cond
       ;; EOF: report a half-typed form if one is pending, then stop.
-      (= (get r :kind) :eof)
-        (do (when (and (not (= acc "")) (= (repl--eval-print acc) :more))
-              (eprint "error: incomplete input at end of input\n"))
-            {:eof true :history history})
+      (= (get r :kind) :eof) (do
+                               (when (and (not (= acc "")) (= (repl--eval-print acc) :more))
+                                 (eprint "error: incomplete input at end of input\n"))
+                               {:eof true :history history})
       ;; Ctrl-C: abandon the (possibly multi-line) form, fresh prompt next round.
       (= (get r :kind) :cancel) {:eof false :history history}
-      :else
-        (let (line (get r :text))
-          (cond
-            ;; A blank / comment-only line at a fresh prompt: nothing to evaluate.
-            (and (= acc "") (not (repl--content? line 0 (string-length line) false)))
-              {:eof false :history history}
-            :else
-              (let (src (str acc line "\n"))
-                (if (= (repl--eval-print src) :more)
-                  (repl--read-eval interactive src history)   ; incomplete — keep reading
-                  (let (h2 (lineedit/lineedit--remember history src))
-                    ;; persist only interactive sessions (not piped/scripted runs)
-                    (when interactive (repl--save-history h2))
-                    {:eof false :history h2}))))))))
+      :else (let (line (get r :text))
+              (cond
+                ;; A blank / comment-only line at a fresh prompt: nothing to evaluate.
+                (and (= acc "") (not (repl--content? line 0 (string-length line) false))) {:eof false
+                                                                                           :history history}
+                :else (let (src (str acc line "\n"))
+                        (if (= (repl--eval-print src) :more)
+                          (repl--read-eval interactive src history)  ; incomplete — keep reading
+                          (let (h2 (lineedit/lineedit--remember history src))
+                            ;; persist only interactive sessions (not piped/scripted runs)
+                            (when interactive (repl--save-history h2))
+                            {:eof false :history h2}))))))))
 
 (defn repl--loop (interactive history)
   "Read-eval one form (skipping blank / comment-only input), then tail-recurse into

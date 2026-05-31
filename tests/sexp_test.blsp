@@ -3,7 +3,8 @@
 ;; editor-specific). Register-only — run by `nest test` (and cargo test, via suite.rs).
 
 (defmodule sexp-test (:use test) (:use sexp) (:use buffer))
-(require 'sexp) (require 'buffer)
+(require 'sexp)
+(require 'buffer)
 
 ;; (defn f (x)\n  (+ x 1))   — outer list [0,22); 'defn' [1,5); 'f' [6,7);
 ;; (x) [8,11); inner (+ x 1) [14,21).
@@ -11,17 +12,17 @@
 
 (describe "sexp navigation (pure, over the parse-source CST)"
   (test "forward over the whole top form, and over inner atoms"
-    (assert= (point-forward src 0) 22)     ; before outer → end of the whole form
-    (assert= (point-forward src 1) 5)      ; → end of 'defn'
-    (assert= (point-forward src 5) 7))     ; from the space → end of 'f'
+    (assert= (point-forward src 0) 22)  ; before outer → end of the whole form
+    (assert= (point-forward src 1) 5)  ; → end of 'defn'
+    (assert= (point-forward src 5) 7))  ; from the space → end of 'f'
   (test "backward"
-    (assert= (point-backward src 22) 0)    ; before close → start of the top form
-    (assert= (point-backward src 5) 1))    ; end of 'defn' → its start
+    (assert= (point-backward src 22) 0)  ; before close → start of the top form
+    (assert= (point-backward src 5) 1))  ; end of 'defn' → its start
   (test "down-list enters, up-list leaves"
-    (assert= (point-down src 0) 1)         ; just inside the outer list
-    (assert= (point-up src 15) 14)         ; inside (+ x 1) → its open paren
-    (assert= (point-up src 1) 0)           ; inside outer → its open paren
-    (assert= (point-up src 0) 0))          ; at top level → unchanged
+    (assert= (point-down src 0) 1)  ; just inside the outer list
+    (assert= (point-up src 15) 14)  ; inside (+ x 1) → its open paren
+    (assert= (point-up src 1) 0)  ; inside outer → its open paren
+    (assert= (point-up src 0) 0))  ; at top level → unchanged
   (test "beginning-of-defun finds the enclosing top-level form"
     (assert= (point-defun-start src 15) 0)
     (assert= (point-defun-start src 8) 0))

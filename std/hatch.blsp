@@ -76,8 +76,9 @@ can tail-recurse with it unchanged)."
       ; query — like call but the body is just the reply; state is untouched.
       ; Removes the [x s] boilerplate from the common "read a field" case.
       (= kind 'query) `([:$call ~from ~rf ~pat] (send ~from [:reply ~rf (do ~@body)])
-                                                 (~name ~state-sym))
-      else (error "defprocess: each clause must start with `cast`, `call`, or `query`, got " (pr-str kind)))))
+                         (~name ~state-sym))
+      else (error "defprocess: each clause must start with `cast`, `call`, or `query`, got "
+             (pr-str kind)))))
 
 (defmacro defprocess (name params & clauses)
   "Define a hatch server `name` over a single `params` state, as a tail-recursive

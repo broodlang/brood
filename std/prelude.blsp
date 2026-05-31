@@ -92,25 +92,21 @@
 ;; is the dogfooding payoff: writing `+` in Brood surfaced the missing
 ;; multi-arity dispatch; we built that capability rather than moving `+` to Rust
 ;; — CLAUDE.md "dogfood first; optimize by building the language up".)
-(defn +
-  "Sum of all arguments (0 with none)."
+(defn + "Sum of all arguments (0 with none)."
   (() 0)
   ((a) a)
   ((a b) (%add a b))
   ((a b & more) (fold %add (%add a b) more)))
-(defn *
-  "Product of all arguments (1 with none)."
+(defn * "Product of all arguments (1 with none)."
   (() 1)
   ((a) a)
   ((a b) (%mul a b))
   ((a b & more) (fold %mul (%mul a b) more)))
-(defn -
-  "Subtract the rest from `x`; negate `x` if it's the only argument."
+(defn - "Subtract the rest from `x`; negate `x` if it's the only argument."
   ((x) (%sub 0 x))
   ((a b) (%sub a b))
   ((x & xs) (fold %sub x xs)))
-(defn /
-  "Divide `x` by the rest; reciprocal of `x` if it's the only argument. Errors on division by zero."
+(defn / "Divide `x` by the rest; reciprocal of `x` if it's the only argument. Errors on division by zero."
   ((x) (%div 1 x))
   ((a b) (%div a b))
   ((x & xs) (fold %div x xs)))
@@ -138,31 +134,25 @@
 ;; Multi-arity like arithmetic above: a direct 2-argument clause (the common
 ;; case — `(< a b)`, `(= a b)`) calls the primitive with one env frame; the
 ;; variadic clause chains over adjacent pairs for 3+ (or 0/1, trivially true).
-(defn <
-  "True if the arguments are in strictly increasing order."
+(defn < "True if the arguments are in strictly increasing order."
   ((a b) (%lt a b))
   ((& xs) (chain? %lt xs)))
-(defn >
-  "True if the arguments are in strictly decreasing order."
+(defn > "True if the arguments are in strictly decreasing order."
   ((a b) (%lt b a))
   ((& xs) (chain? cmp--gt xs)))
-(defn <=
-  "True if the arguments are in non-decreasing order."
+(defn <= "True if the arguments are in non-decreasing order."
   ;; 2-arg body is a direct primitive call (a <= b) so the ADR-069 thin-wrapper
   ;; elision reaches it — the old `(not (%lt b a))` was a nested call it couldn't.
   ((a b) (%le a b))
   ((& xs) (chain? cmp--le xs)))
-(defn >=
-  "True if the arguments are in non-increasing order."
+(defn >= "True if the arguments are in non-increasing order."
   ;; a >= b  ==  b <= a — still a single passthrough (%le with args swapped).
   ((a b) (%le b a))
   ((& xs) (chain? cmp--ge xs)))
-(defn =
-  "True if all arguments are structurally equal."
+(defn = "True if all arguments are structurally equal."
   ((a b) (%eq a b))
   ((& xs) (chain? %eq xs)))
-(defn not=
-  "True if the arguments are not all equal."
+(defn not= "True if the arguments are not all equal."
   ((a b) (not (%eq a b)))
   ((& xs) (not (apply = xs))))
 
@@ -256,7 +246,9 @@ or re-`def` to force re-init."
 (defn map? (x) "True if `x` is a map." (%eq (type-of x) :map))
 (defn ref? (x) "True if `x` is a `(ref)` token (a unique reference)." (%eq (type-of x) :ref))
 (defn pid? (x) "True if `x` is a process id (from `self`/`spawn`)." (%eq (type-of x) :pid))
-(defn rope? (x) "True if `x` is a rope (editor buffer text from `string->rope`)." (%eq (type-of x) :rope))
+(defn rope? (x)
+  "True if `x` is a rope (editor buffer text from `string->rope`)."
+  (%eq (type-of x) :rope))
 ;; `fn?` holds for both Brood closures (:fn) and Rust builtins (:native).
 (defn fn? (x)
   "True if `x` is callable (a closure or a primitive)."
@@ -374,10 +366,13 @@ can.)"
   (fold merge--into {} maps))
 
 ;; merge-with: on a shared key, combine with `(f existing new)` instead of replacing.
-(defn merge-with--step (f a k v) (if (contains? a k) (map-assoc a k (f (get a k) v)) (map-assoc a k v)))
+(defn merge-with--step (f a k v)
+  (if (contains? a k) (map-assoc a k (f (get a k) v)) (map-assoc a k v)))
 (defn merge-with (f & maps)
   "Like `merge`, but when two maps share a key the combined value is `(f value-so-far next-value)` rather than just the latter. `nil` maps are skipped."
-  (fold (fn (acc m) (if (nil? m) acc (reduce-kv (fn (a k v) (merge-with--step f a k v)) acc m))) {} maps))
+  (fold (fn (acc m) (if (nil? m) acc (reduce-kv (fn (a k v) (merge-with--step f a k v)) acc m)))
+    {}
+    maps))
 
 (defn update (m k f & args)
   "A map like `m` with the value at `k` replaced by `(apply f current args)`, where `current` is the existing value (`nil` if `k` is absent)."
@@ -404,7 +399,9 @@ can.)"
 (defn get-in--walk (m path default)
   (cond
     (empty? path) m
-    (and (map? m) (contains? m (first path))) (get-in--walk (get m (first path)) (rest path) default)
+    (and (map? m) (contains? m (first path))) (get-in--walk (get m (first path))
+                                                (rest path)
+                                                default)
     else default))
 (defn get-in (m path & default)
   "The value in nested maps `m` at the key sequence `path`, or `default` (else `nil`) if any key along the way is absent. `(get-in m ())` is `m`."
@@ -846,13 +843,11 @@ is still safe (a `link` to an already-dead pid fires `[:EXIT … :noproc]`)."
 ;; loop so it stays a stable address; the closure crosses the wire as data
 ;; (ADR-033), so any peer node running the same prelude can run it.
 (defn remote--spawn-server ()
-  (receive
-    ([:run thunk] (do (spawn (thunk)) (remote--spawn-server)))
+  (receive ([:run thunk] (do (spawn (thunk)) (remote--spawn-server)))
     ;; Synchronous variant: spawn the thunk and reply with the child's pid (a
     ;; remote pid, carrying this node's `name@host`) to the requester, keyed by
     ;; the ref it supplied so its `receive` can pin the reply.
-    ([:run-sync thunk from r] (do (send from [:spawned r (spawn (thunk))])
-                                  (remote--spawn-server)))
+    ([:run-sync thunk from r] (do (send from [:spawned r (spawn (thunk))]) (remote--spawn-server)))
     (_ (remote--spawn-server))))
 
 (defn start-remote-spawn ()
@@ -875,9 +870,9 @@ called `(start-remote-spawn)`. Use this when you need the child's pid — e.g. t
 `monitor`/`link` a remote child — rather than fire-and-forget."
   `(let (r# (ref))
      (send {:name :remote-spawn :node ~node} [:run-sync (fn () ~expr) (self) r#])
-     (receive
-       ([:spawned got# child#] :when (= got# r#) child#)
-       (after 5000 (throw "remote-spawn-sync: no reply (is start-remote-spawn running on the peer?)")))))
+     (receive ([:spawned got# child#] :when (= got# r#) child#)
+       (after 5000
+         (throw "remote-spawn-sync: no reply (is start-remote-spawn running on the peer?)")))))
 
 ;; ---- node identity: name-addressing + the shared cookie (ADR-068) ----------
 ;; A node is addressed by NAME on the local machine (a Unix-domain socket — no
@@ -904,20 +899,20 @@ called `(start-remote-spawn)`. Use this when you need the child's pid — e.g. t
 `~/.config/brood/cookie` → freshly generated and persisted (0600). All your nodes
 on this machine share one cookie, Erlang-style; set `$BROOD_COOKIE` to override."
   (or (getenv "BROOD_COOKIE")
-      (let (path (node--cookie-path))
-        (if (file-exists? path)
-          (node--chomp (slurp path))
-          (let (secret (random-token 32))
-            (spit-private path secret)
-            secret)))))
+    (let (path (node--cookie-path))
+      (if (file-exists? path)
+        (node--chomp (slurp path))
+        (let (secret (random-token 32))
+          (spit-private path secret)
+          secret)))))
 
 ;; The per-user dir holding local node sockets. $XDG_RUNTIME_DIR is the right
 ;; home (tmpfs, cleared on logout); fall back to /tmp/brood-<user> when a bare /
 ;; cron / ssh session leaves it unset.
 (defn node--runtime-dir ()
   (str (or (getenv "XDG_RUNTIME_DIR")
-           (str "/tmp/brood-" (or (getenv "USER") (getenv "LOGNAME") "shared")))
-       "/brood"))
+         (str "/tmp/brood-" (or (getenv "USER") (getenv "LOGNAME") "shared")))
+    "/brood"))
 
 (defn node--socket-path (s) (str (node--runtime-dir) "/" s ".sock"))
 
@@ -960,8 +955,8 @@ on this machine share one cookie, Erlang-style; set `$BROOD_COOKIE` to override.
   (let (s (name nm))
     (cond
       (>= (node--at s 0 (string-length s)) 0) (keyword s)
-      (nil? addr)                              (keyword (str s "@" (hostname)))
-      else                                     (keyword (str s "@" (node--addr-host addr))))))
+      (nil? addr) (keyword (str s "@" (hostname)))
+      else (keyword (str s "@" (node--addr-host addr))))))
 
 (defn node-start (nm &optional addr cookie)
   "Start this runtime as a node so peers can reach it. The node's identity is
@@ -973,10 +968,10 @@ same-machine case; `(node-start name \"host:port\")` listens over TCP for remote
 peers. The cookie defaults to `(node-cookie)`. Returns the qualified node name.
 Errors if this runtime is already a node."
   (%node-listen (node--qualify nm addr)
-                (if (nil? addr)
-                  (str "unix:" (node--socket-path (node--name-part (name nm))))
-                  (str "tcp:" addr))
-                (or cookie (node-cookie))))
+    (if (nil? addr)
+      (str "unix:" (node--socket-path (node--name-part (name nm))))
+      (str "tcp:" addr))
+    (or cookie (node-cookie))))
 
 (defn connect (spec)
   "Link to a peer node. `(connect \"name\")` dials a local node by name over its
@@ -993,14 +988,15 @@ node — call `(node-start …)` first."
       ;; Bare name → local Unix node. The peer's real name is `name@thishost`;
       ;; pass that as the claimed name (the handshake confirms it).
       (%node-connect (keyword (str spec "@" (hostname)))
-                     (str "unix:" (node--socket-path spec)))
+        (str "unix:" (node--socket-path spec)))
       ;; Qualified → remote TCP: "name@host:port". The node name is everything
       ;; before the (last) port colon; the dial address is everything after `@`.
       (let (lc (node--last-colon spec 0 n -1))
         (when (<= lc at)
-          (error "connect: a remote node needs \"name@host:port\" (a bare name is local), got " spec))
+          (error "connect: a remote node needs \"name@host:port\" (a bare name is local), got "
+            spec))
         (%node-connect (keyword (substring spec 0 lc))
-                       (str "tcp:" (substring spec (inc at) n)))))))
+          (str "tcp:" (substring spec (inc at) n)))))))
 
 (defn node-also-listen (&optional addr)
   "Add another listener to this (already-started) node so it serves several
@@ -1013,10 +1009,9 @@ locally and `(connect \"ed@host:9001\")` from another machine. Errors if this
 runtime isn't a node yet."
   (when (= (node-name) :nonode)
     (error "node-also-listen: this runtime is not a node yet — call (node-start name) first"))
-  (%node-also-listen
-    (if (nil? addr)
-      (str "unix:" (node--socket-path (node--name-part (name (node-name)))))
-      (str "tcp:" addr))))
+  (%node-also-listen (if (nil? addr)
+                       (str "unix:" (node--socket-path (node--name-part (name (node-name)))))
+                       (str "tcp:" addr))))
 
 ;; ---- node-link reconnect: policy in Brood over connect + monitor-node ------
 ;; Today's `(connect addr)` is one-shot; if the peer is down it raises, if it
@@ -1063,12 +1058,10 @@ runtime isn't a node yet."
 ;; reconnect (retrying until success), then go back to listening. Exits
 ;; cleanly on `:stop`.
 (defn ensure-link--loop (addr peer)
-  (receive
-    ([:nodedown p]
-      (when (= p peer)
-        (sleep 200)
-        (ensure-link--reconnect addr)
-        (ensure-link--loop addr peer)))
+  (receive ([:nodedown p] (when (= p peer)
+                            (sleep 200)
+                            (ensure-link--reconnect addr)
+                            (ensure-link--loop addr peer)))
     (:stop nil)
     (_ (ensure-link--loop addr peer))))
 
@@ -1080,8 +1073,7 @@ runtime isn't a node yet."
     ;; `:nodedown` — which `monitor-node` fires immediately when the peer
     ;; isn't connected, so we'll be back here soon.
     (try (connect addr) (catch _ nil))
-    (spawn (do (monitor-node peer)
-               (ensure-link--loop addr peer)))))
+    (spawn (do (monitor-node peer) (ensure-link--loop addr peer)))))
 
 ;; ---- receive: selective, pattern-matched message receipt --------------------
 ;; (receive clause...) where each clause is (pattern [:when guard] body...), with an
@@ -1359,7 +1351,8 @@ structural order (`compare`), so numeric, string, keyword, and vector keys all w
   "A list of `x` repeated `n` times (empty if `n` <= 0)."
   (repeat--acc n x nil))
 
-(defn repeatedly--acc (n f acc) (if (<= n 0) (reverse acc) (repeatedly--acc (dec n) f (cons (f) acc))))
+(defn repeatedly--acc (n f acc)
+  (if (<= n 0) (reverse acc) (repeatedly--acc (dec n) f (cons (f) acc))))
 (defn repeatedly (n f)
   "A list of `n` successive calls to the zero-argument function `f` (in call order)."
   (repeatedly--acc n f nil))
@@ -1495,7 +1488,9 @@ applies to each input first."
   (cond
     (empty? binds) `(cons ~body ~acc)
     (= (first binds) :when) `(if ~(second binds) ~(for--fold acc (rest (rest binds)) body) ~acc)
-    else `(fold (fn (~acc ~(first binds)) ~(for--fold acc (rest (rest binds)) body)) ~acc ~(second binds))))
+    else `(fold (fn (~acc ~(first binds)) ~(for--fold acc (rest (rest binds)) body))
+            ~acc
+            ~(second binds))))
 
 (defmacro for (binds body)
   "List comprehension: `(for (x xs) expr)` yields `expr` for each `x`; supports `:when guard` filters and multiple bindings (last varies fastest). Bindings may destructure."
@@ -1699,7 +1694,11 @@ leaves `s` unchanged."
     (= (char-at fmt i) "%") (format--loop fmt (inc i) n args (str acc "%"))
     (= (char-at fmt i) "s") (format--loop fmt (inc i) n (rest args) (str acc (str (first args))))
     (= (char-at fmt i) "d") (format--loop fmt (inc i) n (rest args) (str acc (str (first args))))
-    (= (char-at fmt i) "f") (format--loop fmt (inc i) n (rest args) (str acc (to-fixed (first args) 6)))
+    (= (char-at fmt i) "f") (format--loop fmt
+                              (inc i)
+                              n
+                              (rest args)
+                              (str acc (to-fixed (first args) 6)))
     (= (char-at fmt i) ".") (format--prec fmt (inc i) n args acc 0)
     else (error (str "format: unrecognized specifier '%" (char-at fmt i) "' at column " i))))
 
@@ -1707,12 +1706,18 @@ leaves `s` unchanged."
   ;; called with `i` pointing one past the `.`, accumulating precision in `p`
   (cond
     (>= i n) (error "format: unterminated %.Nf specifier")
-    (= (char-at fmt i) "f") (format--loop fmt (inc i) n (rest args) (str acc (to-fixed (first args) p)))
+    (= (char-at fmt i) "f") (format--loop fmt
+                              (inc i)
+                              n
+                              (rest args)
+                              (str acc (to-fixed (first args) p)))
     else (let (d (string->number (char-at fmt i)))
            (if (and (int? d) (>= d 0) (<= d 9))
              (format--prec fmt (inc i) n args acc (+ (* p 10) d))
              (error (str "format: expected digit or 'f' after '.' in specifier, got '"
-                      (char-at fmt i) "' at column " i))))))
+                      (char-at fmt i)
+                      "' at column "
+                      i))))))
 
 ;; ---- strings & paths --------------------------------------------------------
 ;; Helpers over `substring` (char-indexed, like `string-length`). Generic enough
@@ -1763,7 +1768,7 @@ stripped (`(cwd)` doesn't produce one, which is the primary caller)."
 ;; left shift can exceed 32 bits, so we mask back to 32 bits with `*rand-mask*`,
 ;; which also keeps every intermediate well within i64 (no overflow).
 
-(def *rand-mask* 4294967295) ; 2^32 - 1
+(def *rand-mask* 4294967295)  ; 2^32 - 1
 
 (defn rand-seed (n)
   "Normalize integer `n` into a valid nonzero 32-bit PRNG seed (xorshift32 cannot start from 0)."
@@ -1834,11 +1839,10 @@ stripped (`(cwd)` doesn't produce one, which is the primary caller)."
 
 (defn doc-search (query)
   "Every global whose docstring contains `query` (a string), as a list of `[name doc]` pairs — searches behaviour, not just names, e.g. `(doc-search \"random\")`."
-  (keep
-    (fn (s)
-      (let (d (try (doc (eval s)) (catch _ nil)))
-        (when (and (string? d) (string-contains? d query))
-          [s d])))
+  (keep (fn (s)
+          (let (d (try (doc (eval s)) (catch _ nil)))
+            (when (and (string? d) (string-contains? d query))
+              [s d])))
     (global-names)))
 
 ;; ---- modules: Emacs-flat provide / require (ADR-019) ------------------------
@@ -1870,10 +1874,10 @@ stripped (`(cwd)` doesn't produce one, which is the primary caller)."
 ;; otherwise all of `mod`'s public (non-`--`) names. Used at `defmodule` expand time.
 (defn defmodule--use-clause (clause)
   (let (mod (second clause)
-         opts (rest (rest clause))
-         subset (if (= (first opts) :refer) (second opts) nil))
+        opts (rest (rest clause))
+        subset (if (= (first opts) :refer) (second opts) nil))
     (list (list 'require (list 'quote mod))
-          (list '%refer (list 'quote mod) (list 'quote subset)))))
+      (list '%refer (list 'quote mod) (list 'quote subset)))))
 
 ;; All require/refer forms for the `(:use …)` clauses in a `defmodule` header
 ;; (skipping the optional docstring / any non-`:use` form), flattened for splicing.
@@ -1895,12 +1899,13 @@ definitions become `mod/name`; bare references resolve there, then through
 `(:use …)` imports, then root. Records an optional docstring and `provide`s the
 feature. Put it first. e.g. (defmodule hatch \"A gen_server …\")."
   (let (key (name mod)
-         doc (if (string? (first more)) (first more) nil)
-         clauses (if (string? (first more)) (rest more) more))
-    `(do (def *module-docs* (assoc *module-docs* ~key ~doc))
-         (provide ~key)
-         (%in-ns '~mod)
-         ~@(defmodule--use-forms clauses))))
+        doc (if (string? (first more)) (first more) nil)
+        clauses (if (string? (first more)) (rest more) more))
+    `(do
+       (def *module-docs* (assoc *module-docs* ~key ~doc))
+       (provide ~key)
+       (%in-ns '~mod)
+       ~@(defmodule--use-forms clauses))))
 
 (defn module-doc (mod)
   "The docstring declared by `(defmodule mod …)` (a symbol or string), or nil."

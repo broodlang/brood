@@ -14,8 +14,7 @@
 ;; the `router` below dispatches on the request path.
 
 (defn home (req)
-  (ok (str
-        "<!doctype html><html><head><meta charset=utf-8><title>Brood</title>"
+  (ok (str "<!doctype html><html><head><meta charset=utf-8><title>Brood</title>"
         "<style>body{font-family:system-ui,sans-serif;max-width:38em;margin:4em auto;line-height:1.5}"
         "code{background:#f0f0f0;padding:.1em .3em;border-radius:3px}</style></head>"
         "<body>"
@@ -36,10 +35,18 @@
 
 ;; Show that the parsed request is just data.
 (defn echo (req)
-  (text-response (str "you asked for: " (get req :path) "\n\n"
-          "method: " (get req :method) "\n"
-          "host:   " (get (get req :headers) "host" "(none)") "\n"
-          "agent:  " (get (get req :headers) "user-agent" "(none)") "\n")))
+  (text-response (str "you asked for: "
+                   (get req :path)
+                   "\n\n"
+                   "method: "
+                   (get req :method)
+                   "\n"
+                   "host:   "
+                   (get (get req :headers) "host" "(none)")
+                   "\n"
+                   "agent:  "
+                   (get (get req :headers) "user-agent" "(none)")
+                   "\n")))
 
 (println (str "Brood web server listening on http://localhost:" *port*))
 (println "Routes: /  /hello  /echo   (Ctrl-C to stop)")
@@ -47,6 +54,4 @@
 ;; `serve` blocks here, accepting connections and dispatching each request through
 ;; the router. The router is passed inline (kept a local value) rather than bound
 ;; with `def`, which would promote the closure to the shared code region.
-(serve *port* (router {"/" home
-                       "/hello" hello
-                       "/echo" echo}))
+(serve *port* (router {"/" home "/hello" hello "/echo" echo}))

@@ -60,24 +60,23 @@
       (spawn (do
                (let (ls (tcp-listen "127.0.0.1" 0))
                  (send me [:port (tcp-local-port ls)])
-                 (receive
-                   ([:tcp-accept ~ls c]
-                     (do
-                       (tcp-controlling-process c (self))
-                       (receive
-                         ([:tcp ~c _]
-                           (do
-                             (tcp-send c "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
-                             (tcp-send c "event: hello\r\ndata: world\r\n\r\n")
-                             (tcp-send c "data: {\"n\":1}\r\n\r\n")
-                             (tcp-close c)))
-                         (after 5000 nil))))
+                 (receive ([:tcp-accept ~ls c] (do
+                                                 (tcp-controlling-process c (self))
+                                                 (receive ([:tcp ~c _] (do
+                                                                         (tcp-send c
+                                                                           "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
+                                                                         (tcp-send c
+                                                                           "event: hello\r\ndata: world\r\n\r\n")
+                                                                         (tcp-send c
+                                                                           "data: {\"n\":1}\r\n\r\n")
+                                                                         (tcp-close c)))
+                                                   (after 5000 nil))))
                    (after 5000 nil)))))
       (let (port (receive ([:port p] p) (after 5000 :timeout)))
         (sse-connect (str "http://127.0.0.1:" port "/events") me)
-        (let (open   (receive ([:sse-open s] s) (after 5000 :timeout))
-              e1     (receive ([:sse e] e) (after 5000 :timeout))
-              e2     (receive ([:sse e] e) (after 5000 :timeout))
+        (let (open (receive ([:sse-open s] s) (after 5000 :timeout))
+              e1 (receive ([:sse e] e) (after 5000 :timeout))
+              e2 (receive ([:sse e] e) (after 5000 :timeout))
               closed (receive ([:sse-closed r] r) (after 5000 :timeout)))
           (assert= open 200)
           (assert= (get e1 :event) "hello")

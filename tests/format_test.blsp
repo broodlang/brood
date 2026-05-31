@@ -79,8 +79,8 @@
   ;; comments out the `)` and leaves the list unclosed — an unparseable file.
   (test "the closing paren drops below a trailing comment, not into it"
     (let (out (format-source "(describe \"x\"\n  (test \"a\" (is true))\n  ;; note\n  )"))
-      (is (string-contains? out ";; note\n)"))      ; `)` on its own line
-      (is (not (string-contains? out ";; note)"))))) ; never swallowed
+      (is (string-contains? out ";; note\n)"))  ; `)` on its own line
+      (is (not (string-contains? out ";; note)")))))  ; never swallowed
   (test "the result is re-readable (not just CST-parseable)"
     ;; parse-source is lenient on unclosed lists; the real reader is not — pin it.
     (let (out (format-source "(describe \"x\"\n  (test \"a\")\n  ;; note\n  )"))
@@ -131,15 +131,15 @@
   (test "escape sequences inside a string survive unchanged"
     (assert= (format-source "(def s \"a\\tb\\nc\")") "(def s \"a\\tb\\nc\")\n"))
   (test "a multi-line string literal preserves its internal newlines"
-    (let (in  "(def doc \"line one\nline two\nline three\")"
+    (let (in "(def doc \"line one\nline two\nline three\")"
           out (format-source in))
       ;; The string content stays byte-for-byte — including the literal
       ;; newlines (we can't reflow inside a string literal).
       (is (string-contains? out "\"line one\nline two\nline three\""))))
   (test "a string longer than the width budget pushes itself to its own line, content untouched"
     (let (long-content "this is a really long string that exceeds the eighty column width budget the formatter uses"
-          in   (str "(def msg \"" long-content "\")")
-          out  (format-source in))
+          in (str "(def msg \"" long-content "\")")
+          out (format-source in))
       ;; Content is preserved verbatim.
       (is (string-contains? out (str "\"" long-content "\"")))
       ;; And the form breaks: string lands on its own line at +2 indent.

@@ -40,7 +40,7 @@
       (is (file? p))
       (delete-file p)
       (refute (path-exists? p))
-      (assert= (delete-file p) nil)))            ; no-op when already gone
+      (assert= (delete-file p) nil)))  ; no-op when already gone
   (test "rename-file moves content to a new path"
     (let (d (ftmp) a (path-join d "a.txt") b (path-join d "b.txt"))
       (write-file a "moved")
