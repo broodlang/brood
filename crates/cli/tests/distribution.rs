@@ -191,6 +191,78 @@ fn clean_peer_exit_fires_nodedown_promptly() {
     );
 }
 
+/// `(disconnect name)` tears the link down *deliberately* while **both** nodes
+/// stay up — the capability a clean process-exit can't provide (a server dropping
+/// one client, or a node leaving a cluster). The dialer disconnects; it sees
+/// `[:nodedown]` + a pruned `(nodes)` synchronously, and the *acceptor* — still
+/// running, blocked in `receive` — sees its own `[:nodedown]` via socket EOF.
+/// Erlang's `disconnect_node/1`. (connect-test had to hand-roll an app-level
+/// `[:bye]` for want of this.)
+#[test]
+fn disconnect_drops_a_peer_link_while_both_nodes_stay_up() {
+    let _g = port_lock();
+    let dir = std::env::temp_dir().join(format!("brood-dist-disconnect-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let port_a = free_port();
+    let port_b = free_port();
+
+    // Node B: come up and *stay* up — monitor whoever links in, then block in
+    // `receive` awaiting its `[:nodedown]`. It never exits on its own; only A's
+    // `disconnect` ends the link, so reaching the `B-NODEDOWN` clause proves the
+    // socket was closed deliberately (not by B exiting).
+    let server = format!(
+        r#"
+(node-start :b "127.0.0.1:{port_b}" "secret")
+(defn wait-link () (if (empty? (nodes)) (do (sleep 50) (wait-link)) (first (nodes))))
+(monitor-node (wait-link))
+(receive
+  ([:nodedown p] (println "B-NODEDOWN " p " " (nodes)))
+  (after 5000 (println "B-TIMEOUT " (nodes))))
+"#
+    );
+
+    // Node A: connect, monitor B, give B a moment to notice + monitor us back,
+    // then `disconnect`. Assert the return value, the local nodedown, the pruned
+    // list, and that disconnecting an unknown node is a no-op returning false.
+    let client = format!(
+        r#"
+(node-start :a "127.0.0.1:{port_a}" "secret")
+(def peer (connect "b@127.0.0.1:{port_b}"))
+(monitor-node peer)
+(sleep 400)
+(if (disconnect peer) (println "RETURNED-TRUE") (println "RETURNED-FALSE"))
+(receive
+  ([:nodedown p] (if (empty? (nodes)) (println "A-NODEDOWN-OK " p) (println "A-NODES-NOT-PRUNED " (nodes))))
+  (after 5000 (println "A-TIMEOUT " (nodes))))
+(if (disconnect :ghost@nowhere) (println "GHOST-TRUE") (println "GHOST-FALSE"))
+"#
+    );
+
+    let b = spawn_brood(&dir, "server.blsp", &server);
+    wait_until_listening(port_b);
+    let a = spawn_brood(&dir, "client.blsp", &client);
+
+    let out = a.wait_with_output().expect("client finished");
+    let b_out = b.wait_with_output().expect("server finished");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let a_stdout = String::from_utf8_lossy(&out.stdout);
+    let a_stderr = String::from_utf8_lossy(&out.stderr);
+    let b_stdout = String::from_utf8_lossy(&b_out.stdout);
+    assert!(
+        out.status.success()
+            && a_stdout.contains("RETURNED-TRUE")
+            && a_stdout.contains("A-NODEDOWN-OK")
+            && a_stdout.contains("GHOST-FALSE"),
+        "client side of disconnect.\n--- a stdout ---\n{a_stdout}\n--- a stderr ---\n{a_stderr}"
+    );
+    assert!(
+        b_stdout.contains("B-NODEDOWN"),
+        "the still-running peer must see its own nodedown via socket EOF.\n--- b stdout ---\n{b_stdout}"
+    );
+}
+
 /// Run a `.blsp` program in a fresh `brood` subprocess with extra env vars —
 /// used by the Unix-socket tests to sandbox `$HOME`/`$XDG_*` (so the cookie file
 /// lands in the test's temp dir, never the runner's real `~/.config`) and to set

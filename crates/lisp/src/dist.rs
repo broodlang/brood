@@ -512,6 +512,29 @@ pub(crate) fn connected_nodes() -> Vec<Symbol> {
     crate::core::sync::read(&NODES).keys().copied().collect()
 }
 
+/// `(disconnect name)` — tear the link to peer `name` down now, *without* exiting
+/// this process. Shuts the socket down (so the peer's reader hits EOF and fires
+/// its own node-down) and runs `drop_link` on our side, which removes the `NODES`
+/// entry and fires `[:nodedown name]` to our monitors. Same teardown the reader
+/// takes on a clean peer exit, just triggered deliberately — Erlang's
+/// `disconnect_node/1`. Returns `true` if a link existed, `false` if there was
+/// nothing connected under `name`. Our own reader will also hit EOF and call
+/// `drop_link(name, id)`, but the generation-id guard makes the second call a
+/// no-op, so `[:nodedown]` fires exactly once.
+pub(crate) fn disconnect(peer: Symbol) -> bool {
+    let conn = crate::core::sync::read(&NODES)
+        .get(&peer)
+        .map(|c| (Arc::clone(&c.sock), c.id));
+    match conn {
+        Some((sock, id)) => {
+            let _ = sock.shutdown(Shutdown::Both);
+            drop_link(peer, id);
+            true
+        }
+        None => false,
+    }
+}
+
 // ----- routing ---------------------------------------------------------------
 
 /// How a `send` names its target within a node.

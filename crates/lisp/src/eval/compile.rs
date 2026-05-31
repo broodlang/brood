@@ -449,13 +449,24 @@ fn compile_make_closure(heap: &Heap, form: Value, scope: &Scope) -> Option<Node>
 /// whole closure to the tree-walker).
 fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Option<Node> {
     match form {
-        // Self-evaluating literals.
+        // Self-evaluating atoms — immovable (inline scalars, or an interned
+        // keyword `u32`), so embedding the handle directly in the `Const` is safe.
         Value::Int(_)
         | Value::Float(_)
         | Value::Bool(_)
         | Value::Nil
-        | Value::Str(_)
         | Value::Keyword(_) => Some(Node::Const(form)),
+
+        // A string literal is a *LOCAL* heap handle, but the compiled node it lands
+        // in is snapshotted into an `Arc`'d AST that lives off the GC root graph —
+        // the collector neither traces nor relocates it. A top-level form run via
+        // `run()` is never promoted (only `def`/`defn` bodies are), so a collection
+        // during that form's *own* evaluation (e.g. `(do (heavy-alloc) "lit")`)
+        // would dangle the handle → use-after-GC when a later sub-form reads it.
+        // Freeze it into the immovable RUNTIME code region now — the same promotion
+        // a defn's body literals already get, so the embedded handle never moves.
+        // (Already-immovable PRELUDE/RUNTIME strings: `promote` is a no-op.)
+        Value::Str(_) => Some(Node::Const(heap.promote(form))),
 
         // A name: a local frame slot if bound, else a global reference.
         Value::Sym(s) => match scope.lookup(s) {

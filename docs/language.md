@@ -127,14 +127,14 @@ Maps are immutable — every operation returns a **fresh** map:
 | Form | Meaning |
 |---|---|
 | `(get m k)` / `(get m k default)` | the value at `k`; `nil` (or `default`) if absent |
-| `(assoc m k1 v1 k2 v2 …)` | a new map with the pairs added/updated |
+| `(assoc m k1 v1 k2 v2 …)` | a new map with the pairs added/updated (also works on a **vector** with integer indices — replaces, never appends) |
 | `(dissoc m k1 k2 …)` | a new map with those keys removed |
 | `(contains? m k)` | whether `k` is present (distinguishes a stored `nil` from absence) |
 | `(keys m)` / `(vals m)` | the keys / values, as a list, in insertion order |
 | `(reduce-kv f init m)` | fold over the entries: `(f acc k v)` left to right → the final acc |
 | `(merge m1 m2 …)` | combine maps left to right; rightmost key wins (`nil` maps skipped) |
 | `(merge-with f m1 m2 …)` | like `merge`, but a shared key's value is `(f old new)` |
-| `(update m k f args…)` | a new map with `k`'s value replaced by `(f current args…)` (`current` is `nil` if absent) |
+| `(update m k f args…)` | a new map with `k`'s value replaced by `(f current args…)` (`current` is `nil` if absent; also works on a **vector** by integer index, which must be in range) |
 | `(update-vals m f)` / `(update-keys m f)` | a new map with `f` applied to every value / key |
 | `(select-keys m ks)` | a new map of just the entries whose key is in `ks` |
 | `(zipmap ks vs)` | a map pairing `ks` with `vs` positionally (stops at the shorter) |
@@ -527,10 +527,22 @@ Raise with `throw` (any value) or `error` (a formatted message), and handle with
 (error "bad index: " i)             ; raise a message string
 ```
 
-`catch` binds `e` to the thrown value; for a built-in error (like division by
-zero) it binds the error's message string. A `try` with no `catch` is just a
-`do`. Under the hood `throw` and `%try` are primitives and `try`/`catch`/`error`
-are written in Brood (`std/prelude.blsp`) — see [primitives.md](primitives.md).
+`catch` binds `e` to the thrown value: a `throw` hands back its argument verbatim
+(a bare string from `error`, a keyword, a `[:tag …]` vector, …), while a built-in
+error (like division by zero) binds the kernel's canonical **error map** —
+`{:kind :message [:code :file :line :col :hint]}` — so a handler can branch on
+`(get e :kind)` without parsing strings. A `try` with no `catch` is just a `do`.
+Under the hood `throw` and `%try` are primitives and `try`/`catch`/`error` are
+written in Brood (`std/prelude.blsp`) — see [primitives.md](primitives.md).
+
+Because a caught value has no single shape, **`(error-message e)`** is the
+shape-agnostic accessor: a raised string as-is, the `:message` of an error map,
+else the value's printed form. A `catch` handler that just wants a human string
+uses it directly instead of branching on `string?`/`map?`:
+
+```clojure
+(try (risky) (catch e (log (str "failed: " (error-message e)))))
+```
 
 Type errors are **self-identifying**: they name the operation, the type it
 wanted, and the tag + printed form of what actually arrived — e.g.
@@ -693,6 +705,16 @@ separate `await`/join. `(ref)` values are their own type (`ref?`, `:ref`),
 compared by identity, and may be sent in messages. (`call`/`reply` aren't in the
 prelude yet — see `examples/life.blsp`.)
 
+The opt-in **`task` module** (`(require 'task)`) packages the common "run this
+thunk off my loop, with a timeout, cancellable" pattern over `spawn`/`receive`/
+`exit`: `(task thunk opts)` returns a handle and delivers a tagged `[:task-done
+handle v]` / `[:task-error handle msg]` / `[:task-timeout handle]` message to
+`:reply-to`; `cancel-task` stops it early; and `(await thunk timeout-ms)` is the
+*synchronous* run-with-timeout that blocks for the value (throwing on error or
+timeout). This `await` is a userland convenience for bounding a single
+computation — distinct from the gen_server `call` idiom above, which is the
+right tool for request/reply to a long-lived process.
+
 ### Monitors
 
 `(monitor pid)` starts watching another process and returns a monitor `ref`.
@@ -831,9 +853,10 @@ detection are deferred. Full reference: [distribution.md](distribution.md).
 `cons`  `first`  `rest`  `car`  `cdr`  `second`  `third`  `last`  `but-last`
 `list`  `vector`  `append`  `concat`  `reverse`  `nth`  `count`  `length`  `empty?`
 `range`  `take`  `drop`  `take-last`  `drop-last`  `take-while`  `drop-while`
-`member?`  `some?`  `every?`  `find`  `zip`  `partition`  `sort`  `sort-by`
-`remove`  `keep`  `distinct`  `dedupe`  `group-by`  `flatten`  `interpose`
-`interleave`  `repeat`  `repeatedly`
+`member?`  `some?`  `every?`  `find`  `index-of`  `index-where`  `zip`
+`partition`  `sort`  `sort-by`  `subvec`  `remove`  `remove-nth`  `keep`
+`distinct`  `dedupe`  `group-by`  `flatten`  `interpose`  `interleave`
+`repeat`  `repeatedly`
 
 - `first`/`rest` of `nil` are `nil`. `nth` takes an optional default:
   `(nth coll i default)`.
@@ -847,8 +870,17 @@ detection are deferred. Full reference: [distribution.md](distribution.md).
   the predicate.
 - `some?`/`every?` return booleans (`every?` is vacuously true on the empty
   list); `find` returns the first matching element, or `nil`.
-- `remove` is the complement of `filter`; `keep` maps a function and drops the
-  `nil` results (map + filter fused).
+- `index-of` returns the 0-based index of an element (by structural `=`), or -1;
+  `index-where` is its predicate counterpart — the index of the first item for
+  which `(pred x)` holds, or -1.
+- `subvec` slices a vector, returning a **vector**: `(subvec v start)` to the end
+  or `(subvec v start end)` for the half-open range `[start, end)` (the
+  vector-preserving counterpart of `take`/`drop`, which return lists).
+- `remove` is the complement of `filter`; `remove-nth` drops the element at a
+  given index (returning a vector for a vector, a list for a list); `keep` maps a
+  function and drops the `nil` results (map + filter fused).
+- On a vector, `assoc`/`update`/`get` index by integer position — see
+  [Maps](#maps) (`assoc`/`update`) and the index note there.
 - `distinct` removes duplicates, keeping the first occurrence (order-preserving);
   `dedupe` collapses only *consecutive* runs of equal items.
 - `group-by` buckets items into a map from `(f x)` to the list of items that

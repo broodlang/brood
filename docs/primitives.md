@@ -29,6 +29,8 @@ arg silently becoming `nil`.
 | **Vector** (data type, O(1)) | `vector` | n | construct a vector |
 | | `vector-ref` | 2 | index |
 | | `vector-length` | 1 | length |
+| | `vector-assoc` | 3 | a fresh vector with index `i` (in `[0, len)`) replaced — the vector counterpart of `map-assoc`; the polymorphic `assoc`/`update` are Brood over it |
+| | `subvec` | 2–3 | a fresh vector slice `[start, end)`; `end` defaults to the length — the vector-preserving counterpart of the list-returning `take`/`drop`; `remove-nth` is Brood over it |
 | **Ordering** | `compare` | 2 | `(compare a b)` → `-1`/`0`/`1` by the structural total order (numbers numerically; strings/keywords/symbols by text; vectors/lists lexicographically; cross-kind by stable tag rank). The binary form of `sort`'s order — `sort-by` and custom comparators build on it |
 | **Map** (immutable; data type) | `hash-map` | n | construct a map from `k v k v …` args (the `{ }` literal's programmatic form); last-wins on dup keys |
 | | `map-get` | 2–3 | value at a key, or the optional default (else nil) |
@@ -123,6 +125,7 @@ arg silently becoming `nil`.
 | | `node-name` | 0 | this runtime's node name — a **keyword** like `:alice@host` (`:nonode` until `node-start`); `(str (node-name))` for string ops. `node-start`/`connect` likewise return keywords |
 | | `nodes` | 0 | list of currently connected peer node names |
 | | `monitor-node` | 1 | get `[:nodedown name]` when the link to node `name` drops (heartbeat timeout or clean close). Persistent — fires on each down |
+| | `disconnect` | 1 | tear the link to peer node `name` down now, **without exiting this process** (Erlang's `disconnect_node`); fires `[:nodedown name]` on both sides and prunes `name` from `(nodes)`. Returns `true` if a link existed, `false` otherwise. The clean way to leave a node/cluster while staying alive |
 
 **Why this set is irreducible:** every entry needs Rust — raw number ops, heap
 construct/inspect, the type-tag *reflection* (`type-of`), I/O, value→text

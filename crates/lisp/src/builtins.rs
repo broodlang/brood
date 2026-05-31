@@ -258,6 +258,20 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![vec_ty], int),
         vector_length,
     );
+    def(
+        heap,
+        "vector-assoc",
+        Arity::exact(3),
+        Sig::new(vec![vec_ty, int, any], vec_ty),
+        vector_assoc,
+    );
+    def(
+        heap,
+        "subvec",
+        Arity::range(2, 3),
+        Sig::with_rest(vec![vec_ty, int], int, vec_ty),
+        subvec,
+    );
 
     // map — the *minimal* kernel: construct, read, two producers, and one
     // enumerator (`map-pairs` → [k v] vectors). `keys`/`vals`/`contains?`/
@@ -315,9 +329,22 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::with_rest(vec![string, int], int, string),
         substring,
     );
+    // Linear substring search — like `substring`/`lower`, it genuinely needs Rust:
+    // Brood has no O(1) char access (char indexing into UTF-8 is O(index)), so a
+    // pure-Brood scan re-skips and is unavoidably O(n²) — which made `doc-search`'s
+    // whole-namespace scan tens of seconds. `index-of` / `string-contains?` /
+    // `includes?` (std/prelude.blsp) ride on this; it's the search counterpart of
+    // the `substring` slice primitive.
+    def(
+        heap,
+        "%str-index-of",
+        Arity::exact(2),
+        Sig::new(vec![string, string], int),
+        str_index_of,
+    );
     // Case folding (Unicode tables) and parse-or-nil genuinely need Rust; the rest
     // of the string library (split/join/replace/index-of/trim/…) is Brood over
-    // these + `substring`/`str` (std/prelude.blsp).
+    // these + `substring`/`%str-index-of`/`str` (std/prelude.blsp).
     def(
         heap,
         "upper",
@@ -1386,6 +1413,15 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![sym.union(kw)], ref_ty),
         monitor_node,
     );
+    def(
+        heap,
+        "disconnect",
+        Arity::exact(1),
+        // Same name domain as `monitor-node`: the authoritative `:name@host`
+        // keyword `connect`/`nodes` hand back (or a symbol).
+        Sig::new(vec![sym.union(kw)], bool_ty),
+        disconnect,
+    );
 }
 
 /// Docstrings + parameter names for the public primitives, so `(doc 'name)`,
@@ -1410,6 +1446,8 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("vector", &["&", "items"], "A vector of the given items."),
     ("vector-ref", &["v", "i"], "The element at index i of vector v."),
     ("vector-length", &["v"], "The number of elements in vector v."),
+    ("vector-assoc", &["v", "i", "x"], "A fresh vector like v with index i (in [0, len)) set to x."),
+    ("subvec", &["v", "start", "end"], "A fresh vector of v's elements in [start, end); end defaults to the length."),
     ("compare", &["a", "b"], "Structural total-order comparison: -1 if a sorts before b, 0 if equal, 1 if after. Numbers numerically; strings/keywords/symbols by text; vectors/lists lexicographically; cross-kind by a stable tag rank. The binary form of `sort`'s order — `sort-by` and custom comparators build on it."),
     ("hash-map", &["&", "kvs"], "A map from alternating key/value arguments (last wins on duplicate keys)."),
     ("map-get", &["m", "k", "default"], "The value at key k in map m, or default (else nil)."),
@@ -1542,6 +1580,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("node-name", &[], "This runtime's node name (:nonode until node-start)."),
     ("nodes", &[], "A list of currently connected peer node names."),
     ("monitor-node", &["name"], "Get [:nodedown name] when the link to node `name` goes down (heartbeat timeout or close)."),
+    ("disconnect", &["name"], "Tear down the link to peer node `name` now, without exiting this process (Erlang's disconnect_node) — fires [:nodedown name] on both sides and prunes `name` from (nodes). Returns true if a link existed, false otherwise. Use it to leave a node/cluster cleanly while staying alive."),
 ];
 
 /// The `(params, doc)` for a primitive `name`, or `(&[], "")` if undocumented.
@@ -1952,6 +1991,58 @@ fn vector_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         Value::Vector(id) => Ok(Value::Int(heap.vector(id).len() as i64)),
         _ => Err(LispError::wrong_type(heap, "vector-length", "vector", v)),
     }
+}
+
+/// `(vector-assoc v i x)` — a fresh vector like `v` with index `i` set to `x`.
+/// The vector counterpart of `map-assoc`; O(n) copy (vectors are flat), one
+/// allocation, no cons churn. `i` must be in `[0, len)` (append-at-end is a
+/// deferred power feature, ADR-011). No GC safepoint runs inside a builtin, so
+/// the cloned handles stay valid across `alloc_vector`.
+fn vector_assoc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let v = arg(args, 0);
+    let i = expect_int(heap, "vector-assoc", arg(args, 1))?;
+    let x = arg(args, 2);
+    match v {
+        Value::Vector(id) if i >= 0 && (i as usize) < heap.vector(id).len() => {
+            let mut items = heap.vector(id).to_vec();
+            items[i as usize] = x;
+            Ok(heap.alloc_vector(items))
+        }
+        Value::Vector(id) => Err(LispError::runtime(format!(
+            "vector-assoc: index {} out of range [0, {})",
+            i,
+            heap.vector(id).len()
+        ))
+        .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE)),
+        _ => Err(LispError::wrong_type(heap, "vector-assoc", "vector", v)),
+    }
+}
+
+/// `(subvec v start)` / `(subvec v start end)` — a fresh vector of the elements
+/// of `v` in `[start, end)` (`end` defaults to the length). `0 <= start <= end
+/// <= len`; out of range is an error. The slice counterpart of `substring`, and
+/// the vector-preserving slice the list-returning `take`/`drop` don't give.
+fn subvec(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let v = arg(args, 0);
+    let id = match v {
+        Value::Vector(id) => id,
+        _ => return Err(LispError::wrong_type(heap, "subvec", "vector", v)),
+    };
+    let len = heap.vector(id).len() as i64;
+    let start = expect_int(heap, "subvec", arg(args, 1))?;
+    let end = if args.len() > 2 {
+        expect_int(heap, "subvec", arg(args, 2))?
+    } else {
+        len
+    };
+    if start < 0 || end > len || start > end {
+        return Err(LispError::runtime(format!(
+            "subvec: range [{start}, {end}) out of bounds for vector of length {len}"
+        ))
+        .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE));
+    }
+    let items = heap.vector(id)[start as usize..end as usize].to_vec();
+    Ok(heap.alloc_vector(items))
 }
 
 // ---------- map ----------
@@ -2668,6 +2759,11 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
     ("sse", include_str!("../../../std/sse.blsp")),
     ("hatch", include_str!("../../../std/hatch.blsp")),
     ("supervisor", include_str!("../../../std/supervisor.blsp")),
+    // Run a thunk off the current process with an optional timeout + cancel
+    // (ADR-006): `task` (async, tagged-reply handle), `cancel-task`, and the
+    // synchronous `await`. Pure Brood over spawn / receive / exit — the generic
+    // version of the editor's hand-rolled async-eval watchdog. Opt-in.
+    ("task", include_str!("../../../std/task.blsp")),
     // The editor framework's buffer model (M2 Phase 1, ADR-045): an immutable
     // buffer over the rope primitives, opt-in, never in the prelude.
     ("buffer", include_str!("../../../std/buffer.blsp")),
@@ -2878,6 +2974,22 @@ fn substring(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         .take((end - start) as usize)
         .collect();
     Ok(heap.alloc_string(&sub))
+}
+
+/// `(%str-index-of s needle)` — the 0-based **char** index of the first
+/// occurrence of `needle` in `s`, or -1 if absent. Linear: Rust's byte-level
+/// `str::find`, then a one-pass byte→char-index conversion of the prefix. The
+/// empty needle matches at 0 (matching `index-of`'s contract). The search
+/// primitive the Brood `index-of`/`string-contains?` ride on; see the
+/// registration comment for why this can't be efficient in pure Brood.
+fn str_index_of(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let s = expect_string(heap, "%str-index-of", arg(args, 0))?;
+    let needle = expect_string(heap, "%str-index-of", arg(args, 1))?;
+    let idx = match s.find(needle.as_str()) {
+        Some(byte) => s[..byte].chars().count() as i64,
+        None => -1,
+    };
+    Ok(Value::Int(idx))
 }
 
 /// `(to-fixed x n)` — x rendered with exactly `n` digits after the decimal point
@@ -5140,6 +5252,13 @@ fn monitor_node(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let name = expect_node_name(heap, "monitor-node", arg(args, 0))?;
     crate::dist::monitor_node(name, crate::process::self_pid());
     Ok(Value::Keyword(name))
+}
+
+/// `(disconnect name)` — drop the link to peer `name` now (Erlang's
+/// `disconnect_node`). Returns `true` if a link existed, `false` otherwise.
+fn disconnect(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let name = expect_node_name(heap, "disconnect", arg(args, 0))?;
+    Ok(Value::Bool(crate::dist::disconnect(name)))
 }
 
 /// `(nodes)` — a list of currently connected peer node names.

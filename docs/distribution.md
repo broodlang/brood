@@ -66,6 +66,7 @@ binding, or `(nodes)`), not a bare literal.
 | `(node-name)` | This runtime's node name (`:nonode` until `node-start`). |
 | `(nodes)` | A list of currently connected peer node names. |
 | `(monitor-node name)` | Deliver `[:nodedown name]` to the caller when the link to `name` goes down (clean close or heartbeat timeout). Persistent. |
+| `(disconnect name)` | Tear the link to `name` down now, without exiting this process (Erlang's `disconnect_node`). Fires `[:nodedown name]` on both sides, prunes `(nodes)`. Returns `true` if a link existed, else `false`. |
 | `(send target msg)` | `target` is a **pid** (local or remote) or a `{:name :node}` address. |
 | `(pid? x)` | True if `x` is a process id. |
 
@@ -227,6 +228,18 @@ Snapshotting `NODES` once per tick avoids holding the lock across the actual
 frees its socket, both threads, and its table entry exactly once. Clean peer
 exits (the test exercises this via `[:bye …]`) fire `nodedown` immediately via
 reader EOF; heartbeat covers the hard-down (no FIN) case.
+
+**Deliberate teardown — `(disconnect name)`.** The three triggers above are all
+*involuntary* (a peer left, or the link died). `disconnect` is the *voluntary*
+one — Erlang's `disconnect_node/1`. It `shutdown`s the peer's socket (so the
+peer's reader hits EOF and fires its own node-down) and runs the same §4
+`drop_link` on our side, firing `[:nodedown name]` to our monitors and pruning
+`(nodes)` — all without exiting the process. It is the clean way to **leave a
+node/cluster while staying alive** (a server dropping one client; a node bowing
+out of a multi-node group), so an application no longer needs an ad-hoc
+`[:bye]`-broadcast convention to get prompt pruning. Our own reader also hits
+EOF and calls `drop_link` again, but the generation-id guard (§4) makes that a
+no-op — `nodedown` fires exactly once. Returns `true` if a link existed.
 
 ### 3. Handshake v2 (versioned + authenticated)
 

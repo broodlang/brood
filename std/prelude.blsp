@@ -322,11 +322,14 @@ Maps look up by key; vectors, lists, and strings index by integer position
     :else (nth coll k (first default))))
 
 ;; (assoc m k1 v1 k2 v2 …) -> a fresh map with each pair added/updated.
-(defn assoc--pairs (m kvs)
-  (if (empty? kvs) m (assoc--pairs (map-assoc m (first kvs) (second kvs)) (rest (rest kvs)))))
-(defn assoc (m & kvs)
-  "A fresh map like `m` with each `key value` pair added or updated."
-  (assoc--pairs m kvs))
+(defn assoc--pairs (set m kvs)
+  (if (empty? kvs) m (assoc--pairs set (set m (first kvs) (second kvs)) (rest (rest kvs)))))
+(defn assoc (coll & kvs)
+  "A fresh collection like `coll` with each `key value` pair added or updated.
+For a map, keys are added or replaced; for a vector, integer indices in
+`[0, count)` are replaced (an out-of-range index is an error — appending is via
+`conj`, not `assoc`)."
+  (assoc--pairs (if (vector? coll) vector-assoc map-assoc) coll kvs))
 
 ;; (dissoc m k1 k2 …) -> a fresh map with each key removed.
 (defn dissoc (m & ks)
@@ -374,9 +377,11 @@ can.)"
     {}
     maps))
 
-(defn update (m k f & args)
-  "A map like `m` with the value at `k` replaced by `(apply f current args)`, where `current` is the existing value (`nil` if `k` is absent)."
-  (assoc m k (apply f (get m k) args)))
+(defn update (coll k f & args)
+  "A collection like `coll` with the value at key/index `k` replaced by
+`(apply f current args)`, where `current` is the existing value (`nil` if absent).
+Works on maps (by key) and vectors (by integer index, which must be in range)."
+  (assoc coll k (apply f (get coll k) args)))
 
 (defn update-vals (m f)
   "A map like `m` with `f` applied to every value."
@@ -552,6 +557,21 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
       (let (init (but-last body) evar (second clause) handler (rest (rest clause)))
         `(%try (fn () ~@init) (fn (~evar) ~@handler)))
       `(do ~@body))))
+
+;; A thrown value has no single shape: `(throw x)` hands `catch` the value `x`
+;; verbatim (a bare string from `error`, a keyword, a `[:tag …]` vector, …),
+;; while every *kernel* error is the canonical `{:kind :message [:code :file
+;; :line :col :hint]}` map. `error-message` is the one accessor that turns any of
+;; them into a human string, so a `(catch e …)` handler never has to branch on
+;; the shape itself.
+(defn error-message (e)
+  "A human-readable message string for a caught value `e`: a raised string
+as-is, the `:message` of a structured error map (what the kernel throws), else
+its printed form."
+  (cond
+    (string? e) e
+    (and (map? e) (get e :message)) (get e :message)
+    else (pr-str e)))
 
 ;; ---- dynamic variables ------------------------------------------------------
 ;; Process-scoped, dynamically-bound variables (Lisp "special" vars), for
@@ -1271,6 +1291,13 @@ structural order (`compare`), so numeric, string, keyword, and vector keys all w
     (vector? to) (apply vector (append to from))
     else (append to from)))
 
+(defn remove-nth (coll i)
+  "A fresh collection like `coll` with the element at index `i` removed. Returns
+a vector for a vector and a list for a list. `i` must be in `[0, count)`."
+  (if (vector? coll)
+    (into (subvec coll 0 i) (subvec coll (inc i) (count coll)))
+    (concat (take i coll) (drop (inc i) coll))))
+
 ;; ---- more sequence operations -----------------------------------------------
 ;; The eager counterparts of the `x*` transducers, plus the common Clojure-ish
 ;; builders. All tail-recursive (reverse-accumulate, reverse once) so they stay
@@ -1571,12 +1598,6 @@ applies to each input first."
   "Concatenate a list of strings (e.g. from `string->list`) into one string."
   (apply str cs))
 
-(defn index-of--str-from (s needle i)
-  (let (nl (string-length needle))
-    (cond
-      (> (+ i nl) (string-length s)) -1
-      (= (substring s i (+ i nl)) needle) i
-      else (index-of--str-from s needle (inc i)))))
 (defn index-of--seq-from (coll x i)
   (cond
     (empty? coll) -1
@@ -1587,9 +1608,23 @@ applies to each input first."
 For a string, `x` is a substring (multi-char ok; the empty string matches at 0).
 For a list or vector, `x` is an element compared structurally."
   (cond
-    (string? coll) (index-of--str-from coll x 0)
+    ;; Strings ride on the `%str-index-of` kernel primitive — linear; a pure-Brood
+    ;; scan would be O(n²) (char indexing is O(index)), which is too slow for
+    ;; whole-namespace `doc-search`/`apropos` use.
+    (string? coll) (%str-index-of coll x)
     (vector? coll) (index-of--seq-from coll x 0)
     else (index-of--seq-from coll x 0)))
+
+(defn index-where--from (pred coll i)
+  (cond
+    (empty? coll) -1
+    (pred (first coll)) i
+    else (index-where--from pred (rest coll) (inc i))))
+(defn index-where (pred coll)
+  "The 0-based index of the first item of `coll` for which `(pred x)` holds, or
+-1 if none does. The predicate counterpart of `index-of` (which matches by
+equality); recover the item itself with `find`."
+  (index-where--from pred coll 0))
 
 (defn string-contains? (s needle)
   "Does `s` contain `needle` as a substring?"

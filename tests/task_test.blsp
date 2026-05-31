@@ -1,0 +1,61 @@
+;; std/task — run a thunk off the current process with timeout + cancel.
+;; `(:use task)` brings `task`/`cancel-task`/`await` in bare. These tests are
+;; inherently concurrent (every case spawns worker + coordinator processes), and
+;; the suite runs each test in its own green process on top of that.
+;; Register-only — discovered and run by `nest test`.
+
+(defmodule task-test
+  (:use test)
+  (:use task))
+
+(describe "await (synchronous)"
+  (test "returns the thunk's value"
+    (assert= (await (fn () (+ 1 2)) 1000) 3)
+    (assert= (await (fn () [1 2 3]) 1000) [1 2 3]))
+  (test "re-raises a thrown error"
+    (assert= (try (await (fn () (error "boom")) 1000) (catch e (error-message e))) "boom"))
+  (test "throws on timeout"
+    (is (try (await (fn () (receive (:never x))) 30) false (catch e true)))))
+
+(describe "task (asynchronous)"
+  :isolated
+  (test "delivers [:task-done handle value] to the caller"
+    (let (h (task (fn () (* 6 7))))
+      (assert= (receive ([:task-done t v] (when (= t h) v))) 42)))
+  (test "delivers [:task-error handle message] when the thunk throws"
+    (let (h (task (fn () (error "nope"))))
+      (assert= (receive ([:task-error t m] (when (= t h) m))) "nope")))
+  (test "delivers [:task-timeout handle] past the deadline"
+    (let (h (task (fn () (receive (:never x))) {:timeout 30}))
+      (assert= (receive ([:task-timeout t] (= t h))) true)))
+  (test "a fast task beats its own timeout (done, not timeout)"
+    (let (h (task (fn () 99) {:timeout 1000}))
+      (assert= (receive ([:task-done t v] (when (= t h) v))) 99)))
+  (test "routes the reply to an explicit :reply-to"
+    (let (me (self)
+          relay (spawn (receive (msg (send me [:relayed msg])))))
+      (task (fn () :ok) {:reply-to relay})
+      (assert= (receive ([:relayed [:task-done t v]] v)) :ok)))
+  (test "the handle tags the reply, so a stale reply is distinguishable"
+    ;; start two tasks; each reply carries its own handle
+    (let (h1 (task (fn () :one))
+          h2 (task (fn () :two)))
+      (refute (= h1 h2))
+      ;; collect both replies (order-independent) and check each matches its handle
+      (let (a (receive ([:task-done t v] [t v]))
+            b (receive ([:task-done t v] [t v])))
+        (is (or (and (= (first a) h1) (= (second a) :one))
+                (and (= (first a) h2) (= (second a) :two))))
+        (is (or (and (= (first b) h1) (= (second b) :one))
+                (and (= (first b) h2) (= (second b) :two)))))))
+  (test "cancel-task stops a long task and sends no reply"
+    (let (h (task (fn () (receive (:never x))) {:timeout 5000}))
+      (cancel-task h)
+      ;; nothing should arrive; a short selective wait falls through to :clear
+      (assert= (receive ([:task-done t v] :got) ([:task-timeout t] :got) (after 60 :clear))
+        :clear)))
+  (test "cancel-task on an already-finished task is a harmless no-op"
+    (let (h (task (fn () 1)))
+      (assert= (receive ([:task-done t v] v)) 1)
+      (cancel-task h)
+      :ok)))

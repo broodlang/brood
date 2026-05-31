@@ -223,6 +223,21 @@
     (assert= (error-of (error "custom" " " "message")) "custom message"))
   (test "error-of is nil when nothing is raised" (assert= (error-of (+ 1 2)) nil)))
 
+(describe "error-message"
+  ;; The shape-agnostic accessor: a caught value is either a verbatim throw
+  ;; payload (a bare string from `error`, a keyword, a vector, …) or the kernel's
+  ;; canonical `{:kind :message …}` map. `error-message` normalises all of them.
+  (test "a raised string is returned as-is"
+    (assert= (error-message "plain") "plain")
+    (assert= (try (error "boom") (catch e (error-message e))) "boom"))
+  (test "a structured error map yields its :message"
+    (assert= (error-message {:kind :user :message "oops"}) "oops")
+    (assert= (try (/ 1 0) (catch e (error-message e))) "division by zero"))
+  (test "any other value is rendered with pr-str"
+    (assert= (error-message :boom) ":boom")
+    (assert= (error-message [1 2]) "[1 2]")
+    (assert= (try (throw [:tag 1]) (catch e (error-message e))) "[:tag 1]")))
+
 (describe "tail calls"
   ;; A deep-but-quick smoke check that tail positions don't grow the stack. The
   ;; rigorous 100,000-frame guard lives in the Rust test `tail_calls_do_not_overflow`.
