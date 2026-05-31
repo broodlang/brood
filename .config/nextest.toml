@@ -30,3 +30,14 @@ real-tcp = { max-threads = 1 }
 [[profile.default.overrides]]
 filter = 'binary(distribution)'
 test-group = 'real-tcp'
+
+# `brood_suite_passes` (tests/suite.rs) runs the ENTIRE in-language suite (~1200
+# cases) inside ONE nextest case, so the 120s default cap is the wrong scale: under
+# a full `make test` it competes with the rest of the workspace for cores and
+# legitimately needs longer, and its own inner per-test ceiling (`*test-timeout-ms*`,
+# 120s in std/test.blsp) must be able to fire *before* nextest kills the wrapper.
+# Give this one binary a 300s cap (60s × 5) so the inner timeout stays the
+# meaningful one; every other test keeps the 120s default above.
+[[profile.default.overrides]]
+filter = 'binary(suite)'
+slow-timeout = { period = "60s", terminate-after = 5 }

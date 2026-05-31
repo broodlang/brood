@@ -401,7 +401,7 @@ docs/testing.md for the full guide.")
 ;; - `*test-slow-ms*` (default 1s) — **informational**. A test that takes longer is
 ;;   listed (name + duration) under the summary. It still PASSES; this only surfaces
 ;;   where the time goes. Override: `(run-tests :slow-over MS)`.
-;; - `*test-timeout-ms*` (default 30s) — **a hard ceiling**. A test that runs longer
+;; - `*test-timeout-ms*` (default 120s) — **a hard ceiling**. A test that runs longer
 ;;   is hard-killed (`(exit worker :kill)`, ADR-063 — stops even a tight loop that
 ;;   never `receive`s) and reported as a "timed out" FAILURE, so a hung/runaway test
 ;;   fails the suite instead of dragging or wedging it. Override: `(run-tests :timeout
@@ -412,7 +412,14 @@ docs/testing.md for the full guide.")
 ;; failed. Keep `*test-slow-ms*` < `*test-timeout-ms*` (a slow test you still want to
 ;; see before it's a hard failure).
 (def *test-slow-ms* 1000)
-(def *test-timeout-ms* 30000)
+;; 120s: headroom for legitimately slow tests (the adversarial heap-allocation
+;; cases take ~15s in a debug build, and far longer when `make test` runs the whole
+;; in-language suite concurrently with the rest of the workspace under nextest).
+;; Still a hard ceiling that catches a genuinely hung/runaway test. NOTE: the
+;; nextest wrapper (`brood_suite_passes`, tests/suite.rs) runs this entire suite as
+;; ONE case, so its per-case cap in `.config/nextest.toml` is set *above* this (300s)
+;; — otherwise nextest would kill the wrapper before this inner timeout could fire.
+(def *test-timeout-ms* 120000)
 
 ;; When set, print `▶ group › name` as each test STARTS — live progress so you can
 ;; see which test is running (and spot the slow/hung one) before it finishes. Off by
@@ -666,7 +673,7 @@ docs/testing.md for the full guide.")
 
 ;; --- entry point -------------------------------------------------------------
 (defn run-tests (& opts)
-  "Run every registered test once (the isolated tests first, then the parallel/serial pool), print a summary, and raise if any failed. Each test has a 30s hard timeout (killed + failed if exceeded — `:timeout MS` to change). Any test over 1s is listed automatically (`:slow-over MS` to change that threshold); `:slow` also reports the slowest 5 regardless of duration."
+  "Run every registered test once (the isolated tests first, then the parallel/serial pool), print a summary, and raise if any failed. Each test has a 120s hard timeout (killed + failed if exceeded — `:timeout MS` to change). Any test over 1s is listed automatically (`:slow-over MS` to change that threshold); `:slow` also reports the slowest 5 regardless of duration."
   ;; `:timeout MS` / `:slow-over MS` override the budgets for this run (global rebind
   ;; — the spawned driver reads `*test-timeout-ms*` from the shared table).
   (def *test-timeout-ms* (opt-val :timeout opts *test-timeout-ms*))
