@@ -100,6 +100,13 @@
   (test "string-last-index-of is -1 when absent or nothing is before `before`"
     (assert= (string-last-index-of "hello" "z") -1)
     (assert= (string-last-index-of "hello" "h" 0) -1))
+  (test "string-last-index-of handles the empty needle without looping"
+    ;; the empty needle matches at every position 0..length; the last one before
+    ;; `before` is before-1 (clamped). A `before` past the length must not loop.
+    (assert= (string-last-index-of "abc" "") 2)
+    (assert= (string-last-index-of "abc" "" 2) 1)
+    (assert= (string-last-index-of "abc" "" 0) -1)
+    (assert= (string-last-index-of "abc" "" 99) 3))   ; clamped to length, no infinite loop
   ;; index-of also works on lists and vectors (linear scan; structural `=`).
   (test "index-of on a list/vector finds the element index"
     (assert= (index-of (list 10 20 30) 20) 1)
