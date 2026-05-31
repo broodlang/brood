@@ -1879,6 +1879,24 @@ as designed, with two refinements from building it:
   base before appending, so releasing from an already-released `brood` can't nest
   archives. macOS code-signing (appended bytes invalidate a signature) is a
   documented re-sign step; cross-targets supply a prebuilt `brood` via `--runtime`.
+- **Lean runtime (2026-05-31 follow-on).** A release does *not* append to the dev
+  `brood`. A `dev-tools` cargo feature (default on) gates the dev/debug surface;
+  `nest release` builds a runtime with `--no-default-features` (cached under
+  `target/release-lean/`, profile `release-lean` = strip + LTO + 1 codegen unit),
+  so a shipped app carries **no** test framework, process observer, MCP/doc/
+  hot-reload tooling, interactive REPL, or GC debug builtins — and they "never
+  compile in" (the `include_str!`s are `#[cfg]`'d out, not runtime-hidden). Kept
+  in CORE: the prelude, `project` (boots the bundle), and the UI/editor toolkit
+  incl. `lineedit` (an editor's minibuffer reuses it). Net ~13 MB → ~6 MB. The
+  runtime is built once; changing the app only re-appends the archive. This forced
+  one structural fix: `project` no longer `(:use test)` at load (it `require`s +
+  qualifies `test/` only inside the test runner), so a lean runtime can load
+  `project` to boot a bundle without the test framework present.
+- **Still a full evaluator.** A bundled binary keeps `load`/`slurp`/`require`/
+  `eval-string` over the real filesystem and `def`-rebind hot reload, so a shipped
+  app reads external `.blsp` (an editor's `init.blsp`: add layers/keymaps/modes,
+  redefine commands) against the live runtime — only the stripped modules are
+  unavailable to it.
 
 
 ## ADR-039 — Supervised processes with mode-gated resume checkpoints

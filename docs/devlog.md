@@ -11223,3 +11223,48 @@ from a clean dir (`>> bundled with a dep <<`); plain `brood` reports
 is always compiled). Introduced by `b072125`; masked because the documented
 release build uses `RUSTFLAGS="-C debug-assertions=on"`. Verified `nest release`
 with debug binaries (functionally identical); flagged for a one-line fix.
+
+## 2026-05-31 (cont.) — lean release runtime + install-build fix
+
+Follow-on to `nest release`, from three user directives: *(1) ensure `make
+install` / `make test` pass; (2) a release must strip test files, the observer,
+and "any debug stuff" — never even compiled in; (3) a shipped binary must still
+read external `.blsp` at runtime (an editor's `init.blsp` adding layers/modes).*
+
+**Install-build fix (pre-existing).** `cargo build --release` (and `make install`,
+which forces `-C debug-assertions=off`) failed to compile: `value_is_immovable`
+(`eval/compile.rs`) was `#[cfg(debug_assertions)]` but referenced from a
+`debug_assert!`, whose *condition* still compiles in release (`if
+cfg!(debug_assertions) { … }`). Un-gated the fn; the dead branch is dropped by the
+optimizer. Introduced by `b072125`; masked because CLAUDE.md's release build sets
+`debug-assertions=on`. `make install` now builds clean.
+
+**Lean release runtime.** Added a `dev-tools` cargo feature (default on). The dev
+`brood`/`nest` + tests keep it; `nest release` builds the bundle base with
+`--no-default-features` under a new `release-lean` profile (strip + fat LTO + one
+codegen unit). Effects:
+- `EMBEDDED_MODULES` split into `CORE_MODULES` (always) + `DEV_MODULES`
+  (`#[cfg(feature = "dev-tools")]`). Stripped from a release — *not compiled in*,
+  the `include_str!`s are `#[cfg]`'d out: `test`, `observer`, `mcp`, `docs`,
+  `reload`, `repl`. GC debug builtins (`gc-stats`/`gc-collect`/`gc-trace`/
+  `runtime-collect`) cfg-gated likewise.
+- Kept in CORE: prelude, `project` (boots the bundle), and the UI/editor toolkit —
+  notably `lineedit`/`highlight` (the editor's minibuffer reuses `std/lineedit`,
+  so stripping it would break a released editor — confirmed with the user).
+- `nest release` builds the lean runtime once and **caches** it under
+  `target/release-lean/` (separate from the dev `target/release/`); changing the
+  app only re-appends the archive, so the runtime + LTO cost is paid once.
+- Net size: dev `brood` ~13 MB → shipped runtime ~6 MB. Verified the stripped
+  surface is gone both as binary strings (`observe-serve`/`mcp-tools` → 0) and at
+  runtime (`(bound? 'gc-stats)` false; `(require 'test)` errors; `(require
+  'layers)` ok).
+- **Structural fix forced by this:** `project` no longer `(:use test)` at *load*
+  (that would `require 'test`, absent in a lean runtime). The test runner now
+  `(require 'test)`s and qualifies `test/run-tests`/`test/run-tests-structured`/
+  `test/reset-units!`. `nest test` reverified green.
+
+**Runtime extensibility kept.** A bundled binary is a full evaluator: `load`/
+`slurp`/`require`/`eval-string` hit the real FS and `def` rebinds globals, so a
+shipped app reads an external `init.blsp` that `(require 'layers)`s, adds
+layers/keymaps, and redefines commands against the live runtime — verified
+end-to-end with a lean release. Documented in [`release.md`](release.md).
