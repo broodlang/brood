@@ -110,13 +110,19 @@ The live set = everything reachable from these, transitively through RUNTIME cod
     missed rewrite). Validated: after 3000 redefs, evacuate → 2 live closures of
     3001, verifier passes, program unchanged (`tests/runtime_collector.rs`).
     **Installs nothing — cannot corrupt the live region.**
-  - **2b — swappable region + single-process in-place collect.** Make
-    `RuntimeCode.code` swappable; rewrite every RUNTIME handle in globals + the
-    LOCAL-heap scan + roots/env_roots/envs + `def_sites`, **clear the `vm_cache`**,
-    swap. Gate to a single-process/quiescent context. Verify with `verify_rt_slabs`
-    over the *whole* live state. ← the first step that actually reclaims; the
-    corruption-risk surface — needs the `BROOD_GC_STRESS`/verifier rigor the LOCAL
-    GC got.
+  - **2b — in-place collect. ✅ done (branch `runtime-gc`).** `Heap::runtime_collect`
+    + the `(runtime-collect)` builtin. **Gated on `Arc::get_mut`** — runs only when
+    this heap uniquely owns the runtime region (no concurrent reader), so it's sound
+    *without* stop-the-world; returns `:ran false` when the runtime is shared. One
+    pass: every RUNTIME handle in globals + both LOCAL generations + roots/env_roots/
+    dynamics is evacuated-and-rewritten; the `vm_cache` + `global_ic` are cleared;
+    the compacted region is swapped in (`mem::take` avoids the borrow conflict).
+    **Opt-in — never wired into the automatic GC.** Validated: reclaims 2999/3001
+    after churn; program correct afterwards incl. a RUNTIME closure held in a LOCAL
+    binding *across* a collect (`(let (g f) (runtime-collect) (g 3))`); green under
+    `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`; full suite 437/437 both engines.
+    **Bounds memory** — 40k redefs: no-collect 34 MB (growing) vs periodic collect
+    14.5 MB (flat). The Stage-5 goal, for the single-process case.
   - **2c — runtime-wide stop-the-world.** The scheduler barrier (doesn't exist yet)
     to pause every process at a safepoint, so 2b can run with other processes
     present (rewriting their state too). The race-prone part; last.

@@ -97,3 +97,50 @@ fn evacuation_copies_only_live_code_and_verifies() {
     let v = interp.eval_str("(f 7)").expect("f errored after evacuation");
     assert_eq!(interp.print(v), "23992");
 }
+
+/// Step 2b — the in-place compacting collect actually reclaims and preserves
+/// correctness. After churn, `runtime_collect` compacts the region (gated on unique
+/// `Arc` ownership — true for this single-process `Interp`), and the program keeps
+/// working: the rewritten globals resolve, and freshly-defined code runs on the
+/// compacted region. The LOCAL-held-handle rewrite path is covered by the
+/// in-language `tests/runtime_collect_test.blsp` (a closure kept in a `let`/list
+/// across a collect), which also runs under `BROOD_GC_STRESS`.
+#[test]
+fn in_place_collect_reclaims_and_preserves_correctness() {
+    LazyLock::force(&MEM_GUARD);
+    let mut interp = Interp::new();
+    const N: usize = 2000;
+    interp
+        .eval_str(&format!(
+            "(defn redef (i n) \
+               (if (= i n) :done \
+                 (do (eval (list 'def 'f (list 'fn '(x) (list '+ (list '* 'x i) i)))) \
+                     (redef (+ i 1) n)))) \
+             (redef 0 {N})"
+        ))
+        .expect("redef loop errored");
+
+    let (before, after) =
+        interp.heap.runtime_collect().expect("collect should run for a single-process Interp");
+    eprintln!("RUNTIME-GC 2b collect: before={before} after={after} reclaimed={}", before - after);
+    assert!(before >= N, "expected ≥{N} promoted, got {before}");
+    assert!(before - after >= N - 50, "expected ~{} reclaimed, got {}", N - 1, before - after);
+
+    // The rewritten current `f` still computes (last redef i=N-1=1999): 1999*7+1999.
+    let v = interp.eval_str("(f 7)").expect("f errored after collect");
+    assert_eq!(interp.print(v), (1999 * 7 + 1999).to_string());
+    // Freshly-defined code runs on the compacted region (cleared caches rebuild).
+    let v = interp.eval_str("(defn k (a) (* a a)) (k 9)").expect("new code errored after collect");
+    assert_eq!(interp.print(v), "81");
+
+    // The LOCAL-heap rewrite path: collect *while* a RUNTIME closure is held in a
+    // LOCAL binding (`g`) on the live operand stack/env. The whole expression is one
+    // top-level form, so the collect runs with `g` live — it must rewrite `g`'s
+    // handle so `(g 3)` still calls the right (compacted) code.
+    let v = interp.eval_str("(let (g f) (runtime-collect) (g 3))").expect("let-held collect errored");
+    assert_eq!(interp.print(v), (1999 * 3 + 1999).to_string());
+
+    // A second bare collect now reclaims little (steady state — nothing superseded).
+    let (b2, a2) = interp.heap.runtime_collect().expect("second collect");
+    assert!(b2 - a2 < 50, "steady-state collect should reclaim little, got {}", b2 - a2);
+}

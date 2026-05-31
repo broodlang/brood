@@ -3395,6 +3395,72 @@ impl Heap {
         (total, live, ok)
     }
 
+    /// **RUNTIME collector — Step 2b (in-place compaction).** Reclaim superseded
+    /// RUNTIME code by compacting the region to its live set and rewriting every
+    /// reference to it. Returns `Some((before, after))` closure counts, or `None` if
+    /// it couldn't run (see the gate). `docs/runtime-collector-exploration.md`.
+    ///
+    /// **Safety gate — `Arc::get_mut`.** Runs only when *this* heap uniquely owns the
+    /// runtime `Arc` — i.e. no other process/thread can be reading the code region
+    /// concurrently. That makes it sound without any stop-the-world (which is Step
+    /// 2c, for the multi-process case); when the runtime is shared it returns `None`
+    /// and reclaims nothing. It is therefore **opt-in** (never wired into the
+    /// automatic GC): a caller invokes it at a known-quiescent point.
+    ///
+    /// One pass, evacuate-and-rewrite: every RUNTIME handle in the globals, both
+    /// LOCAL generations (`local`+`old`), the operand/env roots, and the dynamic-
+    /// binding stack is replaced with its evacuated index ([`flush_rt_value`] copies
+    /// the sub-graph into a fresh `CodeSlabs` on first sight). The per-process
+    /// `vm_cache` (keys + cached bodies are RUNTIME handles) and `global_ic` (cached
+    /// RUNTIME values) are *cleared* — both rebuild lazily. A debug `verify_rt_slabs`
+    /// asserts the result has no dangling handle.
+    pub fn runtime_collect(&mut self) -> Option<(usize, usize)> {
+        // Bail unless we uniquely own the runtime region (no concurrent readers).
+        Arc::get_mut(&mut self.runtime)?;
+        let before = self.runtime.code.closures.count();
+        // Move the old region out (owned) so we can read it while mutating self's
+        // LOCAL slabs without a borrow conflict; the field is left empty meanwhile.
+        let old_code = std::mem::take(&mut Arc::get_mut(&mut self.runtime).unwrap().code);
+        let new = CodeSlabs::default();
+        let mut fwd = RuntimeForward::default();
+
+        // 1. Globals (the primary roots).
+        {
+            let rt = Arc::get_mut(&mut self.runtime).unwrap();
+            let mut g = rt.globals.write().unwrap_or_else(|e| e.into_inner());
+            for v in g.values_mut() {
+                *v = flush_rt_value(&old_code, &new, &mut fwd, *v);
+            }
+        }
+        // 2. This process's roots, env roots, and dynamic bindings.
+        for v in self.roots.iter_mut() {
+            *v = flush_rt_value(&old_code, &new, &mut fwd, *v);
+        }
+        for e in self.env_roots.iter_mut() {
+            *e = flush_rt_env(&old_code, &new, &mut fwd, *e);
+        }
+        for (_, v) in self.dynamics.iter_mut() {
+            *v = flush_rt_value(&old_code, &new, &mut fwd, *v);
+        }
+        // 3. The LOCAL heap (both generations) — any slot may embed a RUNTIME handle.
+        rewrite_local_rt_handles(&mut self.local, &old_code, &new, &mut fwd);
+        rewrite_local_rt_handles(&mut self.old, &old_code, &new, &mut fwd);
+        // 4. Drop the per-process caches that key on / hold RUNTIME handles.
+        self.vm_cache.borrow_mut().clear();
+        self.global_ic.borrow_mut().clear();
+
+        debug_assert!(verify_rt_slabs(&new), "runtime_collect left a dangling RUNTIME handle");
+
+        // 5. Install the compacted region; bump the version so any IC stamp is stale.
+        {
+            let rt = Arc::get_mut(&mut self.runtime).unwrap();
+            rt.code = new;
+            rt.version.fetch_add(1, Ordering::Relaxed);
+        }
+        let after = self.runtime.code.closures.count();
+        Some((before, after))
+    }
+
     /// Should the next safepoint run a collection? Compares LOCAL live count
     /// against the adaptive threshold (recomputed by [`Self::collect`] as
     /// `max(GC_FLOOR, 2 * live)`). Cheap: an addition over six small `usize`s
@@ -4937,6 +5003,58 @@ fn verify_rt_slabs(s: &CodeSlabs) -> bool {
         }
     }
     true
+}
+
+/// Rewrite every RUNTIME handle held in a LOCAL [`Slabs`] (one generation) to its
+/// evacuated index, evacuating it from `old` into `new` on first sight (`fwd`
+/// memoizes). Used by [`Heap::runtime_collect`] for both `local` and `old`. Visiting
+/// every slot directly is what makes the one-pass evacuate-and-rewrite correct: any
+/// RUNTIME handle anywhere is reached without graph-walking LOCAL structure (LOCAL
+/// handles are left as-is — only the RUNTIME handles *inside* each slot move).
+/// Strings/ropes/natives hold no handles; LOCAL map children are LOCAL (same-region
+/// CHAMP), never RUNTIME, so only map *data* is rewritten.
+fn rewrite_local_rt_handles(
+    s: &mut Slabs,
+    old: &CodeSlabs,
+    new: &CodeSlabs,
+    fwd: &mut RuntimeForward,
+) {
+    for (a, b) in s.pairs.iter_mut() {
+        *a = flush_rt_value(old, new, fwd, *a);
+        *b = flush_rt_value(old, new, fwd, *b);
+    }
+    for vec in s.vectors.iter_mut() {
+        for x in vec.iter_mut() {
+            *x = flush_rt_value(old, new, fwd, *x);
+        }
+    }
+    for node in s.maps.iter_mut() {
+        for (k, v) in node.data.iter_mut() {
+            *k = flush_rt_value(old, new, fwd, *k);
+            *v = flush_rt_value(old, new, fwd, *v);
+        }
+    }
+    for cl in s.closures.iter_mut() {
+        for arm in cl.arms.iter_mut() {
+            for f in arm.body.iter_mut() {
+                *f = flush_rt_value(old, new, fwd, *f);
+            }
+            for (_, d) in arm.optionals.iter_mut() {
+                *d = flush_rt_value(old, new, fwd, *d);
+            }
+        }
+        if let Some(e) = cl.env {
+            cl.env = Some(flush_rt_env(old, new, fwd, e));
+        }
+    }
+    for fr in s.envs.iter_mut() {
+        for (_, v) in fr.vars.iter_mut() {
+            *v = flush_rt_value(old, new, fwd, *v);
+        }
+        if let Some(p) = fr.parent {
+            fr.parent = Some(flush_rt_env(old, new, fwd, p));
+        }
+    }
 }
 
 #[cfg(test)]
