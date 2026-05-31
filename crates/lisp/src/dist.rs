@@ -35,7 +35,7 @@ use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, LazyLock, RwLock};
 use std::time::{Duration, Instant};
@@ -50,6 +50,31 @@ use crate::process::{self, Message};
 /// it so a bad/oversized frame is rejected, not OOM'd. 64 MiB is far above any
 /// real message.
 const MAX_FRAME: usize = 64 * 1024 * 1024;
+
+/// Hard ceiling on a frame read *during the handshake*, before the peer is
+/// authenticated. A `Hello` (a short node name + a 32-byte nonce) or `Auth` (a
+/// 32-byte MAC) is only tens of bytes; even a long FQDN node name stays well
+/// under this. Capping the pre-auth read here — rather than at the 64 MiB
+/// steady-state [`MAX_FRAME`] — stops an *unauthenticated* peer from making us
+/// `vec![0u8; 64MiB]` off an 8-byte probe (magic + an oversized length prefix).
+/// 4 KiB is generous headroom over any real handshake frame.
+const MAX_HANDSHAKE_FRAME: usize = 4 * 1024;
+
+/// Cap on inbound handshakes *in flight at once*. Each accepted connection
+/// holds a slot from accept until its handshake finishes (success, failure, or
+/// the [`HANDSHAKE_TIMEOUT`] firing); a steady-state link holds none. Without
+/// this an attacker reachable on a TCP listener can open unbounded connections
+/// — each spawning an OS thread, arming the 10 s timeout, and able to commit a
+/// [`MAX_HANDSHAKE_FRAME`] allocation — *before* authenticating, exhausting
+/// threads/FDs/memory. Past the cap we shed the connection (close it) without
+/// spawning a thread or logging (logging per-shed would itself be a flood
+/// vector). 128 is far above any realistic simultaneous-peer fan-in, which is
+/// rare and bursty; legitimate peers retry.
+const MAX_IN_FLIGHT_HANDSHAKES: usize = 128;
+
+/// Live count of in-flight inbound handshakes, gated by [`MAX_IN_FLIGHT_HANDSHAKES`]
+/// via [`HandshakeSlot`].
+static IN_FLIGHT_HANDSHAKES: AtomicUsize = AtomicUsize::new(0);
 
 /// Bound the read-side of a handshake so a peer that connects and then stalls
 /// can't pin a thread forever (the steady-state reader has the timeout cleared —
@@ -676,6 +701,29 @@ fn clear_identity() {
     LOCAL_NODE.store(u32::MAX, Ordering::Release);
 }
 
+/// RAII permit for one in-flight handshake slot (see [`MAX_IN_FLIGHT_HANDSHAKES`]).
+/// Held by the per-connection thread for the whole pre-auth window; released on
+/// drop (thread end), whether the handshake succeeded, failed, or timed out.
+struct HandshakeSlot;
+impl HandshakeSlot {
+    /// Take a slot, or `None` if the cap is already reached (caller sheds the
+    /// connection). The over-count from a losing `fetch_add` is immediately
+    /// rolled back, so the gate can't drift above the cap under contention.
+    fn try_acquire() -> Option<Self> {
+        if IN_FLIGHT_HANDSHAKES.fetch_add(1, Ordering::AcqRel) >= MAX_IN_FLIGHT_HANDSHAKES {
+            IN_FLIGHT_HANDSHAKES.fetch_sub(1, Ordering::AcqRel);
+            None
+        } else {
+            Some(HandshakeSlot)
+        }
+    }
+}
+impl Drop for HandshakeSlot {
+    fn drop(&mut self) {
+        IN_FLIGHT_HANDSHAKES.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// The accept loop, shared by both transports: pull the next link off `accept`
 /// and hand each to a panic-isolated per-connection thread. A transient accept
 /// error (EMFILE etc.) logs and re-loops with a tiny backoff rather than
@@ -685,7 +733,23 @@ fn spawn_acceptor(accept: impl FnMut() -> io::Result<Stream> + Send + 'static) {
     std::thread::spawn(move || loop {
         match accept() {
             Ok(stream) => {
+                // Shed past the in-flight-handshake cap *before* spawning a thread
+                // or reading a byte, so a flood of unauthenticated connections
+                // can't exhaust threads/memory. Closing the socket is the whole
+                // response — no thread, no log (a per-shed log would itself be a
+                // flood vector under attack).
+                let permit = match HandshakeSlot::try_acquire() {
+                    Some(p) => p,
+                    None => {
+                        let _ = stream.shutdown(Shutdown::Both);
+                        continue;
+                    }
+                };
                 std::thread::spawn(move || {
+                    // Hold the slot until the handshake finishes (this thread ends
+                    // right after `establish` hands off to the steady-state reader
+                    // and writer threads, which don't hold a slot).
+                    let _permit = permit;
                     // Catch a panic in the per-connection thread so one bad peer
                     // doesn't take down the runtime via thread-panic unwind (the
                     // rest of the dist surface assumes its background threads
@@ -1031,3 +1095,38 @@ mod wire;
 
 use heartbeat::ensure_heartbeat;
 use wire::{frame_bytes, read_frame, Frame};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The pre-auth connection gate: slots are bounded at the cap, the
+    /// over-count from a losing `try_acquire` is rolled back (so the live count
+    /// never drifts above the cap), and a dropped slot frees capacity again.
+    /// Under nextest each test runs in its own process, so the global counter
+    /// starts clean at 0.
+    #[test]
+    fn handshake_slot_caps_in_flight_and_releases_on_drop() {
+        // Fill every slot.
+        let held: Vec<HandshakeSlot> = (0..MAX_IN_FLIGHT_HANDSHAKES)
+            .map(|_| HandshakeSlot::try_acquire().expect("under the cap"))
+            .collect();
+        assert_eq!(IN_FLIGHT_HANDSHAKES.load(Ordering::Acquire), MAX_IN_FLIGHT_HANDSHAKES);
+
+        // One past the cap is shed, and the failed attempt rolled its count back.
+        assert!(HandshakeSlot::try_acquire().is_none(), "cap must shed");
+        assert_eq!(
+            IN_FLIGHT_HANDSHAKES.load(Ordering::Acquire),
+            MAX_IN_FLIGHT_HANDSHAKES,
+            "a shed attempt must not leak a slot"
+        );
+
+        // Dropping a held slot frees exactly one, which a fresh acquire can take.
+        drop(held);
+        assert_eq!(IN_FLIGHT_HANDSHAKES.load(Ordering::Acquire), 0);
+        let s = HandshakeSlot::try_acquire().expect("capacity freed");
+        assert_eq!(IN_FLIGHT_HANDSHAKES.load(Ordering::Acquire), 1);
+        drop(s);
+        assert_eq!(IN_FLIGHT_HANDSHAKES.load(Ordering::Acquire), 0);
+    }
+}
