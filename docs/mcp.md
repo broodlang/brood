@@ -148,7 +148,7 @@ The contract for every operation:
 
 ## The tool surface (Brood, in `std/mcp.blsp`)
 
-Twelve tools, each earning its place by needing the runtime to answer —
+Sixteen tools, each earning its place by needing the runtime to answer —
 anything a plain file read or grep would answer is **not** here, because
 Claude Code already has those:
 
@@ -161,11 +161,14 @@ Claude Code already has those:
 | `run-tests`   | `{file?, name?}`            | `[{name, status, output}]`             | Structured, not GNU-line parsing |
 | `check`       | `{file?}`                   | `[{file, line, col, message}]`         | Advisory type-check, structured |
 | `format`      | `{file?, source?}`          | `{formatted}`                          | Idempotent reformatter |
-| `processes`   | `{}`                        | `[{pid, status, ...}]`                 | After `spawn`, list live green processes |
+| `processes`   | `{}`                        | `{processes: [{id, status, mailbox, memory, reductions, ...}]}` | After `spawn`, snapshot every live green process with its full `process-info` stats — the observer's per-process view (mailbox backlog, reductions/work counter, heap, monitors) |
+| `process-info`| `{id}`                      | `{id, status, mailbox, reductions, ...}` or `{error}` | Drill into one process by the numeric id from `processes` |
+| `node`        | `{}`                        | `{node, workers, peak-threads, spawned, process-count, mem-bytes, mem-peak, peers}` | Runtime-wide stats — the observer's header; "is the runtime healthy/busy?" |
 | `callers`     | `{name}`                    | `{references: [{file, line, col}]}`    | Cross-file find-references — the *use* sites of a global (complements `lookup`'s def site) |
 | `apropos`     | `{pattern}`                 | `{matches: [name]}`                    | Discover globals by name substring — answer "does X exist?" without guessing names |
 | `all-globals` | `{}`                        | `{globals: [name]}`                    | The full name list of the live image (prelude + project) |
 | `doc-search`  | `{query}`                   | `{results: [{name, doc}]}`             | Find a capability by *behaviour* — searches docstrings, not names |
+| `bench`       | `{source, iterations?}`     | `{ms, iterations, per-iter-ms, value}` | Time an expression in the live image |
 
 Each tool is a `defn` in `std/mcp.blsp`; `(mcp-tools)` returns the catalogue
 the dispatcher reads at startup. **A project can extend the surface** by

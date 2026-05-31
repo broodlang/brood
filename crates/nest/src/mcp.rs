@@ -899,6 +899,8 @@ mod tests {
             "check",
             "run-tests",
             "processes",
+            "process-info",
+            "node",
             "callers",
         ] {
             assert!(
@@ -1460,24 +1462,55 @@ mod tests {
     }
 
     #[test]
-    fn std_processes_tool_returns_a_pid_list() {
-        // After step 1c-d, `processes` is wired to `(list-processes)`. There's
-        // always at least *some* registered mailbox by the time a tool call
-        // executes (the dispatcher's eval runs in a registered process), so
-        // the list is non-empty. Each entry is a tagged `{$type: "pid"}`
-        // object (see `value_to_json` in this file).
+    fn std_processes_tool_returns_process_info_maps() {
+        // `processes` maps `(process-info pid)` over `(list-processes)`, so each
+        // entry is the full per-process stat map the observer reads — not a bare
+        // pid. There's always at least *some* registered mailbox by the time a
+        // tool call executes (the dispatcher's eval runs in a registered
+        // process), so the list is non-empty. The map's `:pid` field is itself a
+        // tagged `{$type: "pid"}` object (see `value_to_json`).
         let mut interp = Interp::new();
         let (_, body) = invoke_tool(&mut interp, "processes", json!({}));
         let body = body.unwrap();
         let procs = body["processes"]
             .as_array()
             .expect("expected :processes to be an array");
-        assert!(!procs.is_empty(), "no live pids?");
+        assert!(!procs.is_empty(), "no live processes?");
         for p in procs {
-            assert_eq!(p["$type"], "pid", "{p:?}");
-            assert!(p["id"].is_number());
-            assert!(p["node"].is_string());
+            assert!(p["id"].is_number(), "{p:?}");
+            assert!(p["mailbox"].is_number(), "{p:?}");
+            assert!(p["reductions"].is_number(), "{p:?}");
+            assert!(p["node"].is_string(), "{p:?}");
+            assert_eq!(p["pid"]["$type"], "pid", "{p:?}");
         }
+    }
+
+    #[test]
+    fn std_node_tool_returns_runtime_stats() {
+        let mut interp = Interp::new();
+        let (_, body) = invoke_tool(&mut interp, "node", json!({}));
+        let body = body.unwrap();
+        assert!(body["node"].is_string(), "{body:?}");
+        assert!(body["workers"].is_number(), "{body:?}");
+        assert!(body["process-count"].is_number(), "{body:?}");
+        assert!(body["mem-bytes"].is_number(), "{body:?}");
+        assert!(body["peers"].is_array(), "{body:?}");
+    }
+
+    #[test]
+    fn std_process_info_tool_looks_up_by_id() {
+        let mut interp = Interp::new();
+        // Grab a live id from `processes`, then look it up by that integer id.
+        let (_, listing) = invoke_tool(&mut interp, "processes", json!({}));
+        let listing = listing.unwrap();
+        let id = listing["processes"][0]["id"].as_i64().expect("a live id");
+        let (_, body) = invoke_tool(&mut interp, "process-info", json!({ "id": id }));
+        let body = body.unwrap();
+        assert_eq!(body["id"], id, "{body:?}");
+        assert!(body["reductions"].is_number(), "{body:?}");
+        // A bogus id yields a soft error map, not a thrown tool error.
+        let (_, miss) = invoke_tool(&mut interp, "process-info", json!({ "id": 9_999_999 }));
+        assert!(miss.unwrap()["error"].is_string());
     }
 
     #[test]

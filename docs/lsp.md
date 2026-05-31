@@ -76,11 +76,16 @@ one server that owns the language knowledge.
 > and a new `workspace::all_sources` that unions project files + every open
 > buffer). Case-insensitive **subsequence** matching (`fs` → `format-source`);
 > empty query lists all.
-> • **`textDocument/codeAction`** (`code_actions.rs`) — quick-fixes off published
-> diagnostics. Today: **"did you mean?"** for `unbound symbol: X` — Levenshtein
-> against locals-in-scope + special forms + globals, within a length-relative
-> threshold, top-3 nearest, edited onto the diagnostic's (already token-narrowed)
-> range. Marked `isPreferred`.
+> • **`textDocument/codeAction`** (`code_actions.rs`) — two quick-fixes. **"did
+> you mean?"** for `unbound symbol: X` — Levenshtein against locals-in-scope +
+> special forms + globals, within a length-relative threshold, top-3 nearest,
+> edited onto the diagnostic's (already token-narrowed) range; marked
+> `isPreferred`. And **"remove seemingly-unused `(require 'mod)`"** — a structural
+> fix (not tied to a diagnostic): a lone top-level require whose module is never
+> referenced by a qualified `mod/…` name anywhere in the file. Conservative — any
+> textual `mod/` keeps it (false negatives only), `(require 'a 'b)` and
+> `(:use mod)` clauses are left alone, and a side-effect-only require can't be
+> detected statically, so it's a **non-preferred** suggestion, not an auto-fix.
 > • **`textDocument/foldingRange`** (`folding.rs`) — collapsible regions off the
 > CST: every multi-line container (`()`/`[]`/`{}`) and every run of consecutive
 > comment lines. Pure structural walk, no eval.
@@ -92,8 +97,7 @@ one server that owns the language knowledge.
 > region.
 > **Still next:** incremental document sync; range / delta semantic-token
 > requests; finer spans for arity/type findings (wants spans threaded through the
-> checker, not just the call operator); and more code actions (remove unused
-> `require`, create-missing-`defn`).
+> checker, not just the call operator); and more code actions (create-missing-`defn`).
 
 ## Why a server, and why not brute-force it
 
@@ -383,7 +387,7 @@ additive change behind the same feature handlers.
 | **1** | completion (locals + globals), hover, `documentSymbol`, **goto-definition**, **signature help** | `arglist` / `global-names` primitives; CST top-level walk (`defs`) + scope walker | **done** |
 | **1+** | semantic diagnostics ("unbound" / arity / type misuse), **cross-file & stdlib goto**, `require`-target goto | located `check_file`; project bootstrap; `source-location` + prelude-cache; `require--find` | **done** |
 | **2** | **cross-file** references & rename (+prepareRename), document-highlight, semantic tokens, completion resolve | `scope::references` / `references_to_global`; `project_files`; CST token classification | **done** |
-| **2+** | formatting, workspace symbol, code actions (did-you-mean), folding ranges, inlay hints | `introspect::format_source`; `defs::top_level` + `workspace::all_sources`; `global_names`/`names_in_scope` + Levenshtein; CST container/comment walk; `arglist_tokens` | **done** |
+| **2+** | formatting, workspace symbol, code actions (did-you-mean, remove-unused-require), folding ranges, inlay hints | `introspect::format_source`; `defs::top_level` + `workspace::all_sources`; `global_names`/`names_in_scope` + Levenshtein; CST container/comment walk; `arglist_tokens` | **done** |
 
 Tier 0 was reachable immediately because syntactic diagnostics need only the
 CST. Goto-definition landed early with Tier 1 (rather than Tier 2 as first

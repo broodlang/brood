@@ -167,14 +167,58 @@ Outside a Brood project, returns `{:error msg}`."
       {:error (str e)})))
 
 (defn mcp-processes-tool (args)
-  "`processes` — list the session's live green processes. Returns
-`{:processes [{:node :id} ...]}` (the JSON shape pids use; see
-`value_to_json` in the dispatcher). Order is unspecified — sort by
-`:id` if you need stability. Backed by the `(list-processes)`
-primitive (`crates/lisp/src/process.rs`). `(or … [])` so an empty
-list renders as JSON `[]` rather than `null` — agents shouldn't have
-to disambiguate \"no processes\" from \"missing field\"."
-  {:processes (or (list-processes) [])})
+  "`processes` — snapshot every live green process with its runtime stats.
+Returns `{:processes [{:id :pid :node :name :status :mailbox :memory
+:collections :reductions :monitored-by :parent} ...]}` — the same
+`(process-info pid)` map the observer reads, so an agent sees mailbox
+backlog, cumulative reductions (Erlang's work counter — is it busy?),
+heap bytes, GC count and monitors per process, not just the id. Order
+is unspecified — sort by `:id` (or `:reductions` to find the busiest)
+if you need stability. A process that dies mid-snapshot is dropped
+(`process-info` → nil, filtered). `(or … [])` so an empty runtime
+renders as JSON `[]` rather than `null`."
+  {:processes (filter (fn (p) (not (nil? p)))
+                (map process-info (or (list-processes) [])))})
+
+(defn mcp--pid-by-id (id)
+  "The live local pid whose numeric id is `id`, or nil if none. Lets the
+`process-info` tool take the plain integer id an agent sees in a
+`processes` listing rather than a reconstructed pid value."
+  (first (filter (fn (p)
+                   (let (info (process-info p))
+                     (and (not (nil? info)) (= (get info :id) id))))
+           (or (list-processes) []))))
+
+(defn mcp-process-info-tool (args)
+  "`process-info` — the full stat map for a single process by `:id` (an
+integer from a `processes` listing). Returns the `(process-info pid)`
+map (`{:id :pid :node :name :status :mailbox :memory :collections
+:reductions :monitored-by :parent}`), or `{:error msg}` if no live
+process carries that id."
+  (let (id (get args :id))
+    (when (not (int? id))
+      (throw "process-info: :id must be an integer"))
+    (let (pid (mcp--pid-by-id id))
+      (if (nil? pid)
+        {:error (str "no live process with id " id)}
+        (process-info pid)))))
+
+(defn mcp-node-tool (args)
+  "`node` — runtime-wide stats, the header the observer shows: which node
+this is, the scheduler's worker-thread pool size, the high-water marks
+for concurrency and memory, the total processes spawned since start,
+the current live-process count, current/peak memory, and connected
+peers. Returns `{:node :workers :peak-threads :spawned :process-count
+:mem-bytes :mem-peak :peers}`. The \"is the runtime healthy / busy?\"
+overview, complementing per-process `processes`."
+  {:node (node-name)
+   :workers (worker-threads)
+   :peak-threads (peak-threads)
+   :spawned (spawn-count)
+   :process-count (count (or (list-processes) []))
+   :mem-bytes (mem-bytes)
+   :mem-peak (mem-peak)
+   :peers (or (nodes) [])})
 
 (defn mcp-callers-tool (args)
   "`callers` — every reference to the global `:name` across the project's source
@@ -257,11 +301,14 @@ its own list that conses additional entries onto this one — `def` rebinds
 globals (ADR-013), so the dispatcher sees the project's version on its next
 fetch.
 
-Thirteen tools work today: the eight v0 tools, `callers` (cross-file
+Sixteen tools work today: the eight v0 tools, `callers` (cross-file
 find-references), the three discovery tools `apropos` / `all-globals` /
 `doc-search` (search the flat namespace by name or docstring rather than
-looking up a name you already know), and `bench` (time an expression in the
-live image)."
+looking up a name you already know), `bench` (time an expression in the
+live image), and the runtime-introspection pair `process-info` (one
+process's stats by id) and `node` (runtime-wide stats) — together with
+the now-enriched `processes`, these give an agent the same live view the
+observer (`std/observer.blsp`) shows in the terminal."
   (list {:name "eval"
          :description "Evaluate a Brood expression in the session's global environment. State persists across calls (hot reload — `def` mutates the runtime image, ADR-013)."
          :schema {:type "object"
@@ -305,9 +352,20 @@ live image)."
      :schema {:type "object" :properties {}}
      :handler mcp-run-tests-tool}
     {:name "processes"
-     :description "List live green processes."
+     :description "Snapshot every live green process with its runtime stats — id, name, status, mailbox backlog, memory, GC collections, cumulative reductions (Erlang's work counter), monitors and parent. The same per-process view the observer shows. Returns {:processes [{:id :status :mailbox :reductions ...} ...]}. Sort by :reductions to find the busiest process."
      :schema {:type "object" :properties {}}
      :handler mcp-processes-tool}
+    {:name "process-info"
+     :description "Full stat map for one process by numeric :id (from a `processes` listing): status, mailbox, memory, collections, reductions, monitors, parent. Returns the process-info map, or {:error msg} if no live process has that id."
+     :schema {:type "object"
+              :properties {:id {:type "integer"
+                                :description "The numeric process id (as shown in `processes`)"}}
+              :required ["id"]}
+     :handler mcp-process-info-tool}
+    {:name "node"
+     :description "Runtime-wide stats (the observer's header): node name, scheduler worker count, peak concurrency, total spawned, current live-process count, current/peak memory, connected peers. Returns {:node :workers :peak-threads :spawned :process-count :mem-bytes :mem-peak :peers}."
+     :schema {:type "object" :properties {}}
+     :handler mcp-node-tool}
     {:name "callers"
      :description "Find every reference to a global name across the project's source and test files (cross-file find-references). Returns {:references [{:file :line :col} ...]}. Complements `lookup`, which gives the definition site."
      :schema {:type "object"

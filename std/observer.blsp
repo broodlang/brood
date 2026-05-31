@@ -103,10 +103,12 @@ attach). Drive the standalone app from the shell with `nest observe`."
   "Render optional field `v` with `f`, or `\"-\"` when it's absent (nil)."
   (if (nil? v) "-" (f v)))
 
-(defn observe--cells (id nm status mbox mem reds mon)
-  "One table line's seven fixed-width columns (used for both header and rows).
-`reds` is the cumulative reduction count — Erlang's scheduling unit — so a busy
-process stands out by a fast-climbing figure."
+(defn observe--cells (id nm status mbox mem reds rate mon)
+  "One table line's eight fixed-width columns (used for both header and rows).
+`reds` is the cumulative reduction count — Erlang's scheduling unit — and `rate`
+the reductions/second since the last refresh, so a *currently* busy process
+stands out at a glance (cumulative only tells you lifetime work). `mem` and
+`rate` arrive pre-rendered (a string or `\"-\"`)."
   (str (pad-left (str id) 5)
     " "
     (pad-right nm 12)
@@ -118,6 +120,8 @@ process stands out by a fast-climbing figure."
     (pad-left mem 8)
     " "
     (pad-left (str reds) 9)
+    " "
+    (pad-left rate 8)
     " "
     (pad-left (str mon) 4)))
 
@@ -133,6 +137,7 @@ process stands out by a fast-climbing figure."
       (get p :mailbox)
       (observe--opt (get p :memory) observe--bytes->human)
       (observe--opt (get p :reductions) str)
+      (observe--opt (get p :reds-rate) str)
       (get p :monitored-by))))
 
 (defn observe--row-face (p selected?)
@@ -160,6 +165,7 @@ the colours live in one place (`:observer/*`)."
     (let (m (get p :memory)) (if (nil? m) "" (str " · mem " (observe--bytes->human m))))
     (let (gc (get p :collections)) (if (or (nil? gc) (= gc 0)) "" (str " · gc " gc)))
     (let (r (get p :reductions)) (if (or (nil? r) (= r 0)) "" (str " · reds " r)))
+    (let (rr (get p :reds-rate)) (if (nil? rr) "" (str " · reds/s " rr)))
     (let (pa (get p :parent)) (if (nil? pa) "" (str " · parent " pa)))
     " · monitored-by "
     (get p :monitored-by)
@@ -329,7 +335,7 @@ the observer's testable core; `observe--loop` feeds it live data."
                 (text 2
                   0
                   (observe--fit (str "  "
-                                  (observe--cells "ID" "NAME" "STATUS" "MBOX" "MEM" "REDS" "MON"))
+                                  (observe--cells "ID" "NAME" "STATUS" "MBOX" "MEM" "REDS" "REDS/s" "MON"))
                     cols)
                   (face :observer/col-header))]
         body
@@ -350,10 +356,12 @@ the observer's testable core; `observe--loop` feeds it live data."
 
 (defn observe--sort (procs key)
   "Sort the process-info list by `key`: `:id` ascending (stable spawn order),
-`:mailbox` or `:memory` descending (busiest/biggest first)."
+`:mailbox` / `:memory` / `:reds` descending (busiest/biggest first; `:reds` is
+the live reductions/second rate, so the *currently* busiest process floats up)."
   (cond
     (= key :mailbox) (sort-by (fn (p) (- (get p :mailbox))) procs)
     (= key :memory) (sort-by (fn (p) (- (or (get p :memory) 0))) procs)
+    (= key :reds) (sort-by (fn (p) (- (or (get p :reds-rate) 0))) procs)
     :else (sort-by (fn (p) (get p :id)) procs)))
 
 (defn observe--tree-walk (p procs depth limit)
@@ -387,12 +395,49 @@ anything else is `observe--sort` (id / mailbox / memory)."
     (observe--sort procs sort)))
 
 (defn observe--next-sort (key)
-  "Cycle the sort key: id → mailbox → memory → tree → id."
+  "Cycle the sort key: id → mailbox → memory → reds → tree → id."
   (cond
     (= key :id) :mailbox
     (= key :mailbox) :memory
-    (= key :memory) :tree
+    (= key :memory) :reds
+    (= key :reds) :tree
     :else :id))
+
+(defn observe--reds-rate (prev-reds prev-at reds at)
+  "Reductions/second between two `process-info` samples, or nil when it can't be
+computed — no prior sample for this id (`prev-reds`/`prev-at` nil), missing
+counters, or no time elapsed (`at <= prev-at`). `prev-at`/`at` are wall-clock ms.
+Clamps a negative delta (a recycled id) to 0. Pure."
+  (if (or (nil? prev-reds) (nil? prev-at) (nil? reds) (nil? at))
+    nil
+    (let (dt (- at prev-at))
+      (if (<= dt 0)
+        nil
+        (quot (* 1000 (max 0 (- reds prev-reds))) dt)))))
+
+(defn observe--rate-procs (prev-procs prev-at procs at)
+  "Tag each map in `procs` with `:reds-rate` — its reductions/second since the
+matching id in `prev-procs`, over `(at - prev-at)` ms. A process with no prior
+sample (new this tick, or the very first snapshot) gets nil. Pure; O(n) via a
+prev-by-id reductions lookup."
+  (let (prev (reduce (fn (m p) (assoc m (get p :id) (get p :reductions))) {} prev-procs))
+    (map (fn (p)
+           (assoc p
+             :reds-rate
+             (observe--reds-rate (get prev (get p :id)) prev-at (get p :reductions) at)))
+      procs)))
+
+(defn observe--rated-procs (model)
+  "The current snapshot's procs, each tagged with `:reds-rate` computed against the
+previous snapshot (`:prev`). Both snapshots carry `:procs` and `:at`; missing
+either yields nil rates. Pure — the join the `view`/`derived` pipeline applies
+before ordering."
+  (let (snap (or (get model :last) {:procs []})
+        prev (get model :prev))
+    (observe--rate-procs (if (map? prev) (get prev :procs) [])
+      (if (map? prev) (get prev :at) nil)
+      (or (get snap :procs) [])
+      (get snap :at))))
 
 (defn observe--local-source ()
   "The inline data **source**: a `process-info` map for every live process in
@@ -403,21 +448,25 @@ is source-agnostic: inline and remote are one loop with a swapped thunk."
   (filter (fn (p) (not (nil? p))) (map process-info (list-processes))))
 
 (defn observe--local-snapshot ()
-  "A full snapshot of THIS runtime — `{:node <node-info> :procs <process-info list>}`
+  "A full snapshot of THIS runtime — `{:node <node-info> :procs <process-info list>
+:at <ms>}` (`:at` the producing runtime's wall clock, so the reductions/second
+rate is computed against a consistent clock for both inline and remote sources)
 — the inline data **source**, and the payload the remote agent (`observe-serve`)
 ships back. A source is a 0-arg fn returning such a snapshot (or, for a stalled /
 dropped remote link, a status keyword `:timeout` / `:down`); `observe--loop` is
 source-agnostic, so inline and remote are one loop with a swapped source."
-  {:node (observe--node-info) :procs (observe--local-source)})
+  {:node (observe--node-info) :procs (observe--local-source) :at (now)})
 
 (defn observe--apply-result (state result)
-  "Fold a `source` result into the loop state. A snapshot map → store it as `:last`
-and set link `:ok`. `:timeout` → keep `:last`, link `:stale`. `:down` → link
+  "Fold a `source` result into the loop state. A snapshot map → rotate the old
+`:last` into `:prev` (so the reductions/second rate can diff the two), store the
+new snapshot as `:last`, and set link `:ok`. `:timeout` → keep `:last`, link
+`:stale`. `:down` → link
 `:down`, which is **sticky** — a dropped link stays DISCONNECTED (frozen on the
 last snapshot) until the user quits. Pure."
   (cond
     (= (get state :link) :down) state
-    (map? result) (assoc state :last result :link :ok)
+    (map? result) (assoc state :prev (get state :last) :last result :link :ok)
     (= result :down) (assoc state :link :down)
     :else (assoc state :link :stale)))
 
@@ -618,8 +667,7 @@ the backend's `:kill` and reports the result; any other key cancels. Clears
   "Thread the currently-rendered process list / selection / count into `model`, so
 the nav + mouse commands (pure `(state key) → state`) can read them. Recomputed from
 `:last` + `:sort` per input — cheap, since inputs are infrequent. Pure."
-  (let (snap (or (get model :last) {:node (observe--node-info) :procs []})
-        procs (observe--order (get snap :procs) (get model :sort))
+  (let (procs (observe--order (observe--rated-procs model) (get model :sort))
         n (count procs)
         sel (observe--sel-index procs (get model :sel-id)))
     (assoc model :procs procs :sel sel :n n)))
@@ -630,7 +678,7 @@ Builds `observe-frame` from the last snapshot, the sort key, the link status, an
 the minibuffer UI state. Paints to whatever frontend `ui-run` holds."
   (let (snap (or (get model :last) {:node (observe--node-info) :procs []})
         sort (get model :sort)
-        procs (observe--order (get snap :procs) sort)
+        procs (observe--order (observe--rated-procs model) sort)
         sel (observe--sel-index procs (get model :sel-id))
         ui {:mode (get model :mode)
             :edit (get model :edit)
