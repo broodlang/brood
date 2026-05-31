@@ -70,12 +70,15 @@ camelCase hump (an upper preceded by a non-upper)."
 
 (defn fuzzy-match (query cand)
   "`nil` if `query` isn't a case-insensitive subsequence of `cand`, else
-`{:score <int> :positions [i …]}`. The empty query matches anything (score 0)."
-  (let (positions (fuzzy--positions (lower query) (lower cand)
-                    0 (string-length query) 0 (string-length cand) '()))
-    (if (nil? positions)
-      nil
-      {:score (fuzzy--score cand positions) :positions positions})))
+`{:score <int> :positions [i …]}`. The empty query matches anything (score 0) —
+handled directly, since its empty position list is indistinguishable from `nil`."
+  (if (= query "")
+    {:score 0 :positions ()}
+    (let (positions (fuzzy--positions (lower query) (lower cand)
+                      0 (string-length query) 0 (string-length cand) '()))
+      (if (nil? positions)
+        nil
+        {:score (fuzzy--score cand positions) :positions positions}))))
 
 (defn fuzzy-filter (query cands)
   "The candidates in `cands` that fuzzily match `query`, best score first (ties:

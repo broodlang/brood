@@ -2872,6 +2872,9 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // string sink, with `process-port`/`fn-port` + `with-out`/`with-err`. Pairs
     // with the prelude's `*out*`/`*err*` dynamic vars. Opt-in, no dependencies.
     ("io", include_str!("../../../std/io.blsp")),
+    // Fuzzy (subsequence) string matching + ranking: `fuzzy-match` / `fuzzy-filter`,
+    // the matcher completion UIs ride on. Pure Brood, no dependencies. Opt-in.
+    ("fuzzy", include_str!("../../../std/fuzzy.blsp")),
     ("project", include_str!("../../../std/project.blsp")),
     // The package manager (ADR-037): resolves the manifest's :dependencies into a
     // lock file + load-path entries. Required lazily by `project-setup` only when a
