@@ -95,6 +95,14 @@ const CORPUS: &[&str] = &[
     "(defn greet (name & rest) [name rest]) (greet :a)", // rest is the empty list
     // &optional (nil default) — provided and missing
     "(defn opt (a &optional b c) [a b c]) [(opt 1) (opt 1 2) (opt 1 2 3)]",
+    // &optional with REAL defaults — a default referencing an earlier param, a
+    // later default referencing an earlier optional, a default with a `let`, and the
+    // provided-arg case (default not evaluated). VM compiles these now (was deferred).
+    "(defn rd (a &optional (b (+ a 1))) (+ a b)) [(rd 10) (rd 10 5)]",
+    "(defn rd2 (a &optional (b (* a 2)) (c (+ b 1))) [a b c]) [(rd2 3) (rd2 3 100) (rd2 3 100 200)]",
+    "(defn rd3 (a &optional (b (let (x 5) (+ a x)))) b) [(rd3 10) (rd3 10 0)]",
+    // real-default &optional + & rest in one arm
+    "(defn rdm (a &optional (b (* a 10)) & rest) [a b rest]) [(rdm 1) (rdm 1 2) (rdm 1 2 3 4)]",
     // &optional + & rest together
     "(defn mix (a &optional b & rest) [a b rest]) [(mix 1) (mix 1 2) (mix 1 2 3 4)]",
     // multi-arity WITH a variadic arm — the selection must match select_arm exactly
