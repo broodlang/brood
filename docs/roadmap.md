@@ -642,6 +642,21 @@ top* of connect, plus a few deliberately-deferred refinements:
   packaged and launched — a thin native launcher around an embedded runtime, or a
   separate runtime + a script bundle? Cross-compilation / target matrix. Decide
   deliberately and record an ADR when this becomes live.
+- ⬜ **A tree-sitter grammar for Brood + GitHub language recognition.** Today
+  `.gitattributes` maps `.blsp → linguist-language=Clojure linguist-detectable=false`
+  (highlight as Clojure on GitHub, but keep it out of the repo's language stats) —
+  a stopgap, since Brood is not Clojure (`defmodule`, `defdyn`, pattern forms, the
+  list-code/vector-data split aren't Clojure). The real fix is a **tree-sitter
+  grammar** (`tree-sitter-brood`), which is doubly useful: (a) it's the prerequisite
+  for the editor's own syntax highlighting / structural editing (GitHub also uses
+  tree-sitter for highlight + code-nav), and (b) it's required to register **Brood**
+  as its own language with [`github/linguist`](https://github.com/github/linguist)
+  (PR: a `languages.yml` entry + vendored grammar + `samples/Brood/`). **Blocker:**
+  Linguist's contribution bar requires the extension to already be **in use across
+  hundreds of unique repos** — gated on real adoption, not filable day-one. Path:
+  write the grammar early (it serves the editor regardless and unlocks Neovim /
+  Helix / Emacs / Zed highlighting before GitHub does), grow `.blsp` adoption, then
+  file the Linguist PR. Until then the Clojure stopgap stands.
 
 ---
 
