@@ -259,6 +259,19 @@ Prefer the higher-order combinators:
 (fold (fn (m k) (assoc m k (* k k))) {} (range 10))
 ```
 
+**`assoc` / `update` / `get` work on a vector by integer index, not just maps.**
+`(assoc v i x)` returns a fresh vector with index `i` replaced (in range only —
+it never appends; `conj` does that); `(update v i f)` and `(get v i)` likewise.
+`(subvec v start end)` slices to a **vector** (unlike `take`/`drop`, which return
+lists); `(remove-nth coll i)` drops one element, keeping the type. So an
+immutable single-element vector edit is just `(assoc buf i x)`, never a manual
+rebuild.
+
+**In a `catch`, use `(error-message e)`.** A caught value has no single shape:
+`throw` hands back its argument verbatim (often a bare string from `error`),
+while a kernel error is a `{:kind :message …}` map. `error-message` normalises
+any of them to a human string — don't branch on `string?`/`map?` yourself.
+
 For longer pipelines, **transducers** fuse intermediate collections (one pass,
 no throwaway lists):
 
@@ -393,6 +406,11 @@ The three pieces and how they relate:
 `(nodes)` lists currently-connected peers. `(monitor-node name)` fires
 `[:nodedown name]` on a clean socket close *or* a heartbeat timeout, so a peer that
 quits or crashes is detected without any app-level goodbye message.
+`(disconnect name)` is the deliberate counterpart: it drops the link to `name`
+**now, without exiting your process** (Erlang's `disconnect_node`), firing
+`[:nodedown]` on both sides and pruning `(nodes)`. Use it to leave a node/cluster
+cleanly — no need for an ad-hoc `[:bye]` broadcast. Returns `true` if a link
+existed.
 
 ## Stateful servers — the `hatch` framework (`(:use hatch)`)
 

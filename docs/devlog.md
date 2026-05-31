@@ -10823,3 +10823,111 @@ Closed the two items the connect-test triage left open with tests.
   slot that `run-project` prefers over the manifest `project-setup` re-applies).
   Process-isolated because in-language tests share one runtime's global table and
   these toggle `*project-main*`-family globals.
+
+## 2026-05-31 — `(disconnect name)`: deliberate node-link teardown
+
+The one genuine *capability* gap the connect-test triage surfaced (everything
+else was a doc fix or already done): there was **no way to drop a peer link
+without exiting the OS process**. The runtime exits as soon as the top-level
+form returns, so a clean `/quit` *does* fire `nodedown` (verified — the prior
+entry's "stale observation" stands). But a node that *intentionally* stays up —
+a server dropping one client, a node leaving a 3+ member cluster — had no lever.
+connect-test worked around it with an app-level `[:bye]` broadcast, which a
+`kill -9`'d or panicking peer can't send.
+
+**Added `(disconnect name)`** — Erlang's `disconnect_node/1`. Rust mechanism in
+`dist.rs::disconnect`: look up the peer's `Conn`, `shutdown(Both)` its socket
+(so the peer's reader hits EOF and fires *its* node-down), then run the existing
+`drop_link` on our side — which removes the `NODES` entry and fires
+`[:nodedown name]` to our monitors **synchronously**, so `(nodes)` is pruned
+before the call returns. Our own reader then also hits EOF and calls
+`drop_link(name, id)` a second time, but the generation-id guard makes it a
+no-op — `nodedown` fires exactly once per side. Returns `true` if a link
+existed, `false` otherwise (disconnecting an unknown node is a silent no-op,
+Erlang-style).
+
+Exposed as a **direct builtin** (`builtins.rs`), not a `%`-prefixed primitive +
+prelude wrapper: there's no policy to add on top (unlike `connect`/`node-start`,
+which do hostname-qualification / cookie minting), so it sits beside
+`monitor-node`/`nodes`. Name domain is `sym ∪ keyword` (accepts the authoritative
+`:name@host` keyword `connect`/`nodes` return).
+
+**Tests.** `disconnect_drops_a_peer_link_while_both_nodes_stay_up` in
+`crates/cli/tests/distribution.rs` — two real subprocess nodes; the server
+*blocks in `receive` forever* (proving it never exits on its own), the client
+`disconnect`s and asserts it returns `true`, sees a prompt local `[:nodedown]`
+with a pruned `(nodes)`, and that `(disconnect :ghost@nowhere)` returns `false`;
+the still-running server asserts its own `[:nodedown]` via socket EOF. Docs:
+`primitives.md`, `distribution.md` (new "Deliberate teardown" note under §2),
+`brood-for-claude.md`, roadmap.
+
+---
+
+## 2026-05-31 — Language gaps surfaced by the myedit editor (vector indexing, error accessor, `task`)
+
+**Goal.** A review of the `~/src/whk/myedit` editor (a Brood program) flagged
+four spots where the *editor* was working around a missing *language* capability
+rather than building on one. The prime directive cuts both ways: those workarounds
+are exactly the feedback that tells us which primitives/std abstractions are
+missing. Verified each claim against the source, then closed the gaps **language-
+side** (here in `brood`), not in the editor.
+
+**Built.**
+
+1. **Vector indexing — `assoc`/`update` over a vector + integer index.** The
+   editor's buffer pool is a vector, so every edit was a hand-rolled O(n) rebuild
+   (`ed-replace-nth` / `ed-remove-nth`) because `assoc` bottomed out in
+   `map-assoc` (map-only). Vectors are flat (`Vec<Value>`), so an efficient
+   single-element copy genuinely needs a kernel op — added two primitives
+   (`vector-assoc`, mirroring `map-assoc`; and `subvec`, the vector-preserving
+   slice the list-returning `take`/`drop` don't give), then made `assoc`/`update`
+   **polymorphic** in the prelude (`(if (vector? coll) vector-assoc map-assoc)`)
+   and added `remove-nth` (vector via `subvec`, list via `take`/`drop`). `get`/
+   `nth` already indexed vectors. This is the dogfooding rule's "build the right
+   primitive" path, not a Rust escape hatch — the surface stays in Brood and every
+   program gets the capability. In myedit, `ed-set-buf` collapses to
+   `(update m :buffers assoc i buf)`.
+
+2. **`error-message` — the shape-agnostic accessor.** Three editor sites
+   hand-rolled the same `(cond (string? e) e (and (map? e) …) … :else (pr-str e))`
+   because a caught value has no single shape: `throw` hands back its argument
+   verbatim (a bare string from `error`, a keyword, a `[:tag …]` vector), while a
+   kernel error is the canonical `{:kind :message …}` map. Added one prelude
+   accessor, `error-message`, that normalises all of them. **Did *not*** make
+   `error` throw a structured map — `crates/lisp/tests/basic.rs:732` and
+   `suite_test.blsp` lock in `(error …)` → bare string, and the "throw shape ==
+   catch shape" contract is deliberate; the accessor is the right fix because it
+   makes callers stop *caring* about the shape. (Also corrected `language.md`,
+   which wrongly said `catch` binds a *string* for built-in errors — it binds the
+   map.)
+
+3. **`index-where` — predicate index.** `index-of` matches by equality only;
+   added its predicate counterpart (first index where `(pred x)` holds, else -1).
+
+4. **`std/task` — run a thunk off the loop, with timeout + cancel.** The editor's
+   async eval hand-rolled a spawn + watchdog + pid-staleness mini-supervisor (~40
+   lines that aren't editor policy). Extracted the generic abstraction into a new
+   opt-in module: `(task thunk opts)` returns a handle and delivers a tagged
+   `[:task-done handle v]` / `[:task-error handle msg]` / `[:task-timeout handle]`
+   to `:reply-to`; `cancel-task` stops it early; `(await thunk ms)` is the
+   synchronous run-with-timeout. Two processes per task (worker + coordinator,
+   the same shape myedit used): the coordinator's pid is the handle and it's never
+   the one looping, so it can always `(exit worker :kill)` a runaway. Pure Brood
+   over spawn/receive/exit (ADR-006). The handle tags every reply, so a stale
+   reply from a finished/cancelled task is trivially ignored — the editor's
+   `:eval-proc` pid-match generalised.
+
+**Tests.** New `tests/vectors_test.blsp` (assoc/update/remove-nth/subvec incl.
+out-of-range errors, immutability, and a cross-process `:isolated` block proving
+assoc-built vectors round-trip through copy-on-send) and `tests/task_test.blsp`
+(await success/error/timeout; async done/error/timeout/reply-to/handle-tagging/
+cancel). `error-message` cases added to `suite_test.blsp`; `index-where` to
+`sequence_test.blsp`. Docs: `language.md` (Errors, the `await` section, Lists &
+Maps builtins), `primitives.md` (`vector-assoc`/`subvec`), roadmap.
+
+**Not bugs (checked, per the review).** The two suite reds seen during this work
+— `project: source load-once …` and `discovery … doc-search ranks by multi-term
+overlap` — are the pre-existing parallel global-lookup flakiness (KI-2 class:
+doc-search scans *all* globals, load-once shares a root counter across the pool).
+The failing set moves run-to-run, both pass in isolation, and neither code path
+touches the symbols added here. Verified against a clean HEAD worktree.

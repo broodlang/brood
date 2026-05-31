@@ -50,6 +50,9 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   (the irreducible Float→Int crossing); `sqrt` is Newton's method.
 - ✅ **Sequence library** — `range take drop take-while drop-while some? every?
   find zip partition sort sort-by` (all Brood; `sort` is a stable merge sort).
+  Plus **vector indexing** (myedit-driven, 2026-05-31): polymorphic `assoc`/
+  `update` over a vector + integer index, `remove-nth`, and a `subvec` slice — on
+  two kernel primitives (`vector-assoc`/`subvec`); `index-where` (predicate index).
 - ✅ **Dynamic variables** (`defdyn` / `binding`) for config-style knobs — Lisp
   special vars with restore-on-exit (even on throw); **per-process** (a `spawn`ed
   child starts from defaults, never inherits a binding). Brood macros over a tiny
@@ -57,7 +60,9 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   per-process binding stack consulted only at the global-lookup step (free when
   no `binding` is active). No new special form.
 - ✅ **Error handling** — `throw` + `%try` primitives; `try`/`catch` + `error`
-  in the prelude (no new special forms — ADR-011)
+  in the prelude (no new special forms — ADR-011); `error-message` normalises any
+  caught value (verbatim throw payload *or* the kernel `{:kind :message …}` map)
+  to a human string (2026-05-31).
 - ✅ **Pattern matching** (ADR-021) — Erlang/Elixir-style; one Brood compiler
   reused by `match`, refutable `let`, and `fn`/`defn` clauses. Subsumes Tier-2
   destructuring + `case`. Made fast by a **macroexpand-all compile pass**
@@ -506,8 +511,10 @@ The seam that makes remoteability free later (see architecture.md).
   fires on net-split), **closure-as-data shipping** (ADR-033 — closures,
   `(remote-spawn …)`, source positions all cross the wire),
   **auto-reconnect** (`(ensure-link …)` — Brood policy over
-  `connect`/`monitor-node`), and **handshake v2** (magic+version prefix,
-  HMAC-SHA256 challenge–response; cookie never on the wire). ADR-033/034,
+  `connect`/`monitor-node`), **deliberate teardown** (`(disconnect name)` —
+  Erlang's `disconnect_node`: drop one peer link and fire `[:nodedown]` on both
+  sides without exiting the process), and **handshake v2** (magic+version
+  prefix, HMAC-SHA256 challenge–response; cookie never on the wire). ADR-033/034,
   [`distribution.md`](distribution.md). Remaining: supervision trees (true
   `link` / restart strategies) and optional TLS — both additive over what's
   here.
@@ -556,6 +563,14 @@ The seam that makes remoteability free later (see architecture.md).
   the supervisor never runs cleanup). General Erlang primitives
   (`link`/`unlink`/`trap-exit`/`spawn-link`), not a supervision-specific hook. See
   [`supervision.md`](supervision.md) and [`concurrency-v2.md`](concurrency-v2.md) §4.
+- ✅ **`std/task`** (myedit-driven, 2026-05-31) — run a thunk off the current
+  process with an optional timeout + cancellation: `(task thunk opts)` returns a
+  handle and delivers tagged `[:task-done handle v]` / `[:task-error handle msg]`
+  / `[:task-timeout handle]` to `:reply-to`; `cancel-task` stops it early;
+  `(await thunk ms)` is the synchronous run-with-timeout. Pure Brood over
+  spawn/receive/exit (a worker + a coordinator whose pid is the handle), zero new
+  kernel surface — the generic form of the editor's hand-rolled async-eval
+  watchdog. Opt-in (`(require 'task)`).
 - 🟡 **TCP sockets (the substrate, done — ADR-062).** Thin kernel primitives
   (`tcp-connect`/`tcp-listen`/`tcp-send`/`tcp-close`/`tcp-local-port`) over a
   reusable blocking-IO → mailbox seam (`process::spawn_io_source`, ADR-059):

@@ -1,0 +1,99 @@
+;; std/task.blsp — run a thunk off the current process, with timeout + cancel.
+;; (require 'task).
+;;
+;; The generic "do this work off my loop and tell me when it's done" abstraction
+;; that long-running interactive programs (the editor's async eval, ADR-046) keep
+;; hand-rolling out of spawn / receive / exit. It is *policy*, pure Brood over the
+;; process primitives (ADR-006) — the kernel supplies spawn/send/receive/exit, this
+;; packages the spawn-worker + watchdog-timeout + stale-reply bookkeeping once.
+;;
+;; Two processes per task (the same shape the hand-rolled versions used): a
+;; **worker** that runs the thunk, and a **coordinator** that waits for the
+;; worker's result, a timeout, or a cancel — and whose pid is the task *handle*.
+;; The coordinator is never the one looping, so it can always react: a runaway
+;; worker is stopped with the untrappable `(exit worker :kill)` even mid-loop.
+;;
+;; Every reply is tagged with the handle, so a *stale* reply from a finished or
+;; cancelled task is trivially ignored: the consumer matches the handle it last
+;; started against `[:task-done handle …]` and drops anything else (the editor's
+;; `:eval-proc` pid-match — a newer task's reply can't be clobbered by an older
+;; one). See docs/concurrency.md.
+;;
+;;     (require 'task)
+;;     ;; async: returns a handle, delivers a message when done
+;;     (def h (task (fn () (heavy-compute)) {:timeout 2000}))
+;;     (receive
+;;       ([:task-done t v]    (when (= t h) (use v)))
+;;       ([:task-error t msg] (when (= t h) (oops msg)))
+;;       ([:task-timeout t]   (when (= t h) (gave-up))))
+;;     (cancel-task h)        ; stop it early (no reply is sent)
+;;
+;;     ;; sync: block this process for the value, or throw on error/timeout
+;;     (await (fn () (heavy-compute)) 2000)
+
+(defmodule task
+  "Run a thunk off the current process, with an optional timeout and cancellation
+(`(require 'task)`). `task` is asynchronous — it returns a *handle* and delivers
+`[:task-done handle value]` / `[:task-error handle message]` / `[:task-timeout
+handle]` to `:reply-to` (default the caller); `cancel-task` stops a task early;
+`await` is the synchronous form that blocks for the value (throwing on error or
+timeout). Pure Brood over spawn / receive / exit (ADR-006).")
+
+;; ---- the worker: run the thunk, report a tagged outcome to the coordinator ---
+;; A throw is caught here (the worker process must not just die — the coordinator
+;; would then wait out the full timeout for a result that never comes); the human
+;; message is extracted with the prelude's shape-agnostic `error-message`.
+(defn task--worker (thunk coord)
+  (send coord [:task--result (try [:ok (thunk)] (catch e [:err (error-message e)]))]))
+
+;; ---- the coordinator: its pid is the handle ---------------------------------
+;; Waits for exactly one of: the worker's result, a cooperative cancel, or (when a
+;; timeout is set) the deadline. On timeout/cancel it hard-kills the worker — a
+;; looping worker never checks its own mailbox, so `:kill` (untrappable, fires at
+;; the next reduction even when parked) is the only thing that stops it.
+(defn task--run (thunk reply-to timeout)
+  (let (coord  (self)
+        worker (spawn (task--worker thunk coord)))
+    (if (nil? timeout)
+      (receive
+        ([:task--result [:ok v]]  (send reply-to [:task-done coord v]))
+        ([:task--result [:err m]] (send reply-to [:task-error coord m]))
+        (:task--cancel            (exit worker :kill)))
+      (receive
+        ([:task--result [:ok v]]  (send reply-to [:task-done coord v]))
+        ([:task--result [:err m]] (send reply-to [:task-error coord m]))
+        (:task--cancel            (exit worker :kill))
+        (after timeout (do (exit worker :kill) (send reply-to [:task-timeout coord])))))))
+
+(defn task (thunk & opts)
+  "Run 0-arg `thunk` in a child process, off the current process's loop, and
+return a *handle* (the coordinator pid). When `thunk` finishes, `:reply-to`
+(an `opts` map key, default the caller) receives `[:task-done handle value]`, or
+`[:task-error handle message]` if it threw. With `:timeout` (ms) the task is
+hard-killed after that long and `:reply-to` gets `[:task-timeout handle]`
+instead. Every reply is tagged with `handle`, so a reply from a finished or
+cancelled task is easy to ignore — match on the handle you last started. Cancel
+early with `cancel-task`."
+  (let (o        (if (empty? opts) {} (first opts))
+        reply-to (or (get o :reply-to) (self))
+        timeout  (get o :timeout))
+    (spawn (task--run thunk reply-to timeout))))
+
+(defn cancel-task (handle)
+  "Stop the task identified by `handle` early: its worker is hard-killed and no
+reply is delivered. A no-op if the task already finished (its handle is a dead
+pid). Returns nil."
+  (send handle :task--cancel)
+  nil)
+
+(defn await (thunk timeout-ms)
+  "Run 0-arg `thunk` in a child process and block the current process until it
+finishes or `timeout-ms` elapses. Returns the thunk's value; throws if it threw
+(re-raising the message) or if it timed out. The synchronous counterpart of
+`task` — use it in a script or test; use `task` to keep an interactive loop live."
+  (let (me (self)
+        w  (spawn (send me [:await--reply (try [:ok (thunk)] (catch e [:err (error-message e)]))])))
+    (receive
+      ([:await--reply [:ok v]]  v)
+      ([:await--reply [:err m]] (error m))
+      (after timeout-ms (do (exit w :kill) (error "await: timed out after " timeout-ms "ms"))))))

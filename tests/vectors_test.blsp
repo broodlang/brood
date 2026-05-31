@@ -1,0 +1,118 @@
+;; Vector indexing surface: the polymorphic `assoc`/`update` over a vector +
+;; integer index, `remove-nth`, and the `subvec` slice — the editor-driven gap
+;; (a buffer pool is a vector, so every edit is a single-index replace). Built on
+;; the kernel `vector-assoc`/`subvec` primitives. Register-only — discovered and
+;; run by `nest test` (and cargo test, via crates/lisp/tests/suite.rs).
+;;
+;; The whole suite runs each test in its own green process, so these already
+;; exercise the ops on multiple cores; the final :isolated block adds explicit
+;; spawn/send/receive coverage (so it also proves vectors built by assoc/update
+;; round-trip through copy-on-send between per-process heaps).
+
+(defmodule vectors-test (:use test))
+
+;; Tail-recursive ascending [lo, hi) — a test body runs on a small coroutine
+;; stack, so deep non-tail recursion would overflow it.
+(defn vt-range (lo hi) (vt-range--down (- hi 1) lo nil))
+(defn vt-range--down (i lo acc) (if (< i lo) acc (vt-range--down (- i 1) lo (cons i acc))))
+
+(describe "assoc on a vector (by integer index)"
+  (test "replaces a single element"
+    (assert= (assoc [10 20 30] 1 99) [10 99 30]))
+  (test "replaces several indices left to right"
+    (assert= (assoc [10 20 30] 0 :a 2 :c) [:a 20 :c])
+    (assert= (assoc [0 0 0] 0 1 1 2 2 3 0 9) [9 2 3]))   ; later pair to same index wins
+  (test "first and last index"
+    (assert= (assoc [1 2 3] 0 :x) [:x 2 3])
+    (assert= (assoc [1 2 3] 2 :z) [1 2 :z]))
+  (test "result is a vector"
+    (is (vector? (assoc [1 2 3] 0 9))))
+  (test "the original is untouched (immutability)"
+    (let (v [1 2 3] w (assoc v 1 99))
+      (assert= v [1 2 3])
+      (assert= w [1 99 3])))
+  (test "an out-of-range index is an error"
+    (assert-error (assoc [1 2 3] 3 9))
+    (assert-error (assoc [1 2 3] -1 9))
+    (assert-error (assoc [] 0 9)))
+  (test "the map path still works (no regression)"
+    (assert= (assoc {:a 1} :b 2) {:a 1 :b 2})
+    (assert= (assoc {} :a 1 :b 2) {:a 1 :b 2})))
+
+(describe "update on a vector (by integer index)"
+  (test "applies a function to the element at an index"
+    (assert= (update [10 20 30] 2 inc) [10 20 31])
+    (assert= (update [10 20 30] 0 (fn (x) (* x 2))) [20 20 30]))
+  (test "passes extra args through"
+    (assert= (update [1 2 3] 1 + 10 100) [1 112 3]))
+  (test "an out-of-range index is an error"
+    (assert-error (update [1 2 3] 9 inc))))
+
+(describe "subvec"
+  (test "two-arg: from start to the end"
+    (assert= (subvec [1 2 3 4 5] 2) [3 4 5])
+    (assert= (subvec [1 2 3] 0) [1 2 3]))
+  (test "three-arg: the half-open range [start, end)"
+    (assert= (subvec [1 2 3 4 5] 1 3) [2 3])
+    (assert= (subvec [1 2 3 4 5] 0 0) [])
+    (assert= (subvec [1 2 3 4 5] 5 5) []))
+  (test "result is a vector"
+    (is (vector? (subvec [1 2 3] 1))))
+  (test "out-of-range is an error"
+    (assert-error (subvec [1 2 3] -1))
+    (assert-error (subvec [1 2 3] 0 4))
+    (assert-error (subvec [1 2 3] 2 1))))
+
+(describe "remove-nth"
+  (test "drops the element at an index, preserving type"
+    (assert= (remove-nth [10 20 30] 1) [10 30])
+    (is (vector? (remove-nth [10 20 30] 1))))
+  (test "first and last"
+    (assert= (remove-nth [10 20 30] 0) [20 30])
+    (assert= (remove-nth [10 20 30] 2) [10 20]))
+  (test "on a list returns a list"
+    (assert= (remove-nth (list 1 2 3 4) 0) (list 2 3 4))
+    (assert= (remove-nth (list 1 2 3 4) 2) (list 1 2 4)))
+  (test "the original vector is untouched"
+    (let (v [1 2 3] w (remove-nth v 1))
+      (assert= v [1 2 3])
+      (assert= w [1 3]))))
+
+;; ---- across processes -------------------------------------------------------
+;; A worker builds a vector with assoc/update and sends it back; the parent reads
+;; it. This proves the vectors round-trip through copy-on-send (to_message /
+;; from_message) and the promote/freeze path, not just within one heap.
+
+(defn vt-builder (parent)
+  ;; start from a zeroed vector, set each index to its square via assoc
+  (let (z [0 0 0 0 0])
+    (send parent (fold (fn (v i) (assoc v i (* i i))) z (vt-range 0 5)))))
+
+(defn vt-collect (got total acc)
+  (if (= got total) acc
+    (vt-collect (+ got 1) total (receive (v (cons v acc))))))
+
+(defn vt-spawn-builders (parent n)
+  (when (> n 0) (spawn (vt-builder parent)) (vt-spawn-builders parent (- n 1))))
+
+;; A worker that waits for a vector, assoc-updates index 1, and sends it back.
+(defn vt-echo-assoc (parent)
+  (receive (v (send parent (assoc v 1 99)))))
+
+(describe "vectors across processes"
+  :isolated
+  (test "an assoc-built vector survives a send round-trip"
+    (let (me (self) w (spawn (vt-builder me)))
+      (assert= (receive) [0 1 4 9 16])))
+  (test "a worker's assoc does not mutate the sender's vector"
+    (let (me (self)
+          original [1 2 3]
+          w (spawn (vt-echo-assoc me)))
+      (send w original)
+      (assert= (receive) [1 99 3])
+      (assert= original [1 2 3])))
+  (test "many workers each build the same vector concurrently"
+    (vt-spawn-builders (self) 25)
+    (let (results (vt-collect 0 25 nil))
+      (assert= (count results) 25)
+      (is (every? (fn (v) (= v [0 1 4 9 16])) results)))))
