@@ -1837,13 +1837,32 @@ stripped (`(cwd)` doesn't produce one, which is the primary caller)."
   (let (needle (if (string? pattern) pattern (name pattern)))
     (filter (fn (s) (string-contains? (name s) needle)) (global-names))))
 
+;; Whitespace-split a query into lowercased terms (blanks dropped) — the unit
+;; doc-search ranks by. A single-word query yields one term, so it degrades to
+;; the old "docstring contains this word" search.
+(defn doc-search--terms (query)
+  "Lowercased, whitespace-separated terms of `query`, with blanks removed."
+  (filter (fn (t) (not (blank? t))) (string-split (lower query) " ")))
+
 (defn doc-search (query)
-  "Every global whose docstring contains `query` (a string), as a list of `[name doc]` pairs — searches behaviour, not just names, e.g. `(doc-search \"random\")`."
-  (keep (fn (s)
-          (let (d (try (doc (eval s)) (catch _ nil)))
-            (when (and (string? d) (string-contains? d query))
-              [s d])))
-    (global-names)))
+  "Globals whose name or docstring matches `query`, ranked by how many of its
+whitespace-separated terms they contain (case-insensitive substring) — most
+matches first, ties broken by name. A list of `[name doc]` pairs. Searches
+behaviour, not just names: `(doc-search \"node up down\")` finds `monitor-node`
+even when no single docstring holds that exact phrase. A single-word query
+degrades to a plain case-insensitive name/docstring search, e.g.
+`(doc-search \"random\")`."
+  (let (terms (doc-search--terms query))
+    (when (not (empty? terms))
+      (map (fn (e) [(second e) (nth e 2)])
+        (sort-by (fn (e) [(- (first e)) (str (second e))])
+          (keep (fn (s)
+                  (let (d (try (doc (eval s)) (catch _ nil)))
+                    (when (string? d)
+                      (let (hay (lower (str s " " d))
+                            hits (count (filter (fn (t) (string-contains? hay t)) terms)))
+                        (when (> hits 0) [hits s d])))))
+            (global-names)))))))
 
 ;; ---- modules: Emacs-flat provide / require (ADR-019) ------------------------
 ;; A flat module system over the one shared global table: `provide` records a

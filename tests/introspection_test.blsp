@@ -118,7 +118,20 @@
       (refute (empty? hits))
       (let ([nm d] (first hits))
         (is (symbol? nm))
-        (is (string? d))))))
+        (is (string? d)))))
+  ;; A multi-term query matches globals carrying *some* of the terms (no
+  ;; docstring need hold the whole phrase) — the §3.3 fix. Each of these
+  ;; returned nil under the old whole-query substring matcher.
+  (test "doc-search ranks by multi-term overlap, not whole-phrase containment"
+    (is (includes? (map first (doc-search "remote node distributed")) 'connect))
+    (is (includes? (map first (doc-search "remote node distributed")) 'node-start))
+    (is (includes? (map first (doc-search "node up down notification")) 'monitor-node))
+    (is (includes? (map first (doc-search "raw mode single keypress")) 'term-raw-enter)))
+  (test "doc-search is case-insensitive"
+    (assert= (map first (doc-search "XORSHIFT")) (map first (doc-search "xorshift"))))
+  (test "doc-search of a blank query is empty"
+    (assert= (doc-search "") nil)
+    (assert= (doc-search "   ") nil)))
 
 ;; Runtime introspection: per-process GC observability (Tier-1;
 ;; docs/memory-review.md §7). gc-stats reports the *calling* process's own heap.
