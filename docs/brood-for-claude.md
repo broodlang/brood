@@ -358,6 +358,42 @@ and registers the new pid. The name is auto-reaped on death.
         (supervise worker-fn)))))
 ```
 
+## Distributed nodes — named processes & cross-node addressing
+
+Two runtimes become a distributed pair over a local Unix socket (or TCP) with
+**no extra machinery** — the same `send`/`receive`/closures, just addressed across
+a node link (ADR-073). The whole model in one example:
+
+```lisp
+;; --- on node "alice" ---------------------------------------------------------
+(node-start "alice")                  ; this runtime is now :alice@host (a keyword)
+(register :inbox (self))              ; bind a LOCAL name -> this pid
+(let (bob (connect "bob"))            ; dial peer "bob"; returns its :bob@host name
+  (monitor-node bob)                  ; get [:nodedown :bob@host] when the link drops
+  (send {:name :inbox :node bob} [:hi (node-name)]))   ; reach bob's :inbox
+
+;; --- on node "bob" -----------------------------------------------------------
+(node-start "bob")
+(register :inbox (self))
+(receive ([:hi from] (println "hi from " from)))       ; => hi from :alice@host
+```
+
+The three pieces and how they relate:
+
+- **`(register name pid)`** binds `name` → `pid` in *this node's* local registry;
+  **`(whereis name)`** resolves it — **locally only** (`(whereis :inbox)` on alice
+  never sees bob's `:inbox`). Both ends usually `register` the same local name.
+- **`{:name :inbox :node :bob@host}`** is the cross-node address — a send-map naming
+  a registered process *on a specific node*. `(send {:name … :node …} msg)` is the
+  remote analogue of `(send (whereis name) msg)`: it's how you reach a peer's
+  registered process.
+- **`node-start` / `connect` / `node-name` return keywords** (`:bob@host`), not
+  strings — use them directly as the `:node` value; `(str …)` only for display.
+
+`(nodes)` lists currently-connected peers. `(monitor-node name)` fires
+`[:nodedown name]` on a clean socket close *or* a heartbeat timeout, so a peer that
+quits or crashes is detected without any app-level goodbye message.
+
 ## Stateful servers — the `hatch` framework (`(:use hatch)`)
 
 Raw `spawn`/`receive` is the substrate; for a process that **holds state and

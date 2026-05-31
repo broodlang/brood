@@ -153,5 +153,6 @@ aggregate).
   it in a pty —
   `script -qec "nest run --for 800ms" /dev/null 2>&1 | cat -v | grep -oE '\^\[\[[0-9;]*[A-Za-z]' | sort | uniq -c`.
 - New public function has a docstring. Run `nest format` (whole-tree, **no file
-  arg**) and `nest test`. Keep `;` comments **out of vector/map literals** — the
-  formatter shuffles them; annotate above the form.
+  arg**) and `nest test`. Keep `;` comments **out of vector/map literals and off
+  `cond` clauses** — the formatter shuffles them (a trailing comment on a `cond`
+  clause migrates to its own line between clauses); annotate above the form.
