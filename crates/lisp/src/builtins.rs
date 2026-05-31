@@ -1341,14 +1341,16 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         heap,
         "register",
         Arity::exact(2),
-        Sig::new(vec![sym, pid_ty], pid_ty),
+        // A name may be a symbol OR a keyword — `expect_node_name` accepts both, and
+        // `:name` lookups in `send`/`node-name` use keywords, so the sig must too.
+        Sig::new(vec![sym.union(kw), pid_ty], pid_ty),
         register_name,
     );
     def(
         heap,
         "whereis",
         Arity::exact(1),
-        Sig::new(vec![sym], pid_ty.union(nil_ty)),
+        Sig::new(vec![sym.union(kw)], pid_ty.union(nil_ty)),
         whereis_name,
     );
     // `node-name` is the keyword `:nonode` until `node-start` sets it to a symbol.

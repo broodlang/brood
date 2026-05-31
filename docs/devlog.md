@@ -10437,6 +10437,26 @@ intersections for overloaded fns; type variables for user generics. Branch
 
 ---
 
+## 2026-05-31 — `register`/`whereis` sigs accept keyword names; editor per-pane zoom
+
+Small advisory-sig correction. `expect_node_name` accepts a **keyword or symbol** at
+runtime (and `node-name`'s sig already returns `sym | keyword`), but `register` and
+`whereis` declared their name param as `symbol` only — so `(register :observe pid)`
+(the idiomatic keyword name, matching the `{:name :observe}` form `send` uses) drew a
+spurious checker warning. Widened both sigs to `sym ∪ kw`. No runtime change; clears
+the warning in `tests/observer_test.blsp`.
+
+Companion app-side work this session lives in the editor/demo repos (no further
+kernel change): **myedit** moved Ctrl+wheel zoom from a whole-window `gui-font!` to
+**per-pane `:scale`** — only the *selected* pane magnifies (the intended use of
+ADR-079; the view renders a zoomed pane by laying its body into a virtual `vw×vh`
+grid, then scaling every op `s`× and re-anchoring it) — and added plain-wheel buffer
+scroll. **foobar** already draws its status strip via the Face `:scale` (the
+block-font workaround is retired). Both green against this kernel (myedit 137,
+foobar 8).
+
+---
+
 ## 2026-05-31 — Parametric results slice 2: reduce/fold (ADR-078)
 
 **Goal.** Finish parametric HOF results — after `map`/`filter`, give `reduce`/`fold`
