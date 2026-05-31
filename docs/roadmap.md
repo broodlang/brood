@@ -265,6 +265,29 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
     and lock schema able to accept a `:native` sibling additively (as ADR-037
     already reserves `:branch`/`:dir`/`:features`). Costs nothing now; lets
     ADR-071 slot in without reshaping the package format later.
+- ⬜ **`std/` = basic-language core; frameworks are packages; hierarchical module
+  names** (ADR-085). `std/` has grown to ~38 modules, most of which aren't what a
+  *normal language* ships — they're an editor/display **framework** (`buffer`,
+  `display`, `face`, `highlight`, `keymap`, `layers`, `pane`, `ui`, `lineedit`,
+  `ansi`), a net/web library + concurrency framework (`http`/`sse`/`tcp`,
+  `hatch`/`supervisor`), and the project **toolchain** (`project`, `package`,
+  `test`, `docs`, `reload`, `mcp`, `observer`, `repl`, `sexp`). Three coupled moves:
+  **(1)** curate `std/` down to the basics any language ships (`prelude` + `io`/
+  `file`/`set`/`regex`/`json`/`fuzzy`/`format`/`task`/`log` — exact line finalized
+  at move time); **(2)** ship the frameworks/libraries — including the future **GUI
+  framework** — as **external packages** via the package manager (ADR-037), not
+  baked into the binary (toolchain stays bundled, it's what `nest` is built from);
+  **(3)** the enabling language change — **hierarchical module names**:
+  `(require 'gui/window)` → namespace `gui/window` ← `gui/window.blsp`, amending
+  ADR-019/065. The wrinkle is that `/` already separates a qualified name's
+  module/def (`buffer/insert`), so `gui/window/draw` is three segments — the rule
+  is **split on the last `/`**. Touches `eval/mod.rs` + `eval/macros.rs` (the
+  one-separator assumption), `require--find` + `*load-path*` (nested dirs), the
+  `%builtin-module` table, and `unbound_namespace_hint`. **Sequencing:**
+  hierarchical names first, then curate + lift frameworks out; gated on the first
+  real consumer (the GUI framework, ADR-011). The GUI question that started this is
+  answered structurally — a GUI framework is *one external package*, not a
+  `std/gui/` subfolder.
 - ⬜ **Native interop — WASM components, built on fetch** (ADR-071,
   [`interop.md`](interop.md)) — how a package ships native code (from another
   ecosystem, or a perf-critical kernel) with **zero kernel recompilation**. A

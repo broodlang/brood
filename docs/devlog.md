@@ -11551,3 +11551,35 @@ nil equals replacing.
 one-run, faced span coalescing, a range splitting+merging a run, `base` offsetting,
 empty → `()`). Existing `highlight-chunks` plus the lineedit (34) / observer (55) /
 repl (14) suites pin the refactor.
+
+---
+
+## 2026-05-31 — Decision: `std/` is the basic-language core; frameworks become packages (ADR-085)
+
+**Question (from the user).** "We have the standard library under `std/` — can we
+add a folder for modules, like a GUI framework, `libraries/std`, `libraries/gui`?"
+Refined over the conversation into a sharper bar: **"std must be very basic
+functions for a normal language."**
+
+**What the code actually constrains.** The module namespace is *flat* (ADR-019/065):
+`(require 'buffer)` resolves the bare stem, `defmodule buffer` qualifies defs to
+`buffer/insert` (`/` is the qualified-name separator). Resolution is the embedded
+`BUILTIN_MODULES` table in `builtins.rs` (`include_str!` per stem) then `<stem>.blsp`
+on `*load-path*`. So a *folder* on disk changes nothing the language sees — moving
+`buffer.blsp` into a subdir only edits one `include_str!` path; it's still
+`(require 'buffer)`. A folder-only reorg would just split disk layout from the
+namespace. The real question hiding underneath was the **std boundary** and whether
+module names should be **hierarchical**.
+
+**Decided (ADR-085), not built.** Three coupled moves: (1) curate `std/` down to
+basics a normal language ships (`prelude` + `io`/`file`/`set`/`regex`/`json`/
+`fuzzy`/`format`/`task`/`log`); (2) ship frameworks (editor/display, web/net,
+concurrency) and the future **GUI framework** as **external packages** via the
+package manager (ADR-037), not baked into the binary — toolchain (`test`/`project`/
+`package`/…) stays bundled as what `nest` is built from; (3) add **hierarchical
+module names** (`(require 'gui/window)` ← `gui/window.blsp`), the enabling language
+change, with the **split-on-last-`/`** rule to coexist with the existing
+`module/def` separator. Sequencing: hierarchical names first, then curate + lift
+frameworks out; gated on the GUI framework as first consumer (ADR-011). Recorded in
+`decisions.md` (ADR-085) and `roadmap.md` (M1, after Package manager). No code
+changed this session — design only.

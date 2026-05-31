@@ -5462,3 +5462,76 @@ the same way.
 `expand_seq`, and `teardown_err` are deleted. Verified: VM≡tree-walker differential,
 the full in-language suite, and a quasiquote-heavy loop (runtime backtick with
 unquote + splice + autogensym) green under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`.
+
+## ADR-085 — `std/` is the basic-language core; frameworks are packages; hierarchical module names
+
+**Context.** `std/` has grown to ~38 `.blsp` modules, and most of them are *not*
+what a normal language's standard library ships. They're three other things wearing
+the `std/` coat:
+
+- **An editor / display framework** — `buffer`, `display`, `face`, `highlight`,
+  `keymap`, `layers`, `pane`, `ui`, `lineedit`, `ansi`.
+- **A net / web library** — `http`, `sse`, `tcp`; **a concurrency framework** —
+  `hatch`, `supervisor`.
+- **The project toolchain** — `project`, `package`, `test`, `docs`, `reload`,
+  `mcp`, `observer`, `repl`, `sexp` (what `nest` is built from).
+
+Everything is a **flat module name** (ADR-019/065): `(require 'buffer)` resolves the
+bare stem `buffer`, and `defmodule buffer` qualifies its defs to `buffer/insert`
+(one interned symbol; `/` is the namespace-qualified-name separator). Resolution is
+two-tier — the embedded `BUILTIN_MODULES` table in `builtins.rs` (hand-maintained
+`include_str!("../../../std/X.blsp")` lines, keyed by bare stem), then `<stem>.blsp`
+searched across `*load-path*`. A flat name table means no shared prefix, no way to
+say "the editor's `buffer`" vs "some package's `buffer`", and a directory listing
+that doesn't reflect any structure.
+
+The user's framing: **"std must be very basic functions for a normal language."**
+
+**Decision.** Three coupled moves.
+
+1. **Curate `std/` down to the basic-language core.** `std/` keeps only what any
+   normal language ships — `prelude` (always loaded), plus the opt-in basics:
+   `io`, `file`, `set`, `regex`, `json`, `fuzzy`, the `format` string formatter,
+   `task`, `log`. Everything else leaves `std/`. The bundled stdlib should stay
+   *small* ("keep the language as small as possible"); growth pushes **outward** to
+   packages, never into more `std/` modules. (The exact in/out line per module —
+   e.g. is `json` or `format` core? — is finalized when the move is done; the
+   principle is settled, the boundary list above is the working proposal.)
+
+2. **Frameworks and libraries ship as external packages**, installed through the
+   package manager (ADR-037), not baked into the `brood` binary. The editor
+   framework, the web/net library, the concurrency framework, and the future **GUI
+   framework** are all *packages a project depends on* — not always-shipped core.
+   (The project **toolchain** — `test`/`project`/`package`/… — is a separate
+   category: it's what `nest` is built from, so it stays bundled, but it's
+   *toolchain*, not stdlib, and is a candidate for a `tool/` namespace prefix.)
+
+3. **Hierarchical module names** — the enabling language change, amending
+   ADR-019/065. `(require 'gui/window)` loads the `gui/window` module/namespace,
+   resolved from `gui/window.blsp` (and the embedded table keys on the full
+   `"gui/window"` stem). The wrinkle: `/` already separates a qualified name's
+   module from its def (`buffer/insert`), so module `gui/window` with a def `draw`
+   produces the three-segment symbol `gui/window/draw`. **Split rule: on the *last*
+   `/`** — module = everything before, name = the last segment. Touch points:
+   the reader/resolver in `eval/mod.rs` + `eval/macros.rs` (`name.contains('/')`
+   currently assumes one separator), `require--find` + `*load-path*` (search nested
+   dirs), the `%builtin-module` table, and `unbound_namespace_hint`.
+
+**Consequences.**
+- The GUI question that started this is answered structurally: a GUI framework is
+  *one external package* (`gui/window`, `gui/layout`), not a `std/gui/` subfolder.
+- The package manager (ADR-037) becomes the primary distribution path for
+  everything above the language core — which is why it was deliberately built
+  before M2 (ADR-037 context).
+- Migrating a framework out of `std/` is a breaking move (callers switch from a
+  bundled `(require 'buffer)` to a package dependency). That's fine here
+  (greenfield, no external users), but it wants a migration order that keeps the
+  build/tests green at each step — and it depends on hierarchical names landing
+  first, so the editor app (`~/src/whk/myedit`) and the in-tree test suite can
+  follow.
+
+**Status.** Decided (direction + the three moves); **not yet built.** Sequencing:
+hierarchical module names (the language change) first, then curate `std/` and lift
+the frameworks into packages. Gated like every additive capability (ADR-011) — the
+GUI framework is the first concrete consumer that pulls the hierarchical-name work
+in. Tracked in `roadmap.md` (M1, after Namespaces / Package manager).
