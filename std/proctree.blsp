@@ -1,0 +1,49 @@
+;; std/proctree.blsp — order a flat process-info list as a parent→child forest.
+;; (require 'proctree).
+;;
+;; A pure, dependency-free transform over `process-info` maps (ADR-051): given the
+;; flat `(map process-info (list-processes))` snapshot, produce a depth-tagged forest
+;; — roots first, each followed by its DFS descendants — for an indented tree view.
+;; The lineage comes from each map's `:parent` (the spawner's id, nil for the root),
+;; the Erlang-`process_info` field. Shared by std/observer's tree sort and myedit's
+;; *Process List*, so neither reimplements the walk. No IO, no UI deps — just the
+;; ordering.
+
+(defmodule proctree
+  "Order a flat `process-info` list as a parent→child forest. `(require 'proctree)`.
+`tree-order` returns the procs re-ordered roots-first, each followed by its
+descendants (DFS by id), every map tagged with `:depth` (0 = root) for indentation;
+lineage is read from `:parent`. `by-id` is the plain ascending-by-id sort (the flat
+view). Pure — no IO, no UI deps — so a TUI (std/observer) and a buffer editor
+(myedit) share one implementation.
+
+    (require 'proctree)
+    (tree-order [{:id 1 :parent nil} {:id 2 :parent 1}])
+    ; => [{:id 1 :parent nil :depth 0} {:id 2 :parent 1 :depth 1}]")
+
+(defn by-id (procs)
+  "Sort `procs` ascending by `:id` (stable spawn order) — the flat view."
+  (sort-by (fn (p) (get p :id)) procs))
+
+(defn tree-walk (p procs depth limit)
+  "DFS: emit `p` (tagged `:depth`) then its children's subtrees, each child sorted by
+id. Normally terminates because a child's id exceeds its parent's (spawn order);
+`limit` (the process count) caps the depth so a malformed snapshot with a parent
+cycle (impossible from `process-info`, but a buggy remote peer could send one) is
+bounded rather than overflowing the stack."
+  (if (>= depth limit)
+    [(assoc p :depth depth)]
+    (let (kids (by-id (filter (fn (c) (= (get c :parent) (get p :id))) procs)))
+      (cons (assoc p :depth depth)
+        (mapcat (fn (k) (tree-walk k procs (inc depth) limit)) kids)))))
+
+(defn tree-order (procs)
+  "Order `procs` as a parent→child forest: roots first (a proc whose `:parent` is nil
+or not in the set — an orphan whose spawner already died is a root), each followed by
+its descendants (DFS by id), every map `:depth`-tagged. Children appear under their
+parent."
+  (let (ids (map (fn (p) (get p :id)) procs)
+        limit (count procs)
+        root? (fn (p) (let (pa (get p :parent)) (or (nil? pa) (< (index-of ids pa) 0))))
+        roots (by-id (filter root? procs)))
+    (mapcat (fn (r) (tree-walk r procs 0 limit)) roots)))
