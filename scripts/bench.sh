@@ -34,10 +34,25 @@ else
   tree_state="clean"
 fi
 
+# --- force a clean performance build --------------------------------------
+# Append `-C debug-assertions=off -C overflow-checks=off` to any ambient
+# RUSTFLAGS (same trick as `make install`): rustc honours the LAST `-C <key>=`
+# for a key, so this wins even when the GC-debug mode (`RUSTFLAGS="-C
+# debug-assertions=on"`, see CLAUDE.md) is exported in the shell. Without this a
+# debug-armed bench carries the per-deref GC tripwire/epoch overhead (~40% on
+# eval-heavy benches) and the numbers silently aren't comparable to a clean run.
+bench_rustflags="${RUSTFLAGS:-} -C debug-assertions=off -C overflow-checks=off"
+if printf '%s' "${RUSTFLAGS:-}" | grep -q 'debug-assertions=on'; then
+  da_note="overridden off (ambient RUSTFLAGS had \`debug-assertions=on\` — forced off for a comparable run)"
+  echo "scripts/bench.sh: ambient RUSTFLAGS has debug-assertions=on; forcing it OFF for this run." >&2
+else
+  da_note="off (forced)"
+fi
+
 # --- run the benchmarks, capturing plain-text output ----------------------
 # Not a tty when captured, so divan emits no color; strip any ANSI just in case.
 echo "Running benchmarks (output -> $outfile) ..." >&2
-raw="$(NO_COLOR=1 cargo bench --benches -- "$@" 2>&1)" || {
+raw="$(NO_COLOR=1 RUSTFLAGS="$bench_rustflags" cargo bench --benches -- "$@" 2>&1)" || {
   echo "$raw" >&2
   echo "benchmark run failed; not writing $outfile" >&2
   exit 1
@@ -64,6 +79,7 @@ clean="$(printf '%s\n' "$raw" \
   echo "| cargo | ${cargo_v#cargo } |"
   echo "| divan | $divan_v |"
   echo "| Profile | \`bench\` (release, opt-level 3) |"
+  echo "| debug-assertions | $da_note |"
   echo "| Git commit | \`$commit\` (branch \`$branch\`) |"
   echo "| Working tree | $tree_state |"
   echo "| Command | \`cargo bench --benches -- $*\` |"
