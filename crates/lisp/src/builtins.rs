@@ -118,7 +118,18 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![int, int], int),
         remainder,
     );
-    // `floor` is the single irreducible Float→Int crossing; quot/ceil/round/pow/
+    // `%quot` — truncating integer division (toward zero), the kernel `quot`
+    // passes through to so the VM inlines it as one op. (It used to be Brood over
+    // `(/ (- a (rem a b)) b)` — three dispatched calls per use, which made tight
+    // integer loops like `collatz` pay rem+sub+div every step.)
+    def(
+        heap,
+        "%quot",
+        Arity::exact(2),
+        Sig::new(vec![int, int], int),
+        prim_quot,
+    );
+    // `floor` is the single irreducible Float→Int crossing; ceil/round/pow/
     // sqrt are all Brood over it + rem/`/`/`*`/`<` (std/prelude.blsp).
     def(
         heap,
@@ -312,6 +323,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![map_ty], list_ty),
         map_pairs,
+    );
+    def(
+        heap,
+        "map-count",
+        Arity::exact(1),
+        Sig::new(vec![map_ty], int),
+        map_count,
     );
     def(
         heap,
@@ -1504,6 +1522,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("map-assoc", &["m", "k", "v"], "A fresh map like m with key k set to v."),
     ("map-dissoc", &["m", "k"], "A fresh map like m with key k removed."),
     ("map-pairs", &["m"], "The entries of m as a list of [k v] vectors, in insertion order."),
+    ("map-count", &["m"], "The number of entries in map m. O(1) — the CHAMP root tracks its size."),
     ("string-length", &["s"], "The number of characters in string s."),
     ("substring", &["s", "start", "end"], "The characters of s in the range [start, end), char-indexed. end is optional and defaults to (string-length s), so (substring s start) is \"from start to the end\"."),
     ("upper", &["s"], "s upper-cased (Unicode-aware)."),
@@ -1815,6 +1834,22 @@ fn remainder(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             .with_code(crate::error::error_codes::DIV_BY_ZERO)
             .with_hint("guard the denominator: (when (not= y 0) (rem x y))")),
         None => Err(LispError::runtime("rem: integer overflow")
+            .with_code(crate::error::error_codes::INT_OVERFLOW)),
+    }
+}
+
+/// `(%quot a b)` — truncating integer division toward zero, the kernel `quot`
+/// passes through to. `checked_div` truncates toward zero (matching the old
+/// `(/ (- a (rem a b)) b)` integer result) and guards both `b == 0` and the lone
+/// `i64::MIN / -1` overflow.
+fn prim_quot(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let (a, b) = int_pair(heap, args, "%quot")?;
+    match a.checked_div(b) {
+        Some(q) => Ok(Value::Int(q)),
+        None if b == 0 => Err(LispError::runtime("quot: division by zero")
+            .with_code(crate::error::error_codes::DIV_BY_ZERO)
+            .with_hint("guard the denominator: (when (not= y 0) (quot x y))")),
+        None => Err(LispError::runtime("quot: integer overflow")
             .with_code(crate::error::error_codes::INT_OVERFLOW)),
     }
 }
@@ -2192,6 +2227,14 @@ fn map_pairs(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         .map(|(k, v)| heap.alloc_vector(vec![k, v]))
         .collect();
     Ok(heap.list(pairs))
+}
+
+/// `(map-count m)` — the number of entries, O(1). The CHAMP root node tracks
+/// its subtree size, so this never walks (or allocates) the entries; it's what
+/// `count`/`empty?` on a map use instead of materialising `map-pairs`.
+fn map_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_map(heap, "map-count", arg(args, 0))?;
+    Ok(Value::Int(heap.map_size(id) as i64))
 }
 
 fn string_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {

@@ -962,7 +962,7 @@ detection are deferred. Full reference: [distribution.md](distribution.md).
 ### Lists & sequences
 `cons`  `first`  `rest`  `car`  `cdr`  `second`  `third`  `last`  `but-last`
 `list`  `vector`  `append`  `concat`  `reverse`  `nth`  `count`  `length`  `empty?`
-`range`  `take`  `drop`  `take-last`  `drop-last`  `take-while`  `drop-while`
+`range`  `take`  `drop`  `split-at`  `take-last`  `drop-last`  `take-while`  `drop-while`
 `member?`  `some?`  `every?`  `find`  `index-of`  `index-where`  `zip`
 `partition`  `sort`  `sort-by`  `subvec`  `remove`  `remove-nth`  `keep`
 `distinct`  `dedupe`  `group-by`  `flatten`  `interpose`  `interleave`
@@ -977,7 +977,8 @@ detection are deferred. Full reference: [distribution.md](distribution.md).
   `(range lo hi step)` steps (ascending or descending).
 - `take`/`drop` clamp to the sequence length; `take-last`/`drop-last` take/drop
   from the end. `take-while`/`drop-while` split on the first element that fails
-  the predicate.
+  the predicate. `split-at` returns `[front back]` — the first `n` items and the
+  rest — in a single pass (the fused `take`+`drop`).
 - `some?`/`every?` return booleans (`every?` is vacuously true on the empty
   list); `find` returns the first matching element, or `nil`.
 - `index-of` returns the 0-based index of an element (by structural `=`), or -1;
@@ -1012,7 +1013,9 @@ detection are deferred. Full reference: [distribution.md](distribution.md).
 `zipmap`  `get-in`  `assoc-in`  `update-in`  `map?`
 
 See the [Maps](#maps) section above. `{ }` is the literal form; the rest are
-immutable operations that return fresh maps. `count`/`empty?` work on maps too.
+immutable operations that return fresh maps. `count`/`empty?` work on maps too,
+in **O(1)** — the CHAMP root node tracks its size (exposed by the `map-count`
+kernel primitive), so neither walks nor materialises the entries.
 
 ### Higher-order
 `map`  `filter`  `reduce`  `apply`

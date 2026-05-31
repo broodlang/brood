@@ -11583,3 +11583,45 @@ change, with the **split-on-last-`/`** rule to coexist with the existing
 frameworks out; gated on the GUI framework as first consumer (ADR-011). Recorded in
 `decisions.md` (ADR-085) and `roadmap.md` (M1, after Package manager). No code
 changed this session — design only.
+
+---
+
+## 2026-05-31 — std performance pass (sequence/map hot paths)
+
+**Goal.** Step through the std library and remove avoidable per-element overhead,
+staying in Brood (build the language up, not around it — CLAUDE.md). Benchmarked
+with `scripts/quickbench.sh` (the `eval` + `library` suites) before/after.
+
+**Changed (prelude — broad leverage, loaded always).**
+- `map`/`filter`/`remove`/`keep` recur over a dedicated `--acc` loop instead of
+  folding a per-element closure — one fewer `apply` frame per item on the
+  most-used sequence ops.
+- `reverse` likewise drops the `(fold flip-cons …)` indirection; it's the final
+  pass of nearly every builder, so the win is library-wide.
+- `mapcat` concatenates each `(f x)` onto the accumulator directly (no
+  intermediate list-of-sublists, no `apply append` spread).
+- `count` short-circuits vectors to O(1) `vector-length` and maps to O(1)
+  `map-count` (below); lists use a dedicated tail loop.
+- `frequencies`/`group-by`/`set`'s `union`/`intersection`/`difference`, and
+  `json`/`project` map-accumulators call the 3-arg kernel `map-assoc`/`map-get`/
+  `map-dissoc` directly rather than the variadic surface wrappers.
+- `merge--acc` (mergesort tail) splices the remaining run in one pass
+  (`fold flip-cons`) instead of `(append (reverse acc) …)`.
+- **`merge-sort`** is now length-carrying: `count` once and halve `n` down the
+  recursion, splitting each run with a single new **`split-at`** pass — was
+  `count`+`take`+`drop` (three O(n) walks) per level just to find the midpoint.
+- `json--string--acc` and `http--render-headers` were O(n²) `(str acc …)` builds
+  → collect parts, one `(apply str …)`.
+
+**New.**
+- **`split-at`** (prelude) — `[front back]` in one pass; public, tested.
+- **`map-count`** (Rust builtin) — O(1) entry count. The CHAMP root node already
+  tracks its subtree `size`; this just exposes it (`Heap::map_size`), so
+  `count`/`empty?` on a map no longer allocate via `map-pairs`. Genuine mechanism
+  the language can't bootstrap — the one Rust addition in the pass.
+
+**Results (baseline → after, both engines where applicable).** `sort` −48%;
+`frequencies` −38%; `mapcat` −24%; `cons_build` (VM, via `count`) −18..−22%; map
+builds (`into {}`/transient) −10..−12%; `sequence/sort` −10%; `join`/`split`/
+`pipeline`/`transduce` −4..−6%. Tail/fib/sum unchanged (not touched). Suite green
+(the `--acc` helpers stay tail-recursive; sort stability preserved).
