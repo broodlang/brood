@@ -171,12 +171,12 @@ and is NOT folded into `update`."
       (let (input (or ((get display :poll) (ui--tick-ms model)) :tick))
         (cond
           ;; the window's close button always quits; `ui-run` then runs `:leave`
-          ((quit-request? input) nil)
+          (quit-request? input) nil
           ;; raise-to-front request: act on the display, keep the model untouched
-          ((focus-request? input)
-           (let (f (get display :focus))
-             (do (when f (f)) (ui--loop model view update display))))
-          (:else (ui--loop (update model input cols rows) view update display)))))))
+          (focus-request? input)
+          (let (f (get display :focus))
+            (do (when f (f)) (ui--loop model view update display)))
+          :else (ui--loop (update model input cols rows) view update display))))))
 
 (defn ui-run (model view update display)
   "Run a UI app over `display` (a frontend map): enter it, then loop —
