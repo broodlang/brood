@@ -42,6 +42,17 @@
     (assert= (list->string (list "a" "b" "c")) "abc")
     (assert= (list->string (string->list "round-trip")) "round-trip")))
 
+(describe "substring"
+  (test "three-arg form takes the range [start, end)"
+    (assert= (substring "hello" 1 4) "ell")
+    (assert= (substring "hello" 0 0) ""))
+  (test "two-arg form runs from start to the end"
+    (assert= (substring "hello" 2) "llo")
+    (assert= (substring "hello" 0) "hello")
+    (assert= (substring "hello" 5) ""))
+  (test "two-arg form is equivalent to passing the length"
+    (assert= (substring "hello" 2) (substring "hello" 2 (string-length "hello")))))
+
 (describe "escapes"
   ;; Beyond the named `\e` / `\n` / `\t` / `\r` / `\0` / `\\` / `\"`, Brood
   ;; strings also support `\xHH` (two-hex-digit byte) and `\u{H..H}` (Unicode

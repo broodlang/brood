@@ -311,8 +311,8 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(
         heap,
         "substring",
-        Arity::exact(3),
-        Sig::new(vec![string, int, int], string),
+        Arity::range(2, 3),
+        Sig::with_rest(vec![string, int], int, string),
         substring,
     );
     // Case folding (Unicode tables) and parse-or-nil genuinely need Rust; the rest
@@ -1414,7 +1414,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("map-dissoc", &["m", "k"], "A fresh map like m with key k removed."),
     ("map-pairs", &["m"], "The entries of m as a list of [k v] vectors, in insertion order."),
     ("string-length", &["s"], "The number of characters in string s."),
-    ("substring", &["s", "start", "end"], "The characters of s in the range [start, end), char-indexed."),
+    ("substring", &["s", "start", "end"], "The characters of s in the range [start, end), char-indexed. end is optional and defaults to (string-length s), so (substring s start) is \"from start to the end\"."),
     ("upper", &["s"], "s upper-cased (Unicode-aware)."),
     ("lower", &["s"], "s lower-cased (Unicode-aware)."),
     ("to-fixed", &["x", "n"], "Render number x as a string with exactly n digits after the decimal point (rounded). n must be >= 0."),
@@ -2850,13 +2850,18 @@ fn to_keyword(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     }
 }
 
-/// `(substring s start end)` — the characters of `s` in `[start, end)`,
-/// char-indexed (consistent with `string-length`). Errors if out of range.
+/// `(substring s start [end])` — the characters of `s` in `[start, end)`,
+/// char-indexed (consistent with `string-length`). `end` defaults to the
+/// string's length, so `(substring s start)` is "from `start` to the end".
+/// Errors if out of range.
 fn substring(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let s = expect_string(heap, "substring", arg(args, 0))?;
     let start = expect_int(heap, "substring", arg(args, 1))?;
-    let end = expect_int(heap, "substring", arg(args, 2))?;
     let len = s.chars().count() as i64;
+    let end = match args.get(2) {
+        Some(_) => expect_int(heap, "substring", arg(args, 2))?,
+        None => len,
+    };
     if start < 0 || end < start || end > len {
         return Err(LispError::runtime(format!(
             "substring: range [{}, {}) out of bounds for length {}",

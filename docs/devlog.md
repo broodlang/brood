@@ -10762,3 +10762,39 @@ which already treats a qualified miss as a different problem). New regression
 test `qualified_unbound_in_green_process_has_no_scheduler_hint`; the existing
 bare-name positive test still passes. `error-codes.md` hint-conditions section
 was updated in `bf5e5cb`. No language-surface change.
+
+---
+
+## 2026-05-31 — connect-test feedback triage: `substring` 2-arg + doc gaps
+
+**Source.** A findings doc from `~/src/broodlang/connect-test` (an LLM building a
+distributed chat REPL against the live image). Triaged against current `main`:
+**most items were already fixed** by earlier sessions — closure-sending docs
+(`bf5e5cb`), the scheduler-race hint scope (`52554a9`), `nest run --main`
+(verified working: `--main scratch` runs `scratch/main`), the `std/lineedit`
+line editor, and `doc-search` all already landed. Acted only on what was *still*
+open:
+
+- **`substring` now takes an optional `end`** (the one real API gap left).
+  `(substring s start)` is "from `start` to the end", matching Clojure's `subs`
+  / CL — removes the `(substring s start (string-length s))` papercut that hit
+  every "rest of the string" use. Builtin arity `exact(3)` → `range(2, 3)`, sig
+  `Sig::with_rest(vec![string, int], int, string)` (mirrors `map-get`); `end`
+  defaults to `(string-length s)` when absent. Tests in `tests/strings_test.blsp`
+  (new `substring` describe block); `docs/primitives.md` + the `PRIMITIVE_DOCS`
+  arglist updated. Required `make install` so the lint hook's `nest` stops
+  false-flagging the 2-arg calls.
+- **Doc-only fixes** for three undocumented-but-correct behaviours the LLM
+  tripped on: (a) a `fn`/`defn` body of several forms is an implicit `do`
+  (`brood-for-claude.md` *Defining things*); (b) under a pty, `term-poll`
+  delivers Enter as `:ctrl-m`/`:ctrl-j` (raw CR/LF), not `:enter` — a line editor
+  must treat all three as submit (`primitives.md` `term-poll` row); (c)
+  `node-name`/`node-start`/`connect` return a **keyword** (`:alice@host`), not a
+  string (`primitives.md`).
+
+**Deferred / needs investigation** (surfaced, not fixed): clean-disconnect
+`nodedown` (connect-test saw it not fire on a peer's clean exit, yet the devlog
+records EOF→nodedown as implemented — needs a focused 2-node repro to tell a
+residual bug from a stale observation); `doc-search` returning `nil` for
+plausible multi-word queries (a fuzzy-vs-token-index design call); the formatter
+relocating inline `;` comments inside `cond`.

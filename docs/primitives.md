@@ -36,7 +36,7 @@ arg silently becoming `nil`.
 | | `map-dissoc` | 2 | a fresh map with a key removed |
 | | `map-pairs` | 1 | entries as a list of `[k v]` vectors, insertion order, one O(n) pass — the sole enumerator; `keys`/`vals`/`contains?`/`reduce-kv` are all Brood over it |
 | **String** | `string-length` | 1 | char count |
-| | `substring` | 3 | characters `[start, end)`, char-indexed |
+| | `substring` | 2-3 | characters `[start, end)`, char-indexed; `end` defaults to `(string-length s)` |
 | | `upper` | 1 | `s` upper-cased (Unicode-aware, e.g. `ß` → `SS`) |
 | | `lower` | 1 | `s` lower-cased (Unicode-aware) |
 | | `string->number` | 1 | strict parse → int, else float, else `nil` (`"3abc"` → `nil`, unlike `read-string`) |
@@ -53,7 +53,7 @@ arg silently becoming `nil`.
 | **Terminal** (the display/input seam — ADR-046; the in-process crossterm frontend that paints the render-op protocol, `std/display.blsp`) | `term-enter` | 0 | take over the terminal: raw mode + alternate screen, cursor hidden → nil. Pair with `term-leave` |
 | | `term-leave` | 0 | restore the terminal (show cursor, leave alternate screen, disable raw mode) → nil |
 | | `term-size` | 0 | terminal size as `[cols rows]` (character cells) |
-| | `term-poll` | 1 | `(term-poll ms)` → wait up to `ms` ms for a key: a 1-char string (printable), a keyword for specials (`:up` `:down` `:left` `:right` `:enter` `:escape` `:backspace` `:tab` `:back-tab` `:delete` `:home` `:end` `:page-up` `:page-down`, ctrl combos like `:ctrl-c`, alt combos like `:alt-f`), or `nil` on timeout. Always pass a finite `ms` |
+| | `term-poll` | 1 | `(term-poll ms)` → wait up to `ms` ms for a key: a 1-char string (printable), a keyword for specials (`:up` `:down` `:left` `:right` `:enter` `:escape` `:backspace` `:tab` `:back-tab` `:delete` `:home` `:end` `:page-up` `:page-down`, ctrl combos like `:ctrl-c`, alt combos like `:alt-f`), or `nil` on timeout. Always pass a finite `ms`. **Enter caveat:** `:enter` is the named-key event, but a raw CR/LF byte (a pty, CRLF translation, or piped input) arrives as `:ctrl-m` (CR `0x0d`) / `:ctrl-j` (LF `0x0a`) — a line editor should treat all three as "submit" |
 | | `term-draw` | 1 | paint a **frame** — a vector of render ops `[:clear]` / `[:text row col s]` / `[:text row col s face]` / `[:cursor row col]`, where a face is a map like `{:fg :red :bold true}` → nil. The frontend that interprets the display protocol |
 | | `term-raw-enter` | 0 | enter raw mode **only** — no alternate screen, cursor stays visible, scrollback preserved → nil. The seam for an *inline* editor (the REPL, `std/lineedit.blsp`); use `term-enter` for a full-screen TUI. Pair with `term-raw-leave` |
 | | `term-raw-leave` | 0 | leave raw mode (teardown for `term-raw-enter`) → nil |
@@ -120,7 +120,7 @@ arg silently becoming `nil`.
 | | `worker-threads` | 0 | size of the scheduler's worker-thread pool (≈ nproc; `-j` overrides) |
 | **Distributed nodes** ([docs](distribution.md), ADR-034) | `node-start` | 3 | name this runtime (`node`, `"host:port"`, `cookie`), start the acceptor; cookie is the HMAC key for handshake v2 (never on the wire). Returns the node name |
 | | `connect` | 1 | dial `"name@host:port"`, complete the v2 handshake (magic+version, nonce-exchange, HMAC challenge-response). Returns the peer's node name |
-| | `node-name` | 0 | this runtime's node name (`:nonode` until `node-start`) |
+| | `node-name` | 0 | this runtime's node name — a **keyword** like `:alice@host` (`:nonode` until `node-start`); `(str (node-name))` for string ops. `node-start`/`connect` likewise return keywords |
 | | `nodes` | 0 | list of currently connected peer node names |
 | | `monitor-node` | 1 | get `[:nodedown name]` when the link to node `name` drops (heartbeat timeout or clean close). Persistent — fires on each down |
 
