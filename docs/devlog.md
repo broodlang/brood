@@ -10798,3 +10798,28 @@ records EOF→nodedown as implemented — needs a focused 2-node repro to tell a
 residual bug from a stale observation); `doc-search` returning `nil` for
 plausible multi-word queries (a fuzzy-vs-token-index design call); the formatter
 relocating inline `;` comments inside `cond`.
+
+## 2026-05-31 — clean-disconnect `nodedown`: resolved (stale observation) + regression tests
+
+Closed the two items the connect-test triage left open with tests.
+
+- **Clean-disconnect `nodedown` is NOT a bug** — the prior entry's suspicion was
+  a stale observation. A focused 2-node repro (built both directions) shows the
+  survivor receives `[:nodedown name]` **~100–200 ms** after the peer's *clean*
+  exit (process returns → socket FIN → the reader's `read_frame` hits EOF →
+  `drop_link` → `fire_nodedown`), and `(nodes)` prunes immediately — nowhere near
+  the 6 s heartbeat `DOWN_AFTER`. Holds whether the **dialer** watches the
+  acceptor or vice-versa. The `drop_link`-on-EOF path has existed since
+  `b8b84fa` (2026-05-28), so the connect-test report (which likely monitored the
+  *short* `:a` instead of the authoritative `:a@host`, hitting the
+  monitor-an-unknown-node→immediate-`nodedown` path) was never reproducible.
+  New end-to-end guard `clean_peer_exit_fires_nodedown_promptly` in
+  `crates/cli/tests/distribution.rs`: the survivor's `(after 5000 …)` is *below*
+  the 6 s heartbeat window, so a pass proves close-detection rather than
+  heartbeat liveness.
+- **`nest run --main` regression test** — `crates/nest/tests/run_main.rs` runs
+  the real `nest` binary against a scaffolded project and asserts `--main scratch`
+  and `--main scratch/fn` override the manifest's `:main` (the `*project-main-override*`
+  slot that `run-project` prefers over the manifest `project-setup` re-applies).
+  Process-isolated because in-language tests share one runtime's global table and
+  these toggle `*project-main*`-family globals.
