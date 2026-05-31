@@ -1897,6 +1897,17 @@ as designed, with two refinements from building it:
   app reads external `.blsp` (an editor's `init.blsp`: add layers/keymaps/modes,
   redefine commands) against the live runtime — only the stripped modules are
   unavailable to it.
+- **No Rust at release time (2026-05-31 follow-on).** The lean runtime is built
+  *once* at `make install` and **baked into `nest`** (`crates/nest/build.rs` reads
+  `BROOD_EMBED_RUNTIME` and `include_bytes!`s it; `Makefile` builds it first).
+  `nest release` appends the app to that embedded copy — pure file-ops, verified
+  to run with an empty `PATH` (no cargo/rustc). A plain `cargo build` of `nest`
+  embeds nothing and falls back to building the runtime from source. **One variant
+  for now: lean + `gui`** (the embedded runtime includes the windowing backend
+  when GUI is configured, so windowed apps just work; a non-gui app pays ~4 MB it
+  doesn't use). A future opt-in terminal-only variant is the planned next step.
+  The brief gui-feature *detection* that drove a per-app variant was removed in
+  favour of the single embedded variant.
 
 
 ## ADR-039 — Supervised processes with mode-gated resume checkpoints
@@ -5186,6 +5197,57 @@ in the frontend), ADR-079 (the sibling GUI-`Face` work this lands alongside). Li
 `crates/lisp/src/gui.rs` (`Op::CursorZone`, hit-test on `CursorMoved`) +
 `crates/lisp/src/builtins.rs` (`gui-draw` parsing) + `std/display.blsp`.
 
+## ADR-083 — Output ports (`*out*`/`*err*`) and an async, safe logger
+
+**Status:** accepted, shipped (2026-05-31).
+
+**Context.** `print`/`println` wrote straight to stdout via a Rust primitive.
+A host like the editor (myedit) needs output to land somewhere *other* than
+stdout — an in-editor buffer (`*Messages*`) — and the project needs a real
+**logger** that is *async* (a log call must not block the caller) and *safe* (no
+interleaved/garbled lines, no shared mutable state, an isolated failure). Both are
+the same underlying need: *write a string to a sink*, where the sink might be a
+process that owns a buffer.
+
+**Decision.**
+- **A port is a one-argument function `(fn (s) …)`** that consumes a ready string
+  — nothing more (ADR-011: the simplest thing; a richer named/introspectable port
+  value can come later behind `io-write` without changing callers). The prelude
+  declares dynamic vars **`*out*`/`*err*`** holding the current ports and routes
+  `print`/`println`/`eprint`/`eprintln` through them.
+- **Rust keeps only mechanism, split in two** (ADR-006): `%render` (args → the
+  space-joined display string, the exact text stdout would show) and
+  `%write-out`/`%write-err` (a ready string → stdout/stderr, the former honouring
+  the `with-out-str` capture stack). `*out*` defaults to `%write-out`, so
+  `with-out-str` is unaffected and the default path is unchanged. Everything else
+  — `std/io.blsp` (port constructors + `with-out`/`with-err`) and `std/log.blsp`
+  (the logger) — is Brood.
+- **The logger is one `hatch` process** (ADR-006) carrying `{:level :backends}`.
+  A log call is a fire-and-forget **cast** → async; the single process serialises
+  every write → safe (no interleaving) and isolates a crashing backend. A
+  *backend* is an `io` port + a min level + a formatter, so the logger **reuses
+  ports** rather than inventing a sink. The default logger is addressed via the
+  kernel name registry (`register`/`whereis :logger`), with a stderr fallback when
+  none runs so a log is never lost.
+- **A buffer sink is a `process-port`/`process-backend`**: the string is *sent* to
+  the buffer-owning process as `[:io-write s]` (copied, share-nothing), never a
+  mutated value — consistent with immutability (ADR-026) and why it is safe.
+
+**Rejected / deferred.** A tagged-map port value (named/introspectable — deferred
+until `nest observe` wants it); a `*logger*` dynamic override (additive, deferred
+until a consumer needs per-scope loggers); a string-collecting port (`with-out-str`
+already covers capture). Building the logger on `std/task` (one-shot thunk+timeout,
+wrong shape) or a hand-rolled receive loop (duplicates `hatch`).
+
+**Consequences.** `print` now goes through a dynamic var + indirect call (a small
+cost on a cold path, broadly worth the capability). Dynamic bindings don't reach a
+`spawn`ed child, so `with-out` + `spawn` does not redirect the child — pass it a
+port explicitly. `nest new`'s default scaffold starts a logger and documents the
+buffer route. Lives in `crates/lisp/src/builtins.rs` (`%render`/`%write-out`/
+`%write-err`), `std/prelude.blsp` (`*out*`/`*err*` + the four print fns),
+`std/io.blsp`, and `std/log.blsp`; tested in `tests/io_test.blsp` +
+`tests/log_test.blsp`.
+
 ## ADR-082 — Opt-in type annotations & runtime contracts (`sig` / `sig!`)
 
 **Status:** accepted, shipped (2026-05-31). (ADR-081 is the concurrent dist
@@ -5337,3 +5399,54 @@ ADR-043 (the memory cap that is a backstop, not a substitute for this bound).
 Lives in `crates/lisp/src/dist.rs` (`HandshakeSlot`, `MAX_IN_FLIGHT_HANDSHAKES`,
 `MAX_HANDSHAKE_FRAME`), `dist/handshake.rs` (capped handshake reads), and
 `dist/wire.rs` (`read_frame_capped`).
+
+## ADR-084 — Quasiquote is a compile/eval-time code transform, not a runtime walker
+
+**Context.** A moving collector relocates LOCAL handles; a Rust frame that holds a
+LOCAL handle across an `eval` call (which can collect at any safepoint, ADR-061)
+must root it on the operand stack or it dangles. The historically worst offender
+was the **runtime quasiquote walker** (`macros::quasiquote_depth`/`expand_seq`): it
+evaluated each `~unquote` / `~@unquote-splicing` *inline* while accumulating the
+partially-built result, the remaining template, and the env as LOCAL transients —
+so it needed a hand-written `push_root`/`truncate_roots`/`teardown_err` rooting
+dance around every recursion (the kind of bespoke discipline that is easy to get
+subtly wrong, and the class of bug the GC audit kept circling).
+
+**Decision.** Quasiquote is now a **pure structural transform that emits builder
+code**, run at compile time (in the `compile` pass, after `resolve`) and as the
+`eval` fallback for dynamically-constructed forms — never as a runtime walker.
+`` `(a ~b ~@c) `` rewrites to `(append (list 'a) (list b) c)`; the *normal*
+evaluator then runs that, so the unquoted sub-forms are ordinary `list`/`append`
+operands the evaluator already roots. The transform itself calls **no `eval`**, so
+it hits no safepoint and needs **no operand-stack rooting** — the entire bespoke
+rooting dance is deleted. `expand_quasiquote` in `eval/macros.rs`.
+
+- **Auto-gensym (`x#`)** resolves to a fresh symbol *in* the transform, once per
+  template symbol per expansion. Because a macro body is re-expanded on every
+  application, each expansion still gets distinct gensyms (Clojure-style hygiene).
+- **Namespace qualification (ADR-065 §7) is unaffected.** `resolve` still descends
+  the *template* and qualifies free refs at macro-definition time, before the
+  transform turns the (already-qualified) template into builder code — so no
+  pass-order change was needed.
+- **Builder primitives.** The transform emits `list`/`append`/`vector`/`hash-map`/
+  `apply`. `vector`/`hash-map`/`apply` are kernel builtins; `list` and `append` are
+  prelude functions — but the first macro in the prelude (`defn`) uses a backtick
+  template, so minimal seed `list`/`append` are defined at the very top of
+  `std/prelude.blsp` (raw `def`/`fn`, no backtick), `def`-rebound by the full
+  seq-generic versions further down.
+
+**The general rule (the reason this is an ADR, not just a refactor).** The GC
+hazard lives only at a **Rust frame that loops or accumulates LOCAL handles across
+an `eval`**. Brood code is immune (the evaluator roots its own transients). So the
+standing guidance: a Rust primitive that re-enters `eval` should be **single-shot**
+— one bounded step that returns to the evaluator — rather than a loop that drives
+evaluation while holding heap handles. When a primitive *would* need to accumulate
+across `eval`, prefer expressing it as a transform-to-code (expand, then let the
+evaluator run the code) or move it into Brood (ADR-006). Remaining rooted-Rust
+re-entry points (the macroexpand fixpoint, `reload-defs`) are candidates to shrink
+the same way.
+
+**Status.** Done — `expand_quasiquote` + the prelude seed; the runtime walker,
+`expand_seq`, and `teardown_err` are deleted. Verified: VM≡tree-walker differential,
+the full in-language suite, and a quasiquote-heavy loop (runtime backtick with
+unquote + splice + autogensym) green under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`.

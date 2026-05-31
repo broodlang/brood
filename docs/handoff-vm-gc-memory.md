@@ -62,11 +62,14 @@ Authoritative detail lives in `docs/decisions.md` (ADRs cited inline),
    exempt.)
 
 4. **Design follow-up — the "single-shot Rust primitive" rule (ADR-006 aligned).**
+   ~~Move `quasiquote` off the runtime walker.~~ **DONE (2026-05-31, ADR-084).**
    The GC hazard only exists at a Rust frame that loops/accumulates across `eval`;
-   Brood code is immune. So: move **`quasiquote` → a Brood macro** over
-   `cons`/`list`/`eval` (it was the worst historical offender), then
-   `macroexpand`/`reload-defs` → Brood, shrinking the rooted-Rust surface. Record
-   the rule as an ADR. Pure cleanup/robustness, not urgent.
+   Brood code is immune. `quasiquote` was the worst offender and is now a pure
+   **compile/eval-time transform to builder code** (`expand_quasiquote`) — it calls
+   no `eval`, so its bespoke operand-stack rooting (`expand_seq`/`teardown_err`) is
+   deleted. The rule is recorded as ADR-084. **Still open (same rule, lower
+   priority):** the `macroexpand` fixpoint and `reload-defs` are the remaining
+   rooted-Rust re-entry points to shrink the same way.
 
 ### VM (ADR-076 — "still open, pure perf, deferrals already correct")
 
@@ -94,8 +97,7 @@ Authoritative detail lives in `docs/decisions.md` (ADRs cited inline),
 
 1. ~~Fix #1 (promote cyclic-capture)~~ — **DONE (2026-05-31).** GC has no known
    memory-safety holes left.
-2. **#4 (quasiquote → Brood macro)** + record the "single-shot Rust primitive" rule
-   as an ADR — *in progress next* (the chosen follow-up after #1).
+2. ~~#4 (quasiquote → compile/eval-time transform)~~ — **DONE (2026-05-31, ADR-084).**
 3. **#10 then #9** — cheap: measure suite peak, then right-size the ADR-043 caps.
 4. **#5/#6 (VM coverage)** when perf wants it — unlocks #7 (retire the tree-walker).
 5. **#2 (RUNTIME-region GC)** is the larger, lower-urgency item.

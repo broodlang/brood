@@ -11268,3 +11268,114 @@ codegen unit). Effects:
 shipped app reads an external `init.blsp` that `(require 'layers)`s, adds
 layers/keymaps, and redefines commands against the live runtime — verified
 end-to-end with a lean release. Documented in [`release.md`](release.md).
+
+---
+
+## 2026-05-31 — Output ports + an async, safe logger (ADR-083)
+
+**Goal.** A logger that's *async* and *safe*, and — for hosts like myedit —
+`println` redirectable to "any io", which might be a buffer. Settled on building
+both as two altitudes of one primitive: *write a string to a sink*.
+
+**Built.**
+- **Ports.** A port is just a 1-arg fn `(fn (s) …)`. Rust's `print` was split into
+  `%render` (args → the space-joined display string) + `%write-out`/`%write-err`
+  (a ready string → stdout/stderr, the former honouring the `with-out-str` capture).
+  The prelude declares `*out*`/`*err*` (defaulting to those writers) and rebuilds
+  `print`/`println`/`eprint`/`eprintln` to render then write through the port.
+  `with-out-str` is untouched (default `*out*` is still the capturing writer).
+- **`std/io.blsp`** (`require 'io`): `stdout-port`/`stderr-port`/`process-port`/
+  `fn-port`, the `io-write` seam, and `with-out`/`with-err` (binding macros). A
+  `process-port` sends `[:io-write s]` — the share-nothing path to a buffer.
+- **`std/log.blsp`** (`require 'log`): a `hatch` gen-server holding
+  `{:level :backends}`. Log calls are casts (async); the one process serialises
+  writes (safe) and isolates a crashing backend. Backends are `io` ports + a min
+  level + a formatter (`stdout`/`stderr`/`file`/`fn`/`process` backends); levels
+  `:debug<:info<:warn<:error`; the default logger is `register`ed as `:logger`
+  with a stderr fallback. `log`/`log-info`/`log-warn`/`log-error`, `add-backend`,
+  `set-log-level`, `start-logger`/`stop-logger`.
+- **Scaffold + docs.** `nest new`'s default `main` template now starts a logger,
+  logs a line, and comments the file/buffer-backend routes. `docs/language.md`
+  gains an "Output ports and logging" section; ADR-083 records the design.
+
+**Gotcha found & fixed.** First cut iterated backends with `(pair? backends)` +
+`first`/`rest`, but `:backends` defaults to a *vector* and `(pair? [x])` is
+`false` (and `(cons x [..])` makes an improper pair) — so it silently emitted
+nothing while the process stayed alive (an unmatched-shape no-op, not a crash).
+Switched dispatch to `fold` (walks list *or* vector) and `add-backend` to
+`(cons b (apply list …))`.
+
+**Verified.** `tests/io_test.blsp` (8) + `tests/log_test.blsp` (7, incl. 40
+processes logging through one logger with zero loss). Full `cargo nextest -p
+brood` green (316), including `suite` (discovers the new tests) and `differential`
+(tree-walker vs VM agree on the changed `print`).
+
+**Note.** `crates/nest/src/main.rs` was mid-refactor (a `features`/`resolve_runtime`
+arity break — the user's concurrent WIP) and didn't build, so `nest check`/`nest
+test` ran a stale binary; verification was done with `cli` + `nextest` instead.
+`nest format`/`nest test` still want a green `nest` build.
+
+## 2026-05-31 (cont.) — `nest release` with no Rust + GUI in releases
+
+Two user directives: *(1) a released windowed app errored "gui backend not
+compiled in" (the lean `--no-default-features` build drops `gui`); (2) make
+`nest release` work with no Rust toolchain at all.*
+
+**GUI in the release.** First pass: auto-detect `gui-display`/`gui-open` in the
+bundled source and build the lean runtime with `--features brood/gui`. Then,
+per the user's "just one variant with gui for now," that detection was **removed**
+in favour of a single lean+gui runtime variant — simpler, and the embedded model
+(below) needs a fixed variant anyway.
+
+**No Rust at release time.** The lean+gui runtime is now built **once at
+`make install`** and **embedded into `nest`** via `crates/nest/build.rs`
+(`BROOD_EMBED_RUNTIME=<path>` → copied to `OUT_DIR` → `include_bytes!` in
+`main.rs`). `nest release`'s `resolve_runtime` returns the base *bytes*: the
+embedded runtime when present (no toolchain), else `--runtime PATH`, else a
+from-source cargo build (the plain-`cargo build` dev fallback). `Makefile`
+`install` builds the runtime first (`--profile release-lean --no-default-features
+$(GUI_FEATURES) -p cli`) then bakes it into the `nest` install.
+
+**Verified.** With `PATH=/tmp/emptybin` (no cargo, rustc, or even coreutils),
+`nest release` produced a 9.6 MB self-contained gui-capable binary in one step —
+no build, no subprocess. Installed `nest` grew ~14 MB → ~24 MB (the embedded
+runtime). A non-gui `cargo build` of `nest` still compiles (empty embed →
+build-from-source fallback). `make install` + the `release_bundle` integration
+test green; ADR-038 + [`release.md`](release.md) updated.
+
+**Next (deferred):** an opt-in terminal-only (no-gui) variant so non-gui apps
+skip the ~4 MB windowing backend.
+
+## 2026-05-31 — Quasiquote → a compile/eval-time code transform (ADR-084); two-engine bench
+
+**Goal.** The VM/GC/Memory handoff's cleanup item #4: move quasiquote off the
+runtime walker. The walker (`quasiquote_depth`/`expand_seq`) evaluated each
+`~unquote`/`~@` *inline* while accumulating LOCAL transients in Rust, so it carried
+a hand-written operand-stack rooting dance (`push_root`/`truncate_roots`/
+`teardown_err`) — the worst remaining instance of the rooted-Rust-re-entry hazard.
+
+**Built.** `quasiquote` is now `expand_quasiquote` — a **pure structural transform
+to builder code**: `` `(a ~b ~@c) `` → `(append (list 'a) (list b) c)`, which the
+*normal* evaluator runs. The transform calls no `eval`, hits no safepoint, and
+needs no rooting; the rooting dance, `expand_seq`, and `teardown_err` are deleted.
+Runs in the `compile` pass (after `resolve`) and as the `eval` fallback for
+dynamically-built forms. Auto-gensym (`x#`) resolves in the transform (fresh per
+expansion); ns-qualification (ADR-065 §7) is unchanged because `resolve` still
+qualifies the *template* before it becomes builder code. The emitted `list`/
+`append` are seeded at the top of `std/prelude.blsp` (raw `def`/`fn`) so the first
+backtick macro (`defn`) can use them — the full versions `def`-rebind the seeds.
+Full writeup + the "single-shot Rust primitive" rule: **ADR-084**.
+
+**Verified.** macros/quasiquote/resolve unit tests (15/15), VM≡tree-walker
+differential, full in-language suite (1203/1203), gc.rs (9/9) and a quasiquote-heavy
+loop (runtime backtick + unquote + splice + autogensym) green under
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`.
+
+**Also — two-engine benchmark.** `benches/eval.rs` now runs every eval benchmark
+under both engines (`Vm` / `Tw` rows via `set_forced_engine`), after a benchmark
+archive measured on a dirty tree made it look like a ~44% eval-core *code* win when
+it was really the VM-vs-tree-walker gap: `fib 20` is ~7.3 ms on the VM (default)
+vs ~13 ms on the tree-walker (`BROOD_VM=0`). The VM is always compiled in (no
+feature gate) and default-on, including in the lean `--no-default-features` release
+— only `BROOD_VM=0` or a VM-deferred form (`match*`/real-default `&optional`) takes
+the slow path. No more single numbers without an engine label.

@@ -777,10 +777,24 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
     nm
     " project's entry-point module — wired up as\n"
     "the `nest run` entry by default (module `main`, fn `main`).\"\n"
-    "  (:use hello))\n"
+    "  (:use hello)\n"
+    "  (:use log))  ; the async, safe logger (std/log)\n"
     "\n"
     "(defn main ()\n"
-    "  \"Entry point: print the project's greeting.\"\n"
+    "  \"Entry point: start the logger and print the project's greeting.\"\n"
+    "  ;; `start-logger` spawns a logging process (async — each `log-*` call is\n"
+    "  ;; fire-and-forget, and one process serialises every write, so lines never\n"
+    "  ;; interleave). The default backend writes to stdout at :info and up.\n"
+    "  (start-logger)\n"
+    "  (log-info \"starting "
+    nm
+    "\")\n"
+    "  ;; Add backends to fan output out — e.g. to a file, or to a process that\n"
+    "  ;; owns a buffer (an editor's *Messages*); the line is sent as [:io-write s]:\n"
+    "  ;;   (add-backend (file-backend \"app.log\"))\n"
+    "  ;;   (add-backend (process-backend buffer-pid))\n"
+    "  ;; To redirect plain `println` the same way, `(require 'io)` and use\n"
+    "  ;;   (with-out (process-port buffer-pid) (println \"…\")).\n"
     "  (println (greeting)))\n"))
 
 (defn project--hello-template (nm)

@@ -12,6 +12,26 @@
 ;; with `defn`, so the library is defined exactly the way you would define your
 ;; own functions — including `+`, which is "just a function".
 
+;; ---- bootstrap: the list builders the quasiquote expander emits ----
+;; `quasiquote` is a compile/eval-time transform: `` `(a ~b ~@c) `` becomes builder
+;; code `(append (list 'a) (list b) c)`. The very first macro below (`defn`) already
+;; uses a backtick template, so the symbols that builder code names must be bound
+;; before any prelude form runs. `cons`/`vector`/`hash-map`/`apply` are kernel
+;; builtins; `list` and `append` are not — so seed minimal versions here (raw
+;; `def`/`fn`, no backtick, no quasiquote dependency). The full seq-generic,
+;; tail-recursive `list`/`append` further down simply `def`-rebind these.
+(def list (fn (& xs) "A list of the given arguments." xs))
+(def append--empty? (fn (x)
+  (if (%eq (type-of x) :nil) true
+    (if (%eq (type-of x) :vector) (%eq (vector-length x) 0) false))))
+(def append--2 (fn (a b)
+  ;; Cons every element of seq `a` (a list or vector) onto list `b`.
+  (if (append--empty? a) b (cons (first a) (append--2 (rest a) b)))))
+(def append (fn (& lists)
+  ;; Concatenate any number of sequences into one list, left to right.
+  (if (append--empty? lists) nil
+    (append--2 (first lists) (apply append (rest lists))))))
+
 ;; `defn` itself: forwards everything after the name to `fn`, so it inherits
 ;; both single-clause — (defn f (x) ...) => (def f (fn (x) ...)) — and the
 ;; multi-clause pattern form — (defn f ((0) 1) ((n) ...)) => (def f (fn ((0) 1) ((n) ...))).
@@ -576,15 +596,37 @@ Works on maps (by key) and vectors (by integer index, which must be in range)."
   (let (r (rem a b)) (if (< r 0) (+ r (abs b)) r)))
 
 ;; ---- I/O --------------------------------------------------------------------
-;; `print` (no newline) is the primitive; `println` just appends one.
+;; Output is redirectable. A *port* is just a 1-arg fn that consumes a ready
+;; string (`(fn (s) …)`); `*out*`/`*err*` are dynamic vars holding the current
+;; stdout/stderr ports, and `print`/`println`/`eprint`/`eprintln` render their
+;; args (Rust `%render` — the exact text stdout would show) and hand the string to
+;; the port. The defaults are the kernel writers `%write-out`/`%write-err`; rebind
+;; with `binding` (or `std/io`'s `with-out`/`with-err`) to send output to a
+;; process, a buffer, or any callback — see std/io.blsp. The default `*out*` stays
+;; `%write-out`, which honours the capture stack, so `with-out-str` is unaffected.
+;;
+;; Declared with the `%declare-dynamic` primitive directly because the `defdyn`
+;; macro isn't defined until further down the prelude (and `print` lives here).
+(%declare-dynamic '*out*)
+(def *out* %write-out)
+(%declare-dynamic '*err*)
+(def *err* %write-err)
+(defn print (& xs)
+  "Write the display forms of the arguments to the current `*out*` port (stdout by default); returns nil."
+  (*out* (apply %render xs))
+  nil)
 (defn println (& xs)
-  "Write the display forms of the arguments to stdout, followed by a newline."
-  (apply print xs)
-  (print "\n"))
+  "Write the display forms of the arguments to the current `*out*` port, followed by a newline."
+  (*out* (str (apply %render xs) "\n"))
+  nil)
+(defn eprint (& xs)
+  "Write the display forms of the arguments to the current `*err*` port (stderr by default); returns nil."
+  (*err* (apply %render xs))
+  nil)
 (defn eprintln (& xs)
-  "Write the display forms of the arguments to stderr, followed by a newline."
-  (apply eprint xs)
-  (eprint "\n"))
+  "Write the display forms of the arguments to the current `*err*` port, followed by a newline."
+  (*err* (str (apply %render xs) "\n"))
+  nil)
 
 ;; `with-out-str` runs `body` for effect with stdout diverted into a capture
 ;; buffer, and returns the captured text (a string) instead of `body`'s value —

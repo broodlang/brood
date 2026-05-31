@@ -691,6 +691,30 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::variadic(any, nil_ty),
         eprint,
     );
+    // The render/write split behind the dynamic `*out*`/`*err*` ports
+    // (std/prelude.blsp, std/io.blsp): `%render` produces the text `print` would
+    // show, and `%write-out`/`%write-err` write a ready string to stdout/stderr.
+    def(
+        heap,
+        "%render",
+        Arity::any(),
+        Sig::variadic(any, string),
+        render,
+    );
+    def(
+        heap,
+        "%write-out",
+        Arity::exact(1),
+        Sig::new(vec![string], nil_ty),
+        write_out,
+    );
+    def(
+        heap,
+        "%write-err",
+        Arity::exact(1),
+        Sig::new(vec![string], nil_ty),
+        write_err,
+    );
     def(
         heap,
         "read-line",
@@ -1512,6 +1536,9 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("pr-str", &["x"], "The readable (re-readable) text form of x."),
     ("print", &["&", "xs"], "Write the display forms of the arguments to stdout; returns nil."),
     ("eprint", &["&", "xs"], "Write the display forms of the arguments to stderr; returns nil."),
+    ("%render", &["&", "xs"], "The space-joined display forms of the arguments as one string (no output). The rendering half of `print`; Brood's print/println route the result through the dynamic `*out*` port."),
+    ("%write-out", &["s"], "Write the ready string `s` to the current stdout sink — the active capture buffer (`with-out-str`) if set, else real stdout. The default `*out*` port."),
+    ("%write-err", &["s"], "Write the ready string `s` to real stderr (never captured). The default `*err*` port."),
     ("stdout-tty?", &[], "True when stdout is an interactive terminal (false when piped or captured)."),
     ("stdin-tty?", &[], "True when stdin is an interactive terminal (false when redirected from a pipe or file). The REPL gates raw-mode line editing on this."),
     ("now", &[], "Wall-clock milliseconds since the Unix epoch."),
@@ -2283,6 +2310,38 @@ fn eprint(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::Nil)
 }
 
+/// `(%render & xs)` — the space-joined display forms of the arguments as a single
+/// string (no output). The rendering half of `print`, split out so Brood's
+/// `print`/`println` — which route the result through the dynamic `*out*` port —
+/// hand a non-stdout sink (a buffer, a process) the exact text stdout would show.
+fn render(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let parts: Vec<String> = args.iter().map(|&a| printer::display(heap, a)).collect();
+    Ok(heap.alloc_string(&parts.join(" ")))
+}
+
+/// `(%write-out s)` — write the ready string `s` to the current stdout sink: the
+/// active capture buffer if one is set (`with-out-str`, the MCP channel), else
+/// real stdout. The write half of `print` and the default value of the `*out*`
+/// port — keeping it the default is what lets `with-out-str` still capture
+/// un-redirected output.
+fn write_out(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let s = expect_string(heap, "%write-out", arg(args, 0))?;
+    if !capture_write(&s) {
+        write_stdout(&s);
+    }
+    Ok(Value::Nil)
+}
+
+/// `(%write-err s)` — write the ready string `s` to real stderr (never captured,
+/// matching `eprint`). The default value of the `*err*` port.
+fn write_err(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use std::io::Write;
+    let s = expect_string(heap, "%write-err", arg(args, 0))?;
+    eprint!("{}", s);
+    std::io::stderr().flush().ok();
+    Ok(Value::Nil)
+}
+
 /// `(stdout-tty?)` — true when stdout is an interactive terminal, false when it's
 /// captured (a pipe, a file, `cargo test`). The test framework uses this to emit
 /// ANSI colour only when a human is watching, so captured output (what an LLM or
@@ -2809,6 +2868,10 @@ fn eval_string_inner(heap: &mut Heap, env: EnvId, src: &str, reset_ns: bool) -> 
 /// (`--no-default-features`) carries no test/observer/tooling/REPL source
 /// (ADR-038, docs/release.md). `builtin_module` consults both.
 const CORE_MODULES: &[(&str, &str)] = &[
+    // Output ports: the redirectable sink behind print/println — a port is a 1-arg
+    // string sink, with `process-port`/`fn-port` + `with-out`/`with-err`. Pairs
+    // with the prelude's `*out*`/`*err*` dynamic vars. Opt-in, no dependencies.
+    ("io", include_str!("../../../std/io.blsp")),
     ("project", include_str!("../../../std/project.blsp")),
     // The package manager (ADR-037): resolves the manifest's :dependencies into a
     // lock file + load-path entries. Required lazily by `project-setup` only when a
@@ -2838,6 +2901,11 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // synchronous `await`. Pure Brood over spawn / receive / exit — the generic
     // version of the editor's hand-rolled async-eval watchdog. Opt-in.
     ("task", include_str!("../../../std/task.blsp")),
+    // An async, safe logger (ADR-006): a `hatch` process holding a list of
+    // backends, each an `io` port + a min level + a formatter. Log calls are casts
+    // (fire-and-forget = async); the one process serialises writes (no interleaving)
+    // and isolates a backend crash. Opt-in, never in the prelude.
+    ("log", include_str!("../../../std/log.blsp")),
     // The editor framework's buffer model (M2 Phase 1, ADR-045): an immutable
     // buffer over the rope primitives, opt-in, never in the prelude.
     ("buffer", include_str!("../../../std/buffer.blsp")),

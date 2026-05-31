@@ -80,8 +80,14 @@ install: ## Install `brood`, `nest` and `brood-lsp` into $(PREFIX)/bin (./config
 	# (`RUSTFLAGS="-C debug-assertions=on"`, see CLAUDE.md) is exported in the
 	# shell — so the installed binary is never accidentally debug-armed (which
 	# would carry the GC tripwire/verifier overhead and skew benchmarks).
+	# Build the single lean (+gui if `./configure --with-gui`) runtime that `nest`
+	# embeds, so `nest release` ships a self-contained app with NO Rust at release
+	# time (ADR-038, docs/release.md). `--no-default-features` strips the dev/debug
+	# surface; `$(GUI_FEATURES)` adds `--features brood/gui` when GUI is configured.
+	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo build --profile release-lean --no-default-features -p cli $(GUI_FEATURES)
 	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo install --path crates/cli  --force --root $(PREFIX) $(GUI_FEATURES)
-	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo install --path crates/nest --force --root $(PREFIX) $(GUI_FEATURES)
+	# Bake the runtime built above into `nest` (crates/nest/build.rs reads BROOD_EMBED_RUNTIME).
+	BROOD_EMBED_RUNTIME=$(CURDIR)/target/release-lean/brood RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo install --path crates/nest --force --root $(PREFIX) $(GUI_FEATURES)
 	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo install --path crates/lsp  --force --root $(PREFIX)
 
 uninstall: ## Remove the installed `brood`, `nest` and `brood-lsp` binaries from $(PREFIX)/bin

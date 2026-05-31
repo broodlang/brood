@@ -1,0 +1,104 @@
+;; std/log.blsp — the async, safe logger. Verifies delivery, level filtering
+;; (global and per-backend), live add-backend, the no-logger stderr fallback, and
+;; safety under concurrency (many processes logging through one logger, no loss).
+;;
+;; All blocks are :isolated: the logger registers the global name :logger and an
+;; :isolated unit runs alone with rolled-back globals, so parallel tests can't race
+;; the registry. Bodies stay tail-recursive (a test runs in a small-stack green
+;; process). Register-only — `nest test` discovers it.
+
+(defmodule log-test (:use test) (:use log) (:use io))
+
+;; ---- file-local helpers -----------------------------------------------------
+;; A backend that forwards each formatted line to `pid` (so the test can receive
+;; what the logger emitted).
+(defn lt-collect (pid) (fn-backend (fn (s) (send pid [:line s]))))
+
+;; Receive one line, or :timeout.
+(defn lt-line () (receive ([:line s] s) (after 800 :timeout)))
+
+;; Tail-recursive drain of `n` lines into a list (ascending arrival order).
+(defn lt-drain (n acc)
+  (if (= n 0) (reverse acc)
+    (receive ([:line s] (lt-drain (- n 1) (cons s acc)))
+             (after 800 (reverse (cons :timeout acc))))))
+
+;; Tail-recursive [0, n).
+(defn lt-upto (n) (lt-upto--down (- n 1) nil))
+(defn lt-upto--down (i acc) (if (< i 0) acc (lt-upto--down (- i 1) (cons i acc))))
+
+;; ---- delivery + formatting --------------------------------------------------
+(describe "log: delivery and levels"
+  :isolated
+  (test "a log call delivers a formatted line to a backend"
+    (let (me (self))
+      (start-logger {:level :debug :backends [(lt-collect me)]})
+      (log-info "hello")
+      (let (line (lt-line))
+        (stop-logger)
+        (is (includes? line "hello"))
+        (is (includes? line "INFO")))))
+
+  (test "structured meta does not break the default line"
+    (let (me (self))
+      (start-logger {:level :debug :backends [(lt-collect me)]})
+      (log :error "boom" {:code 500})
+      (let (line (lt-line))
+        (stop-logger)
+        (is (includes? line "boom"))
+        (is (includes? line "ERROR")))))
+
+  (test "a level below the logger's global minimum is dropped"
+    (let (me (self))
+      (start-logger {:level :info :backends [(lt-collect me)]})
+      (log-debug "drop-me")
+      (log-info "keep-me")
+      ;; only the :info line should arrive; the first one through must be it
+      (let (line (lt-line))
+        (stop-logger)
+        (is (includes? line "keep-me")))))
+
+  (test "per-backend :min-level filters independently of the logger level"
+    (let (me (self))
+      (start-logger {:level :debug
+                     :backends [(backend (fn-port (fn (s) (send me [:line s])))
+                                  {:min-level :warn})]})
+      (log-info "below")
+      (log-error "above")
+      (let (line (lt-line))
+        (stop-logger)
+        (is (includes? line "above"))))))
+
+;; ---- lifecycle --------------------------------------------------------------
+(describe "log: lifecycle"
+  :isolated
+  (test "add-backend routes subsequent logs to the new backend"
+    (let (me (self))
+      (start-logger {:level :debug :backends []})
+      (add-backend (lt-collect me))
+      (sleep 40)
+      ; let the add-backend cast land first
+      (log-info "after-add")
+      (let (line (lt-line))
+        (stop-logger)
+        (is (includes? line "after-add")))))
+
+  (test "with no logger running, log falls back and never throws"
+    (stop-logger)
+    (sleep 80)
+    ; let any prior logger's name clear from the registry
+    (is (nil? (logger)))
+    ;; fallback path writes to stderr; the call must still return nil cleanly
+    (assert= (log-info "nowhere") nil)))
+
+;; ---- concurrency ------------------------------------------------------------
+(describe "log: safe under concurrency"
+  :isolated
+  (test "N processes each log once; every line arrives, none lost or interleaved"
+    (let (me (self) n 40)
+      (start-logger {:level :debug :backends [(lt-collect me)]})
+      (fold (fn (acc i) (spawn (log-info (str "w" i))) acc) nil (lt-upto n))
+      (let (got (lt-drain n nil))
+        (stop-logger)
+        (assert= (count got) n)
+        (is (not (includes? got :timeout)))))))
