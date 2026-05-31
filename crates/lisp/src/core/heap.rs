@@ -223,6 +223,28 @@ fn gc_floor() -> usize {
     })
 }
 
+/// RUNTIME-closure count at or above which the eval safepoint auto-runs a
+/// **RUNTIME** compaction ([`Heap::maybe_runtime_collect`]) — the shared-code
+/// analog of [`gc_floor`]. The region only grows on `def`/hot-reload (≈1 KB per
+/// superseded closure), so a default of 4096 (~4 MB of churn) keeps a normal
+/// program — which defines each global once, far below this — from ever
+/// auto-collecting, while a sustained redefinition session is bounded. Like
+/// [`major_floor`] (and unlike [`gc_floor`]) this stays **nonzero under
+/// `BROOD_GC_STRESS`**: recompacting the whole RUNTIME region at *every*
+/// safepoint would be O(region) per step, so stress keeps it periodic (still
+/// exercised) at a small floor rather than literally every safepoint.
+/// Overridable via `BROOD_RT_GC_FLOOR` (object count, K/M ok).
+fn rt_gc_floor() -> usize {
+    static FLOOR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *FLOOR.get_or_init(|| {
+        if std::env::var_os("BROOD_GC_STRESS").is_some() {
+            gc_count_env("BROOD_RT_GC_FLOOR").unwrap_or(256)
+        } else {
+            gc_count_env("BROOD_RT_GC_FLOOR").unwrap_or(4096)
+        }
+    })
+}
+
 /// Live old-gen object count below which a **major** collection never fires —
 /// the old-gen counterpart of [`gc_floor`]. Crucially this is **not** zeroed by
 /// `BROOD_GC_STRESS`: stress makes *minor* collection fire at every safepoint
@@ -675,6 +697,15 @@ pub struct Heap {
     ///
     /// [`gc_enabled`]: Self::gc_enabled
     gc_threshold: usize,
+    /// Adaptive **RUNTIME**-collection trigger: the eval safepoint auto-compacts
+    /// the shared code region (when this heap uniquely owns it) once the RUNTIME
+    /// closure count crosses this. Recomputed after each auto-collect as
+    /// `max(RT_GC_FLOOR, 2 * live)`; on a *shared* runtime (collect can't run
+    /// without Step 2c's stop-the-world) it's raised to `2 * count` instead, so a
+    /// multi-process runtime backs off exponentially rather than attempting and
+    /// bailing every safepoint. `usize::MAX` while [`gc_enabled`] is false. See
+    /// [`rt_gc_floor`] and [`maybe_runtime_collect`](Self::maybe_runtime_collect).
+    rt_gc_threshold: usize,
     /// GC switch. `false` during the prelude *build* (`Heap::new`), `true` for
     /// real process heaps (`Heap::with_regions`); also forced `false` when the
     /// prelude `SharedCode` `Arc` is the default (empty) one, since a missing
@@ -863,6 +894,7 @@ impl Heap {
             roots: Vec::new(),
             env_roots: Vec::new(),
             gc_threshold: usize::MAX,
+            rt_gc_threshold: usize::MAX,
             gc_enabled: false,
             local_epoch: 0,
             remembered: Vec::new(),
@@ -899,6 +931,7 @@ impl Heap {
             roots: Vec::new(),
             env_roots: Vec::new(),
             gc_threshold: gc_floor(),
+            rt_gc_threshold: rt_gc_floor(),
             gc_enabled: true,
             local_epoch: 0,
             remembered: Vec::new(),
@@ -3404,8 +3437,10 @@ impl Heap {
     /// runtime `Arc` — i.e. no other process/thread can be reading the code region
     /// concurrently. That makes it sound without any stop-the-world (which is Step
     /// 2c, for the multi-process case); when the runtime is shared it returns `None`
-    /// and reclaims nothing. It is therefore **opt-in** (never wired into the
-    /// automatic GC): a caller invokes it at a known-quiescent point.
+    /// and reclaims nothing. The eval safepoint calls it automatically once churn
+    /// crosses [`rt_gc_threshold`](Self::rt_gc_threshold)
+    /// ([`maybe_runtime_collect`](Self::maybe_runtime_collect)); the
+    /// `(runtime-collect)` builtin is the explicit/force form.
     ///
     /// One pass, evacuate-and-rewrite: every RUNTIME handle in the globals, both
     /// LOCAL generations (`local`+`old`), the operand/env roots, and the dynamic-
@@ -3415,6 +3450,21 @@ impl Heap {
     /// RUNTIME values) are *cleared* — both rebuild lazily. A debug `verify_rt_slabs`
     /// asserts the result has no dangling handle.
     pub fn runtime_collect(&mut self) -> Option<(usize, usize)> {
+        self.runtime_collect_with(&mut [], &mut [])
+    }
+
+    /// As [`runtime_collect`](Self::runtime_collect), but also rewrites RUNTIME
+    /// handles in the caller-supplied `extra_roots`/`extra_envs`. The automatic
+    /// safepoint path ([`maybe_runtime_collect`](Self::maybe_runtime_collect))
+    /// passes the eval loop's live `expr`/`env` — the one pair that, at the
+    /// loop-top safepoint, isn't yet on the operand stack (`roots`/`env_roots`),
+    /// exactly mirroring how the LOCAL collect relocates `expr`/`env`. With empty
+    /// slices it is precisely `runtime_collect`.
+    pub(crate) fn runtime_collect_with(
+        &mut self,
+        extra_roots: &mut [Value],
+        extra_envs: &mut [EnvId],
+    ) -> Option<(usize, usize)> {
         // Bail unless we uniquely own the runtime region (no concurrent readers).
         Arc::get_mut(&mut self.runtime)?;
         let before = self.runtime.code.closures.count();
@@ -3442,6 +3492,13 @@ impl Heap {
         for (_, v) in self.dynamics.iter_mut() {
             *v = flush_rt_value(&old_code, &new, &mut fwd, *v);
         }
+        // ...and the caller's extra live roots (the auto path's `expr`/`env`).
+        for v in extra_roots.iter_mut() {
+            *v = flush_rt_value(&old_code, &new, &mut fwd, *v);
+        }
+        for e in extra_envs.iter_mut() {
+            *e = flush_rt_env(&old_code, &new, &mut fwd, *e);
+        }
         // 3. The LOCAL heap (both generations) — any slot may embed a RUNTIME handle.
         rewrite_local_rt_handles(&mut self.local, &old_code, &new, &mut fwd);
         rewrite_local_rt_handles(&mut self.old, &old_code, &new, &mut fwd);
@@ -3459,6 +3516,56 @@ impl Heap {
         }
         let after = self.runtime.code.closures.count();
         Some((before, after))
+    }
+
+    /// Should the next safepoint attempt a **RUNTIME** compaction? True once the
+    /// RUNTIME closure count crosses the adaptive [`rt_gc_threshold`]
+    /// (`max(RT_GC_FLOOR, 2 * live)`). Cheap: a `boxcar` length read + a compare.
+    /// Gated on [`gc_enabled`] so builder heaps never auto-collect.
+    ///
+    /// [`rt_gc_threshold`]: Self::rt_gc_threshold
+    /// [`gc_enabled`]: Self::gc_enabled
+    #[inline]
+    pub fn rt_gc_due(&self) -> bool {
+        self.gc_enabled && self.runtime.code.closures.count() >= self.rt_gc_threshold
+    }
+
+    /// Test/diagnostic hook: turn the automatic safepoint RUNTIME collection on or
+    /// off for this heap. Disabling raises the threshold to `usize::MAX` so churn
+    /// accumulates, letting a test exercise the *manual* `runtime_collect` /
+    /// evacuation paths in isolation (otherwise, under `BROOD_GC_STRESS`'s low
+    /// floor, the auto-trigger would compact the churn away mid-loop).
+    pub fn set_rt_auto_collect(&mut self, on: bool) {
+        self.rt_gc_threshold = if on { rt_gc_floor() } else { usize::MAX };
+    }
+
+    /// Auto-compact the RUNTIME region at the eval safepoint (the shared-code
+    /// analog of the LOCAL [`collect`](Self::collect)). Opportunistic: the
+    /// underlying [`runtime_collect_with`](Self::runtime_collect_with) runs the
+    /// compaction only when this heap **uniquely owns** the runtime `Arc` (single-
+    /// process / quiescent — sound without stop-the-world); otherwise it returns
+    /// `None` and nothing changes.
+    ///
+    /// Either way the adaptive threshold is reset so this isn't re-attempted every
+    /// safepoint: after a real collect, to `max(RT_GC_FLOOR, 2 * live)` (the next
+    /// collect waits for the live set to roughly double via fresh churn); on a
+    /// *shared* runtime, to `2 * count` (exponential back-off — a multi-process
+    /// runtime attempts a collect only O(log) times as the region grows, until
+    /// Step 2c lets it run under load). `extra_roots`/`extra_envs` carry the eval
+    /// loop's live `expr`/`env` to be rewritten alongside the rooted set.
+    pub fn maybe_runtime_collect(&mut self, extra_roots: &mut [Value], extra_envs: &mut [EnvId]) {
+        match self.runtime_collect_with(extra_roots, extra_envs) {
+            Some((_before, after)) => {
+                self.rt_gc_threshold = rt_gc_floor().max(after.saturating_mul(2));
+            }
+            None => {
+                let count = self.runtime.code.closures.count();
+                self.rt_gc_threshold = self
+                    .rt_gc_threshold
+                    .max(count.saturating_mul(2))
+                    .max(rt_gc_floor());
+            }
+        }
     }
 
     /// Should the next safepoint run a collection? Compares LOCAL live count

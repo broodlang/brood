@@ -22,6 +22,8 @@ static MEM_GUARD: LazyLock<()> = LazyLock::new(|| {
 fn superseded_global_versions_are_reclaimable() {
     LazyLock::force(&MEM_GUARD);
     let mut interp = Interp::new();
+    // Measure the manual path in isolation — keep churn from being auto-collected.
+    interp.heap.set_rt_auto_collect(false);
     // Redefine `f` 3000 times, each body structurally distinct (so the
     // unchanged-redef dedup, ADR-042, can't skip the append) — exactly the
     // hot-reload churn that leaks today.
@@ -69,6 +71,8 @@ fn superseded_global_versions_are_reclaimable() {
 fn evacuation_copies_only_live_code_and_verifies() {
     LazyLock::force(&MEM_GUARD);
     let mut interp = Interp::new();
+    // Measure the manual path in isolation — keep churn from being auto-collected.
+    interp.heap.set_rt_auto_collect(false);
     const N: usize = 3000;
     interp
         .eval_str(&format!(
@@ -109,6 +113,8 @@ fn evacuation_copies_only_live_code_and_verifies() {
 fn in_place_collect_reclaims_and_preserves_correctness() {
     LazyLock::force(&MEM_GUARD);
     let mut interp = Interp::new();
+    // Measure the manual path in isolation — keep churn from being auto-collected.
+    interp.heap.set_rt_auto_collect(false);
     const N: usize = 2000;
     interp
         .eval_str(&format!(
@@ -143,4 +149,41 @@ fn in_place_collect_reclaims_and_preserves_correctness() {
     // A second bare collect now reclaims little (steady state — nothing superseded).
     let (b2, a2) = interp.heap.runtime_collect().expect("second collect");
     assert!(b2 - a2 < 50, "steady-state collect should reclaim little, got {}", b2 - a2);
+}
+
+/// The **automatic** safepoint trigger bounds the RUNTIME region with *no*
+/// explicit `(runtime-collect)`. A single-process `Interp` uniquely owns the
+/// runtime `Arc`, so the eval safepoint auto-compacts once churn crosses
+/// `rt_gc_floor()` (default 4096). Redefining far past that must leave the live
+/// region a small fraction of the promotions — i.e. it didn't grow unbounded.
+#[test]
+fn auto_safepoint_collect_bounds_runtime_region() {
+    LazyLock::force(&MEM_GUARD);
+    let mut interp = Interp::new();
+    // 6000 distinct redefs — well past the 4096 default floor, so the safepoint
+    // must have auto-collected at least once mid-loop.
+    const N: usize = 6000;
+    interp
+        .eval_str(&format!(
+            "(defn redef (i n) \
+               (if (= i n) :done \
+                 (do (eval (list 'def 'f (list 'fn '(x) (list '+ (list '* 'x i) i)))) \
+                     (redef (+ i 1) n)))) \
+             (redef 0 {N})"
+        ))
+        .expect("redef loop errored");
+
+    // Without auto-collection the region would hold ≥N promoted closures. Bounded,
+    // it sits near the floor (live set is a small constant; threshold ≈ floor).
+    let count = interp.heap.runtime_closure_count();
+    eprintln!("auto-collect: RUNTIME closures after {N} redefs = {count}");
+    assert!(
+        count < N,
+        "auto safepoint collection should bound the region well below {N} promotions, got {count}",
+    );
+
+    // And the program is still correct after all those mid-loop compactions: the
+    // current `f` (last redef i=N-1=5999) resolves on the compacted region.
+    let v = interp.eval_str("(f 7)").expect("f errored after auto-collect");
+    assert_eq!(interp.print(v), (5999i64 * 7 + 5999).to_string());
 }
