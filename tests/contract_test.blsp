@@ -1,0 +1,34 @@
+;; Runtime type contracts — `(sig! …)` (docs/type-annotations.md).
+;;
+;; `(sig …)` informs the advisory checker only; `(sig! …)` *also* installs a
+;; runtime contract (the opt-in "strong arrow"): every argument and the result
+;; are checked at call time and a mismatch throws. This is the *sound* half — a
+;; value the static checker trusted can never silently slip through. Place a
+;; `sig!` after the function's definition (it rebinds the name, preserving arity).
+(defmodule contract-test
+  (:use test))
+
+(defn c-add (a b) (+ a b))
+(sig! c-add (int int -> int))
+
+;; A function that lies about its return type — the body returns a string.
+(defn c-bad-ret (x) "not an int")
+(sig! c-bad-ret (int -> int))
+
+(defn c-id (x) x)
+(sig! c-id ((or int nil) -> (or int nil)))
+
+(describe "runtime contracts (sig!)"
+  (test "a correct call passes through unchanged"
+    (assert= (c-add 2 3) 5))
+  (test "a bad first argument throws"
+    (assert-error (c-add "x" 3)))
+  (test "a bad second argument throws too"
+    (assert-error (c-add 1 :k)))
+  (test "a bad *result* throws — the fn can't lie about its return type"
+    (assert-error (c-bad-ret 1)))
+  (test "a union type accepts either member"
+    (assert= (c-id 7) 7)
+    (assert= (c-id nil) nil))
+  (test "a union type still rejects a non-member"
+    (assert-error (c-id "s"))))

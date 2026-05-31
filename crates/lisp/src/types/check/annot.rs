@@ -119,7 +119,9 @@ pub(super) fn parse_sig_decl(heap: &Heap, form: Value) -> Option<(Symbol, Sig)> 
     let Value::Sym(head) = items[0] else {
         return None;
     };
-    if !value::symbol_is(head, "sig") {
+    // `sig` (static only) and `sig!` (also runtime-enforced) declare the same
+    // signature as far as the checker is concerned — it reads both.
+    if !value::symbol_is(head, "sig") && !value::symbol_is(head, "sig!") {
         return None;
     }
     let Value::Sym(name) = items[1] else {

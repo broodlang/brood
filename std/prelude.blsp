@@ -201,6 +201,72 @@ Read by the advisory type checker; a runtime no-op. Type grammar: base names
 `(p… -> r)`, `(list E)`/`(vector E)`, and `(or A B)`."
   nil)
 
+;; ---- runtime contracts: `(sig! …)` enforces a signature at call time --------
+;; The opt-in *sound* half of the type system (the paper's "strong arrow", done
+;; Brood-side). `(sig …)` informs only the checker; `(sig! …)` *also* wraps the
+;; function so each argument and the result are checked at run time and a
+;; mismatch throws — so a value the static checker trusted can never silently
+;; slip through. All policy, no new primitive. See `docs/type-annotations.md`.
+
+(defn type-matches? (t v)
+  "True if value `v` inhabits the (sig …) type-expression `t`. Unknown type
+names accept anything, so a contract never throws on a type it can't interpret."
+  (cond
+    (nil? t) (nil? v)                  ; the `nil` type reads as the nil literal
+    (pair? t) (let (h (first t))
+                (cond
+                  (%eq h 'or) (some? (fn (s) (type-matches? s v)) (rest t))
+                  (%eq h 'list) (list? v)
+                  (%eq h 'vector) (vector? v)
+                  else true))          ; arrow param / unknown compound → accept
+    (%eq t 'any) true
+    (%eq t 'number) (number? v)
+    (%eq t 'int) (int? v)
+    (%eq t 'float) (float? v)
+    (%eq t 'string) (string? v)
+    (%eq t 'bool) (bool? v)
+    (%eq t 'keyword) (keyword? v)
+    (%eq t 'symbol) (symbol? v)
+    (%eq t 'pair) (pair? v)
+    (%eq t 'map) (map? v)
+    (%eq t 'fn) (fn? v)
+    (%eq t 'list) (list? v)
+    (%eq t 'vector) (vector? v)
+    else true))                        ; unknown base name → accept
+
+(defn contract--check-args (name ptypes args i)
+  "Throw if any argument fails its declared type. Pairwise over the overlap —
+arity itself is the static checker's job."
+  (when (and (pair? ptypes) (pair? args))
+    (unless (type-matches? (first ptypes) (first args))
+      (throw (str name ": argument " i " expected " (first ptypes)
+                  ", got " (type-of (first args)) " (" (pr-str (first args)) ")")))
+    (contract--check-args name (rest ptypes) (rest args) (inc i))))
+
+(defmacro sig! (name type)
+  "Like `(sig …)` but also installs a *runtime* contract: each argument and the
+result are checked at every call and a mismatch throws (an opt-in 'strong
+arrow'). Place it AFTER the function's definition — it rebinds `name`, preserving
+arity (so introspection and the reload-arity check are undisturbed). The checker
+reads it exactly like `(sig …)`."
+  (let (i (index-of type '->))
+    (if (< i 0)
+      nil                              ; not a (… -> …) type — nothing to enforce
+      (let (ptypes (take i type)
+            rtype (nth type (inc i))
+            params (map (fn (_) (gensym "arg")) (range i))
+            orig (gensym "orig")
+            r (gensym "ret"))
+        `(def ~name
+           (let (~orig ~name)
+             (fn (~@params)
+               (contract--check-args '~name '~ptypes (list ~@params) 1)
+               (let (~r (~orig ~@params))
+                 (unless (type-matches? '~rtype ~r)
+                   (throw (str '~name ": result expected " '~rtype
+                               ", got " (type-of ~r) " (" (pr-str ~r) ")")))
+                 ~r))))))))
+
 ;; `and`/`or` short-circuit left-to-right and return the deciding value, with
 ;; each subexpression evaluated at most once (a gensym holds it across the test).
 (defmacro and (& xs)

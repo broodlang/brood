@@ -1,7 +1,10 @@
 # Type annotations — `(sig …)` and the road to sound gradual typing
 
-**Status:** design + slice 1 (checker-facing) landing. Slice 2 (runtime
-enforcement) is the soundness step and is specced here but not yet built.
+**Status:** slice 1 (`(sig …)`, checker-facing) **and** slice 2 (`(sig! …)`,
+runtime enforcement — the soundness step) both shipped. Remaining: a
+`BROOD_CONTRACTS=1` switch to enforce *all* `(sig …)` declarations at once
+(fast-follow), richer type-exprs (intersections, rest/optional params), and
+element-level checks for `(list E)`/`(vector E)`.
 
 This is Brood's answer to "can we be *more sound* given our parameters?"
 (advisory, never-gate, zero-false-positive, hot-reload, policy-in-Brood). The
@@ -68,31 +71,43 @@ moment the author writes one line of `sig`.
 `(int -> int)` — the checker simply *trusts* the declaration (TypeScript-style).
 A lying annotation can still let a wrong value through. That's the job of slice 2.
 
-## Slice 2 — runtime enforcement (the strong arrow; not yet built)
+## Slice 2 — runtime enforcement via `(sig! …)` (shipped)
 
-`(sig name (P… -> R))` will also install a **runtime contract**: calls to `name`
-check each argument against `P…` and the result against `R`, **throwing** on a
-mismatch. That makes `name` a *strong arrow* — applied off-domain it returns a
-value in `R`, or fails a runtime check, or diverges; it can never silently return
-an off-type value. The checker's trust then becomes **sound**: the static type it
-reports genuinely holds unless the program errors at run time — the paper's
-(i)/(ii)/(iii) guarantee.
+`(sig! name (P… -> R))` declares the signature *and* installs a **runtime
+contract**: it rebinds `name` to a same-arity wrapper that checks each argument
+against `P…` and the result against `R`, **throwing** on a mismatch. That makes
+`name` a *strong arrow* — applied off-domain it returns a value in `R`, fails a
+runtime check, or diverges; it can never silently return an off-type value. The
+checker reads `(sig! …)` exactly like `(sig …)`, so the static trust is now
+**sound** — the reported type holds unless the program throws (the paper's
+(i)/(ii)/(iii) guarantee).
 
-Design questions to settle for slice 2:
-- **Where the check lives** — wrap the bound global closure (so every call is
-  checked, including indirect/`apply`), vs a call-site check (cheaper, misses
-  indirect calls). Wrapping the global is the sound choice.
-- **Cost / opt-out** — a `BROOD_NO_CONTRACTS=1` (or per-sig opt-out) for hot
-  paths, mirroring `BROOD_NO_CHECK`. Contracts are policy in Brood, so this can
-  be a Brood-level switch.
-- **Hot reload** — re-`def`ing `name` must re-install (or drop) its contract;
-  the contract is metadata on the binding, not the closure value.
-- **Result-type checks** and higher-order params (does a `(int -> int)` *param*
-  get wrapped so the callback is checked?) — defer the HOF case.
+It's **all policy in Brood** (no new primitive): the `sig!` macro generates the
+wrapper, `type-matches?` decides membership over `type-of`/predicates, and
+`contract--check-args` does the per-argument check (all in `std/prelude.blsp`).
+Place `(sig! …)` **after** the definition (it rebinds the name). The wrapper
+preserves arity, so introspection and the reload-arity diagnostic are
+undisturbed (the one cost: `arglist` of a wrapped fn reflects the wrapper).
 
-Soundness oracle to add with slice 2: a `(sig)`-declared function whose body
-returns the wrong type must **throw at runtime**, never corrupt — the runtime
-backstop the static trust relies on.
+Design decisions, as built:
+- **Where the check lives** — the wrapper rebinds the **global**, so every call
+  is checked, including indirect / `apply`.
+- **Opt-in** — only `(sig! …)` enforces; plain `(sig …)` stays static-only and
+  free. Writing a *type* never changes behaviour; opting into *enforcement* does.
+- **Unknown types accept** — a type-expr `type-matches?` can't interpret (an
+  unknown base name, an arrow param) accepts any value, so a contract never
+  throws on a type it doesn't understand (no spurious runtime failure).
+- **Hot reload** — re-`def`ing `name` drops the contract (it's the binding);
+  re-run `(sig! …)` to reinstall. The wrapper's preserved arity keeps the
+  reload-arity check quiet.
+
+Verified by `tests/contract_test.blsp`: a correct call passes; a bad argument,
+a bad *result* (a fn that lies about its return type), and a union-type
+non-member all throw.
+
+**Still to do:** a `BROOD_CONTRACTS=1` switch that enforces *every* `(sig …)`
+(not just `sig!`) for a dev/test run; element-level checks for `(list E)` /
+`(vector E)`; rest/optional params in the type grammar.
 
 ## Why this is the right "more sound" move for Brood
 
