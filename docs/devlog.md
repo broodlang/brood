@@ -11417,3 +11417,46 @@ it (false negatives only, never a wrong removal), `(require 'a 'b)` and
 be detected statically it's a **non-preferred** suggestion, not an auto-fix. One
 of the two future code actions `docs/lsp.md` named; create-missing-`defn` and the
 finer-arity-spans checker refactor remain.
+
+## 2026-05-31 — VM coverage: real-default `&optional` (#6) + match/pattern-fns via quote + literals (#5)
+
+**Goal.** Handoff #5/#6: close the two forms the closure-compiling VM (ADR-076)
+deferred to the tree-walker, the path toward retiring the fallback (#7).
+
+**#6 — real-default `&optional` (commit `4146419`).** The VM compiled only
+nil-default optionals. Now a real default form compiles too: `compile_arm` binds
+slots in layout order and compiles each optional's default *before* binding the
+optional's own slot (so it sees required params + earlier optionals, never itself),
+carried in `CompiledArm.optional_defaults`. `push_frame` was reworked to pre-push
+the whole frame and consume ALL provided args into slots *first* (GC-safe — a
+default's eval can collect and would otherwise strand the live `args` slice), then
+evaluate each missing optional's default against the rooted frame. It's now fallible
+and takes `genv`; the tail trampoline switches to the callee's env before rebuilding.
+
+**#5 — match/pattern-fns (commit `c27e9d7`).** Surprise: `match`/`match*` are
+*macros* expanding to `if`/`let`/`first`/`rest`/`%eq` — all VM core — so a **total**
+match already ran on the VM (~2× speedup confirmed). The deferral was narrow: a
+*non-total* match (every pattern-dispatch `fn`, e.g. `(defn f ((0) 0) ((n) …))`)
+emits a no-match arm `(throw [:match-error (quote ctx) m (quote pats)])`, and
+`compile_node` compiled neither `quote` (a special form) nor `[ ]`/`{ }` literals
+(the `_ => None` catch-all) — so the whole closure deferred. Fix = teach the VM three
+*general* forms: `(quote X)` → an immovable `Const` (via `const_node`'s promote);
+vector literal → `Node::Vector`; map literal → `Node::Map` (both eval elements with
+the same operand-stack rooting as `Call` args, then build fresh). Pattern-dispatch
+fns now compile — pattern fib ~2× on the VM (3.9 s vs 7.7 s; was deferring at 7.4 s).
+
+**Verified.** VM≡tree-walker differential (corpus gained pattern-fn / no-match-throw
+/ quoted-data / vector+map-literal / guarded-match cases, and now runs on a
+CORO-sized stack since a pattern fn's `match*` expansion is a large nested-`if`
+tree); the new paths under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`; full in-language
+suite 1228/1228 (the reworked `push_frame` runs for every VM call — no regression).
+Stale "match* defers" comments in `compile.rs` corrected.
+
+**Also closed in passing (#9/#10).** The ADR-043 caps were already right-sized
+(5/4 → 2/1 GiB, 2026-05-30) and the suite peak re-measured (~150–240 MB under
+collection, vs ~18 GB pre-GC) — the stale `no-gc-suite-memory` note is refreshed.
+
+**Left (#7).** Retiring the tree-walker is now the main open VM item, blocked by the
+*other* deferrals: `def`/`quasiquote`/`binding` bodies, unexpanded forward-ref macros
+(prelude `sleep`→`receive`), movable-LOCAL bodies, PRELUDE closures. ADR-076 says
+don't rush it. (#3 residual: `macroexpand` fixpoint + `reload-defs`.)

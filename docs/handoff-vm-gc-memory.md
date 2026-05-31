@@ -73,34 +73,47 @@ Authoritative detail lives in `docs/decisions.md` (ADRs cited inline),
 
 ### VM (ADR-076 — "still open, pure perf, deferrals already correct")
 
-5. **`match*` / pattern-clause coverage** — the VM defers pattern-matching clauses
-   to the tree-walker.
-6. **Real-default `&optional` coverage** — also deferred to the tree-walker.
-7. **Tree-walker retirement is blocked** on 5–6: the VM depends on the tree-walker
-   for every deferred form, so the fallback can't be removed until the VM is a
-   complete engine. Closing 5 and 6 is the path to that.
+5. ~~`match*` / pattern-clause coverage~~ — **DONE (commit `c27e9d7`).** `match`/
+   `match*` are macros expanding to `if`/`let`/`first`/`rest`/`%eq` (VM core), so a
+   *total* match already ran on the VM; the holdout was the non-total no-match arm
+   `(throw [:match-error (quote ctx) m (quote pats)])`. Taught the VM `quote` →
+   `Const` and vector/map literals → `Node::Vector`/`Node::Map` (general, not
+   match-specific), so pattern-dispatch fns now compile (~2× on the VM).
+6. ~~Real-default `&optional` coverage~~ — **DONE (commit `4146419`).** A non-nil
+   default compiles in a scope where earlier params/optionals are bound; `push_frame`
+   evaluates it for a missing arg against the rooted frame.
+7. **Tree-walker retirement (#7) is still blocked** — but no longer on 5/6. The VM
+   now also defers: `def`/`quasiquote`/`defmacro`/`binding` bodies, **unexpanded
+   forward-referenced macros** (a closure whose body holds a macro defined later —
+   the prelude's `sleep`→`receive`; see `differential.rs::vm_defers_unexpanded_…`),
+   movable-LOCAL (conased) bodies, and PRELUDE closures. Retirement needs each of
+   these covered (or a deliberate decision to keep a minimal fallback) — and ADR-076
+   says don't rush it.
 8. **Bytecode lowering — explicitly premature.** No profiling shows node-dispatch
    dominating; do *not* start this until a profile justifies it.
 
 ### Memory
 
-9. **Revisit the ADR-043 caps now that the GC reclaims.** The 5 GiB/4 GiB caps were
-   a pre-GC host-survival backstop. With reclamation working, decide whether to
-   tighten them and/or introduce a real working-set budget. Per-run override:
-   `BROOD_MEM_LIMIT`.
-10. **Re-measure suite peak memory and refresh the stale note.** The old
-    `no-gc-suite-memory` note recorded a ~18 GB transient peak in the *no-GC* era;
-    with the collector live this should be far lower. Measure (`make test` /
-    per-file) and either retire or rewrite that memory note.
+9. ~~Revisit the ADR-043 caps~~ — **DONE.** Tightened 5 GiB/4 GiB → **2 GiB/1 GiB**
+   (2026-05-30); the call (a host-survival backstop, *not* a working-set budget — a
+   precise budget deliberately not added, ADR-011) is recorded in `alloc.rs`'s doc.
+10. ~~Re-measure suite peak + refresh the stale note~~ — **DONE.** Suite peaks
+    **~150–240 MB** under collection (was ~18 GB pre-GC); the `no-gc-suite-memory`
+    note is refreshed.
 
 ## Suggested order if picking this up cold
 
-1. ~~Fix #1 (promote cyclic-capture)~~ — **DONE (2026-05-31).** GC has no known
-   memory-safety holes left.
-2. ~~#4 (quasiquote → compile/eval-time transform)~~ — **DONE (2026-05-31, ADR-084).**
-3. **#10 then #9** — cheap: measure suite peak, then right-size the ADR-043 caps.
-4. **#5/#6 (VM coverage)** when perf wants it — unlocks #7 (retire the tree-walker).
-5. **#2 (RUNTIME-region GC)** is the larger, lower-urgency item.
+1. ~~#1 promote cyclic-capture~~ — **DONE.** GC has no known memory-safety holes.
+2. ~~#4 quasiquote → compile/eval-time transform~~ — **DONE (ADR-084).**
+3. ~~#9/#10 memory caps~~ — **DONE** (2 GiB/1 GiB backstop; suite peak ~150–240 MB).
+4. ~~#5/#6 VM coverage (match\*/pattern-fns, real-default `&optional`)~~ — **DONE**
+   (commits `c27e9d7`, `4146419`).
+5. **#7 (retire the tree-walker)** — now the main open VM item, but bigger than it
+   looks: cover (or deliberately keep a fallback for) `def`/`quasiquote`/`binding`
+   bodies, unexpanded forward-ref macros, movable-LOCAL bodies, PRELUDE closures.
+6. **#3 (residual rooted-Rust): `macroexpand` fixpoint + `reload-defs`** → the
+   ADR-084 transform-not-walker pattern. Small-ish.
+7. **#2 (RUNTIME-region GC)** — the larger, lower-urgency item.
 
 ## Key files
 
