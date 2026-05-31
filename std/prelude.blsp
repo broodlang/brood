@@ -371,25 +371,32 @@ reads it exactly like `(sig …)`."
 (defn third (coll) "The third item of `coll`." (first (rest (rest coll))))
 
 ;; ---- sequence operations ----
-;; `map`/`filter` recur over a dedicated `--acc` loop rather than folding a
-;; per-element closure: the loop calls the user fn directly, saving one
-;; `apply` frame per element on the language's most-used sequence ops (the
-;; closure-over-`fold` form spent an extra call per item indirecting through
-;; the reducing lambda). `seq` coerces a map to its `[k v]` pairs once up front,
-;; exactly as `fold` did.
-(defn map--acc (f coll acc)
-  (if (empty? coll) acc (map--acc f (rest coll) (cons (f (first coll)) acc))))
-(defn map (f coll)
-  "A list of `(f x)` for each `x` in `coll`."
-  (reverse (map--acc f (seq coll) nil)))
+;; Many eager seq ops share one structure: reverse-accumulate over `(seq coll)`,
+;; then reverse once. `defseq` encodes the pattern as a single `defn` whose body
+;; holds a tail-recursive `letrec` loop. This keeps the source location visible to
+;; `note_definition` (which only recognises `def`/`defn` as outer heads) and
+;; removes the need for separate `name--acc` globals. Each loop calls the user fn
+;; directly — no extra `apply` frame per element. Inside `step`: `item` is bound to
+;; the current element and `acc` is the current accumulator.
+(defmacro defseq (sym params docstring step)
+  "Define an eager sequence op that reverse-accumulates over `coll`.
+`params` are the extra arguments before `coll`; inside `step`, `item` is the
+current element and `acc` is the current accumulator."
+  `(defn ~sym (~@params coll)
+     ~docstring
+     (letrec (--loop (fn (coll acc)
+                       (if (empty? coll) acc
+                         (let (item (first coll))
+                           (--loop (rest coll) ~step)))))
+       (reverse (--loop (seq coll) nil)))))
 
-(defn filter--acc (pred coll acc)
-  (if (empty? coll)
-    acc
-    (let (x (first coll)) (filter--acc pred (rest coll) (if (pred x) (cons x acc) acc)))))
-(defn filter (pred coll)
+(defseq map (f)
+  "A list of `(f x)` for each `x` in `coll`."
+  (cons (f item) acc))
+
+(defseq filter (pred)
   "A list of the items of `coll` for which `(pred x)` is truthy."
-  (reverse (filter--acc pred (seq coll) nil)))
+  (if (pred item) (cons item acc) acc))
 
 (defn append-two (a b) "Concatenate two lists (`a` before `b`)." (fold flip-cons b (reverse a)))
 
@@ -1451,15 +1458,12 @@ structural order (`compare`), so numeric, string, keyword, and vector keys all w
   "Concatenate any number of sequences (lists, vectors, or maps read as `[k v]` pairs) into one list, left to right — the variadic sequence join. Alias of `append` (the name reflexively reached for). Returns a list; wrap in `(into [] …)` for a vector."
   (apply append seqs))
 
-;; Concatenate each `(f x)` straight onto the reversed accumulator (`append--onto`
-;; prepends a list's items in reverse), then reverse once — so we never
-;; materialise the intermediate list-of-sublists nor spread it through `apply
-;; append`. Two passes over the output total, like the eager builders above.
-(defn mapcat--acc (f coll acc)
-  (if (empty? coll) acc (mapcat--acc f (rest coll) (append--onto acc (f (first coll))))))
-(defn mapcat (f coll)
+;; `mapcat` uses `append--onto` instead of `cons` to splice each sublist straight
+;; onto the reversed accumulator, then reverse once — so we never materialise the
+;; intermediate list-of-sublists nor spread it through `apply append`.
+(defseq mapcat (f)
   "Map `f` over `coll` and concatenate the resulting lists into one."
-  (reverse (mapcat--acc f (seq coll) nil)))
+  (append--onto acc (f item)))
 
 (defn frequencies (coll)
   "A map from each distinct element of `coll` to how many times it occurs."
@@ -1494,23 +1498,13 @@ a vector for a vector and a list for a list. `i` must be in `[0, count)`."
 ;; builders. All tail-recursive (reverse-accumulate, reverse once) so they stay
 ;; stack-safe on long inputs — see the sequence-library note above.
 
-;; `remove`/`keep` recur over a dedicated loop (like `map`/`filter` above) rather
-;; than folding a per-element closure — one fewer `apply` frame per item.
-(defn remove--acc (pred coll acc)
-  (if (empty? coll)
-    acc
-    (let (x (first coll)) (remove--acc pred (rest coll) (if (pred x) acc (cons x acc))))))
-(defn remove (pred coll)
+(defseq remove (pred)
   "A list of the items of `coll` for which `(pred x)` is *falsy* — the complement of `filter`."
-  (reverse (remove--acc pred (seq coll) nil)))
+  (if (pred item) acc (cons item acc)))
 
-(defn keep--acc (f coll acc)
-  (if (empty? coll)
-    acc
-    (let (y (f (first coll))) (keep--acc f (rest coll) (if (nil? y) acc (cons y acc))))))
-(defn keep (f coll)
+(defseq keep (f)
   "A list of the non-nil results of `(f x)` over `coll` — map and filter fused (the eager counterpart of `xkeep`)."
-  (reverse (keep--acc f (seq coll) nil)))
+  (let (y (f item)) (if (nil? y) acc (cons y acc))))
 
 ;; distinct: keep the first occurrence of each item. A map carried alongside the
 ;; result acts as the "seen" set, so membership is O(1)-ish, not the O(n²) a
