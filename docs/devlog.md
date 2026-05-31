@@ -11514,3 +11514,40 @@ both + the `text/event-stream` header + no Content-Length (deterministic: handle
 closes after two frames). `tests/sse_test.blsp`: `sse-frame` single/multi-line/with
 event, `sse-headers`, and the framer↔parser round-trip. The http e2e stays
 SSE-free (raw `tcp-send`) so it exercises the *generic* seam.
+
+---
+
+## 2026-05-31 — `std/highlight`: the shared span→runs fontify tiler
+
+**Gap (from the myedit project).** Two renderers — myedit's native `view.blsp`
+and its browser mirror `web.blsp` — each reimplemented the same span→runs
+machinery over `highlight.blsp`'s `[start end face]` shape: face-at-offset,
+overlay-face merge, and run-length coalesce, written twice with only the *emit*
+step (display ops vs HTML) genuinely differing. `highlight.blsp` already owns the
+span type (`highlight-spans` / `highlight-window`); the tiling that turns spans
+into runs belongs there too. It also lived twice *inside* brood — `highlight-chunks`
+had its own private `hl--face-at` / `hl--override-at` / `hl--face` / `hl--chunk`.
+
+**Built (3 pure functions, no kernel/Rust, no ADR — a library helper).**
+- `(face-at spans pos)` — the face of the `[start end face]` span covering `pos`,
+  or nil (end-exclusive; linear scan, unsorted-OK). Promotes the old private
+  `hl--face-at`.
+- `(ranges-face ranges pos)` — merge (via `into`, later-wins) the faces of every
+  `[lo hi face]` range covering `pos`, or nil. One overlay channel for region
+  highlight, isearch, bracket-match — a `[pos face]` override is just the one-char
+  range `[pos (inc pos) face]`, collapsing the old separate overrides model.
+- `(fontify-runs text base spans ranges)` — coalesce `text` (first char at offset
+  `base`) into `[substring face]` runs, each char's face = its span face with
+  covering range faces *merged on top*; callers turn runs into display ops / HTML.
+
+`highlight-chunks` is now a thin shell over `fontify-runs` (overrides → one-char
+ranges), deleting `hl--face-at` / `hl--override-at` / `hl--face` / `hl--chunk`. The
+merge-over-replace switch is behaviour-preserving for its consumers: lineedit /
+observer overrides only mark brackets, which carry no lexer face, so merging onto
+nil equals replacing.
+
+**Tests.** `tests/highlight_test.blsp`: `face-at` (hit / gap / end-exclusive),
+`ranges-face` (no-cover nil / overlapping later-wins merge), `fontify-runs` (plain
+one-run, faced span coalescing, a range splitting+merging a run, `base` offsetting,
+empty → `()`). Existing `highlight-chunks` plus the lineedit (34) / observer (55) /
+repl (14) suites pin the refactor.
