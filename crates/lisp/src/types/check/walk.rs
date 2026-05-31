@@ -55,7 +55,7 @@ fn lambda_literal_arity(heap: &Heap, form: Value) -> Option<Arity> {
     let Some(Value::Sym(head)) = items.first().copied() else {
         return None;
     };
-    if !(value::symbol_is(head, "fn") || value::symbol_is(head, "lambda")) {
+    if !(value::symbol_is(head, kw::FN) || value::symbol_is(head, kw::LAMBDA)) {
         return None;
     }
     // Peel an optional leading docstring, matching the evaluator's `fn` parse.
@@ -72,7 +72,7 @@ fn lambda_literal_arity(heap: &Heap, form: Value) -> Option<Arity> {
         match p {
             Value::Sym(sym) => {
                 // `&optional` / `&` make the arity variable — bail (skip).
-                if value::symbol_is(sym, "&") || value::symbol_is(sym, "&optional") {
+                if value::symbol_is(sym, kw::AMP) || value::symbol_is(sym, kw::AMP_OPTIONAL) {
                     return None;
                 }
                 n += 1;
@@ -247,10 +247,10 @@ pub(super) fn collect_def_names(heap: &Heap, form: Value, ctx: &mut Ctx) {
     };
     // Lock-free `symbol_is` instead of allocating the head's spelling — the
     // walk visits every nested form, and only four comparisons are needed.
-    if value::symbol_is(head, "quote") || value::symbol_is(head, "quasiquote") {
+    if value::symbol_is(head, kw::QUOTE) || value::symbol_is(head, kw::QUASIQUOTE) {
         return;
     }
-    if value::symbol_is(head, "def") || value::symbol_is(head, "defmacro") {
+    if value::symbol_is(head, kw::DEF) || value::symbol_is(head, kw::DEFMACRO) {
         if let Some(&Value::Sym(name)) = items.get(1) {
             ctx.add_file_global(name);
         }
@@ -555,9 +555,9 @@ fn fn_params(heap: &Heap, form: Value) -> Vec<Symbol> {
             Value::Sym(s) => {
                 // Lock-free `symbol_is` to filter the parameter-list markers
                 // — three name compares without ever allocating the spelling.
-                if value::symbol_is(s, "&")
-                    || value::symbol_is(s, "&optional")
-                    || value::symbol_is(s, "&rest")
+                if value::symbol_is(s, kw::AMP)
+                    || value::symbol_is(s, kw::AMP_OPTIONAL)
+                    || value::symbol_is(s, kw::AMP_REST)
                 {
                     continue;
                 }

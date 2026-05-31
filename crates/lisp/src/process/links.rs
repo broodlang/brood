@@ -37,6 +37,7 @@ use std::sync::{LazyLock, Mutex};
 
 use crate::core::sync::lock;
 use crate::core::value::{self, Symbol};
+use crate::process::keywords as pk;
 
 use super::mailbox::{deliver, REGISTRY};
 use super::message::Message;
@@ -78,7 +79,7 @@ pub fn link(a: u64, b: u64) {
         }
     }
     // `b` already dead — notify the linker via the same trap-or-propagate path.
-    deliver_exit_to(a, local_pid_msg(b), Message::Keyword(value::intern("noproc")));
+    deliver_exit_to(a, local_pid_msg(b), Message::Keyword(value::intern(pk::NOPROC)));
 }
 
 /// `(unlink pid)` for a **local** `pid` — drop the symmetric link. Best-effort.
@@ -138,7 +139,7 @@ fn deliver_exit_to(peer: u64, dead_msg: Message, reason: Message) {
     if traps_exit(peer) {
         deliver(peer, exit_message(dead_msg, reason));
     } else if !is_normal(&reason) {
-        scheduler::exit(peer, Message::Keyword(value::intern("kill")));
+        scheduler::exit(peer, Message::Keyword(value::intern(pk::KILL)));
     }
 }
 
@@ -150,14 +151,14 @@ fn traps_exit(pid: u64) -> bool {
 }
 
 fn is_normal(reason: &Message) -> bool {
-    matches!(reason, Message::Keyword(k) if *k == value::intern("normal"))
+    matches!(reason, Message::Keyword(k) if *k == value::intern(pk::NORMAL))
 }
 
 /// `[:EXIT <pid> <reason>]` — the message a trapping process receives. `dead_msg`
 /// is the dead peer's `Message::Pid` (its node may be local or remote).
 fn exit_message(dead_msg: Message, reason: Message) -> Message {
     Message::Vector(vec![
-        Message::Keyword(value::intern("EXIT")),
+        Message::Keyword(value::intern(pk::EXIT)),
         dead_msg,
         reason,
     ])
@@ -250,7 +251,7 @@ pub(crate) fn handle_node_down(node: Symbol) {
         }
         hits
     };
-    let reason = Message::Keyword(value::intern("noconnection"));
+    let reason = Message::Keyword(value::intern(pk::NOCONNECTION));
     for (local, remote) in affected {
         deliver_exit_to(
             local,

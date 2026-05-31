@@ -10478,3 +10478,104 @@ warnings, 0 added/removed) over all 96 project files.
 **Deferred (ADR-011).** Intersections for overloaded fns; arrow/element types in the
 straight-line `infer_sig`; type variables for user-defined generics (Option A — no
 consumer). Branch `parametric-types`.
+
+---
+
+## 2026-05-31 — `check-string-structured`: the checker over a source *string*
+
+New builtin **`(check-string-structured src)`** — the source-string sibling of
+`check-file-structured`. Same checker path (`reader::read_all_positioned` +
+`types::check::check_file`), but it takes the source *text* instead of a path and
+returns `{:line :col :message}` maps (1-based; no `:file`). On any reader/parse error
+— notably **incomplete input** while a buffer is mid-edit — it returns `()` rather
+than raising, so a live diagnostics loop never errors on an unbalanced buffer;
+warnings reappear once it parses. ~25 lines mirroring `check_file_structured`; sig
+`string → list`, doc-table entry, `tests/check_string_structured.rs` (2 cases).
+
+Motivation: **myedit** wants live, in-process diagnostics for the editing buffer
+(unsaved text) — it runs in the same image as the checker, so it calls this directly
+through the new `:diagnostics` mode-service facet instead of going out to an LSP.
+General payoff: the `nest mcp` check tool and a future LSP-over-socket get a
+string-based entry too. No runtime/semantics change to the checker itself.
+
+---
+
+## 2026-05-31 — `std/window` → `std/pane` rename; myedit line-number gutter
+
+**Terminology cleanup (breaking).** "window" was overloaded — `gui-open` returns a
+native OS *window*, but `std/window.blsp` also called each tiled split a "window"
+(Emacs heritage). Renamed the split concept to **pane** throughout, reserving
+**window** for the OS window (modern editor language): `std/window.blsp` →
+`std/pane.blsp`, module `window` → `pane`, every `window-*` → `pane-*`
+(`pane-single`/`pane-layout`/`pane-split`/`pane-other`/`pane-set-ratio`/…;
+`window-pane-at` → `pane-at`), the embedded-module table entry in `builtins.rs`, and
+`tests/window_test.blsp` → `tests/pane_test.blsp`. `divider-at` kept. In **myedit**:
+`ed-window`→`ed-pane`, `ed-current-window`→`ed-current-pane`, the
+`cmd-other-window`/`cmd-split-window-*`/`cmd-delete-window` commands →
+`cmd-*-pane`. Greenfield, so no alias kept (CLAUDE.md). brood `pane_test` 20/20;
+myedit suite green.
+
+**myedit: per-pane line-number gutter.** New `ed-toggle-line-numbers` (bound `C-x l`,
+also M-x) flips `:line-numbers` on the *selected pane's* payload — pane-local, like
+Emacs `display-line-numbers-mode` but per-pane. The view reserves a left gutter
+(`ed-gutter-width` = digit-count + 1) of right-aligned numbers in a dim face,
+offsetting the body; it renders inside the same virtual grid as a zoomed pane, so the
+gutter magnifies in lock-step with Ctrl+wheel zoom. Cursor column accounts for the
+gutter. Pure/testable (154 myedit tests).
+
+**Also this session (myedit, recapped):** Ctrl+wheel zoom moved from whole-window
+`gui-font!` to per-pane `:scale` (only the selected pane magnifies); plain wheel
+scrolls. All editor-policy, no kernel change beyond the rename + the earlier
+`register`/`whereis` keyword-name sig widening.
+
+## 2026-05-31 — Magic-string sweep: finish `kw`, add `process/keywords` (`pk`)
+
+A focused de-duplication pass over the Rust kernel's magic strings, in two
+domain-scoped const modules (no behaviour change; full suite green under both
+engines).
+
+**`kw` hot-path sweep (closes the roadmap's 🟡 `kw` remainder).** The
+special-form / marker spellings still re-typed in the core hot-path files now
+reference `core::keywords` (`kw`): `syntax/reader.rs` (the `'`/`` ` ``/`~`/`~@`
+sigils → `kw::QUOTE`/`QUASIQUOTE`/`UNQUOTE`/`UNQUOTE_SPLICING`), `eval/compile.rs`
+(the VM-eligibility checks `if`/`do`/`let`/`let*`/`letrec`/`fn`/`lambda`),
+`eval/mod.rs` (`&`/`&optional` param markers), and `types/check/{walk,guards}.rs`
+(`fn`/`lambda`/`&…`/`quote`/`def`/`defmacro`/`if`/`let`). `core/heap.rs`'s
+`def_form_name` matcher got a small upgrade in the process: the allocating
+`matches!(symbol_name(head).as_str(), "def" | "defn" | "defmacro")` became three
+lock-free `value::symbol_is(head, kw::*)` checks. Added new consts —
+`kw::EQ_PRIM` (`"%eq"`) because that primitive's spelling is a three-site
+*macro-expansion contract* (the pattern compiler emits `%eq`, `builtins.rs`
+registers it, and `guards.rs` recognizes it for literal-equality narrowing),
+exactly like the `%try`/`kw::TRY_PRIM` precedent already in the module; and
+`kw::NOT`/`SPAWN`/`CASE`/`MODULE_DOC` so the checker's `is_syntactic_keyword`
+recognition list reads uniformly (`kw::*` throughout, no bare strings interleaved
+with the special-form consts) — these are syntax-significant heads the checker
+must not flag as unbound, not special forms, and the module doc now says so.
+(`case` is a construct Brood deliberately *lacks*, kept in that list so the
+runtime foreign-construct hint handles it; the hint table itself in `eval/mod.rs`
+stays bare-string — it's a vocabulary of *other* Lisps' spellings, the opposite
+of what `kw` holds.) `core/value.rs`'s `Tag::name()` strings were deliberately
+left alone — they're *type names* owned by `Tag::name()`, not special-form
+spellings.
+
+**New `process/keywords.rs` (`pk`) — the mailbox wire contract.** The keyword
+*tags* the runtime interns into process messages and exit/monitor reasons were
+re-typed across `process/{scheduler,monitor,links,mailbox}.rs` and `dist.rs`: the
+message tags `:down`/`:EXIT`/`:nodedown`, the exit reasons
+`:normal`/`:kill`/`:killed`/`:error`/`:noproc`/`:noconnection`, the `:nonode`
+sentinel, and the `process-info` run-status strings `running`/`runnable`/`waiting`.
+Each `value::intern("…")` site now references a `pk::*` const. Kept as a separate
+domain module (not folded into `core::keywords`, which is language spellings only).
+**Scope caveat documented in the module:** a Rust-side const only de-dups and
+documents the *Rust* half of the contract — the Brood side (`[:down …]` patterns
+in `std/`) still types these spellings independently, so this isn't cross-language
+typo-proofing, just Rust-internal DRY + a single rename point.
+
+Verified: `cargo build` clean (no warnings); the in-language suite 1130/1130
+(incl. the supervisor/monitor/concurrency adversarial blocks that round-trip these
+tags across per-process heaps); `distribution` 22/22 (incl.
+`remote_monitor_fires_noconnection_on_node_down`); `preemption` + `gc` green
+(scheduler exit-reason construction). Deliberately **not** done (flagged as churn —
+mostly one-off-per-site or out of the chosen scope): the display-protocol op/face
+keywords in `builtins.rs`, the MCP JSON keys, and the cross-crate env-var names.

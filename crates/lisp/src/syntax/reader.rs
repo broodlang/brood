@@ -9,6 +9,7 @@
 //! continue to share [`atom`](super::atom).
 
 use crate::core::heap::Heap;
+use crate::core::keywords as kw;
 use crate::core::value::{self, Value};
 use crate::error::{LispError, Pos};
 use crate::syntax::atom::{self, AtomKind};
@@ -151,13 +152,13 @@ impl<'a> Parser<'a> {
             }
             '\'' => {
                 self.enter()?;
-                let v = self.read_wrapped("quote");
+                let v = self.read_wrapped(kw::QUOTE);
                 self.exit();
                 v
             }
             '`' => {
                 self.enter()?;
-                let v = self.read_wrapped("quasiquote");
+                let v = self.read_wrapped(kw::QUASIQUOTE);
                 self.exit();
                 v
             }
@@ -167,10 +168,10 @@ impl<'a> Parser<'a> {
                 let v = if self.s.peek() == Some('@') {
                     self.s.bump();
                     let form = self.read_form()?;
-                    Ok(self.wrap("unquote-splicing", form))
+                    Ok(self.wrap(kw::UNQUOTE_SPLICING, form))
                 } else {
                     let form = self.read_form()?;
-                    Ok(self.wrap("unquote", form))
+                    Ok(self.wrap(kw::UNQUOTE, form))
                 };
                 self.exit();
                 v

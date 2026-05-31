@@ -105,7 +105,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "%eq",
+        kw::EQ_PRIM,
         Arity::exact(2),
         Sig::new(vec![any, any], bool_ty),
         prim_eq,
@@ -1044,6 +1044,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![string], list_ty),
         check_file_structured,
     );
+    def(
+        heap,
+        "check-string-structured",
+        Arity::exact(1),
+        Sig::new(vec![string], list_ty),
+        check_string_structured,
+    );
 
     // source positions (editor tooling; see docs/tooling.md)
     def(
@@ -1426,6 +1433,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("check", &["form"], "Advisory type-check a quoted form: a list of warning strings, or nil. Never raises."),
     ("check-file", &["path"], "Advisory type-check every top-level form in the file at path: a list of `path:line:col: warning: …` strings, or nil. Does not evaluate the file."),
     ("check-file-structured", &["path"], "Like check-file but returns a list of `{:file :line :col :message}` maps instead of GNU-format strings — for tools (the `nest mcp` `check` tool, editor diagnostics)."),
+    ("check-string-structured", &["src"], "Advisory type-check the source string `src`, returning a list of `{:line :col :message}` maps (1-based positions), or `()` when `src` doesn't parse (e.g. incomplete input) — the string-source counterpart of check-file-structured, for live editor-buffer diagnostics."),
     ("str", &["&", "xs"], "Concatenate the display forms of the arguments into one string."),
     ("pr-str", &["x"], "The readable (re-readable) text form of x."),
     ("print", &["&", "xs"], "Write the display forms of the arguments to stdout; returns nil."),
@@ -1687,7 +1695,7 @@ fn prim_le(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 }
 
 fn prim_eq(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let (a, b) = two(args, "%eq")?;
+    let (a, b) = two(args, kw::EQ_PRIM)?;
     Ok(Value::Bool(heap.equal(a, b)))
 }
 
@@ -2660,7 +2668,7 @@ const EMBEDDED_MODULES: &[(&str, &str)] = &[
     // pane/divider geometry + drag-to-resize over `:drag` mouse events (ADR-077).
     // Reusable editor toolkit (content-agnostic); the keybindings + payload are
     // editor policy. Opt-in, never in the prelude.
-    ("window", include_str!("../../../std/window.blsp")),
+    ("pane", include_str!("../../../std/pane.blsp")),
     ("observer", include_str!("../../../std/observer.blsp")),
     // Bare ANSI escape *strings* for simple terminal scripts (`print` them
     // directly) — the lightweight counterpart to the `display` render-op
@@ -4400,6 +4408,39 @@ fn check_file_structured(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispRe
         let msg_val = heap.alloc_string(msg);
         let mut entries: Vec<(Value, Value)> = Vec::with_capacity(4);
         entries.push((file_kw, file_val));
+        if let Some(p) = pos_opt {
+            entries.push((line_kw, Value::Int(p.line as i64)));
+            entries.push((col_kw, Value::Int(p.col as i64)));
+        }
+        entries.push((msg_kw, msg_val));
+        out.push(heap.map_from_pairs(entries));
+    }
+    Ok(heap.list(out))
+}
+
+/// `(check-string-structured src)` — the source-string counterpart of
+/// `check-file-structured`: advisory type-check the Brood source string `src` and
+/// return a list of `{:line :col :message}` maps (1-based positions; no `:file`).
+/// Returns `()` when `src` doesn't parse — e.g. incomplete input while an editor
+/// buffer is mid-edit — so a live diagnostics loop never errors on an unbalanced
+/// buffer; warnings reappear once it parses. Reuses the same checker as the file
+/// variant (`types::check::check_file`).
+fn check_string_structured(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let src = expect_string(heap, "check-string-structured", arg(args, 0))?;
+    let forms = match reader::read_all_positioned(heap, &src) {
+        Ok(fs) => fs,
+        // unparsable (e.g. mid-edit) — no diagnostics rather than an error
+        Err(_) => return Ok(heap.list(Vec::new())),
+    };
+    let just_forms: Vec<Value> = forms.into_iter().map(|(f, _)| f).collect();
+    let warnings = crate::types::check::check_file(heap, &just_forms);
+    let line_kw = Value::Keyword(value::intern("line"));
+    let col_kw = Value::Keyword(value::intern("col"));
+    let msg_kw = Value::Keyword(value::intern("message"));
+    let mut out = Vec::with_capacity(warnings.len());
+    for (pos_opt, msg) in &warnings {
+        let msg_val = heap.alloc_string(msg);
+        let mut entries: Vec<(Value, Value)> = Vec::with_capacity(3);
         if let Some(p) = pos_opt {
             entries.push((line_kw, Value::Int(p.line as i64)));
             entries.push((col_kw, Value::Int(p.col as i64)));

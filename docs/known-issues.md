@@ -186,7 +186,7 @@ hand-rolled "block font" magnified out of grid cells (what `life.blsp`'s
   so two windows can run different fonts. The `UserEvent::Font` event carries `id:
   Option<u64>` and both arms share an `apply_font` helper (`crates/lisp/src/gui.rs`;
   parsed in `builtins.rs` `gui_font`, arity `range(1,2)`).
-- **GG-3 — no display-side pane/clip/font layer. ✅ Resolved.** `std/window.blsp`
+- **GG-3 — no display-side pane/clip/font layer. ✅ Resolved.** `std/pane.blsp`
   (ADR-077/078) provides the *pane layout + clip-rect* abstraction (a split tree →
   pane rects + dividers), and the *per-pane font scale* remainder collapsed into
   GG-1 — a pane/buffer now renders its text with a face carrying its `:scale`, so
