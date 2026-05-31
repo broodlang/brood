@@ -641,7 +641,7 @@ definition — it rebinds the name, preserving arity.
 `sig` is checker-only (zero runtime cost); `sig!` adds the runtime guarantee
 exactly where you want soundness. The checker treats both identically. Writing a
 *type* never changes behaviour; opting into *enforcement* (`sig!`) does. Full
-design: [type-annotations.md](type-annotations.md) (ADR-081).
+design: [type-annotations.md](type-annotations.md) (ADR-082).
 
 ## Processes (concurrency)
 
