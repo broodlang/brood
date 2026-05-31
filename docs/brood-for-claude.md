@@ -69,6 +69,10 @@ Common macros (expanded once at the compile pass — runtime-free): `defn`,
 (binding (*log-level* :debug) (do-thing))           ; scoped rebind
 ```
 
+A `fn`/`defn` body of several forms is an **implicit `do`**: each is evaluated
+for effect and the **last form's value is returned** — no explicit `(do …)`
+wrapper needed (`((fn () 1 2 3))` → `3`). Same for `let`/`when`/`loop` bodies.
+
 `fn` is multi-clause two ways (don't mix them in one `defn`):
 
 ```lisp
