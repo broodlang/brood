@@ -67,9 +67,14 @@ Authoritative detail lives in `docs/decisions.md` (ADRs cited inline),
    Brood code is immune. `quasiquote` was the worst offender and is now a pure
    **compile/eval-time transform to builder code** (`expand_quasiquote`) — it calls
    no `eval`, so its bespoke operand-stack rooting (`expand_seq`/`teardown_err`) is
-   deleted. The rule is recorded as ADR-084. **Still open (same rule, lower
-   priority):** the `macroexpand` fixpoint and `reload-defs` are the remaining
-   rooted-Rust re-entry points to shrink the same way.
+   deleted. The rule is recorded as ADR-084. **Re-examined 2026-05-31 — nothing
+   actionable here:** the `macroexpand` *fixpoint* already roots its `env` on the
+   operand stack (collects safely at any depth), the compile-pass walk
+   (`macroexpand_all`) deliberately *suppresses* GC via `MACRO_BLOCK` (safe —
+   bounded per form), and `reload-defs` mirrors the already-rooted `eval_str` loop.
+   None is a quasiquote-style "walker accumulating LOCAL handles across `eval`", and
+   macroexpand can't be a transform-not-walker (running a macro *is* eval re-entry).
+   So this item is closed as not-worthwhile, not deferred.
 
 ### VM (ADR-076 — "still open, pure perf, deferrals already correct")
 
@@ -82,13 +87,18 @@ Authoritative detail lives in `docs/decisions.md` (ADRs cited inline),
 6. ~~Real-default `&optional` coverage~~ — **DONE (commit `4146419`).** A non-nil
    default compiles in a scope where earlier params/optionals are bound; `push_frame`
    evaluates it for a missing arg against the rooted frame.
-7. **Tree-walker retirement (#7) is still blocked** — but no longer on 5/6. The VM
-   now also defers: `def`/`quasiquote`/`defmacro`/`binding` bodies, **unexpanded
-   forward-referenced macros** (a closure whose body holds a macro defined later —
-   the prelude's `sleep`→`receive`; see `differential.rs::vm_defers_unexpanded_…`),
-   movable-LOCAL (conased) bodies, and PRELUDE closures. Retirement needs each of
-   these covered (or a deliberate decision to keep a minimal fallback) — and ADR-076
-   says don't rush it.
+7. **Tree-walker retirement (#7) — effectively a non-goal; keep the fallback.**
+   Re-examined 2026-05-31: **PRELUDE closures already compile on the VM**
+   (`cache_key` keys `RUNTIME | PRELUDE`; a `reduce`/`+` loop is ~1.9× — the old
+   "PRELUDE stays on the tree-walker" comment was stale, now fixed). The remaining
+   VM deferrals are **correct by design, not coverage gaps**: an **unexpanded
+   forward-referenced macro** (a body holding a macro defined later — prelude
+   `sleep`→`receive`; `differential.rs::vm_defers_unexpanded_…`) genuinely *cannot*
+   be compiled without expanding it, and a **movable-LOCAL (conased) body** has no
+   stable cache key — the tree-walker fallback is the right home for both. The only
+   true gap is `def`/`quasiquote`/`binding` in a closure *body* (uncommon, low
+   value). So the fallback should **stay** as the per-form escape hatch; "retire the
+   tree-walker" isn't a worthwhile target. ADR-076 already said don't rush it.
 8. **Bytecode lowering — explicitly premature.** No profiling shows node-dispatch
    dominating; do *not* start this until a profile justifies it.
 
@@ -108,12 +118,17 @@ Authoritative detail lives in `docs/decisions.md` (ADRs cited inline),
 3. ~~#9/#10 memory caps~~ — **DONE** (2 GiB/1 GiB backstop; suite peak ~150–240 MB).
 4. ~~#5/#6 VM coverage (match\*/pattern-fns, real-default `&optional`)~~ — **DONE**
    (commits `c27e9d7`, `4146419`).
-5. **#7 (retire the tree-walker)** — now the main open VM item, but bigger than it
-   looks: cover (or deliberately keep a fallback for) `def`/`quasiquote`/`binding`
-   bodies, unexpanded forward-ref macros, movable-LOCAL bodies, PRELUDE closures.
-6. **#3 (residual rooted-Rust): `macroexpand` fixpoint + `reload-defs`** → the
-   ADR-084 transform-not-walker pattern. Small-ish.
-7. **#2 (RUNTIME-region GC)** — the larger, lower-urgency item.
+5. ~~#7 (retire the tree-walker)~~ — **not a goal; keep the fallback.** PRELUDE
+   closures already compile; the rest (forward-ref macros, movable-LOCAL bodies) are
+   correct-by-design defers the fallback should keep handling (2026-05-31 re-exam).
+6. ~~#3 (rooted-Rust: `macroexpand`/`reload-defs`)~~ — **closed, not actionable**
+   (fixpoint already rooted; compile-pass GC-suppressed; `reload-defs` like
+   `eval_str`).
+7. **#2 (RUNTIME-region GC) — the one genuinely-open, substantial item.** The shared
+   mutable RUNTIME code region (where `def`/hot-reload `promote`s code) is never
+   reclaimed, so it grows with hot-reload churn. Matters for a long-lived,
+   live-edited server; design not started (ADR-072 "Stage 5 later half").
+   **Everything else in this handoff is done or deliberately-not-a-goal.**
 
 ## Key files
 
