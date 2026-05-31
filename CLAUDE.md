@@ -307,13 +307,16 @@ co-author trailer, overriding any default that would append one.
 
 ## Known next steps (see roadmap)
 
-The language core (M1) is largely complete: macros/quasiquote, in-language
+The language core (M1) is essentially complete: macros/quasiquote, in-language
 `try`/`catch`, maps (CHAMP trie), the string/math/sequence libraries, pattern
 matching, modules, project tooling, **dynamic variables** (`defdyn`/`binding`),
-the set-theoretic **type checker** (Steps 0–4), and a per-process tracing **GC**
-(ADR-035) are all done. What's left of M1: the **package manager** (ADR-037),
-**self-hosting the CLI/REPL in Brood**, and **LSP Tier 2** (refs/rename, semantic
-tokens, cross-file nav as an image query).
+the set-theoretic **type checker** (Steps 0–4 + Step 5 structured types — arrows,
+element types, parametric HOF results, ADR-078), a per-process tracing **GC**
+(ADR-035), the **package manager** (ADR-037), the **self-hosted REPL in Brood**
+(ADR-048), **LSP Tier 2** (refs/rename, semantic tokens, cross-file nav), and the
+**closure-compiling VM** (now the default engine, ADR-076) are all done. The
+remaining type-system items (intersections, user-generic type variables) are
+additive and gated on a real consumer.
 
 The later milestones are already underway (vertical-slice style, ADR-045/046):
 **M2 editor data model** — the `ropey`-backed `Value::Rope` kernel + the

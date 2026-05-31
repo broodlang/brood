@@ -1,7 +1,10 @@
 # Brood types — set-theoretic, gradual, advisory
 
-**Status:** steps 0–4 done; Step 5+ started — function arrows shipped (ADR-078),
-the advisory checker (`(check 'form)`)
+**Status:** steps 0–4 done; Step 5+ well underway (ADR-078) — function **arrow**
+types, sequence **element** types, and **parametric HOF results**
+(`map`/`filter`/`reduce`/`fold` flow element types through) all shipped; only
+intersections + user-generic type variables remain (gated on a consumer). The
+advisory checker (`(check 'form)`)
 is the lattice's first consumer (`crates/lisp/src/types/{mod,check}.rs`). This doc is the
 plan *and* the compatibility contract: the staircase says what to build next, the
 [Compatibility contract](#compatibility-contract) says what every other change
@@ -61,10 +64,11 @@ A `Ty` **is a set of values**, and the type operations *are* set operations:
   Elixir uses.) **Note:** the advisory *checker* (Step 4) doesn't use `GradualTy`
   — it carries `Option<Ty>` (known / unknown). `dynamic()` is foundation for a
   later gradual-*assignment* checker, not the disjointness pass.
-- **Structured types** arrive as refinements on the flat lattice (Step 5+): a
-  **function arrow** `int -> int` ships (ADR-078, the `arrow` refinement); a
-  vector's element type is the next slice. The flat tag bitset remains the coarse
-  set under any refinement.
+- **Structured types** arrive as refinements on the flat lattice (Step 5+, all
+  shipped — ADR-078): a **function arrow** `int -> int` (the `arrow` refinement)
+  and a **sequence element type** `vector<int>` (the `elem` refinement), with
+  `map`/`filter`/`reduce`/`fold` results derived from their arguments. The flat
+  tag bitset remains the coarse set under any refinement.
 
 ## The staircase — tackle one at a time
 

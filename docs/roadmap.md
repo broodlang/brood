@@ -62,7 +62,7 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   reused by `match`, refutable `let`, and `fn`/`defn` clauses. Subsumes Tier-2
   destructuring + `case`. Made fast by a **macroexpand-all compile pass**
   (ADR-022), which also lowers the `let`/`fn` pattern surfaces.
-- ✅ **Set-theoretic, gradual types — Steps 0–4 done** (ADR-023/024). Full
+- ✅ **Set-theoretic, gradual types — Steps 0–4 done + Step 5 structured types** (ADR-023/024/078). Full
   plan and the *compatibility contract* future changes must honour in
   [`types.md`](types.md). Step 0: first-class `Tag` + `(type-of x)`,
   self-identifying type errors, `Arity` on every builtin (one central gate).
