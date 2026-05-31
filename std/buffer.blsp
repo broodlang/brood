@@ -384,10 +384,18 @@ region is empty. Recorded for undo (restoring it brings back the mark too)."
 ;; never receive the buffer — only derived views. Edits and reads cross as
 ;; *closures* (`buffer -> buffer` and `buffer -> view`), shipped by closure-as-
 ;; data (ADR-033); the read closure must return a non-rope value.
+;;
+;; A buffer process is also a first-class **`io` sink**: it answers `[:io-write s]`
+;; by appending `s` (the same message `std/io`'s `process-port` and thus `std/log`'s
+;; `process-backend` send), so `(add-backend (process-backend a-buffer-pid))` streams
+;; log output straight into a buffer — async, share-nothing, no glue.
 
 (defn buffer--serve (buf)
-  "The receive loop of a buffer process over its immutable `buf`."
+  "The receive loop of a buffer process over its immutable `buf`. Handles `:edit`
+(apply a closure), `:get` (reply a derived view), `:io-write` (append a string — the
+`io`/logger sink path), and `:stop`."
   (receive ([:edit f] (buffer--serve (f buf)))
+    ([:io-write s] (buffer--serve (insert (end-of-buffer buf) s)))
     ([:get f from r] (do (send from [:reply r (f buf)]) (buffer--serve buf)))
     ([:stop from r] (send from [:reply r :stopped]))))
 
@@ -421,3 +429,18 @@ Asynchronous — returns nil."
   (let (r (ref))
     (send bp [:stop (self) r])
     (receive ([:reply ~r v] v))))
+
+;; ---- create / delete (the buffer-process lifecycle) -------------------------
+
+(defn create-buffer (&optional (name "*scratch*"))
+  "Spawn a fresh, empty buffer process named `name` and return its **pid**. The
+process serves `buffer-edit` / `buffer-query` and accepts `[:io-write s]`, so it is a
+valid `io`/logger sink — `(add-backend (process-backend (create-buffer \"*log*\")))`
+streams log output straight into it. Tear it down with `delete-buffer`. (High-volume
+sinks may want `(buffer-edit pid disable-undo)` so appends don't grow undo history.)"
+  (spawn-buffer (make-buffer "" name)))
+
+(defn delete-buffer (bp)
+  "Stop buffer process `bp` and free it — the symmetric name for `stop-buffer`.
+Synchronous; returns :stopped."
+  (stop-buffer bp))

@@ -10,6 +10,9 @@
 
 (defmodule buffer-test (:use test) (:use buffer))
 
+(require 'log)    ; the buffer-as-log-sink integration test drives a real logger
+(require 'hatch)  ; gen-call — to flush the logger's casts before asserting
+
 ;; Drop any fixtures a prior run left in /tmp (at load, before any test runs).
 (purge-stale-temp "brood-buf-")
 
@@ -274,4 +277,28 @@
       (assert= (buffer-query a buffer-text) "!aaa")
       (assert= (buffer-query b buffer-text) "bbb")
       (stop-buffer a)
-      (stop-buffer b))))
+      (stop-buffer b)))
+
+  ;; A buffer process is an `io` sink: `[:io-write s]` appends. create-buffer /
+  ;; delete-buffer are the lifecycle pair. Same-sender ordering makes this exact.
+  (test "create-buffer + [:io-write] appends; delete-buffer stops it"
+    (let (bp (create-buffer "*log*"))
+      (send bp [:io-write "hello\n"])
+      (send bp [:io-write "world\n"])
+      (assert= (buffer-query bp buffer-text) "hello\nworld\n")
+      (assert= (delete-buffer bp) :stopped)))
+
+  ;; The point of it all: a std/log process-backend streams log lines into a buffer
+  ;; process, no glue. Flush the logger (a query after the casts) before asserting,
+  ;; since logging is fire-and-forget.
+  (test "a logger process-backend streams log lines into a buffer process"
+    (let (bp (create-buffer "*app-log*")
+          lg (log/start-logger {:level :info :backends [(log/process-backend bp)]}))
+      (log/log-info "server up")
+      (log/log-warn "disk low")
+      (hatch/gen-call lg :config)   ; the logger has now dispatched both casts → bp
+      (let (txt (buffer-query bp buffer-text))
+        (is (string-contains? txt "server up"))
+        (is (string-contains? txt "disk low")))
+      (log/stop-logger)
+      (delete-buffer bp))))
