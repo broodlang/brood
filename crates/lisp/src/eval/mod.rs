@@ -1083,7 +1083,14 @@ pub(crate) fn unbound_error(heap: &Heap, sym: Symbol) -> LispError {
     if let Some(hint) = unbound_namespace_hint(heap, sym) {
         return e.with_hint(hint);
     }
-    if crate::process::in_green_process() {
+    // The scheduler-race hint is about *bare* prelude/internal names (`fold`,
+    // `acc`, `%eq`) spuriously racing under fan-out. A *qualified* miss
+    // (`mod/name`) is never that race — it's a genuinely-absent module global,
+    // e.g. a `send`-ed closure's free global that exists only on the sending
+    // node (late-bound on the receiver, and simply not there). Don't misdirect
+    // those with the prelude-race story; `unbound_namespace_hint` already treats
+    // a qualified miss as a different problem.
+    if crate::process::in_green_process() && !name.contains('/') {
         e.with_hint(
             "this fired inside a spawned process — if it happens only under \
              fan-out load, the scheduler may be racing prelude lookups; \

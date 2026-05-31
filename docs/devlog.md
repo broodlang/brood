@@ -10739,3 +10739,26 @@ trip), and the full 2000-trial repro ran 30+ min CPU with no panic / no crash du
 Verified: new test green; `gc`/`runtime_collector` suites green under
 `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` with the hardened flush path. KI-1 in
 `known-issues.md` gains a 2026-05-31 re-confirmation note.
+
+---
+
+## 2026-05-31 — Scope the scheduler-race hint to *bare* unbound names
+
+Companion to `bf5e5cb` (which corrected the `brood-for-claude.md` claim that
+"Functions can't be sent" — empirically false: a `send`-ed closure travels as
+data, body as S-exprs, captured locals deep-copied, free globals re-resolving on
+the receiver; verified same-node `k=100`→`101` and `(fn () (* 6 7))`→`42`. Only
+a bare *builtin* value can't be sent).
+
+`eval::unbound_error` attached the scheduler-race hint ("…the scheduler may be
+racing prelude lookups; try -j 1…") to *any* unbound symbol raised in a green
+process. But the race only loses **bare** internal names (`fold`/`acc`/`%eq`).
+The cross-node sent-closure case — a closure whose free global exists only on
+the *sending* node — arrives `unbound symbol: <ns>/<name>` on the receiver and
+got the race hint, a red herring (the symbol is genuinely absent, not racing).
+Gated the hint on `!name.contains('/')` in addition to `in_green_process()`; a
+qualified miss is never the race (consistent with `unbound_namespace_hint`,
+which already treats a qualified miss as a different problem). New regression
+test `qualified_unbound_in_green_process_has_no_scheduler_hint`; the existing
+bare-name positive test still passes. `error-codes.md` hint-conditions section
+was updated in `bf5e5cb`. No language-surface change.
