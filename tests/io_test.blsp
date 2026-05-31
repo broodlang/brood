@@ -1,0 +1,50 @@
+;; std/io.blsp — output ports: the redirectable sink behind print/println.
+;; Verifies that `with-out`/`with-err` reroute the prelude's print/println to a
+;; port, that the default ports are unchanged (so `with-out-str` still captures),
+;; and that a `process-port` carries output across a process boundary as
+;; `[:io-write s]` (the buffer/editor path). Register-only — `nest test` discovers it.
+
+(defmodule io-test (:use test) (:use io))
+
+(describe "io: ports reroute print/println"
+  ;; These send to (self) and receive — no globals, no spawn — so they can run in
+  ;; parallel with the rest of the suite.
+  (test "with-out routes println to a process-port"
+    (let (me (self))
+      (with-out (process-port me) (println "hi"))
+      (assert= (receive ([:io-write s] s) (after 500 :timeout)) "hi\n")))
+
+  (test "with-out routes print (no newline) and joins args with spaces"
+    (let (me (self))
+      (with-out (process-port me) (print "a" "b" 42))
+      (assert= (receive ([:io-write s] s) (after 500 :timeout)) "a b 42")))
+
+  (test "fn-port hands each written string to a callback"
+    (let (me (self))
+      (with-out (fn-port (fn (s) (send me [:io-write s]))) (println "cb"))
+      (assert= (receive ([:io-write s] s) (after 500 :timeout)) "cb\n")))
+
+  (test "io-write writes a string straight to a port"
+    (let (me (self))
+      (io-write (process-port me) "direct")
+      (assert= (receive ([:io-write s] s) (after 500 :timeout)) "direct")))
+
+  (test "with-err reroutes eprintln"
+    (let (me (self))
+      (with-err (process-port me) (eprintln "err"))
+      (assert= (receive ([:io-write s] s) (after 500 :timeout)) "err\n"))))
+
+(describe "io: the prelude defaults are untouched"
+  (test "with-out-str still captures stdout (regression for the print rewire)"
+    (assert= (with-out-str (println "x")) "x\n"))
+
+  (test "with-out restores the previous port on exit"
+    (let (me (self))
+      (with-out (process-port me) (println "redirected"))
+      ;; the redirect is over; the default (capturable) port is back
+      (assert= (with-out-str (println "back")) "back\n")))
+
+  (test "with-out restores even when the body throws"
+    (let (me (self))
+      (try (with-out (process-port me) (throw "boom")) (catch e nil))
+      (assert= (with-out-str (println "after-throw")) "after-throw\n"))))

@@ -405,6 +405,13 @@ the workaround available today.
   flat-namespace-collision problems at load time, not at run.
 - ✅ **Scaffold templates `nest new --template`** — landed 2026-05-29. `tui-loop`
   and `hatch` starters alongside the `default` main+hello pair.
+- ✅ **Output ports + async/safe logger** — landed 2026-05-31 (ADR-083).
+  `print`/`println` route through dynamic `*out*`/`*err*` ports (a port is a 1-arg
+  string sink); `std/io.blsp` adds `process-port`/`fn-port` + `with-out`/`with-err`,
+  so output can be redirected to a process that owns a buffer (`[:io-write s]`).
+  `std/log.blsp` is a `hatch`-process logger — casts (async), one serialising
+  writer (safe), `io`-port backends incl. `process-backend` (→ an editor's
+  `*Messages*`). Wired into the default `nest new` scaffold.
 - ✅ **Property-based testing `check-property`** — landed 2026-05-29. Seeded,
   deterministic, counterexample-shrinking-free but seed-reporting; built on the
   PRNG (`std/test.blsp`).

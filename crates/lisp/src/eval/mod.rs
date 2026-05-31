@@ -422,12 +422,15 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                 Some(SpecialForm::Quasiquote) => {
                     let args = heap.list_to_vec(rest)?;
                     let template = args.into_iter().next().unwrap_or(Value::Nil);
-                    // Inner unquote evals tag their own positions; this
-                    // fallback uses the quasiquote combination only when an
-                    // error somehow escaped without one (e.g. a missing-arg
-                    // from `quasiquote` itself).
-                    return crate::eval::macros::quasiquote(heap, template, env)
-                        .map_err(|e| e.or_form_pos(heap, expr));
+                    // Expand the template into *builder code* (a pure structural
+                    // transform — no eval re-entry, so no GC-rooting hazard), then
+                    // hand it back to the loop to evaluate. The unquoted sub-forms
+                    // become `list`/`append` operands the evaluator roots. Tail
+                    // position: the builder code's value is this form's value, and
+                    // the loop-top safepoint roots the new `expr`.
+                    expr = crate::eval::macros::expand_quasiquote(heap, template)
+                        .map_err(|e| e.or_form_pos(heap, expr))?;
+                    continue 'tail;
                 }
                 Some(SpecialForm::Defmacro) => {
                     let parts = heap.list_to_vec(rest)?;

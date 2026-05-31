@@ -1,0 +1,69 @@
+;; std/io.blsp — output ports: the redirectable sink behind print/println.
+;; (require 'io).
+;;
+;; A *port* is just a 1-arg function `(fn (s) …)` that consumes a ready string —
+;; nothing more (ADR-011: the simplest thing that works; a richer port value can
+;; come later behind `io-write` without changing callers). The prelude declares
+;; the dynamic vars `*out*`/`*err*` holding the current stdout/stderr ports and
+;; routes `print`/`println`/`eprint`/`eprintln` through them; this module is the
+;; toolkit for *building* ports and *installing* them for a dynamic extent.
+;;
+;; The buffer case — an editor showing output in its `*Messages*` buffer — is a
+;; `process-port` to the process that owns the buffer: the string crosses as an
+;; `[:io-write s]` message (async, share-nothing), never a mutated value. That is
+;; the same safe mechanism the logger's `process-backend` uses (std/log.blsp).
+
+(defmodule io
+  "Output ports — the redirectable sink the prelude's `print`/`println` write to
+(`(require 'io)`). A port is a 1-arg fn `(fn (s) …)` that consumes a ready string;
+`*out*`/`*err*` (declared in the prelude) hold the current stdout/stderr ports.
+Build one with `stdout-port`/`stderr-port`/`process-port`/`fn-port`, then redirect
+output for a dynamic extent with `with-out`/`with-err` (or `binding` directly).
+
+    (with-out (process-port editor) (println \"into the editor's buffer\"))
+    (with-out (fn-port (fn (s) (collect s))) (println \"into a callback\"))
+
+A `process-port` sends `[:io-write s]` to its target — async and share-nothing, so
+output crosses process boundaries with no shared mutable state. (Dynamic bindings
+do not reach a `spawn`ed child — a child starts from the default `*out*`; pass it
+a port explicitly if it should redirect too.)")
+
+;; ---- writing through a port -------------------------------------------------
+(defn io-write (port s)
+  "Write string `s` to `port` (a 1-arg sink fn). The single seam every output path
+goes through — today just `(port s)`, leaving room to grow a port into a richer
+value (named, introspectable) without touching callers."
+  (port s))
+
+;; ---- port constructors ------------------------------------------------------
+(defn stdout-port ()
+  "The default stdout port: writes to real stdout, honouring `with-out-str`
+capture. (This is exactly the prelude's default `*out*`.)"
+  %write-out)
+
+(defn stderr-port ()
+  "The default stderr port: writes to real stderr (never captured)."
+  %write-err)
+
+(defn fn-port (f)
+  "A port that hands each written string to the 1-arg callback `f`. The general
+adapter — `f` may buffer, filter, count, or forward however it likes."
+  f)
+
+(defn process-port (pid)
+  "A port that sends each written string to process `pid` as `[:io-write s]`, then
+returns nil. The async, share-nothing way to route output to a process that owns a
+sink — e.g. an editor appending to its `*Messages*` buffer. The `send` never
+blocks, so writing is fire-and-forget."
+  (fn (s) (send pid [:io-write s]) nil))
+
+;; ---- installing a port for a dynamic extent ---------------------------------
+(defmacro with-out (port & body)
+  "Evaluate `body` with `*out*` bound to `port`, restoring the previous port on
+exit (even on error). `print`/`println` inside `body` write to `port`."
+  `(binding (*out* ~port) ~@body))
+
+(defmacro with-err (port & body)
+  "Evaluate `body` with `*err*` bound to `port`, restoring the previous port on
+exit (even on error). `eprint`/`eprintln` inside `body` write to `port`."
+  `(binding (*err* ~port) ~@body))

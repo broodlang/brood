@@ -1,0 +1,159 @@
+;; std/log.blsp — an async, safe logger. (require 'log).
+;;
+;; Async + safe fall straight out of the process model (ADR-006):
+;;  - A logger is one long-lived `hatch` process carrying {:level :backends}.
+;;  - A log call is a CAST (`!`) — fire-and-forget, so the caller never blocks on
+;;    a slow or stuck backend. That is the "async".
+;;  - One process owns every write, so lines never interleave and a backend that
+;;    throws takes down only the log line, not the caller. That is the "safe".
+;;
+;; A *backend* is an `io` port (the redirectable string sink — std/io.blsp) plus a
+;; minimum level and a formatter. So "log to a buffer" is a `process-backend` whose
+;; port sends `[:io-write s]` to the process that owns the buffer (e.g. an editor's
+;; *Messages*) — the same share-nothing path `print` redirection uses, never a
+;; mutated value. The logger reuses ports rather than inventing its own sink.
+
+(defmodule log
+  "An async, safe logger (`(require 'log)`). A `hatch` process holds a list of
+backends; each log call is a cast, so it never blocks the caller, and the single
+process serialises writes (no interleaving) and isolates a crashing backend.
+
+    (start-logger)                       ; default: stdout, :info and up
+    (log-info \"server up\" {:port 8080}) ; structured fields optional
+    (log :warn \"disk low\")
+    (add-backend (file-backend \"app.log\"))
+    (add-backend (process-backend editor-pid))  ; → an editor's *Messages*
+
+Levels are `:debug` < `:info` < `:warn` < `:error`. The default logger is
+registered as `:logger`; `(log …)` finds it via `whereis` and falls back to
+stderr if none is running, so a log is never silently lost. A *backend* is an
+`io` port + `:min-level` + `:format` — build one with `stdout-backend` /
+`stderr-backend` / `process-backend` / `file-backend` / `fn-backend`."
+  (:use hatch)  ; defprocess / hatch / ! / stop
+  (:use io))    ; ports + io-write
+
+;; ---- levels -----------------------------------------------------------------
+(def log--ranks {:debug 0 :info 1 :warn 2 :error 3})
+(def log--labels {:debug "DEBUG" :info "INFO" :warn "WARN" :error "ERROR"})
+
+(defn log--rank (level)
+  "The numeric severity of `level` (unknown levels rank as :info)."
+  (or (get log--ranks level) 1))
+
+(defn log--default-format (rec)
+  "The default line for a record: `[LEVEL ts] msg` plus a newline."
+  (str "[" (or (get log--labels (get rec :level)) "?") " " (get rec :ts) "] "
+    (get rec :msg) "\n"))
+
+;; ---- backends ---------------------------------------------------------------
+(defn backend (sink & opts)
+  "A logger backend over `sink` (an `io` port). `opts` is a map: `:min-level`
+(default `:debug` — everything) gates by severity, `:format` (default the
+`[LEVEL ts] msg` line) is a `(fn (record) -> string)`."
+  (let (o (if (empty? opts) {} (first opts)))
+    {:sink sink
+     :min-level (or (get o :min-level) :debug)
+     :format (or (get o :format) log--default-format)}))
+
+(defn stdout-backend (& opts)
+  "A backend writing to stdout (`opts` as for `backend`)."
+  (apply backend (stdout-port) opts))
+
+(defn stderr-backend (& opts)
+  "A backend writing to stderr (`opts` as for `backend`)."
+  (apply backend (stderr-port) opts))
+
+(defn process-backend (pid & opts)
+  "A backend that sends each formatted line to process `pid` as `[:io-write s]` —
+e.g. an editor appending to its `*Messages*` buffer. Async and share-nothing."
+  (apply backend (process-port pid) opts))
+
+(defn fn-backend (f & opts)
+  "A backend that hands each formatted line to the 1-arg callback `f`."
+  (apply backend (fn-port f) opts))
+
+(defn file-backend (path & opts)
+  "A backend that appends each formatted line to the file at `path` (low-volume —
+`append-file` is a non-atomic read-modify-write today)."
+  (require 'file)
+  (apply backend (fn-port (fn (s) (file/append-file path s) nil)) opts))
+
+;; ---- the logger process -----------------------------------------------------
+(defn log--emit (b rec)
+  "Write `rec` through backend `b` if its level passes `b`'s `:min-level`."
+  (when (>= (log--rank (get rec :level)) (log--rank (get b :min-level)))
+    (io-write (get b :sink) ((get b :format) rec))))
+
+(defn log--dispatch (backends rec)
+  "Write `rec` through every backend in `backends` (a list or vector). Uses `fold`
+so it walks either — `:backends` defaults to a vector but `add-backend` conses."
+  (fold (fn (acc b) (log--emit b rec) acc) nil backends)
+  nil)
+
+(defprocess log--server (cfg)
+  "The logger process: carries `{:level :backends}` and dispatches each
+`[:log rec]` cast to every backend that passes the global and per-backend levels."
+  (cast [:log rec]
+    (do (when (>= (log--rank (get rec :level)) (log--rank (get cfg :level)))
+          (log--dispatch (get cfg :backends) rec))
+      cfg))
+  (cast [:add-backend b] (assoc cfg :backends (cons b (apply list (get cfg :backends)))))
+  (cast [:set-level level] (assoc cfg :level level))
+  (query :config cfg))
+
+;; ---- lifecycle --------------------------------------------------------------
+(defn start-logger (& opts)
+  "Spawn the logger, register it as `:logger`, and return its pid. `opts` is a map:
+`:level` (default `:info`) is the global minimum severity; `:backends` (default
+`[(stdout-backend)]`) is the initial backend list. Replaces any previous `:logger`."
+  (let (o (if (empty? opts) {} (first opts))
+        level (or (get o :level) :info)
+        backends (or (get o :backends) [(stdout-backend)])
+        pid (hatch log--server {:level level :backends backends}))
+    (register :logger pid)
+    pid))
+
+(defn logger ()
+  "The pid of the running default logger (registered `:logger`), or nil."
+  (whereis :logger))
+
+(defn stop-logger ()
+  "Stop the running default logger, if any. Returns nil."
+  (let (pid (logger))
+    (when pid (stop pid)))
+  nil)
+
+(defn add-backend (b)
+  "Add backend `b` to the running logger (a cast). Returns nil."
+  (let (pid (logger))
+    (when pid (! pid [:add-backend b])))
+  nil)
+
+(defn set-log-level (level)
+  "Set the running logger's global minimum severity (a cast). Returns nil."
+  (let (pid (logger))
+    (when pid (! pid [:set-level level])))
+  nil)
+
+;; ---- the log call -----------------------------------------------------------
+(defn log--record (level msg meta)
+  "Build a log record map, stamping `:ts` (now, ms) and `:from` (the caller's pid)."
+  {:level level :msg msg :meta meta :ts (now) :from (self)})
+
+(defn log (level msg & meta)
+  "Log `msg` at `level` (`:debug`/`:info`/`:warn`/`:error`) to the running logger,
+asynchronously (a cast — never blocks the caller). `meta`, if given, is a map of
+structured fields carried on the record. If no logger is running, the formatted
+line falls back to stderr so a log is never lost. Returns nil."
+  (let (m   (if (empty? meta) {} (first meta))
+        rec (log--record level msg m)
+        pid (logger))
+    (if pid
+      (! pid [:log rec])
+      (eprint (log--default-format rec))))
+  nil)
+
+(defn log-debug (msg & meta) "Log `msg` at `:debug`." (apply log :debug msg meta))
+(defn log-info (msg & meta) "Log `msg` at `:info`." (apply log :info msg meta))
+(defn log-warn (msg & meta) "Log `msg` at `:warn`." (apply log :warn msg meta))
+(defn log-error (msg & meta) "Log `msg` at `:error`." (apply log :error msg meta))

@@ -2,25 +2,26 @@
 
 > Status: **implemented** (ADR-038, 2026-05-31). One command turns a project into
 > one self-contained executable — no interpreter install, no project dir, no
-> `.blsp` files on the target. Code-only (no runtime asset filesystem yet),
-> Linux-first.
+> `.blsp` files on the target. After `make install`, **`nest release` needs no
+> Rust toolchain**. Code-only (no runtime asset filesystem yet), Linux-first.
 
 ## TL;DR
 
 ```bash
-nest release            # → ./<project-name>, a single executable
+nest release            # → ./<project-name>, a single executable (no Rust needed)
 ./<project-name>        # runs the project's :main, anywhere, with nothing else
 ```
 
-`nest release` appends the project's source to a copy of a **lean** `brood`
-runtime (built on demand — see below). The result is an ordinary executable that,
-on startup, finds the appended archive and boots `:main` instead of a REPL.
+`nest release` appends the project's source to the lean+gui `brood` runtime
+**embedded in `nest`** (baked in at `make install` time — so releasing needs no
+cargo/rustc). The result is an ordinary executable that, on startup, finds the
+appended archive and boots `:main` instead of a REPL.
 
 ```
 nest release [-o PATH] [--runtime PATH] [--target TRIPLE]
   -o, --output PATH    output path (default: the manifest's :name)
-      --runtime PATH   base runtime to append to (default: a freshly built,
-                       cached lean `brood`); use to supply a prebuilt/cross runtime
+      --runtime PATH   base runtime to append to (default: the runtime embedded
+                       in nest); use to supply a prebuilt or cross-target runtime
       --target TRIPLE  informational; cross-targets need --runtime (see below)
 ```
 
@@ -43,11 +44,15 @@ It is **code-only**: runtime file reads (`(slurp "data.txt")`, `(list-dir …)`)
 still go to the real filesystem on the target — the bundle is not a virtual FS.
 If you need data files, ship them alongside for now.
 
-## The lean runtime
+## The embedded lean+gui runtime (no Rust at release time)
 
-`nest release` does **not** append to your dev `brood`. It builds (once, then
-caches) a *lean* runtime with `--no-default-features`, so a shipped app carries
-no dev/debug surface. Stripped out — never compiled in:
+`nest release` does **not** append to your dev `brood`, and it does **not** need
+a compiler. `make install` builds one lean runtime and **bakes it into `nest`**
+(`crates/nest/build.rs` → `include_bytes!`); `nest release` just appends your app
+to that embedded copy — pure file-ops, no cargo/rustc. (Verified: it runs with an
+empty `PATH`.)
+
+The runtime is **lean** — `--no-default-features` strips, so it never compiles in:
 
 - the **test framework** (`test`),
 - the **process observer** + GC debug builtins (`observer`, `gc-stats`,
@@ -55,22 +60,32 @@ no dev/debug surface. Stripped out — never compiled in:
 - the **MCP / doc / hot-reload** tooling (`mcp`, `docs`, `reload`),
 - the interactive **REPL** (`repl`).
 
-Kept in the lean runtime (an app legitimately needs them): the whole prelude,
-`project` (it boots the bundle), and the UI/editor toolkit — `display`, `keymap`,
-`layers`, `ui`, `pane`, `buffer`, `sexp`, `regex`, `face`, `highlight`,
-**`lineedit`** (an editor's minibuffer reuses it), plus `tcp`/`http`/`file`/
-`json`/`set`/`format`/`task`/`hatch`/`supervisor`/`ansi`/`package`.
+Kept (an app legitimately needs them): the whole prelude, `project` (it boots the
+bundle), and the UI/editor toolkit — `display`, `keymap`, `layers`, `ui`, `pane`,
+`buffer`, `sexp`, `regex`, `face`, `highlight`, **`lineedit`** (an editor's
+minibuffer reuses it), plus `tcp`/`http`/`file`/`json`/`set`/`format`/`task`/
+`hatch`/`supervisor`/`ansi`/`package` — **and the `gui` backend** (it's a single
+variant that includes windowing, so `(gui-open)`/windowed apps just work).
 
-On top of `--no-default-features`, the lean build uses the `release-lean` cargo
-profile (`strip` + fat `lto` + one codegen unit). Net effect: ~13 MB dev `brood`
-→ ~6 MB shipped runtime. The lean runtime is built **once and cached** under
-`target/release-lean/`; changing your *app* only re-appends the archive (the app
-lives in the archive, not compiled in), so you pay the runtime build (and LTO)
-only when the brood source itself changes.
+The runtime is built under the `release-lean` cargo profile (`strip` + fat `lto`
++ one codegen unit), ~10 MB (with gui). So a shipped app is ~10 MB regardless of
+whether it's terminal or windowed.
 
-`gc-stats`/`require 'test`/`require 'observer` etc. are therefore unavailable in
-a shipped app — that's the point. If you genuinely want one back, ship it as a
-`.blsp` on the load-path, or pass a fuller `--runtime`.
+`gc-stats`/`require 'test`/`require 'observer` etc. are therefore unavailable in a
+shipped app — that's the point. If you want one back, ship it as a `.blsp` on the
+load-path, or pass a fuller `--runtime`.
+
+> One variant for now: every release carries the gui backend (a non-gui app pays
+> ~4 MB it doesn't use). A future opt-in lean/terminal-only variant is the planned
+> next step.
+
+### Fallback: no embedded runtime
+
+A plain `cargo build` of `nest` (not via `make install`) embeds nothing. There,
+`nest release` falls back to **building** the lean+gui runtime once from the
+workspace source (needs Rust + the brood tree), caching it under
+`target/release-lean/`. So dev checkouts still work; only `make install` gives the
+no-Rust release.
 
 ## Extending a shipped app at runtime (`init.blsp`)
 
@@ -153,5 +168,8 @@ the payload rather than nesting a second archive.
 - `std/project.blsp` — `bundle-collect` (gather sources) + `run-bundle` (boot);
   no load-time `(:use test)` so a lean runtime can load it
 - `crates/cli/src/main.rs` — `brood` boots the app when bundled
-- `crates/nest/src/main.rs` — `nest release` + `build_lean_runtime` (cached)
+- `crates/nest/src/main.rs` — `nest release`; `resolve_runtime` (embedded →
+  built fallback); `EMBEDDED_RUNTIME` via `include_bytes!`
+- `crates/nest/build.rs` — bakes `BROOD_EMBED_RUNTIME` into `nest` (empty if unset)
+- `Makefile` (`install`) — builds the lean+gui runtime, then embeds it in `nest`
 - `crates/cli/tests/release_bundle.rs` — end-to-end boot test

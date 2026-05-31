@@ -3,6 +3,15 @@
 //! Syntax (Clojure-style): `` `tmpl `` quotes, `~x` splices a value, `~@xs`
 //! splices the elements of a sequence. Nested quasiquote is not level-tracked
 //! (v0.1) — unquotes resolve at the first enclosing quasiquote.
+//!
+//! Quasiquote is a **compile-time / eval-time code transform**, not a runtime
+//! walker: [`expand_quasiquote`] rewrites a template into *builder code*
+//! (`` `(a ~b ~@c) `` → `(append (list 'a) (list b) c)`), and the normal
+//! evaluator runs that. The transform never re-enters `eval`, so — unlike the
+//! old walker, which evaluated unquotes inline while accumulating LOCAL
+//! transients in Rust (the GC-rooting hazard, ADR-084) — it hits no safepoint
+//! and needs no operand-stack rooting; the unquoted sub-forms are rooted by the
+//! evaluator as ordinary `list`/`append` operands.
 
 use crate::core::heap::Heap;
 use crate::core::keywords as kw;
@@ -26,10 +35,23 @@ const MAX_DEPTH: u32 = 256;
 /// with collection enabled (ADR-061). See `maybe_autogensym`.
 type AutoGen = HashMap<Symbol, Value>;
 
-/// Expand a quasiquote template against `env`.
-pub fn quasiquote(heap: &mut Heap, template: Value, env: EnvId) -> LispResult {
+/// Expand a quasiquote template into **builder code** — a pure structural
+/// transform that never re-enters `eval`. `` `(a ~b ~@c) `` becomes
+/// `(append (list 'a) (list b) c)`; evaluating that builder code reconstructs
+/// the template with `~unquote` values inlined and `~@unquote-splicing`
+/// sequences spliced. Replaces the old runtime walker (`quasiquote_depth`),
+/// which evaluated unquotes inline while holding LOCAL transients in Rust — the
+/// GC-rooting hazard. Here the unquoted forms become operands of `list`/`append`
+/// that the normal evaluator roots, and this transform itself touches no
+/// safepoint (it calls no `eval`), so its own transients are stable without
+/// rooting.
+///
+/// Auto-gensym (`x#`) resolves to a fresh symbol here, once per template symbol
+/// per expansion. The enclosing macro body is re-evaluated on every application,
+/// so each expansion gets distinct gensyms — Clojure-style binding hygiene.
+pub fn expand_quasiquote(heap: &mut Heap, template: Value) -> LispResult {
     let mut autogen = AutoGen::new();
-    quasiquote_depth(heap, template, env, 0, &mut autogen)
+    qq_elem(heap, template, 0, &mut autogen)
 }
 
 /// Clojure-style auto-gensym: a literal template symbol whose name ends in `#`
@@ -51,135 +73,103 @@ fn maybe_autogensym(v: Value, autogen: &mut AutoGen) -> Value {
     v
 }
 
-fn quasiquote_depth(
-    heap: &mut Heap,
-    template: Value,
-    env: EnvId,
-    depth: u32,
-    autogen: &mut AutoGen,
-) -> LispResult {
+/// A symbol Value for a builder-code head the transform emits (`list`,
+/// `append`, `vector`, `hash-map`, `apply`). Interning dedups, so this is cheap.
+fn sym(name: &str) -> Value {
+    Value::Sym(value::intern(name))
+}
+
+/// `(quote v)` — the builder form that reproduces a literal symbol/atom datum.
+fn quote_form(heap: &mut Heap, v: Value) -> Value {
+    heap.list(vec![sym(kw::QUOTE), v])
+}
+
+/// Builder code for one template position. `~x` becomes `x` (evaluated in place
+/// by the normal evaluator); a list/vector/map recurses; a literal symbol is
+/// quoted (after auto-gensym rewriting `x#`); a self-evaluating atom is emitted
+/// verbatim.
+fn qq_elem(heap: &mut Heap, v: Value, depth: u32, autogen: &mut AutoGen) -> LispResult {
     if depth >= MAX_DEPTH {
         return Err(LispError::runtime(format!(
             "quasiquote template nested too deeply (max {} levels)",
             MAX_DEPTH
         )));
     }
-    if let Some(inner) = tagged(heap, template, kw::UNQUOTE) {
-        return eval::eval(heap, inner, env);
+    // ~x → x : the unquoted form is evaluated in place when the builder runs.
+    if let Some(inner) = tagged(heap, v, kw::UNQUOTE) {
+        return Ok(inner);
     }
-    match template {
+    match v {
         Value::Pair(_) => {
-            let items = heap.list_to_vec(template)?;
-            let out = expand_seq(heap, &items, env, depth + 1, autogen)?;
-            Ok(heap.list(out))
+            let items = heap.list_to_vec(v)?;
+            qq_seq(heap, &items, false, depth + 1, autogen)
         }
         Value::Vector(id) => {
             let items = heap.vector(id).to_vec();
-            let out = expand_seq(heap, &items, env, depth + 1, autogen)?;
-            Ok(heap.alloc_vector(out))
+            qq_seq(heap, &items, true, depth + 1, autogen)
         }
         Value::Map(id) => {
-            // Expand each key and value (no `~@` splicing into a map — ill-defined).
-            // Runtime quasiquote runs with MACRO_BLOCK *off*, so an inner unquote
-            // eval can collect at any depth (ADR-061); keep `env`, the unexpanded
-            // entries, and the accumulated results on the operand stack.
+            // No `~@` splicing into a map (ill-defined); expand each key/value.
             let entries = heap.map_entries(id);
-            let n = entries.len();
-            let vb = heap.roots_len();
-            let eb = heap.env_roots_len();
-            heap.push_env_root(env);
-            for &(k, v) in &entries {
-                heap.push_root(k); // vb + 2i
-                heap.push_root(v); // vb + 2i + 1
+            let mut out = Vec::with_capacity(entries.len() * 2 + 1);
+            out.push(sym("hash-map"));
+            for (k, val) in entries {
+                out.push(qq_elem(heap, k, depth + 1, autogen)?);
+                out.push(qq_elem(heap, val, depth + 1, autogen)?);
             }
-            let res_base = heap.roots_len();
-            for i in 0..n {
-                let env_now = heap.env_root_at(eb);
-                let kf = heap.root_at(vb + 2 * i);
-                let k = match quasiquote_depth(heap, kf, env_now, depth + 1, autogen) {
-                    Ok(k) => k,
-                    Err(e) => return teardown_err(heap, vb, eb, e),
-                };
-                heap.push_root(k);
-                let env_now = heap.env_root_at(eb);
-                let vf = heap.root_at(vb + 2 * i + 1);
-                let v = match quasiquote_depth(heap, vf, env_now, depth + 1, autogen) {
-                    Ok(v) => v,
-                    Err(e) => return teardown_err(heap, vb, eb, e),
-                };
-                heap.push_root(v);
-            }
-            let mut pairs = Vec::with_capacity(n);
-            for i in 0..n {
-                pairs.push((heap.root_at(res_base + 2 * i), heap.root_at(res_base + 2 * i + 1)));
-            }
-            heap.truncate_roots(vb);
-            heap.truncate_env_roots(eb);
-            Ok(heap.map_from_pairs(pairs))
+            Ok(heap.list(out))
         }
-        other => Ok(maybe_autogensym(other, autogen)),
+        // A literal symbol is data — quote it (auto-gensym `x#` first).
+        Value::Sym(_) => {
+            let sv = maybe_autogensym(v, autogen);
+            Ok(quote_form(heap, sv))
+        }
+        // Self-evaluating atoms (int/float/string/keyword/bool/nil) emit verbatim.
+        other => Ok(other),
     }
 }
 
-/// Tear down an operand-stack region and return the error (helper for the rooted
-/// quasiquote loops, whose `?` would otherwise leak the pushed roots).
-fn teardown_err<T>(heap: &mut Heap, vb: usize, eb: usize, e: LispError) -> Result<T, LispError> {
-    heap.truncate_roots(vb);
-    heap.truncate_env_roots(eb);
-    Err(e)
-}
-
-fn expand_seq(
+/// Builder code for a sequence template (`is_vector` chooses list vs vector).
+/// With no `~@` splice it is a flat `(list e…)` / `(vector e…)`. With a splice
+/// it is `(append (list e) <spliced-seq> …)`, and for a vector that assembled
+/// list is turned back into a vector with `(apply vector …)`. `append` is the
+/// seq-generic concatenation, so a spliced vector/list/map flattens uniformly,
+/// exactly as the old walker's `seq_items` did.
+fn qq_seq(
     heap: &mut Heap,
     items: &[Value],
-    env: EnvId,
+    is_vector: bool,
     depth: u32,
     autogen: &mut AutoGen,
-) -> Result<Vec<Value>, LispError> {
-    // Each `~unquote` / `~@unquote-splicing` evaluates a sub-form, which can
-    // collect at ANY eval depth (ADR-061) — and runtime quasiquote runs with
-    // MACRO_BLOCK *off*. So the accumulated `out`, the remaining template `items`,
-    // and `env` are LOCAL transients a collection would strand: keep them on the
-    // operand stack and read back relocated handles, instead of the plain `Vec`s
-    // (whose copies go stale, then `heap.list(out)` would store stale handles).
-    let n = items.len();
-    let vb = heap.roots_len();
-    let eb = heap.env_roots_len();
-    heap.push_env_root(env);
-    for &it in items {
-        heap.push_root(it); // vb .. vb+n : unexpanded template elements
+) -> LispResult {
+    let has_splice = items
+        .iter()
+        .any(|&it| tagged(heap, it, kw::UNQUOTE_SPLICING).is_some());
+    if !has_splice {
+        let mut out = Vec::with_capacity(items.len() + 1);
+        out.push(if is_vector { sym("vector") } else { sym("list") });
+        for &it in items {
+            out.push(qq_elem(heap, it, depth, autogen)?);
+        }
+        return Ok(heap.list(out));
     }
-    let out_base = heap.roots_len(); // expanded results accumulate here
-    for i in 0..n {
-        let el = heap.root_at(vb + i);
-        let env_now = heap.env_root_at(eb);
-        if let Some(inner) = tagged(heap, el, kw::UNQUOTE_SPLICING) {
-            let spliced = match eval::eval(heap, inner, env_now) {
-                Ok(s) => s,
-                Err(e) => return teardown_err(heap, vb, eb, e),
-            };
-            let seq = match heap.seq_items(spliced) {
-                Ok(s) => s,
-                Err(e) => return teardown_err(heap, vb, eb, e),
-            };
-            for v in seq {
-                heap.push_root(v);
-            }
+    let mut segs = Vec::with_capacity(items.len() + 1);
+    segs.push(sym("append"));
+    for &it in items {
+        if let Some(inner) = tagged(heap, it, kw::UNQUOTE_SPLICING) {
+            segs.push(inner); // splice the sequence's elements in place
         } else {
-            match quasiquote_depth(heap, el, env_now, depth, autogen) {
-                Ok(v) => heap.push_root(v),
-                Err(e) => return teardown_err(heap, vb, eb, e),
-            }
+            let e = qq_elem(heap, it, depth, autogen)?;
+            let one = heap.list(vec![sym("list"), e]);
+            segs.push(one);
         }
     }
-    let outn = heap.roots_len() - out_base;
-    let mut out = Vec::with_capacity(outn);
-    for i in 0..outn {
-        out.push(heap.root_at(out_base + i));
+    let appended = heap.list(segs);
+    if is_vector {
+        Ok(heap.list(vec![sym("apply"), sym("vector"), appended]))
+    } else {
+        Ok(appended)
     }
-    heap.truncate_roots(vb);
-    heap.truncate_env_roots(eb);
-    Ok(out)
 }
 
 /// If `v` is a two-element list `(name x)` with the given head symbol, return `x`.

@@ -602,6 +602,75 @@ crashes mid-`binding` takes its binding stack down with it and disturbs no one.
 `defdyn`/`binding` are Brood macros over a tiny kernel (`%declare-dynamic`,
 `%binding`, `dynamic?`) — no new special form, the `try`/`catch` precedent.
 
+## Output ports and logging
+
+`print`/`println` don't write to stdout directly — they write to the **current
+output port**. A *port* is just a one-argument function `(fn (s) …)` that consumes
+a ready string; the dynamic variables `*out*` and `*err*` hold the current
+stdout/stderr ports. The defaults write to the real streams (and `*out*` honours
+the `with-out-str` capture), so out of the box `print` behaves exactly as you'd
+expect. The point is that you can **redirect** it.
+
+`(require 'io)` gives the port toolkit — constructors and the `with-out`/`with-err`
+scoping macros (thin wrappers over `binding`):
+
+```lisp
+(require 'io)
+
+(with-out (fn-port (fn (s) (collect s)))   ; route output to a callback
+  (println "captured by collect"))
+
+(with-out (process-port editor)            ; route output to another process …
+  (println "sent as [:io-write \"…\\n\"]"))
+```
+
+A **`process-port`** sends each string to a process as `[:io-write s]`. That is
+how output reaches a *buffer*: the process that owns the buffer (an editor's
+`*Messages*`, say) receives the message and appends it. The string crosses the
+process boundary as a copied message — async and share-nothing, never a mutated
+value — which is exactly why it's safe. Because ports are plain functions, `print`
+gains no special cases and `with-out-str` is unaffected. (Dynamic bindings don't
+reach a `spawn`ed child, so a child starts with the default `*out*`; hand it a
+port explicitly if it should redirect too.)
+
+### Logging
+
+`(require 'log)` is an **async, safe logger** built on the same idea. A logger is
+one long-lived process (a `hatch` gen-server) holding a list of *backends*; each
+log call is a fire-and-forget cast, so it never blocks the caller, and the single
+process serialises every write — lines never interleave, and a backend that throws
+takes down only that line, not the caller.
+
+```lisp
+(require 'log)
+
+(start-logger)                          ; default: stdout, :info and up
+(log-info "server up" {:port 8080})     ; structured fields are optional
+(log :warn "disk low")
+;; => [INFO  1736…] server up
+;;    [WARN  1736…] disk low
+```
+
+Levels are `:debug` < `:info` < `:warn` < `:error`. A **backend** is an `io`
+port + a minimum level + a formatter, so the logger *reuses* ports rather than
+inventing its own sink. Build one with `stdout-backend` / `stderr-backend` /
+`file-backend` / `fn-backend` / `process-backend`, and add it live:
+
+```lisp
+(add-backend (file-backend "app.log"))         ; also append to a file
+(add-backend (process-backend buffer-pid))     ; …and to a buffer-owning process
+```
+
+`process-backend` is the **log-to-a-buffer** path: the formatted line is sent to
+`buffer-pid` as `[:io-write s]` — the same envelope `process-port` uses — so an
+editor process can fold it into its `*Messages*` buffer. The default logger is
+registered under the name `:logger` (found via `whereis`); `(log …)` falls back to
+stderr when none is running, so a log is never silently lost.
+
+Both `io` and `log` are written in Brood over the process primitives — Rust only
+supplies the render/write split behind `print` (`%render`, `%write-out`,
+`%write-err`). See `std/io.blsp` and `std/log.blsp`.
+
 ## Type annotations
 
 Types in Brood are **optional and advisory** — you never have to write one, and a

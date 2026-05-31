@@ -5,11 +5,46 @@
 //! `with_inputs`, so the prelude build (a once-per-process `LazyLock`) and the
 //! per-instance seeding stay out of the measured region — we time parse + eval
 //! of the program itself.
+//!
+//! **Both execution engines are measured side by side** (ADR-076): every eval
+//! benchmark runs once under the closure-compiling **VM** (the default engine)
+//! and once under the **tree-walker** (`BROOD_VM=0`'s fallback), labelled `Vm` /
+//! `Tw` in the arg column. The engine is pinned per-input via
+//! `compile::set_forced_engine` (the same override the differential test uses),
+//! so a single `cargo bench` shows the speedup the VM buys — e.g. `fib 20` is
+//! ~7.3 ms on the VM vs ~13 ms on the tree-walker. Don't read a single number as
+//! "the" eval cost without noting which engine row it's on.
 
+use brood::eval::compile::set_forced_engine;
 use brood::{syntax::reader, Interp};
 
 fn main() {
     divan::main();
+}
+
+/// Which execution engine a benchmark row is pinned to. `Debug` is what divan
+/// prints in the arg column (`Vm` / `Tw`).
+#[derive(Clone, Copy, Debug)]
+enum Eng {
+    Vm,
+    Tw,
+}
+
+/// A fresh interpreter with the given engine forced on this thread for the
+/// measured region. `set_forced_engine` takes precedence over the `BROOD_VM`
+/// env default (`compile::vm_enabled`), and divan runs this input setup on the
+/// same worker thread as the benched closure, so the pin holds through the eval.
+fn interp_on(eng: Eng) -> Interp {
+    set_forced_engine(Some(matches!(eng, Eng::Vm)));
+    Interp::new()
+}
+
+/// `[(Vm, n), (Tw, n)]` for every `n` — the engine × size grid each eval
+/// benchmark iterates, so the two engines sit on adjacent rows per size.
+macro_rules! engine_grid {
+    ($($n:expr),+ $(,)?) => {
+        [ $( (Eng::Vm, $n), (Eng::Tw, $n) ),+ ]
+    };
 }
 
 /// Standing up a fresh interpreter. The prelude is built once per process; this
@@ -33,24 +68,24 @@ fn parse_prelude(bencher: divan::Bencher) {
 /// Tail-recursive sum to N — exercises the load-bearing `'tail:` loop in
 /// `eval` (proper tail calls, O(1) Rust stack). Arithmetic is defined in Brood,
 /// so this also stresses prelude function-call dispatch.
-#[divan::bench(args = [1_000, 10_000, 100_000])]
-fn sum_tail(bencher: divan::Bencher, n: u64) {
+#[divan::bench(args = engine_grid![1_000, 10_000, 100_000])]
+fn sum_tail(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
     let src = format!(
         "(def sum-to (fn [n acc] (if (= n 0) acc (sum-to (- n 1) (+ acc n))))) (sum-to {n} 0)"
     );
     bencher
-        .with_inputs(Interp::new)
+        .with_inputs(|| interp_on(eng))
         .bench_refs(|interp| interp.eval_str(&src).unwrap());
 }
 
 /// Naive (non-tail) recursive Fibonacci — exercises function-call overhead and
 /// the growing-then-unwinding Rust call stack. fib(25) is ~242k calls.
-#[divan::bench(args = [15, 20, 25])]
-fn fib(bencher: divan::Bencher, n: u64) {
+#[divan::bench(args = engine_grid![15, 20, 25])]
+fn fib(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
     let src =
         format!("(def fib (fn [n] (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))) (fib {n})");
     bencher
-        .with_inputs(Interp::new)
+        .with_inputs(|| interp_on(eng))
         .bench_refs(|interp| interp.eval_str(&src).unwrap());
 }
 
@@ -59,14 +94,14 @@ fn fib(bencher: divan::Bencher, n: u64) {
 /// allocation. The clearest measure of the global-lookup + dispatch tax the
 /// eval-dispatch campaign targets (see `docs/handoff-eval-dispatch.md`); the
 /// later lexical-addressing step should move this most.
-#[divan::bench(args = [10_000, 100_000])]
-fn cons_build(bencher: divan::Bencher, n: u64) {
+#[divan::bench(args = engine_grid![10_000, 100_000])]
+fn cons_build(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
     let src = format!(
         "(def build (fn [n acc] (if (= n 0) acc (build (- n 1) (cons n acc))))) \
          (count (build {n} nil))"
     );
     bencher
-        .with_inputs(Interp::new)
+        .with_inputs(|| interp_on(eng))
         .bench_refs(|interp| interp.eval_str(&src).unwrap());
 }
 
@@ -74,8 +109,8 @@ fn cons_build(bencher: divan::Bencher, n: u64) {
 /// Forces the in-language `merge-sort` path (custom comparator), not the Rust
 /// `%sort-asc` fast-path, so it reflects interpreter dispatch over list-walking.
 /// Data is built in-language (xorshift) so parsing stays out of the hot region.
-#[divan::bench(args = [1_000, 5_000])]
-fn sort_brood(bencher: divan::Bencher, n: u64) {
+#[divan::bench(args = engine_grid![1_000, 5_000])]
+fn sort_brood(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
     let src = format!(
         "(def gen (fn [n seed acc] \
            (if (= n 0) acc \
@@ -87,6 +122,6 @@ fn sort_brood(bencher: divan::Bencher, n: u64) {
          (count (sort < data))"
     );
     bencher
-        .with_inputs(Interp::new)
+        .with_inputs(|| interp_on(eng))
         .bench_refs(|interp| interp.eval_str(&src).unwrap());
 }
