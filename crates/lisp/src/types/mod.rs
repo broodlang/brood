@@ -286,11 +286,31 @@ impl Ty {
         Ty { tags, arrow, elem }
     }
 
-    /// `¬self` — every value *not* in `self` (complemented within the universe).
-    /// The complement of a refined function/sequence type isn't a single
-    /// refinement, so the result is always unrefined (widen — sound).
+    /// `¬self` — every value *not* in `self`, as a **sound over-approximation**:
+    /// the result is always a *superset* of the true complement, never a subset.
+    /// Exact for a flat type. For a *refined* type it can't be exact — the
+    /// complement of `vector<int>` is "non-vectors **plus** vectors holding a
+    /// non-int", which this flat lattice can't name — so we widen: drop the
+    /// refinement *and keep the refined tag in the result*, because some of that
+    /// tag's inhabitants escape the refinement and so live in the complement.
+    /// Keeping the tag is what makes the result a superset; the earlier "drop the
+    /// tag too" produced a *subset* — unsound, it could manufacture a false
+    /// [`is_disjoint`](Ty::is_disjoint). Widening a complement can only ever
+    /// *suppress* a disjointness warning, never raise a false one
+    /// (advisory-soundness). Consequence: `a ∩ ¬a = ⊥` and double-negation are
+    /// exact only for **flat** `a` (which is all the laws tests sample, and all
+    /// the checker ever negates — `tested_by`/`%eq` results are flat).
     pub fn negate(self) -> Ty {
-        Ty::flat(!self.tags & UNIVERSE)
+        let mut tags = !self.tags & UNIVERSE;
+        // A refinement means `self` omits some values of its refined tag(s);
+        // those omitted values are in the complement, so the tag must survive.
+        if self.arrow.is_some() {
+            tags |= self.tags & FN_BITS;
+        }
+        if self.elem.is_some() {
+            tags |= self.tags & SEQ_BITS;
+        }
+        Ty::flat(tags)
     }
 
     /// `self \ other` — values in `self` but not `other`.
@@ -418,18 +438,27 @@ impl fmt::Display for Ty {
             }
         }
         // A pure sequence type with a known element type: `vector<E>` / `list<E>`
-        // (`nil` may ride along as the empty-list case).
+        // — with a leading `nil | ` when the empty/empty-list case rides along
+        // (e.g. a `(map …)` result is `nil | list<E>`), so the rendering names
+        // every tag the value can actually have.
         if let Some(elem) = self.elem_ty() {
             if self.tags & !(SEQ_BITS | (1u32 << bit(Tag::Nil))) == 0 {
                 let has_vec = self.contains_tag(Tag::Vector);
                 let has_pair = self.contains_tag(Tag::Pair);
+                let nil = if self.contains_tag(Tag::Nil) && (has_vec || has_pair) {
+                    "nil | "
+                } else {
+                    ""
+                };
                 if has_vec && !has_pair {
-                    return write!(f, "vector<{elem}>");
+                    return write!(f, "{nil}vector<{elem}>");
                 }
                 if has_pair && !has_vec {
-                    return write!(f, "list<{elem}>");
+                    return write!(f, "{nil}list<{elem}>");
                 }
-                return write!(f, "(list | vector)<{elem}>");
+                if has_vec && has_pair {
+                    return write!(f, "{nil}(list | vector)<{elem}>");
+                }
             }
         }
         let mut first = true;
@@ -999,6 +1028,32 @@ mod tests {
         );
         // a bare vector (no element refinement) still prints as its tag
         assert_eq!(Ty::of(Tag::Vector).to_string(), "vector");
+        // `nil | list<E>` (the shape a `(map …)`/`(filter …)` result carries)
+        // names the nil rather than hiding it.
+        assert_eq!(
+            Ty::list_of(Ty::of(Tag::Int)).union(Ty::of(Tag::Nil)).to_string(),
+            "nil | list<int>"
+        );
+    }
+
+    #[test]
+    fn negate_of_a_refined_type_is_a_sound_overapproximation() {
+        // ¬(vector<int>) must be a *superset* of the true complement, so it has
+        // to KEEP the `vector` tag — vectors holding a non-int element are in the
+        // complement. The earlier impl dropped the tag (a subset), which could
+        // manufacture a false `is_disjoint`.
+        let nvi = Ty::vector_of(Ty::of(Tag::Int)).negate();
+        assert!(nvi.contains_tag(Tag::Vector), "must keep the refined tag");
+        // ...so it is NOT disjoint from another vector type — no false positive.
+        assert!(!nvi.is_disjoint(&Ty::vector_of(Ty::of(Tag::Str))));
+        assert!(!nvi.is_disjoint(&Ty::of(Tag::Vector)));
+        // and it still admits the obviously-complement tags.
+        assert!(nvi.contains_tag(Tag::Int));
+        // Same widening for an arrow refinement: keep both function tags.
+        let narr = arr(vec![Ty::of(Tag::Int)], Ty::of(Tag::Int)).negate();
+        assert!(narr.contains_tag(Tag::Fn) && narr.contains_tag(Tag::Native));
+        // Flat negate is unchanged (exact): ¬int still excludes int.
+        assert!(!Ty::of(Tag::Int).negate().contains_tag(Tag::Int));
     }
 
     #[test]
