@@ -285,9 +285,12 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   the running image (ADR-031), not a static workspace index; ✅ a
   **developer-ergonomics pass** on top — `textDocument/formatting` (delegated to
   the Brood `std/format.blsp` formatter), `workspace/symbol`, code actions
-  (did-you-mean for unbound symbols), folding ranges, and inlay hints (param-name
-  at call sites). ⬜ Still next: incremental sync; range/delta semantic tokens;
-  finer checker-finding spans.
+  (did-you-mean for unbound symbols; **remove-unused-`require`**, 2026-05-31),
+  folding ranges, and inlay hints (param-name at call sites). ⬜ Still next:
+  incremental sync; range/delta semantic tokens; **finer checker-finding spans**
+  (arity/type findings anchor to the call head, not the offending argument —
+  wants `Pos` threaded through `types/check.rs`'s walk, a focused refactor of
+  that GC-rooting-sensitive pass); and the **create-missing-`defn`** code action.
 
 > v0.1 is the ✅ slice above: enough to be a real, usable language. The ⬜ items
 > complete M1.
@@ -361,6 +364,15 @@ the workaround available today.
 - ⬜ **Lazy sequences + `iterate`** — tail-recursive accumulator helpers
   cover the case today; picks up when an editor feature needs unbounded
   streams (animation frames, file lines, undo history).
+- ✅ **MCP runtime-introspection tools** — landed 2026-05-31. The `processes`
+  tool now returns full `(process-info pid)` maps (mailbox, **reductions**,
+  memory, GC count, monitors) instead of bare pids — the observer's per-process
+  view; plus new `process-info` (one process by numeric id) and `node`
+  (runtime-wide stats: workers, peak concurrency, spawned, live count,
+  memory, peers) tools. All pure Brood in `std/mcp.blsp` (ADR-006); catalogue is
+  sixteen tools. ⬜ Still open: a *streaming*/progress-notification tier so an
+  agent sees long-running tool output incrementally (the dispatcher is
+  synchronous today), and exposing GC/process *traces* (not just snapshots).
 - ✅ **MCP `nest mcp` worker-panic isolation** — landed 2026-05-29. A Rust
   panic in any tool-call code path is caught at the handler boundary
   (`call_tool`'s `panic::catch_unwind`), projected as a structured JSON-RPC
@@ -543,9 +555,13 @@ The seam that makes remoteability free later (see architecture.md).
   spawn count, memory used/peak, peers) over a navigable process **table** — id ·
   name · status · mailbox · memory · monitors — from `(process-info pid)` (ADR-051,
   a kernel snapshot map). `↑`/`↓` select, `s` cycles the view (id / mailbox /
-  memory / **tree** — children indented under their parent), `space` pauses the
+  memory / **reds** (live reductions/second rate) / **tree** — children indented
+  under their parent), `space` pauses the
   live refresh, `q` quits; status is colour-coded (running/runnable/waiting), rows
-  clip to width. Interactivity is a UI-state map threaded through the tail-recursive
+  clip to width. The table also shows **REDS** (cumulative reductions) and
+  **REDS/s** (the rate since the last refresh — diffed from a stamped `:at`
+  against the prior snapshot, 2026-05-31); the rate is the at-a-glance "busy now"
+  signal. Interactivity is a UI-state map threaded through the tail-recursive
   loop (no mutation); selection tracks the numeric pid **id** (stable across
   re-sorts). Pure `observe-frame` core (TTY-free, unit-tested) + a thin root-process
   IO loop. New primitives: `mailbox-size`, `process-info` — now full (`:status`

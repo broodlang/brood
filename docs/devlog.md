@@ -11379,3 +11379,41 @@ vs ~13 ms on the tree-walker (`BROOD_VM=0`). The VM is always compiled in (no
 feature gate) and default-on, including in the lean `--no-default-features` release
 — only `BROOD_VM=0` or a VM-deferred form (`match*`/real-default `&optional`) takes
 the slow path. No more single numbers without an engine label.
+
+---
+
+## 2026-05-31 — Runtime visibility: MCP runtime tools, observer reductions/sec, LSP unused-require fix
+
+Three tooling improvements, all riding on introspection primitives that already
+existed.
+
+**MCP can now see what the observer sees.** The `processes` tool used to throw
+away everything but the pid (`{:node :id}`); it now maps `(process-info pid)`
+over `(list-processes)`, so an agent gets the full per-process stat map —
+mailbox backlog, **reductions** (Erlang's work counter), heap bytes, GC count,
+monitors, parent — the same view `std/observer.blsp` paints. Added two
+companions: `process-info` (drill into one process by the numeric id from a
+listing; soft `{:error}` on a miss) and `node` (runtime-wide stats — worker
+count, peak concurrency, spawned total, live count, current/peak memory, peers —
+the observer's header). All three are pure Brood in `std/mcp.blsp` (ADR-006); no
+kernel change. Catalogue is sixteen tools now. (`crates/nest/src/mcp.rs` tests
+updated: `processes` returns maps, not bare pids.)
+
+**Observer shows reductions/second, not just cumulative.** Cumulative reds were
+already a column, but the at-a-glance "who's busy *now*" signal is the rate. The
+snapshot now stamps `:at (now)` (consistent clock for both inline and remote
+sources), `apply-result` rotates the prior snapshot into `:prev`, and a pure
+`observe--rate-procs` joins the two by id to tag each process with `:reds-rate`
+(Δreds/s, nil without a prior sample). Surfaced as a new `REDS/s` column, on the
+detail line, and as a new `:reds` sort key (cycle: id → mailbox → memory → reds →
+tree). All pure/testable; no IO in the rate path.
+
+**LSP: "remove seemingly-unused `(require 'mod)`" code action.** Pure CST
+analysis in `code_actions.rs` (the style the did-you-mean action already uses): a
+lone top-level require whose module is never referenced by a qualified `mod/…`
+name anywhere in the file. Deliberately conservative — any textual `mod/` keeps
+it (false negatives only, never a wrong removal), `(require 'a 'b)` and
+`(:use mod)` clauses are left alone, and since a side-effect-only require can't
+be detected statically it's a **non-preferred** suggestion, not an auto-fix. One
+of the two future code actions `docs/lsp.md` named; create-missing-`defn` and the
+finer-arity-spans checker refactor remain.

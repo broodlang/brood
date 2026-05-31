@@ -487,13 +487,26 @@ fn handle_request(docs: &Documents, interp: &mut Interp, req: Request) -> Respon
                     // Resolve a diagnostic's range to the byte offset of its
                     // start — where the unbound name sits, for `names_in_scope`.
                     let offset_of = |r: Range| a.line_index.offset(&doc.text, r.start);
-                    code_actions::code_actions(
+                    let mut acts = code_actions::code_actions(
                         interp,
                         &p.text_document.uri,
                         &a.scope,
                         offset_of,
                         &p.context.diagnostics,
-                    )
+                    );
+                    // Structural fixes (not tied to a published diagnostic):
+                    // offer to remove a seemingly-unused require under the cursor.
+                    let req_start = a.line_index.offset(&doc.text, p.range.start);
+                    let req_end = a.line_index.offset(&doc.text, p.range.end);
+                    acts.extend(code_actions::unused_require_actions(
+                        &p.text_document.uri,
+                        &a.cst,
+                        &doc.text,
+                        &a.line_index,
+                        req_start,
+                        req_end,
+                    ));
+                    acts
                 }
                 None => Vec::new(),
             };
