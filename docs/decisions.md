@@ -1811,10 +1811,11 @@ subcommand.
    out (those re-resolve; the rest keep their pins). Moving refs advance; the
    "network-free on a cache hit" property is just "the lock still matches."
 
-## ADR-038 — Single-binary bundling: deferred until distribution matters
+## ADR-038 — Single-binary bundling (`nest release`)
 
-**Status:** proposed, **deferred** (2026-05-28). Design recorded for later;
-no implementation yet.
+**Status:** **implemented** (2026-05-31; proposed/deferred 2026-05-28). Built as
+designed — append-to-binary. See [`release.md`](release.md) for the as-built
+reference; the implementation note at the end of this ADR records what shipped.
 
 **Context.** "Run my Brood app as one executable, no `brood` interpreter on
 the host" matters for end-user distribution (the editor, eventually) but
@@ -1850,6 +1851,34 @@ already bundled via `include_str!`; `EMBEDDED_MODULES` is the established
 pattern. `project.blsp` already declares the entry point (`:main`).
 `(load …)` is the right hook for "load from inside the binary" — extend
 to look in the embedded archive before falling through to disk.
+
+**Implementation note (2026-05-31).** Shipped as **`nest release`**, append-to-binary
+as designed, with two refinements from building it:
+
+- **Surface is `nest release`** (not `nest bundle`) — it produces the release
+  artifact. `nest release [-o PATH] [--runtime PATH] [--target TRIPLE]`.
+- **Wire format** (`crates/lisp/src/bundle.rs`): `[brood][archive][20-byte footer]`,
+  footer = magic `b"BRDBNDL1"` + `u32` version + `u64` archive-len, read
+  last-bytes-first via `std::env::current_exe()` (not hand-rolled `/proc/self/exe`).
+  The archive is a flat length-prefixed store of the manifest + each module's
+  source keyed by **filename stem** — the exact name `require--find` searches for
+  as `<stem>.blsp`, so an app's modules resolve through the *existing* require
+  path with no load-path change.
+- **The hook is `%builtin-module`, not `load`.** A mounted bundle is just *more
+  embedded modules*: `builtin_module` consults the bundle after `EMBEDDED_MODULES`,
+  so `require`/`:use` resolve an app's own modules (and bundled deps) transparently.
+  Thin new primitives `%bundled?` / `%bundle-manifest` / `%bundle-module-names`
+  expose the rest; boot policy is Brood (`project/run-bundle` + `bundle-collect`
+  in `std/project.blsp`), per ADR-006.
+- **Code-only + deps bundled.** v1 embeds `project.blsp` + `src/**/*.blsp` +
+  resolved `_deps/` (so a `:path`/`:git`-dep app is self-contained); it does *not*
+  virtualize the filesystem, so runtime asset reads (`(slurp "data.txt")`) still
+  hit disk. A self-extracting **FS** is the obvious next increment if an app needs
+  it. `tests/` is excluded.
+- **Re-release is idempotent.** `nest release` strips an existing footer off the
+  base before appending, so releasing from an already-released `brood` can't nest
+  archives. macOS code-signing (appended bytes invalidate a signature) is a
+  documented re-sign step; cross-targets supply a prebuilt `brood` via `--runtime`.
 
 
 ## ADR-039 — Supervised processes with mode-gated resume checkpoints

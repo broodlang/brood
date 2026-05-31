@@ -24,6 +24,7 @@ pub mod syntax; // surface: reader (text to Value) + printer (Value to text)
 pub mod types; // the advisory type lattice + checker (nothing gates on it)
 
 pub mod builtins;
+pub mod bundle; // single-binary app release: append-to-binary bundling (ADR-038)
 pub mod cli_support; // tiny mechanism the `brood` and `nest` binaries share
 pub mod dist; // distributed nodes: connect two runtimes over TCP, route messages
 pub mod error; // errors + source positions (cross-cutting)

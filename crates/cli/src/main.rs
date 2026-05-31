@@ -79,6 +79,21 @@ fn main() {
     }
     // Capture any panic (use-after-GC tripwire, heap index, …) to .brood_crash_dump.
     brood::cli_support::install_crash_dump();
+    // A release bundle (`nest release`, ADR-038): this binary carries an app's
+    // source appended to it. Boot the app and pass argv straight through to its
+    // entry fn — *before* `Cli::parse`, so the app's own arguments/flags aren't
+    // intercepted by `brood`'s own clap. A plain `brood` has no bundle and falls
+    // through to normal CLI dispatch.
+    if brood::bundle::is_bundled() {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let handle = std::thread::Builder::new()
+            .name("brood-main".into())
+            .stack_size(brood::process::CORO_STACK_BYTES)
+            .spawn(move || run_bundle(args))
+            .expect("spawn brood-main thread");
+        handle.join().expect("brood-main thread panicked");
+        return;
+    }
     let cli = Cli::parse();
     // Run the actual work on an explicitly-sized large stack. The tree-walking
     // evaluator recurses one (heavy, in debug) Rust frame per non-tail call, and
@@ -140,6 +155,34 @@ fn run(cli: Cli) {
         let _guard = TermGuard;
         interp.eval_str("(require 'repl) (repl/repl-run)")
     };
+    if let Err(e) = result {
+        report_error(&e);
+        std::process::exit(1);
+    }
+}
+
+/// Boot an embedded release bundle (ADR-038) — the path taken when this binary
+/// was produced by `nest release`. Hands `args` (the app's argv) to the embedded
+/// app's `:main` via `std/project.blsp`. No CLI flags, no project dir, no source
+/// on disk: every module is read from the appended archive.
+fn run_bundle(args: Vec<String>) {
+    // Honour BROOD_MEM_LIMIT etc.; a shipped app stays unlimited unless opted in.
+    brood::core::alloc::init_limits_from_env();
+    let mut interp = Interp::new();
+    let list = args
+        .iter()
+        .map(|a| format!("\"{}\"", brood::introspect::escape_brood_string(a)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let code = format!("(require 'project) (project/run-bundle (list {list}))");
+    let result = {
+        let _guard = TermGuard;
+        interp.eval_str(&code)
+    };
+    // Restore the terminal whether the app returned or threw (a full-screen app
+    // that entered raw mode / the alternate screen and then threw never reached
+    // its own teardown; `process::exit` skips Drop guards).
+    brood::builtins::restore_terminal_on_exit();
     if let Err(e) = result {
         report_error(&e);
         std::process::exit(1);

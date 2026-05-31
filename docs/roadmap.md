@@ -677,16 +677,16 @@ top* of connect, plus a few deliberately-deferred refinements:
 
 ## Cross-cutting open questions (revisit, don't build yet)
 
-- ⬜ **How do we ship a binary?** We have no distribution story yet. Open
-  questions to resolve before it matters: what *is* the shippable artifact — just
-  the `brood`/`nest`/`brood-lsp` binaries, or a bundle that also carries `std/`
-  and a project's `.blsp` sources? Is `std/` baked into the binary (the prelude
-  already is) or shipped alongside and loaded from disk? How does an end user
-  install (a single static binary? a `.deb`? `cargo install`? a tarball with a
-  runtime dir)? How does a *Brood application* (eventually the editor) get
-  packaged and launched — a thin native launcher around an embedded runtime, or a
-  separate runtime + a script bundle? Cross-compilation / target matrix. Decide
-  deliberately and record an ADR when this becomes live.
+- ✅ **How do we ship a binary?** **`nest release`** (ADR-038, 2026-05-31,
+  [`release.md`](release.md)) — append-to-binary: a project's manifest + sources
+  (+ resolved `_deps/`) are appended to a copy of the prebuilt `brood`, and that
+  one executable boots `:main` with no interpreter, project dir, or sources on the
+  target. `std/` is already baked into `brood` (the prelude + `EMBEDDED_MODULES`),
+  so a release ships only the app's own code. v1 is **code-only** (no runtime
+  asset FS) and Linux-first; cross-targets supply a prebuilt `brood` via
+  `--runtime` (cross-compiling the runtime stays out of scope). Still open if a
+  real consumer needs it: a self-extracting filesystem for runtime data files, a
+  static-musl default, and `.deb`/`cargo install` packaging of the *runtime*.
 - ⬜ **A tree-sitter grammar for Brood + GitHub language recognition.** Today
   `.gitattributes` maps `.blsp → linguist-language=Clojure linguist-detectable=false`
   (highlight as Clojure on GitHub, but keep it out of the repo's language stats) —
