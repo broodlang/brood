@@ -11625,3 +11625,18 @@ with `scripts/quickbench.sh` (the `eval` + `library` suites) before/after.
 builds (`into {}`/transient) −10..−12%; `sequence/sort` −10%; `join`/`split`/
 `pipeline`/`transduce` −4..−6%. Tail/fib/sum unchanged (not touched). Suite green
 (the `--acc` helpers stay tail-recursive; sort stability preserved).
+
+### Follow-ups (same session)
+
+- **Micro-wins** (un-benched, low-risk): `distinct--step` uses a single
+  `map-get` (the "seen" set only stores `true`) instead of `contains?`'s
+  two-sentinel probe; `select-keys` does one `map-get` per key (value-yielding,
+  with a rare second-sentinel disambiguation) rather than `contains?` + `get`,
+  still keeping `nil`/`false`-valued keys; `enumerate` is one tail pass instead
+  of `count` + `range` + `zip`.
+- **ADR-087** records the principle behind `map-count` (and the sibling `%quot`):
+  expose an O(1) fact the kernel data type already holds as a primitive, rather
+  than recompute it in Brood — mechanism in Rust, policy stays in `std/`.
+- Reinstalled the toolchain (`make install`) so the embedded `nest`/`brood-lsp`
+  pick up `map-count`/`%quot` (the check-hook had flagged `map-count` as unbound
+  against the stale on-PATH binary).

@@ -514,7 +514,19 @@ Works on maps (by key) and vectors (by integer index, which must be in range)."
 
 (defn select-keys (m ks)
   "A map of just the entries of `m` whose key is in `ks` (keys absent from `m` are skipped)."
-  (fold (fn (acc k) (if (contains? m k) (map-assoc acc k (get m k)) acc)) {} ks))
+  ;; One `map-get` per key — which also yields the value — rather than
+  ;; `contains?` (its own probe) plus a separate `get`. A present key returns its
+  ;; stored value (used directly); only when that value happens to equal the
+  ;; first sentinel do we disambiguate present-vs-absent with a second sentinel,
+  ;; so a key stored with `nil`/`false` is still kept (contains?'s guarantee).
+  (fold (fn (acc k)
+          (let (v (map-get m k :%select-miss-a))
+            (if (= v :%select-miss-a)
+              (let (v2 (map-get m k :%select-miss-b))
+                (if (= v2 :%select-miss-b) acc (map-assoc acc k v2)))
+              (map-assoc acc k v))))
+    {}
+    ks))
 
 (defn zipmap (ks vs)
   "A map pairing each key in `ks` with the value at the same position in `vs`, stopping at the shorter."
@@ -1504,7 +1516,10 @@ a vector for a vector and a list for a list. `i` must be in `[0, count)`."
 ;; result acts as the "seen" set, so membership is O(1)-ish, not the O(n²) a
 ;; `member?`-per-item scan would cost. State is the 2-vector [seen result-rev].
 (defn distinct--step (state x)
-  (if (contains? (nth state 0) x)
+  ;; the "seen" map only ever stores `true`, so a single `map-get` (default
+  ;; `false`) distinguishes present from absent — no need for `contains?`'s
+  ;; two-sentinel probe (which exists to tell a stored `nil`/`false` from absence).
+  (if (map-get (nth state 0) x false)
     state
     [(map-assoc (nth state 0) x true) (cons x (nth state 1))]))
 (defn distinct (coll)
@@ -1679,9 +1694,16 @@ applies to each input first."
   "The list (x f(x) f²(x) … fⁿ(x)) — `n`+1 successive states of applying `f`."
   (reverse (iterate-times--acc f x n nil)))
 
+;; One tail pass pairing each item with a running index — the old
+;; `(zip (range (count coll)) coll)` made three passes (count, build the range
+;; list, then zip). `seq` coerces a map to its `[k v]` pairs, as `zip` did.
+(defn enumerate--acc (i coll acc)
+  (if (empty? coll)
+    (reverse acc)
+    (enumerate--acc (inc i) (rest coll) (cons [i (first coll)] acc))))
 (defn enumerate (coll)
   "Pair each item with its 0-based index: ([0 x₀] [1 x₁] …)."
-  (zip (range (count coll)) coll))
+  (enumerate--acc 0 (seq coll) nil))
 
 ;; ---- comprehensions ---------------------------------------------------------
 ;; `for` builds a list by walking one or more bindings, with `:when` guards —
