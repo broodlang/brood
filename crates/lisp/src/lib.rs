@@ -64,15 +64,19 @@ static SHARED: LazyLock<SharedBundle> = LazyLock::new(|| {
     // Positioned read so each def carries the line/col goto-definition lands on.
     let forms = syntax::reader::read_all_positioned(&mut heap, PRELUDE).expect("read prelude");
     for (form, pos) in forms {
-        // Capture the def site from the *un-expanded* form (before macros lower
-        // `defn`/`defmacro` to `def` and discard spans), exactly as the file
-        // loader does. No-op when no file was set, or the form isn't a def.
+        // Try the raw form first — catches `defn`/`defmacro` before lowering
+        // discards their source positions. Then also try the expanded form so
+        // user-defined def-like macros (e.g. `defseq`) whose raw head isn't
+        // `def`/`defn`/`defmacro` but whose expansion IS a `defn` still get
+        // their call-site position recorded. Both calls are no-ops when the
+        // form isn't recognisably a definition, or no file is set.
         heap.note_definition(form, pos);
         // Compile pass (expand macros, then namespace-resolve — a no-op here since
         // the prelude is the root namespace), then evaluate. Form-by-form so a
         // macro defined by one form is visible to the next.
         let form = eval::macros::compile(&mut heap, form, root)
             .unwrap_or_else(|e| panic!("prelude expand: {}", e));
+        heap.note_definition(form, pos);
         eval::eval(&mut heap, form, root).unwrap_or_else(|e| panic!("prelude: {}", e));
     }
     heap.set_current_file(None);
@@ -218,12 +222,15 @@ impl Interp {
         for i in 0..n {
             let form = self.heap.root_at(roots_base + i);
             let pos = forms[i].1;
-            // Record def sites pre-expansion (ADR-031); a no-op unless a file is
-            // set via `current-file`. Def sites live in the (shared) RUNTIME
-            // region, not LOCAL, so they survive collection / arena reset.
+            // Record def sites — try the raw form first (preserves pre-expansion
+            // spans for `defn`/`defmacro`), then also the expanded form so
+            // user-defined def-like macros whose raw head isn't recognised
+            // (e.g. `defseq`) still get their call-site position recorded.
+            // Both calls no-op when not a definition or no file is set.
             self.heap.note_definition(form, pos);
             let outcome = eval::macros::compile(&mut self.heap, form, self.root)
                 .and_then(|f| {
+                    self.heap.note_definition(f, pos);
                     // BROOD_VM routes the resolved form through the compiling
                     // engine (ADR-076); off by default → the tree-walker. Stage 0:
                     // the VM path defers every form back to `eval`, so this is at

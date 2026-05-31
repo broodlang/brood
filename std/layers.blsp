@@ -316,12 +316,16 @@ rule wins — a project can override a default."
       (layers--match-file file (rest rules)))))
 
 (defn buffer-type-for (buf)
-  "The type of `buf`: match its `:file` against `*auto-type-by-file*` (first match
-wins); with no file or no match, fall back to its explicitly-set `:type`, else
+  "The type of `buf`. When `:type` is already set (either stamped by a prior
+`init-buffer-layers` call or by an explicit `M-x some-mode` / `set-buffer-type`),
+returns it directly — so the open-time auto-detection is a one-shot event and an
+explicit mode switch sticks. When `:type` is nil (a freshly-created buffer), matches
+`:file` against `*auto-type-by-file*` (first match wins), then falls back to
 `:fundamental`."
-  (let (file (get buf :file)
-        matched (if (nil? file) nil (layers--match-file file *auto-type-by-file*)))
-    (or matched (get buf :type) :fundamental)))
+  (or (get buf :type)
+      (let (file (get buf :file))
+        (if (nil? file) nil (layers--match-file file *auto-type-by-file*)))
+      :fundamental))
 
 (defn set-buffer-type (buf type)
   "Set `buf`'s `:type` explicitly — the Brood-side override for fileless or special

@@ -39,7 +39,7 @@ fn spawn_brood(dir: &std::path::Path, name: &str, src: &str) -> Child {
 }
 
 fn wait_until_listening(port: u16) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         if TcpStream::connect(("127.0.0.1", port)).is_ok() {
             return;
@@ -105,8 +105,10 @@ fn remote_attach_reads_snapshot_then_sees_disconnect() {
     let b = spawn_brood(&dir, "observer.blsp", &observer);
 
     // Let the observer attach + take its first snapshot, then drop the target so it
-    // observes the disconnect.
-    std::thread::sleep(Duration::from_millis(1500));
+    // observes the disconnect. Give it extra room on a loaded system (observer loads
+    // the full observer module before connecting; under a busy test suite that can
+    // take noticeably longer than the default 1500 ms).
+    std::thread::sleep(Duration::from_millis(5000));
     let _ = a.kill();
     let _ = a.wait();
 

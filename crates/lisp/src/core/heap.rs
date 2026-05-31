@@ -3511,6 +3511,38 @@ impl Heap {
         self.env_roots.truncate(n);
     }
 
+    /// Run `f` within a root-stack checkpoint: both `roots` and `env_roots` are
+    /// restored to their entry depths on return, whether `f` succeeds or fails.
+    ///
+    /// This replaces the recurring manual save/restore pattern:
+    ///
+    /// ```ignore
+    /// let vb = heap.roots_len();
+    /// let eb = heap.env_roots_len();
+    /// // ... push roots ...
+    /// match eval(...) {
+    ///     Err(e) => { heap.truncate_roots(vb); heap.truncate_env_roots(eb); return Err(e); }
+    ///     Ok(v) => { ... }
+    /// }
+    /// heap.truncate_roots(vb);
+    /// heap.truncate_env_roots(eb);
+    /// ```
+    ///
+    /// with a single `heap.root_scope(|heap| { ... })`.  Use `?` inside the
+    /// closure for early exits — cleanup is still guaranteed.
+    #[inline]
+    pub fn root_scope<R>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<R, crate::error::LispError>,
+    ) -> Result<R, crate::error::LispError> {
+        let vb = self.roots_len();
+        let eb = self.env_roots_len();
+        let result = f(self);
+        self.truncate_roots(vb);
+        self.truncate_env_roots(eb);
+        result
+    }
+
     // ----- GC trigger / introspection -----------------------------------------
 
     /// Is GC armed on this heap? `false` for the prelude *builder* (we don't
