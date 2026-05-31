@@ -583,8 +583,10 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(
         heap,
         "gui-font!",
-        Arity::exact(1),
-        Sig::new(vec![map_ty], nil_ty),
+        // (gui-font! spec) or (gui-font! id spec): arg 0 is a window id (int) or the
+        // spec map; the optional arg 1 is the spec map when an id leads.
+        Arity::range(1, 2),
+        Sig::new(vec![Ty::of_tags(&[Tag::Int, Tag::Map]), map_ty], nil_ty),
         gui_font,
     );
     def(
@@ -1496,13 +1498,13 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("term-enter", &[], "Enter raw mode + the alternate screen, hide the cursor, and enable mouse capture, taking over the terminal for a full-screen UI (so click/scroll reach term-poll). Pair with term-leave. (ADR-046 display seam.)"),
     ("term-leave", &[], "Restore the terminal: show the cursor, disable mouse capture, leave the alternate screen, disable raw mode. The normal-path teardown for term-enter."),
     ("term-size", &[], "The terminal size as [cols rows] in character cells."),
-    ("term-poll", &["ms"], "Wait up to ms milliseconds for an input event; return a key (a 1-char string for printables, or a keyword for specials: :up :down :left :right :enter :escape :backspace :tab :back-tab :delete :home :end :page-up :page-down, ctrl combos like :ctrl-c, alt combos like :alt-f), a mouse event as a vector [:mouse action button row col] (action: :press :release :drag :scroll-up :scroll-down — :drag is motion with a button held, reported once per cell crossed; button: :left :right :middle or nil for scroll; row/col 0-based cells), or nil on timeout. Always pass a finite ms."),
+    ("term-poll", &["ms"], "Wait up to ms milliseconds for an input event; return a key (a 1-char string for printables, or a keyword for specials: :up :down :left :right :enter :escape :backspace :tab :back-tab :delete :home :end :page-up :page-down, ctrl combos like :ctrl-c, alt combos like :alt-f), a mouse event as a vector [:mouse action button row col mods] (action: :press :release :drag :scroll-up :scroll-down — :drag is motion with a button held, reported once per cell crossed; button: :left :right :middle or nil for scroll; row/col 0-based cells; mods a vector of held modifier keywords in :ctrl :alt :shift order, [] when none — so Ctrl+wheel etc. are bindable), or nil on timeout. Always pass a finite ms."),
     ("term-draw", &["frame"], "Paint a frame — a vector of render ops: [:clear], [:text row col str], [:text row col str face], [:cursor row col]. A face is a map like {:fg :red :bold true}. The in-process frontend for the display protocol; returns nil."),
-    ("gui-open", &[], "Open a new native window and return its integer id (needs the runtime built with --features gui; errors otherwise). Its key/mouse input is delivered to the CALLING process's mailbox as messages — a key as a 1-char string / keyword (`:up`, `:ctrl-c`), the mouse as `[:mouse action button row col]` (action `:press`/`:release`/`:drag`/`:scroll-up`/`:scroll-down` — `:drag` is motion with a button held, delivered once per cell crossed), a resize as `[:resize cols rows]` (the new cell grid, so the loop re-renders at the new size) — so the consumer parks in `(receive)` instead of polling (ADR-058). Clicking the window's close button delivers a dedicated `:close` message — distinct from the Escape *key* (`:escape`), so an app can quit on the X without conflating it with Escape (which an editor binds to cancel/normal-mode); `ui-run` quits on `:close` automatically. Starts the GUI thread on the first call; each call is an independent window, so several observers can run at once. Pass the id to the other gui-* primitives; pair with gui-close."),
+    ("gui-open", &[], "Open a new native window and return its integer id (needs the runtime built with --features gui; errors otherwise). Its key/mouse input is delivered to the CALLING process's mailbox as messages — a key as a 1-char string / keyword (`:up`, `:ctrl-c`), the mouse as `[:mouse action button row col mods]` (action `:press`/`:release`/`:drag`/`:scroll-up`/`:scroll-down` — `:drag` is motion with a button held, delivered once per cell crossed; `mods` a vector of held modifier keywords in `:ctrl :alt :shift` order, `[]` when none, so Ctrl+wheel / Ctrl+drag are bindable), a resize as `[:resize cols rows]` (the new cell grid, so the loop re-renders at the new size) — so the consumer parks in `(receive)` instead of polling (ADR-058). Clicking the window's close button delivers a dedicated `:close` message — distinct from the Escape *key* (`:escape`), so an app can quit on the X without conflating it with Escape (which an editor binds to cancel/normal-mode); `ui-run` quits on `:close` automatically. Starts the GUI thread on the first call; each call is an independent window, so several observers can run at once. Pass the id to the other gui-* primitives; pair with gui-close."),
     ("gui-close", &["id"], "Close window id (the teardown for gui-open). Idempotent; an unknown id is a no-op."),
     ("gui-size", &["id"], "Window id's size as [cols rows] in character cells (tracks resize / HiDPI), same shape as term-size."),
     ("gui-draw", &["id", "frame"], "Paint a frame (the same render-op vector term-draw takes) to window id; returns nil. Unknown ops are skipped (forward-compatible). A text op's face may carry :scale n (GUI only, integer >=1, capped at 16): the text is drawn n× larger in an n×n block of cells anchored at its row/col — the per-pane/per-buffer font knob; the terminal frontend renders scale 1. A `[:cursor-zone x y w h shape]` op marks a hover hot-zone: while the pointer is over it the window shows the resize cursor `shape` (:col-resize ↔ / :row-resize ↕), hit-tested on the GUI thread (ADR-080); it draws nothing and the terminal ignores it."),
-    ("gui-font!", &["spec"], "Set the global default cell font from spec, a map {:family <keyword> :height <px>} (both keys optional): :family picks a registered font family (bundled :mono, or one added by gui-font-register), :height the cell pixel size. Applies to every open window and ones opened later — the whole-window knob; per-section fonts come from a face's :family/:italic. Needs --features gui. Returns nil."),
+    ("gui-font!", &["id?", "spec"], "Set a cell font from spec, a map {:family <keyword> :height <px>} (both keys optional): :family picks a registered font family (bundled :mono, or one added by gui-font-register), :height the cell pixel size. (gui-font! spec) sets the global default — every open window and ones opened later; (gui-font! id spec) retunes just window id, leaving the global default and other windows alone, so two windows can run different fonts. Per-section fonts within a window come from a face's :family/:scale. Needs --features gui. Returns nil."),
     ("gui-font-register", &["name", "styles"], "Register font family name (a keyword) from styles, a map of style → TTF file path {:regular \"…\" :bold \"…\" :italic \"…\" :bold-italic \"…\"}. Only :regular is required; a missing style reuses the regular file. Afterwards a face's :family <name> (or gui-font!) selects it. Needs --features gui. Returns name."),
     ("term-raw-enter", &[], "Enter raw mode only — NO alternate screen, cursor stays visible, scrollback preserved. The seam for an inline line editor (the REPL); use term-enter instead for a full-screen TUI. Pair with term-raw-leave."),
     ("term-raw-leave", &[], "Leave raw mode (the teardown for term-raw-enter). Idempotent with the panic-path restore."),
@@ -3203,18 +3205,40 @@ fn term_poll(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     }
 }
 
-/// Encode a Brood mouse event as the vector `[:mouse action button row col]` —
-/// the shared shape both frontends yield, so the observer (and any future UI)
+/// Encode a Brood mouse event as the vector `[:mouse action button row col mods]`
+/// — the shared shape both frontends yield, so the observer (and any future UI)
 /// reads one form. `action` is a keyword, `button` a keyword or nil, `row`/`col`
-/// 0-based cell coordinates.
-fn mouse_value(heap: &mut Heap, action: &str, button: Option<&str>, row: u16, col: u16) -> Value {
+/// 0-based cell coordinates, `mods` a vector of the held modifier keywords (in a
+/// stable `[:ctrl :alt :shift]` order, `[]` when none) so an app can bind
+/// Ctrl+wheel etc.
+fn mouse_value(
+    heap: &mut Heap,
+    action: &str,
+    button: Option<&str>,
+    row: u16,
+    col: u16,
+    mods: (bool, bool, bool),
+) -> Value {
     let btn = button.map(value::kw).unwrap_or(Value::Nil);
+    let (ctrl, alt, shift) = mods;
+    let mut ms = Vec::new();
+    if ctrl {
+        ms.push(value::kw("ctrl"));
+    }
+    if alt {
+        ms.push(value::kw("alt"));
+    }
+    if shift {
+        ms.push(value::kw("shift"));
+    }
+    let ms = heap.alloc_vector(ms);
     heap.alloc_vector(vec![
         value::kw("mouse"),
         value::kw(action),
         btn,
         Value::Int(row as i64),
         Value::Int(col as i64),
+        ms,
     ])
 }
 
@@ -3223,7 +3247,7 @@ fn mouse_value(heap: &mut Heap, action: &str, button: Option<&str>, row: u16, co
 /// — is surfaced; release / drag / motion / horizontal-scroll yield nil (a no-op
 /// poll), so both frontends emit exactly the same set.
 fn mouse_to_value(heap: &mut Heap, m: crossterm::event::MouseEvent) -> Value {
-    use crossterm::event::{MouseButton as CB, MouseEventKind as MK};
+    use crossterm::event::{KeyModifiers, MouseButton as CB, MouseEventKind as MK};
     let button = |b: CB| match b {
         CB::Left => "left",
         CB::Right => "right",
@@ -3240,7 +3264,12 @@ fn mouse_to_value(heap: &mut Heap, m: crossterm::event::MouseEvent) -> Value {
         MK::ScrollDown => ("scroll-down", None),
         _ => return Value::Nil,
     };
-    mouse_value(heap, action, btn, m.row, m.column)
+    let mods = (
+        m.modifiers.contains(KeyModifiers::CONTROL),
+        m.modifiers.contains(KeyModifiers::ALT),
+        m.modifiers.contains(KeyModifiers::SHIFT),
+    );
+    mouse_value(heap, action, btn, m.row, m.column, mods)
 }
 
 /// Encode a crossterm key event as a Brood value: a printable char becomes a
@@ -3695,26 +3724,32 @@ fn font_px(heap: &Heap, id: crate::core::value::MapId) -> Option<f32> {
     }
 }
 
-/// `(gui-font! spec)` — set the global default cell font from `spec`, a map
+/// `(gui-font! spec)` / `(gui-font! id spec)` — set a cell font from `spec`, a map
 /// `{:family <keyword> :height <px>}` (either key optional): `:family` picks a
 /// registered font family (the bundled `:mono`, or one added by
-/// `gui-font-register`), `:height` the cell pixel size. Applies to every open
-/// window and any opened later — the whole-window knob (per-section fonts come
-/// from a face's `:family`). Returns nil.
+/// `gui-font-register`), `:height` the cell pixel size. With one argument it sets
+/// the **global default** (every open window + any opened later); with a leading
+/// window `id` it retunes **just that window**, leaving the global default and
+/// other windows alone — so two windows can run different fonts. (Per-section
+/// fonts within a window come from a face's `:family`/`:scale`.) Returns nil.
 fn gui_font(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let Value::Map(id) = arg(args, 0) else {
-        return Err(LispError::wrong_type(
-            heap,
-            "gui-font!",
-            "map (a font spec)",
-            arg(args, 0),
-        ));
+    // (gui-font! spec) → global default; (gui-font! id spec) → just window `id`.
+    let (win, spec) = if args.len() >= 2 {
+        (
+            Some(gui_window_id(heap, "gui-font!", arg(args, 0))?),
+            arg(args, 1),
+        )
+    } else {
+        (None, arg(args, 0))
     };
-    let family = match heap.map_get(id, value::kw("family")) {
+    let Value::Map(m) = spec else {
+        return Err(LispError::wrong_type(heap, "gui-font!", "map (a font spec)", spec));
+    };
+    let family = match heap.map_get(m, value::kw("family")) {
         Some(Value::Keyword(s)) => Some(s),
         _ => None,
     };
-    crate::gui::font(family, font_px(heap, id)).map_err(LispError::runtime)?;
+    crate::gui::font(win, family, font_px(heap, m)).map_err(LispError::runtime)?;
     Ok(Value::Nil)
 }
 
@@ -5332,5 +5367,41 @@ mod mouse_event_tests {
     fn bare_motion_is_not_emitted() {
         let mut heap = Heap::new();
         assert!(matches!(mouse_to_value(&mut heap, ev(MK::Moved)), Value::Nil));
+    }
+
+    // Held modifiers ride on the event as a trailing `[:ctrl …]` vector (so an app
+    // can bind Ctrl+wheel for zoom). No modifiers → an empty vector, not absent.
+    #[test]
+    fn modifiers_ride_on_the_event() {
+        let mut heap = Heap::new();
+
+        // Ctrl held during a scroll → mods is `[:ctrl]` at index 5.
+        let ctrl_scroll = MouseEvent {
+            kind: MK::ScrollUp,
+            column: 7,
+            row: 3,
+            modifiers: KeyModifiers::CONTROL,
+        };
+        let Value::Vector(id) = mouse_to_value(&mut heap, ctrl_scroll) else {
+            panic!("expected a [:mouse …] vector");
+        };
+        let xs = heap.vector(id).to_vec();
+        assert_eq!(xs.len(), 6, "event now carries a trailing mods vector");
+        let Value::Vector(mid) = xs[5] else {
+            panic!("mods should be a vector, got {:?}", xs[5]);
+        };
+        let mods = heap.vector(mid);
+        assert_eq!(mods.len(), 1);
+        assert!(matches!(mods[0], Value::Keyword(k) if k == value::intern("ctrl")));
+
+        // No modifiers → an empty mods vector (present, so destructuring is stable).
+        let Value::Vector(id) = mouse_to_value(&mut heap, ev(MK::ScrollUp)) else {
+            panic!("expected a [:mouse …] vector");
+        };
+        let xs = heap.vector(id).to_vec();
+        let Value::Vector(mid) = xs[5] else {
+            panic!("mods should be a vector");
+        };
+        assert!(heap.vector(mid).is_empty());
     }
 }

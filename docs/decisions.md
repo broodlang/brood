@@ -4906,6 +4906,21 @@ seam, which must keep the terminal's own text selection.
 resolves), ADR-046 (the display/input seam), ADR-058 (GUI input as mailbox
 messages), ADR-011 (ship the minimal form; additive features wait for a consumer).
 
+**Addendum (2026-05-31) — held modifiers ride on the event.** The mouse event grew
+a sixth element: `[:mouse action button row col mods]`, where `mods` is a vector of
+the held modifier keywords in a stable `:ctrl :alt :shift` order (`[]` when none).
+Both frontends fill it — the GUI from the window's tracked `ModifiersState`, the
+terminal from crossterm's `KeyModifiers` — so an app can bind Ctrl+wheel (font
+zoom via the per-window `gui-font!`, ADR-079), Ctrl+drag, etc. **This is a breaking
+change, not additive:** Brood vector patterns are *fixed-length* and forbid a `&`
+rest, so a consumer destructuring the old 5-vector (`[_ a b r c]`) silently stops
+matching. The fix is positional access (`(nth ev n)`) or a 6-binder pattern —
+`std/observer.blsp`'s `observe--apply-mouse` was migrated to `nth` (length-agnostic,
+robust to any future element). Chose appending to the vector (over a `:ctrl-scroll`
+action keyword or reshaping the event to a map) for generality across all actions
+with the smallest shape change; the silent-break cost was accepted as the
+greenfield norm (break + update callers).
+
 ## ADR-078 — Structured types: arrow + element refinements on the flat lattice
 
 **Status:** accepted; **shipped 2026-05-30** (the first slice of Step 5+ in
@@ -5042,9 +5057,17 @@ needed. Arbitrary per-pixel sizing (14px vs 18px buffers) would break the single
 grid and force a `gui-font-metrics` query into Brood for layout — deferred until a
 concrete need justifies it (ADR-011).
 
-**Not addressed.** **GG-2** (`gui-font!` is global across *all* windows) is
-independent and smaller — left open. Arbitrary `:height px` per buffer is deferred
-(see above).
+**GG-2 follow-up (same day).** `gui-font!` was global across *all* windows — the
+`UserEvent::Font` handler retuned every open window, so a second window couldn't
+differ. Folded into this ADR (same font-seam surface, a small additive change):
+`gui-font!` now takes an **optional leading window id** — `(gui-font! spec)` stays
+the global default, `(gui-font! id spec)` retunes *just that window* and does not
+touch the global default. The event carries `id: Option<u64>`; `id: Some(w)` looks
+up the one window, `None` keeps the old "set defaults + apply to all" path (both
+share an `apply_font` helper). So two windows can run different fonts side by side.
+
+**Still deferred.** Arbitrary `:height px` per buffer (see above) — needs a
+metrics-query primitive and breaks the single grid.
 
 **References.** ADR-046 (the display-protocol seam + frame-as-data), ADR-011 (ship
 the simple form, defer power), ADR-006 (mechanism in Rust, policy in Brood — the
