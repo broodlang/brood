@@ -822,8 +822,11 @@ pub fn apply(heap: &mut Heap, callee: Value, argv: &[Value], env: EnvId) -> Lisp
         Value::Native(id) => call_native(heap, id, argv, env),
         Value::Fn(id) => apply_closure(heap, id, argv),
         other => {
+            // Same wording as the evaluator's direct-combination path (the
+            // `cannot call non-function` message asserted by suite_test) so the two
+            // engines — and direct vs `apply`-routed calls — never diverge.
             let shown = crate::syntax::printer::print(heap, other);
-            Err(LispError::type_err(format!("not a function: {}", shown)))
+            Err(LispError::type_err(format!("cannot call non-function: {}", shown)))
         }
     }
 }

@@ -10273,12 +10273,19 @@ px` deferred (breaks the single grid; would need a metrics query).
   from `:height`, the whole-window `gui-font!` hint).
 
 **Resolves.** GG-1 and the per-pane-font remainder of GG-3 (`std/window.blsp`
-already gives pane layout + clipping). **GG-2** (`gui-font!` global across all
-windows) is independent and left open.
+already gives pane layout + clipping).
 
-**Tested.** `cargo build` + `cargo build --features gui` green (the renderer path is
-behind the `gui` feature and needs a display, so not headless-unit-testable; `:scale`
-itself is plain map data, covered by the existing maps tests). Suite green.
+**GG-2 follow-up (same day).** Also closed the last GUI font gap: `gui-font!` used to
+retune *every* open window, so a second window couldn't differ. Added an optional
+leading window id — `(gui-font! spec)` stays global, `(gui-font! id spec)` retunes
+just that window (the `UserEvent::Font` event gained `id: Option<u64>`; both arms
+share an `apply_font` helper; arity `range(1,2)`). Two windows can now run different
+fonts. Folded into ADR-079 (same font-seam surface, small additive change).
+
+**Tested.** `cargo build` + `cargo build --features gui` green for both changes (the
+renderer/window path is behind the `gui` feature and needs a display, so not
+headless-unit-testable; `:scale` and the font spec are plain map data, covered by the
+existing maps tests). Suite green (420/420).
 
 ## 2026-05-31 — Cursor zones: resize pointer over window dividers (ADR-080)
 
@@ -10325,6 +10332,71 @@ soak, trusting the dual-engine suite agreement. **Still recommended next:** a
 differential test mode (run the suite through both engines, assert identical output)
 as a standing CI guard, and widening VM coverage (variadic / pattern / prelude
 closures — pure perf, deferral already correct).
+
+---
+
+## 2026-05-31 — Mouse events carry held modifiers (Ctrl+wheel zoom)
+
+**Goal.** Make Ctrl+mousewheel zoom possible. The blocker wasn't the font knob
+(per-window `gui-font!` from the GG-2 work already does it) — it was that the mouse
+event *dropped the modifier state*, so an app couldn't tell Ctrl+scroll from plain
+scroll.
+
+**Change (ADR-077 addendum).** The mouse event grew a sixth element:
+`[:mouse action button row col mods]`, where `mods` is a vector of held modifier
+keywords in a stable `:ctrl :alt :shift` order (`[]` when none). Both frontends fill
+it — GUI from the window's tracked `ModifiersState`, terminal from crossterm's
+`KeyModifiers`. So `(includes? mods :ctrl)` on a `:scroll-up`/`:scroll-down` →
+`(gui-font! win {:height …})` is the whole zoom binding.
+
+**Breaking change, handled.** Confirmed empirically that Brood vector patterns are
+fixed-length and forbid `&` rest, so a `[_ a b r c]` destructure silently stops
+matching a 6-element event. Migrated the one in-tree consumer,
+`std/observer.blsp`'s `observe--apply-mouse`, to positional `nth` access
+(length-agnostic). Picked appending-to-the-vector over a `:ctrl-scroll-up` action
+keyword (scroll-only, vocab bloat) or a map-shaped event (rewrites every consumer);
+the silent-break cost is the greenfield norm. **External apps that destructure the
+5-vector (foobar/myedit) need a one-line update** — add a 6th binder or switch to
+`nth`.
+
+**Built.** `gui.rs`: `Mouse` gains `ctrl/alt/shift`, filled at all four event sites
+from `w.mods`; `mouse_message` appends the mods vector. `builtins.rs`: `mouse_value`
+takes the modifier triple and builds the vector, `mouse_to_value` reads crossterm
+`KeyModifiers`; `term-poll`/`gui-open` docs updated.
+
+**Tested.** New Rust `modifiers_ride_on_the_event` (Ctrl→`[:ctrl]` at idx 5; none→
+`[]`); observer suite 53/53 incl. a new 6-vector tolerance test; both builds green.
+
+---
+
+## 2026-05-31 — VM differential harness + variadic-arm coverage
+
+Two follow-ups on the now-default VM (both gated by the differential harness).
+
+**Differential harness.** `compile::set_forced_engine` (a thread-local) lets one
+process pin the engine, so `crates/lisp/tests/differential.rs` evaluates a corpus
+through *both* the tree-walker and the VM (fresh `Interp` each) and asserts identical
+result/error — the standing guard that the VM never diverges from the reference
+semantics. `make test-both` runs the whole suite under each engine. The harness
+immediately earned its keep: it caught a non-function call being worded differently
+by `eval::apply` ("not a function") vs the evaluator's direct path ("cannot call
+non-function") — even the tree-walker was internally inconsistent (direct vs
+`apply`-routed). Unified `apply` to the asserted "cannot call non-function" wording.
+
+**Variadic arms.** `&rest` and nil-default `&optional` arms now VM-compile (a real
+`&optional` default form still defers — it'd need eval-with-rooting; rare). The
+frame layout grew to required / optional / rest / binders, and `push_frame` builds
+the rest list with `list_from_slice` (no eval ⇒ no safepoint ⇒ no extra rooting).
+The subtle part is **arm selection**: a variadic arm accepts a *range* of arities
+that can overlap a fixed arm, so picking the wrong one would silently miscompile.
+`CompiledClosure` now records *every* arm's shape (`ArmSpec`, compiled or not) and
+`arm_for` reproduces `select_arm` exactly, running the chosen arm only if it
+VM-compiled (else defers — the tree-walker runs the same arm). Verified: full suite
+green under both engines (421/421) and under the `BROOD_VM=1 BROOD_GC_STRESS=1
+BROOD_GC_VERIFY=1` gate (the rest-list survives relocation); differential corpus
+extended with `&optional`/`&rest`/mixed/multi-arity-with-variadic cases. Perf is
+modest (~1.08× on a variadic hot loop — the per-call rest-list alloc dominates and is
+shared by both engines), as expected; the win is coverage, not speed.
 
 ---
 
