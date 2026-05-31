@@ -313,9 +313,20 @@ shape** `(let (g E) (if g _ g))` (the first conjunct holds in the then-branch; `
 `(if g g _)` deliberately does not), which keeps the guarded `vector-ref` quiet. Zero
 new false positives across `std/` + `tests/`.
 
-**⬜ Still deferred (ADR-011).** Intersections for overloaded fns; arrows/element
-types flowing into the straight-line inference; a parametric `map` result element
-type (`(map f vector<A>) : list<B>` from `f : A -> B`). Gated on a concrete consumer.
+**✅ Parametric HOF results (third slice).** `map`/`filter` results now carry an
+element type derived from their arguments — `(map f vector<A>) : nil | list<B>`
+where `B` is the callback's return (a named fn's sig result, or a straight-line
+lambda's body typed with its parameter bound to `A`), and `(filter pred coll)`
+preserves `coll`'s element type. Done as **per-HOF result rules** in
+`seq_aware_call_ty` (Option B — no lattice change, the same place `first`/`list`
+derive a refined result), not type variables. So `(first (map inc [1 2 3])) :
+number | nil` flows through. Uncertain callback / element → flat `list` (sound;
+`is_disjoint` stays tags-only). See [`parametric-result-types.md`](parametric-result-types.md).
+
+**⬜ Still deferred (ADR-011).** `reduce`/`fold` results (accumulator-typed — slice
+2); intersections for overloaded fns; arrows/element types flowing into the
+straight-line `infer_sig`; **type variables** for *user-defined* generic functions
+(Option A — gated on a real consumer; the curated HOFs needed only the per-rule form).
 
 ## How it runs — and why it's outside the runtime
 

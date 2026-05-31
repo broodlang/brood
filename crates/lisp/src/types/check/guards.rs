@@ -305,5 +305,75 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         // first/last/nth yield `nil` on an empty / out-of-range sequence.
         return Some(elem.union(Ty::of(Tag::Nil)));
     }
+    // `(filter pred coll)` keeps `coll`'s element type — the result is the items
+    // that pass, so `nil | list<A>` for `A = elem(coll)` (ADR-078 parametric
+    // results). `None` element → fall through to the flat curated `list`.
+    if value::symbol_is(head, "filter") {
+        let coll = *items.get(2)?;
+        let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty().cloned());
+        return list_result(a);
+    }
+    // `(map f coll)` → `nil | list<B>`, `B` = the callback's return type applied
+    // to `coll`'s element type. Unknown callback / element → flat `list`.
+    if value::symbol_is(head, "map") {
+        let f = *items.get(1)?;
+        let coll = *items.get(2)?;
+        let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty().cloned());
+        let b = callback_ret(heap, f, a, ctx);
+        return list_result(b);
+    }
     None
+}
+
+/// The result type of a list-producing combinator (`map`/`filter`): `nil |
+/// list<elem>` — empty input maps/filters to `nil`. `None` element → `None`, so
+/// the caller falls back to the flat curated `list` (never a too-narrow result).
+fn list_result(elem: Option<Ty>) -> Option<Ty> {
+    elem.map(|e| Ty::list_of(e).union(Ty::of(Tag::Nil)))
+}
+
+/// The return type of a HOF callback `f` over elements of type `elem_in` (which
+/// may be unknown) — used to compute `map`'s result element type.
+/// - a named **global** fn → its signature's return type (`sig_of`);
+/// - a straight-line single-param lambda `(fn (p) body)` → `body`'s type with `p`
+///   bound to `elem_in` (identity preserves the element; `(+ x 1)` → number);
+/// - anything else (a local var, an unknown form) → `None` (flat result).
+///
+/// The lambda case is the only new inference, and it only computes a *forward*
+/// result type — it never *checks* the body, so it doesn't reopen the deferred
+/// guarded-use false-positive class.
+fn callback_ret(heap: &Heap, f: Value, elem_in: Option<Ty>, ctx: &Ctx) -> Option<Ty> {
+    match f {
+        // A local binding shadows the global table — its return type isn't known.
+        Value::Sym(s) if ctx.is_local(s) => None,
+        Value::Sym(s) => sig_of(heap, s).map(|sig| sig.ret),
+        Value::Pair(_) => lambda_ret(heap, f, elem_in, ctx),
+        _ => None,
+    }
+}
+
+/// The return type of a **simple** single-clause lambda `(fn (p) body)` —
+/// exactly one plain-symbol parameter and one body expression — computed by
+/// binding `p` to `elem_in` and typing `body`. `None` for anything subtler
+/// (multi-param / multi-body / docstring / variadic / non-`fn` head), so the
+/// result stays flat.
+fn lambda_ret(heap: &Heap, form: Value, elem_in: Option<Ty>, ctx: &Ctx) -> Option<Ty> {
+    let items = list_items(heap, form)?;
+    let Some(Value::Sym(head)) = items.first().copied() else {
+        return None;
+    };
+    if !(value::symbol_is(head, "fn") || value::symbol_is(head, "lambda")) {
+        return None;
+    }
+    // Exactly `(fn <param-list> <body>)` — one param list + one body expression.
+    let parts = &items[1..];
+    if parts.len() != 2 {
+        return None;
+    }
+    let params = list_items(heap, parts[0])?;
+    let [Value::Sym(p)] = params.as_slice() else {
+        return None; // not exactly one plain-symbol parameter
+    };
+    let sub = ctx.bind(*p, elem_in);
+    expr_ty(heap, parts[1], &sub)
 }

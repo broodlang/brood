@@ -4994,9 +4994,17 @@ shape `(let (g E) (if g _ g))` (a truthy `and` ⟹ first conjunct `E` holds; `or
 `(if g g _)` deliberately doesn't match). General win beyond this case: any `(if (and
 (pred? x) …) …)` now narrows `x` in the then-branch.
 
-**Still deferred (⬜, ADR-011).** Intersections for overloaded fns; arrow/element
-types flowing into the straight-line inference; a parametric `map` result element
-type (`(map f vector<A>) : list<B>` from `f : A -> B`) — needs dependent signatures.
+**Parametric HOF results (third slice, shipped).** `map`/`filter` results now flow
+an element type from their arguments — `(map f vector<A>) : nil | list<B>` (`B` =
+the callback's return), `(filter pred coll)` preserves `coll`'s element. Done as
+**per-HOF result rules** in `check/guards.rs::seq_aware_call_ty` (Option B), *not*
+type variables — no lattice change, the same mechanism `first`/`list` already use.
+Sound: uncertain callback/element → flat `list`. See
+[`parametric-result-types.md`](parametric-result-types.md).
+
+**Still deferred (⬜, ADR-011).** `reduce`/`fold` results (accumulator-typed); arrow/
+element types in the straight-line `infer_sig`; intersections for overloaded fns;
+**type variables** for user-defined generics (Option A — no consumer yet).
 
 **References.** [`types.md`](types.md) (Step 5+, the compatibility contract), ADR-024
 (the set-theoretic/gradual model this extends), ADR-023, ADR-011 (ship the simple
