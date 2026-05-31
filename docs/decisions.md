@@ -5138,3 +5138,155 @@ affords), ADR-056 (why bare motion isn't delivered — sidestepped by hit-testin
 in the frontend), ADR-079 (the sibling GUI-`Face` work this lands alongside). Lives in
 `crates/lisp/src/gui.rs` (`Op::CursorZone`, hit-test on `CursorMoved`) +
 `crates/lisp/src/builtins.rs` (`gui-draw` parsing) + `std/display.blsp`.
+
+## ADR-082 — Opt-in type annotations & runtime contracts (`sig` / `sig!`)
+
+**Status:** accepted, shipped (2026-05-31). (ADR-081 is the concurrent dist
+security-hardening decision; this work took the next free number.)
+
+**Context.** Brood's type system is set-theoretic and **advisory** (ADR-023/024):
+it warns on a provably-wrong call, never gates, and is engineered for zero false
+positives. The Elixir paper (Castagna/Duboc/Valim, *The Design Principles of the
+Elixir Type System* — notes in `docs/research/`) shows how such a system can be
+made *sound* without inserting casts or changing compilation: the **strong arrow**
+— a function that checks its arguments at run time can be trusted statically. We
+want that soundness *available on demand* without compromising Brood's parameters
+(greenfield, editor-serving, hot-reload, never-gate, policy-in-Brood) and without
+ever forcing a user to write a type.
+
+**Decision.** Two opt-in declaration **macros** — no new special form, no new
+primitive:
+
+- `(sig name (params… -> ret))` declares a signature the advisory checker reads
+  *first* (ahead of primitive / curated / inferred sigs), so it flags a provably
+  wrong argument or a wrong result against the declaration. A pure declaration —
+  a runtime no-op. This closes the multi-clause / branchy gap that the
+  straight-line `infer_sig` can't reach. Type grammar: base names (the `type-of`
+  spellings + the named unions `number`/`list`/`fn`), arrows `(p… -> r)`,
+  `(list E)` / `(vector E)`, and `(or A B …)`. An unrecognised type-expression is
+  dropped, never guessed.
+- `(sig! …)` declares the **same** signature *and* installs a runtime contract: it
+  rebinds `name` to a **same-arity** wrapper that checks each argument and the
+  result and **throws** on a mismatch. That makes `name` a strong arrow — applied
+  off-domain it returns an in-codomain value, fails a runtime check, or diverges;
+  it can never silently return an off-type value — so the checker's trust is now
+  *sound*. All policy in Brood: `type-matches?` + `contract--check-args` + the
+  `sig!` macro in `std/prelude.blsp`. Place it **after** the definition (it
+  rebinds the name); the preserved arity keeps introspection and the reload-arity
+  diagnostic undisturbed.
+
+The spelling is `sig`, not the `::` first sketched, because a leading `:` lexes as
+a keyword in Brood (so `(:: …)` is a keyword-headed list). Enforcement is
+**separate and opt-in**: writing a *type* never changes behaviour or cost; opting
+into a *runtime check* (`sig!`) does.
+
+**Why this, not the alternatives.** Static gating / inserted casts would break
+never-gate and hot reload. A sound-by-default checker would force annotations and
+reintroduce false positives. Leaning on a runtime check the programmer opts into
+is the only route that stays sound *and* additive *and* never in the way of live
+redefinition — and it doubles as real declared types for the editor
+(hover/completion). Unknown type-expressions accept any value, so a contract can
+never throw on a type it can't interpret (no spurious runtime failure).
+
+**Consequences.** `arglist` of a `sig!`-wrapped fn reflects the wrapper (minor
+introspection cost). Re-`def`ing a name drops its contract (re-run `sig!` to
+reinstall). The static checker also gained, alongside this: **soundness-oracle
+tests** (every `expr_ty` over-approximates the runtime value; a clean-running
+program draws no disjointness warning) and **curated sigs** for common predicates
+(`even?`/`abs`/`count`/…). Deferred (ADR-011): a `BROOD_CONTRACTS=1` switch to
+enforce *every* `sig`; element-level `(list E)` / `(vector E)` runtime checks;
+intersections / rest params in the grammar; a noise-free dead-clause lint (a naive
+version flags compiler-generated guard plumbing).
+
+**References.** ADR-023/024 (set-theoretic advisory types), ADR-078 (the
+structured `arrow`/`elem` refinements the checker reuses), ADR-011 (defer power
+features), ADR-006 (policy in Brood). Design: `docs/type-annotations.md`. Review +
+applied model: `docs/research/set-theoretic-types-in-brood.md`,
+`docs/research/elixir-set-theoretic-types.md`. Lives in
+`crates/lisp/src/types/check/annot.rs` (parser) + the `check/` walk + the contract
+macros in `std/prelude.blsp`; tests in `tests/contract_test.blsp` and the
+`soundness_oracle` module.
+
+## ADR-081 — Node-link security: pre-auth DoS hardening now, authenticated-encrypted channel required for network nodes
+
+**Status:** accepted (2026-05-31). The hardening half is implemented; the
+channel-encryption half is a committed requirement, deferred to the
+server-side-TLS work (M4). (ADR-082 is the concurrent opt-in type-annotations
+work; these two landed in the same session and split the numbers.)
+
+**Context.** A security review of the distributed-node layer (`dist/`) — the only
+surface that parses untrusted network bytes, and one that *ships closures* (code)
+between runtimes, so it is RCE-by-design gated on authentication. The crypto and
+deserialization held up well: HMAC-SHA256 handshake over a fresh CSPRNG nonce
+(replay-resistant, constant-time compare, cookie never on the wire), a 256-bit
+OS-CSPRNG cookie (`0600`), a wire decoder with a depth cap and remaining-bytes-
+bounded allocations, no shell-based command injection, and identity keyed on the
+*authenticated* node name rather than the wire's `from_node`. Three real gaps
+surfaced — all confined to `dist/`; **none touch the language kernel**
+(eval/heap/GC/value model unchanged):
+
+1. **No channel confidentiality or per-frame integrity.** The cookie
+   authenticates the *handshake*; steady-state frames are cleartext and carry no
+   MAC. Over TCP, an on-path attacker who lets the handshake complete can inject
+   forged frames afterward — including a `Send` carrying a closure → RCE —
+   *without knowing the cookie*, and can read every message passively.
+2. **Pre-auth resource exhaustion.** The acceptor spawned an unbounded OS thread
+   per inbound connection, and the handshake read frames at the full 64 MiB
+   `MAX_FRAME` ceiling, so an 8-byte probe (magic + length prefix) could commit a
+   64 MiB allocation, and a connection flood could exhaust threads/FDs/memory
+   before authenticating.
+3. **Blast radius.** The machine-wide shared cookie (`~/.config/brood/cookie`)
+   plus the documented `0.0.0.0` dual-listen example means one cookie leak grants
+   RCE on every node on the host, reachable from the whole network.
+
+**Decision.**
+- **Fix #2 now (localized hardening, no kernel change).** A `HandshakeSlot` RAII
+  permit over an `AtomicUsize` caps concurrent in-flight handshakes
+  (`MAX_IN_FLIGHT_HANDSHAKES = 128`); the acceptor takes a slot *before* spawning
+  a thread or reading a byte, and sheds past the cap by closing the socket — no
+  thread, no log (a per-shed log would itself be a flood vector). Handshake reads
+  use a tiny `MAX_HANDSHAKE_FRAME = 4 KiB` ceiling (`read_frame_capped`) instead
+  of the 64 MiB steady-state one. The slot is held only for the pre-auth window
+  and released on thread end (success/failure/timeout); steady-state links hold
+  none.
+- **Treat #1 as required, not optional, for network-facing nodes.** The
+  long-deferred "optional TLS" is reframed: a node exposed on TCP over an
+  untrusted network *requires* an authenticated-encrypted channel (TLS, or a
+  Noise-style session over the existing `Stream { Tcp | Unix }` seam) that gives
+  per-frame integrity + confidentiality, not just handshake auth. This closes
+  both the passive-read and the post-handshake-injection holes in one move.
+  Until it lands, the supported posture is: TCP nodes on trusted networks/VPN
+  only; the Unix transport (in a `0700` dir) is fine locally.
+- **Document #3 as policy.** Recommend binding to loopback/a specific interface
+  unless network exposure is intended, and per-node cookies for network-exposed
+  nodes; keep the machine-wide shared cookie as the local-convenience default.
+
+**Why not encrypt the channel in this change?** Inbound/server-side TLS is a
+separate, larger piece (`rustls` streams don't split read/write across threads
+like a raw fd — the same blocker tracked under M4's server-side-TLS item), and it
+belongs with the daemon/serving work. The DoS hardening is independent, cheap, and
+worth shipping immediately; conflating them would stall the easy win on the hard
+one.
+
+**Consequences.**
+- Pre-auth memory/threads are now bounded by a constant regardless of connection
+  rate; legitimate peers are unaffected (128 is far above any real
+  simultaneous-peer fan-in, and the 4 KiB cap is generous over any real
+  handshake frame). All 24 real-TCP `distribution.rs` cases stay green.
+- The security model is now explicit: **authentication ≠ a secure channel.** The
+  cookie proves "you knew the secret at handshake time"; it does not protect the
+  bytes after. Network deployments must wait for the encrypted channel.
+- Closure-shipping remains RCE-by-design between *trusting* nodes — that is the
+  Erlang model and the basis of hot code mobility, not a bug. If the hosted-editor
+  threat model ever includes mutually-distrusting nodes (multi-tenant server),
+  that is a *separate* design decision (no inbound code from untrusted peers, or a
+  capability/sandbox boundary on inbound closures) and needs its own ADR before
+  M4's multi-client server mode ships.
+
+**References.** ADR-033/034 (closure shipping + handshake v2 this hardens),
+ADR-068 (the `Stream` transport seam an encrypted carrier would slot into),
+ADR-074 (dual-listen, whose `0.0.0.0` example motivates the #3 policy note),
+ADR-043 (the memory cap that is a backstop, not a substitute for this bound).
+Lives in `crates/lisp/src/dist.rs` (`HandshakeSlot`, `MAX_IN_FLIGHT_HANDSHAKES`,
+`MAX_HANDSHAKE_FRAME`), `dist/handshake.rs` (capped handshake reads), and
+`dist/wire.rs` (`read_frame_capped`).
