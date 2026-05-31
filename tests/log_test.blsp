@@ -67,7 +67,27 @@
       (log-error "above")
       (let (line (lt-line))
         (stop-logger)
-        (is (includes? line "above"))))))
+        (is (includes? line "above")))))
+
+  (test "per-backend :filter routes by record category (one logger, many sinks)"
+    (let (me (self))
+      ;; two category backends on ONE logger: each writes only its own records.
+      (start-logger {:level :debug
+                     :backends [(backend (fn-port (fn (s) (send me [:line :lsp s])))
+                                  {:filter (fn (r) (= (get (get r :meta) :category) :lsp))})
+                                (backend (fn-port (fn (s) (send me [:line :other s])))
+                                  {:filter (fn (r) (not (= (get (get r :meta) :category) :lsp)))})]})
+      (log-info "to-lsp" {:category :lsp})
+      (log-info "to-other")
+      ;; collect the two delivered lines, tagged by which backend sent them
+      (let (a (receive ([:line tag s] [tag s]) (after 500 :timeout))
+            b (receive ([:line tag s] [tag s]) (after 500 :timeout)))
+        (stop-logger)
+        (let (lsp-line (if (= (first a) :lsp) (second a) (second b))
+              other-line (if (= (first a) :other) (second a) (second b)))
+          (is (includes? lsp-line "to-lsp"))
+          (refute (includes? lsp-line "to-other"))   ; the :lsp backend did NOT get the uncategorized one
+          (is (includes? other-line "to-other")))))))
 
 ;; ---- lifecycle --------------------------------------------------------------
 (describe "log: lifecycle"
