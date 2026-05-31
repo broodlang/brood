@@ -8,13 +8,16 @@
 //!
 //! **The VM is the default engine** (ADR-076 Stage 3); `BROOD_VM=0` forces the
 //! tree-walker. A closure is VM-compiled when it's built from the core vocabulary
-//! ([`Node`] below): `if`/`do`/`let`/`letrec`/`fn` plus calls, with exact-arity
-//! arms and any capture (global *or* local — Stage 2c). Anything outside that —
-//! variadic arms, pattern params / `match*`, `def`/`quote`/`quasiquote`/`and`/`or`/
-//! `binding`, or a body built from movable (conased) forms — **defers to the
-//! tree-walker** (`eval::eval`) per-form, so partial compilation is always safe and
-//! the language is unchanged. Macros are already expanded by this point
-//! (`eval::macros::compile` ran), so the compiler never sees a macro call.
+//! ([`Node`] below): `if`/`do`/`let`/`letrec`/`fn`/`quote` plus calls and vector/map
+//! literals, with `&optional` (nil- *or* real-default) and any capture (global *or*
+//! local — Stage 2c). Because `match`/`match*`/`and`/`or` are macros that expand to
+//! exactly these forms, **pattern-matching `fn`s and `match` run on the VM too** (the
+//! `quote`/literal in `match*`'s no-match arm used to force them to defer). Anything
+//! still outside the set — `def`/`quasiquote`/`defmacro`/`binding`, or a body built
+//! from movable (conased) forms — **defers to the tree-walker** (`eval::eval`)
+//! per-form, so partial compilation is always safe and the language is unchanged.
+//! Macros are already expanded by this point (`eval::macros::compile` ran), so the
+//! compiler never sees a macro call.
 //!
 //! Naming note: [`run`] runs **after** `eval::macros::compile` (macroexpand-all +
 //! namespace-resolve), on the already-expanded, already-resolved form.
@@ -89,6 +92,13 @@ pub enum Node {
     If(Box<Node>, Box<Node>, Box<Node>),
     /// `(do a b … z)` — all but the last for effect, the last in tail position.
     Do(Box<[Node]>),
+    /// A vector literal `[a b …]` — evaluate each element (value position), then
+    /// build a fresh vector. (A *quoted* vector `'[…]` is immutable data and compiles
+    /// to a single immovable `Const` via `quote`, not this.)
+    Vector(Box<[Node]>),
+    /// A map literal `{k v …}` — evaluate each key and value (value position), then
+    /// build a fresh map. (A *quoted* map is a `Const`, not this.)
+    Map(Box<[(Node, Node)]>),
     /// A combination. `tail` marks a tail call (the trampoline reuses the frame
     /// instead of recursing — proper TCO). Non-tail calls recurse via [`vm_apply`].
     /// `pos` is the source `line:col` of this combination, captured at compile time
@@ -545,6 +555,15 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                 if value::symbol_is(h, kw::DO) {
                     return compile_body(heap, &items[1..], scope, tail);
                 }
+                if value::symbol_is(h, kw::QUOTE) {
+                    // Quoted data → one immovable `Const` (`const_node` promotes the
+                    // datum into the shared RUNTIME region). Unblocks any body that
+                    // quotes data — notably match*'s no-match arm,
+                    // `(throw [:match-error (quote :ctx) m (quote pats)])`, which had
+                    // been forcing every non-total `match` / pattern-dispatch `fn`
+                    // onto the tree-walker.
+                    return Some(const_node(heap, items.get(1).copied().unwrap_or(Value::Nil)));
+                }
                 // `let`/`let*` are sequential; `letrec` pre-allocates all slots.
                 if value::symbol_is(h, kw::LET) || value::symbol_is(h, kw::LET_STAR) {
                     return compile_let(heap, &items, scope, tail, false);
@@ -557,9 +576,11 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                 if value::symbol_is(h, kw::FN) || value::symbol_is(h, kw::LAMBDA) {
                     return compile_make_closure(heap, form, scope);
                 }
-                // Any *other* special form (def/quote/quasiquote/and/or/
-                // binding/match*/…) is outside the VM's vocabulary — defer the
-                // whole closure to the tree-walker.
+                // Any *other* special form (`def`/`quasiquote`/`defmacro`/`binding`)
+                // is outside the VM's vocabulary — defer the whole closure to the
+                // tree-walker. (`if`/`do`/`let`/`letrec`/`fn`/`quote` are handled
+                // above; `and`/`or`/`match`/`match*` aren't special forms — they're
+                // macros, already expanded to these core forms by the compile pass.)
                 if crate::eval::is_special_form(h) {
                     return None;
                 }
@@ -596,7 +617,28 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
             })
         }
 
-        // Vector/map literals, opaque handles, etc. — not in the slice.
+        // Vector literal — evaluate each element (value position), build fresh.
+        Value::Vector(id) => {
+            let items = heap.vector(id).to_vec();
+            let mut nodes = Vec::with_capacity(items.len());
+            for e in items {
+                nodes.push(compile_node(heap, e, scope, false)?);
+            }
+            Some(Node::Vector(nodes.into_boxed_slice()))
+        }
+        // Map literal — evaluate each key and value (value position), build fresh.
+        Value::Map(id) => {
+            let entries = heap.map_entries(id);
+            let mut pairs = Vec::with_capacity(entries.len());
+            for (k, v) in entries {
+                let kn = compile_node(heap, k, scope, false)?;
+                let vn = compile_node(heap, v, scope, false)?;
+                pairs.push((kn, vn));
+            }
+            Some(Node::Map(pairs.into_boxed_slice()))
+        }
+
+        // Opaque handles, etc. — outside the VM's vocabulary.
         _ => None,
     }
 }
@@ -796,6 +838,67 @@ fn exec_node(
                 force(heap, s)?;
             }
             exec_node(heap, &nodes[last], frame_base, genv)
+        }
+        Node::Vector(elems) => {
+            // Evaluate each element, keeping the results on the operand stack so a
+            // collection during a later element relocates them in place (mirrors the
+            // `Call` arg loop); then build a fresh vector. `save` is truncated on
+            // every path, including errors.
+            let save = heap.roots_len();
+            for e in elems.iter() {
+                let step = match exec_node(heap, e, frame_base, genv) {
+                    Ok(s) => s,
+                    Err(err) => {
+                        heap.truncate_roots(save);
+                        return Err(err);
+                    }
+                };
+                match force(heap, step) {
+                    Ok(v) => heap.push_root(v),
+                    Err(err) => {
+                        heap.truncate_roots(save);
+                        return Err(err);
+                    }
+                }
+            }
+            let n = elems.len();
+            let mut vals = Vec::with_capacity(n);
+            for k in 0..n {
+                vals.push(heap.root_at(save + k));
+            }
+            heap.truncate_roots(save);
+            Ok(Step::Done(heap.alloc_vector(vals)))
+        }
+        Node::Map(entries) => {
+            // Same operand-stack discipline as `Vector`: each key then value is
+            // pushed (so a collection mid-build relocates them), then a fresh map is
+            // built from the relocated pairs.
+            let save = heap.roots_len();
+            for (kn, vn) in entries.iter() {
+                for node in [kn, vn] {
+                    let step = match exec_node(heap, node, frame_base, genv) {
+                        Ok(s) => s,
+                        Err(err) => {
+                            heap.truncate_roots(save);
+                            return Err(err);
+                        }
+                    };
+                    match force(heap, step) {
+                        Ok(v) => heap.push_root(v),
+                        Err(err) => {
+                            heap.truncate_roots(save);
+                            return Err(err);
+                        }
+                    }
+                }
+            }
+            let n = entries.len();
+            let mut pairs = Vec::with_capacity(n);
+            for i in 0..n {
+                pairs.push((heap.root_at(save + 2 * i), heap.root_at(save + 2 * i + 1)));
+            }
+            heap.truncate_roots(save);
+            Ok(Step::Done(heap.map_from_pairs(pairs)))
         }
         Node::LetBind { binds, body } => {
             // Evaluate each rhs and write it into its (pre-allocated) frame slot,

@@ -110,6 +110,17 @@ const CORPUS: &[&str] = &[
     "(defn ma ((x) :one) ((x y) :two) ((x y & r) [:many (count r)])) [(ma 1) (ma 1 2) (ma 1 2 3 4)]",
     // a variadic helper driven in a tail loop (rest list rebuilt each call)
     "(defn vmax (& xs) (reduce (fn (a b) (if (< a b) b a)) (first xs) (rest xs))) (vmax 3 9 2 7 1)",
+    // pattern-dispatch fns (lower to match* whose no-match arm is `(throw [:match-error
+    // (quote ctx) m (quote pats)])`): the VM now compiles `quote` + vector/map literals,
+    // so these run on the VM instead of deferring. Recursive + non-total + the throw path.
+    "(defn pfib ((0) 0) ((1) 1) ((n) (+ (pfib (- n 1)) (pfib (- n 2))))) (pfib 12)",
+    "(defn pf ((0) :zero) ((1 2) :one-two)) [(pf 0) (pf 1 2)]",
+    "(defn pf ((0) :zero)) (pf 9)", // no clause matches → match-error throw (both engines)
+    // quoted data + vector/map literals built inside a compiled body (non-constant
+    // elements, so they're build-nodes, not folded Consts)
+    "(defn qd (x) (list (quote a) x '(n e s t) [:v x] {:k x :q (quote s)})) (qd 7)",
+    // a match expression whose clauses include a guard, list-destructure, and wildcard
+    "(defn cl (x) (match x (n :when (< n 0) :neg) (0 :z) ((a b) (+ a b)) (_ :o))) [(cl -3) (cl 0) (cl (list 4 5)) (cl 9)]",
     // data structures
     "{:a 1 :b (+ 1 1)}",
     "(get (assoc {:x 1} :y 2) :y)",
@@ -126,9 +137,20 @@ const CORPUS: &[&str] = &[
 
 #[test]
 fn engines_agree_on_corpus() {
-    for &src in CORPUS {
-        agree(src);
-    }
+    // Run on a large, explicitly-sized stack (like tests/suite.rs and the `brood`
+    // binaries): some corpus entries are pattern-dispatch fns whose `match*`
+    // expansion is a large nested-`if` tree, and macroexpand/compile recurse over it
+    // deeper than libtest's small default thread stack would allow.
+    std::thread::Builder::new()
+        .stack_size(brood::process::CORO_STACK_BYTES)
+        .spawn(|| {
+            for &src in CORPUS {
+                agree(src);
+            }
+        })
+        .expect("spawn differential corpus thread")
+        .join()
+        .expect("differential corpus thread panicked");
 }
 
 /// Regression: a closure body that holds a macro **defined after** it (a forward
