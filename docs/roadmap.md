@@ -607,6 +607,14 @@ top* of connect, plus a few deliberately-deferred refinements:
   long name is passed explicitly, no resolver); a `mio` reactor for socket scale;
   Windows Unix-socket transport. One-node-per-OS-process is a structural choice
   (the Erlang model), not a gap.
+- ⬜ **Cluster-join topology — decide the semantics** (open question, don't build
+  yet): when a node `connect`s to a peer, does it join that peer's *entire cluster*
+  (transitive, mesh — Erlang's default where every node learns about every other
+  node) or only that *one* node (point-to-point, no transitive discovery)? Each has
+  real trade-offs (mesh = convenient global namespace but O(n²) connections and a
+  larger trust surface; point-to-point = explicit topology, better isolation, more
+  manual wiring). Pick deliberately and record an ADR before implementing peer
+  discovery / gossip.
 - ✅ **Test hardening (done — 2026-05-30):** the end-to-end real-TCP
   `distribution.rs` tests no longer flake under `make test`'s max parallel load.
   Root cause: under nextest each case runs in its own process, so the file's
@@ -621,6 +629,19 @@ top* of connect, plus a few deliberately-deferred refinements:
 
 - ⬜ Implement the display protocol over WebSocket
 - ⬜ Browser renderer (DOM or canvas)
+
+## Cross-cutting open questions (revisit, don't build yet)
+
+- ⬜ **How do we ship a binary?** We have no distribution story yet. Open
+  questions to resolve before it matters: what *is* the shippable artifact — just
+  the `brood`/`nest`/`brood-lsp` binaries, or a bundle that also carries `std/`
+  and a project's `.blsp` sources? Is `std/` baked into the binary (the prelude
+  already is) or shipped alongside and loaded from disk? How does an end user
+  install (a single static binary? a `.deb`? `cargo install`? a tarball with a
+  runtime dir)? How does a *Brood application* (eventually the editor) get
+  packaged and launched — a thin native launcher around an embedded runtime, or a
+  separate runtime + a script bundle? Cross-compilation / target matrix. Decide
+  deliberately and record an ADR when this becomes live.
 
 ---
 
