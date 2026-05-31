@@ -126,6 +126,52 @@ enum Outcome {
     Exit,
 }
 
+/// Detects, per request, whether the running binary has been **rebuilt since this
+/// server started** — a long-lived `nest mcp` otherwise silently serves the
+/// *pre-rebuild* runtime. A stale server pinned to a pre-fix binary was the cause of
+/// the 2026-05-31 GC `flush_oob` report (`docs/gc-flush-panic-mcp-2026-05-31.md`),
+/// so we warn loudly (once) and tell the operator to restart.
+///
+/// Best-effort: if the executable path or its mtime can't be read, the guard simply
+/// never fires (no false alarms). [`check`](Self::check) returns the *decision* and
+/// latches; `main_loop` owns the stderr message (so the logic stays unit-testable
+/// without capturing stderr, and stdout stays a clean JSON-RPC stream).
+struct StalenessGuard {
+    started: std::time::SystemTime,
+    exe: Option<std::path::PathBuf>,
+    warned: bool,
+}
+
+impl StalenessGuard {
+    fn new() -> Self {
+        StalenessGuard {
+            started: std::time::SystemTime::now(),
+            exe: std::env::current_exe().ok(),
+            warned: false,
+        }
+    }
+
+    /// `true` exactly once — the first time the executable's mtime is observed to be
+    /// newer than the server's start time (i.e. it was rebuilt under us). Latches, so
+    /// the caller warns at most once.
+    fn check(&mut self) -> bool {
+        if self.warned {
+            return false;
+        }
+        let Some(exe) = self.exe.as_deref() else {
+            return false;
+        };
+        let Ok(mtime) = std::fs::metadata(exe).and_then(|m| m.modified()) else {
+            return false;
+        };
+        if mtime > self.started {
+            self.warned = true;
+            return true;
+        }
+        false
+    }
+}
+
 /// The synchronous request loop. Pulled out of [`run`] so tests can drive it
 /// with in-memory `Cursor` / `Vec<u8>` channels.
 fn main_loop<R: BufRead, W: Write>(
@@ -133,7 +179,19 @@ fn main_loop<R: BufRead, W: Write>(
     r: &mut R,
     w: &mut W,
 ) -> Result<(), Box<dyn Error>> {
+    let mut staleness = StalenessGuard::new();
     while let Some(msg) = read_message(r)? {
+        // A rebuild mid-session means we're now serving stale code — warn once.
+        if staleness.check() {
+            let exe = staleness.exe.as_deref().map(|p| p.display().to_string());
+            eprintln!(
+                "⚠ nest mcp: {} was rebuilt after this server started — it is now \
+                 serving a STALE runtime (the old, pre-rebuild code). Restart \
+                 `nest mcp` to pick up the new build. (A stale MCP server on a \
+                 pre-fix binary caused the 2026-05-31 GC flush_oob report.)",
+                exe.as_deref().unwrap_or("the nest binary"),
+            );
+        }
         match dispatch(interp, &msg) {
             Outcome::Reply(resp) => write_message(w, &resp)?,
             Outcome::NoReply => {}
@@ -796,6 +854,37 @@ fn lisp_error_to_json(heap: &mut Heap, e: &brood::error::LispError) -> Json {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn staleness_guard_fires_once_when_binary_is_newer_than_start() {
+        // Binary present, mtime (now) > started (epoch) → stale: fires once, latches.
+        let tmp = std::env::temp_dir().join(format!("nest-mcp-stale-{}", std::process::id()));
+        std::fs::write(&tmp, b"x").unwrap();
+        let mut g = StalenessGuard {
+            started: std::time::UNIX_EPOCH,
+            exe: Some(tmp.clone()),
+            warned: false,
+        };
+        assert!(g.check(), "a binary newer than the start time is stale");
+        assert!(!g.check(), "the warning latches — fires at most once");
+        let _ = std::fs::remove_file(&tmp);
+
+        // Binary older than the start time → not stale.
+        let tmp2 = std::env::temp_dir().join(format!("nest-mcp-fresh-{}", std::process::id()));
+        std::fs::write(&tmp2, b"x").unwrap();
+        let future = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        let mut g2 = StalenessGuard { started: future, exe: Some(tmp2.clone()), warned: false };
+        assert!(!g2.check(), "a binary older than the start time is not stale");
+        let _ = std::fs::remove_file(&tmp2);
+
+        // Unresolvable executable → best-effort no-op (never a false alarm).
+        let mut g3 = StalenessGuard {
+            started: std::time::UNIX_EPOCH,
+            exe: Some(std::path::PathBuf::from("/no/such/nest-binary-xyz")),
+            warned: false,
+        };
+        assert!(!g3.check(), "a missing binary must not fire");
+    }
 
     /// Build a newline-delimited JSON buffer from a list of messages (the MCP
     /// stdio framing — one compact object per line).
