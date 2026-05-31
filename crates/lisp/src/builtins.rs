@@ -1380,7 +1380,10 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         heap,
         "monitor-node",
         Arity::exact(1),
-        Sig::new(vec![sym], ref_ty),
+        // A node name may be a symbol OR a keyword — `node-name`/`connect` return
+        // the authoritative `:name@host` as a keyword, so monitoring it must not
+        // warn (matches `register`/`whereis`; `expect_node_name` accepts both).
+        Sig::new(vec![sym.union(kw)], ref_ty),
         monitor_node,
     );
 }
