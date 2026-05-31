@@ -83,6 +83,14 @@ pub enum PrimOp {
     Lt,
     Le,
     Eq,
+    // Integer division family (perf): `rem` is the native of that name; `%div`
+    // backs `/`; `%quot` backs `quot` (truncating integer division). Inlining
+    // these on `(Int, Int)` keeps tight integer loops (`collatz`, `mod`, hashing)
+    // off the per-op native-dispatch path; non-int / edge cases defer to the
+    // native so semantics + error messages stay identical (see `prim_apply`).
+    Rem,
+    Div,
+    Quot,
 }
 
 impl PrimOp {
@@ -96,6 +104,9 @@ impl PrimOp {
             PrimOp::Lt => "%lt",
             PrimOp::Le => "%le",
             PrimOp::Eq => kw::EQ_PRIM,
+            PrimOp::Rem => "rem",
+            PrimOp::Div => "%div",
+            PrimOp::Quot => "%quot",
         }
     }
     fn from_native_name(name: &str) -> Option<PrimOp> {
@@ -105,6 +116,9 @@ impl PrimOp {
             "%mul" => PrimOp::Mul,
             "%lt" => PrimOp::Lt,
             "%le" => PrimOp::Le,
+            "rem" => PrimOp::Rem,
+            "%div" => PrimOp::Div,
+            "%quot" => PrimOp::Quot,
             _ if name == kw::EQ_PRIM => PrimOp::Eq,
             _ => return None,
         })
@@ -940,6 +954,24 @@ fn prim_apply(op: PrimOp, x: Value, y: Value) -> Result<Option<Value>, LispError
         PrimOp::Lt => Value::Bool(a < b),
         PrimOp::Le => Value::Bool(a <= b),
         PrimOp::Eq => Value::Bool(a == b),
+        // Division family: handle the clean integer case inline, and **defer**
+        // (`Ok(None)`) every edge — div-by-zero, the `i64::MIN / -1` overflow,
+        // and (`%div` only) a non-exact quotient that the native returns as a
+        // Float — so the native owns those exact results and error messages.
+        PrimOp::Rem => match a.checked_rem(b) {
+            Some(r) => Value::Int(r),
+            None => return Ok(None),
+        },
+        // `%div` returns an Int only when it divides evenly (matching `prim_div`);
+        // a remainder means a Float result, which the native builds.
+        PrimOp::Div => match (a.checked_rem(b), a.checked_div(b)) {
+            (Some(0), Some(q)) => Value::Int(q),
+            _ => return Ok(None),
+        },
+        PrimOp::Quot => match a.checked_div(b) {
+            Some(q) => Value::Int(q),
+            None => return Ok(None),
+        },
     };
     Ok(Some(v))
 }
