@@ -3653,6 +3653,12 @@ fn key_to_value(heap: &mut Heap, k: crossterm::event::KeyEvent) -> Value {
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
     let alt = k.modifiers.contains(KeyModifiers::ALT);
     match k.code {
+        // Ctrl+Alt (Emacs C-M-… — structural sexp motion C-M-f/b/u/d, mark-sexp
+        // C-M-SPC). Must precede the ctrl-only / alt-only arms so the second modifier
+        // isn't dropped (the `ctrl-meta-` spelling the keymaps bind).
+        KeyCode::Char(c) if ctrl && alt => {
+            Value::Keyword(value::intern(&format!("ctrl-meta-{}", c.to_ascii_lowercase())))
+        }
         KeyCode::Char(c) if ctrl => {
             Value::Keyword(value::intern(&format!("ctrl-{}", c.to_ascii_lowercase())))
         }
