@@ -1463,4 +1463,67 @@ mod tests {
             "a correct use under an `or` guard must not warn: {w:?}"
         );
     }
+
+    // ---- parametric HOF result types — map / filter (ADR-078, Option B) ----
+
+    #[test]
+    fn map_result_flows_the_callback_return() {
+        // `(map inc (list 1 2 3))` : list<number>, so `(first …)` is number|nil —
+        // disjoint from string → string-length flags it.
+        let w = warnings("(string-length (first (map inc (list 1 2 3))))");
+        assert!(
+            w.iter().any(|s| s.contains("string-length")),
+            "map's element type (number) should flow to first: {w:?}"
+        );
+        // ...and a numeric sink is fine (number overlaps).
+        let w = warnings("(+ 1 (first (map inc (list 1 2 3))))");
+        assert!(
+            w.iter().all(|s| !s.contains("expects")),
+            "a number element must not warn against +: {w:?}"
+        );
+    }
+
+    #[test]
+    fn filter_preserves_the_element_type() {
+        // `(filter even? (list 1 2 3))` : list<int> — element type unchanged.
+        let w = warnings("(string-length (first (filter even? (list 1 2 3))))");
+        assert!(
+            w.iter().any(|s| s.contains("string-length")),
+            "filter should preserve the int element type: {w:?}"
+        );
+    }
+
+    #[test]
+    fn identity_lambda_preserves_element_type() {
+        // `(map (fn (x) x) (list 1 2 3))` : list<int> — the lambda returns its
+        // argument, so B = the element type A.
+        let w = warnings("(string-length (first (map (fn (x) x) (list 1 2 3))))");
+        assert!(
+            w.iter().any(|s| s.contains("string-length")),
+            "an identity callback should preserve the element type: {w:?}"
+        );
+    }
+
+    #[test]
+    fn map_filter_do_not_refine_when_uncertain() {
+        // Unknown callback (a local) → no refinement → no warning.
+        let w = warnings("(fn (g) (string-length (first (map g (list 1 2 3)))))");
+        assert!(
+            w.iter().all(|s| !s.contains("string-length")),
+            "an unknown callback must not refine the result: {w:?}"
+        );
+        // Identity callback + unknown collection → B depends on the (unknown)
+        // element type → no refinement.
+        let w = warnings("(fn (xs) (string-length (first (map (fn (x) x) xs))))");
+        assert!(
+            w.iter().all(|s| !s.contains("string-length")),
+            "an identity callback over an unknown collection must not refine: {w:?}"
+        );
+        // Branchy lambda body → can't type it → bail to flat (no false positive).
+        let w = warnings(r#"(string-length (first (map (fn (x) (if x 1 "a")) (list 1 2 3))))"#);
+        assert!(
+            w.iter().all(|s| !s.contains("string-length")),
+            "a branchy lambda body must bail to a flat result: {w:?}"
+        );
+    }
 }

@@ -10325,3 +10325,40 @@ soak, trusting the dual-engine suite agreement. **Still recommended next:** a
 differential test mode (run the suite through both engines, assert identical output)
 as a standing CI guard, and widening VM coverage (variadic / pattern / prelude
 closures — pure perf, deferral already correct).
+
+---
+
+## 2026-05-31 — Parametric HOF results: element types flow through map/filter (ADR-078)
+
+**Goal.** The highest-value Step 5+ follow-up: make element types survive a
+higher-order call. After the element-types slice, `(map inc [1 2 3])` was still typed
+flat `list` — element types died at the first `map`/`filter`. Now they flow.
+
+**Decision — per-HOF result rules, not type variables (Option B).** Considered real
+type variables (`map : (A→B, seq<A>) → list<B>` + a unifier) but that adds a new `Ty`
+kind rippling through every set op + the compatibility contract, for no consumer
+beyond a fixed set of curated HOFs. Instead extended `seq_aware_call_ty`
+(`check/guards.rs`) — the same place `first`/`list`/`vector` already derive a refined
+result from args — with `map`/`filter` rules. No lattice change. (Design note:
+`docs/parametric-result-types.md`. Type variables remain the noted future form for
+user-defined generics, gated on a consumer.)
+
+**Built.**
+- `(filter pred coll)` → `nil | list<A>`, `A = elem(coll)` (element preserved).
+- `(map f coll)` → `nil | list<B>`, `B` = the callback's return via a new
+  `callback_ret`: a named global fn → its `sig_of(...).ret`; a straight-line
+  single-param lambda `(fn (p) body)` → `body` typed with `p` bound to `A` (identity
+  preserves the element; `(+ x 1)` → number). Anything subtler → flat (sound).
+- The lambda case is the only new inference and it only computes a *forward* result
+  type — it never *checks* the body, so it doesn't reopen the deferred guarded-use
+  false-positive class.
+
+**Verified.** `(string-length (first (map inc [1 2 3])))` flags (result is number);
+`(+ 1 (first (map inc [1 2 3])))` clean; `(first (filter even? [1 2 3]))` is int;
+identity lambda preserves the element; unknown callback / branchy lambda / unknown
+collection → flat, no warning. 364 lib+lsp tests green (+4). FP audit: `brood --check`
+over all 95 project files byte-identical to baseline (170 warnings, 0 added/removed).
+
+**Deferred (ADR-011).** `reduce`/`fold` results (accumulator-typed — slice 2);
+intersections for overloaded fns; type variables for user generics. Branch
+`parametric-types`.
