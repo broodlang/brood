@@ -3308,6 +3308,63 @@ impl Heap {
         self.runtime.code.closures.count()
     }
 
+    /// **RUNTIME-collector exploration (read-only, ADR-076 / `docs/runtime-collector-
+    /// exploration.md`).** Count RUNTIME closures *reachable* from the live roots —
+    /// the global bindings plus this process's operand stack — by marking the shared
+    /// code graph transitively. The difference from [`runtime_closure_count`] is the
+    /// **reclaimable** set: superseded versions a future compacting collector could
+    /// free. Walks immutable RUNTIME code only; moves and frees nothing. Single-
+    /// process view: a *spawned* process holding an older version would keep it live,
+    /// so for a multi-process runtime this `live` is a lower bound (`reclaimable` an
+    /// upper bound) — adequate for a leak estimate, not for an actual collector.
+    pub fn runtime_live_closure_count(&self) -> usize {
+        let mut visited: HashSet<usize> = HashSet::new();
+        let mut work: Vec<Value> = Vec::new();
+        // Seed: every global binding value + this process's in-flight operand roots.
+        work.extend(self.runtime.globals_read().values().copied());
+        work.extend(self.roots.iter().copied());
+        while let Some(v) = work.pop() {
+            match v {
+                Value::Fn(id) | Value::Macro(id) if id.region() == RUNTIME => {
+                    if visited.insert(id.index()) {
+                        let cl = self.closure(id);
+                        for arm in &cl.arms {
+                            work.extend(arm.body.iter().copied());
+                            work.extend(arm.optionals.iter().map(|(_, d)| *d));
+                        }
+                        // Captured env (a closure promoted from inside a call): walk
+                        // its RUNTIME frame chain's bound values for nested closures.
+                        let mut cur = cl.env;
+                        while let Some(e) = cur {
+                            if e == EnvId::GLOBAL || e.region() != RUNTIME {
+                                break;
+                            }
+                            let frame = self.env_frame(e);
+                            work.extend(frame.vars.iter().map(|(_, val)| *val));
+                            cur = frame.parent;
+                        }
+                    }
+                }
+                Value::Pair(id) if id.region() == RUNTIME => {
+                    let (h, t) = self.pair(id);
+                    work.push(h);
+                    work.push(t);
+                }
+                Value::Vector(id) if id.region() == RUNTIME => {
+                    work.extend(self.vector(id).iter().copied());
+                }
+                Value::Map(id) if id.region() == RUNTIME => {
+                    for (k, val) in self.map_entries(id) {
+                        work.push(k);
+                        work.push(val);
+                    }
+                }
+                _ => {}
+            }
+        }
+        visited.len()
+    }
+
     /// Should the next safepoint run a collection? Compares LOCAL live count
     /// against the adaptive threshold (recomputed by [`Self::collect`] as
     /// `max(GC_FLOOR, 2 * live)`). Cheap: an addition over six small `usize`s
