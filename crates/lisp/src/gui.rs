@@ -444,6 +444,18 @@ mod backend {
         }
     }
 
+    /// A key *release*, as the `[:key-up <key>]` vector — the press value (what
+    /// `key_message` yields) tagged so the app can tell it from a press. The press
+    /// itself stays the bare value, so existing dispatch is untouched; release is
+    /// purely additive. Apps pair down→up to track a held key and drive their own
+    /// repeat (consumer-paced), rather than relying on the OS auto-repeat we drop.
+    fn key_up_message(k: &Key) -> Message {
+        Message::Vector(vec![
+            Message::Keyword(value::intern("key-up")),
+            key_message(k),
+        ])
+    }
+
     /// A mouse event as the shared `[:mouse action button row col mods]` vector,
     /// built as a `Message` (no heap). Mirrors `builtins::mouse_to_value`'s shape so
     /// the two frontends stay identical.
@@ -759,14 +771,44 @@ mod backend {
                 }
                 WindowEvent::KeyboardInput {
                     event: ke,
-                    is_synthetic: false,
+                    is_synthetic,
                     ..
-                } => {
-                    if ke.state == ElementState::Pressed {
+                } => match ke.state {
+                    // A *real* fresh press goes straight through. A held key's OS
+                    // auto-repeat (`ke.repeat`) is dropped, not relayed: the OS fires
+                    // it faster than the app drains its mailbox, so on release a
+                    // backlog of repeats kept "playing" after the key was up (the
+                    // cursor scrolling on past). The app drives its own repeat off the
+                    // down/up pair, paced by its render loop, so it stops the instant
+                    // the key lifts (ADR-086). Synthetic presses (winit replaying
+                    // still-held keys on focus *gain*) are dropped too — they'd be
+                    // phantom keystrokes, and the matching down already fired.
+                    ElementState::Pressed if !ke.repeat && !is_synthetic => {
                         if let Some(k) = translate_key(&ke, w.mods) {
                             deliver(w.subscriber, key_message(&k));
                         }
                     }
+                    ElementState::Pressed => {} // auto-repeat / synthetic — see above
+                    // Key release → `[:key-up <key>]`, so the app can pair it with the
+                    // press and know the key is no longer held. *Synthetic* releases
+                    // are delivered too (not filtered): winit emits them when a key was
+                    // let go while we weren't focused, so honoring them is exactly what
+                    // stops a held key's repeat from surviving a focus change. Modifier-
+                    // only releases (Ctrl/Shift/…) translate to None and are skipped.
+                    ElementState::Released => {
+                        if let Some(k) = translate_key(&ke, w.mods) {
+                            deliver(w.subscriber, key_up_message(&k));
+                        }
+                    }
+                },
+                // Losing focus (Alt-Tab away mid-hold) is the case a key-up can go
+                // missing entirely — the release happens in another window. Deliver
+                // `:blur` so the app can drop any held key and stop repeating; a
+                // belt-and-suspenders backstop beside the synthetic releases above
+                // (ADR-086). Focus *gain* (`true`) needs no signal — the next real
+                // press resumes input.
+                WindowEvent::Focused(false) => {
+                    deliver(w.subscriber, Message::Keyword(value::intern("blur")));
                 }
                 WindowEvent::CursorMoved { position, .. } => {
                     // Track the pointer cell. Bare motion (no button) isn't emitted —
