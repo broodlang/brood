@@ -487,12 +487,33 @@ pub(super) fn check_into(
 /// in the extended scope. Parameter positions (`& rest`, `&optional`) are
 /// binders, not references, so they're not flagged as unbound.
 fn check_fn(heap: &Heap, items: &[Value], ctx: &Ctx, out: &mut Vec<(Option<Pos>, String)>) {
+    check_fn_seeded(heap, items, ctx, out, None);
+}
+
+/// `check_fn`, optionally seeding the parameters from a `(sig …)` signature — used
+/// when this `fn` is the value of a `(def name …)` whose `name` is declared. Each
+/// parameter is then bound to its declared type *and* marked a sig-typed param,
+/// so the body's checks know the types and a guard narrowing a parameter to the
+/// empty type surfaces as a dead clause (`check_if`). Seeds only on an exact
+/// positional match (no rest, equal arity) so positions can't misalign.
+fn check_fn_seeded(
+    heap: &Heap,
+    items: &[Value],
+    ctx: &Ctx,
+    out: &mut Vec<(Option<Pos>, String)>,
+    sig: Option<&crate::types::Sig>,
+) {
     let Some(&params_form) = items.get(1) else {
         return;
     };
+    let params = fn_params(heap, params_form);
+    let sig = sig.filter(|s| s.rest.is_none() && s.params.len() == params.len());
     let mut scope = ctx.clone();
-    for p in fn_params(heap, params_form) {
-        scope = scope.bind(p, None);
+    for (i, &p) in params.iter().enumerate() {
+        match sig.and_then(|s| s.params.get(i)) {
+            Some(ty) => scope = scope.bind_sig_param(p, ty.clone()),
+            None => scope = scope.bind(p, None),
+        }
     }
     // Skip a leading docstring (a lone string when more body follows).
     let body_start = match (items.get(2), items.get(3)) {
@@ -501,6 +522,19 @@ fn check_fn(heap: &Heap, items: &[Value], ctx: &Ctx, out: &mut Vec<(Option<Pos>,
     };
     for &body_form in &items[body_start..] {
         check_into(heap, body_form, &scope, out);
+    }
+}
+
+/// The items of `form` when it is an `(fn …)` / `(lambda …)` form, else `None` —
+/// so `check_def` can recognise the `(def name (fn …))` shape that `defn`
+/// expands to.
+fn fn_form_items(heap: &Heap, form: Value) -> Option<Vec<Value>> {
+    let items = list_items(heap, form)?;
+    match items.first()? {
+        &Value::Sym(s) if value::symbol_is(s, kw::FN) || value::symbol_is(s, kw::LAMBDA) => {
+            Some(items)
+        }
+        _ => None,
     }
 }
 
@@ -519,6 +553,17 @@ fn check_def(
         // `(def name)` — degenerate; skip.
         return;
     };
+    // `(def name (fn …))` where `name` carries a `(sig …)` — the shape `defn`
+    // expands to. Seed the fn's params with the declared types so the body knows
+    // them (and a guard narrowing a param to `never` becomes a dead clause).
+    if let Some(&Value::Sym(name)) = items.get(1) {
+        if let Some(sig) = ctx.declared_sig(name) {
+            if let Some(fn_items) = fn_form_items(heap, value_form) {
+                check_fn_seeded(heap, &fn_items, ctx, out, Some(&sig));
+                return;
+            }
+        }
+    }
     // The value slot is evaluated — a bare unbound symbol there (`(def x typo)`)
     // is a reference error, same rule as a call operand.
     check_value_leaf(heap, value_form, form, ctx, out);
@@ -533,6 +578,10 @@ fn check_defn(heap: &Heap, items: &[Value], ctx: &Ctx, out: &mut Vec<(Option<Pos
     let Some(&params_form) = items.get(2) else {
         return;
     };
+    // Un-expanded `defn` path (e.g. `(check 'form)` without expansion). Whole-file
+    // checking expands `defn` to `(def name (fn …))` first, so a sig'd function's
+    // params are actually seeded in `check_def`; here there's no declared sig to
+    // consult, so just bind the params.
     let mut scope = ctx.clone();
     for p in fn_params(heap, params_form) {
         scope = scope.bind(p, None);
@@ -616,6 +665,24 @@ fn check_if(
     let (then_ctx, else_ctx) = match guard_assertion(heap, test, ctx) {
         Some(g) => {
             let then_ctx = ctx.narrow(g.sym, g.ty.clone());
+            // **Dead-clause lint.** If the guard narrowed a *sig-typed parameter*
+            // to the empty type, this branch can never run — the parameter's
+            // declared type is disjoint from what the guard (a `cond` predicate or
+            // a `match` literal pattern, reached here via the scrutinee alias)
+            // asserts. Gated on a sig-typed param: a literal scrutinee or a
+            // compiler-generated guard never involves one, so no false positives.
+            if let Some((p, known)) = then_ctx.newly_dead_sig_param(ctx) {
+                out.push((
+                    heap.form_pos(form),
+                    format!(
+                        "unreachable clause: {} is {}, which can never be {} \
+                         — this branch is dead code",
+                        name_of(p),
+                        known,
+                        g.ty,
+                    ),
+                ));
+            }
             // Only narrow the else-branch when the guard is biconditional — a
             // `then_only` guard (the `and` short-circuit) doesn't establish `¬ty`
             // on a falsy test, so negating there would be a false positive.
