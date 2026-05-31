@@ -3895,6 +3895,18 @@ interacts with the green scheduler.
   socket to a per-connection handler; accepted sockets are passive until claimed.
 - **Deferred:** binary-safe bytes (recv is UTF-8-lossy today — fine for
   text/HTTP); a bytes type is a separate future decision.
+- **Streaming-response seam (done — 2026-05-31).** The HTTP server's
+  read→one-response→close shape gained one protocol-agnostic escape hatch: a
+  handler may return `(stream-response status headers stream-fn)` instead of a
+  `{:status :headers :body}` map. `http--serve-conn` then renders only the head
+  (`render-head`, no Content-Length / `Connection: close`) and hands the **live
+  socket** to `stream-fn`, *not* closing it — the handler owns the connection from
+  there and `tcp-send`s over time in its own per-connection worker process. This is
+  the general seam, not an SSE feature: SSE server push (`std/sse`'s `sse-headers`
+  / `sse-frame` / `sse-send`), long-poll, chunked downloads, and a WebSocket upgrade
+  are all just `stream-fn`s on top of it — the kernel adds nothing, consistent with
+  ADR-006 (mechanism in Rust, policy in Brood) and ADR-011 (ship the simple seam,
+  defer the power features to consumers).
 
 **References.** ADR-059 (blocking work → mailbox; the seam this builds on),
 ADR-006 (language-in-the-language), ADR-026 (immutability — sockets are the

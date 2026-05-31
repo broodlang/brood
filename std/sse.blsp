@@ -1,4 +1,5 @@
-;; std/sse.blsp — a Server-Sent Events (text/event-stream) client. (require 'sse).
+;; std/sse.blsp — Server-Sent Events (text/event-stream): a client + server framing.
+;; (require 'sse).
 ;;
 ;; Design notes (the *why*; the *what* is in the docstrings below):
 ;;  - SSE is **not** request→response like `http-request`: it's a long-lived `GET`
@@ -20,7 +21,8 @@
 ;;    target is a localhost daemon.
 
 (defmodule sse
-  "A Server-Sent Events (`text/event-stream`) client, written in Brood.
+  "Server-Sent Events (`text/event-stream`) in Brood: a client, and server-side
+framing for pushing events over `http`'s streaming seam.
 
     (require 'sse)
     (def conn (sse-connect \"http://127.0.0.1:7777/events\" (self)))
@@ -31,7 +33,11 @@
 event to `subscriber`'s mailbox as `[:sse {:event :data :id}]` (`[:sse-open status]`
 once connected, `[:sse-closed reason]` when the link ends); it returns that process's
 pid (kill it to disconnect). The `:data` is the raw payload — `json-parse` it
-yourself. Pair with `with-events` (std/ui.blsp) to feed events into a `ui-run` loop."
+yourself. Pair with `with-events` (std/ui.blsp) to feed events into a `ui-run` loop.
+
+On the server side, `sse-headers` / `sse-frame` / `sse-send` turn payloads into wire
+frames: return `(http/stream-response 200 (sse-headers) (fn (sock) … (sse-send sock
+data) …))` from an `http` handler to push events to a browser `EventSource`."
   (:use http))
 
 (require 'http)  ; reuse http/http--parse-url + http/http--request-headers for the handshake
@@ -87,6 +93,29 @@ the type to `\"message\"` and the data to `\"\"` (the SSE spec's defaults). Pure
         parts (string-split line " ")
         n (string->number (nth parts 1 "0")))
     (if (nil? n) 0 n)))
+
+;; ---- server-side framing (the inverse of the parser above) ------------------
+;; Pair with `http`'s streaming seam: a handler returns `(stream-response 200
+;; (sse-headers) (fn (sock) … (sse-send sock data) …))`, and these turn payloads
+;; into wire frames. Pure string building over `tcp-send` — the kernel adds nothing.
+
+(defn sse-headers ()
+  "Headers for an event stream: `text/event-stream`, no caching, keep-alive. Pass as
+the `headers` of a `stream-response` so a browser `EventSource` reads the open stream."
+  {"Content-Type" "text/event-stream" "Cache-Control" "no-cache" "Connection" "keep-alive"})
+
+(defn sse-frame (data &optional (event nil))
+  "One SSE frame for `data`: every line prefixed `data: ` (so multi-line payloads
+round-trip), an optional `event:` type line first, terminated by the blank line.
+The exact inverse of `sse--parse-event`."
+  (str (if (nil? event) "" (str "event: " event "\n"))
+    (join "\n" (map (fn (l) (str "data: " l)) (string-split data "\n")))
+    "\n\n"))
+
+(defn sse-send (sock data &optional (event nil))
+  "Push one SSE event (`data`, with an optional `event` type) down `sock` — the live
+socket a `stream-response` handler was handed. Just `(tcp-send sock (sse-frame …))`."
+  (tcp-send sock (sse-frame data event)))
 
 ;; ---- the reader process (IO) ------------------------------------------------
 
