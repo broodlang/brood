@@ -79,6 +79,12 @@ The vocabulary you'll use most:
   (column-preserving) · `beginning-of-buffer`/`end-of-buffer`
 - **Edit:** `insert` · `delete-char` · `delete-backward-char` · `delete-region` ·
   `set-mark`/`clear-mark`
+- **Read-only:** `read-only?` · `set-read-only` — a buffer marked read-only refuses
+  every edit op above (they throw `"buffer is read-only"`, Emacs's `buffer-read-only`
+  signal); point and mark still move, so it stays navigable. The enforcement lives in
+  the model, not the command layer, so no consumer can forget to check. Build a
+  generated/`special-mode` buffer (a process list, a help page) with `make-buffer`
+  *then* `set-read-only` it — construction never checks the flag.
 - **Files:** `buffer-from-file` (slurp) · `save-buffer` (spit)
 
 Because operations are pure, you compose them with `->` and they never surprise
