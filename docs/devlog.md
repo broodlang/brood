@@ -10824,6 +10824,8 @@ Closed the two items the connect-test triage left open with tests.
   Process-isolated because in-language tests share one runtime's global table and
   these toggle `*project-main*`-family globals.
 
+---
+
 ## 2026-05-31 — `(disconnect name)`: deliberate node-link teardown
 
 The one genuine *capability* gap the connect-test triage surfaced (everything
@@ -10931,3 +10933,49 @@ overlap` — are the pre-existing parallel global-lookup flakiness (KI-2 class:
 doc-search scans *all* globals, load-once shares a root counter across the pool).
 The failing set moves run-to-run, both pass in isolation, and neither code path
 touches the symbols added here. Verified against a clean HEAD worktree.
+
+---
+
+## 2026-05-31 — Internal transients: fast bulk map building (Phase 1)
+
+**Goal.** Cut the cost of building a map by repeated `assoc`
+(`into {}` / `zipmap` / `{}` literals / `hash-map`), which path-copies
+O(log₁₆ N) CHAMP nodes per insert. Grew out of a `brood-life` performance
+report (full design + rejected alternatives in [transients.md](transients.md)).
+
+**Decision.** Take the transient *technique*, not a transient *API*. The two
+suggested fixes were rejected: a native `%life-step` (violates ADR-006), and
+user-facing `transient`/`assoc!`/`persistent!` (violates ADR-026 — a Lisp-callable
+data-mutation primitive). Instead, mutate trie nodes **in place but only inside a
+single GC-quiet builtin**, where the mutable handle never becomes a `Value`. From
+the language's view every builder still returns a fresh immutable map; ADR-026 is
+untouched.
+
+**Built.**
+- `champ_assoc` parameterized over `watermark: Option<usize>`: `None` keeps the
+  byte-identical copy-on-write arms (every existing caller); `Some(w)` rewrites
+  any node this build allocated in place. Ownership is a single integer compare —
+  `alloc_slot!` only appends and GC can't fire mid-builtin, so a nursery node with
+  `index >= watermark` is build-owned. No `Value::Transient`, no `Tag`, no rooting,
+  no per-node bookkeeping.
+- `Heap::map_from_pairs` (now transient) + `map_from_pairs_into`; the `%map-into`
+  builtin behind the prelude's `into` (map branch) and `zipmap`.
+- `tests/transients_test.blsp`: transient ≡ copy-on-write (structural `=` **and**
+  identical `map-pairs` order — `=` on maps is canonical-shape), attempts to
+  observe the mutation (held-map immutability, derived builds, map-as-source),
+  cross-process round-trip, and hot-reload (def-rebinding the builder over a shared
+  global). Green under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`.
+
+**Measured.** ~1.6× on a 50k-entry build call (release, isolated); ~7% end-to-end
+on build-heavy whole programs (the input-sequence construction dominates). No
+small-map regression (the watermark is ~free, unlike an owner-set). The win does
+**not** reach read-modify-write workloads (`frequencies`/`group-by`/the Conway
+tally) — those still fold a Brood combine fn per element and are the open
+follow-up (would need the deferred user-visible transient, i.e. an ADR-026
+amendment, or a targeted primitive).
+
+**Caveat / trade-off.** Immutability shifts from *global-by-construction* (no
+mutating primitive exists) to a *local invariant* in `champ_assoc` ("only write a
+node with `index >= watermark`"). A breach would corrupt a shared/PRELUDE map; the
+differential test + the watermark's degrade-to-copy property are the guards.
+`BROOD_GC_VERIFY` does not catch a mis-owned write.

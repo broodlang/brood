@@ -1,7 +1,17 @@
 # Design note — internal transients for fast map building
 
-**Status:** proposal (not yet implemented; not yet an ADR). Supersedes the
-externally-suggested "user-facing transients" sketch.
+**Status:** implemented (Phase 1 — bulk build). Supersedes the
+externally-suggested "user-facing transients" sketch. The read-modify-write case
+(`frequencies`/`group-by`/the Conway tally) remains deferred and is the open
+follow-up question (see "Deferred" below). Not yet an ADR.
+
+**Landed:** `champ_assoc` is parameterized over a `watermark: Option<usize>`
+(copy-on-write when `None`; transient in-place when `Some`); `Heap::map_from_pairs`
++ `map_from_pairs_into` set the watermark and fold; the `%map-into` builtin backs
+the prelude's `into` (map branch) and `zipmap`. Measured ~1.6× on a 50k-entry
+build call (~7% end-to-end on build-heavy programs); no small-map regression.
+Covered by `tests/transients_test.blsp` (equivalence, input-immutability,
+cross-process round-trip, hot-reload), green under `BROOD_GC_STRESS=1`/`GC_VERIFY`.
 
 ## Problem
 
