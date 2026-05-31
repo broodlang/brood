@@ -1,0 +1,4 @@
+# Brood source (.blsp) is a Lisp; until Brood is its own Linguist language,
+# highlight it as Clojure — the closest common grammar (handles [] vectors,
+# {} maps, and :keywords, all of which Brood uses).
+*.blsp linguist-language=Clojure
