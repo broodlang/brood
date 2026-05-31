@@ -751,6 +751,24 @@ fn scheduler_race_hint_attaches_to_unbound_in_green_processes() {
     assert_eq!(run(src), "true");
 }
 
+/// A *qualified* unbound miss (`mod/name`) inside a green process does NOT get
+/// the scheduler-race hint: a qualified miss is never the prelude-lookup race
+/// (which only loses *bare* internal names like `fold`/`acc`/`%eq`). This is the
+/// cross-node sent-closure case — a `send`-ed closure's free global that exists
+/// only on the sending node arrives `unbound symbol: <ns>/<name>` on the
+/// receiver, and the race story would misdirect. `eval::unbound_error`.
+#[test]
+fn qualified_unbound_in_green_process_has_no_scheduler_hint() {
+    let src = r#"
+        (let (me (self))
+          (spawn (send me (try (some-mod/no-such-fn) (catch e (get e :hint)))))
+          (receive))
+    "#;
+    // No scheduler-race hint, and no namespace hint (no `some-mod/no-such-fn`
+    // is defined), so `:hint` is nil.
+    assert_eq!(run(src), "nil");
+}
+
 #[test]
 fn unbound_in_root_thread_has_no_scheduler_hint() {
     // Negative case: the root thread (REPL / file runner / nest mcp
