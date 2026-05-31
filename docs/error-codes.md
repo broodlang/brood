@@ -94,11 +94,18 @@ A hint always names an actionable next step, not just a description:
 | `run-process` failure | `check that the program is on PATH and the args are well-formed` |
 | Message too deep (`E0070`) | `messages cross processes by deep copy — flatten or chunk the data (e.g. send a list of items rather than one nested tree)` |
 
-The scheduler-race hint is conditional: it attaches only when the unbound
-error is raised inside a green (spawned) process — checked via
-`process::in_green_process()` in `eval::unbound_error`. The root thread
-(REPL / file runner / `nest mcp` dispatcher) doesn't get it, because the
-race is a multi-thread scheduling phenomenon. Documented from
+The scheduler-race hint is conditional on two things, both in
+`eval::unbound_error`: the error is raised inside a green (spawned) process
+(`process::in_green_process()`), **and** the missing name is *bare*
+(unqualified). The root thread (REPL / file runner / `nest mcp` dispatcher)
+doesn't get it, because the race is a multi-thread scheduling phenomenon. A
+*qualified* miss (`mod/name`) doesn't get it either: the race only loses bare
+internal names (`fold`/`acc`/`%eq`), so a qualified miss is never that race —
+it's a genuinely-absent module global. The common qualified case is a
+`send`-ed closure's free global that exists only on the *sending* node:
+closures travel with their captured locals but free globals late-bind on the
+receiver, so a sender-only global arrives `unbound symbol: <ns>/<name>` there,
+and the race story would misdirect. Documented from
 [`claude-demo-findings.md`](claude-demo-findings.md)'s blocker §1.
 
 ## Branching on `:code` vs `:kind`

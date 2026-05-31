@@ -322,8 +322,13 @@ closure and returns, the body never runs (a silent no-op that looks like "spawn
 didn't work"). Same for `(spawn name expr)`.
 
 Each process has its own heap; messages are **deep-copied** on `send`. `(self)`
-is the current process's pid. Functions can't be sent (per-heap closures) —
-send data and call `def`'d names on the receiving side. `receive` takes
+is the current process's pid. **Closures can be sent** — a `send`-ed function
+carries its code and its captured locals (deep-copied with it); only its *free
+global* references are late-bound on the receiver. So builtins/prelude names
+always resolve, and any `def`/`defn` the receiving image also has resolves
+there — but a free global that exists only on the sender raises `unbound
+symbol` on the receiver (ship the `defn` first, or refer to names defined on
+both sides). Same model as Erlang's `spawn`/fun-passing. `receive` takes
 pattern clauses just like `match`, plus an optional `(after ms body...)`
 clause for timeouts.
 
