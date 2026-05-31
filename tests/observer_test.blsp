@@ -157,7 +157,15 @@
       (assert= (observer/observe--apply-mouse st [:mouse :press :middle 5 0] 10) st)
       (assert= (observer/observe--apply-mouse st [:mouse :press :left 99 0] 10) st)
       (assert= (observer/observe--apply-mouse st [:mouse :move nil 5 5] 10) st)
-      (assert= (observer/observe--apply-mouse st [:mouse :drag :left 5 5] 10) st))))
+      (assert= (observer/observe--apply-mouse st [:mouse :drag :left 5 5] 10) st)))
+  (test "observer/observe--apply-mouse: tolerates the trailing mods element (6-vector)"
+    ;; The real event grew a [:mouse … mods] tail (ADR-077); apply-mouse reads fields
+    ;; positionally, so a 6-element event with held modifiers still selects/scrolls.
+    (let (st {:procs [(pinfo 10 :a :running 0 0) (pinfo 11 :b :running 0 0) (pinfo 12 :c :running 0 0)]
+              :n 3 :sel 0 :sel-id 10 :msg "old"})
+      (is (observer/observe--mouse? [:mouse :press :left 5 0 [:ctrl]]))
+      (assert= (get (observer/observe--apply-mouse st [:mouse :press :left 5 0 [:ctrl]] 10) :sel-id) 12)
+      (assert= (get (observer/observe--apply-mouse st [:mouse :scroll-down nil 0 0 []] 10) :sel-id) 11))))
 
 (describe "observe-frame (the pure render core)"
   (test "node panel + header + a row per process + detail + footer"

@@ -160,10 +160,9 @@ options below remain useful for *bounding* a heavy run, not for avoiding crashes
 
 ## Platform gaps — GUI display seam (not defects, missing capability)
 
-**Status:** GG-1 + GG-3 **resolved 2026-05-31** (ADR-079); GG-2 still open ·
-**Severity:** low (was medium) · **First seen:** 2026-05-31 · **Source:** building
-the `foobar` Game of Life demo's split view (`~/src/whk/foobar/src/life.blsp` —
-board + a larger-font status strip).
+**Status:** **all resolved 2026-05-31** (ADR-079) · **Severity:** low (was medium) ·
+**First seen:** 2026-05-31 · **Source:** building the `foobar` Game of Life demo's
+split view (`~/src/whk/foobar/src/life.blsp` — board + a larger-font status strip).
 
 The GUI frontend used to have exactly **one font size for everything** — no pane,
 op, or buffer could be bigger than another, so the only way to enlarge text was a
@@ -180,21 +179,23 @@ hand-rolled "block font" magnified out of grid cells (what `life.blsp`'s
   end-to-end; the grid stays uniform — positions are still base cells). Arbitrary
   per-pixel `:height` sizing is deferred (would break the single grid; needs a
   metrics-query primitive).
-- **GG-2 — `gui-font!` is global across *all* windows. ⬜ Open.** The
-  `UserEvent::Font` handler applies the spec to every open window (`gui.rs`: `for w
-  in self.wins.values_mut() { w.renderer.set_font(…) }`), so the "two windows"
-  escape hatch fails — enlarging a second window resizes the first too. *Possible
-  fix:* a per-window form `(gui-font! id spec)`, leaving the no-id call as the global
-  default. Independent of GG-1 and smaller; not yet done.
+- **GG-2 — `gui-font!` is global across *all* windows. ✅ Resolved (ADR-079).**
+  `gui-font!` now takes an optional leading window id: `(gui-font! spec)` is still
+  the global default (every window + ones opened later), while `(gui-font! id spec)`
+  retunes *just that window* and leaves the global default and other windows alone —
+  so two windows can run different fonts. The `UserEvent::Font` event carries `id:
+  Option<u64>` and both arms share an `apply_font` helper (`crates/lisp/src/gui.rs`;
+  parsed in `builtins.rs` `gui_font`, arity `range(1,2)`).
 - **GG-3 — no display-side pane/clip/font layer. ✅ Resolved.** `std/window.blsp`
   (ADR-077/078) provides the *pane layout + clip-rect* abstraction (a split tree →
   pane rects + dividers), and the *per-pane font scale* remainder collapsed into
   GG-1 — a pane/buffer now renders its text with a face carrying its `:scale`, so
   per-buffer font is pure Brood policy.
 
-**Resolution:** GG-1 shipped as a `Face` `:scale` (ADR-079) — it also closed GG-3's
-remainder and reduces the `life.blsp` block-font workaround to `[:text … {:scale
-n}]`. **GG-2 remains open** as an independent, smaller follow-up.
+**Resolution:** all three closed under ADR-079. GG-1 shipped as a `Face` `:scale`
+(also closing GG-3's per-pane-font remainder, and reducing the `life.blsp`
+block-font workaround to `[:text … {:scale n}]`); GG-2 as an optional window-id
+argument to `gui-font!` for per-window fonts.
 
 ## Minor
 

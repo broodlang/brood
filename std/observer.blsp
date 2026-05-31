@@ -416,9 +416,10 @@ process is selected."
 
 ;; ---- mouse (a second input path: click to select, wheel to scroll) ----------
 ;;
-;; A frontend may also yield a mouse event `[:mouse action button row col]`
+;; A frontend may also yield a mouse event `[:mouse action button row col mods]`
 ;; (terminal + GUI both do, via `term-poll`/`gui-poll`, with the same minimal
-;; vocabulary: `:press` / `:scroll-up` / `:scroll-down`). The observer acts on
+;; vocabulary: `:press` / `:scroll-up` / `:scroll-down`; `mods` is a vector of held
+;; modifier keywords like `[:ctrl]`, which the observer ignores). The observer acts on
 ;; two — left-press selects the clicked process row, the wheel scrolls the
 ;; selection — and ignores anything else (a right/middle click, or any action a
 ;; future frontend adds). `observe--loop` routes mouse events here before
@@ -426,7 +427,7 @@ process is selected."
 ;; the mapping is unit-testable without a window.
 
 (defn observe--mouse? (k)
-  "True if input `k` is a mouse event `[:mouse action button row col]`, not a key."
+  "True if input `k` is a mouse event `[:mouse action button row col mods]`, not a key."
   (and (vector? k) (= (first k) :mouse)))
 
 (defn observe--mouse-row->sel (row sel cap n)
@@ -445,7 +446,13 @@ the wheel scrolls the selection one row. Any other event (a right/middle click, 
 click off the list, or an action a future frontend adds) leaves `state` untouched.
 An acting event also clears the stale command-result message. `cap` is the visible
 body height (`(max 1 (- rows 5))`, as in `observe-frame`)."
-  (let ([_ action button row _col] ev
+  ;; Read fields positionally (nth), not via a fixed-length `[_ a b r c]` vector
+  ;; pattern: the event grew a trailing `mods` element ([:mouse … mods], ADR-077),
+  ;; and a vector pattern is exact-length, so destructuring would silently stop
+  ;; matching. `nth` is length-agnostic — robust to that and any future element.
+  (let (action (nth ev 1)
+        button (nth ev 2)
+        row    (nth ev 3)
         procs (get state :procs)
         n (get state :n)
         sel (get state :sel)

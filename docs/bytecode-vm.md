@@ -10,9 +10,16 @@
 > `eval::compile::vm_enabled` now defaults the VM *on*; `BROOD_VM=0` is the
 > tree-walker escape hatch (retained for ≥1 release).** A core-vocabulary closure
 > runs on the VM; anything else transparently defers to the tree-walker per-form, so
-> the language is unchanged. **Still worth doing:** a differential test mode (run the
-> suite through both engines, assert identical output) as a standing CI guard, and
-> widening VM coverage (variadic / patterns / prelude closures — pure perf). See
+> the language is unchanged. **Differential test mode (done):**
+> `crates/lisp/tests/differential.rs` runs a corpus through *both* engines in one
+> process (via `compile::set_forced_engine`) and asserts identical results; `make
+> test-both` runs the whole suite under each. (It already caught one divergence — a
+> non-function call worded differently by `apply` vs the evaluator; now unified.)
+> **Variadic arms (done):** `&rest` and nil-default `&optional` arms VM-compile
+> (real-default optionals still defer); selection uses a full arity table
+> (`ArmSpec`) so it reproduces `select_arm` exactly even when a variadic arm's range
+> overlaps a fixed arm. **Still worth doing (pure perf):** patterns / `match*` and
+> prelude (PRELUDE-region) closures. See
 > [As-built](#as-built-stage-01-2026-05-30) for the numbers and the §7 plan.
 
 This is the project's "big lever" for performance: closing the tree-walker's

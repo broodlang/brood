@@ -143,13 +143,18 @@ pub enum MouseAction {
 }
 
 /// A mouse event at a character-cell position; the Brood side turns it into a
-/// `[:mouse action button row col]` vector (`button` is nil for scroll).
+/// `[:mouse action button row col mods]` vector (`button` is nil for scroll;
+/// `mods` is a vector of the held modifier keywords, e.g. `[:ctrl]` / `[]`, so an
+/// app can bind Ctrl+wheel, Ctrl+drag, etc.).
 #[derive(Clone, Copy)]
 pub struct Mouse {
     pub action: MouseAction,
     pub button: Option<MouseButton>,
     pub row: u16,
     pub col: u16,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
 }
 
 #[cfg(not(feature = "gui"))]
@@ -171,7 +176,7 @@ mod disabled {
     pub fn draw(_id: u64, _ops: Vec<Op>) -> Result<(), String> {
         Err(NOT_COMPILED.into())
     }
-    pub fn font(_family: Option<u32>, _px: Option<f32>) -> Result<(), String> {
+    pub fn font(_id: Option<u64>, _family: Option<u32>, _px: Option<f32>) -> Result<(), String> {
         Err(NOT_COMPILED.into())
     }
     pub fn register_family(
@@ -262,10 +267,14 @@ mod backend {
         Draw { id: u64, ops: Vec<Op> },
         /// Destroy window `id`.
         Close { id: u64 },
-        /// Set the global default cell font — family and/or pixel size — applied to
-        /// every open window and remembered for windows opened later. The
-        /// whole-window knob behind `gui-font!`; `None` fields are left unchanged.
+        /// Set a cell font — family and/or pixel size; `None` fields are left
+        /// unchanged. `id: None` is the **global default**: applied to every open
+        /// window and remembered for windows opened later. `id: Some(w)` targets
+        /// **just window `w`** and does *not* touch the global default, so two
+        /// windows can run different fonts side by side (the no-id call behind
+        /// `(gui-font! spec)`, the per-window one behind `(gui-font! id spec)`).
         Font {
+            id: Option<u64>,
             family: Option<u32>,
             px: Option<f32>,
         },
@@ -384,15 +393,16 @@ mod backend {
             .map_err(|_| "gui thread is gone".to_string())
     }
 
-    /// `(gui-font! …)` — set the global default cell font (family and/or pixel
-    /// size), applied to every open window and remembered for ones opened later.
+    /// `(gui-font! …)` — set a cell font (family and/or pixel size). `id: None`
+    /// sets the global default (every open window + ones opened later); `id:
+    /// Some(w)` targets just window `w`, leaving the global default untouched.
     /// No-op (silently) if the GUI thread never started.
-    pub fn font(family: Option<u32>, px: Option<f32>) -> Result<(), String> {
+    pub fn font(id: Option<u64>, family: Option<u32>, px: Option<f32>) -> Result<(), String> {
         if let Ok(g) = gui() {
             let _ = g
                 .lock()
                 .unwrap()
-                .send_event(UserEvent::Font { family, px });
+                .send_event(UserEvent::Font { id, family, px });
         }
         Ok(())
     }
@@ -432,9 +442,9 @@ mod backend {
         }
     }
 
-    /// A mouse event as the shared `[:mouse action button row col]` vector, built as
-    /// a `Message` (no heap). Mirrors `builtins::mouse_to_value`'s shape so the two
-    /// frontends stay identical.
+    /// A mouse event as the shared `[:mouse action button row col mods]` vector,
+    /// built as a `Message` (no heap). Mirrors `builtins::mouse_to_value`'s shape so
+    /// the two frontends stay identical.
     fn mouse_message(m: &Mouse) -> Message {
         let action = match m.action {
             MouseAction::Press => "press",
@@ -449,12 +459,24 @@ mod backend {
             Some(MouseButton::Middle) => Message::Keyword(value::intern("middle")),
             None => Message::Nil,
         };
+        // Held modifiers, in a stable order (ctrl, alt, shift); empty `[]` when none.
+        let mut mods = Vec::new();
+        if m.ctrl {
+            mods.push(Message::Keyword(value::intern("ctrl")));
+        }
+        if m.alt {
+            mods.push(Message::Keyword(value::intern("alt")));
+        }
+        if m.shift {
+            mods.push(Message::Keyword(value::intern("shift")));
+        }
         Message::Vector(vec![
             Message::Keyword(value::intern("mouse")),
             Message::Keyword(value::intern(action)),
             button,
             Message::Int(m.row as i64),
             Message::Int(m.col as i64),
+            Message::Vector(mods),
         ])
     }
 
@@ -643,19 +665,31 @@ mod backend {
                         self.wins.remove(&wid); // dropping the window closes it
                     }
                 }
-                // Global default cell font: remember it for future windows and apply
-                // it to every open one (recompute the grid + republish size + redraw).
-                UserEvent::Font { family, px } => {
-                    if let Some(f) = family {
-                        self.default_family = Some(f);
-                    }
-                    if let Some(p) = px {
-                        self.default_px = p.max(1.0);
-                    }
-                    for w in self.wins.values_mut() {
-                        w.renderer.set_font(family, px);
-                        update_cells(&w.window, &w.renderer, &w.size);
-                        w.window.request_redraw();
+                // Cell font. `id: Some(w)` retunes just that window, leaving the
+                // global default alone (so two windows can differ). `id: None` is
+                // the global default: remembered for future windows and applied to
+                // every open one. Either way a target window recomputes its grid +
+                // republishes its size + redraws (`apply_font`).
+                UserEvent::Font { id, family, px } => {
+                    match id {
+                        Some(target) => {
+                            if let Some(w) =
+                                self.ids.get(&target).and_then(|wid| self.wins.get_mut(wid))
+                            {
+                                apply_font(w, family, px);
+                            }
+                        }
+                        None => {
+                            if let Some(f) = family {
+                                self.default_family = Some(f);
+                            }
+                            if let Some(p) = px {
+                                self.default_px = p.max(1.0);
+                            }
+                            for w in self.wins.values_mut() {
+                                apply_font(w, family, px);
+                            }
+                        }
                     }
                 }
                 // Register a font family from raw TTF bytes; parse here and share it
@@ -750,6 +784,9 @@ mod backend {
                                     button: Some(b),
                                     row,
                                     col,
+                                    ctrl: w.mods.control_key(),
+                                    alt: w.mods.alt_key(),
+                                    shift: w.mods.shift_key(),
                                 }),
                             );
                         }
@@ -779,6 +816,9 @@ mod backend {
                                 button: Some(b),
                                 row,
                                 col,
+                                ctrl: w.mods.control_key(),
+                                alt: w.mods.alt_key(),
+                                shift: w.mods.shift_key(),
                             }),
                         );
                     }
@@ -798,6 +838,9 @@ mod backend {
                                 button: Some(b),
                                 row,
                                 col,
+                                ctrl: w.mods.control_key(),
+                                alt: w.mods.alt_key(),
+                                shift: w.mods.shift_key(),
                             }),
                         );
                     }
@@ -822,6 +865,9 @@ mod backend {
                                 button: None,
                                 row,
                                 col,
+                                ctrl: w.mods.control_key(),
+                                alt: w.mods.alt_key(),
+                                shift: w.mods.shift_key(),
                             }),
                         );
                     }
@@ -862,6 +908,15 @@ mod backend {
             pending_open: Vec::new(),
         };
         let _ = event_loop.run_app(&mut app);
+    }
+
+    /// Retune one window's cell font (family and/or px), then recompute its grid,
+    /// republish its size for `gui-size`, and request a repaint. Shared by the
+    /// global-default and per-window arms of `UserEvent::Font`.
+    fn apply_font(w: &mut Win, family: Option<u32>, px: Option<f32>) {
+        w.renderer.set_font(family, px);
+        update_cells(&w.window, &w.renderer, &w.size);
+        w.window.request_redraw();
     }
 
     /// Recompute `(cols, rows)` from the window's physical size and the cell
