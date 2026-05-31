@@ -123,9 +123,38 @@ The live set = everything reachable from these, transitively through RUNTIME cod
     `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`; full suite 437/437 both engines.
     **Bounds memory** — 40k redefs: no-collect 34 MB (growing) vs periodic collect
     14.5 MB (flat). The Stage-5 goal, for the single-process case.
-  - **2c — runtime-wide stop-the-world.** The scheduler barrier (doesn't exist yet)
-    to pause every process at a safepoint, so 2b can run with other processes
-    present (rewriting their state too). The race-prone part; last.
+  - **2c — runtime-wide stop-the-world (design; the race-prone part, deferred).**
+    Lets the collector run when *other processes are live* — today 2b's `Arc::get_mut`
+    gate skips (`:ran false`) because parked processes still hold runtime-`Arc`
+    clones. Grounded in the scheduler as it is:
+    - **No central heap registry.** A *running* `Process` (and its `Heap`) is **not
+      reachable from any registry** (`scheduler.rs:519`) — heaps are scattered across
+      worker coroutine stacks (running), per-worker run queues, and mailbox waiters
+      (parked). So a central collector *cannot* iterate all heaps to rewrite them.
+    - **Parked vs running split.** A process parked in `receive` is suspended (its
+      coroutine yielded) and won't reach an eval safepoint until woken — so it can't
+      *cooperatively* rewrite itself. But its `Heap` **is** reachable, via its
+      registry-reachable mailbox (`mailbox.state.waiter`). Queued processes are
+      reachable via the per-worker queues. ⇒ a **hybrid**: *running* processes
+      rewrite their own heap at the STW safepoint (they hold `&mut heap`); *parked/
+      queued* ones are rewritten centrally by the coordinator (reachable + not
+      executing → safe to mutate).
+    - **Swappable region required.** Under STW the runtime `Arc` is still multiply
+      cloned, so the swap can't use `get_mut`; `RuntimeCode.code` must become
+      interior-mutable-swappable. `arc_swap::ArcSwap<CodeSlabs>` keeps reads ~lock-
+      free (atomic load) — vs `RwLock` which taxes the every-call code-read path
+      (the original Stage-5 objection). Read-path cost is the key tradeoff to measure.
+    - **Protocol:** request a collection epoch (atomic on `RuntimeCode`) → workers
+      bring running processes to the existing eval safepoint + barrier; coordinator
+      evacuates the shared region once (→ forwarding map) → running procs rewrite own
+      heap, coordinator rewrites parked/queued heaps + globals, all clear `vm_cache`/
+      `global_ic`, barrier → atomic-swap the region → resume.
+    This is **M4-server-scale concurrency infrastructure** — the single largest,
+    most race-prone remaining kernel piece (the project's known races live in the
+    scheduler). Deferred to a dedicated effort with the full `BROOD_GC_STRESS` +
+    concurrency-fanout rig. **2b already bounds memory for the single-process /
+    quiescent case**, which covers the practical near-term need; 2c waits until a
+    long-lived *multi-process* server session actually hurts (the Stage-5 principle).
   Build only as far as a real session needs (per the Stage-5 principle).
 
 ## Effort / risk
