@@ -663,11 +663,18 @@ the backend's `:kill` and reports the result; any other key cancels. Clears
 ;; :kill <fn confirm → result-string>}` (local inline, or peer request/eval/kill for
 ;; remote attach). `ui-run` quits when a command sets `:done`.
 
+(defn observe--display-procs (model)
+  "The process list as currently displayed: this snapshot's procs tagged with the
+reductions-per-second rate (`observe--rated-procs`), ordered by the model's sort
+key. Shared by `view` (renders it) and `derived` (threads selection through it),
+so both agree on row order and identity. Pure."
+  (observe--order (observe--rated-procs model) (get model :sort)))
+
 (defn observe--derived (model cols rows)
   "Thread the currently-rendered process list / selection / count into `model`, so
 the nav + mouse commands (pure `(state key) → state`) can read them. Recomputed from
 `:last` + `:sort` per input — cheap, since inputs are infrequent. Pure."
-  (let (procs (observe--order (observe--rated-procs model) (get model :sort))
+  (let (procs (observe--display-procs model)
         n (count procs)
         sel (observe--sel-index procs (get model :sel-id)))
     (assoc model :procs procs :sel sel :n n)))
@@ -678,7 +685,7 @@ Builds `observe-frame` from the last snapshot, the sort key, the link status, an
 the minibuffer UI state. Paints to whatever frontend `ui-run` holds."
   (let (snap (or (get model :last) {:node (observe--node-info) :procs []})
         sort (get model :sort)
-        procs (observe--order (observe--rated-procs model) sort)
+        procs (observe--display-procs model)
         sel (observe--sel-index procs (get model :sel-id))
         ui {:mode (get model :mode)
             :edit (get model :edit)
