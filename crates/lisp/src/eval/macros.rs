@@ -41,7 +41,7 @@ pub fn quasiquote(heap: &mut Heap, template: Value, env: EnvId) -> LispResult {
 /// alone. A bare `#` (no prefix) is not rewritten.
 fn maybe_autogensym(v: Value, autogen: &mut AutoGen) -> Value {
     if let Value::Sym(s) = v {
-        let name = value::symbol_name(s);
+        let name = value::symbol_name_ref(s);
         if name.len() > 1 && name.ends_with('#') {
             return *autogen
                 .entry(s)
@@ -269,12 +269,12 @@ fn scan_def_form(heap: &Heap, form: Value, names: &mut HashSet<Symbol>) {
     if value::symbol_is(h, kw::QUOTE) || value::symbol_is(h, kw::QUASIQUOTE) {
         return;
     }
-    let hn = value::symbol_name(h);
-    if matches!(hn.as_str(), kw::DEF | kw::DEFN | kw::DEFMACRO | kw::DEFDYN) {
+    let hn = value::symbol_name_ref(h);
+    if matches!(hn, kw::DEF | kw::DEFN | kw::DEFMACRO | kw::DEFDYN) {
         if let Some(&Value::Sym(name)) = items.get(1) {
             // Only bare names get pre-recorded; an already-qualified def head needs
             // no forward-ref help.
-            if !value::symbol_name(name).contains('/') {
+            if !value::symbol_name_ref(name).contains('/') {
                 names.insert(name);
             }
         }
@@ -296,8 +296,8 @@ pub fn resolve(heap: &mut Heap, form: Value) -> Value {
     // parallel tree, like `macroexpand_all`; it re-enters neither eval nor expand).
     let _gc_block = crate::process::GcBlockGuard::enter();
     let _macro_block = crate::process::MacroBlockGuard::enter();
-    let ns_name = value::symbol_name(ns);
-    resolve_walk(heap, form, &ns_name, &[])
+    let ns_name = value::symbol_name_ref(ns);
+    resolve_walk(heap, form, ns_name, &[])
 }
 
 /// Resolve a single **reference** symbol `s` against the heap's current namespace
@@ -309,7 +309,7 @@ pub fn resolve(heap: &mut Heap, form: Value) -> Value {
 /// Identity at root (`compile_ns == None`). Read-only (no allocation).
 pub fn resolve_reference(heap: &Heap, s: value::Symbol) -> value::Symbol {
     match heap.compile_ns() {
-        Some(ns) => resolve_sym(heap, s, &value::symbol_name(ns), &[]),
+        Some(ns) => resolve_sym(heap, s, value::symbol_name_ref(ns), &[]),
         None => s,
     }
 }
@@ -326,8 +326,8 @@ fn is_ambient(name: &str) -> bool {
 /// an ambient `*earmuffed*` name, is taken as-is. Shared with `Heap::def_form_name`
 /// so def-site keys match.
 pub fn qualify_name(ns_name: &str, name: value::Symbol) -> value::Symbol {
-    let spelling = value::symbol_name(name);
-    if spelling.contains('/') || is_ambient(&spelling) {
+    let spelling = value::symbol_name_ref(name);
+    if spelling.contains('/') || is_ambient(spelling) {
         name
     } else {
         value::intern(&format!("{}/{}", ns_name, spelling))
@@ -341,11 +341,11 @@ fn resolve_sym(heap: &Heap, s: value::Symbol, ns_name: &str, locals: &[value::Sy
     if locals.contains(&s) {
         return s;
     }
-    let name = value::symbol_name(s);
+    let name = value::symbol_name_ref(s);
     if name.contains('/') {
         return s; // already qualified
     }
-    if is_ambient(&name) {
+    if is_ambient(name) {
         return s; // earmuffed `*foo*` — ambient/root by convention (ADR-065)
     }
     // Own namespace first (a same-named local def shadows an import), then a
@@ -446,7 +446,7 @@ fn resolve_def(heap: &mut Heap, form: Value, items: &[Value], ns_name: &str, loc
             // unexpanded form), so without this a `(defn counter … (counter …))`
             // that came from a macro would bind `ns/counter` but recurse on bare
             // `counter` → unbound. Harmless for an already-qualified name.
-            if !value::symbol_name(name).contains('/') {
+            if !value::symbol_name_ref(name).contains('/') {
                 heap.add_ns_known_name(name);
             }
             out.push(Value::Sym(qualify_name(ns_name, name)));
@@ -683,7 +683,7 @@ pub(crate) fn macro_head_id(heap: &Heap, env: EnvId, sym: value::Symbol) -> Opti
         // same-namespace macro. Resolve it as the `resolve` pass does.
         None => {
             let q = match heap.compile_ns() {
-                Some(ns) => resolve_sym(heap, sym, &value::symbol_name(ns), &[]),
+                Some(ns) => resolve_sym(heap, sym, value::symbol_name_ref(ns), &[]),
                 None => heap.import_of(sym).unwrap_or(sym),
             };
             match (q != sym, heap.env_get(value::EnvId::GLOBAL, q)) {

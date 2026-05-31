@@ -62,6 +62,17 @@ pub fn symbol_name(sym: Symbol) -> String {
     NAMES.get(sym as usize).expect("interned symbol id").clone()
 }
 
+/// Borrowed spelling of `sym` — a `&'static str` straight into the append-only,
+/// never-freed `NAMES` table (stable refs, so it's valid for the life of the
+/// process). Unlike [`symbol_name`] it allocates **nothing**: use it for
+/// transient inspection — compare, `contains`/`starts_with`, push into a buffer,
+/// `format!` — which is the hot-path shape in the printer and the compile/macro
+/// walk. Reach for [`symbol_name`] only when an owned `String` must outlive the
+/// table (stored in a `Value`, returned across an API boundary, collected).
+pub fn symbol_name_ref(sym: Symbol) -> &'static str {
+    NAMES.get(sym as usize).expect("interned symbol id").as_str()
+}
+
 /// Look up an existing interned symbol without inserting one. Returns `None` if
 /// the name has never been interned in this process. For cold-path checks (e.g.
 /// `dist::connect`'s pre-dial de-dup) that don't want to grow the interner with
