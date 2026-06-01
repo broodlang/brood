@@ -187,3 +187,12 @@ fn auto_safepoint_collect_bounds_runtime_region() {
     let v = interp.eval_str("(f 7)").expect("f errored after auto-collect");
     assert_eq!(interp.print(v), (5999i64 * 7 + 5999).to_string());
 }
+
+// The end-to-end corruption (a live compiled arm's `Const` stranded by a mid-call
+// compaction) is a slab-packing-sensitive race that only reproduces reliably with a
+// large, structurally varied churn file (e.g. `load`ing a real module under
+// `BROOD_GC_STRESS=1`) — see `docs/known-issues.md` for the manual repro. The
+// *mechanism* the fix rests on is unit-tested deterministically in
+// `crate::eval::compile::tests` (`const_handle_round_trips`,
+// `rewrite_arm_handles_*`): that `runtime_collect`'s `rewrite_arm_handles` rewrites
+// every movable handle a live arm's node tree embeds.

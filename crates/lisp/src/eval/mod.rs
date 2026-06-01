@@ -233,13 +233,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
         // here. Runs only when this heap uniquely owns the runtime (single-process
         // / quiescent); a shared runtime backs off. Cost when not due: a `boxcar`
         // length read + a compare.
-        // …and not while a compiled-VM body is live on the stack (`rt_compact_pinned`):
-        // it embeds RUNTIME constant handles an evacuation would strand (the
-        // `vm_apply` `RtPinGuard`). Compaction resumes once the VM frame unwinds.
-        if !crate::process::macro_block_active()
-            && !crate::process::rt_compact_pinned()
-            && heap.rt_gc_due()
-        {
+        if !crate::process::macro_block_active() && heap.rt_gc_due() {
             let mut roots = [expr];
             let mut envs = [env];
             heap.maybe_runtime_collect(&mut roots, &mut envs);
