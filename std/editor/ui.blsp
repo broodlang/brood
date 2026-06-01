@@ -156,27 +156,59 @@ terminal) just ignores it. The seam a singleton launcher uses to surface an
 already-open window instead of opening a duplicate (e.g. a repeated `(observe)`)."
   (= input :focus))
 
-(defn ui--loop (model view update display)
+(defn ui--log-error (where e)
+  "Log a caught `view`/`update` error to stderr (via `*err*`, so it's redirectable)
+— it would otherwise vanish with the echo-area message on quit, leaving no trace.
+`where` names the phase it came from (`\"view\"` / `\"update\"`). Returns nil."
+  (eprintln (str "ui-run: " where " error (recovering to last good frame): "
+                (error-message e))))
+
+(defn ui--loop (model last-good view update display)
   "The inner recursion of `ui-run` (own function so each turn is a proper tail call —
 O(1) stack). Renders, polls, folds the input, recurses; stops when `:done` (the
 caller, `ui-run`, runs `:leave` in all cases). A `:close` input (the window's X
 button) always quits, so every `ui-run` app is closeable by its close button without
 wiring it into `update` — independent of how the app binds the Escape key. A `:focus`
 control message (from another process) raises the window via the display's `:focus`
-and is NOT folded into `update`."
+and is NOT folded into `update`.
+
+**Let-it-crash at the render loop** (the editor's application of userland
+supervision, M4 — see `docs/supervision.md`). A throw from `view` or `update` is
+caught, logged to stderr (`ui--log-error`), and the loop keeps going rather than
+dying: a throwing `view` rolls the model back to `last-good` (the last model that
+rendered cleanly) and re-renders it; a throwing `update` drops that one bad input
+and keeps the current model. `last-good` is threaded alongside `model` and starts
+nil — so if the *first* render throws (no good frame to fall back to yet) the error
+re-raises, surfacing a genuine startup bug instead of spinning."
   (if (get model :done)
     nil
-    (let ([cols rows] ((get display :size)))
-      ((get display :draw) (view model cols rows))
-      (let (input (or ((get display :poll) (ui--tick-ms model)) :tick))
-        (cond
-          ;; the window's close button always quits; `ui-run` then runs `:leave`
-          (quit-request? input) nil
-          ;; raise-to-front request: act on the display, keep the model untouched
-          (focus-request? input)
-          (let (f (get display :focus))
-            (do (when f (f)) (ui--loop model view update display)))
-          :else (ui--loop (update model input cols rows) view update display))))))
+    (let ([cols rows] ((get display :size))
+          ;; render this model; a `[:frame …]` result is the frame to draw, `:failed`
+          ;; means `view` threw (already logged) and we must fall back to `last-good`.
+          rendered (try [:frame (view model cols rows)]
+                     (catch e
+                       (if (nil? last-good)
+                         (throw e)  ; first render failed — a real startup bug, not a wedge
+                         (do (ui--log-error "view" e) :failed)))))
+      (if (= rendered :failed)
+        ;; couldn't render `model` — roll back to the last model that did, and re-render it
+        (ui--loop last-good last-good view update display)
+        (do
+          ((get display :draw) (second rendered))
+          ;; `model` rendered cleanly: it's now the fallback point for the next turns.
+          (let (input (or ((get display :poll) (ui--tick-ms model)) :tick))
+            (cond
+              ;; the window's close button always quits; `ui-run` then runs `:leave`
+              (quit-request? input) nil
+              ;; raise-to-front request: act on the display, keep the model untouched
+              (focus-request? input)
+              (let (f (get display :focus))
+                (do (when f (f)) (ui--loop model model view update display)))
+              :else
+              ;; fold the input; a throwing `update` drops this input and keeps `model`
+              (let (next (try (update model input cols rows)
+                           (catch e (do (ui--log-error "update" e) model))))
+                (ui--loop next model view update display)))))))))
 
 (defn ui-run (model view update display)
   "Run a UI app over `display` (a frontend map): enter it, then loop —
@@ -194,12 +226,20 @@ So every app is closeable by its X button for free, no matter how it binds Escap
 (an editor binds Escape to cancel/normal-mode, not quit). Intercepting `:close` to
 prompt first (\"unsaved changes\") is a deferred power feature (ADR-011).
 
-**Teardown is guaranteed.** `:leave` runs on a normal quit *and* if `view`/`update`
-throws (the error is re-raised after) — so a crash never strands the terminal in
-the alternate screen / raw mode; the screen is restored. With `*term-display*` the
-frontend is raw mode + the alternate screen, so `Ctrl-C` arrives as a `:ctrl-c`
-**key** (have `update` quit on it — see the observer's keymap) rather than a SIGINT
-that kills the process mid-draw and leaves stale cells on screen.
+**A `view`/`update` crash is survived, not fatal** (let-it-crash at the render
+loop). A throw from `view` or `update` is caught and logged to stderr, and the loop
+recovers: a bad `view` rolls the model back to the last frame that rendered cleanly;
+a bad `update` drops that one input. So a single buggy command can't kill the app or
+wedge it on a frame it can't redraw — only the *first* render throwing (no good frame
+yet) is fatal, surfacing a genuine startup bug. See `ui--loop`.
+
+**Teardown is guaranteed.** `:leave` runs on a normal quit *and* if the frontend
+mechanism itself (`:size`/`:draw`/`:poll`) throws, or the first render fails (the
+error is re-raised after) — so a crash never strands the terminal in the alternate
+screen / raw mode; the screen is restored. With `*term-display*` the frontend is raw
+mode + the alternate screen, so `Ctrl-C` arrives as a `:ctrl-c` **key** (have
+`update` quit on it — see the observer's keymap) rather than a SIGINT that kills the
+process mid-draw and leaves stale cells on screen.
 
 Modal: control returns to the caller on quit — run it in a spawned process for a
 non-blocking window. The shared loop behind the observer (and the editor)."
@@ -207,8 +247,8 @@ non-blocking window. The shared loop behind the observer (and the editor)."
     ((get display :enter))
     (try
       (do
-        (ui--loop model view update display)
+        (ui--loop model nil view update display)  ; nil last-good: first render must succeed
         ((get display :leave)))
       (catch e
-        ((get display :leave))  ; restore the terminal even on a view/update error
+        ((get display :leave))  ; restore the terminal even on a frontend/startup error
         (throw e)))))

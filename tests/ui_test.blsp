@@ -5,7 +5,22 @@
 ;; which is enough to exercise the loop (render → poll → update → done) and the
 ;; broadcast composition without any IO.
 
-(defmodule ui-test (:use test) (:use editor/ui) (:use editor/display))
+(defmodule ui-test (:use test) (:use editor/ui) (:use editor/display) (:use io))
+
+;; Collect every [:saw x] message now in the mailbox, in send order — the tests
+;; below have `view` announce each model it renders with `(send me [:saw …])`, so
+;; the drained sequence is exactly the frames that rendered cleanly.
+(defn drain-saw (acc)
+  (receive ([:saw x] (drain-saw (cons x acc))) (after 0 (reverse acc))))
+
+;; A scripted display: inputs arrive as `[:input …]` messages (selectively polled,
+;; so interleaved `[:saw …]` render-echoes are skipped and survive for `drain-saw`).
+(defn r--display (me)
+  {:enter (fn () nil)
+   :leave (fn () :left)
+   :size (fn () [80 24])
+   :draw (fn (f) nil)
+   :poll (fn (ms) (receive ([:input i] i) (after 0 :tick)))})
 
 (describe "ui-run — the TEA app loop"
   (test "loops until the model is :done, then returns the :leave result"
@@ -97,3 +112,82 @@
       ((get b :draw) [:FRAME])
       (assert= (receive ([:d1 f] f) (after 200 :none)) [:FRAME])
       (assert= (receive ([:d2 f] f) (after 200 :none)) [:FRAME]))))
+
+(describe "ui-run — let-it-crash at the render loop (resilient loop)"
+  (test "a throwing view rolls back to the last good frame and keeps looping"
+    (let (me (self))
+      (send me [:input :go-b])     ; a -> b   (good)
+      (send me [:input :go-boom])  ; b -> bad (a model whose view throws)
+      (send me [:input :go-c])     ; recover, then -> c
+      (send me [:input :quit])
+      (assert=
+        (ui-run {:tag :a}
+          (fn (m c r)
+            (when (get m :boom) (throw "view boom"))  ; the wedged model can't render
+            (send me [:saw (get m :tag)])             ; announce a clean render
+            [])
+          (fn (m input c r)
+            (cond
+              (= input :go-b)    {:tag :b}
+              (= input :go-boom) {:tag :bad :boom true}
+              (= input :go-c)    {:tag :c}
+              (= input :quit)    (assoc m :done true)
+              :else m))
+          (r--display me))
+        :left)
+      ;; a, b, (bad throws — no render), b again (rolled back + re-rendered), c.
+      ;; the repeated :b proves the loop recovered to the last good frame.
+      (assert= (drain-saw []) (list :a :b :b :c))))
+
+  (test "a throwing update drops the bad input and keeps the current model"
+    (let (me (self))
+      (send me [:input :inc])   ; 0 -> 1
+      (send me [:input :boom])  ; update throws — dropped, model unchanged
+      (send me [:input :inc])   ; continues off n=1 (not 0), so reaches 2
+      (send me [:input :quit])
+      (ui-run {:n 0}
+        (fn (m c r) (send me [:saw (get m :n)]) [])
+        (fn (m input c r)
+          (cond
+            (= input :inc)  (assoc m :n (+ (get m :n) 1))
+            (= input :boom) (throw "update boom")
+            (= input :quit) (assoc m :done true)
+            :else m))
+        (r--display me))
+      ;; rendered n: 0, 1, 1 (boom dropped — model held at 1), 2.
+      (assert= (drain-saw []) (list 0 1 1 2))))
+
+  (test "a throw on the FIRST render is fatal — re-raised, and :leave still runs"
+    (let (me (self))
+      (assert=
+        (try
+          (ui-run {}
+            (fn (m c r) (throw :startup-boom))  ; first render throws, no last-good yet
+            (fn (m input c r) m)
+            {:enter (fn () nil)
+             :leave (fn () (send me [:left]))  ; teardown must still happen
+             :size (fn () [80 24])
+             :draw (fn (f) nil)
+             :poll (fn (ms) :tick)})
+          (catch e e))
+        :startup-boom)
+      ;; the outer try restored the terminal (ran :leave) before re-raising
+      (is (= [:left] (receive ([:left] [:left]) (after 100 :no))))))
+
+  (test "a recovered error is logged to stderr (via *err*)"
+    (let (me (self))
+      (send me [:input :boom])
+      (send me [:input :quit])
+      (let (logged
+            (with-err (fn-port (fn (s) (send me [:err s])))
+              (ui-run {:n 0}
+                (fn (m c r) [])
+                (fn (m input c r)
+                  (cond
+                    (= input :boom) (throw "kaboom!")
+                    (= input :quit) (assoc m :done true)
+                    :else m))
+                (r--display me))
+              (receive ([:err s] s) (after 0 ""))))
+        (is (string-contains? logged "update error"))
+        (is (string-contains? logged "kaboom!"))))))
