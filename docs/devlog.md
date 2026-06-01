@@ -271,6 +271,7 @@ Every session, oldest first. Full text: [devlog-archive.md](archive/devlog-archi
 - **2026-06-01** — Resilient `ui-run`: let-it-crash at the render loop (recover to the last good frame)
 - **2026-06-01** — Node-link channel encryption (ADR-089): Noise-style X25519 + ChaCha20-Poly1305 session
 - **2026-06-01** — M4 daemon/serving layer (ADR-090): serve a `ui-run` app to thin remote frontends (`nest attach`)
+- **2026-06-01** — RUNTIME-region GC, Stage 1 (ADR-091): solidify the single-process collector — stats, gate test, un-stale docs
 
 ---
 
@@ -636,3 +637,50 @@ the session too, not just the node. The gap it closes: `make-model` is evaluated
 session monitor the client would hang (node still up, no `[:bye]`, no `[:nodedown]`). Now
 `attach--drain` also ends on the session's `[:down …]`. Added a `serve_test.blsp` case for
 it (throwing `make-model` → client sees `[:down]`). 485 tests green.
+
+## 2026-06-01 — RUNTIME-region GC, Stage 1: solidify the single-process collector (ADR-091)
+
+Tackled "the one open GC item" (ADR-072 Stage 5: the shared RUNTIME code region grows
+under hot-reload churn). **Surprise from the investigation:** the single-process
+collector was *already built and wired* — `Heap::runtime_collect` (evacuate-and-rewrite
+globals + this process's roots/LOCAL/live-VM-arms + caches, forwarding table,
+`OnceLock` cycle-break, `verify_rt_slabs`), `maybe_runtime_collect` at the eval
+safepoint (`rt_gc_due`, `BROOD_RT_GC_FLOOR`), the `(runtime-collect)` builtin, and
+`crates/lisp/tests/runtime_collector.rs` (3000 redefs → live <50 → compacted). The
+roadmap's "design not started" was stale doc drift.
+
+So Stage 1 was to *solidify*, not build: close the real gaps + fix the docs, with no
+risky kernel change (the user chose this lower-risk path over jumping straight to the
+multi-process stop-the-world).
+
+**Why the shared region needs more than per-process GC (the conceptual crux, prompted
+by a sharp user question — "since we use processes, why stop the world?"):** LOCAL heaps
+are *private* → each process collects its own, no coordination. The RUNTIME region is the
+deliberate *shared* exception (so a `def` is visible everywhere — hot reload). Reclaiming
+it means **compacting** (move live code, free old), but code is addressed by bare index
+**handles** held across *every* process (LOCAL data, execution stacks, VM arms, globals).
+So liveness is a *union* question and the swap must be atomic w.r.t. all readers — that's
+inherently cross-process. The single-process collector is sound precisely because its
+`Arc::get_mut` gate means *no other readers exist*.
+
+**Done:**
+- **Observability:** `(gc-stats)` now reports the shared region — `:runtime-closures`
+  (total promoted-closure count, O(1) slab length) + `:runtime-threshold` (next
+  auto-compact trigger). Kept the expensive live/reclaimable walk out (it's
+  `(runtime-collect)`'s `{:before :after :reclaimed}`). New `Heap::rt_gc_threshold()`.
+- **Test:** `tests/runtime_collect_test.blsp` — proves the **gate** in the multi-process
+  suite (a parked spawn guarantees a shared `Arc`, so `(runtime-collect)` is a safe no-op:
+  `:ran false`, `:before == :after`, churned code still callable) and the new stats.
+  Green standalone + under `BROOD_GC_STRESS`. (Gotcha fixed: two parallel tests churning
+  the *same* global raced on its value → gave each test its own symbol.)
+- **Docs:** new **ADR-091** (the decision of record — region model, the implemented
+  single-process collector, why the shared region needs cross-process coordination, and
+  the **Stage-2 cooperative rolling-quiesce design**: keep the old region alive, each
+  process self-rewrites at its safepoint, free when all migrate; wrinkles — parked
+  process pins old region, handle epoch tag, possible `ArcSwap` read path). Un-staled the
+  roadmap (🟡: single-process ✅, multi-process ⬜) + handoff; pointed the exploration doc
+  at the ADR; added `BROOD_RT_GC_FLOOR` to CLAUDE.md.
+
+**Deferred (Stage 2, ADR-011):** the multi-process rolling-quiesce collector — the
+largest, most race-prone remaining kernel piece, gated on a real long-lived
+multi-process server (the M4 daemon, ADR-090, is the candidate consumer).

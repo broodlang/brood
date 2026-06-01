@@ -1,0 +1,246 @@
+;; std/editor/markdown.blsp — lexical Markdown highlighting. (require 'editor/markdown).
+;;
+;; Design notes (the *why*; the *what* is in the docstrings below):
+;;  - The Markdown analogue of `editor/highlight.blsp`: pure data → data, no IO and
+;;    no kernel surface. `(markdown-spans src)` takes a source string and returns
+;;    `[start end face]` colour spans (character offsets, end-exclusive) in exactly
+;;    the `highlight-spans` shape, so it drops straight into the editor's `:fontify`
+;;    mode service and the shared `fontify-runs` tiler — the view, the web mirror,
+;;    and any REPL use it the same way (ADR-052, ADR-092).
+;;  - Lexical, not a CommonMark parser: it classifies tokens by *line shape* (ATX
+;;    headings, fenced code, list bullets, blockquotes) and a left-to-right inline
+;;    scan (code spans, bold, italic, links). Cheap, robust on incomplete input, and
+;;    written in Brood (ADR-006). Spans are emitted ascending and non-overlapping —
+;;    the `fontify-runs` contract — by consuming each matched region whole.
+;;  - The faces are `display.blsp`-style maps (`{:fg :green}` …) so they feed straight
+;;    into a `[:print str face]` op, like `highlight.blsp`'s `hl-face-*`.
+
+(defmodule editor/markdown
+  "Lexical Markdown syntax highlighting, as a pure function over a source string —
+the Markdown analogue of `editor/highlight` (ADR-052):
+
+  - `(markdown-spans src)` — `[start end face]` colour spans for `src`'s tokens,
+    in the `highlight-spans` shape (ascending, non-overlapping, end-exclusive).
+
+Classifies *line shapes* (ATX `#` headings, ``` fenced code blocks, `-`/`*`/`+` and
+ordered list bullets, `>` blockquotes) plus an inline scan (`` `code` ``, `**bold**`,
+`*italic*`, `[text](url)`). Lexical, not a CommonMark parser — cheap and robust on
+incomplete input; feeds the editor's `:fontify` mode service and the shared
+`fontify-runs` tiler unchanged. Pure, so independently testable.")
+
+;; ---- faces (display.blsp-style maps) ----------------------------------------
+
+(def md-face-heading {:fg :magenta :bold true})
+(def md-face-bold {:bold true})
+(def md-face-italic {:italic true})
+(def md-face-code {:fg :green})
+(def md-face-link {:fg :cyan :underline true})
+(def md-face-list {:fg :yellow})
+(def md-face-quote {:fg :dark-grey :italic true})
+
+;; ---- character / scanning helpers -------------------------------------------
+
+(defn md--digit? (c)
+  "True if single-char string `c` is an ASCII digit."
+  (includes? "0123456789" c))
+
+(defn md--bullet? (c)
+  "True if `c` is an unordered-list bullet marker (`-`, `*`, or `+`)."
+  (or (= c "-") (= c "*") (= c "+")))
+
+(defn md--lead-ws (line)
+  "The column where `line`'s leading whitespace (spaces / tabs) ends."
+  (md--lead-ws--at line 0 (string-length line)))
+(defn md--lead-ws--at (line i n)
+  (if (and (< i n) (or (= (char-at line i) " ") (= (char-at line i) "\t")))
+    (md--lead-ws--at line (inc i) n)
+    i))
+
+(defn md--count-char (line i n ch)
+  "How many copies of single-char `ch` run consecutively starting at offset `i`."
+  (md--count-char--at line i n ch 0))
+(defn md--count-char--at (line i n ch k)
+  (if (and (< i n) (= (char-at line i) ch))
+    (md--count-char--at line (inc i) n ch (inc k))
+    k))
+
+(defn md--find-char (line i n ch)
+  "The offset of the next single-char `ch` at or after `i` in `line`, or -1."
+  (cond
+    (>= i n) -1
+    (= (char-at line i) ch) i
+    :else (md--find-char line (inc i) n ch)))
+
+(defn md--find-2 (line i n a b)
+  "The offset of the next two-char run `a b` at or after `i` in `line`, or -1."
+  (cond
+    (>= i n) -1
+    (and (= (char-at line i) a) (< (inc i) n) (= (char-at line (inc i)) b)) i
+    :else (md--find-2 line (inc i) n a b)))
+
+(defn md--space-after? (line i n)
+  "True if offset `i` is end-of-line or a space — the separator a list marker needs."
+  (or (>= i n) (= (char-at line i) " ")))
+
+(defn md--line-end (src i n)
+  "Index of the newline ending the line containing `i` (or `n` at end of input)."
+  (if (or (>= i n) (= (char-at src i) "\n")) i (md--line-end src (inc i) n)))
+
+;; ---- line-shape classifiers -------------------------------------------------
+
+(defn md--fence? (line)
+  "True if `line` is a fenced-code delimiter — three or more `` ` `` or `~`, after up
+to its leading whitespace."
+  (let (lead (md--lead-ws line)
+        n (string-length line)
+        c (if (< lead n) (char-at line lead) ""))
+    (and (or (= c "`") (= c "~"))
+      (>= (md--count-char line lead n c) 3))))
+
+(defn md--heading-level (line)
+  "The ATX heading level (1–6) of `line` — its run of leading `#`s, which must be
+followed by a space or end-of-line — or nil if it isn't a heading."
+  (let (n (string-length line)
+        lead (md--lead-ws line)
+        h (md--count-char line lead n "#"))
+    (if (and (>= h 1)
+          (<= h 6)
+          (or (= (+ lead h) n) (= (char-at line (+ lead h)) " ")))
+      h
+      nil)))
+
+(defn md--ordered-end (line i n)
+  "Given digits start at `i`, the offset just past an ordered-list marker
+(`1.`/`1)` followed by a space or EOL), or -1 if `line` has no such marker there."
+  (let (d (md--digits-end line i n))
+    (if (= d i)
+      -1
+      (if (and (< d n)
+            (or (= (char-at line d) ".") (= (char-at line d) ")"))
+            (md--space-after? line (inc d) n))
+        (inc d)
+        -1))))
+(defn md--digits-end (line i n)
+  (if (and (< i n) (md--digit? (char-at line i))) (md--digits-end line (inc i) n) i))
+
+;; ---- block markers (the leading `>` / bullet a line may carry) --------------
+
+(defn md--block (line base lead n)
+  "The leading block marker of `line` (offsets shifted by `base`): a `[spans col]`
+pair — `spans` a one-element list for a `>` blockquote or a list bullet (else `()`),
+and `col` the column where inline content begins (past the marker, or `lead`)."
+  (if (>= lead n)
+    [() lead]
+    (let (c (char-at line lead))
+      (cond
+        (= c ">") [(list [(+ base lead) (+ base (inc lead)) md-face-quote]) (inc lead)]
+        (and (md--bullet? c) (md--space-after? line (inc lead) n)) [(list [(+ base lead) (+ base
+                                                                                           (inc lead))
+                                                                            md-face-list]) (inc lead)]
+        (md--digit? c) (let (oe (md--ordered-end line lead n))
+                         (if (< oe 0)
+                           [() lead]
+                           [(list [(+ base lead) (+ base oe) md-face-list]) oe]))
+        :else [() lead]))))
+
+;; ---- the inline scanner: code / bold / italic / links -----------------------
+
+(defn md--delim2? (line i n)
+  "True if offsets `i` and `i+1` are a matching pair of `*` or `_` — a bold delimiter."
+  (and (< (inc i) n)
+    (let (c (char-at line i))
+      (and (or (= c "*") (= c "_")) (= (char-at line (inc i)) c)))))
+
+(defn md--link-span (line base i n)
+  "A `[start end face]` link span for `[text](url)` starting at `i` (offsets shifted
+by `base`), or nil when the text isn't immediately followed by a closed `(url)`."
+  (let (close (md--find-char line (inc i) n "]"))
+    (if (or (< close 0) (>= (inc close) n) (not (= (char-at line (inc close)) "(")))
+      nil
+      (let (pclose (md--find-char line (+ close 2) n ")"))
+        (if (< pclose 0)
+          nil
+          [(+ base i) (+ base (inc pclose)) md-face-link])))))
+
+(defn md--inline-emph (line base i n acc)
+  "Scan a single-char emphasis (`*`/`_`) at `i`: emit an italic span to its closing
+delimiter (or skip the char if unclosed), then continue the inline scan."
+  (let (a (char-at line i)
+        j (md--find-char line (inc i) n a))
+    (if (< j 0)
+      (md--inline line base (inc i) n acc)
+      (md--inline line
+        base
+        (inc j)
+        n
+        (cons [(+ base i) (+ base (inc j)) md-face-italic] acc)))))
+
+(defn md--inline (line base i n acc)
+  "Tail-recursive inline scanner over `[i, n)` of `line` (offsets shifted by `base`),
+accumulating spans for `` `code` ``, `**bold**`, `*italic*`, and `[text](url)` in
+reverse. Each matched region is consumed whole, so spans stay non-overlapping."
+  (if (>= i n)
+    (reverse acc)
+    (let (c (char-at line i))
+      (cond
+        ;; inline code: `…`
+        (= c "`") (let (j (md--find-char line (inc i) n "`"))
+                    (if (< j 0)
+                      (md--inline line base (inc i) n acc)
+                      (md--inline line
+                        base
+                        (inc j)
+                        n
+                        (cons [(+ base i) (+ base (inc j)) md-face-code] acc))))
+        ;; bold: **…** or __…__ (fall back to italic when unclosed)
+        (md--delim2? line i n) (let (a (char-at line i)
+                                     j (md--find-2 line (+ i 2) n a a))
+                                 (if (< j 0)
+                                   (md--inline-emph line base i n acc)
+                                   (md--inline line
+                                     base
+                                     (+ j 2)
+                                     n
+                                     (cons [(+ base i) (+ base (+ j 2)) md-face-bold] acc))))
+        ;; italic: *…* or _…_
+        (or (= c "*") (= c "_")) (md--inline-emph line base i n acc)
+        ;; link: [text](url)
+        (= c "[") (let (span (md--link-span line base i n))
+                    (if (nil? span)
+                      (md--inline line base (inc i) n acc)
+                      (md--inline line base (- (second span) base) n (cons span acc))))
+        :else (md--inline line base (inc i) n acc)))))
+
+;; ---- a line's spans + the document walker -----------------------------------
+
+(defn md--line-spans (line base fence)
+  "The `[new-fence spans]` for one `line` starting at offset `base`, given whether we
+are currently inside a fenced code block (`fence`). A fence delimiter or any line
+inside a block colours whole as code (and toggles `fence`); a heading colours whole;
+otherwise a leading block marker plus an inline scan of the rest."
+  (let (n (string-length line))
+    (cond
+      fence [(not (md--fence? line)) (list [base (+ base n) md-face-code])]
+      (md--fence? line) [true (list [base (+ base n) md-face-code])]
+      (md--heading-level line) [false (list [base (+ base n) md-face-heading])]
+      :else (let (lead (md--lead-ws line)
+                  [marker mstart] (md--block line base lead n))
+              [false (concat marker (md--inline line base mstart n '()))]))))
+
+(defn md--lex (src i n fence acc)
+  "Tail-recursive line walker: classify each line (`md--line-spans`), threading the
+fenced-code `fence` state forward and accumulating spans in reverse."
+  (if (>= i n)
+    (reverse acc)
+    (let (e (md--line-end src i n)
+          [fence2 spans] (md--line-spans (substring src i e) i fence))
+      (md--lex src (inc e) n fence2 (fold (fn (a s) (cons s a)) acc spans)))))
+
+(defn markdown-spans (src)
+  "Lexically tokenize Markdown `src` into a list of `[start end face]` colour spans
+(character offsets, end-exclusive) — in the `highlight-spans` shape, so it feeds the
+editor's `:fontify` service and the shared `fontify-runs` tiler unchanged. Covers ATX
+headings, fenced code blocks, list bullets and blockquotes (line shapes), and inline
+code / bold / italic / links. Spans are ascending and non-overlapping; text carrying
+no markup carries no span (the default face)."
+  (md--lex src 0 (string-length src) false '()))

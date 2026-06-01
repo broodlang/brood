@@ -1,0 +1,68 @@
+;; tests/markdown_test.blsp — the lexical Markdown highlighter (std/editor/markdown.blsp).
+;;
+;; The module is pure (source string -> [start end face] spans), so it's fully
+;; testable without a terminal — the live rendering is the editor's shared
+;; `fontify-runs` tiler. These cover each line shape (headings, fenced code, list
+;; bullets, blockquotes) and the inline scan (code, bold, italic, links), plus the
+;; ascending / non-overlapping span invariants the tiler relies on.
+
+(defmodule markdown-test (:use test) (:use editor/markdown))
+
+(describe "markdown-spans — line shapes"
+  (test "ATX heading colours the whole line"
+    (assert= (markdown-spans "# Title")
+      (list [0 7 md-face-heading]))
+    (assert= (markdown-spans "### deep")
+      (list [0 8 md-face-heading])))
+  (test "seven #'s is not a heading (levels 1–6 only)"
+    (assert= (markdown-spans "####### no") '()))
+  (test "a fenced code block colours its lines, incl. the fences"
+    ;; "```\ncode\n```" — three lines, each whole-line code
+    (assert= (markdown-spans "```\ncode\n```")
+      (list [0 3 md-face-code] [4 8 md-face-code] [9 12 md-face-code])))
+  (test "text after a closed fence is back to inline rules"
+    (assert= (markdown-spans "```\nx\n```\n# H")
+      (list [0 3 md-face-code] [4 5 md-face-code] [6 9 md-face-code]
+        [10 13 md-face-heading])))
+  (test "an unordered bullet marks just the bullet char"
+    (assert= (markdown-spans "- item")
+      (list [0 1 md-face-list])))
+  (test "an ordered bullet marks the number + delimiter"
+    (assert= (markdown-spans "12. item")
+      (list [0 3 md-face-list])))
+  (test "a blockquote marks the leading >"
+    (assert= (markdown-spans "> quoted")
+      (list [0 1 md-face-quote]))))
+
+(describe "markdown-spans — inline scan"
+  (test "inline code spans the backticks"
+    (assert= (markdown-spans "a `x` b")
+      (list [2 5 md-face-code])))
+  (test "bold and italic"
+    (assert= (markdown-spans "**b**") (list [0 5 md-face-bold]))
+    (assert= (markdown-spans "_i_") (list [0 3 md-face-italic])))
+  (test "a link spans [text](url)"
+    (assert= (markdown-spans "see [t](u) ok")
+      (list [4 10 md-face-link])))
+  (test "an unclosed emphasis delimiter carries no span"
+    (assert= (markdown-spans "a * b") '()))
+  (test "inline markup applies after a list bullet"
+    (assert= (markdown-spans "- `x`")
+      (list [0 1 md-face-list] [2 5 md-face-code]))))
+
+(describe "markdown-spans — invariants"
+  (test "spans are ascending and non-overlapping"
+    (let (spans (markdown-spans "# H\n- `a` **b** [t](u)\n> q"))
+      (is (= spans (sort spans)))
+      (is (md-test--non-overlapping? spans))))
+  (test "empty input yields no spans"
+    (assert= (markdown-spans "") '())))
+
+(defn md-test--non-overlapping? (spans)
+  "True if every span ends at or before the next span starts."
+  (cond
+    (empty? spans) true
+    (empty? (rest spans)) true
+    :else (let ([s1 e1 f1] (first spans)
+                [s2 e2 f2] (second spans))
+            (and (<= e1 s2) (md-test--non-overlapping? (rest spans))))))

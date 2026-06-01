@@ -30,7 +30,7 @@ stderr if none is running, so a log is never silently lost. A *backend* is an
 `io` port + `:min-level` + `:format` — build one with `stdout-backend` /
 `stderr-backend` / `process-backend` / `file-backend` / `fn-backend`."
   (:use proc/hatch)  ; defprocess / hatch / ! / stop
-  (:use io))    ; ports + io-write
+  (:use io))  ; ports + io-write
 
 ;; ---- levels -----------------------------------------------------------------
 (def log--ranks {:debug 0 :info 1 :warn 2 :error 3})
@@ -42,8 +42,13 @@ stderr if none is running, so a log is never silently lost. A *backend* is an
 
 (defn log--default-format (rec)
   "The default line for a record: `[LEVEL ts] msg` plus a newline."
-  (str "[" (or (get log--labels (get rec :level)) "?") " " (get rec :ts) "] "
-    (get rec :msg) "\n"))
+  (str "["
+    (or (get log--labels (get rec :level)) "?")
+    " "
+    (get rec :ts)
+    "] "
+    (get rec :msg)
+    "\n"))
 
 ;; ---- backends ---------------------------------------------------------------
 (defn backend (sink & opts)
@@ -56,9 +61,12 @@ category/source (read off the record's `:meta`) to different sinks (e.g. an edit
 `*LSP*` vs `*Messages*` buffer), the OTP-handler-filter / Elixir-metadata-filter idea."
   (let (o (if (empty? opts) {} (first opts)))
     {:sink sink
-     :min-level (or (get o :min-level) :debug)
-     :filter (get o :filter)  ; nil = accept all
-     :format (or (get o :format) log--default-format)}))
+      :min-level
+      (or (get o :min-level) :debug)
+      :filter
+      (get o :filter)  ; nil = accept all
+      :format
+      (or (get o :format) log--default-format)}))
 
 (defn stdout-backend (& opts)
   "A backend writing to stdout (`opts` as for `backend`)."
@@ -99,12 +107,14 @@ so it walks either — `:backends` defaults to a vector but `add-backend` conses
   (fold (fn (acc b) (log--emit b rec) acc) nil backends)
   nil)
 
-(defprocess log--server (cfg)
+(defprocess log--server
+  (cfg)
   "The logger process: carries `{:level :backends}` and dispatches each
 `[:log rec]` cast to every backend that passes the global and per-backend levels."
   (cast [:log rec]
-    (do (when (>= (log--rank (get rec :level)) (log--rank (get cfg :level)))
-          (log--dispatch (get cfg :backends) rec))
+    (do
+      (when (>= (log--rank (get rec :level)) (log--rank (get cfg :level)))
+        (log--dispatch (get cfg :backends) rec))
       cfg))
   (cast [:add-backend b] (assoc cfg :backends (cons b (apply list (get cfg :backends)))))
   (cast [:set-level level] (assoc cfg :level level))
@@ -154,7 +164,7 @@ so it walks either — `:backends` defaults to a vector but `add-backend` conses
 asynchronously (a cast — never blocks the caller). `meta`, if given, is a map of
 structured fields carried on the record. If no logger is running, the formatted
 line falls back to stderr so a log is never lost. Returns nil."
-  (let (m   (if (empty? meta) {} (first meta))
+  (let (m (if (empty? meta) {} (first meta))
         rec (log--record level msg m)
         pid (logger))
     (if pid

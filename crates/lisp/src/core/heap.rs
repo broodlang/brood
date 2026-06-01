@@ -3936,6 +3936,14 @@ impl Heap {
         self.gc_threshold
     }
 
+    /// The RUNTIME closure count at which the next safepoint attempts a shared-code
+    /// compaction (`max(BROOD_RT_GC_FLOOR, 2 * live)`; `usize::MAX` when auto-collect
+    /// is off). The RUNTIME counterpart of [`gc_threshold`](Self::gc_threshold) —
+    /// surfaced so an observer can see how close the shared region is to compacting.
+    pub fn rt_gc_threshold(&self) -> usize {
+        self.rt_gc_threshold
+    }
+
     /// Whether per-collection GC tracing is on for this process. Backs the
     /// no-arg `(gc-trace)` query.
     pub fn gc_trace(&self) -> bool {

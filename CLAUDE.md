@@ -176,6 +176,7 @@ contention races).
 | `BROOD_TRACE_GCBLOCK=1` | Trace GC-block depth (debug). |
 | `BROOD_MEM_LIMIT=<bytes>` | Arm the ADR-043 soft/hard memory cap for a run. |
 | `BROOD_STACK_BUDGET=<bytes>` | Raise/lower the non-tail-recursion stack guard. |
+| `BROOD_RT_GC_FLOOR=<count>` | Threshold floor (RUNTIME closures) for auto-compacting the shared code region (ADR-091; default 4096). The shared-region counterpart of `BROOD_GC_FLOOR`. |
 | `RUST_BACKTRACE` | `brood`/`nest` **default it to `1`** (set in each `main`); `RUST_BACKTRACE=0` opts out, `full` for verbose. |
 
 **Two layers of use-after-GC detection** (a moving collector relocates LOCAL

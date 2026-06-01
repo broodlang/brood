@@ -55,16 +55,20 @@ resize is deferred — re-attach to resize). `:leave` tells the client to restor
 terminal (`[:bye]`). A `[:detach]` from the client, or a monitor `[:down …]` (the
 client died or the link dropped), returns `:close` — which `ui-run` treats as an
 immediate quit, tearing the session down."
-  {:enter (fn () nil)  ; the *client* owns the real terminal, not us
-   :leave (fn () (send client [:bye]))
-   :size (fn () [cols rows])
-   :draw (fn (f) (send client [:frame f]))
-   :poll (fn (ms)
-           (receive
-             ([:key k] k)
-             ([:detach] :close)
-             ([:down _ _ _] :close)  ; client process died / link net-split
-             (after ms nil)))})      ; nil ⇒ ui-run treats it as :tick (re-render)
+  {:enter (fn () nil)
+    ; the *client* owns the real terminal, not us
+    :leave
+    (fn () (send client [:bye]))
+    :size
+    (fn () [cols rows])
+    :draw
+    (fn (f) (send client [:frame f]))
+    :poll
+    (fn (ms)
+      (receive ([:key k] k)
+        ([:detach] :close)
+        ([:down _ _ _] :close)  ; client process died / link net-split
+        (after ms nil)))})  ; nil ⇒ ui-run treats it as :tick (re-render)
 
 ;; ---- daemon side -------------------------------------------------------------
 
@@ -82,11 +86,14 @@ independent."
   "The session manager loop (registered under `serve-name`): on each `[:attach client
 cols rows]`, spawn an independent session for that client. Tail-recursive, so it
 serves any number of clients over its lifetime."
-  (receive
-    ([:attach client cols rows]
-      (do
-        (spawn (serve--session client cols rows make-model view update))
-        (serve--manager make-model view update)))
+  (receive ([:attach client cols rows] (do
+                                         (spawn (serve--session client
+                                                  cols
+                                                  rows
+                                                  make-model
+                                                  view
+                                                  update))
+                                         (serve--manager make-model view update)))
     (_ (serve--manager make-model view update))))
 
 (defn serve (make-model view update)
@@ -111,8 +118,7 @@ Opt-in, like Erlang's `-name`: a runtime serves nothing unless it calls `serve`.
 the session process died (`[:down …]` from the monitor) — the last covers a session
 that died *without* a clean `[:bye]` (e.g. a throwing `make-model`, which runs before
 `ui-run` can install its `:leave`), so the client never hangs waiting on a dead session."
-  (receive
-    ([:frame f] (do (term-draw f) (attach--drain peer)))
+  (receive ([:frame f] (do (term-draw f) (attach--drain peer)))
     ([:bye] :closed)
     ([:nodedown ~peer] :closed)
     ([:down _ _ _] :closed)
@@ -135,12 +141,7 @@ client loop once the daemon replies with our session pid."
   (let ([cols rows] (term-size))
     (send {:name serve-name :node peer} [:attach (self) cols rows])
     (receive
-      ([:attached session]
-        ;; Watch the session too, not just the node: if it dies without a clean
-        ;; `[:bye]` (a throwing `make-model`, say), `monitor` delivers `[:down …]`
-        ;; (immediately, with `:noproc`, if it's already gone), so the loop ends
-        ;; instead of hanging. `attach--drain` handles that `[:down]`.
-        (do (monitor session) (attach--loop peer session)))
+      ([:attached session] (do (monitor session) (attach--loop peer session)))
       ([:nodedown ~peer] nil)
       (after 5000 (error "attach: no response from the server (is it serving?)")))))
 
@@ -154,7 +155,8 @@ enters raw mode, paints the frames the daemon pushes, and ships back every key u
 the app quits (`[:bye]`) or the link drops. The terminal is always restored on exit."
   (do
     (node-start (attach--gen-name) "127.0.0.1:0" (or cookie (node-cookie)))
-    (let (peer (connect spec))  ; raises a clean error on failure, terminal untouched
+    (let (peer (connect spec))
+      ; raises a clean error on failure, terminal untouched
       (monitor-node peer)
       (term-enter)
       (try

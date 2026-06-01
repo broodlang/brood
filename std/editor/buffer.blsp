@@ -88,7 +88,8 @@ nil."
 (defn read-only? (buf)
   "True if `buf` is marked read-only — its mutators (`insert`, `delete-char`,
 `delete-backward-char`, `delete-region`, `replace-region`) refuse to change it.
-Unset/false on a fresh buffer (`make-buffer` builds freely)." (= (get buf :read-only) true))
+Unset/false on a fresh buffer (`make-buffer` builds freely)."
+  (= (get buf :read-only) true))
 (defn buffer-length (buf) "The number of characters in the buffer." (rope-length (get buf :rope)))
 (defn buffer-line-count (buf)
   "The number of lines in the buffer."
@@ -239,21 +240,30 @@ blankness differs from `want-blank?`; stops at the buffer edge."
   "Point moved to the start of the next blank line after the current paragraph (end of
 buffer if none) — Emacs `forward-paragraph` (M-})."
   (let (rope (get buf :rope)
-        n (rope-line-count rope)
-        line (rope-char->line rope (get buf :point))
-        afterblank (buffer--scan-lines buf line n 1 true)        ; skip leading blank lines
-        boundary (buffer--scan-lines buf afterblank n 1 false))  ; skip the paragraph
+         n
+         (rope-line-count rope)
+         line
+         (rope-char->line rope (get buf :point))
+         afterblank
+         (buffer--scan-lines buf line n 1 true)  ; skip leading blank lines
+         boundary
+         (buffer--scan-lines buf afterblank n 1 false))
+    ; skip the paragraph
     (goto-char buf (if (>= boundary n) (buffer-length buf) (rope-line->char rope boundary)))))
 
 (defn backward-paragraph (buf)
   "Point moved to the start of the current/previous paragraph (start of buffer if none)
 — Emacs `backward-paragraph` (M-{)."
   (let (rope (get buf :rope)
-        n (rope-line-count rope)
-        line (rope-char->line rope (get buf :point))
-        ;; step back over blank lines directly above, then over the paragraph's lines.
-        afterblank (buffer--scan-lines buf (dec line) n -1 true)
-        start (buffer--scan-lines buf afterblank n -1 false))
+         n
+         (rope-line-count rope)
+         line
+         (rope-char->line rope (get buf :point))
+         ;; step back over blank lines directly above, then over the paragraph's lines.
+         afterblank
+         (buffer--scan-lines buf (dec line) n -1 true)
+         start
+         (buffer--scan-lines buf afterblank n -1 false))
     (goto-char buf (rope-line->char rope (max 0 (if (< start 0) 0 (inc start)))))))
 
 ;; ---- mark -------------------------------------------------------------------
@@ -273,8 +283,10 @@ by `*mark-ring-max*`, newest first). The ring records where the mark has been so
 `pop-mark` can revisit prior locations."
   (let (p (get buf :point))
     (assoc buf
-      :mark p
-      :mark-ring (take *mark-ring-max* (cons p (or (get buf :mark-ring) ()))))))
+      :mark
+      p
+      :mark-ring
+      (take *mark-ring-max* (cons p (or (get buf :mark-ring) ()))))))
 
 (defn pop-mark (buf)
   "Move point to the newest entry on the buffer's `:mark-ring`, rotating that entry
@@ -284,8 +296,10 @@ A no-op when the ring is empty."
     (if (empty? ring)
       buf
       (assoc buf
-        :point (buffer--clamp 0 (buffer-length buf) (first ring))
-        :mark-ring (append (rest ring) (list (first ring)))))))
+        :point
+        (buffer--clamp 0 (buffer-length buf) (first ring))
+        :mark-ring
+        (append (rest ring) (list (first ring)))))))
 
 ;; ---- search (pure position queries; the caller moves point) -----------------
 
@@ -378,7 +392,8 @@ edit clears `:redo`, so redo is only available immediately after `undo`.)"
 mutators throw `\"buffer is read-only\"` (Emacs's `buffer-read-only` signal) — point
 and mark still move, so the buffer stays navigable. Build the contents *before*
 flipping this on (construction never checks the flag), the way a generated report
-or `special-mode` buffer does." (assoc buf :read-only (if flag true false)))
+or `special-mode` buffer does."
+  (assoc buf :read-only (if flag true false)))
 
 (defn buffer--barf-if-read-only (buf)
   "Throw if `buf` is read-only — the guard every text mutator runs first, so the
