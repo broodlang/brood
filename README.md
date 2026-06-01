@@ -80,7 +80,7 @@ cargo run -p nest -- doc          # emit Markdown docs for the project
 
 `make install` builds and installs the binaries (`brood`, `nest`, `brood-lsp`)
 into `~/.local/bin`; `make uninstall` removes them. The REPL is itself written in
-Brood (`std/repl.blsp`); `brood` with no arguments runs it:
+Brood (`std/tool/repl.blsp`); `brood` with no arguments runs it:
 
 ```
 brood — REPL (Ctrl-D to exit)
@@ -121,8 +121,8 @@ with reduction-counted preemption, selective `receive` + timeouts, and process
 monitors (see [`examples/processes.blsp`](examples/processes.blsp)). **Distributed
 nodes** are in too — two runtimes connect over TCP and message each other with
 location-transparent `send`, remote monitors, closure-shipping, and an HMAC
-handshake. Supervision is **userland** for now (`std/supervisor.blsp` over
-`spawn`/`monitor`); a kernel-supervisor was tried and reverted.
+handshake. Supervision is **userland** for now (the `brood-supervisor` package
+over `spawn`/`monitor`); a kernel-supervisor was tried and reverted.
 
 The language core is now substantially complete — immutable maps, in-language
 error handling, pattern matching, modules, the string/math/sequence libraries,
@@ -131,8 +131,8 @@ per-process tracing **GC** are all done. What remains of the core: a **package
 manager**, self-hosting the CLI/REPL in Brood, and LSP Tier 2.
 
 The editor milestones are already breaking ground as thin vertical slices: a
-`ropey`-backed **rope kernel** + an immutable **buffer framework** (`std/buffer.blsp`)
-for the editor data model; a serialisable **display protocol** (`std/display.blsp`)
+`ropey`-backed **rope kernel** + an immutable **buffer framework** (`std/editor/buffer.blsp`)
+for the editor data model; a serialisable **display protocol** (`std/editor/display.blsp`)
 with a terminal frontend, demoed end-to-end by `nest observe` (an Erlang-observer-style
 process viewer). Still ahead: the editor app itself, a **server/daemon mode** so
 other editor instances can attach remotely, and eventually a **web frontend**.

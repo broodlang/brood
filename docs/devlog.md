@@ -2,6 +2,41 @@
 
 Chronological record of work sessions. Newest at the bottom.
 
+## How to navigate this file
+
+This log is long (200+ sessions) and you rarely want to read it top to bottom.
+It's a **chronological narrative**, not a reference — for the *current* state of
+something, prefer the topic doc (see [README.md](README.md)) or the relevant
+`## ADR-NNN` in [decisions.md](decisions.md); use the log to recover the *why*
+and *how* of a change.
+
+To find a session, **search rather than scroll**:
+- by **date** — headers are `## YYYY-MM-DD — …`, oldest first, newest at the bottom;
+- by **ADR** — most sessions name the ADR they implement, e.g. search `ADR-076`;
+- by **topic** — grep one of the threads below.
+
+**Major threads** (grep these to follow an arc end to end):
+- **GC / memory** — `GC`, `safepoint`, `use-after-GC`, `generational`, `promote`,
+  `hibernate`, `tracing`, `copying` (ADR-016/035/043/054/055/058/061/072)
+- **Execution engine / VM** — `VM`, `bytecode`, `closure-compiling`, `dispatch`,
+  `lexical addressing` (ADR-047/057/069/076)
+- **Scheduler / processes** — `scheduler`, `spawn`, `receive`, `preemption`,
+  `links`, `trap_exit`, `exit pid` (ADR-018/027/059/063/067)
+- **Distribution / nodes** — `node`, `distributed`, `dual-listen`, `node-connect`,
+  `cookie`, `HMAC` (ADR-034/068/073/074/081)
+- **Supervision** — `supervisor`, `hatch`, `monitor` (ADR-039 reverted/044/067)
+- **Types / checker** — `types`, `checker`, `sig`, `structured`, `arrow`
+  (ADR-023/024/078/082)
+- **Namespaces / modules** — `namespace`, `defmodule`, `require`, `:use`
+  (ADR-019/065/070/085)
+- **Maps / data** — `CHAMP`, `maps`, `blob`, `transients`, `set` (ADR-030/040/041/060)
+- **Packages / release** — `package manager`, `:git deps`, `nest release`,
+  `bundling` (ADR-037/038)
+- **Editor (M2/M3) / GUI** — `rope`, `buffer`, `display`, `observe`, `GUI`,
+  `mouse`, `face`, `pane`, `keymap` (ADR-045/046/052/056/075/077/079/080)
+- **Tooling (LSP/MCP/REPL)** — `LSP`, `MCP`, `REPL`, `format`, `nest`
+  (ADR-025/028/036/048/052)
+
 ---
 
 ## 2026-05-27 — Project bootstrap and v0.1 language core
