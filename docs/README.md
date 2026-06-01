@@ -87,9 +87,9 @@ server, and the web frontend come later (see the roadmap).
 | [../ROADMAP.md](../ROADMAP.md) | The **Stage-1 completeness checklist** (top-level): "is Brood a practical general-purpose Lisp yet?" — a finer-grained tick-list that feeds the milestones in roadmap.md. |
 | [../todo.md](../todo.md) | A **scratch list** (top-level) of work not yet committed to. Items graduate to roadmap.md or an ADR once decided — treat as ephemeral, not authoritative. |
 | [deferred.md](deferred.md) | The **holding pen**: worthwhile work intentionally *not* done yet, each with a design sketch and the trigger that should pull it back in. |
-| [decisions.md](decisions.md) | The **ADR log** (Architecture Decision Records) — the *why* behind each choice, so we don't relitigate settled questions. Has an ADR index at the top. |
+| [decisions.md](decisions.md) | The **ADR log** (Architecture Decision Records) — the *why* behind each in-force choice, so we don't relitigate settled questions. Has an ADR index at the top; superseded/reverted ADRs are archived (see below). |
 | [devlog.md](devlog.md) | A chronological log of work sessions — what changed and why, in order. Holds the complete session **digest** + the latest day in full; navigation/threads header at the top. |
-| [devlog-archive.md](devlog-archive.md) | The **full verbatim text** of older devlog sessions, rolled out of devlog.md to keep it loadable. Search a `## YYYY-MM-DD — …` header to read one in full. |
+| [archive/devlog-archive.md](archive/devlog-archive.md) | The **full verbatim text** of older devlog sessions, rolled out of devlog.md to keep it loadable. Search a `## YYYY-MM-DD — …` header to read one in full. |
 | [incarnations.md](incarnations.md) | The self-improving "incarnations" notes — lessons an agent carries forward between sessions. |
 
 ## For LLMs / agents writing Brood
@@ -127,6 +127,7 @@ not for *how things are now*.
 
 | Path | What's in it |
 |---|---|
+| [archive/](archive/) | **Archived docs** kept out of the active tree: superseded/reverted ADRs ([decisions-superseded.md](archive/decisions-superseded.md)) and the verbatim older devlog ([devlog-archive.md](archive/devlog-archive.md)). Not current reference. |
 | [benchmarks/](benchmarks/) | Archived `divan` benchmark runs, one file per run with full environment metadata (written by `scripts/bench.sh`). |
 | [prompts/](prompts/) | Externalized prompts (e.g. the `nest mcp` task prompt). |
 | [research/](research/) | Background research notes — chiefly the Elixir set-theoretic-types papers that informed the type system. |

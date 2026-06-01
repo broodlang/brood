@@ -83,7 +83,7 @@ non-5-char names reject in one compare; not worth a struct field). The real
 target is Step 2.
 
 ### Step 2 (original) — Lexical addressing — ❌ REJECTED AS SCOPED (2026-05-29)
-Designed in full ([ADR-057](decisions.md#adr-057--lexical-addressing-o1-variable-lookup-eval-dispatch-step-2),
+Designed in full ([ADR-057](archive/decisions-superseded.md#adr-057--lexical-addressing-o1-variable-lookup-eval-dispatch-step-2),
 status *rejected as scoped*), then **not implemented**. A "what's the benefit?"
 review measured the thing it targets and found it's **~6% of the eval loop**, not
 the bottleneck — so ~1–1.5 weeks of high-churn work (plus the campaign's only real

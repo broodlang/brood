@@ -1,9 +1,9 @@
 # Dev log — archive
 
-Older work-session entries, rolled over from [devlog.md](devlog.md) to keep the
+Older work-session entries, rolled over from [devlog.md](../devlog.md) to keep the
 active log loadable. **Verbatim, append-only history**, oldest first. To find a
 session, search its `## YYYY-MM-DD — …` header — the digest in
-[devlog.md](devlog.md) lists every session by date, and devlog.md's header has the
+[devlog.md](../devlog.md) lists every session by date, and devlog.md's header has the
 topic-thread index for grepping an arc end to end.
 
 ---
@@ -15,7 +15,7 @@ language a modern, Emacs-like, remotely-hostable, self-editing editor is written
 in. First concrete target from the user: *"a light first version where
 `(+ 1 2)` works."*
 
-**Decisions taken** (full rationale in [decisions.md](decisions.md)):
+**Decisions taken** (full rationale in [decisions.md](../decisions.md)):
 - Host language: **Rust** (ADR-001), reaffirmed against C/Zig given the
   "heavily vibe-coded" constraint — memory safety is the key guardrail.
 - Memory: `Rc`/`RefCell` now, tracing GC later (ADR-002).
@@ -57,7 +57,7 @@ Root cause was a mismatch between an initial Scheme-style clause-list `cond` and
 the intended flat Clojure-style pairs. Switched the implementation to flat
 `test expr` pairs with `else`/`:else` fallback (ADR-004); all green after.
 
-**Status.** v0.1 = the ✅ slice of M1 in [roadmap.md](roadmap.md). Next up to
+**Status.** v0.1 = the ✅ slice of M1 in [roadmap.md](../roadmap.md). Next up to
 finish M1: macros + quasiquote, dynamic variables, in-language error handling,
 maps, and the GC migration.
 
@@ -513,7 +513,7 @@ into `*_test.lisp` files.
 ## 2026-05-27 — Pattern matching + a macroexpand-all compile pass
 
 **Goal.** Implement the pattern matching designed in
-[pattern-matching.md](pattern-matching.md): Erlang/Elixir-style matching with one
+[pattern-matching.md](../pattern-matching.md): Erlang/Elixir-style matching with one
 pattern grammar reused at every binding site. Subsumes the Tier-2 "destructuring
 in `let`/`fn`" and "`case`" items.
 
@@ -941,13 +941,13 @@ features (hover, goto, completion, rename) all hinge on one missing thing:
 **per-occurrence source spans**, which the eval `Value` can't carry (symbols are
 `Copy`/interned/deduplicated; `form-pos` positions only list-form starts).
 
-**Decision (design).** [ADR-025](decisions.md#adr-025--a-lossless-span-carrying-cst-for-tooling-separate-from-the-eval-value):
+**Decision (design).** [ADR-025](../decisions.md#adr-025--a-lossless-span-carrying-cst-for-tooling-separate-from-the-eval-value):
 a lossless, heap-free, error-tolerant **CST** in `syntax::cst`, separate from the
 reader's `Value`, with a `Span` on every node; a `crates/lsp` (`brood-lsp`)
 binary on `lsp-server`/`lsp-types` (sync — the `Interp` isn't `Sync`); the server
 never evaluates user buffers — syntactic diagnostics from CST `Error` nodes,
 semantic ones from the advisory checker (ADR-024). Full plan, the `parse_cst`
-sketch, and the feature tiers in [`lsp.md`](lsp.md). Next: pick where to start
+sketch, and the feature tiers in [`lsp.md`](../lsp.md). Next: pick where to start
 (Tier-0 scaffold vs. feature planning).
 
 ### Immutability: dropped `set!` and `while` (ADR-026) (2026-05-27)
@@ -1184,7 +1184,7 @@ full `cargo test`; scoped to `-p brood`.
 ## 2026-05-27 — `brood-lsp`: the language server, Tier 0
 
 **Goal.** Land the LSP server the foundations (CST, scope resolver, docstrings)
-were built for — see [lsp.md](lsp.md). Scope this session to **Tier 0**: a real
+were built for — see [lsp.md](../lsp.md). Scope this session to **Tier 0**: a real
 server an editor can connect to, publishing *syntactic* diagnostics.
 
 **Shipped.** New `crates/lsp` → **`brood-lsp`** binary (workspace member #4),
@@ -1702,7 +1702,7 @@ order, falsy values through keys/vals, `reduce-kv` folds incl. empty-map seed);
 
 ## 2026-05-27 — Design: cross-file xref via the image, not a static index (ADR-031)
 
-**Decision (no code yet).** Recorded [ADR-031](decisions.md#adr-031--cross-file-xref-is-an-image-query-not-a-static-index-record-def-sites-at-load-time). The question
+**Decision (no code yet).** Recorded [ADR-031](../decisions.md#adr-031--cross-file-xref-is-an-image-query-not-a-static-index-record-def-sites-at-load-time). The question
 was how `brood-lsp` should resolve names across `require`d modules. Rejected the
 rust-analyzer-style static workspace-indexer as the *primary* path: Brood is an
 image-based, hot-reloadable Lisp (ADR-013) whose endgame is an editor that *is* a
@@ -1768,7 +1768,7 @@ special form**:
   `binding` leaves the rest computing correctly**. Rust smoke tests in
   `crates/lisp/tests/basic.rs`.
 - Docs: new "Dynamic variables" section in `docs/language.md`; both roadmaps
-  ticked; [ADR-032](decisions.md).
+  ticked; [ADR-032](../decisions.md).
 
 **Concurrent-edit note.** The tree moved under this work (the symbol interner was
 rewritten to a lock-free `boxcar` `NAMES` + `Mutex` `IDS`, and a `def_sites` table
@@ -1815,7 +1815,7 @@ docstring edits were additive and behaviour is unchanged (verified by the suite)
 
 **Goal (from the user).** *"We must be able to do `(spawn (* (+ 1 1)))` and send
 this to another node."* Two coupled language changes (full rationale in
-[decisions.md](decisions.md) ADR-033).
+[decisions.md](../decisions.md) ADR-033).
 
 **`spawn` now takes one expression.** Renamed the Rust builtin `spawn` →
 `%spawn` (arity 1, runs a 0-arg thunk) and added a prelude macro
@@ -1888,7 +1888,7 @@ concurrent closure-sending edits; the suite shares `Message` with that work.)
 **Scope / deferred.** One node per OS process (node state + interner are
 process-global). Deferred: remote `spawn`/code shipping, distributed
 monitors/links, node-down detection, reconnect/net-split, real auth/TLS (the
-cookie is a placeholder). Full reference: [distribution.md](distribution.md).
+cookie is a placeholder). Full reference: [distribution.md](../distribution.md).
 
 ---
 
@@ -1960,7 +1960,7 @@ tests, and doc test stay green.
 
 **Still deferred.** Handshake v2 (protocol version + constant-time
 challenge–response in place of the plaintext cookie compare). Documented in
-[distribution.md](distribution.md) §3.
+[distribution.md](../distribution.md) §3.
 
 ---
 
@@ -3082,7 +3082,7 @@ every time. A "consistent but misreadable" form is still a wart; not waved
 away.
 
 **Decision.** Two style rules, documented in
-[brood-for-claude.md](brood-for-claude.md) §"Style — lists for code, vectors
+[brood-for-claude.md](../brood-for-claude.md) §"Style — lists for code, vectors
 for data" (ships with the language via `%builtin-doc` and `nest new`):
 
 1. Code uses `( )`; vectors `[ ]` are for tuple values, sequence literals,
@@ -3134,7 +3134,7 @@ green suite next time the workspace builds.
 agent-side counterpart to the LSP) and do the safe prep work so the
 implementation pass that follows is mechanical.
 
-**Decisions taken.** [ADR-036](decisions.md#adr-036--nest-mcp-a-per-project-model-context-protocol-server-tools-surface-in-brood)
+**Decisions taken.** [ADR-036](../decisions.md#adr-036--nest-mcp-a-per-project-model-context-protocol-server-tools-surface-in-brood)
 records the shape: a `nest mcp` subcommand (ADR-028 — `nest` is the project
 tool), strictly per-project (errors outside a `project.blsp`), one long-lived
 `Interp` per session (hot reload, ADR-013, is the headline behaviour), the
@@ -3144,7 +3144,7 @@ tools: `eval`, `load`, `lookup`, `macroexpand`, `run-tests`, `check`, `format`,
 stdio with no async runtime (same calculus as ADR-025 choosing `lsp-server`
 over `tower-lsp` — `Heap` is `!Sync`), and `nest new` scaffolds `.mcp.json` so
 a fresh project is ready for agent-assisted dev from the first commit.
-[`docs/mcp.md`](mcp.md) holds the full plan, mirroring `docs/lsp.md`.
+[`docs/mcp.md`](../mcp.md) holds the full plan, mirroring `docs/lsp.md`.
 
 **Prep landed.** The load-bearing structural change — extracting the shared
 introspection surface so LSP and the future MCP dispatcher can't drift on
@@ -4106,7 +4106,7 @@ remaining roadmap so the next session has a clear picture of what's open.
 **Landed.**
 
 - **`docs/incarnations.md`** (new) — the self-improving findings index
-  ([`llm-native.md`](llm-native.md) §3). One paragraph per session: goal,
+  ([`llm-native.md`](../llm-native.md) §3). One paragraph per session: goal,
   blockers, surprises, "what I'd tell next-me", + a link to the full
   writeup. Format guide at the top so the next agent (or human) appends in
   the right shape without re-inventing it. First entry is the May 28
@@ -5300,7 +5300,7 @@ references/rename (LSP) and `callers` (MCP) end-to-end against a fresh project.
 
 ## 2026-05-28 (cont.) — Demo-friendliness: stdlib + docs gaps from `claude-demo-findings.md`
 
-Closing the tractable, non-race tail of [`claude-demo-findings.md`](claude-demo-findings.md).
+Closing the tractable, non-race tail of [`claude-demo-findings.md`](../claude-demo-findings.md).
 First a status reconciliation against HEAD: three of that doc's four "blockers"
 were **already fixed** (commit `5b19787` + the structured-error work) — the
 type-checker no longer warns on `(require 'hatch)` macros, `nest format` keeps
@@ -5327,12 +5327,12 @@ Rust-boundary cases the language can't bootstrap:
 - `now-ns` — wall-clock nanoseconds since the epoch, the fine-grained partner to
   `now` for sub-millisecond timing.
 
-**Docs.** Expanded [`brood-for-claude.md`](brood-for-claude.md): filled the
+**Docs.** Expanded [`brood-for-claude.md`](../brood-for-claude.md): filled the
 missing builtins (`apply`/`now`/`gensym`/`quot`/`mod`/`rem`/`char-at`/`for`/
 `doseq`/`dotimes`/`dolist`/`enumerate` + the new helpers) and added a **`hatch`
 framework** section (`defprocess`/`cast`/`call`/`!`/`gen-call`/`sleep`) with a
 verified counter-server and worker-pool example — the idiomatic concurrency
-story that was entirely absent. Kept [`language.md`](language.md) in sync
+story that was entirely absent. Kept [`language.md`](../language.md) in sync
 (Strings / Arithmetic / Time & memory sections).
 
 **Tests.** New `deftest`s in `tests/strings_test.blsp` (padding/repetition,
@@ -5709,10 +5709,10 @@ basic`: 72/72. `cargo test -p brood --test gc`: 2/3 — the failing
 GC root-coverage bug* via the poison tripwire, not a regression from this
 commit. That test became Phase 1's witness (it passes after Phase 1).
 
-**Docs.** ADR-039 marked reverted in [`decisions.md`](decisions.md);
-[`supervision.md`](supervision.md) replaced with a short revert note plus
-the userland respawn pattern; [`README.md`](README.md), [`roadmap.md`](roadmap.md),
-and [`known-issues.md`](known-issues.md) updated; this entry.
+**Docs.** ADR-039 marked reverted in [`decisions.md`](../decisions.md);
+[`supervision.md`](../supervision.md) replaced with a short revert note plus
+the userland respawn pattern; [`README.md`](../README.md), [`roadmap.md`](../roadmap.md),
+and [`known-issues.md`](../known-issues.md) updated; this entry.
 
 ---
 
@@ -5764,7 +5764,7 @@ substantial rewrite alongside the map_champ integration; map_champ +
 map_entries threaded through eval / macros / message etc.; error.rs /
 printer.rs / reader.rs adjustments; tests + docs.
 
-**Docs.** [`known-issues.md`](known-issues.md) KI-1 marked largely fixed
+**Docs.** [`known-issues.md`](../known-issues.md) KI-1 marked largely fixed
 with the plain-release caveat preserved; this entry.
 
 ---
@@ -5820,7 +5820,7 @@ plain-release segfault that survived the bump allocator, and (b) bisect the
 from inside `%receive` invalidates the caller's `env` register — then
 resumed later in the day with a safer design (next entry).
 
-**Docs.** This entry; [`known-issues.md`](known-issues.md) KI-1 marked
+**Docs.** This entry; [`known-issues.md`](../known-issues.md) KI-1 marked
 fully fixed; the plain-release and suite-test segfaults moved to
 "resolved" entries in the minor list.
 
@@ -5888,7 +5888,7 @@ eval frame, not just the current one. The `(loop next-state)` ⇒
 `(hibernate loop next-state)` rewrite is always safe; non-tail uses are
 the user's responsibility.
 
-**Docs.** This entry; [`memory-model.md`](memory-model.md) needs the
+**Docs.** This entry; [`memory-model.md`](../memory-model.md) needs the
 hibernate contract written up (follow-up).
 
 ---
@@ -5961,7 +5961,7 @@ no in-language regressions. New tests in `tests/sequence_test.blsp`,
 `tests/strings_test.blsp`, `tests/hatch_test.blsp`, and Rust unit tests
 in `crates/lisp/src/syntax/scanner.rs` pin the new behaviour.
 
-**Deferred.** Five items captured in detail in [`deferred.md`](deferred.md) —
+**Deferred.** Five items captured in detail in [`deferred.md`](../deferred.md) —
 rationale, design sketch, trigger, and the workaround available today:
 1. First-class set type + `#{…}` literal.
 2. Real laziness + `iterate`.
@@ -6039,8 +6039,8 @@ test crate hit its 60s timeout once under full-parallel workspace load
 `--test-threads=2`; pre-existing slow tests, not a regression from this
 change.
 
-**Docs.** [`deferred.md`](deferred.md) #3 promoted to "shipped" with
-as-built design notes; [`roadmap.md`](roadmap.md)'s deferred-ergonomic
+**Docs.** [`deferred.md`](../deferred.md) #3 promoted to "shipped" with
+as-built design notes; [`roadmap.md`](../roadmap.md)'s deferred-ergonomic
 entry flipped from ⬜ to ✅.
 
 ## 2026-05-29 (late) — Shared blob heap (ADR-041): zero-copy send of large strings
@@ -6157,14 +6157,14 @@ a follow-up because the lifecycle story differs (RUNTIME is append-only
 shared; the blob heap is refcounted shared). Flagged in `ADR-041`'s
 Out-of-Scope.
 
-**ADR.** [`decisions.md`](decisions.md) **ADR-041**.
+**ADR.** [`decisions.md`](../decisions.md) **ADR-041**.
 
 
 ## 2026-05-29 (later still) — Runaway-resource backstops (ADR-043) + live-editing hardening (ADR-042)
 
 **Goal.** Two threads of work that had piled up uncommitted in the tree, now
 documented and finished: stop a runaway program from taking the host down, and
-land the cheap, high-value subset of the [`live-editing.md`](live-editing.md)
+land the cheap, high-value subset of the [`live-editing.md`](../live-editing.md)
 hot-reload plan.
 
 **ADR-043 — backstops.** Adversarial / hostile code (the in-language
@@ -6196,7 +6196,7 @@ run it with `cargo test --test mem_limit -- --ignored`. `basic.rs` (its own test
 binary, previously uncapped) now arms the same ceiling via a `LazyLock` guard.
 
 **ADR-042 — live-editing hardening.** Landed Stages 1, 2, 5-dedup, and 7 of the
-[`live-editing.md`](live-editing.md) plan: **`defonce`** (prelude macro — state
+[`live-editing.md`](../live-editing.md) plan: **`defonce`** (prelude macro — state
 and singletons survive reload, Emacs `defvar`), tighter **`reload-defs`**
 definition detection (a `def`-prefixed *call* like `(default-config)` is now
 correctly skipped — it's a `Fn`, not a macro) plus read-whole-file-first
@@ -6212,7 +6212,7 @@ process-singleton case, not the global-state-cell case. `defonce` is the chosen
 tool, restored to the prelude. The roadmap already foreshadowed this ("the
 `defonce` transitional shim stays in the prelude").
 
-**ADRs.** [`decisions.md`](decisions.md) **ADR-042**, **ADR-043**.
+**ADRs.** [`decisions.md`](../decisions.md) **ADR-042**, **ADR-043**.
 
 
 ## 2026-05-29 (re-confirmation) — KI-1 scheduler race verified fixed; docs reconciled
@@ -6251,7 +6251,7 @@ impossible, and a naive work-stealing reintroduction would undo the pinning.
 ## 2026-05-29 (concurrency-v2 track) — userland supervisor library (ADR-044)
 
 **Goal.** First concrete deliverable of the concurrency-v2 track
-([`concurrency-v2.md`](concurrency-v2.md), §4.3 "userland-first"): supervisor
+([`concurrency-v2.md`](../concurrency-v2.md), §4.3 "userland-first"): supervisor
 trees as a require-able Brood library, with **zero** new scheduler surface — the
 property that matters after KI-1, since kernel supervision was the bulk of that
 race.
@@ -6278,7 +6278,7 @@ primitive** (no links, no `exit`), so they're impossible in userland today —
 the supervisor but leaves children running (orphaned), and an intensity shutdown
 orphans survivors. This is now the concrete trigger for the one kernel hook
 supervision might later justify (a minimal `exit`/link) — see
-[`concurrency-v2.md`](concurrency-v2.md) §4.
+[`concurrency-v2.md`](../concurrency-v2.md) §4.
 
 **Rust delta.** One line: `("supervisor", include_str!("…/std/supervisor.blsp"))`
 in `EMBEDDED_MODULES`. Nothing else.
@@ -6290,7 +6290,7 @@ abnormally (observed via a monitor on the supervisor); `which-children`
 summaries; unsupported-strategy rejection. 7/7 green. Sibling embedded module
 (`hatch`) 9/9 and the core suite 57/57 confirm the embed-list change is clean.
 
-**Docs.** ADR-044; [`supervision.md`](supervision.md) gained a "supervisor
+**Docs.** ADR-044; [`supervision.md`](../supervision.md) gained a "supervisor
 library" section; roadmap entry + concurrency-v2 §4.3 flipped to ✅ for the
 one-for-one slice.
 
@@ -6393,7 +6393,7 @@ buffer processes independent). 28/28 green incl. `BROOD_GC_STRESS=1`.
 
 ## 2026-05-29 (concurrency-v2 track) — spawn-time load balancing; work-stealing ruled out
 
-**Goal.** Resolve the Track-A question from [`concurrency-v2.md`](concurrency-v2.md)
+**Goal.** Resolve the Track-A question from [`concurrency-v2.md`](../concurrency-v2.md)
 §3 — is work-stealing viable on today's substrate, and what's the safe
 throughput win — by experiment, in an isolated worktree, without touching the
 just-stabilized scheduler in main until the answer was in.
@@ -6439,7 +6439,7 @@ worker (only queued ones), so it improves burst distribution, not uneven
 long-task occupancy. A per-worker busy flag is the future refinement if that
 matters.
 
-**Docs.** [`concurrency-v2.md`](concurrency-v2.md) §3.1a (experiment results) +
+**Docs.** [`concurrency-v2.md`](../concurrency-v2.md) §3.1a (experiment results) +
 §3.2 (revised directions: balance ✅ landed, fresh-only stealing 🟡 optional,
 live-coroutine stealing ❌ substrate-blocked). Experiment preserved on branch
 `track-a-workstealing`, unmerged.
@@ -7487,7 +7487,7 @@ nor allocation (~140 ns/cons), nor GC (never fires below the 64K `gc_floor`; the
 10k sort's peak live is ~40k). It's **evaluator dispatch** — a bare tail loop
 with no allocation costs ~400 ns/iter, dominated by env-chain lookups. Full
 diagnosis and the staged plan are in
-[handoff-eval-dispatch.md](handoff-eval-dispatch.md). User's call: keep the Rust
+[handoff-eval-dispatch.md](../handoff-eval-dispatch.md). User's call: keep the Rust
 sort fast-path, stop the sort-specific work, and attack dispatch generally.
 
 **Step 0 — lock the baseline.** Added three eval benches
@@ -7577,7 +7577,7 @@ check.
 
 ## 2026-05-29 — Eval-dispatch Step 2 designed, measured, and rejected as scoped
 
-**What.** Designed lexical addressing ([ADR-057](decisions.md#adr-057--lexical-addressing-o1-variable-lookup-eval-dispatch-step-2)):
+**What.** Designed lexical addressing ([ADR-057](decisions-superseded.md#adr-057--lexical-addressing-o1-variable-lookup-eval-dispatch-step-2)):
 resolve every variable reference once at compile time to a `LocalRef{up,idx}` /
 `GlobalRef{slot,sym}` (carved out of the public type universe), globals backed by
 **seqlock** cells (a bare `Value` slot would be a torn-read data race — `Value` is
@@ -7596,7 +7596,7 @@ benefit?" review sent me to *measure* the premise instead of assuming it.
 **Decision.** Step 2 (lexical addressing) **rejected as scoped** — ~1–1.5 weeks of
 high-churn work, including the campaign's only real data-race surface (the seqlock),
 for under 10%. ADR-057 kept on record (correct; lexical addressing returns for free
-if we ever do precompiled bodies). **Re-pointed the campaign** ([handoff](handoff-eval-dispatch.md)):
+if we ever do precompiled bodies). **Re-pointed the campaign** ([handoff](../handoff-eval-dispatch.md)):
 new Step 2 = the **call path + per-combination overhead** (`new_env` pooling, fold
 the three TLS guards into one), Step 3 = pre-tagged/precompiled closure bodies (the
 multiplier; lexical addressing falls out of it).
@@ -8172,7 +8172,7 @@ regions.
 twin) lack a forwarding table, so promoting/sending a closure that captures
 another closure recurses forever → uncatchable stack-overflow abort. This is the
 *sole* remaining memory-safety issue and is fully documented in
-[`findings-closure-promotion-overflow.md`](findings-closure-promotion-overflow.md)
+[`findings-closure-promotion-overflow.md`](../findings-closure-promotion-overflow.md)
 (decided fix: two-pass back-patching `promote`, GC-author track; `std/http.blsp`
 workarounds in place). No new bugs found.
 
@@ -8184,7 +8184,7 @@ workarounds in place). No new bugs found.
 Worked it as a design conversation; recorded the outcome rather than implementing
 (two deep questions still open — see below).
 
-**Decisions taken** (full design in [`namespaces.md`](namespaces.md); ADR-065,
+**Decisions taken** (full design in [`namespaces.md`](../namespaces.md); ADR-065,
 *proposed*).
 - The pressure is **four-fold and now**: ADR-037 packages clobbering the one flat
   global table (the forcing function — package manager is unsafe without this),
@@ -8226,7 +8226,7 @@ greenlit.
 
 ## 2026-05-30 — GC: region-check before rooting (collect-at-any-depth perf recovery)
 
-**Goal.** Remaining-item #1 from [`handoff-gc.md`](handoff-gc.md): ADR-061
+**Goal.** Remaining-item #1 from [`handoff-gc.md`](../handoff-gc.md): ADR-061
 (collect at any eval depth) made every call root its in-flight transients on the
 operand stack, costing a ~1.5–2.0× eval-bound regression (`Vec` push / re-read /
 truncate per call). Recover it without giving up collect-at-any-depth.
@@ -8271,7 +8271,7 @@ while collecting at depth). Medians, `bench` profile, this host:
 | `sequence/sort/10000` | 45.43 ms | 77.88 ms | 70.30 ms | 1.71× → 1.55× |
 | `compile/macroexpand` | 1.145 ms | 1.66 ms | 1.495 ms | 1.45× → 1.31× |
 
-Archive: [`benchmarks/2026-05-30T00-54-34Z.md`](benchmarks/2026-05-30T00-54-34Z.md)
+Archive: [`benchmarks/2026-05-30T00-54-34Z.md`](../benchmarks/2026-05-30T00-54-34Z.md)
 (vs `2026-05-30T00-26-06Z.md`).
 
 **Verified.** Full `cargo test` green under
@@ -8805,7 +8805,7 @@ incremental drip. Land it green: full Rust suite + the in-language suite (962/96
 `cargo clippy --all-targets --all-features` clean (gui feature included).
 
 **Net.** Namespaces are done through inc-3 + α. Left open (additive): LSP Tier 2 and
-ns-name collision policy. See [`namespaces.md`](namespaces.md), ADR-065/066.
+ns-name collision policy. See [`namespaces.md`](../namespaces.md), ADR-065/066.
 
 ## 2026-05-30 — Merge: links/trap_exit + DynamicSupervisor onto the namespaces+generational-GC trunk
 
@@ -9052,7 +9052,7 @@ were already pre-scanned). Fixed the 7 `hatch` suite failures.
 
 ## 2026-05-30 — Package manager Slices 2 & 3: `:git` deps + the `nest` verbs
 
-**Goal.** Finish the package manager (ADR-037, [`packages.md`](packages.md)).
+**Goal.** Finish the package manager (ADR-037, [`packages.md`](../packages.md)).
 Slice 1 had `:path` deps end-to-end (tree-hash, transitive resolution, lock I/O,
 `ensure-deps` on `*load-path*`). Remaining: `:git` deps (Slice 2) and the
 `nest fetch`/`update`/`add`/`remove`/`tree` verbs + auto-fetch (Slice 3).
@@ -9750,7 +9750,7 @@ debug-assertions=on"`) can't silently ship a tripwire/verifier-armed perf binary
 is set (`gc_count_env`/stress/trace) so a benchmark can't silently measure a
 stressed or retuned heap.
 
-**The big lever — planned (ADR-076, [`bytecode-vm.md`](bytecode-vm.md)).** Decided
+**The big lever — planned (ADR-076, [`bytecode-vm.md`](../bytecode-vm.md)).** Decided
 the execution engine becomes a **closure-compiling VM over a lexically-addressed
 IR**, not flat bytecode. The deciding factor is GC rooting: frame slots are
 allocated as regions of the **existing** `Heap::roots` operand stack, so
@@ -9768,7 +9768,7 @@ risk register in the doc.
 ## 2026-05-30 — Errors that teach (LLM-native, first two)
 
 **Context.** A field report from an LLM building an app from scratch (and the
-companion [llm-native.md](llm-native.md)) made the case that an LLM with no
+companion [llm-native.md](../llm-native.md)) made the case that an LLM with no
 training data on Brood learns from two surfaces: the skill it loads, and the
 errors it hits. The errors are the higher-leverage surface — they teach at the
 exact moment of the mistake, no reading required. Two of the most common
@@ -10252,7 +10252,7 @@ cutover (still wants the soak + differential-test mode first).
 ## 2026-05-31 — Per-op font scale on the GUI `Face` (per-buffer fonts)
 
 **Goal.** Close the GUI display seam's biggest font gap (GG-1 in
-[known-issues.md](known-issues.md)): the frontend had one font size for everything,
+[known-issues.md](../known-issues.md)): the frontend had one font size for everything,
 so a larger status strip / heading / per-buffer font needed a hand-rolled "block
 font" (what foobar's `life.blsp` does). User ask: per-buffer font.
 
@@ -10945,7 +10945,7 @@ touches the symbols added here. Verified against a clean HEAD worktree.
 **Goal.** Cut the cost of building a map by repeated `assoc`
 (`into {}` / `zipmap` / `{}` literals / `hash-map`), which path-copies
 O(log₁₆ N) CHAMP nodes per insert. Grew out of a `brood-life` performance
-report (full design + rejected alternatives in [transients.md](transients.md)).
+report (full design + rejected alternatives in [transients.md](../transients.md)).
 
 **Decision.** Take the transient *technique*, not a transient *API*. The two
 suggested fixes were rejected: a native `%life-step` (violates ADR-006), and
@@ -11219,7 +11219,7 @@ from a clean dir (`>> bundled with a dep <<`); plain `brood` reports
 + argv) and the `bundle.rs` unit tests pass.
 
 **Docs.** ADR-038 flipped to *implemented* with an as-built note; roadmap
-"ship a binary" closed; new [`release.md`](release.md) as-built reference.
+"ship a binary" closed; new [`release.md`](../release.md) as-built reference.
 
 **Pre-existing break noted (not this work).** `cargo build --release` *without*
 `debug-assertions` fails in `eval/compile.rs:410` — `value_is_immovable` is
@@ -11271,7 +11271,7 @@ codegen unit). Effects:
 `slurp`/`require`/`eval-string` hit the real FS and `def` rebinds globals, so a
 shipped app reads an external `init.blsp` that `(require 'layers)`s, adds
 layers/keymaps, and redefines commands against the live runtime — verified
-end-to-end with a lean release. Documented in [`release.md`](release.md).
+end-to-end with a lean release. Documented in [`release.md`](../release.md).
 
 ---
 
@@ -11345,7 +11345,7 @@ $(GUI_FEATURES) -p cli`) then bakes it into the `nest` install.
 no build, no subprocess. Installed `nest` grew ~14 MB → ~24 MB (the embedded
 runtime). A non-gui `cargo build` of `nest` still compiles (empty embed →
 build-from-source fallback). `make install` + the `release_bundle` integration
-test green; ADR-038 + [`release.md`](release.md) updated.
+test green; ADR-038 + [`release.md`](../release.md) updated.
 
 **Next (deferred):** an opt-in terminal-only (no-gui) variant so non-gui apps
 skip the ~4 MB windowing backend.

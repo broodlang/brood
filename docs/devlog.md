@@ -7,14 +7,14 @@ Chronological record of work sessions. Newest at the bottom.
 The session history is split so this file stays loadable:
 - **This file** = the **complete digest** (every session, one line, by date) plus
   the **most recent day in full** at the bottom, where new entries get appended.
-- **[devlog-archive.md](devlog-archive.md)** = the **full verbatim text** of all
+- **[devlog-archive.md](archive/devlog-archive.md)** = the **full verbatim text** of all
   older sessions.
 
 You rarely read either top to bottom. For the *current* state of something, prefer
 the topic doc (see [README.md](README.md)) or the relevant `## ADR-NNN` in
 [decisions.md](decisions.md); use the log to recover the *why* and *how* of a change.
 To read a session in full, find its `## YYYY-MM-DD — …` header in
-[devlog-archive.md](devlog-archive.md) (or in the "Recent" section below for the
+[devlog-archive.md](archive/devlog-archive.md) (or in the "Recent" section below for the
 latest day).
 
 **Maintenance:** when the "Recent" section grows past a day or two, move its older
@@ -47,7 +47,7 @@ Append new full sessions to the end of "Recent".
 
 ## Session digest (complete timeline)
 
-Every session, oldest first. Full text: [devlog-archive.md](devlog-archive.md)
+Every session, oldest first. Full text: [devlog-archive.md](archive/devlog-archive.md)
 (older) or the "Recent" section below (latest day).
 
 - **2026-05-27** — Project bootstrap and v0.1 language core
@@ -273,7 +273,7 @@ Every session, oldest first. Full text: [devlog-archive.md](devlog-archive.md)
 ## Recent — full entries
 
 The latest day in full; older sessions' full text is in
-[devlog-archive.md](devlog-archive.md). Append new sessions below (newest last).
+[devlog-archive.md](archive/devlog-archive.md). Append new sessions below (newest last).
 
 ## 2026-06-01 — Hierarchical module names (ADR-085 Move 3)
 
