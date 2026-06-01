@@ -661,26 +661,26 @@ The seam that makes remoteability free later (see architecture.md).
   link freezes on the last snapshot with a `DISCONNECTED` banner. No kernel changes
   (`process-info` maps are send-able); dev-grade auth (shared cookie, LAN/trusted).
   Cross-node `crates/cli/tests/observe_attach.rs`.
-- ⬜ **Resilient `ui-run` — recover to the last good frame (let-it-crash for the
-  TEA loop).** Today a `view`/`update` throw in `std/editor/ui.blsp` runs `:leave`
-  (restores the terminal) and **re-raises** — killing the app. myedit works around
-  this by wrapping its own `ed-view`/`ed-update` in try/catch, but that only stops
-  the *process* dying: a guarded `view` keeps re-rendering the **same bad model**
-  every frame, so a model wedged into a throwing state shows nothing but the error
-  with no way back. Add a supervising loop variant that, on a caught `view`/`update`
-  error, (1) **logs it to the console** (`eprintln` to stderr — the echo-area message
-  vanishes on quit, leaving no trace otherwise) and (2) **rolls the model back to the
-  last frame that rendered cleanly** (`ui--loop` already threads the model each turn;
-  it just carries a `last-good` alongside), then keeps looping. This is the editor's
-  application of the **userland-supervisor / let-it-crash** philosophy (M4,
-  [`supervision.md`](supervision.md)) at the render loop rather than the process tree,
-  and it belongs in the framework so every `ui-run` client (the observer too) inherits
-  it. Note the deliberate non-goal: **buffers stay immutable values, not processes** —
-  the recovery unit is the *model snapshot*, which immutability makes free; process-ifying
+- ✅ **Resilient `ui-run` — recover to the last good frame (let-it-crash for the
+  TEA loop)** (done 2026-06-01). A `view`/`update` throw in `std/editor/ui.blsp` no
+  longer kills the app: `ui--loop` threads a **`last-good`** model, catches a throw
+  from `view` (rolls the model back to `last-good` and re-renders it) or from
+  `update` (drops that one bad input, keeps the current model), and **logs it to
+  stderr** (`ui--log-error` via `eprintln`/`*err*` — the echo-area message vanishes
+  on quit, leaving no trace otherwise) before looping on. `last-good` starts nil, so
+  the *first* render throwing (no good frame to fall back to) still re-raises —
+  surfacing a genuine startup bug instead of spinning; the outer `try` still runs
+  `:leave` (restores the terminal) and re-raises frontend-mechanism
+  (`:size`/`:draw`/`:poll`) errors. The editor's application of the
+  **userland-supervisor / let-it-crash** philosophy (M4,
+  [`supervision.md`](supervision.md)) at the render loop rather than the process
+  tree, in the framework so every `ui-run` client (the observer too) inherits it —
+  myedit's own `ed-view`/`ed-update` try/catch workaround is now redundant. The
+  deliberate non-goal held: **buffers stay immutable values, not processes** — the
+  recovery unit is the *model snapshot*, which immutability makes free; process-ifying
   buffers would forfeit O(1) undo/snapshot/sharing for mutable identity nobody wants.
-  Driver: a stale per-pane `:top` outliving its buffer made `rope-line->char` throw
-  out of myedit's renderer (fixed app-side by clamping scroll into the buffer, but the
-  loop should survive *any* such bug, not just the ones we've found).
+  `tests/ui_test.blsp` (new `describe`): view-rollback, update-drop, fatal-first-render
+  + `:leave`-still-runs, stderr logging.
 - ⬜ Keymaps and interactive commands defined in Brood — belong in the **editor
   app** (a new `nest` project), not the framework.
 - ⬜ Minibuffer / status line / multiple windows — editor-app concerns, additive

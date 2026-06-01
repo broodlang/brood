@@ -268,6 +268,7 @@ Every session, oldest first. Full text: [devlog-archive.md](archive/devlog-archi
 - **2026-06-01** — std/ reorganization: frameworks namespaced, toolchain grouped-but-bare (ADR-085 Move 1)
 - **2026-06-01** — ADR-085 Move 2 (clean slice): brood-net + brood-supervisor packages
 - **2026-06-01** — Nodes form a transitive cluster mesh (ADR-088): connect to one, join all
+- **2026-06-01** — Resilient `ui-run`: let-it-crash at the render loop (recover to the last good frame)
 
 ---
 
@@ -465,3 +466,52 @@ Full `make test` green.
 covers persistent links); a global concurrent-dial cap; cross-machine routability
 beyond what `name@host` assumes. Mesh over an untrusted TCP network still waits on
 channel TLS (ADR-081), exactly as point-to-point does.
+
+## 2026-06-01 — Resilient `ui-run`: let-it-crash at the render loop (M3)
+
+The last open **framework-side** M3 item (the keymap/minibuffer bullets are
+editor-*app* concerns, in `~/src/whk/myedit`). Before this, a `view`/`update`
+throw in `std/editor/ui.blsp` ran `:leave` and **re-raised** — killing the app.
+myedit worked around it by wrapping its own `ed-view`/`ed-update` in try/catch,
+but that only stops the *process* dying: a guarded `view` keeps re-rendering the
+**same bad model** every frame, so a model wedged into a throwing state shows
+nothing but the error with no way back. Driver: a stale per-pane `:top` outliving
+its buffer made `rope-line->char` throw out of myedit's renderer.
+
+**The fix — the userland-supervisor / let-it-crash philosophy (M4) applied at the
+render loop rather than the process tree**, in the framework so every `ui-run`
+client (the observer too) inherits it:
+
+- `ui--loop` now threads a **`last-good`** model alongside `model` — the last
+  model that rendered cleanly.
+- A throw from **`view`** is caught (`try [:frame (view …)]` → `:failed`), logged
+  to stderr (`ui--log-error` via `eprintln`/`*err*`, so it survives the echo area
+  vanishing on quit), and the loop **rolls the model back to `last-good`** and
+  re-renders it. Since `last-good` is a model that rendered cleanly, the re-render
+  can't loop — `view` is deterministic on the same model.
+- A throw from **`update`** is caught and **drops that one input**, keeping the
+  current (good) model — a single buggy command can't advance the model into a
+  bad state.
+- `last-good` starts **nil**: if the *first* render throws (no good frame to fall
+  back to) the error **re-raises**, surfacing a genuine startup bug instead of
+  spinning. The outer `ui-run` try still runs `:leave` (restores the terminal)
+  before re-raising, and still re-raises frontend-mechanism (`:size`/`:draw`/
+  `:poll`) errors — a dead terminal is a real teardown, not a recoverable wedge.
+
+Draw/poll/size (frontend *mechanism*) stay outside the per-turn try; only the two
+user-supplied pure fns (`view`/`update`) are guarded — exactly the surface the
+roadmap named.
+
+**Deliberate non-goal:** buffers stay **immutable values, not processes** — the
+recovery unit is the *model snapshot*, which immutability makes free; process-ifying
+buffers would forfeit O(1) undo/snapshot/sharing for mutable identity nobody wants.
+
+**Tests** (`tests/ui_test.blsp`, new `describe`): a throwing `view` rolls back and
+re-renders the last good frame (drained render-echo sequence `[:a :b :b :c]` — the
+repeated `:b` proves recovery); a throwing `update` drops the bad input and the
+model continues off the last good value (`[0 1 1 2]`); a first-render throw is
+fatal and re-raised *and* `:leave` still runs; a recovered error is logged to
+`*err*` (captured via `with-err`/`fn-port`). The scripted display feeds inputs as
+`[:input …]` messages and `:poll` selectively receives those, so interleaved
+`[:saw …]` render-echoes survive in the mailbox for `drain-saw`. 11/11 green;
+observer (55) + display (7) — the other `ui-run` clients — unchanged.
