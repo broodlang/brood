@@ -141,6 +141,43 @@ value is independent in the receiver — no shared-mutation hazards. Test
 concurrency with spawn-N-then-collect (fan out, `receive`, assert on the
 aggregate).
 
+## When Brood crashes (a Rust panic)
+
+A Rust-level panic — a *kernel* fault (use-after-GC tripwire, a heap index, a
+runtime invariant), not your code raising — is appended to
+**`.brood_crash_dump`** in the working directory: a `=== brood crash dump ===`
+block with the timestamp, thread, the `panic: …` line, and a full backtrace
+(`RUST_BACKTRACE` is forced on, so the trace is always there). stderr also prints
+`brood: crash report appended to .brood_crash_dump`. The file is **append-only**,
+so a burst of worker-thread panics all land — read the **last** block. It catches
+panics, **not** `SIGSEGV`: a coroutine stack overflow surfaces as a normal
+`recursion too deep` error, not a dump.
+
+If Brood *itself* crashes (as opposed to your program erroring), that's a runtime
+bug — write up a short report rather than working around it:
+
+1. **Minimise** to the smallest `.blsp` that still reproduces, and make it
+   deterministic. The usual shapes: a loop that `load`s + allocates (hot-reload /
+   GC churn), or a spawn-N fan-out (scheduler races).
+2. **Capture** the last dump block from `.brood_crash_dump`, plus the runtime
+   version — `git -C <brood-src> rev-parse --short HEAD` — and whether the binary
+   is debug or release.
+3. **Localise** with the GC/engine knobs: each one that flips the verdict
+   (crash ↔ clean) names a subsystem.
+   - `BROOD_GC_STRESS=1` — collect at every safepoint; makes a GC race fire
+     deterministically.
+   - `BROOD_GC_VERIFY=1` — walk the live graph at every safepoint (debug builds);
+     on a bad root it names the root→cell path.
+   - `BROOD_VM=0` — run the tree-walker instead of the compiling VM. Still
+     crashes? → not VM-specific. Only with the VM? → the compiled path.
+   - `BROOD_RT_GC_FLOOR=100000000` — effectively disables runtime-region
+     compaction; clean with it set ⇒ the runtime collector is implicated.
+   - `nest test -j 1` (or `--max-parallel 1`) — serialise the scheduler to rule
+     it in or out of a concurrency crash.
+4. **File it**: save the repro + the dump block + which knobs change the verdict
+   + the bisected subsystem to `docs/known-issues.md` in the brood source tree
+   (newest first), or alongside the project if you don't have the source.
+
 ## Before finishing
 
 - Recursion in hot/iterative paths is **tail** recursion (last thing the

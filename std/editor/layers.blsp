@@ -21,7 +21,7 @@
 ;; This is framework tier (opt-in, never the prelude), pure Brood over `keymap`,
 ;; zero kernel surface (ADR-045). Phase 1: the buffer-free core (keys + hooks).
 
-(defmodule layers
+(defmodule editor/layers
   "Composable, runtime-reconfigurable behaviour layers for interactive UIs.
 `(require 'layers)`. A *context* (any state map — an app model or a buffer) holds
 `:layers`, an ordered list of layer references (head = highest precedence). A
@@ -38,9 +38,9 @@ Keymaps and hooks are resolved by one generic collector (`layer-collect`) — fa
 `:on-close` (and app-defined events) fan across all active layers via `run-event`.
 Buffer-type binding and focus/scope wiring are layered on in later phases — this
 core knows nothing about buffers."
-  (:use keymap))
+  (:use editor/keymap))
 
-(require 'keymap)
+(require 'editor/keymap)
 
 ;; ============================================================================
 ;; HOW TO USE

@@ -8,10 +8,10 @@
 ;; process); the final :isolated block adds explicit spawn/send/receive coverage
 ;; of the actor shell — and proves a buffer's rope stays inside its process.
 
-(defmodule buffer-test (:use test) (:use buffer))
+(defmodule buffer-test (:use test) (:use editor/buffer))
 
 (require 'log)    ; the buffer-as-log-sink integration test drives a real logger
-(require 'hatch)  ; gen-call — to flush the logger's casts before asserting
+(require 'proc/hatch)  ; gen-call — to flush the logger's casts before asserting
 
 ;; Drop any fixtures a prior run left in /tmp (at load, before any test runs).
 (purge-stale-temp "brood-buf-")
@@ -363,7 +363,7 @@
           lg (log/start-logger {:level :info :backends [(log/process-backend bp)]}))
       (log/log-info "server up")
       (log/log-warn "disk low")
-      (hatch/gen-call lg :config)   ; the logger has now dispatched both casts → bp
+      (proc/hatch/gen-call lg :config)   ; the logger has now dispatched both casts → bp
       (let (txt (buffer-query bp buffer-text))
         (is (string-contains? txt "server up"))
         (is (string-contains? txt "disk low")))

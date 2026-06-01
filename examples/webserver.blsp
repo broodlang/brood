@@ -6,7 +6,7 @@
 ;; parser/responder, routing) is Brood over a thin socket kernel (ADR-059/062).
 ;; Stop it with Ctrl-C.
 
-(require 'http)
+(require 'net/http)
 
 (def *port* 8080)
 

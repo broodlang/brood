@@ -3,7 +3,7 @@
 ;; on `bar` (the full-width status / mode / buffer-bar component, ADR-046); the other
 ;; constructors are one-liners exercised throughout the suite.
 
-(defmodule display-test (:use test) (:use display))
+(defmodule display-test (:use test) (:use editor/display))
 
 (describe "bar — full-width status / buffer bar"
   (test "pads to the full width so a :bg/:reverse face fills the line"

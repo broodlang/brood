@@ -3,7 +3,7 @@
 the world is unbounded); a `hatch` process owns it, advanced by cast (`!`) and
 read by call (`gen-call`). Run:  ./bin/cli examples/life.blsp")
 
-(require 'hatch)
+(require 'proc/hatch)
 
 (def offsets (list [-1 -1] [0 -1] [1 -1] [-1 0] [1 0] [-1 1] [0 1] [1 1]))
 

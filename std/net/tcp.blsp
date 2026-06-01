@@ -15,7 +15,7 @@
 ;; stream or stops a listener. A socket handle is valid across this runtime's
 ;; processes but is never sent across nodes.
 
-(defmodule tcp
+(defmodule net/tcp
   "TCP sockets over the kernel's non-blocking primitives (ADR-059/060). Inbound
 data arrives as `[:tcp sock data]` / `[:tcp-closed sock]` / `[:tcp-accept lsock
 client]` messages in the owning process's mailbox — consume them with `receive`.

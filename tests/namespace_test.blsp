@@ -127,3 +127,43 @@
     (let (me (self) w (spawn (ns-echo me)))
       (send w (iappF/make))
       (is (= (receive) {:t 'ilibF/tag :n 7})))))
+
+;;; Hierarchical module names (ADR-085): a module name may itself contain `/`
+;;; (`gui/window`), so its defs qualify on the *last* `/` — module `gui/window`,
+;;; def `draw` → the symbol `gui/window/draw`. Resolution, imports, and the
+;;; cross-process round-trip all reuse the flat-table machinery (a qualified name
+;;; is one interned symbol), so these mirror the flat cases above one level deeper.
+(describe "namespaces: hierarchical module names (ADR-085)"
+  :isolated
+
+  (test "a hierarchical module qualifies its defs on the last `/`"
+    (%load-string "(defmodule gui/window) (defn draw () :drawn)")
+    (is (bound? 'gui/window/draw))
+    (is (not (bound? 'window/draw)))
+    (is (not (bound? 'draw)))
+    (is (= (gui/window/draw) :drawn)))
+
+  (test "a deeper (3-segment) module name works the same way"
+    (%load-string "(defmodule a/b/c) (defn f () 3)")
+    (is (bound? 'a/b/c/f))
+    (is (= (a/b/c/f) 3)))
+
+  (test "a bare same-namespace reference resolves inside a hierarchical module"
+    (%load-string "(defmodule gui/panel) (defn helper () 7) (defn use-it () (helper))")
+    (is (= (gui/panel/use-it) 7)))
+
+  (test "an explicitly qualified cross-module reference resolves"
+    (%load-string "(defmodule gui/text) (defn target () :got)")
+    (%load-string "(defmodule gui/edit) (defn reach () (gui/text/target))")
+    (is (= (gui/edit/reach) :got)))
+
+  (test "(:use gui/lib) refers a hierarchical module's public names bare"
+    (%load-string "(defmodule gui/lib) (defn pub-x () :x) (defn pub-y () :y)")
+    (%load-string "(defmodule gui/app (:use gui/lib)) (defn run () (list (pub-x) (pub-y)))")
+    (is (= (gui/app/run) (list :x :y))))
+
+  (test "a value built by a hierarchical-namespaced fn survives a worker round-trip"
+    (%load-string "(defmodule gui/build) (defn make () {:tag 'gui/build/make :data (list 1 2 3)})")
+    (let (me (self) w (spawn (ns-echo me)))
+      (send w (gui/build/make))
+      (is (= (receive) {:tag 'gui/build/make :data (list 1 2 3)})))))

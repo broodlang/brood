@@ -1319,12 +1319,12 @@ fn supervisor_restarts_a_remote_child() {
         r#"
 (node-start :b "127.0.0.1:{port_b}" "secret")
 (connect "a@127.0.0.1:{port_a}")
-(require 'supervisor)
+(require 'proc/supervisor)
 (def me (self))
 (def spec {{:id :w :restart :permanent
             :start (fn () (do (send {{:name :factory :node :a@127.0.0.1}} [:make (self) me])
                               (receive ([:made p] p) (after 30000 (throw "no :made")))))}})
-(def sup (supervisor/start-supervisor (list spec)))
+(def sup (proc/supervisor/start-supervisor (list spec)))
 (def w1 (receive ([:up p] p) (after 6000 (throw "no first :up"))))
 (send w1 :die)                              ; crash the remote worker
 (def w2 (receive ([:up p] p) (after 6000 (throw "no restart :up"))))

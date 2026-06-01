@@ -1376,6 +1376,14 @@ fn vm_apply(heap: &mut Heap, compiled0: Arc<CompiledArm>, args: &[Value], genv0:
     // budget check, so deep *non-tail* VM recursion fails cleanly instead of a
     // SIGSEGV. Tail calls reuse the frame below and never grow the Rust stack.
     let _gc_block = crate::process::GcBlockGuard::enter();
+    // Pin the RUNTIME region against compaction for this frame's lifetime: the
+    // compiled body (`compiled`/`compiled0`) embeds RUNTIME constant handles in its
+    // node tree, and it lives behind an `Arc` on the Rust stack — unreachable from
+    // the heap roots, so `runtime_collect` can't rewrite it. A nested `eval_at`
+    // (e.g. a builtin like `load` that churns the code region) must therefore not
+    // evacuate the region out from under us; the safepoint checks `rt_compact_pinned`
+    // and defers until this guard drops. LOCAL collection is unaffected.
+    let _rt_pin = crate::process::RtPinGuard::enter();
     let probe = 0u8;
     if let Some(used) = crate::process::stack_overflow_check(&probe as *const u8 as usize) {
         return Err(LispError::runtime(format!(
@@ -1412,8 +1420,10 @@ fn vm_apply(heap: &mut Heap, compiled0: Arc<CompiledArm>, args: &[Value], genv0:
     let mut compiled = compiled0;
     loop {
         // GC safepoint — the frame slots live on `Heap::roots` and the captured env
-        // on `Heap::env_roots`, so `collect` relocates both in place; the compiled
-        // body itself holds only immovable handles, so no further extra roots.
+        // on `Heap::env_roots`, so `collect` relocates both in place. LOCAL
+        // collection never moves the compiled body's RUNTIME/PRELUDE constant
+        // handles, so it needs no extra roots; RUNTIME *compaction* would move them,
+        // which is why this frame holds an `RtPinGuard` (above) deferring it.
         if !crate::process::macro_block_active() && heap.gc_due() {
             heap.collect(&mut [], &mut []);
         }

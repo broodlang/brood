@@ -876,11 +876,14 @@ fn form_pos_key(id: PairId) -> u64 {
     (id.index() as u64) | ((id.is_old() as u64) << 32)
 }
 
-/// True iff `v` is a LOCAL heap object the copying collector relocates — the
-/// only kind that must be rooted across a collection safepoint. Atoms (`Int`,
-/// `Sym`, `Pid`, …) and shared-region (`PRELUDE`/`RUNTIME`) handles never move,
-/// so a copy held across a safepoint stays valid and needs no operand-stack
-/// slot. Mirrors exactly the set `push_value`/`flush_value` relocate.
+/// True iff `v` is a LOCAL heap object the copying collector relocates — the set
+/// `push_value`/`flush_value` move in place during a LOCAL (nursery/major)
+/// collection. Atoms (`Int`, `Sym`, `Pid`, …) and shared-region
+/// (`PRELUDE`/`RUNTIME`) handles are never touched by the LOCAL collector.
+///
+/// **Not** the rooting predicate: a RUNTIME handle is immovable under the LOCAL
+/// collector but *is* evacuated by the runtime compactor, so it still needs an
+/// operand-stack slot — see [`needs_root_slot`], which [`Heap::root`] uses.
 #[inline]
 pub fn is_movable(v: Value) -> bool {
     match v {
@@ -894,23 +897,53 @@ pub fn is_movable(v: Value) -> bool {
     }
 }
 
-/// A rooted value handle from [`Heap::root`]: either an immovable value kept
-/// inline (no operand-stack slot) or the index of a LOCAL slot the collector
-/// relocates. Read back with [`Heap::read_root`] after any potential collection.
-/// The region check means running compiled/promoted (RUNTIME) or prelude code —
-/// the hot path — pays no `Vec` churn, only genuinely LOCAL transients do.
+/// True iff a handle to `v` held across a collection safepoint must take an
+/// operand-stack slot to be rewritten — because **some** collector relocates it:
+/// a LOCAL object (the copying collector moves it) **or** a RUNTIME object (the
+/// runtime compactor [`Heap::runtime_collect`] evacuates the shared code region,
+/// ADR-076). Only atoms and the immutable PRELUDE region are truly fixed and may
+/// stay inline as a [`Root::Stable`].
+///
+/// This is the superset [`Heap::root`] gates on; [`is_movable`] is the narrower
+/// LOCAL-only set. The distinction matters because a RUNTIME constant held inline
+/// (e.g. a `let` body or a `do` spine cursor in hot-reloaded/REPL code) would be
+/// invisible to `runtime_collect`'s root rewrite and go stale across a
+/// compaction — the slab-OOB / silent-corruption class in `docs/known-issues.md`.
+#[inline]
+pub fn needs_root_slot(v: Value) -> bool {
+    let shared = |r| r == LOCAL || r == RUNTIME;
+    match v {
+        Value::Pair(id) => shared(id.region()),
+        Value::Vector(id) => shared(id.region()),
+        Value::Map(id) => shared(id.region()),
+        Value::Str(id) => shared(id.region()),
+        Value::Rope(id) => shared(id.region()),
+        Value::Fn(id) | Value::Macro(id) => shared(id.region()),
+        _ => false,
+    }
+}
+
+/// A rooted value handle from [`Heap::root`]: either a truly-fixed value kept
+/// inline (no operand-stack slot) or the index of a slot a collector rewrites.
+/// Read back with [`Heap::read_root`] after any potential collection. Running
+/// prelude code or handling atoms pays no `Vec` churn; LOCAL transients **and**
+/// RUNTIME handles (which `runtime_collect` evacuates) take a slot — see
+/// [`needs_root_slot`].
 #[derive(Clone, Copy)]
 pub enum Root {
-    /// An immovable value (atom or `PRELUDE`/`RUNTIME` handle); the inline copy
-    /// stays valid across collections.
+    /// A truly-fixed value (atom or `PRELUDE` handle); the inline copy stays
+    /// valid across any collection. RUNTIME handles do **not** use this — they
+    /// take a `Slot`, since the runtime compactor relocates them.
     Stable(Value),
-    /// A movable LOCAL value parked at this operand-root-stack index.
+    /// A relocatable value (LOCAL or RUNTIME) parked at this operand-root-stack
+    /// index; rewritten in place by whichever collector moves it.
     Slot(usize),
 }
 
 /// The [`EnvId`] counterpart of [`Root`] — see [`Heap::root_env`]. The
-/// [`EnvId::GLOBAL`] sentinel and RUNTIME-promoted frames are immovable and kept
-/// inline; only a LOCAL frame takes a slot.
+/// [`EnvId::GLOBAL`] sentinel and immutable PRELUDE frames stay inline; a LOCAL
+/// **or** RUNTIME frame takes a slot (the latter is evacuated by the runtime
+/// compactor, so it must be rewritten there).
 #[derive(Clone, Copy)]
 pub enum EnvRoot {
     Stable(EnvId),
@@ -3410,16 +3443,20 @@ impl Heap {
     }
 
     /// Root `v` for the duration of a collection-bearing region, **skipping the
-    /// operand-stack push when `v` is immovable** (an atom, or a `PRELUDE`/
-    /// `RUNTIME` handle — the common case when running compiled/promoted code).
-    /// Returns a [`Root`] token to read back with [`read_root`](Self::read_root)
-    /// after any nested eval. The cheaper, region-aware sibling of
-    /// [`push_root`](Self::push_root): on the hot path it pays nothing. Teardown
-    /// is still the shared `truncate_roots(base)` — it drops exactly the LOCAL
-    /// slots this region pushed, regardless of how many were skipped.
+    /// operand-stack push only when `v` is truly fixed** (an atom or a `PRELUDE`
+    /// handle). A `RUNTIME` handle *does* take a slot: it is immovable under the
+    /// LOCAL collector but the runtime compactor ([`runtime_collect`]) evacuates
+    /// it, and only the operand stack is rewritten there — so an inlined RUNTIME
+    /// root would go stale across a compaction (the slab-OOB / corruption class,
+    /// `docs/known-issues.md`). Returns a [`Root`] token to read back with
+    /// [`read_root`](Self::read_root) after any nested eval. Teardown is the
+    /// shared `truncate_roots(base)` — it drops exactly the slots pushed,
+    /// regardless of how many were skipped.
+    ///
+    /// [`runtime_collect`]: Self::runtime_collect
     #[inline]
     pub fn root(&mut self, v: Value) -> Root {
-        if is_movable(v) {
+        if needs_root_slot(v) {
             let i = self.roots.len();
             self.roots.push(v);
             Root::Slot(i)
@@ -3458,13 +3495,16 @@ impl Heap {
         }
     }
 
-    /// The [`EnvId`] counterpart of [`root`](Self::root): roots a frame only if
-    /// it's a movable LOCAL frame, keeping the [`EnvId::GLOBAL`] sentinel and
-    /// RUNTIME-promoted frames inline. Read back with
+    /// The [`EnvId`] counterpart of [`root`](Self::root): a LOCAL **or** RUNTIME
+    /// frame takes a slot (the LOCAL collector relocates the former, the runtime
+    /// compactor [`runtime_collect`](Self::runtime_collect) evacuates the latter,
+    /// ADR-076), while the [`EnvId::GLOBAL`] sentinel and immutable PRELUDE frames
+    /// stay inline. An inlined RUNTIME frame would be invisible to the runtime
+    /// compaction's `env_roots` rewrite and go stale. Read back with
     /// [`read_root_env`](Self::read_root_env).
     #[inline]
     pub fn root_env(&mut self, e: EnvId) -> EnvRoot {
-        if e != EnvId::GLOBAL && e.region() == LOCAL {
+        if e != EnvId::GLOBAL && (e.region() == LOCAL || e.region() == RUNTIME) {
             let i = self.env_roots.len();
             self.env_roots.push(e);
             EnvRoot::Slot(i)
@@ -3686,6 +3726,14 @@ impl Heap {
         extra_roots: &mut [Value],
         extra_envs: &mut [EnvId],
     ) -> Option<(usize, usize)> {
+        // Bail while a compiled-VM body is live on this coroutine's stack: it embeds
+        // RUNTIME constant handles behind an `Arc` we can't reach to rewrite, so
+        // evacuating the region would dangle them (the `vm_apply` `RtPinGuard`). The
+        // eval safepoint already gates on this; the guard here also covers the
+        // explicit `(runtime-collect)` builtin called from inside a VM frame.
+        if crate::process::rt_compact_pinned() {
+            return None;
+        }
         // Bail unless we uniquely own the runtime region (no concurrent readers).
         Arc::get_mut(&mut self.runtime)?;
         let before = self.runtime.code.closures.count();

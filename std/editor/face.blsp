@@ -38,7 +38,7 @@
 ;;                    `gui-font!`); the terminal frontend ignores it (renders 1×).
 ;;   :inherit       — a face NAME this face is layered over (local keys win)
 
-(defmodule face
+(defmodule editor/face
   "Named text faces + a theme registry for UI apps on the display seam (the
 counterpart to `keymap`/`display`): style is named once and referenced everywhere,
 so restyling a section is a one-line redefinition rather than an edit at every call

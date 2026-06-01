@@ -174,7 +174,10 @@ fn push_symbol(
     // NAMESPACE and the `name` suffix as its resolved kind, so the editor can
     // tint the module path distinctly. Only a genuine qualifier splits — the
     // bare `/` division operator (slash at index 0) and a trailing slash don't.
-    if let Some(i) = name.find('/') {
+    // Split on the *last* `/` (ADR-085): a hierarchical module `gui/window` with
+    // a def `draw` is the symbol `gui/window/draw`, so the whole `gui/window`
+    // path is the namespace and `draw` the name.
+    if let Some(i) = name.rfind('/') {
         if i > 0 && i + 1 < name.len() {
             let start = node.span.start;
             let slash = start + i as u32;
@@ -350,6 +353,24 @@ mod tests {
         // `parse` (5 chars) after the slash at col 8 is the function head.
         assert!(
             toks.contains(&(0, 8, 5, T_FUNCTION, 0)),
+            "name suffix: {toks:?}"
+        );
+    }
+
+    #[test]
+    fn a_hierarchical_qualified_symbol_splits_on_the_last_slash() {
+        // `(gui/window/draw x)` (ADR-085): the module path is `gui/window` and the
+        // name is `draw` — split on the *last* `/`, so the whole `gui/window`
+        // prefix is one NAMESPACE token, not just `gui`.
+        let toks = tokens("(gui/window/draw x)");
+        // `gui/window` (10 chars) at col 1 is the namespace prefix.
+        assert!(
+            toks.contains(&(0, 1, 10, T_NAMESPACE, 0)),
+            "namespace prefix: {toks:?}"
+        );
+        // `draw` (4 chars) after the last slash at col 12 is the function head.
+        assert!(
+            toks.contains(&(0, 12, 4, T_FUNCTION, 0)),
             "name suffix: {toks:?}"
         );
     }

@@ -18,22 +18,22 @@
 registered as the `:fundamental` type so a plain buffer gets it by default. Its
 motion commands `(buf key) -> buf` are shared with `brood-mode`. `(require
 'text-mode)`."
-  (:use layers))
+  (:use editor/layers))
 
-(require 'buffer)
-(require 'layers)
+(require 'editor/buffer)
+(require 'editor/layers)
 
 ;; ---- motion commands: (buf key) -> buf (key ignored) ------------------------
-(defn forward-char (b k) (buffer/forward-char b))
-(defn backward-char (b k) (buffer/backward-char b))
-(defn forward-word (b k) (buffer/forward-word b))
-(defn backward-word (b k) (buffer/backward-word b))
-(defn forward-line (b k) (buffer/forward-line b))
-(defn backward-line (b k) (buffer/backward-line b))
-(defn beginning-of-line (b k) (buffer/beginning-of-line b))
-(defn end-of-line (b k) (buffer/end-of-line b))
-(defn beginning-of-buffer (b k) (buffer/beginning-of-buffer b))
-(defn end-of-buffer (b k) (buffer/end-of-buffer b))
+(defn forward-char (b k) (editor/buffer/forward-char b))
+(defn backward-char (b k) (editor/buffer/backward-char b))
+(defn forward-word (b k) (editor/buffer/forward-word b))
+(defn backward-word (b k) (editor/buffer/backward-word b))
+(defn forward-line (b k) (editor/buffer/forward-line b))
+(defn backward-line (b k) (editor/buffer/backward-line b))
+(defn beginning-of-line (b k) (editor/buffer/beginning-of-line b))
+(defn end-of-line (b k) (editor/buffer/end-of-line b))
+(defn beginning-of-buffer (b k) (editor/buffer/beginning-of-buffer b))
+(defn end-of-buffer (b k) (editor/buffer/end-of-buffer b))
 
 ;; ---- the layer --------------------------------------------------------------
 (def km

@@ -2,53 +2,53 @@
 ;; functions (unit-tested directly); `with-events` (std/ui.blsp) merges pushed events
 ;; into a ui-run loop; and one end-to-end test streams frames from a loopback server.
 
-(defmodule sse-test (:use test) (:use sse) (:use ui))
+(defmodule sse-test (:use test) (:use net/sse) (:use editor/ui))
 
 (describe "sse — pure event-field parsing"
   (test "parses event / data / id, stripping one space after the colon"
-    (let (ev (sse/sse--parse-event "event: run_started\ndata: {\"id\":42}\nid: 7"))
+    (let (ev (net/sse/sse--parse-event "event: run_started\ndata: {\"id\":42}\nid: 7"))
       (assert= (get ev :event) "run_started")
       (assert= (get ev :data) "{\"id\":42}")
       (assert= (get ev :id) "7")))
   (test "multiple data lines join with a newline"
-    (assert= (get (sse/sse--parse-event "data: a\ndata: b\ndata: c") :data) "a\nb\nc"))
+    (assert= (get (net/sse/sse--parse-event "data: a\ndata: b\ndata: c") :data) "a\nb\nc"))
   (test "missing type defaults to \"message\"; missing data to \"\""
-    (assert= (get (sse/sse--parse-event "data: x") :event) "message")
-    (assert= (get (sse/sse--parse-event "event: ping") :data) ""))
+    (assert= (get (net/sse/sse--parse-event "data: x") :event) "message")
+    (assert= (get (net/sse/sse--parse-event "event: ping") :data) ""))
   (test "comment lines (:-prefixed) are ignored"
-    (assert= (get (sse/sse--parse-event ": keep-alive\ndata: y") :data) "y"))
+    (assert= (get (net/sse/sse--parse-event ": keep-alive\ndata: y") :data) "y"))
   (test "a value with no leading space is kept verbatim"
-    (assert= (get (sse/sse--parse-event "data:tight") :data) "tight")))
+    (assert= (get (net/sse/sse--parse-event "data:tight") :data) "tight")))
 
 (describe "sse — frame splitting + line endings"
   (test "frames splits complete blocks from a trailing remainder"
-    (let ([blocks rest] (sse/sse--frames "x: 1\n\ny: 2\n\nrest"))
+    (let ([blocks rest] (net/sse/sse--frames "x: 1\n\ny: 2\n\nrest"))
       (assert= blocks (list "x: 1" "y: 2"))
       (assert= rest "rest")))
   (test "no complete frame yet → no blocks, all remainder"
-    (let ([blocks rest] (sse/sse--frames "partial data"))
+    (let ([blocks rest] (net/sse/sse--frames "partial data"))
       (assert= blocks '())
       (assert= rest "partial data")))
   (test "normalise turns \\r\\n and \\r into \\n"
-    (assert= (sse/sse--normalize "a\r\nb\rc\nd") "a\nb\nc\nd"))
+    (assert= (net/sse/sse--normalize "a\r\nb\rc\nd") "a\nb\nc\nd"))
   (test "status reads the numeric code from a response head"
-    (assert= (sse/sse--status "HTTP/1.1 200 OK\nContent-Type: text/event-stream") 200)
-    (assert= (sse/sse--status "HTTP/1.1 404 Not Found") 404)))
+    (assert= (net/sse/sse--status "HTTP/1.1 200 OK\nContent-Type: text/event-stream") 200)
+    (assert= (net/sse/sse--status "HTTP/1.1 404 Not Found") 404)))
 
 (describe "sse — server-side frame building"
   (test "a single-line payload becomes one data: line + the blank line"
-    (assert= (sse/sse-frame "hello") "data: hello\n\n"))
+    (assert= (net/sse/sse-frame "hello") "data: hello\n\n"))
   (test "a multi-line payload prefixes every line with data:"
-    (assert= (sse/sse-frame "a\nb\nc") "data: a\ndata: b\ndata: c\n\n"))
+    (assert= (net/sse/sse-frame "a\nb\nc") "data: a\ndata: b\ndata: c\n\n"))
   (test "an event type adds the leading event: line"
-    (assert= (sse/sse-frame "x" "tick") "event: tick\ndata: x\n\n"))
+    (assert= (net/sse/sse-frame "x" "tick") "event: tick\ndata: x\n\n"))
   (test "sse-headers declares text/event-stream and disables caching"
-    (let (h (sse/sse-headers))
+    (let (h (net/sse/sse-headers))
       (assert= (get h "Content-Type") "text/event-stream")
       (assert= (get h "Cache-Control") "no-cache")))
   (test "sse-frame is the inverse of sse--parse-event (round-trip)"
-    (let ([blocks _] (sse/sse--frames (sse/sse-frame "a\nb" "tick"))
-          ev (sse/sse--parse-event (first blocks)))
+    (let ([blocks _] (net/sse/sse--frames (net/sse/sse-frame "a\nb" "tick"))
+          ev (net/sse/sse--parse-event (first blocks)))
       (assert= (get ev :event) "tick")
       (assert= (get ev :data) "a\nb"))))
 

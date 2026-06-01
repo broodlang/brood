@@ -21,7 +21,7 @@
 ;; where a colour is a keyword: :black :red :green :yellow :blue :magenta :cyan
 ;;   :white :grey :dark-grey. Unknown keys/colours are ignored by the frontend.
 
-(defmodule display
+(defmodule editor/display
   "The render-op protocol for the display seam (M3, ADR-046): pure constructors
 that build a **frame** — a vector of render ops — as plain data.
 

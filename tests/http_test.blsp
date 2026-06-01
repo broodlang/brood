@@ -3,7 +3,7 @@
 ;;
 ;; Register-only — discovered and run by `nest test` (and cargo test).
 
-(defmodule http-test (:use test) (:use http) (:use tcp))
+(defmodule http-test (:use test) (:use net/http) (:use net/tcp))
 
 (describe "http: request parsing"
   (test "method, path, version, and lower-cased headers"
@@ -72,15 +72,15 @@
 
 (describe "http: client url + response parsing"
   (test "parse-url splits scheme/host/port/path"
-    (let (u (http/http--parse-url "https://api.github.com/zen"))
+    (let (u (net/http/http--parse-url "https://api.github.com/zen"))
       (assert= (get u :scheme) "https")
       (assert= (get u :host) "api.github.com")
       (assert= (get u :port) 443)
       (assert= (get u :path) "/zen")))
   (test "parse-url defaults: http port 80, root path, explicit port"
-    (assert= (get (http/http--parse-url "http://example.com") :port) 80)
-    (assert= (get (http/http--parse-url "http://example.com") :path) "/")
-    (assert= (get (http/http--parse-url "http://h:8080/x") :port) 8080))
+    (assert= (get (net/http/http--parse-url "http://example.com") :port) 80)
+    (assert= (get (net/http/http--parse-url "http://example.com") :path) "/")
+    (assert= (get (net/http/http--parse-url "http://h:8080/x") :port) 8080))
   (test "parse-response reads the status line, headers, and body"
     (let (r (parse-response "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhi there"))
       (assert= (get r :status) 200)
@@ -132,15 +132,15 @@
 
 (describe "http: request building (http/http--request-headers)"
   (test "adds Host / User-Agent / Connection, and Content-Length when there's a body"
-    (let (h (http/http--request-headers {:host "localhost"} "abc" nil))
+    (let (h (net/http/http--request-headers {:host "localhost"} "abc" nil))
       (assert= (get h "Host") "localhost")
       (assert= (get h "User-Agent") "brood")
       (assert= (get h "Connection") "close")
       (assert= (get h "Content-Length") "3")))
   (test "no Content-Length for an empty body"
-    (refute (contains? (http/http--request-headers {:host "h"} "" nil) "Content-Length")))
+    (refute (contains? (net/http/http--request-headers {:host "h"} "" nil) "Content-Length")))
   (test "caller headers override the defaults and add new ones"
-    (let (h (http/http--request-headers {:host "h"} "" {"User-Agent" "bw" "X-Token" "k"}))
+    (let (h (net/http/http--request-headers {:host "h"} "" {"User-Agent" "bw" "X-Token" "k"}))
       (assert= (get h "User-Agent") "bw")  ; overridden
       (assert= (get h "X-Token") "k"))))  ; added
 

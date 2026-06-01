@@ -8,7 +8,7 @@
 ;; closing :isolated block tokenizes inside a spawned process to prove the spans
 ;; (vectors of face maps) round-trip the copy-on-send heap boundary.
 
-(defmodule highlight-test (:use test) (:use highlight))
+(defmodule highlight-test (:use test) (:use editor/highlight))
 
 (describe "highlight-spans — token classification"
   (test "special form vs call vs number"

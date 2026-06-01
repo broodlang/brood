@@ -60,9 +60,10 @@ pub(crate) use links::{
 };
 pub use scheduler::{
     begin_capture, capture_append, deadline_exceeded, exit, gc_block_depth, in_green_process,
-    macro_block_active, parent_of, peak_threads, pid_value, self_pid, set_deadline,
-    set_max_parallel, spawn, spawn_count, stack_budget, stack_overflow_check, take_capture, tick,
-    worker_threads, GcBlockGuard, MacroBlockGuard, CORO_STACK_BYTES,
+    macro_block_active, parent_of, peak_threads, pid_value, rt_compact_pinned, self_pid,
+    set_deadline, set_max_parallel, spawn, spawn_count, stack_budget, stack_overflow_check,
+    take_capture, tick, worker_threads, GcBlockGuard, MacroBlockGuard, RtPinGuard,
+    CORO_STACK_BYTES,
 };
 
 pub(crate) use mailbox::{deliver, is_alive, read_name_address};
