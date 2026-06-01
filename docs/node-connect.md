@@ -181,6 +181,28 @@ fallback for free.
 `node-start` would hit the existing double-start guard (`dist.rs:482`). Documented
 as mutually exclusive rather than silently no-op'd.
 
+## 5. Serving a `ui-run` app — `serve` / `nest attach` (done, ADR-090)
+
+The payoff this design was the local leg of: a daemon **serves a `ui-run` app** and a
+thin client paints it. `std/editor/serve.blsp` is the policy (`(require 'editor/serve)`),
+purely over `node-start`/`connect`/`send`/`monitor` + the M3 display seam:
+
+```
+;; daemon — `nest run --name ed app.blsp`, whose main calls:
+(serve (fn () {:n 0}) my-view my-update)   ; register the app under :ui, then park
+;; client — another terminal / machine:
+(attach "ed")          ; or "ed@host:port";  CLI: `nest attach ed`  ≈  emacsclient -s ed
+```
+
+The app's *unmodified* `(ui-run model view update display)` runs on the daemon; the
+trick is the **display** — `remote-display` `:draw`s by `send`ing the frame over the
+link and `:poll`s by `receive`ing the client's keys (the frame is plain Brood data, so
+it just travels). `serve` spawns one **independent session per attaching client**, so
+several frontends attach at once; `nest attach` is the thin `emacsclient`, connecting
+*before* it takes the terminal so a bad spec/cookie is a clean error. The app-on-daemon
+*push* complements the observer's *pull* remote-attach (§`nest observe --connect`).
+Deferred (ADR-011): a shared model across clients, live resize, per-client viewports.
+
 ## Rust vs. Brood (ADR-006)
 
 Everything new is **mechanism** — Unix sockets, filesystem paths, `0600`/`0700`

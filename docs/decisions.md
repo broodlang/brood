@@ -5429,3 +5429,73 @@ mirrors). Lives in `crates/lisp/src/dist/session.rs` (the AEAD framing),
 `dist/handshake.rs` (DH + HKDF + key agreement), `dist/wire.rs` (the `Hello` pubkey
 + `encode_payload` + magic v4), `dist.rs` (`establish` threads the session into the
 reader/writer).
+
+## ADR-090 — Serving a `ui-run` app to remote frontends: app-on-daemon, thin client over the display seam
+
+**Status:** accepted + implemented (2026-06-01). The headline **M4 deliverable** —
+"the same runtime listens on a socket and serves the M3 protocol to attached
+frontends (the Emacs `--daemon`/`emacsclient` model)." All Brood policy
+(`std/editor/serve.blsp`) over the existing mechanism; **no kernel change**.
+
+**Context.** The substrate was all built: node-connect (encrypted, ADR-089),
+dual-listen (ADR-074), registered names, location-transparent `send`, monitors, the
+M3 display protocol (a frame is plain send-able data), and `ui-run` with its
+pluggable `display` map. `nest observe --connect` proved *remote rendering* — but in
+the **pull** direction: the loop + model run on the *client*, which requests
+snapshots. That's right for a read-only viewer; it is **not** the emacsclient model,
+where the app (model + editing logic) lives in the daemon and the frontend is thin.
+
+**Decision — run the app on the daemon; make one `ui-run` display a *network*
+frontend.** The daemon runs the app's *unmodified* `(ui-run model view update
+display)`; the only new piece is the `display`:
+- **`remote-display`** — a `display` map bound to an attached client's pid: `:draw`
+  `send`s the frame `[:frame f]` over the link (it's plain data), `:poll` `receive`s
+  the client's `[:key k]`, `:size` is the size reported at attach, `:leave` tells the
+  client to restore its terminal (`[:bye]`). A `[:detach]` or a monitor `[:down …]`
+  (client died / link split) returns `:close`, which `ui-run` already treats as quit.
+  This realizes ADR-046 literally: one display protocol, now a frontend that lives on
+  the wire — so an app written for a local terminal serves remotely with no change.
+- **`serve` / session manager** — `(serve make-model view update)` registers a manager
+  under the well-known node name `serve-name` (`:ui`). Each `[:attach client cols rows]`
+  spawns an **independent session** process that `monitor`s the client, tells it its
+  pid, and runs `ui-run` against a `remote-display` to it. `make-model` is a thunk → a
+  *fresh* model per client.
+- **`attach` / thin client** — `(attach spec &optional cookie)` (and `nest attach
+  SPEC`): `node-start` (ephemeral) + `connect` (clean error *before* the terminal) +
+  `monitor-node`, then `term-enter`, report `term-size`, attach, and loop — drain
+  pushed `[:frame f]` → `term-draw`, poll the local terminal → ship each key to the
+  session — until `[:bye]` / link drop, always restoring the terminal.
+
+The daemon side is a normal `nest run --name N app.blsp` whose `main` calls `(serve …)`
+then parks; the only new CLI command is `nest attach` (mirrors `nest observe --connect`).
+
+**Scope (ADR-011 — ship the slice).** **In:** app-on-daemon + thin client; many
+concurrent clients (independent sessions); graceful attach / detach / client-death
+teardown. **Deferred:** a *shared* model across clients (collaborative editing — each
+session is independent; sharing is done by talking to a common process); live terminal
+**resize** after attach (`:size` is fixed at attach); per-client viewports onto shared
+buffers; a dedicated `nest serve` auto-park command.
+
+**Consequences.**
+- Any Brood `ui-run` app (the coming editor included) is now servable to remote
+  terminals with no change to its `view`/`update` — "the frontend is a protocol" made
+  real, the local leg (`nest attach foo` ≈ `emacsclient -s foo`) and the remote leg
+  (`name@host:port`) being the same code over the encrypted link.
+- The observer's *pull* remote-attach and this *push* serve are complementary: pull =
+  inspect a runtime's processes; push = drive an app whose state lives server-side.
+- Multi-tenant / mutually-distrusting serving is **not** in scope — closure mobility
+  between trusting nodes is still RCE-by-design (ADR-081/089); a sandbox boundary is a
+  separate future ADR.
+
+**Tested.** `tests/serve_test.blsp` (in-process client plays the protocol): attach →
+initial frame → key-driven frames → quit → `[:bye]`; per-client model isolation (two
+clients each see their own count); `remote-display` `:draw`/`:size`/`:poll` units.
+`crates/cli/tests/serve_attach.rs` (cross-process, real encrypted TCP, in the
+`real-tcp` group): a daemon serves a counter app, a TTY-less client attaches and drives
+it (n=0 → n=1) and quits. Full `make test` green.
+
+**References.** ADR-046 (the display-protocol seam this rides — "one protocol, many
+frontends"), ADR-053 (the observer's *pull* remote-attach this complements), ADR-068
+(node-connect by name), ADR-089 (the encrypted channel it serves over), ADR-074
+(dual-listen — local + remote front doors), ADR-011 (deferring shared model / resize).
+Lives in `std/editor/serve.blsp`; `nest attach` in `crates/nest/src/main.rs`.
