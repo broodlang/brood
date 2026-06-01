@@ -262,8 +262,8 @@ not a known body form (defaults to call-style — every arg breaks)."
   ;;
   ;; Maps are inherently pair-shaped (alternating key/value), so a broken map
   ;; pairs up like a `let` bindings list — `{:a 1\n :b 2}` instead of every
-  ;; element on its own line. Comments inside a map fall through to the
-  ;; default list break so they survive.
+  ;; element on its own line. The pair walker is comment-aware, so a map with
+  ;; comments still pairs up (with the comments preserved in place).
   (let (one (single-line n)
          ;; Respect the author's line structure: if the source had newlines
          ;; *inside this form's own children*, keep it broken even if the
@@ -276,10 +276,7 @@ not a known body form (defaults to call-style — every arg breaks)."
          (had-author-newlines? n))
     (cond
       (and one (not keep-broken) (<= (+ indent (string-length one)) *format-width*)) one
-      (and (= (node-kind n) :map) (not (any-comment? (node-children n)))) (render--pair-break (node-children n)
-                                                                            indent
-                                                                            "{"
-                                                                            "}")
+      (= (node-kind n) :map) (render--pair-break (node-children n) indent "{" "}")
       else (render--break (node-children n) indent open close))))
 
 ;; True if any direct-child whitespace of `n` contains a newline — the source
@@ -406,35 +403,70 @@ closing delimiter has to break to its own line so it isn't swallowed."
 ;; Renders a list node `n` whose children are alternating name/value, breaking
 ;; to one pair per line when it doesn't fit. Continuation lines align under
 ;; the bindings list's first element (column = `indent + 1`, i.e. one past
-;; the opening `(`). Comments inside the bindings disable pair grouping —
-;; we fall back to plain `render--break` so they survive.
+;; the opening `(`). Comments are preserved in place — a same-line trailing
+;; comment rides its pair's line, an own-line comment sits on its own line at
+;; the pair indent (the walker pairs name+value but never *across* a comment).
 (defn render-pair-list (n indent)
   (let (one (single-line n)
         keep-broken (had-author-newlines? n))
     (cond
       (and one (not keep-broken) (<= (+ indent (string-length one)) *format-width*)) one
-      (any-comment? (node-children n)) (render--break (node-children n) indent "(" ")")
       else (render--pair-break (node-children n) indent "(" ")"))))
 
 (defn render--pair-break (kids indent open close)
-  (let (forms (filter (fn (c) (not (trivia? c))) (vec->list kids)) pair-ind (inc indent))
-    (if (nil? forms) (str open close) (str open (render--pair-build forms pair-ind "") close))))
+  (let (pair-ind (inc indent))
+    (str open (render--pair-walk kids 0 (vector-length kids) pair-ind 0 "") close)))
 
-(defn render--pair-build (forms pair-ind acc)
-  ;; Emit one pair per line. The first pair has no leading newline (it sits
-  ;; right after the `(`); subsequent pairs are preceded by "\n + spaces".
-  ;; An odd remainder (broken bindings) gets emitted alone on the last line —
-  ;; better than dropping it.
+;; The separator before the next emitted item: nothing for the very first pair
+;; (it sits right after the `(`), else a newline (blank line preserved when the
+;; source had one) + the pair indent. Comments always take a leading newline so
+;; one can never land right after `(` and comment out the bindings.
+(defn render--pair-sep (acc nl pair-ind comment?)
   (cond
-    (nil? forms) acc
-    else (let (a (first forms)
-               rest1 (rest forms)
-               sep (if (= acc "") "" (str "\n" (indent-of pair-ind)))
-               arendr (render a pair-ind))
-           (if (nil? rest1)
-             (str acc sep arendr)
-             (let (b (first rest1) brendr (render b (+ pair-ind (string-length arendr) 1)))
-               (render--pair-build (rest rest1) pair-ind (str acc sep arendr " " brendr)))))))
+    (and (= acc "") (not comment?)) ""
+    (>= nl 2) (str "\n\n" (indent-of pair-ind))
+    else (str "\n" (indent-of pair-ind))))
+
+(defn render--pair-walk (kids i n pair-ind nl acc)
+  ;; Walk kids, emitting one name+value pair per line and each comment in place.
+  ;; `nl` tracks newlines since the last emitted item (so a blank line between
+  ;; bindings survives). Mirrors render--body-pairs, but with no head, the pair
+  ;; indent for continuation lines, and same-line trailing comments kept inline.
+  (if (= i n)
+    acc
+    (let (c (vector-ref kids i))
+      (cond
+        (whitespace? c) (render--pair-walk kids (inc i) n pair-ind (+ nl (count-newlines (node-text c))) acc)
+        (comment? c) (render--pair-walk kids
+                       (inc i)
+                       n
+                       pair-ind
+                       1
+                       (str acc
+                         (render--pair-sep acc nl pair-ind true)
+                         (comment--strip-trailing-nl (node-text c))))
+        ;; a name; pair it with the next form unless a comment (or the end)
+        ;; intervenes first — pairing across a comment would step over and drop it.
+        else (let (j (kids--next-nonws kids (inc i) n)
+                   arendr (render c pair-ind))
+               (if (or (= j n) (comment? (vector-ref kids j)))
+                 (render--pair-walk kids
+                   (inc i)
+                   n
+                   pair-ind
+                   0
+                   (str acc (render--pair-sep acc nl pair-ind false) arendr))
+                 (let (brendr (render (vector-ref kids j) (+ pair-ind (string-length arendr) 1))
+                       line (str acc (render--pair-sep acc nl pair-ind false) arendr " " brendr)
+                       tc (trailing-comment-at kids (inc j) n))
+                   (if (nil? tc)
+                     (render--pair-walk kids (inc j) n pair-ind 0 line)
+                     (render--pair-walk kids
+                       (inc tc)
+                       n
+                       pair-ind
+                       1
+                       (str line "  " (comment--strip-trailing-nl (node-text (vector-ref kids tc)))))))))))))
 
 ;; ---- pair body emit (cond / case clauses) -----------------------------------
 ;; Like render--body but consumes two structural forms per emission, joined by

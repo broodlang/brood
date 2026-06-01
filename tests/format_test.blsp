@@ -97,7 +97,26 @@
   (test "a comment between cond clauses is preserved and breaks the pair"
     (let (out (format-source "(cond\n  (a 1)\n  ;; mid\n  (b 2))"))
       (is (string-contains? out ";; mid"))
-      (is (string-contains? out "(b 2)")))))
+      (is (string-contains? out "(b 2)"))))
+  ;; A comment in a let bindings list used to disable pair-grouping entirely,
+  ;; splitting every `name value` onto two lines. The pair walker is comment-aware:
+  ;; pairs stay together, a trailing comment rides its pair's line, an own-line
+  ;; comment sits on its own line at the pair indent.
+  (test "a trailing comment in let bindings keeps the pair together, inline"
+    (let (out (format-source "(let (a 1\n      b 2  ; note\n      c 3)\n  body)"))
+      (is (string-contains? out "b 2  ; note"))   ; pair intact, comment inline
+      (is (string-contains? out "a 1\n      b 2"))   ; aligned under the first element
+      (is (not (string-contains? out "b\n")))))   ; name never split from its value
+  (test "an own-line comment in let bindings stays on its own line, pairs intact"
+    (let (out (format-source "(let (a 1\n      ;; mid\n      b 2)\n  body)"))
+      (is (string-contains? out "a 1\n      ;; mid\n      b 2"))))
+  (test "a comment in a map pairs up like bindings (not one element per line)"
+    (let (out (format-source "(def m {:a 1\n        :b 2  ; note\n        :c 3})"))
+      (is (string-contains? out ":b 2  ; note"))
+      (is (not (string-contains? out ":b\n")))))
+  (test "comments in pair-lists are idempotent"
+    (let (out (format-source "(let (a 1\n      b 2  ; note\n      ;; mid\n      c 3)\n  body)"))
+      (assert= out (format-source out)))))
 
 (describe "format: comment markers preserved verbatim"
   ;; Lisp convention is `;` for trailing comments, `;;` at the current code
