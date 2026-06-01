@@ -19,7 +19,7 @@
 ;; This is the counterpart to the display seam: `std/display.blsp` is "render-ops
 ;; out"; this is "key events in". Both are policy in Brood over a thin term-* seam.
 
-(defmodule keymap
+(defmodule editor/keymap
   "A rebindable key→command dispatcher for interactive UIs. A *keymap* maps a key
 (a `term-poll` value) to either a command **symbol** — a global `(fn (state key) ->
 state)` — or a nested **keymap** (a prefix, for chords like `C-x C-e`). Bindings

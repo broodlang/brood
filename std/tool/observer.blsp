@@ -53,19 +53,19 @@ the pure core (node + process data → a render frame); `observe--loop` is the I
 loop over a pluggable data **source**, so the *same* loop observes the local
 runtime (`observe-attach`) or, later, a peer runtime over a node link (remote
 attach). Drive the standalone app from the shell with `nest observe`."
-  (:use display)
-  (:use face)
-  (:use highlight)
-  (:use keymap)
-  (:use lineedit)
-  (:use ui))
+  (:use editor/display)
+  (:use editor/face)
+  (:use editor/highlight)
+  (:use editor/keymap)
+  (:use editor/lineedit)
+  (:use editor/ui))
 
-(require 'display)
-(require 'keymap)  ; the shared key→command dispatcher (also used by the REPL)
-(require 'face)  ; the shared named-face / theme registry
-(require 'ui)  ; the reusable app framework — frontends + the `ui-run` loop
-(require 'lineedit)  ; the minibuffer reuses lineedit's pure editing core
-(require 'highlight)  ; …and its syntax colouring (shared with the REPL line editor)
+(require 'editor/display)
+(require 'editor/keymap)  ; the shared key→command dispatcher (also used by the REPL)
+(require 'editor/face)  ; the shared named-face / theme registry
+(require 'editor/ui)  ; the reusable app framework — frontends + the `ui-run` loop
+(require 'editor/lineedit)  ; the minibuffer reuses lineedit's pure editing core
+(require 'editor/highlight)  ; …and its syntax colouring (shared with the REPL line editor)
 (require 'proctree)  ; the parent→child forest ordering (shared with myedit's process list)
 
 ;; ---- faces (named, via the shared `face` registry) --------------------------
@@ -251,7 +251,7 @@ completion already works via `lineedit/lineedit--handle`'s keymap in `observe--c
         len (string-length input)
         vis (substring input hs (min len (+ hs avail)))
         point (get edit :point)
-        overrides (lineedit/lineedit--overrides input point)
+        overrides (editor/lineedit/lineedit--overrides input point)
         chunks (highlight-chunks input hs vis overrides)
         cursor-col (min (max 0 (dec cols)) (+ promptw (- point hs))))
     (append [(text row 0 prompt (face :observer/minibuffer-prompt))]
@@ -494,7 +494,7 @@ Clamped to a valid row."
   "Open the eval minibuffer (a Brood prompt). Enter evaluates in the observed
 runtime (locally inline, or on the peer when remote-attached); Ctrl-C cancels.
 Seeds the line editor with the session's command history (↑/↓ recall, C-r search)."
-  (assoc state :mode :command :edit (lineedit/lineedit--init "λ " "" (get state :history)) :msg nil))
+  (assoc state :mode :command :edit (editor/lineedit/lineedit--init "λ " "" (get state :history)) :msg nil))
 
 (defn observe-cmd-tree (state _)
   "Toggle the tree view — the parent→child process forest (children indented under
@@ -605,7 +605,7 @@ string for the minibuffer. The local backend, and what the remote agent runs."
   "Feed `key` to the minibuffer's line editor (reusing lineedit's pure core). On
 submit, evaluate the text via `backend`'s `:eval` and show the result; on cancel /
 EOF, return to navigation; otherwise keep editing."
-  (let (edit (lineedit/lineedit--handle (get state :edit) key)
+  (let (edit (editor/lineedit/lineedit--handle (get state :edit) key)
         done (get edit :done))
     (cond
       (= done :submit) (assoc state
@@ -614,7 +614,7 @@ EOF, return to navigation; otherwise keep editing."
                          :edit
                          nil
                          :history
-                         (lineedit/lineedit--remember (get state :history) (get edit :text))
+                         (editor/lineedit/lineedit--remember (get state :history) (get edit :text))
                          :msg
                          ((get backend :eval) (get edit :text)))
       (nil? done) (assoc state :edit edit)

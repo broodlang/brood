@@ -22,17 +22,17 @@
 ;; chunked downloads, and a WebSocket upgrade all build on; the kernel still adds
 ;; nothing.
 
-(require 'tcp)
+(require 'net/tcp)
 (require 'file)
 
-(defmodule http
+(defmodule net/http
   "A minimal HTTP/1.0 server over the TCP + file libraries (ADR-062). `(serve port
 handler)` listens and runs one handler process per connection; a handler maps a
 request map to a response map. Includes request parsing, response rendering, a
 `router`, and static-file serving with MIME guessing. A handler may instead return
 a `stream-response` to keep the connection open and push over the live socket (the
 seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
-  (:use tcp)
+  (:use net/tcp)
   (:use file))
 
 ;; How long a connection may stall mid-request before we give up.

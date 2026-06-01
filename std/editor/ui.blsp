@@ -21,7 +21,7 @@
 ;; `lineedit.blsp`, colouring via `highlight.blsp`). That is the dogfooding proof —
 ;; the framework is whatever the observer needs, nothing observer-specific.
 
-(defmodule ui
+(defmodule editor/ui
   "A small terminal/GUI app framework over the M3 display/input seam (ADR-046): a
 `display` frontend (`*term-display*` / `(gui-display)` / `display-broadcast`) plus a
 TEA-style `(ui-run model view update display)` loop. Build an app by supplying a
@@ -29,9 +29,9 @@ pure `view` (model + cols/rows → a render frame) and an `update` (model + inpu
 cols/rows → model); set `:done` in the model to quit, `:tick-ms` to set the refresh
 beat. The observer and the coming editor are both `ui-run` clients — see
 `std/observer.blsp`."
-  (:use face))
+  (:use editor/face))
 
-(require 'face)  ; the shared named-face / theme registry, for every ui-run client
+(require 'editor/face)  ; the shared named-face / theme registry, for every ui-run client
 
 ;; ---- frontends (ADR-046: one render-op protocol, many frontends) ------------
 ;;

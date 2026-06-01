@@ -3,9 +3,9 @@
 ;; `nest test` from examples/editor (its src/ is on the load-path, so requiring
 ;; the modes resolves them).
 
-(defmodule modes-test (:use test) (:use buffer) (:use layers))
-(require 'buffer)
-(require 'layers)
+(defmodule modes-test (:use test) (:use editor/buffer) (:use editor/layers))
+(require 'editor/buffer)
+(require 'editor/layers)
 (require 'brood-mode)
 (require 'text-mode)  ; from src/ (editor policy, not embedded)
 

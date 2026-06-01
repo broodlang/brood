@@ -5530,11 +5530,47 @@ The user's framing: **"std must be very basic functions for a normal language."*
   first, so the editor app (`~/src/whk/myedit`) and the in-tree test suite can
   follow.
 
-**Status.** Decided (direction + the three moves); **not yet built.** Sequencing:
-hierarchical module names (the language change) first, then curate `std/` and lift
-the frameworks into packages. Gated like every additive capability (ADR-011) — the
-GUI framework is the first concrete consumer that pulls the hierarchical-name work
-in. Tracked in `roadmap.md` (M1, after Namespaces / Package manager).
+**Status.** Decided (direction + the three moves). **Move 3 (hierarchical module
+names) is done** (2026-06-01): `(defmodule gui/window)` qualifies defs to
+`gui/window/draw` (split on the last `/`), loads from a nested `gui/window.blsp`,
+imports via `(:use gui/window)`, and round-trips across processes — verified end
+to end (`nest check`/`run`) and in the *hierarchical module names* block of
+`tests/namespace_test.blsp`. The capability was almost entirely already there:
+because a qualified name is one interned symbol over the flat table, the loader
+(`require--find` path-joins the stem), `qualify_name` (formats `{ns}/{name}`), and
+the resolver's `contains('/')` "already qualified?" guards are all
+separator-count-agnostic. The only fixes were the two sites that *split* a
+qualified name back into module + name: `semantic_tokens.rs` (`find('/')` →
+`rfind('/')`) and `unbound_namespace_hint` (dropped the `!contains('/')` filter so
+a hierarchical module is suggested). See [`namespaces.md`](namespaces.md) §3.
+**Move 1 (curate `std/`) — the in-tree reorganization is done** (2026-06-01).
+`std/` is now grouped on disk, and the framework modules are namespaced:
+
+- **Core stays bare in `std/`** (a normal language's stdlib): `prelude`, `io`,
+  `file`, `set`, `regex`, `json`, `fuzzy`, `format`, `task`, `log`.
+- **Frameworks are namespaced** (the things Move 2 will externalize): `editor/*`
+  (`ansi buffer display face highlight keymap layers lineedit pane ui`), `net/*`
+  (`http sse tcp`), `proc/*` (`hatch supervisor`) — files under
+  `std/{editor,net,proc}/`, modules `(defmodule editor/buffer …)`, referenced
+  `editor/buffer/insert` / imported `(:use editor/buffer)`.
+- **Toolchain is grouped but *not* namespaced.** `test project package docs
+  reload mcp observer proctree repl sexp` moved to `std/tool/` **on disk**, but
+  keep **bare module names** (`(defmodule test …)`, `(:use test)`,
+  `test/run-tests`). This honours the rule that the *internal* toolchain stays at
+  root (namespaces.md §10: the ergonomic `describe`/`test`/`is` macros stay root)
+  — the directory groups them without namespacing their identity. The embedded
+  `%builtin-module` table keys them bare (`"test"`) while pointing `include_str!`
+  at `std/tool/test.blsp`, so `require` resolves the bare name to the grouped file.
+
+The mechanical rewrite was a token-aware pass (skips comments/strings, leaves
+`:keyword` face names like `:ui/header` untouched, rewrites only `defmodule`/
+`require`/`:use`/`provide` module positions + non-keyword `mod/name` symbols);
+the Rust eval-string bootstraps in the binaries + the embedded table were updated
+to match. Full suite green. **Move 2 (actually lift the namespaced frameworks out
+of the binary into external packages, with `myedit` depending on them via the
+package manager) is not yet built** — gated like every additive capability
+(ADR-011) on the first concrete consumer (the GUI framework); the namespacing +
+grouping done here is what it builds on. Tracked in `roadmap.md`.
 
 ## ADR-086 — GUI keys are press/release transitions, not an OS-repeat flood
 

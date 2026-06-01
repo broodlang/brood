@@ -12,7 +12,7 @@
 ;;  - The faces are `display.blsp`-style maps (`{:fg :cyan}` …) so they feed
 ;;    straight into a `[:print str face]` op for `term-emit`.
 
-(defmodule highlight
+(defmodule editor/highlight
   "Lexical syntax highlighting and bracket / call-site analysis for Brood source,
 as pure functions over a source string (ADR-052):
 

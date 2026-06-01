@@ -22,7 +22,7 @@
 ;;    sends `[:$stop]` to a child marked `:shutdown :infinity`, which tears its own
 ;;    children down first. Mark every supervisor child `:shutdown :infinity`.
 
-(defmodule supervisor
+(defmodule proc/supervisor
   "OTP-style supervision written in Brood over the kernel's spawn / link / trap-exit
 / receive / exit (ADR-006, ADR-067). A supervisor process starts a set of children,
 links + traps them, and restarts them per a strategy and restart type when they

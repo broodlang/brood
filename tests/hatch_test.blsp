@@ -2,7 +2,7 @@
 ;; spawn/send/receive/ref. :isolated because each test spawns processes and we
 ;; (re)define servers as globals.
 
-(defmodule hatch-test (:use test) (:use hatch))
+(defmodule hatch-test (:use test) (:use proc/hatch))
 
 (describe "hatch: cast and call"
   :isolated

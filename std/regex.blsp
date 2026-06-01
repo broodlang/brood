@@ -27,7 +27,7 @@ tie to the string's start/end); `(regex/matches? pattern s)` requires the whole
 string to match. Subset: literals, `.`, `* + ?`, `^ $`, `[...]`/`[^...]` sets
 (explicit chars), `\\d \\w \\s`, escapes, `|`, and `(...)` groups. No ranges,
 captures, or backreferences yet."
-  (:use buffer))
+  (:use editor/buffer))
 
 ;; ---- parse: pattern string -> AST -------------------------------------------
 ;; A pattern parses to a list of BRANCHES (the top-level alternation); each branch

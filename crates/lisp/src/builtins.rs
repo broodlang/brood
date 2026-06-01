@@ -2934,20 +2934,20 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // Fuzzy (subsequence) string matching + ranking: `fuzzy-match` / `fuzzy-filter`,
     // the matcher completion UIs ride on. Pure Brood, no dependencies. Opt-in.
     ("fuzzy", include_str!("../../../std/fuzzy.blsp")),
-    ("project", include_str!("../../../std/project.blsp")),
+    ("project", include_str!("../../../std/tool/project.blsp")),
     // The package manager (ADR-037): resolves the manifest's :dependencies into a
     // lock file + load-path entries. Required lazily by `project-setup` only when a
     // project actually declares deps. Opt-in, never in the prelude.
-    ("package", include_str!("../../../std/package.blsp")),
+    ("package", include_str!("../../../std/tool/package.blsp")),
     // TCP sockets (ADR-062): active-socket helpers + a spawn-per-connection
     // server over the non-blocking tcp-* primitives. Opt-in, never in the prelude.
-    ("tcp", include_str!("../../../std/tcp.blsp")),
+    ("net/tcp", include_str!("../../../std/net/tcp.blsp")),
     // The file & filesystem library: whole-file/line I/O, directory walking, path
     // helpers — Brood over the fs primitives. Opt-in, never in the prelude.
     ("file", include_str!("../../../std/file.blsp")),
     // A minimal HTTP/1.0 server (ADR-062) over the tcp + file libraries — request
     // parsing, response rendering, a router, static files. Opt-in.
-    ("http", include_str!("../../../std/http.blsp")),
+    ("net/http", include_str!("../../../std/net/http.blsp")),
     // JSON ↔ Brood data, written entirely in Brood (a recursive-descent parser +
     // encoder over the string primitives; the reader's `\u{}` escape is the
     // codepoint→char mechanism). Opt-in, never in the prelude.
@@ -2955,9 +2955,9 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // A Server-Sent Events (text/event-stream) client: a reader process that streams
     // events to a subscriber's mailbox (pairs with ui's `with-events`). Pure frame
     // parsing + a thin IO loop over tcp; reuses http's URL/header helpers. Opt-in.
-    ("sse", include_str!("../../../std/sse.blsp")),
-    ("hatch", include_str!("../../../std/hatch.blsp")),
-    ("supervisor", include_str!("../../../std/supervisor.blsp")),
+    ("net/sse", include_str!("../../../std/net/sse.blsp")),
+    ("proc/hatch", include_str!("../../../std/proc/hatch.blsp")),
+    ("proc/supervisor", include_str!("../../../std/proc/supervisor.blsp")),
     // Run a thunk off the current process with an optional timeout + cancel
     // (ADR-006): `task` (async, tagged-reply handle), `cancel-task`, and the
     // synchronous `await`. Pure Brood over spawn / receive / exit — the generic
@@ -2970,7 +2970,7 @@ const CORE_MODULES: &[(&str, &str)] = &[
     ("log", include_str!("../../../std/log.blsp")),
     // The editor framework's buffer model (M2 Phase 1, ADR-045): an immutable
     // buffer over the rope primitives, opt-in, never in the prelude.
-    ("buffer", include_str!("../../../std/buffer.blsp")),
+    ("editor/buffer", include_str!("../../../std/editor/buffer.blsp")),
     // The display/input seam (M3, ADR-046): `display` is the render-op protocol
     // (pure data constructors); `keymap` is the rebindable key→command dispatcher
     // shared by the line editor and the observer; `observer` is a process-viewer
@@ -2978,31 +2978,31 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // The shared named-face / theme registry (the counterpart to `keymap`): style
     // named once, referenced everywhere, restyled in one place. Required by `ui`
     // (so every ui-run app gets it) and the observer.
-    ("face", include_str!("../../../std/face.blsp")),
-    ("display", include_str!("../../../std/display.blsp")),
-    ("keymap", include_str!("../../../std/keymap.blsp")),
+    ("editor/face", include_str!("../../../std/editor/face.blsp")),
+    ("editor/display", include_str!("../../../std/editor/display.blsp")),
+    ("editor/keymap", include_str!("../../../std/editor/keymap.blsp")),
     // Composable, runtime-reconfigurable behaviour layers over `keymap` (the
     // generic mechanism the editor's "modes" are built from; buffer-agnostic).
     // Opt-in, never in the prelude. See docs/layers.md.
-    ("layers", include_str!("../../../std/layers.blsp")),
+    ("editor/layers", include_str!("../../../std/editor/layers.blsp")),
     // Structural (s-expression) navigation over the parse-source CST — reusable
     // Brood-code tooling (same tier as the formatter / LSP), not editor-specific.
     // (The text-mode/brood-mode *layers* built on it are editor policy and live in
     // the editor app — examples/editor/src/ — not here.) Opt-in. (docs/layers.md)
-    ("sexp", include_str!("../../../std/sexp.blsp")),
+    ("sexp", include_str!("../../../std/tool/sexp.blsp")),
     // A small backtracking regular-expression engine, pure Brood (literals, ., * + ?,
     // ^ $, [...] sets, \d \w \s, |, groups; no ranges/captures yet). Opt-in.
     ("regex", include_str!("../../../std/regex.blsp")),
-    ("ui", include_str!("../../../std/ui.blsp")),
+    ("editor/ui", include_str!("../../../std/editor/ui.blsp")),
     // Emacs-style tiled window splits: an immutable binary layout tree + pure
     // pane/divider geometry + drag-to-resize over `:drag` mouse events (ADR-077).
     // Reusable editor toolkit (content-agnostic); the keybindings + payload are
     // editor policy. Opt-in, never in the prelude.
-    ("pane", include_str!("../../../std/pane.blsp")),
+    ("editor/pane", include_str!("../../../std/editor/pane.blsp")),
     // Bare ANSI escape *strings* for simple terminal scripts (`print` them
     // directly) — the lightweight counterpart to the `display` render-op
     // protocol. Opt-in, never in the prelude.
-    ("ansi", include_str!("../../../std/ansi.blsp")),
+    ("editor/ansi", include_str!("../../../std/editor/ansi.blsp")),
     // Sets as a library over maps (ADR-062): a set is a map of `element → true`,
     // so membership/elements/size reuse `contains?`/`keys`/`count`; the module
     // adds `set`/`conj`/`disj`/`union`/`intersection`/`difference`/`subset?`.
@@ -3015,8 +3015,8 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // `highlight`/`lineedit` stay in CORE: they are reusable UI a shipped app may
     // `require` (the editor's minibuffer reuses `std/lineedit`'s core), not just
     // REPL plumbing — so a lean release keeps them.
-    ("highlight", include_str!("../../../std/highlight.blsp")),
-    ("lineedit", include_str!("../../../std/lineedit.blsp")),
+    ("editor/highlight", include_str!("../../../std/editor/highlight.blsp")),
+    ("editor/lineedit", include_str!("../../../std/editor/lineedit.blsp")),
     ("format", include_str!("../../../std/format.blsp")),
 ];
 
@@ -3029,23 +3029,23 @@ const CORE_MODULES: &[(&str, &str)] = &[
 #[cfg(feature = "dev-tools")]
 const DEV_MODULES: &[(&str, &str)] = &[
     // The test framework — `deftest`/`describe`/`assert=`/`is`. Never shipped.
-    ("test", include_str!("../../../std/test.blsp")),
+    ("test", include_str!("../../../std/tool/test.blsp")),
     // Doc generation (`nest doc`) — tooling, not runtime.
-    ("docs", include_str!("../../../std/docs.blsp")),
+    ("docs", include_str!("../../../std/tool/docs.blsp")),
     // Order a process-info snapshot as a parent→child forest (the tree view).
-    ("proctree", include_str!("../../../std/proctree.blsp")),
+    ("proctree", include_str!("../../../std/tool/proctree.blsp")),
     // The process viewer / debug tooling (`nest observe`, `(observe)`).
-    ("observer", include_str!("../../../std/observer.blsp")),
+    ("observer", include_str!("../../../std/tool/observer.blsp")),
     // The hot-reload file watcher — a dev-loop convenience.
-    ("reload", include_str!("../../../std/reload.blsp")),
+    ("reload", include_str!("../../../std/tool/reload.blsp")),
     // The Model Context Protocol tool surface — `(mcp-tools)` returns the
     // catalogue the `nest mcp` dispatcher reads (ADR-036, docs/mcp.md, step 3).
-    ("mcp", include_str!("../../../std/mcp.blsp")),
+    ("mcp", include_str!("../../../std/tool/mcp.blsp")),
     // The read-eval-print loop itself, written in Brood (`(require 'repl)`):
     // policy over the `read-line`/`eval-string`/`pr-str` primitives. The Rust
     // binaries (`brood`, `nest repl`) just bootstrap into `(repl-run)`. A shipped
     // app runs its own `:main`, never the REPL.
-    ("repl", include_str!("../../../std/repl.blsp")),
+    ("repl", include_str!("../../../std/tool/repl.blsp")),
 ];
 
 /// Empty in a lean (`--no-default-features`) release runtime — the dev modules

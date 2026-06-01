@@ -20,12 +20,12 @@
 sexp navigation (`std/sexp`) + `C-x C-e` evaluate-last-sexp (`std/eval-command`,
 result into `:message`). Registers `.blsp` → `:brood` → this layer. `(require
 'brood-mode)`."
-  (:use layers)
-  (:use keymap))
+  (:use editor/layers)
+  (:use editor/keymap))
 
-(require 'buffer)
-(require 'layers)
-(require 'keymap)
+(require 'editor/buffer)
+(require 'editor/layers)
+(require 'editor/keymap)
 (require 'sexp)
 (require 'eval-command)
 (require 'text-mode)

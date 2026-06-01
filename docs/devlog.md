@@ -11640,3 +11640,97 @@ builds (`into {}`/transient) −10..−12%; `sequence/sort` −10%; `join`/`spli
 - Reinstalled the toolchain (`make install`) so the embedded `nest`/`brood-lsp`
   pick up `map-count`/`%quot` (the check-hook had flagged `map-count` as unbound
   against the stale on-PATH binary).
+
+## 2026-06-01 — Hierarchical module names (ADR-085 Move 3)
+
+**Goal.** Land the enabling language change of ADR-085: let a module name itself
+contain `/` (`(defmodule gui/window)`), so the future GUI framework and the
+`std/`-curation/lift-to-packages work have a namespace shape to land into. The
+ADR sequences this *first* of the three moves; Moves 1 (curate `std/`) and 2
+(lift frameworks into external packages) stay gated on the GUI consumer.
+
+**Finding: it was ~90% already there.** Empirically (not by reading), a
+hierarchical module already loaded, qualified, imported, and ran end to end —
+`(require 'gui/window)` finds `gui/window.blsp` (`require--find` path-joins the
+stem, so the nested dir Just Works), `(defmodule gui/window)` qualifies defs to
+`gui/window/draw` (split on the **last** `/`, since `qualify_name` only formats
+`{ns}/{name}` and doesn't care how many segments `ns` has), `(:use gui/window)`
+refers names bare, and a value built by a hierarchical-ns fn round-trips through
+a process. `nest check`/`run` on a scratch project were clean. The reason: a
+qualified name is **one interned symbol over the flat table** (ADR-019/065), and
+every "already qualified?" guard is `name.contains('/')` — separator-count-
+agnostic. So no reader/resolver/loader change was needed.
+
+The earlier worry that "the checker false-warns on hierarchical names" was a
+**misread**: single-file `brood <file>` checking false-warns on *any* external
+load-path module (flat `widget/paint` too), because the `require` hasn't run at
+check time — it's a known single-file limitation, not hierarchical-specific, and
+it doesn't fire under project-mode `nest check` (which loads the image first).
+
+**The two real fixes** — both at sites that *split* a qualified name back into
+module + name and wrongly assumed one separator:
+
+- `crates/lsp/src/semantic_tokens.rs` — `name.find('/')` → `rfind('/')`, so a
+  3-segment `gui/window/draw` colours the whole `gui/window` path as `NAMESPACE`
+  and `draw` as the name (was: `gui` namespace, `window/draw` name).
+- `crates/lisp/src/eval/mod.rs` `unbound_namespace_hint` — dropped the
+  `!m.contains('/')` filter, so the "did you mean `(:use …)`" hint now suggests a
+  hierarchical module (`add (:use gui/window)`) instead of silently skipping it.
+  Verified: a bare `draw` whose only global is `gui/window/draw` now hints both
+  the `(:use gui/window)` and the `gui/window/draw` qualified spellings.
+
+**Tests.** A *hierarchical module names (ADR-085)* `:isolated` block in
+`tests/namespace_test.blsp` (6 cases): last-`/` qualification, a 3-segment
+module, bare same-ns resolution, explicit cross-module qualified reference,
+`(:use gui/lib)` bare import, and a cross-process round-trip of a value built by
+a hierarchical-ns fn. 24/24 in the file. (The block adds the same documented
+`unbound symbol: ns/…` advisories the existing dynamic-`%load-string` fixtures
+already produce — static analysis can't see a runtime-`%load-string`'d def;
+advisory-only, suite green.)
+
+**Docs.** `namespaces.md` §3 gains a *Hierarchical module names* subsection;
+ADR-085 status updated (Move 3 done, Moves 1/2 still gated); roadmap M1 entry
+flipped to 🟡 with Move 3 ✅.
+
+**Not done (deliberately).** Moves 1 + 2 — they're a breaking reorg touching
+`myedit`, gated on the GUI framework consumer (ADR-011). Hierarchical names now
+unblock them.
+
+## 2026-06-01 — std/ reorganization: frameworks namespaced, toolchain grouped-but-bare (ADR-085 Move 1)
+
+**Goal.** With hierarchical names landed (Move 3, earlier today), do the in-tree
+half of ADR-085 Moves 1+2: stop `std/` being a flat grab-bag of ~35 modules where
+the editor/display framework, the net library, the concurrency framework, and the
+internal toolchain all wear the same coat.
+
+**As-built scheme.**
+- **Core stays bare in `std/`** — `prelude io file set regex json fuzzy format task log`.
+- **Frameworks namespaced** under `std/{editor,net,proc}/` — `editor/*` (ansi
+  buffer display face highlight keymap layers lineedit pane ui), `net/*` (http sse
+  tcp), `proc/*` (hatch supervisor). These are the things Move 2 will externalize
+  into packages, so they get a namespace now: `(:use editor/buffer)`,
+  `editor/buffer/insert`.
+- **Toolchain grouped but NOT namespaced.** `test project package docs reload mcp
+  observer proctree repl sexp` moved to `std/tool/` *on disk* but keep **bare
+  module names**. This was a mid-flight correction: the first pass prefixed them
+  `tool/`, but the *internal* toolchain stays at root (namespaces.md §10 — the
+  ergonomic `describe`/`test`/`is` macros stay root), so every test file keeps
+  `(:use test)`, not `(:use tool/test)`. The embedded `%builtin-module` table keys
+  them bare (`"test"`) while `include_str!`-ing the grouped path
+  (`std/tool/test.blsp`), so `require` maps the bare name to the grouped file.
+
+**How.** A token-aware rewriter (not regex-on-text): it skips `;` comments and
+`"`-strings, leaves `:keyword` face names (`:ui/header`, `:observer/detail`)
+untouched — they're face-registry data, not module symbols — and rewrites only
+bare module names in `defmodule`/`require`/`:use`/`provide` positions plus
+non-keyword `mod/name` symbols. The two real hazards a blind pass would have hit:
+`docs/foo.md` directory paths in comments (most `docs/` occurrences) and the
+`:module/role` face keywords; both are handled by the skip rules. The Rust side
+(binary bootstraps + the embedded table + a few test eval-strings) was updated to
+match, comment-line-aware. `make install` refreshed the on-PATH `nest`/`brood-lsp`
+the check-hook runs (the usual stale-binary gotcha).
+
+**Result.** Full in-language suite (1287) + nest tests green. Files moved with
+`git mv` (history preserved). Move 2 proper — lifting the namespaced frameworks
+out of the binary into packages with `myedit` depending on them — stays deferred,
+gated on the GUI consumer (ADR-011); this reorg is what it builds on.

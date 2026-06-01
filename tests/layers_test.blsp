@@ -1,9 +1,9 @@
 ;; std/layers — composable behaviour layers (Phase 1: the buffer-free core).
 ;; Register-only — run by `nest test` (and cargo test, via crates/lisp/tests/suite.rs).
 
-(defmodule layers-test (:use test) (:use keymap) (:use layers))
-(require 'keymap)
-(require 'layers)
+(defmodule layers-test (:use test) (:use editor/keymap) (:use editor/layers))
+(require 'editor/keymap)
+(require 'editor/layers)
 
 ;; ---- fixtures: commands, hooks, and layers (def'd globals, by qualified symbol) ----
 ;; A test context is a map {:log <string> :layers <list>}; commands/hooks append to

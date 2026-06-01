@@ -4,7 +4,7 @@
 ;; block proves a layout tree (plain map/list data) deep-copies across process heaps
 ;; unchanged — every feature must hold across cores, not just single-threaded.
 
-(defmodule pane-test (:use test) (:use pane))
+(defmodule pane-test (:use test) (:use editor/pane))
 
 ;; A worker that echoes one received message back to `parent` (round-trip proof).
 ;; `spawn` is a macro that runs its argument expression in the new process, so the

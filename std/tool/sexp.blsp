@@ -21,9 +21,9 @@ position functions `(text point) -> point` — `point-forward` / `point-backward
 / `point-up` / `point-down` / `point-defun-start` — plus buffer commands
 `forward` / `backward` / `up` / `down` / `beginning-of-defun` `(buf key) -> buf`
 for binding in a keymap. `(require 'sexp)`."
-  (:use buffer))
+  (:use editor/buffer))
 
-(require 'buffer)
+(require 'editor/buffer)
 
 ;; ---- node-kind predicates ---------------------------------------------------
 

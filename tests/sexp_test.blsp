@@ -2,9 +2,9 @@
 ;; Reusable Brood-code tooling (the editor's brood-mode binds these, but they're not
 ;; editor-specific). Register-only — run by `nest test` (and cargo test, via suite.rs).
 
-(defmodule sexp-test (:use test) (:use sexp) (:use buffer))
+(defmodule sexp-test (:use test) (:use sexp) (:use editor/buffer))
 (require 'sexp)
-(require 'buffer)
+(require 'editor/buffer)
 
 ;; (defn f (x)\n  (+ x 1))   — outer list [0,22); 'defn' [1,5); 'f' [6,7);
 ;; (x) [8,11); inner (+ x 1) [14,21).

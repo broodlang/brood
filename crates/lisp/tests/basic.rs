@@ -809,6 +809,24 @@ fn unbound_bare_name_suggests_use_of_its_namespace() {
     assert!(printed.contains("set/union"), "{printed}");
 }
 
+/// The same fix-it for a *hierarchical* module (ADR-085): a bare name whose only
+/// global is `gui/window/draw` suggests `(:use gui/window)` — the multi-segment
+/// module name must survive the hint's filter (it used to drop anything with a
+/// `/`). `eval::unbound_namespace_hint`.
+#[test]
+fn unbound_bare_name_suggests_use_of_a_hierarchical_namespace() {
+    let mut interp = Interp::new();
+    interp
+        .eval_str("(%load-string \"(defmodule gui/window) (defn draw (x) x)\")")
+        .unwrap();
+    let r = interp
+        .eval_str("(try (draw 1) (catch e (get e :hint)))")
+        .unwrap();
+    let printed = interp.print(r);
+    assert!(printed.contains("(:use gui/window)"), "{printed}");
+    assert!(printed.contains("gui/window/draw"), "{printed}");
+}
+
 /// Parse errors caught by `try`/`catch` carry the `:line` and `:col` the
 /// reader recorded — agents can highlight the bad span without parsing the
 /// message string. (The kernel raises before the source is bound, so `:file`

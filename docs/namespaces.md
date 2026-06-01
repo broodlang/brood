@@ -143,6 +143,28 @@ one thing it deliberately can't do is *hard* sealing — which §2 says we don't
   qualified name. Implemented in `eval/macros.rs` (`resolve`/`compile`),
   `core/heap.rs` (`compile_ns`, `def_form_name`), and the loaders.
 
+### Hierarchical module names (ADR-085)
+
+A module name may itself contain `/`: `(defmodule gui/window)` declares the
+namespace `gui/window`, loaded from `gui/window.blsp` (nested under a load-path
+dir) or the embedded table keyed on the full `"gui/window"` stem. Its
+definitions qualify on the **last** `/` — module `gui/window` + def `draw` is the
+single interned symbol `gui/window/draw`. This is the **same flat-table
+machinery one level deeper**, not a new axis: a qualified name is still one
+symbol, `require--find` already path-joins the stem (`gui/window.blsp` resolves
+in a nested dir), and `qualify_name` formats `{ns}/{name}` regardless of how many
+segments `ns` has. So resolution, `(:use gui/window)` imports, the cross-process
+re-intern, and `nest check` all carry over unchanged.
+
+The only sites that *assumed a single separator* — and were corrected — are the
+two that **split** a qualified name back into module + name: the LSP semantic
+tokeniser (`semantic_tokens.rs`, now `rfind('/')` so the whole `gui/window` path
+colours as `NAMESPACE` and `draw` as the name) and the runtime "did you mean
+`(:use …)`" hint (`unbound_namespace_hint`, no longer filtering out multi-segment
+modules). The `name.contains('/')` "already qualified?" guards in the resolver
+need no change — they're separator-count-agnostic. Covered by the *hierarchical
+module names* block in `tests/namespace_test.blsp`.
+
 ### Rejected alternative: partition the interner (CL-style)
 
 Making `Value::Sym` carry `(ns, name)` in `value.rs` is the "more correct" model,

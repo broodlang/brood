@@ -165,6 +165,20 @@ thread_local! {
     /// saved/restored across suspend, exactly like `GC_BLOCK`/`STACK_BASE`, since
     /// expansion can suspend (its inner evals `tick`).
     static MACRO_BLOCK: Cell<u32> = const { Cell::new(0) };
+
+    /// Runtime-compaction pin depth: how many compiled-VM bodies
+    /// (`compile::vm_apply`) are live on this coroutine's stack. The eval
+    /// safepoint must **not** run a RUNTIME-region compaction
+    /// (`Heap::runtime_collect`) while this is nonzero: a compiled `CompiledArm`
+    /// holds RUNTIME constant handles inline in its node tree (and lives behind an
+    /// `Arc` on the Rust stack, unreachable from the heap roots), so evacuating the
+    /// region out from under it would leave those handles dangling — the slab-OOB /
+    /// silent-corruption class fixed alongside the [`needs_root_slot`] rooting bug
+    /// (`docs/known-issues.md`). LOCAL collection is unaffected (it never moves a
+    /// RUNTIME handle). Reset to 0 at coroutine entry and saved/restored across
+    /// suspend, exactly like `MACRO_BLOCK`, since `vm_apply` can suspend (its body
+    /// `tick`s). [`needs_root_slot`]: crate::core::heap::needs_root_slot
+    static RT_PIN: Cell<u32> = const { Cell::new(0) };
 }
 
 /// Current GC-block depth — feeds the stack-overflow byte guard's base
@@ -234,6 +248,46 @@ impl Drop for MacroBlockGuard {
     #[inline]
     fn drop(&mut self) {
         MACRO_BLOCK.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
+
+/// True while a compiled-VM body is live on this coroutine's stack — the eval
+/// safepoint suppresses RUNTIME-region compaction then (see `RT_PIN`).
+#[inline]
+pub fn rt_compact_pinned() -> bool {
+    RT_PIN.with(|d| d.get() > 0)
+}
+
+/// Read the RT-pin depth for save/restore around a coroutine suspend.
+#[inline]
+pub(super) fn rt_pin_save() -> u32 {
+    RT_PIN.with(|d| d.get())
+}
+
+/// Write the RT-pin depth — paired with `rt_pin_save` around a suspend, and used
+/// by a fresh coroutine to wipe the worker's residual value.
+#[inline]
+pub(super) fn rt_pin_set(n: u32) {
+    RT_PIN.with(|d| d.set(n));
+}
+
+/// RAII guard: increments `RT_PIN` for the lifetime of a `vm_apply` frame, so the
+/// eval safepoint won't compact the RUNTIME region while the frame's compiled body
+/// (which embeds RUNTIME constant handles) is live. `Drop` runs on every return.
+pub struct RtPinGuard;
+
+impl RtPinGuard {
+    #[inline]
+    pub fn enter() -> Self {
+        RT_PIN.with(|d| d.set(d.get() + 1));
+        RtPinGuard
+    }
+}
+
+impl Drop for RtPinGuard {
+    #[inline]
+    fn drop(&mut self) {
+        RT_PIN.with(|d| d.set(d.get().saturating_sub(1)));
     }
 }
 
@@ -496,6 +550,7 @@ fn preempt() {
         let saved_block = gc_block_save();
         let saved_base = stack_base_save();
         let saved_macro = macro_block_save();
+        let saved_rt_pin = rt_pin_save();
         // SAFETY: same invariant as `receive` — the yielder is valid while this
         // coroutine is running, which is now (tick runs inside eval, inside the
         // coroutine body). Suspending returns control to the worker (`run_one`).
@@ -504,6 +559,7 @@ fn preempt() {
         gc_block_set(saved_block);
         stack_base_set(saved_base);
         macro_block_set(saved_macro);
+        rt_pin_set(saved_rt_pin);
     }
     // Root thread (yielder None): budget refreshed, never suspends.
 }
@@ -888,6 +944,7 @@ pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
         gc_block_set(0);
         stack_base_set(0);
         macro_block_set(0);
+        rt_pin_set(0);
         let mut heap = Heap::with_regions(prelude, runtime);
         heap.set_global(EnvId::GLOBAL);
         // Run the process body. Its memory stays bounded with no help from the

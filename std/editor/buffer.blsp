@@ -18,7 +18,7 @@
 ;; [0, length]; `mark` is a char index or nil. Lines are 0-based; a line's text
 ;; (`buffer-line-at`) includes its trailing newline, matching `rope-line`.
 
-(defmodule buffer
+(defmodule editor/buffer
   "An immutable text buffer for building editors, written in Brood over the rope
 primitives (ADR-045). A *buffer* is a map:
 

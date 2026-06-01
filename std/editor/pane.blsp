@@ -20,7 +20,7 @@
 ;; This is reusable editor *mechanism* (the editor toolkit), not policy: which keys
 ;; split/cycle/resize, and what a payload is, live in the editor (see myedit).
 
-(defmodule pane
+(defmodule editor/pane
   "An immutable binary-tree pane layout (Emacs-style tiled splits) over the M3
 display seam. A leaf shows an opaque payload; a `:row`/`:col` split divides its rect
 by a `:ratio`, reserving one cell for a divider. `pane-layout` turns a tree + a

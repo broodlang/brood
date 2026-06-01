@@ -29,7 +29,7 @@ registered as `:logger`; `(log …)` finds it via `whereis` and falls back to
 stderr if none is running, so a log is never silently lost. A *backend* is an
 `io` port + `:min-level` + `:format` — build one with `stdout-backend` /
 `stderr-backend` / `process-backend` / `file-backend` / `fn-backend`."
-  (:use hatch)  ; defprocess / hatch / ! / stop
+  (:use proc/hatch)  ; defprocess / hatch / ! / stop
   (:use io))    ; ports + io-write
 
 ;; ---- levels -----------------------------------------------------------------
