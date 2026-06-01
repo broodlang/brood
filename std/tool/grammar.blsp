@@ -1,0 +1,107 @@
+;; std/tool/grammar.blsp — generate editor syntax grammars from the language's own
+;; introspection. `(require 'grammar)` / `nest grammar`.
+;;
+;; One source of truth: `(special-forms)` — the kernel's canonical special-form +
+;; core-macro list, already shared by the LSP and the REPL highlighter. This tool
+;; turns it into a VS Code **TextMate** grammar and an **Emacs** font-lock list, so
+;; editor integrations stop hand-maintaining (and drifting) parallel keyword lists.
+;; A future tree-sitter target is the same `special-keywords` over a new emitter.
+;;
+;; Only the special-form *keyword alternation* is data-driven; the rest of a grammar
+;; (comments, strings, the `def…`-head rule, `:keywords`, numbers) is fixed structure.
+;; Macros that aren't in `(special-forms)` (e.g. `spawn`) are coloured by the LSP's
+;; semantic tokens, not this static keyword list — so the static list stays exactly
+;; the canonical set.
+
+(defmodule grammar
+  "Generate editor syntax grammars from `(special-forms)` — one source of truth, no
+drift across editors. `(tmlanguage)` emits a VS Code TextMate grammar (JSON text);
+`(emacs-special-forms)` emits the Emacs `brood-special-forms` defconst. The `nest
+grammar` subcommand prints them (redirect to the editor's grammar file). Pure Brood
+over `(special-forms)` + `json-encode`."
+  (:use json))
+
+;; ---- the source of truth -----------------------------------------------------
+
+(defn special-keywords ()
+  "The special-form / core-macro names to highlight as control keywords:
+`(special-forms)` minus the `def…` heads (those get a distinct name-capturing rule,
+so they must not also land in the keyword alternation). The shared input to every
+grammar target."
+  (filter (fn (k) (not (starts-with? k "def"))) (special-forms)))
+
+;; ---- regex helpers (TextMate uses the Oniguruma engine) ----------------------
+
+;; A single symbol character, as a regex character class — used for the word
+;; boundaries around keywords (so `if` doesn't match inside `iffy`, and `->` not
+;; inside `a->b`). Plain ASCII, no escaping needed.
+(def grammar--sym "[A-Za-z0-9*?!<>=+./_-]")
+
+;; Regex metacharacters to backslash-escape in a literal keyword. `\` is first so
+;; the backslashes we add for the others aren't themselves re-escaped.
+(def grammar--meta (list "\\" "*" "?" "+" "." "(" ")" "[" "]" "{" "}" "|" "^" "$"))
+
+(defn grammar--escape (s)
+  "Backslash-escape regex metacharacters in `s`, so a literal keyword matches itself
+(`let*` → `let\\*`)."
+  (fold (fn (acc c) (replace acc c (str "\\" c))) s grammar--meta))
+
+(defn grammar--alternation (keywords)
+  "An escaped, longest-first `a|b|c` regex alternation. Longest-first so a prefix
+can't shadow a longer form (`->>` before `->`, `let*` before `let`)."
+  (join "|" (map grammar--escape (sort-by (fn (k) (- (count k))) keywords))))
+
+;; ---- TextMate grammar (VS Code) ----------------------------------------------
+
+(defn grammar--bounded (body)
+  "Wrap a regex `body` in symbol-character boundaries on both sides."
+  (str "(?<!" grammar--sym ")(" body ")(?!" grammar--sym ")"))
+
+(defn tmlanguage-grammar ()
+  "The full VS Code TextMate grammar as Brood data (a map). The static rules —
+comments, strings, the `def…`-head name capture, `:keywords`, constants, numbers,
+`&optional` — plus the **generated** special-form pattern (the only data-driven
+part, from `special-keywords`). Returned as data so callers/tests can inspect it;
+`(tmlanguage)` is the JSON serialisation."
+  {:name "Brood"
+   :scopeName "source.brood"
+   :patterns [{:include "#comment"}
+              {:include "#string"}
+              {:include "#definition"}
+              {:include "#special-form"}
+              {:include "#param-marker"}
+              {:include "#constant"}
+              {:include "#keyword"}
+              {:include "#number"}]
+   :repository
+   {:comment {:name "comment.line.semicolon.brood" :match ";.*$"}
+    :string {:name "string.quoted.double.brood"
+             :begin "\""
+             :end "\""
+             :patterns [{:name "constant.character.escape.brood" :match "\\\\."}]}
+    :definition {:match (str "(?<=\\()(def" grammar--sym "*)(\\s+(" grammar--sym "+))?")
+                 :captures {"1" {:name "keyword.declaration.brood"}
+                            "3" {:name "entity.name.function.brood"}}}
+    :special-form {:name "keyword.control.brood"
+                   :match (grammar--bounded (grammar--alternation (special-keywords)))}
+    :param-marker {:name "keyword.operator.brood"
+                   :match "(?<=[\\s(\\[])&(optional)?(?=[\\s)\\]])"}
+    :constant {:name "constant.language.brood" :match (grammar--bounded "nil|true|false")}
+    :keyword {:name "constant.keyword.brood" :match (str ":" grammar--sym "+")}
+    :number {:name "constant.numeric.brood"
+             :match (str "(?<!" grammar--sym ")-?[0-9]+(\\.[0-9]+)?(?!" grammar--sym ")")}}})
+
+(defn tmlanguage ()
+  "The VS Code TextMate grammar as JSON text (the `.tmLanguage.json` file body),
+generated from `(special-forms)`. Redirect `nest grammar` to the grammar file."
+  (json-encode (tmlanguage-grammar)))
+
+;; ---- Emacs font-lock list ----------------------------------------------------
+
+(defn emacs-special-forms ()
+  "The Emacs `brood-special-forms` defconst (elisp text) built from the same
+`special-keywords`, so `brood-mode` can generate its highlight list too."
+  (str "(defconst brood-special-forms\n"
+    "  '(" (join " " (map (fn (k) (str "\"" k "\"")) (special-keywords))) ")\n"
+    "  \"Brood special forms and core macros to highlight.\n"
+    "Generated from `(special-forms)` by `nest grammar emacs` — do not edit by hand.\")\n"))

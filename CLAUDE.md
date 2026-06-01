@@ -116,8 +116,8 @@ std/                     standard library written in Brood, grouped (ADR-085):
                          `std/editor/*` (buffer, display, ui, keymap, face,
                          highlight, lineedit, pane, layers, ansi, serve); `std/proc/hatch`;
                          the toolchain `std/tool/*` — grouped on disk but BARE
-                         module names (test, project, package, docs, mcp, observer,
-                         proctree, repl, sexp, reload). The net *library* (`net/*`)
+                         module names (test, project, package, docs, grammar, mcp,
+                         observer, proctree, repl, sexp, reload). The net *library* (`net/*`)
                          and `proc/supervisor` were lifted into the brood-net /
                          brood-supervisor packages (Move 2) — but the Rust socket
                          *mechanism* stays in-tree (`crates/lisp/src/net.rs`, ADR-062);
@@ -133,8 +133,10 @@ subprocess); `nest` is a thin shell over `std/tool/project.blsp`. `nest` subcomm
 today: `new`, `test`, `check`, `run` (with `--watch`), `doc`, `format`, `repl`,
 `mcp` (an MCP server over the project), `observe` (the M3 process viewer),
 `attach` (the `emacsclient`-style thin frontend for a daemon serving a `ui-run`
-app — ADR-090), the package-manager commands `fetch`/`update`/`tree`/`add`/`remove`
-(ADR-037), and `release` (single-binary bundling, ADR-038).
+app — ADR-090), `grammar` (emit an editor syntax grammar — VS Code TextMate or
+Emacs — generated from `(special-forms)`, ADR-092), the package-manager commands
+`fetch`/`update`/`tree`/`add`/`remove` (ADR-037), and `release` (single-binary
+bundling, ADR-038).
 
 ## Commands
 

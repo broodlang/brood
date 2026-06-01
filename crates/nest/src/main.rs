@@ -212,6 +212,18 @@ enum Cmd {
         all: bool,
     },
 
+    /// Generate an editor syntax grammar from the language's own `(special-forms)`
+    /// — one source of truth, no hand-maintained keyword lists (ADR-092). Prints to
+    /// stdout; redirect to the editor's grammar file.
+    ///
+    /// TARGET is `tmlanguage` (default — a VS Code TextMate grammar, JSON) or
+    /// `emacs` (the `brood-special-forms` defconst). E.g.
+    /// `nest grammar > brood-vscode/syntaxes/brood.tmLanguage.json`.
+    Grammar {
+        /// What to emit: `tmlanguage` (default) or `emacs`.
+        target: Option<String>,
+    },
+
     /// Serve the project over Model Context Protocol on stdio so an agent
     /// (Claude Code etc.) can eval / lookup / format / expand / run tests /
     /// read docs against this project's live image (ADR-036, docs/mcp.md).
@@ -341,6 +353,7 @@ fn run_main(cli: Cli) {
             &args,
         ),
         Cmd::Doc { module, all } => cmd_doc(&mut interp, module.as_deref(), all),
+        Cmd::Grammar { target } => cmd_grammar(&mut interp, target.as_deref()),
         Cmd::Fetch => run(&mut interp, "(require 'package) (package/fetch)"),
         Cmd::Update { names } => cmd_update(&mut interp, &names),
         Cmd::Tree => run(&mut interp, "(require 'package) (package/tree)"),
@@ -707,6 +720,23 @@ fn cmd_doc(interp: &mut Interp, module: Option<&str>, all: bool) {
         }
     };
     run(interp, &code);
+}
+
+/// `nest grammar [TARGET]` — emit an editor syntax grammar generated from the
+/// language's own `(special-forms)` (ADR-092), to stdout. `tmlanguage` (default) is
+/// a VS Code TextMate grammar (JSON); `emacs` is the `brood-special-forms` defconst.
+/// Pure Brood — `std/tool/grammar.blsp` — so adding a special form updates every
+/// editor's highlighting from one place.
+fn cmd_grammar(interp: &mut Interp, target: Option<&str>) {
+    let call = match target.unwrap_or("tmlanguage") {
+        "tmlanguage" | "vscode" | "textmate" => "(grammar/tmlanguage)",
+        "emacs" => "(grammar/emacs-special-forms)",
+        other => {
+            eprintln!("nest grammar: unknown target '{other}' (expected 'tmlanguage' or 'emacs')");
+            std::process::exit(2);
+        }
+    };
+    run(interp, &format!("(require 'grammar) (println {call})"));
 }
 
 /// `nest repl` — project-aware REPL. Inside a project, pre-load every source

@@ -3056,6 +3056,9 @@ const DEV_MODULES: &[(&str, &str)] = &[
     ("test", include_str!("../../../std/tool/test.blsp")),
     // Doc generation (`nest doc`) — tooling, not runtime.
     ("docs", include_str!("../../../std/tool/docs.blsp")),
+    // Generate editor syntax grammars (VS Code TextMate, Emacs font-lock) from the
+    // language's own `(special-forms)` — one source of truth, no drift (ADR-092).
+    ("grammar", include_str!("../../../std/tool/grammar.blsp")),
     // Order a process-info snapshot as a parent→child forest (the tree view).
     ("proctree", include_str!("../../../std/tool/proctree.blsp")),
     // The process viewer / debug tooling (`nest observe`, `(observe)`).
@@ -5150,6 +5153,17 @@ pub const SPECIAL_FORMS: &[&str] = &[
     kw::FOR,
     kw::THREAD_FIRST,
     kw::THREAD_LAST,
+    // Core macros (std/prelude.blsp) that read as keywords — highlight-only, not
+    // evaluator special forms (ADR-092). Promoted here so every editor (VS Code via
+    // `nest grammar`, Emacs, the REPL highlighter) + the LSP colour them from one
+    // source. `throw`/`receive` are already above (they're in the core set).
+    kw::SPAWN,
+    kw::SPAWN_LINK,
+    kw::REMOTE_SPAWN,
+    kw::REMOTE_SPAWN_SYNC,
+    kw::ERROR,
+    kw::WITH_OUT_STR,
+    kw::BENCH,
 ];
 
 /// `(special-forms)` — the list of special-form / core-macro names (strings) that
