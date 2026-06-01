@@ -88,7 +88,8 @@ server, and the web frontend come later (see the roadmap).
 | [../todo.md](../todo.md) | A **scratch list** (top-level) of work not yet committed to. Items graduate to roadmap.md or an ADR once decided — treat as ephemeral, not authoritative. |
 | [deferred.md](deferred.md) | The **holding pen**: worthwhile work intentionally *not* done yet, each with a design sketch and the trigger that should pull it back in. |
 | [decisions.md](decisions.md) | The **ADR log** (Architecture Decision Records) — the *why* behind each choice, so we don't relitigate settled questions. Has an ADR index at the top. |
-| [devlog.md](devlog.md) | A chronological log of work sessions — what changed and why, in order. Has a navigation/threads header at the top. |
+| [devlog.md](devlog.md) | A chronological log of work sessions — what changed and why, in order. Holds the complete session **digest** + the latest day in full; navigation/threads header at the top. |
+| [devlog-archive.md](devlog-archive.md) | The **full verbatim text** of older devlog sessions, rolled out of devlog.md to keep it loadable. Search a `## YYYY-MM-DD — …` header to read one in full. |
 | [incarnations.md](incarnations.md) | The self-improving "incarnations" notes — lessons an agent carries forward between sessions. |
 
 ## For LLMs / agents writing Brood

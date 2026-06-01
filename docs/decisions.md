@@ -1,7 +1,8 @@
 # Design decisions (ADR log)
 
-Short records of *why* we chose what we chose, so we don't accidentally
-relitigate settled questions. Newest at the bottom.
+An **ADR** is an *Architecture Decision Record* — a short, dated note capturing
+one design choice and *why* we made it, so we don't accidentally relitigate
+settled questions. Newest at the bottom.
 
 ## Index
 
