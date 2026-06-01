@@ -269,6 +269,7 @@ Every session, oldest first. Full text: [devlog-archive.md](archive/devlog-archi
 - **2026-06-01** — ADR-085 Move 2 (clean slice): brood-net + brood-supervisor packages
 - **2026-06-01** — Nodes form a transitive cluster mesh (ADR-088): connect to one, join all
 - **2026-06-01** — Resilient `ui-run`: let-it-crash at the render loop (recover to the last good frame)
+- **2026-06-01** — Node-link channel encryption (ADR-089): Noise-style X25519 + ChaCha20-Poly1305 session
 
 ---
 
@@ -515,3 +516,63 @@ fatal and re-raised *and* `:leave` still runs; a recovered error is logged to
 `[:input …]` messages and `:poll` selectively receives those, so interleaved
 `[:saw …]` render-echoes survive in the mailbox for `drain-saw`. 11/11 green;
 observer (55) + display (7) — the other `ui-run` clients — unchanged.
+
+## 2026-06-01 — Node-link channel encryption: a Noise-style session (ADR-089, M4)
+
+Closed ADR-081's gap #1 — the headline network-security item. Steady-state
+node-link frames were **cleartext with no per-frame MAC**: over TCP an on-path
+attacker who let the cookie handshake complete could read every message *and*
+inject a forged `Send` carrying a closure (→ RCE) without knowing the cookie. The
+roadmap forbade exposing a TCP node on an untrusted network until this landed.
+
+**Why a Noise-style session, not TLS.** A live link runs two independent threads
+sharing an `Arc<Stream>` — a reader (`&Stream: Read`) and a writer (`&Stream:
+Write`). A single `rustls` `Connection` can't be driven from both (shared mutable
+crypto state). A **per-direction AEAD** maps exactly onto that split: the writer
+owns the send cipher, the reader the receive cipher, neither sharing state. Node
+identity is cookie/name-based (not PKI), so TLS would need self-signed certs pinned
+via the cookie anyway. ADR-081 itself listed "a Noise-style session over the
+existing `Stream` seam" as the equivalent option; chose it. (User confirmed the
+TLS-vs-Noise fork up front.)
+
+**The scheme** (`dist/session.rs` + `dist/handshake.rs`, wire v3→v4):
+- **Ephemeral X25519 ECDH** per handshake → shared secret (forward secrecy: recorded
+  traffic stays secret even if the cookie later leaks). Each side's fresh pubkey
+  rides in its `Hello`.
+- **Authenticated by the existing cookie-HMAC** — *both* ephemeral pubkeys folded
+  into the `Auth` MAC (beside the names + addr, ADR-088), so a MitM can't substitute
+  a DH key without the cookie (a swapped `Hello.eph_pub` fails the MAC).
+- **HKDF-SHA256** (built on the in-tree `hmac`/`sha2` — no `hkdf` crate, sidestepping
+  a sha2-version pin) over the DH secret, salted by `init_nonce ‖ resp_nonce`, → two
+  directional keys.
+- **ChaCha20-Poly1305 per frame**, nonce = a per-direction monotonic counter; the
+  Poly1305 tag *is* the per-frame MAC. A forged/tampered/replayed/reordered frame
+  fails to open and the reader tears the link down — closing the injection hole.
+  Counters never wrap (error at 2⁶⁴) and the directions use different keys, so every
+  (key, nonce) pair is unique.
+- Handshake metadata (names, nonces, pubkeys, MACs) stays **plaintext** — none secret;
+  only steady-state frames (incl. shipped closure source) are sealed. Uniform over
+  TCP **and** Unix (one path). Magic bumped `BRD\x03`→`BRD\x04`.
+
+**Plumbing.** `wire.rs` grew `Hello.eph_pub` + a prefix-free `encode_payload` (the
+session adds the `[u32 len]` after sealing) + `pub(super) decode_frame`; `frame_bytes`
+/`read_frame` now serve only the plaintext handshake/tests. `handshake` returns a
+`Session { send: SealKey, recv: OpenKey }`; `establish` moves `send` into the writer
+(seal-then-write) and `recv` into the reader (`open.open(&mut r)`). Every steady-state
+producer (route/monitor/link/exit/peers/Pong/heartbeat-Ping) switched from `frame_bytes`
+to `encode_payload`; the shared plaintext Ping buffer is fine — each writer seals it
+with its own counter. New deps: `x25519-dalek` (static_secrets) + `chacha20poly1305`,
+both vetted RustCrypto/dalek.
+
+**Tested.** `dist/session.rs`: seal/open round-trip, tamper-reject, replay/reorder-reject,
+wrong-direction-key-reject, counter-advances. `dist/handshake.rs`: MAC covers both
+ephemeral pubkeys (tamper ⇒ different MAC), directional keys agree under role-flip +
+differ per direction. All 26 real-TCP/Unix `distribution.rs` cases (closure shipping,
+mesh, monitors, links, supervisor, wrong-cookie) green over the encrypted path; full
+`make test` (484) + clippy green.
+
+**Consequence.** A TCP node is now safe on an untrusted network; the trusted-only
+caveat is lifted. Standards TLS *on the wire* stays open only if an external non-Brood
+client must ever speak the node protocol (none does). Closure-shipping between
+*trusting* nodes is still RCE-by-design (Erlang model); a mutually-distrusting /
+multi-tenant boundary remains a separate future ADR before multi-client server mode.

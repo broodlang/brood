@@ -4868,10 +4868,12 @@ macros in `std/prelude.blsp`; tests in `tests/contract_test.blsp` and the
 
 ## ADR-081 — Node-link security: pre-auth DoS hardening now, authenticated-encrypted channel required for network nodes
 
-**Status:** accepted (2026-05-31). The hardening half is implemented; the
-channel-encryption half is a committed requirement, deferred to the
-server-side-TLS work (M4). (ADR-082 is the concurrent opt-in type-annotations
-work; these two landed in the same session and split the numbers.)
+**Status:** accepted (2026-05-31). The hardening half is implemented. **Update
+(2026-06-01): the channel-encryption half (gap #1) is now implemented — see
+ADR-089** (a Noise-style X25519 + ChaCha20-Poly1305 session over the `Stream`
+seam, chosen over TLS because the reader/writer thread split can't drive one TLS
+connection). (ADR-082 is the concurrent opt-in type-annotations work; these two
+landed in the same session and split the numbers.)
 
 **Context.** A security review of the distributed-node layer (`dist/`) — the only
 surface that parses untrusted network bytes, and one that *ships closures* (code)
@@ -5341,10 +5343,89 @@ dials a mesh inevitably creates need no new race handling.
 - **Deferred (ADR-011):** auto-reconnect / re-heal after a transient link drop
   (use `ensure-link`); FQDN/host-routability resolution beyond what `name@host`
   already assumes; a global cap on concurrent mesh dials (bounded today by
-  `MAX_GOSSIP_PEERS` per frame). Mesh over an *untrusted* TCP network still waits
-  on channel TLS (ADR-081), exactly as point-to-point does.
+  `MAX_GOSSIP_PEERS` per frame). Mesh over an *untrusted* TCP network is now safe:
+  the channel is encrypted + integrity-protected (ADR-089), exactly as point-to-point.
 
 **References.** ADR-033/034 (closure shipping, handshake v2 + connector
 tie-break), ADR-068 (Unix transport + cookie), ADR-073 (`name@host` identity),
 ADR-081 (channel TLS — still required before untrusted-network exposure),
 `docs/distribution.md` §Cluster mesh.
+
+## ADR-089 — Node-link channel encryption: a Noise-style X25519 + ChaCha20-Poly1305 session over the Stream seam
+
+**Status:** accepted + implemented (2026-06-01). Closes ADR-081's gap #1 (no
+channel confidentiality / per-frame integrity) — the headline network-security
+item. Confined to `dist/`; **does not touch the language kernel**
+(eval/heap/GC/value model unchanged).
+
+**Context.** ADR-081's security review found that the cookie handshake
+authenticates only the *handshake*: steady-state node-link frames travelled
+**cleartext with no per-frame MAC**. Over TCP an on-path attacker who lets the
+handshake complete could (a) read every inter-node message passively, and (b)
+**inject a forged `Send` carrying a closure → RCE** afterward — *without* knowing
+the cookie. The roadmap forbade exposing a TCP node on an untrusted network until
+this closed. ADR-081 named the fix as "an authenticated-encrypted channel (TLS,
+**or a Noise-style session over the existing `Stream` seam**)".
+
+**Decision — the Noise-style session, not TLS.** A live link runs **two
+independent threads sharing an `Arc<Stream>`**: a reader (`&Stream: Read`) and a
+writer (`&Stream: Write`). A single `rustls`/TLS `Connection` can't be driven from
+both threads — it holds shared mutable crypto state and interleaves control records
+with data. A **per-direction AEAD** maps exactly onto the split instead: the writer
+owns the send cipher, the reader the receive cipher, neither sharing state. Node
+identity is also cookie/name-based, not PKI, so TLS would need self-signed certs
+pinned via the cookie anyway. So: keep the carrier; encrypt above it.
+
+The scheme (`dist/session.rs` + `dist/handshake.rs`, wire v4):
+- **Ephemeral X25519 ECDH** per handshake (forward secrecy — recorded traffic
+  stays secret even if the long-term cookie later leaks). Each side puts a fresh
+  ephemeral pubkey in its `Hello`.
+- **Authenticated by the existing cookie-HMAC:** *both* ephemeral pubkeys are
+  folded into the `Auth` MAC (alongside the names + addr already there, ADR-088),
+  so a man-in-the-middle can't substitute its own DH key — a swapped `Hello.eph_pub`
+  fails the MAC check, no cookie ⇒ no forged MAC.
+- **HKDF-SHA256** (built on the in-tree `hmac`/`sha2` — no separate `hkdf` crate)
+  over the DH secret, salted by `initiator_nonce ‖ responder_nonce`, → two
+  directional 32-byte keys.
+- **ChaCha20-Poly1305 AEAD per frame**, nonce = a per-direction monotonic counter
+  (`[0;4] ‖ counter_be`). The Poly1305 tag *is* the per-frame MAC; a forged,
+  tampered, replayed, or reordered frame fails to open and the reader tears the
+  link down — closing the post-handshake injection hole. Counters never wrap
+  (error at 2⁶⁴) and the two directions use different keys, so every (key, nonce)
+  pair is unique — no reuse.
+- **Handshake metadata stays plaintext** (names, nonces, ephemeral pubkeys, MACs)
+  — none are secret; only steady-state frames, *including shipped closures*, are
+  sealed. Applied **uniformly** over both Tcp and Unix (one code path; the local
+  cost of a DH + per-frame ChaCha is negligible).
+- Wire **magic bumped v3 → v4** (`Hello` gained the pubkey + steady-state is now
+  encrypted); a v3 peer is cleanly rejected at the magic prefix (greenfield — no
+  back-compat).
+
+**Consequences.**
+- A TCP node now has an **authenticated, forward-secret, integrity-protected**
+  link. ADR-081's "trusted-network/VPN only" caveat for TCP nodes is **lifted**.
+- **Authentication now implies a secure channel** — the cookie proves possession
+  at handshake time *and* the session protects every byte after.
+- **Closure-shipping between *trusting* nodes is still RCE-by-design** — that is
+  the Erlang model and the basis of hot code mobility, not a bug. A
+  mutually-distrusting / multi-tenant threat model (no inbound code from untrusted
+  peers, or a sandbox on inbound closures) remains a **separate future ADR** before
+  any multi-client server mode ships (as ADR-081 already flagged).
+- The reader/writer thread split is unchanged — the property that made the
+  per-direction AEAD the right fit (and TLS the wrong one) here.
+
+**Tested.** `dist/session.rs` unit: seal/open round-trip, tamper-reject,
+replay/reorder-reject, wrong-direction-key-reject, counter-advances.
+`dist/handshake.rs` unit: MAC covers both ephemeral pubkeys (tamper ⇒ different
+MAC), directional keys agree under role-flip + differ per direction. All 26
+real-TCP/Unix `crates/cli/tests/distribution.rs` cases (incl. closure shipping,
+mesh, monitors, links, supervisor, wrong-cookie rejection) stay green over the
+encrypted path; full `make test` green.
+
+**References.** ADR-081 (the gap this closes — pre-auth DoS hardening was the other
+half), ADR-033/034 (closure shipping + handshake v2 this builds on), ADR-068 (the
+`Stream` seam the session rides), ADR-088 (the addr-in-MAC pattern the pubkey-in-MAC
+mirrors). Lives in `crates/lisp/src/dist/session.rs` (the AEAD framing),
+`dist/handshake.rs` (DH + HKDF + key agreement), `dist/wire.rs` (the `Hello` pubkey
++ `encode_payload` + magic v4), `dist.rs` (`establish` threads the session into the
+reader/writer).

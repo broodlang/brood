@@ -100,21 +100,42 @@ two ways:
 `node-start` binds a listener — a `UnixListener` for a local name or a
 `TcpListener` for `host:port` — and runs an acceptor thread; `connect` dials the
 matching carrier. A single `Stream { Tcp | Unix }` enum (ADR-068) carries the
-link, so everything below is transport-agnostic. Both ends perform the v2
-authenticated handshake (ADR-034 v2): a 4-byte
-magic+version prefix (`b"BRD\x02"`), then a `Hello { node, nonce }` exchange
-(each side a fresh 32-byte nonce), then an `Auth { mac }` exchange where each
-side sends `HMAC-SHA256(cookie, peer_nonce || peer_name || my_name)`. The
-cookie is **never on the wire** — it's an HMAC key, so an eavesdropper can't
-replay either it or a captured `Auth`. A mismatch on the magic, the MAC, or
-either Hello aborts before the link enters `NODES`. On success each connection
-gets two plain OS threads:
+link, so everything below is transport-agnostic. Both ends perform the
+authenticated handshake (ADR-034 v2; wire **v4**, ADR-089): a 4-byte
+magic+version prefix (`b"BRD\x04"`), then a `Hello { node, nonce, eph_pub, addr }`
+exchange (each side a fresh 32-byte nonce, a fresh **ephemeral X25519 pubkey**,
+and the address peers should dial it at), then an `Auth { mac }` exchange where
+each side sends `HMAC-SHA256(cookie, peer_nonce || peer_eph_pub || peer_name ||
+my_name || my_addr || my_eph_pub)`. The cookie is **never on the wire** — it's an
+HMAC key, so an eavesdropper can't replay either it or a captured `Auth`; folding
+both ephemeral pubkeys into the MAC authenticates the DH (a man-in-the-middle can't
+swap a key without the cookie). A mismatch on the magic, the MAC, or either Hello
+aborts before the link enters `NODES`. On success each connection gets two plain OS
+threads:
 
 - a **writer** draining an `mpsc` channel onto the socket;
 - a **reader** decoding inbound frames and handing messages to `process::deliver`.
 
 These never touch the green-process coroutine scheduler — an inbound message lands
 in a local mailbox exactly as an in-process `send` would.
+
+### Channel encryption (ADR-089)
+The handshake authenticates the peer; the **session encrypts the link**. After the
+MAC verifies, both ends derive a shared secret from the exchanged ephemeral X25519
+keys (forward secrecy — recorded traffic stays secret even if the cookie later
+leaks), run it through HKDF-SHA256 to two **directional keys**, and from then on
+**every steady-state frame is sealed with ChaCha20-Poly1305** (the Poly1305 tag is
+a per-frame MAC). The writer owns the send key + a monotonic counter nonce, the
+reader the receive key + counter — so the per-direction AEAD maps cleanly onto the
+reader/writer thread split (a single TLS connection couldn't be driven from both,
+which is *why* it's a Noise-style session rather than TLS). A forged, tampered,
+replayed, or reordered frame fails to open and tears the link down — so a
+post-handshake `Send`-carrying-a-closure injection (→ RCE) is impossible without the
+cookie. Handshake metadata (names, nonces, pubkeys) stays plaintext (none secret);
+only the steady-state frames — including shipped closure source — are encrypted.
+Uniform over TCP **and** Unix. **A TCP node is now safe on an untrusted network**
+(closure-shipping between *trusting* nodes is still RCE-by-design — the Erlang model;
+a mutually-distrusting/multi-tenant boundary is a separate future ADR).
 
 ### Wire codec
 Hand-rolled and length-prefixed (`[u32 len][payload]`), reusing the `Message`
@@ -166,14 +187,15 @@ independent symbol interners. (In-process messages keep the interned id.)
     initial `connect`, then a small supervisor that `monitor-node`s the peer
     and retries `connect` with a 200ms backoff on every `[:nodedown …]` until
     success. See `ensure_link_reconnects_across_a_node_restart`.
-  - **Handshake v2** (ADR-034 v2) — magic+version prefix, nonce-based
-    `Hello`s, HMAC-SHA256 `Auth`. Cookie never on the wire. See
-    `non_brood_peer_is_rejected_at_magic_prefix`, `mismatched_cookie_is_rejected`,
-    and the `dist::tests::compute_mac_is_symmetric_under_role_flip` unit test.
-- **Still deferred** (later): supervision trees / `link` / restart strategies
-  (true Erlang OTP-style; today we have `monitor` only — `link` would couple
-  failure both ways), and TLS as an optional substrate under the HMAC layer
-  for over-the-internet links.
+  - **Handshake v2 + encrypted session** (ADR-034 v2 + ADR-089) — magic+version
+    prefix, nonce + ephemeral-pubkey `Hello`s, HMAC-SHA256 `Auth` (cookie never on
+    the wire), then a forward-secret ChaCha20-Poly1305 channel (see *Channel
+    encryption* above). See `non_brood_peer_is_rejected_at_magic_prefix`,
+    `mismatched_cookie_is_rejected`, the `dist::handshake::tests` (MAC symmetry +
+    key agreement) and `dist::session::tests` (seal/open, tamper/replay rejection).
+- **Still deferred** (later): standards TLS *on the wire* as a third transport —
+  open only if some external, non-Brood client must ever speak the node protocol
+  (none does; brood-to-brood links are already encrypted via ADR-089).
 
 ## Slice 2 — connection lifecycle + liveness (built)
 

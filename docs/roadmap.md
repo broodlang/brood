@@ -793,22 +793,28 @@ top* of connect, plus a few deliberately-deferred refinements:
   one identity, multiple front doors. The "one core, local + remote frontends"
   shape. Composable (opt-in), not forced on every TCP node. Server-side TLS as a
   third transport is still open (below).
-- ⬜ **Server-side / inbound TLS — and per-frame channel integrity** (the
-  headline network-security item; ADR-081). `rustls` is client-only (its streams
-  don't split read/write across threads like a raw fd). Two gaps, both closed by
-  an authenticated-encrypted channel (TLS, or a Noise-style session over the
-  existing `Stream` seam):
-  - **No confidentiality** — node-link frames travel in cleartext; an on-path
-    observer reads every inter-node message (and shipped closure source).
-  - **No per-frame integrity** — the HMAC cookie authenticates the *handshake*
-    only; steady-state frames carry no MAC. On a TCP link an on-path attacker who
-    lets the handshake complete can inject forged frames afterward — including a
-    `Send` carrying a closure → RCE — *without knowing the cookie*.
-  Confined to `dist/` (the transport seam); **does not touch the language
-  kernel** (eval/heap/GC/value model unchanged). Fine for LAN/trusted and the
-  Unix transport (0700 dir) today; **do not expose a TCP node on an untrusted
-  network until this lands.** See ADR-081 for the decision to treat TLS-or-Noise
-  as required (not "optional") for any network-facing node.
+- ✅ **Node-link channel encryption — confidentiality + per-frame integrity**
+  (done 2026-06-01, ADR-089; the headline network-security item, closing ADR-081
+  gap #1). Done via the **Noise-style session** the item always listed as the
+  alternative to TLS — chosen because the link's reader/writer thread split can't
+  drive a single TLS `Connection` (rustls streams don't split read/write across
+  threads), whereas a per-direction AEAD maps onto it cleanly. **Ephemeral X25519
+  ECDH** (forward secrecy) authenticated by folding both ephemeral pubkeys into the
+  existing cookie-HMAC, **HKDF-SHA256** → directional keys, **ChaCha20-Poly1305**
+  per frame with a counter nonce (the Poly1305 tag is the per-frame MAC). Both gaps
+  closed:
+  - **Confidentiality** — steady-state frames (incl. shipped closure source) are
+    encrypted; handshake metadata (names/nonces/pubkeys) stays plaintext (not secret).
+  - **Per-frame integrity** — a forged/tampered/replayed/reordered frame fails the
+    AEAD tag and tears the link down, so a post-handshake `Send`-carrying-a-closure
+    injection (→ RCE) is no longer possible without the cookie.
+  Confined to `dist/`; **does not touch the language kernel**. Uniform over Tcp +
+  Unix; wire magic v3→v4. The "don't expose a TCP node on an untrusted network"
+  caveat is **lifted**. (Standards TLS *on the wire* as a third transport stays
+  open only if some external, non-Brood client must ever speak the node protocol —
+  none does today.) Still a separate future ADR before multi-client server mode:
+  closure-shipping between *trusting* nodes remains RCE-by-design (the Erlang
+  model); a mutually-distrusting/multi-tenant threat model needs its own boundary.
 - ✅ **Pre-auth connection hardening (DoS) — done 2026-05-31 (ADR-081).** The
   inbound-handshake path is now bounded against an unauthenticated flood: a
   `HandshakeSlot` semaphore caps **concurrent in-flight handshakes**
@@ -838,8 +844,8 @@ top* of connect, plus a few deliberately-deferred refinements:
   point-to-point. The reported bug (A↔B + C↔B but A couldn't see C) is fixed —
   `cluster_mesh_connects_peers_transitively` in `crates/cli/tests/distribution.rs`.
   Deferred (ADR-011): auto-reconnect/re-heal after a transient drop (use
-  `ensure-link`); mesh over an untrusted TCP network still waits on channel TLS
-  (ADR-081), as point-to-point does.
+  `ensure-link`). Mesh over an untrusted TCP network is now safe — the channel is
+  encrypted + integrity-protected (ADR-089), as point-to-point is.
 - ✅ **Test hardening (done — 2026-05-30):** the end-to-end real-TCP
   `distribution.rs` tests no longer flake under `make test`'s max parallel load.
   Root cause: under nextest each case runs in its own process, so the file's

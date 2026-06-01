@@ -15,7 +15,7 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Once};
 use std::time::Duration;
 
-use super::wire::{frame_bytes, Frame};
+use super::wire::{encode_payload, Frame};
 use super::{now_millis, NODES};
 
 /// How often the (single, shared) heartbeat thread probes each link with a `Ping`
@@ -51,9 +51,11 @@ pub(super) fn ensure_heartbeat() {
 /// `last_seen`). One thread for all links; a `Ping` is sent only on the tick,
 /// never per message.
 fn heartbeat_loop() {
-    // One shared Ping buffer for every link, every tick: each send is an
-    // `Arc::clone` (atomic incr), not a `Vec` copy.
-    let ping: Arc<[u8]> = match frame_bytes(&Frame::Ping) {
+    // One shared Ping payload for every link, every tick: each send is an
+    // `Arc::clone` (atomic incr), not a `Vec` copy. The payload is plaintext; each
+    // link's writer seals it with that direction's next nonce (ADR-089), so the
+    // same shared buffer yields distinct ciphertext per link — no nonce reuse.
+    let ping: Arc<[u8]> = match encode_payload(&Frame::Ping) {
         Ok(b) => Arc::from(b),
         Err(e) => {
             // The Ping frame has no variable-width fields, so this can't fail
