@@ -92,6 +92,7 @@ crates/lisp/src/   (the directory tree mirrors the layers — see lib.rs)
   syntax/      reader.rs (text -> Value), scanner.rs, printer.rs, and the tooling
                CST (atom.rs / cst.rs / scope.rs)
   eval/        mod.rs (evaluator — a `'tail: loop` for tail calls + special forms),
+               compile.rs (the closure-compiling VM — the default engine, ADR-076),
                macros.rs (quasiquote, macroexpand, the compile pass + pattern lowering)
   types/       mod.rs (Ty/GradualTy set-theoretic lattice), check.rs + check/
                (advisory checker)
@@ -101,6 +102,8 @@ crates/lisp/src/   (the directory tree mirrors the layers — see lib.rs)
   process.rs + process/   green-process scheduler (mailbox, message, monitor,
                scheduler, timer): spawn/send/receive/monitor
   dist.rs + dist/   distributed nodes (handshake, heartbeat, wire) — ADR-033/034
+  net.rs       thin non-blocking TCP socket mechanism (ADR-062); Brood policy is
+               the external brood-net package
   bundle.rs    single-binary app bundling (ADR-038); gui.rs the GUI frontend (ADR-046)
   error.rs     LispError / LispResult / source Pos
   lib.rs       the `Interp` entry point; bundles std/prelude.blsp
@@ -114,9 +117,11 @@ std/                     standard library written in Brood, grouped (ADR-085):
                          highlight, lineedit, pane, layers, ansi); `std/proc/hatch`;
                          the toolchain `std/tool/*` — grouped on disk but BARE
                          module names (test, project, package, docs, mcp, observer,
-                         proctree, repl, sexp, reload). The net library (`net/*`)
+                         proctree, repl, sexp, reload). The net *library* (`net/*`)
                          and `proc/supervisor` were lifted into the brood-net /
-                         brood-supervisor packages (Move 2). The REPL is Brood too
+                         brood-supervisor packages (Move 2) — but the Rust socket
+                         *mechanism* stays in-tree (`crates/lisp/src/net.rs`, ADR-062);
+                         only the Brood policy moved out. The REPL is Brood too
                          (`std/tool/repl.blsp`, ADR-048); the binaries bootstrap
                          into `(repl-run)`.
 docs/                    architecture, language, roadmap, decisions, devlog

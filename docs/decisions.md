@@ -3,6 +3,106 @@
 Short records of *why* we chose what we chose, so we don't accidentally
 relitigate settled questions. Newest at the bottom.
 
+## Index
+
+This file is large. To jump to an entry, search for its `## ADR-NNN` header.
+The per-entry **Status** line is the source of truth for current state — the
+table below is a navigation aid, not a status report. **Entries that are no
+longer in force** (don't cite these as current design): ADR-002 *(superseded by
+the tracing/copying GC)*, ADR-035 *(superseded/disabled)*, ADR-039 *(reverted →
+ADR-044)*, ADR-057 *(rejected as scoped)*. **Still proposed, not built:** ADR-036
+*(built since — see its Status)*, ADR-071 *(WASM extensions)*.
+
+| ADR | Title |
+|----:|-------|
+| 001 | Implement the runtime in Rust (not C or Zig) |
+| 002 | `Rc`/`RefCell` now, tracing GC later *(superseded)* |
+| 003 | Lists are cons cells; `[ ]` vectors are separate |
+| 004 | Clojure-style truthiness and flat `cond` |
+| 005 | v0.1 has zero external dependencies *(relaxed by ADR-014)* |
+| 006 | As much of the language as possible lives in Brood |
+| 007 | Brood is a Lisp-1 |
+| 008 | Rust is a primitive kernel; the language is written in Brood |
+| 009 | Clojure-style quasiquote; commas are whitespace |
+| 010 | Code is cons-lists; vectors are a data type |
+| 011 | Favor the simplest user-facing design; defer power features |
+| 012 | A process-wide byte-counting allocator for memory introspection |
+| 013 | A runtime's inner processes share live code; separate runtimes don't |
+| 014 | Runtime crates are allowed when they remove real complexity |
+| 015 | Share-safe, parallel-by-default test framework |
+| 016 | Arena-reset reclamation at top-level boundaries (first GC step) |
+| 017 | Isolated tests roll back the globals via a private copy (`%isolate`) |
+| 018 | Green M:N scheduler via stackful coroutines (step 4b) |
+| 019 | Emacs-flat modules: `provide`/`require`/`load-path` (pre-namespaces) |
+| 020 | Project model: `project.blsp` + a discovery-based test runner |
+| 021 | Pattern matching: one Brood compiler, reused at every binding site |
+| 022 | A macroexpand-all compile pass (expand once at definition) |
+| 023 | First-class type tags; types stay runtime, checking stays advisory |
+| 024 | Set-theoretic, gradual types: the model and the compatibility contract |
+| 025 | A lossless, span-carrying CST for tooling, separate from the eval `Value` |
+| 026 | Immutability: data is immutable; `def` is the only mutation (no `set!`/`while`) |
+| 027 | Reduction-counted preemption + selective `receive` with timeouts |
+| 028 | Split the CLI: `brood` is the language, `nest` is the project tool |
+| 029 | Module docstrings + `nest doc` (extract by load-and-introspect) |
+| 030 | Maps are immutable values (insertion-ordered assoc vector) |
+| 031 | Cross-file xref is an image query, not a static index |
+| 032 | Dynamic variables: a per-process binding stack, declared with `defdyn` |
+| 033 | `spawn` takes an expression; closures are sendable as data |
+| 034 | Distributed nodes (slice 1): node-tagged pids + a TCP link |
+| 035 | Tracing GC: per-process mark-sweep at the outermost-eval safepoint *(superseded)* |
+| 036 | `nest mcp`: a per-project Model Context Protocol server |
+| 037 | Packages: git deps + project-local cache + lock file |
+| 038 | Single-binary bundling (`nest release`) |
+| 039 | Supervised processes with mode-gated resume checkpoints *(reverted → ADR-044)* |
+| 040 | Maps: CHAMP (16-way) instead of an entries-vec + index |
+| 041 | Shared, refcounted blobs for large immutable byte data |
+| 042 | Live-editing hardening: `defonce`, reload-defs detection, dedup, macro-staleness |
+| 043 | Runaway-resource backstops: memory limits (E0043) + eval-depth ceiling (E0044) |
+| 044 | Supervision is a userland Brood library, not a kernel feature |
+| 045 | Text ropes as an opaque, immutable heap value (`Value::Rope`) |
+| 046 | The display/input seam: a frontend is a protocol of render-op data |
+| 047 | Native multi-arity closure dispatch |
+| 048 | Self-hosted REPL (the read-eval-print loop in Brood) |
+| 049 | Reader `INCOMPLETE_INPUT` as the multi-line continuation signal |
+| 050 | Randomness is a pure, threaded PRNG (bitwise ops the only new primitives) |
+| 051 | `(process-info pid)` as the kernel introspection snapshot |
+| 052 | Interactive REPL line editor in Brood (inline `term-*` seam) |
+| 053 | Remote attach: observe a running runtime over the node link |
+| 054 | Generational handles: a debug tripwire for use-after-GC |
+| 055 | Stage B: automatic copying collection at the eval safepoint |
+| 056 | A windowed (GUI) frontend + mouse input, on the same display seam |
+| 057 | Lexical addressing: O(1) variable lookup *(rejected as scoped)* |
+| 058 | Automatic GC reaches every entry path; `(hibernate)` removed |
+| 059 | Blocking work delivers to a mailbox; it never pins a worker |
+| 060 | Sets are a library over maps; the `#{…}` literal is deferred |
+| 061 | Collect at any eval depth via an operand stack |
+| 062 | TCP sockets: thin kernel, mailbox-delivered, over a reusable IO seam |
+| 063 | `(exit pid reason)`: Erlang-style process termination |
+| 064 | Rust primitives are single-shot w.r.t. eval re-entry |
+| 065 | Namespaces: expand-time resolution over the flat table, soft privacy |
+| 066 | Auto-gensym (`x#`): opt-in macro binding hygiene |
+| 067 | Process links + `trap_exit` (the supervisor's structural orphan fix) |
+| 068 | Node-connect ergonomics: default-cookie file, name-addressed Unix transport |
+| 069 | Evaluator dispatch performance: cache the analysis, not the behaviour |
+| 070 | Namespace-name collisions: detect-and-reject, not mandatory prefixes |
+| 071 | Native extensions are WASM components, built on fetch and wrapped in Brood *(proposed)* |
+| 072 | Stage C: a generational nursery + tenured old generation |
+| 073 | Node names are `name@host` (Erlang short/long names) |
+| 074 | Dual-listen: one node, several transports (`node-also-listen`) |
+| 075 | Undo lives in the buffer value (per-buffer undo/redo stacks) |
+| 076 | The execution engine becomes a closure-compiling VM (now the default) |
+| 077 | Mouse `:drag` and `:release`, at cell granularity |
+| 078 | Structured types: arrow + element refinements on the flat lattice |
+| 079 | Per-op font scale on the GUI `Face` |
+| 080 | Cursor zones: pointer-shape hints carried by the frame |
+| 081 | Node-link security: pre-auth DoS hardening + authenticated-encrypted channel |
+| 082 | Opt-in type annotations & runtime contracts (`sig`/`sig!`) |
+| 083 | Output ports (`*out*`/`*err*`) and an async, safe logger |
+| 084 | Quasiquote is a compile/eval-time code transform, not a runtime walker |
+| 085 | `std/` is the basic-language core; frameworks are packages; hierarchical names |
+| 086 | GUI keys are press/release transitions, not an OS-repeat flood |
+| 087 | Expose O(1) kernel facts (`map-count`) as primitives |
+
 ---
 
 ## ADR-001 — Implement the runtime in Rust (not C or Zig)
