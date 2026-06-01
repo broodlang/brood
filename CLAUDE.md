@@ -101,6 +101,7 @@ crates/lisp/src/   (the directory tree mirrors the layers — see lib.rs)
   process.rs + process/   green-process scheduler (mailbox, message, monitor,
                scheduler, timer): spawn/send/receive/monitor
   dist.rs + dist/   distributed nodes (handshake, heartbeat, wire) — ADR-033/034
+  bundle.rs    single-binary app bundling (ADR-038); gui.rs the GUI frontend (ADR-046)
   error.rs     LispError / LispResult / source Pos
   lib.rs       the `Interp` entry point; bundles std/prelude.blsp
 crates/cli/src/main.rs   the `brood` binary — the language (REPL, file runner, `--test`)
@@ -125,7 +126,9 @@ The CLI is split (ADR-028, the `rustc`/`cargo` model): **`brood` runs the
 language**, **`nest` runs the project**. Both embed the `brood` lib (no
 subprocess); `nest` is a thin shell over `std/tool/project.blsp`. `nest` subcommands
 today: `new`, `test`, `check`, `run` (with `--watch`), `doc`, `format`, `repl`,
-`mcp` (an MCP server over the project), and `observe` (the M3 process viewer).
+`mcp` (an MCP server over the project), `observe` (the M3 process viewer), the
+package-manager commands `fetch`/`update`/`tree`/`add`/`remove` (ADR-037), and
+`release` (single-binary bundling, ADR-038).
 
 ## Commands
 
@@ -164,7 +167,7 @@ contention races).
 |----------|--------|
 | `BROOD_GC_STRESS=1` | Collect at **every** eval safepoint (not just when the threshold is crossed). Turns rare GC races into deterministic ones. |
 | `BROOD_GC_VERIFY=1` | **Heap verifier** (debug only): before each collection, walk the whole reachable LOCAL graph and assert every handle is in-bounds + current-epoch. Catches a *stored* stale handle and prints the `root→…→cell` path. See below. |
-| `BROOD_TRACE_GCBLOCK=1` / `BROOD_TRACE_SAFEPOINT` | Trace GC-block depth / safepoint hits (debug). |
+| `BROOD_TRACE_GCBLOCK=1` | Trace GC-block depth (debug). |
 | `BROOD_MEM_LIMIT=<bytes>` | Arm the ADR-043 soft/hard memory cap for a run. |
 | `BROOD_STACK_BUDGET=<bytes>` | Raise/lower the non-tail-recursion stack guard. |
 | `RUST_BACKTRACE` | `brood`/`nest` **default it to `1`** (set in each `main`); `RUST_BACKTRACE=0` opts out, `full` for verbose. |
