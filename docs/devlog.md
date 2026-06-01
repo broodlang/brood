@@ -11734,3 +11734,41 @@ the check-hook runs (the usual stale-binary gotcha).
 `git mv` (history preserved). Move 2 proper — lifting the namespaced frameworks
 out of the binary into packages with `myedit` depending on them — stays deferred,
 gated on the GUI consumer (ADR-011); this reorg is what it builds on.
+
+## 2026-06-01 — ADR-085 Move 2 (clean slice): brood-net + brood-supervisor packages
+
+**Goal.** Lift the namespaced frameworks out of the binary into packages
+(ADR-037), starting Move 2.
+
+**The constraint that shaped it.** A dependency walk of the bundled code (core +
+toolchain) into the frameworks found that *most of the framework can't leave the
+binary*: `tool/observer` (`nest observe`) is built on
+`editor/{display,face,highlight,keymap,lineedit,ui}`, `tool/repl` on
+`editor/lineedit`, `tool/sexp` on `editor/buffer`, and core `log` on `proc/hatch`.
+Those are bundled features that must work in a fresh `brood`/`nest` with no
+packages fetched — so the modules they need stay baked in. Only modules with
+**zero bundled dependents** can externalize cleanly.
+
+**Shipped (zero-dependent → externalized):**
+- **`brood-net`** — `net/tcp`, `net/http`, `net/sse` → `~/src/broodlang/brood-net`
+  (a `nest` project: `src/net/*` + the moved `tests/*_test.blsp` + the `webserver`
+  example). Removed from `CORE_MODULES`. Built on the kernel `tcp-*` primitives +
+  the bundled `file` core module. Consumers `brood-edit` (web frontend) +
+  `brood-benchmark` (http bench) now `[brood-net :path "../brood-net"]`.
+- **`brood-supervisor`** — `proc/supervisor` → its own package (+ its test).
+  `proc/hatch` stays bundled (core `log` is a hatch process). The cross-node
+  `supervisor_restarts_a_remote_child` test shipped `(require 'proc/supervisor)`
+  into a *bare* runtime, so it was reworked to inline the equivalent userland
+  `monitor`-respawn (start child → monitor → `[:down]` → restart) — same
+  cross-node restart, no module dependency.
+
+**Result.** `brood-net` 41/41, `brood-supervisor` 20/20, consumers green
+(`brood-edit` 286, `brood-benchmark` 2), full brood suite green except the
+pre-existing GC-WIP test. Path deps resolve in place (lock files written, no
+`_deps/` copy needed).
+
+**ADR-085 refinement (recorded in decisions.md).** The "editor framework" is
+largely *shared UI the toolchain consumes*, not a detachable app framework, so
+`editor/*` stays bundled until/unless the REPL + observer are themselves
+repackaged — gated on a real consumer (ADR-011). The editor *app* already lives
+outside the binary (`brood-edit`).

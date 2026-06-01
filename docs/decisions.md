@@ -5566,11 +5566,33 @@ The mechanical rewrite was a token-aware pass (skips comments/strings, leaves
 `:keyword` face names like `:ui/header` untouched, rewrites only `defmodule`/
 `require`/`:use`/`provide` module positions + non-keyword `mod/name` symbols);
 the Rust eval-string bootstraps in the binaries + the embedded table were updated
-to match. Full suite green. **Move 2 (actually lift the namespaced frameworks out
-of the binary into external packages, with `myedit` depending on them via the
-package manager) is not yet built** — gated like every additive capability
-(ADR-011) on the first concrete consumer (the GUI framework); the namespacing +
-grouping done here is what it builds on. Tracked in `roadmap.md`.
+to match. Full suite green.
+
+**Move 2 (lift frameworks into external packages) — the clean slice is done**
+(2026-06-01), and surfaced a structural limit worth recording: *most of the
+framework can't actually leave the binary*, because the **bundled toolchain is
+built on it**. The dependency walk found: `tool/observer` (`nest observe`) →
+`editor/{display,face,highlight,keymap,lineedit,ui}`; `tool/repl` (the REPL) →
+`editor/lineedit`; `tool/sexp` → `editor/buffer`; and core `log` → `proc/hatch`.
+Those bundled features must work in a fresh runtime with no packages fetched, so
+the modules they need **stay bundled**. Only modules with **zero bundled
+dependents** externalize cleanly — and those are exactly what shipped:
+
+- **`brood-net`** (`net/tcp`, `net/http`, `net/sse`) — removed from
+  `CORE_MODULES`, now a `:path` package; consumers `brood-edit` + `brood-benchmark`
+  depend on it. Built on the kernel `tcp-*` primitives + bundled `file`.
+- **`brood-supervisor`** (`proc/supervisor`) — likewise; `proc/hatch` stays bundled
+  (core `log` needs it). The cross-node `supervisor_restarts_a_remote_child`
+  distribution test, which shipped `(require 'proc/supervisor)` into a *bare*
+  runtime, was reworked to inline the equivalent userland `monitor`-respawn.
+
+Each package took its modules **and its tests** (`tests/*_test.blsp`) and, for
+net, the `webserver` example. The takeaway (an ADR-085 refinement): the
+"editor framework" is largely **shared UI the toolchain consumes**, not a
+detachable app framework — so `editor/*` stays bundled until/unless the REPL +
+observer are themselves repackaged (gated on a real consumer, ADR-011). The
+editor *app* already lives outside the binary (`brood-edit`). Tracked in
+`roadmap.md`.
 
 ## ADR-086 — GUI keys are press/release transitions, not an OS-repeat flood
 

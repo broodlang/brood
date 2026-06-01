@@ -2939,25 +2939,21 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // lock file + load-path entries. Required lazily by `project-setup` only when a
     // project actually declares deps. Opt-in, never in the prelude.
     ("package", include_str!("../../../std/tool/package.blsp")),
-    // TCP sockets (ADR-062): active-socket helpers + a spawn-per-connection
-    // server over the non-blocking tcp-* primitives. Opt-in, never in the prelude.
-    ("net/tcp", include_str!("../../../std/net/tcp.blsp")),
     // The file & filesystem library: whole-file/line I/O, directory walking, path
     // helpers — Brood over the fs primitives. Opt-in, never in the prelude.
     ("file", include_str!("../../../std/file.blsp")),
-    // A minimal HTTP/1.0 server (ADR-062) over the tcp + file libraries — request
-    // parsing, response rendering, a router, static files. Opt-in.
-    ("net/http", include_str!("../../../std/net/http.blsp")),
     // JSON ↔ Brood data, written entirely in Brood (a recursive-descent parser +
     // encoder over the string primitives; the reader's `\u{}` escape is the
     // codepoint→char mechanism). Opt-in, never in the prelude.
     ("json", include_str!("../../../std/json.blsp")),
-    // A Server-Sent Events (text/event-stream) client: a reader process that streams
-    // events to a subscriber's mailbox (pairs with ui's `with-events`). Pure frame
-    // parsing + a thin IO loop over tcp; reuses http's URL/header helpers. Opt-in.
-    ("net/sse", include_str!("../../../std/net/sse.blsp")),
+    // The net/web library (net/tcp, net/http, net/sse) was lifted out of the
+    // binary into the `brood-net` package (ADR-085 Move 2) — depend on it via the
+    // package manager (`[brood-net :path …]`), it's no longer baked in.
+    // `proc/hatch` (a gen_server-style server loop) stays bundled — the core
+    // `log` module is a hatch process. `proc/supervisor` was lifted out into the
+    // `brood-supervisor` package (ADR-085 Move 2); depend on it via the package
+    // manager (`[brood-supervisor :path …]`).
     ("proc/hatch", include_str!("../../../std/proc/hatch.blsp")),
-    ("proc/supervisor", include_str!("../../../std/proc/supervisor.blsp")),
     // Run a thunk off the current process with an optional timeout + cancel
     // (ADR-006): `task` (async, tagged-reply handle), `cancel-task`, and the
     // synchronous `await`. Pure Brood over spawn / receive / exit — the generic
