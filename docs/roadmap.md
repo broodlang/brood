@@ -282,10 +282,13 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   keeps bare module names** — the *internal* toolchain stays at root
   (namespaces.md §10), grouped without namespacing its identity (the embedded
   table keys it bare, pointing at the grouped file). 🟡 **(2)** ship the
-  namespaced frameworks as **external packages** (ADR-037) — **the clean slice is
-  done** (2026-06-01): `brood-net` (`net/tcp`/`http`/`sse`) and `brood-supervisor`
-  (`proc/supervisor`) are removed from the binary and consumed as `:path` packages
-  (`brood-edit`/`brood-benchmark` depend on them). The walk found *most of the
+  namespaced frameworks as **packages** — **the clean slice is done**
+  (2026-06-01): `brood-net` (`net/tcp`/`http`/`sse`) and `brood-supervisor`
+  (`proc/supervisor`) are removed from the binary and consumed as **internal
+  packages** — a sibling `src/` on the load-path via `:source-paths`, *not* the
+  package manager (no `:dependencies`/lock/fetch — that's for external/distributed
+  deps, ADR-037); `brood-edit`/`brood-benchmark` point `:source-paths` at them.
+  The walk found *most of the
   framework can't leave* — the bundled toolchain is built on it (`tool/observer` →
   editor display/face/highlight/keymap/lineedit/ui; `tool/repl` → editor/lineedit;
   `tool/sexp` → editor/buffer; core `log` → proc/hatch), and those must run in a
@@ -658,6 +661,26 @@ The seam that makes remoteability free later (see architecture.md).
   link freezes on the last snapshot with a `DISCONNECTED` banner. No kernel changes
   (`process-info` maps are send-able); dev-grade auth (shared cookie, LAN/trusted).
   Cross-node `crates/cli/tests/observe_attach.rs`.
+- ⬜ **Resilient `ui-run` — recover to the last good frame (let-it-crash for the
+  TEA loop).** Today a `view`/`update` throw in `std/editor/ui.blsp` runs `:leave`
+  (restores the terminal) and **re-raises** — killing the app. myedit works around
+  this by wrapping its own `ed-view`/`ed-update` in try/catch, but that only stops
+  the *process* dying: a guarded `view` keeps re-rendering the **same bad model**
+  every frame, so a model wedged into a throwing state shows nothing but the error
+  with no way back. Add a supervising loop variant that, on a caught `view`/`update`
+  error, (1) **logs it to the console** (`eprintln` to stderr — the echo-area message
+  vanishes on quit, leaving no trace otherwise) and (2) **rolls the model back to the
+  last frame that rendered cleanly** (`ui--loop` already threads the model each turn;
+  it just carries a `last-good` alongside), then keeps looping. This is the editor's
+  application of the **userland-supervisor / let-it-crash** philosophy (M4,
+  [`supervision.md`](supervision.md)) at the render loop rather than the process tree,
+  and it belongs in the framework so every `ui-run` client (the observer too) inherits
+  it. Note the deliberate non-goal: **buffers stay immutable values, not processes** —
+  the recovery unit is the *model snapshot*, which immutability makes free; process-ifying
+  buffers would forfeit O(1) undo/snapshot/sharing for mutable identity nobody wants.
+  Driver: a stale per-pane `:top` outliving its buffer made `rope-line->char` throw
+  out of myedit's renderer (fixed app-side by clamping scroll into the buffer, but the
+  loop should survive *any* such bug, not just the ones we've found).
 - ⬜ Keymaps and interactive commands defined in Brood — belong in the **editor
   app** (a new `nest` project), not the framework.
 - ⬜ Minibuffer / status line / multiple windows — editor-app concerns, additive
