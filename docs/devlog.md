@@ -11754,7 +11754,9 @@ packages fetched — so the modules they need stay baked in. Only modules with
   (a `nest` project: `src/net/*` + the moved `tests/*_test.blsp` + the `webserver`
   example). Removed from `CORE_MODULES`. Built on the kernel `tcp-*` primitives +
   the bundled `file` core module. Consumers `brood-edit` (web frontend) +
-  `brood-benchmark` (http bench) now `[brood-net :path "../brood-net"]`.
+  `brood-benchmark` (http bench) reach it as an **internal package** — its `src/`
+  on the load-path via `:source-paths ["src" "../brood-net/src"]`, *not* the
+  package manager (see below).
 - **`brood-supervisor`** — `proc/supervisor` → its own package (+ its test).
   `proc/hatch` stays bundled (core `log` is a hatch process). The cross-node
   `supervisor_restarts_a_remote_child` test shipped `(require 'proc/supervisor)`
@@ -11764,8 +11766,17 @@ packages fetched — so the modules they need stay baked in. Only modules with
 
 **Result.** `brood-net` 41/41, `brood-supervisor` 20/20, consumers green
 (`brood-edit` 286, `brood-benchmark` 2), full brood suite green except the
-pre-existing GC-WIP test. Path deps resolve in place (lock files written, no
-`_deps/` copy needed).
+pre-existing GC-WIP test.
+
+**Internal packages skip the package manager** (a correction — the first cut
+wrongly routed them through ADR-037 `:dependencies`/lock). An in-workspace
+package isn't fetched, hashed, or locked; it's just a sibling `src/` on
+`*load-path*`. A consumer adds it with `:source-paths` (`brood-edit`:
+`["src" "../brood-net/src" "../brood-supervisor/src"]`), which `project-setup`
+appends to the load-path for `run`/`test`/`check` alike — so `(require 'net/http)`
+resolves with no `:dependencies`, no `project.lock.blsp`, no `_deps/`. The
+package manager (git deps, lock, distribution) is only for packages *shared
+across workspaces*.
 
 **ADR-085 refinement (recorded in decisions.md).** The "editor framework" is
 largely *shared UI the toolchain consumes*, not a detachable app framework, so
