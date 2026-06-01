@@ -913,53 +913,6 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
     "      (! c :inc) (! c :inc) (! c [:add 10])\n"
     "      (assert= (gen-call c :value) 12))))\n"))
 
-;; `http-server`: a minimal HTTP/1.0 web app over `std/http` (ADR-062). Handlers
-;; map a request to a response; `serve` blocks accepting connections. The router
-;; is built by a fn (not a top-level `def`) so its closure isn't promoted.
-(defn project--http-main-template (nm)
-  (str "(defmodule main \""
-    nm
-    " — a basic HTTP server.\"\n"
-    "  (:use net/http))  ; net/* lives in the `brood-net` package (ADR-085) — add it\n"
-    "                    ; to :dependencies in project.blsp before this resolves\n"
-    "\n"
-    "(def *port* 8080)\n"
-    "\n"
-    ";; A handler maps a request map to a response (`ok` / `text-response` / `not-found`).\n"
-    "(defn home (req)\n"
-    "  (ok (str \"<!doctype html><meta charset=utf-8>\"\n"
-    "        \"<h1>Hello from "
-    nm
-    "</h1>\"\n"
-    "        \"<p>Served by a web server written in Brood.</p>\"\n"
-    "        \"<p><a href='/hello'>/hello</a></p>\")))\n"
-    "\n"
-    "(defn hello (req) (text-response \"hello, world\"))\n"
-    "\n"
-    ";; Build the router in a fn (not a top-level `def`) so the closure stays local.\n"
-    "(defn app () (router {\"/\" home \"/hello\" hello}))\n"
-    "\n"
-    "(defn main ()\n"
-    "  \"Serve until interrupted. `nest run` blocks here; `nest run --for 2s` bounds it.\"\n"
-    "  (println (str \"Serving on http://localhost:\" *port*))\n"
-    "  (serve *port* (app)))\n"))
-
-(defn project--http-test-template (nm)
-  (str ";; `(:use main)` brings `home` / `app` into scope; `(:use test)` the macros.\n"
-    "(defmodule main-test (:use main) (:use test))\n"
-    "\n"
-    "(describe \""
-    nm
-    " routes\"\n"
-    "  (test \"GET / returns a 200 HTML page\"\n"
-    "    (let (resp (home {:path \"/\"}))\n"
-    "      (assert= (get resp :status) 200)\n"
-    "      (is (string-contains? (get resp :body) \""
-    nm
-    "\"))))\n"
-    "  (test \"an unknown route is a 404\"\n"
-    "    (assert= (get ((app) {:path \"/nope\"}) :status) 404)))\n"))
-
 ;; `editor`: a tiny text editor on the `ui` framework (std/ui.blsp) — a `ui-run`
 ;; client like the observer. The buffer is a list of line strings + a [row col]
 ;; cursor; every edit is a pure `(model -> model)` function (testable without a
@@ -1275,7 +1228,7 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
 ;; .claude/skills/writing-brood skill, so the project is self-contained for
 ;; AI-assisted editing. Errors on a bad name; an existing folder is reused (its
 ;; scaffold files overwritten), not rejected.
-(def *project-templates* ["default" "tui-loop" "hatch" "http-server" "editor" "gui"])
+(def *project-templates* ["default" "tui-loop" "hatch" "editor" "gui"])
 
 ;; Write the template-specific src/ + tests/ files; return the list of relative
 ;; paths written (for the summary). The shared files (manifest, CLAUDE.md, guide,
@@ -1294,12 +1247,6 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
                        (spit (path-join tests-dir "main_test.blsp")
                          (project--hatch-test-template actual-name))
                        [(str nm "/src/main.blsp") (str nm "/tests/main_test.blsp")])
-    (= tmpl "http-server") (do
-                             (spit (path-join src-dir "main.blsp")
-                               (project--http-main-template actual-name))
-                             (spit (path-join tests-dir "main_test.blsp")
-                               (project--http-test-template actual-name))
-                             [(str nm "/src/main.blsp") (str nm "/tests/main_test.blsp")])
     (= tmpl "editor") (do
                         (spit (path-join src-dir "main.blsp")
                           (project--editor-main-template actual-name))
@@ -1321,7 +1268,7 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
              (str nm "/tests/hello_test.blsp")])))
 
 (defn new-project (nm &optional template)
-  "Scaffold a new project named `nm` (or `\".\"` for the current directory, taking the project name from the cwd's basename): a `project.blsp` manifest, the baked-in language guide, and starter code chosen by `template` — `\"default\"` (a `main`+`hello` module pair, the default), `\"tui-loop\"` (a tail-recursive animation loop), `\"hatch\"` (a stateful gen_server process), `\"http-server\"` (a minimal web app), `\"editor\"` (a tiny text editor on the `ui` framework), or `\"gui\"` (a windowed app on the `ui` framework, opened with `(gui-display)` — needs a `--features gui` runtime). Existing scaffold files are overwritten, not rejected. Backs `nest new [--template …]`."
+  "Scaffold a new project named `nm` (or `\".\"` for the current directory, taking the project name from the cwd's basename): a `project.blsp` manifest, the baked-in language guide, and starter code chosen by `template` — `\"default\"` (a `main`+`hello` module pair, the default), `\"tui-loop\"` (a tail-recursive animation loop), `\"hatch\"` (a stateful gen_server process), `\"editor\"` (a tiny text editor on the `ui` framework), or `\"gui\"` (a windowed app on the `ui` framework, opened with `(gui-display)` — needs a `--features gui` runtime). Existing scaffold files are overwritten, not rejected. Backs `nest new [--template …]`."
   ;; `nest new .` scaffolds into the current directory (cargo init's shape);
   ;; the project name is then the cwd's basename. Both forms — `nest new .` and
   ;; `nest new foobar` — *overwrite* existing scaffold files rather than
