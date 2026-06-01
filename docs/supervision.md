@@ -62,10 +62,10 @@ A user wanting *recover-on-throw* writes a supervisor process in Brood:
 Add restart limits, backoff, or a structured policy on top — all in Brood,
 no kernel surface to maintain.
 
-## The supervisor library (`std/supervisor.blsp`)
+## The supervisor library (`brood-supervisor/src/proc/supervisor.blsp`)
 
 The structured version of that pattern ships as a require-able module
-(`(require 'supervisor)`, ADR-044). A supervisor is an ordinary green process
+(`(require 'proc/supervisor)`, ADR-044). A supervisor is an ordinary green process
 that starts a set of children, `link`s + traps each (ADR-067), and restarts them
 per a strategy and restart type, bounded by a restart-intensity limit. It is
 **pure Brood policy over `spawn` / `link` / `trap-exit` / `receive` / `exit`** —
@@ -74,7 +74,7 @@ needed was the general Erlang primitives (`monitor`/`exit/2`/`link`/`trap_exit`)
 never a supervision-specific hook.
 
 ```clojure
-(require 'supervisor)
+(require 'proc/supervisor)
 (def sup (start-supervisor
            (list {:id :a :start (fn () (spawn (worker-a)))}
                  {:id :b :start (fn () (spawn (worker-b))) :restart :transient})

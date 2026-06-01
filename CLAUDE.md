@@ -106,17 +106,24 @@ crates/lisp/src/   (the directory tree mirrors the layers — see lib.rs)
 crates/cli/src/main.rs   the `brood` binary — the language (REPL, file runner, `--test`)
 crates/nest/src/         the `nest` binary — project tooling (main.rs + mcp.rs) — ADR-028
 crates/lsp/src/main.rs   the `brood-lsp` binary — language server (ADR-025, docs/lsp.md)
-std/                     standard library written in Brood: prelude.blsp + opt-in
-                         modules (repl, test, format, project, docs, mcp, reload,
-                         buffer, display, observe, supervisor, hatch). The REPL is
-                         Brood too now (`std/repl.blsp`, ADR-048); the binaries
-                         just bootstrap into `(repl-run)`.
+std/                     standard library written in Brood, grouped (ADR-085):
+                         prelude.blsp + bare core (io, file, set, regex, json,
+                         fuzzy, format, task, log); the editor/display framework
+                         `std/editor/*` (buffer, display, ui, keymap, face,
+                         highlight, lineedit, pane, layers, ansi); `std/proc/hatch`;
+                         the toolchain `std/tool/*` — grouped on disk but BARE
+                         module names (test, project, package, docs, mcp, observer,
+                         proctree, repl, sexp, reload). The net library (`net/*`)
+                         and `proc/supervisor` were lifted into the brood-net /
+                         brood-supervisor packages (Move 2). The REPL is Brood too
+                         (`std/tool/repl.blsp`, ADR-048); the binaries bootstrap
+                         into `(repl-run)`.
 docs/                    architecture, language, roadmap, decisions, devlog
 ```
 
 The CLI is split (ADR-028, the `rustc`/`cargo` model): **`brood` runs the
 language**, **`nest` runs the project**. Both embed the `brood` lib (no
-subprocess); `nest` is a thin shell over `std/project.blsp`. `nest` subcommands
+subprocess); `nest` is a thin shell over `std/tool/project.blsp`. `nest` subcommands
 today: `new`, `test`, `check`, `run` (with `--watch`), `doc`, `format`, `repl`,
 `mcp` (an MCP server over the project), and `observe` (the M3 process viewer).
 
@@ -282,13 +289,13 @@ co-author trailer, overriding any default that would append one.
 1. Implement it (special form in `eval/mod.rs`, or builtin in `builtins.rs`, or
    prelude fn in `std/prelude.blsp`).
 2. Add tests — an `(assert= …)`/`(is …)` inside a `(test …)` within a `describe`
-   block in a `tests/*_test.blsp` file (in-language, via the `std/test.blsp`
+   block in a `tests/*_test.blsp` file (in-language, via the `std/tool/test.blsp`
    framework: open the file with `(defmodule foo-test (:use test) (:use foo))`
    so the test macros and the module under test refer bare — post-ADR-065 a bare
    `(require 'test)` only loads it and leaves `describe`/`test`/`assert=`
    qualified), and/or a Rust case in `crates/lisp/tests/`.
    **Every language feature must also be tested across multiple cores**, not just
-   single-threaded. The in-language suite already helps here — `std/test.blsp`
+   single-threaded. The in-language suite already helps here — `std/tool/test.blsp`
    runs each test in its own green process on the ≈`nproc` worker pool, so a plain
    `describe`/`test` exercises the feature concurrently with every other test. On
    top of that, add **explicit concurrency coverage** for any feature that
@@ -320,10 +327,10 @@ additive and gated on a real consumer.
 
 The later milestones are already underway (vertical-slice style, ADR-045/046):
 **M2 editor data model** — the `ropey`-backed `Value::Rope` kernel + the
-`std/buffer.blsp` immutable-buffer framework are in; **M3 display protocol** —
-`std/display.blsp` render-op vocabulary + `term-*` primitives + the `nest observe`
+`std/editor/buffer.blsp` immutable-buffer framework are in; **M3 display protocol** —
+`std/editor/display.blsp` render-op vocabulary + `term-*` primitives + the `nest observe`
 process viewer; **M4 server/daemon** — distributed nodes (TCP, location-transparent
 `send`, monitors, closure-shipping, HMAC handshake) plus a userland
-`std/supervisor.blsp` (kernel-supervised processes were tried and reverted — see
+`brood-supervisor/src/proc/supervisor.blsp` (kernel-supervised processes were tried and reverted — see
 roadmap/ADR-039). Still ahead: the editor app itself, server-mode socket serving,
 and the M5 web frontend.

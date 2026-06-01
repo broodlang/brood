@@ -244,7 +244,7 @@ never a false positive.
   `brood <file>` and `brood --test <file>` pre-check before evaluating (CLI
   wiring through `check_one_file`); `nest run` and `nest test` pre-check the
   whole project after loads but before running (Brood `(check-project)` in
-  `std/project.blsp` walking every `.blsp` under `src/` + `tests/`). Warnings
+  `std/tool/project.blsp` walking every `.blsp` under `src/` + `tests/`). Warnings
   go to **stderr** so they don't muddle program output; the run/test
   **proceeds regardless** (advisory, never gates — `contract #5`). Set
   `BROOD_NO_CHECK=1` to opt out (e.g. when timing a hot path).

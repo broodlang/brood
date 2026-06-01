@@ -43,7 +43,7 @@ running `nest mcp` image:
   loop keeps its state and picks up new code via late binding. The state problem
   below is real but *narrower* than "Emacs loses nothing": it's specifically
   about state and resources bound at **global** scope.
-- **A reload trigger exists** — `std/reload.blsp` polls file mtimes and calls
+- **A reload trigger exists** — `std/tool/reload.blsp` polls file mtimes and calls
   `reload-defs`, which re-evals only `def…` top-level forms (skipping
   side-effecting calls like `(main-loop 0)`).
 
@@ -196,7 +196,7 @@ request) in `crates/lsp`, reusing the same image the MCP talks to:
 
 These are thin: locate the enclosing top-level form (the LSP already parses
 CST), send its text to the image's `eval`, surface the result/diagnostic inline.
-Polling (`std/reload.blsp`) stays as the fallback for edits made *outside* the
+Polling (`std/tool/reload.blsp`) stays as the fallback for edits made *outside* the
 editor.
 
 **Simplicity / perf.** Reuses existing eval/load + CST; near-zero latency by

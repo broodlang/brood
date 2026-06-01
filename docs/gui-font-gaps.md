@@ -24,7 +24,7 @@ crates/lisp/src/gui.rs:43   pub struct Face { fg, bg, bold, italic, underline, r
 
 `:family` (gui.rs:50) lets a face pick a *registered family*, and `face.blsp`
 documents a `:height` attribute — but `:height` is only "a hint, honored by the
-whole-window `gui-font!` knob" (`std/face.blsp`), i.e. it does **not** resize an
+whole-window `gui-font!` knob" (`std/editor/face.blsp`), i.e. it does **not** resize an
 individual op. The grid is uniform: one global `cell_h` (gui.rs renderer), every
 `[:text …]` lands on integer cell coordinates at that one size.
 
@@ -61,9 +61,9 @@ override, leaving `gui-font!` with no id as the global default.
 
 ## Gap 3 — "layers" are behaviour layers, not display layers
 
-`std/layers.blsp` ("composable behaviour layers") is a **keymap/hook** mechanism
+`std/editor/layers.blsp` ("composable behaviour layers") is a **editor/keymap/hook** mechanism
 (what myedit's modes are built from) — it does not touch rendering. There is no
-display-side pane/clip/compositing layer with its own font or viewport. A frame is
+display-side editor/pane/clip/compositing layer with its own font or viewport. A frame is
 one flat op list; clipping and "panes" are the app's job (in `life.blsp`,
 `render` clips cells to `vcols`×`vrows` and reserves a bottom strip by hand).
 

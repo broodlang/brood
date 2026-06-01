@@ -1104,7 +1104,7 @@ the language" principle.
   mcp` tool handler, whose output is diverted off the JSON-RPC channel — drains
   only its own output. The buffer is released even if `body` throws (the error
   re-raises). Built on the `%capture-begin`/`%capture-take` kernel primitives.
-- For simple raw-terminal control, `(:use ansi)` provides escape *strings*
+- For simple raw-terminal control, `(:use editor/ansi)` provides escape *strings*
   to `print`: `ansi-clear` (erase + home — the per-frame reset), `ansi-cursor`,
   `ansi-home`, `ansi-hide-cursor`/`ansi-show-cursor`. The ESC byte is the `\e`
   string escape. For a structured render-op frame buffer instead, use
@@ -1207,7 +1207,7 @@ refer them bare. `:use` is the **only** import clause: `(:require …)` is not a
 
 ```clojure
 (defmodule editor "the editor core"
-  (:use buffer)                 ; refer buffer's public names bare
+  (:use editor/buffer)                 ; refer buffer's public names bare
   (:use text :refer [insert]))  ; refer just text/insert as `insert`
 (defn open (path) (insert (new-buffer) 0 (slurp path)))   ; insert → text/insert
 ```

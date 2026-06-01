@@ -204,7 +204,7 @@ ADR-039's and stay clear of root cause #1.
 
 - **Userland-first (lowest risk, available today).** `spawn` + `monitor` already
   give `[:down …]` and a respawn loop in ~10 lines ([`supervision.md`](supervision.md)).
-  ✅ **Done (2026-05-29, ADR-044):** `std/supervisor.blsp` — `start-supervisor`
+  ✅ **Done (2026-05-29, ADR-044):** `brood-supervisor/src/proc/supervisor.blsp` — `start-supervisor`
   over child specs, `:permanent`/`:transient`/`:temporary` restart types,
   restart-intensity windows, `which-children` — all Brood policy over the
   existing primitives, **zero** scheduler surface. **All three strategies now

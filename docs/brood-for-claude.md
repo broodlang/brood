@@ -412,7 +412,7 @@ quits or crashes is detected without any app-level goodbye message.
 cleanly — no need for an ad-hoc `[:bye]` broadcast. Returns `true` if a link
 existed.
 
-## Stateful servers — the `hatch` framework (`(:use hatch)`)
+## Stateful servers — the `hatch` framework (`(:use proc/hatch)`)
 
 Raw `spawn`/`receive` is the substrate; for a process that **holds state and
 answers messages** (a gen_server / actor), use `hatch`. State is immutable —
@@ -427,7 +427,7 @@ kinds:
   Use this for "just read a field" cases to avoid the `[x s]` boilerplate.
 
 ```lisp
-(defmodule my-counter "…" (:use hatch))   ; (:use hatch), not (require 'hatch),
+(defmodule my-counter "…" (:use proc/hatch))   ; (:use proc/hatch), not (require 'proc/hatch),
                                            ; to write defprocess/cast/gen-call bare
 
 (defprocess counter (n)                 ; n is the state
@@ -480,8 +480,8 @@ code paints to a terminal or a GUI window unchanged.
 
 - **Frame** = a vector of render ops, built with `std/display` constructors:
   `(frame (clear) (text row col s face?) (cursor row col))`. A *face* is a style
-  map, `{:fg :red :bold true}` (`(:use display)` for the constructors).
-- **Frontend** = a map of five fns `{:enter :leave :size :draw :poll}`. `(:use ui)`
+  map, `{:fg :red :bold true}` (`(:use editor/display)` for the constructors).
+- **Frontend** = a map of five fns `{:enter :leave :size :draw :poll}`. `(:use editor/ui)`
   gives you `*term-display*` (the terminal) and `(gui-display)` (a native window,
   needs a `--features gui` build); `display-broadcast` fans one frame to several.
 - **The loop** = `(ui-run model view update display)` — a TEA loop: render
@@ -490,7 +490,7 @@ code paints to a terminal or a GUI window unchanged.
   `:tick-ms` in the model for the refresh beat (input is `:tick` on timeout).
 
 ```lisp
-(defmodule main "a counter app" (:use ui) (:use display))
+(defmodule main "a counter app" (:use editor/ui) (:use editor/display))
 
 (defn view (m cols rows)
   (frame (clear) (text 0 0 (str "count: " (get m :count)))))
@@ -516,7 +516,7 @@ a resize is `[:resize cols rows]`. **A GUI window's close button (the X) is its 
 can still be closed by the X. **`ui-run` quits on `:close` automatically**, so every
 `ui-run` app is closeable for free; you never wire it into `update`. In a hand-rolled
 `(receive)` loop (not on `ui-run`), match it yourself — `(:close :quit)` — or use the
-`ui/quit-request?` predicate. (`nest new --template gui` / `--template editor`
+`editor/ui/quit-request?` predicate. (`nest new --template gui` / `--template editor`
 scaffold complete `ui-run` apps; `--template tui-loop` a plain stdout animation.)
 
 ## Hot reload (`nest run --watch FILE`)
@@ -655,8 +655,8 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 - **I/O**: `print` `println` `slurp` `spit` `load` `eval-string` `read-string`.
   `print`/`println` **flush stdout every call** — there's no separate flush, so
   an animation frame paints immediately. For raw terminal control without the
-  full display protocol, `(:use ansi)` in your `defmodule` header (a bare
-  `(require 'ansi)` leaves them qualified, `ansi/ansi-clear`) gives
+  full display protocol, `(:use editor/ansi)` in your `defmodule` header (a bare
+  `(require 'editor/ansi)` leaves them qualified, `editor/ansi/ansi-clear`) gives
   `(ansi-clear)`/`(ansi-home)`/
   `(ansi-cursor r c)`/`(ansi-hide-cursor)` — **zero-arg functions you call**, each
   *returning* an escape string. Call them: `(print (ansi-clear))`, **never**
