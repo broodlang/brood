@@ -840,6 +840,17 @@ pub struct Heap {
     /// so the trampoline can hold the compiled body across a call without borrowing
     /// the cache.
     vm_cache: RefCell<VmCacheMap<Option<Arc<crate::eval::compile::CompiledClosure>>>>,
+    /// The compiled arms **currently executing** on this process's stack — a stack
+    /// pushed by `compile::vm_apply` (and the top-level `run`) on entry, the top
+    /// updated on a tail-call into a different arm, popped on return. `runtime_collect`
+    /// walks these after evacuating the RUNTIME region and rewrites the movable
+    /// handles their node trees embed (`Const`/`MakeClosure` literals): they're the
+    /// one RUNTIME-handle holder the root walk can't reach — the `Arc`'d node tree is
+    /// off the GC root graph, and `exec_node` holds it by `&Node`, so the `Arc` can't
+    /// be swapped for a relocated copy. (The non-live arms in `vm_cache` are just
+    /// cleared and rebuilt lazily; only the live ones need fixup.) Empty unless the VM
+    /// is running a body. See ADR-076 / `docs/known-issues.md`.
+    live_vm_arms: Vec<Arc<crate::eval::compile::CompiledArm>>,
 }
 
 impl Default for Heap {
@@ -1015,6 +1026,7 @@ impl Heap {
             gc_reclaimed: 0,
             gc_trace: gc_trace_default(),
             vm_cache: RefCell::new(VmCacheMap::default()),
+            live_vm_arms: Vec::new(),
         }
     }
 
@@ -1052,6 +1064,7 @@ impl Heap {
             gc_reclaimed: 0,
             gc_trace: gc_trace_default(),
             vm_cache: RefCell::new(VmCacheMap::default()),
+            live_vm_arms: Vec::new(),
         }
     }
 
@@ -3726,14 +3739,6 @@ impl Heap {
         extra_roots: &mut [Value],
         extra_envs: &mut [EnvId],
     ) -> Option<(usize, usize)> {
-        // Bail while a compiled-VM body is live on this coroutine's stack: it embeds
-        // RUNTIME constant handles behind an `Arc` we can't reach to rewrite, so
-        // evacuating the region would dangle them (the `vm_apply` `RtPinGuard`). The
-        // eval safepoint already gates on this; the guard here also covers the
-        // explicit `(runtime-collect)` builtin called from inside a VM frame.
-        if crate::process::rt_compact_pinned() {
-            return None;
-        }
         // Bail unless we uniquely own the runtime region (no concurrent readers).
         Arc::get_mut(&mut self.runtime)?;
         let before = self.runtime.code.closures.count();
@@ -3771,7 +3776,24 @@ impl Heap {
         // 3. The LOCAL heap (both generations) — any slot may embed a RUNTIME handle.
         rewrite_local_rt_handles(&mut self.local, &old_code, &new, &mut fwd);
         rewrite_local_rt_handles(&mut self.old, &old_code, &new, &mut fwd);
-        // 4. Drop the per-process caches that key on / hold RUNTIME handles.
+        // 3b. The LIVE compiled-VM arms on this process's execution stack. Their
+        // `Arc`'d node trees are off the GC root graph (and held by `&Node` during
+        // execution, so the `Arc` can't be swapped), but they embed promoted RUNTIME
+        // handles in their `Const`/`MakeClosure` literals — the one holder the root
+        // walk above can't reach. Rewrite them in place with the SAME `fwd`, so a
+        // literal shared with an already-evacuated global maps to the same new index,
+        // and a literal reachable ONLY from a live arm is evacuated here on first
+        // sight. Clone the registry (cheap `Arc` bumps) to drop the `&self` borrow
+        // before the `&old_code`/`&mut fwd` closure. This is what lets the safepoint
+        // compact even while the VM is mid-call (no deferral, region stays bounded).
+        let live_arms = self.live_vm_arms.clone();
+        for arm in &live_arms {
+            crate::eval::compile::rewrite_arm_handles(arm, &mut |v| {
+                flush_rt_value(&old_code, &new, &mut fwd, v)
+            });
+        }
+        // 4. Drop the per-process caches that key on / hold RUNTIME handles. (The live
+        // arms above are NOT cleared — they're mid-execution; only the lookup cache is.)
         self.vm_cache.borrow_mut().clear();
         self.global_ic.borrow_mut().clear();
 
@@ -3943,6 +3965,27 @@ impl Heap {
     /// Record the compile result for closure key `k` (eligible body or `None`).
     pub fn vm_cache_put(&self, k: VmCacheKey, v: Option<Arc<crate::eval::compile::CompiledClosure>>) {
         self.vm_cache.borrow_mut().insert(k, v);
+    }
+
+    /// Push a live compiled arm onto the execution-stack registry; returns its depth
+    /// (the index to [`live_arm_truncate`](Self::live_arm_truncate) back to on return).
+    /// See [`live_vm_arms`](Self::live_vm_arms).
+    pub fn live_arm_push(&mut self, arm: Arc<crate::eval::compile::CompiledArm>) -> usize {
+        let i = self.live_vm_arms.len();
+        self.live_vm_arms.push(arm);
+        i
+    }
+
+    /// Replace the arm at depth `i` — a tail call into a different arm reuses the slot
+    /// rather than growing the stack (the trampoline never recurses).
+    pub fn live_arm_set(&mut self, i: usize, arm: Arc<crate::eval::compile::CompiledArm>) {
+        self.live_vm_arms[i] = arm;
+    }
+
+    /// Pop the registry back to depth `n` (teardown paired with `live_arm_push`,
+    /// also self-healing on an error unwind).
+    pub fn live_arm_truncate(&mut self, n: usize) {
+        self.live_vm_arms.truncate(n);
     }
 
     // ----- the tracing GC ------------------------------------------------------

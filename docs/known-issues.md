@@ -6,6 +6,75 @@ Newest first. For the narrative discovery writeup of the scheduler race, see
 
 ---
 
+## KI-3 — RUNTIME compaction strands live VM / tree-walker constants
+
+**Status:** **fixed (2026-06-01)** · **Severity:** was high (silent data corruption /
+GC slab-OOB panic) → none · **First seen:** 2026-06-01, via a long-lived `nest mcp`
+session building the `brood-terminal` demo (loading a string-literal-heavy module in
+a loop).
+
+### Symptom
+
+A `flush_oob` panic in the RUNTIME compactor (`heap.rs` `flush_pair`/`flush_*`:
+`vector handle indexes the source slab out of bounds`), **or** silent corruption — a
+string/quoted-data **constant read back as a *different* value** after the region was
+compacted. E.g. `(load "…")` in a loop would intermittently fail with a garbled path,
+or a literal's `string-length` would change mid-loop.
+
+### Root cause
+
+The same false invariant in two places, exposed once the ADR-076 RUNTIME compactor
+made promoted code-region handles **movable** (previously the region was append-only,
+so a promoted constant never moved):
+
+1. **Tree-walker.** `Heap::root`/`root_env` elided the operand-stack push for any
+   "immovable" value — and counted a RUNTIME handle as immovable (`Root::Stable`).
+   `runtime_collect` only rewrites the operand stack, so an inlined RUNTIME root held
+   by an ancestor `eval_at` frame (a `let` body, a `do` spine cursor) went stale.
+2. **Compiling VM.** `Node::Const`/`MakeClosure.fn_rest` held a promoted RUNTIME
+   handle inline; the `Arc<CompiledArm>` node tree is off the GC root graph and
+   `exec_node` walks it by `&Node`, so the `Arc` can't be swapped for a relocated
+   copy. A compaction at a nested `eval_at` safepoint (e.g. a builtin like `load`)
+   evacuated the region out from under the live arm, leaving its consts dangling.
+
+### Fix
+
+- **Rooting** (`heap.rs`): a new `needs_root_slot` (= LOCAL **or** RUNTIME) replaces
+  `is_movable` in `root`/`root_env`, so a RUNTIME handle takes an operand-stack slot
+  and `runtime_collect` rewrites it.
+- **VM** (`compile.rs` + `heap.rs`): `Node::Const`/`MakeClosure.fn_rest` carry a
+  movable handle as `ConstVal::Handle { kind, AtomicU64 }` (atom literals stay inline,
+  zero-cost). `vm_apply` (and the top-level `run`) register their live arm in
+  `Heap::live_vm_arms`; `runtime_collect` walks the live arms (`rewrite_arm_handles`)
+  and rewrites their handles **in place** with the same forwarding map — so compaction
+  stays correct *and* bounded while the VM is mid-call (no deferral).
+
+A `flush_bound!` self-diagnosing OOB and the `BROOD_RT_GC_FLOOR` knob (set huge to
+disable RUNTIME compaction) were the key bisection aids.
+
+### Reproduction (manual; the race is slab-packing sensitive)
+
+```
+# in a Brood project with a string-literal-heavy module (e.g. brood-terminal/src/commands.blsp):
+printf '(defn probe (i) (load "src/commands.blsp") (string-length "src/commands.blsp")) \
+        (defn bad (i n a) (if (= i n) a (bad (+ i 1) n (if (= (probe i) 17) a (+ a 1))))) \
+        (println "bad=" (bad 0 60 0))' > /tmp/r.blsp
+BROOD_GC_STRESS=1 brood /tmp/r.blsp     # pre-fix: bad=1 (corruption); fixed: bad=0
+BROOD_RT_GC_FLOOR=100000000 brood /tmp/r.blsp   # clean either way → implicates the RT collector
+BROOD_VM=0 brood /tmp/r.blsp            # tree-walker path (bug #1 only)
+```
+
+### Regression tests
+
+The end-to-end corruption is a slab-packing race (only reliable with a large varied
+churn file under `BROOD_GC_STRESS`), so the *mechanism* is unit-tested deterministically
+in `crates/lisp/src/eval/compile.rs` (`compile::tests::const_handle_round_trips`,
+`rewrite_arm_handles_rewrites_every_embedded_handle`), and
+`crates/lisp/tests/runtime_collector.rs::auto_safepoint_collect_bounds_runtime_region`
+exercises mid-execution compaction + post-compaction correctness.
+
+---
+
 ## KI-1 — Multi-thread scheduler race: green processes can't resolve globals
 
 **Status:** **fixed** (2026-05-29) · **Severity:** was high → none · **First

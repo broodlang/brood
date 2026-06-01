@@ -28,7 +28,9 @@ use std::sync::Arc;
 
 use crate::core::heap::{EnvRoot, Heap, VmCacheKey};
 use crate::core::keywords as kw;
-use crate::core::value::{self, ClosureId, EnvId, NativeId, Symbol, Value};
+use crate::core::value::{
+    self, ClosureId, EnvId, MapId, NativeId, PairId, RopeId, StrId, Symbol, Value, VecId,
+};
 use crate::error::{error_codes, LispError, LispResult, Pos};
 
 thread_local! {
@@ -125,19 +127,122 @@ impl PrimOp {
     }
 }
 
+/// Which movable heap-handle kind a [`ConstVal::Handle`] carries — fixed at compile
+/// time (a `Str` literal stays a `Str`), so only the handle's index bits move under
+/// a RUNTIME compaction and the variant tells [`ConstVal`] how to re-wrap them.
+#[derive(Clone, Copy)]
+pub enum HandleKind {
+    Str,
+    Pair,
+    Vector,
+    Map,
+    Rope,
+    Fn,
+    Macro,
+}
+
+/// A constant baked into a compiled [`Node`] (a `Const` literal or a
+/// `MakeClosure` `fn_rest`). Either a truly-immovable **atom** kept inline, or a
+/// movable **heap handle** stored as `(kind, AtomicU64)` so the RUNTIME compactor
+/// ([`Heap::runtime_collect`](crate::core::heap::Heap::runtime_collect)) can rewrite
+/// it **in place** — the `Node` tree lives behind an `Arc` that `exec_node` walks by
+/// `&Node`, so the `Arc` can't be swapped for a relocated copy; the handle bits must
+/// move under the live reference. The atomic also keeps `ConstVal`/`Node`
+/// `Send + Sync` (required because `Arc<CompiledArm>` is cached in a `Send` `Heap`).
+/// Pre-ADR-076 every promoted constant was immovable, so this was a plain `Value`;
+/// the compactor made promoted handles movable, which is the slab-OOB / corruption
+/// bug this encoding fixes (`docs/known-issues.md`).
+pub enum ConstVal {
+    /// An inline scalar / interned symbol-or-keyword / `Nil` — never relocated.
+    Atom(Value),
+    /// A movable RUNTIME/PRELUDE heap handle, rewritable in place. PRELUDE handles
+    /// never actually move (the flush is a no-op for them), but storing them here is
+    /// harmless and keeps the compile-time split purely atom-vs-handle.
+    Handle { kind: HandleKind, bits: AtomicU64 },
+}
+
+impl ConstVal {
+    /// Build from a (already-`promote`d, immovable-or-RUNTIME) value: an atom stays
+    /// inline; a heap handle is split into `(kind, bits)`.
+    fn new(v: Value) -> ConstVal {
+        match v {
+            Value::Str(id) => ConstVal::Handle { kind: HandleKind::Str, bits: AtomicU64::new(id.0) },
+            Value::Pair(id) => {
+                ConstVal::Handle { kind: HandleKind::Pair, bits: AtomicU64::new(id.0) }
+            }
+            Value::Vector(id) => {
+                ConstVal::Handle { kind: HandleKind::Vector, bits: AtomicU64::new(id.0) }
+            }
+            Value::Map(id) => ConstVal::Handle { kind: HandleKind::Map, bits: AtomicU64::new(id.0) },
+            Value::Rope(id) => {
+                ConstVal::Handle { kind: HandleKind::Rope, bits: AtomicU64::new(id.0) }
+            }
+            Value::Fn(id) => ConstVal::Handle { kind: HandleKind::Fn, bits: AtomicU64::new(id.0) },
+            Value::Macro(id) => {
+                ConstVal::Handle { kind: HandleKind::Macro, bits: AtomicU64::new(id.0) }
+            }
+            atom => ConstVal::Atom(atom),
+        }
+    }
+
+    /// The current value (decoding a handle from its live bits).
+    #[inline]
+    pub fn load(&self) -> Value {
+        match self {
+            ConstVal::Atom(v) => *v,
+            ConstVal::Handle { kind, bits } => {
+                let b = bits.load(Ordering::Relaxed);
+                match kind {
+                    HandleKind::Str => Value::Str(StrId(b)),
+                    HandleKind::Pair => Value::Pair(PairId(b)),
+                    HandleKind::Vector => Value::Vector(VecId(b)),
+                    HandleKind::Map => Value::Map(MapId(b)),
+                    HandleKind::Rope => Value::Rope(RopeId(b)),
+                    HandleKind::Fn => Value::Fn(ClosureId(b)),
+                    HandleKind::Macro => Value::Macro(ClosureId(b)),
+                }
+            }
+        }
+    }
+
+    /// Rewrite a `Handle` in place through `f` (a `runtime_collect` flush). The kind
+    /// is invariant under evacuation (a `Str` stays a `Str`), so only the bits change;
+    /// an `Atom` is left untouched. Single-threaded (the owning process), so `Relaxed`
+    /// suffices.
+    fn rewrite(&self, f: &mut dyn FnMut(Value) -> Value) {
+        if let ConstVal::Handle { bits, .. } = self {
+            let new = f(self.load());
+            let nb = match new {
+                Value::Str(id) => id.0,
+                Value::Pair(id) => id.0,
+                Value::Vector(id) => id.0,
+                Value::Map(id) => id.0,
+                Value::Rope(id) => id.0,
+                Value::Fn(id) | Value::Macro(id) => id.0,
+                // `f` (flush_rt_value) never changes the handle *kind*, so this is
+                // unreachable; keep the old bits rather than panic if it ever does.
+                _ => return,
+            };
+            bits.store(nb, Ordering::Relaxed);
+        }
+    }
+}
+
 /// A compiled IR node (ADR-076). Stage 1 vocabulary — the core forms a top-level
 /// arithmetic/recursive body is built from. Anything outside this set makes the
 /// whole closure ineligible (it runs on the tree-walker instead), so there is no
 /// `Defer` node: a VM-run body is *fully* compiled, which is what lets `exec_node`
 /// never need an `EnvId` for locals.
 pub enum Node {
-    /// A self-evaluating literal (number, bool, nil, string, keyword). **Invariant:
-    /// holds an immovable value** — an inline atom, an interned keyword, or a
-    /// PRELUDE/RUNTIME handle — so the cached `Node` tree (an `Arc` off the GC root
-    /// graph) needs no rooting and can't dangle. Construct only via [`const_node`],
-    /// which `promote`s to enforce this; a bare `Const(local_handle)` is the
-    /// use-after-GC bug fixed 2026-05-31.
-    Const(Value),
+    /// A self-evaluating literal (number, bool, nil, string, keyword), as a
+    /// [`ConstVal`]: an immovable atom inline, or a movable RUNTIME/PRELUDE heap
+    /// handle as `(kind, AtomicU64)`. Construct only via [`const_node`], which
+    /// `promote`s out of LOCAL first. The cached `Node` tree is an `Arc` off the GC
+    /// root graph, so the collector never traces it — a LOCAL handle here would
+    /// dangle (the use-after-GC bug fixed 2026-05-31), and a *RUNTIME* handle would
+    /// dangle under a compaction unless rewritten in place, which is why the handle
+    /// case is atomic (`runtime_collect` walks live arms and rewrites it).
+    Const(ConstVal),
     /// A lexically-addressed local read: frame-slot `index` (depth 0 in the
     /// slice — only the callee's own params). Reads `root_at(frame_base + index)`.
     Local(usize),
@@ -193,7 +298,9 @@ pub enum Node {
     /// sub-form parsed by [`crate::eval::make_closure`] at run time (reusing all the
     /// arity/optional/doc parsing).
     MakeClosure {
-        fn_rest: Value,
+        /// The `(fn …)` form's cdr (an immovable RUNTIME sub-form), as a [`ConstVal`]
+        /// so a runtime compaction rewrites it in place like a `Const` handle.
+        fn_rest: ConstVal,
         captures: Box<[(Symbol, Node)]>,
     },
     /// An inlined 2-ary primitive (perf #1) — `(+ a b)`, `(< a b)`, `(= a b)`, etc.
@@ -505,7 +612,7 @@ fn const_node(heap: &Heap, v: Value) -> Node {
         "Node::Const must hold an immovable handle (the Arc'd AST is off the GC root \
          graph and can't relocate it); promote left a movable {frozen:?}"
     );
-    Node::Const(frozen)
+    Node::Const(ConstVal::new(frozen))
 }
 
 /// A `Value` carrying no relocatable LOCAL heap handle — an inline scalar, an
@@ -583,7 +690,7 @@ fn compile_make_closure(heap: &Heap, form: Value, scope: &Scope) -> Option<Node>
     }
     let captures = compile_captures(scope)?;
     Some(Node::MakeClosure {
-        fn_rest,
+        fn_rest: ConstVal::new(fn_rest),
         captures: captures.into_boxed_slice(),
     })
 }
@@ -976,6 +1083,70 @@ fn prim_apply(op: PrimOp, x: Value, y: Value) -> Result<Option<Value>, LispError
     Ok(Some(v))
 }
 
+/// Walk a compiled `Node` tree, rewriting every embedded movable handle
+/// (a `Const` literal or a `MakeClosure` `fn_rest`) in place through `f`. The crux of
+/// the live-arm fixup: a RUNTIME compaction evacuates the code region, but the `Arc`'d
+/// node trees of the **executing** arms are off the GC root graph (and held by
+/// `&Node` on the Rust stack, so the `Arc` can't be swapped). `runtime_collect` walks
+/// the live arms (registered in `Heap::live_vm_arms`) and calls this with `f` =
+/// `flush_rt_value` so their handles point into the compacted region. Atoms and child
+/// structure are untouched; only `ConstVal::Handle` bits move.
+fn rewrite_node(node: &Node, f: &mut dyn FnMut(Value) -> Value) {
+    match node {
+        Node::Const(cv) => cv.rewrite(f),
+        Node::Local(_) | Node::Global(_) => {}
+        Node::If(a, b, c) => {
+            rewrite_node(a, f);
+            rewrite_node(b, f);
+            rewrite_node(c, f);
+        }
+        Node::Do(ns) | Node::Vector(ns) => {
+            for n in ns.iter() {
+                rewrite_node(n, f);
+            }
+        }
+        Node::Map(pairs) => {
+            for (k, v) in pairs.iter() {
+                rewrite_node(k, f);
+                rewrite_node(v, f);
+            }
+        }
+        Node::Call { callee, args, .. } => {
+            rewrite_node(callee, f);
+            for a in args.iter() {
+                rewrite_node(a, f);
+            }
+        }
+        Node::LetBind { binds, body } => {
+            for (_, n) in binds.iter() {
+                rewrite_node(n, f);
+            }
+            rewrite_node(body, f);
+        }
+        Node::MakeClosure { fn_rest, captures } => {
+            fn_rest.rewrite(f);
+            for (_, n) in captures.iter() {
+                rewrite_node(n, f);
+            }
+        }
+        Node::Prim2 { a, b, .. } => {
+            rewrite_node(a, f);
+            rewrite_node(b, f);
+        }
+    }
+}
+
+/// Rewrite every movable handle embedded in a live compiled arm — its body plus each
+/// real `&optional` default form. Called by `runtime_collect` per registered live arm.
+pub fn rewrite_arm_handles(arm: &CompiledArm, f: &mut dyn FnMut(Value) -> Value) {
+    rewrite_node(&arm.body, f);
+    for d in arm.optional_defaults.iter() {
+        if let Some(n) = d {
+            rewrite_node(n, f);
+        }
+    }
+}
+
 /// Execute one node. `frame_base` is the start of this activation's slot region on
 /// `Heap::roots`; `genv` is an [`EnvRoot`] for the *current* closure's captured env
 /// — read fresh via [`Heap::read_root_env`] wherever it's needed, since a nested
@@ -988,7 +1159,7 @@ fn exec_node(
     genv: EnvRoot,
 ) -> Result<Step, LispError> {
     match node {
-        Node::Const(v) => Ok(Step::Done(*v)),
+        Node::Const(cv) => Ok(Step::Done(cv.load())),
         // Slot read — depth 0: the callee's own frame. (Deeper depths arrive with
         // the full compiler; the slice only binds params.)
         Node::Local(i) => Ok(Step::Done(heap.root_at(frame_base + i))),
@@ -1108,7 +1279,7 @@ fn exec_node(
                 }
                 frame
             };
-            let cl = crate::eval::make_closure(heap, None, *fn_rest, env)?;
+            let cl = crate::eval::make_closure(heap, None, fn_rest.load(), env)?;
             Ok(Step::Done(cl))
         }
         Node::Call { callee, args, tail, pos } => {
@@ -1372,18 +1543,31 @@ fn push_frame(
 /// a GC safepoint, the soft-memory backstop, reduction-counted preemption, the eval
 /// deadline, and the non-tail-recursion stack guard.
 fn vm_apply(heap: &mut Heap, compiled0: Arc<CompiledArm>, args: &[Value], genv0: EnvId) -> LispResult {
+    // Register this frame's compiled arm as LIVE for the duration of the call, so a
+    // RUNTIME compaction (at a nested `eval_at` safepoint — e.g. a builtin like `load`
+    // that churns the code region) rewrites the movable handles its node tree embeds.
+    // The `Arc`'d tree is off the GC root graph and `exec_node` holds it by `&Node`,
+    // so it can't be relocated by swapping the `Arc` — `runtime_collect` walks the
+    // registry and fixes the handles in place (ADR-076 / `docs/known-issues.md`). One
+    // push/truncate around the inner trampoline covers every (incl. error) return; the
+    // inner updates the slot on a tail call into a different arm.
+    let slot = heap.live_arm_push(compiled0.clone());
+    let r = vm_apply_inner(heap, compiled0, args, genv0, slot);
+    heap.live_arm_truncate(slot);
+    r
+}
+
+fn vm_apply_inner(
+    heap: &mut Heap,
+    compiled0: Arc<CompiledArm>,
+    args: &[Value],
+    genv0: EnvId,
+    arm_slot: usize,
+) -> LispResult {
     // Match `eval`: a GC-block guard (feeds the stack-overflow base) + the stack
     // budget check, so deep *non-tail* VM recursion fails cleanly instead of a
     // SIGSEGV. Tail calls reuse the frame below and never grow the Rust stack.
     let _gc_block = crate::process::GcBlockGuard::enter();
-    // Pin the RUNTIME region against compaction for this frame's lifetime: the
-    // compiled body (`compiled`/`compiled0`) embeds RUNTIME constant handles in its
-    // node tree, and it lives behind an `Arc` on the Rust stack — unreachable from
-    // the heap roots, so `runtime_collect` can't rewrite it. A nested `eval_at`
-    // (e.g. a builtin like `load` that churns the code region) must therefore not
-    // evacuate the region out from under us; the safepoint checks `rt_compact_pinned`
-    // and defers until this guard drops. LOCAL collection is unaffected.
-    let _rt_pin = crate::process::RtPinGuard::enter();
     let probe = 0u8;
     if let Some(used) = crate::process::stack_overflow_check(&probe as *const u8 as usize) {
         return Err(LispError::runtime(format!(
@@ -1423,7 +1607,8 @@ fn vm_apply(heap: &mut Heap, compiled0: Arc<CompiledArm>, args: &[Value], genv0:
         // on `Heap::env_roots`, so `collect` relocates both in place. LOCAL
         // collection never moves the compiled body's RUNTIME/PRELUDE constant
         // handles, so it needs no extra roots; RUNTIME *compaction* would move them,
-        // which is why this frame holds an `RtPinGuard` (above) deferring it.
+        // but this arm is registered in `live_vm_arms`, so `runtime_collect` rewrites
+        // them in place (no deferral needed).
         if !crate::process::macro_block_active() && heap.gc_due() {
             heap.collect(&mut [], &mut []);
         }
@@ -1471,6 +1656,9 @@ fn vm_apply(heap: &mut Heap, compiled0: Arc<CompiledArm>, args: &[Value], genv0:
                     heap.truncate_env_roots(env_base);
                     return Err(e);
                 }
+                // Keep the live-arm registry pointing at the arm we're now running, so
+                // a compaction during the tail arm rewrites *its* handles.
+                heap.live_arm_set(arm_slot, c2.clone());
                 compiled = c2;
             }
             Err(e) => {
@@ -1496,15 +1684,30 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
             // of `scope.max` nil slots (like a 0-param closure), then tear it down.
             // The top-level env is the (immovable) process global, so `root_env`
             // keeps it inline; rooting it uniformly keeps `exec_node`'s contract.
+            //
+            // Wrap the transient top-level node in a throwaway arm and register it as
+            // LIVE: like a `vm_apply` frame, its `Const` literals are promoted RUNTIME
+            // handles that a nested compaction (a sub-call into `load`/`eval`) would
+            // strand — registering it lets `runtime_collect` rewrite them in place.
+            let arm = Arc::new(CompiledArm {
+                nrequired: 0,
+                noptional: 0,
+                optional_defaults: Box::new([]),
+                rest_slot: None,
+                nslots: scope.max,
+                body: node,
+            });
+            let arm_slot = heap.live_arm_push(arm.clone());
             let env_base = heap.env_roots_len();
             let genv = heap.root_env(env);
             let base = heap.roots_len();
             for _ in 0..scope.max {
                 heap.push_root(Value::Nil);
             }
-            let r = exec_node(heap, &node, base, genv).and_then(|s| force(heap, s));
+            let r = exec_node(heap, &arm.body, base, genv).and_then(|s| force(heap, s));
             heap.truncate_roots(base);
             heap.truncate_env_roots(env_base);
+            heap.live_arm_truncate(arm_slot);
             r
         }
         None => crate::eval::eval(heap, form, env),
@@ -1525,4 +1728,99 @@ pub fn apply_value(heap: &mut Heap, callee: Value, args: &[Value], genv: EnvId) 
     let argv: SmallVec<[Value; 4]> = args.iter().copied().collect();
     let step = dispatch(heap, callee, argv, false, genv)?;
     force(heap, step)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Bump a movable handle's index by `by`; leave atoms alone. Stands in for the
+    // `runtime_collect` flush that relocates a handle into the compacted region.
+    fn bump(v: Value, by: usize) -> Value {
+        match v {
+            Value::Str(id) => Value::Str(StrId::runtime(id.index() + by)),
+            Value::Pair(id) => Value::Pair(PairId::runtime(id.index() + by)),
+            other => other,
+        }
+    }
+
+    // `Value` has no `PartialEq` (Brood equality is a structural function), so compare
+    // a handle const by kind + index.
+    fn str_idx(v: Value) -> usize {
+        match v {
+            Value::Str(id) => id.index(),
+            other => panic!("expected a Str, got {:?}", std::mem::discriminant(&other)),
+        }
+    }
+    fn pair_idx(v: Value) -> usize {
+        match v {
+            Value::Pair(id) => id.index(),
+            other => panic!("expected a Pair, got {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn const_handle_round_trips() {
+        // A heap-handle const decodes back to the same handle, and `rewrite` moves it.
+        let cv = ConstVal::new(Value::Str(StrId::runtime(5)));
+        assert!(matches!(cv, ConstVal::Handle { .. }), "a Str must encode as a Handle");
+        assert_eq!(str_idx(cv.load()), 5);
+        cv.rewrite(&mut |v| bump(v, 100));
+        assert_eq!(str_idx(cv.load()), 105, "rewrite must relocate the handle");
+
+        // An atom stays inline and is never touched by a rewrite.
+        let atom = ConstVal::new(Value::Int(42));
+        assert!(matches!(atom, ConstVal::Atom(_)), "an Int must encode as an Atom");
+        atom.rewrite(&mut |_| panic!("an atom const must not be passed to the flush"));
+        assert!(matches!(atom.load(), Value::Int(42)));
+    }
+
+    #[test]
+    fn rewrite_arm_handles_rewrites_every_embedded_handle() {
+        // The regression guard: `runtime_collect` calls this on each LIVE arm, so it
+        // must reach every movable handle a node tree embeds — a `Const` literal, a
+        // `MakeClosure` `fn_rest`, an `&optional` default — through all the structural
+        // node variants, while leaving atoms/symbols/indices alone.
+        let body = Node::Do(Box::new([
+            Node::Const(ConstVal::new(Value::Str(StrId::runtime(1)))),
+            Node::If(
+                Box::new(Node::Const(ConstVal::new(Value::Int(7)))), // atom — untouched
+                Box::new(Node::Const(ConstVal::new(Value::Pair(PairId::runtime(2))))),
+                Box::new(Node::MakeClosure {
+                    fn_rest: ConstVal::new(Value::Pair(PairId::runtime(3))),
+                    captures: Box::new([]),
+                }),
+            ),
+        ]));
+        let arm = CompiledArm {
+            nrequired: 0,
+            noptional: 1,
+            optional_defaults: Box::new([Some(Node::Const(ConstVal::new(Value::Str(
+                StrId::runtime(4),
+            ))))]),
+            rest_slot: None,
+            nslots: 0,
+            body,
+        };
+
+        rewrite_arm_handles(&arm, &mut |v| bump(v, 100));
+
+        // Destructure the (known) tree and assert each handle moved, the atom didn't.
+        let Node::Do(top) = &arm.body else { panic!("body") };
+        assert_eq!(str_idx(load_const(&top[0])), 101);
+        let Node::If(cond, then, els) = &top[1] else { panic!("if") };
+        assert!(matches!(load_const(cond), Value::Int(7)), "atom const must be untouched");
+        assert_eq!(pair_idx(load_const(then)), 102);
+        let Node::MakeClosure { fn_rest, .. } = &**els else { panic!("makeclosure") };
+        assert_eq!(pair_idx(fn_rest.load()), 103);
+        let Some(def) = &arm.optional_defaults[0] else { panic!("optional default") };
+        assert_eq!(str_idx(load_const(def)), 104);
+    }
+
+    fn load_const(node: &Node) -> Value {
+        match node {
+            Node::Const(cv) => cv.load(),
+            other => panic!("expected a Const, got {:?}", std::mem::discriminant(other)),
+        }
+    }
 }
