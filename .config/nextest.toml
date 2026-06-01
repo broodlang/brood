@@ -31,6 +31,13 @@ real-tcp = { max-threads = 1 }
 filter = 'binary(distribution)'
 test-group = 'real-tcp'
 
+# `serve_attach` (ADR-090) likewise spins two real `brood` child processes over
+# loopback (a daemon + an attaching client); same reasoning as `distribution` — pin
+# it to the single-threaded group so it doesn't race for ports under full load.
+[[profile.default.overrides]]
+filter = 'binary(serve_attach)'
+test-group = 'real-tcp'
+
 # `brood_suite_passes` (tests/suite.rs) runs the ENTIRE in-language suite (~1200
 # cases) inside ONE nextest case, so the 120s default cap is the wrong scale: under
 # a full `make test` it competes with the rest of the workspace for cores and

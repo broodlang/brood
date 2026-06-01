@@ -1,0 +1,150 @@
+;; std/editor/serve.blsp — serve a `ui-run` app to remote frontends. (require 'editor/serve).
+;;
+;; The Emacs `--daemon` / `emacsclient` model (M4, ADR-090): the **app runs on the
+;; daemon** — its model, `view`, and `update` all live in the serving runtime — and a
+;; **thin client** just paints the frames the daemon pushes and ships back the keys it
+;; reads. "The frontend is a protocol": the same render frame (plain Brood data) and the
+;; same key values cross a node link instead of going to a local terminal.
+;;
+;; This is the *push* direction, the complement of the observer's remote-attach (which
+;; pulls snapshots and runs the loop on the client). Here the daemon runs the unmodified
+;; `(ui-run model view update display)` — the trick is the **display**: `remote-display`
+;; is a frontend whose `:draw` sends the frame to the client and whose `:poll` receives
+;; the client's keys. So an app written for a local terminal serves to a remote one with
+;; no change (ADR-046: one display protocol, many frontends — now a *network* frontend).
+;;
+;;     ;; daemon (e.g. `nest run --name ed app.blsp`, where main calls):
+;;     (serve (fn () {:n 0}) my-view my-update)   ; register the app, then park
+;;     ;; client (another terminal / machine):
+;;     (attach "ed")            ; or "ed@host:port"; like `emacsclient -s ed`
+;;
+;; **Many clients** can attach at once — each gets its own session process running its
+;; own `ui-run` over a fresh `(make-model)`, so sessions are independent. A *shared*
+;; model across clients (collaborative editing), live terminal **resize** after attach,
+;; and per-client viewports onto shared buffers are deferred (ADR-011) — the slice proves
+;; the seam. Detach, client death, and a dropped link all tear the session down cleanly.
+
+(defmodule editor/serve
+  "Serve a `ui-run` app to remote frontends — the Emacs `--daemon`/`emacsclient`
+model (ADR-090). The app's model/`view`/`update` run on the daemon; a thin client
+(`attach`, or `nest attach NAME`) paints pushed frames and ships back keys. `serve`
+registers the app under the well-known node name `serve-name` (`:ui`); each attaching
+client gets its own session process running `ui-run` against a `remote-display` —
+the frontend whose `:draw` sends the frame over the node link and whose `:poll`
+receives the client's input. Many clients may attach at once (independent sessions).
+Built purely on `ui-run` + the node-link primitives (`(require 'editor/serve)`)."
+  (:use editor/ui))
+
+;; The registered name a daemon's session-manager listens under, and an attaching
+;; client addresses. A constant so both ends agree; one served app per node (a
+;; per-app name is a deferred power feature).
+(def serve-name :ui)
+
+;; ---- the seam: a display frontend that lives on the wire ---------------------
+
+(defn remote-display (client cols rows)
+  "A `ui-run` display (`{:enter :leave :size :draw :poll}`) bound to a remote
+frontend `client` (its pid): `:draw` ships the frame to `client` as `[:frame f]`,
+`:poll` returns the next key the client shipped back (`[:key k]`). Runs inside the
+session process (the one `ui-run` runs in), so the client's keys land in *this*
+process's mailbox. `:size` is the `[cols rows]` the client reported at attach (live
+resize is deferred — re-attach to resize). `:leave` tells the client to restore its
+terminal (`[:bye]`). A `[:detach]` from the client, or a monitor `[:down …]` (the
+client died or the link dropped), returns `:close` — which `ui-run` treats as an
+immediate quit, tearing the session down."
+  {:enter (fn () nil)  ; the *client* owns the real terminal, not us
+   :leave (fn () (send client [:bye]))
+   :size (fn () [cols rows])
+   :draw (fn (f) (send client [:frame f]))
+   :poll (fn (ms)
+           (receive
+             ([:key k] k)
+             ([:detach] :close)
+             ([:down _ _ _] :close)  ; client process died / link net-split
+             (after ms nil)))})      ; nil ⇒ ui-run treats it as :tick (re-render)
+
+;; ---- daemon side -------------------------------------------------------------
+
+(defn serve--session (client cols rows make-model view update)
+  "One attached client's session: monitor the client (so its death tears us down),
+tell it our pid (so it can ship keys here), then run the app's `ui-run` against a
+`remote-display` to that client. A fresh `(make-model)` per session keeps clients
+independent."
+  (do
+    (monitor client)
+    (send client [:attached (self)])
+    (ui-run (make-model) view update (remote-display client cols rows))))
+
+(defn serve--manager (make-model view update)
+  "The session manager loop (registered under `serve-name`): on each `[:attach client
+cols rows]`, spawn an independent session for that client. Tail-recursive, so it
+serves any number of clients over its lifetime."
+  (receive
+    ([:attach client cols rows]
+      (do
+        (spawn (serve--session client cols rows make-model view update))
+        (serve--manager make-model view update)))
+    (_ (serve--manager make-model view update))))
+
+(defn serve (make-model view update)
+  "Serve a `ui-run` app from THIS runtime to attaching frontends (ADR-090). `make-model`
+is a 0-arg thunk producing a *fresh* initial model per client; `view`/`update` are the
+usual `ui-run` functions. Registers a session manager under `serve-name` and returns
+its pid (non-blocking) — a daemon's `main` typically calls `(serve …)` then parks
+(`nest run --name N` brings the node up). Each `(attach …)` / `nest attach` then gets
+its own session. The program must already be a node (`node-start` / `nest run --name`).
+Opt-in, like Erlang's `-name`: a runtime serves nothing unless it calls `serve`."
+  (register serve-name (spawn (serve--manager make-model view update))))
+
+;; ---- client side (the thin frontend) -----------------------------------------
+
+(defn attach--gen-name ()
+  "A unique transient node name for a client, so two clients on one box don't collide."
+  (keyword (str "attach-" (now))))
+
+(defn attach--drain (peer)
+  "Draw every frame the daemon has queued (non-blocking), returning `:open`, or
+`:closed` if the daemon said `[:bye]` (the app quit) or the link to `peer` dropped."
+  (receive
+    ([:frame f] (do (term-draw f) (attach--drain peer)))
+    ([:bye] :closed)
+    ([:nodedown ~peer] :closed)
+    (after 0 :open)))
+
+(defn attach--loop (peer session)
+  "The thin client loop: draw any pushed frames, then poll the local terminal briefly
+and ship each key to the daemon's `session`. Tail-recursive (O(1) stack). Ends when
+the daemon says `[:bye]` or the link drops."
+  (if (= (attach--drain peer) :closed)
+    nil
+    (let (k (term-poll 30))
+      (if (nil? k)
+        (attach--loop peer session)
+        (do (send session [:key k]) (attach--loop peer session))))))
+
+(defn attach--session (peer)
+  "Report our terminal size, ask `peer`'s session manager to attach us, and run the
+client loop once the daemon replies with our session pid."
+  (let ([cols rows] (term-size))
+    (send {:name serve-name :node peer} [:attach (self) cols rows])
+    (receive
+      ([:attached session] (attach--loop peer session))
+      ([:nodedown ~peer] nil)
+      (after 5000 (error "attach: no response from the server (is it serving?)")))))
+
+(defn attach (spec &optional cookie)
+  "Attach this terminal to a `ui-run` app served by the peer named in `spec`
+(\"name\" over a local Unix socket, or \"name@host:port\" over TCP) — the
+`emacsclient` to a daemon's `serve`. `cookie` defaults to `(node-cookie)` (the shared
+`~/.config/brood/cookie`). Connects *before* taking the terminal, so a refused /
+wrong-cookie / bad-spec error surfaces cleanly without wrecking the screen; then
+enters raw mode, paints the frames the daemon pushes, and ships back every key until
+the app quits (`[:bye]`) or the link drops. The terminal is always restored on exit."
+  (do
+    (node-start (attach--gen-name) "127.0.0.1:0" (or cookie (node-cookie)))
+    (let (peer (connect spec))  ; raises a clean error on failure, terminal untouched
+      (monitor-node peer)
+      (term-enter)
+      (try
+        (do (attach--session peer) (term-leave))
+        (catch e (do (term-leave) (throw e)))))))

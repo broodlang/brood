@@ -1,0 +1,84 @@
+;; std/editor/serve.blsp — serving a `ui-run` app to remote frontends (ADR-090).
+;; The daemon runs the app; a thin client paints pushed frames and ships back keys.
+;; Here the *test process plays the client* in-process — local pids `send`/`receive`
+;; exactly as remote ones do (a node link is just a longer copy), so the full
+;; serve → frame → key → frame → quit protocol is exercised without a node or a TTY.
+;; The cross-node, real-TCP variant is `crates/cli/tests/serve_attach.rs`.
+
+(defmodule serve-test (:use test) (:use editor/serve) (:use editor/display))
+
+;; A tiny served app: a counter. `"+"` increments, `"q"` quits; the view paints the
+;; count. Each client gets a fresh model from `mk`.
+(defn mk () {:n 0})
+(defn vw (m c r) [(text 0 0 (str "n=" (get m :n)))])
+(defn up (m input c r)
+  (cond
+    (= input "+") (assoc m :n (+ (get m :n) 1))
+    (= input "q") (assoc m :done true)
+    :else m))
+
+;; The text string of a frame's first `[:text row col s]` op — what the app rendered.
+(defn frame-text (f) (nth (first f) 3))
+
+;; A helper "client" process: attach to `mgr`, press `"+"` once, and report the
+;; frame text it sees back to `report`. Used to prove two clients are independent.
+(defn probe (mgr report)
+  (send mgr [:attach (self) 80 24])
+  (receive
+    ([:attached s]
+      (do
+        ;; consume the initial frame (drawn at n=0 before any key), then press "+"
+        ;; and report the frame that key produces
+        (receive ([:frame _] nil) (after 2000 nil))
+        (send s [:key "+"])
+        (receive ([:frame f] (send report [:probed (frame-text f)]))
+          (after 2000 (send report [:probed :no-frame])))))
+    (after 2000 (send report [:probed :no-attach]))))
+
+(describe "editor/serve — serving a ui-run app to a remote frontend"
+  (test "an attached client gets a session pid, the initial frame, then key-driven frames"
+    (let (mgr (spawn (editor/serve/serve--manager mk vw up)))  ; the daemon's session manager
+      (send mgr [:attach (self) 80 24])
+      (let (session (receive ([:attached s] s) (after 2000 :no-attach)))
+        (is (not (= session :no-attach)))
+        ;; the session renders immediately on start — the first frame is the fresh model
+        (assert= (frame-text (receive ([:frame f] f) (after 2000 :none))) "n=0")
+        ;; a key we ship drives the app; the next frame reflects it
+        (send session [:key "+"])
+        (assert= (frame-text (receive ([:frame f] f) (after 2000 :none))) "n=1")
+        (send session [:key "+"])
+        (assert= (frame-text (receive ([:frame f] f) (after 2000 :none))) "n=2")
+        ;; "q" sets :done; ui-run quits and :leave tells the client to restore (:bye)
+        (send session [:key "q"])
+        (assert= (receive ([:bye] :bye) (after 2000 :no-bye)) :bye))))
+
+  (test "each client gets an independent session with its own model"
+    (let (me (self)
+          mgr (spawn (editor/serve/serve--manager mk vw up)))
+      ;; two clients attach to the same manager and each press "+" once
+      (spawn (probe mgr me))
+      (spawn (probe mgr me))
+      ;; if the model were shared, one would see n=2; independent ⇒ both see n=1
+      (assert= (receive ([:probed t] t) (after 3000 :none)) "n=1")
+      (assert= (receive ([:probed t] t) (after 3000 :none)) "n=1")))
+
+  (test "serve registers the manager under the well-known serve-name"
+    ;; the only test that touches the global `:ui` name (avoids cross-test clashes)
+    (do
+      (serve mk vw up)
+      (is (not (nil? (whereis serve-name))))))
+
+  (test "remote-display: :draw ships a frame, :size reports the attach size, :poll maps input"
+    (let (d (remote-display (self) 80 24))
+      ;; :draw sends the frame to the client (us) verbatim
+      ((get d :draw) [:A-FRAME])
+      (assert= (receive ([:frame f] f) (after 1000 :none)) [:A-FRAME])
+      ;; :size is the size reported at attach (live resize deferred)
+      (assert= ((get d :size)) [80 24])
+      ;; :poll returns a shipped key, and maps a detach request to :close (ui-run quits)
+      (send (self) [:key "z"])
+      (assert= ((get d :poll) 500) "z")
+      (send (self) [:detach])
+      (assert= ((get d :poll) 500) :close)
+      ;; nothing waiting ⇒ nil after the timeout (ui-run treats it as :tick)
+      (assert= ((get d :poll) 1) nil))))

@@ -824,11 +824,22 @@ top* of connect, plus a few deliberately-deferred refinements:
   steady-state one, so an unauthenticated peer can't force a 64 MiB allocation
   off an 8-byte probe. Localized to `dist.rs`/`dist/handshake.rs`/`dist/wire.rs`;
   no kernel change.
-- ⬜ The same runtime **listens on a socket and serves the M3 protocol** to
+- ✅ The same runtime **listens on a socket and serves the M3 protocol** to
   attached frontends — the Emacs `--daemon` / `emacsclient` model; **one core,
-  multiple attached frontends**. The `nest observe --connect` remote-attach is a
-  vertical-slice proof; the general server mode (session lifecycle, multi-client)
-  is the headline M4 deliverable.
+  multiple attached frontends** (done 2026-06-01, ADR-090). `std/editor/serve.blsp`:
+  the app's *unmodified* `(ui-run model view update display)` runs on the daemon
+  against a **`remote-display`** whose `:draw` ships the frame over the (encrypted)
+  node link and whose `:poll` receives the client's keys — "the frontend is a
+  protocol" made literal (one more `display`, now a network frontend). `serve`
+  registers a session manager (well-known name `:ui`); each `attach` / `nest attach
+  SPEC` gets its **own session** (own model), so **many frontends attach at once**;
+  detach / client-death / link-drop tear the session down cleanly. The daemon side is
+  a normal `nest run --name N app.blsp` that calls `(serve …)`; `nest attach` is the
+  thin `emacsclient`. Complements the observer's *pull* remote-attach (this is the
+  *push*, app-on-server direction). **Deferred (ADR-011):** a *shared* model across
+  clients (collaborative editing — sessions are independent; share via a common
+  process), live terminal **resize** after attach, per-client viewports on shared
+  buffers, a dedicated `nest serve` auto-park command.
 - ⬜ **Deferred connect/dist refinements** (ADR-011): exact propagated exit reason
   for a *non-trapping* linked peer (the `hard` bit — reports `:kill` today); a
   `terminate/2` cleanup hook on hard kill; **long-name FQDN resolution** (today a

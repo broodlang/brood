@@ -238,6 +238,26 @@ enum Cmd {
         cookie: Option<String>,
     },
 
+    /// Attach this terminal to a `ui-run` app served by a running daemon — the
+    /// `emacsclient` to its `--daemon` (ADR-090). The daemon's app renders here and
+    /// this terminal's keys drive it; the app's model lives on the daemon, so several
+    /// terminals can attach at once.
+    ///
+    /// SPEC is the served node: a bare `name` over the local Unix socket (e.g. a
+    /// `nest run --name ed app.blsp` that called `(serve …)`), or `name@host:port`
+    /// over TCP. The cookie comes from `--cookie` or `$BROOD_COOKIE`, else the shared
+    /// `~/.config/brood/cookie`. Press the app's own quit key to detach.
+    Attach {
+        /// The served node to attach to: `name` (local Unix socket) or `name@host:port`.
+        #[arg(value_name = "SPEC")]
+        spec: String,
+
+        /// Shared cookie authenticating the link (must match the daemon's). Falls
+        /// back to `$BROOD_COOKIE`, then the shared cookie file.
+        #[arg(long = "cookie", value_name = "COOKIE")]
+        cookie: Option<String>,
+    },
+
     /// Bundle the project into a single self-contained executable (ADR-038).
     ///
     /// Appends the project's manifest + every `src/**/*.blsp` (and resolved
@@ -335,6 +355,7 @@ fn run_main(cli: Cli) {
         Cmd::Repl => cmd_repl(&mut interp),
         Cmd::Mcp => cmd_mcp(&mut interp),
         Cmd::Observe { connect, cookie } => cmd_observe(&mut interp, connect, cookie),
+        Cmd::Attach { spec, cookie } => cmd_attach(&mut interp, spec, cookie),
         Cmd::Release {
             output,
             runtime,
@@ -774,6 +795,36 @@ fn cmd_observe(interp: &mut Interp, connect: Option<String>, cookie: Option<Stri
     // (restoring) before any error is reported and we exit — `process::exit`
     // skips Drop. On the normal `q` path the Brood `term-leave` already restored;
     // the guard's second restore is idempotent.
+    let result = {
+        let _guard = TermGuard;
+        interp.eval_str(&boot)
+    };
+    if let Err(e) = result {
+        report_error(&e);
+        std::process::exit(1);
+    }
+}
+
+/// `nest attach SPEC` — the thin `emacsclient`-style frontend (ADR-090). Connects to
+/// the daemon serving a `ui-run` app and runs `editor/serve/attach`, which paints the
+/// pushed frames + ships back keys. Same shape as `cmd_observe`: resolve the cookie
+/// (`--cookie` → `$BROOD_COOKIE` → the shared cookie file), connect *before* taking
+/// the terminal (so a bad spec / wrong cookie is a clean error, screen untouched),
+/// and run under a `TermGuard` that restores the terminal on a panic unwind.
+fn cmd_attach(interp: &mut Interp, spec: String, cookie: Option<String>) {
+    let cookie = cookie
+        .or_else(|| std::env::var("BROOD_COOKIE").ok())
+        .filter(|c| !c.is_empty());
+    // `spec`/`cookie` are user input — `call_form` embeds them as escaped string
+    // literals so they can't break out of the call.
+    let args: Vec<&str> = match &cookie {
+        Some(c) => vec![&spec, c],
+        None => vec![&spec],
+    };
+    let boot = format!(
+        "(require 'editor/serve) {}",
+        brood::introspect::call_form("editor/serve/attach", &args)
+    );
     let result = {
         let _guard = TermGuard;
         interp.eval_str(&boot)

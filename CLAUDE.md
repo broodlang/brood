@@ -114,7 +114,7 @@ std/                     standard library written in Brood, grouped (ADR-085):
                          prelude.blsp + bare core (io, file, set, regex, json,
                          fuzzy, format, task, log); the editor/display framework
                          `std/editor/*` (buffer, display, ui, keymap, face,
-                         highlight, lineedit, pane, layers, ansi); `std/proc/hatch`;
+                         highlight, lineedit, pane, layers, ansi, serve); `std/proc/hatch`;
                          the toolchain `std/tool/*` — grouped on disk but BARE
                          module names (test, project, package, docs, mcp, observer,
                          proctree, repl, sexp, reload). The net *library* (`net/*`)
@@ -131,9 +131,10 @@ The CLI is split (ADR-028, the `rustc`/`cargo` model): **`brood` runs the
 language**, **`nest` runs the project**. Both embed the `brood` lib (no
 subprocess); `nest` is a thin shell over `std/tool/project.blsp`. `nest` subcommands
 today: `new`, `test`, `check`, `run` (with `--watch`), `doc`, `format`, `repl`,
-`mcp` (an MCP server over the project), `observe` (the M3 process viewer), the
-package-manager commands `fetch`/`update`/`tree`/`add`/`remove` (ADR-037), and
-`release` (single-binary bundling, ADR-038).
+`mcp` (an MCP server over the project), `observe` (the M3 process viewer),
+`attach` (the `emacsclient`-style thin frontend for a daemon serving a `ui-run`
+app — ADR-090), the package-manager commands `fetch`/`update`/`tree`/`add`/`remove`
+(ADR-037), and `release` (single-binary bundling, ADR-038).
 
 ## Commands
 

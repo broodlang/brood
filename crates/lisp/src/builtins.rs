@@ -2990,6 +2990,10 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // ^ $, [...] sets, \d \w \s, |, groups; no ranges/captures yet). Opt-in.
     ("regex", include_str!("../../../std/regex.blsp")),
     ("editor/ui", include_str!("../../../std/editor/ui.blsp")),
+    // Serve a `ui-run` app to remote frontends — the Emacs `--daemon`/`emacsclient`
+    // model (ADR-090): the app runs on the daemon, a thin `attach` client paints
+    // pushed frames + ships back keys. Pure Brood over `ui-run` + the node link.
+    ("editor/serve", include_str!("../../../std/editor/serve.blsp")),
     // Emacs-style tiled window splits: an immutable binary layout tree + pure
     // pane/divider geometry + drag-to-resize over `:drag` mouse events (ADR-077).
     // Reusable editor toolkit (content-agnostic); the keybindings + payload are

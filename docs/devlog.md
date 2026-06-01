@@ -270,6 +270,7 @@ Every session, oldest first. Full text: [devlog-archive.md](archive/devlog-archi
 - **2026-06-01** — Nodes form a transitive cluster mesh (ADR-088): connect to one, join all
 - **2026-06-01** — Resilient `ui-run`: let-it-crash at the render loop (recover to the last good frame)
 - **2026-06-01** — Node-link channel encryption (ADR-089): Noise-style X25519 + ChaCha20-Poly1305 session
+- **2026-06-01** — M4 daemon/serving layer (ADR-090): serve a `ui-run` app to thin remote frontends (`nest attach`)
 
 ---
 
@@ -576,3 +577,55 @@ caveat is lifted. Standards TLS *on the wire* stays open only if an external non
 client must ever speak the node protocol (none does). Closure-shipping between
 *trusting* nodes is still RCE-by-design (Erlang model); a mutually-distrusting /
 multi-tenant boundary remains a separate future ADR before multi-client server mode.
+
+## 2026-06-01 — M4 daemon/serving layer: serve a ui-run app to remote frontends (ADR-090)
+
+The headline M4 deliverable: "the same runtime listens on a socket and serves the M3
+protocol to attached frontends — the Emacs `--daemon`/`emacsclient` model." The whole
+substrate was already there (encrypted node-connect, dual-listen, registered names,
+location-transparent `send`, monitors, the send-able display protocol, `ui-run` with
+its pluggable `display` map). `nest observe --connect` proved *remote rendering* but in
+the **pull** direction (loop + model on the client). This adds the **push** direction —
+app-on-daemon, thin client — which is the emacsclient model.
+
+**The key insight (makes it tiny):** the daemon runs the app's *unmodified*
+`(ui-run model view update display)`; the only new piece is the `display`. A
+**`remote-display`** is a frontend whose `:draw` `send`s the frame `[:frame f]` over the
+link (it's plain Brood data) and whose `:poll` `receive`s the client's `[:key k]`. So an
+app written for a local terminal serves to a remote one with zero change — ADR-046's
+"one display protocol, many frontends," now a *network* frontend.
+
+**`std/editor/serve.blsp`** (pure Brood, `(:use editor/ui)`):
+- `remote-display` — `:draw`→`[:frame f]`, `:poll`→`[:key k]`, `:leave`→`[:bye]`, `:size`
+  fixed at attach; `[:detach]` / a monitor `[:down …]` → `:close` (ui-run quits).
+- `serve` / `serve--manager` / `serve--session` — `(serve make-model view update)`
+  registers a manager under the well-known node name `serve-name` (`:ui`); each
+  `[:attach client cols rows]` spawns an **independent session** (a fresh `(make-model)`,
+  its own `ui-run`) that `monitor`s the client. Many frontends attach at once.
+- `attach` (+ `attach--loop`/`attach--session`) — the thin client: `node-start` +
+  `connect` (clean error *before* the terminal) + `monitor-node`, then `term-enter`,
+  report size, attach, and loop: drain pushed frames → `term-draw`, poll the keyboard →
+  ship keys, until `[:bye]`/link-drop; always restores the terminal.
+
+**CLI:** one new command, `nest attach SPEC [--cookie]` (mirrors `cmd_observe`); the
+daemon side is just `nest run --name N app.blsp` whose main calls `(serve …)` and parks.
+`editor/serve` added to `EMBEDDED_MODULES`.
+
+**Scope (ADR-011):** in — app-on-daemon, thin client, many concurrent independent
+sessions, graceful attach/detach/client-death teardown. Deferred — a *shared* model
+across clients (collaborative editing; share via a common process), live terminal resize
+after attach, per-client viewports on shared buffers, a dedicated `nest serve`.
+
+**Tests:** `tests/serve_test.blsp` (the test process plays the client in-process — local
+pids `send`/`receive` exactly like remote): attach → initial frame → key-driven frames →
+quit → `[:bye]`; per-client model isolation (two clients each see their own count);
+`remote-display` `:draw`/`:size`/`:poll` units. `crates/cli/tests/serve_attach.rs`
+(cross-process, real encrypted TCP, in the `real-tcp` nextest group): a daemon serves a
+counter app, a TTY-less client attaches over the link, drives it (n=0 → n=1), quits.
+Full `make test` (485) green.
+
+**Gotcha noted:** the session draws its *initial* frame before polling, so a client that
+presses a key right after attach must consume that initial frame first (the test probe
+and `serve_attach` both do). The PostToolUse `blsp-check` hook false-flagged the new
+`editor/serve` names while the installed `nest` on PATH predated the embed — verified via
+the freshly-built `cli --test` that they resolve.
