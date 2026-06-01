@@ -267,6 +267,7 @@ Every session, oldest first. Full text: [devlog-archive.md](archive/devlog-archi
 - **2026-06-01** — Hierarchical module names (ADR-085 Move 3)
 - **2026-06-01** — std/ reorganization: frameworks namespaced, toolchain grouped-but-bare (ADR-085 Move 1)
 - **2026-06-01** — ADR-085 Move 2 (clean slice): brood-net + brood-supervisor packages
+- **2026-06-01** — Nodes form a transitive cluster mesh (ADR-088): connect to one, join all
 
 ---
 
@@ -417,3 +418,50 @@ largely *shared UI the toolchain consumes*, not a detachable app framework, so
 `editor/*` stays bundled until/unless the REPL + observer are themselves
 repackaged — gated on a real consumer (ADR-011). The editor *app* already lives
 outside the binary (`brood-edit`).
+
+## 2026-06-01 — Nodes form a transitive cluster mesh (ADR-088)
+
+**Reported bug.** With nodes A, B, C running and `A↔B` + `C↔B` established, **A
+could not see C**. Investigation confirmed it was by-construction: links were
+strictly point-to-point, the roadmap's "cluster-join topology" was an undecided
+open question, and — more fundamentally — the wire carried only node *names*, no
+reachable address, so B couldn't have told A *how to dial* C even if it wanted to.
+
+**Decision (ADR-088): full mesh, Erlang-style.** Connecting to one cluster member
+transitively connects you to every node it knows. On by default; `BROOD_NO_MESH=1`
+keeps it point-to-point.
+
+**Three pieces (all in `dist/`, no language-kernel change):**
+1. *Advertise an address.* `Hello` (wire bumped v2→**v3**, magic `BRD\x03`) now
+   carries the sender's dial address (first TCP listener else Unix socket), stored
+   per-link in `Conn.addr`. It's **folded into the auth HMAC** (`compute_mac` gains
+   `my_addr`), so a MitM can't redirect the gossiped address without the cookie.
+2. *Gossip.* A genuinely-new peer triggers `broadcast_peer_table()` — a
+   `Frame::Peers` list of `(name, addr)` to every connected peer (newcomer learns
+   incumbents; incumbents learn newcomer). A reconnect/duplicate (`was_new == false`)
+   doesn't broadcast, so the mesh goes quiet once closed.
+3. *Dial unknowns.* `mesh_consider()` dials any gossiped peer not already in `NODES`,
+   each on a short-lived thread; a `PENDING_DIALS` set dedupes concurrent gossip for
+   the same name. Each new link re-gossips → transitive closure. Simultaneous
+   cross-dials collapse via the existing connector tie-break.
+
+**Convergence is order-independent:** whichever `establish` finishes its insert
+last sees the full table and sends the cross-gossip, so the earlier node always
+learns the later one regardless of interleaving (verified by reasoning + test).
+
+**Robustness review.** No nested locks (NODES / PENDING_DIALS / LISTEN_ADDRS taken
+sequentially, never held across each other or across the dial spawn); `PENDING_DIALS`
+is cleared even if a dial thread panics (remove sits after the `catch_unwind`);
+gossip frames capped at `MAX_GOSSIP_PEERS = 4096`; empty/self/known peers filtered;
+the authoritative handshake name (not the gossip hint) keys the link, and the cookie
+gate means a wrong dial is harmless.
+
+**Tests.** `cluster_mesh_connects_peers_transitively` (the exact A/B/C repro — A
+connects only to hub B, must end up seeing C) and `no_mesh_env_keeps_links_point_to_point`
+(the kill switch). Wire round-trip + oversized-gossip-cap + MAC-binds-addr unit tests.
+Full `make test` green.
+
+**Deferred (ADR-011):** auto-reconnect/re-heal after a transient drop (`ensure-link`
+covers persistent links); a global concurrent-dial cap; cross-machine routability
+beyond what `name@host` assumes. Mesh over an untrusted TCP network still waits on
+channel TLS (ADR-081), exactly as point-to-point does.

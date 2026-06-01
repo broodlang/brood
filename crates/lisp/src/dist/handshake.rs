@@ -6,12 +6,16 @@
 //! 1. **Magic + version** (4 bytes, `b"BRD\x02"`). A mismatch aborts before
 //!    any allocation — a stray HTTP request or port-scanner can't push us
 //!    past this point.
-//! 2. **Hello** (`{ node, nonce }`) — each side announces its name and a
-//!    fresh 32-byte nonce. The initiator writes first; the responder reads,
-//!    then writes its own. The cookie is **never** on the wire.
+//! 2. **Hello** (`{ node, nonce, addr }`) — each side announces its name, a
+//!    fresh 32-byte nonce, and the address peers should dial to reach it (for
+//!    the cluster mesh, ADR-088). The initiator writes first; the responder
+//!    reads, then writes its own. The cookie is **never** on the wire.
 //! 3. **Auth** (`{ mac }`) — each side computes
-//!    `HMAC-SHA256(cookie, peer_nonce || peer_name || 0x00 || my_name)` and
-//!    sends it. Same write-then-read shape as Hello.
+//!    `HMAC-SHA256(cookie, peer_nonce || peer_name || 0x00 || my_name || 0x00
+//!    || my_addr)` and sends it. Same write-then-read shape as Hello. Binding
+//!    `my_addr` into the MAC means an on-path attacker can't rewrite the
+//!    advertised mesh address in a `Hello` without the cookie — the `Auth`
+//!    check would fail.
 //! 4. The peer's `Auth` is constant-time-compared against the expected MAC.
 //!    A mismatch is `PermissionDenied`; the link never enters `NODES`.
 //!
@@ -37,8 +41,12 @@ pub(super) enum Role {
 }
 
 /// Drive the four-step exchange. Returns the peer's authoritative node name
-/// on success — `dist::establish` then registers the link under this name.
-pub(super) fn handshake<S: Read + Write>(stream: &mut S, role: Role) -> io::Result<Symbol> {
+/// *and* its advertised dial address on success — `dist::establish` then
+/// registers the link under the name and stores the address for mesh gossip.
+pub(super) fn handshake<S: Read + Write>(
+    stream: &mut S,
+    role: Role,
+) -> io::Result<(Symbol, String)> {
     // Step 1: magic + version. Reject before any allocation if we don't speak
     // the same dialect.
     stream.write_all(&PROTOCOL_MAGIC)?;
@@ -54,43 +62,39 @@ pub(super) fn handshake<S: Read + Write>(stream: &mut S, role: Role) -> io::Resu
         ));
     }
 
-    // Step 2: Hellos with nonces.
+    // Step 2: Hellos with nonces + advertised mesh address.
     let (my_name, cookie) = {
         let n = crate::core::sync::read(&super::NODE);
         (n.name, n.cookie.clone())
     };
+    let my_addr = super::advertised_addr();
     let my_nonce = fresh_nonce()?;
+    let my_hello = Frame::Hello {
+        node: my_name,
+        nonce: my_nonce,
+        addr: my_addr.clone(),
+    };
     let their_hello = match role {
         Role::Initiator => {
-            write_frame(
-                stream,
-                &Frame::Hello {
-                    node: my_name,
-                    nonce: my_nonce,
-                },
-            )?;
+            write_frame(stream, &my_hello)?;
             read_hello(stream)?
         }
         Role::Responder => {
             let h = read_hello(stream)?;
-            write_frame(
-                stream,
-                &Frame::Hello {
-                    node: my_name,
-                    nonce: my_nonce,
-                },
-            )?;
+            write_frame(stream, &my_hello)?;
             h
         }
     };
-    let (peer_name, peer_nonce) = their_hello;
+    let (peer_name, peer_nonce, peer_addr) = their_hello;
 
-    // Step 3 + 4: MAC the *peer's* nonce + the names; exchange and verify.
-    // Order (peer_name then my_name in the input) is symmetric — both sides
-    // include their own name last, so the two MACs cover identical-shaped
-    // bytes from opposite vantage points.
-    let my_mac = compute_mac(&cookie, &peer_nonce, peer_name, my_name);
-    let expected_peer_mac = compute_mac(&cookie, &my_nonce, my_name, peer_name);
+    // Step 3 + 4: MAC the *peer's* nonce + the names + my own advertised addr;
+    // exchange and verify. Order (peer_name then my_name then my_addr in the
+    // input) is symmetric — both sides include their own name and address last,
+    // so the two MACs cover identical-shaped bytes from opposite vantage points.
+    // Folding the address in authenticates it: a tampered `Hello.addr` fails the
+    // check (ADR-088).
+    let my_mac = compute_mac(&cookie, &peer_nonce, peer_name, my_name, &my_addr);
+    let expected_peer_mac = compute_mac(&cookie, &my_nonce, my_name, peer_name, &peer_addr);
     let their_mac = match role {
         Role::Initiator => {
             write_frame(stream, &Frame::Auth { mac: my_mac })?;
@@ -108,13 +112,13 @@ pub(super) fn handshake<S: Read + Write>(stream: &mut S, role: Role) -> io::Resu
             "node handshake MAC mismatch (wrong cookie?)",
         ));
     }
-    Ok(peer_name)
+    Ok((peer_name, peer_addr))
 }
 
-fn read_hello<S: Read>(stream: &mut S) -> io::Result<(Symbol, [u8; NONCE_LEN])> {
+fn read_hello<S: Read>(stream: &mut S) -> io::Result<(Symbol, [u8; NONCE_LEN], String)> {
     // Pre-auth: a tiny ceiling, not the 64 MiB steady-state one.
     match read_frame_capped(stream, MAX_HANDSHAKE_FRAME)? {
-        Frame::Hello { node, nonce } => Ok((node, nonce)),
+        Frame::Hello { node, nonce, addr } => Ok((node, nonce, addr)),
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, "expected Hello")),
     }
 }
@@ -126,16 +130,21 @@ fn read_auth<S: Read>(stream: &mut S) -> io::Result<[u8; MAC_LEN]> {
     }
 }
 
-/// `HMAC-SHA256(cookie, peer_nonce || peer_name || 0x00 || my_name)`.
+/// `HMAC-SHA256(cookie, peer_nonce || peer_name || 0x00 || my_name || 0x00 ||
+/// my_addr)`.
 ///
-/// **Encoding is collision-free** under two assumptions, both of which hold:
+/// **Encoding is collision-free** under these assumptions, all of which hold:
 ///   1. `peer_nonce` is exactly `NONCE_LEN` bytes (fixed length), so the
 ///      following bytes are unambiguously the start of `peer_name`.
-///   2. The `0x00` delimiter separates the two variable-length names —
-///      without it, `("ab", "c")` and `("a", "bc")` would HMAC to the same
-///      value. NUL is not a legal character in a Brood symbol name (the
-///      reader rejects it), so it can't appear inside either name and
-///      genuinely separates them.
+///   2. The `0x00` delimiters separate the variable-length name/addr fields —
+///      without them, `("ab", "c")` and `("a", "bc")` would HMAC to the same
+///      value. NUL is not a legal character in a Brood symbol name (the reader
+///      rejects it), and the address is a `unix:`/`tcp:` form with no NUL, so
+///      the delimiters genuinely separate the fields.
+///
+/// `my_addr` is each side's *own* advertised dial address; folding it in
+/// authenticates the `Hello.addr` field the cluster mesh relies on (ADR-088),
+/// so a man-in-the-middle can't redirect where peers later dial us.
 ///
 /// Names travel as canonical (interned) UTF-8 spellings, identical on both
 /// sides regardless of interner state.
@@ -144,6 +153,7 @@ fn compute_mac(
     peer_nonce: &[u8; NONCE_LEN],
     peer_name: Symbol,
     my_name: Symbol,
+    my_addr: &str,
 ) -> [u8; MAC_LEN] {
     use hmac::{KeyInit, Mac};
     type HmacSha256 = hmac::Hmac<sha2::Sha256>;
@@ -152,6 +162,8 @@ fn compute_mac(
     mac.update(value::symbol_name(peer_name).as_bytes());
     mac.update(&[0]);
     mac.update(value::symbol_name(my_name).as_bytes());
+    mac.update(&[0]);
+    mac.update(my_addr.as_bytes());
     mac.finalize().into_bytes().into()
 }
 
@@ -194,14 +206,17 @@ mod tests {
         let nonce_b = [2u8; NONCE_LEN];
         let a = value::intern("aa");
         let b = value::intern("bb");
+        let addr_a = "tcp:127.0.0.1:9001";
+        let addr_b = "tcp:127.0.0.1:9002";
 
-        // Side A computes its outgoing MAC and the MAC it expects from B —
-        // exactly the two `compute_mac` calls `handshake` performs.
-        let a_my_mac = compute_mac(cookie, &nonce_b, b, a);
-        let a_expects_b_mac = compute_mac(cookie, &nonce_a, a, b);
+        // Side A computes its outgoing MAC (over its own addr) and the MAC it
+        // expects from B (over B's addr) — exactly the two `compute_mac` calls
+        // `handshake` performs.
+        let a_my_mac = compute_mac(cookie, &nonce_b, b, a, addr_a);
+        let a_expects_b_mac = compute_mac(cookie, &nonce_a, a, b, addr_b);
         // Side B computes the symmetric pair (peer ↔ self labels flipped).
-        let b_my_mac = compute_mac(cookie, &nonce_a, a, b);
-        let b_expects_a_mac = compute_mac(cookie, &nonce_b, b, a);
+        let b_my_mac = compute_mac(cookie, &nonce_a, a, b, addr_b);
+        let b_expects_a_mac = compute_mac(cookie, &nonce_b, b, a, addr_a);
 
         // The cross-checks that the actual handshake does — each side's
         // outgoing MAC equals the other side's expectation.
@@ -209,8 +224,11 @@ mod tests {
         assert_eq!(b_my_mac, a_expects_b_mac, "B's mac must verify on A");
 
         // A different cookie produces a different MAC (integrity).
-        assert_ne!(a_my_mac, compute_mac("other", &nonce_b, b, a));
+        assert_ne!(a_my_mac, compute_mac("other", &nonce_b, b, a, addr_a));
         // A different peer nonce produces a different MAC (replay defence).
-        assert_ne!(a_my_mac, compute_mac(cookie, &[3u8; NONCE_LEN], b, a));
+        assert_ne!(a_my_mac, compute_mac(cookie, &[3u8; NONCE_LEN], b, a, addr_a));
+        // A tampered advertised address produces a different MAC, so a MitM
+        // can't rewrite where peers will later dial us (ADR-088).
+        assert_ne!(a_my_mac, compute_mac(cookie, &nonce_b, b, a, "tcp:evil:6666"));
     }
 }

@@ -829,14 +829,17 @@ top* of connect, plus a few deliberately-deferred refinements:
   long name is passed explicitly, no resolver); a `mio` reactor for socket scale;
   Windows Unix-socket transport. One-node-per-OS-process is a structural choice
   (the Erlang model), not a gap.
-- ⬜ **Cluster-join topology — decide the semantics** (open question, don't build
-  yet): when a node `connect`s to a peer, does it join that peer's *entire cluster*
-  (transitive, mesh — Erlang's default where every node learns about every other
-  node) or only that *one* node (point-to-point, no transitive discovery)? Each has
-  real trade-offs (mesh = convenient global namespace but O(n²) connections and a
-  larger trust surface; point-to-point = explicit topology, better isolation, more
-  manual wiring). Pick deliberately and record an ADR before implementing peer
-  discovery / gossip.
+- ✅ **Cluster-join topology — full mesh, transitive (ADR-088).** Decided and
+  built: connecting to one cluster member auto-connects you to every node it
+  knows (Erlang's default). The handshake advertises each node's reachable
+  address (authenticated in the MAC); a new peer triggers a `Frame::Peers`
+  gossip broadcast; recipients dial the unknowns, and each new link re-gossips
+  until the mesh closes. On by default; `BROOD_NO_MESH=1` reverts to
+  point-to-point. The reported bug (A↔B + C↔B but A couldn't see C) is fixed —
+  `cluster_mesh_connects_peers_transitively` in `crates/cli/tests/distribution.rs`.
+  Deferred (ADR-011): auto-reconnect/re-heal after a transient drop (use
+  `ensure-link`); mesh over an untrusted TCP network still waits on channel TLS
+  (ADR-081), as point-to-point does.
 - ✅ **Test hardening (done — 2026-05-30):** the end-to-end real-TCP
   `distribution.rs` tests no longer flake under `make test`'s max parallel load.
   Root cause: under nextest each case runs in its own process, so the file's

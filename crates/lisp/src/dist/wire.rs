@@ -25,13 +25,19 @@ use super::{Target, MAX_FRAME};
 /// connection-lifecycle code in `dist::mod` can construct and pattern-match
 /// them; the codec is otherwise private to this module.
 pub(super) enum Frame {
-    /// Handshake step 1 & 2: who I am + a fresh nonce I want you to MAC. The
-    /// cookie never travels — it's an HMAC key, not a credential. Both sides
-    /// send a `Hello` (initiator first, responder second); each computes its
-    /// `Auth` over the peer's nonce.
+    /// Handshake step 1 & 2: who I am, a fresh nonce I want you to MAC, and the
+    /// **address peers should dial to reach me** (`"unix:PATH"` / `"tcp:HOST:PORT"`,
+    /// or empty if I'm not listening). The cookie never travels — it's an HMAC
+    /// key, not a credential. Both sides send a `Hello` (initiator first,
+    /// responder second); each computes its `Auth` over the peer's nonce *and*
+    /// its own advertised `addr`, so an on-path attacker can't redirect the
+    /// gossiped address without breaking auth (ADR-088). The address feeds the
+    /// cluster mesh: a peer stores it so it can later *gossip* us to nodes that
+    /// don't know us yet.
     Hello {
         node: Symbol,
         nonce: [u8; NONCE_LEN],
+        addr: String,
     },
     /// Handshake step 3 & 4: `HMAC-SHA256(cookie, peer_nonce || peer_name ||
     /// my_name)` — proves possession of the cookie without disclosing it.
@@ -90,6 +96,13 @@ pub(super) enum Frame {
         reason: Message,
         link: bool,
     },
+    /// Cluster-mesh gossip (ADR-088): "here are the other peers I know about, and
+    /// how to reach them." Each entry is a `(node-name, dial-addr)` pair. The
+    /// receiver dials any peer it isn't already connected to, so connecting to
+    /// one cluster member transitively joins the whole mesh. Sent right after a
+    /// *new* link is established (to the new peer and every existing peer), so a
+    /// node that joins via any single member learns about all the rest.
+    Peers { peers: Vec<(Symbol, String)> },
 }
 
 const FRAME_HELLO: u8 = 0;
@@ -102,15 +115,24 @@ const FRAME_AUTH: u8 = 6;
 const FRAME_LINK: u8 = 7;
 const FRAME_UNLINK: u8 = 8;
 const FRAME_EXIT: u8 = 9;
+const FRAME_PEERS: u8 = 10;
 const TARGET_PID: u8 = 0;
 const TARGET_NAME: u8 = 1;
 
+/// Hard cap on entries in a single `Peers` gossip frame, so an (authenticated
+/// but possibly buggy/hostile) peer can't make us spawn an unbounded number of
+/// dial threads off one frame. Far above any realistic cluster size; the
+/// `prealloc` bound already stops a tiny frame from claiming a huge count, this
+/// caps the *honest-length* case too.
+const MAX_GOSSIP_PEERS: usize = 4096;
+
 /// Protocol magic + version byte sent before any frame. `b"BRD"` lets a
 /// `tcpdump` reader recognise the protocol; the trailing version byte gates
-/// future wire-format changes — a v2 peer that sees anything else aborts
-/// before allocating buffers. The v1 protocol (plaintext cookie in Hello)
-/// has been retired: this is greenfield, so we don't preserve compatibility.
-pub(super) const PROTOCOL_MAGIC: [u8; 4] = *b"BRD\x02";
+/// future wire-format changes — a peer that sees anything else aborts before
+/// allocating buffers. Version history (greenfield — no back-compat kept): v1
+/// plaintext cookie (retired); v2 HMAC handshake; **v3** adds an advertised
+/// `addr` to `Hello` + the `Peers` gossip frame for cluster meshing (ADR-088).
+pub(super) const PROTOCOL_MAGIC: [u8; 4] = *b"BRD\x03";
 pub(super) const NONCE_LEN: usize = 32;
 pub(super) const MAC_LEN: usize = 32;
 
@@ -170,10 +192,11 @@ pub(super) fn read_frame_capped(r: &mut impl Read, max: usize) -> io::Result<Fra
 
 fn encode_frame(w: &mut Vec<u8>, frame: &Frame) -> io::Result<()> {
     match frame {
-        Frame::Hello { node, nonce } => {
+        Frame::Hello { node, nonce, addr } => {
             w.push(FRAME_HELLO);
             put_sym(w, *node);
             w.extend_from_slice(nonce);
+            put_str(w, addr);
         }
         Frame::Auth { mac } => {
             w.push(FRAME_AUTH);
@@ -242,6 +265,14 @@ fn encode_frame(w: &mut Vec<u8>, frame: &Frame) -> io::Result<()> {
             w.push(*link as u8);
             encode_msg(w, reason)?;
         }
+        Frame::Peers { peers } => {
+            w.push(FRAME_PEERS);
+            put_u32(w, peers.len() as u32);
+            for (node, addr) in peers {
+                put_sym(w, *node);
+                put_str(w, addr);
+            }
+        }
     }
     Ok(())
 }
@@ -251,6 +282,7 @@ fn decode_frame(r: &mut Cursor<Vec<u8>>) -> io::Result<Frame> {
         FRAME_HELLO => Ok(Frame::Hello {
             node: get_sym(r)?,
             nonce: get_fixed::<NONCE_LEN>(r)?,
+            addr: get_str(r)?,
         }),
         FRAME_AUTH => Ok(Frame::Auth {
             mac: get_fixed::<MAC_LEN>(r)?,
@@ -289,6 +321,22 @@ fn decode_frame(r: &mut Cursor<Vec<u8>>) -> io::Result<Frame> {
             link: get_u8(r)? != 0,
             reason: decode_msg(r)?,
         }),
+        FRAME_PEERS => {
+            let n = get_u32(r)? as usize;
+            if n > MAX_GOSSIP_PEERS {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("gossip frame of {n} peers exceeds the {MAX_GOSSIP_PEERS} limit"),
+                ));
+            }
+            let mut peers = Vec::with_capacity(prealloc(r, n));
+            for _ in 0..n {
+                let node = get_sym(r)?;
+                let addr = get_str(r)?;
+                peers.push((node, addr));
+            }
+            Ok(Frame::Peers { peers })
+        }
         t => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("unknown frame tag {t}"),
@@ -767,13 +815,56 @@ mod tests {
         let f = Frame::Hello {
             node: value::intern("alpha"),
             nonce,
+            addr: "tcp:127.0.0.1:9000".to_string(),
         };
         match read_full(&f) {
-            Frame::Hello { node, nonce: n2 } => {
+            Frame::Hello {
+                node,
+                nonce: n2,
+                addr,
+            } => {
                 assert_eq!(value::symbol_name(node), "alpha");
                 assert_eq!(n2, nonce);
+                assert_eq!(addr, "tcp:127.0.0.1:9000");
             }
             _ => panic!("wrong frame"),
+        }
+    }
+
+    #[test]
+    fn peers_gossip_roundtrips() {
+        // The cluster-mesh frame: a list of (node-name, dial-addr) pairs. Names
+        // travel by spelling (re-interned on decode); addresses are plain strings.
+        let f = Frame::Peers {
+            peers: vec![
+                (value::intern("b@127.0.0.1"), "tcp:127.0.0.1:9002".to_string()),
+                (value::intern("c@127.0.0.1"), "unix:/run/brood/c.sock".to_string()),
+            ],
+        };
+        match read_full(&f) {
+            Frame::Peers { peers } => {
+                assert_eq!(peers.len(), 2);
+                assert_eq!(value::symbol_name(peers[0].0), "b@127.0.0.1");
+                assert_eq!(peers[0].1, "tcp:127.0.0.1:9002");
+                assert_eq!(value::symbol_name(peers[1].0), "c@127.0.0.1");
+                assert_eq!(peers[1].1, "unix:/run/brood/c.sock");
+            }
+            _ => panic!("wrong frame"),
+        }
+    }
+
+    #[test]
+    fn oversized_gossip_count_is_rejected() {
+        // A Peers frame claiming more entries than the cap must error at the
+        // count check — before the decode loop — so one frame can't fan out into
+        // an unbounded number of dial threads.
+        let mut payload = vec![FRAME_PEERS];
+        payload.extend_from_slice(&(MAX_GOSSIP_PEERS as u32 + 1).to_be_bytes());
+        let mut framed = (payload.len() as u32).to_be_bytes().to_vec();
+        framed.extend_from_slice(&payload);
+        match read_frame(&mut Cursor::new(framed)) {
+            Err(e) => assert_eq!(e.kind(), io::ErrorKind::InvalidData),
+            Ok(_) => panic!("a gossip frame over the cap should be rejected"),
         }
     }
 
