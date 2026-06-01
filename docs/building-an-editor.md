@@ -2,7 +2,7 @@
 
 This is a hands-on guide to writing a text editor *in Brood*, on top of the
 pieces the language already ships: the **rope** text kernel, the **buffer**
-framework (`std/buffer.blsp`), and the **display/input seam** (`std/display.blsp`
+framework (`std/editor/buffer.blsp`), and the **editor/display/input seam** (`std/editor/display.blsp`
 + the `term-*` primitives). By the end you'll have a small but real terminal
 editor — open a file, move around, edit, save — that you can grow into something
 Emacs-shaped.
@@ -17,7 +17,7 @@ Brood program over a thin Rust substrate). If you're an AI assistant, load the
 ```
   Rust kernel       rope primitives, term-* draw/input   ← mechanism (in the language)
   ───────────────────────────────────────────────────
-  Brood framework   std/buffer.blsp · std/display.blsp    ← the editor toolkit (opt-in)
+  Brood framework   std/editor/buffer.blsp · std/editor/display.blsp    ← the editor toolkit (opt-in)
   ───────────────────────────────────────────────────
   Your editor       a nest project: keymaps, commands,    ← what you build here
                     config, UI                              policy, all Brood
@@ -48,14 +48,14 @@ You get `project.blsp`, `src/`, and `tests/`. The framework modules are baked
 into the binary, so you reach them with `require` — no dependency wiring:
 
 ```clojure
-(require 'buffer)    ; the buffer model
-(require 'display)   ; the render-op protocol
+(require 'editor/buffer)    ; the buffer model
+(require 'editor/display)   ; the render-op protocol
 ```
 
 The `term-*` primitives (`term-enter`, `term-leave`, `term-size`, `term-poll`,
 `term-draw`) are always available — they're part of the kernel.
 
-## 2. The buffer model (`std/buffer.blsp`)
+## 2. The buffer model (`std/editor/buffer.blsp`)
 
 A **buffer** is a map `{:rope :point :mark :name :file}`. You rarely touch those
 keys directly — you use the pure functions, each returning a new buffer:
@@ -97,7 +97,7 @@ you with aliasing. A command is just a function `buffer -> buffer`.
 > process with `buffer-edit`/`buffer-query`, which reply only with *derived
 > views* (text, line strings, positions) — never the buffer itself.
 
-## 3. The display protocol (`std/display.blsp`)
+## 3. The display protocol (`std/editor/display.blsp`)
 
 You render by building a **frame**: a vector of render ops. The constructors are
 pure data builders:
@@ -138,8 +138,8 @@ value — the buffer plus the top visible line (the viewport) — and render it:
 ```clojure
 ;; src/render.blsp
 (defmodule render "Pure buffer → frame rendering for my-editor.")
-(require 'buffer)
-(require 'display)
+(require 'editor/buffer)
+(require 'editor/display)
 
 (defn render--line (ed row line-idx cols)
   "One text op for buffer line `line-idx` drawn at screen `row`, clipped to `cols`."
@@ -186,7 +186,7 @@ A **command** is a function `editor -> editor` (or `editor -> :quit` to exit). A
 ```clojure
 ;; src/commands.blsp
 (defmodule commands "Editor commands + the keymap for my-editor.")
-(require 'buffer)
+(require 'editor/buffer)
 
 ;; edit/move commands lift a buffer op into an editor-state op
 (defn cmd--on-buffer (f)
@@ -240,8 +240,8 @@ state — until a command returns `:quit`.
 ```clojure
 ;; src/main.blsp
 (defmodule main "my-editor entry point.")
-(require 'buffer)
-(require 'display)
+(require 'editor/buffer)
+(require 'editor/display)
 (require 'render)
 (require 'commands)
 
@@ -337,12 +337,12 @@ Everything except the loop is pure, so test it like any other Brood code:
 
 ## Reference
 
-- Buffer API: [`std/buffer.blsp`](../std/buffer.blsp) (every function has a
+- Buffer API: [`std/editor/buffer.blsp`](../std/editor/buffer.blsp) (every function has a
   docstring; `nest doc buffer`).
-- Display protocol + terminal primitives: [`std/display.blsp`](../std/display.blsp),
+- Display protocol + terminal primitives: [`std/editor/display.blsp`](../std/editor/display.blsp),
   [`primitives.md`](primitives.md) (the **Terminal** section), ADR-046 in
   [`decisions.md`](decisions.md).
 - A complete, smaller worked example on the same seam: the process observer,
-  [`std/observer.blsp`](../std/observer.blsp) + [`tests/observe_test.blsp`](../tests/observe_test.blsp).
+  [`std/tool/observer.blsp`](../std/tool/observer.blsp) + [`tests/observe_test.blsp`](../tests/observe_test.blsp).
 - The immutable-data rule that makes the buffer model what it is: ADR-026
   (`docs/language.md` §Immutability).

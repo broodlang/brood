@@ -99,7 +99,7 @@ vanishes. To see it:
 
 - **Monitor it.** `(monitor pid)` (or spawn with a link) so the parent
   `receive`s a `:down`/exit message with the reason instead of silence.
-- **Supervise it.** `(require 'supervisor)` for restart strategies
+- **Supervise it.** `(require 'proc/supervisor)` for restart strategies
   (`:one-for-one`/`:one-for-all`/`:rest-for-one`) when a process *should* recover.
 - **`processes`** (MCP) or `(list-processes)` shows who's still alive — a missing
   pid confirms it died.
@@ -156,10 +156,10 @@ regardless of the clock**; gate only the *pacing* on the deadline, never the inp
 read.
 
 **Know the close contract.** The X delivers `:close`, not `:escape`. `ui-run`
-(`std/ui.blsp`) quits on `:close` automatically, so prefer it — it also owns
+(`std/editor/ui.blsp`) quits on `:close` automatically, so prefer it — it also owns
 pacing and guaranteed teardown (`:leave`/`gui-close` runs even if `view`/`update`
 throws). A hand-rolled `(receive)` loop must match `:close` itself (`(:close :quit)`)
-or use `ui/quit-request?`. If the app binds Esc to cancel/normal-mode, **only**
+or use `editor/ui/quit-request?`. If the app binds Esc to cancel/normal-mode, **only**
 `:close` can close it — that's the whole reason the two are separate.
 
 **Build/feature gotchas.** The GUI backend is behind the `gui` cargo feature —

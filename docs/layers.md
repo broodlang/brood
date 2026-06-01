@@ -1,6 +1,6 @@
 # Layers — composable, runtime-reconfigurable behaviour (design-of-record)
 
-`std/layers.blsp` (framework tier, opt-in, pure Brood over `keymap`, **zero kernel
+`std/editor/layers.blsp` (framework tier, opt-in, pure Brood over `keymap`, **zero kernel
 surface**). The generic mechanism the editor's "modes" are built from — but it is
 *not* editor-specific: any interactive Brood UI uses it, with or without buffers.
 
@@ -91,7 +91,7 @@ Resolution: `(buffer-type-for buf)` = match `:file` against `*auto-type-by-file*
 buffers. `(init-buffer-layers buf)` resolves the type → seeds `:layers` from
 `*type-layers*` → fires each `:activate`.
 
-`std/buffer.blsp` stays **layer-agnostic**; the registries + seeding live here, and
+`std/editor/buffer.blsp` stays **layer-agnostic**; the registries + seeding live here, and
 the app calls `init-buffer-layers` on creation.
 
 ## Scopes & focus (Phase 3)
@@ -132,7 +132,7 @@ layer-dispatch (ctx pending key fb)  -> active-keymap + keymap-step → [ctx' pe
   `scope-keymap` / `scope-dispatch` (multi-scope dispatch, command runs on the app
   model); `switch-focus` (`:on-blur`→`:on-focus`, dormancy not teardown);
   `deactivate-all` / `close-context` (`:on-close` async cleanup, then `:deactivate`).
-  A big in-code **HOW TO USE** guide in `std/layers.blsp` covers the whole flow incl.
+  A big in-code **HOW TO USE** guide in `std/editor/layers.blsp` covers the whole flow incl.
   a `ui-run` loop recipe. (A live TTY/GUI demo is left to the editor app, since it
   can't run in the test suite; the loop recipe is documented.)
 
@@ -140,7 +140,7 @@ layer-dispatch (ctx pending key fb)  -> active-keymap + keymap-step → [ctx' pe
 
 The first real use of layers is editing modes — and it sets the tier line:
 
-- **`std/sexp.blsp` (std).** Structural s-expression navigation over Brood's own
+- **`std/tool/sexp.blsp` (std).** Structural s-expression navigation over Brood's own
   `parse-source` CST (a lossless typed tree — our "tree-sitter" for Brood code):
   annotate positions in one walk, then navigate by structure
   (`point-forward`/`backward`/`up`/`down`/`defun-start`, plus buffer commands).

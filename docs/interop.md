@@ -254,7 +254,7 @@ each NIF as a stub the loader replaces. Brood mirrors this:
 
 The wrapper is the right place for *policy* (ADR-006): validate/shape inputs,
 provide idiomatic defaults, wrap opaque guest resources in a Brood API — the same
-role `std/tcp.blsp` plays over the net primitives. `use-native` itself is a thin
+role `brood-net/src/net/tcp.blsp` plays over the net primitives. `use-native` itself is a thin
 macro over the `%wasm-*` primitives below; the WIT interface is what lets it
 generate the bindings instead of the author hand-writing a stub per function (the
 advantage over Rustler's manual stub list).
@@ -274,7 +274,7 @@ Mechanism in Rust; everything else in Brood.
 
 Manifest `:native` parsing, build orchestration, lock-file fields, cache layout,
 capability grants, and each package's wrapper API — **all Brood**
-(`std/package.blsp` + the package's own module).
+(`std/tool/package.blsp` + the package's own module).
 
 ## Relationship to today's native path
 

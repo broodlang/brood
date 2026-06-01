@@ -21,7 +21,7 @@ one with e.g. *"do backlog item W2 from docs/components.md."*
                          └───────────────────────────────┬──────────────────────────────────────┘
                                                           │ embeds
    POLICY (Brood)  ─────────────────────────────────────▼────────────────────────────────────────
-        std/prelude.blsp   std/test.blsp   std/project.blsp        ← redefinable at runtime
+        std/prelude.blsp   std/tool/test.blsp   std/tool/project.blsp        ← redefinable at runtime
    ───────────────────────────────────────────────────────────────────────────────────────────────
    MECHANISM (Rust)        language pipeline                          advisory types
         reader → macros → eval → printer                              types  ←  check
@@ -219,7 +219,7 @@ before working in any Rust component:
   No subprocess — it embeds the lib like `brood` does.
 - **Work here independently:** the subcommands are a *thin* shell that drives
   Brood by embedding source strings (`(require 'project) …`); the policy lives in
-  `std/project.blsp`. A deliberate bootstrap — moving the tool into Brood is the
+  `std/tool/project.blsp`. A deliberate bootstrap — moving the tool into Brood is the
   roadmap goal.
 
 ## Brood standard library (policy — redefinable at runtime)
@@ -235,14 +235,14 @@ before working in any Rust component:
 - **Work here independently:** this is where new language features should go by
   default. Add a test in `tests/suite_test.blsp`; document in `language.md`.
 
-### `std/test.blsp` — the test framework · ~395 LOC
+### `std/tool/test.blsp` — the test framework · ~395 LOC
 - **Owns:** ExUnit-style `describe`/`test`/`deftest`, the assertions, and the
   parallel-by-default runner with `:serial`/`:isolated` (over `spawn`/`%isolate`).
 - **Loaded on demand** via `(require 'test)`; embedded through `%builtin-module`.
 - **Work here independently:** see [testing.md](testing.md). Depends on the
   process primitives and `%isolate`.
 
-### `std/project.blsp` — project model, runner, scaffolding · ~209 LOC
+### `std/tool/project.blsp` — project model, runner, scaffolding · ~209 LOC
 - **Owns:** the `project.blsp` manifest, test discovery + `run-project-tests`,
   the user config (`~/.config/brood/config.blsp`), and `nest new` scaffolding.
   The policy behind `nest`'s `test`/`new`.

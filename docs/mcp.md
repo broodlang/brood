@@ -24,14 +24,14 @@ image.
 > type vocabulary, 12 new tests, all green)**;
 > (1c) Brood-side prereqs for the two deferred operations
 > (`check_project` / `run_tests` want a *structured-result* variant in
-> `std/project.blsp` and `std/test.blsp`; `eval_in_session.stdout` wants a
+> `std/tool/project.blsp` and `std/tool/test.blsp`; `eval_in_session.stdout` wants a
 > `with-out-str` facility — `*out*` dynvar + a Rust capture primitive);
 > **(2) `crates/nest/src/mcp.rs` — done (2026-05-28; sync JSON-RPC loop,
 > `serde_json` framing, initialize / tools{list,call} / resources{list,read}
 > / prompts/list / ping / shutdown / exit; Brood ↔ JSON converters; 13
 > dispatcher tests; `nest mcp` subcommand wired with the strict-per-project
 > bootstrap; happy-path verified against the real binary)**;
-> **(3) `std/mcp.blsp` — done (2026-05-28; eight tool `defn`s + `(mcp-tools)`
+> **(3) `std/tool/mcp.blsp` — done (2026-05-28; eight tool `defn`s + `(mcp-tools)`
 > registry; six live (`eval`, `load`, `lookup`, `macroexpand`, `format`, and
 > dispatch for any project-defined tools), three documented stubs (`check`,
 > `run-tests`, `processes`); added to `EMBEDDED_MODULES` so `(require 'mcp)`
@@ -39,11 +39,11 @@ image.
 > **(4) `nest new` scaffolds `.mcp.json` — done (2026-05-28; the scaffolder
 > writes `foo/.mcp.json` pointing at `nest mcp`, so `cd foo && claude`
 > auto-attaches the agent)**;
-> **(1c-a) structured `(check-project-structured)` in `std/project.blsp` —
+> **(1c-a) structured `(check-project-structured)` in `std/tool/project.blsp` —
 > done (returns `[{:file :line :col :message}]`); `check` MCP tool now
 > dispatches through it**;
-> **(1c-b) structured `(run-tests-structured)` in `std/test.blsp` and
-> `(run-project-tests-structured)` in `std/project.blsp` — done; `run-tests`
+> **(1c-b) structured `(run-tests-structured)` in `std/tool/test.blsp` and
+> `(run-project-tests-structured)` in `std/tool/project.blsp` — done; `run-tests`
 > MCP tool now returns `{:total :passed :failed :failed-assertions :ms
 > :results [...]}` instead of the stub**;
 > **(1c-d) `(list-processes)` Rust primitive — done; `processes` MCP tool
@@ -52,7 +52,7 @@ image.
 > **(5a) `prompts/get` with `brood-task` — done (a single orientation
 > prompt that points at `brood://docs/brood-for-claude` and lists the
 > tool surface)**;
-> **(5b) project-defined tool discovery — done (`std/mcp.blsp` auto-loads
+> **(5b) project-defined tool discovery — done (`std/tool/mcp.blsp` auto-loads
 > `<project-root>/mcp.blsp` if present, after `provide`ing 'mcp; the
 > project file can `def mcp-tools` to extend or replace the catalogue)**;
 > (1c-c) `*out*` dynvar + `(with-out-str)` + dispatcher stdout redirect
@@ -94,7 +94,7 @@ an *agent* do it.
    resources/read ─────────▶  │ session state         │─────────▶│   • mutable RUNTIME image  │
    prompts/get ────────────▶  │ tool registry from    │           │   • spawned processes      │
                               │   (mcp-tools) in      │           │ introspect (shared layer)  │
-                              │   std/mcp.blsp        │           │   • lookup, eval, …       │
+                              │   std/tool/mcp.blsp        │           │   • lookup, eval, …       │
                               └──────────────────────┘           └───────────────────────────┘
 ```
 
@@ -128,11 +128,11 @@ drifting on "what `map`'s signature is":
 - **Deferred to step 1c**, behind Brood-side prereqs:
   - `check_project(root) -> Vec<Diag>` — today `(check-project)` is
     print-oriented (GNU lines + an `Int` count). Needs a structured variant
-    in `std/project.blsp` that returns `[file line col message]` tuples
+    in `std/tool/project.blsp` that returns `[file line col message]` tuples
     before a faithful Rust wrapper can land.
   - `run_tests(filter) -> TestReport` — same shape: `(run-project-tests)`
     prints GNU per-test output and raises on failure. Wants a structured
-    runner result from `std/test.blsp`.
+    runner result from `std/tool/test.blsp`.
   - `EvalResult.stdout` — needs `*out*` (a dynvar) + a `with-out-str` capture
     primitive. Out of scope here; `eval_in_session` ships without it for now,
     since `value` + `error` + `diagnostics` are already useful and the agent
@@ -146,7 +146,7 @@ The contract for every operation:
    `crates/lisp/src/introspect.rs:30`). A long agent session must not leak
    a fresh list per tool call.
 
-## The tool surface (Brood, in `std/mcp.blsp`)
+## The tool surface (Brood, in `std/tool/mcp.blsp`)
 
 Sixteen tools, each earning its place by needing the runtime to answer —
 anything a plain file read or grep would answer is **not** here, because
@@ -170,7 +170,7 @@ Claude Code already has those:
 | `doc-search`  | `{query}`                   | `{results: [{name, doc}]}`             | Find a capability by *behaviour* — searches docstrings, not names |
 | `bench`       | `{source, iterations?}`     | `{ms, iterations, per-iter-ms, value}` | Time an expression in the live image |
 
-Each tool is a `defn` in `std/mcp.blsp`; `(mcp-tools)` returns the catalogue
+Each tool is a `defn` in `std/tool/mcp.blsp`; `(mcp-tools)` returns the catalogue
 the dispatcher reads at startup. **A project can extend the surface** by
 contributing entries to a shared registry from its own `mcp.blsp` — that's
 the ADR-006 part: agent surfaces are Brood, not Rust.
@@ -239,7 +239,7 @@ everything via tools alone.
   `brood-for-claude.md`. The agent has to know that `def` is the loop, not
   "edit file + restart".
 - **The test registry resets per run.** `(describe …)` / `(test …)` *register*
-  by accumulating into `*units*` (`std/test.blsp`); in a long-lived image,
+  by accumulating into `*units*` (`std/tool/test.blsp`); in a long-lived image,
   `load`ing the same test file twice would register every unit twice and
   inflate the `run-tests` count. The project test runners call `reset-units!`
   before (re)loading test files, so each `run-tests` reflects exactly the
@@ -314,7 +314,7 @@ scaffolding work already done.
 | Tier | Surface | Needs | Status |
 |---|---|---|---|
 | **0** | lifecycle, `tools/{list,call}`, `resources/{list,read}`, the eight core tools, the doc resources | `brood::introspect` extracted from LSP | proposed |
-| **1** | project-defined tools (a project's `mcp.blsp` extends the registry), `prompts/get` for `brood-task` | tool-extension API in `std/mcp.blsp`     | next     |
+| **1** | project-defined tools (a project's `mcp.blsp` extends the registry), `prompts/get` for `brood-task` | tool-extension API in `std/tool/mcp.blsp`     | next     |
 | **2** | structured progress notifications (long `run-tests`), per-tool sandboxing (`:safe` allowlist)        | progress event channel                   | later    |
 
 Tier 0 is reachable now because the prerequisites — the introspection
@@ -326,7 +326,7 @@ are all in place.
 Per ADR-006, the Rust side is *mechanism* — JSON-RPC framing, schema
 validation, the `Interp` lifetime, resource file reads — the same category as
 the reader and the LSP transport. **Tool semantics are Brood**
-(`std/mcp.blsp`), so a project can register its own tools without a Rust
+(`std/tool/mcp.blsp`), so a project can register its own tools without a Rust
 release. That's the part that makes `nest mcp` look like a language feature
 rather than a one-off binary: when the future Brood-hosted editor (M2/M3)
 sprouts an MCP server, the Brood half ports unchanged; only the transport

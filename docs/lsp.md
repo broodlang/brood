@@ -43,7 +43,7 @@ one server that owns the language knowledge.
 > unbound-name / arity / type-misuse findings as `WARNING`s (located; a 1-char
 > marker at the form). It bootstraps the enclosing project first through the
 > shared tooling-image seam (`introspect::load_tooling_image` →
-> `std/project.blsp`'s `setup-tooling-image`: `project-setup` +
+> `std/tool/project.blsp`'s `setup-tooling-image`: `project-setup` +
 > `project-load-sources` + `require 'test` + `require 'format`), so cross-module
 > names and the test/format-framework macros resolve and don't false-positive as
 > unbound. `nest mcp` boots through the *same* Brood function, so the two servers

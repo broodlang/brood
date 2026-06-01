@@ -101,7 +101,7 @@ exactly like an editor reading `~/.config/app/init.blsp`:
   (app-loop (initial-state)))
 ```
 
-The init file can `(require 'layers)` (or any kept module), add layers/keymaps/
+The init file can `(require 'editor/layers)` (or any kept module), add editor/layers/keymaps/
 modes, `def` new commands, and redefine existing functions — all against the live
 runtime. Only the *stripped* modules above are unavailable to it.
 
@@ -123,7 +123,7 @@ runtime. Only the *stripped* modules above are unavailable to it.
   no load-path-on-disk needed. Modules are keyed by filename **stem** (`foo.blsp`
   → `foo`), exactly the name `require` searches for.
 - Boot policy is Brood: `brood` calls `(project/run-bundle argv)` in
-  `std/project.blsp`, which applies the embedded manifest, loads every embedded
+  `std/tool/project.blsp`, which applies the embedded manifest, loads every embedded
   module, and invokes `:main` — passing the process's argv to the entry fn.
 
 Rust supplies only mechanism (append/extract the archive, the three
@@ -165,7 +165,7 @@ the payload rather than nesting a second archive.
 - `crates/lisp/Cargo.toml` / `crates/cli/Cargo.toml` — the `dev-tools` feature
   (default on; `cli` forwards `brood/dev-tools`, off via `--no-default-features`)
 - `Cargo.toml` — the `release-lean` profile (strip + LTO + 1 codegen unit)
-- `std/project.blsp` — `bundle-collect` (gather sources) + `run-bundle` (boot);
+- `std/tool/project.blsp` — `bundle-collect` (gather sources) + `run-bundle` (boot);
   no load-time `(:use test)` so a lean runtime can load it
 - `crates/cli/src/main.rs` — `brood` boots the app when bundled
 - `crates/nest/src/main.rs` — `nest release`; `resolve_runtime` (embedded →

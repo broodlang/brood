@@ -215,7 +215,7 @@ Everything LSP Tier 2 wants is blocked by flatness and unlocked by namespaces,
 - **Rename** — qualified names make rename *sound*: only references that resolve
   to `observer/observe` change, not every `observe` in the image.
 - **Subsumes shadow tooling.** The current cross-file flat-namespace-collision
-  warnings (`std/mcp.blsp` `mcp--shadows-for`, the `nest mcp` `load` `:shadows`)
+  warnings (`std/tool/mcp.blsp` `mcp--shadows-for`, the `nest mcp` `load` `:shadows`)
   become ns-aware — a same-name def in a different ns is no longer a collision.
 
 ## 7. Macro hygiene — the two concerns, and where each is solved
@@ -289,7 +289,7 @@ site with a mandatory prefix. "Providers" includes **your own project's modules*
 not just deps — a dep that shadows a module you wrote is the same silent clobber
 (`require` loads whichever `<name>.blsp` is first on `*load-path*`; the loser never
 loads and its dependents bind the wrong module). A provider's namespaces are read
-from each source file's `(defmodule …)` name. (`std/package.blsp`
+from each source file's `(defmodule …)` name. (`std/tool/package.blsp`
 `package--check-namespace-collisions`; tested in `tests/package_test.blsp`.)
 
 The verbose escapes — a per-dep prefix, or an import-site alias `[parser :as p]` —
@@ -322,7 +322,7 @@ the lock file stays computable. Auto-require collapses `require`+`use` for code 
 
 - **Prelude = the root namespace** — always visible, unqualified (`map`, `+`,
   `cons`). The ergonomic macros used bare everywhere — `describe` / `test` / `is`
-  (`std/test.blsp`), `cond`, `when`, … — stay root. Which std *macros* earn a
+  (`std/tool/test.blsp`), `cond`, `when`, … — stay root. Which std *macros* earn a
   root home vs. a prefix is a per-name call.
 - **`defmodule` evolves into `ns`.** It already takes name + optional docstring;
   it grows `:use`/`:refer`/`:export` and sets `*ns*`. `provide`/`require`/
@@ -357,7 +357,7 @@ the lock file stays computable. Auto-require collapses `require`+`use` for code 
    - **All `std/` migrated leaf-out** — every module is `(defmodule X (:use …))`;
      cross-module references are qualified or imported. `test` itself is namespaced,
      so the 40+ test files declare `(defmodule x-test (:use test) …)`. Special cases
-     handled: keymap/dispatch tables hold hand-qualified quoted handler symbols
+     handled: editor/keymap/dispatch tables hold hand-qualified quoted handler symbols
      (`'lineedit/…`); the `project` manifest is read as **data** (not a namespaced
      macro call); circular `:use` (project↔package) broken via lazy `package/…`.
 4. ✅ **Hygiene — α (§7)** — auto-qualifying quasiquote shipped in the big-bang

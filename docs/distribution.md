@@ -159,7 +159,7 @@ independent symbol interners. (In-process messages keep the interned id.)
     reason)` ships `Frame::Exit { link: false }` → `scheduler::exit`. Net-split
     fires `:noconnection` to local peers via `links::handle_node_down` (wired into
     `fire_nodedown` beside the monitor path). This is what makes cross-node
-    supervision work (`std/supervisor.blsp`). See the `remote_link_death_*`,
+    supervision work (`brood-supervisor/src/proc/supervisor.blsp`). See the `remote_link_death_*`,
     `remote_exit_kills_*`, and `supervisor_restarts_a_remote_child` tests.
   - **Auto-reconnect** — `(ensure-link "name@host:port")` (Brood policy in
     `std/prelude.blsp`) maintains a peer link across restarts: synchronous

@@ -11,7 +11,7 @@
 >   primitive + Brood tree-hashing, transitive resolution + conflict detection,
 >   `project.lock.blsp` read/write, and `ensure-deps` wired into `project-setup`
 >   (a path dep's `src/` joins `*load-path*`, so `(require 'dep)` finds it).
->   `std/package.blsp` is the new module; no git, no network. The `(fetch)` verb
+>   `std/tool/package.blsp` is the new module; no git, no network. The `(fetch)` verb
 >   exists; its `nest fetch` subcommand wiring lands with the other verbs.
 > - **Slice 2 — done (2026-05-30):** `:git` deps end-to-end. The
 >   `%git-resolve-ref` (`ls-remote` a tag/branch/commit → SHA), `%git-clone`
@@ -98,7 +98,7 @@ have been added to it.
 
 ## Manifest model
 
-The `(project …)` form (`std/project.blsp`) gains an optional
+The `(project …)` form (`std/tool/project.blsp`) gains an optional
 `:dependencies` slot. The value is a vector of **dep entries**. Each entry
 is a vector: `[name source-kind source-spec & opts]`.
 
@@ -303,7 +303,7 @@ is nearly free.
 
 ## `*load-path*` integration
 
-`project-setup` (in `std/project.blsp`) gains an `(ensure-deps)` step that:
+`project-setup` (in `std/tool/project.blsp`) gains an `(ensure-deps)` step that:
 
 1. Reads `project.lock.blsp` (failing if it doesn't exist but `:dependencies`
    does — the user needs to run `nest fetch`).
@@ -449,7 +449,7 @@ out-of-scope for v1.
 - **Per-dep build / load-path overrides** — Cargo's `[patch]` /
   `[replace]` shape. Solved for now by `:path` sources.
 - **MCP `packages.list` tool surface** — exposes the resolved dep tree to
-  agents. Drops in cleanly once `std/package.blsp` is in.
+  agents. Drops in cleanly once `std/tool/package.blsp` is in.
 
 ## Implementation sketch (when it lands)
 
@@ -467,15 +467,15 @@ out-of-scope for v1.
   primitive: per-file hashing is `(%sha256 (slurp path))` and the canonical
   directory hash is a Brood tree-walk that combines per-file hashes (see
   [Reproducibility notes](#reproducibility-notes) below) — both live in
-  `std/package.blsp`, not the kernel. Also hashes the lock manifest.
+  `std/tool/package.blsp`, not the kernel. Also hashes the lock manifest.
 - `(%http-get url)` — GET → bytes. **Deferred** with the `:tarball` source kind
   (ADR-011): it has no caller until then, so it isn't added yet. When a tarball
   dep lands, the kernel gains this one primitive and the source-kind dispatch in
-  `std/package.blsp` opens up — no other reshaping.
+  `std/tool/package.blsp` opens up — no other reshaping.
 - `(%rm-rf path)` — explicit because `nest update` overwrites cached deps.
   Bounded to paths under `_deps/`; refuses anything outside.
 
-**Brood policy** (`std/package.blsp`, new module):
+**Brood policy** (`std/tool/package.blsp`, new module):
 
 - `(read-lockfile root)` / `(write-lockfile root entries)`.
 - `(resolve-deps manifest lock)` — the walk in [Resolution
@@ -486,7 +486,7 @@ out-of-scope for v1.
 - The CLI verbs: `(fetch)` / `(update & opts)` / `(add name & opts)` /
   `(remove name)` / `(tree)`.
 
-**Manifest extension** (`std/project.blsp`):
+**Manifest extension** (`std/tool/project.blsp`):
 
 - `(project …)` recognises `:dependencies`. Stored in
   `*project-dependencies*`. Empty when omitted (back-compat with v1

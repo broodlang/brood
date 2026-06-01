@@ -120,7 +120,7 @@ flag — this *is* the format.
 The reader records every list form's `line:col` in a heap side-table; `(form-pos
 form)` returns it (or `nil`), and `(current-file)` returns the file `load` is
 reading. The `is` / `assert=` / `refute` / `assert-error` macros (in
-`std/test.blsp`) call these at expansion — while the original form still exists,
+`std/tool/test.blsp`) call these at expansion — while the original form still exists,
 before it macro-expands — and embed the `(file line col)` into a structured
 failure record `(loc detail-lines)`. The runner prints those records.
 
@@ -152,7 +152,7 @@ Extra positional args after `run` are passed to the entry fn as strings, so
 (`(defn main () …)`) or variadic (`(defn main (& args) …)`); a fixed-arity
 mismatch surfaces as a normal Brood error.
 
-`run-project` (in `std/project.blsp`) walks from `cwd` up to `project.blsp`,
+`run-project` (in `std/tool/project.blsp`) walks from `cwd` up to `project.blsp`,
 loads the manifest (which may override `*project-main*`), puts the project's
 source paths on `*load-path*`, `require`s the entry module — pulling in
 everything it transitively requires — then `apply`s the entry fn to the CLI
@@ -198,7 +198,7 @@ and it's invisible to `nest test` and to the MCP eval loop.
 
 The fix is a headless **frame-capture** mode: `nest run --snapshot N` renders the
 first `N` frames to a plaintext file — either escapes resolved into a character
-grid, or a structured dump of the display-protocol render ops (`std/display.blsp`)
+grid, or a structured dump of the display-protocol render ops (`std/editor/display.blsp`)
 — so a frame becomes a value you can assert on: `(assert= frame expected)`. Two
 payoffs:
 
@@ -209,7 +209,7 @@ payoffs:
    it rewards structuring code so the pure frame-builder is separable from the
    blocking loop (the right shape anyway).
 
-This belongs with the M3 display protocol (`std/display.blsp` is the natural seam
+This belongs with the M3 display protocol (`std/editor/display.blsp` is the natural seam
 — a snapshot is just "run the render ops against a string backend instead of the
 terminal"). Pairs with a `verify-tui` skill once the entry point exists.
 
@@ -272,7 +272,7 @@ list of non-function bindings.
 
 ### How this is produced
 
-Policy is Brood (`std/docs.blsp`); Rust supplies only the mechanism. The tool
+Policy is Brood (`std/tool/docs.blsp`); Rust supplies only the mechanism. The tool
 **loads the module and introspects it** rather than parsing source: it snapshots
 `(global-names)`, loads the module, and the new names are what it defined — read
 back via the existing `(doc f)` / `(arglist f)`. The module docstring is read

@@ -161,7 +161,7 @@ So we're "BEAM-minus-preemption-minus-migration" at first — both are additive 
   (reduction-counted preemption, ADR-027) landed; a CPU-bound process now yields
   its worker every ≈2000 reductions.
 - **Introspection semantics.** `spawn-count` = green processes; `peak-threads`
-  becomes "peak busy workers" (≤ pool size) — update `std/test.blsp`'s summary
+  becomes "peak busy workers" (≤ pool size) — update `std/tool/test.blsp`'s summary
   and the wording we just fixed.
 - **Stack size.** corosensei stacks are configurable; pick a small default
   (processes should be cheap) with growth/guard pages, and revisit under load.

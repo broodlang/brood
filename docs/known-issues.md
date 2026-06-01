@@ -175,7 +175,7 @@ EXIT=124   (runner does not reap the dead process → whole run hangs)
    and `collect-units` accounts for each one exactly once — by its result if it
    reported, otherwise by the `[:down …]` its monitor fires — turning a dead
    worker into a failing result (`"test process died: <reason>"`) instead of an
-   indefinite hang (`std/test.blsp`; regression test
+   indefinite hang (`std/tool/test.blsp`; regression test
    `tests/runner_failfast_test.blsp`). This is independent of KI-1: the lookup
    race can still *kill* a worker, but the runner now fails fast with the death
    reason rather than hanging. An unattended `nest test` / `cargo test` therefore
@@ -187,7 +187,7 @@ With the race fixed (KI-1), the default multi-threaded scheduler is safe; the
 options below remain useful for *bounding* a heavy run, not for avoiding crashes:
 
 - `nest test -j 1` (serialize the scheduler), or
-- mark heavy tests `:isolated` (std/test.blsp runs isolated units alone on the
+- mark heavy tests `:isolated` (std/tool/test.blsp runs isolated units alone on the
   runner before the parallel phase), or `:serial` to group them in one process.
   Verified: the `foobar` mandel test marked `:isolated` is 8/8 green.
 
@@ -208,7 +208,7 @@ hand-rolled "block font" magnified out of grid cells (what `life.blsp`'s
   carries an integer `:scale` (≥1, default 1, capped at 16): the renderer draws that
   op's text `scale`× larger in a `scale`×`scale` block of base cells anchored at its
   `(row, col)` (`crates/lisp/src/gui.rs` — `Face.scale` + `paint`/`draw_char`;
-  parsed in `builtins.rs` `gui_face`; documented in `std/face.blsp`). Mixed-size text
+  parsed in `builtins.rs` `gui_face`; documented in `std/editor/face.blsp`). Mixed-size text
   in one frame is now `[:text r c s {:scale 2}]`; the terminal renders 1×. Chose the
   face-key route over a new op or a std block-font module (faces already flow
   end-to-end; the grid stays uniform — positions are still base cells). Arbitrary
@@ -221,10 +221,10 @@ hand-rolled "block font" magnified out of grid cells (what `life.blsp`'s
   so two windows can run different fonts. The `UserEvent::Font` event carries `id:
   Option<u64>` and both arms share an `apply_font` helper (`crates/lisp/src/gui.rs`;
   parsed in `builtins.rs` `gui_font`, arity `range(1,2)`).
-- **GG-3 — no display-side pane/clip/font layer. ✅ Resolved.** `std/pane.blsp`
+- **GG-3 — no display-side editor/pane/clip/font layer. ✅ Resolved.** `std/editor/pane.blsp`
   (ADR-077/078) provides the *pane layout + clip-rect* abstraction (a split tree →
   pane rects + dividers), and the *per-pane font scale* remainder collapsed into
-  GG-1 — a pane/buffer now renders its text with a face carrying its `:scale`, so
+  GG-1 — a editor/pane/buffer now renders its text with a face carrying its `:scale`, so
   per-buffer font is pure Brood policy.
 
 **Resolution:** all three closed under ADR-079. GG-1 shipped as a `Face` `:scale`
@@ -234,7 +234,7 @@ argument to `gui-font!` for per-window fonts.
 
 ## Minor
 
-- ~~**Type-checker noise around `(require 'hatch)`.**~~ **Fixed.** `check_file`
+- ~~**Type-checker noise around `(require 'proc/hatch)`.**~~ **Fixed.** `check_file`
   pre-evaluates top-level `(require …)` forms before walking, so macros from
   the required module (`defprocess`, `!`, `hatch`, `gen-call`, `sleep`)
   resolve correctly and don't trip the unbound-symbol diagnostic. Applies to

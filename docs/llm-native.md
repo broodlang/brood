@@ -82,7 +82,7 @@ Format suggestion:
 ## 2026-05-28 — Claude Opus 4.7 — concurrent Mandelbrot
 **Goal:** demo program exercising processes + transducers + macros.
 **Blockers:** scheduler race; type-checker noise; formatter aggression.
-**Surprises:** `defprocess` is in hatch (require 'hatch); apply exists.
+**Surprises:** `defprocess` is in hatch (require 'proc/hatch); apply exists.
 **What I'd tell next-me:** read std/prelude.blsp once; use -j 1 for
 fan-out demos; the type-checker warnings about hatch macros are noise.
 ```
@@ -411,7 +411,7 @@ LLMs. Brood gets the rare chance to bake them in from the start.
 | **3** | Incarnations file | ✅ `docs/incarnations.md` (with `claude-demo-findings.md` as the first entry); exposed via `brood://docs/incarnations` |
 | **4** | Structured error values with stable codes | ✅ shipped (`docs/error-codes.md`) — `LispError` carries `code` + `kind`; `catch` rebinds kernel errors to `{:kind :code :message :file :line :col :hint}` maps; MCP `error.data` projects the same shape; current codes `E0001`/`E0010`/`E0020`/`E0030`/`E0099` |
 | **5** | Macroexpand visible: MCP tool, LSP hover, CLI-error expansion context, docstring `:expands-to` | partial — MCP `macroexpand` tool shipped; the rest TBD |
-| **6** | `brood --watch` as LLM's REPL | partial — `--watch <file>` flag exists on `brood` and `nest run` (`std/reload.blsp`); structured JSON-lines output TBD |
+| **6** | `brood --watch` as LLM's REPL | partial — `--watch <file>` flag exists on `brood` and `nest run` (`std/tool/reload.blsp`); structured JSON-lines output TBD |
 | **7** | Worked-example index by intent (`examples/by-task/`) | ❌ |
 | **8** | Idiom-aware lints (`prefer-match`, `prefer-transduce`, `no-fn-send`, `pin-or-bind`, …) | ❌ |
 | **9** | Property-test syntax `(prop "..." (a int?) ...)` | ❌ |
@@ -432,7 +432,7 @@ that show the expansion context).
 A small follow-up: **`nest new .`** currently fails (`.` isn't a valid
 project name and the existence check trips). Allowing it to scaffold into
 cwd (deriving the name from the cwd basename, skipping the file-exists
-check) is a ~30-minute change in `std/project.blsp` — separate from the
+check) is a ~30-minute change in `std/tool/project.blsp` — separate from the
 LLM-native plan but related to the agent-attach loop §1 cares about.
 Recorded here so it doesn't get lost.
 
