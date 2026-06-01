@@ -272,6 +272,7 @@ Every session, oldest first. Full text: [devlog-archive.md](archive/devlog-archi
 - **2026-06-01** — Node-link channel encryption (ADR-089): Noise-style X25519 + ChaCha20-Poly1305 session
 - **2026-06-01** — M4 daemon/serving layer (ADR-090): serve a `ui-run` app to thin remote frontends (`nest attach`)
 - **2026-06-01** — RUNTIME-region GC, Stage 1 (ADR-091): solidify the single-process collector — stats, gate test, un-stale docs
+- **2026-06-01** — `nest grammar` (ADR-092): generate editor grammars (VS Code TextMate, Emacs) from `(special-forms)`; `brood-vscode` extension
 
 ---
 
@@ -684,3 +685,37 @@ inherently cross-process. The single-process collector is sound precisely becaus
 **Deferred (Stage 2, ADR-011):** the multi-process rolling-quiesce collector — the
 largest, most race-prone remaining kernel piece, gated on a real long-lived
 multi-process server (the M4 daemon, ADR-090, is the candidate consumer).
+
+## 2026-06-01 — `nest grammar`: editor grammars generated from the language (ADR-092) + a VS Code extension
+
+Built a VS Code extension (`~/src/broodlang/brood-vscode`) — a thin client over the
+existing `brood-lsp` (full IntelliSense) + a TextMate grammar; no tree-sitter (VS Code
+highlights via TextMate, and the intelligence is the Rust LSP). Then, prompted by "can
+the language/tooling make this simpler?", killed the **triplicate keyword list**:
+`brood-mode`, `brood-vscode`, and a future `tree-sitter-brood` each hand-maintained the
+same special-form vocabulary, drifting.
+
+**`nest grammar` (ADR-092)** — a Brood tool (`std/tool/grammar.blsp`, dogfooding) emits
+editor grammars from the kernel's canonical `(special-forms)`: `tmlanguage` (a VS Code
+TextMate grammar, JSON) and `emacs` (the `brood-special-forms` defconst). Only the
+keyword *alternation* is data-driven (escaped, longest-first so `->>` beats `->`); the
+rest is fixed structure. Built on `(special-forms)` + `json-encode` (which handles
+keyword *and* string map keys, so `captures` `"1"`/`"3"` serialise). Thin `nest grammar
+[tmlanguage|emacs]` shim (the `nest doc` model, stdout).
+
+**Reconciled the drift by promoting, not demoting.** `brood-mode` highlighted more than
+the canonical list (`spawn`/`spawn-link`/`remote-spawn(-sync)`/`error`/`with-out-str`/
+`bench`). Per the user's call, **added those to the kernel's `SPECIAL_FORMS`** (new
+`kw::` consts — highlight-only, *not* evaluator special forms). So every consumer now
+colours them from one source: VS Code (`nest grammar`), Emacs (regenerated defconst),
+the REPL highlighter, and the LSP semantic tokens/completion. Adding a future form =
+edit `SPECIAL_FORMS` once, regenerate.
+
+**Consumers updated:** `brood-vscode/syntaxes/brood.tmLanguage.json` is now generated
+(`nest grammar > …`); `brood-mode`'s `brood-special-forms` is the generated canonical
+set (marked "regenerate with `nest grammar emacs`"; byte-compiles clean).
+
+**Tests:** `tests/grammar_test.blsp` — `special-keywords` = `(special-forms)` minus
+def-heads; `(tmlanguage)` round-trips through `json-parse` to a `source.brood` grammar;
+the special-form `match` carries the escaped (`match\*`/`let\*`), def-head-free
+alternation; the emacs defconst from the same set. Full `make test` green.

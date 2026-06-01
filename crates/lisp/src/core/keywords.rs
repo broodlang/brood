@@ -70,6 +70,17 @@ pub const SPAWN: &str = "spawn";
 pub const CASE: &str = "case";
 pub const MODULE_DOC: &str = "module-doc";
 
+// Core macros (defined in std/prelude.blsp, *not* evaluator special forms) that
+// nonetheless read as keywords, so they're highlighted as such everywhere from one
+// source — they sit in `builtins::SPECIAL_FORMS` (ADR-092); `spawn` (above) joins
+// them. Not in the evaluator's `SPECIAL_SPELLINGS` — they're ordinary macros.
+pub const SPAWN_LINK: &str = "spawn-link";
+pub const REMOTE_SPAWN: &str = "remote-spawn";
+pub const REMOTE_SPAWN_SYNC: &str = "remote-spawn-sync";
+pub const ERROR: &str = "error";
+pub const WITH_OUT_STR: &str = "with-out-str";
+pub const BENCH: &str = "bench";
+
 // Reader markers inside a quasiquote template — recognised by the reader, the
 // quasiquote walker (`eval::macros`), and the checker (`hygiene`/`guards`).
 pub const UNQUOTE: &str = "unquote";

@@ -5588,3 +5588,52 @@ ADR-055/061 (the safepoint + operand-stack rooting), ADR-042 (unchanged-redef de
 ADR-011 (deferring Step 2). Lives in `crates/lisp/src/core/heap.rs`
 (`runtime_collect*`, `maybe_runtime_collect`, `flush_rt_*`, `verify_rt_slabs`,
 `rt_gc_*`), `builtins.rs` (`runtime-collect`, the `gc-stats` `:runtime-*` keys).
+
+## ADR-092 — Editor syntax grammars are generated from the language's own introspection
+
+**Status:** accepted + implemented (2026-06-01). Pure Brood policy
+(`std/tool/grammar.blsp`) + a thin `nest grammar` shim; the only kernel change is
+widening the canonical `SPECIAL_FORMS` list.
+
+**Context.** Brood's editor integrations each hand-maintained the same "vocabulary."
+The kernel already has the canonical special-form / core-macro list (`SPECIAL_FORMS`,
+exposed as `(special-forms)` and used by the LSP semantic tokens + the REPL
+highlighter), but `brood-mode` repeated it (`brood-special-forms`), the new
+`brood-vscode` extension repeated it again (its TextMate alternation), and a future
+`tree-sitter-brood` would make three. They drifted — e.g. `brood-mode` highlighted
+`spawn`/`error` while the canonical list didn't.
+
+**Decision.** **Generate the editor grammars from `(special-forms)` — one source of
+truth.** A small Brood tool (`std/tool/grammar.blsp`, dogfooding — ADR-006) turns the
+canonical list into a VS Code **TextMate** grammar (`(tmlanguage)` → JSON) and the
+**Emacs** `brood-special-forms` defconst (`(emacs-special-forms)`), surfaced as
+`nest grammar [tmlanguage|emacs]` (the `nest doc` model; prints to stdout, redirect to
+the editor's grammar file). Only the keyword *alternation* is data-driven (escaped,
+longest-first so `->>` beats `->`); the rest of the grammar (comments, strings, the
+`def…`-head name-capture rule, `:keywords`, numbers) is fixed structure. Built on the
+existing `(special-forms)` + `json-encode`.
+
+**Reconciling the drift — promote, don't demote.** Where `brood-mode` highlighted more
+than the canonical list (`spawn`, `spawn-link`, `remote-spawn`, `remote-spawn-sync`,
+`error`, `with-out-str`, `bench`), we **added those to the kernel's `SPECIAL_FORMS`**
+(new `kw::` consts; they're highlight-only, *not* evaluator special forms — the
+evaluator keeps its own narrower `SPECIAL_SPELLINGS`). So every consumer now colours
+them from one place: VS Code (via `nest grammar`), Emacs (regenerated defconst), the
+REPL highlighter, and the LSP semantic tokens / completion. Adding a future special
+form means editing `SPECIAL_FORMS` once, then regenerating — no per-editor edits.
+
+**Consequences.**
+- `brood-vscode/syntaxes/brood.tmLanguage.json` is now **generated** (`nest grammar >
+  …`), not hand-maintained; `brood-mode`'s `brood-special-forms` is the generated
+  canonical set (marked "regenerate with `nest grammar emacs`").
+- VS Code/the REPL gained keyword colouring for the process/error macros; Emacs kept
+  its richer highlighting — unification *upward*.
+- `tree-sitter-brood`, when built, is one more emitter over the same `special-keywords`.
+- Macros not promoted (anything still outside `(special-forms)`) are coloured by the
+  LSP's semantic tokens as functions, not by the static grammar — the intended split.
+
+**References.** ADR-006 (policy in Brood), ADR-052 (`(special-forms)` shared with the
+LSP/REPL highlighter), the central `kw::` spelling module (devlog 2026-05-30). Lives in
+`std/tool/grammar.blsp`, `crates/nest/src/main.rs` (`nest grammar`),
+`crates/lisp/src/builtins.rs` (`SPECIAL_FORMS`) + `core/keywords.rs` (the new consts);
+consumed by `brood-vscode` and `brood-mode`.

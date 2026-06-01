@@ -906,6 +906,15 @@ top* of connect, plus a few deliberately-deferred refinements:
   write the grammar early (it serves the editor regardless and unlocks Neovim /
   Helix / Emacs / Zed highlighting before GitHub does), grow `.blsp` adoption, then
   file the Linguist PR. Until then the Clojure stopgap stands.
+  - ✅ **Editor grammars generated from the language** (ADR-092, 2026-06-01) — the
+    keyword-list half is solved for the editors that don't need a full parse:
+    `nest grammar` (Brood, `std/tool/grammar.blsp`) emits a VS Code **TextMate**
+    grammar and the **Emacs** `brood-special-forms` defconst from `(special-forms)`,
+    one source of truth (consumed by `brood-vscode` + `brood-mode`). A future
+    `tree-sitter-brood` is one more emitter over the same `special-keywords`.
+  - ✅ **`brood-vscode`** (2026-06-01) — a VS Code extension: a thin client over the
+    `brood-lsp` server (full IntelliSense) + the generated TextMate grammar. No
+    tree-sitter needed (VS Code highlights via TextMate).
 
 ---
 

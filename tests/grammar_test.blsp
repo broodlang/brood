@@ -1,0 +1,52 @@
+;; std/tool/grammar.blsp — the editor-grammar generator (ADR-092). It turns the
+;; kernel's canonical `(special-forms)` into a VS Code TextMate grammar (+ an Emacs
+;; list), so editors stop hand-maintaining parallel keyword lists. These tests pin
+;; the data-driven contract: the keyword set is `(special-forms)` minus def-heads,
+;; and the emitted grammar is valid JSON of the right shape with that set escaped in.
+
+(defmodule grammar-test (:use test) (:use grammar) (:use json))
+
+(describe "grammar — editor grammars generated from (special-forms)"
+  (test "special-keywords is exactly (special-forms) minus the def… heads"
+    (let (kw (special-keywords))
+      ;; def-heads get a distinct name-capturing rule, so they're excluded here
+      (is (every? (fn (k) (not (starts-with? k "def"))) kw))
+      (is (not (includes? kw "defn")))
+      (is (not (includes? kw "defmodule")))
+      ;; everything else from the canonical list is present
+      (is (includes? kw "when"))
+      (is (includes? kw "match*"))
+      (is (includes? kw "->"))
+      (is (includes? kw "->>"))
+      ;; the count matches: the canonical list with def-heads filtered out
+      (assert= (count kw)
+        (count (filter (fn (k) (not (starts-with? k "def"))) (special-forms))))))
+
+  (test "(tmlanguage) is valid JSON of the TextMate shape"
+    (let (g (json-parse (tmlanguage)))
+      (assert= (get g :scopeName) "source.brood")
+      (assert= (get g :name) "Brood")
+      (is (map? (get g :repository)))
+      ;; the patterns list references the named rules
+      (is (vector? (get g :patterns)))))
+
+  (test "the special-form rule carries the escaped keyword alternation"
+    (let (g (json-parse (tmlanguage))
+          m (get (get (get g :repository) :special-form) :match))
+      ;; regex metacharacters in keywords are escaped (`match*` → `match\*`)
+      (is (string-contains? m "match\\*"))
+      (is (string-contains? m "let\\*"))
+      ;; the word forms and the operator forms both made it in
+      (is (string-contains? m "when"))
+      (is (string-contains? m "->>"))
+      ;; def-heads are NOT in the keyword alternation (they're the :definition rule)
+      (is (not (string-contains? m "defn")))
+      (is (map? (get (get g :repository) :definition)))))
+
+  (test "(emacs-special-forms) emits the brood-special-forms defconst from the same set"
+    (let (e (emacs-special-forms))
+      (is (string-contains? e "(defconst brood-special-forms"))
+      (is (string-contains? e "\"when\""))
+      (is (string-contains? e "\"->>\""))
+      ;; same source of truth — no def-heads
+      (is (not (string-contains? e "\"defn\""))))))
