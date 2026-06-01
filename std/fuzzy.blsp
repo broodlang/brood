@@ -42,7 +42,9 @@ candidate, then lexicographic); an empty query returns the candidates unchanged.
 
 (def fuzzy--separators "-_/. ")  ; a match just after one of these is a word boundary
 
-(defn fuzzy--upper? (ch) "True if 1-char string `ch` is an upper-case letter." (not (= (lower ch) ch)))
+(defn fuzzy--upper? (ch)
+  "True if 1-char string `ch` is an upper-case letter."
+  (not (= (lower ch) ch)))
 
 (defn fuzzy--boundary? (cand pos)
   "True if char `pos` starts a word in `cand`: index 0, after a separator, or a
@@ -59,7 +61,8 @@ camelCase hump (an upper preceded by a non-upper)."
         bonus (+ 1
                 (if (fuzzy--boundary? cand pos) 8 0)
                 (if contiguous 6 0)
-                (if (nil? prev) (- 0 (min 3 pos)) 0)))  ; small leading-offset penalty, first match only
+                (if (nil? prev) (- 0 (min 3 pos)) 0)))
+    ; small leading-offset penalty, first match only
     {:score (+ (get st :score) bonus) :prev pos}))
 
 (defn fuzzy--score (cand positions)
@@ -74,8 +77,13 @@ camelCase hump (an upper preceded by a non-upper)."
 handled directly, since its empty position list is indistinguishable from `nil`."
   (if (= query "")
     {:score 0 :positions ()}
-    (let (positions (fuzzy--positions (lower query) (lower cand)
-                      0 (string-length query) 0 (string-length cand) '()))
+    (let (positions (fuzzy--positions (lower query)
+                      (lower cand)
+                      0
+                      (string-length query)
+                      0
+                      (string-length cand)
+                      '()))
       (if (nil? positions)
         nil
         {:score (fuzzy--score cand positions) :positions positions}))))
@@ -88,4 +96,5 @@ shorter candidate, then lexicographic). An empty `query` returns `cands` unchang
     (let (scored (filter (fn (x) (not (nil? (first x))))
                    (map (fn (c) [(fuzzy-match query c) c]) cands)))
       (map second
-        (sort-by (fn (x) [(- 0 (get (first x) :score)) (string-length (second x)) (second x)]) scored)))))
+        (sort-by (fn (x) [(- 0 (get (first x) :score)) (string-length (second x)) (second x)])
+          scored)))))

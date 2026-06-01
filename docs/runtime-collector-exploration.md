@@ -1,5 +1,12 @@
 # RUNTIME-region collection — exploration notes
 
+> **Superseded by [ADR-091](decisions.md#adr-091--runtime-region-collection-single-process-compaction-now-multi-process-via-a-cooperative-rolling-quiesce-later)** as the source of truth (2026-06-01). The single-process
+> collector described below as "2a/2b/2c" is now **shipped** (single-process compaction
+> + auto-safepoint + the `(runtime-collect)` builtin + `:runtime-*` `gc-stats`); the
+> multi-process collector is designed in ADR-091 as a cooperative *rolling quiesce* and
+> deferred. These notes are kept for the quantified-leak measurements + the detailed
+> code trace. See ADR-091 for the decision of record.
+>
 > Status: **exploration / design assessment** (2026-05-31, branch `runtime-gc`).
 > Not an implementation. Builds on `live-editing.md` §"Stage 5 — Bounded RUNTIME
 > memory", which decided to *defer* the collector behind a quantified leak +

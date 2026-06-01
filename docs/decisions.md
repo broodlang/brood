@@ -5505,3 +5505,86 @@ frontends"), ADR-053 (the observer's *pull* remote-attach this complements), ADR
 (node-connect by name), ADR-089 (the encrypted channel it serves over), ADR-074
 (dual-listen — local + remote front doors), ADR-011 (deferring shared model / resize).
 Lives in `std/editor/serve.blsp`; `nest attach` in `crates/nest/src/main.rs`.
+
+## ADR-091 — RUNTIME-region collection: single-process compaction now; multi-process via a cooperative rolling quiesce later
+
+**Status:** accepted (2026-06-01). The single-process collector is **implemented +
+tested**; the multi-process collector is **designed here, deferred** (ADR-011). This
+ADR supersedes the exploratory `docs/runtime-collector-exploration.md` as the source
+of truth. No language-surface change beyond the `(runtime-collect)` builtin + the
+`:runtime-*` keys on `(gc-stats)`.
+
+**Context — two kinds of memory.** Brood's heap has a per-process **LOCAL** region
+(private; collected by the generational copying GC, ADR-055/061/072 — no coordination,
+each process collects its own) and one shared **RUNTIME** code region per runtime
+(`RuntimeCode`, behind `Arc`, `boxcar`-backed append-only slabs). `def` / hot-reload
+`promote`s a closure-graph into RUNTIME and rebinds the global; **old versions are
+never overwritten** (append-only), so an in-flight call keeps running the version it
+entered on while new lookups get the new one — Erlang-style hot reload (ADR-013,
+`shared-code.md`). The cost: RUNTIME grows with redefinition churn and was never
+reclaimed.
+
+**Why the shared region can't just be collected per-process (the crux).** LOCAL works
+per-process *because each heap is private*. RUNTIME is the deliberate exception — it's
+**shared**, which is the whole point (a `def` must be visible to every process; making
+code per-process would break hot reload). Reclaiming it means **compacting**: copy live
+code to fresh slabs and free the old. But code is addressed by bare integer **handles**
+(slab indices), and those handles are held *everywhere at once* — in every process's
+private LOCAL heap (a captured RUNTIME closure), on execution stacks (mid-call), in live
+compiled-VM arms, and in the global table. Moving entry `#100 → #50` requires every
+holder, in every process, to rewrite "100"→"50" with no reader observing a half-done
+state. So reclaiming the shared region is fundamentally **more than per-process**: (a)
+liveness is a *union* question — a version is dead only if *no* process references it;
+(b) the swap must be atomic w.r.t. all readers.
+
+**Decision — Step 1 (done): single-process compaction, gated by `Arc::get_mut`.**
+`Heap::runtime_collect` evacuates the live RUNTIME graph into a fresh `CodeSlabs` and
+rewrites every reference in one pass: globals, this process's roots/env-roots/dynamics,
+both LOCAL generations, and the live compiled-VM arms; per-process caches (`vm_cache`,
+`global_ic`) are cleared (rebuilt lazily); a forwarding table + `OnceLock`
+reserve-then-fill handle DAGs/cycles; `verify_rt_slabs` asserts no dangling handle.
+The eval safepoint calls it automatically (`maybe_runtime_collect`, adaptive
+`rt_gc_threshold = max(BROOD_RT_GC_FLOOR(4096), 2·live)`); `(runtime-collect)` forces
+it and returns `{:before :after :reclaimed :ran}`. **It runs only when this heap
+uniquely owns the runtime `Arc`** — which is *exactly* the condition that makes it
+sound without any stop-the-world: a uniquely-owned runtime has **no other readers**, so
+the single owner safely rewrites its own handles + the globals and swaps. This bounds
+the REPL and any single-process hot-reload loop (`nest run --watch` of a non-spawning
+program). With live spawned processes the `Arc` is shared, the gate declines, and
+`(runtime-collect)` reports `:ran false` (a safe no-op) — verified by
+`tests/runtime_collect_test.blsp`; the reclaim/rewrite mechanics by
+`crates/lisp/tests/runtime_collector.rs` (3000 redefs → live <50 → compacted; the
+auto-safepoint bound; a LOCAL-held handle rewritten across a collect).
+
+**Decision — Step 2 (designed, deferred): a cooperative rolling quiesce.** Because the
+scheduler is *cooperative* (processes yield at the eval safepoint) and each process's
+`Heap` lives on its own coroutine stack (unreachable from outside — so a coordinator
+cannot rewrite another process's handles; each must rewrite its own), the multi-process
+collector is a **rolling quiesce**, not a hard freeze:
+1. A coordinator builds the new compacted region + a forwarding table from the *union*
+   of all processes' roots (each process contributes its RUNTIME roots at its safepoint).
+2. The **old region is kept alive** (a second live `CodeSlabs`); handles resolve against
+   whichever region they belong to until migrated, so nothing dangles mid-migration.
+3. Each process, at its next safepoint, applies the forwarding table to its own
+   heap/roots/arms (self-rewrite) and acknowledges the new epoch.
+4. The old region is freed only once **every** process has migrated.
+Open wrinkles to resolve when built: a permanently-**parked** process pins the old
+region (needs a wake-to-migrate or epoch-bounded escape hatch); handles may need a small
+region/epoch tag to resolve against two live regions; and the read path may move to an
+`ArcSwap<CodeSlabs>` (an atomic load per code read — a measured cost). This is the
+largest, most race-prone remaining kernel piece, gated on a real long-lived
+multi-process server demonstrating the need (the M4 daemon, ADR-090, is the candidate
+consumer) — exercise it under `BROOD_GC_STRESS` across the worker pool before shipping.
+
+**Consequences.** Hot-reload churn is bounded for single-process use today, with
+`(gc-stats)` `:runtime-closures`/`:runtime-threshold` + `(runtime-collect)` for
+visibility. A long-lived server with live processes still accretes superseded code until
+Step 2 lands — acceptable for now (normal sessions are negligible; the dedup of
+structurally-unchanged redefs, ADR-042, already curbs the common case).
+
+**References.** ADR-072 (the generational LOCAL GC this reuses the trace/forward/verify
+machinery from), ADR-013 + `shared-code.md` (why RUNTIME is shared — hot reload),
+ADR-055/061 (the safepoint + operand-stack rooting), ADR-042 (unchanged-redef dedup),
+ADR-011 (deferring Step 2). Lives in `crates/lisp/src/core/heap.rs`
+(`runtime_collect*`, `maybe_runtime_collect`, `flush_rt_*`, `verify_rt_slabs`,
+`rt_gc_*`), `builtins.rs` (`runtime-collect`, the `gc-stats` `:runtime-*` keys).

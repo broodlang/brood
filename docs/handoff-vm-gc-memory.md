@@ -48,11 +48,14 @@ Authoritative detail lives in `docs/decisions.md` (ADRs cited inline),
    `docs/findings-closure-promotion-overflow.md`. **GC has no known
    memory-safety holes left.**
 
-2. **RUNTIME-region collector (deferred, ADR-072 / `live-editing.md` "Stage 5 later
-   half").** The LOCAL-heap GC is done; the **shared mutable RUNTIME code region**
-   (where `def`/hot-reload `promote`s code) is **never collected**, so it grows with
-   hot-reload churn. Doesn't matter for short runs; matters for a long-lived,
-   live-edited server. Its own stage — design not started.
+2. **RUNTIME-region collector — single-process done; multi-process deferred (ADR-091).**
+   The LOCAL-heap GC is done; the **shared mutable RUNTIME code region** (where
+   `def`/hot-reload `promote`s code) is now **collected single-process**
+   (`Heap::runtime_collect` + the `(runtime-collect)` builtin, auto-fired at the eval
+   safepoint, gated on `Arc::get_mut`), bounding the REPL / single-process `--watch`.
+   The **multi-process** case (the shared region with live processes) remains — a
+   cooperative *rolling quiesce*, designed in ADR-091, deferred until a long-lived
+   multi-process server needs it. The largest, most race-prone remaining kernel piece.
 
 3. **`macros.rs` rooting during expansion (deferred, low priority).** The compile
    pass opts *out* of GC via the `MACRO_BLOCK` guard (collection suppressed during
@@ -124,10 +127,10 @@ Authoritative detail lives in `docs/decisions.md` (ADRs cited inline),
 6. ~~#3 (rooted-Rust: `macroexpand`/`reload-defs`)~~ — **closed, not actionable**
    (fixpoint already rooted; compile-pass GC-suppressed; `reload-defs` like
    `eval_str`).
-7. **#2 (RUNTIME-region GC) — the one genuinely-open, substantial item.** The shared
-   mutable RUNTIME code region (where `def`/hot-reload `promote`s code) is never
-   reclaimed, so it grows with hot-reload churn. Matters for a long-lived,
-   live-edited server; design not started (ADR-072 "Stage 5 later half").
+7. **#2 (RUNTIME-region GC) — single-process done; multi-process is the one open item.**
+   The shared mutable RUNTIME code region is now compacted single-process (ADR-091); the
+   *multi-process* rolling-quiesce collector for the shared region under live processes
+   remains, deferred until a long-lived multi-process server needs it.
    **Everything else in this handoff is done or deliberately-not-a-goal.**
 
 ## Key files

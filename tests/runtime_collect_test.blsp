@@ -1,0 +1,50 @@
+;; RUNTIME-region GC (ADR-091), the in-language view: shared-region observability
+;; (`gc-stats`) and the single-process compaction *gate*. The deep reclaim/rewrite
+;; mechanics are covered single-process in `crates/lisp/tests/runtime_collector.rs`
+;; (a fresh `Interp` uniquely owns the runtime, so the collector actually runs).
+;; Here we run inside the test suite — many live processes share the runtime `Arc`,
+;; so `(runtime-collect)` takes its safe no-op branch; that's exactly what this
+;; verifies, plus that the new `:runtime-*` stats surface the shared region.
+
+(defmodule runtime-collect-test (:use test))
+
+;; Tail-recursively redefine the global named `sym` `n` times, each body structurally
+;; distinct (so the unchanged-redef dedup, ADR-042, can't skip the append) — the
+;; hot-reload churn that promotes a fresh RUNTIME closure each time. `eval`-built so
+;; the `def` hits the global table (and the shared RUNTIME region) at run time. Each
+;; test passes its OWN symbol: tests run concurrently, and two churning the same
+;; global would race on its final value.
+(defn rc-churn (sym i n)
+  (if (= i n)
+    :done
+    (do
+      (eval (list 'def sym (list 'fn '(x) (list '+ (list '* 'x i) i))))
+      (rc-churn sym (+ i 1) n))))
+
+(describe "runtime GC — shared-region stats + the single-process gate"
+  (test "gc-stats surfaces the shared RUNTIME region (closure count + auto-compact threshold)"
+    (do
+      (rc-churn 'rc-f-stats 0 200)
+      (let (s (gc-stats))
+        ;; the shared figures are plain ints, same for every process
+        (is (int? (get s :runtime-closures)))
+        (is (int? (get s :runtime-threshold)))
+        ;; the churn promoted closures into the shared region, so it's grown past 0
+        (is (> (get s :runtime-closures) 0))
+        ;; the threshold is the live count that triggers the next auto-compaction
+        (is (> (get s :runtime-threshold) 0)))))
+
+  (test "(runtime-collect) is a safe no-op while the runtime is shared (:ran false)"
+    ;; a parked process guarantees >1 holder of the runtime Arc, so the collector's
+    ;; `Arc::get_mut` soundness gate declines — it must report that, not move shared
+    ;; code out from under a concurrent reader.
+    (let (parked (spawn (receive (_ :never))))
+      (rc-churn 'rc-f-gate 0 200)
+      (let (r (runtime-collect))
+        (is (= (get r :ran) false))
+        (assert= (get r :before) (get r :after))
+        (assert= (get r :reclaimed) 0)
+        ;; nothing was moved or freed, so every churned version is still callable
+        ;; (`eval` resolves the unqualified global the churn defined; last i=199)
+        (assert= (eval (list 'rc-f-gate 10)) (+ (* 10 199) 199))
+        (exit parked :kill)))))

@@ -1580,7 +1580,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("mem-peak", &[], "High-water mark of allocated bytes since process start."),
     ("mem-limit", &[], "Hard memory ceiling in bytes (0 = unlimited); crossing it aborts the process. Set via BROOD_MEM_LIMIT."),
     ("mem-soft-limit", &[], "Soft memory ceiling in bytes (0 = unlimited); crossing it raises a catchable E0043 at the next safepoint."),
-    ("gc-stats", &[], "A snapshot map of this process's GC activity: :collections, :copied, :reclaimed (cumulative object counts), :live, :live-bytes, :threshold (next-collection trigger), and :debug-build (true if built with debug assertions — not a perf build). Per-process — reports the caller's own heap."),
+    ("gc-stats", &[], "A snapshot map of GC activity: :collections, :copied, :reclaimed (cumulative object counts), :live, :live-bytes, :threshold (next-collection trigger) for the caller's own LOCAL heap; :runtime-closures and :runtime-threshold for the *shared* RUNTIME code region (its promoted-closure count + next auto-compact trigger — same for every process); and :debug-build (true if built with debug assertions — not a perf build). The LOCAL figures are per-process; use (runtime-collect) for the RUNTIME live/reclaimable split."),
     ("gc-collect", &[], "Force a collection of this process's LOCAL heap now, returning the post-collection gc-stats map. An observability/test aid, not a load-bearing trigger — automatic collection at the eval safepoint already keeps memory bounded."),
     ("runtime-collect", &[], "Compact the shared RUNTIME code region, reclaiming superseded versions of redefined globals (hot-reload churn). Returns {:before N :after M :reclaimed (N-M) :ran bool} (closure counts). Runs only when this runtime is uniquely owned (no other live process) — otherwise :ran is false and nothing changes. Usually unnecessary: the eval safepoint auto-compacts once hot-reload churn crosses a threshold (single-process); this forces it now. ADR-076 follow-up / docs/runtime-collector-exploration.md."),
     ("gc-trace", &["on?"], "Query (no arg) or set (truthy arg) per-collection GC trace logging for this process; returns the resulting state. When on, each minor/major collection prints a one-line summary to stderr. Defaulted from BROOD_GC_TRACE."),
@@ -2464,7 +2464,12 @@ fn mem_peak(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 /// objects dropped), `:live` (LOCAL objects live right now), `:live-bytes` (a
 /// cheap byte estimate of the LOCAL slabs — see `mem-bytes` for the process-wide
 /// figure), and `:threshold` (the live count that triggers the next collection —
-/// the slow/stable dial).
+/// the slow/stable dial). Plus two figures for the *shared* RUNTIME code region
+/// (the same for every process, not per-process): `:runtime-closures` (its total
+/// promoted-closure count — grows with hot-reload churn, compacted back by the
+/// safepoint, ADR-091) and `:runtime-threshold` (the count that triggers the next
+/// auto-compaction). The live/reclaimable split is the expensive walk reported by
+/// `(runtime-collect)`, so it's not included here.
 #[cfg(feature = "dev-tools")]
 fn gc_stats(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(gc_stats_map(heap))
@@ -2491,6 +2496,20 @@ fn gc_stats_map(heap: &mut Heap) -> Value {
         (
             value::kw("threshold"),
             Value::Int(heap.gc_threshold() as i64),
+        ),
+        // The shared RUNTIME code region (not per-process — every process sees the
+        // same figure). `:runtime-closures` is its total promoted-closure count
+        // (cheap — a slab length); it grows with hot-reload churn and the eval
+        // safepoint compacts it back toward `:runtime-threshold` (single-process
+        // today, ADR-091). The live/reclaimable split is the expensive walk reported
+        // by `(runtime-collect)`'s `{:before :after :reclaimed}`, kept out of here.
+        (
+            value::kw("runtime-closures"),
+            Value::Int(heap.runtime_closure_count() as i64),
+        ),
+        (
+            value::kw("runtime-threshold"),
+            Value::Int(heap.rt_gc_threshold() as i64),
         ),
         // True iff this binary was built with debug assertions (the GC tripwire /
         // verifier / poison bits are compiled in) — so a benchmark can confirm
@@ -3016,6 +3035,11 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // `require` (the editor's minibuffer reuses `std/lineedit`'s core), not just
     // REPL plumbing — so a lean release keeps them.
     ("editor/highlight", include_str!("../../../std/editor/highlight.blsp")),
+    // Lexical Markdown highlighter — the `highlight` analogue for `.md` buffers
+    // (`markdown-spans` → `[start end face]` spans, ADR-092). Pure UI a shipped app
+    // may `require` (myedit's markdown-mode), so it stays in CORE alongside
+    // `highlight`/`lineedit`; opt-in, never in the prelude.
+    ("editor/markdown", include_str!("../../../std/editor/markdown.blsp")),
     ("editor/lineedit", include_str!("../../../std/editor/lineedit.blsp")),
     ("format", include_str!("../../../std/format.blsp")),
 ];

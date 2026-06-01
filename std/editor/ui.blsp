@@ -160,8 +160,7 @@ already-open window instead of opening a duplicate (e.g. a repeated `(observe)`)
   "Log a caught `view`/`update` error to stderr (via `*err*`, so it's redirectable)
 — it would otherwise vanish with the echo-area message on quit, leaving no trace.
 `where` names the phase it came from (`\"view\"` / `\"update\"`). Returns nil."
-  (eprintln (str "ui-run: " where " error (recovering to last good frame): "
-                (error-message e))))
+  (eprintln (str "ui-run: " where " error (recovering to last good frame): " (error-message e))))
 
 (defn ui--loop (model last-good view update display)
   "The inner recursion of `ui-run` (own function so each turn is a proper tail call —
@@ -183,13 +182,15 @@ re-raises, surfacing a genuine startup bug instead of spinning."
   (if (get model :done)
     nil
     (let ([cols rows] ((get display :size))
-          ;; render this model; a `[:frame …]` result is the frame to draw, `:failed`
-          ;; means `view` threw (already logged) and we must fall back to `last-good`.
-          rendered (try [:frame (view model cols rows)]
-                     (catch e
-                       (if (nil? last-good)
-                         (throw e)  ; first render failed — a real startup bug, not a wedge
-                         (do (ui--log-error "view" e) :failed)))))
+           ;; render this model; a `[:frame …]` result is the frame to draw, `:failed`
+           ;; means `view` threw (already logged) and we must fall back to `last-good`.
+           rendered
+           (try
+             [:frame (view model cols rows)]
+             (catch e
+               (if (nil? last-good)
+                 (throw e)  ; first render failed — a real startup bug, not a wedge
+                 (do (ui--log-error "view" e) :failed)))))
       (if (= rendered :failed)
         ;; couldn't render `model` — roll back to the last model that did, and re-render it
         (ui--loop last-good last-good view update display)
@@ -201,12 +202,12 @@ re-raises, surfacing a genuine startup bug instead of spinning."
               ;; the window's close button always quits; `ui-run` then runs `:leave`
               (quit-request? input) nil
               ;; raise-to-front request: act on the display, keep the model untouched
-              (focus-request? input)
-              (let (f (get display :focus))
-                (do (when f (f)) (ui--loop model model view update display)))
+              (focus-request? input) (let (f (get display :focus))
+                                       (do (when f (f)) (ui--loop model model view update display)))
               :else
               ;; fold the input; a throwing `update` drops this input and keeps `model`
-              (let (next (try (update model input cols rows)
+              (let (next (try
+                           (update model input cols rows)
                            (catch e (do (ui--log-error "update" e) model))))
                 (ui--loop next model view update display)))))))))
 

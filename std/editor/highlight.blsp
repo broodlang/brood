@@ -184,12 +184,11 @@ scan; spans need not be sorted."
   "Merge the faces of every `[lo hi face]` range in `ranges` covering offset `pos`
 (later ranges win on key conflict via `into`), or nil when none cover it. Region
 highlight, isearch overlays, and bracket-match are all such ranges."
-  (fold
-    (fn (acc [lo hi f])
-      (cond
-        (not (and (>= pos lo) (< pos hi))) acc
-        (nil? acc) f
-        :else (into acc f)))
+  (fold (fn (acc [lo hi f])
+          (cond
+            (not (and (>= pos lo) (< pos hi))) acc
+            (nil? acc) f
+            :else (into acc f)))
     nil
     ranges))
 
@@ -227,10 +226,13 @@ equal (so touching same-face spans stay one run, as the per-char coalescer produ
 gap between the lexer `spans` and each span's text in its own face, over `[cur, end)`.
 `spans` must be advanced past `cur` and is consumed left-to-right — no per-char scan."
   (cond
-    (or (empty? spans) (>= (first (first spans)) end))
-    (reverse (if (< cur end)
-               (fontify-runs--push acc (substring text (- cur base) (- end base)) nil)
-               acc))
+    (or (empty? spans) (>= (first (first spans)) end)) (reverse (if (< cur end)
+                                                                  (fontify-runs--push acc
+                                                                    (substring text
+                                                                      (- cur base)
+                                                                      (- end base))
+                                                                    nil)
+                                                                  acc))
     :else (let ([s e f] (first spans)
                 lo (max s cur)
                 hi (min e end)
@@ -255,7 +257,14 @@ only for the few lines an overlay range actually touches (`fontify-runs` filters
           f (cond (nil? rf) sf (nil? sf) rf :else (into sf rf)))
       (if (= f cur)
         (fontify-runs--acc text base spans2 ranges len (inc i) start cur acc)
-        (fontify-runs--acc text base spans2 ranges len (inc i) i f
+        (fontify-runs--acc text
+          base
+          spans2
+          ranges
+          len
+          (inc i)
+          i
+          f
           (cons [(substring text start i) cur] acc))))))
 
 (defn fontify-runs (text base spans ranges)
@@ -275,11 +284,17 @@ touches take an O(spans) path; only lines a range crosses pay the per-char merge
             line-ranges (filter (fn ([lo hi f]) (and (< lo end) (> hi base))) ranges))
         (if (empty? line-ranges)
           (fontify-runs--spans text base end spans0 base '())
-          (fontify-runs--acc text base spans0 line-ranges len 1 0
+          (fontify-runs--acc text
+            base
+            spans0
+            line-ranges
+            len
+            1
+            0
             (let (sf (fontify-runs--head-face spans0 base)
                   rf (ranges-face line-ranges base))
               (cond (nil? rf) sf (nil? sf) rf :else (into sf rf)))
-          '()))))))
+            '()))))))
 
 (defn highlight-chunks (full base line overrides)
   "Return `[substring face]` chunks that tile `line` — the visible region starting
@@ -288,7 +303,9 @@ at offset `base` in `full` — coloured by lexing `full`, with `overrides` (a li
 Adjacent chars of equal face coalesce into one chunk; feed each to a `[:print str
 face]` op. A thin shell over `fontify-runs`: each `[pos face]` override is the
 one-char range `[pos (inc pos) face]`."
-  (fontify-runs line base (highlight-spans full)
+  (fontify-runs line
+    base
+    (highlight-spans full)
     (map (fn ([p f]) [p (inc p) f]) overrides)))
 
 ;; ---- bracket matching -------------------------------------------------------
