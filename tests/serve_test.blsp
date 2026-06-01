@@ -62,6 +62,19 @@
       (assert= (receive ([:probed t] t) (after 3000 :none)) "n=1")
       (assert= (receive ([:probed t] t) (after 3000 :none)) "n=1")))
 
+  (test "a session that dies without a clean :bye still notifies the client (monitor)"
+    ;; `make-model` runs *before* ui-run, so a throw there kills the session before
+    ;; `:leave`/`[:bye]` can fire. The client monitors the session pid (as attach--session
+    ;; does), so it learns via `[:down …]` instead of hanging — the robustness fix.
+    (let (bad-mk (fn () (error "boom in make-model"))
+          mgr (spawn (editor/serve/serve--manager bad-mk vw up)))
+      (send mgr [:attach (self) 80 24])
+      ;; [:attached] is sent before make-model runs, so we still get the session pid
+      (let (session (receive ([:attached s] s) (after 2000 :no-attach)))
+        (is (not (= session :no-attach)))
+        (monitor session)
+        (assert= (receive ([:down _ _ _] :down) (after 2000 :no-down)) :down))))
+
   (test "serve registers the manager under the well-known serve-name"
     ;; the only test that touches the global `:ui` name (avoids cross-test clashes)
     (do
