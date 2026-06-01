@@ -5464,7 +5464,11 @@ display)`; the only new piece is the `display`:
   SPEC`): `node-start` (ephemeral) + `connect` (clean error *before* the terminal) +
   `monitor-node`, then `term-enter`, report `term-size`, attach, and loop — drain
   pushed `[:frame f]` → `term-draw`, poll the local terminal → ship each key to the
-  session — until `[:bye]` / link drop, always restoring the terminal.
+  session — until `[:bye]` / link drop, always restoring the terminal. Teardown is
+  **symmetric**: the session `monitor`s the client *and* the client `monitor`s the
+  session, so either side's death (even an abrupt one with no clean `[:bye]` — a
+  throwing `make-model` runs before `ui-run` can install its `:leave`) ends the other
+  via `[:down …]` rather than hanging it.
 
 The daemon side is a normal `nest run --name N app.blsp` whose `main` calls `(serve …)`
 then parks; the only new CLI command is `nest attach` (mirrors `nest observe --connect`).
@@ -5489,7 +5493,9 @@ buffers; a dedicated `nest serve` auto-park command.
 
 **Tested.** `tests/serve_test.blsp` (in-process client plays the protocol): attach →
 initial frame → key-driven frames → quit → `[:bye]`; per-client model isolation (two
-clients each see their own count); `remote-display` `:draw`/`:size`/`:poll` units.
+clients each see their own count); a session that dies without a clean `[:bye]` (a
+throwing `make-model`) still notifies the client via the monitor; `remote-display`
+`:draw`/`:size`/`:poll` units.
 `crates/cli/tests/serve_attach.rs` (cross-process, real encrypted TCP, in the
 `real-tcp` group): a daemon serves a counter app, a TTY-less client attaches and drives
 it (n=0 → n=1) and quits. Full `make test` green.

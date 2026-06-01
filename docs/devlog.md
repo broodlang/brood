@@ -629,3 +629,10 @@ presses a key right after attach must consume that initial frame first (the test
 and `serve_attach` both do). The PostToolUse `blsp-check` hook false-flagged the new
 `editor/serve` names while the installed `nest` on PATH predated the embed — verified via
 the freshly-built `cli --test` that they resolve.
+
+**Review follow-up (same day):** made teardown **symmetric** — the client now `monitor`s
+the session too, not just the node. The gap it closes: `make-model` is evaluated *before*
+`ui-run`, so a throw there kills the session before `:leave`/`[:bye]` can fire; without a
+session monitor the client would hang (node still up, no `[:bye]`, no `[:nodedown]`). Now
+`attach--drain` also ends on the session's `[:down …]`. Added a `serve_test.blsp` case for
+it (throwing `make-model` → client sees `[:down]`). 485 tests green.

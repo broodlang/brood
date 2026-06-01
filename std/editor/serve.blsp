@@ -13,10 +13,13 @@
 ;; the client's keys. So an app written for a local terminal serves to a remote one with
 ;; no change (ADR-046: one display protocol, many frontends — now a *network* frontend).
 ;;
-;;     ;; daemon (e.g. `nest run --name ed app.blsp`, where main calls):
-;;     (serve (fn () {:n 0}) my-view my-update)   ; register the app, then park
+;;     ;; daemon — `nest run --name ed app.blsp`, whose main registers the app and
+;;     ;; then blocks, so the node stays alive after main would otherwise return:
+;;     (defn main ()
+;;       (serve (fn () {:n 0}) my-view my-update)
+;;       (receive (_ (main))))     ; park: any park loop works; `serve` itself doesn't block
 ;;     ;; client (another terminal / machine):
-;;     (attach "ed")            ; or "ed@host:port"; like `emacsclient -s ed`
+;;     (attach "ed")              ; or "ed@host:port"; like `emacsclient -s ed`
 ;;
 ;; **Many clients** can attach at once — each gets its own session process running its
 ;; own `ui-run` over a fresh `(make-model)`, so sessions are independent. A *shared*
@@ -104,11 +107,15 @@ Opt-in, like Erlang's `-name`: a runtime serves nothing unless it calls `serve`.
 
 (defn attach--drain (peer)
   "Draw every frame the daemon has queued (non-blocking), returning `:open`, or
-`:closed` if the daemon said `[:bye]` (the app quit) or the link to `peer` dropped."
+`:closed` if the daemon said `[:bye]` (the app quit), the link to `peer` dropped, or
+the session process died (`[:down …]` from the monitor) — the last covers a session
+that died *without* a clean `[:bye]` (e.g. a throwing `make-model`, which runs before
+`ui-run` can install its `:leave`), so the client never hangs waiting on a dead session."
   (receive
     ([:frame f] (do (term-draw f) (attach--drain peer)))
     ([:bye] :closed)
     ([:nodedown ~peer] :closed)
+    ([:down _ _ _] :closed)
     (after 0 :open)))
 
 (defn attach--loop (peer session)
@@ -128,7 +135,12 @@ client loop once the daemon replies with our session pid."
   (let ([cols rows] (term-size))
     (send {:name serve-name :node peer} [:attach (self) cols rows])
     (receive
-      ([:attached session] (attach--loop peer session))
+      ([:attached session]
+        ;; Watch the session too, not just the node: if it dies without a clean
+        ;; `[:bye]` (a throwing `make-model`, say), `monitor` delivers `[:down …]`
+        ;; (immediately, with `:noproc`, if it's already gone), so the loop ends
+        ;; instead of hanging. `attach--drain` handles that `[:down]`.
+        (do (monitor session) (attach--loop peer session)))
       ([:nodedown ~peer] nil)
       (after 5000 (error "attach: no response from the server (is it serving?)")))))
 
