@@ -6,7 +6,7 @@
 //! copy-on-send — *the network is just a longer copy* (ADR-013, `concurrency.md`).
 //!
 //! **Slice 1 (this module):** node naming, an authenticated TCP handshake (a
-//! shared cookie, like Erlang's — *not* real security yet), and
+//! shared cookie, like Erlang's), and
 //! location-transparent [`send`](crate::process::send) to a remote process. A
 //! process is addressed either by a [`Value::Pid`](crate::core::value::Value::Pid)
 //! — which carries node identity, so the same value works locally or across the
@@ -15,9 +15,10 @@
 //!
 //! **One node per OS process.** The node identity, connection table, name table
 //! and symbol interner are process-global, so a "node" *is* the OS process; two
-//! nodes are two `brood` processes (typically over loopback). Deferred to later
-//! slices: remote `spawn`/code shipping, distributed monitors, node-down
-//! detection, reconnect, and real auth/TLS.
+//! nodes are two `brood` processes (typically over loopback). (Everything the
+//! original slice-1 doc deferred — remote `spawn`/code shipping, distributed
+//! monitors, node-down detection, reconnect, and channel encryption — has since
+//! landed; see the §sections below and `docs/distribution.md`.)
 //!
 //! ## Threads (off the green-process scheduler)
 //! Each connection owns two plain OS threads — a **reader** (decodes inbound
@@ -30,6 +31,16 @@
 //! [`Message`] deep-copy, with one cross-process detail: **symbols travel by
 //! name**, re-interned on arrival, because separate runtimes have independent
 //! interners.
+//!
+//! ## Channel security
+//! The handshake authenticates the peer with a shared-cookie HMAC (the cookie is
+//! never on the wire), and the steady-state link is then **encrypted + integrity-
+//! protected** by a Noise-style session: ephemeral X25519 ECDH (forward secrecy,
+//! authenticated by the cookie-HMAC) → ChaCha20-Poly1305 per frame, with the send
+//! and receive ciphers owned by the writer and reader threads respectively (see
+//! [`session`] and [`handshake`], ADR-089). So a TCP node is safe on an untrusted
+//! network — a passive observer learns nothing and a post-handshake forged frame
+//! (e.g. a `Send` carrying a closure → RCE) fails the per-frame tag.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
@@ -393,7 +404,7 @@ pub(crate) fn spawn_or_get<E>(
 /// gets (`:noproc` from `add_monitor`), just a different reason.
 pub(crate) fn monitor_remote(target_node: Symbol, target_pid: u64, watcher_pid: u64, mref: u64) {
     let me = local_node();
-    let bytes: Arc<[u8]> = match frame_bytes(&Frame::Monitor {
+    let bytes: Arc<[u8]> = match encode_payload(&Frame::Monitor {
         from_node: me,
         watcher_pid,
         target: target_pid,
@@ -443,7 +454,7 @@ pub(crate) fn monitor_remote(target_node: Symbol, target_pid: u64, watcher_pid: 
 pub(crate) fn demonitor_remote(target_node: Symbol, watcher_pid: u64, mref: u64) {
     process::drop_pending_remote(target_node, watcher_pid, mref);
     let me = local_node();
-    let bytes: Arc<[u8]> = match frame_bytes(&Frame::Demonitor {
+    let bytes: Arc<[u8]> = match encode_payload(&Frame::Demonitor {
         from_node: me,
         watcher_pid,
         mref,
@@ -465,7 +476,7 @@ pub(crate) fn demonitor_remote(target_node: Symbol, watcher_pid: u64, mref: u64)
 /// net-split exactly as `monitor_remote`: record before consulting `NODES`.
 pub(crate) fn link_remote(target_node: Symbol, target_pid: u64, local_pid: u64) {
     let me = local_node();
-    let bytes: Arc<[u8]> = match frame_bytes(&Frame::Link {
+    let bytes: Arc<[u8]> = match encode_payload(&Frame::Link {
         from_node: me,
         from_pid: local_pid,
         to_pid: target_pid,
@@ -500,7 +511,7 @@ pub(crate) fn link_remote(target_node: Symbol, target_pid: u64, local_pid: u64) 
 pub(crate) fn unlink_remote(target_node: Symbol, target_pid: u64, local_pid: u64) {
     process::drop_remote_link(local_pid, target_node, target_pid);
     let me = local_node();
-    let bytes: Arc<[u8]> = match frame_bytes(&Frame::Unlink {
+    let bytes: Arc<[u8]> = match encode_payload(&Frame::Unlink {
         from_node: me,
         from_pid: local_pid,
         to_pid: target_pid,
@@ -519,7 +530,7 @@ pub(crate) fn unlink_remote(target_node: Symbol, target_pid: u64, local_pid: u64
 /// Called from `links::notify_peers`.
 pub(crate) fn send_link_exit(target_node: Symbol, target_pid: u64, from_pid: u64, reason: Message) {
     let me = local_node();
-    let bytes: Arc<[u8]> = match frame_bytes(&Frame::Exit {
+    let bytes: Arc<[u8]> = match encode_payload(&Frame::Exit {
         from_node: me,
         from_pid,
         to_pid: target_pid,
@@ -539,7 +550,7 @@ pub(crate) fn send_link_exit(target_node: Symbol, target_pid: u64, from_pid: u64
 /// explicit remote exit and for a supervisor terminating a remote child.
 pub(crate) fn exit_remote(target_node: Symbol, target_pid: u64, reason: Message) {
     let me = local_node();
-    let bytes: Arc<[u8]> = match frame_bytes(&Frame::Exit {
+    let bytes: Arc<[u8]> = match encode_payload(&Frame::Exit {
         from_node: me,
         from_pid: 0, // unused for an explicit (non-link) exit
         to_pid: target_pid,
@@ -631,7 +642,7 @@ pub(crate) fn route(node: Symbol, target: Target, msg: Message) {
         return;
     }
     // Remote: encode a Send frame and hand it to the peer's writer thread.
-    let bytes: Arc<[u8]> = match frame_bytes(&Frame::Send { target, msg }) {
+    let bytes: Arc<[u8]> = match encode_payload(&Frame::Send { target, msg }) {
         Ok(b) => Arc::from(b),
         Err(e) => {
             eprintln!(
@@ -876,9 +887,9 @@ pub(crate) fn node_connect(peer: Symbol, addr: &str) -> io::Result<Symbol> {
     }
     let mut stream = dial(addr)?;
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
-    let (peer, peer_addr) = handshake(&mut stream, Role::Initiator)?;
+    let (peer, peer_addr, session) = handshake(&mut stream, Role::Initiator)?;
     stream.set_read_timeout(None)?; // steady-state reader blocks until the next message
-    establish(peer, peer_addr, stream, Role::Initiator);
+    establish(peer, peer_addr, stream, Role::Initiator, session);
     Ok(peer)
 }
 
@@ -919,16 +930,16 @@ fn dial(addr: &str) -> io::Result<Stream> {
 /// threads. See [`handshake`] for the protocol.
 fn accept_link(mut stream: Stream) -> io::Result<()> {
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
-    let (peer, peer_addr) = handshake(&mut stream, Role::Responder)?;
+    let (peer, peer_addr, session) = handshake(&mut stream, Role::Responder)?;
     stream.set_read_timeout(None)?; // steady-state reader blocks until the next message
-    establish(peer, peer_addr, stream, Role::Responder);
+    establish(peer, peer_addr, stream, Role::Responder, session);
     Ok(())
 }
 
 /// Register the authenticated link and spawn its reader + writer threads —
 /// resolving a duplicate against any existing link to the same peer first.
 /// `peer_addr` is how a third node should dial this peer (for mesh gossip).
-fn establish(peer: Symbol, peer_addr: String, stream: Stream, role: Role) {
+fn establish(peer: Symbol, peer_addr: String, stream: Stream, role: Role, session: Session) {
     // Who initiated *this* connection (the tie-break key).
     let connector = match role {
         Role::Initiator => local_node(),
@@ -984,18 +995,32 @@ fn establish(peer: Symbol, peer_addr: String, stream: Stream, role: Role) {
 
     ensure_heartbeat();
 
-    // Writer: drain the channel onto the socket. A per-write timeout
-    // (`WRITE_TIMEOUT`) prevents a slowloris peer from pinning the writer and
-    // ballooning `rx` — a timeout is treated the same as an I/O error, fall
-    // through to shutdown.
+    // The link is authenticated and registered: split the session into its two
+    // directional ciphers (ADR-089). The writer owns the send cipher, the reader
+    // the receive cipher — neither shares crypto state, which is exactly why this
+    // per-direction-AEAD scheme fits the reader/writer thread split (a single TLS
+    // connection couldn't be driven from both). A tie-break loser returned above,
+    // dropping `session` unused.
+    let Session {
+        send: mut seal,
+        recv: open,
+    } = session;
+
+    // Writer: pull each plaintext frame payload off the channel, **seal** it, and
+    // write the ciphertext. A per-write timeout (`WRITE_TIMEOUT`) prevents a
+    // slowloris peer from pinning the writer and ballooning `rx`; a timeout or a
+    // seal failure is treated like any I/O error — fall through to shutdown.
     let writer_sock = Arc::clone(&sock);
     let _ = writer_sock.set_write_timeout(Some(WRITE_TIMEOUT));
     std::thread::spawn(move || {
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            for bytes in rx {
-                if (&*writer_sock).write_all(&bytes).is_err() {
-                    let _ = writer_sock.shutdown(Shutdown::Both);
-                    break;
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            for payload in rx {
+                match seal.seal(&payload) {
+                    Ok(framed) if (&*writer_sock).write_all(&framed).is_ok() => {}
+                    _ => {
+                        let _ = writer_sock.shutdown(Shutdown::Both);
+                        break;
+                    }
                 }
             }
         }));
@@ -1008,9 +1033,14 @@ fn establish(peer: Symbol, peer_addr: String, stream: Stream, role: Role) {
     let reader_tx = tx;
     // One shared Pong buffer per reader; sending is an `Arc::clone` (atomic
     // incr), not a `Vec` copy.
-    let pong: Arc<[u8]> = Arc::from(frame_bytes(&Frame::Pong).expect("encode Pong"));
+    let pong: Arc<[u8]> = Arc::from(encode_payload(&Frame::Pong).expect("encode Pong"));
     std::thread::spawn(move || {
         let mut r: &Stream = &reader_sock;
+        // The receive cipher, owned solely by this reader (no lock needed). Each
+        // `open` authenticates + decrypts one frame; a tag failure (a tampered,
+        // forged, replayed, or reordered frame) ends the loop and tears the link
+        // down — closing ADR-081's post-handshake injection hole.
+        let mut open = open;
         // Loop until peer closes, protocol error, or a deliberate `shutdown`.
         // `peer` is the *authenticated* node name from the handshake — we use
         // it instead of the wire's `from_node` field on Monitor/Demonitor so a
@@ -1019,7 +1049,7 @@ fn establish(peer: Symbol, peer_addr: String, stream: Stream, role: Role) {
         // the wire format for clean error paths (encode side still emits it)
         // but is *not consulted* on this side.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            while let Ok(frame) = read_frame(&mut r) {
+            while let Ok(frame) = open.open(&mut r) {
                 last_seen.store(now_millis(), Ordering::Release);
                 match frame {
                     Frame::Send { target, msg } => deliver_inbound(target, msg),
@@ -1123,7 +1153,7 @@ fn broadcast_peer_table() {
         if peers.is_empty() {
             continue;
         }
-        if let Ok(bytes) = frame_bytes(&Frame::Peers { peers }) {
+        if let Ok(bytes) = encode_payload(&Frame::Peers { peers }) {
             let _ = conn.tx.send(Arc::from(bytes));
         }
     }
@@ -1223,10 +1253,12 @@ fn deliver_inbound(target: Target, msg: Message) {
 
 mod handshake;
 mod heartbeat;
+mod session;
 mod wire;
 
 use heartbeat::ensure_heartbeat;
-use wire::{frame_bytes, read_frame, Frame};
+use session::Session;
+use wire::{encode_payload, Frame};
 
 #[cfg(test)]
 mod tests {

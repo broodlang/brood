@@ -53,6 +53,16 @@ sha2 = "0.11"
 # Cryptographically-strong random nonces for the handshake. `getrandom` reads
 # the OS RNG directly — no allocator, no global state, just bytes.
 getrandom = "0.4"
+# Node-link channel encryption (ADR-089): a Noise-style session that gives the
+# steady-state node link confidentiality + per-frame integrity, closing ADR-081's
+# cleartext/injection gap. `x25519-dalek` does the ephemeral ECDH (forward secrecy);
+# `chacha20poly1305` is the per-frame AEAD (the Poly1305 tag *is* the per-frame MAC).
+# The session key is derived (HKDF over the hmac/sha2 above) from the DH secret,
+# authenticated by folding both ephemeral pubkeys into the existing cookie-HMAC.
+# Vetted RustCrypto/dalek crates — the "don't roll your own crypto" case the
+# dependency rule allows. See docs/distribution.md + ADR-089.
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
 # The text rope backing editor buffers (M2, ADR-045). A `ropey::Rope` is a
 # B-tree of `Arc`-shared chunks: cloning is O(1) (bump refcounts) and edits are
 # copy-on-write on the touched nodes only — so the immutable-data contract

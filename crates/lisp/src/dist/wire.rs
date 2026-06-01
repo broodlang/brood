@@ -37,6 +37,14 @@ pub(super) enum Frame {
     Hello {
         node: Symbol,
         nonce: [u8; NONCE_LEN],
+        /// An **ephemeral X25519 public key**, fresh per handshake (ADR-089). Both
+        /// sides exchange one in their `Hello`; the shared DH secret derives the
+        /// session's AEAD keys (forward secrecy — recorded traffic stays secret
+        /// even if the long-term cookie later leaks). It is *authenticated* by
+        /// being folded into the `Auth` MAC alongside the names + addr, so an
+        /// on-path attacker can't substitute their own DH key without the cookie.
+        eph_pub: [u8; EPH_PUB_LEN],
+        /// The **address peers should dial to reach me** (`"unix:PATH"` /
         addr: String,
     },
     /// Handshake step 3 & 4: `HMAC-SHA256(cookie, peer_nonce || peer_name ||
@@ -130,18 +138,23 @@ const MAX_GOSSIP_PEERS: usize = 4096;
 /// `tcpdump` reader recognise the protocol; the trailing version byte gates
 /// future wire-format changes — a peer that sees anything else aborts before
 /// allocating buffers. Version history (greenfield — no back-compat kept): v1
-/// plaintext cookie (retired); v2 HMAC handshake; **v3** adds an advertised
-/// `addr` to `Hello` + the `Peers` gossip frame for cluster meshing (ADR-088).
-pub(super) const PROTOCOL_MAGIC: [u8; 4] = *b"BRD\x03";
+/// plaintext cookie (retired); v2 HMAC handshake; v3 adds an advertised `addr`
+/// to `Hello` + the `Peers` gossip frame for cluster meshing (ADR-088); **v4**
+/// adds an ephemeral X25519 pubkey to `Hello` and **encrypts every steady-state
+/// frame** (Noise-style session, ADR-089) — so a v3 and v4 node can't interop.
+pub(super) const PROTOCOL_MAGIC: [u8; 4] = *b"BRD\x04";
 pub(super) const NONCE_LEN: usize = 32;
 pub(super) const MAC_LEN: usize = 32;
+/// Length of an X25519 public key (the ephemeral DH key in `Hello`, ADR-089).
+pub(super) const EPH_PUB_LEN: usize = 32;
 
-/// Encode a frame with its `[u32 len][payload]` length prefix, ready to write.
-/// A payload over [`MAX_FRAME`] is rejected here too — symmetric with
-/// `read_frame` — so an oversized local `(send pid huge-thing)` returns a clean
-/// error rather than silently truncating the `u32` length and producing a frame
-/// the peer can't parse.
-pub(super) fn frame_bytes(frame: &Frame) -> io::Result<Vec<u8>> {
+/// Encode a frame to its bare payload (the `FRAME_*` tag byte + variant fields),
+/// **without** a length prefix, rejecting anything over [`MAX_FRAME`]. This is the
+/// plaintext a steady-state link feeds to the session layer to **seal** (ADR-089):
+/// the AEAD ciphertext gets its own `[u32 len]` prefix once it's encrypted, so
+/// adding one here would double-frame. The cap is enforced here — symmetric with
+/// the read side — so an oversized local `(send pid huge-thing)` errors cleanly.
+pub(super) fn encode_payload(frame: &Frame) -> io::Result<Vec<u8>> {
     let mut payload = Vec::new();
     encode_frame(&mut payload, frame)?;
     if payload.len() > MAX_FRAME {
@@ -153,6 +166,15 @@ pub(super) fn frame_bytes(frame: &Frame) -> io::Result<Vec<u8>> {
             ),
         ));
     }
+    Ok(payload)
+}
+
+/// Encode a frame with its `[u32 len][payload]` length prefix, ready to write as
+/// **plaintext** — used only by the handshake (`write_frame`), which runs before
+/// the session keys exist. Steady-state frames go through `encode_payload` + the
+/// session's `seal` instead.
+pub(super) fn frame_bytes(frame: &Frame) -> io::Result<Vec<u8>> {
+    let payload = encode_payload(frame)?;
     let mut out = Vec::with_capacity(payload.len() + 4);
     out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     out.extend_from_slice(&payload);
@@ -163,8 +185,11 @@ pub(super) fn write_frame(w: &mut impl Write, frame: &Frame) -> io::Result<()> {
     w.write_all(&frame_bytes(frame)?)
 }
 
-/// Read one length-prefixed frame, rejecting an over-large prefix before
-/// allocating for it. The steady-state reader caps at [`MAX_FRAME`].
+/// Read one length-prefixed **plaintext** frame, capped at [`MAX_FRAME`]. Steady-
+/// state frames are now sealed (read via `session::OpenKey::open`, ADR-089) and the
+/// handshake reads through `read_frame_capped` with its own tiny ceiling — so this
+/// convenience wrapper is used only by the wire-codec round-trip tests below.
+#[cfg(test)]
 pub(super) fn read_frame(r: &mut impl Read) -> io::Result<Frame> {
     read_frame_capped(r, MAX_FRAME)
 }
@@ -192,10 +217,16 @@ pub(super) fn read_frame_capped(r: &mut impl Read, max: usize) -> io::Result<Fra
 
 fn encode_frame(w: &mut Vec<u8>, frame: &Frame) -> io::Result<()> {
     match frame {
-        Frame::Hello { node, nonce, addr } => {
+        Frame::Hello {
+            node,
+            nonce,
+            eph_pub,
+            addr,
+        } => {
             w.push(FRAME_HELLO);
             put_sym(w, *node);
             w.extend_from_slice(nonce);
+            w.extend_from_slice(eph_pub);
             put_str(w, addr);
         }
         Frame::Auth { mac } => {
@@ -277,11 +308,16 @@ fn encode_frame(w: &mut Vec<u8>, frame: &Frame) -> io::Result<()> {
     Ok(())
 }
 
-fn decode_frame(r: &mut Cursor<Vec<u8>>) -> io::Result<Frame> {
+/// Decode one frame's payload (no length prefix — the caller has already read the
+/// bytes, whether from the plaintext `read_frame*` path or after the session layer
+/// decrypts a sealed frame, ADR-089). `pub(super)` so `dist::session` can decode an
+/// opened ciphertext.
+pub(super) fn decode_frame(r: &mut Cursor<Vec<u8>>) -> io::Result<Frame> {
     match get_u8(r)? {
         FRAME_HELLO => Ok(Frame::Hello {
             node: get_sym(r)?,
             nonce: get_fixed::<NONCE_LEN>(r)?,
+            eph_pub: get_fixed::<EPH_PUB_LEN>(r)?,
             addr: get_str(r)?,
         }),
         FRAME_AUTH => Ok(Frame::Auth {
@@ -812,19 +848,23 @@ mod tests {
     #[test]
     fn hello_roundtrips() {
         let nonce = [7u8; NONCE_LEN];
+        let eph_pub = [9u8; EPH_PUB_LEN];
         let f = Frame::Hello {
             node: value::intern("alpha"),
             nonce,
+            eph_pub,
             addr: "tcp:127.0.0.1:9000".to_string(),
         };
         match read_full(&f) {
             Frame::Hello {
                 node,
                 nonce: n2,
+                eph_pub: e2,
                 addr,
             } => {
                 assert_eq!(value::symbol_name(node), "alpha");
                 assert_eq!(n2, nonce);
+                assert_eq!(e2, eph_pub);
                 assert_eq!(addr, "tcp:127.0.0.1:9000");
             }
             _ => panic!("wrong frame"),
