@@ -288,9 +288,53 @@ tie-break) → §2 (node-down + `monitor-node`). §3 (handshake v2: protocol-ver
 + challenge–response) is still future; the existing cookie compare and version
 omission are documented as not-yet-security.
 
+## Cluster mesh — connecting transitively (ADR-088)
+
+Nodes form a **full mesh** by default, Erlang-style: connecting to *one* member
+of a cluster transitively connects you to **every** node it knows. So with nodes
+A, B, C where A connects to hub B and C connects to hub B, A and C end up linked
+to each other too — you don't have to dial every peer by hand.
+
+**How it works.**
+- The handshake's `Hello` now carries each node's **advertised dial address**
+  (`unix:PATH` / `tcp:HOST:PORT`) — how a *third* node should reach it. It's
+  folded into the auth MAC, so a man-in-the-middle can't rewrite it without the
+  cookie. Each link stores its peer's address (`Conn.addr`).
+- When a **new** peer joins, the node broadcasts a `Frame::Peers` gossip frame —
+  its table of `(node-name, dial-addr)` pairs — to every connected peer. The new
+  peer learns the incumbents; the incumbents learn the newcomer.
+- On receiving gossip, a node **dials any peer it isn't already connected to**
+  (each on a short-lived thread; a `PENDING_DIALS` set dedupes concurrent gossip
+  naming the same peer). Each new link re-gossips, so the mesh closes
+  transitively and then goes quiet (a reconnect/duplicate doesn't re-broadcast).
+- Simultaneous cross-dials (A dials C while C dials A) collapse to one link via
+  the existing **connector tie-break** (§1). `(nodes)` reflects the full mesh.
+
+**Address chosen to advertise:** the first TCP listener if any (reachable
+locally over loopback *and* remotely), else the local Unix socket. A dual-listen
+node therefore advertises its TCP endpoint.
+
+**Opt out:** `BROOD_NO_MESH=1` keeps links strictly point-to-point — you connect
+to exactly the nodes you dial, with no transitive discovery.
+
+**Limitations (v1, ADR-011 — additive when a consumer needs more).**
+- *No auto-reconnect / re-heal.* The mesh forms on join; a transient link drop
+  isn't re-dialed on its own (consistent with Erlang). Use `ensure-link` for a
+  persistently-maintained link.
+- *Address must be routable from the discoverer.* A node advertises its own
+  listen address; meshing assumes peers can route to it (the same assumption
+  `name@host` already makes). A unix-only node gossiped to a different machine
+  can't be reached — use TCP nodes for cross-machine clusters. A wrong/
+  unreachable advertised address fails the dial harmlessly (and the cookie gate
+  means only same-cluster nodes ever link).
+- *Trust:* gossip comes from an already-authenticated peer (it holds the cookie),
+  so meshing crosses no new trust boundary — it dials with our cookie, and only
+  same-cookie nodes link. Do not expose a TCP node on an untrusted network until
+  channel TLS lands (ADR-081), mesh or not.
+
 ## Where it lives
 - `crates/lisp/src/dist.rs` — node state, transport threads, handshake, routing,
-  wire codec.
+  wire codec, **cluster-mesh gossip** (`broadcast_peer_table`/`mesh_consider`).
 - `crates/lisp/src/core/value.rs` — `Value::Pid` + `Tag::Pid`.
 - `crates/lisp/src/process.rs` — `Message::Pid`, `send` dispatch, `pid_value`,
   `deliver` (the shared local-delivery tail).

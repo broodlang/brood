@@ -31,7 +31,7 @@
 //! name**, re-interned on arrival, because separate runtimes have independent
 //! interners.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -240,6 +240,11 @@ struct Conn {
     /// link initiated by the lexicographically smaller node name, computed
     /// identically on both ends (see `establish`).
     connector: Symbol,
+    /// The address a *third* node should dial to reach this peer (`"unix:PATH"` /
+    /// `"tcp:HOST:PORT"`, or empty if the peer didn't advertise one), learned from
+    /// the peer's authenticated `Hello`. We gossip this to other peers so the
+    /// cluster meshes (ADR-088).
+    addr: String,
     /// The writer thread's inbox (length-framed bytes).
     /// Outbound frames carry an `Arc<[u8]>` so liveness probes (one `ping` per
     /// tick, one `pong` per inbound `Ping`) reuse a single buffer per link
@@ -268,6 +273,46 @@ static NAMES: LazyLock<RwLock<HashMap<Symbol, u64>>> =
 /// `[:nodedown name]` message when a link to that node tears down.
 static NODE_MONITORS: LazyLock<RwLock<HashMap<Symbol, Vec<u64>>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// The addresses this node listens on, in registration order (`"unix:PATH"` /
+/// `"tcp:HOST:PORT"`). One entry per `node-start`/`node-also-listen` listener.
+/// Read by [`advertised_addr`] to tell a peer how others should dial us.
+static LISTEN_ADDRS: LazyLock<RwLock<Vec<String>>> = LazyLock::new(|| RwLock::new(Vec::new()));
+
+/// Peer node-names we're *currently dialing* because cluster gossip named them
+/// (ADR-088). Entered before a mesh dial thread spawns and cleared when it
+/// finishes, so two gossip frames naming the same not-yet-connected peer don't
+/// race into two redundant dials. A peer already in `NODES` is never re-dialed.
+static PENDING_DIALS: LazyLock<RwLock<HashSet<Symbol>>> =
+    LazyLock::new(|| RwLock::new(HashSet::new()));
+
+/// Whether to form a transitive **cluster mesh** (ADR-088): when set (the
+/// default — Erlang's behaviour), connecting to one node auto-connects you to
+/// every node it knows. Set `BROOD_NO_MESH=1` for point-to-point links only
+/// (you connect to exactly the nodes you dial, no transitive discovery). Read
+/// once at first use.
+static MESH_ENABLED: LazyLock<bool> =
+    LazyLock::new(|| std::env::var_os("BROOD_NO_MESH").is_none());
+
+fn mesh_enabled() -> bool {
+    *MESH_ENABLED
+}
+
+/// The address a peer should advertise as "dial this to reach me" — the first
+/// TCP listener if any (reachable from other machines *and* same-machine over
+/// loopback), else the first listener (a local Unix socket), else empty (not
+/// listening; peers then can't gossip us onward). Preferring TCP means a
+/// dual-listen node (local Unix + remote TCP) advertises the address that works
+/// from anywhere.
+fn advertised_addr() -> String {
+    let addrs = crate::core::sync::read(&LISTEN_ADDRS);
+    addrs
+        .iter()
+        .find(|a| a.starts_with("tcp:"))
+        .or_else(|| addrs.first())
+        .cloned()
+        .unwrap_or_default()
+}
 
 /// `(register name pid)` — bind a local name to a local process id.
 pub(crate) fn register(name: Symbol, id: u64) {
@@ -671,6 +716,9 @@ fn start_listener(addr: &str) -> io::Result<()> {
             format!("node address must start with 'unix:' or 'tcp:' (got {addr})"),
         ));
     }
+    // Record only after a successful bind, so a failed listener doesn't leave a
+    // dead address we'd advertise to peers.
+    crate::core::sync::write(&LISTEN_ADDRS).push(addr.to_string());
     Ok(())
 }
 
@@ -828,9 +876,9 @@ pub(crate) fn node_connect(peer: Symbol, addr: &str) -> io::Result<Symbol> {
     }
     let mut stream = dial(addr)?;
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
-    let peer = handshake(&mut stream, Role::Initiator)?;
+    let (peer, peer_addr) = handshake(&mut stream, Role::Initiator)?;
     stream.set_read_timeout(None)?; // steady-state reader blocks until the next message
-    establish(peer, stream, Role::Initiator);
+    establish(peer, peer_addr, stream, Role::Initiator);
     Ok(peer)
 }
 
@@ -871,15 +919,16 @@ fn dial(addr: &str) -> io::Result<Stream> {
 /// threads. See [`handshake`] for the protocol.
 fn accept_link(mut stream: Stream) -> io::Result<()> {
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
-    let peer = handshake(&mut stream, Role::Responder)?;
+    let (peer, peer_addr) = handshake(&mut stream, Role::Responder)?;
     stream.set_read_timeout(None)?; // steady-state reader blocks until the next message
-    establish(peer, stream, Role::Responder);
+    establish(peer, peer_addr, stream, Role::Responder);
     Ok(())
 }
 
 /// Register the authenticated link and spawn its reader + writer threads —
 /// resolving a duplicate against any existing link to the same peer first.
-fn establish(peer: Symbol, stream: Stream, role: Role) {
+/// `peer_addr` is how a third node should dial this peer (for mesh gossip).
+fn establish(peer: Symbol, peer_addr: String, stream: Stream, role: Role) {
     // Who initiated *this* connection (the tie-break key).
     let connector = match role {
         Role::Initiator => local_node(),
@@ -893,6 +942,10 @@ fn establish(peer: Symbol, stream: Stream, role: Role) {
     // Decide winner vs. any existing link, and register atomically under the lock.
     // Compare connectors by *name* (spelling) — interned ids differ per process,
     // but both ends share the names, so they pick the same physical link.
+    // `was_new` distinguishes a brand-new peer (gossip the cluster about it) from
+    // a reconnect/duplicate-replacement (peers already know this name). Assigned
+    // on the registering path; the losing path diverges (`return`).
+    let was_new;
     let evicted: Option<Conn> = {
         let mut nodes = crate::core::sync::write(&NODES);
         match nodes.get(&peer) {
@@ -905,15 +958,17 @@ fn establish(peer: Symbol, stream: Stream, role: Role) {
                 let _ = sock.shutdown(Shutdown::Both);
                 return;
             }
-            _ => {
+            other => {
                 // We win (or there was no existing link). Take over the slot; any
                 // evicted link is torn down below, outside the lock.
+                was_new = other.is_none();
                 let old = nodes.remove(&peer);
                 nodes.insert(
                     peer,
                     Conn {
                         id,
                         connector,
+                        addr: peer_addr,
                         tx: tx.clone(),
                         sock: Arc::clone(&sock),
                         last_seen: Arc::clone(&last_seen),
@@ -1028,6 +1083,10 @@ fn establish(peer: Symbol, stream: Stream, role: Role) {
                             process::exit(to_pid, reason);
                         }
                     }
+                    // Cluster-mesh gossip: the peer is telling us about other
+                    // nodes it knows. Dial any we're not already connected to,
+                    // so connecting to one member joins the whole mesh (ADR-088).
+                    Frame::Peers { peers } => mesh_consider(peers),
                     // Handshake-only frames in steady state: a peer that
                     // re-sends one after the link is up is malformed but harmless
                     // — keep reading.
@@ -1037,6 +1096,79 @@ fn establish(peer: Symbol, stream: Stream, role: Role) {
         }));
         drop_link(peer, id);
     });
+
+    // A brand-new peer just joined: tell the cluster. Send the new peer our other
+    // peers (so it dials them) and tell our existing peers about the newcomer (so
+    // they dial it). Both directions fall out of one broadcast (ADR-088). Skipped
+    // for a reconnect/duplicate (the name was already known cluster-wide) and when
+    // meshing is disabled.
+    if was_new && mesh_enabled() {
+        broadcast_peer_table();
+    }
+}
+
+/// Send every connected peer the current peer table (each *other* peer's name +
+/// dial address), so newcomers and incumbents converge to a full mesh. Idempotent:
+/// a recipient ignores any entry it's already connected to, so re-broadcasting on
+/// each join can't loop. Entries with no advertised address are skipped — a peer
+/// that isn't listening can't be dialed onward.
+fn broadcast_peer_table() {
+    let nodes = crate::core::sync::read(&NODES);
+    for (&recipient, conn) in nodes.iter() {
+        let peers: Vec<(Symbol, String)> = nodes
+            .iter()
+            .filter(|(&name, c)| name != recipient && !c.addr.is_empty())
+            .map(|(&name, c)| (name, c.addr.clone()))
+            .collect();
+        if peers.is_empty() {
+            continue;
+        }
+        if let Ok(bytes) = frame_bytes(&Frame::Peers { peers }) {
+            let _ = conn.tx.send(Arc::from(bytes));
+        }
+    }
+}
+
+/// Handle an inbound gossip list: dial any named peer we're neither connected to
+/// nor already dialing. Each dial runs on its own short-lived thread (the dial +
+/// handshake blocks, and must not stall the reader). The `PENDING_DIALS` claim
+/// makes concurrent gossip frames naming the same peer dial it once; the dialed
+/// link's own `establish` re-gossips, so the mesh closes transitively.
+fn mesh_consider(peers: Vec<(Symbol, String)>) {
+    if !mesh_enabled() {
+        return;
+    }
+    let me = local_node();
+    // Snapshot who we're already linked to (a different lock than PENDING_DIALS;
+    // take it first and drop it before claiming, so the two are never held nested).
+    let connected: HashSet<Symbol> = {
+        let nodes = crate::core::sync::read(&NODES);
+        nodes.keys().copied().collect()
+    };
+    let mut to_dial: Vec<(Symbol, String)> = Vec::new();
+    {
+        let mut pending = crate::core::sync::write(&PENDING_DIALS);
+        for (name, addr) in peers {
+            if name == me || addr.is_empty() || connected.contains(&name) || pending.contains(&name)
+            {
+                continue;
+            }
+            pending.insert(name);
+            to_dial.push((name, addr));
+        }
+    }
+    for (name, addr) in to_dial {
+        std::thread::spawn(move || {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // Best-effort: a peer may be unreachable or a simultaneous dial
+                // from the other side may win the tie-break — either way we just
+                // stop. `node_connect` re-checks `NODES` and handles the self/dup
+                // guards; `establish` does the tie-break.
+                let _ = node_connect(name, &addr);
+            }));
+            crate::core::sync::write(&PENDING_DIALS).remove(&name);
+        });
+    }
 }
 
 /// Remove a link from `NODES` **iff** it's still this generation (so an evicted or

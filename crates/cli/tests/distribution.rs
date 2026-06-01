@@ -1076,6 +1076,138 @@ fn duplicate_connect_is_deduplicated() {
     );
 }
 
+/// **Cluster mesh (ADR-088): connecting to a shared hub transitively connects
+/// the spokes.** Three nodes A, B, C; A and C each `connect` only to the hub B.
+/// Neither A nor C ever dials the other — yet A must end up linked to C (and
+/// vice versa), because B gossips its peer table and they auto-dial. This is the
+/// reported bug ("A B and C running; A↔B and C↔B, but A could not see C").
+#[test]
+fn cluster_mesh_connects_peers_transitively() {
+    let _g = port_lock();
+    let dir = std::env::temp_dir().join(format!("brood-dist-mesh-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let port_a = free_port();
+    let port_b = free_port();
+    let port_c = free_port();
+
+    // The hub B: just an idle node. The mesh logic lives in the kernel, so B
+    // needs no application code to relay peers.
+    let hub = format!(
+        r#"
+(node-start :b "127.0.0.1:{port_b}" "secret")
+(defn idle () (do (sleep 1000) (idle)))
+(idle)
+"#
+    );
+
+    // C: connect only to the hub, then idle (and stay reachable for A's mesh dial).
+    let spoke_c = format!(
+        r#"
+(node-start :c "127.0.0.1:{port_c}" "secret")
+(connect "b@127.0.0.1:{port_b}")
+(defn idle () (do (sleep 1000) (idle)))
+(idle)
+"#
+    );
+
+    // A: connect only to the hub, then wait to *see* C appear in (nodes) — proof
+    // the mesh dialed C without A ever naming it. Poll up to ~15s.
+    let spoke_a = format!(
+        r#"
+(node-start :a "127.0.0.1:{port_a}" "secret")
+(connect "b@127.0.0.1:{port_b}")
+(defn wait-sees (n)
+  (cond
+    (member? :c@127.0.0.1 (nodes)) (println (str "A-SEES-C nodes=" (nodes)))
+    (<= n 0)                       (println (str "A-MISSED-C nodes=" (nodes)))
+    else                           (do (sleep 100) (wait-sees (- n 1)))))
+(wait-sees 150)
+"#
+    );
+
+    let mut b = spawn_brood(&dir, "hub.blsp", &hub);
+    wait_until_listening(port_b);
+    let mut c = spawn_brood(&dir, "spoke_c.blsp", &spoke_c);
+    wait_until_listening(port_c); // A's mesh dial needs C's listener up
+    let a = spawn_brood(&dir, "spoke_a.blsp", &spoke_a);
+
+    let out = a.wait_with_output().expect("spoke A finished");
+    let _ = b.kill();
+    let _ = b.wait();
+    let _ = c.kill();
+    let _ = c.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains("A-SEES-C"),
+        "A connected only to hub B but never saw spoke C — mesh gossip failed.\n--- stdout ---\n{stdout}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The mesh is opt-out: `BROOD_NO_MESH=1` keeps links strictly point-to-point, so
+/// A (connected only to hub B) must *not* discover spoke C. Guards against the
+/// kill switch silently doing nothing.
+#[test]
+fn no_mesh_env_keeps_links_point_to_point() {
+    let _g = port_lock();
+    let dir = std::env::temp_dir().join(format!("brood-dist-nomesh-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let port_a = free_port();
+    let port_b = free_port();
+    let port_c = free_port();
+
+    let hub = format!(
+        r#"
+(node-start :b "127.0.0.1:{port_b}" "secret")
+(defn idle () (do (sleep 1000) (idle)))
+(idle)
+"#
+    );
+    let spoke_c = format!(
+        r#"
+(node-start :c "127.0.0.1:{port_c}" "secret")
+(connect "b@127.0.0.1:{port_b}")
+(defn idle () (do (sleep 1000) (idle)))
+(idle)
+"#
+    );
+    // A waits a beat to give any (disabled) gossip time to *not* happen, then
+    // reports its node list. C must be absent.
+    let spoke_a = format!(
+        r#"
+(node-start :a "127.0.0.1:{port_a}" "secret")
+(connect "b@127.0.0.1:{port_b}")
+(sleep 2000)
+(println (str "A-NODES=" (nodes)))
+"#
+    );
+
+    let env = &[("BROOD_NO_MESH", "1")];
+    let mut b = spawn_brood_env(&dir, "hub.blsp", &hub, env);
+    wait_until_listening(port_b);
+    let mut c = spawn_brood_env(&dir, "spoke_c.blsp", &spoke_c, env);
+    wait_until_listening(port_c);
+    let a = spawn_brood_env(&dir, "spoke_a.blsp", &spoke_a, env);
+
+    let out = a.wait_with_output().expect("spoke A finished");
+    let _ = b.kill();
+    let _ = b.wait();
+    let _ = c.kill();
+    let _ = c.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success()
+            && stdout.contains("A-NODES=")
+            && !stdout.contains(":c@127.0.0.1"),
+        "with BROOD_NO_MESH=1, A must NOT discover C transitively.\n--- stdout ---\n{stdout}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// `connect` to our own node name is refused up-front (no self-dial loop).
 #[test]
 fn connect_to_self_refused() {

@@ -5282,3 +5282,69 @@ on its own, keep the surface in Brood.
 ADR-040 (CHAMP map — the per-node `size` this reads), ADR-076 (the VM that
 inlines the `%quot` family), `docs/transients.md` (the other CHAMP-aware kernel
 hook, `%map-into`).
+
+## ADR-088 — Nodes form a transitive cluster mesh (connect to one, join all)
+
+**Context.** Distribution (ADR-033/034/068/073) gave us authenticated
+point-to-point links: `(connect addr)` dials exactly one peer. The roadmap
+explicitly left the **cluster-join topology** open — when A connects to B, does
+it join B's whole cluster (mesh) or only B (point-to-point)? A user hit the
+gap directly: with A, B, C running and A↔B + C↔B established, **A could not see
+C**. There was no peer discovery at all — the wire carried only node *names*, no
+reachable address, so B could not have told A *how to dial* C even in principle.
+
+**Decision.** Adopt Erlang's default: **a full mesh with transitive discovery.**
+Connecting to any one cluster member auto-connects you to every node it knows.
+Three coordinated pieces:
+
+1. **Advertise a reachable address.** The handshake `Hello` (wire v3, magic
+   `BRD\x03`) now carries the sender's dial address (`unix:PATH` / `tcp:HOST:PORT`
+   — the first TCP listener if any, else the Unix socket). It's **folded into the
+   auth HMAC**, so an on-path attacker can't rewrite where peers will later dial
+   without the cookie. Each link stores its peer's address (`Conn.addr`).
+2. **Gossip the peer table.** When a *genuinely new* peer joins, the node
+   broadcasts a `Frame::Peers` list of `(name, addr)` for its other peers to
+   everyone connected — newcomer learns incumbents, incumbents learn newcomer.
+3. **Dial the unknowns.** On receiving gossip, a node dials any peer not already
+   connected (short-lived thread per dial; a `PENDING_DIALS` set dedupes
+   concurrent gossip for the same name). Each new link re-gossips, closing the
+   mesh transitively, then goes quiet (a reconnect/duplicate doesn't re-broadcast,
+   so there's no steady-state chatter). Simultaneous cross-dials collapse via the
+   existing connector tie-break (ADR-034 §1).
+
+Mesh is **on by default**; `BROOD_NO_MESH=1` reverts to point-to-point.
+
+**Why mesh over point-to-point.** It's what a user means by "act as a cluster,"
+and it matches Erlang, so the global-namespace intuition (`(nodes)` shows
+everyone, any registered name is reachable cluster-wide) holds. The roadmap noted
+mesh's costs — O(n²) connections and a larger trust surface — but: cluster sizes
+here are small (dev/editor-daemon scale), and the trust surface is already bounded
+by the **cookie** (you only ever link to nodes that share it; an authenticated
+peer can already ship closures = RCE per ADR-081), so auto-meshing within a
+cookie-sharing cluster crosses no new boundary. The opt-out covers the deliberate
+point-to-point case.
+
+**Why these mechanisms.** Gossip-on-join (not periodic) means zero idle traffic
+and obvious convergence (the last establish to complete sees the full table and
+sends the cross-gossip; dials only fire for genuinely-unknown peers, so it can't
+loop). Authenticating the advertised address closes the one new injection vector
+the feature introduces. Reusing the connector tie-break means the simultaneous
+dials a mesh inevitably creates need no new race handling.
+
+**Consequences.**
+- `(connect "b")` now joins you to B's whole cluster; `(nodes)` reflects the
+  full mesh. The reported A/B/C bug is fixed; covered by
+  `cluster_mesh_connects_peers_transitively` (+ the `BROOD_NO_MESH` opt-out test)
+  in `crates/cli/tests/distribution.rs`.
+- Wire format bumped to v3 (greenfield — no back-compat; a v2 peer is rejected at
+  the magic prefix).
+- **Deferred (ADR-011):** auto-reconnect / re-heal after a transient link drop
+  (use `ensure-link`); FQDN/host-routability resolution beyond what `name@host`
+  already assumes; a global cap on concurrent mesh dials (bounded today by
+  `MAX_GOSSIP_PEERS` per frame). Mesh over an *untrusted* TCP network still waits
+  on channel TLS (ADR-081), exactly as point-to-point does.
+
+**References.** ADR-033/034 (closure shipping, handshake v2 + connector
+tie-break), ADR-068 (Unix transport + cookie), ADR-073 (`name@host` identity),
+ADR-081 (channel TLS — still required before untrusted-network exposure),
+`docs/distribution.md` §Cluster mesh.
