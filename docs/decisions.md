@@ -5579,12 +5579,22 @@ the modules they need **stay bundled**. Only modules with **zero bundled
 dependents** externalize cleanly — and those are exactly what shipped:
 
 - **`brood-net`** (`net/tcp`, `net/http`, `net/sse`) — removed from
-  `CORE_MODULES`, now a `:path` package; consumers `brood-edit` + `brood-benchmark`
-  depend on it. Built on the kernel `tcp-*` primitives + bundled `file`.
+  `CORE_MODULES`, now an internal package. Built on the kernel `tcp-*` primitives
+  + bundled `file`.
 - **`brood-supervisor`** (`proc/supervisor`) — likewise; `proc/hatch` stays bundled
   (core `log` needs it). The cross-node `supervisor_restarts_a_remote_child`
   distribution test, which shipped `(require 'proc/supervisor)` into a *bare*
   runtime, was reworked to inline the equivalent userland `monitor`-respawn.
+
+**Internal packages skip the package manager.** An in-workspace package is not
+fetched, hashed, or locked (ADR-037 is for *external/distributed* deps). It's
+just a sibling `src/` directory put on `*load-path*`: a consumer adds it via
+`:source-paths` (e.g. `brood-edit`'s `:source-paths ["src" "../brood-net/src"
+"../brood-supervisor/src"]`), which `project-setup` appends to the load-path for
+`run`/`test`/`check` alike, so `(require 'net/http)` resolves under it. No
+`:dependencies`, no `project.lock.blsp`, no `_deps/`. (Externalizing *into the
+package manager* — git deps, lock, distribution — only matters once a package
+is shared across workspaces.)
 
 Each package took its modules **and its tests** (`tests/*_test.blsp`) and, for
 net, the `webserver` example. The takeaway (an ADR-085 refinement): the
