@@ -281,11 +281,20 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   mcp observer proctree repl sexp`) is **grouped under `std/tool/` on disk but
   keeps bare module names** — the *internal* toolchain stays at root
   (namespaces.md §10), grouped without namespacing its identity (the embedded
-  table keys it bare, pointing at the grouped file). ⬜ **(2)** ship the
-  namespaced frameworks/libraries — including the future **GUI framework** — as
-  **external packages** via the package manager (ADR-037), not baked into the
-  binary (toolchain stays bundled, it's what `nest` is built from) — *not yet
-  built, gated on the GUI consumer*;
+  table keys it bare, pointing at the grouped file). 🟡 **(2)** ship the
+  namespaced frameworks as **external packages** (ADR-037) — **the clean slice is
+  done** (2026-06-01): `brood-net` (`net/tcp`/`http`/`sse`) and `brood-supervisor`
+  (`proc/supervisor`) are removed from the binary and consumed as `:path` packages
+  (`brood-edit`/`brood-benchmark` depend on them). The walk found *most of the
+  framework can't leave* — the bundled toolchain is built on it (`tool/observer` →
+  editor display/face/highlight/keymap/lineedit/ui; `tool/repl` → editor/lineedit;
+  `tool/sexp` → editor/buffer; core `log` → proc/hatch), and those must run in a
+  fresh runtime with no deps fetched. So **only zero-bundled-dependent modules
+  externalized**; `editor/*` + `proc/hatch` stay bundled (they're shared UI the
+  toolchain consumes, not a detachable app framework — the editor *app* already
+  lives outside the binary as `brood-edit`). ⬜ Remaining: the future **GUI
+  framework** as a package, and repackaging the REPL/observer if `editor/*` is ever
+  to leave — gated on a real consumer (ADR-011);
   ✅ **(3)** the enabling language change — **hierarchical module names** — is
   **done** (2026-06-01): `(require 'gui/window)` → namespace `gui/window` ←
   `gui/window.blsp`, amending ADR-019/065, defs qualifying on the **last** `/`

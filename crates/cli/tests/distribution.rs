@@ -1285,10 +1285,11 @@ fn remote_exit_kills_a_worker() {
 
 /// End-to-end **cross-node supervision** (ADR-067, the #1 payoff): a supervisor on
 /// node B supervises a worker on node A, and restarts it when it crashes — all
-/// over the distributed link. The child `:start` does a roundtrip to A's
-/// `:factory` to obtain the remote worker's pid (since `remote-spawn` is
-/// fire-and-forget); the supervisor links that remote pid, so the remote crash
-/// arrives as a link `[:EXIT]` and triggers a restart that spins up a fresh worker.
+/// over the distributed link. The supervisor (inlined here — proc/supervisor is
+/// now the external `brood-supervisor` package, ADR-085 Move 2) does a roundtrip
+/// to A's `:factory` to obtain the remote worker's pid (since `remote-spawn` is
+/// fire-and-forget), `monitor`s that remote pid, so the remote crash arrives as a
+/// `[:down …]` and triggers a restart that spins up a fresh worker.
 #[test]
 fn supervisor_restarts_a_remote_child() {
     let _g = port_lock();
@@ -1319,12 +1320,18 @@ fn supervisor_restarts_a_remote_child() {
         r#"
 (node-start :b "127.0.0.1:{port_b}" "secret")
 (connect "a@127.0.0.1:{port_a}")
-(require 'proc/supervisor)
 (def me (self))
-(def spec {{:id :w :restart :permanent
-            :start (fn () (do (send {{:name :factory :node :a@127.0.0.1}} [:make (self) me])
-                              (receive ([:made p] p) (after 30000 (throw "no :made")))))}})
-(def sup (proc/supervisor/start-supervisor (list spec)))
+;; proc/supervisor now lives in the `brood-supervisor` package (ADR-085 Move 2);
+;; this test ships into a bare runtime with no deps fetched, so it inlines the
+;; equivalent userland one-for-one respawn over `monitor` — the remote worker
+;; crashes, its monitor fires `[:down …]`, and we start a fresh incarnation.
+(defn start-child ()
+  (do (send {{:name :factory :node :a@127.0.0.1}} [:make (self) me])
+      (receive ([:made p] p) (after 30000 (throw "no :made")))))
+(defn supervise (child)
+  (do (monitor child)
+      (receive ([:down _ _ _] (supervise (start-child))))))
+(spawn (supervise (start-child)))
 (def w1 (receive ([:up p] p) (after 6000 (throw "no first :up"))))
 (send w1 :die)                              ; crash the remote worker
 (def w2 (receive ([:up p] p) (after 6000 (throw "no restart :up"))))
