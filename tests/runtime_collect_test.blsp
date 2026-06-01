@@ -37,8 +37,13 @@
   (test "(runtime-collect) is a safe no-op while the runtime is shared (:ran false)"
     ;; a parked process guarantees >1 holder of the runtime Arc, so the collector's
     ;; `Arc::get_mut` soundness gate declines — it must report that, not move shared
-    ;; code out from under a concurrent reader.
-    (let (parked (spawn (receive (_ :never))))
+    ;; code out from under a concurrent reader. Wait for the child's `[:ready]` before
+    ;; collecting: a process clones the runtime `Arc` when its heap is created (its
+    ;; first scheduling), so `[:ready]` from its body proves the `Arc` is now shared —
+    ;; making the test prove its own premise, not lean on the suite's other processes.
+    (let (me (self)
+          parked (spawn (do (send me [:ready]) (receive (_ :never)))))
+      (assert= (receive ([:ready] :ready) (after 2000 :no-ready)) :ready)
       (rc-churn 'rc-f-gate 0 200)
       (let (r (runtime-collect))
         (is (= (get r :ran) false))
