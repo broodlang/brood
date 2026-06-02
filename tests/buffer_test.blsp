@@ -310,7 +310,23 @@
         (assert= (buffer-text (buffer-from-file path))
           "first line\nsecond line\nthird line\n"))))
   (test "save-buffer with no file raises"
-    (assert-error (save-buffer (make-buffer "x")))))
+    (assert-error (save-buffer (make-buffer "x"))))
+  ;; find-file-buffer: vim/emacs `find-file` — read an existing file, else a fresh
+  ;; empty buffer backed by the path (so the first save creates the file).
+  (test "find-file-buffer reads an existing file"
+    (let (path (str (temp-dir "brood-buf-") ".txt"))
+      (spit path "hi\n")
+      (let (b (find-file-buffer path))
+        (assert= (buffer-text b) "hi\n")
+        (assert= (buffer-file b) path))))
+  (test "find-file-buffer on a missing path is an empty buffer backed by it"
+    (let (path (str (temp-dir "brood-buf-") "-new.txt")  ; temp-dir creates the file…
+          gone (str path ".absent"))                      ; …so use a path that doesn't exist
+      (let (b (find-file-buffer gone))
+        (assert= (buffer-text b) "")          ; empty — not an error
+        (assert= (buffer-file b) gone)        ; backed by the path, so save creates it
+        (save-buffer (insert b "made"))
+        (assert= (buffer-text (find-file-buffer gone)) "made")))))
 
 ;; The actor shell: a buffer process owns its buffer (and process-local rope) and
 ;; replies only with derived views. Edits/reads cross as closures (ADR-033).
