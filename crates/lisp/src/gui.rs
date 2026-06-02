@@ -229,6 +229,14 @@ mod backend {
     use winit::platform::wayland::EventLoopBuilderExtWayland;
     use winit::window::{CursorIcon, Window, WindowId};
 
+    use cosmic_text::{
+        fontdb, Attrs, Buffer as CtBuffer, Family, FontSystem, Metrics, Shaping, Style, SwashCache,
+        SwashContent, Weight,
+    };
+    use unicode_segmentation::UnicodeSegmentation;
+
+    use crate::text_width::cluster_cells;
+
     /// The winit cursor for a frontend-neutral `CursorShape`.
     fn cursor_icon(shape: super::CursorShape) -> CursorIcon {
         match shape {
@@ -255,6 +263,13 @@ mod backend {
     const FONT_BOLD: &[u8] = include_bytes!("../assets/DejaVuSansMono-Bold.ttf");
     const FONT_ITALIC: &[u8] = include_bytes!("../assets/DejaVuSansMono-Oblique.ttf");
     const FONT_BOLD_ITALIC: &[u8] = include_bytes!("../assets/DejaVuSansMono-BoldOblique.ttf");
+    // Bundled color emoji font (CBDT), loaded only as a *fallback*: a cluster the mono
+    // font can't cover (an emoji, a flag, a CJK char, …) is shaped + rasterised from
+    // here by cosmic-text/swash, in color. Not a selectable `:family`. ~11 MB.
+    const FONT_EMOJI: &[u8] = include_bytes!("../assets/NotoColorEmoji.ttf");
+    // The family name fontdb assigns the bundled mono faces — what we pass as the
+    // primary `Attrs` family; cosmic-text's fallback list then reaches the emoji font.
+    const MONO_FAMILY: &str = "DejaVu Sans Mono";
     // The default font family keyword (`:mono`), and the default cell pixel size.
     const DEFAULT_FAMILY: &str = "mono";
     const DEFAULT_PX: f32 = 15.0;
@@ -782,14 +797,14 @@ mod backend {
                     italic,
                     bold_italic,
                 } => {
-                    if let Ok(set) = FontSet::from_bytes(&regular, &bold, &italic, &bold_italic) {
-                        self.families.borrow_mut().insert(name, Rc::new(set));
-                        // a re-registration replaces a family; clear caches keyed by
-                        // the old glyphs and repaint.
-                        for w in self.wins.values_mut() {
-                            w.renderer.cache.clear();
-                            w.window.request_redraw();
-                        }
+                    self.families
+                        .borrow_mut()
+                        .register(name, regular, bold, italic, bold_italic);
+                    // a re-registration replaces a family; clear caches keyed by the
+                    // old glyphs and repaint.
+                    for w in self.wins.values_mut() {
+                        w.renderer.cache.clear();
+                        w.window.request_redraw();
                     }
                 }
             }
@@ -1075,6 +1090,54 @@ mod backend {
         }
     }
 
+    /// The US-layout shifted form of a base character — `.` → `>`, `1` → `!`, etc.
+    /// Used to re-apply Shift to a modifier chord whose base came from
+    /// `key_without_modifiers()` (which drops Shift along with Ctrl/Alt). Letters and
+    /// anything without a shifted punctuation form pass through unchanged (a letter's
+    /// shift is just upper-case, and the chord is lower-cased anyway). Matches the glyphs
+    /// the crossterm frontend reports for the same physical chord.
+    fn shift_char(c: char) -> char {
+        match c {
+            '`' => '~',
+            '1' => '!',
+            '2' => '@',
+            '3' => '#',
+            '4' => '$',
+            '5' => '%',
+            '6' => '^',
+            '7' => '&',
+            '8' => '*',
+            '9' => '(',
+            '0' => ')',
+            '-' => '_',
+            '=' => '+',
+            '[' => '{',
+            ']' => '}',
+            '\\' => '|',
+            ';' => ':',
+            '\'' => '"',
+            ',' => '<',
+            '.' => '>',
+            '/' => '?',
+            other => other,
+        }
+    }
+
+    #[cfg(test)]
+    mod shift_char_tests {
+        use super::shift_char;
+        #[test]
+        fn maps_us_shifted_punctuation() {
+            assert_eq!(shift_char('.'), '>'); // Emacs M-> (end-of-buffer)
+            assert_eq!(shift_char(','), '<'); // M-< (beginning-of-buffer)
+            assert_eq!(shift_char('['), '{');
+            assert_eq!(shift_char(']'), '}'); // M-{ / M-} paragraph motion
+            assert_eq!(shift_char('5'), '%'); // M-% (query-replace)
+            assert_eq!(shift_char('6'), '^'); // M-^ (join-line)
+            assert_eq!(shift_char('f'), 'f'); // letters pass through (lower-cased later)
+        }
+    }
+
     fn translate_key(ke: &KeyEvent, mods: ModifiersState) -> Option<Key> {
         use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
         match &ke.logical_key {
@@ -1110,7 +1173,7 @@ mod backend {
                 // letters to accents) doesn't mangle the chord — the keymap binds the
                 // BASE character (`-`, `f`). Plain typing keeps the composed/logical
                 // char, so AltGr and dead keys still insert their glyph.
-                let c = if mods.control_key() || mods.alt_key() {
+                let base = if mods.control_key() || mods.alt_key() {
                     match ke.key_without_modifiers() {
                         WKey::Character(b) => b.chars().next(),
                         _ => s.chars().next(),
@@ -1118,6 +1181,18 @@ mod backend {
                 } else {
                     s.chars().next()
                 }?;
+                // `key_without_modifiers()` also strips SHIFT, so a shifted-punctuation
+                // chord (Emacs `M->` = Alt+Shift+`.`) would lose its shift and arrive as
+                // `alt-.` — never matching the `alt->` binding. Re-apply Shift via the
+                // US-layout map so the chord reaches the shifted glyph it names (`>`, `<`,
+                // `{`, `}`, `%`, `^`, …), matching what the crossterm frontend already
+                // delivers (`builtins::key_to_value`). Letters are untouched here (they're
+                // lowercased below); plain typing never reaches this (it keeps `s`).
+                let c = if (mods.control_key() || mods.alt_key()) && mods.shift_key() {
+                    shift_char(base)
+                } else {
+                    base
+                };
                 if mods.control_key() && mods.alt_key() {
                     Some(Key::CtrlAlt(c.to_ascii_lowercase()))
                 } else if mods.control_key() {
@@ -1134,59 +1209,99 @@ mod backend {
 
     // ---- rasterising the cell grid ------------------------------------------
 
-    struct Glyph {
-        metrics: fontdue::Metrics,
-        bitmap: Vec<u8>,
+    /// A rasterised grapheme cluster, baked into a small RGBA canvas sized to its
+    /// cell span (`width`×`height` px, the cluster's `display-width` cells wide). For
+    /// a `color` cluster (emoji) the RGBA is the glyph's own colors; for a monochrome
+    /// cluster the RGB is white and only the alpha carries coverage, so the caller
+    /// recolors it with the face `fg` at blit time (syntax colors vary per op).
+    struct CachedGlyph {
+        color: bool,
+        width: usize,
+        height: usize,
+        rgba: Vec<u8>, // width*height*4, straight (non-premultiplied) alpha
     }
 
-    /// One font family's four styles. A face's `:bold`/`:italic` pick the style;
-    /// `:family` picks the set.
-    struct FontSet {
-        regular: fontdue::Font,
-        bold: fontdue::Font,
-        italic: fontdue::Font,
-        bold_italic: fontdue::Font,
+    /// The shared text engine on the single GUI thread: cosmic-text's `FontSystem`
+    /// (font database + shaping + fallback) and `SwashCache` (glyph rasterisation,
+    /// color and mono), plus the family-keyword → family-name map a `:family` resolves
+    /// through. Shared by every window's renderer (so `gui-font-register` reaches them
+    /// all), like the old family registry.
+    struct FontShared {
+        fs: FontSystem,
+        swash: SwashCache,
+        /// interned family keyword id → fontdb family name (`:mono` → "DejaVu Sans Mono").
+        names: HashMap<u32, String>,
     }
 
-    impl FontSet {
-        /// Parse four TTF byte slices into a family (errors propagate to the caller).
-        fn from_bytes(
-            regular: &[u8],
-            bold: &[u8],
-            italic: &[u8],
-            bold_italic: &[u8],
-        ) -> Result<FontSet, String> {
-            let opts = fontdue::FontSettings::default();
-            let f = |b| fontdue::Font::from_bytes(b, opts).map_err(|e| e.to_string());
-            Ok(FontSet {
-                regular: f(regular)?,
-                bold: f(bold)?,
-                italic: f(italic)?,
-                bold_italic: f(bold_italic)?,
-            })
+    impl FontShared {
+        fn new() -> Self {
+            let src = |b: &'static [u8]| fontdb::Source::Binary(Rc2::new(b));
+            // Load the bundled mono faces + the emoji fallback; no system fonts, so the
+            // editor renders identically everywhere (self-contained, ADR-046).
+            let fs = FontSystem::new_with_fonts([
+                src(FONT_REGULAR),
+                src(FONT_BOLD),
+                src(FONT_ITALIC),
+                src(FONT_BOLD_ITALIC),
+                src(FONT_EMOJI),
+            ]);
+            let mut names = HashMap::new();
+            names.insert(value::intern(DEFAULT_FAMILY), MONO_FAMILY.to_string());
+            FontShared {
+                fs,
+                swash: SwashCache::new(),
+                names,
+            }
         }
-        fn pick(&self, bold: bool, italic: bool) -> &fontdue::Font {
-            match (bold, italic) {
-                (false, false) => &self.regular,
-                (true, false) => &self.bold,
-                (false, true) => &self.italic,
-                (true, true) => &self.bold_italic,
+
+        /// The fontdb family name for keyword id `id` (the bundled mono if unknown).
+        fn name_of(&self, id: u32) -> String {
+            self.names
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| MONO_FAMILY.to_string())
+        }
+
+        /// Register a family from raw TTF bytes per style (behind `gui-font-register`):
+        /// load all four faces into the db, and map `id` to the regular face's family
+        /// name so an `Attrs` built for it picks the right faces (weight/style matched).
+        fn register(
+            &mut self,
+            id: u32,
+            regular: Vec<u8>,
+            bold: Vec<u8>,
+            italic: Vec<u8>,
+            bold_italic: Vec<u8>,
+        ) {
+            let ids = self
+                .fs
+                .db_mut()
+                .load_font_source(fontdb::Source::Binary(Rc2::new(regular)));
+            let fam = ids
+                .first()
+                .and_then(|fid| self.fs.db().face(*fid))
+                .and_then(|f| f.families.first().map(|(n, _)| n.clone()));
+            for b in [bold, italic, bold_italic] {
+                self.fs.db_mut().load_font_data(b);
+            }
+            if let Some(fam) = fam {
+                self.names.insert(id, fam);
             }
         }
     }
 
-    /// The font-family registry, shared by every window's renderer on the single
-    /// GUI thread (so `gui-font-register` is visible everywhere at once). Keyed by
-    /// the interned family keyword id; `:mono` (bundled) is always present.
-    type Families = Rc<RefCell<HashMap<u32, Rc<FontSet>>>>;
+    // fontdb's `Source::Binary` wants an `Arc<dyn AsRef<[u8]> + Send + Sync>`; alias it
+    // so the bundled `&'static [u8]` and the registered `Vec<u8>` both drop straight in.
+    use std::sync::Arc as Rc2;
 
-    /// Build the families registry seeded with the bundled `:mono` family.
+    /// The shared text engine, behind the single GUI thread's `Rc<RefCell<…>>` (it
+    /// never leaves that thread). Keeps the `families` field name the windowing code
+    /// already threads around.
+    type Families = Rc<RefCell<FontShared>>;
+
+    /// Build the shared text engine seeded with the bundled `:mono` family + emoji.
     fn default_families() -> Families {
-        let mono = FontSet::from_bytes(FONT_REGULAR, FONT_BOLD, FONT_ITALIC, FONT_BOLD_ITALIC)
-            .expect("bundled mono font");
-        let mut m = HashMap::new();
-        m.insert(value::intern(DEFAULT_FAMILY), Rc::new(mono));
-        Rc::new(RefCell::new(m))
+        Rc::new(RefCell::new(FontShared::new()))
     }
 
     struct Renderer {
@@ -1197,10 +1312,10 @@ mod backend {
         px: f32,
         cell_w: usize,
         cell_h: usize,
-        ascent: i32,
-        // keyed by (char, family id, bold, italic, scale): the same glyph at a
-        // different family/style/scale rasterises differently.
-        cache: HashMap<(char, u32, bool, bool, u16), Glyph>,
+        baseline: i32, // pixels from a cell's top to the text baseline
+        // keyed by (cluster, family id, bold, italic, scale): the same cluster at a
+        // different family/style/scale rasterises to a different baked canvas.
+        cache: HashMap<(String, u32, bool, bool, u16), CachedGlyph>,
     }
 
     impl Renderer {
@@ -1213,44 +1328,40 @@ mod backend {
                 px: base_px,
                 cell_w: 1,
                 cell_h: 1,
-                ascent: 0,
+                baseline: 0,
                 cache: HashMap::new(),
             };
             r.recompute();
             r
         }
 
-        /// The family for `id` (or the default if unknown / `None`), as a cheap
-        /// `Rc` clone so it can be held across a `&mut self` cache borrow.
-        fn family_of(&self, id: u32) -> Rc<FontSet> {
-            let fams = self.families.borrow();
-            fams.get(&id)
-                .or_else(|| fams.get(&self.default_family))
-                .cloned()
-                .expect("default family present")
-        }
-
-        /// Recompute the px size + cell metrics from the default family at the
-        /// current size × HiDPI scale, dropping the glyph cache (rasterised at the
-        /// old px). The grid stays uniform — sized to the default family — so a
-        /// per-face `:family`/`:italic` only changes glyphs within the fixed cell.
+        /// Recompute the px size + cell metrics by shaping a reference glyph ('M') in
+        /// the default family at the current size × HiDPI scale, dropping the cluster
+        /// cache (baked at the old px). The grid stays uniform — a per-face
+        /// `:family`/`:italic` only changes glyphs within the fixed cell.
         fn recompute(&mut self) {
-            self.px = self.base_px * self.scale as f32;
+            self.px = (self.base_px * self.scale as f32).max(1.0);
             self.cache.clear();
-            let set = self.family_of(self.default_family);
-            let lm = set
-                .regular
-                .horizontal_line_metrics(self.px)
-                .expect("line metrics");
-            self.ascent = lm.ascent.round() as i32;
-            self.cell_h = lm.new_line_size.round().max(1.0) as usize;
-            // Monospace: every glyph advances the same; 'M' is a safe probe.
-            self.cell_w = set
-                .regular
-                .metrics('M', self.px)
-                .advance_width
-                .round()
-                .max(1.0) as usize;
+            let line_h = (self.px * 1.3).round().max(1.0);
+            self.cell_h = line_h as usize;
+            let fam = self.families.borrow().name_of(self.default_family);
+            let mut shared = self.families.borrow_mut();
+            let shared = &mut *shared;
+            let metrics = Metrics::new(self.px, line_h);
+            let mut tb = CtBuffer::new(&mut shared.fs, metrics);
+            tb.set_size(&mut shared.fs, Some(line_h * 4.0), Some(line_h * 2.0));
+            let attrs = Attrs::new().family(Family::Name(fam.as_str()));
+            tb.set_text(&mut shared.fs, "M", &attrs, Shaping::Advanced);
+            tb.shape_until_scroll(&mut shared.fs, false);
+            let (mut cw, mut base) = (self.px, self.px);
+            if let Some(run) = tb.layout_runs().next() {
+                base = run.line_y;
+                if let Some(gl) = run.glyphs.first() {
+                    cw = gl.w;
+                }
+            }
+            self.cell_w = cw.round().max(1.0) as usize;
+            self.baseline = base.round() as i32;
         }
 
         /// Adjust for a new HiDPI scale factor (then recompute metrics).
@@ -1271,64 +1382,150 @@ mod backend {
             self.recompute();
         }
 
-        /// Blit one glyph's coverage into the framebuffer, alpha-compositing `fg`
-        /// over whatever is already there (the cell background), in the given
-        /// `family`/style. `scale` (≥1) rasterises the glyph at `scale`× the cell
-        /// px, anchoring it into the `scale`×`scale` block whose top-left is
-        /// `(left, top)` — so a `:scale 3` op draws a glyph filling a 3×3 cell block.
+        /// Shape + rasterise grapheme cluster `g` (cosmic-text + swash) into a small
+        /// RGBA canvas sized to its cell span, cached by (cluster, family, style,
+        /// scale). A color cluster (emoji) keeps its own colors; a monochrome cluster
+        /// stores coverage in the alpha with white RGB, so the caller recolors it.
+        fn build_cluster(&self, g: &str, fid: u32, bold: bool, italic: bool, scale: u16) -> CachedGlyph {
+            let scale = scale.max(1) as usize;
+            let px = (self.px * scale as f32).max(1.0);
+            let cells = cluster_cells(g).max(1);
+            let cw = (self.cell_w * scale * cells).max(1);
+            let ch = (self.cell_h * scale).max(1);
+            let line_h = ch as f32;
+            let fam = self.families.borrow().name_of(fid);
+            let mut shared = self.families.borrow_mut();
+            let shared = &mut *shared;
+            let metrics = Metrics::new(px, line_h);
+            let mut tb = CtBuffer::new(&mut shared.fs, metrics);
+            // a generous layout box so a wide glyph isn't wrapped or clipped
+            tb.set_size(&mut shared.fs, Some(cw as f32 + px), Some(line_h + px));
+            let mut attrs = Attrs::new().family(Family::Name(fam.as_str()));
+            if bold {
+                attrs = attrs.weight(Weight::BOLD);
+            }
+            if italic {
+                attrs = attrs.style(Style::Italic);
+            }
+            tb.set_text(&mut shared.fs, g, &attrs, Shaping::Advanced);
+            tb.shape_until_scroll(&mut shared.fs, false);
+
+            let mut rgba = vec![0u8; cw * ch * 4];
+            let mut color = false;
+            for run in tb.layout_runs() {
+                let baseline = run.line_y.round() as i32;
+                for gl in run.glyphs.iter() {
+                    let phys = gl.physical((0.0, 0.0), 1.0);
+                    let img = match shared.swash.get_image(&mut shared.fs, phys.cache_key) {
+                        Some(img) => img,
+                        None => continue,
+                    };
+                    let ox = phys.x + img.placement.left;
+                    let oy = baseline + phys.y - img.placement.top;
+                    let (iw, ih) = (img.placement.width as i32, img.placement.height as i32);
+                    match img.content {
+                        SwashContent::Mask => {
+                            for ry in 0..ih {
+                                for rx in 0..iw {
+                                    let a = img.data[(ry * iw + rx) as usize];
+                                    canvas_over(&mut rgba, cw, ch, ox + rx, oy + ry, 255, 255, 255, a);
+                                }
+                            }
+                        }
+                        SwashContent::Color => {
+                            color = true;
+                            for ry in 0..ih {
+                                for rx in 0..iw {
+                                    let i = ((ry * iw + rx) * 4) as usize;
+                                    canvas_over(
+                                        &mut rgba, cw, ch, ox + rx, oy + ry,
+                                        img.data[i], img.data[i + 1], img.data[i + 2], img.data[i + 3],
+                                    );
+                                }
+                            }
+                        }
+                        SwashContent::SubpixelMask => {}
+                    }
+                }
+            }
+            CachedGlyph { color, width: cw, height: ch, rgba }
+        }
+
+        /// Blit grapheme cluster `g` into the framebuffer at cell-pixel `(left, top)`,
+        /// alpha-compositing over the cell background. A color cluster (emoji) draws in
+        /// its own colors; a monochrome one is recolored with the face `fg`. The cluster
+        /// occupies `display-width` cells (the caller advances the cursor to match).
         #[allow(clippy::too_many_arguments)]
-        fn draw_char(
+        fn draw_cluster(
             &mut self,
             buf: &mut [u32],
             fb_w: usize,
             fb_h: usize,
             left: usize,
             top: usize,
-            c: char,
+            g: &str,
             family: Option<u32>,
             bold: bool,
             italic: bool,
             scale: u16,
             fg: [u8; 3],
         ) {
-            if c == ' ' {
+            if g == " " {
                 return;
             }
-            let scale = scale.max(1);
-            let px = self.px * scale as f32;
-            let ascent = self.ascent * scale as i32;
             let fid = family.unwrap_or(self.default_family);
-            let set = self.family_of(fid);
-            let g = self
-                .cache
-                .entry((c, fid, bold, italic, scale))
-                .or_insert_with(|| {
-                    let (metrics, bitmap) = set.pick(bold, italic).rasterize(c, px);
-                    Glyph { metrics, bitmap }
-                });
-            let baseline = top as i32 + ascent;
-            let x0 = left as i32 + g.metrics.xmin;
-            let y0 = baseline - g.metrics.ymin - g.metrics.height as i32;
-            for gy in 0..g.metrics.height {
-                let py = y0 + gy as i32;
-                if py < 0 || py >= fb_h as i32 {
-                    continue;
+            let key = (g.to_string(), fid, bold, italic, scale.max(1));
+            if !self.cache.contains_key(&key) {
+                let baked = self.build_cluster(g, fid, bold, italic, scale);
+                self.cache.insert(key.clone(), baked);
+            }
+            let cg = &self.cache[&key];
+            for ry in 0..cg.height {
+                let py = top + ry;
+                if py >= fb_h {
+                    break;
                 }
-                let row = py as usize * fb_w;
-                for gx in 0..g.metrics.width {
-                    let px_x = x0 + gx as i32;
-                    if px_x < 0 || px_x >= fb_w as i32 {
+                let row = py * fb_w;
+                for rx in 0..cg.width {
+                    let pxx = left + rx;
+                    if pxx >= fb_w {
+                        break;
+                    }
+                    let i = (ry * cg.width + rx) * 4;
+                    let a = cg.rgba[i + 3];
+                    if a == 0 {
                         continue;
                     }
-                    let cov = g.bitmap[gy * g.metrics.width + gx];
-                    if cov == 0 {
-                        continue;
-                    }
-                    let idx = row + px_x as usize;
-                    buf[idx] = blend(buf[idx], fg, cov);
+                    let src = if cg.color {
+                        [cg.rgba[i], cg.rgba[i + 1], cg.rgba[i + 2]]
+                    } else {
+                        fg
+                    };
+                    buf[row + pxx] = blend(buf[row + pxx], src, a);
                 }
             }
         }
+    }
+
+    /// Source-over composite a straight-alpha pixel into the RGBA cluster canvas at
+    /// `(x, y)` (a no-op off-canvas / at zero alpha). Used to bake a shaped cluster's
+    /// glyphs into one canvas before it's cached.
+    #[allow(clippy::too_many_arguments)]
+    fn canvas_over(rgba: &mut [u8], cw: usize, ch: usize, x: i32, y: i32, sr: u8, sg: u8, sb: u8, sa: u8) {
+        if sa == 0 || x < 0 || y < 0 || x >= cw as i32 || y >= ch as i32 {
+            return;
+        }
+        let idx = (y as usize * cw + x as usize) * 4;
+        let (sa, da) = (sa as u32, rgba[idx + 3] as u32);
+        let out_a = sa + da * (255 - sa) / 255;
+        if out_a == 0 {
+            return;
+        }
+        let mix = |s: u8, d: u8| (((s as u32 * sa) + (d as u32 * da * (255 - sa) / 255)) / out_a) as u8;
+        rgba[idx] = mix(sr, rgba[idx]);
+        rgba[idx + 1] = mix(sg, rgba[idx + 1]);
+        rgba[idx + 2] = mix(sb, rgba[idx + 2]);
+        rgba[idx + 3] = out_a as u8;
     }
 
     fn pack(rgb: [u8; 3]) -> u32 {
@@ -1424,26 +1621,35 @@ mod backend {
                     }
                     // `:scale n` draws each glyph n× larger, occupying an n×n block
                     // of base cells anchored at this op's (row, col); positions stay
-                    // in base-cell units, so a scaled char advances `scale` columns.
+                    // in base-cell units, so a scaled cell advances `scale` columns.
+                    // We walk *grapheme clusters* (not codepoints), so a ZWJ emoji /
+                    // flag / accented char is one unit, advancing its `display-width`
+                    // cells — a wide glyph (emoji, CJK) takes two.
                     let scale = face.scale.max(1) as usize;
-                    let (cw_s, ch_s) = (cw * scale, ch * scale);
+                    let ch_s = ch * scale;
                     let top = *row as usize * ch;
                     let mut cx = *col as usize;
                     let bg_packed = pack(bg);
-                    for c in s.chars() {
+                    for g in s.graphemes(true) {
+                        let cells = cluster_cells(g);
+                        if cells == 0 {
+                            // zero-width (a lone combining mark): nothing to advance.
+                            continue;
+                        }
+                        let block_w = cells * cw * scale; // the cluster's pixel span
                         let left = cx * cw;
-                        fill_cell(&mut buf, fb_w, fb_h, left, top, cw_s, ch_s, bg_packed);
-                        r.draw_char(
-                            &mut buf, fb_w, fb_h, left, top, c, face.family, face.bold,
+                        fill_cell(&mut buf, fb_w, fb_h, left, top, block_w, ch_s, bg_packed);
+                        r.draw_cluster(
+                            &mut buf, fb_w, fb_h, left, top, g, face.family, face.bold,
                             face.italic, face.scale, fg,
                         );
                         if face.underline {
                             // a rule near the block bottom, in the text colour
                             // (scaled with the glyph so it stays proportional).
                             let uy = top + ch_s.saturating_sub(2 * scale);
-                            fill_cell(&mut buf, fb_w, fb_h, left, uy, cw_s, scale, pack(fg));
+                            fill_cell(&mut buf, fb_w, fb_h, left, uy, block_w, scale, pack(fg));
                         }
-                        cx += scale;
+                        cx += cells * scale;
                     }
                 }
                 Op::Cursor { row, col } => {

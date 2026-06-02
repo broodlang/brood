@@ -53,6 +53,19 @@
   (test "two-arg form is equivalent to passing the length"
     (assert= (substring "hello" 2) (substring "hello" 2 (string-length "hello")))))
 
+(describe "display-width"
+  (test "ASCII is one cell per character (like string-length)"
+    (assert= (display-width "hello") 5)
+    (assert= (display-width "") 0))
+  (test "emoji and CJK are two cells wide"
+    (assert= (display-width "😀") 2)
+    (assert= (display-width "a😀b") 4)
+    (assert= (display-width "中文") 4))
+  (test "a multi-codepoint emoji cluster is one double-width glyph"
+    ;; string-length counts codepoints (>1); display-width counts cells (2).
+    (is (> (string-length "👨‍👩‍👧") 1))
+    (assert= (display-width "👨‍👩‍👧") 2)))
+
 (describe "escapes"
   ;; Beyond the named `\e` / `\n` / `\t` / `\r` / `\0` / `\\` / `\"`, Brood
   ;; strings also support `\xHH` (two-hex-digit byte) and `\u{H..H}` (Unicode
