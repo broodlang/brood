@@ -31,6 +31,32 @@
     (assert= (point-forward "'(a) [b]" 0) 4)
     (assert= (point-forward "'(a) [b]" 4) 8)))
 
+;; Structural motion narrows to the forms around point (`sexp/narrow`) so it's
+;; O(neighbouring forms), not O(buffer). These pin that the narrowed answer equals the
+;; whole-buffer one, including deep in a file with many preceding top-level forms (where
+;; the un-narrowed walk is what made `forward-sexp` stall for a second).
+(describe "sexp navigation narrows without changing the answer"
+  ;; brute-force references: the same queries over the WHOLE-buffer CST, un-narrowed.
+  (defn bf-enc (text point) (enclosing (tree text) point))
+  (defn bf-forward (text point)
+    (let (nxt (first (filter (fn (f) (>= (get f :start) point)) (forms-of (bf-enc text point)))))
+      (if (nil? nxt) point (get nxt :end))))
+  (defn bf-backward (text point)
+    (let (prev (last (filter (fn (f) (<= (get f :end) point)) (forms-of (bf-enc text point)))))
+      (if (nil? prev) point (get prev :start))))
+  (def many (str (join "" (map (fn (i) (str "(defn f" i " () " i ")\n")) (range 300)))
+                 "(map g (h x))"))
+  (def n (string-length many))
+  (test "narrowed motion matches the whole-buffer walk at many points (incl. deep + boundaries)"
+    (doseq (p [0 1 25 (- n 13) (- n 12) (- n 7) (- n 6) (- n 1)])
+      (assert= (point-forward many p) (bf-forward many p))
+      (assert= (point-backward many p) (bf-backward many p))))
+  (test "narrow genuinely slices (base ≤ point, slice shorter than the whole text)"
+    (let ([base sub] (narrow many (- n 6)))
+      (is (<= base (- n 6)))
+      (is (> (string-length sub) 0))
+      (is (< (string-length sub) n)))))
+
 (describe "sexp buffer commands"
   (test "forward moves point to the end of the next sexp"
     (assert= (get (forward (make-buffer "(+ 1 2)") nil) :point) 7))

@@ -64,42 +64,118 @@ as a unit — descending through them is a deferred refinement."
   "The form (non-whitespace, non-comment) children of `anode`."
   (filter form? (or (get anode :kids) (list))))
 
+;; ---- narrowing: bound structural queries to the forms around point ----------
+;; `parse-source-positioned` plus the CST walk below are O(buffer): at the bottom of a
+;; large file a single `forward-sexp` parses every top-level form and filters the root's
+;; whole child list. Structural motion is LOCAL, though — it never reaches past the form
+;; before point or the form after it. So `narrow` slices the text to that neighbourhood
+;; (the previous, enclosing, and next top-level forms) and the queries run on the slice,
+;; shifting positions back by its base. O(buffer) → O(neighbouring forms). A column-0
+;; open bracket marks a top-level form start (the Brood convention — the same assumption
+;; `highlight/safe-restart` makes; a column-0 bracket inside a multi-line string is the
+;; rare miss).
+
+(defn sexp--open? (c) (or (= c "(") (= c "[") (= c "{")))
+(defn sexp--close? (c) (or (= c ")") (= c "]") (= c "}")))
+
+(defn sexp--col0-open? (text i)
+  "True if offset `i` begins a top-level form: a column-0 (start-of-line) open bracket."
+  (and (or (= i 0) (= (char-at text (dec i)) "\n")) (sexp--open? (char-at text i))))
+
+(defn sexp--defun-start (text i)
+  "Greatest offset ≤ `i` that starts a top-level form (a column-0 open bracket); 0 if
+none. The raw-text `beginning-of-defun` the narrowing window hangs off."
+  (cond
+    (<= i 0) 0
+    (sexp--col0-open? text i) i
+    :else (sexp--defun-start text (dec i))))
+
+(defn sexp--str-end (text i n)
+  "Index just past the closing `\"` of a string whose first content char is at `i`
+(escapes via `\\` skipped), or `n` if it runs to the end."
+  (cond
+    (>= i n) n
+    (= (char-at text i) "\\") (sexp--str-end text (+ i 2) n)
+    (= (char-at text i) "\"") (inc i)
+    :else (sexp--str-end text (inc i) n)))
+
+(defn sexp--eol (text i n)
+  "Index just past the next newline at or after `i`, or `n` — skips a `;` comment tail."
+  (cond (>= i n) n (= (char-at text i) "\n") (inc i) :else (sexp--eol text (inc i) n)))
+
+(defn sexp--scan (text i n depth left)
+  "Forward from `i`, skipping strings/comments and tracking bracket `depth`; returns the
+offset once `left` top-level forms have completed (depth returns to 0 after an open) or
+`n`. Finds a window end that covers the enclosing form and the one after it."
+  (if (or (>= i n) (and (= depth 0) (<= left 0)))
+    i
+    (let (c (char-at text i))
+      (cond
+        (= c "\"") (sexp--scan text (sexp--str-end text (inc i) n) n depth left)
+        (= c ";") (sexp--scan text (sexp--eol text (inc i) n) n depth left)
+        (sexp--open? c) (sexp--scan text (inc i) n (inc depth) left)
+        (sexp--close? c) (let (d (max 0 (dec depth)))
+                           (sexp--scan text (inc i) n d (if (= d 0) (dec left) left)))
+        :else (sexp--scan text (inc i) n depth left)))))
+
+(defn narrow (text point)
+  "`[base sub]` — `text` sliced to the top-level forms around `point` (the previous,
+enclosing, and next form), with `base` the slice's offset in `text`. Structural motion
+from `point` stays inside this window, so running the CST queries on `sub` (with `point`
+shifted by `base`, the result shifted back) matches running them on all of `text` — at a
+cost of ~three forms, not the whole buffer."
+  (let (n (string-length text)
+        p (max 0 (min point n))
+        start (sexp--defun-start text (min p (max 0 (dec n))))
+        base (if (> start 0) (sexp--defun-start text (dec start)) 0)
+        end (sexp--scan text base n 0 3))
+    [base (substring text base end)]))
+
 ;; ---- pure navigation: (text point) -> point ---------------------------------
 
 (defn point-forward (text point)
   "End of the next sexp at or after `point` within the enclosing list; unchanged if
 there is none (the Emacs `forward-sexp`)."
-  (let (enc (enclosing (tree text) point)
-        nxt (first (filter (fn (f) (>= (get f :start) point)) (forms-of enc))))
-    (if (nil? nxt) point (get nxt :end))))
+  (let ([base sub] (narrow text point)
+        rp (- point base)
+        enc (enclosing (tree sub) rp)
+        nxt (first (filter (fn (f) (>= (get f :start) rp)) (forms-of enc))))
+    (if (nil? nxt) point (+ base (get nxt :end)))))
 
 (defn point-backward (text point)
   "Start of the previous sexp ending at or before `point` (Emacs `backward-sexp`)."
-  (let (enc (enclosing (tree text) point)
-        prev (last (filter (fn (f) (<= (get f :end) point)) (forms-of enc))))
-    (if (nil? prev) point (get prev :start))))
+  (let ([base sub] (narrow text point)
+        rp (- point base)
+        enc (enclosing (tree sub) rp)
+        prev (last (filter (fn (f) (<= (get f :end) rp)) (forms-of enc))))
+    (if (nil? prev) point (+ base (get prev :start)))))
 
 (defn point-up (text point)
   "Start of the enclosing list — before its opening delimiter (Emacs
 `backward-up-list`); unchanged at top level."
-  (let (enc (enclosing (tree text) point))
-    (if (= (get enc :kind) :root) point (get enc :start))))
+  (let ([base sub] (narrow text point)
+        enc (enclosing (tree sub) (- point base)))
+    (if (= (get enc :kind) :root) point (+ base (get enc :start)))))
 
 (defn point-down (text point)
   "Just inside the next list at or after `point` (Emacs `down-list`); unchanged if
 none."
-  (let (enc (enclosing (tree text) point)
-        lst (first (filter (fn (f) (and (container-kind? (get f :kind)) (>= (get f :start) point)))
+  (let ([base sub] (narrow text point)
+        rp (- point base)
+        enc (enclosing (tree sub) rp)
+        lst (first (filter (fn (f) (and (container-kind? (get f :kind)) (>= (get f :start) rp)))
                      (forms-of enc))))
-    (if (nil? lst) point (+ (get lst :start) 1))))
+    (if (nil? lst) point (+ base (get lst :start) 1))))
 
 (defn point-defun-start (text point)
   "Start of the top-level form containing `point` (Emacs `beginning-of-defun`);
 unchanged if `point` isn't within one."
-  (let (root (tree text)
-        top (first (filter (fn (f) (and (<= (get f :start) point) (<= point (get f :end))))
+  (let ([base sub] (narrow text point)
+        rp (- point base)
+        root (tree sub)
+        top (first (filter (fn (f) (and (<= (get f :start) rp) (<= rp (get f :end))))
                      (forms-of root))))
-    (if (nil? top) point (get top :start))))
+    (if (nil? top) point (+ base (get top :start)))))
 
 ;; ---- buffer commands: (buf key) -> buf (bind these in a keymap) -------------
 

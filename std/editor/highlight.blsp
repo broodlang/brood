@@ -393,9 +393,15 @@ level — atoms, strings, and whole bracketed forms each count once."
   "Return `[callee arg-index]` for the innermost call `(…` enclosing cursor offset
 `pos` — `callee` the head symbol's text and `arg-index` how many arguments precede
 the cursor (0 = first arg) — or nil when the cursor isn't inside a call whose head
-is a plain symbol."
+is a plain symbol.
+
+The enclosing-bracket scan starts at the nearest top-level form start (`safe-restart`)
+rather than offset 0: head-position state is known-balanced at a column-0 form start, so
+the scan walks only the *current* defun, not every character above `pos`. This makes
+eldoc O(enclosing-form) instead of O(pos) — instant versus a multi-second stall when the
+cursor sits deep in a large file."
   (let (n (string-length full)
-        op (hl--enc-scan full 0 pos n '()))
+        op (hl--enc-scan full (safe-restart full pos) pos n '()))
     (if (or (< op 0) (not (= (char-at full op) "(")))
       nil
       (let (end (min pos n)
