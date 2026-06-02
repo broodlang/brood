@@ -770,3 +770,20 @@ delivers for the same physical chord. Mechanism-only change (winit key decoding 
 inherently Rust); no Brood/editor binding changes. Unit test:
 `gui::backend::shift_char_tests`. Found while fixing four myedit UX issues (scrollbar
 hide/grab, click-to-point, and this).
+
+**Also: case-sensitive Meta (`M-O` ≠ `M-o`).** The Alt arm now keeps a shifted letter
+upper-case (`M-O` open-line-above is distinct from `M-o`), while an unshifted chord
+lower-cases; Control chords stay case-insensitive (as in Emacs). Both frontends.
+
+**Runaway key-repeat on shifted keys (held_key never cleared).** The GUI tracks the
+physically-held key (ADR-086) to drive consumer-paced repeat and stop it on release.
+But release matching used the *logical* key: holding `(` (Shift+9) then releasing
+**Shift before 9** sent a release for logical `9`, which never matched the stored `(` —
+so `held_key` stayed set, `gui-held-key` kept reporting it, and the repeat ran away (a
+flood of `(`, worst on a large file where slow frames delay the stop). Fix: match a
+release to the held key by its **physical** key (`KeyEvent::physical_key`, invariant
+under modifiers) and deliver the *held* logical key's `[:key-up …]` so both the poll-
+and event-based stops fire. New `Win::held_physical`, cleared on release / focus loss.
+(Editor side, same session: eldoc + the advisory type-check are now debounced onto the
+idle tick — `model/ed-post-step` — so a large `.blsp` no longer re-parses the whole
+buffer on every keystroke; `enclosing-call` was ~1.1s/keystroke on a 2000-line file.)

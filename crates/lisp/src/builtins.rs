@@ -184,6 +184,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![int, int], int),
         bit_shift_right,
     );
+    def(
+        heap,
+        "bit-count",
+        Arity::exact(1),
+        Sig::new(vec![int], int),
+        bit_count,
+    );
 
     // pair / sequence — `empty?` is Brood (type dispatch over string-length /
     // vector-length / map-keys; std/prelude.blsp). `first`/`rest` ARE the pair
@@ -1529,6 +1536,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("bit-not", &["a"], "Bitwise complement of integer a (two's-complement, so (bit-not n) = (- (- n) 1))."),
     ("bit-shift-left", &["a", "n"], "Shift integer a left by n bits (0 <= n < 64); bits shifted past bit 63 are discarded."),
     ("bit-shift-right", &["a", "n"], "Arithmetic (sign-preserving) right shift of integer a by n bits (0 <= n < 64)."),
+    ("bit-count", &["a"], "Population count: the number of 1 bits in integer a's two's-complement representation (a negative a counts its sign bits, so (bit-count -1) = 64)."),
     ("cons", &["x", "xs"], "A new pair with head x and tail xs."),
     ("first", &["coll"], "The head of a list or vector, or nil if empty."),
     ("rest", &["coll"], "All but the head of a list or vector."),
@@ -1931,6 +1939,11 @@ fn bit_xor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn bit_not(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let n = expect_int(heap, "bit-not", arg(args, 0))?;
     Ok(Value::Int(!n))
+}
+
+fn bit_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let n = expect_int(heap, "bit-count", arg(args, 0))?;
+    Ok(Value::Int(i64::from(n.count_ones())))
 }
 
 /// A shift amount must be in `[0, 64)` — Rust's `<<`/`>>` panic outside the bit

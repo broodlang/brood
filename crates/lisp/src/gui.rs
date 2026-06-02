@@ -594,6 +594,13 @@ mod backend {
         /// event loop suppresses auto-repeat: a press for the key already here is a
         /// repeat, dropped — reliable on Wayland where `ke.repeat` isn't (ADR-086).
         held_key: Arc<Mutex<Option<Key>>>,
+        /// The PHYSICAL key of the currently-held key (set with `held_key` on a fresh
+        /// press). A release is matched to the held key by *physical* key, not logical:
+        /// a shifted chord (`(` = Shift+9) whose modifier is released *before* the key
+        /// translates its release to a different logical key (`9`), which would never
+        /// clear a logical `(` — leaving `held_key` stuck and the repeat running away.
+        /// The physical key is the same down and up regardless of modifiers (ADR-086).
+        held_physical: Option<PhysicalKey>,
         /// Cursor hot-zones from the last drawn frame (`Op::CursorZone`): cell rect
         /// `(x, y, w, h)` + the shape to show while the pointer is inside. Hit-tested
         /// on `CursorMoved`. (ADR-080.)
@@ -642,6 +649,7 @@ mod backend {
             cursor: (0, 0),
             held: None,
             held_key: Arc::new(Mutex::new(None)),
+            held_physical: None,
             zones: Vec::new(),
             shape: None,
         })
@@ -872,25 +880,35 @@ mod backend {
                             if *hk != Some(k) {
                                 *hk = Some(k);
                                 drop(hk);
+                                w.held_physical = Some(ke.physical_key);
                                 deliver(w.subscriber, key_message(&k));
                             }
                         }
                     }
                     ElementState::Pressed => {} // synthetic press (focus-gain replay)
                     // Key release → clear `held_key` (so `gui-held-key` and the repeat
-                    // stop) and deliver `[:key-up <key>]` as the fast-path stop signal.
-                    // Clear only on a matching key so releasing a modifier while a key
-                    // is held doesn't end the repeat early. *Synthetic* releases count
-                    // too (not filtered): winit emits them when a key was let go while
-                    // unfocused, exactly when we must stop. Modifier-only releases
-                    // (Ctrl/Shift/…) translate to None and are skipped.
+                    // stop) and deliver `[:key-up <held-key>]` as the fast-path stop
+                    // signal. Match the release to the held key by its PHYSICAL key, not
+                    // its logical one: a shifted chord (`(` = Shift+9) released
+                    // modifier-first sends the *base* logical key (`9`) on release, which
+                    // would never match a stored `(` — leaving the key stuck and the
+                    // repeat running away. The physical key is invariant under modifiers,
+                    // so it always matches; we then deliver the *held* logical key's
+                    // key-up so the app's stop-by-key-name also fires. Other releases
+                    // (a non-held key, a bare modifier) just relay their own key-up.
+                    // Synthetic releases count too (winit emits them for a key let go
+                    // while unfocused — exactly when we must stop).
                     ElementState::Released => {
-                        if let Some(k) = translate_key(&ke, w.mods) {
+                        if w.held_physical == Some(ke.physical_key) {
                             let mut hk = w.held_key.lock().unwrap();
-                            if *hk == Some(k) {
-                                *hk = None;
-                            }
+                            let held = *hk;
+                            *hk = None;
                             drop(hk);
+                            w.held_physical = None;
+                            if let Some(k) = held {
+                                deliver(w.subscriber, key_up_message(&k));
+                            }
+                        } else if let Some(k) = translate_key(&ke, w.mods) {
                             deliver(w.subscriber, key_up_message(&k));
                         }
                     }
@@ -906,6 +924,7 @@ mod backend {
                     // so `gui-held-key` must not keep reporting it (the poll-based stop)
                     // and the `:blur` is the event-based stop. Both, belt-and-braces.
                     *w.held_key.lock().unwrap() = None;
+                    w.held_physical = None;
                     deliver(w.subscriber, Message::Keyword(value::intern("blur")));
                 }
                 WindowEvent::CursorMoved { position, .. } => {
