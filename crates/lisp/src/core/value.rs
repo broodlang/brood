@@ -281,6 +281,7 @@ macro_rules! handle {
 handle!(PairId);
 handle!(VecId);
 handle!(StrId);
+handle!(BigIntId);
 handle!(RopeId);
 handle!(ClosureId);
 handle!(NativeId);
@@ -311,6 +312,15 @@ pub enum Value {
     Nil,
     Bool(bool),
     Int(i64),
+    /// An arbitrary-precision integer that does **not** fit in `i64` — a heap
+    /// leaf handle into the per-process `bigints` slab (mirrors [`Value::Str`]).
+    /// The **normalize invariant**: a `BigInt` is *always* strictly outside
+    /// `[i64::MIN, i64::MAX]`; any operation that produces one in range returns
+    /// a `Value::Int` instead (see `Heap::int_from_bigint`). Consequence: an
+    /// `Int` and a `BigInt` are never numerically equal (disjoint ranges).
+    /// Transparently an integer to the language — [`tag`] maps it to
+    /// [`Tag::Int`], so `int?`/`number?`/`type-of` all treat it as `int`.
+    BigInt(BigIntId),
     Float(f64),
     Sym(Symbol),
     Keyword(Symbol),
@@ -425,6 +435,8 @@ pub fn tag(v: Value) -> Tag {
         Value::Nil => Tag::Nil,
         Value::Bool(_) => Tag::Bool,
         Value::Int(_) => Tag::Int,
+        // A BigInt is transparently an integer — no lattice change (ADR bignums).
+        Value::BigInt(_) => Tag::Int,
         Value::Float(_) => Tag::Float,
         Value::Sym(_) => Tag::Sym,
         Value::Keyword(_) => Tag::Keyword,

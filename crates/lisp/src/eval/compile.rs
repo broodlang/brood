@@ -29,7 +29,7 @@ use std::sync::Arc;
 use crate::core::heap::{EnvRoot, Heap, VmCacheKey};
 use crate::core::keywords as kw;
 use crate::core::value::{
-    self, ClosureId, EnvId, MapId, NativeId, PairId, RopeId, StrId, Symbol, Value, VecId,
+    self, BigIntId, ClosureId, EnvId, MapId, NativeId, PairId, RopeId, StrId, Symbol, Value, VecId,
 };
 use crate::error::{error_codes, LispError, LispResult, Pos};
 
@@ -96,21 +96,6 @@ pub enum PrimOp {
 }
 
 impl PrimOp {
-    /// The `%`-prefixed builtin name this op inlines — used for the fallback call
-    /// and to keep the integer-overflow message identical to `num_bin`'s.
-    fn native_name(self) -> &'static str {
-        match self {
-            PrimOp::Add => "%add",
-            PrimOp::Sub => "%sub",
-            PrimOp::Mul => "%mul",
-            PrimOp::Lt => "%lt",
-            PrimOp::Le => "%le",
-            PrimOp::Eq => kw::EQ_PRIM,
-            PrimOp::Rem => "rem",
-            PrimOp::Div => "%div",
-            PrimOp::Quot => "%quot",
-        }
-    }
     fn from_native_name(name: &str) -> Option<PrimOp> {
         Some(match name {
             "%add" => PrimOp::Add,
@@ -133,6 +118,7 @@ impl PrimOp {
 #[derive(Clone, Copy)]
 pub enum HandleKind {
     Str,
+    BigInt,
     Pair,
     Vector,
     Map,
@@ -167,6 +153,9 @@ impl ConstVal {
     fn new(v: Value) -> ConstVal {
         match v {
             Value::Str(id) => ConstVal::Handle { kind: HandleKind::Str, bits: AtomicU64::new(id.0) },
+            Value::BigInt(id) => {
+                ConstVal::Handle { kind: HandleKind::BigInt, bits: AtomicU64::new(id.0) }
+            }
             Value::Pair(id) => {
                 ConstVal::Handle { kind: HandleKind::Pair, bits: AtomicU64::new(id.0) }
             }
@@ -194,6 +183,7 @@ impl ConstVal {
                 let b = bits.load(Ordering::Relaxed);
                 match kind {
                     HandleKind::Str => Value::Str(StrId(b)),
+                    HandleKind::BigInt => Value::BigInt(BigIntId(b)),
                     HandleKind::Pair => Value::Pair(PairId(b)),
                     HandleKind::Vector => Value::Vector(VecId(b)),
                     HandleKind::Map => Value::Map(MapId(b)),
@@ -214,6 +204,7 @@ impl ConstVal {
             let new = f(self.load());
             let nb = match new {
                 Value::Str(id) => id.0,
+                Value::BigInt(id) => id.0,
                 Value::Pair(id) => id.0,
                 Value::Vector(id) => id.0,
                 Value::Map(id) => id.0,
@@ -627,6 +618,7 @@ fn const_node(heap: &Heap, v: Value) -> Node {
 fn value_is_immovable(v: Value) -> bool {
     match v {
         Value::Str(id) => id.region() != value::LOCAL,
+        Value::BigInt(id) => id.region() != value::LOCAL,
         Value::Pair(id) => id.region() != value::LOCAL,
         Value::Vector(id) => id.region() != value::LOCAL,
         Value::Map(id) => id.region() != value::LOCAL,
@@ -739,6 +731,7 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
         // string baked raw into the off-GC-graph AST is the use-after-GC class; see
         // `const_node`), a no-op for the inline/interned atoms.
         Value::Int(_)
+        | Value::BigInt(_)
         | Value::Float(_)
         | Value::Bool(_)
         | Value::Nil
@@ -1039,25 +1032,33 @@ fn force(heap: &mut Heap, step: Step) -> LispResult {
 }
 
 /// The inline fast path for a [`Node::Prim2`] (perf #1): handle the `(Int, Int)`
-/// case of `op` directly, returning `Ok(Some(v))` when done inline, `Ok(None)` to
-/// defer to the real `%`-primitive (any non-`(Int, Int)` operands — float coercion,
-/// structural `=`, and the canonical type errors all live there), or `Err` on
-/// integer overflow with the **same** message + code [`num_bin`](crate::builtins)
-/// raises, so diagnostics are byte-identical to the un-inlined call. Needs no heap:
-/// the result is an inline scalar, so nothing is allocated and no GC can intervene.
+/// case of `op` directly, returning `Ok(Some(v))` when done inline, or `Ok(None)`
+/// to defer to the real `%`-primitive — for any non-`(Int, Int)` operands (float
+/// coercion, structural `=`, bignum operands, the canonical type errors), the
+/// division edges, **and the i64-overflow cases**, which the native now resolves
+/// by promoting to a bignum (ADR bignums) rather than erroring. Needs no heap:
+/// the inline result is a scalar, so nothing is allocated and no GC can intervene.
 fn prim_apply(op: PrimOp, x: Value, y: Value) -> Result<Option<Value>, LispError> {
     let (a, b) = match (x, y) {
         (Value::Int(a), Value::Int(b)) => (a, b),
         _ => return Ok(None),
     };
-    let overflow = || {
-        LispError::runtime(format!("{}: integer overflow", op.native_name()))
-            .with_code(error_codes::INT_OVERFLOW)
-    };
     let v = match op {
-        PrimOp::Add => Value::Int(a.checked_add(b).ok_or_else(overflow)?),
-        PrimOp::Sub => Value::Int(a.checked_sub(b).ok_or_else(overflow)?),
-        PrimOp::Mul => Value::Int(a.checked_mul(b).ok_or_else(overflow)?),
+        // On i64 overflow, defer (`Ok(None)`): the native `prim_add`/etc. redo
+        // the op in BigInt and demote, so a too-big result becomes a `BigInt`
+        // instead of an `E0041`.
+        PrimOp::Add => match a.checked_add(b) {
+            Some(r) => Value::Int(r),
+            None => return Ok(None),
+        },
+        PrimOp::Sub => match a.checked_sub(b) {
+            Some(r) => Value::Int(r),
+            None => return Ok(None),
+        },
+        PrimOp::Mul => match a.checked_mul(b) {
+            Some(r) => Value::Int(r),
+            None => return Ok(None),
+        },
         PrimOp::Lt => Value::Bool(a < b),
         PrimOp::Le => Value::Bool(a <= b),
         PrimOp::Eq => Value::Bool(a == b),

@@ -34,6 +34,8 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
         Value::Nil => out.push_str("nil"),
         Value::Bool(b) => out.push_str(if b { "true" } else { "false" }),
         Value::Int(n) => out.push_str(&n.to_string()),
+        // A bignum prints as its decimal string, exactly like an `Int`.
+        Value::BigInt(id) => out.push_str(&heap.bigint(id).to_string()),
         Value::Float(f) => out.push_str(&format_float(f)),
         Value::Sym(s) => out.push_str(symbol_name_ref(s)),
         Value::Keyword(s) => {

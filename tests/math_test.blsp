@@ -104,6 +104,35 @@
     (assert= (max 1 2.5 2) 2.5)
     (assert= (min 1 2.5 0.5) 0.5)))
 
+(describe "arbitrary-precision integers (bignums)"
+  (test "arithmetic past i64 promotes; in-range results demote"
+    (assert= (* 1000000000000 1000000000000) 1000000000000000000000000)
+    (is (int? (* 1000000000000 1000000000000)))
+    ;; A big computation that lands back in range returns a plain int.
+    (let (big (* 1000000000000 1000000000000))
+      (assert= (- big big) 0)
+      (is (int? (- big big)))))
+  (test "a 60-digit literal round-trips"
+    (assert= 123456789012345678901234567890123456789012345678901234567890
+             (+ 123456789012345678901234567890123456789012345678901234567889 1)))
+  (test "bignums are transparently integers"
+    (is (int? (bit-shift-left 1 200)))
+    (is (number? (bit-shift-left 1 200)))
+    (assert= (type-of (bit-shift-left 1 200)) :int))
+  (test "quot / rem / mod on bignums"
+    (assert= (quot (bit-shift-left 1 200) (bit-shift-left 1 100)) (bit-shift-left 1 100))
+    (assert= (rem (bit-shift-left 1 200) (bit-shift-left 1 100)) 0)
+    (assert= (mod (+ (bit-shift-left 1 200) 7) (bit-shift-left 1 100)) 7))
+  (test "comparisons span int and bignum"
+    (is (> (bit-shift-left 1 200) 9223372036854775807))
+    (is (< (bit-shift-left 1 100) (bit-shift-left 1 200)))
+    ;; an int and a bignum are never equal (disjoint ranges)
+    (refute (= 1 (bit-shift-left 1 200))))
+  (test "bignum bitwise ops"
+    (assert= (bit-and (bit-shift-left 1 200) (bit-shift-left 1 200)) (bit-shift-left 1 200))
+    (assert= (bit-xor (bit-shift-left 1 200) (bit-shift-left 1 200)) 0)
+    (assert= (bit-count (bit-shift-left 1 200)) 1)))
+
 (describe "bitwise operators"
   (test "and / or / xor on small ints"
     (assert= (bit-and 12 10) 8)
@@ -125,9 +154,16 @@
     (assert= (bit-shift-right 1 0) 1))
   (test "shift round-trips below the high bits"
     (assert= (bit-shift-right (bit-shift-left 1234 8) 8) 1234))
-  (test "a shift amount outside [0, 64) is a clean error, not a crash"
-    (assert-error (bit-shift-left 1 64))
-    (assert-error (bit-shift-right 1 -1)))
+  (test "shifts are unbounded: a large shift promotes to a bignum"
+    ;; The old [0, 64) cap is gone (ADR bignums) — shifting past the i64 width
+    ;; promotes rather than erroring, so the Life bitboard can shift by row width.
+    (assert= (bit-shift-left 1 64) 18446744073709551616)
+    (assert= (bit-shift-right (bit-shift-left 1 64) 64) 1)
+    (is (int? (bit-shift-left 1 200)))
+    (assert= (bit-count (bit-shift-left 1 200)) 1)
+    ;; A negative shift amount is still a clean error, not a crash.
+    (assert-error (bit-shift-right 1 -1))
+    (assert-error (bit-shift-left 1 -1)))
   (test "bitwise ops reject non-integers"
     (assert-error (bit-and 1 "x"))
     (assert-error (bit-not :k))
