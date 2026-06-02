@@ -146,13 +146,19 @@ stream (O(tokens)), so it stays fast enough for per-frame fontification."
 ;; only a slice — the visible lines plus a `safe-restart` lead-in for context — and
 ;; shifts the spans back into absolute coordinates with `highlight-window`.
 
+(defn shift-spans (spans base)
+  "Shift every `[start end face]` span by `base` — maps slice-local offsets into the
+absolute coordinates of the larger source the slice came from. The one place windowed
+fontification (any lexer's, mode-agnostic) re-bases its spans."
+  (map (fn ([s e f]) [(+ s base) (+ e base) f]) spans))
+
 (defn highlight-window (slice base)
   "Like `highlight-spans`, but for a windowed `slice` that begins at offset `base`
 in some larger source: every `[start end face]` span is shifted by `base`, so the
 result is in the larger source's absolute coordinates. Lets a viewport fontify only
 its visible slice yet hand the renderer absolute offsets; `base` 0 is exactly
 `highlight-spans`."
-  (map (fn ([s e f]) [(+ s base) (+ e base) f]) (highlight-spans slice)))
+  (shift-spans (highlight-spans slice) base))
 
 (defn hl--col0? (src i)
   "True if offset `i` begins a line — it's the start of `src` or follows a newline."
