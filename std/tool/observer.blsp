@@ -685,13 +685,24 @@ the minibuffer UI state. Paints to whatever frontend `ui-run` holds."
       (get model :link)
       ui)))
 
+;; The eval minibuffer (`:command` mode) is a modal overlay over the keymap — the same
+;; shape the editor's minibuffer has — so it rides the shared `editor/ui/overlay-route`
+;; (ADR-094). A `:confirm` is kept as a *pre-mouse* guard (any input, even a click,
+;; resolves the pending kill rather than shifting the list under it), so it stays an
+;; explicit branch above the mouse case rather than another routed overlay.
+(def observe--key-overlays
+  (list {:active? (fn (m) (= (get m :mode) :command))
+         :owns? nil  ; the eval minibuffer captures every key
+         :handle (fn (m input) (observe--command-key m (get m :backend) input))
+         :exit nil}))
+
 (defn observe--update (model input cols rows)
   "The observer's `ui-run` **update**: fold one input into the next model. `:tick`
 (the refresh beat) fetches a fresh snapshot from the backend's `:source` unless
 paused, in the minibuffer, or awaiting a kill confirmation (so the list can't shift
 under a pending action); a `[:mouse …]` event selects/scrolls; a pending `:confirm`
-routes keys to y/n; in `:command` mode keys drive the eval minibuffer; otherwise
-keys dispatch through `*observe-keymap*` (quit sets `:done`, which `ui-run`
+routes keys to y/n; otherwise keys flow through `overlay-route` — the eval minibuffer
+(`:command` mode) if open, else `*observe-keymap*` (quit sets `:done`, which `ui-run`
 honours). The backend rides in the model under `:backend`."
   (let (backend (get model :backend)
         cap (max 1 (- rows 5)))
@@ -704,11 +715,11 @@ honours). The backend rides in the model under `:backend`."
                         model)
       (get model :confirm) (observe--confirm-key model backend input)
       (observe--mouse? input) (observe--apply-mouse (observe--derived model cols rows) input cap)
-      (= (get model :mode) :command) (observe--command-key model backend input)
-      :else (keymap-dispatch *observe-keymap*
-              (assoc (observe--derived model cols rows) :msg nil)
-              input
-              (fn (s _) s)))))
+      :else (overlay-route observe--key-overlays model input
+              (fn (m k) (keymap-dispatch *observe-keymap*
+                          (assoc (observe--derived m cols rows) :msg nil)
+                          k
+                          (fn (s _) s)))))))
 
 ;; ---- demo processes (so a fresh observer has something to show) -------------
 

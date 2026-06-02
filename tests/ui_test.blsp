@@ -191,3 +191,32 @@
               (receive ([:err s] s) (after 0 ""))))
         (is (string-contains? logged "update error"))
         (is (string-contains? logged "kaboom!"))))))
+
+;; overlay-route — the modal-overlay dispatch fallthrough shared by the editor's
+;; transient overlays and the observer's minibuffer.
+(describe "overlay-route"
+  ;; two overlays: a capture-all "mini" (owns every key) and a "pop" that owns only "x".
+  (def overlays
+    (list {:active? (fn (m) (get m :mini)) :owns? nil
+           :handle (fn (m k) (assoc m :typed k)) :exit nil}
+          {:active? (fn (m) (get m :pop)) :owns? (fn (m k) (= k "x"))
+           :handle (fn (m k) (assoc m :popped k)) :exit (fn (m) (assoc m :pop nil :exited true))}))
+  (defn fallback (m k) (assoc m :dispatched k))
+  (test "no overlay open → fallback"
+    (assert= (get (overlay-route overlays {} "a" fallback) :dispatched) "a"))
+  (test "capture-all overlay handles every key (owns? nil)"
+    (let (r (overlay-route overlays {:mini true} "a" fallback))
+      (assert= (get r :typed) "a")
+      (is (nil? (get r :dispatched)))))
+  (test "an owning overlay handles its key"
+    (assert= (get (overlay-route overlays {:pop true} "x" fallback) :popped) "x"))
+  (test "a non-owned key exits the overlay then falls through (dismiss-and-process)"
+    (let (r (overlay-route overlays {:pop true} "a" fallback))
+      (is (get r :exited))
+      (is (nil? (get r :pop)))
+      (assert= (get r :dispatched) "a")))
+  (test "list order is precedence (first active wins)"
+    (assert= (get (overlay-route overlays {:mini true :pop true} "x" fallback) :typed) "x"))
+  (test "overlay-active returns the first active overlay, or nil"
+    (is (nil? (overlay-active overlays {})))
+    (assert= (get (overlay-active overlays {:pop true}) :active?) (get (second overlays) :active?))))
