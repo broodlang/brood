@@ -220,3 +220,20 @@
   (test "overlay-active returns the first active overlay, or nil"
     (is (nil? (overlay-active overlays {})))
     (assert= (get (overlay-active overlays {:pop true}) :active?) (get (second overlays) :active?))))
+
+;; ui--coalesce-drag — collapse a flood of per-cell mouse :drag events to the latest,
+;; so a fast drag renders once at the final position instead of once per cell crossed.
+(describe "ui--coalesce-drag"
+  (test "non-drag messages pass through untouched (incl. nil on timeout)"
+    (assert= (editor/ui/ui--coalesce-drag "x") "x")
+    (assert= (editor/ui/ui--coalesce-drag :tick) :tick)
+    (assert= (editor/ui/ui--coalesce-drag [:mouse :press :left 3 3 []]) [:mouse :press :left 3 3 []])
+    (is (nil? (editor/ui/ui--coalesce-drag nil))))
+  (test "queued drags collapse to the latest; other messages stay in the mailbox"
+    (let (me (self))
+      (send me [:mouse :drag :left 6 6 []])
+      (send me [:mouse :drag :left 7 7 []])
+      (send me "k")  ; a key after the drags — must survive
+      ;; pass in the first drag (as the poll would); the queued drags drain to the last
+      (assert= (editor/ui/ui--coalesce-drag [:mouse :drag :left 5 5 []]) [:mouse :drag :left 7 7 []])
+      (assert= (receive (m m) (after 200 :none)) "k"))))  ; the key is still there

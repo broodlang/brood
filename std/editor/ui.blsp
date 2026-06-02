@@ -46,6 +46,21 @@ beat. The observer and the coming editor are both `ui-run` clients — see
   ;; terminal), so it's a fixed display map of the 0-arg `term-*` primitives.
   {:enter term-enter :leave term-leave :size term-size :draw term-draw :poll term-poll})
 
+(defn ui--coalesce-drag (msg)
+  "Collapse a flood of mouse `:drag` events down to the latest. A fast drag emits one
+event per cell the pointer crosses (ADR-080), so the mailbox backs up and the loop
+renders every intermediate position — the drag visibly lags, filling in cell by cell.
+Only the *final* pointer position matters for the gesture (a drag-select region is just
+`[mark, point]`, a resize just the latest ratio), so when `msg` is a drag we pull every
+further drag already queued — a non-blocking selective `receive` that leaves keys / ticks
+/ async replies untouched — and return the last. The loop then renders once at the end
+instead of once per cell. `msg` unchanged when it isn't a drag (incl. nil on timeout)."
+  (if (and (vector? msg) (>= (count msg) 2) (= (nth msg 0) :mouse) (= (nth msg 1) :drag))
+    (receive ([:mouse :drag button row col mods]
+                (ui--coalesce-drag [:mouse :drag button row col mods]))
+             (after 0 msg))
+    msg))
+
 (defn gui-display ()
   "Open a **new** native window and return a display (the `{:enter :leave :size
 :draw :poll}` map) bound to it — each call is a separate window, so several
@@ -77,7 +92,7 @@ their input. Both are deferred trade-offs (ADR-059), fine for the observer."
       ;; while waiting (ADR-058), unlike a blocking poll. Returns the next key/mouse
       ;; message, or nil after `ms` (the live-refresh tick).
       :poll
-      (fn (ms) (receive (m m) (after ms nil)))
+      (fn (ms) (ui--coalesce-drag (receive (m m) (after ms nil))))
       ;; Raise this window to the front + focus it (un-minimising) — `ui-run` calls
       ;; this when a `:focus` control message lands in the mailbox, so another process
       ;; can surface an already-open singleton window (e.g. a second `(observe)`).
