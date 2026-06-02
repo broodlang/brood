@@ -168,10 +168,13 @@ const NOT_COMPILED: &str = "gui backend not compiled in; rebuild with `--feature
 mod disabled {
     use super::Op;
     use super::NOT_COMPILED;
-    pub fn open(_subscriber: u64) -> Result<u64, String> {
+    pub fn open(_subscriber: u64, _title: Option<String>) -> Result<u64, String> {
         Err(NOT_COMPILED.into())
     }
     pub fn close(_id: u64) -> Result<(), String> {
+        Err(NOT_COMPILED.into())
+    }
+    pub fn title(_id: u64, _title: String) -> Result<(), String> {
         Err(NOT_COMPILED.into())
     }
     pub fn focus(_id: u64) -> Result<(), String> {
@@ -201,10 +204,10 @@ mod disabled {
 }
 
 #[cfg(not(feature = "gui"))]
-pub use disabled::{close, draw, focus, font, held_key, open, register_family, size};
+pub use disabled::{close, draw, focus, font, held_key, open, register_family, size, title};
 
 #[cfg(feature = "gui")]
-pub use backend::{close, draw, focus, font, held_key, open, register_family, size};
+pub use backend::{close, draw, focus, font, held_key, open, register_family, size, title};
 
 #[cfg(feature = "gui")]
 mod backend {
@@ -286,12 +289,15 @@ mod backend {
         /// mailbox; reply with its id + shared size (or a build error).
         Open {
             subscriber: u64,
+            title: Option<String>,
             reply: Sender<Result<OpenReply, String>>,
         },
         /// Replace window `id`'s frame and repaint it.
         Draw { id: u64, ops: Vec<Op> },
         /// Destroy window `id`.
         Close { id: u64 },
+        /// Set window `id`'s OS title-bar text at runtime. Behind `gui-title!`.
+        Title { id: u64, title: String },
         /// Raise window `id` to the front and give it OS keyboard focus (un-
         /// minimising it first). Behind `gui-focus` — surfaces an already-open
         /// singleton window instead of opening a duplicate.
@@ -376,7 +382,7 @@ mod backend {
     /// `(gui-open subscriber)` — open a new window whose key/mouse input is
     /// delivered to process `subscriber`'s mailbox; return the window id. Starts the
     /// GUI thread on the first call. Each call is an independent window.
-    pub fn open(subscriber: u64) -> Result<u64, String> {
+    pub fn open(subscriber: u64, title: Option<String>) -> Result<u64, String> {
         let (reply_tx, reply_rx) = mpsc::channel();
         // Send under the proxy lock, then drop it before awaiting the reply so a
         // slow window build can't block other windows' sends.
@@ -385,6 +391,7 @@ mod backend {
             .unwrap()
             .send_event(UserEvent::Open {
                 subscriber,
+                title,
                 reply: reply_tx,
             })
             .map_err(|_| "gui thread is gone".to_string())?;
@@ -470,6 +477,16 @@ mod backend {
                 .lock()
                 .unwrap()
                 .send_event(UserEvent::Font { id, family, px });
+        }
+        Ok(())
+    }
+
+    /// `(gui-title! id text)` — set window `id`'s title-bar text at runtime. Routed
+    /// through the event-loop proxy like `font`; a no-op (silently) if the GUI thread
+    /// never started or `id` isn't a live window.
+    pub fn title(id: u64, title: String) -> Result<(), String> {
+        if let Ok(g) = gui() {
+            let _ = g.lock().unwrap().send_event(UserEvent::Title { id, title });
         }
         Ok(())
     }
@@ -614,8 +631,8 @@ mod backend {
     /// loop. Errors (window / surface creation) propagate to the `open` caller.
     fn build_window(
         elwt: &ActiveEventLoop,
-        id: u64,
         subscriber: u64,
+        title: Option<String>,
         families: Families,
         base_px: f32,
         default_family: Option<u32>,
@@ -623,7 +640,7 @@ mod backend {
         let window = elwt
             .create_window(
                 Window::default_attributes()
-                    .with_title(format!("brood observer #{id}"))
+                    .with_title(title.unwrap_or_else(|| "Brood".to_string()))
                     .with_inner_size(LogicalSize::new(840.0, 560.0)),
             )
             .map_err(|e| format!("window: {e}"))?;
@@ -679,7 +696,7 @@ mod backend {
         /// windows simply persist — `resumed` only ever fires once here.)
         resumed: bool,
         /// `Open` requests received before `resumed`, drained when it fires.
-        pending_open: Vec<(u64, Sender<Result<OpenReply, String>>)>,
+        pending_open: Vec<(u64, Option<String>, Sender<Result<OpenReply, String>>)>,
     }
 
     impl GuiApp {
@@ -690,13 +707,14 @@ mod backend {
             &mut self,
             event_loop: &ActiveEventLoop,
             subscriber: u64,
+            title: Option<String>,
             reply: Sender<Result<OpenReply, String>>,
         ) {
             let id = next_id();
             match build_window(
                 event_loop,
-                id,
                 subscriber,
+                title,
                 self.families.clone(),
                 self.default_px,
                 self.default_family,
@@ -726,19 +744,25 @@ mod backend {
         fn resumed(&mut self, event_loop: &ActiveEventLoop) {
             event_loop.set_control_flow(ControlFlow::Wait);
             self.resumed = true;
-            for (subscriber, reply) in std::mem::take(&mut self.pending_open) {
-                self.open_window(event_loop, subscriber, reply);
+            for (subscriber, title, reply) in std::mem::take(&mut self.pending_open) {
+                self.open_window(event_loop, subscriber, title, reply);
             }
         }
 
         fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
             match event {
                 // Create now if the display is live, else queue until `resumed`.
-                UserEvent::Open { subscriber, reply } => {
+                UserEvent::Open { subscriber, title, reply } => {
                     if self.resumed {
-                        self.open_window(event_loop, subscriber, reply);
+                        self.open_window(event_loop, subscriber, title, reply);
                     } else {
-                        self.pending_open.push((subscriber, reply));
+                        self.pending_open.push((subscriber, title, reply));
+                    }
+                }
+                // Set a live window's OS title-bar text (behind gui-title!).
+                UserEvent::Title { id, title } => {
+                    if let Some(w) = self.ids.get(&id).and_then(|wid| self.wins.get(wid)) {
+                        w.window.set_title(&title);
                     }
                 }
                 UserEvent::Draw { id, ops } => {

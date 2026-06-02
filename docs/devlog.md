@@ -787,3 +787,15 @@ and event-based stops fire. New `Win::held_physical`, cleared on release / focus
 (Editor side, same session: eldoc + the advisory type-check are now debounced onto the
 idle tick — `model/ed-post-step` — so a large `.blsp` no longer re-parses the whole
 buffer on every keystroke; `enclosing-call` was ~1.1s/keystroke on a 2000-line file.)
+
+## 2026-06-02 — GUI window titles: `gui-open` title arg + `gui-title!`
+
+Windows can now name themselves. `gui-open` takes an **optional title string**
+(`(gui-open "Brood Life")`); the new **`gui-title!` id text** sets a live window's
+title at runtime, routed through the event-loop proxy like `gui-font!` (new
+`UserEvent::Title`, handled with `window.set_title`). The hard-coded default changed
+from `brood observer #{id}` to plain **`Brood`** (the "observer #N" jargon predated
+windows being a general primitive). `build_window` no longer needs the `id` (it only
+fed the old default). Only Brood caller of `(gui-open)` is `std/editor/ui.blsp`, which
+keeps the no-arg form and gets the new default. Motivated by the `brood-life` demo
+wanting a real title bar.

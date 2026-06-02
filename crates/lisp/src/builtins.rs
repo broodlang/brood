@@ -690,13 +690,26 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // terminal, there can be many windows: `gui-open` returns an integer window id
     // and the other primitives take it, so `(observe)` can spawn several at once.
     // std/observer.blsp's `gui-display` wraps an id as a display map. See gui.rs.
-    def(heap, "gui-open", Arity::exact(0), Sig::new(vec![], int), gui_open);
+    def(
+        heap,
+        "gui-open",
+        Arity::range(0, 1),
+        Sig::new(vec![string], int),
+        gui_open,
+    );
     def(
         heap,
         "gui-close",
         Arity::exact(1),
         Sig::new(vec![int], nil_ty),
         gui_close,
+    );
+    def(
+        heap,
+        "gui-title!",
+        Arity::exact(2),
+        Sig::new(vec![int, string], nil_ty),
+        gui_title,
     );
     def(
         heap,
@@ -1750,8 +1763,9 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("term-size", &[], "The terminal size as [cols rows] in character cells."),
     ("term-poll", &["ms"], "Wait up to ms milliseconds for an input event; return a key (a 1-char string for printables, or a keyword for specials: :up :down :left :right :enter :escape :backspace :tab :back-tab :delete :home :end :page-up :page-down, ctrl combos like :ctrl-c, alt combos like :alt-f), a mouse event as a vector [:mouse action button row col mods] (action: :press :release :drag :scroll-up :scroll-down — :drag is motion with a button held, reported once per cell crossed; button: :left :right :middle or nil for scroll; row/col 0-based cells; mods a vector of held modifier keywords in :ctrl :alt :shift order, [] when none — so Ctrl+wheel etc. are bindable), or nil on timeout. Always pass a finite ms."),
     ("term-draw", &["frame"], "Paint a frame — a vector of render ops: [:clear], [:text row col str], [:text row col str face], [:cursor row col]. A face is a map like {:fg :red :bold true}. The in-process frontend for the display protocol; returns nil."),
-    ("gui-open", &[], "Open a new native window and return its integer id (needs the runtime built with --features gui; errors otherwise). Its key/mouse input is delivered to the CALLING process's mailbox as messages — a key as a 1-char string / keyword (`:up`, `:ctrl-c`), the mouse as `[:mouse action button row col mods]` (action `:press`/`:release`/`:drag`/`:scroll-up`/`:scroll-down` — `:drag` is motion with a button held, delivered once per cell crossed; `mods` a vector of held modifier keywords in `:ctrl :alt :shift` order, `[]` when none, so Ctrl+wheel / Ctrl+drag are bindable), a resize as `[:resize cols rows]` (the new cell grid, so the loop re-renders at the new size) — so the consumer parks in `(receive)` instead of polling (ADR-058). Clicking the window's close button delivers a dedicated `:close` message — distinct from the Escape *key* (`:escape`), so an app can quit on the X without conflating it with Escape (which an editor binds to cancel/normal-mode); `ui-run` quits on `:close` automatically. Starts the GUI thread on the first call; each call is an independent window, so several observers can run at once. Pass the id to the other gui-* primitives; pair with gui-close."),
+    ("gui-open", &["title?"], "Open a new native window and return its integer id (needs the runtime built with --features gui; errors otherwise). An optional `title` string sets the OS title-bar text (default `brood observer #id`); change it later with gui-title!. Its key/mouse input is delivered to the CALLING process's mailbox as messages — a key as a 1-char string / keyword (`:up`, `:ctrl-c`), the mouse as `[:mouse action button row col mods]` (action `:press`/`:release`/`:drag`/`:scroll-up`/`:scroll-down` — `:drag` is motion with a button held, delivered once per cell crossed; `mods` a vector of held modifier keywords in `:ctrl :alt :shift` order, `[]` when none, so Ctrl+wheel / Ctrl+drag are bindable), a resize as `[:resize cols rows]` (the new cell grid, so the loop re-renders at the new size) — so the consumer parks in `(receive)` instead of polling (ADR-058). Clicking the window's close button delivers a dedicated `:close` message — distinct from the Escape *key* (`:escape`), so an app can quit on the X without conflating it with Escape (which an editor binds to cancel/normal-mode); `ui-run` quits on `:close` automatically. Starts the GUI thread on the first call; each call is an independent window, so several observers can run at once. Pass the id to the other gui-* primitives; pair with gui-close."),
     ("gui-close", &["id"], "Close window id (the teardown for gui-open). Idempotent; an unknown id is a no-op."),
+    ("gui-title!", &["id", "text"], "Set window id's OS title-bar text to the string text at runtime (the title gui-open gave it, or the default, otherwise). Needs --features gui; a no-op if the GUI thread never started or id isn't a live window. Returns nil."),
     ("gui-focus", &["id"], "Raise window id to the front and give it OS keyboard focus, un-minimising it first. Lets an app surface an already-open (singleton) window instead of opening a duplicate — e.g. `(observe)` focuses its existing window rather than spawning a second. Errors only if id isn't a live window. Needs --features gui. Returns nil."),
     ("gui-size", &["id"], "Window id's size as [cols rows] in character cells (tracks resize / HiDPI), same shape as term-size."),
     ("gui-held-key", &["id"], "The key window id currently sees as physically held — the same value its press delivered (a 1-char string, or a keyword like :ctrl-n / :up) — or nil when none is held. Tracked from press/release transitions in the event loop (NOT winit's ke.repeat, unreliable on Wayland), so it's the source of truth for a held key: a consumer-paced auto-repeat polls it each tick and stops the instant it no longer matches, so a missed key-up (e.g. lost on focus change) can't cause runaway repeat."),
@@ -4587,12 +4601,17 @@ fn gui_window_id(heap: &Heap, who: &str, v: Value) -> Result<u64, LispError> {
     Ok(expect_int(heap, who, v)?.max(0) as u64)
 }
 
-/// `(gui-open)` — open a new native window and return its integer id. Its key/mouse
-/// input is delivered to the **calling process's mailbox** (ADR-058), so the
+/// `(gui-open)` / `(gui-open title)` — open a new native window and return its integer
+/// id, optionally with a title-bar string (else a default `brood observer #id`). Its
+/// key/mouse input is delivered to the **calling process's mailbox** (ADR-058), so the
 /// observer parks in `(receive)` rather than pinning a worker in a blocking poll.
 /// Starts the GUI thread on the first call; each call is an independent window.
-fn gui_open(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    let id = crate::gui::open(crate::process::self_pid()).map_err(LispError::runtime)?;
+fn gui_open(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let title = match arg(args, 0) {
+        Value::Nil => None,
+        v => Some(expect_string(heap, "gui-open", v)?),
+    };
+    let id = crate::gui::open(crate::process::self_pid(), title).map_err(LispError::runtime)?;
     Ok(Value::Int(id as i64))
 }
 
@@ -4600,6 +4619,14 @@ fn gui_open(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 fn gui_close(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = gui_window_id(heap, "gui-close", arg(args, 0))?;
     crate::gui::close(id).map_err(LispError::runtime)?;
+    Ok(Value::Nil)
+}
+
+/// `(gui-title! id text)` — set window `id`'s OS title-bar text at runtime.
+fn gui_title(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = gui_window_id(heap, "gui-title!", arg(args, 0))?;
+    let title = expect_string(heap, "gui-title!", arg(args, 1))?;
+    crate::gui::title(id, title).map_err(LispError::runtime)?;
     Ok(Value::Nil)
 }
 
