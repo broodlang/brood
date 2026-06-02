@@ -312,10 +312,18 @@ impl<'a> Parser<'a> {
             // token, so dropping the `:` always leaves a non-empty name.
             AtomKind::Keyword => Ok(value::kw(&token[1..])),
             AtomKind::Symbol => Ok(value::sym(token)),
-            AtomKind::IntOverflow => Err(self.err_at(
-                self.s.pos_at(token_start),
-                format!("integer literal out of range for i64: {}", token),
-            )),
+            // An integer-shaped literal too big for i64 is a bignum, not an
+            // error: parse the decimal text into a `num_bigint::BigInt` and
+            // allocate a `Value::BigInt`. `looks_integer` guaranteed the token is
+            // all digits + optional sign, so the parse only fails on something
+            // `classify` would never have routed here — guard it anyway.
+            AtomKind::IntOverflow => match token.parse::<num_bigint::BigInt>() {
+                Ok(n) => Ok(self.heap.alloc_bigint(n)),
+                Err(_) => Err(self.err_at(
+                    self.s.pos_at(token_start),
+                    format!("malformed integer literal: {}", token),
+                )),
+            },
         }
     }
 }

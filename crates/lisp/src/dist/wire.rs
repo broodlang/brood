@@ -426,6 +426,9 @@ const M_PID: u8 = 12;
 /// global scope; free globals re-resolve there (Erlang's "the module must be
 /// loaded on both nodes").
 const M_CLOSURE: u8 = 13;
+/// An arbitrary-precision integer, sent as its decimal string (see
+/// [`Message::BigInt`]) — portable across nodes with independent heaps.
+const M_BIGINT: u8 = 14;
 
 fn encode_msg(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
     match m {
@@ -435,6 +438,10 @@ fn encode_msg(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
         Message::Int(n) => {
             w.push(M_INT);
             w.extend_from_slice(&n.to_be_bytes());
+        }
+        Message::BigInt(s) => {
+            w.push(M_BIGINT);
+            put_str(w, s);
         }
         Message::Float(f) => {
             w.push(M_FLOAT);
@@ -578,6 +585,7 @@ fn decode_msg_at(r: &mut Cursor<Vec<u8>>, depth: u32) -> io::Result<Message> {
         M_FALSE => Message::Bool(false),
         M_TRUE => Message::Bool(true),
         M_INT => Message::Int(get_i64(r)?),
+        M_BIGINT => Message::BigInt(get_str(r)?),
         M_FLOAT => Message::Float(f64::from_bits(get_u64(r)?)),
         M_STR => Message::Str(get_str(r)?),
         M_SYM => Message::Sym(get_sym(r)?),

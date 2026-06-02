@@ -28,6 +28,11 @@ pub enum Message {
     Nil,
     Bool(bool),
     Int(i64),
+    /// An arbitrary-precision integer (a value outside the i64 range), sent as
+    /// its decimal string — a portable form that round-trips across nodes (which
+    /// have independent heaps) without a custom byte layout. The receiver's
+    /// `from_message` parses it and `int_from_bigint`-normalizes it.
+    BigInt(String),
     Float(f64),
     /// A small string sent inline by deep copy. Used for strings below
     /// [`crate::core::blob::SHARED_BLOB_THRESHOLD`] (where atomic refcount
@@ -141,6 +146,7 @@ fn to_message_rec(
         Value::Nil => Message::Nil,
         Value::Bool(b) => Message::Bool(b),
         Value::Int(n) => Message::Int(n),
+        Value::BigInt(id) => Message::BigInt(heap.bigint(id).to_string()),
         Value::Float(f) => Message::Float(f),
         Value::Sym(s) => Message::Sym(s),
         Value::Keyword(s) => Message::Keyword(s),
@@ -351,6 +357,14 @@ pub fn from_message(heap: &mut Heap, m: &Message) -> Value {
         Message::Nil => Value::Nil,
         Message::Bool(b) => Value::Bool(*b),
         Message::Int(n) => Value::Int(*n),
+        Message::BigInt(s) => match s.parse::<num_bigint::BigInt>() {
+            // Normalize through `int_from_bigint` so a value that (against the
+            // sender's invariant) fits i64 still demotes to `Int`.
+            Ok(n) => heap.int_from_bigint(n),
+            // A malformed decimal string can only come from a corrupt/forged
+            // wire frame; fall back to 0 rather than panic the receiver.
+            Err(_) => Value::Int(0),
+        },
         Message::Float(f) => Value::Float(*f),
         Message::Sym(s) => Value::Sym(*s),
         Message::Keyword(s) => Value::Keyword(*s),

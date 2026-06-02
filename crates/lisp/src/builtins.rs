@@ -191,6 +191,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![int], int),
         bit_count,
     );
+    def(
+        heap,
+        "bit-positions",
+        Arity::exact(1),
+        Sig::new(vec![int], vec_ty),
+        bit_positions,
+    );
 
     // pair / sequence — `empty?` is Brood (type dispatch over string-length /
     // vector-length / map-keys; std/prelude.blsp). `first`/`rest` ARE the pair
@@ -1536,7 +1543,8 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("bit-not", &["a"], "Bitwise complement of integer a (two's-complement, so (bit-not n) = (- (- n) 1))."),
     ("bit-shift-left", &["a", "n"], "Shift integer a left by n bits (0 <= n < 64); bits shifted past bit 63 are discarded."),
     ("bit-shift-right", &["a", "n"], "Arithmetic (sign-preserving) right shift of integer a by n bits (0 <= n < 64)."),
-    ("bit-count", &["a"], "Population count: the number of 1 bits in integer a's two's-complement representation (a negative a counts its sign bits, so (bit-count -1) = 64)."),
+    ("bit-count", &["a"], "Population count: the number of 1 bits in integer a's two's-complement representation (a negative a counts its sign bits, so (bit-count -1) = 64). For a bignum it is the popcount of the magnitude."),
+    ("bit-positions", &["a"], "A vector of the 0-based bit indices set in non-negative integer a, ascending (e.g. (bit-positions 6) = [1 2]). O(number of set bits) — for a bignum it scans the magnitude. The inverse of summing (bit-shift-left 1 i); handy for enumerating a bitset's members."),
     ("cons", &["x", "xs"], "A new pair with head x and tail xs."),
     ("first", &["coll"], "The head of a list or vector, or nil if empty."),
     ("rest", &["coll"], "All but the head of a list or vector."),
@@ -1774,39 +1782,76 @@ fn expect_symbol(heap: &Heap, who: &str, v: Value) -> Result<value::Symbol, Lisp
     )
 }
 
+/// True iff `v` is an integer (`Int` or `BigInt`) — the operand shape that
+/// routes `+`/`-`/`*` through the bignum-promoting integer path rather than the
+/// float path.
+fn is_integer(v: Value) -> bool {
+    matches!(v, Value::Int(_) | Value::BigInt(_))
+}
+
+/// Coerce an integer-or-float `Value` to `f64` for the float arithmetic path —
+/// like [`expect_number`] but a `BigInt` also coerces (via its `to_f64`), so a
+/// mixed `(+ 2^200 1.5)` works rather than rejecting the bignum.
+fn num_to_f64(heap: &Heap, who: &str, v: Value) -> Result<f64, LispError> {
+    use num_traits::ToPrimitive;
+    match v {
+        Value::BigInt(id) => Ok(heap.bigint(id).to_f64().unwrap_or(f64::INFINITY)),
+        _ => expect_number(heap, who, v),
+    }
+}
+
+/// The kernel of `+`/`-`/`*`. Two `Int`s try `int_op` (a `checked_*`) first and
+/// stay an `Int` on success; on overflow — or when either operand is already a
+/// `BigInt` — both operands promote to `num_bigint::BigInt`, `big_op` computes,
+/// and the result demotes through [`Heap::int_from_bigint`] (so it comes back as
+/// an `Int` whenever it fits). A float operand keeps the old `f64` path.
 fn num_bin(
-    heap: &Heap,
+    heap: &mut Heap,
     args: &[Value],
     who: &str,
     int_op: fn(i64, i64) -> Option<i64>,
+    big_op: fn(num_bigint::BigInt, num_bigint::BigInt) -> num_bigint::BigInt,
     float_op: fn(f64, f64) -> f64,
 ) -> LispResult {
     let (a, b) = two(args, who)?;
     match (a, b) {
-        (Value::Int(x), Value::Int(y)) => int_op(x, y).map(Value::Int).ok_or_else(|| {
-            LispError::runtime(format!("{}: integer overflow", who))
-                .with_code(crate::error::error_codes::INT_OVERFLOW)
-        }),
+        (Value::Int(x), Value::Int(y)) => match int_op(x, y) {
+            Some(r) => Ok(Value::Int(r)),
+            // Overflowed i64 — redo in BigInt and demote (route through the
+            // normalizer for one code path; here the result is out of range).
+            None => {
+                let r = big_op(num_bigint::BigInt::from(x), num_bigint::BigInt::from(y));
+                Ok(heap.int_from_bigint(r))
+            }
+        },
+        // At least one BigInt, both integers: promote both, compute, demote.
+        _ if is_integer(a) && is_integer(b) => {
+            let x = heap.as_bigint(a).expect("integer");
+            let y = heap.as_bigint(b).expect("integer");
+            let r = big_op(x, y);
+            Ok(heap.int_from_bigint(r))
+        }
+        // A float operand anywhere: the float path (a BigInt coerces via `f64`).
         _ => Ok(Value::Float(float_op(
-            expect_number(heap, who, a)?,
-            expect_number(heap, who, b)?,
+            num_to_f64(heap, who, a)?,
+            num_to_f64(heap, who, b)?,
         ))),
     }
 }
 
 fn prim_add(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    num_bin(heap, args, "%add", i64::checked_add, |a, b| a + b)
+    num_bin(heap, args, "%add", i64::checked_add, |a, b| a + b, |a, b| a + b)
 }
 fn prim_sub(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    num_bin(heap, args, "%sub", i64::checked_sub, |a, b| a - b)
+    num_bin(heap, args, "%sub", i64::checked_sub, |a, b| a - b, |a, b| a - b)
 }
 fn prim_mul(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    num_bin(heap, args, "%mul", i64::checked_mul, |a, b| a * b)
+    num_bin(heap, args, "%mul", i64::checked_mul, |a, b| a * b, |a, b| a * b)
 }
 
 fn prim_div(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let (a, b) = two(args, "%div")?;
-    let bf = expect_number(heap, "%div", b)?;
+    let bf = num_to_f64(heap, "%div", b)?;
     if bf == 0.0 {
         return Err(LispError::runtime("division by zero")
             .with_code(crate::error::error_codes::DIV_BY_ZERO)
@@ -1820,17 +1865,36 @@ fn prim_div(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             (Some(0), Some(q)) => Ok(Value::Int(q)),
             _ => Ok(Value::Float(x as f64 / y as f64)),
         },
-        _ => Ok(Value::Float(expect_number(heap, "%div", a)? / bf)),
+        // Both integers, at least one a BigInt: exact quotient when it divides
+        // evenly (demoted — `(/ 2^200 2^100)` is the exact `2^100`); otherwise a
+        // float. Division by zero was already caught via `bf == 0.0`.
+        _ if is_integer(a) && is_integer(b) => {
+            use num_integer::Integer;
+            let x = heap.as_bigint(a).expect("integer");
+            let y = heap.as_bigint(b).expect("integer");
+            let (q, r) = x.div_rem(&y);
+            if num_traits::Zero::is_zero(&r) {
+                Ok(heap.int_from_bigint(q))
+            } else {
+                Ok(Value::Float(num_to_f64(heap, "%div", a)? / bf))
+            }
+        }
+        _ => Ok(Value::Float(num_to_f64(heap, "%div", a)? / bf)),
     }
 }
 
 fn prim_lt(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let (a, b) = two(args, "%lt")?;
-    // Compare two ints directly; coercing to f64 first loses precision past 2^53
-    // (e.g. `(< 9007199254740992 9007199254740993)` would wrongly be false).
+    // Compare two integers directly; coercing to f64 first loses precision past
+    // 2^53 (e.g. `(< 9007199254740992 9007199254740993)` would wrongly be false).
+    // `value_cmp` already handles Int/BigInt exactly and the mixed int/float and
+    // BigInt/float cases.
     let lt = match (a, b) {
         (Value::Int(x), Value::Int(y)) => x < y,
-        _ => expect_number(heap, "%lt", a)? < expect_number(heap, "%lt", b)?,
+        _ if is_integer(a) && is_integer(b) => {
+            heap.value_cmp(a, b) == std::cmp::Ordering::Less
+        }
+        _ => num_to_f64(heap, "%lt", a)? < num_to_f64(heap, "%lt", b)?,
     };
     Ok(Value::Bool(lt))
 }
@@ -1843,7 +1907,10 @@ fn prim_le(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let (a, b) = two(args, "%le")?;
     let le = match (a, b) {
         (Value::Int(x), Value::Int(y)) => x <= y,
-        _ => expect_number(heap, "%le", a)? <= expect_number(heap, "%le", b)?,
+        _ if is_integer(a) && is_integer(b) => {
+            heap.value_cmp(a, b) != std::cmp::Ordering::Greater
+        }
+        _ => num_to_f64(heap, "%le", a)? <= num_to_f64(heap, "%le", b)?,
     };
     Ok(Value::Bool(le))
 }
@@ -1853,37 +1920,74 @@ fn prim_eq(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::Bool(heap.equal(a, b)))
 }
 
-fn int_pair(heap: &Heap, args: &[Value], who: &str) -> Result<(i64, i64), LispError> {
+/// Read two arguments as `num_bigint::BigInt`s (`Int`s promote), for the
+/// bignum-aware integer ops (`rem`/`quot`/the bitwise family). A self-identifying
+/// type error if either isn't an integer.
+fn bigint_pair(
+    heap: &Heap,
+    args: &[Value],
+    who: &str,
+) -> Result<(num_bigint::BigInt, num_bigint::BigInt), LispError> {
     let (a, b) = two(args, who)?;
-    Ok((expect_int(heap, who, a)?, expect_int(heap, who, b)?))
+    let x = heap
+        .as_bigint(a)
+        .ok_or_else(|| LispError::type_err(format!("{}: expected int, got {:?}", who, value::tag(a))))?;
+    let y = heap
+        .as_bigint(b)
+        .ok_or_else(|| LispError::type_err(format!("{}: expected int, got {:?}", who, value::tag(b))))?;
+    Ok((x, y))
 }
 
 fn remainder(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let (a, b) = int_pair(heap, args, "rem")?;
-    match a.checked_rem(b) {
-        Some(r) => Ok(Value::Int(r)),
-        None if b == 0 => Err(LispError::runtime("rem: division by zero")
-            .with_code(crate::error::error_codes::DIV_BY_ZERO)
-            .with_hint("guard the denominator: (when (not= y 0) (rem x y))")),
-        None => Err(LispError::runtime("rem: integer overflow")
-            .with_code(crate::error::error_codes::INT_OVERFLOW)),
+    let (a, b) = two(args, "rem")?;
+    // i64 fast path. `checked_rem` returns None on `b == 0` (div-by-zero) and
+    // on the lone `i64::MIN % -1` overflow — that overflow is mathematically 0,
+    // so handle it directly rather than promoting.
+    if let (Value::Int(x), Value::Int(y)) = (a, b) {
+        return match x.checked_rem(y) {
+            Some(r) => Ok(Value::Int(r)),
+            None if y == 0 => Err(LispError::runtime("rem: division by zero")
+                .with_code(crate::error::error_codes::DIV_BY_ZERO)
+                .with_hint("guard the denominator: (when (not= y 0) (rem x y))")),
+            None => Ok(Value::Int(0)), // i64::MIN % -1
+        };
     }
+    let (x, y) = bigint_pair(heap, args, "rem")?;
+    if num_traits::Zero::is_zero(&y) {
+        return Err(LispError::runtime("rem: division by zero")
+            .with_code(crate::error::error_codes::DIV_BY_ZERO)
+            .with_hint("guard the denominator: (when (not= y 0) (rem x y))"));
+    }
+    // `BigInt::%` truncates toward zero (matches i64 `%`), so the remainder has
+    // the dividend's sign — the non-Euclidean `rem` the prelude `mod` builds on.
+    Ok(heap.int_from_bigint(x % y))
 }
 
 /// `(%quot a b)` — truncating integer division toward zero, the kernel `quot`
 /// passes through to. `checked_div` truncates toward zero (matching the old
 /// `(/ (- a (rem a b)) b)` integer result) and guards both `b == 0` and the lone
-/// `i64::MIN / -1` overflow.
+/// `i64::MIN / -1` overflow; that overflow promotes to BigInt.
 fn prim_quot(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let (a, b) = int_pair(heap, args, "%quot")?;
-    match a.checked_div(b) {
-        Some(q) => Ok(Value::Int(q)),
-        None if b == 0 => Err(LispError::runtime("quot: division by zero")
-            .with_code(crate::error::error_codes::DIV_BY_ZERO)
-            .with_hint("guard the denominator: (when (not= y 0) (quot x y))")),
-        None => Err(LispError::runtime("quot: integer overflow")
-            .with_code(crate::error::error_codes::INT_OVERFLOW)),
+    let (a, b) = two(args, "%quot")?;
+    if let (Value::Int(x), Value::Int(y)) = (a, b) {
+        match x.checked_div(y) {
+            Some(q) => return Ok(Value::Int(q)),
+            None if y == 0 => {
+                return Err(LispError::runtime("quot: division by zero")
+                    .with_code(crate::error::error_codes::DIV_BY_ZERO)
+                    .with_hint("guard the denominator: (when (not= y 0) (quot x y))"))
+            }
+            None => {} // i64::MIN / -1 — promote and fall through
+        }
     }
+    let (x, y) = bigint_pair(heap, args, "%quot")?;
+    if num_traits::Zero::is_zero(&y) {
+        return Err(LispError::runtime("quot: division by zero")
+            .with_code(crate::error::error_codes::DIV_BY_ZERO)
+            .with_hint("guard the denominator: (when (not= y 0) (quot x y))"));
+    }
+    // `BigInt::/` truncates toward zero, matching i64 `checked_div`.
+    Ok(heap.int_from_bigint(x / y))
 }
 
 /// Floor toward negative infinity, returning an `Int` — the one Float→Int
@@ -1896,6 +2000,8 @@ fn prim_quot(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn floor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match arg(args, 0) {
         Value::Int(n) => Ok(Value::Int(n)),
+        // A bignum is already an integer — it is its own floor.
+        v @ Value::BigInt(_) => Ok(v),
         v => {
             let f = expect_number(heap, "floor", v)?.floor();
             if !f.is_finite() {
@@ -1922,57 +2028,154 @@ fn floor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 // ---------- bitwise ----------
 
 fn bit_and(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let (a, b) = int_pair(heap, args, "bit-and")?;
-    Ok(Value::Int(a & b))
+    if let (Value::Int(a), Value::Int(b)) = (arg(args, 0), arg(args, 1)) {
+        return Ok(Value::Int(a & b));
+    }
+    // num-bigint implements bitwise ops on its (infinite) two's-complement
+    // model, so this matches the i64 result on small values and extends it.
+    let (a, b) = bigint_pair(heap, args, "bit-and")?;
+    Ok(heap.int_from_bigint(a & b))
 }
 
 fn bit_or(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let (a, b) = int_pair(heap, args, "bit-or")?;
-    Ok(Value::Int(a | b))
+    if let (Value::Int(a), Value::Int(b)) = (arg(args, 0), arg(args, 1)) {
+        return Ok(Value::Int(a | b));
+    }
+    let (a, b) = bigint_pair(heap, args, "bit-or")?;
+    Ok(heap.int_from_bigint(a | b))
 }
 
 fn bit_xor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let (a, b) = int_pair(heap, args, "bit-xor")?;
-    Ok(Value::Int(a ^ b))
+    if let (Value::Int(a), Value::Int(b)) = (arg(args, 0), arg(args, 1)) {
+        return Ok(Value::Int(a ^ b));
+    }
+    let (a, b) = bigint_pair(heap, args, "bit-xor")?;
+    Ok(heap.int_from_bigint(a ^ b))
 }
 
 fn bit_not(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let n = expect_int(heap, "bit-not", arg(args, 0))?;
-    Ok(Value::Int(!n))
+    match arg(args, 0) {
+        Value::Int(n) => Ok(Value::Int(!n)),
+        Value::BigInt(id) => {
+            let n = !heap.bigint(id).clone();
+            Ok(heap.int_from_bigint(n))
+        }
+        v => Err(LispError::type_err(format!(
+            "bit-not: expected int, got {:?}",
+            value::tag(v)
+        ))),
+    }
 }
 
 fn bit_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let n = expect_int(heap, "bit-count", arg(args, 0))?;
-    Ok(Value::Int(i64::from(n.count_ones())))
+    match arg(args, 0) {
+        Value::Int(n) => Ok(Value::Int(i64::from(n.count_ones()))),
+        // Popcount of the MAGNITUDE (abs value) — the bitboard only uses
+        // non-negative values, so we count the set bits of |n| (`BigUint`'s
+        // `count_ones`), sign-independent.
+        Value::BigInt(id) => {
+            let bits = heap.bigint(id).magnitude().count_ones();
+            Ok(Value::Int(bits as i64))
+        }
+        v => Err(LispError::type_err(format!(
+            "bit-count: expected int, got {:?}",
+            value::tag(v)
+        ))),
+    }
 }
 
-/// A shift amount must be in `[0, 64)` — Rust's `<<`/`>>` panic outside the bit
-/// width, so reject it as a clean runtime error rather than crash the runtime.
-fn shift_amount(n: i64, who: &str) -> Result<u32, LispError> {
-    if !(0..64).contains(&n) {
+fn bit_positions(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    // The 0-based indices of the set bits, ascending. O(popcount): pull the
+    // lowest set bit, record it, clear it, repeat — so enumerating a sparse
+    // bitset costs the number of members, not the bit width (the bitboard
+    // renderer leans on this to stay O(live) instead of O(area)).
+    let mut out: Vec<Value> = Vec::new();
+    match arg(args, 0) {
+        Value::Int(n) => {
+            let mut bits = n as u64; // the two's-complement bit pattern (bitboard words are non-negative)
+            while bits != 0 {
+                out.push(Value::Int(i64::from(bits.trailing_zeros())));
+                bits &= bits - 1; // clear the lowest set bit
+            }
+        }
+        Value::BigInt(id) => {
+            let mut mag = heap.bigint(id).magnitude().clone();
+            while let Some(i) = mag.trailing_zeros() {
+                out.push(Value::Int(i as i64));
+                mag.set_bit(i, false);
+            }
+        }
+        v => {
+            return Err(LispError::type_err(format!(
+                "bit-positions: expected int, got {:?}",
+                value::tag(v)
+            )))
+        }
+    }
+    Ok(heap.alloc_vector(out))
+}
+
+/// Validate a shift amount: non-negative (a negative shift is an error) and not
+/// absurdly large (cap well above any realistic bit width so a typo'd
+/// `(bit-shift-left 1 1e9)` can't try to allocate gigabytes). Returns the amount
+/// as `usize`. No upper *bit-width* cap any more — large shifts promote to
+/// BigInt (the whole point of the bitboard use).
+fn shift_amount(n: i64, who: &str) -> Result<usize, LispError> {
+    if n < 0 {
         return Err(LispError::runtime(format!(
-            "{}: shift amount {} out of range [0, 64)",
+            "{}: negative shift amount {}",
             who, n
         )));
     }
-    Ok(n as u32)
+    // ~128 Mbit: far past any legitimate use, but bounds the worst-case alloc.
+    const MAX_SHIFT: i64 = 1 << 27;
+    if n > MAX_SHIFT {
+        return Err(LispError::runtime(format!(
+            "{}: shift amount {} too large (max {})",
+            who, n, MAX_SHIFT
+        )));
+    }
+    Ok(n as usize)
 }
 
 fn bit_shift_left(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let (a, n) = int_pair(heap, args, "bit-shift-left")?;
-    // Logical shift of the two's-complement bit pattern (bits shifted past the
-    // top are discarded) — the conventional `bit-shift-left`. Wrapping, not
-    // checked: callers mask back down (e.g. the xorshift PRNG) rather than
-    // expecting an overflow error.
-    Ok(Value::Int(
-        a.wrapping_shl(shift_amount(n, "bit-shift-left")?),
-    ))
+    let a = arg(args, 0);
+    let n = expect_int(heap, "bit-shift-left", arg(args, 1))?;
+    let amount = shift_amount(n, "bit-shift-left")?;
+    // i64 fast path: stay an `Int` when the shift fits, else promote. (Unlike the
+    // old wrapping shift, an i64 result that would lose bits past the top now
+    // promotes to BigInt — the conventional arbitrary-width left shift.)
+    if let Value::Int(x) = a {
+        if amount < 64 {
+            if let Some(r) = x.checked_shl(amount as u32) {
+                // checked_shl only guards the *shift amount*, not value overflow;
+                // verify the shift is lossless before keeping the i64 result.
+                if (r >> amount) == x {
+                    return Ok(Value::Int(r));
+                }
+            }
+        }
+    }
+    let x = heap
+        .as_bigint(a)
+        .ok_or_else(|| LispError::type_err(format!("bit-shift-left: expected int, got {:?}", value::tag(a))))?;
+    Ok(heap.int_from_bigint(x << amount))
 }
 
 fn bit_shift_right(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let (a, n) = int_pair(heap, args, "bit-shift-right")?;
-    // Arithmetic (sign-preserving) right shift, matching the signed i64 model.
-    Ok(Value::Int(a >> shift_amount(n, "bit-shift-right")?))
+    let a = arg(args, 0);
+    let n = expect_int(heap, "bit-shift-right", arg(args, 1))?;
+    let amount = shift_amount(n, "bit-shift-right")?;
+    // Arithmetic (sign-preserving) right shift, matching the signed model.
+    if let Value::Int(x) = a {
+        // A right shift ≥ 64 collapses to the sign bit (0 or -1).
+        let r = if amount >= 64 { x >> 63 } else { x >> amount };
+        return Ok(Value::Int(r));
+    }
+    let x = heap
+        .as_bigint(a)
+        .ok_or_else(|| LispError::type_err(format!("bit-shift-right: expected int, got {:?}", value::tag(a))))?;
+    Ok(heap.int_from_bigint(x >> amount))
 }
 
 // ---------- pair / sequence ----------
