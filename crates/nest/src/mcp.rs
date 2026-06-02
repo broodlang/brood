@@ -172,6 +172,39 @@ impl StalenessGuard {
     }
 }
 
+/// The human-facing staleness message. The agent never sees the server's
+/// stderr, so this also rides back **in-band** (see [`attach_staleness_warning`])
+/// — stderr alone is why the 2026-05-31/06-02 stale-server crashes went unnoticed.
+fn staleness_message(exe: Option<&str>) -> String {
+    format!(
+        "⚠ nest mcp is serving a STALE runtime: {} was rebuilt after this server \
+         started, so it is still running the old, pre-rebuild code. Restart the \
+         `nest mcp` server to pick up the new build — a stale server on a pre-fix \
+         binary caused the GC flush_oob crashes (docs/gc-flush-panic-mcp-2026-05-31.md). \
+         Results from this session may reflect the old runtime.",
+        exe.unwrap_or("the nest binary"),
+    )
+}
+
+/// Append a one-shot staleness notice as an extra `text` content block on a
+/// `tools/call` reply, so the **agent** sees it (stderr doesn't reach an MCP
+/// client). Returns `true` if it attached — only succeeds on a successful
+/// `tools/call` reply (one with a `result.content` array); other replies
+/// (`initialize`, errors, notifications) leave the warning pending for the next
+/// content-bearing reply, so it is never silently dropped. `content[0]` (the
+/// handler's return value) is left untouched — the notice is appended.
+fn attach_staleness_warning(resp: &mut Json, warning: &str) -> bool {
+    let Some(blocks) = resp
+        .get_mut("result")
+        .and_then(|r| r.get_mut("content"))
+        .and_then(Json::as_array_mut)
+    else {
+        return false;
+    };
+    blocks.push(json!({ "type": "text", "text": warning }));
+    true
+}
+
 /// The synchronous request loop. Pulled out of [`run`] so tests can drive it
 /// with in-memory `Cursor` / `Vec<u8>` channels.
 fn main_loop<R: BufRead, W: Write>(
@@ -180,20 +213,28 @@ fn main_loop<R: BufRead, W: Write>(
     w: &mut W,
 ) -> Result<(), Box<dyn Error>> {
     let mut staleness = StalenessGuard::new();
+    // Set once the rebuild is detected; cleared once the notice has ridden back
+    // to the client on a content-bearing reply. Survives across non-tool replies
+    // so the agent always sees it.
+    let mut pending_warning: Option<String> = None;
     while let Some(msg) = read_message(r)? {
-        // A rebuild mid-session means we're now serving stale code — warn once.
+        // A rebuild mid-session means we're now serving stale code — warn once,
+        // on stderr (for a human at the terminal) and in-band (for the agent).
         if staleness.check() {
             let exe = staleness.exe.as_deref().map(|p| p.display().to_string());
-            eprintln!(
-                "⚠ nest mcp: {} was rebuilt after this server started — it is now \
-                 serving a STALE runtime (the old, pre-rebuild code). Restart \
-                 `nest mcp` to pick up the new build. (A stale MCP server on a \
-                 pre-fix binary caused the 2026-05-31 GC flush_oob report.)",
-                exe.as_deref().unwrap_or("the nest binary"),
-            );
+            let warning = staleness_message(exe.as_deref());
+            eprintln!("{warning}");
+            pending_warning = Some(warning);
         }
         match dispatch(interp, &msg) {
-            Outcome::Reply(resp) => write_message(w, &resp)?,
+            Outcome::Reply(mut resp) => {
+                if let Some(warning) = &pending_warning {
+                    if attach_staleness_warning(&mut resp, warning) {
+                        pending_warning = None;
+                    }
+                }
+                write_message(w, &resp)?;
+            }
             Outcome::NoReply => {}
             Outcome::Exit => return Ok(()),
         }
@@ -640,6 +681,10 @@ pub fn value_to_json(heap: &Heap, v: Value) -> Result<Json, String> {
         Value::Nil => Ok(Json::Null),
         Value::Bool(b) => Ok(Json::Bool(b)),
         Value::Int(n) => Ok(json!(n)),
+        // A bignum is outside i64 and JSON's `Number` can't carry it without
+        // precision loss, so emit it as its decimal string (loud, lossless)
+        // rather than a rounded float.
+        Value::BigInt(id) => Ok(Json::String(heap.bigint(id).to_string())),
         Value::Float(f) => {
             // serde_json::Number can't carry NaN or infinity; rather than
             // emit `null` and silently lose data, fail.
@@ -884,6 +929,35 @@ mod tests {
             warned: false,
         };
         assert!(!g3.check(), "a missing binary must not fire");
+    }
+
+    #[test]
+    fn staleness_warning_rides_back_on_a_tool_reply_not_other_replies() {
+        let warning = staleness_message(Some("/x/nest"));
+        assert!(warning.contains("STALE"), "message names the condition");
+
+        // A tools/call reply has a `result.content` array → the notice attaches
+        // as an extra block, leaving content[0] (the handler's value) untouched.
+        let mut tool_reply = json!({
+            "jsonrpc": "2.0", "id": 1,
+            "result": { "content": [{ "type": "text", "text": "42" }] }
+        });
+        assert!(attach_staleness_warning(&mut tool_reply, &warning));
+        let blocks = tool_reply["result"]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2, "warning appended as a second block");
+        assert_eq!(blocks[0]["text"], "42", "handler value is left first");
+        assert!(blocks[1]["text"].as_str().unwrap().contains("STALE"));
+
+        // A non-content reply (initialize, an error envelope) can't carry it →
+        // the caller keeps the warning pending for the next content-bearing reply.
+        let mut init_reply = json!({
+            "jsonrpc": "2.0", "id": 1, "result": { "capabilities": {} }
+        });
+        assert!(!attach_staleness_warning(&mut init_reply, &warning));
+        let mut err_reply = json!({
+            "jsonrpc": "2.0", "id": 1, "error": { "code": -32601, "message": "x" }
+        });
+        assert!(!attach_staleness_warning(&mut err_reply, &warning));
     }
 
     /// Build a newline-delimited JSON buffer from a list of messages (the MCP
