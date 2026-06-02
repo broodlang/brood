@@ -273,6 +273,7 @@ Every session, oldest first. Full text: [devlog-archive.md](archive/devlog-archi
 - **2026-06-01** — M4 daemon/serving layer (ADR-090): serve a `ui-run` app to thin remote frontends (`nest attach`)
 - **2026-06-01** — RUNTIME-region GC, Stage 1 (ADR-091): solidify the single-process collector — stats, gate test, un-stale docs
 - **2026-06-01** — `nest grammar` (ADR-092): generate editor grammars (VS Code TextMate, Emacs) from `(special-forms)`; `brood-vscode` extension
+- **2026-06-01** — `tree-sitter-brood`: a real parser grammar (external scanner mirrors the reader); `nest grammar tree-sitter` highlights
 
 ---
 
@@ -719,3 +720,31 @@ set (marked "regenerate with `nest grammar emacs`"; byte-compiles clean).
 def-heads; `(tmlanguage)` round-trips through `json-parse` to a `source.brood` grammar;
 the special-form `match` carries the escaped (`match\*`/`let\*`), def-head-free
 alternation; the emacs defconst from the same set. Full `make test` green.
+
+## 2026-06-01 — tree-sitter-brood: a real parser grammar (+ `nest grammar tree-sitter`)
+
+The third editor track, in its own project (`~/src/broodlang/brood-treesitter`): a
+genuine **tree-sitter parser** (a `grammar.js` → C parser building a syntax tree) for
+Neovim/Helix/Zed/Emacs-TS/GitHub — distinct from the regex-token grammars VS Code/Emacs
+use. Models Brood's reader exactly (`reader.rs`/`atom.rs`): lists/vectors/maps, `'`/`` ` ``/`~`/`~@`
+prefixes, strings+escapes, `;` comments, commas-as-whitespace.
+
+**The hard part — atom classification — is an external scanner** (`src/scanner.c`).
+tree-sitter's lexer can't do it with overlapping tokens: lexical `prec` *dominates*
+longest-match (so a high-prec `number` matches the `1` in `1abc` and splits the symbol),
+and a string keyword like `nil` matches the prefix of `nil?`. The scanner instead reads a
+maximal non-delimiter run and classifies it (number/keyword/nil/boolean/symbol) exactly
+like `atom::classify` — so `nil?`/`1abc` are single symbols. (Also hit the classic
+external-scanner gotcha: it must consume its own leading whitespace, or it stalls between
+atoms.) Validated against the **whole `std/`+`tests/` corpus: 94 files, 0 ERROR/MISSING**,
+plus 6 corpus tests.
+
+**One source of truth extended (ADR-092):** `nest grammar tree-sitter` emits
+`queries/highlights.scm` — static node→capture rules + the special-form rule as a
+`#any-of?` over `special-keywords` (literal node-text, so `match*`/`->`/`->>` need *no*
+regex escaping). Verified with `tree-sitter query`: `defn`→keyword + name→function,
+`when`/`match*`/`->`→keyword.control, strings/escapes/numbers/keywords all captured.
+
+brood repo: `grammar.blsp` `(tree-sitter-highlights)`, the `nest grammar tree-sitter`
+target, a `grammar_test.blsp` case. `make test` green. Roadmap tree-sitter bullet → 🟡
+(parser done; Linguist PR still gated on adoption).

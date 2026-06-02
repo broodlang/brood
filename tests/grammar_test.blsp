@@ -43,6 +43,20 @@
       (is (not (string-contains? m "defn")))
       (is (map? (get (get g :repository) :definition)))))
 
+  (test "(tree-sitter-highlights) emits a highlight query with the keyword set as #any-of?"
+    (let (q (tree-sitter-highlights))
+      ;; the data-driven head rule lists the canonical keywords literally (no regex
+      ;; escaping needed — #any-of? compares node text)
+      (is (string-contains? q "#any-of? @keyword.control"))
+      (is (string-contains? q "\"when\""))
+      (is (string-contains? q "\"match*\""))   ; the `*` is a plain literal here
+      (is (string-contains? q "\"->>\""))
+      ;; static node→capture rules + the separate def-head rule
+      (is (string-contains? q "@punctuation.bracket"))
+      (is (string-contains? q "(#match? @keyword \"^def\"))"))
+      ;; def-heads are matched by the ^def rule, not listed in the keyword set
+      (is (not (string-contains? q "\"defn\"")))))
+
   (test "(emacs-special-forms) emits the brood-special-forms defconst from the same set"
     (let (e (emacs-special-forms))
       (is (string-contains? e "(defconst brood-special-forms"))

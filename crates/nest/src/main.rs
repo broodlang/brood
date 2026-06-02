@@ -216,11 +216,12 @@ enum Cmd {
     /// — one source of truth, no hand-maintained keyword lists (ADR-092). Prints to
     /// stdout; redirect to the editor's grammar file.
     ///
-    /// TARGET is `tmlanguage` (default — a VS Code TextMate grammar, JSON) or
-    /// `emacs` (the `brood-special-forms` defconst). E.g.
+    /// TARGET is `tmlanguage` (default — a VS Code TextMate grammar, JSON), `emacs`
+    /// (the `brood-special-forms` defconst), or `tree-sitter` (the `tree-sitter-brood`
+    /// `queries/highlights.scm`). E.g.
     /// `nest grammar > brood-vscode/syntaxes/brood.tmLanguage.json`.
     Grammar {
-        /// What to emit: `tmlanguage` (default) or `emacs`.
+        /// What to emit: `tmlanguage` (default), `emacs`, or `tree-sitter`.
         target: Option<String>,
     },
 
@@ -731,8 +732,11 @@ fn cmd_grammar(interp: &mut Interp, target: Option<&str>) {
     let call = match target.unwrap_or("tmlanguage") {
         "tmlanguage" | "vscode" | "textmate" => "(grammar/tmlanguage)",
         "emacs" => "(grammar/emacs-special-forms)",
+        "tree-sitter" | "treesitter" | "highlights" => "(grammar/tree-sitter-highlights)",
         other => {
-            eprintln!("nest grammar: unknown target '{other}' (expected 'tmlanguage' or 'emacs')");
+            eprintln!(
+                "nest grammar: unknown target '{other}' (expected 'tmlanguage', 'emacs', or 'tree-sitter')"
+            );
             std::process::exit(2);
         }
     };

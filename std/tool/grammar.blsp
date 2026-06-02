@@ -96,6 +96,35 @@ part, from `special-keywords`). Returned as data so callers/tests can inspect it
 generated from `(special-forms)`. Redirect `nest grammar` to the grammar file."
   (json-encode (tmlanguage-grammar)))
 
+;; ---- tree-sitter highlight query ---------------------------------------------
+
+(defn tree-sitter-highlights ()
+  "The tree-sitter highlight query (`queries/highlights.scm` for `tree-sitter-brood`,
+the Neovim/Helix/Zed/GitHub grammar) generated from `(special-forms)`. The static
+node→capture rules (the grammar's node names are stable) plus the data-driven
+special-form rule, emitted with a `#any-of?` predicate over `special-keywords` (literal
+node-text, so no regex escaping)."
+  (str
+    ";; tree-sitter-brood highlight query.\n"
+    ";; GENERATED from (special-forms) by `nest grammar tree-sitter` — do not hand-edit.\n\n"
+    "(comment) @comment\n"
+    "(string) @string\n"
+    "(escape_sequence) @string.escape\n"
+    "(number) @number\n"
+    "(keyword) @constant\n"
+    "(boolean) @constant.builtin\n"
+    "(nil) @constant.builtin\n\n"
+    "[\"(\" \")\" \"[\" \"]\" \"{\" \"}\"] @punctuation.bracket\n"
+    "[\"'\" \"`\" \"~\" \"~@\"] @operator\n\n"
+    ";; def… heads: the head reads as a keyword, the defined name as a definition.\n"
+    "((list . (symbol) @keyword (symbol) @function)\n"
+    " (#match? @keyword \"^def\"))\n\n"
+    ";; special forms + core macros in head position (the canonical (special-forms)).\n"
+    "((list . (symbol) @keyword.control)\n"
+    " (#any-of? @keyword.control "
+    (join " " (map (fn (k) (str "\"" k "\"")) (special-keywords)))
+    "))\n"))
+
 ;; ---- Emacs font-lock list ----------------------------------------------------
 
 (defn emacs-special-forms ()
