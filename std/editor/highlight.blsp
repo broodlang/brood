@@ -228,37 +228,6 @@ so only the head can be the covering one."
     :else (let ([s e f] (first spans))
             (if (and (>= pos s) (< pos e)) f nil))))
 
-(defn fontify-runs--push (acc seg face)
-  "Cons `[seg face]` onto `acc`, coalescing into the previous run when the faces are
-equal (so touching same-face spans stay one run, as the per-char coalescer produced)."
-  (cond
-    (empty? acc) (cons [seg face] acc)
-    :else (let ([pseg pface] (first acc))
-            (if (= pface face)
-              (cons [(str pseg seg) face] (rest acc))
-              (cons [seg face] acc)))))
-
-(defn fontify-runs--spans (text base end spans cur acc)
-  "O(spans) tiler for a line with no overlay `ranges`: emit a nil-faced run for each
-gap between the lexer `spans` and each span's text in its own face, over `[cur, end)`.
-`spans` must be advanced past `cur` and is consumed left-to-right — no per-char scan."
-  (cond
-    (or (empty? spans) (>= (first (first spans)) end)) (reverse (if (< cur end)
-                                                                  (fontify-runs--push acc
-                                                                    (substring text
-                                                                      (- cur base)
-                                                                      (- end base))
-                                                                    nil)
-                                                                  acc))
-    :else (let ([s e f] (first spans)
-                lo (max s cur)
-                hi (min e end)
-                acc1 (if (> lo cur)
-                       (fontify-runs--push acc (substring text (- cur base) (- lo base)) nil)
-                       acc)
-                acc2 (fontify-runs--push acc1 (substring text (- lo base) (- hi base)) f))
-            (fontify-runs--spans text base end (rest spans) hi acc2))))
-
 (defn fontify-runs--acc (text base spans ranges len i start cur acc)
   "Tail-recursive run-length coalescer: emit a `[substring face]` run whenever the
 per-char face changes. `spans` is advanced monotonically (`fontify-runs--drop`) so the
@@ -300,7 +269,7 @@ touches take an O(spans) path; only lines a range crosses pay the per-char merge
             spans0 (fontify-runs--drop spans base)
             line-ranges (filter (fn ([lo hi f]) (and (< lo end) (> hi base))) ranges))
         (if (empty? line-ranges)
-          (fontify-runs--spans text base end spans0 base '())
+          (span-runs text base spans0)  ; native no-overlay fast path (the common case)
           (fontify-runs--acc text
             base
             spans0

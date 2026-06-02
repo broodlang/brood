@@ -1012,6 +1012,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![string], vec_ty),
         scan_tokens,
     );
+    def(
+        heap,
+        "span-runs",
+        Arity::exact(3),
+        Sig::new(vec![string, int, any], list_ty),
+        span_runs,
+    );
     // CST parse with absolute positions — every node a map `{:kind :start :end …}`
     // (char offsets). Backs structural navigation (std/sexp); see
     // `parse_source_positioned` for the shape.
@@ -1729,6 +1736,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("read-all", &["s"], "Parse every form in string s and return them as a list (the all-forms sibling of read-string)."),
     ("parse-source", &["s"], "Parse s into a lossless CST tree as nested vectors (mechanism for std/format.blsp)."),
     ("scan-tokens", &["s"], "Lexically tokenize Brood source s into a vector of [start end kind text] tokens (char offsets, end-exclusive; whitespace skipped). kind is :comment, :string, :number, :keyword, :symbol, :open, or :close. The lossless token stream a fontifier / structural tool walks — the per-char scan runs natively, leaving policy (faces, head-position) to the consumer over O(tokens)."),
+    ("span-runs", &["text", "base", "spans"], "Tile text (first char at offset base) into a list of [substring face] runs from ascending, non-overlapping [start end face] spans: gaps between spans are nil-faced runs, each span its text in its face, adjacent equal-face runs coalesced. The no-overlay fast path of the highlight tiler (fontify-runs), in Rust. Faces are opaque."),
     ("parse-source-positioned", &["s"], "Parse s into a CST of maps, each `{:kind :start :end}` (leaves add :text, containers/wrappers add :kids) with half-open character offsets — for structural navigation (std/sexp)."),
     ("eval-string", &["s"], "Read and evaluate every form in string s (the string analogue of load)."),
     ("load", &["path"], "Read and evaluate every form in the file at path."),
@@ -3926,6 +3934,85 @@ fn scan_tokens(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         i = end;
     }
     Ok(heap.alloc_vector(out))
+}
+
+/// Append the run `[lo, hi)` (absolute offsets; `base` is the text's first char) in
+/// `face` to `runs`, coalescing into the previous run when the faces are `equal` — the
+/// runs partition the line contiguously, so coalescing just extends the last run's end.
+fn span_runs_push(
+    runs: &mut Vec<(usize, usize, Value)>,
+    base: i64,
+    lo: i64,
+    hi: i64,
+    face: Value,
+    heap: &Heap,
+) {
+    if hi <= lo {
+        return;
+    }
+    let lhi = (hi - base) as usize;
+    if let Some(last) = runs.last_mut() {
+        if heap.equal(last.2, face) {
+            last.1 = lhi;
+            return;
+        }
+    }
+    runs.push(((lo - base) as usize, lhi, face));
+}
+
+/// `(span-runs text base spans)` — tile `text` (its first char at offset `base`) into a
+/// list of `[substring face]` runs from ascending, non-overlapping `[start end face]`
+/// `spans`: each gap between spans is a nil-faced run, each span its text in its own
+/// face, and adjacent equal-face runs coalesce. The no-overlay fast path of the
+/// fontifier's span→runs tiler (`std/editor/highlight`'s `fontify-runs`), in Rust — it
+/// runs per visible line every frame. Spans outside `[base, base+len)` are ignored;
+/// faces are opaque (re-emitted as-is, compared with `equal` to coalesce)."
+fn span_runs(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let text = expect_string(heap, "span-runs", arg(args, 0))?;
+    let base = expect_int(heap, "span-runs", arg(args, 1))?;
+    let span_vals = heap.seq_items(arg(args, 2))?;
+    let mut spans: Vec<(i64, i64, Value)> = Vec::with_capacity(span_vals.len());
+    for sv in &span_vals {
+        let parts = match sv {
+            Value::Vector(id) => heap.vector(*id).to_vec(),
+            _ => return Err(LispError::runtime("span-runs: each span must be a [start end face] vector".to_string())),
+        };
+        match (parts.first(), parts.get(1), parts.get(2)) {
+            (Some(Value::Int(s)), Some(Value::Int(e)), Some(f)) => spans.push((*s, *e, *f)),
+            _ => return Err(LispError::runtime("span-runs: each span must be [int int face]".to_string())),
+        }
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let end = base + chars.len() as i64;
+    let mut runs: Vec<(usize, usize, Value)> = Vec::new();
+    let mut cur = base;
+    for (s, e, f) in spans {
+        if e <= base {
+            continue; // span ends before the window — can't cover it
+        }
+        if s >= end {
+            break; // ascending spans: the rest are past the window
+        }
+        let lo = s.max(cur);
+        let hi = e.min(end);
+        if lo > cur {
+            span_runs_push(&mut runs, base, cur, lo, Value::Nil, heap); // gap before the span
+        }
+        span_runs_push(&mut runs, base, lo, hi, f, heap);
+        cur = hi;
+    }
+    if cur < end {
+        span_runs_push(&mut runs, base, cur, end, Value::Nil, heap); // trailing gap
+    }
+    let out: Vec<Value> = runs
+        .iter()
+        .map(|&(lo, hi, f)| {
+            let seg: String = chars[lo..hi].iter().collect();
+            let sv = heap.alloc_string(&seg);
+            heap.alloc_vector(vec![sv, f])
+        })
+        .collect();
+    Ok(heap.list_from_slice(&out))
 }
 
 /// `(%str-index-of s needle)` — the 0-based **char** index of the first
