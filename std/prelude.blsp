@@ -420,6 +420,7 @@ current element and `acc` is the current accumulator."
     (string? coll) (string-length coll)
     (vector? coll) (vector-length coll)
     (map? coll) (map-count coll)
+    (transient? coll) (transient-count coll)
     else (count--acc coll 0)))
 (def length count)
 
@@ -445,6 +446,7 @@ Maps look up by key; vectors, lists, and strings index by integer position
 (out-of-range yields the default, never an error)."
   (cond
     (map? coll) (map-get coll k (first default))
+    (transient? coll) (transient-get coll k (first default))
     (string? coll) (if (and (int? k) (>= k 0) (< k (string-length coll)))
                      (char-at coll k)
                      (first default))
@@ -478,10 +480,12 @@ with two distinct sentinels — a present key returns its stored value both time
 an absent key returns each sentinel, and those differ. (One sentinel can't tell
 absence from a key whose *stored value* happens to equal it; two distinct ones
 can.)"
-  (let (a (map-get m k :%contains-miss-a))
-    (if (= a :%contains-miss-a)
-      (not (= (map-get m k :%contains-miss-b) :%contains-miss-b))
-      true)))
+  (if (transient? m)
+    (transient-contains? m k)
+    (let (a (map-get m k :%contains-miss-a))
+      (if (= a :%contains-miss-a)
+        (not (= (map-get m k :%contains-miss-b) :%contains-miss-b))
+        true))))
 (defn reduce-kv (f init m)
   "Fold over the entries of map `m`, calling `(f acc k v)`, starting from `init`."
   (fold (fn (acc p) (f acc (first p) (second p))) init (map-pairs m)))

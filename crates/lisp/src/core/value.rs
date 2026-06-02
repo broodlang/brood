@@ -282,6 +282,7 @@ handle!(PairId);
 handle!(VecId);
 handle!(StrId);
 handle!(BigIntId);
+handle!(TransientId);
 handle!(RopeId);
 handle!(ClosureId);
 handle!(NativeId);
@@ -367,6 +368,16 @@ pub enum Value {
     /// owning process drives it via the non-blocking `tcp-*` primitives); **never**
     /// sent across processes. The TLS counterpart reuses this same handle.
     Socket(u64),
+    /// A **transient map** — Clojure's `(transient m)` / `assoc!` / `persistent!`
+    /// fast-building handle into the per-process `transients` slab. A heap object
+    /// holding a [`crate::core::heap::TransientCell`]: a mutable `root` (a `Map`),
+    /// a build **watermark**, the LOCAL **epoch** the watermark is valid in, and a
+    /// `live` flag. Identity-mutable (unlike every other Value): `assoc!`/`dissoc!`
+    /// rewrite the cell in place and return *the same handle*, mutating nodes the
+    /// transient owns rather than path-copying. Process-local — never frozen into
+    /// PRELUDE/RUNTIME, never sent across processes. `type-of` is `:transient`; it
+    /// is **not** a `map?`. See `Heap::transient` and the epoch guard.
+    Transient(TransientId),
 }
 
 /// The runtime type tags — the discriminant of [`Value`] made first-class, so it
@@ -400,6 +411,7 @@ pub enum Tag {
     Pid,
     Rope,
     Socket,
+    Transient,
 }
 
 impl Tag {
@@ -424,6 +436,7 @@ impl Tag {
             Tag::Pid => "pid",
             Tag::Rope => "rope",
             Tag::Socket => "socket",
+            Tag::Transient => "transient",
         }
     }
 }
@@ -451,6 +464,7 @@ pub fn tag(v: Value) -> Tag {
         Value::Pid { .. } => Tag::Pid,
         Value::Rope(_) => Tag::Rope,
         Value::Socket(_) => Tag::Socket,
+        Value::Transient(_) => Tag::Transient,
     }
 }
 
