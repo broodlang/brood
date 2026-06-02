@@ -23,10 +23,11 @@ dev-tools = []
 # the always-on terminal (crossterm) frontend. Off by default so the core lib —
 # which `nest`/`brood-lsp` embed — pulls no windowing stack; opt in with
 # `--features gui`. winit owns a native window + event loop, softbuffer gives a
-# raw CPU framebuffer, and fontdue rasterises a monospace glyph grid. The display
-# *protocol* is unchanged Brood data (render ops); these just paint it to a window
-# instead of a terminal. See src/gui.rs and std/observer.blsp's `(observe)`.
-gui = ["dep:winit", "dep:softbuffer", "dep:fontdue"]
+# raw CPU framebuffer, and cosmic-text shapes + rasterises glyphs (with font
+# fallback and color emoji, via its bundled swash) into the monospace cell grid.
+# The display *protocol* is unchanged Brood data (render ops); these just paint it
+# to a window instead of a terminal. See src/gui.rs and std/observer.blsp's `(observe)`.
+gui = ["dep:winit", "dep:softbuffer", "dep:cosmic-text"]
 
 [dependencies]
 # Lock-free, append-only vector for the shared RUNTIME code region: stable
@@ -97,7 +98,17 @@ webpki-roots = "1"
 # `make clippy` lints `--all-features`, so a mismatch is caught at the gate.
 winit = { version = "0.30", optional = true }
 softbuffer = { version = "0.4", optional = true }
-fontdue = { version = "0.9", optional = true }
+# Text shaping + glyph rasterisation for the GUI grid: cosmic-text does HarfBuzz-class
+# shaping (so ZWJ emoji / flags / skin-tone sequences form one glyph), font fallback
+# (a cluster the mono font lacks falls back to the bundled Noto Color Emoji), and color
+# glyph rendering (CBDT/COLR) via its bundled swash. Replaces the per-char monochrome
+# fontdue rasteriser. No windowing types, so no raw-window-handle coupling above.
+cosmic-text = { version = "0.14", optional = true }
+# Display-cell width (the `display-width` builtin) + grapheme-cluster segmentation
+# (the renderer advances per cluster, not per codepoint). Always linked — tiny, no_std
+# tables — so the width primitive is available in the lean runtime too.
+unicode-width = "0.2"
+unicode-segmentation = "1"
 
 [dev-dependencies]
 # Lightweight microbenchmark harness for the interpreter core. Dev-only (the

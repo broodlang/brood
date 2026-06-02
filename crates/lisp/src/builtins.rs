@@ -354,6 +354,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::with_rest(vec![string, int], int, string),
         substring,
     );
+    def(
+        heap,
+        "display-width",
+        Arity::exact(1),
+        Sig::new(vec![string], int),
+        display_width,
+    );
     // Linear substring search — like `substring`/`lower`, it genuinely needs Rust:
     // Brood has no O(1) char access (char indexing into UTF-8 is O(index)), so a
     // pure-Brood scan re-skips and is unavoidably O(n²) — which made `doc-search`'s
@@ -1538,6 +1545,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("map-pairs", &["m"], "The entries of m as a list of [k v] vectors, in insertion order."),
     ("map-count", &["m"], "The number of entries in map m. O(1) — the CHAMP root tracks its size."),
     ("string-length", &["s"], "The number of characters in string s."),
+    ("display-width", &["s"], "How many terminal/grid cells string s occupies (grapheme-cluster aware: an emoji / flag / CJK char counts as 2, a combining mark 0). The width-aware counterpart to string-length."),
     ("substring", &["s", "start", "end"], "The characters of s in the range [start, end), char-indexed. end is optional and defaults to (string-length s), so (substring s start) is \"from start to the end\"."),
     ("upper", &["s"], "s upper-cased (Unicode-aware)."),
     ("lower", &["s"], "s lower-cased (Unicode-aware)."),
@@ -2258,6 +2266,19 @@ fn string_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match v {
         Value::Str(id) => Ok(Value::Int(heap.string(id).chars().count() as i64)),
         _ => Err(LispError::wrong_type(heap, "string-length", "string", v)),
+    }
+}
+
+/// `(display-width s)` — how many terminal/grid *cells* `s` occupies, counting
+/// grapheme clusters (an emoji / flag / CJK char is 2, a combining mark 0). The
+/// width-aware counterpart to `string-length` (which counts codepoints) — the
+/// editor's column / cursor math uses it so a wide glyph advances two columns. The
+/// GUI renderer advances the cell grid by the same measure (`crate::text_width`).
+fn display_width(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let v = arg(args, 0);
+    match v {
+        Value::Str(id) => Ok(Value::Int(crate::text_width::display_width(heap.string(id)) as i64)),
+        _ => Err(LispError::wrong_type(heap, "display-width", "string", v)),
     }
 }
 
