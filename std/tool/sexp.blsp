@@ -31,57 +31,21 @@ for binding in a keymap. `(require 'sexp)`."
   "Kinds whose payload is a child vector (we descend into these)."
   (or (= k :root) (= k :list) (= k :vector) (= k :map)))
 
-(defn wrapper-kind? (k)
-  "Reader-macro kinds that wrap a single child (the prefix char is implicit)."
-  (or (= k :quote) (= k :quasi) (= k :unquote) (= k :splice)))
-
-(defn prefix-len (k)
-  "Source length of a wrapper's implicit prefix: `~@` is 2, `'`/`` ` ``/`~` are 1."
-  (if (= k :splice) 2 1))
-
-(defn delim-len (k)
-  "Width of a container's (implicit, not emitted as leaves) opening/closing
-delimiter: 0 for the whole-file `:root`, 1 for `(`/`[`/`{`."
-  (if (= k :root) 0 1))
-
 (defn form? (anode)
   "A real s-expression node — anything but whitespace and comments."
   (let (k (get anode :kind))
     (and (not (= k :whitespace)) (not (= k :comment)))))
 
-;; ---- annotate the CST with absolute positions -------------------------------
-
-(defn annotate (node start)
-  "Annotate one `parse-source` node with absolute positions, returning
-`[anode end]`. A leaf → `{:kind :start :end}`; a container/wrapper also carries
-`:kids` (annotated children). Wrappers account for their implicit prefix char(s)."
-  (let (kind (first node) payload (second node))
-    (cond
-      (container-kind? kind)
-      ;; children start after the opening delimiter; the close delimiter adds its
-      ;; width to the container's end (delimiters aren't emitted as leaves).
-      (let (dl (delim-len kind)
-            [kids cend] (annotate-list payload (+ start dl))
-            end (+ cend dl))
-        [{:kind kind :start start :end end :kids kids} end]) (wrapper-kind? kind)
-      (let (cstart (+ start (prefix-len kind))
-            [child cend] (annotate payload cstart))
-        [{:kind kind :start start :end cend :kids (list child)} cend]) :else
-      (let (end (+ start (string-length payload)))
-        [{:kind kind :start start :end end} end]))))
-
-(defn annotate-list (nodes start)
-  "Annotate a child-node vector left to right; returns `[annotated-list end]`."
-  (annotate-list* nodes start (list)))
-(defn annotate-list* (nodes pos acc)
-  (if (empty? nodes)
-    [(reverse acc) pos]
-    (let ([anode end] (annotate (first nodes) pos))
-      (annotate-list* (rest nodes) end (cons anode acc)))))
+;; ---- the position-annotated CST ---------------------------------------------
 
 (defn tree (text)
-  "The annotated CST root for `text` (a `{:kind :root :kids …}` node)."
-  (first (annotate (parse-source text) 0)))
+  "The annotated CST root for `text` (a `{:kind :root :kids …}` node), every node
+carrying half-open character `:start`/`:end` positions. The kernel's
+`parse-source-positioned` projects the positions it already tracks in one pass —
+the structure queries below navigate the result directly. (This replaced an
+in-Brood `annotate` walk that re-derived positions by summing leaf lengths: O(n)
+interpreted and the bottleneck in structural navigation.)"
+  (parse-source-positioned text))
 
 ;; ---- structure queries ------------------------------------------------------
 

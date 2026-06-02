@@ -38,3 +38,28 @@
     (let (b (down (make-buffer "(a b)") nil))
       (assert= (get b :point) 1)
       (assert= (get (up b nil) :point) 0))))
+
+;; `tree` is the kernel's `parse-source-positioned` — the position-annotated CST the
+;; navigation runs over. These pin the node shape the queries above depend on.
+(describe "parse-source-positioned (the kernel CST behind sexp/tree)"
+  (test "the root is a positioned container node spanning the whole text"
+    (let (r (tree "(a b)"))
+      (assert= (get r :kind) :root)
+      (assert= (get r :start) 0)
+      (assert= (get r :end) 5)
+      (assert= (count (get r :kids)) 1)))   ; one top-level form, no trivia
+  (test "a leaf carries its raw :text and half-open positions"
+    (let (lst (first (forms-of (tree "(ab cd)")))
+          ab (first (forms-of lst)))
+      (assert= (get ab :kind) :symbol)
+      (assert= (get ab :text) "ab")
+      (assert= (get ab :start) 1)
+      (assert= (get ab :end) 3)))
+  (test "positions are CHARACTER offsets, not bytes (multibyte leading content)"
+    ;; "é" is two UTF-8 bytes but one character; the symbol after it starts at char 2.
+    (let (x (first (forms-of (tree "é x"))))
+      (assert= (get x :start) 0))           ; the "é" symbol at char 0
+    (let (forms (forms-of (tree "é x"))
+          x (first (rest forms)))
+      (assert= (get x :start) 2)             ; "x" at char 2 (byte 3) — char offset
+      (assert= (get x :end) 3))))
