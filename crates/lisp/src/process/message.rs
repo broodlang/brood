@@ -215,6 +215,16 @@ fn to_message_rec(
         // per-connection-handler pattern). It is NOT node-portable: the cross-node
         // wire codec rejects it (the id means nothing in another runtime).
         Value::Socket(id) => Message::Socket(id),
+        Value::Transient(_) => {
+            // A transient is a process-local, identity-mutable build handle (its
+            // root maps slab is LOCAL). Deep-copying it across processes would
+            // both break identity-mutation and dangle the watermark. Make it
+            // persistent first and send the resulting immutable map.
+            return Err(LispError::type_err(
+                "cannot send a transient in a message; call (persistent! t) and \
+                 send the resulting map",
+            ));
+        }
     })
 }
 

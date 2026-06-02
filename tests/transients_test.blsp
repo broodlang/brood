@@ -131,3 +131,72 @@
           (assert= (get r1 80) 800)             ;; v1 left key 80 (>=60) — carried from the global
           (assert= (get r2 1010) 10)            ;; v2 result (new key scheme, late-bound)
           (assert= (get r2 50) 500))))))         ;; v2's keys are 1000+, so global's key 50 survives
+
+;; ===========================================================================
+;; The EXPOSED transient surface: (transient m) / (assoc! t k v) /
+;; (dissoc! t k) / (persistent! t), plus transient? and live get/count/
+;; contains?. The build above tested the kernel's *internal* transient
+;; (map_from_pairs). These tests drive the user-facing identity-mutable handle
+;; across multiple ops — which means a GC safepoint can fire BETWEEN ops, the
+;; hazard the epoch guard defends against.
+;; ===========================================================================
+
+;; Build {0->0 … (n-1)->(n-1)} persistently (immutable assoc fold).
+(defn ts-persistent (n) (fold (fn (m i) (assoc m i i)) {} (range n)))
+;; Build the same map with the transient surface API. The recursion makes
+;; `assoc!` the per-step op, so under BROOD_GC_STRESS=1 a collection fires
+;; between every call — relocating the maps slab the watermark indexes.
+(defn ts-fill! (t i n) (if (>= i n) t (ts-fill! (assoc! t i i) (+ i 1) n)))
+(defn ts-transient (n) (persistent! (ts-fill! (transient {}) 0 n)))
+
+(describe "transient surface API: basics"
+  (test "transient? / type-of / not a map"
+    (is (transient? (transient {})))
+    (refute (transient? {}))
+    (refute (transient? 1))
+    (assert= (type-of (transient {})) :transient)
+    (refute (map? (transient {})))
+    (is (map? (persistent! (transient {})))))
+  (test "assoc! then persistent! yields the canonical map"
+    (assert= (persistent! (assoc! (assoc! (transient {}) :a 1) :b 2)) {:a 1 :b 2}))
+  (test "assoc! is identity-mutable — returns the same handle"
+    (let (t (transient {})) (is (= t (assoc! t :a 1)))))
+  (test "dissoc! removes in place"
+    (assert= (persistent! (dissoc! (assoc! (assoc! (transient {}) :a 1) :b 2) :a)) {:b 2}))
+  (test "seeding from an existing map leaves the original untouched"
+    (let (m {:a 1} t (transient m))
+      (assoc! t :b 2)
+      (assert= (persistent! t) {:a 1 :b 2})
+      (assert= m {:a 1}))))
+
+(describe "transient surface API: live lookups (Clojure-style)"
+  (test "get / count / contains? read a live transient"
+    (let (t (assoc! (assoc! (transient {}) :a 1) :b 2))
+      (assert= (get t :a) 1)
+      (assert= (get t :missing :dflt) :dflt)
+      (assert= (count t) 2)
+      (is (contains? t :a))
+      (refute (contains? t :missing)))))
+
+(describe "transient surface API: use-after-persistent! errors"
+  (test "assoc! / dissoc! / persistent! after persistent! all error"
+    (let (t (transient {}))
+      (persistent! t)
+      (assert-error (assoc! t :a 1))
+      (assert-error (dissoc! t :a))
+      (assert-error (persistent! t)))))
+
+(describe "transient surface API: GC safety (watermark survives relocation)"
+  ;; The crux: under BROOD_GC_STRESS=1 a collect fires between every `assoc!`,
+  ;; moving the maps slab; the epoch guard re-anchors the watermark each time.
+  ;; A 2000-entry build must still equal the persistent fold, no flush_oob/poison.
+  (test "a 2000-entry transient build equals the persistent fold"
+    (assert= (ts-transient 2000) (ts-persistent 2000)))
+  (test "transient builds equal persistent maps at several sizes"
+    (is (= (ts-transient 0) (ts-persistent 0)))
+    (is (= (ts-transient 1) (ts-persistent 1)))
+    (is (= (ts-transient 64) (ts-persistent 64)))
+    (is (= (ts-transient 257) (ts-persistent 257)))
+    (is (= (ts-transient 1000) (ts-persistent 1000))))
+  (test "count matches after a stress build"
+    (assert= (count (ts-transient 500)) 500)))

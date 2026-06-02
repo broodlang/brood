@@ -134,6 +134,17 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
             out.push_str(&id.to_string());
             out.push('>');
         }
+        Value::Transient(id) => {
+            // An identity-mutable build handle; no readable literal. Show its
+            // entry count and whether it's still live (Clojure prints opaquely
+            // too — you `persistent!` it before you print the result).
+            out.push_str("#<transient :count ");
+            match heap.transient_root(id) {
+                Ok(Value::Map(m)) => out.push_str(&heap.map_size(m).to_string()),
+                _ => out.push_str("persistent!"),
+            }
+            out.push('>');
+        }
     }
 }
 
