@@ -48,11 +48,14 @@ Used by `std/lineedit.blsp` (the REPL editor); pure, so independently testable."
 ;; from the `(special-forms)` primitive — the canonical Rust `SPECIAL_FORMS`, shared
 ;; with the LSP — so this can't drift from the runtime / tooling (ADR-052).
 (def hl--special-forms (special-forms))
+;; As a SET (map → true) so `special-form?` is an O(1) hash lookup, not an O(n) list
+;; scan: it runs on every head-position atom on the fontify hot path.
+(def hl--special-set (fold (fn (m s) (assoc m s true)) {} hl--special-forms))
 
 (defn special-form? (s)
   "True if string `s` names a Brood special form / core macro that should highlight
 as a keyword. Mirrors the LSP's SPECIAL_FORMS list."
-  (includes? hl--special-forms s))
+  (= true (get hl--special-set s)))
 
 ;; ---- character classes ------------------------------------------------------
 
@@ -65,70 +68,78 @@ as a keyword. Mirrors the LSP's SPECIAL_FORMS list."
   (or (hl--ws? c) (hl--bracket? c) (= c "\"") (= c ";")))
 
 (defn hl--number? (tok)
-  "True if `tok` reads as a number (so it colours as one rather than a symbol)."
-  (not (nil? (string->number tok))))
+  "True if `tok` reads as a number (so it colours as one rather than a symbol). A cheap
+first-char gate skips the `string->number` parse for the common case — an identifier
+that can't begin a number — since this runs on every atom on the fontify hot path."
+  (and (string-contains? "+-.0123456789" (char-at tok 0))
+    (not (nil? (string->number tok)))))
 
 ;; ---- scanning primitives (shared by lexer + matchers) -----------------------
 
+;; The inner scans run on the native `string-span-until` char-class scanner (O(run) in
+;; Rust) rather than per-char Brood recursion — these feed the bracket/call matchers,
+;; which are on the render hot path. The delimiter set mirrors `hl--delim?`.
+(def hl--delim-chars " \t\n\r,()[]{}\";")
+
 (defn hl--to-eol (src i n)
   "Index of the newline ending the line containing `i` (or `n` at end of input)."
-  (if (or (>= i n) (= (char-at src i) "\n")) i (hl--to-eol src (inc i) n)))
+  (min n (string-span-until src i "\n")))
 
 (defn hl--string-end (src i n)
   "Index just past the closing quote of a string whose body starts at `i` (one past
 the opening quote), honouring `\\` escapes; `n` if the string is unterminated."
-  (cond
-    (>= i n) i
-    (= (char-at src i) "\\") (hl--string-end src (+ i 2) n)
-    (= (char-at src i) "\"") (inc i)
-    :else (hl--string-end src (inc i) n)))
+  (let (j (string-span-until src i "\\\""))  ; first backslash or quote (or end)
+    (cond
+      (>= j n) n
+      (= (char-at src j) "\"") (inc j)
+      :else (hl--string-end src (+ j 2) n))))  ; backslash: skip it and the escaped char
 
 (defn hl--atom-end (src i n)
   "Index of the first delimiter at or after `i` — the end of an atom token."
-  (if (or (>= i n) (hl--delim? (char-at src i))) i (hl--atom-end src (inc i) n)))
+  (min n (string-span-until src i hl--delim-chars)))
 
 ;; ---- the lexer: source -> colour spans --------------------------------------
 
 ;; `nil` / `true` / `false` colour as keyword-like literals (the LSP's T_KEYWORD),
 ;; regardless of position — so `(nil? x)` shows `nil` as a constant, not a call head.
-(def hl--constants ["nil" "true" "false"])
+;; (The native `scan-tokens` classifies those, and `:`-prefixed names, as `:keyword`.)
 
-(defn hl--atom-face (tok after)
-  "The face for atom `tok`, given whether it sits in head (`after` a `(`) position."
-  (cond
-    (starts-with? tok ":") hl-face-keyword
-    (includes? hl--constants tok) hl-face-keyword
-    (hl--number? tok) hl-face-number
-    (and after (special-form? tok)) hl-face-special
-    after hl-face-function
-    :else nil))
+;; The face a `:keyword` / `:number` / `:comment` / `:string` token paints in — the
+;; position-independent kinds. `:symbol` is resolved separately (head position decides
+;; special-form vs call vs plain), and `:open`/`:close` carry no colour.
+(def hl--kind->face
+  {:comment hl-face-comment :string hl-face-string :number hl-face-number
+   :keyword hl-face-keyword})
 
-(defn hl--lex (src i n after acc)
-  "Tail-recursive lexer worker. `after` is true when the next atom is in head
-position (directly inside a `(`, across whitespace/comments). Accumulates spans in
-reverse."
-  (if (>= i n)
+(defn hl--spans (toks after acc)
+  "Walk the `scan-tokens` stream into `[start end face]` colour spans, tracking head
+position (`after` — true just inside a `(`, carried across comments like the reader).
+Only `:symbol` needs position: head + special form → keyword face, head → call face,
+else uncoloured. Accumulates in reverse."
+  (if (empty? toks)
     (reverse acc)
-    (let (c (char-at src i))
+    (let ([s e kind text] (first toks)
+          rest (rest toks))
       (cond
-        (hl--ws? c) (hl--lex src (inc i) n after acc)
-        (= c ";") (let (j (hl--to-eol src (inc i) n))
-                    (hl--lex src j n after (cons [i j hl-face-comment] acc)))
-        (= c "\"") (let (j (hl--string-end src (inc i) n))
-                     (hl--lex src j n false (cons [i j hl-face-string] acc)))
-        (= c "(") (hl--lex src (inc i) n true acc)
-        (hl--open? c) (hl--lex src (inc i) n false acc)
-        (hl--close? c) (hl--lex src (inc i) n false acc)
-        :else (let (j (hl--atom-end src (inc i) n)
-                    face (hl--atom-face (substring src i j) after))
-                (hl--lex src j n false (if (nil? face) acc (cons [i j face] acc))))))))
+        (= kind :open) (hl--spans rest (= text "(") acc)   ; only `(` opens head position
+        (= kind :close) (hl--spans rest false acc)
+        (= kind :comment) (hl--spans rest after (cons [s e hl-face-comment] acc))  ; keeps `after`
+        (= kind :symbol)
+          (let (face (cond (and after (special-form? text)) hl-face-special
+                           after hl-face-function
+                           :else nil))
+            (hl--spans rest false (if (nil? face) acc (cons [s e face] acc))))
+        :else (let (face (get hl--kind->face kind))  ; :string / :number / :keyword
+                (hl--spans rest false (if (nil? face) acc (cons [s e face] acc))))))))
 
 (defn highlight-spans (src)
   "Lexically tokenize Brood `src` into a list of `[start end face]` colour spans
 (character offsets, end-exclusive) for the tokens that carry a colour — comments,
 strings, numbers, keywords, and head-position symbols (special forms vs calls).
-Whitespace and plain variable references carry no span (the default colour)."
-  (hl--lex src 0 (string-length src) false '()))
+Whitespace and plain variable references carry no span (the default colour). The
+per-character scan is the native `scan-tokens`; this only assigns faces over the token
+stream (O(tokens)), so it stays fast enough for per-frame fontification."
+  (hl--spans (scan-tokens src) false '()))
 
 ;; ---- windowed highlighting (fontify just a viewport) ------------------------
 ;; A large buffer is too costly to lex whole every frame. The editor instead lexes

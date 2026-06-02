@@ -5641,3 +5641,58 @@ LSP/REPL highlighter), the central `kw::` spelling module (devlog 2026-05-30). L
 `std/tool/grammar.blsp`, `crates/nest/src/main.rs` (`nest grammar`),
 `crates/lisp/src/builtins.rs` (`SPECIAL_FORMS`) + `core/keywords.rs` (the new consts);
 consumed by `brood-vscode` and `brood-mode`.
+
+## ADR-093 — Native char-class scanners + `scan-tokens`: lexing mechanism in Rust, faces in Brood
+
+**Status:** accepted + implemented (2026-06-02). Three new builtins
+(`string-span`, `string-span-until`, `scan-tokens`); the Brood fontifier
+(`std/editor/highlight.blsp`) is rewired to walk `scan-tokens`. No semantic change to
+`highlight-spans` (its tests are unchanged).
+
+**Context.** Syntax fontification is on the editor's render hot path — re-lexed on every
+edit and on scroll past the cached band (ADR: the editor's `:span-cache`). The lexer
+(`hl--lex`) was pure Brood, scanning character-by-character via tail recursion:
+`highlight-spans` cost ~0.5 ms/line interpreted, so a screenful was ~25 ms and a
+margin-widened band ~150 ms — enough to make typing and scrolling feel sticky in a large
+file, even with windowed fontification and the span cache. Profiling showed the cost was
+two interpreted hot loops: the per-character advance (whitespace/atom/comment scanning)
+and the per-token classification (`special-form?` was an O(n) `includes?` over the whole
+special-form list; `hl--number?` ran `string->number` on *every* atom).
+
+**Decision.** **Put the lexing *mechanism* in Rust and keep the colouring *policy* in
+Brood.** Three builtins:
+
+- `(string-span s start chars)` / `(string-span-until s start chars)` — forward
+  char-class run scanners (skip a run *of* / *until* a char set), char-indexed like
+  `substring`. The general primitive any tokenizer's inner loop wants; the markdown
+  lexer's line scan and the highlight bracket/call matchers use them too.
+- `(scan-tokens s)` — a lossless lexical token stream for Brood source: a vector of
+  `[start end kind text]` (`:comment :string :number :keyword :symbol :open :close`),
+  whitespace skipped, strings escape-aware. One native O(n) pass.
+
+`highlight-spans` now walks `scan-tokens`, assigning faces over O(tokens) — the only
+per-token work left in Brood. Crucially the **head-position** rule (a `:symbol` right
+after `(` is a special form or a call) and the **face map** stay in Brood: `scan-tokens`
+classifies lexical category (using data Rust already owns — `SPECIAL_FORMS` isn't needed
+here; number-parsing matches `string->number`), and Brood decides what each category
+*looks like*. Result: ~5× faster (`highlight-spans` 26 ms → 5 ms for a 50-line viewport,
+148 ms → 31 ms for a 288-line band), so a per-keystroke band re-lex is ~11 ms.
+
+Two adjacent pure-Brood wins shipped with it: `special-form?` is now an O(1) set lookup,
+and `hl--number?` gates the `string->number` parse behind a first-char check.
+
+**Consequences.**
+- The mechanism/policy seam matches ADR-006: char scanning genuinely needs Rust (a
+  per-char interpreted loop is the bottleneck); faces + head-position are Brood, editable
+  live. `scan-tokens` is general tooling (a sibling of `parse-source`), reusable by
+  structural tools and completion, not highlight-specific.
+- `hl--lex` / `hl--atom-face` / `hl--constants` are removed (dead); `hl--number?` and the
+  bracket/call matchers stay, now reading the native scanners.
+- The markdown lexer got the cheap `string-span-until` swap for its line scan; its
+  per-char *inline* scanner (emphasis/links) is a deferred follow-up — it has no
+  `scan-tokens` analogue yet.
+
+**References.** ADR-006 (mechanism in the kernel, policy in Brood), ADR-052
+(`highlight-spans` shape, `(special-forms)`), the editor's per-frame span cache. Lives in
+`crates/lisp/src/builtins.rs` (`string_span`/`string_span_until`/`scan_tokens`),
+`std/editor/highlight.blsp`, `std/editor/markdown.blsp`.
