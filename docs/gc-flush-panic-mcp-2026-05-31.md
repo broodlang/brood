@@ -1,6 +1,64 @@
 # GC `flush_oob` panic in a long-running `nest mcp` server (2026-05-31)
 
 **Status: CONFIRMED — stale-binary recurrence (KI-1), NOT a live regression** (confirmed on HEAD `00f06ce`, 2026-05-31).
+
+---
+
+## Recurrence 2026-06-02 — same cause (stale MCP server), re-confirmed
+
+Hit again while driving the `brood-life` project through `nest mcp` (profiling
+`life/step` with `eval`/`bench`). **Same signature, same root cause: the attached
+MCP server was running a pre-rebuild binary.**
+
+**Evidence it's the stale-binary case, not a live regression:**
+
+| Fact | Value |
+|---|---|
+| Running `nest mcp` server | PID 1934575, **started Tue Jun 2 08:05:42** |
+| `~/.local/bin/nest` (what the server execs) mtime | **2026-06-02 08:45:45** — rebuilt ~40 min *after* the server started |
+| brood HEAD | `30ec33a "test: GC rooting-across-collect bench repro (scratch)"` (active GC-rooting work) |
+
+So the server is serving a binary from before the 08:45 rebuild — exactly the
+`StalenessGuard` condition (binary mtime newer than server start). The guard's
+stderr warning isn't visible through the MCP/stdio tool channel, so the stale
+server kept serving the pre-fix runtime unnoticed.
+
+**Verbatim panics this session (all `flush_oob`, `index ≫ slab_len`):**
+```
+GC flush: env handle ... region=0 age=old   epoch=20   index=1133 slab_len=23, collecting old-gen (major)
+GC flush: env handle ... region=0 age=old   epoch=16   index=199  slab_len=23, collecting old-gen (major)
+GC flush: vector handle ... region=0 age=young epoch=948  index=167  slab_len=13, collecting nursery (minor)
+GC flush: map handle ... region=0 age=young epoch=1075 index=1753 slab_len=69, collecting nursery (minor)
+```
+Triggered by: `bench (reduce + 0 (range 100000)) :iterations 10` (the
+`mcp-bench-tool` shape — first result held live across the bench loop), and a
+single heavy `eval` against an image already populated with several ~3500-entry
+maps.
+
+**Could NOT reproduce on the current (08:44/08:45) build**, matching the
+2026-05-31 finding. All of these run clean on a fresh debug-assertions binary,
+including under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`:
+- the faithful `mcp-bench-tool` shape: `read-string` a form, `(eval form)` once
+  into a held `value`, loop `(eval form)` N more times, deref `value` at the end
+  — with the image pre-populated by three retained ~3500-entry global maps;
+- the same under forced-frequent majors (`BROOD_GC_MAJOR=1500 BROOD_GC_TENURE=400
+  BROOD_GC_FLOOR=300`);
+- 20× `(reduce + 0 (range 100000))` back-to-back via `nest run`.
+
+The synthetic repros top out at low epochs; the live crashes show epoch 948–1075
+(hundreds of prior collections), i.e. they need a genuinely long-lived server's
+accumulated old-gen history — which only the stale, hours-old server had.
+
+**Resolution: operational — restart the `nest mcp` server onto the current
+binary.** No code change indicated; the fresh runtime does not exhibit the
+defect. If a future session reproduces this on a server **demonstrably started
+after the last rebuild**, that flips it to a live regression — capture it under
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` (the verifier names the root→cell path
+before the cold `flush_oob`) and reopen.
+
+---
+
+### Original 2026-05-31 report follows
 **Severity:** medium (crashes the MCP eval image mid-session; no data loss, but kills in-flight work)
 **Relates to:** [`known-issues.md`](known-issues.md) **KI-1** (GC slab-OOB / `flush_oob`), `concurrency-v2.md` §6
 **Reporter:** surfaced while driving the `brood-life` (foobar GoL) project through `nest mcp` (`eval`/`bench`/`doc-search`).
