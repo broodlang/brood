@@ -44,8 +44,8 @@ use crate::core::blob::{SharedBlob, SHARED_BLOB_THRESHOLD};
 use crate::core::keywords as kw;
 use crate::core::map_champ::{self, MapNode, MAX_DEPTH};
 use crate::core::value::{
-    Closure, ClosureArm, ClosureId, EnvId, MapId, NativeFn, NativeId, PairId, Passthrough, RopeId,
-    StrId, Symbol, Value, VecId, LOCAL, PRELUDE, RUNTIME,
+    BigIntId, Closure, ClosureArm, ClosureId, EnvId, MapId, NativeFn, NativeId, PairId, Passthrough,
+    RopeId, StrId, Symbol, Value, VecId, LOCAL, PRELUDE, RUNTIME,
 };
 use crate::error::LispError;
 
@@ -155,11 +155,32 @@ struct EnvFrame {
 /// aesthetic — what matters is that it's *fixed* so a heterogeneous sort is
 /// reproducible. Numbers come first (most common), then strings/keywords/
 /// symbols (text), then collections, then everything else.
+/// Order a bignum against a float for `value_cmp`'s heterogeneous numeric
+/// fallback. Compares via `f64` (the bignum is converted, rounding); a `NaN`
+/// float is treated as `Equal` (matching the `Float`/`Float` arm's
+/// `unwrap_or(Equal)`). Exact at the magnitudes that matter here (a bignum
+/// is huge, a float comparison against it rarely needs sub-ULP precision).
+fn bigint_cmp_float(b: &num_bigint::BigInt, f: f64) -> std::cmp::Ordering {
+    use num_traits::ToPrimitive;
+    match b.to_f64() {
+        Some(bf) => bf.partial_cmp(&f).unwrap_or(std::cmp::Ordering::Equal),
+        // Magnitude past f64::MAX: order by the bignum's sign.
+        None => {
+            use num_traits::Signed;
+            if b.is_negative() {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Greater
+            }
+        }
+    }
+}
+
 fn tag_rank(v: Value) -> u8 {
     match v {
         Value::Nil => 0,
         Value::Bool(_) => 1,
-        Value::Int(_) | Value::Float(_) => 2,
+        Value::Int(_) | Value::BigInt(_) | Value::Float(_) => 2,
         Value::Str(_) => 3,
         Value::Keyword(_) => 4,
         Value::Sym(_) => 5,
@@ -348,6 +369,7 @@ fn to_prelude(v: Value) -> Value {
         Value::Vector(id) => Value::Vector(VecId::prelude(id.index())),
         Value::Map(id) => Value::Map(MapId::prelude(id.index())),
         Value::Str(id) => Value::Str(StrId::prelude(id.index())),
+        Value::BigInt(id) => Value::BigInt(BigIntId::prelude(id.index())),
         Value::Fn(id) => Value::Fn(ClosureId::prelude(id.index())),
         Value::Macro(id) => Value::Macro(ClosureId::prelude(id.index())),
         Value::Native(id) => Value::Native(NativeId::prelude(id.index())),
@@ -372,6 +394,11 @@ struct Slabs {
     /// nodes are reachable only through the trie itself.
     maps: Vec<MapNode>,
     strings: Vec<LocalString>,
+    /// Arbitrary-precision integers (the bignum leaf, mirrors `strings`). One
+    /// `num_bigint::BigInt` per live value that overflowed i64; immutable, holds
+    /// no `Value` children. Every entry satisfies the normalize invariant
+    /// (strictly outside the i64 range) — `Heap::int_from_bigint` enforces it.
+    bigints: Vec<num_bigint::BigInt>,
     /// Text ropes (ADR-045). A `ropey::Rope` is itself `Arc`-shared internally,
     /// so this slab owns one cheap handle per live rope; cloning for an edit
     /// bumps refcounts, not bytes. Always inline (no SharedBlob split — ropes
@@ -394,6 +421,7 @@ struct FreeLists {
     vectors: Vec<u32>,
     maps: Vec<u32>,
     strings: Vec<u32>,
+    bigints: Vec<u32>,
     ropes: Vec<u32>,
     closures: Vec<u32>,
     envs: Vec<u32>,
@@ -405,6 +433,7 @@ impl FreeLists {
         self.vectors.clear();
         self.maps.clear();
         self.strings.clear();
+        self.bigints.clear();
         self.ropes.clear();
         self.closures.clear();
         self.envs.clear();
@@ -418,6 +447,7 @@ impl FreeLists {
         self.vectors.retain(|&i| (i as usize) < cp.vectors);
         self.maps.retain(|&i| (i as usize) < cp.maps);
         self.strings.retain(|&i| (i as usize) < cp.strings);
+        self.bigints.retain(|&i| (i as usize) < cp.bigints);
         self.ropes.retain(|&i| (i as usize) < cp.ropes);
         self.closures.retain(|&i| (i as usize) < cp.closures);
         self.envs.retain(|&i| (i as usize) < cp.envs);
@@ -440,6 +470,7 @@ struct PoisonBits {
     vectors: Vec<bool>,
     maps: Vec<bool>,
     strings: Vec<bool>,
+    bigints: Vec<bool>,
     ropes: Vec<bool>,
     closures: Vec<bool>,
     envs: Vec<bool>,
@@ -480,6 +511,7 @@ pub struct LocalCheckpoint {
     vectors: usize,
     maps: usize,
     strings: usize,
+    bigints: usize,
     ropes: usize,
     closures: usize,
     envs: usize,
@@ -498,6 +530,9 @@ struct CodeSlabs {
     vectors: boxcar::Vec<Vec<Value>>,
     maps: boxcar::Vec<MapNode>,
     strings: boxcar::Vec<String>,
+    /// Bignums `def`'d into a global / baked as a literal into shared RUNTIME
+    /// code (mirrors `strings`). Immutable, holds no handles; append-only.
+    bigints: boxcar::Vec<num_bigint::BigInt>,
     /// Ropes `def`'d into a global (shared read-only across this runtime's
     /// processes). A `ropey::Rope` is `Send + Sync` and immutable-by-construction
     /// here (every edit makes a fresh LOCAL rope), so sharing one by handle is
@@ -902,6 +937,7 @@ pub fn is_movable(v: Value) -> bool {
         Value::Vector(id) => id.region() == LOCAL,
         Value::Map(id) => id.region() == LOCAL,
         Value::Str(id) => id.region() == LOCAL,
+        Value::BigInt(id) => id.region() == LOCAL,
         Value::Rope(id) => id.region() == LOCAL,
         Value::Fn(id) | Value::Macro(id) => id.region() == LOCAL,
         _ => false,
@@ -928,6 +964,7 @@ pub fn needs_root_slot(v: Value) -> bool {
         Value::Vector(id) => shared(id.region()),
         Value::Map(id) => shared(id.region()),
         Value::Str(id) => shared(id.region()),
+        Value::BigInt(id) => shared(id.region()),
         Value::Rope(id) => shared(id.region()),
         Value::Fn(id) | Value::Macro(id) => shared(id.region()),
         _ => false,
@@ -1194,6 +1231,7 @@ impl Heap {
             vectors: self.local.vectors.len(),
             maps: self.local.maps.len(),
             strings: self.local.strings.len(),
+            bigints: self.local.bigints.len(),
             ropes: self.local.ropes.len(),
             closures: self.local.closures.len(),
             envs: self.local.envs.len(),
@@ -1216,6 +1254,7 @@ impl Heap {
         self.local.vectors.truncate(cp.vectors);
         self.local.maps.truncate(cp.maps);
         self.local.strings.truncate(cp.strings);
+        self.local.bigints.truncate(cp.bigints);
         self.local.ropes.truncate(cp.ropes);
         self.local.closures.truncate(cp.closures);
         self.local.envs.truncate(cp.envs);
@@ -2055,6 +2094,94 @@ impl Heap {
         }
     }
 
+    /// The **single chokepoint** for turning a `num_bigint::BigInt` back into a
+    /// Brood integer, enforcing the normalize invariant: if `n` fits in `i64`
+    /// it returns `Value::Int` (demotion); otherwise it allocates a LOCAL
+    /// `Value::BigInt`. Every arithmetic/bitwise path that computes in BigInt
+    /// space funnels its result through here, so an `Int` and a `BigInt` are
+    /// always numerically disjoint — which is what lets equality/hashing/
+    /// comparison treat them as never-equal. Use this, never `alloc_bigint`,
+    /// for the *result* of a computation.
+    pub fn int_from_bigint(&mut self, n: num_bigint::BigInt) -> Value {
+        use num_traits::ToPrimitive;
+        match n.to_i64() {
+            Some(i) => Value::Int(i),
+            None => self.alloc_bigint(n),
+        }
+    }
+
+    /// Materialise a `Value::BigInt` into LOCAL from an owned `num_bigint::BigInt`
+    /// (mirrors [`alloc_string`](Self::alloc_string)). **Does not normalize** —
+    /// the caller must already know `n` is outside the i64 range (the reader for
+    /// an over-range literal, or the demotion-checked [`int_from_bigint`]). A
+    /// `debug_assert!` guards the invariant.
+    pub fn alloc_bigint(&mut self, n: num_bigint::BigInt) -> Value {
+        debug_assert!(
+            {
+                use num_traits::ToPrimitive;
+                n.to_i64().is_none()
+            },
+            "alloc_bigint given an i64-range value (breaks the normalize invariant); \
+             use int_from_bigint for computed results"
+        );
+        let idx = self.local.bigints.len();
+        self.local.bigints.push(n);
+        Value::BigInt(BigIntId::local_gen(idx, self.local_epoch))
+    }
+
+    /// Resolve a bignum handle to its `&num_bigint::BigInt`. LOCAL is the common
+    /// case; RUNTIME holds a bignum `def`'d to a global or baked into shared code;
+    /// PRELUDE a bignum literal frozen into the prelude (none today, but the path
+    /// mirrors `string`). Honours the GC poison/epoch tripwires like every leaf.
+    pub fn bigint(&self, id: BigIntId) -> &num_bigint::BigInt {
+        match id.region() {
+            LOCAL if id.is_old() => {
+                #[cfg(debug_assertions)]
+                self.check_epoch_aged(true, id.generation(), id.index(), "bigint", id.0);
+                &self.old.bigints[id.index()]
+            }
+            LOCAL => {
+                #[cfg(debug_assertions)]
+                debug_assert!(
+                    !PoisonBits::is(&self.poison.bigints, id.index()),
+                    "use-after-GC: bigint() on freed nursery bigints slot {} (handle {:#x}).",
+                    id.index(),
+                    id.0
+                );
+                #[cfg(debug_assertions)]
+                self.check_epoch_aged(false, id.generation(), id.index(), "bigint", id.0);
+                &self.local.bigints[id.index()]
+            }
+            PRELUDE => &self.prelude.slabs.bigints[id.index()],
+            RUNTIME => self
+                .runtime
+                .code
+                .bigints
+                .get(id.index())
+                .expect("runtime bigint handle"),
+            _ => unreachable!("invalid handle region"),
+        }
+    }
+
+    /// Read any integer `Value` (`Int` or `BigInt`) as an owned
+    /// `num_bigint::BigInt`, promoting an `Int`. The bridge the arithmetic
+    /// primitives use to compute in a single (big) domain. Returns `None` for a
+    /// non-integer value.
+    pub fn as_bigint(&self, v: Value) -> Option<num_bigint::BigInt> {
+        match v {
+            Value::Int(i) => Some(num_bigint::BigInt::from(i)),
+            Value::BigInt(id) => Some(self.bigint(id).clone()),
+            _ => None,
+        }
+    }
+
+    /// Like [`as_bigint`](Self::as_bigint) but for a context that already knows
+    /// `v` is an integer (`Int`/`BigInt`) — panics otherwise. Used by
+    /// `value_cmp`'s integer arms, which match-guard on integer-ness first.
+    fn bigint_of(&self, v: Value) -> num_bigint::BigInt {
+        self.as_bigint(v).expect("bigint_of on a non-integer value")
+    }
+
     /// Install a pre-existing `Arc<SharedBlob>` as a new LOCAL string slot.
     /// Used by the receive path ([`crate::process::message::from_message`]):
     /// the sender already bumped the refcount via `Arc::clone` for the
@@ -2280,6 +2407,11 @@ impl Heap {
             Value::Str(id) if id.region() == LOCAL => {
                 let s = self.string(id).to_string();
                 Value::Str(StrId::runtime(self.runtime.code.strings.push(s)))
+            }
+            Value::BigInt(id) if id.region() == LOCAL => {
+                // A leaf: clone the value into the shared region (no children).
+                let n = self.bigint(id).clone();
+                Value::BigInt(BigIntId::runtime(self.runtime.code.bigints.push(n)))
             }
             Value::Rope(id) if id.region() == LOCAL => {
                 // Cheap `Arc`-node clone into the shared region; the rope is
@@ -2557,6 +2689,7 @@ impl Heap {
             self.poison.vectors.clear();
             self.poison.maps.clear();
             self.poison.strings.clear();
+            self.poison.bigints.clear();
             self.poison.ropes.clear();
             self.poison.closures.clear();
             self.poison.envs.clear();
@@ -2794,6 +2927,22 @@ impl Heap {
                 2u8.hash(h);
                 i.hash(h);
             }
+            Value::BigInt(id) => {
+                // A distinct tag byte (17) from Int's (2) so a BigInt never
+                // collides with an Int — they're numerically disjoint by the
+                // normalize invariant, so equal values still hash equal. Hash
+                // the value's own bytes (sign + magnitude) so two equal bignums
+                // (different handles) hash the same.
+                17u8.hash(h);
+                let (sign, bytes) = self.bigint(id).to_bytes_le();
+                let sign_byte: u8 = match sign {
+                    num_bigint::Sign::Minus => 0,
+                    num_bigint::Sign::NoSign => 1,
+                    num_bigint::Sign::Plus => 2,
+                };
+                sign_byte.hash(h);
+                bytes.hash(h);
+            }
             Value::Float(f) => {
                 3u8.hash(h);
                 if f.is_nan() {
@@ -2910,6 +3059,10 @@ impl Heap {
             (Nil, Nil) => true,
             (Bool(x), Bool(y)) => x == y,
             (Int(x), Int(y)) => x == y,
+            // Two bignums compare by value. An Int vs a BigInt is never equal —
+            // the normalize invariant keeps their ranges disjoint — so those
+            // mixed pairs fall through to `_ => false`.
+            (BigInt(x), BigInt(y)) => self.bigint(x) == self.bigint(y),
             (Float(x), Float(y)) => x == y,
             (Sym(x), Sym(y)) => x == y,
             (Keyword(x), Keyword(y)) => x == y,
@@ -3066,6 +3219,16 @@ impl Heap {
             (Float(x), Float(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
             (Int(x), Float(y)) => (x as f64).partial_cmp(&y).unwrap_or(Ordering::Equal),
             (Float(x), Int(y)) => x.partial_cmp(&(y as f64)).unwrap_or(Ordering::Equal),
+            // Bignums: compare by value, with the other operand promoted. A
+            // BigInt is always outside the i64 range, so a BigInt vs an Int is
+            // ordered by the bignum's sign (it's strictly larger/smaller in
+            // magnitude than any i64) — `BigInt::cmp` after promotion gives that
+            // for free.
+            (BigInt(_) | Int(_), BigInt(_) | Int(_)) => {
+                self.bigint_of(a).cmp(&self.bigint_of(b))
+            }
+            (BigInt(x), Float(y)) => bigint_cmp_float(self.bigint(x), y),
+            (Float(x), BigInt(y)) => bigint_cmp_float(self.bigint(y), x).reverse(),
             (Str(x), Str(y)) => self.string(x).cmp(self.string(y)),
             // Symbols/keywords sort by spelling so it's stable and human-meaningful.
             (Sym(x), Sym(y)) | (Keyword(x), Keyword(y)) => {
@@ -3876,6 +4039,7 @@ impl Heap {
             + self.local.vectors.len()
             + self.local.maps.len()
             + self.local.strings.len()
+            + self.local.bigints.len()
             + self.local.ropes.len()
             + self.local.closures.len()
             + self.local.envs.len();
@@ -3883,6 +4047,7 @@ impl Heap {
             + self.local_free.vectors.len()
             + self.local_free.maps.len()
             + self.local_free.strings.len()
+            + self.local_free.bigints.len()
             + self.local_free.ropes.len()
             + self.local_free.closures.len()
             + self.local_free.envs.len();
@@ -3914,6 +4079,7 @@ impl Heap {
             + s.vectors.len() * size_of::<Vec<Value>>()
             + s.maps.len() * size_of::<MapNode>()
             + s.strings.len() * size_of::<LocalString>()
+            + s.bigints.len() * size_of::<num_bigint::BigInt>()
             + s.ropes.len() * size_of::<ropey::Rope>()
             + s.closures.len() * size_of::<Closure>()
             + s.natives.len() * size_of::<NativeFn>()
@@ -4069,6 +4235,7 @@ impl Heap {
             + self.old.vectors.len()
             + self.old.maps.len()
             + self.old.strings.len()
+            + self.old.bigints.len()
             + self.old.ropes.len()
             + self.old.closures.len()
             + self.old.envs.len()
@@ -4190,6 +4357,7 @@ impl Heap {
             self.poison.vectors.clear();
             self.poison.maps.clear();
             self.poison.strings.clear();
+            self.poison.bigints.clear();
             self.poison.ropes.clear();
             self.poison.closures.clear();
             self.poison.envs.clear();
@@ -4416,6 +4584,10 @@ impl Heap {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
                         bad("string", id.is_old(), id.generation(), id.index(), slabs.strings.len(), parent, id.0);
                     }
+                    Value::BigInt(id) if id.region() == LOCAL => {
+                        let slabs = if id.is_old() { &self.old } else { &self.local };
+                        bad("bigint", id.is_old(), id.generation(), id.index(), slabs.bigints.len(), parent, id.0);
+                    }
                     Value::Rope(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
                         bad("rope", id.is_old(), id.generation(), id.index(), slabs.ropes.len(), parent, id.0);
@@ -4564,6 +4736,10 @@ impl Heap {
                 // No children, but mark it so it survives sweep.
                 marks.mark_string(idx);
             }
+            TraceItem::BigInt(idx) => {
+                // A leaf (no Value children); just mark it so it survives sweep.
+                marks.mark_bigint(idx);
+            }
             TraceItem::Rope(idx) => {
                 // A rope is an opaque leaf (no Value children); just mark it.
                 marks.mark_rope(idx);
@@ -4618,6 +4794,8 @@ impl Heap {
             self.poison.maps.resize(self.local.maps.len(), false);
             self.poison.strings.clear();
             self.poison.strings.resize(self.local.strings.len(), false);
+            self.poison.bigints.clear();
+            self.poison.bigints.resize(self.local.bigints.len(), false);
             self.poison.ropes.clear();
             self.poison.ropes.resize(self.local.ropes.len(), false);
             self.poison.closures.clear();
@@ -4677,6 +4855,18 @@ impl Heap {
                 }
             }
         }
+        for i in 0..self.local.bigints.len() {
+            if !marks.is_bigint_marked(i) {
+                self.local_free.bigints.push(i as u32);
+                // Release the dead bignum's heap digits; alloc_bigint replaces the
+                // slot wholesale on reuse, so a cheap zero placeholder suffices.
+                self.local.bigints[i] = num_bigint::BigInt::default();
+                #[cfg(debug_assertions)]
+                {
+                    self.poison.bigints[i] = true;
+                }
+            }
+        }
         for i in 0..self.local.ropes.len() {
             if !marks.is_rope_marked(i) {
                 self.local_free.ropes.push(i as u32);
@@ -4727,6 +4917,7 @@ enum TraceItem {
     Vector(usize),
     Map(usize),
     Str(usize),
+    BigInt(usize),
     Rope(usize),
     Closure(usize),
     Env(usize),
@@ -4740,6 +4931,7 @@ fn push_value(work: &mut Vec<TraceItem>, v: Value) {
         Value::Vector(id) if id.region() == LOCAL => work.push(TraceItem::Vector(id.index())),
         Value::Map(id) if id.region() == LOCAL => work.push(TraceItem::Map(id.index())),
         Value::Str(id) if id.region() == LOCAL => work.push(TraceItem::Str(id.index())),
+        Value::BigInt(id) if id.region() == LOCAL => work.push(TraceItem::BigInt(id.index())),
         Value::Rope(id) if id.region() == LOCAL => work.push(TraceItem::Rope(id.index())),
         Value::Fn(id) | Value::Macro(id) if id.region() == LOCAL => {
             work.push(TraceItem::Closure(id.index()))
@@ -4764,6 +4956,7 @@ struct Marks {
     vectors: Vec<bool>,
     maps: Vec<bool>,
     strings: Vec<bool>,
+    bigints: Vec<bool>,
     ropes: Vec<bool>,
     closures: Vec<bool>,
     envs: Vec<bool>,
@@ -4776,6 +4969,7 @@ impl Marks {
             vectors: vec![false; local.vectors.len()],
             maps: vec![false; local.maps.len()],
             strings: vec![false; local.strings.len()],
+            bigints: vec![false; local.bigints.len()],
             ropes: vec![false; local.ropes.len()],
             closures: vec![false; local.closures.len()],
             envs: vec![false; local.envs.len()],
@@ -4808,6 +5002,7 @@ mark_methods! {
     vectors => mark_vector, is_vector_marked,
     maps => mark_map, is_map_marked,
     strings => mark_string, is_string_marked,
+    bigints => mark_bigint, is_bigint_marked,
     ropes => mark_rope, is_rope_marked,
     closures => mark_closure, is_closure_marked,
     envs => mark_env, is_env_marked,
@@ -4865,6 +5060,7 @@ struct FlushForward {
     vectors: HashMap<u32, u32>,
     maps: HashMap<u32, u32>,
     strings: HashMap<u32, u32>,
+    bigints: HashMap<u32, u32>,
     ropes: HashMap<u32, u32>,
     closures: HashMap<u32, u32>,
     envs: HashMap<u32, u32>,
@@ -4901,6 +5097,7 @@ mint_fn!(mint_pair, PairId);
 mint_fn!(mint_vector, VecId);
 mint_fn!(mint_map, MapId);
 mint_fn!(mint_string, StrId);
+mint_fn!(mint_bigint, BigIntId);
 mint_fn!(mint_rope, RopeId);
 mint_fn!(mint_closure, ClosureId);
 mint_fn!(mint_env, EnvId);
@@ -4973,6 +5170,9 @@ fn flush_value(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, v: Value) -
         }
         Value::Str(id) if fwd.copies(id.region(), id.is_old()) => {
             Value::Str(flush_string(old, new, fwd, id))
+        }
+        Value::BigInt(id) if fwd.copies(id.region(), id.is_old()) => {
+            Value::BigInt(flush_bigint(old, new, fwd, id))
         }
         Value::Rope(id) if fwd.copies(id.region(), id.is_old()) => {
             Value::Rope(flush_rope(old, new, fwd, id))
@@ -5074,6 +5274,20 @@ fn flush_string(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: StrId)
     new.strings.push(entry);
     fwd.strings.insert(key, new_idx as u32);
     fwd.mint_string(new_idx)
+}
+
+fn flush_bigint(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: BigIntId) -> BigIntId {
+    let key = id.index() as u32;
+    if let Some(&new_idx) = fwd.bigints.get(&key) {
+        return fwd.mint_bigint(new_idx as usize);
+    }
+    // A leaf: clone the value's digits into the new slab (the old slab drops
+    // right after `flush`). Same shape as `flush_string`'s inline branch.
+    let n = old.bigints[flush_bound!(old.bigints, id, fwd, "bigint")].clone();
+    let new_idx = new.bigints.len();
+    new.bigints.push(n);
+    fwd.bigints.insert(key, new_idx as u32);
+    fwd.mint_bigint(new_idx)
 }
 
 fn flush_rope(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: RopeId) -> RopeId {
@@ -5234,6 +5448,7 @@ struct RuntimeForward {
     vectors: HashMap<u32, u32>,
     maps: HashMap<u32, u32>,
     strings: HashMap<u32, u32>,
+    bigints: HashMap<u32, u32>,
     ropes: HashMap<u32, u32>,
     closures: HashMap<u32, u32>,
     envs: HashMap<u32, u32>,
@@ -5250,6 +5465,9 @@ fn flush_rt_value(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, v:
         }
         Value::Map(id) if id.region() == RUNTIME => Value::Map(flush_rt_map(old, new, fwd, id)),
         Value::Str(id) if id.region() == RUNTIME => Value::Str(flush_rt_string(old, new, fwd, id)),
+        Value::BigInt(id) if id.region() == RUNTIME => {
+            Value::BigInt(flush_rt_bigint(old, new, fwd, id))
+        }
         Value::Rope(id) if id.region() == RUNTIME => Value::Rope(flush_rt_rope(old, new, fwd, id)),
         Value::Fn(id) if id.region() == RUNTIME => Value::Fn(flush_rt_closure(old, new, fwd, id)),
         Value::Macro(id) if id.region() == RUNTIME => {
@@ -5301,6 +5519,22 @@ fn flush_rt_string(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, i
     let new_idx = new.strings.push(s);
     fwd.strings.insert(key, new_idx as u32);
     StrId::runtime(new_idx)
+}
+
+fn flush_rt_bigint(
+    old: &CodeSlabs,
+    new: &CodeSlabs,
+    fwd: &mut RuntimeForward,
+    id: BigIntId,
+) -> BigIntId {
+    let key = id.index() as u32;
+    if let Some(&n) = fwd.bigints.get(&key) {
+        return BigIntId::runtime(n as usize);
+    }
+    let v = old.bigints.get(id.index()).expect("rt bigint").clone();
+    let new_idx = new.bigints.push(v);
+    fwd.bigints.insert(key, new_idx as u32);
+    BigIntId::runtime(new_idx)
 }
 
 fn flush_rt_rope(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, id: RopeId) -> RopeId {
@@ -5417,11 +5651,12 @@ fn flush_rt_env(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, env:
 /// the exact failure mode a moving collector must never ship. (In-bounds is a
 /// necessary soundness check; the redef test additionally pins the live *count*.)
 fn verify_rt_slabs(s: &CodeSlabs) -> bool {
-    let (np, nv, nm, ns, nr, nc, ne) = (
+    let (np, nv, nm, ns, nb, nr, nc, ne) = (
         s.pairs.count(),
         s.vectors.count(),
         s.maps.count(),
         s.strings.count(),
+        s.bigints.count(),
         s.ropes.count(),
         s.closures.count(),
         s.envs.count(),
@@ -5432,6 +5667,7 @@ fn verify_rt_slabs(s: &CodeSlabs) -> bool {
             Value::Vector(id) if id.region() == RUNTIME => id.index() < nv,
             Value::Map(id) if id.region() == RUNTIME => id.index() < nm,
             Value::Str(id) if id.region() == RUNTIME => id.index() < ns,
+            Value::BigInt(id) if id.region() == RUNTIME => id.index() < nb,
             Value::Rope(id) if id.region() == RUNTIME => id.index() < nr,
             Value::Fn(id) | Value::Macro(id) if id.region() == RUNTIME => id.index() < nc,
             _ => true,

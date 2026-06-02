@@ -1065,6 +1065,17 @@ fn integer_overflow_does_not_panic() {
     assert_eq!(run("(rem -7 3)"), "-1");
 }
 
+/// `bit-count` (population count) over the two's-complement bit pattern.
+#[test]
+fn bit_count_counts_set_bits() {
+    assert_eq!(run("(bit-count 0)"), "0");
+    assert_eq!(run("(bit-count 7)"), "3");
+    assert_eq!(run("(bit-count 255)"), "8");
+    assert_eq!(run("(bit-count (bit-shift-left 1 40))"), "1");
+    // A negative integer counts its sign bits: -1 is all 64 bits set.
+    assert_eq!(run("(bit-count -1)"), "64");
+}
+
 /// `=` on floats uses IEEE value equality, not bitwise: `-0.0 = 0.0` is true.
 #[test]
 fn float_equality_is_ieee() {
