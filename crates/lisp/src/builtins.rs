@@ -978,6 +978,16 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![string], vec_ty),
         parse_source,
     );
+    // CST parse with absolute positions — every node a map `{:kind :start :end …}`
+    // (char offsets). Backs structural navigation (std/sexp); see
+    // `parse_source_positioned` for the shape.
+    def(
+        heap,
+        "parse-source-positioned",
+        Arity::exact(1),
+        Sig::new(vec![string], map_ty),
+        parse_source_positioned,
+    );
     def(
         heap,
         "load",
@@ -1682,6 +1692,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("read-string", &["s"], "Parse and return the first form in string s."),
     ("read-all", &["s"], "Parse every form in string s and return them as a list (the all-forms sibling of read-string)."),
     ("parse-source", &["s"], "Parse s into a lossless CST tree as nested vectors (mechanism for std/format.blsp)."),
+    ("parse-source-positioned", &["s"], "Parse s into a CST of maps, each `{:kind :start :end}` (leaves add :text, containers/wrappers add :kids) with half-open character offsets — for structural navigation (std/sexp)."),
     ("eval-string", &["s"], "Read and evaluate every form in string s (the string analogue of load)."),
     ("load", &["path"], "Read and evaluate every form in the file at path."),
     ("reload-defs", &["path"], "Re-evaluate only the def-style top-level forms in `path` (def, defn, defmacro, defmodule, defdyn, …) — skipping other top-level calls. Used by file watchers to refresh code without re-running side-effecting top-level calls like a `(main-loop)`. Returns nil."),
@@ -3074,6 +3085,100 @@ fn cst_to_value(heap: &mut Heap, node: &cst::Node, src: &str) -> Value {
             heap.alloc_vector(vec![tag(k), kids_vec])
         }
     }
+}
+
+/// `(parse-source-positioned s)` — like `parse-source`, but every CST node is a
+/// MAP carrying its absolute source position rather than a `[kind …]` vector:
+/// `{:kind :start :end}` for leaves (plus `:text`, the leaf's raw source), and
+/// additionally `:kids` (a vector of child node maps) for containers
+/// (`:root`/`:list`/`:vector`/`:map`) and reader-macro wrappers
+/// (`:quote`/`:quasi`/`:unquote`/`:splice`). `:start`/`:end` are half-open
+/// CHARACTER offsets (not bytes) — matching `string-length` and editor buffer
+/// point — so structural tooling (`std/sexp`) navigates the tree directly.
+///
+/// The kernel already tracks every node's span; this projects it in one pass. It
+/// exists because recovering those positions in interpreted Brood (`std/sexp`'s
+/// former `annotate` walk) was O(n) and dominated structural-navigation latency.
+fn parse_source_positioned(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let s = expect_string(heap, "parse-source-positioned", arg(args, 0))?;
+    let root = cst::parse(&s);
+    let b2c = byte_to_char_offsets(&s);
+    Ok(cst_to_positioned(heap, &root, &s, &b2c))
+}
+
+/// Per-byte → character-offset table for `s`: `t[b]` is the count of characters
+/// before byte offset `b`. Length `s.len() + 1` so a node's `span.end` (which can
+/// equal `s.len()`) is indexable. CST spans land on char boundaries; a byte
+/// interior to a multi-byte char maps to that char's own index (never queried).
+fn byte_to_char_offsets(s: &str) -> Vec<u32> {
+    let mut t = vec![0u32; s.len() + 1];
+    let mut byte = 0usize;
+    let mut ci = 0u32;
+    for ch in s.chars() {
+        let w = ch.len_utf8();
+        for k in 0..w {
+            t[byte + k] = ci;
+        }
+        byte += w;
+        ci += 1;
+    }
+    t[s.len()] = ci;
+    t
+}
+
+fn cst_node_kind_name(kind: cst::NodeKind) -> &'static str {
+    use cst::NodeKind::*;
+    match kind {
+        Symbol => "symbol",
+        Keyword => "keyword",
+        Int => "int",
+        Float => "float",
+        Str => "str",
+        Bool => "bool",
+        Nil => "nil",
+        Whitespace => "whitespace",
+        Comment => "comment",
+        Error => "error",
+        Quote => "quote",
+        Quasi => "quasi",
+        Unquote => "unquote",
+        Splice => "splice",
+        Root => "root",
+        List => "list",
+        Vector => "vector",
+        Map => "map",
+    }
+}
+
+fn cst_to_positioned(heap: &mut Heap, node: &cst::Node, src: &str, b2c: &[u32]) -> Value {
+    use cst::NodeKind::*;
+    let kw = |k: &'static str| Value::Keyword(value::intern(k));
+    let start = Value::Int(b2c[node.span.start as usize] as i64);
+    let end = Value::Int(b2c[node.span.end as usize] as i64);
+    let mut pairs: Vec<(Value, Value)> = vec![
+        (kw("kind"), kw(cst_node_kind_name(node.kind))),
+        (kw("start"), start),
+        (kw("end"), end),
+    ];
+    match node.kind {
+        // Leaves carry their raw source text; positions alone make them navigable.
+        Symbol | Keyword | Int | Float | Str | Bool | Nil | Whitespace | Comment | Error => {
+            let text = heap.alloc_string(node.text(src));
+            pairs.push((kw("text"), text));
+        }
+        // Containers + wrappers carry their (position-annotated) children — trivia
+        // included, exactly as `parse-source`, so callers filter what they want.
+        Quote | Quasi | Unquote | Splice | Root | List | Vector | Map => {
+            let kids: Vec<Value> = node
+                .children
+                .iter()
+                .map(|c| cst_to_positioned(heap, c, src, b2c))
+                .collect();
+            let kids_vec = heap.alloc_vector(kids);
+            pairs.push((kw("kids"), kids_vec));
+        }
+    }
+    heap.map_from_pairs(pairs)
 }
 
 /// `(reload-defs path)` — like `load`, but only re-evaluates **definitions**
