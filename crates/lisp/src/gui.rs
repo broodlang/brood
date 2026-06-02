@@ -1198,7 +1198,15 @@ mod backend {
                 } else if mods.control_key() {
                     Some(Key::Ctrl(c.to_ascii_lowercase()))
                 } else if mods.alt_key() {
-                    Some(Key::Alt(c.to_ascii_lowercase()))
+                    // Meta is case-SENSITIVE in Emacs (`M-O` open-line-above ≠ `M-o`): a
+                    // shifted letter stays upper-case so the two are distinct, while an
+                    // unshifted chord lower-cases (so Caps Lock / a stray Shift can't change
+                    // the binding). Control chords (above) stay case-insensitive, as in Emacs.
+                    Some(Key::Alt(if mods.shift_key() {
+                        c.to_ascii_uppercase()
+                    } else {
+                        c.to_ascii_lowercase()
+                    }))
                 } else {
                     Some(Key::Char(c))
                 }

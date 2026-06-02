@@ -3772,7 +3772,16 @@ fn key_to_value(heap: &mut Heap, k: crossterm::event::KeyEvent) -> Value {
         // Alt/Meta combos (M-f, M-b, … — emacs word motion). Some terminals send
         // these as an Esc prefix; crossterm normalises them to the ALT modifier.
         KeyCode::Char(c) if alt => {
-            Value::Keyword(value::intern(&format!("alt-{}", c.to_ascii_lowercase())))
+            // Meta is case-SENSITIVE (`M-O` ≠ `M-o`): keep a shifted letter upper-case so
+            // the two are distinct; an unshifted chord lower-cases (Caps Lock / a stray
+            // Shift can't change the binding). Mirrors the GUI frontend
+            // (`gui::backend::translate_key`); Control chords above stay case-insensitive.
+            let ch = if k.modifiers.contains(KeyModifiers::SHIFT) {
+                c.to_ascii_uppercase()
+            } else {
+                c.to_ascii_lowercase()
+            };
+            Value::Keyword(value::intern(&format!("alt-{ch}")))
         }
         KeyCode::Char(c) => heap.alloc_string(&c.to_string()),
         KeyCode::Up => value::kw("up"),

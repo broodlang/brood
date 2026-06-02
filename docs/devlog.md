@@ -274,6 +274,7 @@ Every session, oldest first. Full text: [devlog-archive.md](archive/devlog-archi
 - **2026-06-01** — RUNTIME-region GC, Stage 1 (ADR-091): solidify the single-process collector — stats, gate test, un-stale docs
 - **2026-06-01** — `nest grammar` (ADR-092): generate editor grammars (VS Code TextMate, Emacs) from `(special-forms)`; `brood-vscode` extension
 - **2026-06-01** — `tree-sitter-brood`: a real parser grammar (external scanner mirrors the reader); `nest grammar tree-sitter` highlights
+- **2026-06-02** — GUI key fix: re-apply Shift to Alt/Ctrl punctuation chords (`M->`/`M-<`/`M-{`/`M-%`/…), matching the crossterm frontend
 
 ---
 
@@ -748,3 +749,24 @@ regex escaping). Verified with `tree-sitter query`: `defn`→keyword + name→fu
 brood repo: `grammar.blsp` `(tree-sitter-highlights)`, the `nest grammar tree-sitter`
 target, a `grammar_test.blsp` case. `make test` green. Roadmap tree-sitter bullet → 🟡
 (parser done; Linguist PR still gated on adoption).
+
+## 2026-06-02 — GUI key fix: Shift survives Alt/Ctrl punctuation chords
+
+**Bug.** In the GUI frontend, Emacs chords on shifted punctuation didn't fire — `M->`
+(end-of-buffer), `M-<` (beginning-of-buffer), `M-{`/`M-}`, `M-%`, `M-^`. The crossterm
+frontend handled them; the two frontends disagreed.
+
+**Cause.** `gui::backend::translate_key` reads a Ctrl/Alt chord's character from
+`ke.key_without_modifiers()` — deliberately, so layout composition (Alt+`-` → en-dash,
+Alt+letter → accents on some layouts) can't mangle the chord; the keymap binds the BASE
+glyph. But `key_without_modifiers()` strips **Shift** too, so `Alt+Shift+.` (`M->`) lost
+its shift and arrived as `:alt-.`, never matching the editor's `alt->` binding.
+
+**Fix.** After taking the unmodified base char, when Shift is held re-apply it via a
+US-layout map (`shift_char`: `.`→`>`, `,`→`<`, `[`/`]`→`{`/`}`, digits→symbols, …).
+Letters are untouched (their shift is just upper-case, and the chord is lower-cased
+anyway). This restores parity with what `builtins::key_to_value` (crossterm) already
+delivers for the same physical chord. Mechanism-only change (winit key decoding is
+inherently Rust); no Brood/editor binding changes. Unit test:
+`gui::backend::shift_char_tests`. Found while fixing four myedit UX issues (scrollbar
+hide/grab, click-to-point, and this).
