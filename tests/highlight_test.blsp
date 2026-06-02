@@ -105,6 +105,21 @@
   (test "empty text yields no runs"
     (assert= (fontify-runs "" 0 '() '()) '())))
 
+;; span-runs is the native no-overlay tiler `fontify-runs` calls when no range crosses
+;; the line (the common per-frame case). The fontify-runs cases above exercise it through
+;; that path; these pin its contract directly.
+(describe "span-runs (native no-overlay tiler)"
+  (test "a gap before and after a span are nil-faced runs"
+    (assert= (span-runs "a b" 0 (list [2 3 {:fg :green}]))
+      (list ["a " nil] ["b" {:fg :green}])))
+  (test "touching same-face spans coalesce; a base offsets into buffer coords"
+    (assert= (span-runs "abc" 0 (list [0 1 {:fg :red}] [1 2 {:fg :red}]))
+      (list ["ab" {:fg :red}] ["c" nil]))
+    (assert= (span-runs "bc" 1 (list [1 2 {:fg :yellow}])) (list ["b" {:fg :yellow}] ["c" nil])))
+  (test "no spans → one nil run; empty text → no runs"
+    (assert= (span-runs "abc" 0 '()) (list ["abc" nil]))
+    (assert= (span-runs "" 0 '()) '())))
+
 (describe "special-form?"
   (test "core forms / macros are special"
     (is (special-form? "defn"))

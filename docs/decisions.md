@@ -5692,9 +5692,17 @@ and `hl--number?` gates the `string->number` parse behind a first-char check.
   per-char *inline* scanner (emphasis/links) is a deferred follow-up — it has no
   `scan-tokens` analogue yet.
 
+**Follow-up — the render-side tiler (2026-06-02).** Profiling the *render* (paid every
+frame, not just on edit) showed `fontify-runs` — the per-visible-line span→`[substring
+face]` tiler — was the next interpreted hot loop. Its no-overlay path (the common case:
+no region/overlay crosses the line) is pure positional slicing with face coalescing, so
+it became a fourth native builtin, `(span-runs text base spans)` — same mechanism/policy
+split (faces stay opaque Values, re-emitted as-is; the overlay per-char merge path stays
+in Brood for the few lines a selection touches). Warm `ed-view` ~29ms → ~24ms.
+
 **References.** ADR-006 (mechanism in the kernel, policy in Brood), ADR-052
 (`highlight-spans` shape, `(special-forms)`), the editor's per-frame span cache. Lives in
-`crates/lisp/src/builtins.rs` (`string_span`/`string_span_until`/`scan_tokens`),
+`crates/lisp/src/builtins.rs` (`string_span`/`string_span_until`/`scan_tokens`/`span_runs`),
 `std/editor/highlight.blsp`, `std/editor/markdown.blsp`.
 
 ## ADR-094 — `overlay-route`: the modal-overlay dispatch fallthrough lives in `editor/ui`
