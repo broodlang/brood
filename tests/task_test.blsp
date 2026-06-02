@@ -58,4 +58,15 @@
     (let (h (task (fn () 1)))
       (assert= (receive ([:task-done t v] v)) 1)
       (cancel-task h)
-      :ok)))
+      :ok))
+  (test "task-latest supersedes the prior job: only the new reply arrives"
+    ;; a slow prior job, then supersede it — the prior's reply is cancelled, and only
+    ;; the latest job's reply lands.
+    (let (prev (task (fn () (receive (:never x))) {:timeout 5000})
+          h (task-latest prev (fn () :fresh)))
+      (refute (= h prev))
+      (assert= (receive ([:task-done t v] [t v])) [h :fresh])
+      (assert= (receive ([:task-done t v] :got) ([:task-timeout t] :got) (after 60 :clear)) :clear)))
+  (test "task-latest with nil prev is just task"
+    (let (h (task-latest nil (fn () :first)))
+      (assert= (receive ([:task-done t v] [t v])) [h :first]))))

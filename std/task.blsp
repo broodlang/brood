@@ -86,6 +86,16 @@ pid). Returns nil."
   (send handle :task--cancel)
   nil)
 
+(defn task-latest (prev thunk & opts)
+  "Start `thunk` as the *latest* job of its kind, superseding an in-flight one:
+`cancel-task` the `prev` handle (nil = none running) so its reply never arrives, then
+`(task thunk & opts)` and return the new handle. The 'only the most recent matters'
+pattern — a debounced search, an interactive eval re-run, a live recheck — where a new
+trigger should abandon the previous job rather than queue behind it. Store the returned
+handle and pass it back as `prev` on the next trigger."
+  (when (not (nil? prev)) (cancel-task prev))
+  (apply task thunk opts))
+
 (defn await (thunk timeout-ms)
   "Run 0-arg `thunk` in a child process and block the current process until it
 finishes or `timeout-ms` elapses. Returns the thunk's value; throws if it threw
