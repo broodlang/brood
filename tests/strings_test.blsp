@@ -262,3 +262,19 @@
     (let (me (self))
       (spawn (send me (string-repeat "-" 8)))
       (assert= (receive) "--------"))))
+
+(describe "string-span / string-span-until (native char-class scanners)"
+  (test "string-span: end of the run of set-members from start"
+    (assert= (string-span "   abc" 0 " \t\n") 3)   ; three spaces
+    (assert= (string-span "abc" 0 " ") 0)          ; first char not in set → start
+    (assert= (string-span "aaab" 0 "a") 3)
+    (assert= (string-span "abc" 3 "x") 3))          ; at end → end
+  (test "string-span-until: end of the run of NON-members (stops at a set char)"
+    (assert= (string-span-until "abc def" 0 " ") 3) ; up to the space
+    (assert= (string-span-until "abc" 0 ";") 3)     ; no delimiter → whole string
+    (assert= (string-span-until "(foo bar)" 1 " ()") 4))
+  (test "char-indexed, not byte-indexed (multibyte)"
+    (assert= (string-span-until "é x" 0 " ") 1))    ; 'é' is one char
+  (test "empty set: span is empty, span-until is the whole tail"
+    (assert= (string-span "abc" 0 "") 0)
+    (assert= (string-span-until "abc" 0 "") 3)))

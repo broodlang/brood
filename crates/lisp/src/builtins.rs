@@ -432,6 +432,20 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "string-span",
+        Arity::exact(3),
+        Sig::new(vec![string, int, string], int),
+        string_span,
+    );
+    def(
+        heap,
+        "string-span-until",
+        Arity::exact(3),
+        Sig::new(vec![string, int, string], int),
+        string_span_until,
+    );
+    def(
+        heap,
         "display-width",
         Arity::exact(1),
         Sig::new(vec![string], int),
@@ -990,6 +1004,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![string], vec_ty),
         parse_source,
+    );
+    def(
+        heap,
+        "scan-tokens",
+        Arity::exact(1),
+        Sig::new(vec![string], vec_ty),
+        scan_tokens,
     );
     // CST parse with absolute positions — every node a map `{:kind :start :end …}`
     // (char offsets). Backs structural navigation (std/sexp); see
@@ -1656,6 +1677,8 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("string-length", &["s"], "The number of characters in string s."),
     ("display-width", &["s"], "How many terminal/grid cells string s occupies (grapheme-cluster aware: an emoji / flag / CJK char counts as 2, a combining mark 0). The width-aware counterpart to string-length."),
     ("substring", &["s", "start", "end"], "The characters of s in the range [start, end), char-indexed. end is optional and defaults to (string-length s), so (substring s start) is \"from start to the end\"."),
+    ("string-span", &["s", "start", "chars"], "The char index just past the maximal run of chars (a set, given as a string) starting at char `start` in s — `start` itself if the char there isn't in the set. The forward char-class scan a tokenizer skips a whitespace/digit run with; O(run) native. See also string-span-until."),
+    ("string-span-until", &["s", "start", "chars"], "The char index of the first char of s in the set `chars` (a string) at or after char `start`, or (string-length s) if none — the maximal run of chars NOT in the set. For scanning up to a delimiter (comment-to-newline, atom-to-delimiter). The complement of string-span."),
     ("upper", &["s"], "s upper-cased (Unicode-aware)."),
     ("lower", &["s"], "s lower-cased (Unicode-aware)."),
     ("to-fixed", &["x", "n"], "Render number x as a string with exactly n digits after the decimal point (rounded). n must be >= 0."),
@@ -1705,6 +1728,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("read-string", &["s"], "Parse and return the first form in string s."),
     ("read-all", &["s"], "Parse every form in string s and return them as a list (the all-forms sibling of read-string)."),
     ("parse-source", &["s"], "Parse s into a lossless CST tree as nested vectors (mechanism for std/format.blsp)."),
+    ("scan-tokens", &["s"], "Lexically tokenize Brood source s into a vector of [start end kind text] tokens (char offsets, end-exclusive; whitespace skipped). kind is :comment, :string, :number, :keyword, :symbol, :open, or :close. The lossless token stream a fontifier / structural tool walks — the per-char scan runs natively, leaving policy (faces, head-position) to the consumer over O(tokens)."),
     ("parse-source-positioned", &["s"], "Parse s into a CST of maps, each `{:kind :start :end}` (leaves add :text, containers/wrappers add :kids) with half-open character offsets — for structural navigation (std/sexp)."),
     ("eval-string", &["s"], "Read and evaluate every form in string s (the string analogue of load)."),
     ("load", &["path"], "Read and evaluate every form in the file at path."),
@@ -3776,6 +3800,132 @@ fn substring(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         .take((end - start) as usize)
         .collect();
     Ok(heap.alloc_string(&sub))
+}
+
+/// Shared body of `string-span` / `string-span-until`: from char `start`, count the
+/// maximal run of chars whose membership in the set `chars` equals `in_set`, and
+/// return the char index just past it. Char-indexed, like `substring`/`char-at`. The
+/// forward char-class scan a tokenizer runs its inner loops on (skip a whitespace /
+/// digit / delimiter run) — O(run) native instead of O(run) interpreted recursion.
+fn string_span_impl(args: &[Value], heap: &mut Heap, who: &str, in_set: bool) -> LispResult {
+    let s = expect_string(heap, who, arg(args, 0))?;
+    let start = expect_int(heap, who, arg(args, 1))?;
+    let set = expect_string(heap, who, arg(args, 2))?;
+    let len = s.chars().count() as i64;
+    if start < 0 || start > len {
+        return Err(LispError::runtime(format!(
+            "{}: start {} out of bounds for length {}",
+            who, start, len
+        ))
+        .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE));
+    }
+    let mut idx = start as usize;
+    for c in s.chars().skip(start as usize) {
+        if set.contains(c) == in_set {
+            idx += 1;
+        } else {
+            break;
+        }
+    }
+    Ok(Value::Int(idx as i64))
+}
+
+/// `(string-span s start chars)` — the char index just past the maximal run of chars
+/// drawn from the set `chars`, beginning at `start` (so `start` itself when the char
+/// there isn't in the set). For skipping a run *of* a class — whitespace, digits.
+fn string_span(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    string_span_impl(args, heap, "string-span", true)
+}
+
+/// `(string-span-until s start chars)` — the char index of the first char in the set
+/// `chars` at or after `start` (or the length if none): the maximal run of chars
+/// *not* in the set. For scanning up to a delimiter — comment-to-newline,
+/// atom-to-delimiter, string-body-to-quote.
+fn string_span_until(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    string_span_impl(args, heap, "string-span-until", false)
+}
+
+/// Lexical category of an atom token (a maximal run of non-delimiter chars), matching
+/// `std/editor/highlight`'s `hl--atom-face` shape: a `:`-prefixed or `nil`/`true`/`false`
+/// constant is a `keyword`; one that parses as an int/float (like `string->number`) is a
+/// `number`; anything else is a plain `symbol`. The head-position special-form vs call
+/// distinction is left to the consumer (it needs the surrounding `(`).
+fn scan_atom_kind(t: &str) -> &'static str {
+    if t.starts_with(':') || t == "nil" || t == "true" || t == "false" {
+        "keyword"
+    } else if t.parse::<i64>().is_ok() || t.parse::<f64>().is_ok() {
+        "number"
+    } else {
+        "symbol"
+    }
+}
+
+/// `(scan-tokens s)` — lexically tokenize Brood source `s` into a vector of
+/// `[start end kind text]` tokens (char offsets, end-exclusive; whitespace and commas
+/// skipped between tokens). `kind` is `:comment`, `:string`, `:number`, `:keyword`,
+/// `:symbol`, `:open`, or `:close`. The lossless token stream a fontifier / structural
+/// tool walks — the per-character scanning (a render hot path in interpreted Brood) runs
+/// here in Rust, leaving the consumer to apply policy (faces, head-position) over
+/// O(tokens), not O(chars). Strings honour `\\` escapes; a comment runs to end-of-line.
+fn scan_tokens(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let s = expect_string(heap, "scan-tokens", arg(args, 0))?;
+    let chars: Vec<char> = s.chars().collect();
+    let n = chars.len();
+    let kw = |k: &'static str| Value::Keyword(value::intern(k));
+    let is_ws = |c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | ',');
+    let is_delim = |c: char| is_ws(c) || matches!(c, '(' | ')' | '[' | ']' | '{' | '}' | '"' | ';');
+    let mut out: Vec<Value> = Vec::new();
+    let mut i = 0usize;
+    while i < n {
+        if is_ws(chars[i]) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let (end, kind): (usize, &'static str) = match chars[i] {
+            ';' => {
+                let mut j = i + 1;
+                while j < n && chars[j] != '\n' {
+                    j += 1;
+                }
+                (j, "comment")
+            }
+            '"' => {
+                let mut j = i + 1;
+                loop {
+                    if j >= n {
+                        break;
+                    }
+                    match chars[j] {
+                        '\\' => j += 2,        // escape: skip the backslash and the next char
+                        '"' => {
+                            j += 1;
+                            break;
+                        }
+                        _ => j += 1,
+                    }
+                }
+                (j.min(n), "string")
+            }
+            '(' | '[' | '{' => (start + 1, "open"),
+            ')' | ']' | '}' => (start + 1, "close"),
+            _ => {
+                let mut j = i;
+                while j < n && !is_delim(chars[j]) {
+                    j += 1;
+                }
+                let text: String = chars[start..j].iter().collect();
+                (j, scan_atom_kind(&text))
+            }
+        };
+        let text: String = chars[start..end].iter().collect();
+        let tv = heap.alloc_string(&text);
+        let tok =
+            heap.alloc_vector(vec![Value::Int(start as i64), Value::Int(end as i64), kw(kind), tv]);
+        out.push(tok);
+        i = end;
+    }
+    Ok(heap.alloc_vector(out))
 }
 
 /// `(%str-index-of s needle)` — the 0-based **char** index of the first

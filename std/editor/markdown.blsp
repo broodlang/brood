@@ -83,8 +83,9 @@ incomplete input; feeds the editor's `:fontify` mode service and the shared
   (or (>= i n) (= (char-at line i) " ")))
 
 (defn md--line-end (src i n)
-  "Index of the newline ending the line containing `i` (or `n` at end of input)."
-  (if (or (>= i n) (= (char-at src i) "\n")) i (md--line-end src (inc i) n)))
+  "Index of the newline ending the line containing `i` (or `n` at end of input). Uses
+the native `string-span-until` char scan rather than per-char Brood recursion."
+  (min n (string-span-until src i "\n")))
 
 ;; ---- line-shape classifiers -------------------------------------------------
 
