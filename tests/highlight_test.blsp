@@ -118,7 +118,13 @@
   (test "the innermost call wins"
     (assert= (enclosing-call "(+ (* 2 3) " 11) ["+" 1]))
   (test "outside any call there is no hint"
-    (assert= (enclosing-call "abc " 4) nil)))
+    (assert= (enclosing-call "abc " 4) nil))
+  (test "a call deep below many top-level forms is found (scan starts at the defun, not 0)"
+    ;; the enclosing-bracket scan begins at the nearest column-0 form start (safe-restart),
+    ;; so cost is O(enclosing form), not O(pos) — but the answer must still be exact.
+    (let (lead (join "" (map (fn (i) "(defn f ())\n") (range 500)))
+          src (str lead "(map g "))
+      (assert= (enclosing-call src (+ (string-length lead) 7)) ["map" 1]))))
 
 (describe "completion helpers"
   (test "symbol-prefix-at returns the token start and text"
