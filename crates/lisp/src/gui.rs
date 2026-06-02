@@ -225,7 +225,7 @@ mod backend {
         ElementState, KeyEvent, MouseButton as WMouseButton, MouseScrollDelta, WindowEvent,
     };
     use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-    use winit::keyboard::{Key as WKey, ModifiersState, NamedKey};
+    use winit::keyboard::{Key as WKey, ModifiersState, NamedKey, PhysicalKey};
     use winit::platform::wayland::EventLoopBuilderExtWayland;
     use winit::window::{CursorIcon, Window, WindowId};
 
@@ -1401,61 +1401,40 @@ mod backend {
             let cw = (self.cell_w * scale * cells).max(1);
             let ch = (self.cell_h * scale).max(1);
             let line_h = ch as f32;
+            // The grid baseline (from the mono 'M', not this cluster's own line) so a
+            // fallback glyph aligns with the surrounding text rather than floating to
+            // wherever its own font's line metrics put it.
+            let baseline = (self.baseline * scale as i32).max(0);
             let fam = self.families.borrow().name_of(fid);
             let mut shared = self.families.borrow_mut();
             let shared = &mut *shared;
-            let metrics = Metrics::new(px, line_h);
-            let mut tb = CtBuffer::new(&mut shared.fs, metrics);
-            // a generous layout box so a wide glyph isn't wrapped or clipped
-            tb.set_size(&mut shared.fs, Some(cw as f32 + px), Some(line_h + px));
-            let mut attrs = Attrs::new().family(Family::Name(fam.as_str()));
-            if bold {
-                attrs = attrs.weight(Weight::BOLD);
-            }
-            if italic {
-                attrs = attrs.style(Style::Italic);
-            }
-            tb.set_text(&mut shared.fs, g, &attrs, Shaping::Advanced);
-            tb.shape_until_scroll(&mut shared.fs, false);
-
-            let mut rgba = vec![0u8; cw * ch * 4];
-            let mut color = false;
-            for run in tb.layout_runs() {
-                let baseline = run.line_y.round() as i32;
-                for gl in run.glyphs.iter() {
-                    let phys = gl.physical((0.0, 0.0), 1.0);
-                    let img = match shared.swash.get_image(&mut shared.fs, phys.cache_key) {
-                        Some(img) => img,
-                        None => continue,
-                    };
-                    let ox = phys.x + img.placement.left;
-                    let oy = baseline + phys.y - img.placement.top;
-                    let (iw, ih) = (img.placement.width as i32, img.placement.height as i32);
-                    match img.content {
-                        SwashContent::Mask => {
-                            for ry in 0..ih {
-                                for rx in 0..iw {
-                                    let a = img.data[(ry * iw + rx) as usize];
-                                    canvas_over(&mut rgba, cw, ch, ox + rx, oy + ry, 255, 255, 255, a);
-                                }
-                            }
-                        }
-                        SwashContent::Color => {
-                            color = true;
-                            for ry in 0..ih {
-                                for rx in 0..iw {
-                                    let i = ((ry * iw + rx) * 4) as usize;
-                                    canvas_over(
-                                        &mut rgba, cw, ch, ox + rx, oy + ry,
-                                        img.data[i], img.data[i + 1], img.data[i + 2], img.data[i + 3],
-                                    );
-                                }
-                            }
-                        }
-                        SwashContent::SubpixelMask => {}
-                    }
+            let attrs = |()| {
+                let mut a = Attrs::new().family(Family::Name(fam.as_str()));
+                if bold {
+                    a = a.weight(Weight::BOLD);
                 }
-            }
+                if italic {
+                    a = a.style(Style::Italic);
+                }
+                a
+            };
+            // Shape once at the text size to see whether the cluster fell back to a
+            // *color* font (an emoji). Text/symbol glyphs are mono.
+            let tb = shape_cluster(shared, g, attrs(()), px, cw as f32, line_h);
+            let mut rgba = vec![0u8; cw * ch * 4];
+            let color = if first_glyph_is_color(shared, &tb) {
+                // Emoji: render big enough to fill the cell block and center it — color
+                // glyphs have no useful text baseline, so baseline-aligning them looks
+                // low and cramped. Size to the smaller block dimension so the (square)
+                // glyph fits its `cells`-wide span.
+                let epx = ch.min(cw) as f32;
+                let tb2 = shape_cluster(shared, g, attrs(()), epx, cw as f32, epx);
+                composite_cluster(shared, &tb2, &mut rgba, cw, ch, Placement::Center);
+                true
+            } else {
+                composite_cluster(shared, &tb, &mut rgba, cw, ch, Placement::Baseline(baseline));
+                false
+            };
             CachedGlyph { color, width: cw, height: ch, rgba }
         }
 
@@ -1534,6 +1513,86 @@ mod backend {
         rgba[idx + 1] = mix(sg, rgba[idx + 1]);
         rgba[idx + 2] = mix(sb, rgba[idx + 2]);
         rgba[idx + 3] = out_a as u8;
+    }
+
+    /// Where a cluster's glyphs sit in its baked canvas. `Baseline(y)` puts the text
+    /// baseline at row `y` (the shared grid baseline, so a fallback symbol aligns with
+    /// the surrounding text). `Center` ignores the baseline and centers the glyph's
+    /// bounding box in the canvas — for color emoji, which have no useful text baseline.
+    enum Placement {
+        Baseline(i32),
+        Center,
+    }
+
+    /// Shape grapheme cluster `g` into a fresh cosmic-text buffer at `px` / line height
+    /// `line_h`, in family/style `attrs`. The layout box is generous so a wide glyph
+    /// isn't wrapped or clipped during shaping.
+    fn shape_cluster(shared: &mut FontShared, g: &str, attrs: Attrs, px: f32, w: f32, line_h: f32) -> CtBuffer {
+        let mut tb = CtBuffer::new(&mut shared.fs, Metrics::new(px.max(1.0), line_h.max(1.0)));
+        tb.set_size(&mut shared.fs, Some(w + px), Some(line_h + px));
+        tb.set_text(&mut shared.fs, g, &attrs, Shaping::Advanced);
+        tb.shape_until_scroll(&mut shared.fs, false);
+        tb
+    }
+
+    /// True if the cluster's first rasterised glyph is a *color* (emoji) bitmap — the
+    /// signal to size + center it rather than baseline-align it as text.
+    fn first_glyph_is_color(shared: &mut FontShared, tb: &CtBuffer) -> bool {
+        for run in tb.layout_runs() {
+            for gl in run.glyphs.iter() {
+                let phys = gl.physical((0.0, 0.0), 1.0);
+                if let Some(img) = shared.swash.get_image(&mut shared.fs, phys.cache_key) {
+                    return matches!(img.content, SwashContent::Color);
+                }
+            }
+        }
+        false
+    }
+
+    /// Composite a shaped cluster's glyphs into the RGBA canvas `rgba` (`cw`×`ch`).
+    /// `Baseline` lays each glyph at its pen position on the shared baseline (text);
+    /// `Center` puts the glyph's bounding box in the middle of the canvas (emoji).
+    /// Color glyphs keep their own RGBA; mask glyphs store coverage as white + alpha
+    /// (the caller recolors them with the face fg).
+    fn composite_cluster(shared: &mut FontShared, tb: &CtBuffer, rgba: &mut [u8], cw: usize, ch: usize, place: Placement) {
+        for run in tb.layout_runs() {
+            for gl in run.glyphs.iter() {
+                let phys = gl.physical((0.0, 0.0), 1.0);
+                let img = match shared.swash.get_image(&mut shared.fs, phys.cache_key) {
+                    Some(img) => img,
+                    None => continue,
+                };
+                let (iw, ih) = (img.placement.width as i32, img.placement.height as i32);
+                let (ox, oy) = match place {
+                    Placement::Baseline(b) => {
+                        (phys.x + img.placement.left, b + phys.y - img.placement.top)
+                    }
+                    Placement::Center => ((cw as i32 - iw) / 2, (ch as i32 - ih) / 2),
+                };
+                match img.content {
+                    SwashContent::Mask => {
+                        for ry in 0..ih {
+                            for rx in 0..iw {
+                                let a = img.data[(ry * iw + rx) as usize];
+                                canvas_over(rgba, cw, ch, ox + rx, oy + ry, 255, 255, 255, a);
+                            }
+                        }
+                    }
+                    SwashContent::Color => {
+                        for ry in 0..ih {
+                            for rx in 0..iw {
+                                let i = ((ry * iw + rx) * 4) as usize;
+                                canvas_over(
+                                    rgba, cw, ch, ox + rx, oy + ry,
+                                    img.data[i], img.data[i + 1], img.data[i + 2], img.data[i + 3],
+                                );
+                            }
+                        }
+                    }
+                    SwashContent::SubpixelMask => {}
+                }
+            }
+        }
     }
 
     fn pack(rgb: [u8; 3]) -> u32 {
