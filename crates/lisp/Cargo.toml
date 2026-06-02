@@ -27,7 +27,14 @@ dev-tools = []
 # fallback and color emoji, via its bundled swash) into the monospace cell grid.
 # The display *protocol* is unchanged Brood data (render ops); these just paint it
 # to a window instead of a terminal. See src/gui.rs and std/observer.blsp's `(observe)`.
-gui = ["dep:winit", "dep:softbuffer", "dep:cosmic-text"]
+gui = ["dep:winit", "dep:softbuffer", "dep:cosmic-text", "clipboard"]
+# OS clipboard access (the `clipboard-get` / `clipboard-set!` builtins), via `arboard`.
+# Pulled in by `gui` (a windowed editor wants copy/paste with other apps), but its own
+# feature so it can be enabled alone. Without it the builtins are graceful no-ops
+# (`clipboard-get` → nil), so the lean runtime and headless tests link no clipboard
+# stack. `arboard` keeps a process-lifetime handle so an X11/Wayland paste survives
+# while the editor runs (the selection owner must stay alive to serve paste requests).
+clipboard = ["dep:arboard"]
 
 [dependencies]
 # Lock-free, append-only vector for the shared RUNTIME code region: stable
@@ -109,6 +116,10 @@ webpki-roots = "1"
 # `make clippy` lints `--all-features`, so a mismatch is caught at the gate.
 winit = { version = "0.30", optional = true }
 softbuffer = { version = "0.4", optional = true }
+# OS clipboard (text only). `default-features = false` drops the `image-data` default
+# (no `image` crate pulled in); `wayland-data-control` adds Wayland support alongside the
+# always-built X11 backend, matching winit's dual support. See the `clipboard` feature.
+arboard = { version = "3", optional = true, default-features = false, features = ["wayland-data-control"] }
 # Text shaping + glyph rasterisation for the GUI grid: cosmic-text does HarfBuzz-class
 # shaping (so ZWJ emoji / flags / skin-tone sequences form one glyph), font fallback
 # (a cluster the mono font lacks falls back to the bundled Noto Color Emoji), and color

@@ -5750,3 +5750,38 @@ same spirit as ADR-046 (one `ui-run` loop, many apps): shared *mechanism* in
 **References.** ADR-046 (the `ui-run` framework). Lives in `std/editor/ui.blsp`
 (`overlay-route`/`overlay-active`); consumed by `brood-edit`'s `input.blsp` and
 `std/tool/observer.blsp`.
+
+## ADR-095 — OS clipboard: `clipboard-get` / `clipboard-set!` builtins (the `clipboard` feature)
+
+**Status:** accepted + implemented (2026-06-02). Two builtins behind a `clipboard`
+feature (pulled in by `gui`), via the `arboard` crate. The editor's kill/copy/yank sync
+through them.
+
+**Context.** The editor's kill ring was internal-only — copy/cut/paste couldn't exchange
+text with other apps. Brood had no clipboard access (it's an OS capability, not pure
+data), so this is a genuine kernel-level gap (a `--with-gui` editor that can't paste from
+the browser isn't a real editor).
+
+**Decision.** Add `(clipboard-get)` → text-or-nil and `(clipboard-set! s)` → s, native via
+`arboard` (text only; `default-features = false` drops the `image` dep, `wayland-data-control`
+matches winit's dual X11/Wayland support). Gated behind a `clipboard` feature so the lean
+runtime / headless tests link no clipboard stack — there the builtins are graceful no-ops
+(`get` → nil, `set!` → its arg), so callers needn't branch.
+
+- **Process-lifetime handle.** On X11/Wayland the selection *owner* must stay alive to
+  serve paste requests, so a fresh `Clipboard` per call would lose the text the instant it
+  dropped. The handle lives in a `OnceLock<Option<Mutex<Clipboard>>>` for the process; init
+  failure (no display server) caches `None` → no-op, no retry.
+- **Editor wiring (policy in Brood).** `commands/ed-push-kill` mirrors every new kill-ring
+  head to the clipboard; `cmd-yank` first adopts the clipboard if it differs from the ring
+  head (Emacs `interprogram-cut/paste-function`). Both gate on a model `:os-clipboard` flag
+  the *live editor* sets (`main.blsp`) but pure-model tests omit — so tests never touch the
+  process-global clipboard, which would make them order-dependent.
+
+**Consequences.** Copy/cut/paste are system-wide. The `clipboard` feature is independently
+toggleable; a non-clipboard build is unaffected. A right-click context menu (next) drives
+the same commands by mouse.
+
+**References.** ADR-046 (frontends), ADR-006 (mechanism in the kernel, policy in Brood).
+Lives in `crates/lisp/src/builtins.rs` (`clipboard` mod + the two builtins), `Cargo.toml`
+(`clipboard` feature / `arboard`), `brood-edit`'s `commands.blsp` + `main.blsp`.
