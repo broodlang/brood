@@ -209,78 +209,16 @@ highlight, isearch overlays, and bracket-match are all such ranges."
     nil
     ranges))
 
-(defn fontify-runs--drop (spans pos)
-  "Drop the leading spans that end at or before `pos` — they can't cover `pos` or any
-later offset. The monotonic-advance helper that keeps the span lookup O(1) amortized
-as the tiler walks a line left-to-right (`spans` must be ascending and non-overlapping,
-which `highlight-spans` guarantees)."
-  (cond
-    (empty? spans) spans
-    :else (let ([s e f] (first spans))
-            (if (<= e pos) (fontify-runs--drop (rest spans) pos) spans))))
-
-(defn fontify-runs--head-face (spans pos)
-  "The face of `spans`' head span iff it covers `pos`, else nil — assumes `spans` has
-already been advanced past every span ending at or before `pos` (`fontify-runs--drop`),
-so only the head can be the covering one."
-  (cond
-    (empty? spans) nil
-    :else (let ([s e f] (first spans))
-            (if (and (>= pos s) (< pos e)) f nil))))
-
-(defn fontify-runs--acc (text base spans ranges len i start cur acc)
-  "Tail-recursive run-length coalescer: emit a `[substring face]` run whenever the
-per-char face changes. `spans` is advanced monotonically (`fontify-runs--drop`) so the
-whole line costs O(chars + spans), not O(chars × spans); `ranges` stays a linear merge
-(the overlay channel — region / overlays / brackets — is tiny). The per-char path: used
-only for the few lines an overlay range actually touches (`fontify-runs` filters)."
-  (if (>= i len)
-    (reverse (cons [(substring text start len) cur] acc))
-    (let (pos (+ base i)
-          spans2 (fontify-runs--drop spans pos)
-          sf (fontify-runs--head-face spans2 pos)
-          rf (ranges-face ranges pos)
-          f (cond (nil? rf) sf (nil? sf) rf :else (into sf rf)))
-      (if (= f cur)
-        (fontify-runs--acc text base spans2 ranges len (inc i) start cur acc)
-        (fontify-runs--acc text
-          base
-          spans2
-          ranges
-          len
-          (inc i)
-          i
-          f
-          (cons [(substring text start i) cur] acc))))))
-
 (defn fontify-runs (text base spans ranges)
   "Coalesce `text` (its first char at buffer offset `base`) into a list of
 `[substring face]` runs: each char's face is its `spans` lexer face with every
 covering `ranges` (`[lo hi face]`) face merged on top, and a new run starts wherever
 that face changes. The shared run-length tiler — callers turn runs into display ops
 or HTML; `()` for empty `text`. `spans` must be ascending + non-overlapping (the
-`highlight-spans` shape) so the tiler can advance through them in lockstep with `text`;
-`ranges` may overlap and be unordered (it's merged linearly). Lines no overlay range
-touches take an O(spans) path; only lines a range crosses pay the per-char merge."
-  (let (len (string-length text))
-    (if (= len 0)
-      '()
-      (let (end (+ base len)
-            spans0 (fontify-runs--drop spans base)
-            line-ranges (filter (fn ([lo hi f]) (and (< lo end) (> hi base))) ranges))
-        (if (empty? line-ranges)
-          (span-runs text base spans0)  ; native no-overlay fast path (the common case)
-          (fontify-runs--acc text
-            base
-            spans0
-            line-ranges
-            len
-            1
-            0
-            (let (sf (fontify-runs--head-face spans0 base)
-                  rf (ranges-face line-ranges base))
-              (cond (nil? rf) sf (nil? sf) rf :else (into sf rf)))
-            '()))))))
+`highlight-spans` shape); `ranges` may overlap and be unordered (merged later-wins).
+The whole tile + overlay-merge is the native `span-runs` (it runs per visible line every
+frame, including a region/isearch overlay during a drag-select), so this is a thin call."
+  (span-runs text base spans ranges))
 
 (defn highlight-chunks (full base line overrides)
   "Return `[substring face]` chunks that tile `line` — the visible region starting

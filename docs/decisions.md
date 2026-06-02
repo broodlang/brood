@@ -5697,8 +5697,16 @@ frame, not just on edit) showed `fontify-runs` — the per-visible-line span→`
 face]` tiler — was the next interpreted hot loop. Its no-overlay path (the common case:
 no region/overlay crosses the line) is pure positional slicing with face coalescing, so
 it became a fourth native builtin, `(span-runs text base spans)` — same mechanism/policy
-split (faces stay opaque Values, re-emitted as-is; the overlay per-char merge path stays
-in Brood for the few lines a selection touches). Warm `ed-view` ~29ms → ~24ms.
+split (faces stay opaque Values, re-emitted as-is). Warm `ed-view` ~29ms → ~24ms. A
+follow-up extended it with an optional `ranges` arg `(span-runs text base spans ranges)`
+that tiles by the union of span + range edges and merges overlay faces per segment
+(`into` semantics, via the heap's `map_from_pairs_into`) — so a region/isearch overlay
+during a **drag-select** renders as O(segments), not the old O(chars) per-char merge:
+`ed-view` with a viewport-spanning region ~50ms → ~17ms. The whole Brood `fontify-runs`
+is now a one-line call into it; the per-char `fontify-runs--*` helpers are deleted.
+Separately, a flood of per-cell mouse `:drag` events (ADR-080) made a fast drag render
+cell-by-cell, so `editor/ui`'s `gui-display` poll now coalesces queued drags to the
+latest (`ui--coalesce-drag`) — render once per gesture step, not once per cell crossed.
 
 **References.** ADR-006 (mechanism in the kernel, policy in Brood), ADR-052
 (`highlight-spans` shape, `(special-forms)`), the editor's per-frame span cache. Lives in
