@@ -5628,7 +5628,11 @@ form means editing `SPECIAL_FORMS` once, then regenerating — no per-editor edi
   canonical set (marked "regenerate with `nest grammar emacs`").
 - VS Code/the REPL gained keyword colouring for the process/error macros; Emacs kept
   its richer highlighting — unification *upward*.
-- `tree-sitter-brood`, when built, is one more emitter over the same `special-keywords`.
+- `tree-sitter-brood` (the Neovim/Helix/Zed/GitHub *parser*) is one more emitter over the
+  same `special-keywords`: `nest grammar tree-sitter` emits its `queries/highlights.scm`
+  (a `#any-of?` over the canonical set — literal node-text, no regex escaping). The grammar
+  itself (`grammar.js` + an external scanner mirroring `atom::classify`) is a faithful model
+  of the reader, validated against the whole `std/` + `tests/` corpus.
 - Macros not promoted (anything still outside `(special-forms)`) are coloured by the
   LSP's semantic tokens as functions, not by the static grammar — the intended split.
 
