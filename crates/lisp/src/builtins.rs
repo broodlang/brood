@@ -1019,6 +1019,14 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::with_rest(vec![string, int, any], any, list_ty),
         span_runs,
     );
+    def(heap, "clipboard-get", Arity::exact(0), Sig::nullary(any), clipboard_get);
+    def(
+        heap,
+        "clipboard-set!",
+        Arity::exact(1),
+        Sig::new(vec![string], string),
+        clipboard_set,
+    );
     // CST parse with absolute positions — every node a map `{:kind :start :end …}`
     // (char offsets). Backs structural navigation (std/sexp); see
     // `parse_source_positioned` for the shape.
@@ -1737,6 +1745,8 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("parse-source", &["s"], "Parse s into a lossless CST tree as nested vectors (mechanism for std/format.blsp)."),
     ("scan-tokens", &["s"], "Lexically tokenize Brood source s into a vector of [start end kind text] tokens (char offsets, end-exclusive; whitespace skipped). kind is :comment, :string, :number, :keyword, :symbol, :open, or :close. The lossless token stream a fontifier / structural tool walks — the per-char scan runs natively, leaving policy (faces, head-position) to the consumer over O(tokens)."),
     ("span-runs", &["text", "base", "spans", "ranges"], "Tile text (first char at offset base) into a list of [substring face] runs from ascending, non-overlapping [start end face] spans: gaps are nil-faced, each span its text in its face. With optional overlay ranges ([lo hi face], may overlap/be unordered) each char's face is its span face with every covering range face merged on top (later wins). Adjacent equal-face runs coalesce. The highlight span->runs tiler (fontify-runs), in Rust. Faces are opaque maps."),
+    ("clipboard-get", &[], "The OS clipboard's text, or nil when empty / non-text / unavailable (no display server, or a build without the clipboard feature)."),
+    ("clipboard-set!", &["s"], "Copy string s to the OS clipboard so other apps can paste it; returns s. A no-op (still returns s) when no clipboard is available or the clipboard feature is off."),
     ("parse-source-positioned", &["s"], "Parse s into a CST of maps, each `{:kind :start :end}` (leaves add :text, containers/wrappers add :kids) with half-open character offsets — for structural navigation (std/sexp)."),
     ("eval-string", &["s"], "Read and evaluate every form in string s (the string analogue of load)."),
     ("load", &["path"], "Read and evaluate every form in the file at path."),
@@ -4082,6 +4092,57 @@ fn span_runs(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         })
         .collect();
     Ok(heap.list_from_slice(&out))
+}
+
+/// OS clipboard access (the `clipboard` feature, via `arboard`). The handle lives in a
+/// `OnceLock` for the whole process: on X11/Wayland the selection *owner* must stay
+/// alive to answer paste requests, so a fresh handle per call would lose the copied text
+/// the moment it dropped. Init failure (no display server) is cached as `None`, so the
+/// builtins degrade to no-ops rather than retrying.
+#[cfg(feature = "clipboard")]
+mod clipboard {
+    use arboard::Clipboard;
+    use std::sync::{Mutex, OnceLock};
+    static CB: OnceLock<Option<Mutex<Clipboard>>> = OnceLock::new();
+    fn handle() -> Option<&'static Mutex<Clipboard>> {
+        CB.get_or_init(|| Clipboard::new().ok().map(Mutex::new)).as_ref()
+    }
+    pub fn get_text() -> Option<String> {
+        handle()?.lock().ok()?.get_text().ok()
+    }
+    pub fn set_text(s: &str) {
+        if let Some(m) = handle() {
+            if let Ok(mut cb) = m.lock() {
+                let _ = cb.set_text(s.to_owned());
+            }
+        }
+    }
+}
+
+/// `(clipboard-get)` — the OS clipboard's text, or nil when it's empty / non-text /
+/// unavailable (no display server, or a build without the `clipboard` feature). The
+/// editor's yank consults this so text copied in another app pastes in.
+fn clipboard_get(_args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    #[cfg(feature = "clipboard")]
+    if let Some(s) = clipboard::get_text() {
+        return Ok(heap.alloc_string(&s));
+    }
+    #[cfg(not(feature = "clipboard"))]
+    let _ = &heap;
+    Ok(Value::Nil)
+}
+
+/// `(clipboard-set! s)` — copy string `s` to the OS clipboard so other apps can paste
+/// it; returns `s` (so it threads). A no-op (still returns `s`) when no clipboard is
+/// available or the `clipboard` feature is off, so callers needn't special-case headless
+/// builds. The editor's kill/copy commands call this so a kill is system-wide.
+fn clipboard_set(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let s = expect_string(heap, "clipboard-set!", arg(args, 0))?;
+    #[cfg(feature = "clipboard")]
+    clipboard::set_text(&s);
+    #[cfg(not(feature = "clipboard"))]
+    let _ = &s;
+    Ok(arg(args, 0))
 }
 
 /// `(%str-index-of s needle)` — the 0-based **char** index of the first
