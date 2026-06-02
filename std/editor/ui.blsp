@@ -253,3 +253,32 @@ non-blocking window. The shared loop behind the observer (and the editor)."
       (catch e
         ((get display :leave))  ; restore the terminal even on a frontend/startup error
         (throw e)))))
+
+;; ---- modal input overlays (the dispatch-fallthrough policy) -----------------
+;; A `ui-run` app's `update` usually has a few *transient* modes that sit beside its
+;; keymap and, while open, capture input: a minibuffer prompt, a completion popup, an
+;; incremental search, a y/n confirmation. `overlay-route` is the one fallthrough rule
+;; they share — route a key to whichever overlay is open, else dispatch normally — so an
+;; app lists its overlays as data instead of growing a bespoke `cond`. The editor and the
+;; observer both build on it (ADR-094).
+
+(defn overlay-active (overlays model)
+  "The first overlay in `overlays` whose `:active?` holds for `model` (list order =
+precedence), or nil. Each overlay is a map `{:active? :owns? :handle :exit}`."
+  (find (fn (o) ((get o :active?) model)) overlays))
+
+(defn overlay-route (overlays model input fallback)
+  "Fold `input` into the first active overlay in `overlays`, or `(fallback model input)`
+when none is open. Each overlay is `{:active? (model)->bool, :owns? (model input)->bool
+or nil, :handle (model input)->model, :exit (model)->model or nil}`. The owning overlay
+handles the key; a key it does **not** own dismisses the overlay (`:exit`, if any) and is
+re-dispatched through `fallback` — Emacs' dismiss-and-process. `:owns?` nil is
+capture-all (every key is the overlay's); `:exit` nil leaves the model as-is before
+falling through. The shared seam behind the editor's transient overlays and the
+observer's minibuffer."
+  (let (o (overlay-active overlays model))
+    (cond
+      (nil? o) (fallback model input)
+      (let (owns (get o :owns?)) (or (nil? owns) (owns model input))) ((get o :handle) model input)
+      :else (let (exit (get o :exit))
+              (fallback (if (nil? exit) model (exit model)) input)))))

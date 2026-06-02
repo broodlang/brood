@@ -5696,3 +5696,41 @@ and `hl--number?` gates the `string->number` parse behind a first-char check.
 (`highlight-spans` shape, `(special-forms)`), the editor's per-frame span cache. Lives in
 `crates/lisp/src/builtins.rs` (`string_span`/`string_span_until`/`scan_tokens`),
 `std/editor/highlight.blsp`, `std/editor/markdown.blsp`.
+
+## ADR-094 — `overlay-route`: the modal-overlay dispatch fallthrough lives in `editor/ui`
+
+**Status:** accepted + implemented (2026-06-02). One small `std/editor/ui.blsp`
+addition (`overlay-route` + `overlay-active`); the editor and the observer both adopt
+it. No behaviour change to either app.
+
+**Context.** A `ui-run` app's `update` typically has a few *transient* modes that sit
+beside its keymap and capture input while open: the editor's minibuffer / completion
+popup / incremental search / query-replace, the observer's eval minibuffer. Each app had
+hand-rolled the same fallthrough rule — route a key to whichever overlay is open; the
+overlay that *owns* the key handles it, any other key dismisses the overlay and is
+re-dispatched normally. The editor expressed it as a `{:active? :owns? :handle :exit}`
+handler list + `ed-route-transient`; the observer as an inline `cond`. Two copies of one
+rule, and a third app would be a third.
+
+**Decision.** Move the rule to `editor/ui` (the `ui-run` framework module both apps
+already build on): `(overlay-route overlays model input fallback)` routes `input` to the
+first active overlay or to `fallback`, with `:owns?` nil = capture-all and a non-owned
+key running `:exit` then `fallback` (dismiss-and-process). The *overlay list* stays each
+app's own data (its modes, its model shape); only the dispatch policy is shared.
+
+- The editor's `ed-route-transient` is now a one-line call; `ed--transient-active` /
+  `ed--transient-owns?` are deleted.
+- The observer routes its eval-minibuffer (`:command` mode) + keymap tail through it.
+  Its `:confirm` (kill confirmation) stays an explicit branch **above** the mouse case —
+  that's a deliberate precedence (any input, even a click, resolves a pending kill rather
+  than shifting the list under it), not the overlay-fallthrough shape, so it isn't forced
+  into the router.
+
+**Consequences.** The dispatch rule has one home and one test (`tests/ui_test.blsp`); a
+new modal feature in either app is a list entry, not new control flow. The seam is the
+same spirit as ADR-046 (one `ui-run` loop, many apps): shared *mechanism* in
+`editor/ui`, per-app *policy* (which overlays, what they do) in the app.
+
+**References.** ADR-046 (the `ui-run` framework). Lives in `std/editor/ui.blsp`
+(`overlay-route`/`overlay-active`); consumed by `brood-edit`'s `input.blsp` and
+`std/tool/observer.blsp`.
