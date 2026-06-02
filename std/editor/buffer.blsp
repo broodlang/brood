@@ -70,6 +70,13 @@ nil."
 `save-buffer` can write it back."
   (make-buffer (slurp path) path path))
 
+(defn find-file-buffer (path)
+  "Open `path` for editing, vim/emacs `find-file` style: its contents if the file
+exists, else a fresh *empty* buffer — either way backed by `path`, so `save-buffer`
+writes it (creating the file for a new path). Visiting a missing path starts an
+unsaved buffer rather than erroring."
+  (if (file-exists? path) (buffer-from-file path) (make-buffer "" path path)))
+
 (defn save-buffer (buf)
   "Write `buf`'s text to its `:file`; raise if it has none. Returns `buf`."
   (let (f (get buf :file))

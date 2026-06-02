@@ -88,11 +88,13 @@ enum Cmd {
     /// Run the project's entry point, or a specific .blsp file.
     ///
     /// Inside a project: with no FILE, runs `:main` (defaults to `main/main`);
-    /// with a FILE, runs that file with the project's sources pre-loaded so
-    /// it can reach project modules.
+    /// with a `.blsp` FILE, runs that file with the project's sources pre-loaded
+    /// so it can reach project modules; with a *non-*`.blsp` FILE, runs `:main`
+    /// passing FILE as its argument — so `nest run notes.txt` opens notes.txt in
+    /// the editor (vim/emacs style) rather than parsing it as Brood.
     /// Outside a project: FILE is required and runs like `brood <file>`.
     Run {
-        /// .blsp file to run instead of the project's `:main`.
+        /// A `.blsp` file to run instead of `:main`, or a document to hand `:main`.
         #[arg(value_name = "FILE")]
         file: Option<String>,
 
@@ -547,7 +549,18 @@ fn cmd_run(
     name: Option<&str>,
     args: &[String],
 ) {
-    let promoted: Option<String> = if file.is_none() && watch.len() == 1 {
+    // A non-`.blsp` positional FILE inside a project is a *document* for the entry
+    // point (the editor opens it), not a Brood script to run: route it to `:main` as
+    // an argument, so `nest run notes.txt` edits notes.txt (vim/emacs style) instead
+    // of trying to parse it as Brood. A `.blsp` FILE still runs as a script; outside a
+    // project FILE always runs (there's no `:main` to hand it to).
+    let doc_arg: Option<String> = match file {
+        Some(p) if in_project() && !p.ends_with(".blsp") => Some(p.to_string()),
+        _ => None,
+    };
+    let file: Option<&str> = if doc_arg.is_some() { None } else { file };
+
+    let promoted: Option<String> = if file.is_none() && doc_arg.is_none() && watch.len() == 1 {
         let p = &watch[0];
         match std::fs::metadata(p) {
             Ok(meta) if !meta.is_dir() => Some(p.clone()),
@@ -558,9 +571,11 @@ fn cmd_run(
     };
     let file: Option<&str> = file.or(promoted.as_deref());
 
-    let escaped_args = args
-        .iter()
-        .map(|a| format!("\"{}\"", brood::introspect::escape_brood_string(a)))
+    // The document arg (if any) leads the trailing args passed to `:main`.
+    let escaped_args = doc_arg
+        .into_iter()
+        .chain(args.iter().cloned())
+        .map(|a| format!("\"{}\"", brood::introspect::escape_brood_string(&a)))
         .collect::<Vec<_>>()
         .join(" ");
 
