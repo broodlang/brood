@@ -246,40 +246,40 @@
       (assert= (buffer-search-backward b "abc" 0) nil)
       (assert= (buffer-search-backward b "zzz" 7) nil))))
 
-(describe "buffer undo / redo"
+(describe "buffer undo (tree)"
   (test "undo restores the text and point before the last edit"
     (let (b (-> (make-buffer "hello") (goto-char 5) (insert "!"))
           u (undo b))
       (assert= (buffer-text b) "hello!")
       (assert= (buffer-text u) "hello")
       (assert= (buffer-point u) 5)))
-  (test "redo re-applies an undone edit"
-    (let (b (-> (make-buffer "hi") end-of-buffer (insert "!"))
-          r (-> b undo redo))
-      (assert= (buffer-text r) "hi!")
-      (assert= (buffer-point r) 3)))
-  (test "a fresh edit clears the redo stack"
-    (let (b (-> (make-buffer "") (insert "a") (insert "b"))
-           ; "ab"
-           back
-           (undo b)  ; "a", redo has "ab"
-           edited
-           (insert back "z"))
-      ; "az", redo cleared
-      (assert= (buffer-text edited) "az")
-      (assert= (buffer-text (redo edited)) "az")))  ; redo is now a no-op
+  (test "undoing an undo redoes it (undo is itself recorded — the tree)"
+    ;; `undo` always begins a fresh run, so a second standalone undo reverses direction.
+    (let (b (-> (make-buffer "hi") end-of-buffer (insert "!")))
+      (assert= (buffer-text (undo b)) "hi")
+      (assert= (buffer-text (-> b undo undo)) "hi!")))   ; undo, then undo-the-undo = redo
+  (test "undo-start + undo-next walk groups; a fresh start reverses direction (redo)"
+    (let (b (-> (make-buffer "") (insert "a") (insert "b") (insert "c"))  ; 3 separate edits
+          back1 (undo-next (undo-start b))                ; -> "ab"
+          back2 (undo-next back1)                         ; continue -> "a"
+          back3 (undo-next back2))                        ; continue -> ""
+      (assert= (buffer-text back1) "ab")
+      (assert= (buffer-text back2) "a")
+      (assert= (buffer-text back3) "")
+      (assert= (buffer-text (undo-next (undo-start back3))) "a")))  ; fresh run now redoes
+  (test "no state is lost: an edit after undo leaves the old branch reachable"
+    (let (b (-> (make-buffer "") (insert "a") (insert "b"))  ; "ab"
+          u (undo b)                                          ; "a" (undid "b")
+          branched (insert u "z"))                            ; "az" — a new branch
+      (assert= (buffer-text branched) "az")
+      (is (includes? (map buffer-text (get branched :undo)) "ab"))))  ; "ab" still in history
   (test "undo with no history is a no-op"
-    (let (b (make-buffer "abc"))
-      (assert= (buffer-text (undo b)) "abc")
-      (assert= (buffer-text (redo b)) "abc")))
+    (assert= (buffer-text (undo (make-buffer "abc"))) "abc"))
   (test "a no-op edit records nothing (undo skips past it)"
     (let (b (-> (make-buffer "ab") (insert "X"))
-           ; "Xab", one undo step
-           noop
-           (delete-char (end-of-buffer b)))
-      ; delete at end → unchanged
+          noop (delete-char (end-of-buffer b)))   ; delete at end → unchanged
       (assert= (buffer-text noop) "Xab")
-      (assert= (buffer-text (undo noop)) "ab")))  ; undo reaches the real edit
+      (assert= (buffer-text (undo noop)) "ab")))   ; undo reaches the real edit
   (test "undoing a region delete restores the text and the mark"
     (let (b (-> (make-buffer "abcdef") (goto-char 1) set-mark (goto-char 4) delete-region)
           u (undo b))
