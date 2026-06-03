@@ -74,6 +74,17 @@ Built on `std/highlight.blsp` (pure analysis) and the inline `term-*` seam.
          (= c ";")
          (= c ","))))
 
+(defn lineedit--path-word-char? (c)
+  "Word constituent for **path mode** — like `lineedit--word-char?` but `/` is also a
+boundary, so M-f/M-b/C-w move and kill one path component (folder) at a time."
+  (and (lineedit--word-char? c) (not (= c "/"))))
+
+(defn lineedit--word-pred (state)
+  "The word-constituent predicate for `state`: path-aware (breaks on `/`, for find-file /
+project prompts) when `:word-mode` is `:path`, else the default. Set `:word-mode` on the
+lineedit state to pick — a tiny per-prompt 'mode' for path navigation."
+  (if (= (get state :word-mode) :path) lineedit--path-word-char? lineedit--word-char?))
+
 (defn lineedit--fwd (text i n pred)
   "Smallest index ≥ `i` (up to `n`) whose char fails `pred` — advance while `pred`."
   (if (or (>= i n) (not (pred (char-at text i)))) i (lineedit--fwd text (inc i) n pred)))
@@ -82,16 +93,18 @@ Built on `std/highlight.blsp` (pure analysis) and the inline `term-*` seam.
   "Largest index ≤ `i` (down to 0) whose preceding char fails `pred`."
   (if (or (<= i 0) (not (pred (char-at text (dec i))))) i (lineedit--bwd text (dec i) pred)))
 
-(defn lineedit--fwd-word (text p)
-  "Point after the next word forward from `p` (skip non-word, then word)."
+(defn lineedit--fwd-word (text p word?)
+  "Point after the next word forward from `p` (skip non-word, then word), where `word?`
+is the word-constituent predicate (`lineedit--word-pred` picks it per mode)."
   (let (n (string-length text)
-        i (lineedit--fwd text p n (fn (c) (not (lineedit--word-char? c)))))
-    (lineedit--fwd text i n lineedit--word-char?)))
+        i (lineedit--fwd text p n (fn (c) (not (word? c)))))
+    (lineedit--fwd text i n word?)))
 
-(defn lineedit--bwd-word (text p)
-  "Point at the start of the word backward from `p` (skip non-word, then word)."
-  (let (i (lineedit--bwd text p (fn (c) (not (lineedit--word-char? c)))))
-    (lineedit--bwd text i lineedit--word-char?)))
+(defn lineedit--bwd-word (text p word?)
+  "Point at the start of the word backward from `p` (skip non-word, then word), with
+`word?` the word-constituent predicate."
+  (let (i (lineedit--bwd text p (fn (c) (not (word? c)))))
+    (lineedit--bwd text i word?)))
 
 ;; ---- pure edit operations ---------------------------------------------------
 
@@ -147,7 +160,7 @@ Built on `std/highlight.blsp` (pure analysis) and the inline `term-*` seam.
   (let (text (get state :text)
         p (get state :point)
         n (string-length text)
-        s (lineedit--bwd-word text p))
+        s (lineedit--bwd-word text p (lineedit--word-pred state)))
     (assoc state
       :text
       (str (substring text 0 s) (substring text p n))
@@ -163,7 +176,7 @@ Built on `std/highlight.blsp` (pure analysis) and the inline `term-*` seam.
   (let (text (get state :text)
         p (get state :point)
         n (string-length text)
-        e (lineedit--fwd-word text p))
+        e (lineedit--fwd-word text p (lineedit--word-pred state)))
     (assoc state
       :text
       (str (substring text 0 p) (substring text e n))
@@ -361,11 +374,11 @@ globals by default; a project can rebind it to complete its own vocabulary)."
   "Move point one character left (C-b)."
   (lineedit--move state (dec (get state :point))))
 (defn lineedit-forward-word (state _)
-  "Move point to the end of the next word (M-f)."
-  (lineedit--move state (lineedit--fwd-word (get state :text) (get state :point))))
+  "Move point to the end of the next word (M-f) — by path component in `:path` mode."
+  (lineedit--move state (lineedit--fwd-word (get state :text) (get state :point) (lineedit--word-pred state))))
 (defn lineedit-backward-word (state _)
-  "Move point to the start of the previous word (M-b)."
-  (lineedit--move state (lineedit--bwd-word (get state :text) (get state :point))))
+  "Move point to the start of the previous word (M-b) — by path component in `:path` mode."
+  (lineedit--move state (lineedit--bwd-word (get state :text) (get state :point) (lineedit--word-pred state))))
 (defn lineedit-delete-backward (state _)
   "Delete the character before point (Backspace / C-h)."
   (lineedit--del-back state))
