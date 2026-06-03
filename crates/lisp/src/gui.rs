@@ -168,7 +168,11 @@ const NOT_COMPILED: &str = "gui backend not compiled in; rebuild with `--feature
 mod disabled {
     use super::Op;
     use super::NOT_COMPILED;
-    pub fn open(_subscriber: u64, _title: Option<String>) -> Result<u64, String> {
+    pub fn open(
+        _subscriber: u64,
+        _title: Option<String>,
+        _size: Option<(f64, f64)>,
+    ) -> Result<u64, String> {
         Err(NOT_COMPILED.into())
     }
     pub fn close(_id: u64) -> Result<(), String> {
@@ -290,6 +294,7 @@ mod backend {
         Open {
             subscriber: u64,
             title: Option<String>,
+            size: Option<(f64, f64)>,
             reply: Sender<Result<OpenReply, String>>,
         },
         /// Replace window `id`'s frame and repaint it.
@@ -382,7 +387,11 @@ mod backend {
     /// `(gui-open subscriber)` — open a new window whose key/mouse input is
     /// delivered to process `subscriber`'s mailbox; return the window id. Starts the
     /// GUI thread on the first call. Each call is an independent window.
-    pub fn open(subscriber: u64, title: Option<String>) -> Result<u64, String> {
+    pub fn open(
+        subscriber: u64,
+        title: Option<String>,
+        size: Option<(f64, f64)>,
+    ) -> Result<u64, String> {
         let (reply_tx, reply_rx) = mpsc::channel();
         // Send under the proxy lock, then drop it before awaiting the reply so a
         // slow window build can't block other windows' sends.
@@ -392,6 +401,7 @@ mod backend {
             .send_event(UserEvent::Open {
                 subscriber,
                 title,
+                size,
                 reply: reply_tx,
             })
             .map_err(|_| "gui thread is gone".to_string())?;
@@ -633,15 +643,17 @@ mod backend {
         elwt: &ActiveEventLoop,
         subscriber: u64,
         title: Option<String>,
+        size: Option<(f64, f64)>,
         families: Families,
         base_px: f32,
         default_family: Option<u32>,
     ) -> Result<Win, String> {
+        let (w, h) = size.unwrap_or((840.0, 560.0));
         let window = elwt
             .create_window(
                 Window::default_attributes()
                     .with_title(title.unwrap_or_else(|| "Brood".to_string()))
-                    .with_inner_size(LogicalSize::new(840.0, 560.0)),
+                    .with_inner_size(LogicalSize::new(w, h)),
             )
             .map_err(|e| format!("window: {e}"))?;
         let window = Rc::new(window);
@@ -696,7 +708,7 @@ mod backend {
         /// windows simply persist — `resumed` only ever fires once here.)
         resumed: bool,
         /// `Open` requests received before `resumed`, drained when it fires.
-        pending_open: Vec<(u64, Option<String>, Sender<Result<OpenReply, String>>)>,
+        pending_open: Vec<(u64, Option<String>, Option<(f64, f64)>, Sender<Result<OpenReply, String>>)>,
     }
 
     impl GuiApp {
@@ -708,6 +720,7 @@ mod backend {
             event_loop: &ActiveEventLoop,
             subscriber: u64,
             title: Option<String>,
+            size: Option<(f64, f64)>,
             reply: Sender<Result<OpenReply, String>>,
         ) {
             let id = next_id();
@@ -715,6 +728,7 @@ mod backend {
                 event_loop,
                 subscriber,
                 title,
+                size,
                 self.families.clone(),
                 self.default_px,
                 self.default_family,
@@ -744,19 +758,19 @@ mod backend {
         fn resumed(&mut self, event_loop: &ActiveEventLoop) {
             event_loop.set_control_flow(ControlFlow::Wait);
             self.resumed = true;
-            for (subscriber, title, reply) in std::mem::take(&mut self.pending_open) {
-                self.open_window(event_loop, subscriber, title, reply);
+            for (subscriber, title, size, reply) in std::mem::take(&mut self.pending_open) {
+                self.open_window(event_loop, subscriber, title, size, reply);
             }
         }
 
         fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
             match event {
                 // Create now if the display is live, else queue until `resumed`.
-                UserEvent::Open { subscriber, title, reply } => {
+                UserEvent::Open { subscriber, title, size, reply } => {
                     if self.resumed {
-                        self.open_window(event_loop, subscriber, title, reply);
+                        self.open_window(event_loop, subscriber, title, size, reply);
                     } else {
-                        self.pending_open.push((subscriber, title, reply));
+                        self.pending_open.push((subscriber, title, size, reply));
                     }
                 }
                 // Set a live window's OS title-bar text (behind gui-title!).

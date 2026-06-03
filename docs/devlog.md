@@ -799,3 +799,12 @@ windows being a general primitive). `build_window` no longer needs the `id` (it 
 fed the old default). Only Brood caller of `(gui-open)` is `std/editor/ui.blsp`, which
 keeps the no-arg form and gets the new default. Motivated by the `brood-life` demo
 wanting a real title bar.
+
+## 2026-06-03 — gui-open: optional initial window size
+
+`gui-open` now takes optional `width height` (logical px) after the title:
+`(gui-open title w h)`. Threaded `size: Option<(f64,f64)>` through `UserEvent::Open`
+→ `open` → `pending_open` → `open_window` → `build_window` (which `unwrap_or`s the
+840x560 default). The builtin decodes the two extra int args (Arity 0..3). No-arg
+and title-only callers are unchanged. Motivated by brood-life wanting a larger
+canvas without dragging the window each run.
