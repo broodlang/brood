@@ -587,6 +587,21 @@ mod backend {
         ])
     }
 
+    /// A synthetic release of held button `b` at cell `(col, row)` — delivered when the
+    /// pointer leaves the window or focus is lost while a button is down, so its real
+    /// (off-window) release can't strand the app thinking the button is still pressed.
+    fn release_of(b: MouseButton, col: u16, row: u16, mods: &ModifiersState) -> Mouse {
+        Mouse {
+            action: MouseAction::Release,
+            button: Some(b),
+            row,
+            col,
+            ctrl: mods.control_key(),
+            alt: mods.alt_key(),
+            shift: mods.shift_key(),
+        }
+    }
+
     /// A resize event as the `[:resize cols rows]` vector (the new cell grid),
     /// built as a `Message` (no heap) so the GUI thread can deliver it to a
     /// mailbox. Wakes the app loop so it re-renders at the new size instead of
@@ -964,6 +979,22 @@ mod backend {
                     *w.held_key.lock().unwrap() = None;
                     w.held_physical = None;
                     deliver(w.subscriber, Message::Keyword(value::intern("blur")));
+                    // Same for a held mouse button: its release may land off-window /
+                    // unfocused and never reach us, so synthesize one now (see CursorLeft).
+                    if let Some(b) = w.held.take() {
+                        let (col, row) = w.cursor;
+                        deliver(w.subscriber, mouse_message(&release_of(b, col, row, &w.mods)));
+                    }
+                }
+                WindowEvent::CursorLeft { .. } => {
+                    // The pointer left the window. If a button was held, its release happens
+                    // outside and we never see it — so the NEXT re-entry's motion would emit
+                    // a phantom `:drag` and the app would think the button is still pressed.
+                    // Synthesize the release + clear `held` (mirrors the keyboard blur fix).
+                    if let Some(b) = w.held.take() {
+                        let (col, row) = w.cursor;
+                        deliver(w.subscriber, mouse_message(&release_of(b, col, row, &w.mods)));
+                    }
                 }
                 WindowEvent::CursorMoved { position, .. } => {
                     // Track the pointer cell. Bare motion (no button) isn't emitted —
