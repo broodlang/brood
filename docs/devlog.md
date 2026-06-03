@@ -817,3 +817,13 @@ because `Win::held` was still `Some`, so the app thought the button was still
 pressed (e.g. a Life paint kept auto-repeating). Fix: synthesize a `:release` and
 clear `held` on `WindowEvent::CursorLeft` (and on `Focused(false)`, belt-and-braces)
 — mirrors the keyboard held-key blur handling (ADR-086). New `release_of` helper.
+
+## 2026-06-03 — gui: gui-icon! sets a window's taskbar / title-bar icon
+
+New builtin `(gui-icon! id rgba w h)`: set a live window's icon from raw RGBA
+pixels (a vector of w*h*4 byte ints, row-major). Routed through the event-loop
+proxy like `gui-title!` (new `UserEvent::Icon`), then `Window::set_window_icon`
+with `winit::window::Icon::from_rgba`. Lets an app draw its own icon rather than
+ship an image file (brood-life generates a glider tile from its pattern set).
+Caveat: winit honours this on X11/Windows; on Wayland the compositor takes the
+icon from a .desktop file (app_id), so it's a silent no-op there.

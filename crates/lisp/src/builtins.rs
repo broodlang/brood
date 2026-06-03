@@ -727,6 +727,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "gui-icon!",
+        Arity::exact(4),
+        Sig::new(vec![int, vec_ty, int, int], nil_ty),
+        gui_icon,
+    );
+    def(
+        heap,
         "gui-focus",
         Arity::exact(1),
         Sig::new(vec![int], nil_ty),
@@ -1808,6 +1815,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("gui-open", &["title?", "width?", "height?"], "Open a new native window and return its integer id (needs the runtime built with --features gui; errors otherwise). An optional `title` string sets the OS title-bar text (default `Brood`); change it later with gui-title!. Optional `width` `height` (logical pixels, both required together) set the initial window size (default 840x560). Its key/mouse input is delivered to the CALLING process's mailbox as messages — a key as a 1-char string / keyword (`:up`, `:ctrl-c`), the mouse as `[:mouse action button row col mods]` (action `:press`/`:release`/`:drag`/`:scroll-up`/`:scroll-down` — `:drag` is motion with a button held, delivered once per cell crossed; `mods` a vector of held modifier keywords in `:ctrl :alt :shift` order, `[]` when none, so Ctrl+wheel / Ctrl+drag are bindable), a resize as `[:resize cols rows]` (the new cell grid, so the loop re-renders at the new size) — so the consumer parks in `(receive)` instead of polling (ADR-058). Clicking the window's close button delivers a dedicated `:close` message — distinct from the Escape *key* (`:escape`), so an app can quit on the X without conflating it with Escape (which an editor binds to cancel/normal-mode); `ui-run` quits on `:close` automatically. Starts the GUI thread on the first call; each call is an independent window, so several observers can run at once. Pass the id to the other gui-* primitives; pair with gui-close."),
     ("gui-close", &["id"], "Close window id (the teardown for gui-open). Idempotent; an unknown id is a no-op."),
     ("gui-title!", &["id", "text"], "Set window id's OS title-bar text to the string text at runtime (the title gui-open gave it, or the default, otherwise). Needs --features gui; a no-op if the GUI thread never started or id isn't a live window. Returns nil."),
+    ("gui-icon!", &["id", "rgba", "w", "h"], "Set window id's taskbar / title-bar icon from raw RGBA pixels: rgba is a vector of w*h*4 byte ints (0-255), row-major, 4 per pixel (red, green, blue, alpha). Needs --features gui; a silent no-op if the GUI thread never started, id isn't a live window, or the data length isn't w*h*4. Where the OS shows it depends on the platform (X11/Windows use it directly; Wayland prefers a .desktop file). Returns nil."),
     ("gui-focus", &["id"], "Raise window id to the front and give it OS keyboard focus, un-minimising it first. Lets an app surface an already-open (singleton) window instead of opening a duplicate — e.g. `(observe)` focuses its existing window rather than spawning a second. Errors only if id isn't a live window. Needs --features gui. Returns nil."),
     ("gui-size", &["id"], "Window id's size as [cols rows] in character cells (tracks resize / HiDPI), same shape as term-size."),
     ("gui-held-key", &["id"], "The key window id currently sees as physically held — the same value its press delivered (a 1-char string, or a keyword like :ctrl-n / :up) — or nil when none is held. Tracked from press/release transitions in the event loop (NOT winit's ke.repeat, unreliable on Wayland), so it's the source of truth for a held key: a consumer-paced auto-repeat polls it each tick and stops the instant it no longer matches, so a missed key-up (e.g. lost on focus change) can't cause runaway repeat."),
@@ -5002,6 +5010,31 @@ fn gui_title(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = gui_window_id(heap, "gui-title!", arg(args, 0))?;
     let title = expect_string(heap, "gui-title!", arg(args, 1))?;
     crate::gui::title(id, title).map_err(LispError::runtime)?;
+    Ok(Value::Nil)
+}
+
+/// `(gui-icon! id rgba w h)` — set window `id`'s taskbar/title-bar icon from raw RGBA
+/// pixels (a vector of `w*h*4` byte ints, row-major).
+fn gui_icon(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = gui_window_id(heap, "gui-icon!", arg(args, 0))?;
+    let w = expect_int(heap, "gui-icon!", arg(args, 2))? as u32;
+    let h = expect_int(heap, "gui-icon!", arg(args, 3))? as u32;
+    let rgba: Vec<u8> = match arg(args, 1) {
+        Value::Vector(vid) => heap
+            .vector(vid)
+            .iter()
+            .map(|v| match v {
+                Value::Int(i) => *i as u8,
+                _ => 0,
+            })
+            .collect(),
+        _ => {
+            return Err(LispError::runtime(
+                "gui-icon!: rgba must be a vector of bytes".to_string(),
+            ))
+        }
+    };
+    crate::gui::icon(id, rgba, w, h).map_err(LispError::runtime)?;
     Ok(Value::Nil)
 }
 
