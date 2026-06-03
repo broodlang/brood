@@ -207,3 +207,16 @@
           w (spawn (receive ([:edit s from] (send from (get (le--keys s (list "a" "b" "c")) :text))))))
       (send w [:edit st (self)])
       (assert= (receive (r r)) "abc"))))
+
+(describe "lineedit path mode (M-b/M-f by folder)"
+  ;; "/home/wilhelm/src" — 17 chars; "/" is a word boundary only in :path mode.
+  (def path "/home/wilhelm/src")
+  (test "M-b moves back one path component"
+    (let (st (assoc (editor/lineedit/lineedit--init "" "" '()) :word-mode :path :text path :point 17))
+      (assert= (get (lineedit-backward-word st nil) :point) 14)))   ; start of "src"
+  (test "M-f moves forward one path component"
+    (let (st (assoc (editor/lineedit/lineedit--init "" "" '()) :word-mode :path :text path :point 0))
+      (assert= (get (lineedit-forward-word st nil) :point) 5)))      ; end of "/home"
+  (test "default mode treats the whole path as one word"
+    (let (st (assoc (editor/lineedit/lineedit--init "" "" '()) :text path :point 17))
+      (assert= (get (lineedit-backward-word st nil) :point) 0))))    ; jumps the whole path
