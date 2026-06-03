@@ -3522,6 +3522,11 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // `brood-supervisor` package (ADR-085 Move 2); depend on it via the package
     // manager (`[brood-supervisor :path …]`).
     ("proc/hatch", include_str!("../../../std/proc/hatch.blsp")),
+    // Order a flat process-info snapshot as a parent→child forest (depth-tagged, DFS
+    // by id). A pure, dependency-free transform — CORE, not dev-tools: it's shared by
+    // the dev observer's tree sort *and* a shipped app's process list (myedit's
+    // *Process List*), so a `nest release` binary needs it baked in.
+    ("proctree", include_str!("../../../std/tool/proctree.blsp")),
     // Run a thunk off the current process with an optional timeout + cancel
     // (ADR-006): `task` (async, tagged-reply handle), `cancel-task`, and the
     // synchronous `await`. Pure Brood over spawn / receive / exit — the generic
@@ -3608,8 +3613,6 @@ const DEV_MODULES: &[(&str, &str)] = &[
     // Generate editor syntax grammars (VS Code TextMate, Emacs font-lock) from the
     // language's own `(special-forms)` — one source of truth, no drift (ADR-092).
     ("grammar", include_str!("../../../std/tool/grammar.blsp")),
-    // Order a process-info snapshot as a parent→child forest (the tree view).
-    ("proctree", include_str!("../../../std/tool/proctree.blsp")),
     // The process viewer / debug tooling (`nest observe`, `(observe)`).
     ("observer", include_str!("../../../std/tool/observer.blsp")),
     // The hot-reload file watcher — a dev-loop convenience.
