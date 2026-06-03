@@ -2033,6 +2033,17 @@ stripped (`(cwd)` doesn't produce one, which is the primary caller)."
       (let (i (path--last-slash path (dec n)))
         (if (< i 0) path (substring path (inc i) n))))))
 
+(defn path-absolute (path &optional base)
+  "Resolve `path` to an absolute path: a `/`-rooted path is returned unchanged, a
+`~`/`~/…` path is expanded against `$HOME`, and any other (relative) path is joined
+onto `base` (default the current directory, `(cwd)`). The empty string is returned as
+is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segments."
+  (cond
+    (or (= path "") (starts-with? path "/")) path
+    (= path "~") (or (getenv "HOME") path)
+    (starts-with? path "~/") (str (or (getenv "HOME") "~") (substring path 1 (string-length path)))
+    else (path-join (or base (cwd)) path)))
+
 ;; ---- pseudo-random numbers (xorshift32, pure & seedable) --------------------
 ;; Brood has no global mutable state, so randomness is *threaded*: every step
 ;; takes a seed and returns `[value next-seed]`. Pass `next-seed` to the next
