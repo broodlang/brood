@@ -23,13 +23,13 @@
 primitives (ADR-045). A *buffer* is a map:
 
     {:rope <rope> :point <int> :mark <int|nil> :name <string> :file <string|nil>
-     :undo (<snapshot>…) :redo (<snapshot>…)}
+     :undo (<snapshot>…) :pending-undo (<snapshot>…)}
 
 Every operation is pure — movement and editing return a **fresh** buffer; nothing
 mutates (ADR-026). `point` is the cursor (a char index); `mark`, with point,
 delimits the region. Each editing op records the pre-edit state on `:undo` (a stack
-of `{:rope :point :mark}` snapshots), so `undo`/`redo` are pure stack moves — see
-below.
+of `{:rope :point :mark}` snapshots); undo is an Emacs-style *tree* (undoing is itself
+recorded, so no state is ever lost) — see the undo section below.
 
     (require 'buffer)
     (def b (-> (make-buffer \"hello world\")
@@ -56,10 +56,9 @@ Where `end-of-line` lands and the rightmost column point can hold on that line."
 ;; ---- construction -----------------------------------------------------------
 
 (defn make-buffer (text &optional (name "*scratch*") (file nil))
-  "A fresh buffer holding `text`, with point at 0, no mark, and empty undo/redo
-history. `name` is a label (default `\"*scratch*\"`); `file` is the backing path or
-nil."
-  {:rope (string->rope text) :point 0 :mark nil :name name :file file :undo () :redo ()})
+  "A fresh buffer holding `text`, with point at 0, no mark, and an empty undo history.
+`name` is a label (default `\"*scratch*\"`); `file` is the backing path or nil."
+  {:rope (string->rope text) :point 0 :mark nil :name name :file file :undo () :pending-undo ()})
 
 (defn buffer? (x)
   "True if `x` is a buffer value (a map with a rope under `:rope`)."
@@ -324,16 +323,24 @@ strictly before `before`, or nil if there is none. The backward counterpart of
   (let (i (string-last-index-of (buffer-text buf) needle before))
     (if (< i 0) nil i)))
 
-;; ---- undo / redo ------------------------------------------------------------
+;; ---- undo (an undo *tree*, Emacs-style) -------------------------------------
 ;;
-;; Undo is per-buffer, riding the immutable buffer for free: a snapshot is just
-;; the edit-mutable triple `{:rope :point :mark}` (ropey shares structure, so a
-;; snapshot is O(1)), and `:undo`/`:redo` are stacks of them. Each editing op
-;; pushes a pre-edit snapshot onto `:undo` (clearing `:redo`) *only when it really
-;; changes the text*, so undo never has dead steps. A snapshot deliberately
-;; excludes `:undo`/`:redo` so snapshots don't nest and grow geometrically. v1
-;; does not coalesce consecutive inserts — one keystroke is one undo step (the
-;; editor app would track last-command to merge them; deferred).
+;; Undo rides the immutable buffer for free: a snapshot is the edit-mutable triple
+;; `{:rope :point :mark}` (ropey shares structure, so a snapshot is O(1)). `:undo` is
+;; the history — a stack of snapshots, newest first — and each editing op pushes its
+;; PRE-edit snapshot (only when the text really changes, so undo has no dead steps).
+;;
+;; The twist that makes it a *tree*, not a one-way stack (Emacs `undo`): **undoing is
+;; itself recorded as a change.** `undo-next` restores the next state AND pushes the
+;; current one onto `:undo`, so an undo can itself be undone (= redo), and editing
+;; after some undos leaves the undone states on `:undo` as a branch you can still
+;; reach. No state is ever lost.
+;;
+;; `:pending-undo` is the tail of `:undo` the current undo run walks down. The caller
+;; (the editor's cmd-undo / cmd-redo) calls `undo-start` to begin a fresh run — pointed
+;; at the front of `:undo`, which after a run holds the just-undone states, so a fresh
+;; run *reverses direction* (redo). Continuing the run (not restarting) keeps direction.
+;; A snapshot excludes the history fields so snapshots don't nest and grow geometrically.
 
 (defn buffer--snapshot (buf)
   "The restorable edit state of `buf` — just `{:rope :point :mark}` (no history)."
@@ -341,62 +348,61 @@ strictly before `before`, or nil if there is none. The backward counterpart of
 
 (defn amalgamate-undo (buf)
   "Make the **next** editing op amalgamate into the current undo group rather than start
-a new one: its pre-edit snapshot is dropped, so `undo` treats the run as a single step.
+a new one: its pre-edit snapshot is dropped, so undo treats the run as a single step.
 A one-shot flag (cleared by the next edit). By default every op is its own undo step; the
 editor's command loop calls this to coalesce a typing / deletion run (or a multi-edit
 command) into one undo, the Emacs way — keeping this primitive's default simple."
   (assoc buf :undo-amalgamate true))
 
 (defn buffer--push-undo (buf)
-  "Record `buf`'s pre-edit state for undo and clear `:redo` — called by an editing op
-before it changes the text. Normally pushes a fresh snapshot (each op its own undo
-step); when `amalgamate-undo` armed the one-shot `:undo-amalgamate` flag (and there's a
-group to merge into) it instead drops this op's snapshot so the run undoes as one. A
-no-op when undo is disabled (`disable-undo`)."
+  "Record `buf`'s pre-edit state for undo — called by an editing op before it changes the
+text. Normally conses a fresh snapshot onto `:undo` (each op its own undo step); when
+`amalgamate-undo` armed the one-shot `:undo-amalgamate` (and there's a group to merge
+into) it drops this op's snapshot so the run undoes as one. A no-op when undo is disabled
+(`disable-undo`). (Does not touch `:pending-undo`: the next undo run starts fresh anyway —
+the editor restarts it whenever the previous command wasn't an undo.)"
   (cond
     (get buf :undo-disabled) buf
     (and (get buf :undo-amalgamate) (not (empty? (get buf :undo))))
-      (assoc buf :redo () :undo-amalgamate false)
+      (assoc buf :undo-amalgamate false)
     :else (assoc buf
             :undo (cons (buffer--snapshot buf) (or (get buf :undo) ()))
-            :redo ()
             :undo-amalgamate false)))
 
 (defn disable-undo (buf)
-  "Turn off undo recording for `buf` and drop any existing history. For a log /
-output buffer (e.g. `*Messages*`) where undo is meaningless and would otherwise
-grow without bound — editing ops on the result record nothing, so `undo`/`redo`
-stay no-ops. Like Emacs `buffer-disable-undo`."
-  (assoc buf :undo-disabled true :undo () :redo ()))
+  "Turn off undo recording for `buf` and drop any existing history. For a log / output
+buffer (e.g. `*Messages*`) where undo is meaningless and would otherwise grow without
+bound — editing ops on the result record nothing, so undo stays a no-op. Like Emacs
+`buffer-disable-undo`."
+  (assoc buf :undo-disabled true :undo () :pending-undo ()))
 
 (defn buffer--restore (buf snap)
   "Restore the `{:rope :point :mark}` of `snap` into `buf`, keeping `buf`'s history."
   (assoc buf :rope (get snap :rope) :point (get snap :point) :mark (get snap :mark)))
 
-(defn undo (buf)
-  "Undo the last edit: restore the most recent `:undo` snapshot, pushing the
-current state onto `:redo`. A no-op (returns `buf`) when there's nothing to undo."
-  (let (u (get buf :undo))
-    (if (empty? u)
-      buf
-      (assoc (buffer--restore buf (first u))
-        :undo
-        (rest u)
-        :redo
-        (cons (buffer--snapshot buf) (or (get buf :redo) ()))))))
+(defn undo-start (buf)
+  "Begin a fresh undo run: point `:pending-undo` at the whole `:undo` history. Because
+each `undo-next` records the state it leaves onto `:undo`, a run started after some undos
+walks the *reverse* direction — i.e. it redoes."
+  (assoc buf :pending-undo (get buf :undo)))
 
-(defn redo (buf)
-  "Redo the last undone edit: restore the most recent `:redo` snapshot, pushing the
-current state back onto `:undo`. A no-op when there's nothing to redo. (A fresh
-edit clears `:redo`, so redo is only available immediately after `undo`.)"
-  (let (r (get buf :redo))
-    (if (empty? r)
+(defn undo-next (buf)
+  "One step of the current undo run: restore the next snapshot in `:pending-undo`,
+recording the current state onto `:undo` (so this very step is itself reversible) and
+advancing `:pending-undo`. A no-op (returns `buf`) when the run is exhausted."
+  (let (p (get buf :pending-undo))
+    (if (empty? p)
       buf
-      (assoc (buffer--restore buf (first r))
-        :redo
-        (rest r)
-        :undo
-        (cons (buffer--snapshot buf) (or (get buf :undo) ()))))))
+      (assoc (buffer--restore buf (first p))
+        :undo (cons (buffer--snapshot buf) (or (get buf :undo) ()))
+        :pending-undo (rest p)))))
+
+(defn undo (buf)
+  "A standalone single undo: begin a fresh run and take one step. The editor's repeat
+behaviour — continue a run vs. restart after a non-undo command (which is what turns a
+fresh run into a redo) — lives in cmd-undo / cmd-redo, which call `undo-start` /
+`undo-next` directly."
+  (undo-next (undo-start buf)))
 
 ;; ---- editing (returns a fresh buffer; records undo; clears the mark) ---------
 ;;
