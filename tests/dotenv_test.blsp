@@ -1,0 +1,48 @@
+;; tests/dotenv_test.blsp — the lexical .env highlighter (std/editor/dotenv.blsp).
+;;
+;; Pure (source string -> [start end face] spans), so testable without a terminal.
+;; Covers comments, the export keyword, the KEY of an assignment, and quoted values,
+;; plus the ascending / non-overlapping span invariants the fontify tiler relies on.
+
+(defmodule dotenv-test (:use test) (:use editor/dotenv))
+
+;; A span-list is well-formed for the tiler iff each start >= the previous end.
+(defn ascending? (spans) (ascending--go spans -1))
+(defn ascending--go (spans prev-end)
+  (if (empty? spans)
+    true
+    (let (s (first spans))
+      (and (>= (first s) prev-end) (ascending--go (rest spans) (second s))))))
+
+(describe "env-spans — line shapes"
+  (test "a # comment colours the whole line"
+    (assert= (env-spans "# a comment")
+      (list [0 11 env-face-comment])))
+  (test "a leading-whitespace comment colours from the #"
+    (assert= (env-spans "   # x")
+      (list [3 6 env-face-comment])))
+  (test "a KEY=value line colours just the key"
+    (assert= (env-spans "FOO=bar")
+      (list [0 3 env-face-key])))
+  (test "a double-quoted value is a string span after the key"
+    (assert= (env-spans "FOO=\"bar\"")
+      (list [0 3 env-face-key] [4 9 env-face-string])))
+  (test "a single-quoted value too"
+    (assert= (env-spans "K='v'")
+      (list [0 1 env-face-key] [2 5 env-face-string])))
+  (test "an export prefix colours the keyword and the key"
+    (assert= (env-spans "export FOO=bar")
+      (list [0 6 env-face-export] [7 10 env-face-key])))
+  (test "a blank line and a bare word (no =) produce no spans"
+    (assert= (env-spans "") '())
+    (assert= (env-spans "JUSTNAME") '()))
+  (test "an unquoted value carries no span (default face)"
+    (assert= (env-spans "A=1") (list [0 1 env-face-key]))))
+
+(describe "env-spans — multi-line + invariants"
+  (test "spans across lines are ascending and carry the right offsets"
+    ;; "# c\nFOO=1" — comment line, then an assignment on the next
+    (assert= (env-spans "# c\nFOO=1")
+      (list [0 3 env-face-comment] [4 7 env-face-key])))
+  (test "spans are ascending and non-overlapping"
+    (is (ascending? (env-spans "export A=\"x\"\nB='y'\n# z")))))

@@ -1,0 +1,88 @@
+;; std/editor/dockerfile.blsp — lexical Dockerfile highlighting. (require 'editor/dockerfile).
+;;
+;; The Dockerfile analogue of editor/markdown / editor/highlight: a pure data→data
+;; tokenizer, no IO and no kernel surface. `(dockerfile-spans src)` returns
+;; `[start end face]` colour spans (character offsets, end-exclusive, ascending,
+;; non-overlapping) in the `highlight-spans` shape, feeding the editor's `:fontify`
+;; mode service and the shared `fontify-runs` tiler (ADR-052). Lexical and
+;; line-oriented: a `#` comment line, or an instruction line whose leading word is a
+;; Dockerfile instruction (FROM, RUN, …; matched case-insensitively) plus any quoted
+;; strings in its arguments. Faces are `display.blsp`-style maps, like markdown's.
+
+(defmodule editor/dockerfile
+  "Lexical Dockerfile highlighting, as a pure function over a source string —
+`(dockerfile-spans src)` returns `[start end face]` colour spans in the
+`highlight-spans` shape (ascending, non-overlapping, end-exclusive), feeding the
+editor's `:fontify` service and the shared `fontify-runs` tiler unchanged. Per line it
+classifies a `#` comment, a leading instruction keyword (FROM/RUN/CMD/…, matched
+case-insensitively), and quoted-string arguments. Pure, so independently testable.")
+
+;; ---- faces (display.blsp-style maps) ----------------------------------------
+
+(def dk-face-comment {:fg :dark-grey :italic true})
+(def dk-face-instruction {:fg :magenta :bold true})
+(def dk-face-string {:fg :green})
+
+;; The Dockerfile instruction set (uppercased; the leading word is matched against
+;; this after `upper`-casing, so lowercase / mixed case still highlights).
+(def dk--instructions
+  (list "FROM" "RUN" "CMD" "LABEL" "MAINTAINER" "EXPOSE" "ENV" "ADD" "COPY"
+    "ENTRYPOINT" "VOLUME" "USER" "WORKDIR" "ARG" "ONBUILD" "STOPSIGNAL"
+    "HEALTHCHECK" "SHELL"))
+
+;; ---- scanning helpers -------------------------------------------------------
+
+(defn dk--lead-ws (line i n)
+  (if (and (< i n) (or (= (char-at line i) " ") (= (char-at line i) "\t")))
+    (dk--lead-ws line (inc i) n)
+    i))
+
+(defn dk--word-end (line i n)
+  "The offset just past the non-whitespace run starting at `i`."
+  (if (and (< i n) (not (= (char-at line i) " ")) (not (= (char-at line i) "\t")))
+    (dk--word-end line (inc i) n)
+    i))
+
+(defn dk--find (line i n ch)
+  (cond (>= i n) -1 (= (char-at line i) ch) i :else (dk--find line (inc i) n ch)))
+
+(defn dk--strings (line base i n acc)
+  "Tail-recursive scan of `[i, n)` for `\"…\"` / `'…'` runs (offsets shifted by `base`),
+each consumed whole so spans stay non-overlapping; returns them ascending."
+  (cond
+    (>= i n) (reverse acc)
+    (or (= (char-at line i) "\"") (= (char-at line i) "'"))
+      (let (q (char-at line i) close (dk--find line (inc i) n q) e (if (< close 0) n (inc close)))
+        (dk--strings line base e n (cons [(+ base i) (+ base e) dk-face-string] acc)))
+    :else (dk--strings line base (inc i) n acc)))
+
+;; ---- per-line spans + the document walker -----------------------------------
+
+(defn dk--line-spans (line base)
+  "The spans for one `line` starting at offset `base`: a `#` comment whole, else a
+leading instruction keyword (when the first word is one) plus quoted-string args."
+  (let (n (string-length line) lead (dk--lead-ws line 0 n))
+    (cond
+      (>= lead n) '()
+      (= (char-at line lead) "#") (list [(+ base lead) (+ base n) dk-face-comment])
+      :else (let (we (dk--word-end line lead n)
+                  word (substring line lead we))
+              (if (member? (upper word) dk--instructions)
+                (cons [(+ base lead) (+ base we) dk-face-instruction]
+                  (dk--strings line base we n '()))
+                (dk--strings line base lead n '()))))))
+
+(defn dk--lex (src i n acc)
+  (if (>= i n)
+    (reverse acc)
+    (let (e (min n (string-span-until src i "\n"))
+          spans (dk--line-spans (substring src i e) i))
+      (dk--lex src (inc e) n (fold (fn (a s) (cons s a)) acc spans)))))
+
+(defn dockerfile-spans (src)
+  "Lexically tokenize Dockerfile `src` into a list of `[start end face]` colour spans
+(character offsets, end-exclusive) — in the `highlight-spans` shape, so it feeds the
+editor's `:fontify` service and the shared `fontify-runs` tiler unchanged. Covers `#`
+comments, leading instruction keywords (case-insensitive), and quoted strings. Spans
+are ascending and non-overlapping; everything else carries the default face."
+  (dk--lex src 0 (string-length src) '()))

@@ -1,0 +1,41 @@
+;; tests/dockerfile_test.blsp — the lexical Dockerfile highlighter (std/editor/dockerfile.blsp).
+;;
+;; Pure (source string -> [start end face] spans), so testable without a terminal.
+;; Covers comments, leading instruction keywords (case-insensitive), and quoted-string
+;; arguments, plus the ascending / non-overlapping span invariant the tiler relies on.
+
+(defmodule dockerfile-test (:use test) (:use editor/dockerfile))
+
+(defn ascending? (spans) (ascending--go spans -1))
+(defn ascending--go (spans prev-end)
+  (if (empty? spans)
+    true
+    (let (s (first spans))
+      (and (>= (first s) prev-end) (ascending--go (rest spans) (second s))))))
+
+(describe "dockerfile-spans — line shapes"
+  (test "a # comment colours the whole line"
+    (assert= (dockerfile-spans "# syntax=docker/dockerfile:1")
+      (list [0 28 dk-face-comment])))
+  (test "a leading instruction keyword is coloured"
+    (assert= (dockerfile-spans "FROM alpine:3.19")
+      (list [0 4 dk-face-instruction])))
+  (test "instructions match case-insensitively"
+    (assert= (dockerfile-spans "run echo hi")
+      (list [0 3 dk-face-instruction])))
+  (test "a non-instruction leading word produces no keyword span"
+    (assert= (dockerfile-spans "notacmd x") '()))
+  (test "quoted-string arguments are coloured after the instruction"
+    ;; CMD ["echo", "hi"]  → the keyword + two strings
+    (assert= (dockerfile-spans "CMD [\"echo\"]")
+      (list [0 3 dk-face-instruction] [5 11 dk-face-string])))
+  (test "a blank line produces no spans"
+    (assert= (dockerfile-spans "") '())))
+
+(describe "dockerfile-spans — multi-line + invariants"
+  (test "spans across lines carry the right offsets"
+    ;; "FROM x\nRUN y" — two instruction lines
+    (assert= (dockerfile-spans "FROM x\nRUN y")
+      (list [0 4 dk-face-instruction] [7 10 dk-face-instruction])))
+  (test "spans are ascending and non-overlapping"
+    (is (ascending? (dockerfile-spans "# c\nFROM a\nCMD [\"x\"]\nUSER me")))))

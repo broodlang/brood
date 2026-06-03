@@ -3594,6 +3594,11 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // may `require` (myedit's markdown-mode), so it stays in CORE alongside
     // `highlight`/`lineedit`; opt-in, never in the prelude.
     ("editor/markdown", include_str!("../../../std/editor/markdown.blsp")),
+    // Lexical `.env` and Dockerfile highlighters, the dotenv/Dockerfile analogues of
+    // `markdown` (`env-spans` / `dockerfile-spans` → `[start end face]` spans). Pure
+    // UI a shipped app may `require` (myedit's env-/docker-mode); CORE, like markdown.
+    ("editor/dotenv", include_str!("../../../std/editor/dotenv.blsp")),
+    ("editor/dockerfile", include_str!("../../../std/editor/dockerfile.blsp")),
     ("editor/lineedit", include_str!("../../../std/editor/lineedit.blsp")),
     ("format", include_str!("../../../std/format.blsp")),
 ];
