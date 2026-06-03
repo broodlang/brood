@@ -846,3 +846,27 @@ exactly what a fetcher would fill, so it layers on later) and on-demand
 cross-compiling (Linux→macOS needs the Apple SDK). ADR-038 follow-on note +
 docs/release.md updated; unit tests for `target_suffix`/`is_windows_triple`/
 `runtime_cache_path` in `crates/nest/src/main.rs`.
+
+## 2026-06-03 — gc: harden reset_local_to against a collection inside the bracket
+
+The arena-reset fast path (`checkpoint()` … `reset_local_to(cp)`, used by `nest
+mcp` and the introspect tooling around every eval) recorded nursery slab LENGTHS
+but not the `local_epoch`. If a collection fired between the two — which wide-
+bignum churn (the Life demo's whole-board step) makes likely — the collector had
+already compacted the nursery (a flip rewrites the slabs into a fresh, shorter
+space), so cp's lengths no longer described it. `reset_local_to` then truncated to
+those stale lengths and could strand live survivors → the GC "slab out of bounds"
+panic (a stale handle surfacing at the next collection).
+
+Fix: `checkpoint()` stamps `local_epoch`; `reset_local_to` is a no-op on an epoch
+mismatch (a collection already reclaimed the dead; the next gc_due reclaims this
+bracket's garbage). Full GC + runtime-collector suites stay green; a new mcp test
+churns the wide-bignum step through the real call_tool path under GC_VERIFY.
+
+NOTE: this is a real, demonstrated unsoundness (a survivor kept across a reset
+that follows a collection is stranded — reproduced directly), and a safe hardening
+(skipping a truncation only delays reclaiming garbage). It is NOT yet confirmed to
+be the exact panic seen in the live Life session — that needed a long-lived image
+with much accumulated state and a `load` of the real module, which did not
+reproduce in isolation. If it recurs, capture it live in a debug build with
+BROOD_GC_VERIFY=1 for the precise root→cell path.
