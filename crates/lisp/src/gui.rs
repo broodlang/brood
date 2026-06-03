@@ -181,6 +181,9 @@ mod disabled {
     pub fn title(_id: u64, _title: String) -> Result<(), String> {
         Err(NOT_COMPILED.into())
     }
+    pub fn icon(_id: u64, _rgba: Vec<u8>, _w: u32, _h: u32) -> Result<(), String> {
+        Err(NOT_COMPILED.into())
+    }
     pub fn focus(_id: u64) -> Result<(), String> {
         Err(NOT_COMPILED.into())
     }
@@ -208,10 +211,10 @@ mod disabled {
 }
 
 #[cfg(not(feature = "gui"))]
-pub use disabled::{close, draw, focus, font, held_key, open, register_family, size, title};
+pub use disabled::{close, draw, focus, font, held_key, icon, open, register_family, size, title};
 
 #[cfg(feature = "gui")]
-pub use backend::{close, draw, focus, font, held_key, open, register_family, size, title};
+pub use backend::{close, draw, focus, font, held_key, icon, open, register_family, size, title};
 
 #[cfg(feature = "gui")]
 mod backend {
@@ -234,7 +237,7 @@ mod backend {
     use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
     use winit::keyboard::{Key as WKey, ModifiersState, NamedKey, PhysicalKey};
     use winit::platform::wayland::EventLoopBuilderExtWayland;
-    use winit::window::{CursorIcon, Window, WindowId};
+    use winit::window::{CursorIcon, Icon, Window, WindowId};
 
     use cosmic_text::{
         fontdb, Attrs, Buffer as CtBuffer, Family, FontSystem, Metrics, Shaping, Style, SwashCache,
@@ -303,6 +306,9 @@ mod backend {
         Close { id: u64 },
         /// Set window `id`'s OS title-bar text at runtime. Behind `gui-title!`.
         Title { id: u64, title: String },
+        /// Set window `id`'s taskbar/title-bar icon from raw RGBA pixels (row-major,
+        /// `w*h*4` bytes). Behind `gui-icon!`; ignored if the data is the wrong length.
+        Icon { id: u64, rgba: Vec<u8>, w: u32, h: u32 },
         /// Raise window `id` to the front and give it OS keyboard focus (un-
         /// minimising it first). Behind `gui-focus` — surfaces an already-open
         /// singleton window instead of opening a duplicate.
@@ -497,6 +503,16 @@ mod backend {
     pub fn title(id: u64, title: String) -> Result<(), String> {
         if let Ok(g) = gui() {
             let _ = g.lock().unwrap().send_event(UserEvent::Title { id, title });
+        }
+        Ok(())
+    }
+
+    /// `(gui-icon! id rgba w h)` — set window `id`'s taskbar/title-bar icon from raw
+    /// RGBA pixels at runtime. Routed through the proxy like `title`; a silent no-op
+    /// if the GUI thread never started or `id` isn't a live window.
+    pub fn icon(id: u64, rgba: Vec<u8>, w: u32, h: u32) -> Result<(), String> {
+        if let Ok(g) = gui() {
+            let _ = g.lock().unwrap().send_event(UserEvent::Icon { id, rgba, w, h });
         }
         Ok(())
     }
@@ -792,6 +808,14 @@ mod backend {
                 UserEvent::Title { id, title } => {
                     if let Some(w) = self.ids.get(&id).and_then(|wid| self.wins.get(wid)) {
                         w.window.set_title(&title);
+                    }
+                }
+                // Set a live window's taskbar/title-bar icon (behind gui-icon!).
+                UserEvent::Icon { id, rgba, w: iw, h: ih } => {
+                    if let Some(win) = self.ids.get(&id).and_then(|wid| self.wins.get(wid)) {
+                        if let Ok(ic) = Icon::from_rgba(rgba, iw, ih) {
+                            win.window.set_window_icon(Some(ic));
+                        }
                     }
                 }
                 UserEvent::Draw { id, ops } => {
