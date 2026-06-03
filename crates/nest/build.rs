@@ -28,4 +28,12 @@ fn main() {
     }
     // Re-run when the toggle flips (set ↔ unset), not just when its value changes.
     println!("cargo:rerun-if-env-changed=BROOD_EMBED_RUNTIME");
+
+    // Bake in the triple this `nest` was built *for*, so `nest release --target`
+    // can tell "the host's own triple" (the embedded runtime serves it) apart
+    // from a genuine cross-target (needs a cached prebuilt runtime).
+    println!(
+        "cargo:rustc-env=NEST_HOST_TRIPLE={}",
+        env::var("TARGET").expect("cargo sets TARGET for build scripts")
+    );
 }

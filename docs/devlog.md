@@ -827,3 +827,22 @@ with `winit::window::Icon::from_rgba`. Lets an app draw its own icon rather than
 ship an image file (brood-life generates a glider tile from its pattern set).
 Caveat: winit honours this on X11/Windows; on Wayland the compositor takes the
 icon from a .desktop file (app_id), so it's a silent no-op there.
+
+## 2026-06-03 — nest release: functional, repeatable `--target` via a local runtime cache
+
+`nest release --target TRIPLE` used to be informational-only (error: "pass
+--runtime"). Now it's repeatable and works: each triple resolves a prebuilt lean
+runtime from `$XDG_CACHE_HOME/brood/runtimes/<triple>/brood` (`~/.cache`
+fallback; `brood.exe` for Windows triples), populated once per target by
+building the lean runtime on/for that machine. The host's own triple (baked in
+as `NEST_HOST_TRIPLE` by `crates/nest/build.rs`) falls through to the embedded
+runtime, so no cache entry is needed for it. Outputs get friendly per-target
+suffixes — `app-macos-arm64`, `app-linux-x86_64`, `app-linux-musl-x86_64`,
+`app-windows-x86_64.exe` — so one invocation emits a whole matrix; `-o` with a
+single target stays an exact path, with several it's the stem. `--runtime` is
+now valid with at most one `--target`. Rejected for now: downloading runtimes
+from GitHub releases (no CI/published artifacts yet — but the cache layout is
+exactly what a fetcher would fill, so it layers on later) and on-demand
+cross-compiling (Linux→macOS needs the Apple SDK). ADR-038 follow-on note +
+docs/release.md updated; unit tests for `target_suffix`/`is_windows_triple`/
+`runtime_cache_path` in `crates/nest/src/main.rs`.

@@ -280,21 +280,24 @@ enum Cmd {
     /// runs `:main` on any compatible machine with no interpreter, project dir,
     /// or source files alongside — just the one binary. `tests/` is excluded.
     Release {
-        /// Output path for the binary. Defaults to the project's `:name`.
+        /// Output path for the binary. Defaults to the project's `:name`; with
+        /// `--target` the name gets a per-target suffix (e.g. `app-macos-arm64`).
         #[arg(long = "output", short = 'o', value_name = "PATH")]
         output: Option<String>,
 
         /// The base `brood` runtime to append to. Defaults to the `brood`
-        /// installed beside `nest`, else `target/release/brood`. For a different
-        /// OS/arch, build a `brood` for that target and pass it here.
+        /// embedded in this `nest`. Only valid alongside at most one `--target`.
         #[arg(long = "runtime", value_name = "PATH")]
         runtime: Option<String>,
 
-        /// Target triple — informational; cross-compiling the runtime is out of
-        /// scope, so this requires `--runtime` pointing at a prebuilt `brood` for
-        /// the target (ADR-038).
+        /// Target triple(s) to release for — repeatable. Each resolves a
+        /// prebuilt lean runtime from the local cache
+        /// (`~/.cache/brood/runtimes/<triple>/brood`); the host's own triple
+        /// falls back to the embedded runtime. Cross-compiling is out of scope
+        /// (ADR-038) — build the runtime on/for the target and drop it in the
+        /// cache (or pass `--runtime`).
         #[arg(long = "target", value_name = "TRIPLE")]
-        target: Option<String>,
+        targets: Vec<String>,
     },
 }
 
@@ -375,13 +378,8 @@ fn run_main(cli: Cli) {
         Cmd::Release {
             output,
             runtime,
-            target,
-        } => cmd_release(
-            &mut interp,
-            output.as_deref(),
-            runtime.as_deref(),
-            target.as_deref(),
-        ),
+            targets,
+        } => cmd_release(&mut interp, output.as_deref(), runtime.as_deref(), &targets),
     }
 }
 
@@ -884,15 +882,15 @@ fn cmd_attach(interp: &mut Interp, spec: String, cookie: Option<String>) {
     }
 }
 
-/// `nest release [-o PATH] [--runtime PATH] [--target TRIPLE]` — bundle the
-/// project into one self-contained executable (ADR-038). Collection is policy
-/// (Brood: `project/bundle-collect`); byte assembly + I/O is mechanism (Rust:
-/// `brood::bundle`). See `crates/lisp/src/bundle.rs` for the wire format.
+/// `nest release [-o PATH] [--runtime PATH] [--target TRIPLE]…` — bundle the
+/// project into one self-contained executable per target (ADR-038). Collection
+/// is policy (Brood: `project/bundle-collect`); byte assembly + I/O is mechanism
+/// (Rust: `brood::bundle`). See `crates/lisp/src/bundle.rs` for the wire format.
 fn cmd_release(
     interp: &mut Interp,
     output: Option<&str>,
     runtime: Option<&str>,
-    target: Option<&str>,
+    targets: &[String],
 ) {
     use brood::core::value::Value;
 
@@ -942,38 +940,65 @@ fn cmd_release(
         Value::Str(id) => interp.heap.string(id).to_string(),
         _ => "app".to_string(),
     };
-    let out = std::path::PathBuf::from(output.unwrap_or(&name));
 
-    // 3. The base runtime bytes — the single lean+gui runtime: the one embedded
-    //    in this `nest` at install time (no Rust needed), else built on demand as
-    //    a fallback, else `--runtime PATH`.
-    let base = resolve_runtime(runtime, target);
-
-    // 4. Serialize the archive and write the release binary.
+    // 3. Serialize the archive once — it's target-independent.
     let archive = brood::bundle::serialize(manifest, &modules);
-    if let Err(e) = brood::bundle::write_release(&base, &archive, &out) {
-        eprintln!("nest release: cannot write {}: {e}", out.display());
-        std::process::exit(1);
+
+    // 4. One release binary per target (no --target = one, for the host).
+    //    --runtime names a single specific base, so it can't serve a matrix.
+    if runtime.is_some() && targets.len() > 1 {
+        eprintln!("nest release: --runtime names one base binary; use it with at most one --target");
+        std::process::exit(2);
     }
-    let size = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
-    println!(
-        "Wrote {} ({} module{}, {})",
-        out.display(),
-        modules.len(),
-        if modules.len() == 1 { "" } else { "s" },
-        human_size(size),
-    );
+    let stem = output.unwrap_or(&name);
+    let plans: Vec<(Option<&str>, std::path::PathBuf)> = if targets.is_empty() {
+        vec![(None, std::path::PathBuf::from(stem))]
+    } else {
+        targets
+            .iter()
+            .map(|t| {
+                // `-o` with a single target is the exact output path; otherwise
+                // each binary gets a per-target suffix (`app-macos-arm64`, …).
+                let out = if output.is_some() && targets.len() == 1 {
+                    stem.to_string()
+                } else {
+                    let exe = if is_windows_triple(t) { ".exe" } else { "" };
+                    format!("{stem}-{}{exe}", target_suffix(t))
+                };
+                (Some(t.as_str()), std::path::PathBuf::from(out))
+            })
+            .collect()
+    };
+    for (triple, out) in plans {
+        let base = resolve_runtime(runtime, triple);
+        if let Err(e) = brood::bundle::write_release(&base, &archive, &out) {
+            eprintln!("nest release: cannot write {}: {e}", out.display());
+            std::process::exit(1);
+        }
+        let size = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+        println!(
+            "Wrote {} ({} module{}, {}{})",
+            out.display(),
+            modules.len(),
+            if modules.len() == 1 { "" } else { "s" },
+            human_size(size),
+            triple.map(|t| format!(", {t}")).unwrap_or_default(),
+        );
+    }
 }
 
 /// The base runtime bytes to append the app to — the single **lean + gui**
 /// runtime (no test/observer/MCP/doc/hot-reload/REPL/GC-debug surface, but the
 /// windowed backend kept so any app runs). Priority:
 ///   1. `--runtime PATH` — read it (a prebuilt/cross runtime you supply).
-///   2. the runtime embedded in *this* `nest` at install time — the **no-Rust**
+///   2. with `--target`, the local runtime cache
+///      (`~/.cache/brood/runtimes/<triple>/brood`) — you populate it with lean
+///      runtimes built on/for each target (cross-compiling is out of scope,
+///      ADR-038); a `--target` equal to the host's own triple falls through to:
+///   3. the runtime embedded in *this* `nest` at install time — the **no-Rust**
 ///      path (`make install` bakes it in; see `build.rs`).
-///   3. built on demand from the workspace source (cargo fallback — needs Rust),
+///   4. built on demand from the workspace source (cargo fallback — needs Rust),
 ///      for a plain `cargo build` of `nest` that embedded nothing.
-/// `--target` without `--runtime` is an error (cross-compiling is out of scope).
 fn resolve_runtime(runtime: Option<&str>, target: Option<&str>) -> Vec<u8> {
     if let Some(r) = runtime {
         return std::fs::read(r).unwrap_or_else(|e| {
@@ -982,12 +1007,36 @@ fn resolve_runtime(runtime: Option<&str>, target: Option<&str>) -> Vec<u8> {
         });
     }
     if let Some(t) = target {
-        eprintln!(
-            "nest release: cross-target builds need a prebuilt runtime for {t} — build it \
-             (`cargo build --profile release-lean -p cli --no-default-features --features brood/gui` \
-             on/for that target) and pass it with --runtime PATH (ADR-038)"
-        );
-        std::process::exit(2);
+        if let Some(path) = runtime_cache_path(t) {
+            if path.is_file() {
+                return std::fs::read(&path).unwrap_or_else(|e| {
+                    eprintln!(
+                        "nest release: cannot read cached runtime {}: {e}",
+                        path.display()
+                    );
+                    std::process::exit(1);
+                });
+            }
+            // The host's own triple needs no prebuilt — the embedded/built
+            // runtime below *is* a runtime for it.
+            if t != HOST_TRIPLE {
+                eprintln!(
+                    "nest release: no cached runtime for {t}.\nBuild the lean runtime on/for \
+                     that target:\n  cargo build --profile release-lean -p cli \
+                     --no-default-features --features brood/gui --target {t}\nthen place the \
+                     `brood` binary at {} (or pass --runtime PATH). Cross-compiling is out of \
+                     scope for `nest release` itself (ADR-038).",
+                    path.display()
+                );
+                std::process::exit(2);
+            }
+        } else if t != HOST_TRIPLE {
+            eprintln!(
+                "nest release: cannot locate the runtime cache (no $XDG_CACHE_HOME or $HOME) — \
+                 pass --runtime PATH for {t}"
+            );
+            std::process::exit(2);
+        }
     }
     if !EMBEDDED_RUNTIME.is_empty() {
         // Baked in by `make install` — append with no toolchain at all.
@@ -999,6 +1048,52 @@ fn resolve_runtime(runtime: Option<&str>, target: Option<&str>) -> Vec<u8> {
         eprintln!("nest release: cannot read built runtime {}: {e}", path.display());
         std::process::exit(1);
     })
+}
+
+/// The triple this `nest` was built for (baked in by `build.rs`) — a `--target`
+/// equal to it is served by the embedded runtime, no cache entry needed.
+const HOST_TRIPLE: &str = env!("NEST_HOST_TRIPLE");
+
+/// Where a prebuilt lean runtime for `triple` lives in the local cache:
+/// `$XDG_CACHE_HOME/brood/runtimes/<triple>/brood` (falling back to
+/// `~/.cache`; `brood.exe` for Windows triples). `None` if no cache base can
+/// be determined. Mirrors `prelude_source_path` in `crates/lisp/src/lib.rs`.
+fn runtime_cache_path(triple: &str) -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
+    let bin = if is_windows_triple(triple) { "brood.exe" } else { "brood" };
+    Some(base.join("brood/runtimes").join(triple).join(bin))
+}
+
+/// Short, human-friendly artifact suffix for a target triple — `macos-arm64`,
+/// `linux-x86_64`, `linux-musl-x86_64`, `windows-x86_64`. An unrecognized OS
+/// keeps the whole triple (always unambiguous, just longer).
+fn target_suffix(triple: &str) -> String {
+    let arch = match triple.split('-').next().unwrap_or(triple) {
+        "aarch64" => "arm64",
+        a => a,
+    };
+    let os = if triple.contains("apple-darwin") {
+        "macos"
+    } else if triple.contains("windows") {
+        "windows"
+    } else if triple.contains("linux") {
+        // Keep the libc visible so a gnu + musl matrix can't collide.
+        if triple.ends_with("musl") { "linux-musl" } else { "linux" }
+    } else if triple.contains("freebsd") {
+        "freebsd"
+    } else {
+        return triple.to_string();
+    };
+    format!("{os}-{arch}")
+}
+
+/// Whether a target triple is a Windows target (artifact gets `.exe`).
+fn is_windows_triple(triple: &str) -> bool {
+    triple.contains("windows")
 }
 
 /// Build the single lean+gui `brood` runtime from the workspace this `nest` was
@@ -1150,5 +1245,41 @@ mod tests {
         assert_eq!(parse_duration_ms("abc"), None);
         assert_eq!(parse_duration_ms(""), None);
         assert_eq!(parse_duration_ms("-5s"), None);
+    }
+
+    #[test]
+    fn target_suffix_maps_common_triples() {
+        use super::target_suffix;
+        assert_eq!(target_suffix("aarch64-apple-darwin"), "macos-arm64");
+        assert_eq!(target_suffix("x86_64-apple-darwin"), "macos-x86_64");
+        assert_eq!(target_suffix("x86_64-unknown-linux-gnu"), "linux-x86_64");
+        assert_eq!(target_suffix("aarch64-unknown-linux-gnu"), "linux-arm64");
+        // musl keeps the libc visible so a gnu + musl matrix can't collide.
+        assert_eq!(target_suffix("x86_64-unknown-linux-musl"), "linux-musl-x86_64");
+        assert_eq!(target_suffix("x86_64-pc-windows-msvc"), "windows-x86_64");
+        assert_eq!(target_suffix("x86_64-unknown-freebsd"), "freebsd-x86_64");
+        // An unrecognized OS keeps the whole triple — unambiguous, just longer.
+        assert_eq!(target_suffix("wasm32-wasip1"), "wasm32-wasip1");
+    }
+
+    #[test]
+    fn windows_triples_get_exe() {
+        use super::is_windows_triple;
+        assert!(is_windows_triple("x86_64-pc-windows-msvc"));
+        assert!(is_windows_triple("x86_64-pc-windows-gnu"));
+        assert!(!is_windows_triple("x86_64-unknown-linux-gnu"));
+    }
+
+    #[test]
+    fn runtime_cache_path_is_per_triple() {
+        // Path shape only — don't touch the real env (tests run in parallel).
+        let p = super::runtime_cache_path("aarch64-apple-darwin");
+        if let Some(p) = p {
+            let s = p.to_string_lossy().into_owned();
+            assert!(s.ends_with("brood/runtimes/aarch64-apple-darwin/brood"), "{s}");
+        }
+        if let Some(p) = super::runtime_cache_path("x86_64-pc-windows-msvc") {
+            assert!(p.to_string_lossy().ends_with("brood.exe"));
+        }
     }
 }
