@@ -1185,9 +1185,16 @@ mod backend {
         use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
         match &ke.logical_key {
             WKey::Named(n) => Some(match n {
+                // Shift on a motion key is encoded (`:shift-up`, `:shift-home`, …) so the
+                // editor binds shift-select (extend the region) distinctly from a plain
+                // arrow; other named keys drop Shift as before.
+                NamedKey::ArrowUp if mods.shift_key() => Key::Named("shift-up"),
                 NamedKey::ArrowUp => Key::Named("up"),
+                NamedKey::ArrowDown if mods.shift_key() => Key::Named("shift-down"),
                 NamedKey::ArrowDown => Key::Named("down"),
+                NamedKey::ArrowLeft if mods.shift_key() => Key::Named("shift-left"),
                 NamedKey::ArrowLeft => Key::Named("left"),
+                NamedKey::ArrowRight if mods.shift_key() => Key::Named("shift-right"),
                 NamedKey::ArrowRight => Key::Named("right"),
                 NamedKey::Enter => Key::Named("enter"),
                 NamedKey::Escape => Key::Named("escape"),
@@ -1196,7 +1203,9 @@ mod backend {
                 NamedKey::Tab if mods.shift_key() => Key::Named("back-tab"),
                 NamedKey::Tab => Key::Named("tab"),
                 NamedKey::Delete => Key::Named("delete"),
+                NamedKey::Home if mods.shift_key() => Key::Named("shift-home"),
                 NamedKey::Home => Key::Named("home"),
+                NamedKey::End if mods.shift_key() => Key::Named("shift-end"),
                 NamedKey::End => Key::Named("end"),
                 NamedKey::PageUp => Key::Named("page-up"),
                 NamedKey::PageDown => Key::Named("page-down"),
