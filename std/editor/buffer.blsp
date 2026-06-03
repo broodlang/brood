@@ -339,17 +339,28 @@ strictly before `before`, or nil if there is none. The backward counterpart of
   "The restorable edit state of `buf` — just `{:rope :point :mark}` (no history)."
   {:rope (get buf :rope) :point (get buf :point) :mark (get buf :mark)})
 
+(defn amalgamate-undo (buf)
+  "Make the **next** editing op amalgamate into the current undo group rather than start
+a new one: its pre-edit snapshot is dropped, so `undo` treats the run as a single step.
+A one-shot flag (cleared by the next edit). By default every op is its own undo step; the
+editor's command loop calls this to coalesce a typing / deletion run (or a multi-edit
+command) into one undo, the Emacs way — keeping this primitive's default simple."
+  (assoc buf :undo-amalgamate true))
+
 (defn buffer--push-undo (buf)
-  "Push `buf`'s current snapshot onto its `:undo` stack and clear `:redo` — called
-by an editing op before it changes the text, so the change becomes undoable. A
-no-op when undo is disabled for the buffer (`disable-undo`)."
-  (if (get buf :undo-disabled)
-    buf
-    (assoc buf
-      :undo
-      (cons (buffer--snapshot buf) (or (get buf :undo) ()))
-      :redo
-      ())))
+  "Record `buf`'s pre-edit state for undo and clear `:redo` — called by an editing op
+before it changes the text. Normally pushes a fresh snapshot (each op its own undo
+step); when `amalgamate-undo` armed the one-shot `:undo-amalgamate` flag (and there's a
+group to merge into) it instead drops this op's snapshot so the run undoes as one. A
+no-op when undo is disabled (`disable-undo`)."
+  (cond
+    (get buf :undo-disabled) buf
+    (and (get buf :undo-amalgamate) (not (empty? (get buf :undo))))
+      (assoc buf :redo () :undo-amalgamate false)
+    :else (assoc buf
+            :undo (cons (buffer--snapshot buf) (or (get buf :undo) ()))
+            :redo ()
+            :undo-amalgamate false)))
 
 (defn disable-undo (buf)
   "Turn off undo recording for `buf` and drop any existing history. For a log /

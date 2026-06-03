@@ -296,7 +296,14 @@
     (let (b (-> (disable-undo (make-buffer "")) (insert "a") (insert "b")))
       (assert= (buffer-text b) "ab")
       (assert= (get b :undo) ())  ; nothing recorded
-      (assert= (buffer-text (undo b)) "ab"))))
+      (assert= (buffer-text (undo b)) "ab")))
+  (test "amalgamate-undo merges the next edit into the current group (one undo step)"
+    ;; by default each insert is its own step (undo → \"a\"); amalgamate-undo before the
+    ;; second insert coalesces the run so one undo reverses both.
+    (let (per-op (-> (make-buffer "") (insert "a") (insert "b"))
+          merged (-> (make-buffer "") (insert "a") amalgamate-undo (insert "b")))
+      (assert= (buffer-text (undo per-op)) "a")    ; default: per-op
+      (assert= (buffer-text (undo merged)) ""))))   ; amalgamated: one step
 
 (describe "buffer file round-trip"
   (test "buffer-from-file reads, save-buffer writes back"
