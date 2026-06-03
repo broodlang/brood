@@ -95,4 +95,11 @@
     (assert= (path-extension ".bashrc") ""))
   (test "path-stem"
     (assert= (path-stem "a/b.txt") "b")
-    (assert= (path-stem "a/b") "b")))
+    (assert= (path-stem "a/b") "b"))
+  (test "path-absolute"
+    (assert= (path-absolute "/etc/hosts") "/etc/hosts")          ; already absolute → unchanged
+    (assert= (path-absolute "") "")                              ; empty → empty
+    (assert= (path-absolute "foo/bar" "/base") "/base/foo/bar")  ; relative → joined onto base
+    (assert= (path-absolute "rel") (path-join (cwd) "rel"))      ; default base is (cwd)
+    (assert= (path-absolute "~/x") (str (getenv "HOME") "/x"))   ; ~ expands against $HOME
+    (assert= (path-absolute "~") (getenv "HOME"))))
