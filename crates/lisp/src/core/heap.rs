@@ -555,6 +555,14 @@ pub struct LocalCheckpoint {
     closures: usize,
     envs: usize,
     transients: usize,
+    // The `local_epoch` the checkpoint was taken in. A collection between the
+    // checkpoint and its `reset_local_to` bumps the epoch and rewrites the
+    // nursery (a flip compacts survivors into fresh slabs; a tenure empties it),
+    // so the slab lengths above no longer describe the live nursery — truncating
+    // to them would strand the survivors the collector just kept. `reset_local_to`
+    // compares this against the current epoch and skips the truncation on a
+    // mismatch (the collection already reclaimed the dead). See its body.
+    epoch: u32,
     // No `natives` field: a live runtime never allocates a native into its LOCAL
     // heap (they're registered once during the prelude build, then frozen into
     // PRELUDE). If that ever changes, add a field here and truncate it below.
@@ -1280,6 +1288,7 @@ impl Heap {
             closures: self.local.closures.len(),
             envs: self.local.envs.len(),
             transients: self.local.transients.len(),
+            epoch: self.local_epoch,
         }
     }
 
@@ -1294,7 +1303,21 @@ impl Heap {
     /// still be live is the *result* of the form just evaluated — consume or
     /// promote it before resetting. Resetting mid-evaluation would strand the
     /// in-flight computation's values and corrupt later reads.
+    ///
+    /// **Collection-safety.** If a collection fired between [`checkpoint`] and
+    /// here, it already compacted the nursery (a flip rewrote the slabs; a tenure
+    /// emptied them) and bumped [`local_epoch`](Self::local_epoch), so `cp`'s slab
+    /// lengths no longer describe the live nursery. Truncating to them would
+    /// **strand the survivors the collector just kept** (the demonstrated GC
+    /// slab-OOB crash: a wide-bignum eval forced a flip, then the stale-length
+    /// truncate cut live objects loose). On an epoch mismatch this is a no-op — the
+    /// collection has already reclaimed the dead, and the next `gc_due` reclaims
+    /// this form's now-garbage survivors. Only the no-collection fast path (epoch
+    /// unchanged: a pure bump-allocated region) actually truncates.
     pub fn reset_local_to(&mut self, cp: LocalCheckpoint) {
+        if self.local_epoch != cp.epoch {
+            return;
+        }
         self.local.pairs.truncate(cp.pairs);
         self.local.vectors.truncate(cp.vectors);
         self.local.maps.truncate(cp.maps);

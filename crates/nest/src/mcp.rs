@@ -1044,6 +1044,64 @@ mod tests {
     }
 
     #[test]
+    fn bignum_step_churn_via_mcp_does_not_corrupt_heap() {
+        // Heap smoke test for the Life-demo workload that stresses the GC: many
+        // wide-bignum whole-board `step` evals on ONE persistent interp, each
+        // through the real `call_tool` checkpoint/promote/reset path, with wide
+        // masks captured in relocated closure envs. Run under `BROOD_GC_VERIFY=1`
+        // (debug) to assert the LOCAL graph stays sound across the churn. Guards
+        // the checkpoint/promote/reset discipline this path depends on.
+        let mut interp = Interp::new();
+        // wstep takes the wide masks as ARGS (not globals), so the churn eval below
+        // captures them in a LOCAL closure passed to `reduce` / a thunk — the shape
+        // that actually crashed (wide bignums living in a relocated closure env).
+        let setup = r#"(do
+            (defn ms (f) (f))
+            (defn wstep (b w h mask board col0 high)
+              (let (wm1 (- w 1) hm1w (* (- h 1) w)
+                    l (bit-or (bit-and (bit-shift-left b 1) (bit-xor col0 board)) (bit-shift-right (bit-and b high) wm1))
+                    r (bit-or (bit-and (bit-shift-right b 1) (bit-xor high board)) (bit-shift-left (bit-and b col0) wm1))
+                    up (fn (f) (bit-or (bit-and (bit-shift-left f w) board) (bit-shift-right f hm1w)))
+                    dn (fn (f) (bit-or (bit-shift-right f w) (bit-shift-left (bit-and f mask) hm1w)))
+                    ns [(up l) (up b) (up r) l r (dn l) (dn b) (dn r)]
+                    planes (reduce (fn ([s0 s1 s2 s3] m)
+                                     (let (c (bit-and s0 m) s0b (bit-xor s0 m) c2 (bit-and s1 c) s1b (bit-xor s1 c)
+                                           c3 (bit-and s2 c2) s2b (bit-xor s2 c2) s3b (bit-or s3 c3))
+                                       [s0b s1b s2b s3b]))
+                             [0 0 0 0] ns)
+                    s0 (vector-ref planes 0) s1 (vector-ref planes 1) s2 (vector-ref planes 2) s3 (vector-ref planes 3))
+                (bit-and (bit-and s1 (bit-and (bit-xor s2 board) (bit-xor s3 board))) (bit-or s0 b)))))"#;
+        // each call builds the wide masks as LOCAL lets, captured by the closures
+        // passed to `ms` and `reduce` (exactly the prototype that crashed).
+        let churn = r#"(let (w 200 h 120
+                            mask (- (bit-shift-left 1 w) 1)
+                            board (- (bit-shift-left 1 (* w h)) 1)
+                            col0 (quot board mask)
+                            high (bit-shift-left col0 (- w 1))
+                            st (bit-and board (bit-shift-left (- (bit-shift-left 1 100) 1) 5000)))
+                        (ms (fn () (bit-count (reduce (fn (b _) (wstep b w h mask board col0 high)) st (range 30))))))"#;
+        let mut reqs = vec![
+            req(1, "initialize", json!({})),
+            req(2, "tools/call", json!({ "name": "eval", "arguments": { "source": setup } })),
+        ];
+        for i in 0..25 {
+            reqs.push(req(
+                10 + i,
+                "tools/call",
+                json!({ "name": "eval", "arguments": { "source": churn } }),
+            ));
+        }
+        reqs.push(notif("exit", json!(null)));
+        let resp = round_trip(&mut interp, &reqs);
+        for r in &resp {
+            assert!(
+                r.get("error").is_none(),
+                "an MCP call returned an error (heap corruption?): {r}"
+            );
+        }
+    }
+
+    #[test]
     fn tools_list_returns_the_baked_std_catalogue() {
         // Step 3 ships `std/mcp.blsp` as a baked-in `EMBEDDED_MODULES` entry, so
         // `(require 'mcp) (mcp/mcp-tools)` succeeds in a fresh `Interp` and the
