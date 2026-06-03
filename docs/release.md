@@ -3,7 +3,9 @@
 > Status: **implemented** (ADR-038, 2026-05-31). One command turns a project into
 > one self-contained executable — no interpreter install, no project dir, no
 > `.blsp` files on the target. After `make install`, **`nest release` needs no
-> Rust toolchain**. Code-only (no runtime asset filesystem yet), Linux-first.
+> Rust toolchain**. Code-only (no runtime asset filesystem yet). Cross-targets
+> (mac M-series, Intel mac, Windows, ARM) release from a local runtime cache —
+> see "Targets and portability".
 
 ## TL;DR
 
@@ -18,11 +20,24 @@ cargo/rustc). The result is an ordinary executable that, on startup, finds the
 appended archive and boots `:main` instead of a REPL.
 
 ```
-nest release [-o PATH] [--runtime PATH] [--target TRIPLE]
-  -o, --output PATH    output path (default: the manifest's :name)
+nest release [-o PATH] [--runtime PATH] [--target TRIPLE]…
+  -o, --output PATH    output path (default: the manifest's :name); with several
+                       --targets it's the stem, each binary gets a suffix
       --runtime PATH   base runtime to append to (default: the runtime embedded
-                       in nest); use to supply a prebuilt or cross-target runtime
-      --target TRIPLE  informational; cross-targets need --runtime (see below)
+                       in nest); only valid with at most one --target
+      --target TRIPLE  repeatable; resolves a prebuilt runtime from the local
+                       cache (~/.cache/brood/runtimes/<triple>/brood — see below)
+```
+
+With `--target`, output names get a friendly per-target suffix (and `.exe` for
+Windows): `app-macos-arm64`, `app-macos-x86_64`, `app-linux-x86_64`,
+`app-linux-musl-x86_64`, `app-windows-x86_64.exe`. One invocation can emit a
+whole matrix:
+
+```bash
+nest release --target aarch64-apple-darwin \
+             --target x86_64-apple-darwin \
+             --target x86_64-unknown-linux-gnu
 ```
 
 ## What's in the binary
@@ -132,18 +147,46 @@ Rust supplies only mechanism (append/extract the archive, the three
 ## Targets and portability
 
 The base `brood` is an ordinary dynamically-linked ELF — it runs on any Linux
-with a compatible-or-newer glibc. For a drop-anywhere Linux binary, build the
-runtime against musl and pass it as the base:
+with a compatible-or-newer glibc.
 
-```bash
-rustup target add x86_64-unknown-linux-musl
-cargo build --release --target x86_64-unknown-linux-musl
-nest release --runtime target/x86_64-unknown-linux-musl/release/brood
+For other OS/arch combinations (mac M-series, Intel mac, Windows, ARM Linux),
+`--target <triple>` resolves a prebuilt lean runtime from the **local runtime
+cache**:
+
+```
+$XDG_CACHE_HOME/brood/runtimes/<triple>/brood        (~/.cache fallback;
+$XDG_CACHE_HOME/brood/runtimes/<triple>/brood.exe     Windows triples)
 ```
 
-A different OS/arch (macOS, Windows, ARM) needs a `brood` built for that target;
-build it there (or cross-compile) and pass it with `--runtime`. Cross-compiling
-the runtime is out of scope for `nest release` itself (ADR-038).
+You populate the cache once per target — build the lean runtime **on (or for)
+that machine** and copy the binary over:
+
+```bash
+# on the target machine (e.g. an M-series mac):
+cargo build --profile release-lean -p cli --no-default-features --features brood/gui
+# back on the release machine:
+mkdir -p ~/.cache/brood/runtimes/aarch64-apple-darwin
+scp mac:brood/target/release-lean/brood ~/.cache/brood/runtimes/aarch64-apple-darwin/brood
+```
+
+From then on `nest release --target aarch64-apple-darwin` appends to it with no
+toolchain at all; the runtime only needs refreshing when `brood` itself changes
+(the app archive is re-appended each release). A `--target` equal to the host's
+own triple needs no cache entry — the runtime embedded in `nest` serves it.
+Cross-*compiling* the runtime stays out of scope for `nest release` itself
+(ADR-038); `--runtime PATH` remains the explicit one-off escape hatch.
+
+For a drop-anywhere Linux binary, cache a musl runtime the same way (buildable
+on the host — `rustup target add x86_64-unknown-linux-musl` first):
+
+```bash
+cargo build --profile release-lean -p cli --no-default-features \
+  --features brood/gui --target x86_64-unknown-linux-musl
+mkdir -p ~/.cache/brood/runtimes/x86_64-unknown-linux-musl
+cp target/x86_64-unknown-linux-musl/release-lean/brood \
+   ~/.cache/brood/runtimes/x86_64-unknown-linux-musl/
+nest release --target x86_64-unknown-linux-musl   # → app-linux-musl-x86_64
+```
 
 **macOS note:** appending bytes invalidates an existing code signature; re-sign
 the produced binary (`codesign`) before distributing.
@@ -168,8 +211,9 @@ the payload rather than nesting a second archive.
 - `std/tool/project.blsp` — `bundle-collect` (gather sources) + `run-bundle` (boot);
   no load-time `(:use test)` so a lean runtime can load it
 - `crates/cli/src/main.rs` — `brood` boots the app when bundled
-- `crates/nest/src/main.rs` — `nest release`; `resolve_runtime` (embedded →
-  built fallback); `EMBEDDED_RUNTIME` via `include_bytes!`
+- `crates/nest/src/main.rs` — `nest release`; `resolve_runtime` (`--runtime` →
+  runtime cache per `--target` → embedded → built fallback); `target_suffix` /
+  `runtime_cache_path`; `EMBEDDED_RUNTIME` via `include_bytes!`
 - `crates/nest/build.rs` — bakes `BROOD_EMBED_RUNTIME` into `nest` (empty if unset)
 - `Makefile` (`install`) — builds the lean+gui runtime, then embeds it in `nest`
 - `crates/cli/tests/release_bundle.rs` — end-to-end boot test

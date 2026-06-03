@@ -1863,6 +1863,21 @@ as designed, with two refinements from building it:
   doesn't use). A future opt-in terminal-only variant is the planned next step.
   The brief gui-feature *detection* that drove a per-app variant was removed in
   favour of the single embedded variant.
+- **Cross-targets via a local runtime cache (2026-06-03 follow-on).** `--target
+  TRIPLE` is now **repeatable and functional**: each triple resolves a prebuilt
+  lean runtime from `$XDG_CACHE_HOME/brood/runtimes/<triple>/brood` (`~/.cache`
+  fallback; `brood.exe` for Windows triples), which the user populates by
+  building the lean runtime on/for each target once. The host's own triple
+  (baked in as `NEST_HOST_TRIPLE` by `build.rs`) needs no cache entry — the
+  embedded runtime serves it. Outputs get friendly suffixes (`app-macos-arm64`,
+  `app-windows-x86_64.exe`; musl keeps the libc visible so a gnu+musl matrix
+  can't collide), so one invocation emits a whole release matrix. Considered and
+  rejected for now: *downloading* runtimes from GitHub releases (the Deno model
+  — needs CI + published artifacts we don't have yet; the cache layout is
+  exactly what such a fetcher would fill, so it layers on later without a
+  breaking change) and *cross-compiling* on demand (Linux→macOS needs the Apple
+  SDK; still out of scope). `--runtime PATH` stays as the explicit one-off
+  escape hatch, valid with at most one `--target`.
 
 ## ADR-040 — Maps: CHAMP (16-way) instead of an entries-vec + index
 
