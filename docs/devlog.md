@@ -808,3 +808,12 @@ wanting a real title bar.
 840x560 default). The builtin decodes the two extra int args (Arity 0..3). No-arg
 and title-only callers are unchanged. Motivated by brood-life wanting a larger
 canvas without dragging the window each run.
+
+## 2026-06-03 — gui: release a held mouse button on cursor-leave / focus-loss
+
+Bug: press inside a window, move the pointer out (its real release lands off-window
+and we never see it), come back — the next CursorMoved emitted a phantom `:drag`
+because `Win::held` was still `Some`, so the app thought the button was still
+pressed (e.g. a Life paint kept auto-repeating). Fix: synthesize a `:release` and
+clear `held` on `WindowEvent::CursorLeft` (and on `Focused(false)`, belt-and-braces)
+— mirrors the keyboard held-key blur handling (ADR-086). New `release_of` helper.
