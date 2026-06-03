@@ -1,0 +1,94 @@
+;; std/editor/dotenv.blsp — lexical .env (dotenv) highlighting. (require 'editor/dotenv).
+;;
+;; The dotenv analogue of editor/markdown / editor/highlight: a pure data→data
+;; tokenizer, no IO and no kernel surface. `(env-spans src)` returns `[start end face]`
+;; colour spans (character offsets, end-exclusive, ascending, non-overlapping) in
+;; exactly the `highlight-spans` shape, so it drops straight into the editor's
+;; `:fontify` mode service and the shared `fontify-runs` tiler (ADR-052). Lexical and
+;; line-oriented: each line is a `#` comment, a blank, or a `KEY=value` assignment
+;; (optionally `export`-prefixed, value optionally quoted). The faces are
+;; `display.blsp`-style maps, like markdown's.
+
+(defmodule editor/dotenv
+  "Lexical highlighting for `.env` (dotenv) files, as a pure function over a source
+string — `(env-spans src)` returns `[start end face]` colour spans in the
+`highlight-spans` shape (ascending, non-overlapping, end-exclusive), feeding the
+editor's `:fontify` service and the shared `fontify-runs` tiler unchanged. Per line it
+classifies a `#` comment, an optional leading `export` keyword, the `KEY` of a
+`KEY=value` assignment, and a quoted value string. Pure, so independently testable.")
+
+;; ---- faces (display.blsp-style maps) ----------------------------------------
+
+(def env-face-comment {:fg :dark-grey :italic true})
+(def env-face-export {:fg :magenta :bold true})
+(def env-face-key {:fg :cyan})
+(def env-face-string {:fg :green})
+
+;; ---- scanning helpers -------------------------------------------------------
+
+(defn env--lead-ws (line i n)
+  "The column where `line`'s leading whitespace (spaces / tabs) ends."
+  (if (and (< i n) (or (= (char-at line i) " ") (= (char-at line i) "\t")))
+    (env--lead-ws line (inc i) n)
+    i))
+
+(defn env--find (line i n ch)
+  "The offset of the next single-char `ch` at or after `i` in `line`, or -1."
+  (cond (>= i n) -1 (= (char-at line i) ch) i :else (env--find line (inc i) n ch)))
+
+(defn env--key-char? (c)
+  "True if `c` may appear in a dotenv key (letters, digits, `_`, `.`)."
+  (or (includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789" c)
+    (= c "_") (= c ".")))
+(defn env--key-end (line i n)
+  (if (and (< i n) (env--key-char? (char-at line i))) (env--key-end line (inc i) n) i))
+
+;; ---- per-line spans ---------------------------------------------------------
+
+(defn env--value-spans (line base v n)
+  "A one-element string span for a quoted value starting at offset `v` (to its closing
+quote, or end of line if unclosed); `()` for an unquoted value (the default face)."
+  (if (and (< v n) (or (= (char-at line v) "\"") (= (char-at line v) "'")))
+    (let (q (char-at line v) close (env--find line (inc v) n q) e (if (< close 0) n (inc close)))
+      (list [(+ base v) (+ base e) env-face-string]))
+    '()))
+
+(defn env--assign-spans (line base lead n)
+  "Spans for a `KEY=value` line (offsets shifted by `base`): an `export` keyword when
+present, the key, and a quoted value. `()` when the line isn't an assignment."
+  (let (rest (substring line lead n)
+        exp? (starts-with? rest "export ")
+        ks (if exp? (+ lead 7) lead)
+        ke (env--key-end line ks n))
+    (if (and (> ke ks) (< ke n) (= (char-at line ke) "="))
+      (concat
+        (if exp? (list [(+ base lead) (+ base (+ lead 6)) env-face-export]) '())
+        (cons [(+ base ks) (+ base ke) env-face-key]
+          (env--value-spans line base (inc ke) n)))
+      '())))
+
+(defn env--line-spans (line base)
+  "The spans for one `line` starting at offset `base`: a `#` comment whole, else the
+assignment spans (key / export / quoted value), else none."
+  (let (n (string-length line) lead (env--lead-ws line 0 n))
+    (cond
+      (>= lead n) '()
+      (= (char-at line lead) "#") (list [(+ base lead) (+ base n) env-face-comment])
+      :else (env--assign-spans line base lead n))))
+
+(defn env--lex (src i n acc)
+  "Tail-recursive line walker: classify each line (`env--line-spans`), accumulating
+spans in reverse."
+  (if (>= i n)
+    (reverse acc)
+    (let (e (min n (string-span-until src i "\n"))
+          spans (env--line-spans (substring src i e) i))
+      (env--lex src (inc e) n (fold (fn (a s) (cons s a)) acc spans)))))
+
+(defn env-spans (src)
+  "Lexically tokenize dotenv `src` into a list of `[start end face]` colour spans
+(character offsets, end-exclusive) — in the `highlight-spans` shape, so it feeds the
+editor's `:fontify` service and the shared `fontify-runs` tiler unchanged. Covers `#`
+comments, the `export` keyword, the `KEY` of an assignment, and quoted values. Spans
+are ascending and non-overlapping; unquoted values carry no span (the default face)."
+  (env--lex src 0 (string-length src) '()))
