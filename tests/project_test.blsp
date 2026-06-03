@@ -116,6 +116,17 @@
         (assert= (first form) 'project)
         (assert= (plist-get (rest form) :name) "demo")))))
 
+(describe "project: bundle module naming (ADR-038)"
+  ;; A release bundle keys modules by require-name, not bare stem, so a namespaced
+  ;; module (net/sse) keeps its namespace and resolves through %builtin-module — the
+  ;; bug behind `./app: require: cannot find module 'net/sse'` after `nest release`.
+  (test "project--bundle-name keeps the namespace relative to the source dir"
+    (assert= (project/project--bundle-name "/p/src" "/p/src/main.blsp") "main")
+    (assert= (project/project--bundle-name "/p/src" "/p/src/net/sse.blsp") "net/sse")
+    (assert= (project/project--bundle-name "/p/src/" "/p/src/a/b/c.blsp") "a/b/c"))
+  (test "a path not under the source dir falls back to its bare stem"
+    (assert= (project/project--bundle-name "/other" "/p/src/x.blsp") "x")))
+
 (describe "project: namespace-aware duplicate global detection (ADR-065)"
   (test "project/project--file-def-names resolves names to ns/name (ambient earmuffs stay root; defmodule skipped)"
     (let (dir (temp-dir "brood-dup-"))

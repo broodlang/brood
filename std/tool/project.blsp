@@ -613,21 +613,29 @@ resolve in the advisory checker. Returns the project root."
 ;; embedded runtime. Mechanism (append/extract the archive) is Rust; this is the
 ;; policy (ADR-006).
 
-;; The module name `require` knows a source file by — its filename stem, since
-;; `require--find` searches `<stem>.blsp`. So a bundle keyed by stem resolves
-;; through the same `%builtin-module` path with no load-path on disk.
-(defn project--module-stem (path)
-  (let (base (path-basename path))
-    (if (ends-with? base ".blsp")
-      (substring base 0 (- (string-length base) 5))
-      base)))
+;; The module name `require` knows a source file by — its path **relative to the
+;; source dir it lives under**, without the `.blsp` extension. For a top-level file
+;; that's just the stem (`src/main.blsp` → `main`); for a namespaced module it keeps
+;; the namespace (`…/net/sse.blsp` under `…/src` → `net/sse`), exactly the key
+;; `require 'net/sse` looks up. So a bundle keyed this way resolves through the same
+;; `%builtin-module` path as the baked-in std (whose table is likewise keyed by full
+;; name, e.g. `editor/buffer`) — with no load-path on disk.
+(defn project--bundle-name (dir path)
+  (let (prefix (if (ends-with? dir "/") dir (str dir "/"))
+        rel (if (starts-with? path prefix)
+              (substring path (string-length prefix) (string-length path))
+              (path-basename path)))
+    (if (ends-with? rel ".blsp")
+      (substring rel 0 (- (string-length rel) 5))
+      rel)))
 
 (defn bundle-collect (root)
   "Collect a project's shippable source for `nest release`: a flat list of
-strings `(manifest-src stem0 src0 stem1 src1 …)` the `nest` side embeds in the
-binary (ADR-038). Includes resolved dependency sources; excludes `tests/`.
-Modules are keyed by filename stem (the name `require` searches for). Errors if
-`root` is nil (not in a project)."
+strings `(manifest-src name0 src0 name1 src1 …)` the `nest` side embeds in the
+binary (ADR-038). Includes resolved dependency sources; excludes `tests/`. Modules
+are keyed by their require-name — the path relative to the source dir, sans `.blsp`,
+so a namespaced module (`net/sse`) keeps its namespace and resolves like the baked-in
+std. Errors if `root` is nil (not in a project)."
   (when (nil? root)
     (error "bundle-collect: not in a Brood project (no project.blsp found)"))
   (let (manifest (slurp (path-join root "project.blsp")))
@@ -641,13 +649,18 @@ Modules are keyed by filename stem (the name `require` searches for). Errors if
           dep-dirs (if *project-dependencies*
                      (do (require 'package) (package/ensure-deps root *project-dependencies*))
                      nil)
-          files (fold (fn (acc d) (append acc (project--collect-sources d)))
-                  nil
-                  (append src-dirs dep-dirs)))
+          all-dirs (append src-dirs dep-dirs))
+      ;; Pair each file with the source dir it was found under, so its require-name
+      ;; (relative to that dir) keeps any namespace — `src/main.blsp` → `main`,
+      ;; `../brood-net/src/net/sse.blsp` → `net/sse`. Dir order (project dirs first)
+      ;; is preserved, so a project module still wins a name clash with a dep.
       (cons manifest
-        (fold (fn (acc f) (append acc (list (project--module-stem f) (slurp f))))
+        (fold (fn (acc d)
+                (fold (fn (a f) (append a (list (project--bundle-name d f) (slurp f))))
+                  acc
+                  (project--collect-sources d)))
           nil
-          files)))))
+          all-dirs)))))
 
 ;; (run-bundle args) — boot an embedded release bundle. The `brood` binary,
 ;; detecting its appended archive, calls this instead of starting a REPL. No
