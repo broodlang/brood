@@ -4659,7 +4659,26 @@ impl Heap {
         fwd.src_old = true; // copy old-gen objects
         fwd.dest_old = true; // into the fresh old space
         self.flush_roots(&old_src, &mut dest, &mut fwd, value_roots, env_roots);
-        // `remembered` is empty (the minor cleared it; no binding has run since).
+        // Write barrier across a major. After a *tenure* minor `remembered` is
+        // empty (the minor cleared it). But `collect()` can run a major right
+        // after a *flip* minor, and a flip RETAINS `remembered` — old EnvIds for
+        // frames that gained a young binding, pointing into the pre-compaction old
+        // gen (the old->young edges persist; see `minor_collect`). This major just
+        // relocated those frames into fresh slabs and bumped `old_epoch`, so every
+        // retained entry is now a stale index *and* a stale epoch. Rewrite each
+        // through the env forwarding table (`fwd.envs`, populated by `flush_roots`)
+        // and drop any whose frame wasn't copied — it was unreachable, so the major
+        // reclaimed it. Skipping this leaves the next `minor_collect` indexing
+        // `self.old.envs[e.index()]` with a stale handle and no bounds/epoch check
+        // (and `BROOD_GC_VERIFY`'s remembered walk uses a safe `.get()`, so it
+        // never flags it) — a silent use-after-GC.
+        if !self.remembered.is_empty() {
+            let remembered = std::mem::take(&mut self.remembered);
+            self.remembered = remembered
+                .into_iter()
+                .filter_map(|e| fwd.envs.get(&(e.index() as u32)).map(|&n| fwd.mint_env(n as usize)))
+                .collect();
+        }
         let old_form_pos = std::mem::take(&mut self.form_pos);
         for (key, pos) in old_form_pos {
             if (key >> 32) & 1 == 1 {
@@ -6137,5 +6156,88 @@ mod gen_handle_tests {
             _ => unreachable!(),
         };
         assert!(matches!(car, Value::Int(1)));
+    }
+
+    /// Regression (`docs/kernel-audit-2026-06-03.md` #1): a **major collection
+    /// that follows a *flip* minor** must rewrite the write-barrier `remembered`
+    /// set through the env forwarding table. A flip *retains* `remembered` (the
+    /// old->young edges persist); the subsequent major then relocates those old
+    /// frames and bumps `old_epoch`, leaving every retained entry a stale index
+    /// *and* a stale epoch. The next minor indexes `self.old.envs[e.index()]`
+    /// directly — no bounds/epoch check — so a stale entry is a silent
+    /// use-after-GC: an OOB `Vec` panic when the compacted old gen is smaller, a
+    /// wrong-frame read otherwise. (`BROOD_GC_VERIFY` misses it too — its
+    /// remembered walk uses a safe `.get()`.)
+    ///
+    /// We drive the full `tenure -> mid-bind env_define -> flip -> major -> minor`
+    /// interleave with the remembered frame at a HIGH old-gen index that the major
+    /// then compacts away, so a stale index would be out of bounds. Without the
+    /// fix the post-major assertions fail (stale epoch / OOB index); with it they
+    /// hold and the trailing minor derefs the rewritten handle cleanly.
+    #[test]
+    fn major_after_flip_rewrites_remembered_set() {
+        let mut h = Heap::new();
+        let x = crate::core::value::intern("x");
+        // Inflate the nursery with several frames, all rooted; the one we keep is
+        // LAST so it tenures to the highest old-gen index.
+        let mut envs: Vec<EnvId> = (0..8).map(|_| h.new_env(None)).collect();
+        let keep_pos = envs.len() - 1;
+        // Tenure them all into the old generation.
+        h.minor_collect(true, &mut [], &mut envs);
+        let keep = envs[keep_pos];
+        assert!(keep.is_old(), "frame should be tenured into the old gen");
+        let high_index = keep.index();
+        assert!(high_index > 0, "kept frame should sit at a non-zero old index");
+        // Mid-bind define: store a *young* value into the tenured frame, recording
+        // an old->young edge in `remembered`.
+        let young = h.alloc_pair(Value::Int(1), Value::Int(2));
+        h.env_define(keep, x, young);
+        assert_eq!(h.remembered.len(), 1, "the old->young edge should be remembered");
+        // Keep only `keep` rooted, so the upcoming major reclaims the 7 inflation
+        // frames and *shrinks* the old gen below `high_index`.
+        let mut roots = vec![keep];
+        // A *flip* minor (tenure=false): retains `remembered`, leaves old untouched.
+        h.minor_collect(false, &mut [], &mut roots);
+        assert_eq!(h.remembered.len(), 1, "a flip must retain remembered");
+        // The major: compacts old (drops the 7 dead frames), bumps `old_epoch`.
+        h.major_collect(&mut [], &mut roots);
+        let keep = roots[0];
+        // With the fix, `remembered` was rewritten through the forwarding table:
+        // current epoch, in bounds, pointing at the surviving frame. Without it,
+        // these carry the stale pre-major index/epoch.
+        assert_eq!(h.remembered.len(), 1);
+        let r = h.remembered[0];
+        assert!(r.is_old());
+        assert_eq!(
+            r.generation(),
+            h.old_epoch,
+            "remembered entry kept a stale epoch after the major (use-after-GC)"
+        );
+        assert!(
+            r.index() < h.old.envs.len(),
+            "remembered entry is out of bounds after the major (use-after-GC): \
+             index {} >= old.envs.len() {}",
+            r.index(),
+            h.old.envs.len(),
+        );
+        assert_eq!(
+            r.index(),
+            keep.index(),
+            "remembered should point at the surviving kept frame"
+        );
+        // The deref path the bug corrupts: a subsequent minor reads
+        // `self.old.envs[r.index()]`. Must not panic; the young binding survives.
+        h.minor_collect(false, &mut [], &mut roots);
+        let keep = roots[0];
+        assert!(keep.is_old());
+        let bound = h.old.envs[keep.index()]
+            .vars
+            .iter()
+            .find(|(s, _)| *s == x)
+            .map(|(_, v)| *v);
+        assert!(
+            matches!(bound, Some(Value::Pair(_))),
+            "the remembered young binding was lost or corrupted: {bound:?}"
+        );
     }
 }

@@ -275,6 +275,7 @@ Every session, oldest first. Full text: [devlog-archive.md](archive/devlog-archi
 - **2026-06-01** — `nest grammar` (ADR-092): generate editor grammars (VS Code TextMate, Emacs) from `(special-forms)`; `brood-vscode` extension
 - **2026-06-01** — `tree-sitter-brood`: a real parser grammar (external scanner mirrors the reader); `nest grammar tree-sitter` highlights
 - **2026-06-02** — GUI key fix: re-apply Shift to Alt/Ctrl punctuation chords (`M->`/`M-<`/`M-{`/`M-%`/…), matching the crossterm frontend
+- **2026-06-04** — gc: rewrite the write-barrier `remembered` set in `major_collect` (fixes a use-after-GC when a major follows a flip minor — kernel audit #1)
 
 ---
 
@@ -870,3 +871,39 @@ be the exact panic seen in the live Life session — that needed a long-lived im
 with much accumulated state and a `load` of the real module, which did not
 reproduce in isolation. If it recurs, capture it live in a debug build with
 BROOD_GC_VERIFY=1 for the precise root→cell path.
+
+## 2026-06-04 — gc: rewrite the `remembered` write-barrier set across a major collection
+
+From the kernel audit (`docs/kernel-audit-2026-06-03.md`, finding #1). A
+**use-after-GC** in the generational collector when a *major* collection runs
+immediately after a *flip* minor.
+
+`collect()` runs a minor, then escalates to a major when the old gen has doubled.
+A minor is either a *tenure* (nursery survivors → old) or a *flip* (survivors stay
+young, under premature/`GC_STRESS` pressure). The write-barrier `remembered` set —
+old frames that gained a young binding via a mid-bind `env_define`, holding
+OLD→YOUNG edges the normal roots don't reach — is *cleared* by a tenure but
+*retained* by a flip (the edges persist). `major_collect` relocated every old
+frame and bumped `old_epoch` but, on a comment premise that "`remembered` is empty
+(the minor cleared it)", never rewrote the set. So the sequence `flip(retain) →
+major(relocate + bump epoch)` left `remembered` holding pre-major indices at the
+stale epoch, and the next `minor_collect` indexed `self.old.envs[e.index()]`
+directly — no `flush_bound!`, no epoch/poison check — for a silent wrong-frame
+read+write, or a raw `Vec` OOB panic when the compacted old gen had shrunk.
+`BROOD_GC_VERIFY` did **not** catch it: its remembered walk uses a safe `.get()`
+and never checks the entry's generation.
+
+Trigger is narrow — needs a frame tenured *mid-bind* (the only thing that
+populates `remembered`), so it can't fire under pure unbroken `GC_STRESS`; it
+needs the interleave `tenure → mid-bind env_define → flip → major → minor`,
+reachable in mixed workloads.
+
+Fix: in `major_collect`, after `flush_roots`, rewrite each retained `remembered`
+`EnvId` through the env forwarding table (`fwd.envs`) and drop any whose frame
+wasn't copied (it was unreachable — the major reclaimed it). Mirrors what
+`flush_env` does for every other old handle. New white-box regression test
+(`major_after_flip_rewrites_remembered_set`) drives the full interleave with the
+remembered frame at a high old-gen index the major compacts away, so a stale index
+would be OOB; it asserts the post-major `remembered` entry is current-epoch and
+in-bounds, then derefs it through a trailing minor. Confirmed RED without the fix
+(stale epoch 0 vs 1), GREEN with it; full heap + gc suites stay green.
