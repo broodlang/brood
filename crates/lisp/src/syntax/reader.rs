@@ -297,6 +297,12 @@ impl<'a> Parser<'a> {
         match self.s.scan_string_body(Some(&mut s)) {
             StringScan::Closed => Ok(self.heap.alloc_string(&s)),
             StringScan::Unterminated => Err(self.err_incomplete("unterminated string")),
+            StringScan::BadEscape { at } => Err(self.err_at(
+                self.s.pos_at(at),
+                "malformed string escape: \\x needs two hex digits, \
+                 \\u needs {1-6 hex digits} (a Unicode scalar value)"
+                    .to_string(),
+            )),
         }
     }
 

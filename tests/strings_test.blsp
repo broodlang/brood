@@ -29,7 +29,15 @@
   (test "number->string is the inverse"
     (assert= (number->string 42) "42")
     (assert= (number->string 3.5) "3.5")
-    (assert= (string->number (number->string 99)) 99)))
+    (assert= (string->number (number->string 99)) 99))
+  (test "integers past i64 parse to bignums, not lossy floats"
+    (assert= (string->number "98765432109876543210987654321")
+      98765432109876543210987654321)
+    (assert= (string->number "-98765432109876543210987654321")
+      -98765432109876543210987654321)
+    ;; the round-trip that used to silently round through f64
+    (assert= (string->number (number->string 98765432109876543210987654321))
+      98765432109876543210987654321)))
 
 (describe "characters & lists"
   (test "char-at is char-indexed"
@@ -78,10 +86,18 @@
     (assert= "\u{41}" "A")
     ;; 😀 is U+1F600; the literal char round-trips through the string too.
     (assert= "\u{1F600}" "😀"))
-  (test "malformed escapes pass through as literal chars"
-    (assert= "\xZZ" "xZZ")
-    (assert= "\u{}" "u{}")
-    (assert= "\u{nothex}" "u{nothex}")))
+  ;; A malformed `\x`/`\u{}` is a hard read error (kernel audit) — the old
+  ;; pass-through silently produced wrong output ("\xZZ" became "xZZ").
+  ;; Driven through `read-string` so the error is raised at runtime where
+  ;; `assert-error` can catch it (a literal in this file would fail the load).
+  (test "malformed hex escapes are read errors"
+    (assert-error (read-string "\"\\xZZ\""))
+    (assert-error (read-string "\"\\u{}\""))
+    (assert-error (read-string "\"\\u{nothex}\""))
+    (assert-error (read-string "\"\\u{110000}\"")))
+  (test "unknown non-hex escapes still pass through as literals"
+    (assert= "\q" "q")
+    (assert= (read-string "\"\\q\"") "q")))
 
 (describe "search"
   (test "index-of finds the first occurrence"

@@ -53,9 +53,15 @@ Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
 - ✅ **[perf] lsp: `resolve_in_source` uses `intern_existing`** — the daemon no
   longer leaks an interner entry per queried identifier; interner growth
   vectors documented in `docs/memory-model.md`.
-- Lower-priority hardening (empty-cookie guard, monitor-leak sweep, depth guards,
-  unbounded `macroexpand`, scanner line-breaks, `string->number` bignum path) —
-  see the audit doc.
+- ✅ **Lower-priority hardening batch** — min cookie length (16B) in
+  `node_listen`; `macroexpand` fixpoint capped at 256 rounds (kernel + prelude);
+  `string->number` bignum path; scanner counts lone-CR/U+2028/U+2029 line
+  breaks; malformed `\x`/`\u{}` string escapes are hard read errors
+  (`StringScan::BadEscape`); epoch tripwire masked to `GEN_MASK`; dead-watcher
+  monitor sweep in `deregister`. Remaining from the audit (deferred, latent
+  only): depth counter for `expr_ty`/`check_into`, `catch_unwind` around the
+  whole worker `run_one`, RAII guard for `check_file`'s panic path,
+  `net.rs` binary-safe reads (blocked on a bytes Value type).
 
 ---
 

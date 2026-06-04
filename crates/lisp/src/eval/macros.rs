@@ -709,7 +709,21 @@ pub fn macroexpand(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
     let eb = heap.env_roots_len();
     heap.push_env_root(env);
     let mut cur = form;
+    // Bounded fixpoint (kernel audit): a macro that forever expands to another
+    // macro call (`(defmacro m (x) `(m ~x))`) otherwise hard-hangs the expander
+    // — mitigated only by green-process preemption, and not at all on a
+    // no-deadline root-thread expansion. Same cap as the recursion guards.
+    let mut rounds = 0u32;
     loop {
+        if rounds >= MAX_DEPTH {
+            heap.truncate_env_roots(eb);
+            return Err(LispError::runtime(format!(
+                "macro expansion did not reach a fixpoint after {} rounds \
+                 (a macro that expands to itself?)",
+                MAX_DEPTH
+            )));
+        }
+        rounds += 1;
         let env_now = heap.env_root_at(eb);
         let (next, expanded) = match macroexpand_1(heap, cur, env_now) {
             Ok(r) => r,

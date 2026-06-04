@@ -339,6 +339,12 @@ impl<'a> Cst<'a> {
         match self.s.scan_string_body(None) {
             crate::syntax::scanner::StringScan::Closed => self.leaf(NodeKind::Str, start),
             crate::syntax::scanner::StringScan::Unterminated => self.leaf(NodeKind::Error, start),
+            // The body was scanned through its close quote, so the span covers
+            // the whole string — record an `Error` node and carry on with the
+            // rest of the buffer (tolerant, like every CST error).
+            crate::syntax::scanner::StringScan::BadEscape { .. } => {
+                self.leaf(NodeKind::Error, start)
+            }
         }
     }
 
