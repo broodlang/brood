@@ -276,6 +276,7 @@ Every session, oldest first. Full text: [devlog-archive.md](archive/devlog-archi
 - **2026-06-01** — `tree-sitter-brood`: a real parser grammar (external scanner mirrors the reader); `nest grammar tree-sitter` highlights
 - **2026-06-02** — GUI key fix: re-apply Shift to Alt/Ctrl punctuation chords (`M->`/`M-<`/`M-{`/`M-%`/…), matching the crossterm frontend
 - **2026-06-04** — gc: rewrite the write-barrier `remembered` set in `major_collect` (fixes a use-after-GC when a major follows a flip minor — kernel audit #1)
+- **2026-06-04** — heap: delete the dead mark-sweep collector (~480 lines: `collect_old`/`sweep`/`Marks`/`FreeLists`/`local_free` — kernel audit, refactoring #1)
 
 ---
 
@@ -1032,3 +1033,28 @@ existing `MAX_SHIFT` guard on bit-shifts. An f64 carries ~17 significant digits,
 1000 is far past any real use while bounding the worst-case alloc to ~1 KB.
 Regression cases in `tests/strings_test.blsp` (`assert-error` on 1e9; a 1000-place
 render still allowed).
+
+## 2026-06-04 — heap: delete the dead mark-sweep collector
+
+From the kernel audit (`docs/kernel-audit-2026-06-03.md`, refactoring #1). The
+original in-place mark-sweep (`collect_old` — `#[allow(dead_code)]`, never
+called since the slot-aliasing scheduler race got it disabled) lingered under
+the live generational copying collector: `sweep`, `trace_one`,
+`Marks`/`mark_methods!`/`mark_one`, `TraceItem`/`push_value`/`push_env`, the
+`FreeLists` struct, and the `local_free` field — ~480 lines. `local_free` was
+written only by the dead `sweep`, so it was permanently empty: the `free`
+subtraction in `local_live_count` was always zero and the `purge_above`/
+`clear` calls were no-ops. The `alloc_slot!` allocators were already bump-only
+and never consulted it.
+
+Deleted it all; `local_live_count` is now a raw slab-length sum (the moving
+collector relocates survivors into fresh slabs, so slab lengths *are* the live
+count — no free list to subtract). Kept `PoisonBits` per the audit (it's woven
+through every accessor and any future in-place reclaimer needs exactly that
+tripwire) but documented it as currently inert — its only writer was `sweep`;
+the live use-after-GC detector is the generation-epoch check (ADR-054). Fixed
+every comment that still described the deleted machinery as live (the
+"tracing GC" section header now describes the actual generational copy
+collector; the allocator docs describe bump-only append). No behaviour change:
+full suite green, heap white-box tests green under `BROOD_GC_STRESS` and
+`BROOD_GC_VERIFY`.
