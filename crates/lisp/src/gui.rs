@@ -1478,9 +1478,9 @@ mod backend {
             let shared = &mut *shared;
             let metrics = Metrics::new(self.px, line_h);
             let mut tb = CtBuffer::new(&mut shared.fs, metrics);
-            tb.set_size(&mut shared.fs, Some(line_h * 4.0), Some(line_h * 2.0));
+            tb.set_size(Some(line_h * 4.0), Some(line_h * 2.0));
             let attrs = Attrs::new().family(Family::Name(fam.as_str()));
-            tb.set_text(&mut shared.fs, "M", &attrs, Shaping::Advanced);
+            tb.set_text("M", &attrs, Shaping::Advanced, None);
             tb.shape_until_scroll(&mut shared.fs, false);
             let (mut cw, mut base) = (self.px, self.px);
             if let Some(run) = tb.layout_runs().next() {
@@ -1650,8 +1650,8 @@ mod backend {
     /// isn't wrapped or clipped during shaping.
     fn shape_cluster(shared: &mut FontShared, g: &str, attrs: Attrs, px: f32, w: f32, line_h: f32) -> CtBuffer {
         let mut tb = CtBuffer::new(&mut shared.fs, Metrics::new(px.max(1.0), line_h.max(1.0)));
-        tb.set_size(&mut shared.fs, Some(w + px), Some(line_h + px));
-        tb.set_text(&mut shared.fs, g, &attrs, Shaping::Advanced);
+        tb.set_size(Some(w + px), Some(line_h + px));
+        tb.set_text(g, &attrs, Shaping::Advanced, None);
         tb.shape_until_scroll(&mut shared.fs, false);
         tb
     }

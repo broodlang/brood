@@ -125,7 +125,7 @@ arboard = { version = "3", optional = true, default-features = false, features =
 # (a cluster the mono font lacks falls back to the bundled Noto Color Emoji), and color
 # glyph rendering (CBDT/COLR) via its bundled swash. Replaces the per-char monochrome
 # fontdue rasteriser. No windowing types, so no raw-window-handle coupling above.
-cosmic-text = { version = "0.14", optional = true }
+cosmic-text = { version = "0.19", optional = true }
 # Display-cell width (the `display-width` builtin) + grapheme-cluster segmentation
 # (the renderer advances per cluster, not per codepoint). Always linked — tiny, no_std
 # tables — so the width primitive is available in the lean runtime too.
