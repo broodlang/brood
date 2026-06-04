@@ -66,7 +66,7 @@ fn remote_attach_reads_snapshot_then_sees_disconnect() {
     // Target: become observable, spawn a couple of identifiable workers, park.
     let target = format!(
         r#"
-(node-start :app "127.0.0.1:{port_a}" "secret")
+(node-start :app "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (require 'observer)
 (observer/observe-serve)
 (spawn (receive (_ :done)))
@@ -80,7 +80,7 @@ fn remote_attach_reads_snapshot_then_sees_disconnect() {
     // the link), then poll until the link drops (the harness kills the target).
     let observer = format!(
         r#"
-(node-start :obs "127.0.0.1:{port_b}" "secret")
+(node-start :obs "127.0.0.1:{port_b}" "secret-test-cookie-16+")
 (require 'observer)
 (def peer (connect "app@127.0.0.1:{port_a}"))
 (monitor-node peer)

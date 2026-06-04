@@ -211,17 +211,24 @@ pub(crate) fn drop_monitor(pred: impl Fn(&Watcher) -> bool) {
 /// holding our dead pid as a `Watcher::Remote` cleans up when *its* target
 /// dies — the `[:down …]` send to a dead pid is dropped harmlessly.)
 pub(super) fn sweep_dead_watcher(pid: u64) {
+    // Early-out on the common case (no monitors anywhere): deregister runs
+    // once per spawned process, so a spawn-churn workload must not pay a
+    // table walk per death when the tables are empty.
     let mut mons = crate::core::sync::lock(&MONITORS);
-    mons.retain(|_, watchers| {
-        watchers.retain(|w| !matches!(*w, Watcher::Local { pid: p, .. } if p == pid));
-        !watchers.is_empty()
-    });
+    if !mons.is_empty() {
+        mons.retain(|_, watchers| {
+            watchers.retain(|w| !matches!(*w, Watcher::Local { pid: p, .. } if p == pid));
+            !watchers.is_empty()
+        });
+    }
     drop(mons);
     let mut pending = crate::core::sync::lock(&PENDING_REMOTE);
-    pending.retain(|_, ps| {
-        ps.retain(|p| p.watcher_pid != pid);
-        !ps.is_empty()
-    });
+    if !pending.is_empty() {
+        pending.retain(|_, ps| {
+            ps.retain(|p| p.watcher_pid != pid);
+            !ps.is_empty()
+        });
+    }
 }
 
 // ---- pending remote monitors: the *sender* side ----------------------------

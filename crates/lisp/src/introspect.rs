@@ -841,4 +841,3 @@ mod tests {
         assert!(!r.diagnostics.is_empty(), "expected a diagnostic");
     }
 }
-

@@ -1166,3 +1166,33 @@ landed as one batch:
 
 (The audit's "stale `unsafe` framing in `docs/handoff-vm-gc-memory.md`" item
 was already gone — no handoff doc mentions `unsafe` anymore.)
+
+## 2026-06-04 — review pass over the kernel-audit series
+
+A recall-biased multi-angle review of the whole series (e69b785..426c273),
+then the fixes it surfaced:
+
+- **The cookie guard broke the dist integration tests** — `crates/cli/tests/`
+  (distribution, serve_attach, observe_attach) started nodes with 6–12-byte
+  cookies (`"secret"`, `"right-cookie"`, `"wrong-cookie"`), which the new
+  `MIN_COOKIE_LEN` correctly rejects; the unit-level dist tests I ran before
+  committing didn't cover them. All lengthened to 16+ bytes.
+- **`sweep_dead_watcher` early-out** — it runs once per process death, so a
+  spawn-churn workload was paying two table walks per death even with zero
+  monitors anywhere; `is_empty()` guards both walks now.
+- **`MAX_EXPAND_ROUNDS` is its own constant** — the fixpoint-rounds cap had
+  reused `MAX_DEPTH` (the recursion/nesting guard); semantically different
+  limits that merely share the value 256. The prelude's mirror is now a named
+  `macroexpand--max-rounds` instead of bare literals.
+- **`epoch_in_gen_width`** — the GEN_MASK truncation was duplicated at the
+  per-deref tripwire and the `BROOD_GC_VERIFY` walker; one helper now, so the
+  two detectors can't drift.
+
+Reviewed-and-accepted (no change): the writer-queue sever-on-full can in
+principle flap a healthy-but-bursty link (documented trade-off on
+`WRITER_QUEUE_CAP`, with the bytes-ceiling follow-up named there); big JSON
+integers now decode as lossless bignums rather than lossy floats (intended);
+a short `$BROOD_COOKIE` now fails `node-start` (intended hardening);
+`PoisonBits` is inert with no writer (the audit's explicit call was to keep
+it; deleting it wholesale — ~25 accessor checks + the `BROOD_ENV_DEBUG`
+path — is a candidate follow-up cleanup).
