@@ -69,7 +69,7 @@ fn attach_drives_a_served_app_over_the_link() {
     // Daemon: serve a tiny counter app ("+" increments, "q" quits), then park.
     let daemon = format!(
         r#"
-(node-start :ed "127.0.0.1:{port_a}" "secret")
+(node-start :ed "127.0.0.1:{port_a}" "secret-test-cookie-16+")
 (require 'editor/serve)
 (require 'editor/display)
 (defn mk () {{:n 0}})
@@ -90,7 +90,7 @@ fn attach_drives_a_served_app_over_the_link() {
     // port binds) doesn't lose the first request.
     let client = format!(
         r#"
-(node-start :cli "127.0.0.1:{port_b}" "secret")
+(node-start :cli "127.0.0.1:{port_b}" "secret-test-cookie-16+")
 (require 'editor/serve)
 (def peer (connect "ed@127.0.0.1:{port_a}"))
 (monitor-node peer)

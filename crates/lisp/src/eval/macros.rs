@@ -26,6 +26,13 @@ use std::collections::{HashMap, HashSet};
 /// a misbehaving macro) should produce a clean error, not abort the process.
 const MAX_DEPTH: u32 = 256;
 
+/// Bound on `macroexpand`'s head-fixpoint *rounds* — a different quantity from
+/// the nesting depth above (it counts successive whole-form rewrites, not
+/// recursion), kept as its own constant so tuning one never silently retunes
+/// the other. The prelude's Brood-level `macroexpand` mirrors this value
+/// (`macroexpand--max-rounds` in `std/prelude.blsp`).
+const MAX_EXPAND_ROUNDS: u32 = 256;
+
 /// Per-expansion auto-gensym table (Clojure-style `x#`). Maps a literal template
 /// symbol whose name ends in `#` to a single fresh gensym, so every occurrence of
 /// that name *within one backtick expansion* refers to the same fresh symbol — and
@@ -715,12 +722,12 @@ pub fn macroexpand(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
     // no-deadline root-thread expansion. Same cap as the recursion guards.
     let mut rounds = 0u32;
     loop {
-        if rounds >= MAX_DEPTH {
+        if rounds >= MAX_EXPAND_ROUNDS {
             heap.truncate_env_roots(eb);
             return Err(LispError::runtime(format!(
                 "macro expansion did not reach a fixpoint after {} rounds \
                  (a macro that expands to itself?)",
-                MAX_DEPTH
+                MAX_EXPAND_ROUNDS
             )));
         }
         rounds += 1;

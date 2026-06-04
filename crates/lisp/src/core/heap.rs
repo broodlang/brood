@@ -2880,10 +2880,25 @@ impl Heap {
 
     // ----- access (dispatch on the handle's region) -----
 
+    /// A heap epoch counter truncated to the handle GEN field's width. A
+    /// handle's `generation()` is its mint-time epoch masked to `GEN_MASK`,
+    /// while the heap's `local_epoch`/`old_epoch` counters are full u32s — so
+    /// every stale-handle comparison must truncate the expected side
+    /// identically, or after 2^29 collections of one heap every *valid*
+    /// handle would "mismatch" (kernel audit; astronomically rare, but the
+    /// tripwire must not be the thing that cries wolf). The one definition
+    /// shared by [`check_epoch_aged`](Self::check_epoch_aged) and the
+    /// `BROOD_GC_VERIFY` walker, so the two detectors can't drift.
+    #[cfg(debug_assertions)]
+    fn epoch_in_gen_width(epoch: u32) -> u32 {
+        epoch & (crate::core::value::GEN_MASK as u32)
+    }
+
     /// Generation-aware epoch tripwire. Young (`is_old == false`) handles are
     /// checked against the nursery epoch (bumped by every collection); old handles
     /// against the old-generation epoch (bumped only by a major collection, since a
-    /// minor leaves old objects in place). A mismatch means a handle was held
+    /// minor leaves old objects in place). Both sides compare truncated — see
+    /// [`epoch_in_gen_width`]. A mismatch means a handle was held
     /// across a collection that moved its space without being re-rooted. Only the
     /// debug-gated accessors call it, so it's `cfg(debug_assertions)` too (no
     /// release dead-code).
@@ -2894,12 +2909,8 @@ impl Heap {
         } else {
             (self.local_epoch, "nursery")
         };
-        // Compare in the handle's truncated GEN width: `generation()` is the
-        // mint-time epoch masked to `GEN_MASK`, while the heap's epoch counter
-        // is a full u32 — unmasked, every valid handle would "mismatch" once a
-        // heap passes 2^29 collections (kernel audit; astronomically rare, but
-        // the tripwire must not be the thing that cries wolf).
-        let expected = expected & (crate::core::value::GEN_MASK as u32);
+        // Compare in the handle's truncated GEN width — see `epoch_in_gen_width`.
+        let expected = Self::epoch_in_gen_width(expected);
         debug_assert!(
             gen == expected,
             "use-after-GC: {} handle ({} slot {}) is from epoch {}, but that generation is \
@@ -4680,12 +4691,9 @@ impl Heap {
         // invariant here — the write-barrier `remembered` set legitimately carries
         // transient old→young edges between a tenure-mid-bind and the next minor —
         // only that every reachable handle is in-bounds and current for its gen.
-        // Masked to GEN_MASK like `check_epoch_aged`: a handle's `generation()`
-        // is the mint-time epoch truncated to the GEN field, so the expected
-        // side must truncate identically (no false positives past 2^29
-        // collections of one heap).
-        let young_ep = self.local_epoch & (crate::core::value::GEN_MASK as u32);
-        let old_ep = self.old_epoch & (crate::core::value::GEN_MASK as u32);
+        // Truncated like `check_epoch_aged` — see `epoch_in_gen_width`.
+        let young_ep = Self::epoch_in_gen_width(self.local_epoch);
+        let old_ep = Self::epoch_in_gen_width(self.old_epoch);
         let mut seen_pair = [
             vec![false; self.local.pairs.len()],
             vec![false; self.old.pairs.len()],
