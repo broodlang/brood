@@ -278,6 +278,7 @@ Every session, oldest first. Full text: [devlog-archive.md](archive/devlog-archi
 - **2026-06-04** — gc: rewrite the write-barrier `remembered` set in `major_collect` (fixes a use-after-GC when a major follows a flip minor — kernel audit #1)
 - **2026-06-04** — heap: delete the dead mark-sweep collector (~480 lines: `collect_old`/`sweep`/`Marks`/`FreeLists`/`local_free` — kernel audit, refactoring #1)
 - **2026-06-04** — scheduler: `assign_worker` indexes by `WORKERS.len()` (kills the per-spawn `BROOD_J` env read + the late-`set_max_parallel` OOB — kernel audit, perf #2)
+- **2026-06-04** — gc: de-dup the write-barrier `remembered` set (repeated binds into one tenured frame no longer grow it — kernel audit, perf #3)
 
 ---
 
@@ -1077,3 +1078,16 @@ matches the queues being indexed, and `worker_count()` (with its env read) now
 runs exactly once, at pool init — nothing left to cache. Regression test in
 `tests/pool_resize_after_start.rs` (own binary; deterministically RED before
 the fix: spawn → `set_max_parallel(4096)` → fan out 64 spawns panicked OOB).
+
+## 2026-06-04 — gc: de-dup the write-barrier remembered set
+
+From the kernel audit (`docs/kernel-audit-2026-06-03.md`, performance #3). The
+`env_define` write barrier pushed the tenured frame's `EnvId` onto `remembered`
+on **every** bind into an old frame — so a long `let` body (or any binding loop)
+on a frame that tenured mid-bind grew the set, and every subsequent minor's
+rewrite walk, without bound until the next tenure cleared it. Guard the push
+with a `contains` check: deduped, the set holds one entry per *distinct* old
+frame mutated since the last minor (tiny), so the linear scan is cheap.
+White-box regression test `remembered_set_dedups_repeated_binds` (64 binds →
+one entry; the single entry still carries all 64 young edges through a minor);
+RED before the fix.
