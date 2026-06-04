@@ -4207,6 +4207,19 @@ fn to_fixed(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         ))
         .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE));
     }
+    // Bound the width: `format!("{:.*}", n, x)` materialises an `n`-digit string,
+    // so an unbounded `n` (e.g. `(to-fixed 1.0 1000000000)`) allocates ~1 GB on the
+    // Rust side, bypassing the GC/soft-memory cap. An f64 carries ~17 significant
+    // digits; past that the tail is just zeros, so 1000 is far beyond any real use
+    // while keeping the worst-case alloc to ~1 KB.
+    const MAX_DECIMALS: i64 = 1000;
+    if n > MAX_DECIMALS {
+        return Err(LispError::runtime(format!(
+            "to-fixed: decimal places {n} too large (max {MAX_DECIMALS}); an f64 has \
+             ~17 significant digits, so a larger count only pads zeros"
+        ))
+        .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE));
+    }
     let s = format!("{:.*}", n as usize, x);
     Ok(heap.alloc_string(&s))
 }

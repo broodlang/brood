@@ -34,8 +34,9 @@ Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
 - ✅ **[MED] wire: `prealloc` byte-count-as-element-count** amplified a frame into
   multi-GiB (`wire.rs`). Fixed: cap the reservation at `PREALLOC_CAP` (the `Vec`
   grows for genuinely large collections); direct unit test.
-- ⬜ **[MED] builtins: cap `to-fixed` precision** — `(to-fixed 1.0 1e9)` builds a
-  ~1 GB string, bypassing the memory cap (`builtins.rs:4185-4196`).
+- ✅ **[MED] builtins: cap `to-fixed` precision** — `(to-fixed 1.0 1e9)` built a
+  ~1 GB string, bypassing the memory cap (`builtins.rs`). Fixed: reject
+  `n > MAX_DECIMALS` (1000); cases in `tests/strings_test.blsp`.
 - ⬜ **[cleanup] Delete the dead mark-sweep collector** — `heap.rs:4916-5208`
   (`collect_old`/`sweep`/`Marks`/`FreeLists`/`local_free`) lingers under the live
   copying collector; `local_free` is always empty, so the `free` term and
