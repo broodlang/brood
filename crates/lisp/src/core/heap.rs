@@ -3700,8 +3700,16 @@ impl Heap {
             // it in the old space and remember it: this push can create an
             // OLD->YOUNG edge (`val` is a fresh nursery value), which the next minor
             // collection must trace and rewrite, since it otherwise never scans old.
+            // De-dup: repeated binds into the same tenured frame (a long `let`
+            // body, a binding loop) would otherwise re-push it every time,
+            // growing `remembered` — and the minor's rewrite walk — without
+            // bound until the next tenure clears it. The linear scan is fine:
+            // deduped, the set holds one entry per *distinct* old frame mutated
+            // since the last minor, which is tiny.
             self.old.envs[env.index()].vars.push((sym, val));
-            self.remembered.push(env);
+            if !self.remembered.contains(&env) {
+                self.remembered.push(env);
+            }
         } else {
             self.local.envs[env.index()].vars.push((sym, val));
         }
@@ -5769,5 +5777,34 @@ mod gen_handle_tests {
             matches!(bound, Some(Value::Pair(_))),
             "the remembered young binding was lost or corrupted: {bound:?}"
         );
+    }
+
+    /// Repeated `env_define`s into the *same* tenured frame must not grow the
+    /// write-barrier `remembered` set (kernel audit, perf #3): one entry per
+    /// distinct old frame is all the minor's rewrite walk needs, and without
+    /// the de-dup a long binding loop on a tenured frame grows the set — and
+    /// every subsequent minor's walk — without bound until the next tenure.
+    #[test]
+    fn remembered_set_dedups_repeated_binds() {
+        let mut h = Heap::new();
+        let mut envs: Vec<EnvId> = vec![h.new_env(None)];
+        h.minor_collect(true, &mut [], &mut envs);
+        let frame = envs[0];
+        assert!(frame.is_old(), "frame should be tenured into the old gen");
+        for i in 0..64 {
+            let sym = crate::core::value::intern(&format!("x{i}"));
+            let young = h.alloc_pair(Value::Int(i), Value::Int(i));
+            h.env_define(frame, sym, young);
+        }
+        assert_eq!(
+            h.remembered.len(),
+            1,
+            "64 binds into one tenured frame must remember it once, not 64 times"
+        );
+        // The single entry still carries every young edge through a minor.
+        let mut roots = vec![frame];
+        h.minor_collect(false, &mut [], &mut roots);
+        let frame = roots[0];
+        assert_eq!(h.old.envs[frame.index()].vars.len(), 64);
     }
 }

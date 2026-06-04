@@ -47,6 +47,9 @@ Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
   the per-spawn `BROOD_J` env read (+ env lock) and the latent OOB when
   `set_max_parallel` lands after the pool starts. Regression test
   `tests/pool_resize_after_start.rs`.
+- ✅ **[perf] gc: de-dup the write-barrier `remembered` set** — repeated binds
+  into one tenured frame pushed a duplicate entry each time; now one entry per
+  distinct old frame. White-box regression test.
 - Lower-priority hardening (empty-cookie guard, monitor-leak sweep, depth guards,
   unbounded `macroexpand`, scanner line-breaks, `string->number` bignum path) —
   see the audit doc.
