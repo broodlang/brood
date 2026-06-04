@@ -31,8 +31,9 @@ Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
   stalled peer OOM the writer (`dist.rs`). Fixed: bounded `sync_channel`
   (`WRITER_QUEUE_CAP`); `Conn::enqueue` severs the link on `Full`/disconnect
   (reader's `drop_link` deregisters); heartbeat/Pong producers sever too.
-- ⬜ **[MED] wire: `prealloc` byte-count-as-element-count** amplifies a frame into
-  multi-GiB (`wire.rs:791-793`). Cap to a constant or divide by element size.
+- ✅ **[MED] wire: `prealloc` byte-count-as-element-count** amplified a frame into
+  multi-GiB (`wire.rs`). Fixed: cap the reservation at `PREALLOC_CAP` (the `Vec`
+  grows for genuinely large collections); direct unit test.
 - ⬜ **[MED] builtins: cap `to-fixed` precision** — `(to-fixed 1.0 1e9)` builds a
   ~1 GB string, bypassing the memory cap (`builtins.rs:4185-4196`).
 - ⬜ **[cleanup] Delete the dead mark-sweep collector** — `heap.rs:4916-5208`
