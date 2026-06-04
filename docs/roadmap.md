@@ -9,6 +9,36 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started
 
 ---
 
+## Kernel audit follow-ups (2026-06-03)
+
+From the kernel review in [`kernel-audit-2026-06-03.md`](kernel-audit-2026-06-03.md).
+Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
+
+- ⬜ **[HIGH] GC: rewrite the `remembered` set in `major_collect`** — a flip
+  minor retains stale env handles that the next minor derefs with no
+  epoch/bounds check (`heap.rs:4652-4687`). Use-after-GC; `BROOD_GC_VERIFY`
+  misses it. Needs a `tenure → mid-bind → flip → major → minor` regression test.
+- ⬜ **[HIGH] VM: register the live-arm before `push_frame`** — tail-call into an
+  `&optional`-default arm leaves `c2`'s RUNTIME handles un-rewritten across a
+  compaction (`compile.rs:1655-1663`). One-line reorder + a stress test.
+- ⬜ **[HIGH] builtins: guard `span-runs` i64 overflow** — `(span-runs … i64::MAX
+  …)` panics the host (`builtins.rs:4040`). `checked_add` + clamp slice bounds.
+- ⬜ **[HIGH] dist: bound the per-link writer channel** — unbounded mpsc lets a
+  stalled peer OOM the writer (`dist.rs:949`). Use `sync_channel`; drop on `Full`.
+- ⬜ **[MED] wire: `prealloc` byte-count-as-element-count** amplifies a frame into
+  multi-GiB (`wire.rs:791-793`). Cap to a constant or divide by element size.
+- ⬜ **[MED] builtins: cap `to-fixed` precision** — `(to-fixed 1.0 1e9)` builds a
+  ~1 GB string, bypassing the memory cap (`builtins.rs:4185-4196`).
+- ⬜ **[cleanup] Delete the dead mark-sweep collector** — `heap.rs:4916-5208`
+  (`collect_old`/`sweep`/`Marks`/`FreeLists`/`local_free`) lingers under the live
+  copying collector; `local_free` is always empty, so the `free` term and
+  `purge_above`/`clear` are no-ops. Several hundred dead lines.
+- Lower-priority hardening (empty-cookie guard, monitor-leak sweep, depth guards,
+  unbounded `macroexpand`, scanner line-breaks, `string->number` bignum path) —
+  see the audit doc.
+
+---
+
 ## M1 — The language core
 
 A solid, self-editable Lisp. This is the foundation everything else stands on.
