@@ -907,3 +907,39 @@ remembered frame at a high old-gen index the major compacts away, so a stale ind
 would be OOB; it asserts the post-major `remembered` entry is current-epoch and
 in-bounds, then derefs it through a trailing minor. Confirmed RED without the fix
 (stale epoch 0 vs 1), GREEN with it; full heap + gc suites stay green.
+
+## 2026-06-04 — vm: register the tail-call arm before push_frame (RUNTIME use-after-GC)
+
+From the kernel audit (`docs/kernel-audit-2026-06-03.md`, finding #2). A
+**use-after-GC** in the closure-compiling VM's tail-call trampoline
+(`vm_apply_inner`, `eval/compile.rs`).
+
+On a tail call into a *different* compiled arm `c2`, the trampoline reuses the
+frame region: it called `push_frame(c2)` — which evaluates `c2`'s real (non-nil)
+`&optional` defaults — and only *afterwards* registered `c2` in the live-arm
+registry via `live_arm_set`. But evaluating a default can fire a RUNTIME-region
+compaction (`runtime_collect`), which rewrites movable RUNTIME handles only for
+arms in `live_vm_arms`. With `c2` not yet registered (the slot still held the
+previous arm), `c2`'s compiled node tree — its body and its not-yet-evaluated
+default nodes — was left pointing into the evacuated, now-smaller region. When the
+trampoline then ran `c2.body`, it dereferenced stale RUNTIME handles: a corrupted
+read (observed as a spurious "parameter list must be a list" type error when a
+stale closure-template handle is read as the wrong object) or, in release, a slab
+OOB / SIGSEGV. The debug LOCAL epoch tripwire does not cover RUNTIME handles. The
+first-arm path (`vm_apply`) was already correct — it does `live_arm_push` *before*
+`push_frame`; the tail path inverted that order.
+
+Fix: a one-line reorder — `live_arm_set(slot, c2)` *before* `push_frame(c2, …)`,
+mirroring the first-arm ordering. New integration test
+(`tests/vm_tail_arm_compaction.rs`): `f` tail-calls `g`, whose `&optional` default
+forces a compaction reclaiming ~4000 churned-away `def` versions, shrinking the
+closures slab under the index of a nested-closure template literal in `g`'s body.
+Confirmed RED without the fix (the corrupted-deref type error), GREEN with it.
+
+NOTE on triggering: the runtime collector has several overlapping safety nets that
+mask this in most reachable scenarios — the globals walk rewrites a closure's
+*source* forms, and a compaction clears the `vm_cache` (forcing a recompile) — so
+the window only bites an *executing* arm's separately-compiled node tree holding a
+literal in the *same slab the churn shrinks*. Hence the deliberately specific
+repro (nested-closure literal + closure-slab churn); a string literal alone didn't
+shrink enough to surface it.

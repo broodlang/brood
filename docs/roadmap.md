@@ -14,13 +14,15 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started
 From the kernel review in [`kernel-audit-2026-06-03.md`](kernel-audit-2026-06-03.md).
 Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
 
-- ⬜ **[HIGH] GC: rewrite the `remembered` set in `major_collect`** — a flip
-  minor retains stale env handles that the next minor derefs with no
+- ✅ **[HIGH] GC: rewrite the `remembered` set in `major_collect`** — a flip
+  minor retained stale env handles that the next minor derefed with no
   epoch/bounds check (`heap.rs:4652-4687`). Use-after-GC; `BROOD_GC_VERIFY`
-  misses it. Needs a `tenure → mid-bind → flip → major → minor` regression test.
-- ⬜ **[HIGH] VM: register the live-arm before `push_frame`** — tail-call into an
-  `&optional`-default arm leaves `c2`'s RUNTIME handles un-rewritten across a
-  compaction (`compile.rs:1655-1663`). One-line reorder + a stress test.
+  missed it. Fixed: rewrite retained entries through the env forwarding table;
+  white-box `tenure → mid-bind → flip → major → minor` regression test.
+- ✅ **[HIGH] VM: register the live-arm before `push_frame`** — tail-call into an
+  `&optional`-default arm left `c2`'s RUNTIME handles un-rewritten across a
+  compaction (`compile.rs`). Fixed (one-line reorder); deterministic regression
+  test in `tests/vm_tail_arm_compaction.rs`.
 - ⬜ **[HIGH] builtins: guard `span-runs` i64 overflow** — `(span-runs … i64::MAX
   …)` panics the host (`builtins.rs:4040`). `checked_add` + clamp slice bounds.
 - ⬜ **[HIGH] dist: bound the per-link writer channel** — unbounded mpsc lets a

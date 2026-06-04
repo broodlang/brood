@@ -1652,14 +1652,20 @@ fn vm_apply_inner(
                 // Reuse the frame region: drop the old slots and rebuild at `base`
                 // for the (possibly different, possibly variadic) tail arm.
                 heap.truncate_roots(base);
+                // Register the live-arm BEFORE `push_frame`, not after. `push_frame`
+                // evaluates any real `&optional` default in `c2`, and that eval can
+                // fire a RUNTIME compaction (`runtime_collect`), which rewrites
+                // movable handles only for arms in `live_vm_arms`. If the slot still
+                // pointed at the previous arm, `c2`'s body and its not-yet-evaluated
+                // default nodes would be left pointing into the evacuated region — a
+                // use-after-GC. Mirrors the first-arm order in `vm_apply`
+                // (`live_arm_push` before `push_frame`).
+                heap.live_arm_set(arm_slot, c2.clone());
                 if let Err(e) = push_frame(heap, &c2, &a2, genv) {
                     heap.truncate_roots(base);
                     heap.truncate_env_roots(env_base);
                     return Err(e);
                 }
-                // Keep the live-arm registry pointing at the arm we're now running, so
-                // a compaction during the tail arm rewrites *its* handles.
-                heap.live_arm_set(arm_slot, c2.clone());
                 compiled = c2;
             }
             Err(e) => {
