@@ -564,6 +564,28 @@ fn user_macros_and_quasiquote() {
     assert_eq!(run("(def x 10) `(a ~x b)"), "(a 10 b)");
 }
 
+/// The kernel expander's fixpoint loop is bounded (kernel audit): a macro
+/// whose expansion *grows* every round never reaches a fixpoint and must
+/// produce a clean error — not hard-hang the expander. (A macro expanding to a
+/// structurally identical call IS a fixpoint and terminates normally; the
+/// growing shape is the runaway.) This drives the Rust `macros::macroexpand`
+/// via the compile pass on a direct invocation; the prelude's Brood-level
+/// `macroexpand` fn has its own cap, tested in `tests/macroexpand_test.blsp`.
+#[test]
+fn runaway_macro_expansion_errors_instead_of_hanging() {
+    let mut interp = Interp::new();
+    interp
+        .eval_str("(defmacro grow-loop (x) `(grow-loop (~x)))")
+        .expect("defining the macro is fine");
+    let err = interp
+        .eval_str("(grow-loop 1)")
+        .expect_err("invoking it must error, not spin");
+    assert!(
+        err.to_string().contains("fixpoint"),
+        "expected the fixpoint-cap error, got: {err}"
+    );
+}
+
 #[test]
 fn threading_macros() {
     // (-> 5 (- 1) (* 2)) => (* (- 5 1) 2) => 8

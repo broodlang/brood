@@ -280,6 +280,7 @@ Every session, oldest first. Full text: [devlog-archive.md](archive/devlog-archi
 - **2026-06-04** — scheduler: `assign_worker` indexes by `WORKERS.len()` (kills the per-spawn `BROOD_J` env read + the late-`set_max_parallel` OOB — kernel audit, perf #2)
 - **2026-06-04** — gc: de-dup the write-barrier `remembered` set (repeated binds into one tenured frame no longer grow it — kernel audit, perf #3)
 - **2026-06-04** — lsp: `resolve_in_source` stops interning transient identifiers (daemon-lifetime interner leak — kernel audit, perf #4)
+- **2026-06-04** — kernel-audit hardening batch: min cookie length, bounded `macroexpand`, bignum `string->number`, scanner line breaks + hard-error hex escapes, epoch-tripwire mask, dead-watcher monitor sweep
 
 ---
 
@@ -1117,3 +1118,51 @@ source content, and out of scope here. Also documented the two
 process-lifetime interner growth vectors (`intern` on user text, `gensym`'s
 global counter) in `docs/memory-model.md`, and fixed that doc's stale
 free-list bullet left over from the dead-collector deletion.
+
+## 2026-06-04 — kernel-audit hardening batch (the low-impact tail)
+
+The audit's "lower-priority hardening" list (`docs/kernel-audit-2026-06-03.md`),
+landed as one batch:
+
+- **dist: minimum node-cookie length.** The cookie is the entire trust boundary
+  (possession ⇒ remote eval) and the HMAC accepts any key length, so
+  `node_listen` now rejects a cookie under 16 bytes (`MIN_COOKIE_LEN`) before
+  any identity/listener side effect. Only guards deliberate weak overrides —
+  the default `(node-cookie)` generates 32 random bytes. Test:
+  `node_listen_rejects_a_short_cookie`.
+- **macros: bounded `macroexpand` fixpoint, both layers.** A macro that forever
+  expands to another macro call (`(defmacro m (x) `(m (~x)))`) hard-hung the
+  expander (only green-process preemption mitigated it; a root-thread expansion
+  not at all). The kernel `macros::macroexpand` and the prelude `macroexpand`
+  both cap at 256 rounds (matching `MAX_DEPTH`) with a clean error. A macro
+  expanding to a *structurally identical* call is a fixpoint and still
+  terminates. Tests: `tests/macroexpand_test.blsp` (new),
+  `runaway_macro_expansion_errors_instead_of_hanging` (Rust).
+- **builtins: `string->number` parses big integers as bignums.** An integer
+  past i64 silently rounded through f64, breaking the `number->string` inverse;
+  now it allocates a `Value::BigInt` (mirroring the reader's over-range literal
+  path). Cases in `tests/strings_test.blsp`.
+- **scanner: real line breaks.** `line_starts` counted only `\n`; a lone CR or
+  U+2028/U+2029 skewed every later diagnostic's line:col. All three now break
+  lines (CRLF still one break, via its `\n`).
+- **scanner: malformed hex escapes are read errors** (`StringScan::BadEscape`).
+  The old rule passed `"\xZZ"` through as `"xZZ"` — a silent-wrong-output
+  footgun the scanner's own comment flagged for tightening. The reader reports
+  the offset of the offending backslash; the tolerant CST records an `Error`
+  node (the body is still scanned through its close quote, so spans hold);
+  `Unterminated` still wins for the REPL continuation prompt. The catch-all
+  `\X` → literal X for *other* chars is unchanged. **Breaking** (greenfield):
+  the strings-test passthrough assertions became `assert-error`s;
+  `docs/language.md` literals table updated.
+- **gc: epoch-tripwire compare masked to `GEN_MASK`.** A handle's
+  `generation()` is the mint-time epoch truncated to the GEN field; the heap's
+  counter is a full u32 — unmasked, every valid handle would "mismatch" after
+  2^29 collections of one heap. Both `check_epoch_aged` and the
+  `BROOD_GC_VERIFY` walker now truncate the expected side identically.
+- **process: dead-watcher monitor sweep.** A dead watcher's entries lingered in
+  `MONITORS`/`PENDING_REMOTE` until each *watched* target died — a leak for
+  watchers of long-lived targets. `deregister` now sweeps entries where the
+  dying pid was the watcher (cold path; emptied keys pruned).
+
+(The audit's "stale `unsafe` framing in `docs/handoff-vm-gc-memory.md`" item
+was already gone — no handoff doc mentions `unsafe` anymore.)

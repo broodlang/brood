@@ -1,0 +1,32 @@
+;;; `macroexpand` — the prelude fixpoint driver over `macroexpand-1`.
+;;;
+;;; The fixpoint loop is bounded (kernel audit 2026-06-03): a macro whose
+;;; expansion grows forever would otherwise spin the expander; 256 rounds
+;;; matches the kernel expander's own cap. A macro that expands to a
+;;; *structurally identical* form is a fixpoint and terminates immediately.
+
+(defmodule macroexpand-test (:use test))
+
+;; Ordinary chain: expands through one macro layer to the `if` underneath.
+(defmacro mx-unless (c b) `(if ~c nil ~b))
+;; Expands to a structurally identical call — a fixpoint, not a runaway.
+(defmacro mx-same (x) `(mx-same ~x))
+;; Grows on every round — never reaches a fixpoint.
+(defmacro mx-grow (x) `(mx-grow (~x)))
+
+;; The quoted forms below name the macros *qualified*: `macroexpand` resolves a
+;; head symbol against the globals table, and inside a module the macros above
+;; are defined as `macroexpand-test/mx-*`.
+(describe "macroexpand"
+  (test "expands a macro head to its expansion"
+    (assert= '(if c nil b) (macroexpand '(macroexpand-test/mx-unless c b))))
+
+  (test "a non-macro form is already a fixpoint"
+    (assert= '(+ 1 2) (macroexpand '(+ 1 2))))
+
+  (test "a self-identical expansion terminates as a fixpoint"
+    (assert= '(macroexpand-test/mx-same 1)
+      (macroexpand '(macroexpand-test/mx-same 1))))
+
+  (test "a forever-growing expansion errors instead of spinning"
+    (assert-error (macroexpand '(macroexpand-test/mx-grow 1)))))

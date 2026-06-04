@@ -124,6 +124,14 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// ceiling per `Conn` (the audit's alternative), not a bigger count.
 const WRITER_QUEUE_CAP: usize = 4096;
 
+/// Minimum node-cookie length (bytes) accepted by [`node_listen`]. The cookie
+/// is the whole trust boundary (possession ⇒ remote eval), and the HMAC
+/// imposes no strength requirement of its own — an empty or few-byte cookie
+/// authenticates "successfully" and is guessable online. 16 bytes of a
+/// `(random-token …)`-style secret is far beyond online brute force; the
+/// default `(node-cookie)` generates 32.
+const MIN_COOKIE_LEN: usize = 16;
+
 /// Monotonic clock base, so `last_seen` can live in an `AtomicU64` of millis.
 /// `dist::heartbeat` reads this same clock; keep the source here at the root
 /// so the readers (link establishment, reader thread) and the writer
@@ -703,6 +711,22 @@ pub(crate) fn route(node: Symbol, target: Target, msg: Message) {
 /// leak the first. The *policy* (socket path, cookie source, transport choice)
 /// lives in `std/prelude.blsp`; this primitive is the mechanism (ADR-068).
 pub(crate) fn node_listen(name: Symbol, addr: &str, cookie: String) -> io::Result<()> {
+    // Guardrail (kernel audit 2026-06-03): the cookie is the *entire* trust
+    // boundary — a holder has remote code execution by design — so refuse one
+    // short enough to guess or brute-force online. The default policy
+    // (`node-cookie` in std/prelude) generates `(random-token 32)`; this only
+    // rejects a deliberately weak override (e.g. a short `$BROOD_COOKIE`).
+    if cookie.len() < MIN_COOKIE_LEN {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "node cookie too short: {} bytes (minimum {MIN_COOKIE_LEN}) — \
+                 a cookie-holder has full remote eval on this node; use the \
+                 default (node-cookie) or e.g. (random-token 32)",
+                cookie.len()
+            ),
+        ));
+    }
     // Guard against a second node-start, which would otherwise leak the previous
     // listener + acceptor thread.
     {
@@ -1333,5 +1357,23 @@ mod tests {
         assert_eq!(IN_FLIGHT_HANDSHAKES.load(Ordering::Acquire), 1);
         drop(s);
         assert_eq!(IN_FLIGHT_HANDSHAKES.load(Ordering::Acquire), 0);
+    }
+
+    /// A weak cookie is rejected *before* any identity/listener side effect
+    /// (kernel audit guardrail): possession of the cookie is remote eval, and
+    /// the HMAC itself accepts any key length — so `node_listen` is the gate.
+    /// The runtime must remain a non-node afterwards so a corrected
+    /// `node-start` can be retried.
+    #[test]
+    fn node_listen_rejects_a_short_cookie() {
+        let name = crate::core::value::intern("weak@test");
+        for weak in ["", "x", "hunter2", "123456789012345"] {
+            let err = node_listen(name, "tcp:127.0.0.1:0", weak.to_string())
+                .expect_err("a sub-16-byte cookie must be refused");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert!(err.to_string().contains("cookie too short"), "got: {err}");
+        }
+        // No identity was published by the failed attempts.
+        assert!(!crate::core::sync::read(&NODE).started, "must stay a non-node");
     }
 }

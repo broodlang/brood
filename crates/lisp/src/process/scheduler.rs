@@ -682,6 +682,10 @@ fn deregister(pid: u64, reason: Message) {
     for w in watchers {
         monitor::fire_down(w, pid, reason.clone());
     }
+    // The dead process's own watches: drop entries where *it* was the watcher,
+    // or they leak until each watched target dies (kernel audit). Takes
+    // MONITORS sequentially like everything in this function — never nested.
+    monitor::sweep_dead_watcher(pid);
     // Links (ADR-067), after monitors and with no table lock held: notify every
     // linked peer — a trappable `[:EXIT pid reason]` if it traps, else an abnormal
     // reason propagates as a hard kill that cascades through *its* links. Mirrors

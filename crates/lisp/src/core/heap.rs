@@ -2894,6 +2894,12 @@ impl Heap {
         } else {
             (self.local_epoch, "nursery")
         };
+        // Compare in the handle's truncated GEN width: `generation()` is the
+        // mint-time epoch masked to `GEN_MASK`, while the heap's epoch counter
+        // is a full u32 — unmasked, every valid handle would "mismatch" once a
+        // heap passes 2^29 collections (kernel audit; astronomically rare, but
+        // the tripwire must not be the thing that cries wolf).
+        let expected = expected & (crate::core::value::GEN_MASK as u32);
         debug_assert!(
             gen == expected,
             "use-after-GC: {} handle ({} slot {}) is from epoch {}, but that generation is \
@@ -4674,8 +4680,12 @@ impl Heap {
         // invariant here — the write-barrier `remembered` set legitimately carries
         // transient old→young edges between a tenure-mid-bind and the next minor —
         // only that every reachable handle is in-bounds and current for its gen.
-        let young_ep = self.local_epoch;
-        let old_ep = self.old_epoch;
+        // Masked to GEN_MASK like `check_epoch_aged`: a handle's `generation()`
+        // is the mint-time epoch truncated to the GEN field, so the expected
+        // side must truncate identically (no false positives past 2^29
+        // collections of one heap).
+        let young_ep = self.local_epoch & (crate::core::value::GEN_MASK as u32);
+        let old_ep = self.old_epoch & (crate::core::value::GEN_MASK as u32);
         let mut seen_pair = [
             vec![false; self.local.pairs.len()],
             vec![false; self.old.pairs.len()],

@@ -202,6 +202,28 @@ pub(crate) fn drop_monitor(pred: impl Fn(&Watcher) -> bool) {
     }
 }
 
+/// A local process died: drop every monitor it was the *watcher* of (kernel
+/// audit). Without this, a dead watcher's entries lingered in [`MONITORS`]
+/// (and [`PENDING_REMOTE`]) until the *watched* target died — a leak for
+/// watchers of long-lived targets (a supervisor of a never-dying server,
+/// restarted in a loop). Cold death path, so the full-table walk is fine;
+/// emptied keys are pruned so the map itself doesn't accumulate. (A peer node
+/// holding our dead pid as a `Watcher::Remote` cleans up when *its* target
+/// dies — the `[:down …]` send to a dead pid is dropped harmlessly.)
+pub(super) fn sweep_dead_watcher(pid: u64) {
+    let mut mons = crate::core::sync::lock(&MONITORS);
+    mons.retain(|_, watchers| {
+        watchers.retain(|w| !matches!(*w, Watcher::Local { pid: p, .. } if p == pid));
+        !watchers.is_empty()
+    });
+    drop(mons);
+    let mut pending = crate::core::sync::lock(&PENDING_REMOTE);
+    pending.retain(|_, ps| {
+        ps.retain(|p| p.watcher_pid != pid);
+        !ps.is_empty()
+    });
+}
+
 // ---- pending remote monitors: the *sender* side ----------------------------
 // When `(monitor remote-pid)` runs, the target lives on a peer; the entry that
 // fires when the link dies (net-split = `:noconnection`) needs to be findable

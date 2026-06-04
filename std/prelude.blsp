@@ -328,10 +328,17 @@ reads it exactly like `(sig …)`."
 ;; across a GC safepoint the way a hand-rooted Rust loop could. `macroexpand-1` is
 ;; the irreducible single-shot primitive (one expansion, holding nothing across
 ;; its `apply`); this just drives it. Tail-recursive, so it is O(1) stack.
+;; Bounded (kernel audit): a macro that forever expands to another macro call
+;; would otherwise spin here; 256 matches the kernel expander's own cap.
+(defn macroexpand--loop (form n)
+  (if (= n 0)
+    (error "macroexpand: no fixpoint after 256 rounds (a macro that expands to itself?)")
+    (let (stepped (macroexpand-1 form))
+      (if (= stepped form) form (macroexpand--loop stepped (- n 1))))))
+
 (defn macroexpand (form)
   "Repeatedly expand `form`'s head macro until the head is no longer a macro call."
-  (let (stepped (macroexpand-1 form))
-    (if (= stepped form) form (macroexpand stepped))))
+  (macroexpand--loop form 256))
 
 ;; ---- type predicates --------------------------------------------------------
 ;; Each is a thin wrapper over `type-of`, the one reflective primitive (it

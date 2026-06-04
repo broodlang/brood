@@ -52,7 +52,7 @@ is the one piece that can't be guessed from Clojure; it has to be read.
 | Boolean | `true`, `false` | |
 | Integer | `0`, `42`, `-7` | 64-bit; arithmetic is overflow-checked. |
 | Float | `3.14`, `-0.5`, `1e3` | 64-bit. |
-| String | `"hello\n"` | Escapes: `\n \t \r \e \0 \\ \"` (`\e` is ESC, for ANSI terminal control). |
+| String | `"hello\n"` | Escapes: `\n \t \r \e \0 \\ \"` (`\e` is ESC, for ANSI terminal control), `\xHH` (two-hex-digit byte), `\u{H..H}` (1–6-hex-digit Unicode codepoint). A malformed `\x`/`\u{}` is a read error; any other `\X` is literal `X`. |
 | Symbol | `foo`, `+`, `my-fn`, `empty?` | Names; interned. |
 | Keyword | `:ok`, `:else` | Self-evaluating named constants. |
 | List | `(1 2 3)`, `()`, `(1 . 2)` | Cons cells; `()` is `nil`. Quote to keep as data: `'(1 2 3)`. A dotted tail `(a . b)` makes an improper list (round-trips with the printer). |

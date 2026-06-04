@@ -1704,7 +1704,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("upper", &["s"], "s upper-cased (Unicode-aware)."),
     ("lower", &["s"], "s lower-cased (Unicode-aware)."),
     ("to-fixed", &["x", "n"], "Render number x as a string with exactly n digits after the decimal point (rounded). n must be >= 0."),
-    ("string->number", &["s"], "Parse s strictly as an int, else a float, else nil (unlike read-string)."),
+    ("string->number", &["s"], "Parse s strictly as an int (a bignum when out of i64 range), else a float, else nil (unlike read-string). The inverse of number->string."),
     ("string->rope", &["s"], "A rope (editor buffer text) holding the characters of string s."),
     ("rope->string", &["r"], "The full text of rope r as a string."),
     ("rope-length", &["r"], "The number of characters in rope r."),
@@ -5359,6 +5359,13 @@ fn string_to_number(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let s = expect_string(heap, "string->number", arg(args, 0))?;
     if let Ok(i) = s.parse::<i64>() {
         Ok(Value::Int(i))
+    } else if let Ok(n) = s.parse::<num_bigint::BigInt>() {
+        // An integer too big for i64 is a bignum — mirroring the reader's
+        // over-range literal path — NOT a lossy f64 (which silently rounded
+        // `(number->string big)` away from round-tripping, kernel audit).
+        // Reaching here means the i64 parse failed, so `n` is out of range
+        // and `alloc_bigint`'s no-demotion invariant holds.
+        Ok(heap.alloc_bigint(n))
     } else if let Ok(f) = s.parse::<f64>() {
         Ok(Value::Float(f))
     } else {
