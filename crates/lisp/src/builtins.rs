@@ -3976,14 +3976,17 @@ fn span_runs_push(
     if hi <= lo {
         return;
     }
-    let lhi = (hi - base) as usize;
+    // `lo`/`hi` are absolute offsets >= `base` by construction; `saturating_sub`
+    // keeps the relative index non-negative even if a caller ever violated that,
+    // so the host can't panic on an underflow.
+    let lhi = hi.saturating_sub(base) as usize;
     if let Some(last) = runs.last_mut() {
         if heap.equal(last.2, face) {
             last.1 = lhi;
             return;
         }
     }
-    runs.push(((lo - base) as usize, lhi, face));
+    runs.push((lo.saturating_sub(base) as usize, lhi, face));
 }
 
 /// Merge face `b` over face `a` (`b` wins on key conflict), as Brood's `(into a b)` —
@@ -4037,7 +4040,16 @@ fn span_runs(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         None => Vec::new(),
     };
     let chars: Vec<char> = text.chars().collect();
-    let end = base + chars.len() as i64;
+    // `base` is caller-controlled (any i64); guard the absolute end against i64
+    // overflow so a Lisp program can't panic the host. With a valid `end`, every
+    // `lo`/`hi` handed to `span_runs_push` is provably in `[base, end]`.
+    let end = base.checked_add(chars.len() as i64).ok_or_else(|| {
+        LispError::runtime(format!(
+            "span-runs: base {base} plus text length {} overflows i64",
+            chars.len()
+        ))
+        .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE)
+    })?;
     let mut runs: Vec<(usize, usize, Value)> = Vec::new();
 
     if ranges.is_empty() {
@@ -4099,10 +4111,13 @@ fn span_runs(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         }
     }
 
+    let n = chars.len();
     let out: Vec<Value> = runs
         .iter()
         .map(|&(lo, hi, f)| {
-            let seg: String = chars[lo..hi].iter().collect();
+            // Clamp defensively: the run bounds are in-range by construction, but a
+            // slice past `chars.len()` would panic the host — never let it.
+            let seg: String = chars[lo.min(n)..hi.min(n)].iter().collect();
             let sv = heap.alloc_string(&seg);
             heap.alloc_vector(vec![sv, f])
         })

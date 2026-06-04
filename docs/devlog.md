@@ -943,3 +943,23 @@ the window only bites an *executing* arm's separately-compiled node tree holding
 literal in the *same slab the churn shrinks*. Hence the deliberately specific
 repro (nested-closure literal + closure-slab churn); a string literal alone didn't
 shrink enough to surface it.
+
+## 2026-06-04 — builtins: guard `span-runs` against an i64-overflow host panic
+
+From the kernel audit (`docs/kernel-audit-2026-06-03.md`, finding #3). The public
+`(span-runs text base spans ranges)` builtin (the fontifier's span→runs tiler,
+used by `std/editor/highlight`) read `base` as a raw caller-controlled i64 and
+computed `let end = base + chars.len() as i64` unchecked. `(span-runs "a"
+9223372036854775807 [])` overflowed: a SIGABRT (`attempt to add with overflow`) in
+debug / the `debug-assertions=on` release dev build, and in plain release a wrap to
+a negative `end` that then panicked on an out-of-bounds `chars[lo..hi]` slice.
+Violated "a Lisp program must never panic the host."
+
+Fix: compute `end` with `checked_add`, returning a clean `INDEX_OUT_OF_RANGE`
+(E0042) LispError on overflow — the single root cause, since with a valid `end`
+every `lo`/`hi` handed to `span_runs_push` is provably in `[base, end]`. Added
+defense-in-depth that costs nothing for valid input: `saturating_sub` for the
+relative-offset subtractions in `span_runs_push`, and a `lo.min(n)..hi.min(n)`
+clamp on the final char slice — so even a future call-site change can't panic the
+host. Regression cases in `tests/highlight_test.blsp` (`assert-error` on two
+overflowing bases + a large-but-non-overflowing base that still tiles correctly).
