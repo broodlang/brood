@@ -996,3 +996,27 @@ NOTE: this is DoS hardening, not a logic bug with a clean assertion — driving 
 real peer to stall its read window deterministically from an integration test
 isn't practical without a fault-injection hook, so coverage rests on the existing
 lifecycle suite plus the bounded-channel construction.
+
+## 2026-06-04 — wire: cap `prealloc` against element-size amplification
+
+From the kernel audit (`docs/kernel-audit-2026-06-03.md`, finding #5). The wire
+decoder's `prealloc(r, n) = n.min(remaining(r))` bounds a claimed collection
+*count* by the frame's remaining bytes (an item needs ≥1 wire byte) — which stops
+a *tiny* frame claiming billions of items. But the result feeds
+`Vec::with_capacity`, which allocates `cap × size_of::<Element>()`; the elements
+aren't 1 byte (`Message` = 48 B, `(Message, Message)` for `M_MAP` = 96 B,
+`(Symbol, Message)` = 56 B). So a near-`MAX_FRAME` (64 MiB) frame claiming a huge
+count reserved `~64M × 96 ≈ 6 GiB` up front before the decode failed on EOF — a
+48–96× amplification (the existing `bogus_collection_count_…` test only covered
+the tiny-frame case).
+
+Fix: cap the per-collection reservation at `PREALLOC_CAP = 4096` elements
+(`n.min(remaining(r)).min(PREALLOC_CAP)`), so the up-front allocation is
+≤ `PREALLOC_CAP × elem` (~384 KB) regardless of frame size. A genuinely larger
+collection just grows its `Vec` (amortized doubling) as items are actually
+decoded — the roundtrip tests confirm large/rich messages still decode correctly.
+Single point of change covers every call site (lists, vectors, map entries,
+closure arms/params/optionals/body/captured, gossip peers). New direct unit test
+`prealloc_caps_the_reservation_against_element_size_amplification` asserts a 16 MiB
+`remaining` with a `usize::MAX` claim reserves `PREALLOC_CAP`, not `remaining`,
+while small claims are still honoured exactly.

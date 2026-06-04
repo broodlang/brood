@@ -784,12 +784,24 @@ fn remaining(r: &Cursor<Vec<u8>>) -> usize {
     (r.get_ref().len() as u64).saturating_sub(r.position()) as usize
 }
 
-/// A safe pre-allocation size for a claimed count of `n` items: never reserve
-/// more than the frame's remaining bytes can hold, so a tiny frame claiming a
-/// huge count can't trigger a giant up-front allocation (the decode loop then
-/// fails cleanly on EOF).
+/// Upper bound on a single up-front collection reservation. `remaining()` bounds
+/// the claimed *count* (an item needs ≥1 wire byte), but [`prealloc`]'s result is
+/// fed to `Vec::with_capacity`, which allocates `cap × size_of::<Element>()` bytes
+/// — elements are 48–96 B (`Message`, `(Message, Message)`, …), so capping by the
+/// byte count alone still lets a near-[`MAX_FRAME`] (64 MiB) frame reserve
+/// gigabytes (64M × 96 B ≈ 6 GiB) up front. Capping the *reservation* to a small
+/// constant removes that amplification: a genuinely large collection just grows
+/// the `Vec` (amortized doubling) as its items are actually decoded.
+const PREALLOC_CAP: usize = 4096;
+
+/// A safe pre-allocation size for a claimed count of `n` items: never reserve more
+/// than the frame's remaining bytes can hold (a tiny frame claiming a huge count
+/// can't pre-reserve past its own length) *and* never more than [`PREALLOC_CAP`]
+/// elements up front (so a large frame can't be amplified by the element size into
+/// a multi-GiB reservation). A larger real collection grows the `Vec` as it
+/// decodes; an over-claimed count still fails cleanly on EOF.
 fn prealloc(r: &Cursor<Vec<u8>>, n: usize) -> usize {
-    n.min(remaining(r))
+    n.min(remaining(r)).min(PREALLOC_CAP)
 }
 
 fn get_u8(r: &mut Cursor<Vec<u8>>) -> io::Result<u8> {
@@ -1163,5 +1175,23 @@ mod tests {
             Err(e) => assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof),
             Ok(_) => panic!("a list claiming more items than bytes should fail"),
         }
+    }
+
+    #[test]
+    fn prealloc_caps_the_reservation_against_element_size_amplification() {
+        // The tiny-frame case above is bounded by `remaining`. The remaining gap
+        // (kernel audit #5): a LARGE frame (lots of remaining bytes) claiming a
+        // huge count must not reserve `remaining` *elements* up front — that's
+        // `remaining × size_of::<Element>()` bytes (≈6 GiB for a 64 MiB frame of
+        // 96-byte Map entries). `prealloc` caps the reservation at `PREALLOC_CAP`;
+        // a genuinely larger collection grows its `Vec` as it decodes.
+        let r = Cursor::new(vec![0u8; 16 * 1024 * 1024]); // 16 MiB of "remaining"
+        assert_eq!(remaining(&r), 16 * 1024 * 1024);
+        assert_eq!(prealloc(&r, usize::MAX), PREALLOC_CAP);
+        assert_eq!(prealloc(&r, 10 * 1024 * 1024), PREALLOC_CAP);
+        // A small claim is still honoured exactly — prealloc stays useful.
+        assert_eq!(prealloc(&r, 7), 7);
+        // And a tiny frame is still bounded by its own remaining bytes.
+        assert_eq!(prealloc(&Cursor::new(vec![0u8; 5]), usize::MAX), 5);
     }
 }
