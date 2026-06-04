@@ -277,6 +277,7 @@ Every session, oldest first. Full text: [devlog-archive.md](archive/devlog-archi
 - **2026-06-02** — GUI key fix: re-apply Shift to Alt/Ctrl punctuation chords (`M->`/`M-<`/`M-{`/`M-%`/…), matching the crossterm frontend
 - **2026-06-04** — gc: rewrite the write-barrier `remembered` set in `major_collect` (fixes a use-after-GC when a major follows a flip minor — kernel audit #1)
 - **2026-06-04** — heap: delete the dead mark-sweep collector (~480 lines: `collect_old`/`sweep`/`Marks`/`FreeLists`/`local_free` — kernel audit, refactoring #1)
+- **2026-06-04** — scheduler: `assign_worker` indexes by `WORKERS.len()` (kills the per-spawn `BROOD_J` env read + the late-`set_max_parallel` OOB — kernel audit, perf #2)
 
 ---
 
@@ -1058,3 +1059,21 @@ every comment that still described the deleted machinery as live (the
 collector; the allocator docs describe bump-only append). No behaviour change:
 full suite green, heap white-box tests green under `BROOD_GC_STRESS` and
 `BROOD_GC_VERIFY`.
+
+## 2026-06-04 — scheduler: assign_worker indexes by WORKERS.len()
+
+From the kernel audit (`docs/kernel-audit-2026-06-03.md`, performance #2 + the
+latent `assign_worker`/`enqueue` OOB). `assign_worker` re-derived its modulus
+from `worker_count()` on **every spawn** — an `env::var_os("BROOD_J")` read
+(~17 µs + the process-global env lock) on the spawn hot path — while the
+`WORKERS` queue Vec is sized once at pool init and never resized. Worse, the
+two could disagree: a `set_max_parallel` after the pool started made
+`worker_count()` exceed `WORKERS.len()`, so the rotating least-loaded scan
+indexed past the Vec — an OOB panic on the spawn path.
+
+Fix: `assign_worker` takes its modulus from `WORKERS.len()` (touching the
+LazyLock commits the pool size). One change closes both: the modulus always
+matches the queues being indexed, and `worker_count()` (with its env read) now
+runs exactly once, at pool init — nothing left to cache. Regression test in
+`tests/pool_resize_after_start.rs` (own binary; deterministically RED before
+the fix: spawn → `set_max_parallel(4096)` → fan out 64 spawns panicked OOB).
