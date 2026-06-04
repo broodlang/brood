@@ -27,8 +27,10 @@ Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
   …)` panicked the host (`builtins.rs:4040`). Fixed: `checked_add` → clean
   `INDEX_OUT_OF_RANGE` error + defensive `saturating_sub`/slice clamp; overflow
   cases added to `tests/highlight_test.blsp`.
-- ⬜ **[HIGH] dist: bound the per-link writer channel** — unbounded mpsc lets a
-  stalled peer OOM the writer (`dist.rs:949`). Use `sync_channel`; drop on `Full`.
+- ✅ **[HIGH] dist: bound the per-link writer channel** — unbounded mpsc let a
+  stalled peer OOM the writer (`dist.rs`). Fixed: bounded `sync_channel`
+  (`WRITER_QUEUE_CAP`); `Conn::enqueue` severs the link on `Full`/disconnect
+  (reader's `drop_link` deregisters); heartbeat/Pong producers sever too.
 - ⬜ **[MED] wire: `prealloc` byte-count-as-element-count** amplifies a frame into
   multi-GiB (`wire.rs:791-793`). Cap to a constant or divide by element size.
 - ⬜ **[MED] builtins: cap `to-fixed` precision** — `(to-fixed 1.0 1e9)` builds a

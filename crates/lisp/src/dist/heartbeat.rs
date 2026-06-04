@@ -11,7 +11,7 @@
 use std::io;
 use std::net::Shutdown;
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Once};
 use std::time::Duration;
 
@@ -71,7 +71,7 @@ fn heartbeat_loop() {
         let now = now_millis();
         // Snapshot under the lock, then act without holding it (shutdown/send can block).
         // (sock, tx, last_seen_millis) per link.
-        type LinkSnapshot = (Arc<super::Stream>, Sender<Arc<[u8]>>, u64);
+        type LinkSnapshot = (Arc<super::Stream>, SyncSender<Arc<[u8]>>, u64);
         let links: Vec<LinkSnapshot> = {
             let nodes = crate::core::sync::read(&NODES);
             nodes
@@ -88,8 +88,11 @@ fn heartbeat_loop() {
         for (sock, tx, last) in links {
             if now.saturating_sub(last) > down_after {
                 let _ = sock.shutdown(Shutdown::Both); // dead peer → tear down via the reader
-            } else {
-                let _ = tx.send(Arc::clone(&ping));
+            } else if tx.try_send(Arc::clone(&ping)).is_err() {
+                // Bounded queue Full/disconnected: the writer is stalled or gone —
+                // sever via the socket (the reader's `drop_link` deregisters)
+                // rather than buffer the ping.
+                let _ = sock.shutdown(Shutdown::Both);
             }
         }
     }

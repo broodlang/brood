@@ -47,7 +47,7 @@ use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, LazyLock, RwLock};
 use std::time::{Duration, Instant};
 
@@ -100,10 +100,29 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Per-write timeout on the steady-state writer socket. A peer that stops reading
 /// (slowloris-style) drives its TCP receive window to zero; without this, our
-/// `write_all` blocks forever, the writer thread is pinned, and the unbounded
-/// `mpsc::channel` accumulates messages — a remote-controlled OOM. Generous so a
-/// genuinely slow peer doesn't get torn down for an occasional slow drain.
+/// `write_all` blocks forever and the writer thread is pinned. Generous so a
+/// genuinely slow peer doesn't get torn down for an occasional slow drain. The
+/// companion guard against the backlog ballooning while the writer is stalled is
+/// the **bounded** writer queue (`WRITER_QUEUE_CAP` / [`Conn::enqueue`]); this
+/// timeout only bounds a single `write_all`.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Bound on the per-link writer queue (frames awaiting send). The channel is a
+/// `sync_channel`, not an unbounded `channel`: a peer that stalls its TCP read
+/// window stops the writer draining, and an unbounded queue would let local
+/// producers (`route`, mesh gossip, link/monitor signals, …) balloon the backlog
+/// into a remote-controlled OOM. On overflow [`Conn::enqueue`] **severs the link**
+/// rather than block a producer or buffer without limit — a peer that lets this
+/// many frames back up is wedged and better disconnected; the reader's `drop_link`
+/// then deregisters it and watchers learn it's unreachable.
+///
+/// Sized generously so a *transiently* slow-but-healthy link isn't severed for a
+/// burst (one `write_all` can block up to `WRITE_TIMEOUT`): a frame *count*, not a
+/// byte ceiling, so worst-case memory is `CAP × frame size` — fine for the small
+/// frames that dominate, bounded even for large ones. If false-severance of a
+/// genuinely slow peer ever bites, the precise follow-up is an outstanding-*bytes*
+/// ceiling per `Conn` (the audit's alternative), not a bigger count.
+const WRITER_QUEUE_CAP: usize = 4096;
 
 /// Monotonic clock base, so `last_seen` can live in an `AtomicU64` of millis.
 /// `dist::heartbeat` reads this same clock; keep the source here at the root
@@ -256,16 +275,38 @@ struct Conn {
     /// the peer's authenticated `Hello`. We gossip this to other peers so the
     /// cluster meshes (ADR-088).
     addr: String,
-    /// The writer thread's inbox (length-framed bytes).
-    /// Outbound frames carry an `Arc<[u8]>` so liveness probes (one `ping` per
-    /// tick, one `pong` per inbound `Ping`) reuse a single buffer per link
-    /// instead of cloning a `Vec<u8>` each time.
-    tx: Sender<Arc<[u8]>>,
+    /// The writer thread's inbox (length-framed bytes). **Bounded**
+    /// (`WRITER_QUEUE_CAP`): see [`Conn::enqueue`] — a stalled peer can't balloon
+    /// it into an OOM. Outbound frames carry an `Arc<[u8]>` so liveness probes
+    /// (one `ping` per tick, one `pong` per inbound `Ping`) reuse a single buffer
+    /// per link instead of cloning a `Vec<u8>` each time.
+    tx: SyncSender<Arc<[u8]>>,
     /// A handle to the socket, for `shutdown` — the single teardown lever.
     sock: Arc<Stream>,
     /// Millis (on the `START` clock) of the last inbound frame. The heartbeat
     /// thread reads this to decide liveness; the reader writes it.
     last_seen: Arc<AtomicU64>,
+}
+
+impl Conn {
+    /// Hand a sealed-frame payload to the writer thread. The queue is **bounded**
+    /// (`WRITER_QUEUE_CAP`), so this never blocks a producer and never buffers
+    /// without limit: if the queue is `Full` — the peer has stalled its read
+    /// window so the writer can't drain — or `Disconnected` (the writer has gone),
+    /// it **severs the link** by shutting the socket down. The reader thread
+    /// observes the shutdown and runs `drop_link`, deregistering this `Conn`.
+    /// Returns whether the payload was accepted onto the queue; callers that must
+    /// report unreachability (`route`, `link_remote`) use it to fire
+    /// `:noconnection`, while best-effort signals ignore it.
+    fn enqueue(&self, bytes: Arc<[u8]>) -> bool {
+        match self.tx.try_send(bytes) {
+            Ok(()) => true,
+            Err(_) => {
+                let _ = self.sock.shutdown(Shutdown::Both);
+                false
+            }
+        }
+    }
 }
 
 /// Source of per-connection generation ids.
@@ -434,10 +475,7 @@ pub(crate) fn monitor_remote(target_node: Symbol, target_pid: u64, watcher_pid: 
     let sent = {
         let nodes = crate::core::sync::read(&NODES);
         match nodes.get(&target_node) {
-            Some(conn) => {
-                let _ = conn.tx.send(bytes);
-                true
-            }
+            Some(conn) => conn.enqueue(bytes),
             None => false,
         }
     };
@@ -463,7 +501,7 @@ pub(crate) fn demonitor_remote(target_node: Symbol, watcher_pid: u64, mref: u64)
         Err(_) => return, // best-effort
     };
     if let Some(conn) = crate::core::sync::read(&NODES).get(&target_node) {
-        let _ = conn.tx.send(bytes);
+        let _ = conn.enqueue(bytes);
     }
 }
 
@@ -488,10 +526,7 @@ pub(crate) fn link_remote(target_node: Symbol, target_pid: u64, local_pid: u64) 
     let sent = {
         let nodes = crate::core::sync::read(&NODES);
         match nodes.get(&target_node) {
-            Some(conn) => {
-                let _ = conn.tx.send(bytes);
-                true
-            }
+            Some(conn) => conn.enqueue(bytes),
             None => false,
         }
     };
@@ -520,7 +555,7 @@ pub(crate) fn unlink_remote(target_node: Symbol, target_pid: u64, local_pid: u64
         Err(_) => return,
     };
     if let Some(conn) = crate::core::sync::read(&NODES).get(&target_node) {
-        let _ = conn.tx.send(bytes);
+        let _ = conn.enqueue(bytes);
     }
 }
 
@@ -541,7 +576,7 @@ pub(crate) fn send_link_exit(target_node: Symbol, target_pid: u64, from_pid: u64
         Err(_) => return,
     };
     if let Some(conn) = crate::core::sync::read(&NODES).get(&target_node) {
-        let _ = conn.tx.send(bytes);
+        let _ = conn.enqueue(bytes);
     }
 }
 
@@ -561,7 +596,7 @@ pub(crate) fn exit_remote(target_node: Symbol, target_pid: u64, reason: Message)
         Err(_) => return,
     };
     if let Some(conn) = crate::core::sync::read(&NODES).get(&target_node) {
-        let _ = conn.tx.send(bytes);
+        let _ = conn.enqueue(bytes);
     }
 }
 
@@ -654,7 +689,7 @@ pub(crate) fn route(node: Symbol, target: Target, msg: Message) {
         }
     };
     if let Some(conn) = crate::core::sync::read(&NODES).get(&node) {
-        let _ = conn.tx.send(bytes); // dropped if the writer has gone away
+        let _ = conn.enqueue(bytes); // severs the link if the writer is gone/stalled
     }
 }
 
@@ -946,7 +981,7 @@ fn establish(peer: Symbol, peer_addr: String, stream: Stream, role: Role, sessio
         Role::Responder => peer,
     };
     let sock = Arc::new(stream);
-    let (tx, rx) = mpsc::channel::<Arc<[u8]>>();
+    let (tx, rx) = mpsc::sync_channel::<Arc<[u8]>>(WRITER_QUEUE_CAP);
     let last_seen = Arc::new(AtomicU64::new(now_millis()));
     let id = NEXT_LINK.fetch_add(1, Ordering::Relaxed);
 
@@ -1054,7 +1089,13 @@ fn establish(peer: Symbol, peer_addr: String, stream: Stream, role: Role, sessio
                 match frame {
                     Frame::Send { target, msg } => deliver_inbound(target, msg),
                     Frame::Ping => {
-                        let _ = reader_tx.send(Arc::clone(&pong));
+                        // Bounded queue: if we can't even enqueue a Pong, the writer
+                        // is stalled (peer not draining) or gone — sever and let
+                        // `drop_link` below deregister, rather than buffer.
+                        if reader_tx.try_send(Arc::clone(&pong)).is_err() {
+                            let _ = reader_sock.shutdown(Shutdown::Both);
+                            break;
+                        }
                     }
                     // A peer asked to watch one of our local pids — re-use the
                     // shared `add_monitor` core with a `Watcher::Remote` so the
@@ -1154,7 +1195,7 @@ fn broadcast_peer_table() {
             continue;
         }
         if let Ok(bytes) = encode_payload(&Frame::Peers { peers }) {
-            let _ = conn.tx.send(Arc::from(bytes));
+            let _ = conn.enqueue(Arc::from(bytes));
         }
     }
 }
