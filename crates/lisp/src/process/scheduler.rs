@@ -567,7 +567,12 @@ static NEXT_WORKER: AtomicUsize = AtomicUsize::new(0);
 /// skipped rather than blocking the spawner. Validated clean (incl. under
 /// `BROOD_GC_STRESS`) in the Track-A experiment; replaces pure round-robin.
 fn assign_worker() -> usize {
-    let n = worker_count().max(1);
+    // `WORKERS.len()`, not `worker_count()`: touching the LazyLock commits the
+    // pool size, so the modulus always matches the queues we index — a
+    // `set_max_parallel` after the pool starts can no longer skew the count
+    // (latent OOB), and the old per-spawn `BROOD_J` env read (+ the global env
+    // lock) is gone — `worker_count()` now runs once, at pool init.
+    let n = WORKERS.len().max(1);
     let start = NEXT_WORKER.fetch_add(1, Ordering::Relaxed) % n;
     let mut best = start;
     let mut best_len = WORKERS[start]
@@ -599,7 +604,9 @@ pub fn spawn_count() -> u64 {
 }
 
 /// Set the worker-pool size (0 = default ≈ `nproc`). Call once at startup, before
-/// any spawning. (Replaces the old per-spawn thread cap.)
+/// any spawning — once the `WORKERS` pool has initialised the size is committed
+/// and this has no further effect (everything indexes by `WORKERS.len()`).
+/// (Replaces the old per-spawn thread cap.)
 pub fn set_max_parallel(n: usize) {
     WORKER_COUNT.store(n, Ordering::SeqCst);
 }
@@ -614,6 +621,9 @@ pub fn worker_threads() -> u64 {
     ACTIVE_WORKERS.load(Ordering::SeqCst) as u64
 }
 
+/// Resolve the pool size: `BROOD_J` env override, else `set_max_parallel`'s
+/// value, else ≈ `nproc`. Called exactly once — at the `WORKERS` LazyLock
+/// init — so the env read never lands on the spawn hot path.
 fn worker_count() -> usize {
     if let Some(s) = std::env::var_os("BROOD_J") {
         if let Some(n) = s.to_str().and_then(|t| t.parse::<usize>().ok()) {
