@@ -201,6 +201,11 @@
     (assert= (to-fixed 3.7 0) "4")
     (assert= (to-fixed 3.2 0) "3"))
   (test "rejects a negative decimal count" (assert-error (to-fixed 1.0 -1)))
+  ;; A huge count would materialise a ~1 GB string (kernel audit #6); bounded.
+  (test "rejects an absurd decimal count instead of allocating gigabytes"
+    (assert-error (to-fixed 1.0 1000000000)))
+  (test "a generous-but-bounded count is still allowed"
+    (assert= (count (to-fixed 1.0 1000)) 1002)) ;; "1." + 1000 zeros
   (test "lines up in a fixed-width column via pad-left"
     (assert= (pad-left (to-fixed 1.5 2) 7) "   1.50")))
 

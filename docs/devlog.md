@@ -1020,3 +1020,15 @@ closure arms/params/optionals/body/captured, gossip peers). New direct unit test
 `prealloc_caps_the_reservation_against_element_size_amplification` asserts a 16 MiB
 `remaining` with a `usize::MAX` claim reserves `PREALLOC_CAP`, not `remaining`,
 while small claims are still honoured exactly.
+
+## 2026-06-04 — builtins: cap `to-fixed` decimal count
+
+From the kernel audit (`docs/kernel-audit-2026-06-03.md`, finding #6). `(to-fixed
+x n)` did `format!("{:.*}", n as usize, x)` with only a `n < 0` guard, so
+`(to-fixed 1.0 1000000000)` materialised a ~1 GB string on the Rust side — past the
+GC / `BROOD_MEM_LIMIT` soft cap, which doesn't see a `format!` buffer. Fix: reject
+`n > MAX_DECIMALS` (1000) with an `INDEX_OUT_OF_RANGE` error, mirroring the
+existing `MAX_SHIFT` guard on bit-shifts. An f64 carries ~17 significant digits, so
+1000 is far past any real use while bounding the worst-case alloc to ~1 KB.
+Regression cases in `tests/strings_test.blsp` (`assert-error` on 1e9; a 1000-place
+render still allowed).
