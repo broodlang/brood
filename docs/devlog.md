@@ -963,3 +963,36 @@ relative-offset subtractions in `span_runs_push`, and a `lo.min(n)..hi.min(n)`
 clamp on the final char slice — so even a future call-site change can't panic the
 host. Regression cases in `tests/highlight_test.blsp` (`assert-error` on two
 overflowing bases + a large-but-non-overflowing base that still tiles correctly).
+
+## 2026-06-04 — dist: bound the per-link writer queue (remote-controlled OOM)
+
+From the kernel audit (`docs/kernel-audit-2026-06-03.md`, finding #4). Each
+distributed link's writer drained an **unbounded** `mpsc::channel::<Arc<[u8]>>`.
+`WRITE_TIMEOUT` (30s) bounds a single `write_all`, not the backlog: a peer that
+slowlorises its TCP read window stalls the writer while local producers (`route`,
+`monitor_remote`/`link_remote`, link/exit signals, Pong, mesh gossip, the
+heartbeat ping) keep enqueuing — an unbounded queue, a remote-controlled OOM (the
+`WRITE_TIMEOUT` doc comment named the risk; the timeout was an incomplete
+mitigation).
+
+Fix: a **bounded** `sync_channel(WRITER_QUEUE_CAP=4096)`. A new `Conn::enqueue`
+helper `try_send`s and, on `Full` (stalled peer) or `Disconnected` (writer gone),
+**severs the link** via `sock.shutdown` — the reader observes it and runs
+`drop_link`, deregistering the `Conn`; `route`/`link_remote` use the returned
+`bool` to fire `:noconnection` to watchers. The reader's Pong path and the
+heartbeat's ping use the same `try_send`-then-sever discipline. Every producer
+call site (`conn.tx.send(…)` → `conn.enqueue(…)`) and the `heartbeat.rs` snapshot
+type moved from `Sender` to `SyncSender`.
+
+The cap is a frame *count*, sized generously so a transiently slow-but-healthy
+link isn't severed for a burst (worst-case memory `CAP × frame size`, fine for the
+small frames that dominate, bounded for large ones). If false-severance of a
+genuinely slow peer ever bites, the precise follow-up is an outstanding-*bytes*
+ceiling per `Conn` (the audit's alternative). Full distribution suite (26 tests)
+stays green — link lifecycle (reconnect, dedup, monitor/link death,
+`:noconnection`, mesh) is unchanged for healthy links.
+
+NOTE: this is DoS hardening, not a logic bug with a clean assertion — driving a
+real peer to stall its read window deterministically from an integration test
+isn't practical without a fault-injection hook, so coverage rests on the existing
+lifecycle suite plus the bounded-channel construction.
