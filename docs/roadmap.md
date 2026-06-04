@@ -37,10 +37,12 @@ Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
 - ✅ **[MED] builtins: cap `to-fixed` precision** — `(to-fixed 1.0 1e9)` built a
   ~1 GB string, bypassing the memory cap (`builtins.rs`). Fixed: reject
   `n > MAX_DECIMALS` (1000); cases in `tests/strings_test.blsp`.
-- ⬜ **[cleanup] Delete the dead mark-sweep collector** — `heap.rs:4916-5208`
-  (`collect_old`/`sweep`/`Marks`/`FreeLists`/`local_free`) lingers under the live
-  copying collector; `local_free` is always empty, so the `free` term and
-  `purge_above`/`clear` are no-ops. Several hundred dead lines.
+- ✅ **[cleanup] Delete the dead mark-sweep collector** — `heap.rs`
+  (`collect_old`/`sweep`/`Marks`/`FreeLists`/`local_free`) lingered under the
+  live copying collector; `local_free` was always empty, so the `free` term and
+  `purge_above`/`clear` were no-ops. Deleted (~480 lines); `local_live_count`
+  is a raw slab-length sum; `PoisonBits` kept but documented as inert; stale
+  comments rewritten to describe the generational copy collector.
 - Lower-priority hardening (empty-cookie guard, monitor-leak sweep, depth guards,
   unbounded `macroexpand`, scanner line-breaks, `string->number` bignum path) —
   see the audit doc.

@@ -147,7 +147,7 @@ struct EnvFrame {
 /// Lower bound on the GC threshold (live LOCAL objects), so tiny heaps don't
 /// thrash by collecting between every few allocations. Overridden by the
 /// `BROOD_GC_STRESS` env var (set to `1` to collect at every safepoint — a
-/// debug aid that flushes out rooting bugs by maximising free-list churn).
+/// debug aid that flushes out rooting bugs by maximising relocation churn).
 ///
 /// Read once on first use and cached — env vars don't change mid-run, and the
 /// safepoint hits this every collection.
@@ -444,63 +444,21 @@ struct TransientCell {
     live: bool,
 }
 
-/// Per-slab free lists for the LOCAL heap: indices of dead slots reclaimed by
-/// [`Heap::collect`] that the next [`Heap::alloc_pair`] (etc.) reuses before
-/// extending the slab. Empty for the PRELUDE/RUNTIME regions (those are
-/// append-only / frozen). No `natives` list — natives are only allocated during
-/// the prelude build (then frozen into PRELUDE), so the LOCAL natives slab
-/// stays empty at runtime and isn't swept.
-#[derive(Default)]
-struct FreeLists {
-    pairs: Vec<u32>,
-    vectors: Vec<u32>,
-    maps: Vec<u32>,
-    strings: Vec<u32>,
-    bigints: Vec<u32>,
-    ropes: Vec<u32>,
-    closures: Vec<u32>,
-    envs: Vec<u32>,
-    transients: Vec<u32>,
-}
-
-impl FreeLists {
-    fn clear(&mut self) {
-        self.pairs.clear();
-        self.vectors.clear();
-        self.maps.clear();
-        self.strings.clear();
-        self.bigints.clear();
-        self.ropes.clear();
-        self.closures.clear();
-        self.envs.clear();
-        self.transients.clear();
-    }
-
-    /// Drop free-list entries pointing into the *truncated* region (≥ each cap).
-    /// Called after [`Heap::reset_local_to`] truncates the slabs so we don't try
-    /// to reuse indices that no longer exist.
-    fn purge_above(&mut self, cp: &LocalCheckpoint) {
-        self.pairs.retain(|&i| (i as usize) < cp.pairs);
-        self.vectors.retain(|&i| (i as usize) < cp.vectors);
-        self.maps.retain(|&i| (i as usize) < cp.maps);
-        self.strings.retain(|&i| (i as usize) < cp.strings);
-        self.bigints.retain(|&i| (i as usize) < cp.bigints);
-        self.ropes.retain(|&i| (i as usize) < cp.ropes);
-        self.closures.retain(|&i| (i as usize) < cp.closures);
-        self.envs.retain(|&i| (i as usize) < cp.envs);
-        self.transients.retain(|&i| (i as usize) < cp.transients);
-    }
-}
-
 /// Use-after-GC tripwire bits, one per LOCAL slot in each slab. **Debug-only**:
 /// the field on `Heap` is `#[cfg(debug_assertions)]`, and every accessor that
-/// consults this drops out entirely in release. Set by [`Heap::sweep`] when a
-/// slot is freed, cleared by `new_env` / the `alloc_slot!` reuse paths when a
-/// slot is taken back out of the free list. A `debug_assert!` in each handle
-/// accessor checks the bit so a *use of a dangling handle* panics at the
-/// instant of the bad deref — pointing the backtrace at the actual offender,
-/// not at the eventual symptom (e.g. an "unbound symbol" arising later when
-/// the reclaimed env's parent chain is read).
+/// consults this drops out entirely in release. A `debug_assert!` in each
+/// handle accessor checks the bit so a *use of a dangling handle* panics at
+/// the instant of the bad deref — pointing the backtrace at the actual
+/// offender, not at the eventual symptom (e.g. an "unbound symbol" arising
+/// later when the reclaimed env's parent chain is read).
+///
+/// **Currently inert:** the only writer was the in-place mark-sweep's `sweep`
+/// (deleted — the live collector relocates survivors into fresh slabs and
+/// drops the dead wholesale, so no slot is ever freed in place). The live
+/// use-after-GC detector is the generation-epoch check (`check_epoch`,
+/// ADR-054). The bits and their accessor checks are kept because they're
+/// woven through every accessor and any future in-place reclaimer would need
+/// exactly this tripwire back.
 #[cfg(debug_assertions)]
 #[derive(Default)]
 struct PoisonBits {
@@ -518,7 +476,7 @@ struct PoisonBits {
 #[cfg(debug_assertions)]
 impl PoisonBits {
     /// Is `idx` currently poisoned? Out-of-range answers `false` — a slot we
-    /// never sized for can't have been freed by sweep.
+    /// never sized for can't have been poisoned.
     fn is(bits: &[bool], idx: usize) -> bool {
         bits.get(idx).copied().unwrap_or(false)
     }
@@ -745,13 +703,8 @@ pub struct Heap {
     /// the old generation is **not a root set for a minor collection** — no write
     /// barrier, no remembered set.
     old: Slabs,
-    /// Reclaimed-but-not-yet-reused LOCAL slots. Grown by [`Heap::collect`]'s
-    /// sweep, drained by `alloc_*` before extending the slab. PRELUDE/RUNTIME
-    /// (append-only) have no equivalent.
-    local_free: FreeLists,
-    /// Debug-build use-after-GC tripwire: a bit per LOCAL slot that's set when
-    /// sweep frees the slot and cleared when an `alloc_*` / `new_env` reuses
-    /// it. Every handle accessor (`pair`, `vector`, `closure`, `env_frame`, …)
+    /// Debug-build use-after-GC tripwire: a bit per LOCAL slot. Every handle
+    /// accessor (`pair`, `vector`, `closure`, `env_frame`, …)
     /// `debug_assert!`s its slot isn't poisoned, so a dangling handle panics
     /// at the *moment of use* with a backtrace pointing at the offender —
     /// instead of returning silently-stale data that surfaces as an "unbound
@@ -942,18 +895,13 @@ impl Default for Heap {
     }
 }
 
-/// Pop a free-list slot if one is waiting, otherwise extend the slab. The
-/// shared shape behind every `replace-wholesale` allocator: `alloc_pair`,
-/// `alloc_vector`, `alloc_map`, `alloc_closure`. Returns the chosen slot
-/// index (usize). Pre-consolidation each of those was four lines of the
-/// same `if let Some(idx) = … pop() { … } else { … push() }` shape; the
-/// macro is that shape in one place. (`alloc_string` and `new_env` reuse
-/// the slot's inner buffer instead and stay hand-written.)
-// Bump-only allocator (post-supervisor-strip): indices grow monotonically
-// per process, no free-list reuse, no mark-sweep. The per-process heap is
-// dropped wholesale at process exit; long-running receive loops will (next
-// phase) flip the arena on receive. Stale-handle bugs become impossible
-// because slots are never reused.
+/// Bump-only allocation: append to the slab, return the new index. The shared
+/// shape behind `alloc_pair`, `alloc_vector`, `alloc_map`, `alloc_closure`
+/// (and the rest). Indices grow monotonically per process — **no slot is ever
+/// reused in place**, which is what makes a stale handle detectable (the
+/// epoch tripwire) instead of silently aliasing fresh data. Slab `len()` is
+/// bounded not by a free list but by collections relocating survivors into
+/// fresh slabs and dropping the old slabs wholesale.
 macro_rules! alloc_slot {
     ($self:expr, $field:ident, $value:expr) => {{
         let idx = $self.local.$field.len();
@@ -1088,7 +1036,6 @@ impl Heap {
         Heap {
             local: Slabs::default(),
             old: Slabs::default(),
-            local_free: FreeLists::default(),
             #[cfg(debug_assertions)]
             poison: PoisonBits::default(),
             prelude: Arc::default(),
@@ -1126,7 +1073,6 @@ impl Heap {
         Heap {
             local: Slabs::default(),
             old: Slabs::default(),
-            local_free: FreeLists::default(),
             #[cfg(debug_assertions)]
             poison: PoisonBits::default(),
             prelude,
@@ -1333,10 +1279,6 @@ impl Heap {
         if !self.form_pos.is_empty() {
             self.form_pos.retain(|&k, _| (k as u32 as usize) < cp.pairs);
         }
-        // Drop free-list entries pointing into the truncated tail — those slots
-        // no longer exist. Entries below the cap remain valid (holes inside the
-        // surviving prefix that a later `alloc_*` can still reuse).
-        self.local_free.purge_above(&cp);
         // The threshold is relative to live count; reclamation here is so cheap
         // that we let the next `gc_due` check recompute against the smaller heap.
     }
@@ -1496,17 +1438,11 @@ impl Heap {
 
     // ----- allocation (always into the local heap) -----
     //
-    // Each allocator pops a [`FreeLists`] entry (a slot the GC reclaimed and
-    // overwrites in place) before extending the slab — so the slab's `len()`
-    // stays bounded by the high-water live count, not the lifetime allocation
-    // total. Atomic w.r.t. the slab's `Vec`: a free index is always < current
-    // `len`, so writing in place is well-defined.
-    //
-    // The four `replace-wholesale` allocators (pair/vector/map/closure) share
-    // the same pop-or-push shape; the [`alloc_slot!`] macro is that shape in
-    // one place. `alloc_string` / `new_env` differ — they *reuse* the slot's
-    // inner buffer (String capacity, EnvVars inline storage) rather than
-    // replacing wholesale — so they stay hand-written.
+    // Every allocator bump-appends to its LOCAL slab (the [`alloc_slot!`]
+    // macro is that shape in one place; `alloc_string` / `new_env` stay
+    // hand-written for their extra bookkeeping). Slots are never reused in
+    // place; the slab's `len()` is kept bounded by the copying collector
+    // relocating survivors into fresh slabs and dropping the rest.
 
     pub fn alloc_pair(&mut self, head: Value, tail: Value) -> Value {
         let idx = alloc_slot!(self, pairs, (head, tail));
@@ -2571,8 +2507,8 @@ impl Heap {
 
     pub fn alloc_native(&mut self, f: NativeFn) -> Value {
         // Natives are only allocated during the prelude build (then frozen into
-        // PRELUDE); the LOCAL natives slab stays empty at runtime and isn't
-        // swept, so there's no free list to consult.
+        // PRELUDE); the LOCAL natives slab stays empty at runtime and is never
+        // collected.
         let idx = self.local.natives.len();
         self.local.natives.push(f);
         Value::Native(NativeId::local_gen(idx, self.local_epoch))
@@ -2868,8 +2804,9 @@ impl Heap {
     /// (a placeholder is allocated before recursing). PRELUDE/RUNTIME handles are
     /// returned unchanged (the promotion invariant guarantees they hold no LOCAL
     /// refs). Crucially this **never reuses a slot index** — it relocates and
-    /// drops — so it cannot resurrect the slot-aliasing scheduler race that
-    /// disabled the old mark-sweep (`collect_old`).
+    /// drops — so it cannot resurrect the slot-aliasing scheduler race that got
+    /// the original in-place mark-sweep collector deleted (see
+    /// `docs/claude-demo-findings.md` § Scheduler race).
     fn arena_flip(&mut self, value_roots: &mut [Value], env_roots: &mut [EnvId]) {
         // Bump the generation epoch *before* copying: survivors are re-minted
         // into the fresh slabs stamped with the NEW epoch (via `fwd.epoch`), so
@@ -2903,7 +2840,6 @@ impl Heap {
             *e = flush_env(&old, &mut self.local, &mut fwd, *e);
         }
         self.env_roots = env_roots;
-        self.local_free.clear();
         // form_pos is keyed by LOCAL pair index, which the copy *relocates*.
         // Re-key it through the pair forwarding table (old idx → new idx) so a
         // collection mid-file-load doesn't lose the reader positions later error
@@ -2929,9 +2865,9 @@ impl Heap {
             self.poison.envs.clear();
             self.poison.transients.clear();
         }
-        // GC observability (Tier-1). After the flip the free lists are cleared,
-        // so `local_live_count()` is exactly the survivor count. Saturating so a
-        // pathological wrap can't panic on the collector hot path.
+        // GC observability (Tier-1). After the flip the fresh slabs hold exactly
+        // the survivors, so `local_live_count()` is the survivor count. Saturating
+        // so a pathological wrap can't panic on the collector hot path.
         let survivors = self.local_live_count();
         self.gc_runs = self.gc_runs.saturating_add(1);
         self.gc_copied = self.gc_copied.saturating_add(survivors as u64);
@@ -3524,11 +3460,13 @@ impl Heap {
     // top-level frame's parent chain bottoms out there. (During prelude *build*
     // the global is instead a real local root frame with no parent.)
 
-    /// True if `env` points at a LOCAL env slot that the sweep has poisoned
-    /// (i.e. a freed slot whose handle leaked past GC). Debug-only entry
+    /// True if `env` points at a LOCAL env slot whose poison tripwire bit is
+    /// set (i.e. a freed slot whose handle leaked past GC). Debug-only entry
     /// point for the use-after-GC chase in [`crate::eval`]; in release the
     /// `poison` field doesn't exist, so the method is `#[cfg]`-gated too —
-    /// every call site is `#[cfg(debug_assertions)]`-gated to match.
+    /// every call site is `#[cfg(debug_assertions)]`-gated to match. Note the
+    /// bits currently have no writer (see [`PoisonBits`]), so this answers
+    /// `false` under today's relocate-don't-reuse collector.
     ///
     /// **Opt-in** (`BROOD_ENV_DEBUG=1`): superseded by the generational-handle
     /// tripwire (ADR-054), which catches use-after-GC precisely at the deref. Off
@@ -3599,9 +3537,10 @@ impl Heap {
                 debug_assert!(
                     !PoisonBits::is(&self.poison.envs, env.index()),
                     "use-after-GC: env_frame on freed nursery env slot {} \
-                     (handle {:#x}). Sweep poisoned this slot; some caller \
-                     held the EnvId across a GC safepoint without rooting it. \
-                     See docs/claude-demo-findings.md § Scheduler race.",
+                     (handle {:#x}). This slot was poisoned as freed; some \
+                     caller held the EnvId across a GC safepoint without \
+                     rooting it. See docs/claude-demo-findings.md § Scheduler \
+                     race.",
                     env.index(),
                     env.0
                 );
@@ -4278,11 +4217,14 @@ impl Heap {
         self.gc_enabled && self.local_live_count() >= self.gc_threshold
     }
 
-    /// LOCAL live-object count = `Σ slab.len() − Σ free.len()` over the swept
-    /// slabs. The metric the threshold tracks; also exposed for tests asserting
-    /// reclamation in long-running loops.
+    /// LOCAL live-object count = `Σ slab.len()` over the LOCAL slabs. The metric
+    /// the threshold tracks; also exposed for tests asserting reclamation in
+    /// long-running loops. The collector is a moving copy collector that never
+    /// reuses a slot in place (survivors are relocated into fresh slabs and the
+    /// dead are dropped wholesale), so the live count is simply the slab lengths —
+    /// there is no free list to subtract.
     pub fn local_live_count(&self) -> usize {
-        let total = self.local.pairs.len()
+        self.local.pairs.len()
             + self.local.vectors.len()
             + self.local.maps.len()
             + self.local.strings.len()
@@ -4290,28 +4232,7 @@ impl Heap {
             + self.local.ropes.len()
             + self.local.closures.len()
             + self.local.envs.len()
-            + self.local.transients.len();
-        let free = self.local_free.pairs.len()
-            + self.local_free.vectors.len()
-            + self.local_free.maps.len()
-            + self.local_free.strings.len()
-            + self.local_free.bigints.len()
-            + self.local_free.ropes.len()
-            + self.local_free.closures.len()
-            + self.local_free.envs.len()
-            + self.local_free.transients.len();
-        // `saturating_sub` rather than `total - free`: if a future bug ever
-        // makes the free list outgrow the slab (sweep accounting drift, a
-        // double-free, etc.) this returns 0 instead of panicking on the GC
-        // safepoint hot path. A `debug_assert!` flags the invariant break in
-        // tests without taking the prod runtime down.
-        debug_assert!(
-            total >= free,
-            "free count {} exceeds slab count {}",
-            free,
-            total
-        );
-        total.saturating_sub(free)
+            + self.local.transients.len()
     }
 
     /// An estimate of this process's LOCAL heap footprint in **bytes** — the
@@ -4414,17 +4335,19 @@ impl Heap {
 
     // ----- the tracing GC ------------------------------------------------------
     //
-    // Non-moving, single-threaded mark-sweep over the LOCAL heap only. Roots
-    // are: `extra_roots`/`extra_envs` (the caller — usually the eval safepoint
-    // — supplies `expr`/`env` here), the explicit root stack [`Self::roots`],
-    // and the dynamic-binding stack [`Self::dynamics`]. The PRELUDE and RUNTIME
-    // regions are never traced into (they hold no LOCAL refs, by the promotion
-    // invariant), so the walk stays bounded by *this* process's working set.
-    //
-    // Marking is **iterative** (an explicit worklist) so a deep cons chain or
-    // env-frame chain can't overflow the native stack. Sweep rebuilds the free
-    // lists from scratch as `(0..len).filter(|i| !marked[i])` — equivalently,
-    // any LOCAL slot present in the slab and not reached from a root.
+    // A generational, moving **copy collector** over the LOCAL heap only
+    // (ADR-054; `docs/memory-review.md`). A *minor* collection either tenures
+    // the nursery's survivors into the old generation or semi-space-flips the
+    // nursery in place; a *major* compacts the old generation when it has
+    // doubled. Survivors are relocated into fresh slabs and the dead dropped
+    // wholesale — no slot is ever reused in place. Roots are:
+    // `extra_roots`/`extra_envs` (the caller — usually the eval safepoint —
+    // supplies `expr`/`env` here), the explicit root stack [`Self::roots`],
+    // the operand-stack env half [`Self::env_roots`], the write-barrier
+    // [`Self::remembered`] set (minor only), and the dynamic-binding stack
+    // [`Self::dynamics`]. The PRELUDE and RUNTIME regions are never traced
+    // into (they hold no LOCAL refs, by the promotion invariant), so the walk
+    // stays bounded by *this* process's working set.
 
     /// **Stage B — automatic copying collection at the eval safepoint** (ADR-054;
     /// `docs/memory-review.md`). Fired by `eval::eval` when `gc_due()` *and* we are
@@ -4477,9 +4400,9 @@ impl Heap {
         }
     }
 
-    /// Live objects in the **old generation** (`Σ old.slab.len()`). Old has no
-    /// free list — it's append-only between major collections — so the slab
-    /// lengths *are* the live count. Drives the major-collection threshold.
+    /// Live objects in the **old generation** (`Σ old.slab.len()`). Old is
+    /// append-only between major collections, so the slab lengths *are* the
+    /// live count. Drives the major-collection threshold.
     pub fn old_live_count(&self) -> usize {
         self.old.pairs.len()
             + self.old.vectors.len()
@@ -4588,7 +4511,6 @@ impl Heap {
         if !tenure {
             self.remembered = remembered;
         }
-        self.local_free.clear();
         // form_pos re-key: a surviving nursery pair moves to its new slot with the
         // destination's age bit (old when tenuring, young when flipping); dead
         // nursery entries drop; existing OLD entries are untouched (old didn't move
@@ -4931,398 +4853,6 @@ impl Heap {
         self.roots[i] = v;
     }
 
-    #[allow(dead_code)]
-    fn collect_old(&mut self, extra_roots: &[Value], extra_envs: &[EnvId]) {
-        if !self.gc_enabled {
-            return;
-        }
-        // Sized to the LOCAL slabs only — RUNTIME/PRELUDE handles are filtered
-        // out before they reach the worklist, so we never index those marks.
-        let mut marks = Marks::new(&self.local);
-        let mut work: Vec<TraceItem> = Vec::new();
-
-        // Seed: the caller's transient roots.
-        for &v in extra_roots {
-            push_value(&mut work, v);
-        }
-        for &e in extra_envs {
-            push_env(&mut work, e);
-        }
-        // The explicit root stack and the dynamic-binding stack.
-        for &v in &self.roots {
-            push_value(&mut work, v);
-        }
-        for &(_, v) in &self.dynamics {
-            push_value(&mut work, v);
-        }
-
-        // Worklist mark phase. Adding a handle to `work` is a *request* to mark
-        // it; the pop site checks the mark bit and only walks its children if
-        // it was unmarked (so we never cycle, no quadratic re-traversal).
-        while let Some(item) = work.pop() {
-            self.trace_one(item, &mut marks, &mut work);
-        }
-
-        // Sweep: rebuild free lists from `(0..len) \ marked`. Clearing the slot
-        // (strings/vectors/maps/closures/envs) releases the slot's owned inner
-        // allocations; pairs are 16 bytes inline, so they only need the index
-        // re-listed.
-        self.sweep(&marks);
-
-        // Adaptive threshold: collect again when live doubles. Floored so a
-        // tiny heap doesn't thrash.
-        let live = self.local_live_count();
-        self.gc_threshold = std::cmp::max(gc_floor(), live.saturating_mul(2));
-    }
-
-    /// Mark one item and, if it was previously unmarked, enqueue its children.
-    /// Skips PRELUDE/RUNTIME handles entirely — the promotion invariant
-    /// guarantees they reach no LOCAL data, so there's nothing for us to
-    /// reclaim down those edges.
-    fn trace_one(&self, item: TraceItem, marks: &mut Marks, work: &mut Vec<TraceItem>) {
-        match item {
-            TraceItem::Pair(idx) => {
-                if marks.mark_pair(idx) {
-                    let (a, b) = self.local.pairs[idx];
-                    push_value(work, a);
-                    push_value(work, b);
-                }
-            }
-            TraceItem::Vector(idx) => {
-                if marks.mark_vector(idx) {
-                    for &v in &self.local.vectors[idx] {
-                        push_value(work, v);
-                    }
-                }
-            }
-            TraceItem::Map(idx) => {
-                if marks.mark_map(idx) {
-                    // CHAMP node: trace every inline entry's (k, v) and
-                    // every child sub-node handle. Children are LOCAL
-                    // `MapId`s — push them via the normal Map traceitem.
-                    let node = &self.local.maps[idx];
-                    for &(k, v) in &node.data {
-                        push_value(work, k);
-                        push_value(work, v);
-                    }
-                    for &c in &node.children {
-                        if c.region() == LOCAL {
-                            work.push(TraceItem::Map(c.index()));
-                        }
-                    }
-                }
-            }
-            TraceItem::Str(idx) => {
-                // No children, but mark it so it survives sweep.
-                marks.mark_string(idx);
-            }
-            TraceItem::BigInt(idx) => {
-                // A leaf (no Value children); just mark it so it survives sweep.
-                marks.mark_bigint(idx);
-            }
-            TraceItem::Rope(idx) => {
-                // A rope is an opaque leaf (no Value children); just mark it.
-                marks.mark_rope(idx);
-            }
-            TraceItem::Closure(idx) => {
-                if marks.mark_closure(idx) {
-                    let cl = &self.local.closures[idx];
-                    for arm in &cl.arms {
-                        for &f in &arm.body {
-                            push_value(work, f);
-                        }
-                        for &(_, d) in &arm.optionals {
-                            push_value(work, d);
-                        }
-                    }
-                    if let Some(env) = cl.env {
-                        push_env(work, env);
-                    }
-                }
-            }
-            TraceItem::Env(idx) => {
-                if marks.mark_env(idx) {
-                    let frame = &self.local.envs[idx];
-                    for &(_, v) in &frame.vars {
-                        push_value(work, v);
-                    }
-                    if let Some(parent) = frame.parent {
-                        push_env(work, parent);
-                    }
-                }
-            }
-            TraceItem::Transient(idx) => {
-                if marks.mark_transient(idx) {
-                    // The cell's one child is its `root` Map; trace it like any
-                    // other parent's child handle.
-                    push_value(work, self.local.transients[idx].root);
-                }
-            }
-        }
-    }
-
-    /// Sweep the LOCAL slabs: any unmarked slot becomes a free-list entry.
-    /// Replaces the old free list (every slot present-and-unmarked is "free
-    /// now," whether or not it was free before — the marks distinguish live
-    /// from dead, not from previously-free).
-    fn sweep(&mut self, marks: &Marks) {
-        self.local_free.clear();
-        // Reset the use-after-GC tripwire: poisoned[i] starts equal to "slot
-        // i was just freed" — set inside each loop below. Live slots clear to
-        // false; reused-then-freed slots flip true. Debug builds only — the
-        // `poison` field doesn't exist in release.
-        #[cfg(debug_assertions)]
-        {
-            self.poison.pairs.clear();
-            self.poison.pairs.resize(self.local.pairs.len(), false);
-            self.poison.vectors.clear();
-            self.poison.vectors.resize(self.local.vectors.len(), false);
-            self.poison.maps.clear();
-            self.poison.maps.resize(self.local.maps.len(), false);
-            self.poison.strings.clear();
-            self.poison.strings.resize(self.local.strings.len(), false);
-            self.poison.bigints.clear();
-            self.poison.bigints.resize(self.local.bigints.len(), false);
-            self.poison.ropes.clear();
-            self.poison.ropes.resize(self.local.ropes.len(), false);
-            self.poison.closures.clear();
-            self.poison
-                .closures
-                .resize(self.local.closures.len(), false);
-            self.poison.envs.clear();
-            self.poison.envs.resize(self.local.envs.len(), false);
-            self.poison.transients.clear();
-            self.poison
-                .transients
-                .resize(self.local.transients.len(), false);
-        }
-
-        for i in 0..self.local.pairs.len() {
-            if !marks.is_pair_marked(i) {
-                self.local_free.pairs.push(i as u32);
-                // form_pos is keyed by (age,index); this nursery sweep drops the
-                // young (age 0) entry since the slot will be reused.
-                self.form_pos.remove(&(i as u64));
-                #[cfg(debug_assertions)]
-                {
-                    self.poison.pairs[i] = true;
-                }
-            }
-        }
-        for i in 0..self.local.vectors.len() {
-            if !marks.is_vector_marked(i) {
-                self.local_free.vectors.push(i as u32);
-                // Release the dead `Vec<Value>`'s buffer; alloc_vector replaces
-                // the slot wholesale on reuse, so we don't need an empty marker.
-                self.local.vectors[i] = Vec::new();
-                #[cfg(debug_assertions)]
-                {
-                    self.poison.vectors[i] = true;
-                }
-            }
-        }
-        for i in 0..self.local.maps.len() {
-            if !marks.is_map_marked(i) {
-                self.local_free.maps.push(i as u32);
-                self.local.maps[i] = MapNode::default();
-                #[cfg(debug_assertions)]
-                {
-                    self.poison.maps[i] = true;
-                }
-            }
-        }
-        for i in 0..self.local.strings.len() {
-            if !marks.is_string_marked(i) {
-                self.local_free.strings.push(i as u32);
-                // Release the slot's owned buffer / `Arc<SharedBlob>` ref;
-                // alloc_string replaces wholesale on reuse. `Default` for
-                // `LocalString` is `Inline(String::new())`, so a dead `Shared`
-                // slot also decrements its refcount via the drop here — if
-                // it was the last handle, the blob is freed.
-                self.local.strings[i] = LocalString::default();
-                #[cfg(debug_assertions)]
-                {
-                    self.poison.strings[i] = true;
-                }
-            }
-        }
-        for i in 0..self.local.bigints.len() {
-            if !marks.is_bigint_marked(i) {
-                self.local_free.bigints.push(i as u32);
-                // Release the dead bignum's heap digits; alloc_bigint replaces the
-                // slot wholesale on reuse, so a cheap zero placeholder suffices.
-                self.local.bigints[i] = num_bigint::BigInt::default();
-                #[cfg(debug_assertions)]
-                {
-                    self.poison.bigints[i] = true;
-                }
-            }
-        }
-        for i in 0..self.local.ropes.len() {
-            if !marks.is_rope_marked(i) {
-                self.local_free.ropes.push(i as u32);
-                // Replace with an empty rope so the old one's `Arc` nodes drop
-                // (freeing them if this was the last reference).
-                self.local.ropes[i] = ropey::Rope::new();
-                #[cfg(debug_assertions)]
-                {
-                    self.poison.ropes[i] = true;
-                }
-            }
-        }
-        for i in 0..self.local.closures.len() {
-            if !marks.is_closure_marked(i) {
-                self.local_free.closures.push(i as u32);
-                // Replace with a default so the `Vec`s inside drop. `Closure`
-                // derives `Default`, so adding a field to it doesn't risk a
-                // sweep-bug from a missed initialiser here.
-                self.local.closures[i] = Closure::default();
-                #[cfg(debug_assertions)]
-                {
-                    self.poison.closures[i] = true;
-                }
-            }
-        }
-        for i in 0..self.local.envs.len() {
-            if !marks.is_env_marked(i) {
-                self.local_free.envs.push(i as u32);
-                let slot = &mut self.local.envs[i];
-                slot.vars.clear();
-                slot.parent = None;
-                #[cfg(debug_assertions)]
-                {
-                    self.poison.envs[i] = true;
-                }
-            }
-        }
-        for i in 0..self.local.transients.len() {
-            if !marks.is_transient_marked(i) {
-                self.local_free.transients.push(i as u32);
-                #[cfg(debug_assertions)]
-                {
-                    self.poison.transients[i] = true;
-                }
-            }
-        }
-    }
-}
-
-// ----- GC worklist + mark bits ----------------------------------------------
-
-/// One item on the mark worklist — a LOCAL handle to walk. RUNTIME/PRELUDE
-/// handles are filtered out at the `push_*` sites so they never reach here.
-#[derive(Clone, Copy)]
-enum TraceItem {
-    Pair(usize),
-    Vector(usize),
-    Map(usize),
-    Str(usize),
-    BigInt(usize),
-    Rope(usize),
-    Closure(usize),
-    Env(usize),
-    Transient(usize),
-}
-
-/// If `v` carries a LOCAL handle, push it onto the mark worklist. Atoms and
-/// shared-region values are ignored.
-fn push_value(work: &mut Vec<TraceItem>, v: Value) {
-    match v {
-        Value::Pair(id) if id.region() == LOCAL => work.push(TraceItem::Pair(id.index())),
-        Value::Vector(id) if id.region() == LOCAL => work.push(TraceItem::Vector(id.index())),
-        Value::Map(id) if id.region() == LOCAL => work.push(TraceItem::Map(id.index())),
-        Value::Str(id) if id.region() == LOCAL => work.push(TraceItem::Str(id.index())),
-        Value::BigInt(id) if id.region() == LOCAL => work.push(TraceItem::BigInt(id.index())),
-        Value::Rope(id) if id.region() == LOCAL => work.push(TraceItem::Rope(id.index())),
-        Value::Fn(id) | Value::Macro(id) if id.region() == LOCAL => {
-            work.push(TraceItem::Closure(id.index()))
-        }
-        Value::Transient(id) if id.region() == LOCAL => {
-            work.push(TraceItem::Transient(id.index()))
-        }
-        _ => {}
-    }
-}
-
-/// If `env` is a LOCAL frame, push it. The [`EnvId::GLOBAL`] sentinel and
-/// RUNTIME-promoted frames are skipped (no LOCAL slot to mark).
-fn push_env(work: &mut Vec<TraceItem>, env: EnvId) {
-    if env != EnvId::GLOBAL && env.region() == LOCAL {
-        work.push(TraceItem::Env(env.index()));
-    }
-}
-
-/// One bit per slot in each LOCAL slab. Allocated per collection (no persistent
-/// memory cost between cycles). `mark_*` returns `true` if the slot transitioned
-/// from unmarked to marked, so the caller can enqueue children only once.
-struct Marks {
-    pairs: Vec<bool>,
-    vectors: Vec<bool>,
-    maps: Vec<bool>,
-    strings: Vec<bool>,
-    bigints: Vec<bool>,
-    ropes: Vec<bool>,
-    closures: Vec<bool>,
-    envs: Vec<bool>,
-    transients: Vec<bool>,
-}
-
-impl Marks {
-    fn new(local: &Slabs) -> Self {
-        Marks {
-            pairs: vec![false; local.pairs.len()],
-            vectors: vec![false; local.vectors.len()],
-            maps: vec![false; local.maps.len()],
-            strings: vec![false; local.strings.len()],
-            bigints: vec![false; local.bigints.len()],
-            ropes: vec![false; local.ropes.len()],
-            closures: vec![false; local.closures.len()],
-            envs: vec![false; local.envs.len()],
-            transients: vec![false; local.transients.len()],
-        }
-    }
-}
-
-// Generate `mark_X` / `is_X_marked` for each slab. Pre-consolidation these
-// were twelve hand-written one-line methods that drifted on style (some used
-// `.unwrap_or(false)`, some asserted in-range). The macro pins one shape: a
-// `mark_X` that flips the bit and reports first-touch (so the worklist
-// enqueues children only once), and an `is_X_marked` that's safe past the
-// end of the bit-vector (the sweep loop indexes `local.X.len()`, but a slab
-// that grew mid-mark would otherwise panic). One shape, one place.
-macro_rules! mark_methods {
-    ($($field:ident => $mark:ident, $is_marked:ident),+ $(,)?) => {
-        impl Marks {
-            $(
-                fn $mark(&mut self, i: usize) -> bool { mark_one(&mut self.$field, i) }
-                fn $is_marked(&self, i: usize) -> bool {
-                    self.$field.get(i).copied().unwrap_or(false)
-                }
-            )+
-        }
-    };
-}
-
-mark_methods! {
-    pairs => mark_pair, is_pair_marked,
-    vectors => mark_vector, is_vector_marked,
-    maps => mark_map, is_map_marked,
-    strings => mark_string, is_string_marked,
-    bigints => mark_bigint, is_bigint_marked,
-    ropes => mark_rope, is_rope_marked,
-    closures => mark_closure, is_closure_marked,
-    envs => mark_env, is_env_marked,
-    transients => mark_transient, is_transient_marked,
-}
-
-#[inline]
-fn mark_one(bits: &mut [bool], i: usize) -> bool {
-    if bits[i] {
-        false
-    } else {
-        bits[i] = true;
-        true
-    }
 }
 
 // ----- heap flush (arena flip / Phase 2) -----------------------------------
