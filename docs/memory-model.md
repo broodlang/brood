@@ -195,12 +195,22 @@ multiplexing several green processes don't leak each other's depths.
   pathological case is recoverable by adding explicit rooting to the few
   builtins that hold transients across eval — incremental, no architectural
   shift.
-- **Slabs don't shrink trailing dead runs.** The free list reuses indices;
-  the high-water `len` stays. Memory peaks at the high-water live count and
-  then stays flat. (Trailing-truncate is a small future win.)
+- **Slab `Vec` capacity doesn't shrink.** The copying collector relocates
+  survivors into fresh slabs (dropping the old allocations wholesale), but a
+  heap that once peaked high may keep its high-water capacity until the next
+  collection's fresh slabs right-size it.
 - **The interner and the shared RUNTIME code slabs** (hot-reloaded code via
   `def`) are still append-only and grow with redefinitions. Orthogonal to
-  per-process *data* GC.
+  per-process *data* GC. Two process-lifetime growth vectors to keep in mind
+  for the long-lived daemon (kernel audit 2026-06-03, perf #4):
+  - *Arbitrary strings must not reach `intern`.* The interner never frees, so
+    code paths fed by user-typed text use `value::intern_existing` (a lookup,
+    no insert) — e.g. the LSP's `resolve_in_source`. The reader itself interns
+    every token it scans; that's bounded by actual source content.
+  - *`gensym` grows the interner by one entry per call* (`value::gensym` — a
+    global counter, so every `<prefix>__<n>` spelling is new): each macro
+    recompile mints fresh names. Negligible per reload, but it is the steady
+    drip a hot-reload daemon should know about.
 
 ## Why now
 

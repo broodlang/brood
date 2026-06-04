@@ -279,6 +279,7 @@ Every session, oldest first. Full text: [devlog-archive.md](archive/devlog-archi
 - **2026-06-04** — heap: delete the dead mark-sweep collector (~480 lines: `collect_old`/`sweep`/`Marks`/`FreeLists`/`local_free` — kernel audit, refactoring #1)
 - **2026-06-04** — scheduler: `assign_worker` indexes by `WORKERS.len()` (kills the per-spawn `BROOD_J` env read + the late-`set_max_parallel` OOB — kernel audit, perf #2)
 - **2026-06-04** — gc: de-dup the write-barrier `remembered` set (repeated binds into one tenured frame no longer grow it — kernel audit, perf #3)
+- **2026-06-04** — lsp: `resolve_in_source` stops interning transient identifiers (daemon-lifetime interner leak — kernel audit, perf #4)
 
 ---
 
@@ -1091,3 +1092,28 @@ frame mutated since the last minor (tiny), so the linear scan is cheap.
 White-box regression test `remembered_set_dedups_repeated_binds` (64 binds →
 one entry; the single entry still carries all 64 young edges through a minor);
 RED before the fix.
+
+## 2026-06-04 — lsp: resolve_in_source stops interning transient identifiers
+
+From the kernel audit (`docs/kernel-audit-2026-06-03.md`, performance #4). The
+LSP's shared resolver (`introspect::resolve_in_source` — hover, signature,
+goto, workspace rename probes) called `value::intern(name)` on every query, and
+the interner never frees — so a long-lived daemon leaked one entry per unique
+identifier string it was ever asked about (including names not present in any
+source). Now `value::intern_existing`: a name still un-interned after the
+source read *and the header eval* can't resolve to anything (every resolution
+target interned its bare name when its defining source was read), so it falls
+through unchanged.
+
+Two subtleties the tests pinned down: (1) the check must run **after** the
+header eval — on a fresh interp `(:use set)` is what lazily loads the module
+and interns its exports, so checking earlier wrongly bailed on resolvable
+names (`resolve_in_source_resolves_names_interned_by_the_header_eval`); and
+(2) it must not early-return past the compile_ns/imports context restores —
+structured as a `.map()` so the restores always run. Note the reader interns
+every token it scans (even on a failed mid-edit parse), so identifiers typed
+*into the buffer* still land in the interner via the read — bounded by actual
+source content, and out of scope here. Also documented the two
+process-lifetime interner growth vectors (`intern` on user text, `gensym`'s
+global counter) in `docs/memory-model.md`, and fixed that doc's stale
+free-list bullet left over from the dead-collector deletion.

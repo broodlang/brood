@@ -170,11 +170,24 @@ pub fn resolve_in_source(interp: &mut Interp, src: &str, name: &str) -> String {
         if let Some(&header) = forms.first() {
             let _ = eval::eval(&mut interp.heap, header, value::EnvId::GLOBAL);
         }
-        let out = value::symbol_name(macros::resolve_reference(&interp.heap, value::intern(name)));
+        // `intern_existing`, not `intern`: the LSP routes arbitrary identifier
+        // strings through here (cross-file workspace queries, rename probes —
+        // names that need not appear in `src` at all), and the interner never
+        // frees — each `intern` would leak an entry for the life of the
+        // daemon. A name still un-interned *here* — after the source read and
+        // the header eval (whose `(:use …)` may have just loaded a module and
+        // interned its exports) — can't resolve to anything anyway: every
+        // resolution target (a `ns/name` global, a scanned def head, an
+        // import) interned its bare name when its defining source was read.
+        // So it falls through unchanged, exactly like `resolve_reference`'s
+        // own unknown-name path. (No early `?` return: the context restores
+        // below must run either way.)
+        let out = value::intern_existing(name)
+            .map(|sym| value::symbol_name(macros::resolve_reference(&interp.heap, sym)));
         interp.heap.set_compile_ns(prev_ns);
         interp.heap.set_ns_known_names(prev_known);
         interp.heap.set_imports(prev_imports);
-        Some(out)
+        out
     })();
     interp.heap.reset_local_to(cp);
     resolved.unwrap_or_else(|| name.to_string())
@@ -570,6 +583,42 @@ mod tests {
         assert_eq!(resolve_in_source(&mut interp, "(defn baz (x) x)", "baz"), "baz");
     }
 
+    /// Resolving a never-seen identifier must not grow the interner (kernel
+    /// audit, perf #4). The LSP feeds arbitrary hovered / half-typed names
+    /// through here on every keystroke, and the interner never frees — interning
+    /// each one leaks an entry for the life of the daemon. An unknown name
+    /// resolves to itself, without a side effect.
+    #[test]
+    fn resolve_in_source_does_not_intern_unknown_names() {
+        let mut interp = Interp::new();
+        let src = "(defmodule foo (:use set))\n(defn bar (x) x)\n";
+        let name = "half-typed-lsp-identifier-xyzzy";
+        assert!(value::intern_existing(name).is_none(), "test premise");
+        assert_eq!(resolve_in_source(&mut interp, src, name), name);
+        assert!(
+            value::intern_existing(name).is_none(),
+            "resolve_in_source interned a transient LSP identifier \
+             (daemon-lifetime interner leak)"
+        );
+        // The mid-edit (non-parsing buffer) fallback still resolves the header's
+        // namespace context for names that are interned.
+        let broken = "(defmodule foo (:use set))\n(defn bar (x) (unio";
+        assert_eq!(resolve_in_source(&mut interp, broken, "union"), "set/union");
+    }
+
+    /// The interned-name check must run *after* the header eval, not before:
+    /// on a fresh interp `(:use set)` is what loads the `set` module and
+    /// interns its exports — checking earlier concluded `union` was unknown
+    /// and skipped resolution entirely (caught live while landing the
+    /// `intern_existing` change). Fresh interp + the mid-edit fallback is the
+    /// path where the lazy module load happens inside this very call.
+    #[test]
+    fn resolve_in_source_resolves_names_interned_by_the_header_eval() {
+        let mut interp = Interp::new();
+        let broken = "(defmodule foo (:use set))\n(defn bar (x) (unio";
+        assert_eq!(resolve_in_source(&mut interp, broken, "union"), "set/union");
+    }
+
     #[test]
     fn signature_of_a_prelude_fn_renders_its_params() {
         let mut interp = Interp::new();
@@ -792,3 +841,4 @@ mod tests {
         assert!(!r.diagnostics.is_empty(), "expected a diagnostic");
     }
 }
+

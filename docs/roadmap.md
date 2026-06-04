@@ -50,6 +50,9 @@ Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
 - ✅ **[perf] gc: de-dup the write-barrier `remembered` set** — repeated binds
   into one tenured frame pushed a duplicate entry each time; now one entry per
   distinct old frame. White-box regression test.
+- ✅ **[perf] lsp: `resolve_in_source` uses `intern_existing`** — the daemon no
+  longer leaks an interner entry per queried identifier; interner growth
+  vectors documented in `docs/memory-model.md`.
 - Lower-priority hardening (empty-cookie guard, monitor-leak sweep, depth guards,
   unbounded `macroexpand`, scanner line-breaks, `string->number` bignum path) —
   see the audit doc.
