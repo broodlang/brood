@@ -118,7 +118,16 @@
     (assert= (span-runs "bc" 1 (list [1 2 {:fg :yellow}])) (list ["b" {:fg :yellow}] ["c" nil])))
   (test "no spans → one nil run; empty text → no runs"
     (assert= (span-runs "abc" 0 '()) (list ["abc" nil]))
-    (assert= (span-runs "" 0 '()) '())))
+    (assert= (span-runs "" 0 '()) '()))
+  ;; `base` is caller-controlled; a huge base must not panic the host (kernel
+  ;; audit #3 — `base + text-length` overflowed i64 -> SIGABRT / OOB char slice).
+  (test "a base that overflows i64 raises a clean error, never panics the host"
+    (assert-error (span-runs "a" 9223372036854775807 '()))
+    (assert-error (span-runs "abc" 9223372036854775807 (list [0 1 {:fg :red}]))))
+  (test "a large-but-non-overflowing base still tiles correctly"
+    (assert= (span-runs "abc" 9223372036854775800
+               (list [9223372036854775801 9223372036854775806 {:fg :red}]))
+      (list ["a" nil] ["bc" {:fg :red}]))))
 
 (describe "special-form?"
   (test "core forms / macros are special"

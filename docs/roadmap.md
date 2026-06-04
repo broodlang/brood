@@ -23,8 +23,10 @@ Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
   `&optional`-default arm left `c2`'s RUNTIME handles un-rewritten across a
   compaction (`compile.rs`). Fixed (one-line reorder); deterministic regression
   test in `tests/vm_tail_arm_compaction.rs`.
-- ⬜ **[HIGH] builtins: guard `span-runs` i64 overflow** — `(span-runs … i64::MAX
-  …)` panics the host (`builtins.rs:4040`). `checked_add` + clamp slice bounds.
+- ✅ **[HIGH] builtins: guard `span-runs` i64 overflow** — `(span-runs … i64::MAX
+  …)` panicked the host (`builtins.rs:4040`). Fixed: `checked_add` → clean
+  `INDEX_OUT_OF_RANGE` error + defensive `saturating_sub`/slice clamp; overflow
+  cases added to `tests/highlight_test.blsp`.
 - ⬜ **[HIGH] dist: bound the per-link writer channel** — unbounded mpsc lets a
   stalled peer OOM the writer (`dist.rs:949`). Use `sync_channel`; drop on `Full`.
 - ⬜ **[MED] wire: `prealloc` byte-count-as-element-count** amplifies a frame into
