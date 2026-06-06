@@ -378,7 +378,7 @@ impl CompiledClosure {
     /// arm, then the most required params; ties resolve to the later arm (Rust's
     /// `max_by_key`, same as eval). Returns the winner's compiled body iff it was
     /// VM-eligible — otherwise `None`, so the tree-walker runs the *same* arm.
-    fn arm_for(&self, argc: usize) -> Option<&Arc<CompiledArm>> {
+    pub(crate) fn arm_for(&self, argc: usize) -> Option<&Arc<CompiledArm>> {
         let winner = self
             .arms
             .iter()
@@ -1015,14 +1015,21 @@ fn cache_key(heap: &Heap, id: ClosureId) -> Option<VmCacheKey> {
 /// not its recycled LOCAL handle. `None` (ineligible) is cached too — but only when
 /// the closure *has* a stable key; an unkeyable closure simply defers each call
 /// (cheap: a region check + a body-handle peek).
-fn compiled_for(heap: &Heap, id: ClosureId) -> Option<Arc<CompiledClosure>> {
+/// The per-call hot path: resolve `id`'s `argc` arm, cloning **only** the
+/// `Arc<CompiledArm>` (not the enclosing `CompiledClosure`). On a cache hit
+/// (the overwhelmingly common case — a recursive or repeated callee) this is a
+/// single `vm_cache_arm` lookup + one arm clone. A miss compiles + caches the
+/// closure once, then resolves the arm. `None` = no VM arm for `argc` (defer to
+/// the tree-walker), identical to `compiled_for(..).and_then(|c| c.arm_for(argc))`.
+fn compiled_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Option<Arc<CompiledArm>> {
     let key = cache_key(heap, id)?;
-    if let Some(entry) = heap.vm_cache_get(key) {
-        return entry;
+    if let Some(hit) = heap.vm_cache_arm(key, argc) {
+        return hit;
     }
+    // Cold: compile + cache the closure once, then take the arm.
     let compiled = compile_closure(heap, id).map(Arc::new);
     heap.vm_cache_put(key, compiled.clone());
-    compiled
+    compiled.and_then(|cc| cc.arm_for(argc).cloned())
 }
 
 // ===================== executor (Node → value) =====================
@@ -1468,20 +1475,19 @@ fn dispatch(
     // to the tree-walker via `eval::apply` (which is just `call_native` for a
     // native — cheap).
     if let Value::Fn(id) = cur_callee {
-        if let Some(cc) = compiled_for(heap, id) {
-            if let Some(arm) = cc.arm_for(cur_argv.len()) {
-                let arm = Arc::clone(arm);
-                // Run the callee in *its own* captured env (Stage 2c): a
-                // global-capturing closure (`env == None`) resolves to the process
-                // global as before, while a local-capturing one resolves its free
-                // vars in the env it closed over. `genv` (the caller's env) is only
-                // for natives below.
-                let callee_env = heap.closure(id).env.unwrap_or_else(|| heap.global());
-                if tail {
-                    return Ok(Step::Tail { compiled: arm, args: cur_argv, genv: callee_env });
-                }
-                return Ok(Step::Done(vm_apply(heap, arm, &cur_argv, callee_env)?));
+        // Resolve the arm cloning only the `Arc<CompiledArm>` (not the enclosing
+        // `CompiledClosure`) — one fewer Arc clone per call on the hot path.
+        if let Some(arm) = compiled_arm_for(heap, id, cur_argv.len()) {
+            // Run the callee in *its own* captured env (Stage 2c): a
+            // global-capturing closure (`env == None`) resolves to the process
+            // global as before, while a local-capturing one resolves its free
+            // vars in the env it closed over. `genv` (the caller's env) is only
+            // for natives below.
+            let callee_env = heap.closure(id).env.unwrap_or_else(|| heap.global());
+            if tail {
+                return Ok(Step::Tail { compiled: arm, args: cur_argv, genv: callee_env });
             }
+            return Ok(Step::Done(vm_apply(heap, arm, &cur_argv, callee_env)?));
         }
     }
     Ok(Step::Done(crate::eval::apply(heap, cur_callee, &cur_argv, genv)?))

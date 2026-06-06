@@ -4444,6 +4444,24 @@ impl Heap {
         self.vm_cache.borrow().get(&k).cloned()
     }
 
+    /// Like [`vm_cache_get`] but resolves straight to the `argc` arm under the
+    /// cache borrow, cloning **only** that `Arc<CompiledArm>` — never the whole
+    /// `CompiledClosure`. The compiling VM's per-call hot path (`compiled_arm_for`)
+    /// uses this so each closure call pays one arm clone instead of a transient
+    /// `CompiledClosure` clone + an arm clone. Outer `None` = key absent (a cache
+    /// miss to compile); `Some(None)` = present but no VM arm for `argc` (defer to
+    /// the tree-walker); `Some(Some(arm))` = the compiled arm.
+    pub fn vm_cache_arm(
+        &self,
+        k: VmCacheKey,
+        argc: usize,
+    ) -> Option<Option<Arc<crate::eval::compile::CompiledArm>>> {
+        self.vm_cache
+            .borrow()
+            .get(&k)
+            .map(|cc| cc.as_ref().and_then(|cc| cc.arm_for(argc).cloned()))
+    }
+
     /// Record the compile result for closure key `k` (eligible body or `None`).
     pub fn vm_cache_put(&self, k: VmCacheKey, v: Option<Arc<crate::eval::compile::CompiledClosure>>) {
         self.vm_cache.borrow_mut().insert(k, v);
