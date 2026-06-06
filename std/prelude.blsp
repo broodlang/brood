@@ -1339,13 +1339,21 @@ runtime isn't a node yet."
 (defn range (a & more)
   "A list of integers: `(range hi)` is 0..hi-1, `(range lo hi)` is lo..hi-1, `(range lo hi step)` strides by `step`."
   (cond
-    (empty? more) (range--collect 0 a 1 nil)
-    (empty? (rest more)) (range--collect a (first more) 1 nil)
-    else (range--collect a (first more) (second more) nil)))
-(defn range--collect (i hi step acc)
-  (if (if (> step 0) (< i hi) (> i hi))
-    (range--collect (+ i step) hi step (cons i acc))
-    (reverse acc)))
+    (empty? more) (range--down (- a 1) 0 1 nil)
+    (empty? (rest more)) (range--gen a (first more) 1)
+    else (range--gen a (first more) (second more))))
+;; Build ascending by counting DOWN from the last in-range value, consing as we
+;; go — so the list comes out in order with no closing `reverse`. That halves
+;; allocation (n cons cells, not 2n) and drops the extra O(n) reverse pass.
+;; `range--gen` finds that top value: the largest lo+step*k that's still in range.
+(defn range--gen (lo hi step)
+  (if (> step 0)
+    (if (< lo hi) (range--down (+ lo (* step (quot (- (- hi 1) lo) step))) lo step nil) nil)
+    (if (> lo hi) (range--down (+ lo (* step (quot (- (+ hi 1) lo) step))) lo step nil) nil)))
+(defn range--down (i stop step acc)
+  (if (if (> step 0) (>= i stop) (<= i stop))
+    (range--down (- i step) stop step (cons i acc))
+    acc))
 
 ;; (take n coll) -> the first n elements (fewer if coll is shorter).
 (defn take (n coll)
