@@ -280,6 +280,15 @@ no throwaway lists):
 (transduce (xtake-while (fn (x) (< x 100))) + 0 (map sq (range 1000)))
 ```
 
+**`range` is a reducible lazy range — folding it builds no list.** `(range n)`
+returns a lazy range, not a materialised list: `reduce` / `fold` / `sum` /
+`count` walk it in a counted loop with **zero allocation** (so `(reduce + 0
+(range 1_000_000))` is O(1) memory, not a million cons cells). It still behaves
+as the list of those integers everywhere else — `first` / `rest` / `nth` / `=`
+against a list / printing all work, and `map` / `filter` realise it on demand —
+so you never have to think about it except to know the common `(reduce f init
+(range n))` shape is already streaming. (Empty ranges are `nil`.)
+
 ### Hot inner loops — fuse passes, skip throwaway intermediates
 
 The combinators above read well, but in a function called hundreds of times per
