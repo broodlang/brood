@@ -974,7 +974,13 @@ detection are deferred. Full reference: [distribution.md](distribution.md).
   sequences — lists *and* vectors, read as sequences — left to right, returning
   a **list**; wrap in `(into [] …)` for a vector.
 - `range`: `(range hi)` → `0..hi-1`; `(range lo hi)` → `lo..hi-1`;
-  `(range lo hi step)` steps (ascending or descending).
+  `(range lo hi step)` steps (ascending or descending). The result is a **lazy
+  range** — an O(1) value that stands in for the list it denotes: it prints,
+  compares (`=`), hashes, and `type-of`s exactly like that list, and
+  `fold`/`reduce`/`sum`/`count` consume it in a counted loop with **zero
+  allocation**; any other operation realises it to a real list on demand. An
+  empty range is `nil`. `(range? x)` tests for the lazy handle (realised ranges
+  are ordinary lists, so `range?` is false for them).
 - `take`/`drop` clamp to the sequence length; `take-last`/`drop-last` take/drop
   from the end. `take-while`/`drop-while` split on the first element that fails
   the predicate. `split-at` returns `[front back]` — the first `n` items and the
@@ -1029,7 +1035,7 @@ kernel primitive), so neither walks nor materialises the entries.
 
 ### Predicates
 `nil?`  `pair?`  `list?`  `symbol?`  `keyword?`  `string?`  `number?`  `int?`
-`float?`  `bool?`  `fn?`  `vector?`  `map?`  `ref?`
+`float?`  `bool?`  `fn?`  `vector?`  `map?`  `ref?`  `range?`
 
 - `(type-of x)` returns the runtime type tag as a keyword — `:int` `:float`
   `:string` `:symbol` `:keyword` `:bool` `:nil` `:pair` `:vector` `:map` `:fn`
