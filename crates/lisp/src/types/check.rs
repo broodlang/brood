@@ -519,6 +519,44 @@ mod tests {
     }
 
     #[test]
+    fn variadic_defn_with_sig_does_not_get_a_false_arity_warning() {
+        // Regression: the `(sig …)` parser only builds *fixed*-arity sigs, so a
+        // sig on a **variadic** defn would record an exact arity equal to the
+        // declared param count. A read-only whole-file check can't inspect the
+        // real (unevaluated) closure, so it falls back to that count — and a call
+        // with more args than the sig lists would falsely warn. The def site's
+        // own `& rest` must suppress the sig-derived exact arity.
+        let w = file_warnings("(sig f (int -> int))\n(defn f (x & rest) x)\n(f 1 2 3)");
+        assert!(
+            w.iter()
+                .all(|m| !(m.contains("f:") && m.contains("number of arguments"))),
+            "a variadic defn must not get a false arity warning: {w:?}"
+        );
+        // `&rest` spelling, and below the declared count is fine too.
+        let w = file_warnings("(sig g (int int -> int))\n(defn g (a &rest more) a)\n(g 1 2 3 4)");
+        assert!(
+            w.iter()
+                .all(|m| !(m.contains("g:") && m.contains("number of arguments"))),
+            "&rest variadic defn must not get a false arity warning: {w:?}"
+        );
+        // A multi-arity fn with a variadic arm is likewise variadic.
+        let w =
+            file_warnings("(sig h (int -> int))\n(defn h ((x) x) ((x & ys) x))\n(h 1 2 3)");
+        assert!(
+            w.iter()
+                .all(|m| !(m.contains("h:") && m.contains("number of arguments"))),
+            "multi-arity variadic defn must not get a false arity warning: {w:?}"
+        );
+        // Control: a *fixed*-arity sig'd defn STILL gets its arity checked (the
+        // fix must not over-suppress) — mirrors the case above.
+        let w = file_warnings("(sig p (int int -> int))\n(defn p (a b) (+ a b))\n(p 1)");
+        assert!(
+            w.iter().any(|m| m.contains("expected 2")),
+            "fixed-arity sig'd defn must still be arity-checked: {w:?}"
+        );
+    }
+
+    #[test]
     fn dead_clause_flagged_for_a_sig_typed_param() {
         // A `match` literal pattern that can't match the parameter's declared type.
         let w =

@@ -62,6 +62,15 @@ pub(super) struct Ctx {
     /// evaluated, so these aren't in `heap`'s global table — we track them
     /// here so a later form doesn't flag them as unbound.
     file_globals: HashSet<Symbol>,
+    /// File-local `def`/`defn` names whose value is a **variadic** `fn` (a `&`
+    /// rest param). The declared `(sig …)` parser only builds fixed-arity sigs,
+    /// so a sig on a variadic defn would otherwise yield a spurious *exact* arity
+    /// (`Arity::exact(sig.params.len())`) and a false "wrong number of arguments"
+    /// warning when called with more args. Recording the def site's real
+    /// variadic-ness lets the arity check suppress the sig-derived exact arity —
+    /// preserving the advisory no-false-positives rule. Populated by
+    /// [`collect_def_names`](super::walk::collect_def_names).
+    variadic_globals: HashSet<Symbol>,
     /// `(sig name (… -> …))` declarations — authoritative signatures the user
     /// wrote, read *first* by the call-checker (ahead of primitive/curated/
     /// inferred). Populated by [`check_file`]'s scan of the un-expanded forms.
@@ -220,6 +229,16 @@ impl Ctx {
     /// accumulator threads through [`check_file`].
     pub(super) fn add_file_global(&mut self, sym: Symbol) {
         self.file_globals.insert(sym);
+    }
+    /// Record that file-local `sym`'s value is a **variadic** `fn` (has a `&`
+    /// rest param). Consulted by the arity check so a `(sig …)`-derived *exact*
+    /// arity is never used to flag a variadic defn (see `variadic_globals`).
+    pub(super) fn mark_variadic_global(&mut self, sym: Symbol) {
+        self.variadic_globals.insert(sym);
+    }
+    /// Is `sym` a file-local definition whose value is a variadic `fn`?
+    pub(super) fn is_variadic_global(&self, sym: Symbol) -> bool {
+        self.variadic_globals.contains(&sym)
     }
     /// The user-declared signature for `sym` from a `(sig …)` form, if any.
     pub(super) fn declared_sig(&self, sym: Symbol) -> Option<Sig> {

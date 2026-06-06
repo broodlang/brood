@@ -114,9 +114,10 @@ pub struct ClosureArmMsg {
 /// Maximum nesting depth `to_message` will descend into. Past this, the
 /// serialiser errors out — a deeply nested local data structure (built by a
 /// `cons`-in-a-loop or a runaway recursion) should produce a clean error
-/// rather than aborting the sender thread with a stack overflow. Matches
-/// `dist::MAX_DECODE_DEPTH` so wire round-trip is symmetric.
-const MAX_MESSAGE_DEPTH: u32 = 256;
+/// rather than aborting the sender thread with a stack overflow. The wire
+/// decoder (`dist::wire::MAX_DECODE_DEPTH`) is defined in terms of this so the
+/// two can't diverge — wire round-trip stays symmetric.
+pub(crate) const MAX_MESSAGE_DEPTH: u32 = 256;
 
 /// Deep-copy a value out of `heap` into a `Send` message. A closure is sent as
 /// data (see [`ClosureMsg`]); builtins and macros can't be.

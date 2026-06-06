@@ -9,11 +9,13 @@
 //! the LSP).
 //!
 //! Runs over the **macroexpanded** forms (like the rest of the checker), so
-//! `match`/`case`/threading macros are already lowered to the core special
-//! forms and a `defn` is `(def name (fn …))`. That leaves a small, fixed set of
-//! tail-propagating special forms to model — `if` / `when` / `unless` / `cond`
-//! / `do` / `let` / `let*` / `letrec` / `and` / `or` — mirroring the evaluator's
-//! `'tail:` handling. **Conservative by design:** it descends only into forms
+//! `match`/`case`/threading macros — and `when`/`unless`/`cond`/`and`/`or`,
+//! which are all prelude macros lowering to `if`/`do`/`let` — are already gone,
+//! and a `defn` is `(def name (fn …))`. That leaves a small, fixed set of
+//! tail-propagating *special forms* to model — `if` / `do` / `let` / `let*` /
+//! `letrec` — mirroring the evaluator's `'tail:` handling. (`def`/`defmacro`
+//! survive expansion too and are handled as nested-definition cases.)
+//! **Conservative by design:** it descends only into forms
 //! whose tail structure it knows, stops at nested `fn`/`lambda` (a self-call
 //! inside an inner closure is a different frame) and at `quote`/`quasiquote`
 //! (data), and only flags a self-call it is *certain* sits in non-tail
@@ -126,30 +128,9 @@ fn walk(heap: &Heap, form: Value, tail: bool, name: Symbol, out: &mut Vec<(Optio
             }
             return;
         }
-        if value::symbol_is(head, kw::WHEN) || value::symbol_is(head, kw::UNLESS) {
-            // (when test body…): test non-tail; body is an implicit `do`.
-            if let Some(&t) = items.get(1) {
-                walk(heap, t, false, name, out);
-            }
-            analyze_body(heap, name, &items[2..], out);
-            return;
-        }
-        if value::symbol_is(head, kw::DO)
-            || value::symbol_is(head, kw::AND)
-            || value::symbol_is(head, kw::OR)
-        {
-            // do: last form is tail. and/or: the last operand is the result
-            // (tail); earlier operands are tested (non-tail). Same shape.
+        if value::symbol_is(head, kw::DO) {
+            // do: the last form is tail; earlier forms are for effect (non-tail).
             analyze_body(heap, name, &items[1..], out);
-            return;
-        }
-        if value::symbol_is(head, kw::COND) {
-            // (cond test1 res1 test2 res2 … [:else resN]) — flat. Odd offsets
-            // (1,3,…) are tests (non-tail); even offsets (2,4,…) are results
-            // (inherit `tail`). `:else` sits in a test slot.
-            for (i, &child) in items.iter().enumerate().skip(1) {
-                walk(heap, child, tail && i % 2 == 0, name, out);
-            }
             return;
         }
         if value::symbol_is(head, kw::LET)

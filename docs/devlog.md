@@ -281,6 +281,7 @@ Every session, oldest first. Full text: [devlog-archive.md](archive/devlog-archi
 - **2026-06-04** — gc: de-dup the write-barrier `remembered` set (repeated binds into one tenured frame no longer grow it — kernel audit, perf #3)
 - **2026-06-04** — lsp: `resolve_in_source` stops interning transient identifiers (daemon-lifetime interner leak — kernel audit, perf #4)
 - **2026-06-04** — kernel-audit hardening batch: min cookie length, bounded `macroexpand`, bignum `string->number`, scanner line breaks + hard-error hex escapes, epoch-tripwire mask, dead-watcher monitor sweep
+- **2026-06-06** — whole-kernel review sweep: every Rust file reviewed (duplication / style / bugs / comments), then all findings fixed — VM `quote` divergence, LSP interning leak, timer cancellation, iterative `flush_rt_pair`, `from_node` wire excision, cross-binary dedup into `cli_support`, printer control-char escapes, ~20 comment-drift fixes
 
 ---
 
@@ -1196,3 +1197,100 @@ a short `$BROOD_COOKIE` now fails `node-start` (intended hardening);
 `PoisonBits` is inert with no writer (the audit's explicit call was to keep
 it; deleting it wholesale — ~25 accessor checks + the `BROOD_ENV_DEBUG`
 path — is a candidate follow-up cleanup).
+
+## 2026-06-06 — whole-kernel review sweep: review everything, fix everything
+
+A full review of all ~50k lines of Rust (every file in `crates/`), fanned out
+across parallel reviewers per layer plus a cross-file duplication sweep, then a
+fix pass over every confirmed finding. No high-severity bugs surfaced — the
+06-04 kernel-audit series clearly held — but the sweep caught real items in
+every category. 535/535 tests pass after.
+
+**Bugs / behavior fixes:**
+
+- **eval/VM: `(quote a b)` divergence.** The VM compiled extra quote args away
+  to `Const(a)`; the tree-walker rejects them. The VM now defers non-2-element
+  quotes so both engines raise the same arity error. Also: a top-level `~@`
+  (splice outside any sequence) is now a clear error instead of silently
+  building `(list 'unquote-splicing …)`.
+- **introspect/LSP: the transient-interning fix completed.** 06-04 gated
+  `resolve_in_source`; `signature`, `arglist_tokens`, and `source_location`
+  still interned every half-typed identifier from signature-help/completion.
+  All three now gate on `intern_existing` (regression test extended).
+- **process: timer entries get generation-stamped lazy cancellation.** A
+  `receive`+`after` loop re-armed a fresh TIMERS entry per park with no
+  disarm; superseded entries fired spurious wakeups. Each park bumps a
+  per-mailbox `timer_gen`; stale entries are dropped at fire time.
+- **gc: `flush_rt_pair` cdr spine is iterative** (the in-code "2a hardening
+  follow-up"), so a 100k-element quoted literal promoted to RUNTIME no longer
+  blows the native stack at the next `runtime-collect`. Regression test in
+  `tests/gc.rs`, green under `BROOD_GC_VERIFY=1`.
+- **printer: control chars round-trip.** ESC/NUL printed as raw bytes despite
+  the reader accepting `\e`/`\0`; the readable printer now emits `\e`, `\0`,
+  and `\u{..}` for other C0 chars (reader already supported `\u{}` — no reader
+  change). `docs/language.md` escapes row updated.
+- **net: unclaimed-accept reaper + a loud BINARY-UNSAFE contract.** Accepted
+  sockets never claimed via `tcp-controlling-process` leaked fd+registry
+  forever (DoS surface for brood-net); reaped after 30s. The
+  `from_utf8_lossy` text-only limitation is now documented prominently —
+  faithful binary delivery needs a bytes value kind first (**roadmap
+  candidate**).
+- **types: variadic-defn false-positive guard.** `(sig …)` can't express
+  rest-arity, so a declared sig on a variadic `defn` produced a *false* arity
+  warning (verified real in `--check` mode). Walk now tracks variadic globals
+  and suppresses the sig-derived exact arity. Dead post-expansion
+  `when/unless/cond/and/or` arms deleted from the recursion pass.
+- **mcp: spec-correct `-32700`** on a malformed line instead of tearing down
+  the session; `value_to_json` errors loudly on `:foo`/`"foo"` key collisions
+  instead of last-wins; the 30s watchdog now excludes the dispatcher's own
+  catalogue rebuild. **gui:** the redundant second full-framebuffer clear per
+  frame is gone, and glyph-cache probes no longer allocate a `String` per
+  cluster (zero-alloc `char` fast path).
+- **dist: `from_node` excised from the wire** (Monitor/Demonitor/Link/Unlink/
+  Exit). The reader always ignored it in favor of the authenticated peer;
+  shipping a security-sensitive vestige invited someone to wire it back up.
+  **Breaking** wire change (greenfield) — `PROTOCOL_MAGIC` bumped `BRD\x04` →
+  **`BRD\x05`** so a cross-revision link aborts cleanly at the magic check
+  instead of mis-decoding the shifted fields mid-session (caught by the
+  follow-up regression review). Stale `Auth` MAC-formula doc now points at
+  `compute_mac` as authoritative.
+
+**Duplication folded (the drift-prone ones):**
+
+- The engines' passthrough-redirect core (tick + deadline + callable gate) is
+  one helper — the two copies had already drifted slightly. Runaway-guard
+  error construction (stack/mem/deadline) likewise.
+- The wakeup protocol (`waiter.take()` + enqueue at `exit`/`deliver`/
+  `wake_for_timeout`) is a single `wake_parked`; registry-lookup-then-act is
+  `with_mailbox`.
+- The two binaries: `eval_file`, the main-stack bootstrap
+  (`run_on_main_stack`), the terminal guards, and `read_source_or_exit` all
+  live in `cli_support` now; nest's release mechanism moved to its own
+  `release.rs`. The remaining `call_form` migration sites finished.
+- builtins: the triplicated frame-op prologue (`term-draw`/`term-emit`/
+  `gui-draw`) shares one `frame_ops` extractor; bitwise/bigint type errors go
+  through `wrong_type` (offending value shown) like everything else;
+  face-keyword interning hoisted out of the per-op render path.
+- heap: the LOCAL accessor poison+epoch preamble is a `local_gc_check!` macro
+  across 6 accessors; slab live-count/bytes sums deduped. dist: six
+  `*_remote` senders route through one `send_frame` with uniform error
+  handling; `MAX_DECODE_DEPTH` is defined from `MAX_MESSAGE_DEPTH`.
+  lsp: span→Range is `LineIndex::range` (8 call sites); cross-file
+  references/rename reuse open buffers' cached `Analysis` instead of
+  re-parsing per request. syntax: one `is_trivia_ws` + `skip_line_comment`.
+
+**Comment drift** (~20 sites): stale MAC formula, `mouse_to_value`
+contradicting its own test, the interner's "one allocation" claim, misattached
+doc blocks (`deregister`, `arity_message`, `cmd_doc`/`cmd_update`, slurp/
+read-line + file-mtime/file-size bleed), and newly documented load-bearing
+invariants — `scope_at`'s `<=` tie-break (shadowing depends on it), the
+mailbox `scanned` write-before-read contract, gui's paint coordinate contract
+and borrow-order notes, `EnvId::GLOBAL`'s reserved region 0b11 (now
+debug_assert'd at every mint site).
+
+Reviewed-and-accepted (no change): the message-copy vs wire-codec vs bundle
+"duplication" is intentional layering over the shared `Message` seam; the
+eval/VM split is disciplined (VM calls into `eval::` helpers — no drift
+found); keyword tables are deliberately disjoint; printing is single-sourced.
+The parked-waiter teardown leak in an embedded long-lived `Interp` is
+documented, not fixed (no teardown drain path today).

@@ -169,15 +169,12 @@ fn line_delete_range(src: &str, span: Span, li: &LineIndex) -> Range {
     let post_ws = src[end..line_end]
         .chars()
         .all(|c| c == ' ' || c == '\t' || c == '\n');
-    let (s, e) = if pre_ws && post_ws {
-        (line_start as u32, line_end as u32)
+    let deleted = if pre_ws && post_ws {
+        Span { start: line_start as u32, end: line_end as u32 }
     } else {
-        (span.start, span.end)
+        span
     };
-    Range {
-        start: li.position(src, s),
-        end: li.position(src, e),
-    }
+    li.range(src, deleted)
 }
 
 /// One "Replace with `X`" quick-fix targeting the diagnostic's range — preferred,

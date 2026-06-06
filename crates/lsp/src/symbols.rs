@@ -4,7 +4,7 @@
 //! `selection_range` (what the editor highlights when you pick it).
 
 use brood::syntax::cst::Node;
-use lsp_types::{DocumentSymbol, Range, SymbolKind};
+use lsp_types::{DocumentSymbol, SymbolKind};
 
 use crate::defs::{self, DefKind};
 use crate::line_index::LineIndex;
@@ -13,9 +13,6 @@ pub fn document_symbols(root: &Node, text: &str, index: &LineIndex) -> Vec<Docum
     defs::top_level(root, text)
         .into_iter()
         .map(|d| {
-            let range = |s: brood::error::Span| {
-                Range::new(index.position(text, s.start), index.position(text, s.end))
-            };
             #[allow(deprecated)] // the `deprecated` field is required by the struct
             DocumentSymbol {
                 name: d.name.to_string(),
@@ -26,8 +23,8 @@ pub fn document_symbols(root: &Node, text: &str, index: &LineIndex) -> Vec<Docum
                 },
                 tags: None,
                 deprecated: None,
-                range: range(d.full_span),
-                selection_range: range(d.name_span),
+                range: index.range(text, d.full_span),
+                selection_range: index.range(text, d.name_span),
                 children: None,
             }
         })

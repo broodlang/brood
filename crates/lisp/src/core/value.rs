@@ -50,8 +50,10 @@ pub fn intern(name: &str) -> Symbol {
     }
     // A new name: its index in the append-only `NAMES` vec *is* its id. Pushing
     // while holding the `IDS` lock keeps a single writer, so ids stay dense and
-    // the two tables never disagree. One allocation, not two — `NAMES` and
-    // `IDS` share the same `String` (cloned once from `name: &str` here).
+    // the two tables never disagree. `NAMES` and `IDS` each own their own copy of
+    // the name (the `clone` below), so a new name costs two `String` allocations
+    // — only on the cold intern-a-new-name path; repeat lookups hit `IDS` and
+    // allocate nothing.
     let owned = name.to_string();
     let id = NAMES.push(owned.clone()) as Symbol;
     ids.insert(owned, id);
@@ -174,6 +176,12 @@ pub const AGE_OLD: u64 = 1u64 << AGE_SHIFT;
 pub const LOCAL: u8 = 0b00;
 pub const PRELUDE: u8 = 0b01;
 pub const RUNTIME: u8 = 0b10;
+/// The two region bits `0b11` are **reserved as un-mintable**: [`EnvId::GLOBAL`]
+/// is `u64::MAX`, whose region field is `0b11`, so it round-trips through
+/// `canonical()` as a distinct sentinel that no real handle can collide with.
+/// Every handle constructor debug-asserts its region stays below this — a guard
+/// against a future fourth region quietly stealing `0b11` and aliasing GLOBAL.
+pub const REGION_RESERVED: u8 = 0b11;
 
 macro_rules! handle {
     ($name:ident) => {
@@ -198,7 +206,9 @@ macro_rules! handle {
                     "handle index {} overflows the 32-bit index field",
                     index,
                 );
-                $name((index as u64) | (((gen as u64) & GEN_MASK) << GEN_SHIFT))
+                let h = $name((index as u64) | (((gen as u64) & GEN_MASK) << GEN_SHIFT));
+                debug_assert!(h.region() < REGION_RESERVED, "region 0b11 is reserved for EnvId::GLOBAL");
+                h
             }
             /// A LOCAL handle in the **old (tenured) generation**, stamped with the
             /// old-space epoch `gen`. Same index space as the nursery but the
@@ -210,7 +220,9 @@ macro_rules! handle {
                     "handle index {} overflows the 32-bit index field",
                     index,
                 );
-                $name((index as u64) | (((gen as u64) & GEN_MASK) << GEN_SHIFT) | AGE_OLD)
+                let h = $name((index as u64) | (((gen as u64) & GEN_MASK) << GEN_SHIFT) | AGE_OLD);
+                debug_assert!(h.region() < REGION_RESERVED, "region 0b11 is reserved for EnvId::GLOBAL");
+                h
             }
             /// A handle into the immutable shared prelude region (no generation).
             #[inline]
@@ -220,6 +232,7 @@ macro_rules! handle {
                     "prelude index {} overflows",
                     index
                 );
+                debug_assert!(PRELUDE < REGION_RESERVED, "region 0b11 is reserved for EnvId::GLOBAL");
                 $name((index as u64) | ((PRELUDE as u64) << REGION_SHIFT))
             }
             /// A handle into the runtime's mutable shared code region (no generation).
@@ -230,6 +243,7 @@ macro_rules! handle {
                     "runtime index {} overflows",
                     index
                 );
+                debug_assert!(RUNTIME < REGION_RESERVED, "region 0b11 is reserved for EnvId::GLOBAL");
                 $name((index as u64) | ((RUNTIME as u64) << REGION_SHIFT))
             }
             /// Which region this handle addresses ([`LOCAL`]/[`PRELUDE`]/[`RUNTIME`]).

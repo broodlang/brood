@@ -11,6 +11,12 @@
 //!                    u32-LE module-count, then per module: u32-LE name-len, name, u32-LE src-len, src
 //! ```
 //!
+//! The footer's archive-len is `u64` while every internal length (manifest,
+//! module count, name, src) is `u32`: a single archive could in principle exceed
+//! 4 GiB even though no individual source field will, so the offset that locates
+//! the whole archive needs the wider type — the `u32`s deliberately cap each
+//! component well below that.
+//!
 //! Appended trailing bytes don't disturb the ELF/PE/Mach-O loader (the classic
 //! self-extracting-archive trick). The footer is read last-bytes-first; its
 //! magic disambiguates a release binary from a plain `brood`. Everything is
@@ -99,7 +105,12 @@ fn parse_archive(bytes: &[u8]) -> Option<Bundle> {
     let mut c = Cursor { b: bytes, pos: 0 };
     let manifest = String::from_utf8(c.take_lp()?.to_vec()).ok()?;
     let count = c.take_u32()? as usize;
-    let mut modules = Vec::with_capacity(count);
+    // `count` comes from untrusted file bytes — a corrupt trailer can claim a
+    // huge module count. The smallest possible module is two empty length-prefixed
+    // runs (name + src = 8 bytes), so cap the pre-allocation at what the remaining
+    // bytes could actually hold; the loop still bails via `take_lp` on truncation.
+    let cap = count.min(bytes.len() / 8);
+    let mut modules = Vec::with_capacity(cap);
     for _ in 0..count {
         let name = String::from_utf8(c.take_lp()?.to_vec()).ok()?;
         let src = String::from_utf8(c.take_lp()?.to_vec()).ok()?;
@@ -108,20 +119,27 @@ fn parse_archive(bytes: &[u8]) -> Option<Bundle> {
     Some(Bundle { manifest, modules })
 }
 
-/// If `bytes` ends with a valid footer, return `(archive_start, archive_len)`.
-/// `None` means this is a plain (non-release) binary.
-fn footer(bytes: &[u8]) -> Option<(usize, usize)> {
-    if bytes.len() < FOOTER_LEN {
-        return None;
-    }
-    let foot = &bytes[bytes.len() - FOOTER_LEN..];
+/// Decode the 20 footer bytes: check magic + format version, return the archive
+/// length. `None` if the magic/version don't match (i.e. not one of our bundles).
+/// Shared by the slice-based [`footer`] and the seek/read-based [`mounted`].
+fn decode_footer(foot: &[u8; FOOTER_LEN]) -> Option<u64> {
     if &foot[0..8] != MAGIC {
         return None;
     }
     if u32::from_le_bytes(foot[8..12].try_into().ok()?) != FORMAT_VERSION {
         return None;
     }
-    let alen = u64::from_le_bytes(foot[12..20].try_into().ok()?) as usize;
+    Some(u64::from_le_bytes(foot[12..20].try_into().ok()?))
+}
+
+/// If `bytes` ends with a valid footer, return `(archive_start, archive_len)`.
+/// `None` means this is a plain (non-release) binary.
+fn footer(bytes: &[u8]) -> Option<(usize, usize)> {
+    if bytes.len() < FOOTER_LEN {
+        return None;
+    }
+    let foot: &[u8; FOOTER_LEN] = bytes[bytes.len() - FOOTER_LEN..].try_into().ok()?;
+    let alen = decode_footer(foot)? as usize;
     let total = FOOTER_LEN.checked_add(alen)?;
     if bytes.len() < total {
         return None;
@@ -149,11 +167,7 @@ pub fn mounted() -> &'static Option<Bundle> {
         f.seek(SeekFrom::Start(len - FOOTER_LEN as u64)).ok()?;
         let mut foot = [0u8; FOOTER_LEN];
         f.read_exact(&mut foot).ok()?;
-        if &foot[0..8] != MAGIC || u32::from_le_bytes(foot[8..12].try_into().ok()?) != FORMAT_VERSION
-        {
-            return None;
-        }
-        let alen = u64::from_le_bytes(foot[12..20].try_into().ok()?);
+        let alen = decode_footer(&foot)?;
         if len < FOOTER_LEN as u64 + alen {
             return None;
         }

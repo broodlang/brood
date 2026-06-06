@@ -122,17 +122,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
     // frame count — see `process::stack_overflow_check` for why.)
     let stack_probe = 0u8;
     if let Some(used) = crate::process::stack_overflow_check(&stack_probe as *const u8 as usize) {
-        return Err(LispError::runtime(format!(
-            "recursion too deep: used {used} bytes of stack, over the \
-             {}-byte budget (runaway non-tail recursion?)",
-            crate::process::stack_budget()
-        ))
-        .with_code(crate::error::error_codes::STACK_DEPTH_EXCEEDED)
-        .with_hint(
-            "rewrite as a tail-recursive loop (proper tail calls are O(1) stack), \
-             or raise the budget with BROOD_STACK_BUDGET",
-        )
-        .or_form_pos(heap, expr));
+        return Err(stack_depth_error(used).or_form_pos(heap, expr));
     }
 
     'tail: loop {
@@ -257,13 +247,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
         // safepoint straight into the hard-limit abort. Cheap when disabled: one
         // relaxed load of a zero, early `None`.
         if let Some(used) = crate::core::alloc::soft_limit_hit() {
-            return Err(LispError::runtime(format!(
-                "memory limit exceeded: {used} bytes allocated process-wide \
-                 exceeds the {}-byte soft limit (raise or unset BROOD_MEM_LIMIT)",
-                crate::core::alloc::soft_limit()
-            ))
-            .with_code(crate::error::error_codes::MEMORY_LIMIT)
-            .or_form_pos(heap, expr));
+            return Err(memory_limit_error(used).or_form_pos(heap, expr));
         }
         // Reduction-counted preemption: bound the work a process does before it
         // yields its worker (fairness — a CPU-bound process can't monopolise a
@@ -277,10 +261,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
         // ordinary error through the dispatcher's existing handling. Cheap when no
         // deadline is armed (one thread-local `Cell` get).
         if crate::process::deadline_exceeded() {
-            return Err(LispError::runtime(
-                "evaluation exceeded its time limit (MCP tool watchdog)",
-            )
-            .or_form_pos(heap, expr));
+            return Err(deadline_error().or_form_pos(heap, expr));
         }
 
         let (head, rest) = match expr {
@@ -654,30 +635,17 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     // function; anything else falls through to the normal path.
                     if let Some((head, map)) = passthrough_arm(heap, id, cur_argv.len()) {
                         let cl_env = heap.closure(id).env.unwrap_or_else(|| heap.global());
+                        // Tree-walker inner-head resolution: a full `eval` (a symbol
+                        // lookup — no GC, so `cur_argv` stays valid). The shared
+                        // `passthrough_redirect_ok` then gates the redirect (callable
+                        // inner only), counts the reduction, and honours the deadline.
                         let inner = eval(heap, head, cl_env)
                             .map_err(|e| e.or_form_pos(heap, call_form))?;
-                        if matches!(inner, Value::Fn(_) | Value::Native(_)) {
+                        if passthrough_redirect_ok(inner).map_err(|e| e.or_form_pos(heap, call_form))? {
                             let mut next_argv: SmallVec<[Value; 8]> =
                                 SmallVec::with_capacity(map.len());
                             for &i in &map {
                                 next_argv.push(cur_argv[i]);
-                            }
-                            // The elided inner call would have been its own
-                            // combination (a reduction). Count it so a
-                            // passthrough-heavy loop still yields to peers at the
-                            // same rate, preserving preemption fairness.
-                            crate::process::tick();
-                            // The eval deadline (`nest mcp` watchdog) is otherwise
-                            // only checked at the `'tail:` top — but a
-                            // self-referential passthrough (`(defn ginf () (ginf))`)
-                            // loops here in `'dispatch` and never returns there, so a
-                            // runaway would escape the watchdog and hang. Mirror the
-                            // top-of-loop check so the deadline still aborts it.
-                            if crate::process::deadline_exceeded() {
-                                return Err(LispError::runtime(
-                                    "evaluation exceeded its time limit (MCP tool watchdog)",
-                                )
-                                .or_form_pos(heap, call_form));
                             }
                             cur_callee = inner;
                             cur_argv = next_argv;
@@ -1004,11 +972,6 @@ fn call_native(heap: &mut Heap, id: NativeId, argv: &[Value], env: EnvId) -> Lis
     func(argv, env, heap)
 }
 
-/// Render an arity error — `"{who}: expected {N | N to M | at least N}
-/// argument(s), got {got}"`. The one formatter for both builtins (from their
-/// declared [`Arity`](crate::core::value::Arity)) and user closures (from their parameter list): a closure
-/// with `min..=max` required/optional params passes `Some(max)`; `& rest` (and a
-/// variadic builtin) passes `None`.
 /// Construct an "unbound symbol: …" error, attaching the scheduler-race hint
 /// when we're currently executing in a *green* (spawned) process. The hint
 /// covers the under-load failure mode `docs/claude-demo-findings.md` flagged
@@ -1155,6 +1118,70 @@ fn unbound_namespace_hint(heap: &Heap, sym: Symbol) -> Option<String> {
     }
 }
 
+/// Thin-wrapper passthrough redirect, shared by both engines (`eval`'s
+/// `'dispatch` loop and the VM's `dispatch`). Given the inner head a closure's
+/// `passthrough_arm` resolved to, decide whether to redirect: a redirect is only
+/// valid when `inner` is itself callable (`Fn`/`Native`); anything else means the
+/// caller falls through to a normal call. When it *is* a redirect, this counts the
+/// elided reduction (`tick`) and honours the eval deadline — the watchdog a
+/// self-referential passthrough (`(defn ginf () (ginf))`) once escaped, since it
+/// loops in `dispatch` and never returns to the `'tail:` top where the deadline is
+/// otherwise checked. Returns `Err` if the deadline fired (the caller adds its own
+/// `or_form_pos` / root-stack cleanup), `Ok(true)` to redirect, `Ok(false)` to
+/// fall through. Keeping this one function means the two engines can't drift on
+/// passthrough operator semantics. The inner-head *resolution* (a full `eval` in
+/// the tree-walker vs. a direct `env_get` in the VM) and the per-engine argv
+/// remap stay at the call sites — they're genuinely engine-specific.
+pub(crate) fn passthrough_redirect_ok(inner: Value) -> Result<bool, LispError> {
+    if !matches!(inner, Value::Fn(_) | Value::Native(_)) {
+        return Ok(false);
+    }
+    crate::process::tick();
+    if crate::process::deadline_exceeded() {
+        return Err(deadline_error());
+    }
+    Ok(true)
+}
+
+/// The three runaway-guard errors both engines (`eval` here and the VM's
+/// `vm_apply_inner`) raise — one constructor each so their message/code/hint
+/// stay byte-identical and can't drift. The caller adds engine-specific
+/// trimmings (`eval` attaches `or_form_pos`; the VM truncates its root stacks).
+
+/// "recursion too deep …" — the stack-budget guard for runaway non-tail recursion.
+pub(crate) fn stack_depth_error(used: usize) -> LispError {
+    LispError::runtime(format!(
+        "recursion too deep: used {used} bytes of stack, over the \
+         {}-byte budget (runaway non-tail recursion?)",
+        crate::process::stack_budget()
+    ))
+    .with_code(crate::error::error_codes::STACK_DEPTH_EXCEEDED)
+    .with_hint(
+        "rewrite as a tail-recursive loop (proper tail calls are O(1) stack), \
+         or raise the budget with BROOD_STACK_BUDGET",
+    )
+}
+
+/// "memory limit exceeded …" — the ADR-043 soft-memory backstop.
+pub(crate) fn memory_limit_error(used: usize) -> LispError {
+    LispError::runtime(format!(
+        "memory limit exceeded: {used} bytes allocated process-wide \
+         exceeds the {}-byte soft limit (raise or unset BROOD_MEM_LIMIT)",
+        crate::core::alloc::soft_limit()
+    ))
+    .with_code(crate::error::error_codes::MEMORY_LIMIT)
+}
+
+/// "evaluation exceeded its time limit …" — the `nest mcp` deadline watchdog.
+pub(crate) fn deadline_error() -> LispError {
+    LispError::runtime("evaluation exceeded its time limit (MCP tool watchdog)")
+}
+
+/// Render an arity error — `"{who}: expected {N | N to M | at least N}
+/// argument(s), got {got}"`. The one formatter for both builtins (from their
+/// declared [`Arity`](crate::core::value::Arity)) and user closures (from their parameter list): a closure
+/// with `min..=max` required/optional params passes `Some(max)`; `& rest` (and a
+/// variadic builtin) passes `None`.
 fn arity_message(who: &str, min: usize, max: Option<usize>, got: usize) -> String {
     let (expected, n) = match max {
         Some(m) if min == m => (min.to_string(), min),

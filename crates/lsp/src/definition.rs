@@ -47,11 +47,7 @@ pub fn definition(
         // Bound in this buffer (local or a document-level `def`): jump to the
         // binder token, in this same file.
         Resolution::Defined { def, .. } => {
-            let range = Range::new(
-                index.position(text, def.start),
-                index.position(text, def.end),
-            );
-            Some(Location::new(uri.clone(), range))
+            Some(Location::new(uri.clone(), index.range(text, def)))
         }
         // Free here — ask the runtime where the name was defined (another
         // module, the prelude). The name is first resolved against this file's

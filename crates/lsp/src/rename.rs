@@ -33,10 +33,7 @@ pub fn prepare_rename(
     if tree.references(root, text, offset).is_empty() {
         return None;
     }
-    Some(Range::new(
-        index.position(text, node.span.start),
-        index.position(text, node.span.end),
-    ))
+    Some(index.range(text, node.span))
 }
 
 /// A [`WorkspaceEdit`] replacing every in-file occurrence of the symbol at
@@ -62,7 +59,7 @@ pub fn rename(
     let edits: Vec<TextEdit> = spans
         .into_iter()
         .map(|s| TextEdit {
-            range: Range::new(index.position(text, s.start), index.position(text, s.end)),
+            range: index.range(text, s),
             new_text: new_name.to_string(),
         })
         .collect();

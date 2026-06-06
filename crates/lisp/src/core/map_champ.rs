@@ -88,6 +88,15 @@ impl MapNode {
     /// and frees the child, keeping the trie shallow (a deep chain of
     /// 1-entry nodes would be a pathological waste of indirection).
     /// Includes collision leaves dissoc'd down to their last entry.
+    ///
+    /// The inlining itself lives in `Heap::champ_dissoc` (core/heap.rs) — see
+    /// its `new_child_node.is_singleton()` arm, which re-slots the survivor at
+    /// the *parent's* depth. That re-slot is only sound because of a CHAMP
+    /// invariant: every entry under a child routes through that child's parent
+    /// slot at the parent's depth, and a collision leaf holds keys with
+    /// *identical full hashes* (spawned only at [`MAX_DEPTH`] in `champ_split`).
+    /// So the surviving entry hashes to the same parent slot as the removed
+    /// one, and inlining it there can't misplace it. (Verified June 2026.)
     #[inline]
     pub fn is_singleton(&self) -> bool {
         self.data.len() == 1 && self.children.is_empty()

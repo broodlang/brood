@@ -235,6 +235,13 @@ pub(crate) fn deliver_remote_link_exit(
 /// peer dies — `:noconnection` is abnormal) and drop the entries. Mirrors
 /// `monitor::handle_node_down`'s `:noconnection` fan-out; called from
 /// `dist::fire_nodedown`.
+///
+/// **Keep in sync with the dual `monitor::handle_node_down`** (`monitor.rs`): the
+/// two are deliberately parallel net-split handlers — this fires the symmetric
+/// `[:EXIT … :noconnection]`/propagate path, the monitor dual fires the one-way
+/// `[:down … :noconnection]`. A change to one's fan-out shape usually wants a
+/// matching change to the other. Kept as separate functions on purpose (exit vs.
+/// down semantics differ), not forced behind shared scaffolding.
 pub(crate) fn handle_node_down(node: Symbol) {
     // Collect (local_pid, remote_pid) for the dropped node under the lock, prune
     // those entries, release, then deliver (deliver may re-enter scheduler::exit).

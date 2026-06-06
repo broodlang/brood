@@ -36,7 +36,7 @@ use crate::process::keywords as pk;
 use crate::error::LispError;
 use crate::eval;
 
-use super::mailbox::{Mailbox, REGISTRY, ST_RUNNABLE, ST_RUNNING};
+use super::mailbox::{wake_parked, Mailbox, REGISTRY, ST_RUNNABLE, ST_RUNNING};
 use super::message::Message;
 use super::links;
 use super::monitor;
@@ -387,6 +387,19 @@ pub fn stack_overflow_check(sp: usize) -> Option<usize> {
             // Larger than any single coroutine stack: the base must be stale (a
             // suspend/resume path we didn't account for). Rebase rather than
             // reject a legitimate program.
+            //
+            // Acknowledged window: this treats "used > a whole stack" as *always* a
+            // stale base, so a genuine runaway that somehow overshot a full stack
+            // between two depth-1 re-stamps would rebase here instead of raising the
+            // clean `STACK_DEPTH_EXCEEDED`. In practice it can't reach this branch:
+            // `stack_budget()` (default `CORO_STACK_BYTES − 4 MiB`) is *below*
+            // `CORO_STACK_BYTES`, and the tree-walker grows the stack one combination
+            // frame at a time, so a real runaway trips the `used > stack_budget()`
+            // check below — firing the clean error — well before `used` could exceed
+            // a full stack. The overshoot would need a single eval step to jump from
+            // under-budget to over-a-whole-stack, which the per-frame growth rules
+            // out. If frames ever get heavy enough to leap >4 MiB in one step, narrow
+            // this (e.g. count consecutive rebases) rather than widen the margin.
             b.set(sp);
             return None;
         }
@@ -640,12 +653,6 @@ fn worker_count() -> usize {
     }
 }
 
-/// A process has finished (or crashed): drop its mailbox and fire any
-/// monitors, delivering `[:down <mref> <pid> <reason>]` to each watcher —
-/// `Local` watchers via `deliver` (in-process mailbox push), `Remote`
-/// watchers via the dist layer (an ordinary `send` to a remote pid, which
-/// routes over the link). Same `[:down …]` shape in both cases — the
-/// receiver code on the wire side is unchanged from local.
 /// A human descriptor for a process in death/crash diagnostics: its registered
 /// name plus pid when it has one (`ticker (pid 6)`), else the bare pid (`6`).
 /// Read the name *before* `deregister` clears it. Used only on the cold death
@@ -658,6 +665,12 @@ fn proc_descr(pid: u64) -> String {
     }
 }
 
+/// A process has finished (or crashed): drop its mailbox and fire any
+/// monitors, delivering `[:down <mref> <pid> <reason>]` to each watcher —
+/// `Local` watchers via `deliver` (in-process mailbox push), `Remote`
+/// watchers via the dist layer (an ordinary `send` to a remote pid, which
+/// routes over the link). Same `[:down …]` shape in both cases — the
+/// receiver code on the wire side is unchanged from local.
 fn deregister(pid: u64, reason: Message) {
     // The three tables are taken **sequentially**, not nested: REGISTRY first,
     // released, then NAMES, released, then MONITORS. `add_monitor` and
@@ -720,10 +733,11 @@ pub fn exit(pid: u64, reason: Message) {
     // `kill_pending` check, on the worker that owns it. We must NOT drop it here:
     // dropping force-unwinds its coroutine, and that would resume the coroutine on
     // *this* (the exiter's) thread, not its owning worker — the cross-thread-resume
-    // hazard (KI-1b). Taking the waiter under the state lock serialises with
+    // hazard (KI-1b). Taking the waiter (via the shared `wake_parked` — the same
+    // step `deliver`/`wake_for_timeout` use) under the state lock serialises with
     // `run_one`'s park: either we take an already-parked process here, or `run_one`
     // sees `kill_pending` and retires it instead of parking (exactly one wins).
-    let parked = crate::core::sync::lock(&mailbox.state).waiter.take();
+    let parked = wake_parked(&mut crate::core::sync::lock(&mailbox.state));
     if let Some(proc) = parked {
         enqueue(proc);
     }

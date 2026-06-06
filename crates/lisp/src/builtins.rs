@@ -1920,6 +1920,16 @@ fn expect_int(heap: &Heap, who: &str, v: Value) -> Result<i64, LispError> {
     )
 }
 
+/// Require an integer (`Int` or `BigInt`), coerced to `num_bigint::BigInt`;
+/// otherwise the standard self-identifying type error (which prints the offending
+/// value). The bignum analogue of [`expect_int`] — `expect_int` rejects a
+/// `BigInt`, but the bitwise / bignum-aware ops accept either, so they route
+/// through here instead of losing the value to a bare `type_err`.
+fn expect_bigint(heap: &Heap, who: &str, v: Value) -> Result<num_bigint::BigInt, LispError> {
+    heap.as_bigint(v)
+        .ok_or_else(|| LispError::wrong_type(heap, who, "int", v))
+}
+
 /// Require a symbol; otherwise a self-identifying type error.
 fn expect_symbol(heap: &Heap, who: &str, v: Value) -> Result<value::Symbol, LispError> {
     expect!(heap, who, v, "symbol",
@@ -2074,12 +2084,8 @@ fn bigint_pair(
     who: &str,
 ) -> Result<(num_bigint::BigInt, num_bigint::BigInt), LispError> {
     let (a, b) = two(args, who)?;
-    let x = heap
-        .as_bigint(a)
-        .ok_or_else(|| LispError::type_err(format!("{}: expected int, got {:?}", who, value::tag(a))))?;
-    let y = heap
-        .as_bigint(b)
-        .ok_or_else(|| LispError::type_err(format!("{}: expected int, got {:?}", who, value::tag(b))))?;
+    let x = expect_bigint(heap, who, a)?;
+    let y = expect_bigint(heap, who, b)?;
     Ok((x, y))
 }
 
@@ -2205,10 +2211,7 @@ fn bit_not(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             let n = !heap.bigint(id).clone();
             Ok(heap.int_from_bigint(n))
         }
-        v => Err(LispError::type_err(format!(
-            "bit-not: expected int, got {:?}",
-            value::tag(v)
-        ))),
+        v => Err(LispError::wrong_type(heap, "bit-not", "int", v)),
     }
 }
 
@@ -2222,10 +2225,7 @@ fn bit_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             let bits = heap.bigint(id).magnitude().count_ones();
             Ok(Value::Int(bits as i64))
         }
-        v => Err(LispError::type_err(format!(
-            "bit-count: expected int, got {:?}",
-            value::tag(v)
-        ))),
+        v => Err(LispError::wrong_type(heap, "bit-count", "int", v)),
     }
 }
 
@@ -2250,12 +2250,7 @@ fn bit_positions(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
                 mag.set_bit(i, false);
             }
         }
-        v => {
-            return Err(LispError::type_err(format!(
-                "bit-positions: expected int, got {:?}",
-                value::tag(v)
-            )))
-        }
+        v => return Err(LispError::wrong_type(heap, "bit-positions", "int", v)),
     }
     Ok(heap.alloc_vector(out))
 }
@@ -2301,9 +2296,7 @@ fn bit_shift_left(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             }
         }
     }
-    let x = heap
-        .as_bigint(a)
-        .ok_or_else(|| LispError::type_err(format!("bit-shift-left: expected int, got {:?}", value::tag(a))))?;
+    let x = expect_bigint(heap, "bit-shift-left", a)?;
     Ok(heap.int_from_bigint(x << amount))
 }
 
@@ -2317,9 +2310,7 @@ fn bit_shift_right(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         let r = if amount >= 64 { x >> 63 } else { x >> amount };
         return Ok(Value::Int(r));
     }
-    let x = heap
-        .as_bigint(a)
-        .ok_or_else(|| LispError::type_err(format!("bit-shift-right: expected int, got {:?}", value::tag(a))))?;
+    let x = expect_bigint(heap, "bit-shift-right", a)?;
     Ok(heap.int_from_bigint(x >> amount))
 }
 
@@ -2630,10 +2621,9 @@ fn expect_transient(
     who: &str,
     v: Value,
 ) -> Result<value::TransientId, LispError> {
-    match v {
-        Value::Transient(id) => Ok(id),
-        _ => Err(LispError::wrong_type(heap, who, "transient", v)),
-    }
+    expect!(heap, who, v, "transient",
+        Value::Transient(id) => id,
+    )
 }
 
 /// `(transient m)` — open a transient build over the immutable map `m`.
@@ -3661,6 +3651,16 @@ const EMBEDDED_DOCS: &[(&str, &str)] = &[
     ),
 ];
 
+/// Coerce a (symbol | keyword | string) name argument to its spelling, the shape
+/// every embedded-source lookup accepts. `None` for any other value.
+fn embedded_name(heap: &Heap, v: Value) -> Option<String> {
+    match v {
+        Value::Sym(s) | Value::Keyword(s) => Some(value::symbol_name(s)),
+        Value::Str(id) => Some(heap.string(id).to_string()),
+        _ => None,
+    }
+}
+
 /// The lookup body shared by `%builtin-module` and `%builtin-doc`: coerce the
 /// (symbol | keyword | string) name argument, find it in `table`, return the
 /// baked-in source as a fresh string (or `nil` if absent). `who`/`label` are
@@ -3673,10 +3673,9 @@ fn lookup_embedded(
     label: &'static str,
 ) -> LispResult {
     let v = arg(args, 0);
-    let name = match v {
-        Value::Sym(s) | Value::Keyword(s) => value::symbol_name(s),
-        Value::Str(id) => heap.string(id).to_string(),
-        _ => return Err(LispError::wrong_type(heap, who, label, v)),
+    let name = match embedded_name(heap, v) {
+        Some(name) => name,
+        None => return Err(LispError::wrong_type(heap, who, label, v)),
     };
     match table.iter().find(|(n, _)| *n == name) {
         Some((_, src)) => Ok(heap.alloc_string(src)),
@@ -3701,10 +3700,9 @@ fn builtin_module(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     // Not a baked-in std module — consult a mounted release bundle (the app's
     // own modules + bundled deps), so `require` resolves them with no change to
     // its load-path logic (ADR-038). The arg type was already validated above.
-    let name = match arg(args, 0) {
-        Value::Sym(s) | Value::Keyword(s) => value::symbol_name(s),
-        Value::Str(id) => heap.string(id).to_string(),
-        _ => return Ok(Value::Nil),
+    let name = match embedded_name(heap, arg(args, 0)) {
+        Some(name) => name,
+        None => return Ok(Value::Nil),
     };
     match crate::bundle::mounted() {
         Some(b) => match b.module_src(&name) {
@@ -4612,10 +4610,11 @@ fn mouse_value(
     ])
 }
 
-/// Translate a crossterm mouse event into the shared `[:mouse …]` vector. Only
-/// the minimal vocabulary `gui::MouseAction` also produces — a click and the wheel
-/// — is surfaced; release / drag / motion / horizontal-scroll yield nil (a no-op
-/// poll), so both frontends emit exactly the same set.
+/// Translate a crossterm mouse event into the shared `[:mouse …]` vector.
+/// Press, release, drag, and vertical scroll are surfaced (the `:release`/`:drag`
+/// vocabulary `gui::MouseAction` also produces per ADR-077). Only bare `Moved`
+/// (motion with no button held) and horizontal scroll fall through to nil (a
+/// no-op poll), so both frontends emit exactly the same set.
 fn mouse_to_value(heap: &mut Heap, m: crossterm::event::MouseEvent) -> Value {
     use crossterm::event::{KeyModifiers, MouseButton as CB, MouseEventKind as MK};
     let button = |b: CB| match b {
@@ -4713,26 +4712,21 @@ fn write_term_bytes(bytes: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use crossterm::cursor::MoveTo;
-    use crossterm::style::{Attribute, Print, ResetColor, SetAttribute};
-    use crossterm::terminal::{Clear, ClearType};
-
-    let ops: Vec<Value> = match arg(args, 0) {
+/// Parse a frame value (the op-vector `term-draw`/`term-emit`/`gui-draw` all
+/// take) into `(tag, parts)` pairs: the frame must be a `Vector` (else a
+/// `wrong_type` attributed to `who`); each op that is itself a `Vector` whose
+/// first element is a `Keyword` yields `(that-keyword, the-op-parts)`; any op
+/// that isn't a keyword-led vector is silently skipped (forward-compatible —
+/// unknown ops are no-ops). This is the one extraction shared verbatim by the
+/// three frame dispatchers; they deliberately *diverge downstream* (e.g. gui-draw
+/// clamps coords at parse time, term-draw at use), so they must not drift on this
+/// shared prologue — keep it here, in one place.
+fn frame_ops(heap: &Heap, frame: Value, who: &str, expected: &str) -> Result<Vec<(value::Symbol, Vec<Value>)>, LispError> {
+    let ops: Vec<Value> = match frame {
         Value::Vector(id) => heap.vector(id).to_vec(),
-        other => {
-            return Err(LispError::wrong_type(
-                heap,
-                "term-draw",
-                "vector (a frame)",
-                other,
-            ))
-        }
+        other => return Err(LispError::wrong_type(heap, who, expected, other)),
     };
-    let clear_t = value::intern("clear");
-    let text_t = value::intern("text");
-    let cursor_t = value::intern("cursor");
-    let mut out: Vec<u8> = Vec::new();
+    let mut out = Vec::with_capacity(ops.len());
     for op in ops {
         let parts: Vec<Value> = match op {
             Value::Vector(id) => heap.vector(id).to_vec(),
@@ -4742,6 +4736,22 @@ fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             Some(Value::Keyword(s)) => *s,
             _ => continue,
         };
+        out.push((tag, parts));
+    }
+    Ok(out)
+}
+
+fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use crossterm::cursor::MoveTo;
+    use crossterm::style::{Attribute, Print, ResetColor, SetAttribute};
+    use crossterm::terminal::{Clear, ClearType};
+
+    let parsed = frame_ops(heap, arg(args, 0), "term-draw", "vector (a frame)")?;
+    let clear_t = value::intern("clear");
+    let text_t = value::intern("text");
+    let cursor_t = value::intern("cursor");
+    let mut out: Vec<u8> = Vec::new();
+    for (tag, parts) in parsed {
         if tag == clear_t {
             crossterm::queue!(out, Clear(ClearType::All)).map_err(term_err)?;
         } else if tag == cursor_t {
@@ -4809,17 +4819,7 @@ fn term_emit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use crossterm::style::{Attribute, Print, ResetColor, SetAttribute};
     use crossterm::terminal::{Clear, ClearType};
 
-    let ops: Vec<Value> = match arg(args, 0) {
-        Value::Vector(id) => heap.vector(id).to_vec(),
-        other => {
-            return Err(LispError::wrong_type(
-                heap,
-                "term-emit",
-                "vector (ops)",
-                other,
-            ))
-        }
-    };
+    let parsed = frame_ops(heap, arg(args, 0), "term-emit", "vector (ops)")?;
     let print_t = value::intern("print");
     let cr_t = value::intern("cr");
     let nl_t = value::intern("nl");
@@ -4830,15 +4830,7 @@ fn term_emit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let clear_below_t = value::intern("clear-below");
     let clear_screen_t = value::intern("clear-screen");
     let mut out: Vec<u8> = Vec::new();
-    for op in ops {
-        let parts: Vec<Value> = match op {
-            Value::Vector(id) => heap.vector(id).to_vec(),
-            _ => continue,
-        };
-        let tag = match parts.first() {
-            Some(Value::Keyword(s)) => *s,
-            _ => continue,
-        };
+    for (tag, parts) in parsed {
         if tag == print_t {
             let s = expect_string(heap, "term-emit", arg(&parts, 1))?;
             apply_face(&mut out, heap, parts.get(2).copied().unwrap_or(Value::Nil))?;
@@ -4874,37 +4866,54 @@ fn term_emit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::Nil)
 }
 
+/// The face-map keys (`:fg`/`:bg`/`:bold`/…) interned once for the whole process,
+/// not re-interned per text op per frame on the render path — the same pre-intern
+/// the frame dispatchers do for their op tags. Keyword interning is global and
+/// append-only, so these stay valid for the process's life.
+struct FaceKeys {
+    fg: Value,
+    bg: Value,
+    bold: Value,
+    italic: Value,
+    underline: Value,
+    reverse: Value,
+    family: Value,
+    scale: Value,
+}
+static FACE_KEYS: std::sync::LazyLock<FaceKeys> = std::sync::LazyLock::new(|| FaceKeys {
+    fg: value::kw("fg"),
+    bg: value::kw("bg"),
+    bold: value::kw("bold"),
+    italic: value::kw("italic"),
+    underline: value::kw("underline"),
+    reverse: value::kw("reverse"),
+    family: value::kw("family"),
+    scale: value::kw("scale"),
+});
+
 /// Apply a face map (`{:fg :red :bg :blue :bold true :reverse true}`) as
 /// crossterm style commands. A non-map (or nil) face is a no-op. Unknown colour
 /// names are skipped. Callers reset attributes after the text.
 fn apply_face<W: std::io::Write>(out: &mut W, heap: &Heap, face: Value) -> Result<(), LispError> {
     use crossterm::style::{Attribute, SetAttribute, SetBackgroundColor, SetForegroundColor};
     let Value::Map(id) = face else { return Ok(()) };
-    if let Some(fg) = heap.map_get(id, value::kw("fg")).and_then(color_of) {
+    let k = &*FACE_KEYS;
+    if let Some(fg) = heap.map_get(id, k.fg).and_then(color_of) {
         crossterm::queue!(out, SetForegroundColor(fg)).map_err(term_err)?;
     }
-    if let Some(bg) = heap.map_get(id, value::kw("bg")).and_then(color_of) {
+    if let Some(bg) = heap.map_get(id, k.bg).and_then(color_of) {
         crossterm::queue!(out, SetBackgroundColor(bg)).map_err(term_err)?;
     }
-    if heap.map_get(id, value::kw("bold")).is_some_and(face_truthy) {
+    if heap.map_get(id, k.bold).is_some_and(face_truthy) {
         crossterm::queue!(out, SetAttribute(Attribute::Bold)).map_err(term_err)?;
     }
-    if heap
-        .map_get(id, value::kw("italic"))
-        .is_some_and(face_truthy)
-    {
+    if heap.map_get(id, k.italic).is_some_and(face_truthy) {
         crossterm::queue!(out, SetAttribute(Attribute::Italic)).map_err(term_err)?;
     }
-    if heap
-        .map_get(id, value::kw("underline"))
-        .is_some_and(face_truthy)
-    {
+    if heap.map_get(id, k.underline).is_some_and(face_truthy) {
         crossterm::queue!(out, SetAttribute(Attribute::Underlined)).map_err(term_err)?;
     }
-    if heap
-        .map_get(id, value::kw("reverse"))
-        .is_some_and(face_truthy)
-    {
+    if heap.map_get(id, k.reverse).is_some_and(face_truthy) {
         crossterm::queue!(out, SetAttribute(Attribute::Reverse)).map_err(term_err)?;
     }
     Ok(())
@@ -4975,28 +4984,23 @@ fn color_rgb(v: Value) -> Option<[u8; 3]> {
 fn gui_face(heap: &Heap, face: Value) -> crate::gui::Face {
     let mut f = crate::gui::Face::default();
     let Value::Map(id) = face else { return f };
-    f.fg = heap.map_get(id, value::kw("fg")).and_then(color_rgb);
-    f.bg = heap.map_get(id, value::kw("bg")).and_then(color_rgb);
-    f.bold = heap.map_get(id, value::kw("bold")).is_some_and(face_truthy);
-    f.italic = heap
-        .map_get(id, value::kw("italic"))
-        .is_some_and(face_truthy);
-    f.underline = heap
-        .map_get(id, value::kw("underline"))
-        .is_some_and(face_truthy);
-    f.reverse = heap
-        .map_get(id, value::kw("reverse"))
-        .is_some_and(face_truthy);
+    let k = &*FACE_KEYS;
+    f.fg = heap.map_get(id, k.fg).and_then(color_rgb);
+    f.bg = heap.map_get(id, k.bg).and_then(color_rgb);
+    f.bold = heap.map_get(id, k.bold).is_some_and(face_truthy);
+    f.italic = heap.map_get(id, k.italic).is_some_and(face_truthy);
+    f.underline = heap.map_get(id, k.underline).is_some_and(face_truthy);
+    f.reverse = heap.map_get(id, k.reverse).is_some_and(face_truthy);
     // `:family` is a keyword naming a registered font family; carry its interned
     // id so the renderer can pick the matching font set (`:mono` / unknown → default).
-    f.family = match heap.map_get(id, value::kw("family")) {
+    f.family = match heap.map_get(id, k.family) {
         Some(Value::Keyword(s)) => Some(s),
         _ => None,
     };
     // `:scale n` (GUI only, ADR-079): draw the op's text n× larger, in an n×n cell
     // block. Clamp to 1..=GUI_MAX_SCALE — a non-positive value falls back to the
     // default 1, and the cap bounds the per-op framebuffer work + glyph cache.
-    if let Some(Value::Int(n)) = heap.map_get(id, value::kw("scale")) {
+    if let Some(Value::Int(n)) = heap.map_get(id, k.scale) {
         f.scale = n.clamp(1, GUI_MAX_SCALE as i64) as u16;
     }
     f
@@ -5123,33 +5127,15 @@ fn gui_held_key(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// them to the GUI thread. Unknown ops are skipped (forward-compatible).
 fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let win = gui_window_id(heap, "gui-draw", arg(args, 0))?;
-    let ops_v: Vec<Value> = match arg(args, 1) {
-        Value::Vector(id) => heap.vector(id).to_vec(),
-        other => {
-            return Err(LispError::wrong_type(
-                heap,
-                "gui-draw",
-                "vector (a frame)",
-                other,
-            ))
-        }
-    };
+    let parsed = frame_ops(heap, arg(args, 1), "gui-draw", "vector (a frame)")?;
     let clear_t = value::intern("clear");
     let text_t = value::intern("text");
     let cursor_t = value::intern("cursor");
     let cursor_zone_t = value::intern("cursor-zone");
     let col_resize_t = value::intern("col-resize");
     let row_resize_t = value::intern("row-resize");
-    let mut ops = Vec::with_capacity(ops_v.len());
-    for op in ops_v {
-        let parts: Vec<Value> = match op {
-            Value::Vector(id) => heap.vector(id).to_vec(),
-            _ => continue,
-        };
-        let tag = match parts.first() {
-            Some(Value::Keyword(s)) => *s,
-            _ => continue,
-        };
+    let mut ops = Vec::with_capacity(parsed.len());
+    for (tag, parts) in parsed {
         if tag == clear_t {
             ops.push(crate::gui::Op::Clear);
         } else if tag == cursor_t {
@@ -5613,9 +5599,6 @@ fn rm_rf(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     }
 }
 
-/// `(slurp path)` — read the whole file at `path` and return it as a string. The
-/// read-side counterpart to `spit`; unlike `load` it does not evaluate, so the
-/// doc tooling can inspect a module's source (e.g. its leading docstring form).
 /// `(read-line)` — read one line from stdin, returning it as a string with the
 /// trailing newline stripped, or `nil` at end of input (EOF / Ctrl-D). The one
 /// irreducible I/O mechanism the Brood-hosted REPL (`std/repl.blsp`) can't
@@ -5637,6 +5620,9 @@ fn read_line(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.alloc_string(&line))
 }
 
+/// `(slurp path)` — read the whole file at `path` and return it as a string. The
+/// read-side counterpart to `spit`; unlike `load` it does not evaluate, so the
+/// doc tooling can inspect a module's source (e.g. its leading docstring form).
 fn slurp(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "slurp", arg(args, 0))?;
     let content = std::fs::read_to_string(&path).map_err(|e| {
@@ -5646,11 +5632,6 @@ fn slurp(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.alloc_string(&content))
 }
 
-/// `(file-mtime path)` — last-modified time of `path` as epoch-milliseconds, or
-/// `nil` if the file is missing or its mtime can't be read. A cheap `stat`, not a
-/// read — pairs with `load` to drive a hot-reloader: poll `file-mtime`, reload
-/// only when it changes. Resolution is platform-dependent (typically nanoseconds
-/// on Linux, truncated to ms here).
 /// `(file-size path)` — the size of `path` in bytes, or nil if it's missing.
 /// GC-safe: the arg is copied to an owned `String` up front and the result is a
 /// scalar — no `Value` handle is held across an allocation or eval (and a builtin
@@ -5700,6 +5681,11 @@ fn rename_file(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::Nil)
 }
 
+/// `(file-mtime path)` — last-modified time of `path` as epoch-milliseconds, or
+/// `nil` if the file is missing or its mtime can't be read. A cheap `stat`, not a
+/// read — pairs with `load` to drive a hot-reloader: poll `file-mtime`, reload
+/// only when it changes. Resolution is platform-dependent (typically nanoseconds
+/// on Linux, truncated to ms here).
 fn file_mtime(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "file-mtime", arg(args, 0))?;
     let Ok(meta) = std::fs::metadata(&path) else {

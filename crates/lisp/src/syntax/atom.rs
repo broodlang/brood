@@ -36,14 +36,18 @@ pub fn classify(token: &str) -> AtomKind {
     if let Ok(i) = token.parse::<i64>() {
         return AtomKind::Int(i);
     }
-    // An integer-shaped token that didn't fit in `i64` is its own outcome —
-    // *not* a Float fall-through (which would silently round e.g.
-    // `9223372036854775808` to `9.22e18`). A user who wrote digits got a
-    // diagnostic; a user who wrote `1e1000` still gets the `Float(inf)` path.
-    if looks_integer(token) {
-        return AtomKind::IntOverflow;
-    }
-    if looks_numeric(token) {
+    // Classify the token's numeric shape in a single pass — whether it's
+    // number-ish at all, and whether it has any fractional/exponent part — so we
+    // don't re-walk it once per `looks_*` query.
+    let shape = numeric_shape(token);
+    if shape.numeric {
+        // An integer-shaped token that didn't fit in `i64` is its own outcome —
+        // *not* a Float fall-through (which would silently round e.g.
+        // `9223372036854775808` to `9.22e18`). A user who wrote digits got a
+        // diagnostic; a user who wrote `1e1000` still gets the `Float(inf)` path.
+        if !shape.has_fraction_or_exp {
+            return AtomKind::IntOverflow;
+        }
         if let Ok(f) = token.parse::<f64>() {
             return AtomKind::Float(f);
         }
@@ -55,10 +59,14 @@ pub fn classify(token: &str) -> AtomKind {
     AtomKind::Symbol
 }
 
-/// An integer-shaped token: `looks_numeric`, but with no fractional/exponent
-/// part — pure digits with an optional leading sign.
-fn looks_integer(token: &str) -> bool {
-    looks_numeric(token) && !token.contains('.') && !token.contains('e') && !token.contains('E')
+/// Inter-form trivia whitespace: real whitespace, plus `,` (a comma is
+/// whitespace in Brood). The single definition both parsers share so the
+/// reader and the lossless CST can't disagree on where trivia runs — the
+/// whitespace counterpart of [`is_delimiter`]. (Line comments start with `;`,
+/// which both parsers handle separately because the CST keeps the comment as
+/// its own node.)
+pub fn is_trivia_ws(c: char) -> bool {
+    c.is_whitespace() || c == ','
 }
 
 /// Characters that terminate an atom (and so can't appear unescaped inside one).
@@ -70,21 +78,47 @@ pub fn is_delimiter(c: char) -> bool {
         )
 }
 
-/// A cheap pre-filter before `f64::parse`, so plain symbols like `-` or `...`
-/// aren't misread as numbers: the token must start with a digit, or with a
-/// sign/dot followed by more, and contain only number-ish characters.
-fn looks_numeric(token: &str) -> bool {
+/// The numeric shape of a token, computed in one pass over its characters.
+struct NumericShape {
+    /// Passes the cheap pre-filter for `f64::parse` — starts with a digit, or a
+    /// sign/dot followed by more, and holds only number-ish characters. Plain
+    /// symbols like `-` or `...` are *not* numeric.
+    numeric: bool,
+    /// Has a `.`, `e`, or `E` — i.e. a fractional or exponent part, so it's
+    /// float-shaped rather than integer-shaped. Only meaningful when `numeric`.
+    has_fraction_or_exp: bool,
+}
+
+/// Classify a token's numeric shape in a single character walk. Replaces the
+/// old `looks_numeric` + three `contains` scans (the former `looks_integer`),
+/// which re-read the token up to four times.
+fn numeric_shape(token: &str) -> NumericShape {
     let mut chars = token.chars();
     let first = match chars.next() {
         Some(c) => c,
-        None => return false,
+        None => {
+            return NumericShape {
+                numeric: false,
+                has_fraction_or_exp: false,
+            }
+        }
     };
-    if !(first.is_ascii_digit()
-        || ((first == '-' || first == '+' || first == '.') && token.len() > 1))
-    {
-        return false;
+    // First char: a digit, or a sign/dot that leads a longer token.
+    let first_ok = first.is_ascii_digit()
+        || ((first == '-' || first == '+' || first == '.') && token.len() > 1);
+    let mut numeric = first_ok;
+    // A leading `.` is itself a fractional marker.
+    let mut has_fraction_or_exp = first == '.';
+    // The remaining chars must all be number-ish; note any fraction/exponent.
+    for c in chars {
+        match c {
+            '0'..='9' | '-' | '+' => {}
+            '.' | 'e' | 'E' => has_fraction_or_exp = true,
+            _ => numeric = false,
+        }
     }
-    token
-        .chars()
-        .all(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E'))
+    NumericShape {
+        numeric,
+        has_fraction_or_exp,
+    }
 }

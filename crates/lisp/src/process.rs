@@ -47,6 +47,9 @@ pub use mailbox::{
     receive_match, send,
 };
 pub use message::{from_message, to_message, ClosureArmMsg, ClosureMsg, Message};
+// The wire codec (`dist::wire`) defines its decode-depth cap in terms of this so
+// the two can't diverge; crate-internal, hence `pub(crate)`.
+pub(crate) use message::MAX_MESSAGE_DEPTH;
 // The reusable blocking-IO → mailbox seam (ADR-059): any subsystem that must
 // block runs it on a non-worker thread and delivers to a process mailbox.
 pub(crate) use io_source::{spawn_io_source, MailboxSink, SubscriberHandle};

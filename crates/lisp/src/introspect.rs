@@ -58,6 +58,15 @@ pub fn global_names(interp: &mut Interp) -> Vec<String> {
 ///
 /// [`is_delimiter`]: crate::syntax::atom::is_delimiter
 pub fn signature(interp: &mut Interp, name: &str) -> (Option<String>, Option<String>) {
+    // `intern_existing`, not `intern`: the LSP routes arbitrary half-typed names
+    // through here on every keystroke (signature.rs, hover.rs), and the interner
+    // never frees — each `intern` would leak an entry for the daemon's life. A
+    // never-interned name can't be a bound global (every global interned its name
+    // when its source was read), so it resolves to nothing — return `(None, None)`
+    // without evaluating, exactly as the eval path would. (Mirrors `resolve_in_source`.)
+    if value::intern_existing(name).is_none() {
+        return (None, None);
+    }
     // As in `global_names`: reclaim the LOCAL allocations this eval leaves behind
     // once the signature/doc have been copied into owned `String`s.
     let cp = interp.heap.checkpoint();
@@ -84,6 +93,12 @@ pub fn signature(interp: &mut Interp, name: &str) -> (Option<String>, Option<Str
 /// "&", "rest"]`). `None` when `name` is unbound or has no params (a builtin or a
 /// zero-arg fn — indistinguishable here, as in [`signature`]). For signature help.
 pub fn arglist_tokens(interp: &mut Interp, name: &str) -> Option<Vec<String>> {
+    // `intern_existing`, not `intern`: signature help fires on every keystroke
+    // with arbitrary half-typed names; the interner never frees, so interning a
+    // transient name leaks for the daemon's life. A never-interned name names no
+    // global, so it has no arglist — return `None` without evaluating. (See
+    // `resolve_in_source` for the full rationale.)
+    value::intern_existing(name)?;
     let cp = interp.heap.checkpoint();
     let out = match interp.eval_str(&format!("(arglist {name})")) {
         Ok(v) => interp.heap.list_to_vec(v).ok().map(|items| {
@@ -291,6 +306,12 @@ pub struct EvalResult {
 ///
 /// [`is_delimiter`]: crate::syntax::atom::is_delimiter
 pub fn source_location(interp: &mut Interp, name: &str) -> Option<SourceLoc> {
+    // `intern_existing`, not `intern`: goto-def routes arbitrary names here (the
+    // identifier under the cursor, mid-edit); the interner never frees, so an
+    // `intern` of a transient name leaks for the daemon's life. A never-interned
+    // name names no global, so it has no recorded site — return `None` without
+    // evaluating. (See `resolve_in_source` for the full rationale.)
+    value::intern_existing(name)?;
     let cp = interp.heap.checkpoint();
     let out = match interp.eval_str(&format!("(source-location '{name})")) {
         Ok(v) => parse_source_location(&interp.heap, v),
@@ -604,6 +625,32 @@ mod tests {
         // namespace context for names that are interned.
         let broken = "(defmodule foo (:use set))\n(defn bar (x) (unio";
         assert_eq!(resolve_in_source(&mut interp, broken, "union"), "set/union");
+    }
+
+    /// The same interner-leak guard as `resolve_in_source`, for the sibling
+    /// helpers the LSP also feeds half-typed names: `signature`/`arglist_tokens`
+    /// (signature help, hover) and `source_location` (goto-def). A never-interned
+    /// name names no global, so each must return its empty result *without*
+    /// interning — otherwise the daemon leaks an entry per keystroke.
+    #[test]
+    fn introspect_helpers_do_not_intern_unknown_names() {
+        let mut interp = Interp::new();
+        let name = "another-half-typed-identifier-quux";
+        assert!(value::intern_existing(name).is_none(), "test premise");
+
+        assert_eq!(signature(&mut interp, name), (None, None));
+        assert_eq!(arglist_tokens(&mut interp, name), None);
+        assert_eq!(source_location(&mut interp, name), None);
+
+        assert!(
+            value::intern_existing(name).is_none(),
+            "an introspect helper interned a transient LSP identifier \
+             (daemon-lifetime interner leak)"
+        );
+
+        // A real global still resolves through each gated helper.
+        assert!(signature(&mut interp, "map").0.is_some(), "map has a signature");
+        assert!(arglist_tokens(&mut interp, "map").is_some(), "map has an arglist");
     }
 
     /// The interned-name check must run *after* the header eval, not before:

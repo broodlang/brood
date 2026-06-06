@@ -10,7 +10,8 @@
 //!
 //! [`Span`]: brood::error::Span
 
-use lsp_types::Position;
+use brood::error::Span;
+use lsp_types::{Position, Range};
 
 /// Precomputed line-start byte offsets for a document, so byte ↔ `Position`
 /// projection is a binary search plus a short UTF-16 count.
@@ -61,6 +62,19 @@ impl LineIndex {
             .map(|c| c.len_utf16() as u32)
             .sum();
         Position::new(line as u32, character)
+    }
+
+    /// The LSP `Range` of a byte [`Span`] within `text` — both endpoints projected
+    /// via [`position`]. The span→`Range` projection every request needs (goto,
+    /// references, rename, symbols, semantic tokens), so the
+    /// `Range::new(position(start), position(end))` pair lives in exactly one place.
+    ///
+    /// [`position`]: Self::position
+    pub fn range(&self, text: &str, span: Span) -> Range {
+        Range::new(
+            self.position(text, span.start),
+            self.position(text, span.end),
+        )
     }
 
     /// The byte offset of `pos` within `text` — the inverse of [`position`], for

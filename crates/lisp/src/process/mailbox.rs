@@ -80,6 +80,19 @@ pub(super) struct Mailbox {
     /// process. Read from another worker during the dying peer's `deregister`
     /// (link teardown), so it lives on the registry-reachable mailbox too.
     pub(super) trap_exit: AtomicBool,
+    /// **Park generation** — monotonic counter bumped each time this process parks
+    /// in `receive` *with a deadline* (see `wait_for_message`). It implements lazy
+    /// cancellation of superseded timer entries: each `arm_timer` stamps the entry
+    /// with the gen current at park time, and the timer thread (via
+    /// `wake_for_timeout`) drops an entry whose gen is stale — i.e. the process has
+    /// since re-parked (a new deadline) or moved on. Without this, a server looping
+    /// `(receive … (after ms …))` that is woken by `send` each iteration leaves a
+    /// fresh entry on the TIMERS heap every iteration, none ever cancelled, each
+    /// firing a spurious wakeup when its long-past deadline finally comes due. Heap
+    /// growth is still bounded by the deadline horizon (stale entries are reaped at
+    /// their deadline, not before) — acceptable. The "spurious wakeups are harmless"
+    /// re-validation in `receive_match` stays as the backstop.
+    pub(super) timer_gen: AtomicU64,
 }
 
 pub(super) struct MailboxState {
@@ -91,10 +104,33 @@ pub(super) struct MailboxState {
     /// The parked green process waiting on this mailbox, if any. `send` takes it
     /// and re-queues it. (A short-lived `Process → Arc<Mailbox> → Process` cycle
     /// while parked; broken the moment it's re-queued or the process ends.)
+    ///
+    /// **Known limitation — permanently-parked waiters leak in an embedded host.**
+    /// The cycle above is only "short-lived" for a process that *will* be woken. A
+    /// process parked on a `(receive)` that nothing ever sends to (and no deadline)
+    /// holds its `Box<Process>` here for the life of the `REGISTRY` entry, and the
+    /// `Process → Mailbox → Process` cycle keeps the heap alive. The standalone
+    /// binaries exit the OS process, so this is harmless there. But an embedded,
+    /// long-lived `Interp` that spawns such processes and is then dropped has **no
+    /// teardown path that drains permanently-parked waiters** — they (and their
+    /// heaps) leak until the host process exits. Implementing a registry-wide drain
+    /// on `Interp` drop is out of scope here; flagged so it isn't mistaken for a
+    /// transient cycle.
     pub(super) waiter: Option<Box<Process>>,
     /// How many leading messages the parked waiter already scanned and rejected
     /// (selective receive). The worker re-runs it only when a message arrives
     /// *beyond* this — not for ones it already skipped. 0 for a plain FIFO receive.
+    ///
+    /// **Invariant — never reset between suspend cycles, and that is correct.**
+    /// `scanned` carries no meaning while the process is *running*; it's only read
+    /// in `run_one`'s `Suspend::Receive` arm (the park-or-requeue decision). And
+    /// every such read is preceded, *in the same suspend cycle*, by a write in
+    /// `wait_for_message` (the green branch sets `st.scanned = i` immediately before
+    /// suspending). So the value `run_one` observes is always the one this cycle's
+    /// `wait_for_message` just wrote — a stale value from a prior cycle can never be
+    /// read, because a `Suspend::Receive` is unreachable without going through that
+    /// write first. Don't add a `Suspend::Receive` path that skips the
+    /// `wait_for_message` write, or this read goes stale.
     pub(super) scanned: usize,
 }
 
@@ -116,6 +152,7 @@ impl Mailbox {
             reductions: AtomicU64::new(0),
             kill_pending: AtomicBool::new(false),
             trap_exit: AtomicBool::new(false),
+            timer_gen: AtomicU64::new(0),
         })
     }
 
@@ -153,6 +190,41 @@ pub(crate) fn is_alive(pid: u64) -> bool {
     crate::core::sync::lock(&REGISTRY).contains_key(&pid)
 }
 
+/// Look up `pid`'s mailbox in the REGISTRY and, if it's a live local process, run
+/// `f` against its `Arc<Mailbox>`. Returns `None` for a dead/unknown pid (so the
+/// `process-info` accessors map that straight to their `None`). The registry lock
+/// is dropped before `f` runs — `f` gets the cloned `Arc`, so it's free to take the
+/// mailbox's own `state` lock without nesting it under REGISTRY (preserving the
+/// "never hold REGISTRY while taking another lock" discipline `deregister` relies
+/// on). The shared registry-lookup-then-act step behind the read-only `process_*`
+/// accessors below.
+fn with_mailbox<T>(pid: u64, f: impl FnOnce(&Arc<Mailbox>) -> T) -> Option<T> {
+    let mailbox = crate::core::sync::lock(&REGISTRY).get(&pid).cloned()?;
+    Some(f(&mailbox))
+}
+
+/// **The wakeup protocol, in one place.** Take the parked green waiter (if any)
+/// out of `st` and re-queue it onto its owning worker, so it resumes, re-scans its
+/// mailbox, and proceeds. Returns `true` iff a green process was woken this way.
+///
+/// This is the single step shared by every site that must wake a parked process:
+/// `deliver` (a message arrived), `wake_for_timeout` (a `receive` deadline passed),
+/// and `exit` (an exit signal must rouse a parked target so it self-kills). Route
+/// all three through here so the take-and-enqueue stays identical.
+///
+/// **Caller holds the mailbox state lock** (`st` is the live guard). The take
+/// happens under that lock, which serialises with `run_one`'s park: either we take
+/// an already-parked process, or `run_one` hasn't parked it yet and will observe
+/// the new state (message / `kill_pending`) when it does — exactly one path wins,
+/// so a process can't end up parked-with-work-pending and stuck. The caller drops
+/// the lock *before* the returned `proc` is enqueued (enqueue grabs the worker's
+/// queue lock); callers that follow the lock-ordering do this by dropping `st`
+/// after this returns. A `None` return means no green waiter — the caller decides
+/// whether to wake a root thread blocked on the condvar instead.
+pub(super) fn wake_parked(st: &mut MailboxState) -> Option<Box<Process>> {
+    st.waiter.take()
+}
+
 /// Push a (already-`Send`) message into local process `pid`'s mailbox and wake it;
 /// a no-op if `pid` is gone. The shared tail of `send`, monitor `[:down …]`
 /// delivery, and inbound node-link messages (`crate::dist`).
@@ -161,7 +233,7 @@ pub(crate) fn deliver(pid: u64, msg: Message) {
     if let Some(mb) = mailbox {
         let mut st = crate::core::sync::lock(&mb.state);
         st.queue.push_back(msg);
-        if let Some(proc) = st.waiter.take() {
+        if let Some(proc) = wake_parked(&mut st) {
             drop(st);
             enqueue(proc); // wake a parked green process
         } else {
@@ -359,7 +431,14 @@ fn wait_for_message(ctx: &Ctx, i: usize, deadline: Option<Instant>) {
             }
             set_self_status(ctx, ST_WAITING);
             if let Some(d) = deadline {
-                arm_timer(ctx.pid, d);
+                // Stamp the timer entry with a fresh park generation. If this
+                // process is woken (by `send`) and re-parks before the deadline,
+                // the next `arm_timer` carries a higher gen, so the timer thread's
+                // `wake_for_timeout` discards *this* now-superseded entry instead of
+                // firing a spurious wakeup. `fetch_add` returns the value to stamp;
+                // the bump makes every earlier outstanding entry stale.
+                let gen = ctx.mailbox.timer_gen.fetch_add(1, Ordering::Relaxed) + 1;
+                arm_timer(ctx.pid, d, gen);
             }
             // Save this process's GC-block depth before yielding (same
             // rationale as `preempt`): the worker may run other processes
@@ -381,15 +460,24 @@ fn wait_for_message(ctx: &Ctx, i: usize, deadline: Option<Instant>) {
     }
 }
 
-/// Re-queue green process `pid` if it's still parked, so it wakes, re-scans, and —
-/// finding its deadline passed — runs its `after` clause. A no-op if `send` already
-/// woke it or it re-parked on another receive; the process always re-validates its
-/// own deadline, so a stale timer is harmless (at most one spurious wakeup).
-pub(super) fn wake_for_timeout(pid: u64) {
+/// Re-queue green process `pid` if it's still parked on the deadline identified by
+/// `gen`, so it wakes, re-scans, and — finding its deadline passed — runs its
+/// `after` clause. `gen` is the park generation the timer entry was stamped with
+/// (`arm_timer`); if the mailbox's `timer_gen` has since advanced, this entry is a
+/// **superseded** deadline (the process re-parked with a newer one, or moved on),
+/// so we drop it without waking — lazy timer cancellation (see `Mailbox::timer_gen`).
+/// A no-op too if `send` already woke it. The process always re-validates its own
+/// deadline, so even a wakeup that slips through is harmless (at most one spurious).
+pub(super) fn wake_for_timeout(pid: u64, gen: u64) {
     let mailbox = crate::core::sync::lock(&REGISTRY).get(&pid).cloned();
     if let Some(mb) = mailbox {
+        // Stale entry — the process has re-parked (or moved on) since this timer
+        // was armed. Skip it: the live deadline has its own, current-gen entry.
+        if mb.timer_gen.load(Ordering::Relaxed) != gen {
+            return;
+        }
         let mut st = crate::core::sync::lock(&mb.state);
-        if let Some(proc) = st.waiter.take() {
+        if let Some(proc) = wake_parked(&mut st) {
             drop(st);
             enqueue(proc);
         }
@@ -410,9 +498,7 @@ pub fn list_local_pids() -> Vec<u64> {
 /// that lives behind the scheduler registry. Takes the registry lock, then the
 /// mailbox's own lock, briefly.
 pub fn mailbox_len(pid: u64) -> Option<usize> {
-    let mailbox = crate::core::sync::lock(&REGISTRY).get(&pid).cloned()?;
-    let len = crate::core::sync::lock(&mailbox.state).queue.len();
-    Some(len)
+    with_mailbox(pid, |mb| crate::core::sync::lock(&mb.state).queue.len())
 }
 
 /// The run-status of live local process `pid`: `"running"` (executing on a
@@ -421,8 +507,7 @@ pub fn mailbox_len(pid: u64) -> Option<usize> {
 /// mailbox's `status` cell, which the scheduler sets at each transition. Backs
 /// `process-info`'s `:status`.
 pub fn process_status(pid: u64) -> Option<&'static str> {
-    let mailbox = crate::core::sync::lock(&REGISTRY).get(&pid).cloned()?;
-    Some(match mailbox.status.load(Ordering::Relaxed) {
+    with_mailbox(pid, |mb| match mb.status.load(Ordering::Relaxed) {
         ST_RUNNING => pk::STATUS_RUNNING,
         ST_WAITING => pk::STATUS_WAITING,
         _ => pk::STATUS_RUNNABLE,
@@ -435,8 +520,7 @@ pub fn process_status(pid: u64) -> Option<&'static str> {
 /// `receive`s reports `0`. Bump-allocated, so it reflects allocation since the
 /// last arena reset / collection. Backs `process-info`'s `:memory`.
 pub fn process_mem(pid: u64) -> Option<usize> {
-    let mailbox = crate::core::sync::lock(&REGISTRY).get(&pid).cloned()?;
-    Some(mailbox.mem.load(Ordering::Relaxed))
+    with_mailbox(pid, |mb| mb.mem.load(Ordering::Relaxed))
 }
 
 /// The cumulative GC-collection count of live local process `pid`, or `None` if
@@ -445,8 +529,7 @@ pub fn process_mem(pid: u64) -> Option<usize> {
 /// a process that never `receive`s reports `0`. Backs `process-info`'s
 /// `:collections`.
 pub fn process_gc_runs(pid: u64) -> Option<u64> {
-    let mailbox = crate::core::sync::lock(&REGISTRY).get(&pid).cloned()?;
-    Some(mailbox.gc_runs.load(Ordering::Relaxed))
+    with_mailbox(pid, |mb| mb.gc_runs.load(Ordering::Relaxed))
 }
 
 /// The cumulative reduction count of live local process `pid`, or `None` if the
@@ -456,12 +539,46 @@ pub fn process_gc_runs(pid: u64) -> Option<u64> {
 /// `process-info`'s `:reductions`. Exact for spawned processes; the root accrues
 /// only in whole-budget increments (it bypasses `run_one`), so its figure is coarse.
 pub fn process_reductions(pid: u64) -> Option<u64> {
-    let mailbox = crate::core::sync::lock(&REGISTRY).get(&pid).cloned()?;
-    Some(mailbox.reductions.load(Ordering::Relaxed))
+    with_mailbox(pid, |mb| mb.reductions.load(Ordering::Relaxed))
 }
 
 /// Set the run-status of the *current* process (used by `receive_match` for the
 /// root, which never goes through `run_one`).
 fn set_self_status(ctx: &Ctx, status: u8) {
     ctx.mailbox.status.store(status, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The lazy-cancellation core (Fix 1): each park-with-deadline bumps the
+    /// mailbox's `timer_gen` and stamps its timer entry with the new value; the
+    /// timer thread fires only the entry whose gen is still current. This unit test
+    /// exercises the gen bookkeeping without standing up the timer thread or a real
+    /// coroutine — it models the sequence of arms and asserts which entries are
+    /// considered live vs. superseded.
+    #[test]
+    fn timer_gen_supersedes_earlier_entries() {
+        let mb = Mailbox::new();
+        assert_eq!(mb.timer_gen.load(Ordering::Relaxed), 0, "fresh mailbox at gen 0");
+
+        // Mirror `wait_for_message`'s green branch: `fetch_add(1) + 1` is the gen
+        // stamped onto the entry just armed. A server looping
+        // `(receive … (after ms …))` woken by `send` each iteration arms repeatedly.
+        let gen1 = mb.timer_gen.fetch_add(1, Ordering::Relaxed) + 1;
+        let gen2 = mb.timer_gen.fetch_add(1, Ordering::Relaxed) + 1;
+        let gen3 = mb.timer_gen.fetch_add(1, Ordering::Relaxed) + 1;
+        assert_eq!((gen1, gen2, gen3), (1, 2, 3), "each park stamps a fresh gen");
+
+        // The staleness gate `wake_for_timeout` applies: an entry fires only while
+        // its gen equals the mailbox's current `timer_gen`. After three arms only
+        // the third (the live deadline) is current; the first two are superseded and
+        // would be dropped without a spurious wakeup.
+        let current = mb.timer_gen.load(Ordering::Relaxed);
+        assert_eq!(current, 3);
+        assert_ne!(gen1, current, "first park's entry is superseded");
+        assert_ne!(gen2, current, "second park's entry is superseded");
+        assert_eq!(gen3, current, "only the latest park's entry is live");
+    }
 }

@@ -445,6 +445,38 @@ pub(crate) fn spawn_or_get<E>(
     Ok(pid)
 }
 
+/// Encode `frame` and enqueue it on the link to `target_node`. Returns whether
+/// the bytes actually made it onto that link's writer queue: `false` if the link
+/// is down (no `NODES` entry) *or* its bounded send queue is full/severed. This
+/// is the single send path for every control frame (monitor/link/exit family),
+/// so their error handling is uniform — the two callers that care about delivery
+/// (`monitor_remote`, `link_remote`) branch on the bool to fire `:noconnection`;
+/// the rest are best-effort and ignore it.
+///
+/// Error-handling choice: a failed *encode* is logged via `eprintln!` (adapted
+/// from the old `monitor_remote`, the better of the two prior tails — the others
+/// silently swallowed it) rather than dropped, because a control frame failing to
+/// encode is a real bug, not an expected condition — its only variable-width field
+/// is `Exit`'s `reason`, and an oversized reason that can't be shipped is worth a
+/// diagnostic. A failed encode counts as not-sent.
+fn send_frame(target_node: Symbol, frame: &Frame) -> bool {
+    let bytes: Arc<[u8]> = match encode_payload(frame) {
+        Ok(b) => Arc::from(b),
+        Err(e) => {
+            eprintln!(
+                "dist: cannot encode control frame for {}: {}",
+                value::symbol_name(target_node),
+                e
+            );
+            return false;
+        }
+    };
+    match crate::core::sync::read(&NODES).get(&target_node) {
+        Some(conn) => conn.enqueue(bytes),
+        None => false,
+    }
+}
+
 /// `(monitor (Pid remote_node remote_pid))` from the cross-node path: ship a
 /// `Frame::Monitor` to the peer and record the pending remote watcher locally
 /// (so net-split can fire `:noconnection` to the watcher even though the
@@ -452,41 +484,24 @@ pub(crate) fn spawn_or_get<E>(
 /// `:noconnection` immediately — same shape an immediately-dead local target
 /// gets (`:noproc` from `add_monitor`), just a different reason.
 pub(crate) fn monitor_remote(target_node: Symbol, target_pid: u64, watcher_pid: u64, mref: u64) {
-    let me = local_node();
-    let bytes: Arc<[u8]> = match encode_payload(&Frame::Monitor {
-        from_node: me,
-        watcher_pid,
-        target: target_pid,
-        mref,
-    }) {
-        Ok(b) => Arc::from(b),
-        Err(e) => {
-            eprintln!(
-                "dist: cannot encode Monitor for {}: {}",
-                value::symbol_name(target_node),
-                e
-            );
-            return;
-        }
-    };
-    // Record the pending entry **before** consulting `NODES`, then take a
-    // single `NODES` read lock that covers both the link presence check and
-    // the channel send. This closes a race against `drop_link`/`handle_node_down`:
+    // Record the pending entry **before** sending. This closes a race against
+    // `drop_link`/`handle_node_down`:
     //   • If we record before they run, they'll find our entry in
     //     `PENDING_REMOTE` and fire `:noconnection` to us — even if our send
     //     never made it onto the wire.
-    //   • If they run first (`NODES` already empty here), we fall through to
-    //     the explicit cleanup below, dropping our pending entry and firing
-    //     `:noconnection` ourselves.
+    //   • If they run first (`NODES` already empty when `send_frame` looks),
+    //     `send_frame` returns false and we fall through to the explicit cleanup
+    //     below, dropping our pending entry and firing `:noconnection` ourselves.
     // The pending entry can't be orphaned in either branch.
     process::record_pending_remote(target_node, target_pid, watcher_pid, mref);
-    let sent = {
-        let nodes = crate::core::sync::read(&NODES);
-        match nodes.get(&target_node) {
-            Some(conn) => conn.enqueue(bytes),
-            None => false,
-        }
-    };
+    let sent = send_frame(
+        target_node,
+        &Frame::Monitor {
+            watcher_pid,
+            target: target_pid,
+            mref,
+        },
+    );
     if !sent {
         process::drop_pending_remote(target_node, watcher_pid, mref);
         process::fire_noconnection(target_node, target_pid, watcher_pid, mref);
@@ -499,18 +514,7 @@ pub(crate) fn monitor_remote(target_node: Symbol, target_pid: u64, watcher_pid: 
 /// from its `MONITORS` table.
 pub(crate) fn demonitor_remote(target_node: Symbol, watcher_pid: u64, mref: u64) {
     process::drop_pending_remote(target_node, watcher_pid, mref);
-    let me = local_node();
-    let bytes: Arc<[u8]> = match encode_payload(&Frame::Demonitor {
-        from_node: me,
-        watcher_pid,
-        mref,
-    }) {
-        Ok(b) => Arc::from(b),
-        Err(_) => return, // best-effort
-    };
-    if let Some(conn) = crate::core::sync::read(&NODES).get(&target_node) {
-        let _ = conn.enqueue(bytes);
-    }
+    let _ = send_frame(target_node, &Frame::Demonitor { watcher_pid, mref });
 }
 
 // ---- cross-node links (ADR-067) — the symmetric cousin of monitor_remote ----
@@ -519,25 +523,16 @@ pub(crate) fn demonitor_remote(target_node: Symbol, watcher_pid: u64, mref: u64)
 /// peer records its half, and — if the link to that node isn't up — fire an
 /// immediate `:noconnection` to the local linker (same shape a monitor's
 /// unreachable target gets). `local_pid` is the linker (self). Race-free against
-/// net-split exactly as `monitor_remote`: record before consulting `NODES`.
+/// net-split exactly as `monitor_remote`: record before sending.
 pub(crate) fn link_remote(target_node: Symbol, target_pid: u64, local_pid: u64) {
-    let me = local_node();
-    let bytes: Arc<[u8]> = match encode_payload(&Frame::Link {
-        from_node: me,
-        from_pid: local_pid,
-        to_pid: target_pid,
-    }) {
-        Ok(b) => Arc::from(b),
-        Err(_) => return,
-    };
     process::record_remote_link(local_pid, target_node, target_pid);
-    let sent = {
-        let nodes = crate::core::sync::read(&NODES);
-        match nodes.get(&target_node) {
-            Some(conn) => conn.enqueue(bytes),
-            None => false,
-        }
-    };
+    let sent = send_frame(
+        target_node,
+        &Frame::Link {
+            from_pid: local_pid,
+            to_pid: target_pid,
+        },
+    );
     if !sent {
         // No link to that node: the target is unreachable. Fire `:noconnection`
         // to the linker (this also drops the half-entry we just recorded).
@@ -553,18 +548,13 @@ pub(crate) fn link_remote(target_node: Symbol, target_pid: u64, local_pid: u64) 
 /// `(unlink remote-pid)`: drop our half and ship a best-effort `Frame::Unlink`.
 pub(crate) fn unlink_remote(target_node: Symbol, target_pid: u64, local_pid: u64) {
     process::drop_remote_link(local_pid, target_node, target_pid);
-    let me = local_node();
-    let bytes: Arc<[u8]> = match encode_payload(&Frame::Unlink {
-        from_node: me,
-        from_pid: local_pid,
-        to_pid: target_pid,
-    }) {
-        Ok(b) => Arc::from(b),
-        Err(_) => return,
-    };
-    if let Some(conn) = crate::core::sync::read(&NODES).get(&target_node) {
-        let _ = conn.enqueue(bytes);
-    }
+    let _ = send_frame(
+        target_node,
+        &Frame::Unlink {
+            from_pid: local_pid,
+            to_pid: target_pid,
+        },
+    );
 }
 
 /// A local linked process `from_pid` died with `reason`: ship a link
@@ -572,40 +562,30 @@ pub(crate) fn unlink_remote(target_node: Symbol, target_pid: u64, local_pid: u64
 /// if the link is down the peer already learns via its own net-split handling.
 /// Called from `links::notify_peers`.
 pub(crate) fn send_link_exit(target_node: Symbol, target_pid: u64, from_pid: u64, reason: Message) {
-    let me = local_node();
-    let bytes: Arc<[u8]> = match encode_payload(&Frame::Exit {
-        from_node: me,
-        from_pid,
-        to_pid: target_pid,
-        reason,
-        link: true,
-    }) {
-        Ok(b) => Arc::from(b),
-        Err(_) => return,
-    };
-    if let Some(conn) = crate::core::sync::read(&NODES).get(&target_node) {
-        let _ = conn.enqueue(bytes);
-    }
+    let _ = send_frame(
+        target_node,
+        &Frame::Exit {
+            from_pid,
+            to_pid: target_pid,
+            reason,
+            link: true,
+        },
+    );
 }
 
 /// `(exit remote-pid reason)`: ship a non-link `Frame::Exit` routed straight to
 /// the peer's `scheduler::exit` (kill-style, like the local builtin). Used for an
 /// explicit remote exit and for a supervisor terminating a remote child.
 pub(crate) fn exit_remote(target_node: Symbol, target_pid: u64, reason: Message) {
-    let me = local_node();
-    let bytes: Arc<[u8]> = match encode_payload(&Frame::Exit {
-        from_node: me,
-        from_pid: 0, // unused for an explicit (non-link) exit
-        to_pid: target_pid,
-        reason,
-        link: false,
-    }) {
-        Ok(b) => Arc::from(b),
-        Err(_) => return,
-    };
-    if let Some(conn) = crate::core::sync::read(&NODES).get(&target_node) {
-        let _ = conn.enqueue(bytes);
-    }
+    let _ = send_frame(
+        target_node,
+        &Frame::Exit {
+            from_pid: 0, // unused for an explicit (non-link) exit
+            to_pid: target_pid,
+            reason,
+            link: false,
+        },
+    );
 }
 
 /// `(monitor-node name pid)` — deliver `[:nodedown name]` to `pid` when a link to
@@ -1101,12 +1081,12 @@ fn establish(peer: Symbol, peer_addr: String, stream: Stream, role: Role, sessio
         // down — closing ADR-081's post-handshake injection hole.
         let mut open = open;
         // Loop until peer closes, protocol error, or a deliberate `shutdown`.
-        // `peer` is the *authenticated* node name from the handshake — we use
-        // it instead of the wire's `from_node` field on Monitor/Demonitor so a
-        // malicious peer can't claim to be node X and inject `[:down …]`
-        // deliveries to processes watching X. The `from_node` field stays in
-        // the wire format for clean error paths (encode side still emits it)
-        // but is *not consulted* on this side.
+        // `peer` is the *authenticated* node name from the handshake — every
+        // process-coupling frame (Monitor/Demonitor/Link/Unlink/Exit) is keyed
+        // to it, never to wire-supplied data, so a malicious peer can't claim to
+        // be node X and inject `[:down …]` / link-exit deliveries to processes
+        // coupled with X. (These frames carry no `from_node` field at all — see
+        // the security note on the `Frame` enum.)
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             while let Ok(frame) = open.open(&mut r) {
                 last_seen.store(now_millis(), Ordering::Release);
@@ -1126,7 +1106,6 @@ fn establish(peer: Symbol, peer_addr: String, stream: Stream, role: Role, sessio
                     // alive-target / dead-target paths are exactly the local
                     // monitor's, just with a different delivery channel.
                     Frame::Monitor {
-                        from_node: _wire_node,
                         watcher_pid,
                         target,
                         mref,
@@ -1141,32 +1120,23 @@ fn establish(peer: Symbol, peer_addr: String, stream: Stream, role: Role, sessio
                     // Peer dropped a remote monitor — same `drop_monitor` the
                     // local `demonitor` uses, with a predicate matching the
                     // Remote variant identity (node + pid + mref).
-                    Frame::Demonitor {
-                        from_node: _wire_node,
-                        watcher_pid,
-                        mref,
-                    } => process::drop_monitor(|w| {
+                    Frame::Demonitor { watcher_pid, mref } => process::drop_monitor(|w| {
                         matches!(*w, process::Watcher::Remote { node, pid, mref: r }
                                      if node == peer && pid == watcher_pid && r == mref)
                     }),
                     // A peer linked its `from_pid` to our local `to_pid` — record
                     // our half (keyed by the trusted connection `peer`, not the
                     // wire's `from_node`, same as the monitor handlers).
-                    Frame::Link {
-                        from_node: _wire_node,
-                        from_pid,
-                        to_pid,
-                    } => process::record_remote_link(to_pid, peer, from_pid),
-                    Frame::Unlink {
-                        from_node: _wire_node,
-                        from_pid,
-                        to_pid,
-                    } => process::drop_remote_link(to_pid, peer, from_pid),
+                    Frame::Link { from_pid, to_pid } => {
+                        process::record_remote_link(to_pid, peer, from_pid)
+                    }
+                    Frame::Unlink { from_pid, to_pid } => {
+                        process::drop_remote_link(to_pid, peer, from_pid)
+                    }
                     // An exit signal for our local `to_pid`. A link death goes
                     // through the trap-or-propagate path; an explicit remote exit
                     // is routed straight to `scheduler::exit` (kill-style).
                     Frame::Exit {
-                        from_node: _wire_node,
                         from_pid,
                         to_pid,
                         reason,
