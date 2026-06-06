@@ -297,6 +297,13 @@ pub(crate) fn demonitor_remote_fanout(mref: u64) {
 ///      No notification — the peer is gone — but the entries would otherwise
 ///      leak and a future reconnect would still try to deliver to a fresh
 ///      generation of that peer.
+///
+/// **Keep in sync with the dual `links::handle_node_down`** (`links.rs`): the two
+/// are deliberately parallel — monitors fire one-way `[:down … :noconnection]`,
+/// links fire the symmetric `[:EXIT … :noconnection]`/propagate path — but a
+/// change to the net-split fan-out shape here usually wants a matching change
+/// there. Kept as separate functions on purpose (the down vs. exit semantics
+/// differ), not forced behind shared scaffolding.
 pub(crate) fn handle_node_down(node: Symbol) {
     let pendings = crate::core::sync::lock(&PENDING_REMOTE)
         .remove(&node)

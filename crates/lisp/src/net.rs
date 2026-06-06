@@ -17,13 +17,27 @@
 //! A socket is a `u64` id into a global registry, surfaced as the scalar handle
 //! `Value::Socket(id)` (the GC never traces or moves it). Valid across this
 //! runtime's processes; not node-portable.
+//!
+//! **TEXT-ONLY MECHANISM — BINARY-UNSAFE.** Inbound bytes are delivered as a
+//! Brood string (`Message::Str`) via `from_utf8_lossy`: any byte sequence that
+//! isn't valid UTF-8 is **silently corrupted** (each bad run becomes U+FFFD), so
+//! the bytes you receive may not equal the bytes the peer sent. There is no
+//! lossless path today — Brood has no arbitrary-bytes value kind; `Value::Str`
+//! (and `Message::Str`) are UTF-8 by construction, and adding a byte-string kind
+//! is a deliberate language-surface decision (a new `Value` carries type-system
+//! contract obligations — see CLAUDE.md / `docs/types.md`), not a net.rs change.
+//! This mechanism is fine for text protocols (HTTP headers, line protocols, the
+//! distributed-node handshake is on its *own* codec) and unsafe for binary ones
+//! (raw images, compressed/encrypted streams, length-prefixed binary framing).
+//! See `tcp_data_msg`. (Roadmap item: a faithful binary socket needs a bytes/blob
+//! value kind first.)
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
@@ -34,9 +48,15 @@ use crate::process::{spawn_io_source, MailboxSink, Message, SubscriberHandle};
 enum Sock {
     /// A connected stream — the write/close handle, plus the reader's retarget
     /// handle once started (`None` for a freshly accepted, still-passive socket).
+    /// `accepted_at` is `Some(when)` only while the socket is a passive,
+    /// **unclaimed** accepted stream: the reaper drops it if no
+    /// `tcp-controlling-process` claims it within [`ACCEPT_REAP_AFTER`]. It is
+    /// `None` for an actively-connected stream and is cleared to `None` the
+    /// moment a passive socket is claimed — so a claimed socket is never reaped.
     Stream {
         stream: TcpStream,
         reader: Option<SubscriberHandle>,
+        accepted_at: Option<Instant>,
     },
     /// A listening socket — the accept thread owns the `TcpListener`; `alive`
     /// stops it on close. `port` is cached so `local-port` works without it.
@@ -50,8 +70,53 @@ fn reg() -> std::sync::MutexGuard<'static, HashMap<u64, Sock>> {
     REGISTRY.lock().expect("socket registry mutex")
 }
 
+/// How long a passively-accepted socket may sit in the registry **unclaimed**
+/// (announced via `[:tcp-accept …]` but never handed an owner with
+/// `tcp-controlling-process`) before the reaper drops it. Without this, a peer
+/// that opens connections an application never accepts would leak an fd + a
+/// registry entry per connection forever — a DoS surface for any server built on
+/// this mechanism. 30 s is generous for a handler to claim a fresh connection,
+/// while still bounding the leak. Claimed/active sockets (`accepted_at == None`)
+/// are never reaped.
+const ACCEPT_REAP_AFTER: Duration = Duration::from_secs(30);
+
+/// Drop every passive, unclaimed accepted socket older than [`ACCEPT_REAP_AFTER`].
+/// Called on each accept tick (cheap: it only inspects entries, and there's an
+/// accept tick exactly when new entries appear). Shutting the stream down here
+/// releases the fd; a later `tcp-controlling-process`/`tcp-send` on the reaped id
+/// just gets `bad_socket()`. Only `accepted_at: Some(_)` entries are candidates,
+/// so an actively-connected or already-claimed socket is untouched.
+fn reap_unclaimed(reg: &mut HashMap<u64, Sock>) {
+    let now = Instant::now();
+    let mut doomed = Vec::new();
+    for (&id, sock) in reg.iter() {
+        if let Sock::Stream {
+            accepted_at: Some(t),
+            ..
+        } = sock
+        {
+            if now.duration_since(*t) >= ACCEPT_REAP_AFTER {
+                doomed.push(id);
+            }
+        }
+    }
+    for id in doomed {
+        if let Some(Sock::Stream { stream, .. }) = reg.remove(&id) {
+            let _ = stream.shutdown(Shutdown::Both);
+        }
+    }
+}
+
 // ---- message builders (off-heap; symbols are a global interner) ----
 
+/// Build the `[:tcp sock data]` message for an inbound chunk.
+///
+/// BINARY-UNSAFE: `data` is forced through `from_utf8_lossy`, so any non-UTF-8
+/// bytes are **silently replaced** with U+FFFD — the delivered string is *not*
+/// byte-faithful for binary payloads. This is a known limitation of the text-only
+/// socket mechanism (see the module doc): Brood has no arbitrary-bytes value kind
+/// to carry raw bytes, and adding one is a language-surface decision, not a fix
+/// to make here. Lossless for valid UTF-8 (text protocols); lossy otherwise.
 fn tcp_data_msg(id: u64, bytes: &[u8]) -> Message {
     Message::Vector(vec![
         Message::Keyword(value::intern("tcp")),
@@ -108,13 +173,22 @@ fn accept_loop(lid: u64, listener: TcpListener, alive: Arc<AtomicBool>, sink: &M
                 // announce it; the owner calls `tcp-controlling-process` to start
                 // reading. Avoids losing early bytes before a handler takes over.
                 let cid = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-                reg().insert(
-                    cid,
-                    Sock::Stream {
-                        stream,
-                        reader: None,
-                    },
-                );
+                {
+                    let mut reg = reg();
+                    // Stamp the accept time so the reaper can drop this entry if
+                    // no owner claims it (an unclaimed passive socket otherwise
+                    // leaks its fd + registry slot forever — a DoS surface). The
+                    // sweep is cheap, so piggyback it on this same accept tick.
+                    reg.insert(
+                        cid,
+                        Sock::Stream {
+                            stream,
+                            reader: None,
+                            accepted_at: Some(Instant::now()),
+                        },
+                    );
+                    reap_unclaimed(&mut reg);
+                }
                 sink.emit(tcp_accept_msg(lid, cid));
             }
             // Non-blocking listener: nothing waiting — nap on this dedicated
@@ -141,6 +215,7 @@ pub fn connect(host: &str, port: u16, subscriber: u64) -> std::io::Result<u64> {
         Sock::Stream {
             stream,
             reader: Some(handle),
+            accepted_at: None, // actively connected → never reaped
         },
     );
     Ok(id)
@@ -174,7 +249,11 @@ pub fn listen(host: &str, port: u16, subscriber: u64) -> std::io::Result<u64> {
 pub fn controlling_process(id: u64, pid: u64) -> std::io::Result<()> {
     let mut reg = reg();
     match reg.get_mut(&id) {
-        Some(Sock::Stream { stream, reader }) => {
+        Some(Sock::Stream {
+            stream,
+            reader,
+            accepted_at,
+        }) => {
             match reader {
                 Some(h) => h.retarget(pid),
                 None => {
@@ -182,6 +261,8 @@ pub fn controlling_process(id: u64, pid: u64) -> std::io::Result<()> {
                     *reader = Some(start_reader(id, clone, pid));
                 }
             }
+            // Claimed now: clear the accept stamp so the reaper never drops it.
+            *accepted_at = None;
             Ok(())
         }
         Some(Sock::Listener { .. }) => Err(invalid(

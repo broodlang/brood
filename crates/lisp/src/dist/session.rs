@@ -82,11 +82,10 @@ impl SealKey {
             .checked_add(1)
             .ok_or_else(|| io::Error::other("session nonce space exhausted"))?;
         // `payload` was already capped at MAX_FRAME by `encode_payload`, so
-        // `ct.len()` (payload + 16) fits a u32 comfortably.
-        let mut out = Vec::with_capacity(ct.len() + 4);
-        out.extend_from_slice(&(ct.len() as u32).to_be_bytes());
-        out.extend_from_slice(&ct);
-        Ok(out)
+        // `ct.len()` (payload + 16) fits a u32 comfortably. The `[u32 len][…]`
+        // framing is shared with the plaintext path (`wire::len_prefixed`); only
+        // the body differs (ciphertext+tag here, plaintext there).
+        Ok(super::wire::len_prefixed(&ct))
     }
 }
 
@@ -146,7 +145,6 @@ impl OpenKey {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::value;
     use std::io::Cursor;
 
     fn key(b: u8) -> [u8; KEY_LEN] {
@@ -156,7 +154,6 @@ mod tests {
     /// A frame the tests can seal and recognise on the way back out.
     fn monitor(mref: u64) -> Frame {
         Frame::Monitor {
-            from_node: value::intern("peer"),
             watcher_pid: 7,
             target: 42,
             mref,

@@ -31,7 +31,7 @@ use crate::core::keywords as kw;
 use crate::core::value::{
     self, BigIntId, ClosureId, EnvId, MapId, NativeId, PairId, RopeId, StrId, Symbol, Value, VecId,
 };
-use crate::error::{error_codes, LispError, LispResult, Pos};
+use crate::error::{LispError, LispResult, Pos};
 
 thread_local! {
     /// Per-thread engine override for the differential test harness (and any tool
@@ -772,7 +772,14 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                     // `(throw [:match-error (quote :ctx) m (quote pats)])`, which had
                     // been forcing every non-total `match` / pattern-dispatch `fn`
                     // onto the tree-walker.
-                    return Some(const_node(heap, items.get(1).copied().unwrap_or(Value::Nil)));
+                    //
+                    // `(quote a b)` is malformed — the tree-walker rejects it with an
+                    // arity error. Defer the whole closure so both engines agree;
+                    // compiling only `a` here would silently drop the tail.
+                    if items.len() != 2 {
+                        return None;
+                    }
+                    return Some(const_node(heap, items[1]));
                 }
                 // `let`/`let*` are sequential; `letrec` pre-allocates all slots.
                 if value::symbol_is(h, kw::LET) || value::symbol_is(h, kw::LET_STAR) {
@@ -1297,8 +1304,8 @@ fn exec_node(
             // stack so a collection during a later argument's eval relocates them in
             // place (mirrors `eval::eval_arguments`). `save` is this call's region;
             // it is always truncated back, including on the error path.
-            let cs = exec_node(heap, callee, frame_base, genv).map_err(|e| tag(e))?;
-            let cv = force(heap, cs).map_err(|e| tag(e))?;
+            let cs = exec_node(heap, callee, frame_base, genv).map_err(tag)?;
+            let cv = force(heap, cs).map_err(tag)?;
             let save = heap.roots_len();
             heap.push_root(cv);
             for a in args.iter() {
@@ -1329,7 +1336,7 @@ fn exec_node(
             let cur_env = heap.read_root_env(genv);
             let result = dispatch(heap, callee_v, argv, *tail, cur_env);
             heap.truncate_roots(save);
-            result.map_err(|e| tag(e))
+            result.map_err(tag)
         }
         Node::Prim2 { op, a, b, map, head, guard, pos } => {
             let pos = *pos;
@@ -1402,7 +1409,7 @@ fn exec_node(
             let argv: SmallVec<[Value; 4]> = SmallVec::from_slice(&[sa, sb]);
             let result = dispatch(heap, callee, argv, false, cur_env);
             heap.truncate_roots(save);
-            result.map_err(|e| tag(e))
+            result.map_err(tag)
         }
     }
 }
@@ -1437,26 +1444,21 @@ fn dispatch(
             break;
         };
         let cl_env = heap.closure(id).env.unwrap_or_else(|| heap.global());
+        // VM inner-head resolution: a direct `env_get` for a symbol head (no GC, so
+        // `cur_argv` stays valid), else the head value itself. The shared
+        // `passthrough_redirect_ok` then gates the redirect (callable inner only),
+        // counts the reduction, and honours the deadline.
         let inner = match head {
             Value::Sym(s) => heap.env_get(cl_env, s),
             other => Some(other),
         };
         let Some(inner) = inner else { break };
-        if !matches!(inner, Value::Fn(_) | Value::Native(_)) {
+        if !crate::eval::passthrough_redirect_ok(inner)? {
             break;
         }
         let mut next: SmallVec<[Value; 4]> = SmallVec::with_capacity(map.len());
         for &i in &map {
             next.push(cur_argv[i]);
-        }
-        // The elided inner call would have been its own reduction — count it (and
-        // honour the deadline) so a passthrough-heavy / self-passthrough loop keeps
-        // preemption fairness and can't escape the watchdog (the bug eval hit).
-        crate::process::tick();
-        if crate::process::deadline_exceeded() {
-            return Err(LispError::runtime(
-                "evaluation exceeded its time limit (MCP tool watchdog)",
-            ));
         }
         cur_callee = inner;
         cur_argv = next;
@@ -1571,16 +1573,7 @@ fn vm_apply_inner(
     let _gc_block = crate::process::GcBlockGuard::enter();
     let probe = 0u8;
     if let Some(used) = crate::process::stack_overflow_check(&probe as *const u8 as usize) {
-        return Err(LispError::runtime(format!(
-            "recursion too deep: used {used} bytes of stack, over the \
-             {}-byte budget (runaway non-tail recursion?)",
-            crate::process::stack_budget()
-        ))
-        .with_code(error_codes::STACK_DEPTH_EXCEEDED)
-        .with_hint(
-            "rewrite as a tail-recursive loop (proper tail calls are O(1) stack), \
-             or raise the budget with BROOD_STACK_BUDGET",
-        ));
+        return Err(crate::eval::stack_depth_error(used));
     }
 
     // Root the captured env on `env_roots` (Stage 2c): for a global-capturing
@@ -1617,12 +1610,7 @@ fn vm_apply_inner(
         if let Some(used) = crate::core::alloc::soft_limit_hit() {
             heap.truncate_roots(base);
             heap.truncate_env_roots(env_base);
-            return Err(LispError::runtime(format!(
-                "memory limit exceeded: {used} bytes allocated process-wide \
-                 exceeds the {}-byte soft limit (raise or unset BROOD_MEM_LIMIT)",
-                crate::core::alloc::soft_limit()
-            ))
-            .with_code(error_codes::MEMORY_LIMIT));
+            return Err(crate::eval::memory_limit_error(used));
         }
         // Reduction-counted preemption + the eval deadline (the watchdog the
         // passthrough loop once escaped — checked every tail iteration here too).
@@ -1630,9 +1618,7 @@ fn vm_apply_inner(
         if crate::process::deadline_exceeded() {
             heap.truncate_roots(base);
             heap.truncate_env_roots(env_base);
-            return Err(LispError::runtime(
-                "evaluation exceeded its time limit (MCP tool watchdog)",
-            ));
+            return Err(crate::eval::deadline_error());
         }
 
         match exec_node(heap, &compiled.body, base, genv) {

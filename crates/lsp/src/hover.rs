@@ -10,7 +10,7 @@
 use brood::syntax::cst::{Node, NodeKind};
 use brood::syntax::scope::{BindingKind, Resolution, ScopeTree};
 use brood::Interp;
-use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind, Range};
+use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind};
 
 use crate::defs;
 use crate::line_index::LineIndex;
@@ -53,10 +53,7 @@ pub fn hover(
         Resolution::NotASymbol => return None,
     };
 
-    let range = Range::new(
-        index.position(text, node.span.start),
-        index.position(text, node.span.end),
-    );
+    let range = index.range(text, node.span);
     Some(Hover {
         contents: HoverContents::Markup(MarkupContent {
             kind: MarkupKind::Markdown,

@@ -79,29 +79,64 @@ pub fn run(interp: &mut Interp) -> Result<(), Box<dyn Error>> {
 // Transport — newline-delimited JSON (MCP stdio) + JSON-RPC envelope
 // ============================================================================
 
+/// The result of pulling one line off the transport: a parsed message, a clean
+/// EOF (peer hung up), or a non-blank line that didn't parse as JSON.
+///
+/// A parse failure is **not** fatal: JSON-RPC defines `-32700 Parse error` as a
+/// per-message response, and the MCP stdio transport is one independent message
+/// per line — so one garbled line (a truncated write, a stray log line on the
+/// channel) must not tear down a long-lived session. `main_loop` answers with a
+/// `-32700` envelope and keeps serving. (Earlier this surfaced as an
+/// `io::ErrorKind::InvalidData` that propagated out of `main_loop` and killed
+/// the connection — spec-incorrect and brittle for a daemon an agent keeps open
+/// for an entire editing session.)
+enum ReadOutcome {
+    Message(Json),
+    Eof,
+    Parse(String),
+}
+
 /// Read one **newline-delimited** JSON message — the MCP stdio transport: one
 /// JSON-RPC object per line, no framing headers. (This is *not* LSP, which uses
 /// `Content-Length` headers; using that here is why a real MCP client — Claude
-/// Code — could never complete the `initialize` handshake.) Returns `Ok(None)`
-/// at clean EOF (peer closed the channel — exit cleanly). Blank lines are
-/// tolerated as separators; a non-empty line that doesn't parse as JSON is
-/// `InvalidData` (the protocol is broken — propagate and fail loudly).
-fn read_message<R: BufRead>(r: &mut R) -> std::io::Result<Option<Json>> {
+/// Code — could never complete the `initialize` handshake.) Returns
+/// [`ReadOutcome::Eof`] at clean EOF (peer closed the channel — exit cleanly).
+/// Blank lines are tolerated as separators; a non-empty line that doesn't parse
+/// as JSON is [`ReadOutcome::Parse`] (the caller replies `-32700` and keeps
+/// serving). A genuine *I/O* error still propagates (the channel itself is gone).
+fn read_message<R: BufRead>(r: &mut R) -> std::io::Result<ReadOutcome> {
     let mut line = String::new();
     loop {
         line.clear();
         let n = r.read_line(&mut line)?;
         if n == 0 {
-            return Ok(None); // EOF between messages — peer hung up
+            return Ok(ReadOutcome::Eof); // EOF between messages — peer hung up
         }
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue; // tolerate stray blank lines between messages
         }
-        let msg: Json = serde_json::from_str(trimmed)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        return Ok(Some(msg));
+        return Ok(match serde_json::from_str::<Json>(trimmed) {
+            Ok(msg) => ReadOutcome::Message(msg),
+            Err(e) => ReadOutcome::Parse(e.to_string()),
+        });
     }
+}
+
+/// The JSON-RPC `-32700 Parse error` response for an unparseable line. Per the
+/// spec the `id` is `null` (the request couldn't be parsed, so its id is
+/// unknown). `data` carries the parser's message so an operator can see *what*
+/// failed to parse.
+fn parse_error_response(detail: &str) -> Json {
+    json!({
+        "jsonrpc": "2.0",
+        "id": Json::Null,
+        "error": {
+            "code": -32700,
+            "message": "Parse error",
+            "data": detail,
+        },
+    })
 }
 
 /// Write one **newline-delimited** JSON message: the compact body followed by a
@@ -217,7 +252,17 @@ fn main_loop<R: BufRead, W: Write>(
     // to the client on a content-bearing reply. Survives across non-tool replies
     // so the agent always sees it.
     let mut pending_warning: Option<String> = None;
-    while let Some(msg) = read_message(r)? {
+    loop {
+        let msg = match read_message(r)? {
+            ReadOutcome::Message(msg) => msg,
+            ReadOutcome::Eof => return Ok(()),
+            // An unparseable line is recoverable: answer -32700 and keep the
+            // session alive (the JSON-RPC contract for a parse failure).
+            ReadOutcome::Parse(detail) => {
+                write_message(w, &parse_error_response(&detail))?;
+                continue;
+            }
+        };
         // A rebuild mid-session means we're now serving stale code — warn once,
         // on stderr (for a human at the terminal) and in-band (for the agent).
         if staleness.check() {
@@ -239,7 +284,6 @@ fn main_loop<R: BufRead, W: Write>(
             Outcome::Exit => return Ok(()),
         }
     }
-    Ok(())
 }
 
 /// Route one message to its handler. A `method` we don't know:
@@ -251,7 +295,9 @@ fn dispatch(interp: &mut Interp, msg: &Json) -> Outcome {
     let params = msg.get("params").cloned().unwrap_or(Json::Null);
 
     // Notifications carry no id; the only one we currently *act on* is `exit`
-    // (which stops the loop) and `initialized` (acknowledged silently).
+    // (which stops the loop). Every other notification — `initialized`
+    // included — falls through to the generic no-reply drop below, which is the
+    // correct JSON-RPC handling for a notification (no response is ever sent).
     if id.is_none() {
         if method == "exit" {
             return Outcome::Exit;
@@ -435,9 +481,20 @@ fn call_tool(interp: &mut Interp, params: &Json) -> Result<Json, RpcError> {
     // discarding any partial allocations a panicking handler left behind.
     // That gives us the same recovery the no-panic path has, just triggered
     // by an unwind instead of an early return.
+    // Watchdog: whether this tool's *handler* runs under a 30s deadline. Only
+    // `eval`/`load` run arbitrary, possibly-runaway code; other tools (fast, or
+    // legitimately long like `run-tests`) run unbounded. The deadline is armed
+    // *inside* the closure — right before the handler `apply` — so the
+    // dispatcher's own overhead (the `(require 'mcp)` / catalogue rebuild below)
+    // doesn't eat the handler's budget. Checked inline in eval's loop (scheduler
+    // deadline, ADR-063), so it surfaces as an ordinary error and leaves the
+    // existing error / panic / output-capture handling intact.
+    let watchdog = name == "eval" || name == "load";
     let inner = std::panic::AssertUnwindSafe(|| -> Result<Json, RpcError> {
         // Re-fetch the catalogue per call so a `def` in a previous `eval`
-        // call (hot reload) reshapes the tool surface immediately.
+        // call (hot reload) reshapes the tool surface immediately. This runs
+        // *before* the deadline is armed, so a slow catalogue rebuild doesn't
+        // count against the handler's 30s.
         let _ = interp.eval_str("(require 'mcp)");
         let tools = interp
             .eval_str("(mcp/mcp-tools)")
@@ -455,6 +512,14 @@ fn call_tool(interp: &mut Interp, params: &Json) -> Result<Json, RpcError> {
             json_to_value(&mut interp.heap, &arguments).map_err(RpcError::invalid_params)?;
         interp.heap.push_root(args_value);
 
+        // Arm the deadline only now — it wraps just the handler evaluation, not
+        // the dispatcher overhead above. Cleared unconditionally after
+        // `catch_unwind` below (a no-op when it was never armed).
+        if watchdog {
+            brood::process::set_deadline(Some(
+                std::time::Instant::now() + std::time::Duration::from_secs(30),
+            ));
+        }
         let result_value =
             brood::eval::apply(&mut interp.heap, handler, &[args_value], interp.root)
                 .map_err(|e| RpcError::from_lisp(&mut interp.heap, &e))?;
@@ -462,17 +527,6 @@ fn call_tool(interp: &mut Interp, params: &Json) -> Result<Json, RpcError> {
         let content = value_to_json(&interp.heap, result_value).map_err(RpcError::internal)?;
         Ok(content)
     });
-    // Watchdog: bound `eval`/`load` (which run arbitrary, possibly-runaway code) to
-    // 30s, so a runaway can't wedge the server / runtime. Checked inline in eval's
-    // loop (scheduler deadline, ADR-063), so it surfaces as an ordinary error and
-    // leaves the dispatcher's existing error / panic / output-capture handling
-    // intact. Other tools (fast, or legitimately long like `run-tests`) run
-    // unbounded. Cleared right after, regardless of how the call ends.
-    if name == "eval" || name == "load" {
-        brood::process::set_deadline(Some(
-            std::time::Instant::now() + std::time::Duration::from_secs(30),
-        ));
-    }
     let outcome = match std::panic::catch_unwind(inner) {
         Ok(result) => result,
         Err(payload) => Err(RpcError::from_panic(payload)),
@@ -713,7 +767,18 @@ pub fn value_to_json(heap: &Heap, v: Value) -> Result<Json, String> {
                         ))
                     }
                 };
-                obj.insert(key, value_to_json(heap, val)?);
+                // String/keyword/symbol keys all collapse to the same JSON
+                // string, so `:foo`, `"foo"`, and `'foo` would silently clobber
+                // each other (last wins). That's data loss — fail loudly, the
+                // same fail-loud contract this function holds for non-finite
+                // floats and bignums.
+                let json_val = value_to_json(heap, val)?;
+                if obj.insert(key.clone(), json_val).is_some() {
+                    return Err(format!(
+                        "map has colliding JSON key {key:?} (string/keyword/symbol keys \
+                         share one JSON key — last would silently win)"
+                    ));
+                }
             }
             Ok(Json::Object(obj))
         }
@@ -979,7 +1044,7 @@ mod tests {
     fn unframe(output: &[u8]) -> Vec<Json> {
         let mut r = Cursor::new(output);
         let mut out = Vec::new();
-        while let Ok(Some(m)) = read_message(&mut r) {
+        while let Ok(ReadOutcome::Message(m)) = read_message(&mut r) {
             out.push(m);
         }
         out
@@ -1012,7 +1077,10 @@ mod tests {
         // we no longer treat it as framing).
         let line = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n";
         let mut r = Cursor::new(&line[..]);
-        let msg = read_message(&mut r).unwrap().expect("a message");
+        let msg = match read_message(&mut r).unwrap() {
+            ReadOutcome::Message(m) => m,
+            other => panic!("expected a parsed message, got {}", outcome_label(&other)),
+        };
         assert_eq!(msg["method"], "ping");
 
         // The output side emits compact body + a single trailing newline.
@@ -1020,12 +1088,51 @@ mod tests {
         write_message(&mut out, &json!({"ok": true})).unwrap();
         assert_eq!(out, b"{\"ok\":true}\n");
 
-        // A leftover `Content-Length:` header is just a non-JSON line → error.
+        // A leftover `Content-Length:` header is just a non-JSON line → a
+        // recoverable parse error (the caller answers -32700 and keeps serving),
+        // *not* valid framing.
         let mut r = Cursor::new(&b"Content-Length: 17\r\n"[..]);
         assert!(
-            read_message(&mut r).is_err(),
+            matches!(read_message(&mut r).unwrap(), ReadOutcome::Parse(_)),
             "header must not be accepted as a message"
         );
+    }
+
+    /// A short label for a `ReadOutcome` in test panic messages.
+    fn outcome_label(o: &ReadOutcome) -> &'static str {
+        match o {
+            ReadOutcome::Message(_) => "Message",
+            ReadOutcome::Eof => "Eof",
+            ReadOutcome::Parse(_) => "Parse",
+        }
+    }
+
+    #[test]
+    fn a_malformed_line_yields_a_parse_error_and_the_session_continues() {
+        // JSON-RPC: a non-blank line that doesn't parse is answered with a
+        // -32700 Parse error (id null) and the session keeps serving — one
+        // garbled line must not tear down a long-lived daemon. We feed a junk
+        // line between two valid requests and assert all three replies arrive.
+        let mut interp = Interp::new();
+        let mut input = Vec::new();
+        input.extend_from_slice(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n");
+        input.extend_from_slice(b"this is not json{{{\n");
+        input.extend_from_slice(b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n");
+        input.extend_from_slice(b"{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}\n");
+        let mut output = Vec::new();
+        main_loop(&mut interp, &mut Cursor::new(input), &mut output).unwrap();
+        let replies = unframe(&output);
+        // ping(1), parse-error(null), ping(2) — exit produces no reply.
+        assert_eq!(replies.len(), 3, "{replies:?}");
+        assert_eq!(replies[0]["id"], 1);
+        assert_eq!(replies[0]["result"], json!({}));
+        // The middle reply is the -32700 with a null id.
+        assert_eq!(replies[1]["error"]["code"], -32700);
+        assert_eq!(replies[1]["id"], Json::Null);
+        assert!(replies[1]["error"]["data"].is_string());
+        // The session survived: the request *after* the junk still got served.
+        assert_eq!(replies[2]["id"], 2);
+        assert_eq!(replies[2]["result"], json!({}));
     }
 
     #[test]
@@ -1469,6 +1576,21 @@ mod tests {
         let v = json_to_value(&mut interp.heap, &input).unwrap();
         let back = value_to_json(&interp.heap, v).unwrap();
         assert_eq!(input, back);
+    }
+
+    #[test]
+    fn value_to_json_rejects_colliding_keys() {
+        // `:foo` (keyword) and `"foo"` (string) both render to the JSON key
+        // "foo" — so a map carrying both would silently lose one. That's data
+        // loss, so `value_to_json` must error rather than pick a winner.
+        let mut interp = Interp::new();
+        let collide = interp.eval_str(r#"{:foo 1 "foo" 2}"#).unwrap();
+        let err = value_to_json(&interp.heap, collide)
+            .expect_err("colliding JSON keys must be a loud error");
+        assert!(err.contains("colliding"), "{err}");
+        // A map with genuinely distinct JSON keys still converts fine.
+        let ok = interp.eval_str(r#"{:foo 1 :bar 2}"#).unwrap();
+        assert!(value_to_json(&interp.heap, ok).is_ok());
     }
 
     #[test]

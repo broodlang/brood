@@ -11,12 +11,11 @@
 //! again, but a server-side filter keeps the payload small on a big project. An
 //! empty query returns every symbol (the "show all" affordance some clients use).
 
-use brood::syntax::cst::{self, Node, NodeKind};
+use brood::syntax::cst::{Node, NodeKind};
 use brood::Interp;
-use lsp_types::{Location, OneOf, Range, SymbolKind, Uri, WorkspaceSymbol};
+use lsp_types::{Location, OneOf, SymbolKind, Uri, WorkspaceSymbol};
 
 use crate::defs::{self, DefKind};
-use crate::line_index::LineIndex;
 use crate::{workspace, Documents};
 
 /// Every top-level definition across the project whose name matches `query`.
@@ -26,15 +25,25 @@ pub fn workspace_symbols(
     query: &str,
 ) -> Vec<WorkspaceSymbol> {
     let mut out = Vec::new();
-    for (uri, text) in workspace::all_sources(interp, docs) {
-        let root = cst::parse(&text);
-        let index = LineIndex::new(&text);
+    for source in workspace::all_sources(interp, docs) {
+        let uri = source.uri();
+        let text = source.text();
+        // Reuse an open document's cached CST + line index; parse only disk-only
+        // files (those carry no cached analysis).
+        let parsed;
+        let (root, index) = match source.analysis() {
+            Some(a) => (&a.cst, &a.line_index),
+            None => {
+                parsed = crate::analyze(text);
+                (&parsed.cst, &parsed.line_index)
+            }
+        };
         // A file's `(defmodule ns …)` is its namespace (ADR-065). Display each
         // symbol qualified (`ns/name`) with the namespace as the container, so
         // two same-named defs in different namespaces are distinguishable in the
         // picker. A file with no `defmodule` falls back to the bare name + file.
-        let ns = file_namespace(&root, &text);
-        for d in defs::top_level(&root, &text) {
+        let ns = file_namespace(root, text);
+        for d in defs::top_level(root, text) {
             let name = match ns {
                 Some(ns) => format!("{ns}/{}", d.name),
                 None => d.name.to_string(),
@@ -42,15 +51,12 @@ pub fn workspace_symbols(
             if !matches(query, &name) {
                 continue;
             }
-            let range = Range::new(
-                index.position(&text, d.name_span.start),
-                index.position(&text, d.name_span.end),
-            );
+            let range = index.range(text, d.name_span);
             out.push(WorkspaceSymbol {
                 name,
                 kind: symbol_kind(d.kind),
                 tags: None,
-                container_name: ns.map(str::to_string).or_else(|| file_label(&uri)),
+                container_name: ns.map(str::to_string).or_else(|| file_label(uri)),
                 location: OneOf::Left(Location::new(uri.clone(), range)),
                 data: None,
             });
@@ -120,6 +126,7 @@ fn file_label(uri: &Uri) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use brood::syntax::cst;
 
     #[test]
     fn subsequence_matching() {

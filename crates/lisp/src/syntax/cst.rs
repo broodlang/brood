@@ -141,7 +141,7 @@ impl<'a> Cst<'a> {
     /// One run of trivia, or one form. (Trivia stays in the tree — lossless.)
     fn trivia_or_form(&mut self) -> Node {
         match self.s.peek() {
-            Some(c) if c.is_whitespace() || c == ',' => self.trivia(false),
+            Some(c) if atom::is_trivia_ws(c) => self.trivia(false),
             Some(';') => self.trivia(true),
             _ => self.form(),
         }
@@ -154,14 +154,10 @@ impl<'a> Cst<'a> {
     fn trivia(&mut self, comment: bool) -> Node {
         let start = self.s.pos();
         if comment {
-            while let Some(c) = self.s.bump() {
-                if c == '\n' {
-                    break;
-                }
-            }
+            self.s.skip_line_comment();
             self.leaf(NodeKind::Comment, start)
         } else {
-            while matches!(self.s.peek(), Some(c) if (c.is_whitespace() || c == ',') && c != ';') {
+            while matches!(self.s.peek(), Some(c) if atom::is_trivia_ws(c)) {
                 self.s.bump();
             }
             self.leaf(NodeKind::Whitespace, start)
@@ -217,11 +213,24 @@ impl<'a> Cst<'a> {
         if self.depth >= MAX_DEPTH {
             let err_start = self.s.pos();
             self.skip_to_balanced_close(close);
-            // The Error covers what wasn't parsed; the outer node spans through
-            // the close (if we found one) just like a normal `seq`.
+            // The Error covers what wasn't parsed; the outer node still spans
+            // through the close (if we found one), just like a normal `seq`.
+            // `skip_to_balanced_close` leaves `pos` *past* the close delimiter
+            // when it found one, but *at* EOF when it ran out of input. So the
+            // Error's end is:
+            //   - found a close → `pos - 1`, excluding the close byte (which
+            //     belongs to the outer node, not the unparsed body);
+            //   - hit EOF → `pos` unchanged, since there is no close byte to
+            //     exclude (subtracting here would trim the last real byte).
+            // The `.max(err_start)` keeps the span non-empty for an empty body.
+            let err_end = if self.s.at_end() {
+                self.s.pos()
+            } else {
+                self.s.pos().saturating_sub(1)
+            };
             let err = Node {
                 kind: NodeKind::Error,
-                span: Span::new(err_start, self.s.pos().saturating_sub(1).max(err_start)),
+                span: Span::new(err_start, err_end.max(err_start)),
                 children: Vec::new(),
             };
             return Node {
@@ -280,13 +289,7 @@ impl<'a> Cst<'a> {
                     self.s.bump(); // opening quote
                     let _ = self.s.scan_string_body(None);
                 }
-                ';' => {
-                    while let Some(c) = self.s.bump() {
-                        if c == '\n' {
-                            break;
-                        }
-                    }
-                }
+                ';' => self.s.skip_line_comment(),
                 _ => {
                     self.s.bump();
                 }
@@ -304,7 +307,7 @@ impl<'a> Cst<'a> {
     fn wrap(&mut self, kind: NodeKind, start: usize) -> Node {
         let mut children = Vec::new();
         // interior trivia, kept (lossless): `' x`, `` ` ;c\n x``
-        while matches!(self.s.peek(), Some(c) if c.is_whitespace() || c == ',' || c == ';') {
+        while matches!(self.s.peek(), Some(c) if atom::is_trivia_ws(c) || c == ';') {
             children.push(self.trivia_or_form());
         }
         if self.depth >= MAX_DEPTH {

@@ -127,6 +127,46 @@ macro_rules! region_ref {
     };
 }
 
+/// Emit the use-after-GC tripwire prelude for **one LOCAL match arm** of a
+/// hand-written accessor — the poison `debug_assert!` (nursery only) and the
+/// generational `check_epoch_aged`. Factors the byte-for-byte-identical preamble
+/// the `pair`/`string`/`closure`/`rope`/`bigint`/`transient_cell` accessors each
+/// copy-pasted; `region_ref!` already inlines the same checks for the uniform
+/// reference accessors. The expansion is semantically identical per site — same
+/// old/nursery flags, same `{name}()`/`{label}` words in the panic message, same
+/// `check_epoch_aged` "what" string — so the tripwire fires exactly as it did
+/// hand-written. `$name` is the accessor name (for `{name}()` + the epoch
+/// "what"); `$label` the slot label in the poison message (usually the slab
+/// field name, but `pair` uses the singular "pair"); `$poison` the poison-bitmap
+/// field; `$h` the handle expression (`id.index()`/`id.0`/`id.generation()`).
+///
+/// Two forms: `old` emits just the epoch check; `nursery` emits the poison
+/// assert then the epoch check. (env_frame stays hand-written — its message
+/// carries extra docs prose and binds `env`, not `id`.)
+macro_rules! local_gc_check {
+    (old, $self:ident, $h:expr, $poison:ident, $name:literal, $label:literal) => {
+        #[cfg(debug_assertions)]
+        $self.check_epoch_aged(true, $h.generation(), $h.index(), $name, $h.0);
+    };
+    (nursery, $self:ident, $h:expr, $poison:ident, $name:literal, $label:literal) => {{
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            !PoisonBits::is(&$self.poison.$poison, $h.index()),
+            concat!(
+                "use-after-GC: ",
+                $name,
+                "() on freed nursery ",
+                $label,
+                " slot {} (handle {:#x})."
+            ),
+            $h.index(),
+            $h.0
+        );
+        #[cfg(debug_assertions)]
+        $self.check_epoch_aged(false, $h.generation(), $h.index(), $name, $h.0);
+    }};
+}
+
 /// Inline storage for an env frame's bindings. A frame holds a handful (function
 /// params, a `let`'s names), so keeping them inline avoids a heap allocation per
 /// call / `let` — which the byte-counting global allocator would otherwise tax
@@ -144,17 +184,6 @@ struct EnvFrame {
     parent: Option<EnvId>,
 }
 
-/// Lower bound on the GC threshold (live LOCAL objects), so tiny heaps don't
-/// thrash by collecting between every few allocations. Overridden by the
-/// `BROOD_GC_STRESS` env var (set to `1` to collect at every safepoint — a
-/// debug aid that flushes out rooting bugs by maximising relocation churn).
-///
-/// Read once on first use and cached — env vars don't change mid-run, and the
-/// safepoint hits this every collection.
-/// Tag ranks for `value_cmp`'s heterogeneous fallback. The order is mostly
-/// aesthetic — what matters is that it's *fixed* so a heterogeneous sort is
-/// reproducible. Numbers come first (most common), then strings/keywords/
-/// symbols (text), then collections, then everything else.
 /// Order a bignum against a float for `value_cmp`'s heterogeneous numeric
 /// fallback. Compares via `f64` (the bignum is converted, rounding); a `NaN`
 /// float is treated as `Equal` (matching the `Float`/`Float` arm's
@@ -176,6 +205,10 @@ fn bigint_cmp_float(b: &num_bigint::BigInt, f: f64) -> std::cmp::Ordering {
     }
 }
 
+/// Tag ranks for `value_cmp`'s heterogeneous fallback. The order is mostly
+/// aesthetic — what matters is that it's *fixed* so a heterogeneous sort is
+/// reproducible. Numbers come first (most common), then strings/keywords/
+/// symbols (text), then collections, then everything else.
 fn tag_rank(v: Value) -> u8 {
     match v {
         Value::Nil => 0,
@@ -416,6 +449,43 @@ struct Slabs {
     /// flag. Process-local; never frozen into PRELUDE/RUNTIME (no `CodeSlabs`
     /// field) and never sent across processes.
     transients: Vec<TransientCell>,
+}
+
+/// Live object count of a [`Slabs`] (`Σ slab.len()`). The collector is a moving
+/// copy collector that never reuses a slot in place — survivors are relocated
+/// into fresh slabs and the dead dropped wholesale — so there is no free list to
+/// subtract and the slab lengths *are* the live count. Shared by both
+/// [`Heap::local_live_count`] (the nursery) and [`Heap::old_live_count`] (the old
+/// gen), which were identical sums. `natives` is excluded (it's never GC'd — see
+/// the byte-weighted [`slab_bytes`], which does count it for footprint).
+fn slab_live_count(s: &Slabs) -> usize {
+    s.pairs.len()
+        + s.vectors.len()
+        + s.maps.len()
+        + s.strings.len()
+        + s.bigints.len()
+        + s.ropes.len()
+        + s.closures.len()
+        + s.envs.len()
+        + s.transients.len()
+}
+
+/// Byte-weighted footprint of a [`Slabs`] (`Σ slab.len() * size_of::<elem>`) —
+/// the slab arrays themselves, not nested/shared content (inner vectors, string
+/// bytes, `Arc`-shared ropes). A comparative figure, not exact RSS. Counts
+/// `natives` too (unlike [`slab_live_count`]). Backs [`Heap::local_bytes`].
+fn slab_bytes(s: &Slabs) -> usize {
+    use std::mem::size_of;
+    s.pairs.len() * size_of::<(Value, Value)>()
+        + s.vectors.len() * size_of::<Vec<Value>>()
+        + s.maps.len() * size_of::<MapNode>()
+        + s.strings.len() * size_of::<LocalString>()
+        + s.bigints.len() * size_of::<num_bigint::BigInt>()
+        + s.ropes.len() * size_of::<ropey::Rope>()
+        + s.closures.len() * size_of::<Closure>()
+        + s.natives.len() * size_of::<NativeFn>()
+        + s.envs.len() * size_of::<EnvFrame>()
+        + s.transients.len() * size_of::<TransientCell>()
 }
 
 /// The mutable cell behind a [`Value::Transient`] — Clojure's transient map.
@@ -2042,20 +2112,11 @@ impl Heap {
     fn transient_cell(&self, id: TransientId) -> TransientCell {
         match id.region() {
             LOCAL if id.is_old() => {
-                #[cfg(debug_assertions)]
-                self.check_epoch_aged(true, id.generation(), id.index(), "transient", id.0);
+                local_gc_check!(old, self, id, transients, "transient", "transients");
                 self.old.transients[id.index()]
             }
             LOCAL => {
-                #[cfg(debug_assertions)]
-                debug_assert!(
-                    !PoisonBits::is(&self.poison.transients, id.index()),
-                    "use-after-GC: transient() on freed nursery transients slot {} (handle {:#x}).",
-                    id.index(),
-                    id.0
-                );
-                #[cfg(debug_assertions)]
-                self.check_epoch_aged(false, id.generation(), id.index(), "transient", id.0);
+                local_gc_check!(nursery, self, id, transients, "transient", "transients");
                 self.local.transients[id.index()]
             }
             _ => unreachable!("a transient is always LOCAL (never frozen/shared)"),
@@ -2230,20 +2291,11 @@ impl Heap {
     pub fn rope(&self, id: RopeId) -> &ropey::Rope {
         match id.region() {
             LOCAL if id.is_old() => {
-                #[cfg(debug_assertions)]
-                self.check_epoch_aged(true, id.generation(), id.index(), "rope", id.0);
+                local_gc_check!(old, self, id, ropes, "rope", "ropes");
                 &self.old.ropes[id.index()]
             }
             LOCAL => {
-                #[cfg(debug_assertions)]
-                debug_assert!(
-                    !PoisonBits::is(&self.poison.ropes, id.index()),
-                    "use-after-GC: rope() on freed nursery ropes slot {} (handle {:#x}).",
-                    id.index(),
-                    id.0
-                );
-                #[cfg(debug_assertions)]
-                self.check_epoch_aged(false, id.generation(), id.index(), "rope", id.0);
+                local_gc_check!(nursery, self, id, ropes, "rope", "ropes");
                 &self.local.ropes[id.index()]
             }
             RUNTIME => self
@@ -2298,20 +2350,11 @@ impl Heap {
     pub fn bigint(&self, id: BigIntId) -> &num_bigint::BigInt {
         match id.region() {
             LOCAL if id.is_old() => {
-                #[cfg(debug_assertions)]
-                self.check_epoch_aged(true, id.generation(), id.index(), "bigint", id.0);
+                local_gc_check!(old, self, id, bigints, "bigint", "bigints");
                 &self.old.bigints[id.index()]
             }
             LOCAL => {
-                #[cfg(debug_assertions)]
-                debug_assert!(
-                    !PoisonBits::is(&self.poison.bigints, id.index()),
-                    "use-after-GC: bigint() on freed nursery bigints slot {} (handle {:#x}).",
-                    id.index(),
-                    id.0
-                );
-                #[cfg(debug_assertions)]
-                self.check_epoch_aged(false, id.generation(), id.index(), "bigint", id.0);
+                local_gc_check!(nursery, self, id, bigints, "bigint", "bigints");
                 &self.local.bigints[id.index()]
             }
             PRELUDE => &self.prelude.slabs.bigints[id.index()],
@@ -2928,21 +2971,11 @@ impl Heap {
     pub fn pair(&self, id: PairId) -> (Value, Value) {
         match id.region() {
             LOCAL if id.is_old() => {
-                #[cfg(debug_assertions)]
-                self.check_epoch_aged(true, id.generation(), id.index(), "pair", id.0);
+                local_gc_check!(old, self, id, pairs, "pair", "pair");
                 self.old.pairs[id.index()]
             }
             LOCAL => {
-                #[cfg(debug_assertions)]
-                debug_assert!(
-                    !PoisonBits::is(&self.poison.pairs, id.index()),
-                    "use-after-GC: pair() on freed nursery pair slot {} \
-                     (handle {:#x}).",
-                    id.index(),
-                    id.0
-                );
-                #[cfg(debug_assertions)]
-                self.check_epoch_aged(false, id.generation(), id.index(), "pair", id.0);
+                local_gc_check!(nursery, self, id, pairs, "pair", "pair");
                 self.local.pairs[id.index()]
             }
             PRELUDE => self.prelude.slabs.pairs[id.index()],
@@ -2972,20 +3005,11 @@ impl Heap {
     pub fn string(&self, id: StrId) -> &str {
         match id.region() {
             LOCAL if id.is_old() => {
-                #[cfg(debug_assertions)]
-                self.check_epoch_aged(true, id.generation(), id.index(), "string", id.0);
+                local_gc_check!(old, self, id, strings, "string", "strings");
                 self.old.strings[id.index()].as_str()
             }
             LOCAL => {
-                #[cfg(debug_assertions)]
-                debug_assert!(
-                    !PoisonBits::is(&self.poison.strings, id.index()),
-                    "use-after-GC: string() on freed nursery strings slot {} (handle {:#x}).",
-                    id.index(),
-                    id.0
-                );
-                #[cfg(debug_assertions)]
-                self.check_epoch_aged(false, id.generation(), id.index(), "string", id.0);
+                local_gc_check!(nursery, self, id, strings, "string", "strings");
                 self.local.strings[id.index()].as_str()
             }
             // PRELUDE's `Slabs::strings` is also `Vec<LocalString>` because
@@ -3011,20 +3035,11 @@ impl Heap {
     pub fn closure(&self, id: ClosureId) -> &Closure {
         match id.region() {
             LOCAL if id.is_old() => {
-                #[cfg(debug_assertions)]
-                self.check_epoch_aged(true, id.generation(), id.index(), "closure", id.0);
+                local_gc_check!(old, self, id, closures, "closure", "closures");
                 &self.old.closures[id.index()]
             }
             LOCAL => {
-                #[cfg(debug_assertions)]
-                debug_assert!(
-                    !PoisonBits::is(&self.poison.closures, id.index()),
-                    "use-after-GC: closure() on freed nursery closures slot {} (handle {:#x}).",
-                    id.index(),
-                    id.0
-                );
-                #[cfg(debug_assertions)]
-                self.check_epoch_aged(false, id.generation(), id.index(), "closure", id.0);
+                local_gc_check!(nursery, self, id, closures, "closure", "closures");
                 &self.local.closures[id.index()]
             }
             PRELUDE => &self.prelude.slabs.closures[id.index()],
@@ -3534,8 +3549,8 @@ impl Heap {
         // `EnvId::GLOBAL` is a sentinel (region bits `0b11`) — there is no
         // frame to return; the global scope routes through
         // `runtime.globals_read()` instead. Callers MUST short-circuit
-        // GLOBAL before reaching here (every walker does — see `env_get`
-        // line 1086). A clear assert when that invariant slips, rather
+        // GLOBAL before reaching here (every walker does — see `env_get`).
+        // A clear assert when that invariant slips, rather
         // than the `_ => unreachable!()` arm catching it via the
         // undefined-region byte.
         assert!(
@@ -4035,10 +4050,12 @@ impl Heap {
                     work.extend(self.vector(id).iter().copied());
                 }
                 Value::Map(id) if id.region() == RUNTIME => {
-                    for (k, val) in self.map_entries(id) {
+                    // `fold_entries` walks the trie in place — no intermediate Vec
+                    // (unlike `map_entries`), which matters on this diagnostics walk.
+                    self.fold_entries(id, &mut |k, val| {
                         work.push(k);
                         work.push(val);
-                    }
+                    });
                 }
                 _ => {}
             }
@@ -4249,15 +4266,7 @@ impl Heap {
     /// dead are dropped wholesale), so the live count is simply the slab lengths —
     /// there is no free list to subtract.
     pub fn local_live_count(&self) -> usize {
-        self.local.pairs.len()
-            + self.local.vectors.len()
-            + self.local.maps.len()
-            + self.local.strings.len()
-            + self.local.bigints.len()
-            + self.local.ropes.len()
-            + self.local.closures.len()
-            + self.local.envs.len()
-            + self.local.transients.len()
+        slab_live_count(&self.local)
     }
 
     /// An estimate of this process's LOCAL heap footprint in **bytes** — the
@@ -4268,18 +4277,7 @@ impl Heap {
     /// reflects allocation since the last arena reset / collection. Backs
     /// `process-info`'s `:memory` (published on `receive`).
     pub fn local_bytes(&self) -> usize {
-        use std::mem::size_of;
-        let s = &self.local;
-        s.pairs.len() * size_of::<(Value, Value)>()
-            + s.vectors.len() * size_of::<Vec<Value>>()
-            + s.maps.len() * size_of::<MapNode>()
-            + s.strings.len() * size_of::<LocalString>()
-            + s.bigints.len() * size_of::<num_bigint::BigInt>()
-            + s.ropes.len() * size_of::<ropey::Rope>()
-            + s.closures.len() * size_of::<Closure>()
-            + s.natives.len() * size_of::<NativeFn>()
-            + s.envs.len() * size_of::<EnvFrame>()
-            + s.transients.len() * size_of::<TransientCell>()
+        slab_bytes(&self.local)
     }
 
     /// GC observability counters (Tier-1; `docs/memory-review.md` §7), as a
@@ -4429,15 +4427,7 @@ impl Heap {
     /// append-only between major collections, so the slab lengths *are* the
     /// live count. Drives the major-collection threshold.
     pub fn old_live_count(&self) -> usize {
-        self.old.pairs.len()
-            + self.old.vectors.len()
-            + self.old.maps.len()
-            + self.old.strings.len()
-            + self.old.bigints.len()
-            + self.old.ropes.len()
-            + self.old.closures.len()
-            + self.old.envs.len()
-            + self.old.transients.len()
+        slab_live_count(&self.old)
     }
 
     /// A **minor collection**. `tenure` selects the destination of the nursery's
@@ -5386,16 +5376,48 @@ fn flush_rt_pair(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, id:
     // code lists are **immutable and acyclic** — no cons cycle is constructible — so
     // flush the car/cdr *first*, then push the finished cell once. Sharing (a DAG)
     // is handled by the `fwd` check on revisit; a true cycle would only arise
-    // through a closure, and `flush_rt_closure` breaks that with `OnceLock`. NOTE:
-    // recursive on the cdr — fine for code (shallow bodies); a pathological
-    // 100k-element quoted literal would want the iterative spine `flush_pair` uses
-    // (2a hardening follow-up).
-    let (h, t) = *old.pairs.get(id.index()).expect("rt pair");
-    let nh = flush_rt_value(old, new, fwd, h);
-    let nt = flush_rt_value(old, new, fwd, t);
-    let new_idx = new.pairs.push((nh, nt));
-    fwd.pairs.insert(key, new_idx as u32);
-    PairId::runtime(new_idx)
+    // through a closure, and `flush_rt_closure` breaks that with `OnceLock`.
+    //
+    // Walk the cdr spine **iteratively** (mirroring the LOCAL `flush_pair`): a
+    // pathological 100k-element quoted literal promoted to RUNTIME would otherwise
+    // recurse its length deep and blow the native stack at `runtime_collect` —
+    // now reachable since RT compaction runs at auto-safepoints (ADR-091).
+    // Recursion stays bounded to element *nesting* via `flush_rt_value` on each
+    // car. Append-only means we can't pre-reserve a slot, so we record (key, car)
+    // along the spine and push the finished cells in reverse, wiring each cdr to
+    // the already-built next handle.
+    let mut spine: Vec<(u32, Value)> = Vec::new(); // (forward-map key, original car)
+    let mut cur_id = id;
+    let tail = loop {
+        let (h, t) = *old.pairs.get(cur_id.index()).expect("rt pair");
+        spine.push((cur_id.index() as u32, h));
+        match t {
+            // Another not-yet-copied RUNTIME pair: continue the spine. A
+            // shared/already-copied cell resolves via the `fwd` check below
+            // (handled by `flush_rt_value` on the terminal), so we only extend
+            // the spine for fresh cells.
+            Value::Pair(p) if p.region() == RUNTIME && !fwd.pairs.contains_key(&(p.index() as u32)) => {
+                cur_id = p;
+            }
+            // Nil / atom / dotted tail / shared-or-copied RUNTIME pair: flush it
+            // (cheap, no spine recursion) and stop.
+            other => break flush_rt_value(old, new, fwd, other),
+        }
+    };
+    // Build the cells in reverse so each cdr is the already-pushed next handle.
+    // Car flushes run after the whole spine is known; sharing through a car
+    // resolves via `fwd` once that car's cell is pushed.
+    let mut next = tail;
+    for (key, car) in spine.into_iter().rev() {
+        let new_car = flush_rt_value(old, new, fwd, car);
+        let new_idx = new.pairs.push((new_car, next));
+        fwd.pairs.insert(key, new_idx as u32);
+        next = Value::Pair(PairId::runtime(new_idx));
+    }
+    match next {
+        Value::Pair(pid) => pid,
+        _ => unreachable!("the spine always has at least the head pair"),
+    }
 }
 
 fn flush_rt_vector(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, id: VecId) -> VecId {

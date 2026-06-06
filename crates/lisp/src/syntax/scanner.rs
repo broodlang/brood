@@ -152,17 +152,23 @@ impl<'a> Scanner<'a> {
     pub fn skip_trivia(&mut self) {
         loop {
             match self.peek() {
-                Some(c) if c.is_whitespace() || c == ',' => {
+                Some(c) if atom::is_trivia_ws(c) => {
                     self.pos += c.len_utf8();
                 }
-                Some(';') => {
-                    while let Some(c) = self.bump() {
-                        if c == '\n' {
-                            break;
-                        }
-                    }
-                }
+                Some(';') => self.skip_line_comment(),
                 _ => break,
+            }
+        }
+    }
+
+    /// Consume a `;` line comment through its terminating newline (or EOF).
+    /// Assumes `pos` is on the `;`. Shared by [`Scanner::skip_trivia`] and the
+    /// CST's depth-cap balanced-skip; the CST's *trivia node* builder keeps its
+    /// own copy because it must record the comment's span as a node.
+    pub fn skip_line_comment(&mut self) {
+        while let Some(c) = self.bump() {
+            if c == '\n' {
+                break;
             }
         }
     }
@@ -463,13 +469,10 @@ mod tests {
     #[test]
     fn is_dot_separator_distinguishes_dotted_pair_from_atom() {
         // `.` followed by delimiter is the dotted-pair separator.
-        let mut s = Scanner::new(".)");
+        let s = Scanner::new(".)");
         assert!(s.is_dot_separator());
         // `.5` is the start of an atom, not a dotted-pair `.`.
-        let mut t = Scanner::new(".5");
+        let t = Scanner::new(".5");
         assert!(!t.is_dot_separator());
-        // Suppress unused-warning if we don't bump (we don't).
-        s.bump();
-        t.bump();
     }
 }

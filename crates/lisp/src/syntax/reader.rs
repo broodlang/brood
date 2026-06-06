@@ -237,6 +237,10 @@ impl<'a> Parser<'a> {
     }
 
     fn read_vector(&mut self) -> Result<Value, LispError> {
+        // No `set_form_pos`: the form-pos table is keyed by LOCAL *pair* index
+        // (heap.rs `set_form_pos`/`form_pos` no-op on non-pairs), and only
+        // call-shaped lists carry the runtime-error position. A vector/map isn't
+        // a pair, so a position would be unrecorded — the exemption is deliberate.
         let start = self.s.pos_at(self.s.pos()); // position of the opening '['
         self.s.bump(); // '['
         let mut items = Vec::new();
@@ -259,6 +263,8 @@ impl<'a> Parser<'a> {
     /// canonicalises (last-wins dedup). Commas are whitespace, so
     /// `{:a 1, :b 2}` reads the same as `{:a 1 :b 2}`.
     fn read_map(&mut self) -> Result<Value, LispError> {
+        // No `set_form_pos` — see `read_vector`: the form-pos table is pair-keyed
+        // and only call-shaped lists carry a runtime-error position.
         let start = self.s.pos_at(self.s.pos()); // position of the opening '{'
         self.s.bump(); // '{'
         let mut pairs = Vec::new();

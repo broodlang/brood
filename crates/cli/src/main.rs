@@ -25,10 +25,10 @@
 //! shape for hot reload (docs/shared-code.md), and `nest` is where the
 //! daily-driver workflow lives.
 
-use brood::cli_support::report_error;
-use brood::error::LispError;
+use brood::cli_support::{report_error, run_on_main_stack, RawTermGuard};
 use brood::Interp;
 use clap::Parser;
+use std::path::Path;
 
 /// `brood` — the Brood language binary. Parsed by clap; the help text users
 /// see is generated from these doc-comments + the `#[command]`/`#[arg]` attrs.
@@ -86,29 +86,14 @@ fn main() {
     // through to normal CLI dispatch.
     if brood::bundle::is_bundled() {
         let args: Vec<String> = std::env::args().skip(1).collect();
-        let handle = std::thread::Builder::new()
-            .name("brood-main".into())
-            .stack_size(brood::process::CORO_STACK_BYTES)
-            .spawn(move || run_bundle(args))
-            .expect("spawn brood-main thread");
-        handle.join().expect("brood-main thread panicked");
+        run_on_main_stack("brood-main", move || run_bundle(args));
         return;
     }
     let cli = Cli::parse();
-    // Run the actual work on an explicitly-sized large stack. The tree-walking
-    // evaluator recurses one (heavy, in debug) Rust frame per non-tail call, and
-    // the OS default main-thread stack (~8 MiB) is too small for the stack-budget
-    // guard (ADR-043) to be uniform with the coroutine stacks — deep non-tail
-    // recursion on the root thread would overflow before the guard fires. Sizing
-    // the root thread to `CORO_STACK_BYTES` makes the guard behave identically on
-    // the root thread and inside spawned processes. The child inherits the
-    // process exit via the `std::process::exit` calls inside `run`.
-    let handle = std::thread::Builder::new()
-        .name("brood-main".into())
-        .stack_size(brood::process::CORO_STACK_BYTES)
-        .spawn(move || run(cli))
-        .expect("spawn brood-main thread");
-    handle.join().expect("brood-main thread panicked");
+    // Run the actual work on an explicitly-sized large stack (see
+    // `cli_support::run_on_main_stack` for why). The child inherits the process
+    // exit via the `std::process::exit` calls inside `run`.
+    run_on_main_stack("brood-main", move || run(cli));
 }
 
 fn run(cli: Cli) {
@@ -152,7 +137,7 @@ fn run(cli: Cli) {
     // is the normal teardown); scope it so it drops before any error report + exit
     // (`process::exit` skips Drop). Restore is idempotent.
     let result = {
-        let _guard = TermGuard;
+        let _guard = RawTermGuard;
         interp.eval_str("(require 'repl) (repl/repl-run)")
     };
     if let Err(e) = result {
@@ -176,7 +161,7 @@ fn run_bundle(args: Vec<String>) {
         .join(" ");
     let code = format!("(require 'project) (project/run-bundle (list {list}))");
     let result = {
-        let _guard = TermGuard;
+        let _guard = RawTermGuard;
         interp.eval_str(&code)
     };
     // Restore the terminal whether the app returned or threw (a full-screen app
@@ -187,29 +172,6 @@ fn run_bundle(args: Vec<String>) {
         report_error(&e);
         std::process::exit(1);
     }
-}
-
-/// Restores the terminal on drop — the panic-path backstop for the REPL's raw
-/// mode (std/lineedit.blsp). The Brood `term-raw-leave` is the normal teardown;
-/// this fires on an unwind so a crash never leaves the shell in raw mode.
-struct TermGuard;
-impl Drop for TermGuard {
-    fn drop(&mut self) {
-        // Only leave raw mode (no escape sequences) — the REPL never enters the
-        // alternate screen, and a piped stdout must stay clean. See restore_raw.
-        brood::builtins::restore_raw();
-    }
-}
-
-/// Evaluate a file's source with `(current-file)` set to its path (restored
-/// after), so runtime-error / test locations carry the file and load-time def
-/// sites are recorded for `(source-location …)` (ADR-031) — the same as the
-/// `load` builtin does for `require`d modules.
-fn eval_file(interp: &mut Interp, path: &str, src: &str) -> Result<(), LispError> {
-    let prev = interp.heap.set_current_file(Some(path.to_string()));
-    let result = interp.eval_source(src);
-    interp.heap.set_current_file(prev);
-    result.map(|_| ())
 }
 
 /// `brood --test <file>...`: load each file (registering its cases via the
@@ -236,25 +198,18 @@ fn run_test_files(interp: &mut Interp, files: &[String]) {
         std::process::exit(1);
     }
     for path in files {
-        match std::fs::read_to_string(path) {
-            Ok(src) => {
-                if !no_check_env() {
-                    check_one_file(interp, path, &src, CheckSink::Stderr);
-                }
-                if let Err(e) = eval_file(interp, path, &src) {
-                    // Restore the terminal first: a TUI program that entered raw
-                    // mode and then threw never reached its `term-raw-leave`, and
-                    // `process::exit` skips Drop guards. Without this the shell is
-                    // left wedged in raw mode after an erroring full-screen run.
-                    brood::builtins::restore_terminal_on_exit();
-                    report_error(&e.or_file(path.clone()));
-                    std::process::exit(1);
-                }
-            }
-            Err(e) => {
-                eprintln!("brood: cannot read {}: {}", path, e);
-                std::process::exit(1);
-            }
+        let src = brood::cli_support::read_source_or_exit("brood", Path::new(path));
+        if !no_check_env() {
+            check_one_file(interp, path, &src, CheckSink::Stderr);
+        }
+        if let Err(e) = brood::cli_support::eval_file(interp, path, &src) {
+            // Restore the terminal first: a TUI program that entered raw mode and
+            // then threw never reached its `term-raw-leave`, and `process::exit`
+            // skips Drop guards. Without this the shell is left wedged in raw mode
+            // after an erroring full-screen run.
+            brood::builtins::restore_terminal_on_exit();
+            report_error(&e.or_file(path.clone()));
+            std::process::exit(1);
         }
     }
     if let Err(e) = interp.eval_str("(test/run-tests)") {
@@ -310,13 +265,7 @@ fn run_check_files(interp: &mut Interp, files: &[String]) {
     }
     let mut warned = false;
     for path in files {
-        let src = match std::fs::read_to_string(path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("brood: cannot read {}: {}", path, e);
-                std::process::exit(1);
-            }
-        };
+        let src = brood::cli_support::read_source_or_exit("brood", Path::new(path));
         if check_one_file(interp, path, &src, CheckSink::Stdout) {
             warned = true;
         }
@@ -328,27 +277,20 @@ fn run_check_files(interp: &mut Interp, files: &[String]) {
 
 fn run_files(interp: &mut Interp, files: &[String]) {
     for path in files {
-        match std::fs::read_to_string(path) {
-            Ok(src) => {
-                // Auto-run the advisory checker before eval (stderr so it
-                // doesn't muddle program stdout). `BROOD_NO_CHECK=1` opts out.
-                if !no_check_env() {
-                    check_one_file(interp, path, &src, CheckSink::Stderr);
-                }
-                if let Err(e) = eval_file(interp, path, &src) {
-                    // Restore the terminal first: a TUI program that entered raw
-                    // mode and then threw never reached its `term-raw-leave`, and
-                    // `process::exit` skips Drop guards. Without this the shell is
-                    // left wedged in raw mode after an erroring full-screen run.
-                    brood::builtins::restore_terminal_on_exit();
-                    report_error(&e.or_file(path.clone()));
-                    std::process::exit(1);
-                }
-            }
-            Err(e) => {
-                eprintln!("brood: cannot read {}: {}", path, e);
-                std::process::exit(1);
-            }
+        let src = brood::cli_support::read_source_or_exit("brood", Path::new(path));
+        // Auto-run the advisory checker before eval (stderr so it doesn't muddle
+        // program stdout). `BROOD_NO_CHECK=1` opts out.
+        if !no_check_env() {
+            check_one_file(interp, path, &src, CheckSink::Stderr);
+        }
+        if let Err(e) = brood::cli_support::eval_file(interp, path, &src) {
+            // Restore the terminal first: a TUI program that entered raw mode and
+            // then threw never reached its `term-raw-leave`, and `process::exit`
+            // skips Drop guards. Without this the shell is left wedged in raw mode
+            // after an erroring full-screen run.
+            brood::builtins::restore_terminal_on_exit();
+            report_error(&e.or_file(path.clone()));
+            std::process::exit(1);
         }
     }
     // Success path too: a program may have entered raw mode and returned

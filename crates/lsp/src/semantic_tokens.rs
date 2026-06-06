@@ -208,9 +208,14 @@ fn emit(node: &Node, src: &str, index: &LineIndex, ttype: u32, tmods: u32, out: 
     let slice = &src[node.span.start as usize..node.span.end as usize];
     let mut byte = node.span.start;
     for part in slice.split('\n') {
-        if !part.is_empty() {
+        // On a CRLF document `split('\n')` leaves a trailing '\r' on each part;
+        // it's not part of the visible token, so drop it before measuring the
+        // UTF-16 length (otherwise the token over-runs by one unit). The byte
+        // cursor below still advances over the full part incl. the '\r'.
+        let visible = part.strip_suffix('\r').unwrap_or(part);
+        if !visible.is_empty() {
             let pos = index.position(src, byte);
-            let len: u32 = part.chars().map(|c| c.len_utf16() as u32).sum();
+            let len: u32 = visible.chars().map(|c| c.len_utf16() as u32).sum();
             out.push(Raw {
                 line: pos.line,
                 start: pos.character,

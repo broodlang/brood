@@ -586,6 +586,54 @@ fn runaway_macro_expansion_errors_instead_of_hanging() {
     );
 }
 
+/// `(quote a b)` is malformed — exactly one argument is quoted. The tree-walker
+/// rejects it with an arity error; the closure-compiling VM (the default engine)
+/// must agree rather than silently dropping the extra(s) and compiling `(quote a)`
+/// to a constant. Cover both the direct top-level form (tree-walker entry) and a
+/// form inside a compiled closure body (so the VM's quote arm is exercised — it
+/// now defers the whole closure to the tree-walker on a bad arity).
+#[test]
+fn quote_arity_is_enforced_on_both_engines() {
+    let err = |src: &str| {
+        fresh_interp()
+            .eval_str(src)
+            .expect_err("(quote a b) must error, not drop the tail")
+            .to_string()
+    };
+    // Direct: handled by the tree-walker entry.
+    assert!(
+        err("(quote 1 2)").contains("quote"),
+        "expected a quote arity error, got: {}",
+        err("(quote 1 2)")
+    );
+    // Inside a compiled closure body: forces the VM's quote arm to defer.
+    assert!(
+        err("(defn q () (quote 1 2)) (q)").contains("quote"),
+        "VM-compiled (quote 1 2) must error too, got: {}",
+        err("(defn q () (quote 1 2)) (q)")
+    );
+    // Sanity: the well-formed single-argument form still works.
+    assert_eq!(run("(quote 1)"), "1");
+    assert_eq!(run("(defn q () (quote hi)) (q)"), "hi");
+}
+
+/// A top-level `~@` (unquote-splicing with nothing to splice *into* — outside any
+/// list/vector template position) is malformed. It must raise a clear error, not
+/// silently mis-build `(list 'unquote-splicing xs)`.
+#[test]
+fn top_level_unquote_splicing_errors() {
+    let err = fresh_interp()
+        .eval_str("`~@(list 1 2 3)")
+        .expect_err("top-level ~@ must error")
+        .to_string();
+    assert!(
+        err.contains("unquote-splicing"),
+        "expected an unquote-splicing context error, got: {err}"
+    );
+    // The well-formed splice (inside a list template) still works.
+    assert_eq!(run("`(~@(list 1 2 3))"), "(1 2 3)");
+}
+
 #[test]
 fn threading_macros() {
     // (-> 5 (- 1) (* 2)) => (* (- 5 1) 2) => 8

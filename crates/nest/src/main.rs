@@ -32,18 +32,12 @@
 //! `-j N` / `--max-parallel N` caps concurrent spawned processes. Hot reload
 //! lives in `nest run --watch <path>` (file or directory, repeatable).
 
-use brood::cli_support::report_error;
+use brood::cli_support::{report_error, run_on_main_stack, FullTermGuard, RawTermGuard};
 use brood::Interp;
 use clap::{Parser, Subcommand};
 
 mod mcp;
-
-/// The lean+gui `brood` runtime baked into this `nest` at install time, so
-/// `nest release` can append an app to it with **no Rust toolchain** (ADR-038).
-/// `build.rs` writes this file: the prebuilt runtime when `make install` sets
-/// `BROOD_EMBED_RUNTIME`, otherwise empty — and an empty slice means "nothing
-/// embedded", so `nest release` falls back to building the runtime from source.
-const EMBEDDED_RUNTIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/embedded-runtime"));
+mod release;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -312,15 +306,9 @@ fn main() {
     brood::cli_support::install_crash_dump();
     let cli = Cli::parse();
     // Run on an explicitly-sized large stack so the stack-budget guard (ADR-043)
-    // is uniform across the root thread and spawned coroutines — see the matching
-    // comment in `crates/cli/src/main.rs`. The OS default main stack (~8 MiB) is
-    // too small for the heavy debug eval frames.
-    let handle = std::thread::Builder::new()
-        .name("nest-main".into())
-        .stack_size(brood::process::CORO_STACK_BYTES)
-        .spawn(move || run_main(cli))
-        .expect("spawn nest-main thread");
-    handle.join().expect("nest-main thread panicked");
+    // is uniform across the root thread and spawned coroutines (see
+    // `cli_support::run_on_main_stack`).
+    run_on_main_stack("nest-main", move || run_main(cli));
 }
 
 fn run_main(cli: Cli) {
@@ -365,11 +353,8 @@ fn run_main(cli: Cli) {
         Cmd::Tree => run(&mut interp, "(require 'package) (package/tree)"),
         Cmd::Add { name, spec } => cmd_add(&mut interp, &name, &spec),
         Cmd::Remove { name } => {
-            let escaped = brood::introspect::escape_brood_string(&name);
-            run(
-                &mut interp,
-                &format!("(require 'package) (package/remove-dep \"{}\")", escaped),
-            );
+            let call = brood::introspect::call_form("package/remove-dep", &[&name]);
+            run(&mut interp, &format!("(require 'package) {call}"));
         }
         Cmd::Repl => cmd_repl(&mut interp),
         Cmd::Mcp => cmd_mcp(&mut interp),
@@ -383,27 +368,10 @@ fn run_main(cli: Cli) {
     }
 }
 
-/// Restores the terminal on drop — the abnormal-path backstop for `nest observe`.
-/// The Brood `term-leave` is the normal teardown; this guard fires on a panic
-/// unwind too, so a crash never leaves the terminal in raw mode / the alternate
-/// screen. (`std::process::exit` skips Drop, so `cmd_observe` scopes the guard so
-/// it drops *before* it reports an error and exits.)
-struct TermGuard;
-impl Drop for TermGuard {
-    fn drop(&mut self) {
-        brood::builtins::restore_terminal();
-    }
-}
-
-/// Like [`TermGuard`] but for the *inline* REPL editor (`term-raw-enter`): only
-/// leaves raw mode, writing no escape sequences, so a piped (non-TTY) `nest repl`
-/// stdout stays clean on exit. The Brood `term-raw-leave` is the normal teardown.
-struct ReplTermGuard;
-impl Drop for ReplTermGuard {
-    fn drop(&mut self) {
-        brood::builtins::restore_raw();
-    }
-}
+// Terminal-restore guards (`FullTermGuard` for the full-screen `nest observe` /
+// `nest attach` path; `RawTermGuard` for the inline `nest repl` editor) live in
+// `brood::cli_support`, shared with the `brood` binary — see there for the
+// deliberate `restore_terminal` vs `restore_raw` divergence.
 
 // ---------- subcommand handlers ----------
 
@@ -437,14 +405,8 @@ fn cmd_test(interp: &mut Interp, files: &[String]) {
     };
     run(interp, bootstrap);
     for path in files {
-        let src = match std::fs::read_to_string(path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("nest test: cannot read {}: {}", path, e);
-                std::process::exit(1);
-            }
-        };
-        if let Err(e) = eval_file(interp, path, &src) {
+        let src = brood::cli_support::read_source_or_exit("nest test", std::path::Path::new(path));
+        if let Err(e) = brood::cli_support::eval_file(interp, path, &src) {
             report_error(&e.or_file(path.clone()));
             std::process::exit(1);
         }
@@ -490,16 +452,13 @@ fn cmd_check(interp: &mut Interp, files: &[String]) {
 /// `nest new <name> [--template NAME]` — delegates to `(project/new-project name
 /// template)` in std/project.blsp.
 fn cmd_new(interp: &mut Interp, name: &str, template: Option<&str>) {
-    let escaped = brood::introspect::escape_brood_string(name);
-    let tmpl_arg = match template {
-        Some(t) => format!(" \"{}\"", brood::introspect::escape_brood_string(t)),
-        None => String::new(),
-    };
-    let code = format!(
-        "(require 'project) (project/load-config) (project/new-project \"{}\"{})",
-        escaped, tmpl_arg
+    let mut args: Vec<&str> = vec![name];
+    args.extend(template);
+    let call = brood::introspect::call_form("project/new-project", &args);
+    run(
+        interp,
+        &format!("(require 'project) (project/load-config) {call}"),
     );
-    run(interp, &code);
 }
 
 /// `nest format [--check]` — reformat in place, or dry-run on `--check`.
@@ -567,6 +526,19 @@ fn cmd_run(
     } else {
         None
     };
+    // With no explicit FILE but `--watch` paths that *can't* promote to the entry
+    // — a directory, or more than one path — we silently run `:main` and watch
+    // alongside. That's the intended fallback, but a user who typed `nest run
+    // --watch a.blsp --watch b.blsp` expecting one of them to *run* gets no signal
+    // it didn't. Say so once (the silent-wrong-result lesson, as elsewhere here).
+    if file.is_none() && doc_arg.is_none() && promoted.is_none() && !watch.is_empty() {
+        eprintln!(
+            "nest run: no FILE to run — watching {} path(s) and running :main. (A single \
+             watched *file* is promoted to the entry; a directory or multiple paths can't be, \
+             so :main runs.)",
+            watch.len()
+        );
+    }
     let file: Option<&str> = file.or(promoted.as_deref());
 
     // The document arg (if any) leads the trailing args passed to `:main`.
@@ -582,12 +554,7 @@ fn cmd_run(
     } else {
         let calls = watch
             .iter()
-            .map(|p| {
-                format!(
-                    "(reload-on-change \"{}\")",
-                    brood::introspect::escape_brood_string(p)
-                )
-            })
+            .map(|p| brood::introspect::call_form("reload-on-change", &[p]))
             .collect::<Vec<_>>()
             .join(" ");
         format!("(require 'reload) {}", calls)
@@ -620,10 +587,7 @@ fn cmd_run(
         // project modules), but *don't* eager-load every source — otherwise a
         // file under `src/` would run twice (once via the walker, once via the
         // explicit `load`). Outside a project, plain `brood <file>`.
-        Some(path) => {
-            let escaped_path = brood::introspect::escape_brood_string(path);
-            format!("(load \"{}\")", escaped_path)
-        }
+        Some(path) => brood::introspect::call_form("load", &[path]),
     };
     // `--main module/fn` overrides the manifest's `:main` for this run only.
     // It applies to the project-entry path (no FILE); with a FILE we run that
@@ -631,8 +595,8 @@ fn cmd_run(
     // silently (the silent-wrong-result lesson from the Game-of-Life retro).
     let main_override = match (main, file.is_none()) {
         (Some(spec), true) => format!(
-            "(project/set-project-main \"{}\") ",
-            brood::introspect::escape_brood_string(spec)
+            "{} ",
+            brood::introspect::call_form("project/set-project-main", &[spec])
         ),
         (Some(_), false) => {
             eprintln!("nest run: --main is ignored when a FILE is given");
@@ -695,11 +659,6 @@ fn cmd_run(
     run(interp, &code);
 }
 
-/// `nest doc [module] [--all]` — Markdown docs to stdout. `--all` documents
-/// every public global in a fresh image (the complete builtin + prelude
-/// reference) and ignores MODULE.
-/// `nest add NAME :path PATH` — dispatch into the package module's `add` verb,
-/// passing NAME and each spec token as escaped string arguments.
 /// `nest update [NAME...]` — re-resolve refs and re-lock (ADR-037). No NAMES
 /// updates every dep; NAMES updates only those.
 fn cmd_update(interp: &mut Interp, names: &[String]) {
@@ -711,6 +670,8 @@ fn cmd_update(interp: &mut Interp, names: &[String]) {
     run(interp, &call);
 }
 
+/// `nest add NAME :path PATH` — dispatch into the package module's `add` verb,
+/// passing NAME and each spec token as escaped string arguments.
 fn cmd_add(interp: &mut Interp, name: &str, spec: &[String]) {
     let mut args: Vec<&str> = vec![name];
     args.extend(spec.iter().map(String::as_str));
@@ -721,6 +682,9 @@ fn cmd_add(interp: &mut Interp, name: &str, spec: &[String]) {
     run(interp, &call);
 }
 
+/// `nest doc [module] [--all]` — Markdown docs to stdout. `--all` documents
+/// every public global in a fresh image (the complete builtin + prelude
+/// reference) and ignores MODULE.
 fn cmd_doc(interp: &mut Interp, module: Option<&str>, all: bool) {
     let code = if all {
         "(require 'docs) (println (docs/document-all))".to_string()
@@ -779,7 +743,7 @@ fn cmd_repl(interp: &mut Interp) {
     // restores it on a panic unwind too. Scope it like `cmd_observe` so it drops
     // (restoring) before any error report + exit (`process::exit` skips Drop).
     let result = {
-        let _guard = ReplTermGuard;
+        let _guard = RawTermGuard;
         interp.eval_str("(require 'repl) (repl/repl-run)")
     };
     if let Err(e) = result {
@@ -843,7 +807,7 @@ fn cmd_observe(interp: &mut Interp, connect: Option<String>, cookie: Option<Stri
     // skips Drop. On the normal `q` path the Brood `term-leave` already restored;
     // the guard's second restore is idempotent.
     let result = {
-        let _guard = TermGuard;
+        let _guard = FullTermGuard;
         interp.eval_str(&boot)
     };
     if let Err(e) = result {
@@ -857,7 +821,7 @@ fn cmd_observe(interp: &mut Interp, connect: Option<String>, cookie: Option<Stri
 /// pushed frames + ships back keys. Same shape as `cmd_observe`: resolve the cookie
 /// (`--cookie` → `$BROOD_COOKIE` → the shared cookie file), connect *before* taking
 /// the terminal (so a bad spec / wrong cookie is a clean error, screen untouched),
-/// and run under a `TermGuard` that restores the terminal on a panic unwind.
+/// and run under a `FullTermGuard` that restores the terminal on a panic unwind.
 fn cmd_attach(interp: &mut Interp, spec: String, cookie: Option<String>) {
     let cookie = cookie
         .or_else(|| std::env::var("BROOD_COOKIE").ok())
@@ -873,7 +837,7 @@ fn cmd_attach(interp: &mut Interp, spec: String, cookie: Option<String>) {
         brood::introspect::call_form("editor/serve/attach", &args)
     );
     let result = {
-        let _guard = TermGuard;
+        let _guard = FullTermGuard;
         interp.eval_str(&boot)
     };
     if let Err(e) = result {
@@ -929,9 +893,21 @@ fn cmd_release(
             std::process::exit(1);
         }
     };
+    // `bundle-collect` returns the modules as a flat `stem0 src0 stem1 src1 …`
+    // list, so `rest` must have an even length. An odd tail means a stem with no
+    // source — a contract violation; fail loudly (like the non-string check
+    // above) rather than silently bundling the last module with empty source.
+    if rest.len() % 2 != 0 {
+        eprintln!(
+            "nest release: bundle-collect returned an odd number of module items ({}); \
+             expected stem/source pairs",
+            rest.len()
+        );
+        std::process::exit(1);
+    }
     let modules: Vec<(String, String)> = rest
         .chunks(2)
-        .map(|c| (c[0].clone(), c.get(1).cloned().unwrap_or_default()))
+        .map(|c| (c[0].clone(), c[1].clone()))
         .collect();
 
     // 2. Default the output name from the manifest's `:name` (set in the interp
@@ -962,15 +938,15 @@ fn cmd_release(
                 let out = if output.is_some() && targets.len() == 1 {
                     stem.to_string()
                 } else {
-                    let exe = if is_windows_triple(t) { ".exe" } else { "" };
-                    format!("{stem}-{}{exe}", target_suffix(t))
+                    let exe = if release::is_windows_triple(t) { ".exe" } else { "" };
+                    format!("{stem}-{}{exe}", release::target_suffix(t))
                 };
                 (Some(t.as_str()), std::path::PathBuf::from(out))
             })
             .collect()
     };
     for (triple, out) in plans {
-        let base = resolve_runtime(runtime, triple);
+        let base = release::resolve_runtime(runtime, triple);
         if let Err(e) = brood::bundle::write_release(&base, &archive, &out) {
             eprintln!("nest release: cannot write {}: {e}", out.display());
             std::process::exit(1);
@@ -981,191 +957,9 @@ fn cmd_release(
             out.display(),
             modules.len(),
             if modules.len() == 1 { "" } else { "s" },
-            human_size(size),
+            release::human_size(size),
             triple.map(|t| format!(", {t}")).unwrap_or_default(),
         );
-    }
-}
-
-/// The base runtime bytes to append the app to — the single **lean + gui**
-/// runtime (no test/observer/MCP/doc/hot-reload/REPL/GC-debug surface, but the
-/// windowed backend kept so any app runs). Priority:
-///   1. `--runtime PATH` — read it (a prebuilt/cross runtime you supply).
-///   2. with `--target`, the local runtime cache
-///      (`~/.cache/brood/runtimes/<triple>/brood`) — you populate it with lean
-///      runtimes built on/for each target (cross-compiling is out of scope,
-///      ADR-038); a `--target` equal to the host's own triple falls through to:
-///   3. the runtime embedded in *this* `nest` at install time — the **no-Rust**
-///      path (`make install` bakes it in; see `build.rs`).
-///   4. built on demand from the workspace source (cargo fallback — needs Rust),
-///      for a plain `cargo build` of `nest` that embedded nothing.
-fn resolve_runtime(runtime: Option<&str>, target: Option<&str>) -> Vec<u8> {
-    if let Some(r) = runtime {
-        return std::fs::read(r).unwrap_or_else(|e| {
-            eprintln!("nest release: cannot read runtime binary {r}: {e}");
-            std::process::exit(1);
-        });
-    }
-    if let Some(t) = target {
-        if let Some(path) = runtime_cache_path(t) {
-            if path.is_file() {
-                return std::fs::read(&path).unwrap_or_else(|e| {
-                    eprintln!(
-                        "nest release: cannot read cached runtime {}: {e}",
-                        path.display()
-                    );
-                    std::process::exit(1);
-                });
-            }
-            // The host's own triple needs no prebuilt — the embedded/built
-            // runtime below *is* a runtime for it.
-            if t != HOST_TRIPLE {
-                eprintln!(
-                    "nest release: no cached runtime for {t}.\nBuild the lean runtime on/for \
-                     that target:\n  cargo build --profile release-lean -p cli \
-                     --no-default-features --features brood/gui --target {t}\nthen place the \
-                     `brood` binary at {} (or pass --runtime PATH). Cross-compiling is out of \
-                     scope for `nest release` itself (ADR-038).",
-                    path.display()
-                );
-                std::process::exit(2);
-            }
-        } else if t != HOST_TRIPLE {
-            eprintln!(
-                "nest release: cannot locate the runtime cache (no $XDG_CACHE_HOME or $HOME) — \
-                 pass --runtime PATH for {t}"
-            );
-            std::process::exit(2);
-        }
-    }
-    if !EMBEDDED_RUNTIME.is_empty() {
-        // Baked in by `make install` — append with no toolchain at all.
-        return EMBEDDED_RUNTIME.to_vec();
-    }
-    // No embedded runtime (a plain `cargo build` of `nest`): build one from source.
-    let path = build_lean_runtime();
-    std::fs::read(&path).unwrap_or_else(|e| {
-        eprintln!("nest release: cannot read built runtime {}: {e}", path.display());
-        std::process::exit(1);
-    })
-}
-
-/// The triple this `nest` was built for (baked in by `build.rs`) — a `--target`
-/// equal to it is served by the embedded runtime, no cache entry needed.
-const HOST_TRIPLE: &str = env!("NEST_HOST_TRIPLE");
-
-/// Where a prebuilt lean runtime for `triple` lives in the local cache:
-/// `$XDG_CACHE_HOME/brood/runtimes/<triple>/brood` (falling back to
-/// `~/.cache`; `brood.exe` for Windows triples). `None` if no cache base can
-/// be determined. Mirrors `prelude_source_path` in `crates/lisp/src/lib.rs`.
-fn runtime_cache_path(triple: &str) -> Option<std::path::PathBuf> {
-    use std::path::PathBuf;
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
-    let bin = if is_windows_triple(triple) { "brood.exe" } else { "brood" };
-    Some(base.join("brood/runtimes").join(triple).join(bin))
-}
-
-/// Short, human-friendly artifact suffix for a target triple — `macos-arm64`,
-/// `linux-x86_64`, `linux-musl-x86_64`, `windows-x86_64`. An unrecognized OS
-/// keeps the whole triple (always unambiguous, just longer).
-fn target_suffix(triple: &str) -> String {
-    let arch = match triple.split('-').next().unwrap_or(triple) {
-        "aarch64" => "arm64",
-        a => a,
-    };
-    let os = if triple.contains("apple-darwin") {
-        "macos"
-    } else if triple.contains("windows") {
-        "windows"
-    } else if triple.contains("linux") {
-        // Keep the libc visible so a gnu + musl matrix can't collide.
-        if triple.ends_with("musl") { "linux-musl" } else { "linux" }
-    } else if triple.contains("freebsd") {
-        "freebsd"
-    } else {
-        return triple.to_string();
-    };
-    format!("{os}-{arch}")
-}
-
-/// Whether a target triple is a Windows target (artifact gets `.exe`).
-fn is_windows_triple(triple: &str) -> bool {
-    triple.contains("windows")
-}
-
-/// Build the single lean+gui `brood` runtime from the workspace this `nest` was
-/// built in — the fallback when no runtime was embedded at install time (a plain
-/// `cargo build` of `nest`). `--no-default-features` (no test/observer/MCP/doc/
-/// reload/REPL/GC-debug) `+ --features brood/gui`, under the `release-lean`
-/// profile (strip + LTO + one codegen unit). Cached under `target/release-lean/`
-/// (never clobbering the dev `target/release/`); returns the binary's path.
-fn build_lean_runtime() -> std::path::PathBuf {
-    let workspace = workspace_dir();
-    let cli_manifest = workspace.join("crates/cli/Cargo.toml");
-    if !cli_manifest.exists() {
-        eprintln!(
-            "nest release: no runtime is embedded in this `nest`, and the brood source isn't at \
-             {} to build one.\nReinstall (`make install`) to bake the runtime in, or pass \
-             --runtime PATH to a prebuilt one.",
-            workspace.display()
-        );
-        std::process::exit(2);
-    }
-    let lean_bin = workspace.join("target/release-lean/brood");
-    eprintln!("nest release: building the lean+gui runtime (stripped + LTO; one-time)…");
-    let status = std::process::Command::new("cargo")
-        .args([
-            "build",
-            "--profile",
-            "release-lean",
-            "--no-default-features",
-            "--features",
-            "brood/gui",
-        ])
-        .arg("--manifest-path")
-        .arg(&cli_manifest)
-        .status();
-    match status {
-        Ok(s) if s.success() => lean_bin,
-        Ok(s) => {
-            eprintln!("nest release: runtime build failed (cargo exited {:?})", s.code());
-            std::process::exit(1);
-        }
-        Err(e) => {
-            eprintln!("nest release: could not run cargo to build the runtime: {e}");
-            std::process::exit(1);
-        }
-    }
-}
-
-/// The brood workspace root, as baked in at *this* `nest`'s build time
-/// (`crates/nest` → up two). For the in-repo dev workflow this is the live
-/// source tree; if it's gone (installed `nest`, source moved), the caller hits a
-/// clear "pass --runtime" error.
-fn workspace_dir() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-}
-
-/// Human-friendly byte size for the release summary (e.g. `4.2 MB`).
-fn human_size(bytes: u64) -> String {
-    const UNITS: &[&str] = &["B", "KB", "MB", "GB"];
-    let mut n = bytes as f64;
-    let mut u = 0;
-    while n >= 1024.0 && u < UNITS.len() - 1 {
-        n /= 1024.0;
-        u += 1;
-    }
-    if u == 0 {
-        format!("{bytes} {}", UNITS[0])
-    } else {
-        format!("{n:.1} {}", UNITS[u])
     }
 }
 
@@ -1200,15 +994,6 @@ fn run_for_value(interp: &mut Interp, code: &str) -> brood::core::value::Value {
             std::process::exit(1);
         }
     }
-}
-
-/// Evaluate a file's source with `(current-file)` set so runtime-error /
-/// test locations carry the file. Mirrors the helper in `cli/main.rs`.
-fn eval_file(interp: &mut Interp, path: &str, src: &str) -> Result<(), brood::error::LispError> {
-    let prev = interp.heap.set_current_file(Some(path.to_string()));
-    let result = interp.eval_source(src);
-    interp.heap.set_current_file(prev);
-    result.map(|_| ())
 }
 
 /// Walk up from cwd looking for a `project.blsp` marker. Used by the
@@ -1247,39 +1032,6 @@ mod tests {
         assert_eq!(parse_duration_ms("-5s"), None);
     }
 
-    #[test]
-    fn target_suffix_maps_common_triples() {
-        use super::target_suffix;
-        assert_eq!(target_suffix("aarch64-apple-darwin"), "macos-arm64");
-        assert_eq!(target_suffix("x86_64-apple-darwin"), "macos-x86_64");
-        assert_eq!(target_suffix("x86_64-unknown-linux-gnu"), "linux-x86_64");
-        assert_eq!(target_suffix("aarch64-unknown-linux-gnu"), "linux-arm64");
-        // musl keeps the libc visible so a gnu + musl matrix can't collide.
-        assert_eq!(target_suffix("x86_64-unknown-linux-musl"), "linux-musl-x86_64");
-        assert_eq!(target_suffix("x86_64-pc-windows-msvc"), "windows-x86_64");
-        assert_eq!(target_suffix("x86_64-unknown-freebsd"), "freebsd-x86_64");
-        // An unrecognized OS keeps the whole triple — unambiguous, just longer.
-        assert_eq!(target_suffix("wasm32-wasip1"), "wasm32-wasip1");
-    }
-
-    #[test]
-    fn windows_triples_get_exe() {
-        use super::is_windows_triple;
-        assert!(is_windows_triple("x86_64-pc-windows-msvc"));
-        assert!(is_windows_triple("x86_64-pc-windows-gnu"));
-        assert!(!is_windows_triple("x86_64-unknown-linux-gnu"));
-    }
-
-    #[test]
-    fn runtime_cache_path_is_per_triple() {
-        // Path shape only — don't touch the real env (tests run in parallel).
-        let p = super::runtime_cache_path("aarch64-apple-darwin");
-        if let Some(p) = p {
-            let s = p.to_string_lossy().into_owned();
-            assert!(s.ends_with("brood/runtimes/aarch64-apple-darwin/brood"), "{s}");
-        }
-        if let Some(p) = super::runtime_cache_path("x86_64-pc-windows-msvc") {
-            assert!(p.to_string_lossy().ends_with("brood.exe"));
-        }
-    }
+    // The release-mechanism tests (target_suffix / is_windows_triple /
+    // runtime_cache_path) moved alongside their helpers into `release.rs`.
 }

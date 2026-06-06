@@ -106,6 +106,19 @@ fn is_output_sink(s: Symbol) -> bool {
         || value::symbol_is(s, "format")
 }
 
+/// The `unbound symbol: …` diagnostic text for `nm`, with the foreign-construct
+/// hint appended when `nm` names a construct from another Lisp that Brood lacks
+/// (so the Brood way is visible at write-time). Shared by the call-head and the
+/// value-leaf unbound checks so the two messages can't drift apart.
+fn unbound_msg(nm: &str) -> String {
+    let mut msg = format!("unbound symbol: {}", nm);
+    if let Some(hint) = crate::eval::foreign_construct_hint(nm) {
+        msg.push_str(" — ");
+        msg.push_str(hint);
+    }
+    msg
+}
+
 /// A symbol in *reference* position that resolves to nothing — not a local
 /// binder, not a syntactic keyword, not a curated stdlib name, and not in the
 /// heap's globals (which includes macros and, once the project is loaded,
@@ -163,15 +176,7 @@ fn check_value_leaf(
     }
     if let Value::Sym(s) = form {
         if is_unbound(heap, ctx, s) {
-            let nm = name_of(s);
-            let mut msg = format!("unbound symbol: {}", nm);
-            // If it's a construct from another Lisp that Brood doesn't have,
-            // append the Brood way so the fix is visible at write-time too.
-            if let Some(hint) = crate::eval::foreign_construct_hint(&nm) {
-                msg.push_str(" — ");
-                msg.push_str(hint);
-            }
-            out.push((heap.form_pos(parent), msg));
+            out.push((heap.form_pos(parent), unbound_msg(&name_of(s))));
         }
     }
 }
@@ -253,11 +258,71 @@ pub(super) fn collect_def_names(heap: &Heap, form: Value, ctx: &mut Ctx) {
     if value::symbol_is(head, kw::DEF) || value::symbol_is(head, kw::DEFMACRO) {
         if let Some(&Value::Sym(name)) = items.get(1) {
             ctx.add_file_global(name);
+            // If the value is a variadic `fn` (a `&` rest param), record it so a
+            // later `(sig …)`-derived *exact* arity isn't used to flag a call —
+            // the sig parser can't express rest, so it would be a false positive.
+            if items.get(2).is_some_and(|&v| def_value_is_variadic(heap, v)) {
+                ctx.mark_variadic_global(name);
+            }
         }
     }
     for &item in &items[1..] {
         collect_def_names(heap, item, ctx);
     }
+}
+
+/// Does the value form of a `def` resolve to a **variadic** `fn`/`lambda` — one
+/// whose parameter list (in any arm of a multi-arity fn) contains a `&` rest
+/// marker? Reads the `(def name (fn …))` shape `defn` expands to; `false` for a
+/// non-`fn` value or a fixed-arity one.
+fn def_value_is_variadic(heap: &Heap, value_form: Value) -> bool {
+    let Some(items) = fn_form_items(heap, value_form) else {
+        return false;
+    };
+    // items = [fn, params-or-arm, body…]. A multi-arity fn has clause *lists*
+    // (`((a) …) ((a & b) …)`); a single-arity fn has the param list directly.
+    let rest = &items[1..];
+    let rest = match rest.first() {
+        // Peel a leading docstring for the single-arity shape.
+        Some(Value::Str(_)) if rest.len() > 1 => &rest[1..],
+        _ => rest,
+    };
+    rest.iter().any(|&part| part_has_rest(heap, part))
+}
+
+/// True if `part` — either a single-arity parameter list (`(a & b)`) or a
+/// multi-arity clause (`((a & b) body…)`) — introduces a `&` rest parameter.
+/// Checks the form as a param list, and if its first element is itself a list
+/// (the clause shape), checks that nested param list too.
+fn part_has_rest(heap: &Heap, part: Value) -> bool {
+    if params_have_rest(heap, part) {
+        return true;
+    }
+    // Multi-arity clause: ((params) body…) — look at the inner param list.
+    match list_items(heap, part) {
+        Some(items) => items
+            .first()
+            .is_some_and(|&inner| params_have_rest(heap, inner)),
+        None => false,
+    }
+}
+
+/// True if the parameter-list form `params` contains a `&` (or `&rest`) marker —
+/// i.e. the function it belongs to is variadic. A vector or list param list is
+/// accepted; a non-list form (e.g. a docstring) yields `false`.
+fn params_have_rest(heap: &Heap, params: Value) -> bool {
+    let items = match params {
+        Value::Vector(id) => heap.vector(id).to_vec(),
+        Value::Nil | Value::Pair(_) => match list_items(heap, params) {
+            Some(v) => v,
+            None => return false,
+        },
+        _ => return false,
+    };
+    items.iter().any(|p| {
+        matches!(p, &Value::Sym(s)
+            if value::symbol_is(s, kw::AMP) || value::symbol_is(s, kw::AMP_REST))
+    })
 }
 
 pub(super) fn check_into(
@@ -329,9 +394,17 @@ pub(super) fn check_into(
         let sig = declared.clone().or_else(|| sig_of(heap, s));
         // The real callable's arity is authoritative when known (a `sig!` wrapper
         // preserves the wrapped fn's arity); fall back to the declared param count
-        // for a file-local defn the read-only checker can't inspect.
-        let arity =
-            arity_of(heap, s).or_else(|| declared.map(|sg| Arity::exact(sg.params.len())));
+        // for a file-local defn the read-only checker can't inspect. But the
+        // `(sig …)` parser only builds *fixed*-arity sigs, so for a file-local
+        // defn we know is **variadic** the declared param count is an undercount —
+        // using it as an exact arity would falsely flag a legitimate call. Suppress
+        // the sig-derived arity in that case (no false positive; the real callable
+        // isn't inspectable here anyway).
+        let arity = arity_of(heap, s).or_else(|| {
+            declared
+                .filter(|_| !ctx.is_variadic_global(s))
+                .map(|sg| Arity::exact(sg.params.len()))
+        });
         // Unbound-symbol diagnostic: warn only when the head is **truly not
         // resolvable** — not local, not a syntactic keyword, not in the global
         // env (which includes `Value::Macro`s like `test` / `assert=` that
@@ -343,13 +416,7 @@ pub(super) fn check_into(
         // spelling — but only when every other short-circuit has failed.
         // Compute it lazily.
         if is_unbound(heap, ctx, s) {
-            let nm = name_of(s);
-            let mut msg = format!("unbound symbol: {}", nm);
-            if let Some(hint) = crate::eval::foreign_construct_hint(&nm) {
-                msg.push_str(" — ");
-                msg.push_str(hint);
-            }
-            out.push((heap.form_pos(form), msg));
+            out.push((heap.form_pos(form), unbound_msg(&name_of(s))));
             // Still recurse into args below — they may carry their own issues.
         }
 

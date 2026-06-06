@@ -101,8 +101,8 @@ two ways:
 `TcpListener` for `host:port` — and runs an acceptor thread; `connect` dials the
 matching carrier. A single `Stream { Tcp | Unix }` enum (ADR-068) carries the
 link, so everything below is transport-agnostic. Both ends perform the
-authenticated handshake (ADR-034 v2; wire **v4**, ADR-089): a 4-byte
-magic+version prefix (`b"BRD\x04"`), then a `Hello { node, nonce, eph_pub, addr }`
+authenticated handshake (ADR-034 v2; wire **v5**, ADR-089): a 4-byte
+magic+version prefix (`b"BRD\x05"`), then a `Hello { node, nonce, eph_pub, addr }`
 exchange (each side a fresh 32-byte nonce, a fresh **ephemeral X25519 pubkey**,
 and the address peers should dial it at), then an `Auth { mac }` exchange where
 each side sends `HMAC-SHA256(cookie, peer_nonce || peer_eph_pub || peer_name ||

@@ -592,6 +592,11 @@ impl Sig {
         match (self.rest.is_some(), other.rest.is_some()) {
             (false, true) => return false, // other is variadic, self isn't
             (false, false) if self.params.len() != other.params.len() => return false,
+            // The remaining cases — `(true, _)`: a variadic `self` — are not
+            // rejected here; their arity compatibility is checked positionally by
+            // the param loop below, which iterates max(len) positions and uses
+            // `param(i)` (folding `rest` in), so a variadic `self` is required to
+            // accept every argument `other` may supply.
             _ => {}
         }
         // Parameters: contravariant — for every position `other` may supply,
@@ -866,6 +871,13 @@ mod tests {
 
     // ---- the set algebra obeys the lattice laws, over a representative sample ----
 
+    // Deliberately **flat** types only — no refined (element-typed / arrow)
+    // types. `negate` widens a refinement (see `Ty::negate`, the doc at
+    // ~line 291), so double-negation and De Morgan are exact *only* for flat
+    // types and would fail here for a refined one. That widening is intentional
+    // (advisory soundness), so it's excluded from the laws and pinned on its own
+    // in `negate_of_a_refined_type_is_a_sound_overapproximation` /
+    // `double_negation_widens_a_refined_type`.
     fn sample_tys() -> Vec<Ty> {
         let mut v = vec![Ty::NEVER, Ty::ANY, Ty::NUMBER, Ty::LIST];
         for t in ALL_TAGS {
@@ -1056,6 +1068,26 @@ mod tests {
         assert!(narr.contains_tag(Tag::Fn) && narr.contains_tag(Tag::Native));
         // Flat negate is unchanged (exact): ¬int still excludes int.
         assert!(!Ty::of(Tag::Int).negate().contains_tag(Tag::Int));
+    }
+
+    #[test]
+    fn double_negation_widens_a_refined_type() {
+        // Pins the documented exception the lattice-laws test deliberately can't
+        // exercise (its `sample_tys` is flat-only): for a *refined* type the
+        // widening in `negate` means double-negation does NOT round-trip.
+        //
+        // ¬(vector<int>) keeps the `vector` tag (a vector of non-ints is in the
+        // complement) and adds every non-vector tag → that's `any`. ¬any = never.
+        // So ¬¬(vector<int>) == never, neither the original nor a bare `vector`.
+        let vi = Ty::vector_of(Ty::of(Tag::Int));
+        let once = vi.clone().negate();
+        assert_eq!(once, Ty::ANY, "¬(vector<int>) widens all the way to any");
+        assert_eq!(once.negate(), Ty::NEVER, "…so ¬¬ collapses to never");
+        assert_ne!(vi.clone().negate().negate(), vi, "double negation does NOT hold");
+        // The same collapse for an arrow refinement: ¬¬((int)->int) == never.
+        let ai = arr(vec![Ty::of(Tag::Int)], Ty::of(Tag::Int));
+        assert_eq!(ai.clone().negate(), Ty::ANY);
+        assert_eq!(ai.negate().negate(), Ty::NEVER);
     }
 
     #[test]

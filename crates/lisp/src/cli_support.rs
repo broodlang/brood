@@ -7,6 +7,8 @@
 //! `crates/cli/` or `crates/nest/`.
 
 use crate::error::LispError;
+use crate::Interp;
+use std::path::Path;
 
 /// Install a panic hook that appends a full crash report (message + location +
 /// backtrace) to `.brood_crash_dump` in the working directory, *in addition* to
@@ -68,6 +70,15 @@ pub fn warn_nondefault_gc_env() {
         "BROOD_GC_FLOOR",
         "BROOD_GC_TENURE",
         "BROOD_GC_MAJOR",
+        // The shared-RUNTIME-region compaction floor (ADR-091) and the GC-block
+        // trace — both retune/observe collection, so they belong on this list.
+        "BROOD_RT_GC_FLOOR",
+        "BROOD_TRACE_GCBLOCK",
+        // Not GC knobs per se, but they change run behaviour and so make a
+        // benchmark non-representative: the memory cap forces extra collections
+        // as it's approached, and the stack budget bounds non-tail recursion.
+        "BROOD_MEM_LIMIT",
+        "BROOD_STACK_BUDGET",
     ];
     let active: Vec<String> = KNOBS
         .iter()
@@ -160,4 +171,90 @@ pub fn parse_jobs_args(prog: &str, args: Vec<String>) -> (Vec<String>, Option<us
         i += 1;
     }
     (files, max_parallel)
+}
+
+/// Run `f` on a freshly-spawned thread sized to `process::CORO_STACK_BYTES`,
+/// and join it. Both binaries' `main` need this: the tree-walking evaluator
+/// recurses one (heavy, in debug) Rust frame per non-tail call, and the OS
+/// default main-thread stack (~8 MiB) is too small for the stack-budget guard
+/// (ADR-043) to be *uniform* with the coroutine stacks — deep non-tail
+/// recursion on the root thread would overflow before the guard fires. Sizing
+/// the root thread to `CORO_STACK_BYTES` makes the guard behave identically on
+/// the root thread and inside spawned processes.
+///
+/// `f` typically calls `std::process::exit` itself (the exit-code path), so
+/// the return value is usually unused — but it's threaded through for callers
+/// that return normally. `name` is the thread name (shown in panics / dumps).
+/// Each caller keeps its own unique pre-steps (the RUST_BACKTRACE default,
+/// `install_crash_dump`, `nest`'s bundle pre-check) at the call site, before
+/// this.
+pub fn run_on_main_stack<T, F>(name: &str, f: F) -> T
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(crate::process::CORO_STACK_BYTES)
+        .spawn(f)
+        .unwrap_or_else(|e| panic!("spawn {name} thread: {e}"));
+    handle
+        .join()
+        .unwrap_or_else(|_| panic!("{name} thread panicked"))
+}
+
+/// Read a source file or exit non-zero with a uniform `"{prog}: cannot read
+/// {path}: {e}"` diagnostic. The repeated read-or-die block at every CLI file
+/// entry point (`brood --test`, `brood <file>`, `nest test`). `prog` is the
+/// program label for the message (e.g. `"brood"`, `"nest test"`).
+pub fn read_source_or_exit(prog: &str, path: &Path) -> String {
+    match std::fs::read_to_string(path) {
+        Ok(src) => src,
+        Err(e) => {
+            eprintln!("{prog}: cannot read {}: {e}", path.display());
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Evaluate a file's source with `(current-file)` set to its path (restored
+/// after), so runtime-error / test locations carry the file and load-time def
+/// sites are recorded for `(source-location …)` (ADR-031) — the same as the
+/// `load` builtin does for `require`d modules. Shared by both binaries' file
+/// runners.
+pub fn eval_file(interp: &mut Interp, path: &str, src: &str) -> Result<(), LispError> {
+    let prev = interp.heap.set_current_file(Some(path.to_string()));
+    let result = interp.eval_source(src);
+    interp.heap.set_current_file(prev);
+    result.map(|_| ())
+}
+
+/// Restores the terminal on drop — the panic-path backstop for a full-screen
+/// TUI (`nest observe`, a bundled `ui-run` app). The Brood `term-leave` is the
+/// normal teardown; this fires on an unwind so a crash never leaves the
+/// terminal in raw mode / the alternate screen. (`std::process::exit` skips
+/// Drop, so callers scope the guard so it drops *before* reporting an error and
+/// exiting.) Restores escape sequences too — see [`RawTermGuard`] for the
+/// inline-REPL variant that deliberately doesn't.
+pub struct FullTermGuard;
+impl Drop for FullTermGuard {
+    fn drop(&mut self) {
+        crate::builtins::restore_terminal();
+    }
+}
+
+/// Like [`FullTermGuard`] but for the *inline* editor (`term-raw-enter`, the
+/// REPL line editor): only leaves raw mode, writing no escape sequences, so a
+/// piped (non-TTY) stdout stays clean on exit. The Brood `term-raw-leave` is
+/// the normal teardown.
+///
+/// The single deliberate divergence between the two guards is this one call —
+/// `restore_raw` (no escapes) vs `FullTermGuard`'s `restore_terminal` (full
+/// teardown). The REPL must not emit alternate-screen / cursor escapes onto a
+/// pipe; a full-screen app must.
+pub struct RawTermGuard;
+impl Drop for RawTermGuard {
+    fn drop(&mut self) {
+        crate::builtins::restore_raw();
+    }
 }

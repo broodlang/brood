@@ -76,10 +76,17 @@ pub fn signature_help(
 }
 
 /// The innermost `List` node whose span contains `offset` — the call we're typing
-/// arguments into. Containment is **inclusive of the span end** (unlike
-/// `node_at`): signature help fires while you type, when the cursor sits at the
-/// very end of an unclosed `(map ` (offset == EOF == the recovered span's end),
-/// which a half-open check would miss.
+/// arguments into. Containment is **inclusive of the span end**, deliberately
+/// diverging from [`Node::node_at`] (and the half-open [`Span::contains`]) that
+/// hover / rename / references use: those want the token *under* the cursor, so a
+/// cursor resting at a span's end belongs to the next token; signature help, by
+/// contrast, fires *while you type*, when the cursor sits at the very end of an
+/// unclosed `(map ` (offset == EOF == the recovered span's end), which a half-open
+/// check would miss. The exception lives here, at the one caller that needs it,
+/// rather than relaxing `node_at` for everyone.
+///
+/// [`Node::node_at`]: brood::syntax::cst::Node::node_at
+/// [`Span::contains`]: brood::error::Span::contains
 fn enclosing_list(node: &Node, offset: u32) -> Option<&Node> {
     let contains = |n: &Node| n.span.start <= offset && offset <= n.span.end;
     let mut best = (node.kind == NodeKind::List && contains(node)).then_some(node);

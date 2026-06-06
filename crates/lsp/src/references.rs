@@ -54,7 +54,7 @@ fn spans<'a>(
 ) -> impl Iterator<Item = Range> + 'a {
     tree.references(root, text, offset)
         .into_iter()
-        .map(move |s| Range::new(index.position(text, s.start), index.position(text, s.end)))
+        .map(move |s| index.range(text, s))
 }
 
 #[cfg(test)]

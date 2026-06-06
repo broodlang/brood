@@ -356,6 +356,47 @@ fn sends_closure_capturing_closure_without_crashing() {
     );
 }
 
+/// A long list `def`'d to a global is promoted into the shared RUNTIME region as a
+/// 100k-deep spine of RUNTIME pairs; the RUNTIME compactor must evacuate it
+/// *iteratively*. `flush_rt_pair` used to recurse down the cdr spine — fine for the
+/// shallow code bodies it was written for, but a pathological large quoted/list
+/// literal would blow the native stack at the next `runtime_collect`. That path is
+/// now reachable because RT compaction runs at eval auto-safepoints (ADR-091), so
+/// the spine was made iterative (mirroring the LOCAL `flush_pair`). This forces a
+/// RUNTIME collection via `(runtime-collect)` over a promoted 100k-element list and
+/// asserts it survives intact — a stack overflow here is the regression. Run it
+/// under `BROOD_GC_VERIFY=1` for the extra walk over the evacuated graph.
+#[test]
+fn runtime_collect_iterates_long_promoted_list_spine() {
+    let mut interp = Interp::new();
+    // 100k > any plausible native recursion budget for the old cdr-spine recursion,
+    // but cheap to build (tail-recursive `range`) and to flush once.
+    let prog = r#"
+        ;; `def` promotes this list into the shared RUNTIME region: a 100k-deep
+        ;; spine of RUNTIME pairs. (range is tail-recursive, so *building* it is
+        ;; O(1) stack — the depth we're testing lives only in the flush.)
+        (def big (range 100000))
+        ;; Force a RUNTIME compaction now. Single-process here, so the runtime is
+        ;; uniquely owned and the collect actually runs (:ran true), driving
+        ;; flush_rt_pair down the whole spine. The pre-fix recursive flush
+        ;; overflowed the native stack at this depth.
+        (def stats (runtime-collect))
+        ;; Read the evacuated list back: its length and endpoints must be intact,
+        ;; proving the iterative spine rebuilt every cell and wired the cdrs right.
+        (list (count big) (first big) (last big) (get stats :ran))
+    "#;
+    let v = interp
+        .eval_str(prog)
+        .expect("promoted-long-list runtime collect errored");
+    assert_eq!(
+        interp.print(v),
+        "(100000 0 99999 true)",
+        "a 100k-element list promoted to RUNTIME didn't survive a runtime_collect \
+         intact — flush_rt_pair's cdr-spine evacuation regressed (recursion \
+         overflow, or a mis-wired iterative rebuild)",
+    );
+}
+
 /// Pull `:field N` out of a printed Brood map (`{... :field 123 ...}`). The map
 /// printer separates a key from its value by one space; values here are
 /// non-negative integers.

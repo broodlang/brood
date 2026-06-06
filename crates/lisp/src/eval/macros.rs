@@ -106,6 +106,14 @@ fn qq_elem(heap: &mut Heap, v: Value, depth: u32, autogen: &mut AutoGen) -> Lisp
     if let Some(inner) = tagged(heap, v, kw::UNQUOTE) {
         return Ok(inner);
     }
+    // ~@x at a non-sequence position has nothing to splice into — `qq_seq`
+    // handles splices inline, so reaching here means a top-level `~@`. Reject it
+    // rather than silently mis-building `(list 'unquote-splicing x)`.
+    if tagged(heap, v, kw::UNQUOTE_SPLICING).is_some() {
+        return Err(LispError::runtime(
+            "unquote-splicing (~@) outside a list/vector context",
+        ));
+    }
     match v {
         Value::Pair(_) => {
             let items = heap.list_to_vec(v)?;

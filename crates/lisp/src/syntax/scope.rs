@@ -170,6 +170,20 @@ impl ScopeTree {
     }
 
     /// The innermost scope whose span contains `offset` (smallest containing).
+    ///
+    /// Invariant: on equal span lengths the **`<=` tie-break picks the
+    /// last-pushed scope**, and `build`'s DFS pushes a parent before its
+    /// children — so among scopes of identical span the most-recently-pushed is
+    /// the innermost, which is the one we want. This is what makes shadowing
+    /// resolve correctly when an inner binder shares its parent's span (e.g. a
+    /// `let` whose body is the whole parent form): `resolve` walks parent links
+    /// outward from here, so starting at the innermost equal-span scope means
+    /// the inner binding is seen first. **Do not change `<=` to `<`** — that
+    /// would stop at the outer scope and break shadowing.
+    ///
+    /// Deliberately O(n) over all scopes: simple, and an LSP document has few
+    /// enough scopes that a linear scan beats maintaining an interval tree
+    /// (ADR-011 — ship the simple shape until a real consumer needs faster).
     fn scope_at(&self, offset: u32) -> usize {
         let mut best = 0;
         let mut best_len = u32::MAX;

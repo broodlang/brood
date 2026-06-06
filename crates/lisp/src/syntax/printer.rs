@@ -53,6 +53,19 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
                         '\n' => out.push_str("\\n"),
                         '\t' => out.push_str("\\t"),
                         '\r' => out.push_str("\\r"),
+                        // Match the reader's own spellings for ESC and NUL
+                        // (scanner::scan_string_body decodes `\e`/`\0`); any
+                        // *other* C0 control char (and DEL) has no named
+                        // escape, so emit the reader's `\u{H..H}` form rather
+                        // than a raw byte. The result re-reads to the same
+                        // string — readable output must round-trip.
+                        '\u{1b}' => out.push_str("\\e"),
+                        '\0' => out.push_str("\\0"),
+                        c if c.is_control() => {
+                            out.push_str("\\u{");
+                            out.push_str(&format!("{:x}", c as u32));
+                            out.push('}');
+                        }
                         _ => out.push(c),
                     }
                 }
@@ -192,5 +205,45 @@ fn format_float(f: f64) -> String {
         s
     } else {
         format!("{}.0", s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::syntax::reader;
+
+    /// Readable output of a string must re-read to the same value: every
+    /// control char the reader can decode must print in a form the reader
+    /// understands. This guards the reader/printer round-trip for ESC, NUL,
+    /// and other C0 controls (kernel audit: they used to print as raw bytes).
+    #[test]
+    fn readable_strings_round_trip_through_the_reader() {
+        let mut heap = Heap::new();
+        let original = "a\u{1b}b\0c\n\t\r\u{7}\u{1f}\u{7f}\"\\d";
+        let v = heap.alloc_string(original);
+        let printed = print(&heap, v);
+        // Re-read the printed text and confirm we recover the same string.
+        let back = reader::read_one(&mut heap, &printed).expect("re-reads");
+        match back {
+            Value::Str(id) => assert_eq!(heap.string(id), original),
+            other => panic!("expected a string, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn control_chars_use_named_or_numeric_escapes() {
+        let mut heap = Heap::new();
+        let cases = [
+            ("\u{1b}", "\"\\e\""),     // ESC → \e
+            ("\0", "\"\\0\""),         // NUL → \0
+            ("\u{7}", "\"\\u{7}\""),   // BEL → numeric (no named escape)
+            ("\u{7f}", "\"\\u{7f}\""), // DEL → numeric
+            ("\n", "\"\\n\""),         // existing named escapes unchanged
+        ];
+        for (raw, want) in cases {
+            let v = heap.alloc_string(raw);
+            assert_eq!(print(&heap, v), want, "printing {raw:?}");
+        }
     }
 }

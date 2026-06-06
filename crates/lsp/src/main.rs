@@ -888,10 +888,7 @@ fn publish(
     let mut lsp_diags: Vec<Diagnostic> = diagnostics::collect(cst_root, text)
         .into_iter()
         .map(|d| {
-            let range = Range::new(
-                index.position(text, d.span.start),
-                index.position(text, d.span.end),
-            );
+            let range = index.range(text, d.span);
             let mut diag = Diagnostic::new_simple(range, d.message);
             diag.severity = Some(DiagnosticSeverity::ERROR);
             diag.source = Some("brood".to_string());
@@ -969,10 +966,7 @@ fn refine_diagnostic_range(
         let head = form.forms().next()?;
         (head.kind == cst::NodeKind::Symbol).then_some(head.span)?
     };
-    Some(Range::new(
-        index.position(text, span.start),
-        index.position(text, span.end),
-    ))
+    Some(index.range(text, span))
 }
 
 /// The span of the first `Symbol` token under `node` whose text is `name`.

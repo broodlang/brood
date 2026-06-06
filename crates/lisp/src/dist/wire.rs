@@ -45,11 +45,16 @@ pub(super) enum Frame {
         /// on-path attacker can't substitute their own DH key without the cookie.
         eph_pub: [u8; EPH_PUB_LEN],
         /// The **address peers should dial to reach me** (`"unix:PATH"` /
+        /// `"tcp:HOST:PORT"`, or empty if I'm not listening). Authenticated by
+        /// being folded into the `Auth` MAC (see `handshake::compute_mac`), so an
+        /// on-path attacker can't redirect the gossiped address.
         addr: String,
     },
-    /// Handshake step 3 & 4: `HMAC-SHA256(cookie, peer_nonce || peer_name ||
-    /// my_name)` — proves possession of the cookie without disclosing it.
-    /// Mismatch on either side aborts before the link enters `NODES`.
+    /// Handshake step 3 & 4: an HMAC-SHA256 over the peer's nonce, both names,
+    /// my advertised address, and both ephemeral DH keys — proves possession of
+    /// the cookie without disclosing it. The exact, authoritative input layout
+    /// lives in `handshake::compute_mac` (don't restate it here — it has drifted
+    /// before). Mismatch on either side aborts before the link enters `NODES`.
     Auth { mac: [u8; MAC_LEN] },
     /// Route `msg` to `target` on the receiving node.
     Send { target: Target, msg: Message },
@@ -58,47 +63,42 @@ pub(super) enum Frame {
     /// Reply to a `Ping`. (Receiving any frame refreshes liveness; these two carry
     /// no payload, just keep an idle link demonstrably alive.)
     Pong,
-    /// "Watch local pid `target` for me; deliver `[:down ref pid reason]` to
-    /// my `watcher_pid` (on this sender's `from_node`) when it dies." The
-    /// receiver routes through `process::add_monitor` with a
-    /// `Watcher::Remote`, reusing the local "alive? register; dead? fire
-    /// :noproc" logic — same code path, just a different watcher variant.
+    // Security note for the five process-coupling frames below (Monitor /
+    // Demonitor / Link / Unlink / Exit): none of them carries the sender's node
+    // name on the wire. The receiver always takes the originating node from the
+    // *authenticated* link (the `peer` established by the handshake), never from
+    // wire data — so a malicious peer can't claim to be node X and inject
+    // `[:down …]` / link-exit deliveries to processes coupled with X. A
+    // `from_node` field used to be shipped here and deliberately ignored; it was
+    // removed entirely (greenfield, no wire compat) to keep the wire honest.
+    /// "Watch local pid `target` for me; deliver `[:down ref pid reason]` to my
+    /// `watcher_pid` (on the authenticated peer node) when it dies." The receiver
+    /// routes through `process::add_monitor` with a `Watcher::Remote`, reusing
+    /// the local "alive? register; dead? fire :noproc" logic — same code path,
+    /// just a different watcher variant.
     Monitor {
-        from_node: Symbol,
         watcher_pid: u64,
         target: u64,
         mref: u64,
     },
-    /// Drop the matching remote watcher (best effort; identified by sender's
-    /// node + pid + mref). Goes through `process::drop_monitor`, the same
-    /// dropper local `demonitor` uses.
-    Demonitor {
-        from_node: Symbol,
-        watcher_pid: u64,
-        mref: u64,
-    },
-    /// "Link my `from_pid` (on `from_node`) to your local `to_pid`" (ADR-067).
-    /// The receiver records its half in `links::REMOTE_LINKS` so either side's
-    /// death — or a net-split — reaches the other. Symmetric: each node keeps
-    /// `local_pid → (peer_node, peer_pid)`.
-    Link {
-        from_node: Symbol,
-        from_pid: u64,
-        to_pid: u64,
-    },
-    /// Drop the cross-node link `from_pid@from_node ↔ to_pid` (best effort).
-    Unlink {
-        from_node: Symbol,
-        from_pid: u64,
-        to_pid: u64,
-    },
+    /// Drop the matching remote watcher (best effort; identified by the
+    /// authenticated peer node + pid + mref). Goes through `process::drop_monitor`,
+    /// the same dropper local `demonitor` uses.
+    Demonitor { watcher_pid: u64, mref: u64 },
+    /// "Link my `from_pid` (on the authenticated peer node) to your local
+    /// `to_pid`" (ADR-067). The receiver records its half in `links::REMOTE_LINKS`
+    /// so either side's death — or a net-split — reaches the other. Symmetric:
+    /// each node keeps `local_pid → (peer_node, peer_pid)`.
+    Link { from_pid: u64, to_pid: u64 },
+    /// Drop the cross-node link `from_pid@peer ↔ to_pid` (best effort).
+    Unlink { from_pid: u64, to_pid: u64 },
     /// An exit signal for local `to_pid`. `link = true` is a **link death**:
-    /// `from_pid@from_node` (a linked peer) exited with `reason`, delivered via
-    /// the trap-or-propagate path (a trapping target gets `[:EXIT pid reason]`).
-    /// `link = false` is an explicit remote `(exit pid reason)` — routed straight
-    /// to `scheduler::exit` (kill-style, like the local builtin).
+    /// `from_pid` (a linked peer on the authenticated peer node) exited with
+    /// `reason`, delivered via the trap-or-propagate path (a trapping target gets
+    /// `[:EXIT pid reason]`). `link = false` is an explicit remote
+    /// `(exit pid reason)` — routed straight to `scheduler::exit` (kill-style,
+    /// like the local builtin).
     Exit {
-        from_node: Symbol,
         from_pid: u64,
         to_pid: u64,
         reason: Message,
@@ -141,8 +141,11 @@ const MAX_GOSSIP_PEERS: usize = 4096;
 /// plaintext cookie (retired); v2 HMAC handshake; v3 adds an advertised `addr`
 /// to `Hello` + the `Peers` gossip frame for cluster meshing (ADR-088); **v4**
 /// adds an ephemeral X25519 pubkey to `Hello` and **encrypts every steady-state
-/// frame** (Noise-style session, ADR-089) — so a v3 and v4 node can't interop.
-pub(super) const PROTOCOL_MAGIC: [u8; 4] = *b"BRD\x04";
+/// frame** (Noise-style session, ADR-089) — so a v3 and v4 node can't interop;
+/// **v5** drops the redundant `from_node` field from the link/monitor/exit
+/// frames (the reader always used the authenticated peer instead), shifting
+/// every later field — a v4 peer would mis-decode them, so the byte bumps.
+pub(super) const PROTOCOL_MAGIC: [u8; 4] = *b"BRD\x05";
 pub(super) const NONCE_LEN: usize = 32;
 pub(super) const MAC_LEN: usize = 32;
 /// Length of an X25519 public key (the ephemeral DH key in `Hello`, ADR-089).
@@ -174,11 +177,21 @@ pub(super) fn encode_payload(frame: &Frame) -> io::Result<Vec<u8>> {
 /// the session keys exist. Steady-state frames go through `encode_payload` + the
 /// session's `seal` instead.
 pub(super) fn frame_bytes(frame: &Frame) -> io::Result<Vec<u8>> {
-    let payload = encode_payload(frame)?;
-    let mut out = Vec::with_capacity(payload.len() + 4);
-    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-    out.extend_from_slice(&payload);
-    Ok(out)
+    Ok(len_prefixed(&encode_payload(frame)?))
+}
+
+/// Prepend the protocol's 4-byte big-endian length prefix to `body`, yielding a
+/// `[u32 len][body]` frame ready to write. Shared by the two producers of that
+/// framing: this module's plaintext `frame_bytes` (handshake) and the session
+/// layer's `seal` (ciphertext, ADR-089) — the *body* differs (plaintext payload
+/// vs. AEAD ciphertext+tag) but the on-wire framing is identical, so it lives in
+/// one place. `body.len()` is always within `u32` (the payload is capped at
+/// `MAX_FRAME` upstream; ciphertext adds only the 16-byte AEAD tag).
+pub(super) fn len_prefixed(body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(body.len() + 4);
+    out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    out.extend_from_slice(body);
+    out
 }
 
 pub(super) fn write_frame(w: &mut impl Write, frame: &Frame) -> io::Result<()> {
@@ -241,56 +254,37 @@ fn encode_frame(w: &mut Vec<u8>, frame: &Frame) -> io::Result<()> {
         Frame::Ping => w.push(FRAME_PING),
         Frame::Pong => w.push(FRAME_PONG),
         Frame::Monitor {
-            from_node,
             watcher_pid,
             target,
             mref,
         } => {
             w.push(FRAME_MONITOR);
-            put_sym(w, *from_node);
             w.extend_from_slice(&watcher_pid.to_be_bytes());
             w.extend_from_slice(&target.to_be_bytes());
             w.extend_from_slice(&mref.to_be_bytes());
         }
-        Frame::Demonitor {
-            from_node,
-            watcher_pid,
-            mref,
-        } => {
+        Frame::Demonitor { watcher_pid, mref } => {
             w.push(FRAME_DEMONITOR);
-            put_sym(w, *from_node);
             w.extend_from_slice(&watcher_pid.to_be_bytes());
             w.extend_from_slice(&mref.to_be_bytes());
         }
-        Frame::Link {
-            from_node,
-            from_pid,
-            to_pid,
-        } => {
+        Frame::Link { from_pid, to_pid } => {
             w.push(FRAME_LINK);
-            put_sym(w, *from_node);
             w.extend_from_slice(&from_pid.to_be_bytes());
             w.extend_from_slice(&to_pid.to_be_bytes());
         }
-        Frame::Unlink {
-            from_node,
-            from_pid,
-            to_pid,
-        } => {
+        Frame::Unlink { from_pid, to_pid } => {
             w.push(FRAME_UNLINK);
-            put_sym(w, *from_node);
             w.extend_from_slice(&from_pid.to_be_bytes());
             w.extend_from_slice(&to_pid.to_be_bytes());
         }
         Frame::Exit {
-            from_node,
             from_pid,
             to_pid,
             reason,
             link,
         } => {
             w.push(FRAME_EXIT);
-            put_sym(w, *from_node);
             w.extend_from_slice(&from_pid.to_be_bytes());
             w.extend_from_slice(&to_pid.to_be_bytes());
             w.push(*link as u8);
@@ -330,28 +324,23 @@ pub(super) fn decode_frame(r: &mut Cursor<Vec<u8>>) -> io::Result<Frame> {
         FRAME_PING => Ok(Frame::Ping),
         FRAME_PONG => Ok(Frame::Pong),
         FRAME_MONITOR => Ok(Frame::Monitor {
-            from_node: get_sym(r)?,
             watcher_pid: get_u64(r)?,
             target: get_u64(r)?,
             mref: get_u64(r)?,
         }),
         FRAME_DEMONITOR => Ok(Frame::Demonitor {
-            from_node: get_sym(r)?,
             watcher_pid: get_u64(r)?,
             mref: get_u64(r)?,
         }),
         FRAME_LINK => Ok(Frame::Link {
-            from_node: get_sym(r)?,
             from_pid: get_u64(r)?,
             to_pid: get_u64(r)?,
         }),
         FRAME_UNLINK => Ok(Frame::Unlink {
-            from_node: get_sym(r)?,
             from_pid: get_u64(r)?,
             to_pid: get_u64(r)?,
         }),
         FRAME_EXIT => Ok(Frame::Exit {
-            from_node: get_sym(r)?,
             from_pid: get_u64(r)?,
             to_pid: get_u64(r)?,
             link: get_u8(r)? != 0,
@@ -566,8 +555,10 @@ fn encode_closure(w: &mut Vec<u8>, c: &crate::process::ClosureMsg) -> io::Result
 /// Maximum nesting depth the wire decoder will descend into. Past this we
 /// reject the frame as `InvalidData` — a peer (already authenticated, but
 /// possibly malicious) can otherwise send a deeply nested `M_LIST` chain in a
-/// small frame and overflow the receiver thread's native Rust stack.
-const MAX_DECODE_DEPTH: u32 = 256;
+/// small frame and overflow the receiver thread's native Rust stack. Defined in
+/// terms of the serialiser's cap (`process::MAX_MESSAGE_DEPTH`) so the encode
+/// and decode sides can't drift apart — round-trip stays symmetric.
+const MAX_DECODE_DEPTH: u32 = crate::process::MAX_MESSAGE_DEPTH;
 
 fn decode_msg(r: &mut Cursor<Vec<u8>>) -> io::Result<Message> {
     decode_msg_at(r, 0)

@@ -645,7 +645,10 @@ mod backend {
         cursor: (u16, u16),
         /// The button currently held down (set on press, cleared on release), so a
         /// `CursorMoved` while it's held can be reported as a `:drag` carrying that
-        /// button. One button at a time is all a drag gesture needs.
+        /// button. Deliberately one button at a time — all a drag gesture needs: a
+        /// fresh press overwrites it (last-press-wins) and any release clears it, so
+        /// chording two buttons isn't tracked. Revisit only if multi-button drag is
+        /// ever needed.
         held: Option<MouseButton>,
         /// The key currently held down (set on a fresh press, cleared on its release
         /// or focus loss), shared with the Brood side for `gui-held-key`. Also how the
@@ -1350,6 +1353,27 @@ mod backend {
         rgba: Vec<u8>, // width*height*4, straight (non-premultiplied) alpha
     }
 
+    /// The grapheme-cluster part of a glyph-cache key. The vast majority of probes
+    /// are single chars (one per cell, one repaint per keystroke), so they key on a
+    /// `Char` and allocate nothing; only the rare multi-char cluster (ZWJ emoji,
+    /// flag, accented base+mark) takes the `Str` path and allocates a `Box<str>`.
+    #[derive(Clone, PartialEq, Eq, Hash)]
+    enum ClusterKey {
+        Char(char),
+        Str(Box<str>),
+    }
+
+    impl ClusterKey {
+        /// The cheapest key for a cluster: a lone char allocates nothing.
+        fn of(g: &str) -> ClusterKey {
+            let mut it = g.chars();
+            match (it.next(), it.next()) {
+                (Some(c), None) => ClusterKey::Char(c),
+                _ => ClusterKey::Str(g.into()),
+            }
+        }
+    }
+
     /// The shared text engine on the single GUI thread: cosmic-text's `FontSystem`
     /// (font database + shaping + fallback) and `SwashCache` (glyph rasterisation,
     /// color and mono), plus the family-keyword → family-name map a `:family` resolves
@@ -1444,7 +1468,7 @@ mod backend {
         baseline: i32, // pixels from a cell's top to the text baseline
         // keyed by (cluster, family id, bold, italic, scale): the same cluster at a
         // different family/style/scale rasterises to a different baked canvas.
-        cache: HashMap<(String, u32, bool, bool, u16), CachedGlyph>,
+        cache: HashMap<(ClusterKey, u32, bool, bool, u16), CachedGlyph>,
     }
 
     impl Renderer {
@@ -1473,6 +1497,8 @@ mod backend {
             self.cache.clear();
             let line_h = (self.px * 1.3).round().max(1.0);
             self.cell_h = line_h as usize;
+            // `name_of` returns owned data, so the immutable borrow ends on this
+            // line — letting the `borrow_mut` below succeed (don't make it borrow).
             let fam = self.families.borrow().name_of(self.default_family);
             let mut shared = self.families.borrow_mut();
             let shared = &mut *shared;
@@ -1526,6 +1552,8 @@ mod backend {
             // fallback glyph aligns with the surrounding text rather than floating to
             // wherever its own font's line metrics put it.
             let baseline = (self.baseline * scale as i32).max(0);
+            // `name_of` returns owned data, so the immutable borrow ends on this
+            // line — letting the `borrow_mut` below succeed (don't make it borrow).
             let fam = self.families.borrow().name_of(fid);
             let mut shared = self.families.borrow_mut();
             let shared = &mut *shared;
@@ -1582,7 +1610,9 @@ mod backend {
                 return;
             }
             let fid = family.unwrap_or(self.default_family);
-            let key = (g.to_string(), fid, bold, italic, scale.max(1));
+            // The common single-char cluster keys via `ClusterKey::Char` with no
+            // allocation; only a rare multi-char cluster allocates (a `Box<str>`).
+            let key = (ClusterKey::of(g), fid, bold, italic, scale.max(1));
             if !self.cache.contains_key(&key) {
                 let baked = self.build_cluster(g, fid, bold, italic, scale);
                 self.cache.insert(key.clone(), baked);
@@ -1790,8 +1820,18 @@ mod backend {
         };
         let (fb_w, fb_h) = (w as usize, h as usize);
         let bg0 = pack(DEFAULT_BG);
-        for p in buf.iter_mut() {
-            *p = bg0;
+        // Coordinate contract: `r.cell_w`/`cell_h` are PHYSICAL (post-scale) pixels;
+        // `Op` row/col are BASE cells (top-left pixel = col*cell_w, row*cell_h); a
+        // face `:scale n` multiplies into that same physical grid (n×n base cells).
+        //
+        // The conventional frame opens with a full `:clear`, which already paints the
+        // whole buffer with `bg0` — so skip the unconditional pre-clear in that case
+        // to avoid a redundant full-buffer write every frame. We still pre-clear when
+        // the frame does NOT start with a full clear, so the background is clean.
+        if !matches!(frame.first(), Some(Op::Clear)) {
+            for p in buf.iter_mut() {
+                *p = bg0;
+            }
         }
         let (cw, ch) = (r.cell_w, r.cell_h);
         for op in frame {
@@ -1841,6 +1881,8 @@ mod backend {
                     }
                 }
                 Op::Cursor { row, col } => {
+                    // Always one base cell — the cursor op carries no face, so it
+                    // ignores `:scale`; it overlays the single base cell at (row, col).
                     cursor_cell(
                         &mut buf,
                         fb_w,

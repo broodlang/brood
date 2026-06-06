@@ -293,7 +293,7 @@ impl LispError {
         use crate::core::value::{intern, Value};
         let kind_kw = Value::Keyword(intern(self.kind.tag_name()));
         let msg_str = heap.alloc_string(&self.message);
-        let mut entries: Vec<(Value, Value)> = Vec::with_capacity(7);
+        let mut entries: Vec<(Value, Value)> = Vec::with_capacity(8);
         entries.push((Value::Keyword(intern("kind")), kind_kw));
         entries.push((Value::Keyword(intern("message")), msg_str));
         if let Some(code) = self.code {
