@@ -517,7 +517,6 @@ the raw filesystem."
 ;; are no-ops). Failures in the project mcp.blsp surface as load errors during
 ;; `nest mcp` startup, which is exactly when the agent's `.mcp.json` would
 ;; have wired it up — the right time for a hard error.
-(require 'project)
 (let (root (project/project--find-root (cwd)))
   (when root
     (let (project-mcp (path-join root "mcp.blsp"))

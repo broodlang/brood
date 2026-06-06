@@ -750,7 +750,8 @@ pub fn value_to_json(heap: &Heap, v: Value) -> Result<Json, String> {
         }
         Value::Str(id) => Ok(Json::String(heap.string(id).to_string())),
         Value::Sym(s) | Value::Keyword(s) => Ok(Json::String(value::symbol_name(s))),
-        Value::Pair(_) | Value::Vector(_) => {
+        // A range projects as the array it stands in for (same as print/send).
+        Value::Pair(_) | Value::Vector(_) | Value::Range(_) => {
             let items = heap.seq_items(v).map_err(|e| e.to_string())?;
             items.into_iter().map(|x| value_to_json(heap, x)).collect()
         }

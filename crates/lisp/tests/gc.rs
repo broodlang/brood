@@ -140,12 +140,14 @@ fn gc_stats_counts_automatic_collections() {
     let prog = r#"
         ;; Tail loop at depth 1: each iteration allocates a throwaway list and
         ;; keeps only a small counter, so the Stage-B safepoint collects.
+        ;; (`map` realises 200 cons cells — a bare `(range 200)` is a lazy O(1)
+        ;; Range value and would churn nothing.)
         (defn churn (n acc)
           (if (= n 0)
               acc
-              (let (junk (range 200))
+              (let (junk (map inc (range 200)))
                 (churn (- n 1) (+ acc (count junk))))))
-        (churn 8000 0)
+        (churn 2000 0)
         (gc-stats)
     "#;
     let v = interp.eval_str(prog).expect("churn program errored");
@@ -254,18 +256,39 @@ fn gc_trace_toggles_and_reports_state() {
 /// (`gc_block_depth() == 1`), so a loop this deep reported **0 collections** and
 /// climbed unbounded; now the evaluator roots its transients on the operand stack
 /// and collects at any depth. Asserts the collector actually fired down there.
+/// A `def`'d range must survive promotion plus a local collection: `promote`
+/// copies the backing `[lo hi step]` vector into RUNTIME. The bug this pins:
+/// `promote_in` returning the LOCAL handle unchanged stored a stale VecId in
+/// the shared global table, an OOB deref after the next arena flip (or in any
+/// other process reading the global).
+#[test]
+fn promoted_range_survives_collection() {
+    let mut interp = Interp::new();
+    let prog = r#"
+        (def r (range 1 10 2))
+        (defn churn (n)
+          (if (= n 0) nil (let (j (map inc (range 200))) (churn (- n 1)))))
+        (churn 2000)
+        (= r '(1 3 5 7 9))
+    "#;
+    let v = interp.eval_str(prog).expect("range-def program errored");
+    assert_eq!(interp.print(v), "true", "def'd range corrupted by collection");
+}
+
 #[test]
 fn collects_below_the_outermost_eval() {
     let mut interp = Interp::new();
     let prog = r#"
+        ;; `map` realises 200 cons cells per iteration (a bare `(range 200)` is
+        ;; a lazy O(1) Range value and would churn nothing).
         (defn churn (n acc)
           (if (= n 0)
               (gc-stats)
-              (let (junk (range 200))
+              (let (junk (map inc (range 200)))
                 (churn (- n 1) (+ acc (count junk))))))
         ;; `try` runs `churn` via a thunk apply, so its loop body sits at eval
         ;; depth >= 2 — the case that used to never reach a GC safepoint.
-        (try (churn 8000 0) (catch e e))
+        (try (churn 2000 0) (catch e e))
     "#;
     let v = interp.eval_str(prog).expect("churn-in-try program errored");
     let stats = interp.print(v);

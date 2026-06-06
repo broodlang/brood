@@ -1294,3 +1294,43 @@ eval/VM split is disciplined (VM calls into `eval::` helpers — no drift
 found); keyword tables are deliberately disjoint; printing is single-sourced.
 The parked-waiter teardown leak in an embedded long-lived `Interp` is
 documented, not fixed (no teardown drain path today).
+
+## 2026-06-06 — std/ review sweep: the Brood-language counterpart
+
+The whole-kernel sweep's counterpart for the ~12.8k lines of Brood source:
+every `std/**/*.blsp` reviewed for bugs, duplication, and dead code (parallel
+per-area reviewers + a cross-module duplication pass, findings re-verified by
+hand before changing anything).
+
+**Fixed:**
+
+- `json.blsp`: the encoder didn't escape `\b` (U+0008) / `\f` (U+000C), which
+  the decoder *does* decode — so a string holding either control char broke
+  `parse ∘ encode = identity` and emitted invalid JSON. Added both to
+  `json--enc-escapes` + a round-trip test.
+- `tool/test.blsp` `collect-loop`: the central `cond` had been mangled (a body
+  and the next clause's test sharing a line; one line of ~570 spaces before
+  `:down)`) — the known formatter shuffle of single-`;` comments sitting
+  between a `cond` test and its body. Reflowed with `;;` comments above each
+  clause.
+- Redundant `(require 'mod)` after a `(:use mod)` header clause removed across
+  8 modules (layers, ui, lineedit, repl, sexp, package, mcp, observer) —
+  `:use` auto-loads, the require was pure duplication. Informative per-dep
+  comments moved onto the `:use` clauses; observer keeps `(require 'proctree)`
+  (used qualified, not in its `:use` list).
+
+**Reviewed-and-accepted (no change):** buffer/lineedit's identical
+`--scan-fwd/bwd` ↔ `--fwd/bwd` helpers and `buffer--clamp` ↔ `pane--clampi`
+(private one-liners; extraction would mint a module for <10 lines);
+dockerfile/dotenv/markdown each carrying their own small line-walker +
+`lead-ws`/`find-char` scaffold (independent grammars, shared framework would
+couple them); task.blsp's repeated receive clauses across the timeout/
+no-timeout branches (receive clauses can't be abstracted by a function — a
+macro isn't worth it for 3 lines). The pending `range` rewrite in the
+prelude diff traced correct (downward cons, no reverse).
+
+Follow-up, same day: the remaining strictness gap closed too — the encoder
+now escapes *every* raw control char < U+0020 as `\u00XX` (strict JSON
+forbids them all), via a load-time `[raw escape]` table over the existing
+`json--cp->string`/`json--int->hex` helpers, folded in after the named
+escapes (so the introduced backslashes aren't re-escaped).

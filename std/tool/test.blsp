@@ -500,10 +500,12 @@ docs/testing.md for the full guide.")
     ;; `(m m)` takes the next message; `(after …)` fires when the budget is spent.
     (let (msg (receive (m m) (after (max 0 (- deadline (now))) :%test-timeout)))
       (cond
+        ;; budget spent — kill + fail the stragglers
         (= msg :%test-timeout)
-        ; budget spent — kill + fail the stragglers
-        (collect-timeout workers reported acc) (= (first msg) :unit-result)
-        ; [:unit-result pid results]
+        (collect-timeout workers reported acc)
+
+        ;; [:unit-result pid results]
+        (= (first msg) :unit-result)
         (let (pid (second msg))
           ;; Ignore a result from a pid that isn't one of THIS batch's workers, or
           ;; one already counted — a late message from a timed-out/killed worker of a
@@ -514,9 +516,10 @@ docs/testing.md for the full guide.")
               workers
               (cons pid reported)
               (append (third msg) acc)
-              deadline))) (= (first msg)
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              :down)
-        ; [:down mref pid reason]
+              deadline)))
+
+        ;; [:down mref pid reason]
+        (= (first msg) :down)
         (let (pid (third msg)
               unit (unit-of-pid pid workers))
           (cond

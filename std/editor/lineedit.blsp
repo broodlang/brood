@@ -37,9 +37,6 @@ Built on `std/highlight.blsp` (pure analysis) and the inline `term-*` seam.
   (:use editor/highlight)
   (:use editor/keymap))
 
-(require 'editor/highlight)
-(require 'editor/keymap)
-
 (def lineedit-face-hint {:fg :dark-grey})
 
 ;; ---- editor state -----------------------------------------------------------

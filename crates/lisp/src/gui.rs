@@ -105,6 +105,20 @@ pub enum Op {
         h: u16,
         shape: CursorShape,
     },
+    /// A batch of vertical column-spans — the fast path for column renderers
+    /// (raycasters, spectrum bars, heat columns). `cols[i]` describes the cell
+    /// column `col0 + i` as a top-to-bottom run of `(height-in-cells, color)`
+    /// segments painted from `row0` down; a `None` color leaves the background
+    /// showing through. Each segment is a flat filled rectangle — no glyph
+    /// shaping — and the O(cells) per-cell expansion happens here in Rust, not in
+    /// the Brood frame builder, so a wide scene that an op-per-cell frame can't
+    /// build fast enough becomes O(columns) of Brood work. The terminal frontend
+    /// ignores it (a GUI-only op, like a `:scale` face). (ADR-046 display seam.)
+    VSpans {
+        row0: u16,
+        col0: u16,
+        cols: Vec<Vec<(u16, Option<[u8; 3]>)>>,
+    },
 }
 
 /// A keystroke, in a backend-neutral shape the Brood side turns into the same
@@ -142,6 +156,7 @@ pub enum MouseAction {
     Press,
     Release,
     Drag,
+    Move,
     ScrollUp,
     ScrollDown,
 }
@@ -187,6 +202,9 @@ mod disabled {
     pub fn focus(_id: u64) -> Result<(), String> {
         Err(NOT_COMPILED.into())
     }
+    pub fn grab(_id: u64, _on: bool) -> Result<(), String> {
+        Err(NOT_COMPILED.into())
+    }
     pub fn size(_id: u64) -> Result<(u16, u16), String> {
         Err(NOT_COMPILED.into())
     }
@@ -211,10 +229,14 @@ mod disabled {
 }
 
 #[cfg(not(feature = "gui"))]
-pub use disabled::{close, draw, focus, font, held_key, icon, open, register_family, size, title};
+pub use disabled::{
+    close, draw, focus, font, grab, held_key, icon, open, register_family, size, title,
+};
 
 #[cfg(feature = "gui")]
-pub use backend::{close, draw, focus, font, held_key, icon, open, register_family, size, title};
+pub use backend::{
+    close, draw, focus, font, grab, held_key, icon, open, register_family, size, title,
+};
 
 #[cfg(feature = "gui")]
 mod backend {
@@ -237,7 +259,7 @@ mod backend {
     use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
     use winit::keyboard::{Key as WKey, ModifiersState, NamedKey, PhysicalKey};
     use winit::platform::wayland::EventLoopBuilderExtWayland;
-    use winit::window::{CursorIcon, Icon, Window, WindowId};
+    use winit::window::{CursorGrabMode, CursorIcon, Icon, Window, WindowId};
 
     use cosmic_text::{
         fontdb, Attrs, Buffer as CtBuffer, Family, FontSystem, Metrics, Shaping, Style, SwashCache,
@@ -313,6 +335,10 @@ mod backend {
         /// minimising it first). Behind `gui-focus` — surfaces an already-open
         /// singleton window instead of opening a duplicate.
         Focus { id: u64 },
+        /// Confine the pointer to window `id` (`on`) or release it. Behind
+        /// `gui-grab-cursor` — keeps the cursor inside the window for mouse-look so
+        /// it can't slip out and click another app.
+        Grab { id: u64, on: bool },
         /// Set a cell font — family and/or pixel size; `None` fields are left
         /// unchanged. `id: None` is the **global default**: applied to every open
         /// window and remembered for windows opened later. `id: Some(w)` targets
@@ -448,6 +474,22 @@ mod backend {
             .map_err(|_| "gui thread is gone".to_string())
     }
 
+    /// `(gui-grab-cursor id on)` — confine the pointer to window `id` (`on` true) or
+    /// release it. Dispatched to the GUI thread like `focus`.
+    pub fn grab(id: u64, on: bool) -> Result<(), String> {
+        {
+            let w = windows().lock().unwrap();
+            if !w.contains_key(&id) {
+                return Err("gui window not open".into());
+            }
+        }
+        gui()?
+            .lock()
+            .unwrap()
+            .send_event(UserEvent::Grab { id, on })
+            .map_err(|_| "gui thread is gone".to_string())
+    }
+
     /// `(gui-size id)` — window `id`'s size in character cells.
     pub fn size(id: u64) -> Result<(u16, u16), String> {
         let w = windows().lock().unwrap();
@@ -573,6 +615,7 @@ mod backend {
             MouseAction::Press => "press",
             MouseAction::Release => "release",
             MouseAction::Drag => "drag",
+            MouseAction::Move => "move",
             MouseAction::ScrollUp => "scroll-up",
             MouseAction::ScrollDown => "scroll-down",
         };
@@ -848,6 +891,23 @@ mod backend {
                         w.window.focus_window();
                     }
                 }
+                // Confine the pointer to the window (or release it). `Confined` keeps
+                // it inside but still moving (so absolute mouse-look maps edge-to-edge);
+                // some platforms only offer `Locked`, so fall back to that.
+                UserEvent::Grab { id, on } => {
+                    if let Some(w) = self.ids.get(&id).and_then(|wid| self.wins.get(wid)) {
+                        let mode = if on {
+                            CursorGrabMode::Confined
+                        } else {
+                            CursorGrabMode::None
+                        };
+                        if on && w.window.set_cursor_grab(mode).is_err() {
+                            let _ = w.window.set_cursor_grab(CursorGrabMode::Locked);
+                        } else if !on {
+                            let _ = w.window.set_cursor_grab(CursorGrabMode::None);
+                        }
+                    }
+                }
                 // Cell font. `id: Some(w)` retunes just that window, leaving the
                 // global default alone (so two windows can differ). `id: None` is
                 // the global default: remembered for future windows and applied to
@@ -1033,20 +1093,28 @@ mod backend {
                     if cell != w.cursor {
                         w.cursor = cell;
                         let (col, row) = w.cursor;
-                        if let Some(b) = w.held {
-                            deliver(
-                                w.subscriber,
-                                mouse_message(&Mouse {
-                                    action: MouseAction::Drag,
-                                    button: Some(b),
-                                    row,
-                                    col,
-                                    ctrl: w.mods.control_key(),
-                                    alt: w.mods.alt_key(),
-                                    shift: w.mods.shift_key(),
-                                }),
-                            );
-                        }
+                        // While a button is held this is a `:drag`; otherwise it's a
+                        // bare `:move` (button nil). Either way it's cell-granular (only
+                        // on crossing into a new cell), so it stays bounded — no per-pixel
+                        // flood. Free `:move` is what lets an app do mouse-look / hover
+                        // without requiring a click.
+                        let action = if w.held.is_some() {
+                            MouseAction::Drag
+                        } else {
+                            MouseAction::Move
+                        };
+                        deliver(
+                            w.subscriber,
+                            mouse_message(&Mouse {
+                                action,
+                                button: w.held,
+                                row,
+                                col,
+                                ctrl: w.mods.control_key(),
+                                alt: w.mods.alt_key(),
+                                shift: w.mods.shift_key(),
+                            }),
+                        );
                         // Hover cursor: show a zone's shape (e.g. a resize cursor on
                         // a divider) while the pointer is over it. Locally handled —
                         // no event reaches the app, so no redraw flood. (ADR-080.)
@@ -1896,6 +1964,20 @@ mod backend {
                 // Not painted — a cursor zone is hover metadata, hit-tested on
                 // pointer-move in the window event handler (ADR-080).
                 Op::CursorZone { .. } => {}
+                Op::VSpans { row0, col0, cols } => {
+                    let top0 = *row0 as usize * ch;
+                    for (i, segs) in cols.iter().enumerate() {
+                        let left = (*col0 as usize + i) * cw;
+                        let mut y = top0;
+                        for (h, color) in segs {
+                            let span_h = *h as usize * ch;
+                            if let Some(rgb) = color {
+                                fill_cell(&mut buf, fb_w, fb_h, left, y, cw, span_h, pack(*rgb));
+                            }
+                            y += span_h;
+                        }
+                    }
+                }
             }
         }
         let _ = buf.present();

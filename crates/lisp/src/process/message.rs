@@ -176,6 +176,17 @@ fn to_message_rec(
             }
             Message::Vector(out)
         }
+        // A range crosses as the list it stands in for (its elements are plain
+        // ints; rare across a message boundary, so realising it is fine).
+        Value::Range(id) => {
+            let pos = heap.form_pos(v);
+            let items = heap.range_to_vec(id);
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(to_message_rec(heap, item, visited, depth + 1)?);
+            }
+            Message::List(out, pos)
+        }
         Value::Map(id) => {
             let entries = heap.map_entries(id);
             let mut out = Vec::with_capacity(entries.len());

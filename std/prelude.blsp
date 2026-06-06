@@ -72,8 +72,9 @@
 ;; `type-of`, `map-pairs`) because `fold` calls it before the `map?` predicate /
 ;; `cond` macro are available.
 (defn seq (coll)
-  "A list view of `coll`. A map becomes its `[k v]` pairs; lists, vectors, strings, and `nil` pass through. Used by `map`/`filter`/`fold` so they accept any collection."
-  (if (%eq (type-of coll) :map) (map-pairs coll) coll))
+  "A list view of `coll`. A map becomes its `[k v]` pairs; a lazy range is realised to a list; lists, vectors, strings, and `nil` pass through. Used by `map`/`filter`/`fold` so they accept any collection."
+  (if (range? coll) (%range->list coll)
+    (if (%eq (type-of coll) :map) (map-pairs coll) coll)))
 (def entries map-pairs)
 
 ;; ---- folding (the workhorse; tail-recursive, so it is stack-safe) ----
@@ -81,8 +82,8 @@
 ;; list form for the recursion, so a map costs one extra `map-pairs` pass total
 ;; rather than O(n) per step.
 (defn fold (f acc coll)
-  "Left-fold: combine the items of `coll` left-to-right with `(f acc item)`, starting from `acc`. Tail-recursive, so it is stack-safe. Maps fold as their `[k v]` pairs."
-  (fold--loop f acc (seq coll)))
+  "Left-fold: combine the items of `coll` left-to-right with `(f acc item)`, starting from `acc`. Tail-recursive, so it is stack-safe. Maps fold as their `[k v]` pairs. A lazy range folds in a counted loop with no list materialised."
+  (if (range? coll) (%range-reduce f acc coll) (fold--loop f acc (seq coll))))
 (defn fold--loop (f acc coll)
   (if (empty? coll) acc (fold--loop f (f acc (first coll)) (rest coll))))
 
@@ -428,6 +429,7 @@ current element and `acc` is the current accumulator."
   ;; kernels (both were O(n) — a fold walk / a `map-pairs` allocation); lists
   ;; and nil go through a dedicated tail loop, not a per-element counting closure.
   (cond
+    (range? coll) (%range-count coll)
     (string? coll) (string-length coll)
     (vector? coll) (vector-length coll)
     (map? coll) (map-count coll)
@@ -1337,23 +1339,11 @@ runtime isn't a node yet."
 
 ;; (range hi) -> 0..hi-1 ; (range lo hi) -> lo..hi-1 ; (range lo hi step).
 (defn range (a & more)
-  "A list of integers: `(range hi)` is 0..hi-1, `(range lo hi)` is lo..hi-1, `(range lo hi step)` strides by `step`."
+  "A range of integers: `(range hi)` is 0..hi-1, `(range lo hi)` is lo..hi-1, `(range lo hi step)` strides by `step`. The result is a *lazy* range — `fold`/`reduce`/`sum`/`count` walk it without building a list (O(1) memory); every other op treats it as the list of those integers. Empty ranges are `nil`."
   (cond
-    (empty? more) (range--down (- a 1) 0 1 nil)
-    (empty? (rest more)) (range--gen a (first more) 1)
-    else (range--gen a (first more) (second more))))
-;; Build ascending by counting DOWN from the last in-range value, consing as we
-;; go — so the list comes out in order with no closing `reverse`. That halves
-;; allocation (n cons cells, not 2n) and drops the extra O(n) reverse pass.
-;; `range--gen` finds that top value: the largest lo+step*k that's still in range.
-(defn range--gen (lo hi step)
-  (if (> step 0)
-    (if (< lo hi) (range--down (+ lo (* step (quot (- (- hi 1) lo) step))) lo step nil) nil)
-    (if (> lo hi) (range--down (+ lo (* step (quot (- (+ hi 1) lo) step))) lo step nil) nil)))
-(defn range--down (i stop step acc)
-  (if (if (> step 0) (>= i stop) (<= i stop))
-    (range--down (- i step) stop step (cons i acc))
-    acc))
+    (empty? more) (%range 0 a 1)
+    (empty? (rest more)) (%range a (first more) 1)
+    else (%range a (first more) (second more))))
 
 ;; (take n coll) -> the first n elements (fewer if coll is shorter).
 (defn take (n coll)

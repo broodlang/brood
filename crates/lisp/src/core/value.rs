@@ -352,6 +352,15 @@ pub enum Value {
     /// A cons cell. Proper lists are pairs chained to a final `Nil`.
     Pair(PairId),
     Vector(VecId),
+    /// A lazy integer range `lo..hi` by `step`, backed by a 3-element
+    /// `[lo hi step]` vector (so it rides the `Vector` GC / region / forwarding
+    /// machinery for free). It is never materialised: `fold` / `reduce` / `sum`
+    /// / `count` iterate it in a counted loop with zero allocation, while every
+    /// other op realises it to a list on demand. [`tag`] reports it as a
+    /// [`Tag::Pair`] so the type system and `type-of` treat it exactly like the
+    /// list it stands in for. Constructed only by `%range`, which returns `Nil`
+    /// for an empty range — so a `Range` always has at least one element.
+    Range(VecId),
     /// An immutable map (`{ }`): key→value associations. Insertion-ordered; keys
     /// compared by structural equality, so any value can be a key. Every
     /// operation (`assoc`/`dissoc`) returns a *fresh* map (ADR-026 immutability).
@@ -469,6 +478,11 @@ pub fn tag(v: Value) -> Tag {
         Value::Keyword(_) => Tag::Keyword,
         Value::Str(_) => Tag::Str,
         Value::Pair(_) => Tag::Pair,
+        // A range stands in for the list it would materialise to — report it as a
+        // pair so `type-of`, the type lattice, and every `pair?`/list check treat
+        // it identically. (The fold-family fast path matches `Value::Range`
+        // directly in Rust, not via this tag.)
+        Value::Range(_) => Tag::Pair,
         Value::Vector(_) => Tag::Vector,
         Value::Fn(_) => Tag::Fn,
         Value::Macro(_) => Tag::Macro,
