@@ -75,6 +75,22 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
             }
         }
         Value::Pair(_) => write_list(out, heap, v, readable, depth),
+        // A range prints as the list it stands in for: `(0 1 2 3 4)`.
+        Value::Range(id) => {
+            out.push('(');
+            let (lo, hi, step) = heap.range_parts(id);
+            let mut i = lo;
+            let mut first = true;
+            while if step > 0 { i < hi } else { i > hi } {
+                if !first {
+                    out.push(' ');
+                }
+                first = false;
+                write_value(out, heap, Value::Int(i), readable, depth + 1);
+                i += step;
+            }
+            out.push(')');
+        }
         Value::Vector(id) => {
             out.push('[');
             for (i, &item) in heap.vector(id).iter().enumerate() {

@@ -225,14 +225,28 @@ on malformed input or trailing content. Pure."
 
 ;; ---- encode -----------------------------------------------------------------
 
+(defn json--enc-u (cp)
+  "The `\\u00XX` escape for a control code point `cp` (< 0x20)."
+  (str "\\u00" (char-at json--hex-digits (quot cp 16)) (char-at json--hex-digits (rem cp 16))))
+
+;; `[raw escape]` for every control char the named escapes below don't cover —
+;; strict JSON forbids any raw char < U+0020 in a string, named escape or not.
+(def json--control-escapes
+  (map (fn (cp) [(json--cp->string cp) (json--enc-u cp)])
+    (filter (fn (cp) (not (member? cp [8 9 10 12 13]))) (range 32))))
+
 (defn json--enc-escapes (s)
   "Escape the JSON-special characters in `s` (backslash first)."
-  (-> s
-    (replace "\\" "\\\\")
-    (replace "\"" "\\\"")
-    (replace "\n" "\\n")
-    (replace "\r" "\\r")
-    (replace "\t" "\\t")))
+  (fold (fn (acc [raw esc]) (replace acc raw esc))
+    (-> s
+      (replace "\\" "\\\\")
+      (replace "\"" "\\\"")
+      (replace "\n" "\\n")
+      (replace "\r" "\\r")
+      (replace "\t" "\\t")
+      (replace "\u{8}" "\\b")
+      (replace "\u{c}" "\\f"))
+    json--control-escapes))
 
 (defn json--enc-string (s) (str "\"" (json--enc-escapes s) "\""))
 

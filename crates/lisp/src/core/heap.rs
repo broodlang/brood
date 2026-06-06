@@ -218,6 +218,8 @@ fn tag_rank(v: Value) -> u8 {
         Value::Keyword(_) => 4,
         Value::Sym(_) => 5,
         Value::Pair(_) => 6,
+        // A range sorts among lists (it is one, lazily).
+        Value::Range(_) => 6,
         Value::Vector(_) => 7,
         Value::Map(_) => 8,
         Value::Fn(_) => 9,
@@ -401,6 +403,7 @@ fn to_prelude(v: Value) -> Value {
     match v {
         Value::Pair(id) => Value::Pair(PairId::prelude(id.index())),
         Value::Vector(id) => Value::Vector(VecId::prelude(id.index())),
+        Value::Range(id) => Value::Range(VecId::prelude(id.index())),
         Value::Map(id) => Value::Map(MapId::prelude(id.index())),
         Value::Str(id) => Value::Str(StrId::prelude(id.index())),
         Value::BigInt(id) => Value::BigInt(BigIntId::prelude(id.index())),
@@ -1001,6 +1004,7 @@ pub fn is_movable(v: Value) -> bool {
     match v {
         Value::Pair(id) => id.region() == LOCAL,
         Value::Vector(id) => id.region() == LOCAL,
+        Value::Range(id) => id.region() == LOCAL,
         Value::Map(id) => id.region() == LOCAL,
         Value::Str(id) => id.region() == LOCAL,
         Value::BigInt(id) => id.region() == LOCAL,
@@ -1029,6 +1033,7 @@ pub fn needs_root_slot(v: Value) -> bool {
     match v {
         Value::Pair(id) => shared(id.region()),
         Value::Vector(id) => shared(id.region()),
+        Value::Range(id) => shared(id.region()),
         Value::Map(id) => shared(id.region()),
         Value::Str(id) => shared(id.region()),
         Value::BigInt(id) => shared(id.region()),
@@ -1522,6 +1527,55 @@ impl Heap {
     pub fn alloc_vector(&mut self, items: Vec<Value>) -> Value {
         let idx = alloc_slot!(self, vectors, items);
         Value::Vector(VecId::local_gen(idx, self.local_epoch))
+    }
+
+    /// Allocate a lazy integer range `lo..hi` by `step`. Returns `Nil` when the
+    /// range is empty (so a `Value::Range` always has ≥1 element), otherwise a
+    /// `Value::Range` backed by a 3-element `[lo hi step]` vector. `step` must be
+    /// non-zero (the caller — `%range` — enforces it).
+    pub fn alloc_range(&mut self, lo: i64, hi: i64, step: i64) -> Value {
+        let empty = if step > 0 { lo >= hi } else { hi >= lo };
+        if empty {
+            return Value::Nil;
+        }
+        let idx = alloc_slot!(
+            self,
+            vectors,
+            vec![Value::Int(lo), Value::Int(hi), Value::Int(step)]
+        );
+        Value::Range(VecId::local_gen(idx, self.local_epoch))
+    }
+
+    /// The `(lo, hi, step)` of a range handle's backing `[lo hi step]` vector.
+    pub fn range_parts(&self, id: VecId) -> (i64, i64, i64) {
+        let v = self.vector(id);
+        let int = |x: Value| match x {
+            Value::Int(n) => n,
+            _ => 0,
+        };
+        (int(v[0]), int(v[1]), int(v[2]))
+    }
+
+    /// The number of elements a range yields. O(1).
+    pub fn range_len(&self, id: VecId) -> i64 {
+        let (lo, hi, step) = self.range_parts(id);
+        // step is non-zero and the range is non-empty by construction.
+        let span = if step > 0 { hi - lo } else { lo - hi };
+        let mag = step.abs();
+        (span + mag - 1) / mag
+    }
+
+    /// Materialise a range's elements into a `Vec<Value>` of `Int`s — the slow
+    /// path behind realising a range to a list / vector.
+    pub fn range_to_vec(&self, id: VecId) -> Vec<Value> {
+        let (lo, hi, step) = self.range_parts(id);
+        let mut out = Vec::with_capacity(self.range_len(id).max(0) as usize);
+        let mut i = lo;
+        while if step > 0 { i < hi } else { i > hi } {
+            out.push(Value::Int(i));
+            i += step;
+        }
+        out
     }
 
     // ===== map operations (ADR-040: CHAMP — see `core/map_champ.rs`) =====
@@ -2634,6 +2688,12 @@ impl Heap {
                     .collect();
                 Value::Vector(VecId::runtime(self.runtime.code.vectors.push(items)))
             }
+            // A range's backing `[lo hi step]` vector holds only ints (atoms) —
+            // copy it across and keep the `Range` wrapper.
+            Value::Range(id) if id.region() == LOCAL => {
+                let items = self.vector(id).to_vec();
+                Value::Range(VecId::runtime(self.runtime.code.vectors.push(items)))
+            }
             Value::Map(id) if id.region() == LOCAL => {
                 // Recursively promote the trie depth-first. Children are
                 // promoted before their parent so the parent's `children`
@@ -3086,6 +3146,7 @@ impl Heap {
             Value::Nil => Ok(Vec::new()),
             Value::Pair(_) => self.list_to_vec(v),
             Value::Vector(id) => Ok(self.vector(id).to_vec()),
+            Value::Range(id) => Ok(self.range_to_vec(id)),
             _ => Err(LispError::type_err("expected a list or vector")),
         }
     }
@@ -3188,6 +3249,21 @@ impl Heap {
                     }
                 }
             }
+            // A range hashes byte-for-byte like the proper list it stands in for
+            // (it must — `(= (range 5) (list 0 1 2 3 4))`, so they share a hash):
+            // the same `7u8` list tag, each `Int` element hashed via the same
+            // path, then the `0xFF` + `Nil` end-marker a proper list emits.
+            Value::Range(id) => {
+                7u8.hash(h);
+                let (lo, hi, step) = self.range_parts(id);
+                let mut i = lo;
+                while if step > 0 { i < hi } else { i > hi } {
+                    self.hash_value_into(Value::Int(i), h);
+                    i += step;
+                }
+                0xFFu8.hash(h);
+                self.hash_value_into(Value::Nil, h);
+            }
             Value::Vector(id) => {
                 8u8.hash(h);
                 let xs = self.vector(id);
@@ -3264,10 +3340,48 @@ impl Heap {
     ///
     /// Floats compare by IEEE value, so `-0.0 = 0.0` is true and `nan = nan` is
     /// false — the least-surprising arithmetic semantics (not bitwise equality).
+    /// Structural equality of a range against a list spine, element by element,
+    /// without materialising the range. Both must run out together.
+    fn range_eq_list(&self, rid: VecId, mut lst: Value) -> bool {
+        let (lo, hi, step) = self.range_parts(rid);
+        let mut i = lo;
+        loop {
+            let in_range = if step > 0 { i < hi } else { i > hi };
+            match (in_range, lst) {
+                (false, Value::Nil) => return true,
+                (true, Value::Pair(p)) => {
+                    let (car, cdr) = self.pair(p);
+                    if !self.equal(Value::Int(i), car) {
+                        return false;
+                    }
+                    i += step;
+                    lst = cdr;
+                }
+                // One ran out before the other (or the list is improper).
+                _ => return false,
+            }
+        }
+    }
+
+    /// Structural equality of two ranges. An arithmetic sequence is fixed by its
+    /// first element, length, and (for length ≥ 2) its step — so this is O(1).
+    fn range_eq_range(&self, x: VecId, y: VecId) -> bool {
+        let (lo1, _, s1) = self.range_parts(x);
+        let (lo2, _, s2) = self.range_parts(y);
+        let n1 = self.range_len(x);
+        let n2 = self.range_len(y);
+        n1 == n2 && lo1 == lo2 && (n1 < 2 || s1 == s2)
+    }
+
     pub fn equal(&self, a: Value, b: Value) -> bool {
         use Value::*;
         match (a, b) {
             (Nil, Nil) => true,
+            // A range equals the list it stands in for (and another range),
+            // compared element-wise without materialising either.
+            (Range(x), Range(y)) => self.range_eq_range(x, y),
+            (Range(x), Pair(_)) => self.range_eq_list(x, b),
+            (Pair(_), Range(y)) => self.range_eq_list(y, a),
             (Bool(x), Bool(y)) => x == y,
             (Int(x), Int(y)) => x == y,
             // Two bignums compare by value. An Int vs a BigInt is never equal —
@@ -4775,6 +4889,12 @@ impl Heap {
                             }
                         }
                     }
+                    // A range's backing vector holds only ints — validate the
+                    // handle itself (bounds + epoch), nothing to descend into.
+                    Value::Range(id) if id.region() == LOCAL => {
+                        let slabs = if id.is_old() { &self.old } else { &self.local };
+                        bad("range", id.is_old(), id.generation(), id.index(), slabs.vectors.len(), parent, id.0);
+                    }
                     Value::Map(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
                         bad("map", id.is_old(), id.generation(), id.index(), slabs.maps.len(), parent, id.0);
@@ -5019,6 +5139,11 @@ fn flush_value(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, v: Value) -
         }
         Value::Vector(id) if fwd.copies(id.region(), id.is_old()) => {
             Value::Vector(flush_vector(old, new, fwd, id))
+        }
+        // A range is backed by a `[lo hi step]` vector — forward it exactly like
+        // a vector, keeping the `Range` wrapper.
+        Value::Range(id) if fwd.copies(id.region(), id.is_old()) => {
+            Value::Range(flush_vector(old, new, fwd, id))
         }
         Value::Map(id) if fwd.copies(id.region(), id.is_old()) => {
             Value::Map(flush_map(old, new, fwd, id))
@@ -5353,6 +5478,11 @@ fn flush_rt_value(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, v:
         Value::Vector(id) if id.region() == RUNTIME => {
             Value::Vector(flush_rt_vector(old, new, fwd, id))
         }
+        // A range's backing `[lo hi step]` vector moves like any other vector;
+        // keep the `Range` wrapper on the forwarded handle.
+        Value::Range(id) if id.region() == RUNTIME => {
+            Value::Range(flush_rt_vector(old, new, fwd, id))
+        }
         Value::Map(id) if id.region() == RUNTIME => Value::Map(flush_rt_map(old, new, fwd, id)),
         Value::Str(id) if id.region() == RUNTIME => Value::Str(flush_rt_string(old, new, fwd, id)),
         Value::BigInt(id) if id.region() == RUNTIME => {
@@ -5586,7 +5716,7 @@ fn verify_rt_slabs(s: &CodeSlabs) -> bool {
     let ok = |v: Value| -> bool {
         match v {
             Value::Pair(id) if id.region() == RUNTIME => id.index() < np,
-            Value::Vector(id) if id.region() == RUNTIME => id.index() < nv,
+            Value::Vector(id) | Value::Range(id) if id.region() == RUNTIME => id.index() < nv,
             Value::Map(id) if id.region() == RUNTIME => id.index() < nm,
             Value::Str(id) if id.region() == RUNTIME => id.index() < ns,
             Value::BigInt(id) if id.region() == RUNTIME => id.index() < nb,

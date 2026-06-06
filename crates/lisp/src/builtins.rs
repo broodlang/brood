@@ -225,6 +225,46 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![seq], list_ty),
         rest,
     );
+    // Lazy reducible range (ADR: reducible range). `%range` constructs it (arg
+    // parsing is in the Brood `range`); the fold-family fast paths in the prelude
+    // call `range?` / `%range-reduce` / `%range-count`; everything else realises
+    // via `%range->list`. A range carries `tag = Pair`, so its surface type is a
+    // list — hence the `list_ty` sigs.
+    def(
+        heap,
+        "%range",
+        Arity::exact(3),
+        Sig::new(vec![int, int, int], list_ty),
+        range_make,
+    );
+    def(
+        heap,
+        "range?",
+        Arity::exact(1),
+        Sig::new(vec![any], bool_ty),
+        range_pred,
+    );
+    def(
+        heap,
+        "%range-count",
+        Arity::exact(1),
+        Sig::new(vec![list_ty], int),
+        range_count,
+    );
+    def(
+        heap,
+        "%range->list",
+        Arity::exact(1),
+        Sig::new(vec![list_ty], list_ty),
+        range_to_list,
+    );
+    def(
+        heap,
+        "%range-reduce",
+        Arity::exact(3),
+        Sig::new(vec![callable, any, list_ty], any),
+        range_reduce,
+    );
     // `%sort-asc` is the Rust fast path for the common `(sort coll)` case
     // (ascending by `<`, no custom comparator). Avoids per-comparison Brood
     // eval overhead — the old in-Brood mergesort was ~1.5 s on 10 000 items
@@ -738,6 +778,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![int], nil_ty),
         gui_focus,
+    );
+    def(
+        heap,
+        "gui-grab-cursor",
+        Arity::exact(2),
+        Sig::new(vec![int, bool_ty], nil_ty),
+        gui_grab_cursor,
     );
     def(
         heap,
@@ -1676,6 +1723,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("cons", &["x", "xs"], "A new pair with head x and tail xs."),
     ("first", &["coll"], "The head of a list or vector, or nil if empty."),
     ("rest", &["coll"], "All but the head of a list or vector."),
+    ("range?", &["x"], "True if x is a lazy range (as produced by range). Ranges fold/reduce/sum/count without materialising; other ops treat them as the list they stand for."),
     ("vector", &["&", "items"], "A vector of the given items."),
     ("vector-ref", &["v", "i"], "The element at index i of vector v."),
     ("vector-length", &["v"], "The number of elements in vector v."),
@@ -1812,14 +1860,15 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("term-size", &[], "The terminal size as [cols rows] in character cells."),
     ("term-poll", &["ms"], "Wait up to ms milliseconds for an input event; return a key (a 1-char string for printables, or a keyword for specials: :up :down :left :right :enter :escape :backspace :tab :back-tab :delete :home :end :page-up :page-down, ctrl combos like :ctrl-c, alt combos like :alt-f), a mouse event as a vector [:mouse action button row col mods] (action: :press :release :drag :scroll-up :scroll-down — :drag is motion with a button held, reported once per cell crossed; button: :left :right :middle or nil for scroll; row/col 0-based cells; mods a vector of held modifier keywords in :ctrl :alt :shift order, [] when none — so Ctrl+wheel etc. are bindable), or nil on timeout. Always pass a finite ms."),
     ("term-draw", &["frame"], "Paint a frame — a vector of render ops: [:clear], [:text row col str], [:text row col str face], [:cursor row col]. A face is a map like {:fg :red :bold true}. The in-process frontend for the display protocol; returns nil."),
-    ("gui-open", &["title?", "width?", "height?"], "Open a new native window and return its integer id (needs the runtime built with --features gui; errors otherwise). An optional `title` string sets the OS title-bar text (default `Brood`); change it later with gui-title!. Optional `width` `height` (logical pixels, both required together) set the initial window size (default 840x560). Its key/mouse input is delivered to the CALLING process's mailbox as messages — a key as a 1-char string / keyword (`:up`, `:ctrl-c`), the mouse as `[:mouse action button row col mods]` (action `:press`/`:release`/`:drag`/`:scroll-up`/`:scroll-down` — `:drag` is motion with a button held, delivered once per cell crossed; `mods` a vector of held modifier keywords in `:ctrl :alt :shift` order, `[]` when none, so Ctrl+wheel / Ctrl+drag are bindable), a resize as `[:resize cols rows]` (the new cell grid, so the loop re-renders at the new size) — so the consumer parks in `(receive)` instead of polling (ADR-058). Clicking the window's close button delivers a dedicated `:close` message — distinct from the Escape *key* (`:escape`), so an app can quit on the X without conflating it with Escape (which an editor binds to cancel/normal-mode); `ui-run` quits on `:close` automatically. Starts the GUI thread on the first call; each call is an independent window, so several observers can run at once. Pass the id to the other gui-* primitives; pair with gui-close."),
+    ("gui-open", &["title?", "width?", "height?"], "Open a new native window and return its integer id (needs the runtime built with --features gui; errors otherwise). An optional `title` string sets the OS title-bar text (default `Brood`); change it later with gui-title!. Optional `width` `height` (logical pixels, both required together) set the initial window size (default 840x560). Its key/mouse input is delivered to the CALLING process's mailbox as messages — a key as a 1-char string / keyword (`:up`, `:ctrl-c`), the mouse as `[:mouse action button row col mods]` (action `:press`/`:release`/`:drag`/`:move`/`:scroll-up`/`:scroll-down` — `:drag` is motion with a button held and `:move` is bare motion with none (button nil), both delivered once per cell crossed (so mouse-look / hover need no click); `mods` a vector of held modifier keywords in `:ctrl :alt :shift` order, `[]` when none, so Ctrl+wheel / Ctrl+drag are bindable), a resize as `[:resize cols rows]` (the new cell grid, so the loop re-renders at the new size) — so the consumer parks in `(receive)` instead of polling (ADR-058). Clicking the window's close button delivers a dedicated `:close` message — distinct from the Escape *key* (`:escape`), so an app can quit on the X without conflating it with Escape (which an editor binds to cancel/normal-mode); `ui-run` quits on `:close` automatically. Starts the GUI thread on the first call; each call is an independent window, so several observers can run at once. Pass the id to the other gui-* primitives; pair with gui-close."),
     ("gui-close", &["id"], "Close window id (the teardown for gui-open). Idempotent; an unknown id is a no-op."),
     ("gui-title!", &["id", "text"], "Set window id's OS title-bar text to the string text at runtime (the title gui-open gave it, or the default, otherwise). Needs --features gui; a no-op if the GUI thread never started or id isn't a live window. Returns nil."),
     ("gui-icon!", &["id", "rgba", "w", "h"], "Set window id's taskbar / title-bar icon from raw RGBA pixels: rgba is a vector of w*h*4 byte ints (0-255), row-major, 4 per pixel (red, green, blue, alpha). Needs --features gui; a silent no-op if the GUI thread never started, id isn't a live window, or the data length isn't w*h*4. Where the OS shows it depends on the platform (X11/Windows use it directly; Wayland prefers a .desktop file). Returns nil."),
     ("gui-focus", &["id"], "Raise window id to the front and give it OS keyboard focus, un-minimising it first. Lets an app surface an already-open (singleton) window instead of opening a duplicate — e.g. `(observe)` focuses its existing window rather than spawning a second. Errors only if id isn't a live window. Needs --features gui. Returns nil."),
+    ("gui-grab-cursor", &["id", "on"], "Confine the pointer to window id while `on` is truthy, release it otherwise — for mouse-look that shouldn't let the cursor slip out of the window and click another app. Uses the platform's `Confined` grab (cursor stays inside but keeps moving, so an absolute position-based look maps edge-to-edge), falling back to `Locked` where that's all the platform offers. Off by default; an app opts in. Errors only if id isn't a live window. Needs --features gui. Returns nil."),
     ("gui-size", &["id"], "Window id's size as [cols rows] in character cells (tracks resize / HiDPI), same shape as term-size."),
     ("gui-held-key", &["id"], "The key window id currently sees as physically held — the same value its press delivered (a 1-char string, or a keyword like :ctrl-n / :up) — or nil when none is held. Tracked from press/release transitions in the event loop (NOT winit's ke.repeat, unreliable on Wayland), so it's the source of truth for a held key: a consumer-paced auto-repeat polls it each tick and stops the instant it no longer matches, so a missed key-up (e.g. lost on focus change) can't cause runaway repeat."),
-    ("gui-draw", &["id", "frame"], "Paint a frame (the same render-op vector term-draw takes) to window id; returns nil. Unknown ops are skipped (forward-compatible). A text op's face may carry :scale n (GUI only, integer >=1, capped at 16): the text is drawn n× larger in an n×n block of cells anchored at its row/col — the per-pane/per-buffer font knob; the terminal frontend renders scale 1. A `[:cursor-zone x y w h shape]` op marks a hover hot-zone: while the pointer is over it the window shows the resize cursor `shape` (:col-resize ↔ / :row-resize ↕), hit-tested on the GUI thread (ADR-080); it draws nothing and the terminal ignores it."),
+    ("gui-draw", &["id", "frame"], "Paint a frame (the same render-op vector term-draw takes) to window id; returns nil. Unknown ops are skipped (forward-compatible). A text op's face may carry :scale n (GUI only, integer >=1, capped at 16): the text is drawn n× larger in an n×n block of cells anchored at its row/col — the per-pane/per-buffer font knob; the terminal frontend renders scale 1. A `[:cursor-zone x y w h shape]` op marks a hover hot-zone: while the pointer is over it the window shows the resize cursor `shape` (:col-resize ↔ / :row-resize ↕), hit-tested on the GUI thread (ADR-080); it draws nothing and the terminal ignores it. A `[:vspans row0 col0 cols]` op is the column-renderer fast path (raycasters, spectrum bars): `cols` is a vector with one entry per cell-column (`col0`, `col0+1`, …), each a top-to-bottom stack of `[height colour]` segments painted from `row0` down — `colour` a face keyword (`:red`), an `[r g b]` triple (0..255), or nil (transparent). The per-cell fill happens natively here, so a wide scene costs the Brood side O(columns), not O(cells); GUI-only (the terminal ignores it)."),
     ("gui-font!", &["id?", "spec"], "Set a cell font from spec, a map {:family <keyword> :height <px>} (both keys optional): :family picks a registered font family (bundled :mono, or one added by gui-font-register), :height the cell pixel size. (gui-font! spec) sets the global default — every open window and ones opened later; (gui-font! id spec) retunes just window id, leaving the global default and other windows alone, so two windows can run different fonts. Per-section fonts within a window come from a face's :family/:scale. Needs --features gui. Returns nil."),
     ("gui-font-register", &["name", "styles"], "Register font family name (a keyword) from styles, a map of style → TTF file path {:regular \"…\" :bold \"…\" :italic \"…\" :bold-italic \"…\"}. Only :regular is required; a missing style reuses the regular file. Afterwards a face's :family <name> (or gui-font!) selects it. Needs --features gui. Returns name."),
     ("term-raw-enter", &[], "Enter raw mode only — NO alternate screen, cursor stays visible, scrollback preserved. The seam for an inline line editor (the REPL); use term-enter instead for a full-screen TUI. Pair with term-raw-leave."),
@@ -2326,6 +2375,8 @@ fn first(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match v {
         Value::Pair(p) => Ok(heap.car(p)),
         Value::Vector(id) => Ok(heap.vector(id).first().copied().unwrap_or(Value::Nil)),
+        // A range is non-empty by construction, so its head is `lo`.
+        Value::Range(id) => Ok(Value::Int(heap.range_parts(id).0)),
         Value::Nil => Ok(Value::Nil),
         _ => Err(LispError::wrong_type(heap, "first", "list or vector", v)),
     }
@@ -2339,9 +2390,84 @@ fn rest(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             let items: Vec<Value> = heap.vector(id).iter().skip(1).copied().collect();
             Ok(heap.list(items))
         }
+        // The tail of a range is another range, one step in — no materialisation
+        // (`alloc_range` returns `Nil` once it's empty).
+        Value::Range(id) => {
+            let (lo, hi, step) = heap.range_parts(id);
+            Ok(heap.alloc_range(lo + step, hi, step))
+        }
         Value::Nil => Ok(Value::Nil),
         _ => Err(LispError::wrong_type(heap, "rest", "list or vector", v)),
     }
+}
+
+/// `(%range lo hi step)` — construct a lazy integer range. Returns `Nil` for an
+/// empty range; errors on a zero step. The arg-parsing arities live in the
+/// Brood `range`, which calls this with all three resolved.
+fn range_make(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let lo = expect_int(heap, "%range", arg(args, 0))?;
+    let hi = expect_int(heap, "%range", arg(args, 1))?;
+    let step = expect_int(heap, "%range", arg(args, 2))?;
+    if step == 0 {
+        return Err(LispError::runtime("range: step must be non-zero")
+            .with_hint("use a positive or negative step, e.g. (range 0 10 2)"));
+    }
+    Ok(heap.alloc_range(lo, hi, step))
+}
+
+/// `(range? x)` — true iff `x` is a lazy range handle. (Empty ranges are `Nil`,
+/// so this is false for them — the empty case takes the ordinary list path.)
+fn range_pred(args: &[Value], _: EnvId, _heap: &mut Heap) -> LispResult {
+    Ok(Value::Bool(matches!(arg(args, 0), Value::Range(_))))
+}
+
+/// `(%range-count rng)` — the element count of a range, O(1).
+fn range_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    match arg(args, 0) {
+        Value::Range(id) => Ok(Value::Int(heap.range_len(id))),
+        Value::Nil => Ok(Value::Int(0)),
+        v => Err(LispError::wrong_type(heap, "%range-count", "range", v)),
+    }
+}
+
+/// `(%range->list rng)` — realise a range to a concrete list (the slow path
+/// behind `seq`/`reverse`/`nth` on a range).
+fn range_to_list(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    match arg(args, 0) {
+        Value::Range(id) => {
+            let items = heap.range_to_vec(id);
+            Ok(heap.list(items))
+        }
+        Value::Nil => Ok(Value::Nil),
+        v => Err(LispError::wrong_type(heap, "%range->list", "range", v)),
+    }
+}
+
+/// `(%range-reduce f acc rng)` — left-fold a range with `f` in a native counted
+/// loop, **without materialising** it: the whole point of the reducible range.
+/// `acc` and `f` are rooted across the loop because each `apply` is a safepoint
+/// that can relocate them.
+fn range_reduce(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
+    let f = arg(args, 0);
+    let init = arg(args, 1);
+    let (lo, hi, step) = match arg(args, 2) {
+        Value::Range(id) => heap.range_parts(id),
+        Value::Nil => return Ok(init), // empty range — acc unchanged
+        v => return Err(LispError::wrong_type(heap, "%range-reduce", "range", v)),
+    };
+    heap.root_scope(|heap| {
+        let f_r = heap.root(f);
+        let mut acc_r = heap.root(init);
+        let mut i = lo;
+        while if step > 0 { i < hi } else { i > hi } {
+            let f = heap.read_root(f_r);
+            let acc = heap.read_root(acc_r);
+            let next = apply(heap, f, &[acc, Value::Int(i)], env)?;
+            acc_r = heap.advance_root(acc_r, next);
+            i += step;
+        }
+        Ok(heap.read_root(acc_r))
+    })
 }
 
 /// `(%sort-asc coll)` — stable ascending sort of a numeric collection by `<`.
@@ -5087,6 +5213,15 @@ fn gui_focus(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::Nil)
 }
 
+/// `(gui-grab-cursor id on)` — confine the pointer to window `id` while `on` is
+/// truthy, release it otherwise.
+fn gui_grab_cursor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = gui_window_id(heap, "gui-grab-cursor", arg(args, 0))?;
+    let on = crate::eval::truthy(arg(args, 1));
+    crate::gui::grab(id, on).map_err(LispError::runtime)?;
+    Ok(Value::Nil)
+}
+
 /// `(gui-size id)` — window `id`'s size as `[cols rows]` (character cells), same
 /// shape as `term-size`.
 fn gui_size(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -5134,6 +5269,7 @@ fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let cursor_zone_t = value::intern("cursor-zone");
     let col_resize_t = value::intern("col-resize");
     let row_resize_t = value::intern("row-resize");
+    let vspans_t = value::intern("vspans");
     let mut ops = Vec::with_capacity(parsed.len());
     for (tag, parts) in parsed {
         if tag == clear_t {
@@ -5162,10 +5298,65 @@ fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             if let Some(shape) = shape {
                 ops.push(crate::gui::Op::CursorZone { x, y, w, h, shape });
             }
+        } else if tag == vspans_t {
+            // [:vspans row0 col0 cols] — a batch of vertical column-spans. `cols`
+            // is a vector (one per cell-column) of `[height color]` segments; the
+            // per-cell fill happens in `gui::paint`, so the Brood side builds only
+            // O(columns) data instead of an op-per-cell frame. `color` is a face
+            // colour keyword (`:red`), an `[r g b]` triple (0..255), or nil (the
+            // background shows through).
+            let row0 = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 1))?);
+            let col0 = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 2))?);
+            let col_vals: Vec<Value> = match arg(&parts, 3) {
+                Value::Vector(id) => heap.vector(id).to_vec(),
+                _ => Vec::new(),
+            };
+            let mut cols = Vec::with_capacity(col_vals.len());
+            for cv in col_vals {
+                let seg_vals: Vec<Value> = match cv {
+                    Value::Vector(id) => heap.vector(id).to_vec(),
+                    _ => Vec::new(),
+                };
+                let mut segs = Vec::with_capacity(seg_vals.len());
+                for sv in seg_vals {
+                    let s: Vec<Value> = match sv {
+                        Value::Vector(id) => heap.vector(id).to_vec(),
+                        _ => continue,
+                    };
+                    if s.len() >= 2 {
+                        let h = clamp_u16(expect_int(heap, "gui-draw", s[0])?);
+                        segs.push((h, span_color(heap, s[1])));
+                    }
+                }
+                cols.push(segs);
+            }
+            ops.push(crate::gui::Op::VSpans { row0, col0, cols });
         }
     }
     crate::gui::draw(win, ops).map_err(LispError::runtime)?;
     Ok(Value::Nil)
+}
+
+/// A `:vspans` segment colour: a face colour keyword (`:red` → the GUI palette,
+/// via `color_rgb`), an explicit `[r g b]` triple (each clamped to 0..255), or
+/// anything else (nil) for "transparent" — leave the background showing.
+fn span_color(heap: &Heap, v: Value) -> Option<[u8; 3]> {
+    match v {
+        Value::Keyword(_) => color_rgb(v),
+        Value::Vector(id) => {
+            let xs = heap.vector(id);
+            if xs.len() == 3 {
+                let chan = |k: usize| match xs[k] {
+                    Value::Int(n) => n.clamp(0, 255) as u8,
+                    _ => 0,
+                };
+                Some([chan(0), chan(1), chan(2)])
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Read a `:height` value from a font spec as a pixel size (int or float), or None.

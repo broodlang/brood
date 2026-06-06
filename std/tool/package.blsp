@@ -13,8 +13,6 @@
 ;; Manifest parsing (`project/project--parse-deps`) lives in std/project.blsp — the manifest
 ;; owner — and we reuse it both for the root manifest and for each dep's own.
 
-(require 'project)
-
 (defmodule package
   "The package manager behind `nest fetch` (ADR-037). Resolves the project's
 :dependencies into a flat, transitively-closed lock file and puts each dep's

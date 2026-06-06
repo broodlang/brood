@@ -40,8 +40,6 @@ Buffer-type binding and focus/scope wiring are layered on in later phases — th
 core knows nothing about buffers."
   (:use editor/keymap))
 
-(require 'editor/keymap)
-
 ;; ============================================================================
 ;; HOW TO USE
 ;; ============================================================================

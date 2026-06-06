@@ -23,8 +23,6 @@ position functions `(text point) -> point` — `point-forward` / `point-backward
 for binding in a keymap. `(require 'sexp)`."
   (:use editor/buffer))
 
-(require 'editor/buffer)
-
 ;; ---- node-kind predicates ---------------------------------------------------
 
 (defn container-kind? (k)

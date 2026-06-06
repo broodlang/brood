@@ -47,8 +47,6 @@ the dynamic vars `*repl-prompt*` / `*repl-cont-prompt*`; rebind them with
 `binding` to customise."
   (:use editor/lineedit))
 
-(require 'editor/lineedit)
-
 ;; ---- configuration (dynamic so a session can rebind them) -------------------
 
 (defdyn *repl-prompt* "brood> ")

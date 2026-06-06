@@ -54,18 +54,17 @@ loop over a pluggable data **source**, so the *same* loop observes the local
 runtime (`observe-attach`) or, later, a peer runtime over a node link (remote
 attach). Drive the standalone app from the shell with `nest observe`."
   (:use editor/display)
+  ;; the shared named-face / theme registry
   (:use editor/face)
+  ;; syntax colouring for the minibuffer (shared with the REPL line editor)
   (:use editor/highlight)
+  ;; the shared key→command dispatcher (also used by the REPL)
   (:use editor/keymap)
+  ;; the minibuffer reuses lineedit's pure editing core
   (:use editor/lineedit)
+  ;; the reusable app framework — frontends + the `ui-run` loop
   (:use editor/ui))
 
-(require 'editor/display)
-(require 'editor/keymap)  ; the shared key→command dispatcher (also used by the REPL)
-(require 'editor/face)  ; the shared named-face / theme registry
-(require 'editor/ui)  ; the reusable app framework — frontends + the `ui-run` loop
-(require 'editor/lineedit)  ; the minibuffer reuses lineedit's pure editing core
-(require 'editor/highlight)  ; …and its syntax colouring (shared with the REPL line editor)
 (require 'proctree)  ; the parent→child forest ordering (shared with myedit's process list)
 
 ;; ---- faces (named, via the shared `face` registry) --------------------------

@@ -81,6 +81,15 @@
     (assert= (json-encode "a\"b") "\"a\\\"b\"")
     (assert= (json-encode "a\\b") "\"a\\\\b\"")
     (assert= (json-encode "a\nb") "\"a\\nb\""))
+  (test "\\b and \\f control chars encode escaped (decode round-trip)"
+    (assert= (json-encode "a\u{8}b") "\"a\\bb\"")
+    (assert= (json-encode "a\u{c}b") "\"a\\fb\"")
+    (assert= (json-parse (json-encode "a\u{8}\u{c}b")) "a\u{8}\u{c}b"))
+  (test "other control chars (< U+0020) encode as \\u00XX"
+    (assert= (json-encode "a\u{1}b") "\"a\\u0001b\"")
+    (assert= (json-encode "\u{1f}") "\"\\u001f\"")
+    (assert= (json-encode "\u{0}") "\"\\u0000\"")
+    (assert= (json-parse (json-encode "a\u{0}\u{1b}\u{1f}b")) "a\u{0}\u{1b}\u{1f}b"))
   (test "keywords / symbols encode as their name string"
     (assert= (json-encode :foo) "\"foo\"")
     (assert= (json-encode 'bar) "\"bar\""))
