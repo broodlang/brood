@@ -1334,3 +1334,34 @@ now escapes *every* raw control char < U+0020 as `\u00XX` (strict JSON
 forbids them all), via a load-time `[raw escape]` table over the existing
 `json--cp->string`/`json--int->hex` helpers, folded in after the named
 escapes (so the introduced backslashes aren't re-escaped).
+
+## 2026-06-06 — reducible lazy range (Value::Range)
+
+Driven by the cross-language benchmark suite: `reduce` (fold over `(range 1M)`)
+was the worst result by far — 90× off Python on wall and the *only* memory
+outlier (130 MB), because `(range n)` materialised a million-cons list before
+folding. Decomposition showed ~⅔ of the time was the build, not the fold.
+
+First, a free prelude win: `range` builds ascending by **counting down** from
+the top value so it cons-es the list in order with no closing `reverse` — n
+allocations, not 2n (1.58 s → 0.94 s, 130 MB → 100 MB).
+
+Then the real fix — a **reducible lazy range**. New `Value::Range(VecId)`,
+backed by a `[lo hi step]` vector so it rides the Vector GC / region /
+forwarding machinery; `tag()` reports it as a `Pair` so `type-of` and the type
+lattice treat it exactly like the list it stands in for. `fold` / `reduce` /
+`sum` / `count` fast-path through a native counted loop (`%range-reduce`, which
+roots the accumulator *and* the fn handle across each `apply` safepoint) — zero
+allocation. Everything else realises on demand: `seq` → list, plus `first` /
+`rest` (tail is another range, no copy) / `=` (element-wise vs a list, alloc-
+free) / `hash` (byte-identical to the equivalent list) / printer / cross-process
+copy. Empty ranges are `nil`, so a `Range` always has ≥1 element. Considered and
+rejected actual lazy *sequences*: a thunk-per-element prototype was *slower* than
+materialising (closure-force + cell alloc > a cons), and improper lists only
+help iolists, not folds — reducers are the right tool here.
+
+Result: `(reduce + 0 (range 1_000_000))` 1.58 s → **0.27 s** and 130 MB →
+**20 MB** (90×→12× off Python on wall, 14×→2.2× on memory) — the suite's worst
+case and only memory outlier, gone. Output byte-identical to the old range
+across all arities; full in-language suite green on both engines, GC-safe under
+`BROOD_GC_STRESS` / `BROOD_GC_VERIFY`.
