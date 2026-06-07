@@ -211,3 +211,107 @@
   (test "an int result survives the round-trip across heaps (deep copy on send)"
     (let (me (self) w (spawn (mth-emit me 7)))
       (assert= (receive ([:r n sq cu] [n sq cu])) [7 49 343]))))
+
+;; ---- transcendental math and constants ---------------------------------------
+
+(defn trig-approx? (a b) (< (abs (- a b)) 1e-10))
+
+(describe "math constants pi and e"
+  (test "pi is the right value"
+    (is (trig-approx? pi 3.141592653589793)))
+  (test "e is the right value"
+    (is (trig-approx? e 2.718281828459045)))
+  (test "both are floats"
+    (is (float? pi))
+    (is (float? e))))
+
+(describe "sin / cos"
+  (test "sin 0 = 0"
+    (is (trig-approx? (sin 0) 0.0)))
+  (test "sin pi/2 = 1"
+    (is (trig-approx? (sin (/ pi 2)) 1.0)))
+  (test "cos 0 = 1"
+    (is (trig-approx? (cos 0) 1.0)))
+  (test "cos pi = -1"
+    (is (trig-approx? (cos pi) -1.0)))
+  (test "sin²+cos²=1"
+    (is (trig-approx? (+ (* (sin 1.2) (sin 1.2)) (* (cos 1.2) (cos 1.2))) 1.0)))
+  (test "accepts integer input, returns float"
+    (is (float? (sin 0)))
+    (is (float? (cos 1)))))
+
+(describe "tan"
+  (test "tan 0 = 0"
+    (is (trig-approx? (tan 0) 0.0)))
+  (test "tan pi/4 = 1"
+    (is (trig-approx? (tan (/ pi 4)) 1.0)))
+  (test "returns float"
+    (is (float? (tan 0)))))
+
+(describe "asin / acos / atan"
+  (test "asin(1) = pi/2"
+    (is (trig-approx? (asin 1.0) (/ pi 2))))
+  (test "asin(0) = 0"
+    (is (trig-approx? (asin 0.0) 0.0)))
+  (test "acos(1) = 0"
+    (is (trig-approx? (acos 1.0) 0.0)))
+  (test "acos(-1) = pi"
+    (is (trig-approx? (acos -1.0) pi)))
+  (test "atan(1) = pi/4"
+    (is (trig-approx? (atan 1.0) (/ pi 4))))
+  (test "atan(0) = 0"
+    (is (trig-approx? (atan 0) 0.0)))
+  (test "asin/acos round-trips"
+    (is (trig-approx? (sin (asin 0.5)) 0.5))
+    (is (trig-approx? (cos (acos 0.5)) 0.5)))
+  (test "asin out-of-domain raises"
+    (assert-error (asin 2.0))
+    (assert-error (asin -1.1)))
+  (test "acos out-of-domain raises"
+    (assert-error (acos 2.0))
+    (assert-error (acos -2.0))))
+
+(describe "atan2"
+  (test "atan2(1 1) = pi/4"
+    (is (trig-approx? (atan2 1.0 1.0) (/ pi 4))))
+  (test "atan2(1 0) = pi/2"
+    (is (trig-approx? (atan2 1.0 0.0) (/ pi 2))))
+  (test "atan2(0 -1) = pi"
+    (is (trig-approx? (atan2 0.0 -1.0) pi)))
+  (test "returns float"
+    (is (float? (atan2 1 1)))))
+
+(describe "exp and ln"
+  (test "exp(0) = 1"
+    (is (trig-approx? (exp 0) 1.0)))
+  (test "exp(1) = e"
+    (is (trig-approx? (exp 1) e)))
+  (test "ln(1) = 0"
+    (is (trig-approx? (ln 1.0) 0.0)))
+  (test "ln(e) = 1"
+    (is (trig-approx? (ln e) 1.0)))
+  (test "exp/ln round-trip"
+    (is (trig-approx? (ln (exp 5.0)) 5.0)))
+  (test "ln(0) raises"
+    (assert-error (ln 0.0)))
+  (test "ln(negative) raises"
+    (assert-error (ln -1.0)))
+  (test "both return floats"
+    (is (float? (exp 0)))
+    (is (float? (ln 1.0)))))
+
+(describe "log2 and log10"
+  (test "log2(1) = 0"
+    (is (trig-approx? (log2 1.0) 0.0)))
+  (test "log2(2) = 1"
+    (is (trig-approx? (log2 2.0) 1.0)))
+  (test "log2(8) = 3"
+    (is (trig-approx? (log2 8.0) 3.0)))
+  (test "log10(1) = 0"
+    (is (trig-approx? (log10 1.0) 0.0)))
+  (test "log10(100) = 2"
+    (is (trig-approx? (log10 100.0) 2.0)))
+  (test "log2(0) raises"
+    (assert-error (log2 0.0)))
+  (test "log10(negative) raises"
+    (assert-error (log10 -1.0))))

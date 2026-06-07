@@ -1,0 +1,103 @@
+(defmodule stats
+  (:doc "Descriptive statistics over numeric sequences.
+
+All functions accept any sequence (list or vector) of numbers.
+Empty sequences raise unless documented otherwise.
+
+  (stats/mean [1 2 3 4 5])      ;; => 3.0
+  (stats/median [3 1 2])        ;; => 2
+  (stats/stddev [2 4 4 4 5 5 7 9]) ;; => 2.0
+  (stats/percentile [1 2 3 4 5] 50) ;; => 3"))
+
+;; ---- basic moments -----------------------------------------------------------
+
+(defn mean (xs)
+  "The arithmetic mean of `xs`. Always returns a float. Raises on an empty sequence."
+  (let (n (count xs))
+    (when (= n 0) (error "stats/mean: empty sequence"))
+    (/ (* 1.0 (sum xs)) n)))
+
+(defn sum-of-squares (xs m)
+  (fold (fn (acc x) (+ acc (* (- x m) (- x m)))) 0 xs))
+
+(defn variance (xs)
+  "The population variance (divided by n) of `xs`. Raises on an empty or 1-element sequence."
+  (let (n (count xs))
+    (when (< n 1) (error "stats/variance: empty sequence"))
+    (let (m (mean xs))
+      (/ (sum-of-squares xs m) n))))
+
+(defn sample-variance (xs)
+  "The sample variance (divided by n-1, Bessel's correction) of `xs`. Raises if fewer than 2 elements."
+  (let (n (count xs))
+    (when (< n 2) (error "stats/sample-variance: need at least 2 elements"))
+    (let (m (mean xs))
+      (/ (sum-of-squares xs m) (- n 1)))))
+
+(defn stddev (xs)
+  "The population standard deviation of `xs`."
+  (sqrt (variance xs)))
+
+(defn sample-stddev (xs)
+  "The sample standard deviation of `xs` (Bessel's correction)."
+  (sqrt (sample-variance xs)))
+
+;; ---- order statistics --------------------------------------------------------
+
+(defn median (xs)
+  "The median of `xs`. Raises on an empty sequence.
+For an even-length sequence, returns the mean of the two middle values."
+  (let (n (count xs))
+    (when (= n 0) (error "stats/median: empty sequence"))
+    (let (sorted (sort xs)
+          mid    (quot n 2))
+      (if (= (rem n 2) 1)
+        (nth sorted mid)
+        (/ (+ (nth sorted (- mid 1)) (nth sorted mid)) 2)))))
+
+(defn percentile (xs p)
+  "The `p`-th percentile (0–100) of `xs` using the nearest-rank method.
+  `p` = 0 returns the minimum; `p` = 100 returns the maximum."
+  (let (n (count xs))
+    (when (= n 0) (error "stats/percentile: empty sequence"))
+    (when (or (< p 0) (> p 100))
+      (error "stats/percentile: p must be in [0, 100], got " p))
+    (let (sorted (sort xs)
+          rank   (max 1 (ceil (* (/ p 100.0) n)))
+          idx    (min (- n 1) (- rank 1)))
+      (nth sorted idx))))
+
+(defn quantile (xs q)
+  "The `q`-th quantile (0.0–1.0) of `xs` using the nearest-rank method."
+  (percentile xs (* q 100)))
+
+;; ---- range and spread --------------------------------------------------------
+
+(defn stats-min (xs)
+  "The smallest value in `xs`. Raises on an empty sequence."
+  (when (empty? xs) (error "stats/min: empty sequence"))
+  (reduce min xs))
+
+(defn stats-max (xs)
+  "The largest value in `xs`. Raises on an empty sequence."
+  (when (empty? xs) (error "stats/max: empty sequence"))
+  (reduce max xs))
+
+(defn range-of (xs)
+  "The range (max − min) of `xs`. Raises on an empty sequence."
+  (- (stats-max xs) (stats-min xs)))
+
+;; ---- frequency ---------------------------------------------------------------
+
+(defn frequencies (xs)
+  "A map from each distinct value in `xs` to its count."
+  (fold (fn (m x) (assoc m x (+ (get m x 0) 1))) {} xs))
+
+(defn mode (xs)
+  "The most frequent value in `xs` (first occurrence wins on ties). Raises on empty."
+  (when (empty? xs) (error "stats/mode: empty sequence"))
+  (let (freq (frequencies xs))
+    (fold (fn (best x)
+            (if (> (get freq x) (get freq best)) x best))
+          (first xs)
+          (rest xs))))

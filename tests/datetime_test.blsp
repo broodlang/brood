@@ -1,0 +1,254 @@
+;; Tests for std/datetime.blsp — UTC date/time utilities.
+;; Run via `nest test` or `cargo run -p cli -- --test tests/datetime_test.blsp`.
+
+(defmodule datetime-test (:use test))
+(require 'datetime)
+
+;; ---- leap-year? -------------------------------------------------------------
+
+(describe "leap-year?"
+  (test "century years"
+    (refute (datetime/leap-year? 1900))
+    (is    (datetime/leap-year? 2000))
+    (refute (datetime/leap-year? 2100)))
+  (test "ordinary years"
+    (is    (datetime/leap-year? 2024))
+    (is    (datetime/leap-year? 2020))
+    (refute (datetime/leap-year? 2023))
+    (refute (datetime/leap-year? 1970))))
+
+;; ---- days-in-month ----------------------------------------------------------
+
+(describe "days-in-month"
+  (test "31-day months"
+    (assert= 31 (datetime/days-in-month 2026 1))
+    (assert= 31 (datetime/days-in-month 2026 3))
+    (assert= 31 (datetime/days-in-month 2026 7))
+    (assert= 31 (datetime/days-in-month 2026 12)))
+  (test "30-day months"
+    (assert= 30 (datetime/days-in-month 2026 4))
+    (assert= 30 (datetime/days-in-month 2026 6))
+    (assert= 30 (datetime/days-in-month 2026 9))
+    (assert= 30 (datetime/days-in-month 2026 11)))
+  (test "February non-leap"
+    (assert= 28 (datetime/days-in-month 2023 2)))
+  (test "February leap"
+    (assert= 29 (datetime/days-in-month 2024 2))
+    (assert= 29 (datetime/days-in-month 2000 2))))
+
+;; ---- epoch-ms->dt round-trip ------------------------------------------------
+
+(describe "epoch-ms->dt"
+  (test "Unix epoch itself"
+    (let (dt (datetime/epoch-ms->dt 0))
+      (assert= 1970 (datetime/dt-year dt))
+      (assert= 1    (datetime/dt-month dt))
+      (assert= 1    (datetime/dt-day dt))
+      (assert= 0    (datetime/dt-hour dt))
+      (assert= 0    (datetime/dt-minute dt))
+      (assert= 0    (datetime/dt-second dt))
+      (assert= 0    (datetime/dt-ms dt))))
+  (test "a known date — 2013-01-23T00:00:00Z"
+    ; 15728 days * 86400 * 1000
+    (let (dt (datetime/epoch-ms->dt 1358899200000))
+      (assert= 2013 (datetime/dt-year dt))
+      (assert= 1    (datetime/dt-month dt))
+      (assert= 23   (datetime/dt-day dt))
+      (assert= 0    (datetime/dt-hour dt))))
+  (test "sub-second component"
+    (let (dt (datetime/epoch-ms->dt 1358899200750))
+      (assert= 750 (datetime/dt-ms dt))))
+  (test "one ms before epoch → 1969-12-31T23:59:59.999Z"
+    (let (dt (datetime/epoch-ms->dt -1))
+      (assert= 1969 (datetime/dt-year dt))
+      (assert= 12   (datetime/dt-month dt))
+      (assert= 31   (datetime/dt-day dt))
+      (assert= 23   (datetime/dt-hour dt))
+      (assert= 59   (datetime/dt-minute dt))
+      (assert= 59   (datetime/dt-second dt))
+      (assert= 999  (datetime/dt-ms dt))))
+  (test "one full day before epoch → 1969-12-31T00:00:00Z"
+    (let (dt (datetime/epoch-ms->dt -86400000))
+      (assert= 1969 (datetime/dt-year dt))
+      (assert= 12   (datetime/dt-month dt))
+      (assert= 31   (datetime/dt-day dt))
+      (assert= 0    (datetime/dt-hour dt))
+      (assert= 0    (datetime/dt-second dt)))))
+
+;; ---- dt->epoch-ms -----------------------------------------------------------
+
+(describe "dt->epoch-ms"
+  (test "Unix epoch"
+    (assert= 0 (datetime/dt->epoch-ms (datetime/datetime 1970 1 1 0 0 0 0))))
+  (test "known date"
+    (assert= 1358899200000
+             (datetime/dt->epoch-ms (datetime/datetime 2013 1 23 0 0 0 0))))
+  (test "round-trip through epoch-ms->dt"
+    (let (ms 1700000000123)
+      (assert= ms (datetime/dt->epoch-ms (datetime/epoch-ms->dt ms)))))
+  (test "round-trip negative epoch"
+    (let (ms -86400500)
+      (assert= ms (datetime/dt->epoch-ms (datetime/epoch-ms->dt ms))))))
+
+;; ---- ISO 8601 formatting ----------------------------------------------------
+
+(describe "date->iso8601"
+  (test "basic date"
+    (assert= "2026-06-07" (datetime/date->iso8601 (datetime/date 2026 6 7))))
+  (test "zero-pads month and day"
+    (assert= "2000-01-05" (datetime/date->iso8601 (datetime/date 2000 1 5))))
+  (test "four-digit year zero-pad"
+    (assert= "0042-03-15" (datetime/date->iso8601 (datetime/date 42 3 15)))))
+
+(describe "time->iso8601"
+  (test "midnight"
+    (assert= "00:00:00.000"
+             (datetime/time->iso8601 (datetime/time-of-day 0 0 0 0))))
+  (test "non-zero fields"
+    (assert= "10:30:05.750"
+             (datetime/time->iso8601 (datetime/time-of-day 10 30 5 750)))))
+
+(describe "dt->iso8601"
+  (test "epoch"
+    (assert= "1970-01-01T00:00:00.000Z"
+             (datetime/dt->iso8601 (datetime/epoch-ms->dt 0))))
+  (test "a real datetime"
+    (assert= "2026-06-07T15:04:30.000Z"
+             (datetime/dt->iso8601
+               (datetime/datetime 2026 6 7 15 4 30 0)))))
+
+;; ---- dt-format --------------------------------------------------------------
+
+(describe "dt-format"
+  (test "ISO 8601 manual"
+    (let (dt (datetime/datetime 2026 6 7 9 5 3 42))
+      (assert= "2026-06-07 09:05:03"
+               (datetime/dt-format dt "%Y-%m-%d %H:%M:%S"))))
+  (test "literal percent"
+    (let (dt (datetime/datetime 2026 1 1 0 0 0 0))
+      (assert= "100%" (datetime/dt-format dt "100%%"))))
+  (test "ms field"
+    (let (dt (datetime/datetime 2026 1 1 0 0 0 7))
+      (assert= "007" (datetime/dt-format dt "%f")))))
+
+;; ---- parsing ----------------------------------------------------------------
+
+(describe "parse-date"
+  (test "valid date"
+    (assert= (datetime/date 2026 6 7)
+             (datetime/parse-date "2026-06-07")))
+  (test "leading zeros"
+    (assert= (datetime/date 2000 1 5)
+             (datetime/parse-date "2000-01-05")))
+  (test "invalid returns nil"
+    (assert= nil (datetime/parse-date "not-a-date"))
+    (assert= nil (datetime/parse-date "2026-06"))))
+
+(describe "parse-time"
+  (test "no fractional seconds"
+    (assert= (datetime/time-of-day 10 30 5 0)
+             (datetime/parse-time "10:30:05")))
+  (test "with ms"
+    (assert= (datetime/time-of-day 10 30 5 750)
+             (datetime/parse-time "10:30:05.750")))
+  (test "trailing Z is ignored"
+    (assert= (datetime/time-of-day 0 0 0 0)
+             (datetime/parse-time "00:00:00Z")))
+  (test "fractional right-padding: .5 → 500ms"
+    (assert= (datetime/time-of-day 0 0 0 500)
+             (datetime/parse-time "00:00:00.5"))))
+
+(describe "parse-iso8601"
+  (test "full datetime with Z"
+    (assert= (datetime/datetime 2026 6 7 15 4 30 0)
+             (datetime/parse-iso8601 "2026-06-07T15:04:30Z")))
+  (test "with milliseconds"
+    (assert= (datetime/datetime 2026 6 7 15 4 30 750)
+             (datetime/parse-iso8601 "2026-06-07T15:04:30.750Z")))
+  (test "invalid returns nil"
+    (assert= nil (datetime/parse-iso8601 "not a date"))
+    (assert= nil (datetime/parse-iso8601 "2026-06-07"))))
+
+;; ---- arithmetic -------------------------------------------------------------
+
+(describe "duration helpers"
+  (test "seconds"  (assert= 5000    (datetime/seconds 5)))
+  (test "minutes"  (assert= 300000  (datetime/minutes 5)))
+  (test "hours"    (assert= 3600000 (datetime/hours 1)))
+  (test "days"     (assert= 86400000 (datetime/days 1))))
+
+(describe "dt-add / dt-diff"
+  (test "add one day"
+    (let (d1 (datetime/datetime 2026 6 7 0 0 0 0)
+          d2 (datetime/dt-add d1 (datetime/days 1)))
+      (assert= 2026 (datetime/dt-year d2))
+      (assert= 6    (datetime/dt-month d2))
+      (assert= 8    (datetime/dt-day d2))))
+  (test "add across month boundary"
+    (let (d1 (datetime/datetime 2026 1 31 0 0 0 0)
+          d2 (datetime/dt-add d1 (datetime/days 1)))
+      (assert= 2    (datetime/dt-month d2))
+      (assert= 1    (datetime/dt-day d2))))
+  (test "add across year boundary"
+    (let (d1 (datetime/datetime 2025 12 31 23 59 59 999)
+          d2 (datetime/dt-add d1 1))
+      (assert= 2026 (datetime/dt-year d2))
+      (assert= 1    (datetime/dt-month d2))
+      (assert= 1    (datetime/dt-day d2))
+      (assert= 0    (datetime/dt-ms d2))))
+  (test "dt-diff positive"
+    (let (d1 (datetime/datetime 2026 6 8 0 0 0 0)
+          d2 (datetime/datetime 2026 6 7 0 0 0 0))
+      (assert= (datetime/days 1) (datetime/dt-diff d1 d2))))
+  (test "dt-diff negative"
+    (let (d1 (datetime/datetime 2026 6 7 0 0 0 0)
+          d2 (datetime/datetime 2026 6 8 0 0 0 0))
+      (assert= (- (datetime/days 1)) (datetime/dt-diff d1 d2)))))
+
+;; ---- comparison -------------------------------------------------------------
+
+(describe "dt comparison"
+  (let (a (datetime/datetime 2026 6 7 0 0 0 0)
+        b (datetime/datetime 2026 6 8 0 0 0 0))
+    (test "dt<"  (is (datetime/dt< a b))  (refute (datetime/dt< b a)))
+    (test "dt>"  (is (datetime/dt> b a))  (refute (datetime/dt> a b)))
+    (test "dt="  (is (datetime/dt= a a))  (refute (datetime/dt= a b)))
+    (test "dt<=" (is (datetime/dt<= a a)) (is (datetime/dt<= a b)))
+    (test "dt>=" (is (datetime/dt>= b b)) (is (datetime/dt>= b a)))))
+
+;; ---- day-of-week ------------------------------------------------------------
+
+(describe "day-of-week"
+  (test "1970-01-01 is a Thursday"
+    (assert= :thursday (datetime/day-of-week (datetime/date 1970 1 1))))
+  (test "2013-01-23 is a Wednesday"
+    (assert= :wednesday (datetime/day-of-week (datetime/date 2013 1 23))))
+  (test "1969-12-31 is a Wednesday"
+    (assert= :wednesday (datetime/day-of-week (datetime/date 1969 12 31)))))
+
+;; ---- day-of-year ------------------------------------------------------------
+
+(describe "day-of-year"
+  (test "January 1 is day 1"
+    (assert= 1 (datetime/day-of-year (datetime/date 2026 1 1))))
+  (test "December 31 non-leap"
+    (assert= 365 (datetime/day-of-year (datetime/date 2023 12 31))))
+  (test "December 31 leap"
+    (assert= 366 (datetime/day-of-year (datetime/date 2024 12 31))))
+  (test "March 1 non-leap"
+    (assert= 60 (datetime/day-of-year (datetime/date 2023 3 1)))))
+
+;; ---- decomposition / date+time ----------------------------------------------
+
+(describe "dt->date / dt->time / date+time"
+  (test "round-trip through date+time"
+    (let (dt (datetime/datetime 2026 6 7 10 30 5 123)
+          d  (datetime/dt->date dt)
+          t  (datetime/dt->time dt))
+      (assert= dt (datetime/date+time d t))))
+  (test "dt->date strips time fields"
+    (let (d (datetime/dt->date (datetime/datetime 2026 6 7 10 30 5 123)))
+      (assert= {:year 2026 :month 6 :day 7} d)))
+  (test "dt->time strips date fields"
+    (let (t (datetime/dt->time (datetime/datetime 2026 6 7 10 30 5 123)))
+      (assert= {:hour 10 :minute 30 :second 5 :ms 123} t))))

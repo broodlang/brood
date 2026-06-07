@@ -1,0 +1,146 @@
+(defmodule encoding
+  (:doc "Hex and Base64 encoding/decoding.
+
+Hex functions treat each character as its UTF-8 bytes.
+Base64 functions encode/decode the UTF-8 byte sequence of a string.
+For pure ASCII input both representations are identical to byte-level encoding."))
+
+;; ---- hex --------------------------------------------------------------------
+
+(def encoding--hex-lower "0123456789abcdef")
+(def encoding--hex-upper "0123456789ABCDEF")
+
+(defn encoding--hex-encode-bytes (bytes alphabet acc)
+  (if (empty? bytes)
+    acc
+    (let (b (first bytes)
+          hi (quot b 16)
+          lo (rem b 16))
+      (encoding--hex-encode-bytes
+        (rest bytes)
+        alphabet
+        (str acc (char-at alphabet hi) (char-at alphabet lo))))))
+
+(defn hex-encode (s)
+  "Encode string `s` as lowercase hexadecimal (each UTF-8 byte → 2 hex chars)."
+  (encoding--hex-encode-bytes (seq (string->utf8-bytes s)) encoding--hex-lower ""))
+
+(defn hex-encode-upper (s)
+  "Encode string `s` as uppercase hexadecimal (each UTF-8 byte → 2 hex chars)."
+  (encoding--hex-encode-bytes (seq (string->utf8-bytes s)) encoding--hex-upper ""))
+
+(def encoding--hex-val
+  {"0" 0 "1" 1 "2" 2 "3" 3 "4" 4 "5" 5 "6" 6 "7" 7
+   "8" 8 "9" 9
+   "a" 10 "b" 11 "c" 12 "d" 13 "e" 14 "f" 15
+   "A" 10 "B" 11 "C" 12 "D" 13 "E" 14 "F" 15})
+
+(defn encoding--hex-decode-loop (s i n acc)
+  (if (>= i n)
+    (utf8-bytes->string (reverse acc))
+    (let (hi (get encoding--hex-val (char-at s i))
+          lo (get encoding--hex-val (char-at s (+ i 1))))
+      (if (and hi lo)
+        (encoding--hex-decode-loop s (+ i 2) n
+          (cons (+ (* hi 16) lo) acc))
+        nil))))
+
+(defn hex-decode (s)
+  "Decode a hexadecimal string → original string, or nil if the input is invalid."
+  (let (n (string-length s))
+    (if (= (rem n 2) 0)
+      (encoding--hex-decode-loop s 0 n nil)
+      nil)))
+
+;; ---- base64 -----------------------------------------------------------------
+
+(def encoding--b64-std  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+(def encoding--b64-url  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+
+;; Encode a list of byte integers to base64 using the given 64-char alphabet.
+(defn encoding--b64-encode (bytes alpha)
+  (encoding--b64-enc-loop bytes alpha ""))
+
+(defn encoding--b64-enc-loop (bytes alpha acc)
+  (if (empty? bytes)
+    acc
+    (let (b1   (first bytes)
+          rest1 (rest bytes))
+      (if (empty? rest1)
+        ;; 1-byte tail: 2 chars + "=="
+        (let (c1 (char-at alpha (quot b1 4))
+              c2 (char-at alpha (* (rem b1 4) 16)))
+          (str acc c1 c2 "=="))
+        (let (b2    (first rest1)
+              rest2  (rest rest1))
+          (if (empty? rest2)
+            ;; 2-byte tail: 3 chars + "="
+            (let (c1 (char-at alpha (quot b1 4))
+                  c2 (char-at alpha (+ (* (rem b1 4) 16) (quot b2 16)))
+                  c3 (char-at alpha (* (rem b2 16) 4)))
+              (str acc c1 c2 c3 "="))
+            ;; full 3-byte group → 4 chars
+            (let (b3 (first rest2)
+                  c1 (char-at alpha (quot b1 4))
+                  c2 (char-at alpha (+ (* (rem b1 4) 16) (quot b2 16)))
+                  c3 (char-at alpha (+ (* (rem b2 16) 4) (quot b3 64)))
+                  c4 (char-at alpha (rem b3 64)))
+              (encoding--b64-enc-loop (rest rest2) alpha
+                (str acc c1 c2 c3 c4)))))))))
+
+(defn base64-encode (s)
+  "Encode string `s` as standard Base64 (RFC 4648, `+/` alphabet, `=` padding)."
+  (encoding--b64-encode (seq (string->utf8-bytes s)) encoding--b64-std))
+
+(defn base64-url-encode (s)
+  "Encode string `s` as URL-safe Base64 (RFC 4648 §5, `-_` alphabet, `=` padding)."
+  (encoding--b64-encode (seq (string->utf8-bytes s)) encoding--b64-url))
+
+;; Reverse lookup map: base64 char → 6-bit value (shared for both alphabets
+;; because -/_ only differ from +// in the last two positions).
+(defn encoding--b64-val-map (alpha)
+  (fold (fn (m i) (assoc m (char-at alpha i) i))
+        {}
+        (range 64)))
+
+(def encoding--b64-std-vals (encoding--b64-val-map encoding--b64-std))
+(def encoding--b64-url-vals (encoding--b64-val-map encoding--b64-url))
+
+(defn encoding--b64-decode (s vals)
+  (let (s    (replace s "=" "")        ; strip padding
+        n    (string-length s)
+        tail (rem n 4))
+    (if (= tail 1)
+      nil                              ; 1 leftover char is always invalid
+      (encoding--b64-dec-loop s 0 n vals nil))))
+
+(defn encoding--b64-dec-loop (s i n vals acc)
+  (if (>= i n)
+    (utf8-bytes->string (reverse acc))
+    (let (remaining (- n i)
+          v1 (get vals (char-at s i))
+          v2 (if (>= remaining 2) (get vals (char-at s (+ i 1))) nil))
+      (if (not (and v1 v2))
+        nil
+        (let (acc (cons (+ (* v1 4) (quot v2 16)) acc))
+          (if (= remaining 2)
+            (encoding--b64-dec-loop s (+ i 4) n vals acc)
+            (let (v3 (get vals (char-at s (+ i 2))))
+              (if (not v3)
+                nil
+                (let (acc (cons (+ (* (rem v2 16) 16) (quot v3 4)) acc))
+                  (if (= remaining 3)
+                    (encoding--b64-dec-loop s (+ i 4) n vals acc)
+                    (let (v4 (get vals (char-at s (+ i 3))))
+                      (if (not v4)
+                        nil
+                        (let (acc (cons (+ (* (rem v3 4) 64) v4) acc))
+                          (encoding--b64-dec-loop s (+ i 4) n vals acc))))))))))))))
+
+(defn base64-decode (s)
+  "Decode a standard Base64 string → original string, or nil on invalid input."
+  (encoding--b64-decode s encoding--b64-std-vals))
+
+(defn base64-url-decode (s)
+  "Decode a URL-safe Base64 string → original string, or nil on invalid input."
+  (encoding--b64-decode s encoding--b64-url-vals))

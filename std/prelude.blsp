@@ -651,7 +651,7 @@ Works on maps (by key) and vectors (by integer index, which must be in range)."
 ;; Always returns a Float; a negative argument raises.
 (defn sqrt (n)
   "The square root of `n` (Newton's method; always a float). Negative `n` raises."
-  (cond (< n 0) (error "sqrt: negative argument " n) (= n 0) 0.0 else (sqrt--iter n (/ n 2.0) 100)))
+  (cond (< n 0) (error "sqrt: negative argument " n) (<= n 0) 0.0 else (sqrt--iter n (/ n 2.0) 100)))
 (defn sqrt--iter (n guess steps)
   (let (next (/ (+ guess (/ n guess)) 2.0))
     (if (or (= steps 0) (= next guess)) next (sqrt--iter n next (- steps 1)))))
@@ -663,6 +663,10 @@ Works on maps (by key) and vectors (by integer index, which must be in range)."
 (defn mod (a b)
   "Euclidean modulo: the result is always non-negative and lies in [0, |b|)."
   (let (r (rem a b)) (if (< r 0) (+ r (abs b)) r)))
+
+;; ---- math constants ---------------------------------------------------------
+(def pi 3.141592653589793)
+(def e  2.718281828459045)
 
 ;; ---- I/O --------------------------------------------------------------------
 ;; Output is redirectable. A *port* is just a 1-arg fn that consumes a ready
@@ -1810,6 +1814,24 @@ applies to each input first."
 ;; (stack-safe over long strings); `substring` is O(index), so a full scan is
 ;; O(n²) — fine for the short strings this targets (the rope/buffer engine in M2
 ;; is the home for large-text performance).
+
+;; Standard-name aliases for the Unicode case primitives.
+(def string-upcase upper)
+(def string-downcase lower)
+
+(defn string-capitalize (s)
+  "Return `s` with the first character upper-cased and the rest lower-cased."
+  (if (= (string-length s) 0)
+    s
+    (str (upper (substring s 0 1)) (lower (substring s 1)))))
+
+(defn string-codepoints (s)
+  "The Unicode codepoint values of `s` as a vector of integers."
+  (into [] (map char->int (string->list s))))
+
+(defn string-from-codepoints (cs)
+  "Build a string from a list (or vector) of Unicode codepoint integers."
+  (apply str (map int->char cs)))
 
 (defn char-at (s i)
   "The character (a 1-char string) at char index `i` of `s`."

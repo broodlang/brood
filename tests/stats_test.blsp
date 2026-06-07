@@ -1,0 +1,97 @@
+;; Tests for std/stats.blsp — descriptive statistics.
+
+(defmodule stats-test (:use test))
+(require 'stats)
+
+(defn st-approx= (a b) (< (abs (- a b)) 1e-9))
+
+(describe "mean"
+  (test "simple integers"
+    (assert= (stats/mean [1 2 3 4 5]) 3.0))
+  (test "single element"
+    (assert= (stats/mean [7]) 7.0))
+  (test "floats"
+    (is (st-approx= (stats/mean [1.5 2.5]) 2.0)))
+  (test "even-count"
+    (assert= (stats/mean [1 2 3 4]) 2.5))
+  (test "empty raises"
+    (assert-error (stats/mean [])))
+  (test "works on lists"
+    (assert= (stats/mean '(2 4 6)) 4.0)))
+
+(describe "variance and stddev"
+  (test "population stddev — classic example"
+    ;; dataset {2,4,4,4,5,5,7,9}: mean=5, variance=4, stddev=2
+    (is (st-approx= (stats/stddev [2 4 4 4 5 5 7 9]) 2.0)))
+  (test "population variance"
+    (is (st-approx= (stats/variance [2 4 4 4 5 5 7 9]) 4.0)))
+  (test "sample variance Bessel correction"
+    ;; sample variance = sum((x-mean)^2) / (n-1) = 32/7 ≈ 4.571
+    (is (st-approx= (stats/sample-variance [2 4 4 4 5 5 7 9]) (/ 32.0 7))))
+  (test "all-same values have stddev 0"
+    (is (st-approx= (stats/stddev [5 5 5 5]) 0.0)))
+  (test "empty raises"
+    (assert-error (stats/variance [])))
+  (test "sample-variance needs 2+ elements"
+    (assert-error (stats/sample-variance [1]))))
+
+(describe "median"
+  (test "odd length — middle element"
+    (assert= (stats/median [3 1 2]) 2))
+  (test "even length — mean of two middle values"
+    (assert= (stats/median [1 2 3 4]) 2.5))
+  (test "single element"
+    (assert= (stats/median [42]) 42))
+  (test "already sorted"
+    (assert= (stats/median [1 3 5 7 9]) 5))
+  (test "reverse-sorted"
+    (assert= (stats/median [9 7 5 3 1]) 5))
+  (test "empty raises"
+    (assert-error (stats/median []))))
+
+(describe "percentile"
+  (test "0th percentile is the minimum"
+    (assert= (stats/percentile [1 2 3 4 5] 0) 1))
+  (test "100th percentile is the maximum"
+    (assert= (stats/percentile [1 2 3 4 5] 100) 5))
+  (test "50th percentile of odd-length is the median"
+    (assert= (stats/percentile [1 2 3 4 5] 50) 3))
+  (test "25th percentile"
+    (assert= (stats/percentile [1 2 3 4 5 6 7 8] 25) 2))
+  (test "invalid p raises"
+    (assert-error (stats/percentile [1 2 3] -1))
+    (assert-error (stats/percentile [1 2 3] 101)))
+  (test "empty raises"
+    (assert-error (stats/percentile [] 50))))
+
+(describe "quantile"
+  (test "0.5 quantile = 50th percentile"
+    (assert= (stats/quantile [1 2 3 4 5] 0.5)
+             (stats/percentile [1 2 3 4 5] 50))))
+
+(describe "min, max, range-of"
+  (test "stats-min / stats-max"
+    (assert= (stats/stats-min [3 1 4 1 5 9]) 1)
+    (assert= (stats/stats-max [3 1 4 1 5 9]) 9))
+  (test "range-of"
+    (assert= (stats/range-of [3 1 4 1 5 9]) 8))
+  (test "empty raises"
+    (assert-error (stats/stats-min []))
+    (assert-error (stats/stats-max []))
+    (assert-error (stats/range-of []))))
+
+(describe "frequencies"
+  (test "basic count"
+    (assert= (stats/frequencies [:a :b :a :c :a :b]) {:a 3 :b 2 :c 1}))
+  (test "empty sequence"
+    (assert= (stats/frequencies []) {}))
+  (test "single element"
+    (assert= (stats/frequencies [42]) {42 1})))
+
+(describe "mode"
+  (test "clear mode"
+    (assert= (stats/mode [1 2 2 3]) 2))
+  (test "single element"
+    (assert= (stats/mode [7]) 7))
+  (test "empty raises"
+    (assert-error (stats/mode []))))
