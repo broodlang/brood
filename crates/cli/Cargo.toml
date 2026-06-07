@@ -17,6 +17,9 @@ path = "src/main.rs"
 # (ADR-038). `default-features = false` on the dep below makes this the *only*
 # switch, so `--no-default-features` here fully strips the dev surface.
 default = ["brood/dev-tools"]
+# Forward the brood lib's VM work-attribution counters (docs/benchmarking.md):
+# `cargo run -p cli --features perf-stats`. Off by default — zero cost.
+perf-stats = ["brood/perf-stats"]
 
 [dependencies]
 brood = { path = "../lisp", default-features = false }

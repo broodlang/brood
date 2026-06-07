@@ -192,8 +192,8 @@ eagerly). They are reserved names.
 | `(if test then else?)` | Evaluate `then` if `test` is truthy, else `else` (or `nil`). |
 | `(do body...)` | Evaluate forms in order; result is the last. |
 | `(def name value)` | Define/redefine `name` in the **global** environment — redefinable, the language's only mutation. |
-| `(fn (params) body...)` | A lexical closure. `lambda` is an alias. |
-| `(let (a 1 b 2) body...)` | Sequential local bindings (each sees the previous). `let*` is an alias. |
+| `(fn (params) body...)` | A lexical closure. |
+| `(let (a 1 b 2) body...)` | Sequential local bindings (each sees the previous). |
 | `(letrec (f (fn ...) g (fn ...)) body...)` | Local **mutually recursive** bindings — every name is visible in every RHS (and to itself). Plain-symbol targets only; meant for fn definitions. |
 | `` (quasiquote tmpl) `` / `` `tmpl `` | Template: literal except `~x` inserts a value and `~@xs` splices a sequence. |
 | `(defmacro name (params) body...)` | Define a macro (see below). |
@@ -824,6 +824,48 @@ handle v]` / `[:task-error handle msg]` / `[:task-timeout handle]` message to
 timeout). This `await` is a userland convenience for bounding a single
 computation — distinct from the gen_server `call` idiom above, which is the
 right tool for request/reply to a long-lived process.
+
+### The `proc/gen` server framework (gen_server in Brood)
+
+`(require 'proc/gen)` packages the request/reply idiom above into a
+gen_server-style framework — ~180 lines of Brood over `spawn`/`send`/`receive`/
+`ref`/`monitor`, no kernel surface (ADR-099). A server carries one immutable
+state value through a tail-recursive `receive` loop; `defprocess` declares how it
+handles each kind of message:
+
+```clojure
+(defprocess counter (n)
+  (init  (do (println "up") n))            ; runs once at startup; returns the initial state
+  (cast  :inc            (+ n 1))          ; fire-and-forget; body = next state
+  (call  :value          [n n])            ; synchronous; body = [reply next-state]
+  (query :double         (* n 2))          ; synchronous read-only; body = the reply, state unchanged
+  (info  [:down _ p r]   (do (log p r) n)) ; a non-envelope message (monitor/link/timer/raw send)
+  (terminate reason (println "down: " reason)))  ; runs on (stop); body for cleanup
+
+(def c (spawn-server counter 0))
+(! c :inc)                 ; cast
+(gen-call c :value)        ; => 1  (synchronous, 5 s default timeout)
+(stop c)                   ; graceful shutdown — runs terminate, then ends the loop
+```
+
+The clause kinds map onto Erlang's `handle_cast`/`handle_call`/`handle_info` plus
+two lifecycle hooks: **`cast`** (body → next state), **`call`** (body →
+`[reply next-state]`; the caller blocks for the reply), **`query`** (a read-only
+`call` — body → reply, state untouched), and **`info`** — a message that is *not*
+a cast/call envelope: a monitor `[:down …]`, a link `[:EXIT …]`, a timer tick, or
+a plain `send`. Optional **`init`** runs once at startup (the place to
+`(trap-exit true)`, `(monitor …)`, arm a timer, or transform the seed) and
+**`terminate`** runs on a clean `(stop pid)`. Envelope clauses are always matched
+before `info` clauses, and **any message matched by no clause is dropped** rather
+than left to pile up in the mailbox (OTP's default `handle_info`).
+
+Client API: `(! pid payload)` casts; `(gen-call pid payload)` calls and blocks up
+to 5 s (it `monitor`s the server, so a *dead* server raises at once instead of
+hanging); `(gen-call-timeout pid payload ms)` sets a custom deadline; `(stop pid)`
+ends the loop. Spawn with `spawn-server`, `spawn-server-link` (Erlang
+`start_link` — links the server to the caller), or `spawn-server-named` (registers
+it for `whereis`). A `defprocess` server composes directly under
+`proc/supervisor` (see [supervision.md](supervision.md)).
 
 ### Monitors
 

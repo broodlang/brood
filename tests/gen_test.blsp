@@ -84,3 +84,107 @@
       (! s [:put :a 1])
       (assert= (gen-call s :size) 1)
       (assert= (stop s) nil))))
+
+(describe "gen: info handles non-envelope messages"
+  :isolated
+  ;; `info` clauses match messages that are *not* a cast/call envelope — a raw
+  ;; send, a monitor [:down …], a link [:EXIT …]. The server records the last one.
+  (defprocess inbox
+    (last)
+    (cast [:watch pid] (do (monitor pid) last))
+    ; arm a monitor from inside the server
+    (query :last last)
+    (info [:note x] x)
+    ; a plain send
+    (info [:down _ _ r] r))
+  ; a monitor down: record its reason
+
+  (test "a raw (non-envelope) send reaches an info clause"
+    (let (s (spawn-server inbox nil))
+      (send s [:note 42])
+      ; not a cast/call — goes to `info`
+      (assert= (gen-call s :last) 42)))
+
+  (test "a message matched by no clause is dropped, not leaked"
+    (let (s (spawn-server inbox nil))
+      (send s [:junk :unhandled])
+      ; matches nothing → default catch-all drops it
+      (send s [:note 7])
+      (assert= (gen-call s :last) 7)))
+  ; server still responsive
+
+  (test "an info clause receives the [:down …] of a monitored process"
+    (let (s (spawn-server inbox nil) w (spawn-server inbox nil))
+      (! s [:watch w])
+      ; s monitors w
+      (sleep 20)
+      ; let the :watch cast arm the monitor first
+      (stop w)
+      ; w exits normally → [:down ref w :normal]
+      (sleep 30)
+      (assert= (gen-call s :last) :normal))))
+
+(describe "gen: init runs once"
+  :isolated
+  (defprocess doubler
+    (n)
+    (init (* n 2))
+    ; transform the seed, once
+    (cast :inc (+ n 1))
+    (query :value n))
+
+  (test "init transforms the seed exactly once (not per message)"
+    (let (s (spawn-server doubler 10))
+      ; init: 10*2 = 20
+      (assert= (gen-call s :value) 20)
+      (! s :inc)
+      (! s :inc)
+      (assert= (gen-call s :value) 22))))
+; 20+1+1, not re-doubled
+
+(describe "gen: terminate runs on stop"
+  :isolated
+  (defprocess closer
+    (owner)
+    (query :ping :pong)
+    (terminate reason (send owner [:closed reason])))
+
+  (test "terminate fires on (stop) with reason :normal"
+    (let (s (spawn-server closer (self)))
+      (assert= (gen-call s :ping) :pong)
+      (stop s)
+      (assert= (receive ([:closed r] r) (after 500 :no-terminate)) :normal))))
+
+(describe "gen: gen-call timeout and death"
+  :isolated
+  ;; A server with no call/query clause never replies to a call — the call
+  ;; envelope is dropped by the catch-all, so the caller must time out.
+  (defprocess silent (s) (cast :ignore s))
+
+  (test "gen-call-timeout raises when the server never replies"
+    (let (s (spawn-server silent nil))
+      (assert= (try (gen-call-timeout s :anything 30) (catch e :timed-out)) :timed-out)))
+
+  (test "gen-call raises promptly when the server is already dead"
+    (let (s (spawn-server silent nil))
+      (stop s)
+      (sleep 20)
+      ;; the monitor on a dead pid fires [:down … :noproc] at once — no 2 s wait
+      (assert= (try (gen-call-timeout s :anything 2000) (catch e :died)) :died))))
+
+(describe "gen: named and linked spawn"
+  :isolated
+  (defprocess echo2 (s) (query [:echo x] x))
+
+  (test "spawn-server-named registers the server for whereis"
+    (let (p (spawn-server-named :echo-srv echo2 nil))
+      (assert= (whereis :echo-srv) p)
+      (assert= (gen-call (whereis :echo-srv) [:echo 99]) 99)
+      (stop p)))
+
+  (test "spawn-server-link links the server but a normal stop won't take us down"
+    (let (p (spawn-server-link echo2 nil))
+      (assert= (gen-call p [:echo 5]) 5)
+      (stop p)
+      (is true))))
+; reached here ⇒ the linked normal exit didn't kill us

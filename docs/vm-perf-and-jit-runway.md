@@ -33,13 +33,21 @@
 > `MakeClosure` late-binds the closure to its own name in its captured env (the
 > tree-walker's `letrec` model), and a **self-call optimization**
 > (`Node::SelfCall` → `Step::SelfTail`, in-place frame reset) re-enters the arm
-> with no resolve/dispatch/env-re-root. Load-robust Vm/Tw result: dispatch-bound
-> local recursion **−30…−54%** vs the tree-walker; allocation-bound `defseq` at
-> parity (the per-element captured-fn call stays uncached — a frame-local IC is
-> the remaining lever, deferred since a per-site IC is unsound for a
-> per-instance captured env). Mutual recursion still defers. See the devlog
-> 2026-06-07 entry. Item 6's stretch tail (quasiquote-built bodies, unkeyable
-> LOCAL closures) remains open but is low-value.
+> with no resolve/dispatch/env-re-root. Load-robust Vm/Tw result (corrected with
+> the `perf-stats` harness — see `docs/benchmarking.md`): for **RUNTIME-region
+> closures** — the prelude `defseq` family — a real win, `(count (map inc (range
+> n)))` is **~58–60% faster** on the VM (`self_tail` fires per element; it
+> deferred *wholesale* before). **Top-level `letrec`/lambda literals defer by
+> design** (LOCAL-region `fn_rest` can't be baked into a cached `Node` tree → they
+> run on the tree-walker, parity); the self-call benefits promoted/prelude
+> closures, not top-level one-shots. (An earlier **−30…−54%** figure here was a
+> noisy read of a *top-level* `letrec` micro-bench that actually defers —
+> `perf-stats` showed `self_tail`/`vm_apply` zero there. Corrected; the harness
+> caught the bad measurement.) The remaining lever is the still-uncached
+> per-element captured-fn call in a local closure (a frame-local IC — unsound with
+> the per-site IC since a captured fn differs per instance). Mutual recursion
+> still defers. Item 6's stretch tail (quasiquote-built bodies, unkeyable LOCAL
+> closures) remains open but is low-value.
 >
 > This doc records the analysis behind the round: a set of VM-interpreter
 > optimizations chosen so that each one is *also* a step toward a future JIT
@@ -140,7 +148,7 @@ improvement (or, for a pure-prep item, no regression).
 | 3 | **Wider prim family** | `(Float,Float)` fast path in `prim_apply`; a `Prim1` node for `car`/`cdr`/`not`/`nil?`-class natives; `cons`. Every edge defers to the real native so semantics stay bit-identical. | Partly — enumerates the ops a template JIT inlines first. |
 | 4 | **GC-pure rooting skip** | A compile-time "can't allocate or call" bit per node; pure operands skip the `push_root`/`truncate_roots` dance in `Prim2`/`Call`. | Yes — this analysis is exactly "where are the safepoints", which a JIT needs spelled out. |
 | 5 | **`exec_value` / `exec_tail` split** | Value positions can never produce `Step::Tail`; a direct `-> Result<Value>` executor removes the `Step` wrap + `force` unwrap from every sub-expression. | Neutral (pure interpreter win). |
-| 6 | **Defer-set shrink** (round 2, done for `letrec`) | Direct `letrec` self-recursion now compiles (the `defseq` family + local loops): `MakeClosure` self-binds + a self-call optimization (`Node::SelfCall`/`Step::SelfTail`). −30…−54% on dispatch-bound local recursion; `defseq` at parity. Mutual recursion / quasiquote-built / unkeyable LOCAL bodies still defer (low-value tail). | Yes — smaller deopt surface; self-calls are exactly what a JIT specializes. |
+| 6 | **Defer-set shrink** (round 2, done for `letrec`) | Direct `letrec` self-recursion now compiles for RUNTIME-region closures (the prelude `defseq` family): `MakeClosure` self-binds + a self-call optimization (`Node::SelfCall`/`Step::SelfTail`). `(map inc (range n))` ~58–60% faster on the VM (deferred wholesale before). Top-level `letrec`/lambda literals defer by design (LOCAL region). Mutual recursion / quasiquote-built / unkeyable LOCAL bodies still defer (low-value tail). | Yes — smaller deopt surface; self-calls are exactly what a JIT specializes. |
 
 Then, **later and separately gated**: bytecode lowering (the doc'd §2.4
 internal change) once profiling shows node dispatch dominating — that is the

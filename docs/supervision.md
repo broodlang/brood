@@ -284,6 +284,14 @@ ceremony — and it forced the kernel to grow only **general** Erlang primitives
 (`monitor`, `exit/2`, now `link`/`trap_exit`) rather than a supervision-specific
 kernel feature (the path ADR-039 took and reverted).
 
+The supervised children are typically **`proc/gen` servers** (`defprocess`), which
+since ADR-099 are a real gen_server: `init`/`terminate` lifecycle hooks, an `info`
+clause for the monitor `[:down …]` / link `[:EXIT …]` / timer messages a supervised
+process sees (and a leak-proof default `handle_info`), and a 5 s-default bounded
+`gen-call`. So both halves of the OTP pair — supervisor *and* server — are now
+faithful Brood policy over the kernel primitives. See
+[`language.md`](language.md) §"The `proc/gen` server framework".
+
 ### Path to OTP parity (roughly by value)
 
 1. ✅ **`link` + `trap_exit`** (done 2026-05-30, ADR-067) — automatic subtree

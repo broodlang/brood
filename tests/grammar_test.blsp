@@ -35,7 +35,6 @@
           m (get (get (get g :repository) :special-form) :match))
       ;; regex metacharacters in keywords are escaped (`match*` → `match\*`)
       (is (string-contains? m "match\\*"))
-      (is (string-contains? m "let\\*"))
       ;; the word forms and the operator forms both made it in
       (is (string-contains? m "when"))
       (is (string-contains? m "->>"))

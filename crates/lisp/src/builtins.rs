@@ -973,6 +973,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     #[cfg(feature = "dev-tools")]
     {
         def(heap, "gc-stats", Arity::exact(0), Sig::nullary(map_ty), gc_stats);
+        def(heap, "vm-stats", Arity::exact(0), Sig::nullary(map_ty), vm_stats);
         def(
             heap,
             "gc-collect",
@@ -1482,6 +1483,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "%make-macro",
+        Arity::exact(1),
+        Sig::new(vec![callable], any),
+        make_macro,
+    );
+    def(
+        heap,
         "%isolate",
         Arity::exact(1),
         Sig::new(vec![callable], any),
@@ -1791,6 +1799,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("mem-limit", &[], "Hard memory ceiling in bytes (0 = unlimited); crossing it aborts the process. Set via BROOD_MEM_LIMIT."),
     ("mem-soft-limit", &[], "Soft memory ceiling in bytes (0 = unlimited); crossing it raises a catchable E0043 at the next safepoint."),
     ("gc-stats", &[], "A snapshot map of GC activity: :collections, :copied, :reclaimed (cumulative object counts), :live, :live-bytes, :threshold (next-collection trigger) for the caller's own LOCAL heap; :runtime-closures and :runtime-threshold for the *shared* RUNTIME code region (its promoted-closure count + next auto-compact trigger — same for every process); and :debug-build (true if built with debug assertions — not a perf build). The LOCAL figures are per-process; use (runtime-collect) for the RUNTIME live/reclaimable split."),
+    ("vm-stats", &[], "A snapshot map of VM work-attribution counters (the perf-stats feature). :enabled is false unless the binary was built with --features perf-stats; when true, process-global cumulative totals: :vm-apply (closure activations), :tail-call/:self-tail (trampoline iterations), :tw-defer (tree-walker fallbacks), :call-ic-hit/:call-ic-miss, :global-ic-hit/:global-ic-miss, :prim2-inline/:prim2-fallback, :prim1-inline/:prim1-fallback, :env-get/:env-hops (lookups + chain frames walked), :alloc (LOCAL allocations). Tells you whether the VM is dispatch-, env-, or alloc-bound. A counting tool, not a timing one — read times from the benches (docs/benchmarking.md)."),
     ("gc-collect", &[], "Force a collection of this process's LOCAL heap now, returning the post-collection gc-stats map. An observability/test aid, not a load-bearing trigger — automatic collection at the eval safepoint already keeps memory bounded."),
     ("runtime-collect", &[], "Compact the shared RUNTIME code region, reclaiming superseded versions of redefined globals (hot-reload churn). Returns {:before N :after M :reclaimed (N-M) :ran bool} (closure counts). Runs only when this runtime is uniquely owned (no other live process) — otherwise :ran is false and nothing changes. Usually unnecessary: the eval safepoint auto-compacts once hot-reload churn crosses a threshold (single-process); this forces it now. ADR-076 follow-up / docs/runtime-collector-exploration.md."),
     ("gc-trace", &["on?"], "Query (no arg) or set (truthy arg) per-collection GC trace logging for this process; returns the resulting state. When on, each minor/major collection prints a one-line summary to stderr. Defaulted from BROOD_GC_TRACE."),
@@ -1846,6 +1855,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("bound?", &["sym"], "Whether sym is bound in scope. Quote it: (bound? 'foo)."),
     ("dynamic?", &["x"], "Whether x is a symbol declared dynamic with defdyn. Quote it: (dynamic? '*foo*)."),
     ("throw", &["x"], "Raise x as an error - a non-local exit caught by try/catch."),
+    ("%make-macro", &["f"], "Tag fn f as a macro: the expander calls it on the unevaluated argument forms and splices its result in place. The `defmacro` macro lowers to this."),
     ("%spawn", &["thunk"], "Run thunk (a 0-arg fn) in a new green process; returns its pid. Use the `spawn` macro."),
     ("send", &["target", "msg"], "Copy msg into target's mailbox; target is a pid or {:name :node} address. Routes locally or over a node link. Returns nil."),
     ("self", &[], "This process's own pid (carries this node's identity)."),
@@ -3091,6 +3101,33 @@ fn gc_stats_map(heap: &mut Heap) -> Value {
     heap.map_from_pairs(pairs)
 }
 
+/// `(vm-stats)` — a snapshot map of the VM work-attribution counters (the
+/// `perf-stats` feature; see `docs/benchmarking.md`). `:enabled` is `false` when
+/// the binary was built without `--features perf-stats` (every other key absent —
+/// the counters compiled to nothing). With the feature on: `:enabled true` plus a
+/// key per counter (`:vm-apply`, `:tail-call`, `:self-tail`, `:tw-defer`,
+/// `:call-ic-hit`/`:call-ic-miss`, `:global-ic-hit`/`:global-ic-miss`,
+/// `:prim2-inline`/`:prim2-fallback`, `:prim1-inline`/`:prim1-fallback`,
+/// `:env-get`, `:env-hops`, `:alloc`) — process-global cumulative totals across
+/// every green process. The data behind the bytecode-lowering gate (ADR-096): is
+/// the VM dispatch-, env-, or alloc-bound? A *counting* tool, not a timing one.
+#[cfg(feature = "dev-tools")]
+fn vm_stats(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let pairs = match crate::perf::snapshot() {
+        Some(counters) => {
+            let mut v = Vec::with_capacity(counters.len() + 1);
+            v.push((value::kw("enabled"), Value::Bool(true)));
+            for (name, val) in counters {
+                // counter idents are snake_case; expose idiomatic kebab keywords.
+                v.push((value::kw(&name.replace('_', "-")), Value::Int(val as i64)));
+            }
+            v
+        }
+        None => vec![(value::kw("enabled"), Value::Bool(false))],
+    };
+    Ok(heap.map_from_pairs(pairs))
+}
+
 /// `(runtime-collect)` — compact the shared RUNTIME code region now (reclaim
 /// superseded hot-reload versions), returning `{:before :after :reclaimed :ran}`.
 /// `:ran` is false (and nothing changes) when the runtime is shared with another
@@ -3618,6 +3655,10 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // Fuzzy (subsequence) string matching + ranking: `fuzzy-match` / `fuzzy-filter`,
     // the matcher completion UIs ride on. Pure Brood, no dependencies. Opt-in.
     ("fuzzy", include_str!("../../../std/fuzzy.blsp")),
+    // Plain-text utilities (pure string->string): `fill` greedy word-wraps to a column
+    // width — the engine behind an editor's fill-paragraph / M-q, and reusable for
+    // wrapping help text or terminal output. No dependencies. Opt-in.
+    ("text", include_str!("../../../std/text.blsp")),
     ("project", include_str!("../../../std/tool/project.blsp")),
     // The package manager (ADR-037): resolves the manifest's :dependencies into a
     // lock file + load-path entries. Required lazily by `project-setup` only when a
@@ -6284,9 +6325,7 @@ pub const SPECIAL_FORMS: &[&str] = &[
     kw::DO,
     kw::DEF,
     kw::FN,
-    kw::LAMBDA,
     kw::LET,
-    kw::LET_STAR,
     kw::LETREC,
     kw::QUOTE,
     kw::QUASIQUOTE,
@@ -6362,6 +6401,20 @@ fn gensym(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 }
 
 // ---------- errors / control ----------
+
+/// `(%make-macro f)` — tag the closure `f` as a macro: the expander calls it on
+/// the *unexpanded* argument forms and splices the result in place of the call.
+/// The `defmacro` macro (std/prelude.blsp) lowers to this, so macro definition is
+/// plain Brood over a one-line primitive rather than its own core special form.
+fn make_macro(args: &[Value], _: EnvId, _heap: &mut Heap) -> LispResult {
+    match arg(args, 0) {
+        Value::Fn(id) => Ok(Value::Macro(id)),
+        other => Err(LispError::type_err(format!(
+            "%make-macro: expected a fn, got {}",
+            value::tag(other).name()
+        ))),
+    }
+}
 
 fn throw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Err(LispError::thrown(arg(args, 0), heap))

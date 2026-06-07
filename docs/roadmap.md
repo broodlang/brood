@@ -1,9 +1,10 @@
 # Roadmap
 
-The destination is a modern, Emacs-like editor written in Brood, runnable
-locally as a fast native app and remotely as a server for other editor
-instances. We get there in milestones. Each milestone is shippable and useful on
-its own.
+Brood is the **language and runtime** for a modern, Emacs-like editor — a fast
+native app locally, a server for remote instances. **The editor app itself is a
+separate project** that consumes this language and the `std/editor/*` framework;
+Brood's job is the language core, runtime, and that framework. We get there in
+milestones, each shippable and useful on its own.
 
 Legend: ✅ done · 🟡 in progress · ⬜ not started
 
@@ -620,16 +621,17 @@ the workaround available today.
     item. Each item is also paved JIT runway; actual codegen stays gated on
     bytecode lowering + a real profile.
   - ✅ **VM perf round 2 / defer-set shrink** (ADR-096 item 6, 2026-06-07) —
-    direct `letrec` self-recursion now VM-compiled (the `defseq` family —
-    `map`/`filter`/`mapcat`/`remove`/`keep` — and hand-written local loops, which
-    deferred wholesale to the tree-walker before). `MakeClosure` late-binds the
+    direct `letrec` self-recursion now VM-compiled for RUNTIME-region closures (the
+    prelude `defseq` family — `map`/`filter`/`mapcat`/`remove`/`keep`), which
+    deferred *wholesale* to the tree-walker before. `MakeClosure` late-binds the
     closure to its own name in its captured env; a **self-call optimization**
     (`Node::SelfCall` → `Step::SelfTail`, in-place frame reset) re-enters the arm
-    with no resolve/dispatch/env-re-root. **−30…−54% on dispatch-bound local
-    recursion** vs the tree-walker, `defseq` at parity, no regressions, both
-    suites + GC-stress green. Remaining stretch (low-value): mutual recursion,
-    quasiquote-built / unkeyable LOCAL bodies; and a frame-local IC for the
-    still-uncached captured-fn call in local closures.
+    with no resolve/dispatch/env-re-root. **`(map inc (range n))` ~58–60% faster**
+    on the VM than the tree-walker, no regressions, both suites + GC-stress green.
+    Top-level `letrec`/lambda literals defer by design (LOCAL-region `fn_rest`).
+    Remaining stretch (low-value): mutual recursion, quasiquote-built / unkeyable
+    LOCAL bodies; and a frame-local IC for the still-uncached captured-fn call in
+    local closures.
 
 ## M2 — Editor data model
 
@@ -758,10 +760,8 @@ The seam that makes remoteability free later (see architecture.md).
   buffers would forfeit O(1) undo/snapshot/sharing for mutable identity nobody wants.
   `tests/ui_test.blsp` (new `describe`): view-rollback, update-drop, fatal-first-render
   + `:leave`-still-runs, stderr logging.
-- ⬜ Keymaps and interactive commands defined in Brood — belong in the **editor
-  app** (a new `nest` project), not the framework.
-- ⬜ Minibuffer / status line / multiple windows — editor-app concerns, additive
-  on the same protocol.
+_(Editor-app TODOs — keymaps/commands, minibuffer, multiple windows — live in the
+separate editor project that consumes this framework, not in Brood's roadmap.)_
 
 ## M4 — Server / daemon mode
 
@@ -807,7 +807,7 @@ The seam that makes remoteability free later (see architecture.md).
   tool ([ADR-042](decisions.md), since named-spawn would not have covered the
   global-state-cell case anyway). The editor will be written against
   let-it-crash + userland supervisors instead.
-- ✅ **Userland supervisor library** (ADR-044, `std/supervisor.blsp`) — the
+- ✅ **Userland supervisor library** (ADR-044, `std/proc/supervisor.blsp`) — the
   structured form of that respawn pattern, require-able: `start-supervisor` over
   child specs (`:start` thunk + `:permanent`/`:transient`/`:temporary` restart
   type), restart-intensity limits, `which-children`. Pure Brood over
@@ -826,6 +826,28 @@ The seam that makes remoteability free later (see architecture.md).
   the supervisor never runs cleanup). General Erlang primitives
   (`link`/`unlink`/`trap-exit`/`spawn-link`), not a supervision-specific hook. See
   [`supervision.md`](supervision.md) and [`concurrency-v2.md`](concurrency-v2.md) §4.
+- ✅ **Real gen_server** (ADR-099, 2026-06-07, `std/proc/gen.blsp`) — `defprocess`
+  now closes the widest OTP gap, all in Brood: an **`info`** clause (Erlang
+  `handle_info`) handles non-envelope messages — a monitor `[:down …]`, a link
+  `[:EXIT …]`, a timer tick, a raw send — and a **default catch-all drops** any
+  otherwise-unmatched message so the mailbox can't leak; **`init`**/**`terminate`**
+  lifecycle hooks; and `gen-call` is now **bounded + monitored** (5 s default,
+  `gen-call-timeout` for a custom deadline) so a dead/wedged server raises instead
+  of hanging. `spawn-server-link`/`spawn-server-named` added. Composes under
+  `proc/supervisor`. See [`language.md`](language.md) §"The `proc/gen` server framework".
+- ⬜ **OTP-parity follow-ups (near-term).** Additive, pure Brood (or a thin dist
+  seam), gated on a concrete need: **`send-after`/`send-interval`** timers (Erlang
+  `erlang:send_after` — today only the `receive` timeout exists); a **synchronous
+  `remote-spawn` that returns the child pid** (makes cross-node supervision
+  turnkey — the one deferred dist item, see [`supervision.md`](supervision.md)
+  §Cross-node); a **`terminate`-style worker-cleanup convention** on `[:$stop]`
+  (the supervisor's last documented parity item).
+- ⬜ **OTP-parity follow-ups (deferred, ADR-011 — gated on a real consumer).**
+  **`gen_statem`**-style state machines; an Elixir-style **`Registry`**/via-tuples +
+  **process groups (`pg`)** for name→pid sets; an **`Application`** behaviour (boot/
+  stop a supervision tree as a unit); **synchronous, ordered, rollback-on-failure**
+  supervisor startup + per-child intensity counting + child
+  `type`/`significant`/`auto_shutdown` metadata.
 - ✅ **`std/task`** (myedit-driven, 2026-05-31) — run a thunk off the current
   process with an optional timeout + cancellation: `(task thunk opts)` returns a
   handle and delivers tagged `[:task-done handle v]` / `[:task-error handle msg]`
@@ -943,11 +965,6 @@ top* of connect, plus a few deliberately-deferred refinements:
   at a time — the cross-process equivalent of `port_lock` — plus generous
   readiness/failsafe timeouts (5s→20s waits, 5s→30s receive failsafes). Full
   `make test` now green under load.
-
-## M5 — Web frontend
-
-- ⬜ Implement the display protocol over WebSocket
-- ⬜ Browser renderer (DOM or canvas)
 
 ## Cross-cutting open questions (revisit, don't build yet)
 

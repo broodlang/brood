@@ -45,8 +45,8 @@ fn callback_arity(heap: &Heap, arg: Value, ctx: &Ctx) -> Option<Arity> {
     }
 }
 
-/// The arity of a **simple single-clause** lambda literal `(fn (a b) body…)` /
-/// `(lambda (a b) …)`. `None` for anything we can't read off cleanly — a
+/// The arity of a **simple single-clause** `fn` literal `(fn (a b) body…)`.
+/// `None` for anything we can't read off cleanly — a
 /// multi-arity `fn`, an `&optional`/`&`-variadic or destructuring parameter
 /// list, or a non-`fn` head — so the callback-arity check stays
 /// false-positive-free.
@@ -55,7 +55,7 @@ fn lambda_literal_arity(heap: &Heap, form: Value) -> Option<Arity> {
     let Some(Value::Sym(head)) = items.first().copied() else {
         return None;
     };
-    if !(value::symbol_is(head, kw::FN) || value::symbol_is(head, kw::LAMBDA)) {
+    if !value::symbol_is(head, kw::FN) {
         return None;
     }
     // Peel an optional leading docstring, matching the evaluator's `fn` parse.
@@ -218,10 +218,8 @@ static SPECIAL_HEAD: LazyLock<SymbolMap<SpecialHead>> = LazyLock::new(|| {
         (kw::TRY_PRIM, SkipBody),
         (kw::IF, If),
         (kw::LET, Let),
-        (kw::LET_STAR, Let),
         (kw::LETREC, Letrec),
         (kw::FN, Fn),
-        (kw::LAMBDA, Fn),
         (kw::DEF, Def),
         (kw::DEFN, Defn),
         (kw::DEFMACRO, Defn),
@@ -592,15 +590,13 @@ fn check_fn_seeded(
     }
 }
 
-/// The items of `form` when it is an `(fn …)` / `(lambda …)` form, else `None` —
+/// The items of `form` when it is an `(fn …)` form, else `None` —
 /// so `check_def` can recognise the `(def name (fn …))` shape that `defn`
 /// expands to.
 fn fn_form_items(heap: &Heap, form: Value) -> Option<Vec<Value>> {
     let items = list_items(heap, form)?;
     match items.first()? {
-        &Value::Sym(s) if value::symbol_is(s, kw::FN) || value::symbol_is(s, kw::LAMBDA) => {
-            Some(items)
-        }
+        &Value::Sym(s) if value::symbol_is(s, kw::FN) => Some(items),
         _ => None,
     }
 }
@@ -768,7 +764,7 @@ fn check_if(
     check_into(heap, else_form, &else_ctx, out);
 }
 
-/// `(let bindings body…)` / `(let* …)` / `(letrec …)` — walk the bindings,
+/// `(let bindings body…)` / `(letrec …)` — walk the bindings,
 /// then check the body in the extended ctx. `letrec` pre-binds every name to
 /// "in scope, type unknown" before walking RHSs, matching the evaluator's
 /// nil-pre-bind so a self/mutual-recursive call inside a RHS isn't flagged

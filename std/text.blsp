@@ -1,0 +1,32 @@
+;; std/text.blsp — plain-text utilities.
+;; A namespace (like `set`/`fuzzy`): its functions are `text/fill`, … — consumers
+;; `(:use text)` to refer them bare, or call them qualified. Pure Brood over the
+;; string primitives, no editor / buffer / IO dependency, so it's CORE-able and
+;; reusable anywhere (an editor's fill-paragraph, wrapping help text or REPL output).
+(defmodule text
+  "Plain-text utilities — pure `string -> string` transforms with no editor, buffer, or
+IO dependency. The first is `fill`: greedy word-wrap to a column width — the engine behind
+an editor's fill-paragraph (Emacs `M-q`), and equally useful for wrapping help text,
+comments, or terminal output to a column.")
+
+(defn fill--pack (acc word width)
+  "Greedy line-accumulator step. `acc` is `[cur done]`: the current (in-progress) line and
+the completed lines, newest first. Extend `cur` with `word` when the result still fits in
+`width` columns; otherwise flush `cur` onto `done` and start a fresh line at `word`.
+Prepending to `done` is O(1) (the caller reverses once), so a whole fill is O(words)."
+  (let ([cur done] acc)
+    (cond
+      (= cur "") [word done]
+      (<= (+ (string-length cur) 1 (string-length word)) width) [(str cur " " word) done]
+      :else [word (cons cur done)])))
+
+(defn fill (s width)
+  "Greedily wrap `s` to `width` columns: collapse every run of whitespace (newlines, tabs,
+spaces) to a single space, then re-break on word boundaries so each line is as full as it
+can be without exceeding `width`. A single word longer than `width` keeps its own
+(over-long) line rather than being split. Returns the rewrapped text, lines joined by
+`\\n`; the empty string for blank input."
+  (let (flat (replace (replace s "\n" " ") "\t" " ")
+        words (filter (fn (w) (not (= w ""))) (string-split flat " "))
+        [cur done] (fold (fn (acc w) (fill--pack acc w width)) ["" ()] words))
+    (join "\n" (reverse (if (= cur "") done (cons cur done))))))

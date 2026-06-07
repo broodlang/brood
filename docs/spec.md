@@ -161,12 +161,13 @@ never changes, and data is immutable. `let` introduces a child frame.
 Special forms are reserved symbols recognised in operator position. `body...`
 denotes zero or more forms evaluated as an implicit `do`.
 
-Only `quote`, `if`, `do`, `def`, `fn`/`lambda`, `let`/`let*`, `letrec`,
-`quasiquote`, and `defmacro` are **true core special forms** (the evaluator's
-own rules, in `eval/mod.rs`). `when`, `unless`, `cond`, `and`, and `or` are **prelude macros**
-(ADR-022) — they expand to the core forms and so can be shadowed or passed over
-like any binding; they are tabled here only so the whole surface reads in one
-place.
+Only `quote`, `if`, `do`, `def`, `fn`, `let`, `letrec`, and `quasiquote` are
+**true core special forms** (the evaluator's own rules, in `eval/mod.rs`) — eight
+in all. `defmacro`, `when`, `unless`, `cond`, `and`, and `or` are **prelude macros**
+— they expand to the core forms and so can be shadowed or passed over like any
+binding; they are tabled here only so the whole surface reads in one place.
+`defmacro` lowers to `(def name (%make-macro (fn …)))`: a macro is just a closure
+the expander calls, and `%make-macro` is the one primitive that tags it as such.
 
 | Form | Semantics |
 |---|---|
@@ -177,13 +178,13 @@ place.
 | `(cond t₁ e₁ t₂ e₂ …)` | Even number of forms. Evaluate tests left to right; the first truthy test's `eᵢ` is the result (tail position). `else` or `:else` as a test always matches. No match ⇒ `nil`. |
 | `(do body...)` | Evaluate in order; result is the last (tail position), or `nil` if empty. |
 | `(def name v?)` | Evaluate `v` (or `nil`) and bind `name` globally (redefinable — the language's only mutation). Result: `name`. |
-| `(fn [params] body...)` | A closure capturing the current environment. `lambda` is an alias. |
-| `(let [n₁ v₁ …] body...)` | Sequential bindings in a new child frame (each `vᵢ` sees the previous bindings). `let*` is an alias. |
+| `(fn [params] body...)` | A closure capturing the current environment. |
+| `(let [n₁ v₁ …] body...)` | Sequential bindings in a new child frame (each `vᵢ` sees the previous bindings). |
 | `(letrec [n₁ v₁ …] body...)` | Mutually recursive bindings in a new child frame — every `nᵢ` is visible in every `vⱼ` (and to itself). Each name is pre-bound to `nil` before any `vⱼ` evaluates, so the form is for mutually recursive **functions** (their bodies fire at call time, by which point the real value is bound). Binding targets must be plain symbols. |
 | `(and a₁ …)` | Left to right; returns the first falsy value, else the last (tail position). Empty ⇒ `true`. |
 | `(or a₁ …)` | Left to right; returns the first truthy value, else the last (tail position). Empty ⇒ `nil`. |
 | `(quasiquote tmpl)` | Build a value from a template (§7.2). Reader shorthand: `` `tmpl ``. |
-| `(defmacro name [params] body...)` | Define a macro bound to `name` globally (§7.3). |
+| `(defmacro name [params] body...)` | Define a macro bound to `name` globally (§7.3). A prelude macro over `%make-macro`, not a core special form. |
 
 ### 7.2 Quasiquote
 
@@ -244,7 +245,7 @@ optionals). A `&` rest makes a trailing surplus legal.
 ```
 
 **Status.** Implemented: `required`, `&optional` (with defaults), and `& rest` —
-all in the closure calling convention, so `fn`, `lambda`, and `defn` share them.
+all in the closure calling convention, so `fn` and `defn` share them.
 (Argument binding is core mechanism, hence the kernel rather than macro sugar.)
 
 **Deferred (designed, not in v1) — keyword arguments.** Named, order-independent

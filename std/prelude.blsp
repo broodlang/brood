@@ -32,6 +32,17 @@
   (if (append--empty? lists) nil
     (append--2 (first lists) (apply append (rest lists))))))
 
+;; `defmacro` itself — a macro, not a core special form. A macro is just a `fn`
+;; the expander calls on the *unexpanded* argument forms; `%make-macro` (the one
+;; Rust primitive this needs) tags a closure as one. Bootstrapped with raw
+;; `def`/`fn` because `defmacro` can't define itself; every later `(defmacro …)`
+;; expands through this into `(def name (%make-macro (fn …)))`.
+(def defmacro
+  (%make-macro
+    (fn (name & body)
+      "Define `name` as a macro: a `fn` run at expansion time on the unevaluated argument forms, whose returned form replaces the call."
+      `(def ~name (%make-macro (fn ~@body))))))
+
 ;; `defn` itself: forwards everything after the name to `fn`, so it inherits
 ;; both single-clause — (defn f (x) ...) => (def f (fn (x) ...)) — and the
 ;; multi-clause pattern form — (defn f ((0) 1) ((n) ...)) => (def f (fn ((0) 1) ((n) ...))).

@@ -874,18 +874,6 @@ mod tests {
     }
 
     #[test]
-    fn let_star_behaves_like_let_for_typing() {
-        // `let*` shares the sequential-binding semantics; the checker handles
-        // both via the same path. Verify it still tracks types.
-        let w = warnings("(let* (x 1) (first x))");
-        assert!(
-            w.iter().any(|s| s.contains("first") && s.contains("int")),
-            "let* must populate the ctx like let: {:?}",
-            w
-        );
-    }
-
-    #[test]
     fn guard_narrowing_lets_a_then_branch_flag_a_misuse() {
         // In the then-branch of `(if (int? x) …)`, x : int — `(first x)` flags.
         let w = warnings("(if (int? x) (first x) nil)");

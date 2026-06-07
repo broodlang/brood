@@ -5819,12 +5819,19 @@ suites + GC-stress. **Round 2 (2026-06-07): item 6 (defer-set shrink) done for
 hand-written local loops, which deferred wholesale before): `MakeClosure`
 late-binds the closure to its own name in its captured env, and a **self-call
 optimization** (`Node::SelfCall` → `Step::SelfTail`, in-place frame reset)
-re-enters the arm with no resolve/dispatch/env-re-root. Load-robust result:
-dispatch-bound local recursion −30…−54% vs the tree-walker, allocation-bound
-`defseq` at parity (the residual per-element captured-fn call stays uncached — a
-frame-local IC is the next lever, unsafe with the per-site IC). Mutual recursion
-still defers. Long-form analysis + as-built numbers in
-`docs/vm-perf-and-jit-runway.md`.
+re-enters the arm with no resolve/dispatch/env-re-root. Load-robust result
+(corrected 2026-06-07 with the `perf-stats` harness — see below): for
+**RUNTIME-region closures**, i.e. the prelude `defseq` family, a real win —
+`(count (map inc (range n)))` is **~58–60% faster** on the VM than the tree-walker
+(`self_tail` fires per element; it deferred *wholesale* before round 2).
+**Top-level `letrec`/lambda literals defer by design** — their `fn_rest` is
+LOCAL-region (can't be baked into a cached `Node` tree without a use-after-GC), so
+they run on the tree-walker (parity); the self-call benefits *promoted*/prelude
+closures, not top-level one-shots. (An earlier "−30…−54%" headline was a noisy read
+of a *top-level* `letrec` micro-bench that actually defers — `perf-stats` later
+showed `self_tail`/`vm_apply` were zero there. The harness caught my own bad
+measurement; lesson in `docs/benchmarking.md`.) Mutual recursion still defers.
+Long-form analysis in `docs/vm-perf-and-jit-runway.md`.
 
 **Context.** A JIT (emit machine code at runtime) is the natural next rung above the
 closure-compiling VM (ADR-076): both engines compile a form once, but the VM *interprets*
@@ -5916,3 +5923,96 @@ prelude freeze (devlog). Consumers updated: `std/log` (`proc/gen` + `spawn-serve
 `proc/supervisor` tests + the `webserver` example were restored to the brood repo.
 `brood-edit` drops its `:source-paths` hacks and `(:use proc/supervisor)` /
 `(:use net/*)` resolve from the binary.
+
+## ADR-098 — Shrink the core: drop the `lambda`/`let*` aliases; demote `defmacro` to a macro
+
+**Status:** accepted (2026-06-07).
+
+**Context.** A pass over the public language surface to keep the core "as small as
+possible" (the standing minimal-core principle). Two avoidable items showed up:
+(1) the evaluator carried two spellings each for two forms — `lambda` for `fn`
+and `let*` for `let` (Brood's `let` is already sequential, so `let*` was a pure
+synonym) — yet **no `.blsp` source anywhere used either alias**; (2) `defmacro`
+was a core special form, when it can be a macro over a one-line primitive — the
+same move ADR already made for `try`/`catch` over `%try`. (`letrec` was also
+reviewed and **kept**: it's irreducible — a macro can't introduce the
+mutual-visibility scope without a Y-combinator, and merging it into `let` would
+break shadow-rebinding `(let (x (+ x 1)) …)` and turn forward references into
+silent `nil`s.)
+
+**Decision.**
+1. **Remove the `lambda` and `let*` alias spellings.** `fn` and `let` are the only
+   spellings. Dropped from `SPECIAL_SPELLINGS`, `SPECIAL_FORMS`, the checker
+   (walk/hygiene/recursion/guards), `syntax/scope.rs`, the macro resolver/expander,
+   and the VM compiler; the `kw::LAMBDA`/`kw::LET_STAR` constants are deleted.
+   `(lambda …)` / `(let* …)` now read as ordinary unbound symbols.
+2. **`defmacro` is a prelude macro, not a special form.** A new kernel primitive
+   `(%make-macro f)` tags a closure `f` as a macro (`Value::Fn` → `Value::Macro`);
+   `defmacro` bootstraps in `std/prelude.blsp` with raw `def`/`fn` as
+   `` (def name (%make-macro (fn …))) `` and every later `(defmacro …)` expands
+   through it. The hot-reload "macro redefined" diagnostic moved from the old
+   special-form arm into `def` (fires when an existing `Macro` global is rebound to
+   a `Macro`); `name_value` now names `Macro` closures too, so macros keep their
+   name.
+
+**Consequences.** The evaluator core drops from 9 spellings to **8 true special
+forms** (`quote if do def fn let letrec quasiquote`). `defmacro`'s *surface syntax*
+is unchanged, so all tooling that pattern-matches `(defmacro …)` source (the
+checker, `scope.rs`, the formatter, doc/forward-ref pre-scan) is untouched; it
+stays in `SPECIAL_FORMS` for highlighting. The macroexpander already expands the
+head before its structural dispatch (`macros.rs`), and the loader is form-by-form,
+so the bootstrap is order-safe. One stale grammar-test assertion (which used
+`let*` to demonstrate regex-escaping — `match*` still covers it) was removed. Full
+suite green on both engines.
+
+## ADR-099 — `proc/gen` is a real gen_server: `info`/`init`/`terminate` + a call timeout
+
+**Status:** accepted (2026-06-07).
+
+**Context.** The process *substrate* is already Erlang-family and the userland
+**supervisor** (`std/proc/supervisor.blsp`) is ~95% of OTP, but the gen_server
+layer (`std/proc/gen.blsp`) lagged. `defprocess` handled only its own
+`[:$cast]`/`[:$call]`/`[:$stop]` envelopes, which left three gaps versus OTP:
+(1) **no `handle_info`** — a server could not react to a monitor `[:down …]`, a
+link `[:EXIT …]`, a timer tick, or any raw `send`, and because Brood uses
+Erlang-style selective receive, those unmatched messages **accumulated in the
+mailbox forever** (a slow leak, and the server was blind to the deaths it
+monitored); (2) **no `init`/`terminate`** lifecycle hooks; (3) the client
+`gen-call` **blocked forever** on a dead or wedged server, where OTP defaults to a
+5 s timeout and monitors the callee.
+
+**Decision.** Close all three in **pure Brood** — no kernel/Rust surface (ADR-006).
+
+1. **`defprocess` gains `info`, `init`, `terminate` clauses.** `info` matches a
+   non-envelope message (body → next state, like `cast`); `init` runs once at
+   startup (body sees the state param, returns the initial state — the place to
+   `trap-exit`/`monitor`/arm a timer/transform the seed); `terminate` runs on a
+   clean `(stop)` (body for cleanup, `reason` bound). The macro now expands to a
+   `letrec` loop fn called once after `init`, so `init` runs once rather than per
+   message. Envelope clauses (`cast`/`call`/`query`) are always ordered **before**
+   `info` clauses regardless of declaration order (so a broad `info` pattern can't
+   swallow a `[:$call …]`), and a trailing **default catch-all drops** any
+   otherwise-unmatched message and keeps state — the mailbox can no longer leak
+   (OTP's default `handle_info`).
+2. **`gen-call` is bounded and monitored.** `(gen-call pid payload)` now delegates
+   to `(gen-call-timeout pid payload 5000)` (OTP's 5 s default); both `monitor` the
+   server, so a dead server raises `gen-call: server … died: …` at once and a
+   crossed deadline raises `gen-call: timed out …` (each catchable via `try`). The
+   monitor is always dropped — and a late `[:down]` flushed — before returning.
+3. **`spawn-server-link` / `spawn-server-named`** added (Erlang `start_link` and a
+   registered name) alongside the existing `spawn-server`. Kept to three helpers
+   rather than a link×name matrix (ADR-011); link+name is one line at the call site.
+
+**Consequences.** A `defprocess` server now composes correctly under monitors and
+`proc/supervisor`, never leaks unmatched messages, and `gen-call` fails fast
+instead of deadlocking — the widest remaining OTP gap, closed entirely in
+`std/proc/gen.blsp`. The single-state-param model is unchanged (multi-field state
+via a map/tuple). Existing `defprocess` servers are source-compatible (the new
+clauses and the catch-all are additive). Tests in `tests/gen_test.blsp` cover the
+`info` path, the no-leak drop, `init`-once, `terminate`-on-stop, call timeout and
+dead-server fast-fail, and named/linked spawn; full Brood suite (1416 tests)
+green. The near-term follow-ups (`send-after`/`send-interval` timers, a
+pid-returning synchronous `remote-spawn`, a `terminate`-style worker-cleanup
+convention) and the larger deferred items (`gen_statem`, an Elixir-style
+`Registry`/`pg`, an `Application` behaviour, rollback-on-failure supervisor
+startup) are tracked in [roadmap.md](roadmap.md).

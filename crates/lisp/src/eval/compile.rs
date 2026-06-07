@@ -339,7 +339,7 @@ pub enum Node {
         binds: Box<[(usize, Node)]>,
         body: Box<Node>,
     },
-    /// `(fn …)`/`(lambda …)` evaluated *inside* a compiled body (Stage 2c). Builds
+    /// `(fn …)` evaluated *inside* a compiled body (Stage 2c). Builds
     /// a closure value that closes over a **flat snapshot** of the enclosing lexical
     /// environment: a fresh env frame (parent = the process global) is filled from
     /// `captures` — each `(name, src)` evaluates `src` in the current frame and
@@ -801,19 +801,19 @@ fn compile_captures(scope: &Scope) -> Option<(Vec<(Symbol, Node)>, Option<Symbol
     Some((caps, self_name))
 }
 
-/// Is `form` *directly* a `(fn …)`/`(lambda …)` combination? Used by `letrec` to
+/// Is `form` *directly* a `(fn …)` combination? Used by `letrec` to
 /// gate the direct self-recursion path (only a fn-valued binder can be its own
 /// recursive callee).
 fn is_fn_form(heap: &Heap, form: Value) -> bool {
     if let Value::Pair(p) = form {
         if let Value::Sym(h) = heap.pair(p).0 {
-            return value::symbol_is(h, kw::FN) || value::symbol_is(h, kw::LAMBDA);
+            return value::symbol_is(h, kw::FN);
         }
     }
     false
 }
 
-/// Compile a `(fn …)`/`(lambda …)` evaluated inside a compiled body to a
+/// Compile a `(fn …)` evaluated inside a compiled body to a
 /// [`Node::MakeClosure`] (Stage 2c), or `None` (defer) if it can't be VM-built. The
 /// closure's *body* is not compiled here — it's compiled lazily by [`compiled_for`]
 /// when the closure is first called, keyed by its RUNTIME body handle.
@@ -944,22 +944,22 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                     }
                     return Some(const_node(heap, items[1]));
                 }
-                // `let`/`let*` are sequential; `letrec` pre-allocates all slots.
-                if value::symbol_is(h, kw::LET) || value::symbol_is(h, kw::LET_STAR) {
+                // `let` is sequential; `letrec` pre-allocates all slots.
+                if value::symbol_is(h, kw::LET) {
                     return compile_let(heap, &items, scope, tail, false);
                 }
                 if value::symbol_is(h, kw::LETREC) {
                     return compile_let(heap, &items, scope, tail, true);
                 }
-                // `(fn …)`/`(lambda …)` inside a compiled body (Stage 2c): build a
-                // closure capturing a flat snapshot of the enclosing lexicals.
-                if value::symbol_is(h, kw::FN) || value::symbol_is(h, kw::LAMBDA) {
+                // `(fn …)` inside a compiled body (Stage 2c): build a closure
+                // capturing a flat snapshot of the enclosing lexicals.
+                if value::symbol_is(h, kw::FN) {
                     return compile_make_closure(heap, form, scope);
                 }
-                // Any *other* special form (`def`/`quasiquote`/`defmacro`/`binding`)
-                // is outside the VM's vocabulary — defer the whole closure to the
-                // tree-walker. (`if`/`do`/`let`/`letrec`/`fn`/`quote` are handled
-                // above; `and`/`or`/`match`/`match*` aren't special forms — they're
+                // Any *other* special form (`def`/`quasiquote`/`binding`) is outside
+                // the VM's vocabulary — defer the whole closure to the tree-walker.
+                // (`if`/`do`/`let`/`letrec`/`fn`/`quote` are handled above;
+                // `defmacro`/`and`/`or`/`match`/`match*` aren't special forms — they're
                 // macros, already expanded to these core forms by the compile pass.)
                 if crate::eval::is_special_form(h) {
                     return None;
@@ -1557,8 +1557,10 @@ fn exec_value(
             if heap.is_global(env) {
                 let epoch = heap.global_epoch();
                 if let Some(v) = heap.vm_global_ic_probe(*site, *sym, epoch) {
+                    crate::perf_bump!(global_ic_hit);
                     return Ok(v);
                 }
+                crate::perf_bump!(global_ic_miss);
                 return match heap.env_get(env, *sym) {
                     Some(v) => {
                         // Never cache a dynamic symbol — `binding` rebinds it
@@ -1714,12 +1716,22 @@ fn exec_value(
             };
             if inlinable {
                 match (op, sa) {
-                    (PrimOp1::First, Value::Pair(p)) => return Ok(heap.pair(p).0),
-                    (PrimOp1::Rest, Value::Pair(p)) => return Ok(heap.pair(p).1),
-                    (PrimOp1::First | PrimOp1::Rest, Value::Nil) => return Ok(Value::Nil),
+                    (PrimOp1::First, Value::Pair(p)) => {
+                        crate::perf_bump!(prim1_inline);
+                        return Ok(heap.pair(p).0);
+                    }
+                    (PrimOp1::Rest, Value::Pair(p)) => {
+                        crate::perf_bump!(prim1_inline);
+                        return Ok(heap.pair(p).1);
+                    }
+                    (PrimOp1::First | PrimOp1::Rest, Value::Nil) => {
+                        crate::perf_bump!(prim1_inline);
+                        return Ok(Value::Nil);
+                    }
                     _ => {} // vectors/ranges/type errors → the native owns them
                 }
             }
+            crate::perf_bump!(prim1_fallback);
             // Fallback: a general call on the surface operator (rooted across
             // the dispatch, which can collect).
             let save = heap.roots_len();
@@ -1789,6 +1801,7 @@ fn exec_value(
             if inlinable {
                 match prim_apply(*op, x, y) {
                     Ok(Some(v)) => {
+                        crate::perf_bump!(prim2_inline);
                         heap.truncate_roots(save);
                         return Ok(v);
                     }
@@ -1796,6 +1809,7 @@ fn exec_value(
                     // (which allocates) — inline it here, off the numeric ops'
                     // hot path. It accepts any operands: never defers on shape.
                     Ok(None) if *op == PrimOp::Cons => {
+                        crate::perf_bump!(prim2_inline);
                         let v = heap.alloc_pair(x, y);
                         heap.truncate_roots(save);
                         return Ok(v);
@@ -1807,6 +1821,7 @@ fn exec_value(
                     }
                 }
             }
+            crate::perf_bump!(prim2_fallback);
             // Fallback: call the surface operator on the source-order operands,
             // exactly as the generic call path would — covers a redefined
             // operator and every non-inline operand shape, with identical
@@ -1875,10 +1890,12 @@ fn exec_call(
                     if let Some((v, payload)) =
                         heap.vm_call_ic_probe(site, *sym, argc, probe_epoch)
                     {
+                        crate::perf_bump!(call_ic_hit);
                         cv = v;
                         fast = payload;
                         break 'resolve;
                     }
+                    crate::perf_bump!(call_ic_miss);
                     // Miss: resolve (exactly what `exec_value` on the callee
                     // would do), then install. A *dynamic* symbol is never
                     // cached — a `binding` re-binds it without bumping the
@@ -2047,6 +2064,9 @@ fn dispatch(
             }
             return Ok(Step::Done(vm_apply(heap, arm, &cur_argv, callee_env)?));
         }
+        // A closure with no VM-eligible arm for this argc — a true defer to the
+        // tree-walker (a native callee below is the normal path, not a defer).
+        crate::perf_bump!(tw_defer);
     }
     Ok(Step::Done(crate::eval::apply(heap, cur_callee, &cur_argv, genv)?))
 }
@@ -2109,6 +2129,7 @@ fn push_frame(
 /// a GC safepoint, the soft-memory backstop, reduction-counted preemption, the eval
 /// deadline, and the non-tail-recursion stack guard.
 fn vm_apply(heap: &mut Heap, compiled0: Arc<CompiledArm>, args: &[Value], genv0: EnvId) -> LispResult {
+    crate::perf_bump!(vm_apply);
     // Register this frame's compiled arm as LIVE for the duration of the call, so a
     // RUNTIME compaction (at a nested `eval_at` safepoint — e.g. a builtin like `load`
     // that churns the code region) rewrites the movable handles its node tree embeds.
@@ -2191,6 +2212,7 @@ fn vm_apply_inner(
                 return Ok(v);
             }
             Ok(Step::Tail { compiled: c2, args: a2, genv: g2 }) => {
+                crate::perf_bump!(tail_call);
                 // Switch to the tail callee's env FIRST (`g2` is still valid — no
                 // collection since `dispatch` read it off the callee closure), and
                 // root it before rebuilding the frame, so a real `&optional` default
@@ -2218,6 +2240,7 @@ fn vm_apply_inner(
                 compiled = c2;
             }
             Ok(Step::SelfTail { args: a2 }) => {
+                crate::perf_bump!(self_tail);
                 // Self-tail-call: the SAME arm in the SAME env. Skip the env re-root,
                 // the live-arm re-register, the `Arc` clone, and the frame
                 // teardown/rebuild that `Step::Tail` pays — just reset this frame in

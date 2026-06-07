@@ -35,6 +35,15 @@ gui = ["dep:winit", "dep:softbuffer", "dep:cosmic-text", "clipboard"]
 # stack. `arboard` keeps a process-lifetime handle so an X11/Wayland paste survives
 # while the editor runs (the selection owner must stay alive to serve paste requests).
 clipboard = ["dep:arboard"]
+# VM work-attribution counters (src/perf.rs): allocations, call/IC hit-miss,
+# prim inline-vs-fallback, self-tail-calls, env-get chain hops, tree-walker
+# defers. Off by default — every counter compiles to nothing, so a normal/release
+# build and the timing benches carry ZERO cost. Build with `--features perf-stats`
+# to profile where the VM actually spends work (the bytecode-lowering gate: is it
+# dispatch-, env-, or alloc-bound?), then read `(vm-stats)` / `BROOD_PERF_STATS=1`.
+# This is a *counting* tool, not a timing one — the increments perturb timing, so
+# read counts here and times from the (counter-free) benches. See docs/benchmarking.md.
+perf-stats = []
 
 [dependencies]
 # Lock-free, append-only vector for the shared RUNTIME code region: stable

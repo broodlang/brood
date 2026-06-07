@@ -58,9 +58,9 @@ const CORPUS: &[&str] = &[
     "(and (< 1 2) (= 2 2) 7)",
     "(or false nil 5)",
     "(if (< 3 2) :a :b)",
-    // let / let* / letrec / cond / when
+    // let (sequential) / letrec / cond / when
     "(let (a 1 b 2) (+ a b))",
-    "(let* (a 1 b (+ a 10)) (* a b))",
+    "(let (a 1 b (+ a 10)) (* a b))",
     "(letrec (ev? (fn (n) (if (= n 0) true (od? (- n 1)))) od? (fn (n) (if (= n 0) false (ev? (- n 1))))) (ev? 10))",
     "(cond false :a (= 1 1) :b else :c)",
     "(when (< 1 2) (+ 1 1) (* 3 3))",

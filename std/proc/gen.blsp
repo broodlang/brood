@@ -4,7 +4,9 @@
 ;; Design notes (the *why*; the *what* is in the docstrings below):
 ;;  - Messages ride internal envelopes — [:$cast …] / [:$call from ref …] — so the
 ;;    receive loop can tell a cast from a call, and match a call to its reply by a
-;;    fresh (ref) (the request/reply idiom in docs/language.md).
+;;    fresh (ref) (the request/reply idiom in docs/language.md). A message that is
+;;    *not* one of those envelopes (a monitor `[:down …]`, a link `[:EXIT …]`, a
+;;    timer tick, a plain send) is an `info` message — Erlang's handle_info.
 ;;  - This lives in a require-able module rather than the baked prelude on purpose:
 ;;    `defprocess` expands to receive/match, and that expansion strands lambdas
 ;;    during the prelude freeze (see docs/devlog.md). Loaded after freeze, it's fine.
@@ -12,25 +14,36 @@
 (defmodule proc/gen
   "A gen_server-style process framework written in Brood, on the kernel's
 spawn / send / receive / ref / monitor (ADR-006). A server process carries one
-immutable state value through its receive loop and handles three kinds of
+immutable state value through its receive loop and handles four kinds of
 message: a CAST (fire-and-forget; the clause body is the next state), a CALL
 (synchronous; the clause body is [reply next-state] and the caller blocks for
-the reply), and a QUERY (synchronous read-only; the body is just the reply,
-state unchanged — the common 'just read a field' case without the [x s]
-boilerplate). State is immutable, so a clause returns the state to carry
-forward; to leave it unchanged in a `call`, return the state parameter. Every
-server process also accepts an implicit `(stop pid)` message that ends the
-receive loop cleanly — no need to declare a clause for it.
+the reply), a QUERY (synchronous read-only; the body is just the reply, state
+unchanged — the common 'just read a field' case without the [x s] boilerplate),
+and INFO (a message that is *not* a cast/call — a monitor [:down …], a link
+[:EXIT …], a timer tick, a raw send; the body is the next state, like a cast).
+State is immutable, so a clause returns the state to carry forward; to leave it
+unchanged in a `call`, return the state parameter.
+
+Two optional lifecycle clauses run outside the message loop:
+INIT runs once at startup (the body sees the state parameter and returns the
+initial state — the place to `(trap-exit true)`, `(monitor …)`, or arm a timer),
+and TERMINATE runs on a clean `(stop pid)` (the body, with `reason` bound, is for
+cleanup; its value is ignored). Every server also accepts an implicit
+`(stop pid)` that ends the loop, and any message matched by no clause is dropped
+(it does not pile up in the mailbox).
 
     (defprocess counter (n)
-      (cast  :inc      (+ n 1))           ; new state
-      (cast  :ping     (do (println \"pong\") n))   ; no change: return n
-      (call  :value    [n n])             ; reply n, state unchanged
-      (query :double   (* n 2)))          ; reply n*2; state untouched
+      (init  (do (println \"up\") n))      ; setup; returns initial state
+      (cast  :inc      (+ n 1))            ; new state
+      (cast  :ping     (do (println \"pong\") n))  ; no change: return n
+      (call  :value    [n n])              ; reply n, state unchanged
+      (query :double   (* n 2))            ; reply n*2; state untouched
+      (info  [:down _ pid r] (do (log-death pid r) n))  ; handle a monitor down
+      (terminate reason (println \"down: \" reason)))    ; cleanup on (stop)
 
     (def c (spawn-server counter 0))
     (! c :inc)                            ; cast
-    (gen-call c :value)                   ; => 1  (synchronous)
+    (gen-call c :value)                   ; => 1  (synchronous, 5 s timeout)
     (gen-call c :double)                  ; => 2
     (stop c)                              ; graceful shutdown")
 
@@ -41,19 +54,53 @@ receive loop cleanly — no need to declare a clause for it.
   (send pid [:$cast payload]))
 
 (defn gen-call (pid payload)
-  "Send `payload` as a synchronous call and block until the reply arrives. Other
-messages stay queued — the reply is matched by a fresh (ref)."
-  (let (r (ref)) (send pid [:$call (self) r payload]) (receive ([:reply ~r v] v))))
+  "Send `payload` as a synchronous call and block up to 5 s for the reply (OTP's
+default `gen_server:call` timeout). Monitors the server, so a *dead* server
+raises at once rather than hanging; a timeout raises too. Use `gen-call-timeout`
+for a custom deadline. Other messages stay queued — the reply is matched by a
+fresh (ref)."
+  (gen-call-timeout pid payload 5000))
+
+(defn gen-call-timeout (pid payload ms)
+  "Like `gen-call`, but wait at most `ms` milliseconds. Monitors the server for
+the duration: a reply returns its value, the server dying raises
+`gen-call: server … died: …`, and crossing the deadline raises
+`gen-call: timed out …`. Both errors are catchable with `try`. The monitor is
+always dropped (and a late `[:down]` flushed) before returning."
+  (let (r (ref) m (monitor pid))
+    (send pid [:$call (self) r payload])
+    (receive
+      ([:reply ~r v]
+        (demonitor m)
+        (receive ([:down ~m _ _] :ok) (after 0 :ok))  ; flush a late down, don't leak it
+        v)
+      ([:down ~m _ reason]
+        (error "gen-call: server " (pr-str pid) " died: " (pr-str reason)))
+      (after ms
+        (demonitor m)
+        (error "gen-call: timed out after " ms " ms")))))
 
 (defn stop (pid)
-  "Tell a server process to exit its receive loop cleanly. Returns nil
-immediately — there is no acknowledgement (the process is gone by the time the
-caller could check). Safe to send to a pid that has already exited."
+  "Tell a server process to exit its receive loop cleanly (running its
+`terminate` clause first, if it has one). Returns nil immediately — there is no
+acknowledgement (the process is gone by the time the caller could check). Safe to
+send to a pid that has already exited."
   (send pid [:$stop]))
 
 (defn spawn-server (f state)
   "Spawn a `defprocess` server `f` with its initial `state`; return its pid."
   (spawn (f state)))
+
+(defn spawn-server-link (f state)
+  "Like `spawn-server`, but `spawn-link` the server to the caller so a crash
+propagates either way (Erlang `start_link`). Returns the pid."
+  (spawn-link (f state)))
+
+(defn spawn-server-named (name f state)
+  "Spawn a server and `register` it under `name` (a keyword), returning its pid.
+Address it later via `(whereis name)` or by sending to `{:name name}`. (Combine
+with linking by registering the result of `spawn-server-link` yourself.)"
+  (let (pid (spawn-server f state)) (register name pid) pid))
 
 ;; (`sleep` lives in the prelude — it used to be redefined here with the
 ;; unforgeable-`(ref)` trick because the prelude's version was buggy, but that fix
@@ -61,46 +108,77 @@ caller could check). Safe to send to a pid that has already exited."
 
 ;; ---- defprocess -------------------------------------------------------------
 
-(defn gen--clause (c name from rf res state-sym)
-  "Compile one defprocess clause `c` into a receive clause. `name` is the server
-fn (so a clause tail-recurses with the next state); `from`/`rf`/`res` are the
+(defn gen--clause (c loop from rf res state-sym)
+  "Compile one defprocess message clause `c` into a receive clause. `loop` is the
+loop fn (so a clause tail-recurses with the next state); `from`/`rf`/`res` are the
 gensyms a `call`/`query` clause uses for the sender pid, reply ref, and the
 [reply state] tuple; `state-sym` is the closed-over state parameter (so `query`
-can tail-recurse with it unchanged)."
+and `info` can tail-recurse with it unchanged)."
   (let (kind (first c) pat (second c) body (rest (rest c)))
     (cond
-      (= kind 'cast) `([:$cast ~pat] (~name (do ~@body)))
+      (= kind 'cast) `([:$cast ~pat] (~loop (do ~@body)))
       ; body => next state
       (= kind 'call) `([:$call ~from ~rf ~pat] (let (~res (do ~@body))
                                                  (send ~from [:reply ~rf (nth ~res 0)])
-                                                 (~name (nth ~res 1))))
+                                                 (~loop (nth ~res 1))))
       ; query — like call but the body is just the reply; state is untouched.
       ; Removes the [x s] boilerplate from the common "read a field" case.
       (= kind 'query) `([:$call ~from ~rf ~pat] (send ~from [:reply ~rf (do ~@body)])
-                         (~name ~state-sym))
-      else (error "defprocess: each clause must start with `cast`, `call`, or `query`, got "
+                         (~loop ~state-sym))
+      ; info — a raw message (no envelope): a monitor [:down …], a link [:EXIT …],
+      ; a timer tick, a plain send. Body => next state, like a cast.
+      (= kind 'info) `(~pat (~loop (do ~@body)))
+      else (error "defprocess: a message clause must start with `cast`, `call`, `query`, or `info`, got "
              (pr-str kind)))))
 
 (defmacro defprocess (name params & clauses)
   "Define a server `name` over a single `params` state, as a tail-recursive
-receive loop. Each clause is `(cast PATTERN body…)` — body is the next state —
-or `(call PATTERN body…)` — body is `[reply next-state]` — or
-`(query PATTERN body…)` — body is just the reply, state unchanged. An optional
-leading string is the server's docstring. A `[:$stop]` envelope is always
-matched and ends the loop (so `(stop pid)` is automatic — no clause needed)."
+receive loop. Message clauses are `(cast PATTERN body…)` — body is the next
+state — `(call PATTERN body…)` — body is `[reply next-state]` — `(query PATTERN
+body…)` — body is just the reply, state unchanged — or `(info PATTERN body…)` —
+matches a message that is no cast/call (a `[:down …]`, `[:EXIT …]`, timer tick,
+or plain send), body is the next state. Two optional lifecycle clauses may appear
+in any position: `(init body…)` runs once at startup (sees the state param,
+returns the initial state) and `(terminate reason body…)` runs on `(stop)`. An
+optional leading string is the server's docstring. `(stop pid)` always ends the
+loop, and a message matched by no clause is dropped (so the mailbox can't leak)."
   ;; Peel an optional leading docstring so it stays the generated defn's docstring
   ;; rather than being parsed as a clause.
-  ;;
-  ;; The implicit `[:$stop]` clause appears *last* so any user-declared pattern
-  ;; involving `:$stop` (rare, but possible) wins by being earlier — receive is
-  ;; first-match-wins. The clause body is just `nil`, dropping out of the loop.
   (let (doc (if (string? (first clauses)) (first clauses) nil)
         clauses (if doc (rest clauses) clauses)
         state-sym (first params)
+        ;; Lifecycle clauses are pulled out; the rest are message clauses.
+        init-clause (first (filter (fn (c) (= (first c) 'init)) clauses))
+        term-clause (first (filter (fn (c) (= (first c) 'terminate)) clauses))
+        msg-clauses (filter (fn (c) (not (member? (first c) (list 'init 'terminate)))) clauses)
+        ;; Envelope clauses (cast/call/query) are matched BEFORE info clauses,
+        ;; regardless of declaration order, so a broad `info` pattern can never
+        ;; swallow a `[:$call …]` / `[:$cast …]` envelope (receive is first-match).
+        env-clauses (filter (fn (c) (member? (first c) (list 'cast 'call 'query))) msg-clauses)
+        info-clauses (filter (fn (c) (= (first c) 'info)) msg-clauses)
         from (gensym "from")
         rf (gensym "ref")
         res (gensym "res")
-        user-clauses (map (fn (c) (gen--clause c name from rf res state-sym)) clauses)
-        stop-clause `([:$stop] nil)
-        loop `(receive ~@user-clauses ~stop-clause))
-    (if doc `(defn ~name ~params ~doc ~loop) `(defn ~name ~params ~loop))))
+        loop (gensym "loop")
+        junk (gensym "msg")
+        compile (fn (c) (gen--clause c loop from rf res state-sym))
+        env-receive (map compile env-clauses)
+        info-receive (map compile info-clauses)
+        ;; `[:$stop]` ends the loop; run `terminate` (reason :normal) first if present.
+        stop-clause (if term-clause
+                      `([:$stop] (let (~(second term-clause) :normal) ~@(rest (rest term-clause))) nil)
+                      `([:$stop] nil))
+        ;; Default catch-all (last): drop an unrecognised message and keep state,
+        ;; so it cannot pile up unmatched in the mailbox (OTP's default handle_info).
+        catch-all `(~junk (~loop ~state-sym))
+        loop-body `(receive ~@env-receive ~stop-clause ~@info-receive ~catch-all)
+        ;; `init` runs once: its body sees the state param and returns the initial
+        ;; state. Without it the loop just starts from the passed-in state.
+        init-expr (if init-clause `(do ~@(rest init-clause)) state-sym)
+        ;; A local `loop` keeps init outside the per-message recursion; the clause
+        ;; bodies tail-recurse via `loop`, so the receive loop stays O(1) stack.
+        entry `(letrec (~loop (fn (~state-sym) ~loop-body)) (~loop ~init-expr)))
+    ;; Guard typos: every message clause must be cast/call/query/info.
+    (if (not (= (+ (count env-clauses) (count info-clauses)) (count msg-clauses)))
+      (error "defprocess: every clause must be cast/call/query/info/init/terminate"))
+    (if doc `(defn ~name ~params ~doc ~entry) `(defn ~name ~params ~entry))))
