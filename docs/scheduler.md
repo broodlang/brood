@@ -1,11 +1,15 @@
 # Step 4b — green M:N scheduler
 
-> Status: **implemented**, now **preemptive**. Stages 1–2 (processes are
-> `corosensei` coroutines on an ≈`nproc` worker pool, suspending at `receive`) and
-> Stage 4 (reduction-counted preemption — ADR-027) are done. Stage 3
-> (work-stealing) remains a deferred optimisation. The *rationale* lives in
-> [`concurrency.md`](concurrency.md); this is the build plan and how it landed
-> (ADR-018, ADR-027).
+> Status: **implemented**, now **preemptive**, with **fresh-only work-stealing**.
+> Stages 1–2 (processes are `corosensei` coroutines on an ≈`nproc` worker pool,
+> suspending at `receive`) and Stage 4 (reduction-counted preemption — ADR-027)
+> are done. Stage 3 (work-stealing) landed in its **migration-free form** — an
+> idle worker steals *fresh, never-resumed* processes from a backed-up peer
+> (ADR-100, 2026-06-07; see Placement below). **Full migration of a *running*
+> process** (BEAM-style rebalancing) stays deferred — it is the *stepping-VM
+> endgame*, not a corosensei swap (`concurrency-v2.md` §7, ADR-100). The
+> *rationale* lives in [`concurrency.md`](concurrency.md); this is the build plan
+> and how it landed (ADR-018, ADR-027, ADR-100).
 
 ## Goal & what changes
 
@@ -174,15 +178,22 @@ Precise mid-eval GC (needs Path B / scannable roots), supervision/links,
 work-stealing (stage 3), and cross-node distribution. None block 4b.
 (Reduction preemption was deferred here originally; it has since landed — ADR-027.)
 
-**Work-stealing note:** stage-3 work-stealing was *deliberately removed* (the
-current scheduler pins each process to one worker — `2abf05e`) because
-cross-thread coroutine resume was the last slice of the KI-1 race. The
-root-cause analysis and the invariants a reintroduction must honour are in
-[`concurrency-v2.md`](concurrency-v2.md).
+**Work-stealing note:** stage-3 work-stealing was first *deliberately removed* (the
+scheduler pinned each process to one worker — `2abf05e`) because cross-thread
+coroutine resume was the last slice of the KI-1 race. It is now **back in its safe
+form**: an idle worker steals *fresh, never-resumed* processes only (their first
+`resume` is on the thief, no saved native stack to migrate — ADR-100). Stealing a
+*running* (suspended) process is still off the table on the corosensei substrate,
+and the way to unblock it is the stepping-VM call-stack reification, **not** a
+substrate swap — root-cause analysis, invariants, and the full design are in
+[`concurrency-v2.md`](concurrency-v2.md) §3 and §7.
 
-**Placement (since pinning is for life):** because a process never migrates, the
-*only* load-balancing lever is **where it's first pinned**, decided once at spawn
-by `assign_worker` (`scheduler.rs`). The policy is **least-loaded with a rotating
+**Placement + fresh-steal (the two load-balancing levers):** a *running* process
+never migrates, so the primary lever is **where it's first pinned**, decided once
+at spawn by `assign_worker` (`scheduler.rs`); the secondary lever is **fresh-only
+stealing** — an idle worker pulls a not-yet-resumed process from a backed-up
+peer's queue (`try_steal`) and re-pins it, rebalancing a spawn-burst backlog that
+placement didn't spread. Neither moves an already-running process. The policy is **least-loaded with a rotating
 start**: scan the per-worker queues from a round-robin offset (`NEXT_WORKER`) and
 pick the lightest, breaking ties toward the rotation. A worker's load is its
 runnable-queue length **plus 1 if it's currently inside `resume`** (the
@@ -191,7 +202,10 @@ even with an empty queue, instead of looking idle. When the pool is idle this
 degrades to plain round-robin (so N spawns onto N idle cores land one-per-core);
 when one worker is backed up, fresh processes steer to idle cores. Two caveats
 follow from pinning: it balances *process count*, not *CPU load* (a count-balanced
-placement can still be load-skewed and can't self-correct — that needs migration,
-the deferred work-stealing above), and under heavy concurrent spawning the relaxed
+placement can still be load-skewed and, once a process is running, can't
+self-correct — fresh-only stealing fixes *unstarted* backlog but not a process
+that turns long-running after placement; that needs live-process migration, the
+stepping-VM endgame in `concurrency-v2.md` §7, still deferred), and under heavy
+concurrent spawning the relaxed
 `NEXT_WORKER` rotation + `try_lock` queue sampling make it *approximately*, not
 exactly, round-robin.

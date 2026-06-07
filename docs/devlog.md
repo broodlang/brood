@@ -1690,3 +1690,49 @@ unfolding holds `cur_callee`/`cur_argv` on the Rust stack, safe because
 Five new differential corpus entries cover `try`/`binding`/`isolate` thunk routing
 and apply-unfolding (tail-via-apply, basic splice, prefix+splice, nested apply,
 RUNTIME callee). All 548 nextest cases + differential test pass.
+
+## 2026-06-07 — scheduler: fresh-only work-stealing + the full-migration design (ADR-100)
+
+**Landed: fresh-only work-stealing.** An idle worker now steals a *never-resumed*
+process from a backed-up peer and runs it itself — the migration shape §3.1a
+proved safe (first `resume` on the thief, no saved native stack to move).
+`scheduler.rs`: a `Process.fresh` flag (cleared at first `resume` in `run_one`),
+`try_steal(thief)` (rotating-start, `try_lock` per victim, pulls the first fresh
+process from the victim's *back* and re-pins `worker_id`), `worker_loop` =
+own-queue → `try_steal` → park-with-`STEAL_BACKOFF`(10 ms)-backstop, a relaxed
+`STEALABLE` gate so a truly-idle pool re-parks on one atomic load, and a
+`STOLEN`/`(steal-count)` counter for observability. Rebalances the spawn-burst
+backlog of *unstarted* processes; does not move running ones.
+
+**The bug that cost a cycle (worth remembering).** First cut held the worker's
+queue `MutexGuard` across `run_one` — `if let Some(p) = lock(..).pop_front() {
+run_one(p) }` keeps the temporary alive to the end of the block in edition 2021,
+so the running coroutine's first preempt re-enqueued onto the same worker and
+re-locked the non-reentrant mutex → the worker deadlocked (showed up as a 7-min
+0.3%-CPU hang, not a crash). Fix: bind the pop to a `let` so the guard drops
+before `run_one`. The test's `drain` had no `after`, which turned the lost process
+into a silent hang — added a timeout so a lost process now fails loudly.
+
+**Verified.** `tests/work_stealing.rs` (bursts until a steal is observed, checking
+the deterministic total every burst — ~steals on burst 1 and climbing on a
+2-worker pool): 20/20 release, 5/5 debug. KI-1 guard `tests/concurrency_race.rs`
+clean 13/13 plain-release incl. `BROOD_GC_STRESS`. Full `make test` green (the lone
+`clean_peer_exit_fires_nodedown_promptly` flake was load-induced under full
+concurrency — passes 4/4 isolated; a distributed-nodes timing test, unrelated).
+
+**Designed (deferred): full live-process migration — the stepping-VM endgame.**
+Wrote up *why* a running process can't migrate and the one principled fix, so the
+next person doesn't re-derive "just replace corosensei" and hit the §3.1a wall.
+The blocker isn't corosensei — it's that a process's **call continuation** lives
+on the **native Rust stack** (the tree-walker *and* today's VM, whose `exec_call →
+vm_apply` still recurses natively; only the operand stack was reified and only
+tail calls trampolined). The fix is to reify the **call/frame stack** as heap data
+(a `Vec<Frame>` + flat dispatch loop), making a paused process plain `Send` data
+`(frames, operands, ip)` — then suspension is "stop stepping," migration is "move
+the data," **corosensei is removed**, and the same change independently buys
+**fully precise mid-eval GC** and **anytime stealing**. Everything around the
+engine is already migration-ready (`Send` heaps, migration-surviving scheduler
+TLS, the INV-2 handshake the fresh-steal path now exercises). Full design +
+staging + acceptance bar: `concurrency-v2.md` §7; recorded as ADR-100;
+cross-linked from `memory-model.md` (the recursive-vs-stepping coupling) and
+`scheduler.md`.
