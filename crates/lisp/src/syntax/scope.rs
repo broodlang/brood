@@ -240,8 +240,8 @@ fn collect_globals(node: &Node, src: &str, out: &mut Vec<Binding>) {
 /// Pass 2: descend, opening a child scope at each binding form.
 fn build(node: &Node, src: &str, current: usize, tree: &mut ScopeTree) {
     let opened = match head_sym(node, src) {
-        Some(kw::LET) | Some(kw::LET_STAR) => Some(let_names(node, src)),
-        Some(kw::FN) | Some(kw::LAMBDA) => Some(param_names(node, src, 1)),
+        Some(kw::LET) => Some(let_names(node, src)),
+        Some(kw::FN) => Some(param_names(node, src, 1)),
         // defn/defmacro: name at index 1, param list at 2.
         Some(kw::DEFN) | Some(kw::DEFMACRO) => Some(param_names(node, src, 2)),
         _ => None,

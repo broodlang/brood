@@ -51,6 +51,7 @@ server, and the web frontend come later (see the roadmap).
 | [shared-code.md](shared-code.md) | **Shared code, isolated data** (implemented): region-tagged handles, a runtime's mutable shared code region + global table, and cross-process hot reload (a `def` reaches running spawned processes). |
 | [bytecode-vm.md](bytecode-vm.md) | The **closure-compiling VM** (now the default engine, ADR-076): compile model, stages, closure capture, source positions. |
 | [vm-perf-and-jit-runway.md](vm-perf-and-jit-runway.md) | VM-interpreter perf round + the JIT runway (ADR-096): VM-vs-JIT framing, the IC/rooting/prim work list, JIT-alignment rules, benchmark protocol. |
+| [benchmarking.md](benchmarking.md) | **How to benchmark & profile the VM**: the load-robust VM÷tree-walker ratio (`scripts/bench-ratio.sh`) for *timing*, the `perf-stats` counters + `(vm-stats)` for *attribution*, and how the latter feeds the bytecode-lowering gate. |
 | [transients.md](transients.md) | Internal transients — fast bulk building of immutable maps/vectors without exposing mutation. |
 | [live-editing.md](live-editing.md) | Hot reload & live redefinition: `def` semantics across processes, `defonce`, reload detection, macro-staleness (ADR-042). |
 | [scheduler.md](scheduler.md) | The green M:N scheduler: stackful coroutines, reduction-counted preemption, work distribution (ADR-018/027). |

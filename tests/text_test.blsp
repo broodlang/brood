@@ -1,0 +1,20 @@
+;; Plain-text utilities (std/text.blsp): `fill` — greedy word-wrap to a column width.
+;; Register-only; discovered and run by `nest test` and cargo test (crates/lisp/tests/
+;; suite.rs). This file is a namespace so it can `(:use text)` and refer `fill` bare.
+(defmodule text-test (:use text) (:use test))
+
+(describe "text/fill — greedy word wrap"
+  (test "wraps words to the column width, greedily"
+    (assert= (fill "the quick brown fox jumps" 12) "the quick\nbrown fox\njumps"))
+  (test "collapses existing newlines and tabs before re-breaking"
+    (assert= (fill "the\tquick\nbrown   fox" 9) "the quick\nbrown fox"))
+  (test "a word longer than the width keeps its own (unbroken) line"
+    (assert= (fill "a supercalifragilistic b" 5) "a\nsupercalifragilistic\nb"))
+  (test "text already within width is returned as a single line"
+    (assert= (fill "short line" 80) "short line"))
+  (test "blank input is the empty string"
+    (assert= (fill "" 10) "")
+    (assert= (fill "   \n\t " 10) ""))
+  (test "exact-fit boundary: a word that exactly reaches the width stays on the line"
+    (assert= (fill "ab cd" 5) "ab cd")      ; "ab cd" is 5 cols — fits
+    (assert= (fill "ab cd" 4) "ab\ncd")))   ; 5 > 4 — breaks

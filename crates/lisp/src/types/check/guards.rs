@@ -36,9 +36,7 @@ pub(super) fn is_syntactic_keyword(name: &str) -> bool {
             | kw::DO
             | kw::DEF
             | kw::FN
-            | kw::LAMBDA
             | kw::LET
-            | kw::LET_STAR
             | kw::LETREC
             | kw::DEFMACRO
             | kw::DEFN
@@ -400,7 +398,7 @@ fn lambda_ret(heap: &Heap, form: Value, inputs: &[Option<Ty>], ctx: &Ctx) -> Opt
     let Some(Value::Sym(head)) = items.first().copied() else {
         return None;
     };
-    if !(value::symbol_is(head, kw::FN) || value::symbol_is(head, kw::LAMBDA)) {
+    if !value::symbol_is(head, kw::FN) {
         return None;
     }
     // Exactly `(fn <param-list> <body>)` — one param list + one body expression.

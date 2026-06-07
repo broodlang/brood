@@ -50,10 +50,10 @@ pub(super) fn check_recursion(heap: &Heap, form: Value, out: &mut Vec<(Option<Po
     }
 }
 
-/// Is `v` a `(fn …)` / `(lambda …)` form?
+/// Is `v` a `(fn …)` form?
 fn is_fn_form(heap: &Heap, v: Value) -> bool {
     matches!(list_items(heap, v).as_deref(),
-        Some([Value::Sym(h), ..]) if value::symbol_is(*h, kw::FN) || value::symbol_is(*h, kw::LAMBDA))
+        Some([Value::Sym(h), ..]) if value::symbol_is(*h, kw::FN))
 }
 
 /// Analyze a `(fn …)` value: one body for a single-arity fn, or each arm's body
@@ -113,7 +113,6 @@ fn walk(heap: &Heap, form: Value, tail: bool, name: Symbol, out: &mut Vec<(Optio
         if value::symbol_is(head, kw::QUOTE)
             || value::symbol_is(head, kw::QUASIQUOTE)
             || value::symbol_is(head, kw::FN)
-            || value::symbol_is(head, kw::LAMBDA)
         {
             return;
         }
@@ -133,10 +132,7 @@ fn walk(heap: &Heap, form: Value, tail: bool, name: Symbol, out: &mut Vec<(Optio
             analyze_body(heap, name, &items[1..], out);
             return;
         }
-        if value::symbol_is(head, kw::LET)
-            || value::symbol_is(head, kw::LET_STAR)
-            || value::symbol_is(head, kw::LETREC)
-        {
+        if value::symbol_is(head, kw::LET) || value::symbol_is(head, kw::LETREC) {
             // (let (n1 v1 n2 v2 …) body…): binding *values* are non-tail; body
             // is an implicit `do`.
             if let Some(binds) = items.get(1).and_then(|&b| list_items(heap, b)) {

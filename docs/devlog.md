@@ -282,7 +282,9 @@ Every session, oldest first. Full text: [devlog-archive.md](archive/devlog-archi
 - **2026-06-04** — lsp: `resolve_in_source` stops interning transient identifiers (daemon-lifetime interner leak — kernel audit, perf #4)
 - **2026-06-04** — kernel-audit hardening batch: min cookie length, bounded `macroexpand`, bignum `string->number`, scanner line breaks + hard-error hex escapes, epoch-tripwire mask, dead-watcher monitor sweep
 - **2026-06-06** — whole-kernel review sweep: every Rust file reviewed (duplication / style / bugs / comments), then all findings fixed — VM `quote` divergence, LSP interning leak, timer cancellation, iterative `flush_rt_pair`, `from_node` wire excision, cross-binary dedup into `cli_support`, printer control-char escapes, ~20 comment-drift fixes
-- **2026-06-07** — ADR-096 round 2 (item 6, defer-set shrink): direct `letrec` self-recursion now VM-compiled — closes the `defseq` (`map`/`filter`/`mapcat`/`remove`/`keep`) + hand-written local-loop defer. `MakeClosure` binds the closure to its own name in its captured env (the tree-walker's late-bind); a self-call optimization (`Node::SelfCall` → `Step::SelfTail`, in-place frame reset) makes dispatch-bound local recursion **−30…−54%** vs the tree-walker; allocation-bound `defseq` at parity. (Measurement lesson: separate-process VM-vs-TW reads on this loaded machine were noise; the load-robust signal is adjacent Vm/Tw rows in one `divan` process.)
+- **2026-06-07** — ADR-096 round 2 (item 6, defer-set shrink): direct `letrec` self-recursion now VM-compiles for RUNTIME-region closures — the prelude `defseq` family (`map`/`filter`/`mapcat`/`remove`/`keep`), which deferred *wholesale* before. `MakeClosure` binds the closure to its own name in its captured env (the tree-walker's late-bind); a self-call optimization (`Node::SelfCall` → `Step::SelfTail`, in-place frame reset). `(count (map inc (range n)))` **~58–60% faster** on the VM than the tree-walker. Top-level `letrec`/lambda literals defer by design (LOCAL region). (An earlier "−30…−54%" figure was a noisy read of a top-level-`letrec` bench that *defers* — the `perf-stats` harness later showed it never hit the VM; corrected 2026-06-07. Lesson: measure the path you think you are.)
+- **2026-06-07** — ADR-098 small-core audit: dropped the unused `lambda`/`let*` alias spellings (no `.blsp` used them) and demoted `defmacro` from a core special form to a prelude macro over a new `(%make-macro f)` primitive (the `try`/`%try` pattern). Evaluator core 9 → **8 true special forms** (`quote if do def fn let letrec quasiquote`). `letrec` reviewed and kept (irreducible — merging into `let` would break shadow-rebinding). Surface syntax unchanged, so tooling untouched; full suite green on both engines.
+- **2026-06-07** — VM profiling harness + `(def x <expr>)` runs its RHS on the VM. New `perf-stats` cargo feature (`src/perf.rs`): zero-cost-off work-attribution counters (`vm_apply`/IC hit-miss/prim inline-fallback/`self_tail`/`env_hops`/`alloc`/`tw_defer`), surfaced via `(vm-stats)` + `BROOD_PERF_STATS=1`. Plus `scripts/bench-ratio.sh` — the load-robust VM÷tree-walker ratio (the only trustworthy timing on this box). Two questions, two tools (`docs/benchmarking.md`). First profile finding: the VM is **dispatch-bound** on call-heavy code (IC 99.99% hit, prim2 96% inlined, env/alloc minor) — the bytecode-lowering gate signal. Second: a top-level `(def x <expr>)` was running `<expr>` on the tree-walker (`def` is a special form → the whole form deferred); now its RHS goes through `compile::run` (falls back to the tree-walker for anything it can't compile), so `(def a (fib 27))` runs `fib` on the VM (`vm_apply` 0 → 635k). Suite green both engines, GC-stress clean.
 
 ---
 
@@ -1482,20 +1484,111 @@ round 1 (corroborated by round 1's own "mapcat flat" note).
    plain fixed arity (so `exec_node` — which the trampoline drives — is the only
    executor that needs it; `exec_value`/`force` `unreachable!` it).
 
-**Result (load-robust — adjacent Vm/Tw rows in one `divan` process):**
-dispatch-bound `letrec_loop` is **−30% at 100k, −54% at 1M** vs the tree-walker;
-allocation-bound `defseq` pipeline is at parity (a `cons` per element dominates;
-the residual is the still-uncached `(f item)` captured-fn call — a frame-local IC
-is future work, not safely expressible with the per-site IC since a captured fn
-differs per closure instance). Correctness: VM == tree-walker on every case
-(self-recursion, per-instance freshness, mutual recursion via deferral, non-fn
-RHS, shadowing), 544/544 suite green on both engines, `BROOD_GC_STRESS=1
-BROOD_GC_VERIFY=1` clean. New `letrec_loop` Vm/Tw bench in `benches/eval.rs`;
-five regression tests in `tests/basic.rs`.
+**Result — CORRECTED 2026-06-07 (the original figures below were wrong; see the
+note).** The self-call benefits **RUNTIME-region closures**: the prelude `defseq`
+family. `(count (map inc (range n)))` is **~58–60% faster** on the VM than the
+tree-walker (`self_tail` fires per element — verified with `perf-stats`; it
+deferred *wholesale* before round 2). **Top-level `letrec`/lambda literals defer
+by design** — their `fn_rest` is LOCAL-region and can't be baked into a cached
+`Node` tree without a use-after-GC, so they run on the tree-walker (parity). The
+self-call is for *promoted* closures, not top-level one-shots. Correctness: VM ==
+tree-walker on every case (self-recursion, per-instance freshness, mutual
+recursion via deferral, non-fn RHS, shadowing), suite green on both engines,
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` clean; five regression tests in
+`tests/basic.rs`. The bench is `defseq_map` in `benches/eval.rs` (the original
+`letrec_loop` was replaced — see below).
 
-**Measurement lesson (cost me an afternoon):** on this loaded, low-powered box,
-comparing VM (default) vs `BROOD_VM=0` as *separate process runs* gave pure
-noise — the self-call fix looked like a flat-to-regression until the same
-workload measured as adjacent Vm/Tw rows *in one process* (the `eval.rs` engine
-grid) showed the real −30…−54%. Trust within-process ratios here, not
-cross-run absolutes; the archived `bench.sh` headline still wants a quiet machine.
+**Original (wrong) claim, kept as a cautionary record:** "dispatch-bound
+`letrec_loop` −30% at 100k / −54% at 1M; `defseq` pipeline at parity." Both numbers
+were measurement artifacts. The `letrec_loop` bench is a *top-level* `(letrec (s
+(fn …)) (s n 0))`, whose `fn` **defers** (LOCAL region) — so it never hit the VM;
+"−30…−54%" was noise around parity. The `defseq` pipeline used a *top-level lambda*
+mapper `(fn (x) (* x x))`, which also defers, dragging the measured result to
+parity. The `perf-stats` harness (built the same day) exposed both: `self_tail` and
+`vm_apply` were **zero** for `letrec_loop`. Lesson, the sharper version of the
+earlier one: same-process Vm/Tw ratios are load-robust, **but only if the bench
+actually exercises the path you think it does** — a deferring micro-bench reads as
+parity, and noise around parity can masquerade as a ±30–50% effect. Measure the
+path (`perf-stats` / `(vm-stats)` confirms it ran on the VM), then trust the ratio.
+See `docs/benchmarking.md`.
+
+## 2026-06-07 — ADR-098: shrink the core (drop `lambda`/`let*`; `defmacro` → macro)
+
+A small-core audit of the public language surface. Three findings, three calls.
+
+**`lambda` and `let*` aliases — removed.** `lambda` was a second spelling for
+`fn`; `let*` a second spelling for `let` (Brood's `let` is *already* sequential,
+so `let*` was a pure synonym implying a distinction that doesn't exist). A repo
+grep confirmed **no `.blsp` source used either** — the whole codebase already
+writes `fn`/`let`. Deleted the `kw::LAMBDA`/`kw::LET_STAR` constants and every
+`|| symbol_is(.., LAMBDA/LET_STAR)` clause across the evaluator dispatch, the
+checker (walk/hygiene/recursion/guards), `syntax/scope.rs`, the macro
+resolver/expander, and the VM compiler. `(lambda …)`/`(let* …)` now error as
+unbound symbols.
+
+**`defmacro` — demoted from special form to prelude macro.** Same shape as
+`try`/`catch` over `%try`: added one primitive `(%make-macro f)` (`Value::Fn` →
+`Value::Macro`) and defined `defmacro` in the prelude, bootstrapped with raw
+`def`/`fn` (it can't define itself):
+`(def defmacro (%make-macro (fn (name & body) `(def ~name (%make-macro (fn ~@body))))))`.
+Key reasons it's safe: the macroexpander expands the *head* before its structural
+dispatch (`macros.rs:792`), and the loader is **form-by-form** (lib.rs — "a macro
+defined by one form is visible to the next"), so the bootstrap `def` registers
+`defmacro` before any later `(defmacro …)` is expanded. The *surface syntax* is
+unchanged, so the checker / `scope.rs` / formatter / forward-ref pre-scan that
+match `(defmacro …)` source needed no edits, and it stays in `SPECIAL_FORMS` for
+highlighting. The hot-reload "macro redefined" warning moved into `def` (old
+`Macro` rebound to `Macro`); `name_value` now also names `Macro` closures so a
+macro keeps its name (`#<macro my-unless>`).
+
+**`letrec` — reviewed, kept.** Irreducible: a macro can't build the
+mutual-visibility scope without a Y-combinator (slower/uglier — *more* complexity),
+and merging it into `let` would break shadow-rebinding `(let (x (+ x 1)) …)` (the
+RHS would read a `nil` pre-binding instead of the outer `x`) and turn forward
+references into silent `nil`s. A small language still needs *a* primitive for
+mutual local recursion; `letrec` is it.
+
+**Result.** Evaluator core: 9 spellings → **8 true special forms**
+(`quote if do def fn let letrec quasiquote`). One stale grammar-test assertion
+removed (it used `let*` to show regex-metachar escaping; `match*` still covers
+it). Full suite green on both engines (`make test`); a defmacro smoke test
+exercised user macros, prelude macros (`when`/`cond`/`->`), `macroexpand`, macro
+naming, and the `%make-macro` type-error path.
+
+## 2026-06-07 — ADR-099: `proc/gen` becomes a real gen_server
+
+**What.** Closed the widest remaining OTP gap — the gen_server layer
+(`std/proc/gen.blsp`) — entirely in Brood (no kernel surface, ADR-006). The
+substrate and the `proc/supervisor` library were already ~Erlang/OTP; `defprocess`
+was the laggard, handling only its own `[:$cast]`/`[:$call]`/`[:$stop]` envelopes.
+
+Three gaps, all fixed:
+- **`handle_info`.** New `(info PATTERN body…)` clause matches a non-envelope
+  message — a monitor `[:down …]`, a link `[:EXIT …]`, a timer tick, a raw `send`
+  — body → next state. Before this a server couldn't react to those *and they
+  piled up unmatched in the mailbox forever* (Erlang-style selective receive keeps
+  non-matches queued). A trailing **default catch-all now drops** any
+  otherwise-unmatched message and keeps state (OTP's default `handle_info`), so the
+  mailbox can't leak. Envelope clauses are ordered before `info` clauses so a broad
+  `info` pattern can't swallow a `[:$call …]`.
+- **Lifecycle.** `(init body…)` runs once at startup (sees the state param, returns
+  the initial state — the place to `trap-exit`/`monitor`/arm a timer/transform the
+  seed); `(terminate reason body…)` runs on a clean `(stop)`. The macro now expands
+  to a `letrec` loop fn invoked once after `init`, so `init` doesn't re-run per
+  message; the loop stays O(1) stack (tail self-call via the local fn).
+- **Bounded calls.** `(gen-call pid payload)` delegates to
+  `(gen-call-timeout pid payload 5000)` (OTP's 5 s default); both `monitor` the
+  server, so a dead server raises at once and a crossed deadline raises — each
+  catchable via `try`. Monitor always dropped (+ late `[:down]` flushed) on return.
+- Added `spawn-server-link` (Erlang `start_link`) and `spawn-server-named`
+  (registered name) beside `spawn-server`; kept to three helpers (ADR-011).
+
+**Verification.** `tests/gen_test.blsp` grew from 9 to 18 tests (info path, no-leak
+drop, init-once, terminate-on-stop, call timeout, dead-server fast-fail,
+named/linked spawn). Full Brood suite **1416/1416 green** (`nest test`); existing
+`defprocess` servers (incl. `std/log.blsp`, `tests/buffer_test.blsp`) unaffected —
+the new clauses + catch-all are additive. No Rust/kernel changes, so the kernel
+nextest pass is orthogonal. See ADR-099 and `docs/language.md` §"The `proc/gen`
+server framework". Tiers 2–3 (timers, pid-returning `remote-spawn`, `terminate`
+worker convention; `gen_statem`, `Registry`/`pg`, `Application`) are on the
+roadmap.

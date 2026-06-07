@@ -147,7 +147,7 @@ fn analyze_template(
             return;
         }
 
-        let is_let = value::symbol_is(head, kw::LET) || value::symbol_is(head, kw::LET_STAR);
+        let is_let = value::symbol_is(head, kw::LET);
         let is_fn = value::symbol_is(head, kw::FN);
         if is_let && items.len() >= 2 {
             // `(let (b0 v0 b1 v1 …) body…)`. Brood `let` is sequential, so binder

@@ -78,14 +78,18 @@ fn sum_tail(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
         .bench_refs(|interp| interp.eval_str(&src).unwrap());
 }
 
-/// Tail-recursive **local** loop via `letrec` self-recursion — the `defseq`
-/// (`map`/`filter`) shape. Exercises the VM self-call optimization (`Step::SelfTail`,
-/// ADR-096): a local-capturing closure calling itself, vs the same on the
-/// tree-walker. Adjacent Vm/Tw rows make the ratio load-robust.
-#[divan::bench(args = engine_grid![100_000, 1_000_000])]
-fn letrec_loop(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
-    let src =
-        format!("(letrec (s (fn [n acc] (if (= n 0) acc (s (- n 1) (+ acc n))))) (s {n} 0))");
+/// `(count (map inc …))` — the `defseq` self-recursive `--loop` (ADR-096 round 2)
+/// running on the VM via the **self-call optimization** (`Step::SelfTail`). `map`
+/// is a prelude `defn`, so its body is RUNTIME-region and VM-compiles; calling it
+/// at top level (no `def` wrapper, a *named* mapper so no deferring top-level
+/// lambda) exercises the self-tail-call per element. Adjacent Vm/Tw rows give the
+/// load-robust ratio. (NB: a *top-level* `(letrec (s (fn …)) …)` does **not** test
+/// this — its `fn` is LOCAL-region and defers to the tree-walker by design, which
+/// is why an earlier top-level-letrec bench misread as a big win when it was
+/// actually parity. See docs/benchmarking.md.)
+#[divan::bench(args = engine_grid![3_000, 30_000])]
+fn defseq_map(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
+    let src = format!("(count (map inc (range {n})))");
     bencher
         .with_inputs(|| interp_on(eng))
         .bench_refs(|interp| interp.eval_str(&src).unwrap());

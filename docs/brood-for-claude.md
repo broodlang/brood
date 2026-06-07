@@ -42,14 +42,15 @@ name  foo-bar?  +       ; symbol (kebab-case is idiomatic)
 
 ## Special forms
 
-Only these are *special*; everything else is a function or a macro:
+Only these eight are *special* (evaluator rules in `eval/mod.rs`); everything
+else is a function or a macro:
 
 ```
-def  defmacro  fn  lambda  quote  quasiquote  if  do
-let  let*  letrec  defdyn  binding
+def  fn  quote  quasiquote  if  do  let  letrec
 ```
 
-Common macros (expanded once at the compile pass — runtime-free): `defn`,
+Common macros (expanded once at the compile pass — runtime-free): `defmacro`
+(lowers to `(def name (%make-macro (fn …)))`), `defn`, `defdyn`, `binding`,
 `cond`, `when`, `unless`, `and`, `or`, `match`, `try` / `catch`, `->`, `->>`,
 `receive`, `spawn`.
 
@@ -697,7 +698,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 - **Variadic operators**: `(+ a b c)` works. The fast 2-arg primitives, when
   you really need them, are `%add` `%sub` `%mul` `%div` `%lt` `%eq`.
 - **No commas in maps**: `{:a 1 :b 2}` — spaces only.
-- **`let` bindings are flat**: `(let (a 1 b 2) ...)`, not Scheme's `(let ((a 1) (b 2)) ...)`. Same for `let*` / `letrec` / `binding`.
+- **`let` bindings are flat**: `(let (a 1 b 2) ...)`, not Scheme's `(let ((a 1) (b 2)) ...)`. Same for `letrec` / `binding`.
 - **`nil` is distinct from `false`** — `(nil? false)` is `false`,
   `(false? nil)` is `false`. Both are falsy, neither is the other.
 - **Tail position matters**: deep *non*-tail recursion overflows the

@@ -1020,6 +1020,7 @@ impl Default for Heap {
 /// fresh slabs and dropping the old slabs wholesale.
 macro_rules! alloc_slot {
     ($self:expr, $field:ident, $value:expr) => {{
+        $crate::perf_bump!(alloc);
         let idx = $self.local.$field.len();
         $self.local.$field.push($value);
         idx
@@ -3790,8 +3791,10 @@ impl Heap {
     }
 
     pub fn env_get(&self, env: EnvId, sym: Symbol) -> Option<Value> {
+        crate::perf_bump!(env_get);
         let mut cur = Some(env);
         while let Some(e) = cur {
+            crate::perf_bump!(env_hops);
             if e == EnvId::GLOBAL {
                 // A dynamic var resolves to its innermost active `binding`, if
                 // any, before the shared global default. The stack is empty

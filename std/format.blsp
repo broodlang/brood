@@ -103,9 +103,6 @@ for every well-formed input. Hand-checked across the brood repo's std/ and tests
     'let
     1
     ; bindings list
-    'let*
-    1
-    ; bindings list
     'letrec
     1
     ; bindings list
@@ -161,7 +158,7 @@ not a known body form (defaults to call-style — every arg breaks)."
 ;; that list breaks across lines, we group each name+value on one line and
 ;; align them under the opening element — the canonical let/binding shape.
 (def *format-pair-bindings*
-  {'let true 'let* true 'letrec true 'binding true 'dotimes true 'dolist true 'loop true})
+  {'let true 'letrec true 'binding true 'dotimes true 'dolist true 'loop true})
 
 ;; Forms whose body args (after the header) are emitted as test+body pairs,
 ;; one pair per line. Comments between clauses are kept on their own lines.

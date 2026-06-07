@@ -418,10 +418,10 @@ fn resolve_list(heap: &mut Heap, form: Value, ns_name: &str, locals: &[value::Sy
         if value::symbol_is(h, kw::DEF) || value::symbol_is(h, kw::DEFMACRO) {
             return resolve_def(heap, form, &items, ns_name, locals);
         }
-        if value::symbol_is(h, kw::FN) || value::symbol_is(h, kw::LAMBDA) {
+        if value::symbol_is(h, kw::FN) {
             return resolve_fn(heap, form, &items, ns_name, locals);
         }
-        if value::symbol_is(h, kw::LET) || value::symbol_is(h, kw::LET_STAR) || value::symbol_is(h, kw::LETREC) {
+        if value::symbol_is(h, kw::LET) || value::symbol_is(h, kw::LETREC) {
             return resolve_let(heap, form, &items, ns_name, locals);
         }
         if value::symbol_is(h, kw::MATCH_STAR) {
@@ -475,7 +475,7 @@ fn resolve_def(heap: &mut Heap, form: Value, items: &[Value], ns_name: &str, loc
     rebuild_list(heap, form, out)
 }
 
-/// `(fn …)` / `(lambda …)` — single-arity `(params body…)` or multi-arity
+/// `(fn …)` — single-arity `(params body…)` or multi-arity
 /// `(doc? (params body…)…)`. Params bind in their body; param lists left verbatim.
 fn resolve_fn(heap: &mut Heap, form: Value, items: &[Value], ns_name: &str, locals: &[value::Symbol]) -> Value {
     let parts = &items[1..];
@@ -804,7 +804,7 @@ fn macroexpand_all_depth(heap: &mut Heap, form: Value, env: EnvId, depth: u32) -
                 // Desugar pattern binders into the Brood `match*` engine so they
                 // expand once here (fast) rather than per call. eval's `let`/`fn`
                 // then only ever see plain symbol binds.
-                if value::symbol_is(s, kw::LET) || value::symbol_is(s, kw::LET_STAR) {
+                if value::symbol_is(s, kw::LET) {
                     if let Some(lowered) = lower_let(heap, &items) {
                         return macroexpand_all_depth(heap, lowered, env, depth + 1);
                     }
@@ -816,7 +816,7 @@ fn macroexpand_all_depth(heap: &mut Heap, form: Value, env: EnvId, depth: u32) -
                     // (opaque), odd-indexed are values (expand). letrec disallows
                     // pattern targets in eval, so there's no `lower_let` branch.
                     return expand_let(heap, original, &items, env, depth + 1);
-                } else if value::symbol_is(s, kw::FN) || value::symbol_is(s, kw::LAMBDA) {
+                } else if value::symbol_is(s, kw::FN) {
                     if let Some(lowered) = lower_fn(heap, &items) {
                         return macroexpand_all_depth(heap, lowered, env, depth + 1);
                     }

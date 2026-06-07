@@ -42,27 +42,23 @@ enum SpecialForm {
     If,
     Do,
     Def,
-    Fn, // `fn` and `lambda` — surface synonyms, identical semantics
+    Fn,
     Quasiquote,
-    Defmacro,
-    Let, // `let` and `let*` — surface synonyms here (sequential binding)
+    Let, // sequential binding
     Letrec,
 }
 
-/// Spelling → form. `fn`/`lambda` and `let`/`let*` collapse to one variant each.
-/// This is deliberately the evaluator-*core* subset; `builtins.rs::SPECIAL_FORMS`
-/// is the broader, LSP-facing list (it also names the macro keywords).
+/// Spelling → form. This is deliberately the evaluator-*core* subset;
+/// `builtins.rs::SPECIAL_FORMS` is the broader, LSP-facing list (it also names
+/// the macro keywords).
 const SPECIAL_SPELLINGS: &[(&str, SpecialForm)] = &[
     (kw::QUOTE, SpecialForm::Quote),
     (kw::IF, SpecialForm::If),
     (kw::DO, SpecialForm::Do),
     (kw::DEF, SpecialForm::Def),
     (kw::FN, SpecialForm::Fn),
-    (kw::LAMBDA, SpecialForm::Fn),
     (kw::QUASIQUOTE, SpecialForm::Quasiquote),
-    (kw::DEFMACRO, SpecialForm::Defmacro),
     (kw::LET, SpecialForm::Let),
-    (kw::LET_STAR, SpecialForm::Let),
     (kw::LETREC, SpecialForm::Letrec),
 ];
 
@@ -324,7 +320,20 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                         // `name` is an interned symbol — neither needs re-reading).
                         let (v, new_env) = heap.root_scope(|heap| {
                             let env_r = heap.root_env(env);
-                            let v = eval_at(heap, args[1], env)?;
+                            // Run the RHS on the VM when enabled (it's already
+                            // macroexpanded+resolved if this `def` came through the
+                            // normal pipeline; `run` falls back to the tree-walker
+                            // for anything it can't compile). Without this a
+                            // top-level `(def x <expr>)` evaluates `<expr>` entirely
+                            // on the tree-walker — `def` is a special form, so the
+                            // whole form (RHS included) was deferring. Mirrors
+                            // `Interp::eval_str`'s per-form dispatch.
+                            let v = if compile::vm_enabled() {
+                                compile::run(heap, args[1], env)
+                                    .map_err(|e| e.or_form_pos(heap, args[1]))?
+                            } else {
+                                eval_at(heap, args[1], env)?
+                            };
                             Ok((v, heap.read_root_env(env_r)))
                         })?;
                         env = new_env;
@@ -353,6 +362,18 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                                     arity_to_string(new_a),
                                 );
                             }
+                        }
+                        // Macro-redefinition diagnostic (hot reload): redefining a
+                        // macro does *not* re-expand callers already compiled with
+                        // the old expansion — they keep the old code until re-eval'd.
+                        // `defmacro` is a macro lowering to `(def name (%make-macro …))`,
+                        // so this is the def-side home of what used to live in the
+                        // `defmacro` special form.
+                        if matches!(old, Value::Macro(_)) && matches!(val, Value::Macro(_)) {
+                            eprintln!(
+                                "[reload] macro {} redefined; callers expanded before now keep the old expansion — re-eval them",
+                                value::symbol_name(name)
+                            );
                         }
                     }
                     // A transient is a process-local, identity-mutable build handle:
@@ -394,36 +415,6 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     expr = crate::eval::macros::expand_quasiquote(heap, template)
                         .map_err(|e| e.or_form_pos(heap, expr))?;
                     continue 'tail;
-                }
-                Some(SpecialForm::Defmacro) => {
-                    let parts = heap.list_to_vec(rest)?;
-                    let name = as_symbol(
-                        parts
-                            .first()
-                            .copied()
-                            .ok_or_else(|| LispError::runtime("defmacro: missing name"))?,
-                    )?;
-                    let fn_rest = heap.list(parts[1..].to_vec());
-                    let macro_val = match make_closure(heap, Some(name), fn_rest, env)? {
-                        Value::Fn(id) => Value::Macro(id),
-                        other => other,
-                    };
-                    let root = heap.env_root(env);
-                    // Staleness diagnostic (hot reload): redefining a macro does
-                    // *not* re-expand callers already compiled with the old
-                    // expansion — they keep the old code until re-evaluated. Warn
-                    // when *rebinding* an existing macro so the mismatch isn't a
-                    // silent surprise; silent on first definition (the prelude/std
-                    // build, and a file's first load). Mirrors the `def`
-                    // arity-change diagnostic above (docs/live-editing.md Stage 7).
-                    if matches!(heap.env_get(root, name), Some(Value::Macro(_))) {
-                        eprintln!(
-                            "[reload] macro {} redefined; callers expanded before now keep the old expansion — re-eval them",
-                            value::symbol_name(name)
-                        );
-                    }
-                    heap.env_define(root, name, macro_val);
-                    return Ok(Value::Sym(name));
                 }
                 Some(SpecialForm::Let) => {
                     let (binds_form, body) = uncons(heap, rest);
@@ -1341,14 +1332,23 @@ fn parse_optional(heap: &Heap, form: Value) -> Result<(Symbol, Value), LispError
 
 /// Attach a name to an anonymous closure when it's `def`'d.
 fn name_value(heap: &mut Heap, val: Value, name: Symbol) -> Value {
-    if let Value::Fn(id) = val {
-        if heap.closure(id).name.is_none() {
-            let mut c = heap.closure(id).clone();
-            c.name = Some(name);
-            return Value::Fn(heap.alloc_closure(c));
-        }
+    // Name both `fn` and `macro` closures (a macro is a closure the expander
+    // calls) — `(def m (%make-macro (fn …)))`, which `defmacro` lowers to, must
+    // name its macro just as the old `defmacro` special form did.
+    let id = match val {
+        Value::Fn(id) | Value::Macro(id) => id,
+        _ => return val,
+    };
+    if heap.closure(id).name.is_some() {
+        return val;
     }
-    val
+    let mut c = heap.closure(id).clone();
+    c.name = Some(name);
+    let fresh = heap.alloc_closure(c);
+    match val {
+        Value::Macro(_) => Value::Macro(fresh),
+        _ => Value::Fn(fresh),
+    }
 }
 
 fn as_symbol(v: Value) -> Result<Symbol, LispError> {
