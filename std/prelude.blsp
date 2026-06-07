@@ -2212,7 +2212,7 @@ degrades to a plain case-insensitive name/docstring search, e.g.
   "Declare module/namespace `mod` and compile the rest of the file into it —
 definitions become `mod/name`; bare references resolve there, then through
 `(:use …)` imports, then root. Records an optional docstring and `provide`s the
-feature. Put it first. e.g. (defmodule hatch \"A gen_server …\")."
+feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
   (let (key (name mod)
         doc (if (string? (first more)) (first more) nil)
         clauses (if (string? (first more)) (rest more) more))
@@ -2250,5 +2250,5 @@ feature. Put it first. e.g. (defmodule hatch \"A gen_server …\")."
 ;; (require 'a 'b …) — load each feature once, left to right. Returns the names.
 (defn require (& mods)
   "Load each feature once (a no-op for any already loaded); errors on one not
-found. Returns the list of feature names. e.g. (require 'hatch 'test)."
+found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   (map require-one mods))

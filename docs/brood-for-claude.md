@@ -421,10 +421,10 @@ quits or crashes is detected without any app-level goodbye message.
 cleanly — no need for an ad-hoc `[:bye]` broadcast. Returns `true` if a link
 existed.
 
-## Stateful servers — the `hatch` framework (`(:use proc/hatch)`)
+## Stateful servers — the `proc/gen` framework (`(:use proc/gen)`)
 
 Raw `spawn`/`receive` is the substrate; for a process that **holds state and
-answers messages** (a gen_server / actor), use `hatch`. State is immutable —
+answers messages** (a gen_server / actor), use `proc/gen`. State is immutable —
 each clause *returns the next state* to carry through the loop. Two message
 kinds:
 
@@ -436,8 +436,8 @@ kinds:
   Use this for "just read a field" cases to avoid the `[x s]` boilerplate.
 
 ```lisp
-(defmodule my-counter "…" (:use proc/hatch))   ; (:use proc/hatch), not (require 'proc/hatch),
-                                           ; to write defprocess/cast/gen-call bare
+(defmodule my-counter "…" (:use proc/gen))   ; (:use proc/gen), not (require 'proc/gen),
+                                          ; to write defprocess/cast/gen-call bare
 
 (defprocess counter (n)                 ; n is the state
   (cast  :inc       (+ n 1))            ; new state = n+1
@@ -446,7 +446,7 @@ kinds:
   (call  :value     [n n])              ; reply n, keep state n
   (query :double    (* n 2)))           ; reply n*2; state untouched
 
-(def c (hatch counter 0))               ; spawn with initial state 0 → pid
+(def c (spawn-server counter 0))        ; spawn with initial state 0 → pid
 (! c :inc)                              ; cast (returns immediately)
 (! c [:add 10])
 (gen-call c :value)                     ; => 11  (synchronous; blocks for reply)
@@ -455,9 +455,9 @@ kinds:
 ```
 
 Other primitives: `(sleep ms)` parks the current process without touching its
-mailbox (it does *not* block a worker thread). `(stop pid)` ends a hatch
-process's receive loop cleanly — every hatch automatically handles the stop
-envelope, no `:stop` clause needed.
+mailbox (it does *not* block a worker thread). `(stop pid)` ends a server
+process's receive loop cleanly — every `proc/gen` process automatically handles
+the stop envelope, no `:stop` clause needed.
 
 **Worker pool — fan out work, fan in results** (plain `spawn`/`receive`, the
 pattern most demos want):
@@ -675,7 +675,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 - **Filesystem (stat-class)**: `file-exists?` `dir?` `list-dir` `file-mtime`
 - **processes**: `spawn` (incl. named-spawn `(spawn :name expr)`)
   `send` `receive` `self` `ref` `monitor` `demonitor` `register` `whereis`
-  — plus the **`hatch`** framework below
+  — plus the **`proc/gen`** framework below
 - **transducers**: `comp` `xmap` `xfilter` `xremove` `xkeep` `xmapcat`
   `xtake-while` `transduce` `reduced` `reduced?`
 
@@ -740,7 +740,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 
 `nest new <name>` scaffolds this default `main`+`hello` pair. Other `--template`
 options scaffold starter shapes you'd otherwise hand-write: `tui-loop` (a
-tail-recursive animation loop, pairs with `nest run --for`), `hatch` (a stateful
+tail-recursive animation loop, pairs with `nest run --for`), `gen` (a stateful
 gen_server-style process), `http-server` (a minimal web app), `editor` (a tiny
 text editor on `ui-run`), and `gui` (a windowed `ui-run` app — see *Interactive
 apps* above; needs a `--features gui` build).

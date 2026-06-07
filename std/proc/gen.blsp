@@ -1,4 +1,5 @@
-;; std/hatch.blsp — the process framework. Loaded with (require 'hatch).
+;; std/proc/gen.blsp — the gen_server-style process framework. Loaded with
+;; (require 'proc/gen).
 ;;
 ;; Design notes (the *why*; the *what* is in the docstrings below):
 ;;  - Messages ride internal envelopes — [:$cast …] / [:$call from ref …] — so the
@@ -8,9 +9,9 @@
 ;;    `defprocess` expands to receive/match, and that expansion strands lambdas
 ;;    during the prelude freeze (see docs/devlog.md). Loaded after freeze, it's fine.
 
-(defmodule proc/hatch
+(defmodule proc/gen
   "A gen_server-style process framework written in Brood, on the kernel's
-spawn / send / receive / ref / monitor (ADR-006). A hatch process carries one
+spawn / send / receive / ref / monitor (ADR-006). A server process carries one
 immutable state value through its receive loop and handles three kinds of
 message: a CAST (fire-and-forget; the clause body is the next state), a CALL
 (synchronous; the clause body is [reply next-state] and the caller blocks for
@@ -18,7 +19,7 @@ the reply), and a QUERY (synchronous read-only; the body is just the reply,
 state unchanged — the common 'just read a field' case without the [x s]
 boilerplate). State is immutable, so a clause returns the state to carry
 forward; to leave it unchanged in a `call`, return the state parameter. Every
-hatch process also accepts an implicit `(stop pid)` message that ends the
+server process also accepts an implicit `(stop pid)` message that ends the
 receive loop cleanly — no need to declare a clause for it.
 
     (defprocess counter (n)
@@ -27,7 +28,7 @@ receive loop cleanly — no need to declare a clause for it.
       (call  :value    [n n])             ; reply n, state unchanged
       (query :double   (* n 2)))          ; reply n*2; state untouched
 
-    (def c (hatch counter 0))
+    (def c (spawn-server counter 0))
     (! c :inc)                            ; cast
     (gen-call c :value)                   ; => 1  (synchronous)
     (gen-call c :double)                  ; => 2
@@ -36,7 +37,7 @@ receive loop cleanly — no need to declare a clause for it.
 ;; ---- client side ------------------------------------------------------------
 
 (defn ! (pid payload)
-  "Send `payload` to a hatch process as a cast (fire-and-forget). Erlang's `Pid ! Msg`."
+  "Send `payload` to a server process as a cast (fire-and-forget). Erlang's `Pid ! Msg`."
   (send pid [:$cast payload]))
 
 (defn gen-call (pid payload)
@@ -45,12 +46,12 @@ messages stay queued — the reply is matched by a fresh (ref)."
   (let (r (ref)) (send pid [:$call (self) r payload]) (receive ([:reply ~r v] v))))
 
 (defn stop (pid)
-  "Tell a hatch process to exit its receive loop cleanly. Returns nil
+  "Tell a server process to exit its receive loop cleanly. Returns nil
 immediately — there is no acknowledgement (the process is gone by the time the
 caller could check). Safe to send to a pid that has already exited."
   (send pid [:$stop]))
 
-(defn hatch (f state)
+(defn spawn-server (f state)
   "Spawn a `defprocess` server `f` with its initial `state`; return its pid."
   (spawn (f state)))
 
@@ -60,7 +61,7 @@ caller could check). Safe to send to a pid that has already exited."
 
 ;; ---- defprocess -------------------------------------------------------------
 
-(defn hatch--clause (c name from rf res state-sym)
+(defn gen--clause (c name from rf res state-sym)
   "Compile one defprocess clause `c` into a receive clause. `name` is the server
 fn (so a clause tail-recurses with the next state); `from`/`rf`/`res` are the
 gensyms a `call`/`query` clause uses for the sender pid, reply ref, and the
@@ -81,7 +82,7 @@ can tail-recurse with it unchanged)."
              (pr-str kind)))))
 
 (defmacro defprocess (name params & clauses)
-  "Define a hatch server `name` over a single `params` state, as a tail-recursive
+  "Define a server `name` over a single `params` state, as a tail-recursive
 receive loop. Each clause is `(cast PATTERN body…)` — body is the next state —
 or `(call PATTERN body…)` — body is `[reply next-state]` — or
 `(query PATTERN body…)` — body is just the reply, state unchanged. An optional
@@ -99,7 +100,7 @@ matched and ends the loop (so `(stop pid)` is automatic — no clause needed)."
         from (gensym "from")
         rf (gensym "ref")
         res (gensym "res")
-        user-clauses (map (fn (c) (hatch--clause c name from rf res state-sym)) clauses)
+        user-clauses (map (fn (c) (gen--clause c name from rf res state-sym)) clauses)
         stop-clause `([:$stop] nil)
         loop `(receive ~@user-clauses ~stop-clause))
     (if doc `(defn ~name ~params ~doc ~loop) `(defn ~name ~params ~loop))))

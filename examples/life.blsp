@@ -1,9 +1,9 @@
 (defmodule life
   "Conway's Game of Life. The board is a set of live cells (a map [x y] -> true, so
-the world is unbounded); a `hatch` process owns it, advanced by cast (`!`) and
+the world is unbounded); a `proc/gen` process owns it, advanced by cast (`!`) and
 read by call (`gen-call`). Run:  ./bin/cli examples/life.blsp")
 
-(require 'proc/hatch)
+(require 'proc/gen)
 
 (def offsets (list [-1 -1] [0 -1] [1 -1] [-1 0] [1 0] [-1 1] [0 1] [1 1]))
 
@@ -50,4 +50,4 @@ Redraws in place — each cell overwrites the last, so no clear and no flicker."
 
 (def glider {[1 0] true [2 1] true [0 2] true [1 2] true [2 2] true})
 
-(animate (hatch life-server glider) 45 26 16)
+(animate (spawn-server life-server glider) 45 26 16)

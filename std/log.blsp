@@ -1,7 +1,7 @@
 ;; std/log.blsp — an async, safe logger. (require 'log).
 ;;
 ;; Async + safe fall straight out of the process model (ADR-006):
-;;  - A logger is one long-lived `hatch` process carrying {:level :backends}.
+;;  - A logger is one long-lived `proc/gen` process carrying {:level :backends}.
 ;;  - A log call is a CAST (`!`) — fire-and-forget, so the caller never blocks on
 ;;    a slow or stuck backend. That is the "async".
 ;;  - One process owns every write, so lines never interleave and a backend that
@@ -14,7 +14,7 @@
 ;; mutated value. The logger reuses ports rather than inventing its own sink.
 
 (defmodule log
-  "An async, safe logger (`(require 'log)`). A `hatch` process holds a list of
+  "An async, safe logger (`(require 'log)`). A `proc/gen` process holds a list of
 backends; each log call is a cast, so it never blocks the caller, and the single
 process serialises writes (no interleaving) and isolates a crashing backend.
 
@@ -29,7 +29,7 @@ registered as `:logger`; `(log …)` finds it via `whereis` and falls back to
 stderr if none is running, so a log is never silently lost. A *backend* is an
 `io` port + `:min-level` + `:format` — build one with `stdout-backend` /
 `stderr-backend` / `process-backend` / `file-backend` / `fn-backend`."
-  (:use proc/hatch)  ; defprocess / hatch / ! / stop
+  (:use proc/gen)  ; defprocess / spawn-server / ! / stop
   (:use io))  ; ports + io-write
 
 ;; ---- levels -----------------------------------------------------------------
@@ -128,7 +128,7 @@ so it walks either — `:backends` defaults to a vector but `add-backend` conses
   (let (o (if (empty? opts) {} (first opts))
         level (or (get o :level) :info)
         backends (or (get o :backends) [(stdout-backend)])
-        pid (hatch log--server {:level level :backends backends}))
+        pid (spawn-server log--server {:level level :backends backends}))
     (register :logger pid)
     pid))
 
