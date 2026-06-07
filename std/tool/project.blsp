@@ -652,7 +652,7 @@ std. Errors if `root` is nil (not in a project)."
           all-dirs (append src-dirs dep-dirs))
       ;; Pair each file with the source dir it was found under, so its require-name
       ;; (relative to that dir) keeps any namespace — `src/main.blsp` → `main`,
-      ;; `../brood-net/src/net/sse.blsp` → `net/sse`. Dir order (project dirs first)
+      ;; `src/net/sse.blsp` → `net/sse`. Dir order (project dirs first)
       ;; is preserved, so a project module still wins a name clash with a dep.
       (cons manifest
         (fold (fn (acc d)
@@ -890,14 +890,14 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
     "  (test \"step advances in open space\" (assert= (step 5 1 20) [6 1]))\n"
     "  (test \"render marks the right column\" (assert= (render 0 3) \"[*  ]\")))\n"))
 
-;; `hatch`: a stateful process (gen_server-style) via the `hatch` framework.
+;; `gen`: a stateful process (gen_server-style) via the `proc/gen` framework.
 ;; Genuine mutable state lives in a process's loop, not a variable (ADR-026):
 ;; async `cast` threads new state, synchronous `call` reads/updates it.
-(defn project--hatch-main-template (nm)
+(defn project--gen-main-template (nm)
   (str "(defmodule main \""
     nm
-    " — a stateful process built with the hatch framework.\"\n"
-    "  (:use proc/hatch))\n"
+    " — a stateful process built with the proc/gen framework.\"\n"
+    "  (:use proc/gen))\n"
     "\n"
     ";; A counter server. State `n` is the process's; messages drive it.\n"
     "(defprocess counter\n"
@@ -908,21 +908,21 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
     "\n"
     "(defn main ()\n"
     "  \"Entry point: start a counter, drive it, read the result.\"\n"
-    "  (let (c (hatch counter 0))\n"
+    "  (let (c (spawn-server counter 0))\n"
     "    (! c :inc)\n"
     "    (! c :inc)\n"
     "    (! c [:add 10])\n"
     "    (println \"counter =\" (gen-call c :value))))\n"))
 
-(defn project--hatch-test-template (nm)
-  (str ";; `(:use main)` brings `counter`; `(:use proc/hatch)` the `!`/`gen-call` API;\n"
+(defn project--gen-test-template (nm)
+  (str ";; `(:use main)` brings `counter`; `(:use proc/gen)` the `!`/`gen-call` API;\n"
     ";; `(:use test)` the macros. :isolated — these spawn processes.\n"
-    "(defmodule main-test (:use main) (:use proc/hatch) (:use test))\n"
+    "(defmodule main-test (:use main) (:use proc/gen) (:use test))\n"
     "\n"
     "(describe \"counter\"\n"
     "  :isolated\n"
     "  (test \"casts thread state; a call reads it\"\n"
-    "    (let (c (hatch counter 0))\n"
+    "    (let (c (spawn-server counter 0))\n"
     "      (! c :inc) (! c :inc) (! c [:add 10])\n"
     "      (assert= (gen-call c :value) 12))))\n"))
 
@@ -1241,7 +1241,7 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
 ;; .claude/skills/writing-brood skill, so the project is self-contained for
 ;; AI-assisted editing. Errors on a bad name; an existing folder is reused (its
 ;; scaffold files overwritten), not rejected.
-(def *project-templates* ["default" "tui-loop" "hatch" "editor" "gui"])
+(def *project-templates* ["default" "tui-loop" "gen" "editor" "gui"])
 
 ;; Write the template-specific src/ + tests/ files; return the list of relative
 ;; paths written (for the summary). The shared files (manifest, CLAUDE.md, guide,
@@ -1254,12 +1254,12 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
                           (spit (path-join tests-dir "main_test.blsp")
                             (project--tui-test-template actual-name))
                           [(str nm "/src/main.blsp") (str nm "/tests/main_test.blsp")])
-    (= tmpl "hatch") (do
-                       (spit (path-join src-dir "main.blsp")
-                         (project--hatch-main-template actual-name))
-                       (spit (path-join tests-dir "main_test.blsp")
-                         (project--hatch-test-template actual-name))
-                       [(str nm "/src/main.blsp") (str nm "/tests/main_test.blsp")])
+    (= tmpl "gen") (do
+                     (spit (path-join src-dir "main.blsp")
+                       (project--gen-main-template actual-name))
+                     (spit (path-join tests-dir "main_test.blsp")
+                       (project--gen-test-template actual-name))
+                     [(str nm "/src/main.blsp") (str nm "/tests/main_test.blsp")])
     (= tmpl "editor") (do
                         (spit (path-join src-dir "main.blsp")
                           (project--editor-main-template actual-name))
@@ -1281,7 +1281,7 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
              (str nm "/tests/hello_test.blsp")])))
 
 (defn new-project (nm &optional template)
-  "Scaffold a new project named `nm` (or `\".\"` for the current directory, taking the project name from the cwd's basename): a `project.blsp` manifest, the baked-in language guide, and starter code chosen by `template` — `\"default\"` (a `main`+`hello` module pair, the default), `\"tui-loop\"` (a tail-recursive animation loop), `\"hatch\"` (a stateful gen_server process), `\"editor\"` (a tiny text editor on the `ui` framework), or `\"gui\"` (a windowed app on the `ui` framework, opened with `(gui-display)` — needs a `--features gui` runtime). Existing scaffold files are overwritten, not rejected. Backs `nest new [--template …]`."
+  "Scaffold a new project named `nm` (or `\".\"` for the current directory, taking the project name from the cwd's basename): a `project.blsp` manifest, the baked-in language guide, and starter code chosen by `template` — `\"default\"` (a `main`+`hello` module pair, the default), `\"tui-loop\"` (a tail-recursive animation loop), `\"gen\"` (a stateful gen_server process), `\"editor\"` (a tiny text editor on the `ui` framework), or `\"gui\"` (a windowed app on the `ui` framework, opened with `(gui-display)` — needs a `--features gui` runtime). Existing scaffold files are overwritten, not rejected. Backs `nest new [--template …]`."
   ;; `nest new .` scaffolds into the current directory (cargo init's shape);
   ;; the project name is then the cwd's basename. Both forms — `nest new .` and
   ;; `nest new foobar` — *overwrite* existing scaffold files rather than

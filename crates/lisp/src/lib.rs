@@ -30,7 +30,7 @@ pub mod dist; // distributed nodes: connect two runtimes over TCP, route message
 pub mod error; // errors + source positions (cross-cutting)
 pub mod gui; // optional windowed display backend (feature "gui") — ADR-046 frontend #2
 pub mod introspect; // tooling-facing queries on a live Interp (LSP today, MCP next)
-pub mod net; // thin non-blocking TCP socket mechanism (ADR-062); policy lives in the external brood-net package (ADR-085 Move 2)
+pub mod net; // thin non-blocking TCP socket mechanism (ADR-062); policy lives in bundled std/net/* (ADR-097)
 pub mod process; // the green-process scheduler // the primitive kernel (Rust mechanism; policy lives in std/*.blsp)
 pub mod text_width; // grapheme-cluster display-cell width (the `display-width` builtin + the GUI grid)
 

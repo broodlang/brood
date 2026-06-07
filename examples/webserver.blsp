@@ -1,0 +1,62 @@
+;; A very basic web app, written in Brood. Run it and open the URL it prints:
+;;
+;;     brood examples/webserver.blsp        # or: nest run examples/webserver.blsp
+;;
+;; It serves a few routes over HTTP/1.0 — the whole stack (TCP sockets, the HTTP
+;; parser/responder, routing) is Brood over a thin socket kernel (ADR-059/062).
+;; Stop it with Ctrl-C.
+
+(require 'net/http)
+
+(def *port* 8080)
+
+;; A handler maps a request map to a response map. `ok`/`text` build responses;
+;; the `router` below dispatches on the request path.
+
+(defn home (req)
+  (ok (str "<!doctype html><html><head><meta charset=utf-8><title>Brood</title>"
+        "<style>body{font-family:system-ui,sans-serif;max-width:38em;margin:4em auto;line-height:1.5}"
+        "code{background:#f0f0f0;padding:.1em .3em;border-radius:3px}</style></head>"
+        "<body>"
+        "<h1>Hello from Brood &#128035;</h1>"
+        "<p>This page is served by a web server written entirely in "
+        "<strong>Brood Lisp</strong> &mdash; TCP sockets, HTTP parsing, and routing "
+        "are all Brood over a thin socket kernel.</p>"
+        "<p>Try these routes:</p>"
+        "<ul>"
+        "<li><a href=\"/hello\">/hello</a> &mdash; a plain-text greeting</li>"
+        "<li><a href=\"/echo\">/echo</a> &mdash; echoes your request path &amp; headers</li>"
+        "<li><a href=\"/nope\">/nope</a> &mdash; a 404</li>"
+        "</ul>"
+        "</body></html>")))
+
+(defn hello (req)
+  (text-response "hello, world"))
+
+;; Show that the parsed request is just data.
+(defn echo (req)
+  (text-response (str "you asked for: "
+                   (get req :path)
+                   "\n\n"
+                   "method: "
+                   (get req :method)
+                   "\n"
+                   "host:   "
+                   (get (get req :headers) "host" "(none)")
+                   "\n"
+                   "agent:  "
+                   (get (get req :headers) "user-agent" "(none)")
+                   "\n")))
+
+;; The application: a router (a closure capturing a map of handler closures),
+;; bound at top level. `def` promotes it into the shared code region — sound now
+;; that `promote` back-patches cyclic/nested closure capture (closure-capturing-
+;; closure no longer overflows).
+(def app (router {"/" home "/hello" hello "/echo" echo}))
+
+(println (str "Brood web server listening on http://localhost:" *port*))
+(println "Routes: /  /hello  /echo   (Ctrl-C to stop)")
+
+;; `serve` blocks here, accepting connections and dispatching each request through
+;; `app`. Each connection is handled in its own spawned process.
+(serve *port* app)

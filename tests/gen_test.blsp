@@ -1,10 +1,10 @@
-;; std/hatch.blsp — the gen_server-style process framework. Built in Brood on
+;; std/proc/gen.blsp — the gen_server-style process framework. Built in Brood on
 ;; spawn/send/receive/ref. :isolated because each test spawns processes and we
 ;; (re)define servers as globals.
 
-(defmodule hatch-test (:use test) (:use proc/hatch))
+(defmodule gen-test (:use test) (:use proc/gen))
 
-(describe "hatch: cast and call"
+(describe "gen: cast and call"
   :isolated
   (defprocess counter
     (n)
@@ -18,22 +18,22 @@
   ; reply old, set new
 
   (test "a cast threads new state; gen-call reads it synchronously"
-    (let (c (hatch counter 0)) (! c :inc) (! c [:add 10]) (assert= (gen-call c :value) 11)))
+    (let (c (spawn-server counter 0)) (! c :inc) (! c [:add 10]) (assert= (gen-call c :value) 11)))
 
   (test "a no-op cast leaves state unchanged"
-    (let (c (hatch counter 5)) (! c :ping) (assert= (gen-call c :value) 5)))
+    (let (c (spawn-server counter 5)) (! c :ping) (assert= (gen-call c :value) 5)))
 
   (test "a call can both reply and update state"
-    (let (c (hatch counter 7))
+    (let (c (spawn-server counter 7))
       (assert= (gen-call c [:set 100]) 7)
       ; replies the OLD value
       (assert= (gen-call c :value) 100)))
   ; and the new state took effect
 
   (test "casts are ordered, and a later call observes all of them"
-    (let (c (hatch counter 0)) (! c :inc) (! c :inc) (! c :inc) (assert= (gen-call c :value) 3))))
+    (let (c (spawn-server counter 0)) (! c :inc) (! c :inc) (! c :inc) (assert= (gen-call c :value) 3))))
 
-(describe "hatch: sleep"
+(describe "gen: sleep"
   :isolated
   (test "sleep waits roughly the requested time"
     (let (t (now)) (sleep 30) (is (>= (- (now) t) 25))))
@@ -43,17 +43,17 @@
     (sleep 20)
     (assert= (receive (:keep :present) (after 0 :eaten)) :present)))
 
-(describe "hatch: concurrent servers don't cross wires"
+(describe "gen: concurrent servers don't cross wires"
   :isolated
   (defprocess echo (state) (call [:double x] [(* x 2) state]))
 
   (test "two gen-calls to two servers get their own replies"
-    (let (a (hatch echo nil) b (hatch echo nil))
+    (let (a (spawn-server echo nil) b (spawn-server echo nil))
       ;; refs tag each call, so interleaved replies can't be confused
       (assert= (gen-call a [:double 3]) 6)
       (assert= (gen-call b [:double 21]) 42))))
 
-(describe "hatch: query and stop"
+(describe "gen: query and stop"
   :isolated
   ;; `query` is a synchronous read that doesn't change state — the body is just
   ;; the reply, no `[reply state]` pair needed. State is threaded along by the
@@ -65,7 +65,7 @@
     (query :size (count m)))
 
   (test "query replies the body and leaves state unchanged"
-    (let (s (hatch kv {}))
+    (let (s (spawn-server kv {}))
       (! s [:put :a 1])
       (! s [:put :b 2])
       (assert= (gen-call s [:get :a]) 1)
@@ -80,7 +80,7 @@
     ;; an exited process are no-ops in this kernel). We can't observe the exit
     ;; from outside without `monitor`, so we just confirm stop returns nil and
     ;; the surrounding test completes (i.e. the process doesn't deadlock).
-    (let (s (hatch kv {}))
+    (let (s (spawn-server kv {}))
       (! s [:put :a 1])
       (assert= (gen-call s :size) 1)
       (assert= (stop s) nil))))

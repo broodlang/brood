@@ -3623,21 +3623,31 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // lock file + load-path entries. Required lazily by `project-setup` only when a
     // project actually declares deps. Opt-in, never in the prelude.
     ("package", include_str!("../../../std/tool/package.blsp")),
+    // TCP sockets (ADR-062): active-socket helpers + a spawn-per-connection
+    // server over the non-blocking tcp-* primitives. Opt-in, never in the prelude.
+    ("net/tcp", include_str!("../../../std/net/tcp.blsp")),
     // The file & filesystem library: whole-file/line I/O, directory walking, path
     // helpers — Brood over the fs primitives. Opt-in, never in the prelude.
     ("file", include_str!("../../../std/file.blsp")),
+    // A minimal HTTP/1.0 server (ADR-062) over the tcp + file libraries — request
+    // parsing, response rendering, a router, static files. Opt-in.
+    ("net/http", include_str!("../../../std/net/http.blsp")),
     // JSON ↔ Brood data, written entirely in Brood (a recursive-descent parser +
     // encoder over the string primitives; the reader's `\u{}` escape is the
     // codepoint→char mechanism). Opt-in, never in the prelude.
     ("json", include_str!("../../../std/json.blsp")),
-    // The net/web library (net/tcp, net/http, net/sse) was lifted out of the
-    // binary into the `brood-net` package (ADR-085 Move 2) — depend on it via the
-    // package manager (`[brood-net :path …]`), it's no longer baked in.
-    // `proc/hatch` (a gen_server-style server loop) stays bundled — the core
-    // `log` module is a hatch process. `proc/supervisor` was lifted out into the
-    // `brood-supervisor` package (ADR-085 Move 2); depend on it via the package
-    // manager (`[brood-supervisor :path …]`).
-    ("proc/hatch", include_str!("../../../std/proc/hatch.blsp")),
+    // Server-Sent Events (text/event-stream): a client reader process that streams
+    // events to a subscriber's mailbox (pairs with ui's `with-events`) + server-side
+    // framing. Pure frame parsing + a thin IO loop over tcp; reuses http's URL/header
+    // helpers. Opt-in.
+    ("net/sse", include_str!("../../../std/net/sse.blsp")),
+    // The process framework, bundled in the default install (ADR-085 amended —
+    // batteries-included, not externalized). `proc/gen` is the gen_server-style
+    // server loop (`defprocess` / `spawn-server` / `!` / `gen-call` / `stop`); the
+    // core `log` module is a `proc/gen` process. `proc/supervisor` is OTP-style
+    // supervision — independent of `proc/gen`, both over the same kernel primitives.
+    ("proc/gen", include_str!("../../../std/proc/gen.blsp")),
+    ("proc/supervisor", include_str!("../../../std/proc/supervisor.blsp")),
     // Order a flat process-info snapshot as a parent→child forest (depth-tagged, DFS
     // by id). A pure, dependency-free transform — CORE, not dev-tools: it's shared by
     // the dev observer's tree sort *and* a shipped app's process list (myedit's
@@ -3648,7 +3658,7 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // synchronous `await`. Pure Brood over spawn / receive / exit — the generic
     // version of the editor's hand-rolled async-eval watchdog. Opt-in.
     ("task", include_str!("../../../std/task.blsp")),
-    // An async, safe logger (ADR-006): a `hatch` process holding a list of
+    // An async, safe logger (ADR-006): a `proc/gen` process holding a list of
     // backends, each an `io` port + a min level + a formatter. Log calls are casts
     // (fire-and-forget = async); the one process serialises writes (no interleaving)
     // and isolates a backend crash. Opt-in, never in the prelude.

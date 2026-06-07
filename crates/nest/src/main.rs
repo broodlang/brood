@@ -72,9 +72,9 @@ enum Cmd {
         name: String,
 
         /// Starter template: `default` (a main+hello pair), `tui-loop` (a
-        /// tail-recursive animation loop, pairs with `nest run --for`), `hatch`
+        /// tail-recursive animation loop, pairs with `nest run --for`), `gen`
         /// (a stateful gen_server-style process), or `http-server` (a basic web
-        /// app over std/http). An unknown name lists the full set.
+        /// app over std/net/http). An unknown name lists the full set.
         #[arg(long = "template", short = 't', value_name = "NAME")]
         template: Option<String>,
     },

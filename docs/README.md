@@ -135,7 +135,8 @@ not for *how things are now*.
 
 ---
 
-> **Not in this repo:** the `brood-net` (TCP/HTTP) and `brood-supervisor`
-> libraries are now **separate packages**, lifted out of `std/` by ADR-085
-> (Move 2). The Rust *mechanism* for sockets still lives in the `brood` lib
-> (`crates/lisp/src/net.rs`); the Brood *policy* moved to those external packages.
+> **Bundled in the default install:** the net library (`net/tcp`/`net/http`/
+> `net/sse`) and the process framework (`proc/gen` + `proc/supervisor`) ship in
+> `std/`, baked into the binary (ADR-097 — batteries-included; reverses ADR-085
+> Move 2). The Rust *mechanism* for sockets lives in the `brood` lib
+> (`crates/lisp/src/net.rs`); the Brood *policy* is in `std/net/*`.

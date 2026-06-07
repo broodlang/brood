@@ -62,7 +62,7 @@ A user wanting *recover-on-throw* writes a supervisor process in Brood:
 Add restart limits, backoff, or a structured policy on top — all in Brood,
 no kernel surface to maintain.
 
-## The supervisor library (`brood-supervisor/src/proc/supervisor.blsp`)
+## The supervisor library (`std/proc/supervisor.blsp`)
 
 The structured version of that pattern ships as a require-able module
 (`(require 'proc/supervisor)`, ADR-044). A supervisor is an ordinary green process

@@ -1417,8 +1417,8 @@ fn remote_exit_kills_a_worker() {
 
 /// End-to-end **cross-node supervision** (ADR-067, the #1 payoff): a supervisor on
 /// node B supervises a worker on node A, and restarts it when it crashes — all
-/// over the distributed link. The supervisor (inlined here — proc/supervisor is
-/// now the external `brood-supervisor` package, ADR-085 Move 2) does a roundtrip
+/// over the distributed link. The supervisor (inlined here rather than using
+/// bundled `proc/supervisor`) does a roundtrip
 /// to A's `:factory` to obtain the remote worker's pid (since `remote-spawn` is
 /// fire-and-forget), `monitor`s that remote pid, so the remote crash arrives as a
 /// `[:down …]` and triggers a restart that spins up a fresh worker.
@@ -1453,9 +1453,8 @@ fn supervisor_restarts_a_remote_child() {
 (node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
 (connect "a@127.0.0.1:{port_a}")
 (def me (self))
-;; proc/supervisor now lives in the `brood-supervisor` package (ADR-085 Move 2);
-;; this test ships into a bare runtime with no deps fetched, so it inlines the
-;; equivalent userland one-for-one respawn over `monitor` — the remote worker
+;; this test inlines the equivalent userland one-for-one respawn over `monitor`
+;; (rather than pulling in bundled `proc/supervisor`) — the remote worker
 ;; crashes, its monitor fires `[:down …]`, and we start a fresh incarnation.
 (defn start-child ()
   (do (send {{:name :factory :node :a@127.0.0.1}} [:make (self) me])

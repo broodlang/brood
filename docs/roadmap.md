@@ -345,22 +345,16 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   keeps bare module names** — the *internal* toolchain stays at root
   (namespaces.md §10), grouped without namespacing its identity (the embedded
   table keys it bare, pointing at the grouped file). 🟡 **(2)** ship the
-  namespaced frameworks as **packages** — **the clean slice is done**
-  (2026-06-01): `brood-net` (`net/tcp`/`http`/`sse`) and `brood-supervisor`
-  (`proc/supervisor`) are removed from the binary and consumed as **internal
-  packages** — a sibling `src/` on the load-path via `:source-paths`, *not* the
-  package manager (no `:dependencies`/lock/fetch — that's for external/distributed
-  deps, ADR-037); `brood-edit`/`brood-benchmark` point `:source-paths` at them.
-  The walk found *most of the
-  framework can't leave* — the bundled toolchain is built on it (`tool/observer` →
-  editor display/face/highlight/keymap/lineedit/ui; `tool/repl` → editor/lineedit;
-  `tool/sexp` → editor/buffer; core `log` → proc/hatch), and those must run in a
-  fresh runtime with no deps fetched. So **only zero-bundled-dependent modules
-  externalized**; `editor/*` + `proc/hatch` stay bundled (they're shared UI the
-  toolchain consumes, not a detachable app framework — the editor *app* already
-  lives outside the binary as `brood-edit`). ⬜ Remaining: the future **GUI
-  framework** as a package, and repackaging the REPL/observer if `editor/*` is ever
-  to leave — gated on a real consumer (ADR-011);
+  namespaced frameworks as **packages** — ❌ **reversed by ADR-097**
+  (2026-06-07): the externalization was never finished (`brood-net`/
+  `brood-supervisor` package dirs were deleted from the binary but never created)
+  and the project chose **batteries-included** — every framework module ships in
+  the default install. `net/*` and `proc/supervisor` are bundled in `CORE_MODULES`
+  again; there are no internal framework packages. The package manager (ADR-037)
+  stays for external/distributed deps only. `editor/*` + the process framework
+  (`proc/gen` + `proc/supervisor`, the split-and-renamed `proc/hatch`) remain
+  bundled, as does everything else. ⬜ A future **GUI framework** likewise ships
+  bundled rather than as a fetched package;
   ✅ **(3)** the enabling language change — **hierarchical module names** — is
   **done** (2026-06-01): `(require 'gui/window)` → namespace `gui/window` ←
   `gui/window.blsp`, amending ADR-019/065, defs qualifying on the **last** `/`

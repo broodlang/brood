@@ -5123,6 +5123,14 @@ The mechanical rewrite was a token-aware pass (skips comments/strings, leaves
 the Rust eval-string bootstraps in the binaries + the embedded table were updated
 to match. Full suite green.
 
+**Move 2 (lift frameworks into external packages) — REVERSED by ADR-097**
+(2026-06-07): `brood-net` and `brood-supervisor` were never finished (the
+package dirs were deleted from the binary but never created), and the project's
+direction changed to **batteries-included** — every framework module ships in the
+default install. `net/*` and `proc/supervisor` are bundled in `CORE_MODULES`
+again; there are no internal framework packages. The text below is retained as
+the historical record of the externalization attempt. See ADR-097.
+
 **Move 2 (lift frameworks into external packages) — the clean slice is done**
 (2026-06-01), and surfaced a structural limit worth recording: *most of the
 framework can't actually leave the binary*, because the **bundled toolchain is
@@ -5850,3 +5858,52 @@ already trust) rather than a project. The cost: we deliberately leave the templa
 ADR-069 (dispatch perf — the passthrough + IC groundwork), ADR-091 (RUNTIME compaction),
 ADR-026 (immutability), ADR-038 (bundle-size vs Cranelift). Lives in
 `crates/lisp/src/eval/compile.rs`; plan + analysis in `docs/vm-perf-and-jit-runway.md`.
+
+## ADR-097 — Batteries-included default install; split + rename the process framework
+
+**Status:** accepted (2026-06-07). Amends **ADR-085 Move 2** (reverses the
+externalization) and supersedes the short-lived stopgap that merged supervision
+into `proc/hatch`.
+
+**Context.** ADR-085 Move 2 lifted the net library (`net/tcp`/`net/http`/`net/sse`)
+into a `brood-net` package and planned a `brood-supervisor` package for
+`proc/supervisor`, on the thesis "keep the bundled stdlib small; push frameworks
+out to packages." In practice the modules were *deleted* from the binary but the
+packages were **never created**, so `brood-edit` (which `(:use)`s `net/sse` and
+`proc/supervisor`) couldn't start — `nest run` died with `cannot find module
+'net/sse'`. The project's direction also clarified: Brood should be
+**batteries-included** — the editor, net, and concurrency frameworks are part of
+what the language ships, not optional fetched deps. The package manager (ADR-037)
+remains, but for *third-party* deps only; we do not externalize our own framework.
+
+Separately, `proc/hatch` was the only metaphorically-named module in `std/` (every
+other module is a plain noun — `buffer`, `keymap`, `log`, …), and it had come to
+fuse two concerns over the same kernel primitives that share **no code and no
+common consumer**: a gen_server-style server framework and OTP-style supervision.
+
+**Decision.**
+1. **Everything ships bundled in the default install.** `net/tcp`, `net/http`,
+   `net/sse`, `proc/gen`, and `proc/supervisor` are all in `CORE_MODULES`
+   (`crates/lisp/src/builtins.rs`). No internal framework `:path` packages;
+   consumers carry no `:source-paths` to sibling dirs.
+2. **Split `proc/hatch` into cohesive units.** `proc/gen` is the gen_server-style
+   server loop (`defprocess` / `spawn-server` / `!` / `gen-call` / `stop`);
+   `proc/supervisor` is supervision. They're independent — neither `:use`s the
+   other; both sit directly on `spawn`/`send`/`receive`/`ref`/`link`/`trap-exit`/
+   `exit`/`register`.
+3. **Drop the cute name.** Module `proc/hatch` → `proc/gen`; the spawn fn `hatch`
+   → `spawn-server`; the internal `hatch--clause` → `gen--clause`. `defprocess` /
+   `!` / `gen-call` / `stop` keep their names. The `nest new` scaffold template
+   `hatch` is renamed `gen`.
+
+**Consequences.** The lean-binary goal of ADR-085 is explicitly traded for a
+batteries-included default — every runtime carries the net + concurrency
+frameworks. `std/` is still curated (the *language* core stays small); the
+framework modules live under their `editor/`, `net/`, `proc/` namespaces and are
+bundled, not externalized. `proc/gen` stays a require-able module (not prelude) —
+`defprocess` expands to `receive`/`match`, which strands lambdas during the
+prelude freeze (devlog). Consumers updated: `std/log` (`proc/gen` + `spawn-server`),
+`examples/life`, `tests/{gen,buffer}_test`, the `project` scaffold; `net/*` and
+`proc/supervisor` tests + the `webserver` example were restored to the brood repo.
+`brood-edit` drops its `:source-paths` hacks and `(:use proc/supervisor)` /
+`(:use net/*)` resolve from the binary.

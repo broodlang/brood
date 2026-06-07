@@ -1,0 +1,76 @@
+;; TCP sockets (std/tcp.blsp + the kernel tcp-* primitives, ADR-059/060). Real
+;; loopback connections on 127.0.0.1 with an OS-assigned port (tcp-listen 0).
+;;
+;; The model delivers a socket's events to its *owning* process's mailbox, so each
+;; test owns the listener, the client, and the accepted server-side socket in ONE
+;; process and drives the exchange with plain `receive` — no extra spawn needed.
+;; :isolated keeps these (real fds + timers) off the shared worker churn.
+;;
+;; Register-only — discovered and run by `nest test` (and cargo test).
+
+(defmodule tcp-test (:use test) (:use net/tcp))
+
+(describe "tcp: predicate + handles"
+  :isolated
+  (test "socket? distinguishes sockets from other values"
+    (let (ls (tcp-listen "127.0.0.1" 0))
+      (is (socket? ls))
+      (refute (socket? 5))
+      (refute (socket? "x"))
+      (tcp-close ls)))
+  (test "tcp-local-port reports the OS-assigned port"
+    (let (ls (tcp-listen "127.0.0.1" 0))
+      (is (> (tcp-local-port ls) 0))
+      (tcp-close ls))))
+
+(describe "tcp: loopback echo via mailbox delivery"
+  :isolated
+  (test "accept, client send, server echo — all in one process"
+    (let (ls (tcp-listen "127.0.0.1" 0)
+          port (tcp-local-port ls))
+      (let (c (tcp-connect "127.0.0.1" port)
+             ;; the accept notification carries the server-side socket
+             s
+             (receive ([:tcp-accept ~ls cs] cs) (after 5000 :timeout)))
+        (is (socket? s))
+        ;; an accepted socket is passive — take ownership to start receiving
+        (tcp-controlling-process s (self))
+        (tcp-send c "ping over tcp")
+        ;; the server side (owned here too) receives the client's bytes
+        (let (got (receive ([:tcp ~s d] d) (after 5000 :timeout)))
+          (assert= got "ping over tcp")
+          (tcp-send s "pong back")
+          (let (back (receive ([:tcp ~c d] d) (after 5000 :timeout)))
+            (tcp-close c)
+            (tcp-close s)
+            (tcp-close ls)
+            (assert= back "pong back")))))))
+
+(describe "tcp: EOF surfaces as [:tcp-closed …]"
+  :isolated
+  (test "closing one end delivers [:tcp-closed sock] to the other"
+    (let (ls (tcp-listen "127.0.0.1" 0)
+          port (tcp-local-port ls))
+      (let (c (tcp-connect "127.0.0.1" port)
+            s (receive ([:tcp-accept ~ls cs] cs) (after 5000 :timeout)))
+        (tcp-close s)
+        (let (ev (receive ([:tcp-closed ~c] :closed) (after 5000 :timeout)))
+          (tcp-close c)
+          (tcp-close ls)
+          (assert= ev :closed))))))
+
+(describe "tcp: tcp-drain collects a request/response"
+  :isolated
+  (test "drain concatenates chunks until the peer closes"
+    (let (ls (tcp-listen "127.0.0.1" 0)
+          port (tcp-local-port ls))
+      (let (c (tcp-connect "127.0.0.1" port)
+            s (receive ([:tcp-accept ~ls cs] cs) (after 5000 :timeout)))
+        ;; server writes a reply in two chunks then closes
+        (tcp-send s "hello, ")
+        (tcp-send s "world")
+        (tcp-close s)
+        (let (reply (tcp-drain c))
+          (tcp-close c)
+          (tcp-close ls)
+          (assert= reply "hello, world"))))))
