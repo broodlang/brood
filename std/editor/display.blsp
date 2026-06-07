@@ -18,8 +18,13 @@
 ;;   [:cursor row col]              place the hardware cursor
 ;; A FACE is a map of style attributes, any subset of:
 ;;   {:fg <colour> :bg <colour> :bold <truthy> :reverse <truthy>}
-;; where a colour is a keyword: :black :red :green :yellow :blue :magenta :cyan
-;;   :white :grey :dark-grey. Unknown keys/colours are ignored by the frontend.
+;; where a colour is either a palette keyword — :black :red :green :yellow :blue
+;;   :magenta :cyan :white :grey :dark-grey (the terminal renders these as its
+;;   *named* colours, honouring the user's theme) — or an explicit colour: an
+;;   `[r g b]` vector (each channel 0..255) or a `"#rgb"` / `"#rrggbb"` hex string,
+;;   both rendering as the same true colour in either frontend (so a curated
+;;   palette looks identical in the terminal and the GUI window). Unknown
+;;   keys/colours are ignored by the frontend.
 
 (defmodule editor/display
   "The render-op protocol for the display seam (M3, ADR-046): pure constructors
