@@ -24,7 +24,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, Once};
 
 use corosensei::stack::DefaultStack;
@@ -564,6 +564,15 @@ static WORKERS: LazyLock<Vec<WorkerQueue>> = LazyLock::new(|| {
         .collect()
 });
 
+/// Per-worker "is currently resuming a process" flag. Index = `worker_id`, sized
+/// to match `WORKERS`. A worker runs at most one coroutine at a time, so this is a
+/// 0/1 gauge of in-flight work. `assign_worker` folds it into a worker's load:
+/// a worker draining one CPU-bound process has an *empty queue* yet is saturated,
+/// and queue length alone would wrongly read it as idle. Set/cleared around the
+/// `resume` in `run_one`; read (lock-free) at spawn placement.
+static WORKER_BUSY: LazyLock<Vec<AtomicBool>> =
+    LazyLock::new(|| (0..WORKERS.len()).map(|_| AtomicBool::new(false)).collect());
+
 /// Rotating start point for `assign_worker`'s least-loaded scan. Read +
 /// incremented under relaxed ordering — the only requirement is approximate
 /// rotation; an occasional duplicate or skipped index is fine.
@@ -586,23 +595,30 @@ fn assign_worker() -> usize {
     // (latent OOB), and the old per-spawn `BROOD_J` env read (+ the global env
     // lock) is gone — `worker_count()` now runs once, at pool init.
     let n = WORKERS.len().max(1);
+    // A worker's load is its runnable backlog (queue length) **plus** the process
+    // it's currently running, if any: a worker draining one long CPU-bound process
+    // has an empty queue but no spare capacity, so queue length alone would wrongly
+    // steer a newcomer onto it. (Parked/blocked processes aren't in the queue — they
+    // sit in mailbox waiter slots — so the queue already excludes them; the running
+    // process is the one thing it misses.) Sampled via `try_lock`, so a momentarily
+    // contended queue reads as `MAX` and is skipped rather than blocking the spawner.
+    let load = |i: usize| -> usize {
+        match WORKERS[i].0.try_lock() {
+            Ok(q) => q
+                .len()
+                .saturating_add(WORKER_BUSY[i].load(Ordering::Relaxed) as usize),
+            Err(_) => usize::MAX,
+        }
+    };
     let start = NEXT_WORKER.fetch_add(1, Ordering::Relaxed) % n;
     let mut best = start;
-    let mut best_len = WORKERS[start]
-        .0
-        .try_lock()
-        .map(|q| q.len())
-        .unwrap_or(usize::MAX);
+    let mut best_len = load(start);
     for off in 1..n {
         if best_len == 0 {
-            break; // can't do better than an empty queue
+            break; // can't do better than an empty, idle worker
         }
         let i = (start + off) % n;
-        let len = WORKERS[i]
-            .0
-            .try_lock()
-            .map(|q| q.len())
-            .unwrap_or(usize::MAX);
+        let len = load(i);
         if len < best_len {
             best_len = len;
             best = i;
@@ -709,7 +725,7 @@ fn deregister(pid: u64, reason: Message) {
 /// The untrappable hard-kill reason — Erlang's `exit(pid, kill)`. A `:kill` exit
 /// fires at the next reduction tick (`preempt`); any other reason is the soft
 /// signal that waits for the next `receive` iteration.
-fn is_kill_reason(reason: &Message) -> bool {
+pub(super) fn is_kill_reason(reason: &Message) -> bool {
     matches!(reason, Message::Keyword(k) if *k == value::intern(pk::KILL))
 }
 
@@ -788,16 +804,21 @@ fn worker_loop(wid: usize) {
 /// at `receive`, park it on its mailbox (or re-queue it if a message raced in).
 fn run_one(mut proc: Box<Process>) {
     let mailbox = Arc::clone(&proc.mailbox);
+    let wid = proc.worker_id;
     mailbox.status.store(ST_RUNNING, Ordering::Relaxed); // about to resume on this worker
 
     let live = RUNNING.fetch_add(1, Ordering::SeqCst) + 1;
     PEAK_RUNNING.fetch_max(live, Ordering::SeqCst);
+    // Mark this worker busy for `assign_worker`'s load metric while we're inside
+    // `resume` (cleared below, after `catch_unwind`, on every return path).
+    WORKER_BUSY[wid].store(true, Ordering::Relaxed);
     // Fresh reduction budget for this scheduling quantum (decremented in eval's loop
     // via `tick`; at zero the process preempts itself — see `tick`/`preempt`).
     REDUCTIONS.with(|r| r.set(REDUCTION_BUDGET));
     EXIT_REASON.with(|r| *r.borrow_mut() = None); // stale from a prior process on this worker
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| proc.coro.resume(())));
     RUNNING.fetch_sub(1, Ordering::SeqCst);
+    WORKER_BUSY[wid].store(false, Ordering::Relaxed);
     // Accumulate the reductions this quantum consumed (budget minus what's left;
     // a preempted process left 0) into the per-process total for `process-info`'s
     // `:reductions`. The coroutine shares this worker's `REDUCTIONS` TLS, so its

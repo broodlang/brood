@@ -2465,6 +2465,13 @@ fn range_reduce(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
         Value::Nil => return Ok(init), // empty range — acc unchanged
         v => return Err(LispError::wrong_type(heap, "%range-reduce", "range", v)),
     };
+    // Route the per-element callback through the VM when it's the active engine
+    // (`apply_value` → `dispatch`: a VM-eligible reducer runs compiled, ~the
+    // big win for a named/RUNTIME reducer; a native or ineligible closure still
+    // falls back to `eval::apply` inside `dispatch`). `BROOD_VM=0` keeps the pure
+    // tree-walker path, so the escape hatch / differential TW mode stay honest.
+    // Checked once, not per element.
+    let use_vm = crate::eval::compile::vm_enabled();
     heap.root_scope(|heap| {
         let f_r = heap.root(f);
         let mut acc_r = heap.root(init);
@@ -2472,7 +2479,11 @@ fn range_reduce(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
         while if step > 0 { i < hi } else { i > hi } {
             let f = heap.read_root(f_r);
             let acc = heap.read_root(acc_r);
-            let next = apply(heap, f, &[acc, Value::Int(i)], env)?;
+            let next = if use_vm {
+                crate::eval::compile::apply_value(heap, f, &[acc, Value::Int(i)], env)?
+            } else {
+                apply(heap, f, &[acc, Value::Int(i)], env)?
+            };
             acc_r = heap.advance_root(acc_r, next);
             i += step;
         }

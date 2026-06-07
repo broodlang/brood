@@ -179,3 +179,19 @@ current scheduler pins each process to one worker — `2abf05e`) because
 cross-thread coroutine resume was the last slice of the KI-1 race. The
 root-cause analysis and the invariants a reintroduction must honour are in
 [`concurrency-v2.md`](concurrency-v2.md).
+
+**Placement (since pinning is for life):** because a process never migrates, the
+*only* load-balancing lever is **where it's first pinned**, decided once at spawn
+by `assign_worker` (`scheduler.rs`). The policy is **least-loaded with a rotating
+start**: scan the per-worker queues from a round-robin offset (`NEXT_WORKER`) and
+pick the lightest, breaking ties toward the rotation. A worker's load is its
+runnable-queue length **plus 1 if it's currently inside `resume`** (the
+`WORKER_BUSY` gauge) — so a worker draining one CPU-bound process reads as loaded
+even with an empty queue, instead of looking idle. When the pool is idle this
+degrades to plain round-robin (so N spawns onto N idle cores land one-per-core);
+when one worker is backed up, fresh processes steer to idle cores. Two caveats
+follow from pinning: it balances *process count*, not *CPU load* (a count-balanced
+placement can still be load-skewed and can't self-correct — that needs migration,
+the deferred work-stealing above), and under heavy concurrent spawning the relaxed
+`NEXT_WORKER` rotation + `try_lock` queue sampling make it *approximately*, not
+exactly, round-robin.
