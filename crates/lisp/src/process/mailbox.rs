@@ -341,53 +341,16 @@ pub fn receive_match(
     heap.push_root(on_timeout); // rbase + 1
     let mut i = 0usize;
     loop {
-        // Exit at the `receive` boundary (this loop is a server's natural per-
-        // iteration point, and the resume site for a parked process `exit` woke). A
-        // soft `(exit pid reason)` — and any hard `:kill` not already caught at
-        // `preempt` — dies here with its reason instead of taking another message.
-        // The root has no yielder and can't be killed this way; we never resume
-        // after the suspend, so the operand-rooted matcher/on_timeout (freed with
-        // the heap on death) needn't be popped.
-        if let Some(yptr) = ctx.yielder {
-            if let Some(reason) = ctx.mailbox.pending_kill() {
-                // SAFETY: the yielder is valid while this coroutine runs (we're
-                // inside its body, called from eval). `run_one` retires us on `Kill`.
-                unsafe { (*yptr).suspend(Suspend::Kill(reason)) };
+        // Scan the queued messages for a ready clause (advancing `i` past
+        // non-matches). The wait, below, is the only blocking step — this split is
+        // the seam the coming state-capture path uses: there, a `None` becomes a
+        // *suspend signal* returned to the scheduler instead of a `wait_for_message`.
+        match scan_mailbox(heap, &ctx, rbase, &mut i) {
+            Ok(Some(thunk)) => {
+                heap.truncate_roots(rbase);
+                return Ok(thunk);
             }
-        }
-        // Rebuild candidate `i` into the heap (no eval here → no collection).
-        let candidate = {
-            let st = crate::core::sync::lock(&ctx.mailbox.state);
-            if i < st.queue.len() {
-                Some(from_message(heap, &st.queue[i]))
-            } else {
-                None
-            }
-        };
-        match candidate {
-            Some(v) => {
-                let matcher = heap.root_at(rbase);
-                let thunk = match eval::apply(heap, matcher, &[v], EnvId::GLOBAL) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        heap.truncate_roots(rbase);
-                        return Err(e);
-                    }
-                };
-                if matches!(thunk, Value::Fn(_)) {
-                    // Matched — remove exactly this message, then hand the body thunk
-                    // *back* (don't run it here). The `receive` macro applies it in
-                    // TAIL position — `((%receive …))` — so a loop that tail-calls
-                    // back into `receive` trampolines through eval's TCO and stays
-                    // O(1) native stack (running it here instead nests a `receive_match`
-                    // per message → green-process coroutine-stack overflow).
-                    crate::core::sync::lock(&ctx.mailbox.state).queue.remove(i);
-                    heap.truncate_roots(rbase);
-                    return Ok(thunk);
-                }
-                i += 1; // no clause matched — leave it queued, try the next message
-            }
-            None => {
+            Ok(None) => {
                 // Scanned every queued message with no match.
                 if let Some(d) = deadline {
                     if Instant::now() >= d {
@@ -400,6 +363,68 @@ pub fn receive_match(
                 }
                 wait_for_message(&ctx, i, deadline);
             }
+            Err(e) => {
+                heap.truncate_roots(rbase);
+                return Err(e);
+            }
+        }
+    }
+}
+
+/// Scan the mailbox from index `*i` for the first message a clause matches, advancing
+/// `*i` past non-matching messages (Erlang selective receive — non-matches stay
+/// queued). Returns `Ok(Some(thunk))` — the matched clause body, with that message
+/// removed, to be applied in tail position by the caller — or `Ok(None)` when every
+/// currently-queued message was scanned with no match (the caller then waits and
+/// re-scans; in the coming state-capture path it instead returns a suspend signal).
+///
+/// This does the matcher `apply` (which can collect at any eval depth — ADR-061 — so
+/// the operand-rooted `matcher` at `rbase+0` is re-read each candidate) but **never
+/// blocks/yields for a message** — that's the caller's `wait_for_message`. It is thus
+/// the reusable scan for both the corosensei wait and the future scheduler-parked
+/// resume. The `receive`-boundary kill check rides at the top (a soft `(exit …)` — and
+/// any hard `:kill` not caught at `preempt` — dies here with its reason rather than
+/// taking another message; the root has no yielder and can't be killed this way).
+fn scan_mailbox(
+    heap: &mut Heap,
+    ctx: &Ctx,
+    rbase: usize,
+    i: &mut usize,
+) -> Result<Option<Value>, LispError> {
+    loop {
+        if let Some(yptr) = ctx.yielder {
+            if let Some(reason) = ctx.mailbox.pending_kill() {
+                // SAFETY: the yielder is valid while this coroutine runs (we're
+                // inside its body, called from eval). `run_one` retires us on `Kill`.
+                unsafe { (*yptr).suspend(Suspend::Kill(reason)) };
+            }
+        }
+        // Rebuild candidate `*i` into the heap (no eval here → no collection).
+        let candidate = {
+            let st = crate::core::sync::lock(&ctx.mailbox.state);
+            if *i < st.queue.len() {
+                Some(from_message(heap, &st.queue[*i]))
+            } else {
+                None
+            }
+        };
+        match candidate {
+            Some(v) => {
+                let matcher = heap.root_at(rbase);
+                let thunk = eval::apply(heap, matcher, &[v], EnvId::GLOBAL)?;
+                if matches!(thunk, Value::Fn(_)) {
+                    // Matched — remove exactly this message and hand the body thunk
+                    // *back* (don't run it here). The `receive` macro applies it in
+                    // TAIL position — `((%receive …))` — so a loop that tail-calls back
+                    // into `receive` trampolines through eval's TCO and stays O(1)
+                    // native stack (running it here instead nests a `receive_match` per
+                    // message → green-process coroutine-stack overflow).
+                    crate::core::sync::lock(&ctx.mailbox.state).queue.remove(*i);
+                    return Ok(Some(thunk));
+                }
+                *i += 1; // no clause matched — leave it queued, try the next message
+            }
+            None => return Ok(None), // scanned to the end with no match
         }
     }
 }

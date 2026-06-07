@@ -27,7 +27,7 @@
 TEA-style `(ui-run model view update display)` loop. Build an app by supplying a
 pure `view` (model + cols/rows → a render frame) and an `update` (model + input +
 cols/rows → model); set `:done` in the model to quit, and declare time-driven work
-as `:timers` (named timers, ADR-101) — or, legacy, `:tick-ms` for a single refresh
+as `:timers` (named timers, ADR-102) — or, legacy, `:tick-ms` for a single refresh
 beat. The observer and the editor are both `ui-run` clients — see
 `std/observer.blsp`."
   ;; the shared named-face / theme registry, for every ui-run client
@@ -153,11 +153,11 @@ event feed). Requires `(require 'sse)` on the producing side."
 
 (defn ui--tick-ms (model)
   "The poll timeout (refresh beat) in ms: `(get model :tick-ms)` or 1000 by default.
-The legacy single-beat knob; superseded by `:timers` (ADR-101) — kept for the
+The legacy single-beat knob; superseded by `:timers` (ADR-102) — kept for the
 synthesized back-compat timer below and any app that hasn't moved to named timers."
   (or (get model :tick-ms) 1000))
 
-;; ---- named timers (ADR-101) -------------------------------------------------
+;; ---- named timers (ADR-102) -------------------------------------------------
 ;; A model may carry `:timers` — a map `name -> spec`, where a spec is `{:every ms}`
 ;; (repeating) or `{:after ms}` (one-shot), optionally with `:idle? true` (count from
 ;; the last *real* input, not from arm/last-fire). Each firing delivers `[:timer name]`
@@ -296,7 +296,7 @@ wiring it into `update` — independent of how the app binds the Escape key. A `
 control message (from another process) raises the window via the display's `:focus`
 and is NOT folded into `update`.
 
-**Named timers (ADR-101).** The poll timeout is `ui--poll-ms` — the soonest live
+**Named timers (ADR-102).** The poll timeout is `ui--poll-ms` — the soonest live
 timer in `(ui--timers model)`. A timed-out poll (nil) fires the earliest due timer via
 `ui--fire`, folding `[:timer name]` (or the bare `:tick` legacy beat). A real input
 stamps `:last-input` on the `clock` (so idle timers reset). The `clock` is threaded
@@ -383,7 +383,7 @@ key/mouse value (`\"a\"`, `:up`, `[:mouse …]`), or a timer firing. `view` is p
 (model + size → a `display.blsp` render frame); `update` folds an input into the next
 model and sets `:done` to quit.
 
-**Timers (ADR-101).** Declare time-driven work as data on the model: `:timers`, a map
+**Timers (ADR-102).** Declare time-driven work as data on the model: `:timers`, a map
 `name -> {:every ms}` / `{:after ms}` (optionally `:idle? true`). The loop parks the
 poll until the soonest is due and folds `[:timer name]` when it fires — so a steady
 animation timer and several idle one-shots coexist, each on its own clock. A model
