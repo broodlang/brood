@@ -6016,6 +6016,7 @@ mod gen_handle_tests {
     /// check; `cargo test` builds with `debug_assertions` on. See
     /// `docs/memory-review.md`.
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "use-after-GC")]
     fn stale_handle_after_flip_panics() {
         let mut h = Heap::new();

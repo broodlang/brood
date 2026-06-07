@@ -59,29 +59,47 @@ pub(super) type Yielder0 = Yielder<(), Suspend>;
 type Coro = Coroutine<(), Suspend, ()>;
 
 /// A green process: its mailbox plus the coroutine carrying its computation
-/// (which owns its `Heap`). Pinned to a single worker thread at spawn time
-/// (`worker_id`); the scheduler routes every re-enqueue back to that worker,
-/// so a coroutine is only ever resumed on the OS thread that first ran it.
-/// `Send` for the moment from spawn → worker (the queue owns it exclusively
-/// in transit), and never again across threads.
+/// (which owns its `Heap`). Pinned to a single worker thread once it has run
+/// (`worker_id`); the scheduler routes every re-enqueue back to that worker, so
+/// a coroutine is only ever *resumed* on one OS thread for its whole life.
+/// `Send` only via the hand-written `unsafe impl` below; see it for the
+/// one-owner-at-any-instant argument that keeps cross-thread resume from
+/// happening.
 pub(super) struct Process {
     pub(super) pid: u64,
     pub(super) mailbox: Arc<Mailbox>,
-    /// Which worker owns this process for its lifetime. Assigned at spawn
-    /// (round-robin); preempt/receive re-enqueue routes back to the same
-    /// worker's queue. Prevents corosensei cross-thread resume hazards
-    /// (KI-1b in docs/known-issues.md — clobbered return addresses under
-    /// preempt-induced migration).
+    /// Which worker owns this process. Assigned at spawn (least-loaded —
+    /// `assign_worker`); preempt/receive re-enqueue routes back to the same
+    /// worker's queue. A **fresh** (never-resumed) process may be re-pinned once
+    /// by a steal (`try_steal` sets this to the thief), but only before its first
+    /// resume; once it has run, this is fixed for life. Pinning prevents the
+    /// corosensei cross-thread resume hazard (KI-1b in docs/known-issues.md —
+    /// clobbered return addresses when a coroutine suspended mid-computation is
+    /// resumed on another thread).
     pub(super) worker_id: usize,
+    /// `true` until the first `resume` (cleared at the top of `run_one`). A fresh
+    /// process has no saved coroutine stack, so it is the *only* kind safe to
+    /// migrate across threads — `try_steal` moves fresh processes only. See
+    /// docs/concurrency-v2.md §3.1a.
+    pub(super) fresh: bool,
     coro: Coro,
 }
 
-// SAFETY: corosensei marks `Coroutine` `!Send` conservatively. A process is
-// only ever moved across threads *once* — from `spawn` (caller's thread) into
-// its assigned worker's queue (via `enqueue`). After that, the assigned worker
-// is the only thread that ever pops it; preempt and receive both re-enqueue to
-// the *same* worker's queue. So at every `resume` site the proc is owned
-// exclusively by one thread, and no cross-thread `resume` ever happens. The
+// SAFETY: corosensei marks `Coroutine` `!Send` conservatively. A `Process` is
+// owned by exactly one thread *at any instant*, and no cross-thread `resume`
+// ever happens:
+//   - At spawn the caller's thread builds it and hands it to its assigned
+//     worker's queue (via `enqueue`); the queue mutex serialises the handoff.
+//   - A **fresh** process may additionally be popped from that queue by a
+//     stealing worker (`try_steal`, under the victim queue's `try_lock`) and
+//     re-pinned to the thief — again a serialised handoff, with no two threads
+//     touching it at once. This move happens *before its first resume*, so there
+//     is no saved coroutine stack to migrate (the migration shape proven safe in
+//     docs/concurrency-v2.md §3.1a; suspended coroutines are never stolen).
+//   - After the first resume the process is pinned: preempt and receive both
+//     re-enqueue to its owning worker's queue, the only thread that ever resumes
+//     it thereafter.
+// So at every `resume` site the proc is owned exclusively by one thread. The
 // captured state (heap, Arcs, message values) is all `Send`.
 unsafe impl Send for Process {}
 
@@ -558,6 +576,11 @@ pub fn yield_now() {
 
 pub(super) static NEXT_PID: AtomicU64 = AtomicU64::new(1);
 static SPAWNED: AtomicU64 = AtomicU64::new(0);
+/// How many fresh processes have been work-stolen across worker threads since
+/// program start (read by `(steal-count)`). A diagnostic of how much rebalancing
+/// the scheduler actually did — 0 means placement-at-spawn kept the pool even and
+/// no thief ever needed to pull work.
+static STOLEN: AtomicU64 = AtomicU64::new(0);
 /// child pid → the pid that `spawn`ed it. Populated at `spawn`, removed at
 /// `deregister` (a parent record lives only as long as the child). Backs
 /// `process-info`'s `:parent` (and a future process-tree view). A side table
@@ -585,16 +608,39 @@ thread_local! {
 /// One worker's run queue + the condvar that parks it when the queue is empty.
 type WorkerQueue = (Mutex<VecDeque<Box<Process>>>, Condvar);
 
-/// Per-worker run queues. Index = `worker_id`. Each worker pops only from its
-/// own queue (no shared queue, no work stealing). A process is assigned to one
-/// worker at spawn time and stays there for its lifetime — preempt and receive
-/// re-enqueue to the same worker's queue. The Vec is sized once at the first
-/// `ensure_workers` from `worker_count()`, then never resized.
+/// Per-worker run queues. Index = `worker_id`. A worker drains its own queue
+/// first; when empty, it may **steal a fresh process** from a backed-up peer
+/// (`try_steal`) — the only migration the corosensei substrate tolerates (first
+/// resume on the thief, no saved stack). A process, once resumed, is pinned to
+/// its worker for life — preempt and receive re-enqueue to the same worker's
+/// queue. The Vec is sized once at the first `ensure_workers` from
+/// `worker_count()`, then never resized.
 static WORKERS: LazyLock<Vec<WorkerQueue>> = LazyLock::new(|| {
     (0..worker_count())
         .map(|_| (Mutex::new(VecDeque::new()), Condvar::new()))
         .collect()
 });
+
+/// Count of **fresh** (never-resumed) processes currently sitting in some
+/// worker's queue — i.e. the pool of stealable work. Incremented when a fresh
+/// process is enqueued (only happens at spawn; re-enqueues are non-fresh) and
+/// decremented when one is pulled to run (`run_one`, which clears `fresh`).
+/// A cheap, relaxed atomic gate: an idle worker checks it before scanning peer
+/// queues, so a truly-idle pool (`STEALABLE == 0`) re-parks on one atomic load
+/// instead of an O(workers) scan. May briefly over-count a process popped but
+/// not yet in `run_one` (a wasted scan, self-correcting) — it is a hint, never a
+/// correctness gate.
+static STEALABLE: AtomicUsize = AtomicUsize::new(0);
+
+/// How long an idle worker parks before re-attempting a steal, when it has no
+/// work of its own. A backstop, not the primary wakeup: a worker is woken
+/// immediately when a process is enqueued onto *its* queue (pinned re-enqueue or
+/// a fresh spawn placed here), but it is *not* notified when a **peer's** queue
+/// grows — so it re-checks for stealable work every `STEAL_BACKOFF`. Short
+/// enough that a steal opportunity isn't missed for long; long enough that a
+/// genuinely idle pool wakes rarely (each wake is a single `STEALABLE` load when
+/// nothing is stealable). Tunable.
+const STEAL_BACKOFF: std::time::Duration = std::time::Duration::from_millis(10);
 
 /// Per-worker "is currently resuming a process" flag. Index = `worker_id`, sized
 /// to match `WORKERS`. A worker runs at most one coroutine at a time, so this is a
@@ -662,6 +708,12 @@ fn assign_worker() -> usize {
 /// Total processes spawned since program start (read by `(spawn-count)`).
 pub fn spawn_count() -> u64 {
     SPAWNED.load(Ordering::SeqCst)
+}
+
+/// Total fresh processes work-stolen across worker threads since program start
+/// (read by `(steal-count)`). See [`STOLEN`].
+pub fn steal_count() -> u64 {
+    STOLEN.load(Ordering::SeqCst)
 }
 
 /// Set the worker-pool size (0 = default ≈ `nproc`). Call once at startup, before
@@ -797,9 +849,66 @@ pub fn exit(pid: u64, reason: Message) {
 pub(super) fn enqueue(proc: Box<Process>) {
     let wid = proc.worker_id;
     proc.mailbox.status.store(ST_RUNNABLE, Ordering::Relaxed); // queued, awaiting a worker turn
+    if proc.fresh {
+        // A fresh process becomes stealable the moment it's queued. Only the
+        // spawn path enqueues a fresh process; preempt/receive re-enqueue one that
+        // has already run (`fresh == false`), so this is skipped there.
+        STEALABLE.fetch_add(1, Ordering::Relaxed);
+    }
     let (lock, cv) = &WORKERS[wid];
     crate::core::sync::lock(lock).push_back(proc);
     cv.notify_one();
+}
+
+/// Steal one **fresh** (never-resumed) process from a backed-up peer's queue,
+/// re-pinning it to `thief_wid`. Returns `None` if nothing is stealable.
+///
+/// Why fresh-only: a fresh process has never been `resume`d, so its first resume
+/// happens here on the thief with **no saved native stack to migrate** — the one
+/// migration shape proven safe in docs/concurrency-v2.md §3.1a. Stealing a
+/// *suspended* coroutine (deep saved stack) smashes return addresses on resume →
+/// segfault (KI-1b), so a non-fresh process is never touched. Re-pinning
+/// `worker_id` makes the thief the owner for life: every subsequent
+/// preempt/receive re-enqueue stays on the thief, so INV-2 ("one owner at any
+/// instant, resumed on one thread") holds.
+fn try_steal(thief_wid: usize) -> Option<Box<Process>> {
+    // Fast path: nothing fresh queued anywhere — re-park on one relaxed load.
+    if STEALABLE.load(Ordering::Relaxed) == 0 {
+        return None;
+    }
+    let n = WORKERS.len();
+    // Rotating start so thieves spread their probes across victims rather than all
+    // hammering worker 0 (shares `NEXT_WORKER` with `assign_worker`; only
+    // approximate rotation is needed).
+    let start = NEXT_WORKER.fetch_add(1, Ordering::Relaxed) % n;
+    for off in 0..n {
+        let victim = (start + off) % n;
+        if victim == thief_wid {
+            continue; // don't steal from ourselves
+        }
+        // `try_lock`: never block a would-be thief on a contended victim — skip it
+        // and try the next. A momentarily-locked queue just isn't probed this pass;
+        // the `STEAL_BACKOFF` timeout brings us back.
+        let mut q = match WORKERS[victim].0.try_lock() {
+            Ok(q) => q,
+            Err(_) => continue,
+        };
+        // Scan from the back (the owner pops the front) for the first fresh
+        // process: take the one the owner is least likely to run next, and leave
+        // its pinned/suspended processes untouched. `STEALABLE` is only a hint, so
+        // a queue with no fresh process is normal here.
+        if let Some(idx) = q.iter().rposition(|p| p.fresh) {
+            let mut proc = q.remove(idx).expect("rposition returned an in-bounds index");
+            drop(q);
+            proc.worker_id = thief_wid; // re-pin: the thief owns it from now on
+            STOLEN.fetch_add(1, Ordering::Relaxed);
+            // `STEALABLE` is decremented by `run_one` (the single pulled-to-run
+            // site the caller invokes next), not here — so the count stays balanced
+            // whether a fresh process is drained by its owner or stolen.
+            return Some(proc);
+        }
+    }
+    None
 }
 
 /// Start the worker pool exactly once (on the first `spawn`).
@@ -818,17 +927,37 @@ fn ensure_workers() {
 
 fn worker_loop(wid: usize) {
     loop {
-        let proc = {
-            let (lock, cv) = &WORKERS[wid];
-            let mut q = crate::core::sync::lock(lock);
-            loop {
-                if let Some(p) = q.pop_front() {
-                    break p;
-                }
-                q = cv.wait(q).unwrap();
-            }
-        };
-        run_one(proc);
+        // 1. Our own queue first (FIFO). Pinned, possibly-suspended coroutines
+        //    live only here and must resume on this thread (INV-2).
+        //
+        //    Bind the pop to a `let` so the queue `MutexGuard` is dropped at the
+        //    end of *this statement*, BEFORE `run_one`. In edition 2021 a guard
+        //    held in an `if let` scrutinee lives to the end of the whole block, so
+        //    `if let Some(p) = lock(..).pop_front() { run_one(p) }` would hold the
+        //    queue lock across the resume — and the running coroutine's
+        //    preempt/receive re-enqueue (which re-locks this same queue) would
+        //    deadlock the worker.
+        let own = crate::core::sync::lock(&WORKERS[wid].0).pop_front();
+        if let Some(p) = own {
+            run_one(p);
+            continue;
+        }
+        // 2. Nothing of our own: steal a fresh process from a backed-up peer
+        //    (safe migration — first resume on us, no saved stack). See `try_steal`.
+        if let Some(p) = try_steal(wid) {
+            run_one(p);
+            continue;
+        }
+        // 3. Nothing runnable anywhere we can reach: park on our condvar. We're
+        //    woken immediately when a process is enqueued onto *our* queue, but
+        //    NOT when a peer's queue grows — so park with a `STEAL_BACKOFF`
+        //    backstop and re-attempt the steal on timeout. Re-check our own queue
+        //    under the lock first to close the enqueue/park lost-wakeup window.
+        let (lock, cv) = &WORKERS[wid];
+        let q = crate::core::sync::lock(lock);
+        if q.is_empty() {
+            let _ = cv.wait_timeout(q, STEAL_BACKOFF);
+        }
     }
 }
 
@@ -837,6 +966,14 @@ fn worker_loop(wid: usize) {
 fn run_one(mut proc: Box<Process>) {
     let mailbox = Arc::clone(&proc.mailbox);
     let wid = proc.worker_id;
+    if proc.fresh {
+        // First (and only first) resume: this process is no longer stealable —
+        // from here it carries a saved coroutine stack and is pinned to `wid`.
+        // Single decrement site for `STEALABLE`, paired with the increment in
+        // `enqueue`, regardless of whether its owner drained it or a thief stole it.
+        proc.fresh = false;
+        STEALABLE.fetch_sub(1, Ordering::Relaxed);
+    }
     mailbox.status.store(ST_RUNNING, Ordering::Relaxed); // about to resume on this worker
 
     let live = RUNNING.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1009,6 +1146,7 @@ pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
         pid,
         mailbox,
         worker_id,
+        fresh: true,
         coro,
     }));
     Ok(pid)
