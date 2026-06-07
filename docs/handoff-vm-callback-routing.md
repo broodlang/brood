@@ -182,6 +182,22 @@ Add a differential/cross-engine test that **`send`s a RUNTIME-context
 `let`-self-ref closure** (and a `letrec` one) and asserts the same verdict on both
 engines. Its absence is why this divergence shipped unnoticed.
 
+## Status (2026-06-07 — DONE)
+
+- **#1 landed**: `compile_let` now pre-allocates a fn-valued binder's slot and sets
+  `letrec_self` before compiling the fn RHS, routing it through the `self_name`
+  `env_define` path. The VM `let`-self-ref closure now has a structural env cycle
+  (same as TW), so `send` rejects it consistently. Differential blind-spot test added
+  to `crates/lisp/tests/differential.rs`. Full suite green.
+- **#2 landed (partial)**: `apply_engine` helper added to `eval/compile.rs`.
+  `try_catch` (×2), `binding`, and `isolate` in `builtins.rs` route their
+  callbacks through it. `apply_builtin` intentionally stays on `eval::apply` (TW) —
+  routing it through `apply_engine` creates a new `vm_apply` Rust frame per
+  iteration and overflows the stack on `(apply f …)`-driven tail recursion (the
+  `apply_tail_recursion_does_not_overflow` test regresses to SIGABRT).
+  The `apply` builtin would need the TW's inline `apply`-unfolding in the VM's
+  `exec_call` for a safe migration.
+
 ## Status of the surrounding work (already landed, on origin/main)
 
 - VM **profiling harness**: `perf-stats` feature + `(vm-stats)` + `BROOD_PERF_STATS`

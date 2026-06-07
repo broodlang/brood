@@ -17,7 +17,7 @@
 prelude's `path-join`/`path-basename`/`parent-dir`). Pure Brood over the fs
 primitives. The kernel also provides the always-available file primitives
 `slurp`/`spit`/`make-dir`/`file-exists?`/`dir?`/`list-dir`/`file-mtime`/`file-size`/
-`delete-file`/`rename-file`/`cwd`.")
+`delete-file`/`delete-dir`/`rename-file`/`copy-file`/`cwd`.")
 
 ;; --- whole-file read / write ------------------------------------------------
 (def read-file slurp)
