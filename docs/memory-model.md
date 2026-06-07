@@ -245,6 +245,15 @@ Three things are entangled, and the heap choice constrains the other two:
   "stop stepping," and migration is trivial (move the data). This pairs
   naturally with an arena/GC heap.
 
+> We shipped the **recursive** arm (option B below: hand-rolled `Send` arena +
+> `corosensei` stackful coroutines), and the VM (ADR-076) later reified the
+> *operand* stack but kept native recursion for the *call* stack. That is exactly
+> why a *running* process can't migrate across workers today — its call
+> continuation is a native stack. The stepping-VM arm (reify the call/frame stack
+> too) is the committed way to unblock both **live-process migration** and the
+> **fully precise mid-eval GC** this section wants; the full design is in
+> [`concurrency-v2.md`](concurrency-v2.md) §7 (ADR-100).
+
 ## Options
 
 ### A. gc-arena + stepping VM (the Piccolo architecture)

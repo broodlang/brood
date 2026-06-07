@@ -48,6 +48,18 @@ Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
   the per-spawn `BROOD_J` env read (+ env lock) and the latent OOB when
   `set_max_parallel` lands after the pool starts. Regression test
   `tests/pool_resize_after_start.rs`.
+- ✅ **scheduler: fresh-only work-stealing (ADR-100)** — an idle worker steals a
+  *never-resumed* process from a backed-up peer (`try_steal`, re-pins `worker_id`;
+  first resume on the thief, no saved native stack — safe per `concurrency-v2.md`
+  §3.1a). Rebalances spawn-burst backlog that placement didn't spread; new
+  `(steal-count)` builtin. `tests/work_stealing.rs`; KI-1 bar clean plain-release.
+  ⬜ **Deferred — full live-process migration (the stepping-VM endgame).** Moving
+  an *already-running* process off a hot worker (BEAM-style rebalancing) needs the
+  call continuation reified off the native stack — reify the VM's call/frame stack
+  (a `Vec<Frame>` + flat dispatch loop), which also unlocks fully-precise mid-eval
+  GC and removes corosensei. **Not** a corosensei swap. Full design/staging:
+  `concurrency-v2.md` §7, ADR-100. Gated on a workload that fresh-steal + placement
+  can't serve.
 - ✅ **[perf] gc: de-dup the write-barrier `remembered` set** — repeated binds
   into one tenured frame pushed a duplicate entry each time; now one entry per
   distinct old frame. White-box regression test.
