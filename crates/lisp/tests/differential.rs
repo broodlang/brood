@@ -12,7 +12,7 @@
 
 use std::sync::LazyLock;
 
-use brood::eval::compile::{set_force_bytecode, set_forced_engine};
+use brood::eval::compile::set_forced_engine;
 use brood::Interp;
 
 static MEM_GUARD: LazyLock<()> = LazyLock::new(|| {
@@ -24,39 +24,27 @@ static MEM_GUARD: LazyLock<()> = LazyLock::new(|| {
 
 /// Evaluate `src` in a fresh interpreter pinned to one engine. `Ok(printed)` or
 /// `Err(message)` — the message alone (engine-independent), not the position, which
-/// is asserted separately in `basic.rs`. `bc` forces the bytecode stepping engine
-/// (a sub-mode of the VM, ADR-100 Stage 1) on or off.
-fn eval_with(src: &str, vm: bool, bc: bool) -> Result<String, String> {
+/// is asserted separately in `basic.rs`. `vm = true` is the bytecode VM (the sole VM
+/// executor since ADR-100 Stage 5); `vm = false` is the tree-walker (the reference).
+fn eval_on(src: &str, vm: bool) -> Result<String, String> {
     LazyLock::force(&MEM_GUARD);
     set_forced_engine(Some(vm));
-    set_force_bytecode(Some(bc));
     let mut interp = Interp::new();
     let out = match interp.eval_str(src) {
         Ok(v) => Ok(interp.print(v)),
         Err(e) => Err(e.message),
     };
     set_forced_engine(None);
-    set_force_bytecode(None);
     out
 }
 
-fn eval_on(src: &str, vm: bool) -> Result<String, String> {
-    eval_with(src, vm, false)
-}
-
-/// Assert all engines agree on `src`: the tree-walker, the `Node`-walking VM, and
-/// the bytecode stepping engine (VM + bytecode). The tree-walker is the reference.
+/// Assert the bytecode VM agrees with the reference tree-walker on `src`.
 fn agree(src: &str) {
     let tw = eval_on(src, false);
     let vm = eval_on(src, true);
-    let bc = eval_with(src, true, true);
     assert_eq!(
         tw, vm,
-        "engine divergence on:\n  {src}\n  tree-walker: {tw:?}\n  vm:          {vm:?}"
-    );
-    assert_eq!(
-        tw, bc,
-        "bytecode-engine divergence on:\n  {src}\n  tree-walker: {tw:?}\n  bytecode:    {bc:?}"
+        "engine divergence on:\n  {src}\n  tree-walker: {tw:?}\n  bytecode VM: {vm:?}"
     );
 }
 

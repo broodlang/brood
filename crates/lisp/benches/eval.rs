@@ -15,7 +15,7 @@
 //! ~7.3 ms on the VM vs ~13 ms on the tree-walker. Don't read a single number as
 //! "the" eval cost without noting which engine row it's on.
 
-use brood::eval::compile::{set_force_bytecode, set_forced_engine};
+use brood::eval::compile::set_forced_engine;
 use brood::{syntax::reader, Interp};
 
 fn main() {
@@ -23,13 +23,13 @@ fn main() {
 }
 
 /// Which execution engine a benchmark row is pinned to. `Debug` is what divan
-/// prints in the arg column (`Vm` / `Tw` / `Bc`). `Bc` is the bytecode stepping
-/// engine (a sub-mode of the VM, ADR-100).
+/// prints in the arg column (`Vm` / `Tw`). Since ADR-100 Stage 5 the VM *is* the
+/// bytecode stepping engine (the `Node`-walking executor was retired); `Tw` is the
+/// tree-walker fallback.
 #[derive(Clone, Copy, Debug)]
 enum Eng {
     Vm,
     Tw,
-    Bc,
 }
 
 /// A fresh interpreter with the given engine forced on this thread for the
@@ -37,18 +37,15 @@ enum Eng {
 /// env default (`compile::vm_enabled`), and divan runs this input setup on the
 /// same worker thread as the benched closure, so the pin holds through the eval.
 fn interp_on(eng: Eng) -> Interp {
-    // `Bc` = the VM with the bytecode stepping loop on; `Vm` = the VM with the
-    // `Node` walker; `Tw` = the tree-walker. Set both knobs so a row is unambiguous.
-    set_forced_engine(Some(!matches!(eng, Eng::Tw)));
-    set_force_bytecode(Some(matches!(eng, Eng::Bc)));
+    set_forced_engine(Some(matches!(eng, Eng::Vm)));
     Interp::new()
 }
 
-/// `[(Vm, n), (Tw, n), (Bc, n)]` for every `n` — the engine × size grid each eval
-/// benchmark iterates, so the three engines sit on adjacent rows per size.
+/// `[(Vm, n), (Tw, n)]` for every `n` — the engine × size grid each eval
+/// benchmark iterates, so the two engines sit on adjacent rows per size.
 macro_rules! engine_grid {
     ($($n:expr),+ $(,)?) => {
-        [ $( (Eng::Vm, $n), (Eng::Tw, $n), (Eng::Bc, $n) ),+ ]
+        [ $( (Eng::Vm, $n), (Eng::Tw, $n) ),+ ]
     };
 }
 

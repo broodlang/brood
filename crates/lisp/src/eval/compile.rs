@@ -70,41 +70,6 @@ pub fn vm_enabled() -> bool {
     })
 }
 
-thread_local! {
-    /// Per-thread override for the bytecode stepping engine (the differential test
-    /// pins it), mirroring [`FORCED_ENGINE`]: `Some(true/false)` wins over the
-    /// `BROOD_BYTECODE` env / default. The bytecode engine is a *sub-mode of the VM*
-    /// — it runs a VM-compiled arm's body as flat bytecode instead of walking the
-    /// `Node` tree — so it only takes effect when the VM is the active engine.
-    static FORCE_BYTECODE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
-}
-
-/// Force (or clear) the bytecode stepping engine for the current thread. Used by
-/// the differential harness to run a form through the bytecode engine and compare
-/// it against the tree-walker. `Some(true)` = bytecode, `Some(false)` = the
-/// `Node`-walking VM, `None` = the `BROOD_BYTECODE`/default choice.
-pub fn set_force_bytecode(choice: Option<bool>) {
-    FORCE_BYTECODE.with(|c| c.set(choice));
-}
-
-/// Is the **bytecode stepping engine** enabled? A per-thread [`set_force_bytecode`]
-/// override wins; otherwise it follows `BROOD_BYTECODE` (truthy enables it),
-/// **defaulting ON** (ADR-100 Stage 5 cutover): the bytecode engine beats the
-/// `Node` walker on every benchmark, so it's the default whenever the VM is active.
-/// `BROOD_BYTECODE=0` is the escape hatch back to the `Node`-walking VM (kept for at
-/// least one release, mirroring `BROOD_VM=0` for the tree-walker). Consulted from
-/// [`vm_apply`], which routes a chunked arm to `vm_run_bc` when this is true.
-pub fn bytecode_enabled() -> bool {
-    if let Some(forced) = FORCE_BYTECODE.with(|c| c.get()) {
-        return forced;
-    }
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    fn truthy(v: &str) -> bool {
-        !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "off" | "no")
-    }
-    *ON.get_or_init(|| std::env::var("BROOD_BYTECODE").map(|v| truthy(&v)).unwrap_or(true))
-}
-
 /// "This `Node::Call` has no call-site inline cache" — the callee isn't a free
 /// global reference (ADR-096).
 pub const NO_SITE: u32 = u32::MAX;
@@ -352,13 +317,12 @@ pub enum Node {
     },
     /// A **direct `letrec` self-recursive tail call** (the self-call optimization).
     /// Emitted only for a tail call whose head is the closure's own self-name with
-    /// exactly the arm's required arity (see [`Scope::self_call`]). Evaluates `args`
-    /// and hands the trampoline a [`Step::Tail`] for the *current* arm — no callee
-    /// resolution, no `env_get` walk, no `cache_key`/`vm_cache` lookup, no dispatch.
-    /// Safe because a letrec binder is an immutable lexical slot (no `def`/late
-    /// binding to observe). Only ever appears in tail position, so only
-    /// [`exec_node`] (which carries the running arm) handles it. `pos` tags an error
-    /// from an argument's eval. The arm has no `&optional`/`&` rest (gated in
+    /// exactly the arm's required arity (see [`Scope::self_call`]). Lowered to
+    /// `Inst::SelfCall`, which hands the driver a `ChunkExit::SelfTail` for the
+    /// *current* arm — no callee resolution, no `env_get` walk, no `vm_cache` lookup,
+    /// no dispatch. Safe because a letrec binder is an immutable lexical slot (no
+    /// `def`/late binding to observe). Only ever appears in tail position. `pos` tags
+    /// an error from an argument's eval. The arm has no `&optional`/`&` rest (gated in
     /// `compile_arm`), so `args.len()` always equals the arm's frame arity.
     SelfCall {
         args: Box<[Node]>,
@@ -470,15 +434,12 @@ pub struct CompiledArm {
     /// Total frame slots (params + optionals + rest + `let`/`letrec` binders).
     pub nslots: usize,
     pub body: Node,
-    /// The body compiled to flat **bytecode** (`Chunk`), or `None` when the body is
-    /// outside the bytecode VM's current vocabulary (it then runs via `exec_node`).
-    /// When `Some` *and* the bytecode engine is enabled ([`bytecode_enabled`]),
-    /// [`vm_apply_inner`] runs this instead of walking the `Node` tree — the stepping
-    /// engine of ADR-100's stepping-VM endgame, built incrementally. Both forms are
-    /// kept and must stay semantically identical (the differential test enforces it);
-    /// the `Node` body remains the source of truth and the fallback. (Stage 1: only a
-    /// **call-free** body with no movable handles compiles to a chunk; see
-    /// [`compile_chunk`].)
+    /// The body compiled to flat **bytecode** (`Chunk`). [`vm_run_bc`] runs this — the
+    /// sole VM executor since ADR-100 Stage 5. `compile_arm` always fills it (every
+    /// `Node` shape lowers via [`compile_chunk`]); it's `Option` only for the synthetic
+    /// chunk-less arms (`run`'s top-level wrapper, tests) that never reach `vm_run_bc`.
+    /// `body` is retained as the lowering *source* (and the tree-walker's reference);
+    /// the differential test enforces that bytecode matches it exactly.
     pub chunk: Option<Chunk>,
     /// True when the body or any optional default contains a `Node::Const` with a
     /// movable RUNTIME handle (`ConstVal::Handle`), or a `Node::MakeClosure` (whose
@@ -531,28 +492,20 @@ impl CompiledClosure {
     }
 }
 
-/// The result of running a node: a finished value, or a *tail call* the trampoline
-/// must continue (reusing the frame). `Tail` is only ever produced for a `Call`
-/// node compiled with `tail == true`, which only appears in a closure body run by
-/// [`vm_apply`] — so it never escapes to a value context.
+/// The result of `dispatch` (and the value-position `exec_call`/`exec_value` path):
+/// a finished value, or a *tail call* the caller continues. `Tail` carries a resolved
+/// VM arm un-run, so a tail call reuses a frame (in [`vm_run_bc`]) or is forced (in
+/// value position, via [`force`]). (`exec_value`/`exec_call` survive for `push_frame`'s
+/// `&optional` defaults and top-level `run`; the bytecode driver uses [`ChunkExit`].)
 enum Step {
     Done(Value),
     Tail {
         compiled: Arc<CompiledArm>,
         args: SmallVec<[Value; 4]>,
-        /// The tail callee's own captured env — the trampoline switches `genv` to
-        /// this so the next arm resolves its free vars in *its* scope (Stage 2c: a
-        /// tail call can cross into a closure with a different captured env).
+        /// The tail callee's own captured env — switched to so the next arm resolves
+        /// its free vars in *its* scope (Stage 2c: a tail call can cross into a
+        /// closure with a different captured env).
         genv: EnvId,
-    },
-    /// A **direct `letrec` self-tail-call** (the self-call optimization): re-enter
-    /// the *current* arm in the *current* env with new `args`. The trampoline resets
-    /// the existing frame in place — no env re-root, no arm re-registration, no
-    /// `Arc` clone, no frame teardown/rebuild — which is exactly the overhead that
-    /// otherwise leaves a tight VM self-loop slower than the tree-walker. Produced
-    /// only by [`Node::SelfCall`] (tail position), so it never reaches [`force`].
-    SelfTail {
-        args: SmallVec<[Value; 4]>,
     },
 }
 
@@ -1413,9 +1366,6 @@ fn force(heap: &mut Heap, step: Step) -> LispResult {
     match step {
         Step::Done(v) => Ok(v),
         Step::Tail { compiled, args, genv } => vm_apply(heap, compiled, &args, genv),
-        // `SelfTail` is produced only by a tail-position `Node::SelfCall`, handled by
-        // the `vm_apply` trampoline; a value-position step never carries it.
-        Step::SelfTail { .. } => unreachable!("Step::SelfTail is tail-only"),
     }
 }
 
@@ -1589,91 +1539,6 @@ fn rewrite_chunk(chunk: &Chunk, f: &mut dyn FnMut(Value) -> Value) {
             Inst::MakeClosure { fn_rest, .. } => fn_rest.rewrite(f),
             _ => {}
         }
-    }
-}
-
-/// Execute one node in **tail position**. `frame_base` is the start of this
-/// activation's slot region on `Heap::roots`; `genv` is an [`EnvRoot`] for the
-/// *current* closure's captured env — read fresh via [`Heap::read_root_env`]
-/// wherever it's needed, since a nested call can collect and relocate a movable
-/// LOCAL captured env (Stage 2c, R1b). Returns a [`Step`] so a tail call can
-/// bubble up to [`vm_apply`]'s trampoline.
-///
-/// Only the tail-propagating shapes (`if`/`do`/`let` and the call itself) live
-/// here; every value shape delegates to [`exec_value`], which returns the value
-/// directly (ADR-096): `Step` is a ~100-byte enum (`Tail` carries an inline
-/// `SmallVec`), so building one — and `force`-matching it apart again — on
-/// every `Const`/`Local`/operand read was pure overhead.
-fn exec_node(
-    heap: &mut Heap,
-    node: &Node,
-    frame_base: usize,
-    genv: EnvRoot,
-) -> Result<Step, LispError> {
-    match node {
-        Node::If(cond, then, els) => {
-            let c = exec_value(heap, cond, frame_base, genv)?;
-            if crate::eval::truthy(c) {
-                exec_node(heap, then, frame_base, genv)
-            } else {
-                exec_node(heap, els, frame_base, genv)
-            }
-        }
-        Node::Do(nodes) => {
-            if nodes.is_empty() {
-                return Ok(Step::Done(Value::Nil));
-            }
-            let last = nodes.len() - 1;
-            for n in &nodes[..last] {
-                exec_value(heap, n, frame_base, genv)?; // for effect
-            }
-            exec_node(heap, &nodes[last], frame_base, genv)
-        }
-        Node::LetBind { binds, body } => {
-            // Evaluate each rhs and write it into its (pre-allocated) frame slot,
-            // in order. A binding's rhs eval can collect — the frame slots live on
-            // `Heap::roots`, relocated in place, so `frame_base + slot` stays valid.
-            for (slot, rhs) in binds.iter() {
-                let v = exec_value(heap, rhs, frame_base, genv)?;
-                heap.set_root_at(frame_base + slot, v);
-            }
-            // Body is tail-propagated (its tail call bubbles up to the trampoline).
-            exec_node(heap, body, frame_base, genv)
-        }
-        Node::Call { callee, args, tail, pos, site } => {
-            exec_call(heap, callee, args, *tail, *pos, *site, frame_base, genv)
-        }
-        Node::SelfCall { args, pos } => {
-            // Direct letrec self-recursion (the self-call optimization): evaluate the
-            // args on the operand stack (a collection relocates them in place, like
-            // `exec_call`), then hand the trampoline a `SelfTail` — re-enter THIS arm
-            // in THIS env with no callee resolve, no `cache_key`/`vm_cache` lookup, no
-            // dispatch, no env re-root, no `Arc` clone (the trampoline keeps the
-            // running arm + env). Always tail position (only emitted there) and the
-            // arm has no optional/rest (gated in `compile_arm`), so `argv` exactly
-            // fills the frame the trampoline resets in place.
-            let tag = |e: LispError| match pos {
-                Some(p) => e.or_pos(*p),
-                None => e,
-            };
-            let save = heap.roots_len();
-            for a in args.iter() {
-                match exec_value(heap, a, frame_base, genv) {
-                    Ok(v) => heap.push_root(v),
-                    Err(e) => {
-                        heap.truncate_roots(save);
-                        return Err(tag(e));
-                    }
-                }
-            }
-            let mut argv: SmallVec<[Value; 4]> = SmallVec::with_capacity(args.len());
-            for k in 0..args.len() {
-                argv.push(heap.root_at(save + k));
-            }
-            heap.truncate_roots(save);
-            Ok(Step::SelfTail { args: argv })
-        }
-        other => exec_value(heap, other, frame_base, genv).map(Step::Done),
     }
 }
 
@@ -1995,10 +1860,11 @@ fn exec_value(
     }
 }
 
-/// The combination executor — shared by [`exec_node`] (tail position, where it
-/// may return a [`Step::Tail`] for the trampoline) and [`exec_value`] (value
-/// position, where the step is forced). Resolves the callee through the
-/// call-site IC, evaluates the arguments onto the operand stack, and dispatches.
+/// The combination executor for the surviving `Node` path ([`exec_value`] — used by
+/// `push_frame`'s `&optional` defaults and top-level `run`). Resolves the callee
+/// through the call-site IC, evaluates the arguments onto the operand stack, and
+/// dispatches; the returned [`Step`] is forced in value position. (The bytecode
+/// engine uses its own `Inst::Call` path in [`exec_chunk`].)
 #[allow(clippy::too_many_arguments)]
 fn exec_call(
     heap: &mut Heap,
@@ -2296,178 +2162,15 @@ fn push_frame(
     Ok(())
 }
 
-/// Run a compiled closure body — the trampoline. `args` become the frame's dense
-/// slots (via [`push_frame`]), pushed as a region of `Heap::roots` (so `arena_flip`
-/// relocates them); a tail call truncates the frame and rebuilds it, **reusing the
-/// region** for O(1) stack (proper TCO). Mirrors `eval`'s per-iteration discipline:
-/// a GC safepoint, the soft-memory backstop, reduction-counted preemption, the eval
-/// deadline, and the non-tail-recursion stack guard.
+/// Run a chunked closure arm and its whole chain of chunked calls on the explicit
+/// bytecode frame stack ([`vm_run_bc`]) — the sole VM executor since ADR-100 Stage 5
+/// (the `Node`-walking trampoline was retired with the bytecode default). Every
+/// `CompiledArm` from `compile_arm` has a chunk, so this always routes to the driver;
+/// `vm_run_bc` does the per-frame live-arm registration + the runaway frame guard.
+/// Callers: `dispatch` (non-tail VM-closure branch), `exec_call`'s IC fast path, and
+/// `force` (a tail `Step`). The tree-walker (`BROOD_VM=0`) is the remaining fallback.
 fn vm_apply(heap: &mut Heap, compiled0: Arc<CompiledArm>, args: &[Value], genv0: EnvId) -> LispResult {
-    crate::perf_bump!(vm_apply);
-    // Bytecode stepping engine (ADR-100 Stage 4): run this arm and its whole chain of
-    // chunked calls on the explicit frame stack (no native recursion per Brood call).
-    // `vm_run_bc` does its own per-frame live-arm registration, so bypass the
-    // single-registration dance below. (Every `CompiledArm` has a chunk since Stage 3;
-    // the `is_some` guard stays defensive against the chunk-less top-level/test arms.)
-    if bytecode_enabled() && compiled0.chunk.is_some() {
-        return vm_run_bc(heap, compiled0, args, genv0);
-    }
-    // Register this frame's compiled arm as LIVE only when it contains movable
-    // RUNTIME handles — `runtime_collect` needs to rewrite those in place.  Arms
-    // without any `ConstVal::Handle` or `MakeClosure` (e.g. pure arithmetic /
-    // control-flow functions like `fib`) skip the registration and, crucially, the
-    // `Arc::clone` it requires.  Under heavy parallelism that clone is a `LOCK XADD`
-    // on the *shared* refcount of the function's compiled arm, causing cache-line
-    // ping-pong across workers — the dominant overhead for workloads like pfib where
-    // many processes call the same function concurrently.
-    // `usize::MAX` is the sentinel meaning "nothing was pushed; no truncate needed."
-    let mut slot = if compiled0.has_runtime_handles {
-        heap.live_arm_push(compiled0.clone())
-    } else {
-        usize::MAX
-    };
-    let r = vm_apply_inner(heap, compiled0, args, genv0, &mut slot);
-    if slot != usize::MAX {
-        heap.live_arm_truncate(slot);
-    }
-    r
-}
-
-fn vm_apply_inner(
-    heap: &mut Heap,
-    compiled0: Arc<CompiledArm>,
-    args: &[Value],
-    genv0: EnvId,
-    arm_slot: &mut usize,
-) -> LispResult {
-    // Match `eval`: a GC-block guard (feeds the stack-overflow base) + the stack
-    // budget check, so deep *non-tail* VM recursion fails cleanly instead of a
-    // SIGSEGV. Tail calls reuse the frame below and never grow the Rust stack.
-    let _gc_block = crate::process::GcBlockGuard::enter();
-    let probe = 0u8;
-    if let Some(used) = crate::process::stack_overflow_check(&probe as *const u8 as usize) {
-        return Err(crate::eval::stack_depth_error(used));
-    }
-
-    // Root the captured env on `env_roots` (Stage 2c): for a global-capturing
-    // closure this is the immovable `EnvId::GLOBAL` (kept inline, free), but a
-    // local-capturing closure's env is a movable LOCAL frame that a collection at
-    // the safepoint — or inside any nested call — would relocate. `root_env` parks
-    // it so `arena_flip` relocates it in place; we re-read the live handle after
-    // every collection via the `EnvRoot`. A tail call into a *different* closure
-    // re-roots that callee's env here.
-    let env_base = heap.env_roots_len();
-    let mut genv = heap.root_env(genv0);
-
-    // Build the frame (required / optional / rest / nil-filled binders), evaluating
-    // any real `&optional` default for a missing arg. The whole region lives on
-    // `Heap::roots`, so `collect` relocates it in place.
-    let base = heap.roots_len();
-    if let Err(e) = push_frame(heap, &compiled0, args, genv) {
-        heap.truncate_roots(base);
-        heap.truncate_env_roots(env_base);
-        return Err(e);
-    }
-    let mut compiled = compiled0;
-    // The `Node`-walking trampoline (the `BROOD_BYTECODE`-off engine). The bytecode
-    // path is handled entirely by `vm_run_bc` (routed from `vm_apply`), so it never
-    // reaches here.
-    loop {
-        // GC safepoint — the frame slots live on `Heap::roots` and the captured env
-        // on `Heap::env_roots`, so `collect` relocates both in place. LOCAL
-        // collection never moves the compiled body's RUNTIME/PRELUDE constant
-        // handles, so it needs no extra roots; RUNTIME *compaction* would move them,
-        // but this arm is registered in `live_vm_arms`, so `runtime_collect` rewrites
-        // them in place (no deferral needed).
-        if !crate::process::macro_block_active() && heap.gc_due() {
-            heap.collect(&mut [], &mut []);
-        }
-        // Soft-memory backstop (ADR-043) — catchable, never frees/moves.
-        if let Some(used) = crate::core::alloc::soft_limit_hit() {
-            heap.truncate_roots(base);
-            heap.truncate_env_roots(env_base);
-            return Err(crate::eval::memory_limit_error(used));
-        }
-        // Reduction-counted preemption + the eval deadline (the watchdog the
-        // passthrough loop once escaped — checked every tail iteration here too).
-        crate::process::tick();
-        if crate::process::deadline_exceeded() {
-            heap.truncate_roots(base);
-            heap.truncate_env_roots(env_base);
-            return Err(crate::eval::deadline_error());
-        }
-
-        match exec_node(heap, &compiled.body, base, genv) {
-            Ok(Step::Done(v)) => {
-                heap.truncate_roots(base);
-                heap.truncate_env_roots(env_base);
-                return Ok(v);
-            }
-            Ok(Step::Tail { compiled: c2, args: a2, genv: g2 }) => {
-                crate::perf_bump!(tail_call);
-                // Switch to the tail callee's env FIRST (`g2` is still valid — no
-                // collection since `dispatch` read it off the callee closure), and
-                // root it before rebuilding the frame, so a real `&optional` default
-                // in `c2` both resolves its free vars through `g2` and survives any
-                // collection its own eval triggers.
-                heap.truncate_env_roots(env_base);
-                genv = heap.root_env(g2);
-                // Reuse the frame region: drop the old slots and rebuild at `base`
-                // for the (possibly different, possibly variadic) tail arm.
-                heap.truncate_roots(base);
-                // Register the live-arm BEFORE `push_frame`, not after. `push_frame`
-                // evaluates any real `&optional` default in `c2`, and that eval can
-                // fire a RUNTIME compaction (`runtime_collect`), which rewrites
-                // movable handles only for arms in `live_vm_arms`. If the slot still
-                // pointed at the previous arm, `c2`'s body and its not-yet-evaluated
-                // default nodes would be left pointing into the evacuated region — a
-                // use-after-GC. Mirrors the first-arm order in `vm_apply`
-                // (`live_arm_push` before `push_frame`).
-                //
-                // Slot may be the sentinel `usize::MAX` when the initial arm had no
-                // RUNTIME handles (see `vm_apply`). If `c2` also has none, skip the
-                // update entirely. If `c2` introduces handles (tail-call into a
-                // different function that closes over strings, etc.), push a fresh
-                // slot so compaction can rewrite them.
-                if *arm_slot != usize::MAX {
-                    heap.live_arm_set(*arm_slot, c2.clone());
-                } else if c2.has_runtime_handles {
-                    *arm_slot = heap.live_arm_push(c2.clone());
-                }
-                if let Err(e) = push_frame(heap, &c2, &a2, genv) {
-                    heap.truncate_roots(base);
-                    heap.truncate_env_roots(env_base);
-                    return Err(e);
-                }
-                compiled = c2;
-            }
-            Ok(Step::SelfTail { args: a2 }) => {
-                crate::perf_bump!(self_tail);
-                // Self-tail-call: the SAME arm in the SAME env. Skip the env re-root,
-                // the live-arm re-register, the `Arc` clone, and the frame
-                // teardown/rebuild that `Step::Tail` pays — just reset this frame in
-                // place. The frame region `[base, base+nslots)` is intact (the body
-                // balanced its roots and `SelfCall` truncated its arg evals), and the
-                // arm has no `&optional`/`&` rest (gated in `compile_arm`), so re-nil
-                // every slot — clearing the body's `let`/`letrec` binders for the next
-                // iteration — then rebind the required params from `a2`. `genv` and
-                // the live arm are unchanged; the loop-top GC safepoint then sees the
-                // fresh frame (the params are now in rooted slots).
-                heap.truncate_roots(base + compiled.nslots);
-                for i in 0..compiled.nslots {
-                    heap.set_root_at(base + i, Value::Nil);
-                }
-                for i in 0..compiled.nrequired {
-                    heap.set_root_at(base + i, a2[i]);
-                }
-            }
-            Err(e) => {
-                heap.truncate_roots(base);
-                heap.truncate_env_roots(env_base);
-                return Err(e);
-            }
-        }
-    }
+    vm_run_bc(heap, compiled0, args, genv0)
 }
 
 // ===================== bytecode stepping engine (ADR-100, Stage 1) =====================
@@ -2990,9 +2693,6 @@ fn exec_chunk(
                             ChunkExit::Tail { arm: compiled, args, genv }
                         }
                         Step::Done(v) => ChunkExit::Done(v),
-                        Step::SelfTail { .. } => {
-                            unreachable!("dispatch never yields SelfTail")
-                        }
                     });
                 }
                 match step {
@@ -3007,7 +2707,6 @@ fn exec_chunk(
                         heap.truncate_roots(n - argc - 1);
                         heap.push_root(v);
                     }
-                    Step::SelfTail { .. } => unreachable!("dispatch never yields SelfTail"),
                 }
             }
             Inst::SelfCall { argc } => {
