@@ -618,7 +618,18 @@ the workaround available today.
     sum_tail −26%, cons_build −42%, sort −13…−24%, spawn_fanout −25%** (~1.2–1.7×
     on top of Stage 3), no regressions, both suites + GC-stress gate green per
     item. Each item is also paved JIT runway; actual codegen stays gated on
-    bytecode lowering + a real profile. Remaining stretch: the defer-set shrink.
+    bytecode lowering + a real profile.
+  - ✅ **VM perf round 2 / defer-set shrink** (ADR-096 item 6, 2026-06-07) —
+    direct `letrec` self-recursion now VM-compiled (the `defseq` family —
+    `map`/`filter`/`mapcat`/`remove`/`keep` — and hand-written local loops, which
+    deferred wholesale to the tree-walker before). `MakeClosure` late-binds the
+    closure to its own name in its captured env; a **self-call optimization**
+    (`Node::SelfCall` → `Step::SelfTail`, in-place frame reset) re-enters the arm
+    with no resolve/dispatch/env-re-root. **−30…−54% on dispatch-bound local
+    recursion** vs the tree-walker, `defseq` at parity, no regressions, both
+    suites + GC-stress green. Remaining stretch (low-value): mutual recursion,
+    quasiquote-built / unkeyable LOCAL bodies; and a frame-local IC for the
+    still-uncached captured-fn call in local closures.
 
 ## M2 — Editor data model
 

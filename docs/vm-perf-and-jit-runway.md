@@ -1,6 +1,7 @@
 # VM performance & the JIT runway
 
-> **Status (2026-06-06): round 1 SHIPPED — items 1–5 all landed, same day.**
+> **Status (2026-06-07): round 1 SHIPPED (items 1–5); item 6 (defer-set shrink)
+> done in round 2 — see the Round 2 note below.**
 > Archived runs: baseline `docs/benchmarks/2026-06-06T10-45-03Z.md`, final
 > `docs/benchmarks/2026-06-06T12-48-07Z.md` (same machine, commit `19d06b3` +
 > the round's working tree). VM medians, 100 samples:
@@ -23,7 +24,22 @@
 > call-site ICs −13…−31% (the big one); global-read IC −1…−1.5%; wider prims
 > cons −9% / sort −7…−10% (with a ~+2% code-layout tax on the pure-numeric
 > pair); GC-pure rooting skip −5% (recouped the tax); `exec_value` split
-> −3…−7%. Item 6 (defer-set shrink) remains open as the stretch item.
+> −3…−7%.
+>
+> **Round 2 (2026-06-07): item 6 (defer-set shrink) done — direct `letrec`
+> self-recursion.** The `defseq` family (`map`/`filter`/`mapcat`/`remove`/`keep`)
+> and hand-written local loops deferred wholesale to the tree-walker because a
+> nested `fn` capturing its own in-progress `letrec` binder was ineligible. Now
+> `MakeClosure` late-binds the closure to its own name in its captured env (the
+> tree-walker's `letrec` model), and a **self-call optimization**
+> (`Node::SelfCall` → `Step::SelfTail`, in-place frame reset) re-enters the arm
+> with no resolve/dispatch/env-re-root. Load-robust Vm/Tw result: dispatch-bound
+> local recursion **−30…−54%** vs the tree-walker; allocation-bound `defseq` at
+> parity (the per-element captured-fn call stays uncached — a frame-local IC is
+> the remaining lever, deferred since a per-site IC is unsound for a
+> per-instance captured env). Mutual recursion still defers. See the devlog
+> 2026-06-07 entry. Item 6's stretch tail (quasiquote-built bodies, unkeyable
+> LOCAL closures) remains open but is low-value.
 >
 > This doc records the analysis behind the round: a set of VM-interpreter
 > optimizations chosen so that each one is *also* a step toward a future JIT
@@ -124,7 +140,7 @@ improvement (or, for a pure-prep item, no regression).
 | 3 | **Wider prim family** | `(Float,Float)` fast path in `prim_apply`; a `Prim1` node for `car`/`cdr`/`not`/`nil?`-class natives; `cons`. Every edge defers to the real native so semantics stay bit-identical. | Partly — enumerates the ops a template JIT inlines first. |
 | 4 | **GC-pure rooting skip** | A compile-time "can't allocate or call" bit per node; pure operands skip the `push_root`/`truncate_roots` dance in `Prim2`/`Call`. | Yes — this analysis is exactly "where are the safepoints", which a JIT needs spelled out. |
 | 5 | **`exec_value` / `exec_tail` split** | Value positions can never produce `Step::Tail`; a direct `-> Result<Value>` executor removes the `Step` wrap + `force` unwrap from every sub-expression. | Neutral (pure interpreter win). |
-| 6 | **Defer-set shrink** (stretch) | Close remaining vocabulary gaps (quasiquote-built bodies / unkeyable LOCAL closures, `letrec`-capturing fns). An arm that defers gets zero benefit from items 1–5. | Yes — smaller deopt surface. |
+| 6 | **Defer-set shrink** (round 2, done for `letrec`) | Direct `letrec` self-recursion now compiles (the `defseq` family + local loops): `MakeClosure` self-binds + a self-call optimization (`Node::SelfCall`/`Step::SelfTail`). −30…−54% on dispatch-bound local recursion; `defseq` at parity. Mutual recursion / quasiquote-built / unkeyable LOCAL bodies still defer (low-value tail). | Yes — smaller deopt surface; self-calls are exactly what a JIT specializes. |
 
 Then, **later and separately gated**: bytecode lowering (the doc'd §2.4
 internal change) once profiling shows node dispatch dominating — that is the
