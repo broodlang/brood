@@ -99,12 +99,20 @@ Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
     stays as the lowering source (`compile_chunk`); `exec_value`/`exec_call` survive
     only for `push_frame`'s `&optional` defaults + top-level `run`; the tree-walker
     (`BROOD_VM=0`) is the remaining fallback. Full `make test` (550) green.
-  - 🟡 **In progress — the actual migration** (§7.5 stages 2–4): replace coroutine
-    suspension with **state capture** — `receive`-on-empty unwinds `vm_run_bc` to the
-    scheduler carrying `(frames, operands, ip)` as a heap struct stored in the
-    `Process` in place of the `Coroutine`; re-enter on any worker; generalize
-    stealing/migration to *running* processes; remove corosensei. BEAM-style
-    rebalancing lands here.
+  - 🟡 **In progress — the actual migration → corosensei removal (architecture B).**
+    Replace coroutine suspension with **state capture**: `receive`-on-empty unwinds
+    `vm_run_bc` carrying `(frames, cur_*, ip)` as a heap struct in the `Process`;
+    re-enter on any worker; generalize stealing to *running* processes; **delete
+    corosensei**. Concrete plan: `concurrency-v2.md` §8 (flag-gated rollout, the
+    `preempt`/`:kill`/tree-walked/native-nested implications, acceptance bar).
+    - ✅ Step 1 — `receive_match` split into `scan_mailbox` + wait.
+    - ✅ Step 2 — the `Control::Suspend` signal (`%try` re-raises it; dormant).
+    - ✅ Decision — **B** (remove corosensei, not keep it as a fallback): the
+      suspending `receive` is clean across the whole stdlib, so state-capture covers
+      the real workloads; rare native-nested `receive` re-runs.
+    - ⬜ Steps 3–6 (the focused scheduler-core build): capture/resume machinery →
+      `run_one` dual-mode behind `BROOD_STATE_CAPTURE` → flip default → delete
+      corosensei + generalize stealing. Must hold the §6 plain-release KI-1 bar.
 - ✅ **[perf] gc: de-dup the write-barrier `remembered` set** — repeated binds
   into one tenured frame pushed a duplicate entry each time; now one entry per
   distinct old frame. White-box regression test.

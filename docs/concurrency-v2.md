@@ -402,5 +402,88 @@ parity, not a parallel rewrite:
   frame-count/heap-bytes guard instead of a native-stack-bytes guard).
 - VM parity + no perf regression on the bench suite (the flat loop is the bet that
   it's faster).
+
+## 8. Implementation plan — corosensei removal (architecture **B**, accepted 2026-06-07)
+
+> Migration steps 1–2 are landed (`scan_mailbox` split; the `Control::Suspend`
+> signal that `%try` re-raises, dormant). This section is the concrete plan for the
+> rest, after deciding **B** — *remove corosensei outright* rather than keep it as a
+> fallback. Built **flag-gated alongside corosensei** (`BROOD_STATE_CAPTURE`,
+> default off) until proven, then corosensei is deleted — the bytecode-engine
+> playbook. Every step holds the §6 / §7.6 acceptance bar.
+
+### 8.1 The enabler and the scope
+
+When a **clean** `receive` (the suspending point is reached directly through
+bytecode + the `%receive` native, no *stateful* native in between) suspends, the
+`Control::Suspend` signal propagates up to `vm_run_bc`, unwinding only the
+transient native frames (`dispatch`/`exec_chunk`-call/`receive_match`) — which hold
+no durable state — while `vm_run_bc`'s `frames` Vec and the operand stack
+(`Heap::roots`) stay intact. So `vm_run_bc` captures the full continuation as
+`(frames, cur_*, ip)` and returns it; re-entry replays from there. **Survey finding
+(2026-06-07):** across the stdlib (supervisors, gen_servers, `task`, `sse`, `test`,
+`serve`) the suspending `receive` is *always* clean — a tail position in a loop,
+never nested in `try`/`binding`/`%isolate`. So state-capture covers the real
+workloads; the rare native-nested case is handled by re-run (below).
+
+Removing corosensei means **every** yielder use migrates, not just `receive`:
+- **`preempt`** (reduction tick): at `vm_run_bc`'s loop top — a clean frame
+  boundary — capture state and return `Preempted`; `run_one` re-enqueues; resume
+  re-enters. (No native stack to freeze; the loop top is already the safepoint.)
+- **`:kill`** (`Suspend::Kill`): becomes a capture-and-discard (retire with reason);
+  no resume.
+- **Tree-walked processes** (`BROOD_VM=0`, or an arm that defers to `eval::eval`):
+  have **no bytecode frame stack** to capture. Options: (a) keep a *minimal*
+  coroutine only for tree-walked process bodies (corosensei not fully gone, but
+  off the common path), or (b) require process bodies to be VM-eligible (they
+  almost always are post-Stage-5; a deferred arm is the macro/`def` edge). Decide
+  during stage 8.3 from how often a real process body defers.
+- **Native-nested `receive`** (`receive` inside `try`/`binding`/`%isolate`): the
+  stateful native re-raises the `Control::Suspend` (no cleanup), and on resume
+  `vm_run_bc` re-executes the native's `Inst::Call` — **re-running** the native +
+  its thunk from the start. Correct when the thunk has no irreversible side effect
+  *before* the `receive` (the only shape that occurs); a documented footgun
+  otherwise. `binding` re-installs its dynamic value on re-run (idempotent);
+  `%try` re-enters its body (the receive re-scans).
+
+### 8.2 The capture/resume machinery (`compile.rs`, `mailbox.rs`)
+
+- `Suspended { frames: Vec<BcFrame>, cur: BcFrame, /* + receive deadline */ }` — the
+  reified continuation. Promote `vm_run_bc`'s local `Frame` to a module `BcFrame`.
+- `vm_run_bc(heap, arm, args, env, resume: Option<Suspended>)` — start fresh or
+  resume; on a `Control::Suspend` returned through `exec_chunk`, rewind the
+  `Inst::Call`'s `ip` (so re-entry re-runs `%receive`), capture `(frames, cur_*,
+  ip)`, and return a `Suspended` outcome (a new return enum, *not* `LispResult`).
+- `scan_mailbox` no-match + green + `BROOD_STATE_CAPTURE` → `Err(LispError::suspend(deadline))`
+  instead of `wait_for_message`. `exec_chunk`'s `Inst::Call` intercepts a control
+  signal (rewind ip, return `ChunkExit::Suspend`); `vm_run_bc` turns it into the
+  `Suspended` outcome.
+- `binding`/`%isolate` join `%try` in re-raising a control signal untouched.
+
+### 8.3 The scheduler cutover (`scheduler.rs`)
+
+- `Process` holds `Run::Suspended(Box<Suspended>)` instead of (or alongside, while
+  flagged) the `Coroutine`. `run_one` calls `vm_run_bc(.., resume)` directly; a
+  `Suspended` outcome parks it (mailbox wait + timer, the work `wait_for_message`
+  did); a `Preempted` outcome re-enqueues; `Done`/`Err` retires.
+- **Migration falls out:** a parked/runnable process is now plain `Send` data, so
+  `try_steal` (and a periodic rebalancer) move *any* process — the `fresh`-only
+  restriction and KI-1b pin are gone. Generalise §3's steal; delete the `fresh`
+  flag.
+- Delete corosensei: `Coroutine`/`Yielder`/`Suspend`/`CORO_STACK_BYTES`/the
+  `unsafe impl Send for Process`. The `BROOD_STACK_BUDGET` native-byte guard
+  becomes the `MAX_BC_FRAMES`-style frame guard already in `vm_run_bc`.
+
+### 8.4 Rollout
+
+1. Machinery (8.2) behind `BROOD_STATE_CAPTURE`, corosensei still default; a unit
+   test round-trips capture→resume of a clean `receive`.
+2. `run_one` dual-mode (coroutine default; state-capture under the flag); the new
+   live-migration regression test (§7.6) passes flag-on.
+3. Flip the default; full `make test` + the §6 plain-release KI-1 bar green.
+4. Delete corosensei (8.3 last bullet); re-run the bar. Generalise stealing.
+
+This is the scheduler core (the KI-1 subsystem) — run it as a focused effort, not
+folded into unrelated work.
 </content>
 </invoke>
