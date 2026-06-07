@@ -18,9 +18,15 @@
 (defmodule sexp
   "Structural s-expression navigation over Brood's CST (`parse-source`). Pure
 position functions `(text point) -> point` — `point-forward` / `point-backward`
-/ `point-up` / `point-down` / `point-defun-start` — plus buffer commands
-`forward` / `backward` / `up` / `down` / `beginning-of-defun` `(buf key) -> buf`
-for binding in a keymap. `(require 'sexp)`."
+/ `point-up` / `point-down` / `point-defun-start` — and pure edit functions
+`(text point) -> [new-text new-point]` (nil when inapplicable) —
+`point-slurp-forward` / `point-barf-forward` / `point-slurp-backward` /
+`point-barf-backward` / `point-raise` / `point-splice` / `point-wrap-round`, plus
+`point-kill-end (text point) -> point` (a structure-capped kill bound). Buffer
+commands `(buf key) -> buf` wrap each for a keymap: `forward` / `backward` / `up`
+/ `down` / `beginning-of-defun` and `slurp-forward` / `barf-forward` /
+`slurp-backward` / `barf-backward` / `raise` / `splice` / `wrap-round`.
+`(require 'sexp)`."
   (:use editor/buffer))
 
 ;; ---- node-kind predicates ---------------------------------------------------
@@ -175,7 +181,170 @@ unchanged if `point` isn't within one."
                      (forms-of root))))
     (if (nil? top) point (+ base (get top :start)))))
 
+;; ---- pure structural edits: (text point) -> [new-text new-point] ------------
+;; The paredit family. Each computes the whole new text plus where point should land,
+;; or nil when the op doesn't apply (no sibling to slurp, top level for splice, …) —
+;; the buffer wrappers below treat nil as a no-op, mirroring how the motions above
+;; return `point` unchanged. Unlike the motions these read the FULL-text `tree` (not
+;; `narrow`): an edit fires once per explicit chord, not per cursor move, so the
+;; O(buffer) parse is fine (the fontify/diagnostics passes already parse per frame).
+;; `parent` is found with the same `(enclosing tr (get enc :start))` idiom the indenter
+;; uses — a top-level form's parent is the root, so slurp/barf reach the next top form.
+
+(defn sexp--enc-of (text point)
+  "The deepest container enclosing `point`, or nil when that's the root (no list to
+edit). Wrapped in `[tr enc]` so callers reuse the one tree for parent/child lookups."
+  (let (tr (tree text)
+        enc (enclosing tr point))
+    (if (= (get enc :kind) :root) nil [tr enc])))
+
+(defn point-slurp-forward (text point)
+  "Pull the sibling form *after* the enclosing list inside it — move the close
+delimiter past that form (Emacs/paredit `forward-slurp-sexp`)."
+  (let (ctx (sexp--enc-of text point))
+    (if (nil? ctx)
+      nil
+      (let ([tr enc] ctx
+            ee (get enc :end)
+            parent (enclosing tr (get enc :start))
+            nxt (first (filter (fn (f) (>= (get f :start) ee)) (forms-of parent))))
+        (if (nil? nxt)
+          nil
+          (let (ne (get nxt :end))
+            [(str (substring text 0 (dec ee))
+               (substring text ee ne)
+               (char-at text (dec ee))
+               (substring text ne))
+             point]))))))
+
+(defn point-barf-forward (text point)
+  "Expel the last form of the enclosing list — move the close delimiter in past the
+form before it (paredit `forward-barf-sexp`); point stays inside the list."
+  (let (ctx (sexp--enc-of text point))
+    (if (nil? ctx)
+      nil
+      (let ([tr enc] ctx
+            es (get enc :start) ee (get enc :end)
+            fs (forms-of enc))
+        (if (empty? fs)
+          nil
+          (let (n (count fs)
+                new-close (if (>= n 2) (get (nth fs (- n 2)) :end) (inc es)))
+            [(str (substring text 0 new-close)
+               (char-at text (dec ee))
+               (substring text new-close (dec ee))
+               (substring text ee))
+             (min point new-close)]))))))
+
+(defn point-slurp-backward (text point)
+  "Pull the sibling form *before* the enclosing list inside it — move the open
+delimiter back over that form (paredit `backward-slurp-sexp`)."
+  (let (ctx (sexp--enc-of text point))
+    (if (nil? ctx)
+      nil
+      (let ([tr enc] ctx
+            es (get enc :start)
+            parent (enclosing tr es)
+            prev (last (filter (fn (f) (<= (get f :end) es)) (forms-of parent))))
+        (if (nil? prev)
+          nil
+          (let (ps (get prev :start))
+            [(str (substring text 0 ps)
+               (char-at text es)
+               (substring text ps es)
+               (substring text (inc es)))
+             point]))))))
+
+(defn point-barf-backward (text point)
+  "Expel the first form of the enclosing list — move the open delimiter in past the
+form after it (paredit `backward-barf-sexp`); point stays inside the list."
+  (let (ctx (sexp--enc-of text point))
+    (if (nil? ctx)
+      nil
+      (let ([tr enc] ctx
+            es (get enc :start) ee (get enc :end)
+            fs (forms-of enc))
+        (if (empty? fs)
+          nil
+          (let (new-open (if (>= (count fs) 2) (get (second fs) :start) (dec ee)))
+            [(str (substring text 0 es)
+               (substring text (inc es) new-open)
+               (char-at text es)
+               (substring text new-open))
+             (if (< point new-open) new-open point)]))))))
+
+(defn point-raise (text point)
+  "Replace the enclosing list with the child form point is in/on, deleting that
+form's siblings (paredit `raise-sexp`)."
+  (let (ctx (sexp--enc-of text point))
+    (if (nil? ctx)
+      nil
+      (let ([tr enc] ctx
+            cur (first (filter (fn (f) (and (<= (get f :start) point) (<= point (get f :end))))
+                         (forms-of enc))))
+        (if (nil? cur)
+          nil
+          (let (cs (get cur :start) ce (get cur :end))
+            [(str (substring text 0 (get enc :start))
+               (substring text cs ce)
+               (substring text (get enc :end)))
+             (+ (get enc :start) (- point cs))]))))))
+
+(defn point-splice (text point)
+  "Remove the enclosing list's delimiters, keeping its contents (paredit
+`splice-sexp`)."
+  (let (ctx (sexp--enc-of text point))
+    (if (nil? ctx)
+      nil
+      (let ([tr enc] ctx
+            es (get enc :start) ee (get enc :end))
+        [(str (substring text 0 es)
+           (substring text (inc es) (dec ee))
+           (substring text ee))
+         (max es (dec point))]))))
+
+(defn point-wrap-round (text point)
+  "Wrap the form at or after `point` in a fresh `( … )`, point landing just inside the
+new open (paredit `wrap-round`)."
+  (let (tr (tree text)
+        enc (enclosing tr point)
+        nxt (first (filter (fn (f) (>= (get f :end) point)) (forms-of enc))))
+    (if (nil? nxt)
+      nil
+      (let (ns (get nxt :start) ne (get nxt :end))
+        [(str (substring text 0 ns) "(" (substring text ns ne) ")" (substring text ne))
+         (inc ns)]))))
+
+;; ---- structure-aware kill bound ---------------------------------------------
+
+(defn sexp--line-end (text i n)
+  "Offset of the next newline at or after `i`, or `n` (end of text)."
+  (cond (>= i n) n (= (char-at text i) "\n") i :else (sexp--line-end text (inc i) n)))
+
+(defn point-kill-end (text point)
+  "End offset for a structure-aware kill from `point` (paredit `kill`): the line end,
+but never past the enclosing list's closing delimiter — so a kill never breaks the
+parens. At end of line, kills the newline. At least `point` (a no-op at the close)."
+  (let (n (string-length text)
+        le (sexp--line-end text point n)
+        enc (enclosing (tree text) point))
+    (if (= (get enc :kind) :root)
+      (if (= point le) (min n (inc point)) le)
+      (let (cp (dec (get enc :end)))
+        (cond
+          (<= cp le) (max point cp)        ; close on this line → kill up to (not incl) it
+          (= point le) (min n (inc point)) ; empty rest of line → kill the newline
+          :else le)))))                    ; list spans lines → kill to end of line
+
 ;; ---- buffer commands: (buf key) -> buf (bind these in a keymap) -------------
+
+(defn sexp--apply-edit (buf result)
+  "Apply a pure edit `[new-text new-point]` to `buf` as one whole-buffer splice (a
+single undo unit), leaving point at `new-point`; `buf` unchanged when `result` is nil."
+  (if (nil? result)
+    buf
+    (let ([t p] result)
+      (goto-char (replace-region buf 0 (buffer-length buf) t) p))))
 
 (defn forward (buf key) (goto-char buf (point-forward (buffer-text buf) (get buf :point))))
 (defn backward (buf key) (goto-char buf (point-backward (buffer-text buf) (get buf :point))))
@@ -183,3 +352,18 @@ unchanged if `point` isn't within one."
 (defn down (buf key) (goto-char buf (point-down (buffer-text buf) (get buf :point))))
 (defn beginning-of-defun (buf key)
   (goto-char buf (point-defun-start (buffer-text buf) (get buf :point))))
+
+(defn slurp-forward (buf key)
+  (sexp--apply-edit buf (point-slurp-forward (buffer-text buf) (get buf :point))))
+(defn barf-forward (buf key)
+  (sexp--apply-edit buf (point-barf-forward (buffer-text buf) (get buf :point))))
+(defn slurp-backward (buf key)
+  (sexp--apply-edit buf (point-slurp-backward (buffer-text buf) (get buf :point))))
+(defn barf-backward (buf key)
+  (sexp--apply-edit buf (point-barf-backward (buffer-text buf) (get buf :point))))
+(defn raise (buf key)
+  (sexp--apply-edit buf (point-raise (buffer-text buf) (get buf :point))))
+(defn splice (buf key)
+  (sexp--apply-edit buf (point-splice (buffer-text buf) (get buf :point))))
+(defn wrap-round (buf key)
+  (sexp--apply-edit buf (point-wrap-round (buffer-text buf) (get buf :point))))
