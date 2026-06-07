@@ -62,6 +62,13 @@ const CORPUS: &[&str] = &[
     "(let (a 1 b 2) (+ a b))",
     "(let (a 1 b (+ a 10)) (* a b))",
     "(letrec (ev? (fn (n) (if (= n 0) true (od? (- n 1)))) od? (fn (n) (if (= n 0) false (ev? (- n 1))))) (ev? 10))",
+    // let-self-ref and letrec-self-ref closure send — both engines must agree on
+    // rejection. The divergence (VM accepted, TW rejected let-self-ref) was the
+    // blind spot that motivated this differential entry. Also exercise the call path
+    // (let-self-ref recursion must work identically on both engines).
+    "(defn mk-let () (let (f (fn (n) (if (= n 0) :done (f (- n 1))))) f)) (let (me (self)) (try (do (send me (mk-let)) :ACCEPT) (catch _ :REJECT)))",
+    "(defn mk-letrec () (letrec (f (fn (n) (if (= n 0) :done (f (- n 1))))) f)) (let (me (self)) (try (do (send me (mk-letrec)) :ACCEPT) (catch _ :REJECT)))",
+    "(defn mk-let () (let (f (fn (n) (if (= n 0) :done (f (- n 1))))) f)) ((mk-let) 10)",
     "(cond false :a (= 1 1) :b else :c)",
     "(when (< 1 2) (+ 1 1) (* 3 3))",
     // macros in a fn body — the VM must defer a closure whose body still holds an

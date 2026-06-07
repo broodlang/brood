@@ -46,7 +46,13 @@
       (write-file a "moved")
       (rename-file a b)
       (refute (path-exists? a))
-      (assert= (read-file b) "moved"))))
+      (assert= (read-file b) "moved")))
+  (test "copy-file duplicates content, leaving the original"
+    (let (d (ftmp) a (path-join d "src.txt") b (path-join d "dst.txt"))
+      (write-file a "copied")
+      (copy-file a b)
+      (assert= (read-file a) "copied")   ; original still there
+      (assert= (read-file b) "copied"))))
 
 (describe "file: line I/O"
   (test "write-lines / read-lines round-trip without a trailing blank line"

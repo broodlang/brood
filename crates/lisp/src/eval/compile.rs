@@ -679,9 +679,29 @@ fn compile_let(heap: &Heap, items: &[Value], scope: &mut Scope, tail: bool, rec:
                     Value::Sym(s) => s,
                     _ => return None,
                 };
-                let rhs = compile_node(heap, pair[1], scope, false)?;
-                let slot = scope.bind(name);
-                binds.push((slot, rhs));
+                if is_fn_form(heap, pair[1]) {
+                    // A fn-valued binder: pre-allocate the slot before compiling
+                    // the RHS so compile_captures can route a self-reference through
+                    // self_name, producing a structural env cycle. The tree-walker's
+                    // let captures the scope frame by reference — env_define adds f
+                    // to it after the closure is built — so the TW closure IS
+                    // structurally self-referential (send rejects it). Without this
+                    // path the VM closure gets env=global (no frame, no cycle), send
+                    // accepts it, and the two engines diverge.
+                    let slot = scope.bind(name);
+                    let unsafe_before = scope.unsafe_slots.len();
+                    scope.unsafe_slots.push(slot);
+                    let saved_self = scope.letrec_self;
+                    scope.letrec_self = Some(slot);
+                    let rhs = compile_node(heap, pair[1], scope, false);
+                    scope.letrec_self = saved_self;
+                    scope.unsafe_slots.truncate(unsafe_before);
+                    binds.push((slot, rhs?));
+                } else {
+                    let rhs = compile_node(heap, pair[1], scope, false)?;
+                    let slot = scope.bind(name);
+                    binds.push((slot, rhs));
+                }
             }
         }
         let body = compile_body(heap, &items[2..], scope, tail)?;
@@ -2326,6 +2346,21 @@ pub fn apply_value(heap: &mut Heap, callee: Value, args: &[Value], genv: EnvId) 
     let argv: SmallVec<[Value; 4]> = args.iter().copied().collect();
     let step = dispatch(heap, callee, argv, false, genv)?;
     force(heap, step)
+}
+
+/// Apply `callee` through the active engine: the VM when enabled (a VM-eligible
+/// callback runs compiled), the tree-walker under `BROOD_VM=0` (keeps the
+/// differential / escape-hatch mode honest). `eval::apply` must stay pure
+/// tree-walker — it's `dispatch`'s fallback, so routing it back through
+/// `apply_value` would recurse. Use for once-per-call thunks (`try`, `binding`,
+/// `isolate`); NOT for the `apply` builtin itself — that needs the TW's inline
+/// `apply`-unfolding trampoline for O(1)-stack `(apply f …)`-driven tail recursion.
+pub fn apply_engine(heap: &mut Heap, callee: Value, args: &[Value], genv: EnvId) -> LispResult {
+    if vm_enabled() {
+        apply_value(heap, callee, args, genv)
+    } else {
+        crate::eval::apply(heap, callee, args, genv)
+    }
 }
 
 #[cfg(test)]

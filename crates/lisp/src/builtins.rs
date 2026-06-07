@@ -9,7 +9,7 @@ use crate::core::heap::Heap;
 use crate::core::keywords as kw;
 use crate::core::value::{self, Arity, EnvId, NativeFn, NativeFnPtr, Tag, Value};
 use crate::error::{LispError, LispResult};
-use crate::eval::apply;
+use crate::eval::{apply, compile::apply_engine};
 use crate::syntax::{cst, printer, reader};
 use crate::types::{Sig, Ty};
 
@@ -1257,6 +1257,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![string, string], nil_ty),
         rename_file,
     );
+    def(
+        heap,
+        "copy-file",
+        Arity::exact(2),
+        Sig::new(vec![string, string], nil_ty),
+        copy_file,
+    );
     // The one hashing primitive (ADR-037): SHA-256 of a string's bytes → hex.
     // Per-file and directory-tree hashing for the package manager are Brood over
     // this + `slurp`/`list-dir` (std/package.blsp), not a directory primitive.
@@ -1838,6 +1845,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("delete-file", &["path"], "Remove the file at path. Idempotent (nil if already absent); errors on a real I/O failure."),
     ("delete-dir", &["path"], "Remove a directory and everything under it (recursive). Idempotent (nil if already absent); errors on a real I/O failure."),
     ("rename-file", &["from", "to"], "Rename/move file `from` to `to`. Returns nil; errors on failure."),
+    ("copy-file", &["from", "to"], "Copy file `from` to `to` (replacing `to`), preserving contents and permissions. Binary-safe (unlike slurp+spit). Returns nil; errors on failure."),
     ("getenv", &["name"], "The value of environment variable name, or nil if unset."),
     ("hostname", &[], "This machine's short hostname (no domain). Used to qualify a node name as name@host."),
     ("run-process", &["prog", "args"], "Run external program prog with an args list, inheriting stdio; returns its exit code."),
@@ -5934,6 +5942,20 @@ fn rename_file(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::Nil)
 }
 
+/// `(copy-file from to)` — copy the file `from` to `to` (replacing `to` if it
+/// exists), preserving the contents byte-for-byte and the permission bits.
+/// Returns nil; errors on failure. The binary-safe counterpart to a `slurp`+`spit`
+/// (which is UTF-8 string I/O and would corrupt non-text files / drop the mode).
+fn copy_file(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let from = expect_string(heap, "copy-file", arg(args, 0))?;
+    let to = expect_string(heap, "copy-file", arg(args, 1))?;
+    std::fs::copy(&from, &to).map_err(|e| {
+        LispError::runtime(format!("copy-file: {} -> {}: {}", from, to, e))
+            .with_code(crate::error::error_codes::FILE_IO)
+    })?;
+    Ok(Value::Nil)
+}
+
 /// `(file-mtime path)` — last-modified time of `path` as epoch-milliseconds, or
 /// `nil` if the file is missing or its mtime can't be read. A cheap `stat`, not a
 /// read — pairs with `load` to drive a hot-reloader: poll `file-mtime`, reload
@@ -6028,6 +6050,13 @@ fn apply_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let f = args[0];
     let mut argv = args[1..last].to_vec();
     argv.extend(heap.seq_items(args[last])?);
+    // Intentionally stays on eval::apply (the tree-walker path), NOT apply_engine.
+    // The TW's eval_at dispatch loop has inline `apply` unfolding (a `continue 'tail`
+    // that reuses the Rust frame), giving O(1) stack for `(apply f …)`-driven
+    // recursion like `(def loop (fn (n) (apply loop (list (- n 1)))))`. Routing
+    // through apply_engine/apply_value creates a new vm_apply Rust frame per
+    // iteration — 100k calls → SIGABRT (the `apply_tail_recursion_does_not_overflow`
+    // regression). Callee bodies still run on the VM via the lazy-compile cache.
     apply(heap, f, &argv, env)
 }
 
@@ -6893,7 +6922,7 @@ fn list_processes(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn isolate(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let thunk = arg(args, 0);
     let saved = heap.snapshot_globals();
-    let result = apply(heap, thunk, &[], env);
+    let result = apply_engine(heap, thunk, &[], env);
     heap.restore_globals(saved);
     result
 }
@@ -6911,7 +6940,7 @@ fn try_catch(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let eb = heap.env_roots_len();
     heap.push_root(handler);
     heap.push_env_root(env);
-    let outcome = apply(heap, thunk, &[], env);
+    let outcome = apply_engine(heap, thunk, &[], env);
     let handler = heap.root_at(vb);
     let env = heap.env_root_at(eb);
     heap.truncate_roots(vb);
@@ -6931,7 +6960,7 @@ fn try_catch(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
                 Some(v) => v,
                 None => e.to_value_map(heap),
             };
-            apply(heap, handler, &[caught], env)
+            apply_engine(heap, handler, &[caught], env)
         }
     }
 }
@@ -7039,7 +7068,7 @@ fn binding(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     for (i, &sym) in names.iter().enumerate() {
         heap.push_dynamic(sym, arg(&vals, i));
     }
-    let result = apply(heap, thunk, &[], env);
+    let result = apply_engine(heap, thunk, &[], env);
     for _ in 0..names.len() {
         heap.pop_dynamic();
     }
