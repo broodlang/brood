@@ -1877,7 +1877,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("term-leave", &[], "Restore the terminal: show the cursor, disable mouse capture, leave the alternate screen, disable raw mode. The normal-path teardown for term-enter."),
     ("term-size", &[], "The terminal size as [cols rows] in character cells."),
     ("term-poll", &["ms"], "Wait up to ms milliseconds for an input event; return a key (a 1-char string for printables, or a keyword for specials: :up :down :left :right :enter :escape :backspace :tab :back-tab :delete :home :end :page-up :page-down, ctrl combos like :ctrl-c, alt combos like :alt-f), a mouse event as a vector [:mouse action button row col mods] (action: :press :release :drag :scroll-up :scroll-down — :drag is motion with a button held, reported once per cell crossed; button: :left :right :middle or nil for scroll; row/col 0-based cells; mods a vector of held modifier keywords in :ctrl :alt :shift order, [] when none — so Ctrl+wheel etc. are bindable), or nil on timeout. Always pass a finite ms."),
-    ("term-draw", &["frame"], "Paint a frame — a vector of render ops: [:clear], [:text row col str], [:text row col str face], [:cursor row col] / [:cursor row col style]. A face is a map like {:fg :red :bold true}; a colour is a palette keyword (:red … :dark-grey, the terminal's named colour) or an explicit [r g b] vector / \"#rrggbb\" hex string (a true-colour cell). The optional cursor `style` is :block (default), :bar, or :underline — the steady caret shape. The in-process frontend for the display protocol; returns nil."),
+    ("term-draw", &["frame"], "Paint a frame — a vector of render ops: [:clear], [:text row col str], [:text row col str face], [:rect row col w h face], [:cursor row col] / [:cursor row col style]. A face is a map like {:fg :red :bold true}; a colour is a palette keyword (:red … :dark-grey, the terminal's named colour) or an explicit [r g b] vector / \"#rrggbb\" hex string (a true-colour cell). [:rect …] fills a w×h cell block with the face's background (a solid panel). The optional cursor `style` is :block (default), :bar, or :underline — the steady caret shape. The in-process frontend for the display protocol; returns nil."),
     ("gui-open", &["title?", "width?", "height?"], "Open a new native window and return its integer id (needs the runtime built with --features gui; errors otherwise). An optional `title` string sets the OS title-bar text (default `Brood`); change it later with gui-title!. Optional `width` `height` (logical pixels, both required together) set the initial window size (default 840x560). Its key/mouse input is delivered to the CALLING process's mailbox as messages — a key as a 1-char string / keyword (`:up`, `:ctrl-c`), the mouse as `[:mouse action button row col mods]` (action `:press`/`:release`/`:drag`/`:move`/`:scroll-up`/`:scroll-down` — `:drag` is motion with a button held and `:move` is bare motion with none (button nil), both delivered once per cell crossed (so mouse-look / hover need no click); `mods` a vector of held modifier keywords in `:ctrl :alt :shift` order, `[]` when none, so Ctrl+wheel / Ctrl+drag are bindable), a resize as `[:resize cols rows]` (the new cell grid, so the loop re-renders at the new size) — so the consumer parks in `(receive)` instead of polling (ADR-058). Clicking the window's close button delivers a dedicated `:close` message — distinct from the Escape *key* (`:escape`), so an app can quit on the X without conflating it with Escape (which an editor binds to cancel/normal-mode); `ui-run` quits on `:close` automatically. Starts the GUI thread on the first call; each call is an independent window, so several observers can run at once. Pass the id to the other gui-* primitives; pair with gui-close."),
     ("gui-close", &["id"], "Close window id (the teardown for gui-open). Idempotent; an unknown id is a no-op."),
     ("gui-title!", &["id", "text"], "Set window id's OS title-bar text to the string text at runtime (the title gui-open gave it, or the default, otherwise). Needs --features gui; a no-op if the GUI thread never started or id isn't a live window. Returns nil."),
@@ -1886,7 +1886,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("gui-grab-cursor", &["id", "on"], "Confine the pointer to window id while `on` is truthy, release it otherwise — for mouse-look that shouldn't let the cursor slip out of the window and click another app. Uses the platform's `Confined` grab (cursor stays inside but keeps moving, so an absolute position-based look maps edge-to-edge), falling back to `Locked` where that's all the platform offers. Off by default; an app opts in. Errors only if id isn't a live window. Needs --features gui. Returns nil."),
     ("gui-size", &["id"], "Window id's size as [cols rows] in character cells (tracks resize / HiDPI), same shape as term-size."),
     ("gui-held-key", &["id"], "The key window id currently sees as physically held — the same value its press delivered (a 1-char string, or a keyword like :ctrl-n / :up) — or nil when none is held. Tracked from press/release transitions in the event loop (NOT winit's ke.repeat, unreliable on Wayland), so it's the source of truth for a held key: a consumer-paced auto-repeat polls it each tick and stops the instant it no longer matches, so a missed key-up (e.g. lost on focus change) can't cause runaway repeat."),
-    ("gui-draw", &["id", "frame"], "Paint a frame (the same render-op vector term-draw takes) to window id; returns nil. Unknown ops are skipped (forward-compatible). A text op's face may carry :scale n (GUI only, integer >=1, capped at 16): the text is drawn n× larger in an n×n block of cells anchored at its row/col — the per-pane/per-buffer font knob; the terminal frontend renders scale 1. A `[:cursor row col]` op may carry an optional `style` keyword (`[:cursor row col style]`) — :block (default, a 50% overlay), :bar (a thin caret on the cell's left edge), or :underline (a rule along the cell bottom). A `[:cursor-zone x y w h shape]` op marks a hover hot-zone: while the pointer is over it the window shows the resize cursor `shape` (:col-resize ↔ / :row-resize ↕), hit-tested on the GUI thread (ADR-080); it draws nothing and the terminal ignores it. A `[:vspans row0 col0 cols]` op is the column-renderer fast path (raycasters, spectrum bars): `cols` is a vector with one entry per cell-column (`col0`, `col0+1`, …), each a top-to-bottom stack of `[height colour]` segments painted from `row0` down — `colour` a face keyword (`:red`), an `[r g b]` triple (0..255), or nil (transparent). The per-cell fill happens natively here, so a wide scene costs the Brood side O(columns), not O(cells); GUI-only (the terminal ignores it)."),
+    ("gui-draw", &["id", "frame"], "Paint a frame (the same render-op vector term-draw takes) to window id; returns nil. Unknown ops are skipped (forward-compatible). A text op's face may carry :scale n (GUI only, integer >=1, capped at 16): the text is drawn n× larger in an n×n block of cells anchored at its row/col — the per-pane/per-buffer font knob; the terminal frontend renders scale 1. A `[:cursor row col]` op may carry an optional `style` keyword (`[:cursor row col style]`) — :block (default, a 50% overlay), :bar (a thin caret on the cell's left edge), or :underline (a rule along the cell bottom). A `[:rect row col w h face]` op fills a w×h cell block with the face's background colour — a solid panel painted directly (no glyphs), the multi-row generalisation of a status bar. A `[:cursor-zone x y w h shape]` op marks a hover hot-zone: while the pointer is over it the window shows the resize cursor `shape` (:col-resize ↔ / :row-resize ↕), hit-tested on the GUI thread (ADR-080); it draws nothing and the terminal ignores it. A `[:vspans row0 col0 cols]` op is the column-renderer fast path (raycasters, spectrum bars): `cols` is a vector with one entry per cell-column (`col0`, `col0+1`, …), each a top-to-bottom stack of `[height colour]` segments painted from `row0` down — `colour` a face keyword (`:red`), an `[r g b]` triple (0..255), or nil (transparent). The per-cell fill happens natively here, so a wide scene costs the Brood side O(columns), not O(cells); GUI-only (the terminal ignores it)."),
     ("gui-font!", &["id?", "spec"], "Set a cell font from spec, a map {:family <keyword> :height <px>} (both keys optional): :family picks a registered font family (bundled :mono, or one added by gui-font-register), :height the cell pixel size. (gui-font! spec) sets the global default — every open window and ones opened later; (gui-font! id spec) retunes just window id, leaving the global default and other windows alone, so two windows can run different fonts. Per-section fonts within a window come from a face's :family/:scale. Needs --features gui. Returns nil."),
     ("gui-font-register", &["name", "styles"], "Register font family name (a keyword) from styles, a map of style → TTF file path {:regular \"…\" :bold \"…\" :italic \"…\" :bold-italic \"…\"}. Only :regular is required; a missing style reuses the regular file. Afterwards a face's :family <name> (or gui-font!) selects it. Needs --features gui. Returns name."),
     ("term-raw-enter", &[], "Enter raw mode only — NO alternate screen, cursor stays visible, scrollback preserved. The seam for an inline line editor (the REPL); use term-enter instead for a full-screen TUI. Pair with term-raw-leave."),
@@ -4946,10 +4946,26 @@ fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let clear_t = value::intern("clear");
     let text_t = value::intern("text");
     let cursor_t = value::intern("cursor");
+    let rect_t = value::intern("rect");
     let mut out: Vec<u8> = Vec::new();
     for (tag, parts) in parsed {
         if tag == clear_t {
             crossterm::queue!(out, Clear(ClearType::All)).map_err(term_err)?;
+        } else if tag == rect_t {
+            // [:rect row col w h face] — fill the block by printing `w` spaces in the
+            // face on each of the `h` rows, so the face `:bg` (or `:reverse`) shows.
+            let row = expect_int(heap, "term-draw", arg(&parts, 1))?;
+            let col = expect_int(heap, "term-draw", arg(&parts, 2))?;
+            let w = expect_int(heap, "term-draw", arg(&parts, 3))?.max(0) as usize;
+            let h = expect_int(heap, "term-draw", arg(&parts, 4))?;
+            let face = parts.get(5).copied().unwrap_or(Value::Nil);
+            let fill = " ".repeat(w);
+            for i in 0..h.max(0) {
+                crossterm::queue!(out, MoveTo(clamp_u16(col), clamp_u16(row + i))).map_err(term_err)?;
+                apply_face(&mut out, heap, face)?;
+                crossterm::queue!(out, Print(&fill), SetAttribute(Attribute::Reset), ResetColor)
+                    .map_err(term_err)?;
+            }
         } else if tag == cursor_t {
             use crate::gui::CursorStyle;
             use crossterm::cursor::SetCursorStyle;
@@ -5405,6 +5421,7 @@ fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let col_resize_t = value::intern("col-resize");
     let row_resize_t = value::intern("row-resize");
     let vspans_t = value::intern("vspans");
+    let rect_t = value::intern("rect");
     let mut ops = Vec::with_capacity(parsed.len());
     for (tag, parts) in parsed {
         if tag == clear_t {
@@ -5414,6 +5431,14 @@ fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             let col = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 2))?);
             let style = cursor_style_from(parts.get(3).copied().unwrap_or(Value::Nil));
             ops.push(crate::gui::Op::Cursor { row, col, style });
+        } else if tag == rect_t {
+            // [:rect row col w h face] — fill a w×h cell block with the face background.
+            let row = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 1))?);
+            let col = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 2))?);
+            let w = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 3))?);
+            let h = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 4))?);
+            let face = gui_face(heap, parts.get(5).copied().unwrap_or(Value::Nil));
+            ops.push(crate::gui::Op::Rect { row, col, w, h, face });
         } else if tag == text_t {
             let row = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 1))?);
             let col = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 2))?);

@@ -17,6 +17,7 @@
 ;;   [:text row col s face]         …styled by `face`, a map (see below)
 ;;   [:cursor row col]              place the text cursor (a block caret)
 ;;   [:cursor row col style]        …shaped :block / :bar / :underline
+;;   [:rect row col w h face]       fill a w×h cell block with `face`'s :bg colour
 ;; A FACE is a map of style attributes, any subset of:
 ;;   {:fg <colour> :bg <colour> :bold <truthy> :reverse <truthy>}
 ;; where a colour is either a palette keyword — :black :red :green :yellow :blue
@@ -68,6 +69,16 @@ asks the frontend to show pointer `shape` while the cursor is over it — e.g.
 `:col-resize` (↔) on a side-by-side split's divider, `:row-resize` (↕) on a stacked
 one. The GUI frontend hit-tests it on pointer-move; the terminal ignores it (ADR-080)."
   [:cursor-zone x y w h shape])
+
+(defn rect (row col w h face)
+  "A render op filling the `w`×`h` block of cells whose top-left is (`row`, `col`)
+with `face`'s `:bg` colour — a solid panel. The general fill primitive `bar`
+(one row) is a special case of: a card behind a popup, a filled selection band, a
+gutter background. The GUI paints the rectangle directly (no glyphs); the terminal
+space-fills each row in the face so the `:bg` shows. Other face attributes (`:fg`,
+`:bold`) are irrelevant — there are no glyphs — but a `:bg` (or `:reverse`) is what
+makes it visible; a face with no background paints nothing."
+  [:rect row col w h face])
 
 (defn bar (row width s &optional (opts {}))
   "A full-width status / mode / **buffer bar**: string `s` drawn on `row` from column

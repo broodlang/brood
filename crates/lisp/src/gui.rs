@@ -110,6 +110,17 @@ pub enum Op {
         col: u16,
         style: CursorStyle,
     },
+    /// Fill a `w`×`h` block of cells from `(row, col)` with `face`'s background — a
+    /// solid panel (a popup card, a selection band, a gutter wash). Like a multi-row
+    /// `bar`, but a real rectangle the renderer fills directly. The terminal frontend
+    /// space-fills each row so the `:bg` shows.
+    Rect {
+        row: u16,
+        col: u16,
+        w: u16,
+        h: u16,
+        face: Face,
+    },
     /// A rectangular hot-zone (cells) that asks the frontend to show `shape` while
     /// the pointer is over it — e.g. a resize cursor on a window divider. The GUI
     /// hit-tests it on pointer-move; the terminal ignores it. (ADR-080.)
@@ -1985,6 +1996,23 @@ mod backend {
                             fill_cell(&mut buf, fb_w, fb_h, left, uy, block_w, scale, pack(fg));
                         }
                         cx += cells * scale;
+                    }
+                }
+                Op::Rect { row, col, w, h, face } => {
+                    // A solid panel: fill the w×h cell block with the face background
+                    // (reverse swaps in the fg). No background → nothing to paint.
+                    let bg = if face.reverse { face.fg } else { face.bg };
+                    if let Some(bg) = bg {
+                        fill_cell(
+                            &mut buf,
+                            fb_w,
+                            fb_h,
+                            *col as usize * cw,
+                            *row as usize * ch,
+                            *w as usize * cw,
+                            *h as usize * ch,
+                            pack(bg),
+                        );
                     }
                 }
                 Op::Cursor { row, col, style } => {
