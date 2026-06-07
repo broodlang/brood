@@ -521,6 +521,13 @@ enum ChunkExit {
     Tail { arm: Arc<CompiledArm>, args: SmallVec<[Value; 4]>, genv: EnvId },
     SelfTail { args: SmallVec<[Value; 4]> },
     Call { arm: Arc<CompiledArm>, args: SmallVec<[Value; 4]>, genv: EnvId },
+    /// A clean `receive` on an empty mailbox raised `Control::Suspend` through the
+    /// `%receive` native (state-capture path, ADR-100 §8). `exec_chunk` rewound `ip`
+    /// so re-entry re-runs the suspending `Inst::Call`, leaving the callee + args on
+    /// the operand stack untouched; the driver ([`vm_run_bc`]) captures the whole
+    /// frame stack as a [`Suspended`] and returns it to the scheduler to park. Only
+    /// reachable under `BROOD_STATE_CAPTURE` (default off).
+    Suspend { deadline: Option<std::time::Instant> },
 }
 
 // ===================== compiler (form → Node) =====================
@@ -2170,7 +2177,26 @@ fn push_frame(
 /// Callers: `dispatch` (non-tail VM-closure branch), `exec_call`'s IC fast path, and
 /// `force` (a tail `Step`). The tree-walker (`BROOD_VM=0`) is the remaining fallback.
 fn vm_apply(heap: &mut Heap, compiled0: Arc<CompiledArm>, args: &[Value], genv0: EnvId) -> LispResult {
-    vm_run_bc(heap, compiled0, args, genv0)
+    match vm_run_bc(heap, compiled0, args, genv0, None)? {
+        VmOutcome::Done(v) => Ok(v),
+        // A `receive` suspended inside this VM run — but this run is **nested** under a
+        // native (a `map`/`try`/`binding`/`%isolate` callback that re-entered the VM via
+        // `dispatch`/`apply_value`), so its continuation can't be returned as a value.
+        // This is the native-nested case (ADR-100 §8.1): discard the captured inner
+        // frames (their roots were left intact for a top-level resume — unwind them to
+        // the entry mark) and re-raise the `Control::Suspend` so the enclosing native
+        // re-raises it untouched. The *outer* `vm_run_bc` then re-runs this native's
+        // `Inst::Call` on resume — correct because the only shape that occurs has no
+        // irreversible side effect before the `receive`. With `BROOD_STATE_CAPTURE` off
+        // this is unreachable (no suspend is ever produced).
+        VmOutcome::Suspended(s) => {
+            let deadline = s.deadline;
+            heap.truncate_roots(s.entry_roots);
+            heap.truncate_env_roots(s.entry_env);
+            heap.live_arm_truncate(s.entry_arms);
+            Err(LispError::suspend(deadline))
+        }
+    }
 }
 
 // ===================== bytecode stepping engine (ADR-100, Stage 1) =====================
@@ -2682,7 +2708,25 @@ fn exec_chunk(
                 // callee comes back executed as `Step::Done(value)`.
                 let step = match fast {
                     Some((arm, cenv)) => Step::Tail { compiled: arm, args: argv, genv: cenv },
-                    None => dispatch(heap, callee, argv, true, cur_env).map_err(|e| tag_pos(e, pos))?,
+                    None => match dispatch(heap, callee, argv, true, cur_env) {
+                        Ok(s) => s,
+                        Err(e) if e.is_control() => {
+                            // State-capture suspend (ADR-100 §8): a clean `receive`
+                            // raised `Control::Suspend` through the `%receive` native.
+                            // Rewind `ip` to re-run THIS call on resume (re-scan the
+                            // mailbox); the callee + args are still on the operand stack
+                            // (the `Err` path never truncated them), so the re-run reads
+                            // them back. Hand the driver a `Suspend` to capture the
+                            // continuation. Default-off builds never produce the signal.
+                            *ip -= 1;
+                            let deadline = match &e.control {
+                                Some(crate::error::Control::Suspend { deadline }) => *deadline,
+                                None => None,
+                            };
+                            return Ok(ChunkExit::Suspend { deadline });
+                        }
+                        Err(e) => return Err(tag_pos(e, pos)),
+                    },
                 };
                 if *tail {
                     // Tail position: hand the call to the driver, which reuses this
@@ -2763,6 +2807,51 @@ fn exec_chunk(
 /// infinite non-tail recursion into a catchable error before it exhausts memory.
 const MAX_BC_FRAMES: usize = 1 << 20;
 
+/// One suspended bytecode activation: where to resume (`ip`) and how to tear its
+/// frame down. Promoted out of [`vm_run_bc`]'s body (it was a local `struct Frame`)
+/// so a captured [`Suspended`] continuation can hold the whole stack. The indices
+/// (`base`/`env_base`/`arm_slot`) are positions into `Heap::roots`/`env_roots`/
+/// `live_vm_arms`, which stay valid across a suspend because the driver does **not**
+/// unwind them when it captures (a collection while parked relocates the *values* at
+/// those positions in place, keeping the indices good — ADR-100 §8).
+struct BcFrame {
+    arm: Arc<CompiledArm>,
+    ip: usize,
+    base: usize,
+    env: EnvRoot,
+    env_base: usize,
+    arm_slot: usize,
+}
+
+/// A captured VM continuation — the reified call stack of a green process parked at a
+/// clean `receive` (ADR-100 §8, the corosensei-removal migration). It is plain `Send`
+/// data: `frames` (the pending non-tail callers) + `cur` (the frame that was running)
+/// + the driver's entry marks (for unwinding on a later error) + the `receive`
+/// deadline (so the scheduler arms a timer). The operand stack and frame slots it
+/// references stay live on the owning process's `Heap::roots`; this struct only holds
+/// the *control* state. Hand it back to [`vm_run_bc`] as `resume` to replay from the
+/// suspending `%receive` call. The scheduler cutover (§8.3) stores it in place of a
+/// `Coroutine`; for now only the capture→resume unit test consumes it.
+pub(crate) struct Suspended {
+    frames: Vec<BcFrame>,
+    cur: BcFrame,
+    entry_roots: usize,
+    entry_env: usize,
+    entry_arms: usize,
+    /// The `(receive … (after ms …))` absolute wake time, or `None` to wait forever —
+    /// the scheduler arms a timer from this so a parked process still fires its
+    /// `after` clause.
+    pub(crate) deadline: Option<std::time::Instant>,
+}
+
+/// What a [`vm_run_bc`] call produced: a finished value, or a captured continuation to
+/// park and later resume (ADR-100 §8). A real error is the `Err` of the enclosing
+/// `Result`. With `BROOD_STATE_CAPTURE` off, `Suspended` is never produced.
+pub(crate) enum VmOutcome {
+    Done(Value),
+    Suspended(Suspended),
+}
+
 /// The bytecode driver (ADR-100 Stage 4): run a chunked arm and the **entire chain of
 /// chunked calls it makes** on one explicit frame stack, with no native recursion per
 /// Brood call. A non-tail call to a chunked arm pushes a frame; a tail call reuses the
@@ -2773,54 +2862,89 @@ const MAX_BC_FRAMES: usize = 1 << 20;
 /// its arm in `live_vm_arms` (hot-reload compaction rewrites every in-flight chunk).
 ///
 /// This is what makes a paused process's continuation **relocatable heap data** — the
-/// prerequisite for migrating a running process (concurrency-v2.md §7); the corosensei
-/// stack still wraps it today, but the call continuation no longer lives there.
+/// prerequisite for migrating a running process (concurrency-v2.md §7). `resume` drives
+/// the corosensei-removal migration (§8): `None` starts `arm0` fresh; `Some(s)` replays
+/// a previously [`VmOutcome::Suspended`] continuation from the `%receive` call it parked
+/// at, re-entering the loop with `s`'s frame stack (and the operand stack it left on the
+/// heap) intact — on **any** worker, no coroutine. A clean `receive` suspend returns
+/// `Ok(VmOutcome::Suspended(..))` *without unwinding* (the roots must survive for the
+/// resume); the corosensei stack still wraps this today, but the call continuation no
+/// longer lives there.
 fn vm_run_bc(
     heap: &mut Heap,
     arm0: Arc<CompiledArm>,
     args0: &[Value],
     genv0: EnvId,
-) -> LispResult {
+    resume: Option<Suspended>,
+) -> Result<VmOutcome, LispError> {
     crate::perf_bump!(vm_apply);
     // Keep the GC-block depth consistent for any nested native / tree-walked sub-call
     // (their own `stack_overflow_check` reads it). The driver itself doesn't recurse
     // per Brood call — runaway non-tail recursion is caught by `MAX_BC_FRAMES` below,
     // not the native-stack byte guard.
     let _gc_block = crate::process::GcBlockGuard::enter();
-    // A suspended caller: where to resume (`ip`) and how to tear its frame down.
-    struct Frame {
-        arm: Arc<CompiledArm>,
-        ip: usize,
-        base: usize,
-        env: EnvRoot,
-        env_base: usize,
-        arm_slot: usize,
-    }
+
     // Entry marks for a one-shot unwind on error (truncate every frame's roots / env
-    // roots / live-arm registrations back to where the driver started).
-    let entry_roots = heap.roots_len();
-    let entry_env = heap.env_roots_len();
-    let entry_arms = heap.live_arm_len();
+    // roots / live-arm registrations back to where the driver started). Carried in the
+    // `Suspended` so a resumed run still unwinds to the *original* entry on a later error.
+    let entry_roots;
+    let entry_env;
+    let entry_arms;
+    // The currently-executing frame is held in locals (not the Vec) so a tail/self
+    // loop mutates registers, not the stack — only a non-tail call pushes a `BcFrame`.
+    let mut frames: Vec<BcFrame>;
+    let mut cur_arm;
+    let mut cur_env_base;
+    let mut cur_env;
+    let mut cur_base;
+    let mut cur_arm_slot;
+    let mut cur_ip;
+    match resume {
+        // Resume a parked continuation: its frame stack + operand roots are still on
+        // the heap (the suspend didn't unwind), so restore the registers and re-enter
+        // the loop at the `%receive` `Inst::Call` it rewound to — no fresh frame push.
+        Some(s) => {
+            entry_roots = s.entry_roots;
+            entry_env = s.entry_env;
+            entry_arms = s.entry_arms;
+            frames = s.frames;
+            let cur = s.cur;
+            cur_arm = cur.arm;
+            cur_ip = cur.ip;
+            cur_base = cur.base;
+            cur_env = cur.env;
+            cur_env_base = cur.env_base;
+            cur_arm_slot = cur.arm_slot;
+        }
+        // Fresh start: push `arm0`'s activation frame.
+        None => {
+            entry_roots = heap.roots_len();
+            entry_env = heap.env_roots_len();
+            entry_arms = heap.live_arm_len();
+            frames = Vec::new();
+            cur_arm = arm0;
+            cur_env_base = heap.env_roots_len();
+            cur_env = heap.root_env(genv0);
+            cur_base = heap.roots_len();
+            cur_arm_slot = if cur_arm.has_runtime_handles {
+                heap.live_arm_push(cur_arm.clone())
+            } else {
+                usize::MAX
+            };
+            if let Err(e) = push_frame(heap, &cur_arm, args0, cur_env) {
+                heap.truncate_roots(entry_roots);
+                heap.truncate_env_roots(entry_env);
+                heap.live_arm_truncate(entry_arms);
+                return Err(e);
+            }
+            cur_ip = 0usize;
+        }
+    }
     let unwind = |heap: &mut Heap| {
         heap.truncate_roots(entry_roots);
         heap.truncate_env_roots(entry_env);
         heap.live_arm_truncate(entry_arms);
     };
-
-    // The currently-executing frame is held in locals (not the Vec) so a tail/self
-    // loop mutates registers, not the stack — only a non-tail call pushes a `Frame`.
-    let mut frames: Vec<Frame> = Vec::new();
-    let mut cur_arm = arm0;
-    let mut cur_env_base = heap.env_roots_len();
-    let mut cur_env = heap.root_env(genv0);
-    let mut cur_base = heap.roots_len();
-    let mut cur_arm_slot =
-        if cur_arm.has_runtime_handles { heap.live_arm_push(cur_arm.clone()) } else { usize::MAX };
-    if let Err(e) = push_frame(heap, &cur_arm, args0, cur_env) {
-        unwind(heap);
-        return Err(e);
-    }
-    let mut cur_ip = 0usize;
 
     loop {
         // Per-iteration safepoint / preemption / deadline — relocates every frame's
@@ -2849,7 +2973,7 @@ fn vm_run_bc(
                     heap.live_arm_truncate(cur_arm_slot);
                 }
                 match frames.pop() {
-                    None => return Ok(v),
+                    None => return Ok(VmOutcome::Done(v)),
                     Some(caller) => {
                         cur_arm = caller.arm;
                         cur_ip = caller.ip;
@@ -2872,7 +2996,7 @@ fn vm_run_bc(
                 // switch the registers to the callee. `exec_chunk` already dropped the
                 // callee+args operands, so the callee's frame starts at `roots_len()`.
                 let caller_arm = std::mem::replace(&mut cur_arm, arm);
-                frames.push(Frame {
+                frames.push(BcFrame {
                     arm: caller_arm,
                     ip: cur_ip,
                     base: cur_base,
@@ -2925,6 +3049,31 @@ fn vm_run_bc(
                     heap.set_root_at(cur_base + i, args[i]);
                 }
                 cur_ip = 0;
+            }
+            Ok(ChunkExit::Suspend { deadline }) => {
+                // A clean `receive` parked (ADR-100 §8). `exec_chunk` rewound `cur_ip`
+                // to the suspending `%receive` `Inst::Call` and left the callee + args
+                // on the operand stack, so the captured continuation replays straight
+                // from there. Capture the whole frame stack as `Suspended` and return
+                // it WITHOUT unwinding — the operand stack and frame slots must survive
+                // on the heap for the resume (a collection while parked relocates them
+                // in place; the saved `base`/`env_base` indices stay valid).
+                let cur = BcFrame {
+                    arm: cur_arm,
+                    ip: cur_ip,
+                    base: cur_base,
+                    env: cur_env,
+                    env_base: cur_env_base,
+                    arm_slot: cur_arm_slot,
+                };
+                return Ok(VmOutcome::Suspended(Suspended {
+                    frames,
+                    cur,
+                    entry_roots,
+                    entry_env,
+                    entry_arms,
+                    deadline,
+                }));
             }
             Err(e) => {
                 unwind(heap);
@@ -3115,5 +3264,101 @@ mod tests {
             Node::Const(cv) => cv.load(),
             other => panic!("expected a Const, got {:?}", std::mem::discriminant(other)),
         }
+    }
+
+    // ===================== state-capture (ADR-100 §8) =====================
+
+    thread_local! {
+        /// Drives the suspend-once test native: 0 → suspend, ≥1 → return the value.
+        static SUSPEND_GATE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+
+    /// A stand-in for the `%receive` native: the **first** call raises a
+    /// `Control::Suspend` (as a clean `receive` on an empty mailbox would under
+    /// `BROOD_STATE_CAPTURE`); the **second** returns a value (as it would once a
+    /// message arrived). Lets the capture→resume round-trip be tested in isolation
+    /// from the mailbox/scheduler plumbing — the machinery under test is the driver's
+    /// capture + replay, identical for any native that suspends mid-call.
+    fn suspend_once_native(_args: &[Value], _env: EnvId, _heap: &mut Heap) -> LispResult {
+        let n = SUSPEND_GATE.with(|c| {
+            let v = c.get();
+            c.set(v + 1);
+            v
+        });
+        if n == 0 {
+            Err(LispError::suspend(None))
+        } else {
+            Ok(Value::Int(42))
+        }
+    }
+
+    #[test]
+    fn vm_run_bc_captures_and_resumes_a_suspend() {
+        use crate::core::value::{Arity, NativeFn};
+        use crate::types::Sig;
+
+        SUSPEND_GATE.with(|c| c.set(0));
+        let mut heap = Heap::new();
+
+        // The suspend-once native, held in the arm's one frame slot (slot 0). A 0-arg
+        // `Inst::Call` against it is the suspending point — the shape a `(receive …)`
+        // lowers to (`%receive` is the callee, here `slot 0`).
+        let native = heap.alloc_native(NativeFn {
+            name: "%test-suspend-once".to_string(),
+            arity: Arity::exact(0),
+            func: suspend_once_native,
+            params: &[],
+            doc: "",
+            sig: Sig::any(),
+        });
+
+        // Body `(slot0)`: push the native from slot 0, then a non-tail 0-ary call.
+        let chunk = Chunk {
+            code: vec![
+                Inst::Local(0),
+                Inst::Call { argc: 0, tail: false, pos: None, site: NO_SITE, head: None },
+            ],
+        };
+        let arm = Arc::new(CompiledArm {
+            nrequired: 1, // slot 0 = the callee, passed as the sole arg
+            noptional: 0,
+            optional_defaults: Box::new([]),
+            rest_slot: None,
+            nslots: 1,
+            body: Node::Const(ConstVal::new(Value::Nil)), // unused at runtime (chunk drives)
+            chunk: Some(chunk),
+            has_runtime_handles: false,
+        });
+
+        // First run: the native suspends, so the driver captures the continuation
+        // WITHOUT unwinding (the operand stack — the pushed callee — survives on the
+        // heap for the resume).
+        let roots_before = heap.roots_len();
+        let outcome = vm_run_bc(&mut heap, arm.clone(), &[native], EnvId::GLOBAL, None)
+            .expect("first run errored");
+        let suspended = match outcome {
+            VmOutcome::Suspended(s) => s,
+            VmOutcome::Done(_) => panic!("expected a captured suspend, got Done"),
+        };
+        assert!(
+            heap.roots_len() > roots_before,
+            "the captured continuation's frame slots + operands must stay rooted"
+        );
+
+        // Resume: replay from the rewound `%receive` call; the native now returns 42.
+        let resumed = vm_run_bc(&mut heap, arm, &[native], EnvId::GLOBAL, Some(suspended))
+            .expect("resume errored");
+        match resumed {
+            VmOutcome::Done(Value::Int(n)) => assert_eq!(n, 42, "resumed to the wrong value"),
+            VmOutcome::Done(other) => panic!("resumed to a non-int: {:?}", value::tag(other)),
+            VmOutcome::Suspended(_) => panic!("resume suspended again — the gate didn't advance"),
+        }
+        // The driver retired its only frame on `Done`, unwinding the operand stack
+        // back to where the first run started.
+        assert_eq!(
+            heap.roots_len(),
+            roots_before,
+            "a completed resume must tear its frame stack back down to entry"
+        );
     }
 }

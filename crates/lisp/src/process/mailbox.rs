@@ -28,7 +28,7 @@ use crate::eval;
 use super::message::{from_message, to_message, Message};
 use super::scheduler::{
     enqueue, ensure_ctx, gc_block_save, gc_block_set, macro_block_save, macro_block_set,
-    stack_base_save, stack_base_set, Ctx, Process, Suspend,
+    stack_base_save, stack_base_set, state_capture_enabled, Ctx, Process, Suspend,
 };
 use super::timer::arm_timer;
 
@@ -361,6 +361,19 @@ pub fn receive_match(
                         return Ok(on_timeout);
                     }
                 }
+                // State-capture path (ADR-100 §8): a clean no-match in a green process
+                // becomes a *suspend control signal* returned to the scheduler instead
+                // of freezing the coroutine in `wait_for_message`. It rides the error
+                // channel up through the `%receive` native to the bytecode driver
+                // (`vm_run_bc`), which captures the VM continuation as relocatable heap
+                // data and parks it. Drop this scan's operand roots first (the match /
+                // timeout returns do the same) so the driver's `%receive` `Inst::Call`
+                // re-runs against a clean operand stack on resume. Root thread (no
+                // yielder) and default-off builds fall through to the coroutine wait.
+                if state_capture_enabled() && ctx.yielder.is_some() {
+                    heap.truncate_roots(rbase);
+                    return Err(LispError::suspend(deadline));
+                }
                 wait_for_message(&ctx, i, deadline);
             }
             Err(e) => {
@@ -489,7 +502,7 @@ fn wait_for_message(ctx: &Ctx, i: usize, deadline: Option<Instant>) {
             unsafe { (*yptr).suspend(Suspend::Receive) };
             // Resumed (by send or timer): the worker may have run others or migrated
             // us to another worker — re-establish the context, depth and stack base.
-            super::scheduler::CURRENT.with(|c| *c.borrow_mut() = Some(ctx.clone()));
+            crate::process::scheduler::CURRENT.with(|c| *c.borrow_mut() = Some(ctx.clone()));
             gc_block_set(saved_block);
             stack_base_set(saved_base);
             macro_block_set(saved_macro);
@@ -655,6 +668,48 @@ mod tests {
         assert!(
             !is_kill_reason(&mb.pending_kill().unwrap()),
             "two soft reasons never become a kill"
+        );
+    }
+
+    /// State-capture seam (ADR-100 §8.4 step 1): under `BROOD_STATE_CAPTURE`, a green
+    /// process whose `receive` scans an empty mailbox with no match produces a
+    /// `Control::Suspend` *control signal* (to be captured by the VM driver and parked
+    /// by the scheduler) instead of blocking in `wait_for_message`. We model a green
+    /// process by installing a `CURRENT` ctx with a (dummy, never-dereferenced) yielder
+    /// and an empty mailbox, then assert `receive_match` returns that control signal —
+    /// not a real error, and never blocks (the test would hang if it took the wait path).
+    #[test]
+    fn empty_receive_in_a_green_process_suspends_under_the_flag() {
+        // Arm the flag before the first `state_capture_enabled()` read (it caches). This
+        // is the only state-capture caller in the lib unit-test binary; nextest also
+        // isolates each test in its own process.
+        std::env::set_var("BROOD_STATE_CAPTURE", "1");
+        assert!(state_capture_enabled(), "the flag must be armed for this test");
+
+        // A green ctx: a yielder makes `ctx.yielder.is_some()` true (the greenness
+        // check); it is never dereferenced on the suspend path (no kill pending, and
+        // the suspend returns before any `(*yptr).suspend(..)`), so a dangling pointer
+        // is safe here.
+        let mailbox = Mailbox::new();
+        let ctx = Ctx {
+            pid: 999_999,
+            mailbox: Arc::clone(&mailbox),
+            yielder: Some(core::ptr::NonNull::dangling().as_ptr() as *const _),
+            capture: Vec::new(),
+        };
+        crate::process::scheduler::CURRENT.with(|c| *c.borrow_mut() = Some(ctx));
+
+        let mut heap = Heap::new();
+        // Empty mailbox, no timeout: the scan finds nothing and the green+flag branch
+        // returns the suspend signal. `matcher`/`on_timeout` are never applied (the
+        // queue is empty), so plain `nil`s suffice.
+        let r = receive_match(&mut heap, Value::Nil, Value::Nil, Value::Nil);
+        crate::process::scheduler::CURRENT.with(|c| *c.borrow_mut() = None); // don't leak the dummy ctx
+        let err = r.expect_err("an empty receive under the flag must signal a suspend, not return");
+        assert!(err.is_control(), "the suspend must be a control signal, not a real error");
+        assert!(
+            matches!(err.control, Some(crate::error::Control::Suspend { deadline: None })),
+            "an indefinite receive carries no deadline"
         );
     }
 }

@@ -476,8 +476,15 @@ Removing corosensei means **every** yielder use migrates, not just `receive`:
 
 ### 8.4 Rollout
 
-1. Machinery (8.2) behind `BROOD_STATE_CAPTURE`, corosensei still default; a unit
-   test round-trips capture→resume of a clean `receive`.
+1. ✅ **(2026-06-08)** Machinery (8.2) behind `BROOD_STATE_CAPTURE`, corosensei still
+   default. `vm_run_bc` takes `resume: Option<Suspended>` and returns
+   `VmOutcome::{Done,Suspended}`; `exec_chunk`'s `Inst::Call` intercepts the
+   `Control::Suspend` from `%receive` (rewinds `ip`) into `ChunkExit::Suspend`, and
+   the driver captures `(frames, cur_*, ip, entry-marks, deadline)` without unwinding.
+   `scan_mailbox` no-match + green + flag → `Err(LispError::suspend)`; a nested-native
+   suspend re-raises (8.1 re-run). Capture→resume unit test + green-receive signal
+   test; suite + differential green at the default; §6 plain-release KI-1 bar
+   re-cleared (10/10 + `BROOD_GC_STRESS`).
 2. `run_one` dual-mode (coroutine default; state-capture under the flag); the new
    live-migration regression test (§7.6) passes flag-on.
 3. Flip the default; full `make test` + the §6 plain-release KI-1 bar green.

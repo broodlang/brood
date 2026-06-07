@@ -110,9 +110,19 @@ Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
     - ✅ Decision — **B** (remove corosensei, not keep it as a fallback): the
       suspending `receive` is clean across the whole stdlib, so state-capture covers
       the real workloads; rare native-nested `receive` re-runs.
-    - ⬜ Steps 3–6 (the focused scheduler-core build): capture/resume machinery →
-      `run_one` dual-mode behind `BROOD_STATE_CAPTURE` → flip default → delete
-      corosensei + generalize stealing. Must hold the §6 plain-release KI-1 bar.
+    - ✅ §8.4 step 1 — capture/resume machinery behind `BROOD_STATE_CAPTURE`
+      (default **off**, so `main` stays on corosensei). `vm_run_bc` takes a
+      `resume: Option<Suspended>` and returns `VmOutcome::{Done,Suspended}`; a clean
+      `receive` raises `Control::Suspend` through `%receive`, which `exec_chunk`
+      intercepts (rewinds the `Inst::Call` `ip`) into `ChunkExit::Suspend`, and the
+      driver captures `(frames, cur_*, ip, entry marks, deadline)` *without
+      unwinding* (roots survive on the heap for resume). `scan_mailbox` no-match +
+      green + flag → `Err(LispError::suspend)`. Nested-under-a-native suspends
+      re-raise (the §8.1 re-run case). Capture→resume unit test + the green-receive
+      signal test; §6 plain-release KI-1 bar re-cleared (10/10 + GC_STRESS).
+    - ⬜ §8.4 steps 2–4 (the rest of the scheduler-core build):
+      `run_one` dual-mode behind the flag + live-migration regression → flip default
+      → delete corosensei + generalize stealing. Must hold the §6 plain-release bar.
 - ✅ **[perf] gc: de-dup the write-barrier `remembered` set** — repeated binds
   into one tenured frame pushed a duplicate entry each time; now one entry per
   distinct old frame. White-box regression test.
