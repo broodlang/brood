@@ -65,7 +65,11 @@ Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
     `BROOD_BYTECODE`. Stage 1 lowers a call-free/handle-free subset (others stay on
     `exec_node`). Parity: differential test runs it as a third engine; full
     in-language suite (1434) green with it enabled, incl. GC stress.
-  - ⬜ Stage 2: `Call`/`SelfCall` ops (still via the existing dispatch/trampoline).
+  - ✅ **Stage 2 — `Call`/`SelfCall` ops.** `exec_chunk` returns a `Step` and shares
+    `vm_apply_inner`'s trampoline with `exec_node`; a non-tail call delegates to the
+    existing `dispatch`, a tail call/self-call reuses the frame (TCO). Most arms now
+    lower to bytecode. Parity: differential green incl. GC stress; full in-language
+    suite (1434) green with it enabled. (No call-site IC yet — a later perf pass.)
   - ⬜ Stage 3: `MakeClosure`/captures/optional-rest defaults → full per-arm parity.
   - ⬜ Stage 4: explicit cross-arm frame stack (replaces native dispatch recursion —
     the migration prerequisite); then make bytecode the default and retire the
