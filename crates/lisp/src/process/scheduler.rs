@@ -522,6 +522,38 @@ fn preempt() {
     // Root thread (yielder None): budget refreshed, never suspends.
 }
 
+/// Cooperatively yield so other ready work can make progress, **without blocking a
+/// worker thread**. In a green process, suspend (re-enqueued behind peers, like
+/// `preempt`) so the worker runs other ready processes; on the root thread (no
+/// coroutine), sleep briefly so the background worker threads run. The green path
+/// saves/restores the same per-thread state `preempt` does, since the worker may
+/// run other processes (mutating those thread-locals) before we resume. Used by
+/// `%isolate`'s reap to wait for killed orphans without freezing their worker —
+/// `std::thread::sleep` here would starve any orphan pinned to the caller's worker.
+pub fn yield_now() {
+    let ctx = CURRENT.with(|c| c.borrow().clone());
+    if let Some(ctx) = ctx {
+        if let Some(yptr) = ctx.yielder {
+            let saved_block = gc_block_save();
+            let saved_base = stack_base_save();
+            let saved_macro = macro_block_save();
+            // SAFETY: same invariant as `preempt`/`receive` — the yielder is valid
+            // while this coroutine is running, which is now (we were called from
+            // within its eval). Suspending returns control to `run_one`, which
+            // re-enqueues us (the `Preempt` arm).
+            unsafe { (*yptr).suspend(Suspend::Preempt) };
+            CURRENT.with(|c| *c.borrow_mut() = Some(ctx));
+            gc_block_set(saved_block);
+            stack_base_set(saved_base);
+            macro_block_set(saved_macro);
+            return;
+        }
+    }
+    // Root thread / no coroutine: nothing to yield to here, so let the worker
+    // threads run by sleeping briefly.
+    std::thread::sleep(std::time::Duration::from_micros(200));
+}
+
 // ----- the run queue + worker pool -------------------------------------------
 
 pub(super) static NEXT_PID: AtomicU64 = AtomicU64::new(1);

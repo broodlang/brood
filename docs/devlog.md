@@ -1626,3 +1626,23 @@ migration, no race surface (one relaxed atomic per worker). See `scheduler.md`
 
 Full Brood suite green (1422 tests) with both changes; the busy gauge is exercised
 by the whole concurrent suite (a heuristic, so no isolated unit test).
+
+## 2026-06-07 — fix: flaky `unbound` under load was test-isolation, not a core race
+
+Chased a flaky `unbound symbol` that resurfaced under maximal load (full `nextest`
+/ ~24 parallel suites). It looked like KI-1 returning, but isolating it (clean
+worktree at HEAD reproduced it; my scheduler edits were exonerated) plus an
+instrumented unbound site (`present_in_globals=false`, runtime `version` churning)
+proved the global was *genuinely absent from the table* — not mis-resolved.
+
+Root cause: `%isolate`'s wholesale `restore_globals` removes a global out from
+under a process an isolated test spawned but never stopped (e.g. `concurrency_test`'s
+`tco--srv` server). Pure test-harness artifact — `restore_globals` is test-only;
+production never wholesale-restores globals.
+
+Fix: `%isolate` reaps the thunk's still-running spawns (`:kill`) and waits for them
+to deregister before restoring. New `scheduler::yield_now` (green-friendly
+cooperative suspend) does the waiting — `std::thread::sleep` there would freeze the
+isolated unit's own worker and starve a same-worker orphan (which is exactly why a
+first reap attempt failed). nextest 3/3 green (was ~1/5); 24× unbound 9→0, total
+failures halved. See known-issues.md KI-2 (2026-06-07) for the full write-up.
