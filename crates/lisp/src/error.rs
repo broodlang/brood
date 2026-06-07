@@ -77,10 +77,33 @@ impl ErrorKind {
     }
 }
 
+/// A non-error **control signal** (ADR-100 §7 migration). It travels on the error
+/// channel — a [`LispError`] whose `control` is `Some` — so it propagates through the
+/// existing `?`/`Err` plumbing *without* re-typing every signature, but it is **not a
+/// failure**: error-handling natives (`%try`, and the cleanup natives `binding`/
+/// `%isolate`) must **re-raise** it untouched, and the bytecode driver (`vm_run_bc`)
+/// **intercepts** it rather than unwinding. It is never a user-visible error and
+/// carries no message/kind semantics — `kind`/`message` on a control `LispError` are
+/// inert placeholders.
+///
+/// Distinct from `throw`/`raise`: those *unwind* the stack to a handler (abandon the
+/// continuation); `Suspend` *captures* the continuation to resume at the same point.
+#[derive(Debug, Clone)]
+pub enum Control {
+    /// A green process hit `receive` on an empty mailbox: capture its VM
+    /// continuation to the scheduler and park it. `deadline` is the absolute wake
+    /// time for a `(receive … (after ms …))`, so the scheduler arms a timer; `None`
+    /// waits indefinitely.
+    Suspend { deadline: Option<std::time::Instant> },
+}
+
 #[derive(Debug, Clone)]
 pub struct LispError {
     pub kind: ErrorKind,
     pub message: String,
+    /// `Some` iff this is a [`Control`] signal riding the error channel (a suspend),
+    /// not a real error. `None` for every actual error. See [`Control`].
+    pub control: Option<Control>,
     /// The value carried by `(throw v)`, so `catch` can rebind it. Built-in
     /// errors leave this `None`; `try_catch` then projects the structured
     /// fields (kind, code, message, location, hint) into a Brood map.
@@ -165,12 +188,39 @@ impl LispError {
         LispError {
             kind,
             message: message.into(),
+            control: None,
             payload: None,
             pos: None,
             file: None,
             code: None,
             hint: None,
         }
+    }
+
+    /// Build a [`Control`] signal (rides the error channel; not a real error).
+    /// `kind`/`message` are inert placeholders so the struct stays well-formed.
+    pub fn control(c: Control) -> Self {
+        LispError {
+            kind: ErrorKind::Runtime,
+            message: String::new(),
+            control: Some(c),
+            payload: None,
+            pos: None,
+            file: None,
+            code: None,
+            hint: None,
+        }
+    }
+
+    /// The `receive`-on-empty suspend control signal (ADR-100 §7). See [`Control`].
+    pub fn suspend(deadline: Option<std::time::Instant>) -> Self {
+        LispError::control(Control::Suspend { deadline })
+    }
+
+    /// Is this a [`Control`] signal (a suspend) rather than a real error? Error-handling
+    /// natives test this to **re-raise** it instead of catching/cleaning up.
+    pub fn is_control(&self) -> bool {
+        self.control.is_some()
     }
 
     /// Attach a stable error code (builder).
@@ -275,6 +325,7 @@ impl LispError {
         LispError {
             kind: ErrorKind::User,
             message: crate::syntax::printer::display(heap, value),
+            control: None,
             payload: Some(value),
             pos: None,
             file: None,
@@ -333,3 +384,21 @@ impl std::error::Error for LispError {}
 
 /// The result of evaluating something: a [`Value`](crate::core::value::Value) or a [`LispError`].
 pub type LispResult = Result<crate::core::value::Value, LispError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn control_signal_is_distinct_from_errors() {
+        // A suspend rides the error channel but reports as a control signal, so
+        // error-handling natives (`%try`, `binding`, `%isolate`) re-raise it.
+        let s = LispError::suspend(None);
+        assert!(s.is_control());
+        assert!(matches!(s.control, Some(Control::Suspend { deadline: None })));
+        // Real errors are never control signals.
+        assert!(!LispError::new(ErrorKind::Runtime, "boom").is_control());
+        assert!(!LispError::type_err("nope").is_control());
+        assert!(!LispError::unbound("x").is_control());
+    }
+}

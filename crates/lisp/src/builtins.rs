@@ -3741,6 +3741,9 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // (fire-and-forget = async); the one process serialises writes (no interleaving)
     // and isolates a backend crash. Opt-in, never in the prelude.
     ("log", include_str!("../../../std/log.blsp")),
+    // Date and time utilities (UTC): epoch↔datetime conversion, ISO 8601
+    // format/parse, arithmetic, calendar predicates. Pure Brood over `now`.
+    ("datetime", include_str!("../../../std/datetime.blsp")),
     // The editor framework's buffer model (M2 Phase 1, ADR-045): an immutable
     // buffer over the rope primitives, opt-in, never in the prelude.
     ("editor/buffer", include_str!("../../../std/editor/buffer.blsp")),
@@ -7123,6 +7126,11 @@ fn try_catch(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     heap.truncate_env_roots(eb);
     match outcome {
         Ok(value) => Ok(value),
+        // A control signal (a `receive` suspend, ADR-100 §7) is **not** an error —
+        // re-raise it untouched so it reaches the bytecode driver / scheduler. `%try`
+        // must never catch it: it isn't a `throw`/error, and unwinding to the handler
+        // here would discard the captured continuation the suspend means to resume.
+        Err(e) if e.is_control() => Err(e),
         Err(e) => {
             // The catch sees:
             //   * the user-thrown value verbatim, if there is one (preserves the
