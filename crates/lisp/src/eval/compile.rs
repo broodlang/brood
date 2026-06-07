@@ -555,6 +555,20 @@ enum Step {
     },
 }
 
+/// What running a bytecode [`Chunk`] frame yields back to the explicit-frame driver
+/// ([`vm_run_bc`], ADR-100 Stage 4). Unlike [`Step`] (which the `Node` trampoline
+/// uses), this adds `Call` — a **non-tail** call to a chunked VM arm, which the
+/// driver turns into a **frame push** rather than native recursion. `Tail`/`SelfTail`
+/// reuse the current frame (TCO); `Done` pops it. A non-tail call to a native or a
+/// tree-walked arm is already executed inside `exec_chunk` (via `dispatch`) and
+/// surfaces as an ordinary pushed value, never as `Call`.
+enum ChunkExit {
+    Done(Value),
+    Tail { arm: Arc<CompiledArm>, args: SmallVec<[Value; 4]>, genv: EnvId },
+    SelfTail { args: SmallVec<[Value; 4]> },
+    Call { arm: Arc<CompiledArm>, args: SmallVec<[Value; 4]>, genv: EnvId },
+}
+
 // ===================== compiler (form → Node) =====================
 
 /// Compile-time lexical scope: `let`/`letrec`/param binders flattened into one
@@ -2289,6 +2303,14 @@ fn push_frame(
 /// deadline, and the non-tail-recursion stack guard.
 fn vm_apply(heap: &mut Heap, compiled0: Arc<CompiledArm>, args: &[Value], genv0: EnvId) -> LispResult {
     crate::perf_bump!(vm_apply);
+    // Bytecode stepping engine (ADR-100 Stage 4): run this arm and its whole chain of
+    // chunked calls on the explicit frame stack (no native recursion per Brood call).
+    // `vm_run_bc` does its own per-frame live-arm registration, so bypass the
+    // single-registration dance below. (Every `CompiledArm` has a chunk since Stage 3;
+    // the `is_some` guard stays defensive against the chunk-less top-level/test arms.)
+    if bytecode_enabled() && compiled0.chunk.is_some() {
+        return vm_run_bc(heap, compiled0, args, genv0);
+    }
     // Register this frame's compiled arm as LIVE only when it contains movable
     // RUNTIME handles — `runtime_collect` needs to rewrite those in place.  Arms
     // without any `ConstVal::Handle` or `MakeClosure` (e.g. pure arithmetic /
@@ -2346,13 +2368,9 @@ fn vm_apply_inner(
         return Err(e);
     }
     let mut compiled = compiled0;
-    // Bytecode stepping engine (ADR-100): when enabled, run an arm that lowered to a
-    // chunk on the flat instruction loop (`exec_chunk`) instead of walking the `Node`
-    // tree (`exec_node`); both return a `Step`, so they share this trampoline (and a
-    // tail call from either reuses the frame). Chosen per iteration because a tail
-    // call may cross into a different arm that has (or lacks) a chunk. Constant per
-    // call, so read once.
-    let use_bc = bytecode_enabled();
+    // The `Node`-walking trampoline (the `BROOD_BYTECODE`-off engine). The bytecode
+    // path is handled entirely by `vm_run_bc` (routed from `vm_apply`), so it never
+    // reaches here.
     loop {
         // GC safepoint — the frame slots live on `Heap::roots` and the captured env
         // on `Heap::env_roots`, so `collect` relocates both in place. LOCAL
@@ -2378,11 +2396,7 @@ fn vm_apply_inner(
             return Err(crate::eval::deadline_error());
         }
 
-        let step = match compiled.chunk.as_ref() {
-            Some(chunk) if use_bc => exec_chunk(heap, chunk, base, genv),
-            _ => exec_node(heap, &compiled.body, base, genv),
-        };
-        match step {
+        match exec_node(heap, &compiled.body, base, genv) {
             Ok(Step::Done(v)) => {
                 heap.truncate_roots(base);
                 heap.truncate_env_roots(env_base);
@@ -2666,25 +2680,29 @@ fn tag_pos(e: LispError, pos: Option<Pos>) -> LispError {
     }
 }
 
-/// Run a [`Chunk`], returning a [`Step`] — `Done(value)` for a straight-line body,
-/// or `Tail`/`SelfTail` when the body ends in a tail call (handed to
-/// [`vm_apply_inner`]'s trampoline for TCO, exactly like [`exec_node`]). The operand
-/// stack (`Heap::roots` above `base + nslots`) carries intermediate values; frame
-/// slots live at `base..`; `genv` is the captured-env root. On error, returns `Err`
-/// without unwinding the operand stack — the caller truncates `Heap::roots` back to
-/// `base`, exactly as the `exec_node` error path does.
+/// Run a [`Chunk`] frame from `*ip`, returning a [`ChunkExit`] to the driver
+/// ([`vm_run_bc`]). `*ip` is **resumed and updated in place**, so after a non-tail
+/// `Call` returns `ChunkExit::Call`, the driver re-enters here at the instruction
+/// after the call once the callee frame completes. The operand stack (`Heap::roots`
+/// above `base + nslots`) carries intermediate values; frame slots live at `base..`;
+/// `genv` is the captured-env root. On error, returns `Err` without unwinding the
+/// operand stack — the driver unwinds every frame's roots back to entry.
 ///
-/// Stage 2: `Call`/`SelfCall` are supported. A non-tail `Call` recurses through the
-/// existing `dispatch`/`vm_apply` (native recursion — the explicit cross-arm frame
-/// stack is Stage 4); a tail `Call`/`SelfCall` returns a `Step` so the trampoline
-/// reuses the frame. A single pass through a chunk is bounded by its length (loops
-/// are tail calls that return to the trampoline's per-iteration safepoint), so no
-/// mid-chunk safepoint is needed.
-fn exec_chunk(heap: &mut Heap, chunk: &Chunk, base: usize, genv: EnvRoot) -> Result<Step, LispError> {
-    let mut ip = 0usize;
-    while ip < chunk.code.len() {
-        let inst = &chunk.code[ip];
-        ip += 1;
+/// Stage 4: a **non-tail** `Call` to a chunked VM arm returns `ChunkExit::Call` so
+/// the driver **pushes a frame** instead of recursing natively; a non-tail call to a
+/// native or tree-walked arm is run here (via `dispatch`) and its value pushed. A
+/// **tail** `Call`/`SelfCall` returns `Tail`/`SelfTail` so the driver reuses the
+/// frame (TCO). A single pass to the next call/return is bounded by the chunk length.
+fn exec_chunk(
+    heap: &mut Heap,
+    chunk: &Chunk,
+    ip: &mut usize,
+    base: usize,
+    genv: EnvRoot,
+) -> Result<ChunkExit, LispError> {
+    while *ip < chunk.code.len() {
+        let inst = &chunk.code[*ip];
+        *ip += 1;
         match inst {
             Inst::Const(cv) => {
                 let v = cv.load();
@@ -2738,13 +2756,13 @@ fn exec_chunk(heap: &mut Heap, chunk: &Chunk, base: usize, genv: EnvRoot) -> Res
                 heap.truncate_roots(n - 1);
                 heap.set_root_at(base + slot, v);
             }
-            Inst::Jump(t) => ip = *t,
+            Inst::Jump(t) => *ip = *t,
             Inst::JumpIfFalse(t) => {
                 let n = heap.roots_len();
                 let c = heap.root_at(n - 1);
                 heap.truncate_roots(n - 1);
                 if !crate::eval::truthy(c) {
-                    ip = *t;
+                    *ip = *t;
                 }
             }
             Inst::MakeVector(nelem) => {
@@ -2886,8 +2904,6 @@ fn exec_chunk(heap: &mut Heap, chunk: &Chunk, base: usize, genv: EnvRoot) -> Res
                 let pos = *pos;
                 // Operand layout: [.., callee, arg0 .. arg_{argc-1}] (callee emitted
                 // first, then each arg — the same order `exec_call` evaluates them).
-                // Read callee + args fresh from the (rooted) operand stack right
-                // before `dispatch`, so no read straddles a collection.
                 let n = heap.roots_len();
                 let callee = heap.root_at(n - argc - 1);
                 let mut argv: SmallVec<[Value; 4]> = SmallVec::with_capacity(*argc);
@@ -2895,30 +2911,51 @@ fn exec_chunk(heap: &mut Heap, chunk: &Chunk, base: usize, genv: EnvRoot) -> Res
                     argv.push(heap.root_at(n - argc + k));
                 }
                 let cur_env = heap.read_root_env(genv);
+                // Resolve with `tail = true` so a VM-closure callee comes back as
+                // `Step::Tail` (the resolved arm + args + env, **un-run**), while a
+                // native / tree-walked callee is executed and comes back as
+                // `Step::Done(value)`. (Every VM-eligible arm has a chunk since Stage 3,
+                // so a `Tail` arm is always chunked.) No call-site IC yet (Stage 2).
+                let step = dispatch(heap, callee, argv, true, cur_env).map_err(|e| tag_pos(e, pos))?;
                 if *tail {
-                    // Tail position: hand the call to the trampoline (TCO). The
-                    // leftover operands are dropped by the trampoline (truncate to
-                    // `base`), exactly as `exec_call`'s `save` region is.
-                    return dispatch(heap, callee, argv, true, cur_env).map_err(|e| tag_pos(e, pos));
+                    // Tail position: hand the call to the driver, which reuses this
+                    // frame (TCO). Leftover operands are dropped by the driver
+                    // (truncate to `base`).
+                    return Ok(match step {
+                        Step::Tail { compiled, args, genv } => {
+                            ChunkExit::Tail { arm: compiled, args, genv }
+                        }
+                        Step::Done(v) => ChunkExit::Done(v),
+                        Step::SelfTail { .. } => {
+                            unreachable!("dispatch never yields SelfTail")
+                        }
+                    });
                 }
-                let result =
-                    dispatch(heap, callee, argv, false, cur_env).and_then(|s| force(heap, s));
-                heap.truncate_roots(n - argc - 1);
-                match result {
-                    Ok(v) => heap.push_root(v),
-                    Err(e) => return Err(tag_pos(e, pos)),
+                match step {
+                    // Non-tail call to a chunked VM arm: drop callee+args and hand the
+                    // driver a frame to **push** (no native recursion).
+                    Step::Tail { compiled, args, genv } => {
+                        heap.truncate_roots(n - argc - 1);
+                        return Ok(ChunkExit::Call { arm: compiled, args, genv });
+                    }
+                    // Native / tree-walked callee already ran: push its value and continue.
+                    Step::Done(v) => {
+                        heap.truncate_roots(n - argc - 1);
+                        heap.push_root(v);
+                    }
+                    Step::SelfTail { .. } => unreachable!("dispatch never yields SelfTail"),
                 }
             }
             Inst::SelfCall { argc } => {
                 // Direct `letrec` self-tail-call (always tail position, emitted last):
-                // args are already on the operand stack; hand the trampoline a
-                // `SelfTail` to reset THIS frame in place. Mirrors `Node::SelfCall`.
+                // args are already on the operand stack; hand the driver a `SelfTail`
+                // to reset THIS frame in place. Mirrors `Node::SelfCall`.
                 let n = heap.roots_len();
                 let mut argv: SmallVec<[Value; 4]> = SmallVec::with_capacity(*argc);
                 for k in 0..*argc {
                     argv.push(heap.root_at(n - argc + k));
                 }
-                return Ok(Step::SelfTail { args: argv });
+                return Ok(ChunkExit::SelfTail { args: argv });
             }
             Inst::MakeClosure { fn_rest, names, self_name } => {
                 // Mirrors `exec_value`'s `Node::MakeClosure`. The capture values are on
@@ -2952,7 +2989,186 @@ fn exec_chunk(heap: &mut Heap, chunk: &Chunk, base: usize, genv: EnvRoot) -> Res
     }
     // The body's value is the lone operand left above the frame.
     let n = heap.roots_len();
-    Ok(Step::Done(heap.root_at(n - 1)))
+    Ok(ChunkExit::Done(heap.root_at(n - 1)))
+}
+
+/// Runaway guard for the explicit frame stack: a clean `STACK_DEPTH_EXCEEDED` once
+/// the bytecode call depth crosses this many frames, replacing the native-stack byte
+/// guard the `Node` engine uses (the driver doesn't grow the native stack per Brood
+/// call, so unbounded non-tail recursion grows `frames` + `Heap::roots` instead).
+/// Generous — the soft-memory cap (ADR-043) is the real backstop; this just turns an
+/// infinite non-tail recursion into a catchable error before it exhausts memory.
+const MAX_BC_FRAMES: usize = 1 << 20;
+
+/// The bytecode driver (ADR-100 Stage 4): run a chunked arm and the **entire chain of
+/// chunked calls it makes** on one explicit frame stack, with no native recursion per
+/// Brood call. A non-tail call to a chunked arm pushes a frame; a tail call reuses the
+/// current frame (TCO); a self-tail-call resets it in place; `Done` pops. Calls to
+/// natives / tree-walked arms run inline via `dispatch` (leaves w.r.t. this stack).
+/// Every frame's slots live on `Heap::roots` and its env on `Heap::env_roots`, so one
+/// safepoint at the loop top relocates the whole stack in place; each frame registers
+/// its arm in `live_vm_arms` (hot-reload compaction rewrites every in-flight chunk).
+///
+/// This is what makes a paused process's continuation **relocatable heap data** — the
+/// prerequisite for migrating a running process (concurrency-v2.md §7); the corosensei
+/// stack still wraps it today, but the call continuation no longer lives there.
+fn vm_run_bc(
+    heap: &mut Heap,
+    arm0: Arc<CompiledArm>,
+    args0: &[Value],
+    genv0: EnvId,
+) -> LispResult {
+    crate::perf_bump!(vm_apply);
+    // Keep the GC-block depth consistent for any nested native / tree-walked sub-call
+    // (their own `stack_overflow_check` reads it). The driver itself doesn't recurse
+    // per Brood call — runaway non-tail recursion is caught by `MAX_BC_FRAMES` below,
+    // not the native-stack byte guard.
+    let _gc_block = crate::process::GcBlockGuard::enter();
+    // A suspended caller: where to resume (`ip`) and how to tear its frame down.
+    struct Frame {
+        arm: Arc<CompiledArm>,
+        ip: usize,
+        base: usize,
+        env: EnvRoot,
+        env_base: usize,
+        arm_slot: usize,
+    }
+    // Entry marks for a one-shot unwind on error (truncate every frame's roots / env
+    // roots / live-arm registrations back to where the driver started).
+    let entry_roots = heap.roots_len();
+    let entry_env = heap.env_roots_len();
+    let entry_arms = heap.live_arm_len();
+    let unwind = |heap: &mut Heap| {
+        heap.truncate_roots(entry_roots);
+        heap.truncate_env_roots(entry_env);
+        heap.live_arm_truncate(entry_arms);
+    };
+
+    // The currently-executing frame is held in locals (not the Vec) so a tail/self
+    // loop mutates registers, not the stack — only a non-tail call pushes a `Frame`.
+    let mut frames: Vec<Frame> = Vec::new();
+    let mut cur_arm = arm0;
+    let mut cur_env_base = heap.env_roots_len();
+    let mut cur_env = heap.root_env(genv0);
+    let mut cur_base = heap.roots_len();
+    let mut cur_arm_slot =
+        if cur_arm.has_runtime_handles { heap.live_arm_push(cur_arm.clone()) } else { usize::MAX };
+    if let Err(e) = push_frame(heap, &cur_arm, args0, cur_env) {
+        unwind(heap);
+        return Err(e);
+    }
+    let mut cur_ip = 0usize;
+
+    loop {
+        // Per-iteration safepoint / preemption / deadline — relocates every frame's
+        // slots and env in place (all on `Heap::roots`/`env_roots`). Mirrors the
+        // `Node` trampoline's loop top.
+        if !crate::process::macro_block_active() && heap.gc_due() {
+            heap.collect(&mut [], &mut []);
+        }
+        if let Some(used) = crate::core::alloc::soft_limit_hit() {
+            unwind(heap);
+            return Err(crate::eval::memory_limit_error(used));
+        }
+        crate::process::tick();
+        if crate::process::deadline_exceeded() {
+            unwind(heap);
+            return Err(crate::eval::deadline_error());
+        }
+
+        let chunk = cur_arm.chunk.as_ref().expect("vm_run_bc runs only chunked arms");
+        match exec_chunk(heap, chunk, &mut cur_ip, cur_base, cur_env) {
+            Ok(ChunkExit::Done(v)) => {
+                // Retire the current frame, then either finish or hand `v` to the caller.
+                heap.truncate_roots(cur_base);
+                heap.truncate_env_roots(cur_env_base);
+                if cur_arm_slot != usize::MAX {
+                    heap.live_arm_truncate(cur_arm_slot);
+                }
+                match frames.pop() {
+                    None => return Ok(v),
+                    Some(caller) => {
+                        cur_arm = caller.arm;
+                        cur_ip = caller.ip;
+                        cur_base = caller.base;
+                        cur_env = caller.env;
+                        cur_env_base = caller.env_base;
+                        cur_arm_slot = caller.arm_slot;
+                        // The result lands where the caller pushed the callee — its
+                        // operand stack continues seamlessly past the call site.
+                        heap.push_root(v);
+                    }
+                }
+            }
+            Ok(ChunkExit::Call { arm, args, genv }) => {
+                if frames.len() + 1 > MAX_BC_FRAMES {
+                    unwind(heap);
+                    return Err(crate::eval::stack_depth_error(frames.len()));
+                }
+                // Suspend the caller (resume at the already-advanced `cur_ip`) and
+                // switch the registers to the callee. `exec_chunk` already dropped the
+                // callee+args operands, so the callee's frame starts at `roots_len()`.
+                let caller_arm = std::mem::replace(&mut cur_arm, arm);
+                frames.push(Frame {
+                    arm: caller_arm,
+                    ip: cur_ip,
+                    base: cur_base,
+                    env: cur_env,
+                    env_base: cur_env_base,
+                    arm_slot: cur_arm_slot,
+                });
+                cur_env_base = heap.env_roots_len();
+                cur_env = heap.root_env(genv);
+                cur_base = heap.roots_len();
+                cur_arm_slot = if cur_arm.has_runtime_handles {
+                    heap.live_arm_push(cur_arm.clone())
+                } else {
+                    usize::MAX
+                };
+                if let Err(e) = push_frame(heap, &cur_arm, &args, cur_env) {
+                    unwind(heap);
+                    return Err(e);
+                }
+                cur_ip = 0;
+            }
+            Ok(ChunkExit::Tail { arm, args, genv }) => {
+                crate::perf_bump!(tail_call);
+                // Reuse the current frame for the tail callee (TCO): re-root its env,
+                // rebuild its slots in place. Same discipline as the `Node` trampoline.
+                heap.truncate_env_roots(cur_env_base);
+                cur_env = heap.root_env(genv);
+                heap.truncate_roots(cur_base);
+                if cur_arm_slot != usize::MAX {
+                    heap.live_arm_set(cur_arm_slot, arm.clone());
+                } else if arm.has_runtime_handles {
+                    cur_arm_slot = heap.live_arm_push(arm.clone());
+                }
+                if let Err(e) = push_frame(heap, &arm, &args, cur_env) {
+                    unwind(heap);
+                    return Err(e);
+                }
+                cur_arm = arm;
+                cur_ip = 0;
+            }
+            Ok(ChunkExit::SelfTail { args }) => {
+                crate::perf_bump!(self_tail);
+                // Same arm, same env: reset the frame in place (re-nil the slots, rebind
+                // the required params). Mirrors the `Node` trampoline's `SelfTail`.
+                heap.truncate_roots(cur_base + cur_arm.nslots);
+                for i in 0..cur_arm.nslots {
+                    heap.set_root_at(cur_base + i, Value::Nil);
+                }
+                for i in 0..cur_arm.nrequired {
+                    heap.set_root_at(cur_base + i, args[i]);
+                }
+                cur_ip = 0;
+            }
+            Err(e) => {
+                unwind(heap);
+                return Err(e);
+            }
+        }
+    }
 }
 
 // ===================== entry =====================
