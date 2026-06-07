@@ -1365,3 +1365,85 @@ Result: `(reduce + 0 (range 1_000_000))` 1.58 s → **0.27 s** and 130 MB →
 case and only memory outlier, gone. Output byte-identical to the old range
 across all arities; full in-language suite green on both engines, GC-safe under
 `BROOD_GC_STRESS` / `BROOD_GC_VERIFY`.
+
+## 2026-06-06 — ADR-096: VM perf round as the JIT runway (plan)
+
+Asked "how hard is a JIT?" and ran the analysis to ground. Conclusion: the
+architecture is unusually JIT-friendly — immutability (no write barriers), the
+lexically-addressed `Node` IR, the per-arm deopt seam, the `Prim2` epoch-guard
+pattern, and frame-slots-on-`Heap::roots` (a tier-1 JIT keeps values in slots
+across safepoints and sidesteps stack maps under the moving GC) — but the
+highest-value VM-interpreter work and the JIT prerequisites are mostly the
+*same list*. So: **no JIT now, no parallel track** — one road. Recorded as
+ADR-096 + `docs/vm-perf-and-jit-runway.md`.
+
+The round (benchmark between every step; archived baseline first):
+call-site ICs on `Node::Call` → global-read IC on `Node::Global` → wider
+inlined prims (`Prim1`, float fast path) → compile-time GC-pure bit to skip
+operand rooting → `exec_value`/`exec_tail` split → (stretch) defer-set shrink.
+JIT-alignment rules adopted now: one IC mechanism (the epoch-guarded slot);
+never cache a resolution without a guard; indirection tables over in-place
+patching (machine code can't be `rewrite_node`-patched under an ADR-091
+compaction); explicit safepoint discipline; the packed-64-bit `Value` decision
+flagged as open-before-1.0. Actual codegen (Cranelift) stays gated on bytecode
+lowering + a real editor profile showing dispatch dominates.
+
+## 2026-06-06 — ADR-096 round 1 shipped: ICs, wider prims, rooting skip, exec split
+
+All five items of the VM perf round landed in one session, benchmarked between
+every step (baseline archive `2026-06-06T10-45-03Z`, final `2026-06-06T12-48-07Z`).
+Net on the VM: **fib −22%, sum_tail −26%, cons_build −42%, sort_brood −13…−24%,
+spawn_fanout −25%** — call-paths roughly **1.2–1.7× on top of the Stage-3 VM** —
+with maps/pattern/mapcat flat (no regressions). Full Rust + in-language suites
+green after every item, including the `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` gate.
+
+1. **Call-site inline caches** (the big one: −13…−31% alone). A compiled
+   `Node::Call` whose callee is a free global symbol carries a `site` id into a
+   per-process heap-side table (`Heap::vm_call_ics`); the entry caches the
+   resolved callee + (for a non-passthrough VM closure) its `Arc<CompiledArm>` +
+   captured env, validated by `(sym, argc, epoch)`. A hit skips the `env_get`
+   walk, dispatch's passthrough probe, the `vm_cache` hash lookup, and the env
+   read. Two GC/semantics cruxes: the epoch is *re-checked after argument
+   evaluation* (an arg's `def` or a RUNTIME compaction mid-call drops the fast
+   path; the rooted callee value still takes the correct generic path — old
+   callee, as the tree-walker would), and **dynamic symbols are never cached**
+   (`binding` rebinds without an epoch bump; `defdyn` itself bumps, so a
+   pre-defdyn entry self-invalidates). Entries hold only immovable handles; the
+   table clears wholesale on `runtime_collect` (sym+argc validation makes a
+   recycled site id harmless). New targeted tests in `tests/basic.rs`
+   (redefinition *within* a hot form via `eval`, `binding` shadowing through a
+   hot site, `Prim1` guard).
+2. **Global-read IC** (`Node::GlobalIc`, −1…−1.5%). Same mechanism for
+   value-position global reads; call heads stay plain `Node::Global` (the call
+   site's own IC subsumes them). Small, kept as the unified-IC consolidation
+   (ADR-096 rule A).
+3. **Wider prims**: `cons` joins `Prim2` (allocates → handled in the exec arm,
+   off the numeric hot path), float/mixed-numeric fast paths in `prim_apply`
+   (`(F,F)`/`(I,F)`/`(F,I)` for `+ - * < <=`, non-zero `/`; `=`/BigInt/edges
+   defer), and a new `Prim1` for `first`/`rest` (`Pair`/`Nil` inline,
+   vectors/ranges/errors defer). cons_build −9%, sort −7…−10%.
+4. **GC-pure rooting skip** (`Prim2::broot`): operand `a` is rooted across `b`'s
+   eval only when `b` can reach a safepoint; a `Const`/`Local`/`Global`/`GlobalIc`
+   leaf can't, so `(+ acc n)`-shaped ops run with zero operand-stack traffic
+   (the fallback dispatch still roots both). −5% on the numeric pair. `Call`
+   args deliberately keep today's rooting discipline — natives may rely on
+   caller-rooted argv.
+5. **`exec_value`/`exec_node` split**: `Step` is a ~100-byte enum (`Tail`
+   carries an inline SmallVec), and every leaf eval built one and `force`-matched
+   it apart. Value positions now run through `exec_value -> LispResult` (no
+   `Step`, no `force`); `exec_node` keeps only the tail-propagating shapes, with
+   the combination executor factored into `exec_call`. −3…−7% across the board.
+
+Honest notes: item 3 initially cost the pure-numeric pair ~+2% (code layout in
+the bigger executor); item 4 recouped it. The archived final fib-25 median
+(41.6 ms) caught mid-run interference — a controlled 30-sample re-run gives
+33.97 ms (fastest in the archive run agrees: 33.8 ms).
+
+**Environment gotcha discovered en route:** the package-manager `:git deps`
+tests build fixture repos with real `git commit`/`git tag`, and this machine
+signs commits via the 1Password SSH agent — with the agent locked, those 5
+tests fail ("1Password: agent returned an error") and burn their 60–120 s
+timeouts, which is exactly the "suite suddenly times out at 300 s" symptom that
+initially looked like a VM regression. If `nest test` slows by minutes and
+fails 5 package tests: unlock 1Password (or run the suite minus
+`tests/package_test.blsp`).

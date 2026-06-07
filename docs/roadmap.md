@@ -616,6 +616,15 @@ the workaround available today.
     non-goal.
   - ⬜ **Bytecode lowering** — explicitly deferred until a profile shows node-
     dispatch dominating (ADR-076).
+  - ✅ **VM perf round 1 / JIT runway** (ADR-096,
+    [`vm-perf-and-jit-runway.md`](vm-perf-and-jit-runway.md), 2026-06-06) —
+    call-site + global-read inline caches (one epoch-guarded mechanism), wider
+    inlined prims (`cons`, floats, `first`/`rest`), GC-pure rooting skip,
+    `exec_value`/`exec_node` split; benchmarked between every step. **fib −22%,
+    sum_tail −26%, cons_build −42%, sort −13…−24%, spawn_fanout −25%** (~1.2–1.7×
+    on top of Stage 3), no regressions, both suites + GC-stress gate green per
+    item. Each item is also paved JIT runway; actual codegen stays gated on
+    bytecode lowering + a real profile. Remaining stretch: the defer-set shrink.
 
 ## M2 — Editor data model
 

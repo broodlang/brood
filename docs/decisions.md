@@ -5800,3 +5800,53 @@ the same commands by mouse.
 **References.** ADR-046 (frontends), ADR-006 (mechanism in the kernel, policy in Brood).
 Lives in `crates/lisp/src/builtins.rs` (`clipboard` mod + the two builtins), `Cargo.toml`
 (`clipboard` feature / `arboard`), `brood-edit`'s `commands.blsp` + `main.blsp`.
+
+## ADR-096 — VM perf as the JIT runway: one road, not two
+
+**Status:** accepted + round 1 implemented (2026-06-06): items 1–5 all landed —
+fib −22%, sum_tail −26%, cons_build −42%, sort −13…−24%, spawn_fanout −25%
+(~1.2–1.7× on top of the Stage-3 VM), no regressions, every item gated on both
+suites + GC-stress. Long-form analysis + as-built numbers in
+`docs/vm-perf-and-jit-runway.md`.
+
+**Context.** A JIT (emit machine code at runtime) is the natural next rung above the
+closure-compiling VM (ADR-076): both engines compile a form once, but the VM *interprets*
+the compiled `Node` tree (a Rust `match` per node — ~50–100 instructions for a hot
+`(+ a b)`), where a JIT would run ~8. The question was whether to start one, run it in
+parallel with VM tuning, or defer it. Analysis showed the architecture is unusually
+JIT-friendly (immutability kills write barriers; the lexically-addressed IR, deopt seam,
+and epoch-guard pattern already exist; frame-slots-on-`Heap::roots` lets a tier-1 JIT
+sidestep stack maps under the moving GC) — but also that the highest-value VM-interpreter
+work and the JIT prerequisites are *mostly the same list*.
+
+**Decision.** No JIT work now — and no parallel track. Instead:
+
+1. **Do the VM-interpreter perf round now**, ordered: call-site inline caches on
+   `Node::Call`; a global-read IC on `Node::Global`; a wider inlined-prim family
+   (`Prim1`, float fast paths); a compile-time GC-pure bit to skip operand rooting;
+   an `exec_value`/`exec_tail` split; (stretch) shrink the defer set.
+2. **Adopt JIT-alignment rules while pre-alpha** (cheap now, expensive later): one IC
+   mechanism (the epoch-guarded slot, generalizing `Prim2`'s guard); never hard-bind a
+   resolution without a guard; prefer indirection tables over in-place AST patching
+   (machine code can't be atomically rewritten the way `rewrite_node` patches `ConstVal`s
+   under an ADR-091 compaction); explicit safepoint discipline (values live in
+   `Heap::roots` slots across any call/alloc); the packed-64-bit `Value` question is
+   open and must be decided before 1.0.
+3. **Gate any actual codegen** (Cranelift, executable pages) on: bytecode lowering done
+   (ADR-076 §2.4's internal change), the editor existing, and a real profile showing
+   interpretive dispatch — not allocation/GC/`env_get` — as the bottleneck.
+
+**Benchmark protocol (binding for this round).** An archived `scripts/bench.sh` baseline
+before any change; `scripts/quickbench.sh` between items (directional); the full suite +
+GC-stress gate per landed item; an item that doesn't move its target benchmark is
+investigated or reverted, not shipped. Final archived run closes the round.
+
+**Consequences.** The VM gets measurably faster now; every landed item is also a paved
+meter of JIT runway, so a future JIT becomes an increment (a back-end for an IR we
+already trust) rather than a project. The cost: we deliberately leave the template-JIT
+2–4× on the table until the gates above are met.
+
+**References.** ADR-076 (the VM; its §2.4 names bytecode lowering as an internal change),
+ADR-069 (dispatch perf — the passthrough + IC groundwork), ADR-091 (RUNTIME compaction),
+ADR-026 (immutability), ADR-038 (bundle-size vs Cranelift). Lives in
+`crates/lisp/src/eval/compile.rs`; plan + analysis in `docs/vm-perf-and-jit-runway.md`.

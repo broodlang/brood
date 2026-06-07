@@ -960,6 +960,49 @@ pub struct Heap {
     /// cleared and rebuilt lazily; only the live ones need fixup.) Empty unless the VM
     /// is running a body. See ADR-076 / `docs/known-issues.md`.
     live_vm_arms: Vec<Arc<crate::eval::compile::CompiledArm>>,
+    /// Call-site inline caches (ADR-096). Indexed by the `site` id a compiled
+    /// `Node::Call` with a global-symbol callee carries; each entry caches that
+    /// site's most recent resolution — the callee value, and (for a VM-eligible
+    /// non-passthrough closure callee) its compiled arm + captured env — stamped
+    /// with the global epoch it was resolved at. A probe validates
+    /// `(sym, argc, epoch)`, so a `def` rebind, a `restore_globals` swap, or a
+    /// RUNTIME compaction (all bump `runtime.version`) invalidates every entry
+    /// without a sweep; sym+argc are re-checked so a recycled site id after
+    /// [`Heap::runtime_collect`] clears the table can never alias a different
+    /// call site into a wrong hit. Per-process (`RefCell`, like `vm_cache`); a
+    /// site is allocated at compile time ([`Heap::vm_site_alloc`]), so ids are
+    /// only as dense as the code this process actually compiled.
+    vm_call_ics: RefCell<Vec<Option<CallIcEntry>>>,
+    /// Global-read inline caches (ADR-096) — the value-position counterpart of
+    /// [`Self::vm_call_ics`], indexed by a compiled `Node::GlobalIc`'s site id.
+    /// Same lifecycle: allocated at compile time, validated by (sym, epoch),
+    /// cleared wholesale on a RUNTIME compaction.
+    vm_global_ics: RefCell<Vec<Option<GlobalIcEntry>>>,
+}
+
+/// One global-read inline-cache entry (ADR-096): the value a compiled
+/// `Node::GlobalIc` read from the shared global table, stamped with the epoch.
+/// Same validation discipline as [`CallIcEntry`] (sym + epoch), same
+/// immovability invariant on `value`.
+pub struct GlobalIcEntry {
+    pub sym: Symbol,
+    pub epoch: u64,
+    pub value: Value,
+}
+
+/// One call-site inline-cache entry — see the [`Heap::vm_call_ics`] field doc.
+/// `callee` is always an immovable (PRELUDE/RUNTIME/atom) value: global bindings
+/// are promoted by `env_define`, so the LOCAL collector never relocates it; the
+/// runtime compactor would, but it bumps the epoch this entry is validated
+/// against, so a stale handle is never read.
+pub struct CallIcEntry {
+    pub sym: Symbol,
+    pub argc: u32,
+    pub epoch: u64,
+    pub callee: Value,
+    /// The VM fast path: the callee's compiled arm for `argc` + its captured env,
+    /// when the callee resolved to a non-passthrough VM-eligible closure.
+    pub arm: Option<(Arc<crate::eval::compile::CompiledArm>, EnvId)>,
 }
 
 impl Default for Heap {
@@ -1138,6 +1181,8 @@ impl Heap {
             gc_trace: gc_trace_default(),
             vm_cache: RefCell::new(VmCacheMap::default()),
             live_vm_arms: Vec::new(),
+            vm_call_ics: RefCell::new(Vec::new()),
+            vm_global_ics: RefCell::new(Vec::new()),
         }
     }
 
@@ -1175,6 +1220,8 @@ impl Heap {
             gc_trace: gc_trace_default(),
             vm_cache: RefCell::new(VmCacheMap::default()),
             live_vm_arms: Vec::new(),
+            vm_call_ics: RefCell::new(Vec::new()),
+            vm_global_ics: RefCell::new(Vec::new()),
         }
     }
 
@@ -4299,8 +4346,14 @@ impl Heap {
         }
         // 4. Drop the per-process caches that key on / hold RUNTIME handles. (The live
         // arms above are NOT cleared — they're mid-execution; only the lookup cache is.)
+        // The call-site IC table resets wholesale (sites are re-allocated when the
+        // cleared `vm_cache` recompiles its node trees); a still-live arm's old site
+        // id then either falls out of range (ignored) or aliases a fresh site, which
+        // the probe's sym+argc+epoch validation makes harmless (ADR-096).
         self.vm_cache.borrow_mut().clear();
         self.global_ic.borrow_mut().clear();
+        self.vm_call_ics.borrow_mut().clear();
+        self.vm_global_ics.borrow_mut().clear();
 
         debug_assert!(verify_rt_slabs(&new), "runtime_collect left a dangling RUNTIME handle");
 
@@ -4465,6 +4518,94 @@ impl Heap {
     /// Record the compile result for closure key `k` (eligible body or `None`).
     pub fn vm_cache_put(&self, k: VmCacheKey, v: Option<Arc<crate::eval::compile::CompiledClosure>>) {
         self.vm_cache.borrow_mut().insert(k, v);
+    }
+
+    /// Allocate a fresh call-site id for a compiled `Node::Call` whose callee is
+    /// a global symbol (ADR-096). Interior-mutable (`&self`) because compilation
+    /// runs against a shared heap borrow.
+    pub fn vm_site_alloc(&self) -> u32 {
+        let mut t = self.vm_call_ics.borrow_mut();
+        t.push(None);
+        (t.len() - 1) as u32
+    }
+
+    /// Allocate a fresh global-read site id for a compiled `Node::GlobalIc`.
+    pub fn vm_gsite_alloc(&self) -> u32 {
+        let mut t = self.vm_global_ics.borrow_mut();
+        t.push(None);
+        (t.len() - 1) as u32
+    }
+
+    /// Probe global-read site `site`: a hit requires the same symbol and the
+    /// current epoch (see [`Self::vm_call_ic_probe`] for the validation story).
+    #[inline]
+    pub fn vm_global_ic_probe(&self, site: u32, sym: Symbol, epoch: u64) -> Option<Value> {
+        let t = self.vm_global_ics.borrow();
+        let e = t.get(site as usize)?.as_ref()?;
+        if e.sym == sym && e.epoch == epoch {
+            Some(e.value)
+        } else {
+            None
+        }
+    }
+
+    /// Install global-read site `site`'s entry. Same skip rules as
+    /// [`Self::vm_call_ic_put`]: out-of-range sites and movable (builder-heap)
+    /// values are ignored.
+    pub fn vm_global_ic_put(&self, site: u32, sym: Symbol, epoch: u64, value: Value) {
+        if is_movable(value) {
+            return;
+        }
+        let mut t = self.vm_global_ics.borrow_mut();
+        if let Some(slot) = t.get_mut(site as usize) {
+            *slot = Some(GlobalIcEntry { sym, epoch, value });
+        }
+    }
+
+    /// Probe call-site `site`'s inline cache: a hit requires the same callee
+    /// symbol, the same argument count, **and** the current global epoch (so any
+    /// `def`/compaction since the entry was installed misses). Returns the cached
+    /// callee value plus the VM fast-path payload. Sym + argc are validated (not
+    /// just the epoch) so a site id recycled by [`Self::runtime_collect`]'s table
+    /// clear can never serve a *different* call site a wrong resolution.
+    pub fn vm_call_ic_probe(
+        &self,
+        site: u32,
+        sym: Symbol,
+        argc: u32,
+        epoch: u64,
+    ) -> Option<(Value, Option<(Arc<crate::eval::compile::CompiledArm>, EnvId)>)> {
+        let t = self.vm_call_ics.borrow();
+        let e = t.get(site as usize)?.as_ref()?;
+        if e.sym == sym && e.argc == argc && e.epoch == epoch {
+            Some((e.callee, e.arm.clone()))
+        } else {
+            None
+        }
+    }
+
+    /// Install (or overwrite) call-site `site`'s inline cache entry. An
+    /// out-of-range site (a live arm compiled before the last
+    /// [`Self::runtime_collect`] table clear) is ignored. Refuses to cache a
+    /// movable (LOCAL) callee or captured env — the entry lives outside the GC
+    /// root graph, so it must hold only immovable handles. A *process* heap's
+    /// globals are promoted on `def`, so that never skips; the prelude *builder*
+    /// heap (whose "global" env is a plain LOCAL frame of unpromoted values)
+    /// simply never caches, which is correct — its handles are re-tagged
+    /// wholesale by `freeze_as_shared_code`.
+    pub fn vm_call_ic_put(&self, site: u32, entry: CallIcEntry) {
+        if is_movable(entry.callee) {
+            return;
+        }
+        if let Some((_, env)) = &entry.arm {
+            if *env != EnvId::GLOBAL && env.region() == LOCAL {
+                return;
+            }
+        }
+        let mut t = self.vm_call_ics.borrow_mut();
+        if let Some(slot) = t.get_mut(site as usize) {
+            *slot = Some(entry);
+        }
     }
 
     /// Push a live compiled arm onto the execution-stack registry; returns its depth

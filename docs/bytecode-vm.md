@@ -26,6 +26,18 @@
 > compiles the macro's argument syntax as calls (the `sleep`→`receive` bug). **Still
 > worth doing (pure perf):** patterns / `match*`. See
 > [As-built](#as-built-stage-01-2026-05-30) for the numbers and the §7 plan.
+>
+> **ADR-096 perf round (2026-06-06, done):** call-site + global-read **inline
+> caches** (epoch-guarded, heap-side site tables — `Node::Call{site}` /
+> `Node::GlobalIc`), a **wider inlined-prim family** (`cons`, float/mixed
+> arithmetic + compares, `Prim1` `first`/`rest`), a **GC-pure rooting skip**
+> (`Prim2{broot}` — pure-leaf operands run root-free), and the
+> **`exec_value`/`exec_node` split** (value positions skip the ~100-byte `Step`
+> wrap + `force` unwrap; calls go through the factored `exec_call`). Another
+> **~1.2–1.7× on top of the Stage-3 VM** (fib −22%, sum_tail −26%, cons_build
+> −42%, sort −13…−24%, spawn_fanout −25%); details, per-item attribution, and
+> the JIT-alignment rationale in
+> [`vm-perf-and-jit-runway.md`](vm-perf-and-jit-runway.md).
 
 This is the project's "big lever" for performance: closing the tree-walker's
 structural ~50–220× tax (ADR-069's measurement) over the Node/Elixir range. It is
