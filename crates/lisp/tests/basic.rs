@@ -1682,3 +1682,68 @@ fn transient_assoc_returns_same_handle() {
         "true"
     );
 }
+
+// ----- ADR-096: VM inline caches (call-site / global-read / prim guards) -----
+//
+// The semantics these guard are late binding (a `def` must be visible at the
+// very next call through an already-hot compiled call site) and dynamic-var
+// shadowing (a `binding` must never be bypassed by a cached resolution). The
+// differential harness covers breadth; these are the targeted edges.
+
+/// A hot compiled call site (the IC has been hit repeatedly inside one
+/// top-level form) must re-resolve after a `def` — the epoch guard, exercised
+/// *within* a single compiled body, not across top-level forms.
+#[test]
+fn call_site_ic_sees_redefinition_within_a_form() {
+    let mut interp = fresh_interp();
+    interp.eval_str("(def f (fn () :old))").unwrap();
+    // `loop-f` hammers the site so the IC installs, then the body redefines `f`
+    // (via `eval`, a def during the loop) and calls the SAME site again.
+    let v = interp
+        .eval_str(
+            "(def loop-f
+               (fn [n]
+                 (if (= n 0)
+                   (do (eval '(def f (fn () :new))) (f))
+                   (do (f) (loop-f (- n 1))))))
+             (loop-f 50)",
+        )
+        .unwrap();
+    assert_eq!(interp.print(v), ":new");
+}
+
+/// A dynamic symbol is never cached by the call-site or global-read IC: a
+/// `binding` re-binds it without bumping the global epoch, so a cached
+/// resolution would silently bypass the binding.
+#[test]
+fn ics_never_bypass_a_dynamic_binding() {
+    let mut interp = fresh_interp();
+    interp.eval_str("(defdyn dynf (fn () :default))").unwrap();
+    interp
+        .eval_str("(def call-dynf (fn [n acc] (if (= n 0) acc (call-dynf (- n 1) (dynf)))))")
+        .unwrap();
+    // Hammer the site outside any binding (IC would love to cache it)...
+    let v = interp.eval_str("(call-dynf 50 nil)").unwrap();
+    assert_eq!(interp.print(v), ":default");
+    // ...then the same hot site under a `binding` must see the shadow value.
+    let v = interp
+        .eval_str("(binding [dynf (fn () :shadowed)] (call-dynf 50 nil))")
+        .unwrap();
+    assert_eq!(interp.print(v), ":shadowed");
+    // And back outside, the default again (no stale shadow cached).
+    let v = interp.eval_str("(call-dynf 50 nil)").unwrap();
+    assert_eq!(interp.print(v), ":default");
+}
+
+/// The `Prim1` (`first`/`rest`) epoch guard: a redefinition of the operator is
+/// seen by an already-compiled body on its next call.
+#[test]
+fn prim1_guard_sees_redefinition() {
+    let mut interp = fresh_interp();
+    interp.eval_str("(def use-first (fn [xs] (first xs)))").unwrap();
+    let v = interp.eval_str("(use-first (list 1 2))").unwrap();
+    assert_eq!(interp.print(v), "1");
+    interp.eval_str("(def first (fn [x] :redefined))").unwrap();
+    let v = interp.eval_str("(use-first (list 1 2))").unwrap();
+    assert_eq!(interp.print(v), ":redefined");
+}

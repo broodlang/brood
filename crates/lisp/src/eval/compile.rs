@@ -70,6 +70,10 @@ pub fn vm_enabled() -> bool {
     })
 }
 
+/// "This `Node::Call` has no call-site inline cache" — the callee isn't a free
+/// global reference (ADR-096).
+pub const NO_SITE: u32 = u32::MAX;
+
 /// A core 2-ary numeric/comparison primitive the compiler inlines (perf #1). Each
 /// maps to a Rust builtin (`%add`/`%sub`/`%mul`/`%lt`/`%le`/`%eq`); a
 /// [`Node::Prim2`] runs the `(Int, Int)` case inline (a plain `i64` op — no call
@@ -93,6 +97,31 @@ pub enum PrimOp {
     Rem,
     Div,
     Quot,
+    // `cons` (ADR-096): the list-building workhorse. Unlike the numeric ops it
+    // allocates, so it's handled in the exec arm (which has the heap) rather
+    // than `prim_apply`; it accepts any operands, so it never defers on shape.
+    Cons,
+}
+
+/// A core 1-ary sequence primitive the compiler inlines (ADR-096) — the list
+/// iteration workhorses. The `Pair`/`Nil` cases run inline (a slab read — no
+/// call frame, no dispatch); every other operand shape (vectors, ranges, the
+/// canonical type errors) defers to the real native so semantics stay
+/// bit-identical. Same epoch-guard discipline as [`PrimOp`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PrimOp1 {
+    First,
+    Rest,
+}
+
+impl PrimOp1 {
+    fn from_native_name(name: &str) -> Option<PrimOp1> {
+        Some(match name {
+            "first" => PrimOp1::First,
+            "rest" => PrimOp1::Rest,
+            _ => return None,
+        })
+    }
 }
 
 impl PrimOp {
@@ -106,6 +135,7 @@ impl PrimOp {
             "rem" => PrimOp::Rem,
             "%div" => PrimOp::Div,
             "%quot" => PrimOp::Quot,
+            "cons" => PrimOp::Cons,
             _ if name == kw::EQ_PRIM => PrimOp::Eq,
             _ => return None,
         })
@@ -239,8 +269,18 @@ pub enum Node {
     Local(usize),
     /// A free reference — resolved at run time through the global env (`env_get`,
     /// which also consults the dynamic-binding stack), exactly as the tree-walker
-    /// resolves a non-local symbol.
+    /// resolves a non-local symbol. Used for capture-list reads (which resolve
+    /// through a *captured* env, never the table) and call heads (whose
+    /// resolution the call's own site IC caches); body value-position reads
+    /// compile to [`Node::GlobalIc`] instead.
     Global(Symbol),
+    /// A free reference in value position, with a **global-read inline cache**
+    /// (ADR-096): when the enclosing frame resolves free names through the
+    /// process global, the read validates `(sym, epoch)` against the per-process
+    /// [`Heap::vm_global_ics`] entry and skips the `env_get` walk; otherwise (a
+    /// captured-env frame, an epoch change, a dynamic symbol) it falls back to
+    /// exactly the [`Node::Global`] path.
+    GlobalIc { sym: Symbol, site: u32 },
     /// `(if cond then else)` — `cond` in value position, the branches inheriting
     /// the enclosing tail position.
     If(Box<Node>, Box<Node>, Box<Node>),
@@ -261,11 +301,19 @@ pub enum Node {
     /// wins, like the tree-walker's `or_form_pos`) so VM diagnostics keep line/col.
     /// `None` for a promoted RUNTIME body (whose forms carry no recorded position —
     /// neither engine tags those).
+    /// `site` is this call's **inline-cache id** (ADR-096) when the callee is a
+    /// free global reference — an index into the per-process
+    /// [`Heap::vm_call_ics`] table caching the site's last resolution (callee
+    /// value + compiled arm + captured env, epoch-stamped). [`NO_SITE`] for a
+    /// local/computed callee. Plain data: the entry lives in the *heap*, not the
+    /// node, so the shared `Arc`'d tree stays immutable and the table can be
+    /// dropped wholesale on a RUNTIME compaction.
     Call {
         callee: Box<Node>,
         args: Box<[Node]>,
         tail: bool,
         pos: Option<Pos>,
+        site: u32,
     },
     /// `let`/`let*`/`letrec` (Stage 2a). Lexical scope is **flattened** into the
     /// single activation frame: each binder owns a frame slot (pre-allocated in
@@ -304,11 +352,30 @@ pub enum Node {
     /// tree-walker sees it. `guard` is the global epoch at which `head` was last
     /// confirmed to resolve to `op`; an [`AtomicU64`] (not a `Cell`) so the node stays
     /// `Send + Sync` and a migrating process's heap stays `Send`.
+    /// `broot`: must operand `a`'s value be rooted across operand `b`'s eval
+    /// (ADR-096)? `false` when `b` is a **safepoint-free leaf** (`Const` /
+    /// `Local` / `Global` / `GlobalIc` — none can allocate, call, or collect),
+    /// which is the overwhelmingly common shape in hot loops (`(+ acc n)`,
+    /// `(< n 2)`): the whole inline path then runs with zero operand-stack
+    /// traffic. The fallback (non-inline shapes, redefined operator) roots both
+    /// operands before `dispatch` regardless.
     Prim2 {
         op: PrimOp,
         a: Box<Node>,
         b: Box<Node>,
         map: [u8; 2],
+        head: Symbol,
+        guard: AtomicU64,
+        pos: Option<Pos>,
+        broot: bool,
+    },
+    /// An inlined 1-ary sequence primitive (ADR-096) — `(first xs)` / `(rest xs)`.
+    /// The `Pair`/`Nil` cases run inline; any other operand shape — or a
+    /// redefinition of the operator — falls back to a general call on `head`,
+    /// exactly like [`Node::Prim2`]'s guard discipline.
+    Prim1 {
+        op: PrimOp1,
+        a: Box<Node>,
         head: Symbol,
         guard: AtomicU64,
         pos: Option<Pos>,
@@ -720,6 +787,17 @@ fn resolve_prim(heap: &Heap, h: Symbol) -> Option<(PrimOp, [usize; 2])> {
     Some((op, map))
 }
 
+/// Resolve a 1-arg call head `h` to a core inlinable [`PrimOp1`], or `None` if it
+/// isn't one. Unlike [`resolve_prim`] there's no passthrough hop: `first`/`rest`
+/// are bound directly to their natives. Read against the live global env, so a
+/// redefinition simply doesn't match.
+fn resolve_prim1(heap: &Heap, h: Symbol) -> Option<PrimOp1> {
+    match heap.env_get(heap.global(), h)? {
+        Value::Native(id) => PrimOp1::from_native_name(&heap.native(id).name),
+        _ => None,
+    }
+}
+
 /// Compile an already-expanded, already-resolved `form` against the lexical
 /// `scope`. `tail` is whether this form is in tail position. Returns `None` when
 /// the form uses anything outside the VM's vocabulary (the caller then defers the
@@ -738,10 +816,11 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
         | Value::Str(_)
         | Value::Keyword(_) => Some(const_node(heap, form)),
 
-        // A name: a local frame slot if bound, else a global reference.
+        // A name: a local frame slot if bound, else a global reference with a
+        // read IC (ADR-096).
         Value::Sym(s) => match scope.lookup(s) {
             Some(slot) => Some(Node::Local(slot)),
-            None => Some(Node::Global(s)),
+            None => Some(Node::GlobalIc { sym: s, site: heap.vm_gsite_alloc() }),
         },
 
         // A combination — a special form we handle (`if`/`do`) or a function call.
@@ -824,10 +903,31 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                 // cache hit, arity check, and native dispatch the generic call path
                 // pays per operator per iteration. Guarded by the global epoch so a
                 // redefinition of the operator cleanly falls back (see `Node::Prim2`).
+                // 1-ary sequence primitives (`first`/`rest`) inline the same way
+                // (ADR-096) — the list-iteration workhorses of every prelude
+                // sequence fn.
+                if items.len() == 2 && scope.lookup(h).is_none() {
+                    if let Some(op) = resolve_prim1(heap, h) {
+                        let a = compile_node(heap, items[1], scope, false)?;
+                        return Some(Node::Prim1 {
+                            op,
+                            a: Box::new(a),
+                            head: h,
+                            guard: AtomicU64::new(heap.global_epoch()),
+                            pos: heap.form_pos(form),
+                        });
+                    }
+                }
                 if items.len() == 3 && scope.lookup(h).is_none() {
                     if let Some((op, map)) = resolve_prim(heap, h) {
                         let a = compile_node(heap, items[1], scope, false)?;
                         let b = compile_node(heap, items[2], scope, false)?;
+                        // `a`'s value needs a root slot across `b`'s eval only
+                        // if `b` can reach a safepoint (see the field doc).
+                        let broot = !matches!(
+                            b,
+                            Node::Const(_) | Node::Local(_) | Node::Global(_) | Node::GlobalIc { .. }
+                        );
                         return Some(Node::Prim2 {
                             op,
                             a: Box::new(a),
@@ -836,16 +936,30 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                             head: h,
                             guard: AtomicU64::new(heap.global_epoch()),
                             pos: heap.form_pos(form),
+                            broot,
                         });
                     }
                 }
             }
             // Function call: compile the callee and every argument (value position).
-            let callee = compile_node(heap, head, scope, false)?;
+            // A free-symbol head compiles to a plain `Node::Global` (not a
+            // `GlobalIc`): the call's own site IC below caches the head's full
+            // resolution, so a read IC there would be redundant (and waste a site).
+            let callee = match head {
+                Value::Sym(h) if scope.lookup(h).is_none() => Node::Global(h),
+                _ => compile_node(heap, head, scope, false)?,
+            };
             let mut args = Vec::with_capacity(items.len() - 1);
             for &a in &items[1..] {
                 args.push(compile_node(heap, a, scope, false)?);
             }
+            // A free-global callee gets a call-site inline-cache id (ADR-096);
+            // a local/computed callee can resolve to a different function per
+            // call, so it keeps the generic path.
+            let site = match callee {
+                Node::Global(_) => heap.vm_site_alloc(),
+                _ => NO_SITE,
+            };
             Some(Node::Call {
                 callee: Box::new(callee),
                 args: args.into_boxed_slice(),
@@ -854,6 +968,7 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                 // reader-recorded `form_pos` entry is live (a later collection moves
                 // the LOCAL form, but `Pos` is plain data and stays valid).
                 pos: heap.form_pos(form),
+                site,
             })
         }
 
@@ -1055,7 +1170,7 @@ fn force(heap: &mut Heap, step: Step) -> LispResult {
 fn prim_apply(op: PrimOp, x: Value, y: Value) -> Result<Option<Value>, LispError> {
     let (a, b) = match (x, y) {
         (Value::Int(a), Value::Int(b)) => (a, b),
-        _ => return Ok(None),
+        _ => return Ok(prim_apply_float(op, x, y)),
     };
     let v = match op {
         // On i64 overflow, defer (`Ok(None)`): the native `prim_add`/etc. redo
@@ -1094,8 +1209,39 @@ fn prim_apply(op: PrimOp, x: Value, y: Value) -> Result<Option<Value>, LispError
             Some(q) => Value::Int(q),
             None => return Ok(None),
         },
+        // Handled in the exec arm (it allocates); never reaches here.
+        PrimOp::Cons => return Ok(None),
     };
     Ok(Some(v))
+}
+
+/// The float fast path of [`prim_apply`] (ADR-096): both operands `Int`/`Float`
+/// with at least one `Float` — exactly the shapes `num_bin`/`prim_lt`'s float
+/// arms handle with a plain `f64` op after an exact `i64 as f64` coercion.
+/// Everything else (`BigInt` operands, structural `=` on floats, `rem`/`quot`'s
+/// numeric edges, division by zero) returns `None` so the real native owns the
+/// result and the error messages.
+fn prim_apply_float(op: PrimOp, x: Value, y: Value) -> Option<Value> {
+    let (a, b) = match (x, y) {
+        (Value::Float(a), Value::Float(b)) => (a, b),
+        (Value::Int(a), Value::Float(b)) => (a as f64, b),
+        (Value::Float(a), Value::Int(b)) => (a, b as f64),
+        _ => return None,
+    };
+    Some(match op {
+        PrimOp::Add => Value::Float(a + b),
+        PrimOp::Sub => Value::Float(a - b),
+        PrimOp::Mul => Value::Float(a * b),
+        PrimOp::Lt => Value::Bool(a < b),
+        PrimOp::Le => Value::Bool(a <= b),
+        // `%div`: the native errors on a zero denominator — defer that edge
+        // (a NaN/inf denominator is not zero, so it stays inline, matching the
+        // native's plain `a / b`).
+        PrimOp::Div if b != 0.0 => Value::Float(a / b),
+        // `=` is structural (the native owns float equality), `rem`/`quot` take
+        // the numeric-tower path, and zero-denominator `%div` errors — defer.
+        _ => return None,
+    })
 }
 
 /// Walk a compiled `Node` tree, rewriting every embedded movable handle
@@ -1109,7 +1255,7 @@ fn prim_apply(op: PrimOp, x: Value, y: Value) -> Result<Option<Value>, LispError
 fn rewrite_node(node: &Node, f: &mut dyn FnMut(Value) -> Value) {
     match node {
         Node::Const(cv) => cv.rewrite(f),
-        Node::Local(_) | Node::Global(_) => {}
+        Node::Local(_) | Node::Global(_) | Node::GlobalIc { .. } => {}
         Node::If(a, b, c) => {
             rewrite_node(a, f);
             rewrite_node(b, f);
@@ -1148,6 +1294,7 @@ fn rewrite_node(node: &Node, f: &mut dyn FnMut(Value) -> Value) {
             rewrite_node(a, f);
             rewrite_node(b, f);
         }
+        Node::Prim1 { a, .. } => rewrite_node(a, f),
     }
 }
 
@@ -1162,11 +1309,18 @@ pub fn rewrite_arm_handles(arm: &CompiledArm, f: &mut dyn FnMut(Value) -> Value)
     }
 }
 
-/// Execute one node. `frame_base` is the start of this activation's slot region on
-/// `Heap::roots`; `genv` is an [`EnvRoot`] for the *current* closure's captured env
-/// — read fresh via [`Heap::read_root_env`] wherever it's needed, since a nested
-/// call can collect and relocate a movable LOCAL captured env (Stage 2c, R1b).
-/// Returns a [`Step`] so a tail call can bubble up to [`vm_apply`]'s trampoline.
+/// Execute one node in **tail position**. `frame_base` is the start of this
+/// activation's slot region on `Heap::roots`; `genv` is an [`EnvRoot`] for the
+/// *current* closure's captured env — read fresh via [`Heap::read_root_env`]
+/// wherever it's needed, since a nested call can collect and relocate a movable
+/// LOCAL captured env (Stage 2c, R1b). Returns a [`Step`] so a tail call can
+/// bubble up to [`vm_apply`]'s trampoline.
+///
+/// Only the tail-propagating shapes (`if`/`do`/`let` and the call itself) live
+/// here; every value shape delegates to [`exec_value`], which returns the value
+/// directly (ADR-096): `Step` is a ~100-byte enum (`Tail` carries an inline
+/// `SmallVec`), so building one — and `force`-matching it apart again — on
+/// every `Const`/`Local`/operand read was pure overhead.
 fn exec_node(
     heap: &mut Heap,
     node: &Node,
@@ -1174,17 +1328,8 @@ fn exec_node(
     genv: EnvRoot,
 ) -> Result<Step, LispError> {
     match node {
-        Node::Const(cv) => Ok(Step::Done(cv.load())),
-        // Slot read — depth 0: the callee's own frame. (Deeper depths arrive with
-        // the full compiler; the slice only binds params.)
-        Node::Local(i) => Ok(Step::Done(heap.root_at(frame_base + i))),
-        Node::Global(s) => match heap.env_get(heap.read_root_env(genv), *s) {
-            Some(v) => Ok(Step::Done(v)),
-            None => Err(crate::eval::unbound_error(heap, *s)),
-        },
         Node::If(cond, then, els) => {
-            let cs = exec_node(heap, cond, frame_base, genv)?;
-            let c = force(heap, cs)?;
+            let c = exec_value(heap, cond, frame_base, genv)?;
             if crate::eval::truthy(c) {
                 exec_node(heap, then, frame_base, genv)
             } else {
@@ -1197,11 +1342,93 @@ fn exec_node(
             }
             let last = nodes.len() - 1;
             for n in &nodes[..last] {
-                // for effect — must be a value (compiled tail=false)
-                let s = exec_node(heap, n, frame_base, genv)?;
-                force(heap, s)?;
+                exec_value(heap, n, frame_base, genv)?; // for effect
             }
             exec_node(heap, &nodes[last], frame_base, genv)
+        }
+        Node::LetBind { binds, body } => {
+            // Evaluate each rhs and write it into its (pre-allocated) frame slot,
+            // in order. A binding's rhs eval can collect — the frame slots live on
+            // `Heap::roots`, relocated in place, so `frame_base + slot` stays valid.
+            for (slot, rhs) in binds.iter() {
+                let v = exec_value(heap, rhs, frame_base, genv)?;
+                heap.set_root_at(frame_base + slot, v);
+            }
+            // Body is tail-propagated (its tail call bubbles up to the trampoline).
+            exec_node(heap, body, frame_base, genv)
+        }
+        Node::Call { callee, args, tail, pos, site } => {
+            exec_call(heap, callee, args, *tail, *pos, *site, frame_base, genv)
+        }
+        other => exec_value(heap, other, frame_base, genv).map(Step::Done),
+    }
+}
+
+/// Execute one node in **value position** — operands, call arguments, literal
+/// elements, binding right-hand sides: the overwhelmingly common case. Returns
+/// the value directly — no [`Step`] is built and no [`force`] unwrap runs. A
+/// `Call` reached here was compiled `tail = false`, so [`exec_call`]'s step is
+/// always `Done` (and a stray `Tail` is still resolved safely by [`force`]).
+fn exec_value(
+    heap: &mut Heap,
+    node: &Node,
+    frame_base: usize,
+    genv: EnvRoot,
+) -> LispResult {
+    match node {
+        Node::Const(cv) => Ok(cv.load()),
+        // Slot read — depth 0: the callee's own frame. (Deeper depths arrive with
+        // the full compiler; the slice only binds params.)
+        Node::Local(i) => Ok(heap.root_at(frame_base + i)),
+        Node::Global(s) => match heap.env_get(heap.read_root_env(genv), *s) {
+            Some(v) => Ok(v),
+            None => Err(crate::eval::unbound_error(heap, *s)),
+        },
+        Node::GlobalIc { sym, site } => {
+            let env = heap.read_root_env(genv);
+            // The IC engages only when free names resolve through the process
+            // global (same gate as the call-site IC): a captured-env frame can
+            // shadow the symbol, and differs per closure instance.
+            if heap.is_global(env) {
+                let epoch = heap.global_epoch();
+                if let Some(v) = heap.vm_global_ic_probe(*site, *sym, epoch) {
+                    return Ok(v);
+                }
+                return match heap.env_get(env, *sym) {
+                    Some(v) => {
+                        // Never cache a dynamic symbol — `binding` rebinds it
+                        // without bumping the epoch (a later `defdyn` of a cached
+                        // symbol bumps it, so the stale entry self-invalidates).
+                        if !value::is_dynamic(*sym) {
+                            heap.vm_global_ic_put(*site, *sym, epoch, v);
+                        }
+                        Ok(v)
+                    }
+                    None => Err(crate::eval::unbound_error(heap, *sym)),
+                };
+            }
+            match heap.env_get(env, *sym) {
+                Some(v) => Ok(v),
+                None => Err(crate::eval::unbound_error(heap, *sym)),
+            }
+        }
+        Node::If(cond, then, els) => {
+            let c = exec_value(heap, cond, frame_base, genv)?;
+            if crate::eval::truthy(c) {
+                exec_value(heap, then, frame_base, genv)
+            } else {
+                exec_value(heap, els, frame_base, genv)
+            }
+        }
+        Node::Do(nodes) => {
+            if nodes.is_empty() {
+                return Ok(Value::Nil);
+            }
+            let last = nodes.len() - 1;
+            for n in &nodes[..last] {
+                exec_value(heap, n, frame_base, genv)?; // for effect
+            }
+            exec_value(heap, &nodes[last], frame_base, genv)
         }
         Node::Vector(elems) => {
             // Evaluate each element, keeping the results on the operand stack so a
@@ -1210,14 +1437,7 @@ fn exec_node(
             // every path, including errors.
             let save = heap.roots_len();
             for e in elems.iter() {
-                let step = match exec_node(heap, e, frame_base, genv) {
-                    Ok(s) => s,
-                    Err(err) => {
-                        heap.truncate_roots(save);
-                        return Err(err);
-                    }
-                };
-                match force(heap, step) {
+                match exec_value(heap, e, frame_base, genv) {
                     Ok(v) => heap.push_root(v),
                     Err(err) => {
                         heap.truncate_roots(save);
@@ -1231,7 +1451,7 @@ fn exec_node(
                 vals.push(heap.root_at(save + k));
             }
             heap.truncate_roots(save);
-            Ok(Step::Done(heap.alloc_vector(vals)))
+            Ok(heap.alloc_vector(vals))
         }
         Node::Map(entries) => {
             // Same operand-stack discipline as `Vector`: each key then value is
@@ -1240,14 +1460,7 @@ fn exec_node(
             let save = heap.roots_len();
             for (kn, vn) in entries.iter() {
                 for node in [kn, vn] {
-                    let step = match exec_node(heap, node, frame_base, genv) {
-                        Ok(s) => s,
-                        Err(err) => {
-                            heap.truncate_roots(save);
-                            return Err(err);
-                        }
-                    };
-                    match force(heap, step) {
+                    match exec_value(heap, node, frame_base, genv) {
                         Ok(v) => heap.push_root(v),
                         Err(err) => {
                             heap.truncate_roots(save);
@@ -1262,19 +1475,16 @@ fn exec_node(
                 pairs.push((heap.root_at(save + 2 * i), heap.root_at(save + 2 * i + 1)));
             }
             heap.truncate_roots(save);
-            Ok(Step::Done(heap.map_from_pairs(pairs)))
+            Ok(heap.map_from_pairs(pairs))
         }
         Node::LetBind { binds, body } => {
-            // Evaluate each rhs and write it into its (pre-allocated) frame slot,
-            // in order. A binding's rhs eval can collect — the frame slots live on
-            // `Heap::roots`, relocated in place, so `frame_base + slot` stays valid.
+            // Value-position `let` (an argument/operand): same slot discipline as
+            // the tail flavor in `exec_node`, body in value position.
             for (slot, rhs) in binds.iter() {
-                let s = exec_node(heap, rhs, frame_base, genv)?;
-                let v = force(heap, s)?;
+                let v = exec_value(heap, rhs, frame_base, genv)?;
                 heap.set_root_at(frame_base + slot, v);
             }
-            // Body is tail-propagated (its tail call bubbles up to the trampoline).
-            exec_node(heap, body, frame_base, genv)
+            exec_value(heap, body, frame_base, genv)
         }
         Node::MakeClosure { fn_rest, captures } => {
             // Build the captured env: a flat snapshot of the enclosing lexicals
@@ -1288,89 +1498,95 @@ fn exec_node(
             } else {
                 let frame = heap.new_env(Some(heap.global()));
                 for (name, src) in captures.iter() {
-                    let step = exec_node(heap, src, frame_base, genv)?;
-                    let v = force(heap, step)?;
+                    let v = exec_value(heap, src, frame_base, genv)?;
                     heap.env_define(frame, *name, v);
                 }
                 frame
             };
-            let cl = crate::eval::make_closure(heap, None, fn_rest.load(), env)?;
-            Ok(Step::Done(cl))
+            crate::eval::make_closure(heap, None, fn_rest.load(), env)
         }
-        Node::Call { callee, args, tail, pos } => {
-            // Tag an error with this combination's source position if it doesn't
-            // already carry one — so the *innermost* failing call wins (mirrors the
-            // tree-walker's `or_form_pos`); a sub-call that already tagged itself is
-            // left untouched. `None` (a promoted RUNTIME body) is a no-op.
+        Node::Call { callee, args, tail, pos, site } => {
+            let step = exec_call(heap, callee, args, *tail, *pos, *site, frame_base, genv)?;
+            force(heap, step)
+        }
+        Node::Prim1 { op, a, head, guard, pos } => {
             let pos = *pos;
             let tag = |e: LispError| match pos {
                 Some(p) => e.or_pos(p),
                 None => e,
             };
-            // Evaluate the callee, then each argument, keeping them on the operand
-            // stack so a collection during a later argument's eval relocates them in
-            // place (mirrors `eval::eval_arguments`). `save` is this call's region;
-            // it is always truncated back, including on the error path.
-            let cs = exec_node(heap, callee, frame_base, genv).map_err(tag)?;
-            let cv = force(heap, cs).map_err(tag)?;
-            let save = heap.roots_len();
-            heap.push_root(cv);
-            for a in args.iter() {
-                let step = match exec_node(heap, a, frame_base, genv) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        heap.truncate_roots(save);
-                        return Err(tag(e));
+            let sa = exec_value(heap, a, frame_base, genv).map_err(tag)?;
+            // Inline only while `head` still resolves to `op` (epoch-guarded, as
+            // in `Prim2`). The inline cases read a slab cell and run no further
+            // eval, so the operand needs no rooting here.
+            let cur = heap.global_epoch();
+            let inlinable = if guard.load(Ordering::Relaxed) == cur {
+                true
+            } else {
+                match resolve_prim1(heap, *head) {
+                    Some(op2) if op2 == *op => {
+                        guard.store(cur, Ordering::Relaxed);
+                        true
                     }
-                };
-                match force(heap, step) {
-                    Ok(v) => heap.push_root(v),
-                    Err(e) => {
-                        heap.truncate_roots(save);
-                        return Err(tag(e));
-                    }
+                    _ => false,
+                }
+            };
+            if inlinable {
+                match (op, sa) {
+                    (PrimOp1::First, Value::Pair(p)) => return Ok(heap.pair(p).0),
+                    (PrimOp1::Rest, Value::Pair(p)) => return Ok(heap.pair(p).1),
+                    (PrimOp1::First | PrimOp1::Rest, Value::Nil) => return Ok(Value::Nil),
+                    _ => {} // vectors/ranges/type errors → the native owns them
                 }
             }
-            // Re-read post-collection from the (relocated) operand stack.
-            let callee_v = heap.root_at(save);
-            let mut argv: SmallVec<[Value; 4]> = SmallVec::with_capacity(args.len());
-            for k in 0..args.len() {
-                argv.push(heap.root_at(save + 1 + k));
-            }
-            // The *current* env (read fresh post-collection) is what a native callee
-            // runs in; a VM-eligible closure callee instead runs in its own captured
-            // env, which `dispatch` reads off the closure.
+            // Fallback: a general call on the surface operator (rooted across
+            // the dispatch, which can collect).
+            let save = heap.roots_len();
+            heap.push_root(sa);
             let cur_env = heap.read_root_env(genv);
-            let result = dispatch(heap, callee_v, argv, *tail, cur_env);
+            let callee = match heap.env_get(cur_env, *head) {
+                Some(c) => c,
+                None => {
+                    heap.truncate_roots(save);
+                    return Err(tag(crate::eval::unbound_error(heap, *head)));
+                }
+            };
+            let sa = heap.root_at(save);
+            let argv: SmallVec<[Value; 4]> = SmallVec::from_slice(&[sa]);
+            let result = dispatch(heap, callee, argv, false, cur_env).and_then(|s| force(heap, s));
             heap.truncate_roots(save);
             result.map_err(tag)
         }
-        Node::Prim2 { op, a, b, map, head, guard, pos } => {
+        Node::Prim2 { op, a, b, map, head, guard, pos, broot } => {
             let pos = *pos;
             let tag = |e: LispError| match pos {
                 Some(p) => e.or_pos(p),
                 None => e,
             };
-            // Evaluate operands in source order, keeping both on the operand stack
-            // (so a collect during the second — or the fallback dispatch — relocates
-            // them in place), exactly as `Node::Call`. `save` is always truncated back.
+            // Evaluate operands in source order. `a`'s value is rooted across
+            // `b`'s eval only when `b` can reach a safepoint (`broot` — see the
+            // field doc); the common pure-leaf shape runs root-free, since the
+            // inline path below touches no safepoint either. The fallback
+            // dispatch roots both regardless. `save` is always truncated back.
             let save = heap.roots_len();
-            let sa = match exec_node(heap, a, frame_base, genv).and_then(|s| force(heap, s)) {
+            let sa = match exec_value(heap, a, frame_base, genv) {
                 Ok(v) => v,
                 Err(e) => return Err(tag(e)),
             };
-            heap.push_root(sa);
-            let sb = match exec_node(heap, b, frame_base, genv).and_then(|s| force(heap, s)) {
+            if *broot {
+                heap.push_root(sa);
+            }
+            let sb = match exec_value(heap, b, frame_base, genv) {
                 Ok(v) => v,
                 Err(e) => {
                     heap.truncate_roots(save);
                     return Err(tag(e));
                 }
             };
-            heap.push_root(sb);
-            // Re-read post-collection, then route to the primitive's argument order.
-            let sa = heap.root_at(save);
-            let sb = heap.root_at(save + 1);
+            // Re-read `a` post-collection (a no-op unless it was rooted), then
+            // route to the primitive's argument order. `b` ran no further eval,
+            // so its value is current as-is.
+            let sa = if *broot { heap.root_at(save) } else { sa };
             let src = [sa, sb];
             let x = src[map[0] as usize];
             let y = src[map[1] as usize];
@@ -1393,18 +1609,32 @@ fn exec_node(
                 match prim_apply(*op, x, y) {
                     Ok(Some(v)) => {
                         heap.truncate_roots(save);
-                        return Ok(Step::Done(v));
+                        return Ok(v);
                     }
-                    Ok(None) => {} // non-(Int,Int) → defer to the real primitive
+                    // `prim_apply` is heap-less, so it always defers `cons`
+                    // (which allocates) — inline it here, off the numeric ops'
+                    // hot path. It accepts any operands: never defers on shape.
+                    Ok(None) if *op == PrimOp::Cons => {
+                        let v = heap.alloc_pair(x, y);
+                        heap.truncate_roots(save);
+                        return Ok(v);
+                    }
+                    Ok(None) => {} // non-inline operand shape → defer to the real primitive
                     Err(e) => {
                         heap.truncate_roots(save);
                         return Err(tag(e));
                     }
                 }
             }
-            // Fallback: call the surface operator on the source-order operands (still
-            // rooted), exactly as the generic call path would — covers a redefined
-            // operator and every non-(Int,Int) operand shape, with identical semantics.
+            // Fallback: call the surface operator on the source-order operands,
+            // exactly as the generic call path would — covers a redefined
+            // operator and every non-inline operand shape, with identical
+            // semantics. Root both operands first (the dispatch can collect);
+            // `sa` may already hold the slot at `save`.
+            if !*broot {
+                heap.push_root(sa);
+            }
+            heap.push_root(sb);
             let cur_env = heap.read_root_env(genv);
             let callee = match heap.env_get(cur_env, *head) {
                 Some(c) => c,
@@ -1414,11 +1644,158 @@ fn exec_node(
                 }
             };
             let argv: SmallVec<[Value; 4]> = SmallVec::from_slice(&[sa, sb]);
-            let result = dispatch(heap, callee, argv, false, cur_env);
+            let result = dispatch(heap, callee, argv, false, cur_env).and_then(|s| force(heap, s));
             heap.truncate_roots(save);
             result.map_err(tag)
         }
     }
+}
+
+/// The combination executor — shared by [`exec_node`] (tail position, where it
+/// may return a [`Step::Tail`] for the trampoline) and [`exec_value`] (value
+/// position, where the step is forced). Resolves the callee through the
+/// call-site IC, evaluates the arguments onto the operand stack, and dispatches.
+#[allow(clippy::too_many_arguments)]
+fn exec_call(
+    heap: &mut Heap,
+    callee: &Node,
+    args: &[Node],
+    tail: bool,
+    pos: Option<Pos>,
+    site: u32,
+    frame_base: usize,
+    genv: EnvRoot,
+) -> Result<Step, LispError> {
+    // Tag an error with this combination's source position if it doesn't
+    // already carry one — so the *innermost* failing call wins (mirrors the
+    // tree-walker's `or_form_pos`); a sub-call that already tagged itself is
+    // left untouched. `None` (a promoted RUNTIME body) is a no-op.
+    let tag = |e: LispError| match pos {
+        Some(p) => e.or_pos(p),
+        None => e,
+    };
+    // Resolve the callee — through this site's inline cache when it has one
+    // (ADR-096). A hit skips the `env_get` walk entirely and may carry the
+    // VM fast path (the callee's compiled arm + captured env); a miss
+    // resolves normally and installs the entry, stamped with `probe_epoch`
+    // (read *before* the resolution, so an arg-eval `def` below can't be
+    // attributed to this resolution). Engages only when the body's free
+    // names resolve through the process global (`is_global`): a
+    // local-capturing closure's captured frames could shadow the symbol,
+    // and they differ per closure *instance* while the site is shared.
+    let probe_epoch = heap.global_epoch();
+    let mut fast: Option<(Arc<CompiledArm>, EnvId)> = None;
+    let cv: Value;
+    'resolve: {
+        if site != NO_SITE {
+            if let Node::Global(sym) = callee {
+                if heap.is_global(heap.read_root_env(genv)) {
+                    let argc = args.len() as u32;
+                    if let Some((v, payload)) =
+                        heap.vm_call_ic_probe(site, *sym, argc, probe_epoch)
+                    {
+                        cv = v;
+                        fast = payload;
+                        break 'resolve;
+                    }
+                    // Miss: resolve (exactly what `exec_value` on the callee
+                    // would do), then install. A *dynamic* symbol is never
+                    // cached — a `binding` re-binds it without bumping the
+                    // epoch, so a cached resolution would bypass it. (A
+                    // later `defdyn` of a cached symbol bumps the epoch, so
+                    // the entry self-invalidates and the re-install refuses.)
+                    let env = heap.read_root_env(genv);
+                    let v = match heap.env_get(env, *sym) {
+                        Some(v) => v,
+                        None => return Err(tag(crate::eval::unbound_error(heap, *sym))),
+                    };
+                    if !value::is_dynamic(*sym) {
+                        let arm = match v {
+                            // Cache the VM fast path only for a callee
+                            // `dispatch` would run on the VM directly: a
+                            // non-passthrough closure with a compiled arm
+                            // for this argc. Everything else caches just
+                            // the value (still skips the lookup walk).
+                            Value::Fn(id)
+                                if crate::eval::passthrough_arm(heap, id, args.len())
+                                    .is_none() =>
+                            {
+                                compiled_arm_for(heap, id, args.len()).map(|arm| {
+                                    let cenv =
+                                        heap.closure(id).env.unwrap_or_else(|| heap.global());
+                                    (arm, cenv)
+                                })
+                            }
+                            _ => None,
+                        };
+                        fast = arm.clone();
+                        heap.vm_call_ic_put(
+                            site,
+                            crate::core::heap::CallIcEntry {
+                                sym: *sym,
+                                argc,
+                                epoch: probe_epoch,
+                                callee: v,
+                                arm,
+                            },
+                        );
+                    }
+                    cv = v;
+                    break 'resolve;
+                }
+            }
+        }
+        // No IC for this site/shape: evaluate the callee node as before.
+        cv = exec_value(heap, callee, frame_base, genv).map_err(tag)?;
+    }
+    // Evaluate each argument, keeping the callee + results on the operand
+    // stack so a collection during a later argument's eval relocates them in
+    // place (mirrors `eval::eval_arguments`). `save` is this call's region;
+    // it is always truncated back, including on the error path.
+    let save = heap.roots_len();
+    heap.push_root(cv);
+    for a in args.iter() {
+        match exec_value(heap, a, frame_base, genv) {
+            Ok(v) => heap.push_root(v),
+            Err(e) => {
+                heap.truncate_roots(save);
+                return Err(tag(e));
+            }
+        }
+    }
+    // Re-read post-collection from the (relocated) operand stack.
+    let callee_v = heap.root_at(save);
+    let mut argv: SmallVec<[Value; 4]> = SmallVec::with_capacity(args.len());
+    for k in 0..args.len() {
+        argv.push(heap.root_at(save + 1 + k));
+    }
+    // The IC fast path: run the cached compiled arm directly, skipping
+    // `dispatch`'s passthrough probe + body-cache lookup + env read —
+    // but only if the global epoch is *still* `probe_epoch`. An arg's
+    // eval can `def` (new resolution next call — but THIS call correctly
+    // uses the pre-args callee, which is `callee_v`, rooted) or fire a
+    // RUNTIME compaction (which rewrites the rooted `callee_v` in place
+    // but NOT the un-registered `fast` arm's node tree or its env
+    // handle) — either bumps the epoch, so the stale fast path is
+    // dropped and the rooted callee takes the generic path below.
+    if let Some((arm, cenv)) = fast {
+        if heap.global_epoch() == probe_epoch {
+            let result = if tail {
+                Ok(Step::Tail { compiled: arm, args: argv, genv: cenv })
+            } else {
+                vm_apply(heap, arm, &argv, cenv).map(Step::Done)
+            };
+            heap.truncate_roots(save);
+            return result.map_err(tag);
+        }
+    }
+    // The *current* env (read fresh post-collection) is what a native callee
+    // runs in; a VM-eligible closure callee instead runs in its own captured
+    // env, which `dispatch` reads off the closure.
+    let cur_env = heap.read_root_env(genv);
+    let result = dispatch(heap, callee_v, argv, tail, cur_env);
+    heap.truncate_roots(save);
+    result.map_err(tag)
 }
 
 /// Dispatch a call whose callee and `argv` are already evaluated. A VM-eligible
@@ -1537,8 +1914,7 @@ fn push_frame(
     // default, so the default can't name itself).
     for j in provided_opt..arm.noptional {
         if let Some(node) = &arm.optional_defaults[j] {
-            let step = exec_node(heap, node, base, genv)?;
-            let v = force(heap, step)?;
+            let v = exec_value(heap, node, base, genv)?;
             heap.set_root_at(base + arm.nrequired + j, v);
         }
     }
@@ -1703,7 +2079,7 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
             for _ in 0..scope.max {
                 heap.push_root(Value::Nil);
             }
-            let r = exec_node(heap, &arm.body, base, genv).and_then(|s| force(heap, s));
+            let r = exec_value(heap, &arm.body, base, genv);
             heap.truncate_roots(base);
             heap.truncate_env_roots(env_base);
             heap.live_arm_truncate(arm_slot);
